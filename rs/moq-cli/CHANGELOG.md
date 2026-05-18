@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.21](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.20...moq-cli-v0.7.21) - 2026-05-07
+
+### Other
+
+- moq-mux backport + dual-API cleanup ([#1341](https://github.com/moq-dev/moq/pull/1341))
+- hop-based clustering ([#1322](https://github.com/moq-dev/moq/pull/1322))
+
 ## [0.7.20](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.19...moq-cli-v0.7.20) - 2026-04-20
 
 ### Other

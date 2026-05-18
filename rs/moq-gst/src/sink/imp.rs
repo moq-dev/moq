@@ -1,10 +1,11 @@
 //! Async-friendly MoqSink that keeps the original dynamic-pad Element
 //! behavior while pushing all network setup and CMAF publishing work into
 //! a Tokio task. The GLib state change thread never blocks, pads still get
-//! requested dynamically, and each pad simply forwards buffers/events to the
-//! background worker via an unbounded channel.
+//! requested dynamically, and each pad simply forwards buffers to the
+//! background worker via an unbounded channel. Events are handled on the
+//! sink pad, with EOS aggregated locally before posting element EOS.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 
 use anyhow::{Context, Result};
@@ -103,10 +104,12 @@ enum ControlMessage {
 		data: Bytes,
 		pts: Option<gst::ClockTime>,
 	},
+	Eos {
+		pad_name: String,
+	},
 	DropPad {
 		pad_name: String,
 	},
-	Eos,
 	Shutdown,
 }
 
@@ -234,7 +237,7 @@ impl ElementImpl for MoqSink {
 				let Some(element) = parent.and_then(|p| p.downcast_ref::<super::MoqSink>()) else {
 					return false;
 				};
-				element.imp().forward_event(pad, event)
+				element.imp().handle_event(pad, event)
 			});
 
 		let pad = if let Some(name) = name {
@@ -280,7 +283,6 @@ impl MoqSink {
 		};
 
 		let (tx, rx) = mpsc::unbounded_channel::<ControlMessage>();
-
 		let element_weak = self.obj().downgrade();
 
 		let join = RUNTIME.spawn(async move {
@@ -323,18 +325,17 @@ impl MoqSink {
 		Ok(gst::FlowSuccess::Ok)
 	}
 
-	fn forward_event(&self, pad: &gst::Pad, event: gst::Event) -> bool {
+	fn handle_event(&self, pad: &gst::Pad, event: gst::Event) -> bool {
 		match event.view() {
 			gst::EventView::Caps(caps) => {
-				let sender = match self
+				let Some(sender) = self
 					.session
 					.lock()
 					.unwrap()
 					.as_ref()
 					.map(|handle| handle.sender.clone())
-				{
-					Some(sender) => sender,
-					None => return false,
+				else {
+					return false;
 				};
 
 				if sender
@@ -347,17 +348,28 @@ impl MoqSink {
 					return false;
 				}
 
-				true
+				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
 			gst::EventView::Eos(_) => {
-				let sender = match self.session.lock().unwrap().as_ref() {
-					Some(handle) => handle.sender.clone(),
-					None => return false,
+				let Some(sender) = self
+					.session
+					.lock()
+					.unwrap()
+					.as_ref()
+					.map(|handle| handle.sender.clone())
+				else {
+					return false;
 				};
 
-				if sender.send(ControlMessage::Eos).is_err() {
+				if sender
+					.send(ControlMessage::Eos {
+						pad_name: pad.name().to_string(),
+					})
+					.is_err()
+				{
 					return false;
 				}
+
 				true
 			}
 			_ => gst::Pad::event_default(pad, Some(&*self.obj()), event),
@@ -396,8 +408,7 @@ async fn run_session(
 		catalog,
 		pads: HashMap::new(),
 	};
-
-	let mut eos_received_count = 0;
+	let mut eos_pads = HashSet::new();
 
 	while let Some(msg) = rx.recv().await {
 		match msg {
@@ -413,14 +424,14 @@ async fn run_session(
 			}
 			ControlMessage::DropPad { pad_name } => {
 				runtime.pads.remove(&pad_name);
+				eos_pads.remove(&pad_name);
 			}
-			ControlMessage::Eos => {
-				eos_received_count += 1;
+			ControlMessage::Eos { pad_name } => {
+				eos_pads.insert(pad_name);
 
-				if eos_received_count == runtime.pads.len() {
+				if !runtime.pads.is_empty() && eos_pads.len() == runtime.pads.len() {
 					if let Some(element) = element_weak.upgrade() {
 						let eos_message = gst::message::Eos::builder().src(&element).build();
-
 						let _ = element.post_message(eos_message);
 					}
 				}

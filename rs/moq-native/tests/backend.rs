@@ -65,12 +65,13 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	let bc = match update {
-		moq_lite::OriginAnnounce::Active(path, bc) => {
+	let (path, bc) = update;
+	let bc = match bc {
+		Some(bc) => {
 			assert_eq!(path.as_str(), "test");
 			bc
 		}
-		moq_lite::OriginAnnounce::Ended(path) => panic!("expected announce, got Ended({path})"),
+		None => panic!("expected announce, got Ended({path})"),
 	};
 
 	let mut track_sub = bc
@@ -221,12 +222,13 @@ async fn iroh_connect() {
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	let bc = match update {
-		moq_lite::OriginAnnounce::Active(path, bc) => {
+	let (path, bc) = update;
+	let bc = match bc {
+		Some(bc) => {
 			assert_eq!(path.as_str(), "test");
 			bc
 		}
-		moq_lite::OriginAnnounce::Ended(path) => panic!("expected announce, got Ended({path})"),
+		None => panic!("expected announce, got Ended({path})"),
 	};
 
 	let mut track_sub = bc

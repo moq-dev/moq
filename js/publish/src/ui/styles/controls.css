@@ -1,4 +1,4 @@
-.publish-ui__controls {
+.controls {
 	gap: var(--spacing-16);
 	margin: var(--spacing-8) 0;
 	border-radius: var(--border-radius-lg);
@@ -6,13 +6,13 @@
 	padding: var(--spacing-16);
 }
 
-.publish-ui__source-label {
+.source-label {
 	font-size: 1rem;
 	font-weight: 600;
 	letter-spacing: 0.1rem;
 	color: var(--color-white-alpha-90);
 }
 
-.publish-ui__source-selector {
+.source-selector {
 	gap: var(--spacing-16);
 }

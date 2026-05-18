@@ -194,10 +194,26 @@ impl BroadcastProducer {
 /// When a consumer requests a track that doesn't exist, a [TrackProducer] is created
 /// and queued for the dynamic producer to fulfill via [Self::requested_track].
 /// Dropped when no longer needed; pending requests are automatically aborted.
-#[derive(Clone)]
 pub struct BroadcastDynamic {
 	info: Broadcast,
 	state: conducer::Producer<State>,
+}
+
+impl Clone for BroadcastDynamic {
+	fn clone(&self) -> Self {
+		// Mirror `new`: bump `state.dynamic` so each live handle is counted.
+		// Without this, deriving Clone would let `Drop` decrement past `new`'s
+		// single increment and prematurely flip `dynamic` to zero, causing
+		// future `subscribe_track` calls to return `NotFound`.
+		if let Ok(mut state) = self.state.write() {
+			state.dynamic += 1;
+		}
+
+		Self {
+			info: self.info.clone(),
+			state: self.state.clone(),
+		}
+	}
 }
 
 impl Deref for BroadcastDynamic {
@@ -611,5 +627,22 @@ mod test {
 			producer2.unused().now_or_never().is_some(),
 			"track producer should be unused after consumer is dropped"
 		);
+	}
+
+	// Cloning a `BroadcastDynamic` and dropping the clone must not flip
+	// `state.dynamic` to zero. The relay's lite subscriber clones the
+	// dynamic per spawned subscribe; if Clone skipped the increment, the
+	// first finished subscribe would tear down the broadcast and any
+	// follow-up `subscribe_track` would return `NotFound`.
+	#[tokio::test]
+	async fn dynamic_clone_keeps_alive() {
+		let broadcast = Broadcast::new().produce().dynamic();
+		let consumer = broadcast.consume();
+
+		let clone = broadcast.clone();
+		drop(clone);
+
+		// Original handle is still live, so requests must still be accepted.
+		consumer.assert_subscribe_track(&Track::new("track1"));
 	}
 }

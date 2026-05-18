@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/moq-dev/moq/compare/moq-token-v0.5.17...moq-token-v0.6.0) - 2026-05-07
+
+### Other
+
+- hop-based clustering ([#1322](https://github.com/moq-dev/moq/pull/1322))
+
 ## [0.5.17](https://github.com/moq-dev/moq/compare/moq-token-v0.5.16...moq-token-v0.5.17) - 2026-04-19
 
 ### Other

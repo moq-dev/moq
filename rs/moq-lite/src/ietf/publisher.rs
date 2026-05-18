@@ -139,8 +139,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.writer
 			.encode(&ietf::SubscribeOk {
 				request_id: match self.version {
-					Version::Draft17 => None,
-					_ => Some(request_id),
+					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(request_id),
+					_ => None,
 				},
 				track_alias: request_id.0,
 			})
@@ -163,8 +163,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.writer
 			.encode(&ietf::PublishDone {
 				request_id: match self.version {
-					Version::Draft17 => None,
-					_ => Some(request_id),
+					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(request_id),
+					_ => None,
 				},
 				status_code,
 				stream_count: 0,
@@ -207,7 +207,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					})
 					.await?;
 			}
-			Version::Draft17 => {
+			_ => {
 				writer.encode(&ietf::RequestError::ID).await?;
 				writer
 					.encode(&ietf::RequestError {
@@ -390,7 +390,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					})
 					.await?;
 			}
-			Version::Draft17 => {
+			_ => {
 				writer.encode(&ietf::RequestOk::ID).await?;
 				writer.encode(&ietf::RequestOk { request_id: None }).await?;
 			}
@@ -427,7 +427,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					})
 					.await?;
 			}
-			Version::Draft17 => {
+			_ => {
 				writer.encode(&ietf::RequestError::ID).await?;
 				writer
 					.encode(&ietf::RequestError {
@@ -453,76 +453,73 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				announced = self.origin.announced() => announced,
 			};
 
-			let Some(update) = announced else {
+			let Some((path, active)) = announced else {
 				break;
 			};
 
-			match update {
-				crate::OriginAnnounce::Active(path, _) => {
-					let suffix = path.to_owned();
-					tracing::debug!(broadcast = %self.origin.absolute(&path), "announce");
+			let suffix = path.to_owned();
 
-					let request_id = self.control.next_request_id().await?;
-					let mut stream = Stream::open(&self.session, self.version).await?;
+			if active.is_some() {
+				tracing::debug!(broadcast = %self.origin.absolute(&path), "announce");
 
-					// Write the PublishNamespace message
-					stream.writer.encode(&ietf::PublishNamespace::ID).await?;
-					stream
-						.writer
-						.encode(&ietf::PublishNamespace {
-							request_id,
-							track_namespace: suffix.as_path(),
-						})
-						.await?;
+				let request_id = self.control.next_request_id().await?;
+				let mut stream = Stream::open(&self.session, self.version).await?;
 
-					// Read response from stream.reader
-					let type_id: u64 = stream.reader.decode().await?;
-					let size: u16 = stream.reader.decode().await?;
-					let mut data = stream.reader.read_exact(size as usize).await?;
+				// Write the PublishNamespace message
+				stream.writer.encode(&ietf::PublishNamespace::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::PublishNamespace {
+						request_id,
+						track_namespace: suffix.as_path(),
+					})
+					.await?;
 
-					match (self.version, type_id) {
-						// Draft14 uses PublishNamespaceOk (0x07) / PublishNamespaceError (0x08)
-						(Version::Draft14, ietf::PublishNamespaceOk::ID) => {
-							let msg = ietf::PublishNamespaceOk::decode_msg(&mut data, self.version)?;
-							tracing::debug!(message = ?msg, "publish namespace ok");
-							namespace_streams.insert(suffix, (request_id, stream));
-						}
-						(Version::Draft14, ietf::PublishNamespaceError::ID) => {
-							let msg = ietf::PublishNamespaceError::decode_msg(&mut data, self.version)?;
-							tracing::warn!(message = ?msg, "publish namespace error");
-						}
-						// Draft15+ uses RequestOk (0x07) / RequestError (0x05)
-						(_, ietf::RequestOk::ID) => {
-							let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
-							tracing::debug!(message = ?msg, "publish namespace ok");
-							namespace_streams.insert(suffix, (request_id, stream));
-						}
-						(_, ietf::RequestError::ID) => {
-							let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
-							tracing::warn!(message = ?msg, "publish namespace error");
-						}
-						_ => return Err(Error::UnexpectedMessage),
+				// Read response from stream.reader
+				let type_id: u64 = stream.reader.decode().await?;
+				let size: u16 = stream.reader.decode().await?;
+				let mut data = stream.reader.read_exact(size as usize).await?;
+
+				match (self.version, type_id) {
+					// Draft14 uses PublishNamespaceOk (0x07) / PublishNamespaceError (0x08)
+					(Version::Draft14, ietf::PublishNamespaceOk::ID) => {
+						let msg = ietf::PublishNamespaceOk::decode_msg(&mut data, self.version)?;
+						tracing::debug!(message = ?msg, "publish namespace ok");
+						namespace_streams.insert(suffix, (request_id, stream));
 					}
+					(Version::Draft14, ietf::PublishNamespaceError::ID) => {
+						let msg = ietf::PublishNamespaceError::decode_msg(&mut data, self.version)?;
+						tracing::warn!(message = ?msg, "publish namespace error");
+					}
+					// Draft15+ uses RequestOk (0x07) / RequestError (0x05)
+					(_, ietf::RequestOk::ID) => {
+						let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
+						tracing::debug!(message = ?msg, "publish namespace ok");
+						namespace_streams.insert(suffix, (request_id, stream));
+					}
+					(_, ietf::RequestError::ID) => {
+						let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
+						tracing::warn!(message = ?msg, "publish namespace error");
+					}
+					_ => return Err(Error::UnexpectedMessage),
 				}
-				crate::OriginAnnounce::Ended(path) => {
-					let suffix = path.to_owned();
-					tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounce");
-					if let Some((request_id, mut stream)) = namespace_streams.remove(&suffix) {
-						// For v14-16, send PublishNamespaceDone. v17+ just closes the stream.
-						match self.version {
-							Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-								let _ = stream
-									.writer
-									.encode_message(&ietf::PublishNamespaceDone {
-										track_namespace: suffix.as_path(),
-										request_id,
-									})
-									.await;
-							}
-							_ => {}
+			} else {
+				tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounce");
+				if let Some((request_id, mut stream)) = namespace_streams.remove(&suffix) {
+					// For v14-16, send PublishNamespaceDone. v17+ just closes the stream.
+					match self.version {
+						Version::Draft14 | Version::Draft15 | Version::Draft16 => {
+							let _ = stream
+								.writer
+								.encode_message(&ietf::PublishNamespaceDone {
+									track_namespace: suffix.as_path(),
+									request_id,
+								})
+								.await;
 						}
-						stream.writer.finish().ok();
+						_ => {}
 					}
+					stream.writer.finish().ok();
 				}
 			}
 		}
@@ -579,7 +576,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					})
 					.await?;
 			}
-			Version::Draft17 => {
+			_ => {
 				stream.writer.encode(&ietf::RequestOk::ID).await?;
 				stream.writer.encode(&ietf::RequestOk { request_id: None }).await?;
 			}
@@ -595,8 +592,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// v16+: Send Namespace/NamespaceDone entries on this bidi stream.
 			_ => {
 				// Send initial NAMESPACE messages for currently active namespaces
-				while let Some(update) = origin.try_announced() {
-					if let crate::OriginAnnounce::Active(path, _) = update {
+				while let Some((path, active)) = origin.try_announced() {
+					if active.is_some() {
 						let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
 						tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
 						stream.writer.encode(&ietf::Namespace::ID).await?;
@@ -616,13 +613,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						res = stream.reader.closed() => return res,
 						announced = origin.announced() => {
 							match announced {
-								Some(crate::OriginAnnounce::Active(path, _)) => {
+								Some((path, Some(_))) => {
 									let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 									tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
 									stream.writer.encode(&ietf::Namespace::ID).await?;
 									stream.writer.encode(&ietf::Namespace { suffix }).await?;
 								}
-								Some(crate::OriginAnnounce::Ended(path)) => {
+								Some((path, None)) => {
 									let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 									tracing::debug!(broadcast = %origin.absolute(&path), "namespace_done");
 									stream.writer.encode(&ietf::NamespaceDone::ID).await?;

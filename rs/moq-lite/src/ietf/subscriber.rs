@@ -266,7 +266,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					})
 					.await?;
 			}
-			Version::Draft17 => {
+			_ => {
 				stream.writer.encode(&ietf::RequestOk::ID).await?;
 				stream.writer.encode(&ietf::RequestOk { request_id: None }).await?;
 			}
@@ -306,7 +306,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					})
 					.await?;
 			}
-			Version::Draft17 => {
+			_ => {
 				stream.writer.encode(&ietf::RequestError::ID).await?;
 				stream
 					.writer
@@ -346,7 +346,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					})
 					.await?;
 			}
-			Version::Draft17 => {
+			_ => {
 				stream.writer.encode(&ietf::RequestOk::ID).await?;
 				stream.writer.encode(&ietf::RequestOk { request_id: None }).await?;
 			}
@@ -385,7 +385,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					})
 					.await?;
 			}
-			Version::Draft17 => {
+			_ => {
 				stream.writer.encode(&ietf::RequestError::ID).await?;
 				stream
 					.writer

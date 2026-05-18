@@ -70,7 +70,7 @@ export class RequestOk {
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (version !== Version.DRAFT_17) {
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			if (this.requestId === undefined) throw new Error("requestId required for draft14-16");
 			await w.u62(this.requestId);
 		}
@@ -82,7 +82,10 @@ export class RequestOk {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<RequestOk> {
-		const requestId = version === Version.DRAFT_17 ? undefined : await r.u62();
+		const requestId =
+			version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
+				? await r.u62()
+				: undefined;
 		const parameters = await Parameters.decode(r, version);
 		await Properties.skip(r, version);
 		return new RequestOk({ requestId, parameters });
@@ -121,12 +124,12 @@ export class RequestError {
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (version !== Version.DRAFT_17) {
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			if (this.requestId === undefined) throw new Error("requestId required for draft14-16");
 			await w.u62(this.requestId);
 		}
 		await w.u62(BigInt(this.errorCode));
-		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
+		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15) {
 			await w.u62(this.retryInterval);
 		}
 		await w.string(this.reasonPhrase);
@@ -137,9 +140,12 @@ export class RequestError {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<RequestError> {
-		const requestId = version === Version.DRAFT_17 ? undefined : await r.u62();
+		const requestId =
+			version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
+				? await r.u62()
+				: undefined;
 		const errorCode = Number(await r.u62());
-		const retryInterval = version === Version.DRAFT_16 || version === Version.DRAFT_17 ? await r.u62() : 0n;
+		const retryInterval = version === Version.DRAFT_14 || version === Version.DRAFT_15 ? 0n : await r.u62();
 		const reasonPhrase = await r.string();
 		return new RequestError({ requestId, errorCode, reasonPhrase, retryInterval });
 	}

@@ -16,6 +16,19 @@ class MediaProducer:
     def __init__(self, inner: MoqMediaProducer) -> None:
         self._inner = inner
 
+    @property
+    def name(self) -> str:
+        """The generated media track name."""
+        return self._inner.name()
+
+    async def used(self) -> None:
+        """Wait until this media track has at least one active subscriber."""
+        await self._inner.used()
+
+    async def unused(self) -> None:
+        """Wait until this media track has no active subscribers."""
+        await self._inner.unused()
+
     def write_frame(self, payload: bytes, timestamp_us: int) -> None:
         self._inner.write_frame(payload, timestamp_us)
 
@@ -55,6 +68,19 @@ class TrackProducer:
 
     def __init__(self, inner: MoqTrackProducer) -> None:
         self._inner = inner
+
+    @property
+    def name(self) -> str:
+        """The track name."""
+        return self._inner.name()
+
+    async def used(self) -> None:
+        """Wait until this track has at least one active subscriber."""
+        await self._inner.used()
+
+    async def unused(self) -> None:
+        """Wait until this track has no active subscribers."""
+        await self._inner.unused()
 
     def append_group(self) -> GroupProducer:
         """Start a new group; write frames into it, then finish()."""

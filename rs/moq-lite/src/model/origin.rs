@@ -209,35 +209,11 @@ where
 
 /// A single update emitted by [`OriginConsumer::announced`].
 ///
-/// Mirrors the wire-level `Announce::Active`/`Announce::Ended` distinction.
-#[derive(Clone)]
-pub enum OriginAnnounce {
-	/// `path` now resolves to `broadcast`. If a previous broadcast was active
-	/// at this path, an [`OriginAnnounce::Ended`] for the same path is emitted
-	/// immediately before this update.
-	Active(PathOwned, BroadcastConsumer),
-	/// `path` no longer has an active broadcast (either because the active
-	/// closed and no backup was available, or because a new broadcast is about
-	/// to take over — see [`OriginAnnounce::Active`]).
-	Ended(PathOwned),
-}
-
-impl OriginAnnounce {
-	pub fn path(&self) -> &Path<'static> {
-		match self {
-			OriginAnnounce::Active(p, _) | OriginAnnounce::Ended(p) => p,
-		}
-	}
-}
-
-impl fmt::Debug for OriginAnnounce {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			OriginAnnounce::Active(p, _) => f.debug_tuple("Active").field(p).finish(),
-			OriginAnnounce::Ended(p) => f.debug_tuple("Ended").field(p).finish(),
-		}
-	}
-}
+/// `Some(broadcast)` means the path is now active at that broadcast. `None`
+/// means the path is no longer active (either because the active closed and no
+/// backup was available, or because a new broadcast is about to take over,
+/// which arrives as a follow-up `Some` for the same path).
+pub type OriginAnnounce = (PathOwned, Option<BroadcastConsumer>);
 
 static NEXT_CONSUMER_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -386,16 +362,11 @@ impl Inner {
 /// each event's path to that consumer's scope-relative form.
 fn distribute(state: &mut State, events: &[OriginAnnounce]) {
 	for queue in state.consumers.values_mut() {
-		for event in events {
-			let abs = event.path();
+		for (abs, broadcast) in events {
 			let Some(rel) = queue.scope.relativize(abs) else {
 				continue;
 			};
-			let translated = match event {
-				OriginAnnounce::Active(_, b) => OriginAnnounce::Active(rel, b.clone()),
-				OriginAnnounce::Ended(_) => OriginAnnounce::Ended(rel),
-			};
-			queue.pending.push_back(translated);
+			queue.pending.push_back((rel, broadcast.clone()));
 		}
 	}
 }
@@ -426,12 +397,12 @@ fn gc_pass(state: &mut State) -> bool {
 			Some(idx) => {
 				let new_active = entry.backup.remove(idx).expect("index in range");
 				entry.active = new_active.clone();
-				events.push(OriginAnnounce::Ended(path.clone()));
-				events.push(OriginAnnounce::Active(path.clone(), new_active));
+				events.push((path.clone(), None));
+				events.push((path.clone(), Some(new_active)));
 				true
 			}
 			None => {
-				events.push(OriginAnnounce::Ended(path.clone()));
+				events.push((path.clone(), None));
 				false
 			}
 		}
@@ -508,7 +479,7 @@ impl OriginProducer {
 					active: broadcast.clone(),
 					backup: VecDeque::new(),
 				});
-				events.push(OriginAnnounce::Active(full, broadcast));
+				events.push((full, Some(broadcast)));
 			}
 			std::collections::hash_map::Entry::Occupied(mut slot) => {
 				let entry = slot.get_mut();
@@ -520,8 +491,8 @@ impl OriginProducer {
 					// New is at least as good; demote old to backup, announce new.
 					let old = std::mem::replace(&mut entry.active, broadcast.clone());
 					entry.backup.push_back(old);
-					events.push(OriginAnnounce::Ended(full.clone()));
-					events.push(OriginAnnounce::Active(full, broadcast));
+					events.push((full.clone(), None));
+					events.push((full, Some(broadcast)));
 				} else {
 					// Strictly longer; just stash as a backup.
 					entry.backup.push_back(broadcast);
@@ -655,9 +626,7 @@ impl OriginConsumer {
 		};
 		for (path, entry) in &state.paths {
 			if let Some(rel) = scope.relativize(path) {
-				queue
-					.pending
-					.push_back(OriginAnnounce::Active(rel, entry.active.clone()));
+				queue.pending.push_back((rel, Some(entry.active.clone())));
 			}
 		}
 		state.consumers.insert(id, queue);
@@ -761,7 +730,7 @@ impl OriginConsumer {
 
 		loop {
 			match consumer.announced().await? {
-				OriginAnnounce::Active(p, b) if p.as_path() == path => return Some(b),
+				(p, Some(b)) if p.as_path() == path => return Some(b),
 				_ => continue,
 			}
 		}
@@ -833,47 +802,48 @@ use futures::FutureExt;
 impl OriginConsumer {
 	pub fn assert_announced(&mut self, expected: impl AsPath, broadcast: &BroadcastConsumer) {
 		let expected = expected.as_path();
-		match self
+		let (p, b) = self
 			.announced()
 			.now_or_never()
 			.expect("announced blocked")
-			.expect("no announce")
-		{
-			OriginAnnounce::Active(p, b) => {
+			.expect("no announce");
+		match b {
+			Some(b) => {
 				assert_eq!(p, expected, "wrong path");
 				assert!(b.is_clone(broadcast), "should be the same broadcast");
 			}
-			OriginAnnounce::Ended(p) => panic!("expected Active({expected}), got Ended({p})"),
+			None => panic!("expected Active({expected}), got Ended({p})"),
 		}
 	}
 
 	pub fn assert_try_announced(&mut self, expected: impl AsPath, broadcast: &BroadcastConsumer) {
 		let expected = expected.as_path();
-		match self.try_announced().expect("no announce") {
-			OriginAnnounce::Active(p, b) => {
+		let (p, b) = self.try_announced().expect("no announce");
+		match b {
+			Some(b) => {
 				assert_eq!(p, expected, "wrong path");
 				assert!(b.is_clone(broadcast), "should be the same broadcast");
 			}
-			OriginAnnounce::Ended(p) => panic!("expected Active({expected}), got Ended({p})"),
+			None => panic!("expected Active({expected}), got Ended({p})"),
 		}
 	}
 
 	pub fn assert_announced_ended(&mut self, expected: impl AsPath) {
 		let expected = expected.as_path();
-		match self
+		let (p, b) = self
 			.announced()
 			.now_or_never()
 			.expect("announced blocked")
-			.expect("no announce")
-		{
-			OriginAnnounce::Ended(p) => assert_eq!(p, expected, "wrong path"),
-			OriginAnnounce::Active(p, _) => panic!("expected Ended({expected}), got Active({p})"),
+			.expect("no announce");
+		match b {
+			None => assert_eq!(p, expected, "wrong path"),
+			Some(_) => panic!("expected Ended({expected}), got Active({p})"),
 		}
 	}
 
 	pub fn assert_announced_wait(&mut self) {
-		if let Some(res) = self.announced().now_or_never() {
-			panic!("announced should block: got {res:?}");
+		if self.announced().now_or_never().is_some() {
+			panic!("announced should block");
 		}
 	}
 }
@@ -1124,7 +1094,7 @@ mod tests {
 		let a = limited.try_announced().expect("first");
 		let b = limited.try_announced().expect("second");
 		limited.assert_announced_wait();
-		let mut paths: Vec<String> = [&a, &b].iter().map(|u| u.path().to_string()).collect();
+		let mut paths: Vec<String> = [&a, &b].iter().map(|u| u.0.to_string()).collect();
 		paths.sort();
 		assert_eq!(paths, ["allowed", "allowed/nested"]);
 
@@ -1155,7 +1125,7 @@ mod tests {
 		let b = limited.try_announced().expect("second");
 		limited.assert_announced_wait();
 
-		let mut paths: Vec<String> = [&a, &b].iter().map(|u| u.path().to_string()).collect();
+		let mut paths: Vec<String> = [&a, &b].iter().map(|u| u.0.to_string()).collect();
 		paths.sort();
 		assert_eq!(paths, ["bar/test", "foo/test"]);
 	}
@@ -1234,7 +1204,7 @@ mod tests {
 		let a2 = consumer.try_announced().expect("expected second announcement");
 		consumer.assert_announced_wait();
 
-		let mut paths: Vec<String> = [&a1, &a2].iter().map(|u| u.path().to_string()).collect();
+		let mut paths: Vec<String> = [&a1, &a2].iter().map(|u| u.0.to_string()).collect();
 		paths.sort();
 		assert_eq!(paths, ["foobar/test", "worm-node/test"]);
 	}
@@ -1265,7 +1235,7 @@ mod tests {
 		let a = worm.try_announced().expect("first");
 		let b = worm.try_announced().expect("second");
 		worm.assert_announced_wait();
-		let mut paths: Vec<String> = [&a, &b].iter().map(|u| u.path().to_string()).collect();
+		let mut paths: Vec<String> = [&a, &b].iter().map(|u| u.0.to_string()).collect();
 		paths.sort();
 		assert_eq!(paths, ["worm-node", "worm-node/foo"]);
 

@@ -96,13 +96,13 @@ async fn main() -> anyhow::Result<()> {
 
 			loop {
 				tokio::select! {
-					Some(announce) = origin.announced() => match announce {
-						moq_lite::OriginAnnounce::Active(path, broadcast) => {
+					Some((path, broadcast)) = origin.announced() => match broadcast {
+						Some(broadcast) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
 							let track = broadcast.subscribe_track(&track)?;
 							clock = Some(clock::Subscriber::new(track));
 						}
-						moq_lite::OriginAnnounce::Ended(path) => {
+						None => {
 							tracing::warn!(broadcast = %path, "broadcast is offline, waiting...");
 						}
 					},

@@ -32,13 +32,14 @@ pub struct Cli {
 
 #[derive(Subcommand, Clone)]
 pub enum Command {
+	/// Run a relay and publish a single broadcast read from stdin into it.
 	Serve {
 		#[command(flatten)]
 		config: moq_native::ServerConfig,
 
 		/// The name of the broadcast to serve.
-		#[arg(long)]
-		name: String,
+		#[arg(long, alias = "name")]
+		broadcast: String,
 
 		/// Optionally serve static files from the given directory.
 		#[arg(long)]
@@ -48,6 +49,23 @@ pub enum Command {
 		#[command(subcommand)]
 		format: PublishFormat,
 	},
+	/// Run a relay and write the first incoming broadcast's media to stdout.
+	Accept {
+		#[command(flatten)]
+		config: moq_native::ServerConfig,
+
+		/// The name of the broadcast to accept.
+		#[arg(long, alias = "name")]
+		broadcast: String,
+
+		/// Optionally serve static files from the given directory.
+		#[arg(long)]
+		dir: Option<PathBuf>,
+
+		#[command(flatten)]
+		args: SubscribeArgs,
+	},
+	/// Publish a broadcast read from stdin to a remote relay.
 	Publish {
 		/// The MoQ client configuration.
 		#[command(flatten)]
@@ -67,14 +85,14 @@ pub enum Command {
 		url: Url,
 
 		/// The name of the broadcast to publish.
-		#[arg(long)]
-		name: String,
+		#[arg(long, alias = "name")]
+		broadcast: String,
 
 		/// The format of the input media.
 		#[command(subcommand)]
 		format: PublishFormat,
 	},
-	/// Subscribe to a broadcast and write the media to stdout.
+	/// Subscribe to a broadcast on a remote relay and write the media to stdout.
 	Subscribe {
 		/// The MoQ client configuration.
 		#[command(flatten)]
@@ -85,8 +103,8 @@ pub enum Command {
 		url: Url,
 
 		/// The name of the broadcast to subscribe to.
-		#[arg(long)]
-		name: String,
+		#[arg(long, alias = "name")]
+		broadcast: String,
 
 		#[command(flatten)]
 		args: SubscribeArgs,
@@ -111,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
 		Command::Serve {
 			config,
 			dir,
-			name,
+			broadcast,
 			format,
 		} => {
 			let publish = Publish::new(&format)?;
@@ -124,15 +142,39 @@ async fn main() -> anyhow::Result<()> {
 			let web_tls = server.tls_info();
 
 			tokio::select! {
-				res = run_server(server, name, publish.consume()) => res,
+				res = run_server(server, broadcast, publish.consume()) => res,
 				res = run_web(&web_bind, web_tls, dir) => res,
 				res = publish.run() => res,
+			}
+		}
+		Command::Accept {
+			config,
+			broadcast,
+			dir,
+			args,
+		} => {
+			let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
+
+			let server = config.init()?;
+			#[cfg(feature = "iroh")]
+			let server = server.with_iroh(iroh);
+
+			let web_tls = server.tls_info();
+
+			let origin = moq_lite::Origin::random().produce();
+			let consumer = origin.consume();
+
+			tokio::select! {
+				res = run_accept(server, origin) => res,
+				res = run_web(&web_bind, web_tls, dir) => res,
+				res = run_announced_subscribe(consumer, broadcast, args) => res,
+				_ = tokio::signal::ctrl_c() => Ok(()),
 			}
 		}
 		Command::Publish {
 			config,
 			url,
-			name,
+			broadcast,
 			format,
 		} => {
 			let publish = Publish::new(&format)?;
@@ -141,12 +183,12 @@ async fn main() -> anyhow::Result<()> {
 			#[cfg(feature = "iroh")]
 			let client = client.with_iroh(iroh);
 
-			run_client(client, url, name, publish).await
+			run_client(client, url, broadcast, publish).await
 		}
 		Command::Subscribe {
 			config,
 			url,
-			name,
+			broadcast,
 			args,
 		} => {
 			let client = config.init()?;
@@ -154,32 +196,43 @@ async fn main() -> anyhow::Result<()> {
 			#[cfg(feature = "iroh")]
 			let client = client.with_iroh(iroh);
 
-			run_subscribe(client, url, name, args).await
+			run_subscribe(client, url, broadcast, args).await
 		}
 	}
 }
 
-async fn run_subscribe(client: moq_native::Client, url: Url, name: String, args: SubscribeArgs) -> anyhow::Result<()> {
+async fn run_subscribe(
+	client: moq_native::Client,
+	url: Url,
+	broadcast: String,
+	args: SubscribeArgs,
+) -> anyhow::Result<()> {
 	let origin = moq_lite::Origin::random().produce();
 	let consumer = origin.consume();
 
-	tracing::info!(%url, %name, "connecting");
+	tracing::info!(%url, %broadcast, "connecting");
 
 	let reconnect = client.with_consume(origin).reconnect(url);
 
 	#[cfg(unix)]
 	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
-	let broadcast = consumer
-		.announced_broadcast(&name)
-		.await
-		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast was announced"))?;
-
-	let subscribe = Subscribe::new(broadcast, args);
-
 	tokio::select! {
-		res = subscribe.run() => res,
+		res = run_announced_subscribe(consumer, broadcast, args) => res,
 		res = reconnect.closed() => res,
 		_ = tokio::signal::ctrl_c() => Ok(()),
 	}
+}
+
+async fn run_announced_subscribe(
+	consumer: moq_lite::OriginConsumer,
+	broadcast: String,
+	args: SubscribeArgs,
+) -> anyhow::Result<()> {
+	let consumer = consumer
+		.announced_broadcast(&broadcast)
+		.await
+		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast was announced"))?;
+
+	Subscribe::new(consumer, args).run().await
 }

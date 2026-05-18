@@ -281,25 +281,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe started");
 
-		let res = tokio::select! {
-			_ = track.unused() => Err(Error::Cancel),
-			err = broadcast.closed() => Err(err),
-			res = self.run_track(msg) => res,
-		};
-
-		match res {
-			Err(Error::Cancel) => {
+		tokio::select! {
+			_ = track.unused() => {
 				tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
 			}
-			Err(err) => {
-				tracing::warn!(id, broadcast = %self.log_path(&path), track = %track.name, %err, "subscribe error");
+			err = broadcast.closed() => {
+				tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "broadcast closed");
 				let _ = track.abort(err);
 			}
-			_ => {
-				tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe complete");
-				let _ = track.finish();
-			}
+			res = self.run_track(msg) => match res {
+				Ok(()) => {
+					tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe complete");
+					let _ = track.finish();
+				}
+				Err(err) => {
+					tracing::warn!(id, broadcast = %self.log_path(&path), track = %track.name, %err, "subscribe error");
+					let _ = track.abort(err);
+				}
+			},
 		}
 	}
 

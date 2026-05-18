@@ -14,7 +14,7 @@ export const MAX_U53 = Number.MAX_SAFE_INTEGER;
 // 1110xxxx + 3B   → 4 bytes (28 bits)
 // 11110xxx + 4B   → 5 bytes (35 bits)
 // 111110xx + 5B   → 6 bytes (42 bits)
-// 1111110x        → INVALID
+// 1111110x + 6B   → 7 bytes (49 bits), draft-18+ only (invalid in draft-17 per #1595)
 // 11111110 + 7B   → 8 bytes (56 bits)
 // 11111111 + 8B   → 9 bytes (64 bits)
 
@@ -101,10 +101,12 @@ export function decodeLeadingOnes(buf: Uint8Array): [bigint, Uint8Array] {
 		else break;
 	}
 
-	if (ones === 6) throw new Error("invalid leading-ones varint: 1111110x prefix is reserved");
+	// 1111110x is a 7-byte form: invalid on draft-17, allowed on draft-18+ per #1595.
+	// This standalone decoder is permissive (Postel-style) since we lack version context here.
 
 	let totalSize: number;
 	if (ones <= 5) totalSize = ones + 1;
+	else if (ones === 6) totalSize = 7;
 	else if (ones === 7) totalSize = 8;
 	else totalSize = 9; // ones === 8
 
@@ -141,6 +143,18 @@ export function decodeLeadingOnes(buf: Uint8Array): [bigint, Uint8Array] {
 				(BigInt(buf[4]) << 8n) |
 				BigInt(buf[5]);
 			break;
+		case 6: {
+			// 1111110x + 6 bytes = 49 bits (draft-18+)
+			value =
+				(BigInt(b & 0x01) << 48n) |
+				(BigInt(buf[1]) << 40n) |
+				(BigInt(buf[2]) << 32n) |
+				(BigInt(buf[3]) << 24n) |
+				(BigInt(buf[4]) << 16n) |
+				(BigInt(buf[5]) << 8n) |
+				BigInt(buf[6]);
+			break;
+		}
 		case 7: {
 			// 11111110 + 7 bytes = 56 usable bits
 			const hi = new Uint8Array(8);

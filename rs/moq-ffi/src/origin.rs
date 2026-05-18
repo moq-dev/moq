@@ -28,14 +28,14 @@ impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnouncement>>, MoqError> {
 		loop {
 			match self.inner.announced().await {
-				Some(moq_lite::OriginAnnounce::Active(path, broadcast)) => {
+				Some((path, Some(broadcast))) => {
 					return Ok(Some(Arc::new(MoqAnnouncement {
 						path: path.to_string(),
 						broadcast: Arc::new(MoqBroadcastConsumer::new(broadcast)),
 					})));
 				}
 				// FFI consumers learn about unannounce via broadcast.closed().
-				Some(moq_lite::OriginAnnounce::Ended(_)) => continue,
+				Some((_, None)) => continue,
 				None => return Ok(None),
 			}
 		}
@@ -44,10 +44,10 @@ impl Announced {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		loop {
 			match self.inner.announced().await {
-				Some(moq_lite::OriginAnnounce::Active(_, broadcast)) => {
+				Some((_, Some(broadcast))) => {
 					return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)));
 				}
-				Some(moq_lite::OriginAnnounce::Ended(_)) => continue,
+				Some((_, None)) => continue,
 				None => return Err(MoqError::Closed),
 			}
 		}

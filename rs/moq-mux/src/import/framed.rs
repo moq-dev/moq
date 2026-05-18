@@ -160,6 +160,22 @@ impl Framed {
 		}
 	}
 
+	/// Return the single track produced by this importer.
+	///
+	/// Container formats like fMP4 can produce multiple tracks, so callers that
+	/// need one concrete track must use a single-track format.
+	pub fn track(&self) -> anyhow::Result<&moq_lite::TrackProducer> {
+		match self.decoder {
+			FramedKind::Avc1(ref decoder) => decoder.track(),
+			FramedKind::Avc3(ref decoder) => Ok(decoder.track()),
+			FramedKind::Fmp4(_) => anyhow::bail!("fmp4 can contain multiple tracks"),
+			FramedKind::Hev1(ref decoder) => decoder.track(),
+			FramedKind::Av01(ref decoder) => decoder.track(),
+			FramedKind::Aac(ref decoder) => Ok(decoder.track()),
+			FramedKind::Opus(ref decoder) => Ok(decoder.track()),
+		}
+	}
+
 	/// Decode a frame from the given buffer.
 	///
 	/// This method should be used when the caller knows the buffer consists of an entire frame.

@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginAnnounce, OriginConsumer, OriginList, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, Track, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -166,23 +166,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 				// Send ANNOUNCE_INIT as the first message with all currently active paths.
 				// `try_announced()` is synchronous so we can drain the initial replay in order.
-				while let Some(update) = origin.try_announced() {
-					let suffix = update
-						.path()
+				while let Some((path, active)) = origin.try_announced() {
+					let suffix = path
 						.strip_prefix(&prefix)
 						.expect("origin returned invalid path")
 						.to_owned();
 
-					match update {
-						OriginAnnounce::Active(path, _) => {
-							tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-							init.push(suffix);
-						}
-						OriginAnnounce::Ended(path) => {
-							// A potential race.
-							tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-							init.retain(|p| p != &suffix);
-						}
+					if active.is_some() {
+						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+						init.push(suffix);
+					} else {
+						// A potential race.
+						tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+						init.retain(|p| p != &suffix);
 					}
 				}
 
@@ -206,7 +202,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				res = stream.reader.closed() => return res,
 				announced = origin.announced() => {
 					match announced {
-						Some(OriginAnnounce::Active(path, active)) => {
+						Some((path, Some(active))) => {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 							tracing::debug!(broadcast = %origin.absolute(&path), "announce");
 							// Append our origin id to the hops so the next relay can detect loops.
@@ -224,7 +220,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							let msg = lite::Announce::Active { suffix, hops };
 							stream.writer.encode(&msg).await?;
 						}
-						Some(OriginAnnounce::Ended(path)) => {
+						Some((path, None)) => {
 							if suppressed.remove(&path) {
 								continue;
 							}

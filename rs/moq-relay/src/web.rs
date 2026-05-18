@@ -464,8 +464,8 @@ async fn serve_announced(
 
 	let mut broadcasts = Vec::new();
 
-	while let Some(update) = origin.try_announced() {
-		if let moq_lite::OriginAnnounce::Active(suffix, _) = update {
+	while let Some((suffix, broadcast)) = origin.try_announced() {
+		if broadcast.is_some() {
 			broadcasts.push(suffix);
 		}
 	}

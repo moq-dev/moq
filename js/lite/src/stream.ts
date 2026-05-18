@@ -228,10 +228,14 @@ export class Reader {
 			else break;
 		}
 
-		if (ones === 6) throw new Error("invalid leading-ones varint: 1111110x prefix is reserved");
+		// 1111110x is a 7-byte form. Draft-17 rejects it; draft-18+ allows it per #1595.
+		if (ones === 6 && this.version === Version.DRAFT_17) {
+			throw new Error("invalid leading-ones varint: 1111110x prefix is reserved on draft-17");
+		}
 
 		let totalSize: number;
 		if (ones <= 5) totalSize = ones + 1;
+		else if (ones === 6) totalSize = 7;
 		else if (ones === 7) totalSize = 8;
 		else totalSize = 9; // ones === 8
 

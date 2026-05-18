@@ -44,7 +44,7 @@ impl Message for TrackStatus<'_> {
 				FilterType::LargestObject.encode(w, version)?; // filter type
 				0u8.encode(w, version)?; // no parameters
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				encode_params!(w, version,);
 			}
 		}
@@ -67,7 +67,7 @@ impl Message for TrackStatus<'_> {
 				let _filter_type = u64::decode(r, version)?;
 				let _params = Parameters::decode(r, version)?;
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				decode_params!(r, version,);
 			}
 		}
@@ -176,6 +176,22 @@ mod tests {
 
 		let encoded = encode_message(&msg, Version::Draft16);
 		let decoded: TrackStatus = decode_message(&encoded, Version::Draft16).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+	}
+
+	#[test]
+	fn test_track_status_v18_round_trip() {
+		let msg = TrackStatus {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: TrackStatus = decode_message(&encoded, Version::Draft18).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(1));
 		assert_eq!(decoded.track_namespace.as_str(), "test/ns");

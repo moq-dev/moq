@@ -227,8 +227,12 @@ export class Subscriber {
 						// Wait for stream close (= PublishDone) or track close (= local unsubscribe)
 						await Promise.race([stream.reader.closed, request.track.closed]);
 
-						// For v14-v16: send Unsubscribe before closing
-						if (version !== Version.DRAFT_17) {
+						// For v14-v16: send Unsubscribe before closing (removed in v17+)
+						if (
+							version === Version.DRAFT_14 ||
+							version === Version.DRAFT_15 ||
+							version === Version.DRAFT_16
+						) {
 							try {
 								await stream.writer.u53(Unsubscribe.id);
 								const unsub = new Unsubscribe({ requestId });
@@ -307,7 +311,7 @@ export class Subscriber {
 			} else {
 				await stream.writer.u53(RequestError.id);
 				const err = new RequestError({
-					requestId: version === Version.DRAFT_17 ? undefined : msg.requestId,
+					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
 					errorCode: 409,
 					reasonPhrase: "duplicate namespace",
 				});
@@ -330,7 +334,9 @@ export class Subscriber {
 				await ok.encode(stream.writer, version);
 			} else {
 				await stream.writer.u53(RequestOk.id);
-				const ok = new RequestOk({ requestId: version === Version.DRAFT_17 ? undefined : msg.requestId });
+				const ok = new RequestOk({
+					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
+				});
 				await ok.encode(stream.writer, version);
 			}
 
@@ -383,7 +389,7 @@ export class Subscriber {
 		} else {
 			await stream.writer.u53(RequestError.id);
 			const err = new RequestError({
-				requestId: version === Version.DRAFT_17 ? undefined : msg.requestId,
+				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
 				errorCode: 500,
 				reasonPhrase: "publish not supported",
 			});
