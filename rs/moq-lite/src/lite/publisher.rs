@@ -16,34 +16,38 @@ use crate::{
 
 use super::Version;
 
+pub(super) struct PublisherConfig {
+	/// The origin we read local broadcasts from. None gives this session a
+	/// dummy, immediately-closed origin (i.e. nothing to publish).
+	pub origin: Option<OriginConsumer>,
+	/// Optional stats aggregator for this session's egress.
+	pub stats: Option<MoqStats>,
+	/// Per-session origin id stamped onto outbound announce hops. Shared with
+	/// the matching `Subscriber` so reflected announces can be filtered.
+	pub self_origin: Origin,
+	pub version: Version,
+}
+
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: OriginConsumer,
 	stats: Option<MoqStats>,
-	// The session-level origin id stamped onto outbound hop chains. Shared
-	// with the Subscriber so it can optionally filter out reflected announces.
 	self_origin: Origin,
 	priority: PriorityQueue,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(
-		session: S,
-		origin: Option<OriginConsumer>,
-		stats: Option<MoqStats>,
-		self_origin: Origin,
-		version: Version,
-	) -> Self {
+	pub fn new(session: S, config: PublisherConfig) -> Self {
 		// Default to a dummy origin that is immediately closed.
-		let origin = origin.unwrap_or_else(|| Origin::random().produce().consume());
+		let origin = config.origin.unwrap_or_else(|| Origin::random().produce().consume());
 		Self {
 			session,
 			origin,
-			stats,
-			self_origin,
+			stats: config.stats,
+			self_origin: config.self_origin,
 			priority: Default::default(),
-			version,
+			version: config.version,
 		}
 	}
 
@@ -171,8 +175,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let prefix = prefix.as_path();
 
 		// Per-path stats guards: dropping the guard records `broadcasts_closed`.
-		// Using the absolute path keys means two different sessions handling the same
-		// broadcast each get their own guard scope (the bumps go to the same level).
+		// The origin contract guarantees announce/unannounce toggles per path, so a
+		// new active announcement must always be for a path with no live guard.
 		let mut stats_guards: std::collections::HashMap<crate::PathOwned, crate::PublisherStats> =
 			std::collections::HashMap::new();
 
@@ -189,9 +193,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
 						if let Some(stats) = stats.as_ref() {
 							let absolute = origin.absolute(&path).to_owned();
-							stats_guards
-								.entry(absolute.clone())
-								.or_insert_with(|| stats.broadcast(absolute.clone()).publisher());
+							let guard = stats.broadcast(&absolute).publisher();
+							let prev = stats_guards.insert(absolute, guard);
+							debug_assert!(prev.is_none(), "origin announced a path that was already active");
 						}
 						init.push(suffix.to_owned());
 					} else {
@@ -235,9 +239,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								}
 								if let Some(stats) = stats.as_ref() {
 									let absolute = origin.absolute(&path).to_owned();
-									stats_guards
-										.entry(absolute.clone())
-										.or_insert_with(|| stats.broadcast(absolute.clone()).publisher());
+									let guard = stats.broadcast(&absolute).publisher();
+									let prev = stats_guards.insert(absolute, guard);
+									debug_assert!(prev.is_none(), "origin announced a path that was already active");
 								}
 								let msg = lite::Announce::Active { suffix, hops };
 								stream.writer.encode(&msg).await?;

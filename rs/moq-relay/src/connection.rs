@@ -68,10 +68,14 @@ impl Connection {
 			}
 		}
 
-		// Stats handle is tier-tagged: mTLS-authenticated peers (including
-		// other cluster nodes) record bumps on the `_internal` tracks so a
-		// billing service can rate-differentiate from external traffic.
-		let stats = self.cluster.stats.as_ref().map(|s| s.tier(internal));
+		// mTLS-authenticated peers (including other cluster nodes) report through
+		// the internal stats handle so a billing service can rate-differentiate
+		// from external traffic.
+		let stats = if internal {
+			self.cluster.stats_internal.clone()
+		} else {
+			self.cluster.stats_external.clone()
+		};
 
 		// Accept the connection.
 		// NOTE: subscribe and publish seem backwards because of how relays work.

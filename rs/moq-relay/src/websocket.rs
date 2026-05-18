@@ -43,8 +43,12 @@ pub(crate) async fn serve_ws(
 	};
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
-	// Tier-tag the stats handle so mTLS sessions land on `_internal` tracks.
-	let stats = state.cluster.stats.as_ref().map(|s| s.tier(internal));
+	// mTLS sessions record on the internal stats handle; everything else on external.
+	let stats = if internal {
+		state.cluster.stats_internal.clone()
+	} else {
+		state.cluster.stats_external.clone()
+	};
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.

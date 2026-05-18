@@ -17,6 +17,19 @@ use super::Version;
 
 use web_async::Lock;
 
+pub(super) struct SubscriberConfig {
+	/// The origin into which remote broadcasts are inserted.
+	pub origin: Option<OriginProducer>,
+	/// Receiver-side bandwidth producer for PROBE feedback. None disables the
+	/// feature (used by versions that don't carry probe streams).
+	pub recv_bandwidth: Option<BandwidthProducer>,
+	/// Optional stats aggregator for this session's ingress.
+	pub stats: Option<Stats>,
+	/// Per-session origin id shared with the matching `Publisher`.
+	pub self_origin: crate::Origin,
+	pub version: Version,
+}
+
 #[derive(Clone)]
 pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
@@ -42,23 +55,16 @@ struct TrackEntry {
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(
-		session: S,
-		origin: Option<OriginProducer>,
-		recv_bandwidth: Option<BandwidthProducer>,
-		stats: Option<Stats>,
-		self_origin: crate::Origin,
-		version: Version,
-	) -> Self {
+	pub fn new(session: S, config: SubscriberConfig) -> Self {
 		Self {
 			session,
-			origin,
-			stats,
-			recv_bandwidth,
-			self_origin,
+			origin: config.origin,
+			stats: config.stats,
+			recv_bandwidth: config.recv_bandwidth,
+			self_origin: config.self_origin,
 			subscribes: Default::default(),
 			next_id: Default::default(),
-			version,
+			version: config.version,
 		}
 	}
 

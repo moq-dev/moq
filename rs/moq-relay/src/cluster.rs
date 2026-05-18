@@ -49,11 +49,12 @@ pub struct Cluster {
 	/// (filtered by their auth token) and remote dials both read and write here.
 	pub origin: OriginProducer,
 
-	/// Optional stats aggregator. When configured, every session attached via
-	/// [`Self::publisher`] / [`Self::subscriber`] (and the cluster's own outbound
-	/// dials) will route counter bumps through this handle, publishing per-level
-	/// `.stats/...` broadcasts on the same origin.
-	pub stats: Option<Stats>,
+	/// Optional stats aggregators for external (non-mTLS) and internal (mTLS /
+	/// cluster peer) traffic. Each is an independent [`Stats`] handle publishing
+	/// its own `.stats/<level>/<name>` broadcasts; the connection-acceptance path
+	/// picks one based on whether the peer authenticated via mTLS.
+	pub stats_external: Option<Stats>,
+	pub stats_internal: Option<Stats>,
 }
 
 impl Cluster {
@@ -61,10 +62,15 @@ impl Cluster {
 	pub fn new(config: ClusterConfig, stats_config: StatsConfig, client: moq_native::Client) -> Self {
 		let origin = Origin::random().produce();
 		tracing::info!(origin_id = %origin.id, "cluster initialized");
-		let stats = stats_config
+		let levels = stats_config.levels.max(1);
+		let stats_external = stats_config
 			.name
 			.as_ref()
-			.map(|name| Stats::new(name.clone(), stats_config.levels.max(1), origin.clone()));
+			.map(|name| Stats::new(name.clone(), levels, origin.clone()));
+		let stats_internal = stats_config
+			.name
+			.as_ref()
+			.map(|name| Stats::new(format!("{name}_internal"), levels, origin.clone()));
 		if let Some(name) = stats_config.name.as_ref() {
 			tracing::info!(name, levels = stats_config.levels, "stats publishing enabled");
 		}
@@ -72,7 +78,8 @@ impl Cluster {
 			config,
 			client,
 			origin,
-			stats,
+			stats_external,
+			stats_internal,
 		}
 	}
 
@@ -164,14 +171,12 @@ impl Cluster {
 		tracing::info!(url = %log_url, "dialing cluster peer");
 
 		// Cluster-to-cluster traffic is internal by definition.
-		let stats = self.stats.as_ref().map(|s| s.internal());
-
 		let session = self
 			.client
 			.clone()
 			.with_publish(self.origin.consume())
 			.with_consume(self.origin.clone())
-			.with_stats(stats)
+			.with_stats(self.stats_internal.clone())
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;

@@ -744,7 +744,7 @@ impl OriginConsumer {
 	/// Returns None if the consumer is closed.
 	///
 	/// Skips paths where any segment starts with `.` (see [`Path::is_hidden`]).
-	/// Use [`Self::announced_hidden`] to receive those instead.
+	/// Use [`Self::announced_all`] to receive every update including hidden paths.
 	///
 	/// Note: The returned path is absolute and will always match this consumer's prefix.
 	pub async fn announced(&mut self) -> Option<OriginAnnounce> {
@@ -756,14 +756,15 @@ impl OriginConsumer {
 		}
 	}
 
-	/// Like [`Self::announced`] but returns only paths where any segment starts with `.`.
-	pub async fn announced_hidden(&mut self) -> Option<OriginAnnounce> {
-		loop {
-			let next = self.updates.recv().await?;
-			if next.0.is_hidden() {
-				return Some(next);
-			}
-		}
+	/// Like [`Self::announced`] but returns every update, including paths where any
+	/// segment starts with `.`.
+	///
+	/// Use this when you need to observe infrastructure paths (e.g. `.stats/...`)
+	/// alongside user-visible broadcasts. Do not mix calls to this and
+	/// [`Self::announced`] on the same consumer instance: each update is delivered
+	/// exactly once, so calls compete for the same queue.
+	pub async fn announced_all(&mut self) -> Option<OriginAnnounce> {
+		self.updates.recv().await
 	}
 
 	/// Returns the next (un)announced broadcast and the absolute path without blocking.
@@ -772,7 +773,7 @@ impl OriginConsumer {
 	/// You have to use `is_closed` to check if the consumer is closed.
 	///
 	/// Skips paths where any segment starts with `.` (see [`Path::is_hidden`]).
-	/// Use [`Self::try_announced_hidden`] to receive those instead.
+	/// Use [`Self::try_announced_all`] to receive every update including hidden paths.
 	pub fn try_announced(&mut self) -> Option<OriginAnnounce> {
 		loop {
 			let next = self.updates.try_recv().ok()?;
@@ -782,14 +783,10 @@ impl OriginConsumer {
 		}
 	}
 
-	/// Like [`Self::try_announced`] but returns only paths where any segment starts with `.`.
-	pub fn try_announced_hidden(&mut self) -> Option<OriginAnnounce> {
-		loop {
-			let next = self.updates.try_recv().ok()?;
-			if next.0.is_hidden() {
-				return Some(next);
-			}
-		}
+	/// Like [`Self::try_announced`] but returns every update, including paths where
+	/// any segment starts with `.`. See [`Self::announced_all`] for caveats.
+	pub fn try_announced_all(&mut self) -> Option<OriginAnnounce> {
+		self.updates.try_recv().ok()
 	}
 
 	/// Create another consumer with its own announcement cursor over the same origin.
@@ -832,13 +829,8 @@ impl OriginConsumer {
 			return None;
 		}
 
-		let hidden = path.is_hidden();
 		loop {
-			let (announced, broadcast) = if hidden {
-				consumer.announced_hidden().await?
-			} else {
-				consumer.announced().await?
-			};
+			let (announced, broadcast) = consumer.announced_all().await?;
 			// `scope` narrows by prefix, but we only want an exact-path match.
 			if announced.as_path() == path {
 				if let Some(broadcast) = broadcast {
@@ -1955,7 +1947,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_announced_hidden_returns_only_hidden() {
+	async fn test_announced_all_returns_every_update() {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
@@ -1967,9 +1959,16 @@ mod tests {
 
 		let mut consumer = origin.consume();
 
-		// announced_hidden() should only see the hidden one.
+		// announced_all() should see both, in publish order.
+		let (path, _) = consumer
+			.announced_all()
+			.now_or_never()
+			.expect("next blocked")
+			.expect("no next");
+		assert_eq!(path, Path::new("foo/bar"));
+
 		let (path, broadcast) = consumer
-			.announced_hidden()
+			.announced_all()
 			.now_or_never()
 			.expect("next blocked")
 			.expect("no next");
@@ -1977,7 +1976,7 @@ mod tests {
 		assert!(broadcast.unwrap().is_clone(&hidden.consume()));
 
 		// And nothing else.
-		assert!(consumer.announced_hidden().now_or_never().is_none());
+		assert!(consumer.announced_all().now_or_never().is_none());
 	}
 
 	#[tokio::test]
