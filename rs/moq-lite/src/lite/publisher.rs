@@ -128,13 +128,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	pub async fn recv_announce(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
 		let interest = stream.reader.decode::<lite::AnnounceInterest>().await?;
 		let prefix = interest.prefix.to_owned();
+		let exclude_hop = interest.exclude_hop;
 
 		let mut origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
 
 		let version = self.version;
 		let self_origin = self.self_origin;
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, self_origin, version).await {
+			if let Err(err) =
+				Self::run_announce(&mut stream, &mut origin, &prefix, self_origin, exclude_hop, version).await
+			{
 				match &err {
 					Error::Cancel | Error::Transport(_) => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
@@ -156,6 +159,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: &mut OriginConsumer,
 		prefix: impl AsPath,
 		self_origin: Origin,
+		// Peer's session-level origin id, sent in AnnounceInterest. We skip
+		// forwarding announces whose hop chain already contains this id, so
+		// reflected announces (cluster loops) never hit the wire. Zero means
+		// the peer didn't set it (Lite03 or earlier) — pass through.
+		exclude_hop: u64,
 		version: Version,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
@@ -198,6 +206,26 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 
 							if let Some(active) = active {
+								// Skip if the peer asked us to exclude announces whose hop chain
+								// contains their id — they already saw this broadcast upstream.
+								if exclude_hop != 0 && active.hops.iter().any(|h| h.id == exclude_hop) {
+									tracing::debug!(
+										broadcast = %origin.absolute(&path),
+										%exclude_hop,
+										"skipping announce per peer's exclude_hop",
+									);
+									continue;
+								}
+								// Defense in depth: never echo an announce that already passed
+								// through us. The subscriber should drop these before they reach
+								// our origin, but if one slips through, don't propagate the loop.
+								if active.hops.contains(&self_origin) {
+									tracing::debug!(
+										broadcast = %origin.absolute(&path),
+										"skipping reflected announce",
+									);
+									continue;
+								}
 								tracing::debug!(broadcast = %origin.absolute(&path), "announce");
 								// Append our origin id to the hops so the next relay can detect loops.
 								// If the chain is already at MAX_HOPS, skip the announce — this link is

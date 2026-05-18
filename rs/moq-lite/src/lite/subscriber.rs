@@ -23,11 +23,10 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 	origin: Option<OriginProducer>,
 	recv_bandwidth: Option<BandwidthProducer>,
-	// Session-level origin id shared with the Publisher. Kept so callers that
-	// want to filter reflected announces can reuse the same id; for now only
-	// plumbed through, not applied automatically (see hang.live's dependency
-	// on seeing its own publishes as a confirmation signal).
-	#[allow(dead_code)]
+	// Session-level origin id shared with the Publisher. Used to filter out
+	// reflected announces: we ask the peer (via AnnounceInterest.exclude_hop)
+	// to skip broadcasts whose hop chain already passed through us, and we
+	// double-check incoming announces against it as defense in depth.
 	self_origin: crate::Origin,
 	subscribes: Lock<HashMap<u64, TrackProducer>>,
 	next_id: Arc<atomic::AtomicU64>,
@@ -115,9 +114,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Announce).await?;
 
+		// Ask the peer to filter out announces that already passed through us, so
+		// reflected announces (the simple loop case) never hit the wire. Lite03
+		// peers ignore this field, in which case start_announce below still drops.
 		let msg = lite::AnnounceInterest {
 			prefix: prefix.as_path(),
-			exclude_hop: 0,
+			exclude_hop: self.self_origin.id,
 		};
 		stream.writer.encode(&msg).await?;
 
@@ -210,6 +212,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		hops: crate::OriginList,
 		producers: &mut HashMap<PathOwned, BroadcastProducer>,
 	) -> Result<(), Error> {
+		// Drop announces that already passed through us — this connection is
+		// a reflection, not a new path. Peers should be filtering via
+		// AnnounceInterest.exclude_hop, but Lite03 peers can't, so this is
+		// the authoritative cluster-loop check on the receiver.
+		if hops.contains(&self.self_origin) {
+			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected announce");
+			return Ok(());
+		}
+
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
 
 		let broadcast = Broadcast { hops }.produce();
