@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/moq-dev/moq/compare/moq-mux-v0.4.0...moq-mux-v0.4.1) - 2026-05-18
+
+### Other
+
+- send each frame as its own group ([#1414](https://github.com/moq-dev/moq/pull/1414))
+- Expose track name and used/unused activity signals ([#1398](https://github.com/moq-dev/moq/pull/1398))
+- Fix reading catalogs ([#1404](https://github.com/moq-dev/moq/pull/1404))
+
 ## [0.4.0](https://github.com/moq-dev/moq/compare/moq-mux-v0.3.9...moq-mux-v0.4.0) - 2026-05-07
 
 ### Other

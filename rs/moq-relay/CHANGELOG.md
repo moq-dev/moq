@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.11.0...moq-relay-v0.11.1) - 2026-05-18
+
+### Other
+
+- enforce cluster loop detection on announce ([#1420](https://github.com/moq-dev/moq/pull/1420))
+
 ## [0.11.0](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.25...moq-relay-v0.11.0) - 2026-05-07
 
 ### Fixed

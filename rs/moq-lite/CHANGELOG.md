@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1](https://github.com/moq-dev/moq/compare/moq-lite-v0.16.0...moq-lite-v0.16.1) - 2026-05-18
+
+### Other
+
+- enforce cluster loop detection on announce ([#1420](https://github.com/moq-dev/moq/pull/1420))
+- Add draft-ietf-moq-transport-18 support ([#1418](https://github.com/moq-dev/moq/pull/1418))
+- Reduce track group cache eviction timeout from 30s to 5s ([#1393](https://github.com/moq-dev/moq/pull/1393))
+
 ## [0.16.0](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.15...moq-lite-v0.16.0) - 2026-05-07
 
 ### Other

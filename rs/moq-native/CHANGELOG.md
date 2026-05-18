@@ -44,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1](https://github.com/moq-dev/moq/compare/moq-native-v0.14.0...moq-native-v0.14.1) - 2026-05-18
+
+### Fixed
+
+- bump web-transport-iroh to 0.4 to unbreak cargo update ([#1421](https://github.com/moq-dev/moq/pull/1421))
+
+### Other
+
+- Add draft-ietf-moq-transport-18 support ([#1418](https://github.com/moq-dev/moq/pull/1418))
+
 ## [0.14.0](https://github.com/moq-dev/moq/compare/moq-native-v0.13.13...moq-native-v0.14.0) - 2026-05-07
 
 ### Fixed
