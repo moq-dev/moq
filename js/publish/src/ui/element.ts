@@ -53,12 +53,18 @@ export default class MoqPublishUi extends HTMLElement {
 		const publish = effect.get(this.#publish);
 		if (!publish) return;
 
-		// Start with "nothing" selected so the UI matches what the user sees, but only once.
+		// Start with "nothing" selected on first mount, but only if the host hasn't been
+		// preconfigured (via HTML attributes or JS), so we don't clobber the user's state.
 		if (!this.#initialized) {
 			this.#initialized = true;
-			publish.muted = true;
-			publish.invisible = true;
-			publish.source = undefined;
+			const pristine =
+				publish.state.source.peek() === undefined &&
+				!publish.state.muted.peek() &&
+				!publish.state.invisible.peek();
+			if (pristine) {
+				publish.muted = true;
+				publish.invisible = true;
+			}
 		}
 
 		const controls = DOM.create("div", { className: "publish-ui__controls flex--center flex--space-between" });
