@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Group, type Time, Track, Varint } from "@moq/lite";
+import type { InitSegment } from "./cmaf/decode.ts";
 import { encodeDataSegment } from "./cmaf/encode.ts";
 import { Format as CmafFormat } from "./cmaf/format.ts";
 import { Consumer } from "./consumer.ts";
@@ -8,6 +9,13 @@ import { Format as LegacyFormat } from "./legacy.ts";
 import type { Frame } from "./types.ts";
 
 const TIMESCALE = 90_000;
+const TEST_INIT: InitSegment = {
+	timescale: TIMESCALE,
+	trackId: 1,
+	defaultSampleDuration: 0,
+	defaultSampleSize: 0,
+	defaultSampleFlags: 0,
+};
 
 function encodeLegacyFrame(timestamp: Time.Micro, payload: Uint8Array): Uint8Array {
 	const tsBytes = Varint.encode(timestamp);
@@ -63,7 +71,7 @@ test("LegacyFormat throws on truncated input", () => {
 // --- CmafFormat ---
 
 test("CmafFormat decodes a valid keyframe segment", () => {
-	const format = new CmafFormat(TIMESCALE);
+	const format = new CmafFormat(TEST_INIT);
 	const segment = encodeDataSegment({
 		data: new Uint8Array([0xca, 0xfe]),
 		timestamp: 0,
@@ -81,7 +89,7 @@ test("CmafFormat decodes a valid keyframe segment", () => {
 });
 
 test("CmafFormat decodes a delta frame segment", () => {
-	const format = new CmafFormat(TIMESCALE);
+	const format = new CmafFormat(TEST_INIT);
 	const segment = encodeDataSegment({
 		data: new Uint8Array([0xbe, 0xef]),
 		timestamp: 3000,
@@ -97,7 +105,7 @@ test("CmafFormat decodes a delta frame segment", () => {
 });
 
 test("CmafFormat converts timescale units to microseconds", () => {
-	const format = new CmafFormat(TIMESCALE);
+	const format = new CmafFormat(TEST_INIT);
 	// 90000 timescale units = 1 second = 1_000_000 microseconds
 	const segment = encodeDataSegment({
 		data: new Uint8Array([0x01]),
@@ -112,7 +120,7 @@ test("CmafFormat converts timescale units to microseconds", () => {
 });
 
 test("CmafFormat throws on corrupt segment", () => {
-	const format = new CmafFormat(TIMESCALE);
+	const format = new CmafFormat(TEST_INIT);
 	expect(() => format.decode(new Uint8Array([0x00, 0x01, 0x02]))).toThrow();
 });
 
@@ -443,7 +451,7 @@ test("Consumer handles empty decode result without deadlock", async () => {
 test("Consumer with CmafFormat delivers correct timestamps", async () => {
 	const track = new Track("test");
 	const consumer = new Consumer(track, {
-		format: new CmafFormat(TIMESCALE),
+		format: new CmafFormat(TEST_INIT),
 		latency: 500 as Time.Milli,
 	});
 

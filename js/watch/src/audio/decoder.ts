@@ -5,6 +5,7 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
+import { base64ToBytes } from "../base64";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
@@ -266,14 +267,15 @@ export class Decoder {
 	#runCmafDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
-		const { timescale } = config.container;
+		const initSegment = base64ToBytes(config.container.init);
+		const init = Container.Cmaf.decodeInitSegment(initSegment);
 		// Opus in CMAF uses raw packets (not OGG-wrapped), so description must be omitted.
 		// The dOps box from the init segment is not a valid OGG Identification Header.
 		const description =
 			config.codec === "opus" ? undefined : config.description ? Util.Hex.toBytes(config.description) : undefined;
 
 		const consumer = new Container.Consumer(sub, {
-			format: new Container.Cmaf.Format(timescale),
+			format: new Container.Cmaf.Format(init),
 			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());
@@ -306,7 +308,7 @@ export class Decoder {
 			});
 
 			for (;;) {
-				const next = await Promise.race([consumer.next(), effect.cancel]);
+				const next = await consumer.next();
 				if (!next) break;
 
 				const { frame } = next;

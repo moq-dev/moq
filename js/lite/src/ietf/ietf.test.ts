@@ -532,10 +532,42 @@ test("Leading-ones varint: boundary round-trips", () => {
 	}
 });
 
-test("Leading-ones varint: invalid 0xFC prefix rejected", () => {
+test("Leading-ones varint: 0xFC is a 7-byte form on draft-18+ (per #1595)", () => {
+	// Standalone decoder is permissive; draft-17 enforcement is in Reader#readLeadingOnes.
+	// Only check that it doesn't reject the prefix as "reserved" — it now needs more bytes.
 	expect(() => {
 		Varint.decodeLeadingOnes(new Uint8Array([0xfc]));
-	}).toThrow(/reserved/);
+	}).toThrow(/buffer too short/);
+});
+
+test("Reader#u62: rejects 0xFC 7-byte form on draft-17", async () => {
+	const bytes = new Uint8Array([0xfc, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc]);
+	const reader = new Reader(undefined, bytes, Version.DRAFT_17);
+	await expect(reader.u62()).rejects.toThrow(/reserved on draft-17/);
+});
+
+test("Reader#u62: accepts 0xFC 7-byte form on draft-18", async () => {
+	const value = 0x12_3456_789a_bcn;
+	const bytes = new Uint8Array([0xfc, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc]);
+	const reader = new Reader(undefined, bytes, Version.DRAFT_18);
+	expect(await reader.u62()).toBe(value);
+	expect(await reader.done()).toBe(true);
+});
+
+test("Leading-ones varint: 7-byte form round-trips on draft-18", () => {
+	// Encode 7 bytes manually: 1111110_0 (prefix bit 48 = 0) + 6 bytes payload
+	const value = 0x12_3456_789a_bcn;
+	const bytes = new Uint8Array(7);
+	bytes[0] = 0xfc; // 1111110_0
+	bytes[1] = 0x12;
+	bytes[2] = 0x34;
+	bytes[3] = 0x56;
+	bytes[4] = 0x78;
+	bytes[5] = 0x9a;
+	bytes[6] = 0xbc;
+	const [decoded, remain] = Varint.decodeLeadingOnes(bytes);
+	expect(decoded).toBe(value);
+	expect(remain.length).toBe(0);
 });
 
 // --- Draft-17 message tests ---
@@ -833,4 +865,162 @@ test("Namespace: PublishNamespace with empty namespace round trip", async () => 
 	const decoded = await decodeVersioned(encoded, Announce.PublishNamespace.decode, Version.DRAFT_17);
 
 	expect(decoded.trackNamespace).toBe("" as Path.Valid);
+});
+
+// --- Draft-18 message tests ---
+
+test("Subscribe v18: round trip (same wire as v17 minus required_request_id_delta)", async () => {
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.from("test"),
+		trackName: "video",
+		subscriberPriority: 128,
+	});
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, Version.DRAFT_18);
+
+	expect(decoded.requestId).toBe(1n);
+	expect(decoded.trackNamespace).toBe("test" as Path.Valid);
+	expect(decoded.trackName).toBe("video");
+	expect(decoded.subscriberPriority).toBe(128);
+});
+
+test("SubscribeOk v18: no requestId", async () => {
+	const msg = new Subscribe.SubscribeOk({ trackAlias: 42n });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeOk.decode, Version.DRAFT_18);
+
+	expect(decoded.requestId).toBe(undefined);
+	expect(decoded.trackAlias).toBe(42n);
+});
+
+test("SubscribeUpdate v18: 1 byte shorter than v17 (no required_request_id_delta)", async () => {
+	const msg = new Subscribe.SubscribeUpdate({ requestId: 10n });
+	const v17 = await encodeVersioned(msg, Version.DRAFT_17);
+	const v18 = await encodeVersioned(msg, Version.DRAFT_18);
+	expect(v17.length).toBe(v18.length + 1);
+
+	// Round-trip the v18 bytes too. A different shape that happens to be one byte
+	// shorter would silently pass the length check otherwise.
+	const decoded = await decodeVersioned(v18, Subscribe.SubscribeUpdate.decode, Version.DRAFT_18);
+	expect(decoded.requestId).toBe(10n);
+});
+
+test("PublishNamespace v18: round trip without required_request_id_delta", async () => {
+	const msg = new Announce.PublishNamespace({ requestId: 5n, trackNamespace: Path.from("v18/broadcast") });
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, Announce.PublishNamespace.decode, Version.DRAFT_18);
+	expect(decoded.requestId).toBe(5n);
+	expect(decoded.trackNamespace).toBe("v18/broadcast" as Path.Valid);
+});
+
+test("Publish v18: round trip", async () => {
+	const msg = new Publish({
+		requestId: 7n,
+		trackNamespace: Path.from("v18/ns"),
+		trackName: "video",
+		trackAlias: 1n,
+		groupOrder: 2,
+		contentExists: false,
+		largest: undefined,
+		forward: true,
+	});
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, Publish.decode, Version.DRAFT_18);
+
+	expect(decoded.requestId).toBe(7n);
+	expect(decoded.trackNamespace).toBe("v18/ns" as Path.Valid);
+	expect(decoded.trackName).toBe("video");
+	expect(decoded.trackAlias).toBe(1n);
+	expect(decoded.forward).toBe(true);
+});
+
+test("PublishDone v18: no requestId", async () => {
+	const msg = new PublishDone({ statusCode: 200, reasonPhrase: "OK" });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, PublishDone.decode, Version.DRAFT_18);
+
+	expect(decoded.requestId).toBe(undefined);
+	expect(decoded.statusCode).toBe(200);
+	expect(decoded.reasonPhrase).toBe("OK");
+});
+
+test("RequestOk v18: no requestId (regression: don't treat Draft18 as legacy)", async () => {
+	const msg = new RequestOk({});
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, RequestOk.decode, Version.DRAFT_18);
+
+	expect(decoded.requestId).toBe(undefined);
+});
+
+test("RequestError v18: no requestId, retry_interval still present", async () => {
+	const msg = new RequestError({
+		errorCode: 500,
+		reasonPhrase: "boom",
+		retryInterval: 1234n,
+	});
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, RequestError.decode, Version.DRAFT_18);
+
+	expect(decoded.requestId).toBe(undefined);
+	expect(decoded.errorCode).toBe(500);
+	expect(decoded.reasonPhrase).toBe("boom");
+	expect(decoded.retryInterval).toBe(1234n);
+});
+
+test("Subscribe v18 wire bytes match v17 (FIRST_OBJECT bit doesn't affect control messages)", async () => {
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.from("test"),
+		trackName: "video",
+		subscriberPriority: 128,
+	});
+
+	const v17 = await encodeVersioned(msg, Version.DRAFT_17);
+	const v18 = await encodeVersioned(msg, Version.DRAFT_18);
+
+	// Draft18 drops the required_request_id_delta (1 byte) from v17.
+	expect(v18.length).toBe(v17.length - 1);
+});
+
+test("PublishNamespaceDone v18: rejected (removed in draft-17+)", async () => {
+	const msg = new Announce.PublishNamespaceDone({ requestId: 1n });
+	const { stream } = createTestWritableStream();
+	const writer = new Writer(stream, Version.DRAFT_18);
+	await expect(msg.encode(writer, Version.DRAFT_18)).rejects.toThrow(/removed in draft-17/);
+});
+
+test("GoAway v18: round trip (timeout field still present)", async () => {
+	const msg = new GoAway.GoAway({ newSessionUri: "moqt://relay.example/", timeout: 5000n });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, GoAway.GoAway.decode, Version.DRAFT_18);
+
+	expect(decoded.newSessionUri).toBe("moqt://relay.example/");
+	expect(decoded.timeout).toBe(5000n);
+});
+
+test("Parameters v18 wire is identical to v17 (no count prefix, delta encoded keys)", async () => {
+	const params = new SetupOptions();
+	params.setVarint(0x2n, 42n);
+	params.setVarint(0x4n, 100n);
+
+	const v17 = (() => {
+		const { stream, written } = createTestWritableStream();
+		const w = new Writer(stream, Version.DRAFT_17);
+		return params.encode(w, Version.DRAFT_17).then(() => concatChunks(written));
+	})();
+	const v18 = (() => {
+		const { stream, written } = createTestWritableStream();
+		const w = new Writer(stream, Version.DRAFT_18);
+		return params.encode(w, Version.DRAFT_18).then(() => concatChunks(written));
+	})();
+
+	expect(Array.from(await v18)).toEqual(Array.from(await v17));
 });

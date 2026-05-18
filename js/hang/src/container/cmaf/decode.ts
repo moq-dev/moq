@@ -19,8 +19,10 @@ import {
 	readTfdt,
 	readTfhd,
 	readTkhd,
+	readTrex,
 	readTrun,
 	type SampleDescriptionBox,
+	type TrackExtendsBox,
 	type TrackFragmentBaseMediaDecodeTimeBox,
 	type TrackFragmentHeaderBox,
 	type TrackRunBox,
@@ -37,6 +39,7 @@ const INIT_READERS = {
 	stsd: readStsd,
 	mdhd: readMdhd,
 	tkhd: readTkhd,
+	trex: readTrex,
 };
 
 const DATA_READERS = {
@@ -80,6 +83,18 @@ export interface InitSegment {
 	timescale: number;
 	/** Track ID from the init segment */
 	trackId: number;
+	/** Default sample duration from moov/mvex/trex, used when not overridden in tfhd/trun. */
+	defaultSampleDuration: number;
+	/** Default sample size from moov/mvex/trex, used when not overridden in tfhd/trun. */
+	defaultSampleSize: number;
+	/**
+	 * Default sample flags from moov/mvex/trex, used when not overridden in tfhd/trun.
+	 *
+	 * Some encoders (notably gstreamer/ffmpeg passthrough) only set sample flags
+	 * in trex, leaving tfhd defaults and per-sample trun flags zero. Without this
+	 * fallback every sample would appear as a sync sample.
+	 */
+	defaultSampleFlags: number;
 }
 
 /**
@@ -138,10 +153,21 @@ export function decodeInitSegment(init: Uint8Array): InitSegment {
 	const entry = stsd.entries[0];
 	const description = extractDescription(entry);
 
+	// Find moov > mvex > trex for this track to extract default sample values.
+	// These are the bottom of the fallback chain when tfhd/trun don't specify them.
+	const trex = findBox(
+		boxes,
+		(box): box is TrackExtendsBox & ParsedIsoBox =>
+			box.type === "trex" && (box as TrackExtendsBox).trackId === trackId,
+	);
+
 	return {
 		description,
 		timescale: mdhd.timescale,
 		trackId,
+		defaultSampleDuration: trex?.defaultSampleDuration ?? 0,
+		defaultSampleSize: trex?.defaultSampleSize ?? 0,
+		defaultSampleFlags: trex?.defaultSampleFlags ?? 0,
 	};
 }
 
@@ -259,10 +285,10 @@ function extractAudioSpecificConfig(esds: Uint8Array): Uint8Array | undefined {
  * This is a lighter-weight function when you only need the timestamp.
  *
  * @param segment - The moof + mdat data
- * @param timescale - Time units per second (from init segment)
+ * @param init - Parsed init segment (provides timescale)
  * @returns The base media decode time in microseconds
  */
-export function decodeTimestamp(segment: Uint8Array, timescale: number): Time.Micro {
+export function decodeTimestamp(segment: Uint8Array, init: InitSegment): Time.Micro {
 	const boxes = readIsoBoxes(toArrayBuffer(segment), { readers: DATA_READERS }) as ParsedIsoBox[];
 
 	// Find moof > traf > tfdt for base media decode time
@@ -270,17 +296,21 @@ export function decodeTimestamp(segment: Uint8Array, timescale: number): Time.Mi
 	const baseDecodeTime = tfdt?.baseMediaDecodeTime ?? 0;
 
 	// Convert to microseconds
-	return ((baseDecodeTime * 1_000_000) / timescale) as Time.Micro;
+	return ((baseDecodeTime * 1_000_000) / init.timescale) as Time.Micro;
 }
 
 /**
  * Parse a data segment (moof + mdat) to extract raw samples.
  *
+ * Sample duration/size/flags fall back through trun → tfhd → trex (init segment)
+ * per ISO/IEC 14496-12 §8.8.7. The init segment's trex defaults are required for
+ * fragments where the encoder only set them once in moov (e.g. gstreamer passthrough).
+ *
  * @param segment - The moof + mdat data
- * @param timescale - Time units per second (from init segment)
+ * @param init - Parsed init segment (provides timescale and trex defaults)
  * @returns Array of decoded samples
  */
-export function decodeDataSegment(segment: Uint8Array, timescale: number): Sample[] {
+export function decodeDataSegment(segment: Uint8Array, init: InitSegment): Sample[] {
 	// Cast to ParsedIsoBox[] since the library's return type changes with readers
 	const boxes = readIsoBoxes(toArrayBuffer(segment), { readers: DATA_READERS }) as ParsedIsoBox[];
 
@@ -288,11 +318,11 @@ export function decodeDataSegment(segment: Uint8Array, timescale: number): Sampl
 	const tfdt = findBox(boxes, isBoxType<TrackFragmentBaseMediaDecodeTimeBox & ParsedIsoBox>("tfdt"));
 	const baseDecodeTime = tfdt?.baseMediaDecodeTime ?? 0;
 
-	// Find moof > traf > tfhd for default sample values
+	// Find moof > traf > tfhd for default sample values, falling back to trex from the init segment.
 	const tfhd = findBox(boxes, isBoxType<TrackFragmentHeaderBox & ParsedIsoBox>("tfhd"));
-	const defaultDuration = tfhd?.defaultSampleDuration ?? 0;
-	const defaultSize = tfhd?.defaultSampleSize ?? 0;
-	const defaultFlags = tfhd?.defaultSampleFlags ?? 0;
+	const defaultDuration = tfhd?.defaultSampleDuration ?? init.defaultSampleDuration;
+	const defaultSize = tfhd?.defaultSampleSize ?? init.defaultSampleSize;
+	const defaultFlags = tfhd?.defaultSampleFlags ?? init.defaultSampleFlags;
 
 	// Find moof > traf > trun for sample info
 	const trun = findBox(boxes, isBoxType<TrackRunBox & ParsedIsoBox>("trun"));
@@ -361,7 +391,7 @@ export function decodeDataSegment(segment: Uint8Array, timescale: number): Sampl
 		// Calculate presentation timestamp in microseconds
 		// PTS = (decode_time + composition_offset) * 1_000_000 / timescale
 		const pts = decodeTime + compositionOffset;
-		const timestamp = Math.round((pts * 1_000_000) / timescale);
+		const timestamp = Math.round((pts * 1_000_000) / init.timescale);
 
 		// Check if keyframe (sample_is_non_sync_sample flag is bit 16)
 		// If flag is 0, treat as keyframe for safety

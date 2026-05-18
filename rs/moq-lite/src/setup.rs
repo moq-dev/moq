@@ -63,7 +63,8 @@ impl Decode<Version> for Setup {
 enum SetupVersion {
 	Draft14,
 	Draft15Plus,
-	Draft17,
+	/// Draft17+ uses ALPN-only negotiation with no legacy SETUP message.
+	Modern,
 	LiteLegacy,
 	Unsupported,
 }
@@ -73,7 +74,7 @@ impl SetupVersion {
 		match v {
 			Version::Ietf(ietf::Version::Draft14) => Self::Draft14,
 			Version::Ietf(ietf::Version::Draft15) | Version::Ietf(ietf::Version::Draft16) => Self::Draft15Plus,
-			Version::Ietf(ietf::Version::Draft17) => Self::Draft17,
+			Version::Ietf(ietf::Version::Draft17) | Version::Ietf(ietf::Version::Draft18) => Self::Modern,
 			Version::Lite(lite::Version::Lite01) | Version::Lite(lite::Version::Lite02) => Self::LiteLegacy,
 			Version::Lite(lite::Version::Lite03 | lite::Version::Lite04) => Self::Unsupported,
 		}
@@ -97,7 +98,7 @@ impl Client {
 				// Draft15+: no versions list, parameters only.
 			}
 			SetupVersion::Draft14 | SetupVersion::LiteLegacy => self.versions.encode(w, v)?,
-			SetupVersion::Draft17 | SetupVersion::Unsupported => return Err(EncodeError::Version),
+			SetupVersion::Modern | SetupVersion::Unsupported => return Err(EncodeError::Version),
 		};
 		if w.remaining_mut() < self.parameters.len() {
 			return Err(EncodeError::Short);
@@ -118,7 +119,7 @@ impl Decode<Version> for Client {
 		let size = match SetupVersion::from_version(v) {
 			SetupVersion::Draft14 | SetupVersion::Draft15Plus => u16::decode(r, v)? as usize,
 			SetupVersion::LiteLegacy => u64::decode(r, v)? as usize,
-			SetupVersion::Draft17 | SetupVersion::Unsupported => return Err(DecodeError::Version),
+			SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
 
 		if r.remaining() < size {
@@ -133,7 +134,7 @@ impl Decode<Version> for Client {
 				coding::Versions::from([v.into()])
 			}
 			SetupVersion::Draft14 | SetupVersion::LiteLegacy => coding::Versions::decode(&mut msg, v)?,
-			SetupVersion::Draft17 | SetupVersion::Unsupported => return Err(DecodeError::Version),
+			SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
 
 		Ok(Self {
@@ -157,7 +158,7 @@ impl Encode<Version> for Client {
 				u16::try_from(size).map_err(|_| EncodeError::TooLarge)?.encode(w, v)?;
 			}
 			SetupVersion::LiteLegacy => (size as u64).encode(w, v)?,
-			SetupVersion::Draft17 | SetupVersion::Unsupported => return Err(EncodeError::Version),
+			SetupVersion::Modern | SetupVersion::Unsupported => return Err(EncodeError::Version),
 		}
 		self.encode_inner(w, v)
 	}
@@ -180,7 +181,7 @@ impl Server {
 				// Draft15+: No version field, parameters only.
 			}
 			SetupVersion::Draft14 | SetupVersion::LiteLegacy => self.version.encode(w, v)?,
-			SetupVersion::Draft17 | SetupVersion::Unsupported => return Err(EncodeError::Version),
+			SetupVersion::Modern | SetupVersion::Unsupported => return Err(EncodeError::Version),
 		};
 		if w.remaining_mut() < self.parameters.len() {
 			return Err(EncodeError::Short);
@@ -204,7 +205,7 @@ impl Encode<Version> for Server {
 				u16::try_from(size).map_err(|_| EncodeError::TooLarge)?.encode(w, v)?;
 			}
 			SetupVersion::LiteLegacy => (size as u64).encode(w, v)?,
-			SetupVersion::Draft17 | SetupVersion::Unsupported => return Err(EncodeError::Version),
+			SetupVersion::Modern | SetupVersion::Unsupported => return Err(EncodeError::Version),
 		}
 
 		self.encode_inner(w, v)
@@ -222,7 +223,7 @@ impl Decode<Version> for Server {
 		let size = match SetupVersion::from_version(v) {
 			SetupVersion::Draft14 | SetupVersion::Draft15Plus => u16::decode(r, v)? as usize,
 			SetupVersion::LiteLegacy => u64::decode(r, v)? as usize,
-			SetupVersion::Draft17 | SetupVersion::Unsupported => return Err(DecodeError::Version),
+			SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
 
 		if r.remaining() < size {
@@ -233,7 +234,7 @@ impl Decode<Version> for Server {
 		let version = match SetupVersion::from_version(v) {
 			SetupVersion::Draft15Plus => v.into(),
 			SetupVersion::Draft14 | SetupVersion::LiteLegacy => coding::Version::decode(&mut msg, v)?,
-			SetupVersion::Draft17 | SetupVersion::Unsupported => return Err(DecodeError::Version),
+			SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
 
 		Ok(Self {

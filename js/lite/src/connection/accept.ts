@@ -2,6 +2,7 @@ import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { Stream } from "../stream.ts";
 import type { Established } from "./established.ts";
+import { exchangeSetup } from "./handshake.ts";
 
 export interface AcceptProps {
 	// Version to select during SETUP negotiation (for non-ALPN paths).
@@ -20,12 +21,14 @@ export async function accept(transport: WebTransport, url: URL, props?: AcceptPr
 	// @ts-expect-error - TODO: add protocol to WebTransport
 	const protocol: string | undefined = transport.protocol;
 
-	if (protocol === Ietf.ALPN.DRAFT_17) {
-		return acceptDraft17(transport, url);
+	if (protocol === Ietf.ALPN.DRAFT_18) {
+		return acceptAlpn(transport, url, Ietf.Version.DRAFT_18);
+	} else if (protocol === Ietf.ALPN.DRAFT_17) {
+		return acceptAlpn(transport, url, Ietf.Version.DRAFT_17);
 	} else if (protocol === Ietf.ALPN.DRAFT_16) {
-		return acceptAlpnVersion(transport, url, Ietf.Version.DRAFT_16);
+		return acceptSetup(transport, url, Ietf.Version.DRAFT_16);
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
-		return acceptAlpnVersion(transport, url, Ietf.Version.DRAFT_15);
+		return acceptSetup(transport, url, Ietf.Version.DRAFT_15);
 	} else if (protocol === Lite.ALPN_04) {
 		return new Lite.Connection(url, transport, Lite.Version.DRAFT_04, undefined);
 	} else if (protocol === Lite.ALPN_03) {
@@ -37,58 +40,28 @@ export async function accept(transport: WebTransport, url: URL, props?: AcceptPr
 	}
 }
 
-async function acceptDraft17(transport: WebTransport, url: URL): Promise<Established> {
-	const encoder = new TextEncoder();
-	const params = new Ietf.SetupOptions();
-	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
-
-	const setupMsg = new Ietf.Setup({ parameters: params });
-
-	// Accept recv uni and open send uni concurrently
-	const [recvReadable, sendWritable] = await Promise.all([
-		(async () => {
-			const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
-				ReadableStream<Uint8Array>
-			>;
-			const next = await uniReader.read();
-			uniReader.releaseLock();
-			if (next.done) throw new Error("no incoming uni stream for SETUP");
-			return next.value;
-		})(),
-		transport.createUnidirectionalStream() as Promise<WritableStream<Uint8Array>>,
-	]);
-
-	// Create control stream from the uni pair (this locks readable/writable once)
-	const controlStream = new Stream({ writable: sendWritable, readable: recvReadable });
-	controlStream.writer.version = Ietf.Version.DRAFT_17;
-	controlStream.reader.version = Ietf.Version.DRAFT_17;
-
-	// Send and receive SETUP concurrently using the control stream's reader/writer
-	await Promise.all([
-		(async () => {
-			const streamType = await controlStream.reader.u53();
-			if (streamType !== Ietf.Setup.id) {
-				throw new Error(`unexpected stream type on setup uni: 0x${streamType.toString(16)}`);
-			}
-			await Ietf.Setup.decode(controlStream.reader, Ietf.Version.DRAFT_17);
-		})(),
-		(async () => {
-			await controlStream.writer.u53(Ietf.Setup.id);
-			await setupMsg.encode(controlStream.writer, Ietf.Version.DRAFT_17);
-		})(),
-	]);
+/**
+ * Draft-17+ accept: ALPN already pinned the version. SETUP is exchanged over
+ * a pair of uni streams using stream type 0x2F00.
+ */
+async function acceptAlpn(transport: WebTransport, url: URL, version: Ietf.IetfVersion): Promise<Established> {
+	const controlStream = await exchangeSetup(transport, version, "moq-lite-js");
 
 	return new Ietf.Connection({
 		url,
 		quic: transport,
 		control: controlStream,
-		// v17 uses NativeSession which manages its own request IDs; maxRequestId is unused.
+		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
-		version: Ietf.Version.DRAFT_17,
+		version,
 	});
 }
 
-async function acceptAlpnVersion(transport: WebTransport, url: URL, version: Ietf.IetfVersion): Promise<Established> {
+/**
+ * Legacy accept (draft-15/16): ALPN pinned the version, but the SETUP message
+ * is still exchanged over a bidi stream wrapped in the moq-lite compat envelope.
+ */
+async function acceptSetup(transport: WebTransport, url: URL, version: Ietf.IetfVersion): Promise<Established> {
 	// Accept bidi, read ClientSetup, write ServerSetup
 	const stream = await Stream.accept(transport);
 	if (!stream) throw new Error("no incoming bidi stream for SETUP");

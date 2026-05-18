@@ -1,4 +1,4 @@
-.watch-ui__video-container {
+.video-container {
 	display: block;
 	position: relative;
 	width: 100%;
@@ -8,7 +8,7 @@
 	pointer-events: none;
 }
 
-.watch-ui__controls {
+.controls {
 	display: flex;
 	flex-direction: column;
 	gap: var(--spacing-24);
@@ -62,14 +62,14 @@
 	pointer-events: none;
 }
 
-.watch-ui__playback-controls {
+.playback-controls {
 	display: flex;
 	place-content: center space-around;
 	gap: var(--spacing-8);
 	padding: var(--spacing-8) 0;
 }
 
-.watch-ui__latency-controls {
+.latency-controls {
 	display: flex;
 	flex-direction: column;
 	gap: var(--spacing-16);

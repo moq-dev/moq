@@ -94,7 +94,7 @@ impl Message for Subscribe<'_> {
 					filter_type,
 				})
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				decode_params!(r, version,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
@@ -125,7 +125,7 @@ impl Message for Subscribe<'_> {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		if version == Version::Draft17 {
-			0u64.encode(w, version)?; // required_request_id_delta = 0
+			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 		encode_namespace(w, &self.track_namespace, version)?;
 		self.track_name.encode(w, version)?;
@@ -144,7 +144,7 @@ impl Message for Subscribe<'_> {
 				self.filter_type.encode(w, version)?;
 				0u8.encode(w, version)?; // no parameters
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				encode_params!(w, version,
 					0x10 => true,
 					0x20 => self.subscriber_priority,
@@ -169,12 +169,12 @@ impl Message for SubscribeOk {
 	const ID: u64 = 0x04;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if version != Version::Draft17 {
+		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.request_id
 				.expect("request_id required for draft14-16")
 				.encode(w, version)?;
 		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17");
+			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
 		self.track_alias.encode(w, version)?;
 
@@ -185,7 +185,7 @@ impl Message for SubscribeOk {
 				false.encode(w, version)?; // no content
 				0u8.encode(w, version)?; // no parameters
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				encode_params!(w, version,
 					0x22 => GroupOrder::Descending,
 				);
@@ -196,10 +196,10 @@ impl Message for SubscribeOk {
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = if version == Version::Draft17 {
-			None
-		} else {
+		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			Some(RequestId::decode(r, version)?)
+		} else {
+			None
 		};
 		let track_alias = u64::decode(r, version)?;
 
@@ -219,7 +219,7 @@ impl Message for SubscribeOk {
 
 				let _params = Parameters::decode(r, version)?;
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				decode_params!(r, version,
 					0x22 => _group_order: Option<GroupOrder>,
 				);
@@ -286,7 +286,7 @@ impl Message for Unsubscribe {
 }
 
 /// SubscribeUpdate message (0x02)
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SubscribeUpdate {
 	pub request_id: RequestId,
 	pub subscription_request_id: Option<RequestId>,
@@ -323,14 +323,16 @@ impl Message for SubscribeUpdate {
 					0x21 => FilterType::LargestObject,
 				);
 			}
-			Version::Draft17 => {
+			_ => {
 				assert!(
 					self.subscription_request_id.is_none(),
-					"subscription_request_id must be None for draft17"
+					"subscription_request_id must be None for draft17+"
 				);
-				// REQUEST_UPDATE: request_id, required_request_id_delta, params
+				// REQUEST_UPDATE
 				self.request_id.encode(w, version)?;
-				0u64.encode(w, version)?; // required_request_id_delta = 0
+				if matches!(version, Version::Draft17) {
+					0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
+				}
 				encode_params!(w, version,
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
@@ -383,10 +385,12 @@ impl Message for SubscribeUpdate {
 					forward,
 				})
 			}
-			Version::Draft17 => {
-				// REQUEST_UPDATE: request_id, required_request_id_delta, params
+			_ => {
+				// REQUEST_UPDATE
 				let request_id = RequestId::decode(r, version)?;
-				let _required_request_id_delta = u64::decode(r, version)?;
+				if matches!(version, Version::Draft17) {
+					let _required_request_id_delta = u64::decode(r, version)?;
+				}
 				decode_params!(r, version,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
@@ -665,5 +669,81 @@ mod tests {
 		assert_eq!(decoded.subscription_request_id, None);
 		assert_eq!(decoded.subscriber_priority, 200);
 		assert!(decoded.forward);
+	}
+
+	#[test]
+	fn test_subscribe_v18_round_trip() {
+		let msg = Subscribe {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test"),
+			track_name: "video".into(),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter_type: FilterType::LargestObject,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: Subscribe = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test");
+		assert_eq!(decoded.track_name, "video");
+		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	#[test]
+	fn test_subscribe_ok_v18_round_trip() {
+		let msg = SubscribeOk {
+			request_id: None,
+			track_alias: 42,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: SubscribeOk = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, None);
+		assert_eq!(decoded.track_alias, 42);
+	}
+
+	/// Draft-18 removes the `required_request_id_delta` field (#1615), so the
+	/// REQUEST_UPDATE wire format is 1 varint shorter than draft-17.
+	#[test]
+	fn test_subscribe_update_v18_round_trip() {
+		let msg = SubscribeUpdate {
+			request_id: RequestId(10),
+			subscription_request_id: None,
+			start_location: Location { group: 0, object: 0 },
+			end_group: 0,
+			subscriber_priority: 200,
+			forward: true,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: SubscribeUpdate = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(10));
+		assert_eq!(decoded.subscription_request_id, None);
+		assert_eq!(decoded.subscriber_priority, 200);
+		assert!(decoded.forward);
+	}
+
+	/// Cross-check: draft-17 emits an extra 0-byte (required_request_id_delta) that
+	/// draft-18 does not. So a draft-18 encoding should be exactly 1 byte shorter
+	/// than draft-17 for SUBSCRIBE_UPDATE.
+	#[test]
+	fn test_subscribe_update_v17_v18_size_differs() {
+		let v17_msg = SubscribeUpdate {
+			request_id: RequestId(10),
+			subscription_request_id: None,
+			start_location: Location { group: 0, object: 0 },
+			end_group: 0,
+			subscriber_priority: 200,
+			forward: true,
+		};
+		let v18_msg = SubscribeUpdate { ..v17_msg.clone() };
+
+		let v17 = encode_message(&v17_msg, Version::Draft17);
+		let v18 = encode_message(&v18_msg, Version::Draft18);
+		assert_eq!(v17.len(), v18.len() + 1);
 	}
 }

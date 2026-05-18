@@ -109,33 +109,33 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
 	origin.publish_broadcast("", broadcast.consume());
 
-	// Wrap in OrderedProducer for group management.
-	let mut producer = hang::container::OrderedProducer::new(track);
+	// Wrap in a Producer for keyframe-based group management.
+	let mut producer = moq_mux::container::Producer::new(track, moq_mux::container::Hang::Legacy);
 
-	// Not real frames of course.
-	// Signal a keyframe to start the first group.
-	producer.keyframe()?;
-	let frame = hang::container::Frame {
-		timestamp: hang::container::Timestamp::from_secs(1).unwrap(),
-		payload: Bytes::from_static(b"keyframe NAL data").into(),
+	// Not real frames of course. The first frame is a keyframe and starts the first group.
+	let frame = moq_mux::container::Frame {
+		timestamp: moq_mux::container::Timestamp::from_secs(1).unwrap(),
+		payload: Bytes::from_static(b"keyframe NAL data"),
+		keyframe: true,
 	};
 	producer.write(frame)?;
 
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-	let frame = hang::container::Frame {
-		timestamp: hang::container::Timestamp::from_secs(2).unwrap(),
-		payload: Bytes::from_static(b"delta NAL data").into(),
+	let frame = moq_mux::container::Frame {
+		timestamp: moq_mux::container::Timestamp::from_secs(2).unwrap(),
+		payload: Bytes::from_static(b"delta NAL data"),
+		keyframe: false,
 	};
 	producer.write(frame)?;
 
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-	// Signal a new keyframe to start a new group.
-	producer.keyframe()?;
-	let frame = hang::container::Frame {
-		timestamp: hang::container::Timestamp::from_secs(3).unwrap(),
-		payload: Bytes::from_static(b"keyframe NAL data").into(),
+	// Marking this frame as a keyframe closes the current group and starts a new one.
+	let frame = moq_mux::container::Frame {
+		timestamp: moq_mux::container::Timestamp::from_secs(3).unwrap(),
+		payload: Bytes::from_static(b"keyframe NAL data"),
+		keyframe: true,
 	};
 	producer.write(frame)?;
 

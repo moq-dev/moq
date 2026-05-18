@@ -58,34 +58,9 @@ impl Video {
 		Ok(())
 	}
 
-	/// Create a new video track with the given extension and configuration.
-	#[deprecated(
-		note = "use BroadcastProducer::unique_track to create the track, then insert into the catalog when initialized"
-	)]
-	pub fn create_track(&mut self, extension: &str, config: VideoConfig) -> moq_lite::Track {
-		for i in 0.. {
-			let name = match extension {
-				"" => format!("video{}", i),
-				extension => format!("video{}.{}", i, extension),
-			};
-			if let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.clone()) {
-				entry.insert(config.clone());
-				// TODO: Remove priority
-				return moq_lite::Track { name, priority: 1 };
-			}
-		}
-
-		unreachable!("no available video track name");
-	}
-
-	/// Remove a track from the catalog by name.
+	/// Remove the track from the catalog and return the configuration if found.
 	pub fn remove(&mut self, name: &str) -> Option<VideoConfig> {
 		self.renditions.remove(name)
-	}
-
-	#[deprecated(note = "use remove() instead")]
-	pub fn remove_track(&mut self, track: &moq_lite::Track) -> Option<VideoConfig> {
-		self.remove(&track.name)
 	}
 }
 
@@ -102,7 +77,7 @@ pub struct Display {
 /// This struct contains all the information needed to initialize a video decoder,
 /// including codec-specific parameters, resolution, and optional metadata.
 ///
-/// Reference: <https://w3c.github.io/webcodecs/#video-decoder-config>
+/// Reference: <https://www.w3.org/TR/webcodecs/#video-decoder-config>
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

@@ -14,6 +14,7 @@ import { MaxRequestId, RequestError, RequestOk, RequestsBlocked } from "./reques
 import * as Setup from "./setup.ts";
 import { Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import {
+	SUBSCRIBE_TRACKS_ID,
 	SubscribeNamespace,
 	SubscribeNamespaceError,
 	SubscribeNamespaceOk,
@@ -135,6 +136,13 @@ const MessagesV17 = {
 	// RequestsBlocked (0x1a) removed in d17
 } as const;
 
+// v18 message map — same as v17 with these spec changes:
+// * #1615 removes Required Request ID (transparent on the wire for messages here)
+// * #1542 splits SUBSCRIBE_NAMESPACE into SUBSCRIBE_NAMESPACE + SUBSCRIBE_TRACKS (0x51).
+//   moq-lite does not implement track subscription via PUBLISH replication, so 0x51
+//   is rejected as an explicit error rather than silently ignored.
+const MessagesV18 = MessagesV17;
+
 type V14MessageType = (typeof MessagesV14)[keyof typeof MessagesV14];
 type V15MessageType = (typeof MessagesV15)[keyof typeof MessagesV15];
 type V16MessageType = (typeof MessagesV16)[keyof typeof MessagesV16];
@@ -200,15 +208,24 @@ export class Stream {
 		return await this.#readLock.runExclusive(async () => {
 			const messageType = await this.stream.reader.u53();
 
+			// Draft-18 (#1542) splits SUBSCRIBE_NAMESPACE into SUBSCRIBE_NAMESPACE +
+			// SUBSCRIBE_TRACKS (0x51). moq-lite does not support track subscription
+			// via PUBLISH replication, so reject loudly rather than wait forever.
+			if (this.version === Version.DRAFT_18 && messageType === SUBSCRIBE_TRACKS_ID) {
+				throw new Error("SUBSCRIBE_TRACKS (0x51) is not supported in moq-lite (no PUBLISH replication)");
+			}
+
 			let messages: Record<number, MessageType>;
-			if (this.version === Version.DRAFT_17) {
-				messages = MessagesV17 as unknown as Record<number, MessageType>;
-			} else if (this.version === Version.DRAFT_16) {
-				messages = MessagesV16 as unknown as Record<number, MessageType>;
+			if (this.version === Version.DRAFT_14) {
+				messages = MessagesV14 as unknown as Record<number, MessageType>;
 			} else if (this.version === Version.DRAFT_15) {
 				messages = MessagesV15 as unknown as Record<number, MessageType>;
+			} else if (this.version === Version.DRAFT_16) {
+				messages = MessagesV16 as unknown as Record<number, MessageType>;
+			} else if (this.version === Version.DRAFT_17) {
+				messages = MessagesV17 as unknown as Record<number, MessageType>;
 			} else {
-				messages = MessagesV14 as unknown as Record<number, MessageType>;
+				messages = MessagesV18 as unknown as Record<number, MessageType>;
 			}
 
 			if (!(messageType in messages)) {
@@ -242,13 +259,17 @@ export class Stream {
 		while (true) {
 			const id = this.#requestId;
 
-			// d17: no flow control, always allowed
-			if (this.version === Version.DRAFT_17) {
-				this.#requestId += 2n;
-				return id;
-			}
-
-			if (id < this.#maxRequestId) {
+			// d14-d16 use MAX_REQUEST_ID flow control; d17+ removed it.
+			if (
+				this.version === Version.DRAFT_14 ||
+				this.version === Version.DRAFT_15 ||
+				this.version === Version.DRAFT_16
+			) {
+				if (id < this.#maxRequestId) {
+					this.#requestId += 2n;
+					return id;
+				}
+			} else {
 				this.#requestId += 2n;
 				return id;
 			}

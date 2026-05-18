@@ -5,6 +5,7 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
+import { base64ToBytes } from "../base64";
 import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
 
@@ -309,7 +310,7 @@ class DecoderTrack {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await Promise.race([consumer.next(), effect.cancel]);
+				const next = await consumer.next();
 				if (!next) break;
 
 				const { frame, group } = next;
@@ -359,11 +360,12 @@ class DecoderTrack {
 	#runCmaf(effect: Effect, sub: Moq.Track, decoder: VideoDecoder): void {
 		if (this.config.container.kind !== "cmaf") return;
 
-		const { timescale } = this.config.container;
+		const initSegment = base64ToBytes(this.config.container.init);
+		const init = Container.Cmaf.decodeInitSegment(initSegment);
 		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : undefined;
 
 		const consumer = new Container.Consumer(sub, {
-			format: new Container.Cmaf.Format(timescale),
+			format: new Container.Cmaf.Format(init),
 			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());
@@ -388,7 +390,7 @@ class DecoderTrack {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await Promise.race([consumer.next(), effect.cancel]);
+				const next = await consumer.next();
 				if (!next) break;
 
 				const { frame, group } = next;

@@ -1,7 +1,7 @@
 use crate::{
 	Error, OriginConsumer, OriginProducer,
 	coding::{Encode, Reader, Stream, Writer},
-	ietf::{self, FetchHeader, GroupFlags, RequestId},
+	ietf::{self, FetchHeader, RequestId},
 	setup,
 };
 
@@ -64,7 +64,7 @@ pub fn start<S: web_transport_trait::Session>(
 				web_async::spawn({
 					let session = session.clone();
 					async move {
-						if let Err(err) = run_setup(session).await {
+						if let Err(err) = run_setup(session, version).await {
 							tracing::warn!(%err, "setup send error");
 						}
 					}
@@ -115,8 +115,7 @@ pub fn start<S: web_transport_trait::Session>(
 }
 
 /// Send our SETUP on a uni stream and keep it alive for potential GOAWAY.
-async fn run_setup<S: web_transport_trait::Session>(session: S) -> Result<(), Error> {
-	let version = Version::Draft17;
+async fn run_setup<S: web_transport_trait::Session>(session: S, version: Version) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
 	let send = session.open_uni().await.map_err(Error::from_transport)?;
@@ -163,7 +162,7 @@ async fn run_unis<S: web_transport_trait::Session>(
 				}
 
 				// Monitor for GOAWAY after setup completes.
-				if let Err(err) = run_goaway(reader.with_version(version)).await {
+				if let Err(err) = run_goaway(reader.with_version(version), version).await {
 					tracing::warn!(%err, "goaway error");
 				}
 			});
@@ -189,10 +188,16 @@ async fn run_uni_group<S: web_transport_trait::Session>(
 ) -> Result<(), Error> {
 	let kind: u64 = stream.decode_peek().await?;
 
+	// SUBGROUP_HEADER type bytes match the form 0b0XX1XXXX (spec §11.4.2):
+	// draft-14-17 use 0x10-0x1D and 0x30-0x3D, draft-18 adds 0x40 (FIRST_OBJECT)
+	// extending the form to also cover 0x50-0x5D and 0x70-0x7D. Per-version and
+	// per-bit validation (e.g., FIRST_OBJECT must be 0 on draft-17) is done in
+	// `GroupFlags::decode`.
+	if kind <= 0xff && (kind & 0x90) == 0x10 {
+		return subscriber.recv_group(stream).await;
+	}
+
 	match kind {
-		GroupFlags::START..=GroupFlags::END | GroupFlags::START_NO_PRIORITY..=GroupFlags::END_NO_PRIORITY => {
-			subscriber.recv_group(stream).await
-		}
 		FetchHeader::TYPE => Err(Error::Unsupported),
 		_ => Err(Error::UnexpectedStream),
 	}
@@ -230,7 +235,10 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 }
 
 /// Block until GOAWAY or stream close.
-async fn run_goaway<R: web_transport_trait::RecvStream>(mut reader: Reader<R, Version>) -> Result<(), Error> {
+async fn run_goaway<R: web_transport_trait::RecvStream>(
+	mut reader: Reader<R, Version>,
+	version: Version,
+) -> Result<(), Error> {
 	let id: u64 = match reader.decode_maybe().await? {
 		Some(id) => id,
 		None => return Ok(()),
@@ -240,7 +248,7 @@ async fn run_goaway<R: web_transport_trait::RecvStream>(mut reader: Reader<R, Ve
 	let mut data = reader.read_exact(size as usize).await?;
 
 	if id == ietf::GoAway::ID {
-		let msg = ietf::GoAway::decode_msg(&mut data, Version::Draft17)?;
+		let msg = ietf::GoAway::decode_msg(&mut data, version)?;
 		tracing::debug!(message = ?msg, "received GOAWAY");
 		Err(Error::Unsupported)
 	} else {

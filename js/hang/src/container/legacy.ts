@@ -18,6 +18,21 @@ export interface Source {
 	copyTo(buffer: Uint8Array): void;
 }
 
+// Encode a frame as a timestamp varint followed by the payload bytes.
+export function encodeFrame(source: Uint8Array | Source, timestamp: Time.Micro): Uint8Array {
+	const timestampBytes = Moq.Varint.encode(timestamp);
+	const data = new Uint8Array(timestampBytes.byteLength + source.byteLength);
+	data.set(timestampBytes, 0);
+
+	if (source instanceof Uint8Array) {
+		data.set(source, timestampBytes.byteLength);
+	} else {
+		source.copyTo(data.subarray(timestampBytes.byteLength));
+	}
+
+	return data;
+}
+
 // A Helper class to encode frames into a track.
 export class Producer {
 	#track: Moq.Track;
@@ -35,27 +50,7 @@ export class Producer {
 			throw new Error("must start with a keyframe");
 		}
 
-		this.#group?.writeFrame(Producer.#encode(data, timestamp));
-	}
-
-	static #encode(source: Uint8Array | Source, timestamp: Time.Micro): Uint8Array {
-		const timestampBytes = Moq.Varint.encode(timestamp);
-
-		// Allocate buffer for timestamp + payload
-		const payloadSize = source instanceof Uint8Array ? source.byteLength : source.byteLength;
-		const data = new Uint8Array(timestampBytes.byteLength + payloadSize);
-
-		// Write timestamp header
-		data.set(timestampBytes, 0);
-
-		// Write payload
-		if (source instanceof Uint8Array) {
-			data.set(source, timestampBytes.byteLength);
-		} else {
-			source.copyTo(data.subarray(timestampBytes.byteLength));
-		}
-
-		return data;
+		this.#group?.writeFrame(encodeFrame(data, timestamp));
 	}
 
 	close(err?: Error) {

@@ -58,6 +58,11 @@ export class Broadcast {
 	// All actively announced broadcast paths from the connection.
 	#announced: Getter<Set<Moq.Path.Valid>>;
 
+	// Whether `name` is currently in the announced set (or skipping the check).
+	// Derived in its own effect so that flaps for unrelated broadcasts don't
+	// retrigger the broadcast/catalog subscriptions.
+	#announcedNow = new Signal(false);
+
 	signals = new Effect();
 
 	constructor(props?: BroadcastProps) {
@@ -70,13 +75,17 @@ export class Broadcast {
 
 		this.#announced = props?.announced ?? new Signal(new Set());
 
+		this.signals.run(this.#runAnnouncedNow.bind(this));
 		this.signals.run(this.#runBroadcast.bind(this));
 		this.signals.run(this.#runCatalog.bind(this));
 	}
 
-	#isAnnounced(effect: Effect): boolean {
+	#runAnnouncedNow(effect: Effect): void {
 		const reload = effect.get(this.reload);
-		if (!reload) return true;
+		if (!reload) {
+			this.#announcedNow.set(true);
+			return;
+		}
 
 		// Cloudflare's relay does not yet support announcement subscriptions,
 		// so an announcement will never arrive. Fall back to subscribing
@@ -84,19 +93,20 @@ export class Broadcast {
 		const conn = effect.get(this.connection);
 		if (conn?.url.hostname.endsWith("mediaoverquic.com")) {
 			console.warn("Cloudflare relay does not support broadcast discovery yet; ignoring reload signal.");
-			return true;
+			this.#announcedNow.set(true);
+			return;
 		}
 
 		const name = effect.get(this.name);
 		const announced = effect.get(this.#announced);
-		return announced.has(name);
+		this.#announcedNow.set(announced.has(name));
 	}
 
 	#runBroadcast(effect: Effect): void {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
-		if (!this.#isAnnounced(effect)) return;
+		if (!effect.get(this.#announcedNow)) return;
 
 		const conn = effect.get(this.connection);
 		if (!conn) return;

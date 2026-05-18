@@ -1,10 +1,5 @@
 use anyhow::Context;
-use buf_list::BufList;
-use bytes::Buf;
-
-// Make a new audio group every 100ms.
-// NOTE: We could do this per-frame, but there's not much benefit to it.
-const MAX_GROUP_DURATION: hang::container::Timestamp = hang::container::Timestamp::from_millis_unchecked(100);
+use bytes::{Buf, BytesMut};
 
 /// Typed AAC configuration for initialization without binary blobs.
 pub struct AacConfig {
@@ -99,25 +94,25 @@ impl AacConfig {
 	}
 }
 
-/// AAC decoder, initialized via AudioSpecificConfig (variable length from ESDS box).
+/// AAC importer.
+///
+/// Initialized from an AudioSpecificConfig blob (variable-length, typically extracted from
+/// an MP4 ESDS atom). Each input buffer passed to [`decode`](Self::decode) is published as
+/// one hang frame in its own group, so the relay can forward each frame without waiting for
+/// a group boundary. The codec's packet loss concealment handles drops.
 pub struct Aac {
-	catalog: crate::CatalogProducer,
-	track: hang::container::OrderedProducer,
+	catalog: crate::catalog::Producer,
+	track: crate::container::Producer<crate::container::Hang>,
 	zero: Option<tokio::time::Instant>,
 }
 
 impl Aac {
 	pub fn new(
 		mut broadcast: moq_lite::BroadcastProducer,
-		mut catalog: crate::CatalogProducer,
+		mut catalog: crate::catalog::Producer,
 		config: AacConfig,
 	) -> anyhow::Result<Self> {
 		let track = broadcast.unique_track(".aac")?;
-
-		// TODO parse the actual frame size from the profile (e.g. 960 for HE-AAC, 480/512 for AAC-LD).
-		// 1024 samples is correct for LC-AAC which covers the vast majority of real-world streams.
-		let frame_duration_us = 1024u64 * 1_000_000 / config.sample_rate as u64;
-		let jitter = moq_lite::Time::from_micros(frame_duration_us).ok();
 
 		let audio_config = hang::catalog::AudioConfig {
 			codec: hang::catalog::AAC {
@@ -129,22 +124,22 @@ impl Aac {
 			bitrate: None,
 			description: None,
 			container: hang::catalog::Container::Legacy,
-			jitter,
+			jitter: None,
 		};
 
-		catalog.lock().audio.insert(&track.name, audio_config.clone())?;
 		tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
+		catalog.lock().audio.renditions.insert(track.name.clone(), audio_config);
 
 		Ok(Self {
 			catalog,
-			track: hang::container::OrderedProducer::new(track).with_max_group_duration(MAX_GROUP_DURATION),
+			track: crate::container::Producer::new(track, crate::container::Hang::Legacy),
 			zero: None,
 		})
 	}
 
 	/// Returns a reference to the underlying track producer.
 	pub fn track(&self) -> &moq_lite::TrackProducer {
-		&self.track
+		&self.track.track
 	}
 
 	/// Finish the track, flushing the current group.
@@ -156,18 +151,25 @@ impl Aac {
 	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 
-		// Create a BufList at chunk boundaries, potentially avoiding allocations.
-		let mut payload = BufList::new();
-		while !buf.chunk().is_empty() {
-			payload.push_chunk(buf.copy_to_bytes(buf.chunk().len()));
+		// Collect the input into a contiguous Bytes payload.
+		let mut payload = BytesMut::with_capacity(buf.remaining());
+		while buf.has_remaining() {
+			let chunk = buf.chunk();
+			payload.extend_from_slice(chunk);
+			let len = chunk.len();
+			buf.advance(len);
 		}
 
-		let frame = hang::container::Frame {
+		// Each frame is its own group so the relay can forward it immediately.
+		// The codec's packet loss concealment handles drops.
+		let frame = crate::container::Frame {
 			timestamp: pts,
-			payload,
+			payload: payload.freeze(),
+			keyframe: true,
 		};
 
 		self.track.write(frame)?;
+		self.track.finish_group()?;
 
 		Ok(())
 	}
@@ -187,7 +189,7 @@ impl Aac {
 impl Drop for Aac {
 	fn drop(&mut self) {
 		tracing::debug!(name = ?self.track.name, "ending track");
-		self.catalog.lock().audio.remove(&self.track.name);
+		self.catalog.lock().audio.renditions.remove(&self.track.name);
 	}
 }
 

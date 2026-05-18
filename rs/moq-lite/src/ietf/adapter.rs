@@ -489,6 +489,17 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 				_ => Err(Error::UnexpectedMessage),
 			},
 
+			// SUBSCRIBE_TRACKS (draft-18+, #1542): the half of the SUBSCRIBE_NAMESPACE split
+			// that subscribes to all tracks under a prefix. We don't implement PUBLISH
+			// replication, so this is impossible to honor. Reject loudly.
+			ietf::SUBSCRIBE_TRACKS_ID => {
+				tracing::error!(
+					version = ?self.version,
+					"received SUBSCRIBE_TRACKS (0x51); not supported in moq-lite (no PUBLISH replication)"
+				);
+				Err(Error::Unsupported)
+			}
+
 			// Responses: route to the virtual stream waiting for a reply
 			ietf::SubscribeOk::ID => {
 				let id = decode_response_request_id(body, self.version)?;
@@ -841,6 +852,10 @@ mod tests {
 				}
 				_ => Err(Error::UnexpectedMessage),
 			},
+			ietf::SUBSCRIBE_TRACKS_ID => {
+				tracing::error!(?version, "received SUBSCRIBE_TRACKS (0x51); not supported in moq-lite");
+				Err(Error::Unsupported)
+			}
 			ietf::SubscribeOk::ID => {
 				let id = decode_response_request_id(body, version)?;
 				Ok(Route::Response(id))

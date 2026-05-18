@@ -8,16 +8,16 @@ use crate::{Error, Id, NonZeroSlab};
 #[derive(Default)]
 pub struct Publish {
 	/// Active broadcast producers for publishing.
-	broadcasts: NonZeroSlab<(moq_lite::BroadcastProducer, moq_mux::CatalogProducer)>,
+	broadcasts: NonZeroSlab<(moq_lite::BroadcastProducer, moq_mux::catalog::Producer)>,
 
 	/// Active media encoders/decoders for publishing.
-	media: NonZeroSlab<import::Decoder>,
+	media: NonZeroSlab<import::Framed>,
 }
 
 impl Publish {
 	pub fn create(&mut self) -> Result<Id, Error> {
 		let mut broadcast = moq_lite::Broadcast::new().produce();
-		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let id = self.broadcasts.insert((broadcast, catalog))?;
 		Ok(id)
@@ -38,8 +38,8 @@ impl Publish {
 	pub fn media_ordered(&mut self, broadcast: Id, format: &str, mut init: &[u8]) -> Result<Id, Error> {
 		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 
-		let format = import::DecoderFormat::from_str(format).map_err(|_| Error::UnknownFormat(format.to_string()))?;
-		let decoder = import::Decoder::new(broadcast.clone(), catalog.clone(), format, &mut init)
+		let format = import::FramedFormat::from_str(format).map_err(|_| Error::UnknownFormat(format.to_string()))?;
+		let decoder = import::Framed::new(broadcast.clone(), catalog.clone(), format, &mut init)
 			.map_err(|err| Error::InitFailed(Arc::new(err)))?;
 
 		let id = self.media.insert(decoder)?;

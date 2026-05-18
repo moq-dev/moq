@@ -230,15 +230,20 @@ export class Consumer {
 				throw new Error("multiple calls to next not supported");
 			}
 
-			const wait = new Promise<void>((resolve) => {
-				this.#notify = resolve;
-			}).then(() => true);
+			const abort = this.#signals.abort;
+			if (abort.aborted) return undefined;
 
-			if (!(await Promise.race([wait, this.#signals.closed]))) {
-				this.#notify = undefined;
-				// Consumer was closed while waiting for a new frame.
-				return undefined;
-			}
+			const aborted = await new Promise<boolean>((resolve) => {
+				const onAbort = () => resolve(true);
+				abort.addEventListener("abort", onAbort, { once: true });
+				this.#notify = () => {
+					abort.removeEventListener("abort", onAbort);
+					resolve(false);
+				};
+			});
+
+			this.#notify = undefined;
+			if (aborted) return undefined;
 		}
 	}
 

@@ -91,22 +91,22 @@ impl Message for RequestOk {
 	const ID: u64 = 0x07;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if version != Version::Draft17 {
+		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.request_id
 				.expect("request_id required for draft14-16")
 				.encode(w, version)?;
 		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17");
+			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
 		encode_params!(w, version,);
 		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = if version == Version::Draft17 {
-			None
-		} else {
+		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			Some(RequestId::decode(r, version)?)
+		} else {
+			None
 		};
 		decode_params!(r, version,);
 		Ok(Self { request_id })
@@ -129,15 +129,15 @@ impl Message for RequestError<'_> {
 	const ID: u64 = 0x05;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if version != Version::Draft17 {
+		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.request_id
 				.expect("request_id required for draft14-16")
 				.encode(w, version)?;
 		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17");
+			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
 		self.error_code.encode(w, version)?;
-		if version == Version::Draft16 || version == Version::Draft17 {
+		if !matches!(version, Version::Draft14 | Version::Draft15) {
 			self.retry_interval.encode(w, version)?;
 		}
 		self.reason_phrase.encode(w, version)?;
@@ -145,15 +145,15 @@ impl Message for RequestError<'_> {
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = if version == Version::Draft17 {
-			None
-		} else {
+		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			Some(RequestId::decode(r, version)?)
+		} else {
+			None
 		};
 		let error_code = u64::decode(r, version)?;
 		let retry_interval = match version {
-			Version::Draft16 | Version::Draft17 => u64::decode(r, version)?,
 			Version::Draft14 | Version::Draft15 => 0,
+			_ => u64::decode(r, version)?,
 		};
 		let reason_phrase = Cow::<str>::decode(r, version)?;
 		Ok(Self {
@@ -250,6 +250,44 @@ mod tests {
 
 		let encoded = encode_message(&msg, Version::Draft17);
 		let decoded: RequestError = decode_message(&encoded, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.request_id, None);
+		assert_eq!(decoded.error_code, 500);
+		assert_eq!(decoded.reason_phrase, "Internal error");
+		assert_eq!(decoded.retry_interval, 3000);
+	}
+
+	#[test]
+	fn test_request_ok_v18_round_trip() {
+		let msg = RequestOk { request_id: None };
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: RequestOk = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, None);
+	}
+
+	/// Regression: pre-fix, the `version != Draft17` check caused Draft18 to be
+	/// treated as Draft14-16 and panic in the encoder.
+	#[test]
+	fn test_request_ok_v18_wire_matches_v17() {
+		let msg = RequestOk { request_id: None };
+		let v17 = encode_message(&msg, Version::Draft17);
+		let v18 = encode_message(&msg, Version::Draft18);
+		assert_eq!(v17, v18);
+	}
+
+	#[test]
+	fn test_request_error_v18_round_trip() {
+		let msg = RequestError {
+			request_id: None,
+			error_code: 500,
+			reason_phrase: "Internal error".into(),
+			retry_interval: 3000,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: RequestError = decode_message(&encoded, Version::Draft18).unwrap();
 
 		assert_eq!(decoded.request_id, None);
 		assert_eq!(decoded.error_code, 500);

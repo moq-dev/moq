@@ -52,7 +52,7 @@ export class Publish {
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
 		if (version === Version.DRAFT_17) {
-			await w.u62(0n); // required_request_id_delta = 0
+			await w.u62(0n); // required_request_id_delta = 0 (Draft17 only)
 		}
 		await Namespace.encode(w, this.trackNamespace);
 		await w.string(this.trackName);
@@ -96,7 +96,7 @@ export class Publish {
 	static async #decode(r: Reader, version: IetfVersion): Promise<Publish> {
 		const requestId = await r.u62();
 		if (version === Version.DRAFT_17) {
-			await r.u62(); // required_request_id_delta
+			await r.u62(); // required_request_id_delta (Draft17 only)
 		}
 		const trackNamespace = await Namespace.decode(r);
 		const trackName = await r.string();
@@ -216,7 +216,7 @@ export class PublishDone {
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (version !== Version.DRAFT_17) {
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			if (this.requestId === undefined) throw new Error("requestId required for draft14-16");
 			await w.u62(this.requestId);
 		}
@@ -234,7 +234,10 @@ export class PublishDone {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<PublishDone> {
-		const requestId = version === Version.DRAFT_17 ? undefined : await r.u62();
+		const requestId =
+			version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
+				? await r.u62()
+				: undefined;
 		const statusCode = Number(await r.u62());
 		await r.u62(); // ignore stream_count
 		const reasonPhrase = await r.string();

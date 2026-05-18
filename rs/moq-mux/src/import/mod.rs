@@ -1,51 +1,43 @@
-//! Media demuxers for MoQ.
+//! Pull external media into a moq broadcast.
 //!
-//! This crate provides modules for converting existing media formats into MoQ broadcasts.
-//! It supports various container and codec formats, optionally enabled via feature flags.
+//! Submodules expose codec-specific producers that take raw bitstreams (or container-wrapped
+//! streams) and publish them as hang-protocol tracks alongside a catalog.
 //!
-//! **Feature flags:**
-//! - `aac`: Raw AAC frames (not ADTS).
-//! - `opus`: Raw Opus frames (not Ogg).
-//! - `avc3`: H.264 with inline SPS/PPS.
-//! - `fmp4`: fMP4/CMAF container.
-//! - `hev1`: H.265 with inline SPS/PPS.
-//! - `hls`: HLS playlist.
+//! ## Choosing an entry point
 //!
-//! The [Decoder] module provides a generic interface for importing a stream of media.
-//! If you know the format in advance, use the specific decoder instead.
+//! - If you know the codec/container in advance, use the dedicated producer
+//!   ([`Aac`], [`Avc1`], [`Avc3`], [`Av01`], [`Hev1`], [`Opus`], [`Fmp4`], [`Hls`]).
+//! - If you only know the wrapping container, use [`Framed`] (frame boundaries known —
+//!   e.g. fMP4) or [`Stream`] (raw byte stream, no framing — e.g. piped Annex B H.264).
+//!
+//! Codec producers publish through [`catalog::Producer`](crate::catalog::Producer), which
+//! manages the hang and MSF catalog tracks; per-track encoding goes through
+//! [`Producer<C>`](crate::container::Producer), which dispatches to a
+//! [`Container`](crate::container::Container) implementation.
 
 mod aac;
-#[cfg(any(feature = "h264", feature = "h265"))]
 mod annexb;
-#[cfg(feature = "av1")]
 mod av01;
-#[cfg(feature = "h264")]
 mod avc1;
-#[cfg(feature = "h264")]
 mod avc3;
-mod decoder;
-#[cfg(feature = "mp4")]
 mod fmp4;
-#[cfg(feature = "h265")]
+mod framed;
 mod hev1;
-#[cfg(feature = "hls")]
 mod hls;
+mod jitter;
 mod opus;
-mod stats;
+mod stream;
 
 pub use aac::*;
-#[cfg(feature = "av1")]
 pub use av01::*;
-#[cfg(feature = "h264")]
 pub use avc1::*;
-#[cfg(feature = "h264")]
 pub use avc3::*;
-pub use decoder::*;
-#[cfg(feature = "mp4")]
 pub use fmp4::*;
-#[cfg(feature = "h265")]
+pub use framed::*;
 pub use hev1::*;
-#[cfg(feature = "hls")]
 pub use hls::*;
 pub use opus::*;
-pub use stats::*;
+pub use stream::*;
+
+#[cfg(test)]
+mod test;

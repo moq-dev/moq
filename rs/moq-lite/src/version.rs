@@ -19,6 +19,7 @@ pub const ALPNS: &[&str] = &[
 	ALPN_LITE_04,
 	ALPN_LITE_03,
 	ALPN_LITE,
+	ALPN_18,
 	ALPN_17,
 	ALPN_16,
 	ALPN_15,
@@ -33,6 +34,7 @@ pub(crate) const ALPN_14: &str = "moq-00";
 pub(crate) const ALPN_15: &str = "moqt-15";
 pub(crate) const ALPN_16: &str = "moqt-16";
 pub(crate) const ALPN_17: &str = "moqt-17";
+pub(crate) const ALPN_18: &str = "moqt-18";
 
 /// A MoQ protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,6 +56,7 @@ impl Version {
 			0xff00000f => Some(Self::Ietf(ietf::Version::Draft15)),
 			0xff000010 => Some(Self::Ietf(ietf::Version::Draft16)),
 			0xff000011 => Some(Self::Ietf(ietf::Version::Draft17)),
+			0xff000012 => Some(Self::Ietf(ietf::Version::Draft18)),
 			_ => None,
 		}
 	}
@@ -69,6 +72,7 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft15) => 0xff00000f,
 			Self::Ietf(ietf::Version::Draft16) => 0xff000010,
 			Self::Ietf(ietf::Version::Draft17) => 0xff000011,
+			Self::Ietf(ietf::Version::Draft18) => 0xff000012,
 		}
 	}
 
@@ -85,6 +89,7 @@ impl Version {
 			ALPN_15 => Some(Self::Ietf(ietf::Version::Draft15)),
 			ALPN_16 => Some(Self::Ietf(ietf::Version::Draft16)),
 			ALPN_17 => Some(Self::Ietf(ietf::Version::Draft17)),
+			ALPN_18 => Some(Self::Ietf(ietf::Version::Draft18)),
 			_ => None,
 		}
 	}
@@ -99,6 +104,7 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft15) => ALPN_15,
 			Self::Ietf(ietf::Version::Draft16) => ALPN_16,
 			Self::Ietf(ietf::Version::Draft17) => ALPN_17,
+			Self::Ietf(ietf::Version::Draft18) => ALPN_18,
 		}
 	}
 
@@ -150,6 +156,7 @@ impl FromStr for Version {
 			"moq-transport-15" => Ok(Self::Ietf(ietf::Version::Draft15)),
 			"moq-transport-16" => Ok(Self::Ietf(ietf::Version::Draft16)),
 			"moq-transport-17" => Ok(Self::Ietf(ietf::Version::Draft17)),
+			"moq-transport-18" => Ok(Self::Ietf(ietf::Version::Draft18)),
 			_ => Err(format!("unknown version: {s}")),
 		}
 	}
@@ -215,6 +222,7 @@ impl Versions {
 			Version::Lite(lite::Version::Lite03),
 			Version::Lite(lite::Version::Lite02),
 			Version::Lite(lite::Version::Lite01),
+			Version::Ietf(ietf::Version::Draft18),
 			Version::Ietf(ietf::Version::Draft17),
 			Version::Ietf(ietf::Version::Draft16),
 			Version::Ietf(ietf::Version::Draft15),

@@ -37,7 +37,7 @@ export class Subscribe {
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
 		if (version === Version.DRAFT_17) {
-			await w.u62(0n); // required_request_id_delta = 0
+			await w.u62(0n); // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 		await Namespace.encode(w, this.trackNamespace);
 		await w.string(this.trackName);
@@ -137,7 +137,7 @@ export class SubscribeOk {
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (version !== Version.DRAFT_17) {
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			if (this.requestId === undefined) throw new Error("requestId required for draft14-16");
 			await w.u62(this.requestId);
 		}
@@ -165,7 +165,10 @@ export class SubscribeOk {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeOk> {
-		const requestId = version === Version.DRAFT_17 ? undefined : await r.u62();
+		const requestId =
+			version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
+				? await r.u62()
+				: undefined;
 		const trackAlias = await r.u62();
 
 		if (version === Version.DRAFT_14) {
@@ -259,9 +262,11 @@ export class SubscribeUpdate {
 			const params = new Parameters();
 			await params.encode(w, version);
 		} else {
-			// v17: request_id, required_request_id_delta, params
+			// v17+: REQUEST_UPDATE
 			await w.u62(this.requestId);
-			await w.u62(0n); // required_request_id_delta
+			if (version === Version.DRAFT_17) {
+				await w.u62(0n); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
+			}
 			const params = new Parameters();
 			await params.encode(w, version);
 		}
@@ -292,9 +297,11 @@ export class SubscribeUpdate {
 			await Parameters.decode(r, version);
 			return new SubscribeUpdate({ requestId });
 		} else {
-			// v17
+			// v17+: REQUEST_UPDATE
 			const requestId = await r.u62();
-			await r.u62(); // required_request_id_delta
+			if (version === Version.DRAFT_17) {
+				await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
+			}
 			await Parameters.decode(r, version);
 			return new SubscribeUpdate({ requestId });
 		}

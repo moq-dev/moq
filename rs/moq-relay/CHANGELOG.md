@@ -64,6 +64,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.25...moq-relay-v0.11.0) - 2026-05-07
+
+### Fixed
+
+- *(config)* accept single string or array for TOML list fields ([#1377](https://github.com/moq-dev/moq/pull/1377))
+
+### Other
+
+- tighten public API surface and remove deprecated methods ([#1378](https://github.com/moq-dev/moq/pull/1378))
+- Revert moq-lite FETCH/Subscription API changes ([#1372](https://github.com/moq-dev/moq/pull/1372))
+- add fetch_group API + TrackDynamic ([#1357](https://github.com/moq-dev/moq/pull/1357))
+- authenticate HTTPS callers via the cluster mTLS CA ([#1350](https://github.com/moq-dev/moq/pull/1350))
+- relocate jemalloc helper; wire it into moq-boy ([#1360](https://github.com/moq-dev/moq/pull/1360))
+- backport Subscription model API for FETCH readiness ([#1348](https://github.com/moq-dev/moq/pull/1348))
+- add subdomain-based slug routing for customer isolation ([#1343](https://github.com/moq-dev/moq/pull/1343))
+- add OriginConsumer::wait_for_broadcast; deprecate consume_broadcast ([#1340](https://github.com/moq-dev/moq/pull/1340))
+- hop-based clustering ([#1322](https://github.com/moq-dev/moq/pull/1322))
+
 ## [0.10.25](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.24...moq-relay-v0.10.25) - 2026-04-20
 
 ### Other

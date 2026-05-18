@@ -3,6 +3,7 @@ import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
+import { base64ToBytes } from "../base64";
 import type { Muxer } from "../mse";
 import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
@@ -106,11 +107,10 @@ export class Mse implements Backend {
 	): void {
 		if (config.container.kind !== "cmaf") throw new Error("unreachable");
 
-		const timescale = config.container.timescale;
+		const initSegment = base64ToBytes(config.container.init);
+		const init = Container.Cmaf.decodeInitSegment(initSegment);
 
 		effect.spawn(async () => {
-			// Generate init segment from catalog config (uses track_id from container)
-			const initSegment = Container.Cmaf.createAudioInitSegment(config);
 			await this.#appendBuffer(sourceBuffer, initSegment);
 
 			for (;;) {
@@ -120,7 +120,7 @@ export class Mse implements Backend {
 				if (!frame) return;
 
 				// Extract the timestamp from the CMAF segment and mark when we received it.
-				const timestamp = Container.Cmaf.decodeTimestamp(frame, timescale);
+				const timestamp = Container.Cmaf.decodeTimestamp(frame, init);
 				this.source.sync.received(Moq.Time.Milli.fromMicro(timestamp), "audio");
 
 				await this.#appendBuffer(sourceBuffer, frame);

@@ -1,17 +1,17 @@
 import type { Time } from "@moq/lite";
 import type { Format as ContainerFormat } from "../format";
 import type { Frame } from "../types";
-import { decodeDataSegment } from "./decode";
+import { decodeDataSegment, type InitSegment } from "./decode";
 
 export class Format implements ContainerFormat {
-	#timescale: number;
+	#init: InitSegment;
 
-	constructor(timescale: number) {
-		this.#timescale = timescale;
+	constructor(init: InitSegment) {
+		this.#init = init;
 	}
 
 	decode(frame: Uint8Array): Frame[] {
-		return decodeDataSegment(frame, this.#timescale).map((s) => ({
+		return decodeDataSegment(frame, this.#init).map((s) => ({
 			data: s.data,
 			timestamp: s.timestamp as Time.Micro,
 			keyframe: s.keyframe,

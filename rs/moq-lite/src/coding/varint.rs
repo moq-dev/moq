@@ -238,7 +238,7 @@ impl VarInt {
 		Ok(())
 	}
 
-	/// Decode a leading-1-bits varint (draft-17 Section 1.4.1).
+	/// Decode a leading-1-bits varint (draft-17+ Section 1.4.1).
 	///
 	/// The number of leading 1-bits determines the byte length:
 	/// - `0xxxxxxx` → 1 byte, 7 usable bits
@@ -247,9 +247,10 @@ impl VarInt {
 	/// - `1110xxxx` → 4 bytes, 28 usable bits
 	/// - `11110xxx` → 5 bytes, 35 usable bits
 	/// - `111110xx` → 6 bytes, 42 usable bits
-	/// - `11111110` → 8 bytes, 56 usable bits (skips 7)
+	/// - `1111110x` → 7 bytes, 49 usable bits (draft-18+, INVALID in draft-17 per #1595)
+	/// - `11111110` → 8 bytes, 56 usable bits
 	/// - `11111111` → 9 bytes, 64 usable bits
-	fn decode_leading_ones<R: bytes::Buf>(r: &mut R) -> Result<Self, DecodeError> {
+	fn decode_leading_ones<R: bytes::Buf>(r: &mut R, version: ietf::Version) -> Result<Self, DecodeError> {
 		if !r.has_remaining() {
 			return Err(DecodeError::Short);
 		}
@@ -319,8 +320,17 @@ impl VarInt {
 				Ok(Self((hi << 40) | lo))
 			}
 			6 => {
-				// 1111110x — INVALID per draft-17
-				Err(DecodeError::InvalidValue)?
+				// 1111110x + 6 bytes, 49 bits (draft-18+, INVALID in draft-17 per #1595)
+				if matches!(version, ietf::Version::Draft17) {
+					return Err(DecodeError::InvalidValue);
+				}
+				if r.remaining() < 6 {
+					return Err(DecodeError::Short);
+				}
+				let hi = u64::from(b & 0x01);
+				let mut buf = [0u8; 8];
+				r.copy_to_slice(&mut buf[2..]);
+				Ok(Self((hi << 48) | u64::from_be_bytes(buf)))
 			}
 			7 => {
 				// 11111110 + 7 bytes — 56 bits
@@ -345,8 +355,12 @@ impl VarInt {
 		}
 	}
 
-	/// Encode a leading-1-bits varint (draft-17 Section 1.4.1).
-	fn encode_leading_ones<W: bytes::BufMut>(&self, w: &mut W) -> Result<(), EncodeError> {
+	/// Encode a leading-1-bits varint (draft-17+ Section 1.4.1).
+	///
+	/// Always emits the minimal canonical form. Draft-18 also accepts 7-byte form
+	/// (`1111110x`) on decode but we never emit it because the 8-byte form is one byte
+	/// larger but simpler and is universally valid.
+	fn encode_leading_ones<W: bytes::BufMut>(&self, w: &mut W, _version: ietf::Version) -> Result<(), EncodeError> {
 		let x = self.0;
 		let remaining = w.remaining_mut();
 
@@ -431,12 +445,12 @@ impl Decode<lite::Version> for VarInt {
 	}
 }
 
-// IETF versions use QUIC-style except Draft17 which uses leading-ones.
+// Draft14-16 use QUIC-style varints; draft-17+ uses leading-ones.
 impl Encode<ietf::Version> for VarInt {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: ietf::Version) -> Result<(), EncodeError> {
 		match version {
 			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => self.encode_quic(w),
-			ietf::Version::Draft17 => self.encode_leading_ones(w),
+			_ => self.encode_leading_ones(w, version),
 		}
 	}
 }
@@ -445,7 +459,7 @@ impl Decode<ietf::Version> for VarInt {
 	fn decode<R: bytes::Buf>(r: &mut R, version: ietf::Version) -> Result<Self, DecodeError> {
 		match version {
 			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => Self::decode_quic(r),
-			ietf::Version::Draft17 => Self::decode_leading_ones(r),
+			_ => Self::decode_leading_ones(r, version),
 		}
 	}
 }
@@ -529,6 +543,7 @@ where
 #[cfg(test)]
 mod tests {
 	use super::{DecodeError, VarInt};
+	use crate::ietf;
 	use bytes::Bytes;
 
 	/// Test vectors from the draft-17 spec (Table 2: Example Integer Encodings),
@@ -555,7 +570,7 @@ mod tests {
 		for (bytes, expected) in cases {
 			// Test decoding
 			let mut buf = Bytes::from(bytes.to_vec());
-			let decoded = VarInt::decode_leading_ones(&mut buf).expect("decode should succeed");
+			let decoded = VarInt::decode_leading_ones(&mut buf, ietf::Version::Draft17).expect("decode should succeed");
 			assert_eq!(
 				decoded.into_inner(),
 				*expected,
@@ -570,19 +585,24 @@ mod tests {
 				&& (bytes.len() == 1 || *expected != 37)
 			{
 				let mut encoded = Vec::new();
-				varint.encode_leading_ones(&mut encoded).expect("encode should succeed");
+				varint
+					.encode_leading_ones(&mut encoded, ietf::Version::Draft17)
+					.expect("encode should succeed");
 				assert_eq!(&encoded, bytes, "encode mismatch for value {expected}");
 			}
 		}
 	}
 
-	/// 11111100 (0xFC) is an invalid code point per the spec.
+	/// 11111100 (0xFC) is an invalid code point on draft-17 (allowed as 7-byte form on draft-18+).
 	#[test]
 	fn leading_ones_invalid_0xfc() {
 		let mut buf = Bytes::from_static(&[0xFC]);
 		assert!(
-			matches!(VarInt::decode_leading_ones(&mut buf), Err(DecodeError::InvalidValue)),
-			"0xFC should be rejected as invalid"
+			matches!(
+				VarInt::decode_leading_ones(&mut buf, ietf::Version::Draft17),
+				Err(DecodeError::InvalidValue)
+			),
+			"0xFC should be rejected as invalid on draft-17"
 		);
 	}
 
@@ -601,7 +621,7 @@ mod tests {
 			let varint = VarInt::from_u64(value).expect("value should be representable as VarInt");
 			let mut encoded = Vec::new();
 			varint
-				.encode_leading_ones(&mut encoded)
+				.encode_leading_ones(&mut encoded, ietf::Version::Draft17)
 				.expect("leading-ones encode should succeed");
 			assert_eq!(
 				encoded.len(),
@@ -610,8 +630,35 @@ mod tests {
 			);
 
 			let mut bytes = Bytes::from(encoded);
-			let decoded = VarInt::decode_leading_ones(&mut bytes).expect("leading-ones decode should succeed");
+			let decoded = VarInt::decode_leading_ones(&mut bytes, ietf::Version::Draft17)
+				.expect("leading-ones decode should succeed");
 			assert_eq!(decoded.into_inner(), value, "round-trip mismatch for value {value}");
 		}
+	}
+
+	#[test]
+	fn draft17_rejects_7_byte_varint() {
+		// 1111110x prefix: invalid on draft-17.
+		let bytes = Bytes::from(vec![0xFC, 0, 0, 0, 0, 0, 0]);
+		let mut buf = bytes.clone();
+		let err = VarInt::decode_leading_ones(&mut buf, ietf::Version::Draft17).unwrap_err();
+		assert!(matches!(err, DecodeError::InvalidValue));
+	}
+
+	#[test]
+	fn draft18_accepts_7_byte_varint() {
+		// Value 0x1234_5678_9ABC encoded as 7-byte leading-ones (1111110x | hi, +6 bytes).
+		let value: u64 = 0x1234_5678_9ABC;
+		let mut bytes = Vec::new();
+		// Prefix byte: 1111110_0 + (value >> 48) bit. Top 1 bit of 49 = bit 48.
+		// value fits in 49 bits, so the 0x01 LSB of prefix encodes bit 48 of value.
+		let hi_bit = ((value >> 48) & 0x01) as u8;
+		bytes.push(0xFC | hi_bit);
+		for shift in (0..48).step_by(8).rev() {
+			bytes.push(((value >> shift) & 0xFF) as u8);
+		}
+		let mut buf = Bytes::from(bytes);
+		let decoded = VarInt::decode_leading_ones(&mut buf, ietf::Version::Draft18).unwrap();
+		assert_eq!(decoded.into_inner(), value);
 	}
 }

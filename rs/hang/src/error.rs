@@ -51,7 +51,7 @@ pub enum Error {
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
 
-	/// A track with this name already exists.
+	/// A track with this name already exists in the catalog.
 	#[error("duplicate track: {0}")]
 	Duplicate(String),
 }
