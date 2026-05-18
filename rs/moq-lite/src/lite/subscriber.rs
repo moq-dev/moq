@@ -154,9 +154,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let path = prefix.join(&suffix);
 					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 
-					// Abort the producer.
-					let mut producer = producers.remove(&path).ok_or(Error::NotFound)?;
-					producer.abort(Error::Cancel).ok();
+					// The matching Active may have been silently dropped by
+					// start_announce as a reflected loop, in which case
+					// `producers` has no entry; that's expected, not an error.
+					if let Some(mut producer) = producers.remove(&path) {
+						producer.abort(Error::Cancel).ok();
+					}
 				}
 			}
 		}
