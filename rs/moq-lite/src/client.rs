@@ -1,6 +1,6 @@
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, Error, NEGOTIATED, OriginConsumer,
-	OriginProducer, Session, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, Error, NEGOTIATED,
+	OriginConsumer, OriginProducer, Session, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -50,13 +50,33 @@ impl Client {
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
+			Some(ALPN_18) => {
+				let v = self
+					.versions
+					.select(Version::Ietf(ietf::Version::Draft18))
+					.ok_or(Error::Version)?;
+
+				// Draft-17+: SETUP is exchanged in the background by the session.
+				ietf::start(
+					session.clone(),
+					None,
+					None,
+					true,
+					self.publish.clone(),
+					self.consume.clone(),
+					ietf::Version::Draft18,
+				)?;
+
+				tracing::debug!(version = ?v, "connected");
+				return Ok(Session::new(session, v, None));
+			}
 			Some(ALPN_17) => {
 				let v = self
 					.versions
 					.select(Version::Ietf(ietf::Version::Draft17))
 					.ok_or(Error::Version)?;
 
-				// Draft-17: SETUP is exchanged in the background by the session.
+				// Draft-17+: SETUP is exchanged in the background by the session.
 				ietf::start(
 					session.clone(),
 					None,

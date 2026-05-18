@@ -44,7 +44,7 @@ impl Message for TrackStatus<'_> {
 				FilterType::LargestObject.encode(w, version)?; // filter type
 				0u8.encode(w, version)?; // no parameters
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				encode_params!(w, version,);
 			}
 		}
@@ -67,7 +67,7 @@ impl Message for TrackStatus<'_> {
 				let _filter_type = u64::decode(r, version)?;
 				let _params = Parameters::decode(r, version)?;
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				decode_params!(r, version,);
 			}
 		}

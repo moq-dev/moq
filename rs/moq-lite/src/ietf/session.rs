@@ -64,7 +64,7 @@ pub fn start<S: web_transport_trait::Session>(
 				web_async::spawn({
 					let session = session.clone();
 					async move {
-						if let Err(err) = run_setup(session).await {
+						if let Err(err) = run_setup(session, version).await {
 							tracing::warn!(%err, "setup send error");
 						}
 					}
@@ -115,8 +115,7 @@ pub fn start<S: web_transport_trait::Session>(
 }
 
 /// Send our SETUP on a uni stream and keep it alive for potential GOAWAY.
-async fn run_setup<S: web_transport_trait::Session>(session: S) -> Result<(), Error> {
-	let version = Version::Draft17;
+async fn run_setup<S: web_transport_trait::Session>(session: S, version: Version) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
 	let send = session.open_uni().await.map_err(Error::from_transport)?;
@@ -163,7 +162,7 @@ async fn run_unis<S: web_transport_trait::Session>(
 				}
 
 				// Monitor for GOAWAY after setup completes.
-				if let Err(err) = run_goaway(reader.with_version(version)).await {
+				if let Err(err) = run_goaway(reader.with_version(version), version).await {
 					tracing::warn!(%err, "goaway error");
 				}
 			});
@@ -230,7 +229,10 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 }
 
 /// Block until GOAWAY or stream close.
-async fn run_goaway<R: web_transport_trait::RecvStream>(mut reader: Reader<R, Version>) -> Result<(), Error> {
+async fn run_goaway<R: web_transport_trait::RecvStream>(
+	mut reader: Reader<R, Version>,
+	version: Version,
+) -> Result<(), Error> {
 	let id: u64 = match reader.decode_maybe().await? {
 		Some(id) => id,
 		None => return Ok(()),
@@ -240,7 +242,7 @@ async fn run_goaway<R: web_transport_trait::RecvStream>(mut reader: Reader<R, Ve
 	let mut data = reader.read_exact(size as usize).await?;
 
 	if id == ietf::GoAway::ID {
-		let msg = ietf::GoAway::decode_msg(&mut data, Version::Draft17)?;
+		let msg = ietf::GoAway::decode_msg(&mut data, version)?;
 		tracing::debug!(message = ?msg, "received GOAWAY");
 		Err(Error::Unsupported)
 	} else {

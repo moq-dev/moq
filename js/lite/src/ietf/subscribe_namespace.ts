@@ -31,10 +31,10 @@ export class SubscribeNamespace {
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
 		if (version === Version.DRAFT_17) {
-			await w.u62(0n); // required_request_id_delta = 0
+			await w.u62(0n); // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 		await Namespace.encode(w, this.namespace);
-		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
+		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15) {
 			await w.u53(this.subscribeOptions);
 		}
 		await new Parameters().encode(w, version);
@@ -51,11 +51,11 @@ export class SubscribeNamespace {
 	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespace> {
 		const requestId = await r.u62();
 		if (version === Version.DRAFT_17) {
-			await r.u62(); // required_request_id_delta
+			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
 		const namespace = await Namespace.decode(r);
 		let subscribeOptions = 1;
-		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
+		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15) {
 			subscribeOptions = await r.u53();
 		}
 		await Parameters.decode(r, version);
@@ -63,6 +63,14 @@ export class SubscribeNamespace {
 		return new SubscribeNamespace({ namespace, requestId, subscribeOptions });
 	}
 }
+
+/// SUBSCRIBE_TRACKS message ID (0x51) introduced in draft-18 (#1542).
+///
+/// moq-lite does not implement PUBLISH replication through a CDN, which is the
+/// only thing SUBSCRIBE_TRACKS enables. We never send it and reject it loudly
+/// on receipt rather than silently ignoring, since the peer would otherwise
+/// wait forever for a REQUEST_OK.
+export const SUBSCRIBE_TRACKS_ID = 0x51;
 
 export class SubscribeNamespaceOk {
 	static id = 0x12;

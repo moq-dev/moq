@@ -132,12 +132,12 @@ impl Message for PublishDone<'_> {
 	const ID: u64 = 0x0b;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if version != Version::Draft17 {
+		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.request_id
 				.expect("request_id required for draft14-16")
 				.encode(w, version)?;
 		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17");
+			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
 		self.status_code.encode(w, version)?;
 		self.stream_count.encode(w, version)?;
@@ -146,10 +146,10 @@ impl Message for PublishDone<'_> {
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = if version == Version::Draft17 {
-			None
-		} else {
+		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			Some(RequestId::decode(r, version)?)
+		} else {
+			None
 		};
 		let status_code = u64::decode(r, version)?;
 		let stream_count = u64::decode(r, version)?;
@@ -202,7 +202,7 @@ impl Message for Publish<'_> {
 				// parameters
 				0u8.encode(w, version)?;
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				encode_params!(w, version,
 					0x09 => self.largest_location,
 					0x10 => self.forward,
@@ -245,7 +245,7 @@ impl Message for Publish<'_> {
 					forward,
 				})
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				decode_params!(r, version,
 					0x09 => largest_location: Option<Location>,
 					0x10 => forward: Option<bool>,
@@ -284,12 +284,12 @@ impl Message for PublishOk {
 	const ID: u64 = 0x1E;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if version != Version::Draft17 {
+		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.request_id
 				.expect("request_id required for draft14-16")
 				.encode(w, version)?;
 		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17");
+			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
 
 		match version {
@@ -305,7 +305,7 @@ impl Message for PublishOk {
 				// no parameters
 				0u8.encode(w, version)?;
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				encode_params!(w, version,
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
@@ -319,10 +319,10 @@ impl Message for PublishOk {
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = if version == Version::Draft17 {
-			None
-		} else {
+		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			Some(RequestId::decode(r, version)?)
+		} else {
+			None
 		};
 
 		match version {
@@ -353,7 +353,7 @@ impl Message for PublishOk {
 					filter_type,
 				})
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				decode_params!(r, version,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,

@@ -133,8 +133,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.writer
 			.encode(&ietf::SubscribeOk {
 				request_id: match self.version {
-					Version::Draft17 => None,
-					_ => Some(request_id),
+					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(request_id),
+					_ => None,
 				},
 				track_alias: request_id.0,
 			})
@@ -157,8 +157,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.writer
 			.encode(&ietf::PublishDone {
 				request_id: match self.version {
-					Version::Draft17 => None,
-					_ => Some(request_id),
+					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(request_id),
+					_ => None,
 				},
 				status_code,
 				stream_count: 0,
@@ -201,7 +201,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					})
 					.await?;
 			}
-			Version::Draft17 => {
+			_ => {
 				writer.encode(&ietf::RequestError::ID).await?;
 				writer
 					.encode(&ietf::RequestError {
@@ -384,7 +384,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					})
 					.await?;
 			}
-			Version::Draft17 => {
+			_ => {
 				writer.encode(&ietf::RequestOk::ID).await?;
 				writer.encode(&ietf::RequestOk { request_id: None }).await?;
 			}
@@ -421,7 +421,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					})
 					.await?;
 			}
-			Version::Draft17 => {
+			_ => {
 				writer.encode(&ietf::RequestError::ID).await?;
 				writer
 					.encode(&ietf::RequestError {
@@ -500,7 +500,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			} else {
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounce");
 				if let Some((request_id, mut stream)) = namespace_streams.remove(&suffix) {
-					// For v14-16, send PublishNamespaceDone. For v17, just close the stream.
+					// v14-16 sends PublishNamespaceDone; v17+ just closes the stream.
 					match self.version {
 						Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 							let _ = stream
@@ -511,7 +511,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								})
 								.await;
 						}
-						Version::Draft17 => {}
+						_ => {}
 					}
 					stream.writer.finish().ok();
 				}
@@ -530,7 +530,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						})
 						.await;
 				}
-				Version::Draft17 => {}
+				_ => {}
 			}
 			stream.writer.finish().ok();
 		}
@@ -570,7 +570,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					})
 					.await?;
 			}
-			Version::Draft17 => {
+			_ => {
 				stream.writer.encode(&ietf::RequestOk::ID).await?;
 				stream.writer.encode(&ietf::RequestOk { request_id: None }).await?;
 			}

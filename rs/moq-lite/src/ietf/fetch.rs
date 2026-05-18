@@ -119,7 +119,7 @@ impl Message for Fetch<'_> {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		if version == Version::Draft17 {
-			0u64.encode(w, version)?; // required_request_id_delta = 0
+			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 
 		match version {
@@ -129,7 +129,7 @@ impl Message for Fetch<'_> {
 				self.fetch_type.encode(w, version)?;
 				0u8.encode(w, version)?; // no parameters
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				self.fetch_type.encode(w, version)?;
 				encode_params!(w, version,
 					0x20 => self.subscriber_priority,
@@ -159,7 +159,7 @@ impl Message for Fetch<'_> {
 					fetch_type,
 				})
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				let fetch_type = FetchType::decode(buf, version)?;
 				decode_params!(buf, version,
 					0x20 => subscriber_priority: Option<u8>,
@@ -191,12 +191,12 @@ impl Message for FetchOk {
 	const ID: u64 = 0x18;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if version != Version::Draft17 {
+		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.request_id
 				.expect("request_id required for draft14-16")
 				.encode(w, version)?;
 		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17");
+			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
 
 		match version {
@@ -206,7 +206,7 @@ impl Message for FetchOk {
 				self.end_location.encode(w, version)?;
 				0u8.encode(w, version)?; // no parameters
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				self.end_of_track.encode(w, version)?;
 				self.end_location.encode(w, version)?;
 				encode_params!(w, version,
@@ -218,10 +218,10 @@ impl Message for FetchOk {
 	}
 
 	fn decode_msg<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
-		let request_id = if version == Version::Draft17 {
-			None
-		} else {
+		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			Some(RequestId::decode(buf, version)?)
+		} else {
+			None
 		};
 
 		match version {
@@ -237,7 +237,7 @@ impl Message for FetchOk {
 					end_location,
 				})
 			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			_ => {
 				let end_of_track = bool::decode(buf, version)?;
 				let end_location = Location::decode(buf, version)?;
 				decode_params!(buf, version,

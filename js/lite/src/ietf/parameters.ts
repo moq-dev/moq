@@ -72,9 +72,9 @@ export class SetupOptions {
 	}
 
 	async encode(w: Writer, version: IetfVersion) {
-		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
-			// d17: no count prefix; d16: count prefix
-			if (version !== Version.DRAFT_17) {
+		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15) {
+			// d17+: no count prefix; d16: count prefix
+			if (version === Version.DRAFT_16) {
 				await w.u53(this.vars.size + this.bytes.size);
 			}
 
@@ -120,8 +120,8 @@ export class SetupOptions {
 	static async decode(r: Reader, version: IetfVersion): Promise<SetupOptions> {
 		const params = new SetupOptions();
 
-		if (version === Version.DRAFT_17) {
-			// d17: no count prefix, read until reader is done
+		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
+			// d17+: no count prefix, read until reader is done
 			let prevType = 0n;
 			let i = 0;
 			while (!(await r.done())) {

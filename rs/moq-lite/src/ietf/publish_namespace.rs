@@ -23,7 +23,7 @@ impl Message for PublishNamespace<'_> {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		if version == Version::Draft17 {
-			0u64.encode(w, version)?; // required_request_id_delta = 0
+			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 		encode_namespace(w, &self.track_namespace, version)?;
 		encode_params!(w, version,);
@@ -119,7 +119,7 @@ impl Message for PublishNamespaceDone<'_> {
 			Version::Draft16 => {
 				self.request_id.encode(w, version)?;
 			}
-			Version::Draft17 => return Err(EncodeError::Version),
+			_ => return Err(EncodeError::Version),
 		}
 		Ok(())
 	}
@@ -140,7 +140,7 @@ impl Message for PublishNamespaceDone<'_> {
 					request_id,
 				})
 			}
-			Version::Draft17 => Err(DecodeError::Version),
+			_ => Err(DecodeError::Version),
 		}
 	}
 }
@@ -168,7 +168,7 @@ impl Message for PublishNamespaceCancel<'_> {
 			Version::Draft16 => {
 				self.request_id.encode(w, version)?;
 			}
-			Version::Draft17 => {
+			_ => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -187,7 +187,7 @@ impl Message for PublishNamespaceCancel<'_> {
 				let request_id = RequestId::decode(r, version)?;
 				(Path::default(), request_id)
 			}
-			Version::Draft17 => {
+			_ => {
 				return Err(DecodeError::Version);
 			}
 		};

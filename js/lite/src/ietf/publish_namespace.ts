@@ -138,8 +138,8 @@ export class PublishNamespaceCancel {
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (version === Version.DRAFT_17) {
-			throw new Error("PublishNamespaceCancel removed in draft-17");
+		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
+			throw new Error("PublishNamespaceCancel removed in draft-17+");
 		}
 		if (version === Version.DRAFT_16) {
 			await w.u62(this.requestId);
@@ -159,8 +159,8 @@ export class PublishNamespaceCancel {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceCancel> {
-		if (version === Version.DRAFT_17) {
-			throw new Error("PublishNamespaceCancel removed in draft-17");
+		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
+			throw new Error("PublishNamespaceCancel removed in draft-17+");
 		}
 		let trackNamespace = "" as Path.Valid;
 		let requestId = 0n;
@@ -196,8 +196,8 @@ export class PublishNamespaceDone {
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (version === Version.DRAFT_17) {
-			throw new Error("PublishNamespaceDone removed in draft-17");
+		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
+			throw new Error("PublishNamespaceDone removed in draft-17+");
 		}
 		if (version === Version.DRAFT_16) {
 			await w.u62(this.requestId);
@@ -215,8 +215,8 @@ export class PublishNamespaceDone {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceDone> {
-		if (version === Version.DRAFT_17) {
-			throw new Error("PublishNamespaceDone removed in draft-17");
+		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
+			throw new Error("PublishNamespaceDone removed in draft-17+");
 		}
 		if (version === Version.DRAFT_16) {
 			const requestId = await r.u62();

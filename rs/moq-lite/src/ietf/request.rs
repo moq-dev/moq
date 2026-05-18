@@ -129,15 +129,15 @@ impl Message for RequestError<'_> {
 	const ID: u64 = 0x05;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if version != Version::Draft17 {
+		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.request_id
 				.expect("request_id required for draft14-16")
 				.encode(w, version)?;
 		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17");
+			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
 		self.error_code.encode(w, version)?;
-		if version == Version::Draft16 || version == Version::Draft17 {
+		if !matches!(version, Version::Draft14 | Version::Draft15) {
 			self.retry_interval.encode(w, version)?;
 		}
 		self.reason_phrase.encode(w, version)?;
@@ -145,15 +145,15 @@ impl Message for RequestError<'_> {
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = if version == Version::Draft17 {
-			None
-		} else {
+		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			Some(RequestId::decode(r, version)?)
+		} else {
+			None
 		};
 		let error_code = u64::decode(r, version)?;
 		let retry_interval = match version {
-			Version::Draft16 | Version::Draft17 => u64::decode(r, version)?,
 			Version::Draft14 | Version::Draft15 => 0,
+			_ => u64::decode(r, version)?,
 		};
 		let reason_phrase = Cow::<str>::decode(r, version)?;
 		Ok(Self {

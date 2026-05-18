@@ -47,8 +47,8 @@ impl Decode<Version> for Parameters {
 		let mut bytes = HashMap::new();
 
 		match version {
-			Version::Draft17 => {
-				// Draft17: no count prefix, read Key-Value-Pairs until buffer empty.
+			Version::Draft17 | Version::Draft18 => {
+				// Draft17+: no count prefix, read Key-Value-Pairs until buffer empty.
 				// Delta-encoded types, even = varint value, odd = length-prefixed bytes.
 				let mut prev_type: u64 = 0;
 				let mut i = 0u64;
@@ -106,7 +106,7 @@ impl Decode<Version> for Parameters {
 							abs
 						}
 						Version::Draft14 | Version::Draft15 => u64::decode(r, version)?,
-						Version::Draft17 => unreachable!("handled above"),
+						_ => unreachable!("handled above"),
 					};
 
 					if kind % 2 == 0 {
@@ -142,10 +142,26 @@ impl Encode<Version> for Parameters {
 		}
 
 		match version {
-			Version::Draft16 | Version::Draft17 => {
+			Version::Draft14 | Version::Draft15 => {
+				count.encode(w, version)?;
+
+				for (kind, value) in self.vars.iter() {
+					u64::from(*kind).encode(w, version)?;
+					value.encode(w, version)?;
+				}
+
+				for (kind, value) in self.bytes.iter() {
+					if value.len() > MAX_KVP_VALUE_LEN {
+						return Err(EncodeError::BoundsExceeded);
+					}
+					u64::from(*kind).encode(w, version)?;
+					value.encode(w, version)?;
+				}
+			}
+			_ => {
 				// Draft16: count prefix + delta encoding
-				// Draft17: NO count prefix + delta encoding
-				if version != Version::Draft17 {
+				// Draft17+: NO count prefix + delta encoding
+				if matches!(version, Version::Draft16) {
 					count.encode(w, version)?;
 				}
 
@@ -178,22 +194,6 @@ impl Encode<Version> for Parameters {
 							v.encode(w, version)?;
 						}
 					}
-				}
-			}
-			Version::Draft14 | Version::Draft15 => {
-				count.encode(w, version)?;
-
-				for (kind, value) in self.vars.iter() {
-					u64::from(*kind).encode(w, version)?;
-					value.encode(w, version)?;
-				}
-
-				for (kind, value) in self.bytes.iter() {
-					if value.len() > MAX_KVP_VALUE_LEN {
-						return Err(EncodeError::BoundsExceeded);
-					}
-					u64::from(*kind).encode(w, version)?;
-					value.encode(w, version)?;
 				}
 			}
 		}

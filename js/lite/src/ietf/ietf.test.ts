@@ -532,10 +532,28 @@ test("Leading-ones varint: boundary round-trips", () => {
 	}
 });
 
-test("Leading-ones varint: invalid 0xFC prefix rejected", () => {
+test("Leading-ones varint: 0xFC is a 7-byte form on draft-18+ (per #1595)", () => {
+	// Standalone decoder is permissive; draft-17 enforcement is in Reader#readLeadingOnes.
+	// Only check that it doesn't reject the prefix as "reserved" — it now needs more bytes.
 	expect(() => {
 		Varint.decodeLeadingOnes(new Uint8Array([0xfc]));
-	}).toThrow(/reserved/);
+	}).toThrow(/buffer too short/);
+});
+
+test("Leading-ones varint: 7-byte form round-trips on draft-18", () => {
+	// Encode 7 bytes manually: 1111110_0 (prefix bit 48 = 0) + 6 bytes payload
+	const value = 0x12_3456_789a_bcn;
+	const bytes = new Uint8Array(7);
+	bytes[0] = 0xfc; // 1111110_0
+	bytes[1] = 0x12;
+	bytes[2] = 0x34;
+	bytes[3] = 0x56;
+	bytes[4] = 0x78;
+	bytes[5] = 0x9a;
+	bytes[6] = 0xbc;
+	const [decoded, remain] = Varint.decodeLeadingOnes(bytes);
+	expect(decoded).toBe(value);
+	expect(remain.length).toBe(0);
 });
 
 // --- Draft-17 message tests ---
@@ -833,4 +851,48 @@ test("Namespace: PublishNamespace with empty namespace round trip", async () => 
 	const decoded = await decodeVersioned(encoded, Announce.PublishNamespace.decode, Version.DRAFT_17);
 
 	expect(decoded.trackNamespace).toBe("" as Path.Valid);
+});
+
+// --- Draft-18 message tests ---
+
+test("Subscribe v18: round trip (same wire as v17 minus required_request_id_delta)", async () => {
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.from("test"),
+		trackName: "video",
+		subscriberPriority: 128,
+	});
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, Version.DRAFT_18);
+
+	expect(decoded.requestId).toBe(1n);
+	expect(decoded.trackNamespace).toBe("test" as Path.Valid);
+	expect(decoded.trackName).toBe("video");
+	expect(decoded.subscriberPriority).toBe(128);
+});
+
+test("SubscribeOk v18: no requestId", async () => {
+	const msg = new Subscribe.SubscribeOk({ trackAlias: 42n });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeOk.decode, Version.DRAFT_18);
+
+	expect(decoded.requestId).toBe(undefined);
+	expect(decoded.trackAlias).toBe(42n);
+});
+
+test("SubscribeUpdate v18: 1 byte shorter than v17 (no required_request_id_delta)", async () => {
+	const msg = new Subscribe.SubscribeUpdate({ requestId: 10n });
+	const v17 = await encodeVersioned(msg, Version.DRAFT_17);
+	const v18 = await encodeVersioned(msg, Version.DRAFT_18);
+	expect(v17.length).toBe(v18.length + 1);
+});
+
+test("PublishNamespace v18: round trip without required_request_id_delta", async () => {
+	const msg = new Announce.PublishNamespace({ requestId: 5n, trackNamespace: Path.from("v18/broadcast") });
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, Announce.PublishNamespace.decode, Version.DRAFT_18);
+	expect(decoded.requestId).toBe(5n);
+	expect(decoded.trackNamespace).toBe("v18/broadcast" as Path.Valid);
 });

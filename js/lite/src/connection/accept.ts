@@ -20,8 +20,10 @@ export async function accept(transport: WebTransport, url: URL, props?: AcceptPr
 	// @ts-expect-error - TODO: add protocol to WebTransport
 	const protocol: string | undefined = transport.protocol;
 
-	if (protocol === Ietf.ALPN.DRAFT_17) {
-		return acceptDraft17(transport, url);
+	if (protocol === Ietf.ALPN.DRAFT_18) {
+		return acceptModern(transport, url, Ietf.Version.DRAFT_18);
+	} else if (protocol === Ietf.ALPN.DRAFT_17) {
+		return acceptModern(transport, url, Ietf.Version.DRAFT_17);
 	} else if (protocol === Ietf.ALPN.DRAFT_16) {
 		return acceptAlpnVersion(transport, url, Ietf.Version.DRAFT_16);
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
@@ -37,7 +39,11 @@ export async function accept(transport: WebTransport, url: URL, props?: AcceptPr
 	}
 }
 
-async function acceptDraft17(transport: WebTransport, url: URL): Promise<Established> {
+/**
+ * Draft-17+ accept: SETUP is exchanged over a pair of uni streams using
+ * stream type 0x2F00. The same wire format applies for draft-17 and draft-18.
+ */
+async function acceptModern(transport: WebTransport, url: URL, version: Ietf.IetfVersion): Promise<Established> {
 	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
@@ -60,8 +66,8 @@ async function acceptDraft17(transport: WebTransport, url: URL): Promise<Establi
 
 	// Create control stream from the uni pair (this locks readable/writable once)
 	const controlStream = new Stream({ writable: sendWritable, readable: recvReadable });
-	controlStream.writer.version = Ietf.Version.DRAFT_17;
-	controlStream.reader.version = Ietf.Version.DRAFT_17;
+	controlStream.writer.version = version;
+	controlStream.reader.version = version;
 
 	// Send and receive SETUP concurrently using the control stream's reader/writer
 	await Promise.all([
@@ -70,11 +76,11 @@ async function acceptDraft17(transport: WebTransport, url: URL): Promise<Establi
 			if (streamType !== Ietf.Setup.id) {
 				throw new Error(`unexpected stream type on setup uni: 0x${streamType.toString(16)}`);
 			}
-			await Ietf.Setup.decode(controlStream.reader, Ietf.Version.DRAFT_17);
+			await Ietf.Setup.decode(controlStream.reader, version);
 		})(),
 		(async () => {
 			await controlStream.writer.u53(Ietf.Setup.id);
-			await setupMsg.encode(controlStream.writer, Ietf.Version.DRAFT_17);
+			await setupMsg.encode(controlStream.writer, version);
 		})(),
 	]);
 
@@ -82,9 +88,9 @@ async function acceptDraft17(transport: WebTransport, url: URL): Promise<Establi
 		url,
 		quic: transport,
 		control: controlStream,
-		// v17 uses NativeSession which manages its own request IDs; maxRequestId is unused.
+		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
-		version: Ietf.Version.DRAFT_17,
+		version,
 	});
 }
 

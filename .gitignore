@@ -45,3 +45,6 @@ pnpm-lock.yaml
 __pycache__/
 *.pyc
 .venv/
+
+# IETF spec drafts (downloaded for reference, not part of the repo)
+/spec/

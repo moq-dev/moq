@@ -9,6 +9,15 @@ use super::namespace::{decode_namespace, encode_namespace};
 
 use super::Version;
 
+/// SUBSCRIBE_TRACKS message ID (0x51) introduced in draft-18 (#1542).
+///
+/// moq-lite does not implement PUBLISH replication through a CDN, which is the
+/// only thing that SUBSCRIBE_TRACKS enables (subscribing to all tracks under a
+/// prefix). If a peer sends this we fail the session loudly rather than
+/// silently ignoring it, since ignoring would leave the peer waiting forever
+/// for a REQUEST_OK.
+pub const SUBSCRIBE_TRACKS_ID: u64 = 0x51;
+
 /// SubscribeNamespace message (0x11)
 /// In v16, this moves from the control stream to its own bidirectional stream.
 #[derive(Clone, Debug)]
@@ -25,10 +34,10 @@ impl Message for SubscribeNamespace<'_> {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		if version == Version::Draft17 {
-			0u64.encode(w, version)?; // required_request_id_delta = 0
+			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 		encode_namespace(w, &self.namespace, version)?;
-		if version == Version::Draft16 || version == Version::Draft17 {
+		if !matches!(version, Version::Draft14 | Version::Draft15) {
 			self.subscribe_options.encode(w, version)?;
 		}
 		encode_params!(w, version,);
@@ -42,8 +51,8 @@ impl Message for SubscribeNamespace<'_> {
 		}
 		let namespace = decode_namespace(r, version)?;
 		let subscribe_options = match version {
-			Version::Draft16 | Version::Draft17 => u64::decode(r, version)?,
 			Version::Draft14 | Version::Draft15 => 0x01,
+			_ => u64::decode(r, version)?,
 		};
 
 		// Ignore parameters
