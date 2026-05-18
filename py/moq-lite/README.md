@@ -55,6 +55,29 @@ async def main():
 asyncio.run(main())
 ```
 
+### Host a server
+
+```python
+import asyncio
+import moq_lite as moq
+
+async def main():
+    async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
+        broadcast = moq.BroadcastProducer()
+        track = broadcast.publish_track("events")
+        server.publish("hello", broadcast)
+        print(f"listening on https://{server.local_addr}")
+
+        sessions = []
+        async for request in server:
+            print(f"  + {request.transport} from {request.url}")
+            sessions.append(await request.ok())
+
+asyncio.run(main())
+```
+
+Reject a request instead of accepting it with `await request.close(403)`.
+
 ### Advanced: Manual origin wiring
 
 For full control over the origin topology:
@@ -74,7 +97,15 @@ client = moq.Client(
 
 ### Connection
 
-- **`Client(url, *, tls_verify=True, publish=None, subscribe=None)`** — async context manager for connecting to a relay
+- **`Client(url, *, tls_verify=True, bind=None, publish=None, subscribe=None)`** — async context manager for connecting to a relay
+- **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), publish=None, subscribe=None)`** — async context manager + async iterator of incoming `Request`s
+  - `.local_addr` — the bound address (useful when binding to port `0`)
+  - `.publish(path, broadcast)` — publish a broadcast to be served
+- **`Request`** — an incoming session, yielded by `async for request in server`
+  - `.url`, `.transport` — properties
+  - `.set_publish(origin)`, `.set_consume(origin)` — per-request overrides
+  - `await .ok()` — complete the handshake, returns a session (hold it to keep the connection alive)
+  - `await .close(code)` — reject with an HTTP status code
 
 ### Publishing
 
