@@ -91,22 +91,22 @@ impl Message for RequestOk {
 	const ID: u64 = 0x07;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if version != Version::Draft17 {
+		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.request_id
 				.expect("request_id required for draft14-16")
 				.encode(w, version)?;
 		} else {
-			assert!(self.request_id.is_none(), "request_id must be None for draft17");
+			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
 		encode_params!(w, version,);
 		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = if version == Version::Draft17 {
-			None
-		} else {
+		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			Some(RequestId::decode(r, version)?)
+		} else {
+			None
 		};
 		decode_params!(r, version,);
 		Ok(Self { request_id })

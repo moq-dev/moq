@@ -14,7 +14,7 @@ export const MAX_U53 = Number.MAX_SAFE_INTEGER;
 // 1110xxxx + 3B   → 4 bytes (28 bits)
 // 11110xxx + 4B   → 5 bytes (35 bits)
 // 111110xx + 5B   → 6 bytes (42 bits)
-// 1111110x + 6B   → 7 bytes (49 bits) — draft-18+ only (invalid in draft-17 per #1595)
+// 1111110x + 6B   → 7 bytes (49 bits), draft-18+ only (invalid in draft-17 per #1595)
 // 11111110 + 7B   → 8 bytes (56 bits)
 // 11111111 + 8B   → 9 bytes (64 bits)
 

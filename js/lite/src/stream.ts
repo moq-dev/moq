@@ -228,8 +228,8 @@ export class Reader {
 			else break;
 		}
 
-		// 1111110x is a 7-byte form: invalid on draft-17, allowed on draft-18+ per #1595.
-		if (ones === 6 && this.version !== Version.DRAFT_18) {
+		// 1111110x is a 7-byte form. Draft-17 rejects it; draft-18+ allows it per #1595.
+		if (ones === 6 && this.version === Version.DRAFT_17) {
 			throw new Error("invalid leading-ones varint: 1111110x prefix is reserved on draft-17");
 		}
 

@@ -216,16 +216,16 @@ export class Stream {
 			}
 
 			let messages: Record<number, MessageType>;
-			if (this.version === Version.DRAFT_18) {
-				messages = MessagesV18 as unknown as Record<number, MessageType>;
-			} else if (this.version === Version.DRAFT_17) {
-				messages = MessagesV17 as unknown as Record<number, MessageType>;
-			} else if (this.version === Version.DRAFT_16) {
-				messages = MessagesV16 as unknown as Record<number, MessageType>;
+			if (this.version === Version.DRAFT_14) {
+				messages = MessagesV14 as unknown as Record<number, MessageType>;
 			} else if (this.version === Version.DRAFT_15) {
 				messages = MessagesV15 as unknown as Record<number, MessageType>;
+			} else if (this.version === Version.DRAFT_16) {
+				messages = MessagesV16 as unknown as Record<number, MessageType>;
+			} else if (this.version === Version.DRAFT_17) {
+				messages = MessagesV17 as unknown as Record<number, MessageType>;
 			} else {
-				messages = MessagesV14 as unknown as Record<number, MessageType>;
+				messages = MessagesV18 as unknown as Record<number, MessageType>;
 			}
 
 			if (!(messageType in messages)) {
@@ -259,13 +259,17 @@ export class Stream {
 		while (true) {
 			const id = this.#requestId;
 
-			// d17+: no flow control, always allowed
-			if (this.version === Version.DRAFT_17 || this.version === Version.DRAFT_18) {
-				this.#requestId += 2n;
-				return id;
-			}
-
-			if (id < this.#maxRequestId) {
+			// d14-d16 use MAX_REQUEST_ID flow control; d17+ removed it.
+			if (
+				this.version === Version.DRAFT_14 ||
+				this.version === Version.DRAFT_15 ||
+				this.version === Version.DRAFT_16
+			) {
+				if (id < this.#maxRequestId) {
+					this.#requestId += 2n;
+					return id;
+				}
+			} else {
 				this.#requestId += 2n;
 				return id;
 			}

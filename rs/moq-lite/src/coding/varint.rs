@@ -320,7 +320,7 @@ impl VarInt {
 				Ok(Self((hi << 40) | lo))
 			}
 			6 => {
-				// 1111110x + 6 bytes — 49 bits (draft-18+, INVALID in draft-17 per #1595)
+				// 1111110x + 6 bytes, 49 bits (draft-18+, INVALID in draft-17 per #1595)
 				if matches!(version, ietf::Version::Draft17) {
 					return Err(DecodeError::InvalidValue);
 				}
@@ -642,7 +642,7 @@ mod tests {
 		let bytes = Bytes::from(vec![0xFC, 0, 0, 0, 0, 0, 0]);
 		let mut buf = bytes.clone();
 		let err = VarInt::decode_leading_ones(&mut buf, ietf::Version::Draft17).unwrap_err();
-		matches!(err, DecodeError::InvalidValue);
+		assert!(matches!(err, DecodeError::InvalidValue));
 	}
 
 	#[test]

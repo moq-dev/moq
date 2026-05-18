@@ -52,7 +52,7 @@ export class Publish {
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
 		if (version === Version.DRAFT_17) {
-			await w.u62(0n); // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
+			await w.u62(0n); // required_request_id_delta = 0 (Draft17 only)
 		}
 		await Namespace.encode(w, this.trackNamespace);
 		await w.string(this.trackName);
@@ -96,7 +96,7 @@ export class Publish {
 	static async #decode(r: Reader, version: IetfVersion): Promise<Publish> {
 		const requestId = await r.u62();
 		if (version === Version.DRAFT_17) {
-			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
+			await r.u62(); // required_request_id_delta (Draft17 only)
 		}
 		const trackNamespace = await Namespace.decode(r);
 		const trackName = await r.string();

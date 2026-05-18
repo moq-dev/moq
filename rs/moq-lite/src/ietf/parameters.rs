@@ -47,44 +47,7 @@ impl Decode<Version> for Parameters {
 		let mut bytes = HashMap::new();
 
 		match version {
-			Version::Draft17 | Version::Draft18 => {
-				// Draft17+: no count prefix, read Key-Value-Pairs until buffer empty.
-				// Delta-encoded types, even = varint value, odd = length-prefixed bytes.
-				let mut prev_type: u64 = 0;
-				let mut i = 0u64;
-				while r.has_remaining() {
-					if i >= MAX_PARAMS {
-						return Err(DecodeError::TooMany);
-					}
-					let delta = u64::decode(&mut r, version)?;
-					let abs = if i == 0 {
-						delta
-					} else {
-						prev_type.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?
-					};
-					prev_type = abs;
-					i += 1;
-
-					if abs % 2 == 0 {
-						let kind = ParameterVarInt::from(abs);
-						match vars.entry(kind) {
-							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version)?),
-						};
-					} else {
-						let kind = ParameterBytes::from(abs);
-						let val = Vec::<u8>::decode(&mut r, version)?;
-						if val.len() > MAX_KVP_VALUE_LEN {
-							return Err(DecodeError::BoundsExceeded);
-						}
-						match bytes.entry(kind) {
-							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(val),
-						};
-					}
-				}
-			}
-			_ => {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 				let count = u64::decode(r, version)?;
 
 				if count > MAX_PARAMS {
@@ -117,6 +80,43 @@ impl Decode<Version> for Parameters {
 						};
 					} else {
 						let kind = ParameterBytes::from(kind);
+						let val = Vec::<u8>::decode(&mut r, version)?;
+						if val.len() > MAX_KVP_VALUE_LEN {
+							return Err(DecodeError::BoundsExceeded);
+						}
+						match bytes.entry(kind) {
+							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
+							hash_map::Entry::Vacant(entry) => entry.insert(val),
+						};
+					}
+				}
+			}
+			_ => {
+				// Draft17+: no count prefix, read Key-Value-Pairs until buffer empty.
+				// Delta-encoded types, even = varint value, odd = length-prefixed bytes.
+				let mut prev_type: u64 = 0;
+				let mut i = 0u64;
+				while r.has_remaining() {
+					if i >= MAX_PARAMS {
+						return Err(DecodeError::TooMany);
+					}
+					let delta = u64::decode(&mut r, version)?;
+					let abs = if i == 0 {
+						delta
+					} else {
+						prev_type.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?
+					};
+					prev_type = abs;
+					i += 1;
+
+					if abs % 2 == 0 {
+						let kind = ParameterVarInt::from(abs);
+						match vars.entry(kind) {
+							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
+							hash_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version)?),
+						};
+					} else {
+						let kind = ParameterBytes::from(abs);
 						let val = Vec::<u8>::decode(&mut r, version)?;
 						if val.len() > MAX_KVP_VALUE_LEN {
 							return Err(DecodeError::BoundsExceeded);
