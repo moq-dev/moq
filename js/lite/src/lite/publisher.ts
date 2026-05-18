@@ -281,10 +281,9 @@ export class Publisher {
 			getStats?: () => Promise<{ estimatedSendRate: number | null }>;
 		};
 		if (!quic.getStats) {
-			// Best-effort: close the write side with a FIN so the peer's reader sees EOF.
-			// Don't STOP_SENDING the read side, which can surface as a session-level
-			// error in some WebTransport implementations.
-			stream.writer.close();
+			// Best-effort: we can't supply bandwidth estimates, so close the
+			// whole bidi (FIN + STOP_SENDING) to let the peer release its end.
+			stream.close();
 			return;
 		}
 
@@ -325,7 +324,7 @@ export class Publisher {
 			}
 		} catch (err: unknown) {
 			console.warn("probe stream error", err);
-			stream.writer.close();
+			stream.close();
 		}
 	}
 

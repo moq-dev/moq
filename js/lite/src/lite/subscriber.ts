@@ -250,7 +250,11 @@ export class Subscriber {
 	/**
 	 * Opens a PROBE bidi stream to receive bandwidth estimates from the publisher.
 	 * Returns immediately if recv bandwidth is not supported.
-	 * Errors are fatal and propagate to the connection.
+	 *
+	 * Probe is best-effort telemetry: a stream-level failure (peer reset, FIN,
+	 * missing peer support, transport hiccup) is caught and logged, never
+	 * propagated to the connection. On exit the bandwidth/RTT signals are
+	 * cleared so consumers see them as stale.
 	 *
 	 * @internal
 	 */

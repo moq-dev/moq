@@ -198,12 +198,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					if res.is_err() {
 						return Ok(());
 					}
+					// Loop back: a new consumer may arrive later.
 				}
 				res = self.run_probe_stream(bandwidth) => {
 					match res {
 						Ok(()) => tracing::debug!("probe stream closed"),
 						Err(err) => tracing::warn!(%err, "probe stream error"),
 					}
+					// Stream ended (peer FIN'd or errored). Don't hammer an
+					// uncooperative peer; give up for the rest of the session.
+					return Ok(());
 				}
 			}
 		}
