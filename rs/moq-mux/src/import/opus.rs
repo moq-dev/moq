@@ -1,10 +1,5 @@
 use bytes::{Buf, BytesMut};
 
-// Make a new audio group every 100ms.
-// NOTE: We could do this per-frame, but there's not much benefit to it.
-// Pack ~100ms of audio per group. Opus frames are typically 20ms, so 5 is a good fit.
-const GROUP_FRAMES: usize = 5;
-
 /// Typed Opus configuration for initialization without binary blobs.
 pub struct OpusConfig {
 	pub sample_rate: u32,
@@ -45,13 +40,13 @@ impl OpusConfig {
 /// Opus importer.
 ///
 /// Initialized from an OpusHead packet. Each input buffer passed to [`decode`](Self::decode)
-/// is published as one hang frame. Group boundaries are managed automatically every ~100 ms.
-/// Ogg framing is not supported — feed raw Opus packets.
+/// is published as one hang frame in its own group, so the relay can forward each frame
+/// without waiting for a group boundary. Opus' packet loss concealment handles drops.
+/// Ogg framing is not supported, feed raw Opus packets.
 pub struct Opus {
 	catalog: crate::catalog::Producer,
 	track: crate::container::Producer<crate::container::Hang>,
 	zero: Option<tokio::time::Instant>,
-	frames: usize,
 }
 
 impl Opus {
@@ -79,7 +74,6 @@ impl Opus {
 			catalog,
 			track: crate::container::Producer::new(track, crate::container::Hang::Legacy),
 			zero: None,
-			frames: 0,
 		})
 	}
 
@@ -107,21 +101,16 @@ impl Opus {
 			buf.advance(len);
 		}
 
-		// Start a new group every GROUP_FRAMES frames.
+		// Each frame is its own group so the relay can forward it immediately.
+		// Opus' packet loss concealment handles drops.
 		let frame = crate::container::Frame {
 			timestamp: pts,
 			payload: payload.freeze(),
-			keyframe: self.frames % GROUP_FRAMES == 0,
+			keyframe: true,
 		};
-		self.frames += 1;
 
 		self.track.write(frame)?;
-
-		// Close the group immediately after the Nth frame so the relay can forward it
-		// without waiting for the next keyframe to arrive.
-		if self.frames % GROUP_FRAMES == 0 {
-			self.track.finish_group()?;
-		}
+		self.track.finish_group()?;
 
 		Ok(())
 	}

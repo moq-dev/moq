@@ -177,7 +177,6 @@ export default defineConfig({
 						},
 						{ text: "@moq/watch", link: "/js/@moq/watch" },
 						{ text: "@moq/publish", link: "/js/@moq/publish" },
-						{ text: "@moq/ui-core", link: "/js/@moq/ui-core" },
 						{ text: "@moq/token", link: "/js/@moq/token" },
 						{ text: "@moq/signals", link: "/js/@moq/signals" },
 					],

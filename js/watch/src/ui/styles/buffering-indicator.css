@@ -1,4 +1,4 @@
-.watch-ui__buffering {
+.buffering {
 	position: absolute;
 	width: 100%;
 	height: 100%;
@@ -10,7 +10,7 @@
 	pointer-events: auto;
 }
 
-.watch-ui__buffering-spinner {
+.buffering-spinner {
 	width: 2.5rem;
 	height: 2.5rem;
 	border: var(--spacing-4) solid var(--color-white-alpha-20);

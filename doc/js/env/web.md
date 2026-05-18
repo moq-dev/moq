@@ -214,7 +214,7 @@ function VideoPlayer({ url, name }) {
 
 ### SolidJS
 
-Use `@moq/watch/ui` and `@moq/publish/ui` for SolidJS UI overlays, or use Web Components directly:
+Use `@moq/watch/ui` and `@moq/publish/ui` for ready-made UI overlays, or use Web Components directly:
 
 ```tsx
 import "@moq/watch/element";

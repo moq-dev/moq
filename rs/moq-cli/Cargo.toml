@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.7.21"
+version = "0.7.22"
 edition = "2024"
 rust-version.workspace = true
 
@@ -26,6 +26,7 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }
+humantime = "2.3"
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }

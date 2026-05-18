@@ -117,6 +117,11 @@ impl Hev1 {
 		Ok(())
 	}
 
+	/// Returns a reference to the underlying track producer.
+	pub fn track(&self) -> anyhow::Result<&moq_lite::TrackProducer> {
+		Ok(&self.track.as_ref().context("not initialized")?.track)
+	}
+
 	/// Decode as much data as possible from the given buffer.
 	///
 	/// Unlike [Self::decode_frame], this method needs the start code for the next frame.
