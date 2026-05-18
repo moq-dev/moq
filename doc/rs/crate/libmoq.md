@@ -7,7 +7,7 @@ description: C bindings for MoQ
 
 [![docs.rs](https://docs.rs/libmoq/badge.svg)](https://docs.rs/libmoq)
 
-C bindings for `moq-lite` via FFI, enabling MoQ integration in C/C++ applications and other languages.
+C bindings for `moq-net` via FFI, enabling MoQ integration in C/C++ applications and other languages.
 
 ## Overview
 
@@ -52,6 +52,6 @@ Full API documentation: [docs.rs/libmoq](https://docs.rs/libmoq)
 
 ## Next Steps
 
-- Use [moq-lite](/rs/crate/moq-lite) for Rust applications
+- Use [moq-net](/rs/crate/moq-net) for Rust applications
 - Deploy a [relay server](/app/relay/)
 - Read the [Concepts guide](/concept/)
