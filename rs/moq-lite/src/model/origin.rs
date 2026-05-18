@@ -32,11 +32,17 @@ impl Origin {
 	/// Never encoded for Lite04+: violates the non-zero invariant and would fail to round-trip.
 	pub(crate) const UNKNOWN: Self = Self { id: 0 };
 
-	/// Generate a fresh origin with a random non-zero 62-bit id. Use this for any
+	/// Generate a fresh origin with a random non-zero id. Use this for any
 	/// origin that does not need a stable identity across restarts.
+	///
+	/// TEMPORARY: the wire format allows 62 bits, but older `@moq/lite` JS
+	/// clients decode `AnnounceInterest.exclude_hop` as a u53 (number) and
+	/// throw on anything > 2^53-1. To keep those clients alive against
+	/// fresh relays, we cap the random id at 53 bits. Restore to 62 bits
+	/// once the JS u62 fix has propagated to deployed bundles.
 	pub fn random() -> Self {
 		let mut rng = rand::rng();
-		let id = rng.random_range(1..(1u64 << 62));
+		let id = rng.random_range(1..(1u64 << 53));
 		Self { id }
 	}
 
