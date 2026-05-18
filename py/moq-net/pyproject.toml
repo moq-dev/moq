@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "moq-net"
 version = "0.1.0"
-description = "Ergonomic Python wrapper for the MoQ (Media over QUIC) networking layer"
+description = "The networking layer for Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 requires-python = ">=3.10"

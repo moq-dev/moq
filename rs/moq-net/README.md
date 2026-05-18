@@ -4,7 +4,7 @@
 
 # moq-net
 
-The Rust networking layer for [Media over QUIC](https://moq.dev).
+The Rust networking layer for [Media over QUIC](https://moq.dev): real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC.
 
 At session setup `moq-net` negotiates one of two wire protocols: the simplified [moq-lite](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) protocol (the default) or the full IETF [moq-transport](https://datatracker.ietf.org/group/moq/documents/) protocol. This means clients work with any moq-transport CDN.
 

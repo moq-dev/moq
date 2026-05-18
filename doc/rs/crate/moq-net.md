@@ -1,6 +1,6 @@
 ---
 title: moq-net
-description: Core MoQ networking layer in Rust
+description: Real-time pub/sub with caching, fan-out, and prioritization
 ---
 
 # moq-net
@@ -9,7 +9,7 @@ description: Core MoQ networking layer in Rust
 [![docs.rs](https://docs.rs/moq-net/badge.svg)](https://docs.rs/moq-net)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/moq-dev/moq/blob/main/LICENSE-MIT)
 
-The networking layer for Media over QUIC. At session setup it negotiates one of two wire protocols: the simplified [moq-lite](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) protocol or the full IETF [moq-transport](https://datatracker.ietf.org/group/moq/documents/) protocol.
+The networking layer for Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC. At session setup it negotiates one of two wire protocols: the simplified [moq-lite](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) protocol or the full IETF [moq-transport](https://datatracker.ietf.org/group/moq/documents/) protocol.
 
 > Previously published as `moq-lite`; renamed to clarify that this is the networking layer, not a specific wire protocol.
 

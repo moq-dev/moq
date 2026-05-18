@@ -1,6 +1,6 @@
 ---
 title: "@moq/net"
-description: Core pub/sub protocol for browsers
+description: Real-time pub/sub with caching, fan-out, and prioritization
 ---
 
 # @moq/net
@@ -8,7 +8,7 @@ description: Core pub/sub protocol for browsers
 [![npm](https://img.shields.io/npm/v/@moq/net)](https://www.npmjs.com/package/@moq/net)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-A TypeScript implementation of [Media over QUIC](https://moq.dev/) providing real-time data delivery in web browsers. At session setup it negotiates one of two wire protocols: the simplified [moq-lite](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) protocol or the full IETF [moq-transport](https://datatracker.ietf.org/group/moq/documents/) protocol.
+The networking layer for [Media over QUIC](https://moq.dev/) in TypeScript: real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC. At session setup it negotiates one of two wire protocols: the simplified [moq-lite](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) protocol or the full IETF [moq-transport](https://datatracker.ietf.org/group/moq/documents/) protocol.
 
 ## Overview
 

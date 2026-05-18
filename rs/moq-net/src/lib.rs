@@ -1,9 +1,9 @@
 //! # moq-net: Media over QUIC networking layer
 //!
-//! `moq-net` is the networking layer for Media over QUIC, designed for real-time live media
-//! delivery with sub-second latency at massive scale. At session setup it negotiates one of
-//! two wire protocols: the simplified `moq-lite` protocol (the default) or the full IETF
-//! `moq-transport` protocol.
+//! `moq-net` is the networking layer for Media over QUIC: real-time pub/sub with built-in
+//! caching, fan-out, and prioritization, on top of QUIC. Sub-second latency at massive scale.
+//! At session setup it negotiates one of two wire protocols: the simplified `moq-lite`
+//! protocol (the default) or the full IETF `moq-transport` protocol.
 //!
 //! ## API
 //! The API is built around Producer/Consumer pairs, with the hierarchy:

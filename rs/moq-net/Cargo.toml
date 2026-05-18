@@ -1,6 +1,6 @@
 [package]
 name = "moq-net"
-description = "Media over QUIC - Networking layer (negotiates moq-lite or moq-transport)"
+description = "The networking layer for Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization."
 authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"

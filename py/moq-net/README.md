@@ -1,8 +1,8 @@
 # moq-net
 
-Ergonomic Python wrapper for [MoQ (Media over QUIC)](https://github.com/moq-dev/moq), a next-generation live media delivery protocol providing real-time latency at massive scale.
+The networking layer for [Media over QUIC](https://github.com/moq-dev/moq) in Python: real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC.
 
-`moq-net` wraps the auto-generated [moq-ffi](https://pypi.org/project/moq-ffi/) bindings with a Pythonic API: no `Moq` prefixes, async iterators, context managers, and simplified connection setup. It is the networking layer; under the hood it negotiates either the `moq-lite` or `moq-transport` wire protocol at session setup.
+`moq-net` wraps the auto-generated [moq-ffi](https://pypi.org/project/moq-ffi/) bindings with a Pythonic API: no `Moq` prefixes, async iterators, context managers, and simplified connection setup. At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
 
 ## Installation
 

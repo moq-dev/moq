@@ -1,4 +1,7 @@
-"""moq-net: Ergonomic Python wrapper for the MoQ (Media over QUIC) networking layer."""
+"""The networking layer for Media over QUIC.
+
+Real-time pub/sub with built-in caching, fan-out, and prioritization.
+"""
 
 from .client import Client
 from .origin import Announced, AnnouncedBroadcast, Announcement, OriginConsumer, OriginProducer

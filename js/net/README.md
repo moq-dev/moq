@@ -8,7 +8,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
 A TypeScript [Media over QUIC](https://moq.dev/) (MoQ) client for both browsers and server JS/TS environments.
-`@moq/net` is the **networking layer**: it negotiates one of two wire protocols at session setup, either the simplified [moq-lite](https://doc.moq.dev/concept/layer/moq-lite) protocol or the full IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft, and handles real-time data delivery to/from moq relays.
+`@moq/net` is the **networking layer**: real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC. At session setup it negotiates one of two wire protocols, either the simplified [moq-lite](https://doc.moq.dev/concept/layer/moq-lite) protocol or the full IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft.
 
 Check out [hang](../hang) for a higher-level media library that uses this package.
 
