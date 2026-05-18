@@ -14,7 +14,7 @@ export default defineConfig({
 			formats: ["es"],
 		},
 		rollupOptions: {
-			external: ["@moq/lite", "@moq/signals", "@moq/ui-core", "@moq/watch"],
+			external: ["@moq/lite", "@moq/signals", "@moq/watch"],
 		},
 		sourcemap: true,
 		target: "esnext",

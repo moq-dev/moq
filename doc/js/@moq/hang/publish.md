@@ -85,9 +85,9 @@ publish.video.enabled.set(true);
 publish.audio.enabled.set(false);
 ```
 
-## SolidJS Integration
+## UI Overlay
 
-Use `@moq/publish/ui` for the SolidJS UI overlay. The `<moq-publish-ui>` element wraps a nested `<moq-publish>`:
+Use `@moq/publish/ui` for the Web Component UI overlay. The `<moq-publish-ui>` element wraps a nested `<moq-publish>`:
 
 ```html
 <script type="module">

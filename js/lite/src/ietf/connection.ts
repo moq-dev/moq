@@ -69,11 +69,11 @@ export class Connection implements Established {
 		this.version = versionName(version);
 		this.#quic = quic;
 
-		// Two-path dispatch: v14-v16 uses adapter, v17 uses native bidi streams
-		if (version === Version.DRAFT_17) {
+		// Two-path dispatch: v14-v16 uses adapter, v17+ uses native bidi streams
+		if (version === Version.DRAFT_17 || version === Version.DRAFT_18) {
 			this.#session = new NativeSession(quic, version);
-			// v17: control/setup stream only carries GoAway
-			void this.#runGoAway(control);
+			// v17+: control/setup stream only carries GoAway
+			void this.#runGoAway(control, version);
 		} else {
 			const adapter = new ControlStreamAdapter(quic, control, version, maxRequestId);
 			this.#session = adapter;
@@ -240,16 +240,16 @@ export class Connection implements Established {
 	}
 
 	/**
-	 * v17 only: reads GoAway from the setup/control stream.
+	 * v17+ only: reads GoAway from the setup/control stream.
 	 */
-	async #runGoAway(controlStream: Stream) {
+	async #runGoAway(controlStream: Stream, version: IetfVersion) {
 		try {
 			const done = await controlStream.reader.done();
 			if (done) return;
 
 			const typeId = await controlStream.reader.u53();
 			if (typeId === GoAway.id) {
-				const msg = await GoAway.decode(controlStream.reader, Version.DRAFT_17);
+				const msg = await GoAway.decode(controlStream.reader, version);
 				console.warn(`received GOAWAY with redirect URI: ${msg.newSessionUri}`);
 			} else {
 				console.warn(`unexpected message on setup stream: 0x${typeId.toString(16)}`);

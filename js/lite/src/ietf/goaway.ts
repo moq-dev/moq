@@ -15,8 +15,9 @@ export class GoAway {
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.string(this.newSessionUri);
-		if (version === Version.DRAFT_17) {
+		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
 			await w.u62(this.timeout);
+			// Draft-18 adds an optional trailing Request ID (#1559). We never emit it.
 		}
 	}
 
@@ -30,7 +31,11 @@ export class GoAway {
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<GoAway> {
 		const newSessionUri = await r.string();
-		const timeout = version === Version.DRAFT_17 ? await r.u62() : 0n;
+		const timeout =
+			version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
+				? 0n
+				: await r.u62();
+		// Draft-18 optional trailing Request ID (#1559) — read and discard if present.
 		return new GoAway({ newSessionUri, timeout });
 	}
 }

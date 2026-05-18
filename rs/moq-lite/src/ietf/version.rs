@@ -7,6 +7,7 @@ pub enum Version {
 	Draft15,
 	Draft16,
 	Draft17,
+	Draft18,
 }
 
 impl fmt::Display for Version {
@@ -16,18 +17,14 @@ impl fmt::Display for Version {
 			Self::Draft15 => write!(f, "moq-transport-15"),
 			Self::Draft16 => write!(f, "moq-transport-16"),
 			Self::Draft17 => write!(f, "moq-transport-17"),
+			Self::Draft18 => write!(f, "moq-transport-18"),
 		}
 	}
 }
 
 impl From<Version> for crate::Version {
 	fn from(v: Version) -> Self {
-		match v {
-			Version::Draft14 => crate::Version::Ietf(Version::Draft14),
-			Version::Draft15 => crate::Version::Ietf(Version::Draft15),
-			Version::Draft16 => crate::Version::Ietf(Version::Draft16),
-			Version::Draft17 => crate::Version::Ietf(Version::Draft17),
-		}
+		crate::Version::Ietf(v)
 	}
 }
 

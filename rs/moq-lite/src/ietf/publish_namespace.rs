@@ -23,7 +23,7 @@ impl Message for PublishNamespace<'_> {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		if version == Version::Draft17 {
-			0u64.encode(w, version)?; // required_request_id_delta = 0
+			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 		encode_namespace(w, &self.track_namespace, version)?;
 		encode_params!(w, version,);
@@ -119,7 +119,7 @@ impl Message for PublishNamespaceDone<'_> {
 			Version::Draft16 => {
 				self.request_id.encode(w, version)?;
 			}
-			Version::Draft17 => return Err(EncodeError::Version),
+			_ => return Err(EncodeError::Version),
 		}
 		Ok(())
 	}
@@ -140,7 +140,7 @@ impl Message for PublishNamespaceDone<'_> {
 					request_id,
 				})
 			}
-			Version::Draft17 => Err(DecodeError::Version),
+			_ => Err(DecodeError::Version),
 		}
 	}
 }
@@ -168,7 +168,7 @@ impl Message for PublishNamespaceCancel<'_> {
 			Version::Draft16 => {
 				self.request_id.encode(w, version)?;
 			}
-			Version::Draft17 => {
+			_ => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -187,7 +187,7 @@ impl Message for PublishNamespaceCancel<'_> {
 				let request_id = RequestId::decode(r, version)?;
 				(Path::default(), request_id)
 			}
-			Version::Draft17 => {
+			_ => {
 				return Err(DecodeError::Version);
 			}
 		};
@@ -318,6 +318,31 @@ mod tests {
 
 		assert_eq!(decoded.request_id, RequestId(5));
 		assert_eq!(decoded.track_namespace.as_str(), "v17/broadcast");
+	}
+
+	#[test]
+	fn test_publish_namespace_v18_round_trip() {
+		let msg = PublishNamespace {
+			request_id: RequestId(5),
+			track_namespace: Path::new("v18/broadcast"),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: PublishNamespace = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(5));
+		assert_eq!(decoded.track_namespace.as_str(), "v18/broadcast");
+	}
+
+	#[test]
+	fn test_publish_namespace_done_v18_rejected() {
+		let msg = PublishNamespaceDone {
+			track_namespace: Path::default(),
+			request_id: RequestId(42),
+		};
+
+		let mut buf = BytesMut::new();
+		assert!(msg.encode_msg(&mut buf, Version::Draft18).is_err());
 	}
 
 	#[test]

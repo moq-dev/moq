@@ -127,6 +127,31 @@ export default class MoqWatch extends HTMLElement {
 				this.setAttribute("latency", jitter.toString());
 			}
 		});
+
+		// Track the element's rendered size and feed it into the rendition picker,
+		// scaled by devicePixelRatio so high-DPI screens still get sharp renditions.
+		const updateDimensions = (width: number, height: number) => {
+			if (width <= 0 || height <= 0) return;
+			const dpr = window.devicePixelRatio || 1;
+			this.backend.video.source.target.update((prev) => ({
+				...prev,
+				width: Math.round(width * dpr),
+				height: Math.round(height * dpr),
+			}));
+		};
+
+		const resizeObserver = new ResizeObserver((entries) => {
+			const entry = entries[0];
+			if (!entry) return;
+			updateDimensions(entry.contentRect.width, entry.contentRect.height);
+		});
+		resizeObserver.observe(this);
+		this.signals.cleanup(() => resizeObserver.disconnect());
+
+		// Seed with the current size in case the observer doesn't fire immediately
+		// (e.g. the element is still 0x0 when we attach).
+		const rect = this.getBoundingClientRect();
+		updateDimensions(rect.width, rect.height);
 	}
 
 	// Annoyingly, we have to use these callbacks to figure out when the element is connected to the DOM.

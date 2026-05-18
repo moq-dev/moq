@@ -31,7 +31,7 @@ The project contains multiple layers of protocols:
 4. **hang** - Media-specific encoding/decoding on top of `moq-lite`. Contains:
    - catalog: a JSON track containing a description of other tracks and their properties (for WebCodecs).
    - container: each frame consists of a timestamp and codec bitstream
-   - watch/publish: dedicated packages for subscribing/publishing with optional SolidJS UI overlays
+   - watch/publish: dedicated packages for subscribing/publishing with optional UI overlays
 5. **application** - Users building on top of `moq-lite` or `hang`
 
 Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq` layer should be generic, using rules on the wire on how to deliver content.
@@ -59,7 +59,6 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   token/             # JWT token generation (published as @moq/token)
   clock/             # Clock example (published as @moq/clock)
   hang/              # Core media layer: catalog, container, support (published as @moq/hang)
-  ui-core/           # Shared UI components (published as @moq/ui-core)
   watch/             # Watch/subscribe to streams + UI (published as @moq/watch)
   publish/           # Publish media to streams + UI (published as @moq/publish)
   moq-boy/           # MoQ Boy web viewer (published as @moq/boy)
@@ -117,7 +116,7 @@ match version {
 - **Common**: Use `just` for common development tasks
 - **Rust**: Use `cargo` for Rust-specific operations
 - **Formatting/Linting**: Biome for JS/TS formatting and linting
-- **UI**: Solid.js for Web Components in `@moq/watch/ui` and `@moq/publish/ui`
+- **UI**: Plain Web Components in `@moq/watch/ui` and `@moq/publish/ui`, built directly on `@moq/signals`
 - **Builds**: Nix flake for reproducible builds (optional)
 - **JS async patterns**: Use `Effect.interval()`, `Effect.timer()`, and `Effect.event()` helpers from `@moq/signals` instead of raw `setInterval`, `setTimeout`, `addEventListener`. These handle cleanup automatically when the Effect is closed.
 

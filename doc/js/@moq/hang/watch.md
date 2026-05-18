@@ -78,9 +78,9 @@ el.setAttribute("muted", "");
 el.removeAttribute("muted");
 ```
 
-## SolidJS Integration
+## UI Overlay
 
-Use `@moq/watch/ui` for the SolidJS UI overlay. The `<moq-watch-ui>` element wraps a nested `<moq-watch>`:
+Use `@moq/watch/ui` for the Web Component UI overlay. The `<moq-watch-ui>` element wraps a nested `<moq-watch>`:
 
 ```html
 <script type="module">

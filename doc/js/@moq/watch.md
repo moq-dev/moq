@@ -8,7 +8,7 @@ description: Subscribe to and render MoQ broadcasts
 [![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Subscribe to and render MoQ broadcasts. Provides both a JavaScript API and a `<moq-watch>` Web Component, plus an optional `<moq-watch-ui>` SolidJS overlay.
+Subscribe to and render MoQ broadcasts. Provides both a JavaScript API and a `<moq-watch>` Web Component, plus an optional `<moq-watch-ui>` overlay.
 
 ## Installation
 
@@ -140,7 +140,7 @@ el.catalog = myCatalog;
 
 ## UI Overlay
 
-Import `@moq/watch/ui` for a SolidJS-powered overlay with buffering indicator, stats panel, and playback controls:
+Import `@moq/watch/ui` for a Web Component overlay with buffering indicator, stats panel, and playback controls:
 
 ```html
 <script type="module">
@@ -176,5 +176,4 @@ const broadcast = new Watch.Broadcast({
 
 - **[@moq/publish](/js/@moq/publish)** — Publish media to MoQ broadcasts
 - **[@moq/hang](/js/@moq/hang/)** — Core media library (catalog, container, support)
-- **[@moq/ui-core](/js/@moq/ui-core)** — Shared UI primitives
 - **[@moq/lite](/js/@moq/lite)** — Core pub/sub transport protocol

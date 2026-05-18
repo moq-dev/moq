@@ -27,7 +27,7 @@ other `+esm` URLs. No build step or import map required:
 ```html
 <script type="module">
     import "https://cdn.jsdelivr.net/npm/@moq/publish/element.js/+esm";
-    import "https://cdn.jsdelivr.net/npm/@moq/publish/ui/index.js/+esm";
+    import "https://cdn.jsdelivr.net/npm/@moq/publish/ui/element.js/+esm";
 </script>
 
 <moq-publish-ui>
@@ -92,7 +92,7 @@ publish.source.camera.enabled.set(true);
 
 ## UI Web Component
 
-`@moq/publish` includes a SolidJS-powered UI overlay (`<moq-publish-ui>`) with source selection (camera, screen, file, microphone) and status indicator. It depends on [`@moq/ui-core`](../ui-core) for shared UI primitives.
+`@moq/publish` includes a Web Component UI overlay (`<moq-publish-ui>`) with source selection (camera, screen, file, microphone) and status indicator. It is built on top of `@moq/signals` with no framework dependency.
 
 ```html
 <script type="module">

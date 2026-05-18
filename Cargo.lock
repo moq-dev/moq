@@ -3530,7 +3530,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.7.21"
+version = "0.7.22"
 dependencies = [
  "anyhow",
  "axum",
@@ -3538,6 +3538,7 @@ dependencies = [
  "bytes",
  "clap",
  "hang",
+ "humantime",
  "moq-mux",
  "moq-native",
  "rustls",

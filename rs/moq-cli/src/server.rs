@@ -22,7 +22,7 @@ pub async fn run_server(
 		let consumer = consumer.clone();
 		// Handle the connection in a new task.
 		tokio::spawn(async move {
-			if let Err(err) = run_session(id, session, name, consumer).await {
+			if let Err(err) = run_serve_session(id, session, name, consumer).await {
 				tracing::warn!(%err, "failed to accept session");
 			}
 		});
@@ -32,7 +32,7 @@ pub async fn run_server(
 }
 
 #[tracing::instrument("session", skip_all, fields(id))]
-async fn run_session(
+async fn run_serve_session(
 	id: u64,
 	session: moq_native::Request,
 	name: String,
@@ -44,6 +44,43 @@ async fn run_session(
 
 	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.
 	let session = session.with_publish(origin.consume()).ok().await?;
+
+	tracing::info!(id, "accepted session");
+
+	session.closed().await.map_err(Into::into)
+}
+
+pub async fn run_accept(mut server: moq_native::Server, origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
+	#[cfg(unix)]
+	// Notify systemd that we're ready.
+	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+
+	let mut conn_id = 0;
+
+	tracing::info!(addr = ?server.local_addr(), "listening");
+
+	while let Some(session) = server.accept().await {
+		let id = conn_id;
+		conn_id += 1;
+
+		let origin = origin.clone();
+		tokio::spawn(async move {
+			if let Err(err) = run_accept_session(id, session, origin).await {
+				tracing::warn!(%err, "failed to accept session");
+			}
+		});
+	}
+
+	Ok(())
+}
+
+#[tracing::instrument("session", skip_all, fields(id))]
+async fn run_accept_session(
+	id: u64,
+	session: moq_native::Request,
+	origin: moq_lite::OriginProducer,
+) -> anyhow::Result<()> {
+	let session = session.with_consume(origin).ok().await?;
 
 	tracing::info!(id, "accepted session");
 

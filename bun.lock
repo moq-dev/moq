@@ -79,7 +79,7 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.2.3",
+      "version": "0.2.5",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.8.8",
@@ -99,7 +99,7 @@
     },
     "js/lite": {
       "name": "@moq/lite",
-      "version": "0.2.1",
+      "version": "0.2.3",
       "dependencies": {
         "@moq/qmux": "^0.0.6",
         "@moq/signals": "workspace:*",
@@ -119,11 +119,10 @@
     },
     "js/moq-boy": {
       "name": "@moq/boy",
-      "version": "0.2.7",
+      "version": "0.2.9",
       "dependencies": {
         "@moq/lite": "workspace:^",
         "@moq/signals": "workspace:^",
-        "@moq/ui-core": "workspace:^",
         "@moq/watch": "workspace:^",
         "zod": "^4.3.6",
       },
@@ -151,23 +150,19 @@
     },
     "js/publish": {
       "name": "@moq/publish",
-      "version": "0.2.5",
+      "version": "0.2.7",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/lite": "workspace:^",
         "@moq/signals": "workspace:^",
-        "@moq/ui-core": "workspace:^",
       },
       "devDependencies": {
         "@types/audioworklet": "^0.0.77",
         "@typescript/lib-dom": "npm:@types/web@^0.0.241",
         "esbuild": "^0.27.0",
         "rimraf": "^6.0.1",
-        "solid-element": "^1.9.1",
-        "solid-js": "^1.9.10",
         "typescript": "^6.0.0",
         "vite": "^7.3.1",
-        "vite-plugin-solid": "^2.11.10",
       },
     },
     "js/signals": {
@@ -192,7 +187,7 @@
     },
     "js/token": {
       "name": "@moq/token",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "bin": {
         "moq-token": "./src/cli.ts",
       },
@@ -209,31 +204,14 @@
         "typescript": "^6.0.0",
       },
     },
-    "js/ui-core": {
-      "name": "@moq/ui-core",
-      "version": "0.1.0",
-      "devDependencies": {
-        "@biomejs/biome": "^2.4.3",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.241",
-        "rimraf": "^6.0.1",
-        "solid-js": "^1.9.10",
-        "typescript": "^6.0.0",
-        "vite": "^7.3.1",
-        "vite-plugin-solid": "^2.11.10",
-      },
-      "peerDependencies": {
-        "@moq/signals": "workspace:^0.1.0",
-      },
-    },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.2.9",
+      "version": "0.2.11",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/lite": "workspace:^",
         "@moq/msf": "workspace:^",
         "@moq/signals": "workspace:^",
-        "@moq/ui-core": "workspace:^",
       },
       "devDependencies": {
         "@types/audioworklet": "^0.0.77",
@@ -241,11 +219,8 @@
         "@typescript/lib-dom": "npm:@types/web@^0.0.241",
         "esbuild": "^0.27.0",
         "rimraf": "^6.0.1",
-        "solid-element": "^1.9.1",
-        "solid-js": "^1.9.10",
         "typescript": "^6.0.0",
         "vite": "^7.3.1",
-        "vite-plugin-solid": "^2.11.10",
       },
     },
   },
@@ -524,8 +499,6 @@
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 
     "@moq/token": ["@moq/token@workspace:js/token"],
-
-    "@moq/ui-core": ["@moq/ui-core@workspace:js/ui-core"],
 
     "@moq/watch": ["@moq/watch@workspace:js/watch"],
 

@@ -86,8 +86,12 @@ export class Publisher {
 				// Wait for broadcast to close or stream to close (peer cancelled)
 				await Promise.race([broadcast.closed, stream.reader.closed]);
 
-				// For v14-v16: send explicit PublishNamespaceDone
-				if (this.#session.version !== Version.DRAFT_17) {
+				// For v14-v16: send explicit PublishNamespaceDone (removed in v17+)
+				if (
+					this.#session.version === Version.DRAFT_14 ||
+					this.#session.version === Version.DRAFT_15 ||
+					this.#session.version === Version.DRAFT_16
+				) {
 					try {
 						await stream.writer.u53(PublishNamespaceDone.id);
 						const done = new PublishNamespaceDone({ trackNamespace: path, requestId });
@@ -136,7 +140,7 @@ export class Publisher {
 			} else {
 				await stream.writer.u53(RequestError.id);
 				const err = new RequestError({
-					requestId: version === Version.DRAFT_17 ? undefined : msg.requestId,
+					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
 					errorCode: 404,
 					reasonPhrase: "Broadcast not found",
 				});
@@ -152,7 +156,10 @@ export class Publisher {
 			// Send SUBSCRIBE_OK
 			await stream.writer.u53(SubscribeOk.id);
 			const ok = new SubscribeOk({
-				requestId: version === Version.DRAFT_17 ? undefined : msg.requestId,
+				requestId:
+					version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
+						? msg.requestId
+						: undefined,
 				trackAlias: msg.requestId,
 			});
 			await ok.encode(stream.writer, version);
@@ -172,7 +179,7 @@ export class Publisher {
 			console.debug(`publish done: broadcast=${name} track=${track.name}`);
 
 			// v14-v16: send PublishDone before closing
-			if (version !== Version.DRAFT_17) {
+			if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 				try {
 					await stream.writer.u53(PublishDone.id);
 					const done = new PublishDone({
@@ -255,7 +262,9 @@ export class Publisher {
 				await ok.encode(stream.writer, version);
 			} else {
 				await stream.writer.u53(RequestOk.id);
-				const ok = new RequestOk({ requestId: version === Version.DRAFT_17 ? undefined : msg.requestId });
+				const ok = new RequestOk({
+					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
+				});
 				await ok.encode(stream.writer, version);
 			}
 
@@ -324,7 +333,9 @@ export class Publisher {
 		} else {
 			// v15+: respond with RequestOk (0x07)
 			await stream.writer.u53(RequestOk.id);
-			const ok = new RequestOk({ requestId: version === Version.DRAFT_17 ? undefined : msg.requestId });
+			const ok = new RequestOk({
+				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
+			});
 			await ok.encode(stream.writer, version);
 		}
 		stream.close();

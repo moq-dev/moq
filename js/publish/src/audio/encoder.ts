@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/lite";
-import { Time } from "@moq/lite";
+import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Capture from "./capture";
 import type { Source } from "./types";
@@ -10,7 +10,7 @@ import type { Source } from "./types";
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
 const OPUS_BITRATE_PER_CHANNEL = 32_000;
-const OPUS_FRAME_DURATION = 20 as Time.Milli;
+const OPUS_FRAME_DURATION = 20;
 
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
@@ -24,10 +24,6 @@ export type EncoderProps = {
 	volume?: number | Signal<number>;
 	sampleRate?: number | Signal<number | undefined>;
 
-	// The maximum duration of each group. Larger groups mean fewer drops but the viewer can fall further behind.
-	// NOTE: Each frame is always flushed to the network immediately.
-	groupDuration?: Time.Milli;
-
 	container?: Catalog.Container;
 };
 
@@ -40,7 +36,6 @@ export class Encoder {
 	muted: Signal<boolean>;
 	volume: Signal<number>;
 	sampleRate: Signal<number | undefined>;
-	groupDuration: Time.Milli;
 
 	source: Signal<Source | undefined>;
 
@@ -65,7 +60,6 @@ export class Encoder {
 		this.muted = Signal.from(props?.muted ?? false);
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.sampleRate = Signal.from<number | undefined>(props?.sampleRate);
-		this.groupDuration = props?.groupDuration ?? (100 as Time.Milli); // Default is a group every 100ms
 
 		this.#signals.run(this.#runSource.bind(this));
 		this.#signals.run(this.#runGain.bind(this));
@@ -174,10 +168,7 @@ export class Encoder {
 
 		effect.set(this.active, true, false);
 
-		const producer = new Container.Legacy.Producer(track);
-		effect.cleanup(() => producer.close());
-
-		let lastKeyframe: Time.Micro | undefined;
+		effect.cleanup(() => track.close());
 
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
@@ -189,17 +180,13 @@ export class Encoder {
 						throw new Error("only key frames are supported");
 					}
 
-					let keyframe = false;
-					if (!lastKeyframe || lastKeyframe + Time.Micro.fromMilli(this.groupDuration) <= frame.timestamp) {
-						lastKeyframe = frame.timestamp as Time.Micro;
-						keyframe = true;
-					}
-
-					producer.encode(frame, frame.timestamp as Time.Micro, keyframe);
+					// Each audio frame is its own group so the relay can forward it without
+					// waiting for a group boundary. Loss is handled by the codec's PLC.
+					track.writeFrame(Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro));
 				},
 				error: (err) => {
 					console.error("encoder error", err);
-					producer.close(err);
+					track.close(err);
 				},
 			});
 			effect.cleanup(() => encoder.close());
@@ -209,7 +196,6 @@ export class Encoder {
 				config = effect.get(this.#config);
 				if (!config) return;
 
-				lastKeyframe = undefined;
 				console.debug("encoding audio", config);
 				encoder.configure(config);
 			});

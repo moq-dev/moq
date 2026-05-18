@@ -47,8 +47,52 @@ impl Decode<Version> for Parameters {
 		let mut bytes = HashMap::new();
 
 		match version {
-			Version::Draft17 => {
-				// Draft17: no count prefix, read Key-Value-Pairs until buffer empty.
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
+				let count = u64::decode(r, version)?;
+
+				if count > MAX_PARAMS {
+					return Err(DecodeError::TooMany);
+				}
+
+				let mut prev_type: u64 = 0;
+
+				for i in 0..count {
+					let kind = match version {
+						Version::Draft16 => {
+							let delta = u64::decode(r, version)?;
+							let abs = if i == 0 {
+								delta
+							} else {
+								prev_type.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?
+							};
+							prev_type = abs;
+							abs
+						}
+						Version::Draft14 | Version::Draft15 => u64::decode(r, version)?,
+						_ => unreachable!("handled above"),
+					};
+
+					if kind % 2 == 0 {
+						let kind = ParameterVarInt::from(kind);
+						match vars.entry(kind) {
+							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
+							hash_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version)?),
+						};
+					} else {
+						let kind = ParameterBytes::from(kind);
+						let val = Vec::<u8>::decode(&mut r, version)?;
+						if val.len() > MAX_KVP_VALUE_LEN {
+							return Err(DecodeError::BoundsExceeded);
+						}
+						match bytes.entry(kind) {
+							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
+							hash_map::Entry::Vacant(entry) => entry.insert(val),
+						};
+					}
+				}
+			}
+			_ => {
+				// Draft17+: no count prefix, read Key-Value-Pairs until buffer empty.
 				// Delta-encoded types, even = varint value, odd = length-prefixed bytes.
 				let mut prev_type: u64 = 0;
 				let mut i = 0u64;
@@ -84,50 +128,6 @@ impl Decode<Version> for Parameters {
 					}
 				}
 			}
-			_ => {
-				let count = u64::decode(r, version)?;
-
-				if count > MAX_PARAMS {
-					return Err(DecodeError::TooMany);
-				}
-
-				let mut prev_type: u64 = 0;
-
-				for i in 0..count {
-					let kind = match version {
-						Version::Draft16 => {
-							let delta = u64::decode(r, version)?;
-							let abs = if i == 0 {
-								delta
-							} else {
-								prev_type.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?
-							};
-							prev_type = abs;
-							abs
-						}
-						Version::Draft14 | Version::Draft15 => u64::decode(r, version)?,
-						Version::Draft17 => unreachable!("handled above"),
-					};
-
-					if kind % 2 == 0 {
-						let kind = ParameterVarInt::from(kind);
-						match vars.entry(kind) {
-							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version)?),
-						};
-					} else {
-						let kind = ParameterBytes::from(kind);
-						let val = Vec::<u8>::decode(&mut r, version)?;
-						if val.len() > MAX_KVP_VALUE_LEN {
-							return Err(DecodeError::BoundsExceeded);
-						}
-						match bytes.entry(kind) {
-							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(val),
-						};
-					}
-				}
-			}
 		}
 
 		Ok(Parameters { vars, bytes })
@@ -142,10 +142,26 @@ impl Encode<Version> for Parameters {
 		}
 
 		match version {
-			Version::Draft16 | Version::Draft17 => {
+			Version::Draft14 | Version::Draft15 => {
+				count.encode(w, version)?;
+
+				for (kind, value) in self.vars.iter() {
+					u64::from(*kind).encode(w, version)?;
+					value.encode(w, version)?;
+				}
+
+				for (kind, value) in self.bytes.iter() {
+					if value.len() > MAX_KVP_VALUE_LEN {
+						return Err(EncodeError::BoundsExceeded);
+					}
+					u64::from(*kind).encode(w, version)?;
+					value.encode(w, version)?;
+				}
+			}
+			_ => {
 				// Draft16: count prefix + delta encoding
-				// Draft17: NO count prefix + delta encoding
-				if version != Version::Draft17 {
+				// Draft17+: NO count prefix + delta encoding
+				if matches!(version, Version::Draft16) {
 					count.encode(w, version)?;
 				}
 
@@ -178,22 +194,6 @@ impl Encode<Version> for Parameters {
 							v.encode(w, version)?;
 						}
 					}
-				}
-			}
-			Version::Draft14 | Version::Draft15 => {
-				count.encode(w, version)?;
-
-				for (kind, value) in self.vars.iter() {
-					u64::from(*kind).encode(w, version)?;
-					value.encode(w, version)?;
-				}
-
-				for (kind, value) in self.bytes.iter() {
-					if value.len() > MAX_KVP_VALUE_LEN {
-						return Err(EncodeError::BoundsExceeded);
-					}
-					u64::from(*kind).encode(w, version)?;
-					value.encode(w, version)?;
 				}
 			}
 		}
@@ -612,7 +612,13 @@ mod tests {
 
 	#[test]
 	fn test_param_u8_all_versions() {
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
 			round_trip_params(
 				version,
 				|w, v| {
@@ -630,7 +636,13 @@ mod tests {
 
 	#[test]
 	fn test_param_bool_all_versions() {
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
 			round_trip_params(
 				version,
 				|w, v| {
@@ -649,7 +661,13 @@ mod tests {
 	#[test]
 	fn test_param_location_all_versions() {
 		let loc = Location { group: 5, object: 3 };
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
 			round_trip_params(
 				version,
 				|w, v| {
@@ -667,7 +685,13 @@ mod tests {
 
 	#[test]
 	fn test_param_filter_type_all_versions() {
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
 			round_trip_params(
 				version,
 				|w, v| {
@@ -685,7 +709,13 @@ mod tests {
 
 	#[test]
 	fn test_param_multiple_delta_encoding() {
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
 			round_trip_params(
 				version,
 				|w, v| {
@@ -716,7 +746,13 @@ mod tests {
 
 	#[test]
 	fn test_param_empty_set() {
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
 			round_trip_params(
 				version,
 				|w, v| {
@@ -733,7 +769,13 @@ mod tests {
 
 	#[test]
 	fn test_param_option_skip_none() {
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
 			round_trip_params(
 				version,
 				|w, v| {
@@ -759,7 +801,13 @@ mod tests {
 
 	#[test]
 	fn test_param_option_encode_some() {
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
 			round_trip_params(
 				version,
 				|w, v| {
@@ -786,7 +834,13 @@ mod tests {
 	#[test]
 	fn test_param_bare_type_defaults() {
 		// Bare types use T::default() when the parameter is absent
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
 			round_trip_params(
 				version,
 				|w, v| {
@@ -810,7 +864,13 @@ mod tests {
 	#[test]
 	fn test_param_unknown_rejected() {
 		// Manually encode one param at key 0x10, try to decode expecting key 0x20
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
 			let mut buf = BytesMut::new();
 			1usize.encode(&mut buf, version).unwrap();
 			0x10u64.encode(&mut buf, version).unwrap();
@@ -832,25 +892,29 @@ mod tests {
 	#[test]
 	fn test_param_duplicate_rejected() {
 		// Manually construct a buffer with duplicate key 0x20
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
 			let mut buf = BytesMut::new();
 			// Encode count = 2
 			2usize.encode(&mut buf, version).unwrap();
 			match version {
-				Version::Draft16 | Version::Draft17 => {
-					// First: key delta=0x20, value=100
+				Version::Draft14 | Version::Draft15 => {
+					// Plain (non-delta) keys: first key=0x20, second key=0x20
 					0x20u64.encode(&mut buf, version).unwrap();
 					100u8.param_encode(&mut buf, version).unwrap();
-					// Second: key delta=0 (same key 0x20), value=200
-					0u64.encode(&mut buf, version).unwrap();
+					0x20u64.encode(&mut buf, version).unwrap();
 					200u8.param_encode(&mut buf, version).unwrap();
 				}
 				_ => {
-					// First: key=0x20, value=100
+					// Delta-encoded: first delta=0x20 (abs=0x20), second delta=0 (abs=0x20)
 					0x20u64.encode(&mut buf, version).unwrap();
 					100u8.param_encode(&mut buf, version).unwrap();
-					// Second: key=0x20, value=200
-					0x20u64.encode(&mut buf, version).unwrap();
+					0u64.encode(&mut buf, version).unwrap();
 					200u8.param_encode(&mut buf, version).unwrap();
 				}
 			}

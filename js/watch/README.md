@@ -27,7 +27,7 @@ other `+esm` URLs. No build step or import map required:
 ```html
 <script type="module">
     import "https://cdn.jsdelivr.net/npm/@moq/watch/element.js/+esm";
-    import "https://cdn.jsdelivr.net/npm/@moq/watch/ui/index.js/+esm";
+    import "https://cdn.jsdelivr.net/npm/@moq/watch/ui/element.js/+esm";
 </script>
 
 <moq-watch-ui>
@@ -95,7 +95,7 @@ watch.video.media.subscribe((stream) => {
 
 ## UI Web Component
 
-`@moq/watch` includes a SolidJS-powered UI overlay (`<moq-watch-ui>`) with playback controls, volume, buffering indicator, quality selector, and stats panel. It depends on [`@moq/ui-core`](../ui-core) for shared UI primitives.
+`@moq/watch` includes a Web Component UI overlay (`<moq-watch-ui>`) with playback controls, volume, buffering indicator, quality selector, and stats panel. It is built on top of `@moq/signals` with no framework dependency.
 
 ```html
 <script type="module">

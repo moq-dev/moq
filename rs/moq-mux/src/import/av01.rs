@@ -249,6 +249,11 @@ impl Av01 {
 		Ok(())
 	}
 
+	/// Returns a reference to the underlying track producer.
+	pub fn track(&self) -> anyhow::Result<&moq_lite::TrackProducer> {
+		Ok(&self.track.as_ref().context("not initialized")?.track)
+	}
+
 	/// Decode as much data as possible from the given buffer.
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
 		&mut self,

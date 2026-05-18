@@ -308,7 +308,7 @@ export class Decoder {
 			});
 
 			for (;;) {
-				const next = await Promise.race([consumer.next(), effect.cancel]);
+				const next = await consumer.next();
 				if (!next) break;
 
 				const { frame } = next;
