@@ -68,7 +68,7 @@ impl IrohEndpointConfig {
 			let path = PathBuf::from(path);
 			if !path.exists() {
 				// Generate a new random secret and write it to the file.
-				let secret = SecretKey::generate(&mut rand::rng());
+				let secret = SecretKey::generate();
 				tokio::fs::write(path, hex::encode(secret.to_bytes())).await?;
 				secret
 			} else {
@@ -78,7 +78,7 @@ impl IrohEndpointConfig {
 			}
 		} else {
 			// Otherwise, generate a new random secret.
-			SecretKey::generate(&mut rand::rng())
+			SecretKey::generate()
 		};
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
