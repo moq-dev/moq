@@ -281,7 +281,8 @@ export class Publisher {
 			getStats?: () => Promise<{ estimatedSendRate: number | null }>;
 		};
 		if (!quic.getStats) {
-			// Close gracefully instead of aborting to avoid killing the session.
+			// Best-effort: we can't supply bandwidth estimates, so close the
+			// whole bidi (FIN + STOP_SENDING) to let the peer release its end.
 			stream.close();
 			return;
 		}
@@ -322,9 +323,8 @@ export class Publisher {
 				}
 			}
 		} catch (err: unknown) {
-			const e = error(err);
-			console.warn(`probe error: ${e.message}`);
-			stream.abort(e);
+			console.warn("probe stream error", err);
+			stream.close();
 		}
 	}
 

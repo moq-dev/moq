@@ -169,23 +169,47 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream.writer.closed().await
 	}
 
-	/// Opens a PROBE stream when consumers exist, reads bandwidth estimates.
-	/// Returns Ok(()) only when recv_bandwidth is None (disabled).
-	/// Stream-level errors (e.g. peer reset) are non-fatal and logged as debug.
+	/// Opens a PROBE stream on demand while a consumer is interested.
+	///
+	/// PROBE measures the peer's upload bandwidth to us, which is only meaningful
+	/// when the peer is publishing broadcasts. If we have no origin to insert
+	/// remote broadcasts into, skip the probe stream entirely.
+	///
+	/// Otherwise loop forever: wait for a consumer, race the probe stream against
+	/// the consumer leaving, then loop back. Probe is best-effort, so stream
+	/// errors are logged but never tear down the session.
 	async fn run_recv_bandwidth(self) -> Result<(), Error> {
+		if self.origin.is_none() {
+			return Ok(());
+		}
+
 		let Some(bandwidth) = &self.recv_bandwidth else {
 			return Ok(());
 		};
 
-		bandwidth.used().await?;
-
-		let res = self.run_probe_stream(bandwidth).await;
-		match res {
-			Ok(()) | Err(Error::Cancel | Error::Transport(_) | Error::Decode(_) | Error::Remote(_)) => {
-				tracing::debug!("probe stream closed");
-				Ok(())
+		loop {
+			// Wait until at least one consumer is interested in the estimate.
+			if bandwidth.used().await.is_err() {
+				return Ok(());
 			}
-			Err(err) => Err(err),
+
+			tokio::select! {
+				res = bandwidth.unused() => {
+					if res.is_err() {
+						return Ok(());
+					}
+					// Loop back: a new consumer may arrive later.
+				}
+				res = self.run_probe_stream(bandwidth) => {
+					match res {
+						Ok(()) => tracing::debug!("probe stream closed"),
+						Err(err) => tracing::warn!(%err, "probe stream error"),
+					}
+					// Stream ended (peer FIN'd or errored). Don't hammer an
+					// uncooperative peer; give up for the rest of the session.
+					return Ok(());
+				}
+			}
 		}
 	}
 
@@ -193,25 +217,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Probe).await?;
 
-		loop {
-			tokio::select! {
-				biased;
-				_ = bandwidth.closed() => {
-					stream.writer.finish()?;
-					return stream.writer.closed().await;
-				}
-				res = bandwidth.unused() => {
-					res?;
-					// No more consumers, close the probe stream.
-					stream.writer.finish()?;
-					return stream.writer.closed().await;
-				}
-				probe = stream.reader.decode::<lite::Probe>() => {
-					let probe = probe?;
-					bandwidth.set(Some(probe.bitrate))?;
-				}
-			}
+		while let Some(probe) = stream.reader.decode_maybe::<lite::Probe>().await? {
+			bandwidth.set(Some(probe.bitrate))?;
 		}
+
+		Ok(())
 	}
 
 	fn start_announce(
