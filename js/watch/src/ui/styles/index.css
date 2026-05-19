@@ -5,4 +5,5 @@
 @import "./quality-selector.css";
 @import "./buffer-control.css";
 @import "./buffering-indicator.css";
+@import "./offline-indicator.css";
 @import "./status-indicator.css";
