@@ -53,6 +53,8 @@ jobs:
             os: macos-latest
           - target: aarch64-apple-ios-sim
             os: macos-latest
+          - target: x86_64-apple-ios
+            os: macos-latest
           # Android
           - target: aarch64-linux-android
             os: ubuntu-latest
@@ -131,6 +133,113 @@ jobs:
           name: moq-ffi-bindings
           path: dist/*
 
+  package-swift:
+    name: Package Swift
+    needs: [parse-version, build, bindings]
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download native libs
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: moq-ffi-*-apple-*
+
+      - name: Download bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: moq-ffi-bindings
+          path: bindings
+
+      - name: Expand native lib archives
+        run: |
+          mkdir -p dist
+          for archive in artifacts/*/moq-ffi-*.tar.gz; do
+            tar -xzf "$archive" -C dist
+          done
+
+      - name: Expand bindings archive
+        run: |
+          mkdir -p bindings-extracted
+          for archive in bindings/moq-ffi-*-swift.tar.gz; do
+            tar -xzf "$archive" -C bindings-extracted
+          done
+
+      - name: Package Swift
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./swift/scripts/package.sh \
+            --version "$BUILD_VERSION" \
+            --lib-dir dist \
+            --bindings-dir bindings-extracted \
+            --output release-out
+
+      - name: Upload Swift package
+        uses: actions/upload-artifact@v7
+        with:
+          name: moq-ffi-swift
+          path: release-out/*
+
+  package-kotlin:
+    name: Package Kotlin
+    needs: [parse-version, build, bindings]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Download native libs
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: moq-ffi-*
+
+      - name: Download bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: moq-ffi-bindings
+          path: bindings
+
+      - name: Expand archives
+        run: |
+          mkdir -p dist bindings-extracted
+          for archive in artifacts/*/moq-ffi-*.tar.gz artifacts/*/moq-ffi-*.zip; do
+            [[ -f "$archive" ]] || continue
+            case "$archive" in
+              *.zip) unzip -q "$archive" -d dist;;
+              *.tar.gz) tar -xzf "$archive" -C dist;;
+            esac
+          done
+          for archive in bindings/moq-ffi-*-kotlin.tar.gz; do
+            tar -xzf "$archive" -C bindings-extracted
+          done
+
+      - name: Package Kotlin
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./kt/scripts/package.sh \
+            --version "$BUILD_VERSION" \
+            --lib-dir dist \
+            --bindings-dir bindings-extracted \
+            --output release-out
+
+      - name: Upload Kotlin package
+        uses: actions/upload-artifact@v7
+        with:
+          name: moq-ffi-kotlin
+          path: release-out/*
+
   python:
     name: Python wheels (${{ matrix.target }})
     needs: [parse-version]
@@ -190,7 +299,7 @@ jobs:
 
   release:
     name: Release
-    needs: [parse-version, build, bindings, python]
+    needs: [parse-version, build, bindings, python, package-swift, package-kotlin]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -238,3 +347,60 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-maven:
+    name: Publish to Maven Central
+    needs: [release, parse-version]
+    runs-on: ubuntu-latest
+    # Skipped until PUBLISH_MAVEN=true is set in repo variables and the
+    # MAVEN_CENTRAL_USERNAME / SIGNING_KEY secrets exist. See kt/README.md
+    # for setup steps.
+    if: vars.PUBLISH_MAVEN == 'true'
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Download Kotlin staging artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: moq-ffi-kotlin
+          path: kotlin-out
+
+      - name: Publish
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: ./kt/scripts/publish.sh
+
+  publish-spm:
+    name: Publish Swift Package
+    needs: [release, parse-version]
+    runs-on: ubuntu-latest
+    # Skipped until PUBLISH_SPM=true is set in repo variables and the
+    # SWIFT_MIRROR_TOKEN secret exists. See swift/README.md for setup steps.
+    if: vars.PUBLISH_SPM == 'true'
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download Swift package artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: moq-ffi-swift
+          path: swift-out
+
+      - name: Publish to moq-swift mirror
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          SWIFT_MIRROR_TOKEN: ${{ secrets.SWIFT_MIRROR_TOKEN }}
+        run: ./swift/scripts/publish.sh

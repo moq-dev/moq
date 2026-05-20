@@ -74,6 +74,11 @@ ci:
 	uv run maturin develop -m rs/moq-ffi/Cargo.toml --uv
 	uv run --package moq-lite --no-sync pyright
 
+	# Build the FFI wrappers (Swift on macOS only, Kotlin/JVM everywhere)
+	# and run their smoke tests. Skips with a warning if `swift`/`gradle`
+	# aren't on PATH so the rest of CI still runs.
+	just check-ffi
+
 	# Run the tofu checks.
 	(cd cdn && just check)
 
@@ -92,6 +97,14 @@ ci:
 
 	# Dry-run publish to verify packaging
 	cargo publish --dry-run
+
+# Smoke-check the Swift + Kotlin wrappers on top of moq-ffi.
+# Builds moq-ffi for the host, regenerates uniffi bindings, runs `swift test`
+# (macOS only) and `gradle :moq-jvm:test`. Both legs skip cleanly if their
+# toolchain is missing so `just ci` stays runnable on bare-bones machines.
+check-ffi:
+	bash swift/scripts/check.sh
+	bash kt/scripts/check.sh
 
 # Check semver compatibility against crates.io (default-members only)
 # requires: cargo install cargo-semver-checks
