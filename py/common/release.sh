@@ -5,7 +5,7 @@ set -euo pipefail
 # Usage: ./release.sh [package_dir ...]
 #
 # Examples:
-#   ./release.sh py/moq-lite     # Check and publish moq-lite
+#   ./release.sh py/moq-net      # Check and publish moq-net
 #   ./release.sh py/*/            # Check and publish all packages
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
