@@ -197,9 +197,9 @@ dependencies = [
 
 [[package]]
 name = "asn1-rs"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56624a96882bb8c26d61312ae18cb45868e5a9992ea73c58e45c3101e56a1e60"
+checksum = "b7f43a50ac4fdca5df8e885c21b835997f0a1cdee65494a6847694a98652d9d8"
 dependencies = [
  "asn1-rs-derive",
  "asn1-rs-impl",
@@ -1200,9 +1200,9 @@ dependencies = [
 
 [[package]]
 name = "crypto-common"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77727bb15fa921304124b128af125e7e3b968275d1b108b379190264f4423710"
+checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
 ]
@@ -1520,7 +1520,7 @@ checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer 0.12.0",
  "const-oid 0.10.2",
- "crypto-common 0.2.1",
+ "crypto-common 0.2.2",
 ]
 
 [[package]]
@@ -1884,9 +1884,9 @@ dependencies = [
 
 [[package]]
 name = "foundations"
-version = "5.7.0"
+version = "5.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6634dcef0c06273d416158d512a2a27a8c09f8f5d28c3a10ad17ac3400c32871"
+checksum = "f8842ece95ec0b71f0dbf9cb1da218ebdc6a40536bb97ea9c1974978058912b9"
 dependencies = [
  "anyhow",
  "cf-rustracing",
@@ -1924,9 +1924,9 @@ dependencies = [
 
 [[package]]
 name = "foundations-macros"
-version = "5.7.0"
+version = "5.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a6e06fc30d6ff96b8b593f9cfeeb755757e8d1cd0a6946c07e5030ad40c104c"
+checksum = "ef32f15128fcc7706efb662b46b92bcad51c1e92cd691320864efde9e5e218c0"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -2068,9 +2068,9 @@ checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
 
 [[package]]
 name = "futures-timer"
-version = "3.0.3"
+version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f288b0a4f20f9a56b5d1da57e2227c661b7b16168e2f72365f57b63326e29b24"
+checksum = "af43fadb8a98512d547e37b4e92e0ced13e205c061b87b4623eff01d918d6968"
 
 [[package]]
 name = "futures-util"
@@ -2319,12 +2319,12 @@ dependencies = [
 
 [[package]]
 name = "gst-plugin-version-helper"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a68a894ef2d738054b950e1dbef5d9012b63fd968d4d32dbccd31bd8d8d4b219"
+checksum = "94668bc2592732b8c2b653668ae41211d45988fb61264888b9c2d545d4bd826d"
 dependencies = [
  "chrono",
- "toml_edit 0.23.10+spec-1.0.0",
+ "toml_edit 0.25.11+spec-1.1.0",
 ]
 
 [[package]]
@@ -2391,7 +2391,7 @@ checksum = "253b313319f7109de64e480ffb606f89475cd758bae82e096e00c5d95341d30e"
 
 [[package]]
 name = "hang"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3410,7 +3410,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3451,9 +3451,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "local-ip-address"
-version = "0.6.12"
+version = "0.6.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7b0187df4e614e42405b49511b82ff7a1774fbd9a816060ee465067847cac22"
+checksum = "aa08fb2b1ec3ea84575e94b489d06d4ce0cbf052d12acd515838f50e3c3d63e3"
 dependencies = [
  "libc",
  "neli",
@@ -3614,7 +3614,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -3634,7 +3634,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.7.23"
+version = "0.7.24"
 dependencies = [
  "anyhow",
  "axum",
@@ -3655,7 +3655,7 @@ dependencies = [
 
 [[package]]
 name = "moq-clock"
-version = "0.10.19"
+version = "0.10.20"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3673,7 +3673,7 @@ version = "0.0.2"
 
 [[package]]
 name = "moq-ffi"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "bytes",
  "hang",
@@ -3724,7 +3724,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3749,7 +3749,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3790,7 +3790,7 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "conducer",
@@ -3807,7 +3807,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -4320,9 +4320,9 @@ dependencies = [
 
 [[package]]
 name = "num-conv"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6673768db2d862beb9b39a78fdcb1a69439615d5794a1be50caa9bc92c81967"
+checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
 name = "num-integer"
@@ -6950,18 +6950,6 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.23.10+spec-1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84c8b9f757e028cee9fa244aea147aab2a9ec09d5325a9b01e0a49730c2b5269"
-dependencies = [
- "indexmap 2.14.0",
- "toml_datetime 0.7.5+spec-1.1.0",
- "toml_parser",
- "winnow 0.7.15",
-]
-
-[[package]]
-name = "toml_edit"
 version = "0.25.11+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b59c4d22ed448339746c59b905d24568fcbb3ab65a500494f7b8c3e97739f2b"
@@ -7054,9 +7042,9 @@ dependencies = [
 
 [[package]]
 name = "tower-http"
-version = "0.6.10"
+version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68d6fdd9f81c2819c9a8b0e0cd91660e7746a8e6ea2ba7c6b2b057985f6bcb51"
+checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
  "async-compression",
  "bitflags",

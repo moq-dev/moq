@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4](https://github.com/moq-dev/moq/compare/moq-relay-v0.11.3...moq-relay-v0.11.4) - 2026-05-20
+
+### Other
+
+- rename moq-lite package to moq-net ([#1428](https://github.com/moq-dev/moq/pull/1428))
+
 ## [0.11.2](https://github.com/moq-dev/moq/compare/moq-relay-v0.11.1...moq-relay-v0.11.2) - 2026-05-18
 
 ### Other

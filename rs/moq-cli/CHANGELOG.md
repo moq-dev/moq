@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.24](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.23...moq-cli-v0.7.24) - 2026-05-20
+
+### Other
+
+- rename moq-lite package to moq-net ([#1428](https://github.com/moq-dev/moq/pull/1428))
+
 ## [0.7.23](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.22...moq-cli-v0.7.23) - 2026-05-18
 
 ### Other
