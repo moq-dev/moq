@@ -1,5 +1,6 @@
 use super::annexb::{NalIterator, START_CODE};
 use super::jitter::MinFrameDuration;
+use super::same_codec;
 
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
@@ -7,14 +8,20 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// A decoder for H.264 with inline SPS/PPS.
 pub struct Avc3 {
+	// The broadcast we publish on. Retained so we can mint a fresh track on
+	// codec changes (a mid-stream resolution/profile flip would otherwise
+	// mix incompatible samples into the same track).
+	broadcast: moq_net::BroadcastProducer,
+
 	// The catalog being produced.
 	catalog: crate::catalog::Producer,
 
-	// The track being produced.
+	// The track currently carrying frames.
 	//
 	// Created eagerly in `new()` so callers can monitor `used()`/`unused()`
-	// before any frames arrive. The catalog rendition is added/updated lazily
-	// in `init()` once the codec config is known from the SPS.
+	// before any frames arrive. The catalog rendition is added in `init()`
+	// once the codec config is known from the first SPS, and the track is
+	// replaced in `init()` if the codec config later changes.
 	track: crate::container::Producer<crate::container::Hang>,
 
 	// Whether the track has been initialized.
@@ -42,6 +49,7 @@ impl Avc3 {
 		let track = broadcast.unique_track(".avc3").expect("failed to create avc3 track");
 
 		Self {
+			broadcast,
 			catalog,
 			track: crate::container::Producer::new(track, crate::container::Hang::Legacy),
 			config: None,
@@ -72,7 +80,7 @@ impl Avc3 {
 		// AVCDecoderConfigurationRecord without having to scrape it from the
 		// keyframe themselves.
 		let description = match (&self.cached_sps, &self.cached_pps) {
-			(Some(sps_nal), Some(pps_nal)) => Some(build_avcc(sps_nal, pps_nal)),
+			(Some(sps_nal), Some(pps_nal)) => Some(build_avcc(sps_nal, pps_nal)?),
 			_ => None,
 		};
 
@@ -103,8 +111,23 @@ impl Avc3 {
 			return Ok(());
 		}
 
-		// Insert/update the catalog rendition (track was created eagerly in new()).
 		let mut catalog = self.catalog.lock();
+
+		// Codec-bearing fields determine track identity. A description-only
+		// update (e.g. cached_pps just arrived) keeps the existing track so
+		// downstream subscribers don't have to re-fetch on every catalog tick.
+		// The first SPS (None → Some) also reuses the eagerly-created track.
+		let needs_retrack = self.config.as_ref().is_some_and(|old| !same_codec(old, &config));
+
+		if needs_retrack {
+			let old_name = self.track.name.clone();
+			tracing::debug!(name = ?old_name, "codec changed; replacing track");
+			catalog.video.renditions.remove(&old_name);
+
+			let new_track = self.broadcast.unique_track(".avc3")?;
+			self.track = crate::container::Producer::new(new_track, crate::container::Hang::Legacy);
+		}
+
 		catalog.video.renditions.insert(self.track.name.clone(), config.clone());
 		tracing::debug!(name = ?self.track.name, ?config, "updated catalog");
 
@@ -378,8 +401,23 @@ struct Frame {
 /// Build an AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2) from a
 /// single SPS and PPS NAL. The high-profile extension fields are intentionally
 /// omitted — players that need them re-derive them from the SPS we ship inline.
-fn build_avcc(sps_nal: &[u8], pps_nal: &[u8]) -> Bytes {
+///
+/// Errors if either NAL is too large to fit avcC's 16-bit length fields.
+fn build_avcc(sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
 	use bytes::BufMut;
+
+	anyhow::ensure!(
+		sps_nal.len() <= u16::MAX as usize,
+		"SPS too large for avcC length field ({} > {})",
+		sps_nal.len(),
+		u16::MAX
+	);
+	anyhow::ensure!(
+		pps_nal.len() <= u16::MAX as usize,
+		"PPS too large for avcC length field ({} > {})",
+		pps_nal.len(),
+		u16::MAX
+	);
 
 	// SPS NAL: byte 0 is the NAL header; bytes 1..4 are profile_idc,
 	// constraint flags, and level_idc respectively.
@@ -399,5 +437,63 @@ fn build_avcc(sps_nal: &[u8], pps_nal: &[u8]) -> Bytes {
 	out.put_u8(1); // numOfPictureParameterSets
 	out.put_u16(pps_nal.len() as u16);
 	out.put_slice(pps_nal);
-	out.freeze()
+	Ok(out.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn avcc_layout_matches_iso_14496_15() {
+		// SPS NAL header byte (0x67 = nal_unit_type 7) followed by profile_idc,
+		// constraint flags, level_idc, then trailing rbsp bytes. The avcC
+		// builder only reads the first four bytes; the rest is just copied.
+		let sps = [0x67, 0x42, 0xc0, 0x1f, 0xde, 0xad];
+		let pps = [0x68, 0xce, 0x3c, 0x80];
+		let avcc = build_avcc(&sps, &pps).expect("avcC build");
+
+		// Manually reconstruct the expected layout.
+		let mut expected = vec![
+			1, // configurationVersion
+			0x42, // AVCProfileIndication
+			0xc0, // profile_compatibility (matches sps[2])
+			0x1f, // AVCLevelIndication
+			0xff, // reserved | lengthSizeMinusOne=3
+			0xe1, // reserved | numOfSequenceParameterSets=1
+			0, sps.len() as u8,
+		];
+		expected.extend_from_slice(&sps);
+		expected.push(1); // numOfPictureParameterSets
+		expected.extend_from_slice(&[0, pps.len() as u8]);
+		expected.extend_from_slice(&pps);
+
+		assert_eq!(avcc.as_ref(), expected.as_slice());
+	}
+
+	#[test]
+	fn avcc_errors_on_oversized_sps() {
+		let sps = vec![0u8; u16::MAX as usize + 1];
+		let pps = vec![0x68, 0xce, 0x3c, 0x80];
+		let err = build_avcc(&sps, &pps).expect_err("oversized SPS should error");
+		assert!(err.to_string().contains("SPS too large"), "got: {err}");
+	}
+
+	#[test]
+	fn avcc_errors_on_oversized_pps() {
+		let sps = vec![0x67, 0x42, 0xc0, 0x1f];
+		let pps = vec![0u8; u16::MAX as usize + 1];
+		let err = build_avcc(&sps, &pps).expect_err("oversized PPS should error");
+		assert!(err.to_string().contains("PPS too large"), "got: {err}");
+	}
+
+	#[test]
+	fn avcc_accepts_max_sized_nal() {
+		let sps = vec![0x67, 0x42, 0xc0, 0x1f]
+			.into_iter()
+			.chain(std::iter::repeat_n(0u8, u16::MAX as usize - 4))
+			.collect::<Vec<_>>();
+		let pps = vec![0x68, 0xce, 0x3c, 0x80];
+		assert!(build_avcc(&sps, &pps).is_ok());
+	}
 }

@@ -41,3 +41,13 @@ pub use stream::*;
 
 #[cfg(test)]
 mod test;
+
+/// True if two configs share the codec-bearing fields (anything that would
+/// require a new track on a downstream subscriber). Description, jitter, and
+/// purely informational fields are excluded.
+pub(crate) fn same_codec(a: &hang::catalog::VideoConfig, b: &hang::catalog::VideoConfig) -> bool {
+	a.codec == b.codec
+		&& a.coded_width == b.coded_width
+		&& a.coded_height == b.coded_height
+		&& a.container == b.container
+}

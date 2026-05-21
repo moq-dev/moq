@@ -1,5 +1,6 @@
 use super::annexb::{NalIterator, START_CODE};
 use super::jitter::MinFrameDuration;
+use super::same_codec;
 
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
@@ -58,7 +59,7 @@ impl Hev1 {
 
 		// hvcC is emitted once all of VPS, SPS, and PPS have been observed.
 		let description = match (&self.cached_vps, &self.cached_sps, &self.cached_pps) {
-			(Some(vps_nal), Some(sps_nal), Some(pps_nal)) => Some(build_hvcc(vps_nal, sps_nal, pps_nal, sps)?),
+			(Some(vps_nal), Some(sps_nal), Some(pps_nal)) => Some(build_hvcc(vps_nal, sps_nal, pps_nal)?),
 			_ => None,
 		};
 
@@ -382,22 +383,26 @@ impl Drop for Hev1 {
 	}
 }
 
-// True if two configs share the codec-bearing fields (anything that would
-// require a new track on a downstream subscriber). Description, jitter, and
-// purely informational fields are excluded.
-fn same_codec(a: &hang::catalog::VideoConfig, b: &hang::catalog::VideoConfig) -> bool {
-	a.codec == b.codec
-		&& a.coded_width == b.coded_width
-		&& a.coded_height == b.coded_height
-		&& a.container == b.container
-}
-
 /// Build an HEVCDecoderConfigurationRecord (ISO/IEC 14496-15 §8.3.3) from a
 /// single VPS, SPS, and PPS NAL. Single-layer streams only — multi-layer
 /// VPS extensions are not represented.
-fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8], sps: &SpsNALUnit) -> anyhow::Result<Bytes> {
+///
+/// Errors if any NAL is too large to fit hvcC's 16-bit length fields, or if
+/// the SPS cannot be parsed.
+fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
 	use bytes::BufMut;
 
+	for (label, nal) in [("VPS", vps_nal), ("SPS", sps_nal), ("PPS", pps_nal)] {
+		anyhow::ensure!(
+			nal.len() <= u16::MAX as usize,
+			"{} too large for hvcC length field ({} > {})",
+			label,
+			nal.len(),
+			u16::MAX
+		);
+	}
+
+	let sps = SpsNALUnit::parse(&mut &sps_nal[..]).context("failed to parse SPS NAL unit for hvcC")?;
 	let profile = &sps.rbsp.profile_tier_level.general_profile;
 	let level_idc = profile.level_idc.context("missing level_idc in SPS")?;
 	let constraint_flags = pack_constraint_flags(profile);
@@ -514,5 +519,39 @@ fn aspect_ratio_from_idc(idc: scuffle_h265::AspectRatioIdc) -> Option<(u32, u32)
 		scuffle_h265::AspectRatioIdc::Aspect2_1 => Some((2, 1)),
 		scuffle_h265::AspectRatioIdc::ExtendedSar => None,
 		_ => None, // Reserved
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// Overflow checks run before SPS parsing, so the SPS bytes only need to
+	// be present and short — they're never actually parsed in these tests.
+	#[test]
+	fn hvcc_errors_on_oversized_vps() {
+		let vps = vec![0u8; u16::MAX as usize + 1];
+		let sps = vec![0x42, 0x01];
+		let pps = vec![0x44, 0x01];
+		let err = build_hvcc(&vps, &sps, &pps).expect_err("oversized VPS should error");
+		assert!(err.to_string().contains("VPS too large"), "got: {err}");
+	}
+
+	#[test]
+	fn hvcc_errors_on_oversized_sps() {
+		let vps = vec![0x40, 0x01];
+		let sps = vec![0u8; u16::MAX as usize + 1];
+		let pps = vec![0x44, 0x01];
+		let err = build_hvcc(&vps, &sps, &pps).expect_err("oversized SPS should error");
+		assert!(err.to_string().contains("SPS too large"), "got: {err}");
+	}
+
+	#[test]
+	fn hvcc_errors_on_oversized_pps() {
+		let vps = vec![0x40, 0x01];
+		let sps = vec![0x42, 0x01];
+		let pps = vec![0u8; u16::MAX as usize + 1];
+		let err = build_hvcc(&vps, &sps, &pps).expect_err("oversized PPS should error");
+		assert!(err.to_string().contains("PPS too large"), "got: {err}");
 	}
 }
