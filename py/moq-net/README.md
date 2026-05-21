@@ -1,13 +1,13 @@
-# moq-lite
+# moq-net
 
-Ergonomic Python wrapper for [MoQ (Media over QUIC)](https://github.com/moq-dev/moq) — a next-generation live media delivery protocol providing real-time latency at massive scale.
+The networking layer for [Media over QUIC](https://github.com/moq-dev/moq) in Python: real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC.
 
-`moq-lite` wraps the auto-generated [moq-ffi](https://pypi.org/project/moq-ffi/) bindings with a Pythonic API: no `Moq` prefixes, async iterators, context managers, and simplified connection setup.
+`moq-net` wraps the auto-generated [moq-ffi](https://pypi.org/project/moq-ffi/) bindings with a Pythonic API: no `Moq` prefixes, async iterators, context managers, and simplified connection setup. At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
 
 ## Installation
 
 ```bash
-pip install moq-lite
+pip install moq-net
 ```
 
 ## Quick Start
@@ -16,7 +16,7 @@ pip install moq-lite
 
 ```python
 import asyncio
-import moq_lite as moq
+import moq_net as moq
 
 async def main():
     async with moq.Client("https://relay.quic.video") as client:
@@ -34,7 +34,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
-import moq_lite as moq
+import moq_net as moq
 
 async def main():
     async with moq.Client("https://relay.quic.video") as client:
@@ -60,7 +60,7 @@ asyncio.run(main())
 For full control over the origin topology:
 
 ```python
-import moq_lite as moq
+import moq_net as moq
 
 origin = moq.OriginProducer()
 client = moq.Client(

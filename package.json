@@ -27,6 +27,7 @@
 	"workspaces": [
 		"doc",
 		"js/lite",
+		"js/net",
 		"js/clock",
 		"js/token",
 		"js/hang",

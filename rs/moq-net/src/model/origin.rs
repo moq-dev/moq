@@ -1,11 +1,11 @@
 use std::{
-	collections::{HashMap, VecDeque},
+	collections::{BTreeMap, HashMap, VecDeque},
 	fmt,
 	sync::atomic::{AtomicU64, Ordering},
+	task::Poll,
 };
 
 use rand::Rng;
-use tokio::sync::mpsc;
 use web_async::Lock;
 
 use super::BroadcastConsumer;
@@ -231,27 +231,99 @@ struct OriginBroadcast {
 	backup: VecDeque<BroadcastConsumer>,
 }
 
+/// One coalesced update queued for an `OriginConsumer`.
+///
+/// At most one entry exists per path, so a slow consumer's pending set is bounded
+/// by the number of distinct paths. `UnannounceAnnounce` preserves the
+/// signal that the broadcast at a path was replaced (the consumer must see
+/// `(path, None)` before `(path, Some(new))`), while a stale
+/// `Announce` cancels with a subsequent `unannounce` because the consumer
+/// has not yet observed it.
+enum PendingUpdate {
+	Announce(BroadcastConsumer),
+	Unannounce,
+	UnannounceAnnounce(BroadcastConsumer),
+}
+
+/// Pending updates keyed by path. `BTreeMap` keeps memory strictly bounded by
+/// the number of distinct paths with outstanding work (collapsed pairs are
+/// fully erased) and gives a deterministic lexicographic delivery order so
+/// tests can predict it.
+#[derive(Default)]
+struct OriginConsumerState {
+	pending: BTreeMap<PathOwned, PendingUpdate>,
+}
+
+impl OriginConsumerState {
+	fn apply_announce(&mut self, path: PathOwned, broadcast: BroadcastConsumer) {
+		let new = match self.pending.remove(&path) {
+			// First announce, or a stale announce being replaced.
+			None | Some(PendingUpdate::Announce(_)) => PendingUpdate::Announce(broadcast),
+			// Consumer needs to observe the unannounce before this announce.
+			Some(PendingUpdate::Unannounce | PendingUpdate::UnannounceAnnounce(_)) => {
+				PendingUpdate::UnannounceAnnounce(broadcast)
+			}
+		};
+		self.pending.insert(path, new);
+	}
+
+	fn apply_unannounce(&mut self, path: PathOwned) {
+		match self.pending.remove(&path) {
+			// Consumer has not seen the pending announce; drop both entirely.
+			Some(PendingUpdate::Announce(_)) => {}
+			None | Some(PendingUpdate::Unannounce) => {
+				self.pending.insert(path, PendingUpdate::Unannounce);
+			}
+			// The embedded announce cancels with this unannounce; the consumer
+			// still needs the leading unannounce.
+			Some(PendingUpdate::UnannounceAnnounce(_)) => {
+				self.pending.insert(path, PendingUpdate::Unannounce);
+			}
+		}
+	}
+
+	/// Take one update to deliver to the consumer, if any.
+	fn take(&mut self) -> Option<OriginAnnounce> {
+		let path = self.pending.keys().next()?.clone();
+		match self.pending.remove(&path).unwrap() {
+			PendingUpdate::Announce(broadcast) => Some((path, Some(broadcast))),
+			PendingUpdate::Unannounce => Some((path, None)),
+			PendingUpdate::UnannounceAnnounce(broadcast) => {
+				// Deliver the unannounce now; leave the trailing announce pending so
+				// the next take returns it for the same path.
+				self.pending.insert(path.clone(), PendingUpdate::Announce(broadcast));
+				Some((path, None))
+			}
+		}
+	}
+}
+
 #[derive(Clone)]
 struct OriginConsumerNotify {
 	root: PathOwned,
-	tx: mpsc::UnboundedSender<OriginAnnounce>,
+	state: conducer::Producer<OriginConsumerState>,
 }
 
 impl OriginConsumerNotify {
 	fn announce(&self, path: impl AsPath, broadcast: BroadcastConsumer) {
 		let path = path.as_path().strip_prefix(&self.root).unwrap().to_owned();
-		self.tx.send((path, Some(broadcast))).expect("consumer closed");
+		self.state
+			.write()
+			.ok()
+			.expect("consumer closed")
+			.apply_announce(path, broadcast);
 	}
 
 	fn reannounce(&self, path: impl AsPath, broadcast: BroadcastConsumer) {
 		let path = path.as_path().strip_prefix(&self.root).unwrap().to_owned();
-		self.tx.send((path.clone(), None)).expect("consumer closed");
-		self.tx.send((path, Some(broadcast))).expect("consumer closed");
+		let mut state = self.state.write().ok().expect("consumer closed");
+		state.apply_unannounce(path.clone());
+		state.apply_announce(path, broadcast);
 	}
 
 	fn unannounce(&self, path: impl AsPath) {
 		let path = path.as_path().strip_prefix(&self.root).unwrap().to_owned();
-		self.tx.send((path, None)).expect("consumer closed");
+		self.state.write().ok().expect("consumer closed").apply_unannounce(path);
 	}
 }
 
@@ -706,7 +778,10 @@ pub struct OriginConsumer {
 	// Identity of the origin this consumer was derived from.
 	info: Origin,
 	nodes: OriginNodes,
-	updates: mpsc::UnboundedReceiver<OriginAnnounce>,
+
+	// Pending updates queued for this consumer. Coalesced so a slow consumer
+	// can't accumulate redundant announce/unannounce pairs.
+	state: conducer::Producer<OriginConsumerState>,
 
 	// A prefix that is automatically stripped from all paths.
 	root: PathOwned,
@@ -722,23 +797,22 @@ impl std::ops::Deref for OriginConsumer {
 
 impl OriginConsumer {
 	fn new(info: Origin, root: PathOwned, nodes: OriginNodes) -> Self {
-		let (tx, rx) = mpsc::unbounded_channel();
-
+		let state = conducer::Producer::<OriginConsumerState>::default();
 		let id = ConsumerId::new();
 
-		for (_, state) in &nodes.nodes {
+		for (_, node) in &nodes.nodes {
 			let notify = OriginConsumerNotify {
 				root: root.clone(),
-				tx: tx.clone(),
+				state: state.clone(),
 			};
-			state.lock().consume(id, notify);
+			node.lock().consume(id, notify);
 		}
 
 		Self {
 			id,
 			info,
 			nodes,
-			updates: rx,
+			state,
 			root,
 		}
 	}
@@ -751,7 +825,24 @@ impl OriginConsumer {
 	///
 	/// Note: The returned path is absolute and will always match this consumer's prefix.
 	pub async fn announced(&mut self) -> Option<OriginAnnounce> {
-		self.updates.recv().await
+		conducer::wait(|waiter| self.poll_announced(waiter)).await
+	}
+
+	/// Poll for the next (un)announced broadcast, without blocking.
+	///
+	/// Returns `Poll::Ready(Some(_))` for an update, `Poll::Ready(None)` if the
+	/// consumer is closed, or `Poll::Pending` after registering `waiter` to be
+	/// notified when the next update arrives.
+	pub fn poll_announced(&mut self, waiter: &conducer::Waiter) -> Poll<Option<OriginAnnounce>> {
+		match self.state.poll(waiter, |state| match state.take() {
+			Some(item) => Poll::Ready(item),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(item)) => Poll::Ready(Some(item)),
+			// Closed: discard the Ref so its MutexGuard doesn't escape this call.
+			Poll::Ready(Err(_)) => Poll::Ready(None),
+			Poll::Pending => Poll::Pending,
+		}
 	}
 
 	/// Returns the next (un)announced broadcast and the absolute path without blocking.
@@ -759,7 +850,7 @@ impl OriginConsumer {
 	/// Returns None if there is no update available; NOT because the consumer is closed.
 	/// You have to use `is_closed` to check if the consumer is closed.
 	pub fn try_announced(&mut self) -> Option<OriginAnnounce> {
-		self.updates.try_recv().ok()
+		self.state.write().ok()?.take()
 	}
 
 	/// Create another consumer with its own announcement cursor over the same origin.
@@ -1027,11 +1118,11 @@ mod tests {
 		assert!(consumer.get_broadcast("test").is_some());
 
 		// On equal hop lengths, each new publish replaces the active and reannounces.
-		consumer.assert_next("test", &consumer1);
-		consumer.assert_next_none("test");
-		consumer.assert_next("test", &consumer2);
-		consumer.assert_next_none("test");
+		// Because the consumer hasn't drained between publishes, the stale announces
+		// collapse with their following unannounces and only the final active broadcast
+		// is delivered.
 		consumer.assert_next("test", &consumer3);
+		consumer.assert_next_wait();
 
 		// Drop a backup, nothing should change.
 		drop(broadcast2);
@@ -1108,36 +1199,38 @@ mod tests {
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 		assert!(origin.consume().get_broadcast("test").is_none());
 	}
-	// There was a tokio bug where only the first 127 broadcasts would be received instantly.
+	// A previous mpsc-based implementation could only deliver the first 127 broadcasts
+	// instantly via `assert_next` (which uses `now_or_never`). The conducer-backed
+	// implementation polls synchronously and can deliver all of them without yielding.
+	// Names are zero-padded so lexicographic delivery order matches the loop index.
 	#[tokio::test]
-	#[should_panic]
-	async fn test_128() {
+	async fn test_many_announces() {
 		let origin = Origin::random().produce();
 		let broadcast = Broadcast::new().produce();
 
 		let mut consumer = origin.consume();
 		for i in 0..256 {
-			origin.publish_broadcast(format!("test{i}"), broadcast.consume());
+			origin.publish_broadcast(format!("test{i:03}"), broadcast.consume());
 		}
 
 		for i in 0..256 {
-			consumer.assert_next(format!("test{i}"), &broadcast.consume());
+			consumer.assert_next(format!("test{i:03}"), &broadcast.consume());
 		}
+		consumer.assert_next_wait();
 	}
 
 	#[tokio::test]
-	async fn test_128_fix() {
+	async fn test_many_announces_try() {
 		let origin = Origin::random().produce();
 		let broadcast = Broadcast::new().produce();
 
 		let mut consumer = origin.consume();
 		for i in 0..256 {
-			origin.publish_broadcast(format!("test{i}"), broadcast.consume());
+			origin.publish_broadcast(format!("test{i:03}"), broadcast.consume());
 		}
 
 		for i in 0..256 {
-			// try_next does not have the same issue because it's synchronous.
-			consumer.assert_try_next(format!("test{i}"), &broadcast.consume());
+			consumer.assert_try_next(format!("test{i:03}"), &broadcast.consume());
 		}
 	}
 
@@ -1899,5 +1992,130 @@ mod tests {
 			.now_or_never()
 			.expect("must not block");
 		assert!(result.is_none());
+	}
+
+	// Coalescing tests: a slow consumer that doesn't drain between updates
+	// should observe a bounded number of deliveries.
+
+	#[tokio::test]
+	async fn test_coalesce_announce_then_unannounce() {
+		// announce + unannounce that the consumer hasn't observed yet collapses to nothing.
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let mut consumer = origin.consume();
+
+		let broadcast = Broadcast::new().produce();
+		origin.publish_broadcast("test", broadcast.consume());
+		drop(broadcast);
+
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_coalesce_announce_unannounce_announce() {
+		// announce, unannounce, announce that the consumer hasn't drained collapses
+		// to a single Announce of the latest broadcast.
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let mut consumer = origin.consume();
+
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
+
+		origin.publish_broadcast("test", broadcast1.consume());
+		drop(broadcast1);
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+		origin.publish_broadcast("test", broadcast2.consume());
+
+		consumer.assert_next("test", &broadcast2.consume());
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_coalesce_unannounce_announce_preserved() {
+		// unannounce followed by announce of a different broadcast must be preserved
+		// as two deliveries so the consumer learns the origin changed.
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let broadcast1 = Broadcast::new().produce();
+		origin.publish_broadcast("test", broadcast1.consume());
+
+		let mut consumer = origin.consume();
+		consumer.assert_next("test", &broadcast1.consume());
+
+		// Drop, then publish a fresh broadcast at the same path.
+		drop(broadcast1);
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+		let broadcast2 = Broadcast::new().produce();
+		origin.publish_broadcast("test", broadcast2.consume());
+
+		// The consumer must see the unannounce before the new announce.
+		consumer.assert_next_none("test");
+		consumer.assert_next("test", &broadcast2.consume());
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_coalesce_unannounce_announce_unannounce() {
+		// unannounce + announce + unannounce collapses to a single unannounce: the
+		// embedded announce was never observed.
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let broadcast1 = Broadcast::new().produce();
+		origin.publish_broadcast("test", broadcast1.consume());
+
+		let mut consumer = origin.consume();
+		consumer.assert_next("test", &broadcast1.consume());
+
+		drop(broadcast1);
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+		let broadcast2 = Broadcast::new().produce();
+		origin.publish_broadcast("test", broadcast2.consume());
+		drop(broadcast2);
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+		consumer.assert_next_none("test");
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_coalesce_churn_bounded() {
+		// A churn loop on a single path should keep the pending set bounded.
+		// Backup promotion during cleanup can leave the consumer with zero or one
+		// pending update for "test" depending on the order tasks run; we only
+		// require that churn doesn't accumulate across iterations.
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let mut consumer = origin.consume();
+
+		for _ in 0..1000 {
+			let broadcast = Broadcast::new().produce();
+			origin.publish_broadcast("test", broadcast.consume());
+			drop(broadcast);
+		}
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+		let mut collected = Vec::new();
+		while let Some(update) = consumer.try_announced() {
+			collected.push(update);
+		}
+		assert!(
+			collected.len() <= 1,
+			"expected at most one pending update, got {}",
+			collected.len()
+		);
+		assert!(
+			collected.iter().all(|(path, _)| path == &Path::new("test")),
+			"unexpected path in pending updates",
+		);
 	}
 }

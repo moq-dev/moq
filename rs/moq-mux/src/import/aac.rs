@@ -108,7 +108,7 @@ pub struct Aac {
 
 impl Aac {
 	pub fn new(
-		mut broadcast: moq_lite::BroadcastProducer,
+		mut broadcast: moq_net::BroadcastProducer,
 		mut catalog: crate::catalog::Producer,
 		config: AacConfig,
 	) -> anyhow::Result<Self> {
@@ -138,7 +138,7 @@ impl Aac {
 	}
 
 	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> &moq_lite::TrackProducer {
+	pub fn track(&self) -> &moq_net::TrackProducer {
 		&self.track.track
 	}
 

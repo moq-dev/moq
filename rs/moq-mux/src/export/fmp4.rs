@@ -11,7 +11,7 @@ use crate::container::{Consumer, Frame, Hang};
 
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
 ///
-/// Built from a [`moq_lite::BroadcastConsumer`], `Fmp4` subscribes to the hang catalog,
+/// Built from a [`moq_net::BroadcastConsumer`], `Fmp4` subscribes to the hang catalog,
 /// (un)subscribes per-rendition tracks as the catalog changes, decodes both Legacy and
 /// CMAF tracks via [`Consumer<Hang>`], and re-encodes everything as a merged init
 /// segment + moof+mdat fragments in presentation-timestamp order across tracks. This
@@ -21,7 +21,7 @@ use crate::container::{Consumer, Frame, Hang};
 /// init segment (ftyp + multi-track moov), subsequent calls return moof+mdat
 /// fragments. Returns `None` when the broadcast ends.
 pub struct Fmp4 {
-	broadcast: moq_lite::BroadcastConsumer,
+	broadcast: moq_net::BroadcastConsumer,
 	catalog: Option<crate::catalog::Consumer>,
 	latency: Duration,
 
@@ -55,7 +55,7 @@ impl Fmp4 {
 	///
 	/// The hang catalog is subscribed internally; per-rendition tracks are (un)subscribed
 	/// as the catalog changes.
-	pub fn new(broadcast: moq_lite::BroadcastConsumer) -> Result<Self, crate::Error> {
+	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
 		let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
 		let catalog = crate::catalog::Consumer::new(catalog_track);
 
@@ -175,7 +175,7 @@ impl Fmp4 {
 			}
 
 			let media: Hang = (*container).try_into()?;
-			let track = self.broadcast.subscribe_track(&moq_lite::Track::new(name.clone()))?;
+			let track = self.broadcast.subscribe_track(&moq_net::Track::new(name.clone()))?;
 			let consumer = Consumer::new(track, media).with_latency(self.latency);
 
 			let timescale = catalog_timescale(catalog, name).context("track not in catalog")?;

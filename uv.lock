@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 members = [
     "moq",
     "moq-lite",
+    "moq-net",
 ]
 
 [[package]]
@@ -106,8 +107,19 @@ wheels = [
 
 [[package]]
 name = "moq-lite"
-version = "0.0.3"
+version = "0.1.0"
 source = { editable = "py/moq-lite" }
+dependencies = [
+    { name = "moq-net" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "moq-net", editable = "py/moq-net" }]
+
+[[package]]
+name = "moq-net"
+version = "0.1.0"
+source = { editable = "py/moq-net" }
 dependencies = [
     { name = "moq-ffi" },
 ]

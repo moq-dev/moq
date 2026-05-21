@@ -1,5 +1,5 @@
 import * as Catalog from "@moq/hang/catalog";
-import * as Moq from "@moq/lite";
+import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import * as Chat from "./chat";

@@ -2,7 +2,7 @@
 
 import struct
 
-import moq_lite as moq
+import moq_net as moq
 import pytest
 
 

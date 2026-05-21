@@ -90,8 +90,8 @@ pub struct Config {
 /// track monitors, and async tasks.
 struct Session {
 	video_encoder: video::VideoEncoder,
-	video_track: moq_lite::TrackProducer,
-	audio_track: moq_lite::TrackProducer,
+	video_track: moq_net::TrackProducer,
+	audio_track: moq_net::TrackProducer,
 
 	/// Whether anyone is subscribed to the video/audio tracks.
 	video_active: AtomicBool,
@@ -109,7 +109,7 @@ struct Session {
 impl Session {
 	/// Monitor a single track's subscription state.
 	/// Sets the flag when a viewer subscribes, clears it when all unsubscribe.
-	async fn run_track_monitor(&self, name: &str, track: &moq_lite::TrackProducer, flag: &AtomicBool) {
+	async fn run_track_monitor(&self, name: &str, track: &moq_net::TrackProducer, flag: &AtomicBool) {
 		loop {
 			if track.used().await.is_err() {
 				break;
@@ -209,10 +209,10 @@ async fn run(config: &Config) -> Result<()> {
 	let client = config.client.clone().init()?;
 
 	// Create the broadcast producer.
-	let mut broadcast = moq_lite::Broadcast::new().produce();
+	let mut broadcast = moq_net::Broadcast::new().produce();
 
 	// Publish origin: the game session broadcast.
-	let publish_origin = moq_lite::Origin::random().produce();
+	let publish_origin = moq_net::Origin::random().produce();
 	let default_game_prefix = format!("{}/game", config.prefix);
 	let default_viewer_prefix = format!("{}/viewer", config.prefix);
 	let game_prefix = config.prefix_game.as_deref().unwrap_or(&default_game_prefix);
@@ -224,7 +224,7 @@ async fn run(config: &Config) -> Result<()> {
 	// Consume origin: viewer broadcasts under the viewer prefix.
 	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"
 	let viewer_path = format!("{viewer_prefix}/{name}");
-	let consume_origin = moq_lite::Origin::random().produce();
+	let consume_origin = moq_net::Origin::random().produce();
 	let mut viewer_consumer = consume_origin
 		.with_root(&viewer_path)
 		.expect("viewer prefix should be valid")

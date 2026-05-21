@@ -1,19 +1,21 @@
 ---
-title: moq-lite
-description: Core pub/sub transport protocol in Rust
+title: moq-net
+description: Real-time pub/sub with caching, fan-out, and prioritization
 ---
 
-# moq-lite
+# moq-net
 
-[![crates.io](https://img.shields.io/crates/v/moq-lite)](https://crates.io/crates/moq-lite)
-[![docs.rs](https://docs.rs/moq-lite/badge.svg)](https://docs.rs/moq-lite)
+[![crates.io](https://img.shields.io/crates/v/moq-net)](https://crates.io/crates/moq-net)
+[![docs.rs](https://docs.rs/moq-net/badge.svg)](https://docs.rs/moq-net)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/moq-dev/moq/blob/main/LICENSE-MIT)
 
-The core pub/sub transport protocol implementing the [moq-lite specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/).
+The networking layer for Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC. At session setup it negotiates one of two wire protocols: the simplified [moq-lite](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) protocol or the full IETF [moq-transport](https://datatracker.ietf.org/group/moq/documents/) protocol.
+
+> Previously published as `moq-lite`; renamed to clarify that this is the networking layer, not a specific wire protocol.
 
 ## Overview
 
-`moq-lite` provides the networking layer for MoQ, implementing broadcasts, tracks, groups, and frames on top of QUIC. Live media is built on top of this layer using something like [hang](/rs/crate/hang).
+`moq-net` provides the networking layer for MoQ, implementing broadcasts, tracks, groups, and frames on top of QUIC. Live media is built on top of this layer using something like [hang](/rs/crate/hang).
 
 ## Core Concepts
 
@@ -28,14 +30,14 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-moq-lite = "0.1"
+moq-net = "0.1"
 ```
 
 ## API Reference
 
 The Rust API uses a builder pattern with `Session`, `OriginProducer`/`OriginConsumer`, and related types. See the full API documentation for details:
 
-**[docs.rs/moq-lite](https://docs.rs/moq-lite)**
+**[docs.rs/moq-net](https://docs.rs/moq-net)**
 
 ## Features
 
@@ -43,7 +45,7 @@ The Rust API uses a builder pattern with `Session`, `OriginProducer`/`OriginCons
 - Groups are delivered over independent QUIC streams
 - Built-in deduplication for shared subscriptions
 - QUIC stream prioritization for important data
-- Partial reliability — old groups can be dropped to maintain real-time latency
+- Partial reliability, old groups can be dropped to maintain real-time latency
 
 ## Authentication
 
@@ -51,7 +53,7 @@ Pass JWT tokens via query parameters in the URL. See [Authentication guide](/app
 
 ## Protocol Specification
 
-See the [moq-lite specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) for protocol details.
+See the [moq-lite specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) and [moq-transport drafts](https://datatracker.ietf.org/group/moq/documents/) for the wire formats that this crate speaks.
 
 ## Next Steps
 

@@ -25,7 +25,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 /// - Opus
 pub struct Fmp4 {
 	/// The broadcast being produced
-	broadcast: moq_lite::BroadcastProducer,
+	broadcast: moq_net::BroadcastProducer,
 
 	/// The catalog being produced
 	catalog: crate::catalog::Producer,
@@ -50,8 +50,8 @@ enum TrackKind {
 struct Fmp4Track {
 	kind: TrackKind,
 
-	track: moq_lite::TrackProducer,
-	group: Option<moq_lite::GroupProducer>,
+	track: moq_net::TrackProducer,
+	group: Option<moq_net::GroupProducer>,
 
 	// The minimum buffer required for the track.
 	jitter: Option<Timestamp>,
@@ -67,7 +67,7 @@ impl Fmp4 {
 	/// Create a new CMAF importer that will write to the given broadcast.
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the fMP4 file.
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
 			catalog,
 			tracks: HashMap::default(),

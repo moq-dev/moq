@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "moq-lite"
-version = "0.0.3"
-description = "Ergonomic Python wrapper for MoQ (Media over QUIC)"
+name = "moq-net"
+version = "0.1.0"
+description = "The networking layer for Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 requires-python = ">=3.10"

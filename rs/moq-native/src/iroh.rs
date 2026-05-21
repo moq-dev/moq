@@ -82,7 +82,7 @@ impl IrohEndpointConfig {
 		};
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
-		let mut alpns: Vec<Vec<u8>> = moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
+		let mut alpns: Vec<Vec<u8>> = moq_net::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
 		alpns.push(web_transport_iroh::ALPN_H3.as_bytes().to_vec());
 
 		let mut builder = if self.disable_relay.unwrap_or(false) {
@@ -130,7 +130,7 @@ impl IrohRequest {
 					request: Box::new(request),
 				})
 			}
-			alpn if moq_lite::ALPNS.contains(&alpn) => Ok(Self::Quic {
+			alpn if moq_net::ALPNS.contains(&alpn) => Ok(Self::Quic {
 				request: web_transport_iroh::QuicRequest::accept(conn),
 			}),
 			_ => Err(anyhow::anyhow!("unsupported ALPN: {alpn}")),
@@ -186,8 +186,8 @@ pub(crate) async fn connect(
 
 	// We need to use this API to provide multiple ALPNs.
 	// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
-	let alpn = moq_lite::ALPNS[0].as_bytes();
-	let mut additional: Vec<Vec<u8>> = moq_lite::ALPNS[1..]
+	let alpn = moq_net::ALPNS[0].as_bytes();
+	let mut additional: Vec<Vec<u8>> = moq_net::ALPNS[1..]
 		.iter()
 		.map(|alpn| alpn.as_bytes().to_vec())
 		.collect();
@@ -204,13 +204,13 @@ pub(crate) async fn connect(
 			let url = url_set_scheme(url, "https")?;
 
 			let mut request = ConnectRequest::new(url);
-			for alpn in moq_lite::ALPNS {
+			for alpn in moq_net::ALPNS {
 				request = request.with_protocol(alpn.to_string());
 			}
 
 			web_transport_iroh::Session::connect_h3(conn, request).await?
 		}
-		alpn if moq_lite::ALPNS.contains(&alpn) => {
+		alpn if moq_net::ALPNS.contains(&alpn) => {
 			let conn = connecting.await?;
 			web_transport_iroh::Session::raw(conn)
 		}

@@ -41,7 +41,7 @@ The simplest way to publish:
 For more control, use `@moq/publish` directly:
 
 ```typescript
-import * as Moq from "@moq/lite";
+import * as Moq from "@moq/net";
 import * as Publish from "@moq/publish";
 
 const connection = await Moq.Connection.connect(

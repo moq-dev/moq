@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use moq_lite::{Origin, OriginConsumer, OriginProducer};
+use moq_net::{Origin, OriginConsumer, OriginProducer};
 use url::Url;
 
 use crate::AuthToken;
@@ -39,7 +39,7 @@ pub struct ClusterConfig {
 ///
 /// Local sessions and remote cluster connections all publish into the same
 /// origin. Loop prevention and shortest-path preference come from the
-/// hop list carried on each broadcast (see [`moq_lite::Broadcast::hops`]).
+/// hop list carried on each broadcast (see [`moq_net::Broadcast::hops`]).
 #[derive(Clone)]
 pub struct Cluster {
 	config: ClusterConfig,

@@ -26,9 +26,9 @@ use super::{Container, Frame};
 ///
 /// This is useful for CMAF where multiple samples should be packed into one moof+mdat.
 pub struct Producer<C: Container> {
-	pub track: moq_lite::TrackProducer,
+	pub track: moq_net::TrackProducer,
 	container: C,
-	group: Option<moq_lite::GroupProducer>,
+	group: Option<moq_net::GroupProducer>,
 	buffer: Vec<Frame>,
 
 	latency: std::time::Duration,
@@ -36,7 +36,7 @@ pub struct Producer<C: Container> {
 
 impl<C: Container> Producer<C> {
 	/// Create a new Producer wrapping the given moq-lite producer.
-	pub fn new(track: moq_lite::TrackProducer, container: C) -> Self {
+	pub fn new(track: moq_net::TrackProducer, container: C) -> Self {
 		Self {
 			track,
 			container,
@@ -71,7 +71,7 @@ impl<C: Container> Producer<C> {
 		// Start a new group if needed; the first frame of a group must be a keyframe.
 		if self.group.is_none() {
 			if !frame.keyframe {
-				return Err(moq_lite::Error::ProtocolViolation.into());
+				return Err(moq_net::Error::ProtocolViolation.into());
 			}
 			self.group = Some(self.track.append_group()?);
 		}
@@ -133,13 +133,13 @@ impl<C: Container> Producer<C> {
 	}
 
 	/// Create a consumer for this track.
-	pub fn consume(&self) -> moq_lite::TrackConsumer {
+	pub fn consume(&self) -> moq_net::TrackConsumer {
 		self.track.consume()
 	}
 }
 
 impl<C: Container> std::ops::Deref for Producer<C> {
-	type Target = moq_lite::TrackProducer;
+	type Target = moq_net::TrackProducer;
 
 	fn deref(&self) -> &Self::Target {
 		&self.track
@@ -162,7 +162,7 @@ mod tests {
 	}
 
 	/// Drain all groups from a finished track, returning their frame counts.
-	async fn collect_groups(mut consumer: moq_lite::TrackConsumer) -> Vec<usize> {
+	async fn collect_groups(mut consumer: moq_net::TrackConsumer) -> Vec<usize> {
 		let mut groups = Vec::new();
 		while let Some(mut group) = consumer.recv_group().await.unwrap() {
 			let mut count = 0;
@@ -177,7 +177,7 @@ mod tests {
 	/// Explicit keyframe closes the current group and starts a new one.
 	#[tokio::test]
 	async fn keyframe_closes_group_immediately() {
-		let track = moq_lite::Track::new("test").produce();
+		let track = moq_net::Track::new("test").produce();
 		let consumer = track.consume();
 		let mut producer = Producer::new(track, Hang::Legacy);
 
@@ -193,7 +193,7 @@ mod tests {
 	/// `finish_group()` flushes the current group immediately; the next write must be a keyframe.
 	#[tokio::test]
 	async fn finish_group_closes_immediately() {
-		let track = moq_lite::Track::new("test").produce();
+		let track = moq_net::Track::new("test").produce();
 		let consumer = track.consume();
 		let mut producer = Producer::new(track, Hang::Legacy);
 
@@ -209,10 +209,10 @@ mod tests {
 	/// Writing a non-keyframe with no open group is a protocol violation.
 	#[test]
 	fn first_frame_must_be_keyframe() {
-		let track = moq_lite::Track::new("test").produce();
+		let track = moq_net::Track::new("test").produce();
 		let mut producer = Producer::new(track, Hang::Legacy);
 
 		let err = producer.write(frame(0, false)).unwrap_err();
-		assert!(matches!(err, crate::Error::Moq(moq_lite::Error::ProtocolViolation)));
+		assert!(matches!(err, crate::Error::Moq(moq_net::Error::ProtocolViolation)));
 	}
 }
