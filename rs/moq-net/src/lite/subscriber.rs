@@ -404,7 +404,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		mut group: GroupProducer,
 	) -> Result<(), Error> {
 		while let Some(size) = stream.decode_maybe::<u64>().await? {
-			let mut frame = group.create_frame(Frame { size })?;
+			let mut frame = group.create_frame(Frame::new(size))?;
 
 			if let Err(err) = self.run_frame(stream, &mut frame).await {
 				let _ = frame.abort(err.clone());

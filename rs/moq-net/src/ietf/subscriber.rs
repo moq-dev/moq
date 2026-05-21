@@ -465,6 +465,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let track = Track {
 			name: msg.track_name.to_string(),
 			priority: 0,
+			timescale: 0,
 		}
 		.produce();
 
@@ -736,7 +737,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			if size == 0 {
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
-					let mut frame = producer.create_frame(Frame { size: 0 })?;
+					let mut frame = producer.create_frame(Frame::new(0))?;
 					frame.finish()?;
 				} else if status == 3 && !group.flags.has_end {
 					break;
@@ -744,7 +745,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
-				let mut frame = producer.create_frame(Frame { size })?;
+				let mut frame = producer.create_frame(Frame::new(size))?;
 
 				if let Err(err) = self.run_frame(stream, frame.clone()).await {
 					let _ = frame.abort(err.clone());

@@ -52,6 +52,25 @@ impl VarInt {
 	pub const fn into_inner(self) -> u64 {
 		self.0
 	}
+
+	/// Encode a signed `i64` as a zigzag-then-unsigned varint: `(n << 1) ^ (n >> 63)`.
+	///
+	/// Small negative numbers map to small unsigneds (-1 -> 1, 1 -> 2, -2 -> 3, ...).
+	/// Returns [`BoundsExceeded`] if `signed` is outside `[-2^61, 2^61 - 1]`, since the
+	/// zigzag-encoded result must fit in a 62-bit varint.
+	pub const fn from_zigzag(signed: i64) -> Result<Self, BoundsExceeded> {
+		const RANGE: i64 = 1 << 61;
+		if signed < -RANGE || signed >= RANGE {
+			return Err(BoundsExceeded);
+		}
+		Ok(Self(((signed << 1) ^ (signed >> 63)) as u64))
+	}
+
+	/// Decode this varint as a signed `i64` via the inverse zigzag transform.
+	pub const fn to_zigzag(self) -> i64 {
+		let v = self.0;
+		((v >> 1) as i64) ^ -((v & 1) as i64)
+	}
 }
 
 impl From<VarInt> for u64 {
@@ -542,8 +561,8 @@ where
 
 #[cfg(test)]
 mod tests {
-	use super::{DecodeError, VarInt};
-	use crate::ietf;
+	use super::*;
+	use crate::{ietf, lite};
 	use bytes::Bytes;
 
 	/// Test vectors from the draft-17 spec (Table 2: Example Integer Encodings),
@@ -643,6 +662,60 @@ mod tests {
 		let mut buf = bytes.clone();
 		let err = VarInt::decode_leading_ones(&mut buf, ietf::Version::Draft17).unwrap_err();
 		assert!(matches!(err, DecodeError::InvalidValue));
+	}
+
+	#[test]
+	fn zigzag_roundtrip_small() {
+		for n in [-3i64, -2, -1, 0, 1, 2, 3, 100, -100] {
+			let v = VarInt::from_zigzag(n).unwrap();
+			assert_eq!(v.to_zigzag(), n, "roundtrip failed for {}", n);
+		}
+	}
+
+	#[test]
+	fn zigzag_small_values_compact() {
+		// First few values should fit in 1 byte (varint range 0..=63 = top-2-bits tag 00).
+		assert_eq!(VarInt::from_zigzag(0).unwrap().into_inner(), 0);
+		assert_eq!(VarInt::from_zigzag(-1).unwrap().into_inner(), 1);
+		assert_eq!(VarInt::from_zigzag(1).unwrap().into_inner(), 2);
+		assert_eq!(VarInt::from_zigzag(-2).unwrap().into_inner(), 3);
+		assert_eq!(VarInt::from_zigzag(2).unwrap().into_inner(), 4);
+	}
+
+	#[test]
+	fn zigzag_roundtrip_boundary() {
+		// Boundary values in the valid input range [-2^61, 2^61 - 1].
+		let max = (1i64 << 61) - 1;
+		let min = -(1i64 << 61);
+		let mid = (1i64 << 30) + 17;
+
+		for n in [max, min, mid, -mid] {
+			let v = VarInt::from_zigzag(n).unwrap();
+			assert_eq!(v.to_zigzag(), n);
+		}
+	}
+
+	#[test]
+	fn zigzag_out_of_range_rejected() {
+		// Values past the i61 boundary are out of varint range.
+		assert!(VarInt::from_zigzag(1i64 << 61).is_err());
+		assert!(VarInt::from_zigzag(-(1i64 << 61) - 1).is_err());
+		assert!(VarInt::from_zigzag(i64::MAX).is_err());
+		assert!(VarInt::from_zigzag(i64::MIN).is_err());
+	}
+
+	#[test]
+	fn zigzag_quic_varint_roundtrip() {
+		// Encode a zigzag value through the QUIC varint wire format.
+		for n in [-5000i64, 0, 100, -1, 1_000_000, -1_000_000] {
+			let v = VarInt::from_zigzag(n).unwrap();
+
+			let mut buf = bytes::BytesMut::new();
+			v.encode(&mut buf, lite::Version::Lite01).unwrap();
+			let mut bytes = buf.freeze();
+			let decoded = VarInt::decode(&mut bytes, lite::Version::Lite01).unwrap();
+			assert_eq!(decoded.to_zigzag(), n);
+		}
 	}
 
 	#[test]

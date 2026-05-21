@@ -80,6 +80,7 @@ impl Catalog {
 		moq_net::Track {
 			name: Catalog::DEFAULT_NAME.to_string(),
 			priority: 100,
+			timescale: 0,
 		}
 	}
 }

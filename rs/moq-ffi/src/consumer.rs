@@ -90,7 +90,11 @@ impl MoqBroadcastConsumer {
 	/// Frames are returned as plain byte payloads with no codec or container parsing.
 	pub fn subscribe_track(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let track = self.inner.subscribe_track(&moq_net::Track { name, priority: 0 })?;
+		let track = self.inner.subscribe_track(&moq_net::Track {
+			name,
+			priority: 0,
+			timescale: 0,
+		})?;
 		Ok(Arc::new(MoqTrackConsumer::new(track)))
 	}
 
@@ -111,7 +115,11 @@ impl MoqBroadcastConsumer {
 		let media: moq_mux::container::Hang = (&container)
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
-		let track = self.inner.subscribe_track(&moq_net::Track { name, priority: 0 })?;
+		let track = self.inner.subscribe_track(&moq_net::Track {
+			name,
+			priority: 0,
+			timescale: 0,
+		})?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {

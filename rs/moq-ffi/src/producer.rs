@@ -93,7 +93,11 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		let track = moq_net::Track { name, priority: 0 };
+		let track = moq_net::Track {
+			name,
+			priority: 0,
+			timescale: 0,
+		};
 		// Clone the broadcast handle (shared Arc internally) to get &mut access.
 		let mut broadcast = state.broadcast.clone();
 		let producer = broadcast.create_track(track)?;

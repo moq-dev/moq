@@ -308,6 +308,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track = Track {
 			name: subscribe.track.to_string(),
 			priority: subscribe.priority,
+			timescale: 0,
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;

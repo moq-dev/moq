@@ -27,22 +27,43 @@ use std::{
 const MAX_GROUP_AGE: Duration = Duration::from_secs(5);
 
 /// A track is a collection of groups, delivered out-of-order until expired.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {
 	/// Identifier within a broadcast. Unique per [`crate::Broadcast`].
 	pub name: String,
 	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
 	pub priority: u8,
+	/// Units per second for frame timestamps on this track.
+	///
+	/// `0` (the default) means unspecified, typically because the peer didn't negotiate
+	/// a timescale (older moq-lite or older moq-transport drafts) or none has been
+	/// learned yet. Producers set this before publishing; subscribers learn it from
+	/// [`crate::BroadcastConsumer::subscribe_track`] once SUBSCRIBE_OK arrives.
+	pub timescale: u64,
 }
 
 impl Track {
-	/// Create a track with the given name and default priority (`0`).
+	/// Create a track with the given name, default priority (`0`), and unspecified
+	/// timescale.
 	pub fn new<T: Into<String>>(name: T) -> Self {
 		Self {
 			name: name.into(),
 			priority: 0,
+			timescale: 0,
 		}
+	}
+
+	/// Set the delivery priority. Higher values preempt lower ones.
+	pub fn with_priority(mut self, priority: u8) -> Self {
+		self.priority = priority;
+		self
+	}
+
+	/// Set the per-track timescale (units per second).
+	pub fn with_timescale(mut self, timescale: u64) -> Self {
+		self.timescale = timescale;
+		self
 	}
 
 	/// Consume this [`Track`] to create a producer that owns its metadata.

@@ -166,9 +166,7 @@ impl GroupProducer {
 	/// But an upfront size is required.
 	pub fn write_frame<B: Into<Bytes>>(&mut self, frame: B) -> Result<()> {
 		let data = frame.into();
-		let frame = Frame {
-			size: data.len() as u64,
-		};
+		let frame = Frame::new(data.len() as u64);
 		let mut frame = self.create_frame(frame)?;
 		frame.write(data)?;
 		frame.finish()?;
@@ -404,7 +402,7 @@ mod test {
 	#[test]
 	fn read_frame_chunks() {
 		let mut producer = Group { sequence: 0 }.produce();
-		let mut frame = producer.create_frame(Frame { size: 10 }).unwrap();
+		let mut frame = producer.create_frame(Frame::new(10)).unwrap();
 		frame.write(Bytes::from_static(b"hello")).unwrap();
 		frame.write(Bytes::from_static(b"world")).unwrap();
 		frame.finish().unwrap();

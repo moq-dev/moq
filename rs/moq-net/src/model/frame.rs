@@ -5,20 +5,41 @@ use std::task::{Poll, ready};
 use bytes::buf::UninitSlice;
 use bytes::{BufMut, Bytes};
 
-use crate::{Error, Result};
+use crate::{Error, Result, Timestamp};
 
-/// A chunk of data with an upfront size.
+/// A chunk of data with an upfront size and presentation timestamp.
 ///
 /// Note that this is just the header.
 /// You use [FrameProducer] and [FrameConsumer] to deal with the frame payload, potentially chunked.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Frame {
 	/// Total payload size in bytes. Declared up front so consumers can preallocate.
 	pub size: u64,
+	/// Presentation timestamp in the parent track's timescale.
+	///
+	/// Defaults to [`Timestamp::ZERO`] (unspecified scale). Producers should set this
+	/// to a value at the same scale as [`crate::Track::timescale`] before writing the
+	/// frame; the wire encoder errors on serialization if the scales disagree (for
+	/// protocols that delta-encode timestamps on the wire).
+	pub timestamp: Timestamp,
 }
 
 impl Frame {
+	/// Create a frame header with the given size and an unspecified timestamp.
+	pub fn new(size: u64) -> Self {
+		Self {
+			size,
+			timestamp: Timestamp::ZERO,
+		}
+	}
+
+	/// Set the presentation timestamp.
+	pub fn with_timestamp(mut self, timestamp: Timestamp) -> Self {
+		self.timestamp = timestamp;
+		self
+	}
+
 	/// Create a new producer for the frame.
 	pub fn produce(self) -> FrameProducer {
 		FrameProducer::new(self)
@@ -27,25 +48,25 @@ impl Frame {
 
 impl From<usize> for Frame {
 	fn from(size: usize) -> Self {
-		Self { size: size as u64 }
+		Self::new(size as u64)
 	}
 }
 
 impl From<u64> for Frame {
 	fn from(size: u64) -> Self {
-		Self { size }
+		Self::new(size)
 	}
 }
 
 impl From<u32> for Frame {
 	fn from(size: u32) -> Self {
-		Self { size: size as u64 }
+		Self::new(size as u64)
 	}
 }
 
 impl From<u16> for Frame {
 	fn from(size: u16) -> Self {
-		Self { size: size as u64 }
+		Self::new(size as u64)
 	}
 }
 
@@ -437,7 +458,7 @@ mod test {
 
 	#[test]
 	fn single_chunk_roundtrip() {
-		let mut producer = Frame { size: 5 }.produce();
+		let mut producer = Frame::new(5).produce();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
 		producer.finish().unwrap();
 
@@ -448,7 +469,7 @@ mod test {
 
 	#[test]
 	fn multi_chunk_read_all() {
-		let mut producer = Frame { size: 10 }.produce();
+		let mut producer = Frame::new(10).produce();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
 		producer.write(Bytes::from_static(b"world")).unwrap();
 		producer.finish().unwrap();
@@ -460,7 +481,7 @@ mod test {
 
 	#[test]
 	fn read_chunk_sequential() {
-		let mut producer = Frame { size: 10 }.produce();
+		let mut producer = Frame::new(10).produce();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
 		// Each read_chunk returns whatever is new since the last call,
 		// which may span multiple writes.
@@ -479,7 +500,7 @@ mod test {
 
 	#[test]
 	fn read_all_chunks() {
-		let mut producer = Frame { size: 10 }.produce();
+		let mut producer = Frame::new(10).produce();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
 		producer.write(Bytes::from_static(b"world")).unwrap();
 		producer.finish().unwrap();
@@ -492,7 +513,7 @@ mod test {
 
 	#[test]
 	fn finish_checks_remaining() {
-		let mut producer = Frame { size: 5 }.produce();
+		let mut producer = Frame::new(5).produce();
 		producer.write(Bytes::from_static(b"hi")).unwrap();
 		let err = producer.finish().unwrap_err();
 		assert!(matches!(err, Error::WrongSize));
@@ -500,14 +521,14 @@ mod test {
 
 	#[test]
 	fn write_too_many_bytes() {
-		let mut producer = Frame { size: 3 }.produce();
+		let mut producer = Frame::new(3).produce();
 		let err = producer.write(Bytes::from_static(b"toolong")).unwrap_err();
 		assert!(matches!(err, Error::WrongSize));
 	}
 
 	#[test]
 	fn abort_propagates() {
-		let mut producer = Frame { size: 5 }.produce();
+		let mut producer = Frame::new(5).produce();
 		let mut consumer = producer.consume();
 		producer.abort(Error::Cancel).unwrap();
 
@@ -517,7 +538,7 @@ mod test {
 
 	#[test]
 	fn empty_frame() {
-		let mut producer = Frame { size: 0 }.produce();
+		let mut producer = Frame::new(0).produce();
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
@@ -527,7 +548,7 @@ mod test {
 
 	#[tokio::test]
 	async fn pending_then_ready() {
-		let mut producer = Frame { size: 5 }.produce();
+		let mut producer = Frame::new(5).produce();
 		let mut consumer = producer.consume();
 
 		// Consumer blocks because no data yet.
@@ -543,7 +564,7 @@ mod test {
 	#[test]
 	fn buf_mut_roundtrip() {
 		// Exercise the BufMut path that the receive loop uses via `read_buf`.
-		let mut producer = Frame { size: 12 }.produce();
+		let mut producer = Frame::new(12).produce();
 		assert_eq!(producer.remaining_mut(), 12);
 		producer.put_slice(b"hello");
 		assert_eq!(producer.remaining_mut(), 7);
@@ -559,14 +580,14 @@ mod test {
 	#[test]
 	#[should_panic(expected = "advance_mut past frame.size")]
 	fn buf_mut_advance_past_capacity_panics() {
-		let mut producer = Frame { size: 4 }.produce();
+		let mut producer = Frame::new(4).produce();
 		// Safety violation on purpose: cnt > remaining_mut().
 		unsafe { producer.advance_mut(5) };
 	}
 
 	#[test]
 	fn read_chunk_streams_partial_writes() {
-		let mut producer = Frame { size: 6 }.produce();
+		let mut producer = Frame::new(6).produce();
 		let mut consumer = producer.consume();
 
 		producer.write(Bytes::from_static(b"foo")).unwrap();
@@ -586,7 +607,7 @@ mod test {
 
 	#[test]
 	fn cloned_consumer_independent_cursor() {
-		let mut producer = Frame { size: 10 }.produce();
+		let mut producer = Frame::new(10).produce();
 		let mut c1 = producer.consume();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
 
