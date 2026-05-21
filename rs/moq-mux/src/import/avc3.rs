@@ -67,6 +67,15 @@ impl Avc3 {
 			| ((sps.constraint_set4_flag as u8) << 3)
 			| ((sps.constraint_set5_flag as u8) << 2);
 
+		// avcC is emitted as soon as both SPS and PPS NALs have been observed,
+		// giving downstream consumers (e.g. MKV/CMAF muxers) an out-of-band
+		// AVCDecoderConfigurationRecord without having to scrape it from the
+		// keyframe themselves.
+		let description = match (&self.cached_sps, &self.cached_pps) {
+			(Some(sps_nal), Some(pps_nal)) => Some(build_avcc(sps_nal, pps_nal)),
+			_ => None,
+		};
+
 		let config = hang::catalog::VideoConfig {
 			coded_width: Some(sps.width),
 			coded_height: Some(sps.height),
@@ -77,7 +86,7 @@ impl Avc3 {
 				inline: true,
 			}
 			.into(),
-			description: None,
+			description,
 			// TODO: populate these fields
 			framerate: None,
 			bitrate: None,
@@ -196,10 +205,8 @@ impl Avc3 {
 			Some(NalType::Sps) => {
 				self.maybe_start_frame(pts)?;
 
-				// Try to reinitialize the track if the SPS has changed.
 				let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
 				let sps = h264_parser::Sps::parse(&rbsp)?;
-				self.init(&sps)?;
 
 				// PPS is tied to SPS context; drop cached PPS when SPS changes.
 				if self.cached_sps.as_ref().is_some_and(|cached| cached != &nal) {
@@ -207,7 +214,11 @@ impl Avc3 {
 					self.current.contains_pps = false;
 				}
 
+				// Cache before init() so the avcC builder can see the latest SPS.
 				self.cached_sps = Some(nal.clone());
+
+				self.init(&sps)?;
+
 				self.current.contains_sps = true;
 			}
 			Some(NalType::Pps) => {
@@ -215,6 +226,15 @@ impl Avc3 {
 
 				self.cached_pps = Some(nal.clone());
 				self.current.contains_pps = true;
+
+				// First PPS after an SPS unlocks avcC emission — republish the
+				// catalog with a populated description.
+				if let Some(sps_nal) = self.cached_sps.clone() {
+					let rbsp = h264_parser::nal::ebsp_to_rbsp(&sps_nal[1..]);
+					if let Ok(sps) = h264_parser::Sps::parse(&rbsp) {
+						self.init(&sps)?;
+					}
+				}
 			}
 			Some(NalType::Aud) | Some(NalType::Sei) => {
 				self.maybe_start_frame(pts)?;
@@ -353,4 +373,31 @@ struct Frame {
 	contains_slice: bool,
 	contains_sps: bool,
 	contains_pps: bool,
+}
+
+/// Build an AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2) from a
+/// single SPS and PPS NAL. The high-profile extension fields are intentionally
+/// omitted — players that need them re-derive them from the SPS we ship inline.
+fn build_avcc(sps_nal: &[u8], pps_nal: &[u8]) -> Bytes {
+	use bytes::BufMut;
+
+	// SPS NAL: byte 0 is the NAL header; bytes 1..4 are profile_idc,
+	// constraint flags, and level_idc respectively.
+	let profile_idc = sps_nal.get(1).copied().unwrap_or(0);
+	let constraints = sps_nal.get(2).copied().unwrap_or(0);
+	let level_idc = sps_nal.get(3).copied().unwrap_or(0);
+
+	let mut out = BytesMut::with_capacity(11 + sps_nal.len() + pps_nal.len());
+	out.put_u8(1); // configurationVersion
+	out.put_u8(profile_idc); // AVCProfileIndication
+	out.put_u8(constraints); // profile_compatibility
+	out.put_u8(level_idc); // AVCLevelIndication
+	out.put_u8(0xff); // reserved (6 bits) | lengthSizeMinusOne (2 bits, = 3)
+	out.put_u8(0xe1); // reserved (3 bits) | numOfSequenceParameterSets (5 bits, = 1)
+	out.put_u16(sps_nal.len() as u16);
+	out.put_slice(sps_nal);
+	out.put_u8(1); // numOfPictureParameterSets
+	out.put_u16(pps_nal.len() as u16);
+	out.put_slice(pps_nal);
+	out.freeze()
 }

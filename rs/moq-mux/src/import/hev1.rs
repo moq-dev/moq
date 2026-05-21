@@ -56,6 +56,12 @@ impl Hev1 {
 		let profile = &sps.rbsp.profile_tier_level.general_profile;
 		let vui_data = sps.rbsp.vui_parameters.as_ref().map(VuiData::new).unwrap_or_default();
 
+		// hvcC is emitted once all of VPS, SPS, and PPS have been observed.
+		let description = match (&self.cached_vps, &self.cached_sps, &self.cached_pps) {
+			(Some(vps_nal), Some(sps_nal), Some(pps_nal)) => Some(build_hvcc(vps_nal, sps_nal, pps_nal, sps)?),
+			_ => None,
+		};
+
 		let config = hang::catalog::VideoConfig {
 			coded_width: Some(sps.rbsp.cropped_width() as u32),
 			coded_height: Some(sps.rbsp.cropped_height() as u32),
@@ -69,7 +75,7 @@ impl Hev1 {
 				constraint_flags: pack_constraint_flags(profile),
 			}
 			.into(),
-			description: None,
+			description,
 			framerate: vui_data.framerate,
 			bitrate: None,
 			display_ratio_width: vui_data.display_ratio_width,
@@ -87,17 +93,27 @@ impl Hev1 {
 
 		let mut catalog = self.catalog.lock();
 
-		if let Some(track) = &self.track.take() {
-			tracing::debug!(name = ?track.name, "reinitializing track");
-			catalog.video.renditions.remove(&track.name);
+		// Codec-bearing fields determine track identity. A pure description
+		// update (e.g. cached_pps just arrived) reuses the existing track.
+		let needs_retrack = self.track.is_none() || !self.config.as_ref().is_some_and(|old| same_codec(old, &config));
+
+		if needs_retrack {
+			if let Some(track) = self.track.take() {
+				tracing::debug!(name = ?track.name, "reinitializing track");
+				catalog.video.renditions.remove(&track.name);
+			}
+
+			let track = self.broadcast.unique_track(".hev1")?;
+			tracing::debug!(name = ?track.name, ?config, "starting track");
+			catalog.video.renditions.insert(track.name.clone(), config.clone());
+
+			self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
+		} else if let Some(track) = self.track.as_ref() {
+			tracing::debug!(name = ?track.name, "updating rendition (description)");
+			catalog.video.renditions.insert(track.name.clone(), config.clone());
 		}
 
-		let track = self.broadcast.unique_track(".hev1")?;
-		tracing::debug!(name = ?track.name, ?config, "starting track");
-		catalog.video.renditions.insert(track.name.clone(), config.clone());
-
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
 
 		Ok(())
 	}
@@ -197,13 +213,18 @@ impl Hev1 {
 
 				self.cached_vps = Some(nal.clone());
 				self.current.contains_vps = true;
+
+				// If SPS was already cached, republish so hvcC can include the new VPS.
+				if let Some(sps_nal) = self.cached_sps.clone()
+					&& let Ok(sps) = SpsNALUnit::parse(&mut &sps_nal[..])
+				{
+					self.init(&sps)?;
+				}
 			}
 			NALUnitType::SpsNut => {
 				self.maybe_start_frame(pts)?;
 
-				// Try to reinitialize the track if the SPS has changed.
 				let sps = SpsNALUnit::parse(&mut &nal[..]).context("failed to parse SPS NAL unit")?;
-				self.init(&sps)?;
 
 				// PPS is tied to SPS context; drop cached PPS when SPS changes.
 				if self.cached_sps.as_ref().is_some_and(|cached| cached != &nal) {
@@ -211,7 +232,11 @@ impl Hev1 {
 					self.current.contains_pps = false;
 				}
 
+				// Cache before init() so the hvcC builder can see the latest SPS.
 				self.cached_sps = Some(nal.clone());
+
+				self.init(&sps)?;
+
 				self.current.contains_sps = true;
 			}
 			NALUnitType::PpsNut => {
@@ -219,6 +244,13 @@ impl Hev1 {
 
 				self.cached_pps = Some(nal.clone());
 				self.current.contains_pps = true;
+
+				// First PPS after VPS+SPS unlocks hvcC emission — republish the catalog.
+				if let Some(sps_nal) = self.cached_sps.clone()
+					&& let Ok(sps) = SpsNALUnit::parse(&mut &sps_nal[..])
+				{
+					self.init(&sps)?;
+				}
 			}
 			NALUnitType::AudNut | NALUnitType::PrefixSeiNut | NALUnitType::SuffixSeiNut => {
 				self.maybe_start_frame(pts)?;
@@ -348,6 +380,61 @@ impl Drop for Hev1 {
 			self.catalog.lock().video.renditions.remove(&track.name);
 		}
 	}
+}
+
+// True if two configs share the codec-bearing fields (anything that would
+// require a new track on a downstream subscriber). Description, jitter, and
+// purely informational fields are excluded.
+fn same_codec(a: &hang::catalog::VideoConfig, b: &hang::catalog::VideoConfig) -> bool {
+	a.codec == b.codec
+		&& a.coded_width == b.coded_width
+		&& a.coded_height == b.coded_height
+		&& a.container == b.container
+}
+
+/// Build an HEVCDecoderConfigurationRecord (ISO/IEC 14496-15 §8.3.3) from a
+/// single VPS, SPS, and PPS NAL. Single-layer streams only — multi-layer
+/// VPS extensions are not represented.
+fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8], sps: &SpsNALUnit) -> anyhow::Result<Bytes> {
+	use bytes::BufMut;
+
+	let profile = &sps.rbsp.profile_tier_level.general_profile;
+	let level_idc = profile.level_idc.context("missing level_idc in SPS")?;
+	let constraint_flags = pack_constraint_flags(profile);
+	let compat = profile.profile_compatibility_flag.bits().to_be_bytes();
+	let num_temporal_layers = sps.rbsp.sps_max_sub_layers_minus1 + 1;
+
+	let mut out = BytesMut::with_capacity(23 + vps_nal.len() + sps_nal.len() + pps_nal.len() + 9 * 3);
+	out.put_u8(1); // configurationVersion
+	// general_profile_space(2) | general_tier_flag(1) | general_profile_idc(5)
+	out.put_u8(((profile.profile_space & 0x3) << 6) | ((profile.tier_flag as u8) << 5) | (profile.profile_idc & 0x1f));
+	out.put_slice(&compat); // general_profile_compatibility_flags (32 bits)
+	out.put_slice(&constraint_flags); // general_constraint_indicator_flags (48 bits)
+	out.put_u8(level_idc); // general_level_idc
+	// reserved(4) | min_spatial_segmentation_idc(12) — 0 means "unknown"
+	out.put_u16(0xf000);
+	out.put_u8(0xfc); // reserved(6) | parallelismType(2) — 0 = mixed
+	out.put_u8(0xfc | (sps.rbsp.chroma_format_idc & 0x3)); // reserved(6) | chromaFormat(2)
+	out.put_u8(0xf8 | (sps.rbsp.bit_depth_luma_minus8 & 0x7)); // reserved(5) | bitDepthLumaMinus8(3)
+	out.put_u8(0xf8 | (sps.rbsp.bit_depth_chroma_minus8 & 0x7)); // reserved(5) | bitDepthChromaMinus8(3)
+	out.put_u16(0); // avgFrameRate — unspecified
+	// constantFrameRate(2) | numTemporalLayers(3) | temporalIdNested(1) | lengthSizeMinusOne(2, =3)
+	out.put_u8(((num_temporal_layers & 0x7) << 3) | ((sps.rbsp.sps_temporal_id_nesting_flag as u8) << 2) | 0x3);
+	out.put_u8(3); // numOfArrays — VPS, SPS, PPS
+
+	// Each array: array_completeness(1) | reserved(1) | NAL_unit_type(6) | numNalus(16) | (nalUnitLength(16) | nalUnit)*
+	let nal_unit_type_vps = u8::from(scuffle_h265::NALUnitType::VpsNut);
+	let nal_unit_type_sps = u8::from(scuffle_h265::NALUnitType::SpsNut);
+	let nal_unit_type_pps = u8::from(scuffle_h265::NALUnitType::PpsNut);
+
+	for (nal_type, nal) in [(nal_unit_type_vps, vps_nal), (nal_unit_type_sps, sps_nal), (nal_unit_type_pps, pps_nal)] {
+		out.put_u8(0x80 | (nal_type & 0x3f)); // array_completeness = 1
+		out.put_u16(1); // numNalus
+		out.put_u16(nal.len() as u16);
+		out.put_slice(nal);
+	}
+
+	Ok(out.freeze())
 }
 
 // Packs the constraint flags from ITU H.265 V10 Section 7.3.3 Profile, tier and level syntax
