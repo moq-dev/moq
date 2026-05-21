@@ -62,16 +62,15 @@ trap 'rm -rf "$STAGING"' EXIT
 # --- Headers (modulemap + .h) shared by all slices ---
 HEADERS_DIR="$STAGING/headers"
 mkdir -p "$HEADERS_DIR"
-SWIFT_BINDGEN="$BINDINGS_DIR/swift"
-[[ -f "$SWIFT_BINDGEN/moqFFI.h" ]] || { echo "Error: missing $SWIFT_BINDGEN/moqFFI.h" >&2; exit 1; }
-[[ -f "$SWIFT_BINDGEN/moqFFI.modulemap" ]] || { echo "Error: missing $SWIFT_BINDGEN/moqFFI.modulemap" >&2; exit 1; }
-[[ -f "$SWIFT_BINDGEN/moq.swift" ]] || { echo "Error: missing $SWIFT_BINDGEN/moq.swift" >&2; exit 1; }
-cp "$SWIFT_BINDGEN/moqFFI.h" "$HEADERS_DIR/"
-cp "$SWIFT_BINDGEN/moqFFI.modulemap" "$HEADERS_DIR/module.modulemap"
+[[ -f "$BINDINGS_DIR/moqFFI.h" ]] || { echo "Error: missing $BINDINGS_DIR/moqFFI.h" >&2; exit 1; }
+[[ -f "$BINDINGS_DIR/moqFFI.modulemap" ]] || { echo "Error: missing $BINDINGS_DIR/moqFFI.modulemap" >&2; exit 1; }
+[[ -f "$BINDINGS_DIR/moq.swift" ]] || { echo "Error: missing $BINDINGS_DIR/moq.swift" >&2; exit 1; }
+cp "$BINDINGS_DIR/moqFFI.h" "$HEADERS_DIR/"
+cp "$BINDINGS_DIR/moqFFI.modulemap" "$HEADERS_DIR/module.modulemap"
 
 # --- Per-slice library prep ---
 lib_for() {
-    echo "$LIB_DIR/moq-ffi-${VERSION}-$1/lib/libmoq_ffi.a"
+    echo "$LIB_DIR/$1/libmoq_ffi.a"
 }
 
 ensure_lib() {
@@ -115,7 +114,7 @@ mkdir -p "$PKG_STAGE/Sources/Moq" "$PKG_STAGE/Sources/MoqFFI" "$PKG_STAGE/Tests/
 
 cp -R "$SWIFT_DIR/Sources/Moq/." "$PKG_STAGE/Sources/Moq/"
 cp -R "$SWIFT_DIR/Tests/MoqTests/." "$PKG_STAGE/Tests/MoqTests/"
-cp "$SWIFT_BINDGEN/moq.swift" "$PKG_STAGE/Sources/MoqFFI/Generated.swift"
+cp "$BINDINGS_DIR/moq.swift" "$PKG_STAGE/Sources/MoqFFI/Generated.swift"
 
 # Generate Package.swift with the final URL+checksum.
 URL="${RELEASE_URL_BASE}/moq-ffi-v${VERSION}/MoqFFI.xcframework.zip"

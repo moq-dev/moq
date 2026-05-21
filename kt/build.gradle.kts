@@ -1,6 +1,5 @@
-// Root build script. Modules declare their own plugins and pull the
-// pinned versions from libs.versions.toml (the version catalog), so the
-// root needs almost nothing beyond shared group/version coordinates.
+// Root build script. The moq module declares its own plugins; root just
+// pins the group/version shared by every module.
 
 allprojects {
     group = "dev.moq"

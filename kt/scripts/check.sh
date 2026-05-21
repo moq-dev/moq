@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Local smoke check for the Kotlin wrappers.
+# Local smoke check for the Kotlin wrapper.
 #
-# Builds moq-ffi for the host target, copies the cdylib + uniffi-generated
-# Kotlin source into the appropriate places, and runs `:moq-jvm:test`.
+# Builds moq-ffi for the host target, drops the cdylib into the JNA-resource
+# layout of the :moq KMP module, regenerates the bindings, and runs
+# `:moq:jvmTest`. Intended for `just check-ffi`.
 #
-# Skipped on hosts without a JDK or without `cargo` (just prints and exits 0).
-# Intended for `just check-ffi` so the inner loop stays optional.
+# Skipped cleanly on hosts without `java` or `cargo`.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -22,7 +22,6 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 0
 fi
 
-# --- Build moq-ffi for host ---
 HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
 echo "kt check: building moq-ffi for $HOST_TARGET..."
 cargo build --release --package moq-ffi \
@@ -31,7 +30,6 @@ cargo build --release --package moq-ffi \
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps \
     | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 
-# Locate the cdylib for this host.
 case "$HOST_TARGET" in
     *-apple-*) CDYLIB="$TARGET_BASE/release/libmoq_ffi.dylib"; OS_TAG="darwin";;
     *-windows-*) CDYLIB="$TARGET_BASE/release/moq_ffi.dll"; OS_TAG="win32";;
@@ -45,26 +43,23 @@ esac
 
 [[ -f "$CDYLIB" ]] || { echo "kt check: cdylib not found at $CDYLIB" >&2; exit 1; }
 
-# --- Place host lib at JNA's expected resource path ---
-RES_DIR="$KT_DIR/moq-jvm/src/main/resources/${OS_TAG}-${ARCH_TAG}"
+RES_DIR="$KT_DIR/moq/src/jvmMain/resources/${OS_TAG}-${ARCH_TAG}"
 mkdir -p "$RES_DIR"
 cp "$CDYLIB" "$RES_DIR/"
 
-# --- Generate Kotlin bindings ---
 BINDGEN_OUT=$(mktemp -d)
 trap 'rm -rf "$BINDGEN_OUT"' EXIT
 cargo run --release --package moq-ffi --bin uniffi-bindgen \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
     generate --library "$CDYLIB" --language kotlin --out-dir "$BINDGEN_OUT"
 
-mkdir -p "$KT_DIR/common/src/uniffi/moq"
-cp "$BINDGEN_OUT/uniffi/moq/moq.kt" "$KT_DIR/common/src/uniffi/moq/moq.kt"
+mkdir -p "$KT_DIR/moq/src/jvmAndAndroidMain/kotlin/uniffi/moq"
+cp "$BINDGEN_OUT/uniffi/moq/moq.kt" "$KT_DIR/moq/src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt"
 
-# --- Run gradle ---
 GRADLE_CMD="${GRADLE_CMD:-$(command -v gradle || true)}"
 if [[ -z "$GRADLE_CMD" ]]; then
-    echo "kt check: gradle not on PATH and no wrapper available, skipping test" >&2
+    echo "kt check: gradle not on PATH, skipping" >&2
     exit 0
 fi
 
-"$GRADLE_CMD" -p "$KT_DIR" -Pmoqffi.version=0.0.0-dev :moq-jvm:test
+"$GRADLE_CMD" -p "$KT_DIR" -Pmoqffi.version=0.0.0-dev :moq:jvmTest

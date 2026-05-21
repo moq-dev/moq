@@ -18,7 +18,6 @@ class SmokeTest {
     fun `client constructs and cancels`() = runTest {
         MoqClient().use { client ->
             client.cancel()
-            // Connecting on a cancelled client should immediately error.
             val ex = assertFailsWith<MoqException> {
                 client.connect("https://localhost:0/test")
             }
