@@ -144,7 +144,7 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, Error> {
 
 			let cts = entry.cts.unwrap_or_default() as i64;
 			let pts = dts.checked_add_signed(cts).ok_or(Error::PtsOverflow)?;
-			let timestamp = Timestamp::from_scale(pts, timescale)?;
+			let timestamp = Timestamp::from_scale(pts, timescale, crate::container::TIMESCALE)?;
 			let payload = Bytes::copy_from_slice(&mdat_data[offset..end]);
 			let flags = entry.flags.unwrap_or(0);
 			// depends_on_no_other (bits 24-25 == 0x2) means keyframe
@@ -176,7 +176,7 @@ pub(crate) fn encode(
 		return Ok(());
 	}
 
-	let dts = (frames[0].timestamp.as_micros() * timescale as u128 / 1_000_000) as u64;
+	let dts = (frames[0].timestamp.as_micros()? * timescale as u128 / 1_000_000) as u64;
 	let sequence_number = group.frame_count() as u32;
 
 	let entries: Vec<_> = frames

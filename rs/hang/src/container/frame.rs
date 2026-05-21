@@ -3,7 +3,10 @@ use derive_more::Debug;
 
 use crate::Error;
 
-pub type Timestamp = moq_net::Timescale<1_000_000>;
+pub use moq_net::Timestamp;
+
+/// Canonical timescale for hang frame timestamps: microseconds.
+pub const TIMESCALE: u64 = 1_000_000;
 
 /// A media frame with a timestamp and codec-specific payload.
 ///
@@ -32,7 +35,7 @@ impl Frame {
 	/// VarInt timestamp prefix followed by the raw codec payload.
 	pub fn encode(&self, group: &mut moq_net::GroupProducer) -> Result<(), Error> {
 		let mut header = BytesMut::new();
-		self.timestamp.encode(&mut header).map_err(moq_net::Error::from)?;
+		self.timestamp.encode_value(&mut header).map_err(moq_net::Error::from)?;
 
 		let size = header.len() + self.payload.len();
 
@@ -46,7 +49,7 @@ impl Frame {
 
 	/// Decode a frame from raw bytes (VarInt timestamp prefix + payload).
 	pub fn decode(mut buf: impl Buf) -> Result<Self, Error> {
-		let timestamp = Timestamp::decode(&mut buf)?;
+		let timestamp = Timestamp::decode_value(&mut buf, TIMESCALE)?;
 		let payload = buf.copy_to_bytes(buf.remaining());
 
 		Ok(Self { timestamp, payload })

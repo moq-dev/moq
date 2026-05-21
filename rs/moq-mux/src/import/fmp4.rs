@@ -513,7 +513,7 @@ impl Fmp4 {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let timestamp = hang::container::Timestamp::from_scale(pts, timescale)?;
+					let timestamp = hang::container::Timestamp::from_scale(pts, timescale, hang::container::TIMESCALE)?;
 
 					if offset + size > mdat.data.len() {
 						anyhow::bail!("invalid data offset");
@@ -654,7 +654,7 @@ impl Fmp4 {
 								.renditions
 								.get_mut(&track.track.name)
 								.context("missing video config")?;
-							config.jitter = Some(jitter.convert()?);
+							config.jitter = Some(jitter.convert(1_000)?);
 						}
 						TrackKind::Audio => {
 							let config = catalog
@@ -662,7 +662,7 @@ impl Fmp4 {
 								.renditions
 								.get_mut(&track.track.name)
 								.context("missing audio config")?;
-							config.jitter = Some(jitter.convert()?);
+							config.jitter = Some(jitter.convert(1_000)?);
 						}
 					}
 				}

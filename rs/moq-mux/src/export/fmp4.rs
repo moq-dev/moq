@@ -272,7 +272,7 @@ fn build_init(catalog: &Catalog) -> anyhow::Result<Bytes> {
 
 /// Encode one decoded frame as a CMAF moof+mdat fragment.
 fn encode_fragment(track: &mut Fmp4Track, frame: &Frame) -> anyhow::Result<Bytes> {
-	let dts = frame.timestamp.as_micros() as u64 * track.timescale / 1_000_000;
+	let dts = frame.timestamp.as_micros()? as u64 * track.timescale / 1_000_000;
 	let size = frame.payload.len() as u32;
 	let flags = if frame.keyframe { 0x0200_0000 } else { 0x0001_0000 };
 
