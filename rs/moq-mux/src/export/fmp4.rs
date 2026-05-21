@@ -56,7 +56,7 @@ impl Fmp4 {
 	/// The hang catalog is subscribed internally; per-rendition tracks are (un)subscribed
 	/// as the catalog changes.
 	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
-		let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
+		let catalog_track = broadcast.subscribe_track_immediate(&hang::Catalog::default_track())?;
 		let catalog = crate::catalog::Consumer::new(catalog_track);
 
 		Ok(Self {
@@ -175,7 +175,7 @@ impl Fmp4 {
 			}
 
 			let media: Hang = (*container).try_into()?;
-			let track = self.broadcast.subscribe_track(&moq_net::Track::new(name.clone()))?;
+			let track = self.broadcast.subscribe_track_immediate(&moq_net::Track::new(name.clone()))?;
 			let consumer = Consumer::new(track, media).with_latency(self.latency);
 
 			let timescale = catalog_timescale(catalog, name).context("track not in catalog")?;

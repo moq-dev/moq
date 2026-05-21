@@ -119,7 +119,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			timescale: 0,
 		};
 
-		let track = match broadcast.subscribe_track(&track) {
+		let track = match broadcast.subscribe_track_immediate(&track) {
 			Ok(track) => track,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())

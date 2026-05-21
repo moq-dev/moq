@@ -89,6 +89,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	// Subscribe to the track.
 	let mut track_sub = bc
 		.subscribe_track(&Track::new("video"))
+		.await
 		.expect("subscribe_track failed");
 
 	// Read one group.
@@ -501,6 +502,7 @@ async fn broadcast_websocket() {
 	// Subscribe to the track.
 	let mut track_sub = bc
 		.subscribe_track(&Track::new("video"))
+		.await
 		.expect("subscribe_track failed");
 
 	// Read one group.
@@ -608,6 +610,7 @@ async fn broadcast_websocket_fallback() {
 	// Subscribe to the track.
 	let mut track_sub = bc
 		.subscribe_track(&Track::new("video"))
+		.await
 		.expect("subscribe_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())

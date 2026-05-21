@@ -519,7 +519,7 @@ async fn serve_fetch(
 		// Block until the broadcast has been announced (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before gossip arrives.
 		let broadcast = origin.announced_broadcast("").await.ok_or(StatusCode::NOT_FOUND)?;
-		let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
+		let mut track = broadcast.subscribe_track(&track).await.map_err(|err| match err {
 			moq_net::Error::NotFound => StatusCode::NOT_FOUND,
 			_ => StatusCode::INTERNAL_SERVER_ERROR,
 		})?;

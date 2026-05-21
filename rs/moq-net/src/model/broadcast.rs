@@ -359,7 +359,26 @@ impl BroadcastConsumer {
 	/// queues a new dynamic request that the broadcast's producer will service via
 	/// [`BroadcastDynamic::requested_track`]. Returns [`Error::NotFound`] if the
 	/// broadcast has no dynamic producer to handle requests.
-	pub fn subscribe_track(&self, track: &Track) -> Result<TrackConsumer, Error> {
+	///
+	/// Awaits the negotiated timescale (delivered via SUBSCRIBE_OK on the session
+	/// layer) before returning, so the resulting [`TrackConsumer`] exposes a
+	/// resolved [`TrackConsumer::timescale_now`]. For protocol versions that
+	/// don't negotiate a timescale, the session layer publishes `0` immediately
+	/// and this future resolves without delay.
+	pub async fn subscribe_track(&self, track: &Track) -> Result<TrackConsumer, Error> {
+		let consumer = self.subscribe_track_immediate(track)?;
+		// Wait for the session layer to publish the negotiated timescale.
+		// Ignore the result: if the track is already closed, the consumer
+		// itself will surface that on the next operation.
+		let _ = consumer.timescale().await;
+		Ok(consumer)
+	}
+
+	/// Same as [`Self::subscribe_track`] but does not wait for the timescale to be
+	/// resolved. Callers that don't need the timescale (or want to handle resolution
+	/// themselves via [`TrackConsumer::timescale`]) can use this to avoid an extra
+	/// roundtrip.
+	pub fn subscribe_track_immediate(&self, track: &Track) -> Result<TrackConsumer, Error> {
 		// Upgrade to a temporary producer so we can modify the state.
 		let producer = self
 			.state
@@ -443,7 +462,7 @@ impl BroadcastConsumer {
 #[cfg(test)]
 impl BroadcastConsumer {
 	pub fn assert_subscribe_track(&self, track: &Track) -> TrackConsumer {
-		self.subscribe_track(track).expect("should not have errored")
+		self.subscribe_track_immediate(track).expect("should not have errored")
 	}
 
 	pub fn assert_not_closed(&self) {
@@ -544,7 +563,7 @@ mod test {
 		// Make sure the track is errored, not closed.
 		track4.assert_error();
 
-		let track5 = consumer2.subscribe_track(&Track::new("track3"));
+		let track5 = consumer2.subscribe_track_immediate(&Track::new("track3"));
 		assert!(track5.is_err(), "should have errored");
 	}
 
@@ -622,7 +641,7 @@ mod test {
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
 		// Now the cleanup task should have run and we can subscribe again to the unknown track.
-		let consumer3 = broadcast.consume().subscribe_track(&Track::new("unknown_track"));
+		let consumer3 = broadcast.consume().subscribe_track_immediate(&Track::new("unknown_track"));
 		let producer2 = broadcast.assert_request();
 
 		// Drop the consumer, now the producer should be unused

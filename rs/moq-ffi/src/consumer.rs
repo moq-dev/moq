@@ -78,7 +78,7 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to the catalog for this broadcast.
 	pub fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let track = self.inner.subscribe_track(&hang::catalog::Catalog::default_track())?;
+		let track = self.inner.subscribe_track_immediate(&hang::catalog::Catalog::default_track())?;
 		let consumer = moq_mux::catalog::Consumer::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
 			task: Task::new(Catalog { inner: consumer }),
@@ -90,7 +90,7 @@ impl MoqBroadcastConsumer {
 	/// Frames are returned as plain byte payloads with no codec or container parsing.
 	pub fn subscribe_track(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let track = self.inner.subscribe_track(&moq_net::Track {
+		let track = self.inner.subscribe_track_immediate(&moq_net::Track {
 			name,
 			priority: 0,
 			timescale: 0,
@@ -115,7 +115,7 @@ impl MoqBroadcastConsumer {
 		let media: moq_mux::container::Hang = (&container)
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
-		let track = self.inner.subscribe_track(&moq_net::Track {
+		let track = self.inner.subscribe_track_immediate(&moq_net::Track {
 			name,
 			priority: 0,
 			timescale: 0,

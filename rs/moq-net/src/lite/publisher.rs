@@ -312,7 +312,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&track)?;
+		let track = broadcast.subscribe_track_immediate(&track)?;
 
 		// TODO wait until track.info() to get the *real* priority
 

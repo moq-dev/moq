@@ -571,12 +571,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Read the response and register the alias mapping
 		let track_alias = match self.read_subscribe_response(&mut stream).await {
 			Ok(alias) => {
+				let mut state = self.state.lock();
 				if let Some(alias) = alias {
-					let mut state = self.state.lock();
 					state.aliases.insert(alias, request_id);
-					if let Some(track_state) = state.subscribes.get_mut(&request_id) {
+				}
+				if let Some(track_state) = state.subscribes.get_mut(&request_id) {
+					if let Some(alias) = alias {
 						track_state.alias = Some(alias);
 					}
+					// LOC-style track properties are not parsed yet; default the
+					// timescale to 0 (unspecified) so consumers awaiting it
+					// don't hang. TODO: read timescale from track properties on
+					// Draft17+.
+					track_state.producer.set_timescale(0);
 				}
 				alias
 			}
