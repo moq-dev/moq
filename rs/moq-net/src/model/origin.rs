@@ -825,18 +825,24 @@ impl OriginConsumer {
 	///
 	/// Note: The returned path is absolute and will always match this consumer's prefix.
 	pub async fn announced(&mut self) -> Option<OriginAnnounce> {
-		conducer::wait(|waiter| {
-			match self.state.poll(waiter, |state| match state.take() {
-				Some(item) => Poll::Ready(item),
-				None => Poll::Pending,
-			}) {
-				Poll::Ready(Ok(item)) => Poll::Ready(Some(item)),
-				// Closed: discard the Ref so its MutexGuard doesn't cross the await point.
-				Poll::Ready(Err(_)) => Poll::Ready(None),
-				Poll::Pending => Poll::Pending,
-			}
-		})
-		.await
+		conducer::wait(|waiter| self.poll_announced(waiter)).await
+	}
+
+	/// Poll for the next (un)announced broadcast, without blocking.
+	///
+	/// Returns `Poll::Ready(Some(_))` for an update, `Poll::Ready(None)` if the
+	/// consumer is closed, or `Poll::Pending` after registering `waiter` to be
+	/// notified when the next update arrives.
+	pub fn poll_announced(&mut self, waiter: &conducer::Waiter) -> Poll<Option<OriginAnnounce>> {
+		match self.state.poll(waiter, |state| match state.take() {
+			Some(item) => Poll::Ready(item),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(item)) => Poll::Ready(Some(item)),
+			// Closed: discard the Ref so its MutexGuard doesn't escape this call.
+			Poll::Ready(Err(_)) => Poll::Ready(None),
+			Poll::Pending => Poll::Pending,
+		}
 	}
 
 	/// Returns the next (un)announced broadcast and the absolute path without blocking.
