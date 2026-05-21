@@ -1,5 +1,5 @@
 use std::{
-	collections::{HashMap, VecDeque},
+	collections::{BTreeMap, HashMap, VecDeque},
 	fmt,
 	sync::atomic::{AtomicU64, Ordering},
 	task::Poll,
@@ -245,25 +245,20 @@ enum PendingUpdate {
 	UnannounceAnnounce(BroadcastConsumer),
 }
 
+/// Pending updates keyed by path. `BTreeMap` keeps memory strictly bounded by
+/// the number of distinct paths with outstanding work (collapsed pairs are
+/// fully erased) and gives a deterministic lexicographic delivery order so
+/// tests can predict it.
 #[derive(Default)]
 struct OriginConsumerState {
-	pending: HashMap<PathOwned, PendingUpdate>,
-	// FIFO of paths with a pending update so cross-path delivery order matches
-	// publish order. May contain stale entries from collapsed `Announce`+
-	// `unannounce` pairs; `take` skips paths whose `pending` lookup misses.
-	queue: VecDeque<PathOwned>,
+	pending: BTreeMap<PathOwned, PendingUpdate>,
 }
 
 impl OriginConsumerState {
 	fn apply_announce(&mut self, path: PathOwned, broadcast: BroadcastConsumer) {
 		let new = match self.pending.remove(&path) {
-			None => {
-				// First update for this path; record its position in the queue.
-				self.queue.push_back(path.clone());
-				PendingUpdate::Announce(broadcast)
-			}
-			// Stale announce being replaced; queue position unchanged.
-			Some(PendingUpdate::Announce(_)) => PendingUpdate::Announce(broadcast),
+			// First announce, or a stale announce being replaced.
+			None | Some(PendingUpdate::Announce(_)) => PendingUpdate::Announce(broadcast),
 			// Consumer needs to observe the unannounce before this announce.
 			Some(PendingUpdate::Unannounce | PendingUpdate::UnannounceAnnounce(_)) => {
 				PendingUpdate::UnannounceAnnounce(broadcast)
@@ -274,14 +269,9 @@ impl OriginConsumerState {
 
 	fn apply_unannounce(&mut self, path: PathOwned) {
 		match self.pending.remove(&path) {
-			None => {
-				self.queue.push_back(path.clone());
-				self.pending.insert(path, PendingUpdate::Unannounce);
-			}
-			// Consumer has not seen the pending announce; drop both. The path stays in
-			// the queue as a tombstone and is skipped on `take`.
+			// Consumer has not seen the pending announce; drop both entirely.
 			Some(PendingUpdate::Announce(_)) => {}
-			Some(PendingUpdate::Unannounce) => {
+			None | Some(PendingUpdate::Unannounce) => {
 				self.pending.insert(path, PendingUpdate::Unannounce);
 			}
 			// The embedded announce cancels with this unannounce; the consumer
@@ -294,19 +284,15 @@ impl OriginConsumerState {
 
 	/// Take one update to deliver to the consumer, if any.
 	fn take(&mut self) -> Option<OriginAnnounce> {
-		loop {
-			let path = self.queue.pop_front()?;
-			match self.pending.remove(&path) {
-				// Stale tombstone from a collapsed Announce+Unannounce pair.
-				None => continue,
-				Some(PendingUpdate::Announce(broadcast)) => return Some((path, Some(broadcast))),
-				Some(PendingUpdate::Unannounce) => return Some((path, None)),
-				Some(PendingUpdate::UnannounceAnnounce(broadcast)) => {
-					// Deliver the unannounce now; re-queue the trailing announce.
-					self.pending.insert(path.clone(), PendingUpdate::Announce(broadcast));
-					self.queue.push_front(path.clone());
-					return Some((path, None));
-				}
+		let path = self.pending.keys().next()?.clone();
+		match self.pending.remove(&path).unwrap() {
+			PendingUpdate::Announce(broadcast) => Some((path, Some(broadcast))),
+			PendingUpdate::Unannounce => Some((path, None)),
+			PendingUpdate::UnannounceAnnounce(broadcast) => {
+				// Deliver the unannounce now; leave the trailing announce pending so
+				// the next take returns it for the same path.
+				self.pending.insert(path.clone(), PendingUpdate::Announce(broadcast));
+				Some((path, None))
 			}
 		}
 	}
@@ -1210,6 +1196,7 @@ mod tests {
 	// A previous mpsc-based implementation could only deliver the first 127 broadcasts
 	// instantly via `assert_next` (which uses `now_or_never`). The conducer-backed
 	// implementation polls synchronously and can deliver all of them without yielding.
+	// Names are zero-padded so lexicographic delivery order matches the loop index.
 	#[tokio::test]
 	async fn test_many_announces() {
 		let origin = Origin::random().produce();
@@ -1217,11 +1204,11 @@ mod tests {
 
 		let mut consumer = origin.consume();
 		for i in 0..256 {
-			origin.publish_broadcast(format!("test{i}"), broadcast.consume());
+			origin.publish_broadcast(format!("test{i:03}"), broadcast.consume());
 		}
 
 		for i in 0..256 {
-			consumer.assert_next(format!("test{i}"), &broadcast.consume());
+			consumer.assert_next(format!("test{i:03}"), &broadcast.consume());
 		}
 		consumer.assert_next_wait();
 	}
@@ -1233,11 +1220,11 @@ mod tests {
 
 		let mut consumer = origin.consume();
 		for i in 0..256 {
-			origin.publish_broadcast(format!("test{i}"), broadcast.consume());
+			origin.publish_broadcast(format!("test{i:03}"), broadcast.consume());
 		}
 
 		for i in 0..256 {
-			consumer.assert_try_next(format!("test{i}"), &broadcast.consume());
+			consumer.assert_try_next(format!("test{i:03}"), &broadcast.consume());
 		}
 	}
 

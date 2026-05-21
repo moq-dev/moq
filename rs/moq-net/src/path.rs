@@ -71,7 +71,7 @@ impl<'a> AsPath for &'a String {
 /// let joined = base.join("users");
 /// assert_eq!(joined.as_str(), "api/v1/users");
 /// ```
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Path<'a>(Cow<'a, str>);
 
