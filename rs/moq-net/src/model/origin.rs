@@ -2000,6 +2000,8 @@ mod tests {
 	#[tokio::test]
 	async fn test_coalesce_announce_then_unannounce() {
 		// announce + unannounce that the consumer hasn't observed yet collapses to nothing.
+		tokio::time::pause();
+
 		let origin = Origin::random().produce();
 		let mut consumer = origin.consume();
 
@@ -2016,6 +2018,8 @@ mod tests {
 	async fn test_coalesce_announce_unannounce_announce() {
 		// announce, unannounce, announce that the consumer hasn't drained collapses
 		// to a single Announce of the latest broadcast.
+		tokio::time::pause();
+
 		let origin = Origin::random().produce();
 		let mut consumer = origin.consume();
 
@@ -2035,6 +2039,8 @@ mod tests {
 	async fn test_coalesce_unannounce_announce_preserved() {
 		// unannounce followed by announce of a different broadcast must be preserved
 		// as two deliveries so the consumer learns the origin changed.
+		tokio::time::pause();
+
 		let origin = Origin::random().produce();
 		let broadcast1 = Broadcast::new().produce();
 		origin.publish_broadcast("test", broadcast1.consume());
@@ -2059,6 +2065,8 @@ mod tests {
 	async fn test_coalesce_unannounce_announce_unannounce() {
 		// unannounce + announce + unannounce collapses to a single unannounce: the
 		// embedded announce was never observed.
+		tokio::time::pause();
+
 		let origin = Origin::random().produce();
 		let broadcast1 = Broadcast::new().produce();
 		origin.publish_broadcast("test", broadcast1.consume());
@@ -2081,6 +2089,11 @@ mod tests {
 	#[tokio::test]
 	async fn test_coalesce_churn_bounded() {
 		// A churn loop on a single path should keep the pending set bounded.
+		// Backup promotion during cleanup can leave the consumer with zero or one
+		// pending update for "test" depending on the order tasks run; we only
+		// require that churn doesn't accumulate across iterations.
+		tokio::time::pause();
+
 		let origin = Origin::random().produce();
 		let mut consumer = origin.consume();
 
@@ -2091,13 +2104,18 @@ mod tests {
 		}
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
-		// All churn collapses to at most one pending update for this path.
-		let first = consumer.try_announced();
-		assert!(first.is_some(), "expected one pending update");
-		assert_eq!(first.unwrap().0, Path::new("test"));
+		let mut collected = Vec::new();
+		while let Some(update) = consumer.try_announced() {
+			collected.push(update);
+		}
 		assert!(
-			consumer.try_announced().is_none(),
-			"pending should be empty after one drain"
+			collected.len() <= 1,
+			"expected at most one pending update, got {}",
+			collected.len()
+		);
+		assert!(
+			collected.iter().all(|(path, _)| path == &Path::new("test")),
+			"unexpected path in pending updates",
 		);
 	}
 }
