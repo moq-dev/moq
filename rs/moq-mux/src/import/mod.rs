@@ -16,7 +16,7 @@
 //! [`Container`](crate::container::Container) implementation.
 
 mod aac;
-mod annexb;
+pub(crate) mod annexb;
 mod av01;
 mod avc1;
 mod avc3;

@@ -153,21 +153,26 @@ async fn export_emits_blocks_for_each_frame() {
 	importer.decode(&mut buf).unwrap();
 	importer.finish().unwrap();
 
-	let mut exporter = crate::export::Mkv::new(consumer).unwrap();
+	let mut exporter = crate::export::Mkv::new(consumer)
+		.unwrap()
+		// Use per-frame clustering so each frame is observable as its own
+		// Cluster chunk; batching is exercised in a dedicated test below.
+		.with_fragment_duration(std::time::Duration::ZERO);
 	let mut exported: Vec<u8> = Vec::new();
 
-	// Pull a bounded number of chunks: 1 header + up to 5 block fragments.
-	// Past that we assume the exporter is idle waiting for more frames.
-	for _ in 0..10 {
+	let mut importer = Some(importer);
+	for _ in 0..32 {
 		let next = tokio::time::timeout(std::time::Duration::from_millis(100), exporter.next()).await;
 		match next {
 			Ok(Ok(Some(chunk))) => exported.extend_from_slice(&chunk),
 			Ok(Ok(None)) => break,
 			Ok(Err(e)) => panic!("exporter error: {e}"),
-			Err(_) => break,
+			Err(_) => {
+				// Drop the importer to close the broadcast so the exporter can EOS.
+				importer = None;
+			}
 		}
 	}
-
 	drop(importer);
 	drop(exporter);
 
@@ -251,6 +256,236 @@ async fn export_rejects_cmaf_track() {
 
 	let err = result.expect_err("expected an error");
 	assert!(err.to_string().contains("CMAF"), "expected CMAF rejection, got: {err}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
+	// Avc3-shape source: H264 { inline: true }, description = None, frames in
+	// Annex-B with inline SPS+PPS before keyframes. The exporter must
+	// (a) defer the header until SPS+PPS arrive, (b) emit avcC in CodecPrivate,
+	// (c) length-prefix the sample bytes in each SimpleBlock.
+	use hang::catalog::{Container, H264, VideoConfig};
+	use hang::container::Timestamp;
+
+	let broadcast = moq_net::Broadcast::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let track = producer.unique_track(".avc3").unwrap();
+	catalog.lock().video.renditions.insert(
+		track.name.clone(),
+		VideoConfig {
+			coded_width: Some(320),
+			coded_height: Some(240),
+			codec: H264 {
+				profile: 0x42,
+				constraints: 0xc0,
+				level: 0x1f,
+				inline: true,
+			}
+			.into(),
+			description: None,
+			framerate: None,
+			bitrate: None,
+			display_ratio_width: None,
+			display_ratio_height: None,
+			optimize_for_latency: None,
+			container: Container::Legacy,
+			jitter: None,
+		},
+	);
+
+	// Annex-B start code.
+	const SC: &[u8] = &[0, 0, 0, 1];
+	let sps = &[0x67u8, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef][..];
+	let pps = &[0x68u8, 0xce, 0x3c, 0x80][..];
+	let idr = &[0x65u8, 0x88, 0x84, 0x21, 0x00, 0x11, 0x22, 0x33][..];
+	let pslice = &[0x61u8, 0xe0, 0x12, 0x34][..];
+
+	let mut keyframe_payload = bytes::BytesMut::new();
+	for nal in [sps, pps, idr] {
+		keyframe_payload.extend_from_slice(SC);
+		keyframe_payload.extend_from_slice(nal);
+	}
+	let keyframe_payload = keyframe_payload.freeze();
+
+	let mut pslice_payload = bytes::BytesMut::new();
+	pslice_payload.extend_from_slice(SC);
+	pslice_payload.extend_from_slice(pslice);
+	let pslice_payload = pslice_payload.freeze();
+
+	// Publish frames via the container::Producer.
+	let mut track_producer = crate::container::Producer::new(track, crate::container::Hang::Legacy);
+	track_producer
+		.write(crate::container::Frame {
+			timestamp: Timestamp::from_micros(0).unwrap(),
+			payload: keyframe_payload,
+			keyframe: true,
+		})
+		.unwrap();
+	track_producer
+		.write(crate::container::Frame {
+			timestamp: Timestamp::from_micros(33_000).unwrap(),
+			payload: pslice_payload,
+			keyframe: false,
+		})
+		.unwrap();
+	track_producer.finish().unwrap();
+
+	let mut exporter = crate::export::Mkv::new(consumer)
+		.unwrap()
+		.with_fragment_duration(std::time::Duration::ZERO);
+	let mut exported: Vec<u8> = Vec::new();
+
+	let mut held_producer = Some(producer);
+	let mut held_catalog = Some(catalog);
+	for _ in 0..32 {
+		let next = tokio::time::timeout(std::time::Duration::from_millis(100), exporter.next()).await;
+		match next {
+			Ok(Ok(Some(chunk))) => exported.extend_from_slice(&chunk),
+			Ok(Ok(None)) => break,
+			Ok(Err(e)) => panic!("exporter error: {e}"),
+			Err(_) => {
+				held_producer = None;
+				held_catalog = None;
+			}
+		}
+	}
+	drop(held_producer);
+	drop(held_catalog);
+	drop(track_producer);
+	drop(exporter);
+
+	// Parse the exported MKV and inspect the Tracks element and SimpleBlocks.
+	let mut cursor = Cursor::new(exported.as_slice());
+	let iter = WebmIterator::new(
+		&mut cursor,
+		&[
+			MatroskaSpec::Tracks(Master::Start),
+			MatroskaSpec::TrackEntry(Master::Start),
+		],
+	);
+
+	let mut codec_id: Option<String> = None;
+	let mut codec_private: Option<Vec<u8>> = None;
+	let mut sample_payloads: Vec<Vec<u8>> = Vec::new();
+
+	for tag in iter {
+		match tag.expect("parse exported") {
+			MatroskaSpec::Tracks(Master::Full(entries)) => {
+				for entry in entries {
+					if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry {
+						for c in children {
+							match c {
+								MatroskaSpec::CodecID(s) => codec_id = Some(s),
+								MatroskaSpec::CodecPrivate(p) => codec_private = Some(p),
+								_ => {}
+							}
+						}
+					}
+				}
+			}
+			MatroskaSpec::SimpleBlock(data) => {
+				let sb = SimpleBlock::try_from(data.as_slice()).expect("parse SimpleBlock");
+				sample_payloads.push(sb.raw_frame_data().to_vec());
+			}
+			_ => {}
+		}
+	}
+
+	assert_eq!(codec_id.as_deref(), Some("V_MPEG4/ISO/AVC"));
+
+	// avcC layout: configurationVersion=1, AVCProfileIndication, profile_compat,
+	// AVCLevelIndication, lengthSizeMinusOne=3, numSPS=1, SPS_len(u16), SPS,
+	// numPPS=1, PPS_len(u16), PPS.
+	let avcc = codec_private.expect("avcC in CodecPrivate");
+	assert_eq!(avcc[0], 1, "configurationVersion");
+	assert_eq!(avcc[1], sps[1], "AVCProfileIndication");
+	assert_eq!(avcc[2], sps[2], "profile_compatibility");
+	assert_eq!(avcc[3], sps[3], "AVCLevelIndication");
+	assert_eq!(avcc[4] & 0x03, 3, "lengthSizeMinusOne");
+
+	// SPS should be embedded after the 5+1=6 byte header.
+	let sps_len = u16::from_be_bytes([avcc[6], avcc[7]]) as usize;
+	assert_eq!(sps_len, sps.len());
+	assert_eq!(&avcc[8..8 + sps_len], sps);
+
+	// PPS follows: 1 byte numPPS + 2 byte length + PPS bytes.
+	let pps_offset = 8 + sps_len + 3;
+	assert_eq!(&avcc[pps_offset..pps_offset + pps.len()], pps);
+
+	// Both frames should be length-prefixed (no Annex-B start codes).
+	assert_eq!(sample_payloads.len(), 2, "expected 2 sample blocks");
+
+	// First frame: keyframe contained SPS+PPS+IDR. SPS/PPS are stripped, only
+	// IDR makes it through as length-prefixed.
+	let first = &sample_payloads[0];
+	let idr_len = u32::from_be_bytes([first[0], first[1], first[2], first[3]]) as usize;
+	assert_eq!(idr_len, idr.len(), "IDR length prefix");
+	assert_eq!(&first[4..4 + idr_len], idr, "IDR payload");
+
+	// Second frame: P-slice, length-prefixed.
+	let second = &sample_payloads[1];
+	let pslice_len = u32::from_be_bytes([second[0], second[1], second[2], second[3]]) as usize;
+	assert_eq!(pslice_len, pslice.len(), "P-slice length prefix");
+	assert_eq!(&second[4..4 + pslice_len], pslice, "P-slice payload");
+}
+
+#[tokio::test(start_paused = true)]
+async fn export_fragment_duration_batches_blocks() {
+	// With fragment_duration = 2s and 5 frames within 100ms, all 5 SimpleBlocks
+	// should land in ONE Cluster (vs 5 separate Clusters in per-frame mode).
+	let import_bytes = synth_webm_with_frames();
+
+	let broadcast = moq_net::Broadcast::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = crate::import::Mkv::new(producer, catalog.clone());
+	let mut buf = bytes::BytesMut::from(import_bytes.as_slice());
+	importer.decode(&mut buf).unwrap();
+	importer.finish().unwrap();
+
+	let mut exporter = crate::export::Mkv::new(consumer)
+		.unwrap()
+		.with_fragment_duration(std::time::Duration::from_secs(2));
+	let mut exported: Vec<u8> = Vec::new();
+
+	let mut importer = Some(importer);
+	let mut held_catalog = Some(catalog);
+	for _ in 0..32 {
+		let next = tokio::time::timeout(std::time::Duration::from_millis(100), exporter.next()).await;
+		match next {
+			Ok(Ok(Some(chunk))) => exported.extend_from_slice(&chunk),
+			Ok(Ok(None)) => break,
+			Ok(Err(e)) => panic!("exporter error: {e}"),
+			Err(_) => {
+				importer = None;
+				held_catalog = None;
+			}
+		}
+	}
+	drop(importer);
+	drop(held_catalog);
+	drop(exporter);
+
+	// Count Clusters and SimpleBlocks in the export.
+	let mut cursor = Cursor::new(exported.as_slice());
+	let iter = WebmIterator::new(&mut cursor, &[]);
+	let mut cluster_count = 0;
+	let mut block_count = 0;
+	for tag in iter {
+		match tag.expect("parse") {
+			MatroskaSpec::Cluster(Master::Start) => cluster_count += 1,
+			MatroskaSpec::SimpleBlock(_) => block_count += 1,
+			_ => {}
+		}
+	}
+
+	assert_eq!(block_count, 5, "all blocks should be emitted");
+	assert_eq!(cluster_count, 1, "all blocks should batch into one cluster");
 }
 
 /// Build a small WebM with VP9 video + Opus audio and several frames per track.
