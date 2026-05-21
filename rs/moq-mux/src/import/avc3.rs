@@ -1,4 +1,4 @@
-use super::annexb::{NalIterator, START_CODE};
+use super::annexb::NalIterator;
 use super::jitter::MinFrameDuration;
 use super::same_codec;
 
@@ -91,7 +91,9 @@ impl Avc3 {
 				profile: sps.profile_idc,
 				constraints: constraint_flags,
 				level: sps.level_idc,
-				inline: true,
+				// We now strip inline SPS/PPS from samples and ship them via
+				// `description` (avcC) instead — that's the avc1 contract.
+				inline: false,
 			}
 			.into(),
 			description,
@@ -234,7 +236,11 @@ impl Avc3 {
 		let nal_unit_type = header & 0b11111;
 		let nal_type = NalType::try_from(nal_unit_type).ok();
 
-		match nal_type {
+		// SPS/PPS are stored in the catalog `description` (avcC) and stripped
+		// from sample data — that's the avc1 contract. The rest of the NALs
+		// are emitted length-prefixed (4-byte big-endian, matching the
+		// `lengthSizeMinusOne = 3` we write in build_avcc).
+		let emit = match nal_type {
 			Some(NalType::Sps) => {
 				self.maybe_start_frame(pts)?;
 
@@ -244,21 +250,18 @@ impl Avc3 {
 				// PPS is tied to SPS context; drop cached PPS when SPS changes.
 				if self.cached_sps.as_ref().is_some_and(|cached| cached != &nal) {
 					self.cached_pps = None;
-					self.current.contains_pps = false;
 				}
 
 				// Cache before init() so the avcC builder can see the latest SPS.
 				self.cached_sps = Some(nal.clone());
 
 				self.init(&sps)?;
-
-				self.current.contains_sps = true;
+				false
 			}
 			Some(NalType::Pps) => {
 				self.maybe_start_frame(pts)?;
 
 				self.cached_pps = Some(nal.clone());
-				self.current.contains_pps = true;
 
 				// First PPS after an SPS unlocks avcC emission — republish the
 				// catalog with a populated description.
@@ -268,29 +271,16 @@ impl Avc3 {
 						self.init(&sps)?;
 					}
 				}
+				false
 			}
 			Some(NalType::Aud) | Some(NalType::Sei) => {
 				self.maybe_start_frame(pts)?;
+				true
 			}
 			Some(NalType::IdrSlice) => {
-				// Insert cached SPS/PPS before keyframes if not already present in this frame.
-				if !self.current.contains_sps
-					&& let Some(sps) = &self.cached_sps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(sps);
-					self.current.contains_sps = true;
-				}
-				if !self.current.contains_pps
-					&& let Some(pps) = &self.cached_pps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(pps);
-					self.current.contains_pps = true;
-				}
-
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
+				true
 			}
 			Some(NalType::NonIdrSlice)
 			| Some(NalType::DataPartitionA)
@@ -300,18 +290,19 @@ impl Avc3 {
 				if nal.get(1).context("NAL unit is too short")? & 0x80 != 0 {
 					self.maybe_start_frame(pts)?;
 				}
-
 				self.current.contains_slice = true;
+				true
 			}
-			_ => {}
+			_ => true,
+		};
+
+		tracing::trace!(kind = ?nal_type, ?emit, "parsed NAL");
+
+		if emit {
+			let len = u32::try_from(nal.len()).context("NAL too large for 4-byte length prefix")?;
+			self.current.chunks.extend_from_slice(&len.to_be_bytes());
+			self.current.chunks.extend_from_slice(&nal);
 		}
-
-		tracing::trace!(kind = ?nal_type, "parsed NAL");
-
-		// Replace the original start code with a canonical 4-byte start code (marginally easier
-		// for downstream players, e.g. MSE).
-		self.current.chunks.extend_from_slice(&START_CODE);
-		self.current.chunks.extend_from_slice(&nal);
 
 		Ok(())
 	}
@@ -342,8 +333,6 @@ impl Avc3 {
 
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
-		self.current.contains_sps = false;
-		self.current.contains_pps = false;
 
 		Ok(())
 	}
@@ -404,8 +393,6 @@ struct Frame {
 	chunks: BytesMut,
 	contains_idr: bool,
 	contains_slice: bool,
-	contains_sps: bool,
-	contains_pps: bool,
 }
 
 /// Build an AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2) from a

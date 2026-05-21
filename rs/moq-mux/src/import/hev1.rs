@@ -1,4 +1,4 @@
-use super::annexb::{NalIterator, START_CODE};
+use super::annexb::NalIterator;
 use super::jitter::MinFrameDuration;
 use super::same_codec;
 
@@ -67,7 +67,9 @@ impl Hev1 {
 			coded_width: Some(sps.rbsp.cropped_width() as u32),
 			coded_height: Some(sps.rbsp.cropped_height() as u32),
 			codec: hang::catalog::H265 {
-				in_band: true, // We only support `hev1` with inline SPS/PPS for now
+				// VPS/SPS/PPS now live in `description` (hvcC) and are
+				// stripped from sample data — that's the hvc1 contract.
+				in_band: false,
 				profile_space: profile.profile_space,
 				profile_idc: profile.profile_idc,
 				profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
@@ -217,19 +219,22 @@ impl Hev1 {
 		let nal_unit_type = (header >> 1) & 0b111111;
 		let nal_type = NALUnitType::from(nal_unit_type);
 
-		match nal_type {
+		// VPS/SPS/PPS go into the catalog `description` (hvcC) and are stripped
+		// from sample data — that's the hvc1 contract. Everything else is
+		// emitted length-prefixed (4-byte big-endian, matching the
+		// `lengthSizeMinusOne = 3` we write in build_hvcc).
+		let emit = match nal_type {
 			NALUnitType::VpsNut => {
 				self.maybe_start_frame(pts)?;
-
 				self.cached_vps = Some(nal.clone());
-				self.current.contains_vps = true;
 
-				// If SPS was already cached, republish so hvcC can include the new VPS.
+				// If SPS was already cached, republish so hvcC picks up the new VPS.
 				if let Some(sps_nal) = self.cached_sps.clone()
 					&& let Ok(sps) = SpsNALUnit::parse(&mut &sps_nal[..])
 				{
 					self.init(&sps)?;
 				}
+				false
 			}
 			NALUnitType::SpsNut => {
 				self.maybe_start_frame(pts)?;
@@ -239,21 +244,17 @@ impl Hev1 {
 				// PPS is tied to SPS context; drop cached PPS when SPS changes.
 				if self.cached_sps.as_ref().is_some_and(|cached| cached != &nal) {
 					self.cached_pps = None;
-					self.current.contains_pps = false;
 				}
 
 				// Cache before init() so the hvcC builder can see the latest SPS.
 				self.cached_sps = Some(nal.clone());
 
 				self.init(&sps)?;
-
-				self.current.contains_sps = true;
+				false
 			}
 			NALUnitType::PpsNut => {
 				self.maybe_start_frame(pts)?;
-
 				self.cached_pps = Some(nal.clone());
-				self.current.contains_pps = true;
 
 				// First PPS after VPS+SPS unlocks hvcC emission — republish the catalog.
 				if let Some(sps_nal) = self.cached_sps.clone()
@@ -261,9 +262,11 @@ impl Hev1 {
 				{
 					self.init(&sps)?;
 				}
+				false
 			}
 			NALUnitType::AudNut | NALUnitType::PrefixSeiNut | NALUnitType::SuffixSeiNut => {
 				self.maybe_start_frame(pts)?;
+				true
 			}
 			// Keyframe containing slices
 			NALUnitType::IdrWRadl
@@ -272,31 +275,9 @@ impl Hev1 {
 			| NALUnitType::BlaWRadl
 			| NALUnitType::BlaWLp
 			| NALUnitType::CraNut => {
-				// Insert cached VPS/SPS/PPS before keyframes if not already present in this frame.
-				if !self.current.contains_vps
-					&& let Some(vps) = &self.cached_vps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(vps);
-					self.current.contains_vps = true;
-				}
-				if !self.current.contains_sps
-					&& let Some(sps) = &self.cached_sps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(sps);
-					self.current.contains_sps = true;
-				}
-				if !self.current.contains_pps
-					&& let Some(pps) = &self.cached_pps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(pps);
-					self.current.contains_pps = true;
-				}
-
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
+				true
 			}
 			// All other slice types (both N and R variants)
 			NALUnitType::TrailN
@@ -314,14 +295,16 @@ impl Hev1 {
 					self.maybe_start_frame(pts)?;
 				}
 				self.current.contains_slice = true;
+				true
 			}
-			_ => {}
-		}
+			_ => true,
+		};
 
-		// Replace the original start code with a canonical 4-byte start code (marginally easier
-		// for downstream players, e.g. MSE).
-		self.current.chunks.extend_from_slice(&START_CODE);
-		self.current.chunks.extend_from_slice(&nal);
+		if emit {
+			let len = u32::try_from(nal.len()).context("NAL too large for 4-byte length prefix")?;
+			self.current.chunks.extend_from_slice(&len.to_be_bytes());
+			self.current.chunks.extend_from_slice(&nal);
+		}
 
 		Ok(())
 	}

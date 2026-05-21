@@ -1,8 +1,6 @@
 use anyhow::{self};
 use bytes::{Buf, Bytes};
 
-pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
-
 pub struct NalIterator<'a, T: Buf + AsRef<[u8]> + 'a> {
 	buf: &'a mut T,
 	start: Option<usize>,
