@@ -50,7 +50,7 @@ async fn run_subscribe(mut consumer: moq_net::OriginConsumer) -> anyhow::Result<
 	tracing::info!(%path, "broadcast announced");
 
 	// Read the catalog to discover available tracks.
-	let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
+	let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track()).await?;
 	let mut catalog = moq_mux::catalog::Consumer::new(catalog_track);
 
 	let info = catalog.next().await?.ok_or_else(|| anyhow::anyhow!("no catalog"))?;
@@ -78,7 +78,7 @@ async fn run_subscribe(mut consumer: moq_net::OriginConsumer) -> anyhow::Result<
 		timescale: 0,
 	};
 
-	let track_consumer = broadcast.subscribe_track(&track)?;
+	let track_consumer = broadcast.subscribe_track(&track).await?;
 	let mut ordered = moq_mux::container::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
 		.with_latency(Duration::from_millis(500));
 
