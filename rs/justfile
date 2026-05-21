@@ -23,7 +23,7 @@ check *args:
 
 # Extended Rust-only CI: feature edge cases + publish dry-run.
 ci:
-	just rs check --workspace
+	just check --workspace
 	cargo check --workspace --no-default-features
 	cargo check --workspace --all-features
 	cargo publish --dry-run
