@@ -122,9 +122,15 @@ jobs:
           path: dist/bindings/kotlin/
 
   package:
-    name: Package
+    name: Package and publish
     needs: [parse-version, build, bindings]
     runs-on: ubuntu-latest
+    env:
+      # Picked up by com.vanniktech.maven.publish via Gradle project properties.
+      ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+      ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+      ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+      ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v6
@@ -160,7 +166,7 @@ jobs:
           name: kotlin-bindings
           path: bindings
 
-      - name: Package
+      - name: Stage native libs + bindings into the gradle module
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
@@ -170,41 +176,15 @@ jobs:
             --bindings-dir bindings \
             --output release-out
 
-      - name: Upload Kotlin package
+      - name: Publish to Maven Central
+        run: |
+          gradle -p kt \
+            -Pmoqffi.version="${{ needs.parse-version.outputs.version }}" \
+            -Pandroid.enabled=true \
+            :moq:publishAndReleaseToMavenCentral --no-configuration-cache
+
+      - name: Upload local maven layout
         uses: actions/upload-artifact@v7
         with:
           name: kotlin-package
           path: release-out/*
-
-  publish:
-    name: Publish to Maven Central
-    needs: [package, parse-version]
-    runs-on: ubuntu-latest
-    # Skipped until PUBLISH_MAVEN=true and Sonatype + signing secrets are set.
-    # See kt/README.md for setup steps.
-    if: vars.PUBLISH_MAVEN == 'true'
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      - name: Download package
-        uses: actions/download-artifact@v8
-        with:
-          name: kotlin-package
-          path: kotlin-out
-
-      - name: Publish
-        env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
-          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
-        run: ./kt/scripts/publish.sh

@@ -71,21 +71,22 @@ When `moq-ffi` splits into `moq-mux-ffi` + `moq-net-ffi`, add sibling modules `k
 
 ## Publishing to Maven Central
 
-Wired but disabled. To enable:
+The `kotlin.yml` workflow uses [`com.vanniktech.maven.publish`](https://vanniktech.github.io/gradle-maven-publish-plugin/) to upload artifacts to the [Sonatype Central Portal](https://central.sonatype.com) and trigger the release automatically on every `moq-ffi-v*` tag. Required setup (one-time):
 
-1. Register at https://central.sonatype.com and claim the `dev.moq` namespace (requires a TXT record at `moq.dev` with the verification key). The auto-verified alternative `io.github.moq-dev` works without DNS setup but changes artifact coordinates.
+1. Register at https://central.sonatype.com and claim the `dev.moq` namespace (TXT record on `moq.dev` with the verification key). The auto-verified alternative `io.github.moq-dev` works without DNS setup but changes artifact coordinates.
 2. Account menu -> Generate User Token. Save the username/password (one-time view).
-3. Create a GPG signing key:
+3. Create a GPG signing key (the passphrase becomes `SIGNING_PASSWORD`):
    ```
-   gpg --batch --generate-key gpg.conf
-   gpg --armor --export-secret-keys $KEYID > signing-key.asc
-   gpg --keyserver keys.openpgp.org --send-keys $KEYID
-   gpg --keyserver keyserver.ubuntu.com --send-keys $KEYID
+   gpg --full-generate-key                       # RSA 4096, 4y expiry
+   gpg --list-secret-keys --keyid-format=long    # find <KEYID>
+   gpg --armor --export-secret-keys <KEYID> > signing-key.asc
+   gpg --keyserver keys.openpgp.org --send-keys <KEYID>
+   gpg --keyserver keyserver.ubuntu.com --send-keys <KEYID>
    ```
 4. In `moq-dev/moq` -> Settings -> Secrets and variables -> Actions:
    - Secret `MAVEN_CENTRAL_USERNAME`
    - Secret `MAVEN_CENTRAL_PASSWORD`
-   - Secret `SIGNING_KEY` (contents of `signing-key.asc`)
+   - Secret `SIGNING_KEY` (full contents of `signing-key.asc`, including the BEGIN/END lines)
    - Secret `SIGNING_PASSWORD`
-   - Variable `PUBLISH_MAVEN=true`
-5. Cut the next `moq-ffi-v*` tag. The `kotlin.yml` workflow's `publish` job calls `kt/scripts/publish.sh`, which uploads to the Central Portal.
+
+The publish task is `:moq:publishAndReleaseToMavenCentral`; CI wires the four secrets as `ORG_GRADLE_PROJECT_{mavenCentralUsername,mavenCentralPassword,signingInMemoryKey,signingInMemoryKeyPassword}` so the plugin picks them up automatically.

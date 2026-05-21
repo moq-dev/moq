@@ -16,11 +16,23 @@
 // Android target is opt-in via `-Pandroid.enabled=true` so contributors
 // without the Android SDK (or Google maven access) can still build/test
 // the JVM variant. CI always sets the flag.
+//
+// Publishing uses com.vanniktech.maven.publish, which handles the Sonatype
+// Central Portal upload protocol + GPG signing in a single Gradle task.
+// CI runs `:moq:publishAndReleaseToMavenCentral`. Credentials are picked
+// up from env vars set by kotlin.yml:
+//   ORG_GRADLE_PROJECT_mavenCentralUsername
+//   ORG_GRADLE_PROJECT_mavenCentralPassword
+//   ORG_GRADLE_PROJECT_signingInMemoryKey
+//   ORG_GRADLE_PROJECT_signingInMemoryKeyPassword
+// If the signing key isn't set (e.g., local `:moq:assemble` without secrets),
+// signAllPublications() becomes a no-op so local builds still work.
+
+import com.vanniktech.maven.publish.SonatypeHost
 
 plugins {
     kotlin("multiplatform") version "2.0.21"
-    `maven-publish`
-    signing
+    id("com.vanniktech.maven.publish") version "0.30.0"
 }
 
 val androidEnabled = providers.gradleProperty("android.enabled").orNull == "true"
@@ -69,33 +81,32 @@ if (androidEnabled) {
     apply(from = "android.gradle.kts")
 }
 
-publishing {
-    publications.withType<MavenPublication> {
-        pom {
-            name.set("moq")
-            description.set("Kotlin bindings for Media over QUIC")
-            url.set("https://github.com/moq-dev/moq")
-            licenses {
-                license { name.set("MIT OR Apache-2.0") }
-            }
-            developers {
-                developer {
-                    name.set("moq-dev")
-                    url.set("https://github.com/moq-dev")
-                }
-            }
-            scm { url.set("https://github.com/moq-dev/moq") }
-        }
-    }
-}
+mavenPublishing {
+    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
+    signAllPublications()
+    coordinates("dev.moq", "moq", version.toString())
 
-if (providers.gradleProperty("publishing.enabled").orNull == "true") {
-    signing {
-        val signingKey: String? = System.getenv("SIGNING_KEY")
-        val signingPassword: String? = System.getenv("SIGNING_PASSWORD")
-        if (signingKey != null && signingPassword != null) {
-            useInMemoryPgpKeys(signingKey, signingPassword)
-            sign(publishing.publications)
+    pom {
+        name.set("moq")
+        description.set("Kotlin bindings for Media over QUIC")
+        url.set("https://github.com/moq-dev/moq")
+        licenses {
+            license {
+                name.set("MIT OR Apache-2.0")
+                url.set("https://github.com/moq-dev/moq/blob/main/LICENSE-APACHE")
+            }
+        }
+        developers {
+            developer {
+                id.set("moq-dev")
+                name.set("moq-dev")
+                url.set("https://github.com/moq-dev")
+            }
+        }
+        scm {
+            url.set("https://github.com/moq-dev/moq")
+            connection.set("scm:git:https://github.com/moq-dev/moq.git")
+            developerConnection.set("scm:git:ssh://git@github.com/moq-dev/moq.git")
         }
     }
 }
