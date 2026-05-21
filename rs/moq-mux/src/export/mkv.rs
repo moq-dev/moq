@@ -205,8 +205,11 @@ impl Mkv {
 	/// `duration` of frames, useful for downstream consumers that throttle by
 	/// fragment rate (e.g. KVS PutMedia). [`Duration::ZERO`] emits one Cluster
 	/// per frame; otherwise the cap applies in addition to GOP / overflow rollover.
-	pub fn with_fragment_duration(mut self, duration: Duration) -> Self {
-		self.fragment_duration = Some(duration);
+	///
+	/// Accepts either `Duration` or `Option<Duration>` (where `None` restores
+	/// the per-GOP default).
+	pub fn with_fragment_duration(mut self, duration: impl Into<Option<Duration>>) -> Self {
+		self.fragment_duration = duration.into();
 		self
 	}
 
