@@ -1,4 +1,4 @@
-name: swift
+name: Release Kotlin
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: moq-ffi-swift-release
+  group: release-kt
   cancel-in-progress: true
 
 jobs:
@@ -29,16 +29,28 @@ jobs:
   build:
     name: Build moq-ffi (${{ matrix.target }})
     needs: [parse-version]
-    runs-on: macos-latest
+    runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - aarch64-apple-ios
-          - aarch64-apple-ios-sim
-          - x86_64-apple-ios
-          - universal-apple-darwin
+        include:
+          # Android
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+          - target: armv7-linux-androideabi
+            os: ubuntu-latest
+          - target: x86_64-linux-android
+            os: ubuntu-latest
+          # Desktop JVM
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: universal-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
 
     steps:
       - uses: actions/checkout@v6
@@ -51,13 +63,21 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install cargo-ndk (Android)
+        if: contains(matrix.target, 'android')
+        run: cargo install cargo-ndk
+
       - name: Build
         shell: bash
         env:
           BUILD_TARGET: ${{ matrix.target }}
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-          # Set iOS deployment target to avoid ___chkstk_darwin linker errors.
-          IPHONEOS_DEPLOYMENT_TARGET: ${{ contains(matrix.target, 'apple-ios') && '16.0' || '' }}
         run: |
           ./rs/moq-ffi/build.sh \
             --target "$BUILD_TARGET" \
@@ -67,7 +87,8 @@ jobs:
       - name: Upload lib
         uses: actions/upload-artifact@v7
         with:
-          name: swift-lib-${{ matrix.target }}
+          name: kotlin-lib-${{ matrix.target }}
+          # Upload only the lib/ contents; package.sh expects <target>/<libname>.
           path: dist/moq-ffi-${{ needs.parse-version.outputs.version }}-${{ matrix.target }}/lib/
 
   bindings:
@@ -96,28 +117,45 @@ jobs:
       - name: Upload bindings
         uses: actions/upload-artifact@v7
         with:
-          name: swift-bindings
-          path: dist/bindings/swift/
+          name: kotlin-bindings
+          # Upload only the kotlin subdir.
+          path: dist/bindings/kotlin/
 
   package:
-    name: Package
+    name: Package and publish
     needs: [parse-version, build, bindings]
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
+    env:
+      # Picked up by com.vanniktech.maven.publish via Gradle project properties.
+      ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+      ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+      ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+      ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
 
       - name: Download per-target libs
         uses: actions/download-artifact@v8
         with:
           path: libs-raw
-          pattern: swift-lib-*
+          pattern: kotlin-lib-*
 
       - name: Flatten lib layout
         run: |
           mkdir -p libs
-          for dir in libs-raw/swift-lib-*; do
-            target="${dir#libs-raw/swift-lib-}"
+          for dir in libs-raw/kotlin-lib-*; do
+            target="${dir#libs-raw/kotlin-lib-}"
             mv "$dir" "libs/$target"
           done
           ls -la libs
@@ -125,44 +163,28 @@ jobs:
       - name: Download bindings
         uses: actions/download-artifact@v8
         with:
-          name: swift-bindings
+          name: kotlin-bindings
           path: bindings
 
-      - name: Package
+      - name: Stage native libs + bindings into the gradle module
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
-          ./swift/scripts/package.sh \
+          ./kt/scripts/package.sh \
             --version "$BUILD_VERSION" \
             --lib-dir libs \
             --bindings-dir bindings \
             --output release-out
 
-      - name: Upload Swift package
+      - name: Publish to Maven Central
+        run: |
+          gradle -p kt \
+            -Pmoqffi.version="${{ needs.parse-version.outputs.version }}" \
+            -Pandroid.enabled=true \
+            :moq:publishAndReleaseToMavenCentral --no-configuration-cache
+
+      - name: Upload local maven layout
         uses: actions/upload-artifact@v7
         with:
-          name: swift-package
+          name: kotlin-package
           path: release-out/*
-
-  publish:
-    name: Publish to Swift Package mirror
-    needs: [package, parse-version]
-    runs-on: ubuntu-latest
-    # Skipped until PUBLISH_SPM=true and SWIFT_MIRROR_TOKEN are set. See
-    # swift/README.md for setup steps.
-    if: vars.PUBLISH_SPM == 'true'
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Download package
-        uses: actions/download-artifact@v8
-        with:
-          name: swift-package
-          path: swift-out
-
-      - name: Publish to moq-swift mirror
-        env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-          SWIFT_MIRROR_TOKEN: ${{ secrets.SWIFT_MIRROR_TOKEN }}
-        run: ./swift/scripts/publish.sh

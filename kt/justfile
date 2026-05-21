@@ -1,0 +1,21 @@
+#!/usr/bin/env just --justfile
+#
+# Language-specific recipes for the Kotlin Multiplatform package under
+# kt/. Invoked from the repo root as `just kt <recipe>` via the `mod kt`
+# import.
+
+set working-directory := '.'
+
+default:
+	just check
+
+# Build moq-ffi for the host, regenerate uniffi bindings, run :moq:jvmTest.
+# Skips cleanly if cargo, java, or gradle is missing.
+check:
+	bash scripts/check.sh
+
+# Assemble the KMP module from per-target moq-ffi binaries + bindings.
+# Used by .github/workflows/release-kt.yml; see kt/README.md for the
+# expected --lib-dir layout.
+package *args:
+	bash scripts/package.sh {{ args }}

@@ -1,0 +1,38 @@
+#!/usr/bin/env just --justfile
+#
+# Language-specific recipes for the Python packages under py/. Invoked
+# from the repo root as `just py <recipe>` via the `mod py` import.
+
+set working-directory := '.'
+
+default:
+	just check
+
+# Ruff lint + format + maturin source build + pyright over the moq-lite
+# package. `uv sync --package moq-lite` populates the lockfile-pinned deps,
+# then maturin develop overrides the registry moq-ffi with a source build.
+# --no-sync on the pyright invocation keeps uv from reinstalling the
+# registry moq-ffi over the source build.
+check:
+	uv run ruff check .
+	uv run ruff format --check .
+	uv sync --package moq-lite
+	uv run maturin develop -m ../rs/moq-ffi/Cargo.toml --uv
+	uv run --package moq-lite --no-sync pyright
+
+fix:
+	uv run ruff check --fix .
+	uv run ruff format .
+
+test:
+	uv sync --package moq-lite
+	uv run maturin develop -m ../rs/moq-ffi/Cargo.toml --uv
+	uv run --package moq-lite --no-sync pytest moq-lite/tests/
+
+# Build moq-ffi from source into the moq-lite venv (used during local dev).
+build:
+	cd moq-lite && uv run maturin develop -m ../../rs/moq-ffi/Cargo.toml --uv
+
+# Publish any unpublished Python packages to PyPI. Invoked by release-py.yml.
+release:
+	bash common/release.sh
