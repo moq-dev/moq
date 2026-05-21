@@ -34,7 +34,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
-	let mut announcements = sub_origin.consume();
+	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
@@ -61,7 +61,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -173,7 +173,7 @@ async fn iroh_connect() {
 
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
-	let mut announcements = sub_origin.consume();
+	let mut announcements = sub_origin.consume().announced();
 
 	// Create client iroh endpoint
 	let mut client_iroh_config = IrohEndpointConfig::default();
@@ -213,7 +213,7 @@ async fn iroh_connect() {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");

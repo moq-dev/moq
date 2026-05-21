@@ -5,8 +5,8 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, Track,
-	TrackConsumer,
+	AnnounceConsumer, AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats,
+	Track, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -142,7 +142,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let prefix = interest.prefix.to_owned();
 		let exclude_hop = interest.exclude_hop;
 
-		let mut origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
+		let origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
+		let mut announced = origin.announced();
 
 		let version = self.version;
 		let self_origin = self.self_origin;
@@ -150,7 +151,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		web_async::spawn(async move {
 			if let Err(err) = Self::run_announce(
 				&mut stream,
-				&mut origin,
+				&origin,
+				&mut announced,
 				&prefix,
 				self_origin,
 				exclude_hop,
@@ -175,9 +177,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	async fn run_announce(
 		stream: &mut Stream<S, Version>,
-		origin: &mut OriginConsumer,
+		origin: &OriginConsumer,
+		announced: &mut AnnounceConsumer,
 		prefix: impl AsPath,
 		self_origin: Origin,
 		// Peer's session-level origin id, sent in AnnounceInterest. We skip
@@ -202,7 +206,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 				// Send ANNOUNCE_INIT as the first message with all currently active paths
 				// We use `try_next()` to synchronously get the initial updates.
-				while let Some((path, active)) = origin.try_announced() {
+				while let Some((path, active)) = announced.try_next() {
 					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
 
 					if active.is_some() {
@@ -233,8 +237,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			tokio::select! {
 				biased;
 				res = stream.reader.closed() => return res,
-				announced = origin.announced() => {
-					match announced {
+				next = announced.next() => {
+					match next {
 						Some((path, active)) => {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 

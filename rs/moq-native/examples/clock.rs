@@ -94,13 +94,14 @@ async fn main() -> anyhow::Result<()> {
 			let mut origin = origin
 				.scope(&[path])
 				.context("not allowed to consume broadcast")?
-				.consume();
+				.consume()
+				.announced();
 
 			let mut clock: Option<Subscriber> = None;
 
 			loop {
 				tokio::select! {
-					Some(announce) = origin.announced() => match announce {
+					Some(announce) = origin.next() => match announce {
 						(path, Some(broadcast)) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
 							let track = broadcast.subscribe_track(&track)?;

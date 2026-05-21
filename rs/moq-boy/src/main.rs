@@ -228,7 +228,8 @@ async fn run(config: &Config) -> Result<()> {
 	let mut viewer_consumer = consume_origin
 		.with_root(&viewer_path)
 		.expect("viewer prefix should be valid")
-		.consume();
+		.consume()
+		.announced();
 
 	tracing::info!(url = %config.url, %name, broadcast = %broadcast_path, "connecting to relay");
 

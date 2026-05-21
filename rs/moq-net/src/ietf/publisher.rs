@@ -437,17 +437,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	/// Outgoing PublishNamespace: announce each namespace via a bidi stream.
-	async fn run_announce(mut self) -> Result<(), Error> {
+	async fn run_announce(self) -> Result<(), Error> {
 		let mut namespace_streams: HashMap<crate::PathOwned, (RequestId, Stream<S, Version>)> = HashMap::new();
+		let mut announced = self.origin.announced();
 
 		loop {
-			let announced = tokio::select! {
+			let next = tokio::select! {
 				biased;
 				_ = self.session.closed() => return Ok(()),
-				announced = self.origin.announced() => announced,
+				next = announced.next() => next,
 			};
 
-			let Some((path, active)) = announced else {
+			let Some((path, active)) = next else {
 				break;
 			};
 
@@ -548,7 +549,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::debug!(prefix = %self.origin.absolute(&prefix), "subscribe_namespace stream");
 
-		let mut origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
+		let origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
 
 		// Send OK response
 		match self.version {
@@ -585,8 +586,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 			// v16+: Send Namespace/NamespaceDone entries on this bidi stream.
 			_ => {
+				let mut announced = origin.announced();
+
 				// Send initial NAMESPACE messages for currently active namespaces
-				while let Some((path, active)) = origin.try_announced() {
+				while let Some((path, active)) = announced.try_next() {
 					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
 					if active.is_some() {
 						tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
@@ -605,8 +608,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					tokio::select! {
 						biased;
 						res = stream.reader.closed() => return res,
-						announced = origin.announced() => {
-							match announced {
+						next = announced.next() => {
+							match next {
 								Some((path, active)) => {
 									let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 									if active.is_some() {

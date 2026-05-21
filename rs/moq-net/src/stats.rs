@@ -1063,7 +1063,7 @@ mod tests {
 	async fn task_spawns_on_first_subscribe_and_announces() {
 		let origin = Origin::random().produce();
 		let stats = Stats::new(".stats", 1, Some(PathOwned::from("sjc")), origin.clone());
-		let mut consumer = origin.consume();
+		let mut consumer = origin.consume().announced();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let p = bs.publisher();
@@ -1073,7 +1073,7 @@ mod tests {
 		// levels=1 + broadcast "foo/bar" → buckets ["", "foo"]: root + per-first-segment.
 		let mut seen = std::collections::HashSet::new();
 		for _ in 0..2 {
-			let (path, broadcast) = consumer.announced().await.expect("expected announce");
+			let (path, broadcast) = consumer.next().await.expect("expected announce");
 			assert!(broadcast.is_some());
 			seen.insert(path.as_str().to_string());
 		}
@@ -1085,7 +1085,7 @@ mod tests {
 	async fn task_spawns_with_node_suffix() {
 		let origin = Origin::random().produce();
 		let stats = Stats::new(".stats", 2, Some(PathOwned::from("sjc")), origin.clone());
-		let mut consumer = origin.consume();
+		let mut consumer = origin.consume().announced();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let p = bs.publisher();
@@ -1096,7 +1096,7 @@ mod tests {
 		// suffixed with `/sjc`.
 		let mut seen = std::collections::HashSet::new();
 		for _ in 0..3 {
-			let (path, broadcast) = consumer.announced().await.expect("expected announce");
+			let (path, broadcast) = consumer.next().await.expect("expected announce");
 			assert!(broadcast.is_some());
 			seen.insert(path.as_str().to_string());
 		}
@@ -1110,7 +1110,7 @@ mod tests {
 		// node=None: paths should omit the trailing /<node> segment.
 		let origin = Origin::random().produce();
 		let stats = Stats::new(".stats", 1, None, origin.clone());
-		let mut consumer = origin.consume();
+		let mut consumer = origin.consume().announced();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let p = bs.publisher();
@@ -1119,7 +1119,7 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let mut seen = std::collections::HashSet::new();
 		for _ in 0..2 {
-			let (path, broadcast) = consumer.announced().await.expect("expected announce");
+			let (path, broadcast) = consumer.next().await.expect("expected announce");
 			assert!(broadcast.is_some());
 			seen.insert(path.as_str().to_string());
 		}
@@ -1134,7 +1134,7 @@ mod tests {
 		// the first-segment prefix; the broadcast's own path isn't reachable at
 		// this depth, so we get exactly two stats announces).
 		let stats = Stats::new(".stats", 1, Some(PathOwned::from("sjc")), origin.clone());
-		let mut consumer = origin.consume();
+		let mut consumer = origin.consume().announced();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let p = bs.publisher();
@@ -1143,7 +1143,7 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let mut announced: Vec<String> = Vec::new();
 		for _ in 0..2 {
-			let (path, broadcast) = consumer.announced().await.expect("expected announce");
+			let (path, broadcast) = consumer.next().await.expect("expected announce");
 			assert!(broadcast.is_some(), "expected an active announce");
 			announced.push(path.as_str().to_string());
 		}
@@ -1157,7 +1157,7 @@ mod tests {
 		tokio::time::advance(Duration::from_secs(2)).await;
 		let mut unannounced: Vec<String> = Vec::new();
 		for _ in 0..2 {
-			let (path, broadcast) = consumer.announced().await.expect("expected unannounce");
+			let (path, broadcast) = consumer.next().await.expect("expected unannounce");
 			assert!(broadcast.is_none(), "expected an unannounce");
 			unannounced.push(path.as_str().to_string());
 		}

@@ -40,7 +40,7 @@ impl Origin {
 
 	pub fn announced(&mut self, origin: Id, on_announce: OnStatus) -> Result<Id, Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		let consumer = origin.consume();
+		let consumer = origin.consume().announced();
 		let channel = oneshot::channel();
 
 		let entry = TaskEntry {
@@ -64,8 +64,8 @@ impl Origin {
 		Ok(id)
 	}
 
-	async fn run_announced(task_id: Id, mut consumer: moq_net::OriginConsumer) -> Result<(), Error> {
-		while let Some((path, broadcast)) = consumer.announced().await {
+	async fn run_announced(task_id: Id, mut consumer: moq_net::AnnounceConsumer) -> Result<(), Error> {
+		while let Some((path, broadcast)) = consumer.next().await {
 			let mut state = State::lock();
 
 			// Stop if the callback was revoked by close.
@@ -108,9 +108,7 @@ impl Origin {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
 		// TODO: expose an async variant backed by `announced_broadcast` so FFI callers can wait
 		// for gossip instead of racing it.
-		// Uses the deprecated direct lookup to avoid the per-call cost of OriginProducer::consume().
-		#[allow(deprecated)]
-		origin.get_broadcast(path).ok_or(Error::BroadcastNotFound)
+		origin.consume().get_broadcast(path).ok_or(Error::BroadcastNotFound)
 	}
 
 	pub fn publish<P: moq_net::AsPath>(

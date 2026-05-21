@@ -21,13 +21,13 @@ pub struct MoqAnnounced {
 }
 
 struct Announced {
-	inner: moq_net::OriginConsumer,
+	inner: moq_net::AnnounceConsumer,
 }
 
 impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnouncement>>, MoqError> {
 		loop {
-			match self.inner.announced().await {
+			match self.inner.next().await {
 				Some((path, Some(broadcast))) => {
 					return Ok(Some(Arc::new(MoqAnnouncement {
 						path: path.to_string(),
@@ -43,7 +43,7 @@ impl Announced {
 
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		loop {
-			match self.inner.announced().await {
+			match self.inner.next().await {
 				Some((_path, Some(broadcast))) => {
 					return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)));
 				}
@@ -109,18 +109,22 @@ impl MoqOriginConsumer {
 	/// Subscribe to all broadcast announcements under a prefix.
 	pub fn announced(&self, prefix: String) -> Result<Arc<MoqAnnounced>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let origin = self.inner.clone().with_root(prefix).ok_or(MoqError::Unauthorized)?;
+		let origin = self.inner.with_root(prefix).ok_or(MoqError::Unauthorized)?;
 		Ok(Arc::new(MoqAnnounced {
-			task: Task::new(Announced { inner: origin }),
+			task: Task::new(Announced {
+				inner: origin.announced(),
+			}),
 		}))
 	}
 
 	/// Wait for a specific broadcast to be announced by path.
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let origin = self.inner.clone().with_root(path).ok_or(MoqError::Unauthorized)?;
+		let origin = self.inner.with_root(path).ok_or(MoqError::Unauthorized)?;
 		Ok(Arc::new(MoqAnnouncedBroadcast {
-			task: Task::new(Announced { inner: origin }),
+			task: Task::new(Announced {
+				inner: origin.announced(),
+			}),
 		}))
 	}
 }

@@ -46,7 +46,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
-	let mut announcements = sub_origin.consume();
+	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
@@ -78,7 +78,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -460,7 +460,7 @@ async fn broadcast_websocket() {
 
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
-	let mut announcements = sub_origin.consume();
+	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
@@ -490,7 +490,7 @@ async fn broadcast_websocket() {
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -564,7 +564,7 @@ async fn broadcast_websocket_fallback() {
 
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
-	let mut announcements = sub_origin.consume();
+	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
@@ -597,7 +597,7 @@ async fn broadcast_websocket_fallback() {
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");

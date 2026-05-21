@@ -458,13 +458,14 @@ async fn serve_announced(
 	} else {
 		state.auth.verify(&params).await?
 	};
-	let Some(mut origin) = state.cluster.subscriber(&token) else {
+	let Some(origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
+	let mut announced = origin.announced();
 	let mut broadcasts = Vec::new();
 
-	while let Some((suffix, active)) = origin.try_announced() {
+	while let Some((suffix, active)) = announced.try_next() {
 		if active.is_some() {
 			broadcasts.push(suffix);
 		}
