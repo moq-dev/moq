@@ -46,6 +46,15 @@ build:
 semver:
 	cargo semver-checks check-release
 
+# Update versions and changelogs via release-plz.
+bump:
+	release-plz update
+
+# Create release PRs and publish crates via release-plz.
+release:
+	release-plz release-pr --git-token "$GITHUB_TOKEN"
+	release-plz release --git-token "$GITHUB_TOKEN"
+
 update:
 	cargo update
 	cargo upgrade --incompatible
