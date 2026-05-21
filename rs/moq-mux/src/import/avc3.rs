@@ -111,21 +111,31 @@ impl Avc3 {
 			return Ok(());
 		}
 
-		let mut catalog = self.catalog.lock();
-
 		// Codec-bearing fields determine track identity. A description-only
 		// update (e.g. cached_pps just arrived) keeps the existing track so
 		// downstream subscribers don't have to re-fetch on every catalog tick.
 		// The first SPS (None → Some) also reuses the eagerly-created track.
 		let needs_retrack = self.config.as_ref().is_some_and(|old| !same_codec(old, &config));
 
-		if needs_retrack {
-			let old_name = self.track.name.clone();
-			tracing::debug!(name = ?old_name, "codec changed; replacing track");
-			catalog.video.renditions.remove(&old_name);
+		// Mint the replacement track BEFORE touching the catalog. If
+		// unique_track fails we leave self.track and the catalog untouched —
+		// no orphaned rendition, no lost track.
+		let new_producer = if needs_retrack {
+			Some(crate::container::Producer::new(
+				self.broadcast.unique_track(".avc3")?,
+				crate::container::Hang::Legacy,
+			))
+		} else {
+			None
+		};
 
-			let new_track = self.broadcast.unique_track(".avc3")?;
-			self.track = crate::container::Producer::new(new_track, crate::container::Hang::Legacy);
+		let mut catalog = self.catalog.lock();
+
+		if let Some(new) = new_producer {
+			let old_name = self.track.name.clone();
+			tracing::debug!(?old_name, new_name = ?new.name, "codec changed; replacing track");
+			catalog.video.renditions.remove(&old_name);
+			self.track = new;
 		}
 
 		catalog.video.renditions.insert(self.track.name.clone(), config.clone());

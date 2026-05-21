@@ -92,23 +92,32 @@ impl Hev1 {
 			return Ok(());
 		}
 
-		let mut catalog = self.catalog.lock();
-
 		// Codec-bearing fields determine track identity. A pure description
 		// update (e.g. cached_pps just arrived) reuses the existing track.
 		let needs_retrack = self.track.is_none() || !self.config.as_ref().is_some_and(|old| same_codec(old, &config));
 
-		if needs_retrack {
-			if let Some(track) = self.track.take() {
-				tracing::debug!(name = ?track.name, "reinitializing track");
-				catalog.video.renditions.remove(&track.name);
+		// Mint the replacement track BEFORE touching the catalog. If
+		// unique_track fails we leave self.track and the catalog untouched.
+		let new_producer = if needs_retrack {
+			Some(crate::container::Producer::new(
+				self.broadcast.unique_track(".hev1")?,
+				crate::container::Hang::Legacy,
+			))
+		} else {
+			None
+		};
+
+		let mut catalog = self.catalog.lock();
+
+		if let Some(new) = new_producer {
+			if let Some(old) = self.track.as_ref() {
+				tracing::debug!(old_name = ?old.name, new_name = ?new.name, "codec changed; replacing track");
+				catalog.video.renditions.remove(&old.name);
+			} else {
+				tracing::debug!(name = ?new.name, ?config, "starting track");
 			}
-
-			let track = self.broadcast.unique_track(".hev1")?;
-			tracing::debug!(name = ?track.name, ?config, "starting track");
-			catalog.video.renditions.insert(track.name.clone(), config.clone());
-
-			self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
+			catalog.video.renditions.insert(new.name.clone(), config.clone());
+			self.track = Some(new);
 		} else if let Some(track) = self.track.as_ref() {
 			tracing::debug!(name = ?track.name, "updating rendition (description)");
 			catalog.video.renditions.insert(track.name.clone(), config.clone());
