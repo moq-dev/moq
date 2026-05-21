@@ -7,6 +7,20 @@ pub enum Version {
 	Lite02,
 	Lite03,
 	Lite04,
+	/// Lite05 adds per-track timescale to SUBSCRIBE_OK and zigzag-delta timestamps
+	/// to per-frame headers.
+	Lite05,
+}
+
+impl Version {
+	/// Whether this version carries per-frame timestamps and per-track timescale
+	/// on the wire.
+	pub fn has_timestamps(self) -> bool {
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
+			_ => true,
+		}
+	}
 }
 
 impl fmt::Display for Version {
@@ -16,18 +30,14 @@ impl fmt::Display for Version {
 			Self::Lite02 => write!(f, "moq-lite-02"),
 			Self::Lite03 => write!(f, "moq-lite-03"),
 			Self::Lite04 => write!(f, "moq-lite-04"),
+			Self::Lite05 => write!(f, "moq-lite-05"),
 		}
 	}
 }
 
 impl From<Version> for crate::Version {
 	fn from(v: Version) -> Self {
-		match v {
-			Version::Lite01 => crate::Version::Lite(Version::Lite01),
-			Version::Lite02 => crate::Version::Lite(Version::Lite02),
-			Version::Lite03 => crate::Version::Lite(Version::Lite03),
-			Version::Lite04 => crate::Version::Lite(Version::Lite04),
-		}
+		crate::Version::Lite(v)
 	}
 }
 

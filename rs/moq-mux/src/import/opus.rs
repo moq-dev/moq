@@ -55,7 +55,8 @@ impl Opus {
 		mut catalog: crate::catalog::Producer,
 		config: OpusConfig,
 	) -> anyhow::Result<Self> {
-		let track = broadcast.unique_track(".opus")?;
+		let mut track = broadcast.unique_track(".opus")?;
+		track.set_timescale(hang::container::TIMESCALE);
 
 		let audio_config = hang::catalog::AudioConfig {
 			codec: hang::catalog::AudioCodec::Opus,

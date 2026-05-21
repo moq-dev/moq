@@ -322,6 +322,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			max_latency: std::time::Duration::ZERO,
 			start_group: None,
 			end_group: None,
+			timescale: track.timescale,
 		};
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
@@ -369,7 +370,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let priority = priority.insert(track.priority, sequence);
-			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
+			tasks.push(
+				Self::serve_group(session.clone(), msg, priority, group, version, track.timescale).map(|_| ()),
+			);
 		}
 	}
 
@@ -379,6 +382,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		mut priority: PriorityHandle,
 		mut group: GroupConsumer,
 		version: Version,
+		track_timescale: u64,
 	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
 		let stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -387,6 +391,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.set_priority(priority.current());
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
+
+		// Previous frame timestamp on this group's stream, for zigzag-delta encoding on Lite05+.
+		let mut prev_ts: u64 = 0;
 
 		loop {
 			let frame = tokio::select! {
@@ -404,6 +411,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				Some(frame) => frame,
 				None => break,
 			};
+
+			if version.has_timestamps() {
+				// Verify per-frame timestamp scale matches the track's negotiated timescale.
+				let ts = frame.timestamp;
+				if !ts.is_unspecified() && ts.scale() != track_timescale {
+					return Err(Error::ProtocolViolation);
+				}
+				let curr = ts.value();
+				let delta: i64 = (curr as i128 - prev_ts as i128)
+					.try_into()
+					.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+				let zz = crate::coding::VarInt::from_zigzag(delta)
+					.map_err(crate::coding::EncodeError::from)?;
+				stream.encode(&zz).await?;
+				prev_ts = curr;
+			}
 
 			stream.encode(&frame.size).await?;
 

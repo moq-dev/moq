@@ -92,7 +92,8 @@ impl Hev1 {
 			catalog.video.renditions.remove(&track.name);
 		}
 
-		let track = self.broadcast.unique_track(".hev1")?;
+		let mut track = self.broadcast.unique_track(".hev1")?;
+		track.set_timescale(hang::container::TIMESCALE);
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 

@@ -350,13 +350,24 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Stream<S, Version>,
 		msg: lite::Subscribe<'_>,
 	) -> Result<(), Error> {
+		let subscribe_id = msg.id;
 		stream.writer.encode(&msg).await?;
 
 		// The first response MUST be a SUBSCRIBE_OK.
 		let resp: lite::SubscribeResponse = stream.reader.decode().await?;
-		let lite::SubscribeResponse::Ok(_info) = resp else {
+		let lite::SubscribeResponse::Ok(info) = resp else {
 			return Err(Error::ProtocolViolation);
 		};
+
+		// Apply the negotiated timescale to the track producer so consumers can
+		// observe it via TrackConsumer::timescale() and run_group can decode
+		// per-frame timestamps at the correct scale.
+		{
+			let mut subs = self.subscribes.lock();
+			if let Some(track) = subs.get_mut(&subscribe_id) {
+				track.set_timescale(info.timescale);
+			}
+		}
 
 		// TODO handle additional SUBSCRIBE_OK and SUBSCRIBE_DROP messages.
 		stream.reader.closed().await?;
@@ -367,19 +378,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let (mut group, track) = {
+		let (mut group, track, timescale) = {
 			let mut subs = self.subscribes.lock();
 			let track = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
 			let group_info = Group { sequence: hdr.sequence };
 			let group = track.create_group(group_info)?;
-			(group, track.clone())
+			let timescale = track.timescale;
+			(group, track.clone(), timescale)
 		};
 
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = group.closed() => Err(err),
-			res = self.run_group(stream, group.clone()) => res,
+			res = self.run_group(stream, group.clone(), timescale) => res,
 		};
 
 		match res {
@@ -402,9 +414,33 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
+		track_timescale: u64,
 	) -> Result<(), Error> {
-		while let Some(size) = stream.decode_maybe::<u64>().await? {
-			let mut frame = group.create_frame(Frame::new(size))?;
+		// Previous frame's raw timestamp value, for zigzag-delta decoding on Lite05+.
+		let mut prev_ts: u64 = 0;
+
+		loop {
+			let (size, timestamp) = if self.version.has_timestamps() {
+				let Some(zz) = stream.decode_maybe::<crate::coding::VarInt>().await? else {
+					break;
+				};
+				let delta = zz.to_zigzag();
+				let next = (prev_ts as i128 + delta as i128)
+					.try_into()
+					.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+				prev_ts = next;
+				let size = stream.decode::<u64>().await?;
+				let ts = crate::Timestamp::new_u64(next, track_timescale)
+					.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+				(size, ts)
+			} else {
+				let Some(size) = stream.decode_maybe::<u64>().await? else {
+					break;
+				};
+				(size, crate::Timestamp::ZERO)
+			};
+
+			let mut frame = group.create_frame(Frame::new(size).with_timestamp(timestamp))?;
 
 			if let Err(err) = self.run_frame(stream, &mut frame).await {
 				let _ = frame.abort(err.clone());

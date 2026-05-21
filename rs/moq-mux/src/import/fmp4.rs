@@ -142,7 +142,9 @@ impl Fmp4 {
 			let handler = &trak.mdia.hdlr.handler;
 			let suffix = ".m4s";
 
-			let track = self.broadcast.unique_track(suffix)?;
+			let mut track = self.broadcast.unique_track(suffix)?;
+			// moq-mux frames are always emitted at microsecond timescale.
+			track.set_timescale(hang::container::TIMESCALE);
 
 			let kind = match handler.as_ref() {
 				b"vide" => {

@@ -81,6 +81,10 @@ struct State {
 	max_sequence: Option<u64>,
 	final_sequence: Option<u64>,
 	abort: Option<Error>,
+	/// Track timescale once negotiated via SUBSCRIBE_OK / track properties.
+	/// `None` means not yet resolved; consumers awaiting [`Self::poll_timescale`]
+	/// will block.
+	timescale: Option<u64>,
 }
 
 impl State {
@@ -221,6 +225,16 @@ impl State {
 			Poll::Pending
 		}
 	}
+
+	fn poll_timescale(&self) -> Poll<Result<u64>> {
+		if let Some(scale) = self.timescale {
+			Poll::Ready(Ok(scale))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			Poll::Pending
+		}
+	}
 }
 
 /// A producer for a track, used to create new groups.
@@ -240,10 +254,13 @@ impl std::ops::Deref for TrackProducer {
 impl TrackProducer {
 	/// Build a producer for the given track metadata. Prefer [`Track::produce`].
 	pub fn new(info: Track) -> Self {
-		Self {
-			info,
-			state: conducer::Producer::default(),
+		let state: conducer::Producer<State> = conducer::Producer::default();
+		if info.timescale != 0 {
+			if let Ok(mut s) = state.write() {
+				s.timescale = Some(info.timescale);
+			}
 		}
+		Self { info, state }
 	}
 
 	/// Create a new group with the given sequence number.
@@ -299,6 +316,19 @@ impl TrackProducer {
 		group.write_frame(frame.into())?;
 		group.finish()?;
 		Ok(())
+	}
+
+	/// Update the track's negotiated timescale.
+	///
+	/// Subscribers call this once SUBSCRIBE_OK arrives with the publisher's
+	/// timescale, since the [`TrackProducer`] was created before the value was
+	/// known. Existing [`TrackConsumer`]s see the updated timescale via
+	/// [`TrackConsumer::timescale`].
+	pub fn set_timescale(&mut self, timescale: u64) {
+		self.info.timescale = timescale;
+		if let Ok(mut state) = self.state.write() {
+			state.timescale = Some(timescale);
+		}
 	}
 
 	/// Mark the track as finished after the last appended group.
@@ -620,6 +650,23 @@ impl TrackConsumer {
 	/// Return the latest sequence number in the track.
 	pub fn latest(&self) -> Option<u64> {
 		self.state.read().max_sequence
+	}
+
+	/// Return the resolved timescale (units per second) if one has been negotiated,
+	/// otherwise `None`. Use [`Self::timescale`] to wait until the value is known.
+	pub fn timescale_now(&self) -> Option<u64> {
+		self.state.read().timescale
+	}
+
+	/// Poll for the negotiated timescale, without blocking.
+	pub fn poll_timescale(&self, waiter: &conducer::Waiter) -> Poll<Result<u64>> {
+		self.poll(waiter, |state| state.poll_timescale())
+	}
+
+	/// Wait until the track's timescale has been negotiated (e.g. via SUBSCRIBE_OK
+	/// for subscribers, or set immediately by publishers).
+	pub async fn timescale(&self) -> Result<u64> {
+		conducer::wait(|waiter| self.poll_timescale(waiter)).await
 	}
 
 	/// Create a weak reference that doesn't prevent auto-close.

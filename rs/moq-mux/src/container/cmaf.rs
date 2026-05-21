@@ -223,7 +223,11 @@ pub(crate) fn encode(
 	let mdat = mp4_atom::Mdat { data: mdat_data };
 	mdat.encode(&mut buf)?;
 
-	let mut writer = group.create_frame(buf.len().into())?;
+	// Stamp the wire-level timestamp on the moq-net frame so Lite05+ can
+	// delta-encode it. The CMAF fragment may pack multiple media samples; use
+	// the first sample's PTS as the representative timestamp.
+	let net_frame = moq_net::Frame::new(buf.len() as u64).with_timestamp(frames[0].timestamp);
+	let mut writer = group.create_frame(net_frame)?;
 	writer.write(Bytes::from(buf))?;
 	writer.finish()?;
 

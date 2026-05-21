@@ -32,14 +32,18 @@ pub struct Frame {
 
 impl Frame {
 	/// Encode the frame to the given group as a single moq-lite frame:
-	/// VarInt timestamp prefix followed by the raw codec payload.
+	/// VarInt timestamp prefix followed by the raw codec payload. Also stamps
+	/// the moq-net [`moq_net::Frame::timestamp`] so the wire layer can
+	/// delta-encode it independently on Lite05+ (the container-level prefix
+	/// stays as a duplicate for now).
 	pub fn encode(&self, group: &mut moq_net::GroupProducer) -> Result<(), Error> {
 		let mut header = BytesMut::new();
 		self.timestamp.encode_value(&mut header).map_err(moq_net::Error::from)?;
 
 		let size = header.len() + self.payload.len();
 
-		let mut chunked = group.create_frame(size.into())?;
+		let net_frame = moq_net::Frame::new(size as u64).with_timestamp(self.timestamp);
+		let mut chunked = group.create_frame(net_frame)?;
 		chunked.write(header.freeze())?;
 		chunked.write(self.payload.clone())?;
 		chunked.finish()?;

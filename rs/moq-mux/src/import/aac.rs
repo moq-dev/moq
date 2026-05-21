@@ -112,7 +112,8 @@ impl Aac {
 		mut catalog: crate::catalog::Producer,
 		config: AacConfig,
 	) -> anyhow::Result<Self> {
-		let track = broadcast.unique_track(".aac")?;
+		let mut track = broadcast.unique_track(".aac")?;
+		track.set_timescale(hang::container::TIMESCALE);
 
 		let audio_config = hang::catalog::AudioConfig {
 			codec: hang::catalog::AAC {

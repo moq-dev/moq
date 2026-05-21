@@ -72,13 +72,17 @@ impl Message for Subscribe<'_> {
 	}
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SubscribeOk {
 	pub priority: u8,
 	pub ordered: bool,
 	pub max_latency: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
+	/// Units per second for frame timestamps on this track. `0` (the default)
+	/// means unspecified. Carried on the wire for [`Version::Lite05`] and later;
+	/// older versions decode it as `0`.
+	pub timescale: u64,
 }
 
 impl Message for SubscribeOk {
@@ -88,12 +92,20 @@ impl Message for SubscribeOk {
 				self.priority.encode(w, version)?;
 			}
 			Version::Lite02 => {}
+			Version::Lite03 | Version::Lite04 => {
+				self.priority.encode(w, version)?;
+				(self.ordered as u8).encode(w, version)?;
+				self.max_latency.encode(w, version)?;
+				self.start_group.encode(w, version)?;
+				self.end_group.encode(w, version)?;
+			}
 			_ => {
 				self.priority.encode(w, version)?;
 				(self.ordered as u8).encode(w, version)?;
 				self.max_latency.encode(w, version)?;
 				self.start_group.encode(w, version)?;
 				self.end_group.encode(w, version)?;
+				self.timescale.encode(w, version)?;
 			}
 		}
 
@@ -104,19 +116,10 @@ impl Message for SubscribeOk {
 		match version {
 			Version::Lite01 => Ok(Self {
 				priority: u8::decode(r, version)?,
-				ordered: false,
-				max_latency: std::time::Duration::ZERO,
-				start_group: None,
-				end_group: None,
+				..Self::default()
 			}),
-			Version::Lite02 => Ok(Self {
-				priority: 0,
-				ordered: false,
-				max_latency: std::time::Duration::ZERO,
-				start_group: None,
-				end_group: None,
-			}),
-			_ => {
+			Version::Lite02 => Ok(Self::default()),
+			Version::Lite03 | Version::Lite04 => {
 				let priority = u8::decode(r, version)?;
 				let ordered = u8::decode(r, version)? != 0;
 				let max_latency = std::time::Duration::decode(r, version)?;
@@ -129,6 +132,24 @@ impl Message for SubscribeOk {
 					max_latency,
 					start_group,
 					end_group,
+					timescale: 0,
+				})
+			}
+			_ => {
+				let priority = u8::decode(r, version)?;
+				let ordered = u8::decode(r, version)? != 0;
+				let max_latency = std::time::Duration::decode(r, version)?;
+				let start_group = Option::<u64>::decode(r, version)?;
+				let end_group = Option::<u64>::decode(r, version)?;
+				let timescale = u64::decode(r, version)?;
+
+				Ok(Self {
+					priority,
+					ordered,
+					max_latency,
+					start_group,
+					end_group,
+					timescale,
 				})
 			}
 		}
@@ -324,5 +345,60 @@ impl Decode<Version> for SubscribeResponse {
 				}
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use bytes::BytesMut;
+
+	fn roundtrip_ok(version: Version, original: SubscribeOk) -> SubscribeOk {
+		let mut buf = BytesMut::new();
+		original.encode_msg(&mut buf, version).unwrap();
+		let mut bytes = buf.freeze();
+		SubscribeOk::decode_msg(&mut bytes, version).unwrap()
+	}
+
+	#[test]
+	fn subscribe_ok_lite04_drops_timescale() {
+		// On Lite04, timescale is not serialized; it should round-trip as 0.
+		let ok = SubscribeOk {
+			priority: 7,
+			ordered: true,
+			max_latency: std::time::Duration::from_millis(500),
+			start_group: Some(2),
+			end_group: Some(10),
+			timescale: 1_000_000,
+		};
+		let decoded = roundtrip_ok(Version::Lite04, ok);
+		assert_eq!(decoded.priority, 7);
+		assert_eq!(decoded.ordered, true);
+		assert_eq!(decoded.start_group, Some(2));
+		assert_eq!(decoded.end_group, Some(10));
+		assert_eq!(decoded.timescale, 0);
+	}
+
+	#[test]
+	fn subscribe_ok_lite05_carries_timescale() {
+		let ok = SubscribeOk {
+			priority: 3,
+			ordered: false,
+			max_latency: std::time::Duration::from_millis(100),
+			start_group: None,
+			end_group: None,
+			timescale: 1_000_000,
+		};
+		let decoded = roundtrip_ok(Version::Lite05, ok);
+		assert_eq!(decoded.priority, 3);
+		assert_eq!(decoded.timescale, 1_000_000);
+	}
+
+	#[test]
+	fn subscribe_ok_lite05_unspecified_timescale() {
+		// timescale = 0 round-trips on Lite05 (still serialized, just as 0).
+		let ok = SubscribeOk::default();
+		let decoded = roundtrip_ok(Version::Lite05, ok);
+		assert_eq!(decoded.timescale, 0);
 	}
 }
