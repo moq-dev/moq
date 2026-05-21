@@ -25,6 +25,7 @@ mod framed;
 mod hev1;
 mod hls;
 mod jitter;
+mod mkv;
 mod opus;
 mod stream;
 
@@ -36,6 +37,7 @@ pub use fmp4::*;
 pub use framed::*;
 pub use hev1::*;
 pub use hls::*;
+pub use mkv::*;
 pub use opus::*;
 pub use stream::*;
 

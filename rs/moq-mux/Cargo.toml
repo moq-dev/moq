@@ -35,6 +35,7 @@ thiserror = "2"
 tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = "0.1"
 url = "2"
+webm-iterable = "0.6"
 
 [dependencies.derive_more]
 version = "2"
