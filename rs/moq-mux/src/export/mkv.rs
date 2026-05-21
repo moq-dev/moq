@@ -15,10 +15,6 @@ use crate::export::{Avc1, Hvc1};
 /// Matroska TimestampScale: 1 ms (in nanoseconds).
 const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 
-/// Default cluster (fragment) duration: 2 seconds. Matches what KVS and most
-/// MKV consumers expect; can be overridden via [`Mkv::with_fragment_duration`].
-const DEFAULT_FRAGMENT_DURATION: Duration = Duration::from_secs(2);
-
 /// Subscribe to a moq broadcast and produce a single Matroska / WebM byte stream.
 ///
 /// Built from a [`moq_net::BroadcastConsumer`], `Mkv` subscribes to the hang catalog,
@@ -28,9 +24,11 @@ const DEFAULT_FRAGMENT_DURATION: Duration = Duration::from_secs(2);
 ///
 /// Use [`next`](Self::next) to pull byte chunks. The first chunk is the file
 /// header (EBML + unknown-size Segment + Info + Tracks); subsequent chunks are
-/// complete Cluster elements, each fragment containing roughly
-/// [`with_fragment_duration`](Self::with_fragment_duration) worth of frames or
-/// one GOP (whichever rolls over first). Returns `None` when the broadcast ends.
+/// complete Cluster elements. By default a Cluster contains one GOP (rolled
+/// over on each video keyframe, or on i16 timestamp overflow);
+/// [`with_fragment_duration`](Self::with_fragment_duration) caps Cluster
+/// duration for downstream consumers that throttle by fragment rate (e.g.
+/// KVS PutMedia). Returns `None` when the broadcast ends.
 ///
 /// ## Avc3 / Hev1 sources
 ///
@@ -47,7 +45,7 @@ pub struct Mkv {
 	broadcast: moq_net::BroadcastConsumer,
 	catalog: Option<crate::catalog::Consumer>,
 	latency: Duration,
-	fragment_duration: Duration,
+	fragment_duration: Option<Duration>,
 
 	tracks: HashMap<String, MkvTrack>,
 	/// Catalog snapshot used to build the header. Retained until header emission;
@@ -186,7 +184,7 @@ impl Mkv {
 			broadcast,
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
-			fragment_duration: DEFAULT_FRAGMENT_DURATION,
+			fragment_duration: None,
 			tracks: HashMap::new(),
 			catalog_snapshot: None,
 			header_emitted: false,
@@ -200,13 +198,15 @@ impl Mkv {
 		self
 	}
 
-	/// Set the target fragment (Cluster) duration. Each emitted Cluster contains
-	/// frames spanning roughly this duration, rolled over earlier on video
-	/// keyframes or on i16 timestamp overflow. Default is 2 seconds.
+	/// Cap the fragment (Cluster) duration.
 	///
-	/// Set to [`Duration::ZERO`] to emit one Cluster per frame.
+	/// By default Clusters roll over only on video keyframes (one cluster per GOP)
+	/// or i16 timestamp overflow. Setting this caps each Cluster to roughly
+	/// `duration` of frames, useful for downstream consumers that throttle by
+	/// fragment rate (e.g. KVS PutMedia). [`Duration::ZERO`] emits one Cluster
+	/// per frame; otherwise the cap applies in addition to GOP / overflow rollover.
 	pub fn with_fragment_duration(mut self, duration: Duration) -> Self {
-		self.fragment_duration = duration;
+		self.fragment_duration = Some(duration);
 		self
 	}
 
@@ -470,22 +470,24 @@ impl Mkv {
 			.try_into()
 			.context("timestamp doesn't fit in u64 ms")?;
 
-		let frag_ms = self.fragment_duration.as_millis() as u64;
 		let is_video = kind == TrackKind::Video;
 		let keyframe = frame.keyframe;
 
 		let roll_over = match &self.cluster {
 			None => true,
 			Some(cluster) => {
-				let too_long = frag_ms > 0 && frame_ticks.saturating_sub(cluster.start_ticks) >= frag_ms;
 				let overflow = !cluster.fits(frame_ticks);
 				// Roll on a video keyframe only once the cluster already has video
 				// frames in it — otherwise audio that arrived before the first
 				// keyframe would split into its own (un-renderable) cluster.
 				let gop_boundary = is_video && keyframe && cluster.has_video;
-				// Per-frame mode (frag_ms == 0): always roll over so each cluster has one block.
-				let per_frame = frag_ms == 0 && !cluster.body.is_empty();
-				too_long || overflow || gop_boundary || per_frame
+				// Optional time-based cap. Some(ZERO) means per-frame.
+				let too_long = match self.fragment_duration {
+					Some(d) if d.is_zero() => !cluster.body.is_empty(),
+					Some(d) => frame_ticks.saturating_sub(cluster.start_ticks) >= d.as_millis() as u64,
+					None => false,
+				};
+				overflow || gop_boundary || too_long
 			}
 		};
 
