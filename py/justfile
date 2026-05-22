@@ -1,0 +1,36 @@
+#!/usr/bin/env just --justfile
+#
+# Language-specific recipes for the Python packages under py/. Invoked
+# from the repo root as `just py <recipe>` via the `mod py` import.
+
+set working-directory := '.'
+
+default:
+	just check
+
+# Lint + format + maturin source build + pyright. `--no-install-workspace`
+# installs the root dev group (ruff, maturin, pyright, pytest) without
+# trying to pip-build moq-net; `maturin develop` then installs moq-net
+# as an editable wheel with the rs/moq-ffi cdylib + uniffi bindings.
+check:
+	uv sync --no-install-workspace
+	uv run --no-sync ruff check .
+	uv run --no-sync ruff format --check .
+	cd moq-net && uv run --no-sync maturin develop --uv
+	uv run --no-sync pyright
+
+fix:
+	uv sync --no-install-workspace
+	uv run --no-sync ruff check --fix .
+	uv run --no-sync ruff format .
+
+test:
+	uv sync --no-install-workspace
+	cd moq-net && uv run --no-sync maturin develop --uv
+	uv run --no-sync pytest moq-net/tests/
+
+# Local dev build: produces an editable install of moq-net (with the
+# moq-ffi cdylib + uniffi bindings) into the workspace venv.
+build:
+	uv sync --no-install-workspace
+	cd moq-net && uv run --no-sync maturin develop --uv

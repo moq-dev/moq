@@ -1,6 +1,6 @@
 //! Media muxers and demuxers for MoQ.
 //!
-//! `moq-mux` sits between [`moq_lite`] (the generic pub/sub protocol) and [`hang`]
+//! `moq-mux` sits between [`moq_net`] (the generic pub/sub protocol) and [`hang`]
 //! (the media catalog/container format). It exposes four submodules:
 //!
 //! - [`container`]: the wire-level container abstraction and per-track wrappers —

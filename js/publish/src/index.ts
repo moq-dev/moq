@@ -1,4 +1,4 @@
-export * as Lite from "@moq/lite";
+export * as Lite from "@moq/net";
 export * as Signals from "@moq/signals";
 export * as Audio from "./audio";
 export * from "./broadcast";

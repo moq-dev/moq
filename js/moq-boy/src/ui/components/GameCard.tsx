@@ -1,4 +1,4 @@
-import { Signals } from "@moq/lite";
+import { Signals } from "@moq/net";
 import { createEffect, onCleanup, onMount, Show } from "solid-js";
 import type { Game } from "../../index.ts";
 import { KEY_MAP } from "../../index.ts";

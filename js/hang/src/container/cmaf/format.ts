@@ -1,4 +1,4 @@
-import type { Time } from "@moq/lite";
+import type { Time } from "@moq/net";
 import type { Format as ContainerFormat } from "../format";
 import type { Frame } from "../types";
 import { decodeDataSegment, type InitSegment } from "./decode";

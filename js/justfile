@@ -1,0 +1,47 @@
+#!/usr/bin/env just --justfile
+#
+# Language-specific recipes for the JavaScript / TypeScript packages under
+# js/. Invoked from the repo root as `just js <recipe>` via the `mod js`
+# import in the root justfile.
+
+set working-directory := '.'
+
+# Run all checks by default.
+default:
+	just check
+
+install:
+	bun install
+
+# Lint, type-check, and biome-format all packages.
+check:
+	bun install --frozen-lockfile
+	if tty -s; then \
+		bun run --filter='*' --elide-lines=0 check; \
+	else \
+		bun run --filter='*' check; \
+	fi
+	bun biome check
+
+# Auto-fix lint and formatting issues.
+fix:
+	bun install
+	bun biome check --write
+
+# Run all unit tests.
+test:
+	bun install --frozen-lockfile
+	if tty -s; then \
+		bun run --filter='*' --elide-lines=0 test; \
+	else \
+		bun run --filter='*' test; \
+	fi
+
+# Build all packages.
+build:
+	bun run --filter='*' build
+
+# Pull in new versions and report what's outdated.
+update:
+	bun update
+	bun outdated

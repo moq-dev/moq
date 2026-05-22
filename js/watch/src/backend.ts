@@ -1,4 +1,4 @@
-import * as Moq from "@moq/lite";
+import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
@@ -166,7 +166,10 @@ export class MultiBackend implements Backend {
 			paused: this.paused,
 		});
 
-		const videoRenderer = new Video.Renderer(videoSource, { canvas: element, paused: this.paused });
+		const videoRenderer = new Video.Renderer(videoSource, {
+			canvas: element,
+			paused: this.paused,
+		});
 
 		effect.cleanup(() => {
 			videoSource.close();
@@ -217,5 +220,8 @@ export class MultiBackend implements Backend {
 
 	close(): void {
 		this.signals.close();
+		this.#videoSource.close();
+		this.#audioSource.close();
+		this.sync.close();
 	}
 }

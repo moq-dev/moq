@@ -1,4 +1,4 @@
-//! UniFFI bindings for [`moq_lite`].
+//! UniFFI bindings for [`moq_net`].
 //!
 //! Provides a Kotlin/Swift-compatible API for real-time pub/sub over QUIC.
 //! Uses async UniFFI objects instead of callbacks for a native async experience.

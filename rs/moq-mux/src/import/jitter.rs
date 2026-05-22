@@ -18,11 +18,11 @@ impl MinFrameDuration {
 
 	/// Record a new frame timestamp.
 	///
-	/// Returns the new minimum-frame-duration as a `moq_lite::Time` if it
+	/// Returns the new minimum-frame-duration as a `moq_net::Time` if it
 	/// changed, so the caller can persist it on the catalog rendition. Returns
 	/// `None` when this is the first observation, the timestamps are
 	/// non-monotonic, or the new gap is no smaller than the recorded minimum.
-	pub fn observe(&mut self, ts: Timestamp) -> Option<moq_lite::Time> {
+	pub fn observe(&mut self, ts: Timestamp) -> Option<moq_net::Time> {
 		let last = self.last_timestamp.replace(ts)?;
 		let duration = ts.checked_sub(last).ok()?;
 

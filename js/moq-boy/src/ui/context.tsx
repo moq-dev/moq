@@ -1,4 +1,4 @@
-import { Signals } from "@moq/lite";
+import { Signals } from "@moq/net";
 import { createAccessor } from "@moq/signals/solid";
 import type { JSX } from "solid-js";
 import { createContext, onCleanup } from "solid-js";

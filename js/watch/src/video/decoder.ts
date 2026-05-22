@@ -1,8 +1,8 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
-import type * as Moq from "@moq/lite";
-import { Time } from "@moq/lite";
+import type * as Moq from "@moq/net";
+import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
 import { base64ToBytes } from "../base64";
@@ -53,6 +53,14 @@ export class Decoder implements Backend {
 
 	#signals = new Effect();
 
+	#clearCurrentFrame(): void {
+		this.#frame.update((prev) => {
+			prev?.close();
+			return undefined;
+		});
+		this.#timestamp.set(undefined);
+	}
+
 	constructor(source: Source, props?: DecoderProps) {
 		this.enabled = Signal.from(props?.enabled ?? false);
 
@@ -75,8 +83,14 @@ export class Decoder implements Backend {
 		}
 		const [_, source, track, config] = values;
 
-		const broadcast = effect.get(source.active);
-		if (!broadcast) return;
+		const broadcast: Moq.Broadcast | undefined = effect.get(source.active);
+		if (!broadcast) {
+			// Going offline should clear the last rendered frame.
+			this.#active.set(undefined);
+			this.#clearCurrentFrame();
+			this.#buffered.set([]);
+			return;
+		}
 
 		// Start a new pending effect.
 		let pending: DecoderTrack | undefined = new DecoderTrack({
@@ -175,10 +189,7 @@ export class Decoder implements Backend {
 	}
 
 	close() {
-		this.#frame.update((prev) => {
-			prev?.close();
-			return undefined;
-		});
+		this.#clearCurrentFrame();
 
 		this.#signals.close();
 	}
@@ -310,7 +321,7 @@ class DecoderTrack {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await Promise.race([consumer.next(), effect.cancel]);
+				const next = await consumer.next();
 				if (!next) break;
 
 				const { frame, group } = next;
@@ -340,8 +351,9 @@ class DecoderTrack {
 				}));
 
 				// Track decode buffer: frames sent to decoder but not yet rendered
-				if (previous?.group === group || (previous?.final && previous.group + 1 === group)) {
-					const start = Time.Milli.fromMicro(previous.timestamp);
+				const prior = previous;
+				if (prior && (prior.group === group || (prior.final && prior.group + 1 === group))) {
+					const start = Time.Milli.fromMicro(prior.timestamp);
 					const end = Time.Milli.fromMicro(frame.timestamp);
 					this.#addBuffered(start, end);
 				}
@@ -390,7 +402,7 @@ class DecoderTrack {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await Promise.race([consumer.next(), effect.cancel]);
+				const next = await consumer.next();
 				if (!next) break;
 
 				const { frame, group } = next;
@@ -413,8 +425,9 @@ class DecoderTrack {
 				}));
 
 				// Track decode buffer
-				if (previous?.group === group || (previous?.final && previous.group + 1 === group)) {
-					const start = Time.Milli.fromMicro(previous.timestamp);
+				const prior = previous;
+				if (prior && (prior.group === group || (prior.final && prior.group + 1 === group))) {
+					const start = Time.Milli.fromMicro(prior.timestamp);
 					const end = Time.Milli.fromMicro(frame.timestamp);
 					this.#addBuffered(start, end);
 				}

@@ -1,6 +1,6 @@
 ---
 title: hang
-description: Media library built on moq-lite
+description: Media library built on moq-net
 ---
 
 # hang
@@ -9,11 +9,11 @@ description: Media library built on moq-lite
 [![docs.rs](https://docs.rs/hang/badge.svg)](https://docs.rs/hang)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/moq-dev/moq/blob/main/LICENSE-MIT)
 
-A media library built on top of [moq-lite](/rs/crate/moq-lite) for streaming audio and video.
+A media library built on top of [moq-net](/rs/crate/moq-net) for streaming audio and video.
 
 ## Overview
 
-`hang` provides media-specific functionality on top of the generic `moq-lite` transport:
+`hang` provides media-specific functionality on top of the generic `moq-net` transport:
 
 - **Broadcast** - Discoverable collection of tracks with catalog
 - **Catalog** - Metadata describing available tracks, codec info, etc. (updated live)
@@ -162,7 +162,7 @@ See the [hang specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-
 
 ## Next Steps
 
-- Use the [moq-lite](/rs/crate/moq-lite) transport layer
+- Use the [moq-net](/rs/crate/moq-net) transport layer
 - Deploy a [relay server](/app/relay/)
 - Read the [Concepts guide](/concept/)
 - View [code examples](https://github.com/moq-dev/moq/tree/main/rs)

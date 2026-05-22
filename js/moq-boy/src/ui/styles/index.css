@@ -1,7 +1,4 @@
-/* Shared dependencies */
-@import "@moq/ui-core/variables.css";
-
-/* Component styles */
+@import "./variables.css";
 @import "./grid.css";
 @import "./card.css";
 @import "./controls.css";

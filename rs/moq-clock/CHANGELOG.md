@@ -45,6 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.20](https://github.com/moq-dev/moq/compare/moq-clock-v0.10.19...moq-clock-v0.10.20) - 2026-05-20
+
+### Other
+
+- rename moq-lite package to moq-net ([#1428](https://github.com/moq-dev/moq/pull/1428))
+
+## [0.10.19](https://github.com/moq-dev/moq/compare/moq-clock-v0.10.18...moq-clock-v0.10.19) - 2026-05-18
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.10.18](https://github.com/moq-dev/moq/compare/moq-clock-v0.10.17...moq-clock-v0.10.18) - 2026-05-07
 
 ### Other

@@ -9,7 +9,7 @@ use std::sync::Arc;
 pub enum Error {
 	/// An error from the underlying MoQ transport layer.
 	#[error("moq lite error: {0}")]
-	Moq(#[from] moq_lite::Error),
+	Moq(#[from] moq_net::Error),
 
 	/// JSON serialization/deserialization error.
 	#[error("json error: {0}")]
@@ -29,7 +29,7 @@ pub enum Error {
 
 	/// The timestamp is too large.
 	#[error("timestamp overflow")]
-	TimestampOverflow(#[from] moq_lite::TimeOverflow),
+	TimestampOverflow(#[from] moq_net::TimeOverflow),
 
 	/// The track must start with a keyframe.
 	#[error("must start with a keyframe")]

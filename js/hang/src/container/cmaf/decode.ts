@@ -3,7 +3,7 @@
  * Used by WebCodecs to extract raw frames from CMAF container.
  */
 
-import type { Time } from "@moq/lite";
+import type { Time } from "@moq/net";
 import {
 	type MediaHeaderBox,
 	type ParsedIsoBox,

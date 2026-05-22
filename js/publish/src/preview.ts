@@ -1,5 +1,5 @@
 import * as Catalog from "@moq/hang/catalog";
-import type * as Moq from "@moq/lite";
+import type * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 
 export type PreviewProps = {

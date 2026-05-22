@@ -1,5 +1,5 @@
 use clap::Subcommand;
-use hang::moq_lite;
+use hang::moq_net;
 use moq_mux::import;
 
 #[derive(Subcommand, Clone)]
@@ -33,12 +33,12 @@ impl PublishDecoder {
 
 pub struct Publish {
 	decoder: PublishDecoder,
-	broadcast: moq_lite::BroadcastProducer,
+	broadcast: moq_net::BroadcastProducer,
 }
 
 impl Publish {
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
-		let mut broadcast = moq_lite::Broadcast::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let decoder = match format {
@@ -63,7 +63,7 @@ impl Publish {
 		Ok(Self { decoder, broadcast })
 	}
 
-	pub fn consume(&self) -> moq_lite::BroadcastConsumer {
+	pub fn consume(&self) -> moq_net::BroadcastConsumer {
 		self.broadcast.consume()
 	}
 
