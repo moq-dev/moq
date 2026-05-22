@@ -6,10 +6,11 @@
 //! suffix in the name they publish so consumers can detect it.
 
 /// The catalog format advertised by a broadcast name suffix.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum CatalogFormat {
 	/// `hang` JSON catalog (track `catalog.json`).
+	#[default]
 	Hang,
 	/// MSF catalog (track `catalog`).
 	Msf,
@@ -17,6 +18,8 @@ pub enum CatalogFormat {
 
 impl CatalogFormat {
 	/// The fallback used when a broadcast name has no recognized extension.
+	///
+	/// Matches `<Self as Default>::default()`.
 	pub const DEFAULT: Self = Self::Hang;
 
 	/// The filename-style suffix (including leading dot) for this format.

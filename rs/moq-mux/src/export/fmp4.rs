@@ -7,6 +7,7 @@ use bytes::Bytes;
 use hang::catalog::{Catalog, Container, VideoConfig};
 use mp4_atom::{DecodeMaybe, Encode};
 
+use crate::catalog::CatalogFormat;
 use crate::container::{Consumer, Frame, Hang};
 
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
@@ -45,16 +46,6 @@ enum CatalogSource {
 	Hang(crate::catalog::Consumer),
 	/// The MSF catalog track (track name `catalog`, MSF JSON payload converted to hang).
 	Msf(crate::catalog::MsfConsumer),
-}
-
-/// Catalog wire format the exporter should subscribe to for track discovery.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CatalogFormat {
-	/// The hang catalog (`catalog.json`, hang JSON schema).
-	#[default]
-	Hang,
-	/// The MSF catalog (`catalog`, draft-ietf-moq-msf JSON schema).
-	Msf,
 }
 
 impl CatalogSource {

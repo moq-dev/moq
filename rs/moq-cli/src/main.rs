@@ -240,10 +240,12 @@ async fn run_announced_subscribe(
 	broadcast: String,
 	args: SubscribeArgs,
 ) -> anyhow::Result<()> {
+	let catalog = args.catalog_format(&broadcast);
+
 	let consumer = consumer
 		.announced_broadcast(&broadcast)
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast was announced"))?;
 
-	Subscribe::new(consumer, args).run().await
+	Subscribe::new(consumer, catalog, args).run().await
 }
