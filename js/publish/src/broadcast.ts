@@ -59,7 +59,9 @@ export class Broadcast {
 
 		const name = effect.get(this.name);
 		if (Catalog.detectFormat(name) === undefined) {
-			console.warn(`append .hang to broadcast name ${JSON.stringify(name)} to make the catalog format explicit`);
+			console.warn(
+				`You should append .hang to broadcast name ${JSON.stringify(name)} to make the catalog format explicit.`,
+			);
 		}
 
 		const broadcast = new Moq.Broadcast();

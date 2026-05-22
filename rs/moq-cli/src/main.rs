@@ -207,7 +207,7 @@ fn warn_if_missing_format(name: &str) {
 	if moq_mux::catalog::CatalogFormat::detect(name).is_none() {
 		tracing::warn!(
 			name,
-			"append .hang to your broadcast name to make the catalog format explicit"
+			"You should append .hang to your broadcast name to make the catalog format explicit."
 		);
 	}
 }
