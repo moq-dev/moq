@@ -39,11 +39,6 @@ pub struct Fmp4 {
 	// The latest moof header
 	moof: Option<Moof>,
 	moof_size: usize,
-
-	// When true, groups are created explicitly via `start_group` instead of on
-	// video keyframes. Audio fragments accumulate in the current group until
-	// `start_group` is called.
-	explicit_groups: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -80,63 +75,7 @@ impl Fmp4 {
 			moof: None,
 			moof_size: 0,
 			broadcast,
-			explicit_groups: false,
 		}
-	}
-
-	/// Enable explicit group mode. In this mode, the importer does not create
-	/// groups on keyframes. Instead, the caller must call `start_group(sequence)`
-	/// to create groups on all tracks simultaneously.
-	///
-	/// # Audio behavior in explicit mode
-	///
-	/// Audio fragments accumulate in the current group until `start_group` is called.
-	/// This means late-joining subscribers must buffer the entire group before playback.
-	/// For latency-sensitive non-redundancy use cases, use the default auto mode instead.
-	pub fn with_explicit_groups(mut self) -> Self {
-		self.explicit_groups = true;
-		self
-	}
-
-	/// Start a new group with the given sequence on all tracks.
-	///
-	/// Phase 1: finish all existing groups.
-	/// Phase 2: create new groups with the given sequence on all tracks.
-	///
-	/// Callers should pass a strictly increasing sequence. moq-lite consumers
-	/// may skip groups whose sequence is at or below a previously delivered one,
-	/// so reusing or going backwards causes the new group to be silently dropped
-	/// by `next_group` consumers.
-	///
-	/// # Errors
-	/// Returns an error if explicit group mode is not enabled, if no tracks
-	/// have been discovered yet (moov not parsed), or if any track rejects
-	/// finishing the prior group or creating the new one (e.g. duplicate
-	/// sequence on a cloned track, or the track has been finished).
-	///
-	/// On error mid-call, the importer is left in a partially-advanced state:
-	/// some tracks may have a new group while others do not. The caller should
-	/// treat the importer as unusable after a `start_group` failure.
-	pub fn start_group(&mut self, sequence: u64) -> anyhow::Result<()> {
-		anyhow::ensure!(
-			self.explicit_groups,
-			"start_group requires explicit group mode (call with_explicit_groups first)"
-		);
-		anyhow::ensure!(!self.tracks.is_empty(), "no tracks discovered; feed moov first");
-
-		// Phase 1: finish all existing groups.
-		for track in self.tracks.values_mut() {
-			if let Some(mut prev) = track.group.take() {
-				prev.finish()?;
-			}
-		}
-
-		// Phase 2: create new groups with the given sequence on all tracks.
-		for track in self.tracks.values_mut() {
-			track.group = Some(track.track.create_group(sequence.into())?);
-		}
-
-		Ok(())
 	}
 
 	/// Decode from an asynchronous reader.
@@ -687,12 +626,7 @@ impl Fmp4 {
 			let fragment_bytes = Bytes::from(moof_buf);
 
 			// Write the per-track fragment as a single MoQ frame (passthrough).
-			let mut g = if self.explicit_groups {
-				track
-					.group
-					.take()
-					.context("no active group in explicit mode; call start_group first")?
-			} else if contains_keyframe {
+			let mut g = if contains_keyframe {
 				if let Some(mut prev) = track.group.take() {
 					prev.finish()?;
 				}

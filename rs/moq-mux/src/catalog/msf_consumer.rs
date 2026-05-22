@@ -144,15 +144,42 @@ fn container_from_msf(track: &moq_msf::Track) -> anyhow::Result<Option<Container
 		// Both LOC and Legacy represent raw payloads without ISO-BMFF boxing.
 		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy => Ok(Some(Container::Legacy)),
 		moq_msf::Packaging::Cmaf => {
-			let init_b64 = track
-				.init_data
-				.as_ref()
+			let init = decode_init_data(track)?
 				.with_context(|| format!("MSF CMAF track {:?} missing init_data", track.name))?;
-			let init = base64::engine::general_purpose::STANDARD
-				.decode(init_b64)
-				.with_context(|| format!("MSF CMAF track {:?} has malformed init_data", track.name))?;
-			Ok(Some(Container::Cmaf { init: init.into() }))
+			Ok(Some(Container::Cmaf { init }))
 		}
+		_ => Ok(None),
+	}
+}
+
+/// Base64-decode `track.init_data` into a `Bytes` buffer, propagating a
+/// descriptive error on malformed input. Returns `Ok(None)` when no
+/// `init_data` is present.
+///
+/// For CMAF tracks the decoded bytes are the full `ftyp+moov` init segment.
+/// For Legacy/LOC tracks the bytes are the codec-specific decoder
+/// description (e.g. an AVCC/HVCC config record or AAC AudioSpecificConfig)
+/// that downstream decoders need to configure their bitstream parsers.
+fn decode_init_data(track: &moq_msf::Track) -> anyhow::Result<Option<bytes::Bytes>> {
+	track
+		.init_data
+		.as_ref()
+		.map(|b64| {
+			base64::engine::general_purpose::STANDARD
+				.decode(b64)
+				.map(bytes::Bytes::from)
+				.with_context(|| format!("MSF track {:?} has malformed init_data", track.name))
+		})
+		.transpose()
+}
+
+/// Pull the decoder description out of a Legacy/LOC MSF track's `init_data`.
+///
+/// CMAF tracks carry their config inside `Container::Cmaf::init`, so this
+/// returns `Ok(None)` for them to avoid duplicating the bytes.
+fn legacy_description(track: &moq_msf::Track) -> anyhow::Result<Option<bytes::Bytes>> {
+	match track.packaging {
+		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy => decode_init_data(track),
 		_ => Ok(None),
 	}
 }
@@ -175,7 +202,7 @@ fn video_config_from_msf(track: &moq_msf::Track) -> anyhow::Result<Option<VideoC
 
 	Ok(Some(VideoConfig {
 		codec,
-		description: None,
+		description: legacy_description(track)?,
 		coded_width: track.width,
 		coded_height: track.height,
 		display_ratio_width: None,
@@ -221,7 +248,7 @@ fn audio_config_from_msf(track: &moq_msf::Track) -> anyhow::Result<Option<AudioC
 		sample_rate,
 		channel_count,
 		bitrate: track.bitrate,
-		description: None,
+		description: legacy_description(track)?,
 		container,
 		// Jitter is converted from f64 milliseconds to integer milliseconds.
 		// Fractional milliseconds are truncated (e.g. 15.5ms becomes 15ms).
@@ -322,6 +349,62 @@ mod test {
 		assert_eq!(audio.sample_rate, 48_000);
 		assert_eq!(audio.channel_count, 2);
 		assert_eq!(audio.bitrate, Some(128_000));
+	}
+
+	#[test]
+	fn legacy_init_data_round_trips_into_description() {
+		// Legacy tracks carry the decoder description in `init_data` (base64).
+		// Roundtripping the bytes through Container::Legacy must preserve them
+		// in the `description` field for downstream decoders.
+		let description_bytes: &[u8] = &[0x01, 0x42, 0xc0, 0x1e, 0xff, 0xe1];
+		let init_b64 = base64::engine::general_purpose::STANDARD.encode(description_bytes);
+
+		let mut video = video_track("video0", moq_msf::Packaging::Legacy, Some(&init_b64));
+		video.codec = Some("avc1.42c01e".to_string());
+
+		let mut audio = audio_track("audio0", moq_msf::Packaging::Loc);
+		audio.init_data = Some(init_b64);
+
+		let msf = moq_msf::Catalog {
+			version: 1,
+			tracks: vec![video, audio],
+		};
+
+		let catalog = from_msf(&msf).expect("legacy tracks should convert");
+		let v = catalog.video.renditions.get("video0").expect("video0 rendition");
+		let a = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
+
+		assert_eq!(v.description.as_deref(), Some(description_bytes));
+		assert_eq!(a.description.as_deref(), Some(description_bytes));
+	}
+
+	#[test]
+	fn cmaf_description_stays_none() {
+		// CMAF tracks carry their bytes inside Container::Cmaf::init; description
+		// must stay None so downstream code reads the bytes from one place only.
+		let init_b64 = "AAAYZ2Z0eXA=";
+		let msf = moq_msf::Catalog {
+			version: 1,
+			tracks: vec![video_track("video0", moq_msf::Packaging::Cmaf, Some(init_b64))],
+		};
+		let catalog = from_msf(&msf).unwrap();
+		assert!(catalog.video.renditions["video0"].description.is_none());
+	}
+
+	#[test]
+	fn legacy_malformed_init_data_is_error() {
+		let mut track = video_track("video0", moq_msf::Packaging::Legacy, Some("!!!not-base64!!!"));
+		track.codec = Some("avc1.42c01e".to_string());
+		let msf = moq_msf::Catalog {
+			version: 1,
+			tracks: vec![track],
+		};
+		let err = from_msf(&msf).expect_err("malformed base64 should error");
+		assert!(
+			err.to_string().contains("malformed init_data"),
+			"unexpected error: {}",
+			err
+		);
 	}
 
 	#[test]

@@ -75,18 +75,6 @@ pub enum Error {
 	#[error("track not found")]
 	TrackNotFound,
 
-	/// Group not found.
-	#[error("group not found")]
-	GroupNotFound,
-
-	/// No group is currently open on the track.
-	#[error("no active group")]
-	NoActiveGroup,
-
-	/// Track was used with an incompatible group mode (mixing Mode A and Mode B).
-	#[error("group mode conflict")]
-	ModeConflict,
-
 	/// Frame not found.
 	#[error("frame not found")]
 	FrameNotFound,
@@ -188,9 +176,6 @@ impl ffi::ReturnCode for Error {
 			Error::TrackNotFound => -27,
 			Error::FrameNotFound => -28,
 			Error::Mux(_) => -29,
-			Error::GroupNotFound => -30,
-			Error::NoActiveGroup => -31,
-			Error::ModeConflict => -32,
 		}
 	}
 }

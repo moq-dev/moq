@@ -5,7 +5,6 @@ requires-python = ">=3.10"
 [manifest]
 members = [
     "moq",
-    "moq-lite",
     "moq-net",
 ]
 
@@ -104,17 +103,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/5a/3b/cdea6030a68f232de3b832fff24beb098f00b7bc84955890c3876762e5b7/moq_ffi-0.2.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:30a6be85d9482e9b50097346836064c674317546decd94ecb156475203817c4f", size = 6022648, upload-time = "2026-03-26T23:11:49.485Z" },
     { url = "https://files.pythonhosted.org/packages/b2/63/6bd8b76cd4e2701da5da52749aa5e8386deddf136e4a2bfca739913f3db2/moq_ffi-0.2.0-py3-none-win_amd64.whl", hash = "sha256:1ec82da47f02804ba687ab4d073c7503d0974c84349c2ac030012b15d5a36682", size = 4541198, upload-time = "2026-03-26T23:11:51.286Z" },
 ]
-
-[[package]]
-name = "moq-lite"
-version = "0.1.0"
-source = { editable = "py/moq-lite" }
-dependencies = [
-    { name = "moq-net" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "moq-net", editable = "py/moq-net" }]
 
 [[package]]
 name = "moq-net"

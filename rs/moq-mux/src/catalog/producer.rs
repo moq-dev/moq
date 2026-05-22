@@ -121,16 +121,20 @@ impl Drop for Guard<'_> {
 
 /// Determine the SAP starting type for a given video codec.
 ///
-/// SAP type 1: closed GOP (IDR at every SAP). Used for H.264, VP8, AV1, VP9.
-/// SAP type 3: open GOP (CRA/non-IDR RAP possible). Used for H.265 as a
-/// conservative worst-case since the codec supports both IDR and CRA.
+/// SAP type 1: closed GOP with no leading pictures (IDR at every SAP).
+/// Used for VP8, which has no B-frames.
 ///
-/// Returns None for unknown codecs so the field is omitted from the catalog.
+/// SAP type 2: closed GOP with possible leading pictures. Used for codecs
+/// that can carry B-frames (H.264, AV1, VP9) since the encoder may emit
+/// leading B-frames after an IDR.
+///
+/// Returns None for unknown codecs (and H.265, which we don't yet validate
+/// the SAP behavior of) so the field is omitted from the catalog.
 fn video_sap_type(codec: &hang::catalog::VideoCodec) -> Option<u8> {
 	use hang::catalog::VideoCodec;
 	match codec {
-		VideoCodec::H264(_) | VideoCodec::VP8 | VideoCodec::AV1(_) | VideoCodec::VP9(_) => Some(1),
-		VideoCodec::H265(_) => Some(3),
+		VideoCodec::VP8 => Some(1),
+		VideoCodec::H264(_) | VideoCodec::AV1(_) | VideoCodec::VP9(_) => Some(2),
 		_ => None,
 	}
 }
@@ -292,8 +296,9 @@ mod test {
 		assert_eq!(video.framerate, Some(30.0));
 		assert_eq!(video.bitrate, Some(6_000_000));
 		assert!(video.init_data.is_none());
-		assert_eq!(video.max_grp_sap_starting_type, Some(1));
-		assert_eq!(video.max_obj_sap_starting_type, Some(1));
+		// H.264 may carry B-frames, so SAP starting type is 2 (leading pictures allowed).
+		assert_eq!(video.max_grp_sap_starting_type, Some(2));
+		assert_eq!(video.max_obj_sap_starting_type, Some(2));
 		assert_eq!(video.jitter, None);
 
 		let audio = &msf.tracks[1];
@@ -462,8 +467,9 @@ mod test {
 
 		let video = &msf.tracks[0];
 		assert_eq!(video.role, Some(moq_msf::Role::Video));
-		assert_eq!(video.max_grp_sap_starting_type, Some(1));
-		assert_eq!(video.max_obj_sap_starting_type, Some(1));
+		// H.264 may carry B-frames, so SAP starting type is 2.
+		assert_eq!(video.max_grp_sap_starting_type, Some(2));
+		assert_eq!(video.max_obj_sap_starting_type, Some(2));
 		assert_eq!(video.jitter, Some(100.0));
 
 		let audio = &msf.tracks[1];
@@ -516,8 +522,10 @@ mod test {
 
 		let msf = to_msf(&catalog);
 		let video = &msf.tracks[0];
-		assert_eq!(video.max_grp_sap_starting_type, Some(3));
-		assert_eq!(video.max_obj_sap_starting_type, Some(3));
+		// H.265 SAP behavior isn't validated end-to-end yet, so we omit the
+		// SAP fields rather than advertise something we haven't verified.
+		assert_eq!(video.max_grp_sap_starting_type, None);
+		assert_eq!(video.max_obj_sap_starting_type, None);
 		assert_eq!(video.jitter, None);
 	}
 

@@ -49,18 +49,6 @@ impl<T> NonZeroSlab<T> {
 	pub fn remove(&mut self, id: Id) -> Option<T> {
 		self.map.remove(&id)
 	}
-
-	pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
-		self.map.values_mut()
-	}
-
-	pub fn iter(&self) -> impl Iterator<Item = (Id, &T)> {
-		self.map.iter().map(|(id, value)| (*id, value))
-	}
-
-	pub fn retain<F: FnMut(&Id, &mut T) -> bool>(&mut self, f: F) {
-		self.map.retain(f);
-	}
 }
 
 impl TryFrom<i32> for Id {

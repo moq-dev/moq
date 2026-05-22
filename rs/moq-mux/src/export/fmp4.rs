@@ -47,6 +47,16 @@ enum CatalogSource {
 	Msf(crate::catalog::MsfConsumer),
 }
 
+/// Catalog wire format the exporter should subscribe to for track discovery.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CatalogFormat {
+	/// The hang catalog (`catalog.json`, hang JSON schema).
+	#[default]
+	Hang,
+	/// The MSF catalog (`catalog`, draft-ietf-moq-msf JSON schema).
+	Msf,
+}
+
 impl CatalogSource {
 	fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<hang::Catalog>>> {
 		match self {
@@ -73,35 +83,25 @@ struct Fmp4Track {
 impl Fmp4 {
 	/// Subscribe to `broadcast` and produce fMP4 byte chunks.
 	///
-	/// The hang catalog is subscribed internally; per-rendition tracks are (un)subscribed
-	/// as the catalog changes.
-	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
-		let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
-		let catalog = crate::catalog::Consumer::new(catalog_track);
+	/// `catalog_format` selects which catalog track the importer subscribes to
+	/// for track discovery. Both formats end up driving the same internal
+	/// `hang::Catalog`-based pipeline (MSF snapshots are converted on receipt),
+	/// so the only observable difference is which wire catalog is consumed.
+	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
+		let catalog = match catalog_format {
+			CatalogFormat::Hang => {
+				let track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
+				CatalogSource::Hang(crate::catalog::Consumer::new(track))
+			}
+			CatalogFormat::Msf => {
+				let track = broadcast.subscribe_track(&moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
+				CatalogSource::Msf(crate::catalog::MsfConsumer::new(track))
+			}
+		};
 
 		Ok(Self {
 			broadcast,
-			catalog: Some(CatalogSource::Hang(catalog)),
-			latency: Duration::ZERO,
-			tracks: HashMap::new(),
-			init_pending: None,
-			init_emitted: false,
-		})
-	}
-
-	/// Subscribe to `broadcast` and produce fMP4 byte chunks, using the MSF catalog.
-	///
-	/// Behaves like [`Self::new`] but subscribes to the MSF catalog track
-	/// ([`moq_msf::DEFAULT_NAME`]) instead of the hang catalog. Incoming MSF catalog
-	/// snapshots are converted to [`hang::Catalog`] before driving track (un)subscription
-	/// and init segment construction, so the rest of the pipeline is identical.
-	pub fn new_msf(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
-		let catalog_track = broadcast.subscribe_track(&moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
-		let catalog = crate::catalog::MsfConsumer::new(catalog_track);
-
-		Ok(Self {
-			broadcast,
-			catalog: Some(CatalogSource::Msf(catalog)),
+			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			tracks: HashMap::new(),
 			init_pending: None,

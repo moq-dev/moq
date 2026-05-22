@@ -417,8 +417,13 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 		} else if (config.container.kind === "cmaf") {
 			try {
 				description = Container.Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
-			} catch {
-				// Malformed init segment; let isConfigSupported decide without description.
+			} catch (err) {
+				// A malformed init segment means we can't extract the codec
+				// description, so we can't probe support reliably. Reject the
+				// track rather than letting isConfigSupported pass on a
+				// description-less config and then having decode() fail later.
+				console.warn(`audio: malformed CMAF init segment for codec ${config.codec}`, err);
+				return false;
 			}
 		}
 	}

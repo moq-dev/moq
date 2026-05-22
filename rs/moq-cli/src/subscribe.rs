@@ -19,6 +19,15 @@ pub enum CatalogFormat {
 	Msf,
 }
 
+impl From<CatalogFormat> for moq_mux::export::CatalogFormat {
+	fn from(format: CatalogFormat) -> Self {
+		match format {
+			CatalogFormat::Hang => Self::Hang,
+			CatalogFormat::Msf => Self::Msf,
+		}
+	}
+}
+
 #[derive(clap::Args, Clone)]
 pub struct SubscribeArgs {
 	/// The format to write to stdout.
@@ -56,11 +65,8 @@ impl Subscribe {
 		// Fmp4 subscribes to the catalog internally, builds the merged init segment
 		// from the first catalog snapshot, then yields moof+mdat fragments in
 		// timestamp order across tracks.
-		let mut fmp4 = match self.args.catalog {
-			CatalogFormat::Hang => moq_mux::export::Fmp4::new(self.broadcast)?,
-			CatalogFormat::Msf => moq_mux::export::Fmp4::new_msf(self.broadcast)?,
-		}
-		.with_latency(self.args.max_latency);
+		let mut fmp4 =
+			moq_mux::export::Fmp4::new(self.broadcast, self.args.catalog.into())?.with_latency(self.args.max_latency);
 
 		while let Some(chunk) = fmp4.next().await? {
 			stdout.write_all(&chunk).await?;
