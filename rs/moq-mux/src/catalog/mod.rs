@@ -7,7 +7,9 @@
 //! deserializes incoming updates.
 
 mod consumer;
+mod msf_consumer;
 mod producer;
 
 pub use consumer::*;
+pub use msf_consumer::*;
 pub use producer::*;

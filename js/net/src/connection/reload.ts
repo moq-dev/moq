@@ -18,7 +18,8 @@ export type ReloadDelay = {
 	max: DOMHighResTimeStamp;
 
 	// Maximum total time in milliseconds to spend retrying before giving up.
-	// Resets after each successful connection. Omit for unlimited retries.
+	// Resets after each successful connection. Set to 0 for unlimited retries.
+	// default: 300000 (5 minutes)
 	timeout?: DOMHighResTimeStamp;
 };
 
@@ -128,11 +129,12 @@ export class Reload {
 				// Track retry start for timeout.
 				this.#retryStart ??= performance.now();
 
-				if (this.delay.timeout !== undefined) {
+				const timeout = this.delay.timeout ?? 300000;
+				if (timeout > 0) {
 					const elapsed = performance.now() - this.#retryStart;
-					if (elapsed >= this.delay.timeout) {
+					if (elapsed >= timeout) {
 						console.warn("reconnect timed out");
-						this.#closedReject(new Error("reconnect timed out"));
+						this.#closedReject(err instanceof Error ? err : new Error(String(err)));
 						return;
 					}
 				}

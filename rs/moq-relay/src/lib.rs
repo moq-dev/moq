@@ -11,6 +11,7 @@ mod auth;
 mod cluster;
 mod config;
 mod connection;
+mod stats;
 mod web;
 #[cfg(feature = "websocket")]
 mod websocket;
@@ -23,4 +24,5 @@ pub use auth::*;
 pub use cluster::*;
 pub use config::*;
 pub use connection::*;
+pub use stats::*;
 pub use web::*;
