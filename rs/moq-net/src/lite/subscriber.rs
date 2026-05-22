@@ -58,11 +58,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// every session sharing that origin, required for cross-session
 		// loop detection. If no origin is attached (the announce loop is
 		// inert anyway), fall back to a random session-local id.
-		let self_origin = config
-			.origin
-			.as_deref()
-			.copied()
-			.unwrap_or_else(crate::Origin::random);
+		let self_origin = config.origin.as_deref().copied().unwrap_or_else(crate::Origin::random);
 		Self {
 			session,
 			origin: config.origin,

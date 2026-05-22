@@ -168,10 +168,11 @@ impl Stats {
 	/// * `name` is baked into the advertised path of every published stats broadcast,
 	///   following the convention `<level>/.stats/<name>[/<pop>]` (or `.stats/<name>[/<pop>]`
 	///   for the root).
-	/// * `levels` controls how many path-prefix levels stats are bucketed into. A value
-	///   of `1` produces only the root bucket. `2` adds a per-first-segment bucket, and
-	///   so on. Levels deeper than the number of segments in a given broadcast path are
-	///   skipped (we never publish a level whose key equals the broadcast path itself).
+	/// * `levels` is the maximum segment depth stats are bucketed by. `0` disables
+	///   stats entirely (no buckets, including no root bucket). `1` produces the root
+	///   bucket plus a per-first-segment bucket. `2` adds a per-second-segment bucket,
+	///   and so on. A broadcast within the configured depth also gets its own dedicated
+	///   bucket; broadcasts deeper than `levels` are truncated.
 	/// * `pop` disambiguates broadcasts published by different relays into a shared
 	///   cluster origin. Required whenever more than one relay shares an `origin`.
 	///   Without it, peer relays would publish to the same path and the origin's
@@ -549,7 +550,11 @@ async fn run_publisher(weak: Weak<Level>) {
 				return;
 			}
 		};
-		level.origin.publish_broadcast(&level.advertised, broadcast.consume());
+		if !level.origin.publish_broadcast(&level.advertised, broadcast.consume()) {
+			tracing::warn!(level = %level.advertised, "stats: origin rejected stats broadcast");
+			clear_task(&level);
+			return;
+		}
 		(broadcast, ext_pub, ext_sub, int_pub, int_sub)
 	};
 	let (broadcast, mut ext_pub, mut ext_sub, mut int_pub, mut int_sub) = setup;

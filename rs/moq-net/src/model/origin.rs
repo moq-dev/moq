@@ -903,9 +903,8 @@ impl OriginConsumer {
 	/// Like [`Self::try_announced`] but returns every update, including paths where
 	/// any segment starts with `.`.
 	///
-	/// Returns `None` if there is no update available; NOT because the consumer is closed.
-	/// Use [`Self::is_closed`] to check that. See [`Self::announced_all`] for the
-	/// async variant and full caveats.
+	/// Returns `None` if there is no update available, NOT because the consumer is closed.
+	/// See [`Self::announced_all`] for the async variant and full caveats.
 	pub fn try_announced_all(&mut self) -> Option<OriginAnnounce> {
 		self.state.write().ok()?.take()
 	}

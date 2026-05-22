@@ -23,12 +23,12 @@ pub struct StatsConfig {
 	#[arg(long = "stats-name", env = "MOQ_STATS_NAME")]
 	pub name: Option<String>,
 
-	/// How many path-prefix levels to bucket stats by.
+	/// Maximum segment depth stats are bucketed by.
 	///
-	/// `1` produces only the root bucket (`.stats/<name>`). `2` adds a per-first-segment
-	/// bucket (e.g. `demo/.stats/<name>` for broadcasts under `demo/*`). Levels deeper
-	/// than the broadcast path's segment count are skipped. `None` is treated as `1`
-	/// at the cluster constructor.
+	/// `0` disables stats entirely (no buckets). `1` produces the root bucket plus
+	/// a per-first-segment bucket (e.g. `demo/.stats/<name>` for broadcasts under
+	/// `demo/*`). `2` adds a per-second-segment bucket, and so on. Broadcasts deeper
+	/// than `levels` are truncated. `None` is treated as `1` at the cluster constructor.
 	///
 	/// `Option<u32>` rather than `u32` with a clap default so that
 	/// `Config::load()`'s `update_from(args)` (which clap runs after merging TOML)
