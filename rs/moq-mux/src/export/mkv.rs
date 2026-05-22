@@ -550,6 +550,9 @@ fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Resul
 		Container::Cmaf { .. } => {
 			anyhow::bail!("MKV export does not support CMAF {} track '{}'", kind, name);
 		}
+		Container::Loc => {
+			anyhow::bail!("MKV export does not support LOC {} track '{}'", kind, name);
+		}
 	}
 }
 
