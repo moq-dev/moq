@@ -1,11 +1,11 @@
 use anyhow::Context;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
 
-/// Transmux H.265 frames between Annex-B (inline VPS/SPS/PPS) and
+/// Transform H.265 frames between Annex-B (inline VPS/SPS/PPS) and
 /// length-prefixed NALU (out-of-band HEVCDecoderConfigurationRecord, aka hvc1).
 ///
-/// See [`crate::transmux::Avc1`] for the analogous H.264 transmuxer.
+/// See [`crate::transform::Avc1`] for the analogous H.264 transform.
 pub struct Hvc1 {
 	hvcc: Option<Bytes>,
 	cached_vps: Option<Bytes>,
@@ -30,15 +30,15 @@ impl Hvc1 {
 		self.hvcc.as_ref()
 	}
 
-	pub fn transform(&mut self, payload: &[u8]) -> anyhow::Result<Option<Bytes>> {
+	pub fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
 		if self.passthrough {
-			return Ok(Some(Bytes::copy_from_slice(payload)));
+			return Ok(Some(payload));
 		}
 
-		let mut buf = bytes::Bytes::copy_from_slice(payload);
+		let mut buf = payload.clone();
 		let mut nal_iter = crate::import::annexb::NalIterator::new(&mut buf);
 
-		let mut out = BytesMut::with_capacity(payload.len());
+		let mut out = BytesMut::with_capacity(payload.remaining());
 		let mut params_changed = false;
 		let mut emitted_any_slice = false;
 
@@ -54,8 +54,8 @@ impl Hvc1 {
 		}
 
 		if let Some(nal) = nal_iter.flush()? {
-			self.process_nal(&nal, &mut out, &mut params_changed)?;
-			if !out.is_empty() {
+			let was_slice = self.process_nal(&nal, &mut out, &mut params_changed)?;
+			if was_slice {
 				emitted_any_slice = true;
 			}
 		}
@@ -64,7 +64,7 @@ impl Hvc1 {
 			self.rebuild_hvcc()?;
 		}
 
-		if out.is_empty() && !emitted_any_slice {
+		if !emitted_any_slice {
 			return Ok(None);
 		}
 

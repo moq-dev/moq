@@ -23,5 +23,6 @@ pub mod container;
 mod error;
 pub mod export;
 pub mod import;
+pub mod transform;
 
 pub use error::*;

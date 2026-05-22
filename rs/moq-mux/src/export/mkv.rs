@@ -10,7 +10,7 @@ use webm_iterable::matroska_spec::{Master, MatroskaSpec};
 use webm_iterable::{WebmWriter, WriteOptions};
 
 use crate::container::{Consumer, Frame, Hang};
-use crate::export::{Avc1, Hvc1};
+use crate::transform::{Avc1, Hvc1};
 
 /// Matroska TimestampScale: 1 ms (in nanoseconds).
 const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
@@ -33,11 +33,12 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// ## Avc3 / Hev1 sources
 ///
 /// `Mkv` accepts Annex-B sources (`H264 { inline: true }`, `H265 { in_band: true }`,
-/// catalog `description` empty) by attaching an [`Avc1`] / [`Hvc1`] transmuxer to
-/// each affected track. The transmuxer caches parameter sets, builds the
-/// out-of-band `AVCDecoderConfigurationRecord` / `HEVCDecoderConfigurationRecord`,
-/// and length-prefixes sample NALs. Header emission is deferred until every such
-/// track has produced its codec config (typically the first keyframe).
+/// catalog `description` empty) by attaching a [`crate::transform::Avc1`] /
+/// [`crate::transform::Hvc1`] to each affected track. The transform caches
+/// parameter sets, builds the out-of-band `AVCDecoderConfigurationRecord` /
+/// `HEVCDecoderConfigurationRecord`, and length-prefixes sample NALs. Header
+/// emission is deferred until every such track has produced its codec config
+/// (typically the first keyframe).
 ///
 /// Only Legacy-container tracks (raw codec payloads) are supported. CMAF tracks
 /// (moof+mdat passthrough) are rejected with a clear error.
@@ -65,10 +66,10 @@ struct MkvTrack {
 	finished: bool,
 	track_number: u64,
 	kind: TrackKind,
-	/// Optional per-codec transmuxer. Wraps the sample bytes into the shape
+	/// Optional per-codec transform. Wraps the sample bytes into the shape
 	/// MKV expects (length-prefixed for H.264/H.265) and builds avcC/hvcC
 	/// from inline parameter sets for Avc3/Hev1 sources.
-	video_transmux: Option<VideoTransmux>,
+	video_transform: Option<VideoTransform>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -77,24 +78,24 @@ enum TrackKind {
 	Audio,
 }
 
-enum VideoTransmux {
+enum VideoTransform {
 	Avc1(Avc1),
 	Hvc1(Hvc1),
 }
 
-impl VideoTransmux {
+impl VideoTransform {
 	/// Returns the codec config record (avcC / hvcC) if available.
 	fn codec_private(&self) -> Option<&Bytes> {
 		match self {
-			VideoTransmux::Avc1(t) => t.avcc(),
-			VideoTransmux::Hvc1(t) => t.hvcc(),
+			VideoTransform::Avc1(t) => t.avcc(),
+			VideoTransform::Hvc1(t) => t.hvcc(),
 		}
 	}
 
-	fn transform(&mut self, payload: &[u8]) -> anyhow::Result<Option<Bytes>> {
+	fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
 		match self {
-			VideoTransmux::Avc1(t) => t.transform(payload),
-			VideoTransmux::Hvc1(t) => t.transform(payload),
+			VideoTransform::Avc1(t) => t.transform(payload),
+			VideoTransform::Hvc1(t) => t.transform(payload),
 		}
 	}
 }
@@ -247,9 +248,11 @@ impl Mkv {
 			loop {
 				match track.consumer.poll_read(waiter) {
 					Poll::Ready(Ok(Some(frame))) => {
-						let transformed = match &mut track.video_transmux {
-							// Parameter-only frame: transmuxer absorbed it; pull the next one.
-							Some(t) => t.transform(&frame.payload)?.map(|payload| Frame { payload, ..frame }),
+						let transformed = match &mut track.video_transform {
+							// Parameter-only frame: transform absorbed it; pull the next one.
+							Some(t) => t
+								.transform(frame.payload.clone())?
+								.map(|payload| Frame { payload, ..frame }),
 							None => Some(frame),
 						};
 						if let Some(f) = transformed {
@@ -273,7 +276,7 @@ impl Mkv {
 		}
 
 		// 3. Before the header is emitted: keep pulling until every video
-		// transmuxer has produced its codec config. Frames arriving in this
+		// transform has produced its codec config. Frames arriving in this
 		// phase land in `pending` already transformed; once the header lands
 		// we drain them like any other pending frame.
 		if !self.header_emitted {
@@ -342,7 +345,7 @@ impl Mkv {
 			}
 			ensure_legacy(&config.container, "video", name)?;
 			let consumer = subscribe(&self.broadcast, name, &config.container, self.latency)?;
-			let transmux = build_video_transmux(config)?;
+			let transform = build_video_transform(config)?;
 			self.tracks.insert(
 				name.clone(),
 				MkvTrack {
@@ -351,7 +354,7 @@ impl Mkv {
 					finished: false,
 					track_number: next_track_number,
 					kind: TrackKind::Video,
-					video_transmux: transmux,
+					video_transform: transform,
 				},
 			);
 			next_track_number += 1;
@@ -371,7 +374,7 @@ impl Mkv {
 					finished: false,
 					track_number: next_track_number,
 					kind: TrackKind::Audio,
-					video_transmux: None,
+					video_transform: None,
 				},
 			);
 			next_track_number += 1;
@@ -383,13 +386,13 @@ impl Mkv {
 	}
 
 	/// Header is ready when every video track has its codec config — either
-	/// supplied in the catalog or built by the transmuxer.
+	/// supplied in the catalog or built by the transform.
 	fn header_ready(&self) -> bool {
 		for track in self.tracks.values() {
 			if track.kind != TrackKind::Video {
 				continue;
 			}
-			match &track.video_transmux {
+			match &track.video_transform {
 				Some(t) if t.codec_private().is_none() => return false,
 				_ => {}
 			}
@@ -419,7 +422,7 @@ impl Mkv {
 			entries.push(build_video_track_entry(
 				track.track_number,
 				config,
-				track.video_transmux.as_ref(),
+				track.video_transform.as_ref(),
 			)?);
 		}
 		for (name, config) in catalog.audio.renditions.iter() {
@@ -541,12 +544,12 @@ fn subscribe(
 	Ok(Consumer::new(track, media).with_latency(latency))
 }
 
-/// Build a video transmuxer for the given catalog config, or None if no
-/// transmuxing is needed (e.g. VP8/VP9/AV1, or H.264 with pre-built avcC).
-fn build_video_transmux(config: &VideoConfig) -> anyhow::Result<Option<VideoTransmux>> {
+/// Build a video transform for the given catalog config, or None if no
+/// transform is needed (e.g. VP8/VP9/AV1, or H.264 with pre-built avcC).
+fn build_video_transform(config: &VideoConfig) -> anyhow::Result<Option<VideoTransform>> {
 	match &config.codec {
-		VideoCodec::H264(_) => Ok(Some(VideoTransmux::Avc1(Avc1::new(config.description.clone())))),
-		VideoCodec::H265(_) => Ok(Some(VideoTransmux::Hvc1(Hvc1::new(config.description.clone())))),
+		VideoCodec::H264(_) => Ok(Some(VideoTransform::Avc1(Avc1::new(config.description.clone())))),
+		VideoCodec::H265(_) => Ok(Some(VideoTransform::Hvc1(Hvc1::new(config.description.clone())))),
 		_ => Ok(None),
 	}
 }
@@ -554,20 +557,20 @@ fn build_video_transmux(config: &VideoConfig) -> anyhow::Result<Option<VideoTran
 fn build_video_track_entry(
 	track_number: u64,
 	config: &VideoConfig,
-	transmux: Option<&VideoTransmux>,
+	transform: Option<&VideoTransform>,
 ) -> anyhow::Result<MatroskaSpec> {
 	let (codec_id, codec_private) = match &config.codec {
 		VideoCodec::VP8 => ("V_VP8", None),
 		VideoCodec::VP9(_) => ("V_VP9", None),
 		VideoCodec::AV1(_) => ("V_AV1", config.description.as_ref().map(|b| b.to_vec())),
 		VideoCodec::H264(_) => {
-			let avcc = transmux
+			let avcc = transform
 				.and_then(|t| t.codec_private())
 				.context("H.264 track missing AVCDecoderConfigurationRecord")?;
 			("V_MPEG4/ISO/AVC", Some(avcc.to_vec()))
 		}
 		VideoCodec::H265(_) => {
-			let hvcc = transmux
+			let hvcc = transform
 				.and_then(|t| t.codec_private())
 				.context("H.265 track missing HEVCDecoderConfigurationRecord")?;
 			("V_MPEGH/ISO/HEVC", Some(hvcc.to_vec()))

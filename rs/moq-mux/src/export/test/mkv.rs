@@ -430,6 +430,27 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	let pslice_len = u32::from_be_bytes([second[0], second[1], second[2], second[3]]) as usize;
 	assert_eq!(pslice_len, pslice.len(), "P-slice length prefix");
 	assert_eq!(&second[4..4 + pslice_len], pslice, "P-slice payload");
+
+	// Round-trip: feed the exported MKV back through the Mkv importer and
+	// verify the catalog rebuilds as an H264 (avc1-shape) rendition with the
+	// avcC carried through as `description`. This catches subtle structural
+	// mistakes in the avcC layout that the slot-by-slot check above might
+	// pass even when the record as a whole is malformed.
+	let mut bcast2 = moq_net::Broadcast::new().produce();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
+	let mut imp2 = crate::import::Mkv::new(bcast2, cat2.clone());
+	let mut rt = bytes::BytesMut::from(exported.as_slice());
+	imp2.decode(&mut rt).unwrap();
+	imp2.finish().unwrap();
+	let snap = cat2.snapshot();
+	assert_eq!(snap.video.renditions.len(), 1);
+	let v = snap.video.renditions.values().next().unwrap();
+	assert!(matches!(v.codec, hang::catalog::VideoCodec::H264(_)));
+	assert_eq!(
+		v.description.as_ref().map(|b| b.as_ref()),
+		Some(avcc.as_slice()),
+		"re-imported description should equal the avcC we wrote"
+	);
 }
 
 #[tokio::test(start_paused = true)]

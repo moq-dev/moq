@@ -1,7 +1,11 @@
 use anyhow::Context;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-/// Transmux H.264 frames between Annex-B (inline SPS/PPS) and length-prefixed
+// H.264 NAL unit types (ISO/IEC 14496-10 §7.4.1).
+const NAL_TYPE_SPS: u8 = 7;
+const NAL_TYPE_PPS: u8 = 8;
+
+/// Transform H.264 frames between Annex-B (inline SPS/PPS) and length-prefixed
 /// NALU (out-of-band AVCDecoderConfigurationRecord, aka avc1).
 ///
 /// Construct with [`Self::new`] passing the source's existing avcC if the
@@ -25,7 +29,7 @@ pub struct Avc1 {
 }
 
 impl Avc1 {
-	/// Build a new transmuxer. Pass the source's catalog `description` if it
+	/// Build a new transform. Pass the source's catalog `description` if it
 	/// is already an `AVCDecoderConfigurationRecord` (avc1 source); pass
 	/// `None` for an avc3 source whose samples are Annex-B with inline
 	/// parameter sets.
@@ -50,20 +54,21 @@ impl Avc1 {
 	/// Returns:
 	/// - `Ok(Some(payload))` if a length-prefixed sample is ready to emit.
 	/// - `Ok(None)` if the input contained only parameter sets and the
-	///   transmuxer is still waiting for slice NALs (avcC may have been built
+	///   transform is still waiting for slice NALs (avcC may have been built
 	///   as a side effect).
-	pub fn transform(&mut self, payload: &[u8]) -> anyhow::Result<Option<Bytes>> {
+	pub fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
 		if self.passthrough {
-			// Avc1 source — pass through unchanged.
-			return Ok(Some(Bytes::copy_from_slice(payload)));
+			// Avc1 source — pass through unchanged (cheap refcount clone).
+			return Ok(Some(payload));
 		}
 
 		// Avc3 source — parse Annex-B NALs, strip SPS/PPS into the cache,
-		// length-prefix the rest.
-		let mut buf = bytes::Bytes::copy_from_slice(payload);
+		// length-prefix the rest. NalIterator advances the Bytes cursor;
+		// the trailing NAL has to be pulled separately via flush().
+		let mut buf = payload.clone();
 		let mut nal_iter = crate::import::annexb::NalIterator::new(&mut buf);
 
-		let mut out = BytesMut::with_capacity(payload.len());
+		let mut out = BytesMut::with_capacity(payload.remaining());
 		let mut sps_pps_changed = false;
 		let mut emitted_any_slice = false;
 
@@ -78,11 +83,9 @@ impl Avc1 {
 			}
 		}
 
-		// Flush any trailing NAL (the iterator only yields NALs followed by
-		// another start code; the last NAL needs an explicit flush).
 		if let Some(nal) = nal_iter.flush()? {
-			self.process_nal(&nal, &mut out, &mut sps_pps_changed)?;
-			if !out.is_empty() {
+			let was_slice = self.process_nal(&nal, &mut out, &mut sps_pps_changed)?;
+			if was_slice {
 				emitted_any_slice = true;
 			}
 		}
@@ -91,7 +94,7 @@ impl Avc1 {
 			self.rebuild_avcc()?;
 		}
 
-		if out.is_empty() && !emitted_any_slice {
+		if !emitted_any_slice {
 			return Ok(None);
 		}
 
@@ -107,16 +110,14 @@ impl Avc1 {
 		}
 		let nal_type = nal[0] & 0x1f;
 		match nal_type {
-			7 => {
-				// SPS — cache and skip from sample data.
+			NAL_TYPE_SPS => {
 				if self.cached_sps.as_deref() != Some(nal.as_ref()) {
 					self.cached_sps = Some(nal.clone());
 					*sps_pps_changed = true;
 				}
 				Ok(false)
 			}
-			8 => {
-				// PPS — cache and skip from sample data.
+			NAL_TYPE_PPS => {
 				if self.cached_pps.as_deref() != Some(nal.as_ref()) {
 					self.cached_pps = Some(nal.clone());
 					*sps_pps_changed = true;
@@ -201,17 +202,14 @@ mod tests {
 		let mut tx = Avc1::new(None);
 		assert!(tx.avcc().is_none());
 
-		// Keyframe carries SPS + PPS + IDR.
 		let frame = annexb_frame(&[sps, pps, idr]);
-		let out = tx.transform(&frame).expect("transform").expect("expected output");
+		let out = tx.transform(frame).expect("transform").expect("expected output");
 
-		// avcC should be built now.
 		let avcc = tx.avcc().expect("avcC available").clone();
-		assert_eq!(avcc[0], 1); // configurationVersion
+		assert_eq!(avcc[0], 1);
 		assert_eq!(avcc[1], sps[1]);
 		assert_eq!(avcc[3], sps[3]);
 
-		// Output should contain just the IDR, length-prefixed.
 		let mut expected = BytesMut::new();
 		expected.extend_from_slice(&(idr.len() as u32).to_be_bytes());
 		expected.extend_from_slice(idr);
@@ -225,7 +223,7 @@ mod tests {
 
 		let mut tx = Avc1::new(None);
 		let frame = annexb_frame(&[sps, pps]);
-		assert!(tx.transform(&frame).unwrap().is_none());
+		assert!(tx.transform(frame).unwrap().is_none());
 		assert!(tx.avcc().is_some());
 	}
 
@@ -236,32 +234,8 @@ mod tests {
 		assert_eq!(tx.avcc(), Some(&avcc));
 
 		let payload = Bytes::from_static(&[0, 0, 0, 4, 0x65, 0x88, 0x84, 0x21]);
-		let out = tx.transform(&payload).unwrap().unwrap();
+		let out = tx.transform(payload.clone()).unwrap().unwrap();
 		assert_eq!(out.as_ref(), payload.as_ref());
-	}
-
-	#[test]
-	fn avc3_export_e2e_payload_shape() {
-		// Mirror the byte shapes used by the export test so any divergence
-		// surfaces here in isolation.
-		let sps = &[0x67u8, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef][..];
-		let pps = &[0x68u8, 0xce, 0x3c, 0x80][..];
-		let idr = &[0x65u8, 0x88, 0x84, 0x21, 0x00, 0x11, 0x22, 0x33][..];
-		let pslice = &[0x61u8, 0xe0, 0x12, 0x34][..];
-
-		let mut tx = Avc1::new(None);
-		let key = annexb_frame(&[sps, pps, idr]);
-		let key_out = tx.transform(&key).expect("transform key").expect("output");
-		assert!(tx.avcc().is_some());
-
-		// IDR (8 bytes) becomes 4-byte len prefix + 8-byte NAL.
-		assert_eq!(key_out.len(), 4 + idr.len());
-		assert_eq!(&key_out[4..], idr);
-
-		let p = annexb_frame(&[pslice]);
-		let p_out = tx.transform(&p).expect("transform p").expect("output");
-		assert_eq!(p_out.len(), 4 + pslice.len());
-		assert_eq!(&p_out[4..], pslice);
 	}
 
 	#[test]
@@ -272,15 +246,37 @@ mod tests {
 		let p = &[0x61, 0xe0, 0x12][..];
 
 		let mut tx = Avc1::new(None);
-		tx.transform(&annexb_frame(&[sps, pps, idr])).unwrap();
+		tx.transform(annexb_frame(&[sps, pps, idr])).unwrap();
 		let avcc_v1 = tx.avcc().unwrap().clone();
 
-		// Non-keyframe with no SPS/PPS: avcC unchanged, output is just the P-slice.
-		let out = tx.transform(&annexb_frame(&[p])).unwrap().unwrap();
+		let out = tx.transform(annexb_frame(&[p])).unwrap().unwrap();
 		assert_eq!(tx.avcc().unwrap(), &avcc_v1);
 		let mut expected = BytesMut::new();
 		expected.extend_from_slice(&(p.len() as u32).to_be_bytes());
 		expected.extend_from_slice(p);
 		assert_eq!(out.as_ref(), expected.as_ref());
+	}
+
+	#[test]
+	fn avc3_export_e2e_payload_shape() {
+		// Mirror the byte shapes used by the export integration test so any
+		// divergence surfaces here in isolation.
+		let sps = &[0x67u8, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef][..];
+		let pps = &[0x68u8, 0xce, 0x3c, 0x80][..];
+		let idr = &[0x65u8, 0x88, 0x84, 0x21, 0x00, 0x11, 0x22, 0x33][..];
+		let pslice = &[0x61u8, 0xe0, 0x12, 0x34][..];
+
+		let mut tx = Avc1::new(None);
+		let key = annexb_frame(&[sps, pps, idr]);
+		let key_out = tx.transform(key).expect("transform key").expect("output");
+		assert!(tx.avcc().is_some());
+
+		assert_eq!(key_out.len(), 4 + idr.len());
+		assert_eq!(&key_out[4..], idr);
+
+		let p = annexb_frame(&[pslice]);
+		let p_out = tx.transform(p).expect("transform p").expect("output");
+		assert_eq!(p_out.len(), 4 + pslice.len());
+		assert_eq!(&p_out[4..], pslice);
 	}
 }
