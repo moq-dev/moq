@@ -17,26 +17,28 @@ use crate::{
 
 use super::Version;
 
-pub(super) struct PublisherConfig {
+pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
+	pub session: S,
 	/// The origin we read local broadcasts from. None gives this session a
 	/// dummy, immediately-closed origin (i.e. nothing to publish).
 	pub origin: Option<OriginConsumer>,
-	/// Optional stats aggregator for this session's egress.
-	pub stats: Option<MoqStats>,
+	/// Stats aggregator for this session's egress. Use [`MoqStats::disabled`]
+	/// to opt out.
+	pub stats: MoqStats,
 	pub version: Version,
 }
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: OriginConsumer,
-	stats: Option<MoqStats>,
+	stats: MoqStats,
 	self_origin: Origin,
 	priority: PriorityQueue,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(session: S, config: PublisherConfig) -> Self {
+	pub fn new(config: PublisherConfig<S>) -> Self {
 		// Default to a dummy origin that is immediately closed.
 		let origin = config.origin.unwrap_or_else(|| Origin::random().produce().consume());
 		// Identity stamped onto outbound announce hops. Derived from the
@@ -44,7 +46,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// across every session, required for cross-session loop detection.
 		let self_origin = *origin;
 		Self {
-			session,
+			session: config.session,
 			origin,
 			stats: config.stats,
 			self_origin,
@@ -183,7 +185,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// reflected announces (cluster loops) never hit the wire. Zero means
 		// the peer didn't set it (Lite03 or earlier), pass through.
 		exclude_hop: u64,
-		stats: Option<MoqStats>,
+		stats: MoqStats,
 		version: Version,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
@@ -205,12 +207,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					if active.is_some() {
 						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-						if let Some(stats) = stats.as_ref() {
-							let absolute = origin.absolute(&path).to_owned();
-							let guard = stats.broadcast(&absolute).publisher();
-							let prev = stats_guards.insert(absolute, guard);
-							debug_assert!(prev.is_none(), "origin announced a path that was already active");
-						}
+						let absolute = origin.absolute(&path).to_owned();
+						let guard = stats.broadcast(&absolute).publisher();
+						let prev = stats_guards.insert(absolute, guard);
+						debug_assert!(prev.is_none(), "origin announced a path that was already active");
 						init.push(suffix.to_owned());
 					} else {
 						// A potential race.
@@ -271,12 +271,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									);
 									continue;
 								}
-								if let Some(stats) = stats.as_ref() {
-									let absolute = origin.absolute(&path).to_owned();
-									let guard = stats.broadcast(&absolute).publisher();
-									let prev = stats_guards.insert(absolute, guard);
-									debug_assert!(prev.is_none(), "origin announced a path that was already active");
-								}
+								let absolute = origin.absolute(&path).to_owned();
+								let guard = stats.broadcast(&absolute).publisher();
+								let prev = stats_guards.insert(absolute, guard);
+								debug_assert!(prev.is_none(), "origin announced a path that was already active");
 								let msg = lite::Announce::Active { suffix, hops };
 								stream.writer.encode(&msg).await?;
 							} else {
@@ -315,11 +313,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let priority = self.priority.clone();
 		let version = self.version;
 
-		// Open a publisher-track stats guard tied to this subscription's lifetime.
-		let track_stats = self
-			.stats
-			.as_ref()
-			.map(|stats| stats.broadcast(&absolute).publisher().track(&track));
+		// Per-track subscription guard. The broadcast itself is tracked elsewhere by
+		// run_announce, so we use publisher_track to avoid double-counting broadcasts.
+		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
 
 		let session = self.session.clone();
 		web_async::spawn(async move {
@@ -358,7 +354,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		subscribe: &lite::Subscribe<'_>,
 		consumer: Option<BroadcastConsumer>,
 		priority: PriorityQueue,
-		track_stats: Option<crate::PublisherTrack>,
+		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
 		let track = Track {
@@ -381,7 +377,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
 
-		let track_stats = track_stats.map(std::sync::Arc::new);
+		let track_stats = std::sync::Arc::new(track_stats);
 		tokio::select! {
 			res = Self::run_track(session, track, subscribe, priority, track_stats, version) => res?,
 			res = stream.reader.closed() => res?,
@@ -396,7 +392,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		mut track: TrackConsumer,
 		subscribe: &lite::Subscribe<'_>,
 		priority: PriorityQueue,
-		track_stats: Option<std::sync::Arc<crate::PublisherTrack>>,
+		track_stats: std::sync::Arc<crate::PublisherTrack>,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
@@ -437,7 +433,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		msg: lite::Group,
 		mut priority: PriorityHandle,
 		mut group: GroupConsumer,
-		track_stats: Option<std::sync::Arc<crate::PublisherTrack>>,
+		track_stats: std::sync::Arc<crate::PublisherTrack>,
 		version: Version,
 	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
@@ -447,9 +443,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.set_priority(priority.current());
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
-		if let Some(s) = track_stats.as_deref() {
-			s.group();
-		}
+		track_stats.group();
 
 		loop {
 			let frame = tokio::select! {
@@ -469,9 +463,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			stream.encode(&frame.size).await?;
-			if let Some(s) = track_stats.as_deref() {
-				s.frame();
-			}
+			track_stats.frame();
 
 			loop {
 				let chunk = tokio::select! {
@@ -489,9 +481,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					Some(mut chunk) => {
 						let n = chunk.len() as u64;
 						stream.write_all(&mut chunk).await?;
-						if let Some(s) = track_stats.as_deref() {
-							s.bytes(n);
-						}
+						track_stats.bytes(n);
 					}
 					None => break,
 				}

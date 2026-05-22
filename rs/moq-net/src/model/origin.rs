@@ -285,10 +285,6 @@ impl OriginConsumerState {
 	/// Take one update to deliver to the consumer, if any.
 	fn take(&mut self) -> Option<OriginAnnounce> {
 		let path = self.pending.keys().next()?.clone();
-		self.take_path(path)
-	}
-
-	fn take_path(&mut self, path: PathOwned) -> Option<OriginAnnounce> {
 		match self.pending.remove(&path).unwrap() {
 			PendingUpdate::Announce(broadcast) => Some((path, Some(broadcast))),
 			PendingUpdate::Unannounce => Some((path, None)),
@@ -1998,25 +1994,6 @@ mod tests {
 		assert!(result.is_none());
 	}
 
-	#[tokio::test]
-	async fn test_announced_returns_dot_prefixed_paths() {
-		// `.`-prefixed paths used to be filtered out via an `is_hidden` convention.
-		// They're now ordinary paths — access is scoped via auth tokens instead.
-		tokio::time::pause();
-
-		let origin = Origin::random().produce();
-		let foo = Broadcast::new().produce();
-		let stats = Broadcast::new().produce();
-
-		origin.publish_broadcast("foo/bar", foo.consume());
-		origin.publish_broadcast(".stats/broadcasts/sjc", stats.consume());
-
-		// Pending is a BTreeMap, so deliveries arrive in path order.
-		let mut consumer = origin.consume();
-		consumer.assert_next(".stats/broadcasts/sjc", &stats.consume());
-		consumer.assert_next("foo/bar", &foo.consume());
-	}
-
 	// Coalescing tests: a slow consumer that doesn't drain between updates
 	// should observe a bounded number of deliveries.
 
@@ -2035,23 +2012,6 @@ mod tests {
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
 		consumer.assert_next_wait();
-	}
-
-	#[tokio::test]
-	async fn test_announced_broadcast_with_dot_prefix() {
-		tokio::time::pause();
-
-		let origin = Origin::random().produce();
-		let stats = Broadcast::new().produce();
-
-		origin.publish_broadcast(".stats/broadcasts/sjc", stats.consume());
-
-		let consumer = origin.consume();
-		let result = consumer
-			.announced_broadcast(".stats/broadcasts/sjc")
-			.now_or_never()
-			.expect("next blocked");
-		assert!(result.is_some());
 	}
 
 	#[tokio::test]

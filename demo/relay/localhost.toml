@@ -26,14 +26,19 @@ listen = "[::]:4443"
 # Allow anonymous access to everything.
 public = ""
 
-# Publish per-prefix `.stats/broadcasts/<level>/<node>` broadcasts so the
-# moq-cdn dashboard can read live ingress/egress. Single-node local dev still
-# sets --stats-node (here `localhost`) to exercise the same code path as
-# multi-relay deployments.
+# Publish stats broadcasts on the cluster origin. A broadcast at path
+# `anon/bbb` aggregates into each of its path prefixes (up to `levels`):
+#
+#   .stats/prefix/localhost
+#   .stats/prefix/anon/localhost
+#   .stats/prefix/anon/bbb/localhost
 [stats]
-# 8 gives `<urlPath>/<app>/<room>/<user>/...` plenty of headroom; the snapshot
-# task only runs while a level has activity, so over-provisioning is cheap.
-levels = 8
+enabled = true
+# `/anon/bbb` is the typical localhost broadcast, so 3 levels covers the root,
+# the anon prefix, and the broadcast itself.
+levels = 3
+# `node` is the suffix that disambiguates per-relay broadcasts in a cluster.
+# Single-node setups can leave it unset.
 node = "localhost"
 
 [iroh]

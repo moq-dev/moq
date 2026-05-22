@@ -284,7 +284,7 @@ impl Server {
 	}
 
 	/// Attach a tier-scoped [`moq_net::StatsHandle`] to all sessions accepted by this server.
-	pub fn with_stats(mut self, stats: impl Into<Option<moq_net::StatsHandle>>) -> Self {
+	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
 		self.moq = self.moq.with_stats(stats);
 		self
 	}
@@ -593,7 +593,7 @@ impl Request {
 	}
 
 	/// Attach a tier-scoped [`moq_net::StatsHandle`] to this session.
-	pub fn with_stats(mut self, stats: impl Into<Option<moq_net::StatsHandle>>) -> Self {
+	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
 		self.server = self.server.with_stats(stats);
 		self
 	}

@@ -13,8 +13,8 @@ pub fn start<S: web_transport_trait::Session>(
 	publish: Option<OriginConsumer>,
 	// We will consume any remote broadcasts, inserting them into this origin.
 	subscribe: Option<OriginProducer>,
-	// Optional tier-scoped stats handle. None disables instrumentation for this session.
-	stats: Option<StatsHandle>,
+	// Tier-scoped stats handle. Pass [`StatsHandle::disabled`] to opt out.
+	stats: StatsHandle,
 	// The version of the protocol to use.
 	version: Version,
 ) -> Result<Option<BandwidthConsumer>, Error> {
@@ -35,23 +35,19 @@ pub fn start<S: web_transport_trait::Session>(
 	// stamped onto outbound hops and checked against incoming hops, so it
 	// must be stable across every session that shares the local origin.
 	// Required for cross-session cluster loop detection.
-	let publisher = Publisher::new(
-		session.clone(),
-		PublisherConfig {
-			origin: publish,
-			stats: stats.clone(),
-			version,
-		},
-	);
-	let subscriber = Subscriber::new(
-		session.clone(),
-		SubscriberConfig {
-			origin: subscribe,
-			recv_bandwidth: recv_bw_for_sub,
-			stats,
-			version,
-		},
-	);
+	let publisher = Publisher::new(PublisherConfig {
+		session: session.clone(),
+		origin: publish,
+		stats: stats.clone(),
+		version,
+	});
+	let subscriber = Subscriber::new(SubscriberConfig {
+		session: session.clone(),
+		origin: subscribe,
+		recv_bandwidth: recv_bw_for_sub,
+		stats,
+		version,
+	});
 
 	web_async::spawn(async move {
 		let res = tokio::select! {

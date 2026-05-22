@@ -35,8 +35,7 @@ pub(crate) async fn serve_ws(
 	let ws = ws.protocols(["webtransport"]);
 
 	let params = AuthParams { path, jwt: query.jwt };
-	let internal = mtls.is_some();
-	let token = if internal {
+	let token = if mtls.is_some() {
 		AuthToken::unrestricted()
 	} else {
 		state.auth.verify(&params).await?
@@ -44,8 +43,11 @@ pub(crate) async fn serve_ws(
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
 	// mTLS sessions record on the internal tier; everything else on external.
-	let tier = if internal { Tier::Internal } else { Tier::External };
-	let stats = state.cluster.stats.as_ref().map(|s| s.tier(tier));
+	let tier = match token.internal {
+		true => Tier::Internal,
+		false => Tier::External,
+	};
+	let stats = state.cluster.stats.tier(tier);
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.
@@ -75,7 +77,7 @@ async fn handle_socket<T>(
 	socket: T,
 	publish: Option<OriginProducer>,
 	subscribe: Option<OriginConsumer>,
-	stats: Option<StatsHandle>,
+	stats: StatsHandle,
 ) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>

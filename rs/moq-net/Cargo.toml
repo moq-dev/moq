@@ -13,7 +13,7 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-# Retained for backwards compatibility; serde is now always available.
+# Legacy no-op: serde is now unconditional (stats publishing requires it).
 serde = []
 
 [dependencies]

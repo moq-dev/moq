@@ -1,5 +1,5 @@
 import { Effect, type Getter, Signal } from "@moq/signals";
-import * as Path from "../path.ts";
+import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions } from "./connect.ts";
 import type { Established } from "./established.ts";
@@ -151,9 +151,7 @@ export class Reload {
 		const conn = effect.get(this.established);
 		if (!conn) return;
 
-		effect.cleanup(() => {
-			this.#announced.set(new Set());
-		});
+		effect.cleanup(() => this.#announced.set(new Set()));
 
 		// Cloudflare's relay does not yet support SUBSCRIBE_NAMESPACE, so
 		// skip announce subscriptions entirely for those hosts.

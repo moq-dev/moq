@@ -323,7 +323,7 @@ impl Client {
 	}
 
 	/// Attach a tier-scoped [`moq_net::StatsHandle`] to all sessions opened by this client.
-	pub fn with_stats(mut self, stats: impl Into<Option<moq_net::StatsHandle>>) -> Self {
+	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
 		self.moq = self.moq.with_stats(stats);
 		self
 	}

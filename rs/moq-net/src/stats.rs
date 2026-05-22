@@ -1,9 +1,9 @@
 //! Generic stats publishing for moq-net sessions.
 //!
 //! [`Stats`] aggregates per-broadcast counter bumps into per-prefix levels and
-//! publishes a `<prefix>/broadcasts/<level>/<node>` broadcast on a caller-provided
-//! [`OriginProducer`]. Each stats broadcast carries four tracks, one per
-//! `(tier, role)` pair:
+//! publishes a `<top-prefix>/prefix/<level-path>/<node>` broadcast on a caller-provided
+//! [`OriginProducer`]. The `<node>` suffix is omitted when no node is configured.
+//! Each stats broadcast carries four tracks, one per `(tier, role)` pair:
 //!
 //! * `publisher.json`           : external (e.g. customer) egress
 //! * `subscriber.json`          : external ingress
@@ -12,13 +12,26 @@
 //!
 //! A caller hands each session a tier-scoped [`StatsHandle`] (built from the
 //! single shared [`Stats`] via [`Stats::tier`]) which determines which counter
-//! set its bumps land in. The `node` suffix on the advertised path lets multiple
-//! relays in the same cluster origin coexist without overwriting each other's
-//! broadcast.
+//! set its bumps land in. Multiple relays in the same cluster origin can
+//! coexist by giving each one a distinct `<node>` suffix on advertised paths.
 //!
-//! The `broadcasts` segment between the prefix and the level key is a fixed
-//! category, leaving room under the same prefix for future siblings (e.g.
-//! `<prefix>/nodes/<node>` for host-level stats).
+//! Each broadcast contributes to every prefix of its path (within the
+//! configured depth), so publishing `anon/bbb` with `levels = 2` produces:
+//!
+//! * `<top-prefix>/prefix/<node>`           (root aggregate)
+//! * `<top-prefix>/prefix/anon/<node>`      (per-first-segment aggregate)
+//! * `<top-prefix>/prefix/anon/bbb/<node>`  (per-broadcast)
+//!
+//! The fixed `prefix` segment between the top-level prefix and the
+//! aggregation level leaves room for sibling categories under the same prefix
+//! (e.g. `<top-prefix>/nodes/<node>` for host-level stats).
+//!
+//! # Disabled stats
+//!
+//! [`Stats::disabled`] (and the matching [`Default`] impl) returns a no-op
+//! aggregator. All counter bumps through it are silently dropped and no
+//! snapshot task is ever spawned, so call sites can hold a [`StatsHandle`]
+//! unconditionally instead of threading an `Option`.
 //!
 //! # Lifecycle
 //!
@@ -37,10 +50,10 @@
 //!
 //! # Cycles
 //!
-//! Calling [`Stats::broadcast`] for a path under the configured `prefix`
-//! returns an empty handle whose bumps no-op. This breaks the feedback loop
-//! where serving a `<prefix>/...` broadcast would itself generate more stats
-//! traffic.
+//! Calling [`Stats::broadcast`] for a path under the configured top-level
+//! prefix returns an empty handle whose bumps no-op. This breaks the feedback
+//! loop where serving a `<top-prefix>/...` broadcast would itself generate
+//! more stats traffic.
 
 use std::{
 	collections::HashMap,
@@ -54,7 +67,7 @@ use std::{
 use serde::Serialize;
 use web_async::{Lock, spawn};
 
-use crate::{AsPath, Broadcast, OriginProducer, Path, PathOwned, Track};
+use crate::{AsPath, Broadcast, Origin, OriginProducer, Path, PathOwned, Track};
 
 /// Cumulative atomic counters for a single (tier, role) on a level.
 #[derive(Default, Debug)]
@@ -130,7 +143,7 @@ pub struct Stats {
 struct StatsInner {
 	prefix: PathOwned,
 	levels: u32,
-	node: String,
+	node: Option<String>,
 	origin: OriginProducer,
 	entries: Lock<HashMap<PathOwned, Arc<Level>>>,
 }
@@ -143,7 +156,7 @@ struct Level {
 	internal_subscriber: Counters,
 	task: Lock<Option<()>>,
 	origin: OriginProducer,
-	node: String,
+	node: Option<String>,
 	level_key: PathOwned,
 }
 
@@ -169,24 +182,49 @@ impl Stats {
 	/// Build a new stats aggregator.
 	///
 	/// * `prefix` is the top-level path under which stats are published, e.g. `.stats`.
-	///   The full advertised path is `<prefix>/broadcasts/<level>/<node>`.
-	/// * `levels` is the maximum segment depth stats are bucketed by. `0` disables
-	///   stats entirely (no buckets, including no root bucket). `1` produces the root
-	///   bucket plus a per-first-segment bucket. `2` adds a per-second-segment bucket,
-	///   and so on. A broadcast within the configured depth also gets its own dedicated
-	///   bucket; broadcasts deeper than `levels` are truncated.
+	///   The full advertised path is `<prefix>/prefix/<level-path>/<node>` (or
+	///   `<prefix>/prefix/<level-path>` when `node` is `None`).
+	/// * `levels` is the maximum segment depth stats are bucketed by, which caps the
+	///   number of aggregation buckets per broadcast. `0` disables stats entirely (no
+	///   buckets, including no root bucket). `1` produces the root bucket plus a
+	///   per-first-segment bucket. `2` adds a per-second-segment bucket, and so on.
+	///   A broadcast within the configured depth also gets its own dedicated bucket;
+	///   broadcasts deeper than `levels` are truncated.
 	/// * `node` disambiguates broadcasts published by different relays into a shared
-	///   cluster origin. Required: without it, peer relays would publish to the same
-	///   path and the origin's single-source delivery would drop all but one.
+	///   cluster origin. Set this on every node in multi-relay deployments. `None`
+	///   omits the suffix, which is fine for single-relay deployments.
 	/// * `origin` is the [`OriginProducer`] that receives `publish_broadcast` calls
 	///   for each stats broadcast.
-	pub fn new(prefix: impl Into<PathOwned>, levels: u32, node: impl Into<String>, origin: OriginProducer) -> Self {
+	pub fn new(
+		prefix: impl Into<PathOwned>,
+		levels: u32,
+		node: impl Into<Option<String>>,
+		origin: OriginProducer,
+	) -> Self {
 		Self {
 			inner: Arc::new(StatsInner {
 				prefix: prefix.into(),
 				levels,
 				node: node.into(),
 				origin,
+				entries: Lock::default(),
+			}),
+		}
+	}
+
+	/// A no-op aggregator. Counter bumps are silently dropped and no snapshot
+	/// task is ever spawned. Use this when stats are disabled so call sites
+	/// can hold a [`Stats`] (or [`StatsHandle`]) unconditionally.
+	pub fn disabled() -> Self {
+		// Levels = 0 short-circuits broadcast_levels to an empty Arc, so every
+		// downstream operation is a no-op iteration. The origin is never
+		// touched because the snapshot task only spawns on the first track.
+		Self {
+			inner: Arc::new(StatsInner {
+				prefix: PathOwned::default(),
+				levels: 0,
+				node: None,
+				origin: Origin::random().produce(),
 				entries: Lock::default(),
 			}),
 		}
@@ -222,7 +260,7 @@ impl Stats {
 				entries
 					.entry(key.clone())
 					.or_insert_with(|| {
-						let advertised = advertised_path(&self.inner.prefix, &key, &self.inner.node);
+						let advertised = advertised_path(&self.inner.prefix, &key, self.inner.node.as_deref());
 						Arc::new(Level {
 							advertised,
 							external_publisher: Counters::default(),
@@ -243,6 +281,12 @@ impl Stats {
 	}
 }
 
+impl Default for Stats {
+	fn default() -> Self {
+		Self::disabled()
+	}
+}
+
 /// Tier-scoped wrapper around [`Stats`]. What [`crate::Client::with_stats`] and
 /// [`crate::Server::with_stats`] accept. Cheap to clone.
 #[derive(Clone)]
@@ -252,6 +296,11 @@ pub struct StatsHandle {
 }
 
 impl StatsHandle {
+	/// A no-op handle. See [`Stats::disabled`].
+	pub fn disabled() -> Self {
+		Stats::disabled().tier(Tier::External)
+	}
+
 	/// The aggregator this handle is tied to.
 	pub fn parent(&self) -> &Stats {
 		&self.stats
@@ -276,11 +325,17 @@ impl StatsHandle {
 	}
 }
 
+impl Default for StatsHandle {
+	fn default() -> Self {
+		Self::disabled()
+	}
+}
+
 /// A per-broadcast, tier-scoped handle. Cheap to clone.
 ///
-/// Open a role-scoped guard via [`Self::publisher`] or [`Self::subscriber`]; each
-/// returns a RAII handle whose creation bumps the matching `broadcasts` counter
-/// and whose drop bumps `broadcasts_closed`.
+/// Open a broadcast-lifetime guard with [`Self::publisher`] / [`Self::subscriber`],
+/// or skip straight to a track guard with [`Self::publisher_track`] /
+/// [`Self::subscriber_track`] when the broadcast's lifetime is tracked elsewhere.
 #[derive(Clone)]
 pub struct BroadcastStats {
 	levels: Arc<[Arc<Level>]>,
@@ -289,12 +344,14 @@ pub struct BroadcastStats {
 
 impl BroadcastStats {
 	/// True if this handle covers no levels (its path was under the aggregator's
-	/// own prefix, so bumps are no-ops).
+	/// own prefix, or stats are disabled). All bumps through an empty handle
+	/// are no-ops.
 	pub fn is_empty(&self) -> bool {
 		self.levels.is_empty()
 	}
 
-	/// Open the publisher (egress) role for this broadcast.
+	/// Open a broadcast-lifetime guard for the publisher (egress) role.
+	/// Bumps `broadcasts` on construction and `broadcasts_closed` on drop.
 	pub fn publisher(&self) -> PublisherStats {
 		for level in self.levels.iter() {
 			level
@@ -308,7 +365,8 @@ impl BroadcastStats {
 		}
 	}
 
-	/// Open the subscriber (ingress) role for this broadcast.
+	/// Open a broadcast-lifetime guard for the subscriber (ingress) role.
+	/// Bumps `broadcasts` on construction and `broadcasts_closed` on drop.
 	pub fn subscriber(&self) -> SubscriberStats {
 		for level in self.levels.iter() {
 			level
@@ -317,6 +375,43 @@ impl BroadcastStats {
 				.fetch_add(1, Ordering::Relaxed);
 		}
 		SubscriberStats {
+			levels: self.levels.clone(),
+			tier: self.tier,
+		}
+	}
+
+	/// Open a publisher-track guard without bumping the broadcast counters.
+	///
+	/// Use this when the broadcast is already counted by a [`PublisherStats`]
+	/// guard held elsewhere (e.g. by the announce loop), so the track guard
+	/// only contributes to subscription counters.
+	///
+	/// `_name` is currently unused; counters are per-level only. Reserved for
+	/// future per-track granularity.
+	pub fn publisher_track(&self, _name: &str) -> PublisherTrack {
+		for level in self.levels.iter() {
+			level
+				.counters(self.tier, Role::Publisher)
+				.subscriptions
+				.fetch_add(1, Ordering::Relaxed);
+			ensure_task(level);
+		}
+		PublisherTrack {
+			levels: self.levels.clone(),
+			tier: self.tier,
+		}
+	}
+
+	/// Subscriber-side counterpart to [`Self::publisher_track`].
+	pub fn subscriber_track(&self, _name: &str) -> SubscriberTrack {
+		for level in self.levels.iter() {
+			level
+				.counters(self.tier, Role::Subscriber)
+				.subscriptions
+				.fetch_add(1, Ordering::Relaxed);
+			ensure_task(level);
+		}
+		SubscriberTrack {
 			levels: self.levels.clone(),
 			tier: self.tier,
 		}
@@ -331,25 +426,15 @@ pub struct PublisherStats {
 }
 
 impl PublisherStats {
-	/// Open a track-subscription guard.
-	///
-	/// Bumps `subscriptions` on every level and (on the 0->N transition in any
-	/// role) spawns the level's snapshot task. Drop bumps `subscriptions_closed`.
-	///
-	/// `_name` is currently unused; counters are per-level only. Reserved for
-	/// future per-track granularity.
-	pub fn track(&self, _name: &str) -> PublisherTrack {
-		for level in self.levels.iter() {
-			level
-				.counters(self.tier, Role::Publisher)
-				.subscriptions
-				.fetch_add(1, Ordering::Relaxed);
-			ensure_task(level);
-		}
-		PublisherTrack {
+	/// Open a track-subscription guard. Bumps `subscriptions` on every level
+	/// and (on the 0->N transition in any role) spawns the level's snapshot
+	/// task. Drop bumps `subscriptions_closed`.
+	pub fn track(&self, name: &str) -> PublisherTrack {
+		BroadcastStats {
 			levels: self.levels.clone(),
 			tier: self.tier,
 		}
+		.publisher_track(name)
 	}
 }
 
@@ -373,18 +458,12 @@ pub struct SubscriberStats {
 
 impl SubscriberStats {
 	/// Open a track-subscription guard. Mirrors [`PublisherStats::track`].
-	pub fn track(&self, _name: &str) -> SubscriberTrack {
-		for level in self.levels.iter() {
-			level
-				.counters(self.tier, Role::Subscriber)
-				.subscriptions
-				.fetch_add(1, Ordering::Relaxed);
-			ensure_task(level);
-		}
-		SubscriberTrack {
+	pub fn track(&self, name: &str) -> SubscriberTrack {
+		BroadcastStats {
 			levels: self.levels.clone(),
 			tier: self.tier,
 		}
+		.subscriber_track(name)
 	}
 }
 
@@ -641,7 +720,8 @@ struct SnapshotFrame<'a> {
 	level: &'a str,
 	tier: &'a str,
 	role: &'a str,
-	node: &'a str,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	node: Option<&'a str>,
 	ts_ms: u64,
 	#[serde(flatten)]
 	snapshot: Snapshot,
@@ -653,7 +733,7 @@ fn write_snapshot(track: &mut crate::TrackProducer, tier: Tier, role: Role, leve
 		level: level.level_key.as_str(),
 		tier: tier.as_str(),
 		role: role.as_str(),
-		node: &level.node,
+		node: level.node.as_deref(),
 		ts_ms: now_ms(),
 		snapshot,
 	};
@@ -698,15 +778,20 @@ fn level_keys(broadcast: &Path, levels: u32) -> Vec<PathOwned> {
 	(0..=max).map(|i| PathOwned::from(segs[..i].join("/"))).collect()
 }
 
-fn advertised_path(prefix: &Path, level_key: &Path, node: &str) -> PathOwned {
-	// The fixed `broadcasts` category leaves room for sibling categories (e.g.
-	// `<prefix>/nodes/<node>` for host-level stats) under the same prefix.
-	let prefix = prefix.as_str();
-	if level_key.is_empty() {
-		PathOwned::from(format!("{prefix}/broadcasts/{node}"))
-	} else {
-		PathOwned::from(format!("{prefix}/broadcasts/{}/{node}", level_key.as_str()))
+fn advertised_path(prefix: &Path, level_key: &Path, node: Option<&str>) -> PathOwned {
+	// The fixed `prefix` category leaves room for sibling categories (e.g.
+	// `<top-prefix>/nodes/<node>` for host-level stats) under the same prefix.
+	let top = prefix.as_str();
+	let mut out = format!("{top}/prefix");
+	if !level_key.is_empty() {
+		out.push('/');
+		out.push_str(level_key.as_str());
 	}
+	if let Some(node) = node {
+		out.push('/');
+		out.push_str(node);
+	}
+	PathOwned::from(out)
 }
 
 #[cfg(test)]
@@ -747,16 +832,26 @@ mod tests {
 	fn advertised_path_root_and_nested() {
 		let prefix = Path::new(".stats");
 		assert_eq!(
-			advertised_path(&prefix, &Path::new(""), "sjc").as_str(),
-			".stats/broadcasts/sjc"
+			advertised_path(&prefix, &Path::new(""), Some("sjc")).as_str(),
+			".stats/prefix/sjc"
 		);
 		assert_eq!(
-			advertised_path(&prefix, &Path::new("demo"), "sjc").as_str(),
-			".stats/broadcasts/demo/sjc"
+			advertised_path(&prefix, &Path::new("demo"), Some("sjc")).as_str(),
+			".stats/prefix/demo/sjc"
 		);
 		assert_eq!(
-			advertised_path(&prefix, &Path::new("demo/foo"), "sjc").as_str(),
-			".stats/broadcasts/demo/foo/sjc"
+			advertised_path(&prefix, &Path::new("demo/foo"), Some("sjc")).as_str(),
+			".stats/prefix/demo/foo/sjc"
+		);
+	}
+
+	#[test]
+	fn advertised_path_without_node() {
+		let prefix = Path::new(".stats");
+		assert_eq!(advertised_path(&prefix, &Path::new(""), None).as_str(), ".stats/prefix");
+		assert_eq!(
+			advertised_path(&prefix, &Path::new("demo"), None).as_str(),
+			".stats/prefix/demo"
 		);
 	}
 
@@ -764,21 +859,19 @@ mod tests {
 	fn advertised_path_honors_custom_prefix() {
 		let prefix = Path::new("metrics");
 		assert_eq!(
-			advertised_path(&prefix, &Path::new(""), "lon").as_str(),
-			"metrics/broadcasts/lon"
+			advertised_path(&prefix, &Path::new(""), Some("lon")).as_str(),
+			"metrics/prefix/lon"
 		);
 		assert_eq!(
-			advertised_path(&prefix, &Path::new("demo/room"), "lon").as_str(),
-			"metrics/broadcasts/demo/room/lon"
+			advertised_path(&prefix, &Path::new("demo/room"), Some("lon")).as_str(),
+			"metrics/prefix/demo/room/lon"
 		);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn external_publisher_bumps_external_publisher_counters() {
-		tokio::time::pause();
-
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 2, "sjc", origin);
+		let stats = Stats::new(".stats", 2, Some("sjc".to_string()), origin);
 		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
 		let pub_role = bs.publisher();
 		let track = pub_role.track("video");
@@ -803,12 +896,10 @@ mod tests {
 		assert_eq!(root.internal_subscriber.bytes.load(Relaxed), 0);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn external_subscriber_bumps_external_subscriber_counters() {
-		tokio::time::pause();
-
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 1, "sjc", origin);
+		let stats = Stats::new(".stats", 1, Some("sjc".to_string()), origin);
 		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
 		let sub_role = bs.subscriber();
 		let track = sub_role.track("video");
@@ -825,12 +916,10 @@ mod tests {
 		assert_eq!(root.internal_subscriber.bytes.load(Relaxed), 0);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn external_and_internal_tiers_are_independent() {
-		tokio::time::pause();
-
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 1, "sjc", origin);
+		let stats = Stats::new(".stats", 1, Some("sjc".to_string()), origin);
 		let ext = stats.tier(Tier::External);
 		let int = stats.tier(Tier::Internal);
 
@@ -847,12 +936,10 @@ mod tests {
 		assert_eq!(root.internal_subscriber.bytes.load(Relaxed), 7);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn bumps_fanout_to_all_levels() {
-		tokio::time::pause();
-
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 2, "sjc", origin);
+		let stats = Stats::new(".stats", 2, Some("sjc".to_string()), origin);
 		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
 		let p = bs.publisher();
 		let track = p.track("video");
@@ -865,15 +952,13 @@ mod tests {
 		assert_eq!(demo.external_publisher.bytes.load(Relaxed), 100);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn paths_under_prefix_are_no_op() {
 		// Our own stats broadcasts (and any sibling category under the same
 		// prefix) must not feed back into the aggregator.
-		tokio::time::pause();
-
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 2, "sjc", origin);
-		let bs = stats.tier(Tier::External).broadcast(".stats/broadcasts/sjc");
+		let stats = Stats::new(".stats", 2, Some("sjc".to_string()), origin);
+		let bs = stats.tier(Tier::External).broadcast(".stats/prefix/sjc");
 		assert!(bs.is_empty());
 
 		let p = bs.publisher();
@@ -885,22 +970,46 @@ mod tests {
 		drop(p);
 
 		assert!(stats.inner.entries.lock().is_empty());
-
-		// A hypothetical sibling under the same prefix is also a no-op.
-		assert!(
-			stats
-				.tier(Tier::External)
-				.broadcast(".stats/nodes/sjc")
-				.is_empty()
-		);
 	}
 
-	#[tokio::test]
-	async fn task_spawns_on_first_subscribe_and_announces() {
-		tokio::time::pause();
-
+	#[tokio::test(start_paused = true)]
+	async fn publisher_track_does_not_bump_broadcasts() {
+		// Subscription-side track creation should not record a broadcast: the
+		// broadcast lifetime is tracked separately by the announce loop.
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 1, "sjc", origin.clone());
+		let stats = Stats::new(".stats", 1, Some("sjc".to_string()), origin);
+		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
+		let track = bs.publisher_track("video");
+		track.bytes(10);
+		drop(track);
+
+		let entries = stats.inner.entries.lock();
+		let root = entries.get(&PathOwned::from("")).expect("root level");
+		assert_eq!(root.external_publisher.broadcasts.load(Relaxed), 0);
+		assert_eq!(root.external_publisher.broadcasts_closed.load(Relaxed), 0);
+		assert_eq!(root.external_publisher.subscriptions.load(Relaxed), 1);
+		assert_eq!(root.external_publisher.subscriptions_closed.load(Relaxed), 1);
+		assert_eq!(root.external_publisher.bytes.load(Relaxed), 10);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn disabled_stats_are_noop() {
+		// A disabled aggregator must not allocate level state or spawn tasks.
+		let stats = Stats::disabled();
+		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
+		assert!(bs.is_empty());
+		let p = bs.publisher();
+		let track = p.track("video");
+		track.bytes(100);
+		drop(track);
+		drop(p);
+		assert!(stats.inner.entries.lock().is_empty());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn task_spawns_on_first_subscribe_and_announces() {
+		let origin = Origin::random().produce();
+		let stats = Stats::new(".stats", 1, Some("sjc".to_string()), origin.clone());
 		let mut consumer = origin.consume();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -915,15 +1024,14 @@ mod tests {
 			assert!(broadcast.is_some());
 			seen.insert(path.as_str().to_string());
 		}
-		assert!(seen.contains(".stats/broadcasts/sjc"));
-		assert!(seen.contains(".stats/broadcasts/foo/sjc"));
+		assert!(seen.contains(".stats/prefix/sjc"));
+		assert!(seen.contains(".stats/prefix/foo/sjc"));
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn task_spawns_with_node_suffix() {
-		tokio::time::pause();
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 2, "sjc", origin.clone());
+		let stats = Stats::new(".stats", 2, Some("sjc".to_string()), origin.clone());
 		let mut consumer = origin.consume();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -939,20 +1047,40 @@ mod tests {
 			assert!(broadcast.is_some());
 			seen.insert(path.as_str().to_string());
 		}
-		assert!(seen.contains(".stats/broadcasts/sjc"));
-		assert!(seen.contains(".stats/broadcasts/foo/sjc"));
-		assert!(seen.contains(".stats/broadcasts/foo/bar/sjc"));
+		assert!(seen.contains(".stats/prefix/sjc"));
+		assert!(seen.contains(".stats/prefix/foo/sjc"));
+		assert!(seen.contains(".stats/prefix/foo/bar/sjc"));
 	}
 
-	#[tokio::test]
-	async fn task_exits_when_all_roles_idle() {
-		tokio::time::pause();
+	#[tokio::test(start_paused = true)]
+	async fn task_spawns_without_node_suffix() {
+		// node=None: paths should omit the trailing /<node> segment.
+		let origin = Origin::random().produce();
+		let stats = Stats::new(".stats", 1, None, origin.clone());
+		let mut consumer = origin.consume();
 
+		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let p = bs.publisher();
+		let _track = p.track("video");
+
+		tokio::time::advance(Duration::from_millis(1)).await;
+		let mut seen = std::collections::HashSet::new();
+		for _ in 0..2 {
+			let (path, broadcast) = consumer.announced().await.expect("expected announce");
+			assert!(broadcast.is_some());
+			seen.insert(path.as_str().to_string());
+		}
+		assert!(seen.contains(".stats/prefix"));
+		assert!(seen.contains(".stats/prefix/foo"));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn task_exits_when_all_roles_idle() {
 		let origin = Origin::random().produce();
 		// levels=1 + broadcast "foo/bar" → buckets ["", "foo"] (root prefix plus
 		// the first-segment prefix; the broadcast's own path isn't reachable at
 		// this depth, so we get exactly two stats announces).
-		let stats = Stats::new(".stats", 1, "sjc", origin.clone());
+		let stats = Stats::new(".stats", 1, Some("sjc".to_string()), origin.clone());
 		let mut consumer = origin.consume();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -967,7 +1095,7 @@ mod tests {
 			announced.push(path.as_str().to_string());
 		}
 		announced.sort();
-		assert_eq!(announced, vec![".stats/broadcasts/foo/sjc", ".stats/broadcasts/sjc"]);
+		assert_eq!(announced, vec![".stats/prefix/foo/sjc", ".stats/prefix/sjc"]);
 
 		drop(track);
 		drop(p);
@@ -981,7 +1109,7 @@ mod tests {
 			unannounced.push(path.as_str().to_string());
 		}
 		unannounced.sort();
-		assert_eq!(unannounced, vec![".stats/broadcasts/foo/sjc", ".stats/broadcasts/sjc"]);
+		assert_eq!(unannounced, vec![".stats/prefix/foo/sjc", ".stats/prefix/sjc"]);
 	}
 
 	// Idle-skip behavior (the snapshot task suppresses a write when the

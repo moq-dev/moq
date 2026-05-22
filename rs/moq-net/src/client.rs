@@ -10,7 +10,7 @@ use crate::{
 pub struct Client {
 	publish: Option<OriginConsumer>,
 	consume: Option<OriginProducer>,
-	stats: Option<StatsHandle>,
+	stats: StatsHandle,
 	versions: Versions,
 }
 
@@ -31,8 +31,9 @@ impl Client {
 
 	/// Attach a tier-scoped [`StatsHandle`]. Per-broadcast and per-subscription
 	/// counters will be bumped through this handle for the lifetime of the session.
-	pub fn with_stats(mut self, stats: impl Into<Option<StatsHandle>>) -> Self {
-		self.stats = stats.into();
+	/// Pass [`StatsHandle::disabled`] (also the default) to opt out.
+	pub fn with_stats(mut self, stats: StatsHandle) -> Self {
+		self.stats = stats;
 		self
 	}
 

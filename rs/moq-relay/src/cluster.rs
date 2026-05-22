@@ -49,11 +49,11 @@ pub struct Cluster {
 	/// (filtered by their auth token) and remote dials both read and write here.
 	pub origin: OriginProducer,
 
-	/// Optional stats aggregator. One instance per relay; sessions pick a tier
-	/// via [`Stats::tier`] at acceptance time so external (non-mTLS) and internal
-	/// (mTLS / cluster peer) traffic land in separate counter sets on the same
-	/// `<prefix>/broadcasts/<level>/<node>` broadcasts.
-	pub stats: Option<Stats>,
+	/// Stats aggregator. One instance per relay; sessions pick a tier via
+	/// [`Stats::tier`] at acceptance time so external (non-mTLS) and internal
+	/// (mTLS / cluster peer) traffic land in separate counter sets. When stats
+	/// publishing is disabled, this is a no-op aggregator.
+	pub stats: Stats,
 }
 
 impl Cluster {
@@ -61,20 +61,14 @@ impl Cluster {
 	pub fn new(config: ClusterConfig, stats_config: StatsConfig, client: moq_native::Client) -> Self {
 		let origin = Origin::random().produce();
 		tracing::info!(origin_id = %origin.id, "cluster initialized");
-		let levels = stats_config.levels.unwrap_or(1).max(1);
-		let prefix = stats_config.prefix.clone().unwrap_or_else(|| ".stats".to_string());
-		let stats = stats_config
-			.node
-			.as_ref()
-			.map(|node| Stats::new(prefix.clone(), levels, node.clone(), origin.clone()));
-		if let Some(node) = stats_config.node.as_ref() {
-			tracing::info!(
-				prefix,
-				levels,
-				node,
-				"stats publishing enabled"
-			);
-		}
+		let stats = if stats_config.enabled {
+			let levels = stats_config.levels.unwrap_or(1).max(1);
+			let prefix = stats_config.prefix.clone().unwrap_or_else(|| ".stats".to_string());
+			tracing::info!(prefix, levels, node = ?stats_config.node, "stats publishing enabled");
+			Stats::new(prefix, levels, stats_config.node.clone(), origin.clone())
+		} else {
+			Stats::disabled()
+		};
 		Cluster {
 			config,
 			client,
@@ -176,7 +170,7 @@ impl Cluster {
 			.clone()
 			.with_publish(self.origin.consume())
 			.with_consume(self.origin.clone())
-			.with_stats(self.stats.as_ref().map(|s| s.tier(Tier::Internal)))
+			.with_stats(self.stats.tier(Tier::Internal))
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;

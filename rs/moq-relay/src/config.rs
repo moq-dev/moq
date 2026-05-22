@@ -40,7 +40,7 @@ pub struct Config {
 	#[serde(default)]
 	pub web: WebConfig,
 
-	/// Stats publishing configuration. Disabled when `stats.name` is unset.
+	/// Stats publishing configuration. Disabled unless `stats.enabled = true`.
 	#[command(flatten)]
 	#[serde(default)]
 	pub stats: StatsConfig,
