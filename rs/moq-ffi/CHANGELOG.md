@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.10...moq-ffi-v0.2.11) - 2026-05-20
+
+### Other
+
+- rename moq-lite package to moq-net ([#1428](https://github.com/moq-dev/moq/pull/1428))
+
+## [0.2.10](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.9...moq-ffi-v0.2.10) - 2026-05-18
+
+### Other
+
+- Expose track name and used/unused activity signals ([#1398](https://github.com/moq-dev/moq/pull/1398))
+
 ## [0.2.8](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.7...moq-ffi-v0.2.8) - 2026-05-07
 
 ### Other

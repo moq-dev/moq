@@ -15,7 +15,7 @@ This is the server side of the [MoQ Boy demo](/demo/moq-boy). See that page for 
 
 - **On-demand emulation** — the emulator only runs while at least one viewer is subscribed to the video track.
 - **Hang container format** — video and audio flow through [moq-mux](/rs/crate/moq-mux) so standard `hang` players can consume them.
-- **Raw JSON metadata** — `status` and `command` tracks bypass the container and publish JSON directly to [moq-lite](/rs/crate/moq-lite) groups.
+- **Raw JSON metadata** — `status` and `command` tracks bypass the container and publish JSON directly to [moq-net](/rs/crate/moq-net) groups.
 
 ## Running Locally
 
@@ -39,4 +39,4 @@ See the [setup guide](/setup/demo/boy) for controls, reset behavior, and the aut
 
 - Read the [demo architecture](/demo/moq-boy) for tracks, broadcast layout, and how discovery works
 - See the [@moq/boy](/js/@moq/boy) package for the browser player
-- See [moq-lite](/rs/crate/moq-lite) for the transport layer and [moq-mux](/rs/crate/moq-mux) for the container format
+- See [moq-net](/rs/crate/moq-net) for the transport layer and [moq-mux](/rs/crate/moq-mux) for the container format

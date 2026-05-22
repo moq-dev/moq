@@ -1,21 +1,32 @@
-[![Documentation](https://docs.rs/moq-lite/badge.svg)](https://docs.rs/moq-lite/)
-[![Crates.io](https://img.shields.io/crates/v/moq-lite.svg)](https://crates.io/crates/moq-lite)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/moq-dev/moq/blob/main/LICENSE-MIT)
+# moq-lite (deprecated)
 
-# moq-lite
+> **This crate has been renamed to [`moq-net`](https://crates.io/crates/moq-net).**
 
-A Rust implementation of the [Media over QUIC](https://moq.dev) transport.
+The old name caused confusion because `moq-lite` is also the name of one of the wire
+protocols this library speaks. The crate has been renamed to `moq-net` to make clear
+that it is the **networking layer** for Media over QUIC. Under the hood it negotiates
+either the `moq-lite` protocol or the full IETF `moq-transport` protocol at session setup.
 
-This crate provides the core networking layer, implementing the [moq-lite specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/).
-moq-lite is a forwards-compatible subset of [MoqTransport](https://datatracker.ietf.org/group/moq/documents/), so moq-lite clients work with any moq-transport CDN.
-Live media is built on top of this layer using something like [hang](https://github.com/moq-dev/moq/tree/main/rs/hang).
+## Status
 
-- **Broadcasts**: Discoverable collections of tracks.
-- **Tracks**: Named streams of data, split into groups.
-- **Groups**: A sequential collection of frames, usually starting with a keyframe.
-- **Frame**: A timed chunk of data.
+`moq-lite` now re-exports `moq-net` so existing code keeps building without changes.
+**It will not receive further updates** — new features and breaking changes ship on
+`moq-net` only. Migrate at your convenience.
 
-## Examples
+## Migration
 
-- [Publishing a chat track](https://github.com/moq-dev/moq/blob/main/rs/moq-native/examples/chat.rs)
-- [Publishing or consuming a clock track](https://github.com/moq-dev/moq/tree/main/rs/moq-clock)
+```toml
+# Before
+moq-lite = "0.16"
+
+# After
+moq-net = "0.1"
+```
+
+```rust
+// Before
+use moq_lite::{Session, Broadcast, Track};
+
+// After
+use moq_net::{Session, Broadcast, Track};
+```

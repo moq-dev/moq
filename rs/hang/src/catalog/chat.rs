@@ -5,6 +5,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Chat {
-	pub message: Option<moq_lite::Track>,
-	pub typing: Option<moq_lite::Track>,
+	pub message: Option<moq_net::Track>,
+	pub typing: Option<moq_net::Track>,
 }

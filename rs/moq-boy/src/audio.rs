@@ -56,7 +56,7 @@ const OPUS_BITRATE: usize = 64000;
 
 impl AudioEncoder {
 	pub fn new(
-		broadcast: moq_lite::BroadcastProducer,
+		broadcast: moq_net::BroadcastProducer,
 		catalog: moq_mux::catalog::Producer,
 		input_sample_rate: u32,
 	) -> Result<Self> {
@@ -113,7 +113,7 @@ impl AudioEncoder {
 	}
 
 	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> &moq_lite::TrackProducer {
+	pub fn track(&self) -> &moq_net::TrackProducer {
 		self.opus.track()
 	}
 

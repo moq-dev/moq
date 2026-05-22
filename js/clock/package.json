@@ -16,7 +16,7 @@
 		"check": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@moq/lite": "workspace:*",
+		"@moq/net": "workspace:*",
 		"@fails-components/webtransport": "^1.5.2",
 		"@fails-components/webtransport-transport-http3-quiche": "^1.5.2"
 	},

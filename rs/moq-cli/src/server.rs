@@ -1,9 +1,9 @@
-use hang::moq_lite;
+use hang::moq_net;
 
 pub async fn run_server(
 	mut server: moq_native::Server,
 	name: String,
-	consumer: moq_lite::BroadcastConsumer,
+	consumer: moq_net::BroadcastConsumer,
 ) -> anyhow::Result<()> {
 	#[cfg(unix)]
 	// Notify systemd that we're ready.
@@ -36,10 +36,10 @@ async fn run_serve_session(
 	id: u64,
 	session: moq_native::Request,
 	name: String,
-	consumer: moq_lite::BroadcastConsumer,
+	consumer: moq_net::BroadcastConsumer,
 ) -> anyhow::Result<()> {
 	// Create an origin producer to publish to the broadcast.
-	let origin = moq_lite::Origin::random().produce();
+	let origin = moq_net::Origin::random().produce();
 	origin.publish_broadcast(&name, consumer);
 
 	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.
@@ -50,7 +50,7 @@ async fn run_serve_session(
 	session.closed().await.map_err(Into::into)
 }
 
-pub async fn run_accept(mut server: moq_native::Server, origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
+pub async fn run_accept(mut server: moq_native::Server, origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	#[cfg(unix)]
 	// Notify systemd that we're ready.
 	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
@@ -78,7 +78,7 @@ pub async fn run_accept(mut server: moq_native::Server, origin: moq_lite::Origin
 async fn run_accept_session(
 	id: u64,
 	session: moq_native::Request,
-	origin: moq_lite::OriginProducer,
+	origin: moq_net::OriginProducer,
 ) -> anyhow::Result<()> {
 	let session = session.with_consume(origin).ok().await?;
 

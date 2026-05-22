@@ -506,7 +506,7 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let track = moq_lite::Track {
+	let track = moq_net::Track {
 		name: track,
 		priority: 0,
 	};
@@ -519,7 +519,7 @@ async fn serve_fetch(
 		// freshly-connected subscribers don't get a spurious 404 before gossip arrives.
 		let broadcast = origin.announced_broadcast("").await.ok_or(StatusCode::NOT_FOUND)?;
 		let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
-			moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
+			moq_net::Error::NotFound => StatusCode::NOT_FOUND,
 			_ => StatusCode::INTERNAL_SERVER_ERROR,
 		})?;
 		let group = match params.group {
@@ -565,18 +565,18 @@ async fn serve_fetch(
 }
 
 struct ServeGroup {
-	group: Option<moq_lite::GroupConsumer>,
-	frame: Option<moq_lite::FrameConsumer>,
+	group: Option<moq_net::GroupConsumer>,
+	frame: Option<moq_net::FrameConsumer>,
 	deadline: tokio::time::Instant,
 }
 
 impl ServeGroup {
-	async fn next(&mut self) -> moq_lite::Result<Option<Bytes>> {
+	async fn next(&mut self) -> moq_net::Result<Option<Bytes>> {
 		while self.group.is_some() || self.frame.is_some() {
 			if let Some(frame) = self.frame.as_mut() {
 				let data = tokio::time::timeout_at(self.deadline, frame.read_all())
 					.await
-					.map_err(|_| moq_lite::Error::Timeout)?;
+					.map_err(|_| moq_net::Error::Timeout)?;
 				self.frame.take();
 				return Ok(Some(data?));
 			}
@@ -584,7 +584,7 @@ impl ServeGroup {
 			if let Some(group) = self.group.as_mut() {
 				self.frame = tokio::time::timeout_at(self.deadline, group.next_frame())
 					.await
-					.map_err(|_| moq_lite::Error::Timeout)??;
+					.map_err(|_| moq_net::Error::Timeout)??;
 				if self.frame.is_none() {
 					self.group.take();
 				}
@@ -628,7 +628,7 @@ impl http_body::Body for ServeGroup {
 
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
-struct ServeGroupError(moq_lite::Error);
+struct ServeGroupError(moq_net::Error);
 
 impl IntoResponse for ServeGroupError {
 	fn into_response(self) -> Response {

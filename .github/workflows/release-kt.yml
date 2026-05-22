@@ -1,0 +1,190 @@
+name: Release Kotlin
+
+on:
+  push:
+    tags:
+      - "moq-ffi-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-kt
+  cancel-in-progress: false
+
+jobs:
+  parse-version:
+    name: Parse version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Parse version from tag
+        id: parse
+        run: .github/scripts/release.sh parse-version moq-ffi
+
+  build:
+    name: Build moq-ffi (${{ matrix.target }})
+    needs: [parse-version]
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Android
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+          - target: armv7-linux-androideabi
+            os: ubuntu-latest
+          - target: x86_64-linux-android
+            os: ubuntu-latest
+          # Desktop JVM
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: universal-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target == 'universal-apple-darwin' && 'x86_64-apple-darwin,aarch64-apple-darwin' || matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install cargo-ndk (Android)
+        if: contains(matrix.target, 'android')
+        run: cargo install cargo-ndk
+
+      - name: Build
+        shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./rs/moq-ffi/build.sh \
+            --target "$BUILD_TARGET" \
+            --version "$BUILD_VERSION" \
+            --output dist
+
+      - name: Upload lib
+        uses: actions/upload-artifact@v7
+        with:
+          name: kotlin-lib-${{ matrix.target }}
+          # Upload only the lib/ contents; package.sh expects <target>/<libname>.
+          path: dist/moq-ffi-${{ needs.parse-version.outputs.version }}-${{ matrix.target }}/lib/
+
+  bindings:
+    name: Generate bindings
+    needs: [parse-version]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate bindings
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./rs/moq-ffi/build.sh \
+            --bindings-only \
+            --version "$BUILD_VERSION" \
+            --output dist
+
+      - name: Upload bindings
+        uses: actions/upload-artifact@v7
+        with:
+          name: kotlin-bindings
+          # Upload only the kotlin subdir.
+          path: dist/bindings/kotlin/
+
+  package:
+    name: Package and publish
+    needs: [parse-version, build, bindings]
+    runs-on: ubuntu-latest
+    env:
+      # Picked up by com.vanniktech.maven.publish via Gradle project properties.
+      ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+      ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+      ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+      ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Download per-target libs
+        uses: actions/download-artifact@v8
+        with:
+          path: libs-raw
+          pattern: kotlin-lib-*
+
+      - name: Flatten lib layout
+        run: |
+          mkdir -p libs
+          for dir in libs-raw/kotlin-lib-*; do
+            target="${dir#libs-raw/kotlin-lib-}"
+            mv "$dir" "libs/$target"
+          done
+          ls -la libs
+
+      - name: Download bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: kotlin-bindings
+          path: bindings
+
+      - name: Stage native libs + bindings into the gradle module
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./kt/scripts/package.sh \
+            --version "$BUILD_VERSION" \
+            --lib-dir libs \
+            --bindings-dir bindings \
+            --output release-out
+
+      - name: Publish to Maven Central
+        run: |
+          gradle -p kt \
+            -Pmoqffi.version="${{ needs.parse-version.outputs.version }}" \
+            -Pandroid.enabled=true \
+            :moq:publishAndReleaseToMavenCentral --no-configuration-cache
+
+      - name: Upload local maven layout
+        uses: actions/upload-artifact@v7
+        with:
+          name: kotlin-package
+          path: release-out/*

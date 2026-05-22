@@ -1,5 +1,5 @@
-import type * as Moq from "@moq/lite";
-import { Time } from "@moq/lite";
+import type * as Moq from "@moq/net";
+import { Time } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 
 /** Latency: `"real-time"` auto-computes jitter from RTT; a `Time.Milli` sets a fixed jitter. */

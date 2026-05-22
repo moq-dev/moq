@@ -11,7 +11,7 @@ export default function StatsPanel() {
 
 	const onJitterInput = (e: Event) => {
 		const el = e.currentTarget as HTMLInputElement;
-		game.latency.set(Number.parseInt(el.value, 10) as import("@moq/lite").Time.Milli);
+		game.latency.set(Number.parseInt(el.value, 10) as import("@moq/net").Time.Milli);
 	};
 
 	const location = () => ctx.status()?.location;

@@ -61,4 +61,4 @@ bun run @moq/token verify --key root.jwk --root "rooms/123" < token.jwt
 ## Next Steps
 
 - Set up [Relay Authentication](/app/relay/auth)
-- Use [@moq/lite](/js/@moq/lite) for connections
+- Use [@moq/net](/js/@moq/net) for connections

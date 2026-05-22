@@ -8,7 +8,7 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use tokio::sync::{mpsc, oneshot, watch};
 
-use hang::moq_lite;
+use hang::moq_net;
 
 static CAT: LazyLock<gst::DebugCategory> =
 	LazyLock::new(|| gst::DebugCategory::new("moq-src", gst::DebugColorFlags::empty(), Some("MoQ Source Element")));
@@ -417,7 +417,7 @@ async fn run_session(
 	let mut config = moq_native::ClientConfig::default();
 	config.tls.disable_verify = Some(settings.tls_disable_verify);
 
-	let origin = moq_lite::Origin::random().produce();
+	let origin = moq_net::Origin::random().produce();
 	let origin_consumer = origin.consume();
 	let client = config.init()?.with_consume(origin);
 
@@ -445,7 +445,7 @@ async fn run_session(
 		};
 		let caps = video_caps(&config)?;
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
-		let track_ref = moq_lite::Track::new(&track_name);
+		let track_ref = moq_net::Track::new(&track_name);
 		let track_consumer = broadcast.subscribe_track(&track_ref)?;
 		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
 			.with_latency(Duration::from_secs(1));
@@ -459,7 +459,7 @@ async fn run_session(
 		};
 		let caps = audio_caps(&config)?;
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
-		let track_ref = moq_lite::Track::new(&track_name);
+		let track_ref = moq_net::Track::new(&track_name);
 		let track_consumer = broadcast.subscribe_track(&track_ref)?;
 		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
 			.with_latency(Duration::from_secs(1));

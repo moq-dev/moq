@@ -61,7 +61,7 @@ pub enum Command {
 
 /// Handles discovered viewers: subscribes to their command tracks.
 pub async fn handle_viewers(
-	viewer_origin: &mut moq_lite::OriginConsumer,
+	viewer_origin: &mut moq_net::OriginConsumer,
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
 	loop {
@@ -96,10 +96,10 @@ pub async fn handle_viewers(
 
 async fn handle_viewer_commands(
 	viewer_id: &str,
-	broadcast: moq_lite::BroadcastConsumer,
+	broadcast: moq_net::BroadcastConsumer,
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
-	let command_track = moq_lite::Track {
+	let command_track = moq_net::Track {
 		name: "command".to_string(),
 		priority: 0,
 	};

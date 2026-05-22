@@ -1,33 +1,108 @@
 name: Release Py
 
+# Driven by the `moq-ffi-v*` tag that release-plz pushes when it bumps
+# rs/moq-ffi/Cargo.toml. The wheel inherits its version from that same
+# Cargo.toml (via maturin's dynamic version), so the moq-net package
+# stays lockstep with the moq-ffi crate without a separate bump.
+
 on:
   push:
-    branches:
-      - main
-    paths:
-      - "py/**"
-      - ".github/workflows/release-py.yml"
+    tags:
+      - "moq-ffi-v*"
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: release-py
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Release Py Packages
+  parse-version:
+    name: Parse version
     runs-on: ubuntu-latest
-    if: github.repository_owner == 'moq-dev'
-    environment:
-      name: pypi
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
 
     steps:
       - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+        with:
+          persist-credentials: false
 
-      - name: Release packages
-        run: nix develop --command ./py/common/release.sh
+      - name: Parse version from tag
+        id: parse
+        run: .github/scripts/release.sh parse-version moq-ffi
+
+  build:
+    name: Build wheels (${{ matrix.target }})
+    needs: [parse-version]
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            # Use manylinux_2_28 for aarch64-linux to get a newer GCC.
+            # manylinux2014 ships GCC 4.8.5 which can't compile aws-lc-sys.
+            manylinux: 2_28
+            # The cross image sets TARGET_CC/CXX which leaks into host builds.
+            before-script-linux: "unset TARGET_CC TARGET_CXX"
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          # py/moq-net/pyproject.toml drives the build; its [tool.maturin]
+          # block points at rs/moq-ffi/Cargo.toml.
+          working-directory: py/moq-net
+          args: --release --out dist
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          before-script-linux: ${{ matrix.before-script-linux || '' }}
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-${{ matrix.target }}
+          path: py/moq-net/dist/*.whl
+
+  publish:
+    name: Publish to PyPI
+    needs: [build]
+    runs-on: ubuntu-latest
+    # Skipped until PUBLISH_PYTHON=true is set in repo variables.
+    if: vars.PUBLISH_PYTHON == 'true'
+    environment:
+      name: pypi
+      url: https://pypi.org/p/moq-net
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: python-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

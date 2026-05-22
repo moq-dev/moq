@@ -5,7 +5,7 @@ mod subscribe;
 mod web;
 
 use client::*;
-use hang::moq_lite;
+use hang::moq_net;
 use publish::*;
 use server::*;
 use subscribe::*;
@@ -162,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
 
 			let web_tls = server.tls_info();
 
-			let origin = moq_lite::Origin::random().produce();
+			let origin = moq_net::Origin::random().produce();
 			let consumer = origin.consume();
 
 			tokio::select! {
@@ -218,7 +218,7 @@ async fn run_subscribe(
 	broadcast: String,
 	args: SubscribeArgs,
 ) -> anyhow::Result<()> {
-	let origin = moq_lite::Origin::random().produce();
+	let origin = moq_net::Origin::random().produce();
 	let consumer = origin.consume();
 
 	tracing::info!(%url, %broadcast, "connecting");
@@ -236,7 +236,7 @@ async fn run_subscribe(
 }
 
 async fn run_announced_subscribe(
-	consumer: moq_lite::OriginConsumer,
+	consumer: moq_net::OriginConsumer,
 	broadcast: String,
 	args: SubscribeArgs,
 ) -> anyhow::Result<()> {

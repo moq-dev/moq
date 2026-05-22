@@ -25,5 +25,17 @@ pub enum Container {
 		/// CMAF init segment (ftyp+moov). Encoded as base64 over the wire.
 		#[serde_as(as = "Base64")]
 		init: Bytes,
+
+		/// Duplicates `mdhd.timescale` from `init`. Emitted for backwards
+		/// compatibility with players that predate the `init` field.
+		#[deprecated(note = "parse from `init` instead")]
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		timescale: Option<u32>,
+
+		/// Duplicates `tkhd.track_id` from `init`. Emitted for backwards
+		/// compatibility with players that predate the `init` field.
+		#[deprecated(note = "parse from `init` instead")]
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		track_id: Option<u32>,
 	},
 }

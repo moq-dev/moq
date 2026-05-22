@@ -98,7 +98,7 @@ impl Framed {
 	///
 	/// The buffer will be fully consumed, or an error will be returned.
 	pub fn new<T: Buf + AsRef<[u8]>>(
-		broadcast: moq_lite::BroadcastProducer,
+		broadcast: moq_net::BroadcastProducer,
 		catalog: crate::catalog::Producer,
 		format: FramedFormat,
 		buf: &mut T,
@@ -164,7 +164,7 @@ impl Framed {
 	///
 	/// Container formats like fMP4 can produce multiple tracks, so callers that
 	/// need one concrete track must use a single-track format.
-	pub fn track(&self) -> anyhow::Result<&moq_lite::TrackProducer> {
+	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
 		match self.decoder {
 			FramedKind::Avc1(ref decoder) => decoder.track(),
 			FramedKind::Avc3(ref decoder) => Ok(decoder.track()),

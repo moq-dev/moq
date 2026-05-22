@@ -138,7 +138,7 @@ pub unsafe extern "C" fn moq_session_connect(
 		let publish = ffi::parse_id_optional(origin_publish)?
 			.map(|id| state.origin.get(id))
 			.transpose()?
-			.map(|origin: &moq_lite::OriginProducer| origin.consume());
+			.map(|origin: &moq_net::OriginProducer| origin.consume());
 		let consume = ffi::parse_id_optional(origin_consume)?
 			.map(|id| state.origin.get(id))
 			.transpose()?

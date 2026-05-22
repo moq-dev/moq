@@ -19,7 +19,7 @@ description: Web Components API reference
 For quick demos or embeds on a static page, both `@moq/watch` and
 `@moq/publish` can be loaded straight from jsDelivr with no build step.
 Appending `/+esm` to the URL tells jsDelivr to transform the file and
-rewrite bare imports (like `@moq/hang`, `@moq/lite`) to other `+esm`
+rewrite bare imports (like `@moq/hang`, `@moq/net`) to other `+esm`
 URLs, so it loads in the browser without an import map:
 
 ```html
@@ -345,11 +345,11 @@ For production, you'll want to:
 3. Use a bundler, see [examples](https://github.com/moq-dev/web) for Vite, Webpack, esbuild, and more.
 
 **NOTE** both of these libraries are intended for client-side.
-However, `@moq/lite` can run on the server side using [Deno](https://deno.com/) or a [WebTransport polyfill](https://github.com/moq-dev/web-transport/tree/main/rs/web-transport-ws).
+However, `@moq/net` can run on the server side using [Deno](https://deno.com/) or a [WebTransport polyfill](https://github.com/moq-dev/web-transport/tree/main/rs/web-transport-ws).
 Don't even try to run `@moq/hang` on the server side or you'll run into a ton of issues, *especially* with Next.js.
 
 ## Next Steps
 
 - Learn about [@moq/hang](/js/@moq/hang/)
-- Use [@moq/lite](/js/@moq/lite) for custom protocols
+- Use [@moq/net](/js/@moq/net) for custom protocols
 - View [code examples](https://github.com/moq-dev/moq/tree/main/js)

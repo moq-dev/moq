@@ -90,7 +90,7 @@ pub struct ClientConfig {
 	/// Valid values: moq-lite-01, moq-lite-02, moq-lite-03, moq-transport-14, moq-transport-15, moq-transport-16, moq-transport-17
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[arg(id = "client-version", long = "client-version", env = "MOQ_CLIENT_VERSION")]
-	pub version: Vec<moq_lite::Version>,
+	pub version: Vec<moq_net::Version>,
 
 	#[command(flatten)]
 	#[serde(default)]
@@ -179,11 +179,11 @@ impl ClientConfig {
 	}
 
 	/// Returns the configured versions, defaulting to all if none specified.
-	pub fn versions(&self) -> moq_lite::Versions {
+	pub fn versions(&self) -> moq_net::Versions {
 		if self.version.is_empty() {
-			moq_lite::Versions::all()
+			moq_net::Versions::all()
 		} else {
-			moq_lite::Versions::from(self.version.clone())
+			moq_net::Versions::from(self.version.clone())
 		}
 	}
 }
@@ -208,8 +208,8 @@ impl Default for ClientConfig {
 /// Create via [`ClientConfig::init`] or [`Client::new`].
 #[derive(Clone)]
 pub struct Client {
-	moq: moq_lite::Client,
-	versions: moq_lite::Versions,
+	moq: moq_net::Client,
+	versions: moq_net::Versions,
 	backoff: Backoff,
 	#[cfg(feature = "websocket")]
 	websocket: super::ClientWebSocket,
@@ -277,7 +277,7 @@ impl Client {
 
 		let versions = config.versions();
 		Ok(Self {
-			moq: moq_lite::Client::new().with_versions(versions.clone()),
+			moq: moq_net::Client::new().with_versions(versions.clone()),
 			versions,
 			backoff: config.backoff,
 			#[cfg(feature = "websocket")]
@@ -312,12 +312,12 @@ impl Client {
 		self
 	}
 
-	pub fn with_publish(mut self, publish: impl Into<Option<moq_lite::OriginConsumer>>) -> Self {
+	pub fn with_publish(mut self, publish: impl Into<Option<moq_net::OriginConsumer>>) -> Self {
 		self.moq = self.moq.with_publish(publish);
 		self
 	}
 
-	pub fn with_consume(mut self, consume: impl Into<Option<moq_lite::OriginProducer>>) -> Self {
+	pub fn with_consume(mut self, consume: impl Into<Option<moq_net::OriginProducer>>) -> Self {
 		self.moq = self.moq.with_consume(consume);
 		self
 	}
@@ -337,7 +337,7 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	)))]
-	pub async fn connect(&self, _url: Url) -> anyhow::Result<moq_lite::Session> {
+	pub async fn connect(&self, _url: Url) -> anyhow::Result<moq_net::Session> {
 		anyhow::bail!("no backend compiled; enable noq, quinn, quiche, iroh, or websocket feature");
 	}
 
@@ -348,7 +348,7 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	))]
-	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
+	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_net::Session> {
 		let session = self.connect_inner(url).await?;
 		tracing::info!(version = %session.version(), "connected");
 		Ok(session)
@@ -361,7 +361,7 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	))]
-	async fn connect_inner(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
+	async fn connect_inner(&self, url: Url) -> anyhow::Result<moq_net::Session> {
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
@@ -564,26 +564,17 @@ mod tests {
 		"#;
 
 		let mut config: ClientConfig = toml::from_str(toml).unwrap();
-		assert_eq!(
-			config.version,
-			vec!["moq-lite-02".parse::<moq_lite::Version>().unwrap()]
-		);
+		assert_eq!(config.version, vec!["moq-lite-02".parse::<moq_net::Version>().unwrap()]);
 
 		// Simulate: TOML loaded, then CLI args re-applied (no --client-version flag).
 		config.update_from(["test"]);
-		assert_eq!(
-			config.version,
-			vec!["moq-lite-02".parse::<moq_lite::Version>().unwrap()]
-		);
+		assert_eq!(config.version, vec!["moq-lite-02".parse::<moq_net::Version>().unwrap()]);
 	}
 
 	#[test]
 	fn test_cli_version() {
 		let config = ClientConfig::parse_from(["test", "--client-version", "moq-lite-03"]);
-		assert_eq!(
-			config.version,
-			vec!["moq-lite-03".parse::<moq_lite::Version>().unwrap()]
-		);
+		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_net::Version>().unwrap()]);
 	}
 
 	#[test]
@@ -591,6 +582,6 @@ mod tests {
 		let config = ClientConfig::parse_from(["test"]);
 		assert!(config.version.is_empty());
 		// versions() helper returns all when none specified
-		assert_eq!(config.versions().alpns().len(), moq_lite::ALPNS.len());
+		assert_eq!(config.versions().alpns().len(), moq_net::ALPNS.len());
 	}
 }
