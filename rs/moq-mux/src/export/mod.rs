@@ -21,15 +21,7 @@ pub use mkv::Mkv;
 #[cfg(test)]
 mod test;
 
-/// Catalog wire format the exporter should subscribe to for track discovery.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CatalogFormat {
-	/// The hang catalog (`catalog.json`, hang JSON schema).
-	#[default]
-	Hang,
-	/// The MSF catalog (`catalog`, draft-ietf-moq-msf JSON schema).
-	Msf,
-}
+use crate::catalog::CatalogFormat;
 
 /// Source for the catalog stream backing an exporter.
 ///

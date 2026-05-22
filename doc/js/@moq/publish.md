@@ -33,7 +33,7 @@ build step:
 </script>
 
 <moq-publish-ui>
-    <moq-publish url="https://relay.example.com/anon" name="room/alice" source="camera">
+    <moq-publish url="https://relay.example.com/anon" name="room/alice.hang" source="camera">
         <video muted autoplay></video>
     </moq-publish>
 </moq-publish-ui>
@@ -55,7 +55,7 @@ a real bundler (the examples below).
 
 <moq-publish
     url="https://relay.example.com/anon"
-    name="room/alice"
+    name="room/alice.hang"
     audio video controls>
     <video muted autoplay></video>
 </moq-publish>
@@ -83,7 +83,7 @@ Import `@moq/publish/ui` for a Web Component overlay with device selection and p
 <moq-publish-ui>
     <moq-publish
         url="https://relay.example.com/anon"
-        name="room/alice"
+        name="room/alice.hang"
         audio video>
         <video muted autoplay></video>
     </moq-publish>
@@ -100,14 +100,14 @@ import * as Publish from "@moq/publish";
 const broadcast = new Publish.Broadcast({
     connection,
     enabled: true,
-    name: "alice",
+    name: "alice.hang",
     video: { enabled: true, device: "camera" },
     audio: { enabled: true },
 });
 
 // Reactive controls
 broadcast.video.device.set("screen");
-broadcast.name.set("bob");
+broadcast.name.set("bob.hang");
 ```
 
 ## Related Packages

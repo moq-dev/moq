@@ -6,8 +6,15 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
 
-export const CATALOG_FORMATS = ["hang", "msf", "manual"] as const;
+// Watch supports the two on-the-wire catalog formats from @moq/hang plus a
+// "manual" mode where the user supplies the catalog directly without fetching.
+export const CATALOG_FORMATS = [...Catalog.FORMATS, "manual"] as const;
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
+
+export function parseCatalogFormat(value: string | null): CatalogFormat | undefined {
+	if (value === null) return undefined;
+	return CATALOG_FORMATS.find((f) => f === value);
+}
 
 export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
@@ -26,13 +33,16 @@ export interface BroadcastProps {
 	// Defaults to false; pass true to wait for an announcement before subscribing.
 	reload?: boolean | Signal<boolean>;
 
-	// Which catalog format to use. Default: "hang"
-	catalogFormat?: CatalogFormat | Signal<CatalogFormat>;
+	// Which catalog format to use. When `undefined` (the default), the format is
+	// auto-detected from the broadcast name extension (`.hang`, `.msf`), falling
+	// back to `"hang"` if the name has no recognized extension. Set to a
+	// specific value to override auto-detection.
+	catalogFormat?: CatalogFormat | Signal<CatalogFormat | undefined>;
 
 	// Initial catalog. Used directly when catalogFormat is "manual"; otherwise it's
 	// overwritten by whatever the fetched catalog track produces. Note: switching
 	// catalogFormat between "manual" and a fetched format will reset this signal
-	// to undefined when the fetched-format spawn tears down — set the catalog
+	// to undefined when the fetched-format spawn tears down. Set the catalog
 	// after switching formats, not before.
 	catalog?: Catalog.Root | Signal<Catalog.Root | undefined>;
 }
@@ -46,7 +56,8 @@ export class Broadcast {
 	status = new Signal<"offline" | "loading" | "live">("offline");
 	reload: Signal<boolean>;
 
-	catalogFormat: Signal<CatalogFormat>;
+	// `undefined` means auto-detect from the broadcast name extension.
+	catalogFormat: Signal<CatalogFormat | undefined>;
 
 	#active = new Signal<Moq.Broadcast | undefined>(undefined);
 	readonly active: Getter<Moq.Broadcast | undefined> = this.#active;
@@ -70,7 +81,7 @@ export class Broadcast {
 		this.name = Signal.from(props?.name ?? Path.empty());
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? false);
-		this.catalogFormat = Signal.from(props?.catalogFormat ?? "hang");
+		this.catalogFormat = Signal.from<CatalogFormat | undefined>(props?.catalogFormat);
 		this.catalog = Signal.from(props?.catalog);
 
 		this.#announced = props?.announced ?? new Signal(new Set());
@@ -112,7 +123,6 @@ export class Broadcast {
 		if (!conn) return;
 
 		const name = effect.get(this.name);
-
 		const broadcast = conn.consume(name);
 		effect.cleanup(() => broadcast.close());
 
@@ -123,7 +133,12 @@ export class Broadcast {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
-		const format = effect.get(this.catalogFormat);
+		const catalogFormat = effect.get(this.catalogFormat);
+		const name = effect.get(this.name);
+		// Explicit override beats name-derived auto-detection. When neither is
+		// set we fall back to the default, keeping legacy names that have no
+		// extension working.
+		const format: CatalogFormat = catalogFormat ?? Catalog.detectFormat(name) ?? Catalog.DEFAULT_FORMAT;
 
 		if (format === "manual") {
 			// User-supplied catalog; no track to fetch.

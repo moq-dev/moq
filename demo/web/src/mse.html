@@ -21,7 +21,7 @@
 
 	<moq-discover>
 		<moq-watch-ui>
-			<moq-watch id="watch" url="%VITE_RELAY_URL%" name="bbb" muted jitter="200" reload>
+			<moq-watch id="watch" url="%VITE_RELAY_URL%" name="bbb.hang" muted jitter="200" reload>
 				<video style="width: 100%; height: auto;" autoplay muted></video>
 			</moq-watch>
 		</moq-watch-ui>
@@ -43,7 +43,7 @@
 	</p>
 	<p>
 		To use MSE, provide a <code>&lt;video&gt;</code> element instead of a <code>&lt;canvas&gt;</code> element:
-	<pre><code class="language-html">&lt;moq-watch url="https://cdn.moq.dev/anon" name="bbb"&gt;
+	<pre><code class="language-html">&lt;moq-watch url="https://cdn.moq.dev/anon" name="bbb.hang"&gt;
 	&lt;video style="max-width: 100%; height: auto;" autoplay muted&gt;&lt;/video&gt;
 &lt;/moq-watch&gt;</code></pre>
 	</p>

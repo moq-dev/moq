@@ -106,7 +106,7 @@ The easiest way to add MoQ to your web page:
     <!-- Publish camera/microphone -->
     <moq-publish
         url="https://relay.example.com/anon"
-        name="room/alice"
+        name="room/alice.hang"
         audio video controls>
         <video muted autoplay></video>
     </moq-publish>
@@ -114,7 +114,7 @@ The easiest way to add MoQ to your web page:
     <!-- Watch the stream -->
     <moq-watch
         url="https://relay.example.com/anon"
-        name="room/alice"
+        name="room/alice.hang"
         controls>
         <canvas></canvas>
     </moq-watch>

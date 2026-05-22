@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use clap::ValueEnum;
 use hang::moq_net;
+use moq_mux::catalog::CatalogFormat;
 use tokio::io::AsyncWriteExt;
 
 #[derive(ValueEnum, Clone, Copy)]
@@ -10,21 +11,19 @@ pub enum SubscribeFormat {
 	Mkv,
 }
 
-/// Catalog wire format to subscribe to for track discovery.
-#[derive(ValueEnum, Clone, Copy, Default)]
-pub enum CatalogFormat {
-	/// The hang catalog (`catalog.json`, hang JSON schema).
-	#[default]
+/// `clap` adapter for [`CatalogFormat`] (which is `#[non_exhaustive]` and so
+/// can't derive `ValueEnum` itself).
+#[derive(ValueEnum, Clone, Copy)]
+pub enum CatalogFormatArg {
 	Hang,
-	/// The MSF catalog (`catalog`, draft-ietf-moq-msf JSON schema).
 	Msf,
 }
 
-impl From<CatalogFormat> for moq_mux::export::CatalogFormat {
-	fn from(format: CatalogFormat) -> Self {
+impl From<CatalogFormatArg> for CatalogFormat {
+	fn from(format: CatalogFormatArg) -> Self {
 		match format {
-			CatalogFormat::Hang => Self::Hang,
-			CatalogFormat::Msf => Self::Msf,
+			CatalogFormatArg::Hang => Self::Hang,
+			CatalogFormatArg::Msf => Self::Msf,
 		}
 	}
 }
@@ -48,18 +47,37 @@ pub struct SubscribeArgs {
 	pub fragment_duration: Option<Duration>,
 
 	/// Catalog format to subscribe to for track discovery.
-	#[arg(long, default_value = "hang")]
-	pub catalog: CatalogFormat,
+	///
+	/// When omitted, the format is auto-detected from the broadcast name suffix
+	/// (`.hang` -> hang, `.msf` -> msf), falling back to hang.
+	#[arg(long)]
+	pub catalog: Option<CatalogFormatArg>,
+}
+
+impl SubscribeArgs {
+	/// Resolve the catalog format, falling back to detection from the broadcast
+	/// name suffix and then to the default.
+	pub fn catalog_format(&self, broadcast: &str) -> CatalogFormat {
+		self.catalog
+			.map(Into::into)
+			.or_else(|| CatalogFormat::detect(broadcast))
+			.unwrap_or_default()
+	}
 }
 
 pub struct Subscribe {
 	broadcast: moq_net::BroadcastConsumer,
+	catalog: CatalogFormat,
 	args: SubscribeArgs,
 }
 
 impl Subscribe {
-	pub fn new(broadcast: moq_net::BroadcastConsumer, args: SubscribeArgs) -> Self {
-		Self { broadcast, args }
+	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
+		Self {
+			broadcast,
+			catalog,
+			args,
+		}
 	}
 
 	pub async fn run(self) -> anyhow::Result<()> {
@@ -75,7 +93,7 @@ impl Subscribe {
 		// Fmp4 subscribes to the catalog internally, builds the merged init segment
 		// from the first catalog snapshot, then yields moof+mdat fragments in
 		// timestamp order across tracks.
-		let mut fmp4 = moq_mux::export::Fmp4::new(self.broadcast, self.args.catalog.into())?
+		let mut fmp4 = moq_mux::export::Fmp4::new(self.broadcast, self.catalog)?
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -93,7 +111,7 @@ impl Subscribe {
 		// Mkv writes EBML + an unknown-size Segment header, then per-fragment
 		// Cluster elements. Avc3/Hev1 sources are transcoded to avc1/hvc1
 		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
-		let mut mkv = moq_mux::export::Mkv::new(self.broadcast, self.args.catalog.into())?
+		let mut mkv = moq_mux::export::Mkv::new(self.broadcast, self.catalog)?
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 

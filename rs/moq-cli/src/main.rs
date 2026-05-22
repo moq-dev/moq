@@ -132,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
 			broadcast,
 			format,
 		} => {
+			warn_if_missing_format(&broadcast);
 			let publish = Publish::new(&format)?;
 			let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
 
@@ -177,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
 			broadcast,
 			format,
 		} => {
+			warn_if_missing_format(&broadcast);
 			let publish = Publish::new(&format)?;
 			let client = config.init()?;
 
@@ -198,6 +200,15 @@ async fn main() -> anyhow::Result<()> {
 
 			run_subscribe(client, url, broadcast, args).await
 		}
+	}
+}
+
+fn warn_if_missing_format(name: &str) {
+	if moq_mux::catalog::CatalogFormat::detect(name).is_none() {
+		tracing::warn!(
+			name,
+			"You should append .hang to your broadcast name to make the catalog format explicit."
+		);
 	}
 }
 
@@ -229,10 +240,12 @@ async fn run_announced_subscribe(
 	broadcast: String,
 	args: SubscribeArgs,
 ) -> anyhow::Result<()> {
+	let catalog = args.catalog_format(&broadcast);
+
 	let consumer = consumer
 		.announced_broadcast(&broadcast)
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast was announced"))?;
 
-	Subscribe::new(consumer, args).run().await
+	Subscribe::new(consumer, catalog, args).run().await
 }

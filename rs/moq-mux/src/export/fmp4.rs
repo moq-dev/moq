@@ -7,9 +7,10 @@ use bytes::Bytes;
 use hang::catalog::{Catalog, Container, VideoConfig};
 use mp4_atom::{DecodeMaybe, Encode};
 
+use crate::catalog::CatalogFormat;
 use crate::container::{Consumer, Frame, Hang};
 
-use super::{CatalogFormat, CatalogSource};
+use super::CatalogSource;
 
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
 ///

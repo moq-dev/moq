@@ -18,7 +18,7 @@ The simplest way to watch a stream:
 
 <moq-watch
     url="https://relay.example.com/anon"
-    name="room/alice"
+    name="room/alice.hang"
     controls>
     <canvas></canvas>
 </moq-watch>
@@ -50,7 +50,7 @@ const connection = await Moq.Connection.connect(
 const watch = new Watch.Broadcast({
     connection,
     enabled: true,
-    name: "alice",
+    name: "alice.hang",
     reload: true,
 });
 ```
@@ -89,7 +89,7 @@ Use `@moq/watch/ui` for the Web Component UI overlay. The `<moq-watch-ui>` eleme
 </script>
 
 <moq-watch-ui>
-    <moq-watch url="https://relay.example.com/anon" name="room/alice">
+    <moq-watch url="https://relay.example.com/anon" name="room/alice.hang">
         <canvas></canvas>
     </moq-watch>
 </moq-watch-ui>

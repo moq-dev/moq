@@ -9,10 +9,11 @@ use hang::catalog::{AudioCodec, AudioConfig, Catalog, Container, VideoCodec, Vid
 use webm_iterable::matroska_spec::{Master, MatroskaSpec};
 use webm_iterable::{WebmWriter, WriteOptions};
 
+use crate::catalog::CatalogFormat;
 use crate::container::{Consumer, Frame, Hang};
 use crate::transform::{Avc1, Hvc1};
 
-use super::{CatalogFormat, CatalogSource};
+use super::CatalogSource;
 
 /// Matroska TimestampScale: 1 ms (in nanoseconds).
 const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
