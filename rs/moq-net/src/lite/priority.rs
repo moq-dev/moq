@@ -19,7 +19,6 @@ use tokio::sync::watch;
 #[derive(Debug, Clone)]
 struct PriorityItem {
 	id: usize,
-	subscription_id: u64,
 	track: u8,
 	group: u64,
 }
@@ -54,14 +53,8 @@ pub struct PriorityQueue {
 impl PriorityQueue {
 	// TODO Implement some sort of round robin between tracks with the same priority.
 	// The Group ID should only be used to break ties within the same track.
-	pub fn insert(&self, track: u8, group: u64, subscription_id: u64) -> PriorityHandle {
-		self.state.lock().unwrap().insert(track, group, subscription_id, self.clone())
-	}
-
-	/// Update the track priority for all items belonging to a subscription.
-	/// Called when SUBSCRIBE_UPDATE changes the subscriber priority.
-	pub fn update_subscription(&self, subscription_id: u64, new_track: u8) {
-		self.state.lock().unwrap().update_subscription(subscription_id, new_track);
+	pub fn insert(&self, track: u8, group: u64) -> PriorityHandle {
+		self.state.lock().unwrap().insert(track, group, self.clone())
 	}
 }
 
@@ -84,11 +77,11 @@ struct PriorityState {
 }
 
 impl PriorityState {
-	pub fn insert(&mut self, track: u8, group: u64, subscription_id: u64, myself: PriorityQueue) -> PriorityHandle {
+	pub fn insert(&mut self, track: u8, group: u64, myself: PriorityQueue) -> PriorityHandle {
 		let id = self.next_id;
 		self.next_id += 1;
 
-		let item = PriorityItem { track, group, id, subscription_id };
+		let item = PriorityItem { track, group, id };
 
 		if self.vec.len() < MAX_VEC_SIZE {
 			// Room in vec - binary search for insertion point
@@ -163,34 +156,68 @@ impl PriorityState {
 		});
 	}
 
-	fn update_subscription(&mut self, subscription_id: u64, new_track: u8) {
-		let dominated = |item: &PriorityItem| {
-			item.subscription_id == subscription_id && item.track != new_track
+	fn set_track(&mut self, id: usize, new_track: u8) {
+		let (location, _) = self.indexes.get(&id).expect("item not in indexes");
+
+		let mut item = match location {
+			Location::Vec(idx) => {
+				let idx = *idx;
+				let item = self.vec.remove(idx);
+				self.update_indices_from(idx);
+				item
+			}
+			Location::Overflow => {
+				let mut found = None;
+				let drained: Vec<_> = self.overflow.drain().collect();
+				for entry in drained {
+					if entry.id == id {
+						found = Some(entry);
+					} else {
+						self.overflow.push(entry);
+					}
+				}
+				found.expect("item not found in overflow heap")
+			}
 		};
-		if !self.vec.iter().any(|i| dominated(i)) && !self.overflow.iter().any(|i| dominated(i)) {
+
+		if item.track == new_track {
+			// No change in track, but we already removed the item; just put it back.
+			self.reinsert(item);
 			return;
 		}
 
-		let mut all_items: Vec<_> = self.vec.drain(..).chain(self.overflow.drain()).collect();
-		for item in &mut all_items {
-			if item.subscription_id == subscription_id {
-				item.track = new_track;
-			}
-		}
-		all_items.sort();
+		item.track = new_track;
+		self.reinsert(item);
+	}
 
-		if all_items.len() > MAX_VEC_SIZE {
-			let overflow_items = all_items.split_off(MAX_VEC_SIZE);
-			self.overflow = overflow_items.into_iter().collect();
-		}
-		self.vec = all_items;
+	// Place an item back into the queue, choosing vec vs overflow based on priority,
+	// and updating handle indices and watch channels.
+	fn reinsert(&mut self, item: PriorityItem) {
+		let id = item.id;
 
-		for (idx, item) in self.vec.iter().enumerate() {
-			Self::update_location(&mut self.indexes, item.id, Location::Vec(idx));
+		if self.vec.len() < MAX_VEC_SIZE {
+			let insert_pos = self.vec.binary_search(&item).unwrap_or_else(|pos| pos);
+			self.vec.insert(insert_pos, item);
+			Self::update_location(&mut self.indexes, id, Location::Vec(insert_pos));
+			self.update_indices_from(insert_pos + 1);
+			return;
 		}
-		for item in self.overflow.iter() {
-			Self::update_location(&mut self.indexes, item.id, Location::Overflow);
+
+		let lowest_in_vec = self.vec.last().unwrap();
+		if item > *lowest_in_vec {
+			self.overflow.push(item);
+			Self::update_location(&mut self.indexes, id, Location::Overflow);
+			return;
 		}
+
+		let removed = self.vec.pop().unwrap();
+		Self::update_location(&mut self.indexes, removed.id, Location::Overflow);
+		self.overflow.push(removed);
+
+		let insert_pos = self.vec.binary_search(&item).unwrap_or_else(|pos| pos);
+		self.vec.insert(insert_pos, item);
+		Self::update_location(&mut self.indexes, id, Location::Vec(insert_pos));
+		self.update_indices_from(insert_pos + 1);
 	}
 
 	fn remove(&mut self, id: usize) {
@@ -241,6 +268,11 @@ impl PriorityHandle {
 		let _ = self.rx.changed().await;
 		*self.rx.borrow_and_update()
 	}
+
+	/// Change this item's track priority and re-sort the queue.
+	pub fn set_track(&mut self, new_track: u8) {
+		self.queue.state.lock().unwrap().set_track(self.id, new_track);
+	}
 }
 
 #[cfg(test)]
@@ -250,7 +282,7 @@ mod tests {
 	#[test]
 	fn test_single_item() {
 		let queue = PriorityQueue::default();
-		let mut handle = queue.insert(100, 5, 0);
+		let mut handle = queue.insert(100, 5);
 		assert_eq!(handle.current(), 0); // First item is always index 0
 	}
 
@@ -259,9 +291,9 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Insert items with different track priorities
-		let mut low = queue.insert(50, 0, 0);
-		let mut high = queue.insert(255, 0, 0);
-		let mut mid = queue.insert(100, 0, 0);
+		let mut low = queue.insert(50, 0);
+		let mut high = queue.insert(255, 0);
+		let mut mid = queue.insert(100, 0);
 
 		// With sorted vec, indices map exactly to priority order
 		assert_eq!(high.current(), 0); // Highest priority
@@ -274,9 +306,9 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Same track priority, different groups
-		let mut group10 = queue.insert(100, 10, 0);
-		let mut group5 = queue.insert(100, 5, 0);
-		let mut group1 = queue.insert(100, 1, 0);
+		let mut group10 = queue.insert(100, 10);
+		let mut group5 = queue.insert(100, 5);
+		let mut group1 = queue.insert(100, 1);
 
 		// Exact index mapping for sorted vec
 		assert_eq!(group10.current(), 0);
@@ -289,9 +321,9 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Lower track priority but higher group
-		let mut low_track_high_group = queue.insert(50, 1000, 0);
+		let mut low_track_high_group = queue.insert(50, 1000);
 		// Higher track priority but lower group
-		let mut high_track_low_group = queue.insert(255, 1, 0);
+		let mut high_track_low_group = queue.insert(255, 1);
 
 		// Track priority should take precedence
 		assert_eq!(high_track_low_group.current(), 0);
@@ -302,9 +334,9 @@ mod tests {
 	fn test_removal_on_drop() {
 		let queue = PriorityQueue::default();
 
-		let mut first = queue.insert(255, 0, 0);
-		let mut second = queue.insert(100, 0, 0);
-		let mut third = queue.insert(50, 0, 0);
+		let mut first = queue.insert(255, 0);
+		let mut second = queue.insert(100, 0);
+		let mut third = queue.insert(50, 0);
 
 		assert_eq!(first.current(), 0);
 		assert_eq!(second.current(), 1);
@@ -322,8 +354,8 @@ mod tests {
 	fn test_removal_of_highest_priority() {
 		let queue = PriorityQueue::default();
 
-		let mut first = queue.insert(255, 0, 0);
-		let mut second = queue.insert(100, 0, 0);
+		let mut first = queue.insert(255, 0);
+		let mut second = queue.insert(100, 0);
 
 		assert_eq!(first.current(), 0);
 		assert_eq!(second.current(), 1);
@@ -339,8 +371,8 @@ mod tests {
 	fn test_removal_of_lowest_priority() {
 		let queue = PriorityQueue::default();
 
-		let mut first = queue.insert(255, 0, 0);
-		let mut second = queue.insert(100, 0, 0);
+		let mut first = queue.insert(255, 0);
+		let mut second = queue.insert(100, 0);
 
 		assert_eq!(first.current(), 0);
 		assert_eq!(second.current(), 1);
@@ -357,7 +389,7 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Insert items from high to low group to make them ordered in heap
-		let mut handles: Vec<_> = (0..10).rev().map(|i| queue.insert(100, i, 0)).collect();
+		let mut handles: Vec<_> = (0..10).rev().map(|i| queue.insert(100, i)).collect();
 
 		// Highest group (9, at handles[0]) should be at heap index 0
 		assert_eq!(handles[0].current(), 0);
@@ -373,7 +405,7 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Insert more than 255 items (insert high to low so first item is highest priority)
-		let mut handles: Vec<_> = (0..300).rev().map(|i| queue.insert(100, i, 0)).collect();
+		let mut handles: Vec<_> = (0..300).rev().map(|i| queue.insert(100, i)).collect();
 
 		// Highest priority item (group=299, handles[0]) should be at heap index 0
 		assert_eq!(handles[0].current(), 0);
@@ -394,11 +426,11 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Mix of different track priorities and groups
-		let mut high_track_high_group = queue.insert(255, 10, 0);
-		let mut high_track_low_group = queue.insert(255, 1, 0);
-		let mut mid_track_high_group = queue.insert(100, 5, 0);
-		let mut mid_track_low_group = queue.insert(100, 1, 0);
-		let mut low_track_high_group = queue.insert(50, 100, 0);
+		let mut high_track_high_group = queue.insert(255, 10);
+		let mut high_track_low_group = queue.insert(255, 1);
+		let mut mid_track_high_group = queue.insert(100, 5);
+		let mut mid_track_low_group = queue.insert(100, 1);
+		let mut low_track_high_group = queue.insert(50, 100);
 
 		// Exact index mapping with sorted vec
 		assert_eq!(high_track_high_group.current(), 0); // track=255, group=10
@@ -413,10 +445,10 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Fill vec to capacity
-		let mut fillers: Vec<_> = (0..255).rev().map(|i| queue.insert(100, i + 100, 0)).collect();
+		let mut fillers: Vec<_> = (0..255).rev().map(|i| queue.insert(100, i + 100)).collect();
 
 		// This goes to overflow
-		let mut overflow_item = queue.insert(100, 50, 0);
+		let mut overflow_item = queue.insert(100, 50);
 		assert_eq!(overflow_item.current(), u8::MAX);
 
 		// Spawn task to wait for promotion from overflow
@@ -437,9 +469,9 @@ mod tests {
 	fn test_interleaved_insertions_and_removals() {
 		let queue = PriorityQueue::default();
 
-		let mut h1 = queue.insert(200, 0, 0);
-		let h2 = queue.insert(150, 0, 0);
-		let mut h3 = queue.insert(100, 0, 0);
+		let mut h1 = queue.insert(200, 0);
+		let h2 = queue.insert(150, 0);
+		let mut h3 = queue.insert(100, 0);
 
 		// h1 has highest priority
 		assert_eq!(h1.current(), 0);
@@ -451,7 +483,7 @@ mod tests {
 		// h3 should have moved up
 		assert!(h3.current() < 2);
 
-		let mut h4 = queue.insert(250, 0, 0);
+		let mut h4 = queue.insert(250, 0);
 
 		// h4 has highest priority now
 		assert_eq!(h4.current(), 0);
@@ -469,9 +501,9 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Items with identical track and group should still be ordered consistently
-		let mut h1 = queue.insert(100, 5, 0);
-		let mut h2 = queue.insert(100, 5, 0);
-		let mut h3 = queue.insert(100, 5, 0);
+		let mut h1 = queue.insert(100, 5);
+		let mut h2 = queue.insert(100, 5);
+		let mut h3 = queue.insert(100, 5);
 
 		// All three should have valid indices
 		let indices = [h1.current(), h2.current(), h3.current()];
@@ -486,9 +518,9 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Create a heap with known structure
-		let mut root = queue.insert(255, 0, 0);
-		let left = queue.insert(100, 0, 0);
-		let mut right = queue.insert(100, 0, 0);
+		let mut root = queue.insert(255, 0);
+		let left = queue.insert(100, 0);
+		let mut right = queue.insert(100, 0);
 
 		assert_eq!(root.current(), 0);
 
@@ -507,11 +539,11 @@ mod tests {
 
 		// Insert in random order
 		let mut handles = vec![
-			queue.insert(100, 5, 0),
-			queue.insert(200, 3, 0),
-			queue.insert(50, 10, 0),
-			queue.insert(200, 8, 0),
-			queue.insert(100, 1, 0),
+			queue.insert(100, 5),
+			queue.insert(200, 3),
+			queue.insert(50, 10),
+			queue.insert(200, 8),
+			queue.insert(100, 1),
 		];
 
 		// Verify highest priority is at index 0
@@ -530,10 +562,10 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Fill vec to capacity - 1
-		let _fillers: Vec<_> = (0..254).map(|i| queue.insert(100, i + 100, 0)).collect();
+		let _fillers: Vec<_> = (0..254).map(|i| queue.insert(100, i + 100)).collect();
 
 		// Insert one more that will be at the edge
-		let mut at_edge = queue.insert(100, 50, 0);
+		let mut at_edge = queue.insert(100, 50);
 		assert_eq!(at_edge.current(), 254);
 
 		// Spawn task to wait for demotion notification
@@ -542,7 +574,7 @@ mod tests {
 		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
 		// Insert very high priority item, kicking at_edge to overflow
-		let _high = queue.insert(255, 1000, 0);
+		let _high = queue.insert(255, 1000);
 
 		let new_priority = task.await.unwrap();
 		assert_eq!(new_priority, u8::MAX, "Should be demoted to overflow");
@@ -552,37 +584,39 @@ mod tests {
 	fn test_empty_after_all_removed() {
 		let queue = PriorityQueue::default();
 
-		let h1 = queue.insert(100, 0, 0);
-		let h2 = queue.insert(200, 0, 0);
-		let h3 = queue.insert(50, 0, 0);
+		let h1 = queue.insert(100, 0);
+		let h2 = queue.insert(200, 0);
+		let h3 = queue.insert(50, 0);
 
 		drop(h1);
 		drop(h2);
 		drop(h3);
 
 		// Queue should be empty, next insert should get index 0
-		let mut h4 = queue.insert(100, 0, 0);
+		let mut h4 = queue.insert(100, 0);
 		assert_eq!(h4.current(), 0);
 	}
 
 	#[test]
-	fn test_update_subscription_reorders() {
+	fn test_set_track_reorders() {
 		let queue = PriorityQueue::default();
 
-		// Subscription 1 (high priority track=255), Subscription 2 (low priority track=55)
-		let mut s1_g1 = queue.insert(255, 1, 1);
-		let mut s1_g2 = queue.insert(255, 2, 1);
-		let mut s2_g1 = queue.insert(55, 1, 2);
-		let mut s2_g2 = queue.insert(55, 2, 2);
+		// Subscription 1 (track=255), Subscription 2 (track=55)
+		let mut s1_g1 = queue.insert(255, 1);
+		let mut s1_g2 = queue.insert(255, 2);
+		let mut s2_g1 = queue.insert(55, 1);
+		let mut s2_g2 = queue.insert(55, 2);
 
 		assert_eq!(s1_g2.current(), 0); // s1 highest
 		assert_eq!(s1_g1.current(), 1);
 		assert_eq!(s2_g2.current(), 2); // s2 lowest
 		assert_eq!(s2_g1.current(), 3);
 
-		// Swap priorities: s1 becomes low, s2 becomes high
-		queue.update_subscription(1, 55);
-		queue.update_subscription(2, 255);
+		// Swap track priorities for each handle individually.
+		s1_g1.set_track(55);
+		s1_g2.set_track(55);
+		s2_g1.set_track(255);
+		s2_g2.set_track(255);
 
 		assert_eq!(s2_g2.current(), 0); // s2 now highest
 		assert_eq!(s2_g1.current(), 1);
@@ -591,23 +625,43 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_update_subscription_notifies_handles() {
+	async fn test_set_track_notifies_other_handles() {
 		let queue = PriorityQueue::default();
 
-		// s1 at index 0 (highest track), s2 at index 1, s3 at index 2
-		let mut s1 = queue.insert(255, 1, 1);
-		let _s2 = queue.insert(100, 1, 2);
-		let _s3 = queue.insert(50, 1, 3);
+		// h_low at index 1, will be promoted to 0 when h_high is demoted.
+		let mut h_high = queue.insert(255, 1);
+		let mut h_low = queue.insert(50, 1);
 
-		assert_eq!(s1.current(), 0);
+		assert_eq!(h_low.current(), 1);
 
-		let task = tokio::spawn(async move { s1.next().await });
+		// Wait for a change notification on h_low while another handle's set_track runs.
+		let task = tokio::spawn(async move { h_low.next().await });
 		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-		// Demote subscription 1 below all others
-		queue.update_subscription(1, 10);
+		// Demote h_high below h_low.
+		h_high.set_track(10);
 
 		let new_priority = task.await.unwrap();
-		assert_eq!(new_priority, 2, "s1 should be at the bottom");
+		assert_eq!(new_priority, 0, "h_low should be promoted to the top");
+	}
+
+	#[test]
+	fn test_set_track_self() {
+		let queue = PriorityQueue::default();
+
+		let mut h_high = queue.insert(255, 1);
+		let mut h_mid = queue.insert(100, 1);
+		let mut h_low = queue.insert(50, 1);
+
+		assert_eq!(h_high.current(), 0);
+		assert_eq!(h_mid.current(), 1);
+		assert_eq!(h_low.current(), 2);
+
+		// Demote h_high below the others.
+		h_high.set_track(10);
+
+		assert_eq!(h_mid.current(), 0);
+		assert_eq!(h_low.current(), 1);
+		assert_eq!(h_high.current(), 2);
 	}
 }
