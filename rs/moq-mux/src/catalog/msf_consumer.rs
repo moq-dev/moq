@@ -461,7 +461,7 @@ mod test {
 
 		match &video.container {
 			Container::Cmaf { init, .. } => assert_eq!(init.as_ref(), expected_init.as_slice()),
-			Container::Legacy => panic!("expected Cmaf container, got Legacy"),
+			other => panic!("expected Cmaf container, got {other:?}"),
 		}
 		assert_eq!(video.coded_width, Some(1920));
 		assert_eq!(video.coded_height, Some(1080));
