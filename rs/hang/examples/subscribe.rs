@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
 	moq_native::Log::new(tracing::Level::DEBUG).init();
 
 	// Create an origin that the session can publish incoming broadcasts to.
-	let origin = moq_lite::Origin::random().produce();
+	let origin = moq_net::Origin::random().produce();
 	let consumer = origin.consume();
 
 	// Run the subscription and the session in parallel.
@@ -20,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
 
 // Connect to the server and subscribe to broadcasts.
 // Automatically reconnects if the connection drops.
-async fn run_session(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
+async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 
@@ -38,7 +38,7 @@ async fn run_session(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 }
 
 // Subscribe to a broadcast and read media frames.
-async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result<()> {
+async fn run_subscribe(mut consumer: moq_net::OriginConsumer) -> anyhow::Result<()> {
 	// Wait for a broadcast to be announced.
 	let (path, broadcast) = consumer
 		.announced()
@@ -72,7 +72,7 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 	);
 
 	// Subscribe to the video track.
-	let track = moq_lite::Track {
+	let track = moq_net::Track {
 		name: name.clone(),
 		priority: 1,
 	};

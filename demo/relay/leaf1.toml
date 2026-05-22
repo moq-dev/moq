@@ -35,10 +35,9 @@ tls.root = ["ca.pem"]
 listen = "[::]:4445"
 
 [cluster]
-# Connect to the "root" node, which will proxy any broadcasts from the other leaf.
-# NOTE: We could absolutely connect to the other leaf directly too, but this helps test proper cluster.
-# ex. imagine us-east connects directly to us-central, but not us-west.
-connect = ["localhost:4443"]
+# Connect to both the root and leaf0, forming a loop to exercise cluster loop detection.
+# ex. imagine us-east connects to us-central AND directly to us-west.
+connect = ["localhost:4443", "localhost:4444"]
 
 [auth]
 # Allow JWT tokens that are signed by this root key.

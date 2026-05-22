@@ -1,4 +1,4 @@
-import { Time } from "@moq/lite";
+import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Data, InitPost, InitShared, Latency, State } from "./render";
 import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use moq_lite::Session;
+use moq_net::Session;
 use url::Url;
 
 use crate::error::MoqError;
@@ -96,7 +96,7 @@ impl MoqClient {
 
 #[derive(uniffi::Object)]
 pub struct MoqSession {
-	inner: Option<moq_lite::Session>,
+	inner: Option<moq_net::Session>,
 	closed: Task<Session>,
 }
 
@@ -121,7 +121,7 @@ impl MoqSession {
 	pub fn cancel(&self, code: u32) {
 		let _guard = crate::ffi::RUNTIME.enter();
 		if let Some(inner) = &self.inner {
-			inner.clone().close(moq_lite::Error::Remote(code));
+			inner.clone().close(moq_net::Error::Remote(code));
 		}
 		// NOTE: we don't abort the closed Task because it will be aborted via above ^
 		// We'll get a slightly better error message instead of Cancelled.

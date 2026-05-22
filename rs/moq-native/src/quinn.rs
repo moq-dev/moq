@@ -14,7 +14,7 @@ use url::Url;
 pub(crate) struct QuinnClient {
 	pub quic: quinn::Endpoint,
 	pub transport: Arc<quinn::TransportConfig>,
-	pub versions: moq_lite::Versions,
+	pub versions: moq_net::Versions,
 }
 
 impl QuinnClient {
@@ -316,7 +316,7 @@ impl QuinnRequest {
 					.context("failed to receive WebTransport request")?;
 				Ok(Self::WebTransport { request, alpns })
 			}
-			alpn if moq_lite::ALPNS.contains(&alpn) => {
+			alpn if moq_net::ALPNS.contains(&alpn) => {
 				anyhow::ensure!(!host.is_empty(), "missing server name for raw QUIC connection");
 				let host_str = if host.contains(':') {
 					format!("[{}]", host)

@@ -1,7 +1,7 @@
 {
 	"name": "@moq/boy",
 	"type": "module",
-	"version": "0.2.8",
+	"version": "0.2.9",
 	"description": "MoQ Boy - Crowd-controlled Game Boy streaming via MoQ",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": {
@@ -22,10 +22,9 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
-		"@moq/lite": "workspace:^",
+		"@moq/net": "workspace:^",
 		"@moq/watch": "workspace:^",
 		"@moq/signals": "workspace:^",
-		"@moq/ui-core": "workspace:^",
 		"zod": "^4.3.6"
 	},
 	"//devDependencies": "These are only needed for local development with workspace packages. They are NOT needed when using the published npm packages.",

@@ -1,6 +1,6 @@
 //! Example MoQ application that publishes or subscribes to a clock track.
 //!
-//! Demonstrates basic [`moq_lite`] usage by streaming time updates every second.
+//! Demonstrates basic [`moq_net`] usage by streaming time updates every second.
 //! Useful for testing relay connectivity and latency.
 
 use url::Url;
@@ -9,7 +9,7 @@ use anyhow::Context;
 use clap::Parser;
 
 mod clock;
-use moq_lite::*;
+use moq_net::*;
 
 #[derive(Parser, Clone)]
 #[command(version = env!("VERSION"))]
@@ -59,11 +59,11 @@ async fn main() -> anyhow::Result<()> {
 		priority: 0,
 	};
 
-	let origin = moq_lite::Origin::random().produce();
+	let origin = moq_net::Origin::random().produce();
 
 	match config.role {
 		Command::Publish => {
-			let mut broadcast = moq_lite::Broadcast::new().produce();
+			let mut broadcast = moq_net::Broadcast::new().produce();
 			let track = broadcast.create_track(track)?;
 			let clock = clock::Publisher::new(track);
 
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
 
 			tracing::info!(broadcast = %config.broadcast, "waiting for broadcast to be online");
 
-			let path: moq_lite::Path<'_> = config.broadcast.into();
+			let path: moq_net::Path<'_> = config.broadcast.into();
 			let mut origin = origin
 				.scope(&[path])
 				.context("not allowed to consume broadcast")?

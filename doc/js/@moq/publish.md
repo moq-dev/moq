@@ -8,7 +8,7 @@ description: Publish media to MoQ broadcasts
 [![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Publish media to MoQ broadcasts. Provides both a JavaScript API and a `<moq-publish>` Web Component, plus an optional `<moq-publish-ui>` SolidJS overlay.
+Publish media to MoQ broadcasts. Provides both a JavaScript API and a `<moq-publish>` Web Component, plus an optional `<moq-publish-ui>` overlay.
 
 ## Installation
 
@@ -22,7 +22,7 @@ npm add @moq/publish
 
 For quick demos or single-page embeds where a bundler is overkill, load the
 package straight from jsDelivr with the `+esm` endpoint. jsDelivr transforms
-the published file and rewrites bare imports (like `@moq/hang`, `@moq/lite`)
+the published file and rewrites bare imports (like `@moq/hang`, `@moq/net`)
 to other `+esm` URLs, so it loads in the browser with no import map or local
 build step:
 
@@ -72,7 +72,7 @@ a real bundler (the examples below).
 
 ## UI Overlay
 
-Import `@moq/publish/ui` for a SolidJS-powered overlay with device selection and publishing controls:
+Import `@moq/publish/ui` for a Web Component overlay with device selection and publishing controls:
 
 ```html
 <script type="module">
@@ -114,5 +114,4 @@ broadcast.name.set("bob");
 
 - **[@moq/watch](/js/@moq/watch)** — Subscribe to and render MoQ broadcasts
 - **[@moq/hang](/js/@moq/hang/)** — Core media library (catalog, container, support)
-- **[@moq/ui-core](/js/@moq/ui-core)** — Shared UI primitives
-- **[@moq/lite](/js/@moq/lite)** — Core pub/sub transport protocol
+- **[@moq/net](/js/@moq/net)** — Core pub/sub transport protocol

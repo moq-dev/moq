@@ -1,0 +1,60 @@
+#!/usr/bin/env just --justfile
+#
+# Language-specific recipes for the Rust workspace under rs/. Invoked from
+# the repo root as `just rs <recipe>` via the `mod rs` import.
+#
+# The Rust crates form a single workspace whose root Cargo.toml lives at
+# the repository root, so these recipes run from the repo root rather than
+# from rs/ (cargo resolves paths relative to the workspace root either way).
+
+set working-directory := '..'
+
+default:
+	just check
+
+# Compile, lint, format-check, doc-check, and verify dependency hygiene.
+check *args:
+	cargo check --all-targets {{ args }}
+	cargo clippy --all-targets {{ args }} -- -D warnings
+	cargo fmt --all --check
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps {{ args }}
+	cargo shear
+	cargo sort --workspace --check
+
+# Extended Rust-only CI: feature edge cases + publish dry-run.
+ci:
+	just check --workspace
+	cargo check --workspace --no-default-features
+	cargo check --workspace --all-features
+	cargo publish --dry-run
+
+# Auto-fix clippy/format/shear/sort, then sweep stale target/.
+fix:
+	cargo clippy --fix --allow-staged --allow-dirty --all-targets
+	cargo fmt --all
+	cargo shear --fix
+	cargo sort --workspace
+	if command -v cargo-sweep >/dev/null 2>&1; then cargo sweep --time 3; fi
+
+test *args:
+	cargo test --all-targets {{ args }}
+
+build:
+	cargo build
+
+# Check semver compatibility against crates.io (default-members only).
+semver:
+	cargo semver-checks check-release
+
+# Update versions and changelogs via release-plz.
+bump:
+	release-plz update
+
+# Create release PRs and publish crates via release-plz.
+release:
+	release-plz release-pr --git-token "$GITHUB_TOKEN"
+	release-plz release --git-token "$GITHUB_TOKEN"
+
+update:
+	cargo update
+	cargo upgrade --incompatible

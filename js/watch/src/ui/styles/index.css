@@ -1,13 +1,9 @@
-/* Shared dependencies */
-@import "@moq/ui-core/variables.css";
-@import "@moq/ui-core/flex.css";
-@import "@moq/ui-core/button/button.css";
-@import "@moq/ui-core/stats/styles/index.css";
-
-/* Component styles */
+@import "./base.css";
+@import "./stats.css";
 @import "./controls.css";
 @import "./volume-slider.css";
 @import "./quality-selector.css";
 @import "./buffer-control.css";
 @import "./buffering-indicator.css";
+@import "./offline-indicator.css";
 @import "./status-indicator.css";

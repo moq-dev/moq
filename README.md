@@ -4,8 +4,8 @@
 
 ![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
 [![Discord](https://img.shields.io/discord/1124083992740761730)](https://discord.gg/FCYF3p99mr)
-[![Crates.io](https://img.shields.io/crates/v/moq-lite)](https://crates.io/crates/moq-lite)
-[![npm](https://img.shields.io/npm/v/@moq/lite)](https://www.npmjs.com/package/@moq/lite)
+[![Crates.io](https://img.shields.io/crates/v/moq-net)](https://crates.io/crates/moq-net)
+[![npm](https://img.shields.io/npm/v/@moq/net)](https://www.npmjs.com/package/@moq/net)
 
 # Media over QUIC
 
@@ -79,7 +79,7 @@ MoQ is designed as a layered protocol stack.
 **Rule 1**: The CDN MUST NOT know anything about your application, media codecs, or even the available tracks.
 Everything could be fully E2EE and the CDN wouldn't care. **No business logic allowed**.
 
-Instead, [`moq-relay`](rs/moq-relay) operates on rules encoded in the [`moq-lite`](https://docs.rs/moq-lite) header.
+Instead, [`moq-relay`](rs/moq-relay) operates on rules encoded in the [`moq-net`](https://docs.rs/moq-net) header.
 These rules are based on video encoding but are generic enough to be used for any live data.
 The goal is to keep the server as dumb as possible while supporting a wide range of use-cases.
 
@@ -113,12 +113,12 @@ This repository provides both [Rust](rs) and [TypeScript](js) libraries with sim
 
 | Crate                       | Description                                                                                                                           | Docs                                                                           |
 |-----------------------------|---------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
-| [moq-lite](rs/moq-lite)          | The core pub/sub transport protocol. Has built-in concurrency and deduplication.                                                      | [![docs.rs](https://docs.rs/moq-lite/badge.svg)](https://docs.rs/moq-lite)     |
+| [moq-net](rs/moq-net)            | The networking layer: real-time pub/sub with built-in caching, fan-out, and prioritization. Negotiates either the `moq-lite` or `moq-transport` wire protocol. | [![docs.rs](https://docs.rs/moq-net/badge.svg)](https://docs.rs/moq-net)       |
 | [moq-relay](rs/moq-relay)   | A clusterable relay server. This relay performs fan-out connecting multiple clients and servers together.                             |                                                                                |
 | [moq-token](rs/moq-token)   | An authentication scheme supported by `moq-relay`. Can be used as a library or as [a CLI](rs/moq-token-cli) to authenticate sessions. |                                                                                |
 | [moq-native](rs/moq-native) | Opinionated helpers to configure a Quinn QUIC endpoint. It's harder than it should be.                                                | [![docs.rs](https://docs.rs/moq-native/badge.svg)](https://docs.rs/moq-native) |
-| [libmoq](rs/libmoq)         | C bindings for `moq-lite`.                                                                                                            | [![docs.rs](https://docs.rs/libmoq/badge.svg)](https://docs.rs/libmoq)         |
-| [hang](rs/hang)             | Media-specific encoding/streaming layered on top of `moq-lite`. Can be used as a library.                     | [![docs.rs](https://docs.rs/hang/badge.svg)](https://docs.rs/hang)             |
+| [libmoq](rs/libmoq)         | C bindings for `moq-net`.                                                                                                             | [![docs.rs](https://docs.rs/libmoq/badge.svg)](https://docs.rs/libmoq)         |
+| [hang](rs/hang)             | Media-specific encoding/streaming layered on top of `moq-net`. Can be used as a library.                      | [![docs.rs](https://docs.rs/hang/badge.svg)](https://docs.rs/hang)             |
 | [moq-cli](rs/moq-cli)       | A CLI for publishing media to MoQ relays.                                                                                             |                                                                                |
 | [moq-mux](rs/moq-mux)       | Media muxers and demuxers (fMP4/CMAF, HLS) for importing content into MoQ broadcasts.                                                 | [![docs.rs](https://docs.rs/moq-mux/badge.svg)](https://docs.rs/moq-mux)       |
 | [moq-gst](rs/moq-gst)       | A GStreamer plugin for publishing or consuming MoQ broadcasts. Not built by default; requires GStreamer dev libraries.                         |                                                                                |
@@ -127,7 +127,7 @@ This repository provides both [Rust](rs) and [TypeScript](js) libraries with sim
 
 | Package                                  | Description                                                                                                        | NPM                                                                                                   |
 |------------------------------------------|--------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------|
-| **[@moq/lite](js/lite)**             | The core pub/sub transport protocol. Intended for browsers, but can be run server-side with a WebTransport polyfill.                                   | [![npm](https://img.shields.io/npm/v/@moq/lite)](https://www.npmjs.com/package/@moq/lite)   |
+| **[@moq/net](js/net)**             | The networking layer: real-time pub/sub with built-in caching, fan-out, and prioritization. Negotiates either the `moq-lite` or `moq-transport` wire protocol. Intended for browsers, runs server-side with a WebTransport polyfill. | [![npm](https://img.shields.io/npm/v/@moq/net)](https://www.npmjs.com/package/@moq/net)     |
 | **[@moq/token](js/token)**             |  Authentication library & CLI for JS/TS environments (see [Authentication](doc/app/relay/auth.md))                               | [![npm](https://img.shields.io/npm/v/@moq/token)](https://www.npmjs.com/package/@moq/token)   |
 | **[@moq/hang](js/hang)**           | Core media library: catalog, container, and support. Shared by `@moq/watch` and `@moq/publish`. | [![npm](https://img.shields.io/npm/v/@moq/hang)](https://www.npmjs.com/package/@moq/hang) |
 | **[@moq/demo](demo/web)** | Examples using `@moq/hang`.                                                                                  |                                                                                                       |

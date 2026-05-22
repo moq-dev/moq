@@ -1,0 +1,168 @@
+name: Release Swift
+
+on:
+  push:
+    tags:
+      - "moq-ffi-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-swift
+  cancel-in-progress: false
+
+jobs:
+  parse-version:
+    name: Parse version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Parse version from tag
+        id: parse
+        run: .github/scripts/release.sh parse-version moq-ffi
+
+  build:
+    name: Build moq-ffi (${{ matrix.target }})
+    needs: [parse-version]
+    runs-on: macos-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-ios
+          - aarch64-apple-ios-sim
+          - x86_64-apple-ios
+          - universal-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target == 'universal-apple-darwin' && 'x86_64-apple-darwin,aarch64-apple-darwin' || matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          # Set iOS deployment target to avoid ___chkstk_darwin linker errors.
+          IPHONEOS_DEPLOYMENT_TARGET: ${{ contains(matrix.target, 'apple-ios') && '16.0' || '' }}
+        run: |
+          ./rs/moq-ffi/build.sh \
+            --target "$BUILD_TARGET" \
+            --version "$BUILD_VERSION" \
+            --output dist
+
+      - name: Upload lib
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-lib-${{ matrix.target }}
+          path: dist/moq-ffi-${{ needs.parse-version.outputs.version }}-${{ matrix.target }}/lib/
+
+  bindings:
+    name: Generate bindings
+    needs: [parse-version]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate bindings
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./rs/moq-ffi/build.sh \
+            --bindings-only \
+            --version "$BUILD_VERSION" \
+            --output dist
+
+      - name: Upload bindings
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-bindings
+          path: dist/bindings/swift/
+
+  package:
+    name: Package
+    needs: [parse-version, build, bindings]
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download per-target libs
+        uses: actions/download-artifact@v8
+        with:
+          path: libs-raw
+          pattern: swift-lib-*
+
+      - name: Flatten lib layout
+        run: |
+          mkdir -p libs
+          for dir in libs-raw/swift-lib-*; do
+            target="${dir#libs-raw/swift-lib-}"
+            mv "$dir" "libs/$target"
+          done
+          ls -la libs
+
+      - name: Download bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-bindings
+          path: bindings
+
+      - name: Package
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./swift/scripts/package.sh \
+            --version "$BUILD_VERSION" \
+            --lib-dir libs \
+            --bindings-dir bindings \
+            --output release-out
+
+      - name: Upload Swift package
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-package
+          path: release-out/*
+
+  publish:
+    name: Publish to Swift Package mirror
+    needs: [package, parse-version]
+    runs-on: ubuntu-latest
+    # Skipped until PUBLISH_SPM=true and SWIFT_MIRROR_TOKEN are set. See
+    # swift/README.md for setup steps.
+    if: vars.PUBLISH_SPM == 'true'
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download package
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-package
+          path: swift-out
+
+      - name: Publish to moq-swift mirror
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          SWIFT_MIRROR_TOKEN: ${{ secrets.SWIFT_MIRROR_TOKEN }}
+        run: ./swift/scripts/publish.sh

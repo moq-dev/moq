@@ -139,5 +139,5 @@ pub struct VideoConfig {
 	/// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
 	/// - If frames are buffered into 2s segments, this would be 2s.
 	#[serde(default)]
-	pub jitter: Option<moq_lite::Time>,
+	pub jitter: Option<moq_net::Time>,
 }

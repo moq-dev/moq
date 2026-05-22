@@ -13,8 +13,8 @@ This guide covers connecting to a relay, discovering broadcasts, subscribing to 
 The key crates:
 
 - [moq-native](https://crates.io/crates/moq-native) — Configures QUIC (via [quinn](https://crates.io/crates/quinn)) and TLS (via [rustls](https://crates.io/crates/rustls)) for you.
-- [moq-lite](https://crates.io/crates/moq-lite) — The core pub/sub protocol. Can be used directly with any `web_transport_trait::Session` implementation if you need full control over the QUIC endpoint.
-- [hang](https://crates.io/crates/hang) — Media-specific catalog and container format on top of `moq-lite`.
+- [moq-net](https://crates.io/crates/moq-net) — The core networking layer. Can be used directly with any `web_transport_trait::Session` implementation if you need full control over the QUIC endpoint.
+- [hang](https://crates.io/crates/hang) — Media-specific catalog and container format on top of `moq-net`.
 
 ## Connecting
 
@@ -61,15 +61,15 @@ See the [Authentication guide](/app/relay/auth) for how to generate tokens.
 
 The [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) demonstrates publishing end-to-end.
 
-The key pattern is: create an [`Origin`](https://docs.rs/moq-lite/latest/moq_lite/struct.Origin.html), connect a session to it, then publish broadcasts:
+The key pattern is: create an [`Origin`](https://docs.rs/moq-net/latest/moq_net/struct.Origin.html), connect a session to it, then publish broadcasts:
 
 ```rust
-let origin = moq_lite::Origin::new().produce();
+let origin = moq_net::Origin::new().produce();
 let session = client
     .with_publish(origin.consume())
     .connect(url).await?;
 
-let mut broadcast = moq_lite::Broadcast::new().produce();
+let mut broadcast = moq_net::Broadcast::new().produce();
 // ... add catalog and tracks to the broadcast ...
 origin.publish_broadcast("", broadcast.consume());
 ```
@@ -83,7 +83,7 @@ The [subscribe example](https://github.com/moq-dev/moq/blob/main/rs/hang/example
 To consume a broadcast, use `with_consume()` and listen for announcements:
 
 ```rust
-let origin = moq_lite::Origin::new().produce();
+let origin = moq_net::Origin::new().produce();
 let mut consumer = origin.consume();
 let session = client
     .with_consume(origin)
@@ -191,7 +191,7 @@ Check the `container` field for each rendition:
 ## Next Steps
 
 - [hang format](/concept/layer/hang) — Catalog schema and container details
-- [moq-lite docs](https://docs.rs/moq-lite) — Core protocol API reference
+- [moq-net docs](https://docs.rs/moq-net) — Core networking API reference
 - [moq-native docs](https://docs.rs/moq-native) — Client configuration options
 - [Relay HTTP endpoints](/app/relay/http) — HTTP fetch for debugging and late-join
 - [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) — Complete publishing example

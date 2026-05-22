@@ -12,7 +12,7 @@ QUIC and WebTransport connection helpers for native Rust applications. Provides 
 
 ## Overview
 
-`moq-native` bridges the gap between the transport-agnostic `moq-lite` crate and actual QUIC/WebTransport networking. It handles:
+`moq-native` bridges the gap between the transport-agnostic `moq-net` crate and actual QUIC/WebTransport networking. It handles:
 
 - TLS certificate loading and configuration
 - QUIC connection setup via [quinn](https://crates.io/crates/quinn)
@@ -32,5 +32,5 @@ Full API documentation: [docs.rs/moq-native](https://docs.rs/moq-native)
 
 ## Next Steps
 
-- Build with [moq-lite](/rs/crate/moq-lite) for the core pub/sub protocol
+- Build with [moq-net](/rs/crate/moq-net) for the core pub/sub protocol
 - Deploy a [relay server](/app/relay/)

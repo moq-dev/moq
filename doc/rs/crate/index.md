@@ -9,7 +9,7 @@ Rust crates providing the MoQ protocol implementation and related tooling.
 
 | Crate | Description |
 |-------|-------------|
-| [moq-lite](./moq-lite) | Core pub/sub transport protocol |
+| [moq-net](./moq-net) | Networking layer (pub/sub on QUIC) |
 | [moq-native](./moq-native) | QUIC/WebTransport helpers for native apps |
 | [moq-token](./moq-token) | JWT authentication library |
 | [hang](./hang) | Media encoding/streaming (catalog, container) |

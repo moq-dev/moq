@@ -34,13 +34,13 @@ pub struct Status {
 
 /// Manages the status track, only publishing when content changes.
 pub struct StatusPublisher {
-	producer: moq_lite::TrackProducer,
+	producer: moq_net::TrackProducer,
 	last_json: String,
 }
 
 impl StatusPublisher {
-	pub fn new(broadcast: &mut moq_lite::BroadcastProducer) -> anyhow::Result<Self> {
-		let track = moq_lite::Track {
+	pub fn new(broadcast: &mut moq_net::BroadcastProducer) -> anyhow::Result<Self> {
+		let track = moq_net::Track {
 			name: "status".to_string(),
 			priority: 10,
 		};

@@ -1,8 +1,8 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
-import type * as Moq from "@moq/lite";
-import { Time } from "@moq/lite";
+import type * as Moq from "@moq/net";
+import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
 import { base64ToBytes } from "../base64";
@@ -272,7 +272,11 @@ export class Decoder {
 		// Opus in CMAF uses raw packets (not OGG-wrapped), so description must be omitted.
 		// The dOps box from the init segment is not a valid OGG Identification Header.
 		const description =
-			config.codec === "opus" ? undefined : config.description ? Util.Hex.toBytes(config.description) : undefined;
+			config.codec === "opus"
+				? undefined
+				: config.description
+					? Util.Hex.toBytes(config.description)
+					: init.description;
 
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
@@ -308,7 +312,7 @@ export class Decoder {
 			});
 
 			for (;;) {
-				const next = await Promise.race([consumer.next(), effect.cancel]);
+				const next = await consumer.next();
 				if (!next) break;
 
 				const { frame } = next;
@@ -406,8 +410,23 @@ export class Decoder {
 
 async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	// Opus in CMAF uses raw packets; dOps is not a valid OGG Identification Header.
-	const description =
-		config.codec === "opus" ? undefined : config.description ? Util.Hex.toBytes(config.description) : undefined;
+	let description: Uint8Array | undefined;
+	if (config.codec !== "opus") {
+		if (config.description) {
+			description = Util.Hex.toBytes(config.description);
+		} else if (config.container.kind === "cmaf") {
+			try {
+				description = Container.Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
+			} catch (err) {
+				// A malformed init segment means we can't extract the codec
+				// description, so we can't probe support reliably. Reject the
+				// track rather than letting isConfigSupported pass on a
+				// description-less config and then having decode() fail later.
+				console.warn(`audio: malformed CMAF init segment for codec ${config.codec}`, err);
+				return false;
+			}
+		}
+	}
 	const res = await AudioDecoder.isConfigSupported({
 		...config,
 		description,

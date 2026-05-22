@@ -6,6 +6,7 @@ on:
       - 'moq-relay-v*'
       - 'moq-token-cli-v*'
       - 'moq-cli-v*'
+      - 'moq-boy-v*'
 
 jobs:
   cache:
@@ -46,4 +47,9 @@ jobs:
       - name: Build and cache moq-token-cli
         run: |
           nix build .#moq-token-cli --print-build-logs
+          cachix push kixelated ./result
+
+      - name: Build and cache moq-boy
+        run: |
+          nix build .#moq-boy --print-build-logs
           cachix push kixelated ./result
