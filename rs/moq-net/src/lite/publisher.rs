@@ -200,9 +200,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 				// Send ANNOUNCE_INIT as the first message with all currently active paths
 				// We use `try_next()` to synchronously get the initial updates.
-				// Use _all so hidden paths (`.stats/...`) flow to subscribers; without
-				// this the monitor dashboard can't discover relay-published stats.
-				while let Some((path, active)) = origin.try_announced_all() {
+				while let Some((path, active)) = origin.try_announced() {
 					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
 
 					if active.is_some() {
@@ -235,7 +233,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			tokio::select! {
 				biased;
 				res = stream.reader.closed() => return res,
-				announced = origin.announced_all() => {
+				announced = origin.announced() => {
 					match announced {
 						Some((path, active)) => {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();

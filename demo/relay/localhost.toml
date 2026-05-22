@@ -26,16 +26,15 @@ listen = "[::]:4443"
 # Allow anonymous access to everything.
 public = ""
 
-# Publish per-prefix `<level>/.stats/use/<pop>` broadcasts so the moq-cdn
-# dashboard can read live ingress/egress. levels=5 covers paths up to
-# `<slug>/<app>/<room>/<user>`. Single-node local dev still uses --stats-pop
-# (here `localhost`) to exercise the same code path as multi-relay deployments.
+# Publish per-prefix `.stats/broadcasts/<level>/<node>` broadcasts so the
+# moq-cdn dashboard can read live ingress/egress. Single-node local dev still
+# sets --stats-node (here `localhost`) to exercise the same code path as
+# multi-relay deployments.
 [stats]
-name = "use"
 # 8 gives `<urlPath>/<app>/<room>/<user>/...` plenty of headroom; the snapshot
 # task only runs while a level has activity, so over-provisioning is cheap.
 levels = 8
-pop = "localhost"
+node = "localhost"
 
 [iroh]
 # You can optionally enable iroh support for P2P connections.

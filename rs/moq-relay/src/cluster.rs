@@ -52,7 +52,7 @@ pub struct Cluster {
 	/// Optional stats aggregator. One instance per relay; sessions pick a tier
 	/// via [`Stats::tier`] at acceptance time so external (non-mTLS) and internal
 	/// (mTLS / cluster peer) traffic land in separate counter sets on the same
-	/// `<level>/.stats/<name>[/<pop>]` broadcasts.
+	/// `<prefix>/broadcasts/<level>/<node>` broadcasts.
 	pub stats: Option<Stats>,
 }
 
@@ -62,15 +62,16 @@ impl Cluster {
 		let origin = Origin::random().produce();
 		tracing::info!(origin_id = %origin.id, "cluster initialized");
 		let levels = stats_config.levels.unwrap_or(1).max(1);
+		let prefix = stats_config.prefix.clone().unwrap_or_else(|| ".stats".to_string());
 		let stats = stats_config
-			.name
+			.node
 			.as_ref()
-			.map(|name| Stats::new(name.clone(), levels, stats_config.pop.clone(), origin.clone()));
-		if let Some(name) = stats_config.name.as_ref() {
+			.map(|node| Stats::new(prefix.clone(), levels, node.clone(), origin.clone()));
+		if let Some(node) = stats_config.node.as_ref() {
 			tracing::info!(
-				name,
+				prefix,
 				levels,
-				pop = ?stats_config.pop,
+				node,
 				"stats publishing enabled"
 			);
 		}

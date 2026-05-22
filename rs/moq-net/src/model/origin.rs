@@ -288,19 +288,6 @@ impl OriginConsumerState {
 		self.take_path(path)
 	}
 
-	/// Take the next non-hidden update, discarding any hidden updates skipped over.
-	/// Hidden paths are dropped from `pending` to keep the state bounded for callers
-	/// that only consume visible updates.
-	fn take_visible(&mut self) -> Option<OriginAnnounce> {
-		loop {
-			let path = self.pending.keys().next()?.clone();
-			if !path.is_hidden() {
-				return self.take_path(path);
-			}
-			self.pending.remove(&path);
-		}
-	}
-
 	fn take_path(&mut self, path: PathOwned) -> Option<OriginAnnounce> {
 		match self.pending.remove(&path).unwrap() {
 			PendingUpdate::Announce(broadcast) => Some((path, Some(broadcast))),
@@ -840,22 +827,18 @@ impl OriginConsumer {
 	/// The same path won't be announced/unannounced twice, instead it will toggle.
 	/// Returns None if the consumer is closed.
 	///
-	/// Skips paths where any segment starts with `.` (see [`Path::is_hidden`]).
-	/// Use [`Self::announced_all`] to receive every update including hidden paths.
-	///
 	/// Note: The returned path is absolute and will always match this consumer's prefix.
 	pub async fn announced(&mut self) -> Option<OriginAnnounce> {
 		conducer::wait(|waiter| self.poll_announced(waiter)).await
 	}
 
-	/// Poll for the next visible (un)announced broadcast, without blocking.
+	/// Poll for the next (un)announced broadcast, without blocking.
 	///
 	/// Returns `Poll::Ready(Some(_))` for an update, `Poll::Ready(None)` if the
 	/// consumer is closed, or `Poll::Pending` after registering `waiter` to be
-	/// notified when the next update arrives. Hidden paths (see [`Path::is_hidden`])
-	/// are silently discarded.
+	/// notified when the next update arrives.
 	pub fn poll_announced(&mut self, waiter: &conducer::Waiter) -> Poll<Option<OriginAnnounce>> {
-		match self.state.poll(waiter, |state| match state.take_visible() {
+		match self.state.poll(waiter, |state| match state.take() {
 			Some(item) => Poll::Ready(item),
 			None => Poll::Pending,
 		}) {
@@ -866,46 +849,11 @@ impl OriginConsumer {
 		}
 	}
 
-	/// Like [`Self::announced`] but returns every update, including paths where any
-	/// segment starts with `.`.
-	///
-	/// Use this when you need to observe infrastructure paths (e.g. `.stats/...`)
-	/// alongside user-visible broadcasts. Each update is delivered exactly once,
-	/// so a consumer using [`Self::announced`] will silently drop hidden updates.
-	/// Pick one variant per consumer instance.
-	pub async fn announced_all(&mut self) -> Option<OriginAnnounce> {
-		conducer::wait(|waiter| self.poll_announced_all(waiter)).await
-	}
-
-	/// Like [`Self::poll_announced`] but does not filter hidden paths.
-	pub fn poll_announced_all(&mut self, waiter: &conducer::Waiter) -> Poll<Option<OriginAnnounce>> {
-		match self.state.poll(waiter, |state| match state.take() {
-			Some(item) => Poll::Ready(item),
-			None => Poll::Pending,
-		}) {
-			Poll::Ready(Ok(item)) => Poll::Ready(Some(item)),
-			Poll::Ready(Err(_)) => Poll::Ready(None),
-			Poll::Pending => Poll::Pending,
-		}
-	}
-
 	/// Returns the next (un)announced broadcast and the absolute path without blocking.
 	///
 	/// Returns None if there is no update available; NOT because the consumer is closed.
 	/// You have to use `is_closed` to check if the consumer is closed.
-	///
-	/// Skips paths where any segment starts with `.` (see [`Path::is_hidden`]).
-	/// Use [`Self::try_announced_all`] to receive every update including hidden paths.
 	pub fn try_announced(&mut self) -> Option<OriginAnnounce> {
-		self.state.write().ok()?.take_visible()
-	}
-
-	/// Like [`Self::try_announced`] but returns every update, including paths where
-	/// any segment starts with `.`.
-	///
-	/// Returns `None` if there is no update available, NOT because the consumer is closed.
-	/// See [`Self::announced_all`] for the async variant and full caveats.
-	pub fn try_announced_all(&mut self) -> Option<OriginAnnounce> {
 		self.state.write().ok()?.take()
 	}
 
@@ -950,7 +898,7 @@ impl OriginConsumer {
 		}
 
 		loop {
-			let (announced, broadcast) = consumer.announced_all().await?;
+			let (announced, broadcast) = consumer.announced().await?;
 			// `scope` narrows by prefix, but we only want an exact-path match.
 			if announced.as_path() == path {
 				if let Some(broadcast) = broadcast {
@@ -2051,21 +1999,22 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_announced_filters_hidden() {
+	async fn test_announced_returns_dot_prefixed_paths() {
+		// `.`-prefixed paths used to be filtered out via an `is_hidden` convention.
+		// They're now ordinary paths — access is scoped via auth tokens instead.
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
-		let visible = Broadcast::new().produce();
-		let hidden = Broadcast::new().produce();
+		let foo = Broadcast::new().produce();
+		let stats = Broadcast::new().produce();
 
-		origin.publish_broadcast("foo/bar", visible.consume());
-		origin.publish_broadcast(".stats/use", hidden.consume());
+		origin.publish_broadcast("foo/bar", foo.consume());
+		origin.publish_broadcast(".stats/broadcasts/sjc", stats.consume());
 
+		// Pending is a BTreeMap, so deliveries arrive in path order.
 		let mut consumer = origin.consume();
-
-		// announced() should only see the visible one.
-		consumer.assert_next("foo/bar", &visible.consume());
-		consumer.assert_next_wait();
+		consumer.assert_next(".stats/broadcasts/sjc", &stats.consume());
+		consumer.assert_next("foo/bar", &foo.consume());
 	}
 
 	// Coalescing tests: a slow consumer that doesn't drain between updates
@@ -2089,72 +2038,17 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_announced_all_returns_every_update() {
+	async fn test_announced_broadcast_with_dot_prefix() {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
-		let visible = Broadcast::new().produce();
-		let hidden = Broadcast::new().produce();
+		let stats = Broadcast::new().produce();
 
-		origin.publish_broadcast("foo/bar", visible.consume());
-		origin.publish_broadcast(".stats/use", hidden.consume());
+		origin.publish_broadcast(".stats/broadcasts/sjc", stats.consume());
 
-		let mut consumer = origin.consume();
-
-		// announced_all() should see both. Pending is a BTreeMap, so iteration is
-		// in path order: `.stats/use` comes before `foo/bar`.
-		let (path, broadcast) = consumer
-			.announced_all()
-			.now_or_never()
-			.expect("next blocked")
-			.expect("no next");
-		assert_eq!(path, Path::new(".stats/use"));
-		assert!(broadcast.unwrap().is_clone(&hidden.consume()));
-
-		let (path, broadcast) = consumer
-			.announced_all()
-			.now_or_never()
-			.expect("next blocked")
-			.expect("no next");
-		assert_eq!(path, Path::new("foo/bar"));
-		assert!(broadcast.unwrap().is_clone(&visible.consume()));
-
-		// And nothing else.
-		assert!(consumer.announced_all().now_or_never().is_none());
-	}
-
-	#[tokio::test]
-	async fn test_try_announced_filters_hidden() {
-		tokio::time::pause();
-
-		let origin = Origin::random().produce();
-		let visible = Broadcast::new().produce();
-		let hidden = Broadcast::new().produce();
-
-		origin.publish_broadcast(".stats/use", hidden.consume());
-		origin.publish_broadcast("foo/bar", visible.consume());
-
-		let mut consumer = origin.consume();
-
-		// try_announced() should skip the hidden one and return the visible one.
-		let (path, _) = consumer.try_announced().expect("expected announce");
-		assert_eq!(path, Path::new("foo/bar"));
-		assert!(consumer.try_announced().is_none());
-	}
-
-	#[tokio::test]
-	async fn test_announced_broadcast_hidden() {
-		tokio::time::pause();
-
-		let origin = Origin::random().produce();
-		let hidden = Broadcast::new().produce();
-
-		origin.publish_broadcast(".stats/use", hidden.consume());
-
-		// announced_broadcast() must work for hidden paths too.
 		let consumer = origin.consume();
 		let result = consumer
-			.announced_broadcast(".stats/use")
+			.announced_broadcast(".stats/broadcasts/sjc")
 			.now_or_never()
 			.expect("next blocked");
 		assert!(result.is_some());

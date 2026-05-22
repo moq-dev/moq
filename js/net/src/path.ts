@@ -135,14 +135,3 @@ export function join(path: Valid, other: Valid): Valid {
 export function empty(): Valid {
 	return "" as Valid;
 }
-
-/**
- * True if any segment of the path starts with `.`. Hidden paths are the moq-lite
- * convention for infrastructure broadcasts (e.g. `<level>/.stats/<name>`) that
- * apps should ignore by default. Mirrors `Path::is_hidden` on the Rust side.
- */
-export function isHidden(path: Valid): boolean {
-	if (path === "") return false;
-	if (path.startsWith(".")) return true;
-	return path.includes("/.");
-}

@@ -1,7 +1,7 @@
 //! Generic stats publishing for moq-net sessions.
 //!
 //! [`Stats`] aggregates per-broadcast counter bumps into per-prefix levels and
-//! publishes a `<level>/.stats/<name>[/<pop>]` broadcast on a caller-provided
+//! publishes a `<prefix>/broadcasts/<level>/<node>` broadcast on a caller-provided
 //! [`OriginProducer`]. Each stats broadcast carries four tracks, one per
 //! `(tier, role)` pair:
 //!
@@ -12,9 +12,13 @@
 //!
 //! A caller hands each session a tier-scoped [`StatsHandle`] (built from the
 //! single shared [`Stats`] via [`Stats::tier`]) which determines which counter
-//! set its bumps land in. The `pop` suffix on the advertised path lets multiple
+//! set its bumps land in. The `node` suffix on the advertised path lets multiple
 //! relays in the same cluster origin coexist without overwriting each other's
 //! broadcast.
+//!
+//! The `broadcasts` segment between the prefix and the level key is a fixed
+//! category, leaving room under the same prefix for future siblings (e.g.
+//! `<prefix>/nodes/<node>` for host-level stats).
 //!
 //! # Lifecycle
 //!
@@ -33,10 +37,10 @@
 //!
 //! # Cycles
 //!
-//! Calling [`Stats::broadcast`] for a hidden path (any segment starting with
-//! `.`) returns an empty handle whose bumps no-op. This breaks the obvious
-//! feedback loop where serving a `.../.stats/...` broadcast would itself
-//! generate more stats traffic.
+//! Calling [`Stats::broadcast`] for a path under the configured `prefix`
+//! returns an empty handle whose bumps no-op. This breaks the feedback loop
+//! where serving a `<prefix>/...` broadcast would itself generate more stats
+//! traffic.
 
 use std::{
 	collections::HashMap,
@@ -124,9 +128,9 @@ pub struct Stats {
 }
 
 struct StatsInner {
-	name: String,
+	prefix: PathOwned,
 	levels: u32,
-	pop: Option<String>,
+	node: String,
 	origin: OriginProducer,
 	entries: Lock<HashMap<PathOwned, Arc<Level>>>,
 }
@@ -139,8 +143,7 @@ struct Level {
 	internal_subscriber: Counters,
 	task: Lock<Option<()>>,
 	origin: OriginProducer,
-	name: String,
-	pop: Option<String>,
+	node: String,
 	level_key: PathOwned,
 }
 
@@ -165,36 +168,33 @@ impl Level {
 impl Stats {
 	/// Build a new stats aggregator.
 	///
-	/// * `name` is baked into the advertised path of every published stats broadcast,
-	///   following the convention `<level>/.stats/<name>[/<pop>]` (or `.stats/<name>[/<pop>]`
-	///   for the root).
+	/// * `prefix` is the top-level path under which stats are published, e.g. `.stats`.
+	///   The full advertised path is `<prefix>/broadcasts/<level>/<node>`.
 	/// * `levels` is the maximum segment depth stats are bucketed by. `0` disables
 	///   stats entirely (no buckets, including no root bucket). `1` produces the root
 	///   bucket plus a per-first-segment bucket. `2` adds a per-second-segment bucket,
 	///   and so on. A broadcast within the configured depth also gets its own dedicated
 	///   bucket; broadcasts deeper than `levels` are truncated.
-	/// * `pop` disambiguates broadcasts published by different relays into a shared
-	///   cluster origin. Required whenever more than one relay shares an `origin`.
-	///   Without it, peer relays would publish to the same path and the origin's
-	///   single-source delivery would drop all but one. `None` is fine for single-node
-	///   dev.
+	/// * `node` disambiguates broadcasts published by different relays into a shared
+	///   cluster origin. Required: without it, peer relays would publish to the same
+	///   path and the origin's single-source delivery would drop all but one.
 	/// * `origin` is the [`OriginProducer`] that receives `publish_broadcast` calls
 	///   for each stats broadcast.
-	pub fn new(name: impl Into<String>, levels: u32, pop: Option<String>, origin: OriginProducer) -> Self {
+	pub fn new(prefix: impl Into<PathOwned>, levels: u32, node: impl Into<String>, origin: OriginProducer) -> Self {
 		Self {
 			inner: Arc::new(StatsInner {
-				name: name.into(),
+				prefix: prefix.into(),
 				levels,
-				pop,
+				node: node.into(),
 				origin,
 				entries: Lock::default(),
 			}),
 		}
 	}
 
-	/// Returns the configured `name`.
-	pub fn name(&self) -> &str {
-		&self.inner.name
+	/// Returns the configured top-level prefix.
+	pub fn prefix(&self) -> &Path<'static> {
+		&self.inner.prefix
 	}
 
 	/// Returns a tier-scoped handle. Bumps through this handle land in the
@@ -208,7 +208,9 @@ impl Stats {
 
 	fn broadcast_levels(&self, path: impl AsPath) -> Arc<[Arc<Level>]> {
 		let path = path.as_path();
-		if path.is_hidden() {
+		// Skip our own stats broadcasts (and any sibling category under the same
+		// prefix) so serving a stats broadcast doesn't generate more stats.
+		if path.has_prefix(&self.inner.prefix) {
 			return Arc::from([]);
 		}
 
@@ -220,7 +222,7 @@ impl Stats {
 				entries
 					.entry(key.clone())
 					.or_insert_with(|| {
-						let advertised = advertised_path(&key, &self.inner.name, self.inner.pop.as_deref());
+						let advertised = advertised_path(&self.inner.prefix, &key, &self.inner.node);
 						Arc::new(Level {
 							advertised,
 							external_publisher: Counters::default(),
@@ -229,8 +231,7 @@ impl Stats {
 							internal_subscriber: Counters::default(),
 							task: Lock::new(None),
 							origin: self.inner.origin.clone(),
-							name: self.inner.name.clone(),
-							pop: self.inner.pop.clone(),
+							node: self.inner.node.clone(),
 							level_key: key,
 						})
 					})
@@ -264,9 +265,9 @@ impl StatsHandle {
 	/// Returns a per-broadcast handle scoped to this tier. Cheap; level state is
 	/// created lazily and cached.
 	///
-	/// Hidden paths (any segment starting with `.`) return an empty handle whose
-	/// bumps are no-ops. This keeps stats traffic from feeding back into the
-	/// aggregator.
+	/// Paths under the aggregator's configured `prefix` return an empty handle
+	/// whose bumps are no-ops. This keeps stats traffic from feeding back into
+	/// the aggregator.
 	pub fn broadcast(&self, path: impl AsPath) -> BroadcastStats {
 		BroadcastStats {
 			levels: self.stats.broadcast_levels(path),
@@ -287,7 +288,8 @@ pub struct BroadcastStats {
 }
 
 impl BroadcastStats {
-	/// True if this handle is for a hidden path (no levels, all bumps are no-ops).
+	/// True if this handle covers no levels (its path was under the aggregator's
+	/// own prefix, so bumps are no-ops).
 	pub fn is_empty(&self) -> bool {
 		self.levels.is_empty()
 	}
@@ -636,12 +638,10 @@ struct Snapshot {
 #[derive(Debug, Serialize)]
 struct SnapshotFrame<'a> {
 	v: u32,
-	name: &'a str,
 	level: &'a str,
 	tier: &'a str,
 	role: &'a str,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pop: Option<&'a str>,
+	node: &'a str,
 	ts_ms: u64,
 	#[serde(flatten)]
 	snapshot: Snapshot,
@@ -650,11 +650,10 @@ struct SnapshotFrame<'a> {
 fn write_snapshot(track: &mut crate::TrackProducer, tier: Tier, role: Role, level: &Level, snapshot: Snapshot) {
 	let frame = SnapshotFrame {
 		v: 1,
-		name: &level.name,
 		level: level.level_key.as_str(),
 		tier: tier.as_str(),
 		role: role.as_str(),
-		pop: level.pop.as_deref(),
+		node: &level.node,
 		ts_ms: now_ms(),
 		snapshot,
 	};
@@ -699,15 +698,14 @@ fn level_keys(broadcast: &Path, levels: u32) -> Vec<PathOwned> {
 	(0..=max).map(|i| PathOwned::from(segs[..i].join("/"))).collect()
 }
 
-fn advertised_path(level_key: &Path, name: &str, pop: Option<&str>) -> PathOwned {
-	let tail = match pop {
-		Some(p) => format!("{name}/{p}"),
-		None => name.to_string(),
-	};
+fn advertised_path(prefix: &Path, level_key: &Path, node: &str) -> PathOwned {
+	// The fixed `broadcasts` category leaves room for sibling categories (e.g.
+	// `<prefix>/nodes/<node>` for host-level stats) under the same prefix.
+	let prefix = prefix.as_str();
 	if level_key.is_empty() {
-		PathOwned::from(format!(".stats/{tail}"))
+		PathOwned::from(format!("{prefix}/broadcasts/{node}"))
 	} else {
-		PathOwned::from(format!("{}/.stats/{tail}", level_key.as_str()))
+		PathOwned::from(format!("{prefix}/broadcasts/{}/{node}", level_key.as_str()))
 	}
 }
 
@@ -747,30 +745,31 @@ mod tests {
 
 	#[test]
 	fn advertised_path_root_and_nested() {
-		assert_eq!(advertised_path(&Path::new(""), "use", None).as_str(), ".stats/use");
+		let prefix = Path::new(".stats");
 		assert_eq!(
-			advertised_path(&Path::new("demo"), "use", None).as_str(),
-			"demo/.stats/use"
+			advertised_path(&prefix, &Path::new(""), "sjc").as_str(),
+			".stats/broadcasts/sjc"
 		);
 		assert_eq!(
-			advertised_path(&Path::new("demo/foo"), "use", None).as_str(),
-			"demo/foo/.stats/use"
+			advertised_path(&prefix, &Path::new("demo"), "sjc").as_str(),
+			".stats/broadcasts/demo/sjc"
+		);
+		assert_eq!(
+			advertised_path(&prefix, &Path::new("demo/foo"), "sjc").as_str(),
+			".stats/broadcasts/demo/foo/sjc"
 		);
 	}
 
 	#[test]
-	fn advertised_path_with_pop() {
+	fn advertised_path_honors_custom_prefix() {
+		let prefix = Path::new("metrics");
 		assert_eq!(
-			advertised_path(&Path::new(""), "use", Some("sjc")).as_str(),
-			".stats/use/sjc"
+			advertised_path(&prefix, &Path::new(""), "lon").as_str(),
+			"metrics/broadcasts/lon"
 		);
 		assert_eq!(
-			advertised_path(&Path::new("demo"), "use", Some("sjc")).as_str(),
-			"demo/.stats/use/sjc"
-		);
-		assert_eq!(
-			advertised_path(&Path::new("demo/room"), "use", Some("lon")).as_str(),
-			"demo/room/.stats/use/lon"
+			advertised_path(&prefix, &Path::new("demo/room"), "lon").as_str(),
+			"metrics/broadcasts/demo/room/lon"
 		);
 	}
 
@@ -779,7 +778,7 @@ mod tests {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
-		let stats = Stats::new("use", 2, None, origin);
+		let stats = Stats::new(".stats", 2, "sjc", origin);
 		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
 		let pub_role = bs.publisher();
 		let track = pub_role.track("video");
@@ -809,7 +808,7 @@ mod tests {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
-		let stats = Stats::new("use", 1, None, origin);
+		let stats = Stats::new(".stats", 1, "sjc", origin);
 		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
 		let sub_role = bs.subscriber();
 		let track = sub_role.track("video");
@@ -831,7 +830,7 @@ mod tests {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
-		let stats = Stats::new("use", 1, None, origin);
+		let stats = Stats::new(".stats", 1, "sjc", origin);
 		let ext = stats.tier(Tier::External);
 		let int = stats.tier(Tier::Internal);
 
@@ -853,7 +852,7 @@ mod tests {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
-		let stats = Stats::new("use", 2, None, origin);
+		let stats = Stats::new(".stats", 2, "sjc", origin);
 		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
 		let p = bs.publisher();
 		let track = p.track("video");
@@ -867,12 +866,14 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn hidden_paths_are_no_op() {
+	async fn paths_under_prefix_are_no_op() {
+		// Our own stats broadcasts (and any sibling category under the same
+		// prefix) must not feed back into the aggregator.
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
-		let stats = Stats::new("use", 2, None, origin);
-		let bs = stats.tier(Tier::External).broadcast(".stats/use");
+		let stats = Stats::new(".stats", 2, "sjc", origin);
+		let bs = stats.tier(Tier::External).broadcast(".stats/broadcasts/sjc");
 		assert!(bs.is_empty());
 
 		let p = bs.publisher();
@@ -884,16 +885,14 @@ mod tests {
 		drop(p);
 
 		assert!(stats.inner.entries.lock().is_empty());
-	}
 
-	#[tokio::test]
-	async fn hidden_paths_are_no_op_with_inner_dot_segment() {
-		// e.g. `mycdn/.stats/use/sjc` (our own stats output) must not feed back.
-		tokio::time::pause();
-		let origin = Origin::random().produce();
-		let stats = Stats::new("use", 5, Some("sjc".into()), origin);
-		let bs = stats.tier(Tier::External).broadcast("mycdn/.stats/use/sjc");
-		assert!(bs.is_empty());
+		// A hypothetical sibling under the same prefix is also a no-op.
+		assert!(
+			stats
+				.tier(Tier::External)
+				.broadcast(".stats/nodes/sjc")
+				.is_empty()
+		);
 	}
 
 	#[tokio::test]
@@ -901,7 +900,7 @@ mod tests {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
-		let stats = Stats::new("use", 1, None, origin.clone());
+		let stats = Stats::new(".stats", 1, "sjc", origin.clone());
 		let mut consumer = origin.consume();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -909,33 +908,40 @@ mod tests {
 		let _track = p.track("video");
 
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let (path, broadcast) = consumer.announced_all().await.expect("expected announce");
-		assert_eq!(path, Path::new(".stats/use"));
-		assert!(broadcast.is_some());
-	}
-
-	#[tokio::test]
-	async fn task_spawns_with_pop_suffix() {
-		tokio::time::pause();
-		let origin = Origin::random().produce();
-		let stats = Stats::new("use", 2, Some("sjc".into()), origin.clone());
-		let mut consumer = origin.consume();
-
-		let bs = stats.tier(Tier::External).broadcast("foo/bar");
-		let p = bs.publisher();
-		let _track = p.track("video");
-
-		tokio::time::advance(Duration::from_millis(1)).await;
-		// We should see two announces: the root and the per-first-segment level,
-		// each suffixed with `/sjc`.
+		// levels=1 + broadcast "foo/bar" → buckets ["", "foo"]: root + per-first-segment.
 		let mut seen = std::collections::HashSet::new();
 		for _ in 0..2 {
-			let (path, broadcast) = consumer.announced_all().await.expect("expected announce");
+			let (path, broadcast) = consumer.announced().await.expect("expected announce");
 			assert!(broadcast.is_some());
 			seen.insert(path.as_str().to_string());
 		}
-		assert!(seen.contains(".stats/use/sjc"));
-		assert!(seen.contains("foo/.stats/use/sjc"));
+		assert!(seen.contains(".stats/broadcasts/sjc"));
+		assert!(seen.contains(".stats/broadcasts/foo/sjc"));
+	}
+
+	#[tokio::test]
+	async fn task_spawns_with_node_suffix() {
+		tokio::time::pause();
+		let origin = Origin::random().produce();
+		let stats = Stats::new(".stats", 2, "sjc", origin.clone());
+		let mut consumer = origin.consume();
+
+		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let p = bs.publisher();
+		let _track = p.track("video");
+
+		tokio::time::advance(Duration::from_millis(1)).await;
+		// levels=2 + broadcast "foo/bar" → buckets ["", "foo", "foo/bar"], each
+		// suffixed with `/sjc`.
+		let mut seen = std::collections::HashSet::new();
+		for _ in 0..3 {
+			let (path, broadcast) = consumer.announced().await.expect("expected announce");
+			assert!(broadcast.is_some());
+			seen.insert(path.as_str().to_string());
+		}
+		assert!(seen.contains(".stats/broadcasts/sjc"));
+		assert!(seen.contains(".stats/broadcasts/foo/sjc"));
+		assert!(seen.contains(".stats/broadcasts/foo/bar/sjc"));
 	}
 
 	#[tokio::test]
@@ -946,7 +952,7 @@ mod tests {
 		// levels=1 + broadcast "foo/bar" → buckets ["", "foo"] (root prefix plus
 		// the first-segment prefix; the broadcast's own path isn't reachable at
 		// this depth, so we get exactly two stats announces).
-		let stats = Stats::new("use", 1, None, origin.clone());
+		let stats = Stats::new(".stats", 1, "sjc", origin.clone());
 		let mut consumer = origin.consume();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -956,12 +962,12 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let mut announced: Vec<String> = Vec::new();
 		for _ in 0..2 {
-			let (path, broadcast) = consumer.announced_all().await.expect("expected announce");
+			let (path, broadcast) = consumer.announced().await.expect("expected announce");
 			assert!(broadcast.is_some(), "expected an active announce");
 			announced.push(path.as_str().to_string());
 		}
 		announced.sort();
-		assert_eq!(announced, vec![".stats/use", "foo/.stats/use"]);
+		assert_eq!(announced, vec![".stats/broadcasts/foo/sjc", ".stats/broadcasts/sjc"]);
 
 		drop(track);
 		drop(p);
@@ -970,12 +976,12 @@ mod tests {
 		tokio::time::advance(Duration::from_secs(2)).await;
 		let mut unannounced: Vec<String> = Vec::new();
 		for _ in 0..2 {
-			let (path, broadcast) = consumer.announced_all().await.expect("expected unannounce");
+			let (path, broadcast) = consumer.announced().await.expect("expected unannounce");
 			assert!(broadcast.is_none(), "expected an unannounce");
 			unannounced.push(path.as_str().to_string());
 		}
 		unannounced.sort();
-		assert_eq!(unannounced, vec![".stats/use", "foo/.stats/use"]);
+		assert_eq!(unannounced, vec![".stats/broadcasts/foo/sjc", ".stats/broadcasts/sjc"]);
 	}
 
 	// Idle-skip behavior (the snapshot task suppresses a write when the
