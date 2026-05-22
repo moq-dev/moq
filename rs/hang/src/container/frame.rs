@@ -3,7 +3,7 @@ use derive_more::Debug;
 
 use crate::Error;
 
-pub type Timestamp = moq_lite::Timescale<1_000_000>;
+pub type Timestamp = moq_net::Timescale<1_000_000>;
 
 /// A media frame with a timestamp and codec-specific payload.
 ///
@@ -30,9 +30,9 @@ pub struct Frame {
 impl Frame {
 	/// Encode the frame to the given group as a single moq-lite frame:
 	/// VarInt timestamp prefix followed by the raw codec payload.
-	pub fn encode(&self, group: &mut moq_lite::GroupProducer) -> Result<(), Error> {
+	pub fn encode(&self, group: &mut moq_net::GroupProducer) -> Result<(), Error> {
 		let mut header = BytesMut::new();
-		self.timestamp.encode(&mut header).map_err(moq_lite::Error::from)?;
+		self.timestamp.encode(&mut header).map_err(moq_net::Error::from)?;
 
 		let size = header.len() + self.payload.len();
 

@@ -1,6 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import * as Moq from "@moq/lite";
+import * as Moq from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
 import { base64ToBytes } from "../base64";
@@ -148,12 +148,8 @@ export class Mse implements Backend {
 		const data = active.subscribe(track, Catalog.PRIORITY.video);
 		effect.cleanup(() => data.close());
 
-		const format =
-			config.container.kind === "loc"
-				? new Container.Loc.Format({ timescale: config.container.timescale })
-				: new Container.Legacy.Format();
+		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer that reorders groups/frames up to the provided latency.
-		// Legacy container uses microsecond timescale implicitly.
 		const consumer = new Container.Consumer(data, {
 			format,
 			latency: this.source.sync.buffer,

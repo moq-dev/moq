@@ -1,4 +1,4 @@
-import type * as Moq from "@moq/lite";
+import type * as Moq from "@moq/net";
 import * as z from "zod/mini";
 
 import { AudioSchema } from "./audio";

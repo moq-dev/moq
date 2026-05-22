@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-05-18
+
+### Changed
+
+- **Deprecated**: this crate has been renamed to [`moq-net`](https://crates.io/crates/moq-net).
+  It now re-exports `moq-net` for backwards compatibility. Please migrate your dependencies
+  from `moq-lite` to `moq-net`.
+
+## [0.16.2](https://github.com/moq-dev/moq/compare/moq-lite-v0.16.1...moq-lite-v0.16.2) - 2026-05-18
+
+### Other
+
+- tolerate Ended for unknown paths ([#1423](https://github.com/moq-dev/moq/pull/1423))
+
+## [0.16.1](https://github.com/moq-dev/moq/compare/moq-lite-v0.16.0...moq-lite-v0.16.1) - 2026-05-18
+
+### Other
+
+- enforce cluster loop detection on announce ([#1420](https://github.com/moq-dev/moq/pull/1420))
+- Add draft-ietf-moq-transport-18 support ([#1418](https://github.com/moq-dev/moq/pull/1418))
+- Reduce track group cache eviction timeout from 30s to 5s ([#1393](https://github.com/moq-dev/moq/pull/1393))
+
+## [0.16.0](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.15...moq-lite-v0.16.0) - 2026-05-07
+
+### Other
+
+- Revert the revert ([#1387](https://github.com/moq-dev/moq/pull/1387))
+- Revert "moq-lite: switch insert_track to take TrackConsumer ([#1356](https://github.com/moq-dev/moq/pull/1356))" ([#1385](https://github.com/moq-dev/moq/pull/1385))
+- switch insert_track to take TrackConsumer ([#1356](https://github.com/moq-dev/moq/pull/1356))
+- tighten public API surface and remove deprecated methods ([#1378](https://github.com/moq-dev/moq/pull/1378))
+- Revert moq-lite FETCH/Subscription API changes ([#1372](https://github.com/moq-dev/moq/pull/1372))
+- add fetch_group API + TrackDynamic ([#1357](https://github.com/moq-dev/moq/pull/1357))
+- per-frame buffer + BufMut producer to cut relay memory ([#1353](https://github.com/moq-dev/moq/pull/1353))
+- backport Subscription model API for FETCH readiness ([#1348](https://github.com/moq-dev/moq/pull/1348))
+- add OriginConsumer::wait_for_broadcast; deprecate consume_broadcast ([#1340](https://github.com/moq-dev/moq/pull/1340))
+- hop-based clustering ([#1322](https://github.com/moq-dev/moq/pull/1322))
+
 ## [0.15.15](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.14...moq-lite-v0.15.15) - 2026-04-19
 
 ### Other

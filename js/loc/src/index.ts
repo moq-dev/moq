@@ -1,18 +1,10 @@
-import type { Time } from "@moq/lite";
-import * as Moq from "@moq/lite";
+import type { Time } from "@moq/net";
+import * as Moq from "@moq/net";
 
 export interface Frame {
 	data: Uint8Array;
 	timestamp: Time.Micro;
 	keyframe: boolean;
-}
-
-export interface FormatOptions {
-	/**
-	 * Catalog-level timescale (units per second) used when a frame omits its own
-	 * 0x08 timescale property. Defaults to 1_000_000 (microseconds).
-	 */
-	timescale?: number;
 }
 
 const PROP_TIMESTAMP = 0x06;
@@ -25,15 +17,10 @@ const DEFAULT_TIMESCALE = 1_000_000;
  * draft-ietf-moq-loc.
  *
  * Each MoQ frame is a small property block (timestamp, optional per-frame
- * timescale) followed by the codec bitstream payload.
+ * timescale) followed by the codec bitstream payload. Frames without a 0x08
+ * timescale property are interpreted as microseconds.
  */
 export class Format {
-	#catalogTimescale: number;
-
-	constructor(opts: FormatOptions = {}) {
-		this.#catalogTimescale = opts.timescale ?? DEFAULT_TIMESCALE;
-	}
-
 	decode(frame: Uint8Array): Frame[] {
 		const [propsLen, afterLen] = Moq.Varint.decode(frame);
 		if (afterLen.byteLength < propsLen) {
@@ -73,7 +60,7 @@ export class Format {
 			throw new Error("loc: frame missing required timestamp property");
 		}
 
-		const activeTimescale = timescale ?? this.#catalogTimescale;
+		const activeTimescale = timescale ?? DEFAULT_TIMESCALE;
 		const micros = Math.round((timestamp * DEFAULT_TIMESCALE) / activeTimescale) as Time.Micro;
 
 		return [{ data: payload, timestamp: micros, keyframe: false }];
@@ -85,31 +72,19 @@ export interface Source {
 	copyTo(buffer: Uint8Array): void;
 }
 
-export interface ProducerOptions {
-	/**
-	 * Catalog-level timescale (units per second) used to rescale the
-	 * microsecond timestamps fed to {@link Producer.encode}.
-	 * Defaults to 1_000_000 (microseconds).
-	 */
-	timescale?: number;
-}
-
 /**
- * Encoder that packages frames as LOC and writes them to a moq-lite track.
+ * Encoder that packages frames as LOC and writes them to a moq-net track.
  *
- * Each call to {@link encode} produces one moq-lite frame containing a
- * property block with the 0x06 timestamp and the codec bitstream payload.
- * Per-frame 0x08 timescale is never emitted; decoders fall back to the
- * catalog timescale.
+ * Each call to {@link encode} produces one moq-net frame containing a
+ * property block with the 0x06 timestamp (in microseconds) and the codec
+ * bitstream payload.
  */
 export class Producer {
 	#track: Moq.Track;
 	#group?: Moq.Group;
-	#timescale: number;
 
-	constructor(track: Moq.Track, opts: ProducerOptions = {}) {
+	constructor(track: Moq.Track) {
 		this.#track = track;
-		this.#timescale = opts.timescale ?? DEFAULT_TIMESCALE;
 	}
 
 	encode(data: Uint8Array | Source, timestamp: Time.Micro, keyframe: boolean) {
@@ -124,10 +99,8 @@ export class Producer {
 	}
 
 	#encode(source: Uint8Array | Source, timestamp: Time.Micro): Uint8Array {
-		const scaled = Math.round((timestamp * this.#timescale) / DEFAULT_TIMESCALE);
-
 		const propTypeBytes = Moq.Varint.encode(PROP_TIMESTAMP);
-		const propValueBytes = Moq.Varint.encode(scaled);
+		const propValueBytes = Moq.Varint.encode(timestamp);
 		const propsLen = propTypeBytes.byteLength + propValueBytes.byteLength;
 
 		const propsLenBytes = Moq.Varint.encode(propsLen);
@@ -155,7 +128,7 @@ export class Producer {
 	}
 
 	close(err?: Error) {
-		this.#track.close(err);
 		this.#group?.close();
+		this.#track.close(err);
 	}
 }

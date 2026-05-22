@@ -9,14 +9,12 @@ use serde_with::{base64::Base64, serde_as};
 /// - "cmaf": Fragmented MP4 - frames contain complete moof+mdat fragments. The
 ///   init segment (ftyp+moov) is base64-encoded in the catalog.
 /// - "loc": Low Overhead Container (draft-ietf-moq-loc). Each frame is a small
-///   property block followed by the codec payload. The catalog `timescale` is
-///   the fallback used when a frame has no per-frame 0x08 timescale property.
-///   Defaults to 1_000_000 (microseconds) when omitted.
+///   property block followed by the codec payload.
 ///
 /// JSON examples:
 /// ```json
 /// { "kind": "cmaf", "init": "<base64-encoded ftyp+moov>" }
-/// { "kind": "loc", "timescale": 90000 }
+/// { "kind": "loc" }
 /// ```
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
@@ -30,18 +28,20 @@ pub enum Container {
 		/// CMAF init segment (ftyp+moov). Encoded as base64 over the wire.
 		#[serde_as(as = "Base64")]
 		init: Bytes,
-	},
-	Loc {
-		/// Catalog-level timescale (units per second) used when a LOC frame
-		/// omits its own 0x08 timescale property. Defaults to 1_000_000
-		/// (microseconds).
-		#[serde(default = "default_loc_timescale")]
-		timescale: u64,
-	},
-}
 
-fn default_loc_timescale() -> u64 {
-	1_000_000
+		/// Duplicates `mdhd.timescale` from `init`. Emitted for backwards
+		/// compatibility with players that predate the `init` field.
+		#[deprecated(note = "parse from `init` instead")]
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		timescale: Option<u32>,
+
+		/// Duplicates `tkhd.track_id` from `init`. Emitted for backwards
+		/// compatibility with players that predate the `init` field.
+		#[deprecated(note = "parse from `init` instead")]
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		track_id: Option<u32>,
+	},
+	Loc,
 }
 
 #[cfg(test)]
@@ -49,17 +49,11 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn loc_default_timescale() {
+	fn loc_roundtrip() {
 		let parsed: Container = serde_json::from_str(r#"{"kind":"loc"}"#).unwrap();
-		assert_eq!(parsed, Container::Loc { timescale: 1_000_000 });
-	}
-
-	#[test]
-	fn loc_explicit_timescale_roundtrip() {
-		let parsed: Container = serde_json::from_str(r#"{"kind":"loc","timescale":90000}"#).unwrap();
-		assert_eq!(parsed, Container::Loc { timescale: 90_000 });
+		assert_eq!(parsed, Container::Loc);
 
 		let json = serde_json::to_string(&parsed).unwrap();
-		assert_eq!(json, r#"{"kind":"loc","timescale":90000}"#);
+		assert_eq!(json, r#"{"kind":"loc"}"#);
 	}
 }

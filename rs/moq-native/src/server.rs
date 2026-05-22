@@ -2,7 +2,7 @@ use std::net;
 use std::path::PathBuf;
 
 use crate::QuicBackend;
-use moq_lite::Session;
+use moq_net::Session;
 use std::sync::{Arc, RwLock};
 use url::Url;
 #[cfg(feature = "iroh")]
@@ -146,7 +146,7 @@ pub struct ServerConfig {
 	/// Valid values: moq-lite-01, moq-lite-02, moq-lite-03, moq-transport-14, moq-transport-15, moq-transport-16
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[arg(id = "server-version", long = "server-version", env = "MOQ_SERVER_VERSION")]
-	pub version: Vec<moq_lite::Version>,
+	pub version: Vec<moq_net::Version>,
 
 	#[command(flatten)]
 	#[serde(default)]
@@ -159,11 +159,11 @@ impl ServerConfig {
 	}
 
 	/// Returns the configured versions, defaulting to all if none specified.
-	pub fn versions(&self) -> moq_lite::Versions {
+	pub fn versions(&self) -> moq_net::Versions {
 		if self.version.is_empty() {
-			moq_lite::Versions::all()
+			moq_net::Versions::all()
 		} else {
-			moq_lite::Versions::from(self.version.clone())
+			moq_net::Versions::from(self.version.clone())
 		}
 	}
 }
@@ -175,8 +175,8 @@ pub(crate) const DEFAULT_BIND: &str = "[::]:443";
 ///
 /// Create via [`ServerConfig::init`] or [`Server::new`].
 pub struct Server {
-	moq: moq_lite::Server,
-	versions: moq_lite::Versions,
+	moq: moq_net::Server,
+	versions: moq_net::Versions,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<iroh::Endpoint>,
@@ -241,7 +241,7 @@ impl Server {
 
 		Ok(Server {
 			accept: Default::default(),
-			moq: moq_lite::Server::new().with_versions(versions.clone()),
+			moq: moq_net::Server::new().with_versions(versions.clone()),
 			versions,
 			#[cfg(feature = "iroh")]
 			iroh: None,
@@ -273,12 +273,12 @@ impl Server {
 		self
 	}
 
-	pub fn with_publish(mut self, publish: impl Into<Option<moq_lite::OriginConsumer>>) -> Self {
+	pub fn with_publish(mut self, publish: impl Into<Option<moq_net::OriginConsumer>>) -> Self {
 		self.moq = self.moq.with_publish(publish);
 		self
 	}
 
-	pub fn with_consume(mut self, consume: impl Into<Option<moq_lite::OriginProducer>>) -> Self {
+	pub fn with_consume(mut self, consume: impl Into<Option<moq_net::OriginProducer>>) -> Self {
 		self.moq = self.moq.with_consume(consume);
 		self
 	}
@@ -531,7 +531,7 @@ pub(crate) enum RequestKind {
 /// [Self::with_publish] and [Self::with_consume] will configure what will be published and consumed from the session respectively.
 /// Otherwise, the Server's configuration is used by default.
 pub struct Request {
-	server: moq_lite::Server,
+	server: moq_net::Server,
 	kind: RequestKind,
 }
 
@@ -575,13 +575,13 @@ impl Request {
 	}
 
 	/// Publish the given origin to the session.
-	pub fn with_publish(mut self, publish: impl Into<Option<moq_lite::OriginConsumer>>) -> Self {
+	pub fn with_publish(mut self, publish: impl Into<Option<moq_net::OriginConsumer>>) -> Self {
 		self.server = self.server.with_publish(publish);
 		self
 	}
 
 	/// Consume the given origin from the session.
-	pub fn with_consume(mut self, consume: impl Into<Option<moq_lite::OriginProducer>>) -> Self {
+	pub fn with_consume(mut self, consume: impl Into<Option<moq_net::OriginProducer>>) -> Self {
 		self.server = self.server.with_consume(consume);
 		self
 	}

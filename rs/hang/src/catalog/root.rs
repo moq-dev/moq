@@ -33,7 +33,7 @@ pub struct Catalog {
 
 	/// Preview information about the broadcast
 	#[serde(default)]
-	pub preview: Option<moq_lite::Track>,
+	pub preview: Option<moq_net::Track>,
 }
 
 impl Catalog {
@@ -76,8 +76,8 @@ impl Catalog {
 		Ok(serde_json::to_writer(writer, self)?)
 	}
 
-	pub fn default_track() -> moq_lite::Track {
-		moq_lite::Track {
+	pub fn default_track() -> moq_net::Track {
+		moq_net::Track {
 			name: Catalog::DEFAULT_NAME.to_string(),
 			priority: 100,
 		}

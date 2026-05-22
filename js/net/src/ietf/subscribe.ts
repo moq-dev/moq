@@ -1,0 +1,336 @@
+import type * as Path from "../path.ts";
+import type { Reader, Writer } from "../stream.ts";
+import * as Message from "./message.ts";
+import * as Namespace from "./namespace.ts";
+import { Parameters } from "./parameters.ts";
+import * as Properties from "./properties.ts";
+import { type IetfVersion, Version } from "./version.ts";
+
+// we only support Group Order descending
+const GROUP_ORDER = 0x02;
+
+export class Subscribe {
+	static id = 0x03;
+
+	requestId: bigint;
+	trackNamespace: Path.Valid;
+	trackName: string;
+	subscriberPriority: number;
+
+	constructor({
+		requestId,
+		trackNamespace,
+		trackName,
+		subscriberPriority,
+	}: {
+		requestId: bigint;
+		trackNamespace: Path.Valid;
+		trackName: string;
+		subscriberPriority: number;
+	}) {
+		this.requestId = requestId;
+		this.trackNamespace = trackNamespace;
+		this.trackName = trackName;
+		this.subscriberPriority = subscriberPriority;
+	}
+
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		await w.u62(this.requestId);
+		if (version === Version.DRAFT_17) {
+			await w.u62(0n); // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
+		}
+		await Namespace.encode(w, this.trackNamespace);
+		await w.string(this.trackName);
+
+		if (version === Version.DRAFT_14) {
+			await w.u8(this.subscriberPriority);
+			await w.u8(GROUP_ORDER);
+			await w.bool(true); // forward = true
+			await w.u53(0x2); // filter type = LargestObject
+			await w.u53(0); // no parameters
+		} else {
+			// v15+: fields moved into parameters
+			const params = new Parameters();
+			params.subscriberPriority = this.subscriberPriority;
+			params.groupOrder = GROUP_ORDER;
+			params.forward = true;
+			params.subscriptionFilter = 0x2; // LargestObject
+			await params.encode(w, version);
+		}
+	}
+
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (mw) => this.#encode(mw, version));
+	}
+
+	static async decode(r: Reader, version: IetfVersion): Promise<Subscribe> {
+		return Message.decode(r, (mr) => Subscribe.#decode(mr, version));
+	}
+
+	static async #decode(r: Reader, version: IetfVersion): Promise<Subscribe> {
+		const requestId = await r.u62();
+		if (version === Version.DRAFT_17) {
+			await r.u62(); // required_request_id_delta (read and ignore)
+		}
+		const trackNamespace = await Namespace.decode(r);
+		const trackName = await r.string();
+
+		if (version === Version.DRAFT_14) {
+			const subscriberPriority = await r.u8();
+
+			let groupOrder = await r.u8();
+			if (groupOrder > 2) {
+				throw new Error(`unknown group order: ${groupOrder}`);
+			}
+			if (groupOrder === 0) {
+				groupOrder = GROUP_ORDER; // default to descending
+			}
+
+			const forward = await r.bool();
+			if (!forward) {
+				throw new Error(`unsupported forward value: ${forward}`);
+			}
+
+			const filterType = await r.u53();
+			if (filterType !== 0x1 && filterType !== 0x2) {
+				throw new Error(`unsupported filter type: ${filterType}`);
+			}
+
+			await Parameters.decode(r, version); // ignore parameters
+
+			return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority });
+		}
+		// v15+: fields are in parameters
+		const params = await Parameters.decode(r, version);
+		const subscriberPriority = params.subscriberPriority ?? 128;
+		let groupOrder = params.groupOrder ?? GROUP_ORDER;
+		if (groupOrder > 2) {
+			throw new Error(`unknown group order: ${groupOrder}`);
+		}
+		if (groupOrder === 0) {
+			groupOrder = GROUP_ORDER; // default to descending
+		}
+
+		const forward = params.forward ?? true;
+		if (!forward) {
+			throw new Error(`unsupported forward value: ${forward}`);
+		}
+
+		const filterType = params.subscriptionFilter ?? 0x2;
+		if (filterType !== 0x1 && filterType !== 0x2) {
+			throw new Error(`unsupported filter type: ${filterType}`);
+		}
+
+		return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority });
+	}
+}
+
+export class SubscribeOk {
+	static id = 0x04;
+
+	requestId: bigint | undefined;
+	trackAlias: bigint;
+
+	constructor({ requestId, trackAlias }: { requestId?: bigint; trackAlias: bigint }) {
+		this.requestId = requestId;
+		this.trackAlias = trackAlias;
+	}
+
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			if (this.requestId === undefined) throw new Error("requestId required for draft14-16");
+			await w.u62(this.requestId);
+		}
+		await w.u62(this.trackAlias);
+
+		if (version === Version.DRAFT_14) {
+			await w.u62(0n); // expires = 0
+			await w.u8(GROUP_ORDER);
+			await w.bool(false); // content exists = false
+			await w.u53(0); // no parameters
+		} else {
+			// v15+: just parameters after track_alias
+			const params = new Parameters();
+			params.groupOrder = GROUP_ORDER;
+			await params.encode(w, version);
+		}
+	}
+
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (mw) => this.#encode(mw, version));
+	}
+
+	static async decode(r: Reader, version: IetfVersion): Promise<SubscribeOk> {
+		return Message.decode(r, (mr) => SubscribeOk.#decode(mr, version));
+	}
+
+	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeOk> {
+		const requestId =
+			version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
+				? await r.u62()
+				: undefined;
+		const trackAlias = await r.u62();
+
+		if (version === Version.DRAFT_14) {
+			const expires = await r.u62();
+			if (expires !== BigInt(0)) {
+				throw new Error(`unsupported expires: ${expires}`);
+			}
+
+			await r.u8(); // Don't care about group order
+
+			const contentExists = await r.bool();
+			if (contentExists) {
+				// Ignore largest group/object
+				await r.u62();
+				await r.u62();
+			}
+
+			await Parameters.decode(r, version); // ignore parameters
+		} else {
+			// v15+: parameters followed by Track Properties (draft-17+)
+			await Parameters.decode(r, version);
+			await Properties.skip(r, version);
+		}
+
+		return new SubscribeOk({ requestId, trackAlias });
+	}
+}
+
+export class SubscribeError {
+	static id = 0x05;
+
+	requestId: bigint;
+	errorCode: number;
+	reasonPhrase: string;
+
+	constructor({
+		requestId,
+		errorCode,
+		reasonPhrase,
+	}: { requestId: bigint; errorCode: number; reasonPhrase: string }) {
+		this.requestId = requestId;
+		this.errorCode = errorCode;
+		this.reasonPhrase = reasonPhrase;
+	}
+
+	async #encode(w: Writer): Promise<void> {
+		await w.u62(this.requestId);
+		await w.u62(BigInt(this.errorCode));
+		await w.string(this.reasonPhrase);
+	}
+
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
+		return Message.encode(w, this.#encode.bind(this));
+	}
+
+	static async decode(r: Reader, _version: IetfVersion): Promise<SubscribeError> {
+		return Message.decode(r, SubscribeError.#decode);
+	}
+
+	static async #decode(r: Reader): Promise<SubscribeError> {
+		const requestId = await r.u62();
+		const errorCode = Number(await r.u62());
+		const reasonPhrase = await r.string();
+
+		return new SubscribeError({ requestId, errorCode, reasonPhrase });
+	}
+}
+
+export class SubscribeUpdate {
+	static id = 0x02;
+
+	requestId: bigint;
+
+	constructor({ requestId }: { requestId: bigint }) {
+		this.requestId = requestId;
+	}
+
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		if (version === Version.DRAFT_14) {
+			await w.u62(this.requestId);
+			await w.u62(0n); // subscription_request_id
+			await w.u62(0n); // start_group
+			await w.u62(0n); // start_object
+			await w.u62(0n); // end_group
+			await w.u8(128); // subscriber_priority
+			await w.bool(true); // forward
+			await w.u53(0); // no parameters
+		} else if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			await w.u62(this.requestId);
+			await w.u62(0n); // subscription_request_id
+			const params = new Parameters();
+			await params.encode(w, version);
+		} else {
+			// v17+: REQUEST_UPDATE
+			await w.u62(this.requestId);
+			if (version === Version.DRAFT_17) {
+				await w.u62(0n); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
+			}
+			const params = new Parameters();
+			await params.encode(w, version);
+		}
+	}
+
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (mw) => this.#encode(mw, version));
+	}
+
+	static async decode(r: Reader, version: IetfVersion): Promise<SubscribeUpdate> {
+		return Message.decode(r, (mr) => SubscribeUpdate.#decode(mr, version));
+	}
+
+	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeUpdate> {
+		if (version === Version.DRAFT_14) {
+			const requestId = await r.u62();
+			await r.u62(); // subscription_request_id
+			await r.u62(); // start_group
+			await r.u62(); // start_object
+			await r.u62(); // end_group
+			await r.u8(); // subscriber_priority
+			await r.bool(); // forward
+			await Parameters.decode(r, version); // parameters
+			return new SubscribeUpdate({ requestId });
+		} else if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			const requestId = await r.u62();
+			await r.u62(); // subscription_request_id
+			await Parameters.decode(r, version);
+			return new SubscribeUpdate({ requestId });
+		} else {
+			// v17+: REQUEST_UPDATE
+			const requestId = await r.u62();
+			if (version === Version.DRAFT_17) {
+				await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
+			}
+			await Parameters.decode(r, version);
+			return new SubscribeUpdate({ requestId });
+		}
+	}
+}
+
+export class Unsubscribe {
+	static readonly id = 0x0a;
+
+	requestId: bigint;
+
+	constructor({ requestId }: { requestId: bigint }) {
+		this.requestId = requestId;
+	}
+
+	async #encode(w: Writer): Promise<void> {
+		await w.u62(this.requestId);
+	}
+
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
+		return Message.encode(w, this.#encode.bind(this));
+	}
+
+	static async decode(r: Reader, _version: IetfVersion): Promise<Unsubscribe> {
+		return Message.decode(r, Unsubscribe.#decode);
+	}
+
+	static async #decode(r: Reader): Promise<Unsubscribe> {
+		const requestId = await r.u62();
+		return new Unsubscribe({ requestId });
+	}
+}

@@ -4,31 +4,28 @@ use crate::container::{Container, Frame, Timestamp};
 
 /// LOC (Low Overhead Container) frame format.
 ///
-/// Each moq-lite frame holds one LOC frame: a small property block (timestamp
+/// Each moq-net frame holds one LOC frame: a small property block (timestamp
 /// and optional per-frame timescale) followed by the codec bitstream. See
 /// [draft-ietf-moq-loc](https://www.ietf.org/archive/id/draft-ietf-moq-loc-00.html).
 ///
-/// `catalog_timescale` is the units/sec used when a frame omits its own 0x08
-/// timescale property. The catalog default is microseconds (`1_000_000`).
-pub struct Loc {
-	catalog_timescale: u64,
-}
+/// Frames without a 0x08 timescale property are interpreted as microseconds.
+#[derive(Default)]
+pub struct Loc;
 
 impl Loc {
-	pub fn new(catalog_timescale: u64) -> Self {
-		Self { catalog_timescale }
+	pub fn new() -> Self {
+		Self
 	}
 }
+
+const DEFAULT_TIMESCALE: u64 = 1_000_000;
 
 impl Container for Loc {
 	type Error = crate::Error;
 
-	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		for frame in frames {
-			// Rescale the microsecond timestamp into the catalog's timescale.
-			let scaled = (frame.timestamp.as_micros() * self.catalog_timescale as u128 / 1_000_000) as u64;
-
-			let data = moq_loc::encode(scaled, &frame.payload)?;
+			let data = moq_loc::encode(frame.timestamp.as_micros() as u64, &frame.payload)?;
 
 			let mut chunked = group.create_frame(data.len().into())?;
 			chunked.write(data)?;
@@ -39,7 +36,7 @@ impl Container for Loc {
 
 	fn poll_read(
 		&self,
-		group: &mut moq_lite::GroupConsumer,
+		group: &mut moq_net::GroupConsumer,
 		waiter: &conducer::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;
@@ -49,7 +46,7 @@ impl Container for Loc {
 		};
 
 		let loc = moq_loc::decode(data)?;
-		let timescale = loc.timescale.unwrap_or(self.catalog_timescale);
+		let timescale = loc.timescale.unwrap_or(DEFAULT_TIMESCALE);
 		let timestamp = Timestamp::from_scale(loc.timestamp, timescale).map_err(hang::Error::from)?;
 
 		Poll::Ready(Ok(Some(vec![Frame {

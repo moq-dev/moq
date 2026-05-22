@@ -26,7 +26,8 @@ pub enum Hang {
 	/// CMAF moof+mdat fragments. Wraps a parsed [`Cmaf`] (the track's `trak` box from the
 	/// init segment) so per-frame writes/reads have the timescale and track id available.
 	Cmaf(Cmaf),
-	/// Low Overhead Container. Wraps a [`Loc`] holding the catalog's fallback timescale.
+	/// Low Overhead Container. Frame timestamps use microseconds when the
+	/// per-frame 0x08 timescale property is absent.
 	Loc(Loc),
 }
 
@@ -36,8 +37,8 @@ impl TryFrom<&hang::catalog::Container> for Hang {
 	fn try_from(container: &hang::catalog::Container) -> Result<Self, Self::Error> {
 		match container {
 			hang::catalog::Container::Legacy => Ok(Self::Legacy),
-			hang::catalog::Container::Cmaf { init } => Ok(Self::Cmaf(Cmaf::from_init(init)?)),
-			hang::catalog::Container::Loc { timescale } => Ok(Self::Loc(Loc::new(*timescale))),
+			hang::catalog::Container::Cmaf { init, .. } => Ok(Self::Cmaf(Cmaf::from_init(init)?)),
+			hang::catalog::Container::Loc => Ok(Self::Loc(Loc::new())),
 		}
 	}
 }
@@ -45,7 +46,7 @@ impl TryFrom<&hang::catalog::Container> for Hang {
 impl Container for Hang {
 	type Error = crate::Error;
 
-	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		match self {
 			Self::Legacy => {
 				for frame in frames {
@@ -64,7 +65,7 @@ impl Container for Hang {
 
 	fn poll_read(
 		&self,
-		group: &mut moq_lite::GroupConsumer,
+		group: &mut moq_net::GroupConsumer,
 		waiter: &conducer::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		match self {

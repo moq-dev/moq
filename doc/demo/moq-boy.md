@@ -55,7 +55,7 @@ The browser upscales video with CSS `image-rendering: pixelated` so the pixel ar
 
 ## Metadata tracks
 
-The `status` and `command` tracks bypass the container format — they're raw UTF-8 JSON bytes written directly to [moq-lite](/rs/crate/moq-lite) groups.
+The `status` and `command` tracks bypass the container format — they're raw UTF-8 JSON bytes written directly to [moq-net](/rs/crate/moq-net) groups.
 
 | Track | Direction | Format |
 |-------|-----------|--------|
@@ -81,5 +81,5 @@ This works because subscriptions are a first-class signal in MoQ — the emulato
 - [moq-boy crate](/rs/crate/moq-boy) — the Rust binary
 - [@moq/boy package](/js/@moq/boy) — the browser player
 - [setup/demo/boy](/setup/demo/boy) — how to run it locally, controls, custom ROMs
-- [moq-lite](/rs/crate/moq-lite) — the transport layer used by every track here
+- [moq-net](/rs/crate/moq-net) — the networking layer used by every track here
 - [moq-mux](/rs/crate/moq-mux) — the container format used for A/V

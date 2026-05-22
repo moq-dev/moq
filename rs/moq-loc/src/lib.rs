@@ -23,14 +23,16 @@
 //! object header and are stripped by the transport layer.
 //!
 //! Varint encoding is QUIC-style throughout, matching the rest of the moq
-//! stack via [`moq_lite::Timescale`].
+//! stack.
 
 use bytes::{Buf, Bytes, BytesMut};
-use moq_lite::Timescale;
 
 /// Property IDs recognized by this implementation.
 const PROP_TIMESTAMP: u64 = 0x06;
 const PROP_TIMESCALE: u64 = 0x08;
+
+/// Maximum value representable as a 62-bit QUIC varint.
+const VARINT_MAX: u64 = (1u64 << 62) - 1;
 
 /// A decoded LOC frame.
 #[derive(Clone, Debug)]
@@ -60,13 +62,13 @@ pub enum Error {
 	#[error("malformed loc properties")]
 	MalformedProperties,
 
-	/// Underlying varint decode failed.
-	#[error("decode: {0}")]
-	Decode(#[from] moq_lite::DecodeError),
+	/// A varint did not fit in the buffer.
+	#[error("short buffer")]
+	ShortBuffer,
 
-	/// Underlying varint encode failed.
-	#[error("encode: {0}")]
-	Encode(#[from] moq_lite::EncodeError),
+	/// A value exceeds the 62-bit varint range.
+	#[error("value out of range")]
+	OutOfRange,
 }
 
 /// Decode a LOC frame.
@@ -143,18 +145,69 @@ pub fn encode(timestamp: u64, payload: &[u8]) -> Result<Bytes, Error> {
 	Ok(out.freeze())
 }
 
+/// Decode a QUIC-style varint (2-bit length tag in top bits).
 fn read_varint<B: Buf>(buf: &mut B) -> Result<u64, Error> {
-	let scaled = Timescale::<1>::decode(buf).map_err(|e| match e {
-		moq_lite::Error::Decode(d) => Error::Decode(d),
-		_ => Error::MalformedProperties,
-	})?;
-	// Timescale<1> stores the raw varint value (in units of 1 unit/sec).
-	Ok(scaled.as_secs())
+	if !buf.has_remaining() {
+		return Err(Error::ShortBuffer);
+	}
+	let b = buf.get_u8();
+	let tag = b >> 6;
+	let mut bytes = [0u8; 8];
+	bytes[0] = b & 0b0011_1111;
+	let value = match tag {
+		0b00 => u64::from(bytes[0]),
+		0b01 => {
+			if buf.remaining() < 1 {
+				return Err(Error::ShortBuffer);
+			}
+			buf.copy_to_slice(&mut bytes[1..2]);
+			u64::from(u16::from_be_bytes(bytes[..2].try_into().unwrap()))
+		}
+		0b10 => {
+			if buf.remaining() < 3 {
+				return Err(Error::ShortBuffer);
+			}
+			buf.copy_to_slice(&mut bytes[1..4]);
+			u64::from(u32::from_be_bytes(bytes[..4].try_into().unwrap()))
+		}
+		0b11 => {
+			if buf.remaining() < 7 {
+				return Err(Error::ShortBuffer);
+			}
+			buf.copy_to_slice(&mut bytes[1..8]);
+			u64::from_be_bytes(bytes)
+		}
+		_ => unreachable!(),
+	};
+	Ok(value)
 }
 
+/// Encode a QUIC-style varint (2-bit length tag in top bits).
 fn write_varint<B: bytes::BufMut>(buf: &mut B, value: u64) -> Result<(), Error> {
-	let scaled = Timescale::<1>::new_u64(value).map_err(|_| Error::Encode(moq_lite::EncodeError::BoundsExceeded))?;
-	scaled.encode(buf)?;
+	if value > VARINT_MAX {
+		return Err(Error::OutOfRange);
+	}
+	if value < (1u64 << 6) {
+		if buf.remaining_mut() < 1 {
+			return Err(Error::ShortBuffer);
+		}
+		buf.put_u8(value as u8);
+	} else if value < (1u64 << 14) {
+		if buf.remaining_mut() < 2 {
+			return Err(Error::ShortBuffer);
+		}
+		buf.put_u16(value as u16 | 0b01 << 14);
+	} else if value < (1u64 << 30) {
+		if buf.remaining_mut() < 4 {
+			return Err(Error::ShortBuffer);
+		}
+		buf.put_u32(value as u32 | 0b10 << 30);
+	} else {
+		if buf.remaining_mut() < 8 {
+			return Err(Error::ShortBuffer);
+		}
+		buf.put_u64(value | 0b11 << 62);
+	}
 	Ok(())
 }
 

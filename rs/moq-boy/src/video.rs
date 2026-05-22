@@ -21,7 +21,7 @@ use crate::emulator::{HEIGHT, WIDTH};
 pub struct VideoEncoder {
 	tx: tokio::sync::mpsc::Sender<EncoderMsg>,
 	/// Clone of the video track producer, for monitoring used/unused.
-	pub track: moq_lite::TrackProducer,
+	pub track: moq_net::TrackProducer,
 	force_keyframe: Arc<AtomicBool>,
 	/// Latest encode duration in microseconds.
 	encode_duration: Arc<AtomicU64>,
@@ -34,7 +34,7 @@ struct EncoderMsg {
 }
 
 impl VideoEncoder {
-	pub fn spawn(broadcast: moq_lite::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Self {
+	pub fn spawn(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
 		let avc3 = moq_mux::import::Avc3::new(broadcast, catalog);
 		let force_keyframe = Arc::new(AtomicBool::new(false));

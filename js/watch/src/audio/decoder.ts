@@ -1,8 +1,8 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
-import type * as Moq from "@moq/lite";
-import { Time } from "@moq/lite";
+import type * as Moq from "@moq/net";
+import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
 import { base64ToBytes } from "../base64";
@@ -189,10 +189,7 @@ export class Decoder {
 	}
 
 	#runLegacyDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
-		const format =
-			config.container.kind === "loc"
-				? new Container.Loc.Format({ timescale: config.container.timescale })
-				: new Container.Legacy.Format();
+		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Consumer(sub, {
@@ -312,7 +309,7 @@ export class Decoder {
 			});
 
 			for (;;) {
-				const next = await Promise.race([consumer.next(), effect.cancel]);
+				const next = await consumer.next();
 				if (!next) break;
 
 				const { frame } = next;

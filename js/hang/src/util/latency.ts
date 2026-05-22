@@ -1,5 +1,5 @@
-import type * as Moq from "@moq/lite";
-import { Time } from "@moq/lite";
+import type * as Moq from "@moq/net";
+import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 
 type ConfigWithJitter = { jitter?: number; framerate?: number };

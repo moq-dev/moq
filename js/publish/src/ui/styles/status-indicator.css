@@ -1,4 +1,4 @@
-.publish-ui__status-indicator {
+.status-indicator {
 	gap: var(--spacing-12);
 	padding: var(--spacing-12) var(--spacing-24);
 	border-radius: 12px;
@@ -7,7 +7,7 @@
 	border: var(--spacing-1) solid var(--color-white-alpha-10);
 }
 
-.publish-ui__status-indicator-dot {
+.status-indicator-dot {
 	position: relative;
 	width: 12px;
 	height: 12px;
@@ -16,7 +16,7 @@
 	z-index: 1;
 }
 
-.publish-ui__status-indicator-dot::after {
+.status-indicator-dot::after {
 	content: "";
 	position: absolute;
 	inset: 0;
@@ -28,73 +28,73 @@
 	z-index: -1;
 }
 
-.publish-ui__status-indicator-dot::after {
+.status-indicator-dot::after {
 	display: none;
 }
 
-.publish-ui__status-indicator-dot--live::after,
-.publish-ui__status-indicator-dot--warning::after,
-.publish-ui__status-indicator-dot--connecting::after,
-.publish-ui__status-indicator-dot--audio-only::after,
-.publish-ui__status-indicator-dot--video-only::after {
+.status-indicator-dot--live::after,
+.status-indicator-dot--warning::after,
+.status-indicator-dot--connecting::after,
+.status-indicator-dot--audio-only::after,
+.status-indicator-dot--video-only::after {
 	display: block;
 }
 
-.publish-ui__status-indicator-dot--error {
+.status-indicator-dot--error {
 	background: var(--color-gray-100);
 	color: var(--color-gray-100);
 }
 
-.publish-ui__status-indicator-text--error {
+.status-indicator-text--error {
 	color: var(--color-gray-100);
 }
 
-.publish-ui__status-indicator-dot--warning {
+.status-indicator-dot--warning {
 	background: var(--color-yellow-400);
 	color: var(--color-yellow-400);
 }
 
-.publish-ui__status-indicator-text--warning {
+.status-indicator-text--warning {
 	color: var(--color-yellow-400);
 }
 
-.publish-ui__status-indicator-dot--live {
+.status-indicator-dot--live {
 	background: var(--color-green-400);
 	color: var(--color-green-400);
 }
 
-.publish-ui__status-indicator-text--live {
+.status-indicator-text--live {
 	color: var(--color-green-400);
 }
 
-.publish-ui__status-indicator-dot--audio-only {
+.status-indicator-dot--audio-only {
 	background: var(--color-blue-500);
 	color: var(--color-blue-500);
 }
 
-.publish-ui__status-indicator-text--audio-only {
+.status-indicator-text--audio-only {
 	color: var(--color-blue-500);
 }
 
-.publish-ui__status-indicator-dot--video-only {
+.status-indicator-dot--video-only {
 	background: var(--color-purple-500);
 	color: var(--color-purple-500);
 }
 
-.publish-ui__status-indicator-text--video-only {
+.status-indicator-text--video-only {
 	color: var(--color-purple-500);
 }
 
-.publish-ui__status-indicator-dot--connecting {
+.status-indicator-dot--connecting {
 	background: var(--color-gray-100);
 	color: var(--color-gray-100);
 }
 
-.publish-ui__status-indicator-text--connecting {
+.status-indicator-text--connecting {
 	color: var(--color-gray-100);
 }
 
-.publish-ui__status-indicator-text {
+.status-indicator-text {
 	font-size: 1rem;
 	letter-spacing: 0.1rem;
 }

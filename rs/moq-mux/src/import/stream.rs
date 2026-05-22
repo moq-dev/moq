@@ -67,11 +67,7 @@ pub struct Stream {
 
 impl Stream {
 	/// Create a new stream importer with the given format.
-	pub fn new(
-		broadcast: moq_lite::BroadcastProducer,
-		catalog: crate::catalog::Producer,
-		format: StreamFormat,
-	) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer, format: StreamFormat) -> Self {
 		let decoder = match format {
 			StreamFormat::Avc3 => super::Avc3::new(broadcast, catalog).into(),
 			StreamFormat::Fmp4 => Box::new(super::Fmp4::new(broadcast, catalog)).into(),

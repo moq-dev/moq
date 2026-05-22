@@ -5,18 +5,22 @@ requires-python = ">=3.10"
 
 [tool.uv.workspace]
 members = ["py/*"]
-exclude = ["py/common"]
 
 [dependency-groups]
-dev = ["ruff", "maturin", "pyright"]
+dev = ["ruff", "maturin", "pyright", "pytest", "pytest-asyncio"]
 
 [tool.pyright]
 pythonVersion = "3.10"
 include = ["py"]
+# Skip uniffi-bindgen output: it's regenerated on every build and isn't
+# expected to pass our type checks.
+exclude = ["**/_uniffi"]
 
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+# Skip uniffi-bindgen output (regenerated on every build).
+extend-exclude = ["**/_uniffi"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]

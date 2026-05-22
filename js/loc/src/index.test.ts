@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { type Time, Varint } from "@moq/lite";
+import { type Time, Varint } from "@moq/net";
 import { Format } from "./index.ts";
 
 const PROP_TIMESTAMP = 0x06;
@@ -38,20 +38,8 @@ test("Format decodes timestamp at default microseconds timescale", () => {
 	expect(decoded.keyframe).toBe(false);
 });
 
-test("Format applies catalog timescale when frame has no per-frame timescale", () => {
-	// timestamp = 90 at catalog timescale 90_000 -> 1ms = 1000 micros
-	const props = concat(Varint.encode(PROP_TIMESTAMP), Varint.encode(90));
-	const frame = buildFrame(props, new Uint8Array());
-
-	const fmt = new Format({ timescale: 90_000 });
-	const [decoded] = fmt.decode(frame);
-
-	expect(decoded.timestamp).toBe(1000 as Time.Micro);
-});
-
 test("Format honors per-frame timescale property", () => {
 	// timestamp = 96000 at per-frame timescale 48000 -> 2 seconds = 2_000_000 micros
-	// Catalog says 1000 (would give a different answer).
 	const props = concat(
 		Varint.encode(PROP_TIMESTAMP),
 		Varint.encode(96_000),
@@ -60,7 +48,7 @@ test("Format honors per-frame timescale property", () => {
 	);
 	const frame = buildFrame(props, new Uint8Array());
 
-	const fmt = new Format({ timescale: 1000 });
+	const fmt = new Format();
 	const [decoded] = fmt.decode(frame);
 
 	expect(decoded.timestamp).toBe(2_000_000 as Time.Micro);

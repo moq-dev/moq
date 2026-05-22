@@ -40,7 +40,7 @@ The simplest way to watch a stream:
 For more control, use `@moq/watch` directly:
 
 ```typescript
-import * as Moq from "@moq/lite";
+import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
 
 const connection = await Moq.Connection.connect(
@@ -78,9 +78,9 @@ el.setAttribute("muted", "");
 el.removeAttribute("muted");
 ```
 
-## SolidJS Integration
+## UI Overlay
 
-Use `@moq/watch/ui` for the SolidJS UI overlay. The `<moq-watch-ui>` element wraps a nested `<moq-watch>`:
+Use `@moq/watch/ui` for the Web Component UI overlay. The `<moq-watch-ui>` element wraps a nested `<moq-watch>`:
 
 ```html
 <script type="module">

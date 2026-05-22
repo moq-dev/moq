@@ -15,7 +15,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
-		"@moq/lite": "workspace:^"
+		"@moq/net": "workspace:^"
 	},
 	"devDependencies": {
 		"@types/bun": "^1.3.11",

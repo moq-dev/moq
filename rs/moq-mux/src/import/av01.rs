@@ -8,7 +8,7 @@ use scuffle_av1::seq::SequenceHeaderObu;
 /// A decoder for AV1 with inline sequence headers.
 pub struct Av01 {
 	// The broadcast being produced.
-	broadcast: moq_lite::BroadcastProducer,
+	broadcast: moq_net::BroadcastProducer,
 
 	// The catalog being produced.
 	catalog: crate::catalog::Producer,
@@ -37,7 +37,7 @@ struct Frame {
 }
 
 impl Av01 {
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -247,6 +247,11 @@ impl Av01 {
 		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
 
 		Ok(())
+	}
+
+	/// Returns a reference to the underlying track producer.
+	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
+		Ok(&self.track.as_ref().context("not initialized")?.track)
 	}
 
 	/// Decode as much data as possible from the given buffer.

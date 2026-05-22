@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.10.25"
+version = "0.11.5"
 edition = "2024"
 rust-version.workspace = true
 
@@ -39,15 +39,13 @@ futures = "0.3"
 http-body = "1"
 http-cache-reqwest = { version = "0.16", features = ["manager-moka"], default-features = false }
 jsonwebtoken = "10"
-moq-lite = { workspace = true, features = ["serde"] }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+moq-net = { workspace = true, features = ["serde"] }
 moq-token = { workspace = true, features = ["tokio"] }
 qmux = { workspace = true, features = ["ws"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 reqwest-middleware = "0.4"
-rustls = { version = "0.23", features = [
-    "aws-lc-rs",
-], default-features = false }
+rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_with = { version = "3", features = ["json", "base64"] }

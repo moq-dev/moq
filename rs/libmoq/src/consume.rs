@@ -5,7 +5,7 @@ use crate::ffi::OnStatus;
 use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_video_config};
 
 struct ConsumeCatalog {
-	broadcast: moq_lite::BroadcastConsumer,
+	broadcast: moq_net::BroadcastConsumer,
 
 	catalog: hang::catalog::Catalog,
 
@@ -25,7 +25,7 @@ struct TaskEntry {
 #[derive(Default)]
 pub struct Consume {
 	/// Active broadcast consumers.
-	broadcast: NonZeroSlab<moq_lite::BroadcastConsumer>,
+	broadcast: NonZeroSlab<moq_net::BroadcastConsumer>,
 
 	/// Active catalog consumers and their broadcast references.
 	catalog: NonZeroSlab<ConsumeCatalog>,
@@ -41,7 +41,7 @@ pub struct Consume {
 }
 
 impl Consume {
-	pub fn start(&mut self, broadcast: moq_lite::BroadcastConsumer) -> Result<Id, Error> {
+	pub fn start(&mut self, broadcast: moq_net::BroadcastConsumer) -> Result<Id, Error> {
 		self.broadcast.insert(broadcast)
 	}
 
@@ -73,7 +73,7 @@ impl Consume {
 
 	async fn run_catalog(
 		task_id: Id,
-		broadcast: moq_lite::BroadcastConsumer,
+		broadcast: moq_net::BroadcastConsumer,
 		mut catalog: moq_mux::catalog::Consumer,
 	) -> Result<(), Error> {
 		while let Some(catalog) = catalog.next().await? {
@@ -216,7 +216,7 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 
-		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
+		let track = consume.broadcast.subscribe_track(&moq_net::Track {
 			name: rendition.clone(),
 			priority: 1, // TODO: Remove priority
 		})?;
@@ -260,7 +260,7 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 
-		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
+		let track = consume.broadcast.subscribe_track(&moq_net::Track {
 			name: rendition.clone(),
 			priority: 2, // TODO: Remove priority
 		})?;
@@ -327,7 +327,7 @@ impl Consume {
 	pub fn frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
 		let f = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
 
-		let timestamp_us = f.timestamp.as_micros().try_into().map_err(|_| moq_lite::TimeOverflow)?;
+		let timestamp_us = f.timestamp.as_micros().try_into().map_err(|_| moq_net::TimeOverflow)?;
 
 		*dst = moq_frame {
 			payload: f.payload.as_ptr(),

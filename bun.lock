@@ -70,7 +70,7 @@
       "dependencies": {
         "@fails-components/webtransport": "^1.5.2",
         "@fails-components/webtransport-transport-http3-quiche": "^1.5.2",
-        "@moq/lite": "workspace:*",
+        "@moq/net": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "^24.3.1",
@@ -79,12 +79,12 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.8.8",
-        "@moq/lite": "workspace:^",
         "@moq/loc": "workspace:^",
+        "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
         "@svta/cml-iso-bmff": "^1.0.0-alpha.9",
         "zod": "^4.1.5",
@@ -100,11 +100,9 @@
     },
     "js/lite": {
       "name": "@moq/lite",
-      "version": "0.2.2",
+      "version": "0.3.0",
       "dependencies": {
-        "@moq/qmux": "^0.0.6",
-        "@moq/signals": "workspace:*",
-        "async-mutex": "^0.5.0",
+        "@moq/net": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "^1.3.11",
@@ -112,7 +110,6 @@
         "@typescript/lib-dom": "npm:@types/web@^0.0.241",
         "rimraf": "^6.0.1",
         "typescript": "^6.0.0",
-        "vite-plugin-html": "^3.2.2",
       },
       "peerDependencies": {
         "zod": "^4.0.0",
@@ -122,7 +119,7 @@
       "name": "@moq/loc",
       "version": "0.1.0",
       "dependencies": {
-        "@moq/lite": "workspace:^",
+        "@moq/net": "workspace:^",
       },
       "devDependencies": {
         "@types/bun": "^1.3.11",
@@ -132,11 +129,10 @@
     },
     "js/moq-boy": {
       "name": "@moq/boy",
-      "version": "0.2.8",
+      "version": "0.2.9",
       "dependencies": {
-        "@moq/lite": "workspace:^",
+        "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
-        "@moq/ui-core": "workspace:^",
         "@moq/watch": "workspace:^",
         "zod": "^4.3.6",
       },
@@ -154,7 +150,7 @@
       "name": "@moq/msf",
       "version": "0.1.0",
       "dependencies": {
-        "@moq/lite": "workspace:^",
+        "@moq/net": "workspace:^",
         "zod": "^4.1.5",
       },
       "devDependencies": {
@@ -162,25 +158,41 @@
         "typescript": "^6.0.0",
       },
     },
+    "js/net": {
+      "name": "@moq/net",
+      "version": "0.1.0",
+      "dependencies": {
+        "@moq/qmux": "^0.0.6",
+        "@moq/signals": "workspace:*",
+        "async-mutex": "^0.5.0",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.11",
+        "@types/node": "^24.3.1",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.241",
+        "rimraf": "^6.0.1",
+        "typescript": "^6.0.0",
+        "vite-plugin-html": "^3.2.2",
+      },
+      "peerDependencies": {
+        "zod": "^4.0.0",
+      },
+    },
     "js/publish": {
       "name": "@moq/publish",
-      "version": "0.2.6",
+      "version": "0.2.7",
       "dependencies": {
         "@moq/hang": "workspace:^",
-        "@moq/lite": "workspace:^",
+        "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
-        "@moq/ui-core": "workspace:^",
       },
       "devDependencies": {
         "@types/audioworklet": "^0.0.77",
         "@typescript/lib-dom": "npm:@types/web@^0.0.241",
         "esbuild": "^0.27.0",
         "rimraf": "^6.0.1",
-        "solid-element": "^1.9.1",
-        "solid-js": "^1.9.10",
         "typescript": "^6.0.0",
         "vite": "^7.3.1",
-        "vite-plugin-solid": "^2.11.10",
       },
     },
     "js/signals": {
@@ -205,7 +217,7 @@
     },
     "js/token": {
       "name": "@moq/token",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "bin": {
         "moq-token": "./src/cli.ts",
       },
@@ -222,31 +234,14 @@
         "typescript": "^6.0.0",
       },
     },
-    "js/ui-core": {
-      "name": "@moq/ui-core",
-      "version": "0.1.0",
-      "devDependencies": {
-        "@biomejs/biome": "^2.4.3",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.241",
-        "rimraf": "^6.0.1",
-        "solid-js": "^1.9.10",
-        "typescript": "^6.0.0",
-        "vite": "^7.3.1",
-        "vite-plugin-solid": "^2.11.10",
-      },
-      "peerDependencies": {
-        "@moq/signals": "workspace:^0.1.0",
-      },
-    },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.2.10",
+      "version": "0.2.11",
       "dependencies": {
         "@moq/hang": "workspace:^",
-        "@moq/lite": "workspace:^",
         "@moq/msf": "workspace:^",
+        "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
-        "@moq/ui-core": "workspace:^",
       },
       "devDependencies": {
         "@types/audioworklet": "^0.0.77",
@@ -254,11 +249,8 @@
         "@typescript/lib-dom": "npm:@types/web@^0.0.241",
         "esbuild": "^0.27.0",
         "rimraf": "^6.0.1",
-        "solid-element": "^1.9.1",
-        "solid-js": "^1.9.10",
         "typescript": "^6.0.0",
         "vite": "^7.3.1",
-        "vite-plugin-solid": "^2.11.10",
       },
     },
   },
@@ -532,6 +524,8 @@
 
     "@moq/msf": ["@moq/msf@workspace:js/msf"],
 
+    "@moq/net": ["@moq/net@workspace:js/net"],
+
     "@moq/publish": ["@moq/publish@workspace:js/publish"],
 
     "@moq/qmux": ["@moq/qmux@0.0.6", "", {}, "sha512-ISuGz05lUvf1hzHW3Aw3VnsGRJe1w9Qdog3LQ66KS+l+5mzQsPANvW8yOioEe1Z9dJO2G3sAHoGPnzwnsY9SIQ=="],
@@ -539,8 +533,6 @@
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 
     "@moq/token": ["@moq/token@workspace:js/token"],
-
-    "@moq/ui-core": ["@moq/ui-core@workspace:js/ui-core"],
 
     "@moq/watch": ["@moq/watch@workspace:js/watch"],
 
