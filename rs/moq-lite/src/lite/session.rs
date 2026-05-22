@@ -1,5 +1,5 @@
 use crate::{
-	BandwidthConsumer, BandwidthProducer, Error, Origin, OriginConsumer, OriginProducer, Stats, coding::Stream,
+	BandwidthConsumer, BandwidthProducer, Error, Origin, OriginConsumer, OriginProducer, StatsHandle, coding::Stream,
 	lite::SessionInfo,
 };
 
@@ -13,8 +13,8 @@ pub fn start<S: web_transport_trait::Session>(
 	publish: Option<OriginConsumer>,
 	// We will consume any remote broadcasts, inserting them into this origin.
 	subscribe: Option<OriginProducer>,
-	// Optional stats aggregator. None disables instrumentation for this session.
-	stats: Option<Stats>,
+	// Optional tier-scoped stats handle. None disables instrumentation for this session.
+	stats: Option<StatsHandle>,
 	// The version of the protocol to use.
 	version: Version,
 ) -> Result<Option<BandwidthConsumer>, Error> {

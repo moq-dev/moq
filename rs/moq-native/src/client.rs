@@ -322,8 +322,8 @@ impl Client {
 		self
 	}
 
-	/// Attach a [`moq_lite::Stats`] aggregator to all sessions opened by this client.
-	pub fn with_stats(mut self, stats: impl Into<Option<moq_lite::Stats>>) -> Self {
+	/// Attach a tier-scoped [`moq_lite::StatsHandle`] to all sessions opened by this client.
+	pub fn with_stats(mut self, stats: impl Into<Option<moq_lite::StatsHandle>>) -> Self {
 		self.moq = self.moq.with_stats(stats);
 		self
 	}

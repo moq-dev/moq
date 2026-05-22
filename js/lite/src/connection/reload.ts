@@ -1,5 +1,5 @@
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type * as Path from "../path.ts";
+import * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions } from "./connect.ts";
 import type { Established } from "./established.ts";
@@ -43,9 +43,17 @@ export class Reload {
 	status = new Signal<ReloadStatus>("disconnected");
 	established = new Signal<Established | undefined>(undefined);
 
-	// All actively announced broadcast paths, updated reactively.
+	// All actively announced *user-visible* broadcast paths, updated reactively.
+	// Paths with a hidden segment (any segment starting with `.`, e.g. `.stats/...`)
+	// are filtered out. See [`announcedAll`] for an unfiltered view.
 	#announced = new Signal<Set<Path.Valid>>(new Set());
 	readonly announced: Getter<Set<Path.Valid>> = this.#announced;
+
+	// All actively announced broadcast paths *including* hidden ones (e.g.
+	// `.stats/<name>/<pop>`). Use this when you need to discover infrastructure
+	// broadcasts; most apps want [`announced`] instead.
+	#announcedAll = new Signal<Set<Path.Valid>>(new Set());
+	readonly announcedAll: Getter<Set<Path.Valid>> = this.#announcedAll;
 
 	// WebTransport options (not reactive).
 	webtransport?: WebTransportOptions;
@@ -147,11 +155,15 @@ export class Reload {
 
 	#runAnnounced(effect: Effect): void {
 		this.#announced.set(new Set());
+		this.#announcedAll.set(new Set());
 
 		const conn = effect.get(this.established);
 		if (!conn) return;
 
-		effect.cleanup(() => this.#announced.set(new Set()));
+		effect.cleanup(() => {
+			this.#announced.set(new Set());
+			this.#announcedAll.set(new Set());
+		});
 
 		// Cloudflare's relay does not yet support SUBSCRIBE_NAMESPACE, so
 		// skip announce subscriptions entirely for those hosts.
@@ -168,16 +180,29 @@ export class Reload {
 					const entry = await Promise.race([effect.cancel, announced.next()]);
 					if (!entry) break;
 
-					this.#announced.mutate((active) => {
+					const visible = !Path.isHidden(entry.path);
+
+					this.#announcedAll.mutate((active) => {
 						if (entry.active) {
 							active.add(entry.path);
 						} else {
 							active.delete(entry.path);
 						}
 					});
+
+					if (visible) {
+						this.#announced.mutate((active) => {
+							if (entry.active) {
+								active.add(entry.path);
+							} else {
+								active.delete(entry.path);
+							}
+						});
+					}
 				}
 			} catch (err) {
 				this.#announced.set(new Set());
+				this.#announcedAll.set(new Set());
 				throw err;
 			}
 		});

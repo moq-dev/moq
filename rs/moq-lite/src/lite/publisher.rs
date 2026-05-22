@@ -5,7 +5,8 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, Stats as MoqStats, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, Track,
+	TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -186,7 +187,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 				// Send ANNOUNCE_INIT as the first message with all currently active paths
 				// We use `try_next()` to synchronously get the initial updates.
-				while let Some((path, active)) = origin.try_announced() {
+				// Use _all so hidden paths (`.stats/...`) flow to subscribers; without
+				// this the monitor dashboard can't discover relay-published stats.
+				while let Some((path, active)) = origin.try_announced_all() {
 					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
 
 					if active.is_some() {
@@ -219,7 +222,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			tokio::select! {
 				biased;
 				res = stream.reader.closed() => return res,
-				announced = origin.announced() => {
+				announced = origin.announced_all() => {
 					match announced {
 						Some((path, active)) => {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();

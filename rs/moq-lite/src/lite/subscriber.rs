@@ -7,7 +7,7 @@ use futures::{StreamExt, stream::FuturesUnordered};
 
 use crate::{
 	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer,
-	OriginProducer, Path, PathOwned, Stats, SubscriberStats, SubscriberTrack, TrackProducer,
+	OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -24,7 +24,7 @@ pub(super) struct SubscriberConfig {
 	/// feature (used by versions that don't carry probe streams).
 	pub recv_bandwidth: Option<BandwidthProducer>,
 	/// Optional stats aggregator for this session's ingress.
-	pub stats: Option<Stats>,
+	pub stats: Option<StatsHandle>,
 	/// Per-session origin id shared with the matching `Publisher`.
 	pub self_origin: crate::Origin,
 	pub version: Version,
@@ -35,7 +35,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 
 	origin: Option<OriginProducer>,
-	stats: Option<Stats>,
+	stats: Option<StatsHandle>,
 	recv_bandwidth: Option<BandwidthProducer>,
 	// Session-level origin id shared with the Publisher. Kept so callers that
 	// want to filter reflected announces can reuse the same id; for now only
@@ -142,6 +142,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// when an Ended announcement arrives.
 		let mut stats_guards: HashMap<PathOwned, SubscriberStats> = HashMap::new();
 
+		// Stats keys are absolute paths (matching the publisher side) so the
+		// fanned-out level keys line up with the absolute broadcast paths a
+		// dashboard sees on the origin.
+
 		match self.version {
 			Version::Lite01 | Version::Lite02 => {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
@@ -150,8 +154,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// Lite01/02 don't carry hop information; the broadcast starts with an empty chain.
 					self.start_announce(path.clone(), crate::OriginList::new(), &mut producers)?;
 					if let Some(stats) = self.stats.as_ref() {
-						let guard = stats.broadcast(&path).subscriber();
-						stats_guards.insert(path, guard);
+						let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
+						let guard = stats.broadcast(&abs).subscriber();
+						stats_guards.insert(abs, guard);
 					}
 				}
 			}
@@ -166,8 +171,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let path = prefix.join(&suffix);
 					self.start_announce(path.clone(), hops, &mut producers)?;
 					if let Some(stats) = self.stats.as_ref() {
-						let guard = stats.broadcast(&path).subscriber();
-						stats_guards.insert(path, guard);
+						let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
+						let guard = stats.broadcast(&abs).subscriber();
+						stats_guards.insert(abs, guard);
 					}
 				}
 				lite::Announce::Ended { suffix, .. } => {
@@ -177,7 +183,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// Abort the producer.
 					let mut producer = producers.remove(&path).ok_or(Error::NotFound)?;
 					producer.abort(Error::Cancel).ok();
-					stats_guards.remove(&path);
+					if self.stats.is_some() {
+						let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
+						stats_guards.remove(&abs);
+					}
 				}
 			}
 		}
@@ -296,10 +305,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_subscribe(&mut self, id: u64, path: PathOwned, broadcast: BroadcastDynamic, mut track: TrackProducer) {
 		// Subscriber-side track stats; counters bump as frames/bytes/groups arrive.
 		// Drop on subscription end records `subscriber.subscriptions_closed`.
-		let track_stats = self
-			.stats
-			.as_ref()
-			.map(|stats| Arc::new(stats.broadcast(&path).subscriber().track(&track.name)));
+		// Use the absolute path so per-level fanout matches the publisher side.
+		let track_stats = self.stats.as_ref().map(|stats| {
+			let abs = self.origin.as_ref().unwrap().absolute(&path);
+			Arc::new(stats.broadcast(&abs).subscriber().track(&track.name))
+		});
 
 		self.subscribes.lock().insert(
 			id,

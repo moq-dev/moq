@@ -283,8 +283,8 @@ impl Server {
 		self
 	}
 
-	/// Attach a [`moq_lite::Stats`] aggregator to all sessions accepted by this server.
-	pub fn with_stats(mut self, stats: impl Into<Option<moq_lite::Stats>>) -> Self {
+	/// Attach a tier-scoped [`moq_lite::StatsHandle`] to all sessions accepted by this server.
+	pub fn with_stats(mut self, stats: impl Into<Option<moq_lite::StatsHandle>>) -> Self {
 		self.moq = self.moq.with_stats(stats);
 		self
 	}
@@ -592,8 +592,8 @@ impl Request {
 		self
 	}
 
-	/// Attach a [`moq_lite::Stats`] aggregator to this session.
-	pub fn with_stats(mut self, stats: impl Into<Option<moq_lite::Stats>>) -> Self {
+	/// Attach a tier-scoped [`moq_lite::StatsHandle`] to this session.
+	pub fn with_stats(mut self, stats: impl Into<Option<moq_lite::StatsHandle>>) -> Self {
 		self.server = self.server.with_stats(stats);
 		self
 	}

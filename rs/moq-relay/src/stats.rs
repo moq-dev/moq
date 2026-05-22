@@ -10,15 +10,15 @@ use serde::{Deserialize, Serialize};
 ///
 /// Stats are disabled when `name` is unset. When configured, the relay attaches
 /// a [`moq_lite::Stats`] aggregator to every session it accepts (and every cluster
-/// dial), which publishes `.stats/<level>/<name>` broadcasts on the cluster origin.
-/// Each level only advertises while at least one role on that level has an active
-/// subscription.
+/// dial), which publishes `<level>/.stats/<name>[/<pop>]` broadcasts on the cluster
+/// origin. Each level only advertises while at least one role on that level has an
+/// active subscription.
 #[derive(Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 #[group(id = "stats-config")]
 pub struct StatsConfig {
-	/// Identifier baked into advertised stats paths (`.stats/<level>/<name>`).
+	/// Identifier baked into advertised stats paths (`<level>/.stats/<name>[/<pop>]`).
 	/// Stats are disabled when unset.
 	#[arg(long = "stats-name", env = "MOQ_STATS_NAME")]
 	pub name: Option<String>,
@@ -26,8 +26,22 @@ pub struct StatsConfig {
 	/// How many path-prefix levels to bucket stats by.
 	///
 	/// `1` produces only the root bucket (`.stats/<name>`). `2` adds a per-first-segment
-	/// bucket (e.g. `.stats/demo/<name>` for broadcasts under `demo/*`). Levels deeper
-	/// than the broadcast path's segment count are skipped.
-	#[arg(long = "stats-levels", env = "MOQ_STATS_LEVELS", default_value_t = 1)]
-	pub levels: u32,
+	/// bucket (e.g. `demo/.stats/<name>` for broadcasts under `demo/*`). Levels deeper
+	/// than the broadcast path's segment count are skipped. `None` is treated as `1`
+	/// at the cluster constructor.
+	///
+	/// `Option<u32>` rather than `u32` with a clap default so that
+	/// `Config::load()`'s `update_from(args)` (which clap runs after merging TOML)
+	/// doesn't overwrite a TOML-provided value when the flag is absent from the
+	/// CLI.
+	#[arg(long = "stats-levels", env = "MOQ_STATS_LEVELS")]
+	pub levels: Option<u32>,
+
+	/// POP identifier appended to advertised stats paths to disambiguate broadcasts
+	/// when multiple relays share a cluster origin. Without this, peer relays would
+	/// publish to the same `<level>/.stats/<name>` path and the origin's
+	/// single-source delivery would drop all but one. Required in any multi-relay
+	/// deployment.
+	#[arg(long = "stats-pop", env = "MOQ_STATS_POP")]
+	pub pop: Option<String>,
 }

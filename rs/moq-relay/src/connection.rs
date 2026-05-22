@@ -69,13 +69,15 @@ impl Connection {
 		}
 
 		// mTLS-authenticated peers (including other cluster nodes) report through
-		// the internal stats handle so a billing service can rate-differentiate
-		// from external traffic.
-		let stats = if internal {
-			self.cluster.stats_internal.clone()
+		// the internal tier so a billing service can rate-differentiate from
+		// external traffic. The aggregator is shared; the tier picks which counter
+		// set within each level the bumps land in.
+		let tier = if internal {
+			moq_lite::Tier::Internal
 		} else {
-			self.cluster.stats_external.clone()
+			moq_lite::Tier::External
 		};
+		let stats = self.cluster.stats.as_ref().map(|s| s.tier(tier));
 
 		// Accept the connection.
 		// NOTE: subscribe and publish seem backwards because of how relays work.

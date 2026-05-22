@@ -15,7 +15,7 @@ use axum::{
 	http::StatusCode,
 	response::Response,
 };
-use moq_lite::{OriginConsumer, OriginProducer, Stats};
+use moq_lite::{OriginConsumer, OriginProducer, StatsHandle, Tier};
 
 use crate::{AuthParams, AuthToken, WebState, web::AuthQuery, web::MtlsPeer, web::landing_response};
 
@@ -43,12 +43,9 @@ pub(crate) async fn serve_ws(
 	};
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
-	// mTLS sessions record on the internal stats handle; everything else on external.
-	let stats = if internal {
-		state.cluster.stats_internal.clone()
-	} else {
-		state.cluster.stats_external.clone()
-	};
+	// mTLS sessions record on the internal tier; everything else on external.
+	let tier = if internal { Tier::Internal } else { Tier::External };
+	let stats = state.cluster.stats.as_ref().map(|s| s.tier(tier));
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.
@@ -78,7 +75,7 @@ async fn handle_socket<T>(
 	socket: T,
 	publish: Option<OriginProducer>,
 	subscribe: Option<OriginConsumer>,
-	stats: Option<Stats>,
+	stats: Option<StatsHandle>,
 ) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
