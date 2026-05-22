@@ -81,6 +81,19 @@ test("Format throws when the timestamp property is missing", () => {
 	expect(() => fmt.decode(frame)).toThrow(/timestamp/);
 });
 
+test("Format rejects zero per-frame timescale", () => {
+	const props = concat(
+		Varint.encode(PROP_TIMESTAMP),
+		Varint.encode(10),
+		Varint.encode(PROP_TIMESCALE - PROP_TIMESTAMP),
+		Varint.encode(0),
+	);
+	const frame = buildFrame(props, new Uint8Array([0xaa]));
+
+	const fmt = new Format();
+	expect(() => fmt.decode(frame)).toThrow(/timescale/);
+});
+
 test("Format throws when properties_length exceeds frame size", () => {
 	const lenBytes = Varint.encode(100);
 	const buf = new Uint8Array(lenBytes.byteLength + 1);

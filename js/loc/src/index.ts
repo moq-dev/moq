@@ -45,8 +45,14 @@ export class Format {
 			if (abs % 2 === 0) {
 				const [value, afterValue] = Moq.Varint.decode(cursor);
 				cursor = afterValue;
-				if (abs === PROP_TIMESTAMP) timestamp = value;
-				else if (abs === PROP_TIMESCALE) timescale = value;
+				if (abs === PROP_TIMESTAMP) {
+					timestamp = value;
+				} else if (abs === PROP_TIMESCALE) {
+					if (value === 0) {
+						throw new Error("loc: timescale property must be non-zero");
+					}
+					timescale = value;
+				}
 			} else {
 				const [len, afterLenInner] = Moq.Varint.decode(cursor);
 				if (afterLenInner.byteLength < len) {

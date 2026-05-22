@@ -104,7 +104,12 @@ pub fn decode(mut buf: Bytes) -> Result<Frame, Error> {
 			let value = read_varint(&mut props)?;
 			match abs {
 				PROP_TIMESTAMP => timestamp = Some(value),
-				PROP_TIMESCALE => timescale = Some(value),
+				PROP_TIMESCALE => {
+					if value == 0 {
+						return Err(Error::MalformedProperties);
+					}
+					timescale = Some(value);
+				}
 				_ => {}
 			}
 		} else {
@@ -289,6 +294,23 @@ mod tests {
 		frame.extend_from_slice(b"payload");
 
 		assert!(matches!(decode(frame.freeze()), Err(Error::MissingTimestamp)));
+	}
+
+	#[test]
+	fn decode_rejects_zero_timescale() {
+		// Per-frame 0x08 timescale of 0 is invalid (would divide by zero).
+		let mut props = BytesMut::new();
+		write_varint(&mut props, PROP_TIMESTAMP).unwrap();
+		write_varint(&mut props, 10).unwrap();
+		write_varint(&mut props, PROP_TIMESCALE - PROP_TIMESTAMP).unwrap();
+		write_varint(&mut props, 0).unwrap();
+
+		let mut frame = BytesMut::new();
+		write_varint(&mut frame, props.len() as u64).unwrap();
+		frame.extend_from_slice(&props);
+		frame.extend_from_slice(b"x");
+
+		assert!(matches!(decode(frame.freeze()), Err(Error::MalformedProperties)));
 	}
 
 	#[test]
