@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: release-kt
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   parse-version:

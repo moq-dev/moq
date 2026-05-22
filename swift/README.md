@@ -37,11 +37,11 @@ Cancelling the surrounding Swift `Task` propagates through to the underlying `ca
 
 `swift/scripts/check.sh` builds `moq-ffi` for the host, regenerates the UniFFI Swift bindings, builds a single-slice `MoqFFI.xcframework`, and runs `swift test`. Requires macOS with `xcodebuild` and `swift` on `$PATH`. Invoked by `just check-ffi`; skips cleanly on non-macOS hosts.
 
-The `swift.yml` workflow triggers on the same `moq-ffi-v*` tag as the Kotlin and Python releases, so the Swift package version always echoes moq-ffi's.
+The `release-swift.yml` workflow triggers on the same `moq-ffi-v*` tag as the Kotlin and Python releases, so the Swift package version always echoes moq-ffi's.
 
 ## Layout
 
-```
+```text
 swift/
   Package.swift           Manifest (URL+checksum rewritten by package.sh at release time)
   Sources/

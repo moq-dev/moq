@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Uses associative arrays (declare -A); not available in Bash 3.2 (the
+# default `/usr/bin/bash` on macOS).
+if ((BASH_VERSINFO[0] < 4)); then
+    echo "Error: kt/scripts/package.sh requires Bash >= 4 (found $BASH_VERSION)" >&2
+    exit 1
+fi
+
 # Assemble the moq-ffi Kotlin package and stage it for publication.
 #
 # Designed to run after the workflow has placed per-target moq-ffi

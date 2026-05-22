@@ -55,6 +55,10 @@ command -v xcodebuild >/dev/null || { echo "Error: xcodebuild not found" >&2; ex
 command -v swift >/dev/null || { echo "Error: swift not found" >&2; exit 1; }
 
 mkdir -p "$OUTPUT_DIR"
+# Normalize to an absolute path: later steps (zip, swift package
+# compute-checksum) run from cd'd subshells, so a relative OUTPUT_DIR
+# would resolve against the wrong cwd.
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 
 STAGING=$(mktemp -d)
 trap 'rm -rf "$STAGING"' EXIT

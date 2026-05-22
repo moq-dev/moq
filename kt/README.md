@@ -71,7 +71,7 @@ When `moq-ffi` splits into `moq-mux-ffi` + `moq-net-ffi`, add sibling modules `k
 
 ## Publishing to Maven Central
 
-The `kotlin.yml` workflow uses [`com.vanniktech.maven.publish`](https://vanniktech.github.io/gradle-maven-publish-plugin/) to upload artifacts to the [Sonatype Central Portal](https://central.sonatype.com) and trigger the release automatically on every `moq-ffi-v*` tag. Required setup (one-time):
+The `release-kt.yml` workflow uses [`com.vanniktech.maven.publish`](https://vanniktech.github.io/gradle-maven-publish-plugin/) to upload artifacts to the [Sonatype Central Portal](https://central.sonatype.com) and trigger the release automatically on every `moq-ffi-v*` tag. Required setup (one-time):
 
 1. Register at https://central.sonatype.com and claim the `dev.moq` namespace (TXT record on `moq.dev` with the verification key). The auto-verified alternative `io.github.moq-dev` works without DNS setup but changes artifact coordinates.
 2. Account menu -> Generate User Token. Save the username/password (one-time view).
