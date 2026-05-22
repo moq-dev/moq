@@ -349,12 +349,7 @@ fn build_init(catalog: &Catalog) -> anyhow::Result<Bytes> {
 /// - Per-frame mode (`Some(ZERO)`)
 /// - Audio in an audio-only broadcast under default `None` mode (otherwise
 ///   the buffer would never flush — no keyframe boundary and no time cap)
-fn should_flush(
-	track: &Fmp4Track,
-	frame: &Frame,
-	fragment_duration: Option<Duration>,
-	has_video_track: bool,
-) -> bool {
+fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Duration>, has_video_track: bool) -> bool {
 	if track.buffer.is_empty() {
 		return false;
 	}
