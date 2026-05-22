@@ -354,6 +354,23 @@ impl Mkv {
 			active.insert(name.clone(), ());
 		}
 
+		// The MKV `Tracks` element is written once and can't be amended, so
+		// reject any rendition add/remove once the header has been emitted.
+		if self.header_emitted {
+			for name in active.keys() {
+				if !self.tracks.contains_key(name) {
+					anyhow::bail!("MKV track layout changed after header was emitted: track '{name}' added");
+				}
+			}
+			for name in self.tracks.keys() {
+				if !active.contains_key(name) {
+					anyhow::bail!("MKV track layout changed after header was emitted: track '{name}' removed");
+				}
+			}
+			self.catalog_snapshot = Some(catalog);
+			return Ok(());
+		}
+
 		let mut next_track_number: u64 = self.tracks.values().map(|t| t.track_number).max().unwrap_or(0) + 1;
 
 		for (name, config) in catalog.video.renditions.iter() {
@@ -564,9 +581,12 @@ fn subscribe(
 /// Build a video transform for the given catalog config, or None if no
 /// transform is needed (e.g. VP8/VP9/AV1, or H.264 with pre-built avcC).
 fn build_video_transform(config: &VideoConfig) -> anyhow::Result<Option<VideoTransform>> {
+	// Treat an empty description the same as a missing one: an Annex-B source
+	// with no codec config yet, not a passthrough avc1/hvc1 stream.
+	let description = config.description.clone().filter(|d| !d.is_empty());
 	match &config.codec {
-		VideoCodec::H264(_) => Ok(Some(VideoTransform::Avc1(Avc1::new(config.description.clone())))),
-		VideoCodec::H265(_) => Ok(Some(VideoTransform::Hvc1(Hvc1::new(config.description.clone())))),
+		VideoCodec::H264(_) => Ok(Some(VideoTransform::Avc1(Avc1::new(description)))),
+		VideoCodec::H265(_) => Ok(Some(VideoTransform::Hvc1(Hvc1::new(description)))),
 		_ => Ok(None),
 	}
 }

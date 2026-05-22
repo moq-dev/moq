@@ -198,14 +198,12 @@ impl Mkv {
 					}
 				}
 			}
-			MatroskaSpec::Tracks(Master::Full(children)) => {
-				// Idempotency: if the parser restarts mid-stream and `last_offset`
-				// happens to point at Tracks (i.e. Tracks was the last fully-emitted
-				// tag), we'll see it again. Process once.
-				if !self.tracks_seen {
-					self.handle_tracks(children)?;
-					self.tracks_seen = true;
-				}
+			// Idempotency: if the parser restarts mid-stream and `last_offset`
+			// happens to point at Tracks (i.e. Tracks was the last fully-emitted
+			// tag), we'll see it again. Process once.
+			MatroskaSpec::Tracks(Master::Full(children)) if !self.tracks_seen => {
+				self.handle_tracks(children)?;
+				self.tracks_seen = true;
 			}
 			MatroskaSpec::Cluster(Master::Start) => {
 				self.cluster_timestamp = 0;
