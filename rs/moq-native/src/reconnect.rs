@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use url::Url;
@@ -64,16 +65,16 @@ impl Default for Backoff {
 /// with exponential backoff. Dropping the handle aborts the background task.
 pub struct Reconnect {
 	abort: tokio::task::AbortHandle,
-	closed_rx: tokio::sync::watch::Receiver<Option<String>>,
+	closed_rx: tokio::sync::watch::Receiver<Option<Arc<anyhow::Error>>>,
 }
 
 impl Reconnect {
 	pub(crate) fn new(client: Client, url: Url, backoff: Backoff) -> Self {
-		let (closed_tx, closed_rx) = tokio::sync::watch::channel(None::<String>);
+		let (closed_tx, closed_rx) = tokio::sync::watch::channel(None::<Arc<anyhow::Error>>);
 		let task = tokio::spawn(async move {
 			if let Err(err) = Self::run(client, url, backoff).await {
 				tracing::error!(err = %format!("{err:#}"), "reconnect loop exited");
-				let _ = closed_tx.send(Some(format!("{err:#}")));
+				let _ = closed_tx.send(Some(Arc::new(err)));
 			}
 		});
 		Self {
@@ -124,7 +125,10 @@ impl Reconnect {
 	pub async fn closed(&self) -> anyhow::Result<()> {
 		let mut rx = self.closed_rx.clone();
 		match rx.wait_for(|v| v.is_some()).await {
-			Ok(v) => anyhow::bail!("{}", v.as_ref().expect("predicate matched Some")),
+			Ok(v) => {
+				let err = Arc::clone(v.as_ref().expect("predicate matched Some"));
+				Err(anyhow::anyhow!("{err:#}"))
+			}
 			Err(_) => Ok(()),
 		}
 	}
