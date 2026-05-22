@@ -68,7 +68,10 @@ export class Screen {
 			effect.cleanup(() => v?.stop());
 			effect.cleanup(() => a?.stop());
 
-			effect.set(this.source, { video: v, audio: a });
+			effect.set(this.source, {
+				video: v,
+				audio: a ? { track: a, kind: "music" } : undefined,
+			});
 		});
 	}
 
