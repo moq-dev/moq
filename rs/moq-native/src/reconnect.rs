@@ -35,7 +35,7 @@ pub struct Backoff {
 	pub max: Duration,
 
 	/// Maximum time to spend retrying before giving up.
-	/// Resets after each successful connection.
+	/// Resets after each successful connection. Set to 0 for unlimited retries.
 	#[arg(
 		id = "backoff-timeout",
 		long,
@@ -88,7 +88,7 @@ impl Reconnect {
 		let mut last_error: Option<anyhow::Error> = None;
 
 		loop {
-			if retry_start.elapsed() > backoff.timeout {
+			if !backoff.timeout.is_zero() && retry_start.elapsed() > backoff.timeout {
 				let timeout = backoff.timeout;
 				return Err(last_error
 					.map(|e| e.context(format!("reconnect timed out after {timeout:?}")))
