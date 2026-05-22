@@ -283,6 +283,12 @@ impl Server {
 		self
 	}
 
+	/// Attach a tier-scoped [`moq_net::StatsHandle`] to all sessions accepted by this server.
+	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
+		self.moq = self.moq.with_stats(stats);
+		self
+	}
+
 	// Return the SHA256 fingerprints of all our certificates.
 	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
 		#[cfg(feature = "noq")]
@@ -583,6 +589,12 @@ impl Request {
 	/// Consume the given origin from the session.
 	pub fn with_consume(mut self, consume: impl Into<Option<moq_net::OriginProducer>>) -> Self {
 		self.server = self.server.with_consume(consume);
+		self
+	}
+
+	/// Attach a tier-scoped [`moq_net::StatsHandle`] to this session.
+	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
+		self.server = self.server.with_stats(stats);
 		self
 	}
 

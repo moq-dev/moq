@@ -475,19 +475,24 @@ pub struct AuthToken {
 	pub subscribe: PathPrefixes,
 	/// Paths the holder is allowed to publish to, relative to `root`.
 	pub publish: PathPrefixes,
+	/// True when the peer authenticated through a trusted TLS root rather than
+	/// a JWT. Used to record stats on the internal tier so cluster peers can
+	/// be billed separately from end-user traffic.
+	pub internal: bool,
 }
 
 impl AuthToken {
 	/// Construct a token for a peer that was authenticated at the TLS layer
 	/// via mTLS. These peers are granted full (root-scoped) publish and
-	/// subscribe access. The cert's trust chain (verified against the
-	/// configured CA) is the only credential we require — DNS SANs and the
-	/// `?register=` name are no longer consulted.
+	/// subscribe access and are flagged as internal. The cert's trust chain
+	/// (verified against the configured CA) is the only credential we require
+	/// — DNS SANs and the `?register=` name are no longer consulted.
 	pub fn unrestricted() -> Self {
 		Self {
 			root: PathOwned::default(),
 			subscribe: PathPrefixes::from(vec![Path::new("").to_owned()]),
 			publish: PathPrefixes::from(vec![Path::new("").to_owned()]),
+			internal: true,
 		}
 	}
 }
@@ -789,6 +794,7 @@ impl Auth {
 			root: root.to_owned(),
 			subscribe,
 			publish,
+			internal: false,
 		})
 	}
 
