@@ -48,7 +48,7 @@ fn test_bbb_init_roundtrip() {
 	let catalog = run_fmp4(data);
 
 	let video = catalog.video.renditions.values().next().unwrap();
-	let Container::Cmaf { init } = &video.container else {
+	let Container::Cmaf { init, .. } = &video.container else {
 		panic!("expected Cmaf container");
 	};
 	let (ftyp, moov) = decode_init(init);
@@ -69,7 +69,7 @@ fn test_bbb_init_roundtrip() {
 	assert_eq!(moov2.trak.len(), 1);
 
 	let audio = catalog.audio.renditions.values().next().unwrap();
-	let Container::Cmaf { init } = &audio.container else {
+	let Container::Cmaf { init, .. } = &audio.container else {
 		panic!("expected Cmaf container");
 	};
 	let (ftyp, moov) = decode_init(init);
@@ -94,7 +94,7 @@ fn test_av1_catalog() {
 	assert!(video.codec.to_string().starts_with("av01."), "codec: {}", video.codec);
 	assert!(matches!(video.container, Container::Cmaf { .. }));
 
-	let Container::Cmaf { init } = &video.container else {
+	let Container::Cmaf { init, .. } = &video.container else {
 		panic!("expected Cmaf container");
 	};
 	let (ftyp, moov) = decode_init(init);
@@ -117,7 +117,7 @@ fn test_vp9_catalog() {
 	assert!(video.codec.to_string().starts_with("vp09."), "codec: {}", video.codec);
 	assert!(matches!(video.container, Container::Cmaf { .. }));
 
-	let Container::Cmaf { init } = &video.container else {
+	let Container::Cmaf { init, .. } = &video.container else {
 		panic!("expected Cmaf container");
 	};
 	let (ftyp, moov) = decode_init(init);

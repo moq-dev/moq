@@ -216,7 +216,11 @@ impl Fmp4 {
 			ftyp.encode(&mut buf)?;
 			single_moov.encode(&mut buf)?;
 
-			Ok(Container::Cmaf { init: buf.into() })
+			Ok(Container::Cmaf {
+				init: buf.into(),
+				timescale: Some(trak.mdia.mdhd.timescale),
+				track_id: Some(trak.tkhd.track_id),
+			})
 		}
 	}
 
