@@ -146,7 +146,12 @@ fn container_from_msf(track: &moq_msf::Track) -> anyhow::Result<Option<Container
 		moq_msf::Packaging::Cmaf => {
 			let init = decode_init_data(track)?
 				.with_context(|| format!("MSF CMAF track {:?} missing init_data", track.name))?;
-			Ok(Some(Container::Cmaf { init }))
+			#[allow(deprecated)]
+			Ok(Some(Container::Cmaf {
+				init,
+				timescale: None,
+				track_id: None,
+			}))
 		}
 		_ => Ok(None),
 	}
@@ -455,7 +460,7 @@ mod test {
 		let video = catalog.video.renditions.get("video0").expect("video0 rendition");
 
 		match &video.container {
-			Container::Cmaf { init } => assert_eq!(init.as_ref(), expected_init.as_slice()),
+			Container::Cmaf { init, .. } => assert_eq!(init.as_ref(), expected_init.as_slice()),
 			Container::Legacy => panic!("expected Cmaf container, got Legacy"),
 		}
 		assert_eq!(video.coded_width, Some(1920));
