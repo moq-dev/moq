@@ -80,7 +80,7 @@ where
 		+ 'static,
 {
 	// Wrap the WebSocket in a WebTransport compatibility layer.
-	let ws = qmux::ws::accept(socket, None);
+	let ws = qmux::ws::Bare::new(socket).accept();
 	let session = moq_net::Server::new()
 		.with_publish(subscribe)
 		.with_consume(publish)

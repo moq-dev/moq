@@ -45,3 +45,7 @@ pnpm-lock.yaml
 __pycache__/
 *.pyc
 .venv/
+
+# maturin develop drops uniffi bindings + cdylib here during editable
+# installs of py/moq-net.
+/py/moq-net/moq_net/_uniffi/

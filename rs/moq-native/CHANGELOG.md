@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.3](https://github.com/moq-dev/moq/compare/moq-native-v0.14.2...moq-native-v0.14.3) - 2026-05-21
+
+### Other
+
+- Add audio encoder reconfiguration ([#1362](https://github.com/moq-dev/moq/pull/1362))
+
 ## [0.14.2](https://github.com/moq-dev/moq/compare/moq-native-v0.14.1...moq-native-v0.14.2) - 2026-05-20
 
 ### Other

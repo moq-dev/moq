@@ -51,6 +51,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)
   hang/              # Media encoding/streaming (catalog/container format)
   libmoq/            # C bindings (staticlib)
+  moq-ffi/           # UniFFI bindings for Python/Swift/Kotlin (cdylib + staticlib)
   moq-boy/           # MoQ Boy emulator publisher (binary: moq-boy)
   moq-gst/           # GStreamer plugin (moqsink/moqsrc elements)
 
@@ -64,6 +65,12 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   watch/             # Watch/subscribe to streams + UI (published as @moq/watch)
   publish/           # Publish media to streams + UI (published as @moq/publish)
   moq-boy/           # MoQ Boy web viewer (published as @moq/boy)
+
+/py/                  # Python packages (uv workspace)
+  moq-net/           # Maturin project: bundles rs/moq-ffi cdylib + uniffi
+                     # bindings as moq_net._uniffi. Published as moq-net on
+                     # PyPI; version tracks rs/moq-ffi (release-py.yml fires
+                     # on moq-ffi-v* tags).
 
 /demo/                # Demos and test media
   boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)

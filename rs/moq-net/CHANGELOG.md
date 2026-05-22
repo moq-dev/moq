@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/moq-dev/moq/compare/moq-net-v0.1.1...moq-net-v0.1.2) - 2026-05-21
+
+### Other
+
+- Replace mpsc with conducer for coalesced origin consumer updates ([#1433](https://github.com/moq-dev/moq/pull/1433))
+
 ## [0.1.1](https://github.com/moq-dev/moq/compare/moq-net-v0.1.0...moq-net-v0.1.1) - 2026-05-20
 
 ### Other
