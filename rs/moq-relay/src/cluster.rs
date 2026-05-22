@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use moq_net::{Origin, OriginConsumer, OriginProducer};
+use moq_net::{Origin, OriginConsumer, OriginProducer, Stats, Tier};
 use url::Url;
 
-use crate::AuthToken;
+use crate::{AuthToken, StatsConfig};
 
 /// Configuration for relay clustering.
 ///
@@ -48,14 +48,33 @@ pub struct Cluster {
 	/// All broadcasts, local and remote. Downstream sessions read from here
 	/// (filtered by their auth token) and remote dials both read and write here.
 	pub origin: OriginProducer,
+
+	/// Stats aggregator. One instance per relay; sessions pick a tier via
+	/// [`Stats::tier`] at acceptance time so external (non-mTLS) and internal
+	/// (mTLS / cluster peer) traffic land in separate counter sets. When stats
+	/// publishing is disabled, this is a no-op aggregator.
+	pub stats: Stats,
 }
 
 impl Cluster {
 	/// Creates a new cluster with the given configuration and QUIC client.
-	pub fn new(config: ClusterConfig, client: moq_native::Client) -> Self {
+	pub fn new(config: ClusterConfig, stats_config: StatsConfig, client: moq_native::Client) -> Self {
 		let origin = Origin::random().produce();
 		tracing::info!(origin_id = %origin.id, "cluster initialized");
-		Cluster { config, client, origin }
+		let stats = if stats_config.enabled {
+			let levels = stats_config.levels.unwrap_or(1).max(1);
+			let prefix = stats_config.prefix.clone().unwrap_or_else(|| ".stats".to_string());
+			tracing::info!(prefix, levels, node = ?stats_config.node, "stats publishing enabled");
+			Stats::new(prefix, levels, stats_config.node.clone(), origin.clone())
+		} else {
+			Stats::disabled()
+		};
+		Cluster {
+			config,
+			client,
+			origin,
+			stats,
+		}
 	}
 
 	/// Returns an [`OriginConsumer`] scoped to this session's subscribe permissions.
@@ -145,11 +164,13 @@ impl Cluster {
 		log_url.set_query(None);
 		tracing::info!(url = %log_url, "dialing cluster peer");
 
+		// Cluster-to-cluster traffic is internal by definition.
 		let session = self
 			.client
 			.clone()
 			.with_publish(self.origin.consume())
 			.with_consume(self.origin.clone())
+			.with_stats(self.stats.tier(Tier::Internal))
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;

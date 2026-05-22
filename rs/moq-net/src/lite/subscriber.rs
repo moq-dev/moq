@@ -7,7 +7,7 @@ use futures::{StreamExt, stream::FuturesUnordered};
 
 use crate::{
 	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer,
-	OriginProducer, Path, PathOwned, TrackProducer,
+	OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -17,43 +17,59 @@ use super::Version;
 
 use web_async::Lock;
 
+pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
+	pub session: S,
+	/// The origin into which remote broadcasts are inserted.
+	pub origin: Option<OriginProducer>,
+	/// Receiver-side bandwidth producer for PROBE feedback. None disables the
+	/// feature (used by versions that don't carry probe streams).
+	pub recv_bandwidth: Option<BandwidthProducer>,
+	/// Stats aggregator for this session's ingress. Use [`StatsHandle::disabled`]
+	/// to opt out.
+	pub stats: StatsHandle,
+	pub version: Version,
+}
+
 #[derive(Clone)]
 pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 
 	origin: Option<OriginProducer>,
+	stats: StatsHandle,
 	recv_bandwidth: Option<BandwidthProducer>,
 	// Session-level origin id shared with the Publisher. Used to filter out
 	// reflected announces: we ask the peer (via AnnounceInterest.exclude_hop)
 	// to skip broadcasts whose hop chain already passed through us, and we
 	// double-check incoming announces against it as defense in depth.
 	self_origin: crate::Origin,
-	subscribes: Lock<HashMap<u64, TrackProducer>>,
+	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
 }
 
+#[derive(Clone)]
+struct TrackEntry {
+	producer: TrackProducer,
+	stats: Arc<SubscriberTrack>,
+}
+
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(
-		session: S,
-		origin: Option<OriginProducer>,
-		recv_bandwidth: Option<BandwidthProducer>,
-		version: Version,
-	) -> Self {
+	pub fn new(config: SubscriberConfig<S>) -> Self {
 		// Identity for incoming-hop loop detection. Derived from the local
 		// origin we publish into so it matches the relay identity across
-		// every session sharing that origin — required for cross-session
+		// every session sharing that origin, required for cross-session
 		// loop detection. If no origin is attached (the announce loop is
 		// inert anyway), fall back to a random session-local id.
-		let self_origin = origin.as_deref().copied().unwrap_or_else(crate::Origin::random);
+		let self_origin = config.origin.as_deref().copied().unwrap_or_else(crate::Origin::random);
 		Self {
-			session,
-			origin,
-			recv_bandwidth,
+			session: config.session,
+			origin: config.origin,
+			stats: config.stats,
+			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
 			subscribes: Default::default(),
 			next_id: Default::default(),
-			version,
+			version: config.version,
 		}
 	}
 
@@ -129,14 +145,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream.writer.encode(&msg).await?;
 
 		let mut producers = HashMap::new();
+		// Per-broadcast subscriber-side stats guards. Dropping the guard records
+		// `subscriber.broadcasts_closed`. We only insert a guard when start_announce
+		// actually accepted the announcement (it may drop reflected loops), so the
+		// guard set tracks `producers` exactly.
+		let mut stats_guards: HashMap<PathOwned, SubscriberStats> = HashMap::new();
+
+		// Stats keys are absolute paths (matching the publisher side) so the
+		// fanned-out level keys line up with the absolute broadcast paths a
+		// dashboard sees on the origin.
 
 		match self.version {
 			Version::Lite01 | Version::Lite02 => {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
 				for suffix in msg.suffixes {
 					let path = prefix.join(&suffix);
+					let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
 					// Lite01/02 don't carry hop information; the broadcast starts with an empty chain.
-					self.start_announce(path, crate::OriginList::new(), &mut producers)?;
+					if self.start_announce(path.clone(), crate::OriginList::new(), &mut producers)? {
+						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
+					}
 				}
 			}
 			_ => {
@@ -148,7 +176,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			match announce {
 				lite::Announce::Active { suffix, hops } => {
 					let path = prefix.join(&suffix);
-					self.start_announce(path, hops, &mut producers)?;
+					let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
+					if self.start_announce(path.clone(), hops, &mut producers)? {
+						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
+					}
 				}
 				lite::Announce::Ended { suffix, .. } => {
 					let path = prefix.join(&suffix);
@@ -159,6 +190,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// `producers` has no entry; that's expected, not an error.
 					if let Some(mut producer) = producers.remove(&path) {
 						producer.abort(Error::Cancel).ok();
+						let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
+						stats_guards.remove(&abs);
 					}
 				}
 			}
@@ -224,19 +257,22 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
+	/// Returns `Ok(true)` if the announce was accepted (and the broadcast was
+	/// published into the origin), `Ok(false)` if it was dropped as a
+	/// reflected loop.
 	fn start_announce(
 		&mut self,
 		path: PathOwned,
 		hops: crate::OriginList,
 		producers: &mut HashMap<PathOwned, BroadcastProducer>,
-	) -> Result<(), Error> {
+	) -> Result<bool, Error> {
 		// Drop announces that already passed through us — this connection is
 		// a reflection, not a new path. Peers should be filtering via
 		// AnnounceInterest.exclude_hop, but Lite03 peers can't, so this is
 		// the authoritative cluster-loop check on the receiver.
 		if hops.contains(&self.self_origin) {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected announce");
-			return Ok(());
+			return Ok(false);
 		}
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
@@ -263,7 +299,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		web_async::spawn(self.clone().run_broadcast(path, dynamic));
 
-		Ok(())
+		Ok(true)
 	}
 
 	async fn run_broadcast(self, path: PathOwned, mut broadcast: BroadcastDynamic) {
@@ -295,7 +331,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_subscribe(&mut self, id: u64, path: PathOwned, broadcast: BroadcastDynamic, mut track: TrackProducer) {
-		self.subscribes.lock().insert(id, track.clone());
+		// Subscriber-side track stats; counters bump as frames/bytes/groups arrive.
+		// Drop on subscription end records `subscriber.subscriptions_closed`. We use
+		// subscriber_track to avoid double-counting broadcasts: the broadcast lifetime
+		// is tracked separately by the announce loop's `stats_guards`.
+		let abs = self.origin.as_ref().unwrap().absolute(&path);
+		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&track.name));
+
+		self.subscribes.lock().insert(
+			id,
+			TrackEntry {
+				producer: track.clone(),
+				stats: track_stats.clone(),
+			},
+		);
 
 		let msg = lite::Subscribe {
 			id,
@@ -367,19 +416,22 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let (mut group, track) = {
+		let (mut group, track, track_stats) = {
 			let mut subs = self.subscribes.lock();
-			let track = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
+			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
 			let group_info = Group { sequence: hdr.sequence };
-			let group = track.create_group(group_info)?;
-			(group, track.clone())
+			let group = entry.producer.create_group(group_info)?;
+			(group, entry.producer.clone(), entry.stats.clone())
 		};
+
+		// Bump groups counter for this incoming group on the subscriber side.
+		track_stats.group();
 
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = group.closed() => Err(err),
-			res = self.run_group(stream, group.clone()) => res,
+			res = self.run_group(stream, group.clone(), track_stats.clone()) => res,
 		};
 
 		match res {
@@ -402,11 +454,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
+		track_stats: Arc<SubscriberTrack>,
 	) -> Result<(), Error> {
 		while let Some(size) = stream.decode_maybe::<u64>().await? {
 			let mut frame = group.create_frame(Frame { size })?;
+			track_stats.frame();
 
-			if let Err(err) = self.run_frame(stream, &mut frame).await {
+			if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
 				let _ = frame.abort(err.clone());
 				return Err(err);
 			}
@@ -421,6 +475,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		frame: &mut FrameProducer,
+		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
 		// FrameProducer impls BufMut over its pre-allocated per-frame buffer, so
 		// read_buf writes QUIC stream bytes directly into the frame — no
@@ -428,7 +483,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// as we drain it.
 		while bytes::BufMut::has_remaining_mut(frame) {
 			match stream.read_buf(frame).await? {
-				Some(n) if n > 0 => {}
+				Some(n) if n > 0 => {
+					track_stats.bytes(n as u64);
+				}
 				_ => return Err(Error::WrongSize),
 			}
 		}

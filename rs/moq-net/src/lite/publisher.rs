@@ -5,7 +5,8 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, Track,
+	TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -16,30 +17,41 @@ use crate::{
 
 use super::Version;
 
+pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
+	pub session: S,
+	/// The origin we read local broadcasts from. None gives this session a
+	/// dummy, immediately-closed origin (i.e. nothing to publish).
+	pub origin: Option<OriginConsumer>,
+	/// Stats aggregator for this session's egress. Use [`MoqStats::disabled`]
+	/// to opt out.
+	pub stats: MoqStats,
+	pub version: Version,
+}
+
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: OriginConsumer,
-	// The session-level origin id stamped onto outbound hop chains. Shared
-	// with the Subscriber so it can optionally filter out reflected announces.
+	stats: MoqStats,
 	self_origin: Origin,
 	priority: PriorityQueue,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(session: S, origin: Option<OriginConsumer>, version: Version) -> Self {
+	pub fn new(config: PublisherConfig<S>) -> Self {
 		// Default to a dummy origin that is immediately closed.
-		let origin = origin.unwrap_or_else(|| Origin::random().produce().consume());
+		let origin = config.origin.unwrap_or_else(|| Origin::random().produce().consume());
 		// Identity stamped onto outbound announce hops. Derived from the
 		// origin we're consuming so it matches the local relay identity
-		// across every session — required for cross-session loop detection.
+		// across every session, required for cross-session loop detection.
 		let self_origin = *origin;
 		Self {
-			session,
+			session: config.session,
 			origin,
+			stats: config.stats,
 			self_origin,
 			priority: Default::default(),
-			version,
+			version: config.version,
 		}
 	}
 
@@ -134,9 +146,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let version = self.version;
 		let self_origin = self.self_origin;
+		let stats = self.stats.clone();
 		web_async::spawn(async move {
-			if let Err(err) =
-				Self::run_announce(&mut stream, &mut origin, &prefix, self_origin, exclude_hop, version).await
+			if let Err(err) = Self::run_announce(
+				&mut stream,
+				&mut origin,
+				&prefix,
+				self_origin,
+				exclude_hop,
+				stats,
+				version,
+			)
+			.await
 			{
 				match &err {
 					Error::Cancel | Error::Transport(_) => {
@@ -162,11 +183,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Peer's session-level origin id, sent in AnnounceInterest. We skip
 		// forwarding announces whose hop chain already contains this id, so
 		// reflected announces (cluster loops) never hit the wire. Zero means
-		// the peer didn't set it (Lite03 or earlier) — pass through.
+		// the peer didn't set it (Lite03 or earlier), pass through.
 		exclude_hop: u64,
+		stats: MoqStats,
 		version: Version,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
+
+		// Per-path stats guards: dropping the guard records `broadcasts_closed`.
+		// The origin contract guarantees announce/unannounce toggles per path, so a
+		// new active announcement must always be for a path with no live guard.
+		let mut stats_guards: std::collections::HashMap<crate::PathOwned, crate::PublisherStats> =
+			std::collections::HashMap::new();
 
 		match version {
 			Version::Lite01 | Version::Lite02 => {
@@ -179,10 +207,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					if active.is_some() {
 						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+						let absolute = origin.absolute(&path).to_owned();
+						let guard = stats.broadcast(&absolute).publisher();
+						let prev = stats_guards.insert(absolute, guard);
+						debug_assert!(prev.is_none(), "origin announced a path that was already active");
 						init.push(suffix.to_owned());
 					} else {
 						// A potential race.
 						tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+						stats_guards.remove(&origin.absolute(&path).to_owned());
 						init.retain(|path| path != &suffix);
 					}
 				}
@@ -238,10 +271,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									);
 									continue;
 								}
+								let absolute = origin.absolute(&path).to_owned();
+								let guard = stats.broadcast(&absolute).publisher();
+								let prev = stats_guards.insert(absolute, guard);
+								debug_assert!(prev.is_none(), "origin announced a path that was already active");
 								let msg = lite::Announce::Active { suffix, hops };
 								stream.writer.encode(&msg).await?;
 							} else {
 								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+								stats_guards.remove(&origin.absolute(&path).to_owned());
 								// An ended announce doesn't need hops — the receiver matches on path only.
 								let msg = lite::Announce::Ended {
 									suffix,
@@ -275,9 +313,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let priority = self.priority.clone();
 		let version = self.version;
 
+		// Per-track subscription guard. The broadcast itself is tracked elsewhere by
+		// run_announce, so we use publisher_track to avoid double-counting broadcasts.
+		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
+
 		let session = self.session.clone();
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_subscribe(session, &mut stream, &subscribe, broadcast, priority, version).await
+			if let Err(err) = Self::run_subscribe(
+				session,
+				&mut stream,
+				&subscribe,
+				broadcast,
+				priority,
+				track_stats,
+				version,
+			)
+			.await
 			{
 				match &err {
 					// TODO better classify WebTransport errors.
@@ -303,6 +354,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		subscribe: &lite::Subscribe<'_>,
 		consumer: Option<BroadcastConsumer>,
 		priority: PriorityQueue,
+		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
 		let track = Track {
@@ -325,8 +377,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
 
+		let track_stats = std::sync::Arc::new(track_stats);
 		tokio::select! {
-			res = Self::run_track(session, track, subscribe, priority, version) => res?,
+			res = Self::run_track(session, track, subscribe, priority, track_stats, version) => res?,
 			res = stream.reader.closed() => res?,
 		}
 
@@ -339,6 +392,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		mut track: TrackConsumer,
 		subscribe: &lite::Subscribe<'_>,
 		priority: PriorityQueue,
+		track_stats: std::sync::Arc<crate::PublisherTrack>,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
@@ -368,7 +422,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let priority = priority.insert(track.priority, sequence);
-			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
+			tasks.push(
+				Self::serve_group(session.clone(), msg, priority, group, track_stats.clone(), version).map(|_| ()),
+			);
 		}
 	}
 
@@ -377,6 +433,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		msg: lite::Group,
 		mut priority: PriorityHandle,
 		mut group: GroupConsumer,
+		track_stats: std::sync::Arc<crate::PublisherTrack>,
 		version: Version,
 	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
@@ -386,6 +443,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.set_priority(priority.current());
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
+		track_stats.group();
 
 		loop {
 			let frame = tokio::select! {
@@ -405,6 +463,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			stream.encode(&frame.size).await?;
+			track_stats.frame();
 
 			loop {
 				let chunk = tokio::select! {
@@ -419,7 +478,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				};
 
 				match chunk? {
-					Some(mut chunk) => stream.write_all(&mut chunk).await?,
+					Some(mut chunk) => {
+						let n = chunk.len() as u64;
+						stream.write_all(&mut chunk).await?;
+						track_stats.bytes(n);
+					}
 					None => break,
 				}
 			}

@@ -1,7 +1,7 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthConfig, ClusterConfig, WebConfig};
+use crate::{AuthConfig, ClusterConfig, StatsConfig, WebConfig};
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
 /// variables, or a TOML file.
@@ -39,6 +39,11 @@ pub struct Config {
 	#[command(flatten)]
 	#[serde(default)]
 	pub web: WebConfig,
+
+	/// Stats publishing configuration. Disabled unless `stats.enabled = true`.
+	#[command(flatten)]
+	#[serde(default)]
+	pub stats: StatsConfig,
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
