@@ -1,6 +1,6 @@
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, Error, NEGOTIATED,
-	OriginConsumer, OriginProducer, Session, Version, Versions,
+	OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -10,6 +10,7 @@ use crate::{
 pub struct Server {
 	publish: Option<OriginConsumer>,
 	consume: Option<OriginProducer>,
+	stats: StatsHandle,
 	versions: Versions,
 }
 
@@ -25,6 +26,14 @@ impl Server {
 
 	pub fn with_consume(mut self, consume: impl Into<Option<OriginProducer>>) -> Self {
 		self.consume = consume.into();
+		self
+	}
+
+	/// Attach a tier-scoped [`StatsHandle`]. Per-broadcast and per-subscription
+	/// counters will be bumped through this handle for the lifetime of the session.
+	/// Pass [`StatsHandle::disabled`] (also the default) to opt out.
+	pub fn with_stats(mut self, stats: StatsHandle) -> Self {
+		self.stats = stats;
 		self
 	}
 
@@ -86,6 +95,7 @@ impl Server {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
+				// TODO: ietf code path does not yet record stats.
 				return Ok(Session::new(session, v, None));
 			}
 			Some(ALPN_16) => {
@@ -119,6 +129,7 @@ impl Server {
 					None,
 					self.publish.clone(),
 					self.consume.clone(),
+					self.stats.clone(),
 					lite::Version::Lite04,
 				)?;
 
@@ -135,6 +146,7 @@ impl Server {
 					None,
 					self.publish.clone(),
 					self.consume.clone(),
+					self.stats.clone(),
 					lite::Version::Lite03,
 				)?;
 
@@ -184,6 +196,7 @@ impl Server {
 					Some(stream),
 					self.publish.clone(),
 					self.consume.clone(),
+					self.stats.clone(),
 					v,
 				)?
 			}

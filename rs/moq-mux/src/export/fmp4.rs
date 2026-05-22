@@ -9,6 +9,8 @@ use mp4_atom::{DecodeMaybe, Encode};
 
 use crate::container::{Consumer, Frame, Hang};
 
+use super::{CatalogFormat, CatalogSource};
+
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
 ///
 /// Built from a [`moq_net::BroadcastConsumer`], `Fmp4` subscribes to the hang catalog,
@@ -25,7 +27,7 @@ use crate::container::{Consumer, Frame, Hang};
 /// Returns `None` when the broadcast ends.
 pub struct Fmp4 {
 	broadcast: moq_net::BroadcastConsumer,
-	catalog: Option<crate::catalog::Consumer>,
+	catalog: Option<CatalogSource>,
 	latency: Duration,
 	fragment_duration: Option<Duration>,
 
@@ -64,11 +66,12 @@ struct Fmp4Track {
 impl Fmp4 {
 	/// Subscribe to `broadcast` and produce fMP4 byte chunks.
 	///
-	/// The hang catalog is subscribed internally; per-rendition tracks are (un)subscribed
-	/// as the catalog changes.
-	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
-		let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
-		let catalog = crate::catalog::Consumer::new(catalog_track);
+	/// `catalog_format` selects which catalog track the importer subscribes to
+	/// for track discovery. Both formats end up driving the same internal
+	/// `hang::Catalog`-based pipeline (MSF snapshots are converted on receipt),
+	/// so the only observable difference is which wire catalog is consumed.
+	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
+		let catalog = CatalogSource::new(&broadcast, catalog_format)?;
 
 		Ok(Self {
 			broadcast,
@@ -120,18 +123,13 @@ impl Fmp4 {
 	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<Bytes>>> {
 		// 1. Drain catalog updates and (un)subscribe tracks accordingly.
 		while let Some(catalog) = self.catalog.as_mut() {
-			match catalog.poll_next(waiter) {
-				Poll::Ready(Ok(Some(snapshot))) => self.update_catalog(&snapshot)?,
-				Poll::Ready(Ok(None)) => {
+			match catalog.poll_next(waiter)? {
+				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot)?,
+				Poll::Ready(None) => {
 					self.catalog = None;
 					break;
 				}
 				Poll::Pending => break,
-				Poll::Ready(Err(ref e)) if is_dropped(e) => {
-					self.catalog = None;
-					break;
-				}
-				Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
 			}
 		}
 
@@ -151,7 +149,6 @@ impl Fmp4 {
 			match track.consumer.poll_read(waiter) {
 				Poll::Ready(Ok(Some(frame))) => track.pending = Some(frame),
 				Poll::Ready(Ok(None)) => track.finished = true,
-				Poll::Ready(Err(ref e)) if is_dropped(e) => track.finished = true,
 				Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
 				Poll::Pending => {}
 			}
@@ -281,13 +278,13 @@ fn build_init(catalog: &Catalog) -> anyhow::Result<Bytes> {
 	let mut track_inits: Vec<&Bytes> = Vec::new();
 	for config in catalog.video.renditions.values() {
 		match &config.container {
-			Container::Cmaf { init } => track_inits.push(init),
+			Container::Cmaf { init, .. } => track_inits.push(init),
 			Container::Legacy => anyhow::bail!("track is not CMAF"),
 		}
 	}
 	for config in catalog.audio.renditions.values() {
 		match &config.container {
-			Container::Cmaf { init } => track_inits.push(init),
+			Container::Cmaf { init, .. } => track_inits.push(init),
 			Container::Legacy => anyhow::bail!("track is not CMAF"),
 		}
 	}
@@ -435,24 +432,16 @@ fn build_moof(
 	}
 }
 
-/// Treat `moq_net::Error::Dropped` as graceful end-of-stream.
-fn is_dropped(e: &crate::Error) -> bool {
-	matches!(
-		e,
-		crate::Error::Moq(moq_net::Error::Dropped) | crate::Error::Hang(hang::Error::Moq(moq_net::Error::Dropped))
-	)
-}
-
 fn catalog_timescale(catalog: &Catalog, name: &str) -> Option<u64> {
 	if let Some(config) = catalog.video.renditions.get(name) {
 		return Some(match &config.container {
-			Container::Cmaf { init } => parse_timescale_from_init(init).ok()?,
+			Container::Cmaf { init, .. } => parse_timescale_from_init(init).ok()?,
 			Container::Legacy => guess_video_timescale(config),
 		});
 	}
 	if let Some(config) = catalog.audio.renditions.get(name) {
 		return Some(match &config.container {
-			Container::Cmaf { init } => parse_timescale_from_init(init).ok()?,
+			Container::Cmaf { init, .. } => parse_timescale_from_init(init).ok()?,
 			Container::Legacy => config.sample_rate as u64,
 		});
 	}

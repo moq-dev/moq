@@ -32,7 +32,7 @@ impl TryFrom<&hang::catalog::Container> for Hang {
 	fn try_from(container: &hang::catalog::Container) -> Result<Self, Self::Error> {
 		match container {
 			hang::catalog::Container::Legacy => Ok(Self::Legacy),
-			hang::catalog::Container::Cmaf { init } => Ok(Self::Cmaf(Cmaf::from_init(init)?)),
+			hang::catalog::Container::Cmaf { init, .. } => Ok(Self::Cmaf(Cmaf::from_init(init)?)),
 		}
 	}
 }

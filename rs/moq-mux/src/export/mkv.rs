@@ -12,6 +12,8 @@ use webm_iterable::{WebmWriter, WriteOptions};
 use crate::container::{Consumer, Frame, Hang};
 use crate::transform::{Avc1, Hvc1};
 
+use super::{CatalogFormat, CatalogSource};
+
 /// Matroska TimestampScale: 1 ms (in nanoseconds).
 const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 
@@ -20,15 +22,15 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// Built from a [`moq_net::BroadcastConsumer`], `Mkv` subscribes to the hang catalog,
 /// (un)subscribes per-rendition tracks, decodes them via [`Consumer<Hang>`], and
 /// re-encodes everything as EBML + Segment + Tracks + Cluster/SimpleBlock tags ready
-/// for any Matroska-aware consumer (ffplay, libwebm, KVS PutMedia, browser MSE for WebM).
+/// for any Matroska-aware consumer (ffplay, libwebm, browser MSE for WebM).
 ///
 /// Use [`next`](Self::next) to pull byte chunks. The first chunk is the file
 /// header (EBML + unknown-size Segment + Info + Tracks); subsequent chunks are
 /// complete Cluster elements. By default a Cluster contains one GOP (rolled
 /// over on each video keyframe, or on i16 timestamp overflow);
 /// [`with_fragment_duration`](Self::with_fragment_duration) caps Cluster
-/// duration for downstream consumers that throttle by fragment rate (e.g.
-/// KVS PutMedia). Returns `None` when the broadcast ends.
+/// duration for downstream consumers that throttle by fragment rate.
+/// Returns `None` when the broadcast ends.
 ///
 /// ## Avc3 / Hev1 sources
 ///
@@ -44,7 +46,7 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// (moof+mdat passthrough) are rejected with a clear error.
 pub struct Mkv {
 	broadcast: moq_net::BroadcastConsumer,
-	catalog: Option<crate::catalog::Consumer>,
+	catalog: Option<CatalogSource>,
 	latency: Duration,
 	fragment_duration: Option<Duration>,
 
@@ -177,9 +179,13 @@ impl ClusterBuilder {
 
 impl Mkv {
 	/// Subscribe to `broadcast` and produce MKV byte chunks.
-	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
-		let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
-		let catalog = crate::catalog::Consumer::new(catalog_track);
+	///
+	/// `catalog_format` selects which catalog track the exporter subscribes to
+	/// for track discovery. Both formats end up driving the same internal
+	/// `hang::Catalog`-based pipeline (MSF snapshots are converted on receipt),
+	/// so the only observable difference is which wire catalog is consumed.
+	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
+		let catalog = CatalogSource::new(&broadcast, catalog_format)?;
 
 		Ok(Self {
 			broadcast,
@@ -204,8 +210,8 @@ impl Mkv {
 	/// By default Clusters roll over only on video keyframes (one cluster per GOP)
 	/// or i16 timestamp overflow. Setting this caps each Cluster to roughly
 	/// `duration` of frames, useful for downstream consumers that throttle by
-	/// fragment rate (e.g. KVS PutMedia). [`Duration::ZERO`] emits one Cluster
-	/// per frame; otherwise the cap applies in addition to GOP / overflow rollover.
+	/// fragment rate. [`Duration::ZERO`] emits one Cluster per frame; otherwise
+	/// the cap applies in addition to GOP / overflow rollover.
 	///
 	/// Accepts either `Duration` or `Option<Duration>` (where `None` restores
 	/// the per-GOP default).
@@ -222,19 +228,13 @@ impl Mkv {
 	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<Bytes>>> {
 		// 1. Drain catalog updates.
 		while let Some(catalog) = self.catalog.as_mut() {
-			match catalog.poll_next(waiter) {
-				Poll::Ready(Ok(Some(snapshot))) => self.update_catalog(snapshot)?,
-				Poll::Ready(Ok(None)) => {
+			match catalog.poll_next(waiter)? {
+				Poll::Ready(Some(snapshot)) => self.update_catalog(snapshot)?,
+				Poll::Ready(None) => {
 					self.catalog = None;
 					break;
 				}
 				Poll::Pending => break,
-				Poll::Ready(Err(ref e)) if is_dropped(e) => {
-					// Catalog producer dropped without finish — treat as catalog-done.
-					self.catalog = None;
-					break;
-				}
-				Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
 			}
 		}
 
@@ -278,11 +278,6 @@ impl Mkv {
 						}
 					}
 					Poll::Ready(Ok(None)) => {
-						track.finished = true;
-						break;
-					}
-					Poll::Ready(Err(e)) if is_dropped(&e) => {
-						// Producer dropped without explicit finish — treat as EOS.
 						track.finished = true;
 						break;
 					}
@@ -548,16 +543,6 @@ impl Mkv {
 	}
 }
 
-/// Treat `moq_net::Error::Dropped` as graceful end-of-stream. Producers that
-/// drop without calling `finish()` propagate this through the consumer side;
-/// the export should treat it the same as an explicit close.
-fn is_dropped(e: &crate::Error) -> bool {
-	matches!(
-		e,
-		crate::Error::Moq(moq_net::Error::Dropped) | crate::Error::Hang(hang::Error::Moq(moq_net::Error::Dropped))
-	)
-}
-
 fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Result<()> {
 	match container {
 		Container::Legacy => Ok(()),
@@ -579,14 +564,17 @@ fn subscribe(
 }
 
 /// Build a video transform for the given catalog config, or None if no
-/// transform is needed (e.g. VP8/VP9/AV1, or H.264 with pre-built avcC).
+/// transform is needed (e.g. VP8/VP9/AV1, or H.264/H.265 with an existing avcC/hvcC).
 fn build_video_transform(config: &VideoConfig) -> anyhow::Result<Option<VideoTransform>> {
-	// Treat an empty description the same as a missing one: an Annex-B source
-	// with no codec config yet, not a passthrough avc1/hvc1 stream.
-	let description = config.description.clone().filter(|d| !d.is_empty());
+	// A non-empty description means the source is already avc1/hvc1 (out-of-band
+	// codec config + length-prefixed NALs); no transform needed.
+	let needs_transform = config.description.as_ref().map(|d| d.is_empty()).unwrap_or(true);
+	if !needs_transform {
+		return Ok(None);
+	}
 	match &config.codec {
-		VideoCodec::H264(_) => Ok(Some(VideoTransform::Avc1(Avc1::new(description)))),
-		VideoCodec::H265(_) => Ok(Some(VideoTransform::Hvc1(Hvc1::new(description)))),
+		VideoCodec::H264(_) => Ok(Some(VideoTransform::Avc1(Avc1::new()))),
+		VideoCodec::H265(_) => Ok(Some(VideoTransform::Hvc1(Hvc1::new()))),
 		_ => Ok(None),
 	}
 }
@@ -596,21 +584,30 @@ fn build_video_track_entry(
 	config: &VideoConfig,
 	transform: Option<&VideoTransform>,
 ) -> anyhow::Result<MatroskaSpec> {
+	// For Avc3/Hev1 sources the avcC/hvcC is synthesized by the transform;
+	// for avc1/hvc1 sources it lives in the catalog description.
+	let codec_private_from_transform = transform.and_then(|t| t.codec_private().map(|b| b.to_vec()));
+	let codec_private_from_description = config
+		.description
+		.as_ref()
+		.filter(|b| !b.is_empty())
+		.map(|b| b.to_vec());
+
 	let (codec_id, codec_private) = match &config.codec {
 		VideoCodec::VP8 => ("V_VP8", None),
 		VideoCodec::VP9(_) => ("V_VP9", None),
-		VideoCodec::AV1(_) => ("V_AV1", config.description.as_ref().map(|b| b.to_vec())),
+		VideoCodec::AV1(_) => ("V_AV1", codec_private_from_description),
 		VideoCodec::H264(_) => {
-			let avcc = transform
-				.and_then(|t| t.codec_private())
+			let avcc = codec_private_from_transform
+				.or(codec_private_from_description)
 				.context("H.264 track missing AVCDecoderConfigurationRecord")?;
-			("V_MPEG4/ISO/AVC", Some(avcc.to_vec()))
+			("V_MPEG4/ISO/AVC", Some(avcc))
 		}
 		VideoCodec::H265(_) => {
-			let hvcc = transform
-				.and_then(|t| t.codec_private())
+			let hvcc = codec_private_from_transform
+				.or(codec_private_from_description)
 				.context("H.265 track missing HEVCDecoderConfigurationRecord")?;
-			("V_MPEGH/ISO/HEVC", Some(hvcc.to_vec()))
+			("V_MPEGH/ISO/HEVC", Some(hvcc))
 		}
 		other => anyhow::bail!("MKV export does not support video codec {:?}", other),
 	};

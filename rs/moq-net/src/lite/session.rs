@@ -1,8 +1,9 @@
 use crate::{
-	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, coding::Stream, lite::SessionInfo,
+	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, StatsHandle, coding::Stream,
+	lite::SessionInfo,
 };
 
-use super::{Publisher, Subscriber, Version};
+use super::{Publisher, PublisherConfig, Subscriber, SubscriberConfig, Version};
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
 	// The stream used to setup the session, after exchanging setup messages.
@@ -12,6 +13,8 @@ pub fn start<S: web_transport_trait::Session>(
 	publish: Option<OriginConsumer>,
 	// We will consume any remote broadcasts, inserting them into this origin.
 	subscribe: Option<OriginProducer>,
+	// Tier-scoped stats handle. Pass [`StatsHandle::disabled`] to opt out.
+	stats: StatsHandle,
 	// The version of the protocol to use.
 	version: Version,
 ) -> Result<Option<BandwidthConsumer>, Error> {
@@ -30,10 +33,21 @@ pub fn start<S: web_transport_trait::Session>(
 	// Publisher and Subscriber each derive their identity from their own
 	// attached origin (publish.info / subscribe.info). This is what gets
 	// stamped onto outbound hops and checked against incoming hops, so it
-	// must be stable across every session that shares the local origin —
-	// required for cross-session cluster loop detection.
-	let publisher = Publisher::new(session.clone(), publish, version);
-	let subscriber = Subscriber::new(session.clone(), subscribe, recv_bw_for_sub, version);
+	// must be stable across every session that shares the local origin.
+	// Required for cross-session cluster loop detection.
+	let publisher = Publisher::new(PublisherConfig {
+		session: session.clone(),
+		origin: publish,
+		stats: stats.clone(),
+		version,
+	});
+	let subscriber = Subscriber::new(SubscriberConfig {
+		session: session.clone(),
+		origin: subscribe,
+		recv_bandwidth: recv_bw_for_sub,
+		stats,
+		version,
+	});
 
 	web_async::spawn(async move {
 		let res = tokio::select! {

@@ -28,7 +28,7 @@ async fn export_header_roundtrip_vp9_opus() {
 	importer.finish().unwrap();
 
 	// Now subscribe via the exporter and pull bytes.
-	let mut exporter = crate::export::Mkv::new(consumer).unwrap();
+	let mut exporter = crate::export::Mkv::new(consumer, crate::export::CatalogFormat::Hang).unwrap();
 
 	// First `next()` should give us the header (EBML + Segment-start + Info + Tracks).
 	let header = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
@@ -153,7 +153,7 @@ async fn export_emits_blocks_for_each_frame() {
 	importer.decode(&mut buf).unwrap();
 	importer.finish().unwrap();
 
-	let mut exporter = crate::export::Mkv::new(consumer)
+	let mut exporter = crate::export::Mkv::new(consumer, crate::export::CatalogFormat::Hang)
 		.unwrap()
 		// Use per-frame clustering so each frame is observable as its own
 		// Cluster chunk; batching is exercised in a dedicated test below.
@@ -244,12 +244,14 @@ async fn export_rejects_cmaf_track() {
 			optimize_for_latency: None,
 			container: Container::Cmaf {
 				init: Bytes::from(vec![0u8; 32]),
+				timescale: None,
+				track_id: None,
 			},
 			jitter: None,
 		},
 	);
 
-	let mut exporter = crate::export::Mkv::new(consumer).unwrap();
+	let mut exporter = crate::export::Mkv::new(consumer, crate::export::CatalogFormat::Hang).unwrap();
 	let result = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out");
@@ -332,14 +334,15 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 		})
 		.unwrap();
 	track_producer.finish().unwrap();
+	let mut catalog = catalog;
+	catalog.finish().unwrap();
 
-	let mut exporter = crate::export::Mkv::new(consumer)
+	let mut exporter = crate::export::Mkv::new(consumer, crate::export::CatalogFormat::Hang)
 		.unwrap()
 		.with_fragment_duration(std::time::Duration::ZERO);
 	let mut exported: Vec<u8> = Vec::new();
 
 	let mut held_producer = Some(producer);
-	let mut held_catalog = Some(catalog);
 	for _ in 0..32 {
 		let next = tokio::time::timeout(std::time::Duration::from_millis(100), exporter.next()).await;
 		match next {
@@ -348,12 +351,11 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 			Ok(Err(e)) => panic!("exporter error: {e}"),
 			Err(_) => {
 				held_producer = None;
-				held_catalog = None;
 			}
 		}
 	}
 	drop(held_producer);
-	drop(held_catalog);
+	drop(catalog);
 	drop(track_producer);
 	drop(exporter);
 
@@ -463,19 +465,19 @@ async fn export_fragment_duration_batches_blocks() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = crate::import::Mkv::new(producer, catalog.clone());
 	let mut buf = bytes::BytesMut::from(import_bytes.as_slice());
 	importer.decode(&mut buf).unwrap();
 	importer.finish().unwrap();
+	catalog.finish().unwrap();
 
-	let mut exporter = crate::export::Mkv::new(consumer)
+	let mut exporter = crate::export::Mkv::new(consumer, crate::export::CatalogFormat::Hang)
 		.unwrap()
 		.with_fragment_duration(std::time::Duration::from_secs(2));
 	let mut exported: Vec<u8> = Vec::new();
 
 	let mut importer = Some(importer);
-	let mut held_catalog = Some(catalog);
 	for _ in 0..32 {
 		let next = tokio::time::timeout(std::time::Duration::from_millis(100), exporter.next()).await;
 		match next {
@@ -484,12 +486,11 @@ async fn export_fragment_duration_batches_blocks() {
 			Ok(Err(e)) => panic!("exporter error: {e}"),
 			Err(_) => {
 				importer = None;
-				held_catalog = None;
 			}
 		}
 	}
 	drop(importer);
-	drop(held_catalog);
+	drop(catalog);
 	drop(exporter);
 
 	// Count Clusters and SimpleBlocks in the export.

@@ -2,27 +2,30 @@ use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
 
-/// Transform H.265 frames between Annex-B (inline VPS/SPS/PPS) and
-/// length-prefixed NALU (out-of-band HEVCDecoderConfigurationRecord, aka hvc1).
+/// Transform H.265 frames from Annex-B (inline VPS/SPS/PPS, "hev1") to
+/// length-prefixed NALU (out-of-band HEVCDecoderConfigurationRecord, "hvc1").
 ///
 /// See [`crate::transform::Avc1`] for the analogous H.264 transform.
 pub struct Hvc1 {
 	hvcc: Option<Bytes>,
-	cached_vps: Option<Bytes>,
-	cached_sps: Option<Bytes>,
-	cached_pps: Option<Bytes>,
-	passthrough: bool,
+	vps: Option<Bytes>,
+	sps: Option<Bytes>,
+	pps: Option<Bytes>,
+}
+
+impl Default for Hvc1 {
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 impl Hvc1 {
-	pub fn new(description: Option<Bytes>) -> Self {
-		let passthrough = description.is_some();
+	pub fn new() -> Self {
 		Self {
-			hvcc: description,
-			cached_vps: None,
-			cached_sps: None,
-			cached_pps: None,
-			passthrough,
+			hvcc: None,
+			vps: None,
+			sps: None,
+			pps: None,
 		}
 	}
 
@@ -31,10 +34,6 @@ impl Hvc1 {
 	}
 
 	pub fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
-		if self.passthrough {
-			return Ok(Some(payload));
-		}
-
 		let mut buf = payload.clone();
 		let mut nal_iter = crate::import::annexb::NalIterator::new(&mut buf);
 
@@ -81,22 +80,22 @@ impl Hvc1 {
 
 		match nal_type {
 			NALUnitType::VpsNut => {
-				if self.cached_vps.as_deref() != Some(nal.as_ref()) {
-					self.cached_vps = Some(nal.clone());
+				if self.vps.as_deref() != Some(nal.as_ref()) {
+					self.vps = Some(nal.clone());
 					*params_changed = true;
 				}
 				Ok(false)
 			}
 			NALUnitType::SpsNut => {
-				if self.cached_sps.as_deref() != Some(nal.as_ref()) {
-					self.cached_sps = Some(nal.clone());
+				if self.sps.as_deref() != Some(nal.as_ref()) {
+					self.sps = Some(nal.clone());
 					*params_changed = true;
 				}
 				Ok(false)
 			}
 			NALUnitType::PpsNut => {
-				if self.cached_pps.as_deref() != Some(nal.as_ref()) {
-					self.cached_pps = Some(nal.clone());
+				if self.pps.as_deref() != Some(nal.as_ref()) {
+					self.pps = Some(nal.clone());
 					*params_changed = true;
 				}
 				Ok(false)
@@ -111,7 +110,7 @@ impl Hvc1 {
 	}
 
 	fn rebuild_hvcc(&mut self) -> anyhow::Result<()> {
-		let (Some(vps), Some(sps), Some(pps)) = (&self.cached_vps, &self.cached_sps, &self.cached_pps) else {
+		let (Some(vps), Some(sps), Some(pps)) = (&self.vps, &self.sps, &self.pps) else {
 			return Ok(());
 		};
 		self.hvcc = Some(build_hvcc(vps, sps, pps)?);

@@ -5,46 +5,37 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
 
-/// Transform H.264 frames between Annex-B (inline SPS/PPS) and length-prefixed
-/// NALU (out-of-band AVCDecoderConfigurationRecord, aka avc1).
+/// Transform H.264 frames from Annex-B (inline SPS/PPS, "avc3") to
+/// length-prefixed NALU (out-of-band AVCDecoderConfigurationRecord, "avc1").
 ///
-/// Construct with [`Self::new`] passing the source's existing avcC if the
-/// source was already avc1 (in which case [`Self::transform`] passes payloads
-/// through unchanged). Pass `None` for Avc3 sources: avcC is synthesized from
-/// cached SPS+PPS the first time both are observed and is exposed via
-/// [`Self::avcc`].
-///
-/// Once [`Self::avcc`] returns `Some`, all subsequent calls to
-/// [`Self::transform`] return length-prefixed sample data suitable for an
-/// avc1 container (e.g. MKV `V_MPEG4/ISO/AVC` with the avcC in CodecPrivate).
+/// The avcC is synthesized from cached SPS+PPS the first time both are
+/// observed and is exposed via [`Self::avcc`]. Once [`Self::avcc`] returns
+/// `Some`, all subsequent calls to [`Self::transform`] return length-prefixed
+/// sample data suitable for an avc1 container (e.g. MKV `V_MPEG4/ISO/AVC` with
+/// the avcC in CodecPrivate).
 pub struct Avc1 {
-	/// Pre-supplied avcC (Avc1 source) or one we built ourselves (Avc3 source).
 	avcc: Option<Bytes>,
-	cached_sps: Option<Bytes>,
-	cached_pps: Option<Bytes>,
-	/// True iff the source is already length-prefixed (avc1). Set by [`Self::new`]
-	/// when an avcC is supplied; for Avc3 sources we synthesize avcC and stay in
-	/// "transform" mode.
-	passthrough: bool,
+	sps: Option<Bytes>,
+	pps: Option<Bytes>,
+}
+
+impl Default for Avc1 {
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 impl Avc1 {
-	/// Build a new transform. Pass the source's catalog `description` if it
-	/// is already an `AVCDecoderConfigurationRecord` (avc1 source); pass
-	/// `None` for an avc3 source whose samples are Annex-B with inline
-	/// parameter sets.
-	pub fn new(description: Option<Bytes>) -> Self {
-		let passthrough = description.is_some();
+	/// Build a new transform for an avc3 source.
+	pub fn new() -> Self {
 		Self {
-			avcc: description,
-			cached_sps: None,
-			cached_pps: None,
-			passthrough,
+			avcc: None,
+			sps: None,
+			pps: None,
 		}
 	}
 
-	/// The AVCDecoderConfigurationRecord, available once SPS+PPS have been
-	/// observed (or immediately if constructed with a pre-supplied avcC).
+	/// The AVCDecoderConfigurationRecord, available once SPS+PPS have been observed.
 	pub fn avcc(&self) -> Option<&Bytes> {
 		self.avcc.as_ref()
 	}
@@ -57,14 +48,9 @@ impl Avc1 {
 	///   transform is still waiting for slice NALs (avcC may have been built
 	///   as a side effect).
 	pub fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
-		if self.passthrough {
-			// Avc1 source — pass through unchanged (cheap refcount clone).
-			return Ok(Some(payload));
-		}
-
-		// Avc3 source — parse Annex-B NALs, strip SPS/PPS into the cache,
-		// length-prefix the rest. NalIterator advances the Bytes cursor;
-		// the trailing NAL has to be pulled separately via flush().
+		// Parse Annex-B NALs, strip SPS/PPS into the cache, length-prefix
+		// the rest. NalIterator advances the Bytes cursor; the trailing NAL
+		// has to be pulled separately via flush().
 		let mut buf = payload.clone();
 		let mut nal_iter = crate::import::annexb::NalIterator::new(&mut buf);
 
@@ -111,15 +97,15 @@ impl Avc1 {
 		let nal_type = nal[0] & 0x1f;
 		match nal_type {
 			NAL_TYPE_SPS => {
-				if self.cached_sps.as_deref() != Some(nal.as_ref()) {
-					self.cached_sps = Some(nal.clone());
+				if self.sps.as_deref() != Some(nal.as_ref()) {
+					self.sps = Some(nal.clone());
 					*sps_pps_changed = true;
 				}
 				Ok(false)
 			}
 			NAL_TYPE_PPS => {
-				if self.cached_pps.as_deref() != Some(nal.as_ref()) {
-					self.cached_pps = Some(nal.clone());
+				if self.pps.as_deref() != Some(nal.as_ref()) {
+					self.pps = Some(nal.clone());
 					*sps_pps_changed = true;
 				}
 				Ok(false)
@@ -134,7 +120,7 @@ impl Avc1 {
 	}
 
 	fn rebuild_avcc(&mut self) -> anyhow::Result<()> {
-		let (Some(sps), Some(pps)) = (&self.cached_sps, &self.cached_pps) else {
+		let (Some(sps), Some(pps)) = (&self.sps, &self.pps) else {
 			return Ok(());
 		};
 		self.avcc = Some(build_avcc(sps, pps)?);
@@ -199,7 +185,7 @@ mod tests {
 		let pps = &[0x68, 0xce, 0x3c, 0x80][..];
 		let idr = &[0x65, 0x88, 0x84, 0x21][..];
 
-		let mut tx = Avc1::new(None);
+		let mut tx = Avc1::new();
 		assert!(tx.avcc().is_none());
 
 		let frame = annexb_frame(&[sps, pps, idr]);
@@ -221,21 +207,10 @@ mod tests {
 		let sps = &[0x67, 0x42, 0xc0, 0x1f, 0xde][..];
 		let pps = &[0x68, 0xce, 0x3c, 0x80][..];
 
-		let mut tx = Avc1::new(None);
+		let mut tx = Avc1::new();
 		let frame = annexb_frame(&[sps, pps]);
 		assert!(tx.transform(frame).unwrap().is_none());
 		assert!(tx.avcc().is_some());
-	}
-
-	#[test]
-	fn avc1_passthrough() {
-		let avcc = Bytes::from_static(&[1, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0, 0]);
-		let mut tx = Avc1::new(Some(avcc.clone()));
-		assert_eq!(tx.avcc(), Some(&avcc));
-
-		let payload = Bytes::from_static(&[0, 0, 0, 4, 0x65, 0x88, 0x84, 0x21]);
-		let out = tx.transform(payload.clone()).unwrap().unwrap();
-		assert_eq!(out.as_ref(), payload.as_ref());
 	}
 
 	#[test]
@@ -245,7 +220,7 @@ mod tests {
 		let idr = &[0x65, 0x88][..];
 		let p = &[0x61, 0xe0, 0x12][..];
 
-		let mut tx = Avc1::new(None);
+		let mut tx = Avc1::new();
 		tx.transform(annexb_frame(&[sps, pps, idr])).unwrap();
 		let avcc_v1 = tx.avcc().unwrap().clone();
 
@@ -266,7 +241,7 @@ mod tests {
 		let idr = &[0x65u8, 0x88, 0x84, 0x21, 0x00, 0x11, 0x22, 0x33][..];
 		let pslice = &[0x61u8, 0xe0, 0x12, 0x34][..];
 
-		let mut tx = Avc1::new(None);
+		let mut tx = Avc1::new();
 		let key = annexb_frame(&[sps, pps, idr]);
 		let key_out = tx.transform(key).expect("transform key").expect("output");
 		assert!(tx.avcc().is_some());

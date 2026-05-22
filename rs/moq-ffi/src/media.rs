@@ -16,7 +16,7 @@ impl From<hang::catalog::Container> for Container {
 	fn from(container: hang::catalog::Container) -> Self {
 		match container {
 			hang::catalog::Container::Legacy => Self::Legacy,
-			hang::catalog::Container::Cmaf { init } => Self::Cmaf { init: init.to_vec() },
+			hang::catalog::Container::Cmaf { init, .. } => Self::Cmaf { init: init.to_vec() },
 		}
 	}
 }
@@ -25,7 +25,11 @@ impl From<Container> for hang::catalog::Container {
 	fn from(container: Container) -> Self {
 		match container {
 			Container::Legacy => Self::Legacy,
-			Container::Cmaf { init } => Self::Cmaf { init: init.into() },
+			Container::Cmaf { init } => Self::Cmaf {
+				init: init.into(),
+				timescale: None,
+				track_id: None,
+			},
 		}
 	}
 }

@@ -10,6 +10,25 @@ pub enum SubscribeFormat {
 	Mkv,
 }
 
+/// Catalog wire format to subscribe to for track discovery.
+#[derive(ValueEnum, Clone, Copy, Default)]
+pub enum CatalogFormat {
+	/// The hang catalog (`catalog.json`, hang JSON schema).
+	#[default]
+	Hang,
+	/// The MSF catalog (`catalog`, draft-ietf-moq-msf JSON schema).
+	Msf,
+}
+
+impl From<CatalogFormat> for moq_mux::export::CatalogFormat {
+	fn from(format: CatalogFormat) -> Self {
+		match format {
+			CatalogFormat::Hang => Self::Hang,
+			CatalogFormat::Msf => Self::Msf,
+		}
+	}
+}
+
 #[derive(clap::Args, Clone)]
 pub struct SubscribeArgs {
 	/// The format to write to stdout.
@@ -23,11 +42,14 @@ pub struct SubscribeArgs {
 	/// Cap the output fragment duration (e.g. `2s`, `500ms`).
 	///
 	/// By default a fragment covers one GOP (rolled over on video keyframes).
-	/// Setting this caps each fragment to roughly the given duration, which
-	/// downstream consumers that throttle by fragment rate (e.g. KVS
-	/// PutMedia) typically need. The cap applies in addition to GOP rollover.
+	/// Setting this caps each fragment to roughly the given duration.
+	/// The cap applies in addition to GOP rollover.
 	#[arg(long, value_parser = humantime::parse_duration)]
 	pub fragment_duration: Option<Duration>,
+
+	/// Catalog format to subscribe to for track discovery.
+	#[arg(long, default_value = "hang")]
+	pub catalog: CatalogFormat,
 }
 
 pub struct Subscribe {
@@ -53,7 +75,7 @@ impl Subscribe {
 		// Fmp4 subscribes to the catalog internally, builds the merged init segment
 		// from the first catalog snapshot, then yields moof+mdat fragments in
 		// timestamp order across tracks.
-		let mut fmp4 = moq_mux::export::Fmp4::new(self.broadcast)?
+		let mut fmp4 = moq_mux::export::Fmp4::new(self.broadcast, self.args.catalog.into())?
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -71,7 +93,7 @@ impl Subscribe {
 		// Mkv writes EBML + an unknown-size Segment header, then per-fragment
 		// Cluster elements. Avc3/Hev1 sources are transcoded to avc1/hvc1
 		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
-		let mut mkv = moq_mux::export::Mkv::new(self.broadcast)?
+		let mut mkv = moq_mux::export::Mkv::new(self.broadcast, self.args.catalog.into())?
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
