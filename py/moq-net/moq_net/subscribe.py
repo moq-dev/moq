@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from moq_ffi import (
+from ._uniffi import (
     Container,
     MoqBroadcastConsumer,
     MoqCatalogConsumer,
@@ -10,7 +10,6 @@ from moq_ffi import (
     MoqMediaConsumer,
     MoqTrackConsumer,
 )
-
 from .types import Catalog, Frame
 
 

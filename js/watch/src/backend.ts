@@ -166,7 +166,10 @@ export class MultiBackend implements Backend {
 			paused: this.paused,
 		});
 
-		const videoRenderer = new Video.Renderer(videoSource, { canvas: element, paused: this.paused });
+		const videoRenderer = new Video.Renderer(videoSource, {
+			canvas: element,
+			paused: this.paused,
+		});
 
 		effect.cleanup(() => {
 			videoSource.close();

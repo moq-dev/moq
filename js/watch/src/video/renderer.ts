@@ -100,7 +100,7 @@ export class Renderer {
 		}
 
 		// When paused, fetch a single preview frame then disable.
-		const frame = effect.get(this.frame);
+		const frame = effect.get(this.decoder.frame);
 		this.decoder.enabled.set(!frame);
 	}
 
@@ -108,27 +108,25 @@ export class Renderer {
 		const ctx = effect.get(this.#ctx);
 		if (!ctx) return;
 
-		const paused = effect.get(this.paused);
-
-		// Read new frames from the decoder when not paused.
-		let decoded: VideoFrame | undefined;
-		if (!paused) {
-			decoded = effect.get(this.decoder.frame);
-		}
+		const frame = effect.get(this.decoder.frame);
 
 		// Request a callback to render the frame based on the monitor's refresh rate.
-		// Always render, even when paused (to show last frame)
+		// Always render, even when paused (to show last frame).
 		let animate: number | undefined = requestAnimationFrame(() => {
-			const frame = decoded ?? this.frame.peek();
 			this.#render(ctx, frame);
 
-			// Update signals to reflect what's actually on screen.
-			if (decoded) {
-				this.frame.update((old) => {
-					old?.close();
-					return decoded.clone();
+			if (frame) {
+				this.frame.update((current) => {
+					current?.close();
+					return frame.clone();
 				});
-				this.timestamp.set(Time.Milli.fromMicro(decoded.timestamp as Time.Micro));
+				this.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
+			} else {
+				this.frame.update((current) => {
+					current?.close();
+					return undefined;
+				});
+				this.timestamp.set(undefined);
 			}
 
 			animate = undefined;
@@ -136,7 +134,6 @@ export class Renderer {
 
 		// Clean up any pending animation request.
 		effect.cleanup(() => {
-			decoded?.close();
 			if (animate) cancelAnimationFrame(animate);
 		});
 	}
@@ -167,10 +164,11 @@ export class Renderer {
 
 	// Close the track and all associated resources.
 	close() {
-		this.frame.update((old) => {
-			old?.close();
+		this.frame.update((current) => {
+			current?.close();
 			return undefined;
 		});
+		this.timestamp.set(undefined);
 		this.#signals.close();
 	}
 }

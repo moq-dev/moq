@@ -9,6 +9,8 @@ import type { Source } from "./types";
 
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
+const OPUS_BITRATE_PER_CHANNEL = 32_000;
+const OPUS_FRAME_DURATION = 20;
 
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
@@ -60,7 +62,6 @@ export class Encoder {
 		this.sampleRate = Signal.from<number | undefined>(props?.sampleRate);
 
 		this.#signals.run(this.#runSource.bind(this));
-		this.#signals.run(this.#runConfig.bind(this));
 		this.#signals.run(this.#runGain.bind(this));
 		this.#signals.run(this.#runCatalog.bind(this));
 	}
@@ -96,13 +97,33 @@ export class Encoder {
 			await context.audioWorklet.addModule(CaptureWorklet);
 			if (context.state === "closed") return;
 
+			const channelCount = settings.channelCount ?? root.channelCount;
 			const worklet = new AudioWorkletNode(context, "capture", {
 				numberOfInputs: 1,
 				numberOfOutputs: 0,
-				channelCount: settings.channelCount ?? root.channelCount,
+				channelCount,
 			});
 
 			effect.set(this.#worklet, worklet);
+
+			// The information about channels count can be unreliable on different platforms (Apple's Safari).
+			// Try to get the first audio frame and only then create the configuration.
+			effect.event(
+				worklet.port,
+				"message",
+				(event: Event) => {
+					const data = (event as MessageEvent<Capture.AudioFrame>).data;
+					const channelCount = data.channels.length;
+					if (!channelCount) return;
+
+					this.#config.set(this.#createConfig(worklet, channelCount));
+				},
+				{ once: true },
+			);
+			worklet.port.start();
+			effect.cleanup(() => {
+				this.#config.set(undefined);
+			});
 
 			gain.connect(worklet);
 			effect.cleanup(() => worklet.disconnect());
@@ -112,23 +133,17 @@ export class Encoder {
 		});
 	}
 
-	#runConfig(effect: Effect): void {
-		const values = effect.getAll([this.source, this.#worklet]);
-		if (!values) return;
-		const [_source, worklet] = values;
-
-		const config = {
+	#createConfig(worklet: AudioWorkletNode, channelCount: number): Catalog.AudioConfig {
+		return {
 			codec: "opus",
 			sampleRate: Catalog.u53(worklet.context.sampleRate),
-			numberOfChannels: Catalog.u53(worklet.channelCount),
-			bitrate: Catalog.u53(worklet.channelCount * 32_000),
+			numberOfChannels: Catalog.u53(channelCount),
+			bitrate: Catalog.u53(channelCount * OPUS_BITRATE_PER_CHANNEL),
 			container: { kind: "legacy" } as const,
 			// TODO parse the actual frame duration instead of assuming 20ms.
 			// Opus supports 2.5–60ms but 20ms is the real-time default.
-			jitter: Catalog.u53(20),
+			jitter: Catalog.u53(OPUS_FRAME_DURATION),
 		};
-
-		effect.set(this.#config, config);
 	}
 
 	#runGain(effect: Effect): void {
@@ -147,9 +162,9 @@ export class Encoder {
 	}
 
 	serve(track: Moq.Track, effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.#worklet, this.#config]);
+		const values = effect.getAll([this.enabled, this.#worklet]);
 		if (!values) return;
-		const [_, worklet, config] = values;
+		const [_, worklet] = values;
 
 		effect.set(this.active, true, false);
 
@@ -172,16 +187,30 @@ export class Encoder {
 				error: (err) => {
 					console.error("encoder error", err);
 					track.close(err);
-					worklet.port.onmessage = null;
 				},
 			});
 			effect.cleanup(() => encoder.close());
 
-			console.debug("encoding audio", config);
-			encoder.configure(config);
+			let config: Catalog.AudioConfig | undefined;
+			effect.run((effect: Effect) => {
+				config = effect.get(this.#config);
+				if (!config) return;
 
-			worklet.port.onmessage = ({ data }: { data: Capture.AudioFrame }) => {
-				const channels = data.channels.slice(0, worklet.channelCount);
+				console.debug("encoding audio", config);
+				encoder.configure(config);
+			});
+
+			effect.event(worklet.port, "message", (event: Event) => {
+				const data = (event as MessageEvent<Capture.AudioFrame>).data;
+				const channelCount = data.channels.length;
+				if (!channelCount) return;
+
+				if (!config || channelCount !== config.numberOfChannels) {
+					this.#config.set(this.#createConfig(worklet, channelCount));
+					return;
+				}
+
+				const channels = data.channels;
 				const joinedLength = channels.reduce((a, b) => a + b.length, 0);
 				const joined = new Float32Array(joinedLength);
 
@@ -202,16 +231,17 @@ export class Encoder {
 
 				encoder.encode(frame);
 				frame.close();
-			};
-			effect.cleanup(() => {
-				worklet.port.onmessage = null;
 			});
+			worklet.port.start();
 		});
 	}
 
 	#runCatalog(effect: Effect): void {
 		const config = effect.get(this.#config);
-		if (!config) return;
+		if (!config) {
+			effect.set(this.#catalog, undefined);
+			return;
+		}
 
 		const catalog: Catalog.Audio = {
 			renditions: { [Encoder.TRACK]: config },
