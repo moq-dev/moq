@@ -234,14 +234,22 @@ fn audio_config_from_msf(track: &moq_msf::Track) -> anyhow::Result<Option<AudioC
 	let codec = AudioCodec::from_str(codec_str)
 		.with_context(|| format!("MSF audio track {:?} has invalid codec {codec_str:?}", track.name))?;
 
-	// MSF leaves samplerate and channelConfig optional. Hang requires both, so we fall back
-	// to the WebCodecs-typical defaults (48kHz stereo) when the upstream catalog omits them.
-	let sample_rate = track.samplerate.unwrap_or(48_000);
-	let channel_count = track
-		.channel_config
-		.as_deref()
-		.and_then(|s| s.parse::<u32>().ok())
-		.unwrap_or(2);
+	// MSF leaves samplerate and channelConfig optional, but hang requires both. Trust the
+	// explicit fields when present; otherwise parse the codec init data (AAC
+	// AudioSpecificConfig, OpusHead, or the CMAF moov's audio sample entry) to derive what's
+	// missing. Defaults are dangerous here: a wrong sample rate produces audible distortion
+	// or no audio at all.
+	let channel_count_from_field = track.channel_config.as_deref().and_then(|s| s.parse::<u32>().ok());
+	let (sample_rate, channel_count) = match (track.samplerate, channel_count_from_field) {
+		(Some(sr), Some(cc)) => (sr, cc),
+		(sr_opt, cc_opt) => {
+			let derived = derive_audio_params(track, &codec)?;
+			(
+				sr_opt.unwrap_or(derived.sample_rate),
+				cc_opt.unwrap_or(derived.channel_count),
+			)
+		}
+	};
 
 	Ok(Some(AudioConfig {
 		codec,
@@ -259,6 +267,128 @@ fn audio_config_from_msf(track: &moq_msf::Track) -> anyhow::Result<Option<AudioC
 			.filter(|v| v.is_finite() && *v >= 0.0)
 			.and_then(|v| moq_net::Time::from_millis(v as u64).ok()),
 	}))
+}
+
+/// Audio parameters derived from a track's `init_data`.
+struct DerivedAudio {
+	sample_rate: u32,
+	channel_count: u32,
+}
+
+/// Derive sample rate and channel count from an MSF audio track's `init_data`.
+///
+/// - **Legacy / LOC**: the bytes are the codec config directly. For AAC we parse the
+///   `AudioSpecificConfig` and for Opus we parse the `OpusHead`.
+/// - **CMAF**: the bytes are an `ftyp+moov` init segment. We walk the moov to find the
+///   audio `trak` and pull `sample_rate` / `channel_count` from its sample entry.
+///
+/// Returns an error if `init_data` is absent, malformed, or doesn't carry usable audio
+/// parameters. The caller is expected to surface this as a hard failure rather than
+/// substitute defaults: a wrong sample rate produces silent or distorted playback.
+fn derive_audio_params(track: &moq_msf::Track, codec: &AudioCodec) -> anyhow::Result<DerivedAudio> {
+	let init = decode_init_data(track)?.with_context(|| {
+		format!(
+			"MSF audio track {:?} omits samplerate/channelConfig and has no init_data to derive from",
+			track.name
+		)
+	})?;
+
+	match track.packaging {
+		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy => derive_from_codec_config(track, codec, init),
+		moq_msf::Packaging::Cmaf => derive_from_cmaf_moov(track, init),
+		_ => anyhow::bail!(
+			"MSF audio track {:?} packaging {:?} is unsupported for parameter derivation",
+			track.name,
+			track.packaging
+		),
+	}
+}
+
+fn derive_from_codec_config(
+	track: &moq_msf::Track,
+	codec: &AudioCodec,
+	init: bytes::Bytes,
+) -> anyhow::Result<DerivedAudio> {
+	use bytes::Buf;
+	let mut buf = init;
+	match codec {
+		AudioCodec::AAC(_) => {
+			let cfg = crate::import::AacConfig::parse(&mut buf)
+				.with_context(|| format!("MSF audio track {:?} has malformed AudioSpecificConfig", track.name))?;
+			anyhow::ensure!(
+				!buf.has_remaining(),
+				"MSF audio track {:?} AudioSpecificConfig has trailing bytes",
+				track.name,
+			);
+			Ok(DerivedAudio {
+				sample_rate: cfg.sample_rate,
+				channel_count: cfg.channel_count,
+			})
+		}
+		AudioCodec::Opus => {
+			let cfg = crate::import::OpusConfig::parse(&mut buf)
+				.with_context(|| format!("MSF audio track {:?} has malformed OpusHead", track.name))?;
+			anyhow::ensure!(
+				!buf.has_remaining(),
+				"MSF audio track {:?} OpusHead has trailing bytes",
+				track.name,
+			);
+			Ok(DerivedAudio {
+				sample_rate: cfg.sample_rate,
+				channel_count: cfg.channel_count,
+			})
+		}
+		_ => anyhow::bail!(
+			"MSF audio track {:?} omits samplerate/channelConfig; codec {:?} has no init_data parser",
+			track.name,
+			codec,
+		),
+	}
+}
+
+fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> anyhow::Result<DerivedAudio> {
+	use mp4_atom::{Any, DecodeMaybe};
+
+	let mut cursor = std::io::Cursor::new(init.as_ref());
+	let mut moov: Option<mp4_atom::Moov> = None;
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)
+		.with_context(|| format!("MSF audio track {:?} init segment is malformed", track.name))?
+	{
+		if let Any::Moov(m) = atom {
+			moov = Some(m);
+			break;
+		}
+	}
+	let moov = moov.with_context(|| format!("MSF audio track {:?} init segment missing moov", track.name))?;
+
+	// Walk every trak looking for an audio sample entry. A single-track audio init is
+	// the only thing we expect here, but rather than enforce that we just take the first
+	// audio trak we find — the rest of the catalog identifies tracks by name, not by
+	// position in the moov.
+	for trak in &moov.trak {
+		let stbl = &trak.mdia.minf.stbl;
+		for sample in &stbl.stsd.codecs {
+			match sample {
+				mp4_atom::Codec::Mp4a(mp4a) => {
+					return Ok(DerivedAudio {
+						sample_rate: mp4a.audio.sample_rate.integer() as u32,
+						channel_count: mp4a.audio.channel_count as u32,
+					});
+				}
+				mp4_atom::Codec::Opus(opus) => {
+					return Ok(DerivedAudio {
+						sample_rate: opus.audio.sample_rate.integer() as u32,
+						channel_count: opus.audio.channel_count as u32,
+					});
+				}
+				_ => {}
+			}
+		}
+	}
+	anyhow::bail!(
+		"MSF audio track {:?} CMAF init has no audio sample entry to derive samplerate/channelConfig from",
+		track.name,
+	)
 }
 
 #[cfg(test)]
@@ -474,18 +604,103 @@ mod test {
 	}
 
 	#[test]
-	fn audio_defaults_when_samplerate_and_channels_missing() {
+	fn audio_missing_samplerate_and_channels_without_init_data_errors() {
+		// No explicit fields and no init_data to fall back on → hard failure
+		// (defaults would produce silent or distorted playback).
 		let mut track = audio_track("audio0", moq_msf::Packaging::Legacy);
 		track.samplerate = None;
 		track.channel_config = None;
+		track.init_data = None;
 		let msf = moq_msf::Catalog {
 			version: 1,
 			tracks: vec![track],
 		};
 
-		let catalog = from_msf(&msf).expect("missing samplerate/channels should default");
+		let err = from_msf(&msf).expect_err("missing fields with no init_data should error");
+		assert!(err.to_string().contains("no init_data"), "unexpected error: {}", err);
+	}
+
+	#[test]
+	fn audio_missing_samplerate_and_channels_derived_from_opus_head() {
+		// Legacy/LOC + Opus → parse OpusHead for samplerate and channels.
+		// OpusHead layout: "OpusHead" magic, ver, channels, pre_skip(2), sample_rate(4 LE), ...
+		let mut head = Vec::with_capacity(19);
+		head.extend_from_slice(b"OpusHead");
+		head.push(1); // version
+		head.push(6); // channel_count (5.1)
+		head.extend_from_slice(&0u16.to_le_bytes()); // pre_skip
+		head.extend_from_slice(&24_000u32.to_le_bytes()); // sample_rate
+		head.extend_from_slice(&[0, 0, 0]); // output gain (i16) + channel mapping family (1 byte)
+		let init_b64 = base64::engine::general_purpose::STANDARD.encode(&head);
+
+		let mut track = audio_track("audio0", moq_msf::Packaging::Loc);
+		track.codec = Some("opus".to_string());
+		track.samplerate = None;
+		track.channel_config = None;
+		track.init_data = Some(init_b64);
+		let msf = moq_msf::Catalog {
+			version: 1,
+			tracks: vec![track],
+		};
+
+		let catalog = from_msf(&msf).expect("Opus OpusHead should parse");
+		let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
+		assert_eq!(audio.sample_rate, 24_000);
+		assert_eq!(audio.channel_count, 6);
+	}
+
+	#[test]
+	fn audio_missing_samplerate_and_channels_derived_from_aac_config() {
+		// Legacy + AAC → parse AudioSpecificConfig for samplerate and channels.
+		// 2-byte ASC: object_type=2 (AAC LC), freq_index=3 (48000), channel_config=2 (stereo).
+		// Layout: object_type(5 bits) | freq_index_hi(3 bits) ; freq_index_lo(1) | chan(4) | ext(3)
+		// 2 = 0b00010, freq_index 3 = 0b0011, channel_config 2 = 0b0010
+		// byte0 = 0b00010_000 (obj=2, freq_hi=000) | 0b001 (freq_hi from index 3 = 0b001) → 0b00010001 = 0x11
+		// byte1 = 0b1_0010_000 (freq_lo=1, chan=0010, ext=000) = 0x90
+		let asc = [0x11u8, 0x90];
+		let init_b64 = base64::engine::general_purpose::STANDARD.encode(asc);
+
+		let mut track = audio_track("audio0", moq_msf::Packaging::Legacy);
+		track.codec = Some("mp4a.40.2".to_string());
+		track.samplerate = None;
+		track.channel_config = None;
+		track.init_data = Some(init_b64);
+		let msf = moq_msf::Catalog {
+			version: 1,
+			tracks: vec![track],
+		};
+
+		let catalog = from_msf(&msf).expect("AAC AudioSpecificConfig should parse");
 		let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
 		assert_eq!(audio.sample_rate, 48_000);
+		assert_eq!(audio.channel_count, 2);
+	}
+
+	#[test]
+	fn audio_only_channels_missing_uses_explicit_samplerate() {
+		// Half the fields missing: trust the explicit one, derive the missing one.
+		let mut head = Vec::with_capacity(19);
+		head.extend_from_slice(b"OpusHead");
+		head.push(1);
+		head.push(2); // channel_count derived = 2
+		head.extend_from_slice(&0u16.to_le_bytes());
+		head.extend_from_slice(&48_000u32.to_le_bytes()); // ignored: explicit samplerate wins
+		head.extend_from_slice(&[0, 0, 0]);
+		let init_b64 = base64::engine::general_purpose::STANDARD.encode(&head);
+
+		let mut track = audio_track("audio0", moq_msf::Packaging::Loc);
+		track.codec = Some("opus".to_string());
+		track.samplerate = Some(24_000); // explicit, must be preserved
+		track.channel_config = None; // missing, derive from init_data
+		track.init_data = Some(init_b64);
+		let msf = moq_msf::Catalog {
+			version: 1,
+			tracks: vec![track],
+		};
+
+		let catalog = from_msf(&msf).expect("partial derivation should succeed");
+		let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
+		assert_eq!(audio.sample_rate, 24_000);
 		assert_eq!(audio.channel_count, 2);
 	}
 
