@@ -18,8 +18,9 @@ export type ReloadDelay = {
 	max: DOMHighResTimeStamp;
 
 	// Maximum total time in milliseconds to spend retrying before giving up.
-	// Resets after each successful connection. Omit for unlimited retries.
-	timeout?: DOMHighResTimeStamp;
+	// Resets after each successful connection.
+	// default: 300000 (5 minutes)
+	timeout: DOMHighResTimeStamp;
 };
 
 export type ReloadProps = ConnectProps & {
@@ -74,7 +75,7 @@ export class Reload {
 	constructor(props?: ReloadProps) {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.delay = props?.delay ?? { initial: 1000, multiplier: 2, max: 30000 };
+		this.delay = props?.delay ?? { initial: 1000, multiplier: 2, max: 30000, timeout: 300000 };
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 
@@ -128,13 +129,11 @@ export class Reload {
 				// Track retry start for timeout.
 				this.#retryStart ??= performance.now();
 
-				if (this.delay.timeout !== undefined) {
-					const elapsed = performance.now() - this.#retryStart;
-					if (elapsed >= this.delay.timeout) {
-						console.warn("reconnect timed out");
-						this.#closedReject(new Error("reconnect timed out"));
-						return;
-					}
+				const elapsed = performance.now() - this.#retryStart;
+				if (elapsed >= this.delay.timeout) {
+					console.warn("reconnect timed out");
+					this.#closedReject(err instanceof Error ? err : new Error(String(err)));
+					return;
 				}
 
 				const tick = this.#tick.peek() + 1;
