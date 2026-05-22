@@ -88,7 +88,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+		.subscribe_track("video", moq_net::Subscription::default())
 		.await
 		.expect("subscribe_track failed");
 
@@ -501,7 +501,7 @@ async fn broadcast_websocket() {
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+		.subscribe_track("video", moq_net::Subscription::default())
 		.await
 		.expect("subscribe_track failed");
 
@@ -609,7 +609,7 @@ async fn broadcast_websocket_fallback() {
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+		.subscribe_track("video", moq_net::Subscription::default())
 		.await
 		.expect("subscribe_track failed");
 

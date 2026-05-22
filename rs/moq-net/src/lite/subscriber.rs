@@ -7,7 +7,7 @@ use futures::{StreamExt, stream::FuturesUnordered};
 
 use crate::{
 	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer,
-	OriginProducer, Path, PathOwned, TrackProducer,
+	OriginProducer, Path, PathOwned, Timescale, Track, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -271,9 +271,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		loop {
 			// Keep serving requests until there are no more consumers.
 			// This way we'll clean up the task when the broadcast is no longer needed.
-			let track = tokio::select! {
-				producer = broadcast.requested_track() => match producer {
-					Ok(producer) => producer,
+			let request = tokio::select! {
+				request = broadcast.requested_track() => match request {
+					Ok(request) => request,
 					Err(err) => {
 						tracing::debug!(%err, "broadcast closed");
 						break;
@@ -288,91 +288,104 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let path = path.clone();
 			let broadcast = broadcast.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(id, path, broadcast, track).await;
+				this.run_subscribe(id, path, broadcast, request).await;
 				this.subscribes.lock().remove(&id);
 			});
 		}
 	}
 
-	async fn run_subscribe(&mut self, id: u64, path: PathOwned, broadcast: BroadcastDynamic, mut track: TrackProducer) {
-		self.subscribes.lock().insert(id, track.clone());
+	async fn run_subscribe(&mut self, id: u64, path: PathOwned, broadcast: BroadcastDynamic, request: TrackRequest) {
+		let track_name = request.name().to_string();
+		let priority = request.subscription().priority;
+
+		tracing::info!(id, broadcast = %self.log_path(&path), track = %track_name, "subscribe started");
 
 		let msg = lite::Subscribe {
 			id,
 			broadcast: path.as_path(),
-			track: (&track.name).into(),
-			priority: track.priority,
+			track: (&track_name).into(),
+			priority,
 			ordered: true,
 			max_latency: std::time::Duration::ZERO,
 			start_group: None,
 			end_group: None,
 		};
 
-		tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe started");
+		// Send SUBSCRIBE and wait for SUBSCRIBE_OK to get the publisher's
+		// Track properties. Then convert the request into a TrackProducer.
+		let mut stream = match Stream::open(&self.session, self.version).await {
+			Ok(s) => s,
+			Err(err) => {
+				request.deny(err);
+				return;
+			}
+		};
+		if let Err(err) = stream.writer.encode(&lite::ControlType::Subscribe).await {
+			request.deny(err);
+			return;
+		}
+		if let Err(err) = stream.writer.encode(&msg).await {
+			stream.writer.abort(&err);
+			request.deny(err);
+			return;
+		}
+
+		let info: lite::SubscribeOk = match stream.reader.decode::<lite::SubscribeResponse>().await {
+			Ok(lite::SubscribeResponse::Ok(info)) => info,
+			Ok(_) => {
+				request.deny(Error::ProtocolViolation);
+				stream.writer.abort(&Error::ProtocolViolation);
+				return;
+			}
+			Err(err) => {
+				let cause = err;
+				stream.writer.abort(&cause);
+				request.deny(cause);
+				return;
+			}
+		};
+
+		let track_struct = Track {
+			name: track_name.clone(),
+			priority: info.priority,
+			timescale: Timescale::new(info.timescale),
+		};
+
+		let mut track = match request.accept(track_struct) {
+			Ok(track) => track,
+			Err(err) => {
+				stream.writer.abort(&err);
+				return;
+			}
+		};
+
+		self.subscribes.lock().insert(id, track.clone());
 
 		tokio::select! {
 			_ = track.unused() => {
-				tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe cancelled");
+				tracing::info!(id, broadcast = %self.log_path(&path), track = %track_name, "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
+				stream.writer.abort(&Error::Cancel);
 			}
 			err = broadcast.closed() => {
-				tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "broadcast closed");
-				let _ = track.abort(err);
+				tracing::info!(id, broadcast = %self.log_path(&path), track = %track_name, "broadcast closed");
+				let _ = track.abort(err.clone());
+				stream.writer.abort(&err);
 			}
-			res = self.run_track(msg) => match res {
-				Ok(()) => {
-					tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe complete");
-					let _ = track.finish();
+			res = stream.reader.closed() => {
+				match res {
+					Ok(()) => {
+						tracing::info!(id, broadcast = %self.log_path(&path), track = %track_name, "subscribe complete");
+						let _ = track.finish();
+					}
+					Err(err) => {
+						tracing::warn!(id, broadcast = %self.log_path(&path), track = %track_name, %err, "subscribe error");
+						let _ = track.abort(err);
+					}
 				}
-				Err(err) => {
-					tracing::warn!(id, broadcast = %self.log_path(&path), track = %track.name, %err, "subscribe error");
-					let _ = track.abort(err);
-				}
-			},
-		}
-	}
-
-	async fn run_track(&mut self, msg: lite::Subscribe<'_>) -> Result<(), Error> {
-		let mut stream = Stream::open(&self.session, self.version).await?;
-		stream.writer.encode(&lite::ControlType::Subscribe).await?;
-
-		if let Err(err) = self.run_track_stream(&mut stream, msg).await {
-			stream.writer.abort(&err);
-			return Err(err);
-		}
-
-		stream.writer.finish()?;
-		stream.writer.closed().await
-	}
-
-	async fn run_track_stream(
-		&mut self,
-		stream: &mut Stream<S, Version>,
-		msg: lite::Subscribe<'_>,
-	) -> Result<(), Error> {
-		let subscribe_id = msg.id;
-		stream.writer.encode(&msg).await?;
-
-		// The first response MUST be a SUBSCRIBE_OK.
-		let resp: lite::SubscribeResponse = stream.reader.decode().await?;
-		let lite::SubscribeResponse::Ok(info) = resp else {
-			return Err(Error::ProtocolViolation);
-		};
-
-		// Apply the negotiated timescale to the track producer so consumers can
-		// observe it via TrackConsumer::timescale() and run_group can decode
-		// per-frame timestamps at the correct scale.
-		{
-			let mut subs = self.subscribes.lock();
-			if let Some(track) = subs.get_mut(&subscribe_id) {
-				track.set_timescale(info.timescale);
+				let _ = stream.writer.finish();
 			}
 		}
-
-		// TODO handle additional SUBSCRIBE_OK and SUBSCRIBE_DROP messages.
-		stream.reader.closed().await?;
-
-		Ok(())
 	}
 
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
@@ -414,7 +427,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
-		track_timescale: u64,
+		track_timescale: Timescale,
 	) -> Result<(), Error> {
 		// Previous frame's raw timestamp value, for zigzag-delta decoding on Lite05+.
 		let mut prev_ts: u64 = 0;
@@ -430,7 +443,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 				prev_ts = next;
 				let size = stream.decode::<u64>().await?;
-				let ts = crate::Timestamp::new_u64(next, track_timescale)
+				let ts = crate::Timestamp::new(next, track_timescale)
 					.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 				(size, ts)
 			} else {
@@ -440,7 +453,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				(size, crate::Timestamp::ZERO)
 			};
 
-			let mut frame = group.create_frame(Frame::new(size).with_timestamp(timestamp))?;
+			let mut frame = group.create_frame(Frame { size, timestamp })?;
 
 			if let Err(err) = self.run_frame(stream, &mut frame).await {
 				let _ = frame.abort(err.clone());

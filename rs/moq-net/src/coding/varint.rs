@@ -188,7 +188,7 @@ impl fmt::Display for VarInt {
 
 impl VarInt {
 	/// Decode a QUIC-style varint (2-bit length tag in top bits).
-	fn decode_quic<R: bytes::Buf>(r: &mut R) -> Result<Self, DecodeError> {
+	pub fn decode_quic<R: bytes::Buf>(r: &mut R) -> Result<Self, DecodeError> {
 		if !r.has_remaining() {
 			return Err(DecodeError::Short);
 		}
@@ -229,7 +229,7 @@ impl VarInt {
 	}
 
 	/// Encode a QUIC-style varint (2-bit length tag in top bits).
-	fn encode_quic<W: bytes::BufMut>(&self, w: &mut W) -> Result<(), EncodeError> {
+	pub fn encode_quic<W: bytes::BufMut>(&self, w: &mut W) -> Result<(), EncodeError> {
 		let remaining = w.remaining_mut();
 		if self.0 < (1u64 << 6) {
 			if remaining < 1 {

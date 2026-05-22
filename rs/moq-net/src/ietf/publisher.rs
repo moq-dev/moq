@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::SendStream;
 
 use crate::{
-	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, Error, Origin, OriginConsumer, TrackConsumer,
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	model::GroupConsumer,
@@ -113,13 +113,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			return Ok(());
 		};
 
-		let track = Track {
-			name: msg.track_name.to_string(),
-			priority: msg.subscriber_priority,
-			timescale: 0,
-		};
-
-		let track = match broadcast.subscribe_track_immediate(&track) {
+		let track = match broadcast
+			.subscribe_track(
+				&msg.track_name,
+				crate::Subscription {
+					priority: msg.subscriber_priority,
+					timeout: std::time::Duration::ZERO,
+				},
+			)
+			.await
+		{
 			Ok(track) => track,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())

@@ -15,7 +15,9 @@ pub enum Version {
 impl Version {
 	/// Whether this version carries per-frame timestamps and per-track timescale
 	/// on the wire.
+	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_timestamps(self) -> bool {
+		// Match form is used so future versions default forward (CLAUDE.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
 			_ => true,

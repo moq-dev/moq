@@ -92,8 +92,12 @@ impl Hev1 {
 			catalog.video.renditions.remove(&track.name);
 		}
 
-		let mut track = self.broadcast.unique_track(".hev1")?;
-		track.set_timescale(hang::container::TIMESCALE);
+		let name = self.broadcast.unique_name(".hev1");
+		let track = self.broadcast.create_track(moq_net::Track {
+			name,
+			priority: 0,
+			timescale: hang::container::TIMESCALE,
+		})?;
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 

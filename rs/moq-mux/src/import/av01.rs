@@ -102,8 +102,12 @@ impl Av01 {
 			self.catalog.lock().video.renditions.remove(&track.name);
 		}
 
-		let mut track = self.broadcast.unique_track(".av01")?;
-		track.set_timescale(hang::container::TIMESCALE);
+		let name = self.broadcast.unique_name(".av01");
+		let track = self.broadcast.create_track(moq_net::Track {
+			name,
+			priority: 0,
+			timescale: hang::container::TIMESCALE,
+		})?;
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 		self.catalog
 			.lock()
@@ -147,8 +151,12 @@ impl Av01 {
 			jitter: None,
 		};
 
-		let mut track = self.broadcast.unique_track(".av01")?;
-		track.set_timescale(hang::container::TIMESCALE);
+		let name = self.broadcast.unique_name(".av01");
+		let track = self.broadcast.create_track(moq_net::Track {
+			name,
+			priority: 0,
+			timescale: hang::container::TIMESCALE,
+		})?;
 		tracing::debug!(name = ?track.name, "starting track with minimal config");
 		self.catalog
 			.lock()
@@ -238,8 +246,12 @@ impl Av01 {
 			self.catalog.lock().video.renditions.remove(&track.name);
 		}
 
-		let mut track = self.broadcast.unique_track(".av01")?;
-		track.set_timescale(hang::container::TIMESCALE);
+		let name = self.broadcast.unique_name(".av01");
+		let track = self.broadcast.create_track(moq_net::Track {
+			name,
+			priority: 0,
+			timescale: hang::container::TIMESCALE,
+		})?;
 		self.catalog
 			.lock()
 			.video

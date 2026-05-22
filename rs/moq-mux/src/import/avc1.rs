@@ -103,8 +103,12 @@ impl Avc1 {
 			catalog.video.renditions.remove(&track.name);
 		}
 
-		let mut track = self.broadcast.unique_track(".avc1")?;
-		track.set_timescale(hang::container::TIMESCALE);
+		let name = self.broadcast.unique_name(".avc1");
+		let track = self.broadcast.create_track(moq_net::Track {
+			name,
+			priority: 0,
+			timescale: hang::container::TIMESCALE,
+		})?;
 		tracing::debug!(name = ?track.name, ?config, "starting avc1 track");
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 

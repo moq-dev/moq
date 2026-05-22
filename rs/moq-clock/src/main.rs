@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
 	let track = Track {
 		name: config.track,
 		priority: 0,
-		timescale: 0,
+		timescale: moq_net::Timescale::UNKNOWN,
 	};
 
 	let origin = moq_net::Origin::random().produce();
@@ -100,7 +100,9 @@ async fn main() -> anyhow::Result<()> {
 					Some(announce) = origin.announced() => match announce {
 						(path, Some(broadcast)) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
-							let track = broadcast.subscribe_track(&track).await?;
+							let track = broadcast
+								.subscribe_track(&track.name, moq_net::Subscription::default())
+								.await?;
 							clock = Some(clock::Subscriber::new(track));
 						}
 						(path, None) => {

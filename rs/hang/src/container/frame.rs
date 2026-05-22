@@ -1,12 +1,17 @@
 use bytes::{Buf, Bytes, BytesMut};
 use derive_more::Debug;
+use moq_net::coding::VarInt;
 
 use crate::Error;
 
 pub use moq_net::Timestamp;
 
 /// Canonical timescale for hang frame timestamps: microseconds.
-pub const TIMESCALE: u64 = 1_000_000;
+pub const TIMESCALE: moq_net::Timescale = moq_net::Timescale::MICRO;
+
+/// Re-export so callers don't need a direct `moq_net` import to refer to the
+/// hang container timescale by type.
+pub type Timescale = moq_net::Timescale;
 
 /// A media frame with a timestamp and codec-specific payload.
 ///
@@ -38,11 +43,15 @@ impl Frame {
 	/// stays as a duplicate for now).
 	pub fn encode(&self, group: &mut moq_net::GroupProducer) -> Result<(), Error> {
 		let mut header = BytesMut::new();
-		self.timestamp.encode_value(&mut header).map_err(moq_net::Error::from)?;
+		let value = VarInt::try_from(self.timestamp.value()).map_err(moq_net::Error::from)?;
+		value.encode_quic(&mut header).map_err(moq_net::Error::from)?;
 
-		let size = header.len() + self.payload.len();
+		let size = (header.len() + self.payload.len()) as u64;
 
-		let net_frame = moq_net::Frame::new(size as u64).with_timestamp(self.timestamp);
+		let net_frame = moq_net::Frame {
+			size,
+			timestamp: self.timestamp,
+		};
 		let mut chunked = group.create_frame(net_frame)?;
 		chunked.write(header.freeze())?;
 		chunked.write(self.payload.clone())?;
@@ -53,7 +62,8 @@ impl Frame {
 
 	/// Decode a frame from raw bytes (VarInt timestamp prefix + payload).
 	pub fn decode(mut buf: impl Buf) -> Result<Self, Error> {
-		let timestamp = Timestamp::decode_value(&mut buf, TIMESCALE)?;
+		let value: u64 = VarInt::decode_quic(&mut buf).map_err(moq_net::Error::from)?.into();
+		let timestamp = Timestamp::from_micros(value)?;
 		let payload = buf.copy_to_bytes(buf.remaining());
 
 		Ok(Self { timestamp, payload })

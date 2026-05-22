@@ -96,7 +96,7 @@ impl MoqBroadcastProducer {
 		let track = moq_net::Track {
 			name,
 			priority: 0,
-			timescale: 0,
+			timescale: moq_net::Timescale::UNKNOWN,
 		};
 		// Clone the broadcast handle (shared Arc internally) to get &mut access.
 		let mut broadcast = state.broadcast.clone();

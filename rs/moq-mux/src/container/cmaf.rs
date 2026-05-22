@@ -144,7 +144,8 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, Error> {
 
 			let cts = entry.cts.unwrap_or_default() as i64;
 			let pts = dts.checked_add_signed(cts).ok_or(Error::PtsOverflow)?;
-			let timestamp = Timestamp::from_scale(pts, timescale, crate::container::TIMESCALE)?;
+			let timestamp =
+				Timestamp::new(pts, moq_net::Timescale::new(timescale))?.convert(crate::container::TIMESCALE)?;
 			let payload = Bytes::copy_from_slice(&mdat_data[offset..end]);
 			let flags = entry.flags.unwrap_or(0);
 			// depends_on_no_other (bits 24-25 == 0x2) means keyframe
@@ -226,7 +227,10 @@ pub(crate) fn encode(
 	// Stamp the wire-level timestamp on the moq-net frame so Lite05+ can
 	// delta-encode it. The CMAF fragment may pack multiple media samples; use
 	// the first sample's PTS as the representative timestamp.
-	let net_frame = moq_net::Frame::new(buf.len() as u64).with_timestamp(frames[0].timestamp);
+	let net_frame = moq_net::Frame {
+		size: buf.len() as u64,
+		timestamp: frames[0].timestamp,
+	};
 	let mut writer = group.create_frame(net_frame)?;
 	writer.write(Bytes::from(buf))?;
 	writer.finish()?;

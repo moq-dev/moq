@@ -142,9 +142,13 @@ impl Fmp4 {
 			let handler = &trak.mdia.hdlr.handler;
 			let suffix = ".m4s";
 
-			let mut track = self.broadcast.unique_track(suffix)?;
+			let name = self.broadcast.unique_name(suffix);
 			// moq-mux frames are always emitted at microsecond timescale.
-			track.set_timescale(hang::container::TIMESCALE);
+			let track = self.broadcast.create_track(moq_net::Track {
+				name,
+				priority: 0,
+				timescale: hang::container::TIMESCALE,
+			})?;
 
 			let kind = match handler.as_ref() {
 				b"vide" => {
@@ -515,7 +519,8 @@ impl Fmp4 {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let timestamp = hang::container::Timestamp::from_scale(pts, timescale, hang::container::TIMESCALE)?;
+					let timestamp = hang::container::Timestamp::new(pts, moq_net::Timescale::new(timescale))?
+						.convert(hang::container::TIMESCALE)?;
 
 					if offset + size > mdat.data.len() {
 						anyhow::bail!("invalid data offset");
@@ -656,7 +661,7 @@ impl Fmp4 {
 								.renditions
 								.get_mut(&track.track.name)
 								.context("missing video config")?;
-							config.jitter = Some(jitter.convert(1_000)?);
+							config.jitter = Some(jitter.convert(moq_net::Timescale::MILLI)?);
 						}
 						TrackKind::Audio => {
 							let config = catalog
@@ -664,7 +669,7 @@ impl Fmp4 {
 								.renditions
 								.get_mut(&track.track.name)
 								.context("missing audio config")?;
-							config.jitter = Some(jitter.convert(1_000)?);
+							config.jitter = Some(jitter.convert(moq_net::Timescale::MILLI)?);
 						}
 					}
 				}

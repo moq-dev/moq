@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, Subscription, Timescale, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -305,16 +305,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		priority: PriorityQueue,
 		version: Version,
 	) -> Result<(), Error> {
-		let track = Track {
-			name: subscribe.track.to_string(),
-			priority: subscribe.priority,
-			timescale: 0,
-		};
-
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track_immediate(&track)?;
 
-		// TODO wait until track.info() to get the *real* priority
+		// Await the publisher's authoritative Track properties (priority,
+		// timescale) before responding with SUBSCRIBE_OK.
+		let track = broadcast
+			.subscribe_track(
+				&subscribe.track,
+				Subscription {
+					priority: subscribe.priority,
+					timeout: std::time::Duration::ZERO,
+				},
+			)
+			.await?;
 
 		let info = lite::SubscribeOk {
 			priority: track.priority,
@@ -322,7 +325,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			max_latency: std::time::Duration::ZERO,
 			start_group: None,
 			end_group: None,
-			timescale: track.timescale,
+			timescale: track.timescale.as_u64(),
 		};
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
@@ -370,9 +373,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let priority = priority.insert(track.priority, sequence);
-			tasks.push(
-				Self::serve_group(session.clone(), msg, priority, group, version, track.timescale).map(|_| ()),
-			);
+			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version, track.timescale).map(|_| ()));
 		}
 	}
 
@@ -382,7 +383,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		mut priority: PriorityHandle,
 		mut group: GroupConsumer,
 		version: Version,
-		track_timescale: u64,
+		track_timescale: Timescale,
 	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
 		let stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -422,8 +423,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				let delta: i64 = (curr as i128 - prev_ts as i128)
 					.try_into()
 					.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-				let zz = crate::coding::VarInt::from_zigzag(delta)
-					.map_err(crate::coding::EncodeError::from)?;
+				let zz = crate::coding::VarInt::from_zigzag(delta).map_err(crate::coding::EncodeError::from)?;
 				stream.encode(&zz).await?;
 				prev_ts = curr;
 			}

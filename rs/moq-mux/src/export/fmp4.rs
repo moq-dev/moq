@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -8,6 +9,9 @@ use hang::catalog::{Catalog, Container, VideoConfig};
 use mp4_atom::{DecodeMaybe, Encode};
 
 use crate::container::{Consumer, Frame, Hang};
+
+/// Holds resolved subscriptions from spawned tasks, drained by `poll_next`.
+type SubscribeQueue = Arc<Mutex<Vec<(String, Result<moq_net::TrackConsumer, moq_net::Error>)>>>;
 
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
 ///
@@ -27,6 +31,15 @@ pub struct Fmp4 {
 
 	tracks: HashMap<String, Fmp4Track>,
 
+	/// Per-name metadata captured from the catalog snapshot at subscribe time, used
+	/// once the subscription resolves to construct the [`Fmp4Track`]. While entries
+	/// are present, a tokio task is awaiting SUBSCRIBE_OK and will push into
+	/// [`Self::subscribe_queue`].
+	pending_meta: HashMap<String, PendingMeta>,
+
+	/// Resolved subscriptions written by spawned tasks; drained on each [`poll_next`].
+	subscribe_queue: SubscribeQueue,
+
 	/// Queued init segment, emitted on the first [`next`](Self::next) call after the
 	/// initial catalog snapshot has been processed.
 	init_pending: Option<Bytes>,
@@ -34,6 +47,12 @@ pub struct Fmp4 {
 	/// Set after the init segment has been emitted; subsequent catalog updates only
 	/// (un)subscribe tracks without re-emitting init.
 	init_emitted: bool,
+}
+
+struct PendingMeta {
+	media: Hang,
+	track_id: u32,
+	timescale: u64,
 }
 
 struct Fmp4Track {
@@ -55,8 +74,10 @@ impl Fmp4 {
 	///
 	/// The hang catalog is subscribed internally; per-rendition tracks are (un)subscribed
 	/// as the catalog changes.
-	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
-		let catalog_track = broadcast.subscribe_track_immediate(&hang::Catalog::default_track())?;
+	pub async fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
+		let catalog_track = broadcast
+			.subscribe_track(hang::Catalog::DEFAULT_NAME, moq_net::Subscription::default())
+			.await?;
 		let catalog = crate::catalog::Consumer::new(catalog_track);
 
 		Ok(Self {
@@ -64,6 +85,8 @@ impl Fmp4 {
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			tracks: HashMap::new(),
+			pending_meta: HashMap::new(),
+			subscribe_queue: Arc::new(Mutex::new(Vec::new())),
 			init_pending: None,
 			init_emitted: false,
 		})
@@ -102,7 +125,38 @@ impl Fmp4 {
 			}
 		}
 
-		// 2. Emit the init segment once it's been built.
+		// 2. Drain any subscribe_track tasks that have resolved into TrackConsumers.
+		let resolved: Vec<_> = self
+			.subscribe_queue
+			.lock()
+			.ok()
+			.map(|mut q| std::mem::take(&mut *q))
+			.unwrap_or_default();
+		for (name, result) in resolved {
+			let meta = match self.pending_meta.remove(&name) {
+				Some(meta) => meta,
+				None => continue,
+			};
+			match result {
+				Ok(track) => {
+					let consumer = Consumer::new(track, meta.media).with_latency(self.latency);
+					self.tracks.insert(
+						name,
+						Fmp4Track {
+							consumer,
+							pending: None,
+							finished: false,
+							track_id: meta.track_id,
+							timescale: meta.timescale,
+							sequence_number: 1,
+						},
+					);
+				}
+				Err(err) => return Poll::Ready(Err(err.into())),
+			}
+		}
+
+		// 3. Emit the init segment once it's been built.
 		if !self.init_emitted
 			&& let Some(init) = self.init_pending.take()
 		{
@@ -110,7 +164,7 @@ impl Fmp4 {
 			return Poll::Ready(Ok(Some(init)));
 		}
 
-		// 3. Fill any empty pending slots by polling each consumer.
+		// 4. Fill any empty pending slots by polling each consumer.
 		for track in self.tracks.values_mut() {
 			if track.pending.is_some() || track.finished {
 				continue;
@@ -123,7 +177,7 @@ impl Fmp4 {
 			}
 		}
 
-		// 4. Pick the track whose pending frame has the smallest timestamp.
+		// 5. Pick the track whose pending frame has the smallest timestamp.
 		let chosen = self
 			.tracks
 			.iter()
@@ -138,12 +192,12 @@ impl Fmp4 {
 			return Poll::Ready(Ok(Some(bytes)));
 		}
 
-		// 5. If catalog is closed and every track is finished, we're done.
-		if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
+		// 6. If catalog is closed and every track is finished, we're done.
+		if self.catalog.is_none() && self.pending_meta.is_empty() && self.tracks.values().all(|t| t.finished) {
 			return Poll::Ready(Ok(None));
 		}
 
-		// 6. Drop finished tracks so the next catalog update can re-add a track of the same name.
+		// 7. Drop finished tracks so the next catalog update can re-add a track of the same name.
 		self.tracks.retain(|_, t| !(t.finished && t.pending.is_none()));
 
 		Poll::Pending
@@ -167,35 +221,47 @@ impl Fmp4 {
 
 		// Add any new tracks. We use the rendition's catalog index as the track_id so
 		// fragment moof traf.tfhd.track_id matches the moov trak ids in the init segment.
-		let mut next_track_id = self.tracks.values().map(|t| t.track_id).max().unwrap_or(0) + 1;
+		let mut next_track_id = self
+			.tracks
+			.values()
+			.map(|t| t.track_id)
+			.chain(self.pending_meta.values().map(|m| m.track_id))
+			.max()
+			.unwrap_or(0)
+			+ 1;
 
 		for (name, container) in &active {
-			if self.tracks.contains_key(name) {
+			if self.tracks.contains_key(name) || self.pending_meta.contains_key(name) {
 				continue;
 			}
 
 			let media: Hang = (*container).try_into()?;
-			let track = self.broadcast.subscribe_track_immediate(&moq_net::Track::new(name.clone()))?;
-			let consumer = Consumer::new(track, media).with_latency(self.latency);
-
 			let timescale = catalog_timescale(catalog, name).context("track not in catalog")?;
 
-			self.tracks.insert(
+			self.pending_meta.insert(
 				name.clone(),
-				Fmp4Track {
-					consumer,
-					pending: None,
-					finished: false,
+				PendingMeta {
+					media,
 					track_id: next_track_id,
 					timescale,
-					sequence_number: 1,
 				},
 			);
 			next_track_id += 1;
+
+			let broadcast = self.broadcast.clone();
+			let queue = self.subscribe_queue.clone();
+			let name = name.clone();
+			tokio::spawn(async move {
+				let res = broadcast.subscribe_track(&name, moq_net::Subscription::default()).await;
+				if let Ok(mut q) = queue.lock() {
+					q.push((name, res));
+				}
+			});
 		}
 
 		// Remove tracks no longer in the catalog.
 		self.tracks.retain(|name, _| active.contains_key(name));
+		self.pending_meta.retain(|name, _| active.contains_key(name));
 
 		Ok(())
 	}

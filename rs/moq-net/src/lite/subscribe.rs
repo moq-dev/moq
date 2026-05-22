@@ -373,7 +373,7 @@ mod tests {
 		};
 		let decoded = roundtrip_ok(Version::Lite04, ok);
 		assert_eq!(decoded.priority, 7);
-		assert_eq!(decoded.ordered, true);
+		assert!(decoded.ordered);
 		assert_eq!(decoded.start_group, Some(2));
 		assert_eq!(decoded.end_group, Some(10));
 		assert_eq!(decoded.timescale, 0);

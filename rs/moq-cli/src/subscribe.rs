@@ -42,7 +42,9 @@ impl Subscribe {
 		// Fmp4 subscribes to the catalog internally, builds the merged init segment
 		// from the first catalog snapshot, then yields moof+mdat fragments in
 		// timestamp order across tracks.
-		let mut fmp4 = moq_mux::export::Fmp4::new(self.broadcast)?.with_latency(self.args.max_latency);
+		let mut fmp4 = moq_mux::export::Fmp4::new(self.broadcast)
+			.await?
+			.with_latency(self.args.max_latency);
 
 		while let Some(chunk) = fmp4.next().await? {
 			stdout.write_all(&chunk).await?;

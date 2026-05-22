@@ -47,7 +47,6 @@ impl Consume {
 
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
-		let catalog = broadcast.subscribe_track_immediate(&hang::catalog::Catalog::default_track())?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -58,7 +57,7 @@ impl Consume {
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_catalog(id, broadcast, catalog.into()) => res,
+				res = Self::run_catalog_task(id, broadcast) => res,
 				_ = channel.1 => Ok(()),
 			};
 
@@ -69,6 +68,13 @@ impl Consume {
 		});
 
 		Ok(id)
+	}
+
+	async fn run_catalog_task(task_id: Id, broadcast: moq_net::BroadcastConsumer) -> Result<(), Error> {
+		let catalog = broadcast
+			.subscribe_track(hang::catalog::Catalog::DEFAULT_NAME, moq_net::Subscription::default())
+			.await?;
+		Self::run_catalog(task_id, broadcast, catalog.into()).await
 	}
 
 	async fn run_catalog(
@@ -216,12 +222,8 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 
-		let track = consume.broadcast.subscribe_track_immediate(&moq_net::Track {
-			name: rendition.clone(),
-			priority: 1, // TODO: Remove priority
-			timescale: 0,
-		})?;
-		let track = moq_mux::container::Consumer::new(track, moq_mux::container::Hang::Legacy).with_latency(latency);
+		let broadcast = consume.broadcast.clone();
+		let name = rendition.clone();
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -231,6 +233,26 @@ impl Consume {
 		let id = self.track_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
+			let track = match broadcast
+				.subscribe_track(
+					&name,
+					moq_net::Subscription {
+						priority: 1,
+						timeout: std::time::Duration::ZERO,
+					},
+				)
+				.await
+			{
+				Ok(track) => track,
+				Err(err) => {
+					if let Some(entry) = State::lock().consume.track_task.remove(id).flatten() {
+						entry.callback.call(Result::<Id, Error>::Err(err.into()));
+					}
+					return;
+				}
+			};
+			let track =
+				moq_mux::container::Consumer::new(track, moq_mux::container::Hang::Legacy).with_latency(latency);
 			let res = tokio::select! {
 				res = Self::run_track(id, track) => res,
 				_ = channel.1 => Ok(()),
@@ -261,12 +283,8 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 
-		let track = consume.broadcast.subscribe_track_immediate(&moq_net::Track {
-			name: rendition.clone(),
-			priority: 2, // TODO: Remove priority
-			timescale: 0,
-		})?;
-		let track = moq_mux::container::Consumer::new(track, moq_mux::container::Hang::Legacy).with_latency(latency);
+		let broadcast = consume.broadcast.clone();
+		let name = rendition.clone();
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -276,6 +294,26 @@ impl Consume {
 		let id = self.track_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
+			let track = match broadcast
+				.subscribe_track(
+					&name,
+					moq_net::Subscription {
+						priority: 2,
+						timeout: std::time::Duration::ZERO,
+					},
+				)
+				.await
+			{
+				Ok(track) => track,
+				Err(err) => {
+					if let Some(entry) = State::lock().consume.track_task.remove(id).flatten() {
+						entry.callback.call(Result::<Id, Error>::Err(err.into()));
+					}
+					return;
+				}
+			};
+			let track =
+				moq_mux::container::Consumer::new(track, moq_mux::container::Hang::Legacy).with_latency(latency);
 			let res = tokio::select! {
 				res = Self::run_track(id, track) => res,
 				_ = channel.1 => Ok(()),
@@ -329,11 +367,7 @@ impl Consume {
 	pub fn frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
 		let f = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
 
-		let timestamp_us: u64 = f
-			.timestamp
-			.as_micros()?
-			.try_into()
-			.map_err(|_| moq_net::TimeOverflow)?;
+		let timestamp_us: u64 = f.timestamp.as_micros()?.try_into().map_err(|_| moq_net::TimeOverflow)?;
 
 		*dst = moq_frame {
 			payload: f.payload.as_ptr(),

@@ -31,6 +31,6 @@ impl MinFrameDuration {
 		}
 
 		self.min_duration = Some(duration);
-		duration.convert(1_000).ok()
+		duration.convert(moq_net::Timescale::MILLI).ok()
 	}
 }

@@ -26,10 +26,10 @@ pub use consumer::Consumer;
 pub use hang::Hang;
 pub use producer::Producer;
 
-pub use moq_net::Timestamp;
+pub use moq_net::{Timescale, Timestamp};
 
 /// Microsecond presentation timestamp, the canonical timebase for media frames in moq-mux.
-pub const TIMESCALE: u64 = 1_000_000;
+pub const TIMESCALE: Timescale = Timescale::MICRO;
 
 /// A decoded media frame: timestamp, payload bytes, keyframe flag.
 ///

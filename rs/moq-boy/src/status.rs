@@ -43,6 +43,7 @@ impl StatusPublisher {
 		let track = moq_net::Track {
 			name: "status".to_string(),
 			priority: 10,
+			timescale: moq_net::Timescale::UNKNOWN,
 		};
 		let producer = broadcast.create_track(track)?;
 

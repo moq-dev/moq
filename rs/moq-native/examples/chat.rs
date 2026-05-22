@@ -44,6 +44,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	let mut track = broadcast.create_track(moq_net::Track {
 		name: "chat".to_string(),
 		priority: 0,
+		timescale: moq_net::Timescale::UNKNOWN,
 	})?;
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.

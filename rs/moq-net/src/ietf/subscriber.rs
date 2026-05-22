@@ -465,7 +465,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let track = Track {
 			name: msg.track_name.to_string(),
 			priority: 0,
-			timescale: 0,
+			timescale: crate::Timescale::UNKNOWN,
 		}
 		.produce();
 
@@ -500,9 +500,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: BroadcastDynamic) -> Result<(), Error> {
 		loop {
-			let track = tokio::select! {
-				producer = broadcast.requested_track() => match producer {
-					Ok(producer) => producer,
+			let request = tokio::select! {
+				request = broadcast.requested_track() => match request {
+					Ok(request) => request,
 					Err(err) => {
 						tracing::debug!(%err, "broadcast closed");
 						break;
@@ -516,18 +516,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let path = path.to_owned();
 			let broadcast = broadcast.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(path, broadcast, track).await;
+				this.run_subscribe(path, broadcast, request).await;
 			});
 		}
 
 		Ok(())
 	}
 
-	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, broadcast: BroadcastDynamic, mut track: TrackProducer) {
+	async fn run_subscribe(
+		&mut self,
+		broadcast_path: Path<'_>,
+		broadcast: BroadcastDynamic,
+		request: crate::TrackRequest,
+	) {
+		let track_name = request.name().to_string();
+		let priority = request.subscription().priority;
+
 		let request_id = match self.control.next_request_id().await {
 			Ok(id) => id,
 			Err(err) => {
-				let _ = track.abort(err);
+				request.deny(err);
 				return;
 			}
 		};
@@ -536,78 +544,92 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			Ok(s) => s,
 			Err(err) => {
 				tracing::debug!(%err, "failed to open subscribe stream");
-				let _ = track.abort(err);
+				request.deny(err);
 				return;
 			}
 		};
 
-		// Pre-register the track so group data arriving before SubscribeOk can be routed.
-		// The publisher uses request_id.0 as track_alias, and recv_group falls back to
-		// RequestId(track_alias) when no alias mapping exists, so this works.
+		// Write Subscribe message
+		if let Err(err) = self
+			.write_subscribe(&mut stream, request_id, &broadcast_path, &track_name, priority)
+			.await
+		{
+			tracing::debug!(%err, "failed to write subscribe");
+			request.deny(err);
+			return;
+		}
+
+		tracing::info!(
+			broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path),
+			track = %track_name,
+			"subscribe started"
+		);
+
+		// Read the response and register the alias mapping
+		let track_alias = match self.read_subscribe_response(&mut stream).await {
+			Ok(alias) => alias,
+			Err(err) => {
+				tracing::debug!(%err, "subscribe response error");
+				request.deny(err);
+				return;
+			}
+		};
+
+		// LOC-style track properties are not parsed yet; default the timescale
+		// to UNKNOWN. TODO: read timescale from track properties on Draft17+.
+		let track_info = crate::Track {
+			name: track_name.clone(),
+			priority,
+			timescale: crate::Timescale::UNKNOWN,
+		};
+
+		let mut track = match request.accept(track_info) {
+			Ok(track) => track,
+			Err(err) => {
+				tracing::debug!(%err, "request accept failed");
+				return;
+			}
+		};
+
 		{
 			let mut state = self.state.lock();
+			if let Some(alias) = track_alias {
+				state.aliases.insert(alias, request_id);
+			}
 			state.subscribes.insert(
 				request_id,
 				TrackState {
 					producer: track.clone(),
-					alias: None,
+					alias: track_alias,
 				},
 			);
 		}
 
-		// Write Subscribe message
-		if let Err(err) = self
-			.write_subscribe(&mut stream, request_id, &broadcast_path, &track)
-			.await
-		{
-			tracing::debug!(%err, "failed to write subscribe");
-			self.state.lock().subscribes.remove(&request_id);
-			let _ = track.abort(err);
-			return;
-		}
-
-		tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe started");
-
-		// Read the response and register the alias mapping
-		let track_alias = match self.read_subscribe_response(&mut stream).await {
-			Ok(alias) => {
-				let mut state = self.state.lock();
-				if let Some(alias) = alias {
-					state.aliases.insert(alias, request_id);
-				}
-				if let Some(track_state) = state.subscribes.get_mut(&request_id) {
-					if let Some(alias) = alias {
-						track_state.alias = Some(alias);
-					}
-					// LOC-style track properties are not parsed yet; default the
-					// timescale to 0 (unspecified) so consumers awaiting it
-					// don't hang. TODO: read timescale from track properties on
-					// Draft17+.
-					track_state.producer.set_timescale(0);
-				}
-				alias
-			}
-			Err(err) => {
-				tracing::debug!(%err, "subscribe response error");
-				self.state.lock().subscribes.remove(&request_id);
-				let _ = track.abort(err);
-				return;
-			}
-		};
-
 		tokio::select! {
 			_ = track.unused() => {
-				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe cancelled");
+				tracing::info!(
+					broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path),
+					track = %track_name,
+					"subscribe cancelled"
+				);
 				let _ = track.abort(Error::Cancel);
 			}
 			err = broadcast.closed() => {
-				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "broadcast closed");
+				tracing::info!(
+					broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path),
+					track = %track_name,
+					"broadcast closed"
+				);
 				let _ = track.abort(err);
 			}
 			res = stream.reader.closed() => {
 				match res {
 					Ok(()) => {
-						tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe complete");
+						tracing::info!(
+							broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path),
+							track = %track_name,
+							"subscribe complete"
+						);
 						let _ = track.finish();
 					}
 					Err(err) => {
@@ -632,7 +654,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Stream<S, Version>,
 		request_id: RequestId,
 		broadcast: &Path<'_>,
-		track: &TrackProducer,
+		track_name: &str,
+		priority: u8,
 	) -> Result<(), Error> {
 		stream.writer.encode(&ietf::Subscribe::ID).await?;
 		stream
@@ -640,8 +663,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.encode(&ietf::Subscribe {
 				request_id,
 				track_namespace: broadcast.to_owned(),
-				track_name: (&track.name).into(),
-				subscriber_priority: track.priority,
+				track_name: track_name.into(),
+				subscriber_priority: priority,
 				group_order: GroupOrder::Descending,
 				filter_type: FilterType::LargestObject,
 			})
@@ -744,7 +767,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			if size == 0 {
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
-					let mut frame = producer.create_frame(Frame::new(0))?;
+					let mut frame = producer.create_frame(Frame::from(0u64))?;
 					frame.finish()?;
 				} else if status == 3 && !group.flags.has_end {
 					break;
@@ -752,7 +775,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
-				let mut frame = producer.create_frame(Frame::new(size))?;
+				let mut frame = producer.create_frame(Frame::from(size))?;
 
 				if let Err(err) = self.run_frame(stream, frame.clone()).await {
 					let _ = frame.abort(err.clone());

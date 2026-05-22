@@ -12,12 +12,13 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use crate::{Error, Result, coding};
+use crate::{Error, Result, Timescale, coding};
 
 use super::{Group, GroupConsumer, GroupProducer};
 
 use std::{
 	collections::{HashSet, VecDeque},
+	sync::{Arc, Mutex},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -26,7 +27,12 @@ use std::{
 // TODO: Replace with a configurable cache size.
 const MAX_GROUP_AGE: Duration = Duration::from_secs(5);
 
-/// A track is a collection of groups, delivered out-of-order until expired.
+/// Publisher-side properties of a track.
+///
+/// These properties are fixed by the publisher when the track is created and
+/// do not change while the track is alive. Subscribers learn them via
+/// [`BroadcastConsumer::subscribe_track`](crate::BroadcastConsumer::subscribe_track),
+/// which returns once the publisher's response has been received.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {
@@ -34,41 +40,50 @@ pub struct Track {
 	pub name: String,
 	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
 	pub priority: u8,
-	/// Units per second for frame timestamps on this track.
-	///
-	/// `0` (the default) means unspecified, typically because the peer didn't negotiate
-	/// a timescale (older moq-lite or older moq-transport drafts) or none has been
-	/// learned yet. Producers set this before publishing; subscribers learn it from
-	/// [`crate::BroadcastConsumer::subscribe_track`] once SUBSCRIBE_OK arrives.
-	pub timescale: u64,
+	/// Units per second for frame timestamps on this track. [`Timescale::UNKNOWN`]
+	/// means the publisher hasn't specified a scale (older protocol versions).
+	pub timescale: Timescale,
 }
 
 impl Track {
-	/// Create a track with the given name, default priority (`0`), and unspecified
-	/// timescale.
+	/// Create a track with the given name, default priority (`0`), and unknown timescale.
 	pub fn new<T: Into<String>>(name: T) -> Self {
 		Self {
 			name: name.into(),
 			priority: 0,
-			timescale: 0,
+			timescale: Timescale::UNKNOWN,
 		}
-	}
-
-	/// Set the delivery priority. Higher values preempt lower ones.
-	pub fn with_priority(mut self, priority: u8) -> Self {
-		self.priority = priority;
-		self
-	}
-
-	/// Set the per-track timescale (units per second).
-	pub fn with_timescale(mut self, timescale: u64) -> Self {
-		self.timescale = timescale;
-		self
 	}
 
 	/// Consume this [`Track`] to create a producer that owns its metadata.
 	pub fn produce(self) -> TrackProducer {
 		TrackProducer::new(self)
+	}
+}
+
+/// Subscriber-side preferences for receiving a track.
+///
+/// Held by each subscriber and aggregated across all live subscribers by the
+/// publisher's [`TrackProducer`] (see [`TrackProducer::max_priority`] /
+/// [`TrackProducer::max_timeout`]). The publisher can react to the aggregate
+/// to adapt delivery (priority bumping, cancelling tracks that no one wants
+/// urgently, etc).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Subscription {
+	/// Delivery priority requested by this subscriber.
+	pub priority: u8,
+	/// Maximum delay before this subscriber considers a group stale.
+	/// `Duration::ZERO` means no timeout (the subscriber will wait forever).
+	pub timeout: Duration,
+}
+
+impl Subscription {
+	/// Create a subscription with the given priority and no timeout.
+	pub fn new(priority: u8) -> Self {
+		Self {
+			priority,
+			timeout: Duration::ZERO,
+		}
 	}
 }
 
@@ -81,10 +96,11 @@ struct State {
 	max_sequence: Option<u64>,
 	final_sequence: Option<u64>,
 	abort: Option<Error>,
-	/// Track timescale once negotiated via SUBSCRIBE_OK / track properties.
-	/// `None` means not yet resolved; consumers awaiting [`Self::poll_timescale`]
-	/// will block.
-	timescale: Option<u64>,
+	/// Active subscriptions, used by the producer to aggregate
+	/// [`TrackProducer::max_priority`] and [`TrackProducer::max_timeout`].
+	/// `Arc<Mutex<Subscription>>` so individual subscribers can update their
+	/// preferences in place.
+	subscriptions: Vec<Arc<Mutex<Subscription>>>,
 }
 
 impl State {
@@ -225,19 +241,14 @@ impl State {
 			Poll::Pending
 		}
 	}
-
-	fn poll_timescale(&self) -> Poll<Result<u64>> {
-		if let Some(scale) = self.timescale {
-			Poll::Ready(Ok(scale))
-		} else if let Some(err) = &self.abort {
-			Poll::Ready(Err(err.clone()))
-		} else {
-			Poll::Pending
-		}
-	}
 }
 
 /// A producer for a track, used to create new groups.
+///
+/// The publisher's [`Track`] properties (name, priority, timescale) are fixed
+/// at construction and cannot be mutated through this handle. Subscribers see
+/// these properties on the [`TrackConsumer`] returned from
+/// [`BroadcastConsumer::subscribe_track`](crate::BroadcastConsumer::subscribe_track).
 pub struct TrackProducer {
 	info: Track,
 	state: conducer::Producer<State>,
@@ -254,13 +265,10 @@ impl std::ops::Deref for TrackProducer {
 impl TrackProducer {
 	/// Build a producer for the given track metadata. Prefer [`Track::produce`].
 	pub fn new(info: Track) -> Self {
-		let state: conducer::Producer<State> = conducer::Producer::default();
-		if info.timescale != 0 {
-			if let Ok(mut s) = state.write() {
-				s.timescale = Some(info.timescale);
-			}
+		Self {
+			info,
+			state: conducer::Producer::default(),
 		}
-		Self { info, state }
 	}
 
 	/// Create a new group with the given sequence number.
@@ -318,19 +326,6 @@ impl TrackProducer {
 		Ok(())
 	}
 
-	/// Update the track's negotiated timescale.
-	///
-	/// Subscribers call this once SUBSCRIBE_OK arrives with the publisher's
-	/// timescale, since the [`TrackProducer`] was created before the value was
-	/// known. Existing [`TrackConsumer`]s see the updated timescale via
-	/// [`TrackConsumer::timescale`].
-	pub fn set_timescale(&mut self, timescale: u64) {
-		self.info.timescale = timescale;
-		if let Ok(mut state) = self.state.write() {
-			state.timescale = Some(timescale);
-		}
-	}
-
 	/// Mark the track as finished after the last appended group.
 	///
 	/// Sets the final sequence to one past the current max_sequence.
@@ -376,15 +371,59 @@ impl TrackProducer {
 		Ok(())
 	}
 
-	/// Create a new consumer for the track, starting at the beginning.
-	pub fn consume(&self) -> TrackConsumer {
+	/// Create a new consumer for the track, starting at the beginning, with the
+	/// given subscriber-side preferences. The publisher can observe an aggregate
+	/// of every consumer's preferences via [`Self::max_priority`] and
+	/// [`Self::max_timeout`].
+	pub fn consume_with(&self, subscription: Subscription) -> TrackConsumer {
+		let sub = Arc::new(Mutex::new(subscription));
+		if let Ok(mut state) = self.state.write() {
+			state.subscriptions.push(sub.clone());
+		}
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
+			subscription: sub,
 			index: 0,
 			min_sequence: 0,
 			next_sequence: 0,
 		}
+	}
+
+	/// Create a new consumer with the default ([`Subscription::default`]) preferences.
+	pub fn consume(&self) -> TrackConsumer {
+		self.consume_with(Subscription::default())
+	}
+
+	/// The highest [`Subscription::priority`] across all live consumers, or `0`
+	/// if there are none.
+	pub fn max_priority(&self) -> u8 {
+		let state = self.state.read();
+		state
+			.subscriptions
+			.iter()
+			.filter_map(|s| s.lock().ok().map(|s| s.priority))
+			.max()
+			.unwrap_or(0)
+	}
+
+	/// The largest [`Subscription::timeout`] across all live consumers, or
+	/// `Duration::ZERO` if there are none. `Duration::ZERO` means at least
+	/// one consumer requested no timeout, which dominates.
+	pub fn max_timeout(&self) -> Duration {
+		let state = self.state.read();
+		state
+			.subscriptions
+			.iter()
+			.filter_map(|s| s.lock().ok().map(|s| s.timeout))
+			.reduce(|a, b| {
+				if a.is_zero() || b.is_zero() {
+					Duration::ZERO
+				} else {
+					a.max(b)
+				}
+			})
+			.unwrap_or(Duration::ZERO)
 	}
 
 	/// Block until there are no active consumers.
@@ -461,14 +500,27 @@ impl TrackWeak {
 		self.state.is_closed()
 	}
 
-	pub fn consume(&self) -> TrackConsumer {
+	pub fn consume_with(&self, subscription: Subscription) -> TrackConsumer {
+		let sub = Arc::new(Mutex::new(subscription));
+		// Register the subscription if we can still grab a producer handle.
+		if let Some(producer) = self.state.produce()
+			&& let Ok(mut state) = producer.write()
+		{
+			state.subscriptions.push(sub.clone());
+		}
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
+			subscription: sub,
 			index: 0,
 			min_sequence: 0,
 			next_sequence: 0,
 		}
+	}
+
+	#[allow(dead_code)]
+	pub fn consume(&self) -> TrackConsumer {
+		self.consume_with(Subscription::default())
 	}
 
 	pub async fn unused(&self) -> crate::Result<()> {
@@ -488,6 +540,9 @@ impl TrackWeak {
 pub struct TrackConsumer {
 	info: Track,
 	state: conducer::Consumer<State>,
+	/// This consumer's subscription, shared with the producer's aggregate via
+	/// [`State::subscriptions`].
+	subscription: Arc<Mutex<Subscription>>,
 	/// Arrival-order cursor used by [`Self::recv_group`].
 	index: usize,
 	/// Minimum sequence to return from any `recv` method. Set by [`Self::start_at`].
@@ -516,6 +571,20 @@ impl TrackConsumer {
 			// We try to clone abort just in case the function forgot to check for terminal state.
 			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
 		})
+	}
+
+	/// Update this consumer's subscription preferences. The publisher's
+	/// [`TrackProducer::max_priority`] / [`TrackProducer::max_timeout`] reflect
+	/// the new value on the next read.
+	pub fn update_subscription(&self, subscription: Subscription) {
+		if let Ok(mut s) = self.subscription.lock() {
+			*s = subscription;
+		}
+	}
+
+	/// Snapshot this consumer's current subscription.
+	pub fn subscription(&self) -> Subscription {
+		self.subscription.lock().map(|s| s.clone()).unwrap_or_default()
 	}
 
 	/// Poll for the next group in arrival order, without blocking.
@@ -652,24 +721,8 @@ impl TrackConsumer {
 		self.state.read().max_sequence
 	}
 
-	/// Return the resolved timescale (units per second) if one has been negotiated,
-	/// otherwise `None`. Use [`Self::timescale`] to wait until the value is known.
-	pub fn timescale_now(&self) -> Option<u64> {
-		self.state.read().timescale
-	}
-
-	/// Poll for the negotiated timescale, without blocking.
-	pub fn poll_timescale(&self, waiter: &conducer::Waiter) -> Poll<Result<u64>> {
-		self.poll(waiter, |state| state.poll_timescale())
-	}
-
-	/// Wait until the track's timescale has been negotiated (e.g. via SUBSCRIBE_OK
-	/// for subscribers, or set immediately by publishers).
-	pub async fn timescale(&self) -> Result<u64> {
-		conducer::wait(|waiter| self.poll_timescale(waiter)).await
-	}
-
 	/// Create a weak reference that doesn't prevent auto-close.
+	#[allow(dead_code)]
 	pub(crate) fn weak(&self) -> TrackWeak {
 		TrackWeak {
 			info: self.info.clone(),
@@ -1241,5 +1294,55 @@ mod test {
 		}
 
 		assert!(matches!(producer.append_group(), Err(Error::BoundsExceeded(_))));
+	}
+
+	#[test]
+	fn max_priority_aggregates_subscriptions() {
+		let producer = Track::new("test").produce();
+		let _c1 = producer.consume_with(Subscription::new(3));
+		let _c2 = producer.consume_with(Subscription::new(7));
+		let _c3 = producer.consume_with(Subscription::new(5));
+
+		assert_eq!(producer.max_priority(), 7);
+	}
+
+	#[test]
+	fn max_timeout_zero_dominates() {
+		let producer = Track::new("test").produce();
+		let _c1 = producer.consume_with(Subscription {
+			priority: 0,
+			timeout: Duration::from_secs(1),
+		});
+		let _c2 = producer.consume_with(Subscription {
+			priority: 0,
+			timeout: Duration::ZERO,
+		});
+		// Duration::ZERO (no timeout) dominates the aggregate.
+		assert_eq!(producer.max_timeout(), Duration::ZERO);
+	}
+
+	#[test]
+	fn max_timeout_picks_largest_finite() {
+		let producer = Track::new("test").produce();
+		let _c1 = producer.consume_with(Subscription {
+			priority: 0,
+			timeout: Duration::from_secs(2),
+		});
+		let _c2 = producer.consume_with(Subscription {
+			priority: 0,
+			timeout: Duration::from_secs(5),
+		});
+		assert_eq!(producer.max_timeout(), Duration::from_secs(5));
+	}
+
+	#[test]
+	fn update_subscription_changes_aggregate() {
+		let producer = Track::new("test").produce();
+		let c1 = producer.consume_with(Subscription::new(2));
+		let _c2 = producer.consume_with(Subscription::new(4));
+		assert_eq!(producer.max_priority(), 4);
+
+		c1.update_subscription(Subscription::new(9));
+		assert_eq!(producer.max_priority(), 9);
 	}
 }
