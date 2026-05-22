@@ -195,20 +195,13 @@ export class Subscriber {
 			// Watch for priority changes and send SUBSCRIBE_UPDATE.
 			const priorityWatch = (async () => {
 				for (;;) {
-					let dispose!: () => void;
-					try {
-						const priority = await new Promise<number | undefined>((resolve) => {
-							dispose = request.track.state.priority.changed(resolve);
-						});
-						if (priority === undefined) continue;
-						const update = new SubscribeUpdate({ priority });
-						await update.encode(stream.writer, this.version);
-						console.debug(
-							`subscribe update: id=${id} broadcast=${broadcast} track=${request.track.name} priority=${priority}`,
-						);
-					} finally {
-						dispose();
-					}
+					const priority = await request.track.state.priority.next();
+					if (priority === undefined) continue;
+					const update = new SubscribeUpdate({ priority });
+					await update.encode(stream.writer, this.version);
+					console.debug(
+						`subscribe update: id=${id} broadcast=${broadcast} track=${request.track.name} priority=${priority}`,
+					);
 				}
 			})();
 

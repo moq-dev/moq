@@ -184,7 +184,9 @@ export class Publisher {
 				if (!result) break;
 
 				if (result instanceof SubscribeUpdate) {
-					console.debug(`subscribe update: broadcast=${msg.broadcast} track=${track.name} priority=${result.priority}`);
+					console.debug(
+						`subscribe update: broadcast=${msg.broadcast} track=${track.name} priority=${result.priority}`,
+					);
 					track.updatePriority(result.priority);
 				}
 			}
