@@ -163,7 +163,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
 					// Lite01/02 don't carry hop information; the broadcast starts with an empty chain.
 					if self.start_announce(path.clone(), crate::OriginList::new(), &mut producers)? {
-						stats_guards.insert(abs, self.stats.broadcast(&path).subscriber());
+						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
 			}
@@ -178,7 +178,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
 					if self.start_announce(path.clone(), hops, &mut producers)? {
-						stats_guards.insert(abs, self.stats.broadcast(&path).subscriber());
+						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
 				lite::Announce::Ended { suffix, .. } => {
