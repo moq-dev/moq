@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use clap::ValueEnum;
-use hang::moq_lite;
+use hang::moq_net;
 use tokio::io::AsyncWriteExt;
 
 #[derive(ValueEnum, Clone, Copy)]
@@ -21,12 +21,12 @@ pub struct SubscribeArgs {
 }
 
 pub struct Subscribe {
-	broadcast: moq_lite::BroadcastConsumer,
+	broadcast: moq_net::BroadcastConsumer,
 	args: SubscribeArgs,
 }
 
 impl Subscribe {
-	pub fn new(broadcast: moq_lite::BroadcastConsumer, args: SubscribeArgs) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastConsumer, args: SubscribeArgs) -> Self {
 		Self { broadcast, args }
 	}
 

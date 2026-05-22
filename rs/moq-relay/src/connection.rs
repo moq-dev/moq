@@ -73,9 +73,9 @@ impl Connection {
 		// external traffic. The aggregator is shared; the tier picks which counter
 		// set within each level the bumps land in.
 		let tier = if internal {
-			moq_lite::Tier::Internal
+			moq_net::Tier::Internal
 		} else {
-			moq_lite::Tier::External
+			moq_net::Tier::External
 		};
 		let stats = self.cluster.stats.as_ref().map(|s| s.tier(tier));
 

@@ -4,6 +4,7 @@ import type MoqWatch from "../element";
 import { bufferControl } from "./components/buffer-control";
 import { bufferingIndicator } from "./components/buffering-indicator";
 import { fullscreenButton } from "./components/fullscreen-button";
+import { offlineIndicator } from "./components/offline-indicator";
 import { playPauseButton } from "./components/play-pause";
 import { qualitySelector } from "./components/quality-selector";
 import { statsButton } from "./components/stats-button";
@@ -60,6 +61,7 @@ export default class MoqWatchUi extends HTMLElement {
 			DOM.create("slot"),
 			statsPanel(effect, watch, visible),
 			bufferingIndicator(effect, watch),
+			offlineIndicator(effect, watch),
 		);
 
 		const controls = DOM.create("div", { className: "controls" });

@@ -145,7 +145,7 @@ pub struct WebSocketListener {
 
 impl WebSocketListener {
 	pub async fn bind(addr: net::SocketAddr) -> anyhow::Result<Self> {
-		Self::bind_with_alpns(addr, moq_lite::ALPNS).await
+		Self::bind_with_alpns(addr, moq_net::ALPNS).await
 	}
 
 	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> anyhow::Result<Self> {

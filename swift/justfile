@@ -1,0 +1,20 @@
+#!/usr/bin/env just --justfile
+#
+# Language-specific recipes for the Swift package under swift/. Invoked
+# from the repo root as `just swift <recipe>` via the `mod swift` import.
+
+set working-directory := '.'
+
+default:
+	just check
+
+# Build moq-ffi for the host, regenerate uniffi bindings, run swift test.
+# Skips cleanly on non-macOS hosts.
+check:
+	bash scripts/check.sh
+
+# Assemble the XCFramework + Package.swift from per-target moq-ffi
+# binaries + bindings. Used by .github/workflows/release-swift.yml; see
+# swift/README.md for the expected --lib-dir layout.
+package *args:
+	bash scripts/package.sh {{ args }}

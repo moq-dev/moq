@@ -1,7 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
-import type * as Moq from "@moq/lite";
-import { Path } from "@moq/lite";
 import * as Msf from "@moq/msf";
+import type * as Moq from "@moq/net";
+import { Path } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";

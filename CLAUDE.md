@@ -23,16 +23,16 @@ The project contains multiple layers of protocols:
 
 1. **quic** - Does all the networking.
 2. **web-transport** - A small layer on top of QUIC/HTTP3 for browser support. Provided by the browser or the `web-transport` crates.
-3. **moq-lite** - A generic pub/sub protocol on top of `web-transport` implemented by CDNs, splitting content into:
+3. **moq-net** - The networking layer on top of `web-transport`, implemented by CDNs. At session setup it negotiates one of two wire protocols: the simplified `moq-lite` protocol (the layer name) or the full IETF `moq-transport` protocol. Content splits into:
    - broadcast: a collection of tracks produced by a publisher
    - track: a live stream of groups within a broadcast.
    - group: a live stream of frames within a track, each delivered independently over a QUIC stream.
    - frame: a sized payload of bytes.
-4. **hang** - Media-specific encoding/decoding on top of `moq-lite`. Contains:
+4. **hang** - Media-specific encoding/decoding on top of `moq-net`. Contains:
    - catalog: a JSON track containing a description of other tracks and their properties (for WebCodecs).
    - container: each frame consists of a timestamp and codec bitstream
    - watch/publish: dedicated packages for subscribing/publishing with optional UI overlays
-5. **application** - Users building on top of `moq-lite` or `hang`
+5. **application** - Users building on top of `moq-net` or `hang`
 
 Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq` layer should be generic, using rules on the wire on how to deliver content.
 
@@ -40,7 +40,8 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 
 ```
 /rs/                  # Rust crates
-  moq-lite/          # Core pub/sub protocol (published as moq-lite)
+  moq-net/           # Core networking layer (published as moq-net; negotiates moq-lite or moq-transport)
+  moq-lite/          # Deprecated shim that re-exports moq-net (published as moq-lite)
   moq-native/        # QUIC/WebTransport connection helpers for native apps
   moq-relay/         # Clusterable relay server (binary: moq-relay)
   moq-token/         # JWT authentication library
@@ -50,11 +51,13 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)
   hang/              # Media encoding/streaming (catalog/container format)
   libmoq/            # C bindings (staticlib)
+  moq-ffi/           # UniFFI bindings for Python/Swift/Kotlin (cdylib + staticlib)
   moq-boy/           # MoQ Boy emulator publisher (binary: moq-boy)
   moq-gst/           # GStreamer plugin (moqsink/moqsrc elements)
 
 /js/                  # TypeScript/JavaScript packages
-  lite/              # Core protocol for browsers (published as @moq/lite)
+  net/               # Core networking layer for browsers (published as @moq/net)
+  lite/              # Deprecated shim that re-exports @moq/net (published as @moq/lite)
   signals/           # Reactive signals library (published as @moq/signals)
   token/             # JWT token generation (published as @moq/token)
   clock/             # Clock example (published as @moq/clock)
@@ -62,6 +65,12 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   watch/             # Watch/subscribe to streams + UI (published as @moq/watch)
   publish/           # Publish media to streams + UI (published as @moq/publish)
   moq-boy/           # MoQ Boy web viewer (published as @moq/boy)
+
+/py/                  # Python packages (uv workspace)
+  moq-net/           # Maturin project: bundles rs/moq-ffi cdylib + uniffi
+                     # bindings as moq_net._uniffi. Published as moq-net on
+                     # PyPI; version tracks rs/moq-ffi (release-py.yml fires
+                     # on moq-ffi-v* tags).
 
 /demo/                # Demos and test media
   boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)

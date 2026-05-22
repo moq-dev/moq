@@ -11,10 +11,10 @@ pub enum Error {
 	Mp4(#[from] mp4_atom::Error),
 
 	#[error("moq: {0}")]
-	Moq(#[from] moq_lite::Error),
+	Moq(#[from] moq_net::Error),
 
 	#[error("timestamp overflow")]
-	TimestampOverflow(#[from] moq_lite::TimeOverflow),
+	TimestampOverflow(#[from] moq_net::TimeOverflow),
 
 	#[error("no traf in moof")]
 	NoTraf,
@@ -83,7 +83,7 @@ impl Cmaf {
 impl Container for Cmaf {
 	type Error = Error;
 
-	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		let timescale = self.trak.mdia.mdhd.timescale as u64;
 		let track_id = self.trak.tkhd.track_id;
 		encode(group, frames, timescale, track_id)
@@ -91,7 +91,7 @@ impl Container for Cmaf {
 
 	fn poll_read(
 		&self,
-		group: &mut moq_lite::GroupConsumer,
+		group: &mut moq_net::GroupConsumer,
 		waiter: &conducer::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;
@@ -165,7 +165,7 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, Error> {
 }
 
 pub(crate) fn encode(
-	group: &mut moq_lite::GroupProducer,
+	group: &mut moq_net::GroupProducer,
 	frames: &[Frame],
 	timescale: u64,
 	track_id: u32,

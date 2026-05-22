@@ -27,7 +27,7 @@ pub use hang::Hang;
 pub use producer::Producer;
 
 /// Microsecond presentation timestamp, the canonical timebase for media frames in moq-mux.
-pub type Timestamp = moq_lite::Timescale<1_000_000>;
+pub type Timestamp = moq_net::Timescale<1_000_000>;
 
 /// A decoded media frame: timestamp, payload bytes, keyframe flag.
 ///
@@ -63,12 +63,12 @@ pub struct Frame {
 /// Most callers should use [`Hang`] (catalog-driven) rather than picking a concrete
 /// container directly.
 pub trait Container {
-	/// Container-specific error. All variants must be convertible from [`moq_lite::Error`]
+	/// Container-specific error. All variants must be convertible from [`moq_net::Error`]
 	/// so the IO layer's errors propagate cleanly.
-	type Error: std::error::Error + Send + Sync + Unpin + From<moq_lite::Error>;
+	type Error: std::error::Error + Send + Sync + Unpin + From<moq_net::Error>;
 
 	/// Encode one or more frames into a single moq-lite frame appended to `group`.
-	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error>;
+	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error>;
 
 	/// Poll the next moq-lite frame from `group` and decode it into media frames.
 	///
@@ -76,14 +76,14 @@ pub trait Container {
 	/// media frames (e.g. all samples in a CMAF fragment).
 	fn poll_read(
 		&self,
-		group: &mut moq_lite::GroupConsumer,
+		group: &mut moq_net::GroupConsumer,
 		waiter: &conducer::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>>;
 
 	/// Async wrapper around [`Self::poll_read`].
 	fn read(
 		&self,
-		group: &mut moq_lite::GroupConsumer,
+		group: &mut moq_net::GroupConsumer,
 	) -> impl std::future::Future<Output = Result<Option<Vec<Frame>>, Self::Error>>
 	where
 		Self: Sync,

@@ -51,7 +51,7 @@ pub struct Opus {
 
 impl Opus {
 	pub fn new(
-		mut broadcast: moq_lite::BroadcastProducer,
+		mut broadcast: moq_net::BroadcastProducer,
 		mut catalog: crate::catalog::Producer,
 		config: OpusConfig,
 	) -> anyhow::Result<Self> {
@@ -79,7 +79,7 @@ impl Opus {
 
 	/// Returns a reference to the underlying track producer, e.g. for
 	/// monitoring subscriber state via `used()`/`unused()`.
-	pub fn track(&self) -> &moq_lite::TrackProducer {
+	pub fn track(&self) -> &moq_net::TrackProducer {
 		&self.track.track
 	}
 

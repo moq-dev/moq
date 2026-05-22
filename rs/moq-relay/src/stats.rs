@@ -1,6 +1,6 @@
 //! Relay-side stats configuration.
 //!
-//! The actual aggregator lives in [`moq_lite::Stats`]; this module just
+//! The actual aggregator lives in [`moq_net::Stats`]; this module just
 //! holds the relay-specific config knobs.
 
 use clap::Args;
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Configuration for the relay's stats publishing.
 ///
 /// Stats are disabled when `name` is unset. When configured, the relay attaches
-/// a [`moq_lite::Stats`] aggregator to every session it accepts (and every cluster
+/// a [`moq_net::Stats`] aggregator to every session it accepts (and every cluster
 /// dial), which publishes `<level>/.stats/<name>[/<pop>]` broadcasts on the cluster
 /// origin. Each level only advertises while at least one role on that level has an
 /// active subscription.

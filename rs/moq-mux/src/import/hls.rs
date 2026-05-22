@@ -69,7 +69,7 @@ struct StepOutcome {
 /// to run the continuous ingest loop.
 pub struct Hls {
 	/// Broadcast that all CMAF importers write into.
-	broadcast: moq_lite::BroadcastProducer,
+	broadcast: moq_net::BroadcastProducer,
 
 	/// The catalog being produced.
 	catalog: crate::catalog::Producer,
@@ -115,7 +115,7 @@ impl TrackState {
 impl Hls {
 	/// Create a new HLS ingest that will write into the given broadcast.
 	pub fn new(
-		broadcast: moq_lite::BroadcastProducer,
+		broadcast: moq_net::BroadcastProducer,
 		catalog: crate::catalog::Producer,
 		cfg: HlsConfig,
 	) -> anyhow::Result<Self> {
@@ -615,7 +615,7 @@ mod tests {
 
 	#[test]
 	fn hls_ingest_starts_without_importers() {
-		let mut broadcast = moq_lite::Broadcast::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = HlsConfig::new(url);

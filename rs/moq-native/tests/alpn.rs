@@ -11,7 +11,7 @@
 /// Spin up a server and client both restricted to the given version,
 /// and verify the handshake completes over raw QUIC (moqt:// URL).
 async fn connect_with_version(version: &str) {
-	let version: moq_native::moq_lite::Version = version.parse().expect("invalid version");
+	let version: moq_native::moq_net::Version = version.parse().expect("invalid version");
 
 	// ── server ──────────────────────────────────────────────────────
 	let mut server_config = moq_native::ServerConfig::default();
@@ -23,7 +23,7 @@ async fn connect_with_version(version: &str) {
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	// Provide a dummy origin so the MoQ handshake has something to negotiate.
-	let origin = moq_native::moq_lite::Origin::random().produce();
+	let origin = moq_native::moq_net::Origin::random().produce();
 	let consumer = origin.consume();
 
 	// ── client ──────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ async fn connect_with_version(version: &str) {
 /// Sub-protocols in the HTTP CONNECT request serve the same role as ALPN.
 /// If a version is specified, both client and server are restricted to it.
 async fn connect_with_webtransport(version: Option<&str>) {
-	let version: Option<moq_native::moq_lite::Version> = version.map(|v| v.parse().expect("invalid version"));
+	let version: Option<moq_native::moq_net::Version> = version.map(|v| v.parse().expect("invalid version"));
 
 	// ── server ──────────────────────────────────────────────────────
 	let mut server_config = moq_native::ServerConfig::default();
@@ -73,7 +73,7 @@ async fn connect_with_webtransport(version: Option<&str>) {
 	let mut server = server_config.init().expect("failed to init server");
 	let addr = server.local_addr().expect("failed to get local addr");
 
-	let origin = moq_native::moq_lite::Origin::random().produce();
+	let origin = moq_native::moq_net::Origin::random().produce();
 	let consumer = origin.consume();
 
 	// ── client ──────────────────────────────────────────────────────

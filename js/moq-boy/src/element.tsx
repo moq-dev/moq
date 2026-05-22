@@ -1,4 +1,4 @@
-import * as Moq from "@moq/lite";
+import * as Moq from "@moq/net";
 import { render } from "solid-js/web";
 import type { GameConfig } from "./index.ts";
 import { Game } from "./index.ts";

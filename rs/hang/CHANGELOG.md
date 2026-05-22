@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1](https://github.com/moq-dev/moq/compare/hang-v0.16.0...hang-v0.16.1) - 2026-05-20
+
+### Other
+
+- rename moq-lite package to moq-net ([#1428](https://github.com/moq-dev/moq/pull/1428))
+
 ## [0.16.0](https://github.com/moq-dev/moq/compare/hang-v0.15.8...hang-v0.16.0) - 2026-05-07
 
 ### Other

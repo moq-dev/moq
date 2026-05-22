@@ -15,7 +15,7 @@ use axum::{
 	http::StatusCode,
 	response::Response,
 };
-use moq_lite::{OriginConsumer, OriginProducer, StatsHandle, Tier};
+use moq_net::{OriginConsumer, OriginProducer, StatsHandle, Tier};
 
 use crate::{AuthParams, AuthToken, WebState, web::AuthQuery, web::MtlsPeer, web::landing_response};
 
@@ -85,8 +85,8 @@ where
 		+ 'static,
 {
 	// Wrap the WebSocket in a WebTransport compatibility layer.
-	let ws = qmux::ws::accept(socket, None);
-	let session = moq_lite::Server::new()
+	let ws = qmux::ws::Bare::new(socket).accept();
+	let session = moq_net::Server::new()
 		.with_publish(subscribe)
 		.with_consume(publish)
 		.with_stats(stats)

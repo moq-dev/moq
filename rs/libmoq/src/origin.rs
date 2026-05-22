@@ -20,7 +20,7 @@ struct TaskEntry {
 #[derive(Default)]
 pub struct Origin {
 	/// Active origin producers for publishing and consuming broadcasts.
-	active: NonZeroSlab<moq_lite::OriginProducer>,
+	active: NonZeroSlab<moq_net::OriginProducer>,
 
 	/// Broadcast announcement information (path, active status).
 	announced: NonZeroSlab<(String, bool)>,
@@ -31,10 +31,10 @@ pub struct Origin {
 
 impl Origin {
 	pub fn create(&mut self) -> Result<Id, Error> {
-		self.active.insert(moq_lite::Origin::random().produce())
+		self.active.insert(moq_net::Origin::random().produce())
 	}
 
-	pub fn get(&self, id: Id) -> Result<&moq_lite::OriginProducer, Error> {
+	pub fn get(&self, id: Id) -> Result<&moq_net::OriginProducer, Error> {
 		self.active.get(id).ok_or(Error::OriginNotFound)
 	}
 
@@ -64,7 +64,7 @@ impl Origin {
 		Ok(id)
 	}
 
-	async fn run_announced(task_id: Id, mut consumer: moq_lite::OriginConsumer) -> Result<(), Error> {
+	async fn run_announced(task_id: Id, mut consumer: moq_net::OriginConsumer) -> Result<(), Error> {
 		while let Some((path, broadcast)) = consumer.announced().await {
 			let mut state = State::lock();
 
@@ -104,7 +104,7 @@ impl Origin {
 		Ok(())
 	}
 
-	pub fn consume<P: moq_lite::AsPath>(&mut self, origin: Id, path: P) -> Result<moq_lite::BroadcastConsumer, Error> {
+	pub fn consume<P: moq_net::AsPath>(&mut self, origin: Id, path: P) -> Result<moq_net::BroadcastConsumer, Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
 		// TODO: expose an async variant backed by `announced_broadcast` so FFI callers can wait
 		// for gossip instead of racing it.
@@ -113,11 +113,11 @@ impl Origin {
 		origin.get_broadcast(path).ok_or(Error::BroadcastNotFound)
 	}
 
-	pub fn publish<P: moq_lite::AsPath>(
+	pub fn publish<P: moq_net::AsPath>(
 		&mut self,
 		origin: Id,
 		path: P,
-		broadcast: moq_lite::BroadcastConsumer,
+		broadcast: moq_net::BroadcastConsumer,
 	) -> Result<(), Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
 		origin.publish_broadcast(path, broadcast);

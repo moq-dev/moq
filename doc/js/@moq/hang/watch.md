@@ -40,7 +40,7 @@ The simplest way to watch a stream:
 For more control, use `@moq/watch` directly:
 
 ```typescript
-import * as Moq from "@moq/lite";
+import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
 
 const connection = await Moq.Connection.connect(

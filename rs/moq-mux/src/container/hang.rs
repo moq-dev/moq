@@ -40,7 +40,7 @@ impl TryFrom<&hang::catalog::Container> for Hang {
 impl Container for Hang {
 	type Error = crate::Error;
 
-	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		match self {
 			Self::Legacy => {
 				for frame in frames {
@@ -58,7 +58,7 @@ impl Container for Hang {
 
 	fn poll_read(
 		&self,
-		group: &mut moq_lite::GroupConsumer,
+		group: &mut moq_net::GroupConsumer,
 		waiter: &conducer::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		match self {

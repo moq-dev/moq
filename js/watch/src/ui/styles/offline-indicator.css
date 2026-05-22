@@ -1,0 +1,45 @@
+.watch-ui__offline-indicator {
+	position: absolute;
+	bottom: 1rem;
+	right: 1rem;
+	padding: 0.5rem 1rem;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background-color: #000000;
+	z-index: 4;
+	pointer-events: auto;
+	border-radius: 0.25rem;
+}
+
+.watch-ui__offline-text {
+	font-size: 0.875rem;
+	font-weight: 700;
+	color: #ffffff;
+	letter-spacing: 0.08em;
+	text-shadow: none;
+}
+
+@media (max-width: 768px) {
+	.watch-ui__offline-indicator {
+		bottom: 0.75rem;
+		right: 0.75rem;
+		padding: 0.375rem 0.75rem;
+	}
+
+	.watch-ui__offline-text {
+		font-size: 0.75rem;
+	}
+}
+
+@media (max-width: 480px) {
+	.watch-ui__offline-indicator {
+		bottom: 0.5rem;
+		right: 0.5rem;
+		padding: 0.25rem 0.5rem;
+	}
+
+	.watch-ui__offline-text {
+		font-size: 0.75rem;
+	}
+}

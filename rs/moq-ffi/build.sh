@@ -24,6 +24,7 @@ TARGET=""
 VERSION=""
 OUTPUT_DIR="dist"
 BINDINGS_ONLY=false
+ARCHIVE=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -44,8 +45,14 @@ while [[ $# -gt 0 ]]; do
             BINDINGS_ONLY=true
             shift
             ;;
+        --archive)
+            # Default leaves the staging dir alone for upload-artifact;
+            # --archive recreates the legacy tar.gz/zip behavior.
+            ARCHIVE=true
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only]"
+            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only] [--archive]"
             exit 0
             ;;
         *)
@@ -123,7 +130,9 @@ find_cdylib() {
     fi
 }
 
-# Generate language bindings
+# Generate language bindings into $OUTPUT_DIR/bindings/<lang>/. Tarring is
+# opt-in via --archive; the default leaves the directories alone for
+# actions/upload-artifact to handle directly.
 generate_bindings() {
     local lib_path="$1"
     echo "Generating bindings from $lib_path..."
@@ -135,15 +144,14 @@ generate_bindings() {
             --language "$lang" --out-dir "$OUTPUT_DIR/bindings/$lang"
     done
 
-    # Package each language binding
-    for lang in kotlin swift python; do
-        local archive="moq-ffi-${VERSION}-${lang}.tar.gz"
-        tar -czvf "$OUTPUT_DIR/$archive" -C "$OUTPUT_DIR/bindings" "$lang"
-        echo "Created: $OUTPUT_DIR/$archive"
-    done
-
-    # Clean up unarchived bindings
-    rm -rf "$OUTPUT_DIR/bindings"
+    if [[ "$ARCHIVE" == true ]]; then
+        for lang in kotlin swift python; do
+            local archive="moq-ffi-${VERSION}-${lang}.tar.gz"
+            tar -czf "$OUTPUT_DIR/$archive" -C "$OUTPUT_DIR/bindings" "$lang"
+            echo "Created: $OUTPUT_DIR/$archive"
+        done
+        rm -rf "$OUTPUT_DIR/bindings"
+    fi
 }
 
 mkdir -p "$OUTPUT_DIR"
@@ -221,28 +229,30 @@ else
     cp "$TARGET_DIR/libmoq_ffi.so" "$PACKAGE_DIR/lib/"
 fi
 
-# Create archive
-cd "$OUTPUT_DIR"
-if [[ "$TARGET" == *"-windows-"* ]]; then
-    ARCHIVE="$NAME.zip"
-    if command -v 7z &> /dev/null; then
-        7z a "$ARCHIVE" "$NAME"
-    elif command -v zip &> /dev/null; then
-        zip -r "$ARCHIVE" "$NAME"
-    else
-        echo "Error: Neither 7z nor zip found" >&2
-        exit 1
-    fi
-else
-    ARCHIVE="$NAME.tar.gz"
-    tar -czvf "$ARCHIVE" "$NAME"
-fi
-
-# Clean up directory, keep archive
-rm -rf "$NAME"
-
 echo ""
-echo "Created: $OUTPUT_DIR/$ARCHIVE"
+echo "Staged: $PACKAGE_DIR"
+
+# Optional archive for legacy consumers / manual distribution.
+if [[ "$ARCHIVE" == true ]]; then
+    cd "$OUTPUT_DIR"
+    if [[ "$TARGET" == *"-windows-"* ]]; then
+        ARCHIVE_NAME="$NAME.zip"
+        if command -v 7z &> /dev/null; then
+            7z a "$ARCHIVE_NAME" "$NAME"
+        elif command -v zip &> /dev/null; then
+            zip -r "$ARCHIVE_NAME" "$NAME"
+        else
+            echo "Error: Neither 7z nor zip found" >&2
+            exit 1
+        fi
+    else
+        ARCHIVE_NAME="$NAME.tar.gz"
+        tar -czf "$ARCHIVE_NAME" "$NAME"
+    fi
+    rm -rf "$NAME"
+    echo "Created: $OUTPUT_DIR/$ARCHIVE_NAME"
+    cd "$WORKSPACE_DIR"
+fi
 
 # Generate bindings if we can run the library on this host
 cd "$WORKSPACE_DIR"

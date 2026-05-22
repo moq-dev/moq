@@ -22,7 +22,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
-		"@moq/lite": "workspace:^",
+		"@moq/net": "workspace:^",
 		"@moq/watch": "workspace:^",
 		"@moq/signals": "workspace:^",
 		"zod": "^4.3.6"
