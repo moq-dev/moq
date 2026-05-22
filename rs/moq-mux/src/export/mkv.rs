@@ -241,6 +241,13 @@ impl Mkv {
 		// 2. Pull frames from each track into `pending`, transforming codec
 		// shape (Annex-B → length-prefixed) at pull time so downstream code
 		// never sees a raw Avc3/Hev1 payload.
+		//
+		// Pre-header: for video tracks whose transmuxer hasn't yet built its
+		// codec config (Avc3/Hev1 source, no SPS/PPS seen), drop transformed
+		// slices instead of parking them. A receiver who subscribed mid-GOP
+		// can't render those bytes without the header anyway, and parking
+		// them would stop us from polling for the next SPS/PPS-bearing frame.
+		let waiting_for_header = !self.header_emitted;
 		for track in self.tracks.values_mut() {
 			if track.pending.is_some() || track.finished {
 				continue;
@@ -256,6 +263,16 @@ impl Mkv {
 							None => Some(frame),
 						};
 						if let Some(f) = transformed {
+							let still_no_config = waiting_for_header
+								&& track.kind == TrackKind::Video
+								&& track
+									.video_transform
+									.as_ref()
+									.is_some_and(|t| t.codec_private().is_none());
+							if still_no_config {
+								// Drop this slice and keep polling for SPS/PPS.
+								continue;
+							}
 							track.pending = Some(f);
 							break;
 						}

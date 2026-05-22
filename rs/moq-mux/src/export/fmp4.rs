@@ -168,9 +168,10 @@ impl Fmp4 {
 
 		if let Some(name) = chosen {
 			let frag = self.fragment_duration;
+			let has_video_track = self.tracks.values().any(|t| t.is_video);
 			let track = self.tracks.get_mut(&name).unwrap();
 			let frame = track.pending.take().unwrap();
-			let flush_before = should_flush(track, &frame, frag);
+			let flush_before = should_flush(track, &frame, frag, has_video_track);
 			if flush_before {
 				let frames = std::mem::take(&mut track.buffer);
 				let emit = encode_fragment(track, frames)?;
@@ -346,7 +347,14 @@ fn build_init(catalog: &Catalog) -> anyhow::Result<Bytes> {
 /// - Video keyframe and buffer non-empty (one fragment per GOP)
 /// - Optional duration cap exceeded
 /// - Per-frame mode (`Some(ZERO)`)
-fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Duration>) -> bool {
+/// - Audio in an audio-only broadcast under default `None` mode (otherwise
+///   the buffer would never flush — no keyframe boundary and no time cap)
+fn should_flush(
+	track: &Fmp4Track,
+	frame: &Frame,
+	fragment_duration: Option<Duration>,
+	has_video_track: bool,
+) -> bool {
 	if track.buffer.is_empty() {
 		return false;
 	}
@@ -360,7 +368,10 @@ fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Dura
 			let delta_us = frame.timestamp.as_micros().saturating_sub(first.timestamp.as_micros());
 			delta_us >= d.as_micros()
 		}
-		None => false,
+		// No video keyframe will ever arrive to roll the fragment, so for
+		// audio-only broadcasts in `None` mode we fall back to per-frame
+		// fragments (matches the pre-batching default).
+		None => !track.is_video && !has_video_track,
 	}
 }
 
