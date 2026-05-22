@@ -14,7 +14,8 @@ export interface SourceConfig {
 }
 
 export function normalizeSource(source: Source): SourceConfig {
-	return source instanceof MediaStreamTrack ? { track: source as StreamTrack, kind: "auto" } : source;
+	// Structural check rather than `instanceof MediaStreamTrack` so this stays correct across realms.
+	return "track" in source ? source : { track: source, kind: "auto" };
 }
 
 export type Constraints = Omit<
