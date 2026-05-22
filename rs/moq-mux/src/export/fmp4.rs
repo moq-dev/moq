@@ -210,13 +210,13 @@ fn build_init(catalog: &Catalog) -> anyhow::Result<Bytes> {
 	let mut track_inits: Vec<&Bytes> = Vec::new();
 	for config in catalog.video.renditions.values() {
 		match &config.container {
-			Container::Cmaf { init } => track_inits.push(init),
+			Container::Cmaf { init, .. } => track_inits.push(init),
 			Container::Legacy => anyhow::bail!("track is not CMAF"),
 		}
 	}
 	for config in catalog.audio.renditions.values() {
 		match &config.container {
-			Container::Cmaf { init } => track_inits.push(init),
+			Container::Cmaf { init, .. } => track_inits.push(init),
 			Container::Legacy => anyhow::bail!("track is not CMAF"),
 		}
 	}
@@ -326,13 +326,13 @@ fn build_moof(seq: u32, track_id: u32, dts: u64, size: u32, flags: u32, data_off
 fn catalog_timescale(catalog: &Catalog, name: &str) -> Option<u64> {
 	if let Some(config) = catalog.video.renditions.get(name) {
 		return Some(match &config.container {
-			Container::Cmaf { init } => parse_timescale_from_init(init).ok()?,
+			Container::Cmaf { init, .. } => parse_timescale_from_init(init).ok()?,
 			Container::Legacy => guess_video_timescale(config),
 		});
 	}
 	if let Some(config) = catalog.audio.renditions.get(name) {
 		return Some(match &config.container {
-			Container::Cmaf { init } => parse_timescale_from_init(init).ok()?,
+			Container::Cmaf { init, .. } => parse_timescale_from_init(init).ok()?,
 			Container::Legacy => config.sample_rate as u64,
 		});
 	}
