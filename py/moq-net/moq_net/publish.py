@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from moq_ffi import MoqBroadcastProducer, MoqGroupProducer, MoqMediaProducer, MoqTrackProducer
+from ._uniffi import MoqBroadcastProducer, MoqGroupProducer, MoqMediaProducer, MoqTrackProducer
 
 if TYPE_CHECKING:
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer

@@ -8,31 +8,29 @@ set working-directory := '.'
 default:
 	just check
 
-# Ruff lint + format + maturin source build + pyright over the moq-net
-# package. `uv sync --package moq-net` populates the lockfile-pinned deps,
-# then maturin develop overrides the registry moq-ffi with a source build.
-# --no-sync on the pyright invocation keeps uv from reinstalling the
-# registry moq-ffi over the source build.
+# Lint + format + maturin source build + pyright. `--no-install-workspace`
+# installs the root dev group (ruff, maturin, pyright, pytest) without
+# trying to pip-build moq-net; `maturin develop` then installs moq-net
+# as an editable wheel with the rs/moq-ffi cdylib + uniffi bindings.
 check:
-	uv run ruff check .
-	uv run ruff format --check .
-	uv sync --package moq-net
-	uv run maturin develop -m ../rs/moq-ffi/Cargo.toml --uv
-	uv run --package moq-net --no-sync pyright
+	uv sync --no-install-workspace
+	uv run --no-sync ruff check .
+	uv run --no-sync ruff format --check .
+	cd moq-net && uv run --no-sync maturin develop --uv
+	uv run --no-sync pyright
 
 fix:
-	uv run ruff check --fix .
-	uv run ruff format .
+	uv sync --no-install-workspace
+	uv run --no-sync ruff check --fix .
+	uv run --no-sync ruff format .
 
 test:
-	uv sync --package moq-net
-	uv run maturin develop -m ../rs/moq-ffi/Cargo.toml --uv
-	uv run --package moq-net --no-sync pytest moq-net/tests/
+	uv sync --no-install-workspace
+	cd moq-net && uv run --no-sync maturin develop --uv
+	uv run --no-sync pytest moq-net/tests/
 
-# Build moq-ffi from source into the moq-net venv (used during local dev).
+# Local dev build: produces an editable install of moq-net (with the
+# moq-ffi cdylib + uniffi bindings) into the workspace venv.
 build:
-	cd moq-net && uv run maturin develop -m ../../rs/moq-ffi/Cargo.toml --uv
-
-# Publish any unpublished Python packages to PyPI. Invoked by release-py.yml.
-release:
-	bash common/release.sh
+	uv sync --no-install-workspace
+	cd moq-net && uv run --no-sync maturin develop --uv

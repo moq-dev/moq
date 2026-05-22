@@ -1,10 +1,13 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "moq-net"
-version = "0.1.0"
+# Version is injected at build time from the moq-ffi-v* tag (see
+# .github/workflows/release-py.yml). For local dev `maturin develop`
+# reads it from rs/moq-ffi/Cargo.toml.
+dynamic = ["version"]
 description = "The networking layer for Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -18,14 +21,20 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio",
     "Topic :: Multimedia :: Video",
 ]
-dependencies = ["moq-ffi~=0.2.0"]
 
 [project.urls]
 Homepage = "https://github.com/moq-dev/moq"
 Repository = "https://github.com/moq-dev/moq"
 
-[dependency-groups]
-dev = ["pytest", "pytest-asyncio"]
-
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+# Maturin builds the rs/moq-ffi crate, runs uniffi-bindgen, and packages
+# the cdylib + generated bindings as a private `moq_net._uniffi` subpackage
+# (the leading underscore signals "internal"; the public API lives at the
+# top of moq_net).
+[tool.maturin]
+bindings = "uniffi"
+manifest-path = "../../rs/moq-ffi/Cargo.toml"
+python-source = "."
+module-name = "moq_net._uniffi"
