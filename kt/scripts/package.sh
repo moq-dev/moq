@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Uses associative arrays (declare -A); not available in Bash 3.2 (the
-# default `/usr/bin/bash` on macOS).
-if ((BASH_VERSINFO[0] < 4)); then
-    echo "Error: kt/scripts/package.sh requires Bash >= 4 (found $BASH_VERSION)" >&2
-    exit 1
-fi
-
 # Assemble the moq-ffi Kotlin package and stage it for publication.
 #
 # Designed to run after the workflow has placed per-target moq-ffi
@@ -60,15 +53,19 @@ rm -rf "$KT_DIR/moq/src/jvmAndAndroidMain/kotlin/uniffi"
 mkdir -p "$KT_DIR/moq/src/androidMain/jniLibs"
 mkdir -p "$KT_DIR/moq/src/jvmMain/resources"
 
-# --- Android JNI libs ---
-declare -A ANDROID_ABIS=(
-    [aarch64-linux-android]=arm64-v8a
-    [armv7-linux-androideabi]=armeabi-v7a
-    [x86_64-linux-android]=x86_64
+# Entries are "<cargo-target>:<...>" so the script stays portable to Bash 3.2
+# (default on macOS), which has no associative arrays.
+
+# --- Android JNI libs --- ("<cargo-target>:<android-abi>")
+ANDROID_ABIS=(
+    "aarch64-linux-android:arm64-v8a"
+    "armv7-linux-androideabi:armeabi-v7a"
+    "x86_64-linux-android:x86_64"
 )
 HAVE_ANDROID_LIBS=false
-for target in "${!ANDROID_ABIS[@]}"; do
-    abi="${ANDROID_ABIS[$target]}"
+for entry in "${ANDROID_ABIS[@]}"; do
+    target="${entry%%:*}"
+    abi="${entry##*:}"
     src="$LIB_DIR/$target/libmoq_ffi.so"
     if [[ -f "$src" ]]; then
         dest="$KT_DIR/moq/src/androidMain/jniLibs/$abi"
@@ -82,18 +79,20 @@ for target in "${!ANDROID_ABIS[@]}"; do
 done
 
 # --- JVM desktop resources (JNA classpath layout) ---
-declare -A JVM_LIBS=(
-    [x86_64-unknown-linux-gnu]="linux-x86-64:libmoq_ffi.so"
-    [aarch64-unknown-linux-gnu]="linux-aarch64:libmoq_ffi.so"
-    [universal-apple-darwin]="darwin:libmoq_ffi.dylib"
-    [aarch64-apple-darwin]="darwin-aarch64:libmoq_ffi.dylib"
-    [x86_64-apple-darwin]="darwin-x86-64:libmoq_ffi.dylib"
-    [x86_64-pc-windows-msvc]="win32-x86-64:moq_ffi.dll"
+# Entries are "<cargo-target>:<jna-dir>:<libname>".
+JVM_LIBS=(
+    "x86_64-unknown-linux-gnu:linux-x86-64:libmoq_ffi.so"
+    "aarch64-unknown-linux-gnu:linux-aarch64:libmoq_ffi.so"
+    "universal-apple-darwin:darwin:libmoq_ffi.dylib"
+    "aarch64-apple-darwin:darwin-aarch64:libmoq_ffi.dylib"
+    "x86_64-apple-darwin:darwin-x86-64:libmoq_ffi.dylib"
+    "x86_64-pc-windows-msvc:win32-x86-64:moq_ffi.dll"
 )
-for target in "${!JVM_LIBS[@]}"; do
-    spec="${JVM_LIBS[$target]}"
-    dir="${spec%%:*}"
-    libname="${spec##*:}"
+for entry in "${JVM_LIBS[@]}"; do
+    target="${entry%%:*}"
+    rest="${entry#*:}"
+    dir="${rest%%:*}"
+    libname="${rest##*:}"
     src="$LIB_DIR/$target/$libname"
     if [[ -f "$src" ]]; then
         dest="$KT_DIR/moq/src/jvmMain/resources/$dir"

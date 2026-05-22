@@ -37,6 +37,9 @@ jobs:
         target:
           - aarch64-apple-ios
           - aarch64-apple-ios-sim
+          # x86_64-apple-ios is the Intel iOS simulator slice (Apple never
+          # shipped Intel iOS devices), still needed for Xcode users on
+          # Intel Macs running the simulator.
           - x86_64-apple-ios
           - universal-apple-darwin
 

@@ -33,6 +33,21 @@ jobs:
         id: parse
         run: .github/scripts/release.sh parse-version moq-ffi
 
+      # Maturin reads the wheel version from rs/moq-ffi/Cargo.toml (via
+      # `dynamic = ["version"]` in pyproject.toml). If a tag is pushed by
+      # hand without bumping Cargo.toml first, the wheel would ship with
+      # the previous version and PyPI would reject the duplicate upload.
+      - name: Verify Cargo.toml matches tag
+        env:
+          TAG_VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          CARGO_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [[ "$TAG_VERSION" != "$CARGO_VERSION" ]]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match rs/moq-ffi/Cargo.toml version ($CARGO_VERSION). Bump Cargo.toml before tagging."
+            exit 1
+          fi
+          echo "Cargo.toml version matches tag: $TAG_VERSION"
+
   build:
     name: Build wheels (${{ matrix.target }})
     needs: [parse-version]
@@ -84,9 +99,36 @@ jobs:
           name: python-${{ matrix.target }}
           path: py/moq-net/dist/*.whl
 
+  sdist:
+    name: Build sdist
+    needs: [parse-version]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py/moq-net
+          command: sdist
+          args: --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-sdist
+          path: py/moq-net/dist/*.tar.gz
+
   publish:
     name: Publish to PyPI
-    needs: [build]
+    needs: [build, sdist]
     runs-on: ubuntu-latest
     # Skipped until PUBLISH_PYTHON=true is set in repo variables.
     if: vars.PUBLISH_PYTHON == 'true'
