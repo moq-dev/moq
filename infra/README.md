@@ -1,8 +1,7 @@
 # MoQ infra
 
 Cloudflare Workers and supporting scripts that back project-owned
-infrastructure other than the relay nodes themselves (those live under
-`/cdn/`).
+infrastructure.
 
 | Worker      | Domain          | R2 bucket       | What it serves                          |
 | ----------- | --------------- | --------------- | --------------------------------------- |
