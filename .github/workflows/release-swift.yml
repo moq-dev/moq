@@ -147,9 +147,43 @@ jobs:
           name: swift-package
           path: release-out/*
 
+  release:
+    # Attach MoqFFI.xcframework.zip (and the staged Swift package
+    # tarball) to the moq-ffi-v* GitHub release. The mirror's
+    # Package.swift binaryTarget URL points at this asset, so it must
+    # exist before any consumer resolves the SPM tag.
+    name: Attach assets to GitHub release
+    needs: [package, parse-version]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Find previous tag
+        id: prev_tag
+        run: .github/scripts/release.sh prev-tag moq-ffi
+
+      - name: Download package
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-package
+          path: artifacts
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TITLE: "moq-ffi v${{ needs.parse-version.outputs.version }}"
+          RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+        run: .github/scripts/release.sh create artifacts
+
   publish:
     name: Publish to Swift Package mirror
-    needs: [package, parse-version]
+    needs: [release, parse-version]
     runs-on: ubuntu-latest
     # Skipped until PUBLISH_SPM=true and SWIFT_MIRROR_TOKEN are set. See
     # swift/README.md for setup steps.
@@ -164,7 +198,7 @@ jobs:
           name: swift-package
           path: swift-out
 
-      - name: Publish to moq-swift mirror
+      - name: Publish to moq-dev/swift mirror
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
           SWIFT_MIRROR_TOKEN: ${{ secrets.SWIFT_MIRROR_TOKEN }}

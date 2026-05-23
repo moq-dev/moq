@@ -5,7 +5,7 @@
 // The MoqFFI binary target points at an XCFramework attached to the
 // matching moq-ffi-v* GitHub Release. swift/scripts/package.sh rewrites
 // the URL and checksum below as part of the release pipeline before this
-// file is pushed to the moq-dev/moq-swift mirror repo, which is what SPM
+// file is pushed to the moq-dev/swift mirror repo, which is what SPM
 // consumers actually resolve.
 //
 // For local development pre-release, swap MoqFFI's `.binaryTarget` for
