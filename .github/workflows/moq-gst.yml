@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build (${{ matrix.target }})
+    name: Build tarball (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: .github/scripts/release.sh parse-version moq-gst
 
-      - name: Build and package
+      - name: Build and package (tarball)
         shell: bash
         run: |
           ./rs/moq-gst/build.sh \
@@ -56,12 +56,153 @@ jobs:
           name: moq-gst-${{ matrix.target }}
           path: dist/*
 
+  package-deb:
+    name: Package .deb (${{ matrix.target }})
+    runs-on: ${{ matrix.runs-on }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-22.04
+            deb-arch: amd64
+            deb-multiarch: x86_64-linux-gnu
+          - target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-22.04-arm
+            deb-arch: arm64
+            deb-multiarch: aarch64-linux-gnu
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up packaging tools
+        uses: ./.github/actions/setup-packaging
+
+      - name: Parse version
+        id: parse
+        shell: bash
+        run: .github/scripts/release.sh parse-version moq-gst
+
+      - name: Build inside Debian 12 (glibc 2.36, gst 1.22)
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          # gstreamer-rs 0.23 needs GStreamer >= 1.22 headers at compile
+          # time; Debian 12 (bookworm) ships 1.22 and glibc 2.36, the
+          # lowest-common-denominator that lets the .deb install on
+          # Debian 12+ and Ubuntu 24.04+.
+          docker run --rm \
+            -v "$PWD":/work -w /work \
+            -e TARGET \
+            debian:12 bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y --no-install-recommends \
+                build-essential pkg-config curl ca-certificates \
+                libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+              curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable --profile minimal
+              source $HOME/.cargo/env
+              cargo build --release --target "$TARGET" -p moq-gst
+            '
+
+      - name: Package via nfpm
+        shell: bash
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+          ARCH: ${{ matrix.deb-arch }}
+          PKG_NAME: gstreamer1.0-moq
+          PLUGIN_PATH: target/${{ matrix.target }}/release/libgstmoq.so
+          PLUGIN_DIR: /usr/lib/${{ matrix.deb-multiarch }}/gstreamer-1.0
+        run: |
+          mkdir -p dist
+          nfpm pkg --packager deb --config packaging/moq-gst/nfpm.yaml --target dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: moq-gst-deb-${{ matrix.deb-arch }}
+          path: dist/*.deb
+
+  package-rpm:
+    name: Package .rpm (${{ matrix.target }})
+    runs-on: ${{ matrix.runs-on }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-22.04
+            rpm-arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-22.04-arm
+            rpm-arch: aarch64
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up packaging tools
+        uses: ./.github/actions/setup-packaging
+
+      - name: Parse version
+        id: parse
+        shell: bash
+        run: .github/scripts/release.sh parse-version moq-gst
+
+      - name: Build inside AlmaLinux 9 (glibc 2.34)
+        shell: bash
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+          RPM_ARCH: ${{ matrix.rpm-arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          docker run --rm \
+            -v "$PWD":/work -w /work \
+            -e VERSION -e RPM_ARCH -e TARGET \
+            almalinux:9 bash -c '
+              set -euo pipefail
+              dnf install -y --quiet \
+                gcc make pkgconf-pkg-config curl tar gzip which \
+                gstreamer1-devel gstreamer1-plugins-base-devel
+              curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable --profile minimal
+              source $HOME/.cargo/env
+              cargo build --release --target "$TARGET" -p moq-gst
+            '
+
+      - name: Package via nfpm
+        shell: bash
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+          ARCH: ${{ matrix.rpm-arch }}
+          PKG_NAME: gstreamer1-moq
+          PLUGIN_PATH: target/${{ matrix.target }}/release/libgstmoq.so
+          PLUGIN_DIR: /usr/lib64/gstreamer-1.0
+        run: |
+          mkdir -p dist
+          nfpm pkg --packager rpm --config packaging/moq-gst/nfpm.yaml --target dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: moq-gst-rpm-${{ matrix.rpm-arch }}
+          path: dist/*.rpm
+
   release:
     name: Release
-    needs: build
+    needs: [build, package-deb, package-rpm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -90,3 +231,9 @@ jobs:
           RELEASE_TITLE: "moq-gst v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: .github/scripts/release.sh create artifacts
+
+      - name: Trigger apt/rpm repo publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: .github/scripts/trigger-repo-publish.sh

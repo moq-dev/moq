@@ -1,0 +1,16 @@
+set fallback
+
+# Deploy the rpm.moq.dev worker.
+deploy:
+	bun install
+	bun wrangler deploy
+
+# Regenerate rpm repo metadata and upload to the rpm-moq-dev R2 bucket.
+# Reads .rpm files from $ARTIFACTS_DIR (defaults to ./artifacts).
+publish artifacts="artifacts":
+	ARTIFACTS_DIR="{{artifacts}}" ./publish.sh
+
+# List objects currently in the rpm-moq-dev bucket.
+list:
+	bun install
+	bun wrangler r2 object list "rpm-moq-dev"

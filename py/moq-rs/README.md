@@ -57,6 +57,29 @@ async def main():
 asyncio.run(main())
 ```
 
+### Host a server
+
+```python
+import asyncio
+import moq_lite as moq
+
+async def main():
+    async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
+        broadcast = moq.BroadcastProducer()
+        track = broadcast.publish_track("events")
+        server.publish("hello", broadcast)
+        print(f"listening on https://{server.local_addr}")
+
+        sessions = []
+        async for request in server:
+            print(f"  + {request.transport} from {request.url}")
+            sessions.append(await request.ok())
+
+asyncio.run(main())
+```
+
+Reject a request instead of accepting it with `await request.close(403)`.
+
 ### Advanced: Manual origin wiring
 
 For full control over the origin topology:
@@ -76,7 +99,17 @@ client = moq.Client(
 
 ### Connection
 
-- **`Client(url, *, tls_verify=True, publish=None, subscribe=None)`**. Async context manager for connecting to a relay.
+- **`Client(url, *, tls_verify=True, bind=None, publish=None, subscribe=None)`**. Async context manager for connecting to a relay.
+- **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), publish=None, subscribe=None)`**. Async context manager + async iterator of incoming `Request`s.
+  - `.local_addr`. The bound address (useful when binding to port `0`).
+  - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
+  - `.publish(path, broadcast)`. Publish a broadcast to be served.
+- **`Request`**. An incoming session, yielded by `async for request in server`.
+  - `.url`, `.transport`. Properties.
+  - `.set_publish(origin)`, `.set_consume(origin)`. Per-request overrides.
+  - `await .ok()`. Complete the handshake, returns a session (hold it to keep the connection alive).
+  - `await .close(code)`. Reject with an HTTP status code.
+  - `.cancel()`. Cancel an in-flight `ok()`/`close()` call.
 
 ### Publishing
 

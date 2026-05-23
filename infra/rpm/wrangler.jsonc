@@ -1,0 +1,28 @@
+{
+	// Cloudflare Wrangler configuration for the rpm repository worker.
+	// Serves rpm.moq.dev, backed by the rpm-moq-dev R2 bucket.
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "rpm-moq-dev",
+	"main": "src/worker.ts",
+	"compatibility_date": "2025-07-09",
+	"account_id": "dd618f5dbd5da77b8296f1613c301f5c",
+	"workers_dev": false,
+	"route": {
+		"pattern": "rpm.moq.dev",
+		"custom_domain": true
+	},
+	// R2 bucket bindings
+	"r2_buckets": [
+		{
+			"binding": "RPM",
+			"bucket_name": "rpm-moq-dev",
+			"remote": true
+		}
+	],
+	// Observability
+	"observability": {
+		"logs": {
+			"enabled": true
+		}
+	}
+}

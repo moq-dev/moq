@@ -34,3 +34,18 @@ test:
 build:
 	uv sync --no-install-workspace
 	cd moq-rs && uv run --no-sync maturin develop --uv
+
+# Full Python CI: lint + tests + build. Takes a newline-separated list
+# of changed files; skips if FILES is non-empty and none match the
+# Python scope (which includes rs/moq-ffi because py bundles it via
+# maturin). Run `just py ci` (no FILES) to force-run everything.
+ci FILES="":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'; then
+		echo "py: no Python changes; skipping."
+		exit 0
+	fi
+	just check
+	just test
+	just build

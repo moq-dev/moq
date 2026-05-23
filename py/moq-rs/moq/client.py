@@ -27,11 +27,13 @@ class Client:
         url: str,
         *,
         tls_verify: bool = True,
+        bind: str | None = None,
         publish: OriginProducer | None = None,
         subscribe: OriginProducer | None = None,
     ) -> None:
         self._url = url
         self._tls_verify = tls_verify
+        self._bind = bind
 
         # If neither origin is provided, create a shared internal one.
         if publish is None and subscribe is None:
@@ -52,6 +54,8 @@ class Client:
 
         if not self._tls_verify:
             self._inner.set_tls_disable_verify(True)
+        if self._bind is not None:
+            self._inner.set_bind(self._bind)
 
         if self._publish_origin is not None:
             self._inner.set_publish(self._publish_origin._inner)

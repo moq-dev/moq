@@ -7,6 +7,11 @@ permissions:
 on:
   pull_request:
 
+# Cancel in-flight runs when a new commit lands on the same PR.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     name: Check
@@ -22,6 +27,8 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+          # Full history so `just changed` can diff against origin/$GITHUB_BASE_REF.
+          fetch-depth: 0
 
       - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
         with:
@@ -35,6 +42,6 @@ jobs:
         with:
           cache-on-failure: true
 
-      # Run checks with cached dependencies
+      # `just ci` calls `just changed` internally to skip unchanged scopes.
       - run: nix develop --command just ci
 

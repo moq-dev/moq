@@ -102,6 +102,25 @@
           opentofu
         ];
 
+        # Tools for producing .deb/.rpm artifacts. Cross-platform so that
+        # `just rs package` works from `nix develop` on both Linux and macOS.
+        packagingDeps = with pkgs; [
+          nfpm
+          dpkg
+        ];
+
+        # Tools needed to regenerate and sign the apt/rpm repositories.
+        # Linux-only because apt and createrepo_c are marked broken on Darwin
+        # in nixpkgs. The publish workflows only ever run on Linux runners.
+        publishDeps = with pkgs; lib.optionals (!stdenv.isDarwin) [
+          apt
+          createrepo_c
+          rpm
+          rclone
+          gnupg
+          gzip
+        ];
+
         # Apply our overlay to get the package definitions
         overlayPkgs = pkgs.extend self.overlays.default;
       in
@@ -127,10 +146,18 @@
             libmoq
             moq-gst
             ;
+
+          # Bundle of packaging + repo-publish tooling, pinned via flake.lock.
+          # CI builds this and prepends its bin/ to $PATH so subsequent steps
+          # use the same versions a local `nix develop` user would.
+          packaging = pkgs.symlinkJoin {
+            name = "moq-packaging-tools";
+            paths = packagingDeps ++ publishDeps;
+          };
         };
 
         devShells.default = pkgs.mkShell {
-          packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps;
+          packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps ++ packagingDeps;
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

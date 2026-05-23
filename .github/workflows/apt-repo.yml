@@ -1,0 +1,62 @@
+name: apt-repo
+
+# Mirrors .deb artifacts attached to a release into the apt.moq.dev repo.
+# Invoked via workflow_dispatch from each per-binary release workflow's
+# final job (gh workflow run apt-repo.yml -f tag=...), or manually.
+#
+# Note: we do NOT trigger on release:published because releases created
+# with the default GITHUB_TOKEN don't cascade to other workflows. The
+# per-binary workflows call us explicitly instead.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to ingest (e.g. moq-relay-v1.2.3)"
+        required: true
+
+permissions:
+  contents: read
+
+# Only one apt-repo job can mutate the bucket at a time. Concurrent
+# invocations queue and run in order.
+concurrency:
+  group: apt-repo
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to apt.moq.dev
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up packaging tools
+        uses: ./.github/actions/setup-packaging
+
+      - name: Download .deb assets from release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p artifacts
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
+            --dir artifacts \
+            --pattern "*.deb"
+          ls -la artifacts/
+
+      - name: Publish to R2
+        shell: bash
+        env:
+          ARTIFACTS_DIR: artifacts
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          REPO_SIGNING_KEY: ${{ secrets.REPO_SIGNING_KEY }}
+          REPO_SIGNING_KEY_ID: ${{ secrets.REPO_SIGNING_KEY_ID }}
+        run: ./infra/apt/publish.sh

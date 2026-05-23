@@ -18,3 +18,16 @@ check:
 # swift/README.md for the expected --lib-dir layout.
 package *args:
 	bash scripts/package.sh {{ args }}
+
+# Full Swift CI: `check` already builds moq-ffi and runs swift test.
+# Takes a newline-separated list of changed files; skips if FILES is
+# non-empty and none match the Swift scope. Run `just swift ci` (no
+# FILES) to force-run.
+ci FILES="":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(swift/|rs/moq-ffi/)'; then
+		echo "swift: no Swift changes; skipping."
+		exit 0
+	fi
+	just check
