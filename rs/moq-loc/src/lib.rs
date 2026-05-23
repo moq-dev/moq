@@ -22,17 +22,14 @@
 //! encode. Public properties are not handled here. They belong in the MoQ
 //! object header and are stripped by the transport layer.
 //!
-//! Varint encoding is QUIC-style throughout, matching the rest of the moq
-//! stack.
+//! Varint encoding is QUIC-style throughout via [`moq_net::coding::VarInt`].
 
 use bytes::{Buf, Bytes, BytesMut};
+use moq_net::coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};
 
 /// Property IDs recognized by this implementation.
 const PROP_TIMESTAMP: u64 = 0x06;
 const PROP_TIMESCALE: u64 = 0x08;
-
-/// Maximum value representable as a 62-bit QUIC varint.
-const VARINT_MAX: u64 = (1u64 << 62) - 1;
 
 /// A decoded LOC frame.
 #[derive(Clone, Debug)]
@@ -71,12 +68,38 @@ pub enum Error {
 	OutOfRange,
 }
 
+impl From<DecodeError> for Error {
+	fn from(err: DecodeError) -> Self {
+		match err {
+			DecodeError::Short => Self::ShortBuffer,
+			// Any other decode error (invalid value, etc.) maps to a malformed
+			// property block; the caller can't distinguish them anyway.
+			_ => Self::MalformedProperties,
+		}
+	}
+}
+
+impl From<EncodeError> for Error {
+	fn from(err: EncodeError) -> Self {
+		match err {
+			EncodeError::Short => Self::ShortBuffer,
+			_ => Self::OutOfRange,
+		}
+	}
+}
+
+impl From<BoundsExceeded> for Error {
+	fn from(_: BoundsExceeded) -> Self {
+		Self::OutOfRange
+	}
+}
+
 /// Decode a LOC frame.
 ///
 /// Consumes the properties_length prefix, walks the bounded property block,
 /// and returns the remainder as `payload`.
 pub fn decode(mut buf: Bytes) -> Result<Frame, Error> {
-	let properties_length = read_varint(&mut buf)?;
+	let properties_length: u64 = VarInt::decode_quic(&mut buf)?.into();
 	let properties_length: usize = properties_length.try_into().map_err(|_| Error::MalformedProperties)?;
 
 	if properties_length > buf.remaining() {
@@ -91,7 +114,7 @@ pub fn decode(mut buf: Bytes) -> Result<Frame, Error> {
 	let mut first = true;
 
 	while props.has_remaining() {
-		let delta = read_varint(&mut props)?;
+		let delta: u64 = VarInt::decode_quic(&mut props)?.into();
 		let abs = if first {
 			first = false;
 			delta
@@ -101,7 +124,7 @@ pub fn decode(mut buf: Bytes) -> Result<Frame, Error> {
 		prev_type = abs;
 
 		if abs % 2 == 0 {
-			let value = read_varint(&mut props)?;
+			let value: u64 = VarInt::decode_quic(&mut props)?.into();
 			match abs {
 				PROP_TIMESTAMP => timestamp = Some(value),
 				PROP_TIMESCALE => {
@@ -113,7 +136,7 @@ pub fn decode(mut buf: Bytes) -> Result<Frame, Error> {
 				_ => {}
 			}
 		} else {
-			let len = read_varint(&mut props)?;
+			let len: u64 = VarInt::decode_quic(&mut props)?.into();
 			let len: usize = len.try_into().map_err(|_| Error::MalformedProperties)?;
 			if len > props.remaining() {
 				return Err(Error::MalformedProperties);
@@ -139,86 +162,25 @@ pub fn decode(mut buf: Bytes) -> Result<Frame, Error> {
 /// catalog timescale to interpret `timestamp`.
 pub fn encode(timestamp: u64, payload: &[u8]) -> Result<Bytes, Error> {
 	let mut props = BytesMut::with_capacity(16);
-	write_varint(&mut props, PROP_TIMESTAMP)?;
-	write_varint(&mut props, timestamp)?;
+	VarInt::try_from(PROP_TIMESTAMP)?.encode_quic(&mut props)?;
+	VarInt::try_from(timestamp)?.encode_quic(&mut props)?;
 
 	let mut out = BytesMut::with_capacity(props.len() + payload.len() + 8);
-	write_varint(&mut out, props.len() as u64)?;
+	VarInt::try_from(props.len() as u64)?.encode_quic(&mut out)?;
 	out.extend_from_slice(&props);
 	out.extend_from_slice(payload);
 
 	Ok(out.freeze())
 }
 
-/// Decode a QUIC-style varint (2-bit length tag in top bits).
-fn read_varint<B: Buf>(buf: &mut B) -> Result<u64, Error> {
-	if !buf.has_remaining() {
-		return Err(Error::ShortBuffer);
-	}
-	let b = buf.get_u8();
-	let tag = b >> 6;
-	let mut bytes = [0u8; 8];
-	bytes[0] = b & 0b0011_1111;
-	let value = match tag {
-		0b00 => u64::from(bytes[0]),
-		0b01 => {
-			if buf.remaining() < 1 {
-				return Err(Error::ShortBuffer);
-			}
-			buf.copy_to_slice(&mut bytes[1..2]);
-			u64::from(u16::from_be_bytes(bytes[..2].try_into().unwrap()))
-		}
-		0b10 => {
-			if buf.remaining() < 3 {
-				return Err(Error::ShortBuffer);
-			}
-			buf.copy_to_slice(&mut bytes[1..4]);
-			u64::from(u32::from_be_bytes(bytes[..4].try_into().unwrap()))
-		}
-		0b11 => {
-			if buf.remaining() < 7 {
-				return Err(Error::ShortBuffer);
-			}
-			buf.copy_to_slice(&mut bytes[1..8]);
-			u64::from_be_bytes(bytes)
-		}
-		_ => unreachable!(),
-	};
-	Ok(value)
-}
-
-/// Encode a QUIC-style varint (2-bit length tag in top bits).
-fn write_varint<B: bytes::BufMut>(buf: &mut B, value: u64) -> Result<(), Error> {
-	if value > VARINT_MAX {
-		return Err(Error::OutOfRange);
-	}
-	if value < (1u64 << 6) {
-		if buf.remaining_mut() < 1 {
-			return Err(Error::ShortBuffer);
-		}
-		buf.put_u8(value as u8);
-	} else if value < (1u64 << 14) {
-		if buf.remaining_mut() < 2 {
-			return Err(Error::ShortBuffer);
-		}
-		buf.put_u16(value as u16 | 0b01 << 14);
-	} else if value < (1u64 << 30) {
-		if buf.remaining_mut() < 4 {
-			return Err(Error::ShortBuffer);
-		}
-		buf.put_u32(value as u32 | 0b10 << 30);
-	} else {
-		if buf.remaining_mut() < 8 {
-			return Err(Error::ShortBuffer);
-		}
-		buf.put_u64(value | 0b11 << 62);
-	}
-	Ok(())
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Test helper: write a u64 as a QUIC varint into `buf`.
+	fn write_varint(buf: &mut BytesMut, value: u64) {
+		VarInt::try_from(value).unwrap().encode_quic(buf).unwrap();
+	}
 
 	#[test]
 	fn roundtrip() {
@@ -235,13 +197,13 @@ mod tests {
 	fn decode_per_frame_timescale() {
 		// Manually craft: properties = [delta=0x06 timestamp=96000, delta=0x02 (abs=0x08) timescale=48000]
 		let mut props = BytesMut::new();
-		write_varint(&mut props, PROP_TIMESTAMP).unwrap();
-		write_varint(&mut props, 96_000).unwrap();
-		write_varint(&mut props, PROP_TIMESCALE - PROP_TIMESTAMP).unwrap(); // delta = 2
-		write_varint(&mut props, 48_000).unwrap();
+		write_varint(&mut props, PROP_TIMESTAMP);
+		write_varint(&mut props, 96_000);
+		write_varint(&mut props, PROP_TIMESCALE - PROP_TIMESTAMP); // delta = 2
+		write_varint(&mut props, 48_000);
 
 		let mut frame = BytesMut::new();
-		write_varint(&mut frame, props.len() as u64).unwrap();
+		write_varint(&mut frame, props.len() as u64);
 		frame.extend_from_slice(&props);
 		frame.extend_from_slice(b"payload");
 
@@ -255,14 +217,14 @@ mod tests {
 	fn decode_skips_video_config() {
 		// properties = [delta=0x06 timestamp=10, delta=0x07 (abs=0x0d, video config) bytes=[1,2,3]]
 		let mut props = BytesMut::new();
-		write_varint(&mut props, PROP_TIMESTAMP).unwrap();
-		write_varint(&mut props, 10).unwrap();
-		write_varint(&mut props, 0x0d - PROP_TIMESTAMP).unwrap(); // delta = 7 -> abs 0x0d (Video Config)
-		write_varint(&mut props, 3).unwrap(); // length
+		write_varint(&mut props, PROP_TIMESTAMP);
+		write_varint(&mut props, 10);
+		write_varint(&mut props, 0x0d - PROP_TIMESTAMP); // delta = 7 -> abs 0x0d (Video Config)
+		write_varint(&mut props, 3); // length
 		props.extend_from_slice(&[0x01, 0x02, 0x03]);
 
 		let mut frame = BytesMut::new();
-		write_varint(&mut frame, props.len() as u64).unwrap();
+		write_varint(&mut frame, props.len() as u64);
 		frame.extend_from_slice(&props);
 		frame.extend_from_slice(b"data");
 
@@ -276,11 +238,11 @@ mod tests {
 	fn decode_missing_timestamp_errors() {
 		// properties = [delta=0x08 timescale=1000], no timestamp
 		let mut props = BytesMut::new();
-		write_varint(&mut props, PROP_TIMESCALE).unwrap();
-		write_varint(&mut props, 1000).unwrap();
+		write_varint(&mut props, PROP_TIMESCALE);
+		write_varint(&mut props, 1000);
 
 		let mut frame = BytesMut::new();
-		write_varint(&mut frame, props.len() as u64).unwrap();
+		write_varint(&mut frame, props.len() as u64);
 		frame.extend_from_slice(&props);
 		frame.extend_from_slice(b"x");
 
@@ -290,7 +252,7 @@ mod tests {
 	#[test]
 	fn decode_empty_properties_errors() {
 		let mut frame = BytesMut::new();
-		write_varint(&mut frame, 0).unwrap();
+		write_varint(&mut frame, 0);
 		frame.extend_from_slice(b"payload");
 
 		assert!(matches!(decode(frame.freeze()), Err(Error::MissingTimestamp)));
@@ -300,13 +262,13 @@ mod tests {
 	fn decode_rejects_zero_timescale() {
 		// Per-frame 0x08 timescale of 0 is invalid (would divide by zero).
 		let mut props = BytesMut::new();
-		write_varint(&mut props, PROP_TIMESTAMP).unwrap();
-		write_varint(&mut props, 10).unwrap();
-		write_varint(&mut props, PROP_TIMESCALE - PROP_TIMESTAMP).unwrap();
-		write_varint(&mut props, 0).unwrap();
+		write_varint(&mut props, PROP_TIMESTAMP);
+		write_varint(&mut props, 10);
+		write_varint(&mut props, PROP_TIMESCALE - PROP_TIMESTAMP);
+		write_varint(&mut props, 0);
 
 		let mut frame = BytesMut::new();
-		write_varint(&mut frame, props.len() as u64).unwrap();
+		write_varint(&mut frame, props.len() as u64);
 		frame.extend_from_slice(&props);
 		frame.extend_from_slice(b"x");
 
@@ -316,7 +278,7 @@ mod tests {
 	#[test]
 	fn decode_overflowing_properties_length_errors() {
 		let mut frame = BytesMut::new();
-		write_varint(&mut frame, 100).unwrap(); // claims 100 bytes of properties
+		write_varint(&mut frame, 100); // claims 100 bytes of properties
 		frame.extend_from_slice(&[0x06]); // only 1 byte follows
 
 		assert!(matches!(decode(frame.freeze()), Err(Error::MalformedProperties)));

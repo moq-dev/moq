@@ -23,7 +23,9 @@ use bytes::Bytes;
 use hang::catalog::{AudioCodec, AudioConfig, VideoCodec, VideoConfig};
 use mp4_atom::Atom;
 
-use crate::container::{Container, Frame, Timestamp};
+use moq_net::Timestamp;
+
+use crate::container::{Container, Frame};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -109,7 +111,7 @@ impl Container for Wire {
 	type Error = Error;
 
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
-		let timescale = crate::container::Timescale::new(self.trak.mdia.mdhd.timescale as u64);
+		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64);
 		let track_id = self.trak.tkhd.track_id;
 		encode(group, frames, timescale, track_id)
 	}
@@ -125,12 +127,12 @@ impl Container for Wire {
 			return Poll::Ready(Ok(None));
 		};
 
-		let timescale = crate::container::Timescale::new(self.trak.mdia.mdhd.timescale as u64);
+		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64);
 		Poll::Ready(Ok(Some(decode(data, timescale)?)))
 	}
 }
 
-pub(crate) fn decode(data: Bytes, timescale: crate::container::Timescale) -> Result<Vec<Frame>, Error> {
+pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<Frame>, Error> {
 	use mp4_atom::DecodeMaybe;
 
 	let mut cursor = std::io::Cursor::new(&data);
@@ -193,7 +195,7 @@ pub(crate) fn decode(data: Bytes, timescale: crate::container::Timescale) -> Res
 pub(crate) fn encode(
 	group: &mut moq_net::GroupProducer,
 	frames: &[Frame],
-	timescale: crate::container::Timescale,
+	timescale: moq_net::Timescale,
 	track_id: u32,
 ) -> Result<(), Error> {
 	if frames.is_empty() {
@@ -219,7 +221,7 @@ pub(crate) fn encode(
 /// Returns an empty `Bytes` when `frames` is empty.
 pub(crate) fn encode_fragment(
 	track_id: u32,
-	timescale: crate::container::Timescale,
+	timescale: moq_net::Timescale,
 	sequence_number: u32,
 	frames: &[Frame],
 ) -> Result<Bytes, Error> {

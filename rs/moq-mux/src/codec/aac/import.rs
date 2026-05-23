@@ -56,7 +56,7 @@ impl Import {
 		Ok(())
 	}
 
-	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
+	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 
 		// Collect the input into a contiguous Bytes payload.
@@ -82,15 +82,13 @@ impl Import {
 		Ok(())
 	}
 
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
+	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> anyhow::Result<moq_net::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(crate::container::Timestamp::from_micros(
-			zero.elapsed().as_micros() as u64
-		)?)
+		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
 

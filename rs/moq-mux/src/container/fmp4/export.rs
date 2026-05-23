@@ -483,7 +483,7 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> anyhow::Result<
 	track.sequence_number += 1;
 	Ok(crate::container::fmp4::encode_fragment(
 		track.track_id,
-		crate::container::Timescale::new(track.timescale),
+		moq_net::Timescale::new(track.timescale),
 		seq,
 		&frames,
 	)?)

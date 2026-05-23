@@ -163,7 +163,7 @@ mod tests {
 
 	use super::*;
 	use crate::catalog::hang::Container;
-	use crate::container::Timestamp;
+	use moq_net::Timestamp;
 
 	fn frame(timestamp_us: u64, keyframe: bool) -> Frame {
 		Frame {

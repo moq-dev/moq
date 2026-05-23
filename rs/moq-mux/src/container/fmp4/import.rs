@@ -1,7 +1,7 @@
-use crate::container::Timestamp;
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
+use moq_net::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -453,7 +453,7 @@ impl Import {
 
 			let tfdt = traf.tfdt.as_ref().context("missing tfdt box")?;
 			let mut dts = tfdt.base_media_decode_time;
-			let timescale = crate::container::Timescale::new(trak.mdia.mdhd.timescale as u64);
+			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64);
 
 			let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
 			let mut track_data_start: Option<usize> = None;
@@ -503,7 +503,7 @@ impl Import {
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
 					// Preserve the fmp4 track's native timescale so a passthrough re-emit
 					// doesn't go through a lossy microsecond detour.
-					let timestamp = crate::container::Timestamp::new(pts, timescale)?;
+					let timestamp = moq_net::Timestamp::new(pts, timescale)?;
 
 					if offset + size > mdat.data.len() {
 						anyhow::bail!("invalid data offset");

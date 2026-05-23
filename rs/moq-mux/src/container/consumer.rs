@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
 use std::task::{Poll, ready};
 
-use super::{Container, Frame, Timestamp};
+use moq_net::Timestamp;
+
+use super::{Container, Frame};
 
 /// Decode a moq-lite track into a stream of media [`Frame`]s in latency-bounded
 /// presentation order.

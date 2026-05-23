@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::container::Timestamp;
+use moq_net::Timestamp;
 
 /// Tracks the minimum duration between consecutive frames.
 ///

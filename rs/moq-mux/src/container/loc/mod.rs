@@ -7,7 +7,13 @@
 
 use std::task::Poll;
 
-use crate::container::{Container, Frame, TIMESCALE, Timescale, Timestamp};
+use moq_net::{Timescale, Timestamp};
+
+use crate::container::{Container, Frame};
+
+/// LOC's catalog convention: timestamps are in microseconds when no per-frame
+/// 0x08 timescale property is present.
+const DEFAULT_TIMESCALE: Timescale = Timescale::MICRO;
 
 /// LOC wire format. Each moq frame holds one LOC frame.
 #[derive(Default)]
@@ -20,7 +26,7 @@ impl Container for Wire {
 		for frame in frames {
 			// LOC's wire format omits per-frame timescale by convention; the catalog
 			// default is microseconds, so convert at the boundary.
-			let timestamp = frame.timestamp.convert(TIMESCALE).map_err(hang::Error::from)?;
+			let timestamp = frame.timestamp.convert(DEFAULT_TIMESCALE).map_err(hang::Error::from)?;
 			let data = moq_loc::encode(timestamp.value(), &frame.payload)?;
 
 			let mut chunked = group.create_frame(data.len().into())?;
@@ -42,7 +48,7 @@ impl Container for Wire {
 		};
 
 		let loc = moq_loc::decode(data)?;
-		let scale = loc.timescale.map(Timescale::new).unwrap_or(TIMESCALE);
+		let scale = loc.timescale.map(Timescale::new).unwrap_or(DEFAULT_TIMESCALE);
 		let timestamp = Timestamp::new(loc.timestamp, scale).map_err(hang::Error::from)?;
 
 		Poll::Ready(Ok(Some(vec![Frame {
