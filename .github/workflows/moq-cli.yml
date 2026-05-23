@@ -68,6 +68,18 @@ jobs:
         shell: bash
         run: cargo build --release --target ${{ matrix.target }} -p moq-cli
 
+      - name: Rename binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          # The crate is named moq-cli but the .deb / .rpm and Homebrew
+          # formula present the binary as `moq`. Cargo produces
+          # target/release/moq-cli by default (no [[bin]] override),
+          # so make a sibling copy that the downstream packaging steps
+          # can point at without each one needing to know the rename.
+          cp "target/${TARGET}/release/moq-cli" "target/${TARGET}/release/moq"
+
       - name: Package bare binary
         shell: bash
         run: |
@@ -116,7 +128,7 @@ jobs:
                 | sh -s -- -y --default-toolchain stable --profile minimal
               source $HOME/.cargo/env
               cargo build --release --target ${{ matrix.target }} -p moq-cli
-              cp target/${{ matrix.target }}/release/moq target/moq.rpm-build
+              cp target/${{ matrix.target }}/release/moq-cli target/moq.rpm-build
             '
           ARCH="$RPM_ARCH" \
           BINARY_PATH=target/moq.rpm-build \
