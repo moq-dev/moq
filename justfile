@@ -89,27 +89,39 @@ changed BASE="":
 		echo "$files" | grep -qE '\.md$' && echo md || true
 	} | tr '\n' ' ' | sed 's/ $//'
 
-# Run per-language `ci` for whichever scopes `just changed BASE` reports.
+# Run every per-language `ci` unconditionally; each self-gates against
+# BASE and exits 0 fast when its scope hasn't changed. Pass BASE="" to
+# force-run everything.
 ci BASE="":
 	#!/usr/bin/env bash
 	set -euo pipefail
 
-	scopes=$(just changed "{{ BASE }}")
-	if [[ -z "$scopes" ]]; then
-		echo "No language scopes changed; nothing to do."
-		exit 0
+	# Resolve BASE: arg > $GITHUB_BASE_REF > origin/main.
+	if [[ -n "{{ BASE }}" ]]; then
+		base="{{ BASE }}"
+	elif [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+		base="origin/${GITHUB_BASE_REF}"
+	else
+		base="origin/main"
 	fi
-	echo "Running CI for scopes: $scopes"
 
-	has() { [[ " $scopes " == *" $1 "* ]]; }
+	just js    ci "$base"
+	just rs    ci "$base"
+	just py    ci "$base"
+	just kt    ci "$base"
+	just swift ci "$base"
 
-	if has js;    then just js ci;    fi
-	if has rs;    then just rs ci;    fi
-	if has py;    then just py ci;    fi
-	if has kt;    then just kt ci;    fi
-	if has swift; then just swift ci; fi
-	if has nix;   then nix flake check; fi
-	if has md;    then bun remark . --quiet --frail; fi
+	# nix flake + markdown have no per-language module; gate inline.
+	if merge_base=$(git merge-base "$base" HEAD 2>/dev/null); then
+		files=$(git diff --name-only "$merge_base")
+		if echo "$files" | grep -qE '^(flake\.nix$|flake\.lock$)'; then nix flake check; fi
+		if echo "$files" | grep -qE '\.md$'; then bun remark . --quiet --frail; fi
+	else
+		# Base unreachable; run everything to be safe.
+		echo "warning: $base not available; running nix + remark unconditionally" >&2
+		nix flake check
+		bun remark . --quiet --frail
+	fi
 
 # Auto-fix linting/formatting issues across all languages.
 fix:

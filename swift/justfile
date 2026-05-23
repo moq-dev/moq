@@ -20,8 +20,16 @@ package *args:
 	bash scripts/package.sh {{ args }}
 
 # Full Swift CI: `check` already builds moq-ffi and runs swift test.
-# Dispatched by the root `just ci`.
-ci:
+# Self-gates against BASE: exits 0 fast if no Swift (or rs/moq-ffi)
+# files changed (so root `just ci` can call this unconditionally). Pass
+# BASE="" to force-run.
+ci BASE="origin/main":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [[ -n "{{ BASE }}" ]] && [[ -z "$(just changed {{ BASE }})" ]]; then
+		echo "swift: no changes vs {{ BASE }}; skipping."
+		exit 0
+	fi
 	just check
 
 # Print "swift" if any Swift file (or its rs/moq-ffi dependency) changed

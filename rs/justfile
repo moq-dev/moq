@@ -21,9 +21,17 @@ check *args:
 	cargo shear
 	cargo sort --workspace --check
 
-# Full Rust CI: check + feature edge cases + tests + build. Dispatched
-# by the root `just ci`. `cargo publish --dry-run` is in release-rs.yml.
-ci:
+# Full Rust CI: check + feature edge cases + tests + build. Self-gates
+# against BASE: exits 0 fast if no Rust files changed (so root `just ci`
+# can call this unconditionally). Pass BASE="" to force-run.
+# `cargo publish --dry-run` lives in release-rs.yml.
+ci BASE="origin/main":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [[ -n "{{ BASE }}" ]] && [[ -z "$(just changed {{ BASE }})" ]]; then
+		echo "rs: no changes vs {{ BASE }}; skipping."
+		exit 0
+	fi
 	just check --workspace
 	cargo check --workspace --no-default-features
 	cargo check --workspace --all-features

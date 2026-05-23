@@ -41,8 +41,16 @@ test:
 build:
 	bun run --filter='*' build
 
-# Full JS CI: lint + tests + build. Dispatched by the root `just ci`.
-ci:
+# Full JS CI: lint + tests + build. Self-gates against BASE: exits 0 fast
+# if no JS files changed (so root `just ci` can call this unconditionally).
+# Pass BASE="" to force-run regardless of diff.
+ci BASE="origin/main":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [[ -n "{{ BASE }}" ]] && [[ -z "$(just changed {{ BASE }})" ]]; then
+		echo "js: no changes vs {{ BASE }}; skipping."
+		exit 0
+	fi
 	just check
 	just test
 	just build

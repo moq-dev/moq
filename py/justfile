@@ -35,8 +35,16 @@ build:
 	uv sync --no-install-workspace
 	cd moq-rs && uv run --no-sync maturin develop --uv
 
-# Full Python CI: lint + tests + build. Dispatched by the root `just ci`.
-ci:
+# Full Python CI: lint + tests + build. Self-gates against BASE: exits 0
+# fast if no Python (or rs/moq-ffi) files changed (so root `just ci` can
+# call this unconditionally). Pass BASE="" to force-run.
+ci BASE="origin/main":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [[ -n "{{ BASE }}" ]] && [[ -z "$(just changed {{ BASE }})" ]]; then
+		echo "py: no changes vs {{ BASE }}; skipping."
+		exit 0
+	fi
 	just check
 	just test
 	just build
