@@ -51,7 +51,7 @@ async fn run_subscribe(mut consumer: moq_net::OriginConsumer) -> anyhow::Result<
 
 	// Read the catalog to discover available tracks.
 	let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
-	let mut catalog = moq_mux::catalog::Consumer::new(catalog_track);
+	let mut catalog = moq_mux::catalog::hang::Consumer::new(catalog_track);
 
 	let info = catalog.next().await?.ok_or_else(|| anyhow::anyhow!("no catalog"))?;
 
@@ -78,7 +78,7 @@ async fn run_subscribe(mut consumer: moq_net::OriginConsumer) -> anyhow::Result<
 	};
 
 	let track_consumer = broadcast.subscribe_track(&track)?;
-	let mut ordered = moq_mux::container::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
+	let mut ordered = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
 		.with_latency(Duration::from_millis(500));
 
 	// Read frames in latency-bounded presentation order.

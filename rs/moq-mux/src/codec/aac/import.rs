@@ -1,0 +1,102 @@
+use bytes::{Buf, BytesMut};
+
+use super::Config;
+
+/// AAC importer.
+///
+/// Initialized from an AudioSpecificConfig blob (variable-length, typically extracted from
+/// an MP4 ESDS atom). Each input buffer passed to [`decode`](Self::decode) is published as
+/// one hang frame in its own group, so the relay can forward each frame without waiting for
+/// a group boundary. The codec's packet loss concealment handles drops.
+pub struct Import {
+	catalog: crate::catalog::hang::Producer,
+	track: crate::container::Producer<crate::catalog::hang::Container>,
+	zero: Option<tokio::time::Instant>,
+}
+
+impl Import {
+	pub fn new(
+		mut broadcast: moq_net::BroadcastProducer,
+		mut catalog: crate::catalog::hang::Producer,
+		config: Config,
+	) -> anyhow::Result<Self> {
+		let track = broadcast.unique_track(".aac")?;
+
+		let audio_config = hang::catalog::AudioConfig {
+			codec: hang::catalog::AAC {
+				profile: config.profile,
+			}
+			.into(),
+			sample_rate: config.sample_rate,
+			channel_count: config.channel_count,
+			bitrate: None,
+			description: None,
+			container: hang::catalog::Container::Legacy,
+			jitter: None,
+		};
+
+		tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
+		catalog.lock().audio.renditions.insert(track.name.clone(), audio_config);
+
+		Ok(Self {
+			catalog,
+			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
+			zero: None,
+		})
+	}
+
+	/// Returns a reference to the underlying track producer.
+	pub fn track(&self) -> &moq_net::TrackProducer {
+		self.track.track()
+	}
+
+	/// Finish the track, flushing the current group.
+	pub fn finish(&mut self) -> anyhow::Result<()> {
+		self.track.finish()?;
+		Ok(())
+	}
+
+	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
+		let pts = self.pts(pts)?;
+
+		// Collect the input into a contiguous Bytes payload.
+		let mut payload = BytesMut::with_capacity(buf.remaining());
+		while buf.has_remaining() {
+			let chunk = buf.chunk();
+			payload.extend_from_slice(chunk);
+			let len = chunk.len();
+			buf.advance(len);
+		}
+
+		// Each frame is its own group so the relay can forward it immediately.
+		// The codec's packet loss concealment handles drops.
+		let frame = crate::container::Frame {
+			timestamp: pts,
+			payload: payload.freeze(),
+			keyframe: true,
+		};
+
+		self.track.write(frame)?;
+		self.track.finish_group()?;
+
+		Ok(())
+	}
+
+	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
+		if let Some(pts) = hint {
+			return Ok(pts);
+		}
+
+		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
+		Ok(crate::container::Timestamp::from_micros(
+			zero.elapsed().as_micros() as u64
+		)?)
+	}
+}
+
+impl Drop for Import {
+	fn drop(&mut self) {
+		tracing::debug!(name = ?self.track.name, "ending track");
+		self.catalog.lock().audio.renditions.remove(&self.track.name);
+	}
+}

@@ -63,6 +63,7 @@ export default defineConfig({
 					items: [
 						{ text: "Development", link: "/setup/dev" },
 						{ text: "Production", link: "/setup/prod" },
+						{ text: "Linux Packages", link: "/setup/linux" },
 					],
 				},
 				{

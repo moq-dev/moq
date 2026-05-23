@@ -1,0 +1,54 @@
+# nfpm config for the moq-gst GStreamer plugin.
+# Produces both .deb (as gstreamer1.0-moq, Debian's naming convention) and
+# .rpm (as gstreamer1-moq, Fedora's convention) from one definition.
+#
+# Driven by env vars set in CI:
+#   VERSION     . semver, e.g. 0.2.2
+#   ARCH        . package arch: amd64/arm64 (deb) or x86_64/aarch64 (rpm)
+#   PKG_NAME    . deb: gstreamer1.0-moq   rpm: gstreamer1-moq
+#   PLUGIN_PATH . path to the built libgstmoq.so to package
+#   PLUGIN_DIR  . install dir, varies by distro+arch:
+#                   deb amd64:  /usr/lib/x86_64-linux-gnu/gstreamer-1.0
+#                   deb arm64:  /usr/lib/aarch64-linux-gnu/gstreamer-1.0
+#                   rpm any:    /usr/lib64/gstreamer-1.0
+
+name: ${PKG_NAME}
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: libs
+priority: optional
+maintainer: MoQ Project <admin@moq.dev>
+description: |
+  GStreamer 1.0 plugin for Media over QUIC.
+  Provides moqsink and moqsrc elements that publish to and subscribe from
+  a MoQ relay, enabling MoQ streaming inside any GStreamer pipeline.
+vendor: MoQ Project
+homepage: https://moq.dev
+license: MIT OR Apache-2.0
+
+contents:
+  - src: ${PLUGIN_PATH}
+    dst: ${PLUGIN_DIR}/libgstmoq.so
+    file_info:
+      mode: 0644
+
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.36)
+      - libgstreamer1.0-0 (>= 1.22)
+      - libgstreamer-plugins-base1.0-0 (>= 1.22)
+  rpm:
+    depends:
+      - glibc >= 2.34
+      - gstreamer1 >= 1.22
+      - gstreamer1-plugins-base >= 1.22
+
+deb:
+  fields:
+    Bugs: https://github.com/moq-dev/moq/issues
+
+rpm:
+  group: System Environment/Libraries
+  summary: GStreamer 1.0 plugin for Media over QUIC

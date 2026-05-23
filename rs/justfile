@@ -21,12 +21,22 @@ check *args:
 	cargo shear
 	cargo sort --workspace --check
 
-# Extended Rust-only CI: feature edge cases + publish dry-run.
-ci:
+# Full Rust CI: check + feature edge cases + tests + build. Takes a
+# newline-separated list of changed files; skips if FILES is non-empty
+# and none match the Rust scope. Run `just rs ci` (no FILES) to
+# force-run everything. `cargo publish --dry-run` lives in release-rs.yml.
+ci FILES="":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(rs/|Cargo\.toml$|Cargo\.lock$)'; then
+		echo "rs: no Rust changes; skipping."
+		exit 0
+	fi
 	just check --workspace
 	cargo check --workspace --no-default-features
 	cargo check --workspace --all-features
-	cargo publish --dry-run
+	just test --all-features
+	just build
 
 # Auto-fix clippy/format/shear/sort, then sweep stale target/.
 fix:
@@ -58,3 +68,44 @@ release:
 update:
 	cargo update
 	cargo upgrade --incompatible
+
+# Build a .deb or .rpm for one of the Rust binaries locally. nfpm comes
+# from the flake's dev shell (`nix develop`). For .rpm produced this way,
+# the linkage matches the host's glibc; CI uses an AlmaLinux 9 container
+# to produce broadly compatible artifacts instead.
+#
+# Examples:
+#   just rs package moq-relay deb
+#   just rs package moq-cli rpm
+package crate packager:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	case "{{crate}}" in
+		moq-relay)      bin=moq-relay  ;;
+		moq-cli)        bin=moq        ;;
+		moq-token-cli)  bin=moq-token-cli ;;
+		*) echo "Unknown crate: {{crate}} (use moq-relay, moq-cli, or moq-token-cli)" >&2; exit 1 ;;
+	esac
+	case "{{packager}}" in
+		deb)
+			if command -v dpkg >/dev/null 2>&1; then
+				arch=$(dpkg --print-architecture)
+			else
+				case "$(uname -m)" in
+					x86_64)        arch=amd64 ;;
+					aarch64|arm64) arch=arm64 ;;
+					*) echo "Cannot infer deb arch from host $(uname -m)" >&2; exit 1 ;;
+				esac
+			fi
+			;;
+		rpm) arch=$(uname -m) ;;
+		*) echo "Unknown packager: {{packager}} (use deb or rpm)" >&2; exit 1 ;;
+	esac
+	version=$(grep -m1 '^version' rs/{{crate}}/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+	cargo build --release -p {{crate}}
+	mkdir -p dist
+	VERSION="$version" ARCH="$arch" BINARY_PATH="target/release/$bin" \
+		nfpm pkg --packager {{packager}} \
+			--config packaging/{{crate}}/nfpm.yaml \
+			--target dist/
+	ls -1 dist/

@@ -1,0 +1,69 @@
+# nfpm config for the moq-relay package.
+# Produces both .deb and .rpm from one definition.
+# Driven by env vars set in CI: VERSION, ARCH, BINARY_PATH.
+#
+# Usage:
+#   VERSION=1.2.3 ARCH=amd64 BINARY_PATH=target/release/moq-relay \
+#     nfpm pkg --packager deb --target dist/
+#   VERSION=1.2.3 ARCH=x86_64 BINARY_PATH=target/release/moq-relay \
+#     nfpm pkg --packager rpm --target dist/
+
+name: moq-relay
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: MoQ Project <admin@moq.dev>
+description: |
+  Media over QUIC relay server.
+  Connects publishers and subscribers and forwards content over QUIC/HTTP3.
+  Content-agnostic: knows nothing about the media it transports.
+vendor: MoQ Project
+homepage: https://moq.dev
+license: MIT OR Apache-2.0
+
+contents:
+  - src: ${BINARY_PATH}
+    dst: /usr/bin/moq-relay
+    file_info:
+      mode: 0755
+
+  - src: packaging/moq-relay/relay.toml
+    dst: /etc/moq-relay/relay.toml
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  - src: packaging/moq-relay/moq-relay.service
+    dst: /lib/systemd/system/moq-relay.service
+    file_info:
+      mode: 0644
+
+# Per-packager overrides for distro-specific runtime dependencies.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.35)
+    recommends:
+      - systemd
+    suggests:
+      - moq-token-cli
+  rpm:
+    depends:
+      - glibc >= 2.34
+    recommends:
+      - systemd
+    suggests:
+      - moq-token-cli
+
+deb:
+  fields:
+    Bugs: https://github.com/moq-dev/moq/issues
+  triggers:
+    interest:
+      - update-systemd-units
+
+rpm:
+  group: Applications/Internet
+  summary: Media over QUIC relay server

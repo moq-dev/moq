@@ -2,7 +2,7 @@
 ///
 /// Most variants are simple delegations to underlying layers — [`moq_net::Error`] for
 /// transport / pub-sub failures, [`hang::Error`] for catalog/codec parsing, and
-/// [`CmafError`](crate::container::CmafError) for CMAF wire-format problems.
+/// [`fmp4::Error`](crate::container::fmp4::Error) for CMAF wire-format problems.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -16,7 +16,7 @@ pub enum Error {
 
 	/// Error parsing or building CMAF moof+mdat fragments.
 	#[error("cmaf: {0}")]
-	Cmaf(#[from] crate::container::CmafError),
+	Cmaf(#[from] crate::container::fmp4::Error),
 
 	/// Error parsing or building LOC frames.
 	#[error("loc: {0}")]

@@ -1,50 +1,50 @@
-//! Wire-level container abstraction shared by the import/export pipelines.
+//! Container formats.
 //!
-//! A moq-lite group carries a sequence of frames. *How* a media frame is encoded inside
-//! each moq-lite frame depends on the container format:
+//! A container decides how a media frame is laid out inside a moq-lite
+//! frame: framing overhead, whether multiple samples can share one moq
+//! frame, and whether the same encoding doubles as a file format on disk.
 //!
-//! - **Hang Legacy**: a VarInt timestamp prefix followed by the raw codec bitstream.
-//!   One media frame per moq-lite frame.
-//! - **CMAF**: ISO-BMFF moof+mdat atoms. A single moq-lite frame can carry multiple
-//!   samples (one fragment).
-//! - **LOC**: Low Overhead Container (draft-ietf-moq-loc). A small property block
-//!   (timestamp, optional per-frame timescale) followed by the raw codec bitstream.
-//!   One media frame per moq-lite frame.
-//!
-//! [`Container`] abstracts these into a shared write/read interface. The [`Hang`] enum
-//! is a runtime-dispatched [`Container`] that picks the format based on a hang catalog,
-//! so callers don't need to thread a generic parameter through user code.
+//! Each submodule implements one format. The wire-level ones implement
+//! the [`Container`] trait, so [`Producer<C>`] and [`Consumer<C>`] can
+//! be generic over the choice. The catalog announces a container per
+//! track; [`catalog::hang::Container`](crate::catalog::hang::Container)
+//! dispatches the right implementation at runtime.
 
 use std::task::Poll;
 
 use bytes::Bytes;
 
-pub(crate) mod cmaf;
 mod consumer;
-mod hang;
-mod loc;
+pub(crate) mod jitter;
 mod producer;
+mod source;
 
-pub use cmaf::{Cmaf, Error as CmafError};
+pub mod fmp4;
+pub mod hls;
+pub mod legacy;
+pub mod loc;
+pub mod mkv;
+
 pub use consumer::Consumer;
-pub use hang::Hang;
-pub use loc::Loc;
 pub use producer::Producer;
+pub(crate) use source::{CatalogSource, ExportSource};
 
-/// Microsecond presentation timestamp, the canonical timebase for media frames in moq-mux.
+/// Microsecond presentation timestamp, the canonical timebase for media
+/// frames in moq-mux.
 pub type Timestamp = moq_net::Timescale<1_000_000>;
 
 /// A decoded media frame: timestamp, payload bytes, keyframe flag.
 ///
-/// `payload` is the raw codec bitstream — what gets decoded by the eventual player.
-/// The exact format depends on the codec (Annex B for H.264 / H.265, OBU for AV1, etc.).
+/// `payload` is the raw codec bitstream that gets handed to the decoder.
+/// The exact shape depends on the codec (Annex B for H.264/H.265, OBU for
+/// AV1, and so on).
 #[derive(Clone, Debug)]
 pub struct Frame {
 	/// Presentation timestamp.
 	///
-	/// Microsecond precision. Frames within a track must be in *decode* order (i.e. the
-	/// order the decoder consumes them); B-frames may have non-monotonic presentation
-	/// timestamps.
+	/// Microsecond precision. Frames within a track must be in *decode*
+	/// order, not display order. B-frames may have non-monotonic
+	/// presentation timestamps.
 	pub timestamp: Timestamp,
 
 	/// Encoded codec payload.
@@ -52,33 +52,31 @@ pub struct Frame {
 
 	/// Whether this frame is a keyframe.
 	///
-	/// In the Legacy wire format, keyframes are inferred from group boundaries (the first
-	/// frame of a group is a keyframe). In CMAF, the trun sample-flags carry the truth.
+	/// Containers that carry the bit on the wire (CMAF reads it from
+	/// trun sample-flags) should set it; containers that don't (Legacy,
+	/// LOC) leave it `false`. The wrapping [`Consumer`] still asserts
+	/// "first frame in a group is a keyframe" as a fallback, so the
+	/// Legacy/LOC case lands correctly without anyone having to know.
 	pub keyframe: bool,
 }
 
-/// Encode/decode media frames over a moq-lite group.
+/// Encode and decode media frames over a moq-lite group.
 ///
-/// Implementors choose how multiple [`Frame`]s map onto moq-lite frames:
-///
-/// - The Hang Legacy implementation writes one media frame per moq-lite frame
-///   (timestamp + payload).
-/// - The CMAF implementation packs N samples into a single moof+mdat moq-lite frame.
-///
-/// Most callers should use [`Hang`] (catalog-driven) rather than picking a concrete
-/// container directly.
+/// Implementors decide how many [`Frame`]s map onto one moq-lite frame:
+/// Legacy and LOC write one media frame per moq-lite frame; CMAF can
+/// pack many samples into a single moof+mdat fragment.
 pub trait Container {
-	/// Container-specific error. All variants must be convertible from [`moq_net::Error`]
+	/// Container-specific error. Must be convertible from [`moq_net::Error`]
 	/// so the IO layer's errors propagate cleanly.
 	type Error: std::error::Error + Send + Sync + Unpin + From<moq_net::Error>;
 
 	/// Encode one or more frames into a single moq-lite frame appended to `group`.
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error>;
 
-	/// Poll the next moq-lite frame from `group` and decode it into media frames.
-	///
-	/// Returns `Ok(None)` when the group has ended. A single call may decode multiple
-	/// media frames (e.g. all samples in a CMAF fragment).
+	/// Poll the next moq-lite frame from `group` and decode it into media
+	/// frames. Returns `Ok(None)` when the group has ended. A single call
+	/// may produce multiple media frames (e.g. all samples in a CMAF
+	/// fragment).
 	fn poll_read(
 		&self,
 		group: &mut moq_net::GroupConsumer,

@@ -23,7 +23,7 @@ pub struct MoqCatalogConsumer {
 }
 
 struct Catalog {
-	inner: moq_mux::catalog::Consumer,
+	inner: moq_mux::catalog::hang::Consumer,
 }
 
 impl Catalog {
@@ -42,7 +42,7 @@ pub struct MoqMediaConsumer {
 }
 
 struct Media {
-	inner: moq_mux::container::Consumer<moq_mux::container::Hang>,
+	inner: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 }
 
 impl Media {
@@ -78,7 +78,7 @@ impl MoqBroadcastConsumer {
 	pub fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let track = self.inner.subscribe_track(&hang::catalog::Catalog::default_track())?;
-		let consumer = moq_mux::catalog::Consumer::from(track);
+		let consumer = moq_mux::catalog::hang::Consumer::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
 			task: Task::new(Catalog { inner: consumer }),
 		}))
@@ -107,7 +107,7 @@ impl MoqBroadcastConsumer {
 		// Parse the container before subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
 		let container: hang::catalog::Container = container.into();
-		let media: moq_mux::container::Hang = (&container)
+		let media: moq_mux::catalog::hang::Container = (&container)
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
 		let track = self.inner.subscribe_track(&moq_net::Track { name, priority: 0 })?;

@@ -1,0 +1,40 @@
+# nfpm config for the moq-token-cli package.
+# Produces both .deb and .rpm from one definition.
+# Driven by env vars set in CI: VERSION, ARCH, BINARY_PATH.
+
+name: moq-token-cli
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: MoQ Project <admin@moq.dev>
+description: |
+  JWT token generation and validation utility for moq-relay.
+  Mints and signs the tokens that moq-relay uses to authenticate publishers
+  and subscribers against its [auth] configuration.
+vendor: MoQ Project
+homepage: https://moq.dev
+license: MIT OR Apache-2.0
+
+contents:
+  - src: ${BINARY_PATH}
+    dst: /usr/bin/moq-token-cli
+    file_info:
+      mode: 0755
+
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.35)
+  rpm:
+    depends:
+      - glibc >= 2.34
+
+deb:
+  fields:
+    Bugs: https://github.com/moq-dev/moq/issues
+
+rpm:
+  group: Applications/Internet
+  summary: JWT token utility for moq-relay

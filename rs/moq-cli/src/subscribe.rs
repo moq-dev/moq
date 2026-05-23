@@ -93,7 +93,7 @@ impl Subscribe {
 		// Fmp4 subscribes to the catalog internally, builds the merged init segment
 		// from the first catalog snapshot, then yields moof+mdat fragments in
 		// timestamp order across tracks.
-		let mut fmp4 = moq_mux::export::Fmp4::new(self.broadcast, self.catalog)?
+		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.broadcast, self.catalog)?
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -111,7 +111,7 @@ impl Subscribe {
 		// Mkv writes EBML + an unknown-size Segment header, then per-fragment
 		// Cluster elements. Avc3/Hev1 sources are transcoded to avc1/hvc1
 		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
-		let mut mkv = moq_mux::export::Mkv::new(self.broadcast, self.catalog)?
+		let mut mkv = moq_mux::container::mkv::Export::new(self.broadcast, self.catalog)?
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 

@@ -1,0 +1,40 @@
+[Unit]
+Description=Media over QUIC relay server
+Documentation=https://moq.dev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/moq-relay --file /etc/moq-relay/relay.toml
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+
+# Sandboxing. DynamicUser allocates a transient UID, StateDirectory creates
+# /var/lib/moq-relay owned by that UID so cert/key/jwk files placed there are
+# readable. Caps allow binding to privileged ports (443) and tuning UDP
+# buffers without running as root.
+DynamicUser=yes
+StateDirectory=moq-relay
+StateDirectoryMode=0750
+RuntimeDirectory=moq-relay
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateDevices=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target

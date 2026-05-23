@@ -89,7 +89,7 @@ struct RuntimeState {
 	#[allow(dead_code)]
 	session: moq_net::Session,
 	broadcast: moq_net::BroadcastProducer,
-	catalog: moq_mux::catalog::Producer,
+	catalog: moq_mux::catalog::hang::Producer,
 	pads: HashMap<String, PadState>,
 }
 
@@ -391,7 +391,7 @@ async fn run_session(
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let broadcast_consumer = broadcast.consume();
 
-	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+	let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
 
 	anyhow::ensure!(
 		origin.publish_broadcast(&settings.broadcast, broadcast_consumer),
@@ -469,11 +469,15 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 		"audio/x-opus" => {
 			let channels: i32 = structure.get("channels").unwrap_or(2);
 			let rate: i32 = structure.get("rate").unwrap_or(48_000);
-			let config = moq_mux::import::OpusConfig {
-				sample_rate: rate as u32,
-				channel_count: channels as u32,
+			let channel_count =
+				u32::try_from(channels).with_context(|| format!("Opus caps has negative channel count {channels}"))?;
+			let sample_rate =
+				u32::try_from(rate).with_context(|| format!("Opus caps has negative sample rate {rate}"))?;
+			let config = moq_mux::codec::opus::Config {
+				sample_rate,
+				channel_count,
 			};
-			moq_mux::import::Opus::new(runtime.broadcast.clone(), runtime.catalog.clone(), config)?.into()
+			moq_mux::codec::opus::Import::new(runtime.broadcast.clone(), runtime.catalog.clone(), config)?.into()
 		}
 		other => anyhow::bail!("unsupported caps: {}", other),
 	};

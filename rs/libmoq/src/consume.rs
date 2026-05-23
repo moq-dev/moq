@@ -74,7 +74,7 @@ impl Consume {
 	async fn run_catalog(
 		task_id: Id,
 		broadcast: moq_net::BroadcastConsumer,
-		mut catalog: moq_mux::catalog::Consumer,
+		mut catalog: moq_mux::catalog::hang::Consumer,
 	) -> Result<(), Error> {
 		while let Some(catalog) = catalog.next().await? {
 			// Unfortunately we need to store the codec information on the heap.
@@ -220,7 +220,8 @@ impl Consume {
 			name: rendition.clone(),
 			priority: 1, // TODO: Remove priority
 		})?;
-		let track = moq_mux::container::Consumer::new(track, moq_mux::container::Hang::Legacy).with_latency(latency);
+		let track =
+			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -264,7 +265,8 @@ impl Consume {
 			name: rendition.clone(),
 			priority: 2, // TODO: Remove priority
 		})?;
-		let track = moq_mux::container::Consumer::new(track, moq_mux::container::Hang::Legacy).with_latency(latency);
+		let track =
+			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -290,7 +292,7 @@ impl Consume {
 
 	async fn run_track(
 		task_id: Id,
-		mut track: moq_mux::container::Consumer<moq_mux::container::Hang>,
+		mut track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 	) -> Result<(), Error> {
 		while let Some(frame) = track.read().await? {
 			let mut state = State::lock();

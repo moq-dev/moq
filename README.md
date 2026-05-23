@@ -23,6 +23,16 @@ The core networking is delegated to a QUIC library but the rest is in applicatio
 
 > **Note:** This project implements [moq-lite](https://doc.moq.dev/concept/layer/moq-lite), a forwards-compatible subset of the IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft. moq-lite works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn/)). The focus is narrower, prioritizing simplicity and deployability.
 
+## Installing on Linux
+
+Debian/Ubuntu users can install pre-built packages from `apt.moq.dev`,
+Fedora/RHEL/Rocky/AlmaLinux/openSUSE users from `rpm.moq.dev`. The
+relay ships with a hardened systemd unit and a default config; the
+GStreamer plugin lands in the right multiarch plugin directory and is
+visible to `gst-inspect-1.0` after one install. See
+[Linux Installation](https://doc.moq.dev/setup/linux) for the apt/dnf
+one-liners and the list of available packages.
+
 ## Demo
 
 This repository is split into multiple binaries and libraries across different languages.

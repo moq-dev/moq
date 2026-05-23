@@ -1,0 +1,40 @@
+# nfpm config for the moq-cli package.
+# Produces both .deb and .rpm from one definition.
+# Driven by env vars set in CI: VERSION, ARCH, BINARY_PATH.
+
+name: moq-cli
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: MoQ Project <admin@moq.dev>
+description: |
+  Media over QUIC command-line client.
+  Publishes and subscribes to MoQ tracks, exposes web tooling for relays,
+  and runs ad-hoc client/server operations against any moq-net endpoint.
+vendor: MoQ Project
+homepage: https://moq.dev
+license: MIT OR Apache-2.0
+
+contents:
+  - src: ${BINARY_PATH}
+    dst: /usr/bin/moq
+    file_info:
+      mode: 0755
+
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.35)
+  rpm:
+    depends:
+      - glibc >= 2.34
+
+deb:
+  fields:
+    Bugs: https://github.com/moq-dev/moq/issues
+
+rpm:
+  group: Applications/Internet
+  summary: Media over QUIC command-line client

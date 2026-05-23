@@ -9,6 +9,8 @@ on:
       - ".github/workflows/moq-relay.yml"
       - ".github/scripts/release.sh"
       - "rs/scripts/package-binary.sh"
+      - "packaging/moq-relay/**"
+      - ".github/actions/setup-packaging/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -20,16 +22,125 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runs-on }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners. Each binary is built on the same arch it ships
+          # for, so the .deb/.rpm linkage matches the distro's glibc on the
+          # oldest LTS we support (Ubuntu 22.04 / AlmaLinux 9).
+          - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-22.04
+            deb-arch: amd64
+            rpm-arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-22.04-arm
+            deb-arch: arm64
+            rpm-arch: aarch64
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Parse version
+        id: parse
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            CARGO_VERSION=$(grep '^version' rs/moq-relay/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
+          else
+            .github/scripts/release.sh parse-version moq-relay
+          fi
+
+      - name: Set up packaging tools
+        uses: ./.github/actions/setup-packaging
+
+      - name: Build (release)
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} -p moq-relay
+
+      - name: Package bare binary
+        shell: bash
+        run: |
+          version="${{ steps.parse.outputs.version }}"
+          target="${{ matrix.target }}"
+          name="moq-relay-v${version}-${target}"
+          mkdir -p dist
+          cp "target/${target}/release/moq-relay" "dist/${name}"
+
+      - name: Package tarball (Homebrew)
+        shell: bash
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="moq-relay-${VERSION}-${TARGET}"
+          mkdir -p "dist/${name}/bin"
+          cp "target/${TARGET}/release/moq-relay" "dist/${name}/bin/moq-relay"
+          cp LICENSE-MIT LICENSE-APACHE "dist/${name}/"
+          if [[ -f rs/moq-relay/README.md ]]; then
+            cp rs/moq-relay/README.md "dist/${name}/"
+          fi
+          (cd dist && tar -czvf "${name}.tar.gz" "${name}" && rm -rf "${name}")
+
+      - name: Package .deb (Ubuntu 22.04 toolchain, glibc 2.35)
+        shell: bash
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+          ARCH: ${{ matrix.deb-arch }}
+          BINARY_PATH: target/${{ matrix.target }}/release/moq-relay
+        run: |
+          nfpm pkg --packager deb --config packaging/moq-relay/nfpm.yaml --target dist/
+
+      - name: Package .rpm (AlmaLinux 9 toolchain, glibc 2.34)
+        shell: bash
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+          RPM_ARCH: ${{ matrix.rpm-arch }}
+        run: |
+          # Rebuild inside AlmaLinux 9 so the binary links against its
+          # older glibc and is forward-compatible with RHEL/Rocky/Alma 9+.
+          docker run --rm \
+            -v "$PWD":/work -w /work \
+            almalinux:9 bash -c '
+              set -euo pipefail
+              dnf install -y --quiet gcc make cmake perl pkgconf-pkg-config curl
+              curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable --profile minimal
+              source $HOME/.cargo/env
+              cargo build --release --target ${{ matrix.target }} -p moq-relay
+              cp target/${{ matrix.target }}/release/moq-relay target/moq-relay.rpm-build
+            '
+          ARCH="$RPM_ARCH" \
+          BINARY_PATH=target/moq-relay.rpm-build \
+            nfpm pkg --packager rpm --config packaging/moq-relay/nfpm.yaml --target dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: moq-relay-${{ matrix.target }}
+          path: dist/*
+
+  build-tarball-macos:
+    name: Build macOS tarball (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
             os: macos-15-intel
           - target: aarch64-apple-darwin
@@ -60,7 +171,7 @@ jobs:
             .github/scripts/release.sh parse-version moq-relay
           fi
 
-      - name: Build and package
+      - name: Build and package tarball
         shell: bash
         run: |
           ./rs/scripts/package-binary.sh \
@@ -77,11 +188,12 @@ jobs:
 
   release:
     name: Release
-    needs: build
+    needs: [build, build-tarball-macos]
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
     permissions:
       contents: write
+      actions: write
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -110,3 +222,9 @@ jobs:
           RELEASE_TITLE: "moq-relay v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: .github/scripts/release.sh create artifacts
+
+      - name: Trigger apt/rpm repo publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: .github/scripts/trigger-repo-publish.sh
