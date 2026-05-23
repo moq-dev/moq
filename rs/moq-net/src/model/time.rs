@@ -379,10 +379,11 @@ impl Ord for Timestamp {
 	///   fmp4/mkv exporters, which pick the next track to emit across mixed-scale
 	///   per-track frames.
 	///
-	/// Note: derived `PartialEq`/`Eq` compare fields, so two cross-scale timestamps
-	/// that order as `Equal` here (e.g. `from_secs(1)` and `from_millis(1000)`) still
-	/// compare `!=`. This inconsistency only matters for code that mixes scales in a
-	/// `BTreeMap`/`BTreeSet` keyed on `Timestamp`, which the codebase doesn't do.
+	/// When the cross-scale comparison would otherwise be `Equal` (e.g. `from_secs(1)`
+	/// vs `from_millis(1000)`), we break ties by `(scale, value)` so the result agrees
+	/// with derived `PartialEq`/`Eq`/`Hash` (which are field-wise). Without that tie
+	/// break, `cmp` could return `Equal` for fields that aren't equal, violating
+	/// Rust's `Ord`/`Eq` contract for ordered collection keys.
 	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
 		if self.scale.0 == other.scale.0 || self.scale.0 == 0 || other.scale.0 == 0 {
 			return self.value.cmp(&other.value);
@@ -390,6 +391,8 @@ impl Ord for Timestamp {
 		let lhs = self.value.into_inner() as u128 * other.scale.0 as u128;
 		let rhs = other.value.into_inner() as u128 * self.scale.0 as u128;
 		lhs.cmp(&rhs)
+			.then_with(|| self.scale.0.cmp(&other.scale.0))
+			.then_with(|| self.value.cmp(&other.value))
 	}
 }
 
@@ -672,9 +675,15 @@ mod tests {
 		assert!(one_sec > two_ms);
 		assert!(two_ms < one_sec);
 
-		// Equivalent values across scales compare as Equal under cmp.
+		// Temporally-equivalent timestamps with different (value, scale) representations
+		// must NOT cmp as Equal: derived Eq compares fields, so cmp returning Equal
+		// here would violate the Ord/Eq contract for ordered collection keys. The
+		// tie-breaker resolves them by scale to keep ordering deterministic.
 		let one_sec_b = Timestamp::from_millis(1000).unwrap();
-		assert_eq!(one_sec.cmp(&one_sec_b), std::cmp::Ordering::Equal);
+		assert_ne!(one_sec.cmp(&one_sec_b), std::cmp::Ordering::Equal);
+		assert_ne!(one_sec, one_sec_b);
+		// And the tie-break agrees with PartialEq: cmp(a, b) == Equal iff a == b.
+		assert_eq!(one_sec.cmp(&one_sec), std::cmp::Ordering::Equal);
 
 		// Sorting a mixed-scale slice puts entries in correct temporal order.
 		let mut items = [
