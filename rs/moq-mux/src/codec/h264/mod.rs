@@ -1,8 +1,10 @@
-//! H.264.
+//! H.264 / AVC.
 //!
-//! SPS / avcC parsing, an [`Avc1`] transmuxer that rewrites Annex-B into
-//! length-prefixed NALU + avcC, and an [`Import`] that auto-detects either
-//! wire shape from the leading bytes.
+//! Parses SPS NAL units and AVCDecoderConfigurationRecord blobs into
+//! catalog-ready fields. The [`Avc1`] transmuxer rewrites Annex-B input
+//! (inline SPS/PPS) as length-prefixed NALU + out-of-band avcC, which is
+//! what every CMAF and MKV consumer expects. [`Import`] is the importer;
+//! it auto-detects either wire shape from the leading bytes.
 
 mod import;
 

@@ -447,7 +447,7 @@ async fn run_session(
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_ref = moq_net::Track::new(&track_name);
 		let track_consumer = broadcast.subscribe_track(&track_ref)?;
-		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
+		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
 			.with_latency(Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
 	}
@@ -461,7 +461,7 @@ async fn run_session(
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_ref = moq_net::Track::new(&track_name);
 		let track_consumer = broadcast.subscribe_track(&track_ref)?;
-		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
+		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
 			.with_latency(Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
 	}
@@ -494,7 +494,7 @@ async fn request_pad(
 }
 
 fn spawn_track_pump(
-	track: moq_mux::container::Consumer<moq_mux::container::Hang>,
+	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 	descriptor: TrackDescriptor,
 	pad_endpoint: PadEndpoint,
 	shutdown: watch::Receiver<bool>,
@@ -503,7 +503,7 @@ fn spawn_track_pump(
 }
 
 async fn run_track_pump(
-	mut track: moq_mux::container::Consumer<moq_mux::container::Hang>,
+	mut track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 	descriptor: TrackDescriptor,
 	pad_endpoint: PadEndpoint,
 	mut shutdown: watch::Receiver<bool>,

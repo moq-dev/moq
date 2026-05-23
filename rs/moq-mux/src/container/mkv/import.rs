@@ -61,7 +61,7 @@ enum TrackKind {
 
 struct MkvTrack {
 	kind: TrackKind,
-	track: crate::container::Producer<crate::container::Hang>,
+	track: crate::container::Producer<crate::catalog::hang::Container>,
 	group: Option<moq_net::GroupProducer>,
 	/// Highest block timestamp (Matroska ticks: cluster_ts + block_relative) already emitted.
 	/// Used to dedup re-parsed blocks across decode() calls.
@@ -304,7 +304,7 @@ impl Import {
 			track_number,
 			MkvTrack {
 				kind,
-				track: crate::container::Producer::new(net_track, crate::container::Hang::Legacy),
+				track: crate::container::Producer::new(net_track, crate::catalog::hang::Container::Legacy),
 				group: None,
 				last_emitted_ticks: None,
 			},

@@ -2,8 +2,9 @@ use super::{Container, Frame};
 
 /// A producer for media tracks that manages group boundaries.
 ///
-/// Generic over `C: Container` to support different container encodings (Hang Legacy,
-/// CMAF, …).
+/// Generic over `C: Container` to support different container encodings
+/// (Legacy, CMAF, LOC). Use [`catalog::hang::Container`](crate::catalog::hang::Container)
+/// to dispatch on the catalog at runtime.
 ///
 /// ## Group Management
 ///
@@ -151,7 +152,8 @@ mod tests {
 	use bytes::Bytes;
 
 	use super::*;
-	use crate::container::{Hang, Timestamp};
+	use crate::catalog::hang::Container;
+	use crate::container::Timestamp;
 
 	fn frame(timestamp_us: u64, keyframe: bool) -> Frame {
 		Frame {
@@ -179,7 +181,7 @@ mod tests {
 	async fn keyframe_closes_group_immediately() {
 		let track = moq_net::Track::new("test").produce();
 		let consumer = track.consume();
-		let mut producer = Producer::new(track, Hang::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap(); // first frame must be a keyframe
 		producer.write(frame(10_000, false)).unwrap();
@@ -195,7 +197,7 @@ mod tests {
 	async fn finish_group_closes_immediately() {
 		let track = moq_net::Track::new("test").produce();
 		let consumer = track.consume();
-		let mut producer = Producer::new(track, Hang::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(10_000, false)).unwrap();
@@ -210,7 +212,7 @@ mod tests {
 	#[test]
 	fn first_frame_must_be_keyframe() {
 		let track = moq_net::Track::new("test").produce();
-		let mut producer = Producer::new(track, Hang::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy);
 
 		let err = producer.write(frame(0, false)).unwrap_err();
 		assert!(matches!(err, crate::Error::Moq(moq_net::Error::ProtocolViolation)));

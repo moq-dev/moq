@@ -1,6 +1,8 @@
 //! AV1.
 //!
-//! [`Import`] publishes raw AV1 bitstreams.
+//! Maps the AV1CodecConfigurationRecord (av1C) flag bits into the
+//! catalog's AV1 codec struct, and provides an [`Import`] that publishes
+//! raw AV1 bitstreams (OBU-framed) to a moq broadcast.
 
 mod import;
 

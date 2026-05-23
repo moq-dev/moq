@@ -1,8 +1,9 @@
 //! Low Overhead Container.
 //!
-//! [draft-ietf-moq-loc](https://www.ietf.org/archive/id/draft-ietf-moq-loc-00.html).
-//! Each frame is a small property block (timestamp, optional timescale)
-//! followed by the codec bitstream. Default timescale is microseconds.
+//! The IETF draft replacement for hang's Legacy format. Each moq frame
+//! holds a small property block (timestamp, optional per-frame
+//! timescale) followed by the codec bitstream. Defaults to microsecond
+//! timestamps. See [draft-ietf-moq-loc](https://www.ietf.org/archive/id/draft-ietf-moq-loc-00.html).
 
 use std::task::Poll;
 

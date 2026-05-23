@@ -1,7 +1,7 @@
 //! AAC.
 //!
-//! [`Config`] handles AudioSpecificConfig parse/encode; [`Import`]
-//! publishes raw AAC frames.
+//! ISO 14496-3 AudioSpecificConfig parse and encode lives in [`Config`].
+//! [`Import`] publishes raw AAC frames (not ADTS) to a moq broadcast.
 
 mod import;
 

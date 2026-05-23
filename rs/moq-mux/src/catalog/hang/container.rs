@@ -1,26 +1,25 @@
 use std::task::Poll;
 
-use crate::container::{Container, Frame, fmp4, legacy::Legacy, loc};
+use crate::container::{Container as ContainerTrait, Frame, fmp4, legacy, loc};
 
-/// Catalog-driven [`Container`] for the hang protocol.
+/// Runtime-dispatched wire format for a track described by a hang catalog.
 ///
-/// Runtime-dispatched union over the wire formats — Legacy, CMAF, LOC —
-/// so callers can carry a single concrete type through their pipeline
-/// (e.g. [`Consumer<Hang>`](crate::container::Consumer)) instead of
-/// threading a generic parameter through user code.
-///
-/// Build from a catalog entry with `Hang::try_from(&container)`.
-pub enum Hang {
+/// Built from a [`hang::catalog::Container`] entry. Lets callers carry one
+/// concrete type through their pipeline — [`Consumer<Container>`](crate::container::Consumer),
+/// [`Producer<Container>`](crate::container::Producer) — instead of
+/// threading a generic parameter everywhere.
+pub enum Container {
 	/// VarInt timestamp + raw codec bitstream. The original hang wire format.
 	Legacy,
-	/// ISO-BMFF moof+mdat fragments. Holds a parsed [`fmp4::Fragment`] so
-	/// per-frame writes/reads know the timescale and track id.
+	/// ISO-BMFF moof+mdat fragments. The wrapped [`fmp4::Fragment`] holds
+	/// the track's `trak` box so per-frame writes and reads have the
+	/// timescale and track id available.
 	Cmaf(fmp4::Fragment),
-	/// Low Overhead Container. Each moq frame holds one LOC frame.
+	/// Low Overhead Container. One LOC frame per moq frame.
 	Loc(loc::Frame),
 }
 
-impl TryFrom<&hang::catalog::Container> for Hang {
+impl TryFrom<&hang::catalog::Container> for Container {
 	type Error = crate::Error;
 
 	fn try_from(container: &hang::catalog::Container) -> Result<Self, Self::Error> {
@@ -32,12 +31,12 @@ impl TryFrom<&hang::catalog::Container> for Hang {
 	}
 }
 
-impl Container for Hang {
+impl ContainerTrait for Container {
 	type Error = crate::Error;
 
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		match self {
-			Self::Legacy => Legacy.write(group, frames),
+			Self::Legacy => legacy::Frame.write(group, frames),
 			Self::Cmaf(cmaf) => cmaf.write(group, frames).map_err(Into::into),
 			Self::Loc(loc) => loc.write(group, frames),
 		}
@@ -49,7 +48,7 @@ impl Container for Hang {
 		waiter: &conducer::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		match self {
-			Self::Legacy => Legacy.poll_read(group, waiter),
+			Self::Legacy => legacy::Frame.poll_read(group, waiter),
 			Self::Cmaf(cmaf) => cmaf.poll_read(group, waiter).map(|r| r.map_err(Into::into)),
 			Self::Loc(loc) => loc.poll_read(group, waiter),
 		}

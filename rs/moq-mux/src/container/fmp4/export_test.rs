@@ -60,7 +60,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	}
 	let keyframe_payload = keyframe_payload.freeze();
 
-	let mut track_producer = crate::container::Producer::new(track, crate::container::Hang::Legacy);
+	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
 	track_producer
 		.write(crate::container::Frame {
 			timestamp: Timestamp::from_micros(0).unwrap(),

@@ -1,8 +1,12 @@
-//! Format dispatchers.
+//! Format dispatchers for callers who only have a format string.
 //!
-//! [`Framed`] and [`Stream`] pick a concrete importer from a user-supplied
-//! [`FramedFormat`] / [`StreamFormat`]. Concrete importers live with their
-//! format under [`crate::container`] or [`crate::codec`].
+//! [`Framed`] is the entry point when the caller already has whole
+//! frames (the typical case for files and reassembled network input).
+//! [`Stream`] is for raw byte streams where frame boundaries have to
+//! be inferred (piped Annex-B H.264, an fMP4 reader, …). Both pick a
+//! concrete importer from a [`FramedFormat`] / [`StreamFormat`] string.
+//! The concrete importers themselves live with their format under
+//! [`crate::container`] or [`crate::codec`].
 
 use std::{fmt, str::FromStr};
 

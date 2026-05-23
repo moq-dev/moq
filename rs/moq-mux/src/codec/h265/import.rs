@@ -15,7 +15,7 @@ pub struct Import {
 	catalog: crate::catalog::hang::Producer,
 
 	// The track being produced.
-	track: Option<crate::container::Producer<crate::container::Hang>>,
+	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
 
 	// Whether the track has been initialized.
 	// If it changes, then we'll reinitialize with a new track.
@@ -97,7 +97,10 @@ impl Import {
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
+		self.track = Some(crate::container::Producer::new(
+			track,
+			crate::catalog::hang::Container::Legacy,
+		));
 
 		Ok(())
 	}

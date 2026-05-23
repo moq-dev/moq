@@ -20,9 +20,10 @@ use bytes::Bytes;
 use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
 
 use crate::catalog::CatalogFormat;
+use crate::catalog::hang::Container as HangContainer;
 use crate::codec::h264::Avc1;
 use crate::codec::h265::Hvc1;
-use crate::container::{Consumer, Frame, Hang};
+use crate::container::{Consumer, Frame};
 
 /// Source for the catalog stream backing an exporter.
 ///
@@ -83,7 +84,7 @@ impl VideoTransform {
 /// length-prefixed for H.264/H.265) and exposes the resolved codec config
 /// record alongside the frame stream.
 pub(crate) struct ExportSource {
-	consumer: Consumer<Hang>,
+	consumer: Consumer<HangContainer>,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available — from the catalog
@@ -99,7 +100,7 @@ impl ExportSource {
 		config: &VideoConfig,
 		latency: Duration,
 	) -> Result<Self, crate::Error> {
-		let media: Hang = (&config.container).try_into()?;
+		let media: HangContainer = (&config.container).try_into()?;
 		let track = broadcast.subscribe_track(&moq_net::Track::new(name.to_string()))?;
 		let consumer = Consumer::new(track, media).with_latency(latency);
 
@@ -121,7 +122,7 @@ impl ExportSource {
 		config: &AudioConfig,
 		latency: Duration,
 	) -> Result<Self, crate::Error> {
-		let media: Hang = (&config.container).try_into()?;
+		let media: HangContainer = (&config.container).try_into()?;
 		let track = broadcast.subscribe_track(&moq_net::Track::new(name.to_string()))?;
 		let consumer = Consumer::new(track, media).with_latency(latency);
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();

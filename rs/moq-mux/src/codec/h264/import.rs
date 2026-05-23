@@ -32,7 +32,7 @@ pub enum Mode {
 pub struct Import {
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::hang::Producer,
-	track: Option<crate::container::Producer<crate::container::Hang>>,
+	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
 	config: Option<hang::catalog::VideoConfig>,
 	state: State,
 	zero: Option<tokio::time::Instant>,
@@ -87,7 +87,10 @@ impl Import {
 			}
 			Mode::Avc3 => {
 				let track = self.broadcast.unique_track(".avc3")?;
-				self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
+				self.track = Some(crate::container::Producer::new(
+					track,
+					crate::catalog::hang::Container::Legacy,
+				));
 				self.state = State::Avc3 {
 					current: Avc3Frame::default(),
 					sps: None,
@@ -174,7 +177,10 @@ impl Import {
 			};
 			if self.track.is_none() {
 				let track = self.broadcast.unique_track(".avc3")?;
-				self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
+				self.track = Some(crate::container::Producer::new(
+					track,
+					crate::catalog::hang::Container::Legacy,
+				));
 			}
 		}
 
@@ -451,7 +457,10 @@ impl Import {
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
+		self.track = Some(crate::container::Producer::new(
+			track,
+			crate::catalog::hang::Container::Legacy,
+		));
 		Ok(())
 	}
 

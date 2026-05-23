@@ -10,7 +10,7 @@ use super::Config;
 /// a group boundary. The codec's packet loss concealment handles drops.
 pub struct Import {
 	catalog: crate::catalog::hang::Producer,
-	track: crate::container::Producer<crate::container::Hang>,
+	track: crate::container::Producer<crate::catalog::hang::Container>,
 	zero: Option<tokio::time::Instant>,
 }
 
@@ -40,7 +40,7 @@ impl Import {
 
 		Ok(Self {
 			catalog,
-			track: crate::container::Producer::new(track, crate::container::Hang::Legacy),
+			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			zero: None,
 		})
 	}

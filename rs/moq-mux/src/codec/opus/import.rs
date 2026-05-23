@@ -10,7 +10,7 @@ use super::Config;
 /// Ogg framing is not supported, feed raw Opus packets.
 pub struct Import {
 	catalog: crate::catalog::hang::Producer,
-	track: crate::container::Producer<crate::container::Hang>,
+	track: crate::container::Producer<crate::catalog::hang::Container>,
 	zero: Option<tokio::time::Instant>,
 }
 
@@ -37,7 +37,7 @@ impl Import {
 
 		Ok(Self {
 			catalog,
-			track: crate::container::Producer::new(track, crate::container::Hang::Legacy),
+			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			zero: None,
 		})
 	}

@@ -1,7 +1,9 @@
 //! H.265 / HEVC.
 //!
-//! SPS / hvcC parsing, an [`Hvc1`] transmuxer that rewrites Annex-B into
-//! length-prefixed NALU + hvcC, and an [`Import`] for Annex-B input.
+//! The H.265 analogue of [`crate::codec::h264`]. Parses SPS NAL units
+//! and HEVCDecoderConfigurationRecord blobs. The [`Hvc1`] transmuxer
+//! rewrites Annex-B input (inline VPS/SPS/PPS) as length-prefixed NALU
+//! + out-of-band hvcC. [`Import`] is the Annex-B importer.
 
 mod import;
 

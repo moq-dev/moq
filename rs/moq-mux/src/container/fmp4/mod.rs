@@ -1,4 +1,10 @@
 //! Fragmented MP4 (fMP4 / CMAF).
+//!
+//! A widely supported file format that's also a viable wire format.
+//! Each moq frame carries one moof+mdat fragment, optionally with
+//! several samples packed inside. [`Fragment`] is the wire-level
+//! container; [`Import`] parses external fMP4 streams and [`Export`]
+//! produces them.
 
 mod export;
 mod import;
@@ -64,8 +70,9 @@ pub enum Error {
 /// Build from a CMAF init segment with [`Fragment::from_init`], or wrap a
 /// pre-extracted [`mp4_atom::Trak`] directly with [`Fragment::new`].
 ///
-/// The [`mp4_atom::Trak`] is heap-allocated so that embedding `Fragment` in
-/// other enums (e.g. [`super::Hang`]) doesn't bloat unrelated variants.
+/// The [`mp4_atom::Trak`] is heap-allocated so that embedding `Fragment`
+/// in other enums (e.g. [`catalog::hang::Container`](crate::catalog::hang::Container))
+/// doesn't bloat unrelated variants.
 pub struct Fragment {
 	trak: Box<mp4_atom::Trak>,
 }

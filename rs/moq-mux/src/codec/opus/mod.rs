@@ -1,7 +1,7 @@
 //! Opus.
 //!
-//! [`Config`] handles RFC 7845 OpusHead parse/encode; [`Import`]
-//! publishes raw Opus frames.
+//! RFC 7845 OpusHead parse and encode lives in [`Config`]. [`Import`]
+//! publishes raw Opus frames (no Ogg framing) to a moq broadcast.
 
 mod import;
 

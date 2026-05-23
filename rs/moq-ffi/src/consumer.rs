@@ -42,7 +42,7 @@ pub struct MoqMediaConsumer {
 }
 
 struct Media {
-	inner: moq_mux::container::Consumer<moq_mux::container::Hang>,
+	inner: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 }
 
 impl Media {
@@ -107,7 +107,7 @@ impl MoqBroadcastConsumer {
 		// Parse the container before subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
 		let container: hang::catalog::Container = container.into();
-		let media: moq_mux::container::Hang = (&container)
+		let media: moq_mux::catalog::hang::Container = (&container)
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
 		let track = self.inner.subscribe_track(&moq_net::Track { name, priority: 0 })?;

@@ -14,7 +14,7 @@ pub struct Import {
 	catalog: crate::catalog::hang::Producer,
 
 	// The track being produced.
-	track: Option<crate::container::Producer<crate::container::Hang>>,
+	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
 
 	// Whether the track has been initialized.
 	config: Option<hang::catalog::VideoConfig>,
@@ -111,7 +111,10 @@ impl Import {
 			.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
+		self.track = Some(crate::container::Producer::new(
+			track,
+			crate::catalog::hang::Container::Legacy,
+		));
 
 		Ok(())
 	}
@@ -155,7 +158,10 @@ impl Import {
 			.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
+		self.track = Some(crate::container::Producer::new(
+			track,
+			crate::catalog::hang::Container::Legacy,
+		));
 
 		Ok(())
 	}
@@ -240,7 +246,10 @@ impl Import {
 			.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
+		self.track = Some(crate::container::Producer::new(
+			track,
+			crate::catalog::hang::Container::Legacy,
+		));
 
 		Ok(())
 	}
