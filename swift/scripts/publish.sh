@@ -57,11 +57,12 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 # --- 1. Clone the mirror ---
-if [[ "$DRY_RUN" == true ]]; then
-    # Dry-run uses an anonymous clone so it works without a token.
-    CLONE_URL="https://github.com/${MIRROR_REPO}"
-else
+# Dry-run uses a token if provided (so private mirrors work) but falls
+# back to anonymous when the env var is unset.
+if [[ -n "${SWIFT_MIRROR_TOKEN:-}" ]]; then
     CLONE_URL="https://x-access-token:${SWIFT_MIRROR_TOKEN}@github.com/${MIRROR_REPO}"
+else
+    CLONE_URL="https://github.com/${MIRROR_REPO}"
 fi
 git clone --depth 1 "$CLONE_URL" "$WORK/mirror" 2>&1 | sed "s|${SWIFT_MIRROR_TOKEN:-__no_token__}|***|g"
 
