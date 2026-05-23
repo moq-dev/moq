@@ -74,7 +74,18 @@ in
     craneLib.buildPackage (
       info
       // {
-        src = craneLib.cleanCargoSource ../.;
+        # libmoq's build.rs reads moq.pc.in at compile time to generate the
+        # pkgconfig file. craneLib.cleanCargoSource's default filter drops
+        # .pc.in files, which makes build.rs silently skip pkgconfig
+        # generation (see the `if let Ok(template)` in rs/libmoq/build.rs)
+        # and the installPhase's `cp target/pkgconfig/moq.pc` then fails.
+        src = final.lib.cleanSourceWith {
+          src = ../.;
+          name = "source";
+          filter =
+            path: type:
+            (final.lib.hasSuffix ".pc.in" path) || (craneLib.filterCargoSources path type);
+        };
         cargoExtraArgs = "-p libmoq";
         doCheck = false;
         nativeBuildInputs = with final; [ pkg-config ];
