@@ -41,23 +41,92 @@ check *args:
 	just rs check {{ args }}
 	bun remark . --quiet --frail
 
-# Comprehensive CI: per-language checks + cross-cutting smoke tests.
+# Print the language scopes touched vs $GITHUB_BASE_REF (CI) or origin/main (local).
+changed:
+	#!/usr/bin/env bash
+	set -euo pipefail
+
+	# Resolve the diff base.
+	if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+		base="origin/${GITHUB_BASE_REF}"
+	else
+		base="origin/main"
+	fi
+
+	if ! git rev-parse --verify --quiet "${base}" >/dev/null; then
+		echo "warning: ${base} not available; emitting all scopes" >&2
+		echo "js rs py kt swift nix md"
+		exit 0
+	fi
+
+	# Diff against the merge-base with the base ref. This captures
+	# committed branch changes + staged + unstaged working tree edits,
+	# so `just ci` locally reflects what you're about to push.
+	if ! merge_base=$(git merge-base "${base}" HEAD 2>/dev/null); then
+		echo "warning: no common ancestor with ${base}; emitting all scopes" >&2
+		echo "js rs py kt swift nix md"
+		exit 0
+	fi
+	files=$(git diff --name-only "${merge_base}")
+
+	# If the diff is empty (e.g. branch is even with base), emit nothing.
+	if [[ -z "$files" ]]; then
+		exit 0
+	fi
+
+	# Changes to orchestration (root justfile, per-language justfiles, or
+	# the CI workflow itself) fan out to every scope.
+	if echo "$files" | grep -qE '^(justfile|[^/]+/justfile|\.github/workflows/check\.yml)$'; then
+		echo "js rs py kt swift nix md"
+		exit 0
+	fi
+
+	scopes=()
+	if echo "$files" | grep -qE '^(js/|package\.json$|bun\.lock$|bun\.lockb$|biome\.jsonc$)'; then
+		scopes+=(js)
+	fi
+	if echo "$files" | grep -qE '^(rs/|Cargo\.toml$|Cargo\.lock$)'; then
+		scopes+=(rs)
+	fi
+	if echo "$files" | grep -qE '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'; then
+		scopes+=(py)
+	fi
+	if echo "$files" | grep -qE '^(kt/|rs/moq-ffi/)'; then
+		scopes+=(kt)
+	fi
+	if echo "$files" | grep -qE '^(swift/|rs/moq-ffi/)'; then
+		scopes+=(swift)
+	fi
+	if echo "$files" | grep -qE '^(flake\.nix$|flake\.lock$)'; then
+		scopes+=(nix)
+	fi
+	if echo "$files" | grep -qE '\.md$'; then
+		scopes+=(md)
+	fi
+
+	echo "${scopes[*]}"
+
+# Run per-language `ci` recipes for whichever scopes `just changed` reports.
 ci:
 	#!/usr/bin/env bash
 	set -euo pipefail
 
-	just check --workspace
+	scopes=$(just changed)
+	if [[ -z "$scopes" ]]; then
+		echo "No language scopes changed; nothing to do."
+		exit 0
+	fi
+	echo "Running CI for scopes: $scopes"
 
-	# Per-language extended checks.
-	just py check
-	just rs ci
-	just kt check
-	just swift check
+	has() { [[ " $scopes " == *" $1 "* ]]; }
 
-	# Cross-cutting: nix, multi-language tests, build.
-	nix flake check
-	just test --all-features
-	just build
+	if has js;    then just js ci;    fi
+	if has rs;    then just rs ci;    fi
+	if has py;    then just py ci;    fi
+	if has kt;    then just kt ci;    fi
+	if has swift; then just swift ci; fi
+	if has nix;   then nix flake check; fi
+	if has md;    then bun remark . --quiet --frail; fi
 
 # Auto-fix linting/formatting issues across all languages.
 fix:

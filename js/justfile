@@ -41,6 +41,12 @@ test:
 build:
 	bun run --filter='*' build
 
+# Full JS CI: lint + tests + build. Dispatched by the root `just ci`.
+ci:
+	just check
+	just test
+	just build
+
 # Pull in new versions and report what's outdated.
 update:
 	bun update

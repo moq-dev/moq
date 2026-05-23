@@ -19,3 +19,8 @@ check:
 # expected --lib-dir layout.
 package *args:
 	bash scripts/package.sh {{ args }}
+
+# Full Kotlin CI: `check` already builds moq-ffi and runs gradle tests.
+# Dispatched by the root `just ci`.
+ci:
+	just check

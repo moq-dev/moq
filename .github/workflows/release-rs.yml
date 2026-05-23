@@ -41,6 +41,12 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
       - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
 
+      # Catch packaging issues across every workspace crate before
+      # release-plz attempts the real publish. PR CI skips this step to
+      # keep PRs fast; this is the gate that catches it on main.
+      - name: Verify packaging
+        run: nix develop --command cargo publish --dry-run --workspace
+
       - name: Release
         run: nix develop --command just rs release
         env:

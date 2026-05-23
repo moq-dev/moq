@@ -34,3 +34,9 @@ test:
 build:
 	uv sync --no-install-workspace
 	cd moq-rs && uv run --no-sync maturin develop --uv
+
+# Full Python CI: lint + tests + build. Dispatched by the root `just ci`.
+ci:
+	just check
+	just test
+	just build

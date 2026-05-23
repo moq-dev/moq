@@ -18,3 +18,8 @@ check:
 # swift/README.md for the expected --lib-dir layout.
 package *args:
 	bash scripts/package.sh {{ args }}
+
+# Full Swift CI: `check` already builds moq-ffi and runs swift test.
+# Dispatched by the root `just ci`.
+ci:
+	just check

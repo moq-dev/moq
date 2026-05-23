@@ -21,12 +21,14 @@ check *args:
 	cargo shear
 	cargo sort --workspace --check
 
-# Extended Rust-only CI: feature edge cases + publish dry-run.
+# Full Rust CI: check + feature edge cases + tests + build. Dispatched
+# by the root `just ci`. `cargo publish --dry-run` is in release-rs.yml.
 ci:
 	just check --workspace
 	cargo check --workspace --no-default-features
 	cargo check --workspace --all-features
-	cargo publish --dry-run
+	just test --all-features
+	just build
 
 # Auto-fix clippy/format/shear/sort, then sweep stale target/.
 fix:
