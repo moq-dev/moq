@@ -24,3 +24,17 @@ package *args:
 # Dispatched by the root `just ci`.
 ci:
 	just check
+
+# Print "kt" if any Kotlin file (or its rs/moq-ffi dependency) changed
+# vs BASE; else print nothing. Source of truth for what counts as a
+# "Kotlin change".
+changed BASE="origin/main":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if ! merge_base=$(git merge-base "{{ BASE }}" HEAD 2>/dev/null); then
+		echo kt
+		exit 0
+	fi
+	if git diff --name-only "$merge_base" | grep -qE '^(kt/|rs/moq-ffi/)'; then
+		echo kt
+	fi

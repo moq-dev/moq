@@ -41,78 +41,60 @@ check *args:
 	just rs check {{ args }}
 	bun remark . --quiet --frail
 
-# Print the language scopes touched vs $GITHUB_BASE_REF (CI) or origin/main (local).
-changed:
+# Print scopes touched vs BASE. Defaults: $GITHUB_BASE_REF (CI) or origin/main.
+changed BASE="":
 	#!/usr/bin/env bash
 	set -euo pipefail
 
-	# Resolve the diff base.
-	if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+	# Resolve the diff base. Explicit arg wins; else $GITHUB_BASE_REF in
+	# CI; else origin/main locally.
+	if [[ -n "{{ BASE }}" ]]; then
+		base="{{ BASE }}"
+	elif [[ -n "${GITHUB_BASE_REF:-}" ]]; then
 		base="origin/${GITHUB_BASE_REF}"
 	else
 		base="origin/main"
 	fi
 
-	if ! git rev-parse --verify --quiet "${base}" >/dev/null; then
-		echo "warning: ${base} not available; emitting all scopes" >&2
+	if ! git rev-parse --verify --quiet "$base" >/dev/null; then
+		echo "warning: $base not available; emitting all scopes" >&2
 		echo "js rs py kt swift nix md"
 		exit 0
 	fi
 
-	# Diff against the merge-base with the base ref. This captures
-	# committed branch changes + staged + unstaged working tree edits,
-	# so `just ci` locally reflects what you're about to push.
-	if ! merge_base=$(git merge-base "${base}" HEAD 2>/dev/null); then
-		echo "warning: no common ancestor with ${base}; emitting all scopes" >&2
+	# A root justfile change can alter the dispatch logic itself, so
+	# fan out to every scope. Per-language justfile changes are already
+	# covered by that language's own scope (e.g. `js/justfile` matches
+	# js's `^js/` pattern), so they don't need a fan-out rule.
+	if ! merge_base=$(git merge-base "$base" HEAD 2>/dev/null); then
+		echo "warning: no common ancestor with $base; emitting all scopes" >&2
 		echo "js rs py kt swift nix md"
 		exit 0
 	fi
-	files=$(git diff --name-only "${merge_base}")
-
-	# If the diff is empty (e.g. branch is even with base), emit nothing.
-	if [[ -z "$files" ]]; then
-		exit 0
-	fi
-
-	# Changes to orchestration (root justfile, per-language justfiles, or
-	# either of the check.yml / check-swift.yml workflows) fan out to
-	# every scope.
-	if echo "$files" | grep -qE '^(justfile|[^/]+/justfile|\.github/workflows/check(-swift)?\.yml)$'; then
+	files=$(git diff --name-only "$merge_base")
+	if echo "$files" | grep -qE '^justfile$'; then
 		echo "js rs py kt swift nix md"
 		exit 0
 	fi
 
-	scopes=()
-	if echo "$files" | grep -qE '^(js/|package\.json$|bun\.lock$|bun\.lockb$|biome\.jsonc$)'; then
-		scopes+=(js)
-	fi
-	if echo "$files" | grep -qE '^(rs/|Cargo\.toml$|Cargo\.lock$)'; then
-		scopes+=(rs)
-	fi
-	if echo "$files" | grep -qE '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'; then
-		scopes+=(py)
-	fi
-	if echo "$files" | grep -qE '^(kt/|rs/moq-ffi/)'; then
-		scopes+=(kt)
-	fi
-	if echo "$files" | grep -qE '^(swift/|rs/moq-ffi/)'; then
-		scopes+=(swift)
-	fi
-	if echo "$files" | grep -qE '^(flake\.nix$|flake\.lock$)'; then
-		scopes+=(nix)
-	fi
-	if echo "$files" | grep -qE '\.md$'; then
-		scopes+=(md)
-	fi
+	# Each per-language module owns its own scope detection. Root only
+	# handles things without a per-language home (nix flake + markdown).
+	{
+		just js    changed "$base"
+		just rs    changed "$base"
+		just py    changed "$base"
+		just kt    changed "$base"
+		just swift changed "$base"
+		echo "$files" | grep -qE '^(flake\.nix$|flake\.lock$)' && echo nix || true
+		echo "$files" | grep -qE '\.md$' && echo md || true
+	} | tr '\n' ' ' | sed 's/ $//'
 
-	echo "${scopes[*]}"
-
-# Run per-language `ci` recipes for whichever scopes `just changed` reports.
-ci:
+# Run per-language `ci` for whichever scopes `just changed BASE` reports.
+ci BASE="":
 	#!/usr/bin/env bash
 	set -euo pipefail
 
-	scopes=$(just changed)
+	scopes=$(just changed "{{ BASE }}")
 	if [[ -z "$scopes" ]]; then
 		echo "No language scopes changed; nothing to do."
 		exit 0

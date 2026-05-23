@@ -23,3 +23,17 @@ package *args:
 # Dispatched by the root `just ci`.
 ci:
 	just check
+
+# Print "swift" if any Swift file (or its rs/moq-ffi dependency) changed
+# vs BASE; else print nothing. Source of truth for what counts as a
+# "Swift change".
+changed BASE="origin/main":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if ! merge_base=$(git merge-base "{{ BASE }}" HEAD 2>/dev/null); then
+		echo swift
+		exit 0
+	fi
+	if git diff --name-only "$merge_base" | grep -qE '^(swift/|rs/moq-ffi/)'; then
+		echo swift
+	fi

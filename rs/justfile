@@ -30,6 +30,19 @@ ci:
 	just test --all-features
 	just build
 
+# Print "rs" if any Rust file changed vs BASE; else print nothing.
+# Source of truth for what counts as a "Rust change".
+changed BASE="origin/main":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if ! merge_base=$(git merge-base "{{ BASE }}" HEAD 2>/dev/null); then
+		echo rs
+		exit 0
+	fi
+	if git diff --name-only "$merge_base" | grep -qE '^(rs/|Cargo\.toml$|Cargo\.lock$)'; then
+		echo rs
+	fi
+
 # Auto-fix clippy/format/shear/sort, then sweep stale target/.
 fix:
 	cargo clippy --fix --allow-staged --allow-dirty --all-targets
