@@ -73,7 +73,9 @@ if [[ "$TARGET" == *"-windows-"* ]]; then
         "$SCRIPT_DIR/cmake/moq-config-version.cmake.in" > "$PACKAGE_DIR/lib/cmake/moq/moq-config-version.cmake"
 else
     echo "Building libmoq for $TARGET via nix..."
-    RESULT_LINK="$(mktemp -d)/result"
+    BUILD_TMP="$(mktemp -d)"
+    trap 'rm -rf "$BUILD_TMP"' EXIT
+    RESULT_LINK="$BUILD_TMP/result"
     nix build "$WORKSPACE_DIR#libmoq" --out-link "$RESULT_LINK"
 
     # The derivation lays out everything under $out/{lib,include}; copy it

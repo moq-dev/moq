@@ -45,7 +45,9 @@ fi
 
 echo "Building moq-gst for $TARGET via nix..."
 
-RESULT_LINK="$(mktemp -d)/result"
+BUILD_TMP="$(mktemp -d)"
+trap 'rm -rf "$BUILD_TMP"' EXIT
+RESULT_LINK="$BUILD_TMP/result"
 nix build "$WORKSPACE_DIR#moq-gst" --out-link "$RESULT_LINK"
 
 # Locate the produced shared library (extension differs by platform).
