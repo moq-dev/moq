@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/moq-dev/moq/compare/moq-msf-v0.1.3...moq-msf-v0.2.0) - 2026-05-23
+
+### Added
+
+- Unified CMSF/Hang pipeline (cleanup of #1429) ([#1444](https://github.com/moq-dev/moq/pull/1444))
+
 ## [0.1.3](https://github.com/moq-dev/moq/compare/moq-msf-v0.1.2...moq-msf-v0.1.3) - 2026-04-19
 
 ### Other

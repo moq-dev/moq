@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/moq-dev/moq/compare/moq-mux-v0.4.2...moq-mux-v0.5.0) - 2026-05-23
+
+### Added
+
+- Unified CMSF/Hang pipeline (cleanup of #1429) ([#1444](https://github.com/moq-dev/moq/pull/1444))
+
+### Other
+
+- Tag audio sources with a kind to drive Opus encoder settings ([#1446](https://github.com/moq-dev/moq/pull/1446))
+- Add Low Overhead Container (LOC) frame format support ([#1388](https://github.com/moq-dev/moq/pull/1388))
+- Add Matroska/WebM import and export support ([#1438](https://github.com/moq-dev/moq/pull/1438))
+- Auto-detect catalog format from broadcast name extension ([#1394](https://github.com/moq-dev/moq/pull/1394))
+- re-emit deprecated CMAF timescale/trackId in catalog ([#1440](https://github.com/moq-dev/moq/pull/1440))
+
 ## [0.4.2](https://github.com/moq-dev/moq/compare/moq-mux-v0.4.1...moq-mux-v0.4.2) - 2026-05-20
 
 ### Other

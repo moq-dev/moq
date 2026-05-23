@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.16](https://github.com/moq-dev/moq/compare/libmoq-v0.2.15...libmoq-v0.2.16) - 2026-05-23
+
+### Other
+
+- Package moq-gst for release via Nix-built tarballs ([#1453](https://github.com/moq-dev/moq/pull/1453))
+
 ## [0.2.15](https://github.com/moq-dev/moq/compare/libmoq-v0.2.14...libmoq-v0.2.15) - 2026-05-20
 
 ### Other

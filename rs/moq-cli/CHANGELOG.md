@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.25](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.24...moq-cli-v0.7.25) - 2026-05-23
+
+### Added
+
+- Unified CMSF/Hang pipeline (cleanup of #1429) ([#1444](https://github.com/moq-dev/moq/pull/1444))
+
+### Other
+
+- Add Matroska/WebM import and export support ([#1438](https://github.com/moq-dev/moq/pull/1438))
+- Auto-detect catalog format from broadcast name extension ([#1394](https://github.com/moq-dev/moq/pull/1394))
+
 ## [0.7.24](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.23...moq-cli-v0.7.24) - 2026-05-20
 
 ### Other

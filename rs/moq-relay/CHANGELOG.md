@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/moq-dev/moq/compare/moq-relay-v0.11.5...moq-relay-v0.12.0) - 2026-05-23
+
+### Other
+
+- Add stats via MoQ broadcasts ([#1442](https://github.com/moq-dev/moq/pull/1442))
+
 ## [0.11.5](https://github.com/moq-dev/moq/compare/moq-relay-v0.11.4...moq-relay-v0.11.5) - 2026-05-21
 
 ### Other
