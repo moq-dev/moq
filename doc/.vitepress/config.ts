@@ -43,8 +43,16 @@ export default defineConfig({
 			{ text: "Setup", link: "/setup/" },
 			{ text: "Concepts", link: "/concept/" },
 			{ text: "Apps", link: "/app/" },
-			{ text: "Rust", link: "/rs/" },
-			{ text: "TypeScript", link: "/js/" },
+			{
+				text: "Libraries",
+				items: [
+					{ text: "Rust", link: "/rs/" },
+					{ text: "TypeScript", link: "/js/" },
+					{ text: "Python", link: "/py/" },
+					{ text: "Swift", link: "/swift/" },
+					{ text: "Kotlin", link: "/kt/" },
+				],
+			},
 		],
 
 		sidebar: {
@@ -144,7 +152,7 @@ export default defineConfig({
 					text: "Crates",
 					link: "/rs/crate",
 					items: [
-						{ text: "moq-lite", link: "/rs/crate/moq-lite" },
+						{ text: "moq-net", link: "/rs/crate/moq-net" },
 						{ text: "moq-native", link: "/rs/crate/moq-native" },
 						{ text: "moq-token", link: "/rs/crate/moq-token" },
 						{ text: "hang", link: "/rs/crate/hang" },
@@ -166,7 +174,7 @@ export default defineConfig({
 					text: "Packages",
 					link: "/js/@moq",
 					items: [
-						{ text: "@moq/lite", link: "/js/@moq/lite" },
+						{ text: "@moq/net", link: "/js/@moq/net" },
 						{
 							text: "@moq/hang",
 							link: "/js/@moq/hang/",
@@ -177,10 +185,33 @@ export default defineConfig({
 						},
 						{ text: "@moq/watch", link: "/js/@moq/watch" },
 						{ text: "@moq/publish", link: "/js/@moq/publish" },
-						{ text: "@moq/ui-core", link: "/js/@moq/ui-core" },
 						{ text: "@moq/token", link: "/js/@moq/token" },
 						{ text: "@moq/signals", link: "/js/@moq/signals" },
 					],
+				},
+			],
+
+			"/py/": [
+				{
+					text: "Python",
+					link: "/py/",
+					items: [{ text: "moq-net", link: "/py/moq-net" }],
+				},
+			],
+
+			"/swift/": [
+				{
+					text: "Swift",
+					link: "/swift/",
+					items: [{ text: "Moq", link: "/swift/moq" }],
+				},
+			],
+
+			"/kt/": [
+				{
+					text: "Kotlin",
+					link: "/kt/",
+					items: [{ text: "dev.moq:moq", link: "/kt/moq" }],
 				},
 			],
 		},

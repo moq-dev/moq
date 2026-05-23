@@ -5,7 +5,7 @@ import { parseArgs } from "util";
 // @ts-ignore - assigning to globalThis
 globalThis.WebTransport = WebTransport;
 
-import * as Moq from "@moq/lite";
+import * as Moq from "@moq/net";
 
 interface Config {
 	url: string;

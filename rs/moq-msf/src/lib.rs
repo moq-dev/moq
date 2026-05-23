@@ -21,7 +21,7 @@ pub const DEFAULT_NAME: &str = "catalog";
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Catalog {
-	/// MSF version — always 1 for this draft.
+	/// MSF version. Always 1 for this draft.
 	pub version: u32,
 
 	/// Array of track descriptions.
@@ -74,6 +74,21 @@ pub struct Track {
 
 	/// Alternate group for quality switching.
 	pub alt_group: Option<u32>,
+
+	/// Maximum SAP starting type for groups (CMSF 3.5.2).
+	/// A value of 1 means every group starts with a closed-GOP IDR.
+	// Explicit rename to lock the wire name independent of rename_all.
+	#[serde(rename = "maxGrpSapStartingType")]
+	pub max_grp_sap_starting_type: Option<u8>,
+
+	/// Maximum SAP starting type for objects (CMSF 3.5.2).
+	/// A value of 1 means every object starts with a closed-GOP IDR.
+	// Explicit rename to lock the wire name independent of rename_all.
+	#[serde(rename = "maxObjSapStartingType")]
+	pub max_obj_sap_starting_type: Option<u8>,
+
+	/// Jitter in milliseconds (non-standard extension, matches JS implementation).
+	pub jitter: Option<f64>,
 }
 
 impl Catalog {
@@ -234,6 +249,9 @@ mod test {
 				init_data: None,
 				render_group: Some(1),
 				alt_group: None,
+				max_grp_sap_starting_type: None,
+				max_obj_sap_starting_type: None,
+				jitter: None,
 			}],
 		};
 
@@ -246,6 +264,11 @@ mod test {
 		let track = &value["tracks"][0];
 		assert!(track.get("samplerate").is_none());
 		assert!(track.get("channelConfig").is_none());
+
+		// Verify skip_serializing_none omits the new optional fields when None.
+		assert!(track.get("maxGrpSapStartingType").is_none());
+		assert!(track.get("maxObjSapStartingType").is_none());
+		assert!(track.get("jitter").is_none());
 	}
 
 	#[test]
@@ -267,6 +290,9 @@ mod test {
 				init_data: None,
 				render_group: Some(1),
 				alt_group: None,
+				max_grp_sap_starting_type: None,
+				max_obj_sap_starting_type: None,
+				jitter: None,
 			}],
 		};
 
@@ -345,6 +371,9 @@ mod test {
 				init_data: Some("AQID".to_string()),
 				render_group: Some(1),
 				alt_group: Some(1),
+				max_grp_sap_starting_type: None,
+				max_obj_sap_starting_type: None,
+				jitter: None,
 			}],
 		};
 
@@ -352,5 +381,91 @@ mod test {
 		assert!(json.contains("\"packaging\":\"cmaf\""));
 		let parsed = Catalog::from_str(&json).unwrap();
 		assert_eq!(catalog, parsed);
+	}
+
+	fn track_with_sap_and_jitter() -> Track {
+		Track {
+			name: "video0".to_string(),
+			packaging: Packaging::Cmaf,
+			is_live: true,
+			role: Some(Role::Video),
+			codec: Some("avc1.640028".to_string()),
+			width: Some(1920),
+			height: Some(1080),
+			framerate: Some(30.0),
+			samplerate: None,
+			channel_config: None,
+			bitrate: Some(5_000_000),
+			init_data: None,
+			render_group: Some(1),
+			alt_group: None,
+			max_grp_sap_starting_type: Some(1),
+			max_obj_sap_starting_type: Some(2),
+			jitter: Some(15.5),
+		}
+	}
+
+	#[test]
+	fn serialize_sap_fields() {
+		let catalog = Catalog {
+			version: 1,
+			tracks: vec![track_with_sap_and_jitter()],
+		};
+
+		let json = catalog.to_string().unwrap();
+
+		// Verify wire-format field names use the explicit camelCase renames and the
+		// auto-renamed jitter field.
+		let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+		let track = &value["tracks"][0];
+		assert_eq!(track.get("maxGrpSapStartingType"), Some(&serde_json::json!(1)));
+		assert_eq!(track.get("maxObjSapStartingType"), Some(&serde_json::json!(2)));
+		assert_eq!(track.get("jitter"), Some(&serde_json::json!(15.5)));
+
+		// Snake-case names must NOT appear on the wire.
+		assert!(track.get("max_grp_sap_starting_type").is_none());
+		assert!(track.get("max_obj_sap_starting_type").is_none());
+	}
+
+	#[test]
+	fn deserialize_without_sap_fields() {
+		// Backward compatibility: catalogs produced before SAP/jitter were added
+		// must still deserialize, with the new fields defaulting to None.
+		let json = r#"{
+			"version": 1,
+			"tracks": [{
+				"name": "video0",
+				"packaging": "cmaf",
+				"isLive": true,
+				"role": "video",
+				"codec": "avc1.640028",
+				"width": 1920,
+				"height": 1080,
+				"framerate": 30.0,
+				"bitrate": 5000000,
+				"renderGroup": 1
+			}]
+		}"#;
+
+		let catalog = Catalog::from_str(json).unwrap();
+		let track = &catalog.tracks[0];
+		assert_eq!(track.max_grp_sap_starting_type, None);
+		assert_eq!(track.max_obj_sap_starting_type, None);
+		assert_eq!(track.jitter, None);
+	}
+
+	#[test]
+	fn sap_and_jitter_roundtrip() {
+		let original = Catalog {
+			version: 1,
+			tracks: vec![track_with_sap_and_jitter()],
+		};
+
+		let json = original.to_string().unwrap();
+		let parsed = Catalog::from_str(&json).unwrap();
+		assert_eq!(original, parsed);
+		assert_eq!(parsed.tracks[0].max_grp_sap_starting_type, Some(1));
+		assert_eq!(parsed.tracks[0].max_obj_sap_starting_type, Some(2));
+		assert_eq!(parsed.tracks[0].jitter, Some(15.5));
 	}
 }

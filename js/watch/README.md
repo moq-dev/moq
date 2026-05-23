@@ -7,7 +7,7 @@
 [![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Subscribe to and render [Media over QUIC](https://moq.dev/) (MoQ) broadcasts, built on top of [@moq/hang](../hang) and [@moq/lite](../lite).
+Subscribe to and render [Media over QUIC](https://moq.dev/) (MoQ) broadcasts, built on top of [@moq/hang](../hang) and [@moq/net](../lite).
 
 ## Installation
 
@@ -27,11 +27,11 @@ other `+esm` URLs. No build step or import map required:
 ```html
 <script type="module">
     import "https://cdn.jsdelivr.net/npm/@moq/watch/element.js/+esm";
-    import "https://cdn.jsdelivr.net/npm/@moq/watch/ui/index.js/+esm";
+    import "https://cdn.jsdelivr.net/npm/@moq/watch/ui/element.js/+esm";
 </script>
 
 <moq-watch-ui>
-    <moq-watch url="https://relay.example.com/anon" name="room/alice">
+    <moq-watch url="https://relay.example.com/anon" name="room/alice.hang">
         <canvas></canvas>
     </moq-watch>
 </moq-watch-ui>
@@ -55,7 +55,7 @@ The simplest way to watch a stream:
 
 <moq-watch
     url="https://relay.example.com/anon"
-    path="room/alice"
+    path="room/alice.hang"
     controls>
     <canvas></canvas>
 </moq-watch>
@@ -80,7 +80,7 @@ import * as Watch from "@moq/watch";
 
 const watch = new Watch.Broadcast(connection, {
     enabled: true,
-    name: "alice",
+    name: "alice.hang",
     video: { enabled: true },
     audio: { enabled: true },
 });
@@ -95,7 +95,7 @@ watch.video.media.subscribe((stream) => {
 
 ## UI Web Component
 
-`@moq/watch` includes a SolidJS-powered UI overlay (`<moq-watch-ui>`) with playback controls, volume, buffering indicator, quality selector, and stats panel. It depends on [`@moq/ui-core`](../ui-core) for shared UI primitives.
+`@moq/watch` includes a Web Component UI overlay (`<moq-watch-ui>`) with playback controls, volume, buffering indicator, quality selector, and stats panel. It is built on top of `@moq/signals` with no framework dependency.
 
 ```html
 <script type="module">
@@ -104,7 +104,7 @@ watch.video.media.subscribe((stream) => {
 </script>
 
 <moq-watch-ui>
-    <moq-watch url="https://relay.example.com/anon" path="room/alice">
+    <moq-watch url="https://relay.example.com/anon" path="room/alice.hang">
         <canvas></canvas>
     </moq-watch>
 </moq-watch-ui>

@@ -7,12 +7,12 @@ use crate::producer::MoqBroadcastProducer;
 
 #[derive(uniffi::Object)]
 pub struct MoqOriginProducer {
-	inner: moq_lite::OriginProducer,
+	inner: moq_net::OriginProducer,
 }
 
 #[derive(uniffi::Object)]
 pub struct MoqOriginConsumer {
-	inner: moq_lite::OriginConsumer,
+	inner: moq_net::OriginConsumer,
 }
 
 #[derive(uniffi::Object)]
@@ -21,7 +21,7 @@ pub struct MoqAnnounced {
 }
 
 struct Announced {
-	inner: moq_lite::OriginConsumer,
+	inner: moq_net::OriginConsumer,
 }
 
 impl Announced {
@@ -69,7 +69,7 @@ pub struct MoqAnnouncedBroadcast {
 }
 
 impl MoqOriginProducer {
-	pub(crate) fn inner(&self) -> &moq_lite::OriginProducer {
+	pub(crate) fn inner(&self) -> &moq_net::OriginProducer {
 		&self.inner
 	}
 }
@@ -81,7 +81,7 @@ impl MoqOriginProducer {
 	pub fn new() -> Arc<Self> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		Arc::new(Self {
-			inner: moq_lite::Origin::random().produce(),
+			inner: moq_net::Origin::random().produce(),
 		})
 	}
 

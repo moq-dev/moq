@@ -189,5 +189,5 @@ Check:
 - Set up [Authentication](/app/relay/auth)
 - Configure [Clustering](/app/relay/cluster)
 - Deploy to [Production](/app/relay/prod)
-- Use [moq-lite](/rs/crate/moq-lite) client library
+- Use [moq-net](/rs/crate/moq-net) client library
 - Build media apps with [hang](/rs/crate/hang)

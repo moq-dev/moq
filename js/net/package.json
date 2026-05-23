@@ -1,0 +1,35 @@
+{
+	"name": "@moq/net",
+	"type": "module",
+	"version": "0.1.0",
+	"description": "The networking layer for Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization.",
+	"license": "(MIT OR Apache-2.0)",
+	"repository": "github:moq-dev/moq",
+	"sideEffects": false,
+	"exports": {
+		".": "./src/index.ts",
+		"./zod": "./src/zod.ts"
+	},
+	"scripts": {
+		"build": "rimraf dist && tsc -b && bun ../common/package.ts",
+		"check": "tsc --noEmit && tsc -b examples/tsconfig.json",
+		"test": "bun test --only-failures",
+		"release": "bun ../common/release.ts"
+	},
+	"dependencies": {
+		"@moq/qmux": "^0.0.6",
+		"@moq/signals": "workspace:*",
+		"async-mutex": "^0.5.0"
+	},
+	"peerDependencies": {
+		"zod": "^4.0.0"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.3.11",
+		"@types/node": "^24.3.1",
+		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
+		"rimraf": "^6.0.1",
+		"typescript": "^6.0.0",
+		"vite-plugin-html": "^3.2.2"
+	}
+}

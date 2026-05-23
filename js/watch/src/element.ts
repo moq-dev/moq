@@ -1,16 +1,10 @@
 import type * as Catalog from "@moq/hang/catalog";
-import type { Time } from "@moq/lite";
-import * as Moq from "@moq/lite";
+import type { Time } from "@moq/net";
+import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { MultiBackend } from "./backend";
-import { Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast";
+import { Broadcast, type CatalogFormat, parseCatalogFormat } from "./broadcast";
 import type { Latency } from "./sync";
-
-const DEFAULT_CATALOG_FORMAT: CatalogFormat = "hang";
-
-function parseCatalogFormat(value: string | null): CatalogFormat {
-	return CATALOG_FORMATS.find((f) => f === value) ?? DEFAULT_CATALOG_FORMAT;
-}
 
 const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog-format"] as const;
 type Observed = (typeof OBSERVED)[number];
@@ -127,6 +121,31 @@ export default class MoqWatch extends HTMLElement {
 				this.setAttribute("latency", jitter.toString());
 			}
 		});
+
+		// Track the element's rendered size and feed it into the rendition picker,
+		// scaled by devicePixelRatio so high-DPI screens still get sharp renditions.
+		const updateDimensions = (width: number, height: number) => {
+			if (width <= 0 || height <= 0) return;
+			const dpr = window.devicePixelRatio || 1;
+			this.backend.video.source.target.update((prev) => ({
+				...prev,
+				width: Math.round(width * dpr),
+				height: Math.round(height * dpr),
+			}));
+		};
+
+		const resizeObserver = new ResizeObserver((entries) => {
+			const entry = entries[0];
+			if (!entry) return;
+			updateDimensions(entry.contentRect.width, entry.contentRect.height);
+		});
+		resizeObserver.observe(this);
+		this.signals.cleanup(() => resizeObserver.disconnect());
+
+		// Seed with the current size in case the observer doesn't fire immediately
+		// (e.g. the element is still 0x0 when we attach).
+		const rect = this.getBoundingClientRect();
+		updateDimensions(rect.width, rect.height);
 	}
 
 	// Annoyingly, we have to use these callbacks to figure out when the element is connected to the DOM.
@@ -248,11 +267,11 @@ export default class MoqWatch extends HTMLElement {
 		this.backend.latency.set(value as Time.Milli);
 	}
 
-	get catalogFormat(): CatalogFormat {
+	get catalogFormat(): CatalogFormat | undefined {
 		return this.broadcast.catalogFormat.peek();
 	}
 
-	set catalogFormat(value: CatalogFormat) {
+	set catalogFormat(value: CatalogFormat | undefined) {
 		this.broadcast.catalogFormat.set(value);
 	}
 

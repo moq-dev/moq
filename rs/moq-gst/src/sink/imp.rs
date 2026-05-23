@@ -16,7 +16,7 @@ use gst::subclass::prelude::*;
 use tokio::sync::mpsc;
 use url::Url;
 
-use hang::moq_lite;
+use hang::moq_net;
 
 static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 	tokio::runtime::Builder::new_multi_thread()
@@ -87,8 +87,8 @@ struct PadState {
 
 struct RuntimeState {
 	#[allow(dead_code)]
-	session: moq_lite::Session,
-	broadcast: moq_lite::BroadcastProducer,
+	session: moq_net::Session,
+	broadcast: moq_net::BroadcastProducer,
 	catalog: moq_mux::catalog::Producer,
 	pads: HashMap<String, PadState>,
 }
@@ -387,8 +387,8 @@ async fn run_session(
 
 	let client = client_config.init()?;
 
-	let origin = moq_lite::Origin::random().produce();
-	let mut broadcast = moq_lite::Broadcast::new().produce();
+	let origin = moq_net::Origin::random().produce();
+	let mut broadcast = moq_net::Broadcast::new().produce();
 	let broadcast_consumer = broadcast.consume();
 
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;

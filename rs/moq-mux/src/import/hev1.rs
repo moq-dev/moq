@@ -9,7 +9,7 @@ use scuffle_h265::{NALUnitType, SpsNALUnit};
 /// Only supports single layer streams (VPS is cached but not parsed).
 pub struct Hev1 {
 	// The broadcast being produced.
-	broadcast: moq_lite::BroadcastProducer,
+	broadcast: moq_net::BroadcastProducer,
 
 	// The catalog being produced.
 	catalog: crate::catalog::Producer,
@@ -37,7 +37,7 @@ pub struct Hev1 {
 }
 
 impl Hev1 {
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -118,7 +118,7 @@ impl Hev1 {
 	}
 
 	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> anyhow::Result<&moq_lite::TrackProducer> {
+	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
 		Ok(&self.track.as_ref().context("not initialized")?.track)
 	}
 

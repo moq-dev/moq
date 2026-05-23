@@ -27,11 +27,12 @@
 	"workspaces": [
 		"doc",
 		"js/lite",
+		"js/net",
 		"js/clock",
 		"js/token",
 		"js/hang",
+		"js/loc",
 		"js/msf",
-		"js/ui-core",
 		"js/watch",
 		"js/publish",
 		"js/signals",

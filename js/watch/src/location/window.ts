@@ -1,6 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
-import type * as Moq from "@moq/lite";
-import * as Zod from "@moq/lite/zod";
+import type * as Moq from "@moq/net";
+import * as Zod from "@moq/net/zod";
 import { Effect, type Getter, Signal } from "@moq/signals";
 
 export interface WindowProps {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { Time } from "@moq/lite";
+import { Time } from "@moq/net";
 import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 
 function create(props?: { rate?: number; channels?: number; capacity?: number; latency?: number }) {

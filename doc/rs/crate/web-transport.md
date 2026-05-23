@@ -62,10 +62,10 @@ For a real-world example of using `web-transport` with MoQ, see the [`rs/moq-nat
 
 ## Integration with MoQ
 
-The `moq-lite` crate uses `web-transport` internally. See the [moq-native examples](https://github.com/moq-dev/moq/tree/main/rs/moq-native/examples) for how connections are established.
+The `moq-net` crate uses `web-transport` internally. See the [moq-native examples](https://github.com/moq-dev/moq/tree/main/rs/moq-native/examples) for how connections are established.
 
 ## Next Steps
 
 - Check the [GitHub repository](https://github.com/moq-dev/web-transport)
-- Use [moq-lite](/rs/crate/moq-lite) for MoQ protocol
+- Use [moq-net](/rs/crate/moq-net) for MoQ protocol
 - Deploy a [relay server](/app/relay/)

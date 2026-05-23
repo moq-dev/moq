@@ -5,7 +5,7 @@ mod subscribe;
 mod web;
 
 use client::*;
-use hang::moq_lite;
+use hang::moq_net;
 use publish::*;
 use server::*;
 use subscribe::*;
@@ -132,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
 			broadcast,
 			format,
 		} => {
+			warn_if_missing_format(&broadcast);
 			let publish = Publish::new(&format)?;
 			let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
 
@@ -161,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
 
 			let web_tls = server.tls_info();
 
-			let origin = moq_lite::Origin::random().produce();
+			let origin = moq_net::Origin::random().produce();
 			let consumer = origin.consume();
 
 			tokio::select! {
@@ -177,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
 			broadcast,
 			format,
 		} => {
+			warn_if_missing_format(&broadcast);
 			let publish = Publish::new(&format)?;
 			let client = config.init()?;
 
@@ -201,13 +203,22 @@ async fn main() -> anyhow::Result<()> {
 	}
 }
 
+fn warn_if_missing_format(name: &str) {
+	if moq_mux::catalog::CatalogFormat::detect(name).is_none() {
+		tracing::warn!(
+			name,
+			"You should append .hang to your broadcast name to make the catalog format explicit."
+		);
+	}
+}
+
 async fn run_subscribe(
 	client: moq_native::Client,
 	url: Url,
 	broadcast: String,
 	args: SubscribeArgs,
 ) -> anyhow::Result<()> {
-	let origin = moq_lite::Origin::random().produce();
+	let origin = moq_net::Origin::random().produce();
 	let consumer = origin.consume();
 
 	tracing::info!(%url, %broadcast, "connecting");
@@ -225,14 +236,16 @@ async fn run_subscribe(
 }
 
 async fn run_announced_subscribe(
-	consumer: moq_lite::OriginConsumer,
+	consumer: moq_net::OriginConsumer,
 	broadcast: String,
 	args: SubscribeArgs,
 ) -> anyhow::Result<()> {
+	let catalog = args.catalog_format(&broadcast);
+
 	let consumer = consumer
 		.announced_broadcast(&broadcast)
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast was announced"))?;
 
-	Subscribe::new(consumer, args).run().await
+	Subscribe::new(consumer, catalog, args).run().await
 }
