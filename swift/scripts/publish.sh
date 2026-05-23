@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Push the staged Swift Package contents to the moq-dev/swift mirror
+# Push the staged Swift Package contents to the moq-dev/moq-swift mirror
 # repo on a bare-semver tag (e.g. 0.2.11). SPM consumers point at the
 # mirror instead of this monorepo because Package.swift must live at
 # the root of the resolved tag, and SPM only recognizes semver tags
@@ -13,7 +13,7 @@ set -euo pipefail
 #                         on $MIRROR_REPO
 #
 # Optional environment:
-#   SWIFT_MIRROR_REPO   - defaults to moq-dev/swift
+#   SWIFT_MIRROR_REPO   - defaults to moq-dev/moq-swift
 #   GIT_AUTHOR_NAME     - defaults to "moq-swift-release"
 #   GIT_AUTHOR_EMAIL    - defaults to "release@moq.dev"
 #
@@ -44,7 +44,7 @@ if [[ "$DRY_RUN" != true ]]; then
     : "${SWIFT_MIRROR_TOKEN:?SWIFT_MIRROR_TOKEN is required (or pass --dry-run)}"
 fi
 
-MIRROR_REPO="${SWIFT_MIRROR_REPO:-moq-dev/swift}"
+MIRROR_REPO="${SWIFT_MIRROR_REPO:-moq-dev/moq-swift}"
 # SPM only resolves bare-semver tags; the moq-ffi-v* prefix used in
 # this monorepo would be invisible to SPM, so the mirror gets a stripped tag.
 MIRROR_TAG="${BUILD_VERSION}"

@@ -128,7 +128,7 @@ for license in LICENSE-MIT LICENSE-APACHE; do
 done
 
 # Minimal consumer-facing README. The full developer README lives in
-# the monorepo; this one just orients a visitor to moq-dev/swift.
+# the monorepo; this one just orients a visitor to moq-dev/moq-swift.
 cat > "$PKG_STAGE/README.md" <<EOF
 # Moq (Swift Package)
 
@@ -139,7 +139,7 @@ Source, issues, and pull requests live in [moq-dev/moq](https://github.com/moq-d
 ## Install
 
 \`\`\`swift
-.package(url: "https://github.com/moq-dev/swift", from: "${VERSION}"),
+.package(url: "https://github.com/moq-dev/moq-swift", from: "${VERSION}"),
 \`\`\`
 
 The package depends on a prebuilt \`MoqFFI.xcframework\` attached to the matching [moq-ffi-v${VERSION}](https://github.com/moq-dev/moq/releases/tag/moq-ffi-v${VERSION}) release on the source repo.

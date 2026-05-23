@@ -189,12 +189,22 @@ jobs:
     name: Publish to Swift Package mirror
     needs: [release, parse-version]
     runs-on: ubuntu-latest
-    # Skipped until PUBLISH_SPM=true and SWIFT_MIRROR_TOKEN are set. See
-    # swift/README.md for setup steps.
+    # Skipped until PUBLISH_SPM=true is set in repo variables. The moq-bot
+    # GitHub App already has org-wide access, so no SWIFT_MIRROR_TOKEN
+    # secret is needed. See swift/README.md for setup steps.
     if: vars.PUBLISH_SPM == 'true'
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Generate moq-bot token
+        uses: actions/create-github-app-token@v3
+        id: token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: moq-dev
+          repositories: moq-swift
 
       - name: Download package
         uses: actions/download-artifact@v8
@@ -202,8 +212,13 @@ jobs:
           name: swift-package
           path: swift-out
 
-      - name: Publish to moq-dev/swift mirror
+      - name: Publish to moq-dev/moq-swift mirror
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-          SWIFT_MIRROR_TOKEN: ${{ secrets.SWIFT_MIRROR_TOKEN }}
+          # Token is minted fresh per run, expires in 1 hour, never at rest.
+          SWIFT_MIRROR_TOKEN: ${{ steps.token.outputs.token }}
+          # Use the moq-bot identity for the commit author so the
+          # mirror's git log reflects who actually pushed.
+          GIT_AUTHOR_NAME: moq-bot
+          GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
         run: ./swift/scripts/publish.sh
