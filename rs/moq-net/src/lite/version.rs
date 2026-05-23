@@ -32,7 +32,10 @@ impl fmt::Display for Version {
 			Self::Lite02 => write!(f, "moq-lite-02"),
 			Self::Lite03 => write!(f, "moq-lite-03"),
 			Self::Lite04 => write!(f, "moq-lite-04"),
-			Self::Lite05 => write!(f, "moq-lite-05"),
+			// Mirrors `ALPN_LITE_05`: kept distinct from the eventual stable
+			// `moq-lite-05` identifier so peers parsing this string don't pick
+			// up the unfinalized wire format by accident.
+			Self::Lite05 => write!(f, "moq-lite-05-wip"),
 		}
 	}
 }

@@ -15,8 +15,14 @@ pub(crate) const NEGOTIATED: [Version; 3] = [
 ];
 
 /// ALPN strings for supported versions.
+///
+/// `ALPN_LITE_05` (`moq-lite-05-wip`) is intentionally **not** in this list:
+/// Lite05 is still in development and we don't want a client to accidentally
+/// pick it during ALPN negotiation. Peers that explicitly opt in (e.g. by
+/// setting `client.version = [moq-lite-05-wip]`) will still negotiate it via
+/// the version enum, but the default advertisement only covers shipped
+/// versions.
 pub const ALPNS: &[&str] = &[
-	ALPN_LITE_05,
 	ALPN_LITE_04,
 	ALPN_LITE_03,
 	ALPN_LITE,
@@ -31,7 +37,10 @@ pub const ALPNS: &[&str] = &[
 pub(crate) const ALPN_LITE: &str = "moql";
 pub(crate) const ALPN_LITE_03: &str = "moq-lite-03";
 pub(crate) const ALPN_LITE_04: &str = "moq-lite-04";
-pub(crate) const ALPN_LITE_05: &str = "moq-lite-05";
+/// Work-in-progress ALPN for Lite05. Kept distinct from a stable `moq-lite-05`
+/// identifier so clients that pin to that string today don't accidentally
+/// negotiate the unfinalized wire format. Renamed when Lite05 is finalized.
+pub(crate) const ALPN_LITE_05: &str = "moq-lite-05-wip";
 pub(crate) const ALPN_14: &str = "moq-00";
 pub(crate) const ALPN_15: &str = "moqt-15";
 pub(crate) const ALPN_16: &str = "moqt-16";
@@ -158,7 +167,7 @@ impl FromStr for Version {
 			"moq-lite-02" => Ok(Self::Lite(lite::Version::Lite02)),
 			"moq-lite-03" => Ok(Self::Lite(lite::Version::Lite03)),
 			"moq-lite-04" => Ok(Self::Lite(lite::Version::Lite04)),
-			"moq-lite-05" => Ok(Self::Lite(lite::Version::Lite05)),
+			"moq-lite-05-wip" => Ok(Self::Lite(lite::Version::Lite05)),
 			"moq-transport-14" => Ok(Self::Ietf(ietf::Version::Draft14)),
 			"moq-transport-15" => Ok(Self::Ietf(ietf::Version::Draft15)),
 			"moq-transport-16" => Ok(Self::Ietf(ietf::Version::Draft16)),
@@ -223,9 +232,14 @@ pub struct Versions(Vec<Version>);
 
 impl Versions {
 	/// All supported versions exposed by default.
+	///
+	/// `lite::Version::Lite05` is intentionally omitted: it is work-in-progress
+	/// (see the `ALPN_LITE_05` / `moq-lite-05-wip` ALPN) and would be picked up
+	/// by ALPN negotiation if included. Callers that explicitly opt in (e.g.
+	/// via `--client-version moq-lite-05-wip`) still get it; the default just
+	/// doesn't advertise it.
 	pub fn all() -> Self {
 		Self(vec![
-			Version::Lite(lite::Version::Lite05),
 			Version::Lite(lite::Version::Lite04),
 			Version::Lite(lite::Version::Lite03),
 			Version::Lite(lite::Version::Lite02),
