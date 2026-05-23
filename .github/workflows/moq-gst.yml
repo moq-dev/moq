@@ -56,8 +56,8 @@ jobs:
           name: moq-gst-${{ matrix.target }}
           path: dist/*
 
-  package-deb:
-    name: Package .deb (${{ matrix.target }})
+  package:
+    name: Package .deb/.rpm (${{ matrix.target }})
     runs-on: ${{ matrix.runs-on }}
 
     strategy:
@@ -65,18 +65,25 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runs-on: ubuntu-22.04
+            runs-on: ubuntu-24.04
             deb-arch: amd64
             deb-multiarch: x86_64-linux-gnu
+            rpm-arch: x86_64
           - target: aarch64-unknown-linux-gnu
-            runs-on: ubuntu-22.04-arm
+            runs-on: ubuntu-24.04-arm
             deb-arch: arm64
             deb-multiarch: aarch64-linux-gnu
+            rpm-arch: aarch64
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Set up packaging tools
         uses: ./.github/actions/setup-packaging
@@ -86,32 +93,23 @@ jobs:
         shell: bash
         run: .github/scripts/release.sh parse-version moq-gst
 
-      - name: Build inside Debian 12 (glibc 2.36, gst 1.22)
+      - name: Install GStreamer dev libraries
         shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
         run: |
-          # gstreamer-rs 0.23 needs GStreamer >= 1.22 headers at compile
-          # time; Debian 12 (bookworm) ships 1.22 and glibc 2.36, the
-          # lowest-common-denominator that lets the .deb install on
-          # Debian 12+ and Ubuntu 24.04+.
-          docker run --rm \
-            -v "$PWD":/work -w /work \
-            -e TARGET \
-            debian:12 bash -c '
-              set -euo pipefail
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update -qq
-              apt-get install -y --no-install-recommends \
-                build-essential pkg-config curl ca-certificates \
-                libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-              curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs \
-                | sh -s -- -y --default-toolchain stable --profile minimal
-              source $HOME/.cargo/env
-              cargo build --release --target "$TARGET" -p moq-gst
-            '
+          # Ubuntu 24.04 ships GStreamer 1.24, satisfying gstreamer-rs
+          # 0.23's 1.22+ headers requirement. Resulting .so dynamic-links
+          # to libgstreamer-1.0.so.0 (ABI-stable since 1.0).
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
-      - name: Package via nfpm
+      - name: Build (release, glibc 2.34)
+        shell: bash
+        # Pin glibc to 2.34 so one .so covers Debian 12+/Ubuntu 22.04+
+        # (.deb) and AlmaLinux/RHEL/Rocky 9+ (.rpm).
+        run: cargo zigbuild --release --target ${{ matrix.target }}.2.34 -p moq-gst
+
+      - name: Package .deb
         shell: bash
         env:
           VERSION: ${{ steps.parse.outputs.version }}
@@ -121,64 +119,11 @@ jobs:
           PLUGIN_DIR: /usr/lib/${{ matrix.deb-multiarch }}/gstreamer-1.0
         run: |
           mkdir -p dist
-          nfpm pkg --packager deb --config packaging/moq-gst/nfpm.yaml --target dist/
+          envsubst '$VERSION $ARCH $PKG_NAME $PLUGIN_PATH $PLUGIN_DIR' \
+            < packaging/moq-gst/nfpm.yaml > /tmp/nfpm.yaml
+          nfpm pkg --packager deb --config /tmp/nfpm.yaml --target dist/
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: moq-gst-deb-${{ matrix.deb-arch }}
-          path: dist/*.deb
-
-  package-rpm:
-    name: Package .rpm (${{ matrix.target }})
-    runs-on: ${{ matrix.runs-on }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runs-on: ubuntu-22.04
-            rpm-arch: x86_64
-          - target: aarch64-unknown-linux-gnu
-            runs-on: ubuntu-22.04-arm
-            rpm-arch: aarch64
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-
-      - name: Set up packaging tools
-        uses: ./.github/actions/setup-packaging
-
-      - name: Parse version
-        id: parse
-        shell: bash
-        run: .github/scripts/release.sh parse-version moq-gst
-
-      - name: Build inside AlmaLinux 9 (glibc 2.34)
-        shell: bash
-        env:
-          VERSION: ${{ steps.parse.outputs.version }}
-          RPM_ARCH: ${{ matrix.rpm-arch }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          docker run --rm \
-            -v "$PWD":/work -w /work \
-            -e VERSION -e RPM_ARCH -e TARGET \
-            almalinux:9 bash -c '
-              set -euo pipefail
-              dnf install -y --quiet \
-                gcc make pkgconf-pkg-config curl tar gzip which \
-                gstreamer1-devel gstreamer1-plugins-base-devel
-              curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs \
-                | sh -s -- -y --default-toolchain stable --profile minimal
-              source $HOME/.cargo/env
-              cargo build --release --target "$TARGET" -p moq-gst
-            '
-
-      - name: Package via nfpm
+      - name: Package .rpm
         shell: bash
         env:
           VERSION: ${{ steps.parse.outputs.version }}
@@ -188,17 +133,19 @@ jobs:
           PLUGIN_DIR: /usr/lib64/gstreamer-1.0
         run: |
           mkdir -p dist
-          nfpm pkg --packager rpm --config packaging/moq-gst/nfpm.yaml --target dist/
+          envsubst '$VERSION $ARCH $PKG_NAME $PLUGIN_PATH $PLUGIN_DIR' \
+            < packaging/moq-gst/nfpm.yaml > /tmp/nfpm.yaml
+          nfpm pkg --packager rpm --config /tmp/nfpm.yaml --target dist/
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: moq-gst-rpm-${{ matrix.rpm-arch }}
-          path: dist/*.rpm
+          name: moq-gst-pkg-${{ matrix.target }}
+          path: dist/*
 
   release:
     name: Release
-    needs: [build, package-deb, package-rpm]
+    needs: [build, package]
     runs-on: ubuntu-latest
     permissions:
       contents: write

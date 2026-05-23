@@ -64,9 +64,11 @@ jobs:
       - name: Set up packaging tools
         uses: ./.github/actions/setup-packaging
 
-      - name: Build (release)
+      - name: Build (release, glibc 2.34)
         shell: bash
-        run: cargo build --release --target ${{ matrix.target }} -p moq-cli
+        # Pin to glibc 2.34 so one binary covers Ubuntu 22.04+ (.deb)
+        # and AlmaLinux/RHEL/Rocky 9+ (.rpm).
+        run: cargo zigbuild --release --target ${{ matrix.target }}.2.34 -p moq-cli
 
       - name: Rename binary
         shell: bash
@@ -111,28 +113,22 @@ jobs:
           ARCH: ${{ matrix.deb-arch }}
           BINARY_PATH: target/${{ matrix.target }}/release/moq
         run: |
-          nfpm pkg --packager deb --config packaging/moq-cli/nfpm.yaml --target dist/
+          # nfpm doesn't expand ${VAR} in contents[].src or templating
+          # there either, so render the env vars in ourselves.
+          envsubst '$VERSION $ARCH $BINARY_PATH' \
+            < packaging/moq-cli/nfpm.yaml > /tmp/nfpm.yaml
+          nfpm pkg --packager deb --config /tmp/nfpm.yaml --target dist/
 
-      - name: Package .rpm (AlmaLinux 9 toolchain)
+      - name: Package .rpm
         shell: bash
         env:
           VERSION: ${{ steps.parse.outputs.version }}
-          RPM_ARCH: ${{ matrix.rpm-arch }}
+          ARCH: ${{ matrix.rpm-arch }}
+          BINARY_PATH: target/${{ matrix.target }}/release/moq
         run: |
-          docker run --rm \
-            -v "$PWD":/work -w /work \
-            almalinux:9 bash -c '
-              set -euo pipefail
-              dnf install -y --quiet gcc make cmake perl pkgconf-pkg-config curl
-              curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs \
-                | sh -s -- -y --default-toolchain stable --profile minimal
-              source $HOME/.cargo/env
-              cargo build --release --target ${{ matrix.target }} -p moq-cli
-              cp target/${{ matrix.target }}/release/moq-cli target/moq.rpm-build
-            '
-          ARCH="$RPM_ARCH" \
-          BINARY_PATH=target/moq.rpm-build \
-            nfpm pkg --packager rpm --config packaging/moq-cli/nfpm.yaml --target dist/
+          envsubst '$VERSION $ARCH $BINARY_PATH' \
+            < packaging/moq-cli/nfpm.yaml > /tmp/nfpm.yaml
+          nfpm pkg --packager rpm --config /tmp/nfpm.yaml --target dist/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
