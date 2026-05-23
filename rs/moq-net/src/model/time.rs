@@ -280,10 +280,10 @@ impl Timestamp {
 		}
 	}
 
-	/// Add two timestamps. Returns [`TimeOverflow`] if the sum exceeds `2^62 - 1` or
-	/// if the scales differ.
+	/// Add two timestamps. Returns [`TimeOverflow`] if the sum exceeds `2^62 - 1`,
+	/// if either scale is [`Timescale::UNKNOWN`], or if the scales differ.
 	pub const fn checked_add(self, rhs: Self) -> Result<Self, TimeOverflow> {
-		if self.scale.0 != rhs.scale.0 {
+		if self.scale.0 == 0 || rhs.scale.0 == 0 || self.scale.0 != rhs.scale.0 {
 			return Err(TimeOverflow);
 		}
 		match self.value.into_inner().checked_add(rhs.value.into_inner()) {
@@ -292,10 +292,10 @@ impl Timestamp {
 		}
 	}
 
-	/// Subtract `rhs` from `self`. Returns [`TimeOverflow`] if `rhs > self` or if the
-	/// scales differ.
+	/// Subtract `rhs` from `self`. Returns [`TimeOverflow`] if `rhs > self`, if either
+	/// scale is [`Timescale::UNKNOWN`], or if the scales differ.
 	pub const fn checked_sub(self, rhs: Self) -> Result<Self, TimeOverflow> {
-		if self.scale.0 != rhs.scale.0 {
+		if self.scale.0 == 0 || rhs.scale.0 == 0 || self.scale.0 != rhs.scale.0 {
 			return Err(TimeOverflow);
 		}
 		match self.value.into_inner().checked_sub(rhs.value.into_inner()) {
@@ -368,18 +368,28 @@ impl PartialOrd for Timestamp {
 }
 
 impl Ord for Timestamp {
-	/// Compare by raw value. Debug-asserts that scales are compatible (same, or
-	/// one is unspecified). In release, cross-scale comparisons return a result
-	/// based on the raw value, which is meaningful only when one side is a
-	/// [`Timescale::UNKNOWN`] sentinel ([`Self::ZERO`] or [`Self::MAX`]).
+	/// Compare two timestamps, normalizing across scales when both are known.
+	///
+	/// - If both scales are equal, compares raw values directly.
+	/// - If one side is [`Timescale::UNKNOWN`] ([`Self::ZERO`] / [`Self::MAX`] sentinels),
+	///   compares raw values; the sentinel's `0` / `VarInt::MAX` ensures the expected
+	///   ordering against any concrete timestamp.
+	/// - If both scales are known but differ, cross-multiplies in 128-bit so e.g.
+	///   `1s > 2ms` orders correctly. Required by the `min_by_key` call sites in the
+	///   fmp4/mkv exporters, which pick the next track to emit across mixed-scale
+	///   per-track frames.
+	///
+	/// Note: derived `PartialEq`/`Eq` compare fields, so two cross-scale timestamps
+	/// that order as `Equal` here (e.g. `from_secs(1)` and `from_millis(1000)`) still
+	/// compare `!=`. This inconsistency only matters for code that mixes scales in a
+	/// `BTreeMap`/`BTreeSet` keyed on `Timestamp`, which the codebase doesn't do.
 	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-		debug_assert!(
-			self.scale.0 == other.scale.0 || self.scale.0 == 0 || other.scale.0 == 0,
-			"comparing timestamps with mismatched scales: {} vs {}",
-			self.scale,
-			other.scale,
-		);
-		self.value.cmp(&other.value)
+		if self.scale.0 == other.scale.0 || self.scale.0 == 0 || other.scale.0 == 0 {
+			return self.value.cmp(&other.value);
+		}
+		let lhs = self.value.into_inner() as u128 * other.scale.0 as u128;
+		let rhs = other.value.into_inner() as u128 * self.scale.0 as u128;
+		lhs.cmp(&rhs)
 	}
 }
 
@@ -597,6 +607,27 @@ mod tests {
 	}
 
 	#[test]
+	fn test_add_unspecified_scale_rejected() {
+		// Two ZERO sentinels (both UNKNOWN scale) must not combine into a meaningful
+		// result, otherwise wire-decoded timestamps that haven't had a scale attached
+		// yet would silently behave like real arithmetic operands.
+		assert!(Timestamp::ZERO.checked_add(Timestamp::ZERO).is_err());
+
+		let t = Timestamp::from_millis(100).unwrap();
+		assert!(t.checked_add(Timestamp::ZERO).is_err());
+		assert!(Timestamp::ZERO.checked_add(t).is_err());
+	}
+
+	#[test]
+	fn test_sub_unspecified_scale_rejected() {
+		assert!(Timestamp::ZERO.checked_sub(Timestamp::ZERO).is_err());
+
+		let t = Timestamp::from_millis(100).unwrap();
+		assert!(t.checked_sub(Timestamp::ZERO).is_err());
+		assert!(Timestamp::ZERO.checked_sub(t).is_err());
+	}
+
+	#[test]
 	fn test_max_same_scale() {
 		let a = Timestamp::from_secs(5).unwrap();
 		let b = Timestamp::from_secs(10).unwrap();
@@ -628,6 +659,33 @@ mod tests {
 		assert!(Timestamp::ZERO < t);
 		assert!(t < Timestamp::MAX);
 		assert!(Timestamp::ZERO < Timestamp::MAX);
+	}
+
+	#[test]
+	fn test_ordering_across_known_scales() {
+		// Cross-scale ordering must normalize to a common scale rather than fall back
+		// to raw values. Without this, 1s would order as < 2ms (1 < 2) and the
+		// fmp4/mkv exporter's `min_by_key(|ts| *ts)` over per-track frames would silently
+		// pick the wrong track when tracks have different native scales.
+		let one_sec = Timestamp::from_secs(1).unwrap();
+		let two_ms = Timestamp::from_millis(2).unwrap();
+		assert!(one_sec > two_ms);
+		assert!(two_ms < one_sec);
+
+		// Equivalent values across scales compare as Equal under cmp.
+		let one_sec_b = Timestamp::from_millis(1000).unwrap();
+		assert_eq!(one_sec.cmp(&one_sec_b), std::cmp::Ordering::Equal);
+
+		// Sorting a mixed-scale slice puts entries in correct temporal order.
+		let mut items = [
+			Timestamp::from_secs(2).unwrap(),
+			Timestamp::from_millis(500).unwrap(),
+			Timestamp::from_micros(1_500_000).unwrap(),
+		];
+		items.sort();
+		assert_eq!(items[0], Timestamp::from_millis(500).unwrap());
+		assert_eq!(items[1], Timestamp::from_micros(1_500_000).unwrap());
+		assert_eq!(items[2], Timestamp::from_secs(2).unwrap());
 	}
 
 	#[test]
