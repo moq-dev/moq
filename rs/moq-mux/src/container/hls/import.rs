@@ -21,7 +21,7 @@ use crate::container::fmp4::Import as Fmp4;
 
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]
-pub struct HlsConfig {
+pub struct Config {
 	/// The master or media playlist URL or file path to ingest.
 	pub playlist: String,
 
@@ -30,7 +30,7 @@ pub struct HlsConfig {
 	pub client: Option<Client>,
 }
 
-impl HlsConfig {
+impl Config {
 	pub fn new(playlist: String) -> Self {
 		Self { playlist, client: None }
 	}
@@ -115,7 +115,7 @@ impl Import {
 	pub fn new(
 		broadcast: moq_net::BroadcastProducer,
 		catalog: crate::catalog::hang::Producer,
-		cfg: HlsConfig,
+		cfg: Config,
 	) -> anyhow::Result<Self> {
 		let base_url = cfg.parse_playlist()?;
 		let client = cfg.client.unwrap_or_else(|| {
@@ -607,7 +607,7 @@ mod tests {
 	#[test]
 	fn hls_config_new_sets_fields() {
 		let url = "https://example.com/stream.m3u8".to_string();
-		let cfg = HlsConfig::new(url.clone());
+		let cfg = Config::new(url.clone());
 		assert_eq!(cfg.playlist, url);
 	}
 
@@ -616,7 +616,7 @@ mod tests {
 		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 		let url = "https://example.com/master.m3u8".to_string();
-		let cfg = HlsConfig::new(url);
+		let cfg = Config::new(url);
 		let hls = Import::new(broadcast, catalog, cfg).unwrap();
 
 		assert!(!hls.has_video_importer());

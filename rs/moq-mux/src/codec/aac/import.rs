@@ -1,6 +1,6 @@
 use bytes::{Buf, BytesMut};
 
-use super::AacConfig;
+use super::Config;
 
 /// AAC importer.
 ///
@@ -18,7 +18,7 @@ impl Import {
 	pub fn new(
 		mut broadcast: moq_net::BroadcastProducer,
 		mut catalog: crate::catalog::hang::Producer,
-		config: AacConfig,
+		config: Config,
 	) -> anyhow::Result<Self> {
 		let track = broadcast.unique_track(".aac")?;
 

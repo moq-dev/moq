@@ -1,6 +1,6 @@
 use bytes::{Buf, BytesMut};
 
-use super::OpusConfig;
+use super::Config;
 
 /// Opus importer.
 ///
@@ -18,7 +18,7 @@ impl Import {
 	pub fn new(
 		mut broadcast: moq_net::BroadcastProducer,
 		mut catalog: crate::catalog::hang::Producer,
-		config: OpusConfig,
+		config: Config,
 	) -> anyhow::Result<Self> {
 		let track = broadcast.unique_track(".opus")?;
 

@@ -1,15 +1,18 @@
-pub mod import;
+//! H.265 / HEVC.
+//!
+//! SPS / hvcC parsing, an [`Hvc1`] transmuxer that rewrites Annex-B into
+//! length-prefixed NALU + hvcC, and an [`Import`] for Annex-B input.
 
-pub use import::Import;
+mod import;
+
+pub use import::*;
 
 use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
 
-/// Transform H.265 frames from Annex-B (inline VPS/SPS/PPS, "hev1") to
-/// length-prefixed NALU (out-of-band HEVCDecoderConfigurationRecord, "hvc1").
-///
-/// See [`crate::codec::h264::Avc1`] for the analogous H.264 transform.
+/// Annex-B → length-prefixed transmuxer; the H.265 analogue of
+/// [`crate::codec::h264::Avc1`].
 pub struct Hvc1 {
 	hvcc: Option<Bytes>,
 	vps: Option<Bytes>,
@@ -124,7 +127,7 @@ impl Hvc1 {
 
 /// Build an HEVCDecoderConfigurationRecord (ISO/IEC 14496-15 §8.3.3).
 /// Single-layer streams only.
-pub fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
+pub(crate) fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
 	for (label, nal) in [("VPS", vps_nal), ("SPS", sps_nal), ("PPS", pps_nal)] {
 		anyhow::ensure!(
 			nal.len() <= u16::MAX as usize,
@@ -172,7 +175,7 @@ pub fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Res
 }
 
 /// Pack the constraint flags from ITU H.265 V10 §7.3.3 Profile, tier and level syntax.
-pub fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] {
+pub(crate) fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] {
 	let mut flags = [0u8; 6];
 	flags[0] = ((profile.progressive_source_flag as u8) << 7)
 		| ((profile.interlaced_source_flag as u8) << 6)

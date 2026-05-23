@@ -1,9 +1,8 @@
-//! MSF catalog: alternate JSON-encoded broadcast description.
+//! MSF catalog. Subscribe-only.
 //!
-//! Subscribe-only here: [`Consumer`] reads MSF and converts on the fly to
-//! a [`hang::Catalog`] so downstream code only deals with one shape.
-//! Publishing happens through [`super::hang::Producer`], which writes both
-//! tracks together.
+//! [`Consumer`] reads MSF and converts to a [`hang::Catalog`] on the fly,
+//! so the rest of the pipeline only sees one shape. Publishing happens
+//! through [`super::hang::Producer`].
 
 mod consumer;
 

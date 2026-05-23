@@ -8,17 +8,10 @@
 
 # moq-mux
 
-Media muxers and demuxers for [Media over QUIC](https://moq.dev), bridging containerized media into [hang](https://github.com/moq-dev/moq/tree/main/rs/hang) broadcasts.
+Media muxers and demuxers for [Media over QUIC](https://moq.dev). Takes
+containerized or raw-codec media in, produces a [hang](https://github.com/moq-dev/moq/tree/main/rs/hang) broadcast — or the other way around.
 
-Supported formats:
+**Containers:** fMP4 / CMAF, MKV / WebM, HLS, LOC, hang Legacy.
+**Codecs:** H.264, H.265, AV1, AAC, Opus.
 
-- **fMP4 / CMAF** (`mp4` feature)
-- **HLS** (`hls` feature)
-- **MSF** — see [moq-msf](https://github.com/moq-dev/moq/tree/main/rs/moq-msf) for the catalog types
-
-Supported codecs:
-
-- **Video:** H.264, H.265, AV1
-- **Audio:** AAC, Opus
-
-See the [API documentation](https://docs.rs/moq-mux/) for details.
+See the [API docs](https://docs.rs/moq-mux/) for the full module map.

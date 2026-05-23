@@ -388,7 +388,7 @@ impl Import {
 
 				// Build the AudioSpecificConfig (ISO 14496-3 §1.6.2.1)
 				// This is what GStreamer/WebCodecs need as codec_data.
-				let description = crate::codec::aac::AacConfig {
+				let description = crate::codec::aac::Config {
 					profile,
 					sample_rate,
 					channel_count,

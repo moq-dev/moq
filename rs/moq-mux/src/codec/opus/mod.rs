@@ -1,23 +1,23 @@
-//! Opus parsing and OpusHead helpers.
+//! Opus.
 //!
-//! Centralizes RFC 7845 OpusHead encode/decode so the import and export
-//! paths share one implementation. [`Import`] publishes raw Opus frames.
+//! [`Config`] handles RFC 7845 OpusHead parse/encode; [`Import`]
+//! publishes raw Opus frames.
 
-pub mod import;
+mod import;
 
-pub use import::Import;
+pub use import::*;
 
 use bytes::{Buf, Bytes};
 
 const OPUS_HEAD: u64 = u64::from_be_bytes(*b"OpusHead");
 
 /// Typed Opus configuration mirroring the parsed fields of an OpusHead packet.
-pub struct OpusConfig {
+pub struct Config {
 	pub sample_rate: u32,
 	pub channel_count: u32,
 }
 
-impl OpusConfig {
+impl Config {
 	/// Parse an OpusHead buffer (RFC 7845 §5.1).
 	///
 	/// Verifies the magic signature; reads channel count and sample rate;
@@ -74,33 +74,33 @@ mod tests {
 
 	#[test]
 	fn parses_valid_opus_head() {
-		let cfg = OpusConfig {
+		let cfg = Config {
 			sample_rate: 48000,
 			channel_count: 2,
 		};
 		let encoded = cfg.encode();
 		assert_eq!(encoded.len(), 19);
-		let parsed = OpusConfig::parse(&mut encoded.as_ref()).unwrap();
+		let parsed = Config::parse(&mut encoded.as_ref()).unwrap();
 		assert_eq!(parsed.sample_rate, 48000);
 		assert_eq!(parsed.channel_count, 2);
 	}
 
 	#[test]
 	fn parse_rejects_invalid_signature() {
-		let mut bytes = OpusConfig {
+		let mut bytes = Config {
 			sample_rate: 48000,
 			channel_count: 1,
 		}
 		.encode()
 		.to_vec();
 		bytes[0] = b'X';
-		assert!(OpusConfig::parse(&mut bytes.as_slice()).is_err());
+		assert!(Config::parse(&mut bytes.as_slice()).is_err());
 	}
 
 	#[test]
 	#[should_panic(expected = "mapping family 0")]
 	fn encode_panics_for_multichannel() {
-		OpusConfig {
+		Config {
 			sample_rate: 48000,
 			channel_count: 6,
 		}

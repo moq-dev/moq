@@ -1,7 +1,7 @@
-//! Hang catalog: JSON-encoded broadcast description served over a moq-net track.
+//! Hang catalog. JSON, served over the `catalog.json` track.
 //!
-//! [`Producer`] manages publishing (both the hang and MSF catalog tracks);
-//! [`Consumer`] subscribes to the hang catalog and decodes updates.
+//! [`Producer`] publishes both the hang and MSF tracks together;
+//! [`Consumer`] subscribes to the hang track.
 
 mod consumer;
 mod producer;

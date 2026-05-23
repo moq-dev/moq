@@ -1,9 +1,7 @@
-//! Hang Legacy wire format: one media frame per moq-lite frame, encoded as
-//! a VarInt timestamp prefix followed by the raw codec bitstream.
+//! Original hang wire format.
 //!
-//! This is the original hang wire format. The [`Legacy`] type implements
-//! [`crate::container::Container`] directly; it carries no per-track state
-//! (the hang [`Frame`](hang::container::Frame) helper handles encode/decode).
+//! Each frame is a VarInt timestamp followed by the raw codec bitstream.
+//! Stateless — one [`Legacy`] handles every track.
 
 use std::task::Poll;
 

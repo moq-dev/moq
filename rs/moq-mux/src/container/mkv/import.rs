@@ -513,7 +513,7 @@ fn build_audio_config(
 			// Codec private is OpusHead. If present, it's authoritative for rate/channels.
 			let (cfg_rate, cfg_channels) = if let Some(priv_data) = codec_private {
 				let mut cursor = priv_data.clone();
-				let cfg = crate::codec::opus::OpusConfig::parse(&mut cursor)?;
+				let cfg = crate::codec::opus::Config::parse(&mut cursor)?;
 				(cfg.sample_rate, cfg.channel_count)
 			} else {
 				(sample_rate, channels)
@@ -532,7 +532,7 @@ fn build_audio_config(
 		"A_AAC" => {
 			let priv_data = codec_private.context("A_AAC missing CodecPrivate (AudioSpecificConfig)")?;
 			let mut cursor = priv_data.clone();
-			let cfg = crate::codec::aac::AacConfig::parse(&mut cursor)?;
+			let cfg = crate::codec::aac::Config::parse(&mut cursor)?;
 
 			Ok(AudioConfig {
 				codec: AAC { profile: cfg.profile }.into(),

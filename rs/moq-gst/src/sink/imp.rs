@@ -473,7 +473,7 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 				u32::try_from(channels).with_context(|| format!("Opus caps has negative channel count {channels}"))?;
 			let sample_rate =
 				u32::try_from(rate).with_context(|| format!("Opus caps has negative sample rate {rate}"))?;
-			let config = moq_mux::codec::opus::OpusConfig {
+			let config = moq_mux::codec::opus::Config {
 				sample_rate,
 				channel_count,
 			};

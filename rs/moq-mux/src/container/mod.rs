@@ -1,23 +1,17 @@
-//! Wire-level container abstraction + per-container submodules.
+//! Container formats.
 //!
-//! A moq-lite group carries a sequence of frames. *How* a media frame is
-//! encoded inside each moq-lite frame depends on the container format,
-//! one submodule per:
+//! A moq-lite group is a sequence of frames. Each container submodule
+//! decides how a media frame gets encoded into one of those frames:
 //!
-//! - [`legacy`] — VarInt timestamp prefix + raw codec bitstream. Wire-level only.
-//! - [`fmp4`] — ISO-BMFF moof+mdat fragments. Wire-level [`Container`] impl
-//!   ([`fmp4::Cmaf`]) plus external-file [`fmp4::Import`] /
-//!   [`fmp4::Export`].
-//! - [`loc`] — Low Overhead Container ([draft-ietf-moq-loc]). Wire-level only.
-//! - [`mkv`] — Matroska / WebM external file container. No moq wire-level
-//!   counterpart; [`mkv::Import`] / [`mkv::Export`] only.
-//! - [`hls`] — HLS playlist ingest. [`hls::Import`] only.
+//! - [`legacy`] — the original hang wire format. Timestamp + payload.
+//! - [`loc`] — Low Overhead Container, the IETF draft replacement for Legacy.
+//! - [`fmp4`] — ISO-BMFF moof+mdat fragments.
+//! - [`mkv`] — Matroska / WebM.
+//! - [`hls`] — HLS playlist ingest.
 //!
-//! [draft-ietf-moq-loc]: https://www.ietf.org/archive/id/draft-ietf-moq-loc-00.html
-//!
-//! [`Container`] abstracts the wire-level formats into a shared write/read
-//! interface. The [`Hang`] enum is a runtime-dispatched [`Container`] that
-//! picks the format from a hang catalog.
+//! Wire-level containers implement the [`Container`] trait. [`Hang`] is a
+//! runtime-dispatched enum that picks one based on a hang catalog entry,
+//! so most callers stay generic.
 
 use std::task::Poll;
 

@@ -63,7 +63,7 @@ impl AudioEncoder {
 		let opus = moq_mux::codec::opus::Import::new(
 			broadcast,
 			catalog,
-			moq_mux::codec::opus::OpusConfig {
+			moq_mux::codec::opus::Config {
 				sample_rate: OPUS_SAMPLE_RATE,
 				channel_count: CHANNELS,
 			},

@@ -1,16 +1,10 @@
-//! Matroska / WebM container.
-//!
-//! MKV is an external file format only — no moq wire-level [`Container`]
-//! counterpart. [`Import`] parses MKV byte streams into a broadcast,
-//! [`Export`] does the reverse.
-//!
-//! [`Container`]: crate::container::Container
+//! Matroska / WebM.
 
-pub mod export;
-pub mod import;
+mod export;
+mod import;
 
-pub use export::Export;
-pub use import::Import;
+pub use export::*;
+pub use import::*;
 
 #[cfg(test)]
 mod export_test;

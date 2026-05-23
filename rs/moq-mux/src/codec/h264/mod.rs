@@ -1,9 +1,12 @@
-//! H.264 parsing primitives, [`Avc1`] codec-shape transmuxer (Annex-B → length-prefixed),
-//! and the per-codec [`Import`] that publishes raw bitstreams.
+//! H.264.
+//!
+//! SPS / avcC parsing, an [`Avc1`] transmuxer that rewrites Annex-B into
+//! length-prefixed NALU + avcC, and an [`Import`] that auto-detects either
+//! wire shape from the leading bytes.
 
-pub mod import;
+mod import;
 
-pub use import::{Import, Mode};
+pub use import::*;
 
 use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -106,7 +109,7 @@ fn pack_constraint_flags(sps: &h264_parser::Sps) -> u8 {
 
 /// Build an AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2) from a
 /// single SPS and PPS NAL.
-pub fn build_avcc(sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
+pub(crate) fn build_avcc(sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
 	anyhow::ensure!(
 		sps_nal.len() <= u16::MAX as usize,
 		"SPS too large for avcC length field ({} > {})",

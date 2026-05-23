@@ -1,11 +1,8 @@
-//! Format dispatchers that pick the right per-container or per-codec
-//! importer based on a user-supplied [`FramedFormat`] / [`StreamFormat`].
+//! Format dispatchers.
 //!
-//! Concrete importers live next to the format they parse:
-//! - Container importers under [`crate::container`]
-//!   (`fmp4::Import`, `mkv::Import`, `hls::Import`).
-//! - Codec importers under [`crate::codec`]
-//!   (`h264::Import`, `aac::Import`, …).
+//! [`Framed`] and [`Stream`] pick a concrete importer from a user-supplied
+//! [`FramedFormat`] / [`StreamFormat`]. Concrete importers live with their
+//! format under [`crate::container`] or [`crate::codec`].
 
 use std::{fmt, str::FromStr};
 
@@ -143,11 +140,11 @@ impl Framed {
 				FramedKind::Av01(decoder)
 			}
 			FramedFormat::Aac => {
-				let config = crate::codec::aac::AacConfig::parse(buf)?;
+				let config = crate::codec::aac::Config::parse(buf)?;
 				FramedKind::Aac(crate::codec::aac::Import::new(broadcast, catalog, config)?)
 			}
 			FramedFormat::Opus => {
-				let config = crate::codec::opus::OpusConfig::parse(buf)?;
+				let config = crate::codec::opus::Config::parse(buf)?;
 				FramedKind::Opus(crate::codec::opus::Import::new(broadcast, catalog, config)?)
 			}
 			FramedFormat::Mkv => {
@@ -214,7 +211,7 @@ impl Framed {
 }
 
 // Lift an already-built codec importer into a `Framed` so callers that build
-// their config out-of-band (e.g. moq-gst, which constructs `OpusConfig` from
+// their config out-of-band (e.g. moq-gst, which constructs `opus::Config` from
 // gstreamer caps instead of an OpusHead buffer) can keep using `.into()`.
 impl From<crate::codec::opus::Import> for Framed {
 	fn from(opus: crate::codec::opus::Import) -> Self {

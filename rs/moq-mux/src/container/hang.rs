@@ -1,33 +1,23 @@
 use std::task::Poll;
 
-use crate::container::{Container, Frame, fmp4::Cmaf, legacy::Legacy, loc::Loc};
+use crate::container::{Container, Frame, fmp4, legacy::Legacy, loc};
 
 /// Catalog-driven [`Container`] for the hang protocol.
 ///
-/// `Hang` is a runtime-dispatched [`Container`] that selects the wire format based on a
-/// hang [`catalog::Container`](hang::catalog::Container). This lets callers carry a
-/// single concrete type through their pipeline (e.g. [`Consumer<Hang>`](crate::container::Consumer))
-/// instead of threading a generic parameter through user code.
-///
-/// - [`Hang::Legacy`]: VarInt timestamp prefix + raw codec bitstream, one media frame
-///   per moq-lite frame. The original hang wire format. Unit variant because
-///   [`Legacy`] is stateless.
-/// - [`Hang::Cmaf`]: ISO-BMFF moof+mdat fragments, potentially multiple samples per
-///   moq-lite frame. The contained [`Cmaf`] is parsed once from the catalog's init
-///   segment via [`Cmaf::from_init`].
-/// - [`Hang::Loc`]: Low Overhead Container (draft-ietf-moq-loc). One media frame per
-///   moq-lite frame, with a small property block in front of the codec bitstream.
+/// Runtime-dispatched union over the wire formats — Legacy, CMAF, LOC —
+/// so callers can carry a single concrete type through their pipeline
+/// (e.g. [`Consumer<Hang>`](crate::container::Consumer)) instead of
+/// threading a generic parameter through user code.
 ///
 /// Build from a catalog entry with `Hang::try_from(&container)`.
 pub enum Hang {
-	/// VarInt timestamp prefix + raw codec bitstream. One media frame per moq-lite frame.
+	/// VarInt timestamp + raw codec bitstream. The original hang wire format.
 	Legacy,
-	/// CMAF moof+mdat fragments. Wraps a parsed [`Cmaf`] (the track's `trak` box from the
-	/// init segment) so per-frame writes/reads have the timescale and track id available.
-	Cmaf(Cmaf),
-	/// Low Overhead Container. Frame timestamps use microseconds when the
-	/// per-frame 0x08 timescale property is absent.
-	Loc(Loc),
+	/// ISO-BMFF moof+mdat fragments. Holds a parsed [`fmp4::Fragment`] so
+	/// per-frame writes/reads know the timescale and track id.
+	Cmaf(fmp4::Fragment),
+	/// Low Overhead Container. Each moq frame holds one LOC frame.
+	Loc(loc::Frame),
 }
 
 impl TryFrom<&hang::catalog::Container> for Hang {
@@ -36,8 +26,8 @@ impl TryFrom<&hang::catalog::Container> for Hang {
 	fn try_from(container: &hang::catalog::Container) -> Result<Self, Self::Error> {
 		match container {
 			hang::catalog::Container::Legacy => Ok(Self::Legacy),
-			hang::catalog::Container::Cmaf { init, .. } => Ok(Self::Cmaf(Cmaf::from_init(init)?)),
-			hang::catalog::Container::Loc => Ok(Self::Loc(Loc::new())),
+			hang::catalog::Container::Cmaf { init, .. } => Ok(Self::Cmaf(fmp4::Fragment::from_init(init)?)),
+			hang::catalog::Container::Loc => Ok(Self::Loc(loc::Frame::new())),
 		}
 	}
 }

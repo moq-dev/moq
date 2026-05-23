@@ -1,10 +1,8 @@
 //! HLS playlist ingest.
 //!
-//! HLS is an external streaming format only — no moq wire-level
-//! [`Container`] counterpart and no exporter today.
-//!
-//! [`Container`]: crate::container::Container
+//! Follows the playlist, downloads each fMP4 segment, and feeds it
+//! through the fMP4 importer.
 
-pub mod import;
+mod import;
 
-pub use import::{HlsConfig, Import};
+pub use import::*;

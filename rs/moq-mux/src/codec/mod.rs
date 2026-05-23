@@ -1,10 +1,8 @@
-//! Per-codec parsing, building, and codec-shape transforms.
+//! Codecs.
 //!
-//! One module per codec. Each owns parsing and building of the codec
-//! configuration record (avcC / hvcC / av1C / AudioSpecificConfig / OpusHead),
-//! along with any Annex-B → length-prefixed transforms applicable to that codec
-//! ([`h264::Avc1`], [`h265::Hvc1`]) and a per-codec `Import` that publishes raw
-//! bitstreams as moq broadcasts.
+//! One submodule per codec. Each owns its config-record parser (avcC,
+//! hvcC, …), any Annex-B → length-prefixed transforms, and an `Import`
+//! that publishes raw bitstreams into a moq broadcast.
 
 pub mod aac;
 pub mod annexb;

@@ -1,26 +1,25 @@
-//! AAC parsing and AudioSpecificConfig helpers.
+//! AAC.
 //!
-//! Centralizes ISO 14496-3 AudioSpecificConfig encode/decode so the import
-//! and export paths share one implementation. [`Import`] publishes raw
-//! AAC frames.
+//! [`Config`] handles AudioSpecificConfig parse/encode; [`Import`]
+//! publishes raw AAC frames.
 
-pub mod import;
+mod import;
 
-pub use import::Import;
+pub use import::*;
 
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 
 /// Typed AAC configuration mirroring the relevant fields of an
 /// AudioSpecificConfig.
-pub struct AacConfig {
+pub struct Config {
 	pub profile: u8,
 	pub sample_rate: u32,
 	pub channel_count: u32,
 }
 
-impl AacConfig {
-	/// Parse an AudioSpecificConfig buffer into an [`AacConfig`].
+impl Config {
+	/// Parse an AudioSpecificConfig buffer.
 	///
 	/// Handles basic formats (object_type < 31), extended formats
 	/// (object_type == 31), and explicit sample rates (freq_index == 15).
@@ -200,7 +199,7 @@ mod tests {
 		// b0 = 0x12 (00010 0100b → object_type=2, freq_index high 3 bits=010)
 		// b1 = 0x10 (0001 0000b → freq_index low bit=0, channel_config=2, padding=000)
 		let buf = vec![0x12, 0x10];
-		let cfg = AacConfig::parse(&mut buf.as_slice()).unwrap();
+		let cfg = Config::parse(&mut buf.as_slice()).unwrap();
 		assert_eq!(cfg.profile, 2);
 		assert_eq!(cfg.sample_rate, 44100);
 		assert_eq!(cfg.channel_count, 2);
@@ -215,26 +214,26 @@ mod tests {
 	#[test]
 	fn round_trip_5_1_channels() {
 		// 5.1 surround: config=6, 6 channels.
-		let cfg = AacConfig {
+		let cfg = Config {
 			profile: 2,
 			sample_rate: 48000,
 			channel_count: 6,
 		};
 		let encoded = cfg.encode();
-		let parsed = AacConfig::parse(&mut encoded.as_ref()).unwrap();
+		let parsed = Config::parse(&mut encoded.as_ref()).unwrap();
 		assert_eq!(parsed.channel_count, 6);
 	}
 
 	#[test]
 	fn round_trip_7_1_channels() {
 		// 7.1 surround: config=7, but 8 channels.
-		let cfg = AacConfig {
+		let cfg = Config {
 			profile: 2,
 			sample_rate: 48000,
 			channel_count: 8,
 		};
 		let encoded = cfg.encode();
-		let parsed = AacConfig::parse(&mut encoded.as_ref()).unwrap();
+		let parsed = Config::parse(&mut encoded.as_ref()).unwrap();
 		assert_eq!(parsed.channel_count, 8, "7.1 surround should round-trip as 8 channels");
 	}
 

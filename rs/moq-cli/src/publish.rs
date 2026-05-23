@@ -52,11 +52,7 @@ impl Publish {
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Hls { playlist } => {
-				let hls = hls::Import::new(
-					broadcast.clone(),
-					catalog.clone(),
-					hls::HlsConfig::new(playlist.clone()),
-				)?;
+				let hls = hls::Import::new(broadcast.clone(), catalog.clone(), hls::Config::new(playlist.clone()))?;
 				PublishDecoder::Hls(Box::new(hls))
 			}
 		};

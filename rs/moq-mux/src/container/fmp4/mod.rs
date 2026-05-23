@@ -1,16 +1,10 @@
-//! fMP4 / CMAF: ISO-BMFF moof+mdat fragments.
-//!
-//! - [`Cmaf`] implements the wire-level [`crate::container::Container`] for a
-//!   single track (one moof+mdat per moq-lite frame, potentially N samples).
-//! - [`Import`] parses external fMP4 byte streams and publishes them.
-//! - [`Export`] subscribes to a broadcast and emits an fMP4 stream
-//!   (init segment + moof+mdat fragments).
+//! Fragmented MP4 (fMP4 / CMAF).
 
-pub mod export;
-pub mod import;
+mod export;
+mod import;
 
-pub use export::Export;
-pub use import::Import;
+pub use export::*;
+pub use import::*;
 
 #[cfg(test)]
 mod export_test;
@@ -67,16 +61,16 @@ pub enum Error {
 
 /// CMAF container: encodes/decodes a single track's moof+mdat fragments.
 ///
-/// Build from a CMAF init segment with [`Cmaf::from_init`], or wrap a
-/// pre-extracted [`mp4_atom::Trak`] directly with [`Cmaf::new`].
+/// Build from a CMAF init segment with [`Fragment::from_init`], or wrap a
+/// pre-extracted [`mp4_atom::Trak`] directly with [`Fragment::new`].
 ///
-/// The [`mp4_atom::Trak`] is heap-allocated so that embedding `Cmaf` in
+/// The [`mp4_atom::Trak`] is heap-allocated so that embedding `Fragment` in
 /// other enums (e.g. [`super::Hang`]) doesn't bloat unrelated variants.
-pub struct Cmaf {
+pub struct Fragment {
 	trak: Box<mp4_atom::Trak>,
 }
 
-impl Cmaf {
+impl Fragment {
 	/// Wrap an already-parsed track.
 	pub fn new(trak: mp4_atom::Trak) -> Self {
 		Self { trak: Box::new(trak) }
@@ -104,7 +98,7 @@ impl Cmaf {
 	}
 }
 
-impl Container for Cmaf {
+impl Container for Fragment {
 	type Error = Error;
 
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
@@ -215,7 +209,12 @@ pub(crate) fn encode(
 /// caller-supplied `timescale`.
 ///
 /// Returns an empty `Bytes` when `frames` is empty.
-pub fn encode_fragment(track_id: u32, timescale: u64, sequence_number: u32, frames: &[Frame]) -> Result<Bytes, Error> {
+pub(crate) fn encode_fragment(
+	track_id: u32,
+	timescale: u64,
+	sequence_number: u32,
+	frames: &[Frame],
+) -> Result<Bytes, Error> {
 	use mp4_atom::Encode;
 
 	if frames.is_empty() {
@@ -278,7 +277,7 @@ pub fn encode_fragment(track_id: u32, timescale: u64, sequence_number: u32, fram
 /// out-of-band configuration record (`description`) must be available, e.g.
 /// because the Avc1 / Hvc1 transform has finished building it from inline
 /// parameter sets.
-pub fn synthesize_video_trak(
+pub(crate) fn synthesize_video_trak(
 	track_id: u32,
 	timescale: u64,
 	config: &VideoConfig,
@@ -328,7 +327,11 @@ pub fn synthesize_video_trak(
 }
 
 /// Synthesize a CMAF `Trak` for an audio rendition that has no init segment.
-pub fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &AudioConfig) -> Result<mp4_atom::Trak, Error> {
+pub(crate) fn synthesize_audio_trak(
+	track_id: u32,
+	timescale: u64,
+	config: &AudioConfig,
+) -> Result<mp4_atom::Trak, Error> {
 	let audio = mp4_atom::Audio {
 		data_reference_index: 1,
 		channel_count: config.channel_count as u16,
@@ -418,7 +421,7 @@ fn build_mdia(timescale: u64, handler: &[u8; 4], is_video: bool, sample_entry: m
 ///
 /// Used by the fMP4 exporter when synthesizing an init segment for a track
 /// that has no catalog-supplied timescale.
-pub fn legacy_video_timescale(config: &VideoConfig) -> u64 {
+pub(crate) fn legacy_video_timescale(config: &VideoConfig) -> u64 {
 	if let Some(fps) = config.framerate {
 		(fps * 1000.0) as u64
 	} else {

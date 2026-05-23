@@ -318,7 +318,7 @@ fn derive_from_codec_config(
 	let mut buf = init;
 	match codec {
 		AudioCodec::AAC(_) => {
-			let cfg = crate::codec::aac::AacConfig::parse(&mut buf)
+			let cfg = crate::codec::aac::Config::parse(&mut buf)
 				.with_context(|| format!("MSF audio track {:?} has malformed AudioSpecificConfig", track.name))?;
 			anyhow::ensure!(
 				!buf.has_remaining(),
@@ -331,7 +331,7 @@ fn derive_from_codec_config(
 			})
 		}
 		AudioCodec::Opus => {
-			let cfg = crate::codec::opus::OpusConfig::parse(&mut buf)
+			let cfg = crate::codec::opus::Config::parse(&mut buf)
 				.with_context(|| format!("MSF audio track {:?} has malformed OpusHead", track.name))?;
 			anyhow::ensure!(
 				!buf.has_remaining(),
