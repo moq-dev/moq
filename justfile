@@ -13,7 +13,6 @@ mod swift
 
 # Demos and infra.
 mod demo
-mod cdn
 
 # Shortcuts to avoid `demo::` prefix.
 mod boy 'demo/boy'
@@ -55,8 +54,7 @@ ci:
 	just kt check
 	just swift check
 
-	# Cross-cutting: terraform, nix, multi-language tests, build.
-	(cd cdn && just check)
+	# Cross-cutting: nix, multi-language tests, build.
 	nix flake check
 	just test --all-features
 	just build
@@ -67,7 +65,6 @@ fix:
 	just rs fix
 	just py fix
 	bun remark . --quiet --output
-	if command -v tofu &> /dev/null; then (cd cdn && just fix); fi
 
 # Run unit tests for every language.
 test *args:
