@@ -67,10 +67,14 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq-boy/           # MoQ Boy web viewer (published as @moq/boy)
 
 /py/                  # Python packages (uv workspace)
-  moq-net/           # Maturin project: bundles rs/moq-ffi cdylib + uniffi
-                     # bindings as moq_net._uniffi. Published as moq-net on
-                     # PyPI; version tracks rs/moq-ffi (release-py.yml fires
-                     # on moq-ffi-v* tags).
+  moq-rs/            # Maturin project: bundles rs/moq-ffi cdylib + uniffi
+                     # bindings as moq._uniffi. Distribution name is
+                     # moq-rs (PyPI); import name is `moq`. Version tracks
+                     # rs/moq-ffi (release-py.yml fires on moq-ffi-v*
+                     # tags). One umbrella wheel covers every crate
+                     # exposed via moq-ffi because uniffi-linked
+                     # libraries can't be split across separately
+                     # packaged Python wheels.
 
 /demo/                # Demos and test media
   boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)
@@ -80,7 +84,6 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   throttle/          # Network throttle script for testing
 
 /doc/                 # Documentation site (VitePress, deployed via Cloudflare)
-/cdn/                 # CDN infrastructure (Terraform)
 ```
 
 ## Dependencies
@@ -127,6 +130,7 @@ match version {
 - **Formatting/Linting**: Biome for JS/TS formatting and linting
 - **UI**: Plain Web Components in `@moq/watch/ui` and `@moq/publish/ui`, built directly on `@moq/signals`
 - **Builds**: Nix flake for reproducible builds (optional)
+- **CI**: Prefer building release artifacts inside Nix (`nix build .#pkg`) over relying on runner-provided toolchains and `apt`/`brew` packages. Pinning the build environment in `flake.lock` makes artifacts deterministic and decouples them from drift in GitHub Actions runner images. Reach for the runner-native toolchain only when Nix doesn't fit (e.g. Windows runners).
 - **JS async patterns**: Use `Effect.interval()`, `Effect.timer()`, and `Effect.event()` helpers from `@moq/signals` instead of raw `setInterval`, `setTimeout`, `addEventListener`. These handle cleanup automatically when the Effect is closed.
 
 ## Testing Approach

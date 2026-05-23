@@ -47,5 +47,5 @@ __pycache__/
 .venv/
 
 # maturin develop drops uniffi bindings + cdylib here during editable
-# installs of py/moq-net.
-/py/moq-net/moq_net/_uniffi/
+# installs of py/moq-rs.
+/py/moq-rs/moq/_uniffi/

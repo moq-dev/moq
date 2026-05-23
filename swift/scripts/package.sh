@@ -120,6 +120,35 @@ cp -R "$SWIFT_DIR/Sources/Moq/." "$PKG_STAGE/Sources/Moq/"
 cp -R "$SWIFT_DIR/Tests/MoqTests/." "$PKG_STAGE/Tests/MoqTests/"
 cp "$BINDINGS_DIR/moq.swift" "$PKG_STAGE/Sources/MoqFFI/Generated.swift"
 
+# Dual-license files lifted from the workspace root so the mirror isn't
+# licenseless. Both files are required by the MIT OR Apache-2.0 grant.
+for license in LICENSE-MIT LICENSE-APACHE; do
+    [[ -f "$WORKSPACE_DIR/$license" ]] || { echo "Error: missing $WORKSPACE_DIR/$license" >&2; exit 1; }
+    cp "$WORKSPACE_DIR/$license" "$PKG_STAGE/$license"
+done
+
+# Minimal consumer-facing README. The full developer README lives in
+# the monorepo; this one just orients a visitor to moq-dev/moq-swift.
+cat > "$PKG_STAGE/README.md" <<EOF
+# Moq (Swift Package)
+
+Auto-generated mirror of the Swift package for [Media over QUIC](https://github.com/moq-dev/moq).
+
+Source, issues, and pull requests live in [moq-dev/moq](https://github.com/moq-dev/moq); this repo only carries tagged Swift Package Manager releases.
+
+## Install
+
+\`\`\`swift
+.package(url: "https://github.com/moq-dev/moq-swift", from: "${VERSION}"),
+\`\`\`
+
+The package depends on a prebuilt \`MoqFFI.xcframework\` attached to the matching [moq-ffi-v${VERSION}](https://github.com/moq-dev/moq/releases/tag/moq-ffi-v${VERSION}) release on the source repo.
+
+See [moq-dev/moq/swift/README.md](https://github.com/moq-dev/moq/blob/main/swift/README.md) for usage, local development, and release process.
+
+Licensed under MIT OR Apache-2.0.
+EOF
+
 # Generate Package.swift with the final URL+checksum.
 URL="${RELEASE_URL_BASE}/moq-ffi-v${VERSION}/MoqFFI.xcframework.zip"
 sed -e "s|REPLACE_VERSION|${VERSION}|g" \

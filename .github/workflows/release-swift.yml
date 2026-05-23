@@ -20,7 +20,7 @@ jobs:
       version: ${{ steps.parse.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Parse version from tag
         id: parse
@@ -37,19 +37,22 @@ jobs:
         target:
           - aarch64-apple-ios
           - aarch64-apple-ios-sim
+          # x86_64-apple-ios is the Intel iOS simulator slice (Apple never
+          # shipped Intel iOS devices), still needed for Xcode users on
+          # Intel Macs running the simulator.
           - x86_64-apple-ios
           - universal-apple-darwin
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target == 'universal-apple-darwin' && 'x86_64-apple-darwin,aarch64-apple-darwin' || matrix.target }}
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build
         shell: bash
@@ -65,7 +68,7 @@ jobs:
             --output dist
 
       - name: Upload lib
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: swift-lib-${{ matrix.target }}
           path: dist/moq-ffi-${{ needs.parse-version.outputs.version }}-${{ matrix.target }}/lib/
@@ -76,13 +79,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Generate bindings
         env:
@@ -94,7 +97,7 @@ jobs:
             --output dist
 
       - name: Upload bindings
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: swift-bindings
           path: dist/bindings/swift/
@@ -105,10 +108,10 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Download per-target libs
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: libs-raw
           pattern: swift-lib-*
@@ -123,7 +126,7 @@ jobs:
           ls -la libs
 
       - name: Download bindings
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: swift-bindings
           path: bindings
@@ -139,30 +142,82 @@ jobs:
             --output release-out
 
       - name: Upload Swift package
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: swift-package
           path: release-out/*
 
-  publish:
-    name: Publish to Swift Package mirror
+  release:
+    # Attach MoqFFI.xcframework.zip (and the staged Swift package
+    # tarball) to the moq-ffi-v* GitHub release. The mirror's
+    # Package.swift binaryTarget URL points at this asset, so it must
+    # exist before any consumer resolves the SPM tag.
+    name: Attach assets to GitHub release
     needs: [package, parse-version]
     runs-on: ubuntu-latest
-    # Skipped until PUBLISH_SPM=true and SWIFT_MIRROR_TOKEN are set. See
-    # swift/README.md for setup steps.
-    if: vars.PUBLISH_SPM == 'true'
+    permissions:
+      contents: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          # No git operations here use the stored credential. gh CLI
+          # below picks up GH_TOKEN directly, so don't persist a
+          # contents-write token in .git/config.
+          persist-credentials: false
+
+      - name: Find previous tag
+        id: prev_tag
+        run: .github/scripts/release.sh prev-tag moq-ffi
 
       - name: Download package
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: swift-package
+          path: artifacts
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TITLE: "moq-ffi v${{ needs.parse-version.outputs.version }}"
+          RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+        run: .github/scripts/release.sh create artifacts
+
+  publish:
+    name: Publish to Swift Package mirror
+    needs: [release, parse-version]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Generate moq-bot token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        id: token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: moq-dev
+          repositories: moq-swift
+          # Narrow the minted token to only what publish.sh needs,
+          # rather than inheriting the full App installation scope.
+          permission-contents: write
+
+      - name: Download package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: swift-package
           path: swift-out
 
-      - name: Publish to moq-swift mirror
+      - name: Publish to moq-dev/moq-swift mirror
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-          SWIFT_MIRROR_TOKEN: ${{ secrets.SWIFT_MIRROR_TOKEN }}
+          # Token is minted fresh per run, expires in 1 hour, never at rest.
+          SWIFT_MIRROR_TOKEN: ${{ steps.token.outputs.token }}
+          # Use the moq-bot identity for the commit author so the
+          # mirror's git log reflects who actually pushed.
+          GIT_AUTHOR_NAME: moq-bot
+          GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
         run: ./swift/scripts/publish.sh

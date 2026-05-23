@@ -43,8 +43,16 @@ export default defineConfig({
 			{ text: "Setup", link: "/setup/" },
 			{ text: "Concepts", link: "/concept/" },
 			{ text: "Apps", link: "/app/" },
-			{ text: "Rust", link: "/rs/" },
-			{ text: "TypeScript", link: "/js/" },
+			{
+				text: "Libraries",
+				items: [
+					{ text: "Rust", link: "/rs/" },
+					{ text: "TypeScript", link: "/js/" },
+					{ text: "Python", link: "/py/" },
+					{ text: "Swift", link: "/swift/" },
+					{ text: "Kotlin", link: "/kt/" },
+				],
+			},
 		],
 
 		sidebar: {
@@ -180,6 +188,30 @@ export default defineConfig({
 						{ text: "@moq/token", link: "/js/@moq/token" },
 						{ text: "@moq/signals", link: "/js/@moq/signals" },
 					],
+				},
+			],
+
+			"/py/": [
+				{
+					text: "Python",
+					link: "/py/",
+					items: [{ text: "moq-net", link: "/py/moq-net" }],
+				},
+			],
+
+			"/swift/": [
+				{
+					text: "Swift",
+					link: "/swift/",
+					items: [{ text: "Moq", link: "/swift/moq" }],
+				},
+			],
+
+			"/kt/": [
+				{
+					text: "Kotlin",
+					link: "/kt/",
+					items: [{ text: "dev.moq:moq", link: "/kt/moq" }],
 				},
 			],
 		},

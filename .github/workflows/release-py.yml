@@ -2,7 +2,7 @@ name: Release Py
 
 # Driven by the `moq-ffi-v*` tag that release-plz pushes when it bumps
 # rs/moq-ffi/Cargo.toml. The wheel inherits its version from that same
-# Cargo.toml (via maturin's dynamic version), so the moq-net package
+# Cargo.toml (via maturin's dynamic version), so the moq-rs package
 # stays lockstep with the moq-ffi crate without a separate bump.
 
 on:
@@ -25,13 +25,28 @@ jobs:
       version: ${{ steps.parse.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
       - name: Parse version from tag
         id: parse
         run: .github/scripts/release.sh parse-version moq-ffi
+
+      # Maturin reads the wheel version from rs/moq-ffi/Cargo.toml (via
+      # `dynamic = ["version"]` in pyproject.toml). If a tag is pushed by
+      # hand without bumping Cargo.toml first, the wheel would ship with
+      # the previous version and PyPI would reject the duplicate upload.
+      - name: Verify Cargo.toml matches tag
+        env:
+          TAG_VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          CARGO_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [[ "$TAG_VERSION" != "$CARGO_VERSION" ]]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match rs/moq-ffi/Cargo.toml version ($CARGO_VERSION). Bump Cargo.toml before tagging."
+            exit 1
+          fi
+          echo "Cargo.toml version matches tag: $TAG_VERSION"
 
   build:
     name: Build wheels (${{ matrix.target }})
@@ -59,50 +74,77 @@ jobs:
             os: windows-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"
 
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
-          # py/moq-net/pyproject.toml drives the build; its [tool.maturin]
+          # py/moq-rs/pyproject.toml drives the build; its [tool.maturin]
           # block points at rs/moq-ffi/Cargo.toml.
-          working-directory: py/moq-net
+          working-directory: py/moq-rs
           args: --release --out dist
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
           before-script-linux: ${{ matrix.before-script-linux || '' }}
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-${{ matrix.target }}
-          path: py/moq-net/dist/*.whl
+          path: py/moq-rs/dist/*.whl
+
+  sdist:
+    name: Build sdist
+    needs: [parse-version]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          working-directory: py/moq-rs
+          command: sdist
+          args: --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: python-sdist
+          path: py/moq-rs/dist/*.tar.gz
 
   publish:
     name: Publish to PyPI
-    needs: [build]
+    needs: [build, sdist]
     runs-on: ubuntu-latest
     # Skipped until PUBLISH_PYTHON=true is set in repo variables.
     if: vars.PUBLISH_PYTHON == 'true'
     environment:
       name: pypi
-      url: https://pypi.org/p/moq-net
+      url: https://pypi.org/p/moq-rs
     permissions:
       id-token: write
 
     steps:
       - name: Download wheels
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: python-*
           path: dist
           merge-multiple: true
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

@@ -5,7 +5,7 @@ requires-python = ">=3.10"
 [manifest]
 members = [
     "moq",
-    "moq-net",
+    "moq-rs",
 ]
 
 [[package]]
@@ -97,8 +97,8 @@ dev = [
 ]
 
 [[package]]
-name = "moq-net"
-source = { editable = "py/moq-net" }
+name = "moq-rs"
+source = { editable = "py/moq-rs" }
 
 [[package]]
 name = "nodeenv"
