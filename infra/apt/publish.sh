@@ -10,8 +10,8 @@
 #   R2_ACCESS_KEY_ID          R2 API token
 #   R2_SECRET_ACCESS_KEY
 #   R2_ACCOUNT_ID
-#   APT_SIGNING_KEY           ascii-armored GPG private key
-#   APT_SIGNING_KEY_ID        long key id used to pick the signing key
+#   REPO_SIGNING_KEY           ascii-armored GPG private key
+#   REPO_SIGNING_KEY_ID        long key id used to pick the signing key
 #
 # Required tools: rclone, apt-ftparchive (apt-utils), gpg, dpkg-scanpackages.
 
@@ -38,8 +38,12 @@ export RCLONE_CONFIG_R2_ACL=private
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-echo ">> Sync current pool from R2..."
-rclone sync "r2:${BUCKET}/pool" "$WORK/pool" --quiet || mkdir -p "$WORK/pool"
+# Pull additively: a partial fetch must never cause subsequent steps to act
+# on an incomplete view of the pool, which would drop the missing packages
+# from the regenerated Packages indexes.
+echo ">> Pull current pool from R2..."
+mkdir -p "$WORK/pool"
+rclone copy "r2:${BUCKET}/pool" "$WORK/pool" --quiet
 
 echo ">> Add new .deb files to pool..."
 shopt -s nullglob
@@ -82,8 +86,8 @@ echo ">> Sign Release..."
 GNUPGHOME=$(mktemp -d)
 export GNUPGHOME
 chmod 700 "$GNUPGHOME"
-echo "${APT_SIGNING_KEY:?}" | gpg --batch --quiet --import
-KEY_ID="${APT_SIGNING_KEY_ID:?}"
+echo "${REPO_SIGNING_KEY:?}" | gpg --batch --quiet --import
+KEY_ID="${REPO_SIGNING_KEY_ID:?}"
 gpg --batch --yes --default-key "$KEY_ID" --detach-sign --armor \
     -o "$WORK/dists/$DIST/Release.gpg" \
     "$WORK/dists/$DIST/Release"

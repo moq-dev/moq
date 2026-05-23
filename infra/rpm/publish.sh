@@ -9,8 +9,8 @@
 #   R2_ACCESS_KEY_ID          R2 API token
 #   R2_SECRET_ACCESS_KEY
 #   R2_ACCOUNT_ID
-#   APT_SIGNING_KEY           ascii-armored GPG private key (shared with apt repo)
-#   APT_SIGNING_KEY_ID        long key id used to pick the signing key
+#   REPO_SIGNING_KEY           ascii-armored GPG private key (shared with apt repo)
+#   REPO_SIGNING_KEY_ID        long key id used to pick the signing key
 #
 # Required tools: rclone, createrepo_c, gpg.
 
@@ -32,8 +32,12 @@ export RCLONE_CONFIG_R2_ACL=private
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-echo ">> Sync current repo from R2..."
-rclone sync "r2:${BUCKET}/${DIST}" "$WORK/${DIST}" --quiet || mkdir -p "$WORK/${DIST}"
+# Pull additively: a partial fetch must never cause the push step to delete
+# remote .rpms. createrepo_c --update overwrites repodata in place, so a
+# stale local repodata is fine - the regenerate step rewrites it.
+echo ">> Pull current repo from R2..."
+mkdir -p "$WORK/${DIST}"
+rclone copy "r2:${BUCKET}/${DIST}" "$WORK/${DIST}" --quiet
 
 echo ">> Sort new .rpm files by arch..."
 shopt -s nullglob
@@ -60,8 +64,8 @@ echo ">> Import signing key..."
 GNUPGHOME=$(mktemp -d)
 export GNUPGHOME
 chmod 700 "$GNUPGHOME"
-echo "${APT_SIGNING_KEY:?}" | gpg --batch --quiet --import
-KEY_ID="${APT_SIGNING_KEY_ID:?}"
+echo "${REPO_SIGNING_KEY:?}" | gpg --batch --quiet --import
+KEY_ID="${REPO_SIGNING_KEY_ID:?}"
 
 echo ">> Generate repodata per arch..."
 for arch in "${ARCHES[@]}"; do
@@ -86,8 +90,15 @@ EOF
 
 rm -rf "$GNUPGHOME"
 
+# Push .rpm blobs additively, but sync repodata so old indices are replaced.
+# Mixing the two avoids ever deleting an .rpm that survived a partial pull.
 echo ">> Upload to R2..."
-rclone sync "$WORK/${DIST}" "r2:${BUCKET}/${DIST}" --quiet
+for arch in "${ARCHES[@]}"; do
+    dir="$WORK/${DIST}/${arch}"
+    [[ -d "$dir" ]] || continue
+    rclone copy "$dir" "r2:${BUCKET}/${DIST}/${arch}" --include "*.rpm" --quiet
+    rclone sync "$dir/repodata" "r2:${BUCKET}/${DIST}/${arch}/repodata" --quiet
+done
 rclone copyto "$WORK/moq.repo" "r2:${BUCKET}/moq.repo" --quiet
 
 echo ">> Done. Repo updated at https://rpm.moq.dev/${DIST}/"

@@ -66,26 +66,14 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runs-on: ubuntu-22.04
             deb-arch: amd64
+            deb-multiarch: x86_64-linux-gnu
           - target: aarch64-unknown-linux-gnu
             runs-on: ubuntu-22.04-arm
             deb-arch: arm64
+            deb-multiarch: aarch64-linux-gnu
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install GStreamer dev headers
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev
 
       - name: Set up packaging tools
         uses: ./.github/actions/setup-packaging
@@ -95,15 +83,42 @@ jobs:
         shell: bash
         run: .github/scripts/release.sh parse-version moq-gst
 
-      - name: Build and package
+      - name: Build inside Debian 12 (glibc 2.36, gst 1.22)
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
-          ./rs/moq-gst/package.sh \
-            --packager deb \
-            --version ${{ steps.parse.outputs.version }} \
-            --arch ${{ matrix.deb-arch }} \
-            --target ${{ matrix.target }} \
-            --output dist
+          # gstreamer-rs 0.23 needs GStreamer >= 1.22 headers at compile
+          # time; Debian 12 (bookworm) ships 1.22 and glibc 2.36, the
+          # lowest-common-denominator that lets the .deb install on
+          # Debian 12+ and Ubuntu 24.04+.
+          docker run --rm \
+            -v "$PWD":/work -w /work \
+            -e TARGET \
+            debian:12 bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y --no-install-recommends \
+                build-essential pkg-config curl ca-certificates \
+                libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+              curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable --profile minimal
+              source $HOME/.cargo/env
+              cargo build --release --target "$TARGET" -p moq-gst
+            '
+
+      - name: Package via nfpm
+        shell: bash
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+          ARCH: ${{ matrix.deb-arch }}
+          PKG_NAME: gstreamer1.0-moq
+          PLUGIN_PATH: target/${{ matrix.target }}/release/libgstmoq.so
+          PLUGIN_DIR: /usr/lib/${{ matrix.deb-multiarch }}/gstreamer-1.0
+        run: |
+          mkdir -p dist
+          nfpm pkg --packager deb --config packaging/moq-gst/nfpm.yaml --target dist/
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

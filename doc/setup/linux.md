@@ -13,6 +13,8 @@ via your system package manager and stay current through normal
 ## Debian and Ubuntu
 
 Tested on Debian 12 (bookworm), Debian 13 (trixie), Ubuntu 22.04, Ubuntu 24.04.
+The `gstreamer1.0-moq` plugin needs GStreamer >= 1.22 and is only available
+on Debian 12+ / Ubuntu 24.04+; the other packages install on Ubuntu 22.04 too.
 
 ```bash
 # Trust the project's signing key.

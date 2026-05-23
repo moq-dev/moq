@@ -83,9 +83,10 @@ domain, and signing key already exist. To stand them up the first time:
    - `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`: R2 API token with
      object read/write on both buckets.
    - `R2_ACCOUNT_ID`: the Cloudflare account id.
-   - `APT_SIGNING_KEY`: ascii-armored private key
-     (`gpg --export-secret-keys --armor admin@moq.dev`).
-   - `APT_SIGNING_KEY_ID`: the long key id from step 3.
+   - `REPO_SIGNING_KEY`: ascii-armored private key
+     (`gpg --export-secret-keys --armor admin@moq.dev`). Shared by both
+     the apt and rpm publish workflows.
+   - `REPO_SIGNING_KEY_ID`: the long key id from step 3.
 
 After this, every release that publishes a `.deb` or `.rpm` (one of the
 `moq-relay-v*`, `moq-cli-v*`, `moq-token-cli-v*`, `moq-gst-v*` tags)
@@ -110,7 +111,7 @@ from scratch, the publish scripts can be invoked locally:
 gh release download moq-relay-v1.2.3 --dir artifacts --pattern '*.deb'
 ARTIFACTS_DIR=artifacts \
   R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_ACCOUNT_ID=... \
-  APT_SIGNING_KEY="$(cat private.asc)" APT_SIGNING_KEY_ID=... \
+  REPO_SIGNING_KEY="$(cat private.asc)" REPO_SIGNING_KEY_ID=... \
   ./infra/apt/publish.sh
 ```
 
