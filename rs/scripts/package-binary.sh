@@ -20,10 +20,19 @@ OUTPUT_DIR="dist"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --crate)   CRATE="$2"; shift 2 ;;
-        --target)  TARGET="$2"; shift 2 ;;
-        --version) VERSION="$2"; shift 2 ;;
-        --output)  OUTPUT_DIR="$2"; shift 2 ;;
+        --crate|--target|--version|--output)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: $1 requires a value" >&2
+                exit 1
+            fi
+            case $1 in
+                --crate)   CRATE="$2" ;;
+                --target)  TARGET="$2" ;;
+                --version) VERSION="$2" ;;
+                --output)  OUTPUT_DIR="$2" ;;
+            esac
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 --crate CRATE [--target TARGET] [--version VERSION] [--output DIR]"
             exit 0
@@ -52,8 +61,19 @@ if [[ -z "$VERSION" ]]; then
 fi
 
 if [[ -z "$TARGET" ]]; then
-    TARGET=$(rustc -vV | grep host | cut -d' ' -f2)
+    TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
     echo "Detected target: $TARGET"
+fi
+
+# This script builds the native nix output for the host. Cross-compilation
+# isn't wired up, so an explicit --target that disagrees with the host
+# would silently mislabel the archive. CI keeps target == host by matching
+# each matrix entry to a runner of the right arch.
+HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
+if [[ "$TARGET" != "$HOST_TARGET" ]]; then
+    echo "Error: --target ($TARGET) does not match host target ($HOST_TARGET)." >&2
+    echo "This script builds native nix outputs; refusing to mislabel the archive." >&2
+    exit 1
 fi
 
 echo "Building $CRATE for $TARGET via nix..."

@@ -27,11 +27,20 @@ OUTPUT=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --template)    TEMPLATE="$2"; shift 2 ;;
-        --version)     VERSION="$2"; shift 2 ;;
-        --release-dir) RELEASE_DIR="$2"; shift 2 ;;
-        --crate)       CRATE="$2"; shift 2 ;;
-        --output)      OUTPUT="$2"; shift 2 ;;
+        --template|--version|--release-dir|--crate|--output)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: $1 requires a value" >&2
+                exit 1
+            fi
+            case $1 in
+                --template)    TEMPLATE="$2" ;;
+                --version)     VERSION="$2" ;;
+                --release-dir) RELEASE_DIR="$2" ;;
+                --crate)       CRATE="$2" ;;
+                --output)      OUTPUT="$2" ;;
+            esac
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 --template T --version V --release-dir D --crate C --output O"
             exit 0
