@@ -58,7 +58,7 @@ jobs:
 
       # Build and push by digest. The manifest list is assembled in the merge job.
       - id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           platforms: ${{ matrix.platform }}
