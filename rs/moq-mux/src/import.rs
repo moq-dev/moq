@@ -48,7 +48,7 @@ impl FromStr for FramedFormat {
 			}
 			"hev1" => Ok(FramedFormat::Hev1),
 			"fmp4" | "cmaf" => Ok(FramedFormat::Fmp4),
-			"av01" | "av1" | "av1C" => Ok(FramedFormat::Av01),
+			"av01" | "av1" | "av1c" | "av1C" => Ok(FramedFormat::Av01),
 			"aac" => Ok(FramedFormat::Aac),
 			"opus" => Ok(FramedFormat::Opus),
 			"mkv" | "webm" | "matroska" => Ok(FramedFormat::Mkv),
@@ -262,7 +262,7 @@ impl FromStr for StreamFormat {
 			}
 			"hev1" => Ok(StreamFormat::Hev1),
 			"fmp4" | "cmaf" => Ok(StreamFormat::Fmp4),
-			"av01" | "av1" | "av1C" => Ok(StreamFormat::Av01),
+			"av01" | "av1" | "av1c" | "av1C" => Ok(StreamFormat::Av01),
 			"mkv" | "webm" | "matroska" => Ok(StreamFormat::Mkv),
 			_ => Err(Error::UnknownFormat(s.to_string())),
 		}

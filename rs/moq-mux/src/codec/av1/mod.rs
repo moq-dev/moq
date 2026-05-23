@@ -19,7 +19,7 @@ pub fn av1_from_av1c(av1c: &mp4_atom::Av1c) -> AV1 {
 	AV1 {
 		profile: av1c.seq_profile,
 		level: av1c.seq_level_idx_0,
-		bitdepth: bitdepth(av1c.seq_tier_0, av1c.high_bitdepth),
+		bitdepth: bitdepth(av1c.twelve_bit, av1c.high_bitdepth),
 		mono_chrome: av1c.monochrome,
 		chroma_subsampling_x: av1c.chroma_subsampling_x,
 		chroma_subsampling_y: av1c.chroma_subsampling_y,
@@ -28,11 +28,25 @@ pub fn av1_from_av1c(av1c: &mp4_atom::Av1c) -> AV1 {
 	}
 }
 
-/// Bit depth from the (seq_tier_0, high_bitdepth) av1C flag pair.
-pub fn bitdepth(tier: bool, high_bitdepth: bool) -> u8 {
-	match (tier, high_bitdepth) {
-		(true, true) => 12,
-		(true, false) | (false, true) => 10,
-		(false, false) => 8,
+/// Bit depth from the (twelve_bit, high_bitdepth) av1C flag pair
+/// (ISO/IEC 14496-15 + av1-isobmff §2.3.3).
+///
+/// Computes `8 + 2*high_bitdepth + 2*twelve_bit`.
+pub fn bitdepth(twelve_bit: bool, high_bitdepth: bool) -> u8 {
+	8 + 2 * u8::from(high_bitdepth) + 2 * u8::from(twelve_bit)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::bitdepth;
+
+	#[test]
+	fn maps_bitdepth_flags() {
+		assert_eq!(bitdepth(false, false), 8);
+		assert_eq!(bitdepth(false, true), 10);
+		assert_eq!(bitdepth(true, true), 12);
+		// twelve_bit=true with high_bitdepth=false is not a valid combination
+		// per the spec, but the additive formula still gives a defined answer.
+		assert_eq!(bitdepth(true, false), 10);
 	}
 }

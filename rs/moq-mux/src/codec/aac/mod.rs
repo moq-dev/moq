@@ -121,10 +121,12 @@ impl AacConfig {
 			_ => 0xF, // explicit 24-bit frequency follows
 		};
 
+		let channel_config = channel_config_from_count(self.channel_count) as u64;
+
 		if freq_index != 0xF {
 			// 5 + 4 + 4 = 13 bits → 2 bytes (3 bits padding)
 			let b0 = (profile << 3) | (freq_index >> 1);
-			let b1 = ((freq_index & 1) << 7) | ((self.channel_count as u8 & 0x0F) << 3);
+			let b1 = ((freq_index & 1) << 7) | ((channel_config as u8 & 0x0F) << 3);
 			Bytes::from(vec![b0, b1])
 		} else {
 			// 5 + 4 + 24 + 4 = 37 bits → 5 bytes (3 bits padding)
@@ -132,7 +134,7 @@ impl AacConfig {
 			bits |= (profile as u64) << 35;
 			bits |= 0xF_u64 << 31;
 			bits |= (self.sample_rate as u64) << 7;
-			bits |= ((self.channel_count as u64) & 0xF) << 3;
+			bits |= (channel_config & 0xF) << 3;
 			let all = bits.to_be_bytes();
 			Bytes::copy_from_slice(&all[3..8])
 		}
@@ -156,13 +158,94 @@ fn sample_rate_from_index<T: Buf>(freq_index: u8, buf: &mut T) -> anyhow::Result
 		.context("unsupported sample rate index")
 }
 
+/// Map an AAC `channel_config` (ISO 14496-3 Table 1.19) to its real channel count.
+/// Configs 1..=6 happen to be identity (5.1 has config=6 and 6 channels). Config
+/// 7 is 7.1 = 8 channels. Config 0 means "described elsewhere" — we default to
+/// stereo.
 fn channel_count_from_config(channel_config: u8) -> u32 {
-	if channel_config == 0 {
-		2
-	} else if channel_config <= 7 {
-		channel_config as u32
-	} else {
-		tracing::warn!(channel_config, "unsupported channel config, defaulting to stereo");
-		2
+	match channel_config {
+		1..=6 => channel_config as u32,
+		7 => 8,
+		0 => {
+			tracing::warn!("channel_config=0 (program config element) unsupported, defaulting to stereo");
+			2
+		}
+		_ => {
+			tracing::warn!(channel_config, "unsupported channel config, defaulting to stereo");
+			2
+		}
+	}
+}
+
+/// Inverse of [`channel_count_from_config`]. Defaults to stereo for unsupported
+/// counts (channel configs > 7 are reserved).
+fn channel_config_from_count(channel_count: u32) -> u8 {
+	match channel_count {
+		1..=6 => channel_count as u8,
+		8 => 7,
+		_ => {
+			tracing::warn!(channel_count, "unsupported channel count, defaulting to stereo");
+			2
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn parses_standard_2_byte_config() {
+		// AAC-LC (profile=2), 44100 Hz (freq_index=4), stereo (channels=2).
+		// b0 = 0x12 (00010 0100b → object_type=2, freq_index high 3 bits=010)
+		// b1 = 0x10 (0001 0000b → freq_index low bit=0, channel_config=2, padding=000)
+		let buf = vec![0x12, 0x10];
+		let cfg = AacConfig::parse(&mut buf.as_slice()).unwrap();
+		assert_eq!(cfg.profile, 2);
+		assert_eq!(cfg.sample_rate, 44100);
+		assert_eq!(cfg.channel_count, 2);
+	}
+
+	// TODO: a round-trip test for the explicit-frequency (freq_index=0xF) form
+	// fails today because the parser reads `channel_config` from byte 1 even
+	// though ISO 14496-3 §1.6.2.1 puts it *after* the 24-bit explicit sample
+	// rate. The encoder follows the spec, the parser doesn't. Fixing requires
+	// a bit-level reader; deferred to a separate PR.
+
+	#[test]
+	fn round_trip_5_1_channels() {
+		// 5.1 surround: config=6, 6 channels.
+		let cfg = AacConfig {
+			profile: 2,
+			sample_rate: 48000,
+			channel_count: 6,
+		};
+		let encoded = cfg.encode();
+		let parsed = AacConfig::parse(&mut encoded.as_ref()).unwrap();
+		assert_eq!(parsed.channel_count, 6);
+	}
+
+	#[test]
+	fn round_trip_7_1_channels() {
+		// 7.1 surround: config=7, but 8 channels.
+		let cfg = AacConfig {
+			profile: 2,
+			sample_rate: 48000,
+			channel_count: 8,
+		};
+		let encoded = cfg.encode();
+		let parsed = AacConfig::parse(&mut encoded.as_ref()).unwrap();
+		assert_eq!(parsed.channel_count, 8, "7.1 surround should round-trip as 8 channels");
+	}
+
+	#[test]
+	fn channel_config_zero_falls_back_to_stereo() {
+		// Config 0 means "described in PCE" which we don't implement.
+		assert_eq!(channel_count_from_config(0), 2);
+	}
+
+	#[test]
+	fn unsupported_channel_count_falls_back_to_stereo_config() {
+		assert_eq!(channel_config_from_count(9), 2);
 	}
 }

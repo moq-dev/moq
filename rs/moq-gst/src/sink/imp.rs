@@ -469,9 +469,13 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 		"audio/x-opus" => {
 			let channels: i32 = structure.get("channels").unwrap_or(2);
 			let rate: i32 = structure.get("rate").unwrap_or(48_000);
+			let channel_count =
+				u32::try_from(channels).with_context(|| format!("Opus caps has negative channel count {channels}"))?;
+			let sample_rate =
+				u32::try_from(rate).with_context(|| format!("Opus caps has negative sample rate {rate}"))?;
 			let config = moq_mux::codec::opus::OpusConfig {
-				sample_rate: rate as u32,
-				channel_count: channels as u32,
+				sample_rate,
+				channel_count,
 			};
 			moq_mux::codec::opus::Import::new(runtime.broadcast.clone(), runtime.catalog.clone(), config)?.into()
 		}

@@ -201,11 +201,7 @@ impl Import {
 				profile: seq_profile,
 				level: seq_level_idx,
 				tier: if tier { 'H' } else { 'M' },
-				bitdepth: if high_bitdepth {
-					if twelve_bit { 12 } else { 10 }
-				} else {
-					8
-				},
+				bitdepth: super::bitdepth(twelve_bit, high_bitdepth),
 				mono_chrome: ((data[2] >> 4) & 0x01) == 1,
 				chroma_subsampling_x: ((data[2] >> 3) & 0x01) == 1,
 				chroma_subsampling_y: ((data[2] >> 2) & 0x01) == 1,
