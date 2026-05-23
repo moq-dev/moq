@@ -309,8 +309,14 @@ impl Import {
 					unreachable!("decode_nal is avc3 only")
 				};
 				if sps.as_ref().is_some_and(|cached| cached != &nal) {
+					// SPS changed mid-AU. The cached PPS is tied to the old SPS
+					// and may already have been appended to current.chunks
+					// earlier in this AU; reset the AU so the new SPS+PPS pair
+					// is the only parameter set we emit.
 					*pps = None;
+					current.chunks.clear();
 					current.contains_pps = false;
+					current.contains_sps = false;
 				}
 				*sps = Some(nal.clone());
 				current.contains_sps = true;

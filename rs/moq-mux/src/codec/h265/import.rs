@@ -208,9 +208,15 @@ impl Import {
 				let sps = SpsNALUnit::parse(&mut &nal[..]).context("failed to parse SPS NAL unit")?;
 				self.init(&sps)?;
 
-				// PPS is tied to SPS context; drop cached PPS when SPS changes.
+				// SPS changed mid-AU. Cached VPS/PPS are tied to the old SPS
+				// and may already have been appended to current.chunks earlier
+				// in this AU; reset the AU so the new VPS+SPS+PPS triple is
+				// the only parameter set we emit.
 				if self.sps.as_ref().is_some_and(|cached| cached != &nal) {
 					self.pps = None;
+					self.current.chunks.clear();
+					self.current.contains_vps = false;
+					self.current.contains_sps = false;
 					self.current.contains_pps = false;
 				}
 
