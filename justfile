@@ -74,8 +74,11 @@ ci BASE="":
 		just swift ci "$files"
 	fi
 
-	# Cheap; always run.
+	# Cheap; always run. `bun install` is needed for remark-cli, since
+	# `just js ci` (where bun deps would otherwise install) is skipped
+	# when the diff has no JS-scoped files.
 	nix flake check
+	bun install --frozen-lockfile
 	bun remark . --quiet --frail
 
 # Auto-fix linting/formatting issues across all languages.
