@@ -10,8 +10,10 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde_with::DurationMilliSecondsWithFrac;
 
 /// The default track name for the MSF catalog.
 pub const DEFAULT_NAME: &str = "catalog";
@@ -35,6 +37,7 @@ pub struct Catalog {
 /// then assign whichever optional fields they need; struct-literal
 /// construction (with or without `..base`) is not available outside this
 /// crate.
+#[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -94,8 +97,12 @@ pub struct Track {
 	#[serde(rename = "maxObjSapStartingType")]
 	pub max_obj_sap_starting_type: Option<u8>,
 
-	/// Jitter in milliseconds (non-standard extension, matches JS implementation).
-	pub jitter: Option<f64>,
+	/// Jitter (non-standard extension, matches JS implementation).
+	///
+	/// Serialized as a JSON number of milliseconds with fractional precision
+	/// (e.g. `15.5`), so it stays wire-compatible with existing JS consumers.
+	#[serde_as(as = "Option<DurationMilliSecondsWithFrac<f64>>")]
+	pub jitter: Option<Duration>,
 }
 
 impl Catalog {
@@ -438,7 +445,7 @@ mod test {
 			alt_group: None,
 			max_grp_sap_starting_type: Some(1),
 			max_obj_sap_starting_type: Some(2),
-			jitter: Some(15.5),
+			jitter: Some(Duration::from_micros(15_500)),
 		}
 	}
 
@@ -503,6 +510,6 @@ mod test {
 		assert_eq!(original, parsed);
 		assert_eq!(parsed.tracks[0].max_grp_sap_starting_type, Some(1));
 		assert_eq!(parsed.tracks[0].max_obj_sap_starting_type, Some(2));
-		assert_eq!(parsed.tracks[0].jitter, Some(15.5));
+		assert_eq!(parsed.tracks[0].jitter, Some(Duration::from_micros(15_500)));
 	}
 }

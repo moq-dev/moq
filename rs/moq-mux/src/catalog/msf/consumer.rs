@@ -216,14 +216,7 @@ fn video_config_from_msf(track: &moq_msf::Track) -> anyhow::Result<Option<VideoC
 		framerate: track.framerate,
 		optimize_for_latency: None,
 		container,
-		// Jitter is converted from f64 milliseconds to integer milliseconds.
-		// Fractional milliseconds are truncated (e.g. 15.5ms becomes 15ms).
-		// This is acceptable for the jitter use case where sub-ms precision
-		// is not meaningful.
-		jitter: track
-			.jitter
-			.filter(|v| v.is_finite() && *v >= 0.0)
-			.map(|v| std::time::Duration::from_millis(v as u64)),
+		jitter: track.jitter,
 	}))
 }
 
@@ -263,14 +256,7 @@ fn audio_config_from_msf(track: &moq_msf::Track) -> anyhow::Result<Option<AudioC
 		bitrate: track.bitrate,
 		description: legacy_description(track)?,
 		container,
-		// Jitter is converted from f64 milliseconds to integer milliseconds.
-		// Fractional milliseconds are truncated (e.g. 15.5ms becomes 15ms).
-		// This is acceptable for the jitter use case where sub-ms precision
-		// is not meaningful.
-		jitter: track
-			.jitter
-			.filter(|v| v.is_finite() && *v >= 0.0)
-			.map(|v| std::time::Duration::from_millis(v as u64)),
+		jitter: track.jitter,
 	}))
 }
 
