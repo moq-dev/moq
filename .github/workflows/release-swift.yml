@@ -189,10 +189,6 @@ jobs:
     name: Publish to Swift Package mirror
     needs: [release, parse-version]
     runs-on: ubuntu-latest
-    # Skipped until PUBLISH_SPM=true is set in repo variables. The moq-bot
-    # GitHub App already has org-wide access, so no SWIFT_MIRROR_TOKEN
-    # secret is needed. See swift/README.md for setup steps.
-    if: vars.PUBLISH_SPM == 'true'
 
     steps:
       - uses: actions/checkout@v6

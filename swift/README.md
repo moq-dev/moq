@@ -53,15 +53,10 @@ swift/
 
 ## Publishing to SPM
 
-The `moq-ffi-v*` release flow attaches `MoqFFI.xcframework.zip` to the GitHub Release here and mirrors a self-contained Swift package to [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift) on a bare-semver tag that SPM can resolve.
+Every `moq-ffi-v*` tag attaches `MoqFFI.xcframework.zip` to the GitHub Release here and mirrors a self-contained Swift package to [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift) on a bare-semver tag that SPM can resolve. No extra configuration: the `moq-bot` GitHub App (already used by `release-rs.yml`) has `contents: write` on the mirror, and `release-swift.yml` mints a fresh installation token per run.
 
-To enable the mirror push:
+The `publish` job ("Publish to Swift Package mirror") runs `publish.sh`, which clones the mirror, replaces its tree with the staged package, commits, tags with `${VERSION}` (bare semver), and pushes.
 
-1. The empty `moq-dev/moq-swift` repo already exists.
-2. Confirm the `moq-bot` GitHub App is installed on `moq-dev/moq-swift` with `contents: write`. The same App backs `release-rs.yml`, so the `APP_ID` and `APP_PRIVATE_KEY` secrets are already wired in `moq-dev/moq`.
-3. In `moq-dev/moq` repo settings, add variable `PUBLISH_SPM=true`.
-4. Cut the next `moq-ffi-v*` tag. The `publish` job ("Publish to Swift Package mirror") mints a fresh `moq-bot` token scoped to `moq-dev/moq-swift`, then runs `publish.sh`, which clones the mirror, replaces its tree with the staged package, commits, tags with `${VERSION}` (bare semver), and pushes.
-
-To dry-run locally without flipping `PUBLISH_SPM`, run `BUILD_VERSION=<v> ./swift/scripts/publish.sh --dry-run` against a staged tarball. Dry-run uses an anonymous clone (so the mirror must be public, or you must export `SWIFT_MIRROR_TOKEN` to authenticate), stages the diff, and skips the commit and push.
+To dry-run locally, run `BUILD_VERSION=<v> ./swift/scripts/publish.sh --dry-run` against a staged tarball. Dry-run uses an anonymous clone (so the mirror must be public, or you must export `SWIFT_MIRROR_TOKEN` to authenticate), stages the diff, and skips the commit and push.
 
 No Apple Developer account or App Store Connect setup needed.

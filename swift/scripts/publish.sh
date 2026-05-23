@@ -20,7 +20,7 @@ set -euo pipefail
 # Flags:
 #   --dry-run           Stage and diff against the mirror but skip the
 #                       commit, tag, and push. Useful for verifying the
-#                       pipeline before flipping PUBLISH_SPM=true.
+#                       pipeline locally without touching the mirror.
 #
 # Expects the staged Swift package tarball under `swift-out/`, produced
 # by package.sh as `moq-ffi-${BUILD_VERSION}-swift.tar.gz`.
