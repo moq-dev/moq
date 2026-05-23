@@ -30,7 +30,7 @@ cargo install uniffi-bindgen-go \
 
 ## Layout
 
-```
+```text
 go/
   go.mod              Module declaration (github.com/moq-dev/moq-go)
   moq/

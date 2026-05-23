@@ -48,13 +48,10 @@ esac
 [[ -f "$CDYLIB" ]] || { echo "go check: cdylib not found at $CDYLIB" >&2; exit 1; }
 [[ -f "$STATICLIB" ]] || { echo "go check: staticlib not found at $STATICLIB" >&2; exit 1; }
 
-# Map cargo host target -> Go GOOS_GOARCH (the cgo build-tag subdir).
+# Reject unsupported hosts up front; package.sh derives the cgo
+# subdir name from the cargo target via its own mapping.
 case "$HOST_TARGET" in
-    x86_64-unknown-linux-gnu)   GOSUBDIR="linux_amd64";;
-    aarch64-unknown-linux-gnu)  GOSUBDIR="linux_arm64";;
-    x86_64-apple-darwin)        GOSUBDIR="darwin_amd64";;
-    aarch64-apple-darwin)       GOSUBDIR="darwin_arm64";;
-    x86_64-pc-windows-msvc)     GOSUBDIR="windows_amd64";;
+    x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu|x86_64-apple-darwin|aarch64-apple-darwin|x86_64-pc-windows-msvc) ;;
     *) echo "go check: unsupported host target $HOST_TARGET" >&2; exit 1;;
 esac
 

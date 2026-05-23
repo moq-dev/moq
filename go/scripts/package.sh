@@ -128,7 +128,7 @@ Source, issues, and pull requests live in [moq-dev/moq](https://github.com/moq-d
 go get github.com/moq-dev/moq-go@v${VERSION}
 \`\`\`
 
-The module bundles prebuilt \`libmoq_ffi.a\` for \`linux/amd64\`, \`linux/arm64\`, \`darwin/amd64\`, \`darwin/arm64\`, and \`windows/amd64\`; cgo selects the right archive automatically.
+The module bundles prebuilt native libraries for \`linux/amd64\`, \`linux/arm64\`, \`darwin/amd64\`, \`darwin/arm64\` (\`libmoq_ffi.a\`), and \`windows/amd64\` (\`moq_ffi.lib\`); cgo selects the right one automatically.
 
 See [moq-dev/moq/go/README.md](https://github.com/moq-dev/moq/blob/main/go/README.md) for usage and the release process.
 
