@@ -74,7 +74,8 @@ env ${xcode_sdk_env[@]+"${xcode_sdk_env[@]}"} xcodebuild -create-xcframework \
 mkdir -p "$SWIFT_DIR/Sources/MoqFFI"
 cp "$BINDGEN_OUT/moq.swift" "$SWIFT_DIR/Sources/MoqFFI/Generated.swift"
 
-# Use a path-based Package.swift for local dev.
+# Use a path-based Package.swift for local dev. Mirrors the three-target
+# layout in swift/Package.swift (Moq -> MoqFFI -> MoqFFIBinary).
 cat > "$SWIFT_DIR/Package.swift" <<EOF
 // swift-tools-version:5.9
 // Auto-rewritten by swift/scripts/check.sh for local dev. Restore via git
@@ -88,7 +89,8 @@ let package = Package(
     products: [.library(name: "Moq", targets: ["Moq"])],
     targets: [
         .target(name: "Moq", dependencies: ["MoqFFI"], path: "Sources/Moq"),
-        .binaryTarget(name: "MoqFFI", path: "MoqFFI.xcframework"),
+        .target(name: "MoqFFI", dependencies: ["MoqFFIBinary"], path: "Sources/MoqFFI"),
+        .binaryTarget(name: "MoqFFIBinary", path: "MoqFFI.xcframework"),
         .testTarget(name: "MoqTests", dependencies: ["Moq"], path: "Tests/MoqTests"),
     ]
 )

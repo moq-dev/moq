@@ -2,14 +2,20 @@
 //
 // Swift Package Manager manifest for Moq.
 //
-// The MoqFFI binary target points at an XCFramework attached to the
-// matching moq-ffi-v* GitHub Release. swift/scripts/package.sh rewrites
-// the URL and checksum below as part of the release pipeline before this
-// file is pushed to the moq-dev/moq-swift mirror repo, which is what SPM
-// consumers actually resolve.
+// Three-target layout:
+//   - MoqFFIBinary: the XCFramework attached to the matching
+//     moq-ffi-v* GitHub Release. Provides the C `moqFFI` clang module
+//     (low-level uniffi scaffolding).
+//   - MoqFFI: Swift wrapper that compiles the uniffi-generated
+//     `Sources/MoqFFI/Generated.swift`, which `import moqFFI` and
+//     exposes Swift-native types (MoqClient, MoqSession, etc.).
+//   - Moq: hand-written ergonomic API on top of MoqFFI.
 //
-// For local development pre-release, swap MoqFFI's `.binaryTarget` for
-// `.binaryTarget(name: "MoqFFI", path: "MoqFFI.xcframework")`.
+// swift/scripts/package.sh rewrites the URL and checksum below before
+// this file is pushed to the moq-dev/moq-swift mirror repo, which is
+// what SPM consumers actually resolve. For local pre-release dev,
+// swift/scripts/check.sh swaps the URL-based binaryTarget for a path-
+// based one pointing at MoqFFI.xcframework next to this manifest.
 
 import PackageDescription
 
@@ -28,8 +34,13 @@ let package = Package(
             dependencies: ["MoqFFI"],
             path: "Sources/Moq"
         ),
-        .binaryTarget(
+        .target(
             name: "MoqFFI",
+            dependencies: ["MoqFFIBinary"],
+            path: "Sources/MoqFFI"
+        ),
+        .binaryTarget(
+            name: "MoqFFIBinary",
             url: "https://github.com/moq-dev/moq/releases/download/moq-ffi-vREPLACE_VERSION/MoqFFI.xcframework.zip",
             checksum: "REPLACE_CHECKSUM"
         ),
