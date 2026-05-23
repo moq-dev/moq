@@ -29,9 +29,15 @@ pub struct Catalog {
 }
 
 /// A single track in the MSF catalog.
+///
+/// Marked `#[non_exhaustive]` because the CMSF/MSF drafts continue to grow
+/// optional fields. External constructors should start from a previously
+/// produced `Track` (e.g. from `Catalog::from_str`) or use struct update
+/// syntax against one.
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct Track {
 	/// Unique track name (case-sensitive).
 	pub name: String,
@@ -101,6 +107,36 @@ impl Catalog {
 	#[allow(clippy::should_implement_trait)]
 	pub fn from_str(s: &str) -> Result<Self, serde_json::Error> {
 		serde_json::from_str(s)
+	}
+}
+
+impl Track {
+	/// Construct a track with the required identity fields set and every
+	/// optional field cleared. Fields are `pub`, so callers set whatever they
+	/// need by assignment afterwards.
+	///
+	/// This is the only path external crates have to build a `Track` since the
+	/// type is `#[non_exhaustive]`.
+	pub fn new(name: impl Into<String>, packaging: Packaging) -> Self {
+		Self {
+			name: name.into(),
+			packaging,
+			is_live: false,
+			role: None,
+			codec: None,
+			width: None,
+			height: None,
+			framerate: None,
+			samplerate: None,
+			channel_config: None,
+			bitrate: None,
+			init_data: None,
+			render_group: None,
+			alt_group: None,
+			max_grp_sap_starting_type: None,
+			max_obj_sap_starting_type: None,
+			jitter: None,
+		}
 	}
 }
 

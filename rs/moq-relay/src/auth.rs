@@ -467,7 +467,13 @@ impl AuthConfig {
 
 /// The result of a successful authentication, containing the resolved
 /// permissions for a connection.
+///
+/// Marked `#[non_exhaustive]` so additional context fields (cluster tier flags,
+/// rate-limit info, etc.) can be added without bumping the major version.
+/// External consumers must build tokens through library APIs (e.g. via
+/// [`Auth::verify`]) rather than by struct literal.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct AuthToken {
 	/// The root path this token is scoped to.
 	pub root: PathOwned,

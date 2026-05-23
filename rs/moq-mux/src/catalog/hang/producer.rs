@@ -156,25 +156,21 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 		};
 
 		let sap_type = video_sap_type(&config.codec);
-		tracks.push(moq_msf::Track {
-			name: name.clone(),
-			packaging,
-			is_live: true,
-			role: Some(moq_msf::Role::Video),
-			codec: Some(config.codec.to_string()),
-			width: config.coded_width,
-			height: config.coded_height,
-			framerate: config.framerate,
-			samplerate: None,
-			channel_config: None,
-			bitrate: config.bitrate,
-			init_data,
-			render_group: Some(1),
-			alt_group: if has_multiple_video { Some(1) } else { None },
-			max_grp_sap_starting_type: sap_type,
-			max_obj_sap_starting_type: sap_type,
-			jitter: config.jitter.map(|t| t.as_millis() as f64),
-		});
+		let mut track = moq_msf::Track::new(name.clone(), packaging);
+		track.is_live = true;
+		track.role = Some(moq_msf::Role::Video);
+		track.codec = Some(config.codec.to_string());
+		track.width = config.coded_width;
+		track.height = config.coded_height;
+		track.framerate = config.framerate;
+		track.bitrate = config.bitrate;
+		track.init_data = init_data;
+		track.render_group = Some(1);
+		track.alt_group = if has_multiple_video { Some(1) } else { None };
+		track.max_grp_sap_starting_type = sap_type;
+		track.max_obj_sap_starting_type = sap_type;
+		track.jitter = config.jitter.map(|t| t.as_millis() as f64);
+		tracks.push(track);
 	}
 
 	let has_multiple_audio = catalog.audio.renditions.len() > 1;
@@ -192,25 +188,20 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 				.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref())),
 		};
 
-		tracks.push(moq_msf::Track {
-			name: name.clone(),
-			packaging,
-			is_live: true,
-			role: Some(moq_msf::Role::Audio),
-			codec: Some(config.codec.to_string()),
-			width: None,
-			height: None,
-			framerate: None,
-			samplerate: Some(config.sample_rate),
-			channel_config: Some(config.channel_count.to_string()),
-			bitrate: config.bitrate,
-			init_data,
-			render_group: Some(1),
-			alt_group: if has_multiple_audio { Some(1) } else { None },
-			max_grp_sap_starting_type: Some(1),
-			max_obj_sap_starting_type: Some(1),
-			jitter: config.jitter.map(|t| t.as_millis() as f64),
-		});
+		let mut track = moq_msf::Track::new(name.clone(), packaging);
+		track.is_live = true;
+		track.role = Some(moq_msf::Role::Audio);
+		track.codec = Some(config.codec.to_string());
+		track.samplerate = Some(config.sample_rate);
+		track.channel_config = Some(config.channel_count.to_string());
+		track.bitrate = config.bitrate;
+		track.init_data = init_data;
+		track.render_group = Some(1);
+		track.alt_group = if has_multiple_audio { Some(1) } else { None };
+		track.max_grp_sap_starting_type = Some(1);
+		track.max_obj_sap_starting_type = Some(1);
+		track.jitter = config.jitter.map(|t| t.as_millis() as f64);
+		tracks.push(track);
 	}
 
 	moq_msf::Catalog { version: 1, tracks }
