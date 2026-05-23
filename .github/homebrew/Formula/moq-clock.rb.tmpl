@@ -1,0 +1,36 @@
+class MoqClock < Formula
+  desc "Clock synchronization example for Media over QUIC"
+  homepage "https://moq.dev"
+  version "__VERSION__"
+  license any_of: ["MIT", "Apache-2.0"]
+
+  on_macos do
+    on_arm do
+      url "https://github.com/moq-dev/moq/releases/download/moq-clock-v#{version}/moq-clock-#{version}-aarch64-apple-darwin.tar.gz"
+      sha256 "__SHA256_AARCH64_APPLE_DARWIN__"
+    end
+    on_intel do
+      url "https://github.com/moq-dev/moq/releases/download/moq-clock-v#{version}/moq-clock-#{version}-x86_64-apple-darwin.tar.gz"
+      sha256 "__SHA256_X86_64_APPLE_DARWIN__"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/moq-dev/moq/releases/download/moq-clock-v#{version}/moq-clock-#{version}-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "__SHA256_AARCH64_UNKNOWN_LINUX_GNU__"
+    end
+    on_intel do
+      url "https://github.com/moq-dev/moq/releases/download/moq-clock-v#{version}/moq-clock-#{version}-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "__SHA256_X86_64_UNKNOWN_LINUX_GNU__"
+    end
+  end
+
+  def install
+    bin.install "bin/moq-clock"
+  end
+
+  test do
+    system bin/"moq-clock", "--help"
+  end
+end

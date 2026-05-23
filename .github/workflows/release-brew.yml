@@ -1,0 +1,151 @@
+name: release-brew
+
+# Renders the matching Homebrew formula template from
+# .github/homebrew/Formula/ with the released version + tarball sha256s,
+# then pushes the rendered formula to moq-dev/homebrew-tap.
+#
+# Triggered after a per-crate release workflow finishes successfully, so
+# the GitHub Release assets are guaranteed to exist by the time we
+# download them.
+#
+# Requires repository secret HOMEBREW_TAP_TOKEN: a PAT with `contents:
+# write` on moq-dev/homebrew-tap.
+
+on:
+  workflow_run:
+    workflows:
+      - moq-relay
+      - moq-cli
+      - moq-clock
+      - moq-token-cli
+      - moq-gst
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish formula to homebrew-tap
+    if: ${{ github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'moq-') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Parse crate and version
+        id: parse
+        env:
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [[ ! "$TAG" =~ ^(.+)-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "Tag format not recognized: $TAG" >&2
+            exit 1
+          fi
+          crate="${BASH_REMATCH[1]}"
+          version="${BASH_REMATCH[2]}"
+          echo "crate=$crate" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Crate: $crate"
+          echo "Version: $version"
+
+      - name: Check template exists
+        env:
+          CRATE: ${{ steps.parse.outputs.crate }}
+        run: |
+          template=".github/homebrew/Formula/${CRATE}.rb.tmpl"
+          if [[ ! -f "$template" ]]; then
+            echo "No Homebrew template for crate: $CRATE (looked for $template)" >&2
+            exit 1
+          fi
+
+      - name: Download release tarballs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.parse.outputs.tag }}
+          CRATE: ${{ steps.parse.outputs.crate }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          mkdir -p release-assets
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-gnu
+          do
+            name="${CRATE}-${VERSION}-${target}.tar.gz"
+            echo "Downloading $name..."
+            gh release download "$TAG" \
+              --repo "${{ github.repository }}" \
+              --pattern "$name" \
+              --dir release-assets
+          done
+          ls -la release-assets
+
+      - name: Render formula
+        env:
+          CRATE: ${{ steps.parse.outputs.crate }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          mkdir -p rendered
+          ./.github/scripts/render-formula.sh \
+            --template ".github/homebrew/Formula/${CRATE}.rb.tmpl" \
+            --version "$VERSION" \
+            --release-dir release-assets \
+            --crate "$CRATE" \
+            --output "rendered/${CRATE}.rb"
+          echo "--- Rendered formula ---"
+          cat "rendered/${CRATE}.rb"
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v6
+        with:
+          repository: moq-dev/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Commit and push formula
+        env:
+          CRATE: ${{ steps.parse.outputs.crate }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          cd homebrew-tap
+          mkdir -p Formula
+          cp "../rendered/${CRATE}.rb" "Formula/${CRATE}.rb"
+
+          # Seed a README the first time the tap repo receives a push.
+          if [[ ! -f README.md ]]; then
+            cat > README.md <<'EOF'
+          # moq Homebrew tap
+
+          Homebrew formulae for the [moq](https://github.com/moq-dev/moq) workspace.
+
+          ```bash
+          brew tap moq-dev/tap
+          brew install moq-dev/tap/moq-relay
+          brew install moq-dev/tap/moq-cli
+          brew install moq-dev/tap/moq-clock
+          brew install moq-dev/tap/moq-token-cli
+          brew install moq-dev/tap/moq-gst
+          ```
+
+          Formulae here are generated automatically by the
+          [release-brew workflow](https://github.com/moq-dev/moq/blob/main/.github/workflows/release-brew.yml)
+          in moq-dev/moq. Do not edit by hand; edit the templates under
+          `.github/homebrew/Formula/` in moq-dev/moq instead.
+          EOF
+          fi
+
+          git config user.name "moq-release-bot"
+          git config user.email "noreply@moq.dev"
+
+          if git diff --quiet; then
+            echo "No changes to commit (formula already up to date)."
+            exit 0
+          fi
+
+          git add Formula/ README.md
+          git commit -m "${CRATE}: bump to v${VERSION}"
+          git push
