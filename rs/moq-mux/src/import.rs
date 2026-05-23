@@ -215,6 +215,25 @@ impl Framed {
 	}
 }
 
+// Lift an already-built codec importer into a `Framed` so callers that build
+// their config out-of-band (e.g. moq-gst, which constructs `OpusConfig` from
+// gstreamer caps instead of an OpusHead buffer) can keep using `.into()`.
+impl From<crate::codec::opus::import::Import> for Framed {
+	fn from(opus: crate::codec::opus::import::Import) -> Self {
+		Self {
+			decoder: FramedKind::Opus(opus),
+		}
+	}
+}
+
+impl From<crate::codec::aac::import::Import> for Framed {
+	fn from(aac: crate::codec::aac::import::Import) -> Self {
+		Self {
+			decoder: FramedKind::Aac(aac),
+		}
+	}
+}
+
 // -- stream dispatcher --
 
 /// Formats that support stream decoding (unknown frame boundaries).
