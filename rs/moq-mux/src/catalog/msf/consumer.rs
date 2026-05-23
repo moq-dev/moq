@@ -223,7 +223,7 @@ fn video_config_from_msf(track: &moq_msf::Track) -> anyhow::Result<Option<VideoC
 		jitter: track
 			.jitter
 			.filter(|v| v.is_finite() && *v >= 0.0)
-			.and_then(|v| moq_net::Timestamp::from_millis(v as u64).ok()),
+			.map(|v| std::time::Duration::from_millis(v as u64)),
 	}))
 }
 
@@ -270,7 +270,7 @@ fn audio_config_from_msf(track: &moq_msf::Track) -> anyhow::Result<Option<AudioC
 		jitter: track
 			.jitter
 			.filter(|v| v.is_finite() && *v >= 0.0)
-			.and_then(|v| moq_net::Timestamp::from_millis(v as u64).ok()),
+			.map(|v| std::time::Duration::from_millis(v as u64)),
 	}))
 }
 

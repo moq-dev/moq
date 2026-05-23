@@ -173,7 +173,7 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 			alt_group: if has_multiple_video { Some(1) } else { None },
 			max_grp_sap_starting_type: sap_type,
 			max_obj_sap_starting_type: sap_type,
-			jitter: config.jitter.and_then(|t| t.as_millis().ok()).map(|ms| ms as f64),
+			jitter: config.jitter.map(|d| d.as_millis() as f64),
 		});
 	}
 
@@ -209,7 +209,7 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 			alt_group: if has_multiple_audio { Some(1) } else { None },
 			max_grp_sap_starting_type: Some(1),
 			max_obj_sap_starting_type: Some(1),
-			jitter: config.jitter.and_then(|t| t.as_millis().ok()).map(|ms| ms as f64),
+			jitter: config.jitter.map(|d| d.as_millis() as f64),
 		});
 	}
 
@@ -431,7 +431,7 @@ mod test {
 				framerate: Some(30.0),
 				optimize_for_latency: None,
 				container: Container::Legacy,
-				jitter: Some(moq_net::Timestamp::from_millis_unchecked(100)),
+				jitter: Some(std::time::Duration::from_millis(100)),
 			},
 		);
 
@@ -445,7 +445,7 @@ mod test {
 				bitrate: None,
 				description: None,
 				container: Container::Legacy,
-				jitter: Some(moq_net::Timestamp::from_millis_unchecked(40)),
+				jitter: Some(std::time::Duration::from_millis(40)),
 			},
 		);
 

@@ -134,10 +134,12 @@ pub struct VideoConfig {
 	/// The player's jitter buffer should be larger than this value.
 	/// If not provided, the player should assume each frame is flushed immediately.
 	///
+	/// Serialized as an integer number of milliseconds (sub-ms precision is truncated).
+	///
 	/// ex:
 	/// - If each frame is flushed immediately, this would be 1000/fps.
 	/// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
 	/// - If frames are buffered into 2s segments, this would be 2s.
-	#[serde(default)]
-	pub jitter: Option<moq_net::Timestamp>,
+	#[serde(default, with = "crate::catalog::duration_millis")]
+	pub jitter: Option<std::time::Duration>,
 }

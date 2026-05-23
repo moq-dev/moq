@@ -644,7 +644,7 @@ impl Import {
 								.renditions
 								.get_mut(&track.track.name)
 								.context("missing video config")?;
-							config.jitter = Some(jitter.convert(crate::container::Timescale::MILLI)?);
+							config.jitter = Some(std::time::Duration::try_from(jitter)?);
 						}
 						TrackKind::Audio => {
 							let config = catalog
@@ -652,7 +652,7 @@ impl Import {
 								.renditions
 								.get_mut(&track.track.name)
 								.context("missing audio config")?;
-							config.jitter = Some(jitter.convert(crate::container::Timescale::MILLI)?);
+							config.jitter = Some(std::time::Duration::try_from(jitter)?);
 						}
 					}
 				}

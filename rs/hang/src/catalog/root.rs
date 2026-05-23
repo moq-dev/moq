@@ -180,4 +180,92 @@ mod test {
 		let output = decoded.to_string().expect("failed to encode");
 		assert_eq!(encoded, output, "wrong encoded output");
 	}
+
+	/// Lock in the on-wire shape of the jitter field: a bare integer number
+	/// of milliseconds. If `Option<Duration>` ever loses the `duration_millis`
+	/// serde adapter, this regresses to serde's default `{secs, nanos}` shape.
+	#[test]
+	fn jitter_serialized_as_millis() {
+		let mut encoded = r#"{
+			"video": {
+				"renditions": {
+					"video": {
+						"codec": "avc1.64001f",
+						"container": {"kind": "legacy"},
+						"jitter": 100
+					}
+				}
+			},
+			"audio": {
+				"renditions": {
+					"audio": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"container": {"kind": "legacy"},
+						"jitter": 40
+					}
+				}
+			}
+		}"#
+		.to_string();
+		encoded.retain(|c| !c.is_whitespace());
+
+		let mut video_renditions = BTreeMap::new();
+		video_renditions.insert(
+			"video".to_string(),
+			VideoConfig {
+				codec: H264 {
+					profile: 0x64,
+					constraints: 0x00,
+					level: 0x1f,
+					inline: false,
+				}
+				.into(),
+				description: None,
+				coded_width: None,
+				coded_height: None,
+				display_ratio_width: None,
+				display_ratio_height: None,
+				bitrate: None,
+				framerate: None,
+				optimize_for_latency: None,
+				container: Container::Legacy,
+				jitter: Some(std::time::Duration::from_millis(100)),
+			},
+		);
+
+		let mut audio_renditions = BTreeMap::new();
+		audio_renditions.insert(
+			"audio".to_string(),
+			AudioConfig {
+				codec: Opus,
+				sample_rate: 48_000,
+				channel_count: 2,
+				bitrate: None,
+				description: None,
+				container: Container::Legacy,
+				jitter: Some(std::time::Duration::from_millis(40)),
+			},
+		);
+
+		let catalog = Catalog {
+			video: Video {
+				renditions: video_renditions,
+				display: None,
+				rotation: None,
+				flip: None,
+			},
+			audio: Audio {
+				renditions: audio_renditions,
+			},
+			..Default::default()
+		};
+
+		let decoded = Catalog::from_str(&encoded).expect("failed to decode");
+		assert_eq!(catalog, decoded, "decode mismatch");
+
+		let output = catalog.to_string().expect("failed to encode");
+		assert_eq!(encoded, output, "encode mismatch");
+	}
 }

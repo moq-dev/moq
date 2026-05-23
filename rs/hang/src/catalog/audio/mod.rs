@@ -85,8 +85,10 @@ pub struct AudioConfig {
 	/// The player's jitter buffer should be larger than this value.
 	/// If not provided, the player should assume each frame is flushed immediately.
 	///
+	/// Serialized as an integer number of milliseconds (sub-ms precision is truncated).
+	///
 	/// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
 	/// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 23ms
-	#[serde(default)]
-	pub jitter: Option<moq_net::Timestamp>,
+	#[serde(default, with = "crate::catalog::duration_millis")]
+	pub jitter: Option<std::time::Duration>,
 }

@@ -7,6 +7,7 @@
 mod audio;
 mod chat;
 mod container;
+mod duration_millis;
 mod preview;
 mod root;
 mod user;
