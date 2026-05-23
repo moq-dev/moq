@@ -1,33 +1,38 @@
 //! Media muxers and demuxers for MoQ.
 //!
 //! `moq-mux` sits between [`moq_net`] (the generic pub/sub protocol) and [`hang`]
-//! (the media catalog/container format). It exposes four submodules:
+//! (the media catalog/container format). It exposes:
 //!
-//! - [`container`]: the wire-level container abstraction and per-track wrappers.
-//!   The [`Container`](container::Container) trait, the [`Hang`](container::Hang) enum
-//!   (Legacy or CMAF), the [`Frame`](container::Frame) type, and the generic
-//!   [`Consumer`](container::Consumer)/[`Producer`](container::Producer) wrappers that
-//!   dispatch to a `Container` implementation.
-//! - [`catalog`]: hang and MSF catalog publish/subscribe.
-//!   [`Producer`](catalog::hang::Producer) manages both catalog tracks,
-//!   [`Consumer`](catalog::hang::Consumer) subscribes to incoming hang catalog updates,
-//!   [`MsfConsumer`](catalog::msf::Consumer) does the same for MSF.
-//! - [`codec`]: per-codec parsing, codec-shape transmuxers, and codec-specific importers
-//!   (e.g. [`codec::h264::import::Import`]).
-//! - [`import`]: pull external media (fMP4, HLS, MKV) into a moq broadcast.
-//! - [`export`]: subscribe to a moq broadcast and produce media bytes.
-//!   [`Fmp4`](export::Fmp4) yields a single fMP4 / CMAF byte stream (init segment +
-//!   moof+mdat fragments) in timestamp order across tracks.
+//! - [`container`] — wire-level container abstraction (the [`Container`] trait,
+//!   the [`Hang`] dispatcher, the per-format submodules [`fmp4`], [`mkv`],
+//!   [`legacy`], [`loc`], [`hls`]). External file containers (fmp4, mkv, hls)
+//!   ship with `import::Import` / `export::Export` submodules.
+//! - [`codec`] — per-codec parsing, codec-shape transmuxers, and codec-specific
+//!   importers (e.g. [`codec::h264::import::Import`]).
+//! - [`catalog`] — hang and MSF catalog publish/subscribe.
+//!   [`catalog::hang::Producer`] manages both catalog tracks;
+//!   [`catalog::hang::Consumer`] and [`catalog::msf::Consumer`] subscribe.
+//! - [`import`] — [`Framed`](import::Framed) / [`Stream`](import::Stream)
+//!   dispatchers that pick the right concrete importer from a user-supplied
+//!   format string.
 //!
-//! Broadcast names use a filename-style suffix ([`CatalogFormat::extension`](catalog::CatalogFormat::extension))
-//! to advertise their catalog format (`.hang`, `.msf`). Consumers call
+//! [`Container`]: container::Container
+//! [`Hang`]: container::Hang
+//! [`fmp4`]: container::fmp4
+//! [`mkv`]: container::mkv
+//! [`legacy`]: container::legacy
+//! [`loc`]: container::loc
+//! [`hls`]: container::hls
+//!
+//! Broadcast names use a filename-style suffix
+//! ([`CatalogFormat::extension`](catalog::CatalogFormat::extension)) to
+//! advertise their catalog format (`.hang`, `.msf`). Consumers call
 //! [`CatalogFormat::detect`](catalog::CatalogFormat::detect) to pick a catalog track.
 
 pub mod catalog;
 pub mod codec;
 pub mod container;
 mod error;
-pub mod export;
 pub mod import;
 
 pub use error::*;

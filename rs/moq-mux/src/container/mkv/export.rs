@@ -12,14 +12,14 @@ use webm_iterable::{WebmWriter, WriteOptions};
 use crate::catalog::CatalogFormat;
 use crate::container::Frame;
 
-use super::{CatalogSource, ExportSource};
+use crate::container::{CatalogSource, ExportSource};
 
 /// Matroska TimestampScale: 1 ms (in nanoseconds).
 const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 
 /// Subscribe to a moq broadcast and produce a single Matroska / WebM byte stream.
 ///
-/// Built from a [`moq_net::BroadcastConsumer`], `Mkv` subscribes to the hang catalog,
+/// Built from a [`moq_net::BroadcastConsumer`], `Export` subscribes to the hang catalog,
 /// (un)subscribes per-rendition tracks, decodes them via a per-track source, and
 /// re-encodes everything as EBML + Segment + Tracks + Cluster/SimpleBlock tags ready
 /// for any Matroska-aware consumer (ffplay, libwebm, browser MSE for WebM).
@@ -34,7 +34,7 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 ///
 /// ## Avc3 / Hev1 sources
 ///
-/// `Mkv` accepts Annex-B sources (`H264 { inline: true }`, `H265 { in_band: true }`,
+/// `Export` accepts Annex-B sources (`H264 { inline: true }`, `H265 { in_band: true }`,
 /// catalog `description` empty) by attaching a [`crate::codec::h264::Avc1`] /
 /// [`crate::codec::h265::Hvc1`] to each affected track. The transform caches
 /// parameter sets, builds the out-of-band `AVCDecoderConfigurationRecord` /
@@ -44,7 +44,7 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 ///
 /// Only Legacy-container tracks (raw codec payloads) are supported. CMAF tracks
 /// (moof+mdat passthrough) are rejected with a clear error.
-pub struct Mkv {
+pub struct Export {
 	broadcast: moq_net::BroadcastConsumer,
 	catalog: Option<CatalogSource>,
 	latency: Duration,
@@ -151,7 +151,7 @@ impl ClusterBuilder {
 	}
 }
 
-impl Mkv {
+impl Export {
 	/// Subscribe to `broadcast` and produce MKV byte chunks.
 	///
 	/// `catalog_format` selects which catalog track the exporter subscribes to

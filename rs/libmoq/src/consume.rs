@@ -220,7 +220,11 @@ impl Consume {
 			name: rendition.clone(),
 			priority: 1, // TODO: Remove priority
 		})?;
-		let track = moq_mux::container::Consumer::new(track, moq_mux::container::Hang::Legacy).with_latency(latency);
+		let track = moq_mux::container::Consumer::new(
+			track,
+			moq_mux::container::Hang::Legacy(moq_mux::container::legacy::Legacy::new()),
+		)
+		.with_latency(latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -264,7 +268,11 @@ impl Consume {
 			name: rendition.clone(),
 			priority: 2, // TODO: Remove priority
 		})?;
-		let track = moq_mux::container::Consumer::new(track, moq_mux::container::Hang::Legacy).with_latency(latency);
+		let track = moq_mux::container::Consumer::new(
+			track,
+			moq_mux::container::Hang::Legacy(moq_mux::container::legacy::Legacy::new()),
+		)
+		.with_latency(latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {

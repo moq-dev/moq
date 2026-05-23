@@ -10,11 +10,11 @@ use mp4_atom::{DecodeMaybe, Encode};
 use crate::catalog::CatalogFormat;
 use crate::container::Frame;
 
-use super::{CatalogSource, ExportSource};
+use crate::container::{CatalogSource, ExportSource};
 
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
 ///
-/// Built from a [`moq_net::BroadcastConsumer`], `Fmp4` subscribes to the hang catalog,
+/// Built from a [`moq_net::BroadcastConsumer`], `Export` subscribes to the hang catalog,
 /// (un)subscribes per-rendition tracks as the catalog changes, decodes both Legacy and
 /// CMAF tracks via a per-track source, and re-encodes everything as a merged init
 /// segment + moof+mdat fragments in presentation-timestamp order across tracks. This
@@ -26,7 +26,7 @@ use super::{CatalogSource, ExportSource};
 /// keyframes); [`with_fragment_duration`](Self::with_fragment_duration) caps the
 /// fragment duration for downstream consumers that throttle by fragment rate.
 /// Returns `None` when the broadcast ends.
-pub struct Fmp4 {
+pub struct Export {
 	broadcast: moq_net::BroadcastConsumer,
 	catalog: Option<CatalogSource>,
 	latency: Duration,
@@ -64,7 +64,7 @@ struct Fmp4Track {
 	sequence_number: u32,
 }
 
-impl Fmp4 {
+impl Export {
 	/// Subscribe to `broadcast` and produce fMP4 byte chunks.
 	///
 	/// `catalog_format` selects which catalog track the importer subscribes to
@@ -334,7 +334,7 @@ impl Fmp4 {
 						.source
 						.description()
 						.context("video track missing codec config for synthesized init")?;
-					let trak = crate::container::cmaf::synthesize_video_trak(
+					let trak = crate::container::fmp4::synthesize_video_trak(
 						track.track_id,
 						track.timescale,
 						config,
@@ -357,7 +357,7 @@ impl Fmp4 {
 					extract_init(init, &mut ftyp_data, &mut traks, &mut trexs)?;
 				}
 				Container::Legacy | Container::Loc => {
-					let trak = crate::container::cmaf::synthesize_audio_trak(track.track_id, track.timescale, config)?;
+					let trak = crate::container::fmp4::synthesize_audio_trak(track.track_id, track.timescale, config)?;
 					trexs.push(mp4_atom::Trex {
 						track_id: trak.tkhd.track_id,
 						default_sample_description_index: 1,
@@ -464,7 +464,7 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> anyhow::Result<
 	anyhow::ensure!(!frames.is_empty(), "encode_fragment called with no frames");
 	let seq = track.sequence_number;
 	track.sequence_number += 1;
-	Ok(crate::container::cmaf::encode_fragment(
+	Ok(crate::container::fmp4::encode_fragment(
 		track.track_id,
 		track.timescale,
 		seq,
@@ -475,9 +475,9 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> anyhow::Result<
 fn catalog_timescale_video(config: &VideoConfig) -> u64 {
 	match &config.container {
 		Container::Cmaf { init, .. } => {
-			parse_timescale_from_init(init).unwrap_or_else(|_| crate::container::cmaf::legacy_video_timescale(config))
+			parse_timescale_from_init(init).unwrap_or_else(|_| crate::container::fmp4::legacy_video_timescale(config))
 		}
-		Container::Loc | Container::Legacy => crate::container::cmaf::legacy_video_timescale(config),
+		Container::Loc | Container::Legacy => crate::container::fmp4::legacy_video_timescale(config),
 	}
 }
 

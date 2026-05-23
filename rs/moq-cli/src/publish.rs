@@ -1,6 +1,6 @@
 use clap::Subcommand;
 use hang::moq_net;
-use moq_mux::import;
+use moq_mux::container::{fmp4, hls};
 
 #[derive(Subcommand, Clone)]
 pub enum PublishFormat {
@@ -16,8 +16,8 @@ pub enum PublishFormat {
 
 enum PublishDecoder {
 	Avc3(Box<moq_mux::codec::h264::import::Import>),
-	Fmp4(Box<import::Fmp4>),
-	Hls(Box<import::Hls>),
+	Fmp4(Box<fmp4::import::Import>),
+	Hls(Box<hls::import::Import>),
 }
 
 impl PublishDecoder {
@@ -48,14 +48,14 @@ impl Publish {
 				PublishDecoder::Avc3(Box::new(avc3))
 			}
 			PublishFormat::Fmp4 => {
-				let fmp4 = import::Fmp4::new(broadcast.clone(), catalog.clone());
+				let fmp4 = fmp4::import::Import::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Hls { playlist } => {
-				let hls = import::Hls::new(
+				let hls = hls::import::Import::new(
 					broadcast.clone(),
 					catalog.clone(),
-					import::HlsConfig::new(playlist.clone()),
+					hls::import::HlsConfig::new(playlist.clone()),
 				)?;
 				PublishDecoder::Hls(Box::new(hls))
 			}

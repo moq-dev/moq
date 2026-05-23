@@ -1,36 +1,44 @@
-//! Wire-level container abstraction shared by the import/export pipelines.
+//! Wire-level container abstraction + per-container submodules.
 //!
-//! A moq-lite group carries a sequence of frames. *How* a media frame is encoded inside
-//! each moq-lite frame depends on the container format:
+//! A moq-lite group carries a sequence of frames. *How* a media frame is
+//! encoded inside each moq-lite frame depends on the container format,
+//! one submodule per:
 //!
-//! - **Hang Legacy**: a VarInt timestamp prefix followed by the raw codec bitstream.
-//!   One media frame per moq-lite frame.
-//! - **CMAF**: ISO-BMFF moof+mdat atoms. A single moq-lite frame can carry multiple
-//!   samples (one fragment).
-//! - **LOC**: Low Overhead Container (draft-ietf-moq-loc). A small property block
-//!   (timestamp, optional per-frame timescale) followed by the raw codec bitstream.
-//!   One media frame per moq-lite frame.
+//! - [`legacy`] — VarInt timestamp prefix + raw codec bitstream. Wire-level only.
+//! - [`fmp4`] — ISO-BMFF moof+mdat fragments. Wire-level [`Container`] impl
+//!   ([`fmp4::Cmaf`]) plus external-file [`fmp4::import::Import`] /
+//!   [`fmp4::export::Export`].
+//! - [`loc`] — Low Overhead Container ([draft-ietf-moq-loc]). Wire-level only.
+//! - [`mkv`] — Matroska / WebM external file container. No moq wire-level
+//!   counterpart; [`mkv::import::Import`] / [`mkv::export::Export`] only.
+//! - [`hls`] — HLS playlist ingest. [`hls::import::Import`] only.
 //!
-//! [`Container`] abstracts these into a shared write/read interface. The [`Hang`] enum
-//! is a runtime-dispatched [`Container`] that picks the format based on a hang catalog,
-//! so callers don't need to thread a generic parameter through user code.
+//! [draft-ietf-moq-loc]: https://www.ietf.org/archive/id/draft-ietf-moq-loc-00.html
+//!
+//! [`Container`] abstracts the wire-level formats into a shared write/read
+//! interface. The [`Hang`] enum is a runtime-dispatched [`Container`] that
+//! picks the format from a hang catalog.
 
 use std::task::Poll;
 
 use bytes::Bytes;
 
-pub(crate) mod cmaf;
 mod consumer;
 mod hang;
 pub(crate) mod jitter;
-mod loc;
 mod producer;
+mod source;
 
-pub use cmaf::{Cmaf, Error as CmafError};
+pub mod fmp4;
+pub mod hls;
+pub mod legacy;
+pub mod loc;
+pub mod mkv;
+
 pub use consumer::Consumer;
 pub use hang::Hang;
-pub use loc::Loc;
 pub use producer::Producer;
+pub(crate) use source::{CatalogSource, ExportSource};
 
 /// Microsecond presentation timestamp, the canonical timebase for media frames in moq-mux.
 pub type Timestamp = moq_net::Timescale<1_000_000>;
@@ -62,9 +70,9 @@ pub struct Frame {
 ///
 /// Implementors choose how multiple [`Frame`]s map onto moq-lite frames:
 ///
-/// - The Hang Legacy implementation writes one media frame per moq-lite frame
-///   (timestamp + payload).
-/// - The CMAF implementation packs N samples into a single moof+mdat moq-lite frame.
+/// - The [`legacy`] implementation writes one media frame per moq-lite frame.
+/// - The [`fmp4`] implementation packs N samples into a single moof+mdat moq-lite frame.
+/// - The [`loc`] implementation writes one LOC-framed media frame per moq-lite frame.
 ///
 /// Most callers should use [`Hang`] (catalog-driven) rather than picking a concrete
 /// container directly.

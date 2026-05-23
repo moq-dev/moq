@@ -1,9 +1,7 @@
 //! HLS (HTTP Live Streaming) ingest built on top of fMP4.
 //!
 //! This module provides reusable logic to ingest HLS master/media playlists and
-//! feed their fMP4 segments into a `hang` broadcast. It is designed to be
-//! independent of any particular HTTP client; callers provide an implementation
-//! of [`Fetcher`] to perform the actual network I/O.
+//! feed their fMP4 segments into a `hang` broadcast.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -19,7 +17,7 @@ use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
 
-use super::Fmp4;
+use crate::container::fmp4::import::Import as Fmp4;
 
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]
@@ -67,7 +65,7 @@ struct StepOutcome {
 ///
 /// Provides `init()` to prime the ingest with initial segments, and `service()`
 /// to run the continuous ingest loop.
-pub struct Hls {
+pub struct Import {
 	/// Broadcast that all CMAF importers write into.
 	broadcast: moq_net::BroadcastProducer,
 
@@ -112,7 +110,7 @@ impl TrackState {
 	}
 }
 
-impl Hls {
+impl Import {
 	/// Create a new HLS ingest that will write into the given broadcast.
 	pub fn new(
 		broadcast: moq_net::BroadcastProducer,
@@ -619,7 +617,7 @@ mod tests {
 		let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = HlsConfig::new(url);
-		let hls = Hls::new(broadcast, catalog, cfg).unwrap();
+		let hls = Import::new(broadcast, catalog, cfg).unwrap();
 
 		assert!(!hls.has_video_importer());
 		assert!(!hls.has_audio_importer());

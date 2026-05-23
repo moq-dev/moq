@@ -35,7 +35,7 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// - Opus (`A_OPUS`)
 ///
 /// Unsupported codecs (e.g. Vorbis, AC3, MP3, subtitles) are logged and dropped.
-pub struct Mkv {
+pub struct Import {
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::hang::Producer,
 
@@ -68,7 +68,7 @@ struct MkvTrack {
 	last_emitted_ticks: Option<i64>,
 }
 
-impl Mkv {
+impl Import {
 	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::hang::Producer) -> Self {
 		Self {
 			broadcast,
@@ -304,7 +304,10 @@ impl Mkv {
 			track_number,
 			MkvTrack {
 				kind,
-				track: crate::container::Producer::new(net_track, crate::container::Hang::Legacy),
+				track: crate::container::Producer::new(
+					net_track,
+					crate::container::Hang::Legacy(crate::container::legacy::Legacy::new()),
+				),
 				group: None,
 				last_emitted_ticks: None,
 			},
@@ -401,7 +404,7 @@ impl Mkv {
 	}
 }
 
-impl Drop for Mkv {
+impl Drop for Import {
 	fn drop(&mut self) {
 		let mut catalog = self.catalog.lock();
 		for track in self.tracks.values() {

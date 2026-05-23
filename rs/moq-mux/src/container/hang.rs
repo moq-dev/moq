@@ -1,8 +1,6 @@
 use std::task::Poll;
 
-use bytes::Buf;
-
-use crate::container::{Cmaf, Container, Frame, Loc};
+use crate::container::{Container, Frame, fmp4::Cmaf, legacy::Legacy, loc::Loc};
 
 /// Catalog-driven [`Container`] for the hang protocol.
 ///
@@ -22,7 +20,7 @@ use crate::container::{Cmaf, Container, Frame, Loc};
 /// Build from a catalog entry with `Hang::try_from(&container)`.
 pub enum Hang {
 	/// VarInt timestamp prefix + raw codec bitstream. One media frame per moq-lite frame.
-	Legacy,
+	Legacy(Legacy),
 	/// CMAF moof+mdat fragments. Wraps a parsed [`Cmaf`] (the track's `trak` box from the
 	/// init segment) so per-frame writes/reads have the timescale and track id available.
 	Cmaf(Cmaf),
@@ -36,7 +34,7 @@ impl TryFrom<&hang::catalog::Container> for Hang {
 
 	fn try_from(container: &hang::catalog::Container) -> Result<Self, Self::Error> {
 		match container {
-			hang::catalog::Container::Legacy => Ok(Self::Legacy),
+			hang::catalog::Container::Legacy => Ok(Self::Legacy(Legacy::new())),
 			hang::catalog::Container::Cmaf { init, .. } => Ok(Self::Cmaf(Cmaf::from_init(init)?)),
 			hang::catalog::Container::Loc => Ok(Self::Loc(Loc::new())),
 		}
@@ -48,16 +46,7 @@ impl Container for Hang {
 
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		match self {
-			Self::Legacy => {
-				for frame in frames {
-					let hang_frame = hang::container::Frame {
-						timestamp: frame.timestamp,
-						payload: frame.payload.clone(),
-					};
-					hang_frame.encode(group)?;
-				}
-				Ok(())
-			}
+			Self::Legacy(l) => l.write(group, frames),
 			Self::Cmaf(cmaf) => cmaf.write(group, frames).map_err(Into::into),
 			Self::Loc(loc) => loc.write(group, frames),
 		}
@@ -69,23 +58,7 @@ impl Container for Hang {
 		waiter: &conducer::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		match self {
-			Self::Legacy => {
-				use std::task::ready;
-
-				let Some(data) = ready!(group.poll_read_frame(waiter).map_err(hang::Error::from)?) else {
-					return Poll::Ready(Ok(None));
-				};
-
-				let mut hang_frame = hang::container::Frame::decode(data)?;
-				let payload = hang_frame.payload.copy_to_bytes(hang_frame.payload.remaining());
-
-				Poll::Ready(Ok(Some(vec![Frame {
-					timestamp: hang_frame.timestamp,
-					payload,
-					// Legacy can't determine from data; consumer infers from group position.
-					keyframe: false,
-				}])))
-			}
+			Self::Legacy(l) => l.poll_read(group, waiter),
 			Self::Cmaf(cmaf) => cmaf.poll_read(group, waiter).map(|r| r.map_err(Into::into)),
 			Self::Loc(loc) => loc.poll_read(group, waiter),
 		}

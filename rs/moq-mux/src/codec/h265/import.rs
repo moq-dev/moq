@@ -97,7 +97,10 @@ impl Import {
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
+		self.track = Some(crate::container::Producer::new(
+			track,
+			crate::container::Hang::Legacy(crate::container::legacy::Legacy::new()),
+		));
 
 		Ok(())
 	}

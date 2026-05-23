@@ -87,7 +87,10 @@ impl Import {
 			}
 			Mode::Avc3 => {
 				let track = self.broadcast.unique_track(".avc3")?;
-				self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
+				self.track = Some(crate::container::Producer::new(
+					track,
+					crate::container::Hang::Legacy(crate::container::legacy::Legacy::new()),
+				));
 				self.state = State::Avc3 {
 					current: Avc3Frame::default(),
 					cached_sps: None,
@@ -174,7 +177,10 @@ impl Import {
 			};
 			if self.track.is_none() {
 				let track = self.broadcast.unique_track(".avc3")?;
-				self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
+				self.track = Some(crate::container::Producer::new(
+					track,
+					crate::container::Hang::Legacy(crate::container::legacy::Legacy::new()),
+				));
 			}
 		}
 
@@ -464,7 +470,10 @@ impl Import {
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
+		self.track = Some(crate::container::Producer::new(
+			track,
+			crate::container::Hang::Legacy(crate::container::legacy::Legacy::new()),
+		));
 		Ok(())
 	}
 

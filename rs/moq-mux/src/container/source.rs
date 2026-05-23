@@ -19,9 +19,43 @@ use std::time::Duration;
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
 
+use crate::catalog::CatalogFormat;
 use crate::codec::h264::Avc1;
 use crate::codec::h265::Hvc1;
 use crate::container::{Consumer, Frame, Hang};
+
+/// Source for the catalog stream backing an exporter.
+///
+/// Both variants expose the same [`hang::Catalog`] shape; the MSF variant
+/// converts on the fly so the rest of the pipeline only deals with hang types.
+pub(crate) enum CatalogSource {
+	/// The hang catalog track (track name `catalog.json`, JSON payload).
+	Hang(crate::catalog::hang::Consumer),
+	/// The MSF catalog track (track name `catalog`, MSF JSON payload converted to hang).
+	Msf(crate::catalog::msf::Consumer),
+}
+
+impl CatalogSource {
+	pub(crate) fn new(broadcast: &moq_net::BroadcastConsumer, format: CatalogFormat) -> Result<Self, crate::Error> {
+		Ok(match format {
+			CatalogFormat::Hang => {
+				let track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
+				CatalogSource::Hang(crate::catalog::hang::Consumer::new(track))
+			}
+			CatalogFormat::Msf => {
+				let track = broadcast.subscribe_track(&moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
+				CatalogSource::Msf(crate::catalog::msf::Consumer::new(track))
+			}
+		})
+	}
+
+	pub(crate) fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<hang::Catalog>>> {
+		match self {
+			Self::Hang(c) => c.poll_next(waiter).map_err(Into::into),
+			Self::Msf(c) => c.poll_next(waiter),
+		}
+	}
+}
 
 /// Per-track video transform that bridges between codec shapes.
 pub(crate) enum VideoTransform {

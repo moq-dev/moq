@@ -1,13 +1,11 @@
 use hang::catalog::Container;
 use mp4_atom::{Decode, Encode};
 
-mod mkv;
-
 fn run_fmp4(data: &[u8]) -> hang::Catalog {
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 
-	let mut fmp4 = super::Fmp4::new(broadcast, catalog.clone());
+	let mut fmp4 = crate::container::fmp4::import::Import::new(broadcast, catalog.clone());
 
 	let mut buf = bytes::BytesMut::from(data);
 	// Ignore errors from incomplete/malformed trailing fragments in test files.
@@ -25,7 +23,7 @@ fn decode_init(init: &[u8]) -> (mp4_atom::Ftyp, mp4_atom::Moov) {
 
 #[test]
 fn test_bbb_catalog() {
-	let data = include_bytes!("bbb.mp4");
+	let data = include_bytes!("test_data/bbb.mp4");
 	let catalog = run_fmp4(data);
 
 	assert_eq!(catalog.video.renditions.len(), 1);
@@ -46,7 +44,7 @@ fn test_bbb_catalog() {
 
 #[test]
 fn test_bbb_init_roundtrip() {
-	let data = include_bytes!("bbb.mp4");
+	let data = include_bytes!("test_data/bbb.mp4");
 	let catalog = run_fmp4(data);
 
 	let video = catalog.video.renditions.values().next().unwrap();
@@ -86,7 +84,7 @@ fn test_bbb_init_roundtrip() {
 
 #[test]
 fn test_av1_catalog() {
-	let data = include_bytes!("av1.mp4");
+	let data = include_bytes!("test_data/av1.mp4");
 	let catalog = run_fmp4(data);
 
 	assert_eq!(catalog.video.renditions.len(), 1);
@@ -109,7 +107,7 @@ fn test_av1_catalog() {
 
 #[test]
 fn test_vp9_catalog() {
-	let data = include_bytes!("vp9.mp4");
+	let data = include_bytes!("test_data/vp9.mp4");
 	let catalog = run_fmp4(data);
 
 	assert_eq!(catalog.video.renditions.len(), 1);
@@ -144,9 +142,9 @@ async fn test_msf_catalog_roundtrip() {
 	// MSF catalog track has been created by `catalog::Producer::new`.
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
-	let mut fmp4 = super::Fmp4::new(broadcast, catalog);
+	let mut fmp4 = crate::container::fmp4::import::Import::new(broadcast, catalog);
 
-	let data = include_bytes!("bbb.mp4");
+	let data = include_bytes!("test_data/bbb.mp4");
 	let mut buf = bytes::BytesMut::from(&data[..]);
 	// Trailing fragments may error out (e.g. partial mdat); ignore.
 	let _ = fmp4.decode(&mut buf);

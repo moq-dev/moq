@@ -60,7 +60,10 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	}
 	let keyframe_payload = keyframe_payload.freeze();
 
-	let mut track_producer = crate::container::Producer::new(track, crate::container::Hang::Legacy);
+	let mut track_producer = crate::container::Producer::new(
+		track,
+		crate::container::Hang::Legacy(crate::container::legacy::Legacy::new()),
+	);
 	track_producer
 		.write(crate::container::Frame {
 			timestamp: Timestamp::from_micros(0).unwrap(),
@@ -70,7 +73,8 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let mut exporter = crate::export::Fmp4::new(consumer, crate::catalog::CatalogFormat::Hang).expect("new Fmp4");
+	let mut exporter =
+		crate::container::fmp4::export::Export::new(consumer, crate::catalog::CatalogFormat::Hang).expect("new Fmp4");
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -122,18 +126,19 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 /// Regression check that adding the Avc3 path didn't break the existing one.
 #[tokio::test(start_paused = true)]
 async fn cmaf_source_to_cmaf_export_passthrough() {
-	let data = include_bytes!("../../import/test/bbb.mp4");
+	let data = include_bytes!("test_data/bbb.mp4");
 
 	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
-	let mut importer = crate::import::Fmp4::new(producer, catalog);
+	let mut importer = crate::container::fmp4::import::Import::new(producer, catalog);
 	let mut buf = BytesMut::from(data.as_slice());
 	let _ = importer.decode(&mut buf);
 
-	let mut exporter = crate::export::Fmp4::new(consumer, crate::catalog::CatalogFormat::Hang).expect("new Fmp4");
+	let mut exporter =
+		crate::container::fmp4::export::Export::new(consumer, crate::catalog::CatalogFormat::Hang).expect("new Fmp4");
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await

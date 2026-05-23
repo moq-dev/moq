@@ -23,7 +23,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 /// **Audio:**
 /// - AAC (MP4A)
 /// - Opus
-pub struct Fmp4 {
+pub struct Import {
 	/// The broadcast being produced
 	broadcast: moq_net::BroadcastProducer,
 
@@ -63,7 +63,7 @@ struct Fmp4Track {
 	min_duration: Option<Timestamp>,
 }
 
-impl Fmp4 {
+impl Import {
 	/// Create a new CMAF importer that will write to the given broadcast.
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the fMP4 file.
@@ -661,7 +661,7 @@ impl Fmp4 {
 	}
 }
 
-impl Fmp4 {
+impl Import {
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		for track in self.tracks.values_mut() {
@@ -674,7 +674,7 @@ impl Fmp4 {
 	}
 }
 
-impl Drop for Fmp4 {
+impl Drop for Import {
 	fn drop(&mut self) {
 		let mut catalog = self.catalog.lock();
 
