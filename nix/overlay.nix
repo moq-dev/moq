@@ -66,4 +66,93 @@ in
       hardeningDisable = [ "fortify" ];
     }
   );
+
+  libmoq =
+    let
+      info = crateInfo ../rs/libmoq/Cargo.toml;
+    in
+    craneLib.buildPackage (
+      info
+      // {
+        src = craneLib.cleanCargoSource ../.;
+        cargoExtraArgs = "-p libmoq";
+        doCheck = false;
+        nativeBuildInputs = with final; [ pkg-config ];
+
+        # libmoq is a staticlib; crane's default install phase only handles
+        # binaries. Lay out the artifact tree the way release tarballs and
+        # downstream `find_package(moq)` consumers already expect.
+        installPhase = ''
+          runHook preInstall
+
+          mkdir -p $out/lib/pkgconfig $out/include $out/lib/cmake/moq
+          cp target/release/libmoq.a $out/lib/
+          cp target/include/moq.h $out/include/
+          cp target/pkgconfig/moq.pc $out/lib/pkgconfig/
+
+          major_version="$(echo "${info.version}" | cut -d. -f1)"
+          substitute ${../rs/libmoq/cmake/moq-config.cmake.in} \
+            $out/lib/cmake/moq/moq-config.cmake \
+            --subst-var-by LIB_FILE libmoq.a \
+            --subst-var-by VERSION "${info.version}"
+          substitute ${../rs/libmoq/cmake/moq-config-version.cmake.in} \
+            $out/lib/cmake/moq/moq-config-version.cmake \
+            --subst-var-by VERSION "${info.version}" \
+            --subst-var-by MAJOR_VERSION "$major_version"
+
+          runHook postInstall
+        '';
+      }
+    );
+
+  moq-gst = craneLib.buildPackage (
+    crateInfo ../rs/moq-gst/Cargo.toml
+    // {
+      src = craneLib.cleanCargoSource ../.;
+      cargoExtraArgs = "-p moq-gst";
+      doCheck = false;
+
+      nativeBuildInputs = with final; [ pkg-config ];
+      buildInputs = with final; [
+        gst_all_1.gstreamer
+        gst_all_1.gst-plugins-base
+      ];
+
+      # moq-gst is a cdylib GStreamer plugin. Pick up the produced shared
+      # library; crane's default install phase only handles binaries.
+      installPhase = ''
+        runHook preInstall
+
+        mkdir -p $out/lib
+        if [ -f target/release/libgstmoq.dylib ]; then
+          cp target/release/libgstmoq.dylib $out/lib/
+        else
+          cp target/release/libgstmoq.so $out/lib/
+        fi
+
+        runHook postInstall
+      '';
+
+      # Strip nix-store paths so the plugin loads against the user's system
+      # GStreamer rather than the (unavailable on user machines) nix copy.
+      postFixup =
+        if final.stdenv.isDarwin then
+          ''
+            dylib="$out/lib/libgstmoq.dylib"
+            otool -L "$dylib" \
+              | grep -oE '/nix/store/[^ ]+\.dylib' \
+              | sort -u \
+              | while read -r ref; do
+                  install_name_tool -change "$ref" "@rpath/$(basename "$ref")" "$dylib"
+                done
+            install_name_tool -add_rpath /opt/homebrew/lib "$dylib"
+            install_name_tool -add_rpath /usr/local/lib "$dylib"
+            install_name_tool -add_rpath /Library/Frameworks/GStreamer.framework/Libraries "$dylib"
+          ''
+        else
+          ''
+            patchelf --remove-rpath $out/lib/libgstmoq.so
+          '';
+    }
+  );
 }

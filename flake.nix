@@ -124,6 +124,8 @@
             moq-cli
             moq-token-cli
             moq-boy
+            libmoq
+            moq-gst
             ;
         };
 

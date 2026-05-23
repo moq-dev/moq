@@ -1,9 +1,9 @@
-name: libmoq
+name: moq-gst
 
 on:
   push:
     tags:
-      - "libmoq-v*"
+      - "moq-gst-v*"
 
 permissions:
   contents: read
@@ -19,47 +19,30 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            use_nix: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            use_nix: true
           - target: x86_64-apple-darwin
             os: macos-15-intel
-            use_nix: true
           - target: aarch64-apple-darwin
             os: macos-latest
-            use_nix: true
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            use_nix: false
 
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Install Nix
-        if: matrix.use_nix
-        uses: DeterminateSystems/nix-installer-action@main
-      - name: Configure Nix cache
-        if: matrix.use_nix
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
-      - name: Install Rust (Windows)
-        if: '!matrix.use_nix'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Parse version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version libmoq
+        run: .github/scripts/release.sh parse-version moq-gst
 
       - name: Build and package
         shell: bash
         run: |
-          ./rs/libmoq/build.sh \
+          ./rs/moq-gst/build.sh \
             --target ${{ matrix.target }} \
             --version ${{ steps.parse.outputs.version }} \
             --output dist
@@ -67,7 +50,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: libmoq-${{ matrix.target }}
+          name: moq-gst-${{ matrix.target }}
           path: dist/*
 
   release:
@@ -84,11 +67,11 @@ jobs:
 
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version libmoq
+        run: .github/scripts/release.sh parse-version moq-gst
 
       - name: Find previous tag
         id: prev_tag
-        run: .github/scripts/release.sh prev-tag libmoq
+        run: .github/scripts/release.sh prev-tag moq-gst
 
       - name: Download artifacts
         uses: actions/download-artifact@v8
@@ -100,6 +83,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-          RELEASE_TITLE: "libmoq v${{ steps.parse.outputs.version }}"
+          RELEASE_TITLE: "moq-gst v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: .github/scripts/release.sh create artifacts

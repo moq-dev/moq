@@ -7,6 +7,8 @@ on:
       - 'moq-token-cli-v*'
       - 'moq-cli-v*'
       - 'moq-boy-v*'
+      - 'libmoq-v*'
+      - 'moq-gst-v*'
 
 jobs:
   cache:
@@ -52,4 +54,14 @@ jobs:
       - name: Build and cache moq-boy
         run: |
           nix build .#moq-boy --print-build-logs
+          cachix push kixelated ./result
+
+      - name: Build and cache libmoq
+        run: |
+          nix build .#libmoq --print-build-logs
+          cachix push kixelated ./result
+
+      - name: Build and cache moq-gst
+        run: |
+          nix build .#moq-gst --print-build-logs
           cachix push kixelated ./result
