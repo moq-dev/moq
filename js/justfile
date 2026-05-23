@@ -42,14 +42,12 @@ build:
 	bun run --filter='*' build
 
 # Full JS CI: lint + tests + build. Takes a newline-separated list of
-# changed files; skips if none of them are in the JS scope. Run as
-# `just js ci` (skips by default) or via root `just ci` (which passes
-# the diff). To force-run standalone, call `just js check && just js
-# test && just js build` directly.
+# changed files; skips if FILES is non-empty and none match the JS
+# scope. Run `just js ci` (no FILES) to force-run everything.
 ci FILES="":
 	#!/usr/bin/env bash
 	set -euo pipefail
-	if ! echo "{{ FILES }}" | grep -qE '^(js/|package\.json$|bun\.lock$|bun\.lockb$|biome\.jsonc$)'; then
+	if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(js/|package\.json$|bun\.lock$|bun\.lockb$|biome\.jsonc$)'; then
 		echo "js: no JS changes; skipping."
 		exit 0
 	fi

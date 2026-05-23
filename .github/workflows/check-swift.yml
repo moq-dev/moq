@@ -38,7 +38,6 @@ jobs:
         with:
           cache-on-failure: true
 
-      # Workflow paths filter is the gate; call `check` directly to
-      # bypass `just swift ci`'s diff-based gate (which would skip
-      # since we don't compute a diff here).
-      - run: nix develop --command just swift check
+      # No FILES arg = force-run; the workflow's paths filter is
+      # already the gate for whether to fire at all.
+      - run: nix develop --command just swift ci

@@ -64,11 +64,15 @@ ci BASE="":
 	}
 	files=$(git diff --name-only "$merge_base")
 
-	just js    ci "$files"
-	just rs    ci "$files"
-	just py    ci "$files"
-	just kt    ci "$files"
-	just swift ci "$files"
+	# Skip per-lang dispatch when nothing changed (empty FILES means
+	# "force-run" to per-lang, which is the wrong semantic here).
+	if [[ -n "$files" ]]; then
+		just js    ci "$files"
+		just rs    ci "$files"
+		just py    ci "$files"
+		just kt    ci "$files"
+		just swift ci "$files"
+	fi
 
 	# Cheap; always run.
 	nix flake check
