@@ -17,7 +17,7 @@ use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
 
-use crate::container::fmp4::import::Import as Fmp4;
+use crate::container::fmp4::Import as Fmp4;
 
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]

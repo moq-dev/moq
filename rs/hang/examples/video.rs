@@ -110,10 +110,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	origin.publish_broadcast("", broadcast.consume());
 
 	// Wrap in a Producer for keyframe-based group management.
-	let mut producer = moq_mux::container::Producer::new(
-		track,
-		moq_mux::container::Hang::Legacy(moq_mux::container::legacy::Legacy::new()),
-	);
+	let mut producer = moq_mux::container::Producer::new(track, moq_mux::container::Hang::Legacy);
 
 	// Not real frames of course. The first frame is a keyframe and starts the first group.
 	let frame = moq_mux::container::Frame {

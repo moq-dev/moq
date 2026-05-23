@@ -1,7 +1,9 @@
-//! H.264 parsing primitives, `Avc1` codec-shape transmuxer (Annex-B → length-prefixed),
-//! and the per-codec [`Import`](import::Import) that publishes raw bitstreams.
+//! H.264 parsing primitives, [`Avc1`] codec-shape transmuxer (Annex-B → length-prefixed),
+//! and the per-codec [`Import`] that publishes raw bitstreams.
 
 pub mod import;
+
+pub use import::{Import, Mode};
 
 use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};

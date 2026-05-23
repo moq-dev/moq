@@ -15,9 +15,9 @@ pub enum PublishFormat {
 }
 
 enum PublishDecoder {
-	Avc3(Box<moq_mux::codec::h264::import::Import>),
-	Fmp4(Box<fmp4::import::Import>),
-	Hls(Box<hls::import::Import>),
+	Avc3(Box<moq_mux::codec::h264::Import>),
+	Fmp4(Box<fmp4::Import>),
+	Hls(Box<hls::Import>),
 }
 
 impl PublishDecoder {
@@ -43,19 +43,19 @@ impl Publish {
 
 		let decoder = match format {
 			PublishFormat::Avc3 => {
-				let avc3 = moq_mux::codec::h264::import::Import::new(broadcast.clone(), catalog.clone())
-					.with_mode(moq_mux::codec::h264::import::Mode::Avc3)?;
+				let avc3 = moq_mux::codec::h264::Import::new(broadcast.clone(), catalog.clone())
+					.with_mode(moq_mux::codec::h264::Mode::Avc3)?;
 				PublishDecoder::Avc3(Box::new(avc3))
 			}
 			PublishFormat::Fmp4 => {
-				let fmp4 = fmp4::import::Import::new(broadcast.clone(), catalog.clone());
+				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Hls { playlist } => {
-				let hls = hls::import::Import::new(
+				let hls = hls::Import::new(
 					broadcast.clone(),
 					catalog.clone(),
-					hls::import::HlsConfig::new(playlist.clone()),
+					hls::HlsConfig::new(playlist.clone()),
 				)?;
 				PublishDecoder::Hls(Box::new(hls))
 			}

@@ -179,7 +179,7 @@ mod tests {
 	async fn keyframe_closes_group_immediately() {
 		let track = moq_net::Track::new("test").produce();
 		let consumer = track.consume();
-		let mut producer = Producer::new(track, Hang::Legacy(crate::container::legacy::Legacy::new()));
+		let mut producer = Producer::new(track, Hang::Legacy);
 
 		producer.write(frame(0, true)).unwrap(); // first frame must be a keyframe
 		producer.write(frame(10_000, false)).unwrap();
@@ -195,7 +195,7 @@ mod tests {
 	async fn finish_group_closes_immediately() {
 		let track = moq_net::Track::new("test").produce();
 		let consumer = track.consume();
-		let mut producer = Producer::new(track, Hang::Legacy(crate::container::legacy::Legacy::new()));
+		let mut producer = Producer::new(track, Hang::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(10_000, false)).unwrap();
@@ -210,7 +210,7 @@ mod tests {
 	#[test]
 	fn first_frame_must_be_keyframe() {
 		let track = moq_net::Track::new("test").produce();
-		let mut producer = Producer::new(track, Hang::Legacy(crate::container::legacy::Legacy::new()));
+		let mut producer = Producer::new(track, Hang::Legacy);
 
 		let err = producer.write(frame(0, false)).unwrap_err();
 		assert!(matches!(err, crate::Error::Moq(moq_net::Error::ProtocolViolation)));

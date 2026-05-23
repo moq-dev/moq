@@ -47,8 +47,8 @@ enum State {
 	/// avc3 wire shape: Annex-B NALU, inline SPS/PPS.
 	Avc3 {
 		current: Avc3Frame,
-		cached_sps: Option<Bytes>,
-		cached_pps: Option<Bytes>,
+		sps: Option<Bytes>,
+		pps: Option<Bytes>,
 	},
 }
 
@@ -87,14 +87,11 @@ impl Import {
 			}
 			Mode::Avc3 => {
 				let track = self.broadcast.unique_track(".avc3")?;
-				self.track = Some(crate::container::Producer::new(
-					track,
-					crate::container::Hang::Legacy(crate::container::legacy::Legacy::new()),
-				));
+				self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
 				self.state = State::Avc3 {
 					current: Avc3Frame::default(),
-					cached_sps: None,
-					cached_pps: None,
+					sps: None,
+					pps: None,
 				};
 			}
 		}
@@ -172,15 +169,12 @@ impl Import {
 		if !matches!(self.state, State::Avc3 { .. }) {
 			self.state = State::Avc3 {
 				current: Avc3Frame::default(),
-				cached_sps: None,
-				cached_pps: None,
+				sps: None,
+				pps: None,
 			};
 			if self.track.is_none() {
 				let track = self.broadcast.unique_track(".avc3")?;
-				self.track = Some(crate::container::Producer::new(
-					track,
-					crate::container::Hang::Legacy(crate::container::legacy::Legacy::new()),
-				));
+				self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
 			}
 		}
 
@@ -305,53 +299,40 @@ impl Import {
 				self.maybe_start_frame(pts)?;
 				let sps = Sps::parse(&nal)?;
 				self.init_from_sps(&sps)?;
-				let State::Avc3 {
-					current,
-					cached_sps,
-					cached_pps,
-				} = &mut self.state
-				else {
+				let State::Avc3 { current, sps, pps } = &mut self.state else {
 					unreachable!("decode_nal is avc3 only")
 				};
-				if cached_sps.as_ref().is_some_and(|cached| cached != &nal) {
-					*cached_pps = None;
+				if sps.as_ref().is_some_and(|cached| cached != &nal) {
+					*pps = None;
 					current.contains_pps = false;
 				}
-				*cached_sps = Some(nal.clone());
+				*sps = Some(nal.clone());
 				current.contains_sps = true;
 			}
 			Some(Avc3NalType::Pps) => {
 				self.maybe_start_frame(pts)?;
-				let State::Avc3 {
-					current, cached_pps, ..
-				} = &mut self.state
-				else {
+				let State::Avc3 { current, pps, .. } = &mut self.state else {
 					unreachable!()
 				};
-				*cached_pps = Some(nal.clone());
+				*pps = Some(nal.clone());
 				current.contains_pps = true;
 			}
 			Some(Avc3NalType::Aud) | Some(Avc3NalType::Sei) => {
 				self.maybe_start_frame(pts)?;
 			}
 			Some(Avc3NalType::IdrSlice) => {
-				let State::Avc3 {
-					current,
-					cached_sps,
-					cached_pps,
-				} = &mut self.state
-				else {
+				let State::Avc3 { current, sps, pps } = &mut self.state else {
 					unreachable!()
 				};
 				if !current.contains_sps
-					&& let Some(sps) = cached_sps.as_ref()
+					&& let Some(sps) = sps.as_ref()
 				{
 					current.chunks.extend_from_slice(&START_CODE);
 					current.chunks.extend_from_slice(sps);
 					current.contains_sps = true;
 				}
 				if !current.contains_pps
-					&& let Some(pps) = cached_pps.as_ref()
+					&& let Some(pps) = pps.as_ref()
 				{
 					current.chunks.extend_from_slice(&START_CODE);
 					current.chunks.extend_from_slice(pps);
@@ -470,10 +451,7 @@ impl Import {
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::container::Hang::Legacy(crate::container::legacy::Legacy::new()),
-		));
+		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
 		Ok(())
 	}
 

@@ -447,11 +447,8 @@ async fn run_session(
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_ref = moq_net::Track::new(&track_name);
 		let track_consumer = broadcast.subscribe_track(&track_ref)?;
-		let track = moq_mux::container::Consumer::new(
-			track_consumer,
-			moq_mux::container::Hang::Legacy(moq_mux::container::legacy::Legacy::new()),
-		)
-		.with_latency(Duration::from_secs(1));
+		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
+			.with_latency(Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
 	}
 
@@ -464,11 +461,8 @@ async fn run_session(
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_ref = moq_net::Track::new(&track_name);
 		let track_consumer = broadcast.subscribe_track(&track_ref)?;
-		let track = moq_mux::container::Consumer::new(
-			track_consumer,
-			moq_mux::container::Hang::Legacy(moq_mux::container::legacy::Legacy::new()),
-		)
-		.with_latency(Duration::from_secs(1));
+		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
+			.with_latency(Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
 	}
 

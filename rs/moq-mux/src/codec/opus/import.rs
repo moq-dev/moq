@@ -37,10 +37,7 @@ impl Import {
 
 		Ok(Self {
 			catalog,
-			track: crate::container::Producer::new(
-				track,
-				crate::container::Hang::Legacy(crate::container::legacy::Legacy::new()),
-			),
+			track: crate::container::Producer::new(track, crate::container::Hang::Legacy),
 			zero: None,
 		})
 	}

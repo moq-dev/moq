@@ -28,9 +28,9 @@ pub struct Import {
 	zero: Option<tokio::time::Instant>,
 
 	// Cached parameter set NALs for re-insertion before keyframes.
-	cached_vps: Option<Bytes>,
-	cached_sps: Option<Bytes>,
-	cached_pps: Option<Bytes>,
+	vps: Option<Bytes>,
+	sps: Option<Bytes>,
+	pps: Option<Bytes>,
 
 	// Tracks the minimum frame duration and updates the catalog `jitter` field.
 	jitter: MinFrameDuration,
@@ -45,9 +45,9 @@ impl Import {
 			config: None,
 			current: Default::default(),
 			zero: None,
-			cached_vps: None,
-			cached_sps: None,
-			cached_pps: None,
+			vps: None,
+			sps: None,
+			pps: None,
 			jitter: MinFrameDuration::new(),
 		}
 	}
@@ -97,10 +97,7 @@ impl Import {
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::container::Hang::Legacy(crate::container::legacy::Legacy::new()),
-		));
+		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
 
 		Ok(())
 	}
@@ -198,7 +195,7 @@ impl Import {
 			NALUnitType::VpsNut => {
 				self.maybe_start_frame(pts)?;
 
-				self.cached_vps = Some(nal.clone());
+				self.vps = Some(nal.clone());
 				self.current.contains_vps = true;
 			}
 			NALUnitType::SpsNut => {
@@ -209,18 +206,18 @@ impl Import {
 				self.init(&sps)?;
 
 				// PPS is tied to SPS context; drop cached PPS when SPS changes.
-				if self.cached_sps.as_ref().is_some_and(|cached| cached != &nal) {
-					self.cached_pps = None;
+				if self.sps.as_ref().is_some_and(|cached| cached != &nal) {
+					self.pps = None;
 					self.current.contains_pps = false;
 				}
 
-				self.cached_sps = Some(nal.clone());
+				self.sps = Some(nal.clone());
 				self.current.contains_sps = true;
 			}
 			NALUnitType::PpsNut => {
 				self.maybe_start_frame(pts)?;
 
-				self.cached_pps = Some(nal.clone());
+				self.pps = Some(nal.clone());
 				self.current.contains_pps = true;
 			}
 			NALUnitType::AudNut | NALUnitType::PrefixSeiNut | NALUnitType::SuffixSeiNut => {
@@ -235,21 +232,21 @@ impl Import {
 			| NALUnitType::CraNut => {
 				// Insert cached VPS/SPS/PPS before keyframes if not already present in this frame.
 				if !self.current.contains_vps
-					&& let Some(vps) = &self.cached_vps
+					&& let Some(vps) = &self.vps
 				{
 					self.current.chunks.extend_from_slice(&START_CODE);
 					self.current.chunks.extend_from_slice(vps);
 					self.current.contains_vps = true;
 				}
 				if !self.current.contains_sps
-					&& let Some(sps) = &self.cached_sps
+					&& let Some(sps) = &self.sps
 				{
 					self.current.chunks.extend_from_slice(&START_CODE);
 					self.current.chunks.extend_from_slice(sps);
 					self.current.contains_sps = true;
 				}
 				if !self.current.contains_pps
-					&& let Some(pps) = &self.cached_pps
+					&& let Some(pps) = &self.pps
 				{
 					self.current.chunks.extend_from_slice(&START_CODE);
 					self.current.chunks.extend_from_slice(pps);

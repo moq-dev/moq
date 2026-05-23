@@ -6,12 +6,12 @@
 //!
 //! - [`legacy`] — VarInt timestamp prefix + raw codec bitstream. Wire-level only.
 //! - [`fmp4`] — ISO-BMFF moof+mdat fragments. Wire-level [`Container`] impl
-//!   ([`fmp4::Cmaf`]) plus external-file [`fmp4::import::Import`] /
-//!   [`fmp4::export::Export`].
+//!   ([`fmp4::Cmaf`]) plus external-file [`fmp4::Import`] /
+//!   [`fmp4::Export`].
 //! - [`loc`] — Low Overhead Container ([draft-ietf-moq-loc]). Wire-level only.
 //! - [`mkv`] — Matroska / WebM external file container. No moq wire-level
-//!   counterpart; [`mkv::import::Import`] / [`mkv::export::Export`] only.
-//! - [`hls`] — HLS playlist ingest. [`hls::import::Import`] only.
+//!   counterpart; [`mkv::Import`] / [`mkv::Export`] only.
+//! - [`hls`] — HLS playlist ingest. [`hls::Import`] only.
 //!
 //! [draft-ietf-moq-loc]: https://www.ietf.org/archive/id/draft-ietf-moq-loc-00.html
 //!

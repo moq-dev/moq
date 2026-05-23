@@ -17,7 +17,7 @@ use crate::emulator::{HEIGHT, WIDTH};
 ///
 /// Frames are submitted via `try_frame()` (non-blocking, drops if full).
 /// The encoder thread converts RGBA -> YUV420P -> H.264 and publishes
-/// encoded packets via `moq_mux::codec::h264::import::Import`.
+/// encoded packets via `moq_mux::codec::h264::Import`.
 pub struct VideoEncoder {
 	tx: tokio::sync::mpsc::Sender<EncoderMsg>,
 	/// Clone of the video track producer, for monitoring used/unused.
@@ -36,8 +36,8 @@ struct EncoderMsg {
 impl VideoEncoder {
 	pub fn spawn(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::hang::Producer) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
-		let avc3 = moq_mux::codec::h264::import::Import::new(broadcast, catalog)
-			.with_mode(moq_mux::codec::h264::import::Mode::Avc3)
+		let avc3 = moq_mux::codec::h264::Import::new(broadcast, catalog)
+			.with_mode(moq_mux::codec::h264::Mode::Avc3)
 			.expect("failed to create avc3 track");
 		let force_keyframe = Arc::new(AtomicBool::new(false));
 		let encode_duration = Arc::new(AtomicU64::new(0));
@@ -84,7 +84,7 @@ impl VideoEncoder {
 
 fn encoder_thread(
 	mut rx: tokio::sync::mpsc::Receiver<EncoderMsg>,
-	mut avc3: moq_mux::codec::h264::import::Import,
+	mut avc3: moq_mux::codec::h264::Import,
 	force_keyframe: Arc<AtomicBool>,
 	encode_duration: Arc<AtomicU64>,
 ) {
@@ -215,7 +215,7 @@ impl Encoder {
 		&mut self,
 		yuv: &ffmpeg_next::frame::Video,
 		ts: hang::container::Timestamp,
-		output: &mut moq_mux::codec::h264::import::Import,
+		output: &mut moq_mux::codec::h264::Import,
 	) -> Result<()> {
 		self.encoder.send_frame(yuv)?;
 

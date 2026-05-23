@@ -1,7 +1,7 @@
 //! Tests for the MKV/WebM importer.
 //!
 //! These tests synthesize small WebM files via webm-iterable's writer (no external
-//! tooling required) and feed them through [`crate::container::mkv::import::Import`], then assert that
+//! tooling required) and feed them through [`crate::container::mkv::Import`], then assert that
 //! the resulting catalog and frame stream are well-formed.
 
 use std::io::Cursor;
@@ -137,7 +137,7 @@ fn track_entry_video_vp9(number: u64, width: u64, height: u64) -> MatroskaSpec {
 fn run(data: &[u8]) -> hang::Catalog {
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
-	let mut mkv = crate::container::mkv::import::Import::new(broadcast, catalog.clone());
+	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.clone());
 	let mut buf = bytes::BytesMut::from(data);
 	mkv.decode(&mut buf).expect("decode");
 	mkv.finish().expect("finish");
@@ -224,7 +224,7 @@ fn test_chunked_decode_dedup() {
 
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
-	let mut mkv = crate::container::mkv::import::Import::new(broadcast, catalog.clone());
+	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.clone());
 
 	// Feed in 16-byte chunks to stress the chunked-restart code path.
 	for chunk in data.chunks(16) {

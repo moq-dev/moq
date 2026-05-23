@@ -473,8 +473,7 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 				sample_rate: rate as u32,
 				channel_count: channels as u32,
 			};
-			moq_mux::codec::opus::import::Import::new(runtime.broadcast.clone(), runtime.catalog.clone(), config)?
-				.into()
+			moq_mux::codec::opus::Import::new(runtime.broadcast.clone(), runtime.catalog.clone(), config)?.into()
 		}
 		other => anyhow::bail!("unsupported caps: {}", other),
 	};

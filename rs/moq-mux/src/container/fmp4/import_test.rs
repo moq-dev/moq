@@ -5,7 +5,7 @@ fn run_fmp4(data: &[u8]) -> hang::Catalog {
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 
-	let mut fmp4 = crate::container::fmp4::import::Import::new(broadcast, catalog.clone());
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
 
 	let mut buf = bytes::BytesMut::from(data);
 	// Ignore errors from incomplete/malformed trailing fragments in test files.
@@ -142,7 +142,7 @@ async fn test_msf_catalog_roundtrip() {
 	// MSF catalog track has been created by `catalog::Producer::new`.
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
-	let mut fmp4 = crate::container::fmp4::import::Import::new(broadcast, catalog);
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog);
 
 	let data = include_bytes!("test_data/bbb.mp4");
 	let mut buf = bytes::BytesMut::from(&data[..]);

@@ -3,9 +3,9 @@
 //!
 //! Concrete importers live next to the format they parse:
 //! - Container importers under [`crate::container`]
-//!   (`fmp4::import::Import`, `mkv::import::Import`, `hls::import::Import`).
+//!   (`fmp4::Import`, `mkv::Import`, `hls::Import`).
 //! - Codec importers under [`crate::codec`]
-//!   (`h264::import::Import`, `aac::import::Import`, …).
+//!   (`h264::Import`, `aac::Import`, …).
 
 use std::{fmt, str::FromStr};
 
@@ -87,15 +87,15 @@ impl From<StreamFormat> for FramedFormat {
 enum FramedKind {
 	/// H.264 (both avc1 and avc3 wire shapes go through this importer; mode
 	/// is pinned by the caller's FramedFormat choice).
-	H264(crate::codec::h264::import::Import),
+	H264(crate::codec::h264::Import),
 	// Boxed because it's a large struct and clippy complains about the size.
-	Fmp4(Box<crate::container::fmp4::import::Import>),
-	Hev1(crate::codec::h265::import::Import),
-	Av01(crate::codec::av1::import::Import),
-	Aac(crate::codec::aac::import::Import),
-	Opus(crate::codec::opus::import::Import),
+	Fmp4(Box<crate::container::fmp4::Import>),
+	Hev1(crate::codec::h265::Import),
+	Av01(crate::codec::av1::Import),
+	Aac(crate::codec::aac::Import),
+	Opus(crate::codec::opus::Import),
 	// Boxed for the same reason as Fmp4.
-	Mkv(Box<crate::container::mkv::import::Import>),
+	Mkv(Box<crate::container::mkv::Import>),
 }
 
 /// An importer for formats with known frame boundaries.
@@ -115,45 +115,43 @@ impl Framed {
 		format: FramedFormat,
 		buf: &mut T,
 	) -> anyhow::Result<Self> {
-		use crate::codec::h264::import::Mode as H264Mode;
+		use crate::codec::h264::Mode as H264Mode;
 		let decoder = match format {
 			FramedFormat::Avc1 => {
-				let mut decoder =
-					crate::codec::h264::import::Import::new(broadcast, catalog).with_mode(H264Mode::Avc1)?;
+				let mut decoder = crate::codec::h264::Import::new(broadcast, catalog).with_mode(H264Mode::Avc1)?;
 				decoder.initialize(buf)?;
 				FramedKind::H264(decoder)
 			}
 			FramedFormat::Avc3 => {
-				let mut decoder =
-					crate::codec::h264::import::Import::new(broadcast, catalog).with_mode(H264Mode::Avc3)?;
+				let mut decoder = crate::codec::h264::Import::new(broadcast, catalog).with_mode(H264Mode::Avc3)?;
 				decoder.initialize(buf)?;
 				FramedKind::H264(decoder)
 			}
 			FramedFormat::Fmp4 => {
-				let mut decoder = Box::new(crate::container::fmp4::import::Import::new(broadcast, catalog));
+				let mut decoder = Box::new(crate::container::fmp4::Import::new(broadcast, catalog));
 				decoder.decode(buf)?;
 				FramedKind::Fmp4(decoder)
 			}
 			FramedFormat::Hev1 => {
-				let mut decoder = crate::codec::h265::import::Import::new(broadcast, catalog);
+				let mut decoder = crate::codec::h265::Import::new(broadcast, catalog);
 				decoder.initialize(buf)?;
 				FramedKind::Hev1(decoder)
 			}
 			FramedFormat::Av01 => {
-				let mut decoder = crate::codec::av1::import::Import::new(broadcast, catalog);
+				let mut decoder = crate::codec::av1::Import::new(broadcast, catalog);
 				decoder.initialize(buf)?;
 				FramedKind::Av01(decoder)
 			}
 			FramedFormat::Aac => {
 				let config = crate::codec::aac::AacConfig::parse(buf)?;
-				FramedKind::Aac(crate::codec::aac::import::Import::new(broadcast, catalog, config)?)
+				FramedKind::Aac(crate::codec::aac::Import::new(broadcast, catalog, config)?)
 			}
 			FramedFormat::Opus => {
 				let config = crate::codec::opus::OpusConfig::parse(buf)?;
-				FramedKind::Opus(crate::codec::opus::import::Import::new(broadcast, catalog, config)?)
+				FramedKind::Opus(crate::codec::opus::Import::new(broadcast, catalog, config)?)
 			}
 			FramedFormat::Mkv => {
-				let mut decoder = Box::new(crate::container::mkv::import::Import::new(broadcast, catalog));
+				let mut decoder = Box::new(crate::container::mkv::Import::new(broadcast, catalog));
 				decoder.decode(buf)?;
 				FramedKind::Mkv(decoder)
 			}
@@ -218,16 +216,16 @@ impl Framed {
 // Lift an already-built codec importer into a `Framed` so callers that build
 // their config out-of-band (e.g. moq-gst, which constructs `OpusConfig` from
 // gstreamer caps instead of an OpusHead buffer) can keep using `.into()`.
-impl From<crate::codec::opus::import::Import> for Framed {
-	fn from(opus: crate::codec::opus::import::Import) -> Self {
+impl From<crate::codec::opus::Import> for Framed {
+	fn from(opus: crate::codec::opus::Import) -> Self {
 		Self {
 			decoder: FramedKind::Opus(opus),
 		}
 	}
 }
 
-impl From<crate::codec::aac::import::Import> for Framed {
-	fn from(aac: crate::codec::aac::import::Import) -> Self {
+impl From<crate::codec::aac::Import> for Framed {
+	fn from(aac: crate::codec::aac::Import) -> Self {
 		Self {
 			decoder: FramedKind::Aac(aac),
 		}
@@ -285,13 +283,13 @@ impl fmt::Display for StreamFormat {
 
 enum StreamKind {
 	/// H.264 in avc3 wire shape (Annex-B with inline SPS/PPS).
-	Avc3(crate::codec::h264::import::Import),
+	Avc3(crate::codec::h264::Import),
 	// Boxed because it's a large struct and clippy complains about the size.
-	Fmp4(Box<crate::container::fmp4::import::Import>),
-	Hev1(crate::codec::h265::import::Import),
-	Av01(crate::codec::av1::import::Import),
+	Fmp4(Box<crate::container::fmp4::Import>),
+	Hev1(crate::codec::h265::Import),
+	Av01(crate::codec::av1::Import),
 	// Boxed for the same reason as Fmp4.
-	Mkv(Box<crate::container::mkv::import::Import>),
+	Mkv(Box<crate::container::mkv::Import>),
 }
 
 /// An importer for formats that support stream decoding (unknown frame boundaries).
@@ -309,19 +307,15 @@ impl Stream {
 		catalog: crate::catalog::hang::Producer,
 		format: StreamFormat,
 	) -> anyhow::Result<Self> {
-		use crate::codec::h264::import::Mode as H264Mode;
+		use crate::codec::h264::Mode as H264Mode;
 		let decoder = match format {
 			StreamFormat::Avc3 => {
-				StreamKind::Avc3(crate::codec::h264::import::Import::new(broadcast, catalog).with_mode(H264Mode::Avc3)?)
+				StreamKind::Avc3(crate::codec::h264::Import::new(broadcast, catalog).with_mode(H264Mode::Avc3)?)
 			}
-			StreamFormat::Fmp4 => StreamKind::Fmp4(Box::new(crate::container::fmp4::import::Import::new(
-				broadcast, catalog,
-			))),
-			StreamFormat::Hev1 => StreamKind::Hev1(crate::codec::h265::import::Import::new(broadcast, catalog)),
-			StreamFormat::Av01 => StreamKind::Av01(crate::codec::av1::import::Import::new(broadcast, catalog)),
-			StreamFormat::Mkv => {
-				StreamKind::Mkv(Box::new(crate::container::mkv::import::Import::new(broadcast, catalog)))
-			}
+			StreamFormat::Fmp4 => StreamKind::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, catalog))),
+			StreamFormat::Hev1 => StreamKind::Hev1(crate::codec::h265::Import::new(broadcast, catalog)),
+			StreamFormat::Av01 => StreamKind::Av01(crate::codec::av1::Import::new(broadcast, catalog)),
+			StreamFormat::Mkv => StreamKind::Mkv(Box::new(crate::container::mkv::Import::new(broadcast, catalog))),
 		};
 
 		Ok(Self { decoder })

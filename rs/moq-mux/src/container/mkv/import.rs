@@ -304,10 +304,7 @@ impl Import {
 			track_number,
 			MkvTrack {
 				kind,
-				track: crate::container::Producer::new(
-					net_track,
-					crate::container::Hang::Legacy(crate::container::legacy::Legacy::new()),
-				),
+				track: crate::container::Producer::new(net_track, crate::container::Hang::Legacy),
 				group: None,
 				last_emitted_ticks: None,
 			},

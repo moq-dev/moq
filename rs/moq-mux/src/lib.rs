@@ -8,7 +8,7 @@
 //!   [`legacy`], [`loc`], [`hls`]). External file containers (fmp4, mkv, hls)
 //!   ship with `import::Import` / `export::Export` submodules.
 //! - [`codec`] — per-codec parsing, codec-shape transmuxers, and codec-specific
-//!   importers (e.g. [`codec::h264::import::Import`]).
+//!   importers (e.g. [`codec::h264::Import`]).
 //! - [`catalog`] — hang and MSF catalog publish/subscribe.
 //!   [`catalog::hang::Producer`] manages both catalog tracks;
 //!   [`catalog::hang::Consumer`] and [`catalog::msf::Consumer`] subscribe.

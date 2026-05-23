@@ -2,12 +2,15 @@
 //!
 //! - [`Cmaf`] implements the wire-level [`crate::container::Container`] for a
 //!   single track (one moof+mdat per moq-lite frame, potentially N samples).
-//! - [`import::Import`] parses external fMP4 byte streams and publishes them.
-//! - [`export::Export`] subscribes to a broadcast and emits an fMP4 stream
+//! - [`Import`] parses external fMP4 byte streams and publishes them.
+//! - [`Export`] subscribes to a broadcast and emits an fMP4 stream
 //!   (init segment + moof+mdat fragments).
 
 pub mod export;
 pub mod import;
+
+pub use export::Export;
+pub use import::Import;
 
 #[cfg(test)]
 mod export_test;

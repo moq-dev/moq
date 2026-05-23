@@ -1,10 +1,12 @@
 //! AAC parsing and AudioSpecificConfig helpers.
 //!
 //! Centralizes ISO 14496-3 AudioSpecificConfig encode/decode so the import
-//! and export paths share one implementation. [`import::Import`] publishes
-//! raw AAC frames.
+//! and export paths share one implementation. [`Import`] publishes raw
+//! AAC frames.
 
 pub mod import;
+
+pub use import::Import;
 
 use anyhow::Context;
 use bytes::{Buf, Bytes};

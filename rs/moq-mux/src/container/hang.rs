@@ -10,7 +10,8 @@ use crate::container::{Container, Frame, fmp4::Cmaf, legacy::Legacy, loc::Loc};
 /// instead of threading a generic parameter through user code.
 ///
 /// - [`Hang::Legacy`]: VarInt timestamp prefix + raw codec bitstream, one media frame
-///   per moq-lite frame. The original hang wire format.
+///   per moq-lite frame. The original hang wire format. Unit variant because
+///   [`Legacy`] is stateless.
 /// - [`Hang::Cmaf`]: ISO-BMFF moof+mdat fragments, potentially multiple samples per
 ///   moq-lite frame. The contained [`Cmaf`] is parsed once from the catalog's init
 ///   segment via [`Cmaf::from_init`].
@@ -20,7 +21,7 @@ use crate::container::{Container, Frame, fmp4::Cmaf, legacy::Legacy, loc::Loc};
 /// Build from a catalog entry with `Hang::try_from(&container)`.
 pub enum Hang {
 	/// VarInt timestamp prefix + raw codec bitstream. One media frame per moq-lite frame.
-	Legacy(Legacy),
+	Legacy,
 	/// CMAF moof+mdat fragments. Wraps a parsed [`Cmaf`] (the track's `trak` box from the
 	/// init segment) so per-frame writes/reads have the timescale and track id available.
 	Cmaf(Cmaf),
@@ -34,7 +35,7 @@ impl TryFrom<&hang::catalog::Container> for Hang {
 
 	fn try_from(container: &hang::catalog::Container) -> Result<Self, Self::Error> {
 		match container {
-			hang::catalog::Container::Legacy => Ok(Self::Legacy(Legacy::new())),
+			hang::catalog::Container::Legacy => Ok(Self::Legacy),
 			hang::catalog::Container::Cmaf { init, .. } => Ok(Self::Cmaf(Cmaf::from_init(init)?)),
 			hang::catalog::Container::Loc => Ok(Self::Loc(Loc::new())),
 		}
@@ -46,7 +47,7 @@ impl Container for Hang {
 
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		match self {
-			Self::Legacy(l) => l.write(group, frames),
+			Self::Legacy => Legacy.write(group, frames),
 			Self::Cmaf(cmaf) => cmaf.write(group, frames).map_err(Into::into),
 			Self::Loc(loc) => loc.write(group, frames),
 		}
@@ -58,7 +59,7 @@ impl Container for Hang {
 		waiter: &conducer::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		match self {
-			Self::Legacy(l) => l.poll_read(group, waiter),
+			Self::Legacy => Legacy.poll_read(group, waiter),
 			Self::Cmaf(cmaf) => cmaf.poll_read(group, waiter).map(|r| r.map_err(Into::into)),
 			Self::Loc(loc) => loc.poll_read(group, waiter),
 		}

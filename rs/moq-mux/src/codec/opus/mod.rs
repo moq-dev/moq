@@ -1,9 +1,11 @@
 //! Opus parsing and OpusHead helpers.
 //!
 //! Centralizes RFC 7845 OpusHead encode/decode so the import and export
-//! paths share one implementation. [`import::Import`] publishes raw Opus frames.
+//! paths share one implementation. [`Import`] publishes raw Opus frames.
 
 pub mod import;
+
+pub use import::Import;
 
 use bytes::{Buf, Bytes};
 

@@ -1,10 +1,12 @@
 //! AV1 parsing and AV1CodecConfigurationRecord helpers.
 //!
 //! Centralizes the av1C → catalog [`hang::catalog::AV1`] field extraction
-//! used by the fMP4 and MKV importers. [`import`] holds the per-codec
-//! [`Import`](import::Import) that publishes raw AV1 bitstreams.
+//! used by the fMP4 and MKV importers. [`Import`] publishes raw AV1
+//! bitstreams.
 
 pub mod import;
+
+pub use import::Import;
 
 use hang::catalog::AV1;
 
