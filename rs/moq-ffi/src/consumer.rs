@@ -56,6 +56,7 @@ impl Media {
 		let timestamp_us: u64 = frame
 			.timestamp
 			.as_micros()
+			.map_err(|_| MoqError::Codec("timestamp scale unspecified".into()))?
 			.try_into()
 			.map_err(|_| MoqError::Codec("timestamp overflow".into()))?;
 

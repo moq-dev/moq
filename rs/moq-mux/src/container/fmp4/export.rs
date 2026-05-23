@@ -449,8 +449,13 @@ fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Dura
 		Some(d) if d.is_zero() => true,
 		Some(d) => {
 			let first = track.buffer.first().unwrap();
-			let delta_us = frame.timestamp.as_micros().saturating_sub(first.timestamp.as_micros());
-			delta_us >= d.as_micros()
+			// Compare in nanoseconds so the check works regardless of the source
+			// scale; an unspecified scale conservatively skips the duration cap and
+			// lets the next keyframe (or `None` fallback) flush.
+			match (first.timestamp.as_nanos(), frame.timestamp.as_nanos()) {
+				(Ok(first_ns), Ok(frame_ns)) => frame_ns.saturating_sub(first_ns) >= d.as_nanos(),
+				_ => false,
+			}
 		}
 		// No video keyframe will ever arrive to roll the fragment, so for
 		// audio-only broadcasts in `None` mode we fall back to per-frame
@@ -466,7 +471,7 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> anyhow::Result<
 	track.sequence_number += 1;
 	Ok(crate::container::fmp4::encode_fragment(
 		track.track_id,
-		track.timescale,
+		crate::container::Timescale::new(track.timescale),
 		seq,
 		&frames,
 	)?)

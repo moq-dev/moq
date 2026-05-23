@@ -90,12 +90,16 @@ impl<C: Container> Producer<C> {
 		} else {
 			self.buffer.push(frame);
 
-			// Check if buffered duration exceeds latency.
+			// Check if buffered duration exceeds latency. Compare in nanoseconds so the
+			// check works regardless of the frame's native scale; if either timestamp's
+			// scale is unspecified we conservatively skip the check and let the next
+			// keyframe (or `finish()`) flush.
 			if self.buffer.len() >= 2 {
-				let first_ts: std::time::Duration = self.buffer.first().unwrap().timestamp.into();
-				let last_ts: std::time::Duration = self.buffer.last().unwrap().timestamp.into();
-
-				if last_ts.saturating_sub(first_ts) >= self.latency {
+				let first = self.buffer.first().unwrap().timestamp.as_nanos();
+				let last = self.buffer.last().unwrap().timestamp.as_nanos();
+				if let (Ok(first), Ok(last)) = (first, last)
+					&& last.saturating_sub(first) >= self.latency.as_nanos()
+				{
 					self.flush()?;
 				}
 			}

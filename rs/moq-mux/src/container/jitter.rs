@@ -18,19 +18,23 @@ impl MinFrameDuration {
 
 	/// Record a new frame timestamp.
 	///
-	/// Returns the new minimum-frame-duration as a `moq_net::Time` if it
-	/// changed, so the caller can persist it on the catalog rendition. Returns
-	/// `None` when this is the first observation, the timestamps are
-	/// non-monotonic, or the new gap is no smaller than the recorded minimum.
-	pub fn observe(&mut self, ts: Timestamp) -> Option<moq_net::Time> {
+	/// Returns the new minimum-frame-duration as a millisecond-scale [`Timestamp`]
+	/// if it changed, so the caller can persist it on the catalog rendition.
+	/// Returns `None` when this is the first observation, the timestamps are
+	/// non-monotonic, the new gap is no smaller than the recorded minimum, or
+	/// the scale conversion to milliseconds overflows.
+	pub fn observe(&mut self, ts: Timestamp) -> Option<Timestamp> {
 		let last = self.last_timestamp.replace(ts)?;
 		let duration = ts.checked_sub(last).ok()?;
 
-		if duration >= self.min_duration.unwrap_or(Timestamp::MAX) {
+		// Sentinel max preserves the source scale on the first real observation.
+		if let Some(min) = self.min_duration
+			&& duration >= min
+		{
 			return None;
 		}
 
 		self.min_duration = Some(duration);
-		duration.convert().ok()
+		duration.convert(moq_net::Timescale::MILLI).ok()
 	}
 }

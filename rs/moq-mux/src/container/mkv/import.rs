@@ -344,7 +344,8 @@ impl Import {
 			return Ok(());
 		};
 
-		// Compute PTS in nanoseconds, then convert to the Timestamp's microsecond timescale.
+		// Compute PTS in MKV's native nanosecond units and stamp it on the
+		// timestamp at NANO scale so a passthrough re-emit preserves precision.
 		let block_ticks = (self.cluster_timestamp as i64) + (rel_ts as i64);
 		anyhow::ensure!(block_ticks >= 0, "negative block timestamp");
 

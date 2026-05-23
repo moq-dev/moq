@@ -453,7 +453,7 @@ impl Import {
 
 			let tfdt = traf.tfdt.as_ref().context("missing tfdt box")?;
 			let mut dts = tfdt.base_media_decode_time;
-			let timescale = trak.mdia.mdhd.timescale as u64;
+			let timescale = crate::container::Timescale::new(trak.mdia.mdhd.timescale as u64);
 
 			let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
 			let mut track_data_start: Option<usize> = None;
@@ -501,7 +501,9 @@ impl Import {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let timestamp = crate::container::Timestamp::from_scale(pts, timescale)?;
+					// Preserve the fmp4 track's native timescale so a passthrough re-emit
+					// doesn't go through a lossy microsecond detour.
+					let timestamp = crate::container::Timestamp::new(pts, timescale)?;
 
 					if offset + size > mdat.data.len() {
 						anyhow::bail!("invalid data offset");
@@ -642,7 +644,7 @@ impl Import {
 								.renditions
 								.get_mut(&track.track.name)
 								.context("missing video config")?;
-							config.jitter = Some(jitter.convert()?);
+							config.jitter = Some(jitter.convert(crate::container::Timescale::MILLI)?);
 						}
 						TrackKind::Audio => {
 							let config = catalog
@@ -650,7 +652,7 @@ impl Import {
 								.renditions
 								.get_mut(&track.track.name)
 								.context("missing audio config")?;
-							config.jitter = Some(jitter.convert()?);
+							config.jitter = Some(jitter.convert(crate::container::Timescale::MILLI)?);
 						}
 					}
 				}

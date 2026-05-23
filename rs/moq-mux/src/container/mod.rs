@@ -29,9 +29,12 @@ pub use consumer::Consumer;
 pub use producer::Producer;
 pub(crate) use source::{CatalogSource, ExportSource};
 
-/// Microsecond presentation timestamp, the canonical timebase for media
-/// frames in moq-mux.
-pub type Timestamp = moq_net::Timescale<1_000_000>;
+pub use moq_net::{Timescale, Timestamp};
+
+/// Canonical timescale for the hang catalog and legacy/LOC wire formats:
+/// microseconds. Containers with a richer wire format (CMAF, MKV) carry their
+/// own timescale per-track instead.
+pub const TIMESCALE: Timescale = Timescale::MICRO;
 
 /// A decoded media frame: timestamp, payload bytes, keyframe flag.
 ///
@@ -42,8 +45,12 @@ pub type Timestamp = moq_net::Timescale<1_000_000>;
 pub struct Frame {
 	/// Presentation timestamp.
 	///
-	/// Microsecond precision. Frames within a track must be in *decode*
-	/// order, not display order. B-frames may have non-monotonic
+	/// Carries its own [`Timescale`]; importers preserve the source format's
+	/// native scale (e.g. nanoseconds from MKV, the mdhd timescale from fMP4)
+	/// so exporters can re-emit without a lossy detour through microseconds.
+	/// Wire formats that lack an on-wire scale ([`legacy`], [`loc`]) normalize
+	/// to [`TIMESCALE`] at the encode boundary. Frames within a track must be
+	/// in *decode* order, not display order. B-frames may have non-monotonic
 	/// presentation timestamps.
 	pub timestamp: Timestamp,
 

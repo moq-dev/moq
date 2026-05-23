@@ -329,7 +329,7 @@ impl Consume {
 	pub fn frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
 		let f = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
 
-		let timestamp_us = f.timestamp.as_micros().try_into().map_err(|_| moq_net::TimeOverflow)?;
+		let timestamp_us = f.timestamp.as_micros()?.try_into().map_err(|_| moq_net::TimeOverflow)?;
 
 		*dst = moq_frame {
 			payload: f.payload.as_ptr(),

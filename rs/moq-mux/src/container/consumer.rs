@@ -127,7 +127,7 @@ impl<F: Container> Consumer<F> {
 				&& current.sequence <= self.current
 			{
 				match current.poll_min_timestamp(waiter, &self.format) {
-					Poll::Ready(Ok(ts)) => Some::<std::time::Duration>(ts.into()),
+					Poll::Ready(Ok(ts)) => std::time::Duration::try_from(ts).ok(),
 					_ => None,
 				}
 			} else {
@@ -155,7 +155,9 @@ impl<F: Container> Consumer<F> {
 				}
 
 				if let Poll::Ready(Ok(ts)) = group.poll_max_timestamp(waiter, &self.format) {
-					max_timestamp = max_timestamp.max(ts.into());
+					if let Ok(duration) = std::time::Duration::try_from(ts) {
+						max_timestamp = max_timestamp.max(duration);
+					}
 					break; // We know older groups won't be newer than this.
 				}
 			}
@@ -887,7 +889,7 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp, ts(one_hour));
-		assert_eq!(frames[0].timestamp.as_micros(), one_hour as u128);
+		assert_eq!(frames[0].timestamp.as_micros().unwrap(), one_hour as u128);
 	}
 
 	#[tokio::test]
