@@ -14,4 +14,16 @@ containerized or raw-codec media in, produces a [hang](https://github.com/moq-de
 **Containers:** fMP4 / CMAF, MKV / WebM, HLS, LOC, hang Legacy.
 **Codecs:** H.264, H.265, AV1, AAC, Opus.
 
+The crate splits along two axes:
+
+- `container::*` describes how media frames are packaged on the wire (and
+  sometimes in a file). Each container owns its wire encoder plus any
+  matching file-format import/export.
+- `codec::*` parses each codec's configuration record and provides an
+  importer that publishes a raw bitstream into a broadcast.
+
+For format-string dispatch (e.g. `--format avc3`), use `import::Framed` or
+`import::Stream`. For lower-level control, instantiate a codec/container
+importer directly.
+
 See the [API docs](https://docs.rs/moq-mux/) for the full module map.

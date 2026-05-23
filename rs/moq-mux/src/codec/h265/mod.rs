@@ -29,6 +29,7 @@ impl Default for Hvc1 {
 }
 
 impl Hvc1 {
+	/// Build a new transform for a hev1 source.
 	pub fn new() -> Self {
 		Self {
 			hvcc: None,
@@ -38,10 +39,18 @@ impl Hvc1 {
 		}
 	}
 
+	/// The HEVCDecoderConfigurationRecord, available once VPS+SPS+PPS have been observed.
 	pub fn hvcc(&self) -> Option<&Bytes> {
 		self.hvcc.as_ref()
 	}
 
+	/// Convert one decoded frame's payload to the hvc1 wire shape.
+	///
+	/// Returns:
+	/// - `Ok(Some(payload))` if a length-prefixed sample is ready to emit.
+	/// - `Ok(None)` if the input contained only parameter sets and the
+	///   transform is still waiting for slice NALs (hvcC may have been
+	///   built as a side effect).
 	pub fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
 		let mut buf = payload.clone();
 		let mut nal_iter = crate::codec::annexb::NalIterator::new(&mut buf);

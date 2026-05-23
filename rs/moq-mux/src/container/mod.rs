@@ -52,9 +52,12 @@ pub struct Frame {
 
 	/// Whether this frame is a keyframe.
 	///
-	/// In the Legacy wire format, keyframes are inferred from group
-	/// boundaries (the first frame of a group is a keyframe). In CMAF
-	/// the trun sample-flags carry the truth.
+	/// Containers that don't carry the bit explicitly (Legacy, LOC) leave
+	/// this `false` on decode; the wrapping [`Consumer`] then overwrites it
+	/// from group position (first frame in a group is the keyframe). CMAF
+	/// reads the truth from the trun sample-flags but [`Consumer`] still
+	/// overrides, so external callers should treat producer-side and
+	/// consumer-side semantics as separate concerns.
 	pub keyframe: bool,
 }
 
