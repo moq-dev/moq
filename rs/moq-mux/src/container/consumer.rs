@@ -229,11 +229,6 @@ impl<F: Container> Consumer<F> {
 	pub async fn closed(&self) -> Result<(), F::Error> {
 		Ok(self.track.closed().await?)
 	}
-
-	/// Unwrap into the inner TrackConsumer.
-	pub fn into_inner(self) -> moq_net::TrackConsumer {
-		self.track
-	}
 }
 
 /// Internal reader for a group of frames.
@@ -302,7 +297,9 @@ impl GroupBuffer {
 				None => frame.timestamp,
 			});
 
-			let keyframe = self.index == 0;
+			// First frame of a group is always a keyframe by protocol invariant; trust
+			// the container's flag otherwise so CMAF mid-group keyframes survive.
+			let keyframe = frame.keyframe || self.index == 0;
 			self.index += 1;
 
 			self.buffered.push_back(Frame {

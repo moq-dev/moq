@@ -2,7 +2,7 @@
 //!
 //! A widely supported file format that's also a viable wire format.
 //! Each moq frame carries one moof+mdat fragment, optionally with
-//! several samples packed inside. [`Fragment`] is the wire-level
+//! several samples packed inside. [`Wire`] is the wire-level
 //! container; [`Import`] parses external fMP4 streams and [`Export`]
 //! produces them.
 
@@ -67,17 +67,17 @@ pub enum Error {
 
 /// CMAF container: encodes/decodes a single track's moof+mdat fragments.
 ///
-/// Build from a CMAF init segment with [`Fragment::from_init`], or wrap a
-/// pre-extracted [`mp4_atom::Trak`] directly with [`Fragment::new`].
+/// Build from a CMAF init segment with [`Wire::from_init`], or wrap a
+/// pre-extracted [`mp4_atom::Trak`] directly with [`Wire::new`].
 ///
-/// The [`mp4_atom::Trak`] is heap-allocated so that embedding `Fragment`
+/// The [`mp4_atom::Trak`] is heap-allocated so that embedding `Wire`
 /// in other enums (e.g. [`catalog::hang::Container`](crate::catalog::hang::Container))
 /// doesn't bloat unrelated variants.
-pub struct Fragment {
+pub struct Wire {
 	trak: Box<mp4_atom::Trak>,
 }
 
-impl Fragment {
+impl Wire {
 	/// Wrap an already-parsed track.
 	pub fn new(trak: mp4_atom::Trak) -> Self {
 		Self { trak: Box::new(trak) }
@@ -105,7 +105,7 @@ impl Fragment {
 	}
 }
 
-impl Container for Fragment {
+impl Container for Wire {
 	type Error = Error;
 
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
@@ -424,11 +424,12 @@ fn build_mdia(timescale: u64, handler: &[u8; 4], is_video: bool, sample_entry: m
 	}
 }
 
-/// Pick a reasonable timescale for a Legacy video rendition.
+/// Default video timescale when the catalog doesn't supply one.
 ///
-/// Used by the fMP4 exporter when synthesizing an init segment for a track
-/// that has no catalog-supplied timescale.
-pub(crate) fn legacy_video_timescale(config: &VideoConfig) -> u64 {
+/// Used by the fMP4 exporter when synthesizing an init segment for a
+/// Legacy or LOC source: prefer `framerate * 1000` (so each frame has an
+/// integer duration), falling back to 90 kHz (the MPEG-TS convention).
+pub(crate) fn default_video_timescale(config: &VideoConfig) -> u64 {
 	if let Some(fps) = config.framerate {
 		(fps * 1000.0) as u64
 	} else {

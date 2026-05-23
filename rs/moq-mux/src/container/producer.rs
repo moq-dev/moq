@@ -27,7 +27,7 @@ use super::{Container, Frame};
 ///
 /// This is useful for CMAF where multiple samples should be packed into one moof+mdat.
 pub struct Producer<C: Container> {
-	pub track: moq_net::TrackProducer,
+	inner: moq_net::TrackProducer,
 	container: C,
 	group: Option<moq_net::GroupProducer>,
 	buffer: Vec<Frame>,
@@ -39,12 +39,18 @@ impl<C: Container> Producer<C> {
 	/// Create a new Producer wrapping the given moq-lite producer.
 	pub fn new(track: moq_net::TrackProducer, container: C) -> Self {
 		Self {
-			track,
+			inner: track,
 			container,
 			group: None,
 			buffer: Vec::new(),
 			latency: std::time::Duration::ZERO,
 		}
+	}
+
+	/// The underlying moq-lite track producer. Read-only; mutating it directly
+	/// would sidestep group/keyframe invariants.
+	pub fn track(&self) -> &moq_net::TrackProducer {
+		&self.inner
 	}
 
 	/// Set the maximum buffering latency.
@@ -74,7 +80,7 @@ impl<C: Container> Producer<C> {
 			if !frame.keyframe {
 				return Err(moq_net::Error::ProtocolViolation.into());
 			}
-			self.group = Some(self.track.append_group()?);
+			self.group = Some(self.inner.append_group()?);
 		}
 
 		// Buffer or write the frame.
@@ -129,13 +135,13 @@ impl<C: Container> Producer<C> {
 	/// Finish the track, flushing any buffered frames and closing any open group.
 	pub fn finish(&mut self) -> Result<(), C::Error> {
 		self.finish_group()?;
-		self.track.finish()?;
+		self.inner.finish()?;
 		Ok(())
 	}
 
 	/// Create a consumer for this track.
 	pub fn consume(&self) -> moq_net::TrackConsumer {
-		self.track.consume()
+		self.inner.consume()
 	}
 }
 
@@ -143,7 +149,7 @@ impl<C: Container> std::ops::Deref for Producer<C> {
 	type Target = moq_net::TrackProducer;
 
 	fn deref(&self) -> &Self::Target {
-		&self.track
+		&self.inner
 	}
 }
 

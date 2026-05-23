@@ -475,9 +475,9 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> anyhow::Result<
 fn catalog_timescale_video(config: &VideoConfig) -> u64 {
 	match &config.container {
 		Container::Cmaf { init, .. } => {
-			parse_timescale_from_init(init).unwrap_or_else(|_| crate::container::fmp4::legacy_video_timescale(config))
+			parse_timescale_from_init(init).unwrap_or_else(|_| crate::container::fmp4::default_video_timescale(config))
 		}
-		Container::Loc | Container::Legacy => crate::container::fmp4::legacy_video_timescale(config),
+		Container::Loc | Container::Legacy => crate::container::fmp4::default_video_timescale(config),
 	}
 }
 

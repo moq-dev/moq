@@ -256,14 +256,14 @@ impl Import {
 
 	/// Returns a reference to the underlying track producer.
 	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
-		Ok(&self.track.as_ref().context("not initialized")?.track)
+		Ok(self.track.as_ref().context("not initialized")?.track())
 	}
 
 	/// Decode as much data as possible from the given buffer.
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::container::Timestamp>,
+		pts: Option<crate::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		let obus = ObuIterator::new(buf);
 
@@ -280,7 +280,7 @@ impl Import {
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::container::Timestamp>,
+		pts: Option<crate::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 		let mut obus = ObuIterator::new(buf);
@@ -298,7 +298,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn decode_obu(&mut self, obu_data: Bytes, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
+	fn decode_obu(&mut self, obu_data: Bytes, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
 		anyhow::ensure!(!obu_data.is_empty(), "OBU is too short");
 
 		// Parse OBU header - this consumes header + extension + LEB128 size
@@ -381,7 +381,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
 		if !self.current.contains_frame {
 			return Ok(());
 		}
@@ -425,13 +425,13 @@ impl Import {
 		self.track.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
+	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(hang::container::Timestamp::from_micros(
+		Ok(crate::container::Timestamp::from_micros(
 			zero.elapsed().as_micros() as u64
 		)?)
 	}

@@ -42,11 +42,7 @@ impl FromStr for FramedFormat {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
 			"avc1" | "avcc" => Ok(FramedFormat::Avc1),
-			"avc3" => Ok(FramedFormat::Avc3),
-			"h264" | "annex-b" => {
-				tracing::warn!("format '{s}' is deprecated, use 'avc3' instead");
-				Ok(FramedFormat::Avc3)
-			}
+			"avc3" | "h264" => Ok(FramedFormat::Avc3),
 			"hev1" => Ok(FramedFormat::Hev1),
 			"fmp4" | "cmaf" => Ok(FramedFormat::Fmp4),
 			"av01" | "av1" | "av1c" | "av1C" => Ok(FramedFormat::Av01),
@@ -193,7 +189,7 @@ impl Framed {
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::container::Timestamp>,
+		pts: Option<crate::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		match self.decoder {
 			FramedKind::H264(ref mut decoder) => decoder.decode_frame(buf, pts)?,
@@ -256,11 +252,7 @@ impl FromStr for StreamFormat {
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
-			"avc3" => Ok(StreamFormat::Avc3),
-			"h264" | "annex-b" => {
-				tracing::warn!("format '{s}' is deprecated, use 'avc3' instead");
-				Ok(StreamFormat::Avc3)
-			}
+			"avc3" | "h264" => Ok(StreamFormat::Avc3),
 			"hev1" => Ok(StreamFormat::Hev1),
 			"fmp4" | "cmaf" => Ok(StreamFormat::Fmp4),
 			"av01" | "av1" | "av1c" | "av1C" => Ok(StreamFormat::Av01),

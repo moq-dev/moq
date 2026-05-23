@@ -106,7 +106,7 @@ impl Import {
 	/// after the track has been created. i.e. after [`with_mode`](Self::with_mode)
 	/// for avc3 or after [`initialize`](Self::initialize) for avc1.
 	pub fn track(&self) -> Option<&moq_net::TrackProducer> {
-		self.track.as_ref().map(|t| &t.track)
+		self.track.as_ref().map(|t| t.track())
 	}
 
 	/// Initialize from the codec's leading bytes.
@@ -215,7 +215,7 @@ impl Import {
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::container::Timestamp>,
+		pts: Option<crate::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		anyhow::ensure!(matches!(self.state, State::Avc3 { .. }), "decode_stream is avc3 only");
 		let pts = self.pts(pts)?;
@@ -234,7 +234,7 @@ impl Import {
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::container::Timestamp>,
+		pts: Option<crate::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		match &self.state {
 			State::Avc1 { .. } => self.decode_avc1(buf, pts),
@@ -246,7 +246,7 @@ impl Import {
 	fn decode_avc1<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::container::Timestamp>,
+		pts: Option<crate::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		let State::Avc1 { length_size } = self.state else {
 			unreachable!("checked by decode_frame")
@@ -278,7 +278,7 @@ impl Import {
 	fn decode_avc3_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::container::Timestamp>,
+		pts: Option<crate::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 		let mut nals = NalIterator::new(buf);
@@ -292,7 +292,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn decode_nal(&mut self, nal: Bytes, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
+	fn decode_nal(&mut self, nal: Bytes, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
 		let header = nal.first().context("NAL unit is too short")?;
 		let forbidden_zero_bit = (header >> 7) & 1;
 		anyhow::ensure!(forbidden_zero_bit == 0, "forbidden zero bit is not zero");
@@ -408,7 +408,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
 		let State::Avc3 { current, .. } = &mut self.state else {
 			return Ok(());
 		};
@@ -471,12 +471,12 @@ impl Import {
 		Ok(())
 	}
 
-	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
+	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(hang::container::Timestamp::from_micros(
+		Ok(crate::container::Timestamp::from_micros(
 			zero.elapsed().as_micros() as u64
 		)?)
 	}

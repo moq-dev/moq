@@ -1,4 +1,4 @@
-use hang::container::Timestamp;
+use crate::container::Timestamp;
 
 /// Tracks the minimum duration between consecutive frames.
 ///

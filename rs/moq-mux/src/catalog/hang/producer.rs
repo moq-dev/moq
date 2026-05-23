@@ -10,11 +10,8 @@ use base64::Engine;
 /// Both the hang (`catalog.json`) and MSF (`catalog`) tracks are published on drop of the guard.
 #[derive(Clone)]
 pub struct Producer {
-	/// Access to the underlying hang catalog track producer.
-	pub hang_track: moq_net::TrackProducer,
-
-	/// Access to the underlying MSF catalog track producer.
-	pub msf_track: moq_net::TrackProducer,
+	hang_track: moq_net::TrackProducer,
+	msf_track: moq_net::TrackProducer,
 
 	current: Arc<Mutex<hang::Catalog>>,
 }

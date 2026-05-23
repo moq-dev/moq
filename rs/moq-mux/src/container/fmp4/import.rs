@@ -1,7 +1,7 @@
+use crate::container::Timestamp;
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
-use hang::container::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -501,7 +501,7 @@ impl Import {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let timestamp = hang::container::Timestamp::from_scale(pts, timescale)?;
+					let timestamp = crate::container::Timestamp::from_scale(pts, timescale)?;
 
 					if offset + size > mdat.data.len() {
 						anyhow::bail!("invalid data offset");

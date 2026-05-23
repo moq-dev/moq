@@ -16,8 +16,8 @@ use mp4_atom::{DecodeMaybe, Encode};
 ///   entry whose avcC is built from the inline SPS+PPS.
 #[tokio::test(start_paused = true)]
 async fn avc3_source_to_cmaf_export_roundtrip() {
+	use crate::container::Timestamp;
 	use hang::catalog::{Container, H264, VideoConfig};
-	use hang::container::Timestamp;
 
 	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();

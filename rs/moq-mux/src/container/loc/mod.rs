@@ -7,24 +7,18 @@
 
 use std::task::Poll;
 
-use crate::container::{Container, Frame as MediaFrame, Timestamp};
+use crate::container::{Container, Frame, Timestamp};
 
 /// LOC wire format. Each moq frame holds one LOC frame.
 #[derive(Default)]
-pub struct Frame;
-
-impl Frame {
-	pub fn new() -> Self {
-		Self
-	}
-}
+pub struct Wire;
 
 const DEFAULT_TIMESCALE: u64 = 1_000_000;
 
-impl Container for Frame {
+impl Container for Wire {
 	type Error = crate::Error;
 
-	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[MediaFrame]) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		for frame in frames {
 			let data = moq_loc::encode(frame.timestamp.as_micros() as u64, &frame.payload)?;
 
@@ -39,7 +33,7 @@ impl Container for Frame {
 		&self,
 		group: &mut moq_net::GroupConsumer,
 		waiter: &conducer::Waiter,
-	) -> Poll<Result<Option<Vec<MediaFrame>>, Self::Error>> {
+	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;
 
 		let Some(data) = ready!(group.poll_read_frame(waiter)?) else {
@@ -50,10 +44,11 @@ impl Container for Frame {
 		let timescale = loc.timescale.unwrap_or(DEFAULT_TIMESCALE);
 		let timestamp = Timestamp::from_scale(loc.timestamp, timescale).map_err(hang::Error::from)?;
 
-		Poll::Ready(Ok(Some(vec![MediaFrame {
+		Poll::Ready(Ok(Some(vec![Frame {
 			timestamp,
 			payload: loc.payload,
-			// LOC keyframes are inferred from group position by the wrapping Consumer.
+			// LOC doesn't carry the keyframe bit on the wire; the
+			// wrapping Consumer fills it in from group position.
 			keyframe: false,
 		}])))
 	}

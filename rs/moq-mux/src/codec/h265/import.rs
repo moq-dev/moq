@@ -122,7 +122,7 @@ impl Import {
 
 	/// Returns a reference to the underlying track producer.
 	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
-		Ok(&self.track.as_ref().context("not initialized")?.track)
+		Ok(self.track.as_ref().context("not initialized")?.track())
 	}
 
 	/// Decode as much data as possible from the given buffer.
@@ -134,7 +134,7 @@ impl Import {
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::container::Timestamp>,
+		pts: Option<crate::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 
@@ -158,7 +158,7 @@ impl Import {
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::container::Timestamp>,
+		pts: Option<crate::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 		// Iterate over the NAL units in the buffer based on start codes.
@@ -182,7 +182,7 @@ impl Import {
 
 	/// Decode a single NAL unit. Only reads the first header byte to extract nal_unit_type,
 	/// Ignores nuh_layer_id and nuh_temporal_id_plus1.
-	fn decode_nal(&mut self, nal: Bytes, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
+	fn decode_nal(&mut self, nal: Bytes, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
 		anyhow::ensure!(nal.len() >= 2, "NAL unit is too short");
 		// u16 header: [forbidden_zero_bit(1) | nal_unit_type(6) | nuh_layer_id(6) | nuh_temporal_id_plus1(3)]
 		let header = nal.first().context("NAL unit is too short")?;
@@ -287,7 +287,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
 		// If we haven't seen any slices, we shouldn't flush yet.
 		if !self.current.contains_slice {
 			return Ok(());
@@ -332,13 +332,13 @@ impl Import {
 		self.track.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
+	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(hang::container::Timestamp::from_micros(
+		Ok(crate::container::Timestamp::from_micros(
 			zero.elapsed().as_micros() as u64
 		)?)
 	}

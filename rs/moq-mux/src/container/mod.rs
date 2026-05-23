@@ -52,12 +52,11 @@ pub struct Frame {
 
 	/// Whether this frame is a keyframe.
 	///
-	/// Containers that don't carry the bit explicitly (Legacy, LOC) leave
-	/// this `false` on decode; the wrapping [`Consumer`] then overwrites it
-	/// from group position (first frame in a group is the keyframe). CMAF
-	/// reads the truth from the trun sample-flags but [`Consumer`] still
-	/// overrides, so external callers should treat producer-side and
-	/// consumer-side semantics as separate concerns.
+	/// Containers that carry the bit on the wire (CMAF reads it from
+	/// trun sample-flags) should set it; containers that don't (Legacy,
+	/// LOC) leave it `false`. The wrapping [`Consumer`] still asserts
+	/// "first frame in a group is a keyframe" as a fallback, so the
+	/// Legacy/LOC case lands correctly without anyone having to know.
 	pub keyframe: bool,
 }
 

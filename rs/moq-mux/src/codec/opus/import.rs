@@ -45,7 +45,7 @@ impl Import {
 	/// Returns a reference to the underlying track producer, e.g. for
 	/// monitoring subscriber state via `used()`/`unused()`.
 	pub fn track(&self) -> &moq_net::TrackProducer {
-		&self.track.track
+		self.track.track()
 	}
 
 	/// Finish the track, flushing the current group.
@@ -54,7 +54,7 @@ impl Import {
 		Ok(())
 	}
 
-	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
+	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 
 		// Collect the input into a contiguous Bytes payload.
@@ -80,13 +80,13 @@ impl Import {
 		Ok(())
 	}
 
-	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
+	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(hang::container::Timestamp::from_micros(
+		Ok(crate::container::Timestamp::from_micros(
 			zero.elapsed().as_micros() as u64
 		)?)
 	}
