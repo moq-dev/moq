@@ -34,7 +34,7 @@ key = "/var/lib/moq-relay/key.pem"
 key = "/var/lib/moq-relay/root.jwk"
 
 # Allow anonymous subscribe under anon/** and demo/**.
-# Allow anonymous publish under anon/** only.
+# Allow anonymous publish under anon/** and demo/viewer.
 [auth.public]
 subscribe = ["anon", "demo"]
 publish = ["anon", "demo/viewer"]

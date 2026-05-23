@@ -56,6 +56,7 @@ under `/var/lib/moq-relay/` (the service's `StateDirectory`), edit the
 config to taste, and enable the service:
 
 ```bash
+sudo install -d -m 0750 /var/lib/moq-relay
 sudo cp cert.pem key.pem root.jwk /var/lib/moq-relay/
 sudo systemctl enable --now moq-relay
 sudo journalctl -u moq-relay -f
@@ -92,7 +93,7 @@ public key is served at:
 - <https://apt.moq.dev/moq-archive-keyring.gpg>
 - <https://rpm.moq.dev/moq-archive-keyring.gpg>
 
-Verify a downloaded `.deb` directly:
+Verify the apt repository metadata signature manually:
 
 ```bash
 gpg --import moq-archive-keyring.gpg

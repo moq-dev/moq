@@ -36,7 +36,12 @@ export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY:?}"
 export RCLONE_CONFIG_R2_ACL=private
 
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+GNUPGHOME=""
+cleanup() {
+    rm -rf "$WORK"
+    [[ -n "$GNUPGHOME" ]] && rm -rf "$GNUPGHOME"
+}
+trap cleanup EXIT
 
 # Pull additively: a partial fetch must never cause subsequent steps to act
 # on an incomplete view of the pool, which would drop the missing packages
@@ -86,6 +91,7 @@ echo ">> Sign Release..."
 GNUPGHOME=$(mktemp -d)
 export GNUPGHOME
 chmod 700 "$GNUPGHOME"
+# GNUPGHOME is removed by the EXIT trap; no need for an explicit `rm -rf`.
 echo "${REPO_SIGNING_KEY:?}" | gpg --batch --quiet --import
 KEY_ID="${REPO_SIGNING_KEY_ID:?}"
 gpg --batch --yes --default-key "$KEY_ID" --detach-sign --armor \
@@ -94,7 +100,6 @@ gpg --batch --yes --default-key "$KEY_ID" --detach-sign --armor \
 gpg --batch --yes --default-key "$KEY_ID" --clearsign \
     -o "$WORK/dists/$DIST/InRelease" \
     "$WORK/dists/$DIST/Release"
-rm -rf "$GNUPGHOME"
 
 echo ">> Upload pool additions..."
 rclone copy "$WORK/pool" "r2:${BUCKET}/pool" --quiet

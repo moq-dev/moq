@@ -34,13 +34,20 @@ PKG_ARCH=""
 RUST_TARGET=""
 OUTPUT_DIR="$WORKSPACE_DIR/dist"
 
+require_value() {
+    if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "Missing value for $1" >&2
+        exit 1
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --packager) PACKAGER="$2"; shift 2 ;;
-        --version)  VERSION="$2";  shift 2 ;;
-        --arch)     PKG_ARCH="$2"; shift 2 ;;
-        --target)   RUST_TARGET="$2"; shift 2 ;;
-        --output)   OUTPUT_DIR="$2"; shift 2 ;;
+        --packager) require_value "$@"; PACKAGER="$2"; shift 2 ;;
+        --version)  require_value "$@"; VERSION="$2";  shift 2 ;;
+        --arch)     require_value "$@"; PKG_ARCH="$2"; shift 2 ;;
+        --target)   require_value "$@"; RUST_TARGET="$2"; shift 2 ;;
+        --output)   require_value "$@"; OUTPUT_DIR="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,/^set -euo pipefail/p' "$0" | sed 's/^# //;s/^#//' | head -n -1
             exit 0

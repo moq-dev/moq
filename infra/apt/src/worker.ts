@@ -30,10 +30,11 @@ const CONTENT_TYPE_BY_NAME: Record<string, string> = {
 	Sources: "text/plain; charset=utf-8",
 };
 
-// Cache short for repo metadata (changes every release) and long for the
-// content-addressed package blobs (versioned filename, immutable).
+// Cache long for the content-addressed package blobs and the static archive
+// keyring (versioned filename or pinned, immutable). Cache short for repo
+// metadata signatures like Release.gpg, which get rewritten every release.
 function cacheControl(key: string): string {
-	if (key.endsWith(".deb") || key.endsWith(".gpg") || key.includes("/pool/")) {
+	if (key.endsWith(".deb") || key.includes("/pool/") || key === "moq-archive-keyring.gpg") {
 		return "public, max-age=2592000, immutable";
 	}
 	return "public, max-age=300";

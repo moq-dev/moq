@@ -30,7 +30,12 @@ export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY:?}"
 export RCLONE_CONFIG_R2_ACL=private
 
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+GNUPGHOME=""
+cleanup() {
+    rm -rf "$WORK"
+    [[ -n "$GNUPGHOME" ]] && rm -rf "$GNUPGHOME"
+}
+trap cleanup EXIT
 
 # Pull additively: a partial fetch must never cause the push step to delete
 # remote .rpms. createrepo_c --update overwrites repodata in place, so a
@@ -54,9 +59,12 @@ for rpm in "${new_rpms[@]}"; do
             mkdir -p "$WORK/${DIST}/${a}"
             cp "$rpm" "$WORK/${DIST}/${a}/"
         done
-    else
+    elif [[ " ${ARCHES[*]} " == *" ${arch} "* ]]; then
         mkdir -p "$WORK/${DIST}/${arch}"
         cp "$rpm" "$WORK/${DIST}/${arch}/"
+    else
+        echo "ERROR: ${rpm} has unsupported arch '${arch}'; expected one of: ${ARCHES[*]} or noarch." >&2
+        exit 1
     fi
 done
 
@@ -88,7 +96,7 @@ repo_gpgcheck=1
 gpgkey=https://rpm.moq.dev/moq-archive-keyring.gpg
 EOF
 
-rm -rf "$GNUPGHOME"
+# GNUPGHOME is removed by the EXIT trap; no need for an explicit `rm -rf`.
 
 # Push .rpm blobs additively, but sync repodata so old indices are replaced.
 # Mixing the two avoids ever deleting an .rpm that survived a partial pull.

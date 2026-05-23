@@ -87,7 +87,17 @@ package crate packager:
 		*) echo "Unknown crate: {{crate}} (use moq-relay, moq-cli, or moq-token-cli)" >&2; exit 1 ;;
 	esac
 	case "{{packager}}" in
-		deb) arch=$(dpkg --print-architecture 2>/dev/null || echo amd64) ;;
+		deb)
+			if command -v dpkg >/dev/null 2>&1; then
+				arch=$(dpkg --print-architecture)
+			else
+				case "$(uname -m)" in
+					x86_64)        arch=amd64 ;;
+					aarch64|arm64) arch=arm64 ;;
+					*) echo "Cannot infer deb arch from host $(uname -m)" >&2; exit 1 ;;
+				esac
+			fi
+			;;
 		rpm) arch=$(uname -m) ;;
 		*) echo "Unknown packager: {{packager}} (use deb or rpm)" >&2; exit 1 ;;
 	esac
