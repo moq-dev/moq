@@ -401,47 +401,29 @@ mod test {
 	use super::*;
 
 	fn video_track(name: &str, packaging: moq_msf::Packaging, init_data: Option<&str>) -> moq_msf::Track {
-		moq_msf::Track {
-			name: name.to_string(),
-			packaging,
-			is_live: true,
-			role: Some(moq_msf::Role::Video),
-			codec: Some("avc1.640028".to_string()),
-			width: Some(1920),
-			height: Some(1080),
-			framerate: Some(30.0),
-			samplerate: None,
-			channel_config: None,
-			bitrate: Some(5_000_000),
-			init_data: init_data.map(str::to_string),
-			render_group: Some(1),
-			alt_group: None,
-			max_grp_sap_starting_type: None,
-			max_obj_sap_starting_type: None,
-			jitter: None,
-		}
+		let mut track = moq_msf::Track::new(name, packaging);
+		track.is_live = true;
+		track.role = Some(moq_msf::Role::Video);
+		track.codec = Some("avc1.640028".to_string());
+		track.width = Some(1920);
+		track.height = Some(1080);
+		track.framerate = Some(30.0);
+		track.bitrate = Some(5_000_000);
+		track.init_data = init_data.map(str::to_string);
+		track.render_group = Some(1);
+		track
 	}
 
 	fn audio_track(name: &str, packaging: moq_msf::Packaging) -> moq_msf::Track {
-		moq_msf::Track {
-			name: name.to_string(),
-			packaging,
-			is_live: true,
-			role: Some(moq_msf::Role::Audio),
-			codec: Some("opus".to_string()),
-			width: None,
-			height: None,
-			framerate: None,
-			samplerate: Some(48_000),
-			channel_config: Some("2".to_string()),
-			bitrate: Some(128_000),
-			init_data: None,
-			render_group: Some(1),
-			alt_group: None,
-			max_grp_sap_starting_type: None,
-			max_obj_sap_starting_type: None,
-			jitter: None,
-		}
+		let mut track = moq_msf::Track::new(name, packaging);
+		track.is_live = true;
+		track.role = Some(moq_msf::Role::Audio);
+		track.codec = Some("opus".to_string());
+		track.samplerate = Some(48_000);
+		track.channel_config = Some("2".to_string());
+		track.bitrate = Some(128_000);
+		track.render_group = Some(1);
+		track
 	}
 
 	#[test]

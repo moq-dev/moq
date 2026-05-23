@@ -4,6 +4,7 @@
 //! holds the relay-specific config knobs.
 
 use clap::Args;
+use moq_net::{OriginProducer, Stats};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the relay's stats publishing.
@@ -53,4 +54,20 @@ pub struct StatsConfig {
 	/// Single-relay deployments can leave this unset.
 	#[arg(long = "stats-node", env = "MOQ_STATS_NODE")]
 	pub node: Option<String>,
+}
+
+impl StatsConfig {
+	/// Build a [`Stats`] aggregator from this config, publishing on `origin`.
+	///
+	/// Returns [`Stats::disabled`] (a no-op aggregator) when [`Self::enabled`]
+	/// is false, so the relay can attach the result unconditionally.
+	pub fn build(&self, origin: OriginProducer) -> Stats {
+		if !self.enabled {
+			return Stats::disabled();
+		}
+		let levels = self.levels.unwrap_or(1).max(1);
+		let prefix = self.prefix.clone().unwrap_or_else(|| ".stats".to_string());
+		tracing::info!(prefix, levels, node = ?self.node, "stats publishing enabled");
+		Stats::new(prefix, levels, self.node.clone(), origin)
+	}
 }

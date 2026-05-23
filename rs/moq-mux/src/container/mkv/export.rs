@@ -152,13 +152,25 @@ impl ClusterBuilder {
 }
 
 impl Export {
-	/// Subscribe to `broadcast` and produce MKV byte chunks.
+	/// Subscribe to `broadcast` and produce MKV byte chunks, using the default
+	/// catalog format ([`CatalogFormat::Hang`]).
 	///
-	/// `catalog_format` selects which catalog track the exporter subscribes to
-	/// for track discovery. Both formats end up driving the same internal
-	/// `hang::Catalog`-based pipeline (MSF snapshots are converted on receipt),
-	/// so the only observable difference is which wire catalog is consumed.
-	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
+	/// Use [`with_catalog_format`](Self::with_catalog_format) to subscribe to a
+	/// non-default catalog track (e.g. MSF).
+	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
+		Self::with_catalog_format(broadcast, CatalogFormat::default())
+	}
+
+	/// Subscribe to `broadcast` and produce MKV byte chunks, selecting an
+	/// explicit `catalog_format` for track discovery.
+	///
+	/// Both formats drive the same internal `hang::Catalog`-based pipeline (MSF
+	/// snapshots are converted on receipt), so the only observable difference
+	/// is which wire catalog track is consumed.
+	pub fn with_catalog_format(
+		broadcast: moq_net::BroadcastConsumer,
+		catalog_format: CatalogFormat,
+	) -> Result<Self, crate::Error> {
 		let catalog = CatalogSource::new(&broadcast, catalog_format)?;
 
 		Ok(Self {
