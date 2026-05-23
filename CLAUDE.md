@@ -84,7 +84,6 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   throttle/          # Network throttle script for testing
 
 /doc/                 # Documentation site (VitePress, deployed via Cloudflare)
-/cdn/                 # CDN infrastructure (Terraform)
 ```
 
 ## Dependencies

@@ -1,4 +1,0 @@
-# Apply infrastructure changes (runs init first)
-default:
-	tofu init
-	tofu apply
