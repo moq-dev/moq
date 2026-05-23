@@ -28,11 +28,15 @@ if (!dryRun) {
 console.log(`📦 Building ${name}@${version}...`);
 execSync("bun run build", { stdio: "inherit" });
 
-const suffix = dryRun ? " (dry-run)" : "";
-console.log(`🚀 Publishing ${name}@${version}${suffix}...`);
-// Use npm for publishing to support OIDC trusted publishing
-const publishCmd = dryRun ? "npm publish --access public --dry-run" : "npm publish --access public";
-execSync(publishCmd, {
-	stdio: "inherit",
-	cwd: "dist",
-});
+if (dryRun) {
+	// `npm publish --dry-run` still hits the registry to check for version
+	// conflicts and errors out when the version is already published (which
+	// is the common case on PRs of main). `npm pack --dry-run` exercises the
+	// same packaging path without any registry roundtrip.
+	console.log(`🧪 Packing ${name}@${version} (dry-run)...`);
+	execSync("npm pack --dry-run", { stdio: "inherit", cwd: "dist" });
+} else {
+	console.log(`🚀 Publishing ${name}@${version}...`);
+	// Use npm for publishing to support OIDC trusted publishing
+	execSync("npm publish --access public", { stdio: "inherit", cwd: "dist" });
+}
