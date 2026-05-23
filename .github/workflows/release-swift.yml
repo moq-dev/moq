@@ -201,6 +201,9 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: moq-dev
           repositories: moq-swift
+          # Narrow the minted token to only what publish.sh needs,
+          # rather than inheriting the full App installation scope.
+          permission-contents: write
 
       - name: Download package
         uses: actions/download-artifact@v8
