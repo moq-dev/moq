@@ -56,15 +56,19 @@ ci BASE="origin/main":
 	just build
 
 # Print "js" if any JS file changed vs BASE; else print nothing.
-# Source of truth for what counts as a "JS change".
+# Source of truth for what counts as a "JS change". When called from
+# root `just ci`, reuses $JUST_CHANGED_FILES instead of re-diffing.
 changed BASE="origin/main":
 	#!/usr/bin/env bash
 	set -euo pipefail
-	if ! merge_base=$(git merge-base "{{ BASE }}" HEAD 2>/dev/null); then
-		echo js
-		exit 0
+	if [[ -z "${JUST_CHANGED_FILES+set}" ]]; then
+		if ! merge_base=$(git merge-base "{{ BASE }}" HEAD 2>/dev/null); then
+			echo js
+			exit 0
+		fi
+		JUST_CHANGED_FILES=$(git diff --name-only "$merge_base")
 	fi
-	if git diff --name-only "$merge_base" | grep -qE '^(js/|package\.json$|bun\.lock$|bun\.lockb$|biome\.jsonc$)'; then
+	if echo "$JUST_CHANGED_FILES" | grep -qE '^(js/|package\.json$|bun\.lock$|bun\.lockb$|biome\.jsonc$)'; then
 		echo js
 	fi
 

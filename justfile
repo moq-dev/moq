@@ -44,6 +44,10 @@ check *args:
 # Run every per-language `ci` unconditionally; each self-gates against
 # BASE and exits 0 fast when its scope hasn't changed. Pass BASE="" to
 # force-run everything.
+#
+# Computes the changed file list once and exports it as $JUST_CHANGED_FILES
+# so per-language `changed` recipes can reuse it instead of each running
+# their own git diff.
 ci BASE="":
 	#!/usr/bin/env bash
 	set -euo pipefail
@@ -57,22 +61,32 @@ ci BASE="":
 		base="origin/main"
 	fi
 
+	# One git diff for the whole run. If merge-base fails (e.g. shallow
+	# clone, unreachable base), leave $JUST_CHANGED_FILES unset so each
+	# per-language `changed` recipe falls back to its own conservative
+	# behavior (force-run).
+	base_unreachable=false
+	if merge_base=$(git merge-base "$base" HEAD 2>/dev/null); then
+		export JUST_CHANGED_FILES=$(git diff --name-only "$merge_base")
+	else
+		echo "warning: $base unreachable; force-running everything" >&2
+		base_unreachable=true
+	fi
+
 	just js    ci "$base"
 	just rs    ci "$base"
 	just py    ci "$base"
 	just kt    ci "$base"
 	just swift ci "$base"
 
-	# nix flake + markdown have no per-language module; gate inline.
-	if merge_base=$(git merge-base "$base" HEAD 2>/dev/null); then
-		files=$(git diff --name-only "$merge_base")
-		if echo "$files" | grep -qE '^(flake\.nix$|flake\.lock$)'; then nix flake check; fi
-		if echo "$files" | grep -qE '\.md$'; then bun remark . --quiet --frail; fi
-	else
-		# Base unreachable; run everything to be safe.
-		echo "warning: $base not available; running nix + remark unconditionally" >&2
+	# nix flake + markdown have no per-language module; gate inline
+	# against the same file list.
+	if $base_unreachable; then
 		nix flake check
 		bun remark . --quiet --frail
+	else
+		if echo "$JUST_CHANGED_FILES" | grep -qE '^(flake\.nix$|flake\.lock$)'; then nix flake check; fi
+		if echo "$JUST_CHANGED_FILES" | grep -qE '\.md$'; then bun remark . --quiet --frail; fi
 	fi
 
 # Auto-fix linting/formatting issues across all languages.
