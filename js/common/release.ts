@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 const dryRun = process.argv.includes("--dry-run") || process.env.DRY_RUN === "true";
 
@@ -11,7 +11,7 @@ const { name, version } = pkg;
 if (!dryRun) {
 	let published = "0.0.0";
 	try {
-		published = execSync(`npm view ${name} version`, {
+		published = execFileSync("npm", ["view", name, "version"], {
 			encoding: "utf8",
 			stdio: ["pipe", "pipe", "pipe"],
 		}).trim();
@@ -26,7 +26,7 @@ if (!dryRun) {
 }
 
 console.log(`📦 Building ${name}@${version}...`);
-execSync("bun run build", { stdio: "inherit" });
+execFileSync("bun", ["run", "build"], { stdio: "inherit" });
 
 if (dryRun) {
 	// `npm publish --dry-run` still hits the registry to check for version
@@ -34,9 +34,9 @@ if (dryRun) {
 	// is the common case on PRs of main). `npm pack --dry-run` exercises the
 	// same packaging path without any registry roundtrip.
 	console.log(`🧪 Packing ${name}@${version} (dry-run)...`);
-	execSync("npm pack --dry-run", { stdio: "inherit", cwd: "dist" });
+	execFileSync("npm", ["pack", "--dry-run"], { stdio: "inherit", cwd: "dist" });
 } else {
 	console.log(`🚀 Publishing ${name}@${version}...`);
 	// Use npm for publishing to support OIDC trusted publishing
-	execSync("npm publish --access public", { stdio: "inherit", cwd: "dist" });
+	execFileSync("npm", ["publish", "--access", "public"], { stdio: "inherit", cwd: "dist" });
 }
