@@ -42,3 +42,4 @@ cargo install uniffi-bindgen-go \
 - Source: [go/moq](https://github.com/moq-dev/moq/tree/main/go/moq)
 - Mirror repo: [moq-dev/moq-go](https://github.com/moq-dev/moq-go)
 - The Rust crates this wraps: [moq-net](/rs/crate/moq-net) + [moq-mux](/rs/crate/moq-mux)
+- Shared FFI layer (also powers the Python, Kotlin, and Swift bindings): [moq-ffi](https://crates.io/crates/moq-ffi)
