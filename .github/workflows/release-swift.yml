@@ -162,6 +162,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          # No git operations here use the stored credential. gh CLI
+          # below picks up GH_TOKEN directly, so don't persist a
+          # contents-write token in .git/config.
+          persist-credentials: false
 
       - name: Find previous tag
         id: prev_tag

@@ -62,7 +62,7 @@ To enable the mirror push:
 3. In `moq-dev/moq` repo settings:
    - Add secret `SWIFT_MIRROR_TOKEN` containing the token.
    - Add variable `PUBLISH_SPM=true`.
-4. Cut the next `moq-ffi-v*` tag. The `publish-spm` job runs `publish.sh`, which clones the mirror, replaces its tree with the staged package, commits, tags with `${VERSION}` (bare semver), and pushes.
+4. Cut the next `moq-ffi-v*` tag. The `publish` job ("Publish to Swift Package mirror") runs `publish.sh`, which clones the mirror, replaces its tree with the staged package, commits, tags with `${VERSION}` (bare semver), and pushes.
 
 To dry-run without flipping `PUBLISH_SPM`, run `swift/scripts/publish.sh --dry-run` against a staged tarball. It clones, stages, and prints the diff, but skips the commit and push.
 
