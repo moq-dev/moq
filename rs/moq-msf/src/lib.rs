@@ -31,9 +31,10 @@ pub struct Catalog {
 /// A single track in the MSF catalog.
 ///
 /// Marked `#[non_exhaustive]` because the CMSF/MSF drafts continue to grow
-/// optional fields. External constructors should start from a previously
-/// produced `Track` (e.g. from `Catalog::from_str`) or use struct update
-/// syntax against one.
+/// optional fields. External callers build a track with [`Track::new`] and
+/// then assign whichever optional fields they need; struct-literal
+/// construction (with or without `..base`) is not available outside this
+/// crate.
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
