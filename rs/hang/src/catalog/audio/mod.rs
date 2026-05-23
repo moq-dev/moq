@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, btree_map};
 use bytes::Bytes;
 
 use serde::{Deserialize, Serialize};
-use serde_with::{DisplayFromStr, hex::Hex};
+use serde_with::{DisplayFromStr, DurationMilliSeconds, hex::Hex};
 
 use crate::catalog::Container;
 
@@ -89,6 +89,7 @@ pub struct AudioConfig {
 	///
 	/// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
 	/// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 23ms
-	#[serde(default, with = "crate::catalog::duration_millis")]
+	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
+	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 }

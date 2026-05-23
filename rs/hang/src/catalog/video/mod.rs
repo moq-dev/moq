@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, btree_map};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use serde_with::{DisplayFromStr, hex::Hex};
+use serde_with::{DisplayFromStr, DurationMilliSeconds, hex::Hex};
 
 use crate::catalog::Container;
 
@@ -140,6 +140,7 @@ pub struct VideoConfig {
 	/// - If each frame is flushed immediately, this would be 1000/fps.
 	/// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
 	/// - If frames are buffered into 2s segments, this would be 2s.
-	#[serde(default, with = "crate::catalog::duration_millis")]
+	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
+	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 }
