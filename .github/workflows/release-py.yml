@@ -2,7 +2,7 @@ name: Release Py
 
 # Driven by the `moq-ffi-v*` tag that release-plz pushes when it bumps
 # rs/moq-ffi/Cargo.toml. The wheel inherits its version from that same
-# Cargo.toml (via maturin's dynamic version), so the moq-net package
+# Cargo.toml (via maturin's dynamic version), so the moq-rs package
 # stays lockstep with the moq-ffi crate without a separate bump.
 
 on:
@@ -85,9 +85,9 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          # py/moq-net/pyproject.toml drives the build; its [tool.maturin]
+          # py/moq-rs/pyproject.toml drives the build; its [tool.maturin]
           # block points at rs/moq-ffi/Cargo.toml.
-          working-directory: py/moq-net
+          working-directory: py/moq-rs
           args: --release --out dist
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
@@ -97,7 +97,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: python-${{ matrix.target }}
-          path: py/moq-net/dist/*.whl
+          path: py/moq-rs/dist/*.whl
 
   sdist:
     name: Build sdist
@@ -116,7 +116,7 @@ jobs:
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: py/moq-net
+          working-directory: py/moq-rs
           command: sdist
           args: --out dist
 
@@ -124,7 +124,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: python-sdist
-          path: py/moq-net/dist/*.tar.gz
+          path: py/moq-rs/dist/*.tar.gz
 
   publish:
     name: Publish to PyPI
@@ -134,7 +134,7 @@ jobs:
     if: vars.PUBLISH_PYTHON == 'true'
     environment:
       name: pypi
-      url: https://pypi.org/p/moq-net
+      url: https://pypi.org/p/moq-rs
     permissions:
       id-token: write
 

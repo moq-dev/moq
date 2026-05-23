@@ -1,13 +1,13 @@
 """List broadcasts announced on a relay under a given prefix.
 
-python py/moq-net/examples/announced.py --url https://relay.example.com
-python py/moq-net/examples/announced.py --url https://relay.example.com --prefix live/
+python py/moq-rs/examples/announced.py --url https://relay.example.com
+python py/moq-rs/examples/announced.py --url https://relay.example.com --prefix live/
 """
 
 import argparse
 import asyncio
 
-import moq_net as moq
+import moq_rs as moq
 
 
 async def run(url: str, prefix: str, tls_verify: bool) -> None:

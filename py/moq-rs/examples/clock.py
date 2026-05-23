@@ -4,15 +4,15 @@ Each minute is a new group; each second is a frame inside that group. The first
 frame of every group is the "YYYY-MM-DD HH:MM:" prefix, followed by one "SS"
 frame per second.
 
-    python py/moq-net/examples/clock.py publish   --url https://relay.example.com --broadcast clock
-    python py/moq-net/examples/clock.py subscribe --url https://relay.example.com --broadcast clock
+    python py/moq-rs/examples/clock.py publish   --url https://relay.example.com --broadcast clock
+    python py/moq-rs/examples/clock.py subscribe --url https://relay.example.com --broadcast clock
 """
 
 import argparse
 import asyncio
 from datetime import datetime, timezone
 
-import moq_net as moq
+import moq_rs as moq
 
 
 async def publish(url: str, broadcast_name: str, track_name: str, tls_verify: bool) -> None:

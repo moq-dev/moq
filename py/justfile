@@ -10,13 +10,13 @@ default:
 
 # Lint + format + maturin source build + pyright. `--no-install-workspace`
 # installs the root dev group (ruff, maturin, pyright, pytest) without
-# trying to pip-build moq-net; `maturin develop` then installs moq-net
+# trying to pip-build moq-rs; `maturin develop` then installs moq-rs
 # as an editable wheel with the rs/moq-ffi cdylib + uniffi bindings.
 check:
 	uv sync --no-install-workspace
 	uv run --no-sync ruff check .
 	uv run --no-sync ruff format --check .
-	cd moq-net && uv run --no-sync maturin develop --uv
+	cd moq-rs && uv run --no-sync maturin develop --uv
 	uv run --no-sync pyright
 
 fix:
@@ -26,11 +26,11 @@ fix:
 
 test:
 	uv sync --no-install-workspace
-	cd moq-net && uv run --no-sync maturin develop --uv
-	uv run --no-sync pytest moq-net/tests/
+	cd moq-rs && uv run --no-sync maturin develop --uv
+	uv run --no-sync pytest moq-rs/tests/
 
-# Local dev build: produces an editable install of moq-net (with the
+# Local dev build: produces an editable install of moq-rs (with the
 # moq-ffi cdylib + uniffi bindings) into the workspace venv.
 build:
 	uv sync --no-install-workspace
-	cd moq-net && uv run --no-sync maturin develop --uv
+	cd moq-rs && uv run --no-sync maturin develop --uv

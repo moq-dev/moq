@@ -1,13 +1,13 @@
-# moq-net
+# moq-rs
 
-The networking layer for [Media over QUIC](https://github.com/moq-dev/moq) in Python: real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC.
+Python bindings for the [Media over QUIC](https://github.com/moq-dev/moq) Rust crates: real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC.
 
-`moq-net` wraps the auto-generated [moq-ffi](https://pypi.org/project/moq-ffi/) bindings with a Pythonic API: no `Moq` prefixes, async iterators, context managers, and simplified connection setup. At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
+`moq-rs` wraps the auto-generated [moq-ffi](https://crates.io/crates/moq-ffi) UniFFI bindings with a Pythonic API: no `Moq` prefixes, async iterators, context managers, and simplified connection setup. At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
 
 ## Installation
 
 ```bash
-pip install moq-net
+pip install moq-rs
 ```
 
 ## Quick Start
@@ -16,7 +16,7 @@ pip install moq-net
 
 ```python
 import asyncio
-import moq_net as moq
+import moq_rs as moq
 
 async def main():
     async with moq.Client("https://relay.quic.video") as client:
@@ -34,7 +34,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
-import moq_net as moq
+import moq_rs as moq
 
 async def main():
     async with moq.Client("https://relay.quic.video") as client:
@@ -60,7 +60,7 @@ asyncio.run(main())
 For full control over the origin topology:
 
 ```python
-import moq_net as moq
+import moq_rs as moq
 
 origin = moq.OriginProducer()
 client = moq.Client(
@@ -74,44 +74,44 @@ client = moq.Client(
 
 ### Connection
 
-- **`Client(url, *, tls_verify=True, publish=None, subscribe=None)`** — async context manager for connecting to a relay
+- **`Client(url, *, tls_verify=True, publish=None, subscribe=None)`**. Async context manager for connecting to a relay.
 
 ### Publishing
 
-- **`BroadcastProducer()`** — create a broadcast to publish tracks into
+- **`BroadcastProducer()`**. Create a broadcast to publish tracks into.
   - `.publish_media(format, init) → MediaProducer`
   - `.finish()`
-- **`MediaProducer`** — write frames to a track
+- **`MediaProducer`**. Write frames to a track.
   - `.write_frame(payload, timestamp_us)`
   - `.finish()`
 
 ### Subscribing
 
-- **`BroadcastConsumer`** — subscribe to tracks within a broadcast
+- **`BroadcastConsumer`**. Subscribe to tracks within a broadcast.
   - `.subscribe_catalog() → CatalogConsumer`
   - `.subscribe_media(name, max_latency_ms=10000) → MediaConsumer`
   - `await .catalog() → Catalog` (convenience)
-- **`CatalogConsumer`** — async iterator of `Catalog`
-- **`MediaConsumer`** — async iterator of `Frame`
+- **`CatalogConsumer`**. Async iterator of `Catalog`.
+- **`MediaConsumer`**. Async iterator of `Frame`.
 
 ### Origin (advanced)
 
-- **`OriginProducer()`** — manage broadcast announcements
+- **`OriginProducer()`**. Manage broadcast announcements.
   - `.consume() → OriginConsumer`
   - `.publish(path, broadcast)`
-- **`OriginConsumer`** — discover broadcasts
+- **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix) → Announced` (async iterator)
   - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable)
 
 ### Types
 
-- **`Catalog`** — `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`
-- **`Frame`** — `.payload: bytes`, `.timestamp_us: int`, `.keyframe: bool`
-- **`Audio`** — `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`
-- **`Video`** — `.codec`, `.coded: Dimensions`, `.display_ratio`, `.bitrate`, `.framerate`, `.description`
-- **`Dimensions`** — `.width: int`, `.height: int`
+- **`Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
+- **`Frame`**. `.payload: bytes`, `.timestamp_us: int`, `.keyframe: bool`.
+- **`Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
+- **`Video`**. `.codec`, `.coded: Dimensions`, `.display_ratio`, `.bitrate`, `.framerate`, `.description`.
+- **`Dimensions`**. `.width: int`, `.height: int`.
 
 ## See Also
 
-- [moq-ffi](https://pypi.org/project/moq-ffi/) — raw UniFFI bindings (lower-level)
-- [MoQ project](https://github.com/moq-dev/moq) — full monorepo with Rust server, TypeScript browser lib, and more
+- [moq-ffi](https://crates.io/crates/moq-ffi). The Rust crate that produces the UniFFI bindings vendored as `moq_rs._uniffi`.
+- [MoQ project](https://github.com/moq-dev/moq). Full monorepo with Rust server, TypeScript browser lib, and more.

@@ -67,7 +67,7 @@ kt/
   scripts/                  check.sh, package.sh, publish.sh
 ```
 
-When `moq-ffi` splits into `moq-mux-ffi` + `moq-net-ffi`, add sibling modules `kt/moq-mux/` and `kt/moq-net/` with identical structure.
+The Kotlin module stays as a single `moq-ffi` artifact because uniffi-linked libraries can't be split across separately packaged wheels/artifacts. The Python wheel (`moq-rs`) follows the same umbrella shape for the same reason.
 
 ## Publishing to Maven Central
 
