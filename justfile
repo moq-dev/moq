@@ -76,6 +76,7 @@ ci BASE="":
 
 	# Cheap; always run.
 	nix flake check
+	bun install --frozen-lockfile
 	bun remark . --quiet --frail
 
 # Auto-fix linting/formatting issues across all languages.
