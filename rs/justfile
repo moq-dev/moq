@@ -58,3 +58,34 @@ release:
 update:
 	cargo update
 	cargo upgrade --incompatible
+
+# Build a .deb or .rpm for one of the Rust binaries locally. Requires
+# nfpm in $PATH (https://nfpm.goreleaser.com). For .rpm produced this
+# way, the linkage matches the host's glibc; CI uses an AlmaLinux 9
+# container to produce broadly compatible artifacts instead.
+#
+# Examples:
+#   just rs package moq-relay deb
+#   just rs package moq-cli rpm
+package crate packager:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	case "{{crate}}" in
+		moq-relay)      bin=moq-relay  ;;
+		moq-cli)        bin=moq        ;;
+		moq-token-cli)  bin=moq-token-cli ;;
+		*) echo "Unknown crate: {{crate}} (use moq-relay, moq-cli, or moq-token-cli)" >&2; exit 1 ;;
+	esac
+	case "{{packager}}" in
+		deb) arch=$(dpkg --print-architecture 2>/dev/null || echo amd64) ;;
+		rpm) arch=$(uname -m) ;;
+		*) echo "Unknown packager: {{packager}} (use deb or rpm)" >&2; exit 1 ;;
+	esac
+	version=$(grep -m1 '^version' rs/{{crate}}/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+	cargo build --release -p {{crate}}
+	mkdir -p dist
+	VERSION="$version" ARCH="$arch" BINARY_PATH="target/release/$bin" \
+		nfpm pkg --packager {{packager}} \
+			--config packaging/{{crate}}/nfpm.yaml \
+			--target dist/
+	ls -1 dist/

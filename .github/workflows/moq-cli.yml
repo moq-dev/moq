@@ -1,9 +1,9 @@
-name: moq-relay
+name: moq-cli
 
 on:
   push:
     tags:
-      - "moq-relay-v*"
+      - "moq-cli-v*"
 
 permissions:
   contents: read
@@ -17,9 +17,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Native runners. Each binary is built on the same arch it ships
-          # for, so the .deb/.rpm linkage matches the distro's glibc on the
-          # oldest LTS we support (Ubuntu 22.04 / AlmaLinux 9).
           - target: x86_64-unknown-linux-gnu
             runs-on: ubuntu-22.04
             deb-arch: amd64
@@ -39,7 +36,7 @@ jobs:
 
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version moq-relay
+        run: .github/scripts/release.sh parse-version moq-cli
 
       - name: Install nfpm
         shell: bash
@@ -47,34 +44,32 @@ jobs:
 
       - name: Build (release)
         shell: bash
-        run: cargo build --release --target ${{ matrix.target }} -p moq-relay
+        run: cargo build --release --target ${{ matrix.target }} -p moq-cli
 
       - name: Package bare binary
         shell: bash
         run: |
           version="${{ steps.parse.outputs.version }}"
           target="${{ matrix.target }}"
-          name="moq-relay-v${version}-${target}"
+          name="moq-cli-v${version}-${target}"
           mkdir -p dist
-          cp "target/${target}/release/moq-relay" "dist/${name}"
+          cp "target/${target}/release/moq" "dist/${name}"
 
-      - name: Package .deb (Ubuntu 22.04 toolchain, glibc 2.35)
+      - name: Package .deb (Ubuntu 22.04 toolchain)
         shell: bash
         env:
           VERSION: ${{ steps.parse.outputs.version }}
           ARCH: ${{ matrix.deb-arch }}
-          BINARY_PATH: target/${{ matrix.target }}/release/moq-relay
+          BINARY_PATH: target/${{ matrix.target }}/release/moq
         run: |
-          nfpm pkg --packager deb --config packaging/moq-relay/nfpm.yaml --target dist/
+          nfpm pkg --packager deb --config packaging/moq-cli/nfpm.yaml --target dist/
 
-      - name: Package .rpm (AlmaLinux 9 toolchain, glibc 2.34)
+      - name: Package .rpm (AlmaLinux 9 toolchain)
         shell: bash
         env:
           VERSION: ${{ steps.parse.outputs.version }}
           RPM_ARCH: ${{ matrix.rpm-arch }}
         run: |
-          # Rebuild inside AlmaLinux 9 so the binary links against its
-          # older glibc and is forward-compatible with RHEL/Rocky/Alma 9+.
           docker run --rm \
             -v "$PWD":/work -w /work \
             almalinux:9 bash -c '
@@ -83,17 +78,17 @@ jobs:
               curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs \
                 | sh -s -- -y --default-toolchain stable --profile minimal
               source $HOME/.cargo/env
-              cargo build --release --target ${{ matrix.target }} -p moq-relay
-              cp target/${{ matrix.target }}/release/moq-relay target/moq-relay.rpm-build
+              cargo build --release --target ${{ matrix.target }} -p moq-cli
+              cp target/${{ matrix.target }}/release/moq target/moq.rpm-build
             '
           ARCH="$RPM_ARCH" \
-          BINARY_PATH=target/moq-relay.rpm-build \
-            nfpm pkg --packager rpm --config packaging/moq-relay/nfpm.yaml --target dist/
+          BINARY_PATH=target/moq.rpm-build \
+            nfpm pkg --packager rpm --config packaging/moq-cli/nfpm.yaml --target dist/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: moq-relay-${{ matrix.target }}
+          name: moq-cli-${{ matrix.target }}
           path: dist/*
 
   release:
@@ -111,11 +106,11 @@ jobs:
 
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version moq-relay
+        run: .github/scripts/release.sh parse-version moq-cli
 
       - name: Find previous tag
         id: prev_tag
-        run: .github/scripts/release.sh prev-tag moq-relay
+        run: .github/scripts/release.sh prev-tag moq-cli
 
       - name: Download artifacts
         uses: actions/download-artifact@v8
@@ -127,7 +122,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-          RELEASE_TITLE: "moq-relay v${{ steps.parse.outputs.version }}"
+          RELEASE_TITLE: "moq-cli v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: .github/scripts/release.sh create artifacts
 

@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build (${{ matrix.target }})
+    name: Build tarball (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -39,7 +39,7 @@ jobs:
         shell: bash
         run: .github/scripts/release.sh parse-version moq-gst
 
-      - name: Build and package
+      - name: Build and package (tarball)
         shell: bash
         run: |
           ./rs/moq-gst/build.sh \
@@ -53,12 +53,136 @@ jobs:
           name: moq-gst-${{ matrix.target }}
           path: dist/*
 
+  package-deb:
+    name: Package .deb (${{ matrix.target }})
+    runs-on: ${{ matrix.runs-on }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-22.04
+            deb-arch: amd64
+          - target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-22.04-arm
+            deb-arch: arm64
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install GStreamer dev headers
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
+
+      - name: Install nfpm
+        shell: bash
+        run: .github/scripts/install-nfpm.sh
+
+      - name: Parse version
+        id: parse
+        shell: bash
+        run: .github/scripts/release.sh parse-version moq-gst
+
+      - name: Build and package
+        shell: bash
+        run: |
+          ./rs/moq-gst/package.sh \
+            --packager deb \
+            --version ${{ steps.parse.outputs.version }} \
+            --arch ${{ matrix.deb-arch }} \
+            --target ${{ matrix.target }} \
+            --output dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: moq-gst-deb-${{ matrix.deb-arch }}
+          path: dist/*.deb
+
+  package-rpm:
+    name: Package .rpm (${{ matrix.target }})
+    runs-on: ${{ matrix.runs-on }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-22.04
+            rpm-arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-22.04-arm
+            rpm-arch: aarch64
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install nfpm
+        shell: bash
+        run: .github/scripts/install-nfpm.sh
+
+      - name: Parse version
+        id: parse
+        shell: bash
+        run: .github/scripts/release.sh parse-version moq-gst
+
+      - name: Build inside AlmaLinux 9 (glibc 2.34)
+        shell: bash
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+          RPM_ARCH: ${{ matrix.rpm-arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          docker run --rm \
+            -v "$PWD":/work -w /work \
+            -e VERSION -e RPM_ARCH -e TARGET \
+            almalinux:9 bash -c '
+              set -euo pipefail
+              dnf install -y --quiet \
+                gcc make pkgconf-pkg-config curl tar gzip which \
+                gstreamer1-devel gstreamer1-plugins-base-devel
+              curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable --profile minimal
+              source $HOME/.cargo/env
+              cargo build --release --target "$TARGET" -p moq-gst
+            '
+
+      - name: Package via nfpm
+        shell: bash
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+          ARCH: ${{ matrix.rpm-arch }}
+          PKG_NAME: gstreamer1-moq
+          PLUGIN_PATH: target/${{ matrix.target }}/release/libgstmoq.so
+          PLUGIN_DIR: /usr/lib64/gstreamer-1.0
+        run: |
+          mkdir -p dist
+          nfpm pkg --packager rpm --config packaging/moq-gst/nfpm.yaml --target dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: moq-gst-rpm-${{ matrix.rpm-arch }}
+          path: dist/*.rpm
+
   release:
     name: Release
-    needs: build
+    needs: [build, package-deb, package-rpm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
 
     steps:
       - uses: actions/checkout@v6
@@ -86,3 +210,9 @@ jobs:
           RELEASE_TITLE: "moq-gst v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: .github/scripts/release.sh create artifacts
+
+      - name: Trigger apt/rpm repo publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: .github/scripts/trigger-repo-publish.sh

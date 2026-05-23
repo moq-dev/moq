@@ -8,6 +8,30 @@ See [localhost.toml](https://github.com/moq-dev/moq/blob/main/demo/relay/localho
 
 ## Install
 
+### Debian / Ubuntu
+
+```bash
+curl -fsSL https://apt.moq.dev/moq-archive-keyring.gpg \
+  | sudo tee /usr/share/keyrings/moq-archive-keyring.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/moq-archive-keyring.gpg] https://apt.moq.dev stable main" \
+  | sudo tee /etc/apt/sources.list.d/moq.list
+sudo apt update && sudo apt install moq-relay
+```
+
+The package drops a `moq-relay.service` systemd unit and an
+`/etc/moq-relay/relay.toml` config file. See
+[Linux Installation](https://doc.moq.dev/setup/linux) for the full
+walkthrough.
+
+### Fedora / RHEL / Rocky / AlmaLinux
+
+```bash
+sudo dnf config-manager --add-repo https://rpm.moq.dev/moq.repo
+sudo dnf install moq-relay
+```
+
+### From crates.io
+
 ```bash
 cargo install moq-relay
 ```
