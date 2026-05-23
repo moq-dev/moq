@@ -64,16 +64,17 @@ pub enum Error {
 	ShortBuffer,
 
 	/// A value exceeds the 62-bit varint range.
-	#[error("value out of range")]
-	OutOfRange,
+	#[error("value out of range: {0}")]
+	OutOfRange(#[from] BoundsExceeded),
 }
 
+// DecodeError / EncodeError intentionally collapse into ShortBuffer vs the
+// caller's catch-all variant, so they stay as manual From impls; #[from] can't
+// express that mapping.
 impl From<DecodeError> for Error {
 	fn from(err: DecodeError) -> Self {
 		match err {
 			DecodeError::Short => Self::ShortBuffer,
-			// Any other decode error (invalid value, etc.) maps to a malformed
-			// property block; the caller can't distinguish them anyway.
 			_ => Self::MalformedProperties,
 		}
 	}
@@ -83,14 +84,8 @@ impl From<EncodeError> for Error {
 	fn from(err: EncodeError) -> Self {
 		match err {
 			EncodeError::Short => Self::ShortBuffer,
-			_ => Self::OutOfRange,
+			_ => Self::OutOfRange(BoundsExceeded),
 		}
-	}
-}
-
-impl From<BoundsExceeded> for Error {
-	fn from(_: BoundsExceeded) -> Self {
-		Self::OutOfRange
 	}
 }
 

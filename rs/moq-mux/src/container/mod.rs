@@ -39,10 +39,11 @@ pub struct Frame {
 	/// Presentation timestamp.
 	///
 	/// Each container picks its own native scale: fmp4 uses the source
-	/// `mdhd.timescale`, mkv uses nanoseconds, legacy/LOC use microseconds.
-	/// Importers preserve the source scale so exporters can re-emit without a
-	/// lossy detour. Frames within a track must be in *decode* order, not
-	/// display order. B-frames may have non-monotonic presentation timestamps.
+	/// `mdhd.timescale`, mkv uses nanoseconds, legacy is fixed at microseconds.
+	/// LOC defaults to microseconds but a decoded frame keeps whatever per-frame
+	/// timescale the wire carried, so an exporter can re-emit without forcing
+	/// micros. Frames within a track must be in *decode* order, not display
+	/// order. B-frames may have non-monotonic presentation timestamps.
 	pub timestamp: moq_net::Timestamp,
 
 	/// Encoded codec payload.

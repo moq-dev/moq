@@ -131,9 +131,10 @@ impl Timestamp {
 
 	/// Convert `value` measured at `source` (units per second) to a timestamp at `target`.
 	///
-	/// Returns [`TimeOverflow`] on overflow or if `source` is [`Timescale::UNKNOWN`].
+	/// Returns [`TimeOverflow`] on overflow, or if either `source` or `target` is
+	/// [`Timescale::UNKNOWN`].
 	pub const fn from_scale(value: u64, source: Timescale, target: Timescale) -> Result<Self, TimeOverflow> {
-		if source.0 == 0 {
+		if source.0 == 0 || target.0 == 0 {
 			return Err(TimeOverflow);
 		}
 		match (value as u128).checked_mul(target.0 as u128) {
@@ -752,5 +753,13 @@ mod tests {
 	#[test]
 	fn test_from_scale_zero_source() {
 		assert!(Timestamp::from_scale(5, Timescale::UNKNOWN, Timescale::MILLI).is_err());
+	}
+
+	#[test]
+	fn test_from_scale_zero_target() {
+		// Otherwise the multiply-by-zero silently discards the value and we'd
+		// hand back a 0/?-scale timestamp, breaking the UNKNOWN-conversions-fail
+		// contract.
+		assert!(Timestamp::from_scale(5, Timescale::MILLI, Timescale::UNKNOWN).is_err());
 	}
 }
