@@ -433,7 +433,7 @@ async fn run_session(
 	};
 
 	let catalog_track = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
-	let mut catalog = moq_mux::catalog::Consumer::new(catalog_track);
+	let mut catalog = moq_mux::catalog::hang::Consumer::new(catalog_track);
 	let catalog = catalog.next().await?.context("catalog missing")?.clone();
 
 	let mut tasks = Vec::new();

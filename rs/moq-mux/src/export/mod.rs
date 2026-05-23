@@ -31,9 +31,9 @@ use crate::catalog::CatalogFormat;
 /// the fly so the rest of the pipeline only deals with hang types.
 pub(super) enum CatalogSource {
 	/// The hang catalog track (track name `catalog.json`, JSON payload).
-	Hang(crate::catalog::Consumer),
+	Hang(crate::catalog::hang::Consumer),
 	/// The MSF catalog track (track name `catalog`, MSF JSON payload converted to hang).
-	Msf(crate::catalog::MsfConsumer),
+	Msf(crate::catalog::msf::Consumer),
 }
 
 impl CatalogSource {
@@ -41,11 +41,11 @@ impl CatalogSource {
 		Ok(match format {
 			CatalogFormat::Hang => {
 				let track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
-				CatalogSource::Hang(crate::catalog::Consumer::new(track))
+				CatalogSource::Hang(crate::catalog::hang::Consumer::new(track))
 			}
 			CatalogFormat::Msf => {
 				let track = broadcast.subscribe_track(&moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
-				CatalogSource::Msf(crate::catalog::MsfConsumer::new(track))
+				CatalogSource::Msf(crate::catalog::msf::Consumer::new(track))
 			}
 		})
 	}

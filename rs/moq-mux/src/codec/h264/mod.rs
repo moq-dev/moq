@@ -1,3 +1,8 @@
+//! H.264 parsing primitives, `Avc1` codec-shape transmuxer (Annex-B → length-prefixed),
+//! and the per-codec [`Import`](import::Import) that publishes raw bitstreams.
+
+pub mod import;
+
 use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -180,7 +185,7 @@ impl Avc1 {
 		// the rest. NalIterator advances the Bytes cursor; the trailing NAL
 		// has to be pulled separately via flush().
 		let mut buf = payload.clone();
-		let mut nal_iter = crate::import::annexb::NalIterator::new(&mut buf);
+		let mut nal_iter = crate::codec::annexb::NalIterator::new(&mut buf);
 
 		let mut out = BytesMut::with_capacity(payload.remaining());
 		let mut sps_pps_changed = false;

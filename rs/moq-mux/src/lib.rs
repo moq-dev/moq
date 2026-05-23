@@ -8,19 +8,20 @@
 //!   (Legacy or CMAF), the [`Frame`](container::Frame) type, and the generic
 //!   [`Consumer`](container::Consumer)/[`Producer`](container::Producer) wrappers that
 //!   dispatch to a `Container` implementation.
-//! - [`catalog`]: hang catalog publish/subscribe. [`Producer`](catalog::Producer)
-//!   manages the hang and MSF catalog tracks, [`Consumer`](catalog::Consumer)
-//!   subscribes to incoming catalog updates.
-//! - [`import`]: pull external media (fMP4, HLS, raw codec bitstreams, ...) into a
-//!   moq broadcast. Codec demuxers that publish through a
-//!   [`catalog::Producer`].
+//! - [`catalog`]: hang and MSF catalog publish/subscribe.
+//!   [`Producer`](catalog::hang::Producer) manages both catalog tracks,
+//!   [`Consumer`](catalog::hang::Consumer) subscribes to incoming hang catalog updates,
+//!   [`MsfConsumer`](catalog::msf::Consumer) does the same for MSF.
+//! - [`codec`]: per-codec parsing, codec-shape transmuxers, and codec-specific importers
+//!   (e.g. [`codec::h264::import::Import`]).
+//! - [`import`]: pull external media (fMP4, HLS, MKV) into a moq broadcast.
 //! - [`export`]: subscribe to a moq broadcast and produce media bytes.
 //!   [`Fmp4`](export::Fmp4) yields a single fMP4 / CMAF byte stream (init segment +
 //!   moof+mdat fragments) in timestamp order across tracks.
 //!
-//! Broadcast names use a filename-style suffix ([`catalog::CatalogFormat::extension`])
+//! Broadcast names use a filename-style suffix ([`CatalogFormat::extension`](catalog::CatalogFormat::extension))
 //! to advertise their catalog format (`.hang`, `.msf`). Consumers call
-//! [`catalog::CatalogFormat::detect`] to pick a catalog track.
+//! [`CatalogFormat::detect`](catalog::CatalogFormat::detect) to pick a catalog track.
 
 pub mod catalog;
 pub mod codec;

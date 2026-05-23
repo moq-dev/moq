@@ -23,7 +23,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
 	let track = producer.unique_track(".avc3").unwrap();
 	catalog.lock().video.renditions.insert(
 		track.name.clone(),
@@ -128,7 +128,7 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
 	let mut importer = crate::import::Fmp4::new(producer, catalog);
 	let mut buf = BytesMut::from(data.as_slice());
 	let _ = importer.decode(&mut buf);

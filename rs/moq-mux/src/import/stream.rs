@@ -50,15 +50,13 @@ impl fmt::Display for StreamFormat {
 	}
 }
 
-#[derive(derive_more::From)]
 enum StreamKind {
-	/// aka H264 with inline SPS/PPS
-	Avc3(super::Avc3),
+	/// H.264 in avc3 wire shape (Annex-B with inline SPS/PPS).
+	Avc3(crate::codec::h264::import::Import),
 	// Boxed because it's a large struct and clippy complains about the size.
 	Fmp4(Box<super::Fmp4>),
-	/// aka H265 with inline SPS/PPS
-	Hev1(super::Hev1),
-	Av01(super::Av01),
+	Hev1(crate::codec::h265::import::Import),
+	Av01(crate::codec::av1::import::Import),
 	// Boxed for the same reason as Fmp4.
 	Mkv(Box<super::Mkv>),
 }
@@ -73,16 +71,23 @@ pub struct Stream {
 
 impl Stream {
 	/// Create a new stream importer with the given format.
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer, format: StreamFormat) -> Self {
+	pub fn new(
+		broadcast: moq_net::BroadcastProducer,
+		catalog: crate::catalog::hang::Producer,
+		format: StreamFormat,
+	) -> anyhow::Result<Self> {
+		use crate::codec::h264::import::Mode as H264Mode;
 		let decoder = match format {
-			StreamFormat::Avc3 => super::Avc3::new(broadcast, catalog).into(),
-			StreamFormat::Fmp4 => Box::new(super::Fmp4::new(broadcast, catalog)).into(),
-			StreamFormat::Hev1 => super::Hev1::new(broadcast, catalog).into(),
-			StreamFormat::Av01 => super::Av01::new(broadcast, catalog).into(),
-			StreamFormat::Mkv => Box::new(super::Mkv::new(broadcast, catalog)).into(),
+			StreamFormat::Avc3 => {
+				StreamKind::Avc3(crate::codec::h264::import::Import::new(broadcast, catalog).with_mode(H264Mode::Avc3)?)
+			}
+			StreamFormat::Fmp4 => StreamKind::Fmp4(Box::new(super::Fmp4::new(broadcast, catalog))),
+			StreamFormat::Hev1 => StreamKind::Hev1(crate::codec::h265::import::Import::new(broadcast, catalog)),
+			StreamFormat::Av01 => StreamKind::Av01(crate::codec::av1::import::Import::new(broadcast, catalog)),
+			StreamFormat::Mkv => StreamKind::Mkv(Box::new(super::Mkv::new(broadcast, catalog))),
 		};
 
-		Self { decoder }
+		Ok(Self { decoder })
 	}
 
 	/// Initialize the decoder with the given buffer and populate the broadcast.
@@ -105,14 +110,6 @@ impl Stream {
 	}
 
 	/// Decode a stream of data from the given buffer.
-	///
-	/// This method should be used when the caller does not know the frame boundaries.
-	/// For example, reading a fMP4 file from disk or receiving annex.b over the network.
-	///
-	/// A timestamp cannot be provided because you don't even know if the buffer contains a frame.
-	/// The wall clock time will be used if the format does not contain its own timestamps.
-	///
-	/// If the buffer is not fully consumed, more data is needed.
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
 		match self.decoder {
 			StreamKind::Avc3(ref mut decoder) => decoder.decode_stream(buf, None),
@@ -124,9 +121,6 @@ impl Stream {
 	}
 
 	/// Finish the decoder, flushing any buffered data.
-	///
-	/// This should be called when the input stream ends to ensure the last
-	/// group is properly finalized.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		match self.decoder {
 			StreamKind::Avc3(ref mut decoder) => decoder.finish(),

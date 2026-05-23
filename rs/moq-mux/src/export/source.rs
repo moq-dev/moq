@@ -19,7 +19,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
 
-use crate::codec::{Avc1, Hvc1};
+use crate::codec::h264::Avc1;
+use crate::codec::h265::Hvc1;
 use crate::container::{Consumer, Frame, Hang};
 
 /// Per-track video transform that bridges between codec shapes.

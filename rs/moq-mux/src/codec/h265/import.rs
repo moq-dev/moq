@@ -1,5 +1,5 @@
-use super::annexb::{NalIterator, START_CODE};
-use super::jitter::MinFrameDuration;
+use crate::codec::annexb::{NalIterator, START_CODE};
+use crate::container::jitter::MinFrameDuration;
 
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
@@ -7,12 +7,12 @@ use scuffle_h265::{NALUnitType, SpsNALUnit};
 
 /// A decoder for H.265 with inline SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
-pub struct Hev1 {
+pub struct Import {
 	// The broadcast being produced.
 	broadcast: moq_net::BroadcastProducer,
 
 	// The catalog being produced.
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::hang::Producer,
 
 	// The track being produced.
 	track: Option<crate::container::Producer<crate::container::Hang>>,
@@ -36,8 +36,8 @@ pub struct Hev1 {
 	jitter: MinFrameDuration,
 }
 
-impl Hev1 {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+impl Import {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::hang::Producer) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -341,7 +341,7 @@ impl Hev1 {
 	}
 }
 
-impl Drop for Hev1 {
+impl Drop for Import {
 	fn drop(&mut self) {
 		if let Some(track) = &self.track {
 			tracing::debug!(name = ?track.name, "ending track");

@@ -38,9 +38,5 @@ tracing = "0.1"
 url = "2"
 webm-iterable = "0.6"
 
-[dependencies.derive_more]
-version = "2"
-features = ["from", "display", "debug"]
-
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

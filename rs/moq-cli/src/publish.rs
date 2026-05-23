@@ -15,7 +15,7 @@ pub enum PublishFormat {
 }
 
 enum PublishDecoder {
-	Avc3(Box<import::Avc3>),
+	Avc3(Box<moq_mux::codec::h264::import::Import>),
 	Fmp4(Box<import::Fmp4>),
 	Hls(Box<import::Hls>),
 }
@@ -39,11 +39,12 @@ pub struct Publish {
 impl Publish {
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
 		let mut broadcast = moq_net::Broadcast::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
 
 		let decoder = match format {
 			PublishFormat::Avc3 => {
-				let avc3 = import::Avc3::new(broadcast.clone(), catalog.clone());
+				let avc3 = moq_mux::codec::h264::import::Import::new(broadcast.clone(), catalog.clone())
+					.with_mode(moq_mux::codec::h264::import::Mode::Avc3)?;
 				PublishDecoder::Avc3(Box::new(avc3))
 			}
 			PublishFormat::Fmp4 => {

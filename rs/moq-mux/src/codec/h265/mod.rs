@@ -1,3 +1,5 @@
+pub mod import;
+
 use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
@@ -5,7 +7,7 @@ use scuffle_h265::{NALUnitType, SpsNALUnit};
 /// Transform H.265 frames from Annex-B (inline VPS/SPS/PPS, "hev1") to
 /// length-prefixed NALU (out-of-band HEVCDecoderConfigurationRecord, "hvc1").
 ///
-/// See [`crate::codec::Avc1`] for the analogous H.264 transform.
+/// See [`crate::codec::h264::Avc1`] for the analogous H.264 transform.
 pub struct Hvc1 {
 	hvcc: Option<Bytes>,
 	vps: Option<Bytes>,
@@ -35,7 +37,7 @@ impl Hvc1 {
 
 	pub fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
 		let mut buf = payload.clone();
-		let mut nal_iter = crate::import::annexb::NalIterator::new(&mut buf);
+		let mut nal_iter = crate::codec::annexb::NalIterator::new(&mut buf);
 
 		let mut out = BytesMut::with_capacity(payload.remaining());
 		let mut params_changed = false;

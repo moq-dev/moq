@@ -74,7 +74,7 @@ impl Consume {
 	async fn run_catalog(
 		task_id: Id,
 		broadcast: moq_net::BroadcastConsumer,
-		mut catalog: moq_mux::catalog::Consumer,
+		mut catalog: moq_mux::catalog::hang::Consumer,
 	) -> Result<(), Error> {
 		while let Some(catalog) = catalog.next().await? {
 			// Unfortunately we need to store the codec information on the heap.

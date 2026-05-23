@@ -7,16 +7,16 @@ use hang::catalog::{AudioCodec, AudioConfig, Container, VideoCodec, VideoConfig}
 
 /// A consumer for the MSF catalog track.
 ///
-/// Mirrors [`crate::catalog::Consumer`] but for the MSF (MOQT Streaming Format) catalog
+/// Mirrors [`crate::catalog::hang::Consumer`] but for the MSF (MOQT Streaming Format) catalog
 /// track. Each update is parsed as [`moq_msf::Catalog`] and converted to [`hang::Catalog`]
 /// so the rest of the pipeline only deals with hang types.
-pub struct MsfConsumer {
+pub struct Consumer {
 	/// Access to the underlying track consumer.
 	pub track: moq_net::TrackConsumer,
 	group: Option<moq_net::GroupConsumer>,
 }
 
-impl MsfConsumer {
+impl Consumer {
 	/// Create a new MSF catalog consumer from a MoQ track consumer.
 	///
 	/// The track is expected to carry MSF catalog payloads (track name [`moq_msf::DEFAULT_NAME`]).
@@ -66,7 +66,7 @@ impl MsfConsumer {
 	}
 }
 
-impl From<moq_net::TrackConsumer> for MsfConsumer {
+impl From<moq_net::TrackConsumer> for Consumer {
 	fn from(inner: moq_net::TrackConsumer) -> Self {
 		Self::new(inner)
 	}
@@ -318,7 +318,7 @@ fn derive_from_codec_config(
 	let mut buf = init;
 	match codec {
 		AudioCodec::AAC(_) => {
-			let cfg = crate::import::AacConfig::parse(&mut buf)
+			let cfg = crate::codec::aac::AacConfig::parse(&mut buf)
 				.with_context(|| format!("MSF audio track {:?} has malformed AudioSpecificConfig", track.name))?;
 			anyhow::ensure!(
 				!buf.has_remaining(),
@@ -331,7 +331,7 @@ fn derive_from_codec_config(
 			})
 		}
 		AudioCodec::Opus => {
-			let cfg = crate::import::OpusConfig::parse(&mut buf)
+			let cfg = crate::codec::opus::OpusConfig::parse(&mut buf)
 				.with_context(|| format!("MSF audio track {:?} has malformed OpusHead", track.name))?;
 			anyhow::ensure!(
 				!buf.has_remaining(),

@@ -1,6 +1,6 @@
 use bytes::{Buf, BytesMut};
 
-pub use crate::codec::opus::OpusConfig;
+use super::OpusConfig;
 
 /// Opus importer.
 ///
@@ -8,16 +8,16 @@ pub use crate::codec::opus::OpusConfig;
 /// is published as one hang frame in its own group, so the relay can forward each frame
 /// without waiting for a group boundary. Opus' packet loss concealment handles drops.
 /// Ogg framing is not supported, feed raw Opus packets.
-pub struct Opus {
-	catalog: crate::catalog::Producer,
+pub struct Import {
+	catalog: crate::catalog::hang::Producer,
 	track: crate::container::Producer<crate::container::Hang>,
 	zero: Option<tokio::time::Instant>,
 }
 
-impl Opus {
+impl Import {
 	pub fn new(
 		mut broadcast: moq_net::BroadcastProducer,
-		mut catalog: crate::catalog::Producer,
+		mut catalog: crate::catalog::hang::Producer,
 		config: OpusConfig,
 	) -> anyhow::Result<Self> {
 		let track = broadcast.unique_track(".opus")?;
@@ -92,7 +92,7 @@ impl Opus {
 	}
 }
 
-impl Drop for Opus {
+impl Drop for Import {
 	fn drop(&mut self) {
 		tracing::debug!(name = ?self.track.name, "ending track");
 		self.catalog.lock().audio.renditions.remove(&self.track.name);

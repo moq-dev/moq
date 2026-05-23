@@ -35,8 +35,8 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// ## Avc3 / Hev1 sources
 ///
 /// `Mkv` accepts Annex-B sources (`H264 { inline: true }`, `H265 { in_band: true }`,
-/// catalog `description` empty) by attaching a [`crate::codec::Avc1`] /
-/// [`crate::codec::Hvc1`] to each affected track. The transform caches
+/// catalog `description` empty) by attaching a [`crate::codec::h264::Avc1`] /
+/// [`crate::codec::h265::Hvc1`] to each affected track. The transform caches
 /// parameter sets, builds the out-of-band `AVCDecoderConfigurationRecord` /
 /// `HEVCDecoderConfigurationRecord`, and length-prefixes sample NALs. Header
 /// emission is deferred until every such track has produced its codec config
@@ -491,12 +491,11 @@ impl Mkv {
 
 fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Result<()> {
 	match container {
-		Container::Legacy => Ok(()),
+		// MKV emits raw codec payloads, so it accepts both wire formats whose
+		// frames are raw codec bitstreams (Legacy varint, LOC properties).
+		Container::Legacy | Container::Loc => Ok(()),
 		Container::Cmaf { .. } => {
 			anyhow::bail!("MKV export does not support CMAF {} track '{}'", kind, name);
-		}
-		Container::Loc => {
-			anyhow::bail!("MKV export does not support LOC {} track '{}'", kind, name);
 		}
 	}
 }

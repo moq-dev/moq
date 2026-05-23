@@ -22,6 +22,7 @@ use bytes::Bytes;
 pub(crate) mod cmaf;
 mod consumer;
 mod hang;
+pub(crate) mod jitter;
 mod loc;
 mod producer;
 

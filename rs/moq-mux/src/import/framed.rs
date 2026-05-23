@@ -1,5 +1,6 @@
 use std::{fmt, str::FromStr};
 
+use anyhow::Context;
 use bytes::Buf;
 use hang::Error;
 
@@ -76,19 +77,16 @@ impl From<StreamFormat> for FramedFormat {
 	}
 }
 
-#[derive(derive_more::From)]
 enum FramedKind {
-	/// H264 with AVCC framing
-	Avc1(super::Avc1),
-	/// H264 with Annex B framing
-	Avc3(super::Avc3),
+	/// H.264 (both avc1 and avc3 wire shapes go through this importer; mode
+	/// is pinned by the caller's FramedFormat choice).
+	H264(crate::codec::h264::import::Import),
 	// Boxed because it's a large struct and clippy complains about the size.
 	Fmp4(Box<super::Fmp4>),
-	/// aka H265 with inline SPS/PPS
-	Hev1(super::Hev1),
-	Av01(super::Av01),
-	Aac(super::Aac),
-	Opus(super::Opus),
+	Hev1(crate::codec::h265::import::Import),
+	Av01(crate::codec::av1::import::Import),
+	Aac(crate::codec::aac::import::Import),
+	Opus(crate::codec::opus::import::Import),
 	// Boxed for the same reason as Fmp4.
 	Mkv(Box<super::Mkv>),
 }
@@ -106,48 +104,51 @@ impl Framed {
 	/// The buffer will be fully consumed, or an error will be returned.
 	pub fn new<T: Buf + AsRef<[u8]>>(
 		broadcast: moq_net::BroadcastProducer,
-		catalog: crate::catalog::Producer,
+		catalog: crate::catalog::hang::Producer,
 		format: FramedFormat,
 		buf: &mut T,
 	) -> anyhow::Result<Self> {
+		use crate::codec::h264::import::Mode as H264Mode;
 		let decoder = match format {
 			FramedFormat::Avc1 => {
-				let mut decoder = super::Avc1::new(broadcast, catalog);
+				let mut decoder =
+					crate::codec::h264::import::Import::new(broadcast, catalog).with_mode(H264Mode::Avc1)?;
 				decoder.initialize(buf)?;
-				decoder.into()
+				FramedKind::H264(decoder)
 			}
 			FramedFormat::Avc3 => {
-				let mut decoder = super::Avc3::new(broadcast, catalog);
+				let mut decoder =
+					crate::codec::h264::import::Import::new(broadcast, catalog).with_mode(H264Mode::Avc3)?;
 				decoder.initialize(buf)?;
-				decoder.into()
+				FramedKind::H264(decoder)
 			}
 			FramedFormat::Fmp4 => {
 				let mut decoder = Box::new(super::Fmp4::new(broadcast, catalog));
 				decoder.decode(buf)?;
-				decoder.into()
+				FramedKind::Fmp4(decoder)
 			}
 			FramedFormat::Hev1 => {
-				let mut decoder = super::Hev1::new(broadcast, catalog);
+				let mut decoder = crate::codec::h265::import::Import::new(broadcast, catalog);
 				decoder.initialize(buf)?;
-				decoder.into()
+				FramedKind::Hev1(decoder)
 			}
 			FramedFormat::Av01 => {
-				let mut decoder = super::Av01::new(broadcast, catalog);
+				let mut decoder = crate::codec::av1::import::Import::new(broadcast, catalog);
 				decoder.initialize(buf)?;
-				decoder.into()
+				FramedKind::Av01(decoder)
 			}
 			FramedFormat::Aac => {
-				let config = super::AacConfig::parse(buf)?;
-				super::Aac::new(broadcast, catalog, config)?.into()
+				let config = crate::codec::aac::AacConfig::parse(buf)?;
+				FramedKind::Aac(crate::codec::aac::import::Import::new(broadcast, catalog, config)?)
 			}
 			FramedFormat::Opus => {
-				let config = super::OpusConfig::parse(buf)?;
-				super::Opus::new(broadcast, catalog, config)?.into()
+				let config = crate::codec::opus::OpusConfig::parse(buf)?;
+				FramedKind::Opus(crate::codec::opus::import::Import::new(broadcast, catalog, config)?)
 			}
 			FramedFormat::Mkv => {
 				let mut decoder = Box::new(super::Mkv::new(broadcast, catalog));
 				decoder.decode(buf)?;
-				decoder.into()
+				FramedKind::Mkv(decoder)
 			}
 		};
 
@@ -157,13 +158,9 @@ impl Framed {
 	}
 
 	/// Finish the decoder, flushing any buffered data.
-	///
-	/// This should be called when the input stream ends to ensure the last
-	/// group is properly finalized.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		match self.decoder {
-			FramedKind::Avc1(ref mut decoder) => decoder.finish(),
-			FramedKind::Avc3(ref mut decoder) => decoder.finish(),
+			FramedKind::H264(ref mut decoder) => decoder.finish(),
 			FramedKind::Fmp4(ref mut decoder) => decoder.finish(),
 			FramedKind::Hev1(ref mut decoder) => decoder.finish(),
 			FramedKind::Av01(ref mut decoder) => decoder.finish(),
@@ -174,13 +171,9 @@ impl Framed {
 	}
 
 	/// Return the single track produced by this importer.
-	///
-	/// Container formats like fMP4 can produce multiple tracks, so callers that
-	/// need one concrete track must use a single-track format.
 	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
 		match self.decoder {
-			FramedKind::Avc1(ref decoder) => decoder.track(),
-			FramedKind::Avc3(ref decoder) => Ok(decoder.track()),
+			FramedKind::H264(ref decoder) => decoder.track().context("H.264 track not yet created"),
 			FramedKind::Fmp4(_) => anyhow::bail!("fmp4 can contain multiple tracks"),
 			FramedKind::Hev1(ref decoder) => decoder.track(),
 			FramedKind::Av01(ref decoder) => decoder.track(),
@@ -191,22 +184,13 @@ impl Framed {
 	}
 
 	/// Decode a frame from the given buffer.
-	///
-	/// This method should be used when the caller knows the buffer consists of an entire frame.
-	///
-	/// A timestamp may be provided if the format does not contain its own timestamps.
-	/// Otherwise, a value of [None] will use the wall clock time.
-	///
-	/// The buffer will be fully consumed, or an error will be returned.
-	/// If the buffer did not contain a frame, future decode calls may fail.
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
 		pts: Option<hang::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		match self.decoder {
-			FramedKind::Avc1(ref mut decoder) => decoder.decode(buf, pts)?,
-			FramedKind::Avc3(ref mut decoder) => decoder.decode_frame(buf, pts)?,
+			FramedKind::H264(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			FramedKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
 			FramedKind::Hev1(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			FramedKind::Av01(ref mut decoder) => decoder.decode_frame(buf, pts)?,
@@ -221,17 +205,5 @@ impl Framed {
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
 
 		Ok(())
-	}
-}
-
-impl From<super::Opus> for Framed {
-	fn from(opus: super::Opus) -> Self {
-		Self { decoder: opus.into() }
-	}
-}
-
-impl From<super::Aac> for Framed {
-	fn from(aac: super::Aac) -> Self {
-		Self { decoder: aac.into() }
 	}
 }

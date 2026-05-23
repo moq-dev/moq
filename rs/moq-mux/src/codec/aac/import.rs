@@ -1,6 +1,6 @@
 use bytes::{Buf, BytesMut};
 
-pub use crate::codec::aac::AacConfig;
+use super::AacConfig;
 
 /// AAC importer.
 ///
@@ -8,16 +8,16 @@ pub use crate::codec::aac::AacConfig;
 /// an MP4 ESDS atom). Each input buffer passed to [`decode`](Self::decode) is published as
 /// one hang frame in its own group, so the relay can forward each frame without waiting for
 /// a group boundary. The codec's packet loss concealment handles drops.
-pub struct Aac {
-	catalog: crate::catalog::Producer,
+pub struct Import {
+	catalog: crate::catalog::hang::Producer,
 	track: crate::container::Producer<crate::container::Hang>,
 	zero: Option<tokio::time::Instant>,
 }
 
-impl Aac {
+impl Import {
 	pub fn new(
 		mut broadcast: moq_net::BroadcastProducer,
-		mut catalog: crate::catalog::Producer,
+		mut catalog: crate::catalog::hang::Producer,
 		config: AacConfig,
 	) -> anyhow::Result<Self> {
 		let track = broadcast.unique_track(".aac")?;
@@ -94,7 +94,7 @@ impl Aac {
 	}
 }
 
-impl Drop for Aac {
+impl Drop for Import {
 	fn drop(&mut self) {
 		tracing::debug!(name = ?self.track.name, "ending track");
 		self.catalog.lock().audio.renditions.remove(&self.track.name);

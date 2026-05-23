@@ -1,17 +1,19 @@
-//! Hang catalog publish/subscribe.
+//! Catalog publish/subscribe.
 //!
-//! The hang catalog is a JSON track describing a broadcast's audio/video tracks
-//! (codec info, init segments, container format). [`Producer`] manages the catalog
-//! tracks (both hang-style and MSF-style) and is shared across every codec demuxer
-//! in [`crate::import`]. [`Consumer`] subscribes to the hang catalog track and
-//! deserializes incoming updates.
+//! Two catalog formats coexist:
+//!
+//! - [`hang`] — the JSON catalog (track `catalog.json`) used by every codec
+//!   importer in [`crate::import`]. Publish via [`hang::Producer`]; subscribe
+//!   via [`hang::Consumer`].
+//! - [`msf`] — the MSF catalog (track `catalog`), an alternate JSON shape.
+//!   Subscribe via [`msf::Consumer`]; the same publish-side wraps both since
+//!   [`hang::Producer`] writes both tracks on every update.
+//!
+//! [`CatalogFormat`] picks which one to subscribe to based on the broadcast's
+//! filename-style suffix.
 
-mod consumer;
+pub mod hang;
+pub mod msf;
+
 mod format;
-mod msf_consumer;
-mod producer;
-
-pub use consumer::*;
 pub use format::*;
-pub use msf_consumer::*;
-pub use producer::*;

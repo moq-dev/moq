@@ -1,4 +1,4 @@
-use super::jitter::MinFrameDuration;
+use crate::container::jitter::MinFrameDuration;
 
 use anyhow::Context;
 use bytes::BytesMut;
@@ -6,12 +6,12 @@ use bytes::{Buf, Bytes};
 use scuffle_av1::seq::SequenceHeaderObu;
 
 /// A decoder for AV1 with inline sequence headers.
-pub struct Av01 {
+pub struct Import {
 	// The broadcast being produced.
 	broadcast: moq_net::BroadcastProducer,
 
 	// The catalog being produced.
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::hang::Producer,
 
 	// The track being produced.
 	track: Option<crate::container::Producer<crate::container::Hang>>,
@@ -36,8 +36,8 @@ struct Frame {
 	contains_frame: bool,
 }
 
-impl Av01 {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+impl Import {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::hang::Producer) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -432,7 +432,7 @@ impl Av01 {
 	}
 }
 
-impl Drop for Av01 {
+impl Drop for Import {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.name, "ending track");

@@ -37,7 +37,7 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// Unsupported codecs (e.g. Vorbis, AC3, MP3, subtitles) are logged and dropped.
 pub struct Mkv {
 	broadcast: moq_net::BroadcastProducer,
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::hang::Producer,
 
 	/// Accumulated unparsed input.
 	buffer: BytesMut,
@@ -69,7 +69,7 @@ struct MkvTrack {
 }
 
 impl Mkv {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::hang::Producer) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -513,7 +513,7 @@ fn build_audio_config(
 			// Codec private is OpusHead. If present, it's authoritative for rate/channels.
 			let (cfg_rate, cfg_channels) = if let Some(priv_data) = codec_private {
 				let mut cursor = priv_data.clone();
-				let cfg = super::OpusConfig::parse(&mut cursor)?;
+				let cfg = crate::codec::opus::OpusConfig::parse(&mut cursor)?;
 				(cfg.sample_rate, cfg.channel_count)
 			} else {
 				(sample_rate, channels)
@@ -532,7 +532,7 @@ fn build_audio_config(
 		"A_AAC" => {
 			let priv_data = codec_private.context("A_AAC missing CodecPrivate (AudioSpecificConfig)")?;
 			let mut cursor = priv_data.clone();
-			let cfg = super::AacConfig::parse(&mut cursor)?;
+			let cfg = crate::codec::aac::AacConfig::parse(&mut cursor)?;
 
 			Ok(AudioConfig {
 				codec: AAC { profile: cfg.profile }.into(),

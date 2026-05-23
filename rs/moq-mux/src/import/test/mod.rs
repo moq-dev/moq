@@ -5,7 +5,7 @@ mod mkv;
 
 fn run_fmp4(data: &[u8]) -> hang::Catalog {
 	let mut broadcast = moq_net::Broadcast::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 
 	let mut fmp4 = super::Fmp4::new(broadcast, catalog.clone());
 
@@ -143,7 +143,7 @@ async fn test_msf_catalog_roundtrip() {
 	// Take the consumer before adding tracks; subscribe_track is called after the
 	// MSF catalog track has been created by `catalog::Producer::new`.
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 	let mut fmp4 = super::Fmp4::new(broadcast, catalog);
 
 	let data = include_bytes!("bbb.mp4");
@@ -154,7 +154,7 @@ async fn test_msf_catalog_roundtrip() {
 	let track = consumer
 		.subscribe_track(&moq_net::Track::new(moq_msf::DEFAULT_NAME))
 		.expect("MSF catalog track should exist");
-	let mut msf = crate::catalog::MsfConsumer::new(track);
+	let mut msf = crate::catalog::msf::Consumer::new(track);
 
 	let catalog = msf
 		.next()
