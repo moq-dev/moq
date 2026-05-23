@@ -12,6 +12,7 @@ on:
     paths:
       - 'swift/**'
       - 'rs/moq-ffi/**'
+      - 'justfile'
       - '.github/workflows/check-swift.yml'
 
 concurrency:

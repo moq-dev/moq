@@ -75,8 +75,9 @@ changed:
 	fi
 
 	# Changes to orchestration (root justfile, per-language justfiles, or
-	# the CI workflow itself) fan out to every scope.
-	if echo "$files" | grep -qE '^(justfile|[^/]+/justfile|\.github/workflows/check\.yml)$'; then
+	# either of the check.yml / check-swift.yml workflows) fan out to
+	# every scope.
+	if echo "$files" | grep -qE '^(justfile|[^/]+/justfile|\.github/workflows/check(-swift)?\.yml)$'; then
 		echo "js rs py kt swift nix md"
 		exit 0
 	fi
