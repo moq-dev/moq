@@ -1,0 +1,20 @@
+#!/usr/bin/env just --justfile
+#
+# Language-specific recipes for the Go bindings under go/. Invoked from
+# the repo root as `just go <recipe>` via the `mod go` import.
+
+set working-directory := '.'
+
+default:
+	just check
+
+# Build moq-ffi for the host, run uniffi-bindgen-go, stage everything
+# into a tmp dir, and run `go build`/`go vet`/`go test` from there.
+# Skips cleanly if cargo, go, or uniffi-bindgen-go is missing.
+check:
+	bash scripts/check.sh
+
+# Stage the in-tree go/ source + per-target moq-ffi libs + generated
+# bindings into a single Go module ready for publish.
+package *args:
+	bash scripts/package.sh {{ args }}

@@ -10,6 +10,7 @@ mod rs
 mod py
 mod kt
 mod swift
+mod go
 
 # Demos and infra.
 mod demo
@@ -53,6 +54,7 @@ ci:
 	just rs ci
 	just kt check
 	just swift check
+	just go check
 
 	# Cross-cutting: nix, multi-language tests, build.
 	nix flake check
