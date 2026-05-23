@@ -2,8 +2,8 @@ name: release-brew
 
 # Renders the matching Homebrew formula template from
 # .github/homebrew/Formula/ with the released version + tarball sha256s,
-# then pushes the rendered formula to moq-dev/homebrew-moq (which Homebrew
-# exposes as the `moq-dev/moq` tap).
+# then pushes the rendered formula to moq-dev/homebrew-tap (which Homebrew
+# exposes as the `moq-dev/tap` tap).
 #
 # Triggered after a per-crate release workflow finishes successfully, so
 # the GitHub Release assets are guaranteed to exist by the time we
@@ -11,7 +11,7 @@ name: release-brew
 #
 # Authenticates as the moq-bot GitHub App. The APP_ID and APP_PRIVATE_KEY
 # repo secrets are already wired (see release-swift.yml). The minted
-# installation token is scoped to moq-dev/homebrew-moq and expires in 1
+# installation token is scoped to moq-dev/homebrew-tap and expires in 1
 # hour.
 
 on:
@@ -30,7 +30,7 @@ permissions:
 
 jobs:
   publish:
-    name: Publish formula to homebrew-moq
+    name: Publish formula to homebrew-tap
     if: ${{ github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'moq-') }}
     runs-on: ubuntu-latest
 
@@ -109,15 +109,15 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: moq-dev
-          repositories: homebrew-moq
+          repositories: homebrew-tap
           permission-contents: write
 
-      - name: Checkout homebrew-moq
+      - name: Checkout homebrew-tap
         uses: actions/checkout@v6
         with:
-          repository: moq-dev/homebrew-moq
+          repository: moq-dev/homebrew-tap
           token: ${{ steps.token.outputs.token }}
-          path: homebrew-moq
+          path: homebrew-tap
 
       - name: Commit and push formula
         env:
@@ -128,7 +128,7 @@ jobs:
           GIT_COMMITTER_NAME: moq-bot
           GIT_COMMITTER_EMAIL: moq-bot[bot]@users.noreply.github.com
         run: |
-          cd homebrew-moq
+          cd homebrew-tap
           mkdir -p Formula
           cp "../rendered/${CRATE}.rb" "Formula/${CRATE}.rb"
 
@@ -140,12 +140,12 @@ jobs:
           Homebrew formulae for the [moq](https://github.com/moq-dev/moq) workspace.
 
           ```bash
-          brew tap moq-dev/moq
-          brew install moq-dev/moq/moq-relay
-          brew install moq-dev/moq/moq-cli
-          brew install moq-dev/moq/moq-clock
-          brew install moq-dev/moq/moq-token-cli
-          brew install moq-dev/moq/moq-gst
+          brew tap moq-dev/tap
+          brew install moq-dev/tap/moq-relay
+          brew install moq-dev/tap/moq-cli
+          brew install moq-dev/tap/moq-clock
+          brew install moq-dev/tap/moq-token-cli
+          brew install moq-dev/tap/moq-gst
           ```
 
           Formulae here are generated automatically by the
