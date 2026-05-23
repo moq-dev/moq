@@ -21,15 +21,14 @@ check *args:
 	cargo shear
 	cargo sort --workspace --check
 
-# Full Rust CI: check + feature edge cases + tests + build. Self-gates
-# against BASE: exits 0 fast if no Rust files changed (so root `just ci`
-# can call this unconditionally). Pass BASE="" to force-run.
-# `cargo publish --dry-run` lives in release-rs.yml.
-ci BASE="origin/main":
+# Full Rust CI: check + feature edge cases + tests + build. Takes a
+# newline-separated list of changed files; skips if none are in the
+# Rust scope. `cargo publish --dry-run` lives in release-rs.yml.
+ci FILES="":
 	#!/usr/bin/env bash
 	set -euo pipefail
-	if [[ -n "{{ BASE }}" ]] && [[ -z "$(just changed {{ BASE }})" ]]; then
-		echo "rs: no changes vs {{ BASE }}; skipping."
+	if ! echo "{{ FILES }}" | grep -qE '^(rs/|Cargo\.toml$|Cargo\.lock$)'; then
+		echo "rs: no Rust changes; skipping."
 		exit 0
 	fi
 	just check --workspace
@@ -37,23 +36,6 @@ ci BASE="origin/main":
 	cargo check --workspace --all-features
 	just test --all-features
 	just build
-
-# Print "rs" if any Rust file changed vs BASE; else print nothing.
-# Source of truth for what counts as a "Rust change". When called from
-# root `just ci`, reuses $JUST_CHANGED_FILES instead of re-diffing.
-changed BASE="origin/main":
-	#!/usr/bin/env bash
-	set -euo pipefail
-	if [[ -z "${JUST_CHANGED_FILES+set}" ]]; then
-		if ! merge_base=$(git merge-base "{{ BASE }}" HEAD 2>/dev/null); then
-			echo rs
-			exit 0
-		fi
-		JUST_CHANGED_FILES=$(git diff --name-only "$merge_base")
-	fi
-	if echo "$JUST_CHANGED_FILES" | grep -qE '^(rs/|Cargo\.toml$|Cargo\.lock$)'; then
-		echo rs
-	fi
 
 # Auto-fix clippy/format/shear/sort, then sweep stale target/.
 fix:

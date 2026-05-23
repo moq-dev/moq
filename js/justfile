@@ -41,36 +41,21 @@ test:
 build:
 	bun run --filter='*' build
 
-# Full JS CI: lint + tests + build. Self-gates against BASE: exits 0 fast
-# if no JS files changed (so root `just ci` can call this unconditionally).
-# Pass BASE="" to force-run regardless of diff.
-ci BASE="origin/main":
+# Full JS CI: lint + tests + build. Takes a newline-separated list of
+# changed files; skips if none of them are in the JS scope. Run as
+# `just js ci` (skips by default) or via root `just ci` (which passes
+# the diff). To force-run standalone, call `just js check && just js
+# test && just js build` directly.
+ci FILES="":
 	#!/usr/bin/env bash
 	set -euo pipefail
-	if [[ -n "{{ BASE }}" ]] && [[ -z "$(just changed {{ BASE }})" ]]; then
-		echo "js: no changes vs {{ BASE }}; skipping."
+	if ! echo "{{ FILES }}" | grep -qE '^(js/|package\.json$|bun\.lock$|bun\.lockb$|biome\.jsonc$)'; then
+		echo "js: no JS changes; skipping."
 		exit 0
 	fi
 	just check
 	just test
 	just build
-
-# Print "js" if any JS file changed vs BASE; else print nothing.
-# Source of truth for what counts as a "JS change". When called from
-# root `just ci`, reuses $JUST_CHANGED_FILES instead of re-diffing.
-changed BASE="origin/main":
-	#!/usr/bin/env bash
-	set -euo pipefail
-	if [[ -z "${JUST_CHANGED_FILES+set}" ]]; then
-		if ! merge_base=$(git merge-base "{{ BASE }}" HEAD 2>/dev/null); then
-			echo js
-			exit 0
-		fi
-		JUST_CHANGED_FILES=$(git diff --name-only "$merge_base")
-	fi
-	if echo "$JUST_CHANGED_FILES" | grep -qE '^(js/|package\.json$|bun\.lock$|bun\.lockb$|biome\.jsonc$)'; then
-		echo js
-	fi
 
 # Pull in new versions and report what's outdated.
 update:

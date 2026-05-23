@@ -41,13 +41,9 @@ check *args:
 	just rs check {{ args }}
 	bun remark . --quiet --frail
 
-# Run every per-language `ci` unconditionally; each self-gates against
-# BASE and exits 0 fast when its scope hasn't changed. Pass BASE="" to
-# force-run everything.
-#
-# Computes the changed file list once and exports it as $JUST_CHANGED_FILES
-# so per-language `changed` recipes can reuse it instead of each running
-# their own git diff.
+# Run every per-language `ci` with the diff vs BASE; each greps for its
+# own scope and skips when nothing relevant changed. Pass BASE="" to
+# default to $GITHUB_BASE_REF (CI) or origin/main (local).
 ci BASE="":
 	#!/usr/bin/env bash
 	set -euo pipefail
@@ -61,33 +57,22 @@ ci BASE="":
 		base="origin/main"
 	fi
 
-	# One git diff for the whole run. If merge-base fails (e.g. shallow
-	# clone, unreachable base), leave $JUST_CHANGED_FILES unset so each
-	# per-language `changed` recipe falls back to its own conservative
-	# behavior (force-run).
-	base_unreachable=false
-	if merge_base=$(git merge-base "$base" HEAD 2>/dev/null); then
-		export JUST_CHANGED_FILES=$(git diff --name-only "$merge_base")
-	else
-		echo "warning: $base unreachable; force-running everything" >&2
-		base_unreachable=true
-	fi
+	# One git diff for the whole run; pass the file list to each per-lang.
+	merge_base=$(git merge-base "$base" HEAD) || {
+		echo "error: cannot resolve merge-base against $base (is full history fetched?)" >&2
+		exit 1
+	}
+	files=$(git diff --name-only "$merge_base")
 
-	just js    ci "$base"
-	just rs    ci "$base"
-	just py    ci "$base"
-	just kt    ci "$base"
-	just swift ci "$base"
+	just js    ci "$files"
+	just rs    ci "$files"
+	just py    ci "$files"
+	just kt    ci "$files"
+	just swift ci "$files"
 
-	# nix flake + markdown have no per-language module; gate inline
-	# against the same file list.
-	if $base_unreachable; then
-		nix flake check
-		bun remark . --quiet --frail
-	else
-		if echo "$JUST_CHANGED_FILES" | grep -qE '^(flake\.nix$|flake\.lock$)'; then nix flake check; fi
-		if echo "$JUST_CHANGED_FILES" | grep -qE '\.md$'; then bun remark . --quiet --frail; fi
-	fi
+	# Cheap; always run.
+	nix flake check
+	bun remark . --quiet --frail
 
 # Auto-fix linting/formatting issues across all languages.
 fix:

@@ -21,32 +21,13 @@ package *args:
 	bash scripts/package.sh {{ args }}
 
 # Full Kotlin CI: `check` already builds moq-ffi and runs gradle tests.
-# Self-gates against BASE: exits 0 fast if no Kotlin (or rs/moq-ffi)
-# files changed (so root `just ci` can call this unconditionally). Pass
-# BASE="" to force-run.
-ci BASE="origin/main":
+# Takes a newline-separated list of changed files; skips if none are
+# in the Kotlin scope.
+ci FILES="":
 	#!/usr/bin/env bash
 	set -euo pipefail
-	if [[ -n "{{ BASE }}" ]] && [[ -z "$(just changed {{ BASE }})" ]]; then
-		echo "kt: no changes vs {{ BASE }}; skipping."
+	if ! echo "{{ FILES }}" | grep -qE '^(kt/|rs/moq-ffi/)'; then
+		echo "kt: no Kotlin changes; skipping."
 		exit 0
 	fi
 	just check
-
-# Print "kt" if any Kotlin file (or its rs/moq-ffi dependency) changed
-# vs BASE; else print nothing. Source of truth for what counts as a
-# "Kotlin change". When called from root `just ci`, reuses
-# $JUST_CHANGED_FILES instead of re-diffing.
-changed BASE="origin/main":
-	#!/usr/bin/env bash
-	set -euo pipefail
-	if [[ -z "${JUST_CHANGED_FILES+set}" ]]; then
-		if ! merge_base=$(git merge-base "{{ BASE }}" HEAD 2>/dev/null); then
-			echo kt
-			exit 0
-		fi
-		JUST_CHANGED_FILES=$(git diff --name-only "$merge_base")
-	fi
-	if echo "$JUST_CHANGED_FILES" | grep -qE '^(kt/|rs/moq-ffi/)'; then
-		echo kt
-	fi
