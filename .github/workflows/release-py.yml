@@ -9,6 +9,10 @@ on:
   push:
     tags:
       - "moq-ffi-v*"
+  pull_request:
+    paths:
+      - ".github/workflows/release-py.yml"
+      - ".github/scripts/release.sh"
 
 permissions:
   contents: read
@@ -29,15 +33,25 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Parse version from tag
+      - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version moq-ffi
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            CARGO_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
+          else
+            .github/scripts/release.sh parse-version moq-ffi
+          fi
 
       # Maturin reads the wheel version from rs/moq-ffi/Cargo.toml (via
       # `dynamic = ["version"]` in pyproject.toml). If a tag is pushed by
       # hand without bumping Cargo.toml first, the wheel would ship with
       # the previous version and PyPI would reject the duplicate upload.
       - name: Verify Cargo.toml matches tag
+        if: github.event_name == 'push'
         env:
           TAG_VERSION: ${{ steps.parse.outputs.version }}
         run: |
@@ -130,8 +144,7 @@ jobs:
     name: Publish to PyPI
     needs: [build, sdist]
     runs-on: ubuntu-latest
-    # Skipped until PUBLISH_PYTHON=true is set in repo variables.
-    if: vars.PUBLISH_PYTHON == 'true'
+    if: github.event_name == 'push'
     environment:
       name: pypi
       url: https://pypi.org/p/moq-rs

@@ -21,12 +21,22 @@ check *args:
 	cargo shear
 	cargo sort --workspace --check
 
-# Extended Rust-only CI: feature edge cases + publish dry-run.
-ci:
+# Full Rust CI: check + feature edge cases + tests + build. Takes a
+# newline-separated list of changed files; skips if FILES is non-empty
+# and none match the Rust scope. Run `just rs ci` (no FILES) to
+# force-run everything. `cargo publish --dry-run` lives in release-rs.yml.
+ci FILES="":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(rs/|Cargo\.toml$|Cargo\.lock$)'; then
+		echo "rs: no Rust changes; skipping."
+		exit 0
+	fi
 	just check --workspace
 	cargo check --workspace --no-default-features
 	cargo check --workspace --all-features
-	cargo publish --dry-run
+	just test --all-features
+	just build
 
 # Auto-fix clippy/format/shear/sort, then sweep stale target/.
 fix:
