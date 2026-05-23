@@ -2,7 +2,7 @@
 
 import struct
 
-import moq_rs as moq
+import moq
 import pytest
 
 

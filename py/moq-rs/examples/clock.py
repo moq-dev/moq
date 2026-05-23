@@ -12,7 +12,7 @@ import argparse
 import asyncio
 from datetime import datetime, timezone
 
-import moq_rs as moq
+import moq
 
 
 async def publish(url: str, broadcast_name: str, track_name: str, tls_verify: bool) -> None:

@@ -10,13 +10,15 @@ Python bindings for the [Media over QUIC](https://github.com/moq-dev/moq) Rust c
 pip install moq-rs
 ```
 
+The distribution is `moq-rs`; the import name is `moq`.
+
 ## Quick Start
 
 ### Subscribe to a stream
 
 ```python
 import asyncio
-import moq_rs as moq
+import moq
 
 async def main():
     async with moq.Client("https://relay.quic.video") as client:
@@ -34,7 +36,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
-import moq_rs as moq
+import moq
 
 async def main():
     async with moq.Client("https://relay.quic.video") as client:
@@ -60,7 +62,7 @@ asyncio.run(main())
 For full control over the origin topology:
 
 ```python
-import moq_rs as moq
+import moq
 
 origin = moq.OriginProducer()
 client = moq.Client(
@@ -113,5 +115,5 @@ client = moq.Client(
 
 ## See Also
 
-- [moq-ffi](https://crates.io/crates/moq-ffi). The Rust crate that produces the UniFFI bindings vendored as `moq_rs._uniffi`.
+- [moq-ffi](https://crates.io/crates/moq-ffi). The Rust crate that produces the UniFFI bindings vendored as `moq._uniffi`.
 - [MoQ project](https://github.com/moq-dev/moq). Full monorepo with Rust server, TypeScript browser lib, and more.

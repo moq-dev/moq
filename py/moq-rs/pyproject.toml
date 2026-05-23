@@ -30,11 +30,12 @@ Repository = "https://github.com/moq-dev/moq"
 asyncio_mode = "auto"
 
 # Maturin builds the rs/moq-ffi crate, runs uniffi-bindgen, and packages
-# the cdylib + generated bindings as a private `moq_rs._uniffi` subpackage
+# the cdylib + generated bindings as a private `moq._uniffi` subpackage
 # (the leading underscore signals "internal"; the public API lives at the
-# top of moq_rs).
+# top of moq). The PyPI distribution is `moq-rs` but the import name is
+# `moq` for ergonomics.
 [tool.maturin]
 bindings = "uniffi"
 manifest-path = "../../rs/moq-ffi/Cargo.toml"
 python-source = "."
-module-name = "moq_rs._uniffi"
+module-name = "moq._uniffi"
