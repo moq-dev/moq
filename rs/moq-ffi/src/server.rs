@@ -67,11 +67,26 @@ impl MoqServer {
 		})
 	}
 
-	/// Set the address to bind, e.g. `127.0.0.1:4443` or `[::]:443`.
-	pub fn set_bind(&self, addr: String) {
+	/// Set the address to bind, e.g. `127.0.0.1:4443`, `[::]:443`, or `localhost:0`.
+	///
+	/// Validated syntactically up-front. DNS hostnames are accepted and resolved
+	/// at `listen()` time.
+	pub fn set_bind(&self, addr: String) -> Result<(), MoqError> {
+		// Mirrors `MoqClient::set_bind` by surfacing parse errors here rather
+		// than at listen() time. The server takes a String (not SocketAddr) so
+		// DNS hostnames are allowed; we only check syntactic structure here.
+		if addr.parse::<std::net::SocketAddr>().is_err() {
+			let port_ok = addr
+				.rsplit_once(':')
+				.is_some_and(|(_, port)| port.parse::<u16>().is_ok());
+			if !port_ok {
+				return Err(MoqError::Bind(format!("invalid bind address: {addr}")));
+			}
+		}
 		if let Some(mut state) = self.task.lock() {
 			state.config.bind = Some(addr);
 		}
+		Ok(())
 	}
 
 	/// Load TLS certificate chains from PEM files on disk.
@@ -122,6 +137,27 @@ impl MoqServer {
 	/// `listen()` must be called first.
 	pub async fn accept(&self) -> Result<Option<Arc<MoqRequest>>, MoqError> {
 		self.task.run(|mut state| async move { state.accept().await }).await
+	}
+
+	/// SHA-256 fingerprints of the configured TLS certificates, hex-encoded.
+	///
+	/// Useful for pinning a generated self-signed certificate in a browser via
+	/// WebTransport's `serverCertificateHashes`. Returns an error if called
+	/// before `listen()`.
+	pub fn cert_fingerprints(&self) -> Result<Vec<String>, MoqError> {
+		let state = self
+			.task
+			.lock()
+			.ok_or_else(|| MoqError::Bind("server is busy".into()))?;
+		let server = state
+			.server
+			.as_ref()
+			.ok_or_else(|| MoqError::Bind("not listening; call listen() first".into()))?;
+		let info_handle = server.tls_info();
+		let info = info_handle
+			.read()
+			.map_err(|err| MoqError::Bind(format!("tls info lock poisoned: {err}")))?;
+		Ok(info.fingerprints.clone())
 	}
 
 	/// Cancel any in-flight `listen()` or `accept()` call.
@@ -193,10 +229,12 @@ impl MoqRequest {
 	}
 
 	/// Complete the MoQ handshake and return the established session.
+	///
+	/// Returns `AlreadyResponded` if `ok()` or `close()` has already been called.
 	pub async fn ok(&self) -> Result<Arc<MoqSession>, MoqError> {
 		self.task
 			.run(|mut state| async move {
-				let request = state.request.take().ok_or(MoqError::Closed)?;
+				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
 				let publish = state.publish.as_ref().map(|o| o.inner().consume());
 				let consume = state.consume.as_ref().map(|o| o.inner().clone());
 				let session = request
@@ -211,14 +249,16 @@ impl MoqRequest {
 	}
 
 	/// Reject the session with the given HTTP status code.
+	///
+	/// Returns `AlreadyResponded` if `ok()` or `close()` has already been called.
 	pub async fn close(&self, code: u16) -> Result<(), MoqError> {
 		self.task
 			.run(move |mut state| async move {
-				let request = state.request.take().ok_or(MoqError::Closed)?;
+				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
 				request
 					.close(code)
 					.await
-					.map_err(|err| MoqError::Connect(format!("{err}")))?;
+					.map_err(|err| MoqError::Reject(format!("{err}")))?;
 				Ok(())
 			})
 			.await

@@ -35,6 +35,12 @@ pub enum MoqError {
 	#[error("bind: {0}")]
 	Bind(String),
 
+	#[error("reject: {0}")]
+	Reject(String),
+
+	#[error("already responded")]
+	AlreadyResponded,
+
 	#[error("codec: {0}")]
 	Codec(String),
 

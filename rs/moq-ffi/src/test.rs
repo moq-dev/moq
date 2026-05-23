@@ -376,7 +376,7 @@ async fn server_client_roundtrip() {
 	// Server side: bind, set a publish origin, accept incoming sessions.
 	let server_origin = MoqOriginProducer::new();
 	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into());
+	server.set_bind("127.0.0.1:0".into()).unwrap();
 	server.set_tls_generate(vec!["localhost".into()]);
 	server.set_publish(Some(server_origin.clone()));
 
@@ -454,6 +454,151 @@ async fn server_client_roundtrip() {
 
 	// Clean up.
 	media.finish().unwrap();
+	broadcast.finish().unwrap();
+	session.cancel(0);
+	server_session.cancel(0);
+	server.cancel();
+}
+
+#[tokio::test]
+async fn server_set_bind_validates() {
+	let server = MoqServer::new();
+	assert!(server.set_bind("127.0.0.1:0".into()).is_ok());
+	assert!(server.set_bind("[::]:443".into()).is_ok());
+	assert!(server.set_bind("localhost:4443".into()).is_ok());
+	assert!(matches!(
+		server.set_bind("not-an-address".into()),
+		Err(crate::error::MoqError::Bind(_))
+	));
+}
+
+#[tokio::test]
+async fn server_cert_fingerprints_available_after_listen() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]);
+
+	// Not available before listen().
+	assert!(matches!(
+		server.cert_fingerprints(),
+		Err(crate::error::MoqError::Bind(_))
+	));
+
+	tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+
+	let fps = server.cert_fingerprints().expect("fingerprints available");
+	assert_eq!(fps.len(), 1, "one generated cert => one fingerprint");
+	// Hex-encoded SHA-256 is 64 chars.
+	assert_eq!(fps[0].len(), 64, "fingerprint should be hex SHA-256");
+	assert!(fps[0].chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[tokio::test]
+async fn request_double_respond_returns_already_responded() {
+	use crate::error::MoqError;
+
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]);
+	let addr = server.listen().await.expect("listen failed");
+
+	let url = format!("https://{addr}");
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accept_server
+			.accept()
+			.await
+			.expect("accept errored")
+			.expect("accept returned None");
+
+		// Accept once, then try a second response — must error.
+		let session = request.ok().await.expect("first ok succeeds");
+		let second_ok = request.ok().await;
+		assert!(
+			matches!(second_ok, Err(MoqError::AlreadyResponded)),
+			"second ok() must fail"
+		);
+		let second_close = request.close(403).await;
+		assert!(
+			matches!(second_close, Err(MoqError::AlreadyResponded)),
+			"close after ok must fail"
+		);
+		session
+	});
+
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true);
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	let _session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("accept timed out")
+		.expect("accept task panicked");
+
+	server_session.cancel(0);
+	server.cancel();
+}
+
+#[tokio::test]
+async fn request_per_session_publish_override() {
+	// The server's publish origin is empty; a per-request override is used instead.
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]);
+
+	let addr = server.listen().await.expect("listen failed");
+	let url = format!("https://{addr}");
+
+	let override_origin = MoqOriginProducer::new();
+	let override_for_task = override_origin.clone();
+
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accept_server
+			.accept()
+			.await
+			.expect("accept errored")
+			.expect("accept returned None");
+		// Override publish on a per-request basis.
+		request.set_publish(Some(override_for_task));
+		request.ok().await.expect("ok succeeds")
+	});
+
+	let client_origin = MoqOriginProducer::new();
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true);
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_consume(Some(client_origin.clone()));
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("accept timed out")
+		.expect("accept task panicked");
+
+	// Publishing on the override origin must reach the client.
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	override_origin.publish("override-only".into(), &broadcast).unwrap();
+
+	let consumer = client_origin.consume();
+	let announced = consumer.announced("".into()).unwrap();
+	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
+		.await
+		.expect("timed out waiting for override announcement")
+		.unwrap()
+		.expect("expected an announcement");
+	assert_eq!(announcement.path(), "override-only");
+
 	broadcast.finish().unwrap();
 	session.cancel(0);
 	server_session.cancel(0);
