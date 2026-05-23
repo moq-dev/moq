@@ -135,17 +135,17 @@ class BroadcastConsumer:
     def __init__(self, inner: MoqBroadcastConsumer) -> None:
         self._inner = inner
 
-    def subscribe_catalog(self) -> CatalogConsumer:
-        return CatalogConsumer(self._inner.subscribe_catalog())
+    async def subscribe_catalog(self) -> CatalogConsumer:
+        return CatalogConsumer(await self._inner.subscribe_catalog())
 
-    def subscribe_track(self, name: str) -> TrackConsumer:
-        """Subscribe to a track — receive arbitrary byte payloads."""
-        return TrackConsumer(self._inner.subscribe_track(name))
+    async def subscribe_track(self, name: str) -> TrackConsumer:
+        """Subscribe to a track. Receive arbitrary byte payloads."""
+        return TrackConsumer(await self._inner.subscribe_track(name))
 
-    def subscribe_media(self, name: str, container: Container, max_latency_ms: int) -> MediaConsumer:
-        return MediaConsumer(self._inner.subscribe_media(name, container, max_latency_ms))
+    async def subscribe_media(self, name: str, container: Container, max_latency_ms: int) -> MediaConsumer:
+        return MediaConsumer(await self._inner.subscribe_media(name, container, max_latency_ms))
 
     async def catalog(self) -> Catalog:
         """Convenience: subscribe and return the first catalog."""
-        consumer = self.subscribe_catalog()
+        consumer = await self.subscribe_catalog()
         return await anext(consumer)

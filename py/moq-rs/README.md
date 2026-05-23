@@ -26,7 +26,8 @@ async def main():
             catalog = await announcement.broadcast.catalog()
 
             for name in catalog.audio:
-                async for frame in announcement.broadcast.subscribe_media(name):
+                media = await announcement.broadcast.subscribe_media(name)
+                async for frame in media:
                     print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp_us}")
 
 asyncio.run(main())

@@ -110,7 +110,7 @@ async def test_local_publish_consume_audio():
         assert audio.sample_rate == 48000
         assert audio.channel_count == 2
 
-        media_consumer = announcement.broadcast.subscribe_media(track_name, audio.container, 10_000)
+        media_consumer = await announcement.broadcast.subscribe_media(track_name, audio.container, 10_000)
 
         payload = b"opus audio payload data"
         media.write_frame(payload, 1_000_000)
@@ -144,7 +144,7 @@ async def test_video_publish_consume():
         assert video.coded.width == 1280
         assert video.coded.height == 720
 
-        media_consumer = announcement.broadcast.subscribe_media(track_name, video.container, 10_000)
+        media_consumer = await announcement.broadcast.subscribe_media(track_name, video.container, 10_000)
 
         keyframe = bytes([0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC])
         media.write_frame(keyframe, 0)
@@ -169,7 +169,7 @@ async def test_multiple_frames_ordering():
         catalog = await announcement.broadcast.catalog()
         track_name = list(catalog.audio.keys())[0]
         audio = catalog.audio[track_name]
-        media_consumer = announcement.broadcast.subscribe_media(track_name, audio.container, 10_000)
+        media_consumer = await announcement.broadcast.subscribe_media(track_name, audio.container, 10_000)
 
         timestamps = [0, 20_000, 40_000, 60_000, 80_000]
         for i, ts in enumerate(timestamps):
@@ -193,7 +193,7 @@ async def test_catalog_update_on_new_track():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        cat_consumer = announcement.broadcast.subscribe_catalog()
+        cat_consumer = await announcement.broadcast.subscribe_catalog()
 
         # First catalog: 1 audio track.
         catalog1 = await anext(cat_consumer)
@@ -226,7 +226,7 @@ async def test_announced_broadcast():
 
     async for announcement in consumer.announced():
         assert announcement.path == "test/broadcast"
-        _catalog = announcement.broadcast.subscribe_catalog()
+        _catalog = await announcement.broadcast.subscribe_catalog()
         break
 
 
@@ -334,7 +334,7 @@ async def test_raw_publish_consume():
     async for announcement in consumer.announced():
         assert announcement.path == "robot/arm"
 
-        raw_consumer = announcement.broadcast.subscribe_track("events")
+        raw_consumer = await announcement.broadcast.subscribe_track("events")
 
         payload = b'{"cmd": "button_changed", "arm": "left", "button": "THUMB", "state": "PRESSED"}'
         raw.write_frame(payload)
@@ -357,7 +357,7 @@ async def test_raw_multiple_frames():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        raw_consumer = announcement.broadcast.subscribe_track("commands")
+        raw_consumer = await announcement.broadcast.subscribe_track("commands")
 
         messages = [
             b'{"cmd": "led", "arm": "left", "led": "THUMB", "state": 1}',
@@ -419,7 +419,7 @@ async def test_broadcast_producer_consume_direct():
     raw = broadcast.publish_track("events")
     consumer = broadcast.consume()
 
-    raw_consumer = consumer.subscribe_track("events")
+    raw_consumer = await consumer.subscribe_track("events")
     raw.write_frame(b"event-0")
 
     async for group in raw_consumer:
@@ -439,7 +439,7 @@ async def test_raw_group_sequence():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        raw_consumer = announcement.broadcast.subscribe_track("seq")
+        raw_consumer = await announcement.broadcast.subscribe_track("seq")
 
         sent_sequences = []
         for i in range(3):
@@ -470,7 +470,7 @@ async def test_raw_multi_frame_group():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        raw_consumer = announcement.broadcast.subscribe_track("chunks")
+        raw_consumer = await announcement.broadcast.subscribe_track("chunks")
 
         group_producer = raw.append_group()
         chunks = [b"chunk-0", b"chunk-1", b"chunk-2"]

@@ -43,7 +43,7 @@ async def subscribe(url: str, broadcast_name: str, track_name: str, tls_verify: 
         broadcast = await client.announced_broadcast(broadcast_name)
 
         print(f"subscribed to {broadcast_name!r} track={track_name!r}")
-        track = broadcast.subscribe_track(track_name)
+        track = await broadcast.subscribe_track(track_name)
 
         async for group in track:
             prefix: bytes | None = None
