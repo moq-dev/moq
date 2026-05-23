@@ -432,7 +432,9 @@ async fn run_session(
 		_ = shutdown.changed() => return Ok(()),
 	};
 
-	let catalog_track = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
+	let catalog_track = broadcast
+		.subscribe_track(hang::catalog::Catalog::DEFAULT_NAME, moq_net::Subscription::default())
+		.await?;
 	let mut catalog = moq_mux::catalog::Consumer::new(catalog_track);
 	let catalog = catalog.next().await?.context("catalog missing")?.clone();
 
@@ -445,8 +447,9 @@ async fn run_session(
 		};
 		let caps = video_caps(&config)?;
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
-		let track_ref = moq_net::Track::new(&track_name);
-		let track_consumer = broadcast.subscribe_track(&track_ref)?;
+		let track_consumer = broadcast
+			.subscribe_track(&track_name, moq_net::Subscription::default())
+			.await?;
 		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
 			.with_latency(Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
@@ -459,8 +462,9 @@ async fn run_session(
 		};
 		let caps = audio_caps(&config)?;
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
-		let track_ref = moq_net::Track::new(&track_name);
-		let track_consumer = broadcast.subscribe_track(&track_ref)?;
+		let track_consumer = broadcast
+			.subscribe_track(&track_name, moq_net::Subscription::default())
+			.await?;
 		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
 			.with_latency(Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
@@ -525,10 +529,14 @@ async fn run_track_pump(
 						let buffer_mut = buffer.get_mut().unwrap();
 
 						let pts = match reference_ts {
-							Some(reference) => {
-								let delta: Duration = (timestamp - reference).into();
-								gst::ClockTime::from_nseconds(delta.as_nanos() as u64)
-							}
+							Some(reference) => match timestamp.checked_sub(reference).and_then(|d| d.as_nanos()) {
+								Ok(nanos) => gst::ClockTime::from_nseconds(nanos as u64),
+								Err(_) => {
+									gst::warning!(CAT, "track {} timestamp delta overflow", descriptor.name);
+									pad_endpoint.send(PadMessage::Drop);
+									break;
+								}
+							},
 							None => {
 								reference_ts = Some(timestamp);
 								gst::ClockTime::ZERO
