@@ -30,12 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Install tooling
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            createrepo-c rpm gpg rclone
+      - name: Set up packaging tools
+        uses: ./.github/actions/setup-packaging
 
       - name: Download .rpm assets from release
         shell: bash

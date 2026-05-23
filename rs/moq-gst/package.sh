@@ -17,11 +17,11 @@
 #   .deb (Ubuntu 22.04+ recommended):
 #     apt-get install -y build-essential pkg-config libgstreamer1.0-dev \
 #                        libgstreamer-plugins-base1.0-dev
-#     plus rustup and nfpm.
+#     plus rustup. nfpm comes from the flake's dev shell.
 #   .rpm (AlmaLinux 9 / RHEL 9 / Rocky 9 recommended):
 #     dnf install -y gcc pkgconf-pkg-config gstreamer1-devel \
 #                    gstreamer1-plugins-base-devel
-#     plus rustup and nfpm.
+#     plus rustup. nfpm comes from the flake's dev shell.
 
 set -euo pipefail
 

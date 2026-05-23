@@ -41,9 +41,8 @@ jobs:
         id: parse
         run: .github/scripts/release.sh parse-version moq-relay
 
-      - name: Install nfpm
-        shell: bash
-        run: .github/scripts/install-nfpm.sh
+      - name: Set up packaging tools
+        uses: ./.github/actions/setup-packaging
 
       - name: Build (release)
         shell: bash

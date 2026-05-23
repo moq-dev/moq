@@ -59,10 +59,10 @@ update:
 	cargo update
 	cargo upgrade --incompatible
 
-# Build a .deb or .rpm for one of the Rust binaries locally. Requires
-# nfpm in $PATH (https://nfpm.goreleaser.com). For .rpm produced this
-# way, the linkage matches the host's glibc; CI uses an AlmaLinux 9
-# container to produce broadly compatible artifacts instead.
+# Build a .deb or .rpm for one of the Rust binaries locally. nfpm comes
+# from the flake's dev shell (`nix develop`). For .rpm produced this way,
+# the linkage matches the host's glibc; CI uses an AlmaLinux 9 container
+# to produce broadly compatible artifacts instead.
 #
 # Examples:
 #   just rs package moq-relay deb

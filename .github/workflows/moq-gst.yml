@@ -32,6 +32,8 @@ jobs:
           fetch-depth: 0
 
       - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
+        with:
+          determinate: false
       - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
 
       - name: Parse version
@@ -85,9 +87,8 @@ jobs:
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev
 
-      - name: Install nfpm
-        shell: bash
-        run: .github/scripts/install-nfpm.sh
+      - name: Set up packaging tools
+        uses: ./.github/actions/setup-packaging
 
       - name: Parse version
         id: parse
@@ -128,9 +129,8 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Install nfpm
-        shell: bash
-        run: .github/scripts/install-nfpm.sh
+      - name: Set up packaging tools
+        uses: ./.github/actions/setup-packaging
 
       - name: Parse version
         id: parse
