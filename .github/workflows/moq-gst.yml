@@ -9,9 +9,10 @@ on:
       - ".github/workflows/moq-gst.yml"
       - ".github/scripts/release.sh"
       - "rs/moq-gst/build.sh"
-      - "nix/**"
-      - "flake.nix"
-      - "flake.lock"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

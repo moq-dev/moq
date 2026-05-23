@@ -9,9 +9,10 @@ on:
       - ".github/workflows/moq-clock.yml"
       - ".github/scripts/release.sh"
       - "rs/scripts/package-binary.sh"
-      - "nix/**"
-      - "flake.nix"
-      - "flake.lock"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
