@@ -3743,6 +3743,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-loc"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "moq-msf"
 version = "0.1.3"
 dependencies = [
@@ -3763,6 +3771,7 @@ dependencies = [
  "h264-parser",
  "hang",
  "m3u8-rs",
+ "moq-loc",
  "moq-msf",
  "moq-net",
  "mp4-atom",

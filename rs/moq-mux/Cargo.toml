@@ -24,6 +24,7 @@ conducer = { workspace = true }
 h264-parser = { version = "0.4.0" }
 hang = { workspace = true }
 m3u8-rs = { version = "6" }
+moq-loc = { workspace = true }
 moq-msf = { workspace = true }
 moq-net = { workspace = true, features = ["serde"] }
 mp4-atom = { version = "0.10.0", features = ["tokio", "bytes", "serde"] }

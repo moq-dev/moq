@@ -1,4 +1,22 @@
-export type Source = StreamTrack;
+// The kind of audio being encoded. Drives Opus application/signal settings on the encoder.
+// - "voice": speech (microphone). Opus application=voip + signal=voice.
+// - "music": music or mixed content (screen/tab capture). Opus application=audio + signal=music.
+// - "auto": let the encoder decide. Opus defaults (good for unknown sources like file playback).
+export type Kind = "voice" | "music" | "auto";
+
+// A bare track is accepted for backwards compatibility and treated as kind="auto".
+// Prefer the { track, kind } object form so the encoder can pick the right Opus settings.
+export type Source = StreamTrack | SourceConfig;
+
+export interface SourceConfig {
+	track: StreamTrack;
+	kind: Kind;
+}
+
+export function normalizeSource(source: Source): SourceConfig {
+	// Structural check rather than `instanceof MediaStreamTrack` so this stays correct across realms.
+	return "track" in source ? source : { track: source, kind: "auto" };
+}
 
 export type Constraints = Omit<
 	MediaTrackConstraints,

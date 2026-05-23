@@ -2,7 +2,7 @@ use std::task::Poll;
 
 use bytes::Buf;
 
-use crate::container::{Cmaf, Container, Frame};
+use crate::container::{Cmaf, Container, Frame, Loc};
 
 /// Catalog-driven [`Container`] for the hang protocol.
 ///
@@ -16,6 +16,8 @@ use crate::container::{Cmaf, Container, Frame};
 /// - [`Hang::Cmaf`]: ISO-BMFF moof+mdat fragments, potentially multiple samples per
 ///   moq-lite frame. The contained [`Cmaf`] is parsed once from the catalog's init
 ///   segment via [`Cmaf::from_init`].
+/// - [`Hang::Loc`]: Low Overhead Container (draft-ietf-moq-loc). One media frame per
+///   moq-lite frame, with a small property block in front of the codec bitstream.
 ///
 /// Build from a catalog entry with `Hang::try_from(&container)`.
 pub enum Hang {
@@ -24,6 +26,9 @@ pub enum Hang {
 	/// CMAF moof+mdat fragments. Wraps a parsed [`Cmaf`] (the track's `trak` box from the
 	/// init segment) so per-frame writes/reads have the timescale and track id available.
 	Cmaf(Cmaf),
+	/// Low Overhead Container. Frame timestamps use microseconds when the
+	/// per-frame 0x08 timescale property is absent.
+	Loc(Loc),
 }
 
 impl TryFrom<&hang::catalog::Container> for Hang {
@@ -33,6 +38,7 @@ impl TryFrom<&hang::catalog::Container> for Hang {
 		match container {
 			hang::catalog::Container::Legacy => Ok(Self::Legacy),
 			hang::catalog::Container::Cmaf { init, .. } => Ok(Self::Cmaf(Cmaf::from_init(init)?)),
+			hang::catalog::Container::Loc => Ok(Self::Loc(Loc::new())),
 		}
 	}
 }
@@ -53,6 +59,7 @@ impl Container for Hang {
 				Ok(())
 			}
 			Self::Cmaf(cmaf) => cmaf.write(group, frames).map_err(Into::into),
+			Self::Loc(loc) => loc.write(group, frames),
 		}
 	}
 
@@ -80,6 +87,7 @@ impl Container for Hang {
 				}])))
 			}
 			Self::Cmaf(cmaf) => cmaf.poll_read(group, waiter).map(|r| r.map_err(Into::into)),
+			Self::Loc(loc) => loc.poll_read(group, waiter),
 		}
 	}
 }

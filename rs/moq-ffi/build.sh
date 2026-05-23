@@ -224,8 +224,9 @@ elif [[ "$TARGET" == *"-apple-"* ]]; then
     cp "$TARGET_DIR/libmoq_ffi.dylib" "$PACKAGE_DIR/lib/"
 
 else
+    # Linux: ship the cdylib only. JNA (Kotlin) and maturin (Python) both
+    # consume the .so; nothing in the release pipeline links statically.
     TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
-    cp "$TARGET_DIR/libmoq_ffi.a" "$PACKAGE_DIR/lib/"
     cp "$TARGET_DIR/libmoq_ffi.so" "$PACKAGE_DIR/lib/"
 fi
 

@@ -1,5 +1,5 @@
 import { Effect, Signal } from "@moq/signals";
-import type { StreamTrack as AudioStreamTrack } from "../audio/types";
+import type * as Audio from "../audio";
 import type { StreamTrack as VideoStreamTrack } from "../video/types";
 
 export interface FileSourceConfig {
@@ -11,7 +11,7 @@ export class File {
 	file = new Signal<globalThis.File | undefined>(undefined);
 	signals = new Effect();
 
-	source = new Signal<{ video?: VideoStreamTrack; audio?: AudioStreamTrack }>({});
+	source = new Signal<{ video?: VideoStreamTrack; audio?: Audio.Source }>({});
 	enabled: Signal<boolean>;
 
 	constructor(config: FileSourceConfig) {
@@ -107,7 +107,7 @@ export class File {
 			this.source,
 			{
 				video: videoTrack as VideoStreamTrack,
-				audio: audioTrack as AudioStreamTrack,
+				audio: audioTrack ? { track: audioTrack as Audio.StreamTrack, kind: "auto" } : undefined,
 			},
 			{},
 		);

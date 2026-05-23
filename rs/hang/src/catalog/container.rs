@@ -4,14 +4,17 @@ use serde_with::{base64::Base64, serde_as};
 
 /// Container format for frame timestamp encoding and frame payload structure.
 ///
-/// - "legacy": Uses QUIC VarInt encoding (1-8 bytes, variable length), raw frame payloads.
+/// - "legacy": QUIC VarInt timestamp prefix followed by the raw codec payload.
 ///   Timestamps are in microseconds.
-/// - "cmaf": Fragmented MP4 container - frames contain complete moof+mdat fragments.
-///   The init segment (ftyp+moov) is base64-encoded in the catalog.
+/// - "cmaf": Fragmented MP4 - frames contain complete moof+mdat fragments. The
+///   init segment (ftyp+moov) is base64-encoded in the catalog.
+/// - "loc": Low Overhead Container (draft-ietf-moq-loc). Each frame is a small
+///   property block followed by the codec payload.
 ///
-/// JSON example:
+/// JSON examples:
 /// ```json
 /// { "kind": "cmaf", "init": "<base64-encoded ftyp+moov>" }
+/// { "kind": "loc" }
 /// ```
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
@@ -38,4 +41,19 @@ pub enum Container {
 		#[serde(default, skip_serializing_if = "Option::is_none")]
 		track_id: Option<u32>,
 	},
+	Loc,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn loc_roundtrip() {
+		let parsed: Container = serde_json::from_str(r#"{"kind":"loc"}"#).unwrap();
+		assert_eq!(parsed, Container::Loc);
+
+		let json = serde_json::to_string(&parsed).unwrap();
+		assert_eq!(json, r#"{"kind":"loc"}"#);
+	}
 }

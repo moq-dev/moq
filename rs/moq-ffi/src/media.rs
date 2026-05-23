@@ -10,6 +10,7 @@ pub struct MoqDimensions {
 pub enum Container {
 	Legacy,
 	Cmaf { init: Vec<u8> },
+	Loc,
 }
 
 impl From<hang::catalog::Container> for Container {
@@ -17,6 +18,7 @@ impl From<hang::catalog::Container> for Container {
 		match container {
 			hang::catalog::Container::Legacy => Self::Legacy,
 			hang::catalog::Container::Cmaf { init, .. } => Self::Cmaf { init: init.to_vec() },
+			hang::catalog::Container::Loc => Self::Loc,
 		}
 	}
 }
@@ -30,6 +32,7 @@ impl From<Container> for hang::catalog::Container {
 				timescale: None,
 				track_id: None,
 			},
+			Container::Loc => Self::Loc,
 		}
 	}
 }

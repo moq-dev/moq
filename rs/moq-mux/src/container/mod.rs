@@ -7,6 +7,9 @@
 //!   One media frame per moq-lite frame.
 //! - **CMAF**: ISO-BMFF moof+mdat atoms. A single moq-lite frame can carry multiple
 //!   samples (one fragment).
+//! - **LOC**: Low Overhead Container (draft-ietf-moq-loc). A small property block
+//!   (timestamp, optional per-frame timescale) followed by the raw codec bitstream.
+//!   One media frame per moq-lite frame.
 //!
 //! [`Container`] abstracts these into a shared write/read interface. The [`Hang`] enum
 //! is a runtime-dispatched [`Container`] that picks the format based on a hang catalog,
@@ -19,11 +22,13 @@ use bytes::Bytes;
 pub(crate) mod cmaf;
 mod consumer;
 mod hang;
+mod loc;
 mod producer;
 
 pub use cmaf::{Cmaf, Error as CmafError};
 pub use consumer::Consumer;
 pub use hang::Hang;
+pub use loc::Loc;
 pub use producer::Producer;
 
 /// Microsecond presentation timestamp, the canonical timebase for media frames in moq-mux.

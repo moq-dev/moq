@@ -148,10 +148,10 @@ export class Mse implements Backend {
 		const data = active.subscribe(track, Catalog.PRIORITY.video);
 		effect.cleanup(() => data.close());
 
+		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer that reorders groups/frames up to the provided latency.
-		// Legacy container uses microsecond timescale implicitly.
 		const consumer = new Container.Consumer(data, {
-			format: new Container.Legacy.Format(),
+			format,
 			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());

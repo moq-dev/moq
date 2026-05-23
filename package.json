@@ -31,6 +31,7 @@
 		"js/clock",
 		"js/token",
 		"js/hang",
+		"js/loc",
 		"js/msf",
 		"js/watch",
 		"js/publish",

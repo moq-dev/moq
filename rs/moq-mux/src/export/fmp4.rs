@@ -329,7 +329,7 @@ impl Fmp4 {
 				Container::Cmaf { init, .. } => {
 					extract_init(init, &mut ftyp_data, &mut traks, &mut trexs)?;
 				}
-				Container::Legacy => {
+				Container::Legacy | Container::Loc => {
 					let description = track
 						.source
 						.description()
@@ -356,7 +356,7 @@ impl Fmp4 {
 				Container::Cmaf { init, .. } => {
 					extract_init(init, &mut ftyp_data, &mut traks, &mut trexs)?;
 				}
-				Container::Legacy => {
+				Container::Legacy | Container::Loc => {
 					let trak = crate::container::cmaf::synthesize_audio_trak(track.track_id, track.timescale, config)?;
 					trexs.push(mp4_atom::Trex {
 						track_id: trak.tkhd.track_id,
@@ -477,14 +477,14 @@ fn catalog_timescale_video(config: &VideoConfig) -> u64 {
 		Container::Cmaf { init, .. } => {
 			parse_timescale_from_init(init).unwrap_or_else(|_| crate::container::cmaf::legacy_video_timescale(config))
 		}
-		Container::Legacy => crate::container::cmaf::legacy_video_timescale(config),
+		Container::Loc | Container::Legacy => crate::container::cmaf::legacy_video_timescale(config),
 	}
 }
 
 fn catalog_timescale_audio(config: &hang::catalog::AudioConfig) -> u64 {
 	match &config.container {
 		Container::Cmaf { init, .. } => parse_timescale_from_init(init).unwrap_or(config.sample_rate as u64),
-		Container::Legacy => config.sample_rate as u64,
+		Container::Loc | Container::Legacy => config.sample_rate as u64,
 	}
 }
 
