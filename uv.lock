@@ -5,7 +5,6 @@ requires-python = ">=3.10"
 [manifest]
 members = [
     "moq",
-    "moq-lite",
     "moq-net",
 ]
 
@@ -81,6 +80,8 @@ source = { virtual = "." }
 dev = [
     { name = "maturin" },
     { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
 
@@ -90,54 +91,14 @@ dev = [
 dev = [
     { name = "maturin" },
     { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
 
 [[package]]
-name = "moq-ffi"
-version = "0.2.0"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/0d/cd/ad057a47e9ac119c8bda13a2145a5720cb713eb80233e48e388d7150c513/moq_ffi-0.2.0-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:6e03979ebd56e5617136ce25db01ecebbcf5070f4aa49541672cee5994b42735", size = 5661887, upload-time = "2026-03-26T23:11:42.625Z" },
-    { url = "https://files.pythonhosted.org/packages/db/d8/06b276f51b5acf1d4ecc5d6b85cf2e014907122ee2beeb2882904b6a07fe/moq_ffi-0.2.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:7569409885d10fd4cd1c8a1e31b720d4977ad22b8c37a5b13f53b9ca24e2ce65", size = 5341579, upload-time = "2026-03-26T23:11:44.857Z" },
-    { url = "https://files.pythonhosted.org/packages/04/75/bcfb9e254e0cd60945a119159f31624a234fbd6e4636cafdb61ffc642171/moq_ffi-0.2.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:ac5acd6f03c0642f241276a14e90dc01342fcc531a86f6143ba9467ceae482c6", size = 6029529, upload-time = "2026-03-26T23:11:47.462Z" },
-    { url = "https://files.pythonhosted.org/packages/5a/3b/cdea6030a68f232de3b832fff24beb098f00b7bc84955890c3876762e5b7/moq_ffi-0.2.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:30a6be85d9482e9b50097346836064c674317546decd94ecb156475203817c4f", size = 6022648, upload-time = "2026-03-26T23:11:49.485Z" },
-    { url = "https://files.pythonhosted.org/packages/b2/63/6bd8b76cd4e2701da5da52749aa5e8386deddf136e4a2bfca739913f3db2/moq_ffi-0.2.0-py3-none-win_amd64.whl", hash = "sha256:1ec82da47f02804ba687ab4d073c7503d0974c84349c2ac030012b15d5a36682", size = 4541198, upload-time = "2026-03-26T23:11:51.286Z" },
-]
-
-[[package]]
-name = "moq-lite"
-version = "0.1.0"
-source = { editable = "py/moq-lite" }
-dependencies = [
-    { name = "moq-net" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "moq-net", editable = "py/moq-net" }]
-
-[[package]]
 name = "moq-net"
-version = "0.1.0"
 source = { editable = "py/moq-net" }
-dependencies = [
-    { name = "moq-ffi" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "moq-ffi", specifier = "~=0.2.0" }]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
 
 [[package]]
 name = "nodeenv"

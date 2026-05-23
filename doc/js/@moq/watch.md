@@ -33,13 +33,13 @@ build step:
 </script>
 
 <moq-watch-ui>
-    <moq-watch url="https://relay.example.com/anon" name="room/alice">
+    <moq-watch url="https://relay.example.com/anon" name="room/alice.hang">
         <canvas></canvas>
     </moq-watch>
 </moq-watch-ui>
 ```
 
-Pin a version range in the URL for production — e.g.
+Pin a version range in the URL for production, e.g.
 `https://cdn.jsdelivr.net/npm/@moq/watch@0.2/element.js/+esm`. [esm.sh](https://esm.sh)
 (`https://esm.sh/@moq/watch/element`) works the same way if you prefer it.
 
@@ -55,7 +55,7 @@ a real bundler (the examples below).
 
 <moq-watch
     url="https://relay.example.com/anon"
-    name="room/alice"
+    name="room/alice.hang"
     controls>
     <canvas></canvas>
 </moq-watch>
@@ -63,25 +63,25 @@ a real bundler (the examples below).
 
 **Attributes:**
 
-- `url` (required) — Relay server URL
-- `name` (required) — Broadcast name
-- `controls` — Show playback controls (boolean)
-- `paused` — Pause playback (boolean)
-- `muted` — Mute audio (boolean)
-- `volume` — Audio volume (0–1, default: 1)
-- `catalog-format` — Catalog format: `"hang"` (default), `"msf"` (see [MSF](/concept/standard/msf)), or `"manual"` (supply the catalog yourself)
+- `url` (required): Relay server URL
+- `name` (required): Broadcast name
+- `controls`: Show playback controls (boolean)
+- `paused`: Pause playback (boolean)
+- `muted`: Mute audio (boolean)
+- `volume`: Audio volume (0 to 1, default: 1)
+- `catalog-format`: Catalog format. One of `"hang"`, `"msf"` (see [MSF](/concept/standard/msf)), or `"manual"` (supply the catalog yourself). When omitted, the format is auto-detected from the broadcast `name` extension (`.hang` or `.msf`), falling back to `"hang"`.
 
 ## Catalog Formats
 
 `@moq/watch` can consume either the default [hang](/concept/layer/hang) catalog
-or [MSF](/concept/standard/msf) (MoQ Streaming Format). Set `catalog-format="msf"`
-on the element, or assign the `catalogFormat` signal on the `Broadcast` to
-switch formats at runtime:
+or [MSF](/concept/standard/msf) (MoQ Streaming Format). The format is detected
+from the broadcast name extension by default. `room/alice.hang` uses hang,
+`room/alice.msf` uses MSF. Set `catalog-format` explicitly to override:
 
 ```html
 <moq-watch
     url="https://relay.example.com/anon"
-    name="room/alice"
+    name="room/alice.hang"
     catalog-format="msf">
     <canvas></canvas>
 </moq-watch>
@@ -93,7 +93,7 @@ import * as Watch from "@moq/watch";
 const broadcast = new Watch.Broadcast({
     connection,
     enabled: true,
-    name: "alice",
+    name: "alice.hang",
     catalogFormat: "msf",
 });
 
@@ -105,7 +105,7 @@ broadcast.catalogFormat.set("msf");
 
 Use `catalog-format="manual"` (or `catalogFormat: "manual"`) to skip the catalog
 track entirely and supply a `Catalog.Root` directly. The connection and
-broadcast name are still required — they're used to subscribe to the media
+broadcast name are still required, since they're used to subscribe to the media
 tracks named by the catalog. Update the catalog at any time by writing to
 the signal:
 
@@ -115,7 +115,7 @@ import * as Watch from "@moq/watch";
 const broadcast = new Watch.Broadcast({
     connection,
     enabled: true,
-    name: "alice",
+    name: "alice.hang",
     catalogFormat: "manual",
     catalog: {
         video: { renditions: { hd: { codec: "vp09.00.10.08", container: { kind: "legacy" } } } },
@@ -151,7 +151,7 @@ Import `@moq/watch/ui` for a Web Component overlay with buffering indicator, sta
 <moq-watch-ui>
     <moq-watch
         url="https://relay.example.com/anon"
-        name="room/alice">
+        name="room/alice.hang">
         <canvas></canvas>
     </moq-watch>
 </moq-watch-ui>
@@ -167,13 +167,13 @@ import * as Watch from "@moq/watch";
 const broadcast = new Watch.Broadcast({
     connection,
     enabled: true,
-    name: "alice",
+    name: "alice.hang",
     reload: true,
 });
 ```
 
 ## Related Packages
 
-- **[@moq/publish](/js/@moq/publish)** — Publish media to MoQ broadcasts
-- **[@moq/hang](/js/@moq/hang/)** — Core media library (catalog, container, support)
-- **[@moq/net](/js/@moq/net)** — Core pub/sub transport protocol
+- **[@moq/publish](/js/@moq/publish)**: Publish media to MoQ broadcasts
+- **[@moq/hang](/js/@moq/hang/)**: Core media library (catalog, container, support)
+- **[@moq/net](/js/@moq/net)**: Core pub/sub transport protocol

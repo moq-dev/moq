@@ -295,9 +295,11 @@ class DecoderTrack {
 	}
 
 	#runLegacy(effect: Effect, sub: Moq.Track, decoder: VideoDecoder): void {
+		const format =
+			this.config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Container.Consumer(sub, {
-			format: new Container.Legacy.Format(),
+			format,
 			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());
@@ -374,7 +376,7 @@ class DecoderTrack {
 
 		const initSegment = base64ToBytes(this.config.container.init);
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
-		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : undefined;
+		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : init.description;
 
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
@@ -493,7 +495,21 @@ class DecoderTrack {
 }
 
 async function supported(config: Catalog.VideoConfig): Promise<boolean> {
-	const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
+	let description: Uint8Array | undefined;
+	if (config.description) {
+		description = Util.Hex.toBytes(config.description);
+	} else if (config.container.kind === "cmaf") {
+		try {
+			description = Container.Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
+		} catch (err) {
+			// A malformed init segment means we can't extract the codec
+			// description, so we can't probe support reliably. Reject the
+			// track rather than letting isConfigSupported pass on a
+			// description-less config and then having runCmaf fail later.
+			console.warn(`video: malformed CMAF init segment for codec ${config.codec}`, err);
+			return false;
+		}
+	}
 	const { supported } = await VideoDecoder.isConfigSupported({
 		codec: config.codec,
 		description,

@@ -58,6 +58,7 @@ mod path;
 mod server;
 mod session;
 mod setup;
+mod stats;
 mod version;
 
 pub use client::*;
@@ -67,6 +68,7 @@ pub use model::*;
 pub use path::*;
 pub use server::*;
 pub use session::*;
+pub use stats::*;
 pub use version::*;
 
 // Re-export the bytes crate

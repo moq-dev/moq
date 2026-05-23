@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from moq_ffi import MoqClient
-
+from ._uniffi import MoqClient
 from .origin import Announced, AnnouncedBroadcast, OriginConsumer, OriginProducer
 from .publish import BroadcastProducer
 

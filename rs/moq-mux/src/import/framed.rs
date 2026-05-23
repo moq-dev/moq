@@ -23,6 +23,8 @@ pub enum FramedFormat {
 	Aac,
 	/// Raw Opus frames (not Ogg).
 	Opus,
+	/// Matroska / WebM container.
+	Mkv,
 }
 
 impl FromStr for FramedFormat {
@@ -41,6 +43,7 @@ impl FromStr for FramedFormat {
 			"av01" | "av1" | "av1C" => Ok(FramedFormat::Av01),
 			"aac" => Ok(FramedFormat::Aac),
 			"opus" => Ok(FramedFormat::Opus),
+			"mkv" | "webm" | "matroska" => Ok(FramedFormat::Mkv),
 			_ => Err(Error::UnknownFormat(s.to_string())),
 		}
 	}
@@ -56,6 +59,7 @@ impl fmt::Display for FramedFormat {
 			FramedFormat::Av01 => write!(f, "av01"),
 			FramedFormat::Aac => write!(f, "aac"),
 			FramedFormat::Opus => write!(f, "opus"),
+			FramedFormat::Mkv => write!(f, "mkv"),
 		}
 	}
 }
@@ -67,6 +71,7 @@ impl From<StreamFormat> for FramedFormat {
 			StreamFormat::Fmp4 => FramedFormat::Fmp4,
 			StreamFormat::Hev1 => FramedFormat::Hev1,
 			StreamFormat::Av01 => FramedFormat::Av01,
+			StreamFormat::Mkv => FramedFormat::Mkv,
 		}
 	}
 }
@@ -84,6 +89,8 @@ enum FramedKind {
 	Av01(super::Av01),
 	Aac(super::Aac),
 	Opus(super::Opus),
+	// Boxed for the same reason as Fmp4.
+	Mkv(Box<super::Mkv>),
 }
 
 /// An importer for formats with known frame boundaries.
@@ -137,6 +144,11 @@ impl Framed {
 				let config = super::OpusConfig::parse(buf)?;
 				super::Opus::new(broadcast, catalog, config)?.into()
 			}
+			FramedFormat::Mkv => {
+				let mut decoder = Box::new(super::Mkv::new(broadcast, catalog));
+				decoder.decode(buf)?;
+				decoder.into()
+			}
 		};
 
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
@@ -157,6 +169,7 @@ impl Framed {
 			FramedKind::Av01(ref mut decoder) => decoder.finish(),
 			FramedKind::Aac(ref mut decoder) => decoder.finish(),
 			FramedKind::Opus(ref mut decoder) => decoder.finish(),
+			FramedKind::Mkv(ref mut decoder) => decoder.finish(),
 		}
 	}
 
@@ -173,6 +186,7 @@ impl Framed {
 			FramedKind::Av01(ref decoder) => decoder.track(),
 			FramedKind::Aac(ref decoder) => Ok(decoder.track()),
 			FramedKind::Opus(ref decoder) => Ok(decoder.track()),
+			FramedKind::Mkv(_) => anyhow::bail!("mkv can contain multiple tracks"),
 		}
 	}
 
@@ -198,6 +212,10 @@ impl Framed {
 			FramedKind::Av01(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			FramedKind::Aac(ref mut decoder) => decoder.decode(buf, pts)?,
 			FramedKind::Opus(ref mut decoder) => decoder.decode(buf, pts)?,
+			FramedKind::Mkv(ref mut decoder) => {
+				let _ = pts;
+				decoder.decode(buf)?;
+			}
 		}
 
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");

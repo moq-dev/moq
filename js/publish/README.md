@@ -31,7 +31,7 @@ other `+esm` URLs. No build step or import map required:
 </script>
 
 <moq-publish-ui>
-    <moq-publish url="https://relay.example.com/anon" name="room/alice" source="camera">
+    <moq-publish url="https://relay.example.com/anon" name="room/alice.hang" source="camera">
         <video muted autoplay></video>
     </moq-publish>
 </moq-publish-ui>
@@ -55,7 +55,7 @@ The simplest way to publish a stream:
 
 <moq-publish
     url="https://relay.example.com/anon"
-    path="room/alice"
+    path="room/alice.hang"
     audio video controls>
     <video muted autoplay></video>
 </moq-publish>
@@ -81,7 +81,7 @@ import * as Publish from "@moq/publish";
 
 const publish = new Publish.Broadcast(connection, {
     enabled: true,
-    name: "alice",
+    name: "alice.hang",
     video: { enabled: true },
     audio: { enabled: true },
 });
@@ -101,7 +101,7 @@ publish.source.camera.enabled.set(true);
 </script>
 
 <moq-publish-ui>
-    <moq-publish url="https://relay.example.com/anon" path="room/alice" audio video>
+    <moq-publish url="https://relay.example.com/anon" path="room/alice.hang" audio video>
         <video muted autoplay></video>
     </moq-publish>
 </moq-publish-ui>

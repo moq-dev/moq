@@ -26,6 +26,21 @@ listen = "[::]:4443"
 # Allow anonymous access to everything.
 public = ""
 
+# Publish stats broadcasts on the cluster origin. A broadcast at path
+# `anon/bbb` aggregates into each of its path prefixes (up to `levels`):
+#
+#   .stats/prefix/localhost
+#   .stats/prefix/anon/localhost
+#   .stats/prefix/anon/bbb/localhost
+[stats]
+enabled = true
+# `/anon/bbb` is the typical localhost broadcast, so 3 levels covers the root,
+# the anon prefix, and the broadcast itself.
+levels = 3
+# `node` is the suffix that disambiguates per-relay broadcasts in a cluster.
+# Single-node setups can leave it unset.
+node = "localhost"
+
 [iroh]
 # You can optionally enable iroh support for P2P connections.
 # Clients can connect using --iroh-enabled and a `iroh://` URL.

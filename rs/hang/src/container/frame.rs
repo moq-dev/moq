@@ -42,16 +42,18 @@ impl Frame {
 	/// delta-encode it independently on Lite05+ (the container-level prefix
 	/// stays as a duplicate for now).
 	pub fn encode(&self, group: &mut moq_net::GroupProducer) -> Result<(), Error> {
+		// Normalize to the hang container timescale on the wire so peers using a
+		// different source scale (e.g. nanoseconds from MKV) can decode without
+		// knowing the producer's internal scale.
+		let timestamp = self.timestamp.convert(TIMESCALE)?;
+
 		let mut header = BytesMut::new();
-		let value = VarInt::try_from(self.timestamp.value()).map_err(moq_net::Error::from)?;
+		let value = VarInt::try_from(timestamp.value()).map_err(moq_net::Error::from)?;
 		value.encode_quic(&mut header).map_err(moq_net::Error::from)?;
 
 		let size = (header.len() + self.payload.len()) as u64;
 
-		let net_frame = moq_net::Frame {
-			size,
-			timestamp: self.timestamp,
-		};
+		let net_frame = moq_net::Frame { size, timestamp };
 		let mut chunked = group.create_frame(net_frame)?;
 		chunked.write(header.freeze())?;
 		chunked.write(self.payload.clone())?;

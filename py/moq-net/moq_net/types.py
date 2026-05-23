@@ -1,18 +1,18 @@
 """Re-export moq-ffi record types without the Moq prefix."""
 
-from moq_ffi import (
+from ._uniffi import (
     MoqAudio as Audio,
 )
-from moq_ffi import (
+from ._uniffi import (
     MoqCatalog as Catalog,
 )
-from moq_ffi import (
+from ._uniffi import (
     MoqDimensions as Dimensions,
 )
-from moq_ffi import (
+from ._uniffi import (
     MoqFrame as Frame,
 )
-from moq_ffi import (
+from ._uniffi import (
     MoqVideo as Video,
 )
 

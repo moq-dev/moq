@@ -5,7 +5,7 @@ import type * as Moq from "@moq/net";
 import type { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Capture from "./capture";
-import type { Source } from "./types";
+import { type Kind, normalizeSource, type Source } from "./types";
 
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
@@ -69,9 +69,10 @@ export class Encoder {
 	#runSource(effect: Effect): void {
 		const values = effect.getAll([this.enabled, this.source]);
 		if (!values) return;
-		const [_, source] = values;
+		const [_, rawSource] = values;
+		const source = normalizeSource(rawSource);
 
-		const settings = source.getSettings();
+		const settings = source.track.getSettings();
 		const overrideSampleRate = effect.get(this.sampleRate);
 		const sampleRate = overrideSampleRate ?? settings.sampleRate;
 
@@ -82,7 +83,7 @@ export class Encoder {
 		effect.cleanup(() => context.close());
 
 		const root = new MediaStreamAudioSourceNode(context, {
-			mediaStream: new MediaStream([source]),
+			mediaStream: new MediaStream([source.track]),
 		});
 		effect.cleanup(() => root.disconnect());
 
@@ -196,8 +197,12 @@ export class Encoder {
 				config = effect.get(this.#config);
 				if (!config) return;
 
-				console.debug("encoding audio", config);
-				encoder.configure(config);
+				const source = effect.get(this.source);
+				const kind: Kind = source ? normalizeSource(source).kind : "auto";
+				const encoderConfig = toEncoderConfig(config, kind);
+
+				console.debug("encoding audio", encoderConfig);
+				encoder.configure(encoderConfig);
 			});
 
 			effect.event(worklet.port, "message", (event: Event) => {
@@ -253,4 +258,32 @@ export class Encoder {
 	close() {
 		this.#signals.close();
 	}
+}
+
+// `application` and `signal` are in the WebCodecs spec but missing from lib.dom.d.ts.
+// https://www.w3.org/TR/webcodecs-opus-codec-registration/#dom-opusencoderconfig
+interface OpusEncoderConfigExt extends OpusEncoderConfig {
+	application?: "voip" | "audio" | "lowdelay";
+	signal?: "auto" | "voice" | "music";
+}
+
+// Build the WebCodecs encoder config from the catalog (decoder) config plus a Kind hint.
+// Opus-only knobs are kept out of the catalog since they only affect encoding.
+function toEncoderConfig(config: Catalog.AudioConfig, kind: Kind): AudioEncoderConfig {
+	const encoderConfig: AudioEncoderConfig = {
+		codec: config.codec,
+		sampleRate: config.sampleRate,
+		numberOfChannels: config.numberOfChannels,
+		bitrate: config.bitrate,
+	};
+
+	if (config.codec === "opus" && kind !== "auto") {
+		const opus: OpusEncoderConfigExt = {
+			application: kind === "voice" ? "voip" : "audio",
+			signal: kind,
+		};
+		encoderConfig.opus = opus;
+	}
+
+	return encoderConfig;
 }

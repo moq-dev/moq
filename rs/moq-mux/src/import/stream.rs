@@ -15,6 +15,8 @@ pub enum StreamFormat {
 	Hev1,
 	/// AV1 with inline sequence headers
 	Av01,
+	/// Matroska / WebM container.
+	Mkv,
 }
 
 impl FromStr for StreamFormat {
@@ -30,6 +32,7 @@ impl FromStr for StreamFormat {
 			"hev1" => Ok(StreamFormat::Hev1),
 			"fmp4" | "cmaf" => Ok(StreamFormat::Fmp4),
 			"av01" | "av1" | "av1C" => Ok(StreamFormat::Av01),
+			"mkv" | "webm" | "matroska" => Ok(StreamFormat::Mkv),
 			_ => Err(Error::UnknownFormat(s.to_string())),
 		}
 	}
@@ -42,6 +45,7 @@ impl fmt::Display for StreamFormat {
 			StreamFormat::Fmp4 => write!(f, "fmp4"),
 			StreamFormat::Hev1 => write!(f, "hev1"),
 			StreamFormat::Av01 => write!(f, "av01"),
+			StreamFormat::Mkv => write!(f, "mkv"),
 		}
 	}
 }
@@ -55,6 +59,8 @@ enum StreamKind {
 	/// aka H265 with inline SPS/PPS
 	Hev1(super::Hev1),
 	Av01(super::Av01),
+	// Boxed for the same reason as Fmp4.
+	Mkv(Box<super::Mkv>),
 }
 
 /// An importer for formats that support stream decoding (unknown frame boundaries).
@@ -73,6 +79,7 @@ impl Stream {
 			StreamFormat::Fmp4 => Box::new(super::Fmp4::new(broadcast, catalog)).into(),
 			StreamFormat::Hev1 => super::Hev1::new(broadcast, catalog).into(),
 			StreamFormat::Av01 => super::Av01::new(broadcast, catalog).into(),
+			StreamFormat::Mkv => Box::new(super::Mkv::new(broadcast, catalog)).into(),
 		};
 
 		Self { decoder }
@@ -89,6 +96,7 @@ impl Stream {
 			StreamKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
 			StreamKind::Hev1(ref mut decoder) => decoder.initialize(buf)?,
 			StreamKind::Av01(ref mut decoder) => decoder.initialize(buf)?,
+			StreamKind::Mkv(ref mut decoder) => decoder.decode(buf)?,
 		}
 
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
@@ -111,6 +119,7 @@ impl Stream {
 			StreamKind::Fmp4(ref mut decoder) => decoder.decode(buf),
 			StreamKind::Hev1(ref mut decoder) => decoder.decode_stream(buf, None),
 			StreamKind::Av01(ref mut decoder) => decoder.decode_stream(buf, None),
+			StreamKind::Mkv(ref mut decoder) => decoder.decode(buf),
 		}
 	}
 
@@ -124,6 +133,7 @@ impl Stream {
 			StreamKind::Fmp4(ref mut decoder) => decoder.finish(),
 			StreamKind::Hev1(ref mut decoder) => decoder.finish(),
 			StreamKind::Av01(ref mut decoder) => decoder.finish(),
+			StreamKind::Mkv(ref mut decoder) => decoder.finish(),
 		}
 	}
 
@@ -134,6 +144,7 @@ impl Stream {
 			StreamKind::Fmp4(ref decoder) => decoder.is_initialized(),
 			StreamKind::Hev1(ref decoder) => decoder.is_initialized(),
 			StreamKind::Av01(ref decoder) => decoder.is_initialized(),
+			StreamKind::Mkv(ref decoder) => decoder.is_initialized(),
 		}
 	}
 }

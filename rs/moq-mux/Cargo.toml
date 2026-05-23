@@ -21,9 +21,11 @@ anyhow = "1"
 base64 = "0.22"
 bytes = "1"
 conducer = { workspace = true }
+futures = "0.3"
 h264-parser = { version = "0.4.0" }
 hang = { workspace = true }
 m3u8-rs = { version = "6" }
+moq-loc = { workspace = true }
 moq-msf = { workspace = true }
 moq-net = { workspace = true, features = ["serde"] }
 mp4-atom = { version = "0.10.0", features = ["tokio", "bytes", "serde"] }
@@ -35,6 +37,7 @@ thiserror = "2"
 tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = "0.1"
 url = "2"
+webm-iterable = "0.6"
 
 [dependencies.derive_more]
 version = "2"
