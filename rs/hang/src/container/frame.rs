@@ -1,6 +1,6 @@
 use bytes::{Buf, Bytes, BytesMut};
 use derive_more::Debug;
-use moq_net::coding::VarInt;
+use moq_net::VarInt;
 
 use crate::Error;
 

@@ -22,9 +22,8 @@ impl MinFrameDuration {
 	///
 	/// Returns the new minimum-frame-duration as a [`Duration`] if it changed, so
 	/// the caller can persist it on the catalog rendition. Returns `None` when this
-	/// is the first observation, the timestamps are non-monotonic, the new gap is
-	/// no smaller than the recorded minimum, or the timestamp's scale is
-	/// unspecified.
+	/// is the first observation, the timestamps are non-monotonic, or the new gap
+	/// is no smaller than the recorded minimum.
 	pub fn observe(&mut self, ts: Timestamp) -> Option<Duration> {
 		let last = self.last_timestamp.replace(ts)?;
 		let duration = ts.checked_sub(last).ok()?;
@@ -36,6 +35,6 @@ impl MinFrameDuration {
 		}
 
 		self.min_duration = Some(duration);
-		Duration::try_from(duration).ok()
+		Some(duration.into())
 	}
 }

@@ -49,7 +49,7 @@
 //! standard [`std::task::Waker`] API and any [`std::task::Waker`] is a valid driver.
 
 mod client;
-pub mod coding;
+mod coding;
 mod error;
 mod ietf;
 mod lite;
@@ -62,7 +62,7 @@ mod stats;
 mod version;
 
 pub use client::*;
-pub use coding::{BoundsExceeded, DecodeError, EncodeError};
+pub use coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};
 pub use error::*;
 pub use model::*;
 pub use path::*;

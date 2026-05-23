@@ -644,7 +644,7 @@ impl Import {
 								.renditions
 								.get_mut(&track.track.name)
 								.context("missing video config")?;
-							config.jitter = Some(std::time::Duration::try_from(jitter)?);
+							config.jitter = Some(jitter.into());
 						}
 						TrackKind::Audio => {
 							let config = catalog
@@ -652,7 +652,7 @@ impl Import {
 								.renditions
 								.get_mut(&track.track.name)
 								.context("missing audio config")?;
-							config.jitter = Some(std::time::Duration::try_from(jitter)?);
+							config.jitter = Some(jitter.into());
 						}
 					}
 				}

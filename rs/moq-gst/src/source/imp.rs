@@ -525,11 +525,11 @@ async fn run_track_pump(
 						let buffer_mut = buffer.get_mut().unwrap();
 
 						let pts = match reference_ts {
-							Some(reference) => match timestamp
-								.checked_sub(reference)
-								.and_then(|d| Duration::try_from(d))
-							{
-								Ok(delta) => gst::ClockTime::from_nseconds(delta.as_nanos() as u64),
+							Some(reference) => match timestamp.checked_sub(reference) {
+								Ok(delta) => {
+									let d: Duration = delta.into();
+									gst::ClockTime::from_nseconds(d.as_nanos() as u64)
+								}
 								Err(_) => gst::ClockTime::ZERO,
 							},
 							None => {

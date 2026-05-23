@@ -326,13 +326,20 @@ impl TryFrom<std::time::Duration> for Timestamp {
 	}
 }
 
-impl TryFrom<Timestamp> for std::time::Duration {
-	type Error = TimeOverflow;
-
-	fn try_from(time: Timestamp) -> Result<Self, Self::Error> {
-		let secs = time.as_secs()?;
-		let nanos = time.as_nanos()?;
-		Ok(std::time::Duration::new(secs, (nanos % 1_000_000_000) as u32))
+impl From<Timestamp> for std::time::Duration {
+	/// Panics if the timestamp's scale is [`Timescale::UNKNOWN`].
+	///
+	/// In practice every concrete timestamp produced by an importer carries a known
+	/// scale; only the [`Timestamp::ZERO`] / [`Timestamp::MAX`] sentinels lack one,
+	/// and those never get converted to a `Duration`.
+	fn from(time: Timestamp) -> Self {
+		let secs = time
+			.as_secs()
+			.expect("cannot convert unspecified-scale Timestamp to Duration");
+		let nanos = time
+			.as_nanos()
+			.expect("cannot convert unspecified-scale Timestamp to Duration");
+		std::time::Duration::new(secs, (nanos % 1_000_000_000) as u32)
 	}
 }
 
@@ -704,7 +711,7 @@ mod tests {
 		assert_eq!(time.scale(), Timescale::NANO);
 		assert_eq!(time.as_secs().unwrap(), 5);
 
-		let duration_back: std::time::Duration = time.try_into().unwrap();
+		let duration_back: std::time::Duration = time.into();
 		assert_eq!(duration_back.as_secs(), 5);
 	}
 

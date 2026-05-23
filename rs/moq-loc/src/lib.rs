@@ -22,10 +22,10 @@
 //! encode. Public properties are not handled here. They belong in the MoQ
 //! object header and are stripped by the transport layer.
 //!
-//! Varint encoding is QUIC-style throughout via [`moq_net::coding::VarInt`].
+//! Varint encoding is QUIC-style throughout via [`moq_net::VarInt`].
 
 use bytes::{Buf, Bytes, BytesMut};
-use moq_net::coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};
+use moq_net::{BoundsExceeded, DecodeError, EncodeError, VarInt};
 
 /// Property IDs recognized by this implementation.
 const PROP_TIMESTAMP: u64 = 0x06;
