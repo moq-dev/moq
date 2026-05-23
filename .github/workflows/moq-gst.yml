@@ -4,15 +4,6 @@ on:
   push:
     tags:
       - "moq-gst-v*"
-  pull_request:
-    paths:
-      - ".github/workflows/moq-gst.yml"
-      - ".github/scripts/release.sh"
-      - "rs/moq-gst/build.sh"
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -49,16 +40,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            CARGO_VERSION=$(grep '^version' rs/moq-gst/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
-          else
-            .github/scripts/release.sh parse-version moq-gst
-          fi
+        run: .github/scripts/release.sh parse-version moq-gst
 
       - name: Build and package
         shell: bash
@@ -78,7 +60,6 @@ jobs:
     name: Release
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
     permissions:
       contents: write
 
