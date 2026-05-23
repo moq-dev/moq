@@ -4,7 +4,7 @@ use std::io::Cursor;
 
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
-use hang::catalog::{AAC, AV1, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
+use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
 use hang::container::Timestamp;
 use mp4_atom::Atom;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -557,42 +557,20 @@ fn build_audio_config(
 }
 
 fn build_h264_config(codec_private: Option<&Bytes>) -> anyhow::Result<VideoConfig> {
-	let avcc = codec_private.context("V_MPEG4/ISO/AVC missing CodecPrivate (AVCDecoderConfigurationRecord)")?;
-	anyhow::ensure!(avcc.len() >= 6, "AVCDecoderConfigurationRecord too short");
-
-	let profile = avcc[1];
-	let constraints = avcc[2];
-	let level = avcc[3];
-	let num_sps = avcc[5] & 0x1f;
-
-	let mut offset = 6usize;
-	let mut width = 0u32;
-	let mut height = 0u32;
-
-	if num_sps > 0 && offset + 2 <= avcc.len() {
-		let sps_len = u16::from_be_bytes([avcc[offset], avcc[offset + 1]]) as usize;
-		offset += 2;
-		if offset + sps_len <= avcc.len() && sps_len > 1 {
-			let sps_nalu = &avcc[offset..offset + sps_len];
-			let rbsp = h264_parser::nal::ebsp_to_rbsp(&sps_nalu[1..]);
-			if let Ok(sps) = h264_parser::Sps::parse(&rbsp) {
-				width = sps.width;
-				height = sps.height;
-			}
-		}
-	}
+	let avcc_bytes = codec_private.context("V_MPEG4/ISO/AVC missing CodecPrivate (AVCDecoderConfigurationRecord)")?;
+	let avcc = crate::codec::h264::Avcc::parse(avcc_bytes)?;
 
 	Ok(VideoConfig {
 		codec: H264 {
-			profile,
-			constraints,
-			level,
+			profile: avcc.profile,
+			constraints: avcc.constraints,
+			level: avcc.level,
 			inline: false,
 		}
 		.into(),
-		description: Some(avcc.clone()),
-		coded_width: if width > 0 { Some(width) } else { None },
-		coded_height: if height > 0 { Some(height) } else { None },
+		description: Some(avcc_bytes.clone()),
+		coded_width: avcc.coded_width,
+		coded_height: avcc.coded_height,
 		framerate: None,
 		bitrate: None,
 		display_ratio_width: None,
@@ -643,25 +621,8 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> anyhow::Result<VideoConfig
 	let mut description = BytesMut::new();
 	av1c.encode_body(&mut description)?;
 
-	let bitdepth = match (av1c.seq_tier_0, av1c.high_bitdepth) {
-		(true, true) => 12,
-		(true, false) => 10,
-		(false, true) => 10,
-		(false, false) => 8,
-	};
-
 	Ok(VideoConfig {
-		codec: AV1 {
-			profile: av1c.seq_profile,
-			level: av1c.seq_level_idx_0,
-			bitdepth,
-			mono_chrome: av1c.monochrome,
-			chroma_subsampling_x: av1c.chroma_subsampling_x,
-			chroma_subsampling_y: av1c.chroma_subsampling_y,
-			chroma_sample_position: av1c.chroma_sample_position,
-			..Default::default()
-		}
-		.into(),
+		codec: crate::codec::av1::av1_from_av1c(&av1c).into(),
 		description: Some(description.freeze()),
 		coded_width: None,
 		coded_height: None,

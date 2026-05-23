@@ -5,7 +5,7 @@ use scuffle_h265::{NALUnitType, SpsNALUnit};
 /// Transform H.265 frames from Annex-B (inline VPS/SPS/PPS, "hev1") to
 /// length-prefixed NALU (out-of-band HEVCDecoderConfigurationRecord, "hvc1").
 ///
-/// See [`crate::transform::Avc1`] for the analogous H.264 transform.
+/// See [`crate::codec::Avc1`] for the analogous H.264 transform.
 pub struct Hvc1 {
 	hvcc: Option<Bytes>,
 	vps: Option<Bytes>,
@@ -120,7 +120,7 @@ impl Hvc1 {
 
 /// Build an HEVCDecoderConfigurationRecord (ISO/IEC 14496-15 §8.3.3).
 /// Single-layer streams only.
-fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
+pub fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
 	for (label, nal) in [("VPS", vps_nal), ("SPS", sps_nal), ("PPS", pps_nal)] {
 		anyhow::ensure!(
 			nal.len() <= u16::MAX as usize,
@@ -168,7 +168,7 @@ fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<
 }
 
 /// Pack the constraint flags from ITU H.265 V10 §7.3.3 Profile, tier and level syntax.
-fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] {
+pub fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] {
 	let mut flags = [0u8; 6];
 	flags[0] = ((profile.progressive_source_flag as u8) << 7)
 		| ((profile.interlaced_source_flag as u8) << 6)

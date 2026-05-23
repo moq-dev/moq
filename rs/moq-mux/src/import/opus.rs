@@ -1,41 +1,6 @@
 use bytes::{Buf, BytesMut};
 
-/// Typed Opus configuration for initialization without binary blobs.
-pub struct OpusConfig {
-	pub sample_rate: u32,
-	pub channel_count: u32,
-}
-
-impl OpusConfig {
-	/// Parse an OpusHead buffer into an OpusConfig.
-	pub fn parse<T: Buf>(buf: &mut T) -> anyhow::Result<Self> {
-		// Parse OpusHead (https://datatracker.ietf.org/doc/html/rfc7845#section-5.1)
-		//  - Verifies "OpusHead" magic signature
-		//  - Reads channel count
-		//  - Reads sample rate
-		//  - Ignores pre-skip, gain, channel mapping for now
-
-		anyhow::ensure!(buf.remaining() >= 19, "OpusHead must be at least 19 bytes");
-		const OPUS_HEAD: u64 = u64::from_be_bytes(*b"OpusHead");
-		let signature = buf.get_u64();
-		anyhow::ensure!(signature == OPUS_HEAD, "invalid OpusHead signature");
-
-		buf.advance(1); // Skip version
-		let channel_count = buf.get_u8() as u32;
-		buf.advance(2); // Skip pre-skip (lol)
-		let sample_rate = buf.get_u32_le();
-
-		// Skip gain, channel mapping until if/when we support them
-		if buf.remaining() > 0 {
-			buf.advance(buf.remaining());
-		}
-
-		Ok(Self {
-			sample_rate,
-			channel_count,
-		})
-	}
-}
+pub use crate::codec::opus::OpusConfig;
 
 /// Opus importer.
 ///

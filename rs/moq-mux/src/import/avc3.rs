@@ -59,21 +59,14 @@ impl Avc3 {
 		&self.track.track
 	}
 
-	fn init(&mut self, sps: &h264_parser::Sps) -> anyhow::Result<()> {
-		let constraint_flags: u8 = ((sps.constraint_set0_flag as u8) << 7)
-			| ((sps.constraint_set1_flag as u8) << 6)
-			| ((sps.constraint_set2_flag as u8) << 5)
-			| ((sps.constraint_set3_flag as u8) << 4)
-			| ((sps.constraint_set4_flag as u8) << 3)
-			| ((sps.constraint_set5_flag as u8) << 2);
-
+	fn init(&mut self, sps: &crate::codec::h264::Sps) -> anyhow::Result<()> {
 		let config = hang::catalog::VideoConfig {
-			coded_width: Some(sps.width),
-			coded_height: Some(sps.height),
+			coded_width: Some(sps.coded_width),
+			coded_height: Some(sps.coded_height),
 			codec: hang::catalog::H264 {
-				profile: sps.profile_idc,
-				constraints: constraint_flags,
-				level: sps.level_idc,
+				profile: sps.profile,
+				constraints: sps.constraints,
+				level: sps.level,
 				inline: true,
 			}
 			.into(),
@@ -197,8 +190,7 @@ impl Avc3 {
 				self.maybe_start_frame(pts)?;
 
 				// Try to reinitialize the track if the SPS has changed.
-				let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
-				let sps = h264_parser::Sps::parse(&rbsp)?;
+				let sps = crate::codec::h264::Sps::parse(&nal)?;
 				self.init(&sps)?;
 
 				// PPS is tied to SPS context; drop cached PPS when SPS changes.

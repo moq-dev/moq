@@ -66,7 +66,7 @@ impl Hev1 {
 				profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
 				tier_flag: profile.tier_flag,
 				level_idc: profile.level_idc.context("missing level_idc in SPS")?,
-				constraint_flags: pack_constraint_flags(profile),
+				constraint_flags: crate::codec::h265::pack_constraint_flags(profile),
 			}
 			.into(),
 			description: None,
@@ -348,18 +348,6 @@ impl Drop for Hev1 {
 			self.catalog.lock().video.renditions.remove(&track.name);
 		}
 	}
-}
-
-// Packs the constraint flags from ITU H.265 V10 Section 7.3.3 Profile, tier and level syntax
-fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] {
-	let mut flags = [0u8; 6];
-	flags[0] = ((profile.progressive_source_flag as u8) << 7)
-		| ((profile.interlaced_source_flag as u8) << 6)
-		| ((profile.non_packed_constraint_flag as u8) << 5)
-		| ((profile.frame_only_constraint_flag as u8) << 4);
-
-	// @todo: pack the rest of the optional flags in profile.additional_flags
-	flags
 }
 
 #[derive(Default)]

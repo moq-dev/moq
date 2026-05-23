@@ -43,44 +43,21 @@ impl Avc1 {
 	/// and stores the raw record as the WebCodecs `description`.
 	/// The buffer is fully consumed.
 	pub fn initialize<T: bytes::Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
-		let avcc = buf.as_ref();
-		anyhow::ensure!(avcc.len() >= 6, "AVCDecoderConfigurationRecord too short");
-
-		let profile = avcc[1];
-		let constraints = avcc[2];
-		let level = avcc[3];
-		self.length_size = (avcc[4] & 0x03) as usize + 1;
-		let num_sps = avcc[5] & 0x1f;
-
-		let mut offset = 6usize;
-		let mut width = 0u32;
-		let mut height = 0u32;
-
-		if num_sps > 0 && offset + 2 <= avcc.len() {
-			let sps_len = u16::from_be_bytes([avcc[offset], avcc[offset + 1]]) as usize;
-			offset += 2;
-
-			if offset + sps_len <= avcc.len() && !avcc[offset..].is_empty() {
-				let sps_nalu = &avcc[offset..offset + sps_len];
-				let rbsp = h264_parser::nal::ebsp_to_rbsp(&sps_nalu[1..]);
-				if let Ok(sps) = h264_parser::Sps::parse(&rbsp) {
-					width = sps.width;
-					height = sps.height;
-				}
-			}
-		}
+		let avcc_bytes = buf.as_ref();
+		let avcc = crate::codec::h264::Avcc::parse(avcc_bytes)?;
+		self.length_size = avcc.length_size;
 
 		let config = hang::catalog::VideoConfig {
-			coded_width: if width > 0 { Some(width) } else { None },
-			coded_height: if height > 0 { Some(height) } else { None },
+			coded_width: avcc.coded_width,
+			coded_height: avcc.coded_height,
 			codec: hang::catalog::H264 {
-				profile,
-				constraints,
-				level,
+				profile: avcc.profile,
+				constraints: avcc.constraints,
+				level: avcc.level,
 				inline: false,
 			}
 			.into(),
-			description: Some(Bytes::copy_from_slice(avcc)),
+			description: Some(Bytes::copy_from_slice(avcc_bytes)),
 			framerate: None,
 			bitrate: None,
 			display_ratio_width: None,

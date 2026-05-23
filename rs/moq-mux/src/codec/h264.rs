@@ -5,6 +5,134 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
 
+/// Parsed H.264 SPS (Sequence Parameter Set) NAL.
+///
+/// Wraps [`h264_parser::Sps`] with the codec-config fields that the hang
+/// catalog records: profile_idc, level_idc, and the packed constraint_set
+/// flags. The first byte of `nal` must be the NAL header.
+#[derive(Debug, Clone)]
+pub struct Sps {
+	pub profile: u8,
+	pub constraints: u8,
+	pub level: u8,
+	pub coded_width: u32,
+	pub coded_height: u32,
+}
+
+impl Sps {
+	/// Parse an SPS NAL unit.
+	pub fn parse(nal: &[u8]) -> anyhow::Result<Self> {
+		anyhow::ensure!(nal.len() >= 4, "SPS NAL too short");
+		let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
+		let sps = h264_parser::Sps::parse(&rbsp).context("failed to parse SPS")?;
+		Ok(Self {
+			profile: sps.profile_idc,
+			constraints: pack_constraint_flags(&sps),
+			level: sps.level_idc,
+			coded_width: sps.width,
+			coded_height: sps.height,
+		})
+	}
+}
+
+/// Parsed AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2).
+///
+/// Just the codec-config fields that the hang catalog records. The original
+/// avcC bytes are still what gets stored as the catalog `description`; this
+/// struct is for the field extraction.
+#[derive(Debug, Clone)]
+pub struct Avcc {
+	pub profile: u8,
+	pub constraints: u8,
+	pub level: u8,
+	/// NALU length size in bytes (typically 4).
+	pub length_size: usize,
+	/// Resolution from the embedded SPS, if one was present and parseable.
+	pub coded_width: Option<u32>,
+	pub coded_height: Option<u32>,
+}
+
+impl Avcc {
+	/// Parse an AVCDecoderConfigurationRecord buffer.
+	pub fn parse(avcc: &[u8]) -> anyhow::Result<Self> {
+		anyhow::ensure!(avcc.len() >= 6, "AVCDecoderConfigurationRecord too short");
+
+		let profile = avcc[1];
+		let constraints = avcc[2];
+		let level = avcc[3];
+		let length_size = (avcc[4] & 0x03) as usize + 1;
+		let num_sps = avcc[5] & 0x1f;
+
+		let (mut coded_width, mut coded_height) = (None, None);
+		if num_sps > 0 && avcc.len() >= 8 {
+			let sps_len = u16::from_be_bytes([avcc[6], avcc[7]]) as usize;
+			let sps_start = 8;
+			let sps_end = sps_start + sps_len;
+			if sps_end <= avcc.len()
+				&& sps_len > 1
+				&& let Ok(sps) = Sps::parse(&avcc[sps_start..sps_end])
+			{
+				coded_width = Some(sps.coded_width);
+				coded_height = Some(sps.coded_height);
+			}
+		}
+
+		Ok(Self {
+			profile,
+			constraints,
+			level,
+			length_size,
+			coded_width,
+			coded_height,
+		})
+	}
+}
+
+fn pack_constraint_flags(sps: &h264_parser::Sps) -> u8 {
+	((sps.constraint_set0_flag as u8) << 7)
+		| ((sps.constraint_set1_flag as u8) << 6)
+		| ((sps.constraint_set2_flag as u8) << 5)
+		| ((sps.constraint_set3_flag as u8) << 4)
+		| ((sps.constraint_set4_flag as u8) << 3)
+		| ((sps.constraint_set5_flag as u8) << 2)
+}
+
+/// Build an AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2) from a
+/// single SPS and PPS NAL.
+pub fn build_avcc(sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
+	anyhow::ensure!(
+		sps_nal.len() <= u16::MAX as usize,
+		"SPS too large for avcC length field ({} > {})",
+		sps_nal.len(),
+		u16::MAX
+	);
+	anyhow::ensure!(
+		pps_nal.len() <= u16::MAX as usize,
+		"PPS too large for avcC length field ({} > {})",
+		pps_nal.len(),
+		u16::MAX
+	);
+	anyhow::ensure!(sps_nal.len() >= 4, "SPS NAL too short");
+
+	let profile_idc = sps_nal[1];
+	let constraints = sps_nal[2];
+	let level_idc = sps_nal[3];
+
+	let mut out = BytesMut::with_capacity(11 + sps_nal.len() + pps_nal.len());
+	out.put_u8(1); // configurationVersion
+	out.put_u8(profile_idc);
+	out.put_u8(constraints);
+	out.put_u8(level_idc);
+	out.put_u8(0xff); // reserved (6 bits) | lengthSizeMinusOne (2 bits = 3)
+	out.put_u8(0xe1); // reserved (3 bits) | numOfSequenceParameterSets (5 bits = 1)
+	out.put_u16(sps_nal.len() as u16);
+	out.put_slice(sps_nal);
+	out.put_u8(1); // numOfPictureParameterSets
+	out.put_u16(pps_nal.len() as u16);
+	out.put_slice(pps_nal);
+	Ok(out.freeze())
+}
+
 /// Transform H.264 frames from Annex-B (inline SPS/PPS, "avc3") to
 /// length-prefixed NALU (out-of-band AVCDecoderConfigurationRecord, "avc1").
 ///
@@ -126,42 +254,6 @@ impl Avc1 {
 		self.avcc = Some(build_avcc(sps, pps)?);
 		Ok(())
 	}
-}
-
-/// Build an AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2) from a
-/// single SPS and PPS NAL.
-fn build_avcc(sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
-	anyhow::ensure!(
-		sps_nal.len() <= u16::MAX as usize,
-		"SPS too large for avcC length field ({} > {})",
-		sps_nal.len(),
-		u16::MAX
-	);
-	anyhow::ensure!(
-		pps_nal.len() <= u16::MAX as usize,
-		"PPS too large for avcC length field ({} > {})",
-		pps_nal.len(),
-		u16::MAX
-	);
-	anyhow::ensure!(sps_nal.len() >= 4, "SPS NAL too short");
-
-	let profile_idc = sps_nal[1];
-	let constraints = sps_nal[2];
-	let level_idc = sps_nal[3];
-
-	let mut out = BytesMut::with_capacity(11 + sps_nal.len() + pps_nal.len());
-	out.put_u8(1); // configurationVersion
-	out.put_u8(profile_idc);
-	out.put_u8(constraints);
-	out.put_u8(level_idc);
-	out.put_u8(0xff); // reserved (6 bits) | lengthSizeMinusOne (2 bits = 3)
-	out.put_u8(0xe1); // reserved (3 bits) | numOfSequenceParameterSets (5 bits = 1)
-	out.put_u16(sps_nal.len() as u16);
-	out.put_slice(sps_nal);
-	out.put_u8(1); // numOfPictureParameterSets
-	out.put_u16(pps_nal.len() as u16);
-	out.put_slice(pps_nal);
-	Ok(out.freeze())
 }
 
 #[cfg(test)]

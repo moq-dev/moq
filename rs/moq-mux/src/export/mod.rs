@@ -1,22 +1,24 @@
 //! Subscribe to a moq broadcast and decode media frames.
 //!
 //! - [`Fmp4`] subscribes to a broadcast, decodes every track via
-//!   [`Consumer<Hang>`](crate::container::Consumer), and yields a single fMP4 / CMAF byte
+//!   a per-rendition export source, and yields a single fMP4 / CMAF byte
 //!   stream, the merged init segment followed by moof+mdat fragments in
 //!   timestamp order across tracks.
 //! - [`Mkv`] does the same but yields a Matroska / WebM byte stream: EBML
 //!   header + unknown-size Segment + Cluster fragments.
 //!
 //! Codec-shape conversion for Annex-B sources is handled by
-//! [`crate::transform`], which both exporters compose internally.
+//! [`crate::codec`], which both exporters compose internally.
 
 use std::task::Poll;
 
 mod fmp4;
 mod mkv;
+mod source;
 
 pub use fmp4::Fmp4;
 pub use mkv::Mkv;
+pub(super) use source::ExportSource;
 
 #[cfg(test)]
 mod test;

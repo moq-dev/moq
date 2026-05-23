@@ -1,6 +1,8 @@
 use std::task::Poll;
 
 use bytes::Bytes;
+use hang::catalog::{AudioCodec, AudioConfig, VideoCodec, VideoConfig};
+use mp4_atom::Atom;
 
 use crate::container::{Container, Frame, Timestamp};
 
@@ -39,6 +41,9 @@ pub enum Error {
 
 	#[error("multiple tracks in moov, use Trak instead")]
 	MultipleTracks,
+
+	#[error("can't synthesize CMAF init for {0}")]
+	UnsupportedSynthesis(String),
 }
 
 /// CMAF container: encodes/decodes a single track's moof+mdat fragments.
@@ -170,14 +175,35 @@ pub(crate) fn encode(
 	timescale: u64,
 	track_id: u32,
 ) -> Result<(), Error> {
-	use mp4_atom::Encode;
-
 	if frames.is_empty() {
 		return Ok(());
 	}
 
-	let dts = (frames[0].timestamp.as_micros() * timescale as u128 / 1_000_000) as u64;
 	let sequence_number = group.frame_count() as u32;
+	let bytes = encode_fragment(track_id, timescale, sequence_number, frames)?;
+	let mut writer = group.create_frame(bytes.len().into())?;
+	writer.write(bytes)?;
+	writer.finish()?;
+
+	Ok(())
+}
+
+/// Encode a single-traf moof+mdat fragment from a sequence of frames.
+///
+/// Performs the two-pass encoding required by ISO/IEC 14496-12: encode once
+/// to learn the moof size, then again with `trun.data_offset` pointing past
+/// the moof and mdat header. The DTS of the first frame is computed at the
+/// caller-supplied `timescale`.
+///
+/// Returns an empty `Bytes` when `frames` is empty.
+pub fn encode_fragment(track_id: u32, timescale: u64, sequence_number: u32, frames: &[Frame]) -> Result<Bytes, Error> {
+	use mp4_atom::Encode;
+
+	if frames.is_empty() {
+		return Ok(Bytes::new());
+	}
+
+	let dts = (frames[0].timestamp.as_micros() * timescale as u128 / 1_000_000) as u64;
 
 	let entries: Vec<_> = frames
 		.iter()
@@ -211,21 +237,172 @@ pub(crate) fn encode(
 		}],
 	};
 
-	// First pass: calculate moof size
+	// First pass to learn the moof size.
 	let mut buf = Vec::new();
 	build_moof(0).encode(&mut buf)?;
 	let moof_size = buf.len();
 
-	// Second pass: set data_offset to point past moof + mdat header (8 bytes)
+	// Second pass with data_offset = moof_size + 8 (mdat header).
 	buf.clear();
 	build_moof((moof_size + 8) as i32).encode(&mut buf)?;
 
 	let mdat = mp4_atom::Mdat { data: mdat_data };
 	mdat.encode(&mut buf)?;
 
-	let mut writer = group.create_frame(buf.len().into())?;
-	writer.write(Bytes::from(buf))?;
-	writer.finish()?;
+	Ok(Bytes::from(buf))
+}
 
-	Ok(())
+/// Synthesize a CMAF `Trak` for a video rendition that has no init segment.
+///
+/// Used by the fMP4 exporter when its source is a `Container::Legacy` track
+/// (Avc3/Hev1/etc. importers that publish raw codec bitstreams). The codec's
+/// out-of-band configuration record (`description`) must be available, e.g.
+/// because the Avc1 / Hvc1 transform has finished building it from inline
+/// parameter sets.
+pub fn synthesize_video_trak(
+	track_id: u32,
+	timescale: u64,
+	config: &VideoConfig,
+	description: &[u8],
+) -> Result<mp4_atom::Trak, Error> {
+	let width = config.coded_width.unwrap_or(0) as u16;
+	let height = config.coded_height.unwrap_or(0) as u16;
+	let visual = mp4_atom::Visual {
+		data_reference_index: 1,
+		width,
+		height,
+		..Default::default()
+	};
+
+	let sample_entry = match &config.codec {
+		VideoCodec::H264(_) => {
+			let mut cursor = std::io::Cursor::new(description);
+			let avcc = mp4_atom::Avcc::decode_body(&mut cursor).map_err(Error::Mp4)?;
+			mp4_atom::Codec::from(mp4_atom::Avc1 {
+				visual,
+				avcc,
+				..Default::default()
+			})
+		}
+		VideoCodec::H265(h265) => {
+			let mut cursor = std::io::Cursor::new(description);
+			let hvcc = mp4_atom::Hvcc::decode_body(&mut cursor).map_err(Error::Mp4)?;
+			// `in_band` (catalog) ↔ hev1 sample entry; otherwise hvc1.
+			if h265.in_band {
+				mp4_atom::Codec::from(mp4_atom::Hev1 {
+					visual,
+					hvcc,
+					..Default::default()
+				})
+			} else {
+				mp4_atom::Codec::from(mp4_atom::Hvc1 {
+					visual,
+					hvcc,
+					..Default::default()
+				})
+			}
+		}
+		other => return Err(Error::UnsupportedSynthesis(format!("video codec {:?}", other))),
+	};
+
+	Ok(build_video_trak(track_id, timescale, sample_entry, width, height))
+}
+
+/// Synthesize a CMAF `Trak` for an audio rendition that has no init segment.
+pub fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &AudioConfig) -> Result<mp4_atom::Trak, Error> {
+	let audio = mp4_atom::Audio {
+		data_reference_index: 1,
+		channel_count: config.channel_count as u16,
+		sample_size: 16,
+		sample_rate: mp4_atom::FixedPoint::from(config.sample_rate as u16),
+	};
+
+	let sample_entry = match &config.codec {
+		AudioCodec::Opus => mp4_atom::Codec::from(mp4_atom::Opus {
+			audio,
+			dops: mp4_atom::Dops {
+				output_channel_count: config.channel_count as u8,
+				pre_skip: 0,
+				input_sample_rate: config.sample_rate,
+				output_gain: 0,
+			},
+			btrt: None,
+		}),
+		other => return Err(Error::UnsupportedSynthesis(format!("audio codec {:?}", other))),
+	};
+
+	Ok(build_audio_trak(track_id, timescale, sample_entry))
+}
+
+fn build_video_trak(
+	track_id: u32,
+	timescale: u64,
+	sample_entry: mp4_atom::Codec,
+	width: u16,
+	height: u16,
+) -> mp4_atom::Trak {
+	mp4_atom::Trak {
+		tkhd: mp4_atom::Tkhd {
+			track_id,
+			enabled: true,
+			width: mp4_atom::FixedPoint::from(width),
+			height: mp4_atom::FixedPoint::from(height),
+			..Default::default()
+		},
+		mdia: build_mdia(timescale, b"vide", true, sample_entry),
+		..Default::default()
+	}
+}
+
+fn build_audio_trak(track_id: u32, timescale: u64, sample_entry: mp4_atom::Codec) -> mp4_atom::Trak {
+	mp4_atom::Trak {
+		tkhd: mp4_atom::Tkhd {
+			track_id,
+			enabled: true,
+			..Default::default()
+		},
+		mdia: build_mdia(timescale, b"soun", false, sample_entry),
+		..Default::default()
+	}
+}
+
+fn build_mdia(timescale: u64, handler: &[u8; 4], is_video: bool, sample_entry: mp4_atom::Codec) -> mp4_atom::Mdia {
+	mp4_atom::Mdia {
+		mdhd: mp4_atom::Mdhd {
+			timescale: timescale as u32,
+			..Default::default()
+		},
+		hdlr: mp4_atom::Hdlr {
+			handler: mp4_atom::FourCC::new(handler),
+			name: String::new(),
+		},
+		minf: mp4_atom::Minf {
+			vmhd: is_video.then(mp4_atom::Vmhd::default),
+			smhd: (!is_video).then(mp4_atom::Smhd::default),
+			dinf: mp4_atom::Dinf {
+				dref: mp4_atom::Dref {
+					urls: vec![mp4_atom::Url::default()],
+				},
+			},
+			stbl: mp4_atom::Stbl {
+				stsd: mp4_atom::Stsd {
+					codecs: vec![sample_entry],
+				},
+				..Default::default()
+			},
+			..Default::default()
+		},
+	}
+}
+
+/// Pick a reasonable timescale for a Legacy video rendition.
+///
+/// Used by the fMP4 exporter when synthesizing an init segment for a track
+/// that has no catalog-supplied timescale.
+pub fn legacy_video_timescale(config: &VideoConfig) -> u64 {
+	if let Some(fps) = config.framerate {
+		(fps * 1000.0) as u64
+	} else {
+		90000
+	}
 }

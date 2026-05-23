@@ -10,10 +10,9 @@ use webm_iterable::matroska_spec::{Master, MatroskaSpec};
 use webm_iterable::{WebmWriter, WriteOptions};
 
 use crate::catalog::CatalogFormat;
-use crate::container::{Consumer, Frame, Hang};
-use crate::transform::{Avc1, Hvc1};
+use crate::container::Frame;
 
-use super::CatalogSource;
+use super::{CatalogSource, ExportSource};
 
 /// Matroska TimestampScale: 1 ms (in nanoseconds).
 const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
@@ -21,7 +20,7 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// Subscribe to a moq broadcast and produce a single Matroska / WebM byte stream.
 ///
 /// Built from a [`moq_net::BroadcastConsumer`], `Mkv` subscribes to the hang catalog,
-/// (un)subscribes per-rendition tracks, decodes them via [`Consumer<Hang>`], and
+/// (un)subscribes per-rendition tracks, decodes them via a per-track source, and
 /// re-encodes everything as EBML + Segment + Tracks + Cluster/SimpleBlock tags ready
 /// for any Matroska-aware consumer (ffplay, libwebm, browser MSE for WebM).
 ///
@@ -36,8 +35,8 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// ## Avc3 / Hev1 sources
 ///
 /// `Mkv` accepts Annex-B sources (`H264 { inline: true }`, `H265 { in_band: true }`,
-/// catalog `description` empty) by attaching a [`crate::transform::Avc1`] /
-/// [`crate::transform::Hvc1`] to each affected track. The transform caches
+/// catalog `description` empty) by attaching a [`crate::codec::Avc1`] /
+/// [`crate::codec::Hvc1`] to each affected track. The transform caches
 /// parameter sets, builds the out-of-band `AVCDecoderConfigurationRecord` /
 /// `HEVCDecoderConfigurationRecord`, and length-prefixes sample NALs. Header
 /// emission is deferred until every such track has produced its codec config
@@ -64,43 +63,17 @@ pub struct Mkv {
 }
 
 struct MkvTrack {
-	consumer: Consumer<Hang>,
+	source: ExportSource,
 	pending: Option<Frame>,
 	finished: bool,
 	track_number: u64,
 	kind: TrackKind,
-	/// Optional per-codec transform. Wraps the sample bytes into the shape
-	/// MKV expects (length-prefixed for H.264/H.265) and builds avcC/hvcC
-	/// from inline parameter sets for Avc3/Hev1 sources.
-	video_transform: Option<VideoTransform>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TrackKind {
 	Video,
 	Audio,
-}
-
-enum VideoTransform {
-	Avc1(Avc1),
-	Hvc1(Hvc1),
-}
-
-impl VideoTransform {
-	/// Returns the codec config record (avcC / hvcC) if available.
-	fn codec_private(&self) -> Option<&Bytes> {
-		match self {
-			VideoTransform::Avc1(t) => t.avcc(),
-			VideoTransform::Hvc1(t) => t.hvcc(),
-		}
-	}
-
-	fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
-		match self {
-			VideoTransform::Avc1(t) => t.transform(payload),
-			VideoTransform::Hvc1(t) => t.transform(payload),
-		}
-	}
 }
 
 struct ClusterBuilder {
@@ -200,7 +173,7 @@ impl Mkv {
 		})
 	}
 
-	/// Set the maximum buffering latency for each per-track [`Consumer`].
+	/// Set the maximum buffering latency for each per-track source.
 	pub fn with_latency(mut self, latency: Duration) -> Self {
 		self.latency = latency;
 		self
@@ -239,50 +212,34 @@ impl Mkv {
 			}
 		}
 
-		// 2. Pull frames from each track into `pending`, transforming codec
-		// shape (Annex-B → length-prefixed) at pull time so downstream code
-		// never sees a raw Avc3/Hev1 payload.
+		// 2. Pull frames from each track into `pending`. ExportSource has
+		// already transformed Annex-B payloads (Avc3/Hev1) into length-prefixed
+		// form and absorbed any parameter-only frames before returning.
 		//
-		// Pre-header: for video tracks whose transmuxer hasn't yet built its
-		// codec config (Avc3/Hev1 source, no SPS/PPS seen), drop transformed
-		// slices instead of parking them. A receiver who subscribed mid-GOP
-		// can't render those bytes without the header anyway, and parking
-		// them would stop us from polling for the next SPS/PPS-bearing frame.
+		// Pre-header: drop slices that arrived before this track's codec config
+		// is ready. A receiver who subscribed mid-GOP can't render those bytes
+		// without the header anyway, and parking them would stop us from
+		// polling for the next SPS/PPS-bearing frame.
 		let waiting_for_header = !self.header_emitted;
 		for track in self.tracks.values_mut() {
 			if track.pending.is_some() || track.finished {
 				continue;
 			}
 			loop {
-				match track.consumer.poll_read(waiter) {
+				match track.source.poll_read(waiter) {
 					Poll::Ready(Ok(Some(frame))) => {
-						let transformed = match &mut track.video_transform {
-							// Parameter-only frame: transform absorbed it; pull the next one.
-							Some(t) => t
-								.transform(frame.payload.clone())?
-								.map(|payload| Frame { payload, ..frame }),
-							None => Some(frame),
-						};
-						if let Some(f) = transformed {
-							let still_no_config = waiting_for_header
-								&& track.kind == TrackKind::Video
-								&& track
-									.video_transform
-									.as_ref()
-									.is_some_and(|t| t.codec_private().is_none());
-							if still_no_config {
-								// Drop this slice and keep polling for SPS/PPS.
-								continue;
-							}
-							track.pending = Some(f);
-							break;
+						if waiting_for_header && !track.source.header_ready() {
+							// Drop this slice and keep polling for SPS/PPS.
+							continue;
 						}
+						track.pending = Some(frame);
+						break;
 					}
 					Poll::Ready(Ok(None)) => {
 						track.finished = true;
 						break;
 					}
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+					Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
 					Poll::Pending => break,
 				}
 			}
@@ -374,17 +331,15 @@ impl Mkv {
 				continue;
 			}
 			ensure_legacy(&config.container, "video", name)?;
-			let consumer = subscribe(&self.broadcast, name, &config.container, self.latency)?;
-			let transform = build_video_transform(config)?;
+			let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
 			self.tracks.insert(
 				name.clone(),
 				MkvTrack {
-					consumer,
+					source,
 					pending: None,
 					finished: false,
 					track_number: next_track_number,
 					kind: TrackKind::Video,
-					video_transform: transform,
 				},
 			);
 			next_track_number += 1;
@@ -395,16 +350,15 @@ impl Mkv {
 				continue;
 			}
 			ensure_legacy(&config.container, "audio", name)?;
-			let consumer = subscribe(&self.broadcast, name, &config.container, self.latency)?;
+			let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
 			self.tracks.insert(
 				name.clone(),
 				MkvTrack {
-					consumer,
+					source,
 					pending: None,
 					finished: false,
 					track_number: next_track_number,
 					kind: TrackKind::Audio,
-					video_transform: None,
 				},
 			);
 			next_track_number += 1;
@@ -415,19 +369,10 @@ impl Mkv {
 		Ok(())
 	}
 
-	/// Header is ready when every video track has its codec config — either
-	/// supplied in the catalog or built by the transform.
+	/// Header is ready when every track's [`ExportSource`] has resolved its
+	/// codec config — from the catalog `description` or built by the transform.
 	fn header_ready(&self) -> bool {
-		for track in self.tracks.values() {
-			if track.kind != TrackKind::Video {
-				continue;
-			}
-			match &track.video_transform {
-				Some(t) if t.codec_private().is_none() => return false,
-				_ => {}
-			}
-		}
-		true
+		self.tracks.values().all(|t| t.source.header_ready())
 	}
 
 	fn build_header(&self) -> anyhow::Result<Bytes> {
@@ -452,7 +397,7 @@ impl Mkv {
 			entries.push(build_video_track_entry(
 				track.track_number,
 				config,
-				track.video_transform.as_ref(),
+				track.source.description(),
 			)?);
 		}
 		for (name, config) in catalog.audio.renditions.iter() {
@@ -553,61 +498,25 @@ fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Resul
 	}
 }
 
-fn subscribe(
-	broadcast: &moq_net::BroadcastConsumer,
-	name: &str,
-	container: &Container,
-	latency: Duration,
-) -> Result<Consumer<Hang>, crate::Error> {
-	let media: Hang = container.try_into()?;
-	let track = broadcast.subscribe_track(&moq_net::Track::new(name.to_string()))?;
-	Ok(Consumer::new(track, media).with_latency(latency))
-}
-
-/// Build a video transform for the given catalog config, or None if no
-/// transform is needed (e.g. VP8/VP9/AV1, or H.264/H.265 with an existing avcC/hvcC).
-fn build_video_transform(config: &VideoConfig) -> anyhow::Result<Option<VideoTransform>> {
-	// A non-empty description means the source is already avc1/hvc1 (out-of-band
-	// codec config + length-prefixed NALs); no transform needed.
-	let needs_transform = config.description.as_ref().map(|d| d.is_empty()).unwrap_or(true);
-	if !needs_transform {
-		return Ok(None);
-	}
-	match &config.codec {
-		VideoCodec::H264(_) => Ok(Some(VideoTransform::Avc1(Avc1::new()))),
-		VideoCodec::H265(_) => Ok(Some(VideoTransform::Hvc1(Hvc1::new()))),
-		_ => Ok(None),
-	}
-}
-
 fn build_video_track_entry(
 	track_number: u64,
 	config: &VideoConfig,
-	transform: Option<&VideoTransform>,
+	description: Option<&Bytes>,
 ) -> anyhow::Result<MatroskaSpec> {
-	// For Avc3/Hev1 sources the avcC/hvcC is synthesized by the transform;
-	// for avc1/hvc1 sources it lives in the catalog description.
-	let codec_private_from_transform = transform.and_then(|t| t.codec_private().map(|b| b.to_vec()));
-	let codec_private_from_description = config
-		.description
-		.as_ref()
-		.filter(|b| !b.is_empty())
-		.map(|b| b.to_vec());
+	// The description came from either the catalog (avc1/hvc1 sources) or
+	// the codec transform (Avc3/Hev1 sources synthesizing it from inline params).
+	let codec_private = description.map(|b| b.to_vec());
 
 	let (codec_id, codec_private) = match &config.codec {
 		VideoCodec::VP8 => ("V_VP8", None),
 		VideoCodec::VP9(_) => ("V_VP9", None),
-		VideoCodec::AV1(_) => ("V_AV1", codec_private_from_description),
+		VideoCodec::AV1(_) => ("V_AV1", codec_private),
 		VideoCodec::H264(_) => {
-			let avcc = codec_private_from_transform
-				.or(codec_private_from_description)
-				.context("H.264 track missing AVCDecoderConfigurationRecord")?;
+			let avcc = codec_private.context("H.264 track missing AVCDecoderConfigurationRecord")?;
 			("V_MPEG4/ISO/AVC", Some(avcc))
 		}
 		VideoCodec::H265(_) => {
-			let hvcc = codec_private_from_transform
-				.or(codec_private_from_description)
-				.context("H.265 track missing HEVCDecoderConfigurationRecord")?;
+			let hvcc = codec_private.context("H.265 track missing HEVCDecoderConfigurationRecord")?;
 			("V_MPEGH/ISO/HEVC", Some(hvcc))
 		}
 		other => anyhow::bail!("MKV export does not support video codec {:?}", other),
@@ -641,7 +550,14 @@ fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -> anyhow::R
 	let (codec_id, codec_private) = match &config.codec {
 		AudioCodec::Opus => (
 			"A_OPUS",
-			Some(build_opus_head(config.sample_rate, config.channel_count)),
+			Some(
+				crate::codec::opus::OpusConfig {
+					sample_rate: config.sample_rate,
+					channel_count: config.channel_count,
+				}
+				.encode()
+				.to_vec(),
+			),
 		),
 		AudioCodec::AAC(_) => (
 			"A_AAC",
@@ -669,19 +585,6 @@ fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -> anyhow::R
 	];
 
 	Ok(MatroskaSpec::TrackEntry(Master::Full(entry)))
-}
-
-/// Construct a minimal OpusHead packet (RFC 7845 §5.1).
-fn build_opus_head(sample_rate: u32, channels: u32) -> Vec<u8> {
-	let mut head = Vec::with_capacity(19);
-	head.extend_from_slice(b"OpusHead");
-	head.push(1); // version
-	head.push(channels as u8);
-	head.extend_from_slice(&0u16.to_le_bytes()); // pre-skip
-	head.extend_from_slice(&sample_rate.to_le_bytes());
-	head.extend_from_slice(&0i16.to_le_bytes()); // output gain
-	head.push(0); // channel mapping family (0 = mono/stereo)
-	head
 }
 
 /// EBML tag IDs we hand-encode.
