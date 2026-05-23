@@ -2,14 +2,17 @@ name: release-brew
 
 # Renders the matching Homebrew formula template from
 # .github/homebrew/Formula/ with the released version + tarball sha256s,
-# then pushes the rendered formula to moq-dev/homebrew-tap.
+# then pushes the rendered formula to moq-dev/homebrew-moq (which Homebrew
+# exposes as the `moq-dev/moq` tap).
 #
 # Triggered after a per-crate release workflow finishes successfully, so
 # the GitHub Release assets are guaranteed to exist by the time we
 # download them.
 #
-# Requires repository secret HOMEBREW_TAP_TOKEN: a PAT with `contents:
-# write` on moq-dev/homebrew-tap.
+# Authenticates as the moq-bot GitHub App. The APP_ID and APP_PRIVATE_KEY
+# repo secrets are already wired (see release-swift.yml). The minted
+# installation token is scoped to moq-dev/homebrew-moq and expires in 1
+# hour.
 
 on:
   workflow_run:
@@ -27,7 +30,7 @@ permissions:
 
 jobs:
   publish:
-    name: Publish formula to homebrew-tap
+    name: Publish formula to homebrew-moq
     if: ${{ github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'moq-') }}
     runs-on: ubuntu-latest
 
@@ -99,19 +102,33 @@ jobs:
           echo "--- Rendered formula ---"
           cat "rendered/${CRATE}.rb"
 
-      - name: Checkout homebrew-tap
+      - name: Generate moq-bot token
+        uses: actions/create-github-app-token@v3
+        id: token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: moq-dev
+          repositories: homebrew-moq
+          permission-contents: write
+
+      - name: Checkout homebrew-moq
         uses: actions/checkout@v6
         with:
-          repository: moq-dev/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-tap
+          repository: moq-dev/homebrew-moq
+          token: ${{ steps.token.outputs.token }}
+          path: homebrew-moq
 
       - name: Commit and push formula
         env:
           CRATE: ${{ steps.parse.outputs.crate }}
           VERSION: ${{ steps.parse.outputs.version }}
+          GIT_AUTHOR_NAME: moq-bot
+          GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: moq-bot
+          GIT_COMMITTER_EMAIL: moq-bot[bot]@users.noreply.github.com
         run: |
-          cd homebrew-tap
+          cd homebrew-moq
           mkdir -p Formula
           cp "../rendered/${CRATE}.rb" "Formula/${CRATE}.rb"
 
@@ -123,12 +140,12 @@ jobs:
           Homebrew formulae for the [moq](https://github.com/moq-dev/moq) workspace.
 
           ```bash
-          brew tap moq-dev/tap
-          brew install moq-dev/tap/moq-relay
-          brew install moq-dev/tap/moq-cli
-          brew install moq-dev/tap/moq-clock
-          brew install moq-dev/tap/moq-token-cli
-          brew install moq-dev/tap/moq-gst
+          brew tap moq-dev/moq
+          brew install moq-dev/moq/moq-relay
+          brew install moq-dev/moq/moq-cli
+          brew install moq-dev/moq/moq-clock
+          brew install moq-dev/moq/moq-token-cli
+          brew install moq-dev/moq/moq-gst
           ```
 
           Formulae here are generated automatically by the
@@ -138,10 +155,7 @@ jobs:
           EOF
           fi
 
-          git config user.name "moq-release-bot"
-          git config user.email "noreply@moq.dev"
-
-          if git diff --quiet; then
+          if git diff --quiet && [[ -z "$(git status --porcelain)" ]]; then
             echo "No changes to commit (formula already up to date)."
             exit 0
           fi
