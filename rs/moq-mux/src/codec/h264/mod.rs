@@ -3,11 +3,15 @@
 //! Parses SPS NAL units and AVCDecoderConfigurationRecord blobs into
 //! catalog-ready fields. The [`Avc1`] transmuxer rewrites Annex-B input
 //! (inline SPS/PPS) as length-prefixed NALU + out-of-band avcC, which is
-//! what every CMAF and MKV consumer expects. [`Import`] is the importer;
-//! it auto-detects either wire shape from the leading bytes.
+//! what every CMAF and MKV consumer expects. [`Export`] subscribes to a
+//! catalog-narrowed H.264 rendition and emits an Annex-B elementary
+//! stream; [`Import`] is the importer (auto-detects either wire shape
+//! from the leading bytes).
 
+mod export;
 mod import;
 
+pub use export::*;
 pub use import::*;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -188,6 +192,49 @@ pub(crate) fn build_avcc(sps_nal: &[u8], pps_nal: &[u8]) -> Result<Bytes> {
 	out.put_u16(pps_nal.len() as u16);
 	out.put_slice(pps_nal);
 	Ok(out.freeze())
+}
+
+/// SPS and PPS NAL units extracted from an avcC.
+#[derive(Debug, Clone)]
+pub struct AvccParamSets {
+	/// NALU length size in bytes (typically 4).
+	pub length_size: usize,
+	pub sps: Vec<Bytes>,
+	pub pps: Vec<Bytes>,
+}
+
+/// Pull the SPS and PPS NAL units out of an AVCDecoderConfigurationRecord.
+pub fn parse_avcc_param_sets(avcc: &[u8]) -> anyhow::Result<AvccParamSets> {
+	anyhow::ensure!(avcc.len() >= 7, "avcC too short");
+	let length_size = (avcc[4] & 0x03) as usize + 1;
+	let num_sps = (avcc[5] & 0x1f) as usize;
+
+	let mut pos = 6;
+	let mut sps = Vec::with_capacity(num_sps);
+	for _ in 0..num_sps {
+		anyhow::ensure!(avcc.len() >= pos + 2, "avcC truncated in SPS length");
+		let len = u16::from_be_bytes([avcc[pos], avcc[pos + 1]]) as usize;
+		pos += 2;
+		anyhow::ensure!(avcc.len() >= pos + len, "avcC truncated in SPS payload");
+		sps.push(Bytes::copy_from_slice(&avcc[pos..pos + len]));
+		pos += len;
+	}
+
+	anyhow::ensure!(avcc.len() > pos, "avcC truncated in PPS count");
+	let num_pps = avcc[pos] as usize;
+	pos += 1;
+
+	let mut pps = Vec::with_capacity(num_pps);
+	for _ in 0..num_pps {
+		anyhow::ensure!(avcc.len() >= pos + 2, "avcC truncated in PPS length");
+		let len = u16::from_be_bytes([avcc[pos], avcc[pos + 1]]) as usize;
+		pos += 2;
+		anyhow::ensure!(avcc.len() >= pos + len, "avcC truncated in PPS payload");
+		pps.push(Bytes::copy_from_slice(&avcc[pos..pos + len]));
+		pos += len;
+	}
+
+	Ok(AvccParamSets { length_size, sps, pps })
 }
 
 /// Transform H.264 frames from Annex-B (inline SPS/PPS, "avc3") to

@@ -19,44 +19,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
 
-use crate::catalog::CatalogFormat;
 use crate::catalog::hang::Container as HangContainer;
 use crate::codec::h264::Avc1;
 use crate::codec::h265::Hvc1;
 use crate::container::{Consumer, Frame};
-
-/// Source for the catalog stream backing an exporter.
-///
-/// Both variants expose the same [`hang::Catalog`] shape; the MSF variant
-/// converts on the fly so the rest of the pipeline only deals with hang types.
-pub(crate) enum CatalogSource {
-	/// The hang catalog track (track name `catalog.json`, JSON payload).
-	Hang(crate::catalog::hang::Consumer),
-	/// The MSF catalog track (track name `catalog`, MSF JSON payload converted to hang).
-	Msf(crate::catalog::msf::Consumer),
-}
-
-impl CatalogSource {
-	pub(crate) fn new(broadcast: &moq_net::BroadcastConsumer, format: CatalogFormat) -> Result<Self, crate::Error> {
-		Ok(match format {
-			CatalogFormat::Hang => {
-				let track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
-				CatalogSource::Hang(crate::catalog::hang::Consumer::new(track))
-			}
-			CatalogFormat::Msf => {
-				let track = broadcast.subscribe_track(&moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
-				CatalogSource::Msf(crate::catalog::msf::Consumer::new(track))
-			}
-		})
-	}
-
-	pub(crate) fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<crate::Result<Option<hang::Catalog>>> {
-		match self {
-			Self::Hang(c) => c.poll_next(waiter).map_err(Into::into),
-			Self::Msf(c) => c.poll_next(waiter),
-		}
-	}
-}
 
 /// Per-track video transform that bridges between codec shapes.
 pub(crate) enum VideoTransform {
@@ -72,10 +38,10 @@ impl VideoTransform {
 		}
 	}
 
-	fn transform(&mut self, payload: Bytes) -> crate::Result<Option<Bytes>> {
+	fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
 		match self {
-			VideoTransform::Avc1(t) => Ok(t.transform(payload)?),
-			VideoTransform::Hvc1(t) => Ok(t.transform(payload)?),
+			VideoTransform::Avc1(t) => t.transform(payload),
+			VideoTransform::Hvc1(t) => t.transform(payload),
 		}
 	}
 }
@@ -110,6 +76,29 @@ impl ExportSource {
 		Ok(Self {
 			consumer,
 			transform,
+			description,
+		})
+	}
+
+	/// Subscribe to a video rendition without attaching any codec-shape
+	/// transform. Payloads pass through untouched (Annex-B stays Annex-B,
+	/// avc1 length-prefixed stays length-prefixed). The Annex-B exporter
+	/// uses this to keep parameter sets in-band.
+	pub fn for_video_raw(
+		broadcast: &moq_net::BroadcastConsumer,
+		name: &str,
+		config: &VideoConfig,
+		latency: Duration,
+	) -> Result<Self, crate::Error> {
+		let media: HangContainer = (&config.container).try_into()?;
+		let track = broadcast.subscribe_track(&moq_net::Track::new(name.to_string()))?;
+		let consumer = Consumer::new(track, media).with_latency(latency);
+
+		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
+
+		Ok(Self {
+			consumer,
+			transform: None,
 			description,
 		})
 	}
@@ -150,12 +139,12 @@ impl ExportSource {
 	/// Parameter-only frames (SPS/PPS-only inputs to the Avc3 transform) are
 	/// absorbed and the next frame is polled. Returns `Ready(None)` at
 	/// end-of-track.
-	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<crate::Result<Option<Frame>>> {
+	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
 		loop {
 			let frame = match self.consumer.poll_read(waiter) {
 				Poll::Ready(Ok(Some(f))) => f,
 				Poll::Ready(Ok(None)) => return Poll::Ready(Ok(None)),
-				Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+				Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
 				Poll::Pending => return Poll::Pending,
 			};
 

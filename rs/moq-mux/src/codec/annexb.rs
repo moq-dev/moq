@@ -1,19 +1,52 @@
-use bytes::{Buf, Bytes};
+use anyhow::{self};
+use bytes::{Buf, Bytes, BytesMut};
 
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
 
-/// Annex B parsing errors.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum Error {
-	#[error("missing Annex B start code")]
-	MissingStartCode,
+/// Convert a length-prefixed NALU payload (avc1 / hvc1 wire shape) to Annex-B,
+/// optionally prepending `prefix` bytes (typically VPS/SPS/PPS NAL units already
+/// in Annex-B form, for keyframe parameter-set injection).
+pub fn from_length_prefixed(payload: &[u8], length_size: usize, prefix: Option<&[u8]>) -> anyhow::Result<Bytes> {
+	anyhow::ensure!(
+		(1..=4).contains(&length_size),
+		"invalid avc1/hvc1 length size {length_size}"
+	);
 
-	#[error("invalid Annex B start code")]
-	InvalidStartCode,
+	let mut out = BytesMut::with_capacity(payload.len() + prefix.map(|p| p.len()).unwrap_or(0) + 16);
+	if let Some(p) = prefix {
+		out.extend_from_slice(p);
+	}
+
+	let mut pos = 0;
+	while pos < payload.len() {
+		anyhow::ensure!(payload.len() >= pos + length_size, "truncated NAL length prefix");
+		let mut len = 0usize;
+		for byte in &payload[pos..pos + length_size] {
+			len = (len << 8) | (*byte as usize);
+		}
+		pos += length_size;
+		anyhow::ensure!(payload.len() >= pos + len, "truncated NAL payload");
+		out.extend_from_slice(&START_CODE);
+		out.extend_from_slice(&payload[pos..pos + len]);
+		pos += len;
+	}
+
+	Ok(out.freeze())
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+/// Concatenate `start_code | nal` for every NAL in `nals` and freeze the
+/// result. Used to build a keyframe parameter-set prefix for an Annex-B
+/// elementary stream.
+pub fn build_prefix<'a, I: IntoIterator<Item = &'a Bytes>>(nals: I) -> Bytes {
+	let nals: Vec<&Bytes> = nals.into_iter().collect();
+	let total: usize = nals.iter().map(|n| n.len() + START_CODE.len()).sum();
+	let mut out = BytesMut::with_capacity(total);
+	for nal in nals {
+		out.extend_from_slice(&START_CODE);
+		out.extend_from_slice(nal);
+	}
+	out.freeze()
+}
 
 pub struct NalIterator<'a, T: Buf + AsRef<[u8]> + 'a> {
 	buf: &'a mut T,
@@ -27,7 +60,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> NalIterator<'a, T> {
 
 	/// Assume the buffer ends with a NAL unit and flush it.
 	/// This is more efficient because we cache the last "start" code position.
-	pub fn flush(self) -> Result<Option<Bytes>> {
+	pub fn flush(self) -> anyhow::Result<Option<Bytes>> {
 		let start = match self.start {
 			Some(start) => start,
 			None => {
@@ -46,7 +79,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> NalIterator<'a, T> {
 }
 
 impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for NalIterator<'a, T> {
-	type Item = Result<Bytes>;
+	type Item = anyhow::Result<Bytes>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		let start = match self.start {
@@ -67,22 +100,21 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for NalIterator<'a, T> {
 }
 
 // Return the size of the start code at the start of the buffer.
-pub fn after_start_code(b: &[u8]) -> Result<Option<usize>> {
+pub fn after_start_code(b: &[u8]) -> anyhow::Result<Option<usize>> {
 	if b.len() < 3 {
 		return Ok(None);
 	}
 
 	// NOTE: We have to check every byte, so the `find_start_code` optimization doesn't matter.
-	if b[0] != 0 || b[1] != 0 {
-		return Err(Error::MissingStartCode);
-	}
+	anyhow::ensure!(b[0] == 0, "missing Annex B start code");
+	anyhow::ensure!(b[1] == 0, "missing Annex B start code");
 
 	match b[2] {
 		0 if b.len() < 4 => Ok(None),
-		0 if b[3] != 1 => Err(Error::MissingStartCode),
+		0 if b[3] != 1 => anyhow::bail!("missing Annex B start code"),
 		0 => Ok(Some(4)),
 		1 => Ok(Some(3)),
-		_ => Err(Error::InvalidStartCode),
+		_ => anyhow::bail!("invalid Annex B start code"),
 	}
 }
 
