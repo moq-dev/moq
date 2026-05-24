@@ -74,7 +74,7 @@ enum Commands {
 
 	/// Verify a token, writing the payload to stdout.
 	Verify {
-		/// Path to the key file. Use `-` for stdin.
+		/// Path to the key file. Use `-` for stdin (requires `--in` to be a file).
 		#[arg(long)]
 		key: PathBuf,
 
