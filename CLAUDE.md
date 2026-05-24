@@ -122,7 +122,7 @@ match version {
 
 - Keep things brief and avoid comments if the code is self-explanatory. Reserve comments for the non-obvious WHY: a hidden constraint, a subtle invariant, a workaround for a specific bug, behavior that would surprise a reader.
 - Comments must reflect the **current** state of the code, not its history. Don't write "X no longer does Y" or "this used to cascade". Describe what the code does today, or delete the comment. Migration context belongs in commit messages and PR descriptions, where it ages with the change rather than rotting in the source.
-- When an LLM leaves a comment, append a short disclaimer like `// Written by Claude` at the end so readers know it wasn't human-authored.
+- When an LLM authors something, append a short disclaimer like `(Written by Claude)` so readers know it wasn't human-authored. Apply this to PR descriptions and PR comments (including replies on review threads), **not** to code comments or doc comments — markers in source rot alongside the code, and commit trailers already carry attribution.
 
 ## Tooling
 

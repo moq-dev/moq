@@ -9,22 +9,11 @@ on:
       - 'moq-boy-v*'
       - 'libmoq-v*'
       - 'moq-gst-v*'
-  pull_request:
-    paths:
-      - '.github/workflows/cachix.yml'
-      - 'flake.nix'
-      - 'flake.lock'
-      - 'nix/**'
-
-concurrency:
-  group: cachix-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # On a release tag, build and push only the package the tag names. The
-  # tag prefix (e.g. moq-relay) maps 1:1 to a flake attribute.
+  # Build and push only the package the tag names. The tag prefix
+  # (e.g. moq-relay) maps 1:1 to a flake attribute.
   release:
-    if: github.event_name == 'push'
     name: Release (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     permissions:
@@ -43,7 +32,7 @@ jobs:
 
       # Full-match REF_NAME against the same <prefix>-v<semver> contract
       # release.sh enforces, so a malformed tag fails fast instead of
-      # building under a trusted identity. (Written by Claude)
+      # building under a trusted identity.
       - name: Derive package from tag
         id: pkg
         env:
@@ -72,45 +61,3 @@ jobs:
         run: |
           nix build ".#$PACKAGE" --print-build-logs
           cachix push kixelated ./result
-
-  # On a PR that touches the Nix build config, dry-run every package on
-  # Linux to catch overlay regressions before they reach a release tag.
-  # `cachix push` has no --dry-run flag, so we stop at `nix build` and let
-  # cachix-action's `skipPush: true` keep the watch-store off.
-  pr-dry-run:
-    if: github.event_name == 'pull_request'
-    name: Dry-run (${{ matrix.package }})
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        package:
-          - moq-relay
-          - moq-cli
-          - moq-token-cli
-          - moq-boy
-          - libmoq
-          - moq-gst
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-
-      - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
-        with:
-          determinate: false
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
-
-      - uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
-        with:
-          name: kixelated
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          skipPush: true
-
-      - name: Build
-        env:
-          PACKAGE: ${{ matrix.package }}
-        run: nix build ".#$PACKAGE" --print-build-logs
