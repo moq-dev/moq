@@ -79,6 +79,13 @@ pub struct MoqAudioDecoderConfig {
 	pub output_sample_rate: Option<u32>,
 	/// `None` delivers samples at the codec's native channel count.
 	pub output_channels: Option<u32>,
+	/// Maximum buffering before skipping a stalled group, in
+	/// milliseconds. Same congestion-control knob as
+	/// [`MoqBroadcastConsumer::subscribe_media`](crate::consumer::MoqBroadcastConsumer::subscribe_media)'s
+	/// `max_latency_ms`: when a group stalls and a newer group is more
+	/// than this far ahead, the consumer skips. `None` keeps the
+	/// moq-mux default of zero (skip aggressively).
+	pub max_latency_ms: Option<u64>,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -237,6 +244,7 @@ impl MoqBroadcastConsumer {
 				output_format: config.output_format.into(),
 				output_sample_rate: config.output_sample_rate,
 				output_channels: config.output_channels,
+				max_latency: config.max_latency_ms.map(Duration::from_millis),
 			},
 		)?;
 
