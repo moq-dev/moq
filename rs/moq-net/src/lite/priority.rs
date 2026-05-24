@@ -1,5 +1,5 @@
 use std::{
-	cmp::Ordering,
+	cmp::{Ordering, Reverse},
 	collections::{BinaryHeap, HashMap},
 	sync::{Arc, Mutex},
 };
@@ -94,8 +94,12 @@ enum Location {
 struct PriorityState {
 	// Sorted vec for top 255 items (index 0 = highest priority)
 	vec: Vec<PriorityItem>,
-	// Binary heap for overflow items (all report u8::MAX)
-	overflow: BinaryHeap<PriorityItem>,
+	// Binary heap for overflow items (all report u8::MAX). Wrapped in `Reverse`
+	// because PriorityItem's Ord is itself reversed (higher priority sorts as
+	// less); BinaryHeap is a max-heap, so without the wrapper `pop()` would
+	// return the *lowest*-priority overflow item, not the highest. With the
+	// wrapper, `pop()` returns the next item that should be promoted into vec.
+	overflow: BinaryHeap<Reverse<PriorityItem>>,
 	// Track location and watch channel for each ID
 	indexes: HashMap<usize, (Location, watch::Sender<u8>)>,
 	next_id: usize,
@@ -152,6 +156,27 @@ impl PriorityState {
 		let id = item.id;
 
 		if self.vec.len() < MAX_VEC_SIZE {
+			// Note: Ord is reversed (higher priority = "less than"), so `top < item`
+			// means `top` has higher priority. If an overflow item outranks the one
+			// we're placing, swap them so the higher-priority item lands in vec.
+			// This case only arises via `set_priority`: a fresh insert can't reach
+			// here with non-empty overflow because the invariant "every overflow
+			// item has lower priority than every vec item" is maintained on insert.
+			if let Some(Reverse(top)) = self.overflow.peek()
+				&& *top < item
+			{
+				let Reverse(promoted) = self.overflow.pop().unwrap();
+				self.overflow.push(Reverse(item));
+				Self::update_location(&mut self.indexes, id, Location::Overflow);
+
+				let insert_pos = self.vec.binary_search(&promoted).unwrap_or_else(|pos| pos);
+				let promoted_id = promoted.id;
+				self.vec.insert(insert_pos, promoted);
+				Self::update_location(&mut self.indexes, promoted_id, Location::Vec(insert_pos));
+				self.update_indices_from(insert_pos + 1);
+				return;
+			}
+
 			let insert_pos = self.vec.binary_search(&item).unwrap_or_else(|pos| pos);
 			self.vec.insert(insert_pos, item);
 			Self::update_location(&mut self.indexes, id, Location::Vec(insert_pos));
@@ -163,7 +188,7 @@ impl PriorityState {
 		// so item > lowest_in_vec means item has lower priority than the tail.
 		let lowest_in_vec = self.vec.last().unwrap();
 		if item > *lowest_in_vec {
-			self.overflow.push(item);
+			self.overflow.push(Reverse(item));
 			Self::update_location(&mut self.indexes, id, Location::Overflow);
 			return;
 		}
@@ -171,7 +196,7 @@ impl PriorityState {
 		// Higher priority than the tail of vec: demote the tail into overflow.
 		let removed = self.vec.pop().unwrap();
 		Self::update_location(&mut self.indexes, removed.id, Location::Overflow);
-		self.overflow.push(removed);
+		self.overflow.push(Reverse(removed));
 
 		let insert_pos = self.vec.binary_search(&item).unwrap_or_else(|pos| pos);
 		self.vec.insert(insert_pos, item);
@@ -197,11 +222,11 @@ impl PriorityState {
 				// or a set_priority targets an item that has been demoted past index 254).
 				let mut found = None;
 				let drained: Vec<_> = self.overflow.drain().collect();
-				for entry in drained {
+				for Reverse(entry) in drained {
 					if entry.id == id && found.is_none() {
 						found = Some(entry);
 					} else {
-						self.overflow.push(entry);
+						self.overflow.push(Reverse(entry));
 					}
 				}
 				found.expect("item not found in overflow heap")
@@ -223,7 +248,7 @@ impl PriorityState {
 		// If we removed from vec, promote the highest-priority overflow item to backfill.
 		// The overflow item still has lower priority than every existing vec entry, so it
 		// belongs at the tail and the vec stays sorted.
-		if was_in_vec && let Some(overflow_item) = self.overflow.pop() {
+		if was_in_vec && let Some(Reverse(overflow_item)) = self.overflow.pop() {
 			let overflow_id = overflow_item.id;
 			self.vec.push(overflow_item);
 			Self::update_location(&mut self.indexes, overflow_id, Location::Vec(self.vec.len() - 1));
@@ -656,5 +681,98 @@ mod tests {
 		assert_eq!(h_mid.current(), 0);
 		assert_eq!(h_low.current(), 1);
 		assert_eq!(h_high.current(), 2);
+	}
+
+	#[test]
+	fn test_set_track_swaps_demoted_vec_item_with_overflow() {
+		let queue = PriorityQueue::default();
+
+		// Fill vec with 255 items at track=100, groups 1..=255.
+		// f1 (group=1) is the vec tail (lowest priority of the fillers).
+		let mut fillers: Vec<_> = (1..=255u64).map(|g| queue.insert(Priority::new(100, g))).collect();
+
+		// Insert a higher-track item; this kicks f1 out of vec into overflow.
+		let mut top = queue.insert(Priority::new(200, 0));
+		assert_eq!(top.current(), 0);
+		assert_eq!(fillers[0].current(), u8::MAX, "f1 was kicked into overflow");
+
+		// Lower top's track below every filler. Without the swap, top would land
+		// in vec at the tail while f1 stays in overflow despite having higher
+		// priority — breaking the "every overflow item < every vec item" invariant.
+		top.set_track(0);
+
+		assert!(fillers[0].current() < u8::MAX, "f1 should be promoted back into vec");
+		assert_eq!(top.current(), u8::MAX, "demoted top should land in overflow");
+	}
+
+	#[test]
+	fn test_set_track_lowered_within_vec_no_overflow_disruption() {
+		let queue = PriorityQueue::default();
+
+		// Three items, all in vec; no overflow involvement.
+		let mut a = queue.insert(Priority::new(200, 0));
+		let mut b = queue.insert(Priority::new(100, 0));
+		let mut c = queue.insert(Priority::new(50, 0));
+		assert_eq!(a.current(), 0);
+		assert_eq!(b.current(), 1);
+		assert_eq!(c.current(), 2);
+
+		// Lowering A's priority below B but above C should leave A at index 1.
+		a.set_track(75);
+		assert_eq!(b.current(), 0);
+		assert_eq!(a.current(), 1);
+		assert_eq!(c.current(), 2);
+	}
+
+	#[test]
+	fn test_remove_promotes_highest_priority_overflow_item() {
+		let queue = PriorityQueue::default();
+
+		// Fill vec to capacity with track=200.
+		let fillers: Vec<_> = (100..355u64).map(|g| queue.insert(Priority::new(200, g))).collect();
+
+		// Three overflow items with distinct priorities (same track, different groups).
+		let mut low = queue.insert(Priority::new(100, 1));
+		let mut mid = queue.insert(Priority::new(100, 2));
+		let mut high = queue.insert(Priority::new(100, 3));
+		assert_eq!(low.current(), u8::MAX);
+		assert_eq!(mid.current(), u8::MAX);
+		assert_eq!(high.current(), u8::MAX);
+
+		// Drop every vec item; overflow items must move into vec in priority order
+		// (highest first).
+		drop(fillers);
+
+		assert_eq!(
+			high.current(),
+			0,
+			"highest-priority overflow item should land at index 0"
+		);
+		assert_eq!(mid.current(), 1);
+		assert_eq!(low.current(), 2);
+	}
+
+	#[tokio::test]
+	async fn test_set_track_notifies_swapped_overflow_item() {
+		tokio::time::pause();
+		let queue = PriorityQueue::default();
+
+		// Fill vec, then insert top, kicking f1 (filler at group=1) into overflow.
+		let mut fillers: Vec<_> = (1..=255u64).map(|g| queue.insert(Priority::new(100, g))).collect();
+		let mut top = queue.insert(Priority::new(200, 0));
+		assert_eq!(top.current(), 0);
+
+		// Take ownership of f1 so we can await its promotion notification.
+		let mut f1 = fillers.remove(0);
+		assert_eq!(f1.current(), u8::MAX);
+
+		let task = tokio::spawn(async move { f1.next().await });
+		tokio::task::yield_now().await;
+
+		// Demoting top below every filler swaps it with f1 in overflow.
+		top.set_track(0);
+
+		let promoted = task.await.unwrap();
+		assert!(promoted < u8::MAX, "f1 should be notified of promotion");
 	}
 }
