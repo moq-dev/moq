@@ -116,6 +116,7 @@ match version {
 
 - **Error handling**: Use `thiserror` with `#[from]` for library crates, `anyhow` for binaries. Always add `#[non_exhaustive]` to public `thiserror` enums.
 - Use `anyhow::Context` (`.context("msg")`) instead of `.map_err(|_| anyhow::anyhow!("msg"))` for error conversion
+- **Config flags + TOML merge**: For any `#[arg]` field on a TOML-loadable config, use `Option<T>` (not bare `bool` / `String` / etc.). The TOML→CLI merge clobbers bare fields with their `Default` when the flag is absent, silently overwriting TOML values. See `rs/moq-relay/src/config.rs::tests` for the regression test; add one for any new flag.
 
 ## Comment Conventions
 
