@@ -44,7 +44,7 @@ contents:
 overrides:
   deb:
     depends:
-      - libc6 (>= 2.35)
+      - libc6 (>= 2.34)
     recommends:
       - systemd
     suggests:

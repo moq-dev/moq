@@ -30,6 +30,17 @@ impl Publish {
 			.map(|(broadcast, _)| broadcast)
 	}
 
+	/// Mutable access to both the broadcast and its catalog producer.
+	/// Used by sibling modules (e.g. `audio`) that need to attach a new
+	/// track to an existing publish.
+	pub fn pair_mut(
+		&mut self,
+		id: Id,
+	) -> Result<(&mut moq_net::BroadcastProducer, &mut moq_mux::catalog::hang::Producer), Error> {
+		let (broadcast, catalog) = self.broadcasts.get_mut(id).ok_or(Error::BroadcastNotFound)?;
+		Ok((broadcast, catalog))
+	}
+
 	pub fn close(&mut self, broadcast: Id) -> Result<(), Error> {
 		self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
 		Ok(())

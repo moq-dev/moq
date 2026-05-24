@@ -45,26 +45,11 @@ domain, and signing key already exist. To stand them up the first time:
    just infra deploy
    ```
 
-3. **Generate a project signing key** dedicated to package repositories.
-   Keep the private key safe (preferably in a hardware key or sealed
-   secret manager):
-
-   ```bash
-   gpg --batch --gen-key <<EOF
-   %no-protection
-   Key-Type: EDDSA
-   Key-Curve: ed25519
-   Subkey-Type: ECDH
-   Subkey-Curve: cv25519
-   Name-Real: MoQ Project
-   Name-Email: admin@moq.dev
-   Expire-Date: 0
-   %commit
-   EOF
-
-   # Note the long key id for the next step.
-   gpg --list-keys --keyid-format=long admin@moq.dev
-   ```
+3. **Reuse the project GPG signing key** that's already stored in the
+   `SIGNING_KEY` / `SIGNING_PASSWORD` Actions secrets (also used by the
+   Maven Central / Kotlin release workflow). The apt/rpm publish scripts
+   import the key into an ephemeral keyring and auto-detect the long key
+   id, so no separate `KEY_ID` secret is needed.
 
 4. **Upload the public key** to both buckets so users can verify the
    repository signature:
@@ -83,10 +68,8 @@ domain, and signing key already exist. To stand them up the first time:
    - `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`: R2 API token with
      object read/write on both buckets.
    - `R2_ACCOUNT_ID`: the Cloudflare account id.
-   - `REPO_SIGNING_KEY`: ascii-armored private key
-     (`gpg --export-secret-keys --armor admin@moq.dev`). Shared by both
-     the apt and rpm publish workflows.
-   - `REPO_SIGNING_KEY_ID`: the long key id from step 3.
+   - `SIGNING_KEY` and `SIGNING_PASSWORD`: already configured for the
+     Maven Central release workflow; the apt/rpm publishers reuse them.
 
 After this, every release that publishes a `.deb` or `.rpm` (one of the
 `moq-relay-v*`, `moq-cli-v*`, `moq-token-cli-v*`, `moq-gst-v*` tags)
@@ -111,7 +94,7 @@ from scratch, the publish scripts can be invoked locally:
 gh release download moq-relay-v1.2.3 --dir artifacts --pattern '*.deb'
 ARTIFACTS_DIR=artifacts \
   R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_ACCOUNT_ID=... \
-  REPO_SIGNING_KEY="$(cat private.asc)" REPO_SIGNING_KEY_ID=... \
+  SIGNING_KEY="$(cat private.asc)" SIGNING_PASSWORD=... \
   ./infra/apt/publish.sh
 ```
 

@@ -144,11 +144,22 @@ generate_bindings() {
             --language "$lang" --out-dir "$OUTPUT_DIR/bindings/$lang"
     done
 
+    # Go uses a separate, third-party bindgen (NordSecurity/uniffi-bindgen-go).
+    # Install with: cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.7.1+v0.31.0
+    if command -v uniffi-bindgen-go >/dev/null 2>&1; then
+        echo "  Generating go bindings..."
+        uniffi-bindgen-go --library "$lib_path" --out-dir "$OUTPUT_DIR/bindings/go"
+    else
+        echo "  Skipping go bindings: uniffi-bindgen-go not on PATH"
+    fi
+
     if [[ "$ARCHIVE" == true ]]; then
-        for lang in kotlin swift python; do
-            local archive="moq-ffi-${VERSION}-${lang}.tar.gz"
-            tar -czf "$OUTPUT_DIR/$archive" -C "$OUTPUT_DIR/bindings" "$lang"
-            echo "Created: $OUTPUT_DIR/$archive"
+        for lang in kotlin swift python go; do
+            if [[ -d "$OUTPUT_DIR/bindings/$lang" ]]; then
+                local archive="moq-ffi-${VERSION}-${lang}.tar.gz"
+                tar -czf "$OUTPUT_DIR/$archive" -C "$OUTPUT_DIR/bindings" "$lang"
+                echo "Created: $OUTPUT_DIR/$archive"
+            fi
         done
         rm -rf "$OUTPUT_DIR/bindings"
     fi

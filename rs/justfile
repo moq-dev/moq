@@ -25,6 +25,9 @@ check *args:
 # newline-separated list of changed files; skips if FILES is non-empty
 # and none match the Rust scope. Run `just rs ci` (no FILES) to
 # force-run everything. `cargo publish --dry-run` lives in release-rs.yml.
+#
+# `cargo deny` runs here (not in `check`) so the inner-loop stays fast
+# and devs aren't blocked by a fresh upstream advisory mid-edit.
 ci FILES="":
 	#!/usr/bin/env bash
 	set -euo pipefail
@@ -35,6 +38,7 @@ ci FILES="":
 	just check --workspace
 	cargo check --workspace --no-default-features
 	cargo check --workspace --all-features
+	cargo deny check --show-stats
 	just test --all-features
 	just build
 

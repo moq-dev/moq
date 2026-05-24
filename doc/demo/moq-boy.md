@@ -7,7 +7,7 @@ description: Architecture and track layout of the MoQ Boy demo
 
 A crowd-controlled Game Boy Color emulator that streams over MoQ. The server emulates and encodes on-demand, the browser subscribes to whichever games are visible, and any viewer can send inputs back. Live at [moq.dev/boy](https://moq.dev/boy); local setup instructions are in the [setup guide](/setup/demo/boy).
 
-This page documents what the demo demonstrates and how its tracks are wired together. For the running-locally instructions see [setup/demo/boy](/setup/demo/boy); for the code see the [moq-boy](/rs/crate/moq-boy) crate and the [@moq/boy](/js/@moq/boy) package.
+This page documents what the demo demonstrates and how its tracks are wired together. For the running-locally instructions see [setup/demo/boy](/setup/demo/boy); for the code see the [moq-boy](/lib/rs/crate/moq-boy) crate and the [@moq/boy](/lib/js/@moq/boy) package.
 
 ## What it demonstrates
 
@@ -44,7 +44,7 @@ Splitting authenticated and unauthenticated traffic lets the server be the only 
 
 ## Media tracks
 
-The video and audio tracks go through [moq-mux](/rs/crate/moq-mux), which handles the [hang](/rs/crate/hang) container format (catalog, codec init, group boundaries).
+The video and audio tracks go through [moq-mux](/lib/rs/crate/moq-mux), which handles the [hang](/lib/rs/crate/hang) container format (catalog, codec init, group boundaries).
 
 | Track | Codec | Resolution | Framerate | Pipeline |
 |-------|-------|-----------|-----------|----------|
@@ -55,7 +55,7 @@ The browser upscales video with CSS `image-rendering: pixelated` so the pixel ar
 
 ## Metadata tracks
 
-The `status` and `command` tracks bypass the container format — they're raw UTF-8 JSON bytes written directly to [moq-net](/rs/crate/moq-net) groups.
+The `status` and `command` tracks bypass the container format — they're raw UTF-8 JSON bytes written directly to [moq-net](/lib/rs/crate/moq-net) groups.
 
 | Track | Direction | Format |
 |-------|-----------|--------|
@@ -78,8 +78,8 @@ This works because subscriptions are a first-class signal in MoQ — the emulato
 
 ## Related
 
-- [moq-boy crate](/rs/crate/moq-boy) — the Rust binary
-- [@moq/boy package](/js/@moq/boy) — the browser player
+- [moq-boy crate](/lib/rs/crate/moq-boy) — the Rust binary
+- [@moq/boy package](/lib/js/@moq/boy) — the browser player
 - [setup/demo/boy](/setup/demo/boy) — how to run it locally, controls, custom ROMs
-- [moq-net](/rs/crate/moq-net) — the networking layer used by every track here
-- [moq-mux](/rs/crate/moq-mux) — the container format used for A/V
+- [moq-net](/lib/rs/crate/moq-net) — the networking layer used by every track here
+- [moq-mux](/lib/rs/crate/moq-mux) — the container format used for A/V

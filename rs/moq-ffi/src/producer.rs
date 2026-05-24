@@ -8,9 +8,9 @@ use crate::error::MoqError;
 
 // ---- UniFFI Objects ----
 
-struct BroadcastProducer {
-	broadcast: moq_net::BroadcastProducer,
-	catalog: moq_mux::catalog::hang::Producer,
+pub(crate) struct BroadcastProducer {
+	pub(crate) broadcast: moq_net::BroadcastProducer,
+	pub(crate) catalog: moq_mux::catalog::hang::Producer,
 }
 
 struct MediaProducer {
@@ -28,6 +28,18 @@ impl MoqBroadcastProducer {
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
 		Ok(state.broadcast.consume())
+	}
+
+	/// Run `f` against the open broadcast and catalog. Errors with
+	/// [`MoqError::Closed`] if `finish()` has already run. Used by
+	/// sibling modules (e.g. `audio`) that need joint access.
+	pub(crate) fn with_state<R>(
+		&self,
+		f: impl FnOnce(&mut BroadcastProducer) -> Result<R, MoqError>,
+	) -> Result<R, MoqError> {
+		let mut guard = self.state.lock().unwrap();
+		let state = guard.as_mut().ok_or(MoqError::Closed)?;
+		f(state)
 	}
 }
 

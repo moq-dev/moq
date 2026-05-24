@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>", "Brian Medley <bpm@bmedley.org>"
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.2.15"
+version = "0.2.16"
 edition = "2024"
 rust-version.workspace = true
 
@@ -20,6 +20,7 @@ crate-type = ["staticlib"]
 anyhow = { version = "1", features = ["backtrace"] }
 bytes = "1"
 hang = { workspace = true }
+moq-audio = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
 moq-net = { workspace = true, features = ["serde"] }

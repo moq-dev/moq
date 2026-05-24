@@ -56,28 +56,21 @@ impl Import {
 		let profile = &sps.rbsp.profile_tier_level.general_profile;
 		let vui_data = sps.rbsp.vui_parameters.as_ref().map(VuiData::new).unwrap_or_default();
 
-		let config = hang::catalog::VideoConfig {
-			coded_width: Some(sps.rbsp.cropped_width() as u32),
-			coded_height: Some(sps.rbsp.cropped_height() as u32),
-			codec: hang::catalog::H265 {
-				in_band: true, // We only support `hev1` with inline SPS/PPS for now
-				profile_space: profile.profile_space,
-				profile_idc: profile.profile_idc,
-				profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
-				tier_flag: profile.tier_flag,
-				level_idc: profile.level_idc.context("missing level_idc in SPS")?,
-				constraint_flags: crate::codec::h265::pack_constraint_flags(profile),
-			}
-			.into(),
-			description: None,
-			framerate: vui_data.framerate,
-			bitrate: None,
-			display_ratio_width: vui_data.display_ratio_width,
-			display_ratio_height: vui_data.display_ratio_height,
-			optimize_for_latency: None,
-			container: hang::catalog::Container::Legacy,
-			jitter: None,
-		};
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
+			in_band: true, // We only support `hev1` with inline SPS/PPS for now
+			profile_space: profile.profile_space,
+			profile_idc: profile.profile_idc,
+			profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
+			tier_flag: profile.tier_flag,
+			level_idc: profile.level_idc.context("missing level_idc in SPS")?,
+			constraint_flags: crate::codec::h265::pack_constraint_flags(profile),
+		});
+		config.coded_width = Some(sps.rbsp.cropped_width() as u32);
+		config.coded_height = Some(sps.rbsp.cropped_height() as u32);
+		config.framerate = vui_data.framerate;
+		config.display_ratio_width = vui_data.display_ratio_width;
+		config.display_ratio_height = vui_data.display_ratio_height;
+		config.container = hang::catalog::Container::Legacy;
 
 		if let Some(old) = &self.config
 			&& old == &config

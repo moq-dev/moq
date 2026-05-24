@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.4](https://github.com/moq-dev/moq/compare/moq-native-v0.14.3...moq-native-v0.14.4) - 2026-05-23
+
+### Other
+
+- Add stats via MoQ broadcasts ([#1442](https://github.com/moq-dev/moq/pull/1442))
+- Make reconnect timeout mandatory with 5-minute default ([#1443](https://github.com/moq-dev/moq/pull/1443))
+
 ## [0.14.3](https://github.com/moq-dev/moq/compare/moq-native-v0.14.2...moq-native-v0.14.3) - 2026-05-21
 
 ### Other

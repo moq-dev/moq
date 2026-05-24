@@ -9,7 +9,7 @@ Here's a guide on how to get moq-relay running in production.
 
 ## Overview
 
-[moq-relay](/app/relay/) is the core of the MoQ stack.
+[moq-relay](/bin/relay/) is the core of the MoQ stack.
 It's responsible for routing live tracks (payload agnostic) from 1 client to N clients.
 The relay accepts WebTransport connections from clients, but it can also connect to other relays to fetch upstream.
 Think of the relay as a HTTP web server like [Nginx](https://nginx.org/), but for live content.
@@ -49,6 +49,6 @@ The default WebTransport port is UDP/443 but anything will work if you put it in
 
 ## Next Steps
 
-- Set up [Authentication](/app/relay/auth)
-- Configure [Clustering](/app/relay/cluster)
+- Set up [Authentication](/bin/relay/auth)
+- Configure [Clustering](/bin/relay/cluster)
 - Learn about [Concepts](/concept/)

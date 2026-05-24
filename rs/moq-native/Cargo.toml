@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.14.3"
+version = "0.14.4"
 edition = "2024"
 rust-version.workspace = true
 
@@ -51,7 +51,6 @@ rcgen = { version = "0.14", default-features = false, optional = true }
 reqwest = { version = "0.12", default-features = false, optional = true }
 rustls = "0.23"
 rustls-native-certs = "0.8"
-rustls-pemfile = "2"
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["hex"] }

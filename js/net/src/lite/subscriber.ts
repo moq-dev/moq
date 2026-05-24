@@ -13,7 +13,7 @@ import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
-import { decodeSubscribeResponse, Subscribe } from "./subscribe.ts";
+import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { Version } from "./version.ts";
 
 /**
@@ -192,7 +192,20 @@ export class Subscriber {
 			}
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
 
-			await Promise.race([stream.reader.closed, request.track.closed]);
+			// Watch for priority changes and send SUBSCRIBE_UPDATE. Lite01/Lite02
+			// don't carry SUBSCRIBE_UPDATE on the wire, so skip the watcher there
+			// and just wait on the stream/track like before.
+			const waits: Promise<unknown>[] = [stream.reader.closed, request.track.closed];
+			switch (this.version) {
+				case Version.DRAFT_01:
+				case Version.DRAFT_02:
+					break;
+				default:
+					waits.push(this.#runPriorityUpdates(id, broadcast, request.track, msg, stream));
+					break;
+			}
+
+			await Promise.race(waits);
 
 			request.track.close();
 			stream.close();
@@ -206,6 +219,51 @@ export class Subscriber {
 			stream.abort(e);
 		} finally {
 			this.#subscribes.delete(id);
+		}
+	}
+
+	/**
+	 * Send SUBSCRIBE_UPDATE messages whenever the track's priority signal changes.
+	 *
+	 * Resolves cleanly when the stream or track closes, so the caller can include
+	 * this in Promise.race without leaving a dangling pending write that would
+	 * become an unhandled rejection if the user calls updatePriority after close.
+	 *
+	 * Peeks the signal at the top of every iteration so that updates which landed
+	 * before SubscribeOk arrived (or between iterations, before .next() registered
+	 * its listener) aren't lost.
+	 */
+	async #runPriorityUpdates(
+		id: bigint,
+		broadcast: Path.Valid,
+		track: Track,
+		msg: Subscribe,
+		stream: Stream,
+	): Promise<void> {
+		const stopped: Promise<null> = Promise.race([track.closed, stream.reader.closed]).then(() => null);
+		let lastSent: number | undefined;
+
+		for (;;) {
+			const current = track.state.priority.peek();
+			if (current === undefined || current === lastSent) {
+				// Nothing new to send; wait for a change or termination.
+				const next = await Promise.race([track.state.priority.next(), stopped]);
+				if (next === null) return;
+				continue;
+			}
+
+			// Round-trip the other Subscribe parameters so the publisher doesn't
+			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxLatency/etc.
+			const update = new SubscribeUpdate({
+				priority: current,
+				ordered: msg.ordered,
+				maxLatency: msg.maxLatency,
+				startGroup: msg.startGroup,
+				endGroup: msg.endGroup,
+			});
+			await update.encode(stream.writer, this.version);
+			lastSent = current;
+			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name} priority=${current}`);
 		}
 	}
 

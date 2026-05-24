@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.11...moq-ffi-v0.2.12) - 2026-05-23
+
+### Other
+
+- Add Python MoQ server API with session acceptance and handshake ([#1417](https://github.com/moq-dev/moq/pull/1417))
+- Tighten moq-ffi release pipeline ahead of first publish ([#1447](https://github.com/moq-dev/moq/pull/1447))
+- Add Low Overhead Container (LOC) frame format support ([#1388](https://github.com/moq-dev/moq/pull/1388))
+- re-emit deprecated CMAF timescale/trackId in catalog ([#1440](https://github.com/moq-dev/moq/pull/1440))
+- Add Swift and Kotlin FFI wrappers with packaging and publishing ([#1432](https://github.com/moq-dev/moq/pull/1432))
+
 ## [0.2.11](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.10...moq-ffi-v0.2.11) - 2026-05-20
 
 ### Other

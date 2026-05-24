@@ -10,6 +10,7 @@ mod rs
 mod py
 mod kt
 mod swift
+mod go
 
 # Demos and infra.
 mod demo
@@ -73,9 +74,12 @@ ci BASE="":
 		just py    ci "$files"
 		just kt    ci "$files"
 		just swift ci "$files"
+		just go    ci "$files"
 	fi
 
-	# Cheap; always run.
+	# Cheap; always run. `bun install` is needed for remark-cli, since
+	# `just js ci` (where bun deps would otherwise install) is skipped
+	# when the diff has no JS-scoped files.
 	nix flake check
 	bun install --frozen-lockfile
 	bun remark . --quiet --frail

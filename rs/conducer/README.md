@@ -14,6 +14,6 @@ This crate provides `Producer` and `Consumer` types that share state through a m
 Producers can modify the state and consumers are automatically notified via async wakers.
 The channel auto-closes when all producers are dropped.
 
-It's used internally by [moq-lite](https://github.com/moq-dev/moq/tree/main/rs/moq-lite) and friends, but is generic enough to be useful on its own.
+It's used internally by [moq-net](https://github.com/moq-dev/moq/tree/main/rs/moq-net) and friends, but is generic enough to be useful on its own.
 
 See the [API documentation](https://docs.rs/conducer/) for details.

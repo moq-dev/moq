@@ -350,4 +350,23 @@ impl Consume {
 		self.broadcast.remove(consume).ok_or(Error::BroadcastNotFound)?;
 		Ok(())
 	}
+
+	/// Look up an audio rendition by catalog index, returning the
+	/// (broadcast, config, name) tuple needed to subscribe — mirrors
+	/// the index-based selection in `audio_ordered`.
+	pub fn audio_rendition(
+		&self,
+		catalog: Id,
+		index: usize,
+	) -> Result<(moq_net::BroadcastConsumer, hang::catalog::AudioConfig, String), Error> {
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
+		let (name, config) = consume
+			.catalog
+			.audio
+			.renditions
+			.iter()
+			.nth(index)
+			.ok_or(Error::NoIndex)?;
+		Ok((consume.broadcast.clone(), config.clone(), name.clone()))
+	}
 }

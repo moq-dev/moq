@@ -49,10 +49,17 @@ impl Audio {
 /// including codec-specific parameters, sample rate, and channel configuration.
 ///
 /// Reference: <https://www.w3.org/TR/webcodecs/#audio-decoder-config>
+///
+/// Marked `#[non_exhaustive]` so additional optional fields can be added
+/// without bumping the major version. External callers build a config with
+/// [`AudioConfig::new`] and then assign whichever optional fields they need;
+/// struct-literal construction (with or without `..base`) is not available
+/// outside this crate.
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct AudioConfig {
 	// The codec, see the registry for details:
 	// https://w3c.github.io/webcodecs/codec_registry.html
@@ -92,4 +99,24 @@ pub struct AudioConfig {
 	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
+}
+
+impl AudioConfig {
+	/// Construct a config with the required fields set and every optional
+	/// field cleared. `container` defaults to [`Container::default`]. Fields
+	/// are `pub`, so callers set whatever they need by assignment afterwards.
+	///
+	/// This is the only path external crates have to build an `AudioConfig`
+	/// since the type is `#[non_exhaustive]`.
+	pub fn new(codec: impl Into<AudioCodec>, sample_rate: u32, channel_count: u32) -> Self {
+		Self {
+			codec: codec.into(),
+			sample_rate,
+			channel_count,
+			bitrate: None,
+			description: None,
+			container: Container::default(),
+			jitter: None,
+		}
+	}
 }

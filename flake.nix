@@ -77,6 +77,7 @@
           cargo-edit
           cargo-sweep
           cargo-semver-checks
+          cargo-deny
         ]
         ++ gstreamerDeps
         ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
@@ -107,6 +108,13 @@
         packagingDeps = with pkgs; [
           nfpm
           dpkg
+          gettext
+
+          # cargo-zigbuild + zig let CI build a single binary that links
+          # against an older glibc (passed as `<triple>.<glibc>`), so the
+          # same artifact ships in both .deb and .rpm. No docker needed.
+          cargo-zigbuild
+          zig
         ];
 
         # Tools needed to regenerate and sign the apt/rpm repositories.

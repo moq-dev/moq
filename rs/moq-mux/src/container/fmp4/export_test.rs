@@ -25,28 +25,16 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 
 	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
 	let track = producer.unique_track(".avc3").unwrap();
-	catalog.lock().video.renditions.insert(
-		track.name.clone(),
-		VideoConfig {
-			coded_width: Some(320),
-			coded_height: Some(240),
-			codec: H264 {
-				profile: 0x42,
-				constraints: 0xc0,
-				level: 0x1f,
-				inline: true,
-			}
-			.into(),
-			description: None,
-			framerate: None,
-			bitrate: None,
-			display_ratio_width: None,
-			display_ratio_height: None,
-			optimize_for_latency: None,
-			container: Container::Legacy,
-			jitter: None,
-		},
-	);
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: true,
+	});
+	config.coded_width = Some(320);
+	config.coded_height = Some(240);
+	config.container = Container::Legacy;
+	catalog.lock().video.renditions.insert(track.name.clone(), config);
 
 	const SC: &[u8] = &[0, 0, 0, 1];
 	let sps = &[0x67u8, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef][..];

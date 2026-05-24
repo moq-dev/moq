@@ -32,7 +32,8 @@ The project contains multiple layers of protocols:
    - catalog: a JSON track containing a description of other tracks and their properties (for WebCodecs).
    - container: each frame consists of a timestamp and codec bitstream
    - watch/publish: dedicated packages for subscribing/publishing with optional UI overlays
-5. **application** - Users building on top of `moq-net` or `hang`
+5. **moq-audio** - Native Opus encode/decode for raw PCM (more codecs to come). Used by `moq-ffi`/`libmoq` so native callers don't have to bring their own codec.
+6. **application** - Users building on top of `moq-net` or `hang`
 
 Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq` layer should be generic, using rules on the wire on how to deliver content.
 
@@ -41,7 +42,6 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 ```
 /rs/                  # Rust crates
   moq-net/           # Core networking layer (published as moq-net; negotiates moq-lite or moq-transport)
-  moq-lite/          # Deprecated shim that re-exports moq-net (published as moq-lite)
   moq-native/        # QUIC/WebTransport connection helpers for native apps
   moq-relay/         # Clusterable relay server (binary: moq-relay)
   moq-token/         # JWT authentication library
@@ -49,6 +49,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq-cli/           # CLI tool for media operations (binary: moq)
   moq-clock/         # Clock synchronization example (binary: moq-clock)
   moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)
+  moq-audio/         # Native PCM ↔ Opus encode/decode on top of moq-mux
   hang/              # Media encoding/streaming (catalog/container format)
   libmoq/            # C bindings (staticlib)
   moq-ffi/           # UniFFI bindings for Python/Swift/Kotlin (cdylib + staticlib)
@@ -57,7 +58,6 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 
 /js/                  # TypeScript/JavaScript packages
   net/               # Core networking layer for browsers (published as @moq/net)
-  lite/              # Deprecated shim that re-exports @moq/net (published as @moq/lite)
   signals/           # Reactive signals library (published as @moq/signals)
   token/             # JWT token generation (published as @moq/token)
   clock/             # Clock example (published as @moq/clock)
@@ -117,12 +117,13 @@ match version {
 
 - **Error handling**: Use `thiserror` with `#[from]` for library crates, `anyhow` for binaries. Always add `#[non_exhaustive]` to public `thiserror` enums.
 - Use `anyhow::Context` (`.context("msg")`) instead of `.map_err(|_| anyhow::anyhow!("msg"))` for error conversion
+- **Config flags + TOML merge**: For any `#[arg]` field on a TOML-loadable config, use `Option<T>` (not bare `bool` / `String` / etc.). The TOML→CLI merge clobbers bare fields with their `Default` when the flag is absent, silently overwriting TOML values. See `rs/moq-relay/src/config.rs::tests` for the regression test; add one for any new flag.
 
 ## Comment Conventions
 
 - Keep things brief and avoid comments if the code is self-explanatory. Reserve comments for the non-obvious WHY: a hidden constraint, a subtle invariant, a workaround for a specific bug, behavior that would surprise a reader.
 - Comments must reflect the **current** state of the code, not its history. Don't write "X no longer does Y" or "this used to cascade". Describe what the code does today, or delete the comment. Migration context belongs in commit messages and PR descriptions, where it ages with the change rather than rotting in the source.
-- When an LLM leaves a comment, append a short disclaimer like `// Written by Claude` at the end so readers know it wasn't human-authored.
+- When an LLM authors something, append a short disclaimer like `(Written by Claude)` so readers know it wasn't human-authored. Apply this to PR descriptions and PR comments (including replies on review threads), **not** to code comments or doc comments — markers in source rot alongside the code, and commit trailers already carry attribution.
 
 ## Tooling
 
@@ -153,3 +154,7 @@ When making changes to the codebase:
 4. Update relevant documentation (CLAUDE.md, doc/, README) when making major changes
 5. Add unit tests for any changes that are easy enough to test
 6. Commit and push changes
+
+## PR Reviews
+
+CodeRabbit reviews PRs automatically, but it has an hourly quota and runs out of org credits. If a PR shows a "Review limit reached" / "out of usage credits" message instead of an actual review, run the `/review` skill locally against the PR to get review feedback without waiting for the quota to refill.
