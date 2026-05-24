@@ -124,6 +124,7 @@ fn parse_codec(codec_str: &str) -> Result<moq_audio::Codec, Error> {
 }
 
 impl Audio {
+	#[allow(clippy::too_many_arguments)]
 	pub fn publish(
 		&mut self,
 		broadcast: &mut moq_net::BroadcastProducer,
