@@ -10,12 +10,57 @@ mod import;
 
 pub use import::*;
 
-use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 // H.264 NAL unit types (ISO/IEC 14496-10 §7.4.1).
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
+
+/// H.264 parsing and transform errors.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("SPS NAL too short")]
+	SpsTooShort,
+
+	#[error("failed to parse SPS")]
+	SpsParse,
+
+	#[error("AVCDecoderConfigurationRecord too short")]
+	AvccTooShort,
+
+	#[error("SPS too large for avcC length field ({0} > {max})", max = u16::MAX)]
+	SpsTooLarge(usize),
+
+	#[error("PPS too large for avcC length field ({0} > {max})", max = u16::MAX)]
+	PpsTooLarge(usize),
+
+	#[error("NAL too large for 4-byte length prefix")]
+	NalTooLarge,
+
+	#[error("NAL unit is too short")]
+	NalTooShort,
+
+	#[error("forbidden zero bit is not zero")]
+	ForbiddenZeroBit,
+
+	#[error("not initialized; call initialize() or with_mode() first")]
+	NotInitialized,
+
+	#[error("avc3 track not created")]
+	Avc3TrackNotCreated,
+
+	#[error("missing timestamp")]
+	MissingTimestamp,
+
+	#[error("decode_stream is avc3 only")]
+	StreamNotAvc3,
+
+	#[error("annexb: {0}")]
+	Annexb(#[from] crate::codec::annexb::Error),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Parsed H.264 SPS (Sequence Parameter Set) NAL.
 ///
@@ -33,10 +78,12 @@ pub struct Sps {
 
 impl Sps {
 	/// Parse an SPS NAL unit.
-	pub fn parse(nal: &[u8]) -> anyhow::Result<Self> {
-		anyhow::ensure!(nal.len() >= 4, "SPS NAL too short");
+	pub fn parse(nal: &[u8]) -> Result<Self> {
+		if nal.len() < 4 {
+			return Err(Error::SpsTooShort);
+		}
 		let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
-		let sps = h264_parser::Sps::parse(&rbsp).context("failed to parse SPS")?;
+		let sps = h264_parser::Sps::parse(&rbsp).map_err(|_| Error::SpsParse)?;
 		Ok(Self {
 			profile: sps.profile_idc,
 			constraints: pack_constraint_flags(&sps),
@@ -66,8 +113,10 @@ pub struct Avcc {
 
 impl Avcc {
 	/// Parse an AVCDecoderConfigurationRecord buffer.
-	pub fn parse(avcc: &[u8]) -> anyhow::Result<Self> {
-		anyhow::ensure!(avcc.len() >= 6, "AVCDecoderConfigurationRecord too short");
+	pub fn parse(avcc: &[u8]) -> Result<Self> {
+		if avcc.len() < 6 {
+			return Err(Error::AvccTooShort);
+		}
 
 		let profile = avcc[1];
 		let constraints = avcc[2];
@@ -111,20 +160,16 @@ fn pack_constraint_flags(sps: &h264_parser::Sps) -> u8 {
 
 /// Build an AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2) from a
 /// single SPS and PPS NAL.
-pub(crate) fn build_avcc(sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
-	anyhow::ensure!(
-		sps_nal.len() <= u16::MAX as usize,
-		"SPS too large for avcC length field ({} > {})",
-		sps_nal.len(),
-		u16::MAX
-	);
-	anyhow::ensure!(
-		pps_nal.len() <= u16::MAX as usize,
-		"PPS too large for avcC length field ({} > {})",
-		pps_nal.len(),
-		u16::MAX
-	);
-	anyhow::ensure!(sps_nal.len() >= 4, "SPS NAL too short");
+pub(crate) fn build_avcc(sps_nal: &[u8], pps_nal: &[u8]) -> Result<Bytes> {
+	if sps_nal.len() > u16::MAX as usize {
+		return Err(Error::SpsTooLarge(sps_nal.len()));
+	}
+	if pps_nal.len() > u16::MAX as usize {
+		return Err(Error::PpsTooLarge(pps_nal.len()));
+	}
+	if sps_nal.len() < 4 {
+		return Err(Error::SpsTooShort);
+	}
 
 	let profile_idc = sps_nal[1];
 	let constraints = sps_nal[2];
@@ -187,7 +232,7 @@ impl Avc1 {
 	/// - `Ok(None)` if the input contained only parameter sets and the
 	///   transform is still waiting for slice NALs (avcC may have been built
 	///   as a side effect).
-	pub fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
+	pub fn transform(&mut self, payload: Bytes) -> Result<Option<Bytes>> {
 		// Parse Annex-B NALs, strip SPS/PPS into the cache, length-prefix
 		// the rest. NalIterator advances the Bytes cursor; the trailing NAL
 		// has to be pulled separately via flush().
@@ -201,7 +246,7 @@ impl Avc1 {
 		loop {
 			let nal = match nal_iter.next() {
 				Some(Ok(n)) => n,
-				Some(Err(e)) => return Err(e),
+				Some(Err(e)) => return Err(e.into()),
 				None => break,
 			};
 			if self.process_nal(&nal, &mut out, &mut sps_pps_changed)? {
@@ -230,7 +275,7 @@ impl Avc1 {
 	/// Process one NAL: SPS/PPS go into the cache, everything else gets
 	/// length-prefixed and appended to `out`. Returns true if the NAL was a
 	/// slice (i.e. produced sample bytes).
-	fn process_nal(&mut self, nal: &Bytes, out: &mut BytesMut, sps_pps_changed: &mut bool) -> anyhow::Result<bool> {
+	fn process_nal(&mut self, nal: &Bytes, out: &mut BytesMut, sps_pps_changed: &mut bool) -> Result<bool> {
 		if nal.is_empty() {
 			return Ok(false);
 		}
@@ -251,7 +296,7 @@ impl Avc1 {
 				Ok(false)
 			}
 			_ => {
-				let len = u32::try_from(nal.len()).context("NAL too large for 4-byte length prefix")?;
+				let len = u32::try_from(nal.len()).map_err(|_| Error::NalTooLarge)?;
 				out.extend_from_slice(&len.to_be_bytes());
 				out.extend_from_slice(nal);
 				Ok(true)
@@ -259,7 +304,7 @@ impl Avc1 {
 		}
 	}
 
-	fn rebuild_avcc(&mut self) -> anyhow::Result<()> {
+	fn rebuild_avcc(&mut self) -> Result<()> {
 		let (Some(sps), Some(pps)) = (&self.sps, &self.pps) else {
 			return Ok(());
 		};

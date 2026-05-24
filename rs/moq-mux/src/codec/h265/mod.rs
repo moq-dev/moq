@@ -9,9 +9,45 @@ mod import;
 
 pub use import::*;
 
-use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
+
+/// H.265 parsing and transform errors.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("NAL unit is too short")]
+	NalTooShort,
+
+	#[error("{0} too large for hvcC length field ({1} > {max})", max = u16::MAX)]
+	NalTooLargeForHvcc(&'static str, usize),
+
+	#[error("NAL too large for 4-byte length prefix")]
+	NalTooLarge,
+
+	#[error("failed to parse SPS NAL unit")]
+	SpsParse,
+
+	#[error("missing level_idc in SPS")]
+	MissingLevelIdc,
+
+	#[error("forbidden zero bit is not zero")]
+	ForbiddenZeroBit,
+
+	#[error("not initialized")]
+	NotInitialized,
+
+	#[error("expected SPS before any frames")]
+	MissingSps,
+
+	#[error("missing timestamp")]
+	MissingTimestamp,
+
+	#[error("annexb: {0}")]
+	Annexb(#[from] crate::codec::annexb::Error),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Annex-B → length-prefixed transmuxer; the H.265 analogue of
 /// [`crate::codec::h264::Avc1`].
@@ -51,7 +87,7 @@ impl Hvc1 {
 	/// - `Ok(None)` if the input contained only parameter sets and the
 	///   transform is still waiting for slice NALs (hvcC may have been
 	///   built as a side effect).
-	pub fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
+	pub fn transform(&mut self, payload: Bytes) -> Result<Option<Bytes>> {
 		let mut buf = payload.clone();
 		let mut nal_iter = crate::codec::annexb::NalIterator::new(&mut buf);
 
@@ -62,7 +98,7 @@ impl Hvc1 {
 		loop {
 			let nal = match nal_iter.next() {
 				Some(Ok(n)) => n,
-				Some(Err(e)) => return Err(e),
+				Some(Err(e)) => return Err(e.into()),
 				None => break,
 			};
 			if self.process_nal(&nal, &mut out, &mut params_changed)? {
@@ -88,7 +124,7 @@ impl Hvc1 {
 		Ok(Some(out.freeze()))
 	}
 
-	fn process_nal(&mut self, nal: &Bytes, out: &mut BytesMut, params_changed: &mut bool) -> anyhow::Result<bool> {
+	fn process_nal(&mut self, nal: &Bytes, out: &mut BytesMut, params_changed: &mut bool) -> Result<bool> {
 		if nal.is_empty() {
 			return Ok(false);
 		}
@@ -119,7 +155,7 @@ impl Hvc1 {
 				Ok(false)
 			}
 			_ => {
-				let len = u32::try_from(nal.len()).context("NAL too large for 4-byte length prefix")?;
+				let len = u32::try_from(nal.len()).map_err(|_| Error::NalTooLarge)?;
 				out.extend_from_slice(&len.to_be_bytes());
 				out.extend_from_slice(nal);
 				Ok(true)
@@ -127,7 +163,7 @@ impl Hvc1 {
 		}
 	}
 
-	fn rebuild_hvcc(&mut self) -> anyhow::Result<()> {
+	fn rebuild_hvcc(&mut self) -> Result<()> {
 		let (Some(vps), Some(sps), Some(pps)) = (&self.vps, &self.sps, &self.pps) else {
 			return Ok(());
 		};
@@ -138,20 +174,16 @@ impl Hvc1 {
 
 /// Build an HEVCDecoderConfigurationRecord (ISO/IEC 14496-15 §8.3.3).
 /// Single-layer streams only.
-pub(crate) fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
+pub(crate) fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8]) -> Result<Bytes> {
 	for (label, nal) in [("VPS", vps_nal), ("SPS", sps_nal), ("PPS", pps_nal)] {
-		anyhow::ensure!(
-			nal.len() <= u16::MAX as usize,
-			"{} too large for hvcC length field ({} > {})",
-			label,
-			nal.len(),
-			u16::MAX
-		);
+		if nal.len() > u16::MAX as usize {
+			return Err(Error::NalTooLargeForHvcc(label, nal.len()));
+		}
 	}
 
-	let sps = SpsNALUnit::parse(&mut &sps_nal[..]).context("failed to parse SPS NAL unit for hvcC")?;
+	let sps = SpsNALUnit::parse(&mut &sps_nal[..]).map_err(|_| Error::SpsParse)?;
 	let profile = &sps.rbsp.profile_tier_level.general_profile;
-	let level_idc = profile.level_idc.context("missing level_idc in SPS")?;
+	let level_idc = profile.level_idc.ok_or(Error::MissingLevelIdc)?;
 	let constraint_flags = pack_constraint_flags(profile);
 	let compat = profile.profile_compatibility_flag.bits().to_be_bytes();
 	let num_temporal_layers = sps.rbsp.sps_max_sub_layers_minus1 + 1;

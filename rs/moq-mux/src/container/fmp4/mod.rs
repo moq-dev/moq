@@ -63,6 +63,69 @@ pub enum Error {
 
 	#[error("can't synthesize CMAF init for {0}")]
 	UnsupportedSynthesis(String),
+
+	#[error("subtitle tracks are not supported")]
+	UnsupportedSubtitle,
+
+	#[error("unknown track handler: {0:?}")]
+	UnknownTrackHandler([u8; 4]),
+
+	#[error("missing codec")]
+	MissingCodec,
+
+	#[error("multiple codecs")]
+	MultipleCodecs,
+
+	#[error("unknown codec: {0:?}")]
+	UnknownCodec(mp4_atom::FourCC),
+
+	#[error("unsupported codec: {0:?}")]
+	UnsupportedCodec(Box<mp4_atom::Codec>),
+
+	#[error("unsupported codec: MPEG2")]
+	UnsupportedMpeg2,
+
+	#[error("duplicate moof box")]
+	DuplicateMoof,
+
+	#[error("missing moof box")]
+	MissingMoof,
+
+	#[error("missing moov box")]
+	MissingMoov,
+
+	#[error("missing trun box")]
+	MissingTrun,
+
+	#[error("missing tfdt box")]
+	MissingTfdt,
+
+	#[error("missing video config for synthesized init")]
+	MissingVideoConfig,
+
+	#[error("video track {0} missing in catalog")]
+	MissingVideoTrack(String),
+
+	#[error("audio track {0} missing in catalog")]
+	MissingAudioTrack(String),
+
+	#[error("invalid data offset")]
+	InvalidDataOffset,
+
+	#[error("unknown track {0}")]
+	UnknownTrack(u32),
+
+	#[error("no keyframe at start of group")]
+	NoKeyframe,
+
+	#[error("track sample range {start}..{end} is out of bounds of mdat (len {len})")]
+	SampleRangeOutOfBounds { start: usize, end: usize, len: usize },
+
+	#[error("no catalog snapshot")]
+	NoCatalogSnapshot,
+
+	#[error("encode_fragment called with no frames")]
+	NoFrames,
 }
 
 /// CMAF container: encodes/decodes a single track's moof+mdat fragments.

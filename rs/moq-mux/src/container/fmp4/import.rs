@@ -1,10 +1,12 @@
 use crate::container::Timestamp;
-use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt};
+
+use super::Error;
+use crate::Result;
 
 /// Converts fMP4/CMAF files into MoQ broadcast streams using CMAF passthrough.
 ///
@@ -79,7 +81,7 @@ impl Import {
 	}
 
 	/// Decode from an asynchronous reader.
-	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> anyhow::Result<()> {
+	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> Result<()> {
 		let mut buffer = BytesMut::new();
 		while reader.read_buf(&mut buffer).await? > 0 {
 			self.decode(&mut buffer)?;
@@ -89,7 +91,7 @@ impl Import {
 	}
 
 	/// Decode a buffer of bytes.
-	pub fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+	pub fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		let mut cursor = std::io::Cursor::new(buf);
 		let mut position = 0;
 
@@ -106,7 +108,9 @@ impl Import {
 					self.init(moov)?;
 				}
 				Any::Moof(moof) => {
-					anyhow::ensure!(self.moof.is_none(), "duplicate moof box");
+					if self.moof.is_some() {
+						return Err(Error::DuplicateMoof.into());
+					}
 					self.moof.replace(moof);
 					self.moof_size = size;
 				}
@@ -132,7 +136,7 @@ impl Import {
 		self.moov.is_some()
 	}
 
-	fn init(&mut self, moov: Moov) -> anyhow::Result<()> {
+	fn init(&mut self, moov: Moov) -> Result<()> {
 		// Clone the catalog to avoid the borrow checker.
 		let mut catalog = self.catalog.clone();
 		let mut catalog = catalog.lock();
@@ -155,8 +159,12 @@ impl Import {
 					catalog.audio.renditions.insert(track.name.clone(), config);
 					TrackKind::Audio
 				}
-				b"sbtl" => anyhow::bail!("subtitle tracks are not supported"),
-				handler => anyhow::bail!("unknown track type: {:?}", handler),
+				b"sbtl" => return Err(Error::UnsupportedSubtitle.into()),
+				handler => {
+					let mut buf = [0u8; 4];
+					buf[..handler.len().min(4)].copy_from_slice(&handler[..handler.len().min(4)]);
+					return Err(Error::UnknownTrackHandler(buf).into());
+				}
 			};
 
 			self.tracks.insert(
@@ -179,7 +187,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn container(&self, trak: &Trak, moov: &Moov) -> anyhow::Result<Container> {
+	fn container(&self, trak: &Trak, moov: &Moov) -> Result<Container> {
 		// Build a single-track init segment (ftyp+moov) for this track.
 		{
 			let ftyp = mp4_atom::Ftyp {
@@ -225,14 +233,14 @@ impl Import {
 		}
 	}
 
-	fn init_video(&mut self, trak: &Trak, moov: &Moov) -> anyhow::Result<VideoConfig> {
+	fn init_video(&mut self, trak: &Trak, moov: &Moov) -> Result<VideoConfig> {
 		let container = self.container(trak, moov)?;
 		let stsd = &trak.mdia.minf.stbl.stsd;
 
 		let codec = match stsd.codecs.len() {
-			0 => anyhow::bail!("missing codec"),
+			0 => return Err(Error::MissingCodec.into()),
 			1 => &stsd.codecs[0],
-			_ => anyhow::bail!("multiple codecs"),
+			_ => return Err(Error::MultipleCodecs.into()),
 		};
 
 		let config = match codec {
@@ -289,8 +297,8 @@ impl Import {
 				config.container = container;
 				config
 			}
-			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
-			unsupported => anyhow::bail!("unsupported codec: {:?}", unsupported),
+			mp4_atom::Codec::Unknown(unknown) => return Err(Error::UnknownCodec(*unknown).into()),
+			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
 		};
 
 		Ok(config)
@@ -302,7 +310,7 @@ impl Import {
 		hvcc: &mp4_atom::Hvcc,
 		visual: &mp4_atom::Visual,
 		container: Container,
-	) -> anyhow::Result<VideoConfig> {
+	) -> Result<VideoConfig> {
 		let mut description = BytesMut::new();
 		hvcc.encode_body(&mut description)?;
 
@@ -322,14 +330,14 @@ impl Import {
 		Ok(config)
 	}
 
-	fn init_audio(&mut self, trak: &Trak, moov: &Moov) -> anyhow::Result<AudioConfig> {
+	fn init_audio(&mut self, trak: &Trak, moov: &Moov) -> Result<AudioConfig> {
 		let container = self.container(trak, moov)?;
 		let stsd = &trak.mdia.minf.stbl.stsd;
 
 		let codec = match stsd.codecs.len() {
-			0 => anyhow::bail!("missing codec"),
+			0 => return Err(Error::MissingCodec.into()),
 			1 => &stsd.codecs[0],
-			_ => anyhow::bail!("multiple codecs"),
+			_ => return Err(Error::MultipleCodecs.into()),
 		};
 
 		let config = match codec {
@@ -338,7 +346,7 @@ impl Import {
 
 				// TODO Also support mp4a.67
 				if desc.object_type_indication != 0x40 {
-					anyhow::bail!("unsupported codec: MPEG2");
+					return Err(Error::UnsupportedMpeg2.into());
 				}
 
 				let bitrate = desc.avg_bitrate.max(desc.max_bitrate);
@@ -370,31 +378,31 @@ impl Import {
 				config.container = container;
 				config
 			}
-			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
-			unsupported => anyhow::bail!("unsupported codec: {:?}", unsupported),
+			mp4_atom::Codec::Unknown(unknown) => return Err(Error::UnknownCodec(*unknown).into()),
+			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
 		};
 
 		Ok(config)
 	}
 
 	// Extract all frames out of an mdat atom using CMAF passthrough.
-	fn extract(&mut self, mdat: Mdat, mdat_raw: &[u8]) -> anyhow::Result<()> {
-		let moov = self.moov.as_ref().context("missing moov box")?;
-		let moof = self.moof.take().context("missing moof box")?;
+	fn extract(&mut self, mdat: Mdat, mdat_raw: &[u8]) -> Result<()> {
+		let moov = self.moov.as_ref().ok_or(Error::MissingMoov)?;
+		let moof = self.moof.take().ok_or(Error::MissingMoof)?;
 		let moof_size = self.moof_size;
 		let header_size = mdat_raw.len() - mdat.data.len();
 
 		// Loop over all of the traf boxes in the moof.
 		for traf in &moof.traf {
 			let track_id = traf.tfhd.track_id;
-			let track = self.tracks.get_mut(&track_id).context("unknown track")?;
+			let track = self.tracks.get_mut(&track_id).ok_or(Error::UnknownTrack(track_id))?;
 
 			// Find the track information in the moov
 			let trak = moov
 				.trak
 				.iter()
 				.find(|trak| trak.tkhd.track_id == track_id)
-				.context("unknown track")?;
+				.ok_or(Error::UnknownTrack(track_id))?;
 			let trex = moov
 				.mvex
 				.as_ref()
@@ -405,7 +413,7 @@ impl Import {
 			let default_sample_size = trex.map(|trex| trex.default_sample_size).unwrap_or_default();
 			let default_sample_flags = trex.map(|trex| trex.default_sample_flags).unwrap_or_default();
 
-			let tfdt = traf.tfdt.as_ref().context("missing tfdt box")?;
+			let tfdt = traf.tfdt.as_ref().ok_or(Error::MissingTfdt)?;
 			let mut dts = tfdt.base_media_decode_time;
 			let timescale = trak.mdia.mdhd.timescale as u64;
 
@@ -413,7 +421,7 @@ impl Import {
 			let mut track_data_start: Option<usize> = None;
 
 			if traf.trun.is_empty() {
-				anyhow::bail!("missing trun box");
+				return Err(Error::MissingTrun.into());
 			}
 
 			// Keep track of the minimum and maximum timestamp for this track to compute the jitter.
@@ -426,16 +434,16 @@ impl Import {
 
 				if let Some(data_offset) = trun.data_offset {
 					let base_offset = tfhd.base_data_offset.unwrap_or_default() as usize;
-					let data_offset: usize = data_offset.try_into().context("invalid data offset")?;
+					let data_offset: usize = data_offset.try_into().map_err(|_| Error::InvalidDataOffset)?;
 
 					let relative_offset = data_offset
 						.checked_sub(moof_size)
 						.and_then(|v| v.checked_sub(header_size))
-						.context("invalid data offset: underflow")?;
+						.ok_or(Error::InvalidDataOffset)?;
 
 					offset = base_offset
 						.checked_add(relative_offset)
-						.context("invalid data offset: overflow")?;
+						.ok_or(Error::InvalidDataOffset)?;
 				}
 
 				// Capture the actual start offset for this traf before consuming samples
@@ -458,7 +466,7 @@ impl Import {
 					let timestamp = crate::container::Timestamp::from_scale(pts, timescale)?;
 
 					if offset + size > mdat.data.len() {
-						anyhow::bail!("invalid data offset");
+						return Err(Error::InvalidDataOffset.into());
 					}
 
 					let keyframe = match track.kind {
@@ -507,13 +515,14 @@ impl Import {
 			// The per-track sample range must be in bounds of the original mdat.
 			// If not, the parsed sample sizes/offsets disagree with the actual data
 			// and we cannot safely emit a passthrough fragment with rewritten offsets.
-			anyhow::ensure!(
-				track_data_start <= track_data_end && track_data_end <= mdat.data.len(),
-				"track sample range {}..{} is out of bounds of mdat (len {})",
-				track_data_start,
-				track_data_end,
-				mdat.data.len()
-			);
+			if !(track_data_start <= track_data_end && track_data_end <= mdat.data.len()) {
+				return Err(Error::SampleRangeOutOfBounds {
+					start: track_data_start,
+					end: track_data_end,
+					len: mdat.data.len(),
+				}
+				.into());
+			}
 			let track_mdat_data = &mdat.data[track_data_start..track_data_end];
 
 			let mut adjusted_moof = single_traf_moof;
@@ -574,7 +583,7 @@ impl Import {
 				}
 				track.track.append_group()?
 			} else {
-				track.group.take().context("no keyframe at start")?
+				track.group.take().ok_or(Error::NoKeyframe)?
 			};
 
 			g.write_frame(fragment_bytes)?;
@@ -595,7 +604,7 @@ impl Import {
 								.video
 								.renditions
 								.get_mut(&track.track.name)
-								.context("missing video config")?;
+								.ok_or_else(|| Error::MissingVideoTrack(track.track.name.clone()))?;
 							config.jitter = Some(jitter.convert()?);
 						}
 						TrackKind::Audio => {
@@ -603,7 +612,7 @@ impl Import {
 								.audio
 								.renditions
 								.get_mut(&track.track.name)
-								.context("missing audio config")?;
+								.ok_or_else(|| Error::MissingAudioTrack(track.track.name.clone()))?;
 							config.jitter = Some(jitter.convert()?);
 						}
 					}
@@ -617,7 +626,7 @@ impl Import {
 
 impl Import {
 	/// Finish all tracks, flushing current groups.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	pub fn finish(&mut self) -> Result<()> {
 		for track in self.tracks.values_mut() {
 			if let Some(mut g) = track.group.take() {
 				g.finish()?;

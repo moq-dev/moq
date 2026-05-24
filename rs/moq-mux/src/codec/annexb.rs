@@ -1,7 +1,19 @@
-use anyhow::{self};
 use bytes::{Buf, Bytes};
 
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
+
+/// Annex B parsing errors.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("missing Annex B start code")]
+	MissingStartCode,
+
+	#[error("invalid Annex B start code")]
+	InvalidStartCode,
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct NalIterator<'a, T: Buf + AsRef<[u8]> + 'a> {
 	buf: &'a mut T,
@@ -15,7 +27,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> NalIterator<'a, T> {
 
 	/// Assume the buffer ends with a NAL unit and flush it.
 	/// This is more efficient because we cache the last "start" code position.
-	pub fn flush(self) -> anyhow::Result<Option<Bytes>> {
+	pub fn flush(self) -> Result<Option<Bytes>> {
 		let start = match self.start {
 			Some(start) => start,
 			None => {
@@ -34,7 +46,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> NalIterator<'a, T> {
 }
 
 impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for NalIterator<'a, T> {
-	type Item = anyhow::Result<Bytes>;
+	type Item = Result<Bytes>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		let start = match self.start {
@@ -55,21 +67,22 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for NalIterator<'a, T> {
 }
 
 // Return the size of the start code at the start of the buffer.
-pub fn after_start_code(b: &[u8]) -> anyhow::Result<Option<usize>> {
+pub fn after_start_code(b: &[u8]) -> Result<Option<usize>> {
 	if b.len() < 3 {
 		return Ok(None);
 	}
 
 	// NOTE: We have to check every byte, so the `find_start_code` optimization doesn't matter.
-	anyhow::ensure!(b[0] == 0, "missing Annex B start code");
-	anyhow::ensure!(b[1] == 0, "missing Annex B start code");
+	if b[0] != 0 || b[1] != 0 {
+		return Err(Error::MissingStartCode);
+	}
 
 	match b[2] {
 		0 if b.len() < 4 => Ok(None),
-		0 if b[3] != 1 => anyhow::bail!("missing Annex B start code"),
+		0 if b[3] != 1 => Err(Error::MissingStartCode),
 		0 => Ok(Some(4)),
 		1 => Ok(Some(3)),
-		_ => anyhow::bail!("invalid Annex B start code"),
+		_ => Err(Error::InvalidStartCode),
 	}
 }
 
