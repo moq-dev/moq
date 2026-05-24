@@ -48,28 +48,17 @@ fn create_track(broadcast: &mut moq_net::BroadcastProducer) -> anyhow::Result<mo
 
 	// Example video configuration
 	// In a real application, you would get this from the encoder
-	let video_config = hang::catalog::VideoConfig {
-		codec: hang::catalog::H264 {
-			profile: 0x4D, // Main profile
-			constraints: 0,
-			level: 0x28,  // Level 4.0
-			inline: true, // SPS/PPS inline in bitstream (avc3)
-		}
-		.into(),
-		// Codec-specific data (e.g., SPS/PPS for H.264)
-		// Not needed if you're using annex.b (inline: true)
-		description: None,
-		// There are optional but good to have.
-		coded_width: Some(1920),
-		coded_height: Some(1080),
-		bitrate: Some(5_000_000), // 5 Mbps
-		framerate: Some(30.0),
-		display_ratio_width: None,
-		display_ratio_height: None,
-		optimize_for_latency: None,
-		container: hang::catalog::Container::Legacy,
-		jitter: None,
-	};
+	let mut video_config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+		profile: 0x4D, // Main profile
+		constraints: 0,
+		level: 0x28,  // Level 4.0
+		inline: true, // SPS/PPS inline in bitstream (avc3)
+	});
+	video_config.coded_width = Some(1920);
+	video_config.coded_height = Some(1080);
+	video_config.bitrate = Some(5_000_000); // 5 Mbps
+	video_config.framerate = Some(30.0);
+	video_config.container = hang::catalog::Container::Legacy;
 
 	// Create a map of video renditions
 	// Multiple renditions allow the viewer to choose based on their capabilities

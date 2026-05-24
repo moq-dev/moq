@@ -138,25 +138,16 @@ impl Import {
 			length_size: avcc.length_size,
 		};
 
-		let config = hang::catalog::VideoConfig {
-			coded_width: avcc.coded_width,
-			coded_height: avcc.coded_height,
-			codec: hang::catalog::H264 {
-				profile: avcc.profile,
-				constraints: avcc.constraints,
-				level: avcc.level,
-				inline: false,
-			}
-			.into(),
-			description: Some(Bytes::copy_from_slice(avcc_bytes)),
-			framerate: None,
-			bitrate: None,
-			display_ratio_width: None,
-			display_ratio_height: None,
-			optimize_for_latency: None,
-			container: hang::catalog::Container::Legacy,
-			jitter: None,
-		};
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			profile: avcc.profile,
+			constraints: avcc.constraints,
+			level: avcc.level,
+			inline: false,
+		});
+		config.coded_width = avcc.coded_width;
+		config.coded_height = avcc.coded_height;
+		config.description = Some(Bytes::copy_from_slice(avcc_bytes));
+		config.container = hang::catalog::Container::Legacy;
 
 		self.swap_config(config, ".avc1")?;
 		buf.advance(buf.remaining());
@@ -379,25 +370,15 @@ impl Import {
 	}
 
 	fn init_from_sps(&mut self, sps: &Sps) -> anyhow::Result<()> {
-		let config = hang::catalog::VideoConfig {
-			coded_width: Some(sps.coded_width),
-			coded_height: Some(sps.coded_height),
-			codec: hang::catalog::H264 {
-				profile: sps.profile,
-				constraints: sps.constraints,
-				level: sps.level,
-				inline: true,
-			}
-			.into(),
-			description: None,
-			framerate: None,
-			bitrate: None,
-			display_ratio_width: None,
-			display_ratio_height: None,
-			optimize_for_latency: None,
-			container: hang::catalog::Container::Legacy,
-			jitter: None,
-		};
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			profile: sps.profile,
+			constraints: sps.constraints,
+			level: sps.level,
+			inline: true,
+		});
+		config.coded_width = Some(sps.coded_width);
+		config.coded_height = Some(sps.coded_height);
+		config.container = hang::catalog::Container::Legacy;
 
 		if let Some(old) = &self.config
 			&& old == &config

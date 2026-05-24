@@ -241,85 +241,53 @@ impl Import {
 				let mut description = BytesMut::new();
 				avcc.encode_body(&mut description)?;
 
-				VideoConfig {
-					coded_width: Some(avc1.visual.width as _),
-					coded_height: Some(avc1.visual.height as _),
-					codec: H264 {
-						profile: avcc.avc_profile_indication,
-						constraints: avcc.profile_compatibility,
-						level: avcc.avc_level_indication,
-						inline: false,
-					}
-					.into(),
-					description: Some(description.freeze()),
-					// TODO: populate these fields
-					framerate: None,
-					bitrate: None,
-					display_ratio_width: None,
-					display_ratio_height: None,
-					optimize_for_latency: None,
-					container,
-					jitter: None,
-				}
+				let mut config = VideoConfig::new(H264 {
+					profile: avcc.avc_profile_indication,
+					constraints: avcc.profile_compatibility,
+					level: avcc.avc_level_indication,
+					inline: false,
+				});
+				config.coded_width = Some(avc1.visual.width as _);
+				config.coded_height = Some(avc1.visual.height as _);
+				config.description = Some(description.freeze());
+				config.container = container;
+				config
 			}
 			mp4_atom::Codec::Hev1(hev1) => self.init_h265(true, &hev1.hvcc, &hev1.visual, container)?,
 			mp4_atom::Codec::Hvc1(hvc1) => self.init_h265(false, &hvc1.hvcc, &hvc1.visual, container)?,
-			mp4_atom::Codec::Vp08(vp08) => VideoConfig {
-				codec: VideoCodec::VP8,
-				description: Default::default(),
-				coded_width: Some(vp08.visual.width as _),
-				coded_height: Some(vp08.visual.height as _),
-				// TODO: populate these fields
-				framerate: None,
-				bitrate: None,
-				display_ratio_width: None,
-				display_ratio_height: None,
-				optimize_for_latency: None,
-				container,
-				jitter: None,
-			},
+			mp4_atom::Codec::Vp08(vp08) => {
+				let mut config = VideoConfig::new(VideoCodec::VP8);
+				config.coded_width = Some(vp08.visual.width as _);
+				config.coded_height = Some(vp08.visual.height as _);
+				config.container = container;
+				config
+			}
 			mp4_atom::Codec::Vp09(vp09) => {
 				// https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L238
 				let vpcc = &vp09.vpcc;
 
-				VideoConfig {
-					codec: VP9 {
-						profile: vpcc.profile,
-						level: vpcc.level,
-						bit_depth: vpcc.bit_depth,
-						color_primaries: vpcc.color_primaries,
-						chroma_subsampling: vpcc.chroma_subsampling,
-						transfer_characteristics: vpcc.transfer_characteristics,
-						matrix_coefficients: vpcc.matrix_coefficients,
-						full_range: vpcc.video_full_range_flag,
-					}
-					.into(),
-					description: Default::default(),
-					coded_width: Some(vp09.visual.width as _),
-					coded_height: Some(vp09.visual.height as _),
-					// TODO: populate these fields
-					display_ratio_width: None,
-					display_ratio_height: None,
-					optimize_for_latency: None,
-					bitrate: None,
-					framerate: None,
-					container,
-					jitter: None,
-				}
+				let mut config = VideoConfig::new(VP9 {
+					profile: vpcc.profile,
+					level: vpcc.level,
+					bit_depth: vpcc.bit_depth,
+					color_primaries: vpcc.color_primaries,
+					chroma_subsampling: vpcc.chroma_subsampling,
+					transfer_characteristics: vpcc.transfer_characteristics,
+					matrix_coefficients: vpcc.matrix_coefficients,
+					full_range: vpcc.video_full_range_flag,
+				});
+				config.coded_width = Some(vp09.visual.width as _);
+				config.coded_height = Some(vp09.visual.height as _);
+				config.container = container;
+				config
 			}
-			mp4_atom::Codec::Av01(av01) => VideoConfig {
-				codec: crate::codec::av1::av1_from_av1c(&av01.av1c).into(),
-				description: Default::default(),
-				coded_width: Some(av01.visual.width as _),
-				coded_height: Some(av01.visual.height as _),
-				display_ratio_width: None,
-				display_ratio_height: None,
-				optimize_for_latency: None,
-				bitrate: None,
-				framerate: None,
-				container,
-				jitter: None,
-			},
+			mp4_atom::Codec::Av01(av01) => {
+				let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av01.av1c));
+				config.coded_width = Some(av01.visual.width as _);
+				config.coded_height = Some(av01.visual.height as _);
+				config.container = container;
+				config
+			}
 			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
 			unsupported => anyhow::bail!("unsupported codec: {:?}", unsupported),
 		};
@@ -337,29 +305,20 @@ impl Import {
 		let mut description = BytesMut::new();
 		hvcc.encode_body(&mut description)?;
 
-		Ok(VideoConfig {
-			codec: H265 {
-				in_band,
-				profile_space: hvcc.general_profile_space,
-				profile_idc: hvcc.general_profile_idc,
-				profile_compatibility_flags: hvcc.general_profile_compatibility_flags,
-				tier_flag: hvcc.general_tier_flag,
-				level_idc: hvcc.general_level_idc,
-				constraint_flags: hvcc.general_constraint_indicator_flags,
-			}
-			.into(),
-			description: Some(description.freeze()),
-			coded_width: Some(visual.width as _),
-			coded_height: Some(visual.height as _),
-			// TODO: populate these fields
-			bitrate: None,
-			framerate: None,
-			display_ratio_width: None,
-			display_ratio_height: None,
-			optimize_for_latency: None,
-			container,
-			jitter: None,
-		})
+		let mut config = VideoConfig::new(H265 {
+			in_band,
+			profile_space: hvcc.general_profile_space,
+			profile_idc: hvcc.general_profile_idc,
+			profile_compatibility_flags: hvcc.general_profile_compatibility_flags,
+			tier_flag: hvcc.general_tier_flag,
+			level_idc: hvcc.general_level_idc,
+			constraint_flags: hvcc.general_constraint_indicator_flags,
+		});
+		config.description = Some(description.freeze());
+		config.coded_width = Some(visual.width as _);
+		config.coded_height = Some(visual.height as _);
+		config.container = container;
+		Ok(config)
 	}
 
 	fn init_audio(&mut self, trak: &Trak, moov: &Moov) -> anyhow::Result<AudioConfig> {
@@ -395,26 +354,20 @@ impl Import {
 				}
 				.encode();
 
-				AudioConfig {
-					codec: AAC { profile }.into(),
-					sample_rate,
-					channel_count,
-					bitrate: Some(bitrate.into()),
-					description: Some(description),
-					container,
-					jitter: None,
-				}
+				let mut config = AudioConfig::new(AAC { profile }, sample_rate, channel_count);
+				config.bitrate = Some(bitrate.into());
+				config.description = Some(description);
+				config.container = container;
+				config
 			}
 			mp4_atom::Codec::Opus(opus) => {
-				AudioConfig {
-					codec: AudioCodec::Opus,
-					sample_rate: opus.audio.sample_rate.integer() as _,
-					channel_count: opus.audio.channel_count as _,
-					bitrate: None,
-					description: None, // TODO?
-					container,
-					jitter: None,
-				}
+				let mut config = AudioConfig::new(
+					AudioCodec::Opus,
+					opus.audio.sample_rate.integer() as _,
+					opus.audio.channel_count as _,
+				);
+				config.container = container;
+				config
 			}
 			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
 			unsupported => anyhow::bail!("unsupported codec: {:?}", unsupported),

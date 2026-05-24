@@ -22,15 +22,12 @@ impl Import {
 	) -> anyhow::Result<Self> {
 		let track = broadcast.unique_track(".opus")?;
 
-		let audio_config = hang::catalog::AudioConfig {
-			codec: hang::catalog::AudioCodec::Opus,
-			sample_rate: config.sample_rate,
-			channel_count: config.channel_count,
-			bitrate: None,
-			description: None,
-			container: hang::catalog::Container::Legacy,
-			jitter: None,
-		};
+		let mut audio_config = hang::catalog::AudioConfig::new(
+			hang::catalog::AudioCodec::Opus,
+			config.sample_rate,
+			config.channel_count,
+		);
+		audio_config.container = hang::catalog::Container::Legacy;
 
 		tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
 		catalog.lock().audio.renditions.insert(track.name.clone(), audio_config);

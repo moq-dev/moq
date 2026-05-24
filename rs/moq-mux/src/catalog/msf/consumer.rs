@@ -205,26 +205,22 @@ fn video_config_from_msf(track: &moq_msf::Track) -> anyhow::Result<Option<VideoC
 	let codec = VideoCodec::from_str(codec_str)
 		.with_context(|| format!("MSF video track {:?} has invalid codec {codec_str:?}", track.name))?;
 
-	Ok(Some(VideoConfig {
-		codec,
-		description: legacy_description(track)?,
-		coded_width: track.width,
-		coded_height: track.height,
-		display_ratio_width: None,
-		display_ratio_height: None,
-		bitrate: track.bitrate,
-		framerate: track.framerate,
-		optimize_for_latency: None,
-		container,
-		// Jitter is converted from f64 milliseconds to integer milliseconds.
-		// Fractional milliseconds are truncated (e.g. 15.5ms becomes 15ms).
-		// This is acceptable for the jitter use case where sub-ms precision
-		// is not meaningful.
-		jitter: track
-			.jitter
-			.filter(|v| v.is_finite() && *v >= 0.0)
-			.and_then(|v| moq_net::Time::from_millis(v as u64).ok()),
-	}))
+	let mut config = VideoConfig::new(codec);
+	config.description = legacy_description(track)?;
+	config.coded_width = track.width;
+	config.coded_height = track.height;
+	config.bitrate = track.bitrate;
+	config.framerate = track.framerate;
+	config.container = container;
+	// Jitter is converted from f64 milliseconds to integer milliseconds.
+	// Fractional milliseconds are truncated (e.g. 15.5ms becomes 15ms).
+	// This is acceptable for the jitter use case where sub-ms precision
+	// is not meaningful.
+	config.jitter = track
+		.jitter
+		.filter(|v| v.is_finite() && *v >= 0.0)
+		.and_then(|v| moq_net::Time::from_millis(v as u64).ok());
+	Ok(Some(config))
 }
 
 fn audio_config_from_msf(track: &moq_msf::Track) -> anyhow::Result<Option<AudioConfig>> {
@@ -256,22 +252,19 @@ fn audio_config_from_msf(track: &moq_msf::Track) -> anyhow::Result<Option<AudioC
 		}
 	};
 
-	Ok(Some(AudioConfig {
-		codec,
-		sample_rate,
-		channel_count,
-		bitrate: track.bitrate,
-		description: legacy_description(track)?,
-		container,
-		// Jitter is converted from f64 milliseconds to integer milliseconds.
-		// Fractional milliseconds are truncated (e.g. 15.5ms becomes 15ms).
-		// This is acceptable for the jitter use case where sub-ms precision
-		// is not meaningful.
-		jitter: track
-			.jitter
-			.filter(|v| v.is_finite() && *v >= 0.0)
-			.and_then(|v| moq_net::Time::from_millis(v as u64).ok()),
-	}))
+	let mut config = AudioConfig::new(codec, sample_rate, channel_count);
+	config.bitrate = track.bitrate;
+	config.description = legacy_description(track)?;
+	config.container = container;
+	// Jitter is converted from f64 milliseconds to integer milliseconds.
+	// Fractional milliseconds are truncated (e.g. 15.5ms becomes 15ms).
+	// This is acceptable for the jitter use case where sub-ms precision
+	// is not meaningful.
+	config.jitter = track
+		.jitter
+		.filter(|v| v.is_finite() && *v >= 0.0)
+		.and_then(|v| moq_net::Time::from_millis(v as u64).ok());
+	Ok(Some(config))
 }
 
 /// Audio parameters derived from a track's `init_data`.
