@@ -7,5 +7,7 @@
 //! producer's job (it writes both tracks).
 
 mod consumer;
+mod error;
 
 pub use consumer::Consumer;
+pub use error::Error;

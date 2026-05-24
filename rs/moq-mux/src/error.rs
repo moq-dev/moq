@@ -23,13 +23,8 @@ pub enum Error {
 	Loc(#[from] moq_loc::Error),
 
 	/// Error parsing or converting an MSF catalog snapshot.
-	///
-	/// MSF parsing pulls together moq_msf JSON decoding, base64-decoded
-	/// init data, mp4_atom moov walking, and codec-specific config readers.
-	/// Each can fail in its own way; we wrap the resulting [`anyhow::Error`]
-	/// rather than enumerating every leaf type.
 	#[error("msf: {0}")]
-	Msf(anyhow::Error),
+	Msf(#[from] crate::catalog::msf::Error),
 }
 
 /// A Result type alias for moq-mux operations.

@@ -40,7 +40,7 @@ impl Stream for Consumer {
 	fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
 		match self {
 			Self::Hang(c) => c.poll_next(waiter),
-			Self::Msf(c) => c.poll_next(waiter),
+			Self::Msf(c) => c.poll_next(waiter).map_err(Into::into),
 		}
 	}
 }
