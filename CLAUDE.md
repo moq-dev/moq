@@ -152,3 +152,7 @@ When making changes to the codebase:
 4. Update relevant documentation (CLAUDE.md, doc/, README) when making major changes
 5. Add unit tests for any changes that are easy enough to test
 6. Commit and push changes
+
+## PR Reviews
+
+CodeRabbit reviews PRs automatically, but it has an hourly quota and runs out of org credits. If a PR shows a "Review limit reached" / "out of usage credits" message instead of an actual review, run the `/review` skill locally against the PR to get review feedback without waiting for the quota to refill.
