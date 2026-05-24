@@ -41,20 +41,20 @@ jobs:
         with:
           persist-credentials: false
 
-      # Validate against an allowlist so REF_NAME can't slip arbitrary
-      # text into later steps. (Written by Claude)
+      # Full-match REF_NAME against the same <prefix>-v<semver> contract
+      # release.sh enforces, so a malformed tag fails fast instead of
+      # building under a trusted identity. (Written by Claude)
       - name: Derive package from tag
         id: pkg
         env:
           REF_NAME: ${{ github.ref_name }}
         run: |
-          # moq-relay-v0.11.5 -> moq-relay
-          name="${REF_NAME%-v*}"
-          case "$name" in
-            moq-relay|moq-cli|moq-token-cli|moq-boy|libmoq|moq-gst) ;;
-            *) echo "Unrecognized tag prefix: $REF_NAME" >&2; exit 1 ;;
-          esac
-          echo "name=$name" >> "$GITHUB_OUTPUT"
+          re='^(moq-relay|moq-cli|moq-token-cli|moq-boy|libmoq|moq-gst)-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$'
+          if [[ ! "$REF_NAME" =~ $re ]]; then
+            echo "Tag format not recognized: $REF_NAME" >&2
+            exit 1
+          fi
+          echo "name=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
 
       - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
         with:
