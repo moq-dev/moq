@@ -18,7 +18,7 @@ The simplest way to publish:
 
 <moq-publish
     url="https://relay.example.com/anon"
-    name="room/alice"
+    name="room/alice.hang"
     device="camera"
     audio video controls>
     <video muted autoplay></video>
@@ -41,7 +41,7 @@ The simplest way to publish:
 For more control, use `@moq/publish` directly:
 
 ```typescript
-import * as Moq from "@moq/lite";
+import * as Moq from "@moq/net";
 import * as Publish from "@moq/publish";
 
 const connection = await Moq.Connection.connect(
@@ -51,7 +51,7 @@ const connection = await Moq.Connection.connect(
 const publish = new Publish.Broadcast({
     connection,
     enabled: true,
-    name: "alice",
+    name: "alice.hang",
     video: {
         enabled: true,
         device: "camera",
@@ -85,9 +85,9 @@ publish.video.enabled.set(true);
 publish.audio.enabled.set(false);
 ```
 
-## SolidJS Integration
+## UI Overlay
 
-Use `@moq/publish/ui` for the SolidJS UI overlay. The `<moq-publish-ui>` element wraps a nested `<moq-publish>`:
+Use `@moq/publish/ui` for the Web Component UI overlay. The `<moq-publish-ui>` element wraps a nested `<moq-publish>`:
 
 ```html
 <script type="module">
@@ -96,7 +96,7 @@ Use `@moq/publish/ui` for the SolidJS UI overlay. The `<moq-publish-ui>` element
 </script>
 
 <moq-publish-ui>
-    <moq-publish url="https://relay.example.com/anon" name="room/alice" audio video>
+    <moq-publish url="https://relay.example.com/anon" name="room/alice.hang" audio video>
         <video muted autoplay></video>
     </moq-publish>
 </moq-publish-ui>
@@ -109,7 +109,7 @@ Include JWT token in the URL:
 ```html
 <moq-publish
     url="https://relay.example.com/room/123?jwt=eyJhbGciOiJIUzI1NiIs..."
-    name="alice"
+    name="alice.hang"
     audio video>
 </moq-publish>
 ```

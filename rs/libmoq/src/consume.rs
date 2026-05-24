@@ -1,4 +1,3 @@
-use bytes::Buf;
 use std::ffi::c_char;
 use tokio::sync::oneshot;
 
@@ -6,7 +5,7 @@ use crate::ffi::OnStatus;
 use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_video_config};
 
 struct ConsumeCatalog {
-	broadcast: moq_lite::BroadcastConsumer,
+	broadcast: moq_net::BroadcastConsumer,
 
 	catalog: hang::catalog::Catalog,
 
@@ -26,7 +25,7 @@ struct TaskEntry {
 #[derive(Default)]
 pub struct Consume {
 	/// Active broadcast consumers.
-	broadcast: NonZeroSlab<moq_lite::BroadcastConsumer>,
+	broadcast: NonZeroSlab<moq_net::BroadcastConsumer>,
 
 	/// Active catalog consumers and their broadcast references.
 	catalog: NonZeroSlab<ConsumeCatalog>,
@@ -38,20 +37,17 @@ pub struct Consume {
 	track_task: NonZeroSlab<Option<TaskEntry>>,
 
 	/// Buffered frames ready for consumption.
-	frame: NonZeroSlab<hang::container::OrderedFrame>,
+	frame: NonZeroSlab<moq_mux::container::Frame>,
 }
 
 impl Consume {
-	pub fn start(&mut self, broadcast: moq_lite::BroadcastConsumer) -> Result<Id, Error> {
+	pub fn start(&mut self, broadcast: moq_net::BroadcastConsumer) -> Result<Id, Error> {
 		self.broadcast.insert(broadcast)
 	}
 
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
-		let catalog = broadcast.subscribe_track(
-			&hang::catalog::Catalog::default_track(),
-			hang::catalog::Catalog::SUBSCRIPTION,
-		)?;
+		let catalog = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -77,8 +73,8 @@ impl Consume {
 
 	async fn run_catalog(
 		task_id: Id,
-		broadcast: moq_lite::BroadcastConsumer,
-		mut catalog: hang::CatalogConsumer,
+		broadcast: moq_net::BroadcastConsumer,
+		mut catalog: moq_mux::catalog::hang::Consumer,
 	) -> Result<(), Error> {
 		while let Some(catalog) = catalog.next().await? {
 			// Unfortunately we need to store the codec information on the heap.
@@ -220,14 +216,12 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 
-		let track = consume.broadcast.subscribe_track(
-			&moq_lite::Track::new(rendition.clone()),
-			moq_lite::Subscription {
-				priority: 1,
-				..Default::default()
-			},
-		)?;
-		let track = hang::container::OrderedConsumer::new(track, latency);
+		let track = consume.broadcast.subscribe_track(&moq_net::Track {
+			name: rendition.clone(),
+			priority: 1, // TODO: Remove priority
+		})?;
+		let track =
+			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -267,14 +261,12 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 
-		let track = consume.broadcast.subscribe_track(
-			&moq_lite::Track::new(rendition.clone()),
-			moq_lite::Subscription {
-				priority: 2,
-				..Default::default()
-			},
-		)?;
-		let track = hang::container::OrderedConsumer::new(track, latency);
+		let track = consume.broadcast.subscribe_track(&moq_net::Track {
+			name: rendition.clone(),
+			priority: 2, // TODO: Remove priority
+		})?;
+		let track =
+			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -298,25 +290,11 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_track(task_id: Id, mut track: hang::container::OrderedConsumer) -> Result<(), Error> {
-		while let Some(mut ordered) = track.read().await? {
-			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.
-			let mut new_payload = hang::container::BufList::new();
-			new_payload.push_chunk(if ordered.payload.num_chunks() == 1 {
-				// We can avoid allocating
-				ordered.payload.get_chunk(0).expect("frame has zero chunks").clone()
-			} else {
-				// We need to allocate
-				ordered.payload.copy_to_bytes(ordered.payload.num_bytes())
-			});
-
-			let new_frame = hang::container::OrderedFrame {
-				timestamp: ordered.timestamp,
-				payload: new_payload,
-				group: ordered.group,
-				index: ordered.index,
-			};
-
+	async fn run_track(
+		task_id: Id,
+		mut track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
+	) -> Result<(), Error> {
+		while let Some(frame) = track.read().await? {
 			let mut state = State::lock();
 
 			// Stop if the callback was revoked by close.
@@ -325,7 +303,7 @@ impl Consume {
 			};
 			let callback = entry.callback;
 
-			let frame_id = state.consume.frame.insert(new_frame)?;
+			let frame_id = state.consume.frame.insert(frame)?;
 			drop(state);
 
 			// The lock is dropped before the callback is invoked.
@@ -344,22 +322,20 @@ impl Consume {
 		Ok(())
 	}
 
-	// NOTE: You're supposed to call this multiple times to get all of the chunks.
-	pub fn frame_chunk(&self, frame: Id, index: usize, dst: &mut moq_frame) -> Result<(), Error> {
-		let ordered = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
-		let chunk = ordered.payload.get_chunk(index).ok_or(Error::NoIndex)?;
+	/// Read the payload of a frame as a single contiguous slice.
+	///
+	/// Frames are not chunked — the payload pointer is valid until the frame is closed
+	/// via [`Self::frame_close`].
+	pub fn frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
+		let f = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
 
-		let timestamp_us = ordered
-			.timestamp
-			.as_micros()
-			.try_into()
-			.map_err(|_| moq_lite::TimeOverflow)?;
+		let timestamp_us = f.timestamp.as_micros().try_into().map_err(|_| moq_net::TimeOverflow)?;
 
 		*dst = moq_frame {
-			payload: chunk.as_ptr(),
-			payload_size: chunk.len(),
+			payload: f.payload.as_ptr(),
+			payload_size: f.payload.len(),
 			timestamp_us,
-			keyframe: ordered.is_keyframe(),
+			keyframe: f.keyframe,
 		};
 
 		Ok(())

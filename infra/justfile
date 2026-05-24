@@ -1,0 +1,9 @@
+set fallback
+
+mod apt
+mod rpm
+
+# Deploy all infra workers.
+deploy:
+	just apt deploy
+	just rpm deploy

@@ -1,4 +1,4 @@
-import { Path } from "@moq/lite";
+import { Path } from "@moq/net";
 import * as z from "zod/mini";
 
 /**

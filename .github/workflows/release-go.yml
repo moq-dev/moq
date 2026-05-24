@@ -1,0 +1,262 @@
+name: Release Go
+
+on:
+  push:
+    tags:
+      - "moq-ffi-v*"
+  pull_request:
+    paths:
+      - ".github/workflows/release-go.yml"
+      - ".github/scripts/release.sh"
+      - "go/scripts/package.sh"
+      - "go/scripts/publish.sh"
+      - "rs/moq-ffi/build.sh"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-go
+  cancel-in-progress: false
+
+env:
+  UNIFFI_BINDGEN_GO_TAG: v0.7.1+v0.31.0
+
+jobs:
+  parse-version:
+    name: Parse version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Parse version
+        id: parse
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            CARGO_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
+          else
+            .github/scripts/release.sh parse-version moq-ffi
+          fi
+
+  build:
+    name: Build moq-ffi (${{ matrix.target }})
+    needs: [parse-version]
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./rs/moq-ffi/build.sh \
+            --target "$BUILD_TARGET" \
+            --version "$BUILD_VERSION" \
+            --output dist
+
+      - name: Upload lib
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: go-lib-${{ matrix.target }}
+          # package.sh expects <target>/<libname>; upload just lib/ contents.
+          path: dist/moq-ffi-${{ needs.parse-version.outputs.version }}-${{ matrix.target }}/lib/
+
+  bindings:
+    name: Generate bindings
+    needs: [parse-version]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install uniffi-bindgen-go
+        run: |
+          cargo install uniffi-bindgen-go \
+            --git https://github.com/NordSecurity/uniffi-bindgen-go \
+            --tag "$UNIFFI_BINDGEN_GO_TAG"
+
+      - name: Generate bindings
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./rs/moq-ffi/build.sh \
+            --bindings-only \
+            --version "$BUILD_VERSION" \
+            --output dist
+
+      - name: Upload bindings
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: go-bindings
+          path: dist/bindings/go/
+
+  package:
+    name: Package
+    needs: [parse-version, build, bindings]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Download per-target libs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: libs-raw
+          pattern: go-lib-*
+
+      - name: Flatten lib layout
+        run: |
+          mkdir -p libs
+          for dir in libs-raw/go-lib-*; do
+            target="${dir#libs-raw/go-lib-}"
+            mv "$dir" "libs/$target"
+          done
+          ls -la libs
+
+      - name: Download bindings
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: go-bindings
+          path: bindings-raw
+
+      - name: Flatten bindings layout
+        # uniffi-bindgen-go emits uniffi/moq/moq.go; package.sh expects moq/moq.go.
+        run: |
+          mkdir -p bindings/moq
+          if [[ -f bindings-raw/uniffi/moq/moq.go ]]; then
+            cp bindings-raw/uniffi/moq/moq.go bindings/moq/moq.go
+          elif [[ -f bindings-raw/moq/moq.go ]]; then
+            cp bindings-raw/moq/moq.go bindings/moq/moq.go
+          else
+            echo "Error: could not locate moq.go under bindings-raw/" >&2
+            find bindings-raw -type f
+            exit 1
+          fi
+
+      - name: Package
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./go/scripts/package.sh \
+            --version "$BUILD_VERSION" \
+            --lib-dir libs \
+            --bindings-dir bindings \
+            --output release-out
+
+      - name: Upload Go module
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: go-package
+          path: release-out/*
+
+  publish:
+    name: Publish to Go module mirror
+    needs: [package, parse-version]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Generate moq-bot token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        id: token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: moq-dev
+          repositories: moq-go
+          # Narrow the minted token to only what publish.sh needs.
+          permission-contents: write
+
+      - name: Download package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: go-package
+          path: go-out
+
+      - name: Publish to moq-dev/moq-go mirror
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          # Token is minted fresh per run, expires in 1 hour, never at rest.
+          GO_MIRROR_TOKEN: ${{ steps.token.outputs.token }}
+          GIT_AUTHOR_NAME: moq-bot
+          GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
+        run: ./go/scripts/publish.sh
+
+  publish-dry-run:
+    name: Publish dry-run
+    needs: [package, parse-version]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Download package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: go-package
+          path: go-out
+
+      - name: Dry-run publish to mirror
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: ./go/scripts/publish.sh --dry-run

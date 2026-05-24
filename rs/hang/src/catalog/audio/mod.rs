@@ -37,34 +37,9 @@ impl Audio {
 		Ok(())
 	}
 
-	/// Create a new audio track with the given extension and configuration.
-	#[deprecated(
-		note = "use BroadcastProducer::unique_track to create the track, then insert into the catalog when initialized"
-	)]
-	pub fn create_track(&mut self, extension: &str, config: AudioConfig) -> moq_lite::Track {
-		for i in 0.. {
-			let name = match extension {
-				"" => format!("audio{}", i),
-				extension => format!("audio{}.{}", i, extension),
-			};
-
-			if let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.clone()) {
-				entry.insert(config.clone());
-				return moq_lite::Track::new(name);
-			}
-		}
-
-		unreachable!("no available audio track name");
-	}
-
-	/// Remove a track from the catalog by name.
+	/// Remove the track from the catalog and return the configuration if found.
 	pub fn remove(&mut self, name: &str) -> Option<AudioConfig> {
 		self.renditions.remove(name)
-	}
-
-	#[deprecated(note = "use remove() instead")]
-	pub fn remove_track(&mut self, track: &moq_lite::Track) -> Option<AudioConfig> {
-		self.remove(&track.name)
 	}
 }
 
@@ -83,7 +58,7 @@ pub struct AudioConfig {
 	/// relative to the broadcast that served this catalog. If unset, the track lives
 	/// in the same broadcast as the catalog.
 	#[serde(default)]
-	pub broadcast: Option<moq_lite::PathRelativeOwned>,
+	pub broadcast: Option<moq_net::PathRelativeOwned>,
 
 	// The codec, see the registry for details:
 	// https://w3c.github.io/webcodecs/codec_registry.html
@@ -119,5 +94,5 @@ pub struct AudioConfig {
 	/// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
 	/// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 23ms
 	#[serde(default)]
-	pub jitter: Option<moq_lite::Time>,
+	pub jitter: Option<moq_net::Time>,
 }

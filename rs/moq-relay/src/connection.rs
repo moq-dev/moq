@@ -54,19 +54,29 @@ impl Connection {
 
 		match (&publish, &subscribe) {
 			(Some(publish), Some(subscribe)) => {
-				tracing::info!(transport, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
+				tracing::info!(transport, internal = token.internal, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
 			}
 			(Some(publish), None) => {
-				tracing::info!(transport, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
+				tracing::info!(transport, internal = token.internal, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
 			}
 			(None, Some(subscribe)) => {
-				tracing::info!(transport, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
+				tracing::info!(transport, internal = token.internal, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
 			}
 			_ => {
 				let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
 				anyhow::bail!("invalid session; no allowed paths");
 			}
 		}
+
+		// mTLS-authenticated peers (including other cluster nodes) report through
+		// the internal tier so a billing service can rate-differentiate from
+		// external traffic. The aggregator is shared; the tier picks which counter
+		// set within each level the bumps land in.
+		let tier = match token.internal {
+			true => moq_net::Tier::Internal,
+			false => moq_net::Tier::External,
+		};
+		let stats = self.cluster.stats.tier(tier);
 
 		// Accept the connection.
 		// NOTE: subscribe and publish seem backwards because of how relays work.
@@ -76,8 +86,7 @@ impl Connection {
 			.request
 			.with_publish(subscribe)
 			.with_consume(publish)
-			// TODO: Uncomment when observability feature is merged
-			// .with_stats(stats)
+			.with_stats(stats)
 			.ok()
 			.await?;
 

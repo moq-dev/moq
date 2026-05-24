@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.11...moq-boy-v0.2.12) - 2026-05-23
+
+### Other
+
+- update Cargo.lock dependencies
+
+## [0.2.11](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.10...moq-boy-v0.2.11) - 2026-05-20
+
+### Other
+
+- rename moq-lite package to moq-net ([#1428](https://github.com/moq-dev/moq/pull/1428))
+
+## [0.2.10](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.9...moq-boy-v0.2.10) - 2026-05-18
+
+### Other
+
+- update Cargo.lock dependencies
+
+## [0.2.9](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.8...moq-boy-v0.2.9) - 2026-05-07
+
+### Other
+
+- moq-mux backport + dual-API cleanup ([#1341](https://github.com/moq-dev/moq/pull/1341))
+- Revert moq-lite FETCH/Subscription API changes ([#1372](https://github.com/moq-dev/moq/pull/1372))
+- relocate jemalloc helper; wire it into moq-boy ([#1360](https://github.com/moq-dev/moq/pull/1360))
+- backport Subscription model API for FETCH readiness ([#1348](https://github.com/moq-dev/moq/pull/1348))
+- hop-based clustering ([#1322](https://github.com/moq-dev/moq/pull/1322))
+
 ## [0.2.8](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.7...moq-boy-v0.2.8) - 2026-04-19
 
 ### Other

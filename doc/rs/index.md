@@ -9,12 +9,12 @@ The Rust implementation provides the reference implementation of the MoQ protoco
 
 ## Core Libraries
 
-### moq-lite
+### moq-net
 
-[![crates.io](https://img.shields.io/crates/v/moq-lite)](https://crates.io/crates/moq-lite)
-[![docs.rs](https://docs.rs/moq-lite/badge.svg)](https://docs.rs/moq-lite)
+[![crates.io](https://img.shields.io/crates/v/moq-net)](https://crates.io/crates/moq-net)
+[![docs.rs](https://docs.rs/moq-net/badge.svg)](https://docs.rs/moq-net)
 
-The core pub/sub transport protocol implementing the [moq-lite specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/).
+The networking layer for MoQ. At session setup it negotiates one of two wire protocols: the simplified [moq-lite](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) protocol or the full IETF [moq-transport](https://datatracker.ietf.org/group/moq/documents/) protocol.
 
 **Features:**
 
@@ -23,14 +23,14 @@ The core pub/sub transport protocol implementing the [moq-lite specification](ht
 - QUIC stream management
 - Prioritization and backpressure
 
-[Learn more](/rs/crate/moq-lite)
+[Learn more](/rs/crate/moq-net)
 
 ### hang
 
 [![crates.io](https://img.shields.io/crates/v/hang)](https://crates.io/crates/hang)
 [![docs.rs](https://docs.rs/hang/badge.svg)](https://docs.rs/hang)
 
-Media-specific encoding/streaming library built on top of `moq-lite`.
+Media-specific encoding/streaming library built on top of `moq-net`.
 
 **Features:**
 
@@ -166,7 +166,7 @@ Timing and clock utilities for synchronization.
 
 [![docs.rs](https://docs.rs/libmoq/badge.svg)](https://docs.rs/libmoq)
 
-C bindings for `moq-lite` via FFI.
+C bindings for `moq-net` via FFI.
 
 **Use cases:**
 
@@ -182,7 +182,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-moq-lite = "0.1"
+moq-net = "0.1"
 hang = "0.1"
 ```
 
@@ -209,7 +209,7 @@ nix build github:moq-dev/moq#moq-cli
 ### Publishing (Rust)
 
 ```rust
-use moq_lite::*;
+use moq_net::*;
 use tokio;
 
 #[tokio::main]
@@ -238,7 +238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Subscribing (Rust)
 
 ```rust
-use moq_lite::*;
+use moq_net::*;
 use tokio;
 
 #[tokio::main]
@@ -267,7 +267,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Full API documentation is available on [docs.rs](https://docs.rs):
 
-- [moq-lite API](https://docs.rs/moq-lite)
+- [moq-net API](https://docs.rs/moq-net)
 - [hang API](https://docs.rs/hang)
 - [moq-mux API](https://docs.rs/moq-mux)
 - [moq-token API](https://docs.rs/moq-token)
@@ -276,7 +276,7 @@ Full API documentation is available on [docs.rs](https://docs.rs):
 
 ## Next Steps
 
-- Explore [moq-lite](/rs/crate/moq-lite) - Core protocol
+- Explore [moq-net](/rs/crate/moq-net) - Networking layer
 - Explore [hang](/rs/crate/hang) - Media library
 - Explore [moq-mux](/rs/crate/moq-mux) - Media import
 - Deploy [moq-relay](/app/relay/) - Relay server

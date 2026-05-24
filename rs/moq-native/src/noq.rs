@@ -15,7 +15,7 @@ use web_transport_noq::noq;
 pub(crate) struct NoqClient {
 	pub quic: noq::Endpoint,
 	pub transport: Arc<noq::TransportConfig>,
-	pub versions: moq_lite::Versions,
+	pub versions: moq_net::Versions,
 }
 
 impl NoqClient {
@@ -57,12 +57,15 @@ impl NoqClient {
 		let port = url.port().unwrap_or(443);
 
 		// Look up the DNS entry.
-		// Noq doesn't support happy eyeballs, so we use the first address.
-		let ip = tokio::net::lookup_host((host.clone(), port))
+		// Noq doesn't support happy eyeballs, so we pick a single address,
+		// preferring one whose family matches the local socket so the OS
+		// doesn't reject it (notably on Windows, where IPv6 sockets aren't
+		// dual-stack by default).
+		let local = self.quic.local_addr().context("failed to get local address")?;
+		let addrs = tokio::net::lookup_host((host.clone(), port))
 			.await
-			.context("failed DNS lookup")?
-			.next()
-			.context("no DNS entries")?;
+			.context("failed DNS lookup")?;
+		let ip = crate::util::pick_addr(addrs, local).context("no DNS entries")?;
 
 		if url.scheme() == "http" {
 			// Perform a HTTP request to fetch the certificate fingerprint.
@@ -286,7 +289,7 @@ impl NoqRequest {
 					.context("failed to receive WebTransport request")?;
 				Ok(Self::WebTransport { request, alpns })
 			}
-			alpn if moq_lite::ALPNS.contains(&alpn) => {
+			alpn if moq_net::ALPNS.contains(&alpn) => {
 				anyhow::ensure!(!host.is_empty(), "missing server name for raw QUIC connection");
 				let host_str = if host.contains(':') {
 					format!("[{}]", host)

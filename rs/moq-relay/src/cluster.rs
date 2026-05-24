@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use moq_lite::{BroadcastConsumer, Origin, OriginConsumer, OriginProducer};
+use moq_net::{Origin, OriginConsumer, OriginProducer, Stats, Tier};
 use url::Url;
 
 use crate::AuthToken;
@@ -39,51 +39,91 @@ pub struct ClusterConfig {
 ///
 /// Local sessions and remote cluster connections all publish into the same
 /// origin. Loop prevention and shortest-path preference come from the
-/// hop list carried on each broadcast (see [`moq_lite::Broadcast::hops`]).
+/// hop list carried on each broadcast (see [`moq_net::Broadcast::hops`]).
+///
+/// Construct with [`Cluster::new`], then attach a QUIC client and (optionally)
+/// a [`Stats`] aggregator with the `with_*` builder methods. A cluster without
+/// a client can serve local sessions but cannot dial remote peers.
 #[derive(Clone)]
 pub struct Cluster {
 	config: ClusterConfig,
-	client: moq_native::Client,
+	client: Option<moq_native::Client>,
 
 	/// All broadcasts, local and remote. Downstream sessions read from here
 	/// (filtered by their auth token) and remote dials both read and write here.
 	pub origin: OriginProducer,
+
+	/// Stats aggregator. One instance per relay; sessions pick a tier via
+	/// [`Stats::tier`] at acceptance time so external (non-mTLS) and internal
+	/// (mTLS / cluster peer) traffic land in separate counter sets. Defaults
+	/// to [`Stats::disabled`] (a no-op aggregator) until [`with_stats`](Self::with_stats)
+	/// is called.
+	pub stats: Stats,
 }
 
 impl Cluster {
-	/// Creates a new cluster with the given configuration and QUIC client.
-	pub fn new(config: ClusterConfig, client: moq_native::Client) -> Self {
+	/// Creates a new cluster with a fresh origin and no peers, client, or stats.
+	///
+	/// Use [`with_client`](Self::with_client) to enable dialing remote peers
+	/// (required when `config.connect` is non-empty), and
+	/// [`with_stats`](Self::with_stats) to enable metrics publishing.
+	pub fn new(config: ClusterConfig) -> Self {
 		let origin = Origin::random().produce();
 		tracing::info!(origin_id = %origin.id, "cluster initialized");
-		Cluster { config, client, origin }
+		Cluster {
+			config,
+			client: None,
+			origin,
+			stats: Stats::disabled(),
+		}
+	}
+
+	/// Attach a QUIC client used to dial cluster peers.
+	///
+	/// Required when `config.connect` is non-empty; [`run`](Self::run) returns
+	/// an error otherwise.
+	pub fn with_client(mut self, client: moq_native::Client) -> Self {
+		self.client = Some(client);
+		self
+	}
+
+	/// Attach a [`Stats`] aggregator. Replaces the default no-op aggregator.
+	///
+	/// Build the value with [`StatsConfig::build`](crate::StatsConfig::build),
+	/// passing [`Self::origin`] so the aggregator publishes through the same
+	/// origin cluster peers read from.
+	pub fn with_stats(mut self, stats: Stats) -> Self {
+		self.stats = stats;
+		self
 	}
 
 	/// Returns an [`OriginConsumer`] scoped to this session's subscribe permissions.
 	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginConsumer> {
-		self.origin.with_root(&token.root)?.consume_only(&token.subscribe)
+		Some(self.origin.with_root(&token.root)?.scope(&token.subscribe)?.consume())
 	}
 
 	/// Returns an [`OriginProducer`] scoped to this session's publish permissions.
 	pub fn publisher(&self, token: &AuthToken) -> Option<OriginProducer> {
-		self.origin.with_root(&token.root)?.publish_only(&token.publish)
-	}
-
-	/// Looks up a broadcast by name.
-	#[allow(deprecated)] // Synchronous cluster lookup by design; callers know the broadcast is local.
-	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
-		self.origin.consume_broadcast(broadcast)
+		self.origin.with_root(&token.root)?.scope(&token.publish)
 	}
 
 	/// Runs the cluster event loop, dialing the configured peers and keeping
 	/// each connection alive indefinitely with exponential backoff on failure.
 	///
 	/// Completes once all dials have given up; a node with no peers (`connect`
-	/// empty) has no outbound work and returns immediately.
+	/// empty) has no outbound work and returns immediately. Errors when peers
+	/// are configured but no client has been attached via
+	/// [`with_client`](Self::with_client).
 	pub async fn run(self) -> anyhow::Result<()> {
 		if self.config.connect.is_empty() {
 			tracing::info!("no cluster peers configured; running standalone");
 			return Ok(());
 		}
+
+		anyhow::ensure!(
+			self.client.is_some(),
+			"cluster peers configured but no QUIC client attached (call Cluster::with_client)"
+		);
 
 		let token = match &self.config.token {
 			Some(path) => std::fs::read_to_string(path)
@@ -151,11 +191,17 @@ impl Cluster {
 		log_url.set_query(None);
 		tracing::info!(url = %log_url, "dialing cluster peer");
 
-		let session = self
+		// Checked at the start of `run`; per-peer tasks inherit that guarantee.
+		let client = self
 			.client
 			.clone()
+			.context("internal: cluster peer dial without an attached QUIC client")?;
+
+		// Cluster-to-cluster traffic is internal by definition.
+		let session = client
 			.with_publish(self.origin.consume())
 			.with_consume(self.origin.clone())
+			.with_stats(self.stats.tier(Tier::Internal))
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;

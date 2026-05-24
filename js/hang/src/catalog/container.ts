@@ -4,23 +4,29 @@ import { u53Schema } from "./integers";
 /**
  * Container format for frame timestamp encoding and frame payload structure.
  *
- * - "legacy": Uses QUIC VarInt encoding (1-8 bytes, variable length), raw frame payloads.
+ * - "legacy": QUIC VarInt timestamp prefix followed by the raw codec payload.
  *             Timestamps are in microseconds.
  * - "cmaf": Fragmented MP4 container - frames contain complete moof+mdat fragments.
- *           Timestamps are in timescale units.
+ *           The init segment (ftyp+moov) is base64-encoded in the catalog.
+ * - "loc": Low Overhead Container (draft-ietf-moq-loc). Each frame has a small
+ *          property block followed by the codec payload.
  */
 export const ContainerSchema = z._default(
 	z.discriminatedUnion("kind", [
 		// The default hang container
 		z.object({ kind: z.literal("legacy") }),
-		// CMAF container with timescale for timestamp conversion
+		// CMAF container with base64-encoded init segment (ftyp+moov).
+		// `timescale` and `trackId` are deprecated: they duplicate info in `init`
+		// and are accepted only so catalogs from newer publishers (which still
+		// emit them for older players) round-trip cleanly.
 		z.object({
 			kind: z.literal("cmaf"),
-			// Time units per second
-			timescale: u53Schema,
-			// Track ID used in the moof/mdat fragments
-			trackId: u53Schema,
+			init: z.base64(),
+			timescale: z.optional(u53Schema),
+			trackId: z.optional(u53Schema),
 		}),
+		// Low Overhead Container.
+		z.object({ kind: z.literal("loc") }),
 	]),
 	{ kind: "legacy" },
 );

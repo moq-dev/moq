@@ -3,7 +3,7 @@
 #[uniffi(flat_error)]
 pub enum MoqError {
 	#[error(transparent)]
-	Protocol(#[from] moq_lite::Error),
+	Protocol(#[from] moq_net::Error),
 
 	#[error(transparent)]
 	Media(#[from] hang::Error),
@@ -15,7 +15,7 @@ pub enum MoqError {
 	Url(#[from] url::ParseError),
 
 	#[error(transparent)]
-	TimeOverflow(#[from] moq_lite::TimeOverflow),
+	TimeOverflow(#[from] moq_net::TimeOverflow),
 
 	#[error(transparent)]
 	LogLevel(#[from] tracing::metadata::ParseLevelError),
@@ -31,6 +31,15 @@ pub enum MoqError {
 
 	#[error("connect: {0}")]
 	Connect(String),
+
+	#[error("bind: {0}")]
+	Bind(String),
+
+	#[error("reject: {0}")]
+	Reject(String),
+
+	#[error("already responded")]
+	AlreadyResponded,
 
 	#[error("codec: {0}")]
 	Codec(String),

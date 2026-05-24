@@ -1,39 +1,12 @@
-//! # moq-lite: Media over QUIC Transport
+//! # moq-lite (deprecated)
 //!
-//! `moq-lite` is designed for real-time live media delivery with sub-second latency at massive scale.
-//! This is a simplified subset of the *official* Media over QUIC (MoQ) transport, focusing on the practical features.
+//! This crate has been renamed to [`moq-net`](https://crates.io/crates/moq-net) to clarify
+//! that it is the networking layer for Media over QUIC. Under the hood it negotiates one
+//! of two wire protocols at session setup: the simplified `moq-lite` protocol or the full
+//! IETF `moq-transport` protocol.
 //!
-//! **NOTE**: While compatible with a subset of the IETF MoQ specification, many features are not supported on purpose.
-//! I highly highly highly recommend using `moq-lite` instead of the IETF standard.
-//!
-//! ## API
-//!
-//! The API is built around Producer/Consumer pairs, with the hierarchy:
-//! - [Origin]: A collection of [Broadcast]s, produced by one or more [Session]s.
-//! - [Broadcast]: A collection of [Track]s, produced by a single publisher.
-//! - [Track]: A collection of [Group]s, delivered out-of-order until expired.
-//! - [Group]: A collection of [Frame]s, delivered in order until cancelled.
-//! - [Frame]: Chunks of data with an upfront size.
+//! `moq-lite` now re-exports `moq-net` so existing code keeps building. It will not
+//! receive future updates. Migrate by replacing the dependency and changing `moq_lite::`
+//! to `moq_net::`.
 
-mod client;
-pub mod coding;
-mod error;
-mod ietf;
-mod lite;
-mod model;
-mod path;
-mod server;
-mod session;
-mod setup;
-mod version;
-
-pub use client::*;
-pub use error::*;
-pub use model::*;
-pub use path::*;
-pub use server::*;
-pub use session::*;
-pub use version::*;
-
-// Re-export the bytes crate
-pub use bytes;
+pub use moq_net::*;

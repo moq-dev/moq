@@ -2,7 +2,7 @@ use std::net;
 use std::path::PathBuf;
 
 use crate::QuicBackend;
-use moq_lite::Session;
+use moq_net::Session;
 use std::sync::{Arc, RwLock};
 use url::Url;
 #[cfg(feature = "iroh")]
@@ -19,6 +19,9 @@ use futures::stream::StreamExt;
 ///
 /// Certificate and keys must currently be files on disk.
 /// Alternatively, you can generate a self-signed certificate given a list of hostnames.
+///
+/// In config files, each list field accepts either a single string or a TOML array.
+#[serde_with::serde_as]
 #[derive(clap::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -26,11 +29,13 @@ pub struct ServerTlsConfig {
 	/// Load the given certificate from disk.
 	#[arg(long = "tls-cert", id = "tls-cert", env = "MOQ_SERVER_TLS_CERT")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub cert: Vec<PathBuf>,
 
 	/// Load the given key from disk.
 	#[arg(long = "tls-key", id = "tls-key", env = "MOQ_SERVER_TLS_KEY")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub key: Vec<PathBuf>,
 
 	/// Or generate a new certificate and key with the given hostnames.
@@ -42,6 +47,7 @@ pub struct ServerTlsConfig {
 		env = "MOQ_SERVER_TLS_GENERATE"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub generate: Vec<String>,
 
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
@@ -59,6 +65,7 @@ pub struct ServerTlsConfig {
 		env = "MOQ_SERVER_TLS_ROOT"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 }
 
@@ -139,7 +146,7 @@ pub struct ServerConfig {
 	/// Valid values: moq-lite-01, moq-lite-02, moq-lite-03, moq-transport-14, moq-transport-15, moq-transport-16
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[arg(id = "server-version", long = "server-version", env = "MOQ_SERVER_VERSION")]
-	pub version: Vec<moq_lite::Version>,
+	pub version: Vec<moq_net::Version>,
 
 	#[command(flatten)]
 	#[serde(default)]
@@ -152,11 +159,11 @@ impl ServerConfig {
 	}
 
 	/// Returns the configured versions, defaulting to all if none specified.
-	pub fn versions(&self) -> moq_lite::Versions {
+	pub fn versions(&self) -> moq_net::Versions {
 		if self.version.is_empty() {
-			moq_lite::Versions::all()
+			moq_net::Versions::all()
 		} else {
-			moq_lite::Versions::from(self.version.clone())
+			moq_net::Versions::from(self.version.clone())
 		}
 	}
 }
@@ -168,8 +175,8 @@ pub(crate) const DEFAULT_BIND: &str = "[::]:443";
 ///
 /// Create via [`ServerConfig::init`] or [`Server::new`].
 pub struct Server {
-	moq: moq_lite::Server,
-	versions: moq_lite::Versions,
+	moq: moq_net::Server,
+	versions: moq_net::Versions,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<iroh::Endpoint>,
@@ -234,7 +241,7 @@ impl Server {
 
 		Ok(Server {
 			accept: Default::default(),
-			moq: moq_lite::Server::new().with_versions(versions.clone()),
+			moq: moq_net::Server::new().with_versions(versions.clone()),
 			versions,
 			#[cfg(feature = "iroh")]
 			iroh: None,
@@ -266,13 +273,19 @@ impl Server {
 		self
 	}
 
-	pub fn with_publish(mut self, publish: impl Into<Option<moq_lite::OriginConsumer>>) -> Self {
+	pub fn with_publish(mut self, publish: impl Into<Option<moq_net::OriginConsumer>>) -> Self {
 		self.moq = self.moq.with_publish(publish);
 		self
 	}
 
-	pub fn with_consume(mut self, consume: impl Into<Option<moq_lite::OriginProducer>>) -> Self {
+	pub fn with_consume(mut self, consume: impl Into<Option<moq_net::OriginProducer>>) -> Self {
 		self.moq = self.moq.with_consume(consume);
+		self
+	}
+
+	/// Attach a tier-scoped [`moq_net::StatsHandle`] to all sessions accepted by this server.
+	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
+		self.moq = self.moq.with_stats(stats);
 		self
 	}
 
@@ -524,7 +537,7 @@ pub(crate) enum RequestKind {
 /// [Self::with_publish] and [Self::with_consume] will configure what will be published and consumed from the session respectively.
 /// Otherwise, the Server's configuration is used by default.
 pub struct Request {
-	server: moq_lite::Server,
+	server: moq_net::Server,
 	kind: RequestKind,
 }
 
@@ -568,14 +581,20 @@ impl Request {
 	}
 
 	/// Publish the given origin to the session.
-	pub fn with_publish(mut self, publish: impl Into<Option<moq_lite::OriginConsumer>>) -> Self {
+	pub fn with_publish(mut self, publish: impl Into<Option<moq_net::OriginConsumer>>) -> Self {
 		self.server = self.server.with_publish(publish);
 		self
 	}
 
 	/// Consume the given origin from the session.
-	pub fn with_consume(mut self, consume: impl Into<Option<moq_lite::OriginProducer>>) -> Self {
+	pub fn with_consume(mut self, consume: impl Into<Option<moq_net::OriginProducer>>) -> Self {
 		self.server = self.server.with_consume(consume);
+		self
+	}
+
+	/// Attach a tier-scoped [`moq_net::StatsHandle`] to this session.
+	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
+		self.server = self.server.with_stats(stats);
 		self
 	}
 
@@ -696,5 +715,35 @@ impl std::str::FromStr for ServerId {
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		hex::decode(s).map(Self)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_tls_string_or_array() {
+		// Single string should deserialize into a Vec with one entry.
+		let single = r#"
+			cert = "cert.pem"
+			key = "key.pem"
+		"#;
+		let config: ServerTlsConfig = toml::from_str(single).unwrap();
+		assert_eq!(config.cert, vec![PathBuf::from("cert.pem")]);
+		assert_eq!(config.key, vec![PathBuf::from("key.pem")]);
+
+		// TOML arrays should still work.
+		let array = r#"
+			cert = ["a.pem", "b.pem"]
+			key = ["a.key", "b.key"]
+			generate = ["localhost"]
+			root = ["ca.pem"]
+		"#;
+		let config: ServerTlsConfig = toml::from_str(array).unwrap();
+		assert_eq!(config.cert, vec![PathBuf::from("a.pem"), PathBuf::from("b.pem")]);
+		assert_eq!(config.key, vec![PathBuf::from("a.key"), PathBuf::from("b.key")]);
+		assert_eq!(config.generate, vec!["localhost".to_string()]);
+		assert_eq!(config.root, vec![PathBuf::from("ca.pem")]);
 	}
 }

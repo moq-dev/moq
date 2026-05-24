@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/moq-dev/moq/compare/moq-mux-v0.4.2...moq-mux-v0.5.0) - 2026-05-23
+
+### Added
+
+- Unified CMSF/Hang pipeline (cleanup of #1429) ([#1444](https://github.com/moq-dev/moq/pull/1444))
+
+### Other
+
+- Tag audio sources with a kind to drive Opus encoder settings ([#1446](https://github.com/moq-dev/moq/pull/1446))
+- Add Low Overhead Container (LOC) frame format support ([#1388](https://github.com/moq-dev/moq/pull/1388))
+- Add Matroska/WebM import and export support ([#1438](https://github.com/moq-dev/moq/pull/1438))
+- Auto-detect catalog format from broadcast name extension ([#1394](https://github.com/moq-dev/moq/pull/1394))
+- re-emit deprecated CMAF timescale/trackId in catalog ([#1440](https://github.com/moq-dev/moq/pull/1440))
+
+## [0.4.2](https://github.com/moq-dev/moq/compare/moq-mux-v0.4.1...moq-mux-v0.4.2) - 2026-05-20
+
+### Other
+
+- rename moq-lite package to moq-net ([#1428](https://github.com/moq-dev/moq/pull/1428))
+
+## [0.4.1](https://github.com/moq-dev/moq/compare/moq-mux-v0.4.0...moq-mux-v0.4.1) - 2026-05-18
+
+### Other
+
+- send each frame as its own group ([#1414](https://github.com/moq-dev/moq/pull/1414))
+- Expose track name and used/unused activity signals ([#1398](https://github.com/moq-dev/moq/pull/1398))
+- Fix reading catalogs ([#1404](https://github.com/moq-dev/moq/pull/1404))
+
+## [0.4.0](https://github.com/moq-dev/moq/compare/moq-mux-v0.3.9...moq-mux-v0.4.0) - 2026-05-07
+
+### Other
+
+- moq-mux backport + dual-API cleanup ([#1341](https://github.com/moq-dev/moq/pull/1341))
+- tighten public API surface and remove deprecated methods ([#1378](https://github.com/moq-dev/moq/pull/1378))
+- Revert moq-lite FETCH/Subscription API changes ([#1372](https://github.com/moq-dev/moq/pull/1372))
+- backport Subscription model API for FETCH readiness ([#1348](https://github.com/moq-dev/moq/pull/1348))
+- hop-based clustering ([#1322](https://github.com/moq-dev/moq/pull/1322))
+
 ## [0.3.9](https://github.com/moq-dev/moq/compare/moq-mux-v0.3.8...moq-mux-v0.3.9) - 2026-04-19
 
 ### Other

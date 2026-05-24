@@ -1,14 +1,16 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
-import type * as Moq from "@moq/lite";
-import { Time } from "@moq/lite";
+import type * as Moq from "@moq/net";
+import type { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Capture from "./capture";
-import type { Source } from "./types";
+import { type Kind, normalizeSource, type Source } from "./types";
 
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
+const OPUS_BITRATE_PER_CHANNEL = 32_000;
+const OPUS_FRAME_DURATION = 20;
 
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
@@ -22,10 +24,6 @@ export type EncoderProps = {
 	volume?: number | Signal<number>;
 	sampleRate?: number | Signal<number | undefined>;
 
-	// The maximum duration of each group. Larger groups mean fewer drops but the viewer can fall further behind.
-	// NOTE: Each frame is always flushed to the network immediately.
-	groupDuration?: Time.Milli;
-
 	container?: Catalog.Container;
 };
 
@@ -38,7 +36,6 @@ export class Encoder {
 	muted: Signal<boolean>;
 	volume: Signal<number>;
 	sampleRate: Signal<number | undefined>;
-	groupDuration: Time.Milli;
 
 	source: Signal<Source | undefined>;
 
@@ -63,10 +60,8 @@ export class Encoder {
 		this.muted = Signal.from(props?.muted ?? false);
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.sampleRate = Signal.from<number | undefined>(props?.sampleRate);
-		this.groupDuration = props?.groupDuration ?? (100 as Time.Milli); // Default is a group every 100ms
 
 		this.#signals.run(this.#runSource.bind(this));
-		this.#signals.run(this.#runConfig.bind(this));
 		this.#signals.run(this.#runGain.bind(this));
 		this.#signals.run(this.#runCatalog.bind(this));
 	}
@@ -74,9 +69,10 @@ export class Encoder {
 	#runSource(effect: Effect): void {
 		const values = effect.getAll([this.enabled, this.source]);
 		if (!values) return;
-		const [_, source] = values;
+		const [_, rawSource] = values;
+		const source = normalizeSource(rawSource);
 
-		const settings = source.getSettings();
+		const settings = source.track.getSettings();
 		const overrideSampleRate = effect.get(this.sampleRate);
 		const sampleRate = overrideSampleRate ?? settings.sampleRate;
 
@@ -87,7 +83,7 @@ export class Encoder {
 		effect.cleanup(() => context.close());
 
 		const root = new MediaStreamAudioSourceNode(context, {
-			mediaStream: new MediaStream([source]),
+			mediaStream: new MediaStream([source.track]),
 		});
 		effect.cleanup(() => root.disconnect());
 
@@ -102,13 +98,33 @@ export class Encoder {
 			await context.audioWorklet.addModule(CaptureWorklet);
 			if (context.state === "closed") return;
 
+			const channelCount = settings.channelCount ?? root.channelCount;
 			const worklet = new AudioWorkletNode(context, "capture", {
 				numberOfInputs: 1,
 				numberOfOutputs: 0,
-				channelCount: settings.channelCount ?? root.channelCount,
+				channelCount,
 			});
 
 			effect.set(this.#worklet, worklet);
+
+			// The information about channels count can be unreliable on different platforms (Apple's Safari).
+			// Try to get the first audio frame and only then create the configuration.
+			effect.event(
+				worklet.port,
+				"message",
+				(event: Event) => {
+					const data = (event as MessageEvent<Capture.AudioFrame>).data;
+					const channelCount = data.channels.length;
+					if (!channelCount) return;
+
+					this.#config.set(this.#createConfig(worklet, channelCount));
+				},
+				{ once: true },
+			);
+			worklet.port.start();
+			effect.cleanup(() => {
+				this.#config.set(undefined);
+			});
 
 			gain.connect(worklet);
 			effect.cleanup(() => worklet.disconnect());
@@ -118,23 +134,17 @@ export class Encoder {
 		});
 	}
 
-	#runConfig(effect: Effect): void {
-		const values = effect.getAll([this.source, this.#worklet]);
-		if (!values) return;
-		const [_source, worklet] = values;
-
-		const config = {
+	#createConfig(worklet: AudioWorkletNode, channelCount: number): Catalog.AudioConfig {
+		return {
 			codec: "opus",
 			sampleRate: Catalog.u53(worklet.context.sampleRate),
-			numberOfChannels: Catalog.u53(worklet.channelCount),
-			bitrate: Catalog.u53(worklet.channelCount * 32_000),
+			numberOfChannels: Catalog.u53(channelCount),
+			bitrate: Catalog.u53(channelCount * OPUS_BITRATE_PER_CHANNEL),
 			container: { kind: "legacy" } as const,
 			// TODO parse the actual frame duration instead of assuming 20ms.
 			// Opus supports 2.5–60ms but 20ms is the real-time default.
-			jitter: Catalog.u53(20),
+			jitter: Catalog.u53(OPUS_FRAME_DURATION),
 		};
-
-		effect.set(this.#config, config);
 	}
 
 	#runGain(effect: Effect): void {
@@ -153,16 +163,13 @@ export class Encoder {
 	}
 
 	serve(track: Moq.Track, effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.#worklet, this.#config]);
+		const values = effect.getAll([this.enabled, this.#worklet]);
 		if (!values) return;
-		const [_, worklet, config] = values;
+		const [_, worklet] = values;
 
 		effect.set(this.active, true, false);
 
-		const producer = new Container.Legacy.Producer(track);
-		effect.cleanup(() => producer.close());
-
-		let lastKeyframe: Time.Micro | undefined;
+		effect.cleanup(() => track.close());
 
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
@@ -174,27 +181,41 @@ export class Encoder {
 						throw new Error("only key frames are supported");
 					}
 
-					let keyframe = false;
-					if (!lastKeyframe || lastKeyframe + Time.Micro.fromMilli(this.groupDuration) <= frame.timestamp) {
-						lastKeyframe = frame.timestamp as Time.Micro;
-						keyframe = true;
-					}
-
-					producer.encode(frame, frame.timestamp as Time.Micro, keyframe);
+					// Each audio frame is its own group so the relay can forward it without
+					// waiting for a group boundary. Loss is handled by the codec's PLC.
+					track.writeFrame(Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro));
 				},
 				error: (err) => {
 					console.error("encoder error", err);
-					producer.close(err);
-					worklet.port.onmessage = null;
+					track.close(err);
 				},
 			});
 			effect.cleanup(() => encoder.close());
 
-			console.debug("encoding audio", config);
-			encoder.configure(config);
+			let config: Catalog.AudioConfig | undefined;
+			effect.run((effect: Effect) => {
+				config = effect.get(this.#config);
+				if (!config) return;
 
-			worklet.port.onmessage = ({ data }: { data: Capture.AudioFrame }) => {
-				const channels = data.channels.slice(0, worklet.channelCount);
+				const source = effect.get(this.source);
+				const kind: Kind = source ? normalizeSource(source).kind : "auto";
+				const encoderConfig = toEncoderConfig(config, kind);
+
+				console.debug("encoding audio", encoderConfig);
+				encoder.configure(encoderConfig);
+			});
+
+			effect.event(worklet.port, "message", (event: Event) => {
+				const data = (event as MessageEvent<Capture.AudioFrame>).data;
+				const channelCount = data.channels.length;
+				if (!channelCount) return;
+
+				if (!config || channelCount !== config.numberOfChannels) {
+					this.#config.set(this.#createConfig(worklet, channelCount));
+					return;
+				}
+
+				const channels = data.channels;
 				const joinedLength = channels.reduce((a, b) => a + b.length, 0);
 				const joined = new Float32Array(joinedLength);
 
@@ -215,16 +236,17 @@ export class Encoder {
 
 				encoder.encode(frame);
 				frame.close();
-			};
-			effect.cleanup(() => {
-				worklet.port.onmessage = null;
 			});
+			worklet.port.start();
 		});
 	}
 
 	#runCatalog(effect: Effect): void {
 		const config = effect.get(this.#config);
-		if (!config) return;
+		if (!config) {
+			effect.set(this.#catalog, undefined);
+			return;
+		}
 
 		const catalog: Catalog.Audio = {
 			renditions: { [Encoder.TRACK]: config },
@@ -236,4 +258,32 @@ export class Encoder {
 	close() {
 		this.#signals.close();
 	}
+}
+
+// `application` and `signal` are in the WebCodecs spec but missing from lib.dom.d.ts.
+// https://www.w3.org/TR/webcodecs-opus-codec-registration/#dom-opusencoderconfig
+interface OpusEncoderConfigExt extends OpusEncoderConfig {
+	application?: "voip" | "audio" | "lowdelay";
+	signal?: "auto" | "voice" | "music";
+}
+
+// Build the WebCodecs encoder config from the catalog (decoder) config plus a Kind hint.
+// Opus-only knobs are kept out of the catalog since they only affect encoding.
+function toEncoderConfig(config: Catalog.AudioConfig, kind: Kind): AudioEncoderConfig {
+	const encoderConfig: AudioEncoderConfig = {
+		codec: config.codec,
+		sampleRate: config.sampleRate,
+		numberOfChannels: config.numberOfChannels,
+		bitrate: config.bitrate,
+	};
+
+	if (config.codec === "opus" && kind !== "auto") {
+		const opus: OpusEncoderConfigExt = {
+			application: kind === "voice" ? "voip" : "audio",
+			signal: kind,
+		};
+		encoderConfig.opus = opus;
+	}
+
+	return encoderConfig;
 }

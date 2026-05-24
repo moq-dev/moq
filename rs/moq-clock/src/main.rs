@@ -1,6 +1,6 @@
 //! Example MoQ application that publishes or subscribes to a clock track.
 //!
-//! Demonstrates basic [`moq_lite`] usage by streaming time updates every second.
+//! Demonstrates basic [`moq_net`] usage by streaming time updates every second.
 //! Useful for testing relay connectivity and latency.
 
 use url::Url;
@@ -9,7 +9,7 @@ use anyhow::Context;
 use clap::Parser;
 
 mod clock;
-use moq_lite::*;
+use moq_net::*;
 
 #[derive(Parser, Clone)]
 #[command(version = env!("VERSION"))]
@@ -54,13 +54,16 @@ async fn main() -> anyhow::Result<()> {
 
 	tracing::info!(url = ?config.url, "connecting to server");
 
-	let track = Track::new(config.track);
+	let track = Track {
+		name: config.track,
+		priority: 0,
+	};
 
-	let origin = moq_lite::Origin::random().produce();
+	let origin = moq_net::Origin::random().produce();
 
 	match config.role {
 		Command::Publish => {
-			let mut broadcast = moq_lite::Broadcast::new().produce();
+			let mut broadcast = moq_net::Broadcast::new().produce();
 			let track = broadcast.create_track(track)?;
 			let clock = clock::Publisher::new(track);
 
@@ -82,10 +85,11 @@ async fn main() -> anyhow::Result<()> {
 
 			tracing::info!(broadcast = %config.broadcast, "waiting for broadcast to be online");
 
-			let path: moq_lite::Path<'_> = config.broadcast.into();
+			let path: moq_net::Path<'_> = config.broadcast.into();
 			let mut origin = origin
-				.consume_only(&[path])
-				.context("not allowed to consume broadcast")?;
+				.scope(&[path])
+				.context("not allowed to consume broadcast")?
+				.consume();
 
 			// The current subscriber if any, dropped after each announce.
 			let mut clock: Option<clock::Subscriber> = None;
@@ -95,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
 					Some(announce) = origin.announced() => match announce {
 						(path, Some(broadcast)) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
-							let track = broadcast.subscribe_track(&track, moq_lite::Subscription::default())?;
+							let track = broadcast.subscribe_track(&track)?;
 							clock = Some(clock::Subscriber::new(track));
 						}
 						(path, None) => {

@@ -8,7 +8,7 @@
 
 # moq-native
 
-Helper library for native [Media over QUIC](https://moq.dev) applications, on top of [moq-lite](https://github.com/moq-dev/moq/tree/main/rs/moq-lite).
+Helper library for native [Media over QUIC](https://moq.dev) applications, on top of [moq-net](https://github.com/moq-dev/moq/tree/main/rs/moq-net).
 
 Establishes MoQ connections over a few different transports, selectable via cargo features:
 

@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - "moq-relay-v*"
+  pull_request:
+    paths:
+      - ".github/workflows/moq-relay.yml"
+      - ".github/scripts/release.sh"
+      - "rs/scripts/package-binary.sh"
+      - "packaging/moq-relay/**"
+      - ".github/actions/setup-packaging/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -11,66 +22,176 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runs-on }}
 
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Native runners. Each binary is built on the same arch it ships
+          # for, so the .deb/.rpm linkage matches the distro's glibc on the
+          # oldest LTS we support (Ubuntu 22.04 / AlmaLinux 9).
           - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-22.04
+            deb-arch: amd64
+            rpm-arch: x86_64
           - target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-22.04-arm
+            deb-arch: arm64
+            rpm-arch: aarch64
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
       - name: Parse version
         id: parse
-        run: .github/scripts/release.sh parse-version moq-relay
-
-      - name: Build
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          cargo build --release --target ${{ matrix.target }} -p moq-relay \
-            --config "target.aarch64-unknown-linux-gnu.linker='aarch64-linux-gnu-gcc'"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            CARGO_VERSION=$(grep '^version' rs/moq-relay/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
+          else
+            .github/scripts/release.sh parse-version moq-relay
+          fi
 
-      - name: Package
+      - name: Set up packaging tools
+        uses: ./.github/actions/setup-packaging
+
+      - name: Build (release, glibc 2.34)
+        shell: bash
+        # Pin to glibc 2.34 so one binary covers Ubuntu 22.04+ (.deb)
+        # and AlmaLinux/RHEL/Rocky 9+ (.rpm).
+        run: cargo zigbuild --release --target ${{ matrix.target }}.2.34 -p moq-relay
+
+      - name: Package bare binary
         shell: bash
         run: |
           version="${{ steps.parse.outputs.version }}"
           target="${{ matrix.target }}"
           name="moq-relay-v${version}-${target}"
-
           mkdir -p dist
           cp "target/${target}/release/moq-relay" "dist/${name}"
 
+      - name: Package tarball (Homebrew)
+        shell: bash
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="moq-relay-${VERSION}-${TARGET}"
+          mkdir -p "dist/${name}/bin"
+          cp "target/${TARGET}/release/moq-relay" "dist/${name}/bin/moq-relay"
+          cp LICENSE-MIT LICENSE-APACHE "dist/${name}/"
+          if [[ -f rs/moq-relay/README.md ]]; then
+            cp rs/moq-relay/README.md "dist/${name}/"
+          fi
+          (cd dist && tar -czvf "${name}.tar.gz" "${name}" && rm -rf "${name}")
+
+      - name: Package .deb (Ubuntu 22.04 toolchain, glibc 2.35)
+        shell: bash
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+          ARCH: ${{ matrix.deb-arch }}
+          BINARY_PATH: target/${{ matrix.target }}/release/moq-relay
+        run: |
+          envsubst '$VERSION $ARCH $BINARY_PATH' \
+            < packaging/moq-relay/nfpm.yaml > /tmp/nfpm.yaml
+          nfpm pkg --packager deb --config /tmp/nfpm.yaml --target dist/
+
+      - name: Package .rpm
+        shell: bash
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+          ARCH: ${{ matrix.rpm-arch }}
+          BINARY_PATH: target/${{ matrix.target }}/release/moq-relay
+        run: |
+          envsubst '$VERSION $ARCH $BINARY_PATH' \
+            < packaging/moq-relay/nfpm.yaml > /tmp/nfpm.yaml
+          nfpm pkg --packager rpm --config /tmp/nfpm.yaml --target dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: moq-relay-${{ matrix.target }}
+          path: dist/*
+
+  build-tarball-macos:
+    name: Build macOS tarball (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
+        with:
+          determinate: false
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
+
+      - name: Parse version
+        id: parse
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            CARGO_VERSION=$(grep '^version' rs/moq-relay/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
+          else
+            .github/scripts/release.sh parse-version moq-relay
+          fi
+
+      - name: Build and package tarball
+        shell: bash
+        run: |
+          ./rs/scripts/package-binary.sh \
+            --crate moq-relay \
+            --target ${{ matrix.target }} \
+            --version ${{ steps.parse.outputs.version }} \
+            --output dist
+
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: moq-relay-${{ matrix.target }}
           path: dist/*
 
   release:
     name: Release
-    needs: build
+    needs: [build, build-tarball-macos]
     runs-on: ubuntu-latest
+    if: github.event_name == 'push'
     permissions:
       contents: write
+      actions: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Parse version
         id: parse
@@ -81,7 +202,7 @@ jobs:
         run: .github/scripts/release.sh prev-tag moq-relay
 
       - name: Download artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           merge-multiple: true
@@ -93,3 +214,9 @@ jobs:
           RELEASE_TITLE: "moq-relay v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: .github/scripts/release.sh create artifacts
+
+      - name: Trigger apt/rpm repo publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: .github/scripts/trigger-repo-publish.sh

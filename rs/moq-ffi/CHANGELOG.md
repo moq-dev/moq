@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.11...moq-ffi-v0.2.12) - 2026-05-23
+
+### Other
+
+- Add Python MoQ server API with session acceptance and handshake ([#1417](https://github.com/moq-dev/moq/pull/1417))
+- Tighten moq-ffi release pipeline ahead of first publish ([#1447](https://github.com/moq-dev/moq/pull/1447))
+- Add Low Overhead Container (LOC) frame format support ([#1388](https://github.com/moq-dev/moq/pull/1388))
+- re-emit deprecated CMAF timescale/trackId in catalog ([#1440](https://github.com/moq-dev/moq/pull/1440))
+- Add Swift and Kotlin FFI wrappers with packaging and publishing ([#1432](https://github.com/moq-dev/moq/pull/1432))
+
+## [0.2.11](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.10...moq-ffi-v0.2.11) - 2026-05-20
+
+### Other
+
+- rename moq-lite package to moq-net ([#1428](https://github.com/moq-dev/moq/pull/1428))
+
+## [0.2.10](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.9...moq-ffi-v0.2.10) - 2026-05-18
+
+### Other
+
+- Expose track name and used/unused activity signals ([#1398](https://github.com/moq-dev/moq/pull/1398))
+
+## [0.2.8](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.7...moq-ffi-v0.2.8) - 2026-05-07
+
+### Other
+
+- moq-mux backport + dual-API cleanup ([#1341](https://github.com/moq-dev/moq/pull/1341))
+- tighten public API surface and remove deprecated methods ([#1378](https://github.com/moq-dev/moq/pull/1378))
+- Revert moq-lite FETCH/Subscription API changes ([#1372](https://github.com/moq-dev/moq/pull/1372))
+- backport Subscription model API for FETCH readiness ([#1348](https://github.com/moq-dev/moq/pull/1348))
+- hop-based clustering ([#1322](https://github.com/moq-dev/moq/pull/1322))
+
 ## [0.2.7](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.6...moq-ffi-v0.2.7) - 2026-04-19
 
 ### Other

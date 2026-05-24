@@ -1,0 +1,61 @@
+#!/usr/bin/env just --justfile
+#
+# Language-specific recipes for the JavaScript / TypeScript packages under
+# js/. Invoked from the repo root as `just js <recipe>` via the `mod js`
+# import in the root justfile.
+
+set working-directory := '.'
+
+# Run all checks by default.
+default:
+	just check
+
+install:
+	bun install
+
+# Lint, type-check, and biome-format all packages.
+check:
+	bun install --frozen-lockfile
+	if tty -s; then \
+		bun run --filter='*' --elide-lines=0 check; \
+	else \
+		bun run --filter='*' check; \
+	fi
+	bun biome check
+
+# Auto-fix lint and formatting issues.
+fix:
+	bun install
+	bun biome check --write
+
+# Run all unit tests.
+test:
+	bun install --frozen-lockfile
+	if tty -s; then \
+		bun run --filter='*' --elide-lines=0 test; \
+	else \
+		bun run --filter='*' test; \
+	fi
+
+# Build all packages.
+build:
+	bun run --filter='*' build
+
+# Full JS CI: lint + tests + build. Takes a newline-separated list of
+# changed files; skips if FILES is non-empty and none match the JS
+# scope. Run `just js ci` (no FILES) to force-run everything.
+ci FILES="":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(js/|package\.json$|bun\.lock$|bun\.lockb$|biome\.jsonc$)'; then
+		echo "js: no JS changes; skipping."
+		exit 0
+	fi
+	just check
+	just test
+	just build
+
+# Pull in new versions and report what's outdated.
+update:
+	bun update
+	bun outdated

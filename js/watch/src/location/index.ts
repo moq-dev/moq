@@ -1,5 +1,5 @@
 import type * as Catalog from "@moq/hang/catalog";
-import type * as Moq from "@moq/lite";
+import type * as Moq from "@moq/net";
 import { Effect, type Signal } from "@moq/signals";
 import { Peers, type PeersProps } from "./peers";
 import { Window, type WindowProps } from "./window";

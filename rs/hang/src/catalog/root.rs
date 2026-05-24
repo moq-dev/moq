@@ -33,7 +33,7 @@ pub struct Catalog {
 
 	/// Preview information about the broadcast
 	#[serde(default)]
-	pub preview: Option<moq_lite::Track>,
+	pub preview: Option<moq_net::Track>,
 }
 
 impl Catalog {
@@ -76,21 +76,12 @@ impl Catalog {
 		Ok(serde_json::to_writer(writer, self)?)
 	}
 
-	pub fn default_track() -> moq_lite::Track {
-		moq_lite::Track::new(Catalog::DEFAULT_NAME)
+	pub fn default_track() -> moq_net::Track {
+		moq_net::Track {
+			name: Catalog::DEFAULT_NAME.to_string(),
+			priority: 100,
+		}
 	}
-
-	/// The recommended subscription for the catalog track.
-	///
-	/// The catalog should be high priority since downstream players block on
-	/// it before they can subscribe to anything else.
-	pub const SUBSCRIPTION: moq_lite::Subscription = moq_lite::Subscription {
-		priority: 100,
-		ordered: false,
-		max_latency: std::time::Duration::ZERO,
-		start_group: None,
-		end_group: None,
-	};
 }
 
 #[cfg(test)]

@@ -28,38 +28,8 @@ Before we get carried away, we need to cover the QUIC requirements:
 
 These make it a bit more difficult to deploy, but don't worry we have you covered.
 
-## EZ Mode
+## Self-Hosting
 
-`https://cdn.moq.dev` is a free, public MoQ relay.
-Check out the [cdn](https://github.com/moq-dev/moq/tree/main/cdn) directory for the source code.
-
-It consists of a relay server in the US, Europe, and Asia.
-Clients use [GeoDNS](https://en.wikipedia.org/wiki/GeoDNS) to connect to the nearest relay, and relays connect to each other to form a global mesh.
-You can also connect to individual nodes directly:
-
-- `https://usc.cdn.moq.dev`
-- `https://euc.cdn.moq.dev`
-- `https://sea.cdn.moq.dev`
-
-Here's a quick tl;dr of the setup:
-
-- [Linode](https://www.linode.com/) is the VM provider.
-- [GCP](https://cloud.google.com/) is the DNS provider.
-- [OpenTofu](https://opentofu.org/) (aka Terraform) sets up the infrastructure.
-- [Nix](https://nixos.org/) is used to build/cache the binaries.
-- [systemd](https://systemd.io/) runs the services.
-- [ssh](https://en.wikipedia.org/wiki/Secure_Shell) + [rsync](https://en.wikipedia.org/wiki/Rsync) are used to deploy.
-- [certbot](https://certbot.eff.org/) + [Let's Encrypt](https://letsencrypt.org/) procures TLS certificates.
-
-Any EC2-like cloud provider will work; we just need a VM with a public IP address.
-The old setup used to use [GCP](https://cloud.google.com/) but was double the cost.
-We're still using [GCP](https://cloud.google.com/blog/products/networking/dns-routing-policies-for-geo-location--weighted-round-robin) for GeoDNS because there aren't many other options and it's virtually free (unlike Cloudflare).
-
-Read the [moq-relay](/app/relay/) documentation for more details on how to configure the relay server.
-
-## Hard Mode
-
-If you don't want to use the EZ Mode, don't worry you can build your own stack.
 MoQ should work just fine inside your own network or infrastructure provided you understand the QUIC requirements.
 
 You need at least one server with some way to discover its IP address.

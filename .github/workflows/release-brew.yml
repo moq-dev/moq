@@ -1,0 +1,233 @@
+name: release-brew
+
+# Renders the matching Homebrew formula template from
+# .github/homebrew/Formula/ with the released version + tarball sha256s,
+# then pushes the rendered formula to moq-dev/homebrew-tap (which Homebrew
+# exposes as the `moq-dev/tap` tap).
+#
+# Triggered after a per-crate release workflow finishes successfully, so
+# the GitHub Release assets are guaranteed to exist by the time we
+# download them.
+#
+# Authenticates as the moq-bot GitHub App. The APP_ID and APP_PRIVATE_KEY
+# repo secrets are already wired (see release-swift.yml). The minted
+# installation token is scoped to moq-dev/homebrew-tap and expires in 1
+# hour.
+
+on:
+  workflow_run:
+    workflows:
+      - moq-relay
+      - moq-cli
+      - moq-clock
+      - moq-token-cli
+      - moq-gst
+    types:
+      - completed
+  pull_request:
+    paths:
+      - ".github/workflows/release-brew.yml"
+      - ".github/scripts/render-formula.sh"
+      - ".github/homebrew/Formula/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    name: Dry-run render all templates
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Render every template against synthetic tarballs
+        run: |
+          set -euo pipefail
+          mkdir -p fake-assets rendered
+
+          shopt -s nullglob
+          templates=(.github/homebrew/Formula/*.rb.tmpl)
+          if (( ${#templates[@]} == 0 )); then
+            echo "No templates found under .github/homebrew/Formula/" >&2
+            exit 1
+          fi
+
+          # Use a stable dummy version so any baked-in version assertions in
+          # the templates render deterministically. The sha256s differ per
+          # crate because the fake tarball content includes the crate name.
+          VERSION="0.0.0-dryrun"
+
+          for tmpl in "${templates[@]}"; do
+            crate=$(basename "$tmpl" .rb.tmpl)
+            echo "::group::Render $crate"
+            rm -f fake-assets/*
+            for target in \
+              aarch64-apple-darwin \
+              x86_64-apple-darwin \
+              aarch64-unknown-linux-gnu \
+              x86_64-unknown-linux-gnu
+            do
+              printf 'fake %s %s\n' "$crate" "$target" \
+                > "fake-assets/${crate}-${VERSION}-${target}.tar.gz"
+            done
+
+            ./.github/scripts/render-formula.sh \
+              --template "$tmpl" \
+              --version "$VERSION" \
+              --release-dir fake-assets \
+              --crate "$crate" \
+              --output "rendered/${crate}.rb"
+
+            if grep -E '__[A-Z0-9_]+__' "rendered/${crate}.rb"; then
+              echo "Error: unsubstituted placeholders in rendered/${crate}.rb" >&2
+              exit 1
+            fi
+
+            ruby -c "rendered/${crate}.rb"
+            echo "::endgroup::"
+          done
+
+  publish:
+    name: Publish formula to homebrew-tap
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'moq-') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Parse crate and version
+        id: parse
+        env:
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [[ ! "$TAG" =~ ^(.+)-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "Tag format not recognized: $TAG" >&2
+            exit 1
+          fi
+          crate="${BASH_REMATCH[1]}"
+          version="${BASH_REMATCH[2]}"
+          echo "crate=$crate" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Crate: $crate"
+          echo "Version: $version"
+
+      - name: Check template exists
+        env:
+          CRATE: ${{ steps.parse.outputs.crate }}
+        run: |
+          template=".github/homebrew/Formula/${CRATE}.rb.tmpl"
+          if [[ ! -f "$template" ]]; then
+            echo "No Homebrew template for crate: $CRATE (looked for $template)" >&2
+            exit 1
+          fi
+
+      - name: Download release tarballs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.parse.outputs.tag }}
+          CRATE: ${{ steps.parse.outputs.crate }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          mkdir -p release-assets
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-gnu
+          do
+            name="${CRATE}-${VERSION}-${target}.tar.gz"
+            echo "Downloading $name..."
+            gh release download "$TAG" \
+              --repo "${{ github.repository }}" \
+              --pattern "$name" \
+              --dir release-assets
+          done
+          ls -la release-assets
+
+      - name: Render formula
+        env:
+          CRATE: ${{ steps.parse.outputs.crate }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          mkdir -p rendered
+          ./.github/scripts/render-formula.sh \
+            --template ".github/homebrew/Formula/${CRATE}.rb.tmpl" \
+            --version "$VERSION" \
+            --release-dir release-assets \
+            --crate "$CRATE" \
+            --output "rendered/${CRATE}.rb"
+          echo "--- Rendered formula ---"
+          cat "rendered/${CRATE}.rb"
+
+      - name: Generate moq-bot token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        id: token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: moq-dev
+          repositories: homebrew-tap
+          permission-contents: write
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: moq-dev/homebrew-tap
+          token: ${{ steps.token.outputs.token }}
+          path: homebrew-tap
+
+      - name: Commit and push formula
+        env:
+          CRATE: ${{ steps.parse.outputs.crate }}
+          VERSION: ${{ steps.parse.outputs.version }}
+          GIT_AUTHOR_NAME: moq-bot
+          GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: moq-bot
+          GIT_COMMITTER_EMAIL: moq-bot[bot]@users.noreply.github.com
+        run: |
+          cd homebrew-tap
+          mkdir -p Formula
+          cp "../rendered/${CRATE}.rb" "Formula/${CRATE}.rb"
+
+          # Seed a README the first time the tap repo receives a push.
+          if [[ ! -f README.md ]]; then
+            cat > README.md <<'EOF'
+          # moq Homebrew tap
+
+          Homebrew formulae for the [moq](https://github.com/moq-dev/moq) workspace.
+
+          ```bash
+          brew tap moq-dev/tap
+          brew install moq-dev/tap/moq-relay
+          brew install moq-dev/tap/moq-cli
+          brew install moq-dev/tap/moq-clock
+          brew install moq-dev/tap/moq-token-cli
+          brew install moq-dev/tap/moq-gst
+          ```
+
+          Formulae here are generated automatically by the
+          [release-brew workflow](https://github.com/moq-dev/moq/blob/main/.github/workflows/release-brew.yml)
+          in moq-dev/moq. Do not edit by hand; edit the templates under
+          `.github/homebrew/Formula/` in moq-dev/moq instead.
+          EOF
+          fi
+
+          if git diff --quiet && [[ -z "$(git status --porcelain)" ]]; then
+            echo "No changes to commit (formula already up to date)."
+            exit 0
+          fi
+
+          git add Formula/ README.md
+          git commit -m "${CRATE}: bump to v${VERSION}"
+          git push

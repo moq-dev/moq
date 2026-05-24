@@ -55,7 +55,7 @@ See [demo/moq-boy](/demo/moq-boy) for the full architecture and track layout.
 ## Related Packages
 
 - **[@moq/watch](/js/@moq/watch)** — Used under the hood for video/audio playback
-- **[@moq/lite](/js/@moq/lite)** — Core pub/sub transport
+- **[@moq/net](/js/@moq/net)** — Core pub/sub transport
 - **[moq-boy](/rs/crate/moq-boy)** — The Rust emulator/publisher
 
 ## Source

@@ -97,5 +97,5 @@ ffmpeg -i input.mp4 -f mpegts - | moq-cli publish -
 ## Next Steps
 
 - Use [hang](/rs/crate/hang) for media encoding/decoding
-- Use [moq-lite](/rs/crate/moq-lite) for the transport layer
+- Use [moq-net](/rs/crate/moq-net) for the transport layer
 - Deploy a [relay server](/app/relay/)

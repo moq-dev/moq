@@ -69,7 +69,7 @@ export class Microphone {
 			}
 
 			effect.set(this.device.active, settings.deviceId);
-			effect.set(this.source, track);
+			effect.set(this.source, { track, kind: "voice" });
 		});
 	}
 

@@ -1,16 +1,18 @@
 mod client;
 mod publish;
 mod server;
+mod subscribe;
 mod web;
 
 use client::*;
+use hang::moq_net;
 use publish::*;
 use server::*;
+use subscribe::*;
 use web::*;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use std::time::Duration;
 use url::Url;
 
 #[derive(Parser, Clone)]
@@ -24,23 +26,20 @@ pub struct Cli {
 	#[cfg(feature = "iroh")]
 	iroh: moq_native::IrohEndpointConfig,
 
-	/// Print import statistics to stderr at the given interval.
-	#[arg(long, default_missing_value = "1", num_args = 0..=1, require_equals = true, value_name = "SECS")]
-	stats: Option<f64>,
-
 	#[command(subcommand)]
 	command: Command,
 }
 
 #[derive(Subcommand, Clone)]
 pub enum Command {
+	/// Run a relay and publish a single broadcast read from stdin into it.
 	Serve {
 		#[command(flatten)]
 		config: moq_native::ServerConfig,
 
 		/// The name of the broadcast to serve.
-		#[arg(long)]
-		name: String,
+		#[arg(long, alias = "name")]
+		broadcast: String,
 
 		/// Optionally serve static files from the given directory.
 		#[arg(long)]
@@ -50,6 +49,23 @@ pub enum Command {
 		#[command(subcommand)]
 		format: PublishFormat,
 	},
+	/// Run a relay and write the first incoming broadcast's media to stdout.
+	Accept {
+		#[command(flatten)]
+		config: moq_native::ServerConfig,
+
+		/// The name of the broadcast to accept.
+		#[arg(long, alias = "name")]
+		broadcast: String,
+
+		/// Optionally serve static files from the given directory.
+		#[arg(long)]
+		dir: Option<PathBuf>,
+
+		#[command(flatten)]
+		args: SubscribeArgs,
+	},
+	/// Publish a broadcast read from stdin to a remote relay.
 	Publish {
 		/// The MoQ client configuration.
 		#[command(flatten)]
@@ -69,12 +85,29 @@ pub enum Command {
 		url: Url,
 
 		/// The name of the broadcast to publish.
-		#[arg(long)]
-		name: String,
+		#[arg(long, alias = "name")]
+		broadcast: String,
 
 		/// The format of the input media.
 		#[command(subcommand)]
 		format: PublishFormat,
+	},
+	/// Subscribe to a broadcast on a remote relay and write the media to stdout.
+	Subscribe {
+		/// The MoQ client configuration.
+		#[command(flatten)]
+		config: moq_native::ClientConfig,
+
+		/// The URL of the MoQ server.
+		#[arg(long)]
+		url: Url,
+
+		/// The name of the broadcast to subscribe to.
+		#[arg(long, alias = "name")]
+		broadcast: String,
+
+		#[command(flatten)]
+		args: SubscribeArgs,
 	},
 }
 
@@ -89,27 +122,18 @@ async fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 	cli.log.init();
 
-	let publish = Publish::new(match &cli.command {
-		Command::Serve { format, .. } => format,
-		Command::Publish { format, .. } => format,
-	})?;
-
-	let stats_interval = cli
-		.stats
-		.map(|secs| {
-			anyhow::ensure!(
-				secs.is_finite() && secs > 0.0,
-				"--stats interval must be a positive number"
-			);
-			Ok(Duration::from_secs_f64(secs))
-		})
-		.transpose()?;
-
 	#[cfg(feature = "iroh")]
 	let iroh = cli.iroh.bind().await?;
 
 	match cli.command {
-		Command::Serve { config, dir, name, .. } => {
+		Command::Serve {
+			config,
+			dir,
+			broadcast,
+			format,
+		} => {
+			warn_if_missing_format(&broadcast);
+			let publish = Publish::new(&format)?;
 			let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
 
 			let server = config.init()?;
@@ -119,18 +143,109 @@ async fn main() -> anyhow::Result<()> {
 			let web_tls = server.tls_info();
 
 			tokio::select! {
-				res = run_server(server, name, publish.consume()) => res,
+				res = run_server(server, broadcast, publish.consume()) => res,
 				res = run_web(&web_bind, web_tls, dir) => res,
-				res = publish.run(stats_interval) => res,
+				res = publish.run() => res,
 			}
 		}
-		Command::Publish { config, url, name, .. } => {
+		Command::Accept {
+			config,
+			broadcast,
+			dir,
+			args,
+		} => {
+			let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
+
+			let server = config.init()?;
+			#[cfg(feature = "iroh")]
+			let server = server.with_iroh(iroh);
+
+			let web_tls = server.tls_info();
+
+			let origin = moq_net::Origin::random().produce();
+			let consumer = origin.consume();
+
+			tokio::select! {
+				res = run_accept(server, origin) => res,
+				res = run_web(&web_bind, web_tls, dir) => res,
+				res = run_announced_subscribe(consumer, broadcast, args) => res,
+				_ = tokio::signal::ctrl_c() => Ok(()),
+			}
+		}
+		Command::Publish {
+			config,
+			url,
+			broadcast,
+			format,
+		} => {
+			warn_if_missing_format(&broadcast);
+			let publish = Publish::new(&format)?;
 			let client = config.init()?;
 
 			#[cfg(feature = "iroh")]
 			let client = client.with_iroh(iroh);
 
-			run_client(client, url, name, publish, stats_interval).await
+			run_client(client, url, broadcast, publish).await
+		}
+		Command::Subscribe {
+			config,
+			url,
+			broadcast,
+			args,
+		} => {
+			let client = config.init()?;
+
+			#[cfg(feature = "iroh")]
+			let client = client.with_iroh(iroh);
+
+			run_subscribe(client, url, broadcast, args).await
 		}
 	}
+}
+
+fn warn_if_missing_format(name: &str) {
+	if moq_mux::catalog::CatalogFormat::detect(name).is_none() {
+		tracing::warn!(
+			name,
+			"You should append .hang to your broadcast name to make the catalog format explicit."
+		);
+	}
+}
+
+async fn run_subscribe(
+	client: moq_native::Client,
+	url: Url,
+	broadcast: String,
+	args: SubscribeArgs,
+) -> anyhow::Result<()> {
+	let origin = moq_net::Origin::random().produce();
+	let consumer = origin.consume();
+
+	tracing::info!(%url, %broadcast, "connecting");
+
+	let reconnect = client.with_consume(origin).reconnect(url);
+
+	#[cfg(unix)]
+	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+
+	tokio::select! {
+		res = run_announced_subscribe(consumer, broadcast, args) => res,
+		res = reconnect.closed() => res,
+		_ = tokio::signal::ctrl_c() => Ok(()),
+	}
+}
+
+async fn run_announced_subscribe(
+	consumer: moq_net::OriginConsumer,
+	broadcast: String,
+	args: SubscribeArgs,
+) -> anyhow::Result<()> {
+	let catalog = args.catalog_format(&broadcast);
+
+	let consumer = consumer
+		.announced_broadcast(&broadcast)
+		.await
+		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast was announced"))?;
+
+	Subscribe::new(consumer, catalog, args).run().await
 }

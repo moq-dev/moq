@@ -61,6 +61,7 @@ pub struct HttpConfig {
 }
 
 /// HTTPS listener configuration with TLS certificate and key.
+#[serde_with::serde_as]
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -83,6 +84,8 @@ pub struct HttpsConfig {
 	/// A verified peer is granted an unrestricted [`AuthToken`] without a JWT,
 	/// mirroring the QUIC server's `--server-tls-root` behavior. Clients that
 	/// don't present a cert continue through the normal JWT path.
+	///
+	/// In config files, accepts either a single string or a TOML array.
 	#[arg(
 		long = "web-https-root",
 		id = "web-https-root",
@@ -90,6 +93,7 @@ pub struct HttpsConfig {
 		env = "MOQ_WEB_HTTPS_ROOT"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 }
 
@@ -502,40 +506,34 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let track = moq_lite::Track::new(track);
-
-	// NOTE: The auth token is already scoped to the broadcast.
-	// TODO: switch to `announced_broadcast` (bounded by the fetch deadline) so freshly-connected
-	// subscribers don't get a spurious 404 before the broadcast has gossiped.
-	#[allow(deprecated)]
-	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
-	let track = broadcast.consume_track(&track).map_err(|err| match err {
-		moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
-		_ => StatusCode::INTERNAL_SERVER_ERROR,
-	})?;
+	let track = moq_net::Track {
+		name: track,
+		priority: 0,
+	};
 
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 
 	let result = tokio::time::timeout_at(deadline, async {
+		// NOTE: The auth token is already scoped to the broadcast.
+		// Block until the broadcast has been announced (within the fetch deadline) so
+		// freshly-connected subscribers don't get a spurious 404 before gossip arrives.
+		let broadcast = origin.announced_broadcast("").await.ok_or(StatusCode::NOT_FOUND)?;
+		let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
+			moq_net::Error::NotFound => StatusCode::NOT_FOUND,
+			_ => StatusCode::INTERNAL_SERVER_ERROR,
+		})?;
 		let group = match params.group {
-			FetchGroup::Num(sequence) => track.get_group(sequence.into()).map_err(|err| match err {
-				moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
-				_ => StatusCode::INTERNAL_SERVER_ERROR,
-			})?,
-			FetchGroup::Latest => match track.latest_group() {
-				Some(group) => group,
-				None => {
-					// No cached group yet — wait for the first one via subscribe.
-					let mut sub = track
-						.subscribe_default()
-						.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-					match sub.next_group().await {
-						Ok(Some(group)) => group,
-						Ok(None) => return Err(StatusCode::NOT_FOUND),
-						Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-					}
-				}
+			FetchGroup::Latest => match track.latest() {
+				Some(sequence) => track.get_group(sequence).await,
+				None => track.recv_group().await,
 			},
+			FetchGroup::Num(sequence) => track.get_group(sequence).await,
+		};
+
+		let group = match group {
+			Ok(Some(group)) => group,
+			Ok(None) => return Err(StatusCode::NOT_FOUND),
+			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
 		};
 
 		tracing::info!(track = %track.name, group = %group.sequence, "serving group");
@@ -567,18 +565,18 @@ async fn serve_fetch(
 }
 
 struct ServeGroup {
-	group: Option<moq_lite::GroupConsumer>,
-	frame: Option<moq_lite::FrameConsumer>,
+	group: Option<moq_net::GroupConsumer>,
+	frame: Option<moq_net::FrameConsumer>,
 	deadline: tokio::time::Instant,
 }
 
 impl ServeGroup {
-	async fn next(&mut self) -> moq_lite::Result<Option<Bytes>> {
+	async fn next(&mut self) -> moq_net::Result<Option<Bytes>> {
 		while self.group.is_some() || self.frame.is_some() {
 			if let Some(frame) = self.frame.as_mut() {
 				let data = tokio::time::timeout_at(self.deadline, frame.read_all())
 					.await
-					.map_err(|_| moq_lite::Error::Timeout)?;
+					.map_err(|_| moq_net::Error::Timeout)?;
 				self.frame.take();
 				return Ok(Some(data?));
 			}
@@ -586,7 +584,7 @@ impl ServeGroup {
 			if let Some(group) = self.group.as_mut() {
 				self.frame = tokio::time::timeout_at(self.deadline, group.next_frame())
 					.await
-					.map_err(|_| moq_lite::Error::Timeout)??;
+					.map_err(|_| moq_net::Error::Timeout)??;
 				if self.frame.is_none() {
 					self.group.take();
 				}
@@ -630,7 +628,7 @@ impl http_body::Body for ServeGroup {
 
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
-struct ServeGroupError(moq_lite::Error);
+struct ServeGroupError(moq_net::Error);
 
 impl IntoResponse for ServeGroupError {
 	fn into_response(self) -> Response {

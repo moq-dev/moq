@@ -1,10 +1,11 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
-import type * as Moq from "@moq/lite";
-import { Time } from "@moq/lite";
+import type * as Moq from "@moq/net";
+import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
+import { base64ToBytes } from "../base64";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
@@ -190,9 +191,11 @@ export class Decoder {
 	}
 
 	#runLegacyDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
+		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
-		const consumer = new Container.Legacy.Consumer(sub, {
+		const consumer = new Container.Consumer(sub, {
+			format,
 			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());
@@ -201,7 +204,7 @@ export class Decoder {
 		effect.run((inner) => {
 			const network = inner.get(consumer.buffered);
 			const decode = inner.get(this.#decodeBuffered);
-			this.#buffered.update(() => mergeBufferedRanges(network, decode));
+			this.#buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
 
 		effect.spawn(async () => {
@@ -226,7 +229,13 @@ export class Decoder {
 				if (decoder.state !== "closed") decoder.close();
 			});
 
-			const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
+			// Opus in CMAF uses raw packets; dOps is not a valid OGG Identification Header.
+			const description =
+				config.codec === "opus"
+					? undefined
+					: config.description
+						? Util.Hex.toBytes(config.description)
+						: undefined;
 			decoder.configure({
 				...config,
 				description,
@@ -261,14 +270,28 @@ export class Decoder {
 	#runCmafDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
-		const { timescale } = config.container;
-		const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
+		const initSegment = base64ToBytes(config.container.init);
+		const init = Container.Cmaf.decodeInitSegment(initSegment);
+		// Opus in CMAF uses raw packets (not OGG-wrapped), so description must be omitted.
+		// The dOps box from the init segment is not a valid OGG Identification Header.
+		const description =
+			config.codec === "opus"
+				? undefined
+				: config.description
+					? Util.Hex.toBytes(config.description)
+					: init.description;
 
-		// For CMAF, just use decode buffer (no network jitter buffer yet)
-		// TODO: Add CMAF consumer wrapper for latency control
+		const consumer = new Container.Consumer(sub, {
+			format: new Container.Cmaf.Format(init),
+			latency: this.source.sync.buffer,
+		});
+		effect.cleanup(() => consumer.close());
+
+		// Combine network jitter buffer with decode buffer
 		effect.run((inner) => {
+			const network = inner.get(consumer.buffered);
 			const decode = inner.get(this.#decodeBuffered);
-			this.#buffered.update(() => decode);
+			this.#buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
 
 		effect.spawn(async () => {
@@ -291,42 +314,28 @@ export class Decoder {
 				description,
 			});
 
-			// Process data segments
-			// TODO: Use a consumer wrapper for CMAF to support latency control
 			for (;;) {
-				const group = await sub.recvGroup();
-				if (!group) break;
+				const next = await consumer.next();
+				if (!next) break;
 
-				effect.spawn(async () => {
-					try {
-						for (;;) {
-							const segment = await group.readFrame();
-							if (!segment) break;
+				const { frame } = next;
+				if (!frame) continue;
 
-							const samples = Container.Cmaf.decodeDataSegment(segment, timescale);
+				const timestamp = Time.Milli.fromMicro(frame.timestamp);
+				this.source.sync.received(timestamp, "audio");
 
-							for (const sample of samples) {
-								// Mark that we received this frame right now.
-								const timestamp = Time.Milli.fromMicro(sample.timestamp as Time.Micro);
-								this.source.sync.received(timestamp, "audio");
+				this.#stats.update((stats) => ({
+					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
+				}));
 
-								this.#stats.update((stats) => ({
-									bytesReceived: (stats?.bytesReceived ?? 0) + sample.data.byteLength,
-								}));
-
-								const chunk = new EncodedAudioChunk({
-									type: sample.keyframe ? "key" : "delta",
-									data: sample.data,
-									timestamp: sample.timestamp,
-								});
-
-								decoder.decode(chunk);
-							}
-						}
-					} finally {
-						group.close();
-					}
-				});
+				if (decoder.state === "closed") break;
+				decoder.decode(
+					new EncodedAudioChunk({
+						type: frame.keyframe ? "key" : "delta",
+						data: frame.data,
+						timestamp: frame.timestamp,
+					}),
+				);
 			}
 		});
 	}
@@ -403,31 +412,27 @@ export class Decoder {
 }
 
 async function supported(config: Catalog.AudioConfig): Promise<boolean> {
-	const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
+	// Opus in CMAF uses raw packets; dOps is not a valid OGG Identification Header.
+	let description: Uint8Array | undefined;
+	if (config.codec !== "opus") {
+		if (config.description) {
+			description = Util.Hex.toBytes(config.description);
+		} else if (config.container.kind === "cmaf") {
+			try {
+				description = Container.Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
+			} catch (err) {
+				// A malformed init segment means we can't extract the codec
+				// description, so we can't probe support reliably. Reject the
+				// track rather than letting isConfigSupported pass on a
+				// description-less config and then having decode() fail later.
+				console.warn(`audio: malformed CMAF init segment for codec ${config.codec}`, err);
+				return false;
+			}
+		}
+	}
 	const res = await AudioDecoder.isConfigSupported({
 		...config,
 		description,
 	});
 	return res.supported ?? false;
-}
-
-// Merge two sets of buffered ranges into one sorted list
-function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges {
-	if (a.length === 0) return b;
-	if (b.length === 0) return a;
-
-	const result: BufferedRanges = [];
-	const all = [...a, ...b].sort((x, y) => x.start - y.start);
-
-	for (const range of all) {
-		const last = result.at(-1);
-		if (last && last.end >= range.start) {
-			// Merge overlapping ranges
-			last.end = Time.Milli.max(last.end, range.end);
-		} else {
-			result.push({ ...range });
-		}
-	}
-
-	return result;
 }

@@ -6,6 +6,9 @@ on:
       - 'moq-relay-v*'
       - 'moq-token-cli-v*'
       - 'moq-cli-v*'
+      - 'moq-boy-v*'
+      - 'libmoq-v*'
+      - 'moq-gst-v*'
 
 jobs:
   cache:
@@ -21,12 +24,16 @@ jobs:
           - macos-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
 
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
+        with:
+          determinate: false
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
 
-      - uses: cachix/cachix-action@v17
+      - uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
         with:
           name: kixelated
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -46,4 +53,19 @@ jobs:
       - name: Build and cache moq-token-cli
         run: |
           nix build .#moq-token-cli --print-build-logs
+          cachix push kixelated ./result
+
+      - name: Build and cache moq-boy
+        run: |
+          nix build .#moq-boy --print-build-logs
+          cachix push kixelated ./result
+
+      - name: Build and cache libmoq
+        run: |
+          nix build .#libmoq --print-build-logs
+          cachix push kixelated ./result
+
+      - name: Build and cache moq-gst
+        run: |
+          nix build .#moq-gst --print-build-logs
           cachix push kixelated ./result

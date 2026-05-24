@@ -1,5 +1,5 @@
 import type * as Catalog from "@moq/hang/catalog";
-import type * as Moq from "@moq/lite";
+import type * as Moq from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import type { Sync } from "../sync";
@@ -136,6 +136,12 @@ export class Source {
 
 		for (const [track, config] of entries) {
 			if (config.container.kind === "legacy") {
+				return { track, config };
+			}
+		}
+
+		for (const [track, config] of entries) {
+			if (config.container.kind === "loc") {
 				return { track, config };
 			}
 		}

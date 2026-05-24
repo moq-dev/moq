@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Path } from "@moq/lite";
+import { Path } from "@moq/net";
 import { normalizeRelativeBroadcast, resolveBroadcast } from "./path.ts";
 
 test("resolveBroadcast appends named segments", () => {

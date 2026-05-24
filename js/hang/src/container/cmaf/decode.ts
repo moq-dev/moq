@@ -3,7 +3,7 @@
  * Used by WebCodecs to extract raw frames from CMAF container.
  */
 
-import type { Time } from "@moq/lite";
+import type { Time } from "@moq/net";
 import {
 	type MediaHeaderBox,
 	type ParsedIsoBox,
@@ -19,8 +19,10 @@ import {
 	readTfdt,
 	readTfhd,
 	readTkhd,
+	readTrex,
 	readTrun,
 	type SampleDescriptionBox,
+	type TrackExtendsBox,
 	type TrackFragmentBaseMediaDecodeTimeBox,
 	type TrackFragmentHeaderBox,
 	type TrackRunBox,
@@ -37,6 +39,7 @@ const INIT_READERS = {
 	stsd: readStsd,
 	mdhd: readMdhd,
 	tkhd: readTkhd,
+	trex: readTrex,
 };
 
 const DATA_READERS = {
@@ -80,6 +83,18 @@ export interface InitSegment {
 	timescale: number;
 	/** Track ID from the init segment */
 	trackId: number;
+	/** Default sample duration from moov/mvex/trex, used when not overridden in tfhd/trun. */
+	defaultSampleDuration: number;
+	/** Default sample size from moov/mvex/trex, used when not overridden in tfhd/trun. */
+	defaultSampleSize: number;
+	/**
+	 * Default sample flags from moov/mvex/trex, used when not overridden in tfhd/trun.
+	 *
+	 * Some encoders (notably gstreamer/ffmpeg passthrough) only set sample flags
+	 * in trex, leaving tfhd defaults and per-sample trun flags zero. Without this
+	 * fallback every sample would appear as a sync sample.
+	 */
+	defaultSampleFlags: number;
 }
 
 /**
@@ -138,10 +153,21 @@ export function decodeInitSegment(init: Uint8Array): InitSegment {
 	const entry = stsd.entries[0];
 	const description = extractDescription(entry);
 
+	// Find moov > mvex > trex for this track to extract default sample values.
+	// These are the bottom of the fallback chain when tfhd/trun don't specify them.
+	const trex = findBox(
+		boxes,
+		(box): box is TrackExtendsBox & ParsedIsoBox =>
+			box.type === "trex" && (box as TrackExtendsBox).trackId === trackId,
+	);
+
 	return {
 		description,
 		timescale: mdhd.timescale,
 		trackId,
+		defaultSampleDuration: trex?.defaultSampleDuration ?? 0,
+		defaultSampleSize: trex?.defaultSampleSize ?? 0,
+		defaultSampleFlags: trex?.defaultSampleFlags ?? 0,
 	};
 }
 
@@ -163,8 +189,12 @@ function extractDescription(entry: any): Uint8Array | undefined {
 			if (box.length > 8) {
 				// Check if this looks like a codec config box by reading the type
 				const typeBytes = String.fromCharCode(box[4], box[5], box[6], box[7]);
-				if (typeBytes === "avcC" || typeBytes === "hvcC" || typeBytes === "esds" || typeBytes === "dOps") {
+				if (typeBytes === "avcC" || typeBytes === "hvcC" || typeBytes === "dOps") {
 					return new Uint8Array(box.slice(8));
+				}
+				if (typeBytes === "esds") {
+					// esds payload has nested descriptors; extract the AudioSpecificConfig (tag 0x05).
+					return extractAudioSpecificConfig(new Uint8Array(box.slice(8)));
 				}
 			}
 			continue;
@@ -172,25 +202,78 @@ function extractDescription(entry: any): Uint8Array | undefined {
 
 		// Check for known codec config box types
 		const boxType = box.type;
-		if (boxType === "avcC" || boxType === "hvcC" || boxType === "esds" || boxType === "dOps") {
-			// The library stores parsed boxes with a 'view' property containing IsoBoxReadView
-			// which has access to the raw buffer. Extract the box payload (without header).
+		if (boxType === "avcC" || boxType === "hvcC" || boxType === "dOps") {
 			if (box.view) {
 				const view = box.view;
-				// IsoBoxReadView has buffer, byteOffset, and byteLength properties
-				// The box payload starts after the 8-byte header (size + type)
 				const headerSize = 8;
 				const payloadOffset = view.byteOffset + headerSize;
 				const payloadLength = box.size - headerSize;
 				return new Uint8Array(view.buffer, payloadOffset, payloadLength);
 			}
-			// Fallback: try data or raw properties
 			if (box.data instanceof Uint8Array) {
 				return new Uint8Array(box.data);
 			}
 			if (box.raw instanceof Uint8Array) {
 				return new Uint8Array(box.raw.slice(8));
 			}
+		}
+		if (boxType === "esds") {
+			let payload: Uint8Array | undefined;
+			if (box.view) {
+				const view = box.view;
+				const headerSize = 8;
+				payload = new Uint8Array(view.buffer, view.byteOffset + headerSize, box.size - headerSize);
+			} else if (box.data instanceof Uint8Array) {
+				payload = new Uint8Array(box.data);
+			} else if (box.raw instanceof Uint8Array) {
+				payload = new Uint8Array(box.raw.slice(8));
+			}
+			if (payload) return extractAudioSpecificConfig(payload);
+		}
+	}
+
+	return undefined;
+}
+
+/**
+ * Extract AudioSpecificConfig from an esds box payload.
+ * The esds contains nested descriptors: ES_Descriptor (0x03) → DecoderConfigDescriptor (0x04)
+ * → DecoderSpecificInfo (0x05). The DecoderSpecificInfo payload is the AudioSpecificConfig
+ * that AudioDecoder.configure() expects.
+ */
+function extractAudioSpecificConfig(esds: Uint8Array): Uint8Array | undefined {
+	// Skip version + flags (4 bytes)
+	let offset = 4;
+
+	// Scan for DecoderSpecificInfo tag (0x05)
+	while (offset < esds.length) {
+		const tag = esds[offset++];
+
+		// Parse variable-length size (up to 4 bytes, high bit = continuation)
+		let size = 0;
+		for (let i = 0; i < 4 && offset < esds.length; i++) {
+			const b = esds[offset++];
+			size = (size << 7) | (b & 0x7f);
+			if ((b & 0x80) === 0) break;
+		}
+
+		if (tag === 0x05) {
+			// Found DecoderSpecificInfo — payload is the AudioSpecificConfig
+			if (offset + size <= esds.length) {
+				return new Uint8Array(esds.buffer, esds.byteOffset + offset, size);
+			}
+			return undefined;
+		}
+
+		// For container descriptors (0x03, 0x04), skip their fixed header fields
+		// but continue scanning their children (don't skip the full size).
+		if (tag === 0x03) {
+			offset += 3; // ES_ID (2) + flags (1)
+		} else if (tag === 0x04) {
+			offset += 13; // objectTypeIndication (1) + streamType (1) + bufferSizeDB (3) + maxBitrate (4) + avgBitrate (4)
+		} else {
+			// Unknown tag — skip its payload entirely
+			offset += size;
 		}
 	}
 
@@ -202,10 +285,10 @@ function extractDescription(entry: any): Uint8Array | undefined {
  * This is a lighter-weight function when you only need the timestamp.
  *
  * @param segment - The moof + mdat data
- * @param timescale - Time units per second (from init segment)
+ * @param init - Parsed init segment (provides timescale)
  * @returns The base media decode time in microseconds
  */
-export function decodeTimestamp(segment: Uint8Array, timescale: number): Time.Micro {
+export function decodeTimestamp(segment: Uint8Array, init: InitSegment): Time.Micro {
 	const boxes = readIsoBoxes(toArrayBuffer(segment), { readers: DATA_READERS }) as ParsedIsoBox[];
 
 	// Find moof > traf > tfdt for base media decode time
@@ -213,17 +296,21 @@ export function decodeTimestamp(segment: Uint8Array, timescale: number): Time.Mi
 	const baseDecodeTime = tfdt?.baseMediaDecodeTime ?? 0;
 
 	// Convert to microseconds
-	return ((baseDecodeTime * 1_000_000) / timescale) as Time.Micro;
+	return ((baseDecodeTime * 1_000_000) / init.timescale) as Time.Micro;
 }
 
 /**
  * Parse a data segment (moof + mdat) to extract raw samples.
  *
+ * Sample duration/size/flags fall back through trun → tfhd → trex (init segment)
+ * per ISO/IEC 14496-12 §8.8.7. The init segment's trex defaults are required for
+ * fragments where the encoder only set them once in moov (e.g. gstreamer passthrough).
+ *
  * @param segment - The moof + mdat data
- * @param timescale - Time units per second (from init segment)
+ * @param init - Parsed init segment (provides timescale and trex defaults)
  * @returns Array of decoded samples
  */
-export function decodeDataSegment(segment: Uint8Array, timescale: number): Sample[] {
+export function decodeDataSegment(segment: Uint8Array, init: InitSegment): Sample[] {
 	// Cast to ParsedIsoBox[] since the library's return type changes with readers
 	const boxes = readIsoBoxes(toArrayBuffer(segment), { readers: DATA_READERS }) as ParsedIsoBox[];
 
@@ -231,11 +318,11 @@ export function decodeDataSegment(segment: Uint8Array, timescale: number): Sampl
 	const tfdt = findBox(boxes, isBoxType<TrackFragmentBaseMediaDecodeTimeBox & ParsedIsoBox>("tfdt"));
 	const baseDecodeTime = tfdt?.baseMediaDecodeTime ?? 0;
 
-	// Find moof > traf > tfhd for default sample values
+	// Find moof > traf > tfhd for default sample values, falling back to trex from the init segment.
 	const tfhd = findBox(boxes, isBoxType<TrackFragmentHeaderBox & ParsedIsoBox>("tfhd"));
-	const defaultDuration = tfhd?.defaultSampleDuration ?? 0;
-	const defaultSize = tfhd?.defaultSampleSize ?? 0;
-	const defaultFlags = tfhd?.defaultSampleFlags ?? 0;
+	const defaultDuration = tfhd?.defaultSampleDuration ?? init.defaultSampleDuration;
+	const defaultSize = tfhd?.defaultSampleSize ?? init.defaultSampleSize;
+	const defaultFlags = tfhd?.defaultSampleFlags ?? init.defaultSampleFlags;
 
 	// Find moof > traf > trun for sample info
 	const trun = findBox(boxes, isBoxType<TrackRunBox & ParsedIsoBox>("trun"));
@@ -278,8 +365,9 @@ export function decodeDataSegment(segment: Uint8Array, timescale: number): Sampl
 			throw new Error(`Invalid sample size ${sampleSize} for sample ${i} in trun`);
 		}
 
-		// Validate sample duration - must be positive for proper timing
-		if (sampleDuration <= 0) {
+		// Duration 0 is valid for single-sample CMAF fragments where duration
+		// is implicit. Negative duration would indicate corrupt data.
+		if (sampleDuration < 0) {
 			throw new Error(`Invalid sample duration ${sampleDuration} for sample ${i} in trun`);
 		}
 
@@ -303,7 +391,7 @@ export function decodeDataSegment(segment: Uint8Array, timescale: number): Sampl
 		// Calculate presentation timestamp in microseconds
 		// PTS = (decode_time + composition_offset) * 1_000_000 / timescale
 		const pts = decodeTime + compositionOffset;
-		const timestamp = Math.round((pts * 1_000_000) / timescale);
+		const timestamp = Math.round((pts * 1_000_000) / init.timescale);
 
 		// Check if keyframe (sample_is_non_sync_sample flag is bit 16)
 		// If flag is 0, treat as keyframe for safety

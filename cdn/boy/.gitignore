@@ -1,7 +1,0 @@
-gen/
-.terraform/
-.tofu/
-*.tfstate
-*.tfstate.backup
-*.tfvars
-!*.tfvars.example

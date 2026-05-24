@@ -1,4 +1,4 @@
-import * as Moq from "@moq/lite";
+import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
@@ -50,8 +50,8 @@ export interface MultiBackendProps {
 	// Latency: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter in ms.
 	latency?: Latency | Signal<Latency>;
 
-	// RTT signal from the connection (PROBE), used for dynamic jitter in "real-time" mode.
-	rtt?: Signal<number | undefined>;
+	// Established connection, used by Sync to read RTT (PROBE) for dynamic jitter in "real-time" mode.
+	connection?: Signal<Moq.Connection.Established | undefined>;
 
 	paused?: boolean | Signal<boolean>;
 }
@@ -126,7 +126,7 @@ export class MultiBackend implements Backend {
 	constructor(props?: MultiBackendProps) {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
-		this.sync = new Sync({ latency: props?.latency, rtt: props?.rtt });
+		this.sync = new Sync({ latency: props?.latency, connection: props?.connection });
 		this.latency = this.sync.latency;
 		this.jitter = this.sync.jitter;
 
@@ -166,7 +166,10 @@ export class MultiBackend implements Backend {
 			paused: this.paused,
 		});
 
-		const videoRenderer = new Video.Renderer(videoSource, { canvas: element, paused: this.paused });
+		const videoRenderer = new Video.Renderer(videoSource, {
+			canvas: element,
+			paused: this.paused,
+		});
 
 		effect.cleanup(() => {
 			videoSource.close();
@@ -217,5 +220,8 @@ export class MultiBackend implements Backend {
 
 	close(): void {
 		this.signals.close();
+		this.#videoSource.close();
+		this.#audioSource.close();
+		this.sync.close();
 	}
 }

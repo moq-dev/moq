@@ -7,7 +7,7 @@ async fn main() -> anyhow::Result<()> {
 	moq_native::Log::new(tracing::Level::DEBUG).init();
 
 	// Create an origin that we can publish to and the session can consume from.
-	let origin = moq_lite::Origin::random().produce();
+	let origin = moq_net::Origin::random().produce();
 
 	// Run the broadcast production and the session in parallel.
 	// This is a simple example of how you can concurrently run multiple tasks.
@@ -20,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
 
 // Connect to the server and publish our origin of broadcasts.
 // Automatically reconnects if the connection drops.
-async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
+async fn run_session(origin: moq_net::OriginConsumer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 
@@ -39,9 +39,12 @@ async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 
 // Create a video track with a catalog that describes it.
 // The catalog can contain multiple tracks, used by the viewer to choose the best track.
-fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> anyhow::Result<moq_lite::TrackProducer> {
+fn create_track(broadcast: &mut moq_net::BroadcastProducer) -> anyhow::Result<moq_net::TrackProducer> {
 	// Basic information about the video track.
-	let video_track = moq_lite::Track::new("video");
+	let video_track = moq_net::Track {
+		name: "video".to_string(),
+		priority: 1, // Video typically has lower priority than audio
+	};
 
 	// Example video configuration
 	// In a real application, you would get this from the encoder
@@ -98,42 +101,42 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> anyhow::Result<m
 }
 
 // Produce a broadcast and publish it to the origin.
-async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
+async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin.
-	let mut broadcast = moq_lite::Broadcast::new().produce();
+	let mut broadcast = moq_net::Broadcast::new().produce();
 	let track = create_track(&mut broadcast)?;
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
 	origin.publish_broadcast("", broadcast.consume());
 
-	// Wrap in OrderedProducer for group management.
-	let mut producer = hang::container::OrderedProducer::new(track);
+	// Wrap in a Producer for keyframe-based group management.
+	let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
 
-	// Not real frames of course.
-	// Signal a keyframe to start the first group.
-	producer.keyframe()?;
-	let frame = hang::container::Frame {
-		timestamp: hang::container::Timestamp::from_secs(1).unwrap(),
-		payload: Bytes::from_static(b"keyframe NAL data").into(),
+	// Not real frames of course. The first frame is a keyframe and starts the first group.
+	let frame = moq_mux::container::Frame {
+		timestamp: moq_mux::container::Timestamp::from_secs(1).unwrap(),
+		payload: Bytes::from_static(b"keyframe NAL data"),
+		keyframe: true,
 	};
 	producer.write(frame)?;
 
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-	let frame = hang::container::Frame {
-		timestamp: hang::container::Timestamp::from_secs(2).unwrap(),
-		payload: Bytes::from_static(b"delta NAL data").into(),
+	let frame = moq_mux::container::Frame {
+		timestamp: moq_mux::container::Timestamp::from_secs(2).unwrap(),
+		payload: Bytes::from_static(b"delta NAL data"),
+		keyframe: false,
 	};
 	producer.write(frame)?;
 
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-	// Signal a new keyframe to start a new group.
-	producer.keyframe()?;
-	let frame = hang::container::Frame {
-		timestamp: hang::container::Timestamp::from_secs(3).unwrap(),
-		payload: Bytes::from_static(b"keyframe NAL data").into(),
+	// Marking this frame as a keyframe closes the current group and starts a new one.
+	let frame = moq_mux::container::Frame {
+		timestamp: moq_mux::container::Timestamp::from_secs(3).unwrap(),
+		payload: Bytes::from_static(b"keyframe NAL data"),
+		keyframe: true,
 	};
 	producer.write(frame)?;
 

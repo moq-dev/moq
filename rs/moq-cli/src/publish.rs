@@ -1,33 +1,23 @@
-use std::time::Duration;
-
 use clap::Subcommand;
-use hang::moq_lite;
-use moq_mux::import;
+use hang::moq_net;
+use moq_mux::container::{fmp4, hls};
 
 #[derive(Subcommand, Clone)]
 pub enum PublishFormat {
 	Avc3,
-	Fmp4 {
-		/// Transmit the fMP4 container directly instead of decoding it.
-		#[arg(long)]
-		passthrough: bool,
-	},
+	Fmp4,
 	// NOTE: No aac support because it needs framing.
 	Hls {
 		/// URL or file path of an HLS playlist to ingest.
 		#[arg(long)]
 		playlist: String,
-
-		/// Transmit the fMP4 segments directly instead of decoding them.
-		#[arg(long)]
-		passthrough: bool,
 	},
 }
 
 enum PublishDecoder {
-	Avc3(Box<import::Avc3>),
-	Fmp4(Box<import::Fmp4>),
-	Hls(Box<import::Hls>),
+	Avc3(Box<moq_mux::codec::h264::Import>),
+	Fmp4(Box<fmp4::Import>),
+	Hls(Box<hls::Import>),
 }
 
 impl PublishDecoder {
@@ -39,51 +29,30 @@ impl PublishDecoder {
 			Self::Hls(_) => unreachable!(),
 		}
 	}
-
-	fn stats(&self) -> import::Stats {
-		match self {
-			Self::Avc3(d) => d.stats(),
-			Self::Fmp4(d) => d.stats(),
-			Self::Hls(d) => d.stats(),
-		}
-	}
 }
 
 pub struct Publish {
 	decoder: PublishDecoder,
-	broadcast: moq_lite::BroadcastProducer,
+	broadcast: moq_net::BroadcastProducer,
 }
 
 impl Publish {
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
-		let mut broadcast = moq_lite::Broadcast::new().produce();
-		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
+		let mut broadcast = moq_net::Broadcast::new().produce();
+		let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
 
 		let decoder = match format {
 			PublishFormat::Avc3 => {
-				let avc3 = import::Avc3::new(broadcast.clone(), catalog.clone());
+				let avc3 = moq_mux::codec::h264::Import::new(broadcast.clone(), catalog.clone())
+					.with_mode(moq_mux::codec::h264::Mode::Avc3)?;
 				PublishDecoder::Avc3(Box::new(avc3))
 			}
-			PublishFormat::Fmp4 { passthrough } => {
-				let fmp4 = import::Fmp4::new(
-					broadcast.clone(),
-					catalog.clone(),
-					import::Fmp4Config {
-						passthrough: *passthrough,
-					},
-				);
+			PublishFormat::Fmp4 => {
+				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
-			PublishFormat::Hls { playlist, passthrough } => {
-				let hls = import::Hls::new(
-					broadcast.clone(),
-					catalog.clone(),
-					import::HlsConfig {
-						playlist: playlist.clone(),
-						client: None,
-						passthrough: *passthrough,
-					},
-				)?;
+			PublishFormat::Hls { playlist } => {
+				let hls = hls::Import::new(broadcast.clone(), catalog.clone(), hls::Config::new(playlist.clone()))?;
 				PublishDecoder::Hls(Box::new(hls))
 			}
 		};
@@ -91,86 +60,25 @@ impl Publish {
 		Ok(Self { decoder, broadcast })
 	}
 
-	pub fn consume(&self) -> moq_lite::BroadcastConsumer {
+	pub fn consume(&self) -> moq_net::BroadcastConsumer {
 		self.broadcast.consume()
 	}
 
-	pub async fn run(mut self, stats_interval: Option<Duration>) -> anyhow::Result<()> {
-		// The interval value doesn't matter when stats is None — the select! guard disables polling.
-		let mut ticker = tokio::time::interval(stats_interval.unwrap_or(Duration::from_secs(1)));
-		ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-		ticker.tick().await; // skip the first immediate tick
-
-		let stats_enabled = stats_interval.is_some();
-		let mut prev = import::Stats::default();
-		let mut last_instant = tokio::time::Instant::now();
-
+	pub async fn run(mut self) -> anyhow::Result<()> {
 		if let PublishDecoder::Hls(decoder) = &mut self.decoder {
 			decoder.init().await?;
-
-			loop {
-				let delay = decoder.step().await?;
-				let sleep = tokio::time::sleep(delay);
-				tokio::pin!(sleep);
-
-				loop {
-					tokio::select! {
-						_ = &mut sleep => break,
-						_ = ticker.tick(), if stats_enabled => {
-							Self::tick_stats(decoder.stats(), &mut prev, &mut last_instant);
-						}
-					}
-				}
-			}
+			decoder.run().await
 		} else {
 			let mut stdin = tokio::io::stdin();
 			let mut buffer = bytes::BytesMut::new();
 
 			loop {
-				tokio::select! {
-					result = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer) => {
-						let n = result?;
-						if n == 0 {
-							return Ok(());
-						}
-						self.decoder.decode_buf(&mut buffer)?;
-					}
-					_ = ticker.tick(), if stats_enabled => {
-						Self::tick_stats(self.decoder.stats(), &mut prev, &mut last_instant);
-					}
+				let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
+				if n == 0 {
+					return Ok(());
 				}
+				self.decoder.decode_buf(&mut buffer)?;
 			}
 		}
-	}
-
-	fn tick_stats(current: import::Stats, prev: &mut import::Stats, last_instant: &mut tokio::time::Instant) {
-		let now = tokio::time::Instant::now();
-		let elapsed = now - *last_instant;
-		*last_instant = now;
-
-		let delta = &current - prev;
-		let secs = elapsed.as_secs_f64();
-
-		let fps = delta.frames as f64 / secs;
-		let bps = delta.bytes as f64 * 8.0 / secs;
-
-		let frames = format!("{:.0}/s", fps);
-
-		let bitrate = if bps >= 1_000_000.0 {
-			format!("{:.1} Mbps", bps / 1_000_000.0)
-		} else if bps >= 1_000.0 {
-			format!("{:.1} Kbps", bps / 1_000.0)
-		} else {
-			format!("{:.0} bps", bps)
-		};
-
-		let drift = match delta.drift.mean() {
-			Some(mean) => format!("{:.1}ms", mean.as_secs_f64() * 1000.0),
-			None => "n/a".to_string(),
-		};
-
-		tracing::info!(frames, bitrate, drift, "stats");
-
-		*prev = current;
 	}
 }

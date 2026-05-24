@@ -1,7 +1,7 @@
 use anyhow::Context;
 
 use chrono::prelude::*;
-use moq_lite::*;
+use moq_net::*;
 
 pub struct Publisher {
 	track: TrackProducer,
@@ -71,11 +71,11 @@ impl Publisher {
 	}
 }
 pub struct Subscriber {
-	track: TrackSubscriber,
+	track: TrackConsumer,
 }
 
 impl Subscriber {
-	pub fn new(track: TrackSubscriber) -> Self {
+	pub fn new(track: TrackConsumer) -> Self {
 		Self { track }
 	}
 

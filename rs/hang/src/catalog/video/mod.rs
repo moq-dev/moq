@@ -58,33 +58,9 @@ impl Video {
 		Ok(())
 	}
 
-	/// Create a new video track with the given extension and configuration.
-	#[deprecated(
-		note = "use BroadcastProducer::unique_track to create the track, then insert into the catalog when initialized"
-	)]
-	pub fn create_track(&mut self, extension: &str, config: VideoConfig) -> moq_lite::Track {
-		for i in 0.. {
-			let name = match extension {
-				"" => format!("video{}", i),
-				extension => format!("video{}.{}", i, extension),
-			};
-			if let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.clone()) {
-				entry.insert(config.clone());
-				return moq_lite::Track::new(name);
-			}
-		}
-
-		unreachable!("no available video track name");
-	}
-
-	/// Remove a track from the catalog by name.
+	/// Remove the track from the catalog and return the configuration if found.
 	pub fn remove(&mut self, name: &str) -> Option<VideoConfig> {
 		self.renditions.remove(name)
-	}
-
-	#[deprecated(note = "use remove() instead")]
-	pub fn remove_track(&mut self, track: &moq_lite::Track) -> Option<VideoConfig> {
-		self.remove(&track.name)
 	}
 }
 
@@ -101,7 +77,7 @@ pub struct Display {
 /// This struct contains all the information needed to initialize a video decoder,
 /// including codec-specific parameters, resolution, and optional metadata.
 ///
-/// Reference: <https://w3c.github.io/webcodecs/#video-decoder-config>
+/// Reference: <https://www.w3.org/TR/webcodecs/#video-decoder-config>
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -114,7 +90,7 @@ pub struct VideoConfig {
 	/// This allows a worker to author a downstream catalog that points unchanged
 	/// renditions at the source broadcast without re-publishing the bytes.
 	#[serde(default)]
-	pub broadcast: Option<moq_lite::PathRelativeOwned>,
+	pub broadcast: Option<moq_net::PathRelativeOwned>,
 
 	/// The codec, see the registry for details:
 	/// <https://w3c.github.io/webcodecs/codec_registry.html>
@@ -172,5 +148,5 @@ pub struct VideoConfig {
 	/// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
 	/// - If frames are buffered into 2s segments, this would be 2s.
 	#[serde(default)]
-	pub jitter: Option<moq_lite::Time>,
+	pub jitter: Option<moq_net::Time>,
 }

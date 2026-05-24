@@ -2,8 +2,8 @@ use anyhow::Context;
 use axum::http;
 use http_cache_reqwest::{Cache, CacheMode, HttpCache, HttpCacheOptions, MokaManager};
 #[cfg(test)]
-use moq_lite::AsPath;
-use moq_lite::{Path, PathOwned, PathPrefixes};
+use moq_net::AsPath;
+use moq_net::{Path, PathOwned, PathPrefixes};
 use moq_token::{Key, KeyId};
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
@@ -170,13 +170,16 @@ impl axum::response::IntoResponse for AuthError {
 /// Mirrors [`moq_native::ClientTls`] so the auth client can be configured
 /// independently of the cluster client. Defaults to system roots with no
 /// client identity, which is what most external auth endpoints expect.
+#[serde_as]
 #[derive(Clone, Default, Debug, clap::Args, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct AuthTls {
 	/// PEM file(s) of root CAs. If empty, the platform's native roots are used.
+	/// In config files, accepts either a single string or a TOML array.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[arg(id = "auth-tls-root", long = "auth-tls-root", env = "MOQ_AUTH_TLS_ROOT")]
+	#[serde_as(as = "OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
 	/// PEM file containing the client certificate chain for mTLS.
@@ -223,6 +226,7 @@ impl AuthTls {
 }
 
 /// Configuration for JWT-based authentication.
+#[serde_as]
 #[derive(clap::Args, Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
 #[non_exhaustive]
@@ -297,8 +301,11 @@ pub struct AuthConfig {
 	/// matches the more specific `usw.cdn.moq.dev` (slug `customer`,
 	/// path `/customer/foo`) rather than `cdn.moq.dev` (slug `usw/customer`,
 	/// path `/usw/customer/foo`).
+	///
+	/// In config files, accepts either a single string or a TOML array.
 	#[arg(long = "auth-domain", env = "MOQ_AUTH_DOMAIN")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_>")]
 	pub domains: Vec<String>,
 }
 
@@ -460,7 +467,13 @@ impl AuthConfig {
 
 /// The result of a successful authentication, containing the resolved
 /// permissions for a connection.
+///
+/// Marked `#[non_exhaustive]` so additional context fields (cluster tier flags,
+/// rate-limit info, etc.) can be added without bumping the major version.
+/// External consumers must build tokens through library APIs (e.g. via
+/// [`Auth::verify`]) rather than by struct literal.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct AuthToken {
 	/// The root path this token is scoped to.
 	pub root: PathOwned,
@@ -468,19 +481,24 @@ pub struct AuthToken {
 	pub subscribe: PathPrefixes,
 	/// Paths the holder is allowed to publish to, relative to `root`.
 	pub publish: PathPrefixes,
+	/// True when the peer authenticated through a trusted TLS root rather than
+	/// a JWT. Used to record stats on the internal tier so cluster peers can
+	/// be billed separately from end-user traffic.
+	pub internal: bool,
 }
 
 impl AuthToken {
 	/// Construct a token for a peer that was authenticated at the TLS layer
 	/// via mTLS. These peers are granted full (root-scoped) publish and
-	/// subscribe access. The cert's trust chain (verified against the
-	/// configured CA) is the only credential we require — DNS SANs and the
-	/// `?register=` name are no longer consulted.
+	/// subscribe access and are flagged as internal. The cert's trust chain
+	/// (verified against the configured CA) is the only credential we require
+	/// — DNS SANs and the `?register=` name are no longer consulted.
 	pub fn unrestricted() -> Self {
 		Self {
 			root: PathOwned::default(),
 			subscribe: PathPrefixes::from(vec![Path::new("").to_owned()]),
 			publish: PathPrefixes::from(vec![Path::new("").to_owned()]),
+			internal: true,
 		}
 	}
 }
@@ -782,6 +800,7 @@ impl Auth {
 			root: root.to_owned(),
 			subscribe,
 			publish,
+			internal: false,
 		})
 	}
 

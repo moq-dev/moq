@@ -1,0 +1,112 @@
+name: moq-clock
+
+on:
+  push:
+    tags:
+      - "moq-clock-v*"
+  pull_request:
+    paths:
+      - ".github/workflows/moq-clock.yml"
+      - ".github/scripts/release.sh"
+      - "rs/scripts/package-binary.sh"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
+        with:
+          determinate: false
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
+
+      - name: Parse version
+        id: parse
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            CARGO_VERSION=$(grep '^version' rs/moq-clock/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
+          else
+            .github/scripts/release.sh parse-version moq-clock
+          fi
+
+      - name: Build and package
+        shell: bash
+        run: |
+          ./rs/scripts/package-binary.sh \
+            --crate moq-clock \
+            --target ${{ matrix.target }} \
+            --version ${{ steps.parse.outputs.version }} \
+            --output dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: moq-clock-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Parse version
+        id: parse
+        run: .github/scripts/release.sh parse-version moq-clock
+
+      - name: Find previous tag
+        id: prev_tag
+        run: .github/scripts/release.sh prev-tag moq-clock
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TITLE: "moq-clock v${{ steps.parse.outputs.version }}"
+          RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+        run: .github/scripts/release.sh create artifacts

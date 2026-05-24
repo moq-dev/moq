@@ -1,4 +1,4 @@
-import { Time } from "@moq/lite";
+import { Time } from "@moq/net";
 
 // Control array slot indices
 const WRITE = 0;
