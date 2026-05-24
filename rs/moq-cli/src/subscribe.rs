@@ -106,19 +106,19 @@ pub struct SubscribeArgs {
 
 	/// Prefer a video rendition no wider than this (px).
 	#[arg(long)]
-	pub max_video_width: Option<u32>,
+	pub video_width_max: Option<u32>,
 
 	/// Prefer a video rendition no taller than this (px).
 	#[arg(long)]
-	pub max_video_height: Option<u32>,
+	pub video_height_max: Option<u32>,
 
 	/// Prefer a video rendition with at most this many pixels (`coded_width * coded_height`).
 	#[arg(long)]
-	pub max_video_pixels: Option<u32>,
+	pub video_pixels_max: Option<u32>,
 
 	/// Prefer a video rendition under this bitrate (bits per second).
 	#[arg(long)]
-	pub max_video_bitrate: Option<u64>,
+	pub video_bitrate_max: Option<u64>,
 
 	/// Pick the audio rendition with this exact name.
 	#[arg(long)]
@@ -130,7 +130,7 @@ pub struct SubscribeArgs {
 
 	/// Prefer an audio rendition under this bitrate (bits per second).
 	#[arg(long)]
-	pub max_audio_bitrate: Option<u64>,
+	pub audio_bitrate_max: Option<u64>,
 }
 
 impl SubscribeArgs {
@@ -190,23 +190,23 @@ impl SubscribeArgs {
 	}
 
 	fn target_video(&self) -> Option<TargetVideo> {
-		if self.max_video_width.is_none()
-			&& self.max_video_height.is_none()
-			&& self.max_video_pixels.is_none()
-			&& self.max_video_bitrate.is_none()
+		if self.video_width_max.is_none()
+			&& self.video_height_max.is_none()
+			&& self.video_pixels_max.is_none()
+			&& self.video_bitrate_max.is_none()
 		{
 			return None;
 		}
 		Some(TargetVideo {
-			width: self.max_video_width,
-			height: self.max_video_height,
-			pixels: self.max_video_pixels,
-			bitrate: self.max_video_bitrate,
+			width: self.video_width_max,
+			height: self.video_height_max,
+			pixels: self.video_pixels_max,
+			bitrate: self.video_bitrate_max,
 		})
 	}
 
 	fn target_audio(&self) -> Option<TargetAudio> {
-		self.max_audio_bitrate.map(|b| TargetAudio { bitrate: Some(b) })
+		self.audio_bitrate_max.map(|b| TargetAudio { bitrate: Some(b) })
 	}
 }
 

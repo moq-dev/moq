@@ -25,7 +25,7 @@ impl Consumer {
 	}
 
 	/// Poll for the next catalog update, returned as a [`hang::Catalog`].
-	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<hang::Catalog>>> {
+	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<crate::Result<Option<hang::Catalog>>> {
 		// Drain pending groups, keeping only the newest. Remember whether the track is done
 		// so we can distinguish "more groups may arrive" from "no more groups, ever".
 		let track_finished = loop {
@@ -40,9 +40,7 @@ impl Consumer {
 			match group.poll_read_frame(waiter)? {
 				Poll::Ready(Some(frame)) => {
 					self.group = None;
-					let json = std::str::from_utf8(&frame).context("MSF catalog frame is not valid UTF-8")?;
-					let msf = moq_msf::Catalog::from_str(json).context("failed to parse MSF catalog frame")?;
-					let catalog = from_msf(&msf)?;
+					let catalog = decode_frame(&frame).map_err(crate::Error::Msf)?;
 					return Poll::Ready(Ok(Some(catalog)));
 				}
 				Poll::Ready(None) => self.group = None,
@@ -61,9 +59,18 @@ impl Consumer {
 	///
 	/// Waits for the next MSF catalog publication and returns it converted to a
 	/// [`hang::Catalog`]. Returns `None` when the track has ended with no further updates.
-	pub async fn next(&mut self) -> anyhow::Result<Option<hang::Catalog>> {
+	pub async fn next(&mut self) -> crate::Result<Option<hang::Catalog>> {
 		conducer::wait(|waiter| self.poll_next(waiter)).await
 	}
+}
+
+/// Decode a single MSF catalog frame into a [`hang::Catalog`]. Internal error
+/// chain stays as an [`anyhow::Error`] so the layered parsing contexts survive;
+/// the caller wraps it in [`crate::Error::Msf`] at the boundary.
+fn decode_frame(frame: &[u8]) -> anyhow::Result<hang::Catalog> {
+	let json = std::str::from_utf8(frame).context("MSF catalog frame is not valid UTF-8")?;
+	let msf = moq_msf::Catalog::from_str(json).context("failed to parse MSF catalog frame")?;
+	from_msf(&msf)
 }
 
 impl From<moq_net::TrackConsumer> for Consumer {
