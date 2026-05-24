@@ -132,11 +132,13 @@ impl ClientTls {
 			for root in &self.root {
 				let file = std::fs::File::open(root).context("failed to open root cert file")?;
 				let mut reader = std::io::BufReader::new(file);
-				let cert = CertificateDer::pem_reader_iter(&mut reader)
-					.next()
-					.context("no roots found")?
+				let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(&mut reader)
+					.collect::<Result<_, _>>()
 					.context("failed to read root cert")?;
-				roots.add(cert).context("failed to add root cert")?;
+				anyhow::ensure!(!certs.is_empty(), "no roots found in {}", root.display());
+				for cert in certs {
+					roots.add(cert).context("failed to add root cert")?;
+				}
 			}
 		}
 
