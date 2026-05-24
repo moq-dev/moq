@@ -27,7 +27,7 @@ m3u8-rs = { version = "6" }
 moq-loc = { workspace = true }
 moq-msf = { workspace = true }
 moq-net = { workspace = true, features = ["serde"] }
-mp4-atom = { version = "0.10.0", features = ["tokio", "bytes", "serde"] }
+mp4-atom = { version = "0.11", features = ["tokio", "bytes", "serde"] }
 num_enum = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
 scuffle-av1 = { version = "0.1.4" }

@@ -1,0 +1,63 @@
+# cargo-deny configuration. See https://embarkstudios.github.io/cargo-deny/
+#
+# Run `cargo deny check` to validate; runs in `just rs check` and `just rs ci`.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # rsa 0.9.x Marvin Attack (RSA private-key timing sidechannel). The
+    # `rsa` crate is a direct dep of moq-token but is only used for keygen
+    # and PEM serialization of JWK components. JWT signing/verification
+    # itself runs through `jsonwebtoken` backed by `aws-lc-rs` (constant
+    # time), so the vulnerable code path is not exercised. Drop the ignore
+    # when rustcrypto/RSA publishes a constant-time fix.
+    "RUSTSEC-2023-0071",
+
+    # foundations (Cloudflare) pins serde_yaml 0.8 which uses yaml-rust 0.4.
+    # Reachable via tokio-quiche -> web-transport-quiche -> moq-native
+    # (quiche feature). Awaits upstream migration to serde_yaml 0.9+.
+    "RUSTSEC-2024-0320",
+
+    # gstreamer 0.23 pulls paste (proc-macro). gstreamer 0.25 drops it but
+    # requires Rust 1.92; workspace MSRV is 1.85. Build-time only.
+    "RUSTSEC-2024-0436",
+
+    # http-cache (via http-cache-reqwest in moq-relay) still depends on
+    # bincode 1.x. Awaits upstream bump to bincode 2.x.
+    "RUSTSEC-2025-0141",
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0", # webpki-roots cert bundle
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "WTFPL", # ffmpeg-next, ffmpeg-sys-next
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path/workspace deps don't carry versions; that's fine for intra-workspace use.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -20,6 +20,24 @@ check *args:
 	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps {{ args }}
 	cargo shear
 	cargo sort --workspace --check
+	cargo deny check --show-stats
+	just rs deny-reminder
+
+# Print active deny.toml advisory ignores so we don't forget to revisit them.
+# cargo-deny logs ignored advisories only at --log-level=info, which is too
+# noisy for CI; this surfaces the IDs with their inline rationale instead.
+deny-reminder:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if grep -qE '^\s*"RUSTSEC-' deny.toml; then
+		echo
+		echo "deny.toml: active advisory ignores (revisit when fixable):"
+		awk '
+			/^[[:space:]]*#/   { sub(/^[[:space:]]*#[[:space:]]?/, ""); ctx = ctx ? ctx " " $0 : $0; next }
+			/^[[:space:]]*"RUSTSEC-/ { match($0, /RUSTSEC-[0-9-]+/); printf "  %s — %s\n", substr($0, RSTART, RLENGTH), ctx; ctx = ""; next }
+			/^[[:space:]]*$/   { ctx = "" }
+		' deny.toml
+	fi
 
 # Full Rust CI: check + feature edge cases + tests + build. Takes a
 # newline-separated list of changed files; skips if FILES is non-empty

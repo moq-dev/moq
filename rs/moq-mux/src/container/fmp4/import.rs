@@ -208,6 +208,7 @@ impl Import {
 					mehd: None,
 					trex: vec![trex],
 				}),
+				ainf: None,
 				meta: None,
 				udta: None,
 			};
