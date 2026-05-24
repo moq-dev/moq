@@ -48,3 +48,8 @@ key = "root.jwk"
 # Allow anonymous clients to subscribe and publish to the prefixes below.
 subscribe = ["anon", "demo"]
 publish = ["anon", "demo/viewer"]
+
+[stats]
+enabled = true
+levels = 3
+node = "local/leaf1"

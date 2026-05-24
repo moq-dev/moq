@@ -40,7 +40,7 @@ levels = 3
 # `node` is the suffix that disambiguates per-relay broadcasts in a cluster.
 # It can be multi-segment (e.g. `sjc/1`, `sjc/2`) to nest multiple hosts under
 # a shared region key. Single-node setups can leave it unset.
-node = "localhost"
+node = "local/host"
 
 [iroh]
 # You can optionally enable iroh support for P2P connections.
