@@ -218,43 +218,27 @@ mod test {
 
 	#[test]
 	fn convert_simple() {
+		let mut video_config = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0x00,
+			level: 0x1f,
+			inline: true,
+		});
+		video_config.coded_width = Some(1280);
+		video_config.coded_height = Some(720);
+		video_config.bitrate = Some(6_000_000);
+		video_config.framerate = Some(30.0);
+		video_config.container = Container::Legacy;
+
 		let mut video_renditions = BTreeMap::new();
-		video_renditions.insert(
-			"video0.avc3".to_string(),
-			VideoConfig {
-				codec: H264 {
-					profile: 0x64,
-					constraints: 0x00,
-					level: 0x1f,
-					inline: true,
-				}
-				.into(),
-				description: None,
-				coded_width: Some(1280),
-				coded_height: Some(720),
-				display_ratio_width: None,
-				display_ratio_height: None,
-				bitrate: Some(6_000_000),
-				framerate: Some(30.0),
-				optimize_for_latency: None,
-				container: Container::Legacy,
-				jitter: None,
-			},
-		);
+		video_renditions.insert("video0.avc3".to_string(), video_config);
+
+		let mut audio_config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		audio_config.bitrate = Some(128_000);
+		audio_config.container = Container::Legacy;
 
 		let mut audio_renditions = BTreeMap::new();
-		audio_renditions.insert(
-			"audio0".to_string(),
-			AudioConfig {
-				codec: AudioCodec::Opus,
-				sample_rate: 48_000,
-				channel_count: 2,
-				bitrate: Some(128_000),
-				description: None,
-				container: Container::Legacy,
-				jitter: None,
-			},
-		);
+		audio_renditions.insert("audio0".to_string(), audio_config);
 
 		let catalog = hang::Catalog {
 			video: Video {
@@ -304,29 +288,19 @@ mod test {
 
 	#[test]
 	fn convert_with_description() {
+		let mut video_config = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0x00,
+			level: 0x1f,
+			inline: false,
+		});
+		video_config.description = Some(Bytes::from_static(&[0x01, 0x02, 0x03]));
+		video_config.coded_width = Some(1920);
+		video_config.coded_height = Some(1080);
+		video_config.container = Container::Legacy;
+
 		let mut video_renditions = BTreeMap::new();
-		video_renditions.insert(
-			"video0.m4s".to_string(),
-			VideoConfig {
-				codec: H264 {
-					profile: 0x64,
-					constraints: 0x00,
-					level: 0x1f,
-					inline: false,
-				}
-				.into(),
-				description: Some(Bytes::from_static(&[0x01, 0x02, 0x03])),
-				coded_width: Some(1920),
-				coded_height: Some(1080),
-				display_ratio_width: None,
-				display_ratio_height: None,
-				bitrate: None,
-				framerate: None,
-				optimize_for_latency: None,
-				container: Container::Legacy,
-				jitter: None,
-			},
-		);
+		video_renditions.insert("video0.m4s".to_string(), video_config);
 
 		let catalog = hang::Catalog {
 			video: Video {
@@ -353,36 +327,25 @@ mod test {
 
 	#[test]
 	fn convert_cmaf_packaging() {
-		let mut video_renditions = BTreeMap::new();
-		video_renditions.insert(
-			"video0.m4s".to_string(),
-			VideoConfig {
-				codec: H264 {
-					profile: 0x64,
-					constraints: 0x00,
-					level: 0x28,
-					inline: false,
-				}
+		let mut video_config = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0x00,
+			level: 0x28,
+			inline: false,
+		});
+		video_config.coded_width = Some(1920);
+		video_config.coded_height = Some(1080);
+		video_config.container = Container::Cmaf {
+			init: base64::engine::general_purpose::STANDARD
+				.decode("AAAYZ2Z0eXA=")
+				.unwrap()
 				.into(),
-				description: None,
-				coded_width: Some(1920),
-				coded_height: Some(1080),
-				display_ratio_width: None,
-				display_ratio_height: None,
-				bitrate: None,
-				framerate: None,
-				optimize_for_latency: None,
-				container: Container::Cmaf {
-					init: base64::engine::general_purpose::STANDARD
-						.decode("AAAYZ2Z0eXA=")
-						.unwrap()
-						.into(),
-					timescale: None,
-					track_id: None,
-				},
-				jitter: None,
-			},
-		);
+			timescale: None,
+			track_id: None,
+		};
+
+		let mut video_renditions = BTreeMap::new();
+		video_renditions.insert("video0.m4s".to_string(), video_config);
 
 		let catalog = hang::Catalog {
 			video: Video {
@@ -402,43 +365,27 @@ mod test {
 
 	#[test]
 	fn convert_sap_h264_with_jitter() {
+		let mut video_config = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0x00,
+			level: 0x1f,
+			inline: true,
+		});
+		video_config.coded_width = Some(1280);
+		video_config.coded_height = Some(720);
+		video_config.framerate = Some(30.0);
+		video_config.container = Container::Legacy;
+		video_config.jitter = Some(moq_net::Time::from_millis_unchecked(100));
+
 		let mut video_renditions = BTreeMap::new();
-		video_renditions.insert(
-			"video0".to_string(),
-			VideoConfig {
-				codec: H264 {
-					profile: 0x64,
-					constraints: 0x00,
-					level: 0x1f,
-					inline: true,
-				}
-				.into(),
-				description: None,
-				coded_width: Some(1280),
-				coded_height: Some(720),
-				display_ratio_width: None,
-				display_ratio_height: None,
-				bitrate: None,
-				framerate: Some(30.0),
-				optimize_for_latency: None,
-				container: Container::Legacy,
-				jitter: Some(moq_net::Time::from_millis_unchecked(100)),
-			},
-		);
+		video_renditions.insert("video0".to_string(), video_config);
+
+		let mut audio_config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		audio_config.container = Container::Legacy;
+		audio_config.jitter = Some(moq_net::Time::from_millis_unchecked(40));
 
 		let mut audio_renditions = BTreeMap::new();
-		audio_renditions.insert(
-			"audio0".to_string(),
-			AudioConfig {
-				codec: AudioCodec::Opus,
-				sample_rate: 48_000,
-				channel_count: 2,
-				bitrate: None,
-				description: None,
-				container: Container::Legacy,
-				jitter: Some(moq_net::Time::from_millis_unchecked(40)),
-			},
-		);
+		audio_renditions.insert("audio0".to_string(), audio_config);
 
 		let catalog = hang::Catalog {
 			video: Video {
@@ -473,32 +420,22 @@ mod test {
 	fn convert_sap_h265() {
 		use hang::catalog::H265;
 
+		let mut video_config = VideoConfig::new(H265 {
+			in_band: false,
+			profile_space: 0,
+			profile_idc: 1,
+			profile_compatibility_flags: [0, 0, 0, 0],
+			tier_flag: false,
+			level_idc: 93,
+			constraint_flags: [0, 0, 0, 0, 0, 0],
+		});
+		video_config.coded_width = Some(1920);
+		video_config.coded_height = Some(1080);
+		video_config.framerate = Some(60.0);
+		video_config.container = Container::Legacy;
+
 		let mut video_renditions = BTreeMap::new();
-		video_renditions.insert(
-			"video0".to_string(),
-			VideoConfig {
-				codec: H265 {
-					in_band: false,
-					profile_space: 0,
-					profile_idc: 1,
-					profile_compatibility_flags: [0, 0, 0, 0],
-					tier_flag: false,
-					level_idc: 93,
-					constraint_flags: [0, 0, 0, 0, 0, 0],
-				}
-				.into(),
-				description: None,
-				coded_width: Some(1920),
-				coded_height: Some(1080),
-				display_ratio_width: None,
-				display_ratio_height: None,
-				bitrate: None,
-				framerate: Some(60.0),
-				optimize_for_latency: None,
-				container: Container::Legacy,
-				jitter: None,
-			},
-		);
+		video_renditions.insert("video0".to_string(), video_config);
 
 		let catalog = hang::Catalog {
 			video: Video {
@@ -523,23 +460,11 @@ mod test {
 	fn convert_sap_unknown_codec() {
 		use hang::catalog::VideoCodec;
 
+		let mut video_config = VideoConfig::new(VideoCodec::Unknown("future-codec.01".to_string()));
+		video_config.container = Container::Legacy;
+
 		let mut video_renditions = BTreeMap::new();
-		video_renditions.insert(
-			"video0".to_string(),
-			VideoConfig {
-				codec: VideoCodec::Unknown("future-codec.01".to_string()),
-				description: None,
-				coded_width: None,
-				coded_height: None,
-				display_ratio_width: None,
-				display_ratio_height: None,
-				bitrate: None,
-				framerate: None,
-				optimize_for_latency: None,
-				container: Container::Legacy,
-				jitter: None,
-			},
-		);
+		video_renditions.insert("video0".to_string(), video_config);
 
 		let catalog = hang::Catalog {
 			video: Video {

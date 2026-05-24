@@ -224,32 +224,21 @@ async fn export_rejects_cmaf_track() {
 
 	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
 	let track = producer.unique_track(".avc1").unwrap();
-	catalog.lock().video.renditions.insert(
-		track.name.clone(),
-		VideoConfig {
-			coded_width: Some(640),
-			coded_height: Some(480),
-			codec: H264 {
-				profile: 0x64,
-				constraints: 0,
-				level: 0x1f,
-				inline: false,
-			}
-			.into(),
-			description: Some(Bytes::from(vec![0u8; 8])),
-			framerate: None,
-			bitrate: None,
-			display_ratio_width: None,
-			display_ratio_height: None,
-			optimize_for_latency: None,
-			container: Container::Cmaf {
-				init: Bytes::from(vec![0u8; 32]),
-				timescale: None,
-				track_id: None,
-			},
-			jitter: None,
-		},
-	);
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x64,
+		constraints: 0,
+		level: 0x1f,
+		inline: false,
+	});
+	config.coded_width = Some(640);
+	config.coded_height = Some(480);
+	config.description = Some(Bytes::from(vec![0u8; 8]));
+	config.container = Container::Cmaf {
+		init: Bytes::from(vec![0u8; 32]),
+		timescale: None,
+		track_id: None,
+	};
+	catalog.lock().video.renditions.insert(track.name.clone(), config);
 
 	let mut exporter = crate::container::mkv::Export::new(consumer).unwrap();
 	let result = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
@@ -275,28 +264,16 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 
 	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
 	let track = producer.unique_track(".avc3").unwrap();
-	catalog.lock().video.renditions.insert(
-		track.name.clone(),
-		VideoConfig {
-			coded_width: Some(320),
-			coded_height: Some(240),
-			codec: H264 {
-				profile: 0x42,
-				constraints: 0xc0,
-				level: 0x1f,
-				inline: true,
-			}
-			.into(),
-			description: None,
-			framerate: None,
-			bitrate: None,
-			display_ratio_width: None,
-			display_ratio_height: None,
-			optimize_for_latency: None,
-			container: Container::Legacy,
-			jitter: None,
-		},
-	);
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: true,
+	});
+	config.coded_width = Some(320);
+	config.coded_height = Some(240);
+	config.container = Container::Legacy;
+	catalog.lock().video.renditions.insert(track.name.clone(), config);
 
 	// Annex-B start code.
 	const SC: &[u8] = &[0, 0, 0, 1];

@@ -32,7 +32,8 @@ The project contains multiple layers of protocols:
    - catalog: a JSON track containing a description of other tracks and their properties (for WebCodecs).
    - container: each frame consists of a timestamp and codec bitstream
    - watch/publish: dedicated packages for subscribing/publishing with optional UI overlays
-5. **application** - Users building on top of `moq-net` or `hang`
+5. **moq-audio** - Native Opus encode/decode for raw PCM (more codecs to come). Used by `moq-ffi`/`libmoq` so native callers don't have to bring their own codec.
+6. **application** - Users building on top of `moq-net` or `hang`
 
 Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq` layer should be generic, using rules on the wire on how to deliver content.
 
@@ -49,6 +50,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq-cli/           # CLI tool for media operations (binary: moq)
   moq-clock/         # Clock synchronization example (binary: moq-clock)
   moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)
+  moq-audio/         # Native PCM ↔ Opus encode/decode on top of moq-mux
   hang/              # Media encoding/streaming (catalog/container format)
   libmoq/            # C bindings (staticlib)
   moq-ffi/           # UniFFI bindings for Python/Swift/Kotlin (cdylib + staticlib)
@@ -152,3 +154,7 @@ When making changes to the codebase:
 4. Update relevant documentation (CLAUDE.md, doc/, README) when making major changes
 5. Add unit tests for any changes that are easy enough to test
 6. Commit and push changes
+
+## PR Reviews
+
+CodeRabbit reviews PRs automatically, but it has an hourly quota and runs out of org credits. If a PR shows a "Review limit reached" / "out of usage credits" message instead of an actual review, run the `/review` skill locally against the PR to get review feedback without waiting for the quota to refill.

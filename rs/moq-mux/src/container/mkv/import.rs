@@ -438,21 +438,15 @@ fn build_video_config(
 		.unwrap_or((None, None));
 
 	let mut config = match codec_id {
-		"V_VP8" => VideoConfig {
-			codec: VideoCodec::VP8,
-			description: None,
-			coded_width: width,
-			coded_height: height,
-			framerate: None,
-			bitrate: None,
-			display_ratio_width: None,
-			display_ratio_height: None,
-			optimize_for_latency: None,
-			container: Container::Legacy,
-			jitter: None,
-		},
-		"V_VP9" => VideoConfig {
-			codec: VP9 {
+		"V_VP8" => {
+			let mut config = VideoConfig::new(VideoCodec::VP8);
+			config.coded_width = width;
+			config.coded_height = height;
+			config.container = Container::Legacy;
+			config
+		}
+		"V_VP9" => {
+			let mut config = VideoConfig::new(VP9 {
 				profile: 0,
 				level: 0,
 				bit_depth: 8,
@@ -461,19 +455,12 @@ fn build_video_config(
 				transfer_characteristics: 1,
 				matrix_coefficients: 1,
 				full_range: false,
-			}
-			.into(),
-			description: None,
-			coded_width: width,
-			coded_height: height,
-			framerate: None,
-			bitrate: None,
-			display_ratio_width: None,
-			display_ratio_height: None,
-			optimize_for_latency: None,
-			container: Container::Legacy,
-			jitter: None,
-		},
+			});
+			config.coded_width = width;
+			config.coded_height = height;
+			config.container = Container::Legacy;
+			config
+		}
 		"V_MPEG4/ISO/AVC" => build_h264_config(codec_private)?,
 		"V_MPEGH/ISO/HEVC" => build_h265_config(codec_private)?,
 		"V_AV1" => build_av1_config(codec_private)?,
@@ -519,38 +506,35 @@ fn build_audio_config(
 				(sample_rate, channels)
 			};
 
-			Ok(AudioConfig {
-				codec: AudioCodec::Opus,
-				sample_rate: if cfg_rate > 0 { cfg_rate } else { sample_rate },
-				channel_count: if cfg_channels > 0 { cfg_channels } else { channels },
-				bitrate: None,
-				description: None,
-				container: Container::Legacy,
-				jitter: None,
-			})
+			let mut config = AudioConfig::new(
+				AudioCodec::Opus,
+				if cfg_rate > 0 { cfg_rate } else { sample_rate },
+				if cfg_channels > 0 { cfg_channels } else { channels },
+			);
+			config.container = Container::Legacy;
+			Ok(config)
 		}
 		"A_AAC" => {
 			let priv_data = codec_private.context("A_AAC missing CodecPrivate (AudioSpecificConfig)")?;
 			let mut cursor = priv_data.clone();
 			let cfg = crate::codec::aac::Config::parse(&mut cursor)?;
 
-			Ok(AudioConfig {
-				codec: AAC { profile: cfg.profile }.into(),
-				sample_rate: if cfg.sample_rate > 0 {
+			let mut config = AudioConfig::new(
+				AAC { profile: cfg.profile },
+				if cfg.sample_rate > 0 {
 					cfg.sample_rate
 				} else {
 					sample_rate
 				},
-				channel_count: if cfg.channel_count > 0 {
+				if cfg.channel_count > 0 {
 					cfg.channel_count
 				} else {
 					channels
 				},
-				bitrate: None,
-				description: Some(priv_data.clone()),
-				container: Container::Legacy,
-				jitter: None,
-			})
+			);
+			config.description = Some(priv_data.clone());
+			config.container = Container::Legacy;
+			Ok(config)
 		}
 		other => anyhow::bail!("unsupported audio CodecID: {}", other),
 	}
@@ -560,25 +544,17 @@ fn build_h264_config(codec_private: Option<&Bytes>) -> anyhow::Result<VideoConfi
 	let avcc_bytes = codec_private.context("V_MPEG4/ISO/AVC missing CodecPrivate (AVCDecoderConfigurationRecord)")?;
 	let avcc = crate::codec::h264::Avcc::parse(avcc_bytes)?;
 
-	Ok(VideoConfig {
-		codec: H264 {
-			profile: avcc.profile,
-			constraints: avcc.constraints,
-			level: avcc.level,
-			inline: false,
-		}
-		.into(),
-		description: Some(avcc_bytes.clone()),
-		coded_width: avcc.coded_width,
-		coded_height: avcc.coded_height,
-		framerate: None,
-		bitrate: None,
-		display_ratio_width: None,
-		display_ratio_height: None,
-		optimize_for_latency: None,
-		container: Container::Legacy,
-		jitter: None,
-	})
+	let mut config = VideoConfig::new(H264 {
+		profile: avcc.profile,
+		constraints: avcc.constraints,
+		level: avcc.level,
+		inline: false,
+	});
+	config.description = Some(avcc_bytes.clone());
+	config.coded_width = avcc.coded_width;
+	config.coded_height = avcc.coded_height;
+	config.container = Container::Legacy;
+	Ok(config)
 }
 
 fn build_h265_config(codec_private: Option<&Bytes>) -> anyhow::Result<VideoConfig> {
@@ -589,28 +565,18 @@ fn build_h265_config(codec_private: Option<&Bytes>) -> anyhow::Result<VideoConfi
 	let mut description = BytesMut::new();
 	hvcc.encode_body(&mut description)?;
 
-	Ok(VideoConfig {
-		codec: H265 {
-			in_band: false,
-			profile_space: hvcc.general_profile_space,
-			profile_idc: hvcc.general_profile_idc,
-			profile_compatibility_flags: hvcc.general_profile_compatibility_flags,
-			tier_flag: hvcc.general_tier_flag,
-			level_idc: hvcc.general_level_idc,
-			constraint_flags: hvcc.general_constraint_indicator_flags,
-		}
-		.into(),
-		description: Some(description.freeze()),
-		coded_width: None,
-		coded_height: None,
-		framerate: None,
-		bitrate: None,
-		display_ratio_width: None,
-		display_ratio_height: None,
-		optimize_for_latency: None,
-		container: Container::Legacy,
-		jitter: None,
-	})
+	let mut config = VideoConfig::new(H265 {
+		in_band: false,
+		profile_space: hvcc.general_profile_space,
+		profile_idc: hvcc.general_profile_idc,
+		profile_compatibility_flags: hvcc.general_profile_compatibility_flags,
+		tier_flag: hvcc.general_tier_flag,
+		level_idc: hvcc.general_level_idc,
+		constraint_flags: hvcc.general_constraint_indicator_flags,
+	});
+	config.description = Some(description.freeze());
+	config.container = Container::Legacy;
+	Ok(config)
 }
 
 fn build_av1_config(codec_private: Option<&Bytes>) -> anyhow::Result<VideoConfig> {
@@ -621,17 +587,8 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> anyhow::Result<VideoConfig
 	let mut description = BytesMut::new();
 	av1c.encode_body(&mut description)?;
 
-	Ok(VideoConfig {
-		codec: crate::codec::av1::av1_from_av1c(&av1c).into(),
-		description: Some(description.freeze()),
-		coded_width: None,
-		coded_height: None,
-		framerate: None,
-		bitrate: None,
-		display_ratio_width: None,
-		display_ratio_height: None,
-		optimize_for_latency: None,
-		container: Container::Legacy,
-		jitter: None,
-	})
+	let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av1c));
+	config.description = Some(description.freeze());
+	config.container = Container::Legacy;
+	Ok(config)
 }

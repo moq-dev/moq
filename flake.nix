@@ -77,6 +77,7 @@
           cargo-edit
           cargo-sweep
           cargo-semver-checks
+          cargo-deny
         ]
         ++ gstreamerDeps
         ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [

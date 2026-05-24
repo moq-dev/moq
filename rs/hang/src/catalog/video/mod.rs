@@ -78,10 +78,17 @@ pub struct Display {
 /// including codec-specific parameters, resolution, and optional metadata.
 ///
 /// Reference: <https://www.w3.org/TR/webcodecs/#video-decoder-config>
+///
+/// Marked `#[non_exhaustive]` so additional optional fields can be added
+/// without bumping the major version. External callers build a config with
+/// [`VideoConfig::new`] and then assign whichever optional fields they need;
+/// struct-literal construction (with or without `..base`) is not available
+/// outside this crate.
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct VideoConfig {
 	/// The codec, see the registry for details:
 	/// <https://w3c.github.io/webcodecs/codec_registry.html>
@@ -140,4 +147,28 @@ pub struct VideoConfig {
 	/// - If frames are buffered into 2s segments, this would be 2s.
 	#[serde(default)]
 	pub jitter: Option<moq_net::Time>,
+}
+
+impl VideoConfig {
+	/// Construct a config with the required codec set and every optional
+	/// field cleared. `container` defaults to [`Container::default`]. Fields
+	/// are `pub`, so callers set whatever they need by assignment afterwards.
+	///
+	/// This is the only path external crates have to build a `VideoConfig`
+	/// since the type is `#[non_exhaustive]`.
+	pub fn new(codec: impl Into<VideoCodec>) -> Self {
+		Self {
+			codec: codec.into(),
+			description: None,
+			coded_width: None,
+			coded_height: None,
+			display_ratio_width: None,
+			display_ratio_height: None,
+			bitrate: None,
+			framerate: None,
+			optimize_for_latency: None,
+			container: Container::default(),
+			jitter: None,
+		}
+	}
 }

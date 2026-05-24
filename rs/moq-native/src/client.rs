@@ -114,6 +114,8 @@ impl ClientTls {
 	/// certificate verification when `disable_verify` is set.
 	pub fn build(&self) -> anyhow::Result<rustls::ClientConfig> {
 		use rustls::pki_types::CertificateDer;
+		use rustls::pki_types::PrivateKeyDer;
+		use rustls::pki_types::pem::PemObject;
 
 		let provider = crypto::provider();
 
@@ -130,11 +132,13 @@ impl ClientTls {
 			for root in &self.root {
 				let file = std::fs::File::open(root).context("failed to open root cert file")?;
 				let mut reader = std::io::BufReader::new(file);
-				let cert = rustls_pemfile::certs(&mut reader)
-					.next()
-					.context("no roots found")?
+				let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(&mut reader)
+					.collect::<Result<_, _>>()
 					.context("failed to read root cert")?;
-				roots.add(cert).context("failed to add root cert")?;
+				anyhow::ensure!(!certs.is_empty(), "no roots found in {}", root.display());
+				for cert in certs {
+					roots.add(cert).context("failed to add root cert")?;
+				}
 			}
 		}
 
@@ -147,14 +151,12 @@ impl ClientTls {
 		let mut tls = match (&self.cert, &self.key) {
 			(Some(cert_path), Some(key_path)) => {
 				let cert_pem = std::fs::read(cert_path).context("failed to read client certificate")?;
-				let chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_slice())
+				let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
 					.collect::<Result<_, _>>()
 					.context("failed to parse client certificate")?;
 				anyhow::ensure!(!chain.is_empty(), "no certificates found in client certificate");
 				let key_pem = std::fs::read(key_path).context("failed to read client key")?;
-				let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
-					.context("failed to parse client key")?
-					.context("no private key found in client key")?;
+				let key = PrivateKeyDer::from_pem_slice(&key_pem).context("failed to parse client key")?;
 				builder
 					.with_client_auth_cert(chain, key)
 					.context("failed to configure client certificate")?

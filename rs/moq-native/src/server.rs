@@ -73,12 +73,13 @@ impl ServerTlsConfig {
 	/// Load all configured root CAs into a [`rustls::RootCertStore`].
 	pub fn load_roots(&self) -> anyhow::Result<rustls::RootCertStore> {
 		use rustls::pki_types::CertificateDer;
+		use rustls::pki_types::pem::PemObject;
 
 		let mut roots = rustls::RootCertStore::empty();
 		for path in &self.root {
 			let file = std::fs::File::open(path).context("failed to open root CA")?;
 			let mut reader = std::io::BufReader::new(file);
-			let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+			let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(&mut reader)
 				.collect::<Result<_, _>>()
 				.context("failed to parse root CA PEM")?;
 			anyhow::ensure!(!certs.is_empty(), "no certificates found in root CA");

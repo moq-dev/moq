@@ -4,7 +4,7 @@
 //! holds the relay-specific config knobs.
 
 use clap::Args;
-use moq_net::{OriginProducer, Stats};
+use moq_net::{OriginProducer, PathOwned, Stats};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the relay's stats publishing.
@@ -51,7 +51,10 @@ pub struct StatsConfig {
 	/// broadcasts when multiple relays share a cluster origin. Without this,
 	/// peer relays would publish to the same `<prefix>/prefix/<level-path>`
 	/// path and the origin's single-source delivery would drop all but one.
-	/// Single-relay deployments can leave this unset.
+	///
+	/// May be multi-segment (e.g. `sjc/1`, `sjc/2`) when a region has multiple
+	/// hosts; the segments nest under a shared region key on the advertised
+	/// path. Single-relay deployments can leave this unset.
 	#[arg(long = "stats-node", env = "MOQ_STATS_NODE")]
 	pub node: Option<String>,
 }
@@ -67,7 +70,8 @@ impl StatsConfig {
 		}
 		let levels = self.levels.unwrap_or(1).max(1);
 		let prefix = self.prefix.clone().unwrap_or_else(|| ".stats".to_string());
-		tracing::info!(prefix, levels, node = ?self.node, "stats publishing enabled");
-		Stats::new(prefix, levels, self.node.clone(), origin)
+		let node = self.node.clone().map(PathOwned::from);
+		tracing::info!(prefix, levels, node = ?node, "stats publishing enabled");
+		Stats::new(prefix, levels, node, origin)
 	}
 }

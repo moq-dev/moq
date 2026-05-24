@@ -43,7 +43,7 @@ It sucks but sometimes *media over QUIC* isn't actually an option.
 [moq-lite](/concept/layer/moq-lite) is a forwards-compatible subset of the [MoqTransport](/concept/standard/moq-transport) specification.
 moq-lite clients work with any moq-transport CDN, so you're not locked in.
 
-The goal is a generic pub/sub protocol that can be scaled up via a CDN (see [moq-relay](/app/relay/)).
+The goal is a generic pub/sub protocol that can be scaled up via a CDN (see [moq-relay](/bin/relay/)).
 The CDN doesn't know anything about media, it just knows track/group/frame boundaries and what it should do during congestion.
 Think of it like HTTP but for live content.
 

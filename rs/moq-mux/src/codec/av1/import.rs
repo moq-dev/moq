@@ -50,46 +50,36 @@ impl Import {
 	}
 
 	fn init(&mut self, seq_header: &SequenceHeaderObu) -> anyhow::Result<()> {
-		let config = hang::catalog::VideoConfig {
-			coded_width: Some(seq_header.max_frame_width as u32),
-			coded_height: Some(seq_header.max_frame_height as u32),
-			codec: hang::catalog::AV1 {
-				profile: seq_header.seq_profile,
-				level: seq_header
-					.operating_points
-					.first()
-					.map(|op| op.seq_level_idx)
-					.unwrap_or(0),
-				tier: if seq_header
-					.operating_points
-					.first()
-					.map(|op| op.seq_tier)
-					.unwrap_or(false)
-				{
-					'H'
-				} else {
-					'M'
-				},
-				bitdepth: seq_header.color_config.bit_depth as u8,
-				mono_chrome: seq_header.color_config.mono_chrome,
-				chroma_subsampling_x: seq_header.color_config.subsampling_x,
-				chroma_subsampling_y: seq_header.color_config.subsampling_y,
-				chroma_sample_position: seq_header.color_config.chroma_sample_position,
-				color_primaries: seq_header.color_config.color_primaries,
-				transfer_characteristics: seq_header.color_config.transfer_characteristics,
-				matrix_coefficients: seq_header.color_config.matrix_coefficients,
-				full_range: seq_header.color_config.full_color_range,
-			}
-			.into(),
-			description: None,
-			framerate: None,
-			bitrate: None,
-			display_ratio_width: None,
-			display_ratio_height: None,
-			optimize_for_latency: None,
-			container: hang::catalog::Container::Legacy,
-			jitter: None,
-		};
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
+			profile: seq_header.seq_profile,
+			level: seq_header
+				.operating_points
+				.first()
+				.map(|op| op.seq_level_idx)
+				.unwrap_or(0),
+			tier: if seq_header
+				.operating_points
+				.first()
+				.map(|op| op.seq_tier)
+				.unwrap_or(false)
+			{
+				'H'
+			} else {
+				'M'
+			},
+			bitdepth: seq_header.color_config.bit_depth as u8,
+			mono_chrome: seq_header.color_config.mono_chrome,
+			chroma_subsampling_x: seq_header.color_config.subsampling_x,
+			chroma_subsampling_y: seq_header.color_config.subsampling_y,
+			chroma_sample_position: seq_header.color_config.chroma_sample_position,
+			color_primaries: seq_header.color_config.color_primaries,
+			transfer_characteristics: seq_header.color_config.transfer_characteristics,
+			matrix_coefficients: seq_header.color_config.matrix_coefficients,
+			full_range: seq_header.color_config.full_color_range,
+		});
+		config.coded_width = Some(seq_header.max_frame_width as u32);
+		config.coded_height = Some(seq_header.max_frame_height as u32);
+		config.container = hang::catalog::Container::Legacy;
 
 		if let Some(old) = &self.config
 			&& old == &config
@@ -121,33 +111,21 @@ impl Import {
 
 	/// Initialize with minimal config if sequence header parsing fails
 	fn init_minimal(&mut self) -> anyhow::Result<()> {
-		let config = hang::catalog::VideoConfig {
-			coded_width: None,
-			coded_height: None,
-			codec: hang::catalog::AV1 {
-				profile: 0,  // Main profile
-				level: 0,    // Unknown
-				tier: 'M',   // Main tier
-				bitdepth: 8, // Assume 8-bit
-				mono_chrome: false,
-				chroma_subsampling_x: true, // 4:2:0
-				chroma_subsampling_y: true,
-				chroma_sample_position: 0,
-				color_primaries: 2,          // Unspecified
-				transfer_characteristics: 2, // Unspecified
-				matrix_coefficients: 2,      // Unspecified
-				full_range: false,
-			}
-			.into(),
-			description: None,
-			framerate: None,
-			bitrate: None,
-			display_ratio_width: None,
-			display_ratio_height: None,
-			optimize_for_latency: None,
-			container: hang::catalog::Container::Legacy,
-			jitter: None,
-		};
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
+			profile: 0,  // Main profile
+			level: 0,    // Unknown
+			tier: 'M',   // Main tier
+			bitdepth: 8, // Assume 8-bit
+			mono_chrome: false,
+			chroma_subsampling_x: true, // 4:2:0
+			chroma_subsampling_y: true,
+			chroma_sample_position: 0,
+			color_primaries: 2,          // Unspecified
+			transfer_characteristics: 2, // Unspecified
+			matrix_coefficients: 2,      // Unspecified
+			full_range: false,
+		});
+		config.container = hang::catalog::Container::Legacy;
 
 		let track = self.broadcast.unique_track(".av01")?;
 		tracing::debug!(name = ?track.name, "starting track with minimal config");
@@ -199,34 +177,22 @@ impl Import {
 		let high_bitdepth = ((data[2] >> 6) & 0x01) == 1;
 		let twelve_bit = ((data[2] >> 5) & 0x01) == 1;
 
-		let config = hang::catalog::VideoConfig {
-			// Resolution unknown from av1C - will be updated when first sequence header arrives
-			coded_width: None,
-			coded_height: None,
-			codec: hang::catalog::AV1 {
-				profile: seq_profile,
-				level: seq_level_idx,
-				tier: if tier { 'H' } else { 'M' },
-				bitdepth: super::bitdepth(twelve_bit, high_bitdepth),
-				mono_chrome: ((data[2] >> 4) & 0x01) == 1,
-				chroma_subsampling_x: ((data[2] >> 3) & 0x01) == 1,
-				chroma_subsampling_y: ((data[2] >> 2) & 0x01) == 1,
-				chroma_sample_position: data[2] & 0x03,
-				color_primaries: 1,
-				transfer_characteristics: 1,
-				matrix_coefficients: 1,
-				full_range: false,
-			}
-			.into(),
-			description: None,
-			framerate: None,
-			bitrate: None,
-			display_ratio_width: None,
-			display_ratio_height: None,
-			optimize_for_latency: None,
-			container: hang::catalog::Container::Legacy,
-			jitter: None,
-		};
+		// Resolution unknown from av1C - will be updated when first sequence header arrives
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
+			profile: seq_profile,
+			level: seq_level_idx,
+			tier: if tier { 'H' } else { 'M' },
+			bitdepth: super::bitdepth(twelve_bit, high_bitdepth),
+			mono_chrome: ((data[2] >> 4) & 0x01) == 1,
+			chroma_subsampling_x: ((data[2] >> 3) & 0x01) == 1,
+			chroma_subsampling_y: ((data[2] >> 2) & 0x01) == 1,
+			chroma_sample_position: data[2] & 0x03,
+			color_primaries: 1,
+			transfer_characteristics: 1,
+			matrix_coefficients: 1,
+			full_range: false,
+		});
+		config.container = hang::catalog::Container::Legacy;
 
 		if let Some(old) = &self.config
 			&& old == &config

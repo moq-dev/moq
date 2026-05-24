@@ -2,3 +2,11 @@
 dependencies_update = true
 git_release_enable = false
 
+# moq-clock is an example binary, not a distributed crate. publish = false
+# in its Cargo.toml stops cargo publish; release = false here also stops
+# release-plz from bumping the version, writing CHANGELOG entries, or
+# tagging it.
+[[package]]
+name = "moq-clock"
+release = false
+

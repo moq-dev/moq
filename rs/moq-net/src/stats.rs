@@ -14,6 +14,8 @@
 //! single shared [`Stats`] via [`Stats::tier`]) which determines which counter
 //! set its bumps land in. Multiple relays in the same cluster origin can
 //! coexist by giving each one a distinct `<node>` suffix on advertised paths.
+//! The suffix itself may be multi-segment (e.g. `sjc/1`, `sjc/2`) so a region
+//! with multiple hosts can nest under a shared region key without colliding.
 //!
 //! Each broadcast contributes to every prefix of its path (within the
 //! configured depth), so publishing `anon/bbb` with `levels = 2` produces:
@@ -143,7 +145,7 @@ pub struct Stats {
 struct StatsInner {
 	prefix: PathOwned,
 	levels: u32,
-	node: Option<String>,
+	node: Option<PathOwned>,
 	origin: OriginProducer,
 	entries: Lock<HashMap<PathOwned, Arc<Level>>>,
 }
@@ -156,7 +158,7 @@ struct Level {
 	internal_subscriber: Counters,
 	task: Lock<Option<()>>,
 	origin: OriginProducer,
-	node: Option<String>,
+	node: Option<PathOwned>,
 	level_key: PathOwned,
 }
 
@@ -191,21 +193,27 @@ impl Stats {
 	///   A broadcast within the configured depth also gets its own dedicated bucket;
 	///   broadcasts deeper than `levels` are truncated.
 	/// * `node` disambiguates broadcasts published by different relays into a shared
-	///   cluster origin. Set this on every node in multi-relay deployments. `None`
-	///   omits the suffix, which is fine for single-relay deployments.
+	///   cluster origin. Set this on every node in multi-relay deployments. The
+	///   value may be multi-segment (e.g. `sjc/1`, `sjc/2`) so a region with
+	///   multiple hosts can nest under a shared region key. `None` (or an empty
+	///   path after normalization) omits the suffix, which is fine for
+	///   single-relay deployments.
 	/// * `origin` is the [`OriginProducer`] that receives `publish_broadcast` calls
 	///   for each stats broadcast.
 	pub fn new(
 		prefix: impl Into<PathOwned>,
 		levels: u32,
-		node: impl Into<Option<String>>,
+		node: impl Into<Option<PathOwned>>,
 		origin: OriginProducer,
 	) -> Self {
+		// An empty path after normalization is indistinguishable from "no node
+		// set"; collapse it so downstream code only sees a single representation.
+		let node = node.into().filter(|p| !p.is_empty());
 		Self {
 			inner: Arc::new(StatsInner {
 				prefix: prefix.into(),
 				levels,
-				node: node.into(),
+				node,
 				origin,
 				entries: Lock::default(),
 			}),
@@ -260,7 +268,7 @@ impl Stats {
 				entries
 					.entry(key.clone())
 					.or_insert_with(|| {
-						let advertised = advertised_path(&self.inner.prefix, &key, self.inner.node.as_deref());
+						let advertised = advertised_path(&self.inner.prefix, &key, self.inner.node.as_ref());
 						Arc::new(Level {
 							advertised,
 							external_publisher: Counters::default(),
@@ -733,7 +741,7 @@ fn write_snapshot(track: &mut crate::TrackProducer, tier: Tier, role: Role, leve
 		level: level.level_key.as_str(),
 		tier: tier.as_str(),
 		role: role.as_str(),
-		node: level.node.as_deref(),
+		node: level.node.as_ref().map(|p| p.as_str()),
 		ts_ms: now_ms(),
 		snapshot,
 	};
@@ -778,7 +786,7 @@ fn level_keys(broadcast: &Path, levels: u32) -> Vec<PathOwned> {
 	(0..=max).map(|i| PathOwned::from(segs[..i].join("/"))).collect()
 }
 
-fn advertised_path(prefix: &Path, level_key: &Path, node: Option<&str>) -> PathOwned {
+fn advertised_path(prefix: &Path, level_key: &Path, node: Option<&Path>) -> PathOwned {
 	// The fixed `prefix` category leaves room for sibling categories (e.g.
 	// `<top-prefix>/nodes/<node>` for host-level stats) under the same prefix.
 	let top = prefix.as_str();
@@ -788,8 +796,10 @@ fn advertised_path(prefix: &Path, level_key: &Path, node: Option<&str>) -> PathO
 		out.push_str(level_key.as_str());
 	}
 	if let Some(node) = node {
+		// `node` is already a normalized path, so multi-segment values like
+		// `sjc/1` nest under the region without any extra handling.
 		out.push('/');
-		out.push_str(node);
+		out.push_str(node.as_str());
 	}
 	PathOwned::from(out)
 }
@@ -831,16 +841,17 @@ mod tests {
 	#[test]
 	fn advertised_path_root_and_nested() {
 		let prefix = Path::new(".stats");
+		let node = PathOwned::from("sjc");
 		assert_eq!(
-			advertised_path(&prefix, &Path::new(""), Some("sjc")).as_str(),
+			advertised_path(&prefix, &Path::new(""), Some(&node)).as_str(),
 			".stats/prefix/sjc"
 		);
 		assert_eq!(
-			advertised_path(&prefix, &Path::new("demo"), Some("sjc")).as_str(),
+			advertised_path(&prefix, &Path::new("demo"), Some(&node)).as_str(),
 			".stats/prefix/demo/sjc"
 		);
 		assert_eq!(
-			advertised_path(&prefix, &Path::new("demo/foo"), Some("sjc")).as_str(),
+			advertised_path(&prefix, &Path::new("demo/foo"), Some(&node)).as_str(),
 			".stats/prefix/demo/foo/sjc"
 		);
 	}
@@ -858,20 +869,62 @@ mod tests {
 	#[test]
 	fn advertised_path_honors_custom_prefix() {
 		let prefix = Path::new("metrics");
+		let node = PathOwned::from("lon");
 		assert_eq!(
-			advertised_path(&prefix, &Path::new(""), Some("lon")).as_str(),
+			advertised_path(&prefix, &Path::new(""), Some(&node)).as_str(),
 			"metrics/prefix/lon"
 		);
 		assert_eq!(
-			advertised_path(&prefix, &Path::new("demo/room"), Some("lon")).as_str(),
+			advertised_path(&prefix, &Path::new("demo/room"), Some(&node)).as_str(),
 			"metrics/prefix/demo/room/lon"
 		);
+	}
+
+	#[test]
+	fn advertised_path_multi_segment_node() {
+		let prefix = Path::new(".stats");
+		let node = PathOwned::from("sjc/1");
+		assert_eq!(
+			advertised_path(&prefix, &Path::new(""), Some(&node)).as_str(),
+			".stats/prefix/sjc/1"
+		);
+		assert_eq!(
+			advertised_path(&prefix, &Path::new("demo"), Some(&node)).as_str(),
+			".stats/prefix/demo/sjc/1"
+		);
+		assert_eq!(
+			advertised_path(&prefix, &Path::new("demo/foo"), Some(&node)).as_str(),
+			".stats/prefix/demo/foo/sjc/1"
+		);
+		// A second host in the same region nests under the shared region key
+		// without colliding with the first.
+		let node2 = PathOwned::from("sjc/2");
+		assert_eq!(
+			advertised_path(&prefix, &Path::new("demo"), Some(&node2)).as_str(),
+			".stats/prefix/demo/sjc/2"
+		);
+	}
+
+	#[test]
+	fn new_normalizes_and_drops_empty_node() {
+		let origin = Origin::random().produce();
+
+		// Trailing slash and a doubled separator both get normalized away.
+		let stats = Stats::new(".stats", 1, Some(PathOwned::from("/sjc//1/")), origin.clone());
+		assert_eq!(stats.inner.node.as_ref().unwrap().as_str(), "sjc/1");
+
+		// Empty / whitespace-only inputs collapse to None so downstream code
+		// only has to handle a single "no node" representation.
+		let stats = Stats::new(".stats", 1, Some(PathOwned::from("")), origin.clone());
+		assert!(stats.inner.node.is_none());
+		let stats = Stats::new(".stats", 1, Some(PathOwned::from("///")), origin);
+		assert!(stats.inner.node.is_none());
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn external_publisher_bumps_external_publisher_counters() {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 2, Some("sjc".to_string()), origin);
+		let stats = Stats::new(".stats", 2, Some(PathOwned::from("sjc")), origin);
 		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
 		let pub_role = bs.publisher();
 		let track = pub_role.track("video");
@@ -899,7 +952,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn external_subscriber_bumps_external_subscriber_counters() {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 1, Some("sjc".to_string()), origin);
+		let stats = Stats::new(".stats", 1, Some(PathOwned::from("sjc")), origin);
 		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
 		let sub_role = bs.subscriber();
 		let track = sub_role.track("video");
@@ -919,7 +972,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn external_and_internal_tiers_are_independent() {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 1, Some("sjc".to_string()), origin);
+		let stats = Stats::new(".stats", 1, Some(PathOwned::from("sjc")), origin);
 		let ext = stats.tier(Tier::External);
 		let int = stats.tier(Tier::Internal);
 
@@ -939,7 +992,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn bumps_fanout_to_all_levels() {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 2, Some("sjc".to_string()), origin);
+		let stats = Stats::new(".stats", 2, Some(PathOwned::from("sjc")), origin);
 		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
 		let p = bs.publisher();
 		let track = p.track("video");
@@ -957,7 +1010,7 @@ mod tests {
 		// Our own stats broadcasts (and any sibling category under the same
 		// prefix) must not feed back into the aggregator.
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 2, Some("sjc".to_string()), origin);
+		let stats = Stats::new(".stats", 2, Some(PathOwned::from("sjc")), origin);
 		let bs = stats.tier(Tier::External).broadcast(".stats/prefix/sjc");
 		assert!(bs.is_empty());
 
@@ -977,7 +1030,7 @@ mod tests {
 		// Subscription-side track creation should not record a broadcast: the
 		// broadcast lifetime is tracked separately by the announce loop.
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 1, Some("sjc".to_string()), origin);
+		let stats = Stats::new(".stats", 1, Some(PathOwned::from("sjc")), origin);
 		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
 		let track = bs.publisher_track("video");
 		track.bytes(10);
@@ -1009,7 +1062,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn task_spawns_on_first_subscribe_and_announces() {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 1, Some("sjc".to_string()), origin.clone());
+		let stats = Stats::new(".stats", 1, Some(PathOwned::from("sjc")), origin.clone());
 		let mut consumer = origin.consume();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -1031,7 +1084,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn task_spawns_with_node_suffix() {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", 2, Some("sjc".to_string()), origin.clone());
+		let stats = Stats::new(".stats", 2, Some(PathOwned::from("sjc")), origin.clone());
 		let mut consumer = origin.consume();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -1080,7 +1133,7 @@ mod tests {
 		// levels=1 + broadcast "foo/bar" → buckets ["", "foo"] (root prefix plus
 		// the first-segment prefix; the broadcast's own path isn't reachable at
 		// this depth, so we get exactly two stats announces).
-		let stats = Stats::new(".stats", 1, Some("sjc".to_string()), origin.clone());
+		let stats = Stats::new(".stats", 1, Some(PathOwned::from("sjc")), origin.clone());
 		let mut consumer = origin.consume();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");

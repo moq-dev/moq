@@ -38,7 +38,8 @@ enabled = true
 # the anon prefix, and the broadcast itself.
 levels = 3
 # `node` is the suffix that disambiguates per-relay broadcasts in a cluster.
-# Single-node setups can leave it unset.
+# It can be multi-segment (e.g. `sjc/1`, `sjc/2`) to nest multiple hosts under
+# a shared region key. Single-node setups can leave it unset.
 node = "localhost"
 
 [iroh]
