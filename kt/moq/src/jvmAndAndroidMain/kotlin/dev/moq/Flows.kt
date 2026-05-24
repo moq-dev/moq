@@ -8,6 +8,8 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onCompletion
 import uniffi.moq.MoqAnnounced
 import uniffi.moq.MoqAnnouncement
+import uniffi.moq.MoqAudioConsumer
+import uniffi.moq.MoqAudioFrame
 import uniffi.moq.MoqCatalog
 import uniffi.moq.MoqCatalogConsumer
 import uniffi.moq.MoqFrame
@@ -33,6 +35,19 @@ fun MoqCatalogConsumer.updates(): Flow<MoqCatalog> = flow {
 
 /** Stream of decoded media frames in decode order. */
 fun MoqMediaConsumer.frames(): Flow<MoqFrame> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(next() ?: break)
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
+/**
+ * Stream of decoded audio frames in the layout declared by the
+ * `MoqAudioDecoderConfig` the consumer was created with.
+ */
+fun MoqAudioConsumer.frames(): Flow<MoqAudioFrame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
