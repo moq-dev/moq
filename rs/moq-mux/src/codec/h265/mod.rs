@@ -47,9 +47,7 @@ pub fn parse_hvcc_param_sets(hvcc: &[u8]) -> anyhow::Result<HvccParamSets> {
 		pos = after_hdr;
 
 		for _ in 0..num_nalus {
-			let after_len = pos
-				.checked_add(2)
-				.context("offset overflow reading hvcC NAL length")?;
+			let after_len = pos.checked_add(2).context("offset overflow reading hvcC NAL length")?;
 			anyhow::ensure!(hvcc.len() >= after_len, "hvcC truncated in NAL length");
 			let len = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
 			let after_nal = after_len

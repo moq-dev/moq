@@ -142,7 +142,11 @@ impl<S: Stream> Export<S> {
 			return Ok(());
 		};
 
-		if self.track.as_ref().is_some_and(|t| t.name == *name && t.config == *config) {
+		if self
+			.track
+			.as_ref()
+			.is_some_and(|t| t.name == *name && t.config == *config)
+		{
 			return Ok(());
 		}
 
