@@ -146,23 +146,29 @@ in
 
       # Strip nix-store paths so the plugin loads against the user's system
       # GStreamer rather than the (unavailable on user machines) nix copy.
+      # The `-f` guard skips crane's deps-only stage, whose $out has no plugin
+      # to patch. (Written by Claude)
       postFixup =
         if final.stdenv.isDarwin then
           ''
             dylib="$out/lib/libgstmoq.dylib"
-            otool -L "$dylib" \
-              | grep -oE '/nix/store/[^ ]+\.dylib' \
-              | sort -u \
-              | while read -r ref; do
-                  install_name_tool -change "$ref" "@rpath/$(basename "$ref")" "$dylib"
-                done
-            install_name_tool -add_rpath /opt/homebrew/lib "$dylib"
-            install_name_tool -add_rpath /usr/local/lib "$dylib"
-            install_name_tool -add_rpath /Library/Frameworks/GStreamer.framework/Libraries "$dylib"
+            if [ -f "$dylib" ]; then
+              otool -L "$dylib" \
+                | grep -oE '/nix/store/[^ ]+\.dylib' \
+                | sort -u \
+                | while read -r ref; do
+                    install_name_tool -change "$ref" "@rpath/$(basename "$ref")" "$dylib"
+                  done
+              install_name_tool -add_rpath /opt/homebrew/lib "$dylib"
+              install_name_tool -add_rpath /usr/local/lib "$dylib"
+              install_name_tool -add_rpath /Library/Frameworks/GStreamer.framework/Libraries "$dylib"
+            fi
           ''
         else
           ''
-            patchelf --remove-rpath $out/lib/libgstmoq.so
+            if [ -f "$out/lib/libgstmoq.so" ]; then
+              patchelf --remove-rpath "$out/lib/libgstmoq.so"
+            fi
           '';
     }
   );
