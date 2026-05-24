@@ -80,15 +80,12 @@ impl Encoder for OpusEncoder {
 		}
 		.encode();
 
-		hang::catalog::AudioConfig {
-			codec: hang::catalog::AudioCodec::Opus,
-			sample_rate: self.sample_rate,
-			channel_count: self.channel_count,
-			bitrate: self.bitrate.map(|b| b as u64),
-			description: Some(head),
-			container: hang::catalog::Container::Legacy,
-			jitter: None,
-		}
+		let mut config =
+			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, self.sample_rate, self.channel_count);
+		config.bitrate = self.bitrate.map(|b| b as u64);
+		config.description = Some(head);
+		config.container = hang::catalog::Container::Legacy;
+		config
 	}
 
 	fn frame_size(&self) -> usize {

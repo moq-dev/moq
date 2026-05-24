@@ -234,15 +234,14 @@ impl MoqBroadcastConsumer {
 	) -> Result<Arc<MoqRawAudioConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 
-		let cfg = hang::catalog::AudioConfig {
-			codec: hang::catalog::AudioCodec::Opus,
-			sample_rate: audio_config.sample_rate,
-			channel_count: audio_config.channel_count,
-			bitrate: audio_config.bitrate,
-			description: audio_config.description.map(Into::into),
-			container: audio_config.container.into(),
-			jitter: None,
-		};
+		let mut cfg = hang::catalog::AudioConfig::new(
+			hang::catalog::AudioCodec::Opus,
+			audio_config.sample_rate,
+			audio_config.channel_count,
+		);
+		cfg.bitrate = audio_config.bitrate;
+		cfg.description = audio_config.description.map(Into::into);
+		cfg.container = audio_config.container.into();
 
 		let consumer = moq_audio::AudioConsumer::subscribe_opus(
 			self.inner(),
