@@ -126,7 +126,7 @@ The easiest way to add MoQ to your web page:
 
 ### Using JavaScript API
 
-For more control, use the JavaScript API directly. See the [`js/lite/examples/`](https://github.com/moq-dev/moq/tree/main/js/lite/examples) directory for working examples of [connecting](https://github.com/moq-dev/moq/blob/main/js/lite/examples/connection.ts), [publishing](https://github.com/moq-dev/moq/blob/main/js/lite/examples/publish.ts), [subscribing](https://github.com/moq-dev/moq/blob/main/js/lite/examples/subscribe.ts), and [discovery](https://github.com/moq-dev/moq/blob/main/js/lite/examples/discovery.ts).
+For more control, use the JavaScript API directly. See the [`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples) directory for working examples of [connecting](https://github.com/moq-dev/moq/blob/main/js/net/examples/connection.ts), [publishing](https://github.com/moq-dev/moq/blob/main/js/net/examples/publish.ts), [subscribing](https://github.com/moq-dev/moq/blob/main/js/net/examples/subscribe.ts), and [discovery](https://github.com/moq-dev/moq/blob/main/js/net/examples/discovery.ts).
 
 [Learn more about @moq/net](/js/@moq/net)
 

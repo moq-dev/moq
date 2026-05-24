@@ -57,7 +57,6 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 
 /js/                  # TypeScript/JavaScript packages
   net/               # Core networking layer for browsers (published as @moq/net)
-  lite/              # Deprecated shim that re-exports @moq/net (published as @moq/lite)
   signals/           # Reactive signals library (published as @moq/signals)
   token/             # JWT token generation (published as @moq/token)
   clock/             # Clock example (published as @moq/clock)
