@@ -15,8 +15,6 @@ Live media is built on top of this layer using something like [hang](https://git
 - **Groups**: A sequential collection of frames, usually starting with a keyframe.
 - **Frame**: A timed chunk of data.
 
-> Previously published as [`moq-lite`](https://crates.io/crates/moq-lite); renamed to clarify that this is the networking layer, not a specific wire protocol.
-
 ## Examples
 
 - [Publishing a chat track](https://github.com/moq-dev/moq/blob/main/rs/moq-native/examples/chat.rs)

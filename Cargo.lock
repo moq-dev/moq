@@ -3722,13 +3722,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-lite"
-version = "0.17.0"
-dependencies = [
- "moq-net",
-]
-
-[[package]]
 name = "moq-loc"
 version = "0.1.0"
 dependencies = [

@@ -41,7 +41,6 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 ```
 /rs/                  # Rust crates
   moq-net/           # Core networking layer (published as moq-net; negotiates moq-lite or moq-transport)
-  moq-lite/          # Deprecated shim that re-exports moq-net (published as moq-lite)
   moq-native/        # QUIC/WebTransport connection helpers for native apps
   moq-relay/         # Clusterable relay server (binary: moq-relay)
   moq-token/         # JWT authentication library

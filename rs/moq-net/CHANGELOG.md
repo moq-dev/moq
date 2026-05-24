@@ -29,10 +29,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Initial release as `moq-net`.
-
-This crate was previously published as [`moq-lite`](https://crates.io/crates/moq-lite).
-The new name reflects that it is the networking layer; under the hood it negotiates
-either the `moq-lite` or `moq-transport` wire protocol at session setup. For history
-prior to the rename, see the
-[`moq-lite` changelog](https://github.com/moq-dev/moq/blob/main/rs/moq-lite/CHANGELOG.md).
+- Initial release as `moq-net`, the networking layer that negotiates either
+  the `moq-lite` or `moq-transport` wire protocol at session setup.
