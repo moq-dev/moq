@@ -28,7 +28,7 @@ enum Commands {
 		#[arg(long)]
 		id: Option<String>,
 
-		/// Write the key to a file path.
+		/// Write the key to a file path. Use `-` for stdout.
 		#[arg(long)]
 		out: Option<PathBuf>,
 
@@ -36,7 +36,7 @@ enum Commands {
 		#[arg(long, conflicts_with = "out")]
 		out_dir: Option<PathBuf>,
 
-		/// Write the public key to a file path (asymmetric algorithms only).
+		/// Write the public key to a file path (asymmetric algorithms only). Use `-` for stdout.
 		#[arg(long)]
 		public: Option<PathBuf>,
 
@@ -47,7 +47,7 @@ enum Commands {
 
 	/// Sign a token, writing it to stdout.
 	Sign {
-		/// Path to the signing key file.
+		/// Path to the signing key file. Use `-` for stdin.
 		#[arg(long)]
 		key: PathBuf,
 
@@ -80,8 +80,26 @@ enum Commands {
 	},
 }
 
+fn is_dash(path: &std::path::Path) -> bool {
+	path == std::path::Path::new("-")
+}
+
 fn write_key(key: &moq_token::Key, path: &std::path::Path) -> anyhow::Result<()> {
-	Ok(key.to_file(path)?)
+	if is_dash(path) {
+		println!("{}", key.to_str()?);
+		Ok(())
+	} else {
+		Ok(key.to_file(path)?)
+	}
+}
+
+fn read_key(path: &std::path::Path) -> anyhow::Result<moq_token::Key> {
+	if is_dash(path) {
+		let contents = io::read_to_string(io::stdin())?;
+		Ok(moq_token::Key::from_str(contents.trim())?)
+	} else {
+		Ok(moq_token::Key::from_file(path)?)
+	}
 }
 
 fn main() -> anyhow::Result<()> {
@@ -102,6 +120,14 @@ fn main() -> anyhow::Result<()> {
 			};
 
 			let key = moq_token::Key::generate(algorithm, Some(id.clone()))?;
+
+			let public_to_stdout = public.as_deref().is_some_and(is_dash);
+			let private_to_stdout = out_dir.is_none() && out.as_deref().is_none_or(is_dash);
+			if public_to_stdout && private_to_stdout {
+				anyhow::bail!(
+					"cannot write both keys to stdout; use --out/--public with a file path, or --out-dir/--public-dir"
+				);
+			}
 
 			if let Some(dir) = public_dir {
 				let path = dir.join(format!("{id}.jwk"));
@@ -129,7 +155,7 @@ fn main() -> anyhow::Result<()> {
 			expires,
 			issued,
 		} => {
-			let key = moq_token::Key::from_file(key)?;
+			let key = read_key(&key)?;
 
 			let payload = moq_token::Claims {
 				root,
@@ -144,6 +170,9 @@ fn main() -> anyhow::Result<()> {
 		}
 
 		Commands::Verify { key } => {
+			if is_dash(&key) {
+				anyhow::bail!("--key cannot read from stdin; stdin is reserved for the token");
+			}
 			let key = moq_token::Key::from_file(key)?;
 			let token = io::read_to_string(io::stdin())?.trim().to_string();
 			let payload = key.decode(&token)?;
