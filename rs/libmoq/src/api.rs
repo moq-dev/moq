@@ -450,9 +450,7 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 
 /// Consume a video track from a broadcast, delivering frames in order.
 ///
-/// - `latency_max_ms` is the upper bound on buffering before skipping
-///   a GoP. Named `_max` to leave room for a future `latency_min_ms`
-///   (jitter-buffer floor).
+/// - `max_latency_ms` controls the maximum amount of buffering allowed before skipping a GoP.
 /// - `on_frame` is called with a frame ID when a new frame is available.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
@@ -463,18 +461,18 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 pub unsafe extern "C" fn moq_consume_video_ordered(
 	catalog: u32,
 	index: u32,
-	latency_max_ms: u64,
+	max_latency_ms: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let latency_max = std::time::Duration::from_millis(latency_max_ms);
+		let max_latency = std::time::Duration::from_millis(max_latency_ms);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock()
 			.consume
-			.video_ordered(catalog, index, latency_max, on_frame)
+			.video_ordered(catalog, index, max_latency, on_frame)
 	})
 }
 
@@ -492,9 +490,7 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 /// Consume an audio track from a broadcast, emitting the frames in order.
 ///
 /// The callback is called with a frame ID when a new frame is available.
-/// The `latency_max_ms` parameter is the upper bound on buffering before
-/// the consumer skips. Named `_max` to leave room for a future
-/// `latency_min_ms` (jitter-buffer floor).
+/// The `max_latency_ms` parameter controls how long to wait before skipping frames.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
@@ -504,18 +500,18 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 pub unsafe extern "C" fn moq_consume_audio_ordered(
 	catalog: u32,
 	index: u32,
-	latency_max_ms: u64,
+	max_latency_ms: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let latency_max = std::time::Duration::from_millis(latency_max_ms);
+		let max_latency = std::time::Duration::from_millis(max_latency_ms);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock()
 			.consume
-			.audio_ordered(catalog, index, latency_max, on_frame)
+			.audio_ordered(catalog, index, max_latency, on_frame)
 	})
 }
 

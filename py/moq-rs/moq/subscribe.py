@@ -167,8 +167,8 @@ class BroadcastConsumer:
         """Subscribe to a track — receive arbitrary byte payloads."""
         return TrackConsumer(self._inner.subscribe_track(name))
 
-    def subscribe_media(self, name: str, container: Container, latency_max_ms: int) -> MediaConsumer:
-        return MediaConsumer(self._inner.subscribe_media(name, container, latency_max_ms))
+    def subscribe_media(self, name: str, container: Container, max_latency_ms: int) -> MediaConsumer:
+        return MediaConsumer(self._inner.subscribe_media(name, container, max_latency_ms))
 
     def subscribe_audio(
         self,
