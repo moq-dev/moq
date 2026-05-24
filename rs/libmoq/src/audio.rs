@@ -124,32 +124,14 @@ fn parse_codec(codec_str: &str) -> Result<moq_audio::Codec, Error> {
 }
 
 impl Audio {
-	#[allow(clippy::too_many_arguments)]
 	pub fn publish(
 		&mut self,
 		broadcast: &mut moq_net::BroadcastProducer,
 		catalog: moq_mux::catalog::hang::Producer,
 		name: &str,
-		codec: moq_audio::Codec,
-		input_format: moq_audio::AudioFormat,
-		input_sample_rate: u32,
-		input_channels: u32,
-		bitrate: Option<u32>,
-		frame_duration: Duration,
+		config: moq_audio::EncoderConfig,
 	) -> Result<Id, Error> {
-		let producer = moq_audio::AudioProducer::new(
-			broadcast,
-			catalog,
-			name,
-			moq_audio::EncoderConfig {
-				codec,
-				input_format,
-				input_sample_rate,
-				input_channels,
-				bitrate,
-				frame_duration,
-			},
-		)?;
+		let producer = moq_audio::AudioProducer::new(broadcast, catalog, name, config)?;
 		self.producers.insert(producer)
 	}
 
@@ -165,27 +147,15 @@ impl Audio {
 		Ok(())
 	}
 
-	#[allow(clippy::too_many_arguments)]
 	pub fn consume(
 		&mut self,
 		broadcast: &moq_net::BroadcastConsumer,
 		catalog: &hang::catalog::AudioConfig,
 		name: &str,
-		output_format: moq_audio::AudioFormat,
-		output_sample_rate: Option<u32>,
-		output_channels: Option<u32>,
+		config: moq_audio::DecoderConfig,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let consumer = moq_audio::AudioConsumer::new(
-			broadcast,
-			catalog,
-			name,
-			moq_audio::DecoderConfig {
-				output_format,
-				output_sample_rate,
-				output_channels,
-			},
-		)?;
+		let consumer = moq_audio::AudioConsumer::new(broadcast, catalog, name, config)?;
 
 		let channel = oneshot::channel();
 		let entry = AudioTaskEntry {
@@ -272,32 +242,23 @@ pub unsafe extern "C" fn moq_publish_audio_raw(
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? }.to_string();
-		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let codec_str = unsafe { ffi::parse_str(config.codec, config.codec_len)? };
-		let codec = parse_codec(codec_str)?;
-		let input_format = audio_format_from_u32(config.input_format)?;
-		let bitrate = if config.bitrate == 0 {
-			None
-		} else {
-			Some(config.bitrate)
+		let raw = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let codec_str = unsafe { ffi::parse_str(raw.codec, raw.codec_len)? };
+
+		let encoder_config = moq_audio::EncoderConfig {
+			codec: parse_codec(codec_str)?,
+			input_format: audio_format_from_u32(raw.input_format)?,
+			input_sample_rate: raw.input_sample_rate,
+			input_channels: raw.input_channels,
+			bitrate: if raw.bitrate == 0 { None } else { Some(raw.bitrate) },
+			frame_duration: Duration::from_millis(raw.frame_duration_ms.into()),
 		};
-		let frame_duration = Duration::from_millis(config.frame_duration_ms.into());
 
 		let mut state = State::lock();
 		let State { publish, audio, .. } = &mut *state;
 		let (broadcast_producer, catalog) = publish.pair_mut(broadcast)?;
 
-		audio.publish(
-			broadcast_producer,
-			catalog.clone(),
-			&name,
-			codec,
-			input_format,
-			config.input_sample_rate,
-			config.input_channels,
-			bitrate,
-			frame_duration,
-		)
+		audio.publish(broadcast_producer, catalog.clone(), &name, encoder_config)
 	})
 }
 
@@ -356,17 +317,20 @@ pub unsafe extern "C" fn moq_consume_audio_raw(
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
-		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let output_format = audio_format_from_u32(config.output_format)?;
-		let output_sample_rate = if config.output_sample_rate == 0 {
-			None
-		} else {
-			Some(config.output_sample_rate)
-		};
-		let output_channels = if config.output_channels == 0 {
-			None
-		} else {
-			Some(config.output_channels)
+		let raw = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+
+		let decoder_config = moq_audio::DecoderConfig {
+			output_format: audio_format_from_u32(raw.output_format)?,
+			output_sample_rate: if raw.output_sample_rate == 0 {
+				None
+			} else {
+				Some(raw.output_sample_rate)
+			},
+			output_channels: if raw.output_channels == 0 {
+				None
+			} else {
+				Some(raw.output_channels)
+			},
 		};
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame) };
 
@@ -374,15 +338,7 @@ pub unsafe extern "C" fn moq_consume_audio_raw(
 		let (broadcast, audio_cfg, name) = state.consume.audio_rendition(catalog, index as usize)?;
 
 		let State { audio, .. } = &mut *state;
-		audio.consume(
-			&broadcast,
-			&audio_cfg,
-			&name,
-			output_format,
-			output_sample_rate,
-			output_channels,
-			on_frame,
-		)
+		audio.consume(&broadcast, &audio_cfg, &name, decoder_config, on_frame)
 	})
 }
 
