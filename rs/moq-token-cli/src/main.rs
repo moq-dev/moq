@@ -103,8 +103,7 @@ fn read_key(path: &std::path::Path) -> anyhow::Result<moq_token::Key> {
 		let contents = io::read_to_string(io::stdin())?;
 		moq_token::Key::from_str(contents.trim()).context("failed to parse key from stdin")
 	} else {
-		moq_token::Key::from_file(path)
-			.with_context(|| format!("failed to read key from {}", path.display()))
+		moq_token::Key::from_file(path).with_context(|| format!("failed to read key from {}", path.display()))
 	}
 }
 
@@ -112,8 +111,7 @@ fn read_token(path: &std::path::Path) -> anyhow::Result<String> {
 	let raw = if is_dash(path) {
 		io::read_to_string(io::stdin())?
 	} else {
-		std::fs::read_to_string(path)
-			.with_context(|| format!("failed to read token from {}", path.display()))?
+		std::fs::read_to_string(path).with_context(|| format!("failed to read token from {}", path.display()))?
 	};
 	Ok(raw.trim().to_string())
 }
