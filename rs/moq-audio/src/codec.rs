@@ -1,14 +1,19 @@
 //! Opus codec wrapper.
 //!
 //! Single-codec implementation today: [`Encoder`] / [`Decoder`] wrap
-//! libopus via the [`opus`](https://crates.io/crates/opus) crate.
-//! When AAC or other codecs land we'll factor out a `Codec` enum;
-//! introducing the trait now would be premature.
+//! libopus 1.3.1 via [`unsafe_libopus`], a pure-Rust c2rust
+//! transpilation. No CMake toolchain, no sys crate, no linker
+//! gymnastics. When AAC or other codecs land we'll factor out a
+//! `Codec` enum; introducing the trait now would be premature.
 
 use std::time::Duration;
 
 use bytes::Bytes;
-use opus::{Application, Channels};
+use unsafe_libopus::{
+	OPUS_APPLICATION_AUDIO, OPUS_OK, OPUS_SET_BITRATE_REQUEST, OpusDecoder, OpusEncoder, opus_decode_float,
+	opus_decoder_create, opus_decoder_destroy, opus_encode_float, opus_encoder_create, opus_encoder_ctl_impl,
+	opus_encoder_destroy, varargs,
+};
 
 use crate::{AudioError, AudioFormat};
 
@@ -65,14 +70,17 @@ pub struct DecoderConfig {
 	pub output_channels: Option<u32>,
 }
 
-fn channels_for(count: u32) -> Result<Channels, AudioError> {
+fn validate_opus_channels(count: u32) -> Result<i32, AudioError> {
 	match count {
-		1 => Ok(Channels::Mono),
-		2 => Ok(Channels::Stereo),
+		1 | 2 => Ok(count as i32),
 		other => Err(AudioError::Unsupported(format!(
 			"opus only supports 1 or 2 channels (got {other})"
 		))),
 	}
+}
+
+fn opus_error(code: i32, context: &str) -> AudioError {
+	AudioError::Unsupported(format!("libopus {context} failed (code {code})"))
 }
 
 /// Pick a libopus-supported rate close to `input_rate`.
@@ -108,13 +116,18 @@ fn frame_size_for(sample_rate: u32, duration: Duration) -> Result<usize, AudioEr
 
 /// Opus encoder over the input format declared in [`EncoderConfig`].
 pub struct Encoder {
-	inner: opus::Encoder,
+	inner: *mut OpusEncoder,
 	config: EncoderConfig,
 	/// Sample rate libopus actually runs at (snapped to a supported rate).
 	codec_rate: u32,
 	frame_size: usize,
 	scratch: Vec<u8>,
 }
+
+// SAFETY: OpusEncoder is heap-allocated state owned exclusively by this
+// struct; libopus encoder methods take a single &mut, so a unique
+// owner is allowed to move it across threads.
+unsafe impl Send for Encoder {}
 
 impl Encoder {
 	pub fn new(config: EncoderConfig) -> Result<Self, AudioError> {
@@ -126,14 +139,26 @@ impl Encoder {
 	fn new_opus(config: EncoderConfig) -> Result<Self, AudioError> {
 		let codec_rate = pick_opus_rate(config.input_sample_rate);
 		validate_opus_rate(codec_rate)?;
-		let channels = channels_for(config.input_channels)?;
+		let channels = validate_opus_channels(config.input_channels)?;
+		let frame_size = frame_size_for(codec_rate, config.frame_duration)?;
 
-		let mut inner = opus::Encoder::new(codec_rate, channels, Application::Audio)?;
-		if let Some(b) = config.bitrate {
-			inner.set_bitrate(opus::Bitrate::Bits(b as i32))?;
+		let mut err = 0i32;
+		// SAFETY: out-pointer `err` is valid; inner is checked for null below.
+		let inner = unsafe { opus_encoder_create(codec_rate as i32, channels, OPUS_APPLICATION_AUDIO, &mut err) };
+		if err != OPUS_OK || inner.is_null() {
+			return Err(opus_error(err, "opus_encoder_create"));
 		}
 
-		let frame_size = frame_size_for(codec_rate, config.frame_duration)?;
+		if let Some(b) = config.bitrate {
+			// SAFETY: `inner` is a freshly-created encoder; varargs! produces
+			// the single i32 the SET_BITRATE request expects.
+			let rc = unsafe { opus_encoder_ctl_impl(inner, OPUS_SET_BITRATE_REQUEST, varargs![b as i32]) };
+			if rc != OPUS_OK {
+				// SAFETY: `inner` was created above and not yet handed out.
+				unsafe { opus_encoder_destroy(inner) };
+				return Err(opus_error(rc, "OPUS_SET_BITRATE"));
+			}
+		}
 
 		Ok(Self {
 			inner,
@@ -173,8 +198,21 @@ impl Encoder {
 				expected: expected * std::mem::size_of::<f32>(),
 			});
 		}
-		let n = self.inner.encode_float(pcm, &mut self.scratch)?;
-		Ok(Bytes::copy_from_slice(&self.scratch[..n]))
+		// SAFETY: `inner` owns a live OpusEncoder; pcm and scratch slices
+		// are bounded by the lengths we pass.
+		let n = unsafe {
+			opus_encode_float(
+				self.inner,
+				pcm.as_ptr(),
+				self.frame_size as i32,
+				self.scratch.as_mut_ptr(),
+				self.scratch.len() as i32,
+			)
+		};
+		if n < 0 {
+			return Err(opus_error(n, "opus_encode_float"));
+		}
+		Ok(Bytes::copy_from_slice(&self.scratch[..n as usize]))
 	}
 
 	/// hang catalog entry describing this encoder's output stream.
@@ -199,11 +237,14 @@ impl Encoder {
 
 /// Opus decoder producing interleaved `f32` PCM.
 pub struct Decoder {
-	inner: opus::Decoder,
+	inner: *mut OpusDecoder,
 	sample_rate: u32,
 	channel_count: u32,
 	max_frame_size: usize,
 }
+
+// SAFETY: see Encoder above.
+unsafe impl Send for Decoder {}
 
 impl Decoder {
 	/// Build a decoder from a catalog [`AudioConfig`](hang::catalog::AudioConfig).
@@ -222,8 +263,15 @@ impl Decoder {
 		};
 
 		validate_opus_rate(sample_rate)?;
-		let channels = channels_for(channel_count)?;
-		let inner = opus::Decoder::new(sample_rate, channels)?;
+		let channels = validate_opus_channels(channel_count)?;
+
+		let mut err = 0i32;
+		// SAFETY: out-pointer is valid; inner is checked for null below.
+		let inner = unsafe { opus_decoder_create(sample_rate as i32, channels, &mut err) };
+		if err != OPUS_OK || inner.is_null() {
+			return Err(opus_error(err, "opus_decoder_create"));
+		}
+
 		// Opus packets cap at 120 ms.
 		let max_frame_size = (sample_rate as usize * 120) / 1000;
 
@@ -246,9 +294,37 @@ impl Decoder {
 	/// Decode one packet into interleaved `f32` PCM.
 	pub fn decode_f32(&mut self, packet: &[u8]) -> Result<Vec<f32>, AudioError> {
 		let mut out = vec![0.0f32; self.max_frame_size * self.channel_count as usize];
-		let samples = self.inner.decode_float(packet, &mut out, false)?;
-		out.truncate(samples * self.channel_count as usize);
+		// SAFETY: `inner` owns a live OpusDecoder; packet/out slices bound
+		// by the lengths we pass.
+		let samples = unsafe {
+			opus_decode_float(
+				&mut *self.inner,
+				packet.as_ptr(),
+				packet.len() as i32,
+				out.as_mut_ptr(),
+				self.max_frame_size as i32,
+				0,
+			)
+		};
+		if samples < 0 {
+			return Err(opus_error(samples, "opus_decode_float"));
+		}
+		out.truncate(samples as usize * self.channel_count as usize);
 		Ok(out)
+	}
+}
+
+impl Drop for Encoder {
+	fn drop(&mut self) {
+		// SAFETY: `inner` is a live OpusEncoder that nothing else aliases.
+		unsafe { opus_encoder_destroy(self.inner) };
+	}
+}
+
+impl Drop for Decoder {
+	fn drop(&mut self) {
+		// SAFETY: same as Encoder.
+		unsafe { opus_decoder_destroy(self.inner) };
 	}
 }
 

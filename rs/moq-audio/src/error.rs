@@ -10,10 +10,6 @@ pub enum AudioError {
 	#[error("input buffer length {got} bytes does not match expected {expected}")]
 	Misaligned { got: usize, expected: usize },
 
-	/// libopus returned an error.
-	#[error("opus: {0}")]
-	Opus(#[from] opus::Error),
-
 	/// Rubato resampler construction error.
 	#[error("resample construction: {0}")]
 	ResamplerConstruction(#[from] rubato::ResamplerConstructionError),
