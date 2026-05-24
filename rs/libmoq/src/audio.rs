@@ -99,12 +99,14 @@ pub struct moq_audio_decoder_output {
 	pub sample_rate: u32,
 	/// 0 = deliver at the codec's native channel count.
 	pub channels: u32,
-	/// Maximum buffering before skipping a stalled group, in
+	/// Upper bound on buffering before skipping a stalled group, in
 	/// milliseconds. Same congestion-control knob as
 	/// `moq_consume_audio_ordered`'s `max_latency_ms`. 0 = skip
 	/// aggressively (the moq-mux default); set to your playout
-	/// buffer (tens to a few hundred ms) for a softer skip.
-	pub max_latency_ms: u64,
+	/// buffer (tens to a few hundred ms) for a softer skip. Named
+	/// `_max` to leave room for a future `latency_min_ms`
+	/// (jitter-buffer floor).
+	pub latency_max_ms: u64,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -366,10 +368,10 @@ pub unsafe extern "C" fn moq_consume_audio_raw(
 				Some(raw.sample_rate)
 			},
 			channels: if raw.channels == 0 { None } else { Some(raw.channels) },
-			max_latency: if raw.max_latency_ms == 0 {
+			latency_max: if raw.latency_max_ms == 0 {
 				None
 			} else {
-				Some(Duration::from_millis(raw.max_latency_ms))
+				Some(Duration::from_millis(raw.latency_max_ms))
 			},
 		};
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame) };

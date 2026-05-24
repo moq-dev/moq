@@ -109,17 +109,18 @@ pub struct DecoderOutput {
 	pub format: AudioFormat,
 	pub sample_rate: Option<u32>,
 	pub channels: Option<u32>,
-	/// Maximum buffering before skipping a stalled group.
+	/// Upper bound on buffering before skipping a stalled group.
 	///
 	/// Forwarded to [`moq_mux::container::Consumer::with_latency`]: if
 	/// a group is stuck and a newer group is more than this far ahead,
 	/// the consumer skips. `None` keeps the moq-mux default of zero,
 	/// which skips aggressively. Set to the playout buffer you can
 	/// tolerate (typically tens to a few hundred ms) for the best
-	/// congestion-vs-quality trade-off. The name `max_` is the
-	/// reminder that we never *add* latency: the consumer skips only
-	/// when newer data is already this far ahead.
-	pub max_latency: Option<Duration>,
+	/// congestion-vs-quality trade-off. The `_max` suffix is a
+	/// reminder that we never *add* latency here: the consumer skips
+	/// only when newer data is already this far ahead. A companion
+	/// `latency_min` for jitter-buffer padding will land in a follow-up.
+	pub latency_max: Option<Duration>,
 }
 
 fn validate_opus_channels(count: u32) -> Result<i32, AudioError> {

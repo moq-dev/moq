@@ -157,7 +157,7 @@ async fn opus_round_trip_44100_s16_resampled() {
 			format: AudioFormat::S16,
 			sample_rate: Some(44_100),
 			channels: Some(1),
-			max_latency: Some(Duration::from_millis(500)),
+			latency_max: Some(Duration::from_millis(500)),
 		},
 	)
 	.unwrap();

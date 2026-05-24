@@ -181,9 +181,10 @@ class BroadcastConsumer:
 
         ``catalog_audio`` comes from the catalog (e.g.
         ``await broadcast.catalog()`` followed by
-        ``catalog.audio[name]``). Use ``output.max_latency_ms`` to
+        ``catalog.audio[name]``). Use ``output.latency_max_ms`` to
         control how aggressively stalled groups get skipped — that's
-        the congestion-control knob.
+        the congestion-control knob. (Named ``_max`` to leave room for
+        a future ``latency_min_ms`` jitter-buffer floor.)
         """
         return AudioConsumer(self._inner.subscribe_audio(name, catalog_audio, output))
 
