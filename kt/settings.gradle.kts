@@ -9,10 +9,10 @@ pluginManagement {
         mavenCentral()
     }
 
-    // Pinning the Android plugin version here lets `build.gradle.kts` apply
-    // it via `apply(plugin = "com.android.library")` without redeclaring the
-    // version. When `-Pandroid.enabled=true` isn't set, this is dormant and
-    // the plugin marker is never resolved.
+    // Pin the Android plugin version so `build.gradle.kts` can request it
+    // by id alone. The module declares it `apply false` so AGP types are on
+    // the script classpath; the actual `apply` only happens when
+    // `-Pandroid.enabled=true`.
     plugins {
         id("com.android.library") version "8.7.3"
     }
