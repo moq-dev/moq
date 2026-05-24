@@ -6,7 +6,6 @@ members = [
     "rs/moq-audio",
     "rs/moq-boy",
     "rs/moq-cli",
-    "rs/moq-clock",
     "rs/moq-ffi",
     "rs/moq-gst",
     "rs/moq-loc",
@@ -26,7 +25,6 @@ default-members = [
     "rs/moq-boy",
     "rs/moq-audio",
     "rs/moq-cli",
-    "rs/moq-clock",
     # "rs/moq-ffi",   # requires Python/maturin
     # "rs/moq-gst",   # requires GStreamer
     "rs/moq-loc",

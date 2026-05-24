@@ -3684,20 +3684,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-clock"
-version = "0.10.21"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "moq-native",
- "moq-net",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
 name = "moq-ffi"
 version = "0.2.13"
 dependencies = [
@@ -3782,6 +3768,7 @@ version = "0.15.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "chrono",
  "clap",
  "console-subscriber",
  "futures",

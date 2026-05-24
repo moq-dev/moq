@@ -69,5 +69,6 @@ web-transport-quinn = { workspace = true, optional = true }
 
 [dev-dependencies]
 bytes = "1"
+chrono = "0.4"
 toml = "0.9"
 tracing-test = "0.2"

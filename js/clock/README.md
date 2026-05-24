@@ -22,7 +22,7 @@ If you're running a relay server locally, use `http://localhost:4443/anon` inste
 
 ## Wire Format
 
-The wire format is identical to the Rust `moq-clock` crate:
+The wire format is identical to the Rust [clock example](https://github.com/moq-dev/moq/blob/main/rs/moq-native/examples/clock.rs):
 
 1. **Groups**: Each group represents one minute of data
 2. **Base Frame**: First frame contains the timestamp base (e.g., "2025-01-31 14:23:")

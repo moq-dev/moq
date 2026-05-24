@@ -42,12 +42,11 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 ```
 /rs/                  # Rust crates
   moq-net/           # Core networking layer (published as moq-net; negotiates moq-lite or moq-transport)
-  moq-native/        # QUIC/WebTransport connection helpers for native apps
+  moq-native/        # QUIC/WebTransport connection helpers for native apps; clock example lives in examples/clock.rs
   moq-relay/         # Clusterable relay server (binary: moq-relay)
   moq-token/         # JWT authentication library
   moq-token-cli/     # JWT token CLI tool (binary: moq-token-cli)
   moq-cli/           # CLI tool for media operations (binary: moq)
-  moq-clock/         # Clock synchronization example (binary: moq-clock)
   moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)
   moq-audio/         # Native PCM ↔ Opus encode/decode on top of moq-mux
   hang/              # Media encoding/streaming (catalog/container format)

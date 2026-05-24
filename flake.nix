@@ -138,7 +138,6 @@
             name = "moq-all";
             paths = [
               moq-relay
-              moq-clock
               moq-cli
               moq-token-cli
             ];
@@ -147,7 +146,6 @@
           # Inherit packages from the overlay
           inherit (overlayPkgs)
             moq-relay
-            moq-clock
             moq-cli
             moq-token-cli
             moq-boy
