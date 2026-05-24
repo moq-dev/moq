@@ -1,11 +1,17 @@
 //! Raw-audio import/export via [`moq_audio`].
 //!
-//! Mirrors the encoded media API (`moq_publish_media_*` /
-//! `moq_consume_audio_ordered`) but talks in PCM samples on the C side
-//! and goes through [`moq_audio::AudioProducer`] /
-//! [`moq_audio::AudioConsumer`] for the codec work.
+//! Sibling to `moq_publish_media_*` / `moq_consume_audio_ordered`
+//! (those handle already-encoded frames). These functions accept and
+//! return raw PCM, with Opus encode/decode happening inside the FFI
+//! boundary.
+//!
+//! Format / sample rate / channel count are fixed at producer or
+//! consumer construction via [`moq_audio_encoder_config`] /
+//! [`moq_audio_decoder_config`], so each [`moq_audio_frame`] carries
+//! only payload bytes and a timestamp.
 
 use std::ffi::{c_char, c_void};
+use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::sync::oneshot;
@@ -17,12 +23,10 @@ use crate::{Error, Id, NonZeroSlab, State, ffi};
 
 /// Raw PCM sample layout, mirroring WebCodecs `AudioData.format`.
 ///
-/// Exposed as a C enum for header readability, but the ABI fields and
-/// parameters that carry it (`moq_raw_audio.format`,
-/// `moq_consume_raw_audio_opus`'s `output_format`) are typed as `u32`.
-/// A C caller passing an unknown discriminant would otherwise be UB at
-/// the Rust boundary; the integer ABI lets us validate via
-/// `audio_format_from_u32` before any downstream code runs.
+/// The enum is exposed in the C header for readability, but ABI
+/// fields/parameters that carry it are typed `u32`. A C caller
+/// passing an unknown discriminant gets `Error::InvalidCode` instead
+/// of UB.
 ///
 /// <https://developer.mozilla.org/en-US/docs/Web/API/AudioData/format>
 #[repr(C)]
@@ -39,8 +43,6 @@ pub enum moq_audio_format {
 	MOQ_AUDIO_FORMAT_F32_PLANAR = 7,
 }
 
-/// Convert a C-side discriminant into a typed Rust `AudioFormat`,
-/// rejecting unknown values up front.
 fn audio_format_from_u32(value: u32) -> Result<moq_audio::AudioFormat, Error> {
 	use moq_audio::AudioFormat;
 	Ok(match value {
@@ -56,45 +58,44 @@ fn audio_format_from_u32(value: u32) -> Result<moq_audio::AudioFormat, Error> {
 	})
 }
 
-/// Convert a typed Rust `AudioFormat` into its C-side discriminant.
-fn audio_format_to_u32(f: moq_audio::AudioFormat) -> Result<u32, Error> {
-	use moq_audio::AudioFormat as A;
-	Ok(match f {
-		A::U8 => moq_audio_format::MOQ_AUDIO_FORMAT_U8 as u32,
-		A::S16 => moq_audio_format::MOQ_AUDIO_FORMAT_S16 as u32,
-		A::S32 => moq_audio_format::MOQ_AUDIO_FORMAT_S32 as u32,
-		A::F32 => moq_audio_format::MOQ_AUDIO_FORMAT_F32 as u32,
-		A::U8Planar => moq_audio_format::MOQ_AUDIO_FORMAT_U8_PLANAR as u32,
-		A::S16Planar => moq_audio_format::MOQ_AUDIO_FORMAT_S16_PLANAR as u32,
-		A::S32Planar => moq_audio_format::MOQ_AUDIO_FORMAT_S32_PLANAR as u32,
-		A::F32Planar => moq_audio_format::MOQ_AUDIO_FORMAT_F32_PLANAR as u32,
-		_ => return Err(Error::InvalidCode),
-	})
-}
-
-/// A buffer of raw PCM samples passed across the FFI boundary.
-///
-/// `format` is a `u32` carrying a `moq_audio_format` discriminant; it's
-/// not declared as the enum type so that an unknown value from C lands
-/// in `audio_format_from_u32` instead of becoming an invalid Rust enum
-/// (which would be UB).
-///
-/// **`data` lifetime depends on direction.**
-/// - **Publish** ([`moq_publish_raw_audio_write`]): borrowed for the
-///   duration of the call. The producer copies before returning, so
-///   callers may reuse the buffer immediately.
-/// - **Consume** ([`moq_consume_raw_audio_sample`]): the pointer
-///   remains valid until the corresponding sample ID is released with
-///   [`moq_consume_raw_audio_sample_free`]. The on-frame callback only
-///   delivers an ID; the buffer outlives the callback, and
-///   [`moq_consume_raw_audio_close`] does not free already-delivered
-///   sample IDs.
+/// Encoder configuration. Layout/rates baked in here, not per-frame.
 #[repr(C)]
 #[allow(non_camel_case_types)]
-pub struct moq_raw_audio {
-	pub format: u32,
-	pub sample_rate: u32,
-	pub channel_count: u32,
+pub struct moq_audio_encoder_config {
+	/// Codec id, UTF-8 (currently only "opus").
+	pub codec: *const c_char,
+	pub codec_len: usize,
+	/// `moq_audio_format` discriminant.
+	pub input_format: u32,
+	pub input_sample_rate: u32,
+	pub input_channels: u32,
+	/// 0 = libopus default.
+	pub bitrate: u32,
+	/// Encoded frame duration in milliseconds. Opus accepts
+	/// 2.5/5/10/20/40/60 ms; pass 20 to match the JS publish path.
+	/// (For 2.5 ms, the caller must pre-round; integer ms only.)
+	pub frame_duration_ms: u32,
+}
+
+/// Decoder configuration.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_audio_decoder_config {
+	pub output_format: u32,
+	/// 0 = deliver at the codec's native sample rate.
+	pub output_sample_rate: u32,
+	/// 0 = deliver at the codec's native channel count.
+	pub output_channels: u32,
+}
+
+/// One audio frame: payload bytes plus a presentation timestamp.
+///
+/// `data` is owned by the consume slab (see
+/// [`moq_consume_audio_raw_frame_free`]) or borrowed by the publish call
+/// (the publisher copies before returning).
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_audio_frame {
 	pub timestamp_us: u64,
 	pub data: *const u8,
 	pub data_size: usize,
@@ -104,14 +105,9 @@ pub struct moq_raw_audio {
 
 #[derive(Default)]
 pub struct Audio {
-	/// Active raw-audio producers.
 	producers: NonZeroSlab<moq_audio::AudioProducer>,
-
-	/// Active raw-audio consumer tasks.
 	consumer_tasks: NonZeroSlab<Option<AudioTaskEntry>>,
-
-	/// Buffered raw-audio samples ready for the C callback.
-	samples: NonZeroSlab<moq_audio::AudioSamples>,
+	frames: NonZeroSlab<moq_audio::Frame>,
 }
 
 struct AudioTaskEntry {
@@ -120,24 +116,45 @@ struct AudioTaskEntry {
 	callback: OnStatus,
 }
 
+fn parse_codec(codec_str: &str) -> Result<moq_audio::Codec, Error> {
+	match codec_str {
+		"opus" => Ok(moq_audio::Codec::Opus),
+		_ => Err(Error::UnknownFormat(codec_str.to_string())),
+	}
+}
+
 impl Audio {
-	pub fn publish_opus(
+	pub fn publish(
 		&mut self,
 		broadcast: &mut moq_net::BroadcastProducer,
 		catalog: moq_mux::catalog::hang::Producer,
 		name: &str,
-		sample_rate: u32,
-		channel_count: u32,
+		codec: moq_audio::Codec,
+		input_format: moq_audio::AudioFormat,
+		input_sample_rate: u32,
+		input_channels: u32,
 		bitrate: Option<u32>,
+		frame_duration: Duration,
 	) -> Result<Id, Error> {
-		let producer =
-			moq_audio::AudioProducer::new_opus(broadcast, catalog, name, sample_rate, channel_count, bitrate)?;
+		let producer = moq_audio::AudioProducer::new(
+			broadcast,
+			catalog,
+			name,
+			moq_audio::EncoderConfig {
+				codec,
+				input_format,
+				input_sample_rate,
+				input_channels,
+				bitrate,
+				frame_duration,
+			},
+		)?;
 		self.producers.insert(producer)
 	}
 
-	pub fn publish_write(&mut self, id: Id, samples: &moq_audio::AudioSamples) -> Result<(), Error> {
+	pub fn publish_frame(&mut self, id: Id, frame: moq_audio::Frame) -> Result<(), Error> {
 		let producer = self.producers.get_mut(id).ok_or(Error::MediaNotFound)?;
-		producer.write(samples)?;
+		producer.write(&frame)?;
 		Ok(())
 	}
 
@@ -148,29 +165,31 @@ impl Audio {
 	}
 
 	#[allow(clippy::too_many_arguments)]
-	pub fn consume_opus(
+	pub fn consume(
 		&mut self,
 		broadcast: &moq_net::BroadcastConsumer,
-		config: &hang::catalog::AudioConfig,
+		catalog: &hang::catalog::AudioConfig,
 		name: &str,
 		output_format: moq_audio::AudioFormat,
 		output_sample_rate: Option<u32>,
 		output_channels: Option<u32>,
-		on_samples: OnStatus,
+		on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let consumer = moq_audio::AudioConsumer::subscribe_opus(
+		let consumer = moq_audio::AudioConsumer::new(
 			broadcast,
-			config,
+			catalog,
 			name,
-			output_format,
-			output_sample_rate,
-			output_channels,
+			moq_audio::DecoderConfig {
+				output_format,
+				output_sample_rate,
+				output_channels,
+			},
 		)?;
 
 		let channel = oneshot::channel();
 		let entry = AudioTaskEntry {
 			close: channel.0,
-			callback: on_samples,
+			callback: on_frame,
 		};
 		let id = self.consumer_tasks.insert(Some(entry))?;
 
@@ -189,16 +208,16 @@ impl Audio {
 	}
 
 	async fn run(task_id: Id, mut consumer: moq_audio::AudioConsumer) -> Result<(), Error> {
-		while let Some(samples) = consumer.read().await? {
+		while let Some(frame) = consumer.read().await? {
 			let mut state = State::lock();
 			let Some(Some(entry)) = state.audio.consumer_tasks.get(task_id) else {
 				return Ok(());
 			};
 			let callback = entry.callback;
-			let sample_id = state.audio.samples.insert(samples)?;
+			let frame_id = state.audio.frames.insert(frame)?;
 			drop(state);
 
-			callback.call(Ok(sample_id));
+			callback.call(Ok(frame_id));
 		}
 		Ok(())
 	}
@@ -212,198 +231,196 @@ impl Audio {
 		Ok(())
 	}
 
-	pub fn sample_info(&self, id: Id, dst: &mut moq_raw_audio) -> Result<(), Error> {
-		let samples = self.samples.get(id).ok_or(Error::FrameNotFound)?;
-		*dst = moq_raw_audio {
-			format: audio_format_to_u32(samples.format)?,
-			sample_rate: samples.sample_rate,
-			channel_count: samples.channel_count,
-			timestamp_us: samples.timestamp_us,
-			data: samples.data.as_ptr(),
-			data_size: samples.data.len(),
+	pub fn frame_info(&self, id: Id, dst: &mut moq_audio_frame) -> Result<(), Error> {
+		let frame = self.frames.get(id).ok_or(Error::FrameNotFound)?;
+		*dst = moq_audio_frame {
+			timestamp_us: frame.timestamp_us,
+			data: frame.data.as_ptr(),
+			data_size: frame.data.len(),
 		};
 		Ok(())
 	}
 
-	pub fn sample_free(&mut self, id: Id) -> Result<(), Error> {
-		self.samples.remove(id).ok_or(Error::FrameNotFound)?;
+	pub fn frame_free(&mut self, id: Id) -> Result<(), Error> {
+		self.frames.remove(id).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
 }
 
 // ---- C entry points ----
 
-/// Open a raw-audio Opus track on a broadcast.
+/// Open an audio track on a broadcast.
 ///
-/// `sample_rate` and `channel_count` describe the PCM the caller will
-/// feed to [`moq_publish_raw_audio_write`]. A resampler runs
-/// internally if `sample_rate` isn't one Opus supports natively. The
-/// per-write `moq_raw_audio.format` carries the sample layout, so no
-/// format is needed at publish time.
-///
-/// `bitrate` is bits-per-second; pass 0 for the libopus default.
+/// The encoder configuration is fixed at construction; subsequent
+/// frame writes pass only payload + timestamp via
+/// [`moq_publish_audio_raw_frame`].
 ///
 /// Returns a non-zero handle on success or a negative error code.
 ///
 /// # Safety
 /// - `name` must point to `name_len` bytes of UTF-8.
+/// - `config` must point to a fully populated [`moq_audio_encoder_config`].
+/// - `config->codec` must point to `config->codec_len` bytes of UTF-8.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_raw_audio_opus(
+pub unsafe extern "C" fn moq_publish_audio_raw(
 	broadcast: u32,
 	name: *const c_char,
 	name_len: usize,
-	sample_rate: u32,
-	channel_count: u32,
-	bitrate: u32,
+	config: *const moq_audio_encoder_config,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? }.to_string();
-		let bitrate = if bitrate == 0 { None } else { Some(bitrate) };
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let codec_str = unsafe { ffi::parse_str(config.codec, config.codec_len)? };
+		let codec = parse_codec(codec_str)?;
+		let input_format = audio_format_from_u32(config.input_format)?;
+		let bitrate = if config.bitrate == 0 {
+			None
+		} else {
+			Some(config.bitrate)
+		};
+		let frame_duration = Duration::from_millis(config.frame_duration_ms.into());
 
 		let mut state = State::lock();
-		// Split borrow so publish and audio can be borrowed mutably together.
 		let State { publish, audio, .. } = &mut *state;
-		// Get a mutable reference to the (broadcast, catalog) pair.
 		let (broadcast_producer, catalog) = publish.pair_mut(broadcast)?;
 
-		audio.publish_opus(
+		audio.publish(
 			broadcast_producer,
 			catalog.clone(),
 			&name,
-			sample_rate,
-			channel_count,
+			codec,
+			input_format,
+			config.input_sample_rate,
+			config.input_channels,
 			bitrate,
+			frame_duration,
 		)
 	})
 }
 
-/// Push a buffer of raw PCM samples to a producer.
+/// Push one audio frame.
 ///
-/// Returns zero on success or a negative error code.
+/// `frame->data` is borrowed for the duration of the call; the
+/// producer copies before returning.
 ///
 /// # Safety
-/// - `audio` must be a valid pointer to a [`moq_raw_audio`] populated by the caller.
-/// - `audio.data` must point to `audio.data_size` bytes.
+/// - `frame` must point to a valid [`moq_audio_frame`].
+/// - `frame->data` must point to `frame->data_size` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_raw_audio_write(producer: u32, audio: *const moq_raw_audio) -> i32 {
+pub unsafe extern "C" fn moq_publish_audio_raw_frame(producer: u32, frame: *const moq_audio_frame) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
-		let audio = unsafe { audio.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let data = unsafe { ffi::parse_slice(audio.data, audio.data_size)? };
+		let frame = unsafe { frame.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let data = unsafe { ffi::parse_slice(frame.data, frame.data_size)? };
 
-		let samples = moq_audio::AudioSamples {
-			format: audio_format_from_u32(audio.format)?,
-			sample_rate: audio.sample_rate,
-			channel_count: audio.channel_count,
-			timestamp_us: audio.timestamp_us,
+		let owned = moq_audio::Frame {
+			timestamp_us: frame.timestamp_us,
 			data: Bytes::copy_from_slice(data),
 		};
 
-		State::lock().audio.publish_write(producer, &samples)
+		State::lock().audio.publish_frame(producer, owned)
 	})
 }
 
-/// Flush any pending samples and finalize a raw-audio producer.
+/// Flush any pending samples and finalize an audio producer.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_raw_audio_close(producer: u32) -> i32 {
+pub extern "C" fn moq_publish_audio_raw_close(producer: u32) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
 		State::lock().audio.publish_close(producer)
 	})
 }
 
-/// Subscribe to a raw-audio Opus track and decode it into PCM samples.
+/// Subscribe to an audio track and decode it into PCM.
 ///
-/// `output_sample_rate` of 0 means "deliver at the codec's native rate".
-/// `output_channels` of 0 means "deliver at the codec's native channel count".
-///
-/// The catalog `index` identifies which audio rendition to subscribe to,
-/// matching the existing `moq_consume_audio_ordered` selection model.
-/// TODO: a future API will pick the right rendition automatically (ABR).
+/// The catalog `index` identifies which audio rendition to subscribe
+/// to, matching the existing `moq_consume_audio_ordered` selection
+/// model. TODO: a future API will pick the right rendition
+/// automatically (ABR).
 ///
 /// Returns a non-zero handle on success or a negative error code.
 ///
 /// # Safety
-/// - `on_samples` must be valid until [`moq_consume_raw_audio_close`] is called.
+/// - `config` must point to a valid [`moq_audio_decoder_config`].
+/// - `on_frame` must remain valid until [`moq_consume_audio_raw_close`] is called.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_raw_audio_opus(
+pub unsafe extern "C" fn moq_consume_audio_raw(
 	catalog: u32,
 	index: u32,
-	output_format: u32,
-	output_sample_rate: u32,
-	output_channels: u32,
-	on_samples: Option<extern "C" fn(user_data: *mut c_void, samples: i32)>,
+	config: *const moq_audio_decoder_config,
+	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
-		let output_format = audio_format_from_u32(output_format)?;
-		let on_samples = unsafe { OnStatus::new(user_data, on_samples) };
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let output_format = audio_format_from_u32(config.output_format)?;
+		let output_sample_rate = if config.output_sample_rate == 0 {
+			None
+		} else {
+			Some(config.output_sample_rate)
+		};
+		let output_channels = if config.output_channels == 0 {
+			None
+		} else {
+			Some(config.output_channels)
+		};
+		let on_frame = unsafe { OnStatus::new(user_data, on_frame) };
 
 		let mut state = State::lock();
-		let (broadcast, config, name) = state.consume.audio_rendition(catalog, index as usize)?;
+		let (broadcast, audio_cfg, name) = state.consume.audio_rendition(catalog, index as usize)?;
 
 		let State { audio, .. } = &mut *state;
-		audio.consume_opus(
+		audio.consume(
 			&broadcast,
-			&config,
+			&audio_cfg,
 			&name,
 			output_format,
-			if output_sample_rate == 0 {
-				None
-			} else {
-				Some(output_sample_rate)
-			},
-			if output_channels == 0 {
-				None
-			} else {
-				Some(output_channels)
-			},
-			on_samples,
+			output_sample_rate,
+			output_channels,
+			on_frame,
 		)
 	})
 }
 
-/// Stop consuming a raw-audio track and cancel its background task.
+/// Stop consuming an audio track and cancel its background task.
 ///
-/// Does *not* free any sample IDs that were already delivered to the
-/// on-frame callback. Each one must be released explicitly with
-/// [`moq_consume_raw_audio_sample_free`].
+/// Does *not* free any frame IDs already delivered to the on-frame
+/// callback. Each one must be released explicitly with
+/// [`moq_consume_audio_raw_frame_free`].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_raw_audio_close(consumer: u32) -> i32 {
+pub extern "C" fn moq_consume_audio_raw_close(consumer: u32) -> i32 {
 	ffi::enter(move || {
 		let consumer = ffi::parse_id(consumer)?;
 		State::lock().audio.consume_close(consumer)
 	})
 }
 
-/// Copy a sample buffer's metadata into `dst`.
+/// Copy a delivered frame's metadata into `dst`.
 ///
-/// The written `dst.data` pointer remains valid until the same sample
-/// `id` is released with [`moq_consume_raw_audio_sample_free`]. The
-/// sample outlives both the on-frame callback that delivered the `id`
-/// and any call to [`moq_consume_raw_audio_close`] on the parent
-/// consumer.
+/// The written `dst->data` pointer remains valid until the same `id`
+/// is released with [`moq_consume_audio_raw_frame_free`].
 ///
 /// # Safety
-/// - `dst` must point to a writable [`moq_raw_audio`].
+/// - `dst` must point to a writable [`moq_audio_frame`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_raw_audio_sample(id: u32, dst: *mut moq_raw_audio) -> i32 {
+pub unsafe extern "C" fn moq_consume_audio_raw_frame(id: u32, dst: *mut moq_audio_frame) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		State::lock().audio.sample_info(id, dst)
+		State::lock().audio.frame_info(id, dst)
 	})
 }
 
-/// Free a sample buffer previously delivered through the consume
-/// callback. Required for every delivered sample ID; closing the
-/// parent consumer is not enough.
+/// Free a frame previously delivered through the consume callback.
+/// Required for every delivered frame ID; closing the parent consumer
+/// is not enough.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_raw_audio_sample_free(id: u32) -> i32 {
+pub extern "C" fn moq_consume_audio_raw_frame_free(id: u32) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
-		State::lock().audio.sample_free(id)
+		State::lock().audio.frame_free(id)
 	})
 }

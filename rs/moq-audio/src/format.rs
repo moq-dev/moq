@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::AudioError;
 
 /// Raw PCM sample format.
@@ -9,12 +11,14 @@ use crate::AudioError;
 /// Planar variants pack as `[c0_s0, c0_s1, ..., c1_s0, c1_s1, ...]`.
 ///
 /// See <https://developer.mozilla.org/en-US/docs/Web/API/AudioData/format>.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AudioFormat {
 	U8,
 	S16,
 	S32,
+	/// Default: matches libopus's native interleaved layout.
+	#[default]
 	F32,
 	U8Planar,
 	S16Planar,
@@ -47,9 +51,10 @@ impl AudioFormat {
 
 	/// Convert a raw PCM buffer in this format to interleaved `f32` in `[-1.0, 1.0]`.
 	///
-	/// Codecs (Opus, AAC) work in floating-point internally, so this is the
-	/// universal adapter between caller buffers and codec input.
-	pub fn to_interleaved_f32(self, data: &[u8], channels: u32) -> Result<Vec<f32>, AudioError> {
+	/// Returns a [`Cow::Borrowed`] when the input is already interleaved `f32`
+	/// (and the byte buffer is aligned), avoiding an allocation. Otherwise
+	/// returns a [`Cow::Owned`] holding the converted samples.
+	pub fn as_interleaved_f32<'a>(self, data: &'a [u8], channels: u32) -> Result<Cow<'a, [f32]>, AudioError> {
 		let channels = channels as usize;
 		if channels == 0 {
 			return Err(AudioError::Unsupported("channel count must be > 0".into()));
@@ -63,7 +68,19 @@ impl AudioFormat {
 			});
 		}
 
-		let total_samples = data.len() / bps;
+		// Fast path: already in the codec's working format and aligned.
+		if self == Self::F32 {
+			let (head, body, tail) = unsafe { data.align_to::<f32>() };
+			if head.is_empty() && tail.is_empty() {
+				return Ok(Cow::Borrowed(body));
+			}
+		}
+
+		Ok(Cow::Owned(self.to_interleaved_f32_owned(data, channels)))
+	}
+
+	fn to_interleaved_f32_owned(self, data: &[u8], channels: usize) -> Vec<f32> {
+		let total_samples = data.len() / self.bytes_per_sample();
 		let frames = total_samples / channels;
 		let mut out = vec![0.0f32; total_samples];
 
@@ -126,12 +143,14 @@ impl AudioFormat {
 			}
 		}
 
-		Ok(out)
+		out
 	}
 
 	/// Convert interleaved `f32` PCM to this format's raw byte representation.
 	///
-	/// Integer formats clamp out-of-range samples rather than wrapping.
+	/// Returns a [`Cow::Borrowed`] of the input bytes when no conversion is
+	/// needed (`F32` interleaved). Integer formats clamp out-of-range samples
+	/// rather than wrapping.
 	pub fn from_interleaved_f32(self, samples: &[f32], channels: u32) -> Result<Vec<u8>, AudioError> {
 		let channels = channels as usize;
 		if channels == 0 {
@@ -216,44 +235,45 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn f32_roundtrip() {
-		let samples: Vec<f32> = (0..8).map(|i| (i as f32) * 0.1 - 0.4).collect();
-		let bytes = AudioFormat::F32.from_interleaved_f32(&samples, 2).unwrap();
-		let back = AudioFormat::F32.to_interleaved_f32(&bytes, 2).unwrap();
-		assert_eq!(samples, back);
+	fn f32_interleaved_is_borrowed() {
+		let samples: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
+		let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+		let cow = AudioFormat::F32.as_interleaved_f32(&bytes, 2).unwrap();
+		assert!(matches!(cow, Cow::Borrowed(_)));
+		assert_eq!(cow.as_ref(), samples.as_slice());
 	}
 
 	#[test]
-	fn s16_roundtrip_is_lossy_but_close() {
-		let samples = vec![-1.0, -0.5, 0.0, 0.5, 0.9999];
+	fn s16_interleaved_is_owned_but_close() {
+		let samples = vec![-1.0_f32, -0.5, 0.0, 0.5, 0.9999];
 		let bytes = AudioFormat::S16.from_interleaved_f32(&samples, 1).unwrap();
-		let back = AudioFormat::S16.to_interleaved_f32(&bytes, 1).unwrap();
-		for (a, b) in samples.iter().zip(back.iter()) {
+		let cow = AudioFormat::S16.as_interleaved_f32(&bytes, 1).unwrap();
+		assert!(matches!(cow, Cow::Owned(_)));
+		for (a, b) in samples.iter().zip(cow.iter()) {
 			assert!((a - b).abs() < 1.0 / 32767.0, "{a} vs {b}");
 		}
 	}
 
 	#[test]
 	fn planar_to_interleaved_orders_correctly() {
-		// 2 channels, 3 frames, planar f32: [c0_0, c0_1, c0_2, c1_0, c1_1, c1_2]
 		let planar: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
 		let bytes: Vec<u8> = planar.iter().flat_map(|s| s.to_le_bytes()).collect();
-		let interleaved = AudioFormat::F32Planar.to_interleaved_f32(&bytes, 2).unwrap();
-		assert_eq!(interleaved, vec![0.1, 0.4, 0.2, 0.5, 0.3, 0.6]);
+		let cow = AudioFormat::F32Planar.as_interleaved_f32(&bytes, 2).unwrap();
+		assert_eq!(cow.as_ref(), &[0.1, 0.4, 0.2, 0.5, 0.3, 0.6]);
 	}
 
 	#[test]
 	fn s16_clamps_out_of_range() {
-		let samples = vec![2.0, -3.0];
+		let samples = vec![2.0_f32, -3.0];
 		let bytes = AudioFormat::S16.from_interleaved_f32(&samples, 1).unwrap();
-		let back = AudioFormat::S16.to_interleaved_f32(&bytes, 1).unwrap();
-		assert!((back[0] - 0.99997).abs() < 1e-4);
-		assert!((back[1] + 1.0).abs() < 1e-4);
+		let cow = AudioFormat::S16.as_interleaved_f32(&bytes, 1).unwrap();
+		assert!((cow[0] - 0.99997).abs() < 1e-4);
+		assert!((cow[1] + 1.0).abs() < 1e-4);
 	}
 
 	#[test]
 	fn rejects_misaligned_buffer() {
-		let result = AudioFormat::S16.to_interleaved_f32(&[0u8; 5], 2);
+		let result = AudioFormat::S16.as_interleaved_f32(&[0u8; 5], 2);
 		assert!(matches!(result, Err(AudioError::Misaligned { .. })));
 	}
 }

@@ -13,35 +13,21 @@ keywords = ["quic", "http3", "webtransport", "media", "audio"]
 categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 
 [package.metadata.cargo-shear]
+# audiopus_sys is referenced only via the `static` feature it provides;
+# we pull it in explicitly to vendor libopus into our staticlib.
 ignored = ["audiopus_sys"]
 
 [lib]
 doctest = false
 
-[features]
-default = ["opus", "resample"]
-
-# Opus codec support (libopus, system-linked by default).
-opus = ["dep:opus"]
-
-# Statically link libopus rather than depending on the system copy.
-# Enable this for distributable artifacts (libmoq, moq-ffi wheels).
-opus-static = ["opus", "dep:audiopus_sys", "audiopus_sys/static"]
-
-# Resampling support (rubato) so callers can feed arbitrary input rates.
-resample = ["dep:rubato"]
-
 [dependencies]
-# Only referenced via the `opus-static` Cargo feature (forwards
-# `audiopus_sys/static` to vendor libopus). Marked ignored for cargo-shear.
-audiopus_sys = { version = "0.2", optional = true, default-features = false }
+audiopus_sys = { version = "0.2", default-features = false, features = ["static"] }
 bytes = "1"
 hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-
-opus = { version = "0.3", optional = true }
-rubato = { version = "0.16", optional = true }
+opus = "0.3"
+rubato = "0.16"
 thiserror = "2"
 
 [dev-dependencies]

@@ -49,7 +49,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 conducer = { version = "0.3", path = "rs/conducer" }
 hang = { version = "0.17", path = "rs/hang" }
-moq-audio = { version = "0.0.1", path = "rs/moq-audio", default-features = false }
+moq-audio = { version = "0.0.1", path = "rs/moq-audio" }
 moq-loc = { version = "0.1", path = "rs/moq-loc" }
 moq-msf = { version = "0.2", path = "rs/moq-msf" }
 moq-mux = { version = "0.5", path = "rs/moq-mux" }

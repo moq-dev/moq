@@ -1,13 +1,12 @@
 //! Raw-audio import/export via [`moq_audio`].
 //!
-//! The existing [`producer::MoqMediaProducer`](crate::producer::MoqMediaProducer)
-//! and [`consumer::MoqMediaConsumer`](crate::consumer::MoqMediaConsumer)
-//! deal in already-encoded frames; callers needed to bring their own
-//! codec. These types let callers pass and receive raw PCM in any
-//! WebCodecs `AudioData.format`, with Opus encode/decode happening
-//! inside the FFI boundary.
+//! Sibling to [`producer::MoqMediaProducer`](crate::producer::MoqMediaProducer)
+//! and [`consumer::MoqMediaConsumer`](crate::consumer::MoqMediaConsumer):
+//! those deal in already-encoded frames, these deal in PCM and run
+//! Opus encode/decode inside the FFI boundary.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
@@ -44,60 +43,70 @@ impl From<MoqAudioFormat> for moq_audio::AudioFormat {
 	}
 }
 
-impl TryFrom<moq_audio::AudioFormat> for MoqAudioFormat {
-	type Error = MoqError;
+/// Audio codec identifier.
+#[derive(Clone, Copy, uniffi::Enum)]
+pub enum MoqAudioCodec {
+	Opus,
+}
 
-	fn try_from(f: moq_audio::AudioFormat) -> Result<Self, MoqError> {
-		use moq_audio::AudioFormat as A;
-		Ok(match f {
-			A::U8 => Self::U8,
-			A::S16 => Self::S16,
-			A::S32 => Self::S32,
-			A::F32 => Self::F32,
-			A::U8Planar => Self::U8Planar,
-			A::S16Planar => Self::S16Planar,
-			A::S32Planar => Self::S32Planar,
-			A::F32Planar => Self::F32Planar,
-			_ => return Err(MoqError::Codec(format!("unsupported audio format: {f:?}"))),
-		})
+impl From<MoqAudioCodec> for moq_audio::Codec {
+	fn from(c: MoqAudioCodec) -> Self {
+		match c {
+			MoqAudioCodec::Opus => Self::Opus,
+		}
 	}
 }
 
-/// A buffer of raw PCM samples.
-///
-/// `data` layout is fully described by `format` and `channel_count`.
-/// `timestamp_us` is the presentation timestamp of the first frame.
+/// Encoder configuration. Format and rates are fixed for the lifetime
+/// of the producer, so each [`MoqAudioFrame`] is just bytes + timestamp.
 #[derive(uniffi::Record)]
-pub struct MoqRawAudio {
-	pub format: MoqAudioFormat,
-	pub sample_rate: u32,
-	pub channel_count: u32,
+pub struct MoqAudioEncoderConfig {
+	pub codec: MoqAudioCodec,
+	pub input_format: MoqAudioFormat,
+	pub input_sample_rate: u32,
+	pub input_channels: u32,
+	pub bitrate: Option<u32>,
+	/// Encoded frame duration in milliseconds. Opus accepts
+	/// 2.5/5/10/20/40/60 ms; pass 20 to match the JS publish path.
+	pub frame_duration_ms: u32,
+}
+
+/// Decoder configuration.
+#[derive(uniffi::Record)]
+pub struct MoqAudioDecoderConfig {
+	pub output_format: MoqAudioFormat,
+	/// `None` delivers samples at the codec's native rate.
+	pub output_sample_rate: Option<u32>,
+	/// `None` delivers samples at the codec's native channel count.
+	pub output_channels: Option<u32>,
+}
+
+/// One audio frame: payload bytes plus a presentation timestamp.
+///
+/// PCM layout is fixed by the producer / consumer config, so it is
+/// **not** carried per-frame. On the producer side `data` is raw PCM
+/// in the configured `input_format`; on the consumer side it is raw
+/// PCM in the configured `output_format`.
+#[derive(uniffi::Record)]
+pub struct MoqAudioFrame {
 	pub timestamp_us: u64,
 	pub data: Vec<u8>,
 }
 
-impl TryFrom<moq_audio::AudioSamples> for MoqRawAudio {
-	type Error = MoqError;
-
-	fn try_from(s: moq_audio::AudioSamples) -> Result<Self, MoqError> {
-		Ok(Self {
-			format: s.format.try_into()?,
-			sample_rate: s.sample_rate,
-			channel_count: s.channel_count,
-			timestamp_us: s.timestamp_us,
-			data: s.data.to_vec(),
-		})
+impl From<moq_audio::Frame> for MoqAudioFrame {
+	fn from(f: moq_audio::Frame) -> Self {
+		Self {
+			timestamp_us: f.timestamp_us,
+			data: f.data.to_vec(),
+		}
 	}
 }
 
-impl From<MoqRawAudio> for moq_audio::AudioSamples {
-	fn from(a: MoqRawAudio) -> Self {
+impl From<MoqAudioFrame> for moq_audio::Frame {
+	fn from(f: MoqAudioFrame) -> Self {
 		Self {
-			format: a.format.into(),
-			sample_rate: a.sample_rate,
-			channel_count: a.channel_count,
-			timestamp_us: a.timestamp_us,
-			data: a.data.into(),
+			timestamp_us: f.timestamp_us,
+			data: f.data.into(),
 		}
 	}
 }
@@ -106,31 +115,25 @@ impl From<MoqRawAudio> for moq_audio::AudioSamples {
 
 /// Producer for a raw-audio track.
 ///
-/// Built via [`MoqBroadcastProducer::publish_raw_audio_opus`]. Each
-/// [`write`](Self::write) accepts PCM whose layout is described by the
-/// per-call [`MoqRawAudio::format`] field; the producer converts to
-/// interleaved `f32` per write, resamples to the codec's rate if
-/// needed, then encodes through libopus and publishes to the
-/// underlying moq broadcast.
+/// Built via [`MoqBroadcastProducer::publish_audio`]. Each
+/// [`write`](Self::write) accepts an [`MoqAudioFrame`] whose `data`
+/// is PCM in the format declared by the [`MoqAudioEncoderConfig`]
+/// passed at publish time.
 #[derive(uniffi::Object)]
-pub struct MoqRawAudioProducer {
+pub struct MoqAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::AudioProducer>>,
 }
 
 #[uniffi::export]
-impl MoqRawAudioProducer {
-	/// Push a buffer of raw PCM. Any partial trailing frame is buffered
-	/// internally and emitted with the next call (or by [`finish`](Self::finish)).
-	pub fn write(&self, audio: MoqRawAudio) -> Result<(), MoqError> {
+impl MoqAudioProducer {
+	pub fn write(&self, frame: MoqAudioFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		let samples: moq_audio::AudioSamples = audio.into();
-		producer.write(&samples)?;
+		producer.write(&frame.into())?;
 		Ok(())
 	}
 
-	/// Flush any pending samples (padded with silence) and finalize the track.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
@@ -141,36 +144,34 @@ impl MoqRawAudioProducer {
 
 #[uniffi::export]
 impl MoqBroadcastProducer {
-	/// Open a raw-audio Opus track on this broadcast.
-	///
-	/// `sample_rate` and `channel_count` describe the PCM the caller will
-	/// feed to [`MoqRawAudioProducer::write`]; a resampler runs
-	/// internally if `sample_rate` isn't one Opus supports natively. The
-	/// per-write `MoqRawAudio.format` carries the sample layout, so no
-	/// format is needed at publish time. `bitrate` is in bits per
-	/// second; pass `None` for the libopus default.
-	pub fn publish_raw_audio_opus(
+	/// Open an audio track on this broadcast. The catalog rendition is
+	/// registered immediately so subscribers can find the track even
+	/// before the first frame is written.
+	pub fn publish_audio(
 		&self,
 		name: String,
-		sample_rate: u32,
-		channel_count: u32,
-		bitrate: Option<u32>,
-	) -> Result<Arc<MoqRawAudioProducer>, MoqError> {
+		config: MoqAudioEncoderConfig,
+	) -> Result<Arc<MoqAudioProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 
 		let producer = self.with_state(|state| {
-			moq_audio::AudioProducer::new_opus(
+			moq_audio::AudioProducer::new(
 				&mut state.broadcast,
 				state.catalog.clone(),
 				name,
-				sample_rate,
-				channel_count,
-				bitrate,
+				moq_audio::EncoderConfig {
+					codec: config.codec.into(),
+					input_format: config.input_format.into(),
+					input_sample_rate: config.input_sample_rate,
+					input_channels: config.input_channels,
+					bitrate: config.bitrate,
+					frame_duration: Duration::from_millis(config.frame_duration_ms.into()),
+				},
 			)
 			.map_err(Into::into)
 		})?;
 
-		Ok(Arc::new(MoqRawAudioProducer {
+		Ok(Arc::new(MoqAudioProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
 		}))
 	}
@@ -183,27 +184,20 @@ struct ConsumerInner {
 }
 
 impl ConsumerInner {
-	async fn next(&mut self) -> Result<Option<MoqRawAudio>, MoqError> {
-		match self.consumer.read().await? {
-			Some(samples) => Ok(Some(samples.try_into()?)),
-			None => Ok(None),
-		}
+	async fn next(&mut self) -> Result<Option<MoqAudioFrame>, MoqError> {
+		Ok(self.consumer.read().await?.map(Into::into))
 	}
 }
 
 /// Consumer for a raw-audio track.
-///
-/// Built via [`MoqBroadcastConsumer::subscribe_raw_audio_opus`]. Each
-/// [`next`](Self::next) decodes one Opus packet (and optionally
-/// resamples) into PCM in the format chosen at subscribe time.
 #[derive(uniffi::Object)]
-pub struct MoqRawAudioConsumer {
+pub struct MoqAudioConsumer {
 	task: Task<ConsumerInner>,
 }
 
 #[uniffi::export]
-impl MoqRawAudioConsumer {
-	pub async fn next(&self) -> Result<Option<MoqRawAudio>, MoqError> {
+impl MoqAudioConsumer {
+	pub async fn next(&self) -> Result<Option<MoqAudioFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
 	}
 
@@ -214,45 +208,39 @@ impl MoqRawAudioConsumer {
 
 #[uniffi::export]
 impl MoqBroadcastConsumer {
-	/// Subscribe to a raw-audio Opus track.
-	///
-	/// The `audio_config` comes from the catalog (see
-	/// [`MoqCatalogConsumer::next`](crate::consumer::MoqCatalogConsumer::next)).
-	/// `output_format` is the WebCodecs-style PCM layout to deliver;
-	/// `output_sample_rate` / `output_channels` trigger a resample if
-	/// they differ from what the catalog declares.
-	///
-	/// TODO: a future API will pick the right rendition automatically
-	/// (ABR-style) so callers don't have to thread the catalog through.
-	pub fn subscribe_raw_audio_opus(
+	/// Subscribe to an audio track. `catalog_audio_config` comes from
+	/// the catalog (see
+	/// [`MoqCatalogConsumer::next`](crate::consumer::MoqCatalogConsumer::next));
+	/// the codec is inferred from it.
+	pub fn subscribe_audio(
 		&self,
 		name: String,
-		audio_config: crate::media::MoqAudio,
-		output_format: MoqAudioFormat,
-		output_sample_rate: Option<u32>,
-		output_channels: Option<u32>,
-	) -> Result<Arc<MoqRawAudioConsumer>, MoqError> {
+		catalog_audio_config: crate::media::MoqAudio,
+		config: MoqAudioDecoderConfig,
+	) -> Result<Arc<MoqAudioConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 
 		let mut cfg = hang::catalog::AudioConfig::new(
 			hang::catalog::AudioCodec::Opus,
-			audio_config.sample_rate,
-			audio_config.channel_count,
+			catalog_audio_config.sample_rate,
+			catalog_audio_config.channel_count,
 		);
-		cfg.bitrate = audio_config.bitrate;
-		cfg.description = audio_config.description.map(Into::into);
-		cfg.container = audio_config.container.into();
+		cfg.bitrate = catalog_audio_config.bitrate;
+		cfg.description = catalog_audio_config.description.map(Into::into);
+		cfg.container = catalog_audio_config.container.into();
 
-		let consumer = moq_audio::AudioConsumer::subscribe_opus(
+		let consumer = moq_audio::AudioConsumer::new(
 			self.inner(),
 			&cfg,
 			name,
-			output_format.into(),
-			output_sample_rate,
-			output_channels,
+			moq_audio::DecoderConfig {
+				output_format: config.output_format.into(),
+				output_sample_rate: config.output_sample_rate,
+				output_channels: config.output_channels,
+			},
 		)?;
 
-		Ok(Arc::new(MoqRawAudioConsumer {
+		Ok(Arc::new(MoqAudioConsumer {
 			task: Task::new(ConsumerInner { consumer }),
 		}))
 	}

@@ -2,84 +2,56 @@
 
 use bytes::Bytes;
 
-use moq_mux::container::{Frame, Timestamp};
+use moq_mux::container::{Frame as MuxFrame, Timestamp};
 
-use crate::codec::Encoder;
-use crate::{AudioError, AudioSamples};
-
-#[cfg(feature = "opus")]
-use crate::codec::OpusEncoder;
-
-#[cfg(feature = "resample")]
+use crate::codec::{Encoder, EncoderConfig};
 use crate::resample::Resampler;
+use crate::{AudioError, Frame};
 
 /// Encode raw PCM and publish it as a moq-mux audio track.
 ///
-/// Flow per call to [`write`](Self::write):
-///   1. Convert input bytes → interleaved `f32` (`AudioFormat::to_interleaved_f32`).
-///   2. Resample to the codec's rate / channel count (no-op if they match).
-///   3. Buffer into the codec's frame size (Opus: 20 ms windows).
-///   4. Encode each full window into a packet.
-///   5. Publish each packet as its own moq-lite group, with timestamps in
-///      microseconds. Matches the pattern in `moq_mux::codec::opus::Import`.
+/// Configuration (format / sample rate / channel count / bitrate /
+/// frame duration) is fixed at construction time via
+/// [`EncoderConfig`]; subsequent [`write`](Self::write) calls just
+/// pass payload bytes and a timestamp.
+///
+/// The catalog rendition is registered at construction (not on first
+/// write), so a subscriber that opens the catalog before any frames
+/// arrive still sees the track.
 pub struct AudioProducer {
-	encoder: Box<dyn Encoder>,
+	encoder: Encoder,
+	resampler: Option<Resampler>,
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
 	track_name: String,
 	catalog: moq_mux::catalog::hang::Producer,
-	catalog_registered: bool,
-
-	#[cfg(feature = "resample")]
-	resampler: Option<Resampler>,
-
-	/// Interleaved `f32` samples carried between calls because the
-	/// caller's input didn't line up with the codec's frame size.
 	pending: Vec<f32>,
-
-	/// Frames per channel produced so far — used to derive monotonic
-	/// timestamps if the caller doesn't supply one.
 	frames_produced: u64,
 }
 
 impl AudioProducer {
-	/// Build a new Opus producer for `broadcast`, registering `name` in `catalog`.
-	#[cfg(feature = "opus")]
-	pub fn new_opus(
-		broadcast: &mut moq_net::BroadcastProducer,
-		catalog: moq_mux::catalog::hang::Producer,
-		name: impl Into<String>,
-		input_rate: u32,
-		input_channels: u32,
-		bitrate: Option<u32>,
-	) -> Result<Self, AudioError> {
-		// Pick a libopus-supported rate close to the input. If the caller
-		// is already at one of those, no resampling needed.
-		let codec_rate = pick_opus_rate(input_rate);
-		let encoder = OpusEncoder::new(codec_rate, input_channels, bitrate)?;
-		Self::new(broadcast, catalog, name, Box::new(encoder), input_rate, input_channels)
-	}
-
-	/// Build a producer with a caller-supplied encoder.
-	///
-	/// `input_rate` / `input_channels` describe what the *caller* will
-	/// feed to [`write`](Self::write). A sample-rate resampler is
-	/// inserted if `input_rate` differs from the encoder's expected
-	/// rate. `input_channels` must equal `encoder.channel_count()`
-	/// because channel upmix/downmix isn't implemented yet.
+	/// Build a producer for `name` on `broadcast`, registering the
+	/// rendition in `catalog` immediately.
 	pub fn new(
 		broadcast: &mut moq_net::BroadcastProducer,
 		catalog: moq_mux::catalog::hang::Producer,
 		name: impl Into<String>,
-		encoder: Box<dyn Encoder>,
-		input_rate: u32,
-		input_channels: u32,
+		config: EncoderConfig,
 	) -> Result<Self, AudioError> {
-		if input_channels != encoder.channel_count() {
-			return Err(AudioError::Unsupported(format!(
-				"channel remapping not implemented (caller {input_channels}ch, encoder {}ch)",
-				encoder.channel_count()
-			)));
-		}
+		let encoder = Encoder::new(config)?;
+
+		let resampler = if encoder.config().input_sample_rate == encoder.codec_rate() {
+			None
+		} else {
+			let chunk_frames = (encoder.config().input_sample_rate as usize
+				* encoder.config().frame_duration.as_millis() as usize)
+				/ 1000;
+			Some(Resampler::new(
+				encoder.config().input_sample_rate,
+				encoder.codec_rate(),
+				encoder.config().input_channels,
+				chunk_frames,
+			)?)
+		};
 
 		let name = name.into();
 		let track = broadcast.create_track(moq_net::Track {
@@ -88,76 +60,54 @@ impl AudioProducer {
 		})?;
 		let track = moq_mux::container::Producer::new(track, moq_mux::container::legacy::Wire);
 
-		#[cfg(feature = "resample")]
-		let resampler = if input_rate == encoder.sample_rate() {
-			None
-		} else {
-			// Chunk size: 20ms of input frames — same window the codec uses.
-			let chunk_frames = (input_rate as usize * 20) / 1000;
-			Some(Resampler::new(
-				input_rate,
-				encoder.sample_rate(),
-				input_channels,
-				chunk_frames,
-			)?)
-		};
-
-		#[cfg(not(feature = "resample"))]
-		if input_rate != encoder.sample_rate() {
-			return Err(AudioError::Unsupported(format!(
-				"input {input_rate}Hz does not match codec {}Hz and `resample` feature is disabled",
-				encoder.sample_rate(),
-			)));
-		}
+		let mut catalog_mut = catalog.clone();
+		catalog_mut.lock().audio.insert(&name, encoder.catalog_config())?;
 
 		Ok(Self {
 			encoder,
+			resampler,
 			track,
 			track_name: name,
 			catalog,
-			catalog_registered: false,
-			#[cfg(feature = "resample")]
-			resampler,
 			pending: Vec::new(),
 			frames_produced: 0,
 		})
 	}
 
-	/// Track name as registered in the catalog.
 	pub fn track_name(&self) -> &str {
 		&self.track_name
 	}
 
-	/// Push one buffer of raw PCM. Encodes and publishes as many packets
-	/// as the input contains; any leftover frames are carried to the
+	/// Push one [`Frame`] of PCM in the format declared in
+	/// [`EncoderConfig`]. Encodes and publishes as many packets as the
+	/// input contains; any partial trailing frame is carried to the
 	/// next call.
-	pub fn write(&mut self, samples: &AudioSamples) -> Result<(), AudioError> {
-		self.ensure_catalog_registered()?;
-
-		// Step 1: convert to interleaved f32 at the *input* rate/channels.
-		let pcm = samples
-			.format
-			.to_interleaved_f32(samples.data.as_ref(), samples.channel_count)?;
-
-		// Step 2: resample if needed.
-		#[cfg(feature = "resample")]
-		let pcm = match self.resampler.as_mut() {
+	///
+	/// `frame.timestamp_us` is currently informational; the producer
+	/// derives the emitted timestamps from the running sample count so
+	/// the on-wire timestamps stay monotonic and gap-free even if the
+	/// caller's clock drifts.
+	pub fn write(&mut self, frame: &Frame) -> Result<(), AudioError> {
+		let _ = frame.timestamp_us;
+		let cfg = self.encoder.config();
+		let pcm = cfg
+			.input_format
+			.as_interleaved_f32(frame.data.as_ref(), cfg.input_channels)?;
+		let pcm: Vec<f32> = match self.resampler.as_mut() {
 			Some(r) => r.process(&pcm)?,
-			None => pcm,
+			None => pcm.into_owned(),
 		};
 
-		// Step 3-5: buffer, encode, publish.
 		self.pending.extend(pcm);
 
-		let frame_samples = self.encoder.frame_size() * self.encoder.channel_count() as usize;
+		let frame_samples = self.encoder.frame_size() * cfg.input_channels as usize;
 		while self.pending.len() >= frame_samples {
 			let chunk: Vec<f32> = self.pending.drain(..frame_samples).collect();
-			let packet = self.encoder.encode(&chunk)?;
+			let packet = self.encoder.encode_f32(&chunk)?;
 
 			let timestamp =
-				Timestamp::from_micros((self.frames_produced * 1_000_000) / self.encoder.sample_rate() as u64)?;
+				Timestamp::from_micros((self.frames_produced * 1_000_000) / self.encoder.codec_rate() as u64)?;
 			self.frames_produced += self.encoder.frame_size() as u64;
-
 			self.publish(packet, timestamp)?;
 		}
 
@@ -167,36 +117,27 @@ impl AudioProducer {
 	fn publish(&mut self, payload: Bytes, timestamp: Timestamp) -> Result<(), AudioError> {
 		// Each audio packet is its own moq-lite group, matching
 		// moq_mux::codec::opus::Import. Opus PLC handles dropped groups.
-		let frame = Frame {
+		let mux_frame = MuxFrame {
 			timestamp,
 			payload,
 			keyframe: true,
 		};
-		self.track.write(frame)?;
+		self.track.write(mux_frame)?;
 		self.track.finish_group()?;
 		Ok(())
 	}
 
-	fn ensure_catalog_registered(&mut self) -> Result<(), AudioError> {
-		if self.catalog_registered {
-			return Ok(());
-		}
-		let config = self.encoder.config();
-		self.catalog.lock().audio.insert(&self.track_name, config)?;
-		self.catalog_registered = true;
-		Ok(())
-	}
-
-	/// Flush any pending samples (padded with silence to the next frame
-	/// boundary) and finalize the track.
+	/// Flush any pending samples (zero-padded to a full frame) and
+	/// finalize the track.
 	pub fn finish(mut self) -> Result<(), AudioError> {
-		let frame_samples = self.encoder.frame_size() * self.encoder.channel_count() as usize;
+		let cfg = self.encoder.config();
+		let frame_samples = self.encoder.frame_size() * cfg.input_channels as usize;
 		if !self.pending.is_empty() {
 			self.pending.resize(frame_samples, 0.0);
 			let chunk = std::mem::take(&mut self.pending);
-			let packet = self.encoder.encode(&chunk)?;
+			let packet = self.encoder.encode_f32(&chunk)?;
 			let timestamp =
-				Timestamp::from_micros((self.frames_produced * 1_000_000) / self.encoder.sample_rate() as u64)?;
+				Timestamp::from_micros((self.frames_produced * 1_000_000) / self.encoder.codec_rate() as u64)?;
 			self.publish(packet, timestamp)?;
 		}
 		self.track.finish()?;
@@ -206,37 +147,6 @@ impl AudioProducer {
 
 impl Drop for AudioProducer {
 	fn drop(&mut self) {
-		if self.catalog_registered {
-			self.catalog.lock().audio.remove(&self.track_name);
-		}
-	}
-}
-
-/// Snap an arbitrary input sample rate to the nearest libopus-supported rate.
-fn pick_opus_rate(input_rate: u32) -> u32 {
-	const SUPPORTED: [u32; 5] = [8_000, 12_000, 16_000, 24_000, 48_000];
-	if SUPPORTED.contains(&input_rate) {
-		return input_rate;
-	}
-	// Pick the smallest supported rate that's >= input, falling back to 48k.
-	SUPPORTED.iter().copied().find(|&r| r >= input_rate).unwrap_or(48_000)
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn opus_rate_picker_passes_supported_through() {
-		for &r in &[8_000, 12_000, 16_000, 24_000, 48_000] {
-			assert_eq!(pick_opus_rate(r), r);
-		}
-	}
-
-	#[test]
-	fn opus_rate_picker_rounds_up() {
-		assert_eq!(pick_opus_rate(44_100), 48_000);
-		assert_eq!(pick_opus_rate(22_050), 24_000);
-		assert_eq!(pick_opus_rate(96_000), 48_000);
+		self.catalog.lock().audio.remove(&self.track_name);
 	}
 }

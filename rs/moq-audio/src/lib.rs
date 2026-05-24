@@ -1,35 +1,35 @@
 //! Native audio encoding and decoding for Media over QUIC.
 //!
-//! Sits on top of [`moq_mux`] and [`hang`] and adds the missing piece for
-//! native callers: real codec implementations that turn raw PCM samples
-//! into Opus packets (and back). [`moq_mux`] handles container framing
-//! and on-wire ingestion; this crate handles the codec itself.
+//! Sits on top of [`moq_mux`] and [`hang`] and adds the missing piece
+//! for native callers: a Rust-native Opus codec implementation that
+//! turns raw PCM into the bitstreams `moq_mux::codec::opus` already
+//! knows how to ingest (and vice versa for decode).
 //!
-//! - [`AudioFormat`] mirrors WebCodecs `AudioData.format`. The
-//!   per-sample helpers in [`format`] convert between any supported
-//!   layout and the interleaved `f32` representation codecs work in.
-//! - [`AudioSamples`] is a thin owned PCM buffer with timestamp,
-//!   sample rate, channel count, and layout.
-//! - [`codec`] exposes the generic [`Encoder`](codec::Encoder) /
-//!   [`Decoder`](codec::Decoder) traits, with an Opus implementation
-//!   gated behind the `opus` feature.
-//! - [`AudioProducer`] / [`AudioConsumer`] glue the codec to
-//!   [`moq_mux::container`] and the [`hang`] catalog.
+//! - [`AudioFormat`] mirrors WebCodecs `AudioData.format`. The helpers
+//!   convert between any supported layout and the interleaved `f32`
+//!   representation libopus expects.
+//! - [`Frame`] is a thin owned buffer: just a timestamp and a payload.
+//!   PCM layout (format / rate / channels) is fixed at
+//!   [`Encoder`]/[`Decoder`] construction time, not per frame, so
+//!   callers can't drift between calls.
+//! - [`Encoder`] / [`Decoder`] are the Opus codec types.
+//! - [`AudioProducer`] / [`AudioConsumer`] wire those together with
+//!   `moq_mux::container` and the `hang` catalog.
 
+mod codec;
 mod error;
 mod format;
-mod samples;
+mod frame;
+mod resample;
 
-pub mod codec;
 pub mod consumer;
 pub mod producer;
 
-#[cfg(feature = "resample")]
-pub mod resample;
-
+pub use codec::*;
 pub use error::*;
 pub use format::*;
-pub use samples::*;
+pub use frame::*;
+pub use resample::Resampler;
 
 pub use consumer::AudioConsumer;
 pub use producer::AudioProducer;

@@ -2,11 +2,17 @@
 rustflags = ["--cfg", "tokio_unstable"]
 
 [env]
+# audiopus_sys's build script consults pkg-config before anything else and
+# picks up the transitive libopus that ffmpeg drags into the nix dev shell,
+# even though we want a vendored static copy bundled into libmoq_ffi.a.
+# Setting OPUS_NO_PKG=1 forces audiopus_sys to skip pkg-config and build
+# the vendored copy via CMake.
+OPUS_NO_PKG = { value = "1", force = true }
+
 # audiopus_sys 0.2.2 vendors a libopus source tree whose CMakeLists.txt asks
 # for `cmake_minimum_required(VERSION 3.0)`, which CMake 4 rejects. Setting
-# this env lets CMake fall back to the 3.5 policy version instead. Needed
-# on every platform that builds moq-audio with the `opus` or `opus-static`
-# feature — we deliberately vendor libopus rather than dynamic-linking it
-# so libmoq/moq-ffi staticlibs are self-contained for downstream linkers
-# (the Swift XCFramework relies on this).
+# this env lets CMake fall back to the 3.5 policy version instead. Required
+# on every platform we build for (libmoq/moq-ffi need a self-contained
+# staticlib for downstream linkers like the Swift XCFramework, so we
+# always vendor).
 CMAKE_POLICY_VERSION_MINIMUM = { value = "3.5", force = true }
