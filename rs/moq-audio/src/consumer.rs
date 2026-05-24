@@ -22,15 +22,6 @@ pub struct AudioConsumer {
 
 	#[cfg(feature = "resample")]
 	resampler: Option<Resampler>,
-
-	/// Leftover decoded samples (in the *output* rate/channels, interleaved f32)
-	/// from the resampler that haven't been requested yet.
-	#[cfg(feature = "resample")]
-	pending: Vec<f32>,
-
-	/// Timestamp of the next packet we'll deliver, sourced from the moq-mux frame.
-	#[cfg(feature = "resample")]
-	next_timestamp_us: u64,
 }
 
 impl AudioConsumer {
@@ -56,6 +47,9 @@ impl AudioConsumer {
 	}
 
 	/// Subscribe with a caller-supplied decoder.
+	///
+	/// `output_channels` must equal `decoder.channel_count()` — channel
+	/// upmix/downmix isn't implemented yet.
 	pub fn subscribe(
 		broadcast: &moq_net::BroadcastConsumer,
 		name: impl Into<String>,
@@ -71,8 +65,15 @@ impl AudioConsumer {
 		let output_rate = output_rate.unwrap_or_else(|| decoder.sample_rate());
 		let output_channels = output_channels.unwrap_or_else(|| decoder.channel_count());
 
+		if output_channels != decoder.channel_count() {
+			return Err(AudioError::Unsupported(format!(
+				"channel remapping not implemented (decoder is {}ch, caller requested {output_channels}ch)",
+				decoder.channel_count()
+			)));
+		}
+
 		#[cfg(feature = "resample")]
-		let resampler = if output_rate == decoder.sample_rate() && output_channels == decoder.channel_count() {
+		let resampler = if output_rate == decoder.sample_rate() {
 			None
 		} else {
 			let chunk_frames = (decoder.sample_rate() as usize * 20) / 1000;
@@ -85,11 +86,10 @@ impl AudioConsumer {
 		};
 
 		#[cfg(not(feature = "resample"))]
-		if output_rate != decoder.sample_rate() || output_channels != decoder.channel_count() {
+		if output_rate != decoder.sample_rate() {
 			return Err(AudioError::Unsupported(format!(
-				"output {output_rate}Hz/{output_channels}ch does not match decoder {}Hz/{}ch and `resample` feature is disabled",
+				"output {output_rate}Hz does not match decoder {}Hz and `resample` feature is disabled",
 				decoder.sample_rate(),
-				decoder.channel_count(),
 			)));
 		}
 
@@ -101,10 +101,6 @@ impl AudioConsumer {
 			output_channels,
 			#[cfg(feature = "resample")]
 			resampler,
-			#[cfg(feature = "resample")]
-			pending: Vec::new(),
-			#[cfg(feature = "resample")]
-			next_timestamp_us: 0,
 		})
 	}
 
@@ -123,7 +119,7 @@ impl AudioConsumer {
 	/// Read the next decoded PCM buffer, or `None` when the track ends.
 	pub async fn read(&mut self) -> Result<Option<AudioSamples>, AudioError> {
 		let Some(frame) = self.track.read().await? else {
-			return self.flush();
+			return Ok(None);
 		};
 
 		let ts_us: u64 = frame
@@ -131,41 +127,17 @@ impl AudioConsumer {
 			.as_micros()
 			.try_into()
 			.map_err(|_| AudioError::Unsupported("timestamp overflow".into()))?;
-		#[cfg(feature = "resample")]
-		{
-			self.next_timestamp_us = ts_us;
-		}
 
 		let decoded = self.decoder.decode(&frame.payload)?;
 
 		#[cfg(feature = "resample")]
 		let pcm = match self.resampler.as_mut() {
-			Some(r) => {
-				let mut out = r.process(&decoded)?;
-				if !self.pending.is_empty() {
-					let mut merged = std::mem::take(&mut self.pending);
-					merged.append(&mut out);
-					merged
-				} else {
-					out
-				}
-			}
+			Some(r) => r.process(&decoded)?,
 			None => decoded,
 		};
 
 		#[cfg(not(feature = "resample"))]
 		let pcm = decoded;
-
-		if pcm.is_empty() {
-			// Resampler buffered everything internally; caller should poll again.
-			return Ok(Some(AudioSamples {
-				format: self.output_format,
-				sample_rate: self.output_rate,
-				channel_count: self.output_channels,
-				timestamp_us: ts_us,
-				data: Bytes::new(),
-			}));
-		}
 
 		let bytes = self.output_format.from_interleaved_f32(&pcm, self.output_channels)?;
 		Ok(Some(AudioSamples {
@@ -175,26 +147,5 @@ impl AudioConsumer {
 			timestamp_us: ts_us,
 			data: Bytes::from(bytes),
 		}))
-	}
-
-	#[cfg(feature = "resample")]
-	fn flush(&mut self) -> Result<Option<AudioSamples>, AudioError> {
-		if self.pending.is_empty() {
-			return Ok(None);
-		}
-		let pcm = std::mem::take(&mut self.pending);
-		let bytes = self.output_format.from_interleaved_f32(&pcm, self.output_channels)?;
-		Ok(Some(AudioSamples {
-			format: self.output_format,
-			sample_rate: self.output_rate,
-			channel_count: self.output_channels,
-			timestamp_us: self.next_timestamp_us,
-			data: Bytes::from(bytes),
-		}))
-	}
-
-	#[cfg(not(feature = "resample"))]
-	fn flush(&mut self) -> Result<Option<AudioSamples>, AudioError> {
-		Ok(None)
 	}
 }

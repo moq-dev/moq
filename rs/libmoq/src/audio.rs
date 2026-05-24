@@ -217,9 +217,11 @@ impl Audio {
 
 /// Open a raw-audio Opus track on a broadcast.
 ///
-/// `input_format`, `sample_rate`, and `channel_count` describe the PCM
-/// the caller will feed to [`moq_publish_raw_audio_write`]. A resampler
-/// runs internally if `sample_rate` isn't one Opus supports natively.
+/// `sample_rate` and `channel_count` describe the PCM the caller will
+/// feed to [`moq_publish_raw_audio_write`]. A resampler runs
+/// internally if `sample_rate` isn't one Opus supports natively. The
+/// per-write `moq_raw_audio.format` carries the sample layout, so no
+/// format is needed at publish time.
 ///
 /// `bitrate` is bits-per-second; pass 0 for the libopus default.
 ///
@@ -232,7 +234,6 @@ pub unsafe extern "C" fn moq_publish_raw_audio_opus(
 	broadcast: u32,
 	name: *const c_char,
 	name_len: usize,
-	_input_format: moq_audio_format,
 	sample_rate: u32,
 	channel_count: u32,
 	bitrate: u32,

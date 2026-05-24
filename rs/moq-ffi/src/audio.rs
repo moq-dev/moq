@@ -141,24 +141,20 @@ impl MoqRawAudioProducer {
 impl MoqBroadcastProducer {
 	/// Open a raw-audio Opus track on this broadcast.
 	///
-	/// `input_format`, `sample_rate`, and `channel_count` describe the PCM
-	/// the caller will feed to [`MoqRawAudioProducer::write`]; a resampler
-	/// runs internally if the sample rate isn't one Opus supports
-	/// natively. `bitrate` is in bits per second; pass `None` for the
-	/// libopus default.
+	/// `sample_rate` and `channel_count` describe the PCM the caller will
+	/// feed to [`MoqRawAudioProducer::write`]; a resampler runs
+	/// internally if `sample_rate` isn't one Opus supports natively. The
+	/// per-write `MoqRawAudio.format` carries the sample layout, so no
+	/// format is needed at publish time. `bitrate` is in bits per
+	/// second; pass `None` for the libopus default.
 	pub fn publish_raw_audio_opus(
 		&self,
 		name: String,
-		input_format: MoqAudioFormat,
 		sample_rate: u32,
 		channel_count: u32,
 		bitrate: Option<u32>,
 	) -> Result<Arc<MoqRawAudioProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		// AudioProducer doesn't consume the input format yet — it
-		// derives it per-call from AudioSamples — but we validate it
-		// here so the caller learns early.
-		let _: moq_audio::AudioFormat = input_format.into();
 
 		let producer = self.with_state(|state| {
 			moq_audio::AudioProducer::new_opus(

@@ -62,8 +62,10 @@ impl AudioProducer {
 	/// Build a producer with a caller-supplied encoder.
 	///
 	/// `input_rate` / `input_channels` describe what the *caller* will
-	/// feed to [`write`](Self::write). A resampler is inserted if they
-	/// differ from the encoder's expected rate / channels.
+	/// feed to [`write`](Self::write). A sample-rate resampler is
+	/// inserted if `input_rate` differs from the encoder's expected
+	/// rate. `input_channels` must equal `encoder.channel_count()`
+	/// because channel upmix/downmix isn't implemented yet.
 	pub fn new(
 		broadcast: &mut moq_net::BroadcastProducer,
 		catalog: moq_mux::catalog::hang::Producer,
@@ -72,6 +74,13 @@ impl AudioProducer {
 		input_rate: u32,
 		input_channels: u32,
 	) -> Result<Self, AudioError> {
+		if input_channels != encoder.channel_count() {
+			return Err(AudioError::Unsupported(format!(
+				"channel remapping not implemented (caller {input_channels}ch, encoder {}ch)",
+				encoder.channel_count()
+			)));
+		}
+
 		let name = name.into();
 		let track = broadcast.create_track(moq_net::Track {
 			name: name.clone(),
@@ -80,7 +89,7 @@ impl AudioProducer {
 		let track = moq_mux::container::Producer::new(track, moq_mux::container::legacy::Wire);
 
 		#[cfg(feature = "resample")]
-		let resampler = if input_rate == encoder.sample_rate() && input_channels == encoder.channel_count() {
+		let resampler = if input_rate == encoder.sample_rate() {
 			None
 		} else {
 			// Chunk size: 20ms of input frames — same window the codec uses.
@@ -94,11 +103,10 @@ impl AudioProducer {
 		};
 
 		#[cfg(not(feature = "resample"))]
-		if input_rate != encoder.sample_rate() || input_channels != encoder.channel_count() {
+		if input_rate != encoder.sample_rate() {
 			return Err(AudioError::Unsupported(format!(
-				"input {input_rate}Hz/{input_channels}ch does not match codec {}Hz/{}ch and `resample` feature is disabled",
+				"input {input_rate}Hz does not match codec {}Hz and `resample` feature is disabled",
 				encoder.sample_rate(),
-				encoder.channel_count(),
 			)));
 		}
 

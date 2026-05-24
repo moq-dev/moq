@@ -1,6 +1,7 @@
 /// Error returned by all UniFFI-exported functions.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi(flat_error)]
+#[non_exhaustive]
 pub enum MoqError {
 	#[error(transparent)]
 	Protocol(#[from] moq_net::Error),

@@ -48,6 +48,10 @@ impl Resampler {
 		output_channels: u32,
 		chunk_frames: usize,
 	) -> Result<Self, AudioError> {
+		if chunk_frames == 0 {
+			return Err(AudioError::Unsupported("chunk_frames must be > 0".into()));
+		}
+
 		if input_channels != output_channels {
 			return Err(AudioError::Unsupported(format!(
 				"channel remapping not implemented ({input_channels} → {output_channels})"

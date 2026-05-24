@@ -23,10 +23,15 @@ pub enum AudioError {
 	#[error("opus: {0}")]
 	Opus(#[from] opus::Error),
 
-	/// Rubato resampler error.
+	/// Rubato resampler construction error.
+	#[cfg(feature = "resample")]
+	#[error("resample construction: {0}")]
+	ResamplerConstruction(#[from] rubato::ResamplerConstructionError),
+
+	/// Rubato resampler runtime error.
 	#[cfg(feature = "resample")]
 	#[error("resample: {0}")]
-	Resample(String),
+	Resample(#[from] rubato::ResampleError),
 
 	/// hang catalog error.
 	#[error(transparent)]
@@ -43,18 +48,4 @@ pub enum AudioError {
 	/// Timestamp overflow.
 	#[error(transparent)]
 	TimeOverflow(#[from] moq_net::TimeOverflow),
-}
-
-#[cfg(feature = "resample")]
-impl From<rubato::ResamplerConstructionError> for AudioError {
-	fn from(err: rubato::ResamplerConstructionError) -> Self {
-		Self::Resample(err.to_string())
-	}
-}
-
-#[cfg(feature = "resample")]
-impl From<rubato::ResampleError> for AudioError {
-	fn from(err: rubato::ResampleError) -> Self {
-		Self::Resample(err.to_string())
-	}
 }
