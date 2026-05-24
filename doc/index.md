@@ -11,13 +11,10 @@ hero:
       link: /concept/
     - theme: alt
       text: Apps
-      link: /app/
+      link: /bin/
     - theme: alt
-      text: Rust
-      link: /rs/
-    - theme: alt
-      text: Typescript
-      link: /js/
+      text: Libraries
+      link: /lib/
     - theme: alt
       text: Demo
       link: https://moq.dev/
@@ -46,7 +43,7 @@ features:
   - icon:
       src: /emoji/box.svg
     title: Cross-Platform
-    details: Libraries for Rust (native) and TypeScript (web). Integrations with ffmpeg, OBS, GStreamer, and more to come. And C bindings!
+    details: Libraries for Rust (native) and TypeScript (web), plus FFI bindings for C, Python, Kotlin, Swift, and Go. Integrations with ffmpeg, OBS, GStreamer, and more to come.
 
   - icon:
       src: /emoji/battery.svg
@@ -101,34 +98,44 @@ There are a bunch of MoQ binaries and plugins.
 
 Some highlights:
 
-- [moq-relay](/app/relay/) - A server connecting publishers to subscribers, able to form a [self-hosted CDN cluster](/app/relay/cluster).
-- [moq-cli](/app/cli) - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, etc), including via ffmpeg.
-- [obs](/app/obs) - An OBS plugin, able to publish a MoQ broadcast and/or use MoQ broadcasts as sources.
-- [gstreamer](/app/gstreamer) - A gstreamer plugin, split into a source and a sink.
-- [web](/app/web) - A web component you can slap on your website to watch and publish MoQ broadcasts.
-- [...and more](/app/)
+- [moq-relay](/bin/relay/) - A server connecting publishers to subscribers, able to form a [self-hosted CDN cluster](/bin/relay/cluster).
+- [moq-cli](/bin/cli) - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, etc), including via ffmpeg.
+- [obs](/bin/obs) - An OBS plugin, able to publish a MoQ broadcast and/or use MoQ broadcasts as sources.
+- [gstreamer](/bin/gstreamer) - A gstreamer plugin, split into a source and a sink.
+- [web](/bin/web) - A web component you can slap on your website to watch and publish MoQ broadcasts.
+- [...and more](/bin/)
 
 ## Rust Crates 🦀
 
-Integrate MoQ into your application without fear. Focused on [native](/rs/env/native) but has token [WASM](/rs/env/wasm) support.
+Integrate MoQ into your application without fear. Focused on [native](/lib/rs/env/native) but has token [WASM](/lib/rs/env/wasm) support.
 
 Some highlights:
 
-- [moq-net](/rs/crate/moq-net) - Real-time pub/sub with built-in caching, fan-out, and prioritization.
-- [moq-mux](/rs/crate/moq-mux) - Media muxers/demuxers for fMP4, CMAF, and HLS import.
-- [libmoq](/rs/crate/libmoq) - C bindings for the above, no finagling Rust into your build system.
-- [web-transport](/rs/crate/web-transport) - A suite of crates required to get QUIC access in the browser, plus some polyfills.
-- [...and more](/rs/)
+- [moq-net](/lib/rs/crate/moq-net) - Real-time pub/sub with built-in caching, fan-out, and prioritization.
+- [moq-mux](/lib/rs/crate/moq-mux) - Media muxers/demuxers for fMP4, CMAF, and HLS import.
+- [libmoq](/lib/rs/crate/libmoq) - C bindings for the above, no finagling Rust into your build system.
+- [web-transport](/lib/rs/crate/web-transport) - A suite of crates required to get QUIC access in the browser, plus some polyfills.
+- [...and more](/lib/rs/)
 
 ## TypeScript Packages
 
-Run MoQ in a [web browser](/js/env/web) utilizing the latest Web tech.
-Or run on [native](/js/env/native) with polyfills via Node/Bun/Deno.
+Run MoQ in a [web browser](/lib/js/env/web) utilizing the latest Web tech.
+Or run on [native](/lib/js/env/native) with polyfills via Node/Bun/Deno.
 
 Some highlights:
 
-- [@moq/net](/js/@moq/net) - Real-time pub/sub with built-in caching, fan-out, and prioritization.
-- [@moq/hang](/js/@moq/hang/) - Performs any media stuff: capture, encode, transmux, decode, render.
-- [@moq/watch](/js/@moq/watch) - Subscribe to and render MoQ broadcasts.
-- [@moq/publish](/js/@moq/publish) - Publish media to MoQ broadcasts.
-- [...and more](/js/)
+- [@moq/net](/lib/js/@moq/net) - Real-time pub/sub with built-in caching, fan-out, and prioritization.
+- [@moq/hang](/lib/js/@moq/hang/) - Performs any media stuff: capture, encode, transmux, decode, render.
+- [@moq/watch](/lib/js/@moq/watch) - Subscribe to and render MoQ broadcasts.
+- [@moq/publish](/lib/js/@moq/publish) - Publish media to MoQ broadcasts.
+- [...and more](/lib/js/)
+
+## Other Languages
+
+FFI bindings around the Rust core, with idiomatic APIs in each language:
+
+- [C](/lib/c/) - `libmoq` static + shared library with an auto-generated header.
+- [Python](/lib/py/) - `asyncio`-friendly bindings, published to PyPI.
+- [Kotlin](/lib/kt/) - Coroutines and `Flow` for Android and the JVM.
+- [Swift](/lib/swift/) - Async sequences for iOS, iPadOS, and macOS.
+- [Go](/lib/go/) - cgo bindings resolved via `go get`.

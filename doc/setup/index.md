@@ -76,9 +76,9 @@ When in doubt, check the [Nix Flake](https://github.com/moq-dev/moq/blob/main/fl
 
 The `just` command starts three components:
 
-- [moq-relay](/app/relay/): A server that routes live data between publishers and subscribers.
-- [moq-cli](/app/cli): A CLI that publishes video content piped from `ffmpeg`.
-- [demo](/js/@moq/demo): A web page with various demos.
+- [moq-relay](/bin/relay/): A server that routes live data between publishers and subscribers.
+- [moq-cli](/bin/cli): A CLI that publishes video content piped from `ffmpeg`.
+- [demo](/lib/js/@moq/demo): A web page with various demos.
 
 Once everything compiles, it should open [localhost:5173](http://localhost:5173) in your browser.
 
@@ -93,5 +93,5 @@ The demo uses an insecure HTTP fetch for local development only. In production, 
 
 Check out the full [development guide](/setup/dev) for more commands, or try publishing to the public relay:
 
-- [OBS](/app/obs)
-- [Gstreamer](/app/gstreamer)
+- [OBS](/bin/obs)
+- [Gstreamer](/bin/gstreamer)
