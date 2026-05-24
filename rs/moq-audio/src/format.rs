@@ -146,11 +146,9 @@ impl AudioFormat {
 		out
 	}
 
-	/// Convert interleaved `f32` PCM to this format's raw byte representation.
-	///
-	/// Returns a [`Cow::Borrowed`] of the input bytes when no conversion is
-	/// needed (`F32` interleaved). Integer formats clamp out-of-range samples
-	/// rather than wrapping.
+	/// Convert interleaved `f32` PCM to this format's raw byte
+	/// representation. Returns owned bytes; integer formats clamp
+	/// out-of-range samples rather than wrapping.
 	pub fn from_interleaved_f32(self, samples: &[f32], channels: u32) -> Result<Vec<u8>, AudioError> {
 		let channels = channels as usize;
 		if channels == 0 {

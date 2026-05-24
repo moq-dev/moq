@@ -78,7 +78,11 @@ async fn opus_round_trip_48k_stereo() {
 
 	let mut total_frames = 0u64;
 	let mut total_energy = 0.0f64;
-	while let Some(frame) = consumer.read().await.unwrap() {
+	while let Some(frame) = tokio::time::timeout(Duration::from_secs(5), consumer.read())
+		.await
+		.expect("decoded frame timed out")
+		.unwrap()
+	{
 		let pcm: Vec<f32> = frame
 			.data
 			.chunks_exact(4)
@@ -158,7 +162,11 @@ async fn opus_round_trip_44100_s16_resampled() {
 	producer.finish().unwrap();
 
 	let mut total_bytes = 0u64;
-	while let Some(frame) = consumer.read().await.unwrap() {
+	while let Some(frame) = tokio::time::timeout(Duration::from_secs(5), consumer.read())
+		.await
+		.expect("decoded frame timed out")
+		.unwrap()
+	{
 		total_bytes += frame.data.len() as u64;
 	}
 	// S16 mono → 2 bytes per frame; ~22k frames in → comparable out.

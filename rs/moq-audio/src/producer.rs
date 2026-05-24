@@ -42,9 +42,11 @@ impl AudioProducer {
 		let resampler = if encoder.config().input_sample_rate == encoder.codec_rate() {
 			None
 		} else {
-			let chunk_frames = (encoder.config().input_sample_rate as usize
-				* encoder.config().frame_duration.as_millis() as usize)
-				/ 1000;
+			// Use microsecond precision so 2.5 ms frame_duration (supported by
+			// libopus, see codec::frame_size_for) doesn't truncate to 2 ms.
+			let chunk_frames = ((encoder.config().input_sample_rate as u128
+				* encoder.config().frame_duration.as_micros())
+				/ 1_000_000) as usize;
 			Some(Resampler::new(
 				encoder.config().input_sample_rate,
 				encoder.codec_rate(),
