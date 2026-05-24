@@ -11,7 +11,7 @@ from ._uniffi import (
     MoqMediaConsumer,
     MoqTrackConsumer,
 )
-from .types import Audio, AudioDecoderConfig, AudioFrame, Catalog, Frame
+from .types import Audio, AudioDecoderOutput, AudioFrame, Catalog, Frame
 
 
 class MediaConsumer:
@@ -115,7 +115,7 @@ class AudioConsumer:
     """Async iterator of decoded audio frames.
 
     Built via :meth:`BroadcastConsumer.subscribe_audio`. The PCM layout
-    is fixed by the :class:`AudioDecoderConfig` passed at subscribe
+    is fixed by the :class:`AudioDecoderOutput` passed at subscribe
     time; each frame's ``data`` is raw bytes in that format.
     """
 
@@ -173,19 +173,19 @@ class BroadcastConsumer:
     def subscribe_audio(
         self,
         name: str,
-        catalog_audio_config: Audio,
-        config: AudioDecoderConfig,
+        catalog_audio: Audio,
+        output: AudioDecoderOutput,
     ) -> AudioConsumer:
         """Subscribe to a raw-audio track; samples come back in the format
-        declared by ``config``.
+        declared by ``output``.
 
-        ``catalog_audio_config`` comes from the catalog (e.g.
+        ``catalog_audio`` comes from the catalog (e.g.
         ``await broadcast.catalog()`` followed by
-        ``catalog.audio[name]``). Use ``config.max_latency_ms`` to
+        ``catalog.audio[name]``). Use ``output.max_latency_ms`` to
         control how aggressively stalled groups get skipped — that's
         the congestion-control knob.
         """
-        return AudioConsumer(self._inner.subscribe_audio(name, catalog_audio_config, config))
+        return AudioConsumer(self._inner.subscribe_audio(name, catalog_audio, output))
 
     async def catalog(self) -> Catalog:
         """Convenience: subscribe and return the first catalog."""

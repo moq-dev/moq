@@ -57,28 +57,36 @@ impl From<MoqAudioCodec> for moq_audio::Codec {
 	}
 }
 
-/// Encoder configuration. Format and rates are fixed for the lifetime
-/// of the producer, so each [`MoqAudioFrame`] is just bytes + timestamp.
+/// PCM layout the caller will pass to [`MoqAudioProducer::write`].
 #[derive(uniffi::Record)]
-pub struct MoqAudioEncoderConfig {
+pub struct MoqAudioEncoderInput {
+	pub format: MoqAudioFormat,
+	pub sample_rate: u32,
+	pub channels: u32,
+}
+
+/// Codec-side configuration. `sample_rate` / `channels` `None` means
+/// "match the input (snapping the rate up to a libopus-supported
+/// value if necessary)".
+#[derive(uniffi::Record)]
+pub struct MoqAudioEncoderOutput {
 	pub codec: MoqAudioCodec,
-	pub input_format: MoqAudioFormat,
-	pub input_sample_rate: u32,
-	pub input_channels: u32,
+	pub sample_rate: Option<u32>,
+	pub channels: Option<u32>,
 	pub bitrate: Option<u32>,
 	/// Encoded frame duration in milliseconds. Opus accepts
 	/// 2.5/5/10/20/40/60 ms; pass 20 to match the JS publish path.
 	pub frame_duration_ms: u32,
 }
 
-/// Decoder configuration.
+/// PCM layout the caller wants out of [`MoqAudioConsumer::next`].
 #[derive(uniffi::Record)]
-pub struct MoqAudioDecoderConfig {
-	pub output_format: MoqAudioFormat,
+pub struct MoqAudioDecoderOutput {
+	pub format: MoqAudioFormat,
 	/// `None` delivers samples at the codec's native rate.
-	pub output_sample_rate: Option<u32>,
+	pub sample_rate: Option<u32>,
 	/// `None` delivers samples at the codec's native channel count.
-	pub output_channels: Option<u32>,
+	pub channels: Option<u32>,
 	/// Maximum buffering before skipping a stalled group, in
 	/// milliseconds. Same congestion-control knob as
 	/// [`MoqBroadcastConsumer::subscribe_media`](crate::consumer::MoqBroadcastConsumer::subscribe_media)'s
@@ -124,7 +132,7 @@ impl From<MoqAudioFrame> for moq_audio::Frame {
 ///
 /// Built via [`MoqBroadcastProducer::publish_audio`]. Each
 /// [`write`](Self::write) accepts an [`MoqAudioFrame`] whose `data`
-/// is PCM in the format declared by the [`MoqAudioEncoderConfig`]
+/// is PCM in the format declared by the [`MoqAudioEncoderInput`]
 /// passed at publish time.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
@@ -157,7 +165,8 @@ impl MoqBroadcastProducer {
 	pub fn publish_audio(
 		&self,
 		name: String,
-		config: MoqAudioEncoderConfig,
+		input: MoqAudioEncoderInput,
+		output: MoqAudioEncoderOutput,
 	) -> Result<Arc<MoqAudioProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 
@@ -166,13 +175,17 @@ impl MoqBroadcastProducer {
 				&mut state.broadcast,
 				state.catalog.clone(),
 				name,
-				moq_audio::EncoderConfig {
-					codec: config.codec.into(),
-					input_format: config.input_format.into(),
-					input_sample_rate: config.input_sample_rate,
-					input_channels: config.input_channels,
-					bitrate: config.bitrate,
-					frame_duration: Duration::from_millis(config.frame_duration_ms.into()),
+				moq_audio::EncoderInput {
+					format: input.format.into(),
+					sample_rate: input.sample_rate,
+					channels: input.channels,
+				},
+				moq_audio::EncoderOutput {
+					codec: output.codec.into(),
+					sample_rate: output.sample_rate,
+					channels: output.channels,
+					bitrate: output.bitrate,
+					frame_duration: Duration::from_millis(output.frame_duration_ms.into()),
 				},
 			)
 			.map_err(Into::into)
@@ -222,29 +235,29 @@ impl MoqBroadcastConsumer {
 	pub fn subscribe_audio(
 		&self,
 		name: String,
-		catalog_audio_config: crate::media::MoqAudio,
-		config: MoqAudioDecoderConfig,
+		catalog_audio: crate::media::MoqAudio,
+		output: MoqAudioDecoderOutput,
 	) -> Result<Arc<MoqAudioConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 
 		let mut cfg = hang::catalog::AudioConfig::new(
 			hang::catalog::AudioCodec::Opus,
-			catalog_audio_config.sample_rate,
-			catalog_audio_config.channel_count,
+			catalog_audio.sample_rate,
+			catalog_audio.channel_count,
 		);
-		cfg.bitrate = catalog_audio_config.bitrate;
-		cfg.description = catalog_audio_config.description.map(Into::into);
-		cfg.container = catalog_audio_config.container.into();
+		cfg.bitrate = catalog_audio.bitrate;
+		cfg.description = catalog_audio.description.map(Into::into);
+		cfg.container = catalog_audio.container.into();
 
 		let consumer = moq_audio::AudioConsumer::new(
 			self.inner(),
 			&cfg,
 			name,
-			moq_audio::DecoderConfig {
-				output_format: config.output_format.into(),
-				output_sample_rate: config.output_sample_rate,
-				output_channels: config.output_channels,
-				max_latency: config.max_latency_ms.map(Duration::from_millis),
+			moq_audio::DecoderOutput {
+				format: output.format.into(),
+				sample_rate: output.sample_rate,
+				channels: output.channels,
+				max_latency: output.max_latency_ms.map(Duration::from_millis),
 			},
 		)?;
 

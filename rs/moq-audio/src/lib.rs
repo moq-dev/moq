@@ -9,9 +9,9 @@
 //!   convert between any supported layout and the interleaved `f32`
 //!   representation libopus expects.
 //! - [`Frame`] is a thin owned buffer: just a timestamp and a payload.
-//!   PCM layout (format / rate / channels) is fixed at
-//!   [`Encoder`]/[`Decoder`] construction time, not per frame, so
-//!   callers can't drift between calls.
+//!   PCM layout lives on the [`Encoder`] / [`Decoder`] via
+//!   [`EncoderInput`] / [`EncoderOutput`] / [`DecoderOutput`], not on
+//!   each frame, so callers can't drift between calls.
 //! - [`Encoder`] / [`Decoder`] are the Opus codec types.
 //! - [`AudioProducer`] / [`AudioConsumer`] wire those together with
 //!   `moq_mux::container` and the `hang` catalog.

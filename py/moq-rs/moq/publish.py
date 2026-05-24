@@ -11,7 +11,7 @@ from ._uniffi import (
     MoqMediaProducer,
     MoqTrackProducer,
 )
-from .types import AudioEncoderConfig, AudioFrame
+from .types import AudioEncoderInput, AudioEncoderOutput, AudioFrame
 
 if TYPE_CHECKING:
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
@@ -137,9 +137,14 @@ class BroadcastProducer:
     def publish_media(self, format: str, init: bytes) -> MediaProducer:
         return MediaProducer(self._inner.publish_media(format, init))
 
-    def publish_audio(self, name: str, config: AudioEncoderConfig) -> AudioProducer:
+    def publish_audio(
+        self,
+        name: str,
+        input: AudioEncoderInput,
+        output: AudioEncoderOutput,
+    ) -> AudioProducer:
         """Publish a raw-audio track with an in-process Opus encoder."""
-        return AudioProducer(self._inner.publish_audio(name, config))
+        return AudioProducer(self._inner.publish_audio(name, input, output))
 
     def publish_track(self, name: str) -> TrackProducer:
         """Create a track — send any bytes, no codec validation."""

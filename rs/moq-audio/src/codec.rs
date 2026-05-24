@@ -4,8 +4,10 @@
 //! libopus 1.3.1 via [`unsafe_libopus`], a pure-Rust c2rust
 //! transpilation. No CMake toolchain, no sys crate, no linker
 //! gymnastics. When AAC or other codecs land we'll factor out a
-//! `Codec` enum; introducing the trait now would be premature.
+//! `Codec` enum dispatch; introducing a trait now would be
+//! premature.
 
+use std::str::FromStr;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -27,55 +29,96 @@ pub enum Codec {
 	Opus,
 }
 
-/// Encoder configuration.
-///
-/// `input_format` / `input_sample_rate` / `input_channels` describe
-/// what the caller will pass to [`Encoder::encode_f32`]. They are
-/// baked in at construction so individual frames don't carry format
-/// information.
+impl Codec {
+	/// Canonical lowercase identifier, matching the WebCodecs / RFC
+	/// catalog string. Used as the wire/FFI codec name everywhere.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Opus => "opus",
+		}
+	}
+}
+
+impl std::fmt::Display for Codec {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(self.as_str())
+	}
+}
+
+impl FromStr for Codec {
+	type Err = AudioError;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		match s {
+			"opus" => Ok(Self::Opus),
+			other => Err(AudioError::Unsupported(format!("unknown codec: {other}"))),
+		}
+	}
+}
+
+/// PCM layout the caller hands to [`Encoder::encode_f32`] /
+/// `AudioProducer::write`.
 #[derive(Clone, Debug)]
-pub struct EncoderConfig {
+pub struct EncoderInput {
+	pub format: AudioFormat,
+	pub sample_rate: u32,
+	pub channels: u32,
+}
+
+impl Default for EncoderInput {
+	fn default() -> Self {
+		Self {
+			format: AudioFormat::F32,
+			sample_rate: 48_000,
+			channels: 2,
+		}
+	}
+}
+
+/// Codec-side configuration. `sample_rate` and `channels` are
+/// optional overrides; `None` means "match input (snapping the rate
+/// up to a libopus-supported value if necessary)".
+#[derive(Clone, Debug)]
+pub struct EncoderOutput {
 	pub codec: Codec,
-	pub input_format: AudioFormat,
-	pub input_sample_rate: u32,
-	pub input_channels: u32,
+	pub sample_rate: Option<u32>,
+	pub channels: Option<u32>,
 	/// libopus bitrate in bits per second. `None` lets libopus pick.
 	pub bitrate: Option<u32>,
 	/// Encoded frame duration. Opus accepts 2.5 / 5 / 10 / 20 / 40 / 60 ms.
 	pub frame_duration: Duration,
 }
 
-impl Default for EncoderConfig {
+impl Default for EncoderOutput {
 	fn default() -> Self {
 		Self {
 			codec: Codec::Opus,
-			input_format: AudioFormat::F32,
-			input_sample_rate: 48_000,
-			input_channels: 2,
+			sample_rate: None,
+			channels: None,
 			bitrate: None,
 			frame_duration: Duration::from_millis(20),
 		}
 	}
 }
 
-/// Decoder configuration.
-///
-/// `output_*` describe how the caller wants samples delivered.
-/// `None` for rate or channels means "match the codec's native shape
-/// from the catalog".
+/// PCM layout the caller wants out of [`Decoder::decode_f32`] /
+/// `AudioConsumer::read`. `sample_rate` and `channels` `None`
+/// means "match the codec's native shape from the catalog".
 #[derive(Clone, Debug, Default)]
-pub struct DecoderConfig {
-	pub output_format: AudioFormat,
-	pub output_sample_rate: Option<u32>,
-	pub output_channels: Option<u32>,
+pub struct DecoderOutput {
+	pub format: AudioFormat,
+	pub sample_rate: Option<u32>,
+	pub channels: Option<u32>,
 	/// Maximum buffering before skipping a stalled group.
 	///
-	/// Forwarded to [`moq_mux::container::Consumer::with_latency`]: if a
-	/// group is stuck and a newer group is older-than-`max_latency` ahead,
-	/// the consumer skips. `None` (the default) keeps the moq-mux default
-	/// of zero, which skips aggressively. Set this to the playout buffer
-	/// you can tolerate (typically tens to a few hundred ms) for the
-	/// best congestion-vs-quality trade-off.
+	/// Forwarded to [`moq_mux::container::Consumer::with_latency`]: if
+	/// a group is stuck and a newer group is more than this far ahead,
+	/// the consumer skips. `None` keeps the moq-mux default of zero,
+	/// which skips aggressively. Set to the playout buffer you can
+	/// tolerate (typically tens to a few hundred ms) for the best
+	/// congestion-vs-quality trade-off. The name `max_` is the
+	/// reminder that we never *add* latency: the consumer skips only
+	/// when newer data is already this far ahead.
 	pub max_latency: Option<Duration>,
 }
 
@@ -92,12 +135,10 @@ fn opus_error(code: i32, context: &str) -> AudioError {
 	AudioError::Unsupported(format!("libopus {context} failed (code {code})"))
 }
 
-/// Pick a libopus-supported rate close to `input_rate`.
+/// Snap an arbitrary sample rate up to the nearest libopus-supported
+/// rate (8/12/16/24/48 kHz); falls back to 48 kHz for anything above.
 pub fn pick_opus_rate(input_rate: u32) -> u32 {
 	const SUPPORTED: [u32; 5] = [8_000, 12_000, 16_000, 24_000, 48_000];
-	if SUPPORTED.contains(&input_rate) {
-		return input_rate;
-	}
 	SUPPORTED.iter().copied().find(|&r| r >= input_rate).unwrap_or(48_000)
 }
 
@@ -123,12 +164,16 @@ fn frame_size_for(sample_rate: u32, duration: Duration) -> Result<usize, AudioEr
 	Ok((sample_rate as u128 * micros / 1_000_000) as usize)
 }
 
-/// Opus encoder over the input format declared in [`EncoderConfig`].
+/// Opus encoder over the PCM layout declared in [`EncoderInput`].
 pub struct Encoder {
 	inner: *mut OpusEncoder,
-	config: EncoderConfig,
-	/// Sample rate libopus actually runs at (snapped to a supported rate).
+	input: EncoderInput,
+	output: EncoderOutput,
+	/// Resolved codec sample rate (from `output.sample_rate` or
+	/// `pick_opus_rate(input.sample_rate)`).
 	codec_rate: u32,
+	/// Resolved codec channel count (currently same as `input.channels`).
+	codec_channels: u32,
 	frame_size: usize,
 	scratch: Vec<u8>,
 }
@@ -139,17 +184,26 @@ pub struct Encoder {
 unsafe impl Send for Encoder {}
 
 impl Encoder {
-	pub fn new(config: EncoderConfig) -> Result<Self, AudioError> {
-		match config.codec {
-			Codec::Opus => Self::new_opus(config),
+	pub fn new(input: EncoderInput, output: EncoderOutput) -> Result<Self, AudioError> {
+		match output.codec {
+			Codec::Opus => Self::new_opus(input, output),
 		}
 	}
 
-	fn new_opus(config: EncoderConfig) -> Result<Self, AudioError> {
-		let codec_rate = pick_opus_rate(config.input_sample_rate);
+	fn new_opus(input: EncoderInput, output: EncoderOutput) -> Result<Self, AudioError> {
+		let codec_rate = output.sample_rate.unwrap_or_else(|| pick_opus_rate(input.sample_rate));
 		validate_opus_rate(codec_rate)?;
-		let channels = validate_opus_channels(config.input_channels)?;
-		let frame_size = frame_size_for(codec_rate, config.frame_duration)?;
+
+		let codec_channels = output.channels.unwrap_or(input.channels);
+		if codec_channels != input.channels {
+			return Err(AudioError::Unsupported(format!(
+				"channel remapping not implemented (input {}ch, output {codec_channels}ch)",
+				input.channels
+			)));
+		}
+		let channels = validate_opus_channels(codec_channels)?;
+
+		let frame_size = frame_size_for(codec_rate, output.frame_duration)?;
 
 		let mut err = 0i32;
 		// SAFETY: out-pointer `err` is valid; inner is checked for null below.
@@ -158,7 +212,7 @@ impl Encoder {
 			return Err(opus_error(err, "opus_encoder_create"));
 		}
 
-		if let Some(b) = config.bitrate {
+		if let Some(b) = output.bitrate {
 			// SAFETY: `inner` is a freshly-created encoder; varargs! produces
 			// the single i32 the SET_BITRATE request expects.
 			let rc = unsafe { opus_encoder_ctl_impl(inner, OPUS_SET_BITRATE_REQUEST, varargs![b as i32]) };
@@ -171,22 +225,31 @@ impl Encoder {
 
 		Ok(Self {
 			inner,
-			config,
+			input,
+			output,
 			codec_rate,
+			codec_channels,
 			frame_size,
 			scratch: vec![0u8; MAX_PACKET_BYTES],
 		})
 	}
 
-	pub fn config(&self) -> &EncoderConfig {
-		&self.config
+	pub fn input(&self) -> &EncoderInput {
+		&self.input
 	}
 
-	/// Sample rate libopus actually runs at. Equal to
-	/// `config.input_sample_rate` if that was already a libopus-supported
-	/// rate; otherwise snapped up (e.g. 44.1 kHz → 48 kHz).
+	pub fn output(&self) -> &EncoderOutput {
+		&self.output
+	}
+
+	/// Sample rate libopus actually runs at.
 	pub fn codec_rate(&self) -> u32 {
 		self.codec_rate
+	}
+
+	/// Channel count libopus actually runs at.
+	pub fn codec_channels(&self) -> u32 {
+		self.codec_channels
 	}
 
 	/// Number of input frames libopus consumes per call.
@@ -196,11 +259,11 @@ impl Encoder {
 
 	/// Encode one frame of interleaved `f32` PCM at `codec_rate`.
 	///
-	/// `pcm.len()` must equal `frame_size() * config.input_channels`. The
+	/// `pcm.len()` must equal `frame_size() * codec_channels()`. The
 	/// producer typically handles format conversion and resampling
 	/// before calling this; for direct use, the caller does the same.
 	pub fn encode_f32(&mut self, pcm: &[f32]) -> Result<Bytes, AudioError> {
-		let expected = self.frame_size * self.config.input_channels as usize;
+		let expected = self.frame_size * self.codec_channels as usize;
 		if pcm.len() != expected {
 			return Err(AudioError::Misaligned {
 				got: std::mem::size_of_val(pcm),
@@ -225,19 +288,16 @@ impl Encoder {
 	}
 
 	/// hang catalog entry describing this encoder's output stream.
-	pub fn catalog_config(&self) -> hang::catalog::AudioConfig {
+	pub fn catalog(&self) -> hang::catalog::AudioConfig {
 		let head = moq_mux::codec::opus::Config {
 			sample_rate: self.codec_rate,
-			channel_count: self.config.input_channels,
+			channel_count: self.codec_channels,
 		}
 		.encode();
 
-		let mut config = hang::catalog::AudioConfig::new(
-			hang::catalog::AudioCodec::Opus,
-			self.codec_rate,
-			self.config.input_channels,
-		);
-		config.bitrate = self.config.bitrate.map(|b| b as u64);
+		let mut config =
+			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, self.codec_rate, self.codec_channels);
+		config.bitrate = self.output.bitrate.map(|b| b as u64);
 		config.description = Some(head);
 		config.container = hang::catalog::Container::Legacy;
 		config
@@ -355,15 +415,20 @@ mod tests {
 
 	#[test]
 	fn opus_encode_then_decode_keeps_signal_close() {
-		let mut enc = Encoder::new(EncoderConfig {
-			input_sample_rate: 48_000,
-			input_channels: 2,
-			bitrate: Some(96_000),
-			..EncoderConfig::default()
-		})
+		let mut enc = Encoder::new(
+			EncoderInput {
+				format: AudioFormat::F32,
+				sample_rate: 48_000,
+				channels: 2,
+			},
+			EncoderOutput {
+				bitrate: Some(96_000),
+				..EncoderOutput::default()
+			},
+		)
 		.unwrap();
 
-		let cfg = enc.catalog_config();
+		let cfg = enc.catalog();
 		let mut dec = Decoder::new(&cfg).unwrap();
 
 		let frame = sine(440.0, 48_000, 2, enc.frame_size());
@@ -387,16 +452,19 @@ mod tests {
 
 	#[test]
 	fn opus_rejects_unsupported_frame_duration() {
-		let err = Encoder::new(EncoderConfig {
-			frame_duration: Duration::from_millis(15),
-			..EncoderConfig::default()
-		});
+		let err = Encoder::new(
+			EncoderInput::default(),
+			EncoderOutput {
+				frame_duration: Duration::from_millis(15),
+				..EncoderOutput::default()
+			},
+		);
 		assert!(matches!(err, Err(AudioError::Unsupported(_))));
 	}
 
 	#[test]
 	fn opus_rejects_misaligned_input() {
-		let mut enc = Encoder::new(EncoderConfig::default()).unwrap();
+		let mut enc = Encoder::new(EncoderInput::default(), EncoderOutput::default()).unwrap();
 		assert!(matches!(
 			enc.encode_f32(&[0.0f32; 100]),
 			Err(AudioError::Misaligned { .. })
@@ -404,15 +472,20 @@ mod tests {
 	}
 
 	#[test]
-	fn opus_config_includes_opushead() {
-		let enc = Encoder::new(EncoderConfig {
-			input_sample_rate: 48_000,
-			input_channels: 2,
-			bitrate: Some(64_000),
-			..EncoderConfig::default()
-		})
+	fn opus_catalog_includes_opushead() {
+		let enc = Encoder::new(
+			EncoderInput {
+				sample_rate: 48_000,
+				channels: 2,
+				..EncoderInput::default()
+			},
+			EncoderOutput {
+				bitrate: Some(64_000),
+				..EncoderOutput::default()
+			},
+		)
 		.unwrap();
-		let cfg = enc.catalog_config();
+		let cfg = enc.catalog();
 		assert_eq!(cfg.sample_rate, 48_000);
 		assert_eq!(cfg.channel_count, 2);
 		assert_eq!(cfg.bitrate, Some(64_000));
@@ -427,5 +500,31 @@ mod tests {
 		for &r in &[8_000, 12_000, 16_000, 24_000, 48_000] {
 			assert_eq!(pick_opus_rate(r), r);
 		}
+	}
+
+	#[test]
+	fn codec_roundtrips_as_str() {
+		assert_eq!(Codec::Opus.as_str(), "opus");
+		assert_eq!(Codec::Opus.to_string(), "opus");
+		assert_eq!("opus".parse::<Codec>().unwrap(), Codec::Opus);
+		assert!("aac".parse::<Codec>().is_err());
+	}
+
+	#[test]
+	fn encoder_output_overrides_codec_rate() {
+		let enc = Encoder::new(
+			EncoderInput {
+				sample_rate: 48_000,
+				channels: 1,
+				..EncoderInput::default()
+			},
+			EncoderOutput {
+				sample_rate: Some(24_000),
+				..EncoderOutput::default()
+			},
+		)
+		.unwrap();
+		assert_eq!(enc.codec_rate(), 24_000);
+		assert_eq!(enc.catalog().sample_rate, 24_000);
 	}
 }

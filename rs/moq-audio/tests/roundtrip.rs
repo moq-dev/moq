@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_audio::{AudioConsumer, AudioFormat, AudioProducer, Codec, DecoderConfig, EncoderConfig, Frame};
+use moq_audio::{AudioConsumer, AudioFormat, AudioProducer, Codec, DecoderOutput, EncoderInput, EncoderOutput, Frame};
 
 fn sine_f32_interleaved(freq: f32, sample_rate: u32, channels: u32, frames: usize) -> Vec<f32> {
 	let mut out = Vec::with_capacity(frames * channels as usize);
@@ -39,13 +39,15 @@ async fn opus_round_trip_48k_stereo() {
 		&mut broadcast,
 		catalog.clone(),
 		"audio",
-		EncoderConfig {
+		EncoderInput {
+			format: AudioFormat::F32,
+			sample_rate: 48_000,
+			channels: 2,
+		},
+		EncoderOutput {
 			codec: Codec::Opus,
-			input_format: AudioFormat::F32,
-			input_sample_rate: 48_000,
-			input_channels: 2,
 			bitrate: Some(96_000),
-			frame_duration: Duration::from_millis(20),
+			..EncoderOutput::default()
 		},
 	)
 	.unwrap();
@@ -67,9 +69,9 @@ async fn opus_round_trip_48k_stereo() {
 		&broadcast_consumer,
 		cfg,
 		"audio",
-		DecoderConfig {
-			output_format: AudioFormat::F32,
-			..DecoderConfig::default()
+		DecoderOutput {
+			format: AudioFormat::F32,
+			..DecoderOutput::default()
 		},
 	)
 	.unwrap();
@@ -116,13 +118,15 @@ async fn opus_round_trip_44100_s16_resampled() {
 		&mut broadcast,
 		catalog.clone(),
 		"audio",
-		EncoderConfig {
+		EncoderInput {
+			format: AudioFormat::S16,
+			sample_rate: 44_100,
+			channels: 1,
+		},
+		EncoderOutput {
 			codec: Codec::Opus,
-			input_format: AudioFormat::S16,
-			input_sample_rate: 44_100,
-			input_channels: 1,
 			bitrate: Some(64_000),
-			frame_duration: Duration::from_millis(20),
+			..EncoderOutput::default()
 		},
 	)
 	.unwrap();
@@ -149,16 +153,16 @@ async fn opus_round_trip_44100_s16_resampled() {
 		&broadcast_consumer,
 		cfg,
 		"audio",
-		DecoderConfig {
-			output_format: AudioFormat::S16,
-			output_sample_rate: Some(44_100),
-			output_channels: Some(1),
+		DecoderOutput {
+			format: AudioFormat::S16,
+			sample_rate: Some(44_100),
+			channels: Some(1),
 			max_latency: Some(Duration::from_millis(500)),
 		},
 	)
 	.unwrap();
-	assert_eq!(consumer.output_rate(), 44_100);
-	assert_eq!(consumer.output_channels(), 1);
+	assert_eq!(consumer.sample_rate(), 44_100);
+	assert_eq!(consumer.channels(), 1);
 
 	producer.finish().unwrap();
 
@@ -170,7 +174,6 @@ async fn opus_round_trip_44100_s16_resampled() {
 	{
 		total_bytes += frame.data.len() as u64;
 	}
-	// S16 mono → 2 bytes per frame; ~22k frames in → comparable out.
 	assert!(
 		total_bytes > 10_000,
 		"expected several thousand samples, got {} bytes",

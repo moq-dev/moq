@@ -7,10 +7,13 @@ from ._uniffi import (
     MoqAudioCodec as AudioCodec,
 )
 from ._uniffi import (
-    MoqAudioDecoderConfig as AudioDecoderConfig,
+    MoqAudioDecoderOutput as AudioDecoderOutput,
 )
 from ._uniffi import (
-    MoqAudioEncoderConfig as AudioEncoderConfig,
+    MoqAudioEncoderInput as AudioEncoderInput,
+)
+from ._uniffi import (
+    MoqAudioEncoderOutput as AudioEncoderOutput,
 )
 from ._uniffi import (
     MoqAudioFormat as AudioFormat,
@@ -34,8 +37,9 @@ from ._uniffi import (
 __all__ = [
     "Audio",
     "AudioCodec",
-    "AudioDecoderConfig",
-    "AudioEncoderConfig",
+    "AudioDecoderOutput",
+    "AudioEncoderInput",
+    "AudioEncoderOutput",
     "AudioFormat",
     "AudioFrame",
     "Catalog",

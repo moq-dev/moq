@@ -51,7 +51,6 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq-clock/         # Clock synchronization example (binary: moq-clock)
   moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)
   moq-audio/         # Native PCM ↔ Opus encode/decode on top of moq-mux
-  moq-video/         # Counterpart to moq-audio for video (stub today)
   hang/              # Media encoding/streaming (catalog/container format)
   libmoq/            # C bindings (staticlib)
   moq-ffi/           # UniFFI bindings for Python/Swift/Kotlin (cdylib + staticlib)

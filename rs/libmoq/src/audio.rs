@@ -6,9 +6,10 @@
 //! boundary.
 //!
 //! Format / sample rate / channel count are fixed at producer or
-//! consumer construction via [`moq_audio_encoder_config`] /
-//! [`moq_audio_decoder_config`], so each [`moq_audio_frame`] carries
-//! only payload bytes and a timestamp.
+//! consumer construction via [`moq_audio_encoder_input`] /
+//! [`moq_audio_encoder_output`] / [`moq_audio_decoder_output`], so
+//! each [`moq_audio_frame`] carries only payload bytes and a
+//! timestamp.
 
 use std::ffi::{c_char, c_void};
 use std::time::Duration;
@@ -58,17 +59,29 @@ fn audio_format_from_u32(value: u32) -> Result<moq_audio::AudioFormat, Error> {
 	})
 }
 
-/// Encoder configuration. Layout/rates baked in here, not per-frame.
+/// PCM layout the caller hands to [`moq_publish_audio_raw_frame`].
 #[repr(C)]
 #[allow(non_camel_case_types)]
-pub struct moq_audio_encoder_config {
+pub struct moq_audio_encoder_input {
+	/// `moq_audio_format` discriminant.
+	pub format: u32,
+	pub sample_rate: u32,
+	pub channels: u32,
+}
+
+/// Codec-side configuration. `sample_rate` / `channels` = 0 means
+/// "match the input (snapping the rate up to a libopus-supported
+/// value if necessary)".
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_audio_encoder_output {
 	/// Codec id, UTF-8 (currently only "opus").
 	pub codec: *const c_char,
 	pub codec_len: usize,
-	/// `moq_audio_format` discriminant.
-	pub input_format: u32,
-	pub input_sample_rate: u32,
-	pub input_channels: u32,
+	/// 0 = derive from input.
+	pub sample_rate: u32,
+	/// 0 = derive from input.
+	pub channels: u32,
 	/// 0 = libopus default.
 	pub bitrate: u32,
 	/// Encoded frame duration in milliseconds. Opus accepts
@@ -77,15 +90,15 @@ pub struct moq_audio_encoder_config {
 	pub frame_duration_ms: u32,
 }
 
-/// Decoder configuration.
+/// PCM layout the caller wants out of [`moq_consume_audio_raw`].
 #[repr(C)]
 #[allow(non_camel_case_types)]
-pub struct moq_audio_decoder_config {
-	pub output_format: u32,
+pub struct moq_audio_decoder_output {
+	pub format: u32,
 	/// 0 = deliver at the codec's native sample rate.
-	pub output_sample_rate: u32,
+	pub sample_rate: u32,
 	/// 0 = deliver at the codec's native channel count.
-	pub output_channels: u32,
+	pub channels: u32,
 	/// Maximum buffering before skipping a stalled group, in
 	/// milliseconds. Same congestion-control knob as
 	/// `moq_consume_audio_ordered`'s `max_latency_ms`. 0 = skip
@@ -122,22 +135,16 @@ struct AudioTaskEntry {
 	callback: OnStatus,
 }
 
-fn parse_codec(codec_str: &str) -> Result<moq_audio::Codec, Error> {
-	match codec_str {
-		"opus" => Ok(moq_audio::Codec::Opus),
-		_ => Err(Error::UnknownFormat(codec_str.to_string())),
-	}
-}
-
 impl Audio {
 	pub fn publish(
 		&mut self,
 		broadcast: &mut moq_net::BroadcastProducer,
 		catalog: moq_mux::catalog::hang::Producer,
 		name: &str,
-		config: moq_audio::EncoderConfig,
+		input: moq_audio::EncoderInput,
+		output: moq_audio::EncoderOutput,
 	) -> Result<Id, Error> {
-		let producer = moq_audio::AudioProducer::new(broadcast, catalog, name, config)?;
+		let producer = moq_audio::AudioProducer::new(broadcast, catalog, name, input, output)?;
 		self.producers.insert(producer)
 	}
 
@@ -158,10 +165,10 @@ impl Audio {
 		broadcast: &moq_net::BroadcastConsumer,
 		catalog: &hang::catalog::AudioConfig,
 		name: &str,
-		config: moq_audio::DecoderConfig,
+		output: moq_audio::DecoderOutput,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let consumer = moq_audio::AudioConsumer::new(broadcast, catalog, name, config)?;
+		let consumer = moq_audio::AudioConsumer::new(broadcast, catalog, name, output)?;
 
 		let channel = oneshot::channel();
 		let entry = AudioTaskEntry {
@@ -236,35 +243,61 @@ impl Audio {
 ///
 /// # Safety
 /// - `name` must point to `name_len` bytes of UTF-8.
-/// - `config` must point to a fully populated [`moq_audio_encoder_config`].
-/// - `config->codec` must point to `config->codec_len` bytes of UTF-8.
+/// - `input` / `output` must point to fully populated structs.
+/// - `output->codec` must point to `output->codec_len` bytes of UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_audio_raw(
 	broadcast: u32,
 	name: *const c_char,
 	name_len: usize,
-	config: *const moq_audio_encoder_config,
+	input: *const moq_audio_encoder_input,
+	output: *const moq_audio_encoder_output,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? }.to_string();
-		let raw = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let codec_str = unsafe { ffi::parse_str(raw.codec, raw.codec_len)? };
+		let raw_input = unsafe { input.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let raw_output = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let codec_str = unsafe { ffi::parse_str(raw_output.codec, raw_output.codec_len)? };
 
-		let encoder_config = moq_audio::EncoderConfig {
-			codec: parse_codec(codec_str)?,
-			input_format: audio_format_from_u32(raw.input_format)?,
-			input_sample_rate: raw.input_sample_rate,
-			input_channels: raw.input_channels,
-			bitrate: if raw.bitrate == 0 { None } else { Some(raw.bitrate) },
-			frame_duration: Duration::from_millis(raw.frame_duration_ms.into()),
+		let encoder_input = moq_audio::EncoderInput {
+			format: audio_format_from_u32(raw_input.format)?,
+			sample_rate: raw_input.sample_rate,
+			channels: raw_input.channels,
+		};
+		let encoder_output = moq_audio::EncoderOutput {
+			codec: codec_str
+				.parse()
+				.map_err(|_| Error::UnknownFormat(codec_str.to_string()))?,
+			sample_rate: if raw_output.sample_rate == 0 {
+				None
+			} else {
+				Some(raw_output.sample_rate)
+			},
+			channels: if raw_output.channels == 0 {
+				None
+			} else {
+				Some(raw_output.channels)
+			},
+			bitrate: if raw_output.bitrate == 0 {
+				None
+			} else {
+				Some(raw_output.bitrate)
+			},
+			frame_duration: Duration::from_millis(raw_output.frame_duration_ms.into()),
 		};
 
 		let mut state = State::lock();
 		let State { publish, audio, .. } = &mut *state;
 		let (broadcast_producer, catalog) = publish.pair_mut(broadcast)?;
 
-		audio.publish(broadcast_producer, catalog.clone(), &name, encoder_config)
+		audio.publish(
+			broadcast_producer,
+			catalog.clone(),
+			&name,
+			encoder_input,
+			encoder_output,
+		)
 	})
 }
 
@@ -311,32 +344,28 @@ pub extern "C" fn moq_publish_audio_raw_close(producer: u32) -> i32 {
 /// Returns a non-zero handle on success or a negative error code.
 ///
 /// # Safety
-/// - `config` must point to a valid [`moq_audio_decoder_config`].
+/// - `output` must point to a valid [`moq_audio_decoder_output`].
 /// - `on_frame` must remain valid until [`moq_consume_audio_raw_close`] is called.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_audio_raw(
 	catalog: u32,
 	index: u32,
-	config: *const moq_audio_decoder_config,
+	output: *const moq_audio_decoder_output,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
-		let raw = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let raw = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 
-		let decoder_config = moq_audio::DecoderConfig {
-			output_format: audio_format_from_u32(raw.output_format)?,
-			output_sample_rate: if raw.output_sample_rate == 0 {
+		let decoder_output = moq_audio::DecoderOutput {
+			format: audio_format_from_u32(raw.format)?,
+			sample_rate: if raw.sample_rate == 0 {
 				None
 			} else {
-				Some(raw.output_sample_rate)
+				Some(raw.sample_rate)
 			},
-			output_channels: if raw.output_channels == 0 {
-				None
-			} else {
-				Some(raw.output_channels)
-			},
+			channels: if raw.channels == 0 { None } else { Some(raw.channels) },
 			max_latency: if raw.max_latency_ms == 0 {
 				None
 			} else {
@@ -349,7 +378,7 @@ pub unsafe extern "C" fn moq_consume_audio_raw(
 		let (broadcast, audio_cfg, name) = state.consume.audio_rendition(catalog, index as usize)?;
 
 		let State { audio, .. } = &mut *state;
-		audio.consume(&broadcast, &audio_cfg, &name, decoder_config, on_frame)
+		audio.consume(&broadcast, &audio_cfg, &name, decoder_output, on_frame)
 	})
 }
 
