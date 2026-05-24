@@ -79,9 +79,16 @@ fn audio_format_to_u32(f: moq_audio::AudioFormat) -> Result<u32, Error> {
 /// in `audio_format_from_u32` instead of becoming an invalid Rust enum
 /// (which would be UB).
 ///
-/// `data` is borrowed: the pointer is valid for the duration of the C
-/// call (publish) or callback (consume). Callers that need to keep the
-/// samples must copy.
+/// **`data` lifetime depends on direction.**
+/// - **Publish** ([`moq_publish_raw_audio_write`]): borrowed for the
+///   duration of the call. The producer copies before returning, so
+///   callers may reuse the buffer immediately.
+/// - **Consume** ([`moq_consume_raw_audio_sample`]): the pointer
+///   remains valid until the corresponding sample ID is released with
+///   [`moq_consume_raw_audio_sample_free`]. The on-frame callback only
+///   delivers an ID; the buffer outlives the callback, and
+///   [`moq_consume_raw_audio_close`] does not free already-delivered
+///   sample IDs.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_raw_audio {
@@ -358,7 +365,11 @@ pub unsafe extern "C" fn moq_consume_raw_audio_opus(
 	})
 }
 
-/// Stop consuming a raw-audio track and clean up its resources.
+/// Stop consuming a raw-audio track and cancel its background task.
+///
+/// Does *not* free any sample IDs that were already delivered to the
+/// on-frame callback. Each one must be released explicitly with
+/// [`moq_consume_raw_audio_sample_free`].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_raw_audio_close(consumer: u32) -> i32 {
 	ffi::enter(move || {
@@ -367,8 +378,13 @@ pub extern "C" fn moq_consume_raw_audio_close(consumer: u32) -> i32 {
 	})
 }
 
-/// Copy a sample buffer's metadata into `dst`. The `data` pointer
-/// remains valid until [`moq_consume_raw_audio_sample_free`] is called.
+/// Copy a sample buffer's metadata into `dst`.
+///
+/// The written `dst.data` pointer remains valid until the same sample
+/// `id` is released with [`moq_consume_raw_audio_sample_free`]. The
+/// sample outlives both the on-frame callback that delivered the `id`
+/// and any call to [`moq_consume_raw_audio_close`] on the parent
+/// consumer.
 ///
 /// # Safety
 /// - `dst` must point to a writable [`moq_raw_audio`].
@@ -381,7 +397,9 @@ pub unsafe extern "C" fn moq_consume_raw_audio_sample(id: u32, dst: *mut moq_raw
 	})
 }
 
-/// Free a sample buffer previously delivered through the consume callback.
+/// Free a sample buffer previously delivered through the consume
+/// callback. Required for every delivered sample ID; closing the
+/// parent consumer is not enough.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_raw_audio_sample_free(id: u32) -> i32 {
 	ffi::enter(move || {
