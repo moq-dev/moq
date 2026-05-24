@@ -3,15 +3,71 @@
 //! The H.265 analogue of [`crate::codec::h264`]. Parses SPS NAL units
 //! and HEVCDecoderConfigurationRecord blobs. The [`Hvc1`] transmuxer
 //! rewrites Annex-B input (inline VPS/SPS/PPS) as length-prefixed NALU
-//! + out-of-band hvcC. [`Import`] is the Annex-B importer.
+//! + out-of-band hvcC. [`Export`] is the single-rendition Annex-B
+//!   exporter; [`Import`] is the Annex-B importer.
 
+mod export;
 mod import;
 
+pub use export::*;
 pub use import::*;
 
 use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
+
+/// VPS, SPS, and PPS NAL units extracted from an hvcC.
+#[derive(Debug, Clone)]
+pub struct HvccParamSets {
+	/// NALU length size in bytes (typically 4).
+	pub length_size: usize,
+	pub vps: Vec<Bytes>,
+	pub sps: Vec<Bytes>,
+	pub pps: Vec<Bytes>,
+}
+
+/// Pull the VPS/SPS/PPS NAL units out of an HEVCDecoderConfigurationRecord.
+pub fn parse_hvcc_param_sets(hvcc: &[u8]) -> anyhow::Result<HvccParamSets> {
+	anyhow::ensure!(hvcc.len() >= 23, "hvcC too short");
+	let length_size = (hvcc[21] & 0x3) as usize + 1;
+	let num_arrays = hvcc[22] as usize;
+
+	let mut vps = Vec::new();
+	let mut sps = Vec::new();
+	let mut pps = Vec::new();
+	let mut pos = 23;
+
+	for _ in 0..num_arrays {
+		anyhow::ensure!(hvcc.len() >= pos + 3, "hvcC truncated in array header");
+		let nal_type = hvcc[pos] & 0x3f;
+		pos += 1;
+		let num_nalus = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
+		pos += 2;
+
+		for _ in 0..num_nalus {
+			anyhow::ensure!(hvcc.len() >= pos + 2, "hvcC truncated in NAL length");
+			let len = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
+			pos += 2;
+			anyhow::ensure!(hvcc.len() >= pos + len, "hvcC truncated in NAL payload");
+			let bytes = Bytes::copy_from_slice(&hvcc[pos..pos + len]);
+			pos += len;
+
+			match NALUnitType::from(nal_type) {
+				NALUnitType::VpsNut => vps.push(bytes),
+				NALUnitType::SpsNut => sps.push(bytes),
+				NALUnitType::PpsNut => pps.push(bytes),
+				_ => {}
+			}
+		}
+	}
+
+	Ok(HvccParamSets {
+		length_size,
+		vps,
+		sps,
+		pps,
+	})
+}
 
 /// Annex-B → length-prefixed transmuxer; the H.265 analogue of
 /// [`crate::codec::h264::Avc1`].

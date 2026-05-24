@@ -7,10 +7,9 @@ use bytes::Bytes;
 use hang::catalog::{Catalog, Container, VideoConfig};
 use mp4_atom::{DecodeMaybe, Encode};
 
-use crate::catalog::CatalogFormat;
+use crate::catalog::Stream;
+use crate::container::ExportSource;
 use crate::container::Frame;
-
-use crate::container::{CatalogSource, ExportSource};
 
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
 ///
@@ -26,9 +25,9 @@ use crate::container::{CatalogSource, ExportSource};
 /// keyframes); [`with_fragment_duration`](Self::with_fragment_duration) caps the
 /// fragment duration for downstream consumers that throttle by fragment rate.
 /// Returns `None` when the broadcast ends.
-pub struct Export {
+pub struct Export<S: Stream> {
 	broadcast: moq_net::BroadcastConsumer,
-	catalog: Option<CatalogSource>,
+	catalog: Option<S>,
 	latency: Duration,
 	fragment_duration: Option<Duration>,
 
@@ -64,29 +63,16 @@ struct Fmp4Track {
 	sequence_number: u32,
 }
 
-impl Export {
-	/// Subscribe to `broadcast` and produce fMP4 byte chunks, using the default
-	/// catalog format ([`CatalogFormat::Hang`]).
+impl<S: Stream> Export<S> {
+	/// Subscribe to `broadcast` and produce fMP4 byte chunks, driving track
+	/// (un)subscription from `catalog`.
 	///
-	/// Use [`with_catalog_format`](Self::with_catalog_format) to subscribe to a
-	/// non-default catalog track (e.g. MSF).
-	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
-		Self::with_catalog_format(broadcast, CatalogFormat::default())
-	}
-
-	/// Subscribe to `broadcast` and produce fMP4 byte chunks, selecting an
-	/// explicit `catalog_format` for track discovery.
-	///
-	/// Both formats drive the same internal `hang::Catalog`-based pipeline (MSF
-	/// snapshots are converted on receipt), so the only observable difference
-	/// is which wire catalog track is consumed.
-	pub fn with_catalog_format(
-		broadcast: moq_net::BroadcastConsumer,
-		catalog_format: CatalogFormat,
-	) -> Result<Self, crate::Error> {
-		let catalog = CatalogSource::new(&broadcast, catalog_format)?;
-
-		Ok(Self {
+	/// `catalog` is any [`Stream`] of catalog snapshots — typically a
+	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or wrapped in
+	/// [`catalog::Filter`](crate::catalog::Filter) /
+	/// [`catalog::Target`](crate::catalog::Target) to narrow the rendition set.
+	pub fn new(broadcast: moq_net::BroadcastConsumer, catalog: S) -> Self {
+		Self {
 			broadcast,
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
@@ -94,7 +80,7 @@ impl Export {
 			tracks: HashMap::new(),
 			catalog_snapshot: None,
 			init_emitted: false,
-		})
+		}
 	}
 
 	/// Set the maximum buffering latency for each per-track source.

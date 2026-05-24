@@ -20,6 +20,26 @@ pub enum AudioCodec {
 	Unknown(String),
 }
 
+/// Coarse audio codec family, used for tag-only matching.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AudioCodecKind {
+	AAC,
+	Opus,
+	Unknown,
+}
+
+impl AudioCodec {
+	/// Return the coarse codec family for tag-only matching.
+	pub fn kind(&self) -> AudioCodecKind {
+		match self {
+			Self::AAC(_) => AudioCodecKind::AAC,
+			Self::Opus => AudioCodecKind::Opus,
+			Self::Unknown(_) => AudioCodecKind::Unknown,
+		}
+	}
+}
+
 impl FromStr for AudioCodec {
 	type Err = Error;
 
