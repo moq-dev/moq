@@ -218,11 +218,81 @@ mod test {
 			"broadcast field did not deserialize"
 		);
 
-		// Re-encoding preserves the broadcast field.
+		// Full encode -> decode -> equality, so the test catches any encoder regression
+		// (e.g. wrong key, double-emission, or `null` instead of skip).
 		let output = parsed.to_string().expect("failed to encode");
+		let reparsed = Catalog::from_str(&output).expect("failed to re-decode");
+		assert_eq!(parsed, reparsed, "re-encoded catalog did not round-trip");
+	}
+
+	#[test]
+	fn rendition_without_broadcast_omits_field() {
+		// `broadcast: None` must NOT serialize as `"broadcast":null`, otherwise the wire
+		// format silently changes for every catalog that doesn't use cross-broadcast refs.
+		let mut renditions = BTreeMap::new();
+		renditions.insert(
+			"video".to_string(),
+			VideoConfig {
+				broadcast: None,
+				codec: H264 {
+					profile: 0x64,
+					constraints: 0x00,
+					level: 0x1f,
+					inline: false,
+				}
+				.into(),
+				description: None,
+				coded_width: Some(1280),
+				coded_height: Some(720),
+				display_ratio_width: None,
+				display_ratio_height: None,
+				bitrate: None,
+				framerate: None,
+				optimize_for_latency: None,
+				container: Container::Legacy,
+				jitter: None,
+			},
+		);
+
+		let catalog = Catalog {
+			video: Video {
+				renditions,
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let output = catalog.to_string().expect("failed to encode");
 		assert!(
-			output.contains(r#""broadcast":"../source""#),
-			"broadcast field missing from re-encoded JSON: {output}"
+			!output.contains("broadcast"),
+			"broadcast field leaked into JSON when None: {output}"
+		);
+	}
+
+	#[test]
+	fn rendition_with_empty_broadcast_normalizes() {
+		// An empty-string broadcast field should normalize to an empty PathRelative so the
+		// consumer can treat it identically to a missing field.
+		let encoded = r#"{
+			"video": {
+				"renditions": {
+					"video": {
+						"broadcast": "",
+						"codec": "avc1.64001f",
+						"codedWidth": 1280,
+						"codedHeight": 720,
+						"container": {"kind": "legacy"}
+					}
+				}
+			}
+		}"#;
+
+		let parsed = Catalog::from_str(encoded).expect("failed to decode");
+		let rendition = parsed.video.renditions.get("video").expect("missing rendition");
+		assert_eq!(
+			rendition.broadcast.as_ref().map(|p| p.is_empty()),
+			Some(true),
+			"empty broadcast should deserialize as Some(empty)"
 		);
 	}
 }

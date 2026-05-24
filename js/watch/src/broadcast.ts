@@ -75,6 +75,11 @@ export class Broadcast {
 	}
 
 	#isAnnounced(effect: Effect): boolean {
+		const name = effect.get(this.name);
+		return this.#isPathAnnounced(effect, name);
+	}
+
+	#isPathAnnounced(effect: Effect, name: Path.Valid): boolean {
 		const reload = effect.get(this.reload);
 		if (!reload) return true;
 
@@ -87,7 +92,6 @@ export class Broadcast {
 			return true;
 		}
 
-		const name = effect.get(this.name);
 		const announced = effect.get(this.#announced);
 		return announced.has(name);
 	}
@@ -166,21 +170,46 @@ export class Broadcast {
 	 * subscribe to the resolved broadcast on the same connection. Otherwise return the catalog's
 	 * own active broadcast.
 	 *
-	 * The lifetime of any newly-opened broadcast is tied to the provided `Effect`.
+	 * Override broadcasts are cached per resolved path and owned by this Broadcast's
+	 * `signals`; the caller's `effect` only subscribes to the cached signal. This means
+	 * many renditions referencing the same source share one underlying subscription, and
+	 * the override outlives any single caller effect.
 	 */
 	trackBroadcast(effect: Effect, configBroadcast: string | undefined): Moq.Broadcast | undefined {
-		const active = effect.get(this.active);
-		if (!active) return undefined;
-		if (!configBroadcast) return active;
-
-		const conn = effect.get(this.connection);
-		if (!conn) return undefined;
+		if (!configBroadcast) return effect.get(this.active);
 
 		const basePath = effect.get(this.name);
 		const resolved = Catalog.resolveBroadcast(basePath, configBroadcast);
-		const remote = conn.consume(resolved);
-		effect.cleanup(() => remote.close());
-		return remote;
+
+		// Self-reference (including `..` paths that walk back to the catalog's own path,
+		// and any rel that normalizes to empty): reuse the catalog's broadcast handle
+		// instead of opening a duplicate subscription on the same path.
+		if (resolved === basePath) return effect.get(this.active);
+
+		return effect.get(this.#override(resolved));
+	}
+
+	#overrides = new Map<Path.Valid, Signal<Moq.Broadcast | undefined>>();
+
+	#override(path: Path.Valid): Signal<Moq.Broadcast | undefined> {
+		const cached = this.#overrides.get(path);
+		if (cached) return cached;
+
+		const signal = new Signal<Moq.Broadcast | undefined>(undefined);
+		this.#overrides.set(path, signal);
+
+		this.signals.run((effect) => {
+			const conn = effect.get(this.connection);
+			if (!conn) return;
+
+			if (!this.#isPathAnnounced(effect, path)) return;
+
+			const remote = conn.consume(path);
+			effect.cleanup(() => remote.close());
+			effect.set(signal, remote, undefined);
+		});
+
+		return signal;
 	}
 
 	close() {
