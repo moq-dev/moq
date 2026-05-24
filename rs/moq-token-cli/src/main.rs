@@ -89,16 +89,18 @@ fn write_key(key: &moq_token::Key, path: &std::path::Path) -> anyhow::Result<()>
 		println!("{}", key.to_str()?);
 		Ok(())
 	} else {
-		Ok(key.to_file(path)?)
+		key.to_file(path)
+			.with_context(|| format!("failed to write key to {}", path.display()))
 	}
 }
 
 fn read_key(path: &std::path::Path) -> anyhow::Result<moq_token::Key> {
 	if is_dash(path) {
 		let contents = io::read_to_string(io::stdin())?;
-		Ok(moq_token::Key::from_str(contents.trim())?)
+		moq_token::Key::from_str(contents.trim()).context("failed to parse key from stdin")
 	} else {
-		Ok(moq_token::Key::from_file(path)?)
+		moq_token::Key::from_file(path)
+			.with_context(|| format!("failed to read key from {}", path.display()))
 	}
 }
 
@@ -173,7 +175,7 @@ fn main() -> anyhow::Result<()> {
 			if is_dash(&key) {
 				anyhow::bail!("--key cannot read from stdin; stdin is reserved for the token");
 			}
-			let key = moq_token::Key::from_file(key)?;
+			let key = read_key(&key)?;
 			let token = io::read_to_string(io::stdin())?.trim().to_string();
 			let payload = key.decode(&token)?;
 
