@@ -72,11 +72,15 @@ enum Commands {
 		issued: Option<std::time::SystemTime>,
 	},
 
-	/// Verify a token from stdin, writing the payload to stdout.
+	/// Verify a token, writing the payload to stdout.
 	Verify {
-		/// Path to the key file.
+		/// Path to the key file. Use `-` for stdin.
 		#[arg(long)]
 		key: PathBuf,
+
+		/// Path to read the token from. Use `-` for stdin.
+		#[arg(long = "in", default_value = "-")]
+		token: PathBuf,
 	},
 }
 
@@ -102,6 +106,16 @@ fn read_key(path: &std::path::Path) -> anyhow::Result<moq_token::Key> {
 		moq_token::Key::from_file(path)
 			.with_context(|| format!("failed to read key from {}", path.display()))
 	}
+}
+
+fn read_token(path: &std::path::Path) -> anyhow::Result<String> {
+	let raw = if is_dash(path) {
+		io::read_to_string(io::stdin())?
+	} else {
+		std::fs::read_to_string(path)
+			.with_context(|| format!("failed to read token from {}", path.display()))?
+	};
+	Ok(raw.trim().to_string())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -171,12 +185,12 @@ fn main() -> anyhow::Result<()> {
 			println!("{token}");
 		}
 
-		Commands::Verify { key } => {
-			if is_dash(&key) {
-				anyhow::bail!("--key cannot read from stdin; stdin is reserved for the token");
+		Commands::Verify { key, token } => {
+			if is_dash(&key) && is_dash(&token) {
+				anyhow::bail!("--key and --in cannot both read from stdin");
 			}
 			let key = read_key(&key)?;
-			let token = io::read_to_string(io::stdin())?.trim().to_string();
+			let token = read_token(&token)?;
 			let payload = key.decode(&token)?;
 
 			println!("{payload:#?}");
