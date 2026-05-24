@@ -58,7 +58,8 @@ pub struct Config {
 
 impl Config {
 	/// Parses configuration from CLI arguments, optionally merging with a
-	/// TOML file specified via `--file`. Also initializes the logger.
+	/// TOML file specified via the positional `file` argument. Also initializes
+	/// the logger.
 	pub fn load() -> anyhow::Result<Self> {
 		let config = Self::parse_and_merge(std::env::args_os())?;
 		config.log.init();
@@ -69,8 +70,8 @@ impl Config {
 	/// Pure version of [`Self::load`] without logger init, so tests can drive
 	/// it with synthetic args and inspect the result.
 	///
-	/// Merge order: CLI args (`config.file` and any flags) → TOML file (if
-	/// `--file` is set) → CLI args re-applied so explicit flags / env vars
+	/// Merge order: CLI args (the positional `file` and any flags) → TOML file
+	/// (if `file` is set) → CLI args re-applied so explicit flags / env vars
 	/// override TOML.
 	///
 	/// # Pitfall (see `CLAUDE.md` and `tests` below)
@@ -98,7 +99,15 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+	use std::sync::Mutex;
+
 	use super::*;
+
+	/// Serializes tests that touch `MOQ_STATS_ENABLED`. Cargo runs tests in
+	/// parallel within a single binary, and `env::set_var` / `remove_var` are
+	/// not thread-safe with concurrent env reads (which is why they're `unsafe`
+	/// as of Rust 1.80). Any test that mutates this env must hold this lock.
+	static STATS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 	/// Regression test for the clap+TOML interaction documented on
 	/// `Config::parse_and_merge`. A TOML file that enables stats with no
@@ -110,12 +119,12 @@ mod tests {
 	/// stats publishing for any deployment that configured it via TOML.
 	#[test]
 	fn cli_does_not_clobber_toml_stats_enabled() {
-		// SAFETY: clap reads MOQ_STATS_ENABLED via `env = ...`. If the host
-		// environment has it set, the test would pass for the wrong reason.
-		// Clear it for the duration of this test. (Tests run single-threaded
-		// by default at the file level under `cargo test`; if more env-touching
-		// tests land here, consider a Mutex or `temp-env` crate.)
-		// SAFETY: tests run single-threaded per process by default.
+		let _guard = STATS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// clap reads MOQ_STATS_ENABLED via `env = ...`. If the host environment
+		// has it set, the test would pass for the wrong reason. Clear it for
+		// the duration of this test (lock above serializes with sibling tests).
+		// SAFETY: STATS_ENV_LOCK ensures no other test in this binary touches
+		// this env var concurrently.
 		unsafe { std::env::remove_var("MOQ_STATS_ENABLED") };
 
 		let toml = r#"
@@ -148,6 +157,9 @@ node = "localhost"
 	/// path.
 	#[test]
 	fn cli_flag_overrides_toml_stats_enabled() {
+		let _guard = STATS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: STATS_ENV_LOCK ensures no other test in this binary touches
+		// this env var concurrently.
 		unsafe { std::env::remove_var("MOQ_STATS_ENABLED") };
 
 		let toml = "[stats]\nenabled = true\n";
