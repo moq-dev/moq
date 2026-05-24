@@ -107,9 +107,11 @@ impl From<MoqRawAudio> for moq_audio::AudioSamples {
 /// Producer for a raw-audio track.
 ///
 /// Built via [`MoqBroadcastProducer::publish_raw_audio_opus`]. Each
-/// [`write`](Self::write) accepts PCM in the format supplied at
-/// construction time, resamples/encodes through libopus, and publishes
-/// to the underlying moq broadcast.
+/// [`write`](Self::write) accepts PCM whose layout is described by the
+/// per-call [`MoqRawAudio::format`] field; the producer converts to
+/// interleaved `f32` per write, resamples to the codec's rate if
+/// needed, then encodes through libopus and publishes to the
+/// underlying moq broadcast.
 #[derive(uniffi::Object)]
 pub struct MoqRawAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::AudioProducer>>,

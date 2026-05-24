@@ -17,6 +17,13 @@ use crate::{Error, Id, NonZeroSlab, State, ffi};
 
 /// Raw PCM sample layout, mirroring WebCodecs `AudioData.format`.
 ///
+/// Exposed as a C enum for header readability, but the ABI fields and
+/// parameters that carry it (`moq_raw_audio.format`,
+/// `moq_consume_raw_audio_opus`'s `output_format`) are typed as `u32`.
+/// A C caller passing an unknown discriminant would otherwise be UB at
+/// the Rust boundary; the integer ABI lets us validate via
+/// `audio_format_from_u32` before any downstream code runs.
+///
 /// <https://developer.mozilla.org/en-US/docs/Web/API/AudioData/format>
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -32,42 +39,45 @@ pub enum moq_audio_format {
 	MOQ_AUDIO_FORMAT_F32_PLANAR = 7,
 }
 
-impl From<moq_audio_format> for moq_audio::AudioFormat {
-	fn from(f: moq_audio_format) -> Self {
-		use moq_audio_format::*;
-		match f {
-			MOQ_AUDIO_FORMAT_U8 => Self::U8,
-			MOQ_AUDIO_FORMAT_S16 => Self::S16,
-			MOQ_AUDIO_FORMAT_S32 => Self::S32,
-			MOQ_AUDIO_FORMAT_F32 => Self::F32,
-			MOQ_AUDIO_FORMAT_U8_PLANAR => Self::U8Planar,
-			MOQ_AUDIO_FORMAT_S16_PLANAR => Self::S16Planar,
-			MOQ_AUDIO_FORMAT_S32_PLANAR => Self::S32Planar,
-			MOQ_AUDIO_FORMAT_F32_PLANAR => Self::F32Planar,
-		}
-	}
+/// Convert a C-side discriminant into a typed Rust `AudioFormat`,
+/// rejecting unknown values up front.
+fn audio_format_from_u32(value: u32) -> Result<moq_audio::AudioFormat, Error> {
+	use moq_audio::AudioFormat;
+	Ok(match value {
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_U8 as u32 => AudioFormat::U8,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_S16 as u32 => AudioFormat::S16,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_S32 as u32 => AudioFormat::S32,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_F32 as u32 => AudioFormat::F32,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_U8_PLANAR as u32 => AudioFormat::U8Planar,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_S16_PLANAR as u32 => AudioFormat::S16Planar,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_S32_PLANAR as u32 => AudioFormat::S32Planar,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_F32_PLANAR as u32 => AudioFormat::F32Planar,
+		_ => return Err(Error::InvalidCode),
+	})
 }
 
-impl TryFrom<moq_audio::AudioFormat> for moq_audio_format {
-	type Error = Error;
-
-	fn try_from(f: moq_audio::AudioFormat) -> Result<Self, Error> {
-		use moq_audio::AudioFormat as A;
-		Ok(match f {
-			A::U8 => Self::MOQ_AUDIO_FORMAT_U8,
-			A::S16 => Self::MOQ_AUDIO_FORMAT_S16,
-			A::S32 => Self::MOQ_AUDIO_FORMAT_S32,
-			A::F32 => Self::MOQ_AUDIO_FORMAT_F32,
-			A::U8Planar => Self::MOQ_AUDIO_FORMAT_U8_PLANAR,
-			A::S16Planar => Self::MOQ_AUDIO_FORMAT_S16_PLANAR,
-			A::S32Planar => Self::MOQ_AUDIO_FORMAT_S32_PLANAR,
-			A::F32Planar => Self::MOQ_AUDIO_FORMAT_F32_PLANAR,
-			_ => return Err(Error::InvalidCode),
-		})
-	}
+/// Convert a typed Rust `AudioFormat` into its C-side discriminant.
+fn audio_format_to_u32(f: moq_audio::AudioFormat) -> Result<u32, Error> {
+	use moq_audio::AudioFormat as A;
+	Ok(match f {
+		A::U8 => moq_audio_format::MOQ_AUDIO_FORMAT_U8 as u32,
+		A::S16 => moq_audio_format::MOQ_AUDIO_FORMAT_S16 as u32,
+		A::S32 => moq_audio_format::MOQ_AUDIO_FORMAT_S32 as u32,
+		A::F32 => moq_audio_format::MOQ_AUDIO_FORMAT_F32 as u32,
+		A::U8Planar => moq_audio_format::MOQ_AUDIO_FORMAT_U8_PLANAR as u32,
+		A::S16Planar => moq_audio_format::MOQ_AUDIO_FORMAT_S16_PLANAR as u32,
+		A::S32Planar => moq_audio_format::MOQ_AUDIO_FORMAT_S32_PLANAR as u32,
+		A::F32Planar => moq_audio_format::MOQ_AUDIO_FORMAT_F32_PLANAR as u32,
+		_ => return Err(Error::InvalidCode),
+	})
 }
 
 /// A buffer of raw PCM samples passed across the FFI boundary.
+///
+/// `format` is a `u32` carrying a `moq_audio_format` discriminant; it's
+/// not declared as the enum type so that an unknown value from C lands
+/// in `audio_format_from_u32` instead of becoming an invalid Rust enum
+/// (which would be UB).
 ///
 /// `data` is borrowed: the pointer is valid for the duration of the C
 /// call (publish) or callback (consume). Callers that need to keep the
@@ -75,7 +85,7 @@ impl TryFrom<moq_audio::AudioFormat> for moq_audio_format {
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_raw_audio {
-	pub format: moq_audio_format,
+	pub format: u32,
 	pub sample_rate: u32,
 	pub channel_count: u32,
 	pub timestamp_us: u64,
@@ -198,7 +208,7 @@ impl Audio {
 	pub fn sample_info(&self, id: Id, dst: &mut moq_raw_audio) -> Result<(), Error> {
 		let samples = self.samples.get(id).ok_or(Error::FrameNotFound)?;
 		*dst = moq_raw_audio {
-			format: samples.format.try_into()?,
+			format: audio_format_to_u32(samples.format)?,
 			sample_rate: samples.sample_rate,
 			channel_count: samples.channel_count,
 			timestamp_us: samples.timestamp_us,
@@ -276,7 +286,7 @@ pub unsafe extern "C" fn moq_publish_raw_audio_write(producer: u32, audio: *cons
 		let data = unsafe { ffi::parse_slice(audio.data, audio.data_size)? };
 
 		let samples = moq_audio::AudioSamples {
-			format: audio.format.into(),
+			format: audio_format_from_u32(audio.format)?,
 			sample_rate: audio.sample_rate,
 			channel_count: audio.channel_count,
 			timestamp_us: audio.timestamp_us,
@@ -313,7 +323,7 @@ pub extern "C" fn moq_publish_raw_audio_close(producer: u32) -> i32 {
 pub unsafe extern "C" fn moq_consume_raw_audio_opus(
 	catalog: u32,
 	index: u32,
-	output_format: moq_audio_format,
+	output_format: u32,
 	output_sample_rate: u32,
 	output_channels: u32,
 	on_samples: Option<extern "C" fn(user_data: *mut c_void, samples: i32)>,
@@ -321,6 +331,7 @@ pub unsafe extern "C" fn moq_consume_raw_audio_opus(
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
+		let output_format = audio_format_from_u32(output_format)?;
 		let on_samples = unsafe { OnStatus::new(user_data, on_samples) };
 
 		let mut state = State::lock();
@@ -331,7 +342,7 @@ pub unsafe extern "C" fn moq_consume_raw_audio_opus(
 			&broadcast,
 			&config,
 			&name,
-			output_format.into(),
+			output_format,
 			if output_sample_rate == 0 {
 				None
 			} else {

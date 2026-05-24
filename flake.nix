@@ -69,7 +69,6 @@
           cmake
           pkg-config
           glib
-          libopus
           libressl
           ffmpeg
           curl
