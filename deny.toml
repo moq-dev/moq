@@ -29,6 +29,15 @@ ignore = [
     # http-cache (via http-cache-reqwest in moq-relay) still depends on
     # bincode 1.x. Awaits upstream bump to bincode 2.x.
     "RUSTSEC-2025-0141",
+
+    # audiopus_sys (via opus, used by moq-audio) is unmaintained: last
+    # commit 5 years ago, no response to PRs fixing the CMake 4
+    # incompatibility. We work around the CMake issue with
+    # CMAKE_POLICY_VERSION_MINIMUM=3.5 in .cargo/config.toml. Drop the
+    # ignore once we either swap to a maintained opus binding (current
+    # candidates all wrap the same vendored libopus) or libopus's
+    # CMakeLists gets updated upstream.
+    "RUSTSEC-2026-0150",
 ]
 
 [licenses]
