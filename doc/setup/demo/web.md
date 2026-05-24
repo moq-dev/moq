@@ -35,6 +35,6 @@ Once running, open the browser to watch the stream, publish from your camera, or
 
 ## Related
 
-- [@moq/watch](/js/@moq/watch) — Watch/subscribe package
-- [@moq/publish](/js/@moq/publish) — Publish package
-- [Relay setup](/app/relay/) — Server configuration
+- [@moq/watch](/lib/js/@moq/watch) — Watch/subscribe package
+- [@moq/publish](/lib/js/@moq/publish) — Publish package
+- [Relay setup](/bin/relay/) — Server configuration

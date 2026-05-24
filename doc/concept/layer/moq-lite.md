@@ -62,7 +62,7 @@ This asks the peer to notify us of any existing broadcasts that match the prefix
 
 This is extremely useful for conference rooms, as you can live discover when participants join and leave.
 It's also useful for individual broadcasts as you can get notifications it comes online or goes offline (no spamming F5).
-The [moq-relay clustering](/app/relay/cluster) feature actually uses this to discover other nodes in the cluster AND what broadcasts are available on each node.
+The [moq-relay clustering](/bin/relay/cluster) feature actually uses this to discover other nodes in the cluster AND what broadcasts are available on each node.
 
 ### Subscriptions
 

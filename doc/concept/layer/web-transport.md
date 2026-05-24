@@ -35,7 +35,7 @@ Most of the time, you can assume they are the same, but there are some differenc
 2. **Smaller Errors**: WebTransport supports a smaller set of error codes than QUIC.
 3. **Browser API**: The [W3C API](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport_API) is more limited than most QUIC libraries.
 
-Shameless plug: use my [web-transport](/rs/crate/web-transport) libraries for Rust.
+Shameless plug: use my [web-transport](/lib/rs/crate/web-transport) libraries for Rust.
 It implements most of the Quinn API so you can support both QUIC and WebTransport with minimal changes.
 
 ## Why Not HTTP/3?
@@ -45,7 +45,7 @@ MoQ could use HTTP/3 directly instead of WebTransport, but HTTP semantics make i
 - **With WebTransport**: both sides can create streams whenever and immediately write new frames.
 - **With HTTP/3**: only the client can create a stream (HTTP request), as HTTP push is gone and a mistake anyway. The client needs to know when the server wants to write a new stream.
 
-[moq-relay](/app/relay/) does provide an HTTP endpoint so a client can still request content on-demand instead of subscribing.
+[moq-relay](/bin/relay/) does provide an HTTP endpoint so a client can still request content on-demand instead of subscribing.
 This is useful for backwards compatibility with HLS, but the long-term goal is to make publishing and subscribing symmetrical via WebTransport.
 
 ## Native Clients

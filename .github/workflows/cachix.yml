@@ -11,8 +11,10 @@ on:
       - 'moq-gst-v*'
 
 jobs:
-  cache:
-    name: Build and push to Cachix (${{ matrix.os }})
+  # Build and push only the package the tag names. The tag prefix
+  # (e.g. moq-relay) maps 1:1 to a flake attribute.
+  release:
+    name: Release (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -28,6 +30,21 @@ jobs:
         with:
           persist-credentials: false
 
+      # Full-match REF_NAME against the same <prefix>-v<semver> contract
+      # release.sh enforces, so a malformed tag fails fast instead of
+      # building under a trusted identity.
+      - name: Derive package from tag
+        id: pkg
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          re='^(moq-relay|moq-cli|moq-token-cli|moq-boy|libmoq|moq-gst)-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$'
+          if [[ ! "$REF_NAME" =~ $re ]]; then
+            echo "Tag format not recognized: $REF_NAME" >&2
+            exit 1
+          fi
+          echo "name=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
       - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
         with:
           determinate: false
@@ -38,34 +55,9 @@ jobs:
           name: kixelated
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      # Build each package individually so their closures are all cached.
-      # This ensures CDN nodes can download pre-built binaries instead of compiling.
-      - name: Build and cache moq-relay
+      - name: Build and cache
+        env:
+          PACKAGE: ${{ steps.pkg.outputs.name }}
         run: |
-          nix build .#moq-relay --print-build-logs
-          cachix push kixelated ./result
-
-      - name: Build and cache moq-cli
-        run: |
-          nix build .#moq-cli --print-build-logs
-          cachix push kixelated ./result
-
-      - name: Build and cache moq-token-cli
-        run: |
-          nix build .#moq-token-cli --print-build-logs
-          cachix push kixelated ./result
-
-      - name: Build and cache moq-boy
-        run: |
-          nix build .#moq-boy --print-build-logs
-          cachix push kixelated ./result
-
-      - name: Build and cache libmoq
-        run: |
-          nix build .#libmoq --print-build-logs
-          cachix push kixelated ./result
-
-      - name: Build and cache moq-gst
-        run: |
-          nix build .#moq-gst --print-build-logs
+          nix build ".#$PACKAGE" --print-build-logs
           cachix push kixelated ./result

@@ -120,7 +120,7 @@ Learn how to run them [in production](/setup/prod).
 Or take a detour and:
 
 - Brush up on the [concepts](/concept/).
-- Discover the other [apps](/app/).
-- `use` the [Rust crates](/rs/).
-- `import` the [Typescript packages](/js/).
+- Discover the other [apps](/bin/).
+- `use` the [Rust crates](/lib/rs/).
+- `import` the [Typescript packages](/lib/js/).
 - or IDK, go take a shower or something while Claude parses the docs.

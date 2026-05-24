@@ -147,7 +147,7 @@ in
       # Strip nix-store paths so the plugin loads against the user's system
       # GStreamer rather than the (unavailable on user machines) nix copy.
       # The `-f` guard skips crane's deps-only stage, whose $out has no plugin
-      # to patch. (Written by Claude)
+      # to patch.
       postFixup =
         if final.stdenv.isDarwin then
           ''

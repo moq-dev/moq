@@ -42,15 +42,18 @@ export default defineConfig({
 		nav: [
 			{ text: "Setup", link: "/setup/" },
 			{ text: "Concepts", link: "/concept/" },
-			{ text: "Apps", link: "/app/" },
+			{ text: "Apps", link: "/bin/" },
 			{
 				text: "Libraries",
+				link: "/lib/",
 				items: [
-					{ text: "Rust", link: "/rs/" },
-					{ text: "TypeScript", link: "/js/" },
-					{ text: "Python", link: "/py/" },
-					{ text: "Swift", link: "/swift/" },
-					{ text: "Kotlin", link: "/kt/" },
+					{ text: "Rust", link: "/lib/rs/" },
+					{ text: "TypeScript", link: "/lib/js/" },
+					{ text: "C", link: "/lib/c/" },
+					{ text: "Python", link: "/lib/py/" },
+					{ text: "Kotlin", link: "/lib/kt/" },
+					{ text: "Swift", link: "/lib/swift/" },
+					{ text: "Go", link: "/lib/go/" },
 				],
 			},
 		],
@@ -116,103 +119,120 @@ export default defineConfig({
 				},
 			],
 
-			"/app/": [
+			"/bin/": [
 				{
 					text: "Applications",
-					link: "/app/",
+					link: "/bin/",
 					items: [
 						{
 							text: "Relay",
-							link: "/app/relay/",
+							link: "/bin/relay/",
 							items: [
-								{ text: "Configuration", link: "/app/relay/config" },
-								{ text: "Authentication", link: "/app/relay/auth" },
-								{ text: "Clustering", link: "/app/relay/cluster" },
-								{ text: "HTTP", link: "/app/relay/http" },
-								{ text: "Production", link: "/app/relay/prod" },
+								{ text: "Configuration", link: "/bin/relay/config" },
+								{ text: "Authentication", link: "/bin/relay/auth" },
+								{ text: "Clustering", link: "/bin/relay/cluster" },
+								{ text: "HTTP", link: "/bin/relay/http" },
+								{ text: "Production", link: "/bin/relay/prod" },
 							],
 						},
-						{ text: "CLI", link: "/app/cli" },
-						{ text: "OBS", link: "/app/obs" },
-						{ text: "Gstreamer", link: "/app/gstreamer" },
-						{ text: "Web", link: "/app/web" },
+						{ text: "CLI", link: "/bin/cli" },
+						{ text: "OBS", link: "/bin/obs" },
+						{ text: "Gstreamer", link: "/bin/gstreamer" },
+						{ text: "Web", link: "/bin/web" },
 					],
 				},
 			],
 
-			"/rs/": [
+			"/lib/": [
 				{
-					text: "Environments",
-					link: "/rs/env/",
+					text: "Libraries",
+					link: "/lib/",
 					items: [
-						{ text: "Native", link: "/rs/env/native" },
-						{ text: "WASM", link: "/rs/env/wasm" },
-					],
-				},
-				{
-					text: "Crates",
-					link: "/rs/crate",
-					items: [
-						{ text: "moq-net", link: "/rs/crate/moq-net" },
-						{ text: "moq-native", link: "/rs/crate/moq-native" },
-						{ text: "moq-token", link: "/rs/crate/moq-token" },
-						{ text: "hang", link: "/rs/crate/hang" },
-						{ text: "web-transport", link: "/rs/crate/web-transport" },
-					],
-				},
-			],
-
-			"/js/": [
-				{
-					text: "Environments",
-					link: "/js/env/",
-					items: [
-						{ text: "Web", link: "/js/env/web" },
-						{ text: "Native", link: "/js/env/native" },
-					],
-				},
-				{
-					text: "Packages",
-					link: "/js/@moq",
-					items: [
-						{ text: "@moq/net", link: "/js/@moq/net" },
 						{
-							text: "@moq/hang",
-							link: "/js/@moq/hang/",
+							text: "Rust",
+							link: "/lib/rs/",
 							items: [
-								{ text: "Watch", link: "/js/@moq/hang/watch" },
-								{ text: "Publish", link: "/js/@moq/hang/publish" },
+								{
+									text: "Environments",
+									link: "/lib/rs/env/",
+									items: [
+										{ text: "Native", link: "/lib/rs/env/native" },
+										{ text: "WASM", link: "/lib/rs/env/wasm" },
+									],
+								},
+								{
+									text: "Crates",
+									link: "/lib/rs/crate",
+									items: [
+										{ text: "moq-net", link: "/lib/rs/crate/moq-net" },
+										{ text: "moq-native", link: "/lib/rs/crate/moq-native" },
+										{ text: "moq-token", link: "/lib/rs/crate/moq-token" },
+										{ text: "hang", link: "/lib/rs/crate/hang" },
+										{ text: "web-transport", link: "/lib/rs/crate/web-transport" },
+										{ text: "libmoq", link: "/lib/rs/crate/libmoq" },
+									],
+								},
 							],
 						},
-						{ text: "@moq/watch", link: "/js/@moq/watch" },
-						{ text: "@moq/publish", link: "/js/@moq/publish" },
-						{ text: "@moq/token", link: "/js/@moq/token" },
-						{ text: "@moq/signals", link: "/js/@moq/signals" },
+						{
+							text: "TypeScript",
+							link: "/lib/js/",
+							items: [
+								{
+									text: "Environments",
+									link: "/lib/js/env/",
+									items: [
+										{ text: "Web", link: "/lib/js/env/web" },
+										{ text: "Native", link: "/lib/js/env/native" },
+									],
+								},
+								{
+									text: "Packages",
+									link: "/lib/js/@moq",
+									items: [
+										{ text: "@moq/net", link: "/lib/js/@moq/net" },
+										{
+											text: "@moq/hang",
+											link: "/lib/js/@moq/hang/",
+											items: [
+												{ text: "Watch", link: "/lib/js/@moq/hang/watch" },
+												{ text: "Publish", link: "/lib/js/@moq/hang/publish" },
+											],
+										},
+										{ text: "@moq/watch", link: "/lib/js/@moq/watch" },
+										{ text: "@moq/publish", link: "/lib/js/@moq/publish" },
+										{ text: "@moq/token", link: "/lib/js/@moq/token" },
+										{ text: "@moq/signals", link: "/lib/js/@moq/signals" },
+									],
+								},
+							],
+						},
+						{
+							text: "C",
+							link: "/lib/c/",
+							items: [{ text: "libmoq", link: "/lib/rs/crate/libmoq" }],
+						},
+						{
+							text: "Python",
+							link: "/lib/py/",
+							items: [{ text: "moq-net", link: "/lib/py/moq-net" }],
+						},
+						{
+							text: "Kotlin",
+							link: "/lib/kt/",
+							items: [{ text: "dev.moq:moq", link: "/lib/kt/moq" }],
+						},
+						{
+							text: "Swift",
+							link: "/lib/swift/",
+							items: [{ text: "Moq", link: "/lib/swift/moq" }],
+						},
+						{
+							text: "Go",
+							link: "/lib/go/",
+							items: [{ text: "moq", link: "/lib/go/moq" }],
+						},
 					],
-				},
-			],
-
-			"/py/": [
-				{
-					text: "Python",
-					link: "/py/",
-					items: [{ text: "moq-net", link: "/py/moq-net" }],
-				},
-			],
-
-			"/swift/": [
-				{
-					text: "Swift",
-					link: "/swift/",
-					items: [{ text: "Moq", link: "/swift/moq" }],
-				},
-			],
-
-			"/kt/": [
-				{
-					text: "Kotlin",
-					link: "/kt/",
-					items: [{ text: "dev.moq:moq", link: "/kt/moq" }],
 				},
 			],
 		},

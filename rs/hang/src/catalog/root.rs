@@ -123,45 +123,27 @@ mod test {
 
 		encoded.retain(|c| !c.is_whitespace());
 
+		let mut video_config = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0x00,
+			level: 0x1f,
+			inline: false,
+		});
+		video_config.coded_width = Some(1280);
+		video_config.coded_height = Some(720);
+		video_config.bitrate = Some(6_000_000);
+		video_config.framerate = Some(30.0);
+		video_config.container = Container::Legacy;
+
 		let mut video_renditions = BTreeMap::new();
-		video_renditions.insert(
-			"video".to_string(),
-			VideoConfig {
-				broadcast: None,
-				codec: H264 {
-					profile: 0x64,
-					constraints: 0x00,
-					level: 0x1f,
-					inline: false,
-				}
-				.into(),
-				description: None,
-				coded_width: Some(1280),
-				coded_height: Some(720),
-				display_ratio_width: None,
-				display_ratio_height: None,
-				bitrate: Some(6_000_000),
-				framerate: Some(30.0),
-				optimize_for_latency: None,
-				container: Container::Legacy,
-				jitter: None,
-			},
-		);
+		video_renditions.insert("video".to_string(), video_config);
+
+		let mut audio_config = AudioConfig::new(Opus, 48_000, 2);
+		audio_config.bitrate = Some(128_000);
+		audio_config.container = Container::Legacy;
 
 		let mut audio_renditions = BTreeMap::new();
-		audio_renditions.insert(
-			"audio".to_string(),
-			AudioConfig {
-				broadcast: None,
-				codec: Opus,
-				sample_rate: 48_000,
-				channel_count: 2,
-				bitrate: Some(128_000),
-				description: None,
-				container: Container::Legacy,
-				jitter: None,
-			},
-		);
+		audio_renditions.insert("audio".to_string(), audio_config);
 
 		let decoded = Catalog {
 			video: Video {
@@ -220,30 +202,18 @@ mod test {
 	fn rendition_without_broadcast_omits_field() {
 		// `broadcast: None` must NOT serialize as `"broadcast":null`, otherwise the wire
 		// format silently changes for every catalog that doesn't use cross-broadcast refs.
+		let mut video_config = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0x00,
+			level: 0x1f,
+			inline: false,
+		});
+		video_config.coded_width = Some(1280);
+		video_config.coded_height = Some(720);
+		video_config.container = Container::Legacy;
+
 		let mut renditions = BTreeMap::new();
-		renditions.insert(
-			"video".to_string(),
-			VideoConfig {
-				broadcast: None,
-				codec: H264 {
-					profile: 0x64,
-					constraints: 0x00,
-					level: 0x1f,
-					inline: false,
-				}
-				.into(),
-				description: None,
-				coded_width: Some(1280),
-				coded_height: Some(720),
-				display_ratio_width: None,
-				display_ratio_height: None,
-				bitrate: None,
-				framerate: None,
-				optimize_for_latency: None,
-				container: Container::Legacy,
-				jitter: None,
-			},
-		);
+		renditions.insert("video".to_string(), video_config);
 
 		let catalog = Catalog {
 			video: Video {

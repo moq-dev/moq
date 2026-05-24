@@ -9,8 +9,8 @@
 #   R2_ACCESS_KEY_ID          R2 API token
 #   R2_SECRET_ACCESS_KEY
 #   R2_ACCOUNT_ID
-#   REPO_SIGNING_KEY           ascii-armored GPG private key (shared with apt repo)
-#   REPO_SIGNING_KEY_ID        long key id used to pick the signing key
+#   SIGNING_KEY               ascii-armored GPG private key (shared with apt repo and maven publishing)
+#   SIGNING_PASSWORD          optional passphrase for SIGNING_KEY
 #
 # Required tools: rclone, createrepo_c, gpg.
 
@@ -72,15 +72,27 @@ echo ">> Import signing key..."
 GNUPGHOME=$(mktemp -d)
 export GNUPGHOME
 chmod 700 "$GNUPGHOME"
-echo "${REPO_SIGNING_KEY:?}" | gpg --batch --quiet --import
-KEY_ID="${REPO_SIGNING_KEY_ID:?}"
+echo "${SIGNING_KEY:?}" | gpg --batch --quiet --import
+# Fail loud if SIGNING_KEY ever holds more than one secret. Silently picking
+# the first one would produce signatures from the wrong key.
+mapfile -t KEY_IDS < <(gpg --list-secret-keys --with-colons --keyid-format=long \
+    | awk -F: '/^sec:/ { print $5 }')
+if [[ ${#KEY_IDS[@]} -ne 1 ]]; then
+    echo "ERROR: expected exactly one secret key in SIGNING_KEY, found ${#KEY_IDS[@]}." >&2
+    exit 1
+fi
+KEY_ID="${KEY_IDS[0]}"
+GPG_PASS_ARGS=()
+if [[ -n "${SIGNING_PASSWORD:-}" ]]; then
+    GPG_PASS_ARGS=(--pinentry-mode loopback --passphrase "$SIGNING_PASSWORD")
+fi
 
 echo ">> Generate repodata per arch..."
 for arch in "${ARCHES[@]}"; do
     dir="$WORK/${DIST}/${arch}"
     [[ -d "$dir" ]] || continue
     createrepo_c --update --general-compress-type=gz "$dir"
-    gpg --batch --yes --default-key "$KEY_ID" --detach-sign --armor \
+    gpg --batch --yes "${GPG_PASS_ARGS[@]}" --default-key "$KEY_ID" --detach-sign --armor \
         -o "$dir/repodata/repomd.xml.asc" \
         "$dir/repodata/repomd.xml"
 done

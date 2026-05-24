@@ -151,5 +151,5 @@ HTTP/3 is a new kid on the block, and MoQ can ride that momentum, but it's going
 I think the most crucial feature for MoQ is backwards compatibility with HLS/DASH.
 The ability to serve HLS/DASH content via MoQ and HTTP is necessary for the industry to adopt MoQ.
 
-That's why [hang](/concept/layer/hang) can support CMAF and [moq-relay](/app/relay/) can serve tracks via HTTP.
+That's why [hang](/concept/layer/hang) can support CMAF and [moq-relay](/bin/relay/) can serve tracks via HTTP.
 More documentation coming soon.
