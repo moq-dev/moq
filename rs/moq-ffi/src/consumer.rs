@@ -102,12 +102,14 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to a track by name, delivering frames in decode order.
 	///
 	/// `container` is the track container from the catalog.
-	/// `max_latency_ms` controls the maximum buffering before skipping a GoP.
+	/// `latency_max_ms` is the upper bound on buffering before skipping
+	/// a GoP. Named `_max` to leave room for a future `latency_min_ms`
+	/// (jitter-buffer floor).
 	pub fn subscribe_media(
 		&self,
 		name: String,
 		container: Container,
-		max_latency_ms: u64,
+		latency_max_ms: u64,
 	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		// Parse the container before subscribing so we don't leave a dangling
@@ -117,7 +119,7 @@ impl MoqBroadcastConsumer {
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
 		let track = self.inner.subscribe_track(&moq_net::Track { name, priority: 0 })?;
-		let latency = std::time::Duration::from_millis(max_latency_ms);
+		let latency = std::time::Duration::from_millis(latency_max_ms);
 		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),
