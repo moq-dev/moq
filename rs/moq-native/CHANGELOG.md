@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0](https://github.com/moq-dev/moq/compare/moq-native-v0.14.4...moq-native-v0.15.0) - 2026-05-24
+
+### Other
+
+- *(rs)* add cargo-deny and resolve outstanding advisories ([#1486](https://github.com/moq-dev/moq/pull/1486))
+
 ## [0.14.4](https://github.com/moq-dev/moq/compare/moq-native-v0.14.3...moq-native-v0.14.4) - 2026-05-23
 
 ### Other

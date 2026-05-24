@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.0...moq-mux-v0.5.1) - 2026-05-24
+
+### Other
+
+- *(rs)* add cargo-deny and resolve outstanding advisories ([#1486](https://github.com/moq-dev/moq/pull/1486))
+- non_exhaustive VideoConfig/AudioConfig with constructors ([#1485](https://github.com/moq-dev/moq/pull/1485))
+
 ## [0.5.0](https://github.com/moq-dev/moq/compare/moq-mux-v0.4.2...moq-mux-v0.5.0) - 2026-05-23
 
 ### Added
