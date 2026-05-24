@@ -35,22 +35,29 @@ pub fn parse_hvcc_param_sets(hvcc: &[u8]) -> anyhow::Result<HvccParamSets> {
 	let mut vps = Vec::new();
 	let mut sps = Vec::new();
 	let mut pps = Vec::new();
-	let mut pos = 23;
+	let mut pos: usize = 23;
 
 	for _ in 0..num_arrays {
-		anyhow::ensure!(hvcc.len() >= pos + 3, "hvcC truncated in array header");
+		let after_hdr = pos
+			.checked_add(3)
+			.context("offset overflow reading hvcC array header")?;
+		anyhow::ensure!(hvcc.len() >= after_hdr, "hvcC truncated in array header");
 		let nal_type = hvcc[pos] & 0x3f;
-		pos += 1;
-		let num_nalus = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
-		pos += 2;
+		let num_nalus = u16::from_be_bytes([hvcc[pos + 1], hvcc[pos + 2]]) as usize;
+		pos = after_hdr;
 
 		for _ in 0..num_nalus {
-			anyhow::ensure!(hvcc.len() >= pos + 2, "hvcC truncated in NAL length");
+			let after_len = pos
+				.checked_add(2)
+				.context("offset overflow reading hvcC NAL length")?;
+			anyhow::ensure!(hvcc.len() >= after_len, "hvcC truncated in NAL length");
 			let len = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
-			pos += 2;
-			anyhow::ensure!(hvcc.len() >= pos + len, "hvcC truncated in NAL payload");
-			let bytes = Bytes::copy_from_slice(&hvcc[pos..pos + len]);
-			pos += len;
+			let after_nal = after_len
+				.checked_add(len)
+				.context("offset overflow reading hvcC NAL payload")?;
+			anyhow::ensure!(hvcc.len() >= after_nal, "hvcC truncated in NAL payload");
+			let bytes = Bytes::copy_from_slice(&hvcc[after_len..after_nal]);
+			pos = after_nal;
 
 			match NALUnitType::from(nal_type) {
 				NALUnitType::VpsNut => vps.push(bytes),

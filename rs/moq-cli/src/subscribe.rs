@@ -143,21 +143,40 @@ impl SubscribeArgs {
 			.unwrap_or_default()
 	}
 
-	/// Build a video filter from the parsed flags, plus any codec defaulted by
-	/// the chosen output format (e.g. `--format h264` implies `codec = H264`).
-	fn filter_video(&self) -> Option<FilterVideo> {
-		let codec = self.video_codec.map(Into::into).or(match self.format {
+	/// Codec implied by the output format. `--format h264` / `--format h265`
+	/// each force a single codec family; container formats leave it open.
+	fn format_codec(&self) -> Option<VideoCodecKind> {
+		match self.format {
 			SubscribeFormat::H264 => Some(VideoCodecKind::H264),
 			SubscribeFormat::H265 => Some(VideoCodecKind::H265),
-			_ => None,
-		});
-		if self.video_name.is_none() && codec.is_none() {
-			return None;
+			SubscribeFormat::Fmp4 | SubscribeFormat::Mkv => None,
 		}
-		Some(FilterVideo {
+	}
+
+	/// Build a video filter from the parsed flags, plus any codec defaulted by
+	/// the chosen output format (e.g. `--format h264` implies `codec = H264`).
+	///
+	/// Errors if `--video-codec` contradicts the format-implied codec — fail
+	/// fast in the CLI rather than later in the exporter.
+	fn filter_video(&self) -> anyhow::Result<Option<FilterVideo>> {
+		let user_codec = self.video_codec.map(VideoCodecKind::from);
+		let codec = match (self.format_codec(), user_codec) {
+			(Some(fmt), Some(user)) if fmt != user => {
+				anyhow::bail!(
+					"--format implies video codec {fmt:?}, but --video-codec {user:?} was passed; \
+					 remove --video-codec or pick a matching format"
+				);
+			}
+			(Some(fmt), _) => Some(fmt),
+			(None, user) => user,
+		};
+		if self.video_name.is_none() && codec.is_none() {
+			return Ok(None);
+		}
+		Ok(Some(FilterVideo {
 			name: self.video_name.clone(),
 			codec,
-		})
+		}))
 	}
 
 	fn filter_audio(&self) -> Option<FilterAudio> {
@@ -207,11 +226,11 @@ impl Subscribe {
 	}
 
 	/// Build the catalog stream from the configured filter/target flags.
-	fn stream(&self) -> Result<catalog::Target<catalog::Filter<catalog::Consumer>>, moq_mux::Error> {
+	fn stream(&self) -> anyhow::Result<catalog::Target<catalog::Filter<catalog::Consumer>>> {
 		let consumer = catalog::Consumer::new(&self.broadcast, self.catalog)?;
 
 		let mut filter = consumer.filter();
-		filter.set_video(self.args.filter_video());
+		filter.set_video(self.args.filter_video()?);
 		filter.set_audio(self.args.filter_audio());
 
 		let mut target = filter.target();

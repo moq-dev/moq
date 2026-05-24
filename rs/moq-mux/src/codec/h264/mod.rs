@@ -165,31 +165,36 @@ pub fn parse_avcc_param_sets(avcc: &[u8]) -> anyhow::Result<AvccParamSets> {
 	let num_sps = (avcc[5] & 0x1f) as usize;
 
 	let mut pos = 6;
-	let mut sps = Vec::with_capacity(num_sps);
-	for _ in 0..num_sps {
-		anyhow::ensure!(avcc.len() >= pos + 2, "avcC truncated in SPS length");
-		let len = u16::from_be_bytes([avcc[pos], avcc[pos + 1]]) as usize;
-		pos += 2;
-		anyhow::ensure!(avcc.len() >= pos + len, "avcC truncated in SPS payload");
-		sps.push(Bytes::copy_from_slice(&avcc[pos..pos + len]));
-		pos += len;
-	}
+	let sps = read_param_sets(avcc, &mut pos, num_sps, "SPS")?;
 
 	anyhow::ensure!(avcc.len() > pos, "avcC truncated in PPS count");
 	let num_pps = avcc[pos] as usize;
 	pos += 1;
 
-	let mut pps = Vec::with_capacity(num_pps);
-	for _ in 0..num_pps {
-		anyhow::ensure!(avcc.len() >= pos + 2, "avcC truncated in PPS length");
-		let len = u16::from_be_bytes([avcc[pos], avcc[pos + 1]]) as usize;
-		pos += 2;
-		anyhow::ensure!(avcc.len() >= pos + len, "avcC truncated in PPS payload");
-		pps.push(Bytes::copy_from_slice(&avcc[pos..pos + len]));
-		pos += len;
-	}
+	let pps = read_param_sets(avcc, &mut pos, num_pps, "PPS")?;
 
 	Ok(AvccParamSets { length_size, sps, pps })
+}
+
+/// Read `count` length-prefixed (u16) NAL units from `buf` starting at `*pos`,
+/// advancing `*pos` past the last one. All arithmetic is checked so malformed
+/// configs surface as errors rather than panics.
+fn read_param_sets(buf: &[u8], pos: &mut usize, count: usize, label: &str) -> anyhow::Result<Vec<Bytes>> {
+	let mut out = Vec::with_capacity(count);
+	for _ in 0..count {
+		let after_len = pos
+			.checked_add(2)
+			.with_context(|| format!("offset overflow reading {label} length"))?;
+		anyhow::ensure!(buf.len() >= after_len, "avcC truncated in {label} length");
+		let len = u16::from_be_bytes([buf[*pos], buf[*pos + 1]]) as usize;
+		let after_nal = after_len
+			.checked_add(len)
+			.with_context(|| format!("offset overflow reading {label} payload"))?;
+		anyhow::ensure!(buf.len() >= after_nal, "avcC truncated in {label} payload");
+		out.push(Bytes::copy_from_slice(&buf[after_len..after_nal]));
+		*pos = after_nal;
+	}
+	Ok(out)
 }
 
 /// Transform H.264 frames from Annex-B (inline SPS/PPS, "avc3") to

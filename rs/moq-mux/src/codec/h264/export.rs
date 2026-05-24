@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hang::Catalog;
-use hang::catalog::VideoCodecKind;
+use hang::catalog::{VideoCodecKind, VideoConfig};
 
 use crate::catalog::Stream;
 use crate::codec::annexb;
@@ -33,6 +33,11 @@ pub struct Export<S: Stream> {
 
 struct H264Track {
 	name: String,
+	/// Snapshot of the catalog config we built `source` from. Cached so that
+	/// a catalog update which keeps the same rendition name but changes the
+	/// codec config (e.g. a new avcC) triggers a full rebuild instead of
+	/// silently reusing a stale `convert`.
+	config: VideoConfig,
 	source: ExportSource,
 	/// `Some` for an avc1 source: SPS/PPS prefix prebuilt from the avcC, and
 	/// the avcC length-prefix size. `None` for an avc3 source: Annex-B passes
@@ -137,7 +142,7 @@ impl<S: Stream> Export<S> {
 			return Ok(());
 		};
 
-		if self.track.as_ref().is_some_and(|t| t.name == *name) {
+		if self.track.as_ref().is_some_and(|t| t.name == *name && t.config == *config) {
 			return Ok(());
 		}
 
@@ -146,6 +151,13 @@ impl<S: Stream> Export<S> {
 			None => None,
 			Some(avcc) => {
 				let params = super::parse_avcc_param_sets(avcc)?;
+				anyhow::ensure!(
+					!params.sps.is_empty() && !params.pps.is_empty(),
+					"avc1 description for rendition {name:?} is missing SPS or PPS \
+					 (sps={}, pps={}); cannot inject parameter sets at keyframes",
+					params.sps.len(),
+					params.pps.len(),
+				);
 				let prefix = annexb::build_prefix(params.sps.iter().chain(params.pps.iter()));
 				Some(Avc1Convert {
 					length_size: params.length_size,
@@ -156,6 +168,7 @@ impl<S: Stream> Export<S> {
 
 		self.track = Some(H264Track {
 			name: name.clone(),
+			config: config.clone(),
 			source,
 			convert,
 		});

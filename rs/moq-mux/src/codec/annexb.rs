@@ -1,4 +1,4 @@
-use anyhow::{self};
+use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
@@ -19,16 +19,21 @@ pub fn from_length_prefixed(payload: &[u8], length_size: usize, prefix: Option<&
 
 	let mut pos = 0;
 	while pos < payload.len() {
-		anyhow::ensure!(payload.len() >= pos + length_size, "truncated NAL length prefix");
+		let after_prefix = pos
+			.checked_add(length_size)
+			.context("offset overflow reading NAL length prefix")?;
+		anyhow::ensure!(payload.len() >= after_prefix, "truncated NAL length prefix");
 		let mut len = 0usize;
-		for byte in &payload[pos..pos + length_size] {
+		for byte in &payload[pos..after_prefix] {
 			len = (len << 8) | (*byte as usize);
 		}
-		pos += length_size;
-		anyhow::ensure!(payload.len() >= pos + len, "truncated NAL payload");
+		let after_nal = after_prefix
+			.checked_add(len)
+			.context("offset overflow reading NAL payload")?;
+		anyhow::ensure!(payload.len() >= after_nal, "truncated NAL payload");
 		out.extend_from_slice(&START_CODE);
-		out.extend_from_slice(&payload[pos..pos + len]);
-		pos += len;
+		out.extend_from_slice(&payload[after_prefix..after_nal]);
+		pos = after_nal;
 	}
 
 	Ok(out.freeze())

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hang::Catalog;
-use hang::catalog::VideoCodecKind;
+use hang::catalog::{VideoCodecKind, VideoConfig};
 
 use crate::catalog::Stream;
 use crate::codec::annexb;
@@ -26,6 +26,11 @@ pub struct Export<S: Stream> {
 
 struct H265Track {
 	name: String,
+	/// Snapshot of the catalog config we built `source` from. Cached so that
+	/// a catalog update which keeps the same rendition name but changes the
+	/// codec config (e.g. a new hvcC) triggers a full rebuild instead of
+	/// silently reusing a stale `convert`.
+	config: VideoConfig,
 	source: ExportSource,
 	/// `Some` for an hvc1 source: VPS/SPS/PPS prefix prebuilt from the hvcC,
 	/// and the hvcC length-prefix size. `None` for a hev1 source: Annex-B
@@ -128,7 +133,7 @@ impl<S: Stream> Export<S> {
 			return Ok(());
 		};
 
-		if self.track.as_ref().is_some_and(|t| t.name == *name) {
+		if self.track.as_ref().is_some_and(|t| t.name == *name && t.config == *config) {
 			return Ok(());
 		}
 
@@ -137,6 +142,14 @@ impl<S: Stream> Export<S> {
 			None => None,
 			Some(hvcc) => {
 				let params = super::parse_hvcc_param_sets(hvcc)?;
+				anyhow::ensure!(
+					!params.vps.is_empty() && !params.sps.is_empty() && !params.pps.is_empty(),
+					"hvc1 description for rendition {name:?} is missing VPS, SPS, or PPS \
+					 (vps={}, sps={}, pps={}); cannot inject parameter sets at keyframes",
+					params.vps.len(),
+					params.sps.len(),
+					params.pps.len(),
+				);
 				let prefix = annexb::build_prefix(params.vps.iter().chain(params.sps.iter()).chain(params.pps.iter()));
 				Some(Hvc1Convert {
 					length_size: params.length_size,
@@ -147,6 +160,7 @@ impl<S: Stream> Export<S> {
 
 		self.track = Some(H265Track {
 			name: name.clone(),
+			config: config.clone(),
 			source,
 			convert,
 		});
