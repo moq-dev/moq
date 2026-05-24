@@ -32,7 +32,8 @@ The project contains multiple layers of protocols:
    - catalog: a JSON track containing a description of other tracks and their properties (for WebCodecs).
    - container: each frame consists of a timestamp and codec bitstream
    - watch/publish: dedicated packages for subscribing/publishing with optional UI overlays
-5. **application** - Users building on top of `moq-net` or `hang`
+5. **moq-audio** - Native Rust audio codecs (Opus today; AAC/video in future crates) on top of `moq-mux` + `hang`. Wraps libopus behind `opus`/`opus-static` features and ships a rubato-backed resampler so callers can hand it any WebCodecs `AudioData.format` and sample rate. Used by `moq-ffi`/`libmoq` to import/export raw PCM samples without bringing a codec library themselves.
+6. **application** - Users building on top of `moq-net` or `hang`
 
 Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq` layer should be generic, using rules on the wire on how to deliver content.
 
@@ -49,6 +50,8 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq-cli/           # CLI tool for media operations (binary: moq)
   moq-clock/         # Clock synchronization example (binary: moq-clock)
   moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)
+  moq-audio/         # Native PCM ↔ Opus encode/decode on top of moq-mux
+  moq-video/         # Counterpart to moq-audio for video (stub today)
   hang/              # Media encoding/streaming (catalog/container format)
   libmoq/            # C bindings (staticlib)
   moq-ffi/           # UniFFI bindings for Python/Swift/Kotlin (cdylib + staticlib)

@@ -1,6 +1,6 @@
 [package]
-name = "moq-codec"
-description = "Native encoding/decoding support for Media over QUIC"
+name = "moq-video"
+description = "Native video encoding/decoding for Media over QUIC"
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"

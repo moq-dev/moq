@@ -3,10 +3,10 @@ members = [
     "rs/conducer",
     "rs/hang",
     "rs/libmoq",
+    "rs/moq-audio",
     "rs/moq-boy",
     "rs/moq-cli",
     "rs/moq-clock",
-    "rs/moq-codec",
     "rs/moq-ffi",
     "rs/moq-gst",
     "rs/moq-lite",
@@ -18,15 +18,16 @@ members = [
     "rs/moq-relay",
     "rs/moq-token",
     "rs/moq-token-cli",
+    "rs/moq-video",
 ]
 default-members = [
     "rs/conducer",
     "rs/hang",
     # "rs/libmoq",    # requires C toolchain
     "rs/moq-boy",
+    "rs/moq-audio",
     "rs/moq-cli",
     "rs/moq-clock",
-    "rs/moq-codec",
     # "rs/moq-ffi",   # requires Python/maturin
     # "rs/moq-gst",   # requires GStreamer
     "rs/moq-lite",
@@ -38,6 +39,7 @@ default-members = [
     "rs/moq-relay",
     "rs/moq-token",
     "rs/moq-token-cli",
+    "rs/moq-video",
 ]
 resolver = "2"
 
@@ -47,6 +49,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 conducer = { version = "0.3", path = "rs/conducer" }
 hang = { version = "0.17", path = "rs/hang" }
+moq-audio = { version = "0.0.1", path = "rs/moq-audio", default-features = false }
 moq-loc = { version = "0.1", path = "rs/moq-loc" }
 moq-msf = { version = "0.2", path = "rs/moq-msf" }
 moq-mux = { version = "0.5", path = "rs/moq-mux" }

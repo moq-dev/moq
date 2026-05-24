@@ -1,0 +1,48 @@
+[package]
+name = "moq-audio"
+description = "Native audio encoding/decoding for Media over QUIC"
+authors = ["Luke Curley <kixelated@gmail.com>"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+version = "0.0.1"
+edition = "2024"
+rust-version.workspace = true
+
+keywords = ["quic", "http3", "webtransport", "media", "audio"]
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+
+[package.metadata.cargo-shear]
+ignored = ["audiopus_sys"]
+
+[lib]
+doctest = false
+
+[features]
+default = ["opus", "resample"]
+
+# Opus codec support (libopus, system-linked by default).
+opus = ["dep:opus"]
+
+# Statically link libopus rather than depending on the system copy.
+# Enable this for distributable artifacts (libmoq, moq-ffi wheels).
+opus-static = ["opus", "dep:audiopus_sys", "audiopus_sys/static"]
+
+# Resampling support (rubato) so callers can feed arbitrary input rates.
+resample = ["dep:rubato"]
+
+[dependencies]
+# Only referenced via the `opus-static` Cargo feature (forwards
+# `audiopus_sys/static` to vendor libopus). Marked ignored for cargo-shear.
+audiopus_sys = { version = "0.2", optional = true, default-features = false }
+bytes = "1"
+hang = { workspace = true }
+moq-mux = { workspace = true }
+moq-net = { workspace = true }
+
+opus = { version = "0.3", optional = true }
+rubato = { version = "0.16", optional = true }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
