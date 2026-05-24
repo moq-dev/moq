@@ -9,10 +9,23 @@ on:
       - 'moq-boy-v*'
       - 'libmoq-v*'
       - 'moq-gst-v*'
+  pull_request:
+    paths:
+      - '.github/workflows/cachix.yml'
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'nix/**'
+
+concurrency:
+  group: cachix-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  cache:
-    name: Build and push to Cachix (${{ matrix.os }})
+  # On a release tag, build and push only the package the tag names. The
+  # tag prefix (e.g. moq-relay) maps 1:1 to a flake attribute.
+  release:
+    if: github.event_name == 'push'
+    name: Release (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -28,6 +41,21 @@ jobs:
         with:
           persist-credentials: false
 
+      # Validate against an allowlist so REF_NAME can't slip arbitrary
+      # text into later steps. (Written by Claude)
+      - name: Derive package from tag
+        id: pkg
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          # moq-relay-v0.11.5 -> moq-relay
+          name="${REF_NAME%-v*}"
+          case "$name" in
+            moq-relay|moq-cli|moq-token-cli|moq-boy|libmoq|moq-gst) ;;
+            *) echo "Unrecognized tag prefix: $REF_NAME" >&2; exit 1 ;;
+          esac
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
       - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
         with:
           determinate: false
@@ -38,34 +66,51 @@ jobs:
           name: kixelated
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      # Build each package individually so their closures are all cached.
-      # This ensures CDN nodes can download pre-built binaries instead of compiling.
-      - name: Build and cache moq-relay
+      - name: Build and cache
+        env:
+          PACKAGE: ${{ steps.pkg.outputs.name }}
         run: |
-          nix build .#moq-relay --print-build-logs
+          nix build ".#$PACKAGE" --print-build-logs
           cachix push kixelated ./result
 
-      - name: Build and cache moq-cli
-        run: |
-          nix build .#moq-cli --print-build-logs
-          cachix push kixelated ./result
+  # On a PR that touches the Nix build config, dry-run every package on
+  # Linux to catch overlay regressions before they reach a release tag.
+  # `cachix push` has no --dry-run flag, so we stop at `nix build` and let
+  # cachix-action's `skipPush: true` keep the watch-store off.
+  pr-dry-run:
+    if: github.event_name == 'pull_request'
+    name: Dry-run (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - moq-relay
+          - moq-cli
+          - moq-token-cli
+          - moq-boy
+          - libmoq
+          - moq-gst
 
-      - name: Build and cache moq-token-cli
-        run: |
-          nix build .#moq-token-cli --print-build-logs
-          cachix push kixelated ./result
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
 
-      - name: Build and cache moq-boy
-        run: |
-          nix build .#moq-boy --print-build-logs
-          cachix push kixelated ./result
+      - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
+        with:
+          determinate: false
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
 
-      - name: Build and cache libmoq
-        run: |
-          nix build .#libmoq --print-build-logs
-          cachix push kixelated ./result
+      - uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        with:
+          name: kixelated
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
 
-      - name: Build and cache moq-gst
-        run: |
-          nix build .#moq-gst --print-build-logs
-          cachix push kixelated ./result
+      - name: Build
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: nix build ".#$PACKAGE" --print-build-logs
