@@ -1,43 +1,19 @@
-use anyhow::Context;
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
 
-/// Append `nal` to `set` unless a byte-identical entry is already present,
-/// preserving insertion order. Returns true if it was added.
-///
-/// Used to accumulate the distinct parameter-set NALs (SPS/PPS, plus VPS for
-/// H.265) a stream carries: avcC/hvcC hold an ordered list, and a source may
-/// define several (e.g. two PPS) that slices reference by id.
-pub(crate) fn push_distinct(set: &mut Vec<Bytes>, nal: &Bytes) -> bool {
-	if set.iter().any(|existing| existing == nal) {
-		return false;
-	}
-	set.push(nal.clone());
-	true
+/// Annex B parsing errors.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("missing Annex B start code")]
+	MissingStartCode,
+
+	#[error("invalid Annex B start code")]
+	InvalidStartCode,
 }
 
-/// Reconcile the retained parameter sets with what a keyframe access unit carried
-/// inline, called when the keyframe slice is reached:
-///
-/// - If the AU presented its own set (`seen` non-empty), adopt it as the retained
-///   set, dropping any the new GOP no longer uses (a mid-stream reinit).
-/// - If the AU carried none, re-inject the retained set into `chunks` as Annex-B
-///   so a receiver tuning in at this keyframe still gets them.
-///
-/// `seen` is this AU's inline NALs (already appended to `chunks`); `retained` is
-/// the cross-GOP set re-injected on bare keyframes.
-pub(crate) fn reconcile_keyframe_params(chunks: &mut BytesMut, retained: &mut Vec<Bytes>, seen: &mut Vec<Bytes>) {
-	if seen.is_empty() {
-		for nal in retained.iter() {
-			chunks.extend_from_slice(&START_CODE);
-			chunks.extend_from_slice(nal);
-		}
-		seen.clone_from(retained);
-	} else if seen != retained {
-		retained.clone_from(seen);
-	}
-}
+pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct NalIterator<'a, T: Buf + AsRef<[u8]> + 'a> {
 	buf: &'a mut T,
@@ -51,7 +27,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> NalIterator<'a, T> {
 
 	/// Assume the buffer ends with a NAL unit and flush it.
 	/// This is more efficient because we cache the last "start" code position.
-	pub fn flush(self) -> anyhow::Result<Option<Bytes>> {
+	pub fn flush(self) -> Result<Option<Bytes>> {
 		let start = match self.start {
 			Some(start) => start,
 			None => {
@@ -70,7 +46,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> NalIterator<'a, T> {
 }
 
 impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for NalIterator<'a, T> {
-	type Item = anyhow::Result<Bytes>;
+	type Item = Result<Bytes>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		let start = match self.start {
@@ -90,133 +66,92 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for NalIterator<'a, T> {
 	}
 }
 
-/// Rewrite a length-prefixed NALU buffer (avc1/hvc1 sample, each NAL preceded
-/// by a `length_size`-byte big-endian length) into Annex-B by replacing every
-/// length prefix with a 4-byte start code. This is the inverse of the
-/// length-prefixing done by [`crate::codec::h264::Avc1`] / [`crate::codec::h265::Hvc1`].
-pub fn length_prefixed_to_annexb(mut data: &[u8], length_size: usize, out: &mut Vec<u8>) -> anyhow::Result<()> {
-	anyhow::ensure!((1..=4).contains(&length_size), "invalid NALU length size {length_size}");
-	while !data.is_empty() {
-		anyhow::ensure!(data.len() >= length_size, "truncated NALU length prefix");
-		let mut len = 0usize;
-		for &b in &data[..length_size] {
-			len = (len << 8) | b as usize;
-		}
-		data = &data[length_size..];
-		anyhow::ensure!(
-			data.len() >= len,
-			"NALU length {len} exceeds {} remaining bytes",
-			data.len()
-		);
-		out.extend_from_slice(&START_CODE);
-		out.extend_from_slice(&data[..len]);
-		data = &data[len..];
-	}
-	Ok(())
-}
-
 // Return the size of the start code at the start of the buffer.
-pub fn after_start_code(b: &[u8]) -> anyhow::Result<Option<usize>> {
+pub fn after_start_code(b: &[u8]) -> Result<Option<usize>> {
 	if b.len() < 3 {
 		return Ok(None);
 	}
 
 	// NOTE: We have to check every byte, so the `find_start_code` optimization doesn't matter.
-	anyhow::ensure!(b[0] == 0, "missing Annex B start code");
-	anyhow::ensure!(b[1] == 0, "missing Annex B start code");
+	if b[0] != 0 || b[1] != 0 {
+		return Err(Error::MissingStartCode);
+	}
 
 	match b[2] {
 		0 if b.len() < 4 => Ok(None),
-		0 if b[3] != 1 => anyhow::bail!("missing Annex B start code"),
+		0 if b[3] != 1 => Err(Error::MissingStartCode),
 		0 => Ok(Some(4)),
 		1 => Ok(Some(3)),
-		_ => anyhow::bail!("invalid Annex B start code"),
+		_ => Err(Error::InvalidStartCode),
 	}
 }
 
 // Return the number of bytes until the next start code, and the size of that start code.
-//
-// Both forms share the `0 0 1` suffix (3-byte is `0 0 1`, 4-byte is `0 0 0 1`), so a single
-// SIMD-accelerated substring search for `0 0 1` finds the core. We then peek one byte back to
-// decide whether a leading zero promotes it to a 4-byte code.
-pub fn find_start_code(b: &[u8]) -> Option<(usize, usize)> {
-	let core = memchr::memmem::find(b, &[0, 0, 1])?;
-	if core > 0 && b[core - 1] == 0 {
-		Some((core - 1, 4))
-	} else {
-		Some((core, 3))
-	}
-}
+pub fn find_start_code(mut b: &[u8]) -> Option<(usize, usize)> {
+	// Okay this is over-engineered because this was my interview question.
+	// We need to find either a 3 byte or 4 byte start code.
+	// 3-byte: 0 0 1
+	// 4-byte: 0 0 0 1
+	//
+	// You fail the interview if you call string.split twice or something.
+	// You get a pass if you do index += 1 and check the next 3-4 bytes.
+	// You get my eternal respect if you check the 3rd byte first.
+	// What?
+	//
+	// If we check the 3rd byte and it's not a 0 or 1, then we immediately index += 3
+	// Sometimes we might only skip 1 or 2 bytes, but it's still better than checking every byte.
+	//
+	// TODO Is this the type of thing that SIMD could further improve?
+	// If somebody can figure that out, I'll buy you a beer.
+	let size = b.len();
 
-/// Convert a length-prefixed NALU payload (avc1 / hvc1 wire shape) to Annex-B,
-/// optionally prepending `prefix` bytes (typically VPS/SPS/PPS NAL units already
-/// in Annex-B form, for keyframe parameter-set injection).
-pub fn from_length_prefixed(payload: &[u8], length_size: usize, prefix: Option<&[u8]>) -> anyhow::Result<Bytes> {
-	anyhow::ensure!(
-		(1..=4).contains(&length_size),
-		"invalid avc1/hvc1 length size {length_size}"
-	);
-
-	let mut out = BytesMut::with_capacity(payload.len() + prefix.map(|p| p.len()).unwrap_or(0) + 16);
-	if let Some(p) = prefix {
-		out.extend_from_slice(p);
-	}
-
-	let mut pos = 0;
-	while pos < payload.len() {
-		let after_prefix = pos
-			.checked_add(length_size)
-			.context("truncated length-prefixed NAL unit")?;
-		anyhow::ensure!(payload.len() >= after_prefix, "truncated length-prefixed NAL unit");
-		let mut len = 0usize;
-		for byte in &payload[pos..after_prefix] {
-			len = (len << 8) | (*byte as usize);
+	while b.len() >= 3 {
+		// ? ? ?
+		match b[2] {
+			// ? ? 0
+			0 if b.len() >= 4 => match b[3] {
+				// ? ? 0 1
+				1 => match b[1] {
+					// ? 0 0 1
+					0 => match b[0] {
+						// 0 0 0 1
+						0 => return Some((size - b.len(), 4)),
+						// ? 0 0 1
+						_ => return Some((size - b.len() + 1, 3)),
+					},
+					// ? x 0 1
+					_ => b = &b[4..],
+				},
+				// ? ? 0 0 - skip only 1 byte to check for potential 0 0 0 1
+				0 => b = &b[1..],
+				// ? ? 0 x
+				_ => b = &b[4..],
+			},
+			// ? ? 0 FIN
+			0 => return None,
+			// ? ? 1
+			1 => match b[1] {
+				// ? 0 1
+				0 => match b[0] {
+					// 0 0 1
+					0 => return Some((size - b.len(), 3)),
+					// ? 0 1
+					_ => b = &b[3..],
+				},
+				// ? x 1
+				_ => b = &b[3..],
+			},
+			// ? ? x
+			_ => b = &b[3..],
 		}
-		let after_nal = after_prefix
-			.checked_add(len)
-			.context("truncated length-prefixed NAL unit")?;
-		anyhow::ensure!(payload.len() >= after_nal, "truncated length-prefixed NAL unit");
-		out.extend_from_slice(&START_CODE);
-		out.extend_from_slice(&payload[after_prefix..after_nal]);
-		pos = after_nal;
 	}
 
-	Ok(out.freeze())
-}
-
-/// Concatenate `start_code | nal` for every NAL in `nals` and freeze the result.
-/// Used to build a keyframe parameter-set prefix for an Annex-B elementary stream.
-pub fn build_prefix<'a, I: IntoIterator<Item = &'a Bytes>>(nals: I) -> Bytes {
-	let nals: Vec<&Bytes> = nals.into_iter().collect();
-	let total: usize = nals.iter().map(|n| n.len() + START_CODE.len()).sum();
-	let mut out = BytesMut::with_capacity(total);
-	for nal in nals {
-		out.extend_from_slice(&START_CODE);
-		out.extend_from_slice(nal);
-	}
-	out.freeze()
+	None
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn length_prefixed_to_annexb_rewrites_prefixes() {
-		// Two 4-byte-length-prefixed NALs -> two start-code-delimited NALs.
-		let input = [0, 0, 0, 2, 0x67, 0x42, 0, 0, 0, 3, 0x68, 0xce, 0x3c];
-		let mut out = Vec::new();
-		length_prefixed_to_annexb(&input, 4, &mut out).unwrap();
-		assert_eq!(out, vec![0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce, 0x3c]);
-	}
-
-	#[test]
-	fn length_prefixed_to_annexb_rejects_truncated() {
-		// Declared length (5) overruns the buffer.
-		let input = [0, 0, 0, 5, 0x67];
-		let mut out = Vec::new();
-		assert!(length_prefixed_to_annexb(&input, 4, &mut out).is_err());
-	}
 
 	// Tests for after_start_code - validates and measures start code at buffer beginning
 

@@ -89,11 +89,15 @@ pub enum Error {
 
 	/// Media decoder initialization failed.
 	#[error("init failed: {0}")]
-	InitFailed(Arc<anyhow::Error>),
+	InitFailed(Arc<moq_mux::Error>),
 
 	/// Media frame decode failed.
 	#[error("decode failed: {0}")]
-	DecodeFailed(Arc<anyhow::Error>),
+	DecodeFailed(Arc<moq_mux::Error>),
+
+	/// Buffer was not fully consumed.
+	#[error("buffer was not fully consumed")]
+	BufferNotConsumed,
 
 	/// Timestamp value overflow.
 	#[error("timestamp overflow")]
@@ -201,6 +205,7 @@ impl ffi::ReturnCode for Error {
 			Error::Hang(_) => -18,
 			Error::NoIndex => -19,
 			Error::NulError(_) => -20,
+			Error::BufferNotConsumed => -30,
 			Error::SessionNotFound => -21,
 			Error::OriginNotFound => -22,
 			Error::AnnouncementNotFound => -23,

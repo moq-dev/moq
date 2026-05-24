@@ -64,11 +64,68 @@ pub enum Error {
 	#[error("can't synthesize CMAF init for {0}")]
 	UnsupportedSynthesis(String),
 
-	#[error("video codec {0} needs a description (codec config record) to synthesize a CMAF init")]
-	MissingVideoDescription(String),
+	#[error("subtitle tracks are not supported")]
+	UnsupportedSubtitle,
 
-	#[error("audio codec {0} needs a description (AudioSpecificConfig) to synthesize a CMAF init")]
-	MissingAudioDescription(String),
+	#[error("unknown track handler: {0:?}")]
+	UnknownTrackHandler([u8; 4]),
+
+	#[error("missing codec")]
+	MissingCodec,
+
+	#[error("multiple codecs")]
+	MultipleCodecs,
+
+	#[error("unknown codec: {0:?}")]
+	UnknownCodec(mp4_atom::FourCC),
+
+	#[error("unsupported codec: {0:?}")]
+	UnsupportedCodec(Box<mp4_atom::Codec>),
+
+	#[error("unsupported codec: MPEG2")]
+	UnsupportedMpeg2,
+
+	#[error("duplicate moof box")]
+	DuplicateMoof,
+
+	#[error("missing moof box")]
+	MissingMoof,
+
+	#[error("missing moov box")]
+	MissingMoov,
+
+	#[error("missing trun box")]
+	MissingTrun,
+
+	#[error("missing tfdt box")]
+	MissingTfdt,
+
+	#[error("missing video config for synthesized init")]
+	MissingVideoConfig,
+
+	#[error("video track {0} missing in catalog")]
+	MissingVideoTrack(String),
+
+	#[error("audio track {0} missing in catalog")]
+	MissingAudioTrack(String),
+
+	#[error("invalid data offset")]
+	InvalidDataOffset,
+
+	#[error("unknown track {0}")]
+	UnknownTrack(u32),
+
+	#[error("no keyframe at start of group")]
+	NoKeyframe,
+
+	#[error("track sample range {start}..{end} is out of bounds of mdat (len {len})")]
+	SampleRangeOutOfBounds { start: usize, end: usize, len: usize },
+
+	#[error("no catalog snapshot")]
+	NoCatalogSnapshot,
+
+	#[error("encode_fragment called with no frames")]
+	NoFrames,
 }
 
 /// CMAF container: encodes/decodes a single track's moof+mdat fragments.
@@ -123,7 +180,7 @@ impl Container for Wire {
 	fn poll_read(
 		&self,
 		group: &mut moq_net::GroupConsumer,
-		waiter: &kio::Waiter,
+		waiter: &conducer::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;
 
@@ -286,15 +343,15 @@ pub(crate) fn encode_fragment(
 /// Synthesize a CMAF `Trak` for a video rendition that has no init segment.
 ///
 /// Used by the fMP4 exporter when its source is a `Container::Legacy` track
-/// (Avc3/Hev1/etc. importers that publish raw codec bitstreams). H.264/H.265
-/// need their out-of-band configuration record (`description`), e.g. because the
-/// Avc1 / Hvc1 transform has finished building it from inline parameter sets.
-/// VP8 carries no out-of-band config, so `description` is `None` for it.
+/// (Avc3/Hev1/etc. importers that publish raw codec bitstreams). The codec's
+/// out-of-band configuration record (`description`) must be available, e.g.
+/// because the Avc1 / Hvc1 transform has finished building it from inline
+/// parameter sets.
 pub(crate) fn synthesize_video_trak(
 	track_id: u32,
 	timescale: u64,
 	config: &VideoConfig,
-	description: Option<&[u8]>,
+	description: &[u8],
 ) -> Result<mp4_atom::Trak, Error> {
 	let width = config.coded_width.unwrap_or(0) as u16;
 	let height = config.coded_height.unwrap_or(0) as u16;
@@ -305,12 +362,9 @@ pub(crate) fn synthesize_video_trak(
 		..Default::default()
 	};
 
-	// Codecs that carry an out-of-band config record require `description`.
-	let require_description = || description.ok_or_else(|| Error::MissingVideoDescription(config.codec.to_string()));
-
 	let sample_entry = match &config.codec {
 		VideoCodec::H264(_) => {
-			let mut cursor = std::io::Cursor::new(require_description()?);
+			let mut cursor = std::io::Cursor::new(description);
 			let avcc = mp4_atom::Avcc::decode_body(&mut cursor).map_err(Error::Mp4)?;
 			mp4_atom::Codec::from(mp4_atom::Avc1 {
 				visual,
@@ -319,7 +373,7 @@ pub(crate) fn synthesize_video_trak(
 			})
 		}
 		VideoCodec::H265(h265) => {
-			let mut cursor = std::io::Cursor::new(require_description()?);
+			let mut cursor = std::io::Cursor::new(description);
 			let hvcc = mp4_atom::Hvcc::decode_body(&mut cursor).map_err(Error::Mp4)?;
 			// `in_band` (catalog) ↔ hev1 sample entry; otherwise hvc1.
 			if h265.in_band {
@@ -336,16 +390,6 @@ pub(crate) fn synthesize_video_trak(
 				})
 			}
 		}
-		VideoCodec::VP8 => mp4_atom::Codec::from(mp4_atom::Vp08 {
-			visual,
-			vpcc: crate::codec::vp8::vpcc(),
-			..Default::default()
-		}),
-		VideoCodec::VP9(vp9) => mp4_atom::Codec::from(mp4_atom::Vp09 {
-			visual,
-			vpcc: crate::codec::vp9::vpcc(vp9),
-			..Default::default()
-		}),
 		other => return Err(Error::UnsupportedSynthesis(format!("video codec {:?}", other))),
 	};
 
@@ -358,8 +402,6 @@ pub(crate) fn synthesize_audio_trak(
 	timescale: u64,
 	config: &AudioConfig,
 ) -> Result<mp4_atom::Trak, Error> {
-	use mp4_atom::Decode;
-
 	let audio = mp4_atom::Audio {
 		data_reference_index: 1,
 		channel_count: config.channel_count as u16,
@@ -378,41 +420,6 @@ pub(crate) fn synthesize_audio_trak(
 			},
 			btrt: None,
 		}),
-		AudioCodec::AAC(_) => {
-			// The catalog `description` is the AudioSpecificConfig (set by the TS
-			// importer via aac::Config::encode, or carried over from a CMAF source).
-			// mp4_atom models the esds DecoderSpecific as the parsed
-			// AudioSpecificConfig, so decode the blob back into that shape.
-			let description = config
-				.description
-				.as_ref()
-				.ok_or_else(|| Error::MissingAudioDescription(config.codec.to_string()))?;
-			let mut cursor = std::io::Cursor::new(description.as_ref());
-			let dec_specific = mp4_atom::esds::DecoderSpecific::decode(&mut cursor)?;
-
-			let bitrate = config.bitrate.unwrap_or(0) as u32;
-			mp4_atom::Codec::from(mp4_atom::Mp4a {
-				audio,
-				esds: mp4_atom::Esds {
-					es_desc: mp4_atom::esds::EsDescriptor {
-						// ISO/IEC 14496-14 §5.6: ES_ID is 0 in an MP4 file (the track id carries identity).
-						es_id: 0,
-						dec_config: mp4_atom::esds::DecoderConfig {
-							object_type_indication: 0x40, // MPEG-4 AAC
-							stream_type: 0x05,            // audio
-							up_stream: 0,
-							buffer_size_db: Default::default(),
-							max_bitrate: bitrate,
-							avg_bitrate: bitrate,
-							dec_specific,
-						},
-						sl_config: Default::default(),
-					},
-				},
-				btrt: None,
-				taic: None,
-			})
-		}
 		other => return Err(Error::UnsupportedSynthesis(format!("audio codec {:?}", other))),
 	};
 

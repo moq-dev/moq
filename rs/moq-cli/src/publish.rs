@@ -1,15 +1,11 @@
 use clap::Subcommand;
 use hang::moq_net;
-use moq_mux::container::{flv, fmp4, hls, ts};
+use moq_mux::container::{fmp4, hls};
 
 #[derive(Subcommand, Clone)]
 pub enum PublishFormat {
 	Avc3,
 	Fmp4,
-	/// MPEG-TS (transport stream) read from stdin.
-	Ts,
-	/// FLV (Flash Video / RTMP) read from stdin.
-	Flv,
 	// NOTE: No aac support because it needs framing.
 	Hls {
 		/// URL or file path of an HLS playlist to ingest.
@@ -19,55 +15,33 @@ pub enum PublishFormat {
 }
 
 enum PublishDecoder {
-	Avc3(Box<moq_mux::codec::h264::Import<moq_mux::catalog::hang::Extra>>),
+	Avc3(Box<moq_mux::codec::h264::Import>),
 	Fmp4(Box<fmp4::Import>),
-	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
-	// verbatim, so it uses the typed `mpegts` catalog extension rather than the untyped default.
-	Ts(Box<ts::Import<ts::catalog::Ext>>),
-	Flv(Box<flv::Import>),
 	Hls(Box<hls::Import>),
 }
 
 impl PublishDecoder {
-	/// Decode a chunk of bytes from stdin (Avc3, Fmp4, Ts, or Flv).
+	/// Decode a chunk of bytes from stdin (Avc3 or Fmp4 only).
 	fn decode_buf(&mut self, buffer: &mut bytes::BytesMut) -> anyhow::Result<()> {
 		match self {
-			Self::Avc3(d) => d.decode_stream(buffer, None),
-			Self::Fmp4(d) => d.decode(buffer),
-			Self::Ts(d) => d.decode(buffer),
-			Self::Flv(d) => d.decode(buffer),
+			Self::Avc3(d) => Ok(d.decode_stream(buffer, None)?),
+			Self::Fmp4(d) => Ok(d.decode(buffer)?),
 			Self::Hls(_) => unreachable!(),
 		}
 	}
 }
 
 pub struct Publish {
-	source: PublishDecoder,
+	decoder: PublishDecoder,
 	broadcast: moq_net::BroadcastProducer,
 }
 
 impl Publish {
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
 		let mut broadcast = moq_net::Broadcast::new().produce();
+		let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
 
-		// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
-		// verbatim, so it uses the `mpegts` catalog extension rather than the media-only
-		// `()`. The catalog producer owns the broadcast's catalog tracks, so each broadcast
-		// gets exactly one; TS builds its `Ext` catalog here instead of the shared `()` below.
-		if let PublishFormat::Ts = format {
-			let catalog = moq_mux::catalog::Producer::with_catalog(
-				&mut broadcast,
-				moq_mux::catalog::hang::Catalog::<ts::catalog::Ext>::default(),
-			)?;
-			let ts = ts::Import::new(broadcast.clone(), catalog);
-			return Ok(Self {
-				source: PublishDecoder::Ts(Box::new(ts)),
-				broadcast,
-			});
-		}
-
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
-		let source = match format {
+		let decoder = match format {
 			PublishFormat::Avc3 => {
 				let avc3 = moq_mux::codec::h264::Import::new(broadcast.clone(), catalog.clone())
 					.with_mode(moq_mux::codec::h264::Mode::Avc3)?;
@@ -77,41 +51,33 @@ impl Publish {
 				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
-			PublishFormat::Ts => unreachable!("TS is handled above with the mpegts catalog extension"),
-			PublishFormat::Flv => {
-				let flv = flv::Import::new(broadcast.clone(), catalog.clone());
-				PublishDecoder::Flv(Box::new(flv))
-			}
 			PublishFormat::Hls { playlist } => {
 				let hls = hls::Import::new(broadcast.clone(), catalog.clone(), hls::Config::new(playlist.clone()))?;
 				PublishDecoder::Hls(Box::new(hls))
 			}
 		};
 
-		Ok(Self { source, broadcast })
+		Ok(Self { decoder, broadcast })
 	}
 
 	pub fn consume(&self) -> moq_net::BroadcastConsumer {
 		self.broadcast.consume()
 	}
 
-	pub async fn run(self) -> anyhow::Result<()> {
-		match self.source {
-			PublishDecoder::Hls(mut decoder) => {
-				decoder.init().await?;
-				decoder.run().await
-			}
-			mut decoder => {
-				let mut stdin = tokio::io::stdin();
-				let mut buffer = bytes::BytesMut::new();
+	pub async fn run(mut self) -> anyhow::Result<()> {
+		if let PublishDecoder::Hls(decoder) = &mut self.decoder {
+			decoder.init().await?;
+			Ok(decoder.run().await?)
+		} else {
+			let mut stdin = tokio::io::stdin();
+			let mut buffer = bytes::BytesMut::new();
 
-				loop {
-					let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
-					if n == 0 {
-						return Ok(());
-					}
-					decoder.decode_buf(&mut buffer)?;
+			loop {
+				let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
+				if n == 0 {
+					return Ok(());
 				}
+				self.decoder.decode_buf(&mut buffer)?;
 			}
 		}
 	}

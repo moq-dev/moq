@@ -76,9 +76,7 @@ impl Publish {
 			.map_err(|err| Error::DecodeFailed(Arc::new(err)))?;
 
 		if data.has_remaining() {
-			return Err(Error::DecodeFailed(Arc::new(anyhow::anyhow!(
-				"buffer was not fully consumed"
-			))));
+			return Err(Error::BufferNotConsumed);
 		}
 
 		Ok(())

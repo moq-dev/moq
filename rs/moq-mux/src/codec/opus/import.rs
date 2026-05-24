@@ -9,38 +9,18 @@ use super::Config;
 /// without waiting for a group boundary. Opus' packet loss concealment handles drops.
 /// Ogg framing is not supported, feed raw Opus packets.
 pub struct Import {
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::hang::Producer,
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	zero: Option<tokio::time::Instant>,
 }
 
 impl Import {
 	pub fn new(
-		broadcast: moq_net::BroadcastProducer,
-		catalog: crate::catalog::Producer,
+		mut broadcast: moq_net::BroadcastProducer,
+		mut catalog: crate::catalog::hang::Producer,
 		config: Config,
-	) -> anyhow::Result<Self> {
-		Self::new_with_source(
-			crate::track_provider::TrackProvider::unique(broadcast, ".opus"),
-			catalog,
-			config,
-		)
-	}
-
-	pub fn new_with_track(
-		track: moq_net::TrackProducer,
-		catalog: crate::catalog::Producer,
-		config: Config,
-	) -> anyhow::Result<Self> {
-		Self::new_with_source(crate::track_provider::TrackProvider::fixed(track), catalog, config)
-	}
-
-	fn new_with_source(
-		mut tracks: crate::track_provider::TrackProvider,
-		mut catalog: crate::catalog::Producer,
-		config: Config,
-	) -> anyhow::Result<Self> {
-		let track = tracks.create()?;
+	) -> crate::Result<Self> {
+		let track = broadcast.unique_track(".opus")?;
 
 		let mut audio_config = hang::catalog::AudioConfig::new(
 			hang::catalog::AudioCodec::Opus,
@@ -66,18 +46,12 @@ impl Import {
 	}
 
 	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
 		Ok(())
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
-		self.track.seek(sequence)?;
-		Ok(())
-	}
-
-	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
+	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<crate::container::Timestamp>) -> crate::Result<()> {
 		let pts = self.pts(pts)?;
 
 		// Collect the input into a contiguous Bytes payload.
@@ -103,7 +77,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
+	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> crate::Result<crate::container::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}

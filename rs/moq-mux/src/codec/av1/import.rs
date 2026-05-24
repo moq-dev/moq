@@ -1,9 +1,11 @@
 use crate::container::jitter::Jitter;
 
-use anyhow::Context;
 use bytes::BytesMut;
 use bytes::{Buf, Bytes};
 use scuffle_av1::seq::SequenceHeaderObu;
+
+use super::Error;
+use crate::Result;
 
 /// A decoder for AV1 with inline sequence headers.
 pub struct Import {
@@ -61,7 +63,7 @@ impl Import {
 		}
 	}
 
-	fn init(&mut self, seq_header: &SequenceHeaderObu) -> anyhow::Result<()> {
+	fn init(&mut self, seq_header: &SequenceHeaderObu) -> Result<()> {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
 			profile: seq_header.seq_profile,
 			level: seq_header
@@ -126,7 +128,7 @@ impl Import {
 	}
 
 	/// Initialize with minimal config if sequence header parsing fails
-	fn init_minimal(&mut self) -> anyhow::Result<()> {
+	fn init_minimal(&mut self) -> Result<()> {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
 			profile: 0,  // Main profile
 			level: 0,    // Unknown
@@ -165,7 +167,7 @@ impl Import {
 	}
 
 	/// Initialize the decoder with sequence header and other metadata OBUs.
-	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		let data = buf.as_ref();
 
 		// Handle av1C format (MP4/container initialization)
@@ -189,7 +191,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn init_from_av1c(&mut self, data: &[u8]) -> anyhow::Result<()> {
+	fn init_from_av1c(&mut self, data: &[u8]) -> Result<()> {
 		// Parse av1C box structure
 		let seq_profile = (data[1] >> 5) & 0x07;
 		let seq_level_idx = data[1] & 0x1F;
@@ -245,8 +247,8 @@ impl Import {
 	}
 
 	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
-		Ok(self.track.as_ref().context("not initialized")?.track())
+	pub fn track(&self) -> Result<&moq_net::TrackProducer> {
+		Ok(self.track.as_ref().ok_or(Error::NotInitialized)?.track())
 	}
 
 	/// Decode as much data as possible from the given buffer.
@@ -254,7 +256,7 @@ impl Import {
 		&mut self,
 		buf: &mut T,
 		pts: Option<crate::container::Timestamp>,
-	) -> anyhow::Result<()> {
+	) -> Result<()> {
 		let obus = ObuIterator::new(buf);
 
 		for obu in obus {
@@ -271,7 +273,7 @@ impl Import {
 		&mut self,
 		buf: &mut T,
 		pts: Option<crate::container::Timestamp>,
-	) -> anyhow::Result<()> {
+	) -> Result<()> {
 		let pts = self.pts(pts)?;
 		let mut obus = ObuIterator::new(buf);
 
@@ -288,8 +290,10 @@ impl Import {
 		Ok(())
 	}
 
-	fn decode_obu(&mut self, obu_data: Bytes, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
-		anyhow::ensure!(!obu_data.is_empty(), "OBU is too short");
+	fn decode_obu(&mut self, obu_data: Bytes, pts: Option<crate::container::Timestamp>) -> Result<()> {
+		if obu_data.is_empty() {
+			return Err(Error::ObuTooShort.into());
+		}
 
 		// Parse OBU header - this consumes header + extension + LEB128 size
 		let mut reader = &obu_data[..];
@@ -371,16 +375,13 @@ impl Import {
 		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> Result<()> {
 		if !self.current.contains_frame {
 			return Ok(());
 		}
 
-		let track = self
-			.track
-			.as_mut()
-			.context("expected sequence header before any frames")?;
-		let pts = pts.context("missing timestamp")?;
+		let track = self.track.as_mut().ok_or(Error::MissingSequenceHeader)?;
+		let pts = pts.ok_or(Error::MissingTimestamp)?;
 
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
 
@@ -405,8 +406,8 @@ impl Import {
 	}
 
 	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
+	pub fn finish(&mut self) -> Result<()> {
+		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
 		track.finish()?;
 		Ok(())
 	}
@@ -422,7 +423,7 @@ impl Import {
 		self.track.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
+	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> Result<crate::container::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
@@ -453,7 +454,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> ObuIterator<'a, T> {
 		Self { buf }
 	}
 
-	pub fn flush(self) -> anyhow::Result<Option<Bytes>> {
+	pub fn flush(self) -> Result<Option<Bytes>> {
 		let remaining = self.buf.remaining();
 		if remaining == 0 {
 			return Ok(None);
@@ -465,7 +466,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> ObuIterator<'a, T> {
 }
 
 impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for ObuIterator<'a, T> {
-	type Item = anyhow::Result<Bytes>;
+	type Item = Result<Bytes>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		if self.buf.remaining() == 0 {
@@ -516,7 +517,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for ObuIterator<'a, T> {
 			}
 
 			if shift >= 56 {
-				return Some(Err(anyhow::anyhow!("OBU size too large")));
+				return Some(Err(Error::ObuSizeTooLarge.into()));
 			}
 		}
 

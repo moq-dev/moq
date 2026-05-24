@@ -13,7 +13,7 @@
 //! existing `description` (for already-out-of-band sources) or the synthesized
 //! avcC/hvcC (for Annex-B sources).
 
-use std::task::{Poll, ready};
+use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -21,32 +21,27 @@ use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
 
 use crate::catalog::CatalogFormat;
 use crate::catalog::hang::Container as HangContainer;
-use crate::catalog::hang::{Catalog, CatalogExt};
 use crate::codec::h264::Avc1;
 use crate::codec::h265::Hvc1;
 use crate::container::{Consumer, Frame};
 
 /// Source for the catalog stream backing an exporter.
 ///
-/// Both variants yield [`Catalog<E>`]; MSF is media-only, so its extension is
-/// always the empty default.
-pub(crate) enum CatalogSource<E: CatalogExt = ()> {
+/// Both variants expose the same [`hang::Catalog`] shape; the MSF variant
+/// converts on the fly so the rest of the pipeline only deals with hang types.
+pub(crate) enum CatalogSource {
 	/// The hang catalog track (track name `catalog.json`, JSON payload).
-	Hang(crate::catalog::hang::Consumer<E>),
+	Hang(crate::catalog::hang::Consumer),
 	/// The MSF catalog track (track name `catalog`, MSF JSON payload converted to hang).
 	Msf(crate::catalog::msf::Consumer),
 }
 
-impl<E: CatalogExt> CatalogSource<E> {
+impl CatalogSource {
 	pub(crate) fn new(broadcast: &moq_net::BroadcastConsumer, format: CatalogFormat) -> Result<Self, crate::Error> {
 		Ok(match format {
 			CatalogFormat::Hang => {
 				let track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
 				CatalogSource::Hang(crate::catalog::hang::Consumer::new(track))
-			}
-			CatalogFormat::HangZ => {
-				let track = broadcast.subscribe_track(&hang::Catalog::compressed_track())?;
-				CatalogSource::Hang(crate::catalog::hang::Consumer::compressed(track))
 			}
 			CatalogFormat::Msf => {
 				let track = broadcast.subscribe_track(&moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
@@ -55,20 +50,10 @@ impl<E: CatalogExt> CatalogSource<E> {
 		})
 	}
 
-	pub(crate) fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Catalog<E>>>> {
+	pub(crate) fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<crate::Result<Option<hang::Catalog>>> {
 		match self {
-			Self::Hang(c) => {
-				let catalog = ready!(c.poll_next(waiter))?;
-				Poll::Ready(Ok(catalog))
-			}
-			Self::Msf(c) => {
-				let catalog = ready!(c.poll_next(waiter))?;
-				Poll::Ready(Ok(catalog.map(|media| Catalog {
-					video: media.video,
-					audio: media.audio,
-					ext: E::default(),
-				})))
-			}
+			Self::Hang(c) => c.poll_next(waiter).map_err(Into::into),
+			Self::Msf(c) => c.poll_next(waiter),
 		}
 	}
 }
@@ -87,10 +72,10 @@ impl VideoTransform {
 		}
 	}
 
-	fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
+	fn transform(&mut self, payload: Bytes) -> crate::Result<Option<Bytes>> {
 		match self {
-			VideoTransform::Avc1(t) => t.transform(payload),
-			VideoTransform::Hvc1(t) => t.transform(payload),
+			VideoTransform::Avc1(t) => Ok(t.transform(payload)?),
+			VideoTransform::Hvc1(t) => Ok(t.transform(payload)?),
 		}
 	}
 }
@@ -149,24 +134,6 @@ impl ExportSource {
 		})
 	}
 
-	/// Subscribe to a verbatim `mpegts` stream rendition (SCTE-35, private PES, ...).
-	/// No codec-shape transform and no description: the frames are Legacy-framed
-	/// verbatim bytes the muxer writes back out as PES or private sections.
-	pub fn for_stream(
-		broadcast: &moq_net::BroadcastConsumer,
-		name: &str,
-		latency: Duration,
-	) -> Result<Self, crate::Error> {
-		let track = broadcast.subscribe_track(&moq_net::Track::new(name.to_string()))?;
-		let consumer = Consumer::new(track, HangContainer::Legacy).with_latency(latency);
-
-		Ok(Self {
-			consumer,
-			transform: None,
-			description: None,
-		})
-	}
-
 	/// The resolved codec-config record, if available.
 	pub fn description(&self) -> Option<&Bytes> {
 		self.description.as_ref()
@@ -183,12 +150,12 @@ impl ExportSource {
 	/// Parameter-only frames (SPS/PPS-only inputs to the Avc3 transform) are
 	/// absorbed and the next frame is polled. Returns `Ready(None)` at
 	/// end-of-track.
-	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
+	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		loop {
 			let frame = match self.consumer.poll_read(waiter) {
 				Poll::Ready(Ok(Some(f))) => f,
 				Poll::Ready(Ok(None)) => return Poll::Ready(Ok(None)),
-				Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+				Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
 				Poll::Pending => return Poll::Pending,
 			};
 
@@ -213,13 +180,11 @@ impl ExportSource {
 	}
 
 	fn refresh_description(&mut self) {
-		// Track the transform's record even after it is first set: a mid-stream
-		// reconfiguration rebuilds the avcC/hvcC with a new parameter set, and the
-		// muxer re-injects from this on every keyframe, so a stale record would
-		// carry superseded SPS/PPS.
+		if self.description.is_some() {
+			return;
+		}
 		if let Some(transform) = self.transform.as_ref()
 			&& let Some(d) = transform.codec_private()
-			&& self.description.as_ref() != Some(d)
 		{
 			self.description = Some(d.clone());
 		}

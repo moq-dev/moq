@@ -7,14 +7,13 @@
 //! leading start code; callers that already know it can also force the
 //! mode via [`with_mode`](Import::with_mode).
 
-use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use super::Sps;
-use crate::catalog::hang::CatalogExt;
+use super::{Error, Sps};
+use crate::Result;
 use crate::codec::annexb::{NalIterator, START_CODE};
-use crate::container::jitter::Jitter;
+use crate::container::jitter::MinFrameDuration;
 
 /// The wire shape an [`Import`] is processing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,14 +29,14 @@ pub enum Mode {
 /// H.264 importer. Handles both avc1 (length-prefixed) and avc3 (Annex-B)
 /// input streams; the shape is detected from the first bytes the caller
 /// supplies, or forced explicitly via [`with_mode`](Self::with_mode).
-pub struct Import<E: CatalogExt = ()> {
-	tracks: crate::track_provider::TrackProvider,
-	catalog: crate::catalog::Producer<E>,
+pub struct Import {
+	broadcast: moq_net::BroadcastProducer,
+	catalog: crate::catalog::hang::Producer,
 	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
 	config: Option<hang::catalog::VideoConfig>,
 	state: State,
 	zero: Option<tokio::time::Instant>,
-	jitter: Jitter,
+	jitter: MinFrameDuration,
 }
 
 enum State {
@@ -48,13 +47,8 @@ enum State {
 	/// avc3 wire shape: Annex-B NALU, inline SPS/PPS.
 	Avc3 {
 		current: Avc3Frame,
-		/// Retained SPS NALs from the latest keyframe that carried them, re-injected
-		/// on bare keyframes. Replaced (not accumulated) when a keyframe presents a
-		/// different set, so a mid-stream reinit drops the superseded ones.
-		sps: Vec<Bytes>,
-		/// Retained PPS NALs. A keyframe may carry several (slices reference them by
-		/// id); all are kept and re-injected, but a new GOP's set supersedes them.
-		pps: Vec<Bytes>,
+		sps: Option<Bytes>,
+		pps: Option<Bytes>,
 	},
 }
 
@@ -63,34 +57,20 @@ struct Avc3Frame {
 	chunks: BytesMut,
 	contains_idr: bool,
 	contains_slice: bool,
-	/// SPS NALs already inline in this access unit, so re-injection skips them.
-	sps_seen: Vec<Bytes>,
-	/// PPS NALs already inline in this access unit.
-	pps_seen: Vec<Bytes>,
+	contains_sps: bool,
+	contains_pps: bool,
 }
 
-impl<E: CatalogExt> Import<E> {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
+impl Import {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::hang::Producer) -> Self {
 		Self {
-			tracks: crate::track_provider::TrackProvider::unique(broadcast, ".avc3"),
+			broadcast,
 			catalog,
 			track: None,
 			config: None,
 			state: State::Pending { mode_hint: None },
 			zero: None,
-			jitter: Jitter::new(),
-		}
-	}
-
-	pub fn new_with_track(track: moq_net::TrackProducer, catalog: crate::catalog::Producer<E>) -> Self {
-		Self {
-			tracks: crate::track_provider::TrackProvider::fixed(track),
-			catalog,
-			track: None,
-			config: None,
-			state: State::Pending { mode_hint: None },
-			zero: None,
-			jitter: Jitter::new(),
+			jitter: MinFrameDuration::new(),
 		}
 	}
 
@@ -98,25 +78,23 @@ impl<E: CatalogExt> Import<E> {
 	/// inside [`initialize`](Self::initialize). Eagerly creates the broadcast
 	/// track for avc3 sources so the caller can observe subscriber state
 	/// (`used()` / `unused()`) before any frames arrive.
-	pub fn with_mode(mut self, mode: Mode) -> anyhow::Result<Self> {
+	pub fn with_mode(mut self, mode: Mode) -> Result<Self> {
 		match mode {
 			Mode::Avc1 => {
-				self.tracks.set_suffix(".avc1");
 				self.state = State::Pending {
 					mode_hint: Some(Mode::Avc1),
 				};
 			}
 			Mode::Avc3 => {
-				self.tracks.set_suffix(".avc3");
-				let track = self.tracks.create()?;
-				self.track = Some(
-					crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
-						.with_lenient_start(),
-				);
+				let track = self.broadcast.unique_track(".avc3")?;
+				self.track = Some(crate::container::Producer::new(
+					track,
+					crate::catalog::hang::Container::Legacy,
+				));
 				self.state = State::Avc3 {
 					current: Avc3Frame::default(),
-					sps: Vec::new(),
-					pps: Vec::new(),
+					sps: None,
+					pps: None,
 				};
 			}
 		}
@@ -139,7 +117,7 @@ impl<E: CatalogExt> Import<E> {
 	///   is parsed as Annex-B NALs to seed the cached SPS/PPS.
 	///
 	/// The buffer is fully consumed.
-	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		let mode = match &self.state {
 			State::Pending { mode_hint } => mode_hint.unwrap_or_else(|| detect_mode(buf.as_ref())),
 			State::Avc1 { .. } => Mode::Avc1,
@@ -153,7 +131,7 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Initialize the avc1 path from an `AVCDecoderConfigurationRecord` buffer.
-	fn initialize_avc1<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+	fn initialize_avc1<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		let avcc_bytes = buf.as_ref();
 		let avcc = super::Avcc::parse(avcc_bytes)?;
 		self.state = State::Avc1 {
@@ -171,8 +149,7 @@ impl<E: CatalogExt> Import<E> {
 		config.description = Some(Bytes::copy_from_slice(avcc_bytes));
 		config.container = hang::catalog::Container::Legacy;
 
-		self.tracks.set_suffix(".avc1");
-		self.swap_config(config)?;
+		self.swap_config(config, ".avc1")?;
 		buf.advance(buf.remaining());
 
 		Ok(())
@@ -180,22 +157,21 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Initialize the avc3 path by parsing Annex-B NALs (SPS/PPS seed the
 	/// catalog rendition; the track is created eagerly on first SPS).
-	fn initialize_avc3<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+	fn initialize_avc3<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		// Eager-create the track + state on first switch into Avc3 mode so
 		// callers can observe `used()` / `unused()` before any frames arrive.
 		if !matches!(self.state, State::Avc3 { .. }) {
 			self.state = State::Avc3 {
 				current: Avc3Frame::default(),
-				sps: Vec::new(),
-				pps: Vec::new(),
+				sps: None,
+				pps: None,
 			};
 			if self.track.is_none() {
-				self.tracks.set_suffix(".avc3");
-				let track = self.tracks.create()?;
-				self.track = Some(
-					crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
-						.with_lenient_start(),
-				);
+				let track = self.broadcast.unique_track(".avc3")?;
+				self.track = Some(crate::container::Producer::new(
+					track,
+					crate::catalog::hang::Container::Legacy,
+				));
 			}
 		}
 
@@ -216,7 +192,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Decode from an asynchronous reader. avc3 only — for avc1, the caller
 	/// already has framed buffers and uses [`decode_frame`](Self::decode_frame).
-	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> anyhow::Result<()> {
+	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> Result<()> {
 		let mut buffer = BytesMut::new();
 		while reader.read_buf(&mut buffer).await? > 0 {
 			self.decode_stream(&mut buffer, None)?;
@@ -231,8 +207,10 @@ impl<E: CatalogExt> Import<E> {
 		&mut self,
 		buf: &mut T,
 		pts: Option<crate::container::Timestamp>,
-	) -> anyhow::Result<()> {
-		anyhow::ensure!(matches!(self.state, State::Avc3 { .. }), "decode_stream is avc3 only");
+	) -> Result<()> {
+		if !matches!(self.state, State::Avc3 { .. }) {
+			return Err(Error::StreamNotAvc3.into());
+		}
 		let pts = self.pts(pts)?;
 		let nals = NalIterator::new(buf);
 		for nal in nals {
@@ -250,27 +228,11 @@ impl<E: CatalogExt> Import<E> {
 		&mut self,
 		buf: &mut T,
 		pts: Option<crate::container::Timestamp>,
-	) -> anyhow::Result<()> {
+	) -> Result<()> {
 		match &self.state {
 			State::Avc1 { .. } => self.decode_avc1(buf, pts),
 			State::Avc3 { .. } => self.decode_avc3_frame(buf, pts),
-			State::Pending { .. } => anyhow::bail!("not initialized; call initialize() or with_mode() first"),
-		}
-	}
-
-	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the
-	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The container
-	/// supplies this since the elementary stream alone carries no decode time. No-op until the
-	/// track exists.
-	pub fn observe_reorder(&mut self, reorder: crate::container::Timestamp) {
-		let Some(jitter) = self.jitter.observe_reorder(reorder) else {
-			return;
-		};
-		let Some(track) = self.track.as_ref() else {
-			return;
-		};
-		if let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name) {
-			c.jitter = Some(jitter);
+			State::Pending { .. } => Err(Error::NotInitialized.into()),
 		}
 	}
 
@@ -278,17 +240,14 @@ impl<E: CatalogExt> Import<E> {
 		&mut self,
 		buf: &mut T,
 		pts: Option<crate::container::Timestamp>,
-	) -> anyhow::Result<()> {
+	) -> Result<()> {
 		let State::Avc1 { length_size } = self.state else {
 			unreachable!("checked by decode_frame")
 		};
 		let data = buf.as_ref();
 		let pts = self.pts(pts)?;
 		let keyframe = avc1_is_keyframe(data, length_size);
-		let track = self
-			.track
-			.as_mut()
-			.context("not initialized; call initialize() first")?;
+		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
 
 		track.write(crate::container::Frame {
 			timestamp: pts,
@@ -310,7 +269,7 @@ impl<E: CatalogExt> Import<E> {
 		&mut self,
 		buf: &mut T,
 		pts: Option<crate::container::Timestamp>,
-	) -> anyhow::Result<()> {
+	) -> Result<()> {
 		let pts = self.pts(pts)?;
 		let mut nals = NalIterator::new(buf);
 		while let Some(nal) = nals.next().transpose()? {
@@ -323,10 +282,12 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	fn decode_nal(&mut self, nal: Bytes, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
-		let header = nal.first().context("NAL unit is too short")?;
+	fn decode_nal(&mut self, nal: Bytes, pts: Option<crate::container::Timestamp>) -> Result<()> {
+		let header = nal.first().ok_or(Error::NalTooShort)?;
 		let forbidden_zero_bit = (header >> 7) & 1;
-		anyhow::ensure!(forbidden_zero_bit == 0, "forbidden zero bit is not zero");
+		if forbidden_zero_bit != 0 {
+			return Err(Error::ForbiddenZeroBit.into());
+		}
 
 		let nal_unit_type = header & 0b11111;
 		let nal_type = Avc3NalType::try_from(nal_unit_type).ok();
@@ -334,33 +295,31 @@ impl<E: CatalogExt> Import<E> {
 		match nal_type {
 			Some(Avc3NalType::Sps) => {
 				self.maybe_start_frame(pts)?;
-				let parsed = Sps::parse(&nal)?;
-				// A changed config (resolution/profile) means the retained parameter
-				// sets no longer apply; reconfigured tells us to drop them.
-				let reconfigured = self.init_from_sps(&parsed)?;
+				let sps = Sps::parse(&nal)?;
+				self.init_from_sps(&sps)?;
 				let State::Avc3 { current, sps, pps } = &mut self.state else {
 					unreachable!("decode_nal is avc3 only")
 				};
-				if reconfigured {
-					// The retained SPS/PPS are tied to the old config and may already
-					// have been appended to current.chunks earlier in this AU; reset
-					// the sets and AU so only the new parameter sets emit.
-					sps.clear();
-					pps.clear();
+				if sps.as_ref().is_some_and(|cached| cached != &nal) {
+					// SPS changed mid-AU. The cached PPS is tied to the old SPS
+					// and may already have been appended to current.chunks
+					// earlier in this AU; reset the AU so the new SPS+PPS pair
+					// is the only parameter set we emit.
+					*pps = None;
 					current.chunks.clear();
-					current.sps_seen.clear();
-					current.pps_seen.clear();
+					current.contains_pps = false;
+					current.contains_sps = false;
 				}
-				// Track only what this AU carries; the retained set is reconciled at
-				// the keyframe so a new GOP's set replaces (not accumulates onto) it.
-				crate::codec::annexb::push_distinct(&mut current.sps_seen, &nal);
+				*sps = Some(nal.clone());
+				current.contains_sps = true;
 			}
 			Some(Avc3NalType::Pps) => {
 				self.maybe_start_frame(pts)?;
-				let State::Avc3 { current, .. } = &mut self.state else {
+				let State::Avc3 { current, pps, .. } = &mut self.state else {
 					unreachable!()
 				};
-				crate::codec::annexb::push_distinct(&mut current.pps_seen, &nal);
+				*pps = Some(nal.clone());
+				current.contains_pps = true;
 			}
 			Some(Avc3NalType::Aud) | Some(Avc3NalType::Sei) => {
 				self.maybe_start_frame(pts)?;
@@ -369,10 +328,20 @@ impl<E: CatalogExt> Import<E> {
 				let State::Avc3 { current, sps, pps } = &mut self.state else {
 					unreachable!()
 				};
-				// Adopt this keyframe's inline set (dropping any the new GOP no longer
-				// uses), or re-inject the retained set if the keyframe carried none.
-				crate::codec::annexb::reconcile_keyframe_params(&mut current.chunks, sps, &mut current.sps_seen);
-				crate::codec::annexb::reconcile_keyframe_params(&mut current.chunks, pps, &mut current.pps_seen);
+				if !current.contains_sps
+					&& let Some(sps) = sps.as_ref()
+				{
+					current.chunks.extend_from_slice(&START_CODE);
+					current.chunks.extend_from_slice(sps);
+					current.contains_sps = true;
+				}
+				if !current.contains_pps
+					&& let Some(pps) = pps.as_ref()
+				{
+					current.chunks.extend_from_slice(&START_CODE);
+					current.chunks.extend_from_slice(pps);
+					current.contains_pps = true;
+				}
 				current.contains_idr = true;
 				current.contains_slice = true;
 			}
@@ -380,7 +349,7 @@ impl<E: CatalogExt> Import<E> {
 			| Some(Avc3NalType::DataPartitionA)
 			| Some(Avc3NalType::DataPartitionB)
 			| Some(Avc3NalType::DataPartitionC) => {
-				if nal.get(1).context("NAL unit is too short")? & 0x80 != 0 {
+				if nal.get(1).ok_or(Error::NalTooShort)? & 0x80 != 0 {
 					self.maybe_start_frame(pts)?;
 				}
 				let State::Avc3 { current, .. } = &mut self.state else {
@@ -401,11 +370,7 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Publish (or republish) the catalog rendition for this SPS. Returns true if
-	/// the config changed an existing one (a reconfiguration), so the caller can
-	/// drop parameter sets tied to the old config. The first SPS is not a
-	/// reconfiguration.
-	fn init_from_sps(&mut self, sps: &Sps) -> anyhow::Result<bool> {
+	fn init_from_sps(&mut self, sps: &Sps) -> Result<()> {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
 			profile: sps.profile,
 			constraints: sps.constraints,
@@ -416,42 +381,37 @@ impl<E: CatalogExt> Import<E> {
 		config.coded_height = Some(sps.coded_height);
 		config.container = hang::catalog::Container::Legacy;
 
-		match &self.config {
-			Some(old) if old == &config => Ok(false),
-			old => {
-				let reconfigured = old.is_some();
-				// The avc3 track was created eagerly in initialize_avc3; just publish
-				// (or republish) the catalog rendition with the latest config.
-				let track_name = self.track.as_ref().context("avc3 track not created")?.name.clone();
-				// Seed jitter from whatever has accumulated: a dirty start feeds frames before
-				// this first rendition exists, so those per-frame updates would otherwise be
-				// lost. Keep the cached `config` jitter-free so a later jitter change is not
-				// mistaken for a codec reconfiguration.
-				let mut published = config.clone();
-				published.jitter = self.jitter.current();
-				self.catalog.lock().video.renditions.insert(track_name, published);
-				self.config = Some(config);
-				Ok(reconfigured)
-			}
+		if let Some(old) = &self.config
+			&& old == &config
+		{
+			return Ok(());
 		}
+
+		// The avc3 track was created eagerly in initialize_avc3; just publish
+		// (or republish) the catalog rendition with the latest config.
+		let track_name = self.track.as_ref().ok_or(Error::Avc3TrackNotCreated)?.name.clone();
+		let mut catalog = self.catalog.lock();
+		catalog.video.renditions.insert(track_name, config.clone());
+		self.config = Some(config);
+		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> Result<()> {
 		let State::Avc3 { current, .. } = &mut self.state else {
 			return Ok(());
 		};
 		if !current.contains_slice {
 			return Ok(());
 		}
-		let pts = pts.context("missing timestamp")?;
+		let pts = pts.ok_or(Error::MissingTimestamp)?;
 		let payload = std::mem::take(&mut current.chunks).freeze();
 		let keyframe = current.contains_idr;
 		current.contains_idr = false;
 		current.contains_slice = false;
-		current.sps_seen.clear();
-		current.pps_seen.clear();
+		current.contains_sps = false;
+		current.contains_pps = false;
 
-		let track = self.track.as_mut().context("avc3 track not created")?;
+		let track = self.track.as_mut().ok_or(Error::Avc3TrackNotCreated)?;
 		track.write(crate::container::Frame {
 			timestamp: pts,
 			payload,
@@ -468,7 +428,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Replace the current track + catalog rendition with `config`. Used by
 	/// the avc1 path on every (re)initialization.
-	fn swap_config(&mut self, config: hang::catalog::VideoConfig) -> anyhow::Result<()> {
+	fn swap_config(&mut self, config: hang::catalog::VideoConfig, suffix: &str) -> Result<()> {
 		if let Some(old) = &self.config
 			&& old == &config
 		{
@@ -477,38 +437,29 @@ impl<E: CatalogExt> Import<E> {
 
 		let mut catalog = self.catalog.lock();
 		if let Some(track) = self.track.take() {
-			if self.tracks.is_fixed() {
-				self.track = Some(track);
-				anyhow::bail!("fixed track cannot be reconfigured");
-			}
 			tracing::debug!(name = ?track.name, "reinitializing H.264 track");
 			catalog.video.renditions.remove(&track.name);
 		}
-		let track = self.tracks.create()?;
+		let track = self.broadcast.unique_track(suffix)?;
 		tracing::debug!(name = ?track.name, ?config, "starting H.264 track");
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track =
-			Some(crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start());
+		self.track = Some(crate::container::Producer::new(
+			track,
+			crate::catalog::hang::Container::Legacy,
+		));
 		Ok(())
 	}
 
 	/// Finish the track, flushing any buffered data.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
+	pub fn finish(&mut self) -> Result<()> {
+		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
 		track.finish()?;
 		Ok(())
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
-		track.seek(sequence)?;
-		Ok(())
-	}
-
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
+	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> Result<crate::container::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
@@ -519,7 +470,7 @@ impl<E: CatalogExt> Import<E> {
 	}
 }
 
-impl<E: CatalogExt> Drop for Import<E> {
+impl Drop for Import {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.name, "ending H.264 track");
@@ -604,7 +555,7 @@ mod tests {
 
 		let broadcast = moq_net::Broadcast::new();
 		let mut producer = broadcast.produce();
-		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+		let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
 
 		let mut importer = Import::new(producer, catalog.clone());
 		let mut buf = bytes::BytesMut::from(avcc.as_slice());
@@ -640,7 +591,7 @@ mod tests {
 
 		let broadcast = moq_net::Broadcast::new();
 		let mut producer = broadcast.produce();
-		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+		let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
 
 		let mut importer = Import::new(producer, catalog.clone());
 		importer.initialize(&mut annexb).expect("initialize avc3");
@@ -655,124 +606,6 @@ mod tests {
 		assert!(cfg.description.is_none(), "avc3 has no out-of-band description");
 		assert_eq!(h264.profile, sps[1]);
 		assert_eq!(h264.level, sps[3]);
-	}
-
-	/// A source that defines two PPS once, then sends a bare IDR (no inline
-	/// parameter sets): the importer must re-inject BOTH cached PPS on the
-	/// keyframe, not just the last one. Regression for the multi-PPS collapse.
-	#[tokio::test(start_paused = true)]
-	async fn avc3_reinjects_all_cached_pps_on_keyframe() {
-		const SC: &[u8] = &[0, 0, 0, 1];
-		// A real, parseable SPS so init_from_sps can read the resolution.
-		let sps: &[u8] = &[
-			0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07, 0xd0, 0x00,
-			0x01, 0xd4, 0xc0, 0x80,
-		];
-		let pps0: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
-		let pps1: &[u8] = &[0x68, 0xce, 0x3c, 0x81];
-		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
-
-		let annexb = |nals: &[&[u8]]| {
-			let mut buf = bytes::BytesMut::new();
-			for nal in nals {
-				buf.extend_from_slice(SC);
-				buf.extend_from_slice(nal);
-			}
-			buf
-		};
-
-		let mut producer = moq_net::Broadcast::new().produce();
-		let consumer = producer.consume();
-		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-		let mut importer = Import::new(producer, catalog.clone())
-			.with_mode(Mode::Avc3)
-			.expect("avc3 mode");
-		let name = importer.track().unwrap().name.clone();
-
-		// First AU defines both PPS inline; the second is a bare IDR.
-		importer
-			.decode_frame(
-				&mut annexb(&[sps, pps0, pps1, idr]),
-				Some(crate::container::Timestamp::from_millis(0).unwrap()),
-			)
-			.unwrap();
-		importer
-			.decode_frame(
-				&mut annexb(&[idr]),
-				Some(crate::container::Timestamp::from_millis(40).unwrap()),
-			)
-			.unwrap();
-		importer.finish().unwrap();
-
-		let track = consumer.subscribe_track(&moq_net::Track::new(name)).unwrap();
-		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
-		let mut frames = Vec::new();
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
-		{
-			frames.push(frame);
-		}
-
-		assert_eq!(frames.len(), 2, "expected two keyframes");
-		// The bare IDR keyframe must carry SPS + both PPS, re-injected in order.
-		assert_eq!(frames[1].payload.as_ref(), annexb(&[sps, pps0, pps1, idr]).as_ref());
-	}
-
-	/// A keyframe that presents a smaller parameter set than a prior one reinits
-	/// the retained set: the dropped PPS must not be re-injected on later bare
-	/// keyframes.
-	#[tokio::test(start_paused = true)]
-	async fn avc3_reinit_drops_superseded_pps_on_keyframe() {
-		const SC: &[u8] = &[0, 0, 0, 1];
-		let sps: &[u8] = &[
-			0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07, 0xd0, 0x00,
-			0x01, 0xd4, 0xc0, 0x80,
-		];
-		let pps0: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
-		let pps1: &[u8] = &[0x68, 0xce, 0x3c, 0x81];
-		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
-
-		let annexb = |nals: &[&[u8]]| {
-			let mut buf = bytes::BytesMut::new();
-			for nal in nals {
-				buf.extend_from_slice(SC);
-				buf.extend_from_slice(nal);
-			}
-			buf
-		};
-
-		let mut producer = moq_net::Broadcast::new().produce();
-		let consumer = producer.consume();
-		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-		let mut importer = Import::new(producer, catalog.clone())
-			.with_mode(Mode::Avc3)
-			.expect("avc3 mode");
-		let name = importer.track().unwrap().name.clone();
-
-		// GOP 1 defines both PPS; GOP 2 redefines the set with only PPS 0; GOP 3 is
-		// a bare IDR that must re-inject the reduced set, not the dropped PPS 1.
-		let times = [0u64, 40, 80];
-		let gops: [&[&[u8]]; 3] = [&[sps, pps0, pps1, idr], &[sps, pps0, idr], &[idr]];
-		for (gop, t) in gops.iter().zip(times) {
-			importer
-				.decode_frame(
-					&mut annexb(gop),
-					Some(crate::container::Timestamp::from_millis(t).unwrap()),
-				)
-				.unwrap();
-		}
-		importer.finish().unwrap();
-
-		let track = consumer.subscribe_track(&moq_net::Track::new(name)).unwrap();
-		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
-		let mut frames = Vec::new();
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
-		{
-			frames.push(frame);
-		}
-
-		assert_eq!(frames.len(), 3, "expected three keyframes");
-		// The bare third keyframe re-injects only the surviving SPS + PPS 0.
-		assert_eq!(frames[2].payload.as_ref(), annexb(&[sps, pps0, idr]).as_ref());
 	}
 }
 

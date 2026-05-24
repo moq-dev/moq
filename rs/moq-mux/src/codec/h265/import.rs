@@ -1,19 +1,20 @@
-use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::{NalIterator, START_CODE};
-use crate::container::jitter::Jitter;
+use crate::container::jitter::MinFrameDuration;
 
-use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
 
+use super::Error;
+use crate::Result;
+
 /// A decoder for H.265 with inline SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
-pub struct Import<E: CatalogExt = ()> {
-	// Where new media tracks come from.
-	tracks: crate::track_provider::TrackProvider,
+pub struct Import {
+	// The broadcast being produced.
+	broadcast: moq_net::BroadcastProducer,
 
 	// The catalog being produced.
-	catalog: crate::catalog::Producer<E>,
+	catalog: crate::catalog::hang::Producer,
 
 	// The track being produced.
 	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
@@ -28,53 +29,32 @@ pub struct Import<E: CatalogExt = ()> {
 	// Used to compute wall clock timestamps if needed.
 	zero: Option<tokio::time::Instant>,
 
-	// Retained parameter set NALs from the latest keyframe that carried them,
-	// re-injected before bare keyframes. A keyframe may define several of each
-	// (slices reference them by id); all are kept, but a new GOP's set supersedes
-	// them (replace, not accumulate) so a mid-stream reinit drops stale entries.
-	vps: Vec<Bytes>,
-	sps: Vec<Bytes>,
-	pps: Vec<Bytes>,
+	// Cached parameter set NALs for re-insertion before keyframes.
+	vps: Option<Bytes>,
+	sps: Option<Bytes>,
+	pps: Option<Bytes>,
 
 	// Tracks the minimum frame duration and updates the catalog `jitter` field.
-	jitter: Jitter,
+	jitter: MinFrameDuration,
 }
 
-impl<E: CatalogExt> Import<E> {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
+impl Import {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::hang::Producer) -> Self {
 		Self {
-			tracks: crate::track_provider::TrackProvider::unique(broadcast, ".hev1"),
+			broadcast,
 			catalog,
 			track: None,
 			config: None,
 			current: Default::default(),
 			zero: None,
-			vps: Vec::new(),
-			sps: Vec::new(),
-			pps: Vec::new(),
-			jitter: Jitter::new(),
+			vps: None,
+			sps: None,
+			pps: None,
+			jitter: MinFrameDuration::new(),
 		}
 	}
 
-	pub fn new_with_track(track: moq_net::TrackProducer, catalog: crate::catalog::Producer<E>) -> Self {
-		Self {
-			tracks: crate::track_provider::TrackProvider::fixed(track),
-			catalog,
-			track: None,
-			config: None,
-			current: Default::default(),
-			zero: None,
-			vps: Vec::new(),
-			sps: Vec::new(),
-			pps: Vec::new(),
-			jitter: Jitter::new(),
-		}
-	}
-
-	/// Publish (or republish) the catalog rendition for this SPS. Returns true if
-	/// it changed an existing config (a reconfiguration), so the caller drops the
-	/// parameter sets tied to the old config. The first SPS is not a reconfiguration.
-	fn init(&mut self, sps: &SpsNALUnit) -> anyhow::Result<bool> {
+	fn init(&mut self, sps: &SpsNALUnit) -> Result<()> {
 		let profile = &sps.rbsp.profile_tier_level.general_profile;
 		let vui_data = sps.rbsp.vui_parameters.as_ref().map(VuiData::new).unwrap_or_default();
 
@@ -84,7 +64,7 @@ impl<E: CatalogExt> Import<E> {
 			profile_idc: profile.profile_idc,
 			profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
 			tier_flag: profile.tier_flag,
-			level_idc: profile.level_idc.context("missing level_idc in SPS")?,
+			level_idc: profile.level_idc.ok_or(Error::MissingLevelIdc)?,
 			constraint_flags: crate::codec::h265::pack_constraint_flags(profile),
 		});
 		config.coded_width = Some(sps.rbsp.cropped_width() as u32);
@@ -97,41 +77,31 @@ impl<E: CatalogExt> Import<E> {
 		if let Some(old) = &self.config
 			&& old == &config
 		{
-			return Ok(false);
+			return Ok(());
 		}
 
-		let reconfigured = self.config.is_some();
-		// Seed jitter from whatever has accumulated: a dirty start feeds frames before this
-		// first rendition exists, so those per-frame updates would otherwise be lost. The
-		// cached `config` stays jitter-free so a later jitter change is not mistaken for a
-		// codec reconfiguration.
-		let jitter = self.jitter.current();
 		let mut catalog = self.catalog.lock();
 
-		if self.track.is_some() && self.tracks.is_fixed() {
-			anyhow::bail!("fixed track cannot be reconfigured");
-		}
-
-		if let Some(track) = self.track.take() {
+		if let Some(track) = &self.track.take() {
 			tracing::debug!(name = ?track.name, "reinitializing track");
 			catalog.video.renditions.remove(&track.name);
 		}
 
-		let track = self.tracks.create()?;
+		let track = self.broadcast.unique_track(".hev1")?;
 		tracing::debug!(name = ?track.name, ?config, "starting track");
-		let mut published = config.clone();
-		published.jitter = jitter;
-		catalog.video.renditions.insert(track.name.clone(), published);
+		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track =
-			Some(crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start());
+		self.track = Some(crate::container::Producer::new(
+			track,
+			crate::catalog::hang::Container::Legacy,
+		));
 
-		Ok(reconfigured)
+		Ok(())
 	}
 
 	/// Initialize the decoder with SPS/PPS and other non-slice NALs.
-	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		let mut nals = NalIterator::new(buf);
 
 		while let Some(nal) = nals.next().transpose()? {
@@ -146,8 +116,8 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
-		Ok(self.track.as_ref().context("not initialized")?.track())
+	pub fn track(&self) -> Result<&moq_net::TrackProducer> {
+		Ok(self.track.as_ref().ok_or(Error::NotInitialized)?.track())
 	}
 
 	/// Decode as much data as possible from the given buffer.
@@ -160,7 +130,7 @@ impl<E: CatalogExt> Import<E> {
 		&mut self,
 		buf: &mut T,
 		pts: Option<crate::container::Timestamp>,
-	) -> anyhow::Result<()> {
+	) -> Result<()> {
 		let pts = self.pts(pts)?;
 
 		// Iterate over the NAL units in the buffer based on start codes.
@@ -180,27 +150,11 @@ impl<E: CatalogExt> Import<E> {
 	/// This can also be used when EOF is detected to flush the final frame.
 	///
 	/// NOTE: The next decode will fail if it doesn't begin with a start code.
-	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the
-	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The container
-	/// supplies this since the elementary stream alone carries no decode time. No-op until the
-	/// track exists.
-	pub fn observe_reorder(&mut self, reorder: crate::container::Timestamp) {
-		let Some(jitter) = self.jitter.observe_reorder(reorder) else {
-			return;
-		};
-		let Some(track) = self.track.as_ref() else {
-			return;
-		};
-		if let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name) {
-			c.jitter = Some(jitter);
-		}
-	}
-
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
 		pts: Option<crate::container::Timestamp>,
-	) -> anyhow::Result<()> {
+	) -> Result<()> {
 		let pts = self.pts(pts)?;
 		// Iterate over the NAL units in the buffer based on start codes.
 		let mut nals = NalIterator::new(buf);
@@ -223,13 +177,17 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Decode a single NAL unit. Only reads the first header byte to extract nal_unit_type,
 	/// Ignores nuh_layer_id and nuh_temporal_id_plus1.
-	fn decode_nal(&mut self, nal: Bytes, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
-		anyhow::ensure!(nal.len() >= 2, "NAL unit is too short");
+	fn decode_nal(&mut self, nal: Bytes, pts: Option<crate::container::Timestamp>) -> Result<()> {
+		if nal.len() < 2 {
+			return Err(Error::NalTooShort.into());
+		}
 		// u16 header: [forbidden_zero_bit(1) | nal_unit_type(6) | nuh_layer_id(6) | nuh_temporal_id_plus1(3)]
-		let header = nal.first().context("NAL unit is too short")?;
+		let header = nal.first().ok_or(Error::NalTooShort)?;
 
 		let forbidden_zero_bit = (header >> 7) & 1;
-		anyhow::ensure!(forbidden_zero_bit == 0, "forbidden zero bit is not zero");
+		if forbidden_zero_bit != 0 {
+			return Err(Error::ForbiddenZeroBit.into());
+		}
 
 		// Bits 1-6: nal_unit_type
 		let nal_unit_type = (header >> 1) & 0b111111;
@@ -239,42 +197,36 @@ impl<E: CatalogExt> Import<E> {
 			NALUnitType::VpsNut => {
 				self.maybe_start_frame(pts)?;
 
-				// Track only what this AU carries; the retained set is reconciled at
-				// the keyframe so a new GOP's set replaces (not accumulates onto) it.
-				crate::codec::annexb::push_distinct(&mut self.current.vps_seen, &nal);
+				self.vps = Some(nal.clone());
+				self.current.contains_vps = true;
 			}
 			NALUnitType::SpsNut => {
 				self.maybe_start_frame(pts)?;
 
 				// Try to reinitialize the track if the SPS has changed.
-				let sps = SpsNALUnit::parse(&mut &nal[..]).context("failed to parse SPS NAL unit")?;
-				let reconfigured = self.init(&sps)?;
+				let sps = SpsNALUnit::parse(&mut &nal[..]).map_err(|_| Error::SpsParse)?;
+				self.init(&sps)?;
 
-				// A changed config means the retained VPS/SPS/PPS no longer apply; they
-				// may already have been appended to current.chunks earlier in this AU,
-				// so reset the sets and AU so only the new parameter sets emit.
-				if reconfigured {
-					self.vps.clear();
-					self.sps.clear();
-					self.pps.clear();
+				// SPS changed mid-AU. Cached VPS/PPS are tied to the old SPS
+				// and may already have been appended to current.chunks earlier
+				// in this AU; reset the AU so the new VPS+SPS+PPS triple is
+				// the only parameter set we emit.
+				if self.sps.as_ref().is_some_and(|cached| cached != &nal) {
+					self.pps = None;
 					self.current.chunks.clear();
-					// Keep vps_seen: in H.265 the VPS precedes the reconfiguring SPS, so
-					// any VPS already seen this AU belongs to the new config. Re-append
-					// it to the cleared chunks so the keyframe still carries it.
-					for nal in &self.current.vps_seen {
-						self.current.chunks.extend_from_slice(&START_CODE);
-						self.current.chunks.extend_from_slice(nal);
-					}
-					self.current.sps_seen.clear();
-					self.current.pps_seen.clear();
+					self.current.contains_vps = false;
+					self.current.contains_sps = false;
+					self.current.contains_pps = false;
 				}
 
-				crate::codec::annexb::push_distinct(&mut self.current.sps_seen, &nal);
+				self.sps = Some(nal.clone());
+				self.current.contains_sps = true;
 			}
 			NALUnitType::PpsNut => {
 				self.maybe_start_frame(pts)?;
 
-				crate::codec::annexb::push_distinct(&mut self.current.pps_seen, &nal);
+				self.pps = Some(nal.clone());
+				self.current.contains_pps = true;
 			}
 			NALUnitType::AudNut | NALUnitType::PrefixSeiNut | NALUnitType::SuffixSeiNut => {
 				self.maybe_start_frame(pts)?;
@@ -286,23 +238,28 @@ impl<E: CatalogExt> Import<E> {
 			| NALUnitType::BlaWRadl
 			| NALUnitType::BlaWLp
 			| NALUnitType::CraNut => {
-				// Adopt this keyframe's inline set (dropping any the new GOP no longer
-				// uses), or re-inject the retained set if the keyframe carried none.
-				crate::codec::annexb::reconcile_keyframe_params(
-					&mut self.current.chunks,
-					&mut self.vps,
-					&mut self.current.vps_seen,
-				);
-				crate::codec::annexb::reconcile_keyframe_params(
-					&mut self.current.chunks,
-					&mut self.sps,
-					&mut self.current.sps_seen,
-				);
-				crate::codec::annexb::reconcile_keyframe_params(
-					&mut self.current.chunks,
-					&mut self.pps,
-					&mut self.current.pps_seen,
-				);
+				// Insert cached VPS/SPS/PPS before keyframes if not already present in this frame.
+				if !self.current.contains_vps
+					&& let Some(vps) = &self.vps
+				{
+					self.current.chunks.extend_from_slice(&START_CODE);
+					self.current.chunks.extend_from_slice(vps);
+					self.current.contains_vps = true;
+				}
+				if !self.current.contains_sps
+					&& let Some(sps) = &self.sps
+				{
+					self.current.chunks.extend_from_slice(&START_CODE);
+					self.current.chunks.extend_from_slice(sps);
+					self.current.contains_sps = true;
+				}
+				if !self.current.contains_pps
+					&& let Some(pps) = &self.pps
+				{
+					self.current.chunks.extend_from_slice(&START_CODE);
+					self.current.chunks.extend_from_slice(pps);
+					self.current.contains_pps = true;
+				}
 
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
@@ -319,7 +276,7 @@ impl<E: CatalogExt> Import<E> {
 			| NALUnitType::RaslN
 			| NALUnitType::RaslR => {
 				// Check first_slice_segment_in_pic_flag (bit 7 of third byte, after 2-byte header)
-				if nal.get(2).context("NAL unit is too short")? & 0x80 != 0 {
+				if nal.get(2).ok_or(Error::NalTooShort)? & 0x80 != 0 {
 					self.maybe_start_frame(pts)?;
 				}
 				self.current.contains_slice = true;
@@ -335,14 +292,14 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> Result<()> {
 		// If we haven't seen any slices, we shouldn't flush yet.
 		if !self.current.contains_slice {
 			return Ok(());
 		}
 
-		let track = self.track.as_mut().context("expected SPS before any frames")?;
-		let pts = pts.context("missing timestamp")?;
+		let track = self.track.as_mut().ok_or(Error::MissingSps)?;
+		let pts = pts.ok_or(Error::MissingTimestamp)?;
 
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
 
@@ -362,24 +319,17 @@ impl<E: CatalogExt> Import<E> {
 
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
-		self.current.vps_seen.clear();
-		self.current.sps_seen.clear();
-		self.current.pps_seen.clear();
+		self.current.contains_vps = false;
+		self.current.contains_sps = false;
+		self.current.contains_pps = false;
 
 		Ok(())
 	}
 
 	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
+	pub fn finish(&mut self) -> Result<()> {
+		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
 		track.finish()?;
-		Ok(())
-	}
-
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
-		track.seek(sequence)?;
 		Ok(())
 	}
 
@@ -387,7 +337,7 @@ impl<E: CatalogExt> Import<E> {
 		self.track.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
+	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> Result<crate::container::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
@@ -399,7 +349,7 @@ impl<E: CatalogExt> Import<E> {
 	}
 }
 
-impl<E: CatalogExt> Drop for Import<E> {
+impl Drop for Import {
 	fn drop(&mut self) {
 		if let Some(track) = &self.track {
 			tracing::debug!(name = ?track.name, "ending track");
@@ -413,10 +363,9 @@ struct Frame {
 	chunks: BytesMut,
 	contains_idr: bool,
 	contains_slice: bool,
-	/// VPS/SPS/PPS NALs already inline in this access unit, so re-injection skips them.
-	vps_seen: Vec<Bytes>,
-	sps_seen: Vec<Bytes>,
-	pps_seen: Vec<Bytes>,
+	contains_vps: bool,
+	contains_sps: bool,
+	contains_pps: bool,
 }
 
 #[derive(Default)]

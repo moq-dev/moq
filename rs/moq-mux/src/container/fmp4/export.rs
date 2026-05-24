@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::task::Poll;
 use std::time::Duration;
 
-use anyhow::Context;
 use bytes::Bytes;
 use hang::catalog::{Catalog, Container, VideoConfig};
 use mp4_atom::{DecodeMaybe, Encode};
 
+use crate::Result;
 use crate::catalog::CatalogFormat;
 use crate::container::Frame;
+use crate::container::fmp4::Error;
 
 use crate::container::{CatalogSource, ExportSource};
 
@@ -70,7 +71,7 @@ impl Export {
 	///
 	/// Use [`with_catalog_format`](Self::with_catalog_format) to subscribe to a
 	/// non-default catalog track (e.g. MSF).
-	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
+	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self> {
 		Self::with_catalog_format(broadcast, CatalogFormat::default())
 	}
 
@@ -80,10 +81,7 @@ impl Export {
 	/// Both formats drive the same internal `hang::Catalog`-based pipeline (MSF
 	/// snapshots are converted on receipt), so the only observable difference
 	/// is which wire catalog track is consumed.
-	pub fn with_catalog_format(
-		broadcast: moq_net::BroadcastConsumer,
-		catalog_format: CatalogFormat,
-	) -> Result<Self, crate::Error> {
+	pub fn with_catalog_format(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self> {
 		let catalog = CatalogSource::new(&broadcast, catalog_format)?;
 
 		Ok(Self {
@@ -128,16 +126,16 @@ impl Export {
 	/// subsequent call returns one moof+mdat fragment. Fragments arrive in ascending
 	/// timestamp order across tracks. Returns `None` when the catalog and every track
 	/// have ended.
-	pub async fn next(&mut self) -> anyhow::Result<Option<Bytes>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
+	pub async fn next(&mut self) -> Result<Option<Bytes>> {
+		conducer::wait(|waiter| self.poll_next(waiter)).await
 	}
 
 	/// Poll-based variant of [`Self::next`].
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Bytes>>> {
+	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Bytes>>> {
 		// 1. Drain catalog updates and (un)subscribe tracks accordingly.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
-				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot.media())?,
+				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot)?,
 				Poll::Ready(None) => {
 					self.catalog = None;
 					break;
@@ -255,7 +253,7 @@ impl Export {
 		Poll::Pending
 	}
 
-	fn update_catalog(&mut self, catalog: &Catalog) -> anyhow::Result<()> {
+	fn update_catalog(&mut self, catalog: &Catalog) -> Result<()> {
 		let mut active: HashMap<String, ()> = HashMap::new();
 		for name in catalog.video.renditions.keys() {
 			active.insert(name.clone(), ());
@@ -328,27 +326,29 @@ impl Export {
 	/// Build the merged ftyp + multi-track moov init segment from the cached
 	/// catalog snapshot. CMAF tracks pass their existing init segment through;
 	/// Legacy tracks synthesize a `trak` from codec config + dimensions.
-	fn build_init(&self) -> anyhow::Result<Bytes> {
-		let catalog = self.catalog_snapshot.as_ref().context("no catalog snapshot")?;
+	fn build_init(&self) -> Result<Bytes> {
+		let catalog = self.catalog_snapshot.as_ref().ok_or(Error::NoCatalogSnapshot)?;
 
 		let mut traks: Vec<mp4_atom::Trak> = Vec::new();
 		let mut trexs: Vec<mp4_atom::Trex> = Vec::new();
 		let mut ftyp_data: Option<mp4_atom::Ftyp> = None;
 
 		for (name, config) in &catalog.video.renditions {
-			let track = self.tracks.get(name).context("video track not subscribed")?;
+			let track = self
+				.tracks
+				.get(name)
+				.ok_or_else(|| Error::MissingVideoTrack(name.clone()))?;
 			match &config.container {
 				Container::Cmaf { init, .. } => {
 					extract_init(init, &mut ftyp_data, &mut traks, &mut trexs)?;
 				}
 				Container::Legacy | Container::Loc => {
-					// H.264/H.265 need a synthesized config record here; VP8 has none.
-					let description = track.source.description();
+					let description = track.source.description().ok_or(Error::MissingVideoConfig)?;
 					let trak = crate::container::fmp4::synthesize_video_trak(
 						track.track_id,
 						track.timescale,
 						config,
-						description.map(|d| d.as_ref()),
+						description.as_ref(),
 					)?;
 					trexs.push(mp4_atom::Trex {
 						track_id: trak.tkhd.track_id,
@@ -361,7 +361,10 @@ impl Export {
 		}
 
 		for (name, config) in &catalog.audio.renditions {
-			let track = self.tracks.get(name).context("audio track not subscribed")?;
+			let track = self
+				.tracks
+				.get(name)
+				.ok_or_else(|| Error::MissingAudioTrack(name.clone()))?;
 			match &config.container {
 				Container::Cmaf { init, .. } => {
 					extract_init(init, &mut ftyp_data, &mut traks, &mut trexs)?;
@@ -417,7 +420,7 @@ fn extract_init(
 	ftyp_data: &mut Option<mp4_atom::Ftyp>,
 	traks: &mut Vec<mp4_atom::Trak>,
 	trexs: &mut Vec<mp4_atom::Trex>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
 	let mut cursor = std::io::Cursor::new(init.as_ref());
 	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
 		match atom {
@@ -470,8 +473,10 @@ fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Dura
 }
 
 /// Encode a buffered run of samples as a single CMAF moof+mdat fragment.
-fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> anyhow::Result<Bytes> {
-	anyhow::ensure!(!frames.is_empty(), "encode_fragment called with no frames");
+fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Bytes> {
+	if frames.is_empty() {
+		return Err(Error::NoFrames.into());
+	}
 	let seq = track.sequence_number;
 	track.sequence_number += 1;
 	Ok(crate::container::fmp4::encode_fragment(
@@ -498,13 +503,13 @@ fn catalog_timescale_audio(config: &hang::catalog::AudioConfig) -> u64 {
 	}
 }
 
-fn parse_timescale_from_init(init: &[u8]) -> anyhow::Result<u64> {
+fn parse_timescale_from_init(init: &[u8]) -> Result<u64> {
 	let mut cursor = std::io::Cursor::new(init);
 	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
 		if let mp4_atom::Any::Moov(moov) = atom {
-			let trak = moov.trak.first().context("no tracks in moov")?;
+			let trak = moov.trak.first().ok_or(Error::NoTracks)?;
 			return Ok(trak.mdia.mdhd.timescale as u64);
 		}
 	}
-	anyhow::bail!("no moov in init data")
+	Err(Error::NoMoov.into())
 }
