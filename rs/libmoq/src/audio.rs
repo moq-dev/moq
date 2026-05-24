@@ -130,6 +130,7 @@ impl Audio {
 		Ok(())
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	pub fn consume_opus(
 		&mut self,
 		broadcast: &moq_net::BroadcastConsumer,
