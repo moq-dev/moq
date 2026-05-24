@@ -9,6 +9,10 @@ version = "0.10.21"
 edition = "2024"
 rust-version.workspace = true
 
+# Example binary, not a distributed crate. Stays in the workspace so it
+# builds with everything else, but never pushed to crates.io.
+publish = false
+
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
