@@ -155,9 +155,10 @@ EOF
 TEMPLATE="$SWIFT_DIR/Package.swift.template"
 [[ -f "$TEMPLATE" ]] || { echo "Error: missing $TEMPLATE" >&2; exit 1; }
 URL="${RELEASE_URL_BASE}/moq-ffi-v${VERSION}/MoqFFI.xcframework.zip"
-# Substitute the URL first so the in-template tokens are still present
-# for the version/checksum passes that follow.
-sed -e "s|https://github.com/moq-dev/moq/releases/download/moq-ffi-vREPLACE_VERSION/MoqFFI.xcframework.zip|${URL}|g" \
+# Token-based substitution: the template carries REPLACE_URL / REPLACE_VERSION
+# / REPLACE_CHECKSUM placeholders, so editing the upstream URL in the template
+# (or passing --release-url) never goes silently unsubstituted.
+sed -e "s|REPLACE_URL|${URL}|g" \
     -e "s|REPLACE_VERSION|${VERSION}|g" \
     -e "s|REPLACE_CHECKSUM|${CHECKSUM}|g" \
     "$TEMPLATE" > "$PKG_STAGE/Package.swift"
@@ -165,9 +166,9 @@ sed -e "s|https://github.com/moq-dev/moq/releases/download/moq-ffi-vREPLACE_VERS
 # Fail loudly if any placeholder survived (e.g. someone renamed a token
 # in the template without updating this script). Catching it here keeps
 # a broken manifest from reaching the mirror.
-if grep -q 'REPLACE_VERSION\|REPLACE_CHECKSUM' "$PKG_STAGE/Package.swift"; then
+if grep -q 'REPLACE_URL\|REPLACE_VERSION\|REPLACE_CHECKSUM' "$PKG_STAGE/Package.swift"; then
     echo "Error: unresolved REPLACE_* tokens in generated Package.swift" >&2
-    grep -n 'REPLACE_VERSION\|REPLACE_CHECKSUM' "$PKG_STAGE/Package.swift" >&2
+    grep -n 'REPLACE_URL\|REPLACE_VERSION\|REPLACE_CHECKSUM' "$PKG_STAGE/Package.swift" >&2
     exit 1
 fi
 
