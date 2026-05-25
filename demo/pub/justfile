@@ -211,7 +211,7 @@ clock action url="http://localhost:4443/anon" *args:
 		exit 1; \
 	fi
 
-	cargo run --bin moq-clock -- --url "{{url}}" --broadcast "clock" {{args}} {{action}}
+	cargo run -p moq-native --example clock -- --url "{{url}}" --broadcast "clock" {{args}} {{action}}
 
 # Connect tokio-console to the publisher (port 6681).
 console:

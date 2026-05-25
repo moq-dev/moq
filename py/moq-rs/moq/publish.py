@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ._uniffi import MoqBroadcastProducer, MoqGroupProducer, MoqMediaProducer, MoqTrackProducer
+from ._uniffi import (
+    MoqAudioProducer,
+    MoqBroadcastProducer,
+    MoqGroupProducer,
+    MoqMediaProducer,
+    MoqTrackProducer,
+)
+from .types import AudioEncoderInput, AudioEncoderOutput, AudioFrame
 
 if TYPE_CHECKING:
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
@@ -100,6 +107,27 @@ class TrackProducer:
         self._inner.finish()
 
 
+class AudioProducer:
+    """Publish raw PCM and let libopus encode it on the way out.
+
+    Built via :meth:`BroadcastProducer.publish_audio`. PCM layout
+    (format / sample rate / channels / bitrate / frame duration) is
+    fixed at construction; each :meth:`write` call passes only bytes
+    and a presentation timestamp.
+    """
+
+    def __init__(self, inner: MoqAudioProducer) -> None:
+        self._inner = inner
+
+    def write(self, frame: AudioFrame) -> None:
+        """Push one frame of PCM in the configured input format."""
+        self._inner.write(frame)
+
+    def finish(self) -> None:
+        """Flush any pending samples and finalize the track."""
+        self._inner.finish()
+
+
 class BroadcastProducer:
     """Wraps MoqBroadcastProducer with a cleaner interface."""
 
@@ -108,6 +136,15 @@ class BroadcastProducer:
 
     def publish_media(self, format: str, init: bytes) -> MediaProducer:
         return MediaProducer(self._inner.publish_media(format, init))
+
+    def publish_audio(
+        self,
+        name: str,
+        input: AudioEncoderInput,
+        output: AudioEncoderOutput,
+    ) -> AudioProducer:
+        """Publish a raw-audio track with an in-process Opus encoder."""
+        return AudioProducer(self._inner.publish_audio(name, input, output))
 
     def publish_track(self, name: str) -> TrackProducer:
         """Create a track — send any bytes, no codec validation."""

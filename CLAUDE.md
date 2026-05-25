@@ -32,7 +32,8 @@ The project contains multiple layers of protocols:
    - catalog: a JSON track containing a description of other tracks and their properties (for WebCodecs).
    - container: each frame consists of a timestamp and codec bitstream
    - watch/publish: dedicated packages for subscribing/publishing with optional UI overlays
-5. **application** - Users building on top of `moq-net` or `hang`
+5. **moq-audio** - Native Opus encode/decode for raw PCM (more codecs to come). Used by `moq-ffi`/`libmoq` so native callers don't have to bring their own codec.
+6. **application** - Users building on top of `moq-net` or `hang`
 
 Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq` layer should be generic, using rules on the wire on how to deliver content.
 
@@ -41,14 +42,13 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 ```
 /rs/                  # Rust crates
   moq-net/           # Core networking layer (published as moq-net; negotiates moq-lite or moq-transport)
-  moq-lite/          # Deprecated shim that re-exports moq-net (published as moq-lite)
-  moq-native/        # QUIC/WebTransport connection helpers for native apps
+  moq-native/        # QUIC/WebTransport connection helpers for native apps; clock example lives in examples/clock.rs
   moq-relay/         # Clusterable relay server (binary: moq-relay)
   moq-token/         # JWT authentication library
   moq-token-cli/     # JWT token CLI tool (binary: moq-token-cli)
   moq-cli/           # CLI tool for media operations (binary: moq)
-  moq-clock/         # Clock synchronization example (binary: moq-clock)
   moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)
+  moq-audio/         # Native PCM ↔ Opus encode/decode on top of moq-mux
   hang/              # Media encoding/streaming (catalog/container format)
   libmoq/            # C bindings (staticlib)
   moq-ffi/           # UniFFI bindings for Python/Swift/Kotlin (cdylib + staticlib)
@@ -116,6 +116,7 @@ match version {
 
 - **Error handling**: Use `thiserror` with `#[from]` for library crates, `anyhow` for binaries. Always add `#[non_exhaustive]` to public `thiserror` enums.
 - Use `anyhow::Context` (`.context("msg")`) instead of `.map_err(|_| anyhow::anyhow!("msg"))` for error conversion
+- **Config flags + TOML merge**: For any `#[arg]` field on a TOML-loadable config, use `Option<T>` (not bare `bool` / `String` / etc.). The TOML→CLI merge clobbers bare fields with their `Default` when the flag is absent, silently overwriting TOML values. See `rs/moq-relay/src/config.rs::tests` for the regression test; add one for any new flag.
 
 ## Comment Conventions
 

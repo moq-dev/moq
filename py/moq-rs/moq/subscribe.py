@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from ._uniffi import (
     Container,
+    MoqAudioConsumer,
     MoqBroadcastConsumer,
     MoqCatalogConsumer,
     MoqGroupConsumer,
     MoqMediaConsumer,
     MoqTrackConsumer,
 )
-from .types import Catalog, Frame
+from .types import Audio, AudioDecoderOutput, AudioFrame, Catalog, Frame
 
 
 class MediaConsumer:
@@ -110,6 +111,30 @@ class TrackConsumer:
         self._inner.cancel()
 
 
+class AudioConsumer:
+    """Async iterator of decoded audio frames.
+
+    Built via :meth:`BroadcastConsumer.subscribe_audio`. The PCM layout
+    is fixed by the :class:`AudioDecoderOutput` passed at subscribe
+    time; each frame's ``data`` is raw bytes in that format.
+    """
+
+    def __init__(self, inner: MoqAudioConsumer) -> None:
+        self._inner = inner
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> AudioFrame:
+        frame = await self._inner.next()
+        if frame is None:
+            raise StopAsyncIteration
+        return frame
+
+    def cancel(self) -> None:
+        self._inner.cancel()
+
+
 class CatalogConsumer:
     """Wraps MoqCatalogConsumer as an async iterator of Catalog."""
 
@@ -144,6 +169,24 @@ class BroadcastConsumer:
 
     def subscribe_media(self, name: str, container: Container, max_latency_ms: int) -> MediaConsumer:
         return MediaConsumer(self._inner.subscribe_media(name, container, max_latency_ms))
+
+    def subscribe_audio(
+        self,
+        name: str,
+        catalog_audio: Audio,
+        output: AudioDecoderOutput,
+    ) -> AudioConsumer:
+        """Subscribe to a raw-audio track; samples come back in the format
+        declared by ``output``.
+
+        ``catalog_audio`` comes from the catalog (e.g.
+        ``await broadcast.catalog()`` followed by
+        ``catalog.audio[name]``). Use ``output.latency_max_ms`` to
+        control how aggressively stalled groups get skipped — that's
+        the congestion-control knob. (Named ``_max`` to leave room for
+        a future ``latency_min_ms`` jitter-buffer floor.)
+        """
+        return AudioConsumer(self._inner.subscribe_audio(name, catalog_audio, output))
 
     async def catalog(self) -> Catalog:
         """Convenience: subscribe and return the first catalog."""

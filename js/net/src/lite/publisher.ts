@@ -184,8 +184,10 @@ export class Publisher {
 				if (!result) break;
 
 				if (result instanceof SubscribeUpdate) {
-					// TODO use the update
-					console.warn("subscribe update not supported", result);
+					console.debug(
+						`subscribe update: broadcast=${msg.broadcast} track=${track.name} priority=${result.priority}`,
+					);
+					track.updatePriority(result.priority);
 				}
 			}
 

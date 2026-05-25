@@ -26,14 +26,6 @@ in
     }
   );
 
-  moq-clock = craneLib.buildPackage (
-    crateInfo ../rs/moq-clock/Cargo.toml
-    // {
-      src = craneLib.cleanCargoSource ../.;
-      cargoExtraArgs = "-p moq-clock";
-    }
-  );
-
   moq-cli = craneLib.buildPackage (
     crateInfo ../rs/moq-cli/Cargo.toml
     // {

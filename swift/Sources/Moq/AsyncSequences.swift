@@ -47,6 +47,30 @@ extension MoqMediaConsumer {
     }
 }
 
+extension MoqAudioConsumer {
+    /// Stream of decoded audio frames in the layout declared by
+    /// `MoqAudioDecoderConfig`. Terminates when the underlying track ends.
+    public var frames: AsyncThrowingStream<MoqAudioFrame, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    while let frame = try await self.next() {
+                        try Task.checkCancellation()
+                        continuation.yield(frame)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { [weak self] _ in
+                task.cancel()
+                self?.cancel()
+            }
+        }
+    }
+}
+
 extension MoqTrackConsumer {
     /// Stream of groups in sequence order, skipping forward if the reader falls behind.
     public var groups: AsyncThrowingStream<MoqGroupConsumer, Error> {

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.17](https://github.com/moq-dev/moq/compare/libmoq-v0.2.16...libmoq-v0.2.17) - 2026-05-24
+
+### Added
+
+- add moq-audio crate, raw-audio FFI, and rename moq-codec to moq-video ([#1484](https://github.com/moq-dev/moq/pull/1484))
+
 ## [0.2.16](https://github.com/moq-dev/moq/compare/libmoq-v0.2.15...libmoq-v0.2.16) - 2026-05-23
 
 ### Other

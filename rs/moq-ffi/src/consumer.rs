@@ -15,6 +15,12 @@ impl MoqBroadcastConsumer {
 	pub(crate) fn new(inner: moq_net::BroadcastConsumer) -> Self {
 		Self { inner }
 	}
+
+	/// Access the underlying `moq_net::BroadcastConsumer` for sibling
+	/// modules (e.g. `audio`) that need to subscribe a typed track.
+	pub(crate) fn inner(&self) -> &moq_net::BroadcastConsumer {
+		&self.inner
+	}
 }
 
 #[derive(uniffi::Object)]
