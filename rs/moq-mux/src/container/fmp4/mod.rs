@@ -223,7 +223,11 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>> {
 			let end = offset + size;
 
 			if end > mdat_data.len() {
-				return Ok(frames);
+				return Err(Error::SampleRangeOutOfBounds {
+					start: offset,
+					end,
+					len: mdat_data.len(),
+				});
 			}
 
 			let cts = entry.cts.unwrap_or_default() as i64;
