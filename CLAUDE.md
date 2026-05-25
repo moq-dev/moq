@@ -75,6 +75,13 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
                      # libraries can't be split across separately
                      # packaged Python wheels.
 
+/swift/               # Swift wrapper over rs/moq-ffi (SwiftPM)
+/kt/                  # Kotlin wrapper over rs/moq-ffi (Gradle, KMP)
+/go/                  # Go wrapper over rs/moq-ffi (uniffi-bindgen-go)
+                      # swift/kt/go are in-tree source skeletons.
+                      # CI mirrors them to moq-dev/moq-{swift,kotlin,go}
+                      # on each moq-ffi-v* tag.
+
 /demo/                # Demos and test media
   boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)
   relay/             # Relay server configs (relay.toml, root.toml, leaf*.toml)
@@ -157,7 +164,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/libmoq` (C), `py/moq-rs` + Swift/Kotlin/Go wrapper repos, and `doc/lib/{py,swift,kt,go}` |
+| `rs/moq-ffi` | `rs/libmoq`, `py/moq-rs`, `swift/`, `kt/`, `go/`, `doc/lib/{py,swift,kt,go,c}` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept` |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept` |
 | `rs/moq-token` | `js/token` |
