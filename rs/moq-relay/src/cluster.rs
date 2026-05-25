@@ -165,14 +165,21 @@ impl Cluster {
 		}
 	}
 
-	/// Runs the cluster event loop: dial static `--cluster-connect` peers, publish a
-	/// self-registration broadcast for `--cluster-node` (if set), and watch for other
-	/// peers' registrations to discover and dial them.
+	/// Runs the cluster event loop. Three modes, derived from config:
 	///
-	/// Completes once all dials have given up; a node with no peers and no self URL
-	/// returns immediately. Errors:
+	/// - **Standalone** (`connect` empty, `node` unset): returns immediately.
+	/// - **Passive rendezvous** (`node` set, `connect` empty): publishes the
+	///   self-registration broadcast and parks. The relay accepts inbound cluster
+	///   sessions through the moq-native server but does not dial out, so no QUIC
+	///   client is required.
+	/// - **Active** (`connect` non-empty, with or without `node`): requires a QUIC
+	///   client. Dials each static peer with exponential-backoff retry. If `node`
+	///   is also set, advertises self and watches `.internal/origins/*` to discover
+	///   and dial additional peers.
+	///
+	/// Errors:
 	/// - if `cluster.root` / `--cluster-root` is set (removed flag);
-	/// - if any cluster work is configured but no QUIC client has been attached via
+	/// - if `connect` is non-empty but no QUIC client was attached via
 	///   [`with_client`](Self::with_client).
 	pub async fn run(self) -> anyhow::Result<()> {
 		if let Some(root) = &self.config.root {
@@ -184,16 +191,19 @@ impl Cluster {
 			);
 		}
 
-		let has_work = !self.config.connect.is_empty() || self.config.node.is_some();
+		let has_outbound = !self.config.connect.is_empty();
+		let has_work = has_outbound || self.config.node.is_some();
 		if !has_work {
 			tracing::info!("no cluster peers configured; running standalone");
 			return Ok(());
 		}
 
-		anyhow::ensure!(
-			self.client.is_some(),
-			"cluster peers configured but no QUIC client attached (call Cluster::with_client)"
-		);
+		if has_outbound {
+			anyhow::ensure!(
+				self.client.is_some(),
+				"cluster peers configured but no QUIC client attached (call Cluster::with_client)"
+			);
+		}
 
 		let token = match &self.config.token {
 			Some(path) => std::fs::read_to_string(path)
@@ -228,14 +238,27 @@ impl Cluster {
 			Self::spawn_dial(&mut tasks, &active, self.clone(), peer.clone(), token.clone(), true);
 		}
 
-		// Spawn the gossip discovery task if --cluster-node is set.
-		if let Some(self_url) = self.config.node.clone() {
-			let this = self.clone();
-			let token = token.clone();
-			let active = active.clone();
-			tasks.spawn(async move {
-				this.run_discovery(self_url, token, active).await;
-			});
+		// Spawn the gossip discovery task only when we have at least one outbound peer
+		// to bootstrap from. A node-only relay (passive rendezvous) has no use for
+		// discovery: it accepts inbound sessions and shouldn't dial peers back, since
+		// those peers already have a session to us.
+		if has_outbound {
+			if let Some(self_url) = self.config.node.clone() {
+				let this = self.clone();
+				let token = token.clone();
+				let active = active.clone();
+				tasks.spawn(async move {
+					this.run_discovery(self_url, token, active).await;
+				});
+			}
+		}
+
+		if tasks.is_empty() {
+			// Passive rendezvous: nothing to wait on, but we must hold
+			// `_self_registration` alive so inbound peers continue to see our
+			// advertisement. Park here forever; `cluster.run()` is one arm of
+			// `tokio::select!` in main.rs, so the process still exits via the other arms.
+			std::future::pending::<()>().await
 		}
 
 		while tasks.join_next().await.is_some() {}
@@ -570,6 +593,42 @@ mod tests {
 			.block_on(Cluster::new(config.cluster).run())
 			.expect_err("should error");
 		assert!(format!("{err}").contains("cluster.root"));
+	}
+
+	/// A relay configured with only `cluster.node` (passive rendezvous) must run
+	/// without a QUIC client, publish its self-registration on the cluster origin,
+	/// and keep that registration alive (i.e. not exit and drop the broadcast).
+	#[tokio::test(start_paused = true)]
+	async fn passive_rendezvous_runs_without_client_and_advertises_self() {
+		let cluster = Cluster::new(ClusterConfig {
+			node: Some("rendezvous.example.com:4443".to_string()),
+			..Default::default()
+		});
+
+		// Snapshot a consumer on the cluster origin before run() takes ownership of
+		// `cluster` so we can later check that the registration was published.
+		let mut watcher = cluster.origin.consume();
+
+		let cluster_run = cluster.clone();
+		let mut handle = tokio::spawn(async move { cluster_run.run().await });
+
+		// Give the runtime a moment to execute the synchronous setup work.
+		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+		// The self-registration broadcast must be visible on the origin.
+		let (path, broadcast) = watcher.try_announced().expect("self-registration must be published");
+		assert_eq!(path.as_str(), ".internal/origins/rendezvous.example.com:4443");
+		assert!(broadcast.is_some());
+
+		// run() must NOT have returned: dropping the broadcast (via run returning)
+		// would unannounce the registration immediately. Use a short timeout to
+		// confirm we're still parked.
+		let still_running = tokio::time::timeout(tokio::time::Duration::from_millis(50), &mut handle)
+			.await
+			.is_err();
+		assert!(still_running, "passive rendezvous run() should park, not return");
+
+		handle.abort();
 	}
 
 	/// `cluster.node` round-trips through TOML and CLI.
