@@ -164,7 +164,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/libmoq`, `py/moq-rs`, `swift/`, `kt/`, `go/`, `doc/lib/{py,swift,kt,go,c}` |
+| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt,go}/`, `doc/lib/{py,swift,kt,go,c}` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept` |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept` |
 | `rs/moq-token` | `js/token` |
