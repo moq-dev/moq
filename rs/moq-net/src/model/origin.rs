@@ -755,8 +755,12 @@ impl OriginProducer {
 	}
 
 	/// Subscribe to all announced broadcasts.
+	///
+	/// Any `block(prefix)` calls on this producer propagate to the consumer so the
+	/// view stays consistent: paths the producer refuses to publish are also hidden
+	/// from announce streams on the derived consumer.
 	pub fn consume(&self) -> OriginConsumer {
-		OriginConsumer::new(self.info, self.root.clone(), self.nodes.clone())
+		OriginConsumer::new_with_blocked(self.info, self.root.clone(), self.nodes.clone(), self.blocked.clone())
 	}
 
 	/// Get a broadcast by path if it has *already* been published.
@@ -839,10 +843,6 @@ impl std::ops::Deref for OriginConsumer {
 }
 
 impl OriginConsumer {
-	fn new(info: Origin, root: PathOwned, nodes: OriginNodes) -> Self {
-		Self::new_with_blocked(info, root, nodes, Vec::new())
-	}
-
 	fn new_with_blocked(info: Origin, root: PathOwned, nodes: OriginNodes, blocked: Vec<PathOwned>) -> Self {
 		let state = conducer::Producer::<OriginConsumerState>::default();
 		let id = ConsumerId::new();

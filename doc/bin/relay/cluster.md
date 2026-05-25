@@ -80,7 +80,7 @@ connect = ["rendezvous.example.com:4443"]
 token = "cluster.jwt"
 ```
 
-JWT-authenticated cluster sessions are tagged as external for stats purposes (unlike mTLS) but otherwise behave the same. Note: by default a JWT session is also filtered out of `.internal/*`. A cluster JWT must include the cluster privileges that bypass that filter; if you find yourself reaching for this path, prefer mTLS.
+JWT-authenticated cluster sessions are tagged as external for stats purposes. **`.internal/*` is mTLS-only**: a JWT session, no matter how broad its scope, is filtered out of `.internal/origins/*` and cannot publish or receive mesh registrations. JWT-only cluster peers can still relay user traffic for each other, but they will not participate in gossip discovery. Use mTLS for any deployment that wants peers to find each other automatically.
 
 ## Example topology (3-node gossip cluster)
 

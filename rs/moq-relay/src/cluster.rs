@@ -16,6 +16,15 @@ use crate::AuthToken;
 /// [`Cluster::subscriber`] / [`Cluster::publisher`].
 const MESH_PREFIX: &str = ".internal/origins";
 
+/// One entry in the active-dial map. The provenance flag keeps
+/// gossip unannounces from tearing down a peer that was also seeded statically:
+/// static peers must keep their reconnect loop running even when the
+/// remote temporarily disappears from `.internal/origins/*`.
+struct DialEntry {
+	handle: AbortHandle,
+	is_static: bool,
+}
+
 /// Configuration for relay clustering.
 ///
 /// Two modes that can be combined:
@@ -127,20 +136,33 @@ impl Cluster {
 	/// Returns an [`OriginConsumer`] scoped to this session's subscribe permissions.
 	///
 	/// Non-internal tokens (i.e. JWT-authenticated end users) cannot see `.internal/*`
-	/// paths regardless of their declared scope. Cluster mesh registrations and other
-	/// infrastructure broadcasts live under that prefix.
+	/// paths regardless of their declared scope or root. Cluster mesh registrations and
+	/// other infrastructure broadcasts live under that prefix.
+	///
+	/// The block is applied to the absolute root before any `with_root`/`scope` so a
+	/// JWT whose `token.root` itself lies under `.internal/*` can't sidestep it.
 	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginConsumer> {
-		let view = self.origin.with_root(&token.root)?.scope(&token.subscribe)?.consume();
-		Some(if token.internal { view } else { view.block(".internal") })
+		let origin = self.access_origin(token);
+		Some(origin.with_root(&token.root)?.scope(&token.subscribe)?.consume())
 	}
 
 	/// Returns an [`OriginProducer`] scoped to this session's publish permissions.
 	///
 	/// Non-internal tokens cannot publish into `.internal/*` regardless of their
-	/// declared scope.
+	/// declared scope or root.
 	pub fn publisher(&self, token: &AuthToken) -> Option<OriginProducer> {
-		let view = self.origin.with_root(&token.root)?.scope(&token.publish)?;
-		Some(if token.internal { view } else { view.block(".internal") })
+		let origin = self.access_origin(token);
+		origin.with_root(&token.root)?.scope(&token.publish)
+	}
+
+	/// Returns the base origin a session is allowed to see. mTLS / internal sessions
+	/// get the full origin; everyone else gets a view that blocks `.internal/*`.
+	fn access_origin(&self, token: &AuthToken) -> OriginProducer {
+		if token.internal {
+			self.origin.clone()
+		} else {
+			self.origin.block(".internal")
+		}
 	}
 
 	/// Runs the cluster event loop: dial static `--cluster-connect` peers, publish a
@@ -194,14 +216,16 @@ impl Cluster {
 		});
 
 		// Track active dial tasks by URL so static and gossip-discovered peers don't
-		// duplicate, and so the discovery side can abort a task when a peer unannounces.
-		let active: Arc<Mutex<HashMap<String, AbortHandle>>> = Arc::new(Mutex::new(HashMap::new()));
+		// duplicate, and so the discovery side can abort a discovered peer's task when
+		// it unannounces. Static peers carry `is_static = true` and are exempt from
+		// unannounce-driven aborts.
+		let active: Arc<Mutex<HashMap<String, DialEntry>>> = Arc::new(Mutex::new(HashMap::new()));
 
 		let mut tasks = tokio::task::JoinSet::new();
 
 		// Seed static peers from --cluster-connect.
 		for peer in &self.config.connect {
-			Self::spawn_dial(&mut tasks, &active, self.clone(), peer.clone(), token.clone());
+			Self::spawn_dial(&mut tasks, &active, self.clone(), peer.clone(), token.clone(), true);
 		}
 
 		// Spawn the gossip discovery task if --cluster-node is set.
@@ -222,10 +246,11 @@ impl Cluster {
 	/// is already tracked (caller-side dedup against static peers and prior discoveries).
 	fn spawn_dial(
 		tasks: &mut tokio::task::JoinSet<()>,
-		active: &Arc<Mutex<HashMap<String, AbortHandle>>>,
+		active: &Arc<Mutex<HashMap<String, DialEntry>>>,
 		this: Self,
 		peer: String,
 		token: String,
+		is_static: bool,
 	) {
 		{
 			let active = active.lock().expect("dial map poisoned");
@@ -239,12 +264,16 @@ impl Cluster {
 				tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
 			}
 		});
-		active.lock().expect("dial map poisoned").insert(peer, handle);
+		active
+			.lock()
+			.expect("dial map poisoned")
+			.insert(peer, DialEntry { handle, is_static });
 	}
 
 	/// Watch `.internal/origins/*` for peer registrations and dial each newly-announced
-	/// URL that isn't already tracked. Unannounces abort the corresponding dial.
-	async fn run_discovery(self, self_url: String, token: String, active: Arc<Mutex<HashMap<String, AbortHandle>>>) {
+	/// URL that isn't already tracked. An unannounce aborts the corresponding dial only
+	/// for gossip-discovered peers; static `--cluster-connect` peers keep reconnecting.
+	async fn run_discovery(self, self_url: String, token: String, active: Arc<Mutex<HashMap<String, DialEntry>>>) {
 		let Some(mut consumer) = self.origin.consume().with_root(MESH_PREFIX) else {
 			tracing::warn!("could not scope cluster origin to {MESH_PREFIX}; discovery disabled");
 			return;
@@ -276,18 +305,38 @@ impl Cluster {
 							tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
 						}
 					});
-					active
-						.lock()
-						.expect("dial map poisoned")
-						.insert(peer, handle.abort_handle());
+					active.lock().expect("dial map poisoned").insert(
+						peer,
+						DialEntry {
+							handle: handle.abort_handle(),
+							is_static: false,
+						},
+					);
 				}
-				None => {
-					tracing::info!(%peer, "cluster peer unannounced; aborting dial");
-					if let Some(handle) = active.lock().expect("dial map poisoned").remove(peer) {
-						handle.abort();
-					}
+				None => Self::handle_gossip_unannounce(&active, peer),
+			}
+		}
+	}
+
+	/// Handle a gossip unannounce for `peer`: abort the dial only if the entry was
+	/// added by discovery. Static peers (seeded from `--cluster-connect`) keep their
+	/// reconnect loop running, since gossip churn is just remote restarts.
+	fn handle_gossip_unannounce(active: &Arc<Mutex<HashMap<String, DialEntry>>>, peer: &str) {
+		let mut active = active.lock().expect("dial map poisoned");
+		match active.get(peer) {
+			Some(entry) if entry.is_static => {
+				tracing::debug!(
+					%peer,
+					"gossip unannounce for static peer; reconnect loop kept alive"
+				);
+			}
+			Some(_) => {
+				tracing::info!(%peer, "cluster peer unannounced; aborting dial");
+				if let Some(entry) = active.remove(peer) {
+					entry.handle.abort();
 				}
 			}
+			None => {}
 		}
 	}
 
@@ -395,6 +444,82 @@ mod tests {
 		let publisher = cluster.publisher(&token).expect("publisher");
 		let attempt = Broadcast::new().produce();
 		assert!(!publisher.publish_broadcast(".internal/origins/attacker", attempt.consume()));
+	}
+
+	/// Regression test for the block-before-root fix: a JWT whose `root` claim points
+	/// at `.internal` (or any prefix of it) must still be filtered. Before the fix the
+	/// `.block(".internal")` call sat on top of a view already rooted at `.internal`,
+	/// so the resulting block prefix was `.internal/.internal` and the real mesh paths
+	/// leaked through.
+	#[tokio::test]
+	async fn internal_paths_invisible_when_token_root_is_internal() {
+		let cluster = Cluster::new(ClusterConfig::default());
+		let mesh = Broadcast::new().produce();
+		cluster
+			.origin
+			.publish_broadcast(".internal/origins/peer.example.com:4443", mesh.consume());
+
+		let token = AuthToken {
+			root: PathOwned::from(".internal".to_string()),
+			subscribe: PathPrefixes::from(vec![PathOwned::from(String::new())]),
+			publish: PathPrefixes::from(vec![PathOwned::from(String::new())]),
+			internal: false,
+		};
+
+		let mut subscriber = cluster.subscriber(&token).expect("subscriber");
+		assert!(
+			subscriber.try_announced().is_none(),
+			"token.root=.internal must not be able to read mesh registrations"
+		);
+
+		let publisher = cluster.publisher(&token).expect("publisher");
+		let attempt = Broadcast::new().produce();
+		// `origins/attacker` relative to root `.internal` is absolute `.internal/origins/attacker`.
+		assert!(
+			!publisher.publish_broadcast("origins/attacker", attempt.consume()),
+			"token.root=.internal must not be able to publish mesh registrations"
+		);
+	}
+
+	/// Regression test for the static-peer survival fix: gossip-driven unannounces must
+	/// not abort the reconnect loop of a peer that was statically configured via
+	/// `--cluster-connect`. Before the fix the active map didn't track provenance, so an
+	/// unannounce of a peer that appeared in both `connect` and gossip removed it,
+	/// permanently breaking that static peer's reconnect.
+	#[tokio::test]
+	async fn gossip_unannounce_preserves_static_peer() {
+		let active: Arc<Mutex<HashMap<String, DialEntry>>> = Arc::new(Mutex::new(HashMap::new()));
+		// Stand in for a real dial task; never polled but provides an AbortHandle.
+		let placeholder = tokio::spawn(std::future::pending::<()>());
+		let static_handle = placeholder.abort_handle();
+		active.lock().unwrap().insert(
+			"static-peer.example.com:4443".to_string(),
+			DialEntry {
+				handle: static_handle,
+				is_static: true,
+			},
+		);
+
+		Cluster::handle_gossip_unannounce(&active, "static-peer.example.com:4443");
+		assert!(
+			active.lock().unwrap().contains_key("static-peer.example.com:4443"),
+			"static peer entry must survive a gossip unannounce"
+		);
+
+		// Now insert a discovered peer and confirm unannounce DOES drop it.
+		let discovered = tokio::spawn(std::future::pending::<()>());
+		active.lock().unwrap().insert(
+			"discovered.example.com:4443".to_string(),
+			DialEntry {
+				handle: discovered.abort_handle(),
+				is_static: false,
+			},
+		);
+		Cluster::handle_gossip_unannounce(&active, "discovered.example.com:4443");
+		assert!(
+			!active.lock().unwrap().contains_key("discovered.example.com:4443"),
+			"discovered peer entry should be removed on gossip unannounce"
+		);
 	}
 
 	/// mTLS sessions see the mesh registrations they need to route between cluster peers.
