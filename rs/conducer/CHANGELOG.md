@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7](https://github.com/moq-dev/moq/compare/conducer-v0.3.6...conducer-v0.3.7) - 2026-05-25
+
+### Other
+
+- Remove moq-lite stub crate ([#1492](https://github.com/moq-dev/moq/pull/1492))
+
 ## [0.3.6](https://github.com/moq-dev/moq/compare/conducer-v0.3.5...conducer-v0.3.6) - 2026-05-07
 
 ### Other

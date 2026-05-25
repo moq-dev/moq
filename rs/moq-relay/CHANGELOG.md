@@ -64,6 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.0...moq-relay-v0.12.1) - 2026-05-25
+
+### Other
+
+- release ([#1475](https://github.com/moq-dev/moq/pull/1475))
+- *(stats)* fix TOML stats config silently clobbered by clap update_from ([#1491](https://github.com/moq-dev/moq/pull/1491))
+- *(stats)* allow multi-segment --stats-node values; move cargo-deny to ci ([#1489](https://github.com/moq-dev/moq/pull/1489))
+
 ## [0.12.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.0...moq-relay-v0.12.1) - 2026-05-24
 
 ### Other
