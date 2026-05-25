@@ -86,10 +86,6 @@ pub enum Error {
 	/// Importer dispatcher cannot return a single track for multi-track containers.
 	#[error("{0} can contain multiple tracks")]
 	MultipleTracks(&'static str),
-
-	/// Multi-track container reported no tracks.
-	#[error("init segment did not initialize the importer")]
-	NotInitialized,
 }
 
 /// A Result type alias for moq-mux operations.

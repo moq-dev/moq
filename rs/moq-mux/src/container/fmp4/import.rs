@@ -387,8 +387,8 @@ impl Import {
 
 	// Extract all frames out of an mdat atom using CMAF passthrough.
 	fn extract(&mut self, mdat: Mdat, mdat_raw: &[u8]) -> Result<()> {
-		let moov = self.moov.as_ref().ok_or(Error::MissingMoov)?;
-		let moof = self.moof.take().ok_or(Error::MissingMoof)?;
+		let moov = self.moov.as_ref().ok_or(Error::NoMoov)?;
+		let moof = self.moof.take().ok_or(Error::NoMoof)?;
 		let moof_size = self.moof_size;
 		let header_size = mdat_raw.len() - mdat.data.len();
 

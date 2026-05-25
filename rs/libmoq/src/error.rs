@@ -171,7 +171,6 @@ impl ffi::ReturnCode for Error {
 			Error::Hang(_) => -18,
 			Error::NoIndex => -19,
 			Error::NulError(_) => -20,
-			Error::BufferNotConsumed => -30,
 			Error::SessionNotFound => -21,
 			Error::OriginNotFound => -22,
 			Error::AnnouncementNotFound => -23,
@@ -181,6 +180,7 @@ impl ffi::ReturnCode for Error {
 			Error::TrackNotFound => -27,
 			Error::FrameNotFound => -28,
 			Error::Mux(_) => -29,
+			Error::BufferNotConsumed => -30,
 		}
 	}
 }

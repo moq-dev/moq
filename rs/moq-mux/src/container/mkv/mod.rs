@@ -115,3 +115,5 @@ pub enum Error {
 	#[error("matroska write error: {0}")]
 	MatroskaWrite(#[from] webm_iterable::errors::TagWriterError),
 }
+
+pub type Result<T> = std::result::Result<T, Error>;

@@ -68,3 +68,5 @@ pub enum Error {
 	#[error("MSF audio track {0:?} CMAF init has no audio sample entry to derive samplerate/channelConfig from")]
 	MissingAudioSampleEntry(String),
 }
+
+pub type Result<T> = std::result::Result<T, Error>;

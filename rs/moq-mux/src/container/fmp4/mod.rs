@@ -46,13 +46,13 @@ pub enum Error {
 	#[error("PTS overflow")]
 	PtsOverflow,
 
-	#[error("no moof found in CMAF frame data")]
+	#[error("missing moof")]
 	NoMoof,
 
-	#[error("no mdat found in CMAF frame data")]
+	#[error("missing mdat")]
 	NoMdat,
 
-	#[error("no moov found in init data")]
+	#[error("missing moov")]
 	NoMoov,
 
 	#[error("no tracks in moov")]
@@ -85,19 +85,13 @@ pub enum Error {
 	#[error("unsupported codec: MPEG2")]
 	UnsupportedMpeg2,
 
-	#[error("duplicate moof box")]
+	#[error("duplicate moof")]
 	DuplicateMoof,
 
-	#[error("missing moof box")]
-	MissingMoof,
-
-	#[error("missing moov box")]
-	MissingMoov,
-
-	#[error("missing trun box")]
+	#[error("missing trun")]
 	MissingTrun,
 
-	#[error("missing tfdt box")]
+	#[error("missing tfdt")]
 	MissingTfdt,
 
 	#[error("missing video config for synthesized init")]
@@ -128,6 +122,8 @@ pub enum Error {
 	NoFrames,
 }
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 /// CMAF container: encodes/decodes a single track's moof+mdat fragments.
 ///
 /// Build from a CMAF init segment with [`Wire::from_init`], or wrap a
@@ -147,7 +143,7 @@ impl Wire {
 	}
 
 	/// Parse a CMAF init segment (ftyp+moov), extracting the single track.
-	pub fn from_init(init_data: &[u8]) -> Result<Self, Error> {
+	pub fn from_init(init_data: &[u8]) -> Result<Self> {
 		use mp4_atom::DecodeMaybe;
 
 		let mut cursor = std::io::Cursor::new(init_data);
@@ -171,7 +167,7 @@ impl Wire {
 impl Container for Wire {
 	type Error = Error;
 
-	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> std::result::Result<(), Self::Error> {
 		let timescale = self.trak.mdia.mdhd.timescale as u64;
 		let track_id = self.trak.tkhd.track_id;
 		encode(group, frames, timescale, track_id)
@@ -181,7 +177,7 @@ impl Container for Wire {
 		&self,
 		group: &mut moq_net::GroupConsumer,
 		waiter: &conducer::Waiter,
-	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+	) -> Poll<std::result::Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;
 
 		let Some(data) = ready!(group.poll_read_frame(waiter)?) else {
@@ -193,7 +189,7 @@ impl Container for Wire {
 	}
 }
 
-pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, Error> {
+pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>> {
 	use mp4_atom::DecodeMaybe;
 
 	let mut cursor = std::io::Cursor::new(&data);
@@ -257,7 +253,7 @@ pub(crate) fn encode(
 	frames: &[Frame],
 	timescale: u64,
 	track_id: u32,
-) -> Result<(), Error> {
+) -> Result<()> {
 	if frames.is_empty() {
 		return Ok(());
 	}
@@ -279,12 +275,7 @@ pub(crate) fn encode(
 /// caller-supplied `timescale`.
 ///
 /// Returns an empty `Bytes` when `frames` is empty.
-pub(crate) fn encode_fragment(
-	track_id: u32,
-	timescale: u64,
-	sequence_number: u32,
-	frames: &[Frame],
-) -> Result<Bytes, Error> {
+pub(crate) fn encode_fragment(track_id: u32, timescale: u64, sequence_number: u32, frames: &[Frame]) -> Result<Bytes> {
 	use mp4_atom::Encode;
 
 	if frames.is_empty() {
@@ -352,7 +343,7 @@ pub(crate) fn synthesize_video_trak(
 	timescale: u64,
 	config: &VideoConfig,
 	description: &[u8],
-) -> Result<mp4_atom::Trak, Error> {
+) -> Result<mp4_atom::Trak> {
 	let width = config.coded_width.unwrap_or(0) as u16;
 	let height = config.coded_height.unwrap_or(0) as u16;
 	let visual = mp4_atom::Visual {
@@ -397,11 +388,7 @@ pub(crate) fn synthesize_video_trak(
 }
 
 /// Synthesize a CMAF `Trak` for an audio rendition that has no init segment.
-pub(crate) fn synthesize_audio_trak(
-	track_id: u32,
-	timescale: u64,
-	config: &AudioConfig,
-) -> Result<mp4_atom::Trak, Error> {
+pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &AudioConfig) -> Result<mp4_atom::Trak> {
 	let audio = mp4_atom::Audio {
 		data_reference_index: 1,
 		channel_count: config.channel_count as u16,
