@@ -58,22 +58,22 @@ HTTPS is currently not supported.
 
 ## Clustering
 
-In order to scale MoQ, you will eventually need to run multiple moq-relay instances potentially in different regions.
-This is called *clustering*, where the goal is that a user connects to the closest relay and they magically form a mesh behind the scenes.
+To scale MoQ, you will eventually need to run multiple moq-relay instances, often in different regions.
+A user connects to the nearest relay and the cluster routes broadcasts between peers behind the scenes.
 
-**moq-relay** uses a simple clustering scheme using moq-lite.
-This is both dog-fooding and a surprisingly ueeful way to distribute live metadata at scale.
+**moq-relay** layers clustering on top of moq-lite: every cluster peer publishes into the same logical origin, with a hop list on each broadcast for loop detection and shortest-path preference.
+There are two ways to form a cluster, which can be combined:
 
-We currently use a single "root" node that is used to discover members of the cluster and what broadcasts they offer.
-This is a normal moq-relay instance, potentially serving public traffic, unaware of the fact that it's in charge of other relays.
+- **Static topology** — `--cluster-connect <peer-url>` (repeatable or comma-separated). Each peer is dialed at startup and kept alive with exponential backoff. Best for 2-5 stable nodes; no discovery.
+- **Gossip discovery** — `--cluster-node <self-url>`. This relay advertises its URL on the cluster origin so peers reached via `--cluster-connect` discover and dial it. Pair with `--cluster-connect <rendezvous-url>` to join an existing mesh.
 
-The other moq-relay instances accept internet traffic and consult the root for routing.
-They can then advertise their internal ip/hostname to other instances when publishing a broadcast.
+A relay with only `--cluster-node` set waits passively for inbound connections (acts as a rendezvous). A relay with both flags dials the rendezvous, gossips itself, and dials every peer it learns about.
 
-Cluster arguments:
+Mesh registrations live at `.internal/origins/<url>` on the cluster origin. That namespace is mTLS-only: JWT and anonymous sessions never see or publish into `.internal/*` regardless of their declared scope.
 
-- `--cluster-root <HOST>`: The hostname/ip of the root node. If missing, this node is a root.
-- `--cluster-node <HOST>`: The hostname/ip of this instance. There needs to be a corresponding valid TLS certificate, potentially self-signed. If missing, published broadcasts will only be available on this specific relay.
+> `--cluster-root` was removed. If you have it in an existing config, the relay errors at startup with a message pointing at the replacements above.
+
+See [doc/bin/relay/cluster.md](https://github.com/moq-dev/moq/blob/main/doc/bin/relay/cluster.md) for the full walkthrough, including mTLS setup and a 3-node example.
 
 ## Authentication
 

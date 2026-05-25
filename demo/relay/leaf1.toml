@@ -35,9 +35,13 @@ tls.root = ["ca.pem"]
 listen = "[::]:4445"
 
 [cluster]
-# Connect to both the root and leaf0, forming a loop to exercise cluster loop detection.
-# ex. imagine us-east connects to us-central AND directly to us-west.
-connect = ["localhost:4443", "localhost:4444"]
+# Dial only the root explicitly; gossip via .internal/origins/* will discover
+# leaf0 and dial it automatically. Combined with leaf0's own outbound connect
+# to the root, this still forms the leaf0 <-> leaf1 <-> root loop that
+# exercises cluster loop detection. The mesh edge is now discovered, not
+# hardcoded (ex. imagine us-east learning about us-west via us-central).
+connect = ["localhost:4443"]
+node = "localhost:4445"
 
 [auth]
 # Allow JWT tokens that are signed by this root key.

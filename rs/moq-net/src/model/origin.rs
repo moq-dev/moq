@@ -643,6 +643,10 @@ pub struct OriginProducer {
 
 	// The prefix that is automatically stripped from all paths.
 	root: PathOwned,
+
+	// Absolute path prefixes for which publishes are silently refused.
+	// Populated by [`OriginProducer::block`]. Empty by default.
+	blocked: Vec<PathOwned>,
 }
 
 impl std::ops::Deref for OriginProducer {
@@ -661,6 +665,7 @@ impl OriginProducer {
 			info,
 			nodes: OriginNodes::default(),
 			root: PathOwned::default(),
+			blocked: Vec::new(),
 		}
 	}
 
@@ -690,12 +695,16 @@ impl OriginProducer {
 			return false;
 		}
 
+		let full = self.root.join(&path);
+
+		if self.is_blocked(&full) {
+			return false;
+		}
+
 		let (root, rest) = match self.nodes.get(&path) {
 			Some(root) => root,
 			None => return false,
 		};
-
-		let full = self.root.join(&path);
 
 		root.lock().publish(&full, &broadcast, &rest);
 		let root = root.clone();
@@ -719,7 +728,30 @@ impl OriginProducer {
 			info: self.info,
 			nodes: self.nodes.select(&prefixes)?,
 			root: self.root.clone(),
+			blocked: self.blocked.clone(),
 		})
+	}
+
+	/// Returns a new OriginProducer that silently refuses publishes whose absolute path
+	/// falls under `prefix`. Stacks: `.block(a).block(b)` refuses paths under either.
+	///
+	/// `prefix` is interpreted relative to this producer's current root, so the resulting
+	/// block is fixed at the absolute path computed at call time. Subsequent
+	/// [`with_root`](Self::with_root) calls do not retarget the block.
+	pub fn block(&self, prefix: impl AsPath) -> Self {
+		let absolute = self.root.join(prefix);
+		let mut blocked = self.blocked.clone();
+		blocked.push(absolute);
+		Self {
+			info: self.info,
+			nodes: self.nodes.clone(),
+			root: self.root.clone(),
+			blocked,
+		}
+	}
+
+	fn is_blocked(&self, absolute: &Path<'_>) -> bool {
+		self.blocked.iter().any(|b| absolute.has_prefix(b.as_path()))
 	}
 
 	/// Subscribe to all announced broadcasts.
@@ -734,6 +766,12 @@ impl OriginProducer {
 	#[deprecated(note = "use `consume().get_broadcast(path)` once `consume()` is cheap")]
 	pub fn get_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
+		if !self.blocked.is_empty() {
+			let absolute = self.root.join(&path);
+			if self.blocked.iter().any(|b| absolute.has_prefix(b.as_path())) {
+				return None;
+			}
+		}
 		let (root, rest) = self.nodes.get(&path)?;
 		let state = root.lock();
 		state.consume_broadcast(&rest)
@@ -750,6 +788,7 @@ impl OriginProducer {
 			info: self.info,
 			root: self.root.join(&prefix).to_owned(),
 			nodes: self.nodes.root(&prefix)?,
+			blocked: self.blocked.clone(),
 		})
 	}
 
@@ -785,6 +824,10 @@ pub struct OriginConsumer {
 
 	// A prefix that is automatically stripped from all paths.
 	root: PathOwned,
+
+	// Absolute path prefixes whose announcements / lookups are hidden from this
+	// consumer. Populated by [`OriginConsumer::block`]. Empty by default.
+	blocked: Vec<PathOwned>,
 }
 
 impl std::ops::Deref for OriginConsumer {
@@ -797,6 +840,10 @@ impl std::ops::Deref for OriginConsumer {
 
 impl OriginConsumer {
 	fn new(info: Origin, root: PathOwned, nodes: OriginNodes) -> Self {
+		Self::new_with_blocked(info, root, nodes, Vec::new())
+	}
+
+	fn new_with_blocked(info: Origin, root: PathOwned, nodes: OriginNodes, blocked: Vec<PathOwned>) -> Self {
 		let state = conducer::Producer::<OriginConsumerState>::default();
 		let id = ConsumerId::new();
 
@@ -814,6 +861,7 @@ impl OriginConsumer {
 			nodes,
 			state,
 			root,
+			blocked,
 		}
 	}
 
@@ -834,14 +882,21 @@ impl OriginConsumer {
 	/// consumer is closed, or `Poll::Pending` after registering `waiter` to be
 	/// notified when the next update arrives.
 	pub fn poll_announced(&mut self, waiter: &conducer::Waiter) -> Poll<Option<OriginAnnounce>> {
-		match self.state.poll(waiter, |state| match state.take() {
-			Some(item) => Poll::Ready(item),
-			None => Poll::Pending,
-		}) {
-			Poll::Ready(Ok(item)) => Poll::Ready(Some(item)),
-			// Closed: discard the Ref so its MutexGuard doesn't escape this call.
-			Poll::Ready(Err(_)) => Poll::Ready(None),
-			Poll::Pending => Poll::Pending,
+		loop {
+			let item = match self.state.poll(waiter, |state| match state.take() {
+				Some(item) => Poll::Ready(item),
+				None => Poll::Pending,
+			}) {
+				Poll::Ready(Ok(item)) => item,
+				// Closed: discard the Ref so its MutexGuard doesn't escape this call.
+				Poll::Ready(Err(_)) => return Poll::Ready(None),
+				Poll::Pending => return Poll::Pending,
+			};
+
+			if self.is_blocked(&item.0) {
+				continue;
+			}
+			return Poll::Ready(Some(item));
 		}
 	}
 
@@ -850,7 +905,21 @@ impl OriginConsumer {
 	/// Returns None if there is no update available; NOT because the consumer is closed.
 	/// You have to use `is_closed` to check if the consumer is closed.
 	pub fn try_announced(&mut self) -> Option<OriginAnnounce> {
-		self.state.write().ok()?.take()
+		loop {
+			let item = self.state.write().ok()?.take()?;
+			if self.is_blocked(&item.0) {
+				continue;
+			}
+			return Some(item);
+		}
+	}
+
+	fn is_blocked(&self, path: &PathOwned) -> bool {
+		if self.blocked.is_empty() {
+			return false;
+		}
+		let absolute = self.root.join(path);
+		self.blocked.iter().any(|b| absolute.has_prefix(b.as_path()))
 	}
 
 	/// Create another consumer with its own announcement cursor over the same origin.
@@ -867,6 +936,12 @@ impl OriginConsumer {
 	/// landed (e.g. you're responding to an `announced()` callback).
 	pub fn get_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
+		if !self.blocked.is_empty() {
+			let absolute = self.root.join(&path);
+			if self.blocked.iter().any(|b| absolute.has_prefix(b.as_path())) {
+				return None;
+			}
+		}
 		let (root, rest) = self.nodes.get(&path)?;
 		let state = root.lock();
 		state.consume_broadcast(&rest)
@@ -882,6 +957,14 @@ impl OriginConsumer {
 	/// cannot guarantee the announcement has already been received.
 	pub async fn announced_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
+
+		// Refuse blocked paths up front; the post-scope loop would otherwise hang forever.
+		if !self.blocked.is_empty() {
+			let absolute = self.root.join(&path);
+			if self.blocked.iter().any(|b| absolute.has_prefix(b.as_path())) {
+				return None;
+			}
+		}
 
 		// Scope a fresh consumer down to this path so we only wake up for relevant announcements.
 		let mut consumer = self.scope(std::slice::from_ref(&path))?;
@@ -911,10 +994,11 @@ impl OriginConsumer {
 	// TODO accept PathPrefixes instead of &[Path]
 	pub fn scope(&self, prefixes: &[Path]) -> Option<OriginConsumer> {
 		let prefixes = PathPrefixes::new(prefixes);
-		Some(OriginConsumer::new(
+		Some(OriginConsumer::new_with_blocked(
 			self.info,
 			self.root.clone(),
 			self.nodes.select(&prefixes)?,
+			self.blocked.clone(),
 		))
 	}
 
@@ -925,11 +1009,26 @@ impl OriginConsumer {
 	pub fn with_root(&self, prefix: impl AsPath) -> Option<Self> {
 		let prefix = prefix.as_path();
 
-		Some(Self::new(
+		Some(Self::new_with_blocked(
 			self.info,
 			self.root.join(&prefix).to_owned(),
 			self.nodes.root(&prefix)?,
+			self.blocked.clone(),
 		))
+	}
+
+	/// Returns a new OriginConsumer that hides announcements whose absolute path falls
+	/// under `prefix`, and refuses `get_broadcast` / `announced_broadcast` lookups
+	/// targeting those paths. Stacks: `.block(a).block(b)` hides paths under either.
+	///
+	/// `prefix` is interpreted relative to this consumer's current root, so the resulting
+	/// block is fixed at the absolute path computed at call time. Subsequent
+	/// [`with_root`](Self::with_root) calls do not retarget the block.
+	pub fn block(&self, prefix: impl AsPath) -> Self {
+		let absolute = self.root.join(prefix);
+		let mut blocked = self.blocked.clone();
+		blocked.push(absolute);
+		Self::new_with_blocked(self.info, self.root.clone(), self.nodes.clone(), blocked)
 	}
 
 	/// Returns the prefix that is automatically stripped from all paths.
@@ -959,7 +1058,7 @@ impl Drop for OriginConsumer {
 
 impl Clone for OriginConsumer {
 	fn clone(&self) -> Self {
-		OriginConsumer::new(self.info, self.root.clone(), self.nodes.clone())
+		OriginConsumer::new_with_blocked(self.info, self.root.clone(), self.nodes.clone(), self.blocked.clone())
 	}
 }
 
@@ -2117,5 +2216,107 @@ mod tests {
 			collected.iter().all(|(path, _)| path == &Path::new("test")),
 			"unexpected path in pending updates",
 		);
+	}
+
+	#[tokio::test]
+	async fn test_consume_block_hides_announces_under_prefix() {
+		let origin = Origin::random().produce();
+		let hidden = Broadcast::new().produce();
+		let visible = Broadcast::new().produce();
+
+		// .internal/origins/foo is the cluster mesh path the relay needs to keep private.
+		origin.publish_broadcast(".internal/origins/foo", hidden.consume());
+		origin.publish_broadcast("demo/bar", visible.consume());
+
+		let mut blocked = origin.consume().block(".internal");
+		blocked.assert_next("demo/bar", &visible.consume());
+		blocked.assert_next_wait(); // .internal/origins/foo is hidden
+
+		let mut unblocked = origin.consume();
+		// Insertion order isn't guaranteed across roots; just confirm both arrive.
+		let first = unblocked.try_announced().expect("first announce");
+		let second = unblocked.try_announced().expect("second announce");
+		let mut paths = [first.0.as_str(), second.0.as_str()];
+		paths.sort();
+		assert_eq!(paths, [".internal/origins/foo", "demo/bar"]);
+	}
+
+	#[tokio::test]
+	async fn test_publish_block_refuses_publish_under_prefix() {
+		let origin = Origin::random().produce();
+		let broadcast = Broadcast::new().produce();
+
+		let blocked = origin.block(".internal");
+		assert!(!blocked.publish_broadcast(".internal/origins/foo", broadcast.consume()));
+		// Exact-match also blocked.
+		assert!(!blocked.publish_broadcast(".internal", broadcast.consume()));
+		// Sibling under a different first segment is fine.
+		assert!(blocked.publish_broadcast(".internalish", broadcast.consume()));
+		assert!(blocked.publish_broadcast("demo/bar", broadcast.consume()));
+
+		let mut consumer = origin.consume();
+		// Insertion-order: .internalish first, then demo/bar.
+		consumer.assert_next(".internalish", &broadcast.consume());
+		consumer.assert_next("demo/bar", &broadcast.consume());
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_block_get_broadcast() {
+		let origin = Origin::random().produce();
+		let hidden = Broadcast::new().produce();
+		origin.publish_broadcast(".internal/origins/foo", hidden.consume());
+
+		let consumer = origin.consume().block(".internal");
+		assert!(consumer.get_broadcast(".internal/origins/foo").is_none());
+		assert!(
+			consumer
+				.announced_broadcast(".internal/origins/foo")
+				.now_or_never()
+				.is_some()
+		);
+		// announced_broadcast returns None synchronously for blocked paths.
+		assert!(
+			consumer
+				.announced_broadcast(".internal/origins/foo")
+				.now_or_never()
+				.unwrap()
+				.is_none()
+		);
+	}
+
+	#[tokio::test]
+	async fn test_block_stacks() {
+		let origin = Origin::random().produce();
+		let b1 = Broadcast::new().produce();
+		let b2 = Broadcast::new().produce();
+		let b3 = Broadcast::new().produce();
+
+		origin.publish_broadcast(".internal/x", b1.consume());
+		origin.publish_broadcast(".secret/y", b2.consume());
+		origin.publish_broadcast("demo/z", b3.consume());
+
+		let mut consumer = origin.consume().block(".internal").block(".secret");
+		consumer.assert_next("demo/z", &b3.consume());
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_block_with_root_treats_block_as_absolute() {
+		let origin = Origin::random().produce();
+		let internal = Broadcast::new().produce();
+		let nested = Broadcast::new().produce();
+
+		// `.internal` set at the unrooted view stays anchored at the absolute root.
+		// After descending into `demo`, paths in the view start with `demo/...`, so the
+		// absolute `.internal/...` paths aren't reachable from the rooted view anyway.
+		let blocked = origin.block(".internal");
+
+		assert!(!blocked.publish_broadcast(".internal/x", internal.consume()));
+
+		// .block then with_root: the descended view publishes under absolute "demo/...",
+		// so blocked .internal is unreachable from the rooted view and publishes succeed.
+		let rooted = blocked.with_root("demo").expect("rooted view");
+		assert!(rooted.publish_broadcast("nested", nested.consume()));
 	}
 }
