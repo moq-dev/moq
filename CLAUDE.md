@@ -148,13 +148,8 @@ A function with 4+ args, or a call site passing the same 3+ values into multiple
 
 - Run `just check` to execute all tests and linting.
 - Run `just fix` to automatically fix formating and easy things.
-- Prefer end-to-end tests (publisher ↔ relay ↔ subscriber, asserting observed bytes) over unit tests when the bug surface crosses modules. Reach for unit tests when the surface is genuinely module-local.
 - Rust tests are integrated within source files
 - Async tests that sleep should call `tokio::time::pause()` at the start to simulate time instantly
-
-## Benchmarks
-
-Performance-sensitive crates (`moq-net`, `hang`, `moq-mux`, `moq-audio`) keep a `benches/` directory using `divan`. When changing a hot path (group dispatch, frame parsing, codec wrap/unwrap), add or update a bench and paste before/after numbers in the PR description.
 
 ## Cross-Package Sync
 
@@ -162,7 +157,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/libmoq`, `py/moq-rs`, `doc/lib/{py,swift,kt}` |
+| `rs/moq-ffi` | `rs/libmoq` (C), `py/moq-rs` + Swift/Kotlin/Go wrapper repos, and `doc/lib/{py,swift,kt,go}` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept` |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept` |
 | `rs/moq-token` | `js/token` |
@@ -179,7 +174,7 @@ When making changes to the codebase:
 2. Run `just fix` to auto-format and fix linting issues
 3. Run `just check` to verify everything passes
 4. Walk the Cross-Package Sync table; update paired packages and docs in the same PR
-5. Add tests (integration first; see Testing Approach)
+5. Add tests where they're easy to write
 6. Commit and push changes
 
 ## PR Reviews
