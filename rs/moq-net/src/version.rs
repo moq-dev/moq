@@ -36,6 +36,37 @@ pub(crate) const ALPN_16: &str = "moqt-16";
 pub(crate) const ALPN_17: &str = "moqt-17";
 pub(crate) const ALPN_18: &str = "moqt-18";
 
+/// The qmux draft version used to carry a MoQ ALPN over WebSocket / TLS.
+///
+/// The MoQ WG decided that qmux's version is tied to the moq-transport draft
+/// (moq-transport-18 requires qmux-01; moq-transport-14..17 use qmux-00).
+/// moq-lite is unconstrained and may ride on either.
+///
+/// Mirrors `qmux::Version` but kept local so `moq-net` stays independent of
+/// the `qmux` crate; the `moq-native` layer converts at the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum QmuxVersion {
+	QMux00,
+	QMux01,
+}
+
+impl QmuxVersion {
+	/// The bare ALPN string for this qmux version.
+	pub fn alpn(&self) -> &'static str {
+		match self {
+			Self::QMux00 => "qmux-00",
+			Self::QMux01 => "qmux-01",
+		}
+	}
+}
+
+impl fmt::Display for QmuxVersion {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.write_str(self.alpn())
+	}
+}
+
 /// A MoQ protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -115,6 +146,31 @@ impl Version {
 			self,
 			Self::Lite(lite::Version::Lite01 | lite::Version::Lite02) | Self::Ietf(ietf::Version::Draft14)
 		)
+	}
+
+	/// The qmux versions this MoQ version may ride on, in preference order.
+	///
+	/// moq-transport-18 requires qmux-01; moq-transport-14..17 require qmux-00.
+	/// Existing moq-lite versions (Lite01..Lite04) advertise both for back-compat.
+	/// Future moq-lite versions should pin to a single qmux version, like moq-transport.
+	pub fn qmux_versions(&self) -> &'static [QmuxVersion] {
+		use ietf::Version as I;
+		use lite::Version as L;
+		match self {
+			Self::Ietf(I::Draft18) => &[QmuxVersion::QMux01],
+			Self::Ietf(I::Draft14 | I::Draft15 | I::Draft16 | I::Draft17) => &[QmuxVersion::QMux00],
+			Self::Lite(L::Lite01 | L::Lite02 | L::Lite03 | L::Lite04) => {
+				&[QmuxVersion::QMux01, QmuxVersion::QMux00]
+			}
+		}
+	}
+
+	/// Whether this MoQ version is permitted to ride on the given qmux version.
+	///
+	/// Use server-side after the qmux/app pair has been negotiated to reject
+	/// pairings the moq-transport spec forbids (e.g. `qmux-00.moqt-18`).
+	pub fn accepts_qmux(&self, qv: QmuxVersion) -> bool {
+		self.qmux_versions().contains(&qv)
 	}
 
 	/// Whether this is a lite protocol version.
@@ -242,6 +298,26 @@ impl Versions {
 		alpns
 	}
 
+	/// Compute the `(qmux_version, app_alpn)` pairs to advertise over WebSocket / TLS,
+	/// in preference order, dedup'd.
+	///
+	/// Each MoQ version is paired only with the qmux versions it's permitted to ride on
+	/// (see [`Version::qmux_versions`]). Use this to build the `Sec-WebSocket-Protocol`
+	/// list (or TLS ALPN list) when fronting a qmux session.
+	pub fn qmux_alpns(&self) -> Vec<(QmuxVersion, &'static str)> {
+		let mut pairs = Vec::new();
+		for v in &self.0 {
+			let alpn = v.alpn();
+			for &qv in v.qmux_versions() {
+				let pair = (qv, alpn);
+				if !pairs.contains(&pair) {
+					pairs.push(pair);
+				}
+			}
+		}
+		pairs
+	}
+
 	/// Return only versions present in both self and other, or `None` if the intersection is empty.
 	pub fn filter(&self, other: &Versions) -> Option<Versions> {
 		let filtered: Vec<Version> = self.0.iter().filter(|v| other.0.contains(v)).copied().collect();
@@ -294,5 +370,102 @@ impl From<Versions> for coding::Versions {
 	fn from(value: Versions) -> Self {
 		let inner: Vec<coding::Version> = value.0.into_iter().map(|v| v.into()).collect();
 		coding::Versions::from(inner)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn qmux_versions_for_each_moq_version() {
+		assert_eq!(
+			Version::Ietf(ietf::Version::Draft18).qmux_versions(),
+			&[QmuxVersion::QMux01]
+		);
+		for v in [
+			ietf::Version::Draft14,
+			ietf::Version::Draft15,
+			ietf::Version::Draft16,
+			ietf::Version::Draft17,
+		] {
+			assert_eq!(Version::Ietf(v).qmux_versions(), &[QmuxVersion::QMux00], "{v}");
+		}
+		for v in [
+			lite::Version::Lite01,
+			lite::Version::Lite02,
+			lite::Version::Lite03,
+			lite::Version::Lite04,
+		] {
+			assert_eq!(
+				Version::Lite(v).qmux_versions(),
+				&[QmuxVersion::QMux01, QmuxVersion::QMux00],
+				"{v}"
+			);
+		}
+	}
+
+	#[test]
+	fn accepts_qmux_is_consistent() {
+		assert!(Version::Ietf(ietf::Version::Draft18).accepts_qmux(QmuxVersion::QMux01));
+		assert!(!Version::Ietf(ietf::Version::Draft18).accepts_qmux(QmuxVersion::QMux00));
+		assert!(Version::Ietf(ietf::Version::Draft17).accepts_qmux(QmuxVersion::QMux00));
+		assert!(!Version::Ietf(ietf::Version::Draft17).accepts_qmux(QmuxVersion::QMux01));
+		assert!(Version::Lite(lite::Version::Lite04).accepts_qmux(QmuxVersion::QMux01));
+		assert!(Version::Lite(lite::Version::Lite04).accepts_qmux(QmuxVersion::QMux00));
+	}
+
+	#[test]
+	fn qmux_alpns_all_matches_table() {
+		let pairs = Versions::all().qmux_alpns();
+		assert_eq!(
+			pairs,
+			vec![
+				(QmuxVersion::QMux01, "moq-lite-04"),
+				(QmuxVersion::QMux00, "moq-lite-04"),
+				(QmuxVersion::QMux01, "moq-lite-03"),
+				(QmuxVersion::QMux00, "moq-lite-03"),
+				(QmuxVersion::QMux01, "moql"),
+				(QmuxVersion::QMux00, "moql"),
+				(QmuxVersion::QMux01, "moqt-18"),
+				(QmuxVersion::QMux00, "moqt-17"),
+				(QmuxVersion::QMux00, "moqt-16"),
+				(QmuxVersion::QMux00, "moqt-15"),
+				(QmuxVersion::QMux00, "moq-00"),
+			]
+		);
+	}
+
+	#[test]
+	fn qmux_alpns_singleton_moqt_18() {
+		assert_eq!(
+			Versions::from(Version::Ietf(ietf::Version::Draft18)).qmux_alpns(),
+			vec![(QmuxVersion::QMux01, "moqt-18")]
+		);
+	}
+
+	#[test]
+	fn qmux_alpns_singleton_moqt_17() {
+		assert_eq!(
+			Versions::from(Version::Ietf(ietf::Version::Draft17)).qmux_alpns(),
+			vec![(QmuxVersion::QMux00, "moqt-17")]
+		);
+	}
+
+	#[test]
+	fn qmux_alpns_singleton_lite_offers_both() {
+		assert_eq!(
+			Versions::from(Version::Lite(lite::Version::Lite04)).qmux_alpns(),
+			vec![
+				(QmuxVersion::QMux01, "moq-lite-04"),
+				(QmuxVersion::QMux00, "moq-lite-04"),
+			]
+		);
+	}
+
+	#[test]
+	fn qmux_version_alpn_strings() {
+		assert_eq!(QmuxVersion::QMux00.alpn(), "qmux-00");
+		assert_eq!(QmuxVersion::QMux01.alpn(), "qmux-01");
 	}
 }
