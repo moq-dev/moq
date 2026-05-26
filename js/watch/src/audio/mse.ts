@@ -53,14 +53,16 @@ export class Mse implements Backend {
 		const broadcast = effect.get(this.source.broadcast);
 		if (!broadcast) return;
 
-		const active = effect.get(broadcast.active);
-		if (!active) return;
-
 		const track = effect.get(this.source.track);
 		if (!track) return;
 
 		const config = effect.get(this.source.config);
 		if (!config) return;
+
+		// Honor a per-rendition `broadcast` override: resolve to the source broadcast if set,
+		// otherwise use the catalog's own broadcast.
+		const active = broadcast.trackBroadcast(effect, config.broadcast);
+		if (!active) return;
 
 		const mime = `audio/mp4; codecs="${config.codec}"`;
 

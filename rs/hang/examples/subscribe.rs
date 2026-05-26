@@ -68,8 +68,30 @@ async fn run_subscribe(mut consumer: moq_net::OriginConsumer) -> anyhow::Result<
 		codec = %config.codec,
 		width = ?config.coded_width,
 		height = ?config.coded_height,
+		broadcast_override = ?config.broadcast.as_ref().map(|p| p.as_str()),
 		"subscribing to video track"
 	);
+
+	// If the rendition references a different broadcast (e.g. a source feed that this
+	// catalog only sidecars), resolve it relative to the catalog's broadcast path and
+	// wait for the announcement. Otherwise subscribe on the catalog's broadcast.
+	// Treat an empty rel, a rel that resolves back to our own path, or a rel that
+	// resolves to empty (excess `..`) as "no override" so we reuse the existing
+	// broadcast handle instead of opening a redundant or unrouteable subscription.
+	let track_broadcast = match config.broadcast.as_ref() {
+		Some(rel) if !rel.is_empty() => {
+			let resolved = path.resolve(rel);
+			if resolved.is_empty() || resolved == path {
+				broadcast.clone()
+			} else {
+				consumer
+					.announced_broadcast(&resolved)
+					.await
+					.ok_or_else(|| anyhow::anyhow!("source broadcast unavailable: {resolved}"))?
+			}
+		}
+		_ => broadcast.clone(),
+	};
 
 	// Subscribe to the video track.
 	let track = moq_net::Track {
@@ -77,7 +99,7 @@ async fn run_subscribe(mut consumer: moq_net::OriginConsumer) -> anyhow::Result<
 		priority: 1,
 	};
 
-	let track_consumer = broadcast.subscribe_track(&track)?;
+	let track_consumer = track_broadcast.subscribe_track(&track)?;
 	let mut ordered = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
 		.with_latency(Duration::from_millis(500));
 

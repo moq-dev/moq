@@ -164,4 +164,96 @@ mod test {
 		let output = decoded.to_string().expect("failed to encode");
 		assert_eq!(encoded, output, "wrong encoded output");
 	}
+
+	#[test]
+	fn rendition_with_broadcast_override() {
+		// Decode a catalog where one rendition references a track in a sibling broadcast,
+		// and verify the `broadcast` field round-trips through serde.
+		let encoded = r#"{
+			"video": {
+				"renditions": {
+					"video": {
+						"broadcast": "../source",
+						"codec": "avc1.64001f",
+						"codedWidth": 1280,
+						"codedHeight": 720,
+						"container": {"kind": "legacy"}
+					}
+				}
+			}
+		}"#;
+
+		let parsed = Catalog::from_str(encoded).expect("failed to decode");
+		let rendition = parsed.video.renditions.get("video").expect("missing rendition");
+		assert_eq!(
+			rendition.broadcast.as_ref().map(|p| p.as_str()),
+			Some("../source"),
+			"broadcast field did not deserialize"
+		);
+
+		// Full encode -> decode -> equality, so the test catches any encoder regression
+		// (e.g. wrong key, double-emission, or `null` instead of skip).
+		let output = parsed.to_string().expect("failed to encode");
+		let reparsed = Catalog::from_str(&output).expect("failed to re-decode");
+		assert_eq!(parsed, reparsed, "re-encoded catalog did not round-trip");
+	}
+
+	#[test]
+	fn rendition_without_broadcast_omits_field() {
+		// `broadcast: None` must NOT serialize as `"broadcast":null`, otherwise the wire
+		// format silently changes for every catalog that doesn't use cross-broadcast refs.
+		let mut video_config = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0x00,
+			level: 0x1f,
+			inline: false,
+		});
+		video_config.coded_width = Some(1280);
+		video_config.coded_height = Some(720);
+		video_config.container = Container::Legacy;
+
+		let mut renditions = BTreeMap::new();
+		renditions.insert("video".to_string(), video_config);
+
+		let catalog = Catalog {
+			video: Video {
+				renditions,
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let output = catalog.to_string().expect("failed to encode");
+		assert!(
+			!output.contains("broadcast"),
+			"broadcast field leaked into JSON when None: {output}"
+		);
+	}
+
+	#[test]
+	fn rendition_with_empty_broadcast_normalizes() {
+		// An empty-string broadcast field should normalize to an empty PathRelative so the
+		// consumer can treat it identically to a missing field.
+		let encoded = r#"{
+			"video": {
+				"renditions": {
+					"video": {
+						"broadcast": "",
+						"codec": "avc1.64001f",
+						"codedWidth": 1280,
+						"codedHeight": 720,
+						"container": {"kind": "legacy"}
+					}
+				}
+			}
+		}"#;
+
+		let parsed = Catalog::from_str(encoded).expect("failed to decode");
+		let rendition = parsed.video.renditions.get("video").expect("missing rendition");
+		assert_eq!(
+			rendition.broadcast.as_ref().map(|p| p.is_empty()),
+			Some(true),
+			"empty broadcast should deserialize as Some(empty)"
+		);
+	}
 }
