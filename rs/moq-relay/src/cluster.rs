@@ -195,17 +195,6 @@ impl Cluster {
 			None => String::new(),
 		};
 
-		// Held in scope so the registration stays announced until `run` exits.
-		let _self_registration: Option<BroadcastProducer> = self.config.mesh.as_deref().map(|mesh| {
-			let path = Path::new(MESH_PREFIX).join(mesh);
-			let broadcast = self
-				.origin
-				.create_broadcast(&path)
-				.expect(".internal/origins is within the relay origin's root");
-			tracing::info!(url = %mesh, %path, "advertising cluster mesh URL");
-			broadcast
-		});
-
 		let active: Arc<Mutex<HashMap<String, DialEntry>>> = Arc::new(Mutex::new(HashMap::new()));
 		let mut tasks = tokio::task::JoinSet::new();
 
@@ -213,19 +202,31 @@ impl Cluster {
 			Self::spawn_dial(&mut tasks, &active, self.clone(), peer.clone(), token.clone(), true);
 		}
 
-		// A mesh-only relay (passive rendezvous) already has inbound sessions from
-		// every peer that knows about it; running discovery would only create
-		// duplicate outbound sessions.
-		if has_outbound {
-			if let Some(self_url) = self.config.mesh.clone() {
+		// Held in scope so the registration stays announced until `run` exits.
+		// Discovery is paired with it: a mesh-only relay (passive rendezvous) has
+		// nothing to discover, so we only run it when we also have an outbound peer.
+		let _self_registration: Option<BroadcastProducer> = if let Some(mesh) = self.config.mesh.as_deref() {
+			let path = Path::new(MESH_PREFIX).join(mesh);
+			let broadcast = self
+				.origin
+				.create_broadcast(&path)
+				.expect(".internal/origins is within the relay origin's root");
+			tracing::info!(url = %mesh, %path, "advertising cluster mesh URL");
+
+			if has_outbound {
 				let this = self.clone();
 				let token = token.clone();
 				let active = active.clone();
+				let self_url = mesh.to_owned();
 				tasks.spawn(async move {
 					this.run_discovery(self_url, token, active).await;
 				});
 			}
-		}
+
+			Some(broadcast)
+		} else {
+			None
+		};
 
 		if tasks.is_empty() {
 			// Passive rendezvous: park to keep `_self_registration` alive. The
@@ -280,35 +281,34 @@ impl Cluster {
 				continue;
 			}
 
-			match announced {
-				Some(_) => {
-					let peer = peer.to_owned();
-					let already_active = {
-						let active = active.lock().expect("dial map poisoned");
-						active.contains_key(&peer)
-					};
-					if already_active {
-						tracing::debug!(%peer, "discovered peer already tracked; skipping dial");
-						continue;
-					}
-					tracing::info!(%peer, "discovered cluster peer; dialing");
-					let this = self.clone();
-					let token = token.clone();
-					let peer_for_task = peer.clone();
-					let handle = tokio::spawn(async move {
-						if let Err(err) = this.run_remote(&peer_for_task, token).await {
-							tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
-						}
-					});
-					active.lock().expect("dial map poisoned").insert(
-						peer,
-						DialEntry {
-							handle: handle.abort_handle(),
-							is_static: false,
-						},
-					);
+			if announced.is_some() {
+				let peer = peer.to_owned();
+				let already_active = {
+					let active = active.lock().expect("dial map poisoned");
+					active.contains_key(&peer)
+				};
+				if already_active {
+					tracing::debug!(%peer, "discovered peer already tracked; skipping dial");
+					continue;
 				}
-				None => Self::handle_gossip_unannounce(&active, peer),
+				tracing::info!(%peer, "discovered cluster peer; dialing");
+				let this = self.clone();
+				let token = token.clone();
+				let peer_for_task = peer.clone();
+				let handle = tokio::spawn(async move {
+					if let Err(err) = this.run_remote(&peer_for_task, token).await {
+						tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
+					}
+				});
+				active.lock().expect("dial map poisoned").insert(
+					peer,
+					DialEntry {
+						handle: handle.abort_handle(),
+						is_static: false,
+					},
+				);
+			} else {
+				Self::handle_gossip_unannounce(&active, peer);
 			}
 		}
 	}
