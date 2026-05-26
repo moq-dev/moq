@@ -7,55 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.3](https://github.com/moq-dev/moq/compare/moq-native-v0.8.2...moq-native-v0.8.3) - 2025-09-05
-
-### Added
-
-- *(moq-native)* support raw QUIC sessions with `moql://` URLs ([#578](https://github.com/moq-dev/moq/pull/578))
-
-## [0.8.2](https://github.com/moq-dev/moq/compare/moq-native-v0.8.1...moq-native-v0.8.2) - 2025-09-04
-
-### Other
-
-- Support aws_lc_rs or ring in moq-native ([#574](https://github.com/moq-dev/moq/pull/574))
-
-## [0.8.0](https://github.com/moq-dev/moq/compare/moq-native-v0.7.7...moq-native-v0.8.0) - 2025-09-04
-
-### Other
-
-- Add WebSocket fallback support ([#570](https://github.com/moq-dev/moq/pull/570))
-
-## [0.7.7](https://github.com/moq-dev/moq/compare/moq-native-v0.7.6...moq-native-v0.7.7) - 2025-08-12
-
-### Other
-
-- Less verbose errors, using % instead of ? ([#521](https://github.com/moq-dev/moq/pull/521))
-
-## [0.7.6](https://github.com/moq-dev/moq/compare/moq-native-v0.7.5...moq-native-v0.7.6) - 2025-07-31
-
-### Other
-
-- updated the following local packages: moq-lite
-# Changelog
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
 ## [0.15.0](https://github.com/moq-dev/moq/compare/moq-native-v0.14.4...moq-native-v0.15.0) - 2026-05-25
 
 ### Other
 
 - convert to a moq-native example ([#1494](https://github.com/moq-dev/moq/pull/1494))
 - release ([#1475](https://github.com/moq-dev/moq/pull/1475))
-- *(rs)* add cargo-deny and resolve outstanding advisories ([#1486](https://github.com/moq-dev/moq/pull/1486))
-
-## [0.15.0](https://github.com/moq-dev/moq/compare/moq-native-v0.14.4...moq-native-v0.15.0) - 2026-05-24
-
-### Other
-
 - *(rs)* add cargo-deny and resolve outstanding advisories ([#1486](https://github.com/moq-dev/moq/pull/1486))
 
 ## [0.14.4](https://github.com/moq-dev/moq/compare/moq-native-v0.14.3...moq-native-v0.14.4) - 2026-05-23
@@ -256,6 +213,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Other
 
 - Fix a potential race with append_group ([#600](https://github.com/moq-dev/moq/pull/600))
+
+## [0.8.3](https://github.com/moq-dev/moq/compare/moq-native-v0.8.2...moq-native-v0.8.3) - 2025-09-05
+
+### Added
+
+- *(moq-native)* support raw QUIC sessions with `moql://` URLs ([#578](https://github.com/moq-dev/moq/pull/578))
+
+## [0.8.2](https://github.com/moq-dev/moq/compare/moq-native-v0.8.1...moq-native-v0.8.2) - 2025-09-04
+
+### Other
+
+- Support aws_lc_rs or ring in moq-native ([#574](https://github.com/moq-dev/moq/pull/574))
+
+## [0.8.0](https://github.com/moq-dev/moq/compare/moq-native-v0.7.7...moq-native-v0.8.0) - 2025-09-04
+
+### Other
+
+- Add WebSocket fallback support ([#570](https://github.com/moq-dev/moq/pull/570))
+
+## [0.7.7](https://github.com/moq-dev/moq/compare/moq-native-v0.7.6...moq-native-v0.7.7) - 2025-08-12
+
+### Other
+
+- Less verbose errors, using % instead of ? ([#521](https://github.com/moq-dev/moq/pull/521))
+
+## [0.7.6](https://github.com/moq-dev/moq/compare/moq-native-v0.7.5...moq-native-v0.7.6) - 2025-07-31
+
+### Other
+
+- updated the following local packages: moq-lite
 
 ## [0.7.5](https://github.com/moq-dev/moq/compare/moq-native-v0.7.4...moq-native-v0.7.5) - 2025-07-22
 
