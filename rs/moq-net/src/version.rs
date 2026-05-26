@@ -159,9 +159,7 @@ impl Version {
 		match self {
 			Self::Ietf(I::Draft18) => &[QmuxVersion::QMux01],
 			Self::Ietf(I::Draft14 | I::Draft15 | I::Draft16 | I::Draft17) => &[QmuxVersion::QMux00],
-			Self::Lite(L::Lite01 | L::Lite02 | L::Lite03 | L::Lite04) => {
-				&[QmuxVersion::QMux01, QmuxVersion::QMux00]
-			}
+			Self::Lite(L::Lite01 | L::Lite02 | L::Lite03 | L::Lite04) => &[QmuxVersion::QMux01, QmuxVersion::QMux00],
 		}
 	}
 
