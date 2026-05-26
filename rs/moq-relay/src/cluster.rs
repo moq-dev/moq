@@ -170,23 +170,16 @@ impl Cluster {
 		}
 	}
 
-	/// Runs the cluster event loop. Three modes, derived from config:
+	/// Runs the cluster event loop.
 	///
-	/// - **Standalone** (`connect` empty, `mesh` unset): returns immediately.
-	/// - **Passive rendezvous** (`mesh` set, `connect` empty): publishes the
-	///   self-registration broadcast and parks. The relay accepts inbound cluster
-	///   sessions through the moq-native server but does not dial out, so no QUIC
-	///   client is required.
-	/// - **Active** (`connect` non-empty, with or without `mesh`): requires a QUIC
-	///   client. Dials each static peer with exponential-backoff retry. If `mesh`
-	///   is also set, advertises self and watches `.internal/origins/*` to discover
-	///   and dial additional peers.
+	/// Modes are derived from config: standalone (no work) returns immediately;
+	/// passive rendezvous (`mesh` only) parks after publishing self-registration
+	/// and does not require a QUIC client; active (`connect` non-empty) dials
+	/// peers and, if `mesh` is also set, runs gossip discovery.
 	///
-	/// Errors:
-	/// - if `cluster.root` / `--cluster-root` is set (removed flag);
-	/// - if `cluster.node` / `--cluster-node` is set (renamed to `cluster.mesh`);
-	/// - if `connect` is non-empty but no QUIC client was attached via
-	///   [`with_client`](Self::with_client).
+	/// Bails when removed flags `cluster.root` / `cluster.node` are set, or when
+	/// `connect` is non-empty but no client was attached via
+	/// [`with_client`](Self::with_client).
 	pub async fn run(self) -> anyhow::Result<()> {
 		if let Some(root) = &self.config.root {
 			anyhow::bail!(
@@ -229,8 +222,7 @@ impl Cluster {
 			None => String::new(),
 		};
 
-		// Hold the self-registration broadcast alive for the lifetime of `run`. Dropping
-		// it would unannounce immediately and tell peers we've left.
+		// Held in scope so the registration stays announced until `run` exits.
 		let _self_registration: Option<BroadcastProducer> = self.config.mesh.as_deref().map(|mesh| {
 			let path = Path::new(MESH_PREFIX).join(mesh);
 			let broadcast = self
@@ -241,23 +233,16 @@ impl Cluster {
 			broadcast
 		});
 
-		// Track active dial tasks by URL so static and gossip-discovered peers don't
-		// duplicate, and so the discovery side can abort a discovered peer's task when
-		// it unannounces. Static peers carry `is_static = true` and are exempt from
-		// unannounce-driven aborts.
 		let active: Arc<Mutex<HashMap<String, DialEntry>>> = Arc::new(Mutex::new(HashMap::new()));
-
 		let mut tasks = tokio::task::JoinSet::new();
 
-		// Seed static peers from --cluster-connect.
 		for peer in &self.config.connect {
 			Self::spawn_dial(&mut tasks, &active, self.clone(), peer.clone(), token.clone(), true);
 		}
 
-		// Spawn the gossip discovery task only when we have at least one outbound peer
-		// to bootstrap from. A mesh-only relay (passive rendezvous) has no use for
-		// discovery: it accepts inbound sessions and shouldn't dial peers back, since
-		// those peers already have a session to us.
+		// A mesh-only relay (passive rendezvous) already has inbound sessions from
+		// every peer that knows about it; running discovery would only create
+		// duplicate outbound sessions.
 		if has_outbound {
 			if let Some(self_url) = self.config.mesh.clone() {
 				let this = self.clone();
@@ -270,10 +255,8 @@ impl Cluster {
 		}
 
 		if tasks.is_empty() {
-			// Passive rendezvous: nothing to wait on, but we must hold
-			// `_self_registration` alive so inbound peers continue to see our
-			// advertisement. Park here forever; `cluster.run()` is one arm of
-			// `tokio::select!` in main.rs, so the process still exits via the other arms.
+			// Passive rendezvous: park to keep `_self_registration` alive. The
+			// process still exits via the other arms of `tokio::select!` in main.
 			std::future::pending::<()>().await
 		}
 

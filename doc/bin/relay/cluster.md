@@ -37,7 +37,7 @@ mesh = "us-east.example.com:4443"
 connect = ["rendezvous.example.com:4443"]
 ```
 
-When a leaf with `mesh` set connects to `rendezvous`, it publishes a registration broadcast at `.internal/origins/<url>` on the cluster origin. Other peers reachable from `rendezvous` see the registration and dial the new leaf, building a full mesh. Removing a node unannounces its registration, which aborts the dial on every other peer.
+When a leaf with `mesh` set connects to `rendezvous`, it publishes a registration broadcast at `.internal/origins/<url>` on the cluster origin. Other peers reachable from `rendezvous` see the registration and dial the new leaf, building a full mesh. Removing a node unannounces its registration, which aborts every dial that was spawned in response to that gossip. Static `connect` peers are exempt: their reconnect loop keeps running through unannounces, so a remote restart doesn't permanently break a hand-configured edge.
 
 A relay with `mesh` set and no `connect` entries waits passively for inbound connections (it does not need a QUIC client). A relay with `connect` and no `mesh` dials peers but isn't itself advertised, so others won't discover it via gossip.
 

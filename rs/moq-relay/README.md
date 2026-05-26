@@ -64,8 +64,8 @@ A user connects to the nearest relay and the cluster routes broadcasts between p
 **moq-relay** layers clustering on top of moq-lite: every cluster peer publishes into the same logical origin, with a hop list on each broadcast for loop detection and shortest-path preference.
 There are two ways to form a cluster, which can be combined:
 
-- **Static topology** — `--cluster-connect <peer-url>` (repeatable or comma-separated). Each peer is dialed at startup and kept alive with exponential backoff. Best for 2-5 stable nodes; no discovery.
-- **Gossip discovery** — `--cluster-mesh <self-url>`. This relay advertises its URL on the cluster origin so peers reached via `--cluster-connect` discover and dial it. Pair with `--cluster-connect <rendezvous-url>` to join an existing mesh.
+- **Static topology** (`--cluster-connect <peer-url>`, repeatable or comma-separated). Each peer is dialed at startup and kept alive with exponential backoff. Best for 2-5 stable nodes; no discovery.
+- **Gossip discovery** (`--cluster-mesh <self-url>`). This relay advertises its URL on the cluster origin so peers reached via `--cluster-connect` discover and dial it. Pair with `--cluster-connect <rendezvous-url>` to join an existing mesh.
 
 A relay with only `--cluster-mesh` set waits passively for inbound connections (acts as a rendezvous; no QUIC client required). A relay with both flags dials the rendezvous, gossips itself, and dials every peer it learns about.
 
