@@ -1,29 +1,18 @@
 use std::{
-	collections::HashMap,
+	collections::HashSet,
 	path::PathBuf,
 	sync::{Arc, Mutex},
 };
 
 use anyhow::Context;
 use moq_net::{BroadcastProducer, Origin, OriginConsumer, OriginProducer, Path, Stats, Tier};
-use tokio::task::AbortHandle;
 use url::Url;
 
 use crate::AuthToken;
 
 /// Path prefix under which cluster nodes advertise their own URLs for gossip-style
-/// peer discovery. Restricted to mTLS (`token.internal`) sessions by
-/// [`Cluster::subscriber`] / [`Cluster::publisher`].
+/// peer discovery.
 const MESH_PREFIX: &str = ".internal/origins";
-
-/// One entry in the active-dial map. The provenance flag keeps
-/// gossip unannounces from tearing down a peer that was also seeded statically:
-/// static peers must keep their reconnect loop running even when the
-/// remote temporarily disappears from `.internal/origins/*`.
-struct DialEntry {
-	handle: AbortHandle,
-	is_static: bool,
-}
 
 /// Configuration for relay clustering.
 ///
@@ -195,11 +184,15 @@ impl Cluster {
 			None => String::new(),
 		};
 
-		let active: Arc<Mutex<HashMap<String, DialEntry>>> = Arc::new(Mutex::new(HashMap::new()));
+		// URLs we've already spawned a dial task for (static + gossip-discovered).
+		// Dedup only; we never abort entries based on gossip churn, since the
+		// "prefer shorter hop" logic in OriginProducer delivers reannounces as
+		// unannounce-then-announce pairs that would otherwise drive a tight loop.
+		let dialed: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 		let mut tasks = tokio::task::JoinSet::new();
 
 		for peer in &self.config.connect {
-			Self::spawn_dial(&mut tasks, &active, self.clone(), peer.clone(), token.clone(), true);
+			Self::spawn_dial(&mut tasks, &dialed, self.clone(), peer.clone(), token.clone());
 		}
 
 		// Held in scope so the registration stays announced until `run` exits.
@@ -216,10 +209,10 @@ impl Cluster {
 			if has_outbound {
 				let this = self.clone();
 				let token = token.clone();
-				let active = active.clone();
+				let dialed = dialed.clone();
 				let self_url = mesh.to_owned();
 				tasks.spawn(async move {
-					this.run_discovery(self_url, token, active).await;
+					this.run_discovery(self_url, token, dialed).await;
 				});
 			}
 
@@ -238,100 +231,57 @@ impl Cluster {
 		Ok(())
 	}
 
-	/// Spawn a dial loop for `peer` and remember its abort handle. Skips if `peer`
-	/// is already tracked (caller-side dedup against static peers and prior discoveries).
+	/// Spawn a dial loop for `peer`. No-op if `peer` is already tracked.
 	fn spawn_dial(
 		tasks: &mut tokio::task::JoinSet<()>,
-		active: &Arc<Mutex<HashMap<String, DialEntry>>>,
+		dialed: &Arc<Mutex<HashSet<String>>>,
 		this: Self,
 		peer: String,
 		token: String,
-		is_static: bool,
 	) {
-		{
-			let active = active.lock().expect("dial map poisoned");
-			if active.contains_key(&peer) {
-				return;
-			}
+		if !dialed.lock().expect("dial set poisoned").insert(peer.clone()) {
+			return;
 		}
-		let peer_for_task = peer.clone();
-		let handle = tasks.spawn(async move {
-			if let Err(err) = this.run_remote(&peer_for_task, token).await {
-				tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
+		tasks.spawn(async move {
+			if let Err(err) = this.run_remote(&peer, token).await {
+				tracing::warn!(%err, %peer, "cluster peer connection ended");
 			}
 		});
-		active
-			.lock()
-			.expect("dial map poisoned")
-			.insert(peer, DialEntry { handle, is_static });
 	}
 
-	/// Watch `.internal/origins/*` for peer registrations and dial each newly-announced
-	/// URL that isn't already tracked. An unannounce aborts the corresponding dial only
-	/// for gossip-discovered peers; static `--cluster-connect` peers keep reconnecting.
-	async fn run_discovery(self, self_url: String, token: String, active: Arc<Mutex<HashMap<String, DialEntry>>>) {
+	/// Watch `.internal/origins/*` for peer registrations and dial each newly-seen
+	/// URL. We deliberately don't abort dials on unannounce: the "prefer shorter
+	/// hop" path in OriginProducer delivers reannouncements as unannounce-then-
+	/// announce pairs whenever a closer copy of the same broadcast arrives,
+	/// which would otherwise drive a tight respawn loop. The dial loop reconnects
+	/// on its own; if a peer truly leaves, the loop just keeps backing off.
+	async fn run_discovery(self, self_url: String, token: String, dialed: Arc<Mutex<HashSet<String>>>) {
 		let Some(mut consumer) = self.origin.consume().with_root(MESH_PREFIX) else {
 			tracing::warn!("could not scope cluster origin to {MESH_PREFIX}; discovery disabled");
 			return;
 		};
 
 		while let Some((relative, announced)) = consumer.announced().await {
+			if announced.is_none() {
+				continue;
+			}
 			let peer = relative.as_str();
 			if peer == self_url {
 				continue;
 			}
-
-			if announced.is_some() {
-				let peer = peer.to_owned();
-				let already_active = {
-					let active = active.lock().expect("dial map poisoned");
-					active.contains_key(&peer)
-				};
-				if already_active {
-					tracing::debug!(%peer, "discovered peer already tracked; skipping dial");
-					continue;
+			let peer = peer.to_owned();
+			if !dialed.lock().expect("dial set poisoned").insert(peer.clone()) {
+				tracing::debug!(%peer, "discovered peer already tracked; skipping dial");
+				continue;
+			}
+			tracing::info!(%peer, "discovered cluster peer; dialing");
+			let this = self.clone();
+			let token = token.clone();
+			tokio::spawn(async move {
+				if let Err(err) = this.run_remote(&peer, token).await {
+					tracing::warn!(%err, %peer, "cluster peer connection ended");
 				}
-				tracing::info!(%peer, "discovered cluster peer; dialing");
-				let this = self.clone();
-				let token = token.clone();
-				let peer_for_task = peer.clone();
-				let handle = tokio::spawn(async move {
-					if let Err(err) = this.run_remote(&peer_for_task, token).await {
-						tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
-					}
-				});
-				active.lock().expect("dial map poisoned").insert(
-					peer,
-					DialEntry {
-						handle: handle.abort_handle(),
-						is_static: false,
-					},
-				);
-			} else {
-				Self::handle_gossip_unannounce(&active, peer);
-			}
-		}
-	}
-
-	/// Handle a gossip unannounce for `peer`: abort the dial only if the entry was
-	/// added by discovery. Static peers (seeded from `--cluster-connect`) keep their
-	/// reconnect loop running, since gossip churn is just remote restarts.
-	fn handle_gossip_unannounce(active: &Arc<Mutex<HashMap<String, DialEntry>>>, peer: &str) {
-		let mut active = active.lock().expect("dial map poisoned");
-		match active.get(peer) {
-			Some(entry) if entry.is_static => {
-				tracing::debug!(
-					%peer,
-					"gossip unannounce for static peer; reconnect loop kept alive"
-				);
-			}
-			Some(_) => {
-				tracing::info!(%peer, "cluster peer unannounced; aborting dial");
-				if let Some(entry) = active.remove(peer) {
-					entry.handle.abort();
-				}
-			}
-			None => {}
+			});
 		}
 	}
 
@@ -400,47 +350,6 @@ impl Cluster {
 mod tests {
 	use super::*;
 	use crate::Config;
-
-	/// Regression test for the static-peer survival fix: gossip-driven unannounces must
-	/// not abort the reconnect loop of a peer that was statically configured via
-	/// `--cluster-connect`. Before the fix the active map didn't track provenance, so an
-	/// unannounce of a peer that appeared in both `connect` and gossip removed it,
-	/// permanently breaking that static peer's reconnect.
-	#[tokio::test]
-	async fn gossip_unannounce_preserves_static_peer() {
-		let active: Arc<Mutex<HashMap<String, DialEntry>>> = Arc::new(Mutex::new(HashMap::new()));
-		// Stand in for a real dial task; never polled but provides an AbortHandle.
-		let placeholder = tokio::spawn(std::future::pending::<()>());
-		let static_handle = placeholder.abort_handle();
-		active.lock().unwrap().insert(
-			"static-peer.example.com:4443".to_string(),
-			DialEntry {
-				handle: static_handle,
-				is_static: true,
-			},
-		);
-
-		Cluster::handle_gossip_unannounce(&active, "static-peer.example.com:4443");
-		assert!(
-			active.lock().unwrap().contains_key("static-peer.example.com:4443"),
-			"static peer entry must survive a gossip unannounce"
-		);
-
-		// Now insert a discovered peer and confirm unannounce DOES drop it.
-		let discovered = tokio::spawn(std::future::pending::<()>());
-		active.lock().unwrap().insert(
-			"discovered.example.com:4443".to_string(),
-			DialEntry {
-				handle: discovered.abort_handle(),
-				is_static: false,
-			},
-		);
-		Cluster::handle_gossip_unannounce(&active, "discovered.example.com:4443");
-		assert!(
-			!active.lock().unwrap().contains_key("discovered.example.com:4443"),
-			"discovered peer entry should be removed on gossip unannounce"
-		);
-	}
 
 	/// Setting `cluster.root` (the removed flag) at startup must surface a migration
 	/// message that names both the replacement flags.
