@@ -120,19 +120,18 @@ Clustering configuration for multi-relay deployments.
 
 ```toml
 [cluster]
-# Static peers to dial. Each is kept alive with exponential backoff.
-connect = ["rendezvous.example.com:4443"]
+# Peers this relay dials. The topology is whatever you draw with these links.
+connect = ["us-east.example.com:4443"]
 
-# This relay's own externally-reachable URL. When set, the relay advertises
-# itself on the cluster origin so peers reached via `connect` discover and
-# dial it. Omit for a relay that should not appear in the gossip mesh.
-mesh = "us-east.example.com:4443"
+# Optional. Set to this relay's own URL to advertise it so other peers find
+# you automatically.
+mesh = "us-west.example.com:4443"
 
 # JWT used for outbound cluster dials (alternative to mTLS).
 token = "cluster.jwt"
 ```
 
-See [Clustering](/bin/relay/cluster) for deployment patterns and the static / gossip mode split.
+See [Clustering](/bin/relay/cluster) for topology choices and the trade-off between hand-listed peers and gossip.
 
 ### \[client]
 

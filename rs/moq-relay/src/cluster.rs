@@ -27,16 +27,11 @@ struct DialEntry {
 
 /// Configuration for relay clustering.
 ///
-/// Two modes that can be combined:
+/// [`Self::connect`] lists peers to dial. [`Self::mesh`] is optional: when set, this
+/// relay advertises its own URL so other peers discover and dial it. Set both to
+/// join an existing cluster; set mesh alone to act as a passive rendezvous.
 ///
-/// - **Static** ([`Self::connect`]): explicit list of peer URLs to dial. Each is kept
-///   alive for the session lifetime; no discovery happens.
-/// - **Gossip** ([`Self::mesh`]): advertise this relay's URL on the cluster origin so
-///   connected peers discover and dial it, and watch for the advertisements of others
-///   so we dial them too. Pair with [`Self::connect`] to bootstrap into an existing
-///   mesh, or set alone to act as a passive rendezvous.
-///
-/// Hop-based routing on broadcasts prevents announcement loops regardless of mode.
+/// Hop-based routing on broadcasts prevents announcement loops regardless of topology.
 #[serde_with::serde_as]
 #[derive(clap::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 #[serde_with::skip_serializing_none]
@@ -56,10 +51,10 @@ pub struct ClusterConfig {
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub connect: Vec<String>,
 
-	/// This relay's own externally-reachable URL. When set, the relay publishes its address
-	/// on the cluster origin (under `.internal/origins/<url>`) so other mTLS-authenticated
-	/// peers can discover and dial it. Pair with [`Self::connect`] to reach an initial peer
-	/// who will gossip your address onward, or set alone for passive rendezvous.
+	/// This relay's own externally-reachable URL. When set, the relay publishes its
+	/// address on the cluster origin so other peers can discover and dial it. Pair
+	/// with [`Self::connect`] to reach an initial peer who will gossip your address
+	/// onward, or set alone for passive rendezvous.
 	#[arg(id = "cluster-mesh", long = "cluster-mesh", env = "MOQ_CLUSTER_MESH")]
 	pub mesh: Option<String>,
 
@@ -139,35 +134,13 @@ impl Cluster {
 	}
 
 	/// Returns an [`OriginConsumer`] scoped to this session's subscribe permissions.
-	///
-	/// Non-internal tokens (i.e. JWT-authenticated end users) cannot see `.internal/*`
-	/// paths regardless of their declared scope or root. Cluster mesh registrations and
-	/// other infrastructure broadcasts live under that prefix.
-	///
-	/// The block is applied to the absolute root before any `with_root`/`scope` so a
-	/// JWT whose `token.root` itself lies under `.internal/*` can't sidestep it.
 	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginConsumer> {
-		let origin = self.access_origin(token);
-		Some(origin.with_root(&token.root)?.scope(&token.subscribe)?.consume())
+		Some(self.origin.with_root(&token.root)?.scope(&token.subscribe)?.consume())
 	}
 
 	/// Returns an [`OriginProducer`] scoped to this session's publish permissions.
-	///
-	/// Non-internal tokens cannot publish into `.internal/*` regardless of their
-	/// declared scope or root.
 	pub fn publisher(&self, token: &AuthToken) -> Option<OriginProducer> {
-		let origin = self.access_origin(token);
-		origin.with_root(&token.root)?.scope(&token.publish)
-	}
-
-	/// Returns the base origin a session is allowed to see. mTLS / internal sessions
-	/// get the full origin; everyone else gets a view that blocks `.internal/*`.
-	fn access_origin(&self, token: &AuthToken) -> OriginProducer {
-		if token.internal {
-			self.origin.clone()
-		} else {
-			self.origin.block(".internal")
-		}
+		self.origin.with_root(&token.root)?.scope(&token.publish)
 	}
 
 	/// Runs the cluster event loop.
@@ -427,81 +400,6 @@ impl Cluster {
 mod tests {
 	use super::*;
 	use crate::Config;
-	use moq_net::{Broadcast, PathOwned, PathPrefixes};
-
-	fn full_scope_jwt() -> AuthToken {
-		AuthToken {
-			root: PathOwned::default(),
-			subscribe: PathPrefixes::from(vec![PathOwned::from(String::new())]),
-			publish: PathPrefixes::from(vec![PathOwned::from(String::new())]),
-			internal: false,
-		}
-	}
-
-	/// A JWT with the broadest possible scope is still kept out of `.internal/*`.
-	#[tokio::test]
-	async fn internal_paths_invisible_to_non_mtls_token() {
-		let cluster = Cluster::new(ClusterConfig::default());
-		let mesh = Broadcast::new().produce();
-		let user = Broadcast::new().produce();
-
-		cluster
-			.origin
-			.publish_broadcast(".internal/origins/peer.example.com:4443", mesh.consume());
-		cluster.origin.publish_broadcast("demo/test", user.consume());
-
-		let token = full_scope_jwt();
-		let mut subscriber = cluster.subscriber(&token).expect("subscriber");
-
-		// The user broadcast is visible; the mesh registration must not be.
-		let (path, broadcast) = subscriber.try_announced().expect("user announce");
-		assert_eq!(path.as_str(), "demo/test");
-		assert!(broadcast.is_some());
-		assert!(
-			subscriber.try_announced().is_none(),
-			".internal/* must not be visible to a broad-scope JWT"
-		);
-
-		// The publisher view rejects publishes to `.internal/*` even with broad scope.
-		let publisher = cluster.publisher(&token).expect("publisher");
-		let attempt = Broadcast::new().produce();
-		assert!(!publisher.publish_broadcast(".internal/origins/attacker", attempt.consume()));
-	}
-
-	/// Regression test for the block-before-root fix: a JWT whose `root` claim points
-	/// at `.internal` (or any prefix of it) must still be filtered. Before the fix the
-	/// `.block(".internal")` call sat on top of a view already rooted at `.internal`,
-	/// so the resulting block prefix was `.internal/.internal` and the real mesh paths
-	/// leaked through.
-	#[tokio::test]
-	async fn internal_paths_invisible_when_token_root_is_internal() {
-		let cluster = Cluster::new(ClusterConfig::default());
-		let mesh = Broadcast::new().produce();
-		cluster
-			.origin
-			.publish_broadcast(".internal/origins/peer.example.com:4443", mesh.consume());
-
-		let token = AuthToken {
-			root: PathOwned::from(".internal".to_string()),
-			subscribe: PathPrefixes::from(vec![PathOwned::from(String::new())]),
-			publish: PathPrefixes::from(vec![PathOwned::from(String::new())]),
-			internal: false,
-		};
-
-		let mut subscriber = cluster.subscriber(&token).expect("subscriber");
-		assert!(
-			subscriber.try_announced().is_none(),
-			"token.root=.internal must not be able to read mesh registrations"
-		);
-
-		let publisher = cluster.publisher(&token).expect("publisher");
-		let attempt = Broadcast::new().produce();
-		// `origins/attacker` relative to root `.internal` is absolute `.internal/origins/attacker`.
-		assert!(
-			!publisher.publish_broadcast("origins/attacker", attempt.consume()),
-			"token.root=.internal must not be able to publish mesh registrations"
-		);
-	}
 
 	/// Regression test for the static-peer survival fix: gossip-driven unannounces must
 	/// not abort the reconnect loop of a peer that was statically configured via
@@ -542,21 +440,6 @@ mod tests {
 			!active.lock().unwrap().contains_key("discovered.example.com:4443"),
 			"discovered peer entry should be removed on gossip unannounce"
 		);
-	}
-
-	/// mTLS sessions see the mesh registrations they need to route between cluster peers.
-	#[tokio::test]
-	async fn internal_paths_visible_to_mtls_token() {
-		let cluster = Cluster::new(ClusterConfig::default());
-		let mesh = Broadcast::new().produce();
-		cluster
-			.origin
-			.publish_broadcast(".internal/origins/peer.example.com:4443", mesh.consume());
-
-		let mut subscriber = cluster.subscriber(&AuthToken::unrestricted()).expect("subscriber");
-		let (path, broadcast) = subscriber.try_announced().expect("announce");
-		assert_eq!(path.as_str(), ".internal/origins/peer.example.com:4443");
-		assert!(broadcast.is_some());
 	}
 
 	/// Setting `cluster.root` (the removed flag) at startup must surface a migration

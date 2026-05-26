@@ -5,124 +5,66 @@ description: Run multiple moq-relay instances across multiple hosts/regions
 
 # Clustering
 
-Multiple relay instances can join a cluster for geographic distribution and improved latency. Every cluster peer publishes into the same logical origin; loop detection and shortest-path preference come from a hop list on each broadcast, so peers can be connected in arbitrary topologies without duplicating data.
+Relays can be joined together to proxy announcements and subscriptions between each other. A viewer talks to whichever relay is closest; if their broadcast lives somewhere else in the cluster, the local relay fetches it from a neighbor and caches it.
 
-## Two ways to form a cluster
+A broadcast carries a small hop list as it travels. Each relay it passes through adds itself to the list, which is how loops are caught and how the network picks the shortest path when there's more than one.
 
-Pick the mode that matches your operational constraints. Both can be combined in a single deployment.
+## Topology
 
-### Static topology
+Each relay lists the peers it wants to dial in `cluster.connect`. That's it; the topology is whatever you draw with those links.
 
-Enumerate every peer by URL. Best for small clusters (2-5 nodes) where membership rarely changes.
-
-```toml
-[cluster]
-connect = ["us-east.example.com:4443", "eu-west.example.com:4443"]
-```
-
-Each entry in `connect` is dialed at startup and kept alive with exponential backoff. There is no discovery: every new node requires editing every existing config.
-
-### Gossip discovery
-
-Each relay sets `mesh` to its own externally-reachable URL. Connecting to a single peer is enough; that peer gossips the new relay's address to everyone else.
-
-```toml
-# On the rendezvous (every other relay connects here)
-[cluster]
-mesh = "rendezvous.example.com:4443"
-
-# On a leaf joining the cluster
-[cluster]
-mesh = "us-east.example.com:4443"
-connect = ["rendezvous.example.com:4443"]
-```
-
-When a leaf with `mesh` set connects to `rendezvous`, it publishes a registration broadcast at `.internal/origins/<url>` on the cluster origin. Other peers reachable from `rendezvous` see the registration and dial the new leaf, building a full mesh. Removing a node unannounces its registration, which aborts every dial that was spawned in response to that gossip. Static `connect` peers are exempt: their reconnect loop keeps running through unannounces, so a remote restart doesn't permanently break a hand-configured edge.
-
-A relay with `mesh` set and no `connect` entries waits passively for inbound connections (it does not need a QUIC client). A relay with `connect` and no `mesh` dials peers but isn't itself advertised, so others won't discover it via gossip.
-
-## How gossip works
-
-1. On startup, a relay with `cluster.mesh = "<url>"` publishes a placeholder broadcast at `.internal/origins/<url>` on its own origin. The broadcast carries no tracks: the path is the registration.
-2. Cluster sessions exchange their origins both ways. The registration propagates to every connected peer, accumulating a hop chain along the way.
-3. Each peer watches `.internal/origins/*` for newly announced URLs and dials any it isn't already connected to. Dials are deduplicated by URL, so a peer reached via both `connect` and gossip uses a single session. Static `connect` peers are exempt from gossip-driven aborts (a peer restart doesn't kill the reconnect loop).
-4. When a gossip-discovered peer goes away, its registration is unannounced and every other relay aborts the dial it spawned in response.
-5. Loop detection on `publish_broadcast` refuses any broadcast whose hop chain already contains this relay's id, so re-announcing a registration through a longer path is a silent no-op.
-
-## Visibility of `.internal/*`
-
-Mesh registrations are infrastructure, not user data. The relay restricts the `.internal/` namespace to internal sessions:
-
-- **mTLS peers** (cluster-to-cluster traffic, authenticated against `tls.root`) see `.internal/*` and can publish into it. This is how registrations flow between relays.
-- **JWT-authenticated sessions** are filtered: their subscribe view hides `.internal/*` announcements, and their publish view refuses publishes to `.internal/*`. This holds even for tokens with the broadest possible scope (`subscribe = [""]`, `publish = [""]`).
-- **Anonymous sessions** under `auth.public` are bound by the configured public prefixes; `.internal/` is not one of them.
-
-The split is enforced at session acceptance, so there is no way to reach `.internal/*` without first authenticating via a trusted client certificate.
-
-## Peer authentication
-
-Cluster peers must authenticate to each other before they exchange registrations. Two options:
-
-### mTLS (recommended for new deployments)
-
-Configure the relay with `tls.root` pointing at the CA that signed the cluster peer certificates. Inbound connections presenting a valid client cert are granted full access (`AuthToken::unrestricted`) and tagged as internal. Leaves connect outbound with a `client.tls.cert` / `client.tls.key` signed by the same CA. No JWT is required.
-
-See [Authentication → mTLS Peer Authentication](/bin/relay/auth#mtls-peer-authentication) for the CA setup walkthrough.
-
-### JWT token
-
-Each relay reads a JWT from `cluster.token` and presents it on outbound dials. The token must grant full publish and subscribe scope (`publish: ""`, `subscribe: ""`). The receiving relay verifies it like any other JWT.
-
-```toml
-[cluster]
-mesh = "us-east.example.com:4443"
-connect = ["rendezvous.example.com:4443"]
-token = "cluster.jwt"
-```
-
-JWT-authenticated cluster sessions are tagged as external for stats purposes. **`.internal/*` is mTLS-only**: a JWT session, no matter how broad its scope, is filtered out of `.internal/origins/*` and cannot publish or receive mesh registrations. JWT-only cluster peers can still relay user traffic for each other, but they will not participate in gossip discovery. Use mTLS for any deployment that wants peers to find each other automatically.
-
-## Example topology (3-node gossip cluster)
+A simple chain works well when one region is the source and others are caches:
 
 ```text
-              ┌──────────────────────┐
-              │  rendezvous.exam.com │
-              │  cluster.mesh = ...  │
-              └──┬──────────────┬────┘
-                 │              │
-       gossip ┌──┘              └──┐ gossip
-              │                    │
-   ┌──────────┴──────┐    ┌────────┴────────┐
-   │ us-east.exam.com│◀──▶│ eu-west.exam.com│
-   │  mesh + connect │    │  mesh + connect │
-   └─────────────────┘    └─────────────────┘
-                ▲    direct (gossip)    ▲
-                └─────────────────────────┘
+eu-west  <---  us-east  <---  us-west
 ```
 
-`us-east` and `eu-west` each set `connect = ["rendezvous.example.com:4443"]`. The rendezvous gossips them to each other; the resulting topology is a full mesh.
+```toml
+# us-east.toml
+[cluster]
+connect = ["eu-west.example.com:4443"]
 
-## Production example
+# us-west.toml
+[cluster]
+connect = ["us-east.example.com:4443"]
+```
 
-The public CDN at `cdn.moq.dev` uses gossip-style discovery across regions:
+A publisher on `eu-west` reaches a viewer on `us-west` through `us-east`. If a second `us-west` viewer subscribes to the same broadcast, `us-east` already has it cached, so only one fetch crosses the Atlantic. A full mesh (every relay dialing every other) would skip the cache entirely and waste an outbound link per pair.
 
-- `usc.cdn.moq.dev` - US Central
-- `euc.cdn.moq.dev` - EU Central
-- `sea.cdn.moq.dev` - Southeast Asia
+Pick the shape that matches your traffic. Linear chains are great for fanout; small N-way meshes are fine when latency matters more than dedup; mixed shapes work too.
 
-Clients use GeoDNS to connect to the nearest relay automatically.
+## Auto-discovery
+
+Listing every peer by hand can get tedious in larger clusters. Set `cluster.mesh` to this relay's own URL and connected peers will discover and dial it back automatically:
+
+```toml
+[cluster]
+connect = ["us-east.example.com:4443"]
+mesh    = "us-west.example.com:4443"
+```
+
+Each node with `mesh` set creates a broadcast carrying its address, which other nodes pick up. `connect` is optional once gossip is running, but you still need at least one connection somewhere (either you dial a peer or a peer dials you) for the advertisement to flow.
+
+A relay with `mesh` set and no `connect` is a passive rendezvous: it sits and waits for inbound connections, then helps everyone else find each other.
+
+## Authentication
+
+Cluster peers must authenticate to each other:
+
+- **mTLS** (recommended). Set `tls.root` to the CA that signed the cluster certificates. Inbound connections presenting a valid client cert are granted full access; outbound dials use `client.tls.cert` / `client.tls.key`.
+- **JWT**. Each relay reads a token from `cluster.token` and presents it on outbound dials. The token needs broad enough scope to cover whatever paths the cluster carries.
+
+See [Authentication](/bin/relay/auth) for the full setup.
 
 ## Migration from older configs
 
-Both `cluster.root` and `cluster.node` were removed. If a config still sets either (CLI flags `--cluster-root` / `--cluster-node` or TOML `[cluster] root = "..."` / `node = "..."`), the relay errors at startup with a message pointing at `--cluster-connect` and `--cluster-mesh`. Minimal migrations:
+`cluster.root` and `cluster.node` were both removed. If a config still sets either flag, the relay errors at startup with a message pointing at the replacements:
 
-| Old (pre-rewrite) | New equivalent |
+| Old | New |
 |---|---|
 | `root = "rendezvous:4443"` + `node = "us-east:4443"` | `connect = ["rendezvous:4443"]` + `mesh = "us-east:4443"` |
-| `root = "rendezvous:4443"` (root-only node) | `mesh = "rendezvous:4443"` (passive rendezvous) |
-| `node = "us-east:4443"` (post-rewrite, briefly) | `mesh = "us-east:4443"` |
-
-The semantics carry over: `connect` is the static dial list (one-or-more bootstrap peers), `mesh` is this relay's own advertised URL for gossip discovery.
+| `root = "rendezvous:4443"` only | `mesh = "rendezvous:4443"` (passive rendezvous) |
+| `node = "us-east:4443"` | `mesh = "us-east:4443"` |
 
 ## Next steps
 
