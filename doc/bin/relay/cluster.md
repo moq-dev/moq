@@ -24,29 +24,29 @@ Each entry in `connect` is dialed at startup and kept alive with exponential bac
 
 ### Gossip discovery
 
-Each relay sets `node` to its own externally-reachable URL. Connecting to a single peer is enough; that peer gossips the new node's address to everyone else.
+Each relay sets `mesh` to its own externally-reachable URL. Connecting to a single peer is enough; that peer gossips the new relay's address to everyone else.
 
 ```toml
 # On the rendezvous (every other relay connects here)
 [cluster]
-node = "rendezvous.example.com:4443"
+mesh = "rendezvous.example.com:4443"
 
 # On a leaf joining the cluster
 [cluster]
-node = "us-east.example.com:4443"
+mesh = "us-east.example.com:4443"
 connect = ["rendezvous.example.com:4443"]
 ```
 
-When a leaf with `node` set connects to `rendezvous`, it publishes a registration broadcast at `.internal/origins/<node>` on the cluster origin. Other peers reachable from `rendezvous` see the registration and dial the new leaf, building a full mesh. Removing a node unannounces its registration, which aborts the dial on every other peer.
+When a leaf with `mesh` set connects to `rendezvous`, it publishes a registration broadcast at `.internal/origins/<url>` on the cluster origin. Other peers reachable from `rendezvous` see the registration and dial the new leaf, building a full mesh. Removing a node unannounces its registration, which aborts the dial on every other peer.
 
-A relay with `node` set and no `connect` entries waits passively for inbound connections. A relay with `connect` and no `node` dials peers but isn't itself advertised, so others won't discover it via gossip.
+A relay with `mesh` set and no `connect` entries waits passively for inbound connections (it does not need a QUIC client). A relay with `connect` and no `mesh` dials peers but isn't itself advertised, so others won't discover it via gossip.
 
 ## How gossip works
 
-1. On startup, a relay with `cluster.node = "<url>"` publishes a placeholder broadcast at `.internal/origins/<url>` on its own origin. The broadcast carries no tracks: the path is the registration.
+1. On startup, a relay with `cluster.mesh = "<url>"` publishes a placeholder broadcast at `.internal/origins/<url>` on its own origin. The broadcast carries no tracks: the path is the registration.
 2. Cluster sessions exchange their origins both ways. The registration propagates to every connected peer, accumulating a hop chain along the way.
-3. Each peer watches `.internal/origins/*` for newly announced URLs and dials any it isn't already connected to. Dials are deduplicated by URL, so a peer reached via both `connect` and gossip uses a single session.
-4. When a peer goes away, its registration is unannounced and every other relay aborts the dial it spawned in response.
+3. Each peer watches `.internal/origins/*` for newly announced URLs and dials any it isn't already connected to. Dials are deduplicated by URL, so a peer reached via both `connect` and gossip uses a single session. Static `connect` peers are exempt from gossip-driven aborts (a peer restart doesn't kill the reconnect loop).
+4. When a gossip-discovered peer goes away, its registration is unannounced and every other relay aborts the dial it spawned in response.
 5. Loop detection on `publish_broadcast` refuses any broadcast whose hop chain already contains this relay's id, so re-announcing a registration through a longer path is a silent no-op.
 
 ## Visibility of `.internal/*`
@@ -75,7 +75,7 @@ Each relay reads a JWT from `cluster.token` and presents it on outbound dials. T
 
 ```toml
 [cluster]
-node = "us-east.example.com:4443"
+mesh = "us-east.example.com:4443"
 connect = ["rendezvous.example.com:4443"]
 token = "cluster.jwt"
 ```
@@ -87,14 +87,14 @@ JWT-authenticated cluster sessions are tagged as external for stats purposes. **
 ```text
               ┌──────────────────────┐
               │  rendezvous.exam.com │
-              │  cluster.node = ...  │
+              │  cluster.mesh = ...  │
               └──┬──────────────┬────┘
                  │              │
        gossip ┌──┘              └──┐ gossip
               │                    │
    ┌──────────┴──────┐    ┌────────┴────────┐
    │ us-east.exam.com│◀──▶│ eu-west.exam.com│
-   │  node + connect │    │  node + connect │
+   │  mesh + connect │    │  mesh + connect │
    └─────────────────┘    └─────────────────┘
                 ▲    direct (gossip)    ▲
                 └─────────────────────────┘
@@ -114,14 +114,15 @@ Clients use GeoDNS to connect to the nearest relay automatically.
 
 ## Migration from older configs
 
-`cluster.root` was removed in favor of the gossip / static split. If a config still sets it (CLI flag `--cluster-root` or TOML `[cluster] root = "..."`), the relay errors at startup with a message pointing at `--cluster-connect` and `--cluster-node`. Two minimal migrations:
+Both `cluster.root` and `cluster.node` were removed. If a config still sets either (CLI flags `--cluster-root` / `--cluster-node` or TOML `[cluster] root = "..."` / `node = "..."`), the relay errors at startup with a message pointing at `--cluster-connect` and `--cluster-mesh`. Minimal migrations:
 
 | Old (pre-rewrite) | New equivalent |
 |---|---|
-| `root = "rendezvous:4443"` + `node = "us-east:4443"` | `connect = ["rendezvous:4443"]` + `node = "us-east:4443"` |
-| `root = "rendezvous:4443"` (root-only node) | `node = "rendezvous:4443"` (passive rendezvous) |
+| `root = "rendezvous:4443"` + `node = "us-east:4443"` | `connect = ["rendezvous:4443"]` + `mesh = "us-east:4443"` |
+| `root = "rendezvous:4443"` (root-only node) | `mesh = "rendezvous:4443"` (passive rendezvous) |
+| `node = "us-east:4443"` (post-rewrite, briefly) | `mesh = "us-east:4443"` |
 
-The `node` field on leaves keeps its meaning; only the entry-point flag was renamed from `root` to `connect`, and `connect` now accepts a list.
+The semantics carry over: `connect` is the static dial list (one-or-more bootstrap peers), `mesh` is this relay's own advertised URL for gossip discovery.
 
 ## Next steps
 

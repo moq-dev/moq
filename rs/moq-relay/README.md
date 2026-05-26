@@ -65,13 +65,13 @@ A user connects to the nearest relay and the cluster routes broadcasts between p
 There are two ways to form a cluster, which can be combined:
 
 - **Static topology** — `--cluster-connect <peer-url>` (repeatable or comma-separated). Each peer is dialed at startup and kept alive with exponential backoff. Best for 2-5 stable nodes; no discovery.
-- **Gossip discovery** — `--cluster-node <self-url>`. This relay advertises its URL on the cluster origin so peers reached via `--cluster-connect` discover and dial it. Pair with `--cluster-connect <rendezvous-url>` to join an existing mesh.
+- **Gossip discovery** — `--cluster-mesh <self-url>`. This relay advertises its URL on the cluster origin so peers reached via `--cluster-connect` discover and dial it. Pair with `--cluster-connect <rendezvous-url>` to join an existing mesh.
 
-A relay with only `--cluster-node` set waits passively for inbound connections (acts as a rendezvous). A relay with both flags dials the rendezvous, gossips itself, and dials every peer it learns about.
+A relay with only `--cluster-mesh` set waits passively for inbound connections (acts as a rendezvous; no QUIC client required). A relay with both flags dials the rendezvous, gossips itself, and dials every peer it learns about.
 
 Mesh registrations live at `.internal/origins/<url>` on the cluster origin. That namespace is mTLS-only: JWT and anonymous sessions never see or publish into `.internal/*` regardless of their declared scope.
 
-> `--cluster-root` was removed. If you have it in an existing config, the relay errors at startup with a message pointing at the replacements above.
+> `--cluster-root` and `--cluster-node` were removed. If you have either in an existing config, the relay errors at startup with a message pointing at `--cluster-connect` and `--cluster-mesh`.
 
 See [doc/bin/relay/cluster.md](https://github.com/moq-dev/moq/blob/main/doc/bin/relay/cluster.md) for the full walkthrough, including mTLS setup and a 3-node example.
 

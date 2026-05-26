@@ -126,7 +126,7 @@ connect = ["rendezvous.example.com:4443"]
 # This relay's own externally-reachable URL. When set, the relay advertises
 # itself on the cluster origin so peers reached via `connect` discover and
 # dial it. Omit for a relay that should not appear in the gossip mesh.
-node = "us-east.example.com:4443"
+mesh = "us-east.example.com:4443"
 
 # JWT used for outbound cluster dials (alternative to mTLS).
 token = "cluster.jwt"

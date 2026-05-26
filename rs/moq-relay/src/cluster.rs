@@ -31,9 +31,10 @@ struct DialEntry {
 ///
 /// - **Static** ([`Self::connect`]): explicit list of peer URLs to dial. Each is kept
 ///   alive for the session lifetime; no discovery happens.
-/// - **Gossip** ([`Self::node`] + at least one [`Self::connect`] entry): advertise
-///   this relay's URL on the cluster origin so connected peers discover and dial it,
-///   and watch for the advertisements of others so we dial them too.
+/// - **Gossip** ([`Self::mesh`]): advertise this relay's URL on the cluster origin so
+///   connected peers discover and dial it, and watch for the advertisements of others
+///   so we dial them too. Pair with [`Self::connect`] to bootstrap into an existing
+///   mesh, or set alone to act as a passive rendezvous.
 ///
 /// Hop-based routing on broadcasts prevents announcement loops regardless of mode.
 #[serde_with::serde_as]
@@ -58,13 +59,17 @@ pub struct ClusterConfig {
 	/// This relay's own externally-reachable URL. When set, the relay publishes its address
 	/// on the cluster origin (under `.internal/origins/<url>`) so other mTLS-authenticated
 	/// peers can discover and dial it. Pair with [`Self::connect`] to reach an initial peer
-	/// who will gossip your address onward.
-	#[arg(id = "cluster-node", long = "cluster-node", env = "MOQ_CLUSTER_NODE")]
-	pub node: Option<String>,
+	/// who will gossip your address onward, or set alone for passive rendezvous.
+	#[arg(id = "cluster-mesh", long = "cluster-mesh", env = "MOQ_CLUSTER_MESH")]
+	pub mesh: Option<String>,
 
 	/// Use the token in this file when connecting to other nodes.
 	#[arg(id = "cluster-token", long = "cluster-token", env = "MOQ_CLUSTER_TOKEN")]
 	pub token: Option<PathBuf>,
+
+	/// Removed; present only to emit a migration error. Use [`Self::mesh`] instead.
+	#[arg(id = "cluster-node", long = "cluster-node", env = "MOQ_CLUSTER_NODE", hide = true)]
+	pub node: Option<String>,
 
 	/// Removed; present only to emit a migration error. Use [`Self::connect`] instead.
 	#[arg(id = "cluster-root", long = "cluster-root", env = "MOQ_CLUSTER_ROOT", hide = true)]
@@ -167,32 +172,43 @@ impl Cluster {
 
 	/// Runs the cluster event loop. Three modes, derived from config:
 	///
-	/// - **Standalone** (`connect` empty, `node` unset): returns immediately.
-	/// - **Passive rendezvous** (`node` set, `connect` empty): publishes the
+	/// - **Standalone** (`connect` empty, `mesh` unset): returns immediately.
+	/// - **Passive rendezvous** (`mesh` set, `connect` empty): publishes the
 	///   self-registration broadcast and parks. The relay accepts inbound cluster
 	///   sessions through the moq-native server but does not dial out, so no QUIC
 	///   client is required.
-	/// - **Active** (`connect` non-empty, with or without `node`): requires a QUIC
-	///   client. Dials each static peer with exponential-backoff retry. If `node`
+	/// - **Active** (`connect` non-empty, with or without `mesh`): requires a QUIC
+	///   client. Dials each static peer with exponential-backoff retry. If `mesh`
 	///   is also set, advertises self and watches `.internal/origins/*` to discover
 	///   and dial additional peers.
 	///
 	/// Errors:
 	/// - if `cluster.root` / `--cluster-root` is set (removed flag);
+	/// - if `cluster.node` / `--cluster-node` is set (renamed to `cluster.mesh`);
 	/// - if `connect` is non-empty but no QUIC client was attached via
 	///   [`with_client`](Self::with_client).
 	pub async fn run(self) -> anyhow::Result<()> {
 		if let Some(root) = &self.config.root {
 			anyhow::bail!(
 				"`cluster.root` / `--cluster-root` was removed (value: {root:?}). \
-				 Use `--cluster-connect <peer-url>` for static peer connections, or \
-				 `--cluster-node <self-url>` to gossip this relay's address so other peers \
-				 can discover and dial it. See https://doc.moq.dev/bin/relay/cluster."
+				 Use `--cluster-connect <peer-url>` to dial cluster peers, and \
+				 optionally `--cluster-mesh <self-url>` to gossip this relay's address \
+				 so other peers can discover and dial it. \
+				 See https://doc.moq.dev/bin/relay/cluster."
+			);
+		}
+		if let Some(node) = &self.config.node {
+			anyhow::bail!(
+				"`cluster.node` / `--cluster-node` was renamed (value: {node:?}). \
+				 Use `--cluster-connect <peer-url>` to dial cluster peers, and \
+				 optionally `--cluster-mesh <self-url>` to gossip this relay's address \
+				 so other peers can discover and dial it. \
+				 See https://doc.moq.dev/bin/relay/cluster."
 			);
 		}
 
 		let has_outbound = !self.config.connect.is_empty();
-		let has_work = has_outbound || self.config.node.is_some();
+		let has_work = has_outbound || self.config.mesh.is_some();
 		if !has_work {
 			tracing::info!("no cluster peers configured; running standalone");
 			return Ok(());
@@ -215,13 +231,13 @@ impl Cluster {
 
 		// Hold the self-registration broadcast alive for the lifetime of `run`. Dropping
 		// it would unannounce immediately and tell peers we've left.
-		let _self_registration: Option<BroadcastProducer> = self.config.node.as_deref().map(|node| {
-			let path = Path::new(MESH_PREFIX).join(node);
+		let _self_registration: Option<BroadcastProducer> = self.config.mesh.as_deref().map(|mesh| {
+			let path = Path::new(MESH_PREFIX).join(mesh);
 			let broadcast = self
 				.origin
 				.create_broadcast(&path)
 				.expect(".internal/origins is within the relay origin's root");
-			tracing::info!(%node, %path, "advertising cluster node");
+			tracing::info!(url = %mesh, %path, "advertising cluster mesh URL");
 			broadcast
 		});
 
@@ -239,11 +255,11 @@ impl Cluster {
 		}
 
 		// Spawn the gossip discovery task only when we have at least one outbound peer
-		// to bootstrap from. A node-only relay (passive rendezvous) has no use for
+		// to bootstrap from. A mesh-only relay (passive rendezvous) has no use for
 		// discovery: it accepts inbound sessions and shouldn't dial peers back, since
 		// those peers already have a session to us.
 		if has_outbound {
-			if let Some(self_url) = self.config.node.clone() {
+			if let Some(self_url) = self.config.mesh.clone() {
 				let this = self.clone();
 				let token = token.clone();
 				let active = active.clone();
@@ -572,7 +588,22 @@ mod tests {
 		let msg = format!("{err}");
 		assert!(msg.contains("cluster.root"), "missing cluster.root in: {msg}");
 		assert!(msg.contains("--cluster-connect"), "missing --cluster-connect in: {msg}");
-		assert!(msg.contains("--cluster-node"), "missing --cluster-node in: {msg}");
+		assert!(msg.contains("--cluster-mesh"), "missing --cluster-mesh in: {msg}");
+	}
+
+	/// Setting `cluster.node` (the renamed flag) at startup must surface a migration
+	/// message that names both replacement flags.
+	#[tokio::test]
+	async fn cluster_node_errors_with_migration_message() {
+		let config = ClusterConfig {
+			node: Some("legacy-node.example.com:4443".to_string()),
+			..Default::default()
+		};
+		let err = Cluster::new(config).run().await.expect_err("should error");
+		let msg = format!("{err}");
+		assert!(msg.contains("cluster.node"), "missing cluster.node in: {msg}");
+		assert!(msg.contains("--cluster-connect"), "missing --cluster-connect in: {msg}");
+		assert!(msg.contains("--cluster-mesh"), "missing --cluster-mesh in: {msg}");
 	}
 
 	/// `cluster.root` parsed from TOML triggers the same migration error.
@@ -595,13 +626,33 @@ mod tests {
 		assert!(format!("{err}").contains("cluster.root"));
 	}
 
-	/// A relay configured with only `cluster.node` (passive rendezvous) must run
+	/// `cluster.node` parsed from TOML triggers the same migration error.
+	#[test]
+	fn cluster_node_toml_parses_then_errors() {
+		let toml = "[cluster]\nnode = \"legacy-node.example.com:4443\"\n";
+		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("cluster-node-toml.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+		assert_eq!(config.cluster.node.as_deref(), Some("legacy-node.example.com:4443"));
+
+		let rt = tokio::runtime::Runtime::new().unwrap();
+		let err = rt
+			.block_on(Cluster::new(config.cluster).run())
+			.expect_err("should error");
+		assert!(format!("{err}").contains("cluster.node"));
+	}
+
+	/// A relay configured with only `cluster.mesh` (passive rendezvous) must run
 	/// without a QUIC client, publish its self-registration on the cluster origin,
 	/// and keep that registration alive (i.e. not exit and drop the broadcast).
 	#[tokio::test(start_paused = true)]
 	async fn passive_rendezvous_runs_without_client_and_advertises_self() {
 		let cluster = Cluster::new(ClusterConfig {
-			node: Some("rendezvous.example.com:4443".to_string()),
+			mesh: Some("rendezvous.example.com:4443".to_string()),
 			..Default::default()
 		});
 
@@ -631,18 +682,18 @@ mod tests {
 		handle.abort();
 	}
 
-	/// `cluster.node` round-trips through TOML and CLI.
+	/// `cluster.mesh` round-trips through TOML and CLI.
 	#[test]
-	fn cluster_node_round_trips() {
-		let toml = "[cluster]\nnode = \"us-east.example.com:4443\"\nconnect = [\"root.example.com:4443\"]\n";
+	fn cluster_mesh_round_trips() {
+		let toml = "[cluster]\nmesh = \"us-east.example.com:4443\"\nconnect = [\"root.example.com:4443\"]\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
 		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-node-toml.toml");
+		let path = dir.join("cluster-mesh-toml.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
-		assert_eq!(config.cluster.node.as_deref(), Some("us-east.example.com:4443"));
+		assert_eq!(config.cluster.mesh.as_deref(), Some("us-east.example.com:4443"));
 		assert_eq!(config.cluster.connect, vec!["root.example.com:4443".to_string()]);
 	}
 }

@@ -41,7 +41,7 @@ listen = "[::]:4445"
 # exercises cluster loop detection. The mesh edge is now discovered, not
 # hardcoded (ex. imagine us-east learning about us-west via us-central).
 connect = ["localhost:4443"]
-node = "localhost:4445"
+mesh = "localhost:4445"
 
 [auth]
 # Allow JWT tokens that are signed by this root key.

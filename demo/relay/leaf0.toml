@@ -36,12 +36,12 @@ listen = "[::]:4444"
 
 [cluster]
 # Dial the root for the initial cluster session. The root then gossips our
-# `node` URL to other leaves via the .internal/origins/<node> mesh path so
+# `mesh` URL to other leaves via the .internal/origins/<url> mesh path so
 # they discover and dial us back. leaf1 reaches us this way, forming a loop
 # (leaf1 -> root, leaf1 -> leaf0, leaf0 -> root) that exercises cluster
 # loop detection.
 connect = ["localhost:4443"]
-node = "localhost:4444"
+mesh = "localhost:4444"
 
 [auth]
 # Allow JWT tokens that are signed by this root key.
