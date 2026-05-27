@@ -32,7 +32,7 @@ pub(crate) async fn serve_ws(
 		return Ok(landing_response());
 	};
 
-	let ws = ws.protocols(["webtransport"]);
+	let ws = ws.protocols(moq_net::Versions::all().qmux_alpn_strings());
 
 	let params = AuthParams { path, jwt: query.jwt };
 	let token = if mtls.is_some() {
@@ -57,6 +57,19 @@ pub(crate) async fn serve_ws(
 	Ok(ws.on_upgrade(async move |socket| {
 		let id = state.conn_id.fetch_add(1, Ordering::Relaxed);
 
+		// Pull the negotiated subprotocol off the WebSocket before we wrap it
+		// in adapters. Without it we can't tell which qmux draft the peer
+		// expects to speak.
+		let negotiated = socket.protocol().and_then(|h| h.to_str().ok()).map(str::to_owned);
+		let Some(negotiated) = negotiated else {
+			tracing::warn!("client connected with no Sec-WebSocket-Protocol");
+			return;
+		};
+		let Some(version) = qmux_version_from_alpn(&negotiated) else {
+			tracing::warn!(%negotiated, "client negotiated an unrecognized Sec-WebSocket-Protocol");
+			return;
+		};
+
 		// Unfortunately, we need to convert from Axum to Tungstenite.
 		// Axum uses Tungstenite internally, but it's not exposed to avoid semvar issues.
 		let socket = socket
@@ -67,14 +80,23 @@ pub(crate) async fn serve_ws(
 				tungstenite::Error::ConnectionClosed
 			})
 			.with(tungstenite_to_axum);
-		let _ = handle_socket(id, socket, publish, subscribe, stats).await;
+		let _ = handle_socket(id, socket, version, &negotiated, publish, subscribe, stats).await;
 	}))
 }
 
-#[tracing::instrument("ws", err, skip_all, fields(id = _id))]
+/// Pick the qmux version implied by a negotiated `Sec-WebSocket-Protocol` value.
+fn qmux_version_from_alpn(alpn: &str) -> Option<qmux::Version> {
+	[qmux::Version::QMux01, qmux::Version::QMux00]
+		.into_iter()
+		.find(|v| alpn == v.alpn() || alpn.starts_with(v.prefix()))
+}
+
+#[tracing::instrument("ws", err, skip_all, fields(id = _id, qmux = ?version, alpn = %negotiated))]
 async fn handle_socket<T>(
 	_id: u64,
 	socket: T,
+	version: qmux::Version,
+	negotiated: &str,
 	publish: Option<OriginProducer>,
 	subscribe: Option<OriginConsumer>,
 	stats: StatsHandle,
@@ -86,8 +108,8 @@ where
 		+ Unpin
 		+ 'static,
 {
-	// Wrap the WebSocket in a WebTransport compatibility layer.
-	let ws = qmux::ws::Bare::new(socket).accept();
+	// Wrap the WebSocket in a qmux session pinned to the negotiated draft.
+	let ws = qmux::ws::Bare::new(socket, version).with_alpn(negotiated).accept();
 	let session = moq_net::Server::new()
 		.with_publish(subscribe)
 		.with_consume(publish)

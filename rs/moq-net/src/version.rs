@@ -316,6 +316,15 @@ impl Versions {
 		pairs
 	}
 
+	/// Same as [`Self::qmux_alpns`] but formatted as `Sec-WebSocket-Protocol`
+	/// strings (e.g. `"qmux-01.moqt-18"`), in preference order.
+	pub fn qmux_alpn_strings(&self) -> Vec<String> {
+		self.qmux_alpns()
+			.into_iter()
+			.map(|(qv, app)| format!("{}.{}", qv.alpn(), app))
+			.collect()
+	}
+
 	/// Return only versions present in both self and other, or `None` if the intersection is empty.
 	pub fn filter(&self, other: &Versions) -> Option<Versions> {
 		let filtered: Vec<Version> = self.0.iter().filter(|v| other.0.contains(v)).copied().collect();

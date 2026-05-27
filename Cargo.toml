@@ -52,7 +52,7 @@ moq-mux = { version = "0.5", path = "rs/moq-mux" }
 moq-native = { version = "0.15", path = "rs/moq-native", default-features = false }
 moq-net = { version = "0.1", path = "rs/moq-net" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
-qmux = { version = "0.0.7", default-features = false }
+qmux = { path = "/Users/kixelated/work/web-transport/.claude/worktrees/sad-pasteur-2b0cd5/rs/qmux", default-features = false }
 
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
@@ -63,6 +63,12 @@ web-transport-proto = "0.6"
 web-transport-quiche = "0.2"
 web-transport-quinn = "0.11"
 web-transport-trait = "0.3.4"
+
+# Temporary: link the qmux-01 worktree so the whole web-transport family shares one crate instance.
+# Drop once qmux 0.1.0 ships on crates.io.
+[patch.crates-io]
+web-transport-trait = { path = "/Users/kixelated/work/web-transport/.claude/worktrees/sad-pasteur-2b0cd5/rs/web-transport-trait" }
+web-transport-proto = { path = "/Users/kixelated/work/web-transport/.claude/worktrees/sad-pasteur-2b0cd5/rs/web-transport-proto" }
 
 [profile.dev]
 panic = "abort"

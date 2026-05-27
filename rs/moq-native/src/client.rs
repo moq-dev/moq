@@ -392,7 +392,7 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				let alpns = self.versions.alpns();
+				let alpns = self.versions.qmux_alpn_strings();
 				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
 
 				return Ok(tokio::select! {
@@ -423,7 +423,7 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				let alpns = self.versions.alpns();
+				let alpns = self.versions.qmux_alpn_strings();
 				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
 
 				return Ok(tokio::select! {
@@ -453,7 +453,7 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				let alpns = self.versions.alpns();
+				let alpns = self.versions.qmux_alpn_strings();
 				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
 
 				return Ok(tokio::select! {
@@ -472,7 +472,7 @@ impl Client {
 
 		#[cfg(feature = "websocket")]
 		{
-			let alpns = self.versions.alpns();
+			let alpns = self.versions.qmux_alpn_strings();
 			let session = crate::websocket::connect(&self.websocket, &self.tls, url, &alpns).await?;
 			return Ok(self.moq.connect(session).await?);
 		}
