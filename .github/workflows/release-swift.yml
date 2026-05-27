@@ -8,8 +8,10 @@ on:
     paths:
       - ".github/workflows/release-swift.yml"
       - ".github/scripts/release.sh"
+      - "swift/Package.swift.template"
       - "swift/scripts/package.sh"
       - "swift/scripts/publish.sh"
+      - "swift/scripts/verify.sh"
       - "rs/moq-ffi/build.sh"
 
 permissions:
@@ -210,9 +212,36 @@ jobs:
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: .github/scripts/release.sh create artifacts
 
+  verify:
+    # Gate the mirror push on actually being able to resolve the staged
+    # package against the live release asset. Catches manifests that
+    # look syntactically fine but SPM cannot resolve (e.g. a path-based
+    # binaryTarget slipping in where a URL+checksum is expected).
+    name: Verify staged package resolves
+    needs: [release, parse-version]
+    runs-on: macos-latest
+    if: github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Download staged package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: swift-package
+          path: artifacts
+
+      - name: Resolve and build smoke consumer
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./swift/scripts/verify.sh --tarball "artifacts/moq-ffi-${BUILD_VERSION}-swift.tar.gz"
+
   publish:
     name: Publish to Swift Package mirror
-    needs: [release, parse-version]
+    needs: [verify, parse-version]
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
 

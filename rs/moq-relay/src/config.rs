@@ -152,6 +152,52 @@ node = "localhost"
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
 	}
 
+	/// Serializes tests that touch `MOQ_SERVER_PREFERRED_V4` / `_V6`. Same
+	/// rationale as `STATS_ENV_LOCK`.
+	static PREFERRED_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	/// Regression test for the same clap+TOML clobber bug applied to the
+	/// `preferred_v4` / `preferred_v6` fields on `moq-native::ServerConfig`.
+	/// If either field is ever re-typed as a bare `SocketAddrV4` / `SocketAddrV6`
+	/// (without `Option<>`), the CLI re-parse will overwrite the TOML value
+	/// with `Default::default()` and silently disable the
+	/// preferred_address transport parameter for deployments configured via
+	/// TOML. This test asserts the TOML value survives an absent CLI flag.
+	#[test]
+	fn cli_does_not_clobber_toml_preferred_addresses() {
+		let _guard = PREFERRED_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: PREFERRED_ENV_LOCK ensures no other test in this binary
+		// touches these env vars concurrently.
+		unsafe {
+			std::env::remove_var("MOQ_SERVER_PREFERRED_V4");
+			std::env::remove_var("MOQ_SERVER_PREFERRED_V6");
+		}
+
+		let toml = r#"
+[server]
+preferred_v4 = "192.0.2.1:443"
+preferred_v6 = "[2001:db8::1]:443"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("preferred-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.server.preferred_v4,
+			Some("192.0.2.1:443".parse().unwrap()),
+			"TOML's server.preferred_v4 must not be clobbered by the CLI re-parse"
+		);
+		assert_eq!(
+			config.server.preferred_v6,
+			Some("[2001:db8::1]:443".parse().unwrap()),
+			"TOML's server.preferred_v6 must not be clobbered by the CLI re-parse"
+		);
+	}
+
 	/// Explicit CLI flag must still override TOML. Belt-and-suspenders for the
 	/// fix above: making `enabled: Option<bool>` shouldn't break the override
 	/// path.

@@ -75,6 +75,13 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
                      # libraries can't be split across separately
                      # packaged Python wheels.
 
+/swift/               # Swift wrapper over rs/moq-ffi (SwiftPM)
+/kt/                  # Kotlin wrapper over rs/moq-ffi (Gradle, KMP)
+/go/                  # Go wrapper over rs/moq-ffi (uniffi-bindgen-go)
+                      # swift/kt/go are in-tree source skeletons.
+                      # CI mirrors them to moq-dev/moq-{swift,kotlin,go}
+                      # on each moq-ffi-v* tag.
+
 /demo/                # Demos and test media
   boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)
   relay/             # Relay server configs (relay.toml, root.toml, leaf*.toml)
@@ -121,8 +128,16 @@ match version {
 ## Comment Conventions
 
 - Keep things brief and avoid comments if the code is self-explanatory. Reserve comments for the non-obvious WHY: a hidden constraint, a subtle invariant, a workaround for a specific bug, behavior that would surprise a reader.
+- Write the way you'd say it out loud, not the way a doc generator would. One short line is almost always enough. Skip throat-clearing like "This function is responsible for...".
 - Comments must reflect the **current** state of the code, not its history. Don't write "X no longer does Y" or "this used to cascade". Describe what the code does today, or delete the comment. Migration context belongs in commit messages and PR descriptions, where it ages with the change rather than rotting in the source.
-- When an LLM authors something, append a short disclaimer like `(Written by Claude)` so readers know it wasn't human-authored. Apply this to PR descriptions and PR comments (including replies on review threads), **not** to code comments or doc comments — markers in source rot alongside the code, and commit trailers already carry attribution.
+
+## AI Attribution
+
+LLM-authored prose visible to humans (PR descriptions, PR comments, review replies) should end with `(Written by Claude)` or similar. Do **not** tag code comments, doc comments, or `/doc` pages: source markers rot. Commit attribution lives in the `Co-Authored-By` trailer, not the commit body.
+
+## Refactor As You Go
+
+A function with 4+ args, or a call site passing the same 3+ values into multiple functions, is a struct waiting to happen. Make the change in the same PR rather than leaving a TODO. Same for repeated tuples returned across modules.
 
 ## Tooling
 
@@ -143,6 +158,21 @@ match version {
 - Rust tests are integrated within source files
 - Async tests that sleep should call `tokio::time::pause()` at the start to simulate time instantly
 
+## Cross-Package Sync
+
+Changes in one area usually need matching updates elsewhere, including docs. If you skip a row, say why in the PR description.
+
+| Change in | Also update |
+|---|---|
+| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt,go}/`, `doc/lib/{py,swift,kt,go,c}` |
+| `rs/moq-net` wire/API | `js/net`, `doc/concept` |
+| `rs/hang` catalog/container | `js/hang`, `doc/concept` |
+| `rs/moq-token` | `js/token` |
+| `rs/moq-relay` config/behavior | `doc/bin/relay/` |
+| `rs/moq-cli` | `doc/bin/cli.md` |
+| `rs/moq-gst` | `doc/bin/gstreamer.md` |
+| `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
+
 ## Workflow
 
 When making changes to the codebase:
@@ -150,8 +180,8 @@ When making changes to the codebase:
 1. Make your code changes
 2. Run `just fix` to auto-format and fix linting issues
 3. Run `just check` to verify everything passes
-4. Update relevant documentation (CLAUDE.md, doc/, README) when making major changes
-5. Add unit tests for any changes that are easy enough to test
+4. Walk the Cross-Package Sync table; update paired packages and docs in the same PR
+5. Add tests where they're easy to write
 6. Commit and push changes
 
 ## PR Reviews

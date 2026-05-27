@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.14](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.13...moq-ffi-v0.2.14) - 2026-05-25
+
+### Other
+
+- ci(swift): decouple release manifest from dev Package.swift and gate publish on SPM resolve ([#1502](https://github.com/moq-dev/moq/pull/1502))
+
 ## [0.2.13](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.12...moq-ffi-v0.2.13) - 2026-05-24
 
 ### Added

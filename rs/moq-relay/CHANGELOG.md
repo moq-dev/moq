@@ -7,75 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.3](https://github.com/moq-dev/moq/compare/moq-relay-v0.9.2...moq-relay-v0.9.3) - 2025-09-05
-
-### Added
-
-- *(moq-native)* support raw QUIC sessions with `moql://` URLs ([#578](https://github.com/moq-dev/moq/pull/578))
-
-### Other
-
-- Fix the web debug endpoints. ([#579](https://github.com/moq-dev/moq/pull/579))
-
-## [0.9.2](https://github.com/moq-dev/moq/compare/moq-relay-v0.9.1...moq-relay-v0.9.2) - 2025-09-04
-
-### Other
-
-- update Cargo.lock dependencies
-
-## [0.8.10](https://github.com/moq-dev/moq/compare/moq-relay-v0.8.9...moq-relay-v0.8.10) - 2025-09-04
-
-### Other
-
-- Add WebSocket fallback support ([#570](https://github.com/moq-dev/moq/pull/570))
-
-## [0.8.9](https://github.com/moq-dev/moq/compare/moq-relay-v0.8.8...moq-relay-v0.8.9) - 2025-08-21
-
-### Other
-
-- Fix clustering. ([#546](https://github.com/moq-dev/moq/pull/546))
-- moq.dev ([#538](https://github.com/moq-dev/moq/pull/538))
-
-## [0.8.8](https://github.com/moq-dev/moq/compare/moq-relay-v0.8.7...moq-relay-v0.8.8) - 2025-08-12
-
-### Other
-
-- Support an array of authorized paths ([#536](https://github.com/moq-dev/moq/pull/536))
-- Revamp the Producer/Consumer API for moq_lite ([#516](https://github.com/moq-dev/moq/pull/516))
-- Another simpler fix for now-or-never ([#526](https://github.com/moq-dev/moq/pull/526))
-- Less verbose errors, using % instead of ? ([#521](https://github.com/moq-dev/moq/pull/521))
-
-## [0.8.7](https://github.com/moq-dev/moq/compare/moq-relay-v0.8.6...moq-relay-v0.8.7) - 2025-07-31
-
-### Other
-
-- Update moq-lite dependency to v0.6.1
-
-## [0.8.6](https://github.com/moq-dev/moq/compare/moq-relay-v0.8.5...moq-relay-v0.8.6) - 2025-07-31
-
-### Other
-
-- Fix paths so they're relative to the root, not root + role. ([#508](https://github.com/moq-dev/moq/pull/508))
-# Changelog
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
 ## [0.12.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.0...moq-relay-v0.12.1) - 2026-05-25
 
 ### Other
 
 - release ([#1475](https://github.com/moq-dev/moq/pull/1475))
 - *(stats)* fix TOML stats config silently clobbered by clap update_from ([#1491](https://github.com/moq-dev/moq/pull/1491))
-- *(stats)* allow multi-segment --stats-node values; move cargo-deny to ci ([#1489](https://github.com/moq-dev/moq/pull/1489))
-
-## [0.12.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.0...moq-relay-v0.12.1) - 2026-05-24
-
-### Other
-
 - *(stats)* allow multi-segment --stats-node values; move cargo-deny to ci ([#1489](https://github.com/moq-dev/moq/pull/1489))
 
 ## [0.12.0](https://github.com/moq-dev/moq/compare/moq-relay-v0.11.5...moq-relay-v0.12.0) - 2026-05-23
@@ -218,12 +155,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - release ([#1168](https://github.com/moq-dev/moq/pull/1168))
 - Drone demo: real-time 2D game with physics ([#1171](https://github.com/moq-dev/moq/pull/1171))
 
-## [0.10.13](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.12...moq-relay-v0.10.13) - 2026-03-31
-
-### Other
-
-- Drone demo: real-time 2D game with physics ([#1171](https://github.com/moq-dev/moq/pull/1171))
-
 ## [0.10.12](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.11...moq-relay-v0.10.12) - 2026-03-26
 
 ### Added
@@ -266,14 +197,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Other
 
 - release ([#1039](https://github.com/moq-dev/moq/pull/1039))
-- Tweak the API to revert some breaking changes. ([#1036](https://github.com/moq-dev/moq/pull/1036))
-- Replace tokio::sync::watch with custom Producer/Subscriber ([#996](https://github.com/moq-dev/moq/pull/996))
-- Increase MAX_STREAMS default and make it configurable ([#955](https://github.com/moq-dev/moq/pull/955))
-
-## [0.10.7](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.6...moq-relay-v0.10.7) - 2026-03-03
-
-### Other
-
 - Tweak the API to revert some breaking changes. ([#1036](https://github.com/moq-dev/moq/pull/1036))
 - Replace tokio::sync::watch with custom Producer/Subscriber ([#996](https://github.com/moq-dev/moq/pull/996))
 - Increase MAX_STREAMS default and make it configurable ([#955](https://github.com/moq-dev/moq/pull/955))
@@ -357,6 +280,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Other
 
 - Use MaybeSend and MaybeSync for WASM compatibility ([#615](https://github.com/moq-dev/moq/pull/615))
+
+## [0.9.3](https://github.com/moq-dev/moq/compare/moq-relay-v0.9.2...moq-relay-v0.9.3) - 2025-09-05
+
+### Added
+
+- *(moq-native)* support raw QUIC sessions with `moql://` URLs ([#578](https://github.com/moq-dev/moq/pull/578))
+
+### Other
+
+- Fix the web debug endpoints. ([#579](https://github.com/moq-dev/moq/pull/579))
+
+## [0.9.2](https://github.com/moq-dev/moq/compare/moq-relay-v0.9.1...moq-relay-v0.9.2) - 2025-09-04
+
+### Other
+
+- update Cargo.lock dependencies
+
+## [0.8.10](https://github.com/moq-dev/moq/compare/moq-relay-v0.8.9...moq-relay-v0.8.10) - 2025-09-04
+
+### Other
+
+- Add WebSocket fallback support ([#570](https://github.com/moq-dev/moq/pull/570))
+
+## [0.8.9](https://github.com/moq-dev/moq/compare/moq-relay-v0.8.8...moq-relay-v0.8.9) - 2025-08-21
+
+### Other
+
+- Fix clustering. ([#546](https://github.com/moq-dev/moq/pull/546))
+- moq.dev ([#538](https://github.com/moq-dev/moq/pull/538))
+
+## [0.8.8](https://github.com/moq-dev/moq/compare/moq-relay-v0.8.7...moq-relay-v0.8.8) - 2025-08-12
+
+### Other
+
+- Support an array of authorized paths ([#536](https://github.com/moq-dev/moq/pull/536))
+- Revamp the Producer/Consumer API for moq_lite ([#516](https://github.com/moq-dev/moq/pull/516))
+- Another simpler fix for now-or-never ([#526](https://github.com/moq-dev/moq/pull/526))
+- Less verbose errors, using % instead of ? ([#521](https://github.com/moq-dev/moq/pull/521))
+
+## [0.8.7](https://github.com/moq-dev/moq/compare/moq-relay-v0.8.6...moq-relay-v0.8.7) - 2025-07-31
+
+### Other
+
+- Update moq-lite dependency to v0.6.1
+
+## [0.8.6](https://github.com/moq-dev/moq/compare/moq-relay-v0.8.5...moq-relay-v0.8.6) - 2025-07-31
+
+### Other
+
+- Fix paths so they're relative to the root, not root + role. ([#508](https://github.com/moq-dev/moq/pull/508))
 
 ## [0.8.3](https://github.com/moq-dev/moq/compare/moq-relay-v0.8.2...moq-relay-v0.8.3) - 2025-07-22
 

@@ -149,12 +149,34 @@ See [moq-dev/moq/swift/README.md](https://github.com/moq-dev/moq/blob/main/swift
 Licensed under MIT OR Apache-2.0.
 EOF
 
-# Generate Package.swift with the final URL+checksum.
+# Generate Package.swift with the final URL+checksum from the release
+# template. The working swift/Package.swift is intentionally the
+# local-dev (path-based) form and is not used here.
+TEMPLATE="$SWIFT_DIR/Package.swift.template"
+[[ -f "$TEMPLATE" ]] || { echo "Error: missing $TEMPLATE" >&2; exit 1; }
 URL="${RELEASE_URL_BASE}/moq-ffi-v${VERSION}/MoqFFI.xcframework.zip"
-sed -e "s|REPLACE_VERSION|${VERSION}|g" \
+# Token-based substitution: the template carries REPLACE_URL / REPLACE_VERSION
+# / REPLACE_CHECKSUM placeholders, so editing the upstream URL in the template
+# (or passing --release-url) never goes silently unsubstituted.
+sed -e "s|REPLACE_URL|${URL}|g" \
+    -e "s|REPLACE_VERSION|${VERSION}|g" \
     -e "s|REPLACE_CHECKSUM|${CHECKSUM}|g" \
-    -e "s|https://github.com/moq-dev/moq/releases/download/moq-ffi-vREPLACE_VERSION/MoqFFI.xcframework.zip|${URL}|g" \
-    "$SWIFT_DIR/Package.swift" > "$PKG_STAGE/Package.swift"
+    "$TEMPLATE" > "$PKG_STAGE/Package.swift"
+
+# Fail loudly if any placeholder survived (e.g. someone renamed a token
+# in the template without updating this script). Catching it here keeps
+# a broken manifest from reaching the mirror.
+if grep -q 'REPLACE_URL\|REPLACE_VERSION\|REPLACE_CHECKSUM' "$PKG_STAGE/Package.swift"; then
+    echo "Error: unresolved REPLACE_* tokens in generated Package.swift" >&2
+    grep -n 'REPLACE_URL\|REPLACE_VERSION\|REPLACE_CHECKSUM' "$PKG_STAGE/Package.swift" >&2
+    exit 1
+fi
+
+# Cheap manifest sanity check: parse the generated Package.swift via the
+# Swift toolchain. This runs even on PR dry-runs (where the live release
+# asset doesn't exist yet) and catches syntax / API breakage in the
+# template before it can reach the mirror.
+(cd "$PKG_STAGE" && swift package dump-package > /dev/null)
 
 # --- Archive ---
 ARCHIVE="$OUTPUT_DIR/${PKG_NAME}.tar.gz"
