@@ -578,7 +578,7 @@ mod test {
 		track2.assert_group();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn requested_unused() {
 		let mut broadcast = Broadcast::new().produce().dynamic();
 
@@ -616,7 +616,10 @@ mod test {
 
 		// Aborting the producer triggers cleanup; the next subscribe creates a fresh request.
 		producer1.abort(Error::Cancel).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		// Yield to give the spawned cleanup task a chance to run before we
+		// expect its effects below. Using paused time keeps the test
+		// independent of wall-clock scheduling.
+		tokio::time::advance(std::time::Duration::from_millis(1)).await;
 
 		let consumer4 = broadcast.consume().assert_subscribe_track(&Track::new("unknown_track"));
 		let producer2 = broadcast.assert_request();

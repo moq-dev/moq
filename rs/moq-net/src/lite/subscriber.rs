@@ -351,9 +351,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// Drive one upstream subscription end-to-end, including linger across consumer churn.
 	///
 	/// The id may change across iterations: if a returning consumer arrives during the linger
-	/// window, we open a fresh subscribe stream under a new id (the old id is still routed in
-	/// `self.subscribes` until linger exits, so any in-flight groups for the old subscription
-	/// keep landing on the same producer until the publisher FINs back).
+	/// window, a fresh subscribe stream is opened under a new id. Every id this task allocates
+	/// stays mapped in `self.subscribes` (all pointing at the same TrackEntry) until the task
+	/// exits, so any in-flight uni streams from the prior subscription instance still route to
+	/// the producer — late groups hit the duplicate-drop path in `recv_group` instead of the
+	/// unknown-subscription error path.
 	async fn run_subscribe(&mut self, path: PathOwned, broadcast: BroadcastDynamic, mut track: TrackProducer) {
 		// Subscriber-side track stats; counters bump as frames/bytes/groups arrive.
 		// Drop on subscription end records `subscriber.subscriptions_closed`. We use
@@ -365,6 +367,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// SubscribeUpdate only exists on Lite03+; older versions skip linger entirely.
 		let supports_linger = !matches!(self.version, Version::Lite01 | Version::Lite02);
 
+		// Track every subscribe id this task allocates. Reused leaves the previous
+		// id mapped to the same TrackEntry so late group streams from the lingering
+		// upstream session still route to the producer and the duplicate-drop path
+		// in recv_group, instead of the unknown-subscription error path.
+		let mut active_ids: Vec<u64> = Vec::with_capacity(1);
 		let mut id = self.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 		let mut start_group: Option<u64> = None;
 
@@ -376,6 +383,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					stats: track_stats.clone(),
 				},
 			);
+			active_ids.push(id);
 
 			let msg = lite::Subscribe {
 				id,
@@ -403,10 +411,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			match outcome {
 				SessionOutcome::Reused => {
-					// A new consumer arrived during linger. Drop the lingering subscribe
-					// id and restart with a fresh one, resuming after the latest group we
-					// already cached so the publisher doesn't re-send anything we have.
-					self.subscribes.lock().remove(&id);
+					// A new consumer arrived during linger. Allocate a fresh id and
+					// resume after the latest group we already cached. Keep the prior
+					// id in `self.subscribes` so any in-flight uni streams from the
+					// lingering subscription still resolve to this TrackEntry.
 					id = self.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 					start_group = track.latest().and_then(|s| s.checked_add(1));
 					tracing::info!(
@@ -421,7 +429,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		self.subscribes.lock().remove(&id);
+		{
+			let mut subs = self.subscribes.lock();
+			for id in active_ids {
+				subs.remove(&id);
+			}
+		}
 
 		match result {
 			SessionOutcome::Complete => {
