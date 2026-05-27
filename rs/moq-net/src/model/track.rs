@@ -363,6 +363,11 @@ impl TrackProducer {
 		self.state.read().is_closed()
 	}
 
+	/// Return the latest sequence number successfully appended to the track.
+	pub fn latest(&self) -> Option<u64> {
+		self.state.read().max_sequence
+	}
+
 	/// Return true if this is the same track.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
@@ -420,11 +425,9 @@ impl TrackWeak {
 		}
 	}
 
-	pub async fn unused(&self) -> crate::Result<()> {
-		self.state
-			.unused()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	/// Wait until the underlying track state closes (producer dropped or aborted).
+	pub async fn closed(&self) {
+		self.state.closed().await;
 	}
 
 	pub fn is_clone(&self, other: &Self) -> bool {

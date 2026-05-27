@@ -384,10 +384,14 @@ impl BroadcastConsumer {
 		state.tracks.insert(producer.name.clone(), weak.clone());
 		state.requests.push(producer);
 
-		// Remove the track from the lookup when it's unused.
+		// Remove the track from the lookup once the producer closes. The
+		// producer owner is responsible for closing it (via abort/finish/drop)
+		// when truly done with the track; this lets a producer linger across
+		// transient consumer churn (relay subscription churn) without losing
+		// the lookup entry to a race with auto-cleanup.
 		let consumer_state = self.state.clone();
 		web_async::spawn(async move {
-			let _ = weak.unused().await;
+			weak.closed().await;
 
 			let Some(producer) = consumer_state.produce() else {
 				return;
@@ -578,54 +582,48 @@ mod test {
 	async fn requested_unused() {
 		let mut broadcast = Broadcast::new().produce().dynamic();
 
-		// Subscribe to a track that doesn't exist - this creates a request
+		// Subscribe to a track that doesn't exist - this creates a request.
 		let consumer1 = broadcast.consume().assert_subscribe_track(&Track::new("unknown_track"));
-
-		// Get the requested track producer
-		let producer1 = broadcast.assert_request();
-
-		// The track producer should NOT be unused yet because there's a consumer
+		let mut producer1 = broadcast.assert_request();
 		assert!(
 			producer1.unused().now_or_never().is_none(),
 			"track producer should be used"
 		);
 
-		// Making a new consumer will keep the producer alive
+		// A second subscriber reuses the existing producer (deduplication).
 		let consumer2 = broadcast.consume().assert_subscribe_track(&Track::new("unknown_track"));
 		consumer2.assert_is_clone(&consumer1);
 
-		// Drop the consumer subscription
-		drop(consumer1);
-
-		// The track producer should NOT be unused yet because there's a consumer
+		drop(consumer2);
 		assert!(
 			producer1.unused().now_or_never().is_none(),
 			"track producer should be used"
 		);
 
-		// Drop the second consumer, now the producer should be unused
-		drop(consumer2);
-
-		// BUG: The track producer should become unused after dropping the consumer,
-		// but it won't because the broadcast keeps a reference in the lookup HashMap
-		// This assertion will fail, demonstrating the bug
+		drop(consumer1);
 		assert!(
 			producer1.unused().now_or_never().is_some(),
-			"track producer should be unused after consumer is dropped"
+			"track producer should be unused after all consumers are dropped"
 		);
 
-		// TODO Unfortunately, we need to sleep for a little bit to detect when unused.
+		// While the producer is alive, re-subscribing to the same name reuses
+		// the existing producer (no new request) — this is what lets the relay
+		// linger upstream subscriptions across transient consumer churn.
+		let consumer3 = broadcast.consume().assert_subscribe_track(&Track::new("unknown_track"));
+		consumer3.assert_is_clone(&producer1.consume());
+		broadcast.assert_no_request();
+		drop(consumer3);
+
+		// Aborting the producer triggers cleanup; the next subscribe creates a fresh request.
+		producer1.abort(Error::Cancel).unwrap();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
-		// Now the cleanup task should have run and we can subscribe again to the unknown track.
-		let consumer3 = broadcast.consume().subscribe_track(&Track::new("unknown_track"));
+		let consumer4 = broadcast.consume().assert_subscribe_track(&Track::new("unknown_track"));
 		let producer2 = broadcast.assert_request();
-
-		// Drop the consumer, now the producer should be unused
-		drop(consumer3);
+		drop(consumer4);
 		assert!(
 			producer2.unused().now_or_never().is_some(),
-			"track producer should be unused after consumer is dropped"
+			"new track producer should be unused after its consumer is dropped"
 		);
 	}
 
