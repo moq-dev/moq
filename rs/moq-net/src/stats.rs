@@ -634,9 +634,15 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 				let snap = counters.snapshot();
 				if counters.active() {
 					last_tick.store(current_tick, Ordering::Relaxed);
+					frame.insert(entry.path.as_str().to_string(), snap);
+					continue;
 				}
 				let last = last_tick.load(Ordering::Relaxed);
-				if last != 0 && current_tick.saturating_sub(last) < retention_ticks as u64 {
+				// `<=` so retention_ticks counts the number of *idle* ticks the
+				// entry lingers after its last observed active tick. retention=0
+				// means "drop as soon as the sub goes idle"; the active branch
+				// above still emits while subs are live.
+				if last != 0 && current_tick.saturating_sub(last) <= retention_ticks as u64 {
 					frame.insert(entry.path.as_str().to_string(), snap);
 				}
 			}
@@ -656,7 +662,7 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 				}
 				entry.last_active_tick.iter().any(|t| {
 					let last = t.load(Ordering::Relaxed);
-					last != 0 && current_tick.saturating_sub(last) < retention_ticks as u64
+					last != 0 && current_tick.saturating_sub(last) <= retention_ticks as u64
 				})
 			});
 		}
@@ -686,6 +692,9 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 			};
 			if let Err(err) = track.write_frame(compressed) {
 				tracing::debug!(?err, slot, "stats: failed to write frame");
+				// Leave `last_payload` untouched so the next tick retries this
+				// snapshot instead of skipping it as "already written".
+				continue;
 			}
 			*last = json;
 		}
@@ -933,6 +942,47 @@ mod tests {
 				tokio::task::yield_now().await;
 			}
 		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn retention_boundary_keeps_last_idle_tick() {
+		// retention_ticks=2 means the entry lingers for exactly 2 idle ticks
+		// after its last observed active tick. Drive the boundary precisely.
+		let origin = Origin::random().produce();
+		let stats = Stats::new(
+			".stats",
+			Duration::from_secs(1),
+			2,
+			Some(PathOwned::from("sjc".to_string())),
+			origin,
+		);
+		let key = PathOwned::from("foo/bar".to_string());
+		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let track = bs.publisher().track("video");
+
+		// One active tick so last_active_tick is set.
+		drive_ticks(1).await;
+		drop(track);
+		drop(bs);
+
+		// Idle tick 1: diff == 1, still <= retention_ticks. Kept.
+		drive_ticks(1).await;
+		assert!(
+			stats.inner.entries.lock().contains_key(&key),
+			"entry must remain after 1 idle tick (retention=2)"
+		);
+		// Idle tick 2: diff == 2, still <= retention_ticks. Kept.
+		drive_ticks(1).await;
+		assert!(
+			stats.inner.entries.lock().contains_key(&key),
+			"entry must remain after 2 idle ticks (retention=2)"
+		);
+		// Idle tick 3: diff == 3, exceeds retention_ticks. GC'd.
+		drive_ticks(1).await;
+		assert!(
+			!stats.inner.entries.lock().contains_key(&key),
+			"entry must be GC'd after 3 idle ticks (retention=2)"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
