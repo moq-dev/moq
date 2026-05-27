@@ -7,6 +7,9 @@ pub enum Version {
 	Lite02,
 	Lite03,
 	Lite04,
+	/// Work-in-progress placeholder for lite-05. Not advertised over ALPN or
+	/// included in default version sets; callers must opt in explicitly.
+	Lite05Wip,
 }
 
 impl fmt::Display for Version {
@@ -16,6 +19,7 @@ impl fmt::Display for Version {
 			Self::Lite02 => write!(f, "moq-lite-02"),
 			Self::Lite03 => write!(f, "moq-lite-03"),
 			Self::Lite04 => write!(f, "moq-lite-04"),
+			Self::Lite05Wip => write!(f, "moq-lite-05-wip"),
 		}
 	}
 }
@@ -27,6 +31,7 @@ impl From<Version> for crate::Version {
 			Version::Lite02 => crate::Version::Lite(Version::Lite02),
 			Version::Lite03 => crate::Version::Lite(Version::Lite03),
 			Version::Lite04 => crate::Version::Lite(Version::Lite04),
+			Version::Lite05Wip => crate::Version::Lite(Version::Lite05Wip),
 		}
 	}
 }

@@ -1,6 +1,6 @@
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, Error, NEGOTIATED,
-	OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Error,
+	NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -118,6 +118,22 @@ impl Server {
 					.select(Version::Ietf(ietf::Version::Draft14))
 					.ok_or(Error::Version)?;
 				(v, v.into())
+			}
+			Some(ALPN_LITE_05_WIP) => {
+				self.versions
+					.select(Version::Lite(lite::Version::Lite05Wip))
+					.ok_or(Error::Version)?;
+
+				let recv_bw = lite::start(
+					session.clone(),
+					None,
+					self.publish.clone(),
+					self.consume.clone(),
+					self.stats.clone(),
+					lite::Version::Lite05Wip,
+				)?;
+
+				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw));
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
