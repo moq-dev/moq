@@ -1,5 +1,17 @@
+use futures::FutureExt;
 use hang::catalog::Container;
 use mp4_atom::{Decode, Encode};
+
+/// Drain every group currently buffered on the consumer without waiting for new ones.
+/// Used in tests where the producer is still alive after writing.
+#[cfg(test)]
+fn drain_group_sequences(consumer: &mut moq_net::TrackConsumer) -> Vec<u64> {
+	let mut sequences = Vec::new();
+	while let Some(group) = consumer.recv_group().now_or_never().and_then(|r| r.ok().flatten()) {
+		sequences.push(group.sequence);
+	}
+	sequences
+}
 
 fn run_fmp4(data: &[u8]) -> hang::Catalog {
 	let mut broadcast = moq_net::Broadcast::new().produce();
@@ -126,6 +138,65 @@ fn test_vp9_catalog() {
 	let mvex = moov.mvex.as_ref().unwrap();
 	assert_eq!(mvex.trex.len(), 1);
 	assert_eq!(mvex.trex[0].track_id, moov.trak[0].tkhd.track_id);
+}
+
+/// `Import::seek(n)` starts the next group at sequence `n`; subsequent fragments
+/// auto-increment from there.
+#[tokio::test]
+async fn test_seek_sets_initial_sequence() {
+	use mp4_atom::{Any, DecodeMaybe};
+
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let broadcast_consumer = broadcast.consume();
+	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
+
+	let data = include_bytes!("test_data/bbb.mp4");
+
+	// Walk the file atom-by-atom so we can seek before any fragments are processed.
+	// Init atoms (ftyp/moov) come first; everything after is moof/mdat pairs.
+	let mut init_buf = bytes::BytesMut::new();
+	let mut frag_buf = bytes::BytesMut::new();
+	let mut cursor = std::io::Cursor::new(&data[..]);
+	let mut init_done = false;
+	let mut position = 0;
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap_or(None) {
+		let end = cursor.position() as usize;
+		let bytes = &data[position..end];
+		match atom {
+			Any::Ftyp(_) | Any::Styp(_) | Any::Moov(_) => init_buf.extend_from_slice(bytes),
+			_ => {
+				init_done = true;
+				frag_buf.extend_from_slice(bytes);
+			}
+		}
+		position = end;
+		if init_done && frag_buf.len() > 1024 {
+			break;
+		}
+	}
+
+	// Decode init so the tracks exist, then seek, then decode the fragments.
+	fmp4.decode(&mut init_buf).unwrap();
+	assert!(fmp4.is_initialized());
+
+	let snap = catalog.snapshot();
+	let video_name = snap.video.renditions.keys().next().expect("video track").clone();
+	let mut video_track = broadcast_consumer
+		.subscribe_track(&moq_net::Track::new(&video_name))
+		.expect("video track should exist");
+
+	fmp4.seek(100).unwrap();
+	// Trailing partial fragments may error; ignore.
+	let _ = fmp4.decode(&mut frag_buf);
+	fmp4.finish().unwrap();
+
+	let sequences = drain_group_sequences(&mut video_track);
+	assert!(!sequences.is_empty(), "expected at least one group");
+	assert_eq!(sequences[0], 100, "first group should land at the seeked sequence");
+	for win in sequences.windows(2) {
+		assert_eq!(win[1], win[0] + 1, "subsequent groups should auto-increment");
+	}
 }
 
 /// E2E test: publish via the fMP4 importer, subscribe to the MSF catalog track,

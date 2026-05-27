@@ -137,7 +137,7 @@ export default defineConfig({
 						},
 						{ text: "CLI", link: "/bin/cli" },
 						{ text: "OBS", link: "/bin/obs" },
-						{ text: "Gstreamer", link: "/bin/gstreamer" },
+						{ text: "GStreamer", link: "/bin/gstreamer" },
 						{ text: "Web", link: "/bin/web" },
 					],
 				},
