@@ -41,6 +41,45 @@ pub(crate) const ALPN_16: &str = "moqt-16";
 pub(crate) const ALPN_17: &str = "moqt-17";
 pub(crate) const ALPN_18: &str = "moqt-18";
 
+/// Default `(qmux_version, app_alpn)` pairs to advertise over WebSocket / TLS,
+/// in preference order.
+///
+/// Each pair encodes the spec mapping: moq-transport-18 rides on qmux-01,
+/// moq-transport-14..17 on qmux-00, and moq-lite-01..04 are dual-advertised on
+/// both for back-compat. Lite05Wip is intentionally absent (opt-in only).
+///
+/// See also [`QMUX_ALPN_STRINGS`] for the same list formatted as
+/// `Sec-WebSocket-Protocol` strings.
+pub const QMUX_ALPNS: &[(QmuxVersion, &str)] = &[
+	(QmuxVersion::QMux01, ALPN_LITE_04),
+	(QmuxVersion::QMux00, ALPN_LITE_04),
+	(QmuxVersion::QMux01, ALPN_LITE_03),
+	(QmuxVersion::QMux00, ALPN_LITE_03),
+	(QmuxVersion::QMux01, ALPN_LITE),
+	(QmuxVersion::QMux00, ALPN_LITE),
+	(QmuxVersion::QMux01, ALPN_18),
+	(QmuxVersion::QMux00, ALPN_17),
+	(QmuxVersion::QMux00, ALPN_16),
+	(QmuxVersion::QMux00, ALPN_15),
+	(QmuxVersion::QMux00, ALPN_14),
+];
+
+/// [`QMUX_ALPNS`] flattened to `"qmux-XX.app"` strings, ready to drop into a
+/// `Sec-WebSocket-Protocol` header (or any TLS ALPN list).
+pub const QMUX_ALPN_STRINGS: &[&str] = &[
+	"qmux-01.moq-lite-04",
+	"qmux-00.moq-lite-04",
+	"qmux-01.moq-lite-03",
+	"qmux-00.moq-lite-03",
+	"qmux-01.moql",
+	"qmux-00.moql",
+	"qmux-01.moqt-18",
+	"qmux-00.moqt-17",
+	"qmux-00.moqt-16",
+	"qmux-00.moqt-15",
+	"qmux-00.moq-00",
+];
+
 /// The qmux draft version used to carry a MoQ ALPN over WebSocket / TLS.
 ///
 /// The MoQ WG decided that qmux's version is tied to the moq-transport draft
@@ -162,6 +201,7 @@ impl Version {
 	/// moq-transport-18 requires qmux-01; moq-transport-14..17 require qmux-00.
 	/// Existing moq-lite versions (Lite01..Lite04) advertise both for back-compat.
 	/// Future moq-lite versions should pin to a single qmux version, like moq-transport.
+	/// Lite05Wip is opt-in only and pins to qmux-01.
 	pub fn qmux_versions(&self) -> &'static [QmuxVersion] {
 		use ietf::Version as I;
 		use lite::Version as L;
@@ -169,6 +209,7 @@ impl Version {
 			Self::Ietf(I::Draft18) => &[QmuxVersion::QMux01],
 			Self::Ietf(I::Draft14 | I::Draft15 | I::Draft16 | I::Draft17) => &[QmuxVersion::QMux00],
 			Self::Lite(L::Lite01 | L::Lite02 | L::Lite03 | L::Lite04) => &[QmuxVersion::QMux01, QmuxVersion::QMux00],
+			Self::Lite(L::Lite05Wip) => &[QmuxVersion::QMux01],
 		}
 	}
 
@@ -306,35 +347,6 @@ impl Versions {
 		alpns
 	}
 
-	/// Compute the `(qmux_version, app_alpn)` pairs to advertise over WebSocket / TLS,
-	/// in preference order, dedup'd.
-	///
-	/// Each MoQ version is paired only with the qmux versions it's permitted to ride on
-	/// (see [`Version::qmux_versions`]). Use this to build the `Sec-WebSocket-Protocol`
-	/// list (or TLS ALPN list) when fronting a qmux session.
-	pub fn qmux_alpns(&self) -> Vec<(QmuxVersion, &'static str)> {
-		let mut pairs = Vec::new();
-		for v in &self.0 {
-			let alpn = v.alpn();
-			for &qv in v.qmux_versions() {
-				let pair = (qv, alpn);
-				if !pairs.contains(&pair) {
-					pairs.push(pair);
-				}
-			}
-		}
-		pairs
-	}
-
-	/// Same as [`Self::qmux_alpns`] but formatted as `Sec-WebSocket-Protocol`
-	/// strings (e.g. `"qmux-01.moqt-18"`), in preference order.
-	pub fn qmux_alpn_strings(&self) -> Vec<String> {
-		self.qmux_alpns()
-			.into_iter()
-			.map(|(qv, app)| format!("{}.{}", qv.alpn(), app))
-			.collect()
-	}
-
 	/// Return only versions present in both self and other, or `None` if the intersection is empty.
 	pub fn filter(&self, other: &Versions) -> Option<Versions> {
 		let filtered: Vec<Version> = self.0.iter().filter(|v| other.0.contains(v)).copied().collect();
@@ -420,6 +432,10 @@ mod tests {
 				"{v}"
 			);
 		}
+		assert_eq!(
+			Version::Lite(lite::Version::Lite05Wip).qmux_versions(),
+			&[QmuxVersion::QMux01]
+		);
 	}
 
 	#[test]
@@ -433,11 +449,10 @@ mod tests {
 	}
 
 	#[test]
-	fn qmux_alpns_all_matches_table() {
-		let pairs = Versions::all().qmux_alpns();
+	fn qmux_alpns_table() {
 		assert_eq!(
-			pairs,
-			vec![
+			QMUX_ALPNS,
+			&[
 				(QmuxVersion::QMux01, "moq-lite-04"),
 				(QmuxVersion::QMux00, "moq-lite-04"),
 				(QmuxVersion::QMux01, "moq-lite-03"),
@@ -454,30 +469,20 @@ mod tests {
 	}
 
 	#[test]
-	fn qmux_alpns_singleton_moqt_18() {
-		assert_eq!(
-			Versions::from(Version::Ietf(ietf::Version::Draft18)).qmux_alpns(),
-			vec![(QmuxVersion::QMux01, "moqt-18")]
-		);
+	fn qmux_alpn_strings_match_pairs() {
+		// Hand-rolled string list must agree with the typed pair list: same
+		// length, same order, and each string is `{qv.alpn()}.{app}`.
+		assert_eq!(QMUX_ALPN_STRINGS.len(), QMUX_ALPNS.len());
+		for (s, (qv, app)) in QMUX_ALPN_STRINGS.iter().zip(QMUX_ALPNS) {
+			assert_eq!(*s, format!("{}.{}", qv.alpn(), app));
+		}
 	}
 
 	#[test]
-	fn qmux_alpns_singleton_moqt_17() {
-		assert_eq!(
-			Versions::from(Version::Ietf(ietf::Version::Draft17)).qmux_alpns(),
-			vec![(QmuxVersion::QMux00, "moqt-17")]
-		);
-	}
-
-	#[test]
-	fn qmux_alpns_singleton_lite_offers_both() {
-		assert_eq!(
-			Versions::from(Version::Lite(lite::Version::Lite04)).qmux_alpns(),
-			vec![
-				(QmuxVersion::QMux01, "moq-lite-04"),
-				(QmuxVersion::QMux00, "moq-lite-04"),
-			]
-		);
+	fn qmux_alpns_excludes_lite_05_wip() {
+		// Lite05Wip is opt-in only; it must not leak into the default list.
+		assert!(!QMUX_ALPNS.iter().any(|(_, app)| *app == "moq-lite-05-wip"));
+		assert!(!QMUX_ALPN_STRINGS.iter().any(|s| s.contains("moq-lite-05-wip")));
 	}
 
 	#[test]

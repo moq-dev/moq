@@ -211,7 +211,6 @@ impl Default for ClientConfig {
 #[derive(Clone)]
 pub struct Client {
 	moq: moq_net::Client,
-	versions: moq_net::Versions,
 	backoff: Backoff,
 	#[cfg(feature = "websocket")]
 	websocket: super::ClientWebSocket,
@@ -277,10 +276,8 @@ impl Client {
 			_ => None,
 		};
 
-		let versions = config.versions();
 		Ok(Self {
-			moq: moq_net::Client::new().with_versions(versions.clone()),
-			versions,
+			moq: moq_net::Client::new().with_versions(config.versions()),
 			backoff: config.backoff,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
@@ -392,8 +389,8 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				let alpns = self.versions.qmux_alpn_strings();
-				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
+				let alpns = moq_net::QMUX_ALPNS;
+				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, alpns);
 
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
@@ -423,8 +420,8 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				let alpns = self.versions.qmux_alpn_strings();
-				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
+				let alpns = moq_net::QMUX_ALPNS;
+				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, alpns);
 
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
@@ -453,8 +450,8 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				let alpns = self.versions.qmux_alpn_strings();
-				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
+				let alpns = moq_net::QMUX_ALPNS;
+				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, alpns);
 
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
@@ -472,8 +469,8 @@ impl Client {
 
 		#[cfg(feature = "websocket")]
 		{
-			let alpns = self.versions.qmux_alpn_strings();
-			let session = crate::websocket::connect(&self.websocket, &self.tls, url, &alpns).await?;
+			let alpns = moq_net::QMUX_ALPNS;
+			let session = crate::websocket::connect(&self.websocket, &self.tls, url, alpns).await?;
 			return Ok(self.moq.connect(session).await?);
 		}
 

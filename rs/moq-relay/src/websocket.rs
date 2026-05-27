@@ -15,7 +15,7 @@ use axum::{
 	http::StatusCode,
 	response::Response,
 };
-use moq_net::{OriginConsumer, OriginProducer, StatsHandle, Tier};
+use moq_net::{OriginConsumer, OriginProducer, QmuxVersion, StatsHandle, Tier};
 
 use crate::{AuthParams, AuthToken, WebState, web::AuthQuery, web::MtlsPeer, web::landing_response};
 
@@ -32,7 +32,7 @@ pub(crate) async fn serve_ws(
 		return Ok(landing_response());
 	};
 
-	let ws = ws.protocols(moq_net::Versions::all().qmux_alpn_strings());
+	let ws = ws.protocols(moq_net::QMUX_ALPN_STRINGS.iter().copied());
 
 	let params = AuthParams { path, jwt: query.jwt };
 	let token = if mtls.is_some() {
@@ -60,15 +60,20 @@ pub(crate) async fn serve_ws(
 		// Pull the negotiated subprotocol off the WebSocket before we wrap it
 		// in adapters. Without it we can't tell which qmux draft the peer
 		// expects to speak.
-		let negotiated = socket.protocol().and_then(|h| h.to_str().ok()).map(str::to_owned);
-		let Some(negotiated) = negotiated else {
+		let Some(negotiated) = socket.protocol().and_then(|h| h.to_str().ok()).map(str::to_owned) else {
 			tracing::warn!("client connected with no Sec-WebSocket-Protocol");
 			return;
 		};
-		let Some(version) = qmux_version_from_alpn(&negotiated) else {
+		// Axum filtered to QMUX_ALPN_STRINGS for us, so the negotiated value
+		// must be one of those entries; recover the qmux draft by index.
+		let Some(idx) = moq_net::QMUX_ALPN_STRINGS
+			.iter()
+			.position(|s| *s == negotiated.as_str())
+		else {
 			tracing::warn!(%negotiated, "client negotiated an unrecognized Sec-WebSocket-Protocol");
 			return;
 		};
+		let (qv, _) = moq_net::QMUX_ALPNS[idx];
 
 		// Unfortunately, we need to convert from Axum to Tungstenite.
 		// Axum uses Tungstenite internally, but it's not exposed to avoid semvar issues.
@@ -80,43 +85,60 @@ pub(crate) async fn serve_ws(
 				tungstenite::Error::ConnectionClosed
 			})
 			.with(tungstenite_to_axum);
-		let _ = handle_socket(id, socket, version, &negotiated, publish, subscribe, stats).await;
+		let handler = Handler {
+			id,
+			qv,
+			negotiated,
+			publish,
+			subscribe,
+			stats,
+		};
+		let _ = handler.run(socket).await;
 	}))
 }
 
-/// Pick the qmux version implied by a negotiated `Sec-WebSocket-Protocol` value.
-fn qmux_version_from_alpn(alpn: &str) -> Option<qmux::Version> {
-	[qmux::Version::QMux01, qmux::Version::QMux00]
-		.into_iter()
-		.find(|v| alpn == v.alpn() || alpn.starts_with(v.prefix()))
-}
-
-#[tracing::instrument("ws", err, skip_all, fields(id = _id, qmux = ?version, alpn = %negotiated))]
-async fn handle_socket<T>(
-	_id: u64,
-	socket: T,
-	version: qmux::Version,
-	negotiated: &str,
+/// Owns the per-connection state for one upgraded WebSocket, ready to be wrapped
+/// in a qmux session and handed off to `moq_net::Server`.
+struct Handler {
+	id: u64,
+	qv: QmuxVersion,
+	negotiated: String,
 	publish: Option<OriginProducer>,
 	subscribe: Option<OriginConsumer>,
 	stats: StatsHandle,
-) -> anyhow::Result<()>
-where
-	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
-		+ futures::Sink<tungstenite::Message, Error = tungstenite::Error>
-		+ Send
-		+ Unpin
-		+ 'static,
-{
-	// Wrap the WebSocket in a qmux session pinned to the negotiated draft.
-	let ws = qmux::ws::Upgraded::new(socket, version).with_alpn(negotiated).accept();
-	let session = moq_net::Server::new()
-		.with_publish(subscribe)
-		.with_consume(publish)
-		.with_stats(stats)
-		.accept(ws)
-		.await?;
-	session.closed().await.map_err(Into::into)
+}
+
+impl Handler {
+	#[tracing::instrument("ws", err, skip_all, fields(id = self.id, qmux = ?self.qv, alpn = %self.negotiated))]
+	async fn run<T>(self, socket: T) -> anyhow::Result<()>
+	where
+		T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
+			+ futures::Sink<tungstenite::Message, Error = tungstenite::Error>
+			+ Send
+			+ Unpin
+			+ 'static,
+	{
+		// Wrap the WebSocket in a qmux session pinned to the negotiated draft.
+		let ws = qmux::ws::Upgraded::new(socket, qmux_version(self.qv))
+			.with_alpn(&self.negotiated)
+			.accept();
+		let session = moq_net::Server::new()
+			.with_publish(self.subscribe)
+			.with_consume(self.publish)
+			.with_stats(self.stats)
+			.accept(ws)
+			.await?;
+		session.closed().await.map_err(Into::into)
+	}
+}
+
+fn qmux_version(qv: QmuxVersion) -> qmux::Version {
+	// `QmuxVersion` is `#[non_exhaustive]`, hence the catch-all arm.
+	match qv {
+		QmuxVersion::QMux00 => qmux::Version::QMux00,
+		QmuxVersion::QMux01 => qmux::Version::QMux01,
+		_ => unreachable!("unknown QmuxVersion variant"),
+	}
 }
 
 // https://github.com/tokio-rs/axum/discussions/848#discussioncomment-11443587

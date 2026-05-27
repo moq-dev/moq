@@ -1,4 +1,5 @@
 use anyhow::Context;
+use moq_net::QmuxVersion;
 use qmux::tokio_tungstenite;
 use qmux::tungstenite;
 use std::collections::HashSet;
@@ -46,21 +47,27 @@ impl Default for ClientWebSocket {
 	}
 }
 
-/// Pick the qmux version implied by a negotiated `Sec-WebSocket-Protocol` value.
-///
-/// Returns `None` for unknown prefixes; we accept anything starting with a
-/// known qmux ALPN ("qmux-01", "qmux-00") with or without an app suffix.
-fn qmux_version_from_alpn(alpn: &str) -> Option<qmux::Version> {
-	[qmux::Version::QMux01, qmux::Version::QMux00]
-		.into_iter()
-		.find(|v| alpn == v.alpn() || alpn.starts_with(v.prefix()))
+fn qmux_version(qv: QmuxVersion) -> qmux::Version {
+	// `QmuxVersion` is `#[non_exhaustive]`, so we need a fallthrough even
+	// though both current variants are listed. New variants will hit this
+	// arm at runtime, which we'd want to update to handle cleanly.
+	match qv {
+		QmuxVersion::QMux00 => qmux::Version::QMux00,
+		QmuxVersion::QMux01 => qmux::Version::QMux01,
+		_ => unreachable!("unknown QmuxVersion variant"),
+	}
+}
+
+/// Format a `(QmuxVersion, app)` pair as the `qmux-XX.app` subprotocol string.
+fn pair_to_alpn(qv: QmuxVersion, app: &str) -> String {
+	format!("{}.{}", qv.alpn(), app)
 }
 
 pub(crate) async fn race_handle(
 	config: &ClientWebSocket,
 	tls: &rustls::ClientConfig,
 	url: Url,
-	alpns: &[String],
+	alpns: &[(QmuxVersion, &str)],
 ) -> Option<anyhow::Result<qmux::Session>> {
 	if !config.enabled {
 		return None;
@@ -84,7 +91,7 @@ pub(crate) async fn connect(
 	config: &ClientWebSocket,
 	tls: &rustls::ClientConfig,
 	mut url: Url,
-	alpns: &[String],
+	alpns: &[(QmuxVersion, &str)],
 ) -> anyhow::Result<qmux::Session> {
 	anyhow::ensure!(config.enabled, "WebSocket support is disabled");
 	anyhow::ensure!(!alpns.is_empty(), "no WebSocket subprotocols to offer");
@@ -138,7 +145,8 @@ pub(crate) async fn connect(
 	// moq-native owns the multi-version multiplexing.
 	use tungstenite::client::IntoClientRequest;
 	let mut request = url.as_str().into_client_request().context("invalid WebSocket URL")?;
-	let protocol_value = alpns.join(", ");
+	let formatted: Vec<String> = alpns.iter().map(|(qv, app)| pair_to_alpn(*qv, app)).collect();
+	let protocol_value = formatted.join(", ");
 	request.headers_mut().insert(
 		tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL,
 		tungstenite::http::HeaderValue::from_str(&protocol_value).context("invalid Sec-WebSocket-Protocol value")?,
@@ -153,12 +161,19 @@ pub(crate) async fn connect(
 		.get(tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL)
 		.and_then(|h| h.to_str().ok())
 		.context("server did not select a Sec-WebSocket-Protocol")?;
-	let version = qmux_version_from_alpn(negotiated)
-		.with_context(|| format!("unrecognized negotiated protocol: {negotiated}"))?;
+	// The server can only pick something we offered, so we recover the qmux
+	// version by index in the pair list rather than re-parsing the prefix.
+	let idx = formatted
+		.iter()
+		.position(|s| s == negotiated)
+		.with_context(|| format!("server picked an alpn we did not offer: {negotiated}"))?;
+	let (qv, _) = alpns[idx];
 
-	let session = qmux::ws::Upgraded::new(ws, version).with_alpn(negotiated).connect();
+	let session = qmux::ws::Upgraded::new(ws, qmux_version(qv))
+		.with_alpn(negotiated)
+		.connect();
 
-	tracing::warn!(%url, ?version, %negotiated, "using WebSocket fallback");
+	tracing::warn!(%url, ?qv, %negotiated, "using WebSocket fallback");
 	WEBSOCKET_WON.lock().unwrap().insert(key);
 
 	Ok(session)
@@ -170,29 +185,28 @@ pub(crate) async fn connect(
 /// alongside QUIC connections on a separate port.
 pub struct WebSocketListener {
 	listener: tokio::net::TcpListener,
-	alpns: Arc<Vec<String>>,
+	pairs: &'static [(QmuxVersion, &'static str)],
+	// Pre-formatted `qmux-XX.app` strings, same order as `pairs`. The handshake
+	// callback matches against these and we look up the qmux version by index.
+	formatted: Arc<Vec<String>>,
 }
 
 impl WebSocketListener {
 	pub async fn bind(addr: net::SocketAddr) -> anyhow::Result<Self> {
-		Self::bind_with_alpns(addr, moq_net::Versions::all().qmux_alpn_strings()).await
+		Self::bind_with_alpns(addr, moq_net::QMUX_ALPNS).await
 	}
 
-	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: Vec<String>) -> anyhow::Result<Self> {
+	pub async fn bind_with_alpns(
+		addr: net::SocketAddr,
+		alpns: &'static [(QmuxVersion, &'static str)],
+	) -> anyhow::Result<Self> {
 		anyhow::ensure!(!alpns.is_empty(), "no WebSocket subprotocols to accept");
-		// Reject anything we wouldn't be able to map back to a qmux::Version
-		// after negotiation; otherwise the handshake could succeed and the
-		// session would then fail at wrap time.
-		for alpn in &alpns {
-			anyhow::ensure!(
-				qmux_version_from_alpn(alpn).is_some(),
-				"unsupported WebSocket subprotocol: {alpn}"
-			);
-		}
 		let listener = tokio::net::TcpListener::bind(addr).await?;
+		let formatted = alpns.iter().map(|(qv, app)| pair_to_alpn(*qv, app)).collect();
 		Ok(Self {
 			listener,
-			alpns: Arc::new(alpns),
+			pairs: alpns,
+			formatted: Arc::new(formatted),
 		})
 	}
 
@@ -204,21 +218,26 @@ impl WebSocketListener {
 		match self.listener.accept().await {
 			Ok((stream, addr)) => {
 				tracing::debug!(%addr, "accepted WebSocket TCP connection");
-				let alpns = self.alpns.clone();
-				Some(accept_socket(stream, alpns).await)
+				Some(accept_socket(stream, self.pairs, self.formatted.clone()).await)
 			}
 			Err(e) => Some(Err(e.into())),
 		}
 	}
 }
 
-async fn accept_socket(stream: tokio::net::TcpStream, alpns: Arc<Vec<String>>) -> anyhow::Result<qmux::Session> {
+async fn accept_socket(
+	stream: tokio::net::TcpStream,
+	pairs: &'static [(QmuxVersion, &'static str)],
+	formatted: Arc<Vec<String>>,
+) -> anyhow::Result<qmux::Session> {
 	use std::sync::Mutex;
 	use tungstenite::handshake::server;
 	use tungstenite::http;
 
-	let negotiated_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-	let slot = negotiated_slot.clone();
+	// Capture the negotiated string from inside the handshake callback.
+	let chosen_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+	let slot = chosen_slot.clone();
+	let supported = formatted.clone();
 
 	#[allow(clippy::result_large_err)]
 	let callback = move |req: &server::Request,
@@ -235,9 +254,7 @@ async fn accept_socket(stream: tokio::net::TcpStream, alpns: Arc<Vec<String>>) -
 			.collect();
 
 		// Pick the first server-supported protocol that the client offered.
-		let chosen = alpns.iter().find(|s| header_protocols.contains(&s.as_str()));
-
-		match chosen {
+		match supported.iter().find(|s| header_protocols.contains(&s.as_str())) {
 			Some(picked) => {
 				response.headers_mut().insert(
 					http::header::SEC_WEBSOCKET_PROTOCOL,
@@ -257,13 +274,18 @@ async fn accept_socket(stream: tokio::net::TcpStream, alpns: Arc<Vec<String>>) -
 		.await
 		.context("WebSocket handshake failed")?;
 
-	let negotiated = negotiated_slot
+	let negotiated = chosen_slot
 		.lock()
 		.unwrap()
 		.take()
 		.context("handshake completed without setting negotiated protocol")?;
-	let version = qmux_version_from_alpn(&negotiated)
-		.with_context(|| format!("unrecognized negotiated protocol: {negotiated}"))?;
+	let idx = formatted
+		.iter()
+		.position(|s| *s == negotiated)
+		.expect("callback only writes strings drawn from `formatted`");
+	let (qv, _) = pairs[idx];
 
-	Ok(qmux::ws::Upgraded::new(ws, version).with_alpn(&negotiated).accept())
+	Ok(qmux::ws::Upgraded::new(ws, qmux_version(qv))
+		.with_alpn(&negotiated)
+		.accept())
 }
