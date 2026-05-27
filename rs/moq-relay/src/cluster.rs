@@ -1,11 +1,13 @@
 use std::{
-	collections::HashSet,
+	collections::HashMap,
 	path::PathBuf,
 	sync::{Arc, Mutex},
+	time::{Duration, Instant},
 };
 
 use anyhow::Context;
 use moq_net::{BroadcastProducer, Origin, OriginConsumer, OriginProducer, Path, Stats, Tier};
+use tokio::task::AbortHandle;
 use url::Url;
 
 use crate::AuthToken;
@@ -13,6 +15,25 @@ use crate::AuthToken;
 /// Path prefix under which cluster nodes advertise their own URLs for gossip-style
 /// peer discovery.
 const MESH_PREFIX: &str = ".internal/origins";
+
+/// How often the discovery loop scans for stale entries.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long a peer must stay unannounced before we abort the dial. Must clear the
+/// "prefer shorter hop" reannounce flap (which arrives as unannounce-then-announce
+/// within sub-milliseconds) plus reasonable churn from a peer restart.
+const STALE_AFTER: Duration = Duration::from_secs(60);
+
+/// One entry in the dial map. `is_static` flags peers seeded from
+/// `--cluster-connect`; those keep retrying forever even if their gossip
+/// registration goes away (operator intent says "always dial"). Gossip-discovered
+/// peers carry an `unannounced_at` timestamp that the periodic sweep uses to
+/// decide when a peer has truly left vs. is just flapping between paths.
+struct DialEntry {
+	handle: AbortHandle,
+	is_static: bool,
+	unannounced_at: Option<Instant>,
+}
 
 /// Configuration for relay clustering.
 ///
@@ -185,14 +206,17 @@ impl Cluster {
 		};
 
 		// URLs we've already spawned a dial task for (static + gossip-discovered).
-		// Dedup only; we never abort entries based on gossip churn, since the
-		// "prefer shorter hop" logic in OriginProducer delivers reannounces as
-		// unannounce-then-announce pairs that would otherwise drive a tight loop.
-		let dialed: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+		// Both flavors share this map so a peer reached via both `connect` and gossip
+		// only opens one dial. Gossip-driven unannounces don't abort immediately —
+		// the discovery loop runs a periodic sweep that only aborts entries whose
+		// unannounce has stuck for [`STALE_AFTER`]. That filters out the prefer-
+		// shorter-hop flap (which delivers unannounce-then-announce within
+		// sub-milliseconds) while still cleaning up peers that truly left.
+		let dialed: Arc<Mutex<HashMap<String, DialEntry>>> = Arc::new(Mutex::new(HashMap::new()));
 		let mut tasks = tokio::task::JoinSet::new();
 
 		for peer in &self.config.connect {
-			Self::spawn_dial(&mut tasks, &dialed, self.clone(), peer.clone(), token.clone());
+			Self::spawn_dial(&mut tasks, &dialed, self.clone(), peer.clone(), token.clone(), true);
 		}
 
 		// Held in scope so the registration stays announced until `run` exits.
@@ -231,58 +255,129 @@ impl Cluster {
 		Ok(())
 	}
 
-	/// Spawn a dial loop for `peer`. No-op if `peer` is already tracked.
+	/// Spawn a dial loop for `peer` and record its abort handle. No-op if `peer`
+	/// is already tracked.
 	fn spawn_dial(
 		tasks: &mut tokio::task::JoinSet<()>,
-		dialed: &Arc<Mutex<HashSet<String>>>,
+		dialed: &Arc<Mutex<HashMap<String, DialEntry>>>,
 		this: Self,
 		peer: String,
 		token: String,
+		is_static: bool,
 	) {
-		if !dialed.lock().expect("dial set poisoned").insert(peer.clone()) {
-			return;
+		{
+			let map = dialed.lock().expect("dial map poisoned");
+			if map.contains_key(&peer) {
+				return;
+			}
 		}
-		tasks.spawn(async move {
-			if let Err(err) = this.run_remote(&peer, token).await {
-				tracing::warn!(%err, %peer, "cluster peer connection ended");
+		let peer_for_task = peer.clone();
+		let handle = tasks.spawn(async move {
+			if let Err(err) = this.run_remote(&peer_for_task, token).await {
+				tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
 			}
 		});
+		dialed.lock().expect("dial map poisoned").insert(
+			peer,
+			DialEntry {
+				handle,
+				is_static,
+				unannounced_at: None,
+			},
+		);
 	}
 
-	/// Watch `.internal/origins/*` for peer registrations and dial each newly-seen
-	/// URL. We deliberately don't abort dials on unannounce: the "prefer shorter
-	/// hop" path in OriginProducer delivers reannouncements as unannounce-then-
-	/// announce pairs whenever a closer copy of the same broadcast arrives,
-	/// which would otherwise drive a tight respawn loop. The dial loop reconnects
-	/// on its own; if a peer truly leaves, the loop just keeps backing off.
-	async fn run_discovery(self, self_url: String, token: String, dialed: Arc<Mutex<HashSet<String>>>) {
+	/// Watch `.internal/origins/*` for peer registrations and dial each newly-
+	/// announced URL. Unannounces don't abort immediately — they just mark the
+	/// entry as "pending cleanup" with a timestamp. A periodic sweep evicts
+	/// entries whose unannounce has stuck for [`STALE_AFTER`]. The "prefer
+	/// shorter hop" path in OriginProducer delivers reannouncements as
+	/// unannounce-then-announce within sub-milliseconds, which clears the
+	/// pending-cleanup timestamp long before the sweep fires.
+	async fn run_discovery(self, self_url: String, token: String, dialed: Arc<Mutex<HashMap<String, DialEntry>>>) {
 		let Some(mut consumer) = self.origin.consume().with_root(MESH_PREFIX) else {
 			tracing::warn!("could not scope cluster origin to {MESH_PREFIX}; discovery disabled");
 			return;
 		};
 
-		while let Some((relative, announced)) = consumer.announced().await {
-			if announced.is_none() {
-				continue;
-			}
-			let peer = relative.as_str();
-			if peer == self_url {
-				continue;
-			}
-			let peer = peer.to_owned();
-			if !dialed.lock().expect("dial set poisoned").insert(peer.clone()) {
-				tracing::debug!(%peer, "discovered peer already tracked; skipping dial");
-				continue;
-			}
-			tracing::info!(%peer, "discovered cluster peer; dialing");
-			let this = self.clone();
-			let token = token.clone();
-			tokio::spawn(async move {
-				if let Err(err) = this.run_remote(&peer, token).await {
-					tracing::warn!(%err, %peer, "cluster peer connection ended");
+		let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
+		sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+		// Skip the first immediate tick; nothing has had a chance to go stale yet.
+		sweep.tick().await;
+
+		loop {
+			tokio::select! {
+				ann = consumer.announced() => {
+					let Some((relative, announced)) = ann else { return; };
+					let peer = relative.as_str();
+					if peer == self_url {
+						continue;
+					}
+					let peer = peer.to_owned();
+					let mut map = dialed.lock().expect("dial map poisoned");
+					match announced {
+						Some(_) => {
+							if let Some(entry) = map.get_mut(&peer) {
+								// Already tracked. Clear any pending-cleanup so a
+								// reannounce-after-unannounce flap doesn't trigger
+								// the sweep when it next fires.
+								if entry.unannounced_at.take().is_some() {
+									tracing::debug!(%peer, "reannounce within sweep window; keeping dial");
+								}
+								continue;
+							}
+							tracing::info!(%peer, "discovered cluster peer; dialing");
+							let this = self.clone();
+							let token = token.clone();
+							let peer_for_task = peer.clone();
+							let handle = tokio::spawn(async move {
+								if let Err(err) = this.run_remote(&peer_for_task, token).await {
+									tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
+								}
+							});
+							map.insert(peer, DialEntry {
+								handle: handle.abort_handle(),
+								is_static: false,
+								unannounced_at: None,
+							});
+						}
+						None => {
+							// Mark for sweep; only the first unannounce-without-followup
+							// sets the timestamp so a reannounce-then-unannounce doesn't
+							// reset the clock.
+							if let Some(entry) = map.get_mut(&peer) {
+								if !entry.is_static {
+									entry.unannounced_at.get_or_insert_with(Instant::now);
+								}
+							}
+						}
+					}
 				}
-			});
+				_ = sweep.tick() => {
+					Self::sweep_stale(&dialed, Instant::now(), STALE_AFTER);
+				}
+			}
 		}
+	}
+
+	/// Abort and remove gossip-discovered entries whose unannounce has stuck
+	/// for at least `threshold`. Static peers and entries with no pending
+	/// unannounce are left alone. Extracted as a free function for unit testing.
+	fn sweep_stale(dialed: &Arc<Mutex<HashMap<String, DialEntry>>>, now: Instant, threshold: Duration) {
+		let mut map = dialed.lock().expect("dial map poisoned");
+		map.retain(|peer, entry| {
+			if entry.is_static {
+				return true;
+			}
+			let Some(at) = entry.unannounced_at else { return true };
+			if now.duration_since(at) >= threshold {
+				tracing::info!(%peer, "peer no longer gossiped; abandoning dial");
+				entry.handle.abort();
+				false
+			} else {
+				true
+			}
+		});
 	}
 
 	#[tracing::instrument("remote", skip_all, err, fields(%remote))]
@@ -350,6 +445,109 @@ impl Cluster {
 mod tests {
 	use super::*;
 	use crate::Config;
+
+	/// Stand-in dial task: never makes progress, exposes an AbortHandle.
+	fn placeholder_handle() -> AbortHandle {
+		tokio::spawn(std::future::pending::<()>()).abort_handle()
+	}
+
+	/// Static `--cluster-connect` peers must never be swept, even if they sit with
+	/// an unannounced_at timestamp far in the past (shouldn't happen for static
+	/// peers in practice, but the sweep is defensive).
+	#[tokio::test]
+	async fn sweep_preserves_static_peer() {
+		let dialed: Arc<Mutex<HashMap<String, DialEntry>>> = Arc::new(Mutex::new(HashMap::new()));
+		let now = Instant::now();
+
+		dialed.lock().unwrap().insert(
+			"static-peer:4443".to_string(),
+			DialEntry {
+				handle: placeholder_handle(),
+				is_static: true,
+				unannounced_at: Some(now - Duration::from_secs(3600)),
+			},
+		);
+
+		Cluster::sweep_stale(&dialed, now, STALE_AFTER);
+
+		assert!(
+			dialed.lock().unwrap().contains_key("static-peer:4443"),
+			"static peer must survive sweep regardless of unannounced_at"
+		);
+	}
+
+	/// A gossip-discovered peer whose unannounce has stuck longer than the
+	/// threshold gets aborted and removed.
+	#[tokio::test]
+	async fn sweep_evicts_stale_gossip_peer() {
+		let dialed: Arc<Mutex<HashMap<String, DialEntry>>> = Arc::new(Mutex::new(HashMap::new()));
+		let now = Instant::now();
+
+		dialed.lock().unwrap().insert(
+			"gone:4443".to_string(),
+			DialEntry {
+				handle: placeholder_handle(),
+				is_static: false,
+				unannounced_at: Some(now - STALE_AFTER - Duration::from_secs(1)),
+			},
+		);
+
+		Cluster::sweep_stale(&dialed, now, STALE_AFTER);
+
+		assert!(
+			!dialed.lock().unwrap().contains_key("gone:4443"),
+			"stale gossip peer should have been evicted"
+		);
+	}
+
+	/// A gossip-discovered peer whose unannounce is recent stays in the map; the
+	/// sweep is only allowed to evict entries past the full threshold so that the
+	/// prefer-shorter-hop flap (sub-millisecond unannounce-then-announce) doesn't
+	/// trip it.
+	#[tokio::test]
+	async fn sweep_keeps_recently_unannounced_peer() {
+		let dialed: Arc<Mutex<HashMap<String, DialEntry>>> = Arc::new(Mutex::new(HashMap::new()));
+		let now = Instant::now();
+
+		dialed.lock().unwrap().insert(
+			"flapping:4443".to_string(),
+			DialEntry {
+				handle: placeholder_handle(),
+				is_static: false,
+				unannounced_at: Some(now - Duration::from_millis(50)),
+			},
+		);
+
+		Cluster::sweep_stale(&dialed, now, STALE_AFTER);
+
+		assert!(
+			dialed.lock().unwrap().contains_key("flapping:4443"),
+			"recently-unannounced peer should still be in the map"
+		);
+	}
+
+	/// A peer that's currently announced (`unannounced_at = None`) is never swept.
+	#[tokio::test]
+	async fn sweep_keeps_currently_announced_peer() {
+		let dialed: Arc<Mutex<HashMap<String, DialEntry>>> = Arc::new(Mutex::new(HashMap::new()));
+		let now = Instant::now();
+
+		dialed.lock().unwrap().insert(
+			"healthy:4443".to_string(),
+			DialEntry {
+				handle: placeholder_handle(),
+				is_static: false,
+				unannounced_at: None,
+			},
+		);
+
+		Cluster::sweep_stale(&dialed, now, STALE_AFTER);
+
+		assert!(
+			dialed.lock().unwrap().contains_key("healthy:4443"),
+			"announced peer should still be in the map"
+		);
+	}
 
 	/// Setting `cluster.root` (the removed flag) at startup must surface a migration
 	/// message that names both the replacement flags.
