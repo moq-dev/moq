@@ -448,26 +448,30 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			track.start_at(start_group);
 		}
 
-		// Groups received from the track whose sequence exceeds the current cap.
-		// They stay here (the GroupConsumer keeps the data reachable in the
-		// producer's cache) until the cap rises enough to let them through.
-		let mut held: Vec<GroupConsumer> = Vec::new();
+		// At most one group consumed-but-not-yet-serveable, kept until the cap
+		// rises enough to release it. We deliberately don't accumulate a queue
+		// here: stopping consumption while one is pending bounds publisher-side
+		// memory to a single group regardless of how long the subscriber leaves
+		// the cap below the live head. Anything else the publisher produces
+		// during that window stays in the track's own cache (subject to its
+		// 5-second eviction), which already has a memory bound.
+		let mut pending: Option<GroupConsumer> = None;
 		let mut track_done = false;
 
 		loop {
 			let cap = *end_group.borrow_and_update();
 
-			// Drain held groups the cap now permits, in sequence order so
-			// subscribers see a monotonic stream when they unpause.
-			held.sort_by_key(|g| g.sequence);
-			while held.first().is_some_and(|g| cap.is_none_or(|e| g.sequence <= e)) {
-				let group = held.remove(0);
+			// Release the pending group if the cap now permits it.
+			if let Some(p) = pending.as_ref()
+				&& cap.is_none_or(|e| p.sequence <= e)
+			{
+				let group = pending.take().unwrap();
 				self.spawn_serve(group, &mut tasks);
 			}
 
 			// Once the track has finished and there's nothing left to serve,
 			// drain any in-flight serve tasks and exit.
-			if track_done && held.is_empty() {
+			if track_done && pending.is_none() {
 				while tasks.next().await.is_some() {}
 				return Ok(());
 			}
@@ -479,11 +483,13 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					false
 				} => unreachable!(),
 
-				res = track.recv_group(), if !track_done => {
+				// Only pull from the track when we have somewhere to put the result.
+				// `pending.is_none()` enforces the one-group buffer bound.
+				res = track.recv_group(), if !track_done && pending.is_none() => {
 					match res? {
 						Some(group) => {
 							if cap.is_some_and(|e| group.sequence > e) {
-								held.push(group);
+								pending = Some(group);
 							} else {
 								self.spawn_serve(group, &mut tasks);
 							}
@@ -493,7 +499,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 				}
 
 				Ok(()) = end_group.changed() => {
-					// Loop back to drain any newly-permitted held groups.
+					// Loop back to re-evaluate pending against the new cap.
 				}
 			}
 		}
