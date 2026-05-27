@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
-use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
@@ -381,11 +380,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// to both run_track (so future groups inherit the new priority) and serve_group
 		// tasks (so in-flight groups update via PriorityHandle::set_track).
 		let (track_priority_tx, track_priority_rx) = tokio::sync::watch::channel(track.priority);
+		// `end_group` is a serving cap, not a subscription terminator: groups with
+		// sequence > cap are held until the subscriber raises the cap (or unsets
+		// it) via SUBSCRIBE_UPDATE, then served in order. Only FIN ends the
+		// subscription. This is what relays use to pause an upstream subscription
+		// across consumer churn without tearing it down.
+		let (end_group_tx, end_group_rx) = tokio::sync::watch::channel(subscribe.end_group);
 		let track_stats = std::sync::Arc::new(track_stats);
 
 		tokio::select! {
-			res = Self::run_track(session, track, subscribe, priority, track_stats, track_priority_rx, version) => res?,
-			res = Self::run_subscribe_updates(&mut stream.reader, &track_priority_tx) => res?,
+			res = Self::run_track(session, track, subscribe, priority, track_stats, track_priority_rx, end_group_rx, version) => res?,
+			res = Self::run_subscribe_updates(&mut stream.reader, &track_priority_tx, &end_group_tx) => res?,
 		}
 
 		stream.writer.finish()?;
@@ -395,13 +400,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn run_subscribe_updates<R: web_transport_trait::RecvStream>(
 		reader: &mut crate::coding::Reader<R, Version>,
 		priority_tx: &tokio::sync::watch::Sender<u8>,
+		end_group_tx: &tokio::sync::watch::Sender<Option<u64>>,
 	) -> Result<(), Error> {
 		while let Some(upd) = reader.decode_maybe::<lite::SubscribeUpdate>().await? {
 			let _ = priority_tx.send(upd.priority);
+			let _ = end_group_tx.send(upd.end_group);
 		}
 		Ok(())
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	async fn run_track(
 		session: S,
 		mut track: TrackConsumer,
@@ -409,49 +417,96 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		priority: PriorityQueue,
 		track_stats: std::sync::Arc<crate::PublisherTrack>,
 		mut track_priority: tokio::sync::watch::Receiver<u8>,
+		mut end_group: tokio::sync::watch::Receiver<Option<u64>>,
 		version: Version,
 	) -> Result<(), Error> {
-		let mut tasks = FuturesUnordered::new();
+		let mut tasks: FuturesUnordered<futures::future::BoxFuture<'static, ()>> = FuturesUnordered::new();
 
 		// Start the consumer at the specified sequence, otherwise start at the latest group.
 		if let Some(start_group) = subscribe.start_group.or_else(|| track.latest()) {
 			track.start_at(start_group);
 		}
 
-		loop {
-			let group = tokio::select! {
-				// Poll all active group futures; never matches but keeps them running.
-				true = async {
-					while tasks.next().await.is_some() {}
-					false
-				} => unreachable!(),
-				Some(group) = track.recv_group().transpose() => group,
-				else => return Ok(()),
-			}?;
+		// Groups received from the track whose sequence exceeds the current cap.
+		// They stay here (the GroupConsumer keeps the data reachable in the
+		// producer's cache) until the cap rises enough to let them through.
+		let mut held: Vec<GroupConsumer> = Vec::new();
+		let mut track_done = false;
 
+		// Snapshot for tracing inside the closure (avoids re-borrowing `track` while
+		// we hold `&mut track` for recv_group).
+		let track_name = track.name.clone();
+		let subscribe_id = subscribe.id;
+
+		// Inline helper: spawn a serve_group task onto `tasks`.
+		let spawn_serve = |group: GroupConsumer,
+		                   track_priority: &mut tokio::sync::watch::Receiver<u8>,
+		                   tasks: &mut FuturesUnordered<futures::future::BoxFuture<'static, ()>>| {
 			let sequence = group.sequence;
-			tracing::debug!(subscribe = %subscribe.id, track = %track.name, sequence, "serving group");
+			tracing::debug!(subscribe = subscribe_id, track = %track_name, sequence, "serving group");
 
 			let msg = lite::Group {
-				subscribe: subscribe.id,
+				subscribe: subscribe_id,
 				sequence,
 			};
 
 			// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
 			let current_priority = *track_priority.borrow_and_update();
 			let handle = priority.insert(Priority::new(current_priority, sequence));
-			tasks.push(
-				Self::serve_group(
-					session.clone(),
-					msg,
-					handle,
-					group,
-					track_stats.clone(),
-					track_priority.clone(),
-					version,
-				)
-				.map(|_| ()),
+			let fut = Self::serve_group(
+				session.clone(),
+				msg,
+				handle,
+				group,
+				track_stats.clone(),
+				track_priority.clone(),
+				version,
 			);
+			tasks.push(fut.map(|_| ()).boxed());
+		};
+
+		loop {
+			let cap = *end_group.borrow_and_update();
+
+			// Drain held groups the cap now permits, in sequence order so
+			// subscribers see a monotonic stream when they unpause.
+			held.sort_by_key(|g| g.sequence);
+			while held.first().is_some_and(|g| cap.is_none_or(|e| g.sequence <= e)) {
+				let group = held.remove(0);
+				spawn_serve(group, &mut track_priority, &mut tasks);
+			}
+
+			// Once the track has finished and there's nothing left to serve,
+			// drain any in-flight serve tasks and exit.
+			if track_done && held.is_empty() {
+				while tasks.next().await.is_some() {}
+				return Ok(());
+			}
+
+			tokio::select! {
+				// Drive in-flight group futures; never matches because the inner block returns false.
+				true = async {
+					while tasks.next().await.is_some() {}
+					false
+				} => unreachable!(),
+
+				res = track.recv_group(), if !track_done => {
+					match res? {
+						Some(group) => {
+							if cap.is_some_and(|e| group.sequence > e) {
+								held.push(group);
+							} else {
+								spawn_serve(group, &mut track_priority, &mut tasks);
+							}
+						}
+						None => track_done = true,
+					}
+				}
+
+				Ok(()) = end_group.changed() => {
+					// Loop back to drain any newly-permitted held groups.
+				}
+			}
 		}
 	}
 
