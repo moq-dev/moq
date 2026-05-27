@@ -463,13 +463,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			tokio::select! {
 				_ = track.unused() => {}
 				res = stream.reader.closed() => {
-					return match res {
-						Ok(()) => {
-							let _ = stream.writer.finish();
-							SessionOutcome::Complete
-						}
-						Err(err) => SessionOutcome::Error(err),
-					};
+					if let Err(err) = res {
+						return SessionOutcome::Error(err);
+					}
+					let _ = stream.writer.finish();
+					return SessionOutcome::Complete;
 				}
 			}
 
@@ -503,10 +501,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			// - a new consumer arrives: send the uncap update and re-enter Phase 1
 			let resume = tokio::select! {
 				res = stream.reader.closed() => {
-					return match res {
-						Ok(()) => SessionOutcome::Complete,
-						Err(err) => SessionOutcome::Error(err),
-					};
+					if let Err(err) = res {
+						return SessionOutcome::Error(err);
+					}
+					return SessionOutcome::Complete;
 				}
 				_ = tokio::time::sleep(LINGER_TIMEOUT) => {
 					let _ = stream.writer.finish();

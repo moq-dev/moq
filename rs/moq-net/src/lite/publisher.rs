@@ -448,34 +448,11 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			track.start_at(start_group);
 		}
 
-		// At most one group consumed-but-not-yet-serveable, kept until the cap
-		// rises enough to release it. We deliberately don't accumulate a queue
-		// here: stopping consumption while one is pending bounds publisher-side
-		// memory to a single group regardless of how long the subscriber leaves
-		// the cap below the live head. Anything else the publisher produces
-		// during that window stays in the track's own cache (subject to its
-		// 5-second eviction), which already has a memory bound.
-		let mut pending: Option<GroupConsumer> = None;
-		let mut track_done = false;
+		// Apply the initial cap from the original Subscribe. Subsequent updates
+		// arrive via the end_group watch channel and get re-applied below.
+		track.end_at(*end_group.borrow_and_update());
 
 		loop {
-			let cap = *end_group.borrow_and_update();
-
-			// Release the pending group if the cap now permits it.
-			if let Some(p) = pending.as_ref()
-				&& cap.is_none_or(|e| p.sequence <= e)
-			{
-				let group = pending.take().unwrap();
-				self.spawn_serve(group, &mut tasks);
-			}
-
-			// Once the track has finished and there's nothing left to serve,
-			// drain any in-flight serve tasks and exit.
-			if track_done && pending.is_none() {
-				while tasks.next().await.is_some() {}
-				return Ok(());
-			}
-
 			tokio::select! {
 				// Drive in-flight group futures; never matches because the inner block returns false.
 				true = async {
@@ -483,23 +460,25 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					false
 				} => unreachable!(),
 
-				// Only pull from the track when we have somewhere to put the result.
-				// `pending.is_none()` enforces the one-group buffer bound.
-				res = track.recv_group(), if !track_done && pending.is_none() => {
+				// next_group respects the cap set via track.end_at and parks
+				// while the next sequence is above the cap. Groups beyond the
+				// cap stay in the producer's cache (bounded by its 5s eviction).
+				res = track.next_group() => {
 					match res? {
-						Some(group) => {
-							if cap.is_some_and(|e| group.sequence > e) {
-								pending = Some(group);
-							} else {
-								self.spawn_serve(group, &mut tasks);
-							}
+						Some(group) => self.spawn_serve(group, &mut tasks),
+						None => {
+							// Track finished; drain in-flight tasks and exit.
+							while tasks.next().await.is_some() {}
+							return Ok(());
 						}
-						None => track_done = true,
 					}
 				}
 
 				Ok(()) = end_group.changed() => {
-					// Loop back to re-evaluate pending against the new cap.
+					// Re-apply the cap. If it rose, the next loop iteration's
+					// track.next_group() will pick up any cached groups that
+					// fell into range; if it dropped, the consumer parks itself.
+					track.end_at(*end_group.borrow_and_update());
 				}
 			}
 		}
