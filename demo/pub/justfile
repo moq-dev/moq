@@ -27,6 +27,7 @@ sync dir="media":
     #!/usr/bin/env bash
     set -euo pipefail
     for file in "{{ dir }}"/*; do
+    	[ -e "$file" ] || continue
     	key=$(basename "$file")
     	echo "Uploading $key..."
     	bun wrangler r2 object put "video-moq-dev/$key" --file "$file" --remote
@@ -236,6 +237,7 @@ gst name url='http://localhost:4443/anon' *args:
 [private]
 download name:
     @if [ ! -f "media/{{ name }}.mp4" ]; then \
+    	mkdir -p media; \
     	curl -fsSL "https://vid.moq.dev/{{ name }}.mp4" -o "media/{{ name }}.mp4"; \
     fi
 
