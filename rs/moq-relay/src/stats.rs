@@ -3,6 +3,8 @@
 //! The actual aggregator lives in [`moq_net::Stats`]; this module just
 //! holds the relay-specific config knobs.
 
+use std::time::Duration;
+
 use clap::Args;
 use moq_net::{OriginProducer, PathOwned, Stats};
 use serde::{Deserialize, Serialize};
@@ -11,10 +13,11 @@ use serde::{Deserialize, Serialize};
 ///
 /// Set `enabled = true` to attach a [`moq_net::Stats`] aggregator to every
 /// session the relay accepts (and every cluster dial). The aggregator
-/// publishes `<prefix>/prefix/<level-path>/<node>` broadcasts on the cluster
-/// origin, with `<node>` omitted when [`Self::node`] is unset. Each level only
-/// advertises while at least one role on that level has an active
-/// subscription.
+/// publishes a single `<prefix>/node/<node>` broadcast (or `<prefix>/node`
+/// when [`Self::node`] is unset) on the cluster origin. Each frame is a
+/// gzipped JSON map of broadcast path to a cumulative counter snapshot,
+/// covering every broadcast that has had an active subscription within the
+/// last [`Self::retention_ticks`] ticks.
 #[derive(Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -44,20 +47,20 @@ pub struct StatsConfig {
 	#[arg(long = "stats-prefix", env = "MOQ_STATS_PREFIX")]
 	pub prefix: Option<String>,
 
-	/// Maximum segment depth stats are bucketed by, capping the number of
-	/// aggregation buckets the relay produces per broadcast.
-	///
-	/// `1` produces only the root bucket (`<prefix>/prefix/<node>`). `2`
-	/// adds a per-first-segment bucket (e.g. `<prefix>/prefix/demo/<node>`
-	/// for broadcasts under `demo/*`). Levels deeper than the broadcast
-	/// path's segment count are skipped. `None` defaults to `1`.
-	#[arg(long = "stats-levels", env = "MOQ_STATS_LEVELS")]
-	pub levels: Option<u32>,
+	/// Tick interval (in seconds) between snapshot publishes. Defaults to 1.
+	#[arg(long = "stats-tick-secs", env = "MOQ_STATS_TICK_SECS")]
+	pub tick_secs: Option<u64>,
 
-	/// Node identifier appended to advertised stats paths to disambiguate
+	/// Number of ticks an idle broadcast lingers in the emitted frame after
+	/// its last observed active subscription. Defaults to 10. A short
+	/// reconnect window keeps the entry visible across brief disconnects.
+	#[arg(long = "stats-retention-ticks", env = "MOQ_STATS_RETENTION_TICKS")]
+	pub retention_ticks: Option<u32>,
+
+	/// Node identifier appended to the advertised stats path to disambiguate
 	/// broadcasts when multiple relays share a cluster origin. Without this,
-	/// peer relays would publish to the same `<prefix>/prefix/<level-path>`
-	/// path and the origin's single-source delivery would drop all but one.
+	/// peer relays would publish to the same `<prefix>/node` path and the
+	/// origin's single-source delivery would drop all but one.
 	///
 	/// May be multi-segment (e.g. `sjc/1`, `sjc/2`) when a region has multiple
 	/// hosts; the segments nest under a shared region key on the advertised
@@ -75,10 +78,11 @@ impl StatsConfig {
 		if !self.enabled.unwrap_or(false) {
 			return Stats::disabled();
 		}
-		let levels = self.levels.unwrap_or(1).max(1);
 		let prefix = self.prefix.clone().unwrap_or_else(|| ".stats".to_string());
+		let tick = Duration::from_secs(self.tick_secs.unwrap_or(1).max(1));
+		let retention_ticks = self.retention_ticks.unwrap_or(10).max(1);
 		let node = self.node.clone().map(PathOwned::from);
-		tracing::info!(prefix, levels, node = ?node, "stats publishing enabled");
-		Stats::new(prefix, levels, node, origin)
+		tracing::info!(prefix, tick_secs = tick.as_secs(), retention_ticks, node = ?node, "stats publishing enabled");
+		Stats::new(prefix, tick, retention_ticks, node, origin)
 	}
 }

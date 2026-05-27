@@ -146,6 +146,70 @@ tls.disable_verify = true
 # tls.root = ["/path/to/root.pem"]
 ```
 
+### \[stats]
+
+Per-node stats publishing. When enabled, the relay publishes a single
+`<prefix>/node/<node>` broadcast (or `<prefix>/node` when `node` is unset)
+carrying gzipped JSON snapshots of every broadcast it's currently serving.
+
+```toml
+[stats]
+# Master switch (defaults to false)
+enabled = true
+
+# Top-level path under which stats broadcasts are published (defaults to ".stats")
+prefix = ".stats"
+
+# Tick interval in seconds between snapshots (defaults to 1)
+tick_secs = 1
+
+# Number of ticks an idle broadcast lingers in the emitted frame after its
+# last observed active subscription (defaults to 10). A short reconnect
+# window keeps the entry visible across brief disconnects.
+retention_ticks = 10
+
+# Node identifier appended to the advertised path to disambiguate broadcasts
+# when multiple relays share a cluster origin. May be multi-segment, e.g.
+# "sjc/1" / "sjc/2" for two hosts nested under a shared region key.
+# Single-relay deployments can omit this.
+node = "sjc/1"
+```
+
+Each stats broadcast carries four tracks, one per `(tier, role)` pair:
+
+| Track                          | What it covers                              |
+|--------------------------------|---------------------------------------------|
+| `publisher.json.gz`            | external (e.g. customer) egress             |
+| `subscriber.json.gz`           | external ingress                            |
+| `internal/publisher.json.gz`   | internal (e.g. mTLS cluster peer) egress    |
+| `internal/subscriber.json.gz`  | internal ingress                            |
+
+Each frame is a gzipped JSON object mapping broadcast path to a cumulative
+counter snapshot. A broadcast appears in the frame while it has at least one
+active subscription on that `(tier, role)` slot, and lingers for
+`retention_ticks` ticks after the last one drops:
+
+```json
+{
+  "demo/bbb": { "broadcasts": 1, "broadcasts_closed": 0, "subscriptions": 5,
+                "subscriptions_closed": 2, "bytes": 12345, "frames": 678, "groups": 9 },
+  "anon/foo": { "broadcasts": 1, "broadcasts_closed": 0, "subscriptions": 2,
+                "subscriptions_closed": 0, "bytes": 234,   "frames": 12,  "groups": 1 }
+}
+```
+
+Tier, role, and node are implied by the track and broadcast paths, so they
+aren't repeated inside the frame. Counters are cumulative; a downstream
+aggregator computes rates from successive snapshots. Frames for any one
+`(tier, role)` are skipped when the JSON is byte-identical to the last
+emitted frame, so idle periods don't burn bandwidth.
+
+Every flag also accepts an equivalent CLI argument (`--stats-enabled`,
+`--stats-prefix`, `--stats-tick-secs`, `--stats-retention-ticks`,
+`--stats-node`) and environment variable (`MOQ_STATS_ENABLED`,
+`MOQ_STATS_PREFIX`, `MOQ_STATS_TICK_SECS`, `MOQ_STATS_RETENTION_TICKS`,
+`MOQ_STATS_NODE`).
+
 ### \[iroh]
 
 Experimental P2P support via iroh.
