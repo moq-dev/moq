@@ -3744,6 +3744,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "conducer",
+ "futures",
  "h264-parser",
  "hang",
  "m3u8-rs",

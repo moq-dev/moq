@@ -389,6 +389,17 @@ impl Import {
 		Ok(())
 	}
 
+	/// Close the current group on every track and open the next one at `sequence`.
+	///
+	/// Broadcast-wide: every track inside this MKV import advances together; per-track
+	/// control is intentionally not exposed.
+	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+		for track in self.tracks.values_mut() {
+			track.track.seek(sequence)?;
+		}
+		Ok(())
+	}
+
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		for track in self.tracks.values_mut() {

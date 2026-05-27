@@ -33,6 +33,10 @@ pub struct Producer<C: Container> {
 	buffer: Vec<Frame>,
 
 	latency: std::time::Duration,
+
+	/// Sequence to use for the next group opened by [`Self::write`].
+	/// Set by [`Self::seek`] and consumed on the next group creation.
+	pending_sequence: Option<u64>,
 }
 
 impl<C: Container> Producer<C> {
@@ -44,6 +48,7 @@ impl<C: Container> Producer<C> {
 			group: None,
 			buffer: Vec::new(),
 			latency: std::time::Duration::ZERO,
+			pending_sequence: None,
 		}
 	}
 
@@ -80,7 +85,10 @@ impl<C: Container> Producer<C> {
 			if !frame.keyframe {
 				return Err(moq_net::Error::ProtocolViolation.into());
 			}
-			self.group = Some(self.inner.append_group()?);
+			self.group = Some(match self.pending_sequence.take() {
+				Some(sequence) => self.inner.create_group(moq_net::Group { sequence })?,
+				None => self.inner.append_group()?,
+			});
 		}
 
 		// Buffer or write the frame.
@@ -112,6 +120,16 @@ impl<C: Container> Producer<C> {
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
+		Ok(())
+	}
+
+	/// Close the current group (if any) and open the next group at the given sequence.
+	///
+	/// The next [`write`](Self::write) must be a keyframe and will land in a group with
+	/// `sequence`. Useful for joining mid-stream or signalling a discontinuity.
+	pub fn seek(&mut self, sequence: u64) -> Result<(), C::Error> {
+		self.finish_group()?;
+		self.pending_sequence = Some(sequence);
 		Ok(())
 	}
 
@@ -222,5 +240,44 @@ mod tests {
 
 		let err = producer.write(frame(0, false)).unwrap_err();
 		assert!(matches!(err, crate::Error::Moq(moq_net::Error::ProtocolViolation)));
+	}
+
+	/// Drain all groups from a finished track, returning their sequence numbers.
+	async fn collect_sequences(mut consumer: moq_net::TrackConsumer) -> Vec<u64> {
+		let mut sequences = Vec::new();
+		while let Some(group) = consumer.recv_group().await.unwrap() {
+			sequences.push(group.sequence);
+		}
+		sequences
+	}
+
+	/// `seek(n)` opens the next group at sequence `n`.
+	#[tokio::test]
+	async fn seek_uses_explicit_sequence() {
+		let track = moq_net::Track::new("test").produce();
+		let consumer = track.consume();
+		let mut producer = Producer::new(track, Container::Legacy);
+
+		producer.write(frame(0, true)).unwrap(); // seq 0
+		producer.seek(42).unwrap();
+		producer.write(frame(10_000, true)).unwrap(); // seq 42
+		producer.finish().unwrap();
+
+		assert_eq!(collect_sequences(consumer).await, vec![0, 42]);
+	}
+
+	/// `seek` is consumed on the next group creation; subsequent groups auto-increment from there.
+	#[tokio::test]
+	async fn seek_clears_pending_after_use() {
+		let track = moq_net::Track::new("test").produce();
+		let consumer = track.consume();
+		let mut producer = Producer::new(track, Container::Legacy);
+
+		producer.seek(5).unwrap();
+		producer.write(frame(0, true)).unwrap(); // seq 5
+		producer.write(frame(10_000, true)).unwrap(); // seq 6 (auto-incremented)
+		producer.finish().unwrap();
+
+		assert_eq!(collect_sequences(consumer).await, vec![5, 6]);
 	}
 }
