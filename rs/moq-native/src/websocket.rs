@@ -156,7 +156,7 @@ pub(crate) async fn connect(
 	let version = qmux_version_from_alpn(negotiated)
 		.with_context(|| format!("unrecognized negotiated protocol: {negotiated}"))?;
 
-	let session = qmux::ws::Bare::new(ws, version).with_alpn(negotiated).connect();
+	let session = qmux::ws::Upgraded::new(ws, version).with_alpn(negotiated).connect();
 
 	tracing::warn!(%url, ?version, %negotiated, "using WebSocket fallback");
 	WEBSOCKET_WON.lock().unwrap().insert(key);
@@ -265,5 +265,5 @@ async fn accept_socket(stream: tokio::net::TcpStream, alpns: Arc<Vec<String>>) -
 	let version = qmux_version_from_alpn(&negotiated)
 		.with_context(|| format!("unrecognized negotiated protocol: {negotiated}"))?;
 
-	Ok(qmux::ws::Bare::new(ws, version).with_alpn(&negotiated).accept())
+	Ok(qmux::ws::Upgraded::new(ws, version).with_alpn(&negotiated).accept())
 }

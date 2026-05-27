@@ -109,7 +109,7 @@ where
 		+ 'static,
 {
 	// Wrap the WebSocket in a qmux session pinned to the negotiated draft.
-	let ws = qmux::ws::Bare::new(socket, version).with_alpn(negotiated).accept();
+	let ws = qmux::ws::Upgraded::new(socket, version).with_alpn(negotiated).accept();
 	let session = moq_net::Server::new()
 		.with_publish(subscribe)
 		.with_consume(publish)
