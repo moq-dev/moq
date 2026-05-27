@@ -172,6 +172,19 @@ impl Framed {
 		}
 	}
 
+	/// Close the current group and open the next one at `sequence`.
+	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+		match self.decoder {
+			FramedKind::H264(ref mut decoder) => decoder.seek(sequence),
+			FramedKind::Fmp4(ref mut decoder) => decoder.seek(sequence),
+			FramedKind::Hev1(ref mut decoder) => decoder.seek(sequence),
+			FramedKind::Av01(ref mut decoder) => decoder.seek(sequence),
+			FramedKind::Aac(ref mut decoder) => decoder.seek(sequence),
+			FramedKind::Opus(ref mut decoder) => decoder.seek(sequence),
+			FramedKind::Mkv(ref mut decoder) => decoder.seek(sequence),
+		}
+	}
+
 	/// Return the single track produced by this importer.
 	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
 		match self.decoder {
@@ -352,6 +365,17 @@ impl Stream {
 			StreamKind::Hev1(ref mut decoder) => decoder.finish(),
 			StreamKind::Av01(ref mut decoder) => decoder.finish(),
 			StreamKind::Mkv(ref mut decoder) => decoder.finish(),
+		}
+	}
+
+	/// Close the current group and open the next one at `sequence`.
+	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+		match self.decoder {
+			StreamKind::Avc3(ref mut decoder) => decoder.seek(sequence),
+			StreamKind::Fmp4(ref mut decoder) => decoder.seek(sequence),
+			StreamKind::Hev1(ref mut decoder) => decoder.seek(sequence),
+			StreamKind::Av01(ref mut decoder) => decoder.seek(sequence),
+			StreamKind::Mkv(ref mut decoder) => decoder.seek(sequence),
 		}
 	}
 

@@ -458,6 +458,13 @@ impl Import {
 		Ok(())
 	}
 
+	/// Close the current group and open the next one at `sequence`.
+	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+		let track = self.track.as_mut().context("not initialized")?;
+		track.seek(sequence)?;
+		Ok(())
+	}
+
 	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> anyhow::Result<moq_net::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
