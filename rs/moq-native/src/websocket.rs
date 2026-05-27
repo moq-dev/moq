@@ -180,6 +180,15 @@ impl WebSocketListener {
 
 	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: Vec<String>) -> anyhow::Result<Self> {
 		anyhow::ensure!(!alpns.is_empty(), "no WebSocket subprotocols to accept");
+		// Reject anything we wouldn't be able to map back to a qmux::Version
+		// after negotiation; otherwise the handshake could succeed and the
+		// session would then fail at wrap time.
+		for alpn in &alpns {
+			anyhow::ensure!(
+				qmux_version_from_alpn(alpn).is_some(),
+				"unsupported WebSocket subprotocol: {alpn}"
+			);
+		}
 		let listener = tokio::net::TcpListener::bind(addr).await?;
 		Ok(Self {
 			listener,
