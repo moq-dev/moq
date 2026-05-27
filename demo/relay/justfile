@@ -1,4 +1,4 @@
-set fallback := true
+set fallback
 
 # Run a localhost relay server without authentication.
 default:

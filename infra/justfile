@@ -5,5 +5,5 @@ mod rpm
 
 # Deploy all infra workers.
 deploy:
-	just apt deploy
-	just rpm deploy
+    just apt deploy
+    just rpm deploy

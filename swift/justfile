@@ -6,28 +6,28 @@
 set working-directory := '.'
 
 default:
-	just check
+    just check
 
 # Build moq-ffi for the host, regenerate uniffi bindings, run swift test.
 # Skips cleanly on non-macOS hosts.
 check:
-	bash scripts/check.sh
+    bash scripts/check.sh
 
 # Assemble the XCFramework + Package.swift from per-target moq-ffi
 # binaries + bindings. Used by .github/workflows/release-swift.yml; see
 # swift/README.md for the expected --lib-dir layout.
 package *args:
-	bash scripts/package.sh {{ args }}
+    bash scripts/package.sh {{ args }}
 
 # Full Swift CI: `check` already builds moq-ffi and runs swift test.
 # Takes a newline-separated list of changed files; skips if FILES is
 # non-empty and none match the Swift scope. Run `just swift ci` (no
 # FILES) to force-run.
 ci FILES="":
-	#!/usr/bin/env bash
-	set -euo pipefail
-	if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(swift/|rs/moq-ffi/)'; then
-		echo "swift: no Swift changes; skipping."
-		exit 0
-	fi
-	just check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(swift/|rs/moq-ffi/)'; then
+    	echo "swift: no Swift changes; skipping."
+    	exit 0
+    fi
+    just check
