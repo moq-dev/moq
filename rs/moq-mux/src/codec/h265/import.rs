@@ -334,7 +334,11 @@ impl Import {
 	}
 
 	/// Close the current group and open the next one at `sequence`.
+	///
+	/// Any in-flight access unit is dropped. Pre-seek NALs would otherwise leak
+	/// into the post-seek group with the wrong timestamp.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		self.current = Frame::default();
 		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
 		track.seek(sequence)?;
 		Ok(())

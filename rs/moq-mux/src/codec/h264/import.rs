@@ -460,7 +460,13 @@ impl Import {
 	}
 
 	/// Close the current group and open the next one at `sequence`.
+	///
+	/// Any in-flight avc3 access unit is dropped. Pre-seek NALs would otherwise
+	/// leak into the post-seek group with the wrong timestamp.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		if let State::Avc3 { current, .. } = &mut self.state {
+			*current = Avc3Frame::default();
+		}
 		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
 		track.seek(sequence)?;
 		Ok(())
