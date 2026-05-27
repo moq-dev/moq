@@ -335,7 +335,15 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;
 
-	const quic = new Session(url);
+	// qmux 0.1.0 pins a single QMux version per Session. Pick qmux-01 (the
+	// latest) and offer the application protocols that the spec allows on it:
+	// moq-transport-18 requires qmux-01, and moq-lite is unconstrained so the
+	// modern versions all ride here. Older moq-transport drafts (15/16/17)
+	// need qmux-00 and aren't reachable via this fallback path.
+	const quic = new Session(url, {
+		version: "qmux-01",
+		protocols: [Lite.ALPN_04, Lite.ALPN_03, Lite.ALPN, Ietf.ALPN.DRAFT_18],
+	});
 
 	// Wait for the WebSocket to connect, or for the cancel promise to resolve.
 	// Close the connection if we lost the race.
