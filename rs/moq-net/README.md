@@ -18,4 +18,4 @@ Live media is built on top of this layer using something like [hang](https://git
 ## Examples
 
 - [Publishing a chat track](https://github.com/moq-dev/moq/blob/main/rs/moq-native/examples/chat.rs)
-- [Publishing or consuming a clock track](https://github.com/moq-dev/moq/tree/main/rs/moq-clock)
+- [Publishing or consuming a clock track](https://github.com/moq-dev/moq/blob/main/rs/moq-native/examples/clock.rs)

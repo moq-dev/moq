@@ -1,4 +1,4 @@
-"""Publish or subscribe to a clock track — the Python twin of `rs/moq-clock`.
+"""Publish or subscribe to a clock track. Python twin of `rs/moq-native/examples/clock.rs`.
 
 Each minute is a new group; each second is a frame inside that group. The first
 frame of every group is the "YYYY-MM-DD HH:MM:" prefix, followed by one "SS"

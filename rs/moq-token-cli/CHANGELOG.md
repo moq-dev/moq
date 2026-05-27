@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.27](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.26...moq-token-cli-v0.5.27) - 2026-05-24
+
+### Other
+
+- treat `-` as stdin/stdout, not a literal file path ([#1490](https://github.com/moq-dev/moq/pull/1490))
+
 ## [0.5.26](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.25...moq-token-cli-v0.5.26) - 2026-05-21
 
 ### Other

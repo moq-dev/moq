@@ -94,4 +94,4 @@ The demo uses an insecure HTTP fetch for local development only. In production, 
 Check out the full [development guide](/setup/dev) for more commands, or try publishing to the public relay:
 
 - [OBS](/bin/obs)
-- [Gstreamer](/bin/gstreamer)
+- [GStreamer](/bin/gstreamer)

@@ -28,6 +28,10 @@ export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID:?}.r2.cloudflarestorag
 export RCLONE_CONFIG_R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID:?}"
 export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY:?}"
 export RCLONE_CONFIG_R2_ACL=private
+# The R2 token has object read/write but not CreateBucket. rclone normally
+# probes the bucket on writes to a bucket-root key (e.g. moq.repo), which
+# surfaces as a 403 AccessDenied. Skip the probe; the bucket already exists.
+export RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true
 
 WORK=$(mktemp -d)
 GNUPGHOME=""
