@@ -51,6 +51,12 @@ impl Import {
 		Ok(())
 	}
 
+	/// Close the current group and open the next one at `sequence`.
+	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
+		self.track.seek(sequence)?;
+		Ok(())
+	}
+
 	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<crate::container::Timestamp>) -> crate::Result<()> {
 		let pts = self.pts(pts)?;
 

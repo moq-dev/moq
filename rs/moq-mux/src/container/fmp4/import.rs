@@ -63,6 +63,9 @@ struct Fmp4Track {
 
 	// The minimum duration between frames for this track.
 	min_duration: Option<Timestamp>,
+
+	// Sequence to use for the next group, set by `Import::seek`.
+	pending_sequence: Option<u64>,
 }
 
 impl Import {
@@ -176,6 +179,7 @@ impl Import {
 					jitter: None,
 					last_timestamp: None,
 					min_duration: None,
+					pending_sequence: None,
 				},
 			);
 		}
@@ -581,7 +585,10 @@ impl Import {
 				if let Some(mut prev) = track.group.take() {
 					prev.finish()?;
 				}
-				track.track.append_group()?
+				match track.pending_sequence.take() {
+					Some(sequence) => track.track.create_group(moq_net::Group { sequence })?,
+					None => track.track.append_group()?,
+				}
 			} else {
 				track.group.take().ok_or(Error::NoKeyframe)?
 			};
@@ -632,6 +639,20 @@ impl Import {
 				g.finish()?;
 			}
 			track.track.finish()?;
+		}
+		Ok(())
+	}
+
+	/// Close the current group on every track and open the next one at `sequence`.
+	///
+	/// Broadcast-wide: every track inside this fMP4 import advances together; per-track
+	/// control is intentionally not exposed.
+	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		for track in self.tracks.values_mut() {
+			if let Some(mut g) = track.group.take() {
+				g.finish()?;
+			}
+			track.pending_sequence = Some(sequence);
 		}
 		Ok(())
 	}

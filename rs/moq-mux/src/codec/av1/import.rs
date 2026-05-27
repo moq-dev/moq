@@ -388,6 +388,13 @@ impl Import {
 		Ok(())
 	}
 
+	/// Close the current group and open the next one at `sequence`.
+	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
+		track.seek(sequence)?;
+		Ok(())
+	}
+
 	pub fn is_initialized(&self) -> bool {
 		self.track.is_some()
 	}
