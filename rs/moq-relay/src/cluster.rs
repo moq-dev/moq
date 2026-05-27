@@ -285,7 +285,19 @@ impl Cluster {
 		let mut tasks = tokio::task::JoinSet::new();
 
 		for peer in &self.config.connect {
-			Self::spawn_dial(&mut tasks, &dialed, self.clone(), peer.clone(), token.clone(), true);
+			if dialed.contains(peer) {
+				continue;
+			}
+			let this = self.clone();
+			let token = token.clone();
+			let peer = peer.clone();
+			let peer_for_task = peer.clone();
+			let handle = tasks.spawn(async move {
+				if let Err(err) = this.run_remote(&peer_for_task, token).await {
+					tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
+				}
+			});
+			dialed.insert(peer, handle, true);
 		}
 
 		// Held in scope so the registration stays announced until `run` exits.
@@ -322,28 +334,6 @@ impl Cluster {
 
 		while tasks.join_next().await.is_some() {}
 		Ok(())
-	}
-
-	/// Spawn a dial loop for `peer` and record its abort handle in `dialed`.
-	/// No-op if `peer` is already tracked.
-	fn spawn_dial(
-		tasks: &mut tokio::task::JoinSet<()>,
-		dialed: &DialMap,
-		this: Self,
-		peer: String,
-		token: String,
-		is_static: bool,
-	) {
-		if dialed.contains(&peer) {
-			return;
-		}
-		let peer_for_task = peer.clone();
-		let handle = tasks.spawn(async move {
-			if let Err(err) = this.run_remote(&peer_for_task, token).await {
-				tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
-			}
-		});
-		dialed.insert(peer, handle, is_static);
 	}
 
 	/// Watch `.internal/origins/*` for peer registrations and dial each newly-
