@@ -27,21 +27,36 @@ echo "kt check: building moq-ffi for $HOST_TARGET..."
 cargo build --release --package moq-ffi \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
-TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps \
-    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
+    sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 
 case "$HOST_TARGET" in
-    *-apple-*) CDYLIB="$TARGET_BASE/release/libmoq_ffi.dylib"; OS_TAG="darwin";;
-    *-windows-*) CDYLIB="$TARGET_BASE/release/moq_ffi.dll"; OS_TAG="win32";;
-    *) CDYLIB="$TARGET_BASE/release/libmoq_ffi.so"; OS_TAG="linux";;
+    *-apple-*)
+        CDYLIB="$TARGET_BASE/release/libmoq_ffi.dylib"
+        OS_TAG="darwin"
+        ;;
+    *-windows-*)
+        CDYLIB="$TARGET_BASE/release/moq_ffi.dll"
+        OS_TAG="win32"
+        ;;
+    *)
+        CDYLIB="$TARGET_BASE/release/libmoq_ffi.so"
+        OS_TAG="linux"
+        ;;
 esac
 case "$HOST_TARGET" in
-    aarch64-*) ARCH_TAG="aarch64";;
-    x86_64-*) ARCH_TAG="x86-64";;
-    *) echo "kt check: unsupported host arch in $HOST_TARGET" >&2; exit 1;;
+    aarch64-*) ARCH_TAG="aarch64" ;;
+    x86_64-*) ARCH_TAG="x86-64" ;;
+    *)
+        echo "kt check: unsupported host arch in $HOST_TARGET" >&2
+        exit 1
+        ;;
 esac
 
-[[ -f "$CDYLIB" ]] || { echo "kt check: cdylib not found at $CDYLIB" >&2; exit 1; }
+[[ -f "$CDYLIB" ]] || {
+    echo "kt check: cdylib not found at $CDYLIB" >&2
+    exit 1
+}
 
 RES_DIR="$KT_DIR/moq/src/jvmMain/resources/${OS_TAG}-${ARCH_TAG}"
 mkdir -p "$RES_DIR"

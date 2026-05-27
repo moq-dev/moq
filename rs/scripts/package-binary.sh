@@ -20,20 +20,20 @@ OUTPUT_DIR="dist"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --crate|--target|--version|--output)
+        --crate | --target | --version | --output)
             if [[ $# -lt 2 ]]; then
                 echo "Error: $1 requires a value" >&2
                 exit 1
             fi
             case $1 in
-                --crate)   CRATE="$2" ;;
-                --target)  TARGET="$2" ;;
+                --crate) CRATE="$2" ;;
+                --target) TARGET="$2" ;;
                 --version) VERSION="$2" ;;
-                --output)  OUTPUT_DIR="$2" ;;
+                --output) OUTPUT_DIR="$2" ;;
             esac
             shift 2
             ;;
-        -h|--help)
+        -h | --help)
             echo "Usage: $0 --crate CRATE [--target TARGET] [--version VERSION] [--output DIR]"
             exit 0
             ;;

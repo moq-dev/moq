@@ -119,6 +119,7 @@ jobs:
           PLUGIN_DIR: /usr/lib/${{ matrix.deb-multiarch }}/gstreamer-1.0
         run: |
           mkdir -p dist
+          # shellcheck disable=SC2016  # envsubst varlist must be single-quoted
           envsubst '$VERSION $ARCH $PKG_NAME $PLUGIN_PATH $PLUGIN_DIR' \
             < packaging/moq-gst/nfpm.yaml > /tmp/nfpm.yaml
           nfpm pkg --packager deb --config /tmp/nfpm.yaml --target dist/
@@ -133,6 +134,7 @@ jobs:
           PLUGIN_DIR: /usr/lib64/gstreamer-1.0
         run: |
           mkdir -p dist
+          # shellcheck disable=SC2016  # envsubst varlist must be single-quoted
           envsubst '$VERSION $ARCH $PKG_NAME $PLUGIN_PATH $PLUGIN_DIR' \
             < packaging/moq-gst/nfpm.yaml > /tmp/nfpm.yaml
           nfpm pkg --packager rpm --config /tmp/nfpm.yaml --target dist/

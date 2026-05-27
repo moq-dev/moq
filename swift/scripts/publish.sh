@@ -25,17 +25,21 @@ set -euo pipefail
 # Expects the staged Swift package tarball under `swift-out/`, produced
 # by package.sh as `moq-ffi-${BUILD_VERSION}-swift.tar.gz`.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 DRY_RUN=false
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --dry-run) DRY_RUN=true; shift;;
-        -h|--help)
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        -h | --help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
-        *) echo "Unknown option: $1" >&2; exit 1;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
     esac
 done
 
@@ -51,7 +55,10 @@ MIRROR_TAG="${BUILD_VERSION}"
 SOURCE_TAG="moq-ffi-v${BUILD_VERSION}"
 
 TARBALL="swift-out/moq-ffi-${BUILD_VERSION}-swift.tar.gz"
-[[ -f "$TARBALL" ]] || { echo "Error: missing $TARBALL" >&2; exit 1; }
+[[ -f "$TARBALL" ]] || {
+    echo "Error: missing $TARBALL" >&2
+    exit 1
+}
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -76,7 +83,10 @@ fi
 # --- 3. Extract staged package ---
 tar -xzf "$TARBALL" -C "$WORK"
 STAGED="$WORK/moq-ffi-${BUILD_VERSION}-swift"
-[[ -d "$STAGED" ]] || { echo "Error: tarball did not contain $STAGED" >&2; exit 1; }
+[[ -d "$STAGED" ]] || {
+    echo "Error: tarball did not contain $STAGED" >&2
+    exit 1
+}
 
 # --- 4. Replace mirror tree with staged contents (preserving .git) ---
 rsync --archive --delete --exclude='.git' "$STAGED/" "$WORK/mirror/"

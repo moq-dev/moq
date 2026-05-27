@@ -16,6 +16,9 @@ mod go
 mod demo
 mod infra
 
+# GitHub Actions workflow linting.
+mod gh '.github'
+
 # Shortcuts to avoid `demo::` prefix.
 mod boy 'demo/boy'
 mod pub 'demo/pub'
@@ -38,10 +41,14 @@ install:
 	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-sweep cargo-semver-checks release-plz
 
 # Fast inner-loop checks. Runs JS, Rust, and Markdown lints.
+# Shell + workflow lints skip silently if their binaries aren't on $PATH;
+# `nix develop` provides them, and `just ci` requires them.
 check *args:
 	just js check
 	just rs check {{ args }}
 	bun remark . --quiet --frail
+	@if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then shfmt --diff $(shfmt -f .) && shellcheck $(shfmt -f .); fi
+	just gh check
 
 # Run every per-language `ci` with the diff vs BASE; each greps for its
 # own scope and skips when nothing relevant changed. Pass BASE="" to
@@ -83,13 +90,18 @@ ci BASE="":
 	nix flake check
 	bun install --frozen-lockfile
 	bun remark . --quiet --frail
+	shfmt --diff $(shfmt -f .)
+	shellcheck $(shfmt -f .)
+	just gh ci
 
 # Auto-fix linting/formatting issues across all languages.
+# shfmt skipped silently if not installed locally.
 fix:
 	just js fix
 	just rs fix
 	just py fix
 	bun remark . --quiet --output
+	@if command -v shfmt >/dev/null 2>&1; then shfmt --write $(shfmt -f .); fi
 
 # Run unit tests for every language.
 test *args:

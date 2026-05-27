@@ -129,6 +129,14 @@
           gzip
         ];
 
+        # Linters for shell scripts and GitHub Actions workflows. Required
+        # by `just ci`; `just check` / `just fix` skip silently if missing.
+        lintDeps = with pkgs; [
+          shellcheck
+          shfmt
+          actionlint
+        ];
+
         # Apply our overlay to get the package definitions
         overlayPkgs = pkgs.extend self.overlays.default;
       in
@@ -163,7 +171,7 @@
         };
 
         devShells.default = pkgs.mkShell {
-          packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps ++ packagingDeps;
+          packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps ++ packagingDeps ++ lintDeps;
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).
