@@ -661,12 +661,14 @@ impl TrackConsumer {
 
 	/// Cap the consumer at the specified sequence (inclusive), or remove the cap entirely.
 	///
+	/// Accepts a bare `u64` (cap), `Some(u64)`, or `None` (uncap).
+	///
 	/// Affects [`Self::next_group`] only: groups beyond the cap stay in the producer's
 	/// cache rather than being skipped past, so a later call to [`Self::end_at`] with a
 	/// higher value (or `None`) makes them available again. Lowering the cap below the
 	/// consumer's current cursor parks the consumer until the cap is raised.
-	pub fn end_at(&mut self, sequence: Option<u64>) {
-		self.end_sequence = sequence;
+	pub fn end_at(&mut self, sequence: impl Into<Option<u64>>) {
+		self.end_sequence = sequence.into();
 	}
 
 	/// Return the latest sequence number in the track.
@@ -1069,7 +1071,7 @@ mod test {
 			producer.create_group(Group { sequence: s }).unwrap();
 		}
 
-		consumer.end_at(Some(2));
+		consumer.end_at(2);
 
 		// Groups 0, 1, 2 are within the cap.
 		assert_eq!(
@@ -1101,7 +1103,7 @@ mod test {
 			producer.create_group(Group { sequence: s }).unwrap();
 		}
 
-		consumer.end_at(Some(1));
+		consumer.end_at(1);
 		assert_eq!(
 			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			0
@@ -1113,7 +1115,7 @@ mod test {
 		assert!(consumer.next_group().now_or_never().is_none(), "capped at 1");
 
 		// Raise the cap; previously-blocked cached groups become available again.
-		consumer.end_at(Some(4));
+		consumer.end_at(4);
 		assert_eq!(
 			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			2
@@ -1161,7 +1163,7 @@ mod test {
 		);
 
 		// Lower the cap below the cursor. New groups beyond the cap are blocked.
-		consumer.end_at(Some(1));
+		consumer.end_at(1);
 		producer.create_group(Group { sequence: 3 }).unwrap();
 		producer.create_group(Group { sequence: 4 }).unwrap();
 		assert!(
@@ -1186,7 +1188,7 @@ mod test {
 		let mut producer = Track::new("test").produce();
 		let mut consumer = producer.consume();
 
-		consumer.end_at(Some(5));
+		consumer.end_at(5);
 
 		// Out-of-order arrivals all within the cap.
 		producer.create_group(Group { sequence: 2 }).unwrap();
@@ -1217,7 +1219,7 @@ mod test {
 		assert!(consumer.next_group().now_or_never().is_none());
 
 		// Raise the cap; cached seq 8 is finally served.
-		consumer.end_at(Some(10));
+		consumer.end_at(10);
 		assert_eq!(
 			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			8
