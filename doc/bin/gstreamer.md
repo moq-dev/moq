@@ -40,6 +40,16 @@ If you're using Nix, GStreamer is included in the dev shell automatically. Other
 - **Debian/Ubuntu:** `apt install libgstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad`
 - **Arch:** `pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad`
 
+## Quick start with Nix
+
+If you have Nix installed, you don't need to build anything:
+
+```bash
+nix shell github:moq-dev/moq#moq-gst --command gst-inspect-1.0 moq
+```
+
+The `moq-gst` flake output bundles the plugin with wrappers around the standard `gst-inspect-1.0` / `gst-launch-1.0` that preload moq + the usual `gst-plugins-{base,good,bad}` set, so no `GST_PLUGIN_PATH_1_0` setup is needed.
+
 ## Building
 
 ```bash

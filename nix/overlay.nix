@@ -109,7 +109,7 @@ in
       }
     );
 
-  moq-gst = craneLib.buildPackage (
+  moq-gst-plugin = craneLib.buildPackage (
     crateInfo ../rs/moq-gst/Cargo.toml
     // {
       src = craneLib.cleanCargoSource ../.;
@@ -122,16 +122,20 @@ in
         gst_all_1.gst-plugins-base
       ];
 
-      # moq-gst is a cdylib GStreamer plugin. Pick up the produced shared
-      # library; crane's default install phase only handles binaries.
+      # moq-gst is a cdylib GStreamer plugin. Install into lib/gstreamer-1.0
+      # so gst_all_1.gstreamer's nixpkgs setup-hook (which scans every input
+      # for that subdir) appends us to GST_PLUGIN_SYSTEM_PATH_1_0. Then
+      #   nix shell .#moq-gst .#gst_all_1.gstreamer --command gst-inspect-1.0 moq
+      # discovers moqsink/moqsrc without any env-var fiddling. Crane's
+      # default install phase only handles binaries, so we copy by hand.
       installPhase = ''
         runHook preInstall
 
-        mkdir -p $out/lib
+        mkdir -p $out/lib/gstreamer-1.0
         if [ -f target/release/libgstmoq.dylib ]; then
-          cp target/release/libgstmoq.dylib $out/lib/
+          cp target/release/libgstmoq.dylib $out/lib/gstreamer-1.0/
         else
-          cp target/release/libgstmoq.so $out/lib/
+          cp target/release/libgstmoq.so $out/lib/gstreamer-1.0/
         fi
 
         runHook postInstall
@@ -146,7 +150,7 @@ in
       # portability separately. The `[ -f ]` guard skips crane's
       # deps-only stage, whose $out has no plugin.
       postFixup = final.lib.optionalString final.stdenv.isDarwin ''
-        dylib="$out/lib/libgstmoq.dylib"
+        dylib="$out/lib/gstreamer-1.0/libgstmoq.dylib"
         if [ -f "$dylib" ]; then
           install_name_tool -id "@rpath/libgstmoq.dylib" "$dylib"
 
@@ -178,4 +182,38 @@ in
       '';
     }
   );
+
+  # User-facing flake output. Bundles the plugin with wrapped gstreamer
+  # tools so a single `nix shell .#moq-gst` gives you gst-inspect-1.0 /
+  # gst-launch-1.0 that already know about the moq plugin plus the usual
+  # base/good/bad plugin set, matching the "install a plugin and the
+  # standard tools find it" UX. `nix shell` (unlike nix-shell / nix
+  # develop) doesn't run nixpkgs setup-hooks, so a bare lib/gstreamer-1.0
+  # directory in $out isn't enough on its own.
+  moq-gst =
+    let
+      pluginPaths = final.lib.concatStringsSep ":" [
+        "${final.moq-gst-plugin}/lib/gstreamer-1.0"
+        # gstreamer.out (vs .bin) holds the core plugins (coreelements,
+        # coretracers): identity, queue, fakesink, capsfilter, etc.
+        "${final.gst_all_1.gstreamer.out}/lib/gstreamer-1.0"
+        "${final.gst_all_1.gst-plugins-base}/lib/gstreamer-1.0"
+        "${final.gst_all_1.gst-plugins-good}/lib/gstreamer-1.0"
+        "${final.gst_all_1.gst-plugins-bad}/lib/gstreamer-1.0"
+      ];
+    in
+    final.symlinkJoin {
+      name = "moq-gst-${final.moq-gst-plugin.version}";
+      paths = [ final.moq-gst-plugin ];
+      nativeBuildInputs = [ final.makeWrapper ];
+      postBuild = ''
+        rm -rf $out/bin
+        mkdir -p $out/bin
+        for tool in gst-inspect-1.0 gst-launch-1.0; do
+          makeWrapper "${final.gst_all_1.gstreamer.bin}/bin/$tool" "$out/bin/$tool" \
+            --suffix GST_PLUGIN_SYSTEM_PATH_1_0 : "${pluginPaths}"
+        done
+      '';
+      meta.mainProgram = "gst-inspect-1.0";
+    };
 }

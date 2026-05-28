@@ -31,9 +31,20 @@ sudo dnf config-manager --add-repo https://rpm.moq.dev/moq.repo
 sudo dnf install gstreamer1-moq
 ```
 
+### Nix (any platform with Nix installed)
+
+```bash
+nix shell github:moq-dev/moq#moq-gst --command gst-inspect-1.0 moq
+nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
+  moqsrc url="https://relay.moq.dev/anon" broadcast="bbb" \
+  ! decodebin3 ! videoconvert ! autovideosink
+```
+
+The `moq-gst` flake output bundles the plugin with wrappers around `gst-inspect-1.0` and `gst-launch-1.0` that preload moq + the standard `gst-plugins-{base,good,bad}` set, so no `GST_PLUGIN_PATH` setup is needed.
+
 ### Manual install (tarball)
 
-Download the tarball for your platform from the [releases page](https://github.com/moq-dev/moq/releases?q=moq-gst) and extract `lib/libgstmoq.{so,dylib}` into a directory GStreamer scans for plugins:
+Download the tarball for your platform from the [releases page](https://github.com/moq-dev/moq/releases?q=moq-gst) and copy `lib/gstreamer-1.0/libgstmoq.{so,dylib}` into a directory GStreamer scans for plugins:
 
 - **Linux**: `~/.local/share/gstreamer-1.0/plugins/` (per-user) or `/usr/lib/x86_64-linux-gnu/gstreamer-1.0/` (system-wide). Alternatively, `export GST_PLUGIN_PATH=/path/to/dir`.
 - **macOS**: `~/Library/Application Support/GStreamer/1.0/plugins/`. Alternatively, `export GST_PLUGIN_PATH=/path/to/dir`.
@@ -75,5 +86,5 @@ For a reproducible build matching the release artifacts (Linux + macOS):
 
 ```bash
 nix build .#moq-gst
-ls result/lib/
+ls result/lib/gstreamer-1.0/
 ```

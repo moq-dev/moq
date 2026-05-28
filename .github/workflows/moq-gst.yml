@@ -79,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           tar -xzf "dist/moq-gst-${VERSION}-${TARGET}.tar.gz" -C dist/
-          ./rs/moq-gst/smoke.sh "dist/moq-gst-${VERSION}-${TARGET}/lib"
+          ./rs/moq-gst/smoke.sh "dist/moq-gst-${VERSION}-${TARGET}/lib/gstreamer-1.0"
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
