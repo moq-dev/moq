@@ -630,3 +630,153 @@ async fn broadcast_websocket_fallback() {
 		.expect("server task panicked")
 		.expect("server task failed");
 }
+
+// ── ALPN regression guards ──────────────────────────────────────────
+
+/// The newest moq-lite version both sides advertise by default.
+///
+/// Bump this whenever [`moq_net::Versions::all`] gains a newer Lite variant
+/// so the regression tests below keep tracking "the newest", not a frozen value.
+const NEWEST_LITE: &str = "moq-lite-04";
+
+/// Regression guard for the WebSocket ALPN path. Lite02 over WebSocket means
+/// the qmux subprotocol negotiation produced a bare `moql` (or no match)
+/// instead of `moq-lite-04`, which falls through to legacy SETUP negotiation
+/// and picks Lite02. This test fails immediately if that happens.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_websocket_uses_newest_version() {
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut track = broadcast
+		.create_track(Track::new("video"))
+		.expect("failed to create track");
+	let mut group = track.append_group().expect("failed to append group");
+	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.finish().expect("failed to finish group");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+
+	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+		.await
+		.expect("failed to bind WebSocket listener");
+	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
+
+	let mut server = server_config
+		.init()
+		.expect("failed to init server")
+		.with_websocket(Some(ws_listener));
+
+	let sub_origin = Origin::random().produce();
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.websocket.delay = None;
+
+	let client = client_config.init().expect("failed to init client");
+	let url: url::Url = format!("ws://localhost:{}", ws_addr.port()).parse().unwrap();
+
+	let expected_version: moq_net::Version = NEWEST_LITE.parse().expect("invalid version");
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		assert_eq!(request.transport(), "websocket");
+		let session = request.with_publish(pub_origin.consume()).ok().await?;
+		assert_eq!(session.version(), expected_version, "server negotiated stale version");
+		let _broadcast = broadcast;
+		let _track = track;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_consume(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	assert_eq!(session.version(), expected_version, "client negotiated stale version");
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
+/// Regression guard for the QUIC vs WebSocket race. With both transports
+/// reachable at the same URL, QUIC must win, since it's lower-latency and
+/// has direct ALPN negotiation. A WebSocket win here means QUIC silently
+/// regressed (and would also tend to drag the version down to Lite02 on
+/// older relays). We bind WebSocket TCP and QUIC UDP to the same port,
+/// then disable the head start so the race is genuine.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_race_quic_wins() {
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut track = broadcast
+		.create_track(Track::new("video"))
+		.expect("failed to create track");
+	let mut group = track.append_group().expect("failed to append group");
+	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.finish().expect("failed to finish group");
+
+	// Bind WebSocket TCP first to pick a random port, then bind QUIC UDP to
+	// the same port. UDP and TCP live in separate kernel namespaces, so this
+	// works on every supported platform.
+	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+		.await
+		.expect("failed to bind WebSocket listener");
+	let port = ws_listener.local_addr().expect("failed to get ws addr").port();
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some(format!("[::]:{port}"));
+	server_config.tls.generate = vec!["localhost".into()];
+
+	let mut server = server_config
+		.init()
+		.expect("failed to init server")
+		.with_websocket(Some(ws_listener));
+
+	let sub_origin = Origin::random().produce();
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	// Zero head start: QUIC has to win on its own merit, not by penalising WS.
+	client_config.websocket.delay = None;
+
+	let client = client_config.init().expect("failed to init client");
+	let url: url::Url = format!("https://localhost:{port}").parse().unwrap();
+
+	let expected_version: moq_net::Version = NEWEST_LITE.parse().expect("invalid version");
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		assert_eq!(
+			request.transport(),
+			"quic",
+			"QUIC lost the race to WebSocket with both reachable",
+		);
+		let session = request.with_publish(pub_origin.consume()).ok().await?;
+		assert_eq!(session.version(), expected_version, "server negotiated stale version");
+		let _broadcast = broadcast;
+		let _track = track;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_consume(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	assert_eq!(session.version(), expected_version, "client negotiated stale version");
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
