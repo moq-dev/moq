@@ -1,9 +1,10 @@
 //! HTTP-client side: dial a remote WHIP/WHEP endpoint over an SDP exchange.
 //!
 //! Counterpart to [`crate::server`]. Whereas the server accepts POSTed
-//! offers, the client *mints* the offer with [`Rtc::sdp_api`] and POSTs it
-//! to the remote URL. Once the answer arrives the same [`Session`] driver
-//! takes over, so the per-codec bridges and UDP socket loop are shared.
+//! offers, the client mints the offer with `str0m::Rtc::sdp_api` and POSTs
+//! it to the remote URL. Once the answer arrives the same
+//! [`crate::session::Session`] driver takes over, so the per-codec bridges
+//! and UDP socket loop are shared.
 
 pub mod whep;
 pub mod whip;

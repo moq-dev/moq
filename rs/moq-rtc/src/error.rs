@@ -20,6 +20,9 @@ pub enum Error {
 	#[error("moq error: {0}")]
 	Moq(#[from] moq_net::Error),
 
+	#[error("mux error: {0}")]
+	Mux(#[from] moq_mux::Error),
+
 	#[error("rtc error: {0}")]
 	Rtc(#[from] str0m::RtcError),
 

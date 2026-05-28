@@ -15,9 +15,8 @@ pub struct Bridge {
 
 impl Bridge {
 	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::hang::Producer) -> Result<Self> {
-		let import = moq_mux::codec::h264::Import::new(broadcast, catalog)
-			.with_mode(moq_mux::codec::h264::Mode::Avc3)
-			.map_err(crate::Error::Other)?;
+		let import =
+			moq_mux::codec::h264::Import::new(broadcast, catalog).with_mode(moq_mux::codec::h264::Mode::Avc3)?;
 		Ok(Self { import })
 	}
 }
@@ -27,9 +26,7 @@ impl codec::Bridge for Bridge {
 		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
 		let mut buf = BytesMut::from(frame.payload.as_ref());
-		self.import
-			.decode_frame(&mut buf, Some(pts))
-			.map_err(crate::Error::Other)?;
+		self.import.decode_frame(&mut buf, Some(pts))?;
 		Ok(())
 	}
 }

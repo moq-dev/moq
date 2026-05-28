@@ -6,7 +6,7 @@
 //!
 //! | | RTP-in (ingest into MoQ) | RTP-out (egress from MoQ) |
 //! |---|---|---|
-//! | HTTP server | [`server::publish_router`] (WHIP server) | [`server::subscribe_router`] (WHEP server, 501) |
+//! | HTTP server | [`Server::publish_router`] (WHIP server) | [`Server::subscribe_router`] (WHEP server, 501) |
 //! | HTTP client | [`Client::subscribe`] (WHEP client) | [`Client::publish`] (WHIP client, 501) |
 //!
 //! The two HTTP-client paths and the two HTTP-server paths share a single

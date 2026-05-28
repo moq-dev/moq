@@ -3,8 +3,9 @@
 //!
 //! Mints an SDP offer with `recvonly` audio and video, POSTs it to the
 //! WHEP resource URL with `Content-Type: application/sdp`, parses the
-//! returned answer, then hands the resulting [`Rtc`] to a [`Session`] that
-//! reuses [`IngestSink`] (the same sink the WHIP server uses).
+//! returned answer, then hands the resulting `str0m::Rtc` to a
+//! [`crate::session::Session`] that reuses [`IngestSink`] (the same sink the
+//! WHIP server uses).
 
 use std::time::Instant;
 

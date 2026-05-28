@@ -20,7 +20,7 @@ impl Bridge {
 			sample_rate,
 			channel_count,
 		};
-		let import = moq_mux::codec::opus::Import::new(broadcast, catalog, config).map_err(crate::Error::Other)?;
+		let import = moq_mux::codec::opus::Import::new(broadcast, catalog, config)?;
 		Ok(Self { import })
 	}
 }
@@ -30,9 +30,7 @@ impl codec::Bridge for Bridge {
 		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
 		let mut payload = frame.payload;
-		self.import
-			.decode(&mut payload, Some(pts))
-			.map_err(crate::Error::Other)?;
+		self.import.decode(&mut payload, Some(pts))?;
 		Ok(())
 	}
 }

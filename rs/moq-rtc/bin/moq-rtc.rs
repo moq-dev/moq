@@ -209,10 +209,12 @@ async fn run_client(
 		}
 		Direction::Publish => {
 			// WHIP client: read the local broadcast, push as RTP to remote.
+			// Once the per-codec re-packetizer lands, this should poll
+			// `subscriber.announced()` to await the broadcast rather than
+			// erroring on first-miss.
 			let broadcast = subscriber
-				.announced_broadcast(broadcast_name)
-				.await
-				.ok_or_else(|| anyhow::anyhow!("broadcast {} never announced", broadcast_name))?;
+				.get_broadcast(broadcast_name)
+				.ok_or_else(|| anyhow::anyhow!("broadcast {} not announced", broadcast_name))?;
 			client.publish(url, broadcast).await?;
 		}
 	}
