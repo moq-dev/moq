@@ -219,10 +219,11 @@ export class Subscriber {
 				`subscribe error: id=${id} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
 			);
 			// If the stream eventually opens after the timeout, abort it so we
-			// don't leak it. swallow the setup rejection either way.
+			// don't leak it. Cover both branches: setup may resolve late, or it
+			// may reject (e.g. encode/decode failure) after the stream is open.
 			setup.then(
 				() => opened?.abort(e),
-				() => void 0,
+				() => opened?.abort(e),
 			);
 			return;
 		}

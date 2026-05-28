@@ -266,7 +266,9 @@ export class Subscriber {
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
 			);
 			// If setup eventually settles after the timeout, abort the stream
-			// and drop any registration so we don't leak.
+			// and drop any registration so we don't leak. Cover both branches:
+			// setup may resolve late, or reject (e.g. SUBSCRIBE error) after the
+			// stream is already open.
 			setup.then(
 				() => {
 					if (registeredAlias !== undefined) this.#subscribes.delete(registeredAlias);
@@ -274,6 +276,7 @@ export class Subscriber {
 				},
 				() => {
 					if (registeredAlias !== undefined) this.#subscribes.delete(registeredAlias);
+					opened?.abort(e);
 				},
 			);
 			return;
