@@ -29,26 +29,35 @@ Android uses JNI (`jniLibs/`), desktop JVM uses JNA (resource-classpath layout).
 ## Connect
 
 ```kotlin
-import dev.moq.Moq
+import uniffi.moq.MoqClient
+import uniffi.moq.MoqOriginProducer
 
-val (session, origin) = Moq.connect("https://relay.example.com")
+// Wire an origin as both publish source and consume sink for the
+// typical full-duplex client. Set just one side for a subscribe-only
+// or publish-only client.
+val origin = MoqOriginProducer()
+val client = MoqClient()
+client.setPublish(origin)
+client.setConsume(origin)
+
+val session = client.connect("https://relay.example.com")
 ```
 
-`Moq.connect` is a thin wrapper over `MoqClient().connectDuplex(url)`, which wires a fresh `MoqOriginProducer` as both publish source and consume sink (the typical full-duplex client). For custom TLS / bind options, configure the client first:
+For development against a relay with a self-signed certificate, configure the client before connecting:
 
 ```kotlin
-val client = Moq.client()
+val client = MoqClient()
 client.setTlsDisableVerify(true)
 client.setBind("127.0.0.1:0")
-val (session, origin) = client.connectDuplex("https://localhost:4443")
+client.setPublish(origin)
+client.setConsume(origin)
+val session = client.connect("https://localhost:4443")
 ```
-
-For a non-duplex topology, call `setPublish` / `setConsume` yourself and use `client.connect(url)` (returns just the session).
 
 When you're done, signal graceful shutdown to the peer:
 
 ```kotlin
-session.shutdown()  // sends close code 0
+session.shutdown()  // alias for cancel(0u)
 ```
 
 ## Subscribe

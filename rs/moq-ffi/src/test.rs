@@ -462,20 +462,6 @@ async fn server_client_roundtrip() {
 }
 
 #[tokio::test]
-async fn connect_duplex_errors_on_unreachable() {
-	// Smoke test that the duplex helper wires correctly and surfaces
-	// connection failures as `Connect` instead of panicking. Port 1 is
-	// reliably unreachable on localhost without root.
-	let client = MoqClient::new();
-	let res = client.connect_duplex("https://127.0.0.1:1/test".into()).await;
-	let err = res.err().expect("connect should fail");
-	assert!(
-		matches!(err, crate::error::MoqError::Connect(_)),
-		"expected Connect error, got: {err:?}"
-	);
-}
-
-#[tokio::test]
 async fn server_set_bind_validates() {
 	let server = MoqServer::new();
 	assert!(server.set_bind("127.0.0.1:0".into()).is_ok());

@@ -7,7 +7,7 @@ description: Swift Package Manager target for Media over QUIC
 
 The Swift Package Manager target for [Media over QUIC](/).
 
-This is an ergonomic wrapper around the UniFFI-generated `MoqFFI` types, providing `AsyncSequence` adapters, Swift-friendly errors, and a `Moq.connect` helper that returns both a session and the origin it was wired against.
+This is an ergonomic wrapper around the UniFFI-generated `MoqFFI` types, providing `AsyncSequence` adapters and Swift-friendly errors.
 
 ## Install
 
@@ -33,25 +33,32 @@ Supported platforms: iOS 15+, iPadOS 15+, macOS 12+. The package ships an XCFram
 ```swift
 import Moq
 
-let (session, origin) = try await Moq.connect(url: "https://relay.example.com")
+// Wire an origin as both publish source and consume sink for the
+// typical full-duplex client. Set just one side for a subscribe-only
+// or publish-only client.
+let origin = MoqOriginProducer()
+let client = MoqClient()
+client.setPublish(origin: origin)
+client.setConsume(origin: origin)
+
+let session = try await client.connect(url: "https://relay.example.com")
 ```
 
-`Moq.connect(url:)` is a thin wrapper over `MoqClient().connectDuplex(url:)`, which wires a fresh `MoqOriginProducer` as both publish source and consume sink (the typical full-duplex client). For custom TLS / bind options, configure the client first:
+For development against a relay with a self-signed certificate, configure the client before connecting:
 
 ```swift
-let client = Moq.client()
+let client = MoqClient()
 client.setTlsDisableVerify(disable: true)
 try client.setBind(addr: "127.0.0.1:0")
-let cs = try await client.connectDuplex(url: "https://localhost:4443")
-let (session, origin) = (cs.session, cs.origin)
+client.setPublish(origin: origin)
+client.setConsume(origin: origin)
+let session = try await client.connect(url: "https://localhost:4443")
 ```
-
-For a non-duplex topology, call `setPublish` / `setConsume` yourself and use `client.connect(url:)` (returns just the session).
 
 When you're done, signal graceful shutdown to the peer:
 
 ```swift
-session.shutdown()  // sends close code 0
+session.shutdown()  // alias for cancel(code: 0)
 ```
 
 ## Subscribe

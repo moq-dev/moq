@@ -38,8 +38,17 @@ Published to Maven Central via [release-kt.yml](https://github.com/moq-dev/moq/b
 ```kotlin
 import dev.moq.*
 import kotlinx.coroutines.flow.collect
+import uniffi.moq.MoqClient
+import uniffi.moq.MoqOriginProducer
 
-val (session, origin) = Moq.connect("https://relay.example.com")
+// Wire an origin as both publish source and consume sink. Set just one
+// side for a subscribe-only or publish-only client.
+val origin = MoqOriginProducer()
+val client = MoqClient()
+client.setPublish(origin)
+client.setConsume(origin)
+
+val session = client.connect("https://relay.example.com")
 
 origin.use {
     val consumer = origin.consume()
@@ -55,8 +64,6 @@ origin.use {
 
 session.shutdown()
 ```
-
-`Moq.connect` is a thin wrapper over `MoqClient().connectDuplex(url)`, which wires a fresh `MoqOriginProducer` as both publish source and consume sink (the typical full-duplex client). For custom TLS / bind options, build a client via `Moq.client()`, configure it, and call `connectDuplex(url)` on it.
 
 Cancelling the surrounding coroutine scope propagates through to the native consumer's `cancel()` via the wrapper's `onCompletion` hook.
 
