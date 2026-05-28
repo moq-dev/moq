@@ -12,12 +12,35 @@
 //!
 //! Each frame is a JSON object mapping broadcast path to a cumulative
 //! counter snapshot. Tier, role, and node are implied by the track and
-//! broadcast paths, so they aren't repeated inside the frame. A broadcast
-//! appears in the frame for a given (tier, role) while it has at least one
-//! active subscription, and lingers for `retention_ticks` ticks after the last
-//! one drops so short disconnects don't immediately erase the entry. A
-//! downstream aggregator computes rates from successive cumulative snapshots
-//! and slices the data however a dashboard wants.
+//! broadcast paths, so they aren't repeated inside the frame. An entry
+//! appears in the frame for a given `(tier, role)` whenever its snapshot
+//! differs from what we last emitted; it then lingers for `retention_ticks`
+//! ticks past the most recent change so short disconnects don't immediately
+//! erase it. A downstream aggregator computes rates from successive
+//! cumulative snapshots and slices the data however a dashboard wants.
+//!
+//! Per-snapshot semantics:
+//!
+//! * `announced` / `announced_closed`: cumulative count of broadcast
+//!   announce/unannounce events on this `(tier, role)`. Bumped on every
+//!   `publisher()` / `subscriber()` guard creation and drop.
+//! * `broadcasts` / `broadcasts_closed`: derived by the snapshot task from
+//!   subscription transitions. `broadcasts` bumps each tick the slot
+//!   transitions from "no active subs" to "one or more active subs" (or
+//!   when subs flickered through 0 within a tick). `broadcasts_closed`
+//!   bumps on the reverse transition. Use these for "active broadcasts"
+//!   billing/UI metrics; use `announced` if you want all broadcasts ever
+//!   seen.
+//! * `subscriptions` / `subscriptions_closed`: cumulative count of
+//!   track-level subscription guards opened/dropped.
+//! * `bytes` / `frames` / `groups`: cumulative payload counters bumped from
+//!   the lite session loops.
+//!
+//! Counters are strictly monotonic (only `fetch_add`); a counter going
+//! backwards across snapshots means the underlying entry was garbage
+//! collected and re-created. Downstream consumers should treat decreases
+//! as a fresh session segment, summing across resets when computing
+//! lifetime totals.
 //!
 //! A caller hands each session a tier-scoped [`StatsHandle`] (built from the
 //! single shared [`Stats`] via [`Stats::tier`]) which determines which counter
@@ -50,6 +73,16 @@
 //! changed. New subscribers still pick up a baseline immediately because
 //! track-latest semantics retain the most recent emitted frame.
 //!
+//! # Snapshot atomicity
+//!
+//! Each [`Counters`] snapshot reads `*_closed` atomics before their open
+//! counterparts. Every increment to a closed counter is preceded in real
+//! time by a matching increment to its open counter, so reading closed
+//! first guarantees `open >= closed` in the observed snapshot even under
+//! concurrent bumps. The cost is a slight upward bias on the open counts
+//! when a bump lands between the two loads, which never produces a
+//! logically impossible (`closed > open`) snapshot for downstream.
+//!
 //! # Cycles
 //!
 //! Calling [`StatsHandle::broadcast`] for a path under the configured
@@ -71,12 +104,18 @@ use web_async::{Lock, spawn};
 
 use crate::{AsPath, Broadcast, Origin, OriginProducer, Path, PathOwned, Track, TrackProducer};
 
-/// Cumulative atomic counters for a single (tier, role) on a broadcast.
+/// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
+///
+/// Only `announced` / `announced_closed` and `subscriptions` /
+/// `subscriptions_closed` (and the payload counters) are bumped from the
+/// hot bump path. `broadcasts` / `broadcasts_closed` are not stored here;
+/// they're derived in the snapshot task from observed subscription
+/// transitions.
 #[derive(Default, Debug)]
 #[non_exhaustive]
 pub struct Counters {
-	pub broadcasts: AtomicU64,
-	pub broadcasts_closed: AtomicU64,
+	pub announced: AtomicU64,
+	pub announced_closed: AtomicU64,
 	pub subscriptions: AtomicU64,
 	pub subscriptions_closed: AtomicU64,
 	pub bytes: AtomicU64,
@@ -85,21 +124,41 @@ pub struct Counters {
 }
 
 impl Counters {
-	fn snapshot(&self) -> Snapshot {
-		Snapshot {
-			broadcasts: self.broadcasts.load(Ordering::Relaxed),
-			broadcasts_closed: self.broadcasts_closed.load(Ordering::Relaxed),
-			subscriptions: self.subscriptions.load(Ordering::Relaxed),
-			subscriptions_closed: self.subscriptions_closed.load(Ordering::Relaxed),
-			bytes: self.bytes.load(Ordering::Relaxed),
-			frames: self.frames.load(Ordering::Relaxed),
-			groups: self.groups.load(Ordering::Relaxed),
+	/// Read all atomics into a `RawCounts`. Closed counters are read before
+	/// their open counterparts so the snapshot always satisfies
+	/// `open >= closed`; see the module-level "Snapshot atomicity" note.
+	fn snapshot(&self) -> RawCounts {
+		let announced_closed = self.announced_closed.load(Ordering::Relaxed);
+		let subscriptions_closed = self.subscriptions_closed.load(Ordering::Relaxed);
+		let announced = self.announced.load(Ordering::Relaxed);
+		let subscriptions = self.subscriptions.load(Ordering::Relaxed);
+		let bytes = self.bytes.load(Ordering::Relaxed);
+		let frames = self.frames.load(Ordering::Relaxed);
+		let groups = self.groups.load(Ordering::Relaxed);
+		RawCounts {
+			announced,
+			announced_closed,
+			subscriptions,
+			subscriptions_closed,
+			bytes,
+			frames,
+			groups,
 		}
 	}
+}
 
-	fn active(&self) -> bool {
-		self.subscriptions.load(Ordering::Relaxed) > self.subscriptions_closed.load(Ordering::Relaxed)
-	}
+/// Raw counter readout, before the snapshot task layers on derived
+/// `broadcasts` / `broadcasts_closed`. Intermediate type that doesn't
+/// escape this module.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RawCounts {
+	announced: u64,
+	announced_closed: u64,
+	subscriptions: u64,
+	subscriptions_closed: u64,
+	bytes: u64,
+	frames: u64,
+	groups: u64,
 }
 
 /// Distinguishes traffic classes so a single [`Stats`] can record customer-facing
@@ -154,27 +213,43 @@ struct StatsInner {
 	entries: Lock<HashMap<PathOwned, Arc<BroadcastEntry>>>,
 	task: Lock<Option<()>>,
 	/// Monotonic tick counter; `0` is a sentinel meaning "no tick has run yet"
-	/// so a slot's `last_active_tick == 0` reliably means "never observed
-	/// active". Counts up from `1`.
+	/// so a [`SlotState::last_change_tick == 0`] reliably means "never
+	/// observed". Counts up from `1`.
 	tick_counter: AtomicU64,
 }
 
 struct BroadcastEntry {
-	path: PathOwned,
 	slots: [Counters; NUM_SLOTS],
-	/// Tick index of the most recent sampling tick that observed an active
-	/// subscription in this slot. `0` means never observed.
-	last_active_tick: [AtomicU64; NUM_SLOTS],
 }
 
 impl BroadcastEntry {
-	fn new(path: PathOwned) -> Self {
+	fn new() -> Self {
 		Self {
-			path,
 			slots: Default::default(),
-			last_active_tick: Default::default(),
 		}
 	}
+}
+
+/// Per-(entry, slot) state owned by the snapshot task. The snapshot task
+/// is single-threaded so this needs no atomics; we keep one of these per
+/// `(path, slot)` in a task-local map.
+#[derive(Default, Clone)]
+struct SlotState {
+	/// Cumulative count of `inactive -> active` subscription transitions on
+	/// this slot since the snapshot task started. Resets to 0 when the
+	/// entry is GC'd from the local map (consumers must treat decreases as
+	/// a session restart).
+	derived_broadcasts: u64,
+	/// Cumulative count of `active -> inactive` transitions.
+	derived_broadcasts_closed: u64,
+	/// Last `Snapshot` we wrote to the frame for this slot, used to detect
+	/// changes that warrant re-emission.
+	prev_emitted: Option<Snapshot>,
+	/// Tick index of the most recent change in `prev_emitted`. `0` means
+	/// no change has been observed yet. Drives both the per-slot frame
+	/// inclusion (within `retention_ticks` of this) and the global entry
+	/// GC.
+	last_change_tick: u64,
 }
 
 impl Stats {
@@ -266,8 +341,8 @@ impl Stats {
 		let arc = {
 			let mut entries = self.inner.entries.lock();
 			entries
-				.entry(owned.clone())
-				.or_insert_with(|| Arc::new(BroadcastEntry::new(owned)))
+				.entry(owned)
+				.or_insert_with(|| Arc::new(BroadcastEntry::new()))
 				.clone()
 		};
 		ensure_task(self);
@@ -345,11 +420,13 @@ impl BroadcastStats {
 	}
 
 	/// Open a broadcast-lifetime guard for the publisher (egress) role.
-	/// Bumps `broadcasts` on construction and `broadcasts_closed` on drop.
+	/// Bumps `announced` on construction and `announced_closed` on drop.
+	/// (The emitted `broadcasts` counter is derived in the snapshot task
+	/// from subscription activity; see the module docs.)
 	pub fn publisher(&self) -> PublisherStats {
 		if let Some(entry) = &self.entry {
 			entry.slots[slot_index(self.tier, Role::Publisher)]
-				.broadcasts
+				.announced
 				.fetch_add(1, Ordering::Relaxed);
 		}
 		PublisherStats {
@@ -359,11 +436,13 @@ impl BroadcastStats {
 	}
 
 	/// Open a broadcast-lifetime guard for the subscriber (ingress) role.
-	/// Bumps `broadcasts` on construction and `broadcasts_closed` on drop.
+	/// Bumps `announced` on construction and `announced_closed` on drop.
+	/// (The emitted `broadcasts` counter is derived in the snapshot task
+	/// from subscription activity; see the module docs.)
 	pub fn subscriber(&self) -> SubscriberStats {
 		if let Some(entry) = &self.entry {
 			entry.slots[slot_index(self.tier, Role::Subscriber)]
-				.broadcasts
+				.announced
 				.fetch_add(1, Ordering::Relaxed);
 		}
 		SubscriberStats {
@@ -372,10 +451,11 @@ impl BroadcastStats {
 		}
 	}
 
-	/// Open a publisher-track guard without bumping the broadcast counters.
+	/// Open a publisher-track guard.
 	///
-	/// `_name` is currently unused; counters are per-broadcast only. Reserved
-	/// for future per-track granularity.
+	/// `_name` is unused; counters are per-broadcast only. The track name
+	/// parameter is kept for symmetry with the rest of moq-net so callers
+	/// don't have to thread an `Option<&str>` through subscribe sites.
 	pub fn publisher_track(&self, _name: &str) -> PublisherTrack {
 		if let Some(entry) = &self.entry {
 			entry.slots[slot_index(self.tier, Role::Publisher)]
@@ -425,7 +505,7 @@ impl Drop for PublisherStats {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
 			entry.slots[slot_index(self.tier, Role::Publisher)]
-				.broadcasts_closed
+				.announced_closed
 				.fetch_add(1, Ordering::Relaxed);
 		}
 	}
@@ -453,7 +533,7 @@ impl Drop for SubscriberStats {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
 			entry.slots[slot_index(self.tier, Role::Subscriber)]
-				.broadcasts_closed
+				.announced_closed
 				.fetch_add(1, Ordering::Relaxed);
 		}
 	}
@@ -601,6 +681,10 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 	}
 	drop(inner);
 
+	// Per-(path, slot) state owned by this task. Mirrors entries we've
+	// seen recently; serves both as the diff source for change detection
+	// and as the authority on which global entries to GC.
+	let mut local: HashMap<PathOwned, [SlotState; NUM_SLOTS]> = HashMap::new();
 	let mut last_payload: [Vec<u8>; NUM_SLOTS] = Default::default();
 	let mut empty_ticks: u32 = 0;
 
@@ -616,54 +700,112 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 
 		let current_tick = inner.tick_counter.fetch_add(1, Ordering::Relaxed) + 1;
 
-		let entries: Vec<Arc<BroadcastEntry>> = {
+		// Clone the current entries map into a Vec so we can drop the
+		// global lock before the change-detection pass.
+		let entries: Vec<(PathOwned, Arc<BroadcastEntry>)> = {
 			let map = inner.entries.lock();
-			map.values().cloned().collect()
+			map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 		};
 
 		let mut frames: [BTreeMap<String, Snapshot>; NUM_SLOTS] = Default::default();
-		for entry in &entries {
-			for ((counters, last_tick), frame) in entry
-				.slots
-				.iter()
-				.zip(entry.last_active_tick.iter())
-				.zip(frames.iter_mut())
-			{
-				let snap = counters.snapshot();
-				if counters.active() {
-					last_tick.store(current_tick, Ordering::Relaxed);
-					frame.insert(entry.path.as_str().to_string(), snap);
-					continue;
+		for (path, entry) in &entries {
+			let slot_states = local.entry(path.clone()).or_default();
+			for (i, (counters, slot_state)) in entry.slots.iter().zip(slot_states.iter_mut()).enumerate() {
+				let raw = counters.snapshot();
+
+				// Derive `broadcasts` / `broadcasts_closed` from the
+				// subscription-active transitions observed across ticks.
+				// `delta_subs > 0` catches the case where a sub opened AND
+				// closed within a single tick window so the snapshot shows
+				// `subs == subs_closed` (curr_active == false) but real
+				// activity happened. Such flickers count as a full
+				// open/close pair.
+				let (prev_subs, prev_subs_closed, prev_broadcasts, prev_broadcasts_closed) =
+					match &slot_state.prev_emitted {
+						Some(prev) => (
+							prev.subscriptions,
+							prev.subscriptions_closed,
+							prev.broadcasts,
+							prev.broadcasts_closed,
+						),
+						None => (0, 0, 0, 0),
+					};
+				let prev_active = prev_subs > prev_subs_closed;
+				let curr_active = raw.subscriptions > raw.subscriptions_closed;
+				let delta_subs = raw.subscriptions.saturating_sub(prev_subs);
+				let active_during = prev_active || curr_active || delta_subs > 0;
+
+				if !prev_active && active_during {
+					slot_state.derived_broadcasts = prev_broadcasts.saturating_add(1);
 				}
-				let last = last_tick.load(Ordering::Relaxed);
-				// `<=` so retention_ticks counts the number of *idle* ticks the
-				// entry lingers after its last observed active tick. retention=0
-				// means "drop as soon as the sub goes idle"; the active branch
-				// above still emits while subs are live.
-				if last != 0 && current_tick.saturating_sub(last) <= retention_ticks as u64 {
-					frame.insert(entry.path.as_str().to_string(), snap);
+				if active_during && !curr_active {
+					slot_state.derived_broadcasts_closed = prev_broadcasts_closed.saturating_add(1);
+				}
+
+				let snap = Snapshot {
+					announced: raw.announced,
+					announced_closed: raw.announced_closed,
+					broadcasts: slot_state.derived_broadcasts,
+					broadcasts_closed: slot_state.derived_broadcasts_closed,
+					subscriptions: raw.subscriptions,
+					subscriptions_closed: raw.subscriptions_closed,
+					bytes: raw.bytes,
+					frames: raw.frames,
+					groups: raw.groups,
+				};
+
+				// Include the entry whenever the snapshot differs from the
+				// last emitted one OR we're still within the retention
+				// window of the most recent change. The change-driven path
+				// catches bumps that landed since the last tick (including
+				// sub-tick flickers); the retention path lets entries
+				// linger so a downstream "currently active" view doesn't
+				// flicker out on a single idle tick.
+				let changed = slot_state.prev_emitted.as_ref() != Some(&snap);
+				if changed {
+					slot_state.last_change_tick = current_tick;
+					slot_state.prev_emitted = Some(snap);
+				}
+				let within_retention = slot_state.last_change_tick != 0
+					&& current_tick.saturating_sub(slot_state.last_change_tick) <= retention_ticks as u64;
+				if within_retention {
+					frames[i].insert(path.as_str().to_string(), snap);
 				}
 			}
 		}
-		// Release our snapshot refs before GC so Arc::strong_count below only
-		// reflects map + outstanding guard references.
+		// Build a snapshot of the live path set before dropping `entries`
+		// (the Arc clones we hold inflate strong_count for the GC check).
+		let live: std::collections::HashSet<PathOwned> = entries.iter().map(|(p, _)| p.clone()).collect();
 		drop(entries);
 
+		// GC global entries: keep if any external guard still holds the
+		// Arc, OR our local state shows a recent change. Without the
+		// `strong_count > 1` check a bump racing with GC could land on an
+		// orphaned Arc and be silently lost.
 		{
 			let mut map = inner.entries.lock();
-			map.retain(|_, entry| {
-				// Keep entries with outstanding guards alive even if they
-				// haven't surfaced in a frame yet, so a bump that races with
-				// GC can't be silently lost on an orphaned Arc.
+			map.retain(|path, entry| {
 				if Arc::strong_count(entry) > 1 {
 					return true;
 				}
-				entry.last_active_tick.iter().any(|t| {
-					let last = t.load(Ordering::Relaxed);
-					last != 0 && current_tick.saturating_sub(last) <= retention_ticks as u64
+				local.get(path).is_some_and(|slots| {
+					slots.iter().any(|s| {
+						s.last_change_tick != 0
+							&& current_tick.saturating_sub(s.last_change_tick) <= retention_ticks as u64
+					})
 				})
 			});
 		}
+
+		// GC local state: drop entries whose global counterpart is gone
+		// AND retention has expired. Bounded growth even if a relay
+		// churns through many transient broadcast paths.
+		local.retain(|path, slots| {
+			live.contains(path)
+				|| slots.iter().any(|s| {
+					s.last_change_tick != 0 && current_tick.saturating_sub(s.last_change_tick) <= retention_ticks as u64
+				})
+		});
 
 		for (((frame, last), track), slot) in frames
 			.iter()
@@ -716,9 +858,15 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 	}
 }
 
+/// What we emit for one entry on one tier-role track. `announced` /
+/// `announced_closed` and the subscription / payload counters come straight
+/// from [`RawCounts`]; `broadcasts` / `broadcasts_closed` are derived in
+/// the snapshot task from observed subscription transitions.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(serde::Deserialize))]
 struct Snapshot {
+	announced: u64,
+	announced_closed: u64,
 	broadcasts: u64,
 	broadcasts_closed: u64,
 	subscriptions: u64,
@@ -928,9 +1076,12 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn retention_boundary_keeps_last_idle_tick() {
-		// retention_ticks=2 means the entry lingers for exactly 2 idle ticks
-		// after its last observed active tick. Drive the boundary precisely.
+	async fn retention_boundary_after_drop() {
+		// retention_ticks=2 lingers exactly 2 idle ticks after the LAST
+		// snapshot change. The drop itself is a change (it bumps
+		// announced_closed/subs_closed/derived broadcasts_closed), so the
+		// retention countdown starts from the tick that observes the drop,
+		// not the tick that observed the open guard.
 		let origin = Origin::random().produce();
 		let stats = Stats::new(
 			".stats",
@@ -943,28 +1094,34 @@ mod tests {
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let track = bs.publisher().track("video");
 
-		// One active tick so last_active_tick is set.
+		// Tick 1: observe open. snapshot changes.
 		drive_ticks(1).await;
 		drop(track);
 		drop(bs);
 
-		// Idle tick 1: diff == 1, still <= retention_ticks. Kept.
+		// Tick 2: observe drop. snapshot changes (broadcasts_closed bumps).
 		drive_ticks(1).await;
 		assert!(
 			stats.inner.entries.lock().contains_key(&key),
-			"entry must remain after 1 idle tick (retention=2)"
+			"kept on the tick the drop is observed"
 		);
-		// Idle tick 2: diff == 2, still <= retention_ticks. Kept.
+		// Tick 3: idle tick 1 after change. diff=1<=2, kept.
 		drive_ticks(1).await;
 		assert!(
 			stats.inner.entries.lock().contains_key(&key),
-			"entry must remain after 2 idle ticks (retention=2)"
+			"kept after 1 idle tick (retention=2)"
 		);
-		// Idle tick 3: diff == 3, exceeds retention_ticks. GC'd.
+		// Tick 4: idle tick 2. diff=2<=2, kept.
+		drive_ticks(1).await;
+		assert!(
+			stats.inner.entries.lock().contains_key(&key),
+			"kept after 2 idle ticks (retention=2)"
+		);
+		// Tick 5: idle tick 3. diff=3>2, GC'd.
 		drive_ticks(1).await;
 		assert!(
 			!stats.inner.entries.lock().contains_key(&key),
-			"entry must be GC'd after 3 idle ticks (retention=2)"
+			"GC'd after 3 idle ticks (retention=2)"
 		);
 	}
 
@@ -974,12 +1131,11 @@ mod tests {
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let track = bs.publisher().track("video");
 
-		// Tick a few times while subs are active so last_active_tick is set.
 		drive_ticks(2).await;
 		drop(track);
 		drop(bs);
-		// Tick a few more times within retention_ticks=10. Entry must remain
-		// in the map (because last_active_tick is still recent enough).
+		// Within retention_ticks=10. Drop is observed as a change at tick 3,
+		// so we have plenty of ticks left before GC.
 		drive_ticks(3).await;
 
 		assert!(
@@ -994,8 +1150,6 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn retention_evicts_after_window() {
-		// retention_ticks=2, drop and tick well past the window. Entry should
-		// be GC'd from the map and absent from subsequent frames.
 		let origin = Origin::random().produce();
 		let stats = Stats::new(
 			".stats",
@@ -1010,9 +1164,8 @@ mod tests {
 		drive_ticks(2).await;
 		drop(track);
 		drop(bs);
-		// Tick well past 2 * retention_ticks so the entry ages out and the
-		// GC sweep removes it.
-		drive_ticks(8).await;
+		// Far past 2 * retention_ticks so the entry is fully aged out.
+		drive_ticks(10).await;
 
 		assert!(stats.inner.entries.lock().is_empty(), "entries should be GC'd");
 	}
@@ -1038,9 +1191,140 @@ mod tests {
 			.expect("subscribe");
 		let frame = read_frame(track).await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
+		assert_eq!(snap.announced, 1, "publisher() guard bumps announced");
+		assert_eq!(snap.broadcasts, 1, "subs went 0->1, derived broadcasts++");
+		assert_eq!(snap.subscriptions, 1);
 		assert_eq!(snap.bytes, 42);
 		assert_eq!(snap.frames, 1);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn announced_decouples_from_broadcasts() {
+		// publisher() with no track subscription should bump announced but
+		// NOT broadcasts (which only counts slots with sub activity).
+		let (stats, origin) = test_stats(Some("sjc"));
+		let mut consumer = origin.consume();
+		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let _guard = bs.publisher();
+
+		tokio::time::advance(Duration::from_millis(1100)).await;
+
+		let (_path, broadcast) = consumer.announced().await.expect("announce");
+		let broadcast = broadcast.expect("active");
+		let track = broadcast
+			.subscribe_track(&Track {
+				name: "publisher.json".into(),
+				priority: 0,
+			})
+			.expect("subscribe");
+		let frame = read_frame(track).await;
+		let snap = frame.get("foo/bar").expect("foo/bar entry");
+		assert_eq!(snap.announced, 1);
+		assert_eq!(snap.broadcasts, 0, "no sub, no derived broadcasts");
+		assert_eq!(snap.subscriptions, 0);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn short_lived_sub_is_surfaced() {
+		// A subscription that opens AND closes within a single tick window
+		// must still surface as a complete broadcasts open/close cycle.
+		// Before the change-driven inclusion fix, this entry would never
+		// have appeared in any frame and would have been GC'd silently.
+		let (stats, origin) = test_stats(Some("sjc"));
+		let mut consumer = origin.consume();
+		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		{
+			let track = bs.publisher().track("video");
+			track.bytes(123);
+			track.frame();
+			// track dropped here, all within tick 1
+		}
+
+		tokio::time::advance(Duration::from_millis(1100)).await;
+
+		let (_path, broadcast) = consumer.announced().await.expect("announce");
+		let broadcast = broadcast.expect("active");
+		let track = broadcast
+			.subscribe_track(&Track {
+				name: "publisher.json".into(),
+				priority: 0,
+			})
+			.expect("subscribe");
+		let frame = read_frame(track).await;
+		let snap = frame.get("foo/bar").expect("foo/bar entry");
+		// subs went 0->1->0 within the same tick. delta_subs > 0 triggers
+		// both broadcasts++ and broadcasts_closed++.
 		assert_eq!(snap.subscriptions, 1);
+		assert_eq!(snap.subscriptions_closed, 1);
+		assert_eq!(snap.broadcasts, 1, "flicker counts as one broadcast");
+		assert_eq!(snap.broadcasts_closed, 1);
+		assert_eq!(snap.bytes, 123);
+		assert_eq!(snap.frames, 1);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn multiple_subs_count_as_one_broadcast() {
+		// Two concurrent subs on the same slot should bump broadcasts by 1,
+		// not 2. broadcasts is "broadcasts that had >=1 active sub" not
+		// "subscription count".
+		let (stats, origin) = test_stats(Some("sjc"));
+		let mut consumer = origin.consume();
+		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let pub_guard = bs.publisher();
+		let t1 = pub_guard.track("video");
+		let t2 = pub_guard.track("audio");
+
+		drive_ticks(2).await;
+
+		let (_path, broadcast) = consumer.announced().await.expect("announce");
+		let broadcast = broadcast.expect("active");
+		let frame_track = broadcast
+			.subscribe_track(&Track {
+				name: "publisher.json".into(),
+				priority: 0,
+			})
+			.expect("subscribe");
+		let frame = read_frame(frame_track).await;
+		let snap = frame.get("foo/bar").expect("foo/bar entry");
+		assert_eq!(snap.subscriptions, 2, "two track subs");
+		assert_eq!(snap.broadcasts, 1, "still one active broadcast");
+
+		drop(t1);
+		drop(t2);
+		drop(pub_guard);
+		drop(bs);
+		// Need to actually keep the test alive long enough for the next assertion.
+		// Pulled snap above; new bumps land but we don't reassert here.
+	}
+
+	#[test]
+	fn snapshot_reads_closed_before_open() {
+		// Reading closed counters before their open counterparts is the
+		// guarantee that the emitted Snapshot never shows close > open
+		// under concurrent bumps. This unit-test pins the ordering at the
+		// source level so a future refactor that re-orders the loads
+		// trips the test.
+		let src = include_str!("stats.rs");
+		// Find the body of `impl Counters { fn snapshot(...) ... }` and
+		// check the line order.
+		let body_start = src
+			.find("fn snapshot(&self) -> RawCounts")
+			.expect("snapshot fn present");
+		let body = &src[body_start..];
+		let closed_pos = body.find("self.announced_closed.load").expect("announced_closed load");
+		let open_pos = body.find("self.announced.load(").expect("announced load");
+		assert!(
+			closed_pos < open_pos,
+			"announced_closed must be loaded before announced; reversing breaks the open>=closed invariant",
+		);
+		let subs_closed_pos = body
+			.find("self.subscriptions_closed.load")
+			.expect("subscriptions_closed load");
+		let subs_pos = body.find("self.subscriptions.load").expect("subscriptions load");
+		assert!(
+			subs_closed_pos < subs_pos,
+			"subscriptions_closed must be loaded before subscriptions",
+		);
 	}
 
 	async fn read_frame(mut track: crate::TrackConsumer) -> BTreeMap<String, Snapshot> {

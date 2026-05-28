@@ -15,9 +15,10 @@ use serde::{Deserialize, Serialize};
 /// session the relay accepts (and every cluster dial). The aggregator
 /// publishes a single `<prefix>/node/<node>` broadcast (or `<prefix>/node`
 /// when [`Self::node`] is unset) on the cluster origin. Each frame is a
-/// JSON map of broadcast path to a cumulative counter snapshot,
-/// covering every broadcast that has had an active subscription within the
-/// last [`Self::retention_ticks`] ticks.
+/// JSON map of broadcast path to a cumulative counter snapshot; an entry
+/// surfaces whenever its snapshot changes, and lingers for
+/// [`Self::retention_ticks`] ticks past the most recent change. See
+/// `moq_net::stats` for the per-field semantics.
 #[derive(Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -51,9 +52,9 @@ pub struct StatsConfig {
 	#[arg(long = "stats-tick-secs", env = "MOQ_STATS_TICK_SECS")]
 	pub tick_secs: Option<u64>,
 
-	/// Number of ticks an idle broadcast lingers in the emitted frame after
-	/// its last observed active subscription. Defaults to 1. A short
-	/// reconnect window keeps the entry visible across brief disconnects.
+	/// Number of ticks an entry lingers in the emitted frame after its last
+	/// observed change. Defaults to 1. A short reconnect window keeps the
+	/// entry visible across brief disconnects.
 	#[arg(long = "stats-retention-ticks", env = "MOQ_STATS_RETENTION_TICKS")]
 	pub retention_ticks: Option<u32>,
 
