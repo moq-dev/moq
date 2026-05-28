@@ -24,18 +24,9 @@ let announced = try consumer.announced(prefix: "demos/")
 for try await announcement in announced.announcements {
     print("got broadcast \(announcement.path())")
 
-    let broadcast = announcement.broadcast()
-    let audio = try await broadcast.subscribeAudio(
-        name: "0",
-        output: MoqAudioDecoderOutput(
-            format: .f32,
-            sampleRate: 48000,
-            channels: 2,
-            latencyMaxMs: 100
-        )
-    )
-    for try await frame in audio.frames {
-        // play frame.data
+    let catalog = try announcement.broadcast().subscribeCatalog()
+    for try await update in catalog.updates {
+        print("catalog: \(update)")
     }
 }
 
