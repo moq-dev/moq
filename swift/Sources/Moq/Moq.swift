@@ -4,20 +4,21 @@ import Foundation
 /// Top-level entry points for the Moq protocol stack.
 public enum Moq {
     /// Connect with a single origin attached as both publish source and
-    /// consume sink. The returned origin is what you use to publish local
-    /// broadcasts and to discover remote announcements.
+    /// consume sink, then return both. Convenience over
+    /// `MoqClient().connectDuplex(url:)` that destructures the FFI record
+    /// into a tuple so callers can `let (session, origin) = ...`.
     ///
-    /// Thin Swift-idiomatic wrapper over `MoqFFI.connect(url:)`: the FFI
-    /// returns a `MoqClientSession` record, this destructures it into a
-    /// tuple so callers can `let (session, origin) = ...`.
+    /// For custom TLS / bind options, build a client via `Moq.client()`,
+    /// configure it, then call `connectDuplex(url:)` on it.
     public static func connect(url: String) async throws -> (MoqSession, MoqOriginProducer) {
-        let result = try await MoqFFI.connect(url: url)
+        let result = try await MoqClient().connectDuplex(url: url)
         return (result.session, result.origin)
     }
 
     /// Build a client with custom configuration before connecting.
-    /// Use when you need TLS / bind options or a non-duplex topology
-    /// (only consume, only publish, separate origins).
+    /// Pair with `connectDuplex(url:)` for the auto-wired duplex setup,
+    /// or with `connect(url:)` and your own `setPublish` / `setConsume`
+    /// for a custom topology.
     public static func client() -> MoqClient {
         MoqClient()
     }

@@ -98,6 +98,23 @@ impl MoqClient {
 		self.task.run(|state| async move { state.connect(url).await }).await
 	}
 
+	/// Convenience over [`Self::connect`]: wires a fresh
+	/// [`MoqOriginProducer`] as both publish source and consume sink (the
+	/// typical full-duplex client), then connects. Returns the session
+	/// alongside the origin so the caller can publish and consume through
+	/// it.
+	///
+	/// Composes with [`Self::set_tls_disable_verify`] and
+	/// [`Self::set_bind`] for custom configuration. Overwrites any
+	/// publish or consume origin previously set on this client.
+	pub async fn connect_duplex(&self, url: String) -> Result<MoqClientSession, MoqError> {
+		let origin = MoqOriginProducer::new();
+		self.set_publish(Some(origin.clone()));
+		self.set_consume(Some(origin.clone()));
+		let session = self.connect(url).await?;
+		Ok(MoqClientSession { session, origin })
+	}
+
 	/// Cancel all current and future `connect()` calls.
 	pub fn cancel(&self) {
 		self.task.cancel();
@@ -158,7 +175,7 @@ impl MoqSession {
 }
 
 /// A `MoqSession` plus the `MoqOriginProducer` it was wired against,
-/// returned by the duplex [`connect`] helper.
+/// returned by [`MoqClient::connect_duplex`].
 ///
 /// Use `origin` to `publish(...)` local broadcasts and `consume()` remote
 /// announcements; use `session` for shutdown.
@@ -166,17 +183,4 @@ impl MoqSession {
 pub struct MoqClientSession {
 	pub session: Arc<MoqSession>,
 	pub origin: Arc<MoqOriginProducer>,
-}
-
-/// Connect with a single origin attached as both publish source and consume
-/// sink. The typical full-duplex client setup. For custom TLS / bind options
-/// or a non-duplex topology, build a [`MoqClient`] directly.
-#[uniffi::export]
-pub async fn connect(url: String) -> Result<MoqClientSession, MoqError> {
-	let origin = MoqOriginProducer::new();
-	let client = MoqClient::new();
-	client.set_publish(Some(origin.clone()));
-	client.set_consume(Some(origin.clone()));
-	let session = client.connect(url).await?;
-	Ok(MoqClientSession { session, origin })
 }

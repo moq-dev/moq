@@ -34,14 +34,16 @@ import dev.moq.Moq
 val (session, origin) = Moq.connect("https://relay.example.com")
 ```
 
-`Moq.connect` wires a single `MoqOriginProducer` as both publish source and consume sink (the typical full-duplex client). For custom TLS / bind options or a non-duplex topology, build the client manually:
+`Moq.connect` is a thin wrapper over `MoqClient().connectDuplex(url)`, which wires a fresh `MoqOriginProducer` as both publish source and consume sink (the typical full-duplex client). For custom TLS / bind options, configure the client first:
 
 ```kotlin
 val client = Moq.client()
 client.setTlsDisableVerify(true)
 client.setBind("127.0.0.1:0")
-val session = client.connect("https://localhost:4443")
+val (session, origin) = client.connectDuplex("https://localhost:4443")
 ```
+
+For a non-duplex topology, call `setPublish` / `setConsume` yourself and use `client.connect(url)` (returns just the session).
 
 When you're done, signal graceful shutdown to the peer:
 

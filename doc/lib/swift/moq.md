@@ -36,14 +36,17 @@ import Moq
 let (session, origin) = try await Moq.connect(url: "https://relay.example.com")
 ```
 
-`Moq.connect(url:)` wires a single `MoqOriginProducer` as both publish source and consume sink (the typical full-duplex client). For custom TLS / bind options or a non-duplex topology, build the client manually:
+`Moq.connect(url:)` is a thin wrapper over `MoqClient().connectDuplex(url:)`, which wires a fresh `MoqOriginProducer` as both publish source and consume sink (the typical full-duplex client). For custom TLS / bind options, configure the client first:
 
 ```swift
 let client = Moq.client()
 client.setTlsDisableVerify(disable: true)
 try client.setBind(addr: "127.0.0.1:0")
-let session = try await client.connect(url: "https://localhost:4443")
+let cs = try await client.connectDuplex(url: "https://localhost:4443")
+let (session, origin) = (cs.session, cs.origin)
 ```
+
+For a non-duplex topology, call `setPublish` / `setConsume` yourself and use `client.connect(url:)` (returns just the session).
 
 When you're done, signal graceful shutdown to the peer:
 

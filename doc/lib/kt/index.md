@@ -56,7 +56,7 @@ origin.use {
 session.shutdown()
 ```
 
-`Moq.connect` wires a single `MoqOriginProducer` as both publish source and consume sink (the typical full-duplex client). For custom TLS / bind options or a non-duplex topology, build the client with `Moq.client()` and call `setPublish` / `setConsume` yourself.
+`Moq.connect` is a thin wrapper over `MoqClient().connectDuplex(url)`, which wires a fresh `MoqOriginProducer` as both publish source and consume sink (the typical full-duplex client). For custom TLS / bind options, build a client via `Moq.client()`, configure it, and call `connectDuplex(url)` on it.
 
 Cancelling the surrounding coroutine scope propagates through to the native consumer's `cancel()` via the wrapper's `onCompletion` hook.
 

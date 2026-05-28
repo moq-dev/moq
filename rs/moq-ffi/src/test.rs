@@ -1,7 +1,7 @@
 use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
-use super::session::{self, MoqClient};
+use super::session::MoqClient;
 
 use std::time::Duration;
 
@@ -462,12 +462,12 @@ async fn server_client_roundtrip() {
 }
 
 #[tokio::test]
-async fn connect_errors_on_unreachable() {
-	// The duplex `connect()` free function doesn't expose TLS / bind
-	// knobs; this is mostly a smoke test that the wiring compiles and
-	// that connection failures surface as `Connect` rather than panicking.
-	// Port 1 is reliably unreachable on localhost without root.
-	let res = session::connect("https://127.0.0.1:1/test".into()).await;
+async fn connect_duplex_errors_on_unreachable() {
+	// Smoke test that the duplex helper wires correctly and surfaces
+	// connection failures as `Connect` instead of panicking. Port 1 is
+	// reliably unreachable on localhost without root.
+	let client = MoqClient::new();
+	let res = client.connect_duplex("https://127.0.0.1:1/test".into()).await;
 	let err = res.err().expect("connect should fail");
 	assert!(
 		matches!(err, crate::error::MoqError::Connect(_)),
