@@ -45,6 +45,15 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	}
 
 	/// Decode the next message unless the stream is closed.
+	///
+	/// Cancel-safe with the transports we ship (`web_transport_quinn`, `qmux`).
+	/// The only `.await` points are reads from the underlying transport; partial
+	/// bytes accumulate in `self.buffer` and a re-entry resumes decoding from
+	/// the same position, so dropping the future mid-message never desynchronizes
+	/// the stream. This requires the transport's `read_buf` to be cancel-safe
+	/// (Quinn's `RecvStream::read` is documented as such, and qmux's
+	/// `RecvStream::read_chunk` is a `tokio::sync::mpsc::Receiver::recv`).
+	/// New transport impls must preserve this property.
 	pub async fn decode_maybe<T: Decode<V> + Debug>(&mut self) -> Result<Option<T>, Error>
 	where
 		V: Clone,

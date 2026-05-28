@@ -378,14 +378,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Track-level subscriber priority. SUBSCRIBE_UPDATE messages broadcast new values
 		// to both run_track (so future groups inherit the new priority) and serve_group
-		// tasks (so in-flight groups update via PriorityHandle::set_track).
+		// tasks (so in-flight groups update via PriorityHandle::set_track). The Sender
+		// stays in run_subscribe and gets handed to run_track so the same loop that
+		// parses SUBSCRIBE_UPDATEs also fans the new priority out.
 		let (track_priority_tx, track_priority_rx) = tokio::sync::watch::channel(track.priority);
-		// `end_group` is a serving cap, not a subscription terminator: groups with
-		// sequence > cap are held until the subscriber raises the cap (or unsets
-		// it) via SUBSCRIBE_UPDATE, then served in order. Only FIN ends the
-		// subscription. This is what relays use to pause an upstream subscription
-		// across consumer churn without tearing it down.
-		let (end_group_tx, end_group_rx) = tokio::sync::watch::channel(subscribe.end_group);
 
 		let sub = Subscription {
 			session,
@@ -397,25 +393,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			version,
 		};
 
-		tokio::select! {
-			res = sub.run_track(track, subscribe.start_group, end_group_rx) => res?,
-			res = Self::run_subscribe_updates(&mut stream.reader, &track_priority_tx, &end_group_tx) => res?,
-		}
+		// `end_group` is a serving cap, not a subscription terminator: groups with
+		// sequence > cap are held in the producer's cache until the subscriber raises
+		// the cap (or unsets it) via SUBSCRIBE_UPDATE, then served in order. Only a
+		// peer FIN actually ends the subscription. This is what lets relays pause an
+		// upstream subscription across consumer churn without tearing it down.
+		sub.run_track(
+			track,
+			subscribe.start_group,
+			subscribe.end_group,
+			&mut stream.reader,
+			&track_priority_tx,
+		)
+		.await?;
 
 		stream.writer.finish()?;
 		stream.writer.closed().await
-	}
-
-	async fn run_subscribe_updates<R: web_transport_trait::RecvStream>(
-		reader: &mut crate::coding::Reader<R, Version>,
-		priority_tx: &tokio::sync::watch::Sender<u8>,
-		end_group_tx: &tokio::sync::watch::Sender<Option<u64>>,
-	) -> Result<(), Error> {
-		while let Some(upd) = reader.decode_maybe::<lite::SubscribeUpdate>().await? {
-			let _ = priority_tx.send(upd.priority);
-			let _ = end_group_tx.send(upd.end_group);
-		}
-		Ok(())
 	}
 }
 
@@ -439,7 +432,9 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		mut self,
 		mut track: TrackConsumer,
 		start_group: Option<u64>,
-		mut end_group: tokio::sync::watch::Receiver<Option<u64>>,
+		initial_end_group: Option<u64>,
+		reader: &mut crate::coding::Reader<S::RecvStream, Version>,
+		track_priority_tx: &tokio::sync::watch::Sender<u8>,
 	) -> Result<(), Error> {
 		let mut tasks: FuturesUnordered<futures::future::BoxFuture<'static, ()>> = FuturesUnordered::new();
 
@@ -449,8 +444,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		}
 
 		// Apply the initial cap from the original Subscribe. Subsequent updates
-		// arrive via the end_group watch channel and get re-applied below.
-		track.end_at(*end_group.borrow_and_update());
+		// flow through the SubscribeUpdate select arm below.
+		track.end_at(initial_end_group);
 
 		loop {
 			tokio::select! {
@@ -467,18 +462,25 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					match res? {
 						Some(group) => self.spawn_serve(group, &mut tasks),
 						None => {
-							// Track finished; drain in-flight tasks and exit.
+							// Track finished cleanly; drain in-flight tasks and exit.
 							while tasks.next().await.is_some() {}
 							return Ok(());
 						}
 					}
 				}
 
-				Ok(()) = end_group.changed() => {
-					// Re-apply the cap. If it rose, the next loop iteration's
-					// track.next_group() will pick up any cached groups that
-					// fell into range; if it dropped, the consumer parks itself.
-					track.end_at(*end_group.borrow_and_update());
+				// SUBSCRIBE_UPDATE messages share this hot loop; safe because
+				// decode_maybe is cancel-safe given quinn/qmux's cancel-safe
+				// read primitives (see Reader::decode_maybe doc).
+				upd = reader.decode_maybe::<lite::SubscribeUpdate>() => {
+					let Some(upd) = upd? else {
+						// Peer FIN'd — they're done with this subscription. Drop any
+						// in-flight serve_group tasks (don't drain) so half-sent
+						// groups get cancelled rather than completed pointlessly.
+						return Ok(());
+					};
+					let _ = track_priority_tx.send(upd.priority);
+					track.end_at(upd.end_group);
 				}
 			}
 		}
