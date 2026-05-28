@@ -186,7 +186,7 @@ Each stats broadcast carries four tracks, one per `(tier, role)` pair:
 
 Each frame is a JSON object mapping broadcast path to a cumulative
 counter snapshot. An entry surfaces whenever its snapshot differs from
-the last one emitted, and lingers for `retention_ticks` ticks past the
+the last one emitted, and lingers for `retention` intervals past the
 most recent change:
 
 ```json

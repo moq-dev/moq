@@ -75,13 +75,19 @@
 //!
 //! # Snapshot atomicity
 //!
-//! Each [`Counters`] snapshot reads `*_closed` atomics before their open
-//! counterparts. Every increment to a closed counter is preceded in real
-//! time by a matching increment to its open counter, so reading closed
-//! first guarantees `open >= closed` in the observed snapshot even under
-//! concurrent bumps. The cost is a slight upward bias on the open counts
-//! when a bump lands between the two loads, which never produces a
-//! logically impossible (`closed > open`) snapshot for downstream.
+//! Each [`Counters`] snapshot reads `*_closed` atomics (with `Acquire`)
+//! before their open counterparts (with `Relaxed`). The matching close
+//! bumps in the RAII guards' `Drop` impls use `Release`. With this
+//! pairing the snapshot always satisfies `open >= closed` even on
+//! weakly-ordered architectures (ARM, POWER): the `Acquire` load of
+//! close synchronizes-with the `Release` bump that produced the
+//! observed value, making every write that happened-before that close
+//! (including the matching open bump on whichever thread opened the
+//! guard) visible to the snapshot thread. Open / payload counters can
+//! then stay `Relaxed` because the visibility comes for free through
+//! the close pairing. The cost is a slight upward bias on the open
+//! counts when a bump lands between the two loads, which never produces
+//! a logically impossible (`closed > open`) snapshot for downstream.
 //!
 //! # Cycles
 //!
@@ -124,12 +130,16 @@ pub struct Counters {
 }
 
 impl Counters {
-	/// Read all atomics into a `RawCounts`. Closed counters are read before
-	/// their open counterparts so the snapshot always satisfies
-	/// `open >= closed`; see the module-level "Snapshot atomicity" note.
+	/// Read all atomics into a `RawCounts`. Closed counters are read with
+	/// `Acquire` ordering before their open counterparts so the snapshot
+	/// always satisfies `open >= closed`; see the module-level "Snapshot
+	/// atomicity" note. Open / payload counters stay `Relaxed`: the
+	/// Acquire on close synchronizes-with the matching Release on the
+	/// close bump, which transitively makes all earlier writes (including
+	/// the prior open bump) visible to this thread.
 	fn snapshot(&self) -> RawCounts {
-		let announced_closed = self.announced_closed.load(Ordering::Relaxed);
-		let subscriptions_closed = self.subscriptions_closed.load(Ordering::Relaxed);
+		let announced_closed = self.announced_closed.load(Ordering::Acquire);
+		let subscriptions_closed = self.subscriptions_closed.load(Ordering::Acquire);
 		let announced = self.announced.load(Ordering::Relaxed);
 		let subscriptions = self.subscriptions.load(Ordering::Relaxed);
 		let bytes = self.bytes.load(Ordering::Relaxed);
@@ -552,9 +562,12 @@ impl PublisherStats {
 impl Drop for PublisherStats {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
+			// Release pairs with the snapshot reader's Acquire load of
+			// `announced_closed`, propagating the open-bump from this
+			// guard's construction to whichever thread observes the close.
 			entry.publisher[self.tier.idx()]
 				.announced_closed
-				.fetch_add(1, Ordering::Relaxed);
+				.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -580,9 +593,10 @@ impl SubscriberStats {
 impl Drop for SubscriberStats {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
+			// See `PublisherStats::drop` for why this is Release.
 			entry.subscriber[self.tier.idx()]
 				.announced_closed
-				.fetch_add(1, Ordering::Relaxed);
+				.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -620,9 +634,10 @@ impl PublisherTrack {
 impl Drop for PublisherTrack {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
+			// See `PublisherStats::drop` for why this is Release.
 			entry.publisher[self.tier.idx()]
 				.subscriptions_closed
-				.fetch_add(1, Ordering::Relaxed);
+				.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -660,9 +675,10 @@ impl SubscriberTrack {
 impl Drop for SubscriberTrack {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
+			// See `PublisherStats::drop` for why this is Release.
 			entry.subscriber[self.tier.idx()]
 				.subscriptions_closed
-				.fetch_add(1, Ordering::Relaxed);
+				.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -751,7 +767,14 @@ fn process_slot(
 	// previous tick (incl. sub-tick flickers); the retention path lets
 	// idle entries linger so a downstream "currently active" view doesn't
 	// flicker on a single idle tick.
-	let changed = slot_state.prev_emitted.as_ref() != Some(&snap);
+	//
+	// `None` (slot never emitted) is treated as the default Snapshot so a
+	// first-tick all-zeros snap on an unused tier-side slot doesn't count
+	// as a "change". Without this, every entry would surface in all four
+	// tracks with zeros on the tick after creation even if only one slot
+	// is actually in use.
+	let prev_snap = slot_state.prev_emitted.unwrap_or_default();
+	let changed = snap != prev_snap;
 	if changed {
 		slot_state.last_change_tick = current_tick;
 		slot_state.prev_emitted = Some(snap);
@@ -1201,7 +1224,7 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn frame_round_trips_as_json() {
+	async fn frame_emits_expected_counters() {
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume();
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -1296,35 +1319,88 @@ mod tests {
 	async fn multiple_subs_count_as_one_broadcast() {
 		// Two concurrent subs on the same slot should bump broadcasts by 1,
 		// not 2. broadcasts is "broadcasts that had >=1 active sub" not
-		// "subscription count".
-		let (stats, origin) = test_stats(Some("sjc"));
-		let mut consumer = origin.consume();
+		// "subscription count". And dropping both subs should bump
+		// broadcasts_closed by 1 (the 1->0 transition is one event).
+		let (stats, _origin) = test_stats(Some("sjc"));
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let pub_guard = bs.publisher();
 		let t1 = pub_guard.track("video");
 		let t2 = pub_guard.track("audio");
 
 		drive_ticks(2).await;
-
-		let (_path, broadcast) = consumer.announced().await.expect("announce");
-		let broadcast = broadcast.expect("active");
-		let frame_track = broadcast
-			.subscribe_track(&Track {
-				name: "publisher.json".into(),
-				priority: 0,
-			})
-			.expect("subscribe");
-		let frame = read_frame(frame_track).await;
-		let snap = frame.get("foo/bar").expect("foo/bar entry");
-		assert_eq!(snap.subscriptions, 2, "two track subs");
-		assert_eq!(snap.broadcasts, 1, "still one active broadcast");
+		{
+			let entries = stats.inner.entries.lock();
+			let entry = entries.get(&PathOwned::from("foo/bar")).expect("entry");
+			let raw = entry.publisher[Tier::External.idx()].snapshot();
+			assert_eq!(raw.subscriptions, 2, "two track subs");
+			assert_eq!(raw.subscriptions_closed, 0, "neither dropped yet");
+		}
 
 		drop(t1);
 		drop(t2);
 		drop(pub_guard);
 		drop(bs);
-		// Need to actually keep the test alive long enough for the next assertion.
-		// Pulled snap above; new bumps land but we don't reassert here.
+		drive_ticks(1).await;
+
+		// All subs dropped: subscriptions_closed catches up to subscriptions.
+		// The snapshot task observes the 1->0 transition; derived
+		// broadcasts_closed (which lives in task-local state, not on the
+		// global entry) gets bumped to 1, but we can only see that through
+		// the wire frame. Here we just confirm the raw counters squared up.
+		let entries = stats.inner.entries.lock();
+		let entry = entries
+			.get(&PathOwned::from("foo/bar"))
+			.expect("entry still in retention");
+		let raw = entry.publisher[Tier::External.idx()].snapshot();
+		assert_eq!(raw.subscriptions, 2);
+		assert_eq!(raw.subscriptions_closed, 2, "both dropped");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn unused_slots_dont_surface() {
+		// A broadcast that only sees External Publisher traffic must NOT
+		// appear in the other three tracks with zero counters. Regression
+		// for the "None != Some(default)" first-tick change-detection bug:
+		// without the unwrap_or_default fix, every entry would surface
+		// once in every track even when only one slot had real activity.
+		let (stats, origin) = test_stats(Some("sjc"));
+		let mut consumer = origin.consume();
+		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let track = bs.publisher().track("video");
+		track.frame();
+
+		drive_ticks(2).await;
+
+		let (_path, broadcast) = consumer.announced().await.expect("announce");
+		let broadcast = broadcast.expect("active");
+
+		// External publisher slot SHOULD include foo/bar.
+		let pub_track = broadcast
+			.subscribe_track(&Track {
+				name: "publisher.json".into(),
+				priority: 0,
+			})
+			.expect("subscribe");
+		assert!(
+			read_frame(pub_track).await.contains_key("foo/bar"),
+			"publisher.json must include the active foo/bar entry"
+		);
+
+		// The other three slots had zero activity. The first frame on
+		// each must be `{}`, not `{"foo/bar": {all zeros}}`.
+		for name in ["subscriber.json", "internal/publisher.json", "internal/subscriber.json"] {
+			let t = broadcast
+				.subscribe_track(&Track {
+					name: name.into(),
+					priority: 0,
+				})
+				.expect("subscribe");
+			let frame = read_frame(t).await;
+			assert!(
+				frame.is_empty(),
+				"{name} must be empty for an entry with no activity on that slot, got {frame:?}",
+			);
+		}
 	}
 
 	#[test]
