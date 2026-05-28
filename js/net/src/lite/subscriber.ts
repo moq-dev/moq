@@ -8,6 +8,7 @@ import { type Reader, Stream } from "../stream.ts";
 import type * as Time from "../time.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
+import { withTimeout } from "../util/timeout.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
@@ -15,6 +16,11 @@ import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
 import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { Version } from "./version.ts";
+
+// Bound on how long stream-open plus SUBSCRIBE_OK may take. Browsers cap
+// concurrent QUIC streams (Chrome ~100); past the cap createBidirectionalStream
+// silently blocks. The timeout turns that into a clear error.
+const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
 
 /**
  * Options accepted by {@link Subscriber.announced}.
@@ -180,18 +186,48 @@ export class Subscriber {
 
 		const msg = new Subscribe({ id, broadcast, track: request.track.name, priority: request.priority });
 
-		const stream = await Stream.open(this.#quic);
-		await stream.writer.u53(StreamId.Subscribe);
-		await msg.encode(stream.writer, this.version);
+		// Open the stream, send SUBSCRIBE, and wait for SUBSCRIBE_OK under a
+		// timeout. If we time out the underlying stream may still finish opening
+		// later, so capture it via closure and abort it once it settles.
+		let opened: Stream | undefined;
+		const setup = (async (): Promise<Stream> => {
+			opened = await Stream.open(this.#quic);
+			await opened.writer.u53(StreamId.Subscribe);
+			await msg.encode(opened.writer, this.version);
 
-		try {
 			// The first response MUST be a SUBSCRIBE_OK.
-			const resp = await decodeSubscribeResponse(stream.reader, this.version);
+			const resp = await decodeSubscribeResponse(opened.reader, this.version);
 			if (!("ok" in resp)) {
 				throw new Error("first subscribe response must be SUBSCRIBE_OK");
 			}
-			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
+			return opened;
+		})();
 
+		let stream: Stream;
+		try {
+			stream = await withTimeout(
+				setup,
+				SUBSCRIBE_OK_TIMEOUT_MS,
+				`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
+			);
+			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
+		} catch (err) {
+			const e = error(err);
+			request.track.close(e);
+			this.#subscribes.delete(id);
+			console.warn(
+				`subscribe error: id=${id} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
+			);
+			// If the stream eventually opens after the timeout, abort it so we
+			// don't leak it. swallow the setup rejection either way.
+			setup.then(
+				() => opened?.abort(e),
+				() => void 0,
+			);
+			return;
+		}
+
+		try {
 			// Watch for priority changes and send SUBSCRIBE_UPDATE. Lite01/Lite02
 			// don't carry SUBSCRIBE_UPDATE on the wire, so skip the watcher there
 			// and just wait on the stream/track like before.
