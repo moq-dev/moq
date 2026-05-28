@@ -38,10 +38,10 @@ impl VideoTransform {
 		}
 	}
 
-	fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
+	fn transform(&mut self, payload: Bytes) -> crate::Result<Option<Bytes>> {
 		match self {
-			VideoTransform::Avc1(t) => t.transform(payload),
-			VideoTransform::Hvc1(t) => t.transform(payload),
+			VideoTransform::Avc1(t) => Ok(t.transform(payload)?),
+			VideoTransform::Hvc1(t) => Ok(t.transform(payload)?),
 		}
 	}
 }
@@ -139,12 +139,12 @@ impl ExportSource {
 	/// Parameter-only frames (SPS/PPS-only inputs to the Avc3 transform) are
 	/// absorbed and the next frame is polled. Returns `Ready(None)` at
 	/// end-of-track.
-	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
+	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		loop {
 			let frame = match self.consumer.poll_read(waiter) {
 				Poll::Ready(Ok(Some(f))) => f,
 				Poll::Ready(Ok(None)) => return Poll::Ready(Ok(None)),
-				Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+				Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
 				Poll::Pending => return Poll::Pending,
 			};
 

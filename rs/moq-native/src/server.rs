@@ -129,6 +129,32 @@ pub struct ServerConfig {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub quic_lb_nonce: Option<usize>,
 
+	/// IPv4 address advertised as the QUIC preferred_address.
+	///
+	/// Supporting clients (Chrome M131+, native Quinn) migrate to this address
+	/// shortly after the handshake completes. Typical use: handshake on an
+	/// anycast IP, steady-state on this host's unicast IP.
+	///
+	/// Only honored by the Quinn backend.
+	#[arg(
+		id = "server-preferred-v4",
+		long = "server-preferred-v4",
+		env = "MOQ_SERVER_PREFERRED_V4"
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub preferred_v4: Option<net::SocketAddrV4>,
+
+	/// IPv6 address advertised as the QUIC preferred_address.
+	///
+	/// See [`Self::preferred_v4`].
+	#[arg(
+		id = "server-preferred-v6",
+		long = "server-preferred-v6",
+		env = "MOQ_SERVER_PREFERRED_V6"
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub preferred_v6: Option<net::SocketAddrV6>,
+
 	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(

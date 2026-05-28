@@ -1,12 +1,13 @@
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use crate::{Consume, Origin, Publish, Session};
+use crate::{Consume, Origin, Publish, Session, audio::Audio};
 
 pub struct State {
 	pub session: Session,
 	pub origin: Origin,
 	pub publish: Publish,
 	pub consume: Consume,
+	pub audio: Audio,
 }
 
 impl State {
@@ -16,6 +17,7 @@ impl State {
 			origin: Origin::default(),
 			publish: Publish::default(),
 			consume: Consume::default(),
+			audio: Audio::default(),
 		}
 	}
 

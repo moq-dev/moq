@@ -8,7 +8,6 @@ use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Context;
 use bytes::Bytes;
 use m3u8_rs::{
 	AlternativeMedia, AlternativeMediaType, Map, MasterPlaylist, MediaPlaylist, MediaSegment, Resolution, VariantStream,
@@ -17,7 +16,9 @@ use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
 
+use crate::Result;
 use crate::container::fmp4::Import as Fmp4;
+use crate::container::hls::Error;
 
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]
@@ -38,9 +39,9 @@ impl Config {
 	/// Parse the playlist string into a URL.
 	/// If it starts with http:// or https://, parse as URL.
 	/// Otherwise, treat as a file path and convert to file:// URL.
-	fn parse_playlist(&self) -> anyhow::Result<Url> {
+	fn parse_playlist(&self) -> Result<Url> {
 		if self.playlist.starts_with("http://") || self.playlist.starts_with("https://") {
-			Url::parse(&self.playlist).context("invalid playlist URL")
+			Url::parse(&self.playlist).map_err(|_| Error::InvalidPlaylistUrl.into())
 		} else {
 			let path = PathBuf::from(&self.playlist);
 			let absolute = if path.is_absolute() {
@@ -48,7 +49,7 @@ impl Config {
 			} else {
 				std::env::current_dir()?.join(path)
 			};
-			Url::from_file_path(&absolute).ok().context("invalid file path")
+			Url::from_file_path(&absolute).map_err(|_| Error::InvalidFilePath.into())
 		}
 	}
 }
@@ -116,7 +117,7 @@ impl Import {
 		broadcast: moq_net::BroadcastProducer,
 		catalog: crate::catalog::hang::Producer,
 		cfg: Config,
-	) -> anyhow::Result<Self> {
+	) -> Result<Self> {
 		let base_url = cfg.parse_playlist()?;
 		let client = cfg.client.unwrap_or_else(|| {
 			Client::builder()
@@ -139,7 +140,7 @@ impl Import {
 	/// Fetch the latest playlist, download the init segment, and prime the importer with a buffer of segments.
 	///
 	/// Returns the number of segments buffered during initialization.
-	pub async fn init(&mut self) -> anyhow::Result<()> {
+	pub async fn init(&mut self) -> Result<()> {
 		let buffered = self.prime().await?;
 		if buffered == 0 {
 			warn!("HLS playlist had no new segments during init step");
@@ -150,7 +151,7 @@ impl Import {
 	}
 
 	/// Run the ingest loop until cancelled.
-	pub async fn run(&mut self) -> anyhow::Result<()> {
+	pub async fn run(&mut self) -> Result<()> {
 		loop {
 			let outcome = self.step().await?;
 			let delay = self.refresh_delay(outcome.target_duration, outcome.wrote_segments);
@@ -167,7 +168,7 @@ impl Import {
 	}
 
 	/// Internal: fetch the latest playlist, download the init segment, and buffer segments.
-	async fn prime(&mut self) -> anyhow::Result<usize> {
+	async fn prime(&mut self) -> Result<usize> {
 		self.ensure_tracks().await?;
 
 		let mut buffered = 0usize;
@@ -205,7 +206,7 @@ impl Import {
 	/// This fetches the current media playlists, consumes any fresh segments,
 	/// and returns how many segments were written along with the target
 	/// duration to guide scheduling of the next step.
-	async fn step(&mut self) -> anyhow::Result<StepOutcome> {
+	async fn step(&mut self) -> Result<StepOutcome> {
 		self.ensure_tracks().await?;
 
 		let mut wrote = 0usize;
@@ -257,17 +258,16 @@ impl Import {
 		base
 	}
 
-	async fn fetch_media_playlist(&self, url: Url) -> anyhow::Result<MediaPlaylist> {
+	async fn fetch_media_playlist(&self, url: Url) -> Result<MediaPlaylist> {
 		let body = self.fetch_bytes(url).await?;
 
 		// Nom errors take ownership of the input, so we need to stringify any error messages.
-		let playlist = m3u8_rs::parse_media_playlist_res(&body)
-			.map_err(|e| anyhow::anyhow!("failed to parse media playlist: {}", e))?;
+		let playlist = m3u8_rs::parse_media_playlist_res(&body).map_err(|e| Error::ParsePlaylist(e.to_string()))?;
 
 		Ok(playlist)
 	}
 
-	async fn ensure_tracks(&mut self) -> anyhow::Result<()> {
+	async fn ensure_tracks(&mut self) -> Result<()> {
 		// Tracks already discovered.
 		if !self.video.is_empty() {
 			return Ok(());
@@ -276,7 +276,9 @@ impl Import {
 		let body = self.fetch_bytes(self.base_url.clone()).await?;
 		if let Ok((_, master)) = m3u8_rs::parse_master_playlist(&body) {
 			let variants = select_variants(&master);
-			anyhow::ensure!(!variants.is_empty(), "no usable variants found in master playlist");
+			if variants.is_empty() {
+				return Err(Error::NoVariants.into());
+			}
 
 			// Create a video track state for every usable variant.
 			for variant in &variants {
@@ -319,7 +321,7 @@ impl Import {
 		track: &mut TrackState,
 		playlist: &MediaPlaylist,
 		limit: Option<usize>,
-	) -> anyhow::Result<usize> {
+	) -> Result<usize> {
 		self.ensure_init_segment(kind, track, playlist).await?;
 
 		let next_seq = track.next_sequence.unwrap_or(0);
@@ -383,12 +385,12 @@ impl Import {
 		kind: TrackKind,
 		track: &mut TrackState,
 		playlist: &MediaPlaylist,
-	) -> anyhow::Result<()> {
+	) -> Result<()> {
 		if track.init_ready {
 			return Ok(());
 		}
 
-		let map = self.find_map(playlist).context("playlist missing EXT-X-MAP")?;
+		let map = self.find_map(playlist).ok_or(Error::MissingMap)?;
 
 		let url = resolve_uri(&track.playlist, &map.uri)?;
 		let mut bytes = self.fetch_bytes(url).await?;
@@ -397,13 +399,14 @@ impl Import {
 			TrackKind::Audio => self.ensure_audio_importer(),
 		};
 
-		importer.decode(&mut bytes).context("init segment parse error")?;
+		importer.decode(&mut bytes)?;
 
-		anyhow::ensure!(bytes.is_empty(), "init segment was not fully consumed");
-		anyhow::ensure!(
-			importer.is_initialized(),
-			"init segment did not initialize the importer"
-		);
+		if !bytes.is_empty() {
+			return Err(Error::InitNotConsumed.into());
+		}
+		if !importer.is_initialized() {
+			return Err(Error::InitNotInitialized.into());
+		}
 
 		track.init_ready = true;
 		info!(?kind, "loaded HLS init segment");
@@ -416,8 +419,10 @@ impl Import {
 		track: &mut TrackState,
 		segment: &MediaSegment,
 		sequence: u64,
-	) -> anyhow::Result<()> {
-		anyhow::ensure!(!segment.uri.is_empty(), "encountered segment with empty URI");
+	) -> Result<()> {
+		if segment.uri.is_empty() {
+			return Err(Error::EmptySegmentUri.into());
+		}
 
 		let url = resolve_uri(&track.playlist, &segment.uri)?;
 		let mut bytes = self.fetch_bytes(url).await?;
@@ -438,13 +443,10 @@ impl Import {
 
 		// Final check after ensuring init segment
 		if !importer.is_initialized() {
-			return Err(anyhow::anyhow!(
-				"importer not initialized for {:?} after ensure_init_segment - init segment processing failed",
-				kind
-			));
+			return Err(Error::ImporterNotInitialized(format!("{:?}", kind)).into());
 		}
 
-		importer.decode(&mut bytes).context("failed to parse media segment")?;
+		importer.decode(&mut bytes)?;
 		track.next_sequence = Some(sequence + 1);
 
 		Ok(())
@@ -454,15 +456,15 @@ impl Import {
 		playlist.segments.iter().find_map(|segment| segment.map.as_ref())
 	}
 
-	async fn fetch_bytes(&self, url: Url) -> anyhow::Result<Bytes> {
+	async fn fetch_bytes(&self, url: Url) -> Result<Bytes> {
 		if url.scheme() == "file" {
-			let path = url.to_file_path().ok().context("invalid file URL")?;
-			let bytes = tokio::fs::read(&path).await.context("failed to read file")?;
+			let path = url.to_file_path().map_err(|_| Error::InvalidFileUrl)?;
+			let bytes = tokio::fs::read(&path).await.map_err(Error::from)?;
 			Ok(Bytes::from(bytes))
 		} else {
-			let response = self.client.get(url).send().await?;
-			let response = response.error_for_status()?;
-			let bytes = response.bytes().await.context("failed to read response body")?;
+			let response = self.client.get(url).send().await.map_err(Error::from)?;
+			let response = response.error_for_status().map_err(Error::from)?;
+			let bytes = response.bytes().await.map_err(Error::from)?;
 			Ok(bytes)
 		}
 	}

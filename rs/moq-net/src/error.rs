@@ -86,6 +86,10 @@ pub enum Error {
 	#[error("cache full")]
 	CacheFull,
 
+	/// A frame declared a payload size larger than the receiver accepts.
+	#[error("frame too large")]
+	FrameTooLarge,
+
 	/// A remote error received via a stream/session reset code.
 	#[error("remote error: code={0}")]
 	Remote(u32),
@@ -118,6 +122,7 @@ impl Error {
 			Self::Dropped => 24,
 			Self::Closed => 25,
 			Self::CacheFull => 26,
+			Self::FrameTooLarge => 27,
 			Self::App(app) => *app as u32 + 64,
 			Self::Remote(code) => *code,
 		}

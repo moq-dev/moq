@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/moq-dev/moq/compare/hang-v0.17.0...hang-v0.18.0) - 2026-05-24
+
+### Other
+
+- non_exhaustive VideoConfig/AudioConfig with constructors ([#1485](https://github.com/moq-dev/moq/pull/1485))
+
 ## [0.17.0](https://github.com/moq-dev/moq/compare/hang-v0.16.1...hang-v0.17.0) - 2026-05-23
 
 ### Other

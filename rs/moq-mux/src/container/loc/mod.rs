@@ -7,20 +7,27 @@
 
 use std::task::Poll;
 
-use crate::container::{Container, Frame, Timestamp};
+use moq_net::{Timescale, Timestamp};
+
+use crate::container::{Container, Frame};
+
+/// LOC's catalog convention: timestamps are in microseconds when no per-frame
+/// 0x08 timescale property is present.
+const DEFAULT_TIMESCALE: Timescale = Timescale::MICRO;
 
 /// LOC wire format. Each moq frame holds one LOC frame.
 #[derive(Default)]
 pub struct Wire;
-
-const DEFAULT_TIMESCALE: u64 = 1_000_000;
 
 impl Container for Wire {
 	type Error = crate::Error;
 
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		for frame in frames {
-			let data = moq_loc::encode(frame.timestamp.as_micros() as u64, &frame.payload)?;
+			// LOC's wire format omits per-frame timescale by convention; the catalog
+			// default is microseconds, so convert at the boundary.
+			let timestamp = frame.timestamp.convert(DEFAULT_TIMESCALE).map_err(hang::Error::from)?;
+			let data = moq_loc::encode(timestamp.value(), &frame.payload)?;
 
 			let mut chunked = group.create_frame(data.len().into())?;
 			chunked.write(data)?;
@@ -41,8 +48,14 @@ impl Container for Wire {
 		};
 
 		let loc = moq_loc::decode(data)?;
-		let timescale = loc.timescale.unwrap_or(DEFAULT_TIMESCALE);
-		let timestamp = Timestamp::from_scale(loc.timestamp, timescale).map_err(hang::Error::from)?;
+		// `loc.timescale == Some(0)` is a malformed wire (caught by moq_loc::decode itself),
+		// so any Some(_) we see here is non-zero. Falling back to the catalog default
+		// keeps this code path infallible.
+		let scale = loc
+			.timescale
+			.and_then(|s| Timescale::new(s).ok())
+			.unwrap_or(DEFAULT_TIMESCALE);
+		let timestamp = Timestamp::new(loc.timestamp, scale).map_err(hang::Error::from)?;
 
 		Poll::Ready(Ok(Some(vec![Frame {
 			timestamp,

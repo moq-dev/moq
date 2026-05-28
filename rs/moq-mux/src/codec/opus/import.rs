@@ -19,7 +19,7 @@ impl Import {
 		mut broadcast: moq_net::BroadcastProducer,
 		mut catalog: crate::catalog::hang::Producer,
 		config: Config,
-	) -> anyhow::Result<Self> {
+	) -> crate::Result<Self> {
 		let track = broadcast.unique_track(".opus")?;
 
 		let mut audio_config = hang::catalog::AudioConfig::new(
@@ -46,12 +46,18 @@ impl Import {
 	}
 
 	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
 		Ok(())
 	}
 
-	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
+	/// Close the current group and open the next one at `sequence`.
+	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
+		self.track.seek(sequence)?;
+		Ok(())
+	}
+
+	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		let pts = self.pts(pts)?;
 
 		// Collect the input into a contiguous Bytes payload.
@@ -77,15 +83,13 @@ impl Import {
 		Ok(())
 	}
 
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
+	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(crate::container::Timestamp::from_micros(
-			zero.elapsed().as_micros() as u64
-		)?)
+		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
 

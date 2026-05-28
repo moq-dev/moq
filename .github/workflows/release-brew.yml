@@ -19,7 +19,6 @@ on:
     workflows:
       - moq-relay
       - moq-cli
-      - moq-clock
       - moq-token-cli
       - moq-gst
     types:
@@ -116,9 +115,11 @@ jobs:
           fi
           crate="${BASH_REMATCH[1]}"
           version="${BASH_REMATCH[2]}"
-          echo "crate=$crate" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo "crate=$crate"
+            echo "version=$version"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
           echo "Crate: $crate"
           echo "Version: $version"
 
@@ -211,7 +212,6 @@ jobs:
           brew tap moq-dev/tap
           brew install moq-dev/tap/moq-relay
           brew install moq-dev/tap/moq-cli
-          brew install moq-dev/tap/moq-clock
           brew install moq-dev/tap/moq-token-cli
           brew install moq-dev/tap/moq-gst
           ```

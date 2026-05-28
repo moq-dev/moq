@@ -8,13 +8,19 @@ import { type Reader, Stream } from "../stream.ts";
 import type * as Time from "../time.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
+import { withTimeout } from "../util/timeout.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
-import { decodeSubscribeResponse, Subscribe } from "./subscribe.ts";
+import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { Version } from "./version.ts";
+
+// Bound on how long stream-open plus SUBSCRIBE_OK may take. Browsers cap
+// concurrent QUIC streams (Chrome ~100); past the cap createBidirectionalStream
+// silently blocks. The timeout turns that into a clear error.
+const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
 
 /**
  * Options accepted by {@link Subscriber.announced}.
@@ -180,19 +186,52 @@ export class Subscriber {
 
 		const msg = new Subscribe({ id, broadcast, track: request.track.name, priority: request.priority });
 
-		const stream = await Stream.open(this.#quic);
-		await stream.writer.u53(StreamId.Subscribe);
-		await msg.encode(stream.writer, this.version);
+		// Open the stream and wait for SUBSCRIBE_OK under a timeout. The stream
+		// handle flows back via `state` so the timeout path can abort it if it
+		// finishes opening after the deadline.
+		const state: { stream?: Stream } = {};
+		const setup = this.#openSubscribe(state, msg);
+
+		let stream: Stream;
+		try {
+			stream = await withTimeout(
+				setup,
+				SUBSCRIBE_OK_TIMEOUT_MS,
+				`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
+			);
+			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
+		} catch (err) {
+			const e = error(err);
+			request.track.close(e);
+			this.#subscribes.delete(id);
+			console.warn(
+				`subscribe error: id=${id} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
+			);
+			// If the stream eventually opens after the timeout, abort it so we
+			// don't leak it. Cover both branches: setup may resolve late, or it
+			// may reject (e.g. encode/decode failure) after the stream is open.
+			setup.then(
+				() => state.stream?.abort(e),
+				() => state.stream?.abort(e),
+			);
+			return;
+		}
 
 		try {
-			// The first response MUST be a SUBSCRIBE_OK.
-			const resp = await decodeSubscribeResponse(stream.reader, this.version);
-			if (!("ok" in resp)) {
-				throw new Error("first subscribe response must be SUBSCRIBE_OK");
+			// Watch for priority changes and send SUBSCRIBE_UPDATE. Lite01/Lite02
+			// don't carry SUBSCRIBE_UPDATE on the wire, so skip the watcher there
+			// and just wait on the stream/track like before.
+			const waits: Promise<unknown>[] = [stream.reader.closed, request.track.closed];
+			switch (this.version) {
+				case Version.DRAFT_01:
+				case Version.DRAFT_02:
+					break;
+				default:
+					waits.push(this.#runPriorityUpdates(id, broadcast, request.track, msg, stream));
+					break;
 			}
-			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
 
-			await Promise.race([stream.reader.closed, request.track.closed]);
+			await Promise.race(waits);
 
 			request.track.close();
 			stream.close();
@@ -206,6 +245,67 @@ export class Subscriber {
 			stream.abort(e);
 		} finally {
 			this.#subscribes.delete(id);
+		}
+	}
+
+	// Opens the subscribe stream, sends SUBSCRIBE, and reads SUBSCRIBE_OK.
+	// `state.stream` is populated as soon as the stream opens so the caller
+	// can clean it up on timeout even before this promise settles.
+	async #openSubscribe(state: { stream?: Stream }, msg: Subscribe): Promise<Stream> {
+		state.stream = await Stream.open(this.#quic);
+		await state.stream.writer.u53(StreamId.Subscribe);
+		await msg.encode(state.stream.writer, this.version);
+
+		// The first response MUST be a SUBSCRIBE_OK.
+		const resp = await decodeSubscribeResponse(state.stream.reader, this.version);
+		if (!("ok" in resp)) {
+			throw new Error("first subscribe response must be SUBSCRIBE_OK");
+		}
+		return state.stream;
+	}
+
+	/**
+	 * Send SUBSCRIBE_UPDATE messages whenever the track's priority signal changes.
+	 *
+	 * Resolves cleanly when the stream or track closes, so the caller can include
+	 * this in Promise.race without leaving a dangling pending write that would
+	 * become an unhandled rejection if the user calls updatePriority after close.
+	 *
+	 * Peeks the signal at the top of every iteration so that updates which landed
+	 * before SubscribeOk arrived (or between iterations, before .next() registered
+	 * its listener) aren't lost.
+	 */
+	async #runPriorityUpdates(
+		id: bigint,
+		broadcast: Path.Valid,
+		track: Track,
+		msg: Subscribe,
+		stream: Stream,
+	): Promise<void> {
+		const stopped: Promise<null> = Promise.race([track.closed, stream.reader.closed]).then(() => null);
+		let lastSent: number | undefined;
+
+		for (;;) {
+			const current = track.state.priority.peek();
+			if (current === undefined || current === lastSent) {
+				// Nothing new to send; wait for a change or termination.
+				const next = await Promise.race([track.state.priority.next(), stopped]);
+				if (next === null) return;
+				continue;
+			}
+
+			// Round-trip the other Subscribe parameters so the publisher doesn't
+			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxLatency/etc.
+			const update = new SubscribeUpdate({
+				priority: current,
+				ordered: msg.ordered,
+				maxLatency: msg.maxLatency,
+				startGroup: msg.startGroup,
+				endGroup: msg.endGroup,
+			});
+			await update.encode(stream.writer, this.version);
+			lastSent = current;
+			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name} priority=${current}`);
 		}
 	}
 

@@ -11,6 +11,19 @@ use bytes::{Buf, Bytes};
 
 const OPUS_HEAD: u64 = u64::from_be_bytes(*b"OpusHead");
 
+/// Opus parsing errors.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("OpusHead must be at least 19 bytes")]
+	HeadTooShort,
+
+	#[error("invalid OpusHead signature")]
+	InvalidSignature,
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
 /// Typed Opus configuration mirroring the parsed fields of an OpusHead packet.
 pub struct Config {
 	pub sample_rate: u32,
@@ -23,10 +36,14 @@ impl Config {
 	/// Verifies the magic signature; reads channel count and sample rate;
 	/// ignores pre-skip, gain, and channel mapping. Any trailing bytes are
 	/// consumed.
-	pub fn parse<T: Buf>(buf: &mut T) -> anyhow::Result<Self> {
-		anyhow::ensure!(buf.remaining() >= 19, "OpusHead must be at least 19 bytes");
+	pub fn parse<T: Buf>(buf: &mut T) -> Result<Self> {
+		if buf.remaining() < 19 {
+			return Err(Error::HeadTooShort);
+		}
 		let signature = buf.get_u64();
-		anyhow::ensure!(signature == OPUS_HEAD, "invalid OpusHead signature");
+		if signature != OPUS_HEAD {
+			return Err(Error::InvalidSignature);
+		}
 
 		buf.advance(1); // Skip version
 		let channel_count = buf.get_u8() as u32;

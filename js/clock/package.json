@@ -5,6 +5,7 @@
 	"description": "MoQ clock example with publish/subscribe functionality",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
+	"private": true,
 	"files": [
 		"./src",
 		"README.md"

@@ -4,6 +4,7 @@ import { Group } from "./group.ts";
 export class TrackState {
 	groups = new Signal<Group[]>([]);
 	closed = new Signal<boolean | Error>(false);
+	priority = new Signal<number | undefined>(undefined);
 }
 
 export class Track {
@@ -209,6 +210,14 @@ export class Track {
 		if (!next) return undefined;
 		if (next.byteLength !== 1 || !(next[0] === 0 || next[0] === 1)) throw new Error("invalid bool frame");
 		return next[0] === 1;
+	}
+
+	/**
+	 * Update the subscription priority. Triggers a SUBSCRIBE_UPDATE
+	 * to the publisher when used on a subscribed track.
+	 */
+	updatePriority(priority: number) {
+		this.state.priority.set(priority, true);
 	}
 
 	/**

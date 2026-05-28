@@ -23,3 +23,19 @@ indent_size = 2
 [**.nix]
 indent_style = space
 indent_size = 2
+
+# shfmt reads these natively. Match existing script style to keep
+# the format pass minimal.
+[*.sh]
+indent_style = space
+indent_size = 4
+switch_case_indent = true
+
+[demo/throttle/enable]
+indent_style = space
+indent_size = 4
+switch_case_indent = true
+
+# Skip vendored / build output trees when shfmt walks the repo.
+[{node_modules,target,dist,.venv}/**]
+ignore = true

@@ -31,22 +31,49 @@ ARCHIVE=true
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --version) VERSION="$2"; shift 2;;
-        --lib-dir) LIB_DIR="$2"; shift 2;;
-        --bindings-dir) BINDINGS_DIR="$2"; shift 2;;
-        --output) OUTPUT_DIR="$2"; shift 2;;
-        --no-archive) ARCHIVE=false; shift;;
-        -h|--help)
+        --version)
+            VERSION="$2"
+            shift 2
+            ;;
+        --lib-dir)
+            LIB_DIR="$2"
+            shift 2
+            ;;
+        --bindings-dir)
+            BINDINGS_DIR="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --no-archive)
+            ARCHIVE=false
+            shift
+            ;;
+        -h | --help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
-        *) echo "Unknown option: $1" >&2; exit 1;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
     esac
 done
 
-[[ -z "$VERSION" ]] && { echo "Error: --version is required" >&2; exit 1; }
-[[ -z "$LIB_DIR" ]] && { echo "Error: --lib-dir is required" >&2; exit 1; }
-[[ -z "$BINDINGS_DIR" ]] && { echo "Error: --bindings-dir is required" >&2; exit 1; }
+[[ -z "$VERSION" ]] && {
+    echo "Error: --version is required" >&2
+    exit 1
+}
+[[ -z "$LIB_DIR" ]] && {
+    echo "Error: --lib-dir is required" >&2
+    exit 1
+}
+[[ -z "$BINDINGS_DIR" ]] && {
+    echo "Error: --bindings-dir is required" >&2
+    exit 1
+}
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="dist"
 
 mkdir -p "$OUTPUT_DIR"
@@ -70,13 +97,19 @@ done
 
 # Dual-license files lifted from the workspace root.
 for license in LICENSE-MIT LICENSE-APACHE; do
-    [[ -f "$WORKSPACE_DIR/$license" ]] || { echo "Error: missing $WORKSPACE_DIR/$license" >&2; exit 1; }
+    [[ -f "$WORKSPACE_DIR/$license" ]] || {
+        echo "Error: missing $WORKSPACE_DIR/$license" >&2
+        exit 1
+    }
     cp "$WORKSPACE_DIR/$license" "$PKG_STAGE/$license"
 done
 
 # --- 2. Generated uniffi-bindgen-go output ---
 GENERATED_GO="$BINDINGS_DIR/moq/moq.go"
-[[ -f "$GENERATED_GO" ]] || { echo "Error: uniffi-bindgen-go output not found at $GENERATED_GO" >&2; exit 1; }
+[[ -f "$GENERATED_GO" ]] || {
+    echo "Error: uniffi-bindgen-go output not found at $GENERATED_GO" >&2
+    exit 1
+}
 cp "$GENERATED_GO" "$PKG_STAGE/moq/moq.go"
 
 # --- 3. Per-target static libraries ---
@@ -115,7 +148,7 @@ fi
 # --- 4. Minimal consumer-facing README rewrite ---
 # The full developer README lives in the monorepo; the staged copy
 # (which ends up on moq-dev/moq-go) gets a thin orientation pointer.
-cat > "$PKG_STAGE/README.md" <<EOF
+cat >"$PKG_STAGE/README.md" <<EOF
 # Moq (Go module)
 
 Auto-generated mirror of the Go module for [Media over QUIC](https://github.com/moq-dev/moq).

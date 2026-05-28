@@ -2,16 +2,18 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io::Cursor;
 
-use crate::container::Timestamp;
-use anyhow::Context;
+use crate::Result;
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
+use moq_net::Timestamp;
 use mp4_atom::Atom;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use webm_iterable::WebmIterator;
 use webm_iterable::errors::TagIteratorError;
 use webm_iterable::iterator::AllowableErrors;
 use webm_iterable::matroska_spec::{Master, MatroskaSpec, SimpleBlock};
+
+use super::Error;
 
 /// Default Matroska TimestampScale: 1 ms (in nanoseconds).
 const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
@@ -86,7 +88,7 @@ impl Import {
 	}
 
 	/// Decode from an asynchronous reader. Drives [`Self::decode`] in a loop.
-	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> anyhow::Result<()> {
+	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> Result<()> {
 		let mut chunk = BytesMut::with_capacity(64 * 1024);
 		loop {
 			chunk.clear();
@@ -104,7 +106,7 @@ impl Import {
 	/// The buffer is fully consumed on every call (data is moved into the internal
 	/// scratch). Bytes that cannot yet form a complete top-level tag are retained
 	/// for the next call.
-	pub fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+	pub fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		// Move the input into our scratch buffer.
 		while buf.has_remaining() {
 			let chunk = buf.chunk();
@@ -123,7 +125,7 @@ impl Import {
 	/// blocks). After parsing stops (UnexpectedEOF or end of buffer), bytes up to the start
 	/// of the most-recently emitted top-level tag are discarded so memory does not grow
 	/// unboundedly.
-	fn drain(&mut self) -> anyhow::Result<()> {
+	fn drain(&mut self) -> Result<()> {
 		// Buffer master tags that are bounded and convenient to handle atomically.
 		let buffered = [
 			MatroskaSpec::Ebml(Master::Start),
@@ -160,8 +162,8 @@ impl Import {
 					self.handle_tag(tag)?;
 				}
 				Some(Err(TagIteratorError::UnexpectedEOF { .. })) => break,
-				Some(Err(e)) => {
-					return Err(anyhow::Error::new(e).context("matroska parse error"));
+				Some(Err(_e)) => {
+					return Err(Error::MatroskaParse.into());
 				}
 				None => {
 					last_offset = snapshot.len();
@@ -182,7 +184,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn handle_tag(&mut self, tag: MatroskaSpec) -> anyhow::Result<()> {
+	fn handle_tag(&mut self, tag: MatroskaSpec) -> Result<()> {
 		match tag {
 			MatroskaSpec::Ebml(Master::Full(children)) => {
 				self.handle_ebml(&children)?;
@@ -214,7 +216,7 @@ impl Import {
 				self.cluster_timestamp = v;
 			}
 			MatroskaSpec::SimpleBlock(ref data) => {
-				let sb = SimpleBlock::try_from(data.as_slice()).context("invalid SimpleBlock")?;
+				let sb = SimpleBlock::try_from(data.as_slice()).map_err(|_| Error::InvalidSimpleBlock)?;
 				self.handle_block(sb.track, sb.timestamp, sb.keyframe, sb.raw_frame_data())?;
 			}
 			MatroskaSpec::BlockGroup(Master::Full(children)) => {
@@ -226,19 +228,19 @@ impl Import {
 		Ok(())
 	}
 
-	fn handle_ebml(&self, children: &[MatroskaSpec]) -> anyhow::Result<()> {
+	fn handle_ebml(&self, children: &[MatroskaSpec]) -> Result<()> {
 		for c in children {
 			if let MatroskaSpec::DocType(doc) = c {
 				match doc.as_str() {
 					"matroska" | "webm" => return Ok(()),
-					other => anyhow::bail!("unsupported EBML DocType: {}", other),
+					other => return Err(Error::UnsupportedDocType(other.to_string()).into()),
 				}
 			}
 		}
-		anyhow::bail!("EBML header missing DocType");
+		Err(Error::MissingDocType.into())
 	}
 
-	fn handle_tracks(&mut self, entries: Vec<MatroskaSpec>) -> anyhow::Result<()> {
+	fn handle_tracks(&mut self, entries: Vec<MatroskaSpec>) -> Result<()> {
 		for entry in entries {
 			if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry {
 				if let Err(e) = self.add_track(children) {
@@ -249,7 +251,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn add_track(&mut self, children: Vec<MatroskaSpec>) -> anyhow::Result<()> {
+	fn add_track(&mut self, children: Vec<MatroskaSpec>) -> Result<()> {
 		let mut track_number: Option<u64> = None;
 		let mut track_type: Option<u64> = None;
 		let mut codec_id: Option<String> = None;
@@ -269,9 +271,9 @@ impl Import {
 			}
 		}
 
-		let track_number = track_number.context("TrackEntry missing TrackNumber")?;
-		let track_type = track_type.context("TrackEntry missing TrackType")?;
-		let codec_id = codec_id.context("TrackEntry missing CodecID")?;
+		let track_number = track_number.ok_or(Error::MissingTrackNumber)?;
+		let track_type = track_type.ok_or(Error::MissingTrackType)?;
+		let codec_id = codec_id.ok_or(Error::MissingCodecId)?;
 
 		// Matroska TrackType: 1 = video, 2 = audio.
 		let (kind, suffix) = match track_type {
@@ -313,7 +315,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn handle_block_group(&mut self, children: &[MatroskaSpec]) -> anyhow::Result<()> {
+	fn handle_block_group(&mut self, children: &[MatroskaSpec]) -> Result<()> {
 		let mut block_data: Option<&[u8]> = None;
 		let mut has_reference = false;
 
@@ -332,21 +334,24 @@ impl Import {
 		// `Block` has the same on-wire header as `SimpleBlock` minus the keyframe flag.
 		// We parse it via `SimpleBlock::try_from` (which works on the raw slice) but
 		// derive keyframe from the absence of `ReferenceBlock`.
-		let parsed = SimpleBlock::try_from(data).context("invalid Block payload")?;
+		let parsed = SimpleBlock::try_from(data).map_err(|_| Error::InvalidBlock)?;
 		let keyframe = !has_reference;
 
 		self.handle_block(parsed.track, parsed.timestamp, keyframe, parsed.raw_frame_data())
 	}
 
-	fn handle_block(&mut self, track_number: u64, rel_ts: i16, keyframe: bool, payload: &[u8]) -> anyhow::Result<()> {
+	fn handle_block(&mut self, track_number: u64, rel_ts: i16, keyframe: bool, payload: &[u8]) -> Result<()> {
 		let Some(track) = self.tracks.get_mut(&track_number) else {
 			// Unknown or skipped track.
 			return Ok(());
 		};
 
-		// Compute PTS in nanoseconds, then convert to the Timestamp's microsecond timescale.
+		// Compute PTS in MKV's native nanosecond units and stamp it on the
+		// timestamp at NANO scale so a passthrough re-emit preserves precision.
 		let block_ticks = (self.cluster_timestamp as i64) + (rel_ts as i64);
-		anyhow::ensure!(block_ticks >= 0, "negative block timestamp");
+		if block_ticks < 0 {
+			return Err(Error::NegativeBlockTimestamp.into());
+		}
 
 		// Skip blocks we've already emitted on a previous decode() pass (buffer replay).
 		if let Some(last) = track.last_emitted_ticks
@@ -358,7 +363,7 @@ impl Import {
 
 		let pts_ns = (block_ticks as u64)
 			.checked_mul(self.timestamp_scale_ns)
-			.context("timestamp overflow")?;
+			.ok_or(Error::TimestampOverflow)?;
 		let timestamp = Timestamp::from_nanos(pts_ns)?;
 
 		// Audio tracks: always treat as keyframes (matches fmp4 behavior).
@@ -389,8 +394,19 @@ impl Import {
 		Ok(())
 	}
 
+	/// Close the current group on every track and open the next one at `sequence`.
+	///
+	/// Broadcast-wide: every track inside this MKV import advances together; per-track
+	/// control is intentionally not exposed.
+	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		for track in self.tracks.values_mut() {
+			track.track.seek(sequence)?;
+		}
+		Ok(())
+	}
+
 	/// Finish all tracks, flushing current groups.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	pub fn finish(&mut self) -> Result<()> {
 		for track in self.tracks.values_mut() {
 			if let Some(mut g) = track.group.take() {
 				g.finish()?;
@@ -421,7 +437,7 @@ fn build_video_config(
 	codec_id: &str,
 	codec_private: Option<&Bytes>,
 	video_children: Option<&[MatroskaSpec]>,
-) -> anyhow::Result<VideoConfig> {
+) -> Result<VideoConfig> {
 	let (width, height) = video_children
 		.map(|cs| {
 			let mut w = None;
@@ -464,7 +480,7 @@ fn build_video_config(
 		"V_MPEG4/ISO/AVC" => build_h264_config(codec_private)?,
 		"V_MPEGH/ISO/HEVC" => build_h265_config(codec_private)?,
 		"V_AV1" => build_av1_config(codec_private)?,
-		other => anyhow::bail!("unsupported video CodecID: {}", other),
+		other => return Err(Error::UnsupportedVideoCodec(other.to_string()).into()),
 	};
 
 	if config.coded_width.is_none() {
@@ -481,7 +497,7 @@ fn build_audio_config(
 	codec_id: &str,
 	codec_private: Option<&Bytes>,
 	audio_children: Option<&[MatroskaSpec]>,
-) -> anyhow::Result<AudioConfig> {
+) -> Result<AudioConfig> {
 	let mut sample_rate: u32 = 0;
 	let mut channels: u32 = 0;
 
@@ -515,7 +531,10 @@ fn build_audio_config(
 			Ok(config)
 		}
 		"A_AAC" => {
-			let priv_data = codec_private.context("A_AAC missing CodecPrivate (AudioSpecificConfig)")?;
+			let priv_data = codec_private.ok_or(Error::MissingCodecPrivate {
+				codec_id: "A_AAC",
+				purpose: "AudioSpecificConfig",
+			})?;
 			let mut cursor = priv_data.clone();
 			let cfg = crate::codec::aac::Config::parse(&mut cursor)?;
 
@@ -536,12 +555,15 @@ fn build_audio_config(
 			config.container = Container::Legacy;
 			Ok(config)
 		}
-		other => anyhow::bail!("unsupported audio CodecID: {}", other),
+		other => Err(Error::UnsupportedAudioCodec(other.to_string()).into()),
 	}
 }
 
-fn build_h264_config(codec_private: Option<&Bytes>) -> anyhow::Result<VideoConfig> {
-	let avcc_bytes = codec_private.context("V_MPEG4/ISO/AVC missing CodecPrivate (AVCDecoderConfigurationRecord)")?;
+fn build_h264_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
+	let avcc_bytes = codec_private.ok_or(Error::MissingCodecPrivate {
+		codec_id: "V_MPEG4/ISO/AVC",
+		purpose: "AVCDecoderConfigurationRecord",
+	})?;
 	let avcc = crate::codec::h264::Avcc::parse(avcc_bytes)?;
 
 	let mut config = VideoConfig::new(H264 {
@@ -557,10 +579,13 @@ fn build_h264_config(codec_private: Option<&Bytes>) -> anyhow::Result<VideoConfi
 	Ok(config)
 }
 
-fn build_h265_config(codec_private: Option<&Bytes>) -> anyhow::Result<VideoConfig> {
-	let hvcc_data = codec_private.context("V_MPEGH/ISO/HEVC missing CodecPrivate (HEVCDecoderConfigurationRecord)")?;
+fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
+	let hvcc_data = codec_private.ok_or(Error::MissingCodecPrivate {
+		codec_id: "V_MPEGH/ISO/HEVC",
+		purpose: "HEVCDecoderConfigurationRecord",
+	})?;
 	let mut cursor = Cursor::new(hvcc_data.as_ref());
-	let hvcc = mp4_atom::Hvcc::decode_body(&mut cursor).context("invalid HEVCDecoderConfigurationRecord")?;
+	let hvcc = mp4_atom::Hvcc::decode_body(&mut cursor).map_err(|_| Error::InvalidHvcc)?;
 
 	let mut description = BytesMut::new();
 	hvcc.encode_body(&mut description)?;
@@ -579,10 +604,13 @@ fn build_h265_config(codec_private: Option<&Bytes>) -> anyhow::Result<VideoConfi
 	Ok(config)
 }
 
-fn build_av1_config(codec_private: Option<&Bytes>) -> anyhow::Result<VideoConfig> {
-	let av1c_data = codec_private.context("V_AV1 missing CodecPrivate (AV1CodecConfigurationRecord)")?;
+fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
+	let av1c_data = codec_private.ok_or(Error::MissingCodecPrivate {
+		codec_id: "V_AV1",
+		purpose: "AV1CodecConfigurationRecord",
+	})?;
 	let mut cursor = Cursor::new(av1c_data.as_ref());
-	let av1c = mp4_atom::Av1c::decode_body(&mut cursor).context("invalid AV1CodecConfigurationRecord")?;
+	let av1c = mp4_atom::Av1c::decode_body(&mut cursor).map_err(|_| Error::InvalidAv1c)?;
 
 	let mut description = BytesMut::new();
 	av1c.encode_body(&mut description)?;

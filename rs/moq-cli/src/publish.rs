@@ -24,8 +24,8 @@ impl PublishDecoder {
 	/// Decode a chunk of bytes from stdin (Avc3 or Fmp4 only).
 	fn decode_buf(&mut self, buffer: &mut bytes::BytesMut) -> anyhow::Result<()> {
 		match self {
-			Self::Avc3(d) => d.decode_stream(buffer, None),
-			Self::Fmp4(d) => d.decode(buffer),
+			Self::Avc3(d) => Ok(d.decode_stream(buffer, None)?),
+			Self::Fmp4(d) => Ok(d.decode(buffer)?),
 			Self::Hls(_) => unreachable!(),
 		}
 	}
@@ -67,7 +67,7 @@ impl Publish {
 	pub async fn run(mut self) -> anyhow::Result<()> {
 		if let PublishDecoder::Hls(decoder) = &mut self.decoder {
 			decoder.init().await?;
-			decoder.run().await
+			Ok(decoder.run().await?)
 		} else {
 			let mut stdin = tokio::io::stdin();
 			let mut buffer = bytes::BytesMut::new();

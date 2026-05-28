@@ -180,14 +180,17 @@ in
         # Generate cluster token for leaf nodes
         ${lib.optionalString
           (cfg.cluster.mode == "leaf" && cfg.auth.enable && cfg.cluster.tokenFile == null)
-          (let
-            keyPath = if cfg.auth.keyFile != null then cfg.auth.keyFile else "${cfg.stateDir}/root.jwk";
-          in ''
-            ${pkgs.moq-token-cli}/bin/moq-token-cli --key "${keyPath}" sign \
-              --subscribe "" --publish "" --cluster \
-              > "${cfg.stateDir}/cluster.jwt"
-            chown ${cfg.user}:${cfg.group} "${cfg.stateDir}/cluster.jwt"
-          '')
+          (
+            let
+              keyPath = if cfg.auth.keyFile != null then cfg.auth.keyFile else "${cfg.stateDir}/root.jwk";
+            in
+            ''
+              ${pkgs.moq-token-cli}/bin/moq-token-cli --key "${keyPath}" sign \
+                --subscribe "" --publish "" --cluster \
+                > "${cfg.stateDir}/cluster.jwt"
+              chown ${cfg.user}:${cfg.group} "${cfg.stateDir}/cluster.jwt"
+            ''
+          )
         }
       '';
 

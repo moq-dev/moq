@@ -10,7 +10,7 @@ use crate::{
 	coding::{Stream, Writer},
 	lite::{
 		self,
-		priority::{PriorityHandle, PriorityQueue},
+		priority::{Priority, PriorityHandle, PriorityQueue},
 	},
 	model::GroupConsumer,
 };
@@ -377,14 +377,29 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
 
+		// Track-level subscriber priority. SUBSCRIBE_UPDATE messages broadcast new values
+		// to both run_track (so future groups inherit the new priority) and serve_group
+		// tasks (so in-flight groups update via PriorityHandle::set_track).
+		let (track_priority_tx, track_priority_rx) = tokio::sync::watch::channel(track.priority);
 		let track_stats = std::sync::Arc::new(track_stats);
+
 		tokio::select! {
-			res = Self::run_track(session, track, subscribe, priority, track_stats, version) => res?,
-			res = stream.reader.closed() => res?,
+			res = Self::run_track(session, track, subscribe, priority, track_stats, track_priority_rx, version) => res?,
+			res = Self::run_subscribe_updates(&mut stream.reader, &track_priority_tx) => res?,
 		}
 
 		stream.writer.finish()?;
 		stream.writer.closed().await
+	}
+
+	async fn run_subscribe_updates<R: web_transport_trait::RecvStream>(
+		reader: &mut crate::coding::Reader<R, Version>,
+		priority_tx: &tokio::sync::watch::Sender<u8>,
+	) -> Result<(), Error> {
+		while let Some(upd) = reader.decode_maybe::<lite::SubscribeUpdate>().await? {
+			let _ = priority_tx.send(upd.priority);
+		}
+		Ok(())
 	}
 
 	async fn run_track(
@@ -393,6 +408,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		subscribe: &lite::Subscribe<'_>,
 		priority: PriorityQueue,
 		track_stats: std::sync::Arc<crate::PublisherTrack>,
+		mut track_priority: tokio::sync::watch::Receiver<u8>,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
@@ -421,9 +437,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				sequence,
 			};
 
-			let priority = priority.insert(track.priority, sequence);
+			// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
+			let current_priority = *track_priority.borrow_and_update();
+			let handle = priority.insert(Priority::new(current_priority, sequence));
 			tasks.push(
-				Self::serve_group(session.clone(), msg, priority, group, track_stats.clone(), version).map(|_| ()),
+				Self::serve_group(
+					session.clone(),
+					msg,
+					handle,
+					group,
+					track_stats.clone(),
+					track_priority.clone(),
+					version,
+				)
+				.map(|_| ()),
 			);
 		}
 	}
@@ -434,9 +461,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		mut priority: PriorityHandle,
 		mut group: GroupConsumer,
 		track_stats: std::sync::Arc<crate::PublisherTrack>,
+		mut track_priority: tokio::sync::watch::Receiver<u8>,
 		version: Version,
 	) -> Result<(), Error> {
-		// TODO add a way to open in priority order.
 		let stream = session.open_uni().await.map_err(Error::from_transport)?;
 
 		let mut stream = Writer::new(stream, version);
@@ -450,9 +477,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				biased;
 				_ = stream.closed() => return Err(Error::Cancel),
 				frame = group.next_frame() => frame,
-				// Update the priority if it changes.
-				priority = priority.next() => {
-					stream.set_priority(priority);
+				new_pri = priority.next() => {
+					stream.set_priority(new_pri);
+					continue;
+				}
+				Ok(()) = track_priority.changed() => {
+					priority.set_track(*track_priority.borrow_and_update());
 					continue;
 				}
 			};
@@ -470,9 +500,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					biased;
 					_ = stream.closed() => return Err(Error::Cancel),
 					chunk = frame.read_chunk() => chunk,
-					// Update the priority if it changes.
-					priority = priority.next() => {
-						stream.set_priority(priority);
+					new_pri = priority.next() => {
+						stream.set_priority(new_pri);
+						continue;
+					}
+					Ok(()) = track_priority.changed() => {
+						priority.set_track(*track_priority.borrow_and_update());
 						continue;
 					}
 				};
@@ -480,7 +513,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				match chunk? {
 					Some(mut chunk) => {
 						let n = chunk.len() as u64;
-						stream.write_all(&mut chunk).await?;
+						loop {
+							tokio::select! {
+								biased;
+								result = stream.write_all(&mut chunk) => {
+									result?;
+									break;
+								}
+								new_pri = priority.next() => {
+									stream.set_priority(new_pri);
+								}
+								Ok(()) = track_priority.changed() => {
+									priority.set_track(*track_priority.borrow_and_update());
+								}
+							}
+						}
 						track_stats.bytes(n);
 					}
 					None => break,

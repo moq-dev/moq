@@ -44,7 +44,7 @@ Cancelling the surrounding coroutine scope propagates through to the native cons
 
 `kt/scripts/check.sh` builds `moq-ffi` for the host, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the JNA-resource layout, and runs `gradle :moq:jvmTest`. Run via `just check-ffi`. Skips cleanly without a JDK or `cargo`.
 
-The Android target is opt-in via `-Pandroid.enabled=true`. Local dev without the Android SDK (or without Google maven access) still builds the JVM variant fine. CI sets the flag automatically when packaging.
+The Android target is opt-in via `-Pandroid.enabled=true`. Without the flag the JVM variant builds without an Android SDK, though Gradle still resolves the AGP plugin marker against `google()` at sync time. CI sets the flag automatically when packaging.
 
 ## Layout
 
@@ -54,8 +54,7 @@ kt/
   settings.gradle.kts       include(":moq"), pins AGP version
   gradle.properties         Defaults: version, android.useAndroidX, etc.
   moq/
-    build.gradle.kts        KMP plugin, jvm() always, androidTarget() conditional
-    android.gradle.kts      Applied only when -Pandroid.enabled=true
+    build.gradle.kts        KMP plugin, jvm() always, androidTarget() guarded by -Pandroid.enabled
     src/
       commonMain/           (reserved for future K/N targets)
       jvmAndAndroidMain/

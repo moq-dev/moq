@@ -29,10 +29,6 @@ pub use consumer::Consumer;
 pub use producer::Producer;
 pub(crate) use source::ExportSource;
 
-/// Microsecond presentation timestamp, the canonical timebase for media
-/// frames in moq-mux.
-pub type Timestamp = moq_net::Timescale<1_000_000>;
-
 /// A decoded media frame: timestamp, payload bytes, keyframe flag.
 ///
 /// `payload` is the raw codec bitstream that gets handed to the decoder.
@@ -42,10 +38,13 @@ pub type Timestamp = moq_net::Timescale<1_000_000>;
 pub struct Frame {
 	/// Presentation timestamp.
 	///
-	/// Microsecond precision. Frames within a track must be in *decode*
-	/// order, not display order. B-frames may have non-monotonic
-	/// presentation timestamps.
-	pub timestamp: Timestamp,
+	/// Each container picks its own native scale: fmp4 uses the source
+	/// `mdhd.timescale`, mkv uses nanoseconds, legacy is fixed at microseconds.
+	/// LOC defaults to microseconds but a decoded frame keeps whatever per-frame
+	/// timescale the wire carried, so an exporter can re-emit without forcing
+	/// micros. Frames within a track must be in *decode* order, not display
+	/// order. B-frames may have non-monotonic presentation timestamps.
+	pub timestamp: moq_net::Timestamp,
 
 	/// Encoded codec payload.
 	pub payload: Bytes,

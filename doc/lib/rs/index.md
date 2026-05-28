@@ -158,10 +158,6 @@ See [Authentication guide](/bin/relay/auth) for details.
 
 ## Utilities
 
-### moq-clock
-
-Timing and clock utilities for synchronization.
-
 ### libmoq
 
 [![docs.rs](https://docs.rs/libmoq/badge.svg)](https://docs.rs/libmoq)

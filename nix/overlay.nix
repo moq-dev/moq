@@ -26,14 +26,6 @@ in
     }
   );
 
-  moq-clock = craneLib.buildPackage (
-    crateInfo ../rs/moq-clock/Cargo.toml
-    // {
-      src = craneLib.cleanCargoSource ../.;
-      cargoExtraArgs = "-p moq-clock";
-    }
-  );
-
   moq-cli = craneLib.buildPackage (
     crateInfo ../rs/moq-cli/Cargo.toml
     // {
@@ -56,7 +48,10 @@ in
     // {
       src = craneLib.cleanCargoSource ../.;
       cargoExtraArgs = "-p moq-boy --features jemalloc";
-      nativeBuildInputs = with final; [ pkg-config clang ];
+      nativeBuildInputs = with final; [
+        pkg-config
+        clang
+      ];
       buildInputs = with final; [ ffmpeg ];
       LIBCLANG_PATH = "${final.libclang.lib}/lib";
       # Enable frame pointers for profiling support (negligible overhead on x86_64).
@@ -82,9 +77,7 @@ in
         src = final.lib.cleanSourceWith {
           src = ../.;
           name = "source";
-          filter =
-            path: type:
-            (final.lib.hasSuffix ".pc.in" path) || (craneLib.filterCargoSources path type);
+          filter = path: type: (final.lib.hasSuffix ".pc.in" path) || (craneLib.filterCargoSources path type);
         };
         cargoExtraArgs = "-p libmoq";
         doCheck = false;

@@ -7,8 +7,29 @@ mod import;
 
 pub use import::*;
 
-use anyhow::Context;
 use bytes::{Buf, Bytes};
+
+/// AAC parsing errors.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("AudioSpecificConfig must be at least 2 bytes")]
+	ConfigTooShort,
+
+	#[error("extended audioObjectType requires 2 additional bytes")]
+	ExtendedConfigTooShort,
+
+	#[error("AudioSpecificConfig incomplete")]
+	IncompleteConfig,
+
+	#[error("explicit sample rate requires 3 additional bytes")]
+	ExplicitSampleRateTooShort,
+
+	#[error("unsupported sample rate index: {0}")]
+	UnsupportedSampleRateIndex(u8),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Typed AAC configuration mirroring the relevant fields of an
 /// AudioSpecificConfig.
@@ -24,8 +45,10 @@ impl Config {
 	/// Handles basic formats (object_type < 31), extended formats
 	/// (object_type == 31), and explicit sample rates (freq_index == 15).
 	/// Any SBR/PS extension bytes after the core fields are consumed.
-	pub fn parse<T: Buf>(buf: &mut T) -> anyhow::Result<Self> {
-		anyhow::ensure!(buf.remaining() >= 2, "AudioSpecificConfig must be at least 2 bytes");
+	pub fn parse<T: Buf>(buf: &mut T) -> Result<Self> {
+		if buf.remaining() < 2 {
+			return Err(Error::ConfigTooShort);
+		}
 
 		// Read first byte
 		let b0 = buf.get_u8();
@@ -33,10 +56,9 @@ impl Config {
 		let freq_index;
 
 		let (profile, sample_rate, channel_count) = if object_type == 31 {
-			anyhow::ensure!(
-				buf.remaining() >= 2,
-				"extended audioObjectType requires 2 additional bytes"
-			);
+			if buf.remaining() < 2 {
+				return Err(Error::ExtendedConfigTooShort);
+			}
 			// Extended format: next 6 bits are the extended object_type (32-63).
 			// Bits 5-7 of b0 are the first 3 bits of extended object_type.
 			let b_ext = buf.get_u8();
@@ -49,7 +71,9 @@ impl Config {
 			let channel_config_high = b_ext & 0x01;
 
 			// Read next byte for rest of channelConfiguration.
-			anyhow::ensure!(buf.remaining() >= 1, "AudioSpecificConfig incomplete");
+			if buf.remaining() < 1 {
+				return Err(Error::IncompleteConfig);
+			}
 			let b1 = buf.get_u8();
 			// Bits 5-7 of b1 are the remaining 3 bits of channelConfiguration.
 			let channel_config = (channel_config_high << 3) | ((b1 >> 5) & 0x07);
@@ -66,7 +90,9 @@ impl Config {
 			// Standard format: bits 5-7 of b0 are first 3 bits of freq_index.
 			let mut freq_index_local = (b0 & 0x07) << 1;
 
-			anyhow::ensure!(buf.remaining() >= 1, "AudioSpecificConfig incomplete");
+			if buf.remaining() < 1 {
+				return Err(Error::IncompleteConfig);
+			}
 			let b1 = buf.get_u8();
 
 			// Complete frequency index (bit 7 of b1 is bit 0 of freq_index).
@@ -140,13 +166,15 @@ impl Config {
 	}
 }
 
-fn sample_rate_from_index<T: Buf>(freq_index: u8, buf: &mut T) -> anyhow::Result<u32> {
+fn sample_rate_from_index<T: Buf>(freq_index: u8, buf: &mut T) -> Result<u32> {
 	const SAMPLE_RATES: [u32; 13] = [
 		96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
 	];
 
 	if freq_index == 15 {
-		anyhow::ensure!(buf.remaining() >= 3, "explicit sample rate requires 3 additional bytes");
+		if buf.remaining() < 3 {
+			return Err(Error::ExplicitSampleRateTooShort);
+		}
 		let rate_bytes = [buf.get_u8(), buf.get_u8(), buf.get_u8()];
 		return Ok(((rate_bytes[0] as u32) << 16) | ((rate_bytes[1] as u32) << 8) | (rate_bytes[2] as u32));
 	}
@@ -154,7 +182,7 @@ fn sample_rate_from_index<T: Buf>(freq_index: u8, buf: &mut T) -> anyhow::Result
 	SAMPLE_RATES
 		.get(freq_index as usize)
 		.copied()
-		.context("unsupported sample rate index")
+		.ok_or(Error::UnsupportedSampleRateIndex(freq_index))
 }
 
 /// Map an AAC `channel_config` (ISO 14496-3 Table 1.19) to its real channel count.

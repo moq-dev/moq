@@ -73,11 +73,11 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	pub async fn next(&mut self) -> anyhow::Result<Option<Bytes>> {
+	pub async fn next(&mut self) -> crate::Result<Option<Bytes>> {
 		conducer::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<Bytes>>> {
+	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<crate::Result<Option<Bytes>>> {
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
 				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot)?,
@@ -121,7 +121,7 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	fn update_catalog(&mut self, catalog: &Catalog) -> anyhow::Result<()> {
+	fn update_catalog(&mut self, catalog: &Catalog) -> crate::Result<()> {
 		let picked = catalog
 			.video
 			.renditions
@@ -155,13 +155,14 @@ impl<S: Stream> Export<S> {
 			None => None,
 			Some(avcc) => {
 				let params = super::parse_avcc_param_sets(avcc)?;
-				anyhow::ensure!(
-					!params.sps.is_empty() && !params.pps.is_empty(),
-					"avc1 description for rendition {name:?} is missing SPS or PPS \
-					 (sps={}, pps={}); cannot inject parameter sets at keyframes",
-					params.sps.len(),
-					params.pps.len(),
-				);
+				if params.sps.is_empty() || params.pps.is_empty() {
+					return Err(super::Error::MissingParamSets {
+						name: name.clone(),
+						sps: params.sps.len(),
+						pps: params.pps.len(),
+					}
+					.into());
+				}
 				let prefix = annexb::build_prefix(params.sps.iter().chain(params.pps.iter()));
 				Some(Avc1Convert {
 					length_size: params.length_size,

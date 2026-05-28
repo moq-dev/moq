@@ -79,7 +79,7 @@ sudo cp "$PF_CONF" "$PF_BACKUP"
     grep -v "set skip on lo0" "$PF_BACKUP"
     echo "dummynet-anchor \"$PF_ANCHOR\""
     echo "anchor \"$PF_ANCHOR\""
-} | sudo tee "$PF_CONF" > /dev/null
+} | sudo tee "$PF_CONF" >/dev/null
 
 # Configure dummynet pipe
 sudo dnctl pipe $PIPE_NUM config bw "$BANDWIDTH" delay "$DELAY" queue "$QUEUE"

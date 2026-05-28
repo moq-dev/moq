@@ -1,8 +1,8 @@
 use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
-	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
-	Track, TrackProducer,
+	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, MAX_FRAME_SIZE, OriginProducer,
+	Path, PathOwned, Track, TrackProducer,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
@@ -744,6 +744,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
+				if size > MAX_FRAME_SIZE {
+					return Err(Error::FrameTooLarge);
+				}
 				let mut frame = producer.create_frame(Frame { size })?;
 
 				if let Err(err) = self.run_frame(stream, frame.clone()).await {

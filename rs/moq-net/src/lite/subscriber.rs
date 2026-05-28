@@ -7,7 +7,7 @@ use futures::{StreamExt, stream::FuturesUnordered};
 
 use crate::{
 	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer,
-	OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer,
+	MAX_FRAME_SIZE, OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -457,6 +457,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		track_stats: Arc<SubscriberTrack>,
 	) -> Result<(), Error> {
 		while let Some(size) = stream.decode_maybe::<u64>().await? {
+			if size > MAX_FRAME_SIZE {
+				return Err(Error::FrameTooLarge);
+			}
 			let mut frame = group.create_frame(Frame { size })?;
 			track_stats.frame();
 

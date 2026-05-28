@@ -1,16 +1,33 @@
-use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
 
+/// Annex B parsing errors.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("missing Annex B start code")]
+	MissingStartCode,
+
+	#[error("invalid Annex B start code")]
+	InvalidStartCode,
+
+	#[error("invalid avc1/hvc1 length size {0}")]
+	InvalidLengthSize(usize),
+
+	#[error("truncated length-prefixed NAL unit")]
+	Truncated,
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
 /// Convert a length-prefixed NALU payload (avc1 / hvc1 wire shape) to Annex-B,
 /// optionally prepending `prefix` bytes (typically VPS/SPS/PPS NAL units already
 /// in Annex-B form, for keyframe parameter-set injection).
-pub fn from_length_prefixed(payload: &[u8], length_size: usize, prefix: Option<&[u8]>) -> anyhow::Result<Bytes> {
-	anyhow::ensure!(
-		(1..=4).contains(&length_size),
-		"invalid avc1/hvc1 length size {length_size}"
-	);
+pub fn from_length_prefixed(payload: &[u8], length_size: usize, prefix: Option<&[u8]>) -> Result<Bytes> {
+	if !(1..=4).contains(&length_size) {
+		return Err(Error::InvalidLengthSize(length_size));
+	}
 
 	let mut out = BytesMut::with_capacity(payload.len() + prefix.map(|p| p.len()).unwrap_or(0) + 16);
 	if let Some(p) = prefix {
@@ -19,18 +36,18 @@ pub fn from_length_prefixed(payload: &[u8], length_size: usize, prefix: Option<&
 
 	let mut pos = 0;
 	while pos < payload.len() {
-		let after_prefix = pos
-			.checked_add(length_size)
-			.context("offset overflow reading NAL length prefix")?;
-		anyhow::ensure!(payload.len() >= after_prefix, "truncated NAL length prefix");
+		let after_prefix = pos.checked_add(length_size).ok_or(Error::Truncated)?;
+		if payload.len() < after_prefix {
+			return Err(Error::Truncated);
+		}
 		let mut len = 0usize;
 		for byte in &payload[pos..after_prefix] {
 			len = (len << 8) | (*byte as usize);
 		}
-		let after_nal = after_prefix
-			.checked_add(len)
-			.context("offset overflow reading NAL payload")?;
-		anyhow::ensure!(payload.len() >= after_nal, "truncated NAL payload");
+		let after_nal = after_prefix.checked_add(len).ok_or(Error::Truncated)?;
+		if payload.len() < after_nal {
+			return Err(Error::Truncated);
+		}
 		out.extend_from_slice(&START_CODE);
 		out.extend_from_slice(&payload[after_prefix..after_nal]);
 		pos = after_nal;
@@ -65,7 +82,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> NalIterator<'a, T> {
 
 	/// Assume the buffer ends with a NAL unit and flush it.
 	/// This is more efficient because we cache the last "start" code position.
-	pub fn flush(self) -> anyhow::Result<Option<Bytes>> {
+	pub fn flush(self) -> Result<Option<Bytes>> {
 		let start = match self.start {
 			Some(start) => start,
 			None => {
@@ -84,7 +101,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> NalIterator<'a, T> {
 }
 
 impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for NalIterator<'a, T> {
-	type Item = anyhow::Result<Bytes>;
+	type Item = Result<Bytes>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		let start = match self.start {
@@ -105,21 +122,22 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for NalIterator<'a, T> {
 }
 
 // Return the size of the start code at the start of the buffer.
-pub fn after_start_code(b: &[u8]) -> anyhow::Result<Option<usize>> {
+pub fn after_start_code(b: &[u8]) -> Result<Option<usize>> {
 	if b.len() < 3 {
 		return Ok(None);
 	}
 
 	// NOTE: We have to check every byte, so the `find_start_code` optimization doesn't matter.
-	anyhow::ensure!(b[0] == 0, "missing Annex B start code");
-	anyhow::ensure!(b[1] == 0, "missing Annex B start code");
+	if b[0] != 0 || b[1] != 0 {
+		return Err(Error::MissingStartCode);
+	}
 
 	match b[2] {
 		0 if b.len() < 4 => Ok(None),
-		0 if b[3] != 1 => anyhow::bail!("missing Annex B start code"),
+		0 if b[3] != 1 => Err(Error::MissingStartCode),
 		0 => Ok(Some(4)),
 		1 => Ok(Some(3)),
-		_ => anyhow::bail!("invalid Annex B start code"),
+		_ => Err(Error::InvalidStartCode),
 	}
 }
 

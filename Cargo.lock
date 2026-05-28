@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "conducer"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "smallvec",
 ]
@@ -2417,7 +2417,7 @@ checksum = "253b313319f7109de64e480ffb606f89475cd758bae82e096e00c5d95341d30e"
 
 [[package]]
 name = "hang"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3425,12 +3425,13 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "bytes",
  "cbindgen",
  "hang",
+ "moq-audio",
  "moq-mux",
  "moq-native",
  "moq-net",
@@ -3628,8 +3629,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-audio"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "hang",
+ "moq-mux",
+ "moq-net",
+ "rubato",
+ "thiserror 2.0.18",
+ "tokio",
+ "unsafe-libopus",
+]
+
+[[package]]
 name = "moq-boy"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -3649,7 +3664,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.7.25"
+version = "0.7.26"
 dependencies = [
  "anyhow",
  "axum",
@@ -3669,29 +3684,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-clock"
-version = "0.10.21"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "moq-native",
- "moq-net",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "moq-codec"
-version = "0.0.2"
-
-[[package]]
 name = "moq-ffi"
-version = "0.2.12"
+version = "0.2.15"
 dependencies = [
  "bytes",
  "hang",
+ "moq-audio",
  "moq-mux",
  "moq-native",
  "moq-net",
@@ -3722,17 +3720,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-lite"
-version = "0.17.0"
-dependencies = [
- "moq-net",
-]
-
-[[package]]
 name = "moq-loc"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "moq-net",
  "thiserror 2.0.18",
 ]
 
@@ -3747,12 +3739,12 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
- "anyhow",
  "base64 0.22.1",
  "bytes",
  "conducer",
+ "futures",
  "h264-parser",
  "hang",
  "m3u8-rs",
@@ -3774,10 +3766,11 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.14.4"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "chrono",
  "clap",
  "console-subscriber",
  "futures",
@@ -3814,7 +3807,7 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bytes",
  "conducer",
@@ -3832,7 +3825,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3889,12 +3882,16 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.26"
+version = "0.5.27"
 dependencies = [
  "anyhow",
  "clap",
  "moq-token",
 ]
+
+[[package]]
+name = "moq-video"
+version = "0.0.2"
 
 [[package]]
 name = "mp4-atom"
@@ -4990,6 +4987,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "primal-check"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc0d895b311e3af9902528fbb8f928688abbd95872819320517cc24ca6b2bd08"
+dependencies = [
+ "num-integer",
+]
+
+[[package]]
 name = "primeorder"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5444,6 +5450,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "realfft"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f821338fddb99d089116342c46e9f1fbf3828dba077674613e734e01d6ea8677"
+dependencies = [
+ "rustfft",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5642,6 +5657,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rubato"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5258099699851cfd0082aeb645feb9c084d9a5e1f1b8d5372086b989fc5e56a1"
+dependencies = [
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "realfft",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5660,6 +5687,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
+]
+
+[[package]]
+name = "rustfft"
+version = "6.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21db5f9893e91f41798c88680037dba611ca6674703c1a18601b01a72c8adb89"
+dependencies = [
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "primal-check",
+ "strength_reduce",
+ "transpose",
 ]
 
 [[package]]
@@ -6474,6 +6515,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "strength_reduce"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7262,6 +7309,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "transpose"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ad61aed86bc3faea4300c7aee358b4c6d0c8d6ccc36524c96e4c92ccf26e77e"
+dependencies = [
+ "num-integer",
+ "strength_reduce",
+]
+
+[[package]]
 name = "triomphe"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7495,6 +7552,17 @@ checksum = "fc1de2c688dc15305988b563c3854064043356019f97a4b46276fe734c4f07ea"
 dependencies = [
  "crypto-common 0.1.7",
  "subtle",
+]
+
+[[package]]
+name = "unsafe-libopus"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c757408e7256c910343c7b215c8c8b878948630eecc774baabcca0972376eb73"
+dependencies = [
+ "arrayref",
+ "num-complex",
+ "num-traits",
 ]
 
 [[package]]
@@ -7790,9 +7858,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-iroh"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f52c25108f5882585fd43f7ef1f44682d39563532af062e12a7d604aecfca855"
+checksum = "8f4ebffba98c30a0ac3560c4d7c595e61a5ad040049d65ff5c91304e5ee5f5ee"
 dependencies = [
  "bytes",
  "http",

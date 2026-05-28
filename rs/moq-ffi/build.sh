@@ -15,9 +15,9 @@ RS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKSPACE_DIR="$(cd "$RS_DIR/.." && pwd)"
 
 # Resolve cargo target directory (respects CARGO_TARGET_DIR, .cargo/config, etc.)
-TARGET_BASE_DIR=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps 2>/dev/null \
-    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' \
-    || echo "$WORKSPACE_DIR/target")
+TARGET_BASE_DIR=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps 2>/dev/null |
+    sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' ||
+    echo "$WORKSPACE_DIR/target")
 
 # Defaults
 TARGET=""
@@ -51,7 +51,7 @@ while [[ $# -gt 0 ]]; do
             ARCHIVE=true
             shift
             ;;
-        -h|--help)
+        -h | --help)
             echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only] [--archive]"
             exit 0
             ;;
@@ -249,9 +249,9 @@ if [[ "$ARCHIVE" == true ]]; then
     cd "$OUTPUT_DIR"
     if [[ "$TARGET" == *"-windows-"* ]]; then
         ARCHIVE_NAME="$NAME.zip"
-        if command -v 7z &> /dev/null; then
+        if command -v 7z &>/dev/null; then
             7z a "$ARCHIVE_NAME" "$NAME"
-        elif command -v zip &> /dev/null; then
+        elif command -v zip &>/dev/null; then
             zip -r "$ARCHIVE_NAME" "$NAME"
         else
             echo "Error: Neither 7z nor zip found" >&2
@@ -273,9 +273,12 @@ if can_run_on_host "$TARGET"; then
     if [[ "$TARGET" == "universal-apple-darwin" ]]; then
         host_arch=$(uname -m)
         case "$host_arch" in
-            arm64|aarch64) cdylib=$(find_cdylib "aarch64-apple-darwin") ;;
-            x86_64)        cdylib=$(find_cdylib "x86_64-apple-darwin") ;;
-            *)             echo "Warning: unknown host arch $host_arch, skipping bindings"; cdylib="" ;;
+            arm64 | aarch64) cdylib=$(find_cdylib "aarch64-apple-darwin") ;;
+            x86_64) cdylib=$(find_cdylib "x86_64-apple-darwin") ;;
+            *)
+                echo "Warning: unknown host arch $host_arch, skipping bindings"
+                cdylib=""
+                ;;
         esac
     else
         cdylib=$(find_cdylib "$TARGET")
