@@ -5,9 +5,9 @@ set -euo pipefail
 # Usage: ./build.sh [--target TARGET] [--version VERSION] [--output DIR]
 #
 # Builds via `nix build .#moq-gst` against the flake-pinned GStreamer so
-# artifacts are reproducible. The produced shared library has nix-store
-# paths stripped (patchelf on Linux, install_name_tool on macOS) so it
-# loads against the user's system GStreamer at runtime.
+# artifacts are reproducible, then runs scrub.sh on a copy of the
+# produced shared library to rewrite nix-store paths for the user's
+# system GStreamer, and smoke.sh to confirm the result actually loads.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -88,28 +88,8 @@ cp "$SCRIPT_DIR/README.md" "$PACKAGE_DIR/"
 cp "$WORKSPACE_DIR/LICENSE-MIT" "$PACKAGE_DIR/"
 cp "$WORKSPACE_DIR/LICENSE-APACHE" "$PACKAGE_DIR/"
 
-# Smoke test: load the plugin against the user's system GStreamer (separate
-# from the nix copy we just linked against). Skipped if gst-inspect-1.0
-# isn't on PATH so contributors without GStreamer installed can still build
-# tarballs; CI installs it explicitly. The postFixup in nix/overlay.nix
-# already asserts no /nix/store refs remain in the binary itself; this is
-# the runtime counterpart.
-if command -v gst-inspect-1.0 >/dev/null 2>&1; then
-    echo "Smoke testing against $(gst-inspect-1.0 --version | head -1)..."
-    out="$(GST_PLUGIN_PATH_1_0="$PACKAGE_DIR/lib" gst-inspect-1.0 moq)"
-    # Factories appear as "  factoryname: description" in gst-inspect output;
-    # anchor on that so a load failure surfaces here and stray header
-    # mentions (Source module, Binary package, ...) can't false-positive.
-    if ! echo "$out" | grep -qE '^[[:space:]]+moqsink:' ||
-        ! echo "$out" | grep -qE '^[[:space:]]+moqsrc:'; then
-        echo "Error: gst-inspect-1.0 didn't find moqsink/moqsrc in the plugin." >&2
-        echo "$out" >&2
-        exit 1
-    fi
-    echo "Smoke test passed (moqsink + moqsrc loaded)."
-else
-    echo "Warning: gst-inspect-1.0 not on PATH; skipping load test." >&2
-fi
+"$SCRIPT_DIR/scrub.sh" "$PACKAGE_DIR/lib/$LIB_FILE"
+"$SCRIPT_DIR/smoke.sh" "$PACKAGE_DIR/lib"
 
 cd "$OUTPUT_DIR"
 ARCHIVE="$NAME.tar.gz"
