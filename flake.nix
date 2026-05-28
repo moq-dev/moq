@@ -62,28 +62,30 @@
         ];
 
         # Rust dependencies
-        rustDeps = with pkgs; [
-          rust-toolchain
-          just
-          git
-          cmake
-          pkg-config
-          glib
-          libressl
-          ffmpeg
-          curl
-          cargo-sort
-          cargo-shear
-          cargo-edit
-          cargo-sweep
-          cargo-semver-checks
-          cargo-deny
-        ]
-        ++ gstreamerDeps
-        ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
-          # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
-          pkgs.release-plz
-        ];
+        rustDeps =
+          with pkgs;
+          [
+            rust-toolchain
+            just
+            git
+            cmake
+            pkg-config
+            glib
+            libressl
+            ffmpeg
+            curl
+            cargo-sort
+            cargo-shear
+            cargo-edit
+            cargo-sweep
+            cargo-semver-checks
+            cargo-deny
+          ]
+          ++ gstreamerDeps
+          ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
+            # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
+            pkgs.release-plz
+          ];
 
         # JavaScript dependencies
         jsDeps = with pkgs; [
@@ -120,13 +122,26 @@
         # Tools needed to regenerate and sign the apt/rpm repositories.
         # Linux-only because apt and createrepo_c are marked broken on Darwin
         # in nixpkgs. The publish workflows only ever run on Linux runners.
-        publishDeps = with pkgs; lib.optionals (!stdenv.isDarwin) [
-          apt
-          createrepo_c
-          rpm
-          rclone
-          gnupg
-          gzip
+        publishDeps =
+          with pkgs;
+          lib.optionals (!stdenv.isDarwin) [
+            apt
+            createrepo_c
+            rpm
+            rclone
+            gnupg
+            gzip
+          ];
+
+        # Linters / formatters required by `just ci`; `just check` and
+        # `just fix` guard each tool with `command -v` so they skip
+        # silently when the binary isn't on $PATH.
+        lintDeps = with pkgs; [
+          shellcheck
+          shfmt
+          actionlint
+          taplo
+          nixfmt-rfc-style
         ];
 
         # Apply our overlay to get the package definitions
@@ -163,7 +178,7 @@
         };
 
         devShells.default = pkgs.mkShell {
-          packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps ++ packagingDeps;
+          packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps ++ packagingDeps ++ lintDeps;
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

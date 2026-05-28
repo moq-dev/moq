@@ -115,6 +115,7 @@ jobs:
         run: |
           # nfpm doesn't expand ${VAR} in contents[].src or templating
           # there either, so render the env vars in ourselves.
+          # shellcheck disable=SC2016  # envsubst varlist must be single-quoted
           envsubst '$VERSION $ARCH $BINARY_PATH' \
             < packaging/moq-cli/nfpm.yaml > /tmp/nfpm.yaml
           nfpm pkg --packager deb --config /tmp/nfpm.yaml --target dist/
@@ -126,6 +127,7 @@ jobs:
           ARCH: ${{ matrix.rpm-arch }}
           BINARY_PATH: target/${{ matrix.target }}/release/moq
         run: |
+          # shellcheck disable=SC2016  # envsubst varlist must be single-quoted
           envsubst '$VERSION $ARCH $BINARY_PATH' \
             < packaging/moq-cli/nfpm.yaml > /tmp/nfpm.yaml
           nfpm pkg --packager rpm --config /tmp/nfpm.yaml --target dist/

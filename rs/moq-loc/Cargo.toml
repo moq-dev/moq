@@ -17,4 +17,5 @@ doctest = false
 
 [dependencies]
 bytes = "1"
+moq-net = { workspace = true }
 thiserror = "2"

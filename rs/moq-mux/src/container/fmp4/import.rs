@@ -1,6 +1,6 @@
-use crate::container::Timestamp;
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
+use moq_net::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -419,7 +419,7 @@ impl Import {
 
 			let tfdt = traf.tfdt.as_ref().ok_or(Error::MissingTfdt)?;
 			let mut dts = tfdt.base_media_decode_time;
-			let timescale = trak.mdia.mdhd.timescale as u64;
+			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 
 			let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
 			let mut track_data_start: Option<usize> = None;
@@ -467,7 +467,9 @@ impl Import {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let timestamp = crate::container::Timestamp::from_scale(pts, timescale)?;
+					// Preserve the fmp4 track's native timescale so a passthrough re-emit
+					// doesn't go through a lossy microsecond detour.
+					let timestamp = moq_net::Timestamp::new(pts, timescale)?;
 
 					if offset + size > mdat.data.len() {
 						return Err(Error::InvalidDataOffset.into());
@@ -484,16 +486,16 @@ impl Import {
 
 					contains_keyframe |= keyframe;
 
-					if timestamp >= max_timestamp.unwrap_or(Timestamp::ZERO) {
+					if max_timestamp.is_none_or(|max| timestamp >= max) {
 						max_timestamp = Some(timestamp);
 					}
-					if timestamp <= min_timestamp.unwrap_or(Timestamp::MAX) {
+					if min_timestamp.is_none_or(|min| timestamp <= min) {
 						min_timestamp = Some(timestamp);
 					}
 
 					if let Some(last_timestamp) = track.last_timestamp
 						&& let Ok(duration) = timestamp.checked_sub(last_timestamp)
-						&& duration < track.min_duration.unwrap_or(Timestamp::MAX)
+						&& track.min_duration.is_none_or(|min| duration < min)
 					{
 						track.min_duration = Some(duration);
 					}
@@ -600,7 +602,7 @@ impl Import {
 			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
 				let jitter = max - min + min_duration;
 
-				if jitter < track.jitter.unwrap_or(Timestamp::MAX) {
+				if track.jitter.is_none_or(|j| jitter < j) {
 					track.jitter = Some(jitter);
 
 					let mut catalog = self.catalog.lock();
@@ -612,7 +614,7 @@ impl Import {
 								.renditions
 								.get_mut(&track.track.name)
 								.ok_or_else(|| Error::MissingVideoTrack(track.track.name.clone()))?;
-							config.jitter = Some(jitter.convert()?);
+							config.jitter = Some(jitter.into());
 						}
 						TrackKind::Audio => {
 							let config = catalog
@@ -620,7 +622,7 @@ impl Import {
 								.renditions
 								.get_mut(&track.track.name)
 								.ok_or_else(|| Error::MissingAudioTrack(track.track.name.clone()))?;
-							config.jitter = Some(jitter.convert()?);
+							config.jitter = Some(jitter.into());
 						}
 					}
 				}

@@ -58,22 +58,14 @@ HTTPS is currently not supported.
 
 ## Clustering
 
-In order to scale MoQ, you will eventually need to run multiple moq-relay instances potentially in different regions.
-This is called *clustering*, where the goal is that a user connects to the closest relay and they magically form a mesh behind the scenes.
+Relays can be joined together to proxy announcements and subscriptions. A viewer talks to whichever relay is closest; if their broadcast lives elsewhere in the cluster, the local relay fetches it from a neighbor and caches it. Hop tracking on every broadcast keeps loops out and picks the shortest path when there's more than one.
 
-**moq-relay** uses a simple clustering scheme using moq-lite.
-This is both dog-fooding and a surprisingly ueeful way to distribute live metadata at scale.
+- `--cluster-connect <peer-url>` lists the peers this relay dials. Repeatable; defines the topology by hand. A simple chain like `eu-west <- us-east <- us-west` lets `us-east` cache and dedup the transatlantic fetches that fan out to many `us-west` viewers.
+- `--cluster-mesh <self-url>` is optional. When set, this relay advertises its own URL to connected peers and dials any peers it learns about, so larger clusters don't need each node hand-configured. You still need at least one connection (in or out) so the advertisement has a path to flow. A relay with `--cluster-mesh` set and no `--cluster-connect` is a passive rendezvous.
 
-We currently use a single "root" node that is used to discover members of the cluster and what broadcasts they offer.
-This is a normal moq-relay instance, potentially serving public traffic, unaware of the fact that it's in charge of other relays.
+`--cluster-root` and `--cluster-node` from earlier versions were removed. The relay errors at startup if either is set and points at the replacements.
 
-The other moq-relay instances accept internet traffic and consult the root for routing.
-They can then advertise their internal ip/hostname to other instances when publishing a broadcast.
-
-Cluster arguments:
-
-- `--cluster-root <HOST>`: The hostname/ip of the root node. If missing, this node is a root.
-- `--cluster-node <HOST>`: The hostname/ip of this instance. There needs to be a corresponding valid TLS certificate, potentially self-signed. If missing, published broadcasts will only be available on this specific relay.
+See [doc/bin/relay/cluster.md](https://github.com/moq-dev/moq/blob/main/doc/bin/relay/cluster.md) for the full walkthrough, including topology trade-offs and authentication.
 
 ## Authentication
 

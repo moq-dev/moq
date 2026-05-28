@@ -203,11 +203,7 @@ impl Framed {
 	}
 
 	/// Decode a frame from the given buffer.
-	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> Result<()> {
+	pub fn decode_frame<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		match self.decoder {
 			FramedKind::H264(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			FramedKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,

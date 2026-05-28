@@ -23,13 +23,22 @@ TARBALL=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --staged-dir) STAGED_DIR="$2"; shift 2;;
-        --tarball) TARBALL="$2"; shift 2;;
-        -h|--help)
+        --staged-dir)
+            STAGED_DIR="$2"
+            shift 2
+            ;;
+        --tarball)
+            TARBALL="$2"
+            shift 2
+            ;;
+        -h | --help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
-        *) echo "Unknown option: $1" >&2; exit 1;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
     esac
 done
 
@@ -42,13 +51,19 @@ if [[ -z "$STAGED_DIR" && -z "$TARBALL" ]]; then
     exit 1
 fi
 
-command -v swift >/dev/null || { echo "Error: swift not found on PATH" >&2; exit 1; }
+command -v swift >/dev/null || {
+    echo "Error: swift not found on PATH" >&2
+    exit 1
+}
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 if [[ -n "$TARBALL" ]]; then
-    [[ -f "$TARBALL" ]] || { echo "Error: tarball not found: $TARBALL" >&2; exit 1; }
+    [[ -f "$TARBALL" ]] || {
+        echo "Error: tarball not found: $TARBALL" >&2
+        exit 1
+    }
     tar -xzf "$TARBALL" -C "$WORK"
     # The tarball wraps a single top-level moq-ffi-${VERSION}-swift dir.
     extracted=("$WORK"/moq-ffi-*-swift)
@@ -62,7 +77,10 @@ fi
 # Resolve to absolute path; SPM resolves relative .package(path:) against
 # the consumer manifest, which lives under $WORK below.
 STAGED_DIR=$(cd "$STAGED_DIR" && pwd)
-[[ -f "$STAGED_DIR/Package.swift" ]] || { echo "Error: $STAGED_DIR/Package.swift missing" >&2; exit 1; }
+[[ -f "$STAGED_DIR/Package.swift" ]] || {
+    echo "Error: $STAGED_DIR/Package.swift missing" >&2
+    exit 1
+}
 
 echo "verify: staged package at $STAGED_DIR"
 echo "verify: --- Package.swift ---"
@@ -81,7 +99,7 @@ ln -s "$STAGED_DIR" "$PKG_LINK"
 SMOKE="$WORK/smoke"
 mkdir -p "$SMOKE/Sources/Smoke"
 
-cat > "$SMOKE/Package.swift" <<EOF
+cat >"$SMOKE/Package.swift" <<EOF
 // swift-tools-version:5.9
 import PackageDescription
 
@@ -101,7 +119,7 @@ let package = Package(
 )
 EOF
 
-cat > "$SMOKE/Sources/Smoke/main.swift" <<'EOF'
+cat >"$SMOKE/Sources/Smoke/main.swift" <<'EOF'
 import Moq
 // Verify that the binary target's symbols are linkable, not just resolvable.
 print("moq-swift verify ok")

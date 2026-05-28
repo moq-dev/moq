@@ -62,7 +62,7 @@ mod stats;
 mod version;
 
 pub use client::*;
-pub use coding::{BoundsExceeded, DecodeError, EncodeError};
+pub use coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};
 pub use error::*;
 pub use model::*;
 pub use path::*;

@@ -203,11 +203,7 @@ impl Import {
 	/// Decode a buffer where frame boundaries are unknown (avc3 streaming
 	/// input). The leading start code of the *next* frame is what signals the
 	/// previous frame is done.
-	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> Result<()> {
+	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		if !matches!(self.state, State::Avc3 { .. }) {
 			return Err(Error::StreamNotAvc3.into());
 		}
@@ -224,11 +220,7 @@ impl Import {
 	/// - avc1: the buffer is written as one length-prefixed-NALU frame.
 	/// - avc3: NALs are parsed; any trailing NAL without a start code is
 	///   flushed as the last NAL of this frame.
-	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> Result<()> {
+	pub fn decode_frame<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		match &self.state {
 			State::Avc1 { .. } => self.decode_avc1(buf, pts),
 			State::Avc3 { .. } => self.decode_avc3_frame(buf, pts),
@@ -236,11 +228,7 @@ impl Import {
 		}
 	}
 
-	fn decode_avc1<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> Result<()> {
+	fn decode_avc1<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		let State::Avc1 { length_size } = self.state else {
 			unreachable!("checked by decode_frame")
 		};
@@ -265,11 +253,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn decode_avc3_frame<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> Result<()> {
+	fn decode_avc3_frame<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		let pts = self.pts(pts)?;
 		let mut nals = NalIterator::new(buf);
 		while let Some(nal) = nals.next().transpose()? {
@@ -282,7 +266,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn decode_nal(&mut self, nal: Bytes, pts: Option<crate::container::Timestamp>) -> Result<()> {
+	fn decode_nal(&mut self, nal: Bytes, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		let header = nal.first().ok_or(Error::NalTooShort)?;
 		let forbidden_zero_bit = (header >> 7) & 1;
 		if forbidden_zero_bit != 0 {
@@ -396,7 +380,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		let State::Avc3 { current, .. } = &mut self.state else {
 			return Ok(());
 		};
@@ -472,14 +456,12 @@ impl Import {
 		Ok(())
 	}
 
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> Result<crate::container::Timestamp> {
+	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(crate::container::Timestamp::from_micros(
-			zero.elapsed().as_micros() as u64
-		)?)
+		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
 

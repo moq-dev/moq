@@ -180,14 +180,17 @@ in
         # Generate cluster token for leaf nodes
         ${lib.optionalString
           (cfg.cluster.mode == "leaf" && cfg.auth.enable && cfg.cluster.tokenFile == null)
-          (let
-            keyPath = if cfg.auth.keyFile != null then cfg.auth.keyFile else "${cfg.stateDir}/root.jwk";
-          in ''
-            ${pkgs.moq-token-cli}/bin/moq-token-cli --key "${keyPath}" sign \
-              --subscribe "" --publish "" --cluster \
-              > "${cfg.stateDir}/cluster.jwt"
-            chown ${cfg.user}:${cfg.group} "${cfg.stateDir}/cluster.jwt"
-          '')
+          (
+            let
+              keyPath = if cfg.auth.keyFile != null then cfg.auth.keyFile else "${cfg.stateDir}/root.jwk";
+            in
+            ''
+              ${pkgs.moq-token-cli}/bin/moq-token-cli --key "${keyPath}" sign \
+                --subscribe "" --publish "" --cluster \
+                > "${cfg.stateDir}/cluster.jwt"
+              chown ${cfg.user}:${cfg.group} "${cfg.stateDir}/cluster.jwt"
+            ''
+          )
         }
       '';
 
@@ -212,45 +215,46 @@ in
         AmbientCapabilities = lib.optional (cfg.port < 1024) "CAP_NET_BIND_SERVICE";
       };
 
-      environment = {
-        # Enable jemalloc heap profiling; dump with `kill -USR1 <pid>`
-        MALLOC_CONF = "prof:true,prof_active:true,prof_prefix:${cfg.heapDumpPrefix}";
+      environment =
+        {
+          # Enable jemalloc heap profiling; dump with `kill -USR1 <pid>`
+          MALLOC_CONF = "prof:true,prof_active:true,prof_prefix:${cfg.heapDumpPrefix}";
 
-        MOQ_LOG_LEVEL = lib.mkDefault cfg.logLevel;
+          MOQ_LOG_LEVEL = lib.mkDefault cfg.logLevel;
 
-        # Server configuration
-        MOQ_SERVER_BIND = "[::]:${toString cfg.port}";
+          # Server configuration
+          MOQ_SERVER_BIND = "[::]:${toString cfg.port}";
 
-        MOQ_CLIENT_TLS_DISABLE_VERIFY = lib.boolToString cfg.cluster.disableTlsVerify;
-      }
-      // lib.optionalAttrs (cfg.tls.generate != [ ]) {
-        # TLS configuration
-        MOQ_SERVER_TLS_GENERATE = lib.concatStringsSep "," cfg.tls.generate;
-      }
-      // lib.optionalAttrs (cfg.tls.certs != [ ]) {
-        MOQ_SERVER_TLS_CERT = lib.concatMapStringsSep "," (cert: "${cert.chain}") cfg.tls.certs;
-      }
-      // lib.optionalAttrs (cfg.tls.certs != [ ]) {
-        MOQ_SERVER_TLS_KEY = lib.concatMapStringsSep "," (cert: "${cert.key}") cfg.tls.certs;
-      }
-      // lib.optionalAttrs cfg.auth.enable {
-        # Auth configuration
-        MOQ_AUTH_KEY = if cfg.auth.keyFile != null then cfg.auth.keyFile else "${cfg.stateDir}/root.jwk";
-      }
-      // lib.optionalAttrs (cfg.auth.publicPath != null) {
-        MOQ_AUTH_PUBLIC = cfg.auth.publicPath;
-      }
-      // lib.optionalAttrs (cfg.cluster.rootUrl != null) {
-        # Cluster configuration
-        MOQ_CLUSTER_ROOT = cfg.cluster.rootUrl;
-      }
-      // lib.optionalAttrs (cfg.cluster.mode != "none") {
-        MOQ_CLUSTER_TOKEN =
-          if cfg.cluster.tokenFile != null then cfg.cluster.tokenFile else "${cfg.stateDir}/cluster.jwt";
-      }
-      // lib.optionalAttrs (cfg.cluster.nodeUrl != null) {
-        MOQ_CLUSTER_NODE = cfg.cluster.nodeUrl;
-      };
+          MOQ_CLIENT_TLS_DISABLE_VERIFY = lib.boolToString cfg.cluster.disableTlsVerify;
+        }
+        // lib.optionalAttrs (cfg.tls.generate != [ ]) {
+          # TLS configuration
+          MOQ_SERVER_TLS_GENERATE = lib.concatStringsSep "," cfg.tls.generate;
+        }
+        // lib.optionalAttrs (cfg.tls.certs != [ ]) {
+          MOQ_SERVER_TLS_CERT = lib.concatMapStringsSep "," (cert: "${cert.chain}") cfg.tls.certs;
+        }
+        // lib.optionalAttrs (cfg.tls.certs != [ ]) {
+          MOQ_SERVER_TLS_KEY = lib.concatMapStringsSep "," (cert: "${cert.key}") cfg.tls.certs;
+        }
+        // lib.optionalAttrs cfg.auth.enable {
+          # Auth configuration
+          MOQ_AUTH_KEY = if cfg.auth.keyFile != null then cfg.auth.keyFile else "${cfg.stateDir}/root.jwk";
+        }
+        // lib.optionalAttrs (cfg.auth.publicPath != null) {
+          MOQ_AUTH_PUBLIC = cfg.auth.publicPath;
+        }
+        // lib.optionalAttrs (cfg.cluster.rootUrl != null) {
+          # Cluster configuration
+          MOQ_CLUSTER_ROOT = cfg.cluster.rootUrl;
+        }
+        // lib.optionalAttrs (cfg.cluster.mode != "none") {
+          MOQ_CLUSTER_TOKEN =
+            if cfg.cluster.tokenFile != null then cfg.cluster.tokenFile else "${cfg.stateDir}/cluster.jwt";
+        }
+        // lib.optionalAttrs (cfg.cluster.nodeUrl != null) {
+          MOQ_CLUSTER_NODE = cfg.cluster.nodeUrl;
+        };
     };
   };
 }

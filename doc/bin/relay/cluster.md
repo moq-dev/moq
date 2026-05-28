@@ -5,96 +5,68 @@ description: Run multiple moq-relay instances across multiple hosts/regions
 
 # Clustering
 
-Multiple relay instances can cluster for geographic distribution and improved latency.
+Relays can be joined together to proxy announcements and subscriptions between each other. A viewer talks to whichever relay is closest; if their broadcast lives somewhere else in the cluster, the local relay fetches it from a neighbor and caches it.
 
-## Overview
+A broadcast carries a small hop list as it travels. Each relay it passes through adds itself to the list, which is how loops are caught and how the network picks the shortest path when there's more than one.
 
-`moq-relay` uses a simple clustering scheme:
+## Topology
 
-1. **Root node** - A single relay (can serve public traffic) that tracks cluster membership
-2. **Other nodes** - Accept internet traffic and consult the root for routing
+Each relay lists the peers it wants to dial in `cluster.connect`. That's it; the topology is whatever you draw with those links.
 
-When a relay publishes a broadcast, it advertises its `node` address to other relays via the root.
+A simple chain works well when one region is the source and others are caches:
 
-## Configuration
+```text
+eu-west  <---  us-east  <---  us-west
+```
+
+```toml
+# us-east.toml
+[cluster]
+connect = ["eu-west.example.com:4443"]
+
+# us-west.toml
+[cluster]
+connect = ["us-east.example.com:4443"]
+```
+
+A publisher on `eu-west` reaches a viewer on `us-west` through `us-east`. If a second `us-west` viewer subscribes to the same broadcast, `us-east` already has it cached, so only one fetch crosses the Atlantic. A full mesh (every relay dialing every other) would skip the cache entirely and waste an outbound link per pair.
+
+Pick the shape that matches your traffic. Linear chains are great for fanout; small N-way meshes are fine when latency matters more than dedup; mixed shapes work too.
+
+## Auto-discovery
+
+Listing every peer by hand can get tedious in larger clusters. Set `cluster.mesh` to this relay's own URL and connected peers will discover and dial it back automatically:
 
 ```toml
 [cluster]
-root = "https://root-relay.example.com"  # Root node
-node = "https://us-east.relay.example.com"  # This node's address
+connect = ["us-east.example.com:4443"]
+mesh    = "us-west.example.com:4443"
 ```
 
-### Cluster Arguments
+Each node with `mesh` set creates a broadcast carrying its address, which other nodes pick up. `connect` is optional once gossip is running, but you still need at least one connection somewhere (either you dial a peer or a peer dials you) for the advertisement to flow.
 
-- `--cluster-root <HOST>` - Hostname/IP of the root node (omit to make this node the root)
-- `--cluster-node <HOST>` - Hostname/IP of this instance (needs valid TLS cert)
+A relay with `mesh` set and no `connect` is a passive rendezvous: it sits and waits for inbound connections, then helps everyone else find each other.
 
-## How It Works
+## Authentication
 
-1. Each relay connects to the root node on startup
-2. When a publisher connects to any relay, that relay announces the broadcast
-3. The root node tracks which relay has which broadcasts
-4. When a subscriber connects, the relay queries the root to find the broadcast
-5. Relays connect to each other to forward traffic
+Cluster peers must authenticate to each other:
 
-## Benefits
+- **mTLS** (recommended). Set `tls.root` to the CA that signed the cluster certificates. Inbound connections presenting a valid client cert are granted full access; outbound dials use `client.tls.cert` / `client.tls.key`.
+- **JWT**. Each relay reads a token from `cluster.token` and presents it on outbound dials. The token needs broad enough scope to cover whatever paths the cluster carries.
 
-- **Lower latency** - Users connect to nearest relay
-- **Higher availability** - Redundancy across regions
-- **Geographic distribution** - Serve global audiences
+See [Authentication](/bin/relay/auth) for the full setup.
 
-## Example Topology
+## Migration from older configs
 
-```text
-                    ┌─────────────┐
-                    │  Root Node  │
-                    │   (US-C)    │
-                    └──────┬──────┘
-           ┌───────────────┼───────────────┐
-           │               │               │
-    ┌──────┴──────┐ ┌──────┴──────┐ ┌──────┴──────┐
-    │   US-East   │ │   EU-West   │ │   Asia-SE   │
-    │   Relay     │ │   Relay     │ │   Relay     │
-    └─────────────┘ └─────────────┘ └─────────────┘
-```
+`cluster.root` and `cluster.node` were both removed. If a config still sets either flag, the relay errors at startup with a message pointing at the replacements:
 
-## Peer Authentication
+| Old | New |
+|---|---|
+| `root = "rendezvous:4443"` + `node = "us-east:4443"` | `connect = ["rendezvous:4443"]` + `mesh = "us-east:4443"` |
+| `root = "rendezvous:4443"` only | `mesh = "rendezvous:4443"` (passive rendezvous) |
+| `node = "us-east:4443"` | `mesh = "us-east:4443"` |
 
-Cluster peers must authenticate to each other. Two options:
-
-### JWT token
-
-Each leaf reads a JWT from `cluster.token` (see [Authentication](/bin/relay/auth))
-and presents it to the root on connect. The token must grant cluster privileges
-and full publish/subscribe access.
-
-### mTLS (recommended for new deployments)
-
-Configure the root with `tls.root` pointing at the CA that signed the leaf
-certificates. Leaves connect with a client certificate signed by that CA —
-no JWT needed. The leaf's cluster node name is taken from the first DNS SAN on
-its certificate, so identity is bound to the cert rather than self-declared.
-
-See [Authentication → mTLS Peer Authentication](/bin/relay/auth#mtls-peer-authentication)
-for details.
-
-## Current Limitations
-
-- **Mesh topology** - All relays connect to all others
-- **Not optimized for large clusters** - 3-5 nodes recommended
-- **Single root node** - Future: multi-root for redundancy
-
-## Production Example
-
-The public CDN at `cdn.moq.dev` uses this clustering approach:
-
-- `usc.cdn.moq.dev` - US Central (root)
-- `euc.cdn.moq.dev` - EU Central
-- `sea.cdn.moq.dev` - Southeast Asia
-
-Clients use GeoDNS to connect to the nearest relay automatically.
-
-## Next Steps
+## Next steps
 
 - Deploy to [Production](/bin/relay/prod)
 - Set up [Authentication](/bin/relay/auth)

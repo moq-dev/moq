@@ -2,7 +2,8 @@
 
 use bytes::Bytes;
 
-use moq_mux::container::{Frame as MuxFrame, Timestamp};
+use moq_mux::container::Frame as MuxFrame;
+use moq_net::Timestamp;
 
 use crate::codec::{Encoder, EncoderInput, EncoderOutput};
 use crate::resample::Resampler;

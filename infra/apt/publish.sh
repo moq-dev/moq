@@ -70,12 +70,12 @@ for arch in "${ARCHES[@]}"; do
     out="$WORK/dists/$DIST/$COMPONENT/binary-${arch}"
     mkdir -p "$out"
     (cd "$WORK" && apt-ftparchive --arch "$arch" packages "pool/$COMPONENT") \
-        > "$out/Packages"
+        >"$out/Packages"
     gzip -9kf "$out/Packages"
 done
 
 echo ">> Generate Release..."
-cat > "$WORK/apt-ftparchive.conf" <<EOF
+cat >"$WORK/apt-ftparchive.conf" <<EOF
 APT::FTPArchive::Release::Origin "$ORIGIN";
 APT::FTPArchive::Release::Label "$LABEL";
 APT::FTPArchive::Release::Suite "$SUITE";
@@ -85,7 +85,7 @@ APT::FTPArchive::Release::Components "$COMPONENT";
 APT::FTPArchive::Release::Description "$DESCRIPTION";
 EOF
 (cd "$WORK" && apt-ftparchive -c=apt-ftparchive.conf release "dists/$DIST") \
-    > "$WORK/dists/$DIST/Release"
+    >"$WORK/dists/$DIST/Release"
 
 echo ">> Sign Release..."
 GNUPGHOME=$(mktemp -d)
@@ -95,8 +95,8 @@ chmod 700 "$GNUPGHOME"
 echo "${SIGNING_KEY:?}" | gpg --batch --quiet --import
 # Fail loud if SIGNING_KEY ever holds more than one secret. Silently picking
 # the first one would produce signatures from the wrong key.
-mapfile -t KEY_IDS < <(gpg --list-secret-keys --with-colons --keyid-format=long \
-    | awk -F: '/^sec:/ { print $5 }')
+mapfile -t KEY_IDS < <(gpg --list-secret-keys --with-colons --keyid-format=long |
+    awk -F: '/^sec:/ { print $5 }')
 if [[ ${#KEY_IDS[@]} -ne 1 ]]; then
     echo "ERROR: expected exactly one secret key in SIGNING_KEY, found ${#KEY_IDS[@]}." >&2
     exit 1

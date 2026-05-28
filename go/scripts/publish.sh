@@ -27,12 +27,18 @@ set -euo pipefail
 DRY_RUN=false
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --dry-run) DRY_RUN=true; shift;;
-        -h|--help)
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        -h | --help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
-        *) echo "Unknown option: $1" >&2; exit 1;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
     esac
 done
 
@@ -48,7 +54,10 @@ MIRROR_TAG="v${BUILD_VERSION}"
 SOURCE_TAG="moq-ffi-v${BUILD_VERSION}"
 
 TARBALL="go-out/moq-ffi-${BUILD_VERSION}-go.tar.gz"
-[[ -f "$TARBALL" ]] || { echo "Error: missing $TARBALL" >&2; exit 1; }
+[[ -f "$TARBALL" ]] || {
+    echo "Error: missing $TARBALL" >&2
+    exit 1
+}
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -70,7 +79,10 @@ fi
 # --- 3. Extract staged package ---
 tar -xzf "$TARBALL" -C "$WORK"
 STAGED="$WORK/moq-ffi-${BUILD_VERSION}-go"
-[[ -d "$STAGED" ]] || { echo "Error: tarball did not contain $STAGED" >&2; exit 1; }
+[[ -d "$STAGED" ]] || {
+    echo "Error: tarball did not contain $STAGED" >&2
+    exit 1
+}
 
 # --- 4. Replace mirror tree with staged contents (preserving .git) ---
 rsync --archive --delete --exclude='.git' "$STAGED/" "$WORK/mirror/"

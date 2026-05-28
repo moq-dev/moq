@@ -98,12 +98,16 @@ impl<C: Container> Producer<C> {
 		} else {
 			self.buffer.push(frame);
 
-			// Check if buffered duration exceeds latency.
+			// Flush if the buffered span has reached the latency budget. Compute
+			// min/max across the buffer rather than first/last: frames within a track
+			// are in *decode* order, and B-frames have non-monotonic PTS, so
+			// `last - first` can shrink as a B-frame lands between two earlier-PTS
+			// frames. The min/max pair captures the actual presentation span.
 			if self.buffer.len() >= 2 {
-				let first_ts: std::time::Duration = self.buffer.first().unwrap().timestamp.into();
-				let last_ts: std::time::Duration = self.buffer.last().unwrap().timestamp.into();
-
-				if last_ts.saturating_sub(first_ts) >= self.latency {
+				let mut iter = self.buffer.iter().map(|f| std::time::Duration::from(f.timestamp));
+				let first = iter.next().unwrap();
+				let (min, max) = iter.fold((first, first), |(min, max), d| (min.min(d), max.max(d)));
+				if max.saturating_sub(min) >= self.latency {
 					self.flush()?;
 				}
 			}
@@ -177,7 +181,7 @@ mod tests {
 
 	use super::*;
 	use crate::catalog::hang::Container;
-	use crate::container::Timestamp;
+	use moq_net::Timestamp;
 
 	fn frame(timestamp_us: u64, keyframe: bool) -> Frame {
 		Frame {

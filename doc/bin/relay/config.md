@@ -120,18 +120,18 @@ Clustering configuration for multi-relay deployments.
 
 ```toml
 [cluster]
-# Address of the root relay to connect to
-# Omit this to make this relay the root
-connect = "root.relay.example.com:4443"
+# Peers this relay dials. The topology is whatever you draw with these links.
+connect = ["us-east.example.com:4443"]
 
-# JWT token file for cluster authentication
+# Optional. Set to this relay's own URL to advertise it so other peers find
+# you automatically.
+mesh = "us-west.example.com:4443"
+
+# JWT used for outbound cluster dials (alternative to mTLS).
 token = "cluster.jwt"
-
-# This relay's address, as reachable by other cluster nodes
-node = "leaf1.relay.example.com:4443"
 ```
 
-See [Clustering](/bin/relay/cluster) for deployment patterns.
+See [Clustering](/bin/relay/cluster) for topology choices and the trade-off between hand-listed peers and gossip.
 
 ### \[client]
 

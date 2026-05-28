@@ -3685,7 +3685,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "bytes",
  "hang",
@@ -3724,6 +3724,7 @@ name = "moq-loc"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "moq-net",
  "thiserror 2.0.18",
 ]
 

@@ -471,7 +471,11 @@ impl Export {
 		let kind = track.kind;
 		let payload = &frame.payload;
 
-		let frame_ticks: u64 = (frame.timestamp.as_micros() / 1_000)
+		// MKV's wire scale is ms (TIMESTAMP_SCALE_NS = 1_000_000). Re-express the
+		// frame's timestamp directly at MILLI rather than going through micros.
+		let frame_ticks: u64 = frame
+			.timestamp
+			.as_millis()
 			.try_into()
 			.map_err(|_| Error::TimestampU64)?;
 

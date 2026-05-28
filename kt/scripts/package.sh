@@ -27,21 +27,45 @@ BINDINGS_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --version) VERSION="$2"; shift 2;;
-        --lib-dir) LIB_DIR="$2"; shift 2;;
-        --output) OUTPUT_DIR="$2"; shift 2;;
-        --bindings-dir) BINDINGS_DIR="$2"; shift 2;;
-        -h|--help)
+        --version)
+            VERSION="$2"
+            shift 2
+            ;;
+        --lib-dir)
+            LIB_DIR="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --bindings-dir)
+            BINDINGS_DIR="$2"
+            shift 2
+            ;;
+        -h | --help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
-        *) echo "Unknown option: $1" >&2; exit 1;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
     esac
 done
 
-[[ -z "$VERSION" ]] && { echo "Error: --version is required" >&2; exit 1; }
-[[ -z "$LIB_DIR" ]] && { echo "Error: --lib-dir is required" >&2; exit 1; }
-[[ -z "$BINDINGS_DIR" ]] && { echo "Error: --bindings-dir is required" >&2; exit 1; }
+[[ -z "$VERSION" ]] && {
+    echo "Error: --version is required" >&2
+    exit 1
+}
+[[ -z "$LIB_DIR" ]] && {
+    echo "Error: --lib-dir is required" >&2
+    exit 1
+}
+[[ -z "$BINDINGS_DIR" ]] && {
+    echo "Error: --bindings-dir is required" >&2
+    exit 1
+}
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="dist"
 
 mkdir -p "$OUTPUT_DIR"
@@ -106,7 +130,10 @@ done
 
 # --- Uniffi-generated Kotlin source ---
 GENERATED_KT="$BINDINGS_DIR/uniffi/moq/moq.kt"
-[[ -f "$GENERATED_KT" ]] || { echo "Error: uniffi-bindgen output not found at $GENERATED_KT" >&2; exit 1; }
+[[ -f "$GENERATED_KT" ]] || {
+    echo "Error: uniffi-bindgen output not found at $GENERATED_KT" >&2
+    exit 1
+}
 mkdir -p "$KT_DIR/moq/src/jvmAndAndroidMain/kotlin/uniffi/moq"
 cp "$GENERATED_KT" "$KT_DIR/moq/src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt"
 
@@ -120,6 +147,9 @@ if [[ "$HAVE_ANDROID_LIBS" == true ]]; then
 fi
 
 GRADLE_CMD="${GRADLE_CMD:-$(command -v gradle || true)}"
-[[ -n "$GRADLE_CMD" ]] || { echo "Error: gradle not on PATH" >&2; exit 1; }
+[[ -n "$GRADLE_CMD" ]] || {
+    echo "Error: gradle not on PATH" >&2
+    exit 1
+}
 
 "$GRADLE_CMD" -p "$KT_DIR" "${GRADLE_ARGS[@]}" :moq:assemble :moq:publishToMavenLocal

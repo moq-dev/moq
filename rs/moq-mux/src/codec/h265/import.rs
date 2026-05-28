@@ -126,11 +126,7 @@ impl Import {
 	/// This means it works for streaming media (ex. stdin) but adds a frame of latency.
 	///
 	/// TODO: This currently associates PTS with the *previous* frame, as part of `maybe_start_frame`.
-	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> Result<()> {
+	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		let pts = self.pts(pts)?;
 
 		// Iterate over the NAL units in the buffer based on start codes.
@@ -150,11 +146,7 @@ impl Import {
 	/// This can also be used when EOF is detected to flush the final frame.
 	///
 	/// NOTE: The next decode will fail if it doesn't begin with a start code.
-	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> Result<()> {
+	pub fn decode_frame<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		let pts = self.pts(pts)?;
 		// Iterate over the NAL units in the buffer based on start codes.
 		let mut nals = NalIterator::new(buf);
@@ -177,7 +169,7 @@ impl Import {
 
 	/// Decode a single NAL unit. Only reads the first header byte to extract nal_unit_type,
 	/// Ignores nuh_layer_id and nuh_temporal_id_plus1.
-	fn decode_nal(&mut self, nal: Bytes, pts: Option<crate::container::Timestamp>) -> Result<()> {
+	fn decode_nal(&mut self, nal: Bytes, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		if nal.len() < 2 {
 			return Err(Error::NalTooShort.into());
 		}
@@ -292,7 +284,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		// If we haven't seen any slices, we shouldn't flush yet.
 		if !self.current.contains_slice {
 			return Ok(());
@@ -348,15 +340,13 @@ impl Import {
 		self.track.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> Result<crate::container::Timestamp> {
+	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(crate::container::Timestamp::from_micros(
-			zero.elapsed().as_micros() as u64
-		)?)
+		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
 
