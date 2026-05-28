@@ -133,3 +133,7 @@ update:
 # Serve the documentation locally.
 doc:
     cd doc && bun run dev
+
+# Cross-language media interop smoke test (see demo/smoke).
+smoke *args:
+    demo/smoke/run.sh {{ args }}

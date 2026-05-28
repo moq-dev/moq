@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+# Cross-language media interop smoke test.
+#
+# Stands up a real moq-relay, then for each publisher language publishes an
+# H.264 broadcast and confirms every subscriber sees data flowing (a non-empty
+# frame before the timeout). We check that bytes move end-to-end across
+# implementations, not that H.264 decodes.
+set -euo pipefail
+
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+SMOKE_DIR="$REPO_ROOT/demo/smoke"
+
+PUBLISHERS="rust,python"
+SUBSCRIBERS="rust,python"
+TIMEOUT="${SMOKE_TIMEOUT:-20}"
+FPS="${SMOKE_FPS:-30}"
+SIZE="${SMOKE_SIZE:-320x240}"
+URL="http://127.0.0.1:4443"
+NEGATIVE=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --publishers)
+            PUBLISHERS="$2"
+            shift 2
+            ;;
+        --subscribers)
+            SUBSCRIBERS="$2"
+            shift 2
+            ;;
+        --timeout)
+            TIMEOUT="$2"
+            shift 2
+            ;;
+        --negative)
+            NEGATIVE=1
+            shift
+            ;;
+        *)
+            echo "unknown arg: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+IFS=',' read -r -a PUB_LIST <<<"$PUBLISHERS"
+IFS=',' read -r -a SUB_LIST <<<"$SUBSCRIBERS"
+
+needs() {
+    # needs <lang>: true if <lang> appears in either list.
+    local lang="$1" x
+    for x in "${PUB_LIST[@]}" "${SUB_LIST[@]}"; do [[ "$x" == "$lang" ]] && return 0; done
+    return 1
+}
+
+MOQ="$REPO_ROOT/target/debug/moq-cli"
+RELAY="$REPO_ROOT/target/debug/moq-relay"
+TMP=$(mktemp -d)
+ASSET="$TMP/asset"
+RELAY_PID=""
+
+kill_tree() {
+    # SIGKILL, depth-first. moq-cli ignores SIGTERM (handles only SIGINT), so a
+    # polite kill would leak it; these are ephemeral test processes, so -9 is fine.
+    local pid="$1" child
+    for child in $(pgrep -P "$pid" 2>/dev/null || true); do kill_tree "$child"; done
+    kill -KILL "$pid" 2>/dev/null || true
+}
+
+# shellcheck disable=SC2329  # invoked indirectly via 'trap cleanup EXIT'
+cleanup() {
+    # Reap the last publisher too; subscribers self-terminate via their timeouts.
+    [[ -n "${PUB_PID:-}" ]] && kill_tree "$PUB_PID"
+    [[ -n "$RELAY_PID" ]] && kill_tree "$RELAY_PID"
+    rm -rf "$TMP"
+}
+trap cleanup EXIT
+
+require_tools() {
+    local missing=() t
+    for t in cargo ffmpeg curl pgrep timeout python3; do
+        command -v "$t" >/dev/null 2>&1 || missing+=("$t")
+    done
+    if needs python; then command -v uv >/dev/null 2>&1 || missing+=("uv"); fi
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "error: missing required tools: ${missing[*]}" >&2
+        echo "       run inside 'nix develop' (or install them) and retry." >&2
+        exit 1
+    fi
+}
+
+# ── setup ───────────────────────────────────────────────────────────────────
+require_tools
+
+echo "building moq-relay + moq-cli..."
+cargo build -q -p moq-relay -p moq-cli
+
+echo "generating H.264 asset..."
+SMOKE_FPS="$FPS" "$SMOKE_DIR/gen-asset.sh" "$ASSET"
+
+if needs python; then
+    echo "preparing python bindings..."
+    # sync the workspace dev group (ruff/maturin/...) from py/, then build the
+    # moq-rs editable wheel (moq-ffi cdylib + uniffi bindings) from py/moq-rs.
+    (cd "$REPO_ROOT/py" && uv sync --no-install-workspace)
+    (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync maturin develop --uv)
+fi
+
+if curl -sf "$URL/certificate.sha256" >/dev/null 2>&1; then
+    echo "error: something is already listening on 127.0.0.1:4443 (stale relay?)" >&2
+    exit 1
+fi
+
+echo "starting relay..."
+"$RELAY" "$SMOKE_DIR/smoke.toml" >"$TMP/relay.log" 2>&1 &
+RELAY_PID=$!
+for _ in $(seq 1 60); do
+    curl -sf "$URL/certificate.sha256" >/dev/null 2>&1 && break
+    sleep 0.5
+done
+if ! curl -sf "$URL/certificate.sha256" >/dev/null 2>&1; then
+    echo "relay never became ready" >&2
+    sed 's/^/  relay: /' "$TMP/relay.log" >&2 || true
+    exit 1
+fi
+
+# ── client dispatch ─────────────────────────────────────────────────────────
+# Sets global PUB_PID. Called in the current shell (no command substitution) so
+# $! refers to the backgrounded job and kill_tree can reap the whole pipeline.
+PUB_PID=""
+start_publisher() {
+    local lang="$1" broadcast="$2" log="$TMP/pub-$1.log"
+    case "$lang" in
+        rust)
+            # Encode live from an infinite lavfi source (paced with -re) so the
+            # broadcast streams until we kill it. moq-cli only frames/forwards.
+            (ffmpeg -hide_banner -loglevel error -re -f lavfi -i "testsrc=size=${SIZE}:rate=${FPS}" \
+                -an -c:v libx264 -profile:v baseline -preset ultrafast -pix_fmt yuv420p \
+                -x264-params "keyint=${FPS}:min-keyint=${FPS}:scenecut=0:repeat-headers=1" \
+                -f h264 - | "$MOQ" publish --url "$URL" --broadcast "$broadcast" avc3) >"$log" 2>&1 &
+            ;;
+        python)
+            (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync python examples/interop.py \
+                publish --url "$URL" --broadcast "$broadcast" --asset "$ASSET") >"$log" 2>&1 &
+            ;;
+        *)
+            echo "unknown publisher: $lang" >&2
+            return 1
+            ;;
+    esac
+    PUB_PID=$!
+}
+
+run_subscriber() {
+    local lang="$1" broadcast="$2"
+    case "$lang" in
+        rust)
+            # moq-cli only handles SIGINT, so -k forces SIGKILL if it ignores the
+            # SIGTERM that fires when no data arrives within the timeout.
+            local n
+            n=$(timeout -k 3 "$TIMEOUT" "$MOQ" subscribe --url "$URL" --broadcast "$broadcast" \
+                --format fmp4 2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true)
+            [[ "${n:-0}" -ge 1 ]]
+            ;;
+        python)
+            (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync python examples/interop.py \
+                subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT")
+            ;;
+        *)
+            echo "unknown subscriber: $lang" >&2
+            return 1
+            ;;
+    esac
+}
+
+# ── matrix ──────────────────────────────────────────────────────────────────
+overall=0
+
+run_round() {
+    local pub="$1" broadcast="$2" pub_pid="$3"
+    local pids=() names=() i sub
+    for sub in "${SUB_LIST[@]}"; do
+        (run_subscriber "$sub" "$broadcast") >"$TMP/$pub-$sub.log" 2>&1 &
+        pids+=("$!")
+        names+=("$sub")
+    done
+    # A publisher that streams forever should still be alive; if it died, the
+    # subscriber failures below are a publisher bug, so surface its log.
+    if [[ -n "$pub_pid" ]] && ! kill -0 "$pub_pid" 2>/dev/null; then
+        echo "  WARN  publisher '$pub' exited early:"
+        sed 's/^/        /' "$TMP/pub-$pub.log" 2>/dev/null || true
+    fi
+    local want_pass=1 got
+    [[ "$NEGATIVE" -eq 1 ]] && want_pass=0
+    for i in "${!pids[@]}"; do
+        if wait "${pids[$i]}"; then got=1; else got=0; fi
+        if [[ "$got" -eq "$want_pass" ]]; then
+            echo "  PASS  $pub -> ${names[$i]}"
+        else
+            echo "  FAIL  $pub -> ${names[$i]}"
+            sed 's/^/        /' "$TMP/$pub-${names[$i]}.log" 2>/dev/null || true
+            overall=1
+        fi
+    done
+    if [[ -n "$pub_pid" ]]; then
+        kill_tree "$pub_pid"
+        wait "$pub_pid" 2>/dev/null || true
+    fi
+    return 0
+}
+
+if [[ "$NEGATIVE" -eq 1 ]]; then
+    # Negative control: no publisher. Every subscriber must FAIL (time out with
+    # no data), proving the harness can actually report failure.
+    echo "=== negative control: subscribers expect NO data ==="
+    run_round "none" "smoke-missing-$$-$RANDOM.hang" ""
+else
+    for pub in "${PUB_LIST[@]}"; do
+        broadcast="smoke-${pub}-$$-${RANDOM}.hang"
+        echo "=== publisher: $pub  broadcast: $broadcast ==="
+        start_publisher "$pub" "$broadcast"
+        run_round "$pub" "$broadcast" "$PUB_PID"
+    done
+fi
+
+if [[ "$overall" -eq 0 ]]; then
+    echo "smoke: all checks passed"
+else
+    echo "smoke: FAILURES detected" >&2
+fi
+exit "$overall"
