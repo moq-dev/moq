@@ -79,8 +79,8 @@ chmod 700 "$GNUPGHOME"
 echo "${SIGNING_KEY:?}" | gpg --batch --quiet --import
 # Fail loud if SIGNING_KEY ever holds more than one secret. Silently picking
 # the first one would produce signatures from the wrong key.
-mapfile -t KEY_IDS < <(gpg --list-secret-keys --with-colons --keyid-format=long \
-    | awk -F: '/^sec:/ { print $5 }')
+mapfile -t KEY_IDS < <(gpg --list-secret-keys --with-colons --keyid-format=long |
+    awk -F: '/^sec:/ { print $5 }')
 if [[ ${#KEY_IDS[@]} -ne 1 ]]; then
     echo "ERROR: expected exactly one secret key in SIGNING_KEY, found ${#KEY_IDS[@]}." >&2
     exit 1
@@ -102,7 +102,7 @@ for arch in "${ARCHES[@]}"; do
 done
 
 echo ">> Write moq.repo template..."
-cat > "$WORK/moq.repo" <<EOF
+cat >"$WORK/moq.repo" <<EOF
 [moq]
 name=MoQ Project
 baseurl=https://rpm.moq.dev/${DIST}/\$basearch

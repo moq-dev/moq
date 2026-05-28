@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.15](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.14...moq-ffi-v0.2.15) - 2026-05-27
+
+### Other
+
+- moq-mux: add seek(sequence) on importers for explicit group boundaries ([#1515](https://github.com/moq-dev/moq/pull/1515))
+- moq-net: add Lite05Wip version variant (unadvertised) ([#1518](https://github.com/moq-dev/moq/pull/1518))
+
 ## [0.2.14](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.13...moq-ffi-v0.2.14) - 2026-05-25
 
 ### Other

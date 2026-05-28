@@ -7,28 +7,28 @@
 set working-directory := '.'
 
 default:
-	just check
+    just check
 
 # Build moq-ffi for the host, regenerate uniffi bindings, run :moq:jvmTest.
 # Skips cleanly if cargo, java, or gradle is missing.
 check:
-	bash scripts/check.sh
+    bash scripts/check.sh
 
 # Assemble the KMP module from per-target moq-ffi binaries + bindings.
 # Used by .github/workflows/release-kt.yml; see kt/README.md for the
 # expected --lib-dir layout.
 package *args:
-	bash scripts/package.sh {{ args }}
+    bash scripts/package.sh {{ args }}
 
 # Full Kotlin CI: `check` already builds moq-ffi and runs gradle tests.
 # Takes a newline-separated list of changed files; skips if FILES is
 # non-empty and none match the Kotlin scope. Run `just kt ci` (no
 # FILES) to force-run.
 ci FILES="":
-	#!/usr/bin/env bash
-	set -euo pipefail
-	if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(kt/|rs/moq-ffi/)'; then
-		echo "kt: no Kotlin changes; skipping."
-		exit 0
-	fi
-	just check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(kt/|rs/moq-ffi/)'; then
+    	echo "kt: no Kotlin changes; skipping."
+    	exit 0
+    fi
+    just check

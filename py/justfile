@@ -6,46 +6,46 @@
 set working-directory := '.'
 
 default:
-	just check
+    just check
 
 # Lint + format + maturin source build + pyright. `--no-install-workspace`
 # installs the root dev group (ruff, maturin, pyright, pytest) without
 # trying to pip-build moq-rs; `maturin develop` then installs moq-rs
 # as an editable wheel with the rs/moq-ffi cdylib + uniffi bindings.
 check:
-	uv sync --no-install-workspace
-	uv run --no-sync ruff check .
-	uv run --no-sync ruff format --check .
-	cd moq-rs && uv run --no-sync maturin develop --uv
-	uv run --no-sync pyright
+    uv sync --no-install-workspace
+    uv run --no-sync ruff check .
+    uv run --no-sync ruff format --check .
+    cd moq-rs && uv run --no-sync maturin develop --uv
+    uv run --no-sync pyright
 
 fix:
-	uv sync --no-install-workspace
-	uv run --no-sync ruff check --fix .
-	uv run --no-sync ruff format .
+    uv sync --no-install-workspace
+    uv run --no-sync ruff check --fix .
+    uv run --no-sync ruff format .
 
 test:
-	uv sync --no-install-workspace
-	cd moq-rs && uv run --no-sync maturin develop --uv
-	uv run --no-sync pytest moq-rs/tests/
+    uv sync --no-install-workspace
+    cd moq-rs && uv run --no-sync maturin develop --uv
+    uv run --no-sync pytest moq-rs/tests/
 
 # Local dev build: produces an editable install of moq-rs (with the
 # moq-ffi cdylib + uniffi bindings) into the workspace venv.
 build:
-	uv sync --no-install-workspace
-	cd moq-rs && uv run --no-sync maturin develop --uv
+    uv sync --no-install-workspace
+    cd moq-rs && uv run --no-sync maturin develop --uv
 
 # Full Python CI: lint + tests + build. Takes a newline-separated list
 # of changed files; skips if FILES is non-empty and none match the
 # Python scope (which includes rs/moq-ffi because py bundles it via
 # maturin). Run `just py ci` (no FILES) to force-run everything.
 ci FILES="":
-	#!/usr/bin/env bash
-	set -euo pipefail
-	if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'; then
-		echo "py: no Python changes; skipping."
-		exit 0
-	fi
-	just check
-	just test
-	just build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'; then
+    	echo "py: no Python changes; skipping."
+    	exit 0
+    fi
+    just check
+    just test
+    just build

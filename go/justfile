@@ -6,28 +6,28 @@
 set working-directory := '.'
 
 default:
-	just check
+    just check
 
 # Build moq-ffi for the host, run uniffi-bindgen-go, stage everything
 # into a tmp dir, and run `go build`/`go vet`/`go test` from there.
 # Skips cleanly if cargo, go, or uniffi-bindgen-go is missing.
 check:
-	bash scripts/check.sh
+    bash scripts/check.sh
 
 # Stage the in-tree go/ source + per-target moq-ffi libs + generated
 # bindings into a single Go module ready for publish.
 package *args:
-	bash scripts/package.sh {{ args }}
+    bash scripts/package.sh {{ args }}
 
 # Full Go CI: `check` builds moq-ffi, regenerates bindings, runs go
 # vet/build/test. Takes a newline-separated list of changed files;
 # skips if FILES is non-empty and none match the Go scope. Run
 # `just go ci` (no FILES) to force-run.
 ci FILES="":
-	#!/usr/bin/env bash
-	set -euo pipefail
-	if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(go/|rs/moq-ffi/)'; then
-		echo "go: no Go changes; skipping."
-		exit 0
-	fi
-	just check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(go/|rs/moq-ffi/)'; then
+    	echo "go: no Go changes; skipping."
+    	exit 0
+    fi
+    just check

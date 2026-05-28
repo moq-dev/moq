@@ -36,23 +36,41 @@ echo "go check: building moq-ffi for $HOST_TARGET..."
 cargo build --release --package moq-ffi \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
-TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps \
-    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
+    sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 
 case "$HOST_TARGET" in
-    *-apple-*) CDYLIB="$TARGET_BASE/release/libmoq_ffi.dylib"; STATICLIB="$TARGET_BASE/release/libmoq_ffi.a";;
-    *-windows-*) CDYLIB="$TARGET_BASE/release/moq_ffi.dll"; STATICLIB="$TARGET_BASE/release/moq_ffi.lib";;
-    *) CDYLIB="$TARGET_BASE/release/libmoq_ffi.so"; STATICLIB="$TARGET_BASE/release/libmoq_ffi.a";;
+    *-apple-*)
+        CDYLIB="$TARGET_BASE/release/libmoq_ffi.dylib"
+        STATICLIB="$TARGET_BASE/release/libmoq_ffi.a"
+        ;;
+    *-windows-*)
+        CDYLIB="$TARGET_BASE/release/moq_ffi.dll"
+        STATICLIB="$TARGET_BASE/release/moq_ffi.lib"
+        ;;
+    *)
+        CDYLIB="$TARGET_BASE/release/libmoq_ffi.so"
+        STATICLIB="$TARGET_BASE/release/libmoq_ffi.a"
+        ;;
 esac
 
-[[ -f "$CDYLIB" ]] || { echo "go check: cdylib not found at $CDYLIB" >&2; exit 1; }
-[[ -f "$STATICLIB" ]] || { echo "go check: staticlib not found at $STATICLIB" >&2; exit 1; }
+[[ -f "$CDYLIB" ]] || {
+    echo "go check: cdylib not found at $CDYLIB" >&2
+    exit 1
+}
+[[ -f "$STATICLIB" ]] || {
+    echo "go check: staticlib not found at $STATICLIB" >&2
+    exit 1
+}
 
 # Reject unsupported hosts up front; package.sh derives the cgo
 # subdir name from the cargo target via its own mapping.
 case "$HOST_TARGET" in
-    x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu|x86_64-apple-darwin|aarch64-apple-darwin|x86_64-pc-windows-msvc) ;;
-    *) echo "go check: unsupported host target $HOST_TARGET" >&2; exit 1;;
+    x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu | x86_64-apple-darwin | aarch64-apple-darwin | x86_64-pc-windows-msvc) ;;
+    *)
+        echo "go check: unsupported host target $HOST_TARGET" >&2
+        exit 1
+        ;;
 esac
 
 # Stage into the workspace's dist/ (gitignored at repo root).

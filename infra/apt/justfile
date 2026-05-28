@@ -2,15 +2,15 @@ set fallback
 
 # Deploy the apt.moq.dev worker.
 deploy:
-	bun install
-	bun wrangler deploy
+    bun install
+    bun wrangler deploy
 
 # Regenerate apt repo metadata and upload to the apt-moq-dev R2 bucket.
 # Reads .deb files from $ARTIFACTS_DIR (defaults to ./artifacts).
 publish artifacts="artifacts":
-	ARTIFACTS_DIR="{{artifacts}}" ./publish.sh
+    ARTIFACTS_DIR="{{ artifacts }}" ./publish.sh
 
 # List objects currently in the apt-moq-dev bucket.
 list:
-	bun install
-	bun wrangler r2 object list "apt-moq-dev"
+    bun install
+    bun wrangler r2 object list "apt-moq-dev"

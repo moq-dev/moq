@@ -21,7 +21,7 @@ parse_version() {
 
     if [[ "$ref" =~ ^${prefix}-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$ ]]; then
         local version="${BASH_REMATCH[1]}"
-        echo "version=${version}" >> "$GITHUB_OUTPUT"
+        echo "version=${version}" >>"$GITHUB_OUTPUT"
         echo "Parsed version: ${version}"
     else
         echo "Tag format not recognized: $ref (expected ${prefix}-v<semver>)" >&2
@@ -36,10 +36,10 @@ prev_tag() {
     local current_tag="${GITHUB_REF#refs/tags/}"
 
     local prev
-    prev=$(git tag --list "${prefix}-v*" --sort=v:refname \
-        | awk -v cur="$current_tag" '$0 == cur { print prev; found=1; exit } { prev=$0 } END { if (!found) print "" }')
+    prev=$(git tag --list "${prefix}-v*" --sort=v:refname |
+        awk -v cur="$current_tag" '$0 == cur { print prev; found=1; exit } { prev=$0 } END { if (!found) print "" }')
 
-    echo "tag=${prev}" >> "$GITHUB_OUTPUT"
+    echo "tag=${prev}" >>"$GITHUB_OUTPUT"
     echo "Previous tag: ${prev:-none}"
 }
 
@@ -52,7 +52,7 @@ create_release() {
     local title="${RELEASE_TITLE:?RELEASE_TITLE must be set}"
     local prev_tag="${RELEASE_PREV_TAG:-}"
 
-    if gh release view "$tag" > /dev/null 2>&1; then
+    if gh release view "$tag" >/dev/null 2>&1; then
         echo "Release exists, updating assets and metadata..."
         gh release upload "$tag" "$artifacts_dir"/* --clobber
         if [ -n "$prev_tag" ]; then
@@ -80,8 +80,8 @@ create_release() {
 # Dispatch subcommands
 case "${1:-}" in
     parse-version) parse_version "$2" ;;
-    prev-tag)      prev_tag "$2" ;;
-    create)        create_release "$2" ;;
+    prev-tag) prev_tag "$2" ;;
+    create) create_release "$2" ;;
     *)
         echo "Usage: $0 {parse-version|prev-tag|create} <args>" >&2
         exit 1

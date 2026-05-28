@@ -187,3 +187,15 @@ When making changes to the codebase:
 ## PR Reviews
 
 CodeRabbit reviews PRs automatically, but it has an hourly quota and runs out of org credits. If a PR shows a "Review limit reached" / "out of usage credits" message instead of an actual review, run the `/review` skill locally against the PR to get review feedback without waiting for the quota to refill.
+
+## PR Title and Description Maintenance
+
+When pushing additional commits to an existing PR, check whether the title and description still describe the change accurately. They often go stale during review iterations: a flag gets renamed, an API gets reshaped, an extra fix lands, etc. The PR description is what shows up in the squash-merge commit, so a stale title/body means a misleading entry in `git log` forever.
+
+Update them with `gh pr edit <num> --title "..." --body "..."` whenever the scope shifts. Specifically watch for:
+
+- Flags, file names, or public APIs renamed in later commits but still referenced by their old name in the PR body.
+- Bullet points in the "Summary" section that describe behavior the latest commits have changed or removed.
+- The test-plan checklist getting out of date as new tests are added.
+
+When you edit a PR description you authored, keep the `(Written by Claude)` marker so reviewers still know the body wasn't human-authored.

@@ -32,27 +32,60 @@ RELEASE_URL_BASE="https://github.com/moq-dev/moq/releases/download"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --version) VERSION="$2"; shift 2;;
-        --lib-dir) LIB_DIR="$2"; shift 2;;
-        --output) OUTPUT_DIR="$2"; shift 2;;
-        --bindings-dir) BINDINGS_DIR="$2"; shift 2;;
-        --release-url) RELEASE_URL_BASE="$2"; shift 2;;
-        -h|--help)
+        --version)
+            VERSION="$2"
+            shift 2
+            ;;
+        --lib-dir)
+            LIB_DIR="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --bindings-dir)
+            BINDINGS_DIR="$2"
+            shift 2
+            ;;
+        --release-url)
+            RELEASE_URL_BASE="$2"
+            shift 2
+            ;;
+        -h | --help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
-        *) echo "Unknown option: $1" >&2; exit 1;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
     esac
 done
 
-[[ -z "$VERSION" ]] && { echo "Error: --version is required" >&2; exit 1; }
-[[ -z "$LIB_DIR" ]] && { echo "Error: --lib-dir is required" >&2; exit 1; }
+[[ -z "$VERSION" ]] && {
+    echo "Error: --version is required" >&2
+    exit 1
+}
+[[ -z "$LIB_DIR" ]] && {
+    echo "Error: --lib-dir is required" >&2
+    exit 1
+}
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="dist"
 [[ -z "$BINDINGS_DIR" ]] && BINDINGS_DIR="$LIB_DIR/bindings"
 
-[[ "$(uname)" == "Darwin" ]] || { echo "Error: package.sh requires macOS (xcodebuild)" >&2; exit 1; }
-command -v xcodebuild >/dev/null || { echo "Error: xcodebuild not found" >&2; exit 1; }
-command -v swift >/dev/null || { echo "Error: swift not found" >&2; exit 1; }
+[[ "$(uname)" == "Darwin" ]] || {
+    echo "Error: package.sh requires macOS (xcodebuild)" >&2
+    exit 1
+}
+command -v xcodebuild >/dev/null || {
+    echo "Error: xcodebuild not found" >&2
+    exit 1
+}
+command -v swift >/dev/null || {
+    echo "Error: swift not found" >&2
+    exit 1
+}
 
 mkdir -p "$OUTPUT_DIR"
 # Normalize to an absolute path: later steps (zip, swift package
@@ -66,9 +99,18 @@ trap 'rm -rf "$STAGING"' EXIT
 # --- Headers (modulemap + .h) shared by all slices ---
 HEADERS_DIR="$STAGING/headers"
 mkdir -p "$HEADERS_DIR"
-[[ -f "$BINDINGS_DIR/moqFFI.h" ]] || { echo "Error: missing $BINDINGS_DIR/moqFFI.h" >&2; exit 1; }
-[[ -f "$BINDINGS_DIR/moqFFI.modulemap" ]] || { echo "Error: missing $BINDINGS_DIR/moqFFI.modulemap" >&2; exit 1; }
-[[ -f "$BINDINGS_DIR/moq.swift" ]] || { echo "Error: missing $BINDINGS_DIR/moq.swift" >&2; exit 1; }
+[[ -f "$BINDINGS_DIR/moqFFI.h" ]] || {
+    echo "Error: missing $BINDINGS_DIR/moqFFI.h" >&2
+    exit 1
+}
+[[ -f "$BINDINGS_DIR/moqFFI.modulemap" ]] || {
+    echo "Error: missing $BINDINGS_DIR/moqFFI.modulemap" >&2
+    exit 1
+}
+[[ -f "$BINDINGS_DIR/moq.swift" ]] || {
+    echo "Error: missing $BINDINGS_DIR/moq.swift" >&2
+    exit 1
+}
 cp "$BINDINGS_DIR/moqFFI.h" "$HEADERS_DIR/"
 cp "$BINDINGS_DIR/moqFFI.modulemap" "$HEADERS_DIR/module.modulemap"
 
@@ -80,7 +122,10 @@ lib_for() {
 ensure_lib() {
     local path
     path=$(lib_for "$1")
-    [[ -f "$path" ]] || { echo "Error: missing static lib for $1 at $path" >&2; exit 1; }
+    [[ -f "$path" ]] || {
+        echo "Error: missing static lib for $1 at $path" >&2
+        exit 1
+    }
     echo "$path"
 }
 
@@ -123,13 +168,16 @@ cp "$BINDINGS_DIR/moq.swift" "$PKG_STAGE/Sources/MoqFFI/Generated.swift"
 # Dual-license files lifted from the workspace root so the mirror isn't
 # licenseless. Both files are required by the MIT OR Apache-2.0 grant.
 for license in LICENSE-MIT LICENSE-APACHE; do
-    [[ -f "$WORKSPACE_DIR/$license" ]] || { echo "Error: missing $WORKSPACE_DIR/$license" >&2; exit 1; }
+    [[ -f "$WORKSPACE_DIR/$license" ]] || {
+        echo "Error: missing $WORKSPACE_DIR/$license" >&2
+        exit 1
+    }
     cp "$WORKSPACE_DIR/$license" "$PKG_STAGE/$license"
 done
 
 # Minimal consumer-facing README. The full developer README lives in
 # the monorepo; this one just orients a visitor to moq-dev/moq-swift.
-cat > "$PKG_STAGE/README.md" <<EOF
+cat >"$PKG_STAGE/README.md" <<EOF
 # Moq (Swift Package)
 
 Auto-generated mirror of the Swift package for [Media over QUIC](https://github.com/moq-dev/moq).
@@ -153,7 +201,10 @@ EOF
 # template. The working swift/Package.swift is intentionally the
 # local-dev (path-based) form and is not used here.
 TEMPLATE="$SWIFT_DIR/Package.swift.template"
-[[ -f "$TEMPLATE" ]] || { echo "Error: missing $TEMPLATE" >&2; exit 1; }
+[[ -f "$TEMPLATE" ]] || {
+    echo "Error: missing $TEMPLATE" >&2
+    exit 1
+}
 URL="${RELEASE_URL_BASE}/moq-ffi-v${VERSION}/MoqFFI.xcframework.zip"
 # Token-based substitution: the template carries REPLACE_URL / REPLACE_VERSION
 # / REPLACE_CHECKSUM placeholders, so editing the upstream URL in the template
@@ -161,7 +212,7 @@ URL="${RELEASE_URL_BASE}/moq-ffi-v${VERSION}/MoqFFI.xcframework.zip"
 sed -e "s|REPLACE_URL|${URL}|g" \
     -e "s|REPLACE_VERSION|${VERSION}|g" \
     -e "s|REPLACE_CHECKSUM|${CHECKSUM}|g" \
-    "$TEMPLATE" > "$PKG_STAGE/Package.swift"
+    "$TEMPLATE" >"$PKG_STAGE/Package.swift"
 
 # Fail loudly if any placeholder survived (e.g. someone renamed a token
 # in the template without updating this script). Catching it here keeps
@@ -176,7 +227,7 @@ fi
 # Swift toolchain. This runs even on PR dry-runs (where the live release
 # asset doesn't exist yet) and catches syntax / API breakage in the
 # template before it can reach the mirror.
-(cd "$PKG_STAGE" && swift package dump-package > /dev/null)
+(cd "$PKG_STAGE" && swift package dump-package >/dev/null)
 
 # --- Archive ---
 ARCHIVE="$OUTPUT_DIR/${PKG_NAME}.tar.gz"

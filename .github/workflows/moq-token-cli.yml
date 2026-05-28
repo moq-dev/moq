@@ -101,6 +101,7 @@ jobs:
           ARCH: ${{ matrix.deb-arch }}
           BINARY_PATH: target/${{ matrix.target }}/release/moq-token-cli
         run: |
+          # shellcheck disable=SC2016  # envsubst varlist must be single-quoted
           envsubst '$VERSION $ARCH $BINARY_PATH' \
             < packaging/moq-token-cli/nfpm.yaml > /tmp/nfpm.yaml
           nfpm pkg --packager deb --config /tmp/nfpm.yaml --target dist/
@@ -112,6 +113,7 @@ jobs:
           ARCH: ${{ matrix.rpm-arch }}
           BINARY_PATH: target/${{ matrix.target }}/release/moq-token-cli
         run: |
+          # shellcheck disable=SC2016  # envsubst varlist must be single-quoted
           envsubst '$VERSION $ARCH $BINARY_PATH' \
             < packaging/moq-token-cli/nfpm.yaml > /tmp/nfpm.yaml
           nfpm pkg --packager rpm --config /tmp/nfpm.yaml --target dist/

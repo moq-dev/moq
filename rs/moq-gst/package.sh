@@ -43,12 +43,32 @@ require_value() {
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --packager) require_value "$@"; PACKAGER="$2"; shift 2 ;;
-        --version)  require_value "$@"; VERSION="$2";  shift 2 ;;
-        --arch)     require_value "$@"; PKG_ARCH="$2"; shift 2 ;;
-        --target)   require_value "$@"; RUST_TARGET="$2"; shift 2 ;;
-        --output)   require_value "$@"; OUTPUT_DIR="$2"; shift 2 ;;
-        -h|--help)
+        --packager)
+            require_value "$@"
+            PACKAGER="$2"
+            shift 2
+            ;;
+        --version)
+            require_value "$@"
+            VERSION="$2"
+            shift 2
+            ;;
+        --arch)
+            require_value "$@"
+            PKG_ARCH="$2"
+            shift 2
+            ;;
+        --target)
+            require_value "$@"
+            RUST_TARGET="$2"
+            shift 2
+            ;;
+        --output)
+            require_value "$@"
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        -h | --help)
             sed -n '2,/^set -euo pipefail/p' "$0" | sed 's/^# //;s/^#//' | head -n -1
             exit 0
             ;;
@@ -77,25 +97,29 @@ fi
 if [[ -z "$PKG_ARCH" ]]; then
     case "$RUST_TARGET" in
         x86_64-unknown-linux-*)
-            PKG_ARCH=$([[ "$PACKAGER" == "deb" ]] && echo "amd64" || echo "x86_64") ;;
+            PKG_ARCH=$([[ "$PACKAGER" == "deb" ]] && echo "amd64" || echo "x86_64")
+            ;;
         aarch64-unknown-linux-*)
-            PKG_ARCH=$([[ "$PACKAGER" == "deb" ]] && echo "arm64" || echo "aarch64") ;;
+            PKG_ARCH=$([[ "$PACKAGER" == "deb" ]] && echo "arm64" || echo "aarch64")
+            ;;
         *)
             echo "Cannot derive --arch from target $RUST_TARGET; please pass it explicitly." >&2
-            exit 1 ;;
+            exit 1
+            ;;
     esac
     echo "Derived pkg arch: $PKG_ARCH"
 fi
 
 # Plugin install directory varies by distro+arch.
 case "$PACKAGER:$PKG_ARCH" in
-    deb:amd64)       PLUGIN_DIR="/usr/lib/x86_64-linux-gnu/gstreamer-1.0" ;;
-    deb:arm64)       PLUGIN_DIR="/usr/lib/aarch64-linux-gnu/gstreamer-1.0" ;;
-    rpm:x86_64)      PLUGIN_DIR="/usr/lib64/gstreamer-1.0" ;;
-    rpm:aarch64)     PLUGIN_DIR="/usr/lib64/gstreamer-1.0" ;;
+    deb:amd64) PLUGIN_DIR="/usr/lib/x86_64-linux-gnu/gstreamer-1.0" ;;
+    deb:arm64) PLUGIN_DIR="/usr/lib/aarch64-linux-gnu/gstreamer-1.0" ;;
+    rpm:x86_64) PLUGIN_DIR="/usr/lib64/gstreamer-1.0" ;;
+    rpm:aarch64) PLUGIN_DIR="/usr/lib64/gstreamer-1.0" ;;
     *)
         echo "Unsupported --packager/--arch combination: $PACKAGER/$PKG_ARCH" >&2
-        exit 1 ;;
+        exit 1
+        ;;
 esac
 
 echo ">> Building moq-gst for $RUST_TARGET against system gstreamer..."

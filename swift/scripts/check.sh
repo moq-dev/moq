@@ -44,12 +44,15 @@ echo "swift check: building moq-ffi for $HOST_TARGET..."
 cargo build --release --package moq-ffi \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
-TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps \
-    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
+    sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 
 CDYLIB="$TARGET_BASE/release/libmoq_ffi.dylib"
 STATIC="$TARGET_BASE/release/libmoq_ffi.a"
-[[ -f "$CDYLIB" && -f "$STATIC" ]] || { echo "swift check: missing $CDYLIB or $STATIC" >&2; exit 1; }
+[[ -f "$CDYLIB" && -f "$STATIC" ]] || {
+    echo "swift check: missing $CDYLIB or $STATIC" >&2
+    exit 1
+}
 
 # Generate bindings.
 BINDGEN_OUT=$(mktemp -d)

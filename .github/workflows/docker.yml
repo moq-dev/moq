@@ -23,8 +23,8 @@ jobs:
         run: |
           ref=${GITHUB_REF#refs/tags/}
           if [[ "$ref" =~ ^([a-z-]+)-v([0-9.]+)$ ]]; then
-            echo "target=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
-            echo "version=${BASH_REMATCH[2]}" >> $GITHUB_OUTPUT
+            echo "target=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+            echo "version=${BASH_REMATCH[2]}" >> "$GITHUB_OUTPUT"
           else
             echo "Tag format not recognized." >&2
             exit 1
@@ -101,6 +101,7 @@ jobs:
       - name: Create manifest
         working-directory: /tmp/digests
         run: |
+          # shellcheck disable=SC2046  # intentional word-splitting: one arg per digest
           docker buildx imagetools create \
             -t ${{ env.REGISTRY }}/${{ needs.parse.outputs.target }}:${{ needs.parse.outputs.version }} \
             -t ${{ env.REGISTRY }}/${{ needs.parse.outputs.target }}:latest \
