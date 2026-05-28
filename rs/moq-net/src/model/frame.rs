@@ -16,7 +16,7 @@ use crate::{Error, Result};
 // TODO enforce this in [Frame::produce] / [FrameProducer::new] so the limit is
 // guaranteed for every caller, not just the wire decode paths. Blocked on
 // making the constructor fallible (returning [Result]), which is an API break.
-pub const MAX_FRAME_SIZE: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_FRAME_SIZE: u64 = 16 * 1024 * 1024;
 
 /// A chunk of data with an upfront size.
 ///
