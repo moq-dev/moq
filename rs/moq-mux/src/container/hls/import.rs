@@ -459,12 +459,12 @@ impl Import {
 	async fn fetch_bytes(&self, url: Url) -> Result<Bytes> {
 		if url.scheme() == "file" {
 			let path = url.to_file_path().map_err(|_| Error::InvalidFileUrl)?;
-			let bytes = tokio::fs::read(&path).await.map_err(Error::Io)?;
+			let bytes = tokio::fs::read(&path).await.map_err(Error::from)?;
 			Ok(Bytes::from(bytes))
 		} else {
-			let response = self.client.get(url).send().await.map_err(Error::Reqwest)?;
-			let response = response.error_for_status().map_err(Error::Reqwest)?;
-			let bytes = response.bytes().await.map_err(Error::Reqwest)?;
+			let response = self.client.get(url).send().await.map_err(Error::from)?;
+			let response = response.error_for_status().map_err(Error::from)?;
+			let bytes = response.bytes().await.map_err(Error::from)?;
 			Ok(bytes)
 		}
 	}

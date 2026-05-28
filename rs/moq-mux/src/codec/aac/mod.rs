@@ -10,7 +10,7 @@ pub use import::*;
 use bytes::{Buf, Bytes};
 
 /// AAC parsing errors.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
 	#[error("AudioSpecificConfig must be at least 2 bytes")]

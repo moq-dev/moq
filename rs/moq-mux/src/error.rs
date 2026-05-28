@@ -4,7 +4,7 @@
 /// transport / pub-sub failures, [`hang::Error`] for catalog/codec parsing, the
 /// per-format Errors for container shape problems, and the per-codec Errors for
 /// bitstream parsing problems.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
 	/// Error from the underlying moq-net transport.
@@ -65,11 +65,11 @@ pub enum Error {
 
 	/// Error decoding or encoding an mp4 atom.
 	#[error("mp4: {0}")]
-	Mp4(#[from] mp4_atom::Error),
+	Mp4(std::sync::Arc<mp4_atom::Error>),
 
 	/// I/O error.
 	#[error("io: {0}")]
-	Io(#[from] std::io::Error),
+	Io(std::sync::Arc<std::io::Error>),
 
 	/// URL parse error.
 	#[error("url: {0}")]
@@ -86,6 +86,18 @@ pub enum Error {
 	/// Importer dispatcher cannot return a single track for multi-track containers.
 	#[error("{0} can contain multiple tracks")]
 	MultipleTracks(&'static str),
+}
+
+impl From<mp4_atom::Error> for Error {
+	fn from(err: mp4_atom::Error) -> Self {
+		Error::Mp4(std::sync::Arc::new(err))
+	}
+}
+
+impl From<std::io::Error> for Error {
+	fn from(err: std::io::Error) -> Self {
+		Error::Io(std::sync::Arc::new(err))
+	}
 }
 
 /// A Result type alias for moq-mux operations.

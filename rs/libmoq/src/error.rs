@@ -83,14 +83,6 @@ pub enum Error {
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
 
-	/// Media decoder initialization failed.
-	#[error("init failed: {0}")]
-	InitFailed(Arc<moq_mux::Error>),
-
-	/// Media frame decode failed.
-	#[error("decode failed: {0}")]
-	DecodeFailed(Arc<moq_mux::Error>),
-
 	/// Buffer was not fully consumed.
 	#[error("buffer was not fully consumed")]
 	BufferNotConsumed,
@@ -121,7 +113,7 @@ pub enum Error {
 
 	/// Error from the moq-mux consumer layer.
 	#[error("mux error: {0}")]
-	Mux(Arc<moq_mux::Error>),
+	Mux(#[from] moq_mux::Error),
 
 	/// Index out of bounds.
 	#[error("no index")]
@@ -148,16 +140,6 @@ impl From<tracing::metadata::ParseLevelError> for Error {
 	}
 }
 
-impl From<moq_mux::Error> for Error {
-	fn from(err: moq_mux::Error) -> Self {
-		match err {
-			moq_mux::Error::Moq(e) => Error::Moq(e),
-			moq_mux::Error::Hang(e) => Error::Hang(e),
-			e => Error::Mux(Arc::new(e)),
-		}
-	}
-}
-
 impl ffi::ReturnCode for Error {
 	fn code(&self) -> i32 {
 		tracing::error!("{}", self);
@@ -171,8 +153,6 @@ impl ffi::ReturnCode for Error {
 			Error::InvalidId => -7,
 			Error::NotFound => -8,
 			Error::UnknownFormat(_) => -9,
-			Error::InitFailed(_) => -10,
-			Error::DecodeFailed(_) => -11,
 			Error::TimestampOverflow(_) => -13,
 			Error::Level(_) => -14,
 			Error::InvalidCode => -15,

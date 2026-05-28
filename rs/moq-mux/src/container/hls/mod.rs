@@ -9,7 +9,7 @@ mod import;
 pub use import::*;
 
 /// HLS ingest errors.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
 	#[error("invalid playlist URL")]
@@ -46,10 +46,22 @@ pub enum Error {
 	UrlParse(#[from] url::ParseError),
 
 	#[error("reqwest: {0}")]
-	Reqwest(#[from] reqwest::Error),
+	Reqwest(std::sync::Arc<reqwest::Error>),
 
 	#[error("io: {0}")]
-	Io(#[from] std::io::Error),
+	Io(std::sync::Arc<std::io::Error>),
+}
+
+impl From<reqwest::Error> for Error {
+	fn from(err: reqwest::Error) -> Self {
+		Error::Reqwest(std::sync::Arc::new(err))
+	}
+}
+
+impl From<std::io::Error> for Error {
+	fn from(err: std::io::Error) -> Self {
+		Error::Io(std::sync::Arc::new(err))
+	}
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

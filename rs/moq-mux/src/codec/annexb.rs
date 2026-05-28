@@ -3,7 +3,7 @@ use bytes::{Buf, Bytes};
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
 
 /// Annex B parsing errors.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
 	#[error("missing Annex B start code")]

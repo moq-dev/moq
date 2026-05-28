@@ -51,7 +51,7 @@ pub struct Frame {
 }
 
 /// Errors from LOC frame encode/decode.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
 	/// The frame's property block did not contain a 0x06 (Timestamp) entry.

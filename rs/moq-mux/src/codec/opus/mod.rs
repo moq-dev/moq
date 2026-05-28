@@ -12,7 +12,7 @@ use bytes::{Buf, Bytes};
 const OPUS_HEAD: u64 = u64::from_be_bytes(*b"OpusHead");
 
 /// Opus parsing errors.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
 	#[error("OpusHead must be at least 19 bytes")]

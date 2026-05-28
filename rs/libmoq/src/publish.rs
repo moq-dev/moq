@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::str::FromStr;
 
 use bytes::Buf;
 use moq_mux::import;
@@ -50,8 +50,7 @@ impl Publish {
 		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 
 		let format = import::FramedFormat::from_str(format).map_err(|_| Error::UnknownFormat(format.to_string()))?;
-		let decoder = import::Framed::new(broadcast.clone(), catalog.clone(), format, &mut init)
-			.map_err(|err| Error::InitFailed(Arc::new(err)))?;
+		let decoder = import::Framed::new(broadcast.clone(), catalog.clone(), format, &mut init)?;
 
 		let id = self.media.insert(decoder)?;
 		Ok(id)
@@ -65,9 +64,7 @@ impl Publish {
 	) -> Result<(), Error> {
 		let media = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
 
-		media
-			.decode_frame(&mut data, Some(timestamp))
-			.map_err(|err| Error::DecodeFailed(Arc::new(err)))?;
+		media.decode_frame(&mut data, Some(timestamp))?;
 
 		if data.has_remaining() {
 			return Err(Error::BufferNotConsumed);
@@ -78,7 +75,7 @@ impl Publish {
 
 	pub fn media_close(&mut self, media: Id) -> Result<(), Error> {
 		let mut decoder = self.media.remove(media).ok_or(Error::MediaNotFound)?;
-		decoder.finish().map_err(|err| Error::DecodeFailed(Arc::new(err)))?;
+		decoder.finish()?;
 		Ok(())
 	}
 }

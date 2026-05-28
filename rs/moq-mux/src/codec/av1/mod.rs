@@ -11,7 +11,7 @@ pub use import::*;
 use hang::catalog::AV1;
 
 /// AV1 parsing errors.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
 	#[error("OBU is too short")]
@@ -30,7 +30,13 @@ pub enum Error {
 	MissingTimestamp,
 
 	#[error("OBU header parse: {0}")]
-	ObuHeaderParse(#[from] std::io::Error),
+	ObuHeaderParse(std::sync::Arc<std::io::Error>),
+}
+
+impl From<std::io::Error> for Error {
+	fn from(err: std::io::Error) -> Self {
+		Error::ObuHeaderParse(std::sync::Arc::new(err))
+	}
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -25,11 +25,11 @@ use mp4_atom::Atom;
 
 use crate::container::{Container, Frame, Timestamp};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
 	#[error("mp4: {0}")]
-	Mp4(#[from] mp4_atom::Error),
+	Mp4(std::sync::Arc<mp4_atom::Error>),
 
 	#[error("moq: {0}")]
 	Moq(#[from] moq_net::Error),
@@ -120,6 +120,12 @@ pub enum Error {
 
 	#[error("encode_fragment called with no frames")]
 	NoFrames,
+}
+
+impl From<mp4_atom::Error> for Error {
+	fn from(err: mp4_atom::Error) -> Self {
+		Error::Mp4(std::sync::Arc::new(err))
+	}
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -360,7 +366,7 @@ pub(crate) fn synthesize_video_trak(
 	let sample_entry = match &config.codec {
 		VideoCodec::H264(_) => {
 			let mut cursor = std::io::Cursor::new(description);
-			let avcc = mp4_atom::Avcc::decode_body(&mut cursor).map_err(Error::Mp4)?;
+			let avcc = mp4_atom::Avcc::decode_body(&mut cursor).map_err(Error::from)?;
 			mp4_atom::Codec::from(mp4_atom::Avc1 {
 				visual,
 				avcc,
@@ -369,7 +375,7 @@ pub(crate) fn synthesize_video_trak(
 		}
 		VideoCodec::H265(h265) => {
 			let mut cursor = std::io::Cursor::new(description);
-			let hvcc = mp4_atom::Hvcc::decode_body(&mut cursor).map_err(Error::Mp4)?;
+			let hvcc = mp4_atom::Hvcc::decode_body(&mut cursor).map_err(Error::from)?;
 			// `in_band` (catalog) ↔ hev1 sample entry; otherwise hvc1.
 			if h265.in_band {
 				mp4_atom::Codec::from(mp4_atom::Hev1 {
