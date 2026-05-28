@@ -1,9 +1,10 @@
 use crate::crypto;
 use crate::server::{ServerTlsConfig, ServerTlsInfo};
 use anyhow::Context;
-use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use std::fs;
-use std::io::{self, Cursor, Read};
+use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -108,20 +109,14 @@ impl ServeCerts {
 		let chain = fs::File::open(chain_path).context("failed to open cert file")?;
 		let mut chain = io::BufReader::new(chain);
 
-		let chain: Vec<CertificateDer> = rustls_pemfile::certs(&mut chain)
+		let chain: Vec<CertificateDer> = CertificateDer::pem_reader_iter(&mut chain)
 			.collect::<Result<_, _>>()
 			.context("failed to read certs")?;
 
 		anyhow::ensure!(!chain.is_empty(), "could not find certificate");
 
 		// Read the PEM private key
-		let mut keys = fs::File::open(key_path).context("failed to open key file")?;
-
-		// Read the keys into a Vec so we can parse it twice.
-		let mut buf = Vec::new();
-		keys.read_to_end(&mut buf)?;
-
-		let key = rustls_pemfile::private_key(&mut Cursor::new(&buf))?.context("missing private key")?;
+		let key = PrivateKeyDer::from_pem_file(key_path).context("missing private key")?;
 		let key = self.provider.key_provider.load_private_key(key)?;
 
 		let certified_key = rustls::sign::CertifiedKey::new(chain, key);

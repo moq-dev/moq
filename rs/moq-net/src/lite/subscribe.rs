@@ -81,7 +81,7 @@ pub struct SubscribeOk {
 	pub end_group: Option<u64>,
 	/// Track timescale negotiated by the publisher. `None` means the publisher
 	/// hasn't negotiated a timescale (Lite04 and earlier, or Lite05+ with the
-	/// wire field set to `0`). Carried on the wire for [`Version::Lite05`] and
+	/// wire field set to `0`). Carried on the wire for [`Version::Lite05Wip`] and
 	/// later: `None` encodes as `0`, `Some(n)` encodes as `n`.
 	pub timescale: Option<Timescale>,
 }
@@ -106,7 +106,7 @@ impl Message for SubscribeOk {
 				self.max_latency.encode(w, version)?;
 				self.start_group.encode(w, version)?;
 				self.end_group.encode(w, version)?;
-				self.timescale.map(|ts| ts.get()).unwrap_or(0).encode(w, version)?;
+				self.timescale.map(u64::from).unwrap_or(0).encode(w, version)?;
 			}
 		}
 
@@ -142,7 +142,7 @@ impl Message for SubscribeOk {
 				let max_latency = std::time::Duration::decode(r, version)?;
 				let start_group = Option::<u64>::decode(r, version)?;
 				let end_group = Option::<u64>::decode(r, version)?;
-				let timescale = Timescale::new(u64::decode(r, version)?);
+				let timescale = Timescale::new(u64::decode(r, version)?).ok();
 
 				Ok(Self {
 					priority,
@@ -390,7 +390,7 @@ mod tests {
 			end_group: None,
 			timescale: Some(Timescale::MICRO),
 		};
-		let decoded = roundtrip_ok(Version::Lite05, ok);
+		let decoded = roundtrip_ok(Version::Lite05Wip, ok);
 		assert_eq!(decoded.priority, 3);
 		assert_eq!(decoded.timescale, Some(Timescale::MICRO));
 	}
@@ -399,7 +399,7 @@ mod tests {
 	fn subscribe_ok_lite05_unspecified_timescale() {
 		// timescale = None round-trips on Lite05 (wire field is 0).
 		let ok = SubscribeOk::default();
-		let decoded = roundtrip_ok(Version::Lite05, ok);
+		let decoded = roundtrip_ok(Version::Lite05Wip, ok);
 		assert_eq!(decoded.timescale, None);
 	}
 }

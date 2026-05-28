@@ -155,6 +155,13 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		return () => this.#changed.delete(fn);
 	}
 
+	// Resolve with the next value, once the signal changes.
+	next(): Promise<T> {
+		return new Promise<T>((resolve) => {
+			this.changed(resolve);
+		});
+	}
+
 	// Receive a notification when the value changes AND with the initial value.
 	watch(fn: Subscriber<T>): Dispose {
 		const dispose = this.subscribe(fn);

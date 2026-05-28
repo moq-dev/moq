@@ -216,6 +216,15 @@ impl QuinnServer {
 		let mut tls = quinn::ServerConfig::with_crypto(Arc::new(tls));
 		tls.transport_config(transport);
 
+		// Advertise the preferred_address transport parameter (RFC 9000 §9.6).
+		// Quinn allocates a fresh CID + reset token for the address during the handshake.
+		if let Some(addr) = config.preferred_v4 {
+			tls.preferred_address_v4(Some(addr));
+		}
+		if let Some(addr) = config.preferred_v6 {
+			tls.preferred_address_v6(Some(addr));
+		}
+
 		// There's a bit more boilerplate to make a generic endpoint.
 		let runtime = quinn::default_runtime().context("no async runtime")?;
 

@@ -62,27 +62,30 @@
         ];
 
         # Rust dependencies
-        rustDeps = with pkgs; [
-          rust-toolchain
-          just
-          git
-          cmake
-          pkg-config
-          glib
-          libressl
-          ffmpeg
-          curl
-          cargo-sort
-          cargo-shear
-          cargo-edit
-          cargo-sweep
-          cargo-semver-checks
-        ]
-        ++ gstreamerDeps
-        ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
-          # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
-          pkgs.release-plz
-        ];
+        rustDeps =
+          with pkgs;
+          [
+            rust-toolchain
+            just
+            git
+            cmake
+            pkg-config
+            glib
+            libressl
+            ffmpeg
+            curl
+            cargo-sort
+            cargo-shear
+            cargo-edit
+            cargo-sweep
+            cargo-semver-checks
+            cargo-deny
+          ]
+          ++ gstreamerDeps
+          ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
+            # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
+            pkgs.release-plz
+          ];
 
         # JavaScript dependencies
         jsDeps = with pkgs; [
@@ -102,6 +105,45 @@
           opentofu
         ];
 
+        # Tools for producing .deb/.rpm artifacts. Cross-platform so that
+        # `just rs package` works from `nix develop` on both Linux and macOS.
+        packagingDeps = with pkgs; [
+          nfpm
+          dpkg
+          gettext
+
+          # cargo-zigbuild + zig let CI build a single binary that links
+          # against an older glibc (passed as `<triple>.<glibc>`), so the
+          # same artifact ships in both .deb and .rpm. No docker needed.
+          cargo-zigbuild
+          zig
+        ];
+
+        # Tools needed to regenerate and sign the apt/rpm repositories.
+        # Linux-only because apt and createrepo_c are marked broken on Darwin
+        # in nixpkgs. The publish workflows only ever run on Linux runners.
+        publishDeps =
+          with pkgs;
+          lib.optionals (!stdenv.isDarwin) [
+            apt
+            createrepo_c
+            rpm
+            rclone
+            gnupg
+            gzip
+          ];
+
+        # Linters / formatters required by `just ci`; `just check` and
+        # `just fix` guard each tool with `command -v` so they skip
+        # silently when the binary isn't on $PATH.
+        lintDeps = with pkgs; [
+          shellcheck
+          shfmt
+          actionlint
+          taplo
+          nixfmt-rfc-style
+        ];
+
         # Apply our overlay to get the package definitions
         overlayPkgs = pkgs.extend self.overlays.default;
       in
@@ -111,7 +153,6 @@
             name = "moq-all";
             paths = [
               moq-relay
-              moq-clock
               moq-cli
               moq-token-cli
             ];
@@ -120,17 +161,24 @@
           # Inherit packages from the overlay
           inherit (overlayPkgs)
             moq-relay
-            moq-clock
             moq-cli
             moq-token-cli
             moq-boy
             libmoq
             moq-gst
             ;
+
+          # Bundle of packaging + repo-publish tooling, pinned via flake.lock.
+          # CI builds this and prepends its bin/ to $PATH so subsequent steps
+          # use the same versions a local `nix develop` user would.
+          packaging = pkgs.symlinkJoin {
+            name = "moq-packaging-tools";
+            paths = packagingDeps ++ publishDeps;
+          };
         };
 
         devShells.default = pkgs.mkShell {
-          packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps;
+          packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps ++ packagingDeps ++ lintDeps;
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

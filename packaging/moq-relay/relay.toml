@@ -1,0 +1,40 @@
+# Default moq-relay configuration installed by the moq-relay package.
+# Edit this file in place; your changes survive package upgrades because
+# /etc/moq-relay/relay.toml is registered as a conffile.
+#
+# See https://moq.dev/docs/auth and the example configs at
+# https://github.com/moq-dev/moq/tree/main/demo/relay for more.
+
+[server]
+# Listen for QUIC connections on UDP:443.
+# This is the default port for WebTransport.
+listen = "[::]:443"
+
+[server.tls]
+# Provide real certificates from Let's Encrypt or your CA of choice.
+# The default paths below are owned by the moq-relay service (DynamicUser)
+# via StateDirectory; drop your cert/key in /var/lib/moq-relay/.
+cert = "/var/lib/moq-relay/cert.pem"
+key = "/var/lib/moq-relay/key.pem"
+
+[web.https]
+# Listen for TCP/HTTPS/WSS connections on port 443.
+# Reuse the same certificate as the QUIC endpoint.
+listen = "[::]:443"
+cert = "/var/lib/moq-relay/cert.pem"
+key = "/var/lib/moq-relay/key.pem"
+
+# Uncomment to also serve plain HTTP/WebSocket on port 80.
+# [web.http]
+# listen = "[::]:80"
+
+# JWT authentication. Generate a key with `moq-token-cli`.
+# See https://moq.dev/docs/auth for the full reference.
+[auth]
+key = "/var/lib/moq-relay/root.jwk"
+
+# Allow anonymous subscribe under anon/** and demo/**.
+# Allow anonymous publish under anon/** and demo/viewer.
+[auth.public]
+subscribe = ["anon", "demo"]
+publish = ["anon", "demo/viewer"]

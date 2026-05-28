@@ -2,7 +2,7 @@
 //!
 //! The Game Boy APU outputs unsigned 8-bit stereo PCM at ~44.1kHz.
 //! This module resamples to 48kHz and encodes to Opus (20ms frames)
-//! using ffmpeg-next, then publishes via `moq_mux::import::Opus`.
+//! using ffmpeg-next, then publishes via `moq_mux::codec::opus::Import`.
 //!
 //! Audio timestamps are anchored to the same wall clock as video,
 //! ensuring A/V sync. The epoch is set on the first `push_samples()`
@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 ///
 /// Uses ffmpeg-next for Opus encoding (same dependency as video H.264).
 pub struct AudioEncoder {
-	opus: moq_mux::import::Opus,
+	opus: moq_mux::codec::opus::Import,
 	ffmpeg_encoder: ffmpeg_next::encoder::audio::Encoder,
 
 	resampler: Option<ffmpeg_next::software::resampling::Context>,
@@ -57,13 +57,13 @@ const OPUS_BITRATE: usize = 64000;
 impl AudioEncoder {
 	pub fn new(
 		broadcast: moq_net::BroadcastProducer,
-		catalog: moq_mux::catalog::Producer,
+		catalog: moq_mux::catalog::hang::Producer,
 		input_sample_rate: u32,
 	) -> Result<Self> {
-		let opus = moq_mux::import::Opus::new(
+		let opus = moq_mux::codec::opus::Import::new(
 			broadcast,
 			catalog,
-			moq_mux::import::OpusConfig {
+			moq_mux::codec::opus::Config {
 				sample_rate: OPUS_SAMPLE_RATE,
 				channel_count: CHANNELS,
 			},

@@ -1,0 +1,9 @@
+set fallback
+
+# Lint GitHub Actions workflows. Silently skipped if actionlint is not installed.
+check:
+    @if command -v actionlint >/dev/null 2>&1; then actionlint; fi
+
+# CI variant: actionlint is required (provided by the nix devShell).
+ci:
+    actionlint

@@ -15,6 +15,12 @@ impl MoqBroadcastConsumer {
 	pub(crate) fn new(inner: moq_net::BroadcastConsumer) -> Self {
 		Self { inner }
 	}
+
+	/// Access the underlying `moq_net::BroadcastConsumer` for sibling
+	/// modules (e.g. `audio`) that need to subscribe a typed track.
+	pub(crate) fn inner(&self) -> &moq_net::BroadcastConsumer {
+		&self.inner
+	}
 }
 
 #[derive(uniffi::Object)]
@@ -23,7 +29,7 @@ pub struct MoqCatalogConsumer {
 }
 
 struct Catalog {
-	inner: moq_mux::catalog::Consumer,
+	inner: moq_mux::catalog::hang::Consumer,
 }
 
 impl Catalog {
@@ -42,7 +48,7 @@ pub struct MoqMediaConsumer {
 }
 
 struct Media {
-	inner: moq_mux::container::Consumer<moq_mux::container::Hang>,
+	inner: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 }
 
 impl Media {
@@ -75,17 +81,10 @@ impl Media {
 #[uniffi::export]
 impl MoqBroadcastConsumer {
 	/// Subscribe to the catalog for this broadcast.
-	pub async fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
-		let broadcast = self.inner.clone();
-		let track = crate::ffi::RUNTIME
-			.spawn(async move {
-				broadcast
-					.subscribe_track(hang::catalog::Catalog::DEFAULT_NAME, moq_net::Subscription::default())
-					.await
-			})
-			.await
-			.map_err(|err| MoqError::Codec(format!("subscribe task panicked: {err}")))??;
-		let consumer = moq_mux::catalog::Consumer::from(track);
+	pub fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let track = self.inner.subscribe_track(&hang::catalog::Catalog::default_track())?;
+		let consumer = moq_mux::catalog::hang::Consumer::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
 			task: Task::new(Catalog { inner: consumer }),
 		}))
@@ -94,12 +93,9 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to a track by name — same pattern as moq-boy's command/status tracks.
 	///
 	/// Frames are returned as plain byte payloads with no codec or container parsing.
-	pub async fn subscribe_track(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
-		let broadcast = self.inner.clone();
-		let track = crate::ffi::RUNTIME
-			.spawn(async move { broadcast.subscribe_track(&name, moq_net::Subscription::default()).await })
-			.await
-			.map_err(|err| MoqError::Codec(format!("subscribe task panicked: {err}")))??;
+	pub fn subscribe_track(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let track = self.inner.subscribe_track(&moq_net::Track { name, priority: 0, timescale: None })?;
 		Ok(Arc::new(MoqTrackConsumer::new(track)))
 	}
 
@@ -107,23 +103,20 @@ impl MoqBroadcastConsumer {
 	///
 	/// `container` is the track container from the catalog.
 	/// `max_latency_ms` controls the maximum buffering before skipping a GoP.
-	pub async fn subscribe_media(
+	pub fn subscribe_media(
 		&self,
 		name: String,
 		container: Container,
 		max_latency_ms: u64,
 	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
 		// Parse the container before subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
 		let container: hang::catalog::Container = container.into();
-		let media: moq_mux::container::Hang = (&container)
+		let media: moq_mux::catalog::hang::Container = (&container)
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
-		let broadcast = self.inner.clone();
-		let track = crate::ffi::RUNTIME
-			.spawn(async move { broadcast.subscribe_track(&name, moq_net::Subscription::default()).await })
-			.await
-			.map_err(|err| MoqError::Codec(format!("subscribe task panicked: {err}")))??;
+		let track = self.inner.subscribe_track(&moq_net::Track { name, priority: 0, timescale: None })?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {

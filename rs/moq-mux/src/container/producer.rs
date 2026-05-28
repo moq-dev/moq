@@ -2,8 +2,9 @@ use super::{Container, Frame};
 
 /// A producer for media tracks that manages group boundaries.
 ///
-/// Generic over `C: Container` to support different container encodings (Hang Legacy,
-/// CMAF, …).
+/// Generic over `C: Container` to support different container encodings
+/// (Legacy, CMAF, LOC). Use [`catalog::hang::Container`](crate::catalog::hang::Container)
+/// to dispatch on the catalog at runtime.
 ///
 /// ## Group Management
 ///
@@ -26,24 +27,35 @@ use super::{Container, Frame};
 ///
 /// This is useful for CMAF where multiple samples should be packed into one moof+mdat.
 pub struct Producer<C: Container> {
-	pub track: moq_net::TrackProducer,
+	inner: moq_net::TrackProducer,
 	container: C,
 	group: Option<moq_net::GroupProducer>,
 	buffer: Vec<Frame>,
 
 	latency: std::time::Duration,
+
+	/// Sequence to use for the next group opened by [`Self::write`].
+	/// Set by [`Self::seek`] and consumed on the next group creation.
+	pending_sequence: Option<u64>,
 }
 
 impl<C: Container> Producer<C> {
 	/// Create a new Producer wrapping the given moq-lite producer.
 	pub fn new(track: moq_net::TrackProducer, container: C) -> Self {
 		Self {
-			track,
+			inner: track,
 			container,
 			group: None,
 			buffer: Vec::new(),
 			latency: std::time::Duration::ZERO,
+			pending_sequence: None,
 		}
+	}
+
+	/// The underlying moq-lite track producer. Read-only; mutating it directly
+	/// would sidestep group/keyframe invariants.
+	pub fn track(&self) -> &moq_net::TrackProducer {
+		&self.inner
 	}
 
 	/// Set the maximum buffering latency.
@@ -73,7 +85,10 @@ impl<C: Container> Producer<C> {
 			if !frame.keyframe {
 				return Err(moq_net::Error::ProtocolViolation.into());
 			}
-			self.group = Some(self.track.append_group()?);
+			self.group = Some(match self.pending_sequence.take() {
+				Some(sequence) => self.inner.create_group(moq_net::Group { sequence })?,
+				None => self.inner.append_group()?,
+			});
 		}
 
 		// Buffer or write the frame.
@@ -83,12 +98,16 @@ impl<C: Container> Producer<C> {
 		} else {
 			self.buffer.push(frame);
 
-			// Check if buffered duration exceeds latency.
+			// Flush if the buffered span has reached the latency budget. Compute
+			// min/max across the buffer rather than first/last: frames within a track
+			// are in *decode* order, and B-frames have non-monotonic PTS, so
+			// `last - first` can shrink as a B-frame lands between two earlier-PTS
+			// frames. The min/max pair captures the actual presentation span.
 			if self.buffer.len() >= 2 {
-				let first_us = self.buffer.first().unwrap().timestamp.as_micros();
-				let last_us = self.buffer.last().unwrap().timestamp.as_micros();
-
-				if last_us.saturating_sub(first_us) >= self.latency.as_micros() {
+				let mut iter = self.buffer.iter().map(|f| std::time::Duration::from(f.timestamp));
+				let first = iter.next().unwrap();
+				let (min, max) = iter.fold((first, first), |(min, max), d| (min.min(d), max.max(d)));
+				if max.saturating_sub(min) >= self.latency {
 					self.flush()?;
 				}
 			}
@@ -105,6 +124,16 @@ impl<C: Container> Producer<C> {
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
+		Ok(())
+	}
+
+	/// Close the current group (if any) and open the next group at the given sequence.
+	///
+	/// The next [`write`](Self::write) must be a keyframe and will land in a group with
+	/// `sequence`. Useful for joining mid-stream or signalling a discontinuity.
+	pub fn seek(&mut self, sequence: u64) -> Result<(), C::Error> {
+		self.finish_group()?;
+		self.pending_sequence = Some(sequence);
 		Ok(())
 	}
 
@@ -128,13 +157,13 @@ impl<C: Container> Producer<C> {
 	/// Finish the track, flushing any buffered frames and closing any open group.
 	pub fn finish(&mut self) -> Result<(), C::Error> {
 		self.finish_group()?;
-		self.track.finish()?;
+		self.inner.finish()?;
 		Ok(())
 	}
 
 	/// Create a consumer for this track.
 	pub fn consume(&self) -> moq_net::TrackConsumer {
-		self.track.consume()
+		self.inner.consume()
 	}
 }
 
@@ -142,7 +171,7 @@ impl<C: Container> std::ops::Deref for Producer<C> {
 	type Target = moq_net::TrackProducer;
 
 	fn deref(&self) -> &Self::Target {
-		&self.track
+		&self.inner
 	}
 }
 
@@ -151,7 +180,8 @@ mod tests {
 	use bytes::Bytes;
 
 	use super::*;
-	use crate::container::{Hang, Timestamp};
+	use crate::catalog::hang::Container;
+	use moq_net::Timestamp;
 
 	fn frame(timestamp_us: u64, keyframe: bool) -> Frame {
 		Frame {
@@ -179,7 +209,7 @@ mod tests {
 	async fn keyframe_closes_group_immediately() {
 		let track = moq_net::Track::new("test").produce();
 		let consumer = track.consume();
-		let mut producer = Producer::new(track, Hang::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap(); // first frame must be a keyframe
 		producer.write(frame(10_000, false)).unwrap();
@@ -195,7 +225,7 @@ mod tests {
 	async fn finish_group_closes_immediately() {
 		let track = moq_net::Track::new("test").produce();
 		let consumer = track.consume();
-		let mut producer = Producer::new(track, Hang::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(10_000, false)).unwrap();
@@ -210,9 +240,48 @@ mod tests {
 	#[test]
 	fn first_frame_must_be_keyframe() {
 		let track = moq_net::Track::new("test").produce();
-		let mut producer = Producer::new(track, Hang::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy);
 
 		let err = producer.write(frame(0, false)).unwrap_err();
 		assert!(matches!(err, crate::Error::Moq(moq_net::Error::ProtocolViolation)));
+	}
+
+	/// Drain all groups from a finished track, returning their sequence numbers.
+	async fn collect_sequences(mut consumer: moq_net::TrackConsumer) -> Vec<u64> {
+		let mut sequences = Vec::new();
+		while let Some(group) = consumer.recv_group().await.unwrap() {
+			sequences.push(group.sequence);
+		}
+		sequences
+	}
+
+	/// `seek(n)` opens the next group at sequence `n`.
+	#[tokio::test]
+	async fn seek_uses_explicit_sequence() {
+		let track = moq_net::Track::new("test").produce();
+		let consumer = track.consume();
+		let mut producer = Producer::new(track, Container::Legacy);
+
+		producer.write(frame(0, true)).unwrap(); // seq 0
+		producer.seek(42).unwrap();
+		producer.write(frame(10_000, true)).unwrap(); // seq 42
+		producer.finish().unwrap();
+
+		assert_eq!(collect_sequences(consumer).await, vec![0, 42]);
+	}
+
+	/// `seek` is consumed on the next group creation; subsequent groups auto-increment from there.
+	#[tokio::test]
+	async fn seek_clears_pending_after_use() {
+		let track = moq_net::Track::new("test").produce();
+		let consumer = track.consume();
+		let mut producer = Producer::new(track, Container::Legacy);
+
+		producer.seek(5).unwrap();
+		producer.write(frame(0, true)).unwrap(); // seq 5
+		producer.write(frame(10_000, true)).unwrap(); // seq 6 (auto-incremented)
+		producer.finish().unwrap();
+
+		assert_eq!(collect_sequences(consumer).await, vec![5, 6]);
 	}
 }

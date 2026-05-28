@@ -22,10 +22,19 @@ OUTPUT_DIR="dist"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --target)  TARGET="$2"; shift 2 ;;
-        --version) VERSION="$2"; shift 2 ;;
-        --output)  OUTPUT_DIR="$2"; shift 2 ;;
-        -h|--help)
+        --target)
+            TARGET="$2"
+            shift 2
+            ;;
+        --version)
+            VERSION="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        -h | --help)
             echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR]"
             exit 0
             ;;
@@ -67,10 +76,10 @@ if [[ "$TARGET" == *"-windows-"* ]]; then
     MAJOR_VERSION="${VERSION%%.*}"
     sed -e "s|@LIB_FILE@|${LIB_FILE}|g" \
         -e "s|@VERSION@|${VERSION}|g" \
-        "$SCRIPT_DIR/cmake/moq-config.cmake.in" > "$PACKAGE_DIR/lib/cmake/moq/moq-config.cmake"
+        "$SCRIPT_DIR/cmake/moq-config.cmake.in" >"$PACKAGE_DIR/lib/cmake/moq/moq-config.cmake"
     sed -e "s|@VERSION@|${VERSION}|g" \
         -e "s|@MAJOR_VERSION@|${MAJOR_VERSION}|g" \
-        "$SCRIPT_DIR/cmake/moq-config-version.cmake.in" > "$PACKAGE_DIR/lib/cmake/moq/moq-config-version.cmake"
+        "$SCRIPT_DIR/cmake/moq-config-version.cmake.in" >"$PACKAGE_DIR/lib/cmake/moq/moq-config-version.cmake"
 else
     echo "Building libmoq for $TARGET via nix..."
     BUILD_TMP="$(mktemp -d)"
@@ -89,9 +98,9 @@ fi
 cd "$OUTPUT_DIR"
 if [[ "$TARGET" == *"-windows-"* ]]; then
     ARCHIVE="$NAME.zip"
-    if command -v 7z &> /dev/null; then
+    if command -v 7z &>/dev/null; then
         7z a "$ARCHIVE" "$NAME"
-    elif command -v zip &> /dev/null; then
+    elif command -v zip &>/dev/null; then
         zip -r "$ARCHIVE" "$NAME"
     else
         echo "Error: Neither 7z nor zip found" >&2

@@ -2,22 +2,23 @@ use tikv_jemalloc_ctl::raw;
 
 pub use tikv_jemallocator;
 
-/// Activate jemalloc heap profiling and listen for SIGUSR1 to dump profiles.
+/// Listen for SIGUSR1 and dump a jemalloc heap profile on each signal.
 ///
-/// The dump path is controlled by `MALLOC_CONF=prof_prefix:<path>`.
-/// Returns `Ok(())` if profiling is not available (i.e. MALLOC_CONF=prof:true was not set).
+/// Profiling must be enabled at startup via `MALLOC_CONF=prof:true`
+/// (and typically `prof_active:true` plus a `prof_prefix`). jemalloc
+/// only initializes the profiling backend when `opt.prof` is set at
+/// init; toggling `prof.active` later returns EINVAL.
 pub async fn run() -> anyhow::Result<()> {
-	let prof_active = b"prof.active\0";
-
-	match unsafe { raw::read::<bool>(prof_active) } {
+	match unsafe { raw::read::<bool>(b"prof.active\0") } {
 		Ok(true) => tracing::info!("jemalloc heap profiling is active"),
 		Ok(false) => {
-			tracing::info!("jemalloc profiling compiled in; activating");
-			unsafe { raw::write(prof_active, true) }
-				.map_err(|err| anyhow::anyhow!("failed to activate jemalloc profiling: {err}"))?;
+			tracing::info!(
+				"jemalloc profiling compiled in but not active. Set MALLOC_CONF=prof:true,prof_active:true at startup to enable"
+			);
+			return Ok(());
 		}
 		Err(err) => {
-			tracing::debug!(%err, "jemalloc profiling not available — set MALLOC_CONF=prof:true to enable");
+			tracing::debug!(%err, "jemalloc profiling not available");
 			return Ok(());
 		}
 	}

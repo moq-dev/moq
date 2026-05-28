@@ -2,9 +2,10 @@ use crate::client::ClientConfig;
 use crate::crypto;
 use crate::server::{ServerConfig, ServerTlsInfo};
 use anyhow::Context;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::fs;
-use std::io::{self, Cursor, Read};
+use std::io;
 use std::net;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -198,21 +199,17 @@ impl QuicheServer {
 fn load_quiche_cert(
 	cert_path: &PathBuf,
 	key_path: &PathBuf,
-) -> anyhow::Result<(Vec<CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>)> {
+) -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
 	let chain_file = fs::File::open(cert_path).context("failed to open cert file")?;
 	let mut chain_reader = io::BufReader::new(chain_file);
 
-	let chain: Vec<CertificateDer> = rustls_pemfile::certs(&mut chain_reader)
+	let chain: Vec<CertificateDer> = CertificateDer::pem_reader_iter(&mut chain_reader)
 		.collect::<Result<_, _>>()
 		.context("failed to read certs")?;
 
 	anyhow::ensure!(!chain.is_empty(), "could not find certificate");
 
-	let mut key_buf = Vec::new();
-	let mut key_file = fs::File::open(key_path).context("failed to open key file")?;
-	key_file.read_to_end(&mut key_buf)?;
-
-	let key = rustls_pemfile::private_key(&mut Cursor::new(&key_buf))?.context("missing private key")?;
+	let key = PrivateKeyDer::from_pem_file(key_path).context("missing private key")?;
 
 	Ok((chain, key))
 }

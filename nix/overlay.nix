@@ -26,14 +26,6 @@ in
     }
   );
 
-  moq-clock = craneLib.buildPackage (
-    crateInfo ../rs/moq-clock/Cargo.toml
-    // {
-      src = craneLib.cleanCargoSource ../.;
-      cargoExtraArgs = "-p moq-clock";
-    }
-  );
-
   moq-cli = craneLib.buildPackage (
     crateInfo ../rs/moq-cli/Cargo.toml
     // {
@@ -56,7 +48,10 @@ in
     // {
       src = craneLib.cleanCargoSource ../.;
       cargoExtraArgs = "-p moq-boy --features jemalloc";
-      nativeBuildInputs = with final; [ pkg-config clang ];
+      nativeBuildInputs = with final; [
+        pkg-config
+        clang
+      ];
       buildInputs = with final; [ ffmpeg ];
       LIBCLANG_PATH = "${final.libclang.lib}/lib";
       # Enable frame pointers for profiling support (negligible overhead on x86_64).
@@ -74,7 +69,16 @@ in
     craneLib.buildPackage (
       info
       // {
-        src = craneLib.cleanCargoSource ../.;
+        # libmoq's build.rs reads moq.pc.in at compile time to generate the
+        # pkgconfig file. craneLib.cleanCargoSource's default filter drops
+        # .pc.in files, which makes build.rs silently skip pkgconfig
+        # generation (see the `if let Ok(template)` in rs/libmoq/build.rs)
+        # and the installPhase's `cp target/pkgconfig/moq.pc` then fails.
+        src = final.lib.cleanSourceWith {
+          src = ../.;
+          name = "source";
+          filter = path: type: (final.lib.hasSuffix ".pc.in" path) || (craneLib.filterCargoSources path type);
+        };
         cargoExtraArgs = "-p libmoq";
         doCheck = false;
         nativeBuildInputs = with final; [ pkg-config ];
@@ -135,23 +139,29 @@ in
 
       # Strip nix-store paths so the plugin loads against the user's system
       # GStreamer rather than the (unavailable on user machines) nix copy.
+      # The `-f` guard skips crane's deps-only stage, whose $out has no plugin
+      # to patch.
       postFixup =
         if final.stdenv.isDarwin then
           ''
             dylib="$out/lib/libgstmoq.dylib"
-            otool -L "$dylib" \
-              | grep -oE '/nix/store/[^ ]+\.dylib' \
-              | sort -u \
-              | while read -r ref; do
-                  install_name_tool -change "$ref" "@rpath/$(basename "$ref")" "$dylib"
-                done
-            install_name_tool -add_rpath /opt/homebrew/lib "$dylib"
-            install_name_tool -add_rpath /usr/local/lib "$dylib"
-            install_name_tool -add_rpath /Library/Frameworks/GStreamer.framework/Libraries "$dylib"
+            if [ -f "$dylib" ]; then
+              otool -L "$dylib" \
+                | grep -oE '/nix/store/[^ ]+\.dylib' \
+                | sort -u \
+                | while read -r ref; do
+                    install_name_tool -change "$ref" "@rpath/$(basename "$ref")" "$dylib"
+                  done
+              install_name_tool -add_rpath /opt/homebrew/lib "$dylib"
+              install_name_tool -add_rpath /usr/local/lib "$dylib"
+              install_name_tool -add_rpath /Library/Frameworks/GStreamer.framework/Libraries "$dylib"
+            fi
           ''
         else
           ''
-            patchelf --remove-rpath $out/lib/libgstmoq.so
+            if [ -f "$out/lib/libgstmoq.so" ]; then
+              patchelf --remove-rpath "$out/lib/libgstmoq.so"
+            fi
           '';
     }
   );

@@ -20,6 +20,8 @@ jobs:
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
+        with:
+          determinate: false
 
       - name: Update flake.lock
         uses: DeterminateSystems/update-flake-lock@5ba4a20ae344a5edd7b97ed3002219974f4d20d7 # main

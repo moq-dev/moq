@@ -124,43 +124,27 @@ mod test {
 
 		encoded.retain(|c| !c.is_whitespace());
 
+		let mut video_config = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0x00,
+			level: 0x1f,
+			inline: false,
+		});
+		video_config.coded_width = Some(1280);
+		video_config.coded_height = Some(720);
+		video_config.bitrate = Some(6_000_000);
+		video_config.framerate = Some(30.0);
+		video_config.container = Container::Legacy;
+
 		let mut video_renditions = BTreeMap::new();
-		video_renditions.insert(
-			"video".to_string(),
-			VideoConfig {
-				codec: H264 {
-					profile: 0x64,
-					constraints: 0x00,
-					level: 0x1f,
-					inline: false,
-				}
-				.into(),
-				description: None,
-				coded_width: Some(1280),
-				coded_height: Some(720),
-				display_ratio_width: None,
-				display_ratio_height: None,
-				bitrate: Some(6_000_000),
-				framerate: Some(30.0),
-				optimize_for_latency: None,
-				container: Container::Legacy,
-				jitter: None,
-			},
-		);
+		video_renditions.insert("video".to_string(), video_config);
+
+		let mut audio_config = AudioConfig::new(Opus, 48_000, 2);
+		audio_config.bitrate = Some(128_000);
+		audio_config.container = Container::Legacy;
 
 		let mut audio_renditions = BTreeMap::new();
-		audio_renditions.insert(
-			"audio".to_string(),
-			AudioConfig {
-				codec: Opus,
-				sample_rate: 48_000,
-				channel_count: 2,
-				bitrate: Some(128_000),
-				description: None,
-				container: Container::Legacy,
-				jitter: None,
-			},
-		);
+		audio_renditions.insert("audio".to_string(), audio_config);
 
 		let decoded = Catalog {
 			video: Video {
@@ -180,5 +164,93 @@ mod test {
 
 		let output = decoded.to_string().expect("failed to encode");
 		assert_eq!(encoded, output, "wrong encoded output");
+	}
+
+	/// Lock in the on-wire shape of the jitter field: a bare integer number
+	/// of milliseconds. If `Option<Duration>` ever loses the `duration_millis`
+	/// serde adapter, this regresses to serde's default `{secs, nanos}` shape.
+	#[test]
+	fn jitter_serialized_as_millis() {
+		let mut encoded = r#"{
+			"video": {
+				"renditions": {
+					"video": {
+						"codec": "avc1.64001f",
+						"container": {"kind": "legacy"},
+						"jitter": 100
+					}
+				}
+			},
+			"audio": {
+				"renditions": {
+					"audio": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"container": {"kind": "legacy"},
+						"jitter": 40
+					}
+				}
+			}
+		}"#
+		.to_string();
+		encoded.retain(|c| !c.is_whitespace());
+
+		let mut video_renditions = BTreeMap::new();
+		video_renditions.insert(
+			"video".to_string(),
+			VideoConfig {
+				codec: H264 {
+					profile: 0x64,
+					constraints: 0x00,
+					level: 0x1f,
+					inline: false,
+				}
+				.into(),
+				description: None,
+				coded_width: None,
+				coded_height: None,
+				display_ratio_width: None,
+				display_ratio_height: None,
+				bitrate: None,
+				framerate: None,
+				optimize_for_latency: None,
+				container: Container::Legacy,
+				jitter: Some(std::time::Duration::from_millis(100)),
+			},
+		);
+
+		let mut audio_renditions = BTreeMap::new();
+		audio_renditions.insert(
+			"audio".to_string(),
+			AudioConfig {
+				codec: Opus,
+				sample_rate: 48_000,
+				channel_count: 2,
+				bitrate: None,
+				description: None,
+				container: Container::Legacy,
+				jitter: Some(std::time::Duration::from_millis(40)),
+			},
+		);
+
+		let catalog = Catalog {
+			video: Video {
+				renditions: video_renditions,
+				display: None,
+				rotation: None,
+				flip: None,
+			},
+			audio: Audio {
+				renditions: audio_renditions,
+			},
+			..Default::default()
+		};
+
+		let decoded = Catalog::from_str(&encoded).expect("failed to decode");
+		assert_eq!(catalog, decoded, "decode mismatch");
+
+		let output = catalog.to_string().expect("failed to encode");
+		assert_eq!(encoded, output, "encode mismatch");
 	}
 }

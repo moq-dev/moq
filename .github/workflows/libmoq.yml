@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "libmoq-v*"
+  pull_request:
+    paths:
+      - ".github/workflows/libmoq.yml"
+      - ".github/scripts/release.sh"
+      - "rs/libmoq/build.sh"
 
 permissions:
   contents: read
@@ -37,10 +42,13 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install Nix
         if: matrix.use_nix
         uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
+        with:
+          determinate: false
       - name: Configure Nix cache
         if: matrix.use_nix
         uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
@@ -54,7 +62,16 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: .github/scripts/release.sh parse-version libmoq
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            CARGO_VERSION=$(grep '^version' rs/libmoq/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
+          else
+            .github/scripts/release.sh parse-version libmoq
+          fi
 
       - name: Build and package
         shell: bash
@@ -74,6 +91,7 @@ jobs:
     name: Release
     needs: build
     runs-on: ubuntu-latest
+    if: github.event_name == 'push'
     permissions:
       contents: write
 
@@ -81,6 +99,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Parse version
         id: parse

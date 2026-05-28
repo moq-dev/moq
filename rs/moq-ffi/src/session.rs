@@ -31,10 +31,7 @@ impl Client {
 			.await
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
-		Ok(Arc::new(MoqSession {
-			inner: Some(session.clone()),
-			closed: Task::new(session),
-		}))
+		Ok(Arc::new(MoqSession::new(session)))
 	}
 }
 
@@ -63,6 +60,19 @@ impl MoqClient {
 		if let Some(mut state) = self.task.lock() {
 			state.config.tls.disable_verify = Some(disable);
 		}
+	}
+
+	/// Set the local UDP socket bind address. Defaults to `[::]:0`.
+	///
+	/// Returns an error if the address cannot be parsed.
+	pub fn set_bind(&self, addr: String) -> Result<(), MoqError> {
+		let parsed: std::net::SocketAddr = addr
+			.parse()
+			.map_err(|err| MoqError::Bind(format!("invalid bind address: {err}")))?;
+		if let Some(mut state) = self.task.lock() {
+			state.config.bind = parsed;
+		}
+		Ok(())
 	}
 
 	/// Set the origin to publish local broadcasts to the remote.
@@ -98,6 +108,15 @@ impl MoqClient {
 pub struct MoqSession {
 	inner: Option<moq_net::Session>,
 	closed: Task<Session>,
+}
+
+impl MoqSession {
+	pub(crate) fn new(session: moq_net::Session) -> Self {
+		Self {
+			inner: Some(session.clone()),
+			closed: Task::new(session),
+		}
+	}
 }
 
 impl Drop for MoqSession {

@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, btree_map};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use serde_with::{DisplayFromStr, hex::Hex};
+use serde_with::{DisplayFromStr, DurationMilliSeconds, hex::Hex};
 
 use crate::catalog::Container;
 
@@ -78,10 +78,17 @@ pub struct Display {
 /// including codec-specific parameters, resolution, and optional metadata.
 ///
 /// Reference: <https://www.w3.org/TR/webcodecs/#video-decoder-config>
+///
+/// Marked `#[non_exhaustive]` so additional optional fields can be added
+/// without bumping the major version. External callers build a config with
+/// [`VideoConfig::new`] and then assign whichever optional fields they need;
+/// struct-literal construction (with or without `..base`) is not available
+/// outside this crate.
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct VideoConfig {
 	/// The codec, see the registry for details:
 	/// <https://w3c.github.io/webcodecs/codec_registry.html>
@@ -134,10 +141,37 @@ pub struct VideoConfig {
 	/// The player's jitter buffer should be larger than this value.
 	/// If not provided, the player should assume each frame is flushed immediately.
 	///
+	/// Serialized as an integer number of milliseconds (sub-ms precision is truncated).
+	///
 	/// ex:
 	/// - If each frame is flushed immediately, this would be 1000/fps.
 	/// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
 	/// - If frames are buffered into 2s segments, this would be 2s.
+	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
 	#[serde(default)]
-	pub jitter: Option<moq_net::Timestamp>,
+	pub jitter: Option<std::time::Duration>,
+}
+
+impl VideoConfig {
+	/// Construct a config with the required codec set and every optional
+	/// field cleared. `container` defaults to [`Container::default`]. Fields
+	/// are `pub`, so callers set whatever they need by assignment afterwards.
+	///
+	/// This is the only path external crates have to build a `VideoConfig`
+	/// since the type is `#[non_exhaustive]`.
+	pub fn new(codec: impl Into<VideoCodec>) -> Self {
+		Self {
+			codec: codec.into(),
+			description: None,
+			coded_width: None,
+			coded_height: None,
+			display_ratio_width: None,
+			display_ratio_height: None,
+			bitrate: None,
+			framerate: None,
+			optimize_for_latency: None,
+			container: Container::default(),
+			jitter: None,
+		}
+	}
 }

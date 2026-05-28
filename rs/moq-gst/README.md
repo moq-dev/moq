@@ -14,6 +14,25 @@ This crate is not published to crates.io. Pre-built binaries are attached to Git
 
 ## Install
 
+### Debian / Ubuntu (recommended on Linux)
+
+```bash
+curl -fsSL https://apt.moq.dev/moq-archive-keyring.gpg \
+  | sudo tee /usr/share/keyrings/moq-archive-keyring.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/moq-archive-keyring.gpg] https://apt.moq.dev stable main" \
+  | sudo tee /etc/apt/sources.list.d/moq.list
+sudo apt update && sudo apt install gstreamer1.0-moq
+```
+
+### Fedora / RHEL / Rocky / AlmaLinux
+
+```bash
+sudo dnf config-manager --add-repo https://rpm.moq.dev/moq.repo
+sudo dnf install gstreamer1-moq
+```
+
+### Manual install (tarball)
+
 Download the tarball for your platform from the [releases page](https://github.com/moq-dev/moq/releases?q=moq-gst) and extract `lib/libgstmoq.{so,dylib}` into a directory GStreamer scans for plugins:
 
 - **Linux**: `~/.local/share/gstreamer-1.0/plugins/` (per-user) or `/usr/lib/x86_64-linux-gnu/gstreamer-1.0/` (system-wide). Alternatively, `export GST_PLUGIN_PATH=/path/to/dir`.

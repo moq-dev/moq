@@ -1,4 +1,3 @@
 [workspace]
 dependencies_update = true
 git_release_enable = false
-

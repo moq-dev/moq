@@ -31,7 +31,7 @@ node_modules
 *.m4s
 
 # Except these test fixtures, which are committed.
-!rs/moq-mux/src/import/test/*.mp4
+!rs/moq-mux/src/container/fmp4/test_data/*.mp4
 
 # Cloudflare Wrangler
 .wrangler/

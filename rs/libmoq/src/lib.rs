@@ -17,6 +17,7 @@
 //! Resources are managed through opaque integer handles that must be explicitly closed.
 
 mod api;
+mod audio;
 mod consume;
 mod error;
 mod ffi;
@@ -27,6 +28,7 @@ mod session;
 mod state;
 
 pub use api::*;
+pub use audio::*;
 pub use error::*;
 pub use id::*;
 

@@ -43,17 +43,22 @@ The `release-swift.yml` workflow triggers on the same `moq-ffi-v*` tag as the Ko
 
 ```text
 swift/
-  Package.swift           Manifest (URL+checksum rewritten by package.sh at release time)
+  Package.swift           Local-dev manifest (path-based MoqFFIBinary; used by check.sh + IDEs)
+  Package.swift.template  Released manifest (URL + checksum; substituted by package.sh)
   Sources/
     Moq/                  Ergonomic shim (Moq.swift, AsyncSequences.swift, Errors.swift, Session.swift)
     MoqFFI/               UniFFI-generated swift (populated by check.sh/package.sh, gitignored)
   Tests/MoqTests/         Smoke tests
-  scripts/                check.sh, package.sh, publish.sh
+  scripts/                check.sh, package.sh, verify.sh, publish.sh
 ```
+
+The two manifests are intentionally separate: the in-repo `Package.swift` is what SPM and Xcode see during local development, while `Package.swift.template` is the source-of-truth for what ships to the mirror. Edit the template when changing the released manifest; never copy the dev-mode form into the release path.
 
 ## Publishing to SPM
 
 Every `moq-ffi-v*` tag attaches `MoqFFI.xcframework.zip` to the GitHub Release here and mirrors a self-contained Swift package to [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift) on a bare-semver tag that SPM can resolve. No extra configuration: the `moq-bot` GitHub App (already used by `release-rs.yml`) has `contents: write` on the mirror, and `release-swift.yml` mints a fresh installation token per run.
+
+Before the push, a `verify` job builds a throwaway SPM consumer against the staged package (via [`scripts/verify.sh`](scripts/verify.sh)) and runs `swift package resolve` + `swift build`. That resolves the binary target against the just-uploaded `MoqFFI.xcframework.zip` and verifies its SHA-256 checksum, so a manifest SPM cannot resolve never reaches the mirror.
 
 The `publish` job ("Publish to Swift Package mirror") runs `publish.sh`, which clones the mirror, replaces its tree with the staged package, commits, tags with `${VERSION}` (bare semver), and pushes.
 

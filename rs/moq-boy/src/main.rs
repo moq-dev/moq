@@ -228,7 +228,8 @@ async fn run(config: &Config) -> Result<()> {
 	let mut viewer_consumer = consume_origin
 		.with_root(&viewer_path)
 		.expect("viewer prefix should be valid")
-		.consume();
+		.consume()
+		.announced();
 
 	tracing::info!(url = %config.url, %name, broadcast = %broadcast_path, "connecting to relay");
 
@@ -238,7 +239,7 @@ async fn run(config: &Config) -> Result<()> {
 		.reconnect(config.url.clone());
 
 	// Set up catalog and encoders.
-	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+	let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
 	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone());
 
 	ffmpeg_next::init().context("failed to init ffmpeg")?;

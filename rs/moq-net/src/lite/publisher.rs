@@ -1,16 +1,15 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
-use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats, Subscription,
-	Timescale, TrackConsumer,
+	AnnounceConsumer, AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats,
+	Track, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
-		priority::{PriorityHandle, PriorityQueue},
+		priority::{Priority, PriorityHandle, PriorityQueue},
 	},
 	model::GroupConsumer,
 };
@@ -142,7 +141,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let prefix = interest.prefix.to_owned();
 		let exclude_hop = interest.exclude_hop;
 
-		let mut origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
+		let origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
+		let mut announced = origin.announced();
 
 		let version = self.version;
 		let self_origin = self.self_origin;
@@ -150,7 +150,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		web_async::spawn(async move {
 			if let Err(err) = Self::run_announce(
 				&mut stream,
-				&mut origin,
+				&origin,
+				&mut announced,
 				&prefix,
 				self_origin,
 				exclude_hop,
@@ -175,9 +176,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	async fn run_announce(
 		stream: &mut Stream<S, Version>,
-		origin: &mut OriginConsumer,
+		origin: &OriginConsumer,
+		announced: &mut AnnounceConsumer,
 		prefix: impl AsPath,
 		self_origin: Origin,
 		// Peer's session-level origin id, sent in AnnounceInterest. We skip
@@ -202,7 +205,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 				// Send ANNOUNCE_INIT as the first message with all currently active paths
 				// We use `try_next()` to synchronously get the initial updates.
-				while let Some((path, active)) = origin.try_announced() {
+				while let Some((path, active)) = announced.try_next() {
 					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
 
 					if active.is_some() {
@@ -233,8 +236,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			tokio::select! {
 				biased;
 				res = stream.reader.closed() => return res,
-				announced = origin.announced() => {
-					match announced {
+				next = announced.next() => {
+					match next {
 						Some((path, active)) => {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 
@@ -357,21 +360,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
+		let track = Track {
+			name: subscribe.track.to_string(),
+			priority: subscribe.priority,
+			timescale: None,
+		};
+
 		let broadcast = consumer.ok_or(Error::NotFound)?;
+		let track = broadcast.subscribe_track(&track)?;
 
-		// Await the publisher's authoritative Track properties (priority,
-		// timescale) before responding with SUBSCRIBE_OK.
-		let track = broadcast
-			.subscribe_track(
-				&subscribe.track,
-				Subscription {
-					priority: subscribe.priority,
-					timeout: std::time::Duration::ZERO,
-				},
-			)
-			.await?;
+		// TODO wait until track.info() to get the *real* priority
 
-		// Lite05 requires a track timescale to encode per-frame timestamps; reject
+		// Lite05+ requires a track timescale to encode per-frame timestamps; reject
 		// tracks that don't advertise one before sending SUBSCRIBE_OK.
 		if version.has_timestamps() && track.timescale.is_none() {
 			return Err(Error::ProtocolViolation);
@@ -388,85 +388,153 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
 
-		let track_stats = std::sync::Arc::new(track_stats);
-		tokio::select! {
-			res = Self::run_track(session, track, subscribe, priority, track_stats, version) => res?,
-			res = stream.reader.closed() => res?,
-		}
+		// Track-level subscriber priority. SUBSCRIBE_UPDATE messages broadcast new values
+		// to both run_track (so future groups inherit the new priority) and serve_group
+		// tasks (so in-flight groups update via PriorityHandle::set_track). The Sender
+		// stays in run_subscribe and gets handed to run_track so the same loop that
+		// parses SUBSCRIBE_UPDATEs also fans the new priority out.
+		let (track_priority_tx, track_priority_rx) = tokio::sync::watch::channel(track.priority);
+
+		let sub = Subscription {
+			session,
+			id: subscribe.id,
+			track_name: Arc::from(track.name.as_str()),
+			track_stats: Arc::new(track_stats),
+			priority,
+			track_priority: track_priority_rx,
+			version,
+			track_timescale: track.timescale,
+		};
+
+		// `end_group` is a serving cap, not a subscription terminator: groups with
+		// sequence > cap are held in the producer's cache until the subscriber raises
+		// the cap (or unsets it) via SUBSCRIBE_UPDATE, then served in order. Only a
+		// peer FIN actually ends the subscription. This is what lets relays pause an
+		// upstream subscription across consumer churn without tearing it down.
+		sub.run_track(
+			track,
+			subscribe.start_group,
+			subscribe.end_group,
+			&mut stream.reader,
+			&track_priority_tx,
+		)
+		.await?;
 
 		stream.writer.finish()?;
 		stream.writer.closed().await
 	}
+}
 
+/// Shared per-subscription state for the publisher side. Cloned (cheaply — every
+/// field is either small or already Arc-backed) for each spawned serve_group task
+/// so each in-flight group reads the latest SUBSCRIBE_UPDATE priority via its own
+/// watch::Receiver.
+#[derive(Clone)]
+struct Subscription<S: web_transport_trait::Session> {
+	session: S,
+	id: u64,
+	track_name: Arc<str>,
+	track_stats: Arc<crate::PublisherTrack>,
+	priority: PriorityQueue,
+	track_priority: tokio::sync::watch::Receiver<u8>,
+	version: Version,
+	/// Track's negotiated timescale, used to encode per-frame timestamps on Lite05+.
+	track_timescale: Option<crate::Timescale>,
+}
+
+impl<S: web_transport_trait::Session> Subscription<S> {
 	async fn run_track(
-		session: S,
+		mut self,
 		mut track: TrackConsumer,
-		subscribe: &lite::Subscribe<'_>,
-		priority: PriorityQueue,
-		track_stats: std::sync::Arc<crate::PublisherTrack>,
-		version: Version,
+		start_group: Option<u64>,
+		initial_end_group: Option<u64>,
+		reader: &mut crate::coding::Reader<S::RecvStream, Version>,
+		track_priority_tx: &tokio::sync::watch::Sender<u8>,
 	) -> Result<(), Error> {
-		let mut tasks = FuturesUnordered::new();
+		let mut tasks: FuturesUnordered<futures::future::BoxFuture<'static, ()>> = FuturesUnordered::new();
 
 		// Start the consumer at the specified sequence, otherwise start at the latest group.
-		if let Some(start_group) = subscribe.start_group.or_else(|| track.latest()) {
+		if let Some(start_group) = start_group.or_else(|| track.latest()) {
 			track.start_at(start_group);
 		}
 
+		// Apply the initial cap from the original Subscribe. Subsequent updates
+		// flow through the SubscribeUpdate select arm below.
+		track.end_at(initial_end_group);
+
 		loop {
-			let group = tokio::select! {
-				// Poll all active group futures; never matches but keeps them running.
+			tokio::select! {
+				// Drive in-flight group futures; never matches because the inner block returns false.
 				true = async {
 					while tasks.next().await.is_some() {}
 					false
 				} => unreachable!(),
-				Some(group) = track.recv_group().transpose() => group,
-				else => return Ok(()),
-			}?;
 
-			let sequence = group.sequence;
-			tracing::debug!(subscribe = %subscribe.id, track = %track.name, sequence, "serving group");
+				// next_group respects the cap set via track.end_at and parks
+				// while the next sequence is above the cap. Groups beyond the
+				// cap stay in the producer's cache (bounded by its 5s eviction).
+				res = track.next_group() => {
+					match res? {
+						Some(group) => self.spawn_serve(group, &mut tasks),
+						None => {
+							// Track finished cleanly; drain in-flight tasks and exit.
+							while tasks.next().await.is_some() {}
+							return Ok(());
+						}
+					}
+				}
 
-			let msg = lite::Group {
-				subscribe: subscribe.id,
-				sequence,
-			};
-
-			let priority = priority.insert(track.priority, sequence);
-			tasks.push(
-				Self::serve_group(
-					session.clone(),
-					msg,
-					priority,
-					group,
-					track_stats.clone(),
-					version,
-					track.timescale,
-				)
-				.map(|_| ()),
-			);
+				// SUBSCRIBE_UPDATE messages share this hot loop; safe because
+				// decode_maybe is cancel-safe given quinn/qmux's cancel-safe
+				// read primitives (see Reader::decode_maybe doc).
+				upd = reader.decode_maybe::<lite::SubscribeUpdate>() => {
+					let Some(upd) = upd? else {
+						// Peer FIN'd — they're done with this subscription. Drop any
+						// in-flight serve_group tasks (don't drain) so half-sent
+						// groups get cancelled rather than completed pointlessly.
+						return Ok(());
+					};
+					let _ = track_priority_tx.send(upd.priority);
+					track.end_at(upd.end_group);
+				}
+			}
 		}
 	}
 
+	fn spawn_serve(
+		&mut self,
+		group: GroupConsumer,
+		tasks: &mut FuturesUnordered<futures::future::BoxFuture<'static, ()>>,
+	) {
+		let sequence = group.sequence;
+		tracing::debug!(subscribe = self.id, track = %self.track_name, sequence, "serving group");
+
+		// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
+		let current_priority = *self.track_priority.borrow_and_update();
+		let handle = self.priority.insert(Priority::new(current_priority, sequence));
+		let fut = self.clone().serve_group(sequence, handle, group);
+		tasks.push(fut.map(|_| ()).boxed());
+	}
+
 	async fn serve_group(
-		session: S,
-		msg: lite::Group,
+		mut self,
+		sequence: u64,
 		mut priority: PriorityHandle,
 		mut group: GroupConsumer,
-		track_stats: std::sync::Arc<crate::PublisherTrack>,
-		version: Version,
-		track_timescale: Option<Timescale>,
 	) -> Result<(), Error> {
-		// TODO add a way to open in priority order.
-		let stream = session.open_uni().await.map_err(Error::from_transport)?;
+		let msg = lite::Group {
+			subscribe: self.id,
+			sequence,
+		};
+		let stream = self.session.open_uni().await.map_err(Error::from_transport)?;
 
-		let mut stream = Writer::new(stream, version);
+		let mut stream = Writer::new(stream, self.version);
 		stream.set_priority(priority.current());
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
-		track_stats.group();
+		self.track_stats.group();
 
-		// Previous frame timestamp on this group's stream, for zigzag-delta encoding on Lite05+.
+		// Previous frame's raw timestamp value, for zigzag-delta encoding on Lite05+.
 		let mut prev_ts: u64 = 0;
 
 		loop {
@@ -474,9 +542,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				biased;
 				_ = stream.closed() => return Err(Error::Cancel),
 				frame = group.next_frame() => frame,
-				// Update the priority if it changes.
-				priority = priority.next() => {
-					stream.set_priority(priority);
+				new_pri = priority.next() => {
+					stream.set_priority(new_pri);
+					continue;
+				}
+				Ok(()) = self.track_priority.changed() => {
+					priority.set_track(*self.track_priority.borrow_and_update());
 					continue;
 				}
 			};
@@ -486,12 +557,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				None => break,
 			};
 
-			if version.has_timestamps() {
-				// Lite05 requires a timestamp on every frame, scaled to the track's
-				// negotiated timescale. Reject the frame as ProtocolViolation if the
-				// producer didn't attach one or the scale doesn't match. Encoding a
-				// zero delta for a missing timestamp would silently corrupt the stream.
-				let track_timescale = track_timescale.ok_or(Error::ProtocolViolation)?;
+			if self.version.has_timestamps() {
+				// Lite05 requires a per-frame timestamp at the track's negotiated scale.
+				// Encoding a zero delta for a missing timestamp would silently corrupt
+				// the stream, so refuse the frame instead.
+				let track_timescale = self.track_timescale.ok_or(Error::ProtocolViolation)?;
 				let ts = frame.timestamp.ok_or(Error::ProtocolViolation)?;
 				if ts.scale() != track_timescale {
 					return Err(Error::ProtocolViolation);
@@ -506,16 +576,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 
 			stream.encode(&frame.size).await?;
-			track_stats.frame();
+			self.track_stats.frame();
 
 			loop {
 				let chunk = tokio::select! {
 					biased;
 					_ = stream.closed() => return Err(Error::Cancel),
 					chunk = frame.read_chunk() => chunk,
-					// Update the priority if it changes.
-					priority = priority.next() => {
-						stream.set_priority(priority);
+					new_pri = priority.next() => {
+						stream.set_priority(new_pri);
+						continue;
+					}
+					Ok(()) = self.track_priority.changed() => {
+						priority.set_track(*self.track_priority.borrow_and_update());
 						continue;
 					}
 				};
@@ -523,8 +596,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				match chunk? {
 					Some(mut chunk) => {
 						let n = chunk.len() as u64;
-						stream.write_all(&mut chunk).await?;
-						track_stats.bytes(n);
+						loop {
+							tokio::select! {
+								biased;
+								result = stream.write_all(&mut chunk) => {
+									result?;
+									break;
+								}
+								new_pri = priority.next() => {
+									stream.set_priority(new_pri);
+								}
+								Ok(()) = self.track_priority.changed() => {
+									priority.set_track(*self.track_priority.borrow_and_update());
+								}
+							}
+						}
+						self.track_stats.bytes(n);
 					}
 					None => break,
 				}
@@ -534,7 +621,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.finish()?;
 		stream.closed().await?;
 
-		tracing::debug!(sequence = %msg.sequence, "finished group");
+		tracing::debug!(sequence, "finished group");
 
 		Ok(())
 	}

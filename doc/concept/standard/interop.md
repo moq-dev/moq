@@ -41,7 +41,7 @@ The publisher sends a `PUBLISH_NAMESPACE` and the subscriber **requires** a `SUB
 If you haven't implemented the latter yet, remove `reload` in `demo/web/src/index.html`.
 
 **Feeling spicy?**
-You can use [gstreamer](/app/gstreamer) or [obs](/app/obs) too, both support publishing and subscribing.
+You can use [gstreamer](/bin/gstreamer) or [obs](/bin/obs) too, both support publishing and subscribing.
 There's also bindings for Rust, Javascript, C, Python, Kotlin, Swift, etc.
 
 ### Relay

@@ -38,10 +38,11 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 }
 
 // Subscribe to a broadcast and read media frames.
-async fn run_subscribe(mut consumer: moq_net::OriginConsumer) -> anyhow::Result<()> {
+async fn run_subscribe(consumer: moq_net::OriginConsumer) -> anyhow::Result<()> {
 	// Wait for a broadcast to be announced.
 	let (path, broadcast) = consumer
 		.announced()
+		.next()
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed"))?;
 
@@ -50,10 +51,8 @@ async fn run_subscribe(mut consumer: moq_net::OriginConsumer) -> anyhow::Result<
 	tracing::info!(%path, "broadcast announced");
 
 	// Read the catalog to discover available tracks.
-	let catalog_track = broadcast
-		.subscribe_track(hang::Catalog::DEFAULT_NAME, moq_net::Subscription::default())
-		.await?;
-	let mut catalog = moq_mux::catalog::Consumer::new(catalog_track);
+	let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
+	let mut catalog = moq_mux::catalog::hang::Consumer::new(catalog_track);
 
 	let info = catalog.next().await?.ok_or_else(|| anyhow::anyhow!("no catalog"))?;
 
@@ -73,19 +72,14 @@ async fn run_subscribe(mut consumer: moq_net::OriginConsumer) -> anyhow::Result<
 		"subscribing to video track"
 	);
 
-	// Subscribe to the video track. Priority is a subscriber preference; the
-	// publisher's authoritative Track properties (including timescale) arrive
-	// on the returned TrackConsumer.
-	let track_consumer = broadcast
-		.subscribe_track(
-			name,
-			moq_net::Subscription {
-				priority: 1,
-				timeout: Duration::ZERO,
-			},
-		)
-		.await?;
-	let mut ordered = moq_mux::container::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
+	// Subscribe to the video track.
+	let track = moq_net::Track {
+		name: name.clone(),
+		priority: 1,
+	};
+
+	let track_consumer = broadcast.subscribe_track(&track)?;
+	let mut ordered = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
 		.with_latency(Duration::from_millis(500));
 
 	// Read frames in latency-bounded presentation order.

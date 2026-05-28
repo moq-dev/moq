@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.4.2"
+version = "0.5.1"
 edition = "2024"
 rust-version.workspace = true
 
@@ -17,7 +17,6 @@ doctest = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1"
 base64 = "0.22"
 bytes = "1"
 conducer = { workspace = true }
@@ -28,7 +27,7 @@ m3u8-rs = { version = "6" }
 moq-loc = { workspace = true }
 moq-msf = { workspace = true }
 moq-net = { workspace = true, features = ["serde"] }
-mp4-atom = { version = "0.10.0", features = ["tokio", "bytes", "serde"] }
+mp4-atom = { version = "0.11", features = ["tokio", "bytes", "serde"] }
 num_enum = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
 scuffle-av1 = { version = "0.1.4" }
@@ -39,9 +38,6 @@ tracing = "0.1"
 url = "2"
 webm-iterable = "0.6"
 
-[dependencies.derive_more]
-version = "2"
-features = ["from", "display", "debug"]
-
 [dev-dependencies]
+futures = "0.3"
 tokio = { workspace = true, features = ["test-util"] }

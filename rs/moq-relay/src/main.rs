@@ -49,7 +49,9 @@ async fn main() -> anyhow::Result<()> {
 		config.auth.init().await?
 	};
 
-	let cluster = Cluster::new(config.cluster, config.stats, client);
+	let cluster = Cluster::new(config.cluster).with_client(client);
+	let stats = config.stats.build(cluster.origin.clone());
+	let cluster = cluster.with_stats(stats);
 
 	// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
 	let web = Web::new(

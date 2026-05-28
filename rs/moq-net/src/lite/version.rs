@@ -7,9 +7,11 @@ pub enum Version {
 	Lite02,
 	Lite03,
 	Lite04,
-	/// Lite05 adds per-track timescale to SUBSCRIBE_OK and zigzag-delta timestamps
-	/// to per-frame headers.
-	Lite05,
+	/// Work-in-progress placeholder for lite-05. Adds per-track timescale to
+	/// SUBSCRIBE_OK and zigzag-delta timestamps to per-frame headers. Not
+	/// advertised over ALPN or included in default version sets; callers must
+	/// opt in explicitly.
+	Lite05Wip,
 }
 
 impl Version {
@@ -17,7 +19,7 @@ impl Version {
 	/// on the wire.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_timestamps(self) -> bool {
-		// Match form is used so future versions default forward (CLAUDE.md convention).
+		// Match form so future versions default forward (CLAUDE.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
 			_ => true,
@@ -32,17 +34,20 @@ impl fmt::Display for Version {
 			Self::Lite02 => write!(f, "moq-lite-02"),
 			Self::Lite03 => write!(f, "moq-lite-03"),
 			Self::Lite04 => write!(f, "moq-lite-04"),
-			// Mirrors `ALPN_LITE_05`: kept distinct from the eventual stable
-			// `moq-lite-05` identifier so peers parsing this string don't pick
-			// up the unfinalized wire format by accident.
-			Self::Lite05 => write!(f, "moq-lite-05-wip"),
+			Self::Lite05Wip => write!(f, "moq-lite-05-wip"),
 		}
 	}
 }
 
 impl From<Version> for crate::Version {
 	fn from(v: Version) -> Self {
-		crate::Version::Lite(v)
+		match v {
+			Version::Lite01 => crate::Version::Lite(Version::Lite01),
+			Version::Lite02 => crate::Version::Lite(Version::Lite02),
+			Version::Lite03 => crate::Version::Lite(Version::Lite03),
+			Version::Lite04 => crate::Version::Lite(Version::Lite04),
+			Version::Lite05Wip => crate::Version::Lite(Version::Lite05Wip),
+		}
 	}
 }
 

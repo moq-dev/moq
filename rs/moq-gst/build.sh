@@ -19,10 +19,19 @@ OUTPUT_DIR="dist"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --target)  TARGET="$2"; shift 2 ;;
-        --version) VERSION="$2"; shift 2 ;;
-        --output)  OUTPUT_DIR="$2"; shift 2 ;;
-        -h|--help)
+        --target)
+            TARGET="$2"
+            shift 2
+            ;;
+        --version)
+            VERSION="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        -h | --help)
             echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR]"
             exit 0
             ;;
