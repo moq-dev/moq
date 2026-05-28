@@ -17,21 +17,36 @@ The mirror repo is updated by [`swift/scripts/publish.sh`](scripts/publish.sh) o
 ```swift
 import Moq
 
-let session = try await Moq.connect(url: "https://relay.example.com")
+let (session, origin) = try await Moq.connect(url: "https://relay.example.com")
 
-let consumer = MoqOriginProducer().consume()
+let consumer = origin.consume()
 let announced = try consumer.announced(prefix: "demos/")
 for try await announcement in announced.announcements {
     print("got broadcast \(announcement.path())")
 
-    let catalog = try announcement.broadcast().subscribeCatalog()
-    for try await update in catalog.updates {
-        print("catalog: \(update)")
+    let broadcast = announcement.broadcast()
+    let audio = try await broadcast.subscribeAudio(
+        name: "0",
+        output: MoqAudioDecoderOutput(
+            format: .f32,
+            sampleRate: 48000,
+            channels: 2,
+            latencyMaxMs: 100
+        )
+    )
+    for try await frame in audio.frames {
+        // play frame.data
     }
 }
+
+session.close()
 ```
 
+`Moq.connect(url:)` attaches a single `MoqOriginProducer` as both publish source and consume sink — the typical full-duplex client. Use that origin to `publish(...)` local broadcasts or `consume()` remote announcements. For custom TLS / bind options or a non-duplex topology, build the client with `Moq.client()` and call `setPublish` / `setConsume` yourself.
+
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer.
+
+A note on enum casing: UniFFI keeps Rust's casing for error variants (every `MoqError` case is PascalCase and carries `message: String`, e.g. `MoqError.Closed(message: "...")`), but plain enums round-trip to lowerCamelCase (`MoqAudioFormat.s16`, `MoqAudioCodec.opus`).
 
 ## Local development
 

@@ -1,5 +1,5 @@
 import Foundation
-import MoqFFI
+@_exported import MoqFFI
 
 extension MoqCatalogConsumer {
     /// Stream of catalog updates. Terminates when the underlying track ends.
