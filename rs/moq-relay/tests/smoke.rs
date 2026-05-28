@@ -13,7 +13,21 @@ use moq_native::moq_net::{self, Origin, Track};
 use moq_relay::{AuthConfig, Cluster, ClusterConfig, PublicConfig, Web, WebConfig, WebState};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-const NEWEST_LITE: &str = "moq-lite-04";
+
+/// The newest moq-lite ALPN both sides should converge on. Derived from
+/// `moq_net::ALPNS` so a future bump (e.g. lite-05 promoted out of WIP)
+/// doesn't break this test independently of the production negotiation.
+/// We filter on the `moq-lite-` prefix specifically; the relay smoke test
+/// is asserting lite behavior, not IETF moqt drafts.
+fn newest_lite_version() -> moq_net::Version {
+	moq_net::ALPNS
+		.iter()
+		.copied()
+		.find(|alpn| alpn.starts_with("moq-lite-"))
+		.expect("no moq-lite ALPN in moq_net::ALPNS")
+		.parse()
+		.expect("parse newest lite ALPN as a Version")
+}
 
 /// The shared bootstrap: stand up a relay listening on `127.0.0.1:<free-port>`
 /// with fully public auth, and return the port plus an abort handle for the
@@ -100,7 +114,7 @@ fn client() -> moq_native::Client {
 async fn relay_websocket_round_trip_uses_newest_version() {
 	let (port, web_handle) = spawn_relay().await;
 	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
-	let expected_version: moq_net::Version = NEWEST_LITE.parse().expect("parse version");
+	let expected_version = newest_lite_version();
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
