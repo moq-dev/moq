@@ -162,9 +162,9 @@ struct RawCounts {
 }
 
 /// Distinguishes traffic classes so a single [`Stats`] can record
-/// customer-facing and cluster-peer traffic separately. Each
-/// [`BroadcastEntry`] keeps a per-tier [`Counters`] under its `publisher`
-/// and `subscriber` fields.
+/// customer-facing and cluster-peer traffic separately. Each tracked
+/// broadcast keeps per-tier [`Counters`] on both its publisher and
+/// subscriber sides.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Tier {
 	External,
