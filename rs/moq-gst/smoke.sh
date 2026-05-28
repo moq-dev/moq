@@ -33,10 +33,24 @@ fi
 
 echo "Smoke testing against $(gst-inspect-1.0 --version | head -1)..."
 
+# Isolate discovery to $plugin_dir:
+#   - GST_PLUGIN_PATH_1_0 alone is additive, so a system-installed moq
+#     plugin could shadow the one we want to validate.
+#   - GST_PLUGIN_SYSTEM_PATH_1_0="" suppresses the default system scan.
+#   - GST_REGISTRY_1_0 points at a temp file so we don't read or pollute
+#     the user's cached registry.
+tmp_registry="$(mktemp)"
+trap 'rm -f "$tmp_registry"' EXIT
+
 # gst-inspect-1.0 moq exits 0 even when the .so fails to load (it
 # treats "no such plugin" as a non-error), so grep for the factory
 # names. The plugin lists each factory as "  name: description".
-out="$(GST_PLUGIN_PATH_1_0="$plugin_dir" gst-inspect-1.0 moq)"
+out="$(
+    GST_PLUGIN_PATH_1_0="$plugin_dir" \
+        GST_PLUGIN_SYSTEM_PATH_1_0="" \
+        GST_REGISTRY_1_0="$tmp_registry" \
+        gst-inspect-1.0 moq
+)"
 if ! echo "$out" | grep -qE '^[[:space:]]+moqsink:' ||
     ! echo "$out" | grep -qE '^[[:space:]]+moqsrc:'; then
     echo "Error: gst-inspect-1.0 didn't find moqsink/moqsrc in the plugin." >&2
