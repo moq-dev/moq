@@ -1,4 +1,4 @@
-set fallback := true
+set fallback
 
 # --- R2 bucket management (vid.moq.dev) ---
 

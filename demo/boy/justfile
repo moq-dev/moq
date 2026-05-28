@@ -1,4 +1,4 @@
-set fallback := true
+set fallback
 
 # Run the GB demo: relay + emulator publisher + web viewer.
 default:

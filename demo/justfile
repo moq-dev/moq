@@ -1,4 +1,4 @@
-set fallback := true
+set fallback
 
 mod boy
 mod pub
