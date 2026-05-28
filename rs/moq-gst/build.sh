@@ -88,6 +88,25 @@ cp "$SCRIPT_DIR/README.md" "$PACKAGE_DIR/"
 cp "$WORKSPACE_DIR/LICENSE-MIT" "$PACKAGE_DIR/"
 cp "$WORKSPACE_DIR/LICENSE-APACHE" "$PACKAGE_DIR/"
 
+# Smoke test: load the plugin against the user's system GStreamer (separate
+# from the nix copy we just linked against). Skipped if gst-inspect-1.0
+# isn't on PATH so contributors without GStreamer installed can still build
+# tarballs; CI installs it explicitly. The postFixup in nix/overlay.nix
+# already asserts no /nix/store refs remain in the binary itself; this is
+# the runtime counterpart.
+if command -v gst-inspect-1.0 >/dev/null 2>&1; then
+    echo "Smoke testing against $(gst-inspect-1.0 --version | head -1)..."
+    out="$(GST_PLUGIN_PATH_1_0="$PACKAGE_DIR/lib" gst-inspect-1.0 moq)"
+    if ! echo "$out" | grep -q moqsink || ! echo "$out" | grep -q moqsrc; then
+        echo "Error: gst-inspect-1.0 didn't find moqsink/moqsrc in the plugin." >&2
+        echo "$out" >&2
+        exit 1
+    fi
+    echo "Smoke test passed (moqsink + moqsrc loaded)."
+else
+    echo "Warning: gst-inspect-1.0 not on PATH; skipping load test." >&2
+fi
+
 cd "$OUTPUT_DIR"
 ARCHIVE="$NAME.tar.gz"
 tar -czvf "$ARCHIVE" "$NAME"

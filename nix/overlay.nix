@@ -138,29 +138,68 @@ in
       '';
 
       # Strip nix-store paths so the plugin loads against the user's system
-      # GStreamer rather than the (unavailable on user machines) nix copy.
-      # The `-f` guard skips crane's deps-only stage, whose $out has no plugin
-      # to patch.
+      # GStreamer rather than the (unavailable on user machines) nix copy,
+      # and assert no /nix/store refs remain so a broken plugin fails the
+      # build instead of shipping. The `[ -f ]` guards skip crane's deps-only
+      # stage, whose $out has no plugin to patch.
       postFixup =
         if final.stdenv.isDarwin then
           ''
             dylib="$out/lib/libgstmoq.dylib"
             if [ -f "$dylib" ]; then
+              # Rewrite LC_LOAD_DYLIB entries: /nix/store/.../libX.dylib → @rpath/libX.dylib
               otool -L "$dylib" \
                 | grep -oE '/nix/store/[^ ]+\.dylib' \
                 | sort -u \
                 | while read -r ref; do
                     install_name_tool -change "$ref" "@rpath/$(basename "$ref")" "$dylib"
                   done
+
+              # Strip LC_RPATH entries pointing at /nix/store. Crane/rustc
+              # may bake these in; dyld would silently skip missing dirs, but
+              # leftover store paths are dead weight and trip the assertion
+              # below.
+              otool -l "$dylib" \
+                | awk '/^ *cmd LC_RPATH$/{f=1; next} f && /^ *path /{print $2; f=0}' \
+                | grep '^/nix/store/' \
+                | while read -r rp; do
+                    install_name_tool -delete_rpath "$rp" "$dylib"
+                  done
+
               install_name_tool -add_rpath /opt/homebrew/lib "$dylib"
               install_name_tool -add_rpath /usr/local/lib "$dylib"
               install_name_tool -add_rpath /Library/Frameworks/GStreamer.framework/Libraries "$dylib"
+
+              if otool -L "$dylib" | grep -q '/nix/store/'; then
+                echo "ERROR: $dylib still references /nix/store in LC_LOAD_DYLIB:" >&2
+                otool -L "$dylib" | grep '/nix/store/' >&2
+                exit 1
+              fi
+              if otool -l "$dylib" \
+                   | awk '/^ *cmd LC_RPATH$/{f=1; next} f && /^ *path /{print $2; f=0}' \
+                   | grep -q '^/nix/store/'; then
+                echo "ERROR: $dylib still has /nix/store LC_RPATH entries:" >&2
+                otool -l "$dylib" | grep -B1 -A2 LC_RPATH >&2
+                exit 1
+              fi
             fi
           ''
         else
           ''
-            if [ -f "$out/lib/libgstmoq.so" ]; then
-              patchelf --remove-rpath "$out/lib/libgstmoq.so"
+            so="$out/lib/libgstmoq.so"
+            if [ -f "$so" ]; then
+              patchelf --remove-rpath "$so"
+
+              rp="$(patchelf --print-rpath "$so")"
+              if [ -n "$rp" ]; then
+                echo "ERROR: $so still has DT_RPATH/DT_RUNPATH after strip: $rp" >&2
+                exit 1
+              fi
+              if patchelf --print-needed "$so" | grep -q '/nix/store/'; then
+                echo "ERROR: $so has DT_NEEDED entries with /nix/store paths:" >&2
+                patchelf --print-needed "$so" | grep '/nix/store/' >&2
+                exit 1
+              fi
             fi
           '';
     }
