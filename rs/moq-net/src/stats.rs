@@ -14,9 +14,9 @@
 //! counter snapshot. Tier, role, and node are implied by the track and
 //! broadcast paths, so they aren't repeated inside the frame. An entry
 //! appears in the frame for a given `(tier, role)` whenever its snapshot
-//! differs from what we last emitted; it then lingers for `retention_ticks`
-//! ticks past the most recent change so short disconnects don't immediately
-//! erase it. A downstream aggregator computes rates from successive
+//! differs from what we last emitted; it then lingers for `retention`
+//! intervals past the most recent change so short disconnects don't
+//! immediately erase it. A downstream aggregator computes rates from successive
 //! cumulative snapshots and slices the data however a dashboard wants.
 //!
 //! Per-snapshot semantics:
@@ -63,7 +63,7 @@
 //! `broadcast()` call on any path spawns the snapshot task, which constructs
 //! the stats broadcast, ticks at the configured interval, and writes a frame
 //! per (tier, role) track. The task exits once the entry map has been empty
-//! for `2 * retention_ticks`, dropping the broadcast and unannouncing. The
+//! for `2 * retention` intervals, dropping the broadcast and unannouncing. The
 //! next `broadcast()` call respawns it.
 //!
 //! # Idle frame skipping
@@ -161,38 +161,24 @@ struct RawCounts {
 	groups: u64,
 }
 
-/// Distinguishes traffic classes so a single [`Stats`] can record customer-facing
-/// and cluster-peer traffic separately. The four `(Tier, Role)` combinations are
-/// the four tracks published on the per-node stats broadcast.
+/// Distinguishes traffic classes so a single [`Stats`] can record
+/// customer-facing and cluster-peer traffic separately. Each
+/// [`BroadcastEntry`] keeps a per-tier [`Counters`] under its `publisher`
+/// and `subscriber` fields.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Tier {
 	External,
 	Internal,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum Role {
-	Publisher,
-	Subscriber,
-}
-
-const NUM_SLOTS: usize = 4;
-
-fn slot_index(tier: Tier, role: Role) -> usize {
-	match (tier, role) {
-		(Tier::External, Role::Publisher) => 0,
-		(Tier::External, Role::Subscriber) => 1,
-		(Tier::Internal, Role::Publisher) => 2,
-		(Tier::Internal, Role::Subscriber) => 3,
+impl Tier {
+	fn idx(self) -> usize {
+		match self {
+			Tier::External => 0,
+			Tier::Internal => 1,
+		}
 	}
 }
-
-const TRACK_NAMES: [&str; NUM_SLOTS] = [
-	"publisher.json",
-	"subscriber.json",
-	"internal/publisher.json",
-	"internal/subscriber.json",
-];
 
 /// Top-level stats aggregator. Cheap to clone (`Arc` inside). One instance per
 /// relay; sessions get tier-scoped handles via [`Stats::tier`].
@@ -208,8 +194,8 @@ struct StatsInner {
 	/// doesn't have to recompute it per spawn.
 	advertised: Option<PathOwned>,
 	origin: OriginProducer,
-	tick: Duration,
-	retention_ticks: u32,
+	interval: Duration,
+	retention: u32,
 	entries: Lock<HashMap<PathOwned, Arc<BroadcastEntry>>>,
 	task: Lock<Option<()>>,
 	/// Monotonic tick counter; `0` is a sentinel meaning "no tick has run yet"
@@ -218,21 +204,28 @@ struct StatsInner {
 	tick_counter: AtomicU64,
 }
 
+/// Per-broadcast counters split by side then tier. The two side fields are
+/// named explicitly (rather than indexed by some `Role` enum) because the
+/// bump-path call sites always know which side they're on at compile time;
+/// only the tier varies dynamically with the session.
 struct BroadcastEntry {
-	slots: [Counters; NUM_SLOTS],
+	publisher: [Counters; 2],
+	subscriber: [Counters; 2],
 }
 
 impl BroadcastEntry {
 	fn new() -> Self {
 		Self {
-			slots: Default::default(),
+			publisher: Default::default(),
+			subscriber: Default::default(),
 		}
 	}
 }
 
 /// Per-(entry, slot) state owned by the snapshot task. The snapshot task
 /// is single-threaded so this needs no atomics; we keep one of these per
-/// `(path, slot)` in a task-local map.
+/// `(path, side, tier)` in a task-local map, mirroring the structure of
+/// [`BroadcastEntry`].
 #[derive(Default, Clone)]
 struct SlotState {
 	/// Cumulative count of `inactive -> active` subscription transitions on
@@ -247,10 +240,64 @@ struct SlotState {
 	prev_emitted: Option<Snapshot>,
 	/// Tick index of the most recent change in `prev_emitted`. `0` means
 	/// no change has been observed yet. Drives both the per-slot frame
-	/// inclusion (within `retention_ticks` of this) and the global entry
+	/// inclusion (within `retention` of this) and the global entry
 	/// GC.
 	last_change_tick: u64,
 }
+
+/// Snapshot-task-local mirror of [`BroadcastEntry`]: per-side, per-tier
+/// `SlotState`. Same field layout so iteration in the snapshot loop is
+/// trivially parallel between the two.
+#[derive(Default)]
+struct EntrySnapState {
+	publisher: [SlotState; 2],
+	subscriber: [SlotState; 2],
+}
+
+impl EntrySnapState {
+	/// Iterate the four `(track_name, counters, slot_state)` slots in the
+	/// fixed order matching `TRACK_ORDER`.
+	fn zip_slots<'a>(&'a mut self, entry: &'a BroadcastEntry) -> [(&'static str, &'a Counters, &'a mut SlotState); 4] {
+		let [pub_ext_state, pub_int_state] = &mut self.publisher;
+		let [sub_ext_state, sub_int_state] = &mut self.subscriber;
+		[
+			("publisher.json", &entry.publisher[Tier::External.idx()], pub_ext_state),
+			(
+				"subscriber.json",
+				&entry.subscriber[Tier::External.idx()],
+				sub_ext_state,
+			),
+			(
+				"internal/publisher.json",
+				&entry.publisher[Tier::Internal.idx()],
+				pub_int_state,
+			),
+			(
+				"internal/subscriber.json",
+				&entry.subscriber[Tier::Internal.idx()],
+				sub_int_state,
+			),
+		]
+	}
+
+	/// Walk all four slot states (read-only). Used by GC.
+	fn all_slots(&self) -> impl Iterator<Item = &SlotState> {
+		self.publisher.iter().chain(self.subscriber.iter())
+	}
+}
+
+/// Number of `(side, tier)` slots, matching the four tracks per stats
+/// broadcast.
+const NUM_SLOTS: usize = 4;
+
+/// Track names in the same order [`EntrySnapState::zip_slots`] returns
+/// them. Used to construct the per-broadcast track set up front.
+const TRACK_ORDER: [&str; NUM_SLOTS] = [
+	"publisher.json",
+	"subscriber.json",
+	"internal/publisher.json",
+	"internal/subscriber.json",
+];
 
 impl Stats {
 	/// Build a new stats aggregator.
@@ -258,10 +305,11 @@ impl Stats {
 	/// * `prefix` is the top-level path under which stats are published, e.g.
 	///   `.stats`. The full advertised path is `<prefix>/node/<node>` (or
 	///   `<prefix>/node` when `node` is `None`).
-	/// * `tick` is the interval between snapshot publishes.
-	/// * `retention_ticks` is how many ticks an idle broadcast lingers in the
-	///   emitted frame after its last observed active subscription, so a
-	///   short reconnect window doesn't erase the entry.
+	/// * `interval` is how long the snapshot task waits between snapshot
+	///   publishes.
+	/// * `retention` is how many intervals an entry lingers in the emitted
+	///   frame after its last observed change, so a short reconnect window
+	///   doesn't erase the entry.
 	/// * `node` disambiguates broadcasts published by different relays into a
 	///   shared cluster origin. Set this on every node in multi-relay
 	///   deployments. The value may be multi-segment (e.g. `sjc/1`, `sjc/2`)
@@ -271,8 +319,8 @@ impl Stats {
 	///   for the stats broadcast.
 	pub fn new(
 		prefix: impl Into<PathOwned>,
-		tick: Duration,
-		retention_ticks: u32,
+		interval: Duration,
+		retention: u32,
 		node: impl Into<Option<PathOwned>>,
 		origin: OriginProducer,
 	) -> Self {
@@ -286,8 +334,8 @@ impl Stats {
 				prefix,
 				advertised,
 				origin,
-				tick,
-				retention_ticks,
+				interval,
+				retention,
 				entries: Lock::default(),
 				task: Lock::new(None),
 				tick_counter: AtomicU64::new(0),
@@ -304,8 +352,8 @@ impl Stats {
 				prefix: PathOwned::default(),
 				advertised: None,
 				origin: Origin::random().produce(),
-				tick: Duration::from_secs(1),
-				retention_ticks: 0,
+				interval: Duration::from_secs(1),
+				retention: 0,
 				entries: Lock::default(),
 				task: Lock::new(None),
 				tick_counter: AtomicU64::new(0),
@@ -425,7 +473,7 @@ impl BroadcastStats {
 	/// from subscription activity; see the module docs.)
 	pub fn publisher(&self) -> PublisherStats {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Publisher)]
+			entry.publisher[self.tier.idx()]
 				.announced
 				.fetch_add(1, Ordering::Relaxed);
 		}
@@ -441,7 +489,7 @@ impl BroadcastStats {
 	/// from subscription activity; see the module docs.)
 	pub fn subscriber(&self) -> SubscriberStats {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Subscriber)]
+			entry.subscriber[self.tier.idx()]
 				.announced
 				.fetch_add(1, Ordering::Relaxed);
 		}
@@ -458,7 +506,7 @@ impl BroadcastStats {
 	/// don't have to thread an `Option<&str>` through subscribe sites.
 	pub fn publisher_track(&self, _name: &str) -> PublisherTrack {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Publisher)]
+			entry.publisher[self.tier.idx()]
 				.subscriptions
 				.fetch_add(1, Ordering::Relaxed);
 		}
@@ -471,7 +519,7 @@ impl BroadcastStats {
 	/// Subscriber-side counterpart to [`Self::publisher_track`].
 	pub fn subscriber_track(&self, _name: &str) -> SubscriberTrack {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Subscriber)]
+			entry.subscriber[self.tier.idx()]
 				.subscriptions
 				.fetch_add(1, Ordering::Relaxed);
 		}
@@ -504,7 +552,7 @@ impl PublisherStats {
 impl Drop for PublisherStats {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Publisher)]
+			entry.publisher[self.tier.idx()]
 				.announced_closed
 				.fetch_add(1, Ordering::Relaxed);
 		}
@@ -532,7 +580,7 @@ impl SubscriberStats {
 impl Drop for SubscriberStats {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Subscriber)]
+			entry.subscriber[self.tier.idx()]
 				.announced_closed
 				.fetch_add(1, Ordering::Relaxed);
 		}
@@ -550,27 +598,21 @@ impl PublisherTrack {
 	/// Bumps `frames` once.
 	pub fn frame(&self) {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Publisher)]
-				.frames
-				.fetch_add(1, Ordering::Relaxed);
+			entry.publisher[self.tier.idx()].frames.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 
 	/// Bumps `bytes` by `n`.
 	pub fn bytes(&self, n: u64) {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Publisher)]
-				.bytes
-				.fetch_add(n, Ordering::Relaxed);
+			entry.publisher[self.tier.idx()].bytes.fetch_add(n, Ordering::Relaxed);
 		}
 	}
 
 	/// Bumps `groups` once.
 	pub fn group(&self) {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Publisher)]
-				.groups
-				.fetch_add(1, Ordering::Relaxed);
+			entry.publisher[self.tier.idx()].groups.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 }
@@ -578,7 +620,7 @@ impl PublisherTrack {
 impl Drop for PublisherTrack {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Publisher)]
+			entry.publisher[self.tier.idx()]
 				.subscriptions_closed
 				.fetch_add(1, Ordering::Relaxed);
 		}
@@ -596,27 +638,21 @@ impl SubscriberTrack {
 	/// Bumps `frames` once.
 	pub fn frame(&self) {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Subscriber)]
-				.frames
-				.fetch_add(1, Ordering::Relaxed);
+			entry.subscriber[self.tier.idx()].frames.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 
 	/// Bumps `bytes` by `n`.
 	pub fn bytes(&self, n: u64) {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Subscriber)]
-				.bytes
-				.fetch_add(n, Ordering::Relaxed);
+			entry.subscriber[self.tier.idx()].bytes.fetch_add(n, Ordering::Relaxed);
 		}
 	}
 
 	/// Bumps `groups` once.
 	pub fn group(&self) {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Subscriber)]
-				.groups
-				.fetch_add(1, Ordering::Relaxed);
+			entry.subscriber[self.tier.idx()].groups.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 }
@@ -624,7 +660,7 @@ impl SubscriberTrack {
 impl Drop for SubscriberTrack {
 	fn drop(&mut self) {
 		if let Some(entry) = &self.entry {
-			entry.slots[slot_index(self.tier, Role::Subscriber)]
+			entry.subscriber[self.tier.idx()]
 				.subscriptions_closed
 				.fetch_add(1, Ordering::Relaxed);
 		}
@@ -648,6 +684,84 @@ fn clear_task(inner: &StatsInner) {
 	*inner.task.lock() = None;
 }
 
+/// True iff any of the supplied slots had a snapshot change within the
+/// retention window. Used by both the global-entry GC and the local-state
+/// GC so they agree on lifetime.
+fn within_retention<'a>(slots: impl IntoIterator<Item = &'a SlotState>, current_tick: u64, retention: u32) -> bool {
+	slots
+		.into_iter()
+		.any(|s| s.last_change_tick != 0 && current_tick.saturating_sub(s.last_change_tick) <= retention as u64)
+}
+
+/// Per-tick work for a single `(side, tier)` slot: derive `broadcasts` /
+/// `broadcasts_closed` from subscription transitions, build the emitted
+/// `Snapshot`, update the slot's `prev_emitted` / `last_change_tick`, and
+/// hand the snap to `emit` iff the slot is still within the retention
+/// window of its most recent change.
+fn process_slot(
+	counters: &Counters,
+	slot_state: &mut SlotState,
+	current_tick: u64,
+	retention: u32,
+	mut emit: impl FnMut(Snapshot),
+) {
+	let raw = counters.snapshot();
+
+	// Derive `broadcasts` / `broadcasts_closed` from subscription-active
+	// transitions observed across ticks. `delta_subs > 0` catches the case
+	// where a sub opened AND closed within a single tick window so the
+	// snapshot shows `subs == subs_closed` (curr_active false) but real
+	// activity happened. Such flickers count as a full open/close pair.
+	let (prev_subs, prev_subs_closed, prev_broadcasts, prev_broadcasts_closed) = match &slot_state.prev_emitted {
+		Some(prev) => (
+			prev.subscriptions,
+			prev.subscriptions_closed,
+			prev.broadcasts,
+			prev.broadcasts_closed,
+		),
+		None => (0, 0, 0, 0),
+	};
+	let prev_active = prev_subs > prev_subs_closed;
+	let curr_active = raw.subscriptions > raw.subscriptions_closed;
+	let delta_subs = raw.subscriptions.saturating_sub(prev_subs);
+	let active_during = prev_active || curr_active || delta_subs > 0;
+
+	if !prev_active && active_during {
+		slot_state.derived_broadcasts = prev_broadcasts.saturating_add(1);
+	}
+	if active_during && !curr_active {
+		slot_state.derived_broadcasts_closed = prev_broadcasts_closed.saturating_add(1);
+	}
+
+	let snap = Snapshot {
+		announced: raw.announced,
+		announced_closed: raw.announced_closed,
+		broadcasts: slot_state.derived_broadcasts,
+		broadcasts_closed: slot_state.derived_broadcasts_closed,
+		subscriptions: raw.subscriptions,
+		subscriptions_closed: raw.subscriptions_closed,
+		bytes: raw.bytes,
+		frames: raw.frames,
+		groups: raw.groups,
+	};
+
+	// Include the entry whenever the snapshot differs from the last
+	// emitted one OR we're still within the retention window of the most
+	// recent change. Change-driven inclusion catches bumps since the
+	// previous tick (incl. sub-tick flickers); the retention path lets
+	// idle entries linger so a downstream "currently active" view doesn't
+	// flicker on a single idle tick.
+	let changed = slot_state.prev_emitted.as_ref() != Some(&snap);
+	if changed {
+		slot_state.last_change_tick = current_tick;
+		slot_state.prev_emitted = Some(snap);
+	}
+	if slot_state.last_change_tick != 0 && current_tick.saturating_sub(slot_state.last_change_tick) <= retention as u64
+	{
+		emit(snap);
+	}
+}
+
 async fn run_publisher(weak: Weak<StatsInner>) {
 	let Some(inner) = weak.upgrade() else {
 		return;
@@ -656,12 +770,12 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 		clear_task(&inner);
 		return;
 	};
-	let tick = inner.tick;
-	let retention_ticks = inner.retention_ticks;
+	let interval = inner.interval;
+	let retention = inner.retention;
 
 	let mut broadcast = Broadcast::new().produce();
 	let mut tracks: Vec<TrackProducer> = Vec::with_capacity(NUM_SLOTS);
-	for name in TRACK_NAMES {
+	for name in TRACK_ORDER {
 		match broadcast.create_track(Track {
 			name: name.into(),
 			priority: 0,
@@ -681,14 +795,14 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 	}
 	drop(inner);
 
-	// Per-(path, slot) state owned by this task. Mirrors entries we've
+	// Per-path snapshot state owned by this task. Mirrors entries we've
 	// seen recently; serves both as the diff source for change detection
 	// and as the authority on which global entries to GC.
-	let mut local: HashMap<PathOwned, [SlotState; NUM_SLOTS]> = HashMap::new();
+	let mut local: HashMap<PathOwned, EntrySnapState> = HashMap::new();
 	let mut last_payload: [Vec<u8>; NUM_SLOTS] = Default::default();
 	let mut empty_ticks: u32 = 0;
 
-	let mut ticker = tokio::time::interval(tick);
+	let mut ticker = tokio::time::interval(interval);
 	ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
 	loop {
@@ -709,68 +823,11 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 
 		let mut frames: [BTreeMap<String, Snapshot>; NUM_SLOTS] = Default::default();
 		for (path, entry) in &entries {
-			let slot_states = local.entry(path.clone()).or_default();
-			for (i, (counters, slot_state)) in entry.slots.iter().zip(slot_states.iter_mut()).enumerate() {
-				let raw = counters.snapshot();
-
-				// Derive `broadcasts` / `broadcasts_closed` from the
-				// subscription-active transitions observed across ticks.
-				// `delta_subs > 0` catches the case where a sub opened AND
-				// closed within a single tick window so the snapshot shows
-				// `subs == subs_closed` (curr_active == false) but real
-				// activity happened. Such flickers count as a full
-				// open/close pair.
-				let (prev_subs, prev_subs_closed, prev_broadcasts, prev_broadcasts_closed) =
-					match &slot_state.prev_emitted {
-						Some(prev) => (
-							prev.subscriptions,
-							prev.subscriptions_closed,
-							prev.broadcasts,
-							prev.broadcasts_closed,
-						),
-						None => (0, 0, 0, 0),
-					};
-				let prev_active = prev_subs > prev_subs_closed;
-				let curr_active = raw.subscriptions > raw.subscriptions_closed;
-				let delta_subs = raw.subscriptions.saturating_sub(prev_subs);
-				let active_during = prev_active || curr_active || delta_subs > 0;
-
-				if !prev_active && active_during {
-					slot_state.derived_broadcasts = prev_broadcasts.saturating_add(1);
-				}
-				if active_during && !curr_active {
-					slot_state.derived_broadcasts_closed = prev_broadcasts_closed.saturating_add(1);
-				}
-
-				let snap = Snapshot {
-					announced: raw.announced,
-					announced_closed: raw.announced_closed,
-					broadcasts: slot_state.derived_broadcasts,
-					broadcasts_closed: slot_state.derived_broadcasts_closed,
-					subscriptions: raw.subscriptions,
-					subscriptions_closed: raw.subscriptions_closed,
-					bytes: raw.bytes,
-					frames: raw.frames,
-					groups: raw.groups,
-				};
-
-				// Include the entry whenever the snapshot differs from the
-				// last emitted one OR we're still within the retention
-				// window of the most recent change. The change-driven path
-				// catches bumps that landed since the last tick (including
-				// sub-tick flickers); the retention path lets entries
-				// linger so a downstream "currently active" view doesn't
-				// flicker out on a single idle tick.
-				let changed = slot_state.prev_emitted.as_ref() != Some(&snap);
-				if changed {
-					slot_state.last_change_tick = current_tick;
-					slot_state.prev_emitted = Some(snap);
-				}
-				let within_retention = slot_state.last_change_tick != 0
-					&& current_tick.saturating_sub(slot_state.last_change_tick) <= retention_ticks as u64;
-				if within_retention {
+			let snap_state = local.entry(path.clone()).or_default();
+			for (i, (_track_name, counters, slot_state)) in snap_state.zip_slots(entry).into_iter().enumerate() {
+				process_slot(counters, slot_state, current_tick, retention, |snap| {
 					frames[i].insert(path.as_str().to_string(), snap);
-				}
+				});
 			}
 		}
 		// Build a snapshot of the live path set before dropping `entries`
@@ -788,23 +845,17 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 				if Arc::strong_count(entry) > 1 {
 					return true;
 				}
-				local.get(path).is_some_and(|slots| {
-					slots.iter().any(|s| {
-						s.last_change_tick != 0
-							&& current_tick.saturating_sub(s.last_change_tick) <= retention_ticks as u64
-					})
-				})
+				local
+					.get(path)
+					.is_some_and(|snap_state| within_retention(snap_state.all_slots(), current_tick, retention))
 			});
 		}
 
 		// GC local state: drop entries whose global counterpart is gone
 		// AND retention has expired. Bounded growth even if a relay
 		// churns through many transient broadcast paths.
-		local.retain(|path, slots| {
-			live.contains(path)
-				|| slots.iter().any(|s| {
-					s.last_change_tick != 0 && current_tick.saturating_sub(s.last_change_tick) <= retention_ticks as u64
-				})
+		local.retain(|path, snap_state| {
+			live.contains(path) || within_retention(snap_state.all_slots(), current_tick, retention)
 		});
 
 		for (((frame, last), track), slot) in frames
@@ -839,7 +890,7 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 			// learn anything new, drop the broadcast and let the next bump
 			// respawn us. Take the task slot under lock and re-check the map
 			// to avoid racing with a fresh insert.
-			let exit_threshold = retention_ticks.saturating_mul(2).max(1);
+			let exit_threshold = retention.saturating_mul(2).max(1);
 			if empty_ticks >= exit_threshold {
 				let mut slot = inner.task.lock();
 				if inner.entries.lock().is_empty() {
@@ -954,9 +1005,8 @@ mod tests {
 		let entries = stats.inner.entries.lock();
 		let e1 = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
 		let e2 = entries.get(&PathOwned::from("demo/ccc")).expect("entry");
-		let i = slot_index(Tier::External, Role::Publisher);
-		assert_eq!(e1.slots[i].bytes.load(Relaxed), 100);
-		assert_eq!(e2.slots[i].bytes.load(Relaxed), 7);
+		assert_eq!(e1.publisher[Tier::External.idx()].bytes.load(Relaxed), 100);
+		assert_eq!(e2.publisher[Tier::External.idx()].bytes.load(Relaxed), 7);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -972,30 +1022,10 @@ mod tests {
 
 		let entries = stats.inner.entries.lock();
 		let entry = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
-		assert_eq!(
-			entry.slots[slot_index(Tier::External, Role::Publisher)]
-				.bytes
-				.load(Relaxed),
-			100
-		);
-		assert_eq!(
-			entry.slots[slot_index(Tier::External, Role::Subscriber)]
-				.bytes
-				.load(Relaxed),
-			0
-		);
-		assert_eq!(
-			entry.slots[slot_index(Tier::Internal, Role::Publisher)]
-				.bytes
-				.load(Relaxed),
-			0
-		);
-		assert_eq!(
-			entry.slots[slot_index(Tier::Internal, Role::Subscriber)]
-				.bytes
-				.load(Relaxed),
-			7
-		);
+		assert_eq!(entry.publisher[Tier::External.idx()].bytes.load(Relaxed), 100);
+		assert_eq!(entry.subscriber[Tier::External.idx()].bytes.load(Relaxed), 0);
+		assert_eq!(entry.publisher[Tier::Internal.idx()].bytes.load(Relaxed), 0);
+		assert_eq!(entry.subscriber[Tier::Internal.idx()].bytes.load(Relaxed), 7);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1077,7 +1107,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn retention_boundary_after_drop() {
-		// retention_ticks=2 lingers exactly 2 idle ticks after the LAST
+		// retention=2 lingers exactly 2 idle ticks after the LAST
 		// snapshot change. The drop itself is a change (it bumps
 		// announced_closed/subs_closed/derived broadcasts_closed), so the
 		// retention countdown starts from the tick that observes the drop,
@@ -1134,7 +1164,7 @@ mod tests {
 		drive_ticks(2).await;
 		drop(track);
 		drop(bs);
-		// Within retention_ticks=10. Drop is observed as a change at tick 3,
+		// Within retention=10. Drop is observed as a change at tick 3,
 		// so we have plenty of ticks left before GC.
 		drive_ticks(3).await;
 
@@ -1164,7 +1194,7 @@ mod tests {
 		drive_ticks(2).await;
 		drop(track);
 		drop(bs);
-		// Far past 2 * retention_ticks so the entry is fully aged out.
+		// Far past 2 * retention so the entry is fully aged out.
 		drive_ticks(10).await;
 
 		assert!(stats.inner.entries.lock().is_empty(), "entries should be GC'd");

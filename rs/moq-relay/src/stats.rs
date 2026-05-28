@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// when [`Self::node`] is unset) on the cluster origin. Each frame is a
 /// JSON map of broadcast path to a cumulative counter snapshot; an entry
 /// surfaces whenever its snapshot changes, and lingers for
-/// [`Self::retention_ticks`] ticks past the most recent change. See
+/// [`Self::retention`] ticks past the most recent change. See
 /// `moq_net::stats` for the per-field semantics.
 #[derive(Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -48,15 +48,15 @@ pub struct StatsConfig {
 	#[arg(long = "stats-prefix", env = "MOQ_STATS_PREFIX")]
 	pub prefix: Option<String>,
 
-	/// Tick interval (in seconds) between snapshot publishes. Defaults to 1.
-	#[arg(long = "stats-tick-secs", env = "MOQ_STATS_TICK_SECS")]
-	pub tick_secs: Option<u64>,
+	/// Interval (in seconds) between snapshot publishes. Defaults to 1.
+	#[arg(long = "stats-interval", env = "MOQ_STATS_INTERVAL")]
+	pub interval: Option<u64>,
 
-	/// Number of ticks an entry lingers in the emitted frame after its last
-	/// observed change. Defaults to 1. A short reconnect window keeps the
-	/// entry visible across brief disconnects.
-	#[arg(long = "stats-retention-ticks", env = "MOQ_STATS_RETENTION_TICKS")]
-	pub retention_ticks: Option<u32>,
+	/// Number of intervals an entry lingers in the emitted frame after its
+	/// last observed change. Defaults to 1. A short reconnect window keeps
+	/// the entry visible across brief disconnects.
+	#[arg(long = "stats-retention", env = "MOQ_STATS_RETENTION")]
+	pub retention: Option<u32>,
 
 	/// Node identifier appended to the advertised stats path to disambiguate
 	/// broadcasts when multiple relays share a cluster origin. Without this,
@@ -80,10 +80,10 @@ impl StatsConfig {
 			return Stats::disabled();
 		}
 		let prefix = self.prefix.clone().unwrap_or_else(|| ".stats".to_string());
-		let tick = Duration::from_secs(self.tick_secs.unwrap_or(1).max(1));
-		let retention_ticks = self.retention_ticks.unwrap_or(1).max(1);
+		let interval = Duration::from_secs(self.interval.unwrap_or(1).max(1));
+		let retention = self.retention.unwrap_or(1).max(1);
 		let node = self.node.clone().map(PathOwned::from);
-		tracing::info!(prefix, tick_secs = tick.as_secs(), retention_ticks, node = ?node, "stats publishing enabled");
-		Stats::new(prefix, tick, retention_ticks, node, origin)
+		tracing::info!(prefix, interval_secs = interval.as_secs(), retention, node = ?node, "stats publishing enabled");
+		Stats::new(prefix, interval, retention, node, origin)
 	}
 }

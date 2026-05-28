@@ -160,13 +160,13 @@ enabled = true
 # Top-level path under which stats broadcasts are published (defaults to ".stats")
 prefix = ".stats"
 
-# Tick interval in seconds between snapshots (defaults to 1)
-tick_secs = 1
+# Seconds between snapshot publishes (defaults to 1)
+interval = 1
 
-# Number of ticks an entry lingers in the emitted frame after its last
-# observed change (defaults to 1). A short reconnect window keeps the
-# entry visible across brief disconnects.
-retention_ticks = 1
+# Number of intervals an entry lingers in the emitted frame after its
+# last observed change (defaults to 1). A short reconnect window keeps
+# the entry visible across brief disconnects.
+retention = 1
 
 # Node identifier appended to the advertised path to disambiguate broadcasts
 # when multiple relays share a cluster origin. May be multi-segment, e.g.
@@ -240,9 +240,9 @@ byte-identical to the last emitted frame; new subscribers still pick up
 a baseline immediately via track-latest semantics.
 
 Every flag also accepts an equivalent CLI argument (`--stats-enabled`,
-`--stats-prefix`, `--stats-tick-secs`, `--stats-retention-ticks`,
+`--stats-prefix`, `--stats-interval`, `--stats-retention`,
 `--stats-node`) and environment variable (`MOQ_STATS_ENABLED`,
-`MOQ_STATS_PREFIX`, `MOQ_STATS_TICK_SECS`, `MOQ_STATS_RETENTION_TICKS`,
+`MOQ_STATS_PREFIX`, `MOQ_STATS_INTERVAL`, `MOQ_STATS_RETENTION`,
 `MOQ_STATS_NODE`).
 
 ### \[iroh]
