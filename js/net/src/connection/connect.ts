@@ -1,4 +1,4 @@
-import Session from "@moq/qmux";
+import Session, { type Version as QmuxVersion } from "@moq/qmux";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { Stream } from "../stream.ts";
@@ -335,7 +335,29 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;
 
-	const quic = new Session(url);
+	// Only moq-transport-18 is pinned to qmux-01 today. Every other ALPN we
+	// support is currently negotiated as `qmux-00.{alpn}` on the wire, but we
+	// don't want to lock that in: set the value to `null` so the polyfill
+	// advertises every QMux draft it knows about and the server picks one.
+	// Insertion order is the negotiation preference on the wire.
+	const versions = {
+		[Lite.ALPN_04]: null,
+		[Lite.ALPN_03]: null,
+		[Lite.ALPN]: null,
+		[Ietf.ALPN.DRAFT_18]: "qmux-01",
+		[Ietf.ALPN.DRAFT_17]: null,
+		[Ietf.ALPN.DRAFT_16]: null,
+		[Ietf.ALPN.DRAFT_15]: null,
+	} as const satisfies Record<string, QmuxVersion | QmuxVersion[] | null>;
+
+	// `withoutProtocol` also advertises bare `qmux-01`, `qmux-00`, and
+	// `webtransport` so we still interop with relays that only know a
+	// wire-format version (today's moq-relay only accepts bare `webtransport`).
+	const quic = new Session(url, {
+		protocols: Object.keys(versions),
+		versions,
+		withoutProtocol: true,
+	});
 
 	// Wait for the WebSocket to connect, or for the cancel promise to resolve.
 	// Close the connection if we lost the race.

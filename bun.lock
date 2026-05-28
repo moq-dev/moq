@@ -1,6 +1,5 @@
 {
   "lockfileVersion": 1,
-  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "moq",
@@ -145,7 +144,7 @@
       "name": "@moq/net",
       "version": "0.1.1",
       "dependencies": {
-        "@moq/qmux": "^0.0.6",
+        "@moq/qmux": "^0.1.1",
         "@moq/signals": "workspace:*",
         "async-mutex": "^0.5.0",
       },
@@ -509,7 +508,7 @@
 
     "@moq/publish": ["@moq/publish@workspace:js/publish"],
 
-    "@moq/qmux": ["@moq/qmux@0.0.6", "", {}, "sha512-ISuGz05lUvf1hzHW3Aw3VnsGRJe1w9Qdog3LQ66KS+l+5mzQsPANvW8yOioEe1Z9dJO2G3sAHoGPnzwnsY9SIQ=="],
+    "@moq/qmux": ["@moq/qmux@0.1.1", "", {}, "sha512-ljrQzBiKk3/yQ1+DCmI/F24CYzfePDSt/SUVWNjdtCsOn1CO/9EXHz8CLMlaA1ZFBviAJhWxc4B0CZw6x0E1Wg=="],
 
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 
