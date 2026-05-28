@@ -1,0 +1,38 @@
+//! Opus bridge.
+//!
+//! str0m hands us one Opus packet per frame, which is exactly the
+//! raw shape that [`moq_mux::codec::opus::Import`] consumes.
+
+use crate::{Result, codec};
+
+pub struct Bridge {
+	import: moq_mux::codec::opus::Import,
+}
+
+impl Bridge {
+	pub fn new(
+		broadcast: moq_net::BroadcastProducer,
+		catalog: moq_mux::catalog::hang::Producer,
+		sample_rate: u32,
+		channel_count: u32,
+	) -> Result<Self> {
+		let config = moq_mux::codec::opus::Config {
+			sample_rate,
+			channel_count,
+		};
+		let import = moq_mux::codec::opus::Import::new(broadcast, catalog, config).map_err(crate::Error::Other)?;
+		Ok(Self { import })
+	}
+}
+
+impl codec::Bridge for Bridge {
+	fn push(&mut self, frame: codec::Frame) -> Result<()> {
+		let pts = moq_mux::container::Timestamp::from_micros(frame.timestamp_us)
+			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
+		let mut payload = frame.payload;
+		self.import
+			.decode(&mut payload, Some(pts))
+			.map_err(crate::Error::Other)?;
+		Ok(())
+	}
+}

@@ -1,0 +1,197 @@
+//! str0m session driver shared by WHIP ingest and WHEP egress.
+//!
+//! str0m is sans-IO, so we drive the [`str0m::Rtc`] instance from a tokio
+//! task that owns a UDP socket. [`Session::run`] alternates between
+//! [`Rtc::poll_output`] (drain pending transmits / events) and
+//! [`Rtc::handle_input`] (feed UDP packets or timeouts).
+
+pub mod ingest;
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::time::Instant;
+
+use str0m::{Event, IceConnectionState, Input, Output, Rtc, net::Receive};
+use tokio::net::UdpSocket;
+
+use crate::{Error, Result, codec};
+
+/// Receives `MediaData` events from str0m and dispatches to the right codec
+/// [`Bridge`](codec::Bridge). Used as the per-session sink in [`Session::run`].
+pub trait MediaSink: Send {
+	/// Called once str0m has confirmed which codec is on which `mid`.
+	fn on_track(
+		&mut self,
+		mid: str0m::media::Mid,
+		kind: str0m::media::MediaKind,
+		codec: str0m::format::Codec,
+		audio_params: Option<(u32, u32)>,
+	) -> Result<()>;
+
+	/// Called on each [`MediaData`](str0m::media::MediaData) event. The session
+	/// loop has already converted the timestamp to microseconds.
+	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()>;
+}
+
+/// Drives a [`Rtc`] instance on a UDP socket until it ends.
+///
+/// The caller pre-populates the `Rtc` with whatever SDP exchange they need
+/// (typically by accepting an offer in the WHIP/WHEP HTTP handler); the
+/// session loop just owns the socket and the sink.
+pub struct Session {
+	rtc: Rtc,
+	socket: UdpSocket,
+	sink: Box<dyn MediaSink>,
+}
+
+impl Session {
+	pub fn new(rtc: Rtc, socket: UdpSocket, sink: Box<dyn MediaSink>) -> Self {
+		Self { rtc, socket, sink }
+	}
+
+	pub async fn run(mut self) -> Result<()> {
+		// Buffer for one UDP datagram (max v4/v6 payload size).
+		let mut buf = vec![0u8; 65_535];
+
+		loop {
+			let timeout = match self.rtc.poll_output().map_err(Error::Rtc)? {
+				Output::Timeout(t) => t,
+				Output::Transmit(t) => {
+					if let Err(err) = self.socket.send_to(&t.contents, t.destination).await {
+						tracing::warn!(%err, dst = %t.destination, "send failed");
+					}
+					continue;
+				}
+				Output::Event(event) => {
+					self.handle_event(event)?;
+					continue;
+				}
+			};
+
+			let now = Instant::now();
+			let duration = timeout.saturating_duration_since(now);
+			if duration.is_zero() {
+				self.rtc.handle_input(Input::Timeout(now)).map_err(Error::Rtc)?;
+				continue;
+			}
+
+			let read = tokio::time::timeout(duration, self.socket.recv_from(&mut buf)).await;
+			match read {
+				Ok(Ok((len, src))) => {
+					let local = self.socket.local_addr()?;
+					let now = Instant::now();
+					let recv =
+						Receive::new(str0m::net::Protocol::Udp, src, local, &buf[..len]).map_err(Error::RtcInput)?;
+					self.rtc.handle_input(Input::Receive(now, recv)).map_err(Error::Rtc)?;
+				}
+				Ok(Err(err)) => return Err(err.into()),
+				Err(_) => {
+					self.rtc
+						.handle_input(Input::Timeout(Instant::now()))
+						.map_err(Error::Rtc)?;
+				}
+			}
+		}
+	}
+
+	fn handle_event(&mut self, event: Event) -> Result<()> {
+		match event {
+			Event::IceConnectionStateChange(state) => {
+				tracing::debug!(?state, "ice state");
+				if state == IceConnectionState::Disconnected {
+					return Err(Error::SessionClosed);
+				}
+			}
+			Event::MediaAdded(added) => {
+				// str0m's CodecConfig is the negotiated set; pick the first
+				// codec advertised for this `mid` and tell the sink so it
+				// can spin up the matching bridge.
+				let pt = self.rtc.media(added.mid).and_then(|m| m.remote_pts().first().copied());
+				let params = pt.and_then(|pt| self.rtc.codec_config().params().iter().find(|p| p.pt() == pt).copied());
+				let codec = match params {
+					Some(p) => p.spec().codec,
+					None => {
+						tracing::warn!(?added.mid, "no codec params for media; ignoring");
+						return Ok(());
+					}
+				};
+				let audio_params = params.filter(|_| codec.is_audio()).map(|p| {
+					let spec = p.spec();
+					(spec.clock_rate.get(), spec.channels.unwrap_or(1) as u32)
+				});
+				self.sink.on_track(added.mid, added.kind, codec, audio_params)?;
+			}
+			Event::MediaData(data) => {
+				let timestamp_us = media_time_to_micros(&data.time);
+				self.sink.on_frame(
+					data.mid,
+					codec::Frame {
+						timestamp_us,
+						payload: data.data.into(),
+					},
+				)?;
+			}
+			_ => {}
+		}
+		Ok(())
+	}
+}
+
+/// Convert a str0m [`MediaTime`](str0m::media::MediaTime) to microseconds.
+fn media_time_to_micros(time: &str0m::media::MediaTime) -> u64 {
+	// MediaTime stores `numer / denom` seconds; cast through u128 so the
+	// product doesn't overflow at 90 kHz video timestamps.
+	let numer = time.numer() as i128;
+	let denom = time.denom() as i128;
+	if denom == 0 {
+		return 0;
+	}
+	let micros = (numer.saturating_mul(1_000_000)) / denom;
+	micros.max(0) as u64
+}
+
+/// Type-erased map of `Mid` -> codec bridge, populated as `MediaAdded`
+/// events arrive.
+pub(crate) struct Bridges {
+	inner: HashMap<str0m::media::Mid, Box<dyn codec::Bridge>>,
+}
+
+impl Bridges {
+	pub fn new() -> Self {
+		Self { inner: HashMap::new() }
+	}
+
+	pub fn insert(&mut self, mid: str0m::media::Mid, bridge: Box<dyn codec::Bridge>) {
+		self.inner.insert(mid, bridge);
+	}
+
+	pub fn push(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()> {
+		if let Some(bridge) = self.inner.get_mut(&mid) {
+			bridge.push(frame)?;
+		}
+		Ok(())
+	}
+}
+
+/// Bind a UDP socket on `0.0.0.0:0` and return both the socket and the
+/// listed ICE candidates the caller should advertise.
+///
+/// If `advertise` is non-empty, those addresses are used verbatim as
+/// ICE host candidates (typically the gateway's public IPs). Otherwise we
+/// fall back to whatever the OS picked.
+pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<(UdpSocket, Vec<SocketAddr>)> {
+	let socket = UdpSocket::bind(("0.0.0.0", 0)).await?;
+	let local = socket.local_addr()?;
+	let candidates = if advertise.is_empty() {
+		vec![local]
+	} else {
+		// Reuse the bound port across each advertised IP, since str0m's ICE
+		// agent picks the destination port from the candidate it's pairing
+		// against.
+		advertise
+			.iter()
+			.map(|addr| SocketAddr::new(addr.ip(), local.port()))
+			.collect()
+	};
+	Ok((socket, candidates))
+}
