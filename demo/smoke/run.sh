@@ -18,17 +18,29 @@ SIZE="${SMOKE_SIZE:-320x240}"
 URL="http://127.0.0.1:4443"
 NEGATIVE=0
 
+require_value() {
+    # require_value <flag> "$@": the flag plus the rest of the argv. Ensures a
+    # non-flag value follows, so `set -u` doesn't abort on a bare `--timeout`.
+    if [[ $# -lt 2 || -z "${2:-}" || "$2" == -* ]]; then
+        echo "error: $1 requires a value" >&2
+        exit 2
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --publishers)
+            require_value "$@"
             PUBLISHERS="$2"
             shift 2
             ;;
         --subscribers)
+            require_value "$@"
             SUBSCRIBERS="$2"
             shift 2
             ;;
         --timeout)
+            require_value "$@"
             TIMEOUT="$2"
             shift 2
             ;;
@@ -205,6 +217,8 @@ run_round() {
     if [[ -n "$pub_pid" ]]; then
         kill_tree "$pub_pid"
         wait "$pub_pid" 2>/dev/null || true
+        # Don't let cleanup() later signal this now-reaped (possibly recycled) PID.
+        [[ "${PUB_PID:-}" == "$pub_pid" ]] && PUB_PID=""
     fi
     return 0
 }

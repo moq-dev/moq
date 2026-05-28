@@ -17,6 +17,10 @@ from pathlib import Path
 
 import moq
 
+DEFAULT_FPS = 30
+MICROSECONDS_PER_SECOND = 1_000_000
+MAX_LATENCY_MS = 1_000  # subscribe_media congestion-control / lookahead window
+
 
 async def publish(url: str, broadcast: str, asset_dir: str) -> None:
     root = Path(asset_dir)
@@ -24,9 +28,9 @@ async def publish(url: str, broadcast: str, asset_dir: str) -> None:
     init = (root / meta["init_file"]).read_bytes()
     frames = [(root / f["file"]).read_bytes() for f in meta["frames"]]
     timestamps = [int(f["ts_us"]) for f in meta["frames"]]
-    fps = int(meta.get("fps", 30))
+    fps = int(meta.get("fps", DEFAULT_FPS))
     frame_dt = 1.0 / fps
-    loop_us = timestamps[-1] + 1_000_000 // fps
+    loop_us = timestamps[-1] + MICROSECONDS_PER_SECOND // fps
 
     producer = moq.BroadcastProducer()
     media = producer.publish_media(meta["format"], init)
@@ -37,7 +41,7 @@ async def publish(url: str, broadcast: str, asset_dir: str) -> None:
 
         base = 0
         while True:
-            for payload, ts in zip(frames, timestamps):
+            for payload, ts in zip(frames, timestamps, strict=True):
                 media.write_frame(payload, base + ts)
                 await asyncio.sleep(frame_dt)
             base += loop_us
@@ -53,7 +57,7 @@ async def subscribe(url: str, broadcast: str, timeout: float) -> None:
         track_name = next(iter(catalog.video))
         video = catalog.video[track_name]
 
-        media = consumer.subscribe_media(track_name, video.container, 1_000)
+        media = consumer.subscribe_media(track_name, video.container, MAX_LATENCY_MS)
 
         total = 0
 

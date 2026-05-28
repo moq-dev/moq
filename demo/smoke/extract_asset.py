@@ -15,9 +15,20 @@ from pathlib import Path
 
 START_CODE = b"\x00\x00\x01"
 
+# H.264 NAL unit types (spec table 7-1), masked from the header byte.
+NAL_TYPE_MASK = 0x1F
+NAL_NON_IDR_SLICE = 1
+NAL_IDR_SLICE = 5
+NAL_SEI = 6
+NAL_SPS = 7
+NAL_PPS = 8
+NAL_AUD = 9
+
+MICROSECONDS_PER_SECOND = 1_000_000
+
 
 def nal_units(data: bytes) -> list[bytes]:
-    """Yield NAL units (without start codes, trailing zeros stripped)."""
+    """Return NAL units (without start codes, trailing zeros stripped)."""
     starts = []
     idx = data.find(START_CODE, 0)
     while idx != -1:
@@ -37,6 +48,7 @@ def nal_units(data: bytes) -> list[bytes]:
 
 
 def annexb(nal: bytes) -> bytes:
+    """Prepend the 4-byte Annex-B start code (00 00 00 01) to a raw NAL unit."""
     return b"\x00\x00\x00\x01" + nal
 
 
@@ -57,18 +69,18 @@ def main() -> None:
     sps = pps = None
     pending: list[bytes] = []  # non-VCL NALs (SEI/AUD) preceding the next slice
     frames: list[dict] = []
-    frame_us = 1_000_000 // fps
+    frame_us = MICROSECONDS_PER_SECOND // fps
 
     def nal_type(nal: bytes) -> int:
-        return nal[0] & 0x1F
+        return nal[0] & NAL_TYPE_MASK
 
     for nal in units:
         t = nal_type(nal)
-        if t == 7 and sps is None:
+        if t == NAL_SPS and sps is None:
             sps = nal
-        elif t == 8 and pps is None:
+        elif t == NAL_PPS and pps is None:
             pps = nal
-        elif t in (1, 5):  # VCL slice -> one access unit / frame
+        elif t in (NAL_NON_IDR_SLICE, NAL_IDR_SLICE):  # VCL slice -> one access unit / frame
             payload = b"".join(annexb(n) for n in pending) + annexb(nal)
             pending = []
             idx = len(frames)
@@ -78,10 +90,10 @@ def main() -> None:
                 {
                     "file": f"frames/{idx:04d}.bin",
                     "ts_us": idx * frame_us,
-                    "keyframe": t == 5,
+                    "keyframe": t == NAL_IDR_SLICE,
                 }
             )
-        elif t in (6, 9):  # SEI / access unit delimiter
+        elif t in (NAL_SEI, NAL_AUD):  # non-VCL: carry into the next access unit
             pending.append(nal)
         # SPS/PPS after the first are dropped: they live in init.bin.
 
