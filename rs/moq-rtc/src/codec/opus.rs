@@ -27,7 +27,7 @@ impl Bridge {
 
 impl codec::Bridge for Bridge {
 	fn push(&mut self, frame: codec::Frame) -> Result<()> {
-		let pts = moq_mux::container::Timestamp::from_micros(frame.timestamp_us)
+		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
 		let mut payload = frame.payload;
 		self.import

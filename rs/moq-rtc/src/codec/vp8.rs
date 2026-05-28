@@ -41,7 +41,7 @@ impl Bridge {
 impl codec::Bridge for Bridge {
 	fn push(&mut self, frame: codec::Frame) -> Result<()> {
 		self.announce();
-		let pts = moq_mux::container::Timestamp::from_micros(frame.timestamp_us)
+		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
 		// VP8: first byte bit 0 == 0 means keyframe (RFC 6386 §9.1).
 		let keyframe = frame.payload.first().map(|b| b & 0x01 == 0).unwrap_or(false);
