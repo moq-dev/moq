@@ -597,7 +597,7 @@ async fn run_publisher(weak: Weak<Level>) {
 			broadcast.create_track(Track {
 				name: name.into(),
 				priority: 0,
-				timescale: crate::Timescale::UNKNOWN,
+				timescale: None,
 			})
 		};
 		let ext_pub = match make("publisher.json") {

@@ -529,8 +529,8 @@ async fn run_track_pump(
 						let buffer_mut = buffer.get_mut().unwrap();
 
 						let pts = match reference_ts {
-							Some(reference) => match timestamp.checked_sub(reference).and_then(|d| d.as_nanos()) {
-								Ok(nanos) => gst::ClockTime::from_nseconds(nanos as u64),
+							Some(reference) => match timestamp.checked_sub(reference) {
+								Ok(d) => gst::ClockTime::from_nseconds(d.as_nanos() as u64),
 								Err(_) => {
 									gst::warning!(CAT, "track {} timestamp delta overflow", descriptor.name);
 									pad_endpoint.send(PadMessage::Drop);

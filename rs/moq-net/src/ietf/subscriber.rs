@@ -465,7 +465,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let track = Track {
 			name: msg.track_name.to_string(),
 			priority: 0,
-			timescale: crate::Timescale::UNKNOWN,
+			timescale: None,
 		}
 		.produce();
 
@@ -575,12 +575,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		// LOC-style track properties are not parsed yet; default the timescale
-		// to UNKNOWN. TODO: read timescale from track properties on Draft17+.
+		// LOC-style track properties are not parsed yet. TODO: read timescale from
+		// track properties on Draft17+.
 		let track_info = crate::Track {
 			name: track_name.clone(),
 			priority,
-			timescale: crate::Timescale::UNKNOWN,
+			timescale: None,
 		};
 
 		let mut track = match request.accept(track_info) {

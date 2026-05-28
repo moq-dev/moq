@@ -684,7 +684,7 @@ mod test {
 		track1.assert_group();
 		track2.assert_group();
 
-		// Subscribe to a new track and drop the dynamic — the pending sub aborts.
+		// Subscribe to a new track and drop the dynamic. The pending sub aborts.
 		let sub3 = tokio::spawn({
 			let consumer = consumer.clone();
 			async move { consumer.subscribe_track("track2", Subscription::default()).await }
@@ -723,7 +723,7 @@ mod test {
 		// Consumer should see the track as closed.
 		track1.assert_closed();
 
-		// Subscribe again to the same track — should get a NEW producer.
+		// Subscribe again to the same track. Should get a NEW producer.
 		let sub2 = tokio::spawn({
 			let consumer = consumer.clone();
 			async move { consumer.subscribe_track("track1", Subscription::default()).await }

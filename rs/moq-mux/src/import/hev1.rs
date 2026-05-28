@@ -96,7 +96,7 @@ impl Hev1 {
 		let track = self.broadcast.create_track(moq_net::Track {
 			name,
 			priority: 0,
-			timescale: hang::container::TIMESCALE,
+			timescale: Some(hang::container::TIMESCALE),
 		})?;
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 		catalog.video.renditions.insert(track.name.clone(), config.clone());

@@ -7,7 +7,7 @@ use bytes::{BufMut, Bytes};
 
 use crate::{Error, Result, Timestamp};
 
-/// A chunk of data with an upfront size and presentation timestamp.
+/// A chunk of data with an upfront size and optional presentation timestamp.
 ///
 /// Note that this is just the header.
 /// You use [FrameProducer] and [FrameConsumer] to deal with the frame payload, potentially chunked.
@@ -18,11 +18,12 @@ pub struct Frame {
 	pub size: u64,
 	/// Presentation timestamp in the parent track's timescale.
 	///
-	/// Defaults to [`Timestamp::ZERO`] (unspecified scale). Producers should set this
-	/// to a value at the same scale as [`crate::Track::timescale`] before writing the
-	/// frame; the wire encoder errors on serialization if the scales disagree (for
-	/// protocols that delta-encode timestamps on the wire).
-	pub timestamp: Timestamp,
+	/// `None` means no timestamp is attached to this frame, which is the case for
+	/// pre-Lite05 moq-lite streams and IETF moq-transport streams that haven't
+	/// negotiated a timescale. On Lite05+, producers must set `Some(ts)` whose
+	/// scale matches the track's [`crate::Track::timescale`]; the publisher
+	/// surfaces a `ProtocolViolation` otherwise.
+	pub timestamp: Option<Timestamp>,
 }
 
 impl Frame {
@@ -36,17 +37,14 @@ impl From<usize> for Frame {
 	fn from(size: usize) -> Self {
 		Self {
 			size: size as u64,
-			timestamp: Timestamp::ZERO,
+			timestamp: None,
 		}
 	}
 }
 
 impl From<u64> for Frame {
 	fn from(size: u64) -> Self {
-		Self {
-			size,
-			timestamp: Timestamp::ZERO,
-		}
+		Self { size, timestamp: None }
 	}
 }
 
@@ -54,7 +52,7 @@ impl From<u32> for Frame {
 	fn from(size: u32) -> Self {
 		Self {
 			size: size as u64,
-			timestamp: Timestamp::ZERO,
+			timestamp: None,
 		}
 	}
 }
@@ -63,7 +61,7 @@ impl From<u16> for Frame {
 	fn from(size: u16) -> Self {
 		Self {
 			size: size as u64,
-			timestamp: Timestamp::ZERO,
+			timestamp: None,
 		}
 	}
 }

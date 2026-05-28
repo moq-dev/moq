@@ -26,7 +26,7 @@ impl MinFrameDuration {
 		let last = self.last_timestamp.replace(ts)?;
 		let duration = ts.checked_sub(last).ok()?;
 
-		if duration >= self.min_duration.unwrap_or(Timestamp::MAX) {
+		if matches!(self.min_duration, Some(min) if duration >= min) {
 			return None;
 		}
 

@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::{
-	Path,
+	Path, Timescale,
 	coding::{Decode, DecodeError, Encode, EncodeError, Sizer},
 };
 
@@ -79,10 +79,11 @@ pub struct SubscribeOk {
 	pub max_latency: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
-	/// Units per second for frame timestamps on this track. `0` (the default)
-	/// means unspecified. Carried on the wire for [`Version::Lite05`] and later;
-	/// older versions decode it as `0`.
-	pub timescale: u64,
+	/// Track timescale negotiated by the publisher. `None` means the publisher
+	/// hasn't negotiated a timescale (Lite04 and earlier, or Lite05+ with the
+	/// wire field set to `0`). Carried on the wire for [`Version::Lite05`] and
+	/// later: `None` encodes as `0`, `Some(n)` encodes as `n`.
+	pub timescale: Option<Timescale>,
 }
 
 impl Message for SubscribeOk {
@@ -105,7 +106,7 @@ impl Message for SubscribeOk {
 				self.max_latency.encode(w, version)?;
 				self.start_group.encode(w, version)?;
 				self.end_group.encode(w, version)?;
-				self.timescale.encode(w, version)?;
+				self.timescale.map(|ts| ts.get()).unwrap_or(0).encode(w, version)?;
 			}
 		}
 
@@ -132,7 +133,7 @@ impl Message for SubscribeOk {
 					max_latency,
 					start_group,
 					end_group,
-					timescale: 0,
+					timescale: None,
 				})
 			}
 			_ => {
@@ -141,7 +142,7 @@ impl Message for SubscribeOk {
 				let max_latency = std::time::Duration::decode(r, version)?;
 				let start_group = Option::<u64>::decode(r, version)?;
 				let end_group = Option::<u64>::decode(r, version)?;
-				let timescale = u64::decode(r, version)?;
+				let timescale = Timescale::new(u64::decode(r, version)?);
 
 				Ok(Self {
 					priority,
@@ -362,21 +363,21 @@ mod tests {
 
 	#[test]
 	fn subscribe_ok_lite04_drops_timescale() {
-		// On Lite04, timescale is not serialized; it should round-trip as 0.
+		// On Lite04, timescale is not serialized; it should round-trip as None.
 		let ok = SubscribeOk {
 			priority: 7,
 			ordered: true,
 			max_latency: std::time::Duration::from_millis(500),
 			start_group: Some(2),
 			end_group: Some(10),
-			timescale: 1_000_000,
+			timescale: Some(Timescale::MICRO),
 		};
 		let decoded = roundtrip_ok(Version::Lite04, ok);
 		assert_eq!(decoded.priority, 7);
 		assert!(decoded.ordered);
 		assert_eq!(decoded.start_group, Some(2));
 		assert_eq!(decoded.end_group, Some(10));
-		assert_eq!(decoded.timescale, 0);
+		assert_eq!(decoded.timescale, None);
 	}
 
 	#[test]
@@ -387,18 +388,18 @@ mod tests {
 			max_latency: std::time::Duration::from_millis(100),
 			start_group: None,
 			end_group: None,
-			timescale: 1_000_000,
+			timescale: Some(Timescale::MICRO),
 		};
 		let decoded = roundtrip_ok(Version::Lite05, ok);
 		assert_eq!(decoded.priority, 3);
-		assert_eq!(decoded.timescale, 1_000_000);
+		assert_eq!(decoded.timescale, Some(Timescale::MICRO));
 	}
 
 	#[test]
 	fn subscribe_ok_lite05_unspecified_timescale() {
-		// timescale = 0 round-trips on Lite05 (still serialized, just as 0).
+		// timescale = None round-trips on Lite05 (wire field is 0).
 		let ok = SubscribeOk::default();
 		let decoded = roundtrip_ok(Version::Lite05, ok);
-		assert_eq!(decoded.timescale, 0);
+		assert_eq!(decoded.timescale, None);
 	}
 }

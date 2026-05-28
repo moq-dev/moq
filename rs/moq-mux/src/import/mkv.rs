@@ -287,7 +287,7 @@ impl Mkv {
 		let net_track = self.broadcast.create_track(moq_net::Track {
 			name,
 			priority: 0,
-			timescale: hang::container::TIMESCALE,
+			timescale: Some(hang::container::TIMESCALE),
 		})?;
 		let mut catalog = self.catalog.clone();
 		let mut catalog = catalog.lock();

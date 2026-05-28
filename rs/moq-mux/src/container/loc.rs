@@ -25,10 +25,16 @@ impl Container for Loc {
 
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		for frame in frames {
-			let micros = frame.timestamp.as_micros().map_err(hang::Error::from)? as u64;
+			let micros = frame.timestamp.as_micros() as u64;
 			let data = moq_loc::encode(micros, &frame.payload)?;
 
-			let mut chunked = group.create_frame(data.len())?;
+			// Stamp the moq-net frame timestamp so Lite05+ can delta-encode it
+			// independently of the LOC-level prefix inside the payload.
+			let net_frame = moq_net::Frame {
+				size: data.len() as u64,
+				timestamp: Some(frame.timestamp),
+			};
+			let mut chunked = group.create_frame(net_frame)?;
 			chunked.write(data)?;
 			chunked.finish()?;
 		}
@@ -47,7 +53,8 @@ impl Container for Loc {
 		};
 
 		let loc = moq_loc::decode(data)?;
-		let timescale = moq_net::Timescale::new(loc.timescale.unwrap_or(DEFAULT_TIMESCALE));
+		let timescale = moq_net::Timescale::new(loc.timescale.unwrap_or(DEFAULT_TIMESCALE))
+			.ok_or_else(|| hang::Error::from(moq_net::TimeOverflow))?;
 		let timestamp = Timestamp::new(loc.timestamp, timescale)
 			.and_then(|ts| ts.convert(crate::container::TIMESCALE))
 			.map_err(hang::Error::from)?;

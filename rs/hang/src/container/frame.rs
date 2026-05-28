@@ -53,7 +53,10 @@ impl Frame {
 
 		let size = (header.len() + self.payload.len()) as u64;
 
-		let net_frame = moq_net::Frame { size, timestamp };
+		let net_frame = moq_net::Frame {
+			size,
+			timestamp: Some(timestamp),
+		};
 		let mut chunked = group.create_frame(net_frame)?;
 		chunked.write(header.freeze())?;
 		chunked.write(self.payload.clone())?;

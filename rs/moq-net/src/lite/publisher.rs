@@ -371,13 +371,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			)
 			.await?;
 
+		// Lite05 requires a track timescale to encode per-frame timestamps; reject
+		// tracks that don't advertise one before sending SUBSCRIBE_OK.
+		if version.has_timestamps() && track.timescale.is_none() {
+			return Err(Error::ProtocolViolation);
+		}
+
 		let info = lite::SubscribeOk {
 			priority: track.priority,
 			ordered: false,
 			max_latency: std::time::Duration::ZERO,
 			start_group: None,
 			end_group: None,
-			timescale: track.timescale.as_u64(),
+			timescale: track.timescale,
 		};
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
@@ -449,7 +455,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		mut group: GroupConsumer,
 		track_stats: std::sync::Arc<crate::PublisherTrack>,
 		version: Version,
-		track_timescale: Timescale,
+		track_timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
 		let stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -481,9 +487,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			if version.has_timestamps() {
-				// Verify per-frame timestamp scale matches the track's negotiated timescale.
-				let ts = frame.timestamp;
-				if !ts.is_unspecified() && ts.scale() != track_timescale {
+				// Lite05 requires a timestamp on every frame, scaled to the track's
+				// negotiated timescale. Reject the frame as ProtocolViolation if the
+				// producer didn't attach one or the scale doesn't match. Encoding a
+				// zero delta for a missing timestamp would silently corrupt the stream.
+				let track_timescale = track_timescale.ok_or(Error::ProtocolViolation)?;
+				let ts = frame.timestamp.ok_or(Error::ProtocolViolation)?;
+				if ts.scale() != track_timescale {
 					return Err(Error::ProtocolViolation);
 				}
 				let curr = ts.value();

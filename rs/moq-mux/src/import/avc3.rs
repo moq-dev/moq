@@ -44,7 +44,7 @@ impl Avc3 {
 			.create_track(moq_net::Track {
 				name,
 				priority: 0,
-				timescale: hang::container::TIMESCALE,
+				timescale: Some(hang::container::TIMESCALE),
 			})
 			.expect("failed to create avc3 track");
 

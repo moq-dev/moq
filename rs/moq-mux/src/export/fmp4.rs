@@ -431,8 +431,8 @@ fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Dura
 	match fragment_duration {
 		Some(d) if d.is_zero() => true,
 		Some(d) => {
-			let frame_us = frame.timestamp.as_micros().unwrap_or(0);
-			let first_us = track.buffer.first().unwrap().timestamp.as_micros().unwrap_or(0);
+			let frame_us = frame.timestamp.as_micros();
+			let first_us = track.buffer.first().unwrap().timestamp.as_micros();
 			let delta_us = frame_us.saturating_sub(first_us);
 			delta_us >= d.as_micros()
 		}
@@ -446,7 +446,7 @@ fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Dura
 /// Encode a buffered run of samples as a single CMAF moof+mdat fragment.
 fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> anyhow::Result<Bytes> {
 	anyhow::ensure!(!frames.is_empty(), "encode_fragment called with no frames");
-	let base_dts = frames[0].timestamp.as_micros()? as u64 * track.timescale / 1_000_000;
+	let base_dts = frames[0].timestamp.as_micros() as u64 * track.timescale / 1_000_000;
 
 	let entries: Vec<mp4_atom::TrunEntry> = frames
 		.iter()

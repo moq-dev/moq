@@ -59,7 +59,7 @@ impl Opus {
 		let track = broadcast.create_track(moq_net::Track {
 			name,
 			priority: 0,
-			timescale: hang::container::TIMESCALE,
+			timescale: Some(hang::container::TIMESCALE),
 		})?;
 
 		let audio_config = hang::catalog::AudioConfig {

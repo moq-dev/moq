@@ -583,7 +583,7 @@ impl Mkv {
 		let kind = track.kind;
 		let payload = &frame.payload;
 
-		let micros = frame.timestamp.as_micros().context("timestamp scale unknown")?;
+		let micros = frame.timestamp.as_micros();
 		let frame_ticks: u64 = (micros / 1_000).try_into().context("timestamp doesn't fit in u64 ms")?;
 
 		let is_video = kind == TrackKind::Video;

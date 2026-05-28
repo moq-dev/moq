@@ -107,7 +107,7 @@ impl Avc1 {
 		let track = self.broadcast.create_track(moq_net::Track {
 			name,
 			priority: 0,
-			timescale: hang::container::TIMESCALE,
+			timescale: Some(hang::container::TIMESCALE),
 		})?;
 		tracing::debug!(name = ?track.name, ?config, "starting avc1 track");
 		catalog.video.renditions.insert(track.name.clone(), config.clone());

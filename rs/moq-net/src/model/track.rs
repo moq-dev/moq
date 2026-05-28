@@ -40,18 +40,19 @@ pub struct Track {
 	pub name: String,
 	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
 	pub priority: u8,
-	/// Units per second for frame timestamps on this track. [`Timescale::UNKNOWN`]
-	/// means the publisher hasn't specified a scale (older protocol versions).
-	pub timescale: Timescale,
+	/// Units per second for frame timestamps on this track. `None` means the
+	/// publisher hasn't negotiated a scale (older protocol versions). Lite05+
+	/// requires `Some` to encode per-frame timestamps on the wire.
+	pub timescale: Option<Timescale>,
 }
 
 impl Track {
-	/// Create a track with the given name, default priority (`0`), and unknown timescale.
+	/// Create a track with the given name, default priority (`0`), and no timescale.
 	pub fn new<T: Into<String>>(name: T) -> Self {
 		Self {
 			name: name.into(),
 			priority: 0,
-			timescale: Timescale::UNKNOWN,
+			timescale: None,
 		}
 	}
 

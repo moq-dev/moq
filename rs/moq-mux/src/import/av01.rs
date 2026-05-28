@@ -106,7 +106,7 @@ impl Av01 {
 		let track = self.broadcast.create_track(moq_net::Track {
 			name,
 			priority: 0,
-			timescale: hang::container::TIMESCALE,
+			timescale: Some(hang::container::TIMESCALE),
 		})?;
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 		self.catalog
@@ -155,7 +155,7 @@ impl Av01 {
 		let track = self.broadcast.create_track(moq_net::Track {
 			name,
 			priority: 0,
-			timescale: hang::container::TIMESCALE,
+			timescale: Some(hang::container::TIMESCALE),
 		})?;
 		tracing::debug!(name = ?track.name, "starting track with minimal config");
 		self.catalog
@@ -250,7 +250,7 @@ impl Av01 {
 		let track = self.broadcast.create_track(moq_net::Track {
 			name,
 			priority: 0,
-			timescale: hang::container::TIMESCALE,
+			timescale: Some(hang::container::TIMESCALE),
 		})?;
 		self.catalog
 			.lock()

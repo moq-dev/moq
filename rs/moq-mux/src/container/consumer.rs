@@ -153,9 +153,7 @@ impl<F: Container> Consumer<F> {
 				}
 
 				if let Poll::Ready(Ok(ts)) = group.poll_max_timestamp(waiter, &self.format) {
-					if let Ok(ts) = std::time::Duration::try_from(ts) {
-						max_timestamp = max_timestamp.max(ts);
-					}
+					max_timestamp = max_timestamp.max(std::time::Duration::from(ts));
 					break; // We know older groups won't be newer than this.
 				}
 			}
@@ -889,7 +887,7 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp, ts(one_hour));
-		assert_eq!(frames[0].timestamp.as_micros().unwrap(), one_hour as u128);
+		assert_eq!(frames[0].timestamp.as_micros(), one_hour as u128);
 	}
 
 	#[tokio::test]

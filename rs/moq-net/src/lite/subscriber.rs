@@ -392,7 +392,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let track_struct = Track {
 			name: track_name.clone(),
 			priority: info.priority,
-			timescale: Timescale::new(info.timescale),
+			timescale: info.timescale,
 		};
 
 		let mut track = match request.accept(track_struct) {
@@ -481,13 +481,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
 		track_stats: Arc<SubscriberTrack>,
-		track_timescale: Timescale,
+		track_timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		// Previous frame's raw timestamp value, for zigzag-delta decoding on Lite05+.
 		let mut prev_ts: u64 = 0;
 
 		loop {
 			let (size, timestamp) = if self.version.has_timestamps() {
+				// Lite05 requires the publisher to advertise a real timescale on
+				// SUBSCRIBE_OK. If we still hit this branch with `None` the peer is
+				// malformed (or we forgot to gate on it at subscribe time).
+				let scale = track_timescale.ok_or(Error::ProtocolViolation)?;
 				let Some(zz) = stream.decode_maybe::<crate::coding::VarInt>().await? else {
 					break;
 				};
@@ -497,14 +501,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 				prev_ts = next;
 				let size = stream.decode::<u64>().await?;
-				let ts = crate::Timestamp::new(next, track_timescale)
+				let ts = crate::Timestamp::new(next, scale)
 					.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-				(size, ts)
+				(size, Some(ts))
 			} else {
 				let Some(size) = stream.decode_maybe::<u64>().await? else {
 					break;
 				};
-				(size, crate::Timestamp::ZERO)
+				(size, None)
 			};
 
 			let mut frame = group.create_frame(Frame { size, timestamp })?;

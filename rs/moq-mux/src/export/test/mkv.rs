@@ -230,7 +230,7 @@ async fn export_rejects_cmaf_track() {
 		.create_track(moq_net::Track {
 			name: producer.unique_name(".avc1"),
 			priority: 0,
-			timescale: hang::container::TIMESCALE,
+			timescale: Some(hang::container::TIMESCALE),
 		})
 		.unwrap();
 	catalog.lock().video.renditions.insert(
@@ -289,7 +289,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 		.create_track(moq_net::Track {
 			name: producer.unique_name(".avc3"),
 			priority: 0,
-			timescale: hang::container::TIMESCALE,
+			timescale: Some(hang::container::TIMESCALE),
 		})
 		.unwrap();
 	catalog.lock().video.renditions.insert(

@@ -85,8 +85,8 @@ impl<C: Container> Producer<C> {
 
 			// Check if buffered duration exceeds latency.
 			if self.buffer.len() >= 2 {
-				let first_us = self.buffer.first().unwrap().timestamp.as_micros().unwrap_or(0);
-				let last_us = self.buffer.last().unwrap().timestamp.as_micros().unwrap_or(0);
+				let first_us = self.buffer.first().unwrap().timestamp.as_micros();
+				let last_us = self.buffer.last().unwrap().timestamp.as_micros();
 
 				if last_us.saturating_sub(first_us) >= self.latency.as_micros() {
 					self.flush()?;

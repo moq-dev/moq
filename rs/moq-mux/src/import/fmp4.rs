@@ -147,7 +147,7 @@ impl Fmp4 {
 			let track = self.broadcast.create_track(moq_net::Track {
 				name,
 				priority: 0,
-				timescale: hang::container::TIMESCALE,
+				timescale: Some(hang::container::TIMESCALE),
 			})?;
 
 			let kind = match handler.as_ref() {
@@ -523,8 +523,8 @@ impl Fmp4 {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let timestamp = hang::container::Timestamp::new(pts, moq_net::Timescale::new(timescale))?
-						.convert(hang::container::TIMESCALE)?;
+					let scale = moq_net::Timescale::new(timescale).context("track has zero timescale")?;
+					let timestamp = hang::container::Timestamp::new(pts, scale)?.convert(hang::container::TIMESCALE)?;
 
 					if offset + size > mdat.data.len() {
 						anyhow::bail!("invalid data offset");
@@ -541,16 +541,16 @@ impl Fmp4 {
 
 					contains_keyframe |= keyframe;
 
-					if timestamp >= max_timestamp.unwrap_or(Timestamp::ZERO) {
+					if max_timestamp.is_none_or(|m| timestamp >= m) {
 						max_timestamp = Some(timestamp);
 					}
-					if timestamp <= min_timestamp.unwrap_or(Timestamp::MAX) {
+					if min_timestamp.is_none_or(|m| timestamp <= m) {
 						min_timestamp = Some(timestamp);
 					}
 
 					if let Some(last_timestamp) = track.last_timestamp
 						&& let Ok(duration) = timestamp.checked_sub(last_timestamp)
-						&& duration < track.min_duration.unwrap_or(Timestamp::MAX)
+						&& track.min_duration.is_none_or(|min| duration < min)
 					{
 						track.min_duration = Some(duration);
 					}
@@ -653,7 +653,7 @@ impl Fmp4 {
 			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
 				let jitter = max - min + min_duration;
 
-				if jitter < track.jitter.unwrap_or(Timestamp::MAX) {
+				if track.jitter.is_none_or(|cur| jitter < cur) {
 					track.jitter = Some(jitter);
 
 					let mut catalog = self.catalog.lock();
