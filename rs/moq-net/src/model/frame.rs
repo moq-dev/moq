@@ -12,6 +12,10 @@ use crate::{Error, Result};
 /// The receive path preallocates a buffer from the declared frame size, so an
 /// untrusted peer could otherwise request a multi-gigabyte allocation with a
 /// single varint. Subscribers reject frames whose declared size exceeds this.
+///
+// TODO enforce this in [Frame::produce] / [FrameProducer::new] so the limit is
+// guaranteed for every caller, not just the wire decode paths. Blocked on
+// making the constructor fallible (returning [Result]), which is an API break.
 pub const MAX_FRAME_SIZE: u64 = 16 * 1024 * 1024;
 
 /// A chunk of data with an upfront size.
