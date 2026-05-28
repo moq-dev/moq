@@ -51,7 +51,10 @@ impl Container for Wire {
 		// `loc.timescale == Some(0)` is a malformed wire (caught by moq_loc::decode itself),
 		// so any Some(_) we see here is non-zero. Falling back to the catalog default
 		// keeps this code path infallible.
-		let scale = loc.timescale.and_then(Timescale::new).unwrap_or(DEFAULT_TIMESCALE);
+		let scale = loc
+			.timescale
+			.and_then(|s| Timescale::new(s).ok())
+			.unwrap_or(DEFAULT_TIMESCALE);
 		let timestamp = Timestamp::new(loc.timestamp, scale).map_err(hang::Error::from)?;
 
 		Poll::Ready(Ok(Some(vec![Frame {

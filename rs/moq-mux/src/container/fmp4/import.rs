@@ -411,8 +411,8 @@ impl Import {
 
 			let tfdt = traf.tfdt.as_ref().context("missing tfdt box")?;
 			let mut dts = tfdt.base_media_decode_time;
-			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)
-				.context("fmp4 mdhd.timescale must be non-zero")?;
+			let timescale =
+				moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64).context("invalid fmp4 mdhd.timescale")?;
 
 			let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
 			let mut track_data_start: Option<usize> = None;

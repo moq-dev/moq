@@ -19,7 +19,8 @@ pub struct TimeOverflow;
 /// arithmetic on [`Timestamp`] can divide by `self.scale` without ever risking
 /// a divide by zero. Use the named constants ([`Self::SECOND`], [`Self::MILLI`],
 /// [`Self::MICRO`], [`Self::NANO`]) instead of writing raw integers at call sites;
-/// for runtime values, use [`Self::new`] which returns `None` for `0`.
+/// for runtime values, use [`Self::new`] which returns [`TimeOverflow`] for `0` or
+/// for values past the QUIC varint range.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Timescale(NonZero<u64>);
@@ -43,12 +44,19 @@ impl Timescale {
 		None => unreachable!(),
 	};
 
-	/// Construct a timescale from a raw value (units per second). Returns `None` if
-	/// `units_per_second == 0`.
-	pub const fn new(units_per_second: u64) -> Option<Self> {
+	/// Construct a timescale from a raw value (units per second).
+	///
+	/// Returns [`TimeOverflow`] if `units_per_second` is `0` (would divide by zero)
+	/// or exceeds `2^62 - 1` (the QUIC varint range, matching [`Timestamp`] values).
+	pub const fn new(units_per_second: u64) -> Result<Self, TimeOverflow> {
+		// Reject values that wouldn't fit in a QUIC varint, keeping the constraint
+		// symmetric with Timestamp's raw value.
+		if VarInt::from_u64(units_per_second).is_none() {
+			return Err(TimeOverflow);
+		}
 		match NonZero::new(units_per_second) {
-			Some(n) => Some(Self(n)),
-			None => None,
+			Some(n) => Ok(Self(n)),
+			None => Err(TimeOverflow),
 		}
 	}
 
@@ -62,7 +70,7 @@ impl TryFrom<u64> for Timescale {
 	type Error = TimeOverflow;
 
 	fn try_from(units_per_second: u64) -> Result<Self, Self::Error> {
-		Self::new(units_per_second).ok_or(TimeOverflow)
+		Self::new(units_per_second)
 	}
 }
 
@@ -125,18 +133,6 @@ impl Timestamp {
 	pub const fn new(value: u64, scale: Timescale) -> Result<Self, TimeOverflow> {
 		match VarInt::from_u64(value) {
 			Some(value) => Ok(Self { value, scale }),
-			None => Err(TimeOverflow),
-		}
-	}
-
-	/// Convert `value` measured at `source` (units per second) to a timestamp at `target`.
-	/// Returns [`TimeOverflow`] on overflow.
-	pub const fn from_scale(value: u64, source: Timescale, target: Timescale) -> Result<Self, TimeOverflow> {
-		match (value as u128).checked_mul(target.0.get() as u128) {
-			Some(scaled) => match VarInt::from_u128(scaled / source.0.get() as u128) {
-				Some(value) => Ok(Self { value, scale: target }),
-				None => Err(TimeOverflow),
-			},
 			None => Err(TimeOverflow),
 		}
 	}
@@ -214,7 +210,16 @@ impl Timestamp {
 		if self.scale.0.get() == new_scale.0.get() {
 			return Ok(self);
 		}
-		Self::from_scale(self.value.into_inner(), self.scale, new_scale)
+		match (self.value.into_inner() as u128).checked_mul(new_scale.0.get() as u128) {
+			Some(scaled) => match VarInt::from_u128(scaled / self.scale.0.get() as u128) {
+				Some(value) => Ok(Self {
+					value,
+					scale: new_scale,
+				}),
+				None => Err(TimeOverflow),
+			},
+			None => Err(TimeOverflow),
+		}
 	}
 
 	/// The value re-expressed at `target` as a `u128`.
@@ -454,10 +459,16 @@ mod tests {
 	}
 
 	#[test]
-	fn test_timescale_new_rejects_zero() {
-		assert!(Timescale::new(0).is_none());
-		assert_eq!(Timescale::new(1), Some(Timescale::SECOND));
-		assert_eq!(Timescale::new(1_000), Some(Timescale::MILLI));
+	fn test_timescale_new_rejects_zero_and_overflow() {
+		assert!(Timescale::new(0).is_err());
+		assert!(Timescale::new(1).is_ok());
+		assert_eq!(Timescale::new(1).unwrap(), Timescale::SECOND);
+		assert_eq!(Timescale::new(1_000).unwrap(), Timescale::MILLI);
+
+		// Above the QUIC varint range.
+		assert!(Timescale::new(1u64 << 62).is_err());
+		// Right at the top of the varint range is still valid.
+		assert!(Timescale::new((1u64 << 62) - 1).is_ok());
 	}
 
 	#[test]
@@ -610,10 +621,13 @@ mod tests {
 	}
 
 	#[test]
-	fn test_from_scale_custom() {
+	fn test_custom_scale_convert() {
 		// 120 units at 60Hz = 2 seconds, expressed at 1000Hz = 2000 ms.
 		let scale_60 = Timescale::new(60).unwrap();
-		let t = Timestamp::from_scale(120, scale_60, Timescale::MILLI).unwrap();
+		let t = Timestamp::new(120, scale_60)
+			.unwrap()
+			.convert(Timescale::MILLI)
+			.unwrap();
 		assert_eq!(t.scale(), Timescale::MILLI);
 		assert_eq!(t.as_millis(), 2000);
 	}

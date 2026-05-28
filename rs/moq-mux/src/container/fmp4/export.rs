@@ -488,7 +488,7 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> anyhow::Result<
 	anyhow::ensure!(!frames.is_empty(), "encode_fragment called with no frames");
 	let seq = track.sequence_number;
 	track.sequence_number += 1;
-	let timescale = moq_net::Timescale::new(track.timescale).context("track timescale must be non-zero")?;
+	let timescale = moq_net::Timescale::new(track.timescale).context("invalid track timescale")?;
 	Ok(crate::container::fmp4::encode_fragment(
 		track.track_id,
 		timescale,
