@@ -93,7 +93,6 @@ impl AudioConsumer {
 		let ts_us: u64 = mux_frame
 			.timestamp
 			.as_micros()
-			.map_err(|_| AudioError::Unsupported("timestamp scale unspecified".into()))?
 			.try_into()
 			.map_err(|_| AudioError::Unsupported("timestamp overflow".into()))?;
 

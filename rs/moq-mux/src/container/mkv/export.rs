@@ -464,7 +464,6 @@ impl Export {
 		let frame_ticks: u64 = frame
 			.timestamp
 			.as_millis()
-			.context("timestamp scale unspecified")?
 			.try_into()
 			.context("timestamp doesn't fit in u64 ms")?;
 

@@ -889,7 +889,7 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp, ts(one_hour));
-		assert_eq!(frames[0].timestamp.as_micros().unwrap(), one_hour as u128);
+		assert_eq!(frames[0].timestamp.as_micros(), one_hour as u128);
 	}
 
 	#[tokio::test]

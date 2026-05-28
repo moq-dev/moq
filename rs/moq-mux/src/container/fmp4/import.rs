@@ -411,7 +411,8 @@ impl Import {
 
 			let tfdt = traf.tfdt.as_ref().context("missing tfdt box")?;
 			let mut dts = tfdt.base_media_decode_time;
-			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64);
+			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)
+				.context("fmp4 mdhd.timescale must be non-zero")?;
 
 			let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
 			let mut track_data_start: Option<usize> = None;
@@ -478,16 +479,16 @@ impl Import {
 
 					contains_keyframe |= keyframe;
 
-					if timestamp >= max_timestamp.unwrap_or(Timestamp::ZERO) {
+					if max_timestamp.is_none_or(|max| timestamp >= max) {
 						max_timestamp = Some(timestamp);
 					}
-					if timestamp <= min_timestamp.unwrap_or(Timestamp::MAX) {
+					if min_timestamp.is_none_or(|min| timestamp <= min) {
 						min_timestamp = Some(timestamp);
 					}
 
 					if let Some(last_timestamp) = track.last_timestamp
 						&& let Ok(duration) = timestamp.checked_sub(last_timestamp)
-						&& duration < track.min_duration.unwrap_or(Timestamp::MAX)
+						&& track.min_duration.is_none_or(|min| duration < min)
 					{
 						track.min_duration = Some(duration);
 					}
@@ -593,7 +594,7 @@ impl Import {
 			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
 				let jitter = max - min + min_duration;
 
-				if jitter < track.jitter.unwrap_or(Timestamp::MAX) {
+				if track.jitter.is_none_or(|j| jitter < j) {
 					track.jitter = Some(jitter);
 
 					let mut catalog = self.catalog.lock();

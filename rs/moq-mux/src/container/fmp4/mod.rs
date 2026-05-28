@@ -65,6 +65,9 @@ pub enum Error {
 
 	#[error("can't synthesize CMAF init for {0}")]
 	UnsupportedSynthesis(String),
+
+	#[error("invalid mdhd.timescale (must be non-zero)")]
+	InvalidTimescale,
 }
 
 /// CMAF container: encodes/decodes a single track's moof+mdat fragments.
@@ -111,7 +114,7 @@ impl Container for Wire {
 	type Error = Error;
 
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
-		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64);
+		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64).ok_or(Error::InvalidTimescale)?;
 		let track_id = self.trak.tkhd.track_id;
 		encode(group, frames, timescale, track_id)
 	}
@@ -127,7 +130,7 @@ impl Container for Wire {
 			return Poll::Ready(Ok(None));
 		};
 
-		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64);
+		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64).ok_or(Error::InvalidTimescale)?;
 		Poll::Ready(Ok(Some(decode(data, timescale)?)))
 	}
 }
@@ -235,7 +238,7 @@ pub(crate) fn encode_fragment(
 	// importer preserved the source scale (the common passthrough case), this is a
 	// no-op; otherwise it's a single rescale rather than the legacy `micros * scale
 	// / 1_000_000` round-trip.
-	let dts = frames[0].timestamp.as_scale(timescale)? as u64;
+	let dts = frames[0].timestamp.as_scale(timescale) as u64;
 
 	let entries: Vec<_> = frames
 		.iter()
