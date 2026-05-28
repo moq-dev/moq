@@ -1,4 +1,6 @@
-//! WHIP ingest [`MediaSink`](super::MediaSink).
+//! Per-broadcast [`MediaSink`](crate::session::MediaSink) used by every
+//! RTP-in flow (`server publish` / WHIP server, `client subscribe` / WHEP
+//! client).
 //!
 //! Holds the [`moq_net::BroadcastProducer`] and per-track codec bridges.
 //! On `MediaAdded`, it inspects the negotiated codec and instantiates the

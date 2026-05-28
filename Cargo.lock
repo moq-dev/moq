@@ -3956,6 +3956,7 @@ dependencies = [
  "moq-mux",
  "moq-native",
  "moq-net",
+ "reqwest 0.12.28",
  "rustls",
  "sd-notify",
  "str0m",

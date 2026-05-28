@@ -1,8 +1,8 @@
-//! WHIP ingest endpoint (RFC 9725).
+//! `server publish`: WHIP server (RFC 9725).
 //!
 //! `POST /<broadcast-path>` accepts an SDP offer (`Content-Type: application/sdp`)
-//! and returns an SDP answer. The body is interpreted relative to the gateway's
-//! publish origin: the request path becomes the broadcast name.
+//! and returns an SDP answer. The request path becomes the broadcast name on
+//! the upstream publish origin.
 
 use axum::{
 	Router,
@@ -12,17 +12,17 @@ use axum::{
 	response::{IntoResponse, Response},
 	routing::post,
 };
-use str0m::{Candidate, Rtc, change::SdpAnswer};
+use str0m::{Candidate, Rtc};
 
-use crate::{Error, Gateway, Result, sdp, session};
+use crate::{Error, Result, ingest::IngestSink, sdp, server::Server, session};
 
 /// Build the WHIP axum router.
-pub fn router(gateway: Gateway) -> Router {
-	Router::new().route("/{*path}", post(handle)).with_state(gateway)
+pub fn router(server: Server) -> Router {
+	Router::new().route("/{*path}", post(handle)).with_state(server)
 }
 
-async fn handle(State(gateway): State<Gateway>, Path(path): Path<String>, headers: HeaderMap, body: Bytes) -> Response {
-	match accept_offer(&gateway, &path, &headers, body).await {
+async fn handle(State(server): State<Server>, Path(path): Path<String>, headers: HeaderMap, body: Bytes) -> Response {
+	match accept_offer(&server, &path, &headers, body).await {
 		Ok((resource_id, answer)) => {
 			let mut response_headers = HeaderMap::new();
 			response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/sdp"));
@@ -38,25 +38,25 @@ async fn handle(State(gateway): State<Gateway>, Path(path): Path<String>, header
 	}
 }
 
-async fn accept_offer(gateway: &Gateway, path: &str, headers: &HeaderMap, body: Bytes) -> Result<(String, String)> {
+async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: Bytes) -> Result<(String, String)> {
 	if !is_sdp(headers) {
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let sdp = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
 	let offer = sdp::parse_offer(sdp)?;
 
-	// Build the broadcast producer and register it with the upstream
-	// origin before negotiating, so a fast subscriber doesn't see a 404
-	// in the gap between the answer and the first RTP packet.
+	// Register the broadcast on the publish origin before negotiating, so a
+	// fast subscriber doesn't see a 404 in the gap between the SDP answer
+	// and the first RTP packet.
 	let broadcast = moq_net::Broadcast::new().produce();
 	let consumer = broadcast.consume();
-	if !gateway.publisher().publish_broadcast(path, consumer) {
+	if !server.publisher().publish_broadcast(path, consumer) {
 		return Err(Error::Other(anyhow::anyhow!("path conflict: {path}")));
 	}
 
-	let sink = Box::new(session::ingest::IngestSink::new(broadcast)?);
+	let sink = Box::new(IngestSink::new(broadcast)?);
 
-	let (socket, candidates) = session::bind_udp(&gateway.config().ice_candidates).await?;
+	let (socket, candidates) = session::bind_udp(&server.config().ice_candidates).await?;
 	let mut rtc = Rtc::new(std::time::Instant::now());
 	for addr in &candidates {
 		let cand = Candidate::host(*addr, "udp").map_err(str0m::RtcError::from)?;
@@ -65,7 +65,7 @@ async fn accept_offer(gateway: &Gateway, path: &str, headers: &HeaderMap, body: 
 
 	let answer = rtc.sdp_api().accept_offer(offer).map_err(Error::Rtc)?;
 	let resource_id = sdp::new_resource_id();
-	let session = session::Session::new(rtc, socket, sink);
+	let session = session::Session::ingest(rtc, socket, sink);
 
 	tokio::spawn(async move {
 		if let Err(err) = session.run().await {
@@ -73,11 +73,7 @@ async fn accept_offer(gateway: &Gateway, path: &str, headers: &HeaderMap, body: 
 		}
 	});
 
-	Ok((resource_id, render_answer(&answer)))
-}
-
-fn render_answer(answer: &SdpAnswer) -> String {
-	sdp::render_answer(answer)
+	Ok((resource_id, sdp::render_answer(&answer)))
 }
 
 fn is_sdp(headers: &HeaderMap) -> bool {

@@ -1,110 +1,35 @@
 //! WebRTC ↔ MoQ gateway.
 //!
-//! Accepts WHIP (RFC 9725) for ingestion and WHEP for egress, bridging
-//! WebRTC media into a [`moq_net`] broadcast (and back). Built on
-//! [`str0m`] for the sans-IO WebRTC stack and [`axum`] for the HTTP
-//! signaling.
+//! Bridges WHIP (RFC 9725) and WHEP between WebRTC peers and
+//! [`moq_net`] broadcasts. The crate is split along two orthogonal axes
+//! so all four combinations can land independently:
 //!
-//! ## Crate shape
+//! | | RTP-in (ingest into MoQ) | RTP-out (egress from MoQ) |
+//! |---|---|---|
+//! | HTTP server | [`server::publish_router`] (WHIP server) | [`server::subscribe_router`] (WHEP server, 501) |
+//! | HTTP client | [`Client::subscribe`] (WHEP client) | [`Client::publish`] (WHIP client, 501) |
 //!
-//! - [`whip`] mounts the `POST /<resource>` ingest endpoint.
-//! - [`whep`] mounts the `POST /<resource>` egress endpoint.
-//! - [`session`] runs the per-connection [`str0m::Rtc`] event loop and
-//!   UDP socket.
-//! - [`codec`] holds the per-codec bridges that convert depacketized
-//!   media into [`moq_mux`] container frames.
+//! The two HTTP-client paths and the two HTTP-server paths share a single
+//! [`session::Session`] driver and the same per-codec bridges in [`codec`];
+//! the per-direction trait split lives in [`session::MediaSink`] /
+//! [`session::MediaSource`].
 //!
-//! ## Public surface
+//! ## Bitstream gotcha
 //!
-//! Library users build a [`Gateway`] with their [`moq_net::OriginProducer`]
-//! and [`moq_net::OriginConsumer`] and mount the returned routers under
-//! their own [`axum`] server. The `moq-rtc` binary is just a thin wrapper
-//! that dials a relay and mounts both routers on its own listener.
+//! The WebRTC ↔ MoQ shape conversion for H.264 is handled by `moq-mux`'s
+//! `Avc3` importer: str0m hands us Annex-B (start-code NALs with inline
+//! SPS/PPS) and that's exactly what the importer wants, so no extra
+//! transform is needed in the gateway. Opus, VP8, and VP9 pass through.
 
+pub mod client;
 pub mod codec;
+pub mod egress;
 mod error;
+pub mod ingest;
 pub mod sdp;
+pub mod server;
 pub mod session;
-pub mod whep;
-pub mod whip;
 
+pub use client::Client;
 pub use error::*;
-
-use std::sync::Arc;
-
-use axum::Router;
-
-/// Configuration for a [`Gateway`].
-#[derive(Clone, Debug, Default)]
-pub struct GatewayConfig {
-	/// Public UDP socket addresses that should be advertised as ICE host
-	/// candidates. Each is sent as a separate `candidate` line in the SDP
-	/// answer so a remote peer can reach this gateway.
-	///
-	/// If empty, the session loop binds an ephemeral port and discovers the
-	/// local address; that works for loopback testing but not behind NAT.
-	pub ice_candidates: Vec<std::net::SocketAddr>,
-}
-
-/// Glue that owns the moq-net origin pair and hands axum routers to the caller.
-///
-/// `publisher` is where WHIP-ingested broadcasts get inserted; `subscriber`
-/// is what WHEP requests fan out from. They're typically the two halves of
-/// the same upstream [`moq_net::Session`].
-#[derive(Clone)]
-pub struct Gateway {
-	inner: Arc<GatewayInner>,
-}
-
-struct GatewayInner {
-	config: GatewayConfig,
-	publisher: moq_net::OriginProducer,
-	// Held for WHEP egress, which is gated until the per-codec re-packetizers land.
-	#[allow(dead_code)]
-	subscriber: moq_net::OriginConsumer,
-}
-
-impl Gateway {
-	/// Build a gateway. `publisher` receives WHIP broadcasts; `subscriber`
-	/// is the source for WHEP egress.
-	pub fn new(config: GatewayConfig, publisher: moq_net::OriginProducer, subscriber: moq_net::OriginConsumer) -> Self {
-		Self {
-			inner: Arc::new(GatewayInner {
-				config,
-				publisher,
-				subscriber,
-			}),
-		}
-	}
-
-	/// An axum router mounting the WHIP ingest endpoint at the root.
-	///
-	/// Path layout: `POST /<broadcast-path>` accepts an SDP offer and
-	/// returns an SDP answer with a `Location` header pointing at the
-	/// resource (used by WHIP clients for `DELETE` and `PATCH` calls).
-	pub fn whip_router(&self) -> Router {
-		whip::router(self.clone())
-	}
-
-	/// An axum router mounting the WHEP egress endpoint at the root.
-	///
-	/// Path layout: `POST /<broadcast-path>` accepts an SDP offer and
-	/// returns an SDP answer; the matching broadcast must already be
-	/// announced on the [`moq_net::OriginConsumer`].
-	pub fn whep_router(&self) -> Router {
-		whep::router(self.clone())
-	}
-
-	pub(crate) fn config(&self) -> &GatewayConfig {
-		&self.inner.config
-	}
-
-	pub(crate) fn publisher(&self) -> &moq_net::OriginProducer {
-		&self.inner.publisher
-	}
-
-	#[allow(dead_code)]
-	pub(crate) fn subscriber(&self) -> &moq_net::OriginConsumer {
-		&self.inner.subscriber
-	}
-}
+pub use server::Server;

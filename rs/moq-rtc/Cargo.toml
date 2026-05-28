@@ -37,6 +37,7 @@ hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 moq-net = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 str0m = "0.19"
 thiserror = "2"

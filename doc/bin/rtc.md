@@ -6,45 +6,63 @@ description: WebRTC <-> MoQ gateway (WHIP/WHEP)
 # moq-rtc
 
 `moq-rtc` bridges WebRTC and Media over QUIC. It speaks
-[WHIP](https://datatracker.ietf.org/doc/html/rfc9725) for ingestion and WHEP
-for egress, letting any conformant WebRTC publisher (OBS, browsers, mobile
-SDKs) feed a MoQ relay without shipping a custom MoQ client.
+[WHIP](https://datatracker.ietf.org/doc/html/rfc9725) (publish) and WHEP
+(subscribe) in **either HTTP role**, so it can either accept incoming peers
+or dial out to a remote WebRTC server.
 
-## Status
+## The 2x2
 
-- **WHIP ingest**: working for Opus audio and H.264 / VP8 / VP9 video.
-- **WHEP egress**: HTTP plumbing is in place but the per-codec
-  re-packetization is not implemented yet; the endpoint returns
-  `501 Not Implemented`.
-- **AV1 / H.265**: not in str0m 0.19; tracked as a follow-up. Use H.264 or VP9
-  for now.
+| Subcommand | WebRTC role | Direction | Status |
+|---|---|---|---|
+| `server publish` | accept WHIP publishes | RTP into MoQ | working |
+| `client subscribe` | dial a remote WHEP URL | RTP into MoQ | working |
+| `server subscribe` | serve WHEP subscriptions | MoQ -> RTP | 501 (re-packetizer pending) |
+| `client publish` | dial a remote WHIP URL | MoQ -> RTP | 501 (re-packetizer pending) |
 
-The gateway is built on [str0m](https://github.com/algesten/str0m) (sans-IO
-WebRTC), [axum](https://github.com/tokio-rs/axum) for the HTTP layer, and
-`moq-mux` for the catalog and container side.
+The two ingest paths (`server publish` and `client subscribe`) work today.
+The two egress paths share a single blocker: per-codec re-packetization
+(MoQ frame -> RTP) is not implemented yet.
 
-## Run
+AV1 / H.265 aren't in str0m 0.19's codec enum, so they're not negotiated;
+this is tracked as a follow-up. Use H.264 or VP9 for now.
+
+## CLI shape
+
+Mirrors `moq-cli`: globals first, then HTTP role, then direction.
 
 ```bash
-moq-rtc \
-  --listen 0.0.0.0:8088 \
-  --relay https://relay.example.com \
-  --ice-candidate 198.51.100.7:0
+# server publish (WHIP server): accept publishes into MoQ
+moq-rtc --relay https://relay.example.com --broadcast my-stream \
+        server --listen 0.0.0.0:8088 publish
+
+# client subscribe (WHEP client): pull from a remote WHEP source
+moq-rtc --relay https://relay.example.com --broadcast cam0 \
+        client --url https://camera.example.com/whep/cam0 subscribe
+
+# server subscribe (WHEP server, not yet implemented)
+moq-rtc --relay ... --broadcast foo server --listen ... subscribe
+
+# client publish (WHIP client, not yet implemented)
+moq-rtc --relay ... --broadcast foo client --url https://twitch.tv/whip publish
 ```
 
-- `--listen`: address for the WHIP/WHEP HTTP endpoints. Use `--tls-cert` and
-  `--tls-key` to serve HTTPS instead (most WHIP clients require it).
-- `--relay`: upstream MoQ relay to forward ingested broadcasts to.
+### Global flags
+
+- `--relay`: upstream MoQ relay to publish to / subscribe from.
+- `--broadcast`: MoQ broadcast name this gateway binds to.
 - `--ice-candidate`: public UDP socket(s) to advertise as ICE host
   candidates. Required behind NAT; the port component is replaced with the
   kernel-picked port at bind time.
 
-## Endpoints
+### Server flags
 
-- `POST /whip/<broadcast-path>` (`Content-Type: application/sdp`): accept a
-  WHIP offer, return the SDP answer. The broadcast is published to the
-  upstream relay at `<broadcast-path>`.
-- `POST /whep/<broadcast-path>`: WHEP egress (placeholder; see Status).
+- `--listen`: HTTP bind address (default `[::]:8088`).
+- `--tls-cert` / `--tls-key`: serve HTTPS instead. Most WHIP clients
+  require it in practice.
+
+### Client flags
+
+- `--url`: remote WHIP or WHEP resource URL.
 
 ## Codec mapping
 
@@ -55,9 +73,9 @@ moq-rtc \
 | VP8          | `VideoCodec::VP8` |
 | VP9          | `VideoCodec::VP9` |
 
-H.264 input is reassembled by `str0m` as Annex-B; `moq-mux`'s H.264 importer
-in `Avc3` mode publishes the inline-parameter shape directly, which lines up
-with what the WebCodecs decoder in `@moq/watch` already expects. No extra
-conversion is needed in the gateway.
+H.264 input is reassembled by str0m as Annex-B; `moq-mux`'s H.264 importer
+in `Avc3` mode publishes the inline-parameter shape directly, which lines
+up with what the WebCodecs decoder in `@moq/watch` already expects. No
+extra conversion needed in the gateway.
 
 (Written by Claude)

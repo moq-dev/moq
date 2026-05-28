@@ -1,11 +1,16 @@
-//! str0m session driver shared by WHIP ingest and WHEP egress.
+//! str0m session driver shared by every HTTP role / media direction.
 //!
 //! str0m is sans-IO, so we drive the [`str0m::Rtc`] instance from a tokio
 //! task that owns a UDP socket. [`Session::run`] alternates between
 //! [`Rtc::poll_output`] (drain pending transmits / events) and
 //! [`Rtc::handle_input`] (feed UDP packets or timeouts).
-
-pub mod ingest;
+//!
+//! The session itself doesn't care whether the [`Rtc`] was populated by
+//! accepting an SDP offer (server side) or by minting one and posting it
+//! to a remote URL (client side), or whether the media flow is RTP-in
+//! ([`MediaSink`]) or RTP-out (future [`MediaSource`]). Each entry point
+//! just hands a populated [`Rtc`] + UDP socket + media role to
+//! [`Session::new`].
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -17,7 +22,9 @@ use tokio::net::UdpSocket;
 use crate::{Error, Result, codec};
 
 /// Receives `MediaData` events from str0m and dispatches to the right codec
-/// [`Bridge`](codec::Bridge). Used as the per-session sink in [`Session::run`].
+/// [`Bridge`](codec::Bridge). Used as the per-session sink in [`Session::run`]
+/// for any flow where RTP arrives from the peer (`server publish` / WHIP
+/// server, `client subscribe` / WHEP client).
 pub trait MediaSink: Send {
 	/// Called once str0m has confirmed which codec is on which `mid`.
 	fn on_track(
@@ -33,20 +40,47 @@ pub trait MediaSink: Send {
 	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()>;
 }
 
+/// Produces frames into str0m for the flows where RTP leaves toward the peer
+/// (`server subscribe` / WHEP server, `client publish` / WHIP client).
+///
+/// Not yet implemented: the per-codec re-packetizer (MoQ frame -> RTP) is the
+/// blocker for both egress paths.
+pub trait MediaSource: Send {
+	// Placeholder. Once the re-packetizer trait lands here, this exposes
+	// `next_frame(...)` and is consumed by `Session::run` in the egress arm.
+}
+
+/// What the session does with the negotiated media stream.
+#[non_exhaustive]
+pub enum MediaRole {
+	/// RTP-in: dispatch peer frames into a [`MediaSink`].
+	Ingest(Box<dyn MediaSink>),
+	/// RTP-out: pull frames from a [`MediaSource`] and forward to the peer.
+	/// Construction is gated until the re-packetizer is wired up.
+	#[allow(dead_code)]
+	Egress(Box<dyn MediaSource>),
+}
+
 /// Drives a [`Rtc`] instance on a UDP socket until it ends.
 ///
-/// The caller pre-populates the `Rtc` with whatever SDP exchange they need
-/// (typically by accepting an offer in the WHIP/WHEP HTTP handler); the
-/// session loop just owns the socket and the sink.
+/// The caller pre-populates the `Rtc` with whatever SDP exchange they need;
+/// this just owns the socket and the media role.
 pub struct Session {
 	rtc: Rtc,
 	socket: UdpSocket,
-	sink: Box<dyn MediaSink>,
+	role: MediaRole,
 }
 
 impl Session {
-	pub fn new(rtc: Rtc, socket: UdpSocket, sink: Box<dyn MediaSink>) -> Self {
-		Self { rtc, socket, sink }
+	/// Construct a session driven by an [`Rtc`] and a UDP socket. The
+	/// [`MediaRole`] decides whether RTP flows in or out.
+	pub fn new(rtc: Rtc, socket: UdpSocket, role: MediaRole) -> Self {
+		Self { rtc, socket, role }
+	}
+
+	/// Convenience for the common ingest case (WHIP server, WHEP client).
+	pub fn ingest(rtc: Rtc, socket: UdpSocket, sink: Box<dyn MediaSink>) -> Self {
+		Self::new(rtc, socket, MediaRole::Ingest(sink))
 	}
 
 	pub async fn run(mut self) -> Result<()> {
@@ -119,17 +153,21 @@ impl Session {
 					let spec = p.spec();
 					(spec.clock_rate.get(), spec.channels.unwrap_or(1) as u32)
 				});
-				self.sink.on_track(added.mid, added.kind, codec, audio_params)?;
+				if let MediaRole::Ingest(sink) = &mut self.role {
+					sink.on_track(added.mid, added.kind, codec, audio_params)?;
+				}
 			}
 			Event::MediaData(data) => {
-				let timestamp_us = media_time_to_micros(&data.time);
-				self.sink.on_frame(
-					data.mid,
-					codec::Frame {
-						timestamp_us,
-						payload: data.data.into(),
-					},
-				)?;
+				if let MediaRole::Ingest(sink) = &mut self.role {
+					let timestamp_us = media_time_to_micros(&data.time);
+					sink.on_frame(
+						data.mid,
+						codec::Frame {
+							timestamp_us,
+							payload: data.data.into(),
+						},
+					)?;
+				}
 			}
 			_ => {}
 		}
@@ -139,7 +177,7 @@ impl Session {
 
 /// Convert a str0m [`MediaTime`](str0m::media::MediaTime) to microseconds.
 fn media_time_to_micros(time: &str0m::media::MediaTime) -> u64 {
-	// MediaTime stores `numer / denom` seconds; cast through u128 so the
+	// MediaTime stores `numer / denom` seconds; cast through i128 so the
 	// product doesn't overflow at 90 kHz video timestamps.
 	let numer = time.numer() as i128;
 	let denom = time.denom() as i128;
@@ -151,7 +189,7 @@ fn media_time_to_micros(time: &str0m::media::MediaTime) -> u64 {
 }
 
 /// Type-erased map of `Mid` -> codec bridge, populated as `MediaAdded`
-/// events arrive.
+/// events arrive on the ingest side.
 pub(crate) struct Bridges {
 	inner: HashMap<str0m::media::Mid, Box<dyn codec::Bridge>>,
 }

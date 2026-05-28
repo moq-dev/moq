@@ -1,16 +1,21 @@
-//! `moq-rtc` binary: WebRTC <-> MoQ gateway.
+//! `moq-rtc` binary.
 //!
-//! Binds an axum listener serving WHIP/WHEP and dials an upstream moq-net
-//! relay where ingested broadcasts are forwarded and egressed broadcasts
-//! are pulled from.
+//! Subcommand structure mirrors `moq-cli`: globals first
+//! (`--relay`, `--broadcast`), then HTTP role (`client` / `server`), then
+//! direction (`publish` / `subscribe`). The 2x2 is:
+//!
+//! - `server publish` -- WHIP server, ingest from a remote publisher into MoQ.
+//! - `server subscribe` -- WHEP server, egress a MoQ broadcast to remote subscribers (501).
+//! - `client subscribe` -- WHEP client, pull a remote WHEP feed into MoQ.
+//! - `client publish` -- WHIP client, push a MoQ broadcast to a remote WHIP endpoint (501).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Context;
 use axum::Router;
-use clap::Parser;
-use moq_rtc::{Gateway, GatewayConfig};
+use clap::{Parser, Subcommand};
+use moq_rtc::{Client, Server};
 use tower_http::cors::{Any, CorsLayer};
 use url::Url;
 
@@ -22,29 +27,66 @@ struct Cli {
 
 	/// MoQ client configuration for dialing the upstream relay.
 	#[command(flatten)]
-	client: moq_native::ClientConfig,
+	moq_client: moq_native::ClientConfig,
 
-	/// URL of the upstream MoQ relay.
+	/// URL of the upstream MoQ relay where ingested broadcasts get
+	/// published and from which egressed broadcasts are pulled.
 	#[arg(long, env = "MOQ_RTC_RELAY")]
 	relay: Url,
 
-	/// HTTP listener for the WHIP/WHEP endpoints.
-	#[arg(long, env = "MOQ_RTC_LISTEN", default_value = "[::]:8088")]
-	listen: SocketAddr,
-
-	/// Optional TLS certificate (PEM) for serving HTTPS instead of HTTP.
-	/// Requires `--tls-key`. WHIP clients typically need HTTPS in practice.
-	#[arg(long, env = "MOQ_RTC_TLS_CERT", requires = "tls_key")]
-	tls_cert: Option<PathBuf>,
-
-	#[arg(long, env = "MOQ_RTC_TLS_KEY", requires = "tls_cert")]
-	tls_key: Option<PathBuf>,
+	/// Broadcast name on the MoQ relay this gateway binds to. For
+	/// `server publish` this is the path that arrives at the WHIP
+	/// endpoint; for the other three it's a single name pinned to the
+	/// gateway.
+	#[arg(long, alias = "name", env = "MOQ_RTC_BROADCAST")]
+	broadcast: String,
 
 	/// Public UDP socket address(es) to advertise as ICE host candidates.
-	/// Repeat the flag for multi-homed deployments. Falls back to the
-	/// kernel-picked address when empty (loopback testing only).
+	/// Repeat the flag for multi-homed deployments. Without this the
+	/// kernel-picked address is used (loopback testing only).
 	#[arg(long = "ice-candidate", env = "MOQ_RTC_ICE_CANDIDATE", value_delimiter = ',')]
 	ice_candidates: Vec<SocketAddr>,
+
+	#[command(subcommand)]
+	role: Role,
+}
+
+#[derive(Subcommand, Clone)]
+enum Role {
+	/// Dial out: act as an HTTP client and POST an SDP offer to a remote
+	/// WHIP or WHEP URL.
+	Client {
+		/// Remote WHIP or WHEP resource URL.
+		#[arg(long, env = "MOQ_RTC_URL")]
+		url: Url,
+
+		#[command(subcommand)]
+		direction: Direction,
+	},
+	/// Listen: accept incoming WHIP or WHEP HTTP requests.
+	Server {
+		/// HTTP listener for the WHIP/WHEP endpoints.
+		#[arg(long, env = "MOQ_RTC_LISTEN", default_value = "[::]:8088")]
+		listen: SocketAddr,
+
+		/// Optional TLS cert (PEM). Requires `--tls-key`.
+		#[arg(long, env = "MOQ_RTC_TLS_CERT", requires = "tls_key")]
+		tls_cert: Option<PathBuf>,
+
+		#[arg(long, env = "MOQ_RTC_TLS_KEY", requires = "tls_cert")]
+		tls_key: Option<PathBuf>,
+
+		#[command(subcommand)]
+		direction: Direction,
+	},
+}
+
+#[derive(Subcommand, Clone, Copy, Debug)]
+enum Direction {
+	/// WHIP (publish protocol): RTP flows toward the WHIP-server endpoint.
+	Publish,
+	/// WHEP (subscribe protocol): RTP flows away from the WHEP-server endpoint.
+	Subscribe,
 }
 
 #[tokio::main]
@@ -53,51 +95,136 @@ async fn main() -> anyhow::Result<()> {
 		.install_default()
 		.expect("failed to install default crypto provider");
 
-	let cli = Cli::parse();
-	cli.log.init();
+	let Cli {
+		log,
+		moq_client,
+		relay,
+		broadcast,
+		ice_candidates,
+		role,
+	} = Cli::parse();
+	log.init();
 
-	let client = cli.client.init().context("failed to init moq client")?;
+	let moq_client = moq_client.init().context("failed to init moq client")?;
 
-	// Two origins so WHIP ingest and WHEP egress see independent views of
-	// the upstream relay. The publisher feeds the relay; the subscriber
+	// Two origins so ingest and egress see independent views of the
+	// upstream relay. The publisher feeds the relay; the subscriber
 	// reads from it.
 	let publisher = moq_net::Origin::random().produce();
 	let subscriber = moq_net::Origin::random().produce();
 	let subscriber_consumer = subscriber.consume();
 
-	let reconnect = client
+	let reconnect = moq_client
 		.with_publish(publisher.consume())
 		.with_consume(subscriber)
-		.reconnect(cli.relay.clone());
+		.reconnect(relay.clone());
 
-	let config = GatewayConfig {
-		ice_candidates: cli.ice_candidates,
-	};
-	let gateway = Gateway::new(config, publisher, subscriber_consumer);
-
-	let app = Router::new()
-		.nest("/whip", gateway.whip_router())
-		.nest("/whep", gateway.whep_router())
-		.layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any));
-
-	let bind = cli.listen;
-	tracing::info!(%bind, relay = %cli.relay, "starting moq-rtc");
+	tracing::info!(%relay, %broadcast, "starting moq-rtc");
 
 	#[cfg(unix)]
 	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
-	let serve = serve(app, bind, cli.tls_cert, cli.tls_key);
+	let driver = run_role(role, &broadcast, ice_candidates, publisher, subscriber_consumer);
 
 	tokio::select! {
-		res = serve => res,
+		res = driver => res,
 		res = reconnect.closed() => res,
 		_ = tokio::signal::ctrl_c() => Ok(()),
 	}
 }
 
+async fn run_role(
+	role: Role,
+	broadcast: &str,
+	ice_candidates: Vec<SocketAddr>,
+	publisher: moq_net::OriginProducer,
+	subscriber: moq_net::OriginConsumer,
+) -> anyhow::Result<()> {
+	match role {
+		Role::Server {
+			listen,
+			tls_cert,
+			tls_key,
+			direction,
+		} => {
+			run_server(
+				ice_candidates,
+				publisher,
+				subscriber,
+				listen,
+				tls_cert,
+				tls_key,
+				direction,
+			)
+			.await
+		}
+		Role::Client { url, direction } => {
+			run_client(broadcast, ice_candidates, publisher, subscriber, url, direction).await
+		}
+	}
+}
+
+async fn run_server(
+	ice_candidates: Vec<SocketAddr>,
+	publisher: moq_net::OriginProducer,
+	subscriber: moq_net::OriginConsumer,
+	listen: SocketAddr,
+	tls_cert: Option<PathBuf>,
+	tls_key: Option<PathBuf>,
+	direction: Direction,
+) -> anyhow::Result<()> {
+	let config = moq_rtc::server::Config { ice_candidates };
+	let server = Server::new(config, publisher, subscriber);
+
+	let app = match direction {
+		Direction::Publish => Router::new().merge(server.publish_router()),
+		Direction::Subscribe => Router::new().merge(server.subscribe_router()),
+	};
+	let app = app.layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any));
+
+	tracing::info!(%listen, ?direction, "moq-rtc server listening");
+	serve(app, listen, tls_cert, tls_key).await
+}
+
+async fn run_client(
+	broadcast_name: &str,
+	ice_candidates: Vec<SocketAddr>,
+	publisher: moq_net::OriginProducer,
+	subscriber: moq_net::OriginConsumer,
+	url: Url,
+	direction: Direction,
+) -> anyhow::Result<()> {
+	let config = moq_rtc::client::Config { ice_candidates };
+	let client = Client::new(config);
+
+	match direction {
+		Direction::Subscribe => {
+			// WHEP client: receive remote RTP, publish it as `broadcast_name`.
+			let broadcast = moq_net::Broadcast::new().produce();
+			let consumer = broadcast.consume();
+			if !publisher.publish_broadcast(broadcast_name, consumer) {
+				anyhow::bail!("broadcast path conflict: {}", broadcast_name);
+			}
+			client.subscribe(url, broadcast).await?;
+		}
+		Direction::Publish => {
+			// WHIP client: read the local broadcast, push as RTP to remote.
+			let broadcast = subscriber
+				.announced_broadcast(broadcast_name)
+				.await
+				.ok_or_else(|| anyhow::anyhow!("broadcast {} never announced", broadcast_name))?;
+			client.publish(url, broadcast).await?;
+		}
+	}
+
+	// `client.subscribe` spawns the session in the background; block on
+	// ctrl-c instead of returning so the binary stays up.
+	tokio::signal::ctrl_c().await?;
+	Ok(())
+}
+
 async fn serve(app: Router, bind: SocketAddr, cert: Option<PathBuf>, key: Option<PathBuf>) -> anyhow::Result<()> {
 	let service = app.into_make_service();
-
 	match (cert, key) {
 		(Some(cert), Some(key)) => {
 			let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
