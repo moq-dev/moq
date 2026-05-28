@@ -1,7 +1,7 @@
 use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
-use super::session::MoqClient;
+use super::session::{self, MoqClient};
 
 use std::time::Duration;
 
@@ -452,12 +452,27 @@ async fn server_client_roundtrip() {
 	assert_eq!(frame.payload, payload);
 	assert_eq!(frame.timestamp_us, 1_000_000);
 
-	// Clean up.
+	// Clean up. Exercise `shutdown()` on the client side and the underlying
+	// `cancel(code)` on the server side, so both shutdown paths run.
 	media.finish().unwrap();
 	broadcast.finish().unwrap();
-	session.cancel(0);
+	session.shutdown();
 	server_session.cancel(0);
 	server.cancel();
+}
+
+#[tokio::test]
+async fn connect_errors_on_unreachable() {
+	// The duplex `connect()` free function doesn't expose TLS / bind
+	// knobs; this is mostly a smoke test that the wiring compiles and
+	// that connection failures surface as `Connect` rather than panicking.
+	// Port 1 is reliably unreachable on localhost without root.
+	let res = session::connect("https://127.0.0.1:1/test".into()).await;
+	let err = res.err().expect("connect should fail");
+	assert!(
+		matches!(err, crate::error::MoqError::Connect(_)),
+		"expected Connect error, got: {err:?}"
+	);
 }
 
 #[tokio::test]

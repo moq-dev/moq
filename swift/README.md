@@ -30,10 +30,10 @@ for try await announcement in announced.announcements {
     }
 }
 
-session.close()
+session.shutdown()
 ```
 
-`Moq.connect(url:)` attaches a single `MoqOriginProducer` as both publish source and consume sink — the typical full-duplex client. Use that origin to `publish(...)` local broadcasts or `consume()` remote announcements. For custom TLS / bind options or a non-duplex topology, build the client with `Moq.client()` and call `setPublish` / `setConsume` yourself.
+`Moq.connect(url:)` attaches a single `MoqOriginProducer` as both publish source and consume sink (the typical full-duplex client). Use that origin to `publish(...)` local broadcasts or `consume()` remote announcements. For custom TLS / bind options or a non-duplex topology, build the client with `Moq.client()` and call `setPublish` / `setConsume` yourself.
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer.
 

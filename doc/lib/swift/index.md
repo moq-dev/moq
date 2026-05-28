@@ -49,9 +49,9 @@ The package depends on a prebuilt `MoqFFI.xcframework` attached to the matching 
 ```swift
 import Moq
 
-let session = try await Moq.connect(url: "https://relay.example.com")
+let (session, origin) = try await Moq.connect(url: "https://relay.example.com")
 
-let consumer = MoqOriginProducer().consume()
+let consumer = origin.consume()
 let announced = try consumer.announced(prefix: "demos/")
 for try await announcement in announced.announcements {
     print("got broadcast \(announcement.path())")
@@ -61,7 +61,11 @@ for try await announcement in announced.announcements {
         print("catalog: \(update)")
     }
 }
+
+session.shutdown()
 ```
+
+`Moq.connect(url:)` wires a single `MoqOriginProducer` as both publish source and consume sink (the typical full-duplex client). For custom TLS / bind options or a non-duplex topology, build the client with `Moq.client()` and call `setPublish` / `setConsume` yourself.
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer.
 

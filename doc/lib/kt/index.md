@@ -38,11 +38,10 @@ Published to Maven Central via [release-kt.yml](https://github.com/moq-dev/moq/b
 ```kotlin
 import dev.moq.*
 import kotlinx.coroutines.flow.collect
-import uniffi.moq.MoqOriginProducer
 
-val session = Moq.connect("https://relay.example.com")
+val (session, origin) = Moq.connect("https://relay.example.com")
 
-MoqOriginProducer().use { origin ->
+origin.use {
     val consumer = origin.consume()
     val announced = consumer.announced("demos/")
     announced.announcements().collect { announcement ->
@@ -53,7 +52,11 @@ MoqOriginProducer().use { origin ->
         }
     }
 }
+
+session.shutdown()
 ```
+
+`Moq.connect` wires a single `MoqOriginProducer` as both publish source and consume sink (the typical full-duplex client). For custom TLS / bind options or a non-duplex topology, build the client with `Moq.client()` and call `setPublish` / `setConsume` yourself.
 
 Cancelling the surrounding coroutine scope propagates through to the native consumer's `cancel()` via the wrapper's `onCompletion` hook.
 

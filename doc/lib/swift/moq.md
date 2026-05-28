@@ -7,7 +7,7 @@ description: Swift Package Manager target for Media over QUIC
 
 The Swift Package Manager target for [Media over QUIC](/).
 
-This is an ergonomic wrapper around the UniFFI-generated `MoqFFI` types, providing `AsyncSequence` adapters, Swift-friendly errors, and a `Moq.connect` helper that returns a session you can `await`.
+This is an ergonomic wrapper around the UniFFI-generated `MoqFFI` types, providing `AsyncSequence` adapters, Swift-friendly errors, and a `Moq.connect` helper that returns both a session and the origin it was wired against.
 
 ## Install
 
@@ -33,15 +33,28 @@ Supported platforms: iOS 15+, iPadOS 15+, macOS 12+. The package ships an XCFram
 ```swift
 import Moq
 
-let session = try await Moq.connect(url: "https://relay.example.com")
+let (session, origin) = try await Moq.connect(url: "https://relay.example.com")
 ```
 
-For development against a relay using a self-signed certificate, pass `tlsVerify: false`.
+`Moq.connect(url:)` wires a single `MoqOriginProducer` as both publish source and consume sink (the typical full-duplex client). For custom TLS / bind options or a non-duplex topology, build the client manually:
+
+```swift
+let client = Moq.client()
+client.setTlsDisableVerify(disable: true)
+try client.setBind(addr: "127.0.0.1:0")
+let session = try await client.connect(url: "https://localhost:4443")
+```
+
+When you're done, signal graceful shutdown to the peer:
+
+```swift
+session.shutdown()  // sends close code 0
+```
 
 ## Subscribe
 
 ```swift
-let consumer = MoqOriginProducer().consume()
+let consumer = origin.consume()
 let announced = try consumer.announced(prefix: "demos/")
 
 for try await announcement in announced.announcements {
@@ -55,15 +68,15 @@ for try await announcement in announced.announcements {
 ## Publish
 
 ```swift
-let broadcast = MoqBroadcastProducer()
+let broadcast = try MoqBroadcastProducer()
 let audio = try broadcast.publishMedia(format: "opus", init: opusInitBytes)
 
-try session.publish(path: "my-stream", broadcast: broadcast)
+try origin.publish(path: "my-stream", broadcast: broadcast)
 
 try audio.writeFrame(payload: payload, timestampUs: 0)
 try audio.writeFrame(payload: payload, timestampUs: 20_000)
-audio.finish()
-broadcast.finish()
+try audio.finish()
+try broadcast.finish()
 ```
 
 ## Cancellation

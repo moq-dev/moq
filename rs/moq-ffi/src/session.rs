@@ -145,4 +145,38 @@ impl MoqSession {
 		// NOTE: we don't abort the closed Task because it will be aborted via above ^
 		// We'll get a slightly better error message instead of Cancelled.
 	}
+
+	/// Graceful shutdown. Equivalent to `cancel(0)`. Documents the
+	/// convention that code 0 means "no error" so callers don't have to
+	/// pick one. Named `shutdown` (not `close`) because UniFFI's Kotlin
+	/// generator already emits an `AutoCloseable.close()` that releases
+	/// the FFI handle, and shadowing it would silently mean a different
+	/// thing per binding.
+	pub fn shutdown(&self) {
+		self.cancel(0);
+	}
+}
+
+/// A `MoqSession` plus the `MoqOriginProducer` it was wired against,
+/// returned by the duplex [`connect`] helper.
+///
+/// Use `origin` to `publish(...)` local broadcasts and `consume()` remote
+/// announcements; use `session` for shutdown.
+#[derive(uniffi::Record)]
+pub struct MoqClientSession {
+	pub session: Arc<MoqSession>,
+	pub origin: Arc<MoqOriginProducer>,
+}
+
+/// Connect with a single origin attached as both publish source and consume
+/// sink. The typical full-duplex client setup. For custom TLS / bind options
+/// or a non-duplex topology, build a [`MoqClient`] directly.
+#[uniffi::export]
+pub async fn connect(url: String) -> Result<MoqClientSession, MoqError> {
+	let origin = MoqOriginProducer::new();
+	let client = MoqClient::new();
+	client.set_publish(Some(origin.clone()));
+	client.set_consume(Some(origin.clone()));
+	let session = client.connect(url).await?;
+	Ok(MoqClientSession { session, origin })
 }
