@@ -3856,6 +3856,7 @@ dependencies = [
  "tower-service",
  "tracing",
  "url",
+ "web-transport-trait",
  "wiremock",
 ]
 
