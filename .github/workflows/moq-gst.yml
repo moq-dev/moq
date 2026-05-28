@@ -83,12 +83,13 @@ jobs:
           ls -l "$plugin_dir"
 
           # gst-inspect-1.0 moq exits 0 even when the .so fails to load
-          # ("no such plugin" isn't an error). Grep for the factory names so
-          # a load failure surfaces as non-zero.
+          # ("no such plugin" isn't an error). Anchor on the factory-listing
+          # format ("  factoryname: description") so a load failure surfaces
+          # as non-zero and stray mentions in headers can't false-positive.
           out="$(GST_PLUGIN_PATH_1_0="$plugin_dir" gst-inspect-1.0 moq)"
           echo "$out"
-          echo "$out" | grep -q moqsink
-          echo "$out" | grep -q moqsrc
+          echo "$out" | grep -qE '^[[:space:]]+moqsink:'
+          echo "$out" | grep -qE '^[[:space:]]+moqsrc:'
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

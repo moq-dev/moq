@@ -97,7 +97,11 @@ cp "$WORKSPACE_DIR/LICENSE-APACHE" "$PACKAGE_DIR/"
 if command -v gst-inspect-1.0 >/dev/null 2>&1; then
     echo "Smoke testing against $(gst-inspect-1.0 --version | head -1)..."
     out="$(GST_PLUGIN_PATH_1_0="$PACKAGE_DIR/lib" gst-inspect-1.0 moq)"
-    if ! echo "$out" | grep -q moqsink || ! echo "$out" | grep -q moqsrc; then
+    # Factories appear as "  factoryname: description" in gst-inspect output;
+    # anchor on that so a load failure surfaces here and stray header
+    # mentions (Source module, Binary package, ...) can't false-positive.
+    if ! echo "$out" | grep -qE '^[[:space:]]+moqsink:' ||
+        ! echo "$out" | grep -qE '^[[:space:]]+moqsrc:'; then
         echo "Error: gst-inspect-1.0 didn't find moqsink/moqsrc in the plugin." >&2
         echo "$out" >&2
         exit 1

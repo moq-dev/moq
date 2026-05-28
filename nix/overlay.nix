@@ -148,8 +148,10 @@ in
             dylib="$out/lib/libgstmoq.dylib"
             if [ -f "$dylib" ]; then
               # Rewrite LC_LOAD_DYLIB entries: /nix/store/.../libX.dylib → @rpath/libX.dylib
+              # The `|| true` keeps a clean-binary case (grep finds nothing,
+              # exit 1) from tripping `set -o pipefail` in the stdenv.
               otool -L "$dylib" \
-                | grep -oE '/nix/store/[^ ]+\.dylib' \
+                | { grep -oE '/nix/store/[^ ]+\.dylib' || true; } \
                 | sort -u \
                 | while read -r ref; do
                     install_name_tool -change "$ref" "@rpath/$(basename "$ref")" "$dylib"
@@ -161,7 +163,7 @@ in
               # below.
               otool -l "$dylib" \
                 | awk '/^ *cmd LC_RPATH$/{f=1; next} f && /^ *path /{print $2; f=0}' \
-                | grep '^/nix/store/' \
+                | { grep '^/nix/store/' || true; } \
                 | while read -r rp; do
                     install_name_tool -delete_rpath "$rp" "$dylib"
                   done
