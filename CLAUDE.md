@@ -173,16 +173,30 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
 
+## Branch Targeting
+
+Two long-lived branches:
+
+- **`main`**: stable. Bug fixes, small additive changes, docs, refactors that preserve public/wire behavior.
+- **`dev`**: staging branch for disruptive work. Target it for:
+  - Wire-protocol changes (anything under `rs/moq-net`, including `moq-lite` / `moq-transport` framing or draft bumps).
+  - Breaking changes to public APIs in `rs/moq-ffi`, `rs/libmoq`, `rs/moq-net`, `rs/hang`, `js/net`, `js/hang`, or any of the language wrappers under `swift/`, `kt/`, `go/`, `py/`.
+  - Catalog/container format changes in `rs/hang` or `js/hang`.
+  - Major features that need time to settle before shipping.
+
+`dev` periodically merges into `main` (or vice versa) when the batch is ready to ship. When in doubt, target `main`; reviewers will redirect to `dev` if needed. CI (`pull_request:` workflows) runs on PRs against either branch, so no extra setup is needed when you switch the base.
+
 ## Workflow
 
 When making changes to the codebase:
 
-1. Make your code changes
-2. Run `just fix` to auto-format and fix linting issues
-3. Run `just check` to verify everything passes
-4. Walk the Cross-Package Sync table; update paired packages and docs in the same PR
-5. Add tests where they're easy to write
-6. Commit and push changes
+1. Pick the base branch per [Branch Targeting](#branch-targeting) above
+2. Make your code changes
+3. Run `just fix` to auto-format and fix linting issues
+4. Run `just check` to verify everything passes
+5. Walk the Cross-Package Sync table; update paired packages and docs in the same PR
+6. Add tests where they're easy to write
+7. Commit and push changes
 
 ## PR Reviews
 
