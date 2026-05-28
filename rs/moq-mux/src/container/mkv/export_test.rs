@@ -255,8 +255,8 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	// Annex-B with inline SPS+PPS before keyframes. The exporter must
 	// (a) defer the header until SPS+PPS arrive, (b) emit avcC in CodecPrivate,
 	// (c) length-prefix the sample bytes in each SimpleBlock.
-	use crate::container::Timestamp;
 	use hang::catalog::{Container, H264, VideoConfig};
+	use moq_net::Timestamp;
 
 	let broadcast = moq_net::Broadcast::new();
 	let mut producer = broadcast.produce();

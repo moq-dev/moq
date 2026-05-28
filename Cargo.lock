@@ -3724,6 +3724,7 @@ name = "moq-loc"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "moq-net",
  "thiserror 2.0.18",
 ]
 

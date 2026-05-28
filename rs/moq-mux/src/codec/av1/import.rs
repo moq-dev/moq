@@ -229,7 +229,7 @@ impl Import {
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
+		pts: Option<moq_net::Timestamp>,
 	) -> anyhow::Result<()> {
 		let obus = ObuIterator::new(buf);
 
@@ -246,7 +246,7 @@ impl Import {
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
+		pts: Option<moq_net::Timestamp>,
 	) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 		let mut obus = ObuIterator::new(buf);
@@ -264,7 +264,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn decode_obu(&mut self, obu_data: Bytes, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
+	fn decode_obu(&mut self, obu_data: Bytes, pts: Option<moq_net::Timestamp>) -> anyhow::Result<()> {
 		anyhow::ensure!(!obu_data.is_empty(), "OBU is too short");
 
 		// Parse OBU header - this consumes header + extension + LEB128 size
@@ -347,7 +347,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<moq_net::Timestamp>) -> anyhow::Result<()> {
 		if !self.current.contains_frame {
 			return Ok(());
 		}
@@ -398,15 +398,13 @@ impl Import {
 		self.track.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
+	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> anyhow::Result<moq_net::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(crate::container::Timestamp::from_micros(
-			zero.elapsed().as_micros() as u64
-		)?)
+		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
 

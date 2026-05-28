@@ -1,65 +1,148 @@
-use rand::Rng;
-
-use crate::Error;
-use crate::coding::{Decode, DecodeError, Encode, EncodeError, VarInt};
-
+use std::num::NonZero;
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// A timestamp representing the presentation time in milliseconds.
-///
-/// The underlying implementation supports any scale, but everything uses milliseconds by default.
-pub type Time = Timescale<1_000>;
+use rand::Rng;
 
-/// Returned when a [`Timescale`] operation would exceed the QUIC VarInt range
-/// (`2^62 - 1`) or overflow during scale conversion or arithmetic.
+use crate::coding::VarInt;
+
+/// Returned when a [`Timestamp`] operation would exceed the QUIC VarInt range
+/// (`2^62 - 1`), overflow during scale conversion or arithmetic, or attempt
+/// arithmetic between timestamps with mismatched scales.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("time overflow")]
 pub struct TimeOverflow;
 
-/// A timestamp representing the presentation time in a given scale. ex. 1000 for milliseconds.
+/// Units per second used by a track for frame timestamps.
+///
+/// Newtype around [`NonZero<u64>`] — zero is structurally impossible, so the
+/// arithmetic on [`Timestamp`] can divide by `self.scale` without ever risking
+/// a divide by zero. Use the named constants ([`Self::SECOND`], [`Self::MILLI`],
+/// [`Self::MICRO`], [`Self::NANO`]) instead of writing raw integers at call sites;
+/// for runtime values, use [`Self::new`] which returns [`TimeOverflow`] for `0` or
+/// for values past the QUIC varint range.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Timescale(NonZero<u64>);
+
+impl Timescale {
+	/// One unit per second (`1`).
+	pub const SECOND: Self = Self(NonZero::<u64>::MIN);
+	/// 1,000 units per second (`1_000`).
+	pub const MILLI: Self = match NonZero::new(1_000) {
+		Some(n) => Self(n),
+		None => unreachable!(),
+	};
+	/// 1,000,000 units per second (`1_000_000`). Common default for media tracks.
+	pub const MICRO: Self = match NonZero::new(1_000_000) {
+		Some(n) => Self(n),
+		None => unreachable!(),
+	};
+	/// 1,000,000,000 units per second (`1_000_000_000`).
+	pub const NANO: Self = match NonZero::new(1_000_000_000) {
+		Some(n) => Self(n),
+		None => unreachable!(),
+	};
+
+	/// Construct a timescale from a raw value (units per second).
+	///
+	/// Returns [`TimeOverflow`] if `units_per_second` is `0` (would divide by zero)
+	/// or exceeds `2^62 - 1` (the QUIC varint range, matching [`Timestamp`] values).
+	pub const fn new(units_per_second: u64) -> Result<Self, TimeOverflow> {
+		// Reject values that wouldn't fit in a QUIC varint, keeping the constraint
+		// symmetric with Timestamp's raw value.
+		if VarInt::from_u64(units_per_second).is_none() {
+			return Err(TimeOverflow);
+		}
+		match NonZero::new(units_per_second) {
+			Some(n) => Ok(Self(n)),
+			None => Err(TimeOverflow),
+		}
+	}
+
+	/// The raw units-per-second value (always non-zero).
+	pub const fn as_u64(self) -> u64 {
+		self.0.get()
+	}
+}
+
+impl TryFrom<u64> for Timescale {
+	type Error = TimeOverflow;
+
+	fn try_from(units_per_second: u64) -> Result<Self, Self::Error> {
+		Self::new(units_per_second)
+	}
+}
+
+impl From<NonZero<u64>> for Timescale {
+	fn from(units_per_second: NonZero<u64>) -> Self {
+		Self(units_per_second)
+	}
+}
+
+impl From<Timescale> for u64 {
+	fn from(scale: Timescale) -> Self {
+		scale.0.get()
+	}
+}
+
+impl From<Timescale> for NonZero<u64> {
+	fn from(scale: Timescale) -> Self {
+		scale.0
+	}
+}
+
+impl std::fmt::Debug for Timescale {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match *self {
+			Self::SECOND => write!(f, "Timescale::SECOND"),
+			Self::MILLI => write!(f, "Timescale::MILLI"),
+			Self::MICRO => write!(f, "Timescale::MICRO"),
+			Self::NANO => write!(f, "Timescale::NANO"),
+			Self(n) => write!(f, "Timescale({n})"),
+		}
+	}
+}
+
+impl std::fmt::Display for Timescale {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.0)
+	}
+}
+
+/// A timestamp in a track's timescale (units per second).
 ///
 /// All timestamps within a track are relative, so zero for one track is not zero for another.
-/// Values are constrained to fit within a QUIC VarInt (2^62) so they can be encoded and decoded easily.
+/// The underlying value is constrained to fit within a QUIC VarInt (`2^62 - 1`) so it can be
+/// encoded and decoded easily; the scale is carried alongside so frames from different
+/// sources can be compared and converted without lossy detours through a single fixed scale.
 ///
-/// This is [std::time::Instant] and [std::time::Duration] merged into one type for simplicity.
-#[derive(Clone, Default, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// The scale is a [`Timescale`] (always non-zero), so unit conversions (`as_secs`, `as_millis`,
+/// etc.) are infallible. Use [`Option<Timestamp>`] at call sites that need a "missing" sentinel
+/// instead of relying on a magic value.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct Timescale<const SCALE: u64>(VarInt);
+pub struct Timestamp {
+	value: VarInt,
+	scale: Timescale,
+}
 
-impl<const SCALE: u64> Timescale<SCALE> {
-	/// The maximum representable instant.
-	pub const MAX: Self = Self(VarInt::MAX);
-
-	/// The minimum representable instant.
-	pub const ZERO: Self = Self(VarInt::ZERO);
-
-	/// Construct a timestamp directly from a value in this scale's units. Infallible
-	/// because any `u32` fits within the 62-bit varint range.
-	pub const fn new(value: u32) -> Self {
-		Self(VarInt::from_u32(value))
-	}
-
-	/// Construct a timestamp directly from a value in this scale's units. Returns
-	/// [`TimeOverflow`] if `value` exceeds the 62-bit varint range.
-	pub const fn new_u64(value: u64) -> Result<Self, TimeOverflow> {
+impl Timestamp {
+	/// Construct a timestamp directly from a raw value at the given scale.
+	/// Returns [`TimeOverflow`] if `value` exceeds `2^62 - 1`.
+	pub const fn new(value: u64, scale: Timescale) -> Result<Self, TimeOverflow> {
 		match VarInt::from_u64(value) {
-			Some(varint) => Ok(Self(varint)),
+			Some(value) => Ok(Self { value, scale }),
 			None => Err(TimeOverflow),
 		}
 	}
 
-	/// Convert a number of seconds to a timestamp, returning an error if the timestamp would overflow.
+	/// Convert a number of seconds to a timestamp at [`Timescale::SECOND`].
 	pub const fn from_secs(seconds: u64) -> Result<Self, TimeOverflow> {
-		// Not using from_scale because it'll be slightly faster
-		match seconds.checked_mul(SCALE) {
-			Some(value) => Self::new_u64(value),
-			None => Err(TimeOverflow),
-		}
+		Self::new(seconds, Timescale::SECOND)
 	}
 
-	/// Like [`Self::from_secs`] but panics on overflow. Intended for `const`
-	/// initializers where overflow indicates a bug, not a runtime condition.
+	/// Like [`Self::from_secs`] but panics on overflow.
 	pub const fn from_secs_unchecked(seconds: u64) -> Self {
 		match Self::from_secs(seconds) {
 			Ok(time) => time,
@@ -67,187 +150,175 @@ impl<const SCALE: u64> Timescale<SCALE> {
 		}
 	}
 
-	/// Convert a number of milliseconds to a timestamp, returning an error if the timestamp would overflow.
+	/// Convert a number of milliseconds to a timestamp at [`Timescale::MILLI`].
 	pub const fn from_millis(millis: u64) -> Result<Self, TimeOverflow> {
-		Self::from_scale(millis, 1000)
+		Self::new(millis, Timescale::MILLI)
 	}
 
 	/// Like [`Self::from_millis`] but panics on overflow.
 	pub const fn from_millis_unchecked(millis: u64) -> Self {
-		Self::from_scale_unchecked(millis, 1000)
+		match Self::from_millis(millis) {
+			Ok(time) => time,
+			Err(_) => panic!("time overflow"),
+		}
 	}
 
-	/// Convert a number of microseconds to a timestamp, returning an error on overflow.
+	/// Convert a number of microseconds to a timestamp at [`Timescale::MICRO`].
 	pub const fn from_micros(micros: u64) -> Result<Self, TimeOverflow> {
-		Self::from_scale(micros, 1_000_000)
+		Self::new(micros, Timescale::MICRO)
 	}
 
 	/// Like [`Self::from_micros`] but panics on overflow.
 	pub const fn from_micros_unchecked(micros: u64) -> Self {
-		Self::from_scale_unchecked(micros, 1_000_000)
+		match Self::from_micros(micros) {
+			Ok(time) => time,
+			Err(_) => panic!("time overflow"),
+		}
 	}
 
-	/// Convert a number of nanoseconds to a timestamp, returning an error on overflow.
+	/// Convert a number of nanoseconds to a timestamp at [`Timescale::NANO`].
 	pub const fn from_nanos(nanos: u64) -> Result<Self, TimeOverflow> {
-		Self::from_scale(nanos, 1_000_000_000)
+		Self::new(nanos, Timescale::NANO)
 	}
 
 	/// Like [`Self::from_nanos`] but panics on overflow.
 	pub const fn from_nanos_unchecked(nanos: u64) -> Self {
-		Self::from_scale_unchecked(nanos, 1_000_000_000)
-	}
-
-	/// Construct from `value` measured at the given `scale` (units per second), rescaling
-	/// to `SCALE`. Returns [`TimeOverflow`] if the rescaled value exceeds 2^62.
-	pub const fn from_scale(value: u64, scale: u64) -> Result<Self, TimeOverflow> {
-		match VarInt::from_u128(value as u128 * SCALE as u128 / scale as u128) {
-			Some(varint) => Ok(Self(varint)),
-			None => Err(TimeOverflow),
+		match Self::from_nanos(nanos) {
+			Ok(time) => time,
+			Err(_) => panic!("time overflow"),
 		}
 	}
 
-	/// Like [`Self::from_scale`] but accepts a `u128` source value.
-	pub const fn from_scale_u128(value: u128, scale: u64) -> Result<Self, TimeOverflow> {
-		match value.checked_mul(SCALE as u128) {
-			Some(value) => match VarInt::from_u128(value / scale as u128) {
-				Some(varint) => Ok(Self(varint)),
+	/// The raw value in the timestamp's own scale.
+	pub const fn value(self) -> u64 {
+		self.value.into_inner()
+	}
+
+	/// The scale (units per second) attached to this timestamp.
+	pub const fn scale(self) -> Timescale {
+		self.scale
+	}
+
+	/// Whether the raw value is zero. Does not consider scale.
+	pub const fn is_zero(self) -> bool {
+		self.value.into_inner() == 0
+	}
+
+	/// Re-express this timestamp at a new scale. Returns [`TimeOverflow`] if the new
+	/// value would exceed `2^62 - 1`.
+	pub const fn convert(self, new_scale: Timescale) -> Result<Self, TimeOverflow> {
+		if self.scale.0.get() == new_scale.0.get() {
+			return Ok(self);
+		}
+		match (self.value.into_inner() as u128).checked_mul(new_scale.0.get() as u128) {
+			Some(scaled) => match VarInt::from_u128(scaled / self.scale.0.get() as u128) {
+				Some(value) => Ok(Self {
+					value,
+					scale: new_scale,
+				}),
 				None => Err(TimeOverflow),
 			},
 			None => Err(TimeOverflow),
 		}
 	}
 
-	/// Like [`Self::from_scale`] but panics on overflow.
-	pub const fn from_scale_unchecked(value: u64, scale: u64) -> Self {
-		match Self::from_scale(value, scale) {
-			Ok(time) => time,
-			Err(_) => panic!("time overflow"),
-		}
+	/// The value re-expressed at `target` as a `u128`.
+	pub const fn as_scale(self, target: Timescale) -> u128 {
+		self.value.into_inner() as u128 * target.0.get() as u128 / self.scale.0.get() as u128
 	}
 
-	/// Get the timestamp as seconds.
+	/// The value re-expressed in seconds.
 	pub const fn as_secs(self) -> u64 {
-		self.0.into_inner() / SCALE
+		self.value.into_inner() / self.scale.0.get()
 	}
 
-	/// Get the timestamp as milliseconds.
-	//
-	// This returns a u128 to avoid a possible overflow when SCALE < 250
+	/// The value re-expressed in milliseconds.
 	pub const fn as_millis(self) -> u128 {
-		self.as_scale(1000)
+		self.as_scale(Timescale::MILLI)
 	}
 
-	/// Get the timestamp as microseconds.
+	/// The value re-expressed in microseconds.
 	pub const fn as_micros(self) -> u128 {
-		self.as_scale(1_000_000)
+		self.as_scale(Timescale::MICRO)
 	}
 
-	/// Get the timestamp as nanoseconds.
+	/// The value re-expressed in nanoseconds.
 	pub const fn as_nanos(self) -> u128 {
-		self.as_scale(1_000_000_000)
+		self.as_scale(Timescale::NANO)
 	}
 
-	/// Convert this timestamp to the given `scale` (units per second).
-	pub const fn as_scale(self, scale: u64) -> u128 {
-		self.0.into_inner() as u128 * scale as u128 / SCALE as u128
-	}
-
-	/// Get the maximum of two timestamps.
+	/// Return the larger of two timestamps.
+	///
+	/// Panics if the scales differ. Use [`Self::convert`] first if you need to compare
+	/// across scales.
 	pub const fn max(self, other: Self) -> Self {
-		if self.0.into_inner() > other.0.into_inner() {
+		assert!(self.scale.0.get() == other.scale.0.get(), "mismatched timestamp scales");
+		if self.value.into_inner() > other.value.into_inner() {
 			self
 		} else {
 			other
 		}
 	}
 
-	/// Add two timestamps, returning [`TimeOverflow`] if the sum exceeds 2^62.
+	/// Add two timestamps. Returns [`TimeOverflow`] if the sum exceeds `2^62 - 1` or
+	/// if the scales differ.
 	pub const fn checked_add(self, rhs: Self) -> Result<Self, TimeOverflow> {
-		let lhs = self.0.into_inner();
-		let rhs = rhs.0.into_inner();
-		match lhs.checked_add(rhs) {
-			Some(result) => Self::new_u64(result),
+		if self.scale.0.get() != rhs.scale.0.get() {
+			return Err(TimeOverflow);
+		}
+		match self.value.into_inner().checked_add(rhs.value.into_inner()) {
+			Some(result) => Self::new(result, self.scale),
 			None => Err(TimeOverflow),
 		}
 	}
 
-	/// Subtract `rhs` from `self`, returning [`TimeOverflow`] if `rhs > self`.
+	/// Subtract `rhs` from `self`. Returns [`TimeOverflow`] if `rhs > self` or if the
+	/// scales differ.
 	pub const fn checked_sub(self, rhs: Self) -> Result<Self, TimeOverflow> {
-		let lhs = self.0.into_inner();
-		let rhs = rhs.0.into_inner();
-		match lhs.checked_sub(rhs) {
-			Some(result) => Self::new_u64(result),
+		if self.scale.0.get() != rhs.scale.0.get() {
+			return Err(TimeOverflow);
+		}
+		match self.value.into_inner().checked_sub(rhs.value.into_inner()) {
+			Some(result) => Self::new(result, self.scale),
 			None => Err(TimeOverflow),
 		}
 	}
 
-	/// Whether this timestamp is [`Self::ZERO`].
-	pub const fn is_zero(self) -> bool {
-		self.0.into_inner() == 0
-	}
-
-	/// Current time as a timestamp, derived from [`tokio::time::Instant::now`] so
-	/// it honors `tokio::time::pause` in tests.
+	/// Current time, expressed in microseconds ([`Timescale::MICRO`]). Uses
+	/// [`tokio::time::Instant::now`] so it honors `tokio::time::pause` in tests.
 	pub fn now() -> Self {
-		// We use tokio so it can be stubbed for testing.
 		tokio::time::Instant::now().into()
 	}
+}
 
-	/// Convert this timestamp to a different scale.
-	///
-	/// This allows converting between different TimeScale types, for example from milliseconds to microseconds.
-	/// Note that converting to a coarser scale may lose precision due to integer division.
-	pub const fn convert<const NEW_SCALE: u64>(self) -> Result<Timescale<NEW_SCALE>, TimeOverflow> {
-		let value = self.0.into_inner();
-		// Convert from SCALE to NEW_SCALE: value * NEW_SCALE / SCALE
-		match (value as u128).checked_mul(NEW_SCALE as u128) {
-			Some(v) => match v.checked_div(SCALE as u128) {
-				Some(v) => match VarInt::from_u128(v) {
-					Some(varint) => Ok(Timescale(varint)),
-					None => Err(TimeOverflow),
-				},
-				None => Err(TimeOverflow),
-			},
+impl TryFrom<std::time::Duration> for Timestamp {
+	type Error = TimeOverflow;
+
+	/// Convert a [`std::time::Duration`] into a nanosecond-scale timestamp.
+	fn try_from(duration: std::time::Duration) -> Result<Self, Self::Error> {
+		match VarInt::from_u128(duration.as_nanos()) {
+			Some(value) => Ok(Self {
+				value,
+				scale: Timescale::NANO,
+			}),
 			None => Err(TimeOverflow),
 		}
 	}
+}
 
-	/// Encode this timestamp as a QUIC varint. Version-independent.
-	pub fn encode<W: bytes::BufMut>(&self, w: &mut W) -> Result<(), EncodeError> {
-		// Version-independent: uses QUIC varint encoding.
-		self.0.encode(w, crate::lite::Version::Lite01)?;
-		Ok(())
-	}
-
-	/// Decode a timestamp from a QUIC varint. Version-independent.
-	pub fn decode<R: bytes::Buf>(r: &mut R) -> Result<Self, Error> {
-		// Version-independent: uses QUIC varint encoding.
-		let v = VarInt::decode(r, crate::lite::Version::Lite01)?;
-		Ok(Self(v))
+impl From<Timestamp> for std::time::Duration {
+	fn from(time: Timestamp) -> Self {
+		let nanos = time.as_nanos();
+		std::time::Duration::new(time.as_secs(), (nanos % 1_000_000_000) as u32)
 	}
 }
 
-impl<const SCALE: u64> TryFrom<std::time::Duration> for Timescale<SCALE> {
-	type Error = TimeOverflow;
-
-	fn try_from(duration: std::time::Duration) -> Result<Self, Self::Error> {
-		Self::from_scale_u128(duration.as_nanos(), 1_000_000_000)
-	}
-}
-
-impl<const SCALE: u64> From<Timescale<SCALE>> for std::time::Duration {
-	fn from(time: Timescale<SCALE>) -> Self {
-		std::time::Duration::new(time.as_secs(), (time.as_nanos() % 1_000_000_000) as u32)
-	}
-}
-
-impl<const SCALE: u64> std::fmt::Debug for Timescale<SCALE> {
+impl std::fmt::Debug for Timestamp {
 	#[allow(clippy::manual_is_multiple_of)] // is_multiple_of is unstable in Rust 1.85
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let nanos = self.as_nanos();
 
-		// Choose the largest unit where we don't need decimal places
-		// Check from largest to smallest unit
+		// Choose the largest unit where we don't need decimal places.
 		if nanos % 1_000_000_000 == 0 {
 			write!(f, "{}s", nanos / 1_000_000_000)
 		} else if nanos % 1_000_000 == 0 {
@@ -260,29 +331,56 @@ impl<const SCALE: u64> std::fmt::Debug for Timescale<SCALE> {
 	}
 }
 
-impl<const SCALE: u64> std::ops::Add for Timescale<SCALE> {
-	type Output = Self;
-
-	fn add(self, rhs: Self) -> Self {
-		self.checked_add(rhs).expect("time overflow")
+impl PartialOrd for Timestamp {
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		Some(self.cmp(other))
 	}
 }
 
-impl<const SCALE: u64> std::ops::AddAssign for Timescale<SCALE> {
+impl Ord for Timestamp {
+	/// Compare two timestamps, normalizing across scales when they differ.
+	///
+	/// - If both scales are equal, compares raw values directly.
+	/// - Otherwise cross-multiplies in 128-bit so e.g. `1s > 2ms` orders correctly.
+	///
+	/// When the cross-scale comparison would otherwise be `Equal` (e.g. `from_secs(1)`
+	/// vs `from_millis(1000)`), breaks ties by `(scale, value)` so the result agrees
+	/// with derived `PartialEq`/`Eq`/`Hash` (which are field-wise).
+	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+		if self.scale.0.get() == other.scale.0.get() {
+			return self.value.cmp(&other.value);
+		}
+		let lhs = self.value.into_inner() as u128 * other.scale.0.get() as u128;
+		let rhs = other.value.into_inner() as u128 * self.scale.0.get() as u128;
+		lhs.cmp(&rhs)
+			.then_with(|| self.scale.0.get().cmp(&other.scale.0.get()))
+			.then_with(|| self.value.cmp(&other.value))
+	}
+}
+
+impl std::ops::Add for Timestamp {
+	type Output = Self;
+
+	fn add(self, rhs: Self) -> Self {
+		self.checked_add(rhs).expect("time overflow or scale mismatch")
+	}
+}
+
+impl std::ops::AddAssign for Timestamp {
 	fn add_assign(&mut self, rhs: Self) {
 		*self = *self + rhs;
 	}
 }
 
-impl<const SCALE: u64> std::ops::Sub for Timescale<SCALE> {
+impl std::ops::Sub for Timestamp {
 	type Output = Self;
 
 	fn sub(self, rhs: Self) -> Self {
-		self.checked_sub(rhs).expect("time overflow")
+		self.checked_sub(rhs).expect("time overflow or scale mismatch")
 	}
 }
 
-impl<const SCALE: u64> std::ops::SubAssign for Timescale<SCALE> {
+impl std::ops::SubAssign for Timestamp {
 	fn sub_assign(&mut self, rhs: Self) {
 		*self = *self - rhs;
 	}
@@ -297,44 +395,28 @@ static TIME_ANCHOR: LazyLock<(std::time::Instant, SystemTime)> = LazyLock::new(|
 	(std::time::Instant::now(), SystemTime::now() - jitter)
 });
 
-// Convert an Instant to a Unix timestamp
-impl<const SCALE: u64> From<std::time::Instant> for Timescale<SCALE> {
+impl From<std::time::Instant> for Timestamp {
+	/// Convert an [`std::time::Instant`] into a microsecond-scale timestamp anchored to a
+	/// jittered wall-clock reference (see `TIME_ANCHOR`).
 	fn from(instant: std::time::Instant) -> Self {
 		let (anchor_instant, anchor_system) = *TIME_ANCHOR;
 
-		// Conver the instant to a SystemTime.
 		let system = match instant.checked_duration_since(anchor_instant) {
 			Some(forward) => anchor_system + forward,
 			None => anchor_system - anchor_instant.duration_since(instant),
 		};
 
-		// Convert the SystemTime to a Unix timestamp in nanoseconds.
-		// We'll then convert that to the desired scale.
-		system
+		let duration = system
 			.duration_since(UNIX_EPOCH)
-			.expect("dude your clock is earlier than 1970")
-			.try_into()
-			.expect("dude your clock is later than 2116")
+			.expect("dude your clock is earlier than 1970");
+
+		Self::from_micros(duration.as_micros() as u64).expect("dude your clock is later than 2116")
 	}
 }
 
-impl<const SCALE: u64> From<tokio::time::Instant> for Timescale<SCALE> {
+impl From<tokio::time::Instant> for Timestamp {
 	fn from(instant: tokio::time::Instant) -> Self {
 		instant.into_std().into()
-	}
-}
-
-impl<const SCALE: u64> Decode<crate::Version> for Timescale<SCALE> {
-	fn decode<R: bytes::Buf>(r: &mut R, version: crate::Version) -> Result<Self, DecodeError> {
-		let v = VarInt::decode(r, version)?;
-		Ok(Self(v))
-	}
-}
-
-impl<const SCALE: u64> Encode<crate::Version> for Timescale<SCALE> {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: crate::Version) -> Result<(), EncodeError> {
-		self.0.encode(w, version)?;
-		Ok(())
 	}
 }
 
@@ -344,7 +426,8 @@ mod tests {
 
 	#[test]
 	fn test_from_secs() {
-		let time = Time::from_secs(5).unwrap();
+		let time = Timestamp::from_secs(5).unwrap();
+		assert_eq!(time.scale(), Timescale::SECOND);
 		assert_eq!(time.as_secs(), 5);
 		assert_eq!(time.as_millis(), 5000);
 		assert_eq!(time.as_micros(), 5_000_000);
@@ -353,368 +436,199 @@ mod tests {
 
 	#[test]
 	fn test_from_millis() {
-		let time = Time::from_millis(5000).unwrap();
+		let time = Timestamp::from_millis(5000).unwrap();
+		assert_eq!(time.scale(), Timescale::MILLI);
 		assert_eq!(time.as_secs(), 5);
 		assert_eq!(time.as_millis(), 5000);
 	}
 
 	#[test]
 	fn test_from_micros() {
-		let time = Time::from_micros(5_000_000).unwrap();
+		let time = Timestamp::from_micros(5_000_000).unwrap();
+		assert_eq!(time.scale(), Timescale::MICRO);
 		assert_eq!(time.as_secs(), 5);
-		assert_eq!(time.as_millis(), 5000);
 		assert_eq!(time.as_micros(), 5_000_000);
 	}
 
 	#[test]
 	fn test_from_nanos() {
-		let time = Time::from_nanos(5_000_000_000).unwrap();
+		let time = Timestamp::from_nanos(5_000_000_000).unwrap();
+		assert_eq!(time.scale(), Timescale::NANO);
 		assert_eq!(time.as_secs(), 5);
-		assert_eq!(time.as_millis(), 5000);
-		assert_eq!(time.as_micros(), 5_000_000);
 		assert_eq!(time.as_nanos(), 5_000_000_000);
 	}
 
 	#[test]
-	fn test_zero() {
-		let time = Time::ZERO;
-		assert_eq!(time.as_secs(), 0);
-		assert_eq!(time.as_millis(), 0);
-		assert_eq!(time.as_micros(), 0);
-		assert_eq!(time.as_nanos(), 0);
-		assert!(time.is_zero());
+	fn test_timescale_new_rejects_zero_and_overflow() {
+		assert!(Timescale::new(0).is_err());
+		assert!(Timescale::new(1).is_ok());
+		assert_eq!(Timescale::new(1).unwrap(), Timescale::SECOND);
+		assert_eq!(Timescale::new(1_000).unwrap(), Timescale::MILLI);
+
+		// Above the QUIC varint range.
+		assert!(Timescale::new(1u64 << 62).is_err());
+		// Right at the top of the varint range is still valid.
+		assert!(Timescale::new((1u64 << 62) - 1).is_ok());
 	}
 
 	#[test]
-	fn test_roundtrip_millis() {
-		let values = [0, 1, 100, 1000, 999999, 1_000_000_000];
-		for &val in &values {
-			let time = Time::from_millis(val).unwrap();
-			assert_eq!(time.as_millis(), val as u128);
-		}
+	fn test_convert_to_finer() {
+		let time_ms = Timestamp::from_millis(5000).unwrap();
+		let time_us = time_ms.convert(Timescale::MICRO).unwrap();
+		assert_eq!(time_us.scale(), Timescale::MICRO);
+		assert_eq!(time_us.as_micros(), 5_000_000);
 	}
 
 	#[test]
-	fn test_roundtrip_micros() {
-		// Note: values < 1000 will lose precision when converting to milliseconds (SCALE=1000)
-		let values = [0, 1000, 1_000_000, 1_000_000_000];
-		for &val in &values {
-			let time = Time::from_micros(val).unwrap();
-			assert_eq!(time.as_micros(), val as u128);
-		}
+	fn test_convert_to_coarser() {
+		let time_ms = Timestamp::from_millis(5000).unwrap();
+		let time_s = time_ms.convert(Timescale::SECOND).unwrap();
+		assert_eq!(time_s.scale(), Timescale::SECOND);
+		assert_eq!(time_s.as_secs(), 5);
 	}
 
 	#[test]
-	fn test_different_scale_seconds() {
-		type TimeInSeconds = Timescale<1>;
-		let time = TimeInSeconds::from_secs(5).unwrap();
-		assert_eq!(time.as_secs(), 5);
-		assert_eq!(time.as_millis(), 5000);
+	fn test_convert_precision_loss() {
+		// 1234 ms = 1.234 s, rounds down to 1 s
+		let time_ms = Timestamp::from_millis(1234).unwrap();
+		let time_s = time_ms.convert(Timescale::SECOND).unwrap();
+		assert_eq!(time_s.as_secs(), 1);
 	}
 
 	#[test]
-	fn test_different_scale_microseconds() {
-		type TimeInMicros = Timescale<1_000_000>;
-		let time = TimeInMicros::from_micros(5_000_000).unwrap();
-		assert_eq!(time.as_secs(), 5);
-		assert_eq!(time.as_micros(), 5_000_000);
+	fn test_convert_roundtrip() {
+		let original = Timestamp::from_millis(5000).unwrap();
+		let as_micros = original.convert(Timescale::MICRO).unwrap();
+		let back = as_micros.convert(Timescale::MILLI).unwrap();
+		assert_eq!(original.value(), back.value());
+		assert_eq!(original.scale(), back.scale());
 	}
 
 	#[test]
-	fn test_scale_conversion() {
-		// Converting 5000 milliseconds at scale 1000 to scale 1000 (should be identity)
-		let time = Time::from_scale(5000, 1000).unwrap();
-		assert_eq!(time.as_millis(), 5000);
-		assert_eq!(time.as_secs(), 5);
-
-		// Converting 5 seconds at scale 1 to scale 1000
-		let time = Time::from_scale(5, 1).unwrap();
-		assert_eq!(time.as_millis(), 5000);
-		assert_eq!(time.as_secs(), 5);
+	fn test_convert_same_scale() {
+		let time = Timestamp::from_millis(5000).unwrap();
+		let converted = time.convert(Timescale::MILLI).unwrap();
+		assert_eq!(time, converted);
 	}
 
 	#[test]
-	fn test_add() {
-		let a = Time::from_secs(3).unwrap();
-		let b = Time::from_secs(2).unwrap();
-		let c = a + b;
-		assert_eq!(c.as_secs(), 5);
-		assert_eq!(c.as_millis(), 5000);
-	}
-
-	#[test]
-	fn test_sub() {
-		let a = Time::from_secs(5).unwrap();
-		let b = Time::from_secs(2).unwrap();
-		let c = a - b;
-		assert_eq!(c.as_secs(), 3);
-		assert_eq!(c.as_millis(), 3000);
-	}
-
-	#[test]
-	fn test_checked_add() {
-		let a = Time::from_millis(1000).unwrap();
-		let b = Time::from_millis(2000).unwrap();
+	fn test_add_same_scale() {
+		let a = Timestamp::from_millis(1000).unwrap();
+		let b = Timestamp::from_millis(2000).unwrap();
 		let c = a.checked_add(b).unwrap();
 		assert_eq!(c.as_millis(), 3000);
+		assert_eq!(c.scale(), Timescale::MILLI);
 	}
 
 	#[test]
-	fn test_checked_sub() {
-		let a = Time::from_millis(5000).unwrap();
-		let b = Time::from_millis(2000).unwrap();
-		let c = a.checked_sub(b).unwrap();
-		assert_eq!(c.as_millis(), 3000);
+	fn test_add_mismatched_scale() {
+		let a = Timestamp::from_millis(1000).unwrap();
+		let b = Timestamp::from_micros(1000).unwrap();
+		assert!(a.checked_add(b).is_err());
 	}
 
 	#[test]
-	fn test_checked_sub_underflow() {
-		let a = Time::from_millis(1000).unwrap();
-		let b = Time::from_millis(2000).unwrap();
+	fn test_sub_underflow() {
+		let a = Timestamp::from_millis(1000).unwrap();
+		let b = Timestamp::from_millis(2000).unwrap();
 		assert!(a.checked_sub(b).is_err());
 	}
 
 	#[test]
-	fn test_max() {
-		let a = Time::from_secs(5).unwrap();
-		let b = Time::from_secs(10).unwrap();
+	fn test_max_same_scale() {
+		let a = Timestamp::from_secs(5).unwrap();
+		let b = Timestamp::from_secs(10).unwrap();
 		assert_eq!(a.max(b), b);
 		assert_eq!(b.max(a), b);
 	}
 
 	#[test]
-	fn test_duration_conversion() {
-		let duration = std::time::Duration::from_secs(5);
-		let time: Time = duration.try_into().unwrap();
-		assert_eq!(time.as_secs(), 5);
-		assert_eq!(time.as_millis(), 5000);
-
-		let duration_back: std::time::Duration = time.into();
-		assert_eq!(duration_back.as_secs(), 5);
+	#[should_panic(expected = "mismatched timestamp scales")]
+	fn test_max_mismatched_scale_panics() {
+		let a = Timestamp::from_millis(1).unwrap();
+		let b = Timestamp::from_secs(1).unwrap();
+		let _ = a.max(b);
 	}
 
 	#[test]
-	fn test_duration_with_nanos() {
-		let duration = std::time::Duration::new(5, 500_000_000); // 5.5 seconds
-		let time: Time = duration.try_into().unwrap();
-		assert_eq!(time.as_millis(), 5500);
-
-		let duration_back: std::time::Duration = time.into();
-		assert_eq!(duration_back.as_millis(), 5500);
-	}
-
-	#[test]
-	fn test_fractional_conversion() {
-		// Test that 1500 millis = 1.5 seconds
-		let time = Time::from_millis(1500).unwrap();
-		assert_eq!(time.as_secs(), 1); // Integer division
-		assert_eq!(time.as_millis(), 1500);
-		assert_eq!(time.as_micros(), 1_500_000);
-	}
-
-	#[test]
-	fn test_precision_loss() {
-		// When converting from a finer scale to coarser, we lose precision
-		// 1234 micros = 1.234 millis, which rounds down to 1 millisecond internally
-		// When converting back, we get 1000 micros, not the original 1234
-		let time = Time::from_micros(1234).unwrap();
-		assert_eq!(time.as_millis(), 1); // 1234 micros = 1.234 millis, rounds to 1
-		assert_eq!(time.as_micros(), 1000); // Precision lost: 1 milli = 1000 micros
-	}
-
-	#[test]
-	fn test_scale_boundaries() {
-		// Test values near scale boundaries
-		let time = Time::from_millis(999).unwrap();
-		assert_eq!(time.as_secs(), 0);
-		assert_eq!(time.as_millis(), 999);
-
-		let time = Time::from_millis(1000).unwrap();
-		assert_eq!(time.as_secs(), 1);
-		assert_eq!(time.as_millis(), 1000);
-
-		let time = Time::from_millis(1001).unwrap();
-		assert_eq!(time.as_secs(), 1);
-		assert_eq!(time.as_millis(), 1001);
-	}
-
-	#[test]
-	fn test_large_values() {
-		// Test with large but valid values
-		let large_secs = 1_000_000_000u64; // ~31 years
-		let time = Time::from_secs(large_secs).unwrap();
-		assert_eq!(time.as_secs(), large_secs);
-	}
-
-	#[test]
-	fn test_new() {
-		let time = Time::new(5000); // 5000 in the current scale (millis)
-		assert_eq!(time.as_millis(), 5000);
-		assert_eq!(time.as_secs(), 5);
-	}
-
-	#[test]
-	fn test_new_u64() {
-		let time = Time::new_u64(5000).unwrap();
-		assert_eq!(time.as_millis(), 5000);
-	}
-
-	#[test]
-	fn test_ordering() {
-		let a = Time::from_secs(1).unwrap();
-		let b = Time::from_secs(2).unwrap();
+	fn test_ordering_same_scale() {
+		let a = Timestamp::from_secs(1).unwrap();
+		let b = Timestamp::from_secs(2).unwrap();
 		assert!(a < b);
 		assert!(b > a);
 		assert_eq!(a, a);
 	}
 
 	#[test]
-	fn test_unchecked_variants() {
-		let time = Time::from_secs_unchecked(5);
+	fn test_ordering_across_known_scales() {
+		// Cross-scale ordering normalizes to a common scale.
+		let one_sec = Timestamp::from_secs(1).unwrap();
+		let two_ms = Timestamp::from_millis(2).unwrap();
+		assert!(one_sec > two_ms);
+		assert!(two_ms < one_sec);
+
+		// Temporally-equivalent timestamps with different representations are NOT
+		// Equal under cmp: derived Eq compares fields, and Ord must agree.
+		let one_sec_b = Timestamp::from_millis(1000).unwrap();
+		assert_ne!(one_sec.cmp(&one_sec_b), std::cmp::Ordering::Equal);
+		assert_ne!(one_sec, one_sec_b);
+		assert_eq!(one_sec.cmp(&one_sec), std::cmp::Ordering::Equal);
+
+		// Mixed-scale sort lands in correct temporal order.
+		let mut items = [
+			Timestamp::from_secs(2).unwrap(),
+			Timestamp::from_millis(500).unwrap(),
+			Timestamp::from_micros(1_500_000).unwrap(),
+		];
+		items.sort();
+		assert_eq!(items[0], Timestamp::from_millis(500).unwrap());
+		assert_eq!(items[1], Timestamp::from_micros(1_500_000).unwrap());
+		assert_eq!(items[2], Timestamp::from_secs(2).unwrap());
+	}
+
+	#[test]
+	fn test_duration_conversion() {
+		let duration = std::time::Duration::from_secs(5);
+		let time: Timestamp = duration.try_into().unwrap();
+		assert_eq!(time.scale(), Timescale::NANO);
 		assert_eq!(time.as_secs(), 5);
 
-		let time = Time::from_millis_unchecked(5000);
-		assert_eq!(time.as_millis(), 5000);
-
-		let time = Time::from_micros_unchecked(5_000_000);
-		assert_eq!(time.as_micros(), 5_000_000);
-
-		let time = Time::from_nanos_unchecked(5_000_000_000);
-		assert_eq!(time.as_nanos(), 5_000_000_000);
-
-		let time = Time::from_scale_unchecked(5000, 1000);
-		assert_eq!(time.as_millis(), 5000);
-	}
-
-	#[test]
-	fn test_as_scale() {
-		let time = Time::from_secs(1).unwrap();
-		// 1 second in scale 1000 = 1000
-		assert_eq!(time.as_scale(1000), 1000);
-		// 1 second in scale 1 = 1
-		assert_eq!(time.as_scale(1), 1);
-		// 1 second in scale 1_000_000 = 1_000_000
-		assert_eq!(time.as_scale(1_000_000), 1_000_000);
-	}
-
-	#[test]
-	fn test_convert_to_finer() {
-		// Convert from milliseconds to microseconds (coarser to finer)
-		type TimeInMillis = Timescale<1_000>;
-		type TimeInMicros = Timescale<1_000_000>;
-
-		let time_millis = TimeInMillis::from_millis(5000).unwrap();
-		let time_micros: TimeInMicros = time_millis.convert().unwrap();
-
-		assert_eq!(time_micros.as_millis(), 5000);
-		assert_eq!(time_micros.as_micros(), 5_000_000);
-	}
-
-	#[test]
-	fn test_convert_to_coarser() {
-		// Convert from milliseconds to seconds (finer to coarser)
-		type TimeInMillis = Timescale<1_000>;
-		type TimeInSeconds = Timescale<1>;
-
-		let time_millis = TimeInMillis::from_millis(5000).unwrap();
-		let time_secs: TimeInSeconds = time_millis.convert().unwrap();
-
-		assert_eq!(time_secs.as_secs(), 5);
-		assert_eq!(time_secs.as_millis(), 5000);
-	}
-
-	#[test]
-	fn test_convert_precision_loss() {
-		// Converting 1234 millis to seconds loses precision
-		type TimeInMillis = Timescale<1_000>;
-		type TimeInSeconds = Timescale<1>;
-
-		let time_millis = TimeInMillis::from_millis(1234).unwrap();
-		let time_secs: TimeInSeconds = time_millis.convert().unwrap();
-
-		// 1234 millis = 1.234 seconds, rounds down to 1 second
-		assert_eq!(time_secs.as_secs(), 1);
-		assert_eq!(time_secs.as_millis(), 1000); // Lost 234 millis
-	}
-
-	#[test]
-	fn test_convert_roundtrip() {
-		// Converting to finer and back should preserve value
-		type TimeInMillis = Timescale<1_000>;
-		type TimeInMicros = Timescale<1_000_000>;
-
-		let original = TimeInMillis::from_millis(5000).unwrap();
-		let as_micros: TimeInMicros = original.convert().unwrap();
-		let back_to_millis: TimeInMillis = as_micros.convert().unwrap();
-
-		assert_eq!(original.as_millis(), back_to_millis.as_millis());
-	}
-
-	#[test]
-	fn test_convert_same_scale() {
-		// Converting to the same scale should be identity
-		type TimeInMillis = Timescale<1_000>;
-
-		let time = TimeInMillis::from_millis(5000).unwrap();
-		let converted: TimeInMillis = time.convert().unwrap();
-
-		assert_eq!(time.as_millis(), converted.as_millis());
-	}
-
-	#[test]
-	fn test_convert_microseconds_to_nanoseconds() {
-		type TimeInMicros = Timescale<1_000_000>;
-		type TimeInNanos = Timescale<1_000_000_000>;
-
-		let time_micros = TimeInMicros::from_micros(5_000_000).unwrap();
-		let time_nanos: TimeInNanos = time_micros.convert().unwrap();
-
-		assert_eq!(time_nanos.as_micros(), 5_000_000);
-		assert_eq!(time_nanos.as_nanos(), 5_000_000_000);
-	}
-
-	#[test]
-	fn test_convert_custom_scales() {
-		// Test with unusual custom scales
-		type TimeScale60 = Timescale<60>; // 60Hz
-		type TimeScale90 = Timescale<90>; // 90Hz
-
-		let time60 = TimeScale60::from_scale(120, 60).unwrap(); // 2 seconds at 60Hz
-		let time90: TimeScale90 = time60.convert().unwrap();
-
-		// Both should represent 2 seconds
-		assert_eq!(time60.as_secs(), 2);
-		assert_eq!(time90.as_secs(), 2);
+		let duration_back: std::time::Duration = time.into();
+		assert_eq!(duration_back.as_secs(), 5);
 	}
 
 	#[test]
 	fn test_debug_format_units() {
-		// Test that Debug chooses appropriate units based on value
-
-		// Milliseconds that are clean seconds
-		let t = Time::from_millis(100000).unwrap();
+		let t = Timestamp::from_millis(100_000).unwrap();
 		assert_eq!(format!("{:?}", t), "100s");
 
-		let t = Time::from_millis(1000).unwrap();
-		assert_eq!(format!("{:?}", t), "1s");
-
-		// Milliseconds that are clean milliseconds
-		let t = Time::from_millis(100).unwrap();
+		let t = Timestamp::from_millis(100).unwrap();
 		assert_eq!(format!("{:?}", t), "100ms");
 
-		let t = Time::from_millis(5500).unwrap();
-		assert_eq!(format!("{:?}", t), "5500ms");
-
-		// Zero
-		let t = Time::ZERO;
-		assert_eq!(format!("{:?}", t), "0s");
-
-		// Test with microsecond-scale time
-		type TimeMicros = Timescale<1_000_000>;
-		let t = TimeMicros::from_micros(1500).unwrap();
+		let t = Timestamp::from_micros(1500).unwrap();
 		assert_eq!(format!("{:?}", t), "1500µs");
 
-		let t = TimeMicros::from_micros(1000).unwrap();
+		let t = Timestamp::from_micros(1000).unwrap();
 		assert_eq!(format!("{:?}", t), "1ms");
+	}
+
+	#[test]
+	fn test_new() {
+		let t = Timestamp::new(5000, Timescale::MILLI).unwrap();
+		assert_eq!(t.value(), 5000);
+		assert_eq!(t.scale(), Timescale::MILLI);
+		assert_eq!(t.as_millis(), 5000);
+	}
+
+	#[test]
+	fn test_custom_scale_convert() {
+		// 120 units at 60Hz = 2 seconds, expressed at 1000Hz = 2000 ms.
+		let scale_60 = Timescale::new(60).unwrap();
+		let t = Timestamp::new(120, scale_60)
+			.unwrap()
+			.convert(Timescale::MILLI)
+			.unwrap();
+		assert_eq!(t.scale(), Timescale::MILLI);
+		assert_eq!(t.as_millis(), 2000);
 	}
 }

@@ -460,9 +460,21 @@ fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Dura
 	match fragment_duration {
 		Some(d) if d.is_zero() => true,
 		Some(d) => {
-			let first = track.buffer.first().unwrap();
-			let delta_us = frame.timestamp.as_micros().saturating_sub(first.timestamp.as_micros());
-			delta_us >= d.as_micros()
+			// Frames within a track are in *decode* order; B-frames have
+			// non-monotonic PTS, so the span of the buffer is min..max of all
+			// PTS, not just first..incoming.
+			let mut min = Duration::from(frame.timestamp);
+			let mut max = min;
+			for f in &track.buffer {
+				let pts = Duration::from(f.timestamp);
+				if pts < min {
+					min = pts;
+				}
+				if pts > max {
+					max = pts;
+				}
+			}
+			max.saturating_sub(min) >= d
 		}
 		// No video keyframe will ever arrive to roll the fragment, so for
 		// audio-only broadcasts in `None` mode we fall back to per-frame
@@ -476,9 +488,10 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> anyhow::Result<
 	anyhow::ensure!(!frames.is_empty(), "encode_fragment called with no frames");
 	let seq = track.sequence_number;
 	track.sequence_number += 1;
+	let timescale = moq_net::Timescale::new(track.timescale).context("invalid track timescale")?;
 	Ok(crate::container::fmp4::encode_fragment(
 		track.track_id,
-		track.timescale,
+		timescale,
 		seq,
 		&frames,
 	)?)

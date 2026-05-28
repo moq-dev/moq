@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io::Cursor;
 
-use crate::container::Timestamp;
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
+use moq_net::Timestamp;
 use mp4_atom::Atom;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use webm_iterable::WebmIterator;
@@ -344,7 +344,8 @@ impl Import {
 			return Ok(());
 		};
 
-		// Compute PTS in nanoseconds, then convert to the Timestamp's microsecond timescale.
+		// Compute PTS in MKV's native nanosecond units and stamp it on the
+		// timestamp at NANO scale so a passthrough re-emit preserves precision.
 		let block_ticks = (self.cluster_timestamp as i64) + (rel_ts as i64);
 		anyhow::ensure!(block_ticks >= 0, "negative block timestamp");
 

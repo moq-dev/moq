@@ -23,7 +23,9 @@ use bytes::Bytes;
 use hang::catalog::{AudioCodec, AudioConfig, VideoCodec, VideoConfig};
 use mp4_atom::Atom;
 
-use crate::container::{Container, Frame, Timestamp};
+use moq_net::Timestamp;
+
+use crate::container::{Container, Frame};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -109,7 +111,7 @@ impl Container for Wire {
 	type Error = Error;
 
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
-		let timescale = self.trak.mdia.mdhd.timescale as u64;
+		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64)?;
 		let track_id = self.trak.tkhd.track_id;
 		encode(group, frames, timescale, track_id)
 	}
@@ -125,12 +127,12 @@ impl Container for Wire {
 			return Poll::Ready(Ok(None));
 		};
 
-		let timescale = self.trak.mdia.mdhd.timescale as u64;
+		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64)?;
 		Poll::Ready(Ok(Some(decode(data, timescale)?)))
 	}
 }
 
-pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, Error> {
+pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<Frame>, Error> {
 	use mp4_atom::DecodeMaybe;
 
 	let mut cursor = std::io::Cursor::new(&data);
@@ -169,7 +171,8 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, Error> {
 
 			let cts = entry.cts.unwrap_or_default() as i64;
 			let pts = dts.checked_add_signed(cts).ok_or(Error::PtsOverflow)?;
-			let timestamp = Timestamp::from_scale(pts, timescale)?;
+			// Preserve the fmp4 track's native scale through the pipeline.
+			let timestamp = Timestamp::new(pts, timescale)?;
 			let payload = Bytes::copy_from_slice(&mdat_data[offset..end]);
 			let flags = entry.flags.unwrap_or(0);
 			// depends_on_no_other (bits 24-25 == 0x2) means keyframe
@@ -192,7 +195,7 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, Error> {
 pub(crate) fn encode(
 	group: &mut moq_net::GroupProducer,
 	frames: &[Frame],
-	timescale: u64,
+	timescale: moq_net::Timescale,
 	track_id: u32,
 ) -> Result<(), Error> {
 	if frames.is_empty() {
@@ -218,7 +221,7 @@ pub(crate) fn encode(
 /// Returns an empty `Bytes` when `frames` is empty.
 pub(crate) fn encode_fragment(
 	track_id: u32,
-	timescale: u64,
+	timescale: moq_net::Timescale,
 	sequence_number: u32,
 	frames: &[Frame],
 ) -> Result<Bytes, Error> {
@@ -228,7 +231,11 @@ pub(crate) fn encode_fragment(
 		return Ok(Bytes::new());
 	}
 
-	let dts = (frames[0].timestamp.as_micros() * timescale as u128 / 1_000_000) as u64;
+	// Re-express the first frame's timestamp at the target track's scale. When the
+	// importer preserved the source scale (the common passthrough case), this is a
+	// no-op; otherwise it's a single rescale rather than the legacy `micros * scale
+	// / 1_000_000` round-trip.
+	let dts = frames[0].timestamp.as_scale(timescale) as u64;
 
 	let entries: Vec<_> = frames
 		.iter()
