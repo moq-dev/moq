@@ -1,7 +1,6 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
-use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
@@ -383,98 +382,146 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Track-level subscriber priority. SUBSCRIBE_UPDATE messages broadcast new values
 		// to both run_track (so future groups inherit the new priority) and serve_group
-		// tasks (so in-flight groups update via PriorityHandle::set_track).
+		// tasks (so in-flight groups update via PriorityHandle::set_track). The Sender
+		// stays in run_subscribe and gets handed to run_track so the same loop that
+		// parses SUBSCRIBE_UPDATEs also fans the new priority out.
 		let (track_priority_tx, track_priority_rx) = tokio::sync::watch::channel(track.priority);
-		let track_stats = std::sync::Arc::new(track_stats);
 
-		tokio::select! {
-			res = Self::run_track(session, track, subscribe, priority, track_stats, track_priority_rx, version) => res?,
-			res = Self::run_subscribe_updates(&mut stream.reader, &track_priority_tx) => res?,
-		}
+		let sub = Subscription {
+			session,
+			id: subscribe.id,
+			track_name: Arc::from(track.name.as_str()),
+			track_stats: Arc::new(track_stats),
+			priority,
+			track_priority: track_priority_rx,
+			version,
+		};
+
+		// `end_group` is a serving cap, not a subscription terminator: groups with
+		// sequence > cap are held in the producer's cache until the subscriber raises
+		// the cap (or unsets it) via SUBSCRIBE_UPDATE, then served in order. Only a
+		// peer FIN actually ends the subscription. This is what lets relays pause an
+		// upstream subscription across consumer churn without tearing it down.
+		sub.run_track(
+			track,
+			subscribe.start_group,
+			subscribe.end_group,
+			&mut stream.reader,
+			&track_priority_tx,
+		)
+		.await?;
 
 		stream.writer.finish()?;
 		stream.writer.closed().await
 	}
+}
 
-	async fn run_subscribe_updates<R: web_transport_trait::RecvStream>(
-		reader: &mut crate::coding::Reader<R, Version>,
-		priority_tx: &tokio::sync::watch::Sender<u8>,
-	) -> Result<(), Error> {
-		while let Some(upd) = reader.decode_maybe::<lite::SubscribeUpdate>().await? {
-			let _ = priority_tx.send(upd.priority);
-		}
-		Ok(())
-	}
+/// Shared per-subscription state for the publisher side. Cloned (cheaply — every
+/// field is either small or already Arc-backed) for each spawned serve_group task
+/// so each in-flight group reads the latest SUBSCRIBE_UPDATE priority via its own
+/// watch::Receiver.
+#[derive(Clone)]
+struct Subscription<S: web_transport_trait::Session> {
+	session: S,
+	id: u64,
+	track_name: Arc<str>,
+	track_stats: Arc<crate::PublisherTrack>,
+	priority: PriorityQueue,
+	track_priority: tokio::sync::watch::Receiver<u8>,
+	version: Version,
+}
 
+impl<S: web_transport_trait::Session> Subscription<S> {
 	async fn run_track(
-		session: S,
+		mut self,
 		mut track: TrackConsumer,
-		subscribe: &lite::Subscribe<'_>,
-		priority: PriorityQueue,
-		track_stats: std::sync::Arc<crate::PublisherTrack>,
-		mut track_priority: tokio::sync::watch::Receiver<u8>,
-		version: Version,
+		start_group: Option<u64>,
+		initial_end_group: Option<u64>,
+		reader: &mut crate::coding::Reader<S::RecvStream, Version>,
+		track_priority_tx: &tokio::sync::watch::Sender<u8>,
 	) -> Result<(), Error> {
-		let mut tasks = FuturesUnordered::new();
+		let mut tasks: FuturesUnordered<futures::future::BoxFuture<'static, ()>> = FuturesUnordered::new();
 
 		// Start the consumer at the specified sequence, otherwise start at the latest group.
-		if let Some(start_group) = subscribe.start_group.or_else(|| track.latest()) {
+		if let Some(start_group) = start_group.or_else(|| track.latest()) {
 			track.start_at(start_group);
 		}
 
+		// Apply the initial cap from the original Subscribe. Subsequent updates
+		// flow through the SubscribeUpdate select arm below.
+		track.end_at(initial_end_group);
+
 		loop {
-			let group = tokio::select! {
-				// Poll all active group futures; never matches but keeps them running.
+			tokio::select! {
+				// Drive in-flight group futures; never matches because the inner block returns false.
 				true = async {
 					while tasks.next().await.is_some() {}
 					false
 				} => unreachable!(),
-				Some(group) = track.recv_group().transpose() => group,
-				else => return Ok(()),
-			}?;
 
-			let sequence = group.sequence;
-			tracing::debug!(subscribe = %subscribe.id, track = %track.name, sequence, "serving group");
+				// next_group respects the cap set via track.end_at and parks
+				// while the next sequence is above the cap. Groups beyond the
+				// cap stay in the producer's cache (bounded by its 5s eviction).
+				res = track.next_group() => {
+					match res? {
+						Some(group) => self.spawn_serve(group, &mut tasks),
+						None => {
+							// Track finished cleanly; drain in-flight tasks and exit.
+							while tasks.next().await.is_some() {}
+							return Ok(());
+						}
+					}
+				}
 
-			let msg = lite::Group {
-				subscribe: subscribe.id,
-				sequence,
-			};
-
-			// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
-			let current_priority = *track_priority.borrow_and_update();
-			let handle = priority.insert(Priority::new(current_priority, sequence));
-			tasks.push(
-				Self::serve_group(
-					session.clone(),
-					msg,
-					handle,
-					group,
-					track_stats.clone(),
-					track_priority.clone(),
-					version,
-				)
-				.map(|_| ()),
-			);
+				// SUBSCRIBE_UPDATE messages share this hot loop; safe because
+				// decode_maybe is cancel-safe given quinn/qmux's cancel-safe
+				// read primitives (see Reader::decode_maybe doc).
+				upd = reader.decode_maybe::<lite::SubscribeUpdate>() => {
+					let Some(upd) = upd? else {
+						// Peer FIN'd — they're done with this subscription. Drop any
+						// in-flight serve_group tasks (don't drain) so half-sent
+						// groups get cancelled rather than completed pointlessly.
+						return Ok(());
+					};
+					let _ = track_priority_tx.send(upd.priority);
+					track.end_at(upd.end_group);
+				}
+			}
 		}
 	}
 
+	fn spawn_serve(
+		&mut self,
+		group: GroupConsumer,
+		tasks: &mut FuturesUnordered<futures::future::BoxFuture<'static, ()>>,
+	) {
+		let sequence = group.sequence;
+		tracing::debug!(subscribe = self.id, track = %self.track_name, sequence, "serving group");
+
+		// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
+		let current_priority = *self.track_priority.borrow_and_update();
+		let handle = self.priority.insert(Priority::new(current_priority, sequence));
+		let fut = self.clone().serve_group(sequence, handle, group);
+		tasks.push(fut.map(|_| ()).boxed());
+	}
+
 	async fn serve_group(
-		session: S,
-		msg: lite::Group,
+		mut self,
+		sequence: u64,
 		mut priority: PriorityHandle,
 		mut group: GroupConsumer,
-		track_stats: std::sync::Arc<crate::PublisherTrack>,
-		mut track_priority: tokio::sync::watch::Receiver<u8>,
-		version: Version,
 	) -> Result<(), Error> {
-		let stream = session.open_uni().await.map_err(Error::from_transport)?;
+		let msg = lite::Group {
+			subscribe: self.id,
+			sequence,
+		};
+		let stream = self.session.open_uni().await.map_err(Error::from_transport)?;
 
-		let mut stream = Writer::new(stream, version);
+		let mut stream = Writer::new(stream, self.version);
 		stream.set_priority(priority.current());
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
-		track_stats.group();
+		self.track_stats.group();
 
 		loop {
 			let frame = tokio::select! {
@@ -485,8 +532,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					stream.set_priority(new_pri);
 					continue;
 				}
-				Ok(()) = track_priority.changed() => {
-					priority.set_track(*track_priority.borrow_and_update());
+				Ok(()) = self.track_priority.changed() => {
+					priority.set_track(*self.track_priority.borrow_and_update());
 					continue;
 				}
 			};
@@ -497,7 +544,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			stream.encode(&frame.size).await?;
-			track_stats.frame();
+			self.track_stats.frame();
 
 			loop {
 				let chunk = tokio::select! {
@@ -508,8 +555,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						stream.set_priority(new_pri);
 						continue;
 					}
-					Ok(()) = track_priority.changed() => {
-						priority.set_track(*track_priority.borrow_and_update());
+					Ok(()) = self.track_priority.changed() => {
+						priority.set_track(*self.track_priority.borrow_and_update());
 						continue;
 					}
 				};
@@ -527,12 +574,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								new_pri = priority.next() => {
 									stream.set_priority(new_pri);
 								}
-								Ok(()) = track_priority.changed() => {
-									priority.set_track(*track_priority.borrow_and_update());
+								Ok(()) = self.track_priority.changed() => {
+									priority.set_track(*self.track_priority.borrow_and_update());
 								}
 							}
 						}
-						track_stats.bytes(n);
+						self.track_stats.bytes(n);
 					}
 					None => break,
 				}
@@ -542,7 +589,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.finish()?;
 		stream.closed().await?;
 
-		tracing::debug!(sequence = %msg.sequence, "finished group");
+		tracing::debug!(sequence, "finished group");
 
 		Ok(())
 	}

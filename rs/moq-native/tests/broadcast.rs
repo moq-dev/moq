@@ -630,3 +630,131 @@ async fn broadcast_websocket_fallback() {
 		.expect("server task panicked")
 		.expect("server task failed");
 }
+
+// ── Linger: relay-style subscription reuse ──────────────────────────
+//
+// When the last consumer of an upstream subscription drops, the relay keeps
+// the TrackProducer alive briefly so a returning consumer reuses it instead
+// of triggering a fresh upstream Subscribe. This is the moq-lite linger
+// behavior: on `track.unused()` the subscriber sends `SubscribeUpdate(priority=0)`
+// + FIN, then waits up to LINGER_TIMEOUT for either the upstream to FIN back,
+// the timeout to expire, or a new consumer to arrive (resume with
+// `start_group = max + 1`).
+//
+// Reliably distinguishing the Reused vs Complete vs Cancelled branches from a
+// black-box client test is hard because all three paths converge on the same
+// observable behavior at the consumer (groups eventually flow). What we *can*
+// test cheaply here is the end-to-end smoke: subscribe → drop → resubscribe
+// must keep working, with a fresh group flowing afterwards.
+
+/// Smoke test: dropping the last consumer and resubscribing within the linger
+/// window doesn't wedge the subscription, and groups appended after the resume
+/// still arrive at the new consumer.
+#[tokio::test]
+async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let mut track = broadcast.create_track(Track::new("video")).expect("create track");
+
+	let mut group0 = track.append_group().expect("append group 0");
+	group0.write_frame(b"a".as_ref()).expect("write frame 0");
+	group0.finish().expect("finish group 0");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-lite-03".parse().unwrap()];
+	let mut server = server_config.init().expect("init server");
+	let addr = server.local_addr().expect("server addr");
+
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.version = vec!["moq-lite-03".parse().unwrap()];
+	let client = client_config.init().expect("init client");
+	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("accept");
+		let session = request.with_publish(pub_origin.consume()).ok().await?;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_consume(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timeout")
+		.expect("connect failed");
+
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+		.await
+		.expect("announce timeout")
+		.expect("origin closed");
+	assert_eq!(path.as_str(), "test");
+	let bc = bc.expect("expected announce");
+
+	// First subscription: receive group 0.
+	let mut sub1 = bc.subscribe_track(&Track::new("video")).expect("subscribe1");
+	let mut g = tokio::time::timeout(TIMEOUT, sub1.recv_group())
+		.await
+		.expect("recv group 0 timeout")
+		.expect("recv group 0 failed")
+		.expect("track closed early");
+	assert_eq!(g.sequence, 0);
+	let frame = tokio::time::timeout(TIMEOUT, g.read_frame())
+		.await
+		.expect("read frame 0 timeout")
+		.expect("read frame 0 failed")
+		.expect("group closed early");
+	assert_eq!(&*frame, b"a");
+
+	// Drop the only consumer to trigger the linger phase.
+	drop(g);
+	drop(sub1);
+
+	// Yield a few times so the subscriber task can observe `track.unused()` and
+	// enter the linger select. A small real sleep also makes the test less
+	// scheduler-dependent across runtimes.
+	tokio::time::sleep(Duration::from_millis(20)).await;
+
+	// Resubscribe well inside the 5s linger window.
+	let mut sub2 = bc.subscribe_track(&Track::new("video")).expect("subscribe2");
+
+	// A new group published after the resubscribe must reach the consumer
+	// regardless of which linger branch fired.
+	let mut group1 = track.append_group().expect("append group 1");
+	group1.write_frame(b"b".as_ref()).expect("write frame 1");
+	group1.finish().expect("finish group 1");
+
+	let mut saw_group1 = false;
+	for _ in 0..2 {
+		let mut next = tokio::time::timeout(TIMEOUT, sub2.recv_group())
+			.await
+			.expect("recv group timeout")
+			.expect("recv group failed")
+			.expect("track closed early");
+		if next.sequence == 1 {
+			let frame = tokio::time::timeout(TIMEOUT, next.read_frame())
+				.await
+				.expect("read frame 1 timeout")
+				.expect("read frame 1 failed")
+				.expect("group closed early on resume");
+			assert_eq!(&*frame, b"b");
+			saw_group1 = true;
+			break;
+		}
+	}
+	assert!(
+		saw_group1,
+		"expected group 1 to be delivered to the resubscribed consumer"
+	);
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}

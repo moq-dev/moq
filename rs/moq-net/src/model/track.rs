@@ -130,6 +130,61 @@ impl State {
 		}
 	}
 
+	/// Find the smallest-sequence cached group satisfying
+	/// `next_sequence <= seq <= end_sequence (if set)`. Used by
+	/// [`TrackConsumer::next_group`] so the range can be widened (or unset)
+	/// after the fact and previously-skipped cached groups become available
+	/// without scanning past them in arrival order.
+	///
+	/// Returns `Poll::Pending` when no in-range group is currently cached but
+	/// future groups could still arrive in range; returns `Ok(None)` only when
+	/// the track is finalized and no further in-range group is possible.
+	fn poll_next_in_range(&self, next_sequence: u64, end_sequence: Option<u64>) -> Poll<Result<Option<GroupConsumer>>> {
+		// If the end cap is already below where we'd resume, no group can
+		// ever satisfy this call until the cap rises. Pending (not None) so
+		// the consumer is parked rather than told the stream is over.
+		if let Some(end) = end_sequence
+			&& end < next_sequence
+		{
+			if let Some(err) = &self.abort {
+				return Poll::Ready(Err(err.clone()));
+			}
+			return Poll::Pending;
+		}
+
+		let mut best: Option<&GroupProducer> = None;
+		for (group, _) in self.groups.iter().flatten() {
+			if group.sequence < next_sequence {
+				continue;
+			}
+			if let Some(end) = end_sequence
+				&& group.sequence > end
+			{
+				continue;
+			}
+			if best.is_none_or(|b| group.sequence < b.sequence) {
+				best = Some(group);
+			}
+		}
+
+		if let Some(group) = best {
+			return Poll::Ready(Ok(Some(group.consume())));
+		}
+
+		// No in-range group is cached. Decide whether more could ever arrive.
+		if let Some(err) = &self.abort {
+			return Poll::Ready(Err(err.clone()));
+		}
+		// `final_sequence` is one past the last possible sequence. If our
+		// floor is already at/past it, nothing else can land in range.
+		if let Some(fin) = self.final_sequence
+			&& next_sequence >= fin
+		{
+			return Poll::Ready(Ok(None));
+		}
+		Poll::Pending
+	}
+
 	fn poll_get_group(&self, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
 		// Search for the group with the matching sequence, skipping tombstones.
 		for (group, _) in self.groups.iter().flatten() {
@@ -333,6 +388,7 @@ impl TrackProducer {
 			index: 0,
 			min_sequence: 0,
 			next_sequence: 0,
+			end_sequence: None,
 		}
 	}
 
@@ -361,6 +417,11 @@ impl TrackProducer {
 	/// Return true if the track has been closed.
 	pub fn is_closed(&self) -> bool {
 		self.state.read().is_closed()
+	}
+
+	/// Return the latest sequence number successfully appended to the track.
+	pub fn latest(&self) -> Option<u64> {
+		self.state.read().max_sequence
 	}
 
 	/// Return true if this is the same track.
@@ -417,14 +478,13 @@ impl TrackWeak {
 			index: 0,
 			min_sequence: 0,
 			next_sequence: 0,
+			end_sequence: None,
 		}
 	}
 
-	pub async fn unused(&self) -> crate::Result<()> {
-		self.state
-			.unused()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	/// Wait until the underlying track state closes (producer dropped or aborted).
+	pub async fn closed(&self) {
+		self.state.closed().await;
 	}
 
 	pub fn is_clone(&self, other: &Self) -> bool {
@@ -444,6 +504,11 @@ pub struct TrackConsumer {
 	/// One past the highest sequence returned by [`Self::next_group`].
 	/// Used only by that method to skip late arrivals; does not affect [`Self::recv_group`].
 	next_sequence: u64,
+	/// Inclusive upper sequence bound for [`Self::next_group`]. `None` means
+	/// no cap. Set by [`Self::end_at`]; can be raised, lowered, or unset at
+	/// any time. Groups beyond the cap stay in the producer's cache and
+	/// become eligible again when the cap rises (or is removed).
+	end_sequence: Option<u64>,
 }
 
 impl std::ops::Deref for TrackConsumer {
@@ -502,18 +567,16 @@ impl TrackConsumer {
 	/// Late arrivals (sequence at or below the last returned) are silently skipped, so this
 	/// produces a monotonically increasing sequence at the cost of dropping out-of-order
 	/// groups. Use [`Self::poll_recv_group`] to see every group in arrival order instead.
+	///
+	/// Honors the cap set by [`Self::end_at`]: groups with sequence past the cap are left
+	/// in the producer's cache and become eligible again if the cap is raised or removed.
 	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
-		loop {
-			let Some(group) = ready!(self.poll_recv_group(waiter)?) else {
-				return Poll::Ready(Ok(None));
-			};
-			if group.sequence < self.next_sequence {
-				// Late arrival; discard and keep looking.
-				continue;
-			}
-			self.next_sequence = group.sequence.saturating_add(1);
-			return Poll::Ready(Ok(Some(group)));
-		}
+		let floor = self.next_sequence.max(self.min_sequence);
+		let Some(group) = ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, self.end_sequence))?) else {
+			return Poll::Ready(Ok(None));
+		};
+		self.next_sequence = group.sequence.saturating_add(1);
+		Poll::Ready(Ok(Some(group)))
 	}
 
 	/// Return the next group with a higher sequence number than any previously returned.
@@ -594,6 +657,18 @@ impl TrackConsumer {
 	/// Start the consumer at the specified sequence.
 	pub fn start_at(&mut self, sequence: u64) {
 		self.min_sequence = sequence;
+	}
+
+	/// Cap the consumer at the specified sequence (inclusive), or remove the cap entirely.
+	///
+	/// Accepts a bare `u64` (cap), `Some(u64)`, or `None` (uncap).
+	///
+	/// Affects [`Self::next_group`] only: groups beyond the cap stay in the producer's
+	/// cache rather than being skipped past, so a later call to [`Self::end_at`] with a
+	/// higher value (or `None`) makes them available again. Lowering the cap below the
+	/// consumer's current cursor parks the consumer until the cap is raised.
+	pub fn end_at(&mut self, sequence: impl Into<Option<u64>>) {
+		self.end_sequence = sequence.into();
 	}
 
 	/// Return the latest sequence number in the track.
@@ -964,25 +1039,191 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn recv_group_after_next_group_sees_late_arrivals() {
+	async fn next_group_and_recv_group_use_independent_cursors() {
 		let mut producer = Track::new("test").produce();
 		let mut consumer = producer.consume();
 
+		// Out-of-order arrivals: seq 5 first, then seq 3.
 		producer.create_group(Group { sequence: 5 }).unwrap();
 		producer.create_group(Group { sequence: 3 }).unwrap();
 
-		// Ordered returns seq 5 and advances its internal cursor past it.
+		// next_group is sequence-ordered: it returns the smallest sequence first,
+		// regardless of arrival order.
 		let group = consumer
 			.next_group()
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(group.sequence, 5);
+		assert_eq!(group.sequence, 3);
 
-		// Intermixing: recv_group on the same consumer still returns the late seq 3.
-		// The ordered cursor is separate from the recv_group filter.
-		assert_eq!(consumer.assert_group().sequence, 3);
+		// recv_group is arrival-ordered and uses an independent cursor, so it
+		// still starts at the first arrival.
+		assert_eq!(consumer.assert_group().sequence, 5);
+	}
+
+	#[tokio::test]
+	async fn end_at_caps_next_group() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		for s in 0..6 {
+			producer.create_group(Group { sequence: s }).unwrap();
+		}
+
+		consumer.end_at(2);
+
+		// Groups 0, 1, 2 are within the cap.
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			0
+		);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			1
+		);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			2
+		);
+
+		// Group 3 is beyond the cap: next_group parks even though cached groups exist.
+		assert!(
+			consumer.next_group().now_or_never().is_none(),
+			"capped consumer must block instead of returning out-of-range groups"
+		);
+	}
+
+	#[tokio::test]
+	async fn end_at_release_drains_cached_groups() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		for s in 0..6 {
+			producer.create_group(Group { sequence: s }).unwrap();
+		}
+
+		consumer.end_at(1);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			0
+		);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			1
+		);
+		assert!(consumer.next_group().now_or_never().is_none(), "capped at 1");
+
+		// Raise the cap; previously-blocked cached groups become available again.
+		consumer.end_at(4);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			2
+		);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			3
+		);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			4
+		);
+		assert!(consumer.next_group().now_or_never().is_none(), "capped at 4");
+
+		// Remove the cap; everything remaining flows.
+		consumer.end_at(None);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			5
+		);
+		assert!(consumer.next_group().now_or_never().is_none(), "no more groups");
+	}
+
+	#[tokio::test]
+	async fn end_at_lower_than_cursor_parks_consumer() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		for s in 0..3 {
+			producer.create_group(Group { sequence: s }).unwrap();
+		}
+
+		// Drain everything with no cap.
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			0
+		);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			1
+		);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			2
+		);
+
+		// Lower the cap below the cursor. New groups beyond the cap are blocked.
+		consumer.end_at(1);
+		producer.create_group(Group { sequence: 3 }).unwrap();
+		producer.create_group(Group { sequence: 4 }).unwrap();
+		assert!(
+			consumer.next_group().now_or_never().is_none(),
+			"cap is below cursor; nothing returnable until cap rises"
+		);
+
+		// Restoring the cap to no-limit (or any value >= cursor) releases them.
+		consumer.end_at(None);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			3
+		);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			4
+		);
+	}
+
+	#[tokio::test]
+	async fn end_at_toggling_around_late_arrivals() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		consumer.end_at(5);
+
+		// Out-of-order arrivals all within the cap.
+		producer.create_group(Group { sequence: 2 }).unwrap();
+		producer.create_group(Group { sequence: 5 }).unwrap();
+		producer.create_group(Group { sequence: 3 }).unwrap();
+		// One beyond the cap; should be held even though it arrived in the middle.
+		producer.create_group(Group { sequence: 8 }).unwrap();
+		producer.create_group(Group { sequence: 4 }).unwrap();
+
+		// next_group walks in sequence order through everything <= cap.
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			2
+		);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			3
+		);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			4
+		);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			5
+		);
+		// Now blocked: 8 is still beyond the cap.
+		assert!(consumer.next_group().now_or_never().is_none());
+
+		// Raise the cap; cached seq 8 is finally served.
+		consumer.end_at(10);
+		assert_eq!(
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			8
+		);
 	}
 
 	#[tokio::test]
