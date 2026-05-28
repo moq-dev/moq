@@ -187,47 +187,62 @@ mod tests {
 	// Brings `qmux::Session::protocol` and `::closed` into scope.
 	use web_transport_trait::Session as _;
 
+	/// The newest moq ALPN both sides agree on. Derived from the same source
+	/// of truth that `supported_subprotocols` and `qmux::Client::with_protocols`
+	/// consume, so adding a new ALPN doesn't break these tests independently
+	/// of the production logic.
+	fn newest_moq_alpn() -> &'static str {
+		moq_net::ALPNS.first().copied().expect("moq_net::ALPNS is empty")
+	}
+
+	fn preferred_qmux_prefix() -> &'static str {
+		qmux::PREFIXES.first().copied().expect("qmux::PREFIXES is empty")
+	}
+
 	#[test]
 	fn supported_subprotocols_lists_full_matrix() {
 		let list = supported_subprotocols();
 
 		// Newest moq ALPN under the preferred prefix must come first so axum
 		// picks it whenever the client offers it.
-		assert_eq!(list.first().map(String::as_str), Some("qmux-00.moq-lite-04"));
+		let expected_first = format!("{}{}", preferred_qmux_prefix(), newest_moq_alpn());
+		assert_eq!(list.first().map(String::as_str), Some(expected_first.as_str()));
 
 		// Every moq ALPN must appear under every qmux prefix.
-		for &alpn in moq_net::ALPNS {
-			assert!(list.contains(&format!("qmux-00.{alpn}")), "missing qmux-00.{alpn}");
-			assert!(
-				list.contains(&format!("webtransport.{alpn}")),
-				"missing webtransport.{alpn}"
-			);
+		for &prefix in qmux::PREFIXES {
+			for &alpn in moq_net::ALPNS {
+				let entry = format!("{prefix}{alpn}");
+				assert!(list.contains(&entry), "missing {entry}");
+			}
 		}
 
 		// Bare qmux fallbacks must come after every versioned entry so they
 		// only win when the client offers nothing better. The buggy
-		// `["webtransport"]` advertise list would put webtransport first and
+		// `["webtransport"]` advertise list would put a bare entry first and
 		// silently downgrade modern clients to Lite02.
-		let webtransport_idx = list
-			.iter()
-			.position(|s| s == "webtransport")
-			.expect("bare webtransport missing");
 		let last_versioned_idx = list
 			.iter()
 			.rposition(|s| s.contains('.'))
 			.expect("no versioned entries");
-		assert!(
-			webtransport_idx > last_versioned_idx,
-			"bare webtransport must come after every versioned entry, got {list:?}",
-		);
+		for &bare in qmux::ALPNS {
+			let bare_idx = list
+				.iter()
+				.position(|s| s == bare)
+				.unwrap_or_else(|| panic!("missing bare fallback {bare}"));
+			assert!(
+				bare_idx > last_versioned_idx,
+				"bare {bare} must come after every versioned entry, got {list:?}",
+			);
+		}
 	}
 
 	/// End-to-end regression: connect a qmux client offering the full moq
 	/// ALPN list to an axum router that mirrors `serve_ws`'s subprotocol
-	/// wiring. Both client and server must observe `moq-lite-04` on the
-	/// resulting qmux session. A bug in `supported_subprotocols` or in the
-	/// `Bare::with_alpn` plumbing collapses this to `None` / bare
-	/// `webtransport`, and moq-net then downgrades to Lite02 via SETUP.
+	/// wiring. Both client and server must observe the newest moq ALPN
+	/// (`moq_net::ALPNS[0]`) on the resulting qmux session. A bug in
+	/// `supported_subprotocols` or in the `Bare::with_alpn` plumbing
+	/// collapses this to `None` / bare `webtransport`, and moq-net then
+	/// downgrades to Lite02 via SETUP.
 	#[tokio::test]
 	async fn axum_ws_negotiates_newest_moq_alpn() {
 		let (server_alpn_tx, server_alpn_rx) = oneshot::channel::<Option<String>>();
@@ -281,7 +296,7 @@ mod tests {
 
 		assert_eq!(
 			session.protocol(),
-			Some("moq-lite-04"),
+			Some(newest_moq_alpn()),
 			"client side should see the newest moq ALPN, got {:?}",
 			session.protocol(),
 		);
@@ -292,7 +307,7 @@ mod tests {
 			.expect("server alpn channel dropped");
 		assert_eq!(
 			server_alpn.as_deref(),
-			Some("moq-lite-04"),
+			Some(newest_moq_alpn()),
 			"server side should see the newest moq ALPN after Bare::with_alpn",
 		);
 
