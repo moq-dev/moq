@@ -27,6 +27,14 @@ import { Version } from "./version.ts";
 // blocks. The timeout turns that into a clear error.
 const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
 
+// Out-parameter for #openSubscribe: lets the caller observe partial progress
+// (stream opened, trackAlias registered) so it can clean up on timeout even
+// before the setup promise settles.
+type SubscribeSetupState = {
+	stream?: Stream;
+	registeredAlias?: bigint;
+};
+
 /**
  * Handles subscribing to broadcasts using moq-transport protocol.
  * Uses the stream-per-request pattern (real bidi streams for v17, virtual for v14-v16).
@@ -199,54 +207,11 @@ export class Subscriber {
 
 		console.debug(`subscribe start: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
 
-		// Open the stream, send SUBSCRIBE, and wait for SUBSCRIBE_OK under a
-		// timeout. Capture the stream and the registered trackAlias via closure
-		// so the timeout path can clean them up if setup eventually finishes.
-		let opened: Stream | undefined;
-		let registeredAlias: bigint | undefined;
-		const setup = (async (): Promise<{ stream: Stream; alias: bigint }> => {
-			opened = await this.#session.openBi();
-
-			await opened.writer.u53(Subscribe.id);
-			const msg = new Subscribe({
-				requestId,
-				trackNamespace: broadcast,
-				trackName: request.track.name,
-				subscriberPriority: request.priority,
-			});
-			await msg.encode(opened.writer, version);
-			console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
-
-			// Pre-register with requestId so early group uni streams aren't dropped.
-			// The publisher typically uses requestId as the trackAlias.
-			this.#subscribes.set(requestId, request.track);
-			registeredAlias = requestId;
-
-			const respTypeId = await opened.reader.u53();
-			if (respTypeId !== SubscribeOk.id) {
-				let reasonPhrase = "unknown error";
-				try {
-					if (respTypeId === RequestError.id) {
-						const err =
-							version === Version.DRAFT_14
-								? await (await import("./subscribe.ts")).SubscribeError.decode(opened.reader, version)
-								: await RequestError.decode(opened.reader, version);
-						reasonPhrase = `code=${err.errorCode} reason=${err.reasonPhrase}`;
-					}
-				} catch {
-					// Decoding error response failed, use default message
-				}
-				throw new Error(`SUBSCRIBE error: ${reasonPhrase}`);
-			}
-
-			const ok = await SubscribeOk.decode(opened.reader, version);
-			if (ok.trackAlias !== requestId) {
-				this.#subscribes.delete(requestId);
-				this.#subscribes.set(ok.trackAlias, request.track);
-				registeredAlias = ok.trackAlias;
-			}
-			return { stream: opened, alias: ok.trackAlias };
-		})();
+		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
+		// flows back via `state` so the timeout path can clean up the stream
+		// and any registration if setup eventually finishes.
+		const state: SubscribeSetupState = {};
+		const setup = this.#openSubscribe(state, broadcast, request, requestId);
 
 		let stream: Stream;
 		let trackAlias: bigint;
@@ -269,16 +234,11 @@ export class Subscriber {
 			// and drop any registration so we don't leak. Cover both branches:
 			// setup may resolve late, or reject (e.g. SUBSCRIBE error) after the
 			// stream is already open.
-			setup.then(
-				() => {
-					if (registeredAlias !== undefined) this.#subscribes.delete(registeredAlias);
-					opened?.abort(e);
-				},
-				() => {
-					if (registeredAlias !== undefined) this.#subscribes.delete(registeredAlias);
-					opened?.abort(e);
-				},
-			);
+			const cleanup = () => {
+				if (state.registeredAlias !== undefined) this.#subscribes.delete(state.registeredAlias);
+				state.stream?.abort(e);
+			};
+			setup.then(cleanup, cleanup);
 			return;
 		}
 
@@ -310,6 +270,61 @@ export class Subscriber {
 		} finally {
 			this.#subscribes.delete(trackAlias);
 		}
+	}
+
+	// Opens the subscribe stream, sends SUBSCRIBE, and reads the response.
+	// `state` is populated as soon as the stream opens and again when the
+	// trackAlias is registered, so the caller can clean both up on timeout
+	// even before this promise settles.
+	async #openSubscribe(
+		state: SubscribeSetupState,
+		broadcast: Path.Valid,
+		request: TrackRequest,
+		requestId: bigint,
+	): Promise<{ stream: Stream; alias: bigint }> {
+		const version = this.#session.version;
+
+		state.stream = await this.#session.openBi();
+
+		await state.stream.writer.u53(Subscribe.id);
+		const msg = new Subscribe({
+			requestId,
+			trackNamespace: broadcast,
+			trackName: request.track.name,
+			subscriberPriority: request.priority,
+		});
+		await msg.encode(state.stream.writer, version);
+		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
+
+		// Pre-register with requestId so early group uni streams aren't dropped.
+		// The publisher typically uses requestId as the trackAlias.
+		this.#subscribes.set(requestId, request.track);
+		state.registeredAlias = requestId;
+
+		const respTypeId = await state.stream.reader.u53();
+		if (respTypeId !== SubscribeOk.id) {
+			let reasonPhrase = "unknown error";
+			try {
+				if (respTypeId === RequestError.id) {
+					const err =
+						version === Version.DRAFT_14
+							? await (await import("./subscribe.ts")).SubscribeError.decode(state.stream.reader, version)
+							: await RequestError.decode(state.stream.reader, version);
+					reasonPhrase = `code=${err.errorCode} reason=${err.reasonPhrase}`;
+				}
+			} catch {
+				// Decoding error response failed, use default message
+			}
+			throw new Error(`SUBSCRIBE error: ${reasonPhrase}`);
+		}
+
+		const ok = await SubscribeOk.decode(state.stream.reader, version);
+		if (ok.trackAlias !== requestId) {
+			this.#subscribes.delete(requestId);
+			this.#subscribes.set(ok.trackAlias, request.track);
+			state.registeredAlias = ok.trackAlias;
+		}
+		return { stream: state.stream, alias: ok.trackAlias };
 	}
 
 	/**

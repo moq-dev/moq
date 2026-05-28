@@ -186,22 +186,11 @@ export class Subscriber {
 
 		const msg = new Subscribe({ id, broadcast, track: request.track.name, priority: request.priority });
 
-		// Open the stream, send SUBSCRIBE, and wait for SUBSCRIBE_OK under a
-		// timeout. If we time out the underlying stream may still finish opening
-		// later, so capture it via closure and abort it once it settles.
-		let opened: Stream | undefined;
-		const setup = (async (): Promise<Stream> => {
-			opened = await Stream.open(this.#quic);
-			await opened.writer.u53(StreamId.Subscribe);
-			await msg.encode(opened.writer, this.version);
-
-			// The first response MUST be a SUBSCRIBE_OK.
-			const resp = await decodeSubscribeResponse(opened.reader, this.version);
-			if (!("ok" in resp)) {
-				throw new Error("first subscribe response must be SUBSCRIBE_OK");
-			}
-			return opened;
-		})();
+		// Open the stream and wait for SUBSCRIBE_OK under a timeout. The stream
+		// handle flows back via `state` so the timeout path can abort it if it
+		// finishes opening after the deadline.
+		const state: { stream?: Stream } = {};
+		const setup = this.#openSubscribe(state, msg);
 
 		let stream: Stream;
 		try {
@@ -222,8 +211,8 @@ export class Subscriber {
 			// don't leak it. Cover both branches: setup may resolve late, or it
 			// may reject (e.g. encode/decode failure) after the stream is open.
 			setup.then(
-				() => opened?.abort(e),
-				() => opened?.abort(e),
+				() => state.stream?.abort(e),
+				() => state.stream?.abort(e),
 			);
 			return;
 		}
@@ -257,6 +246,22 @@ export class Subscriber {
 		} finally {
 			this.#subscribes.delete(id);
 		}
+	}
+
+	// Opens the subscribe stream, sends SUBSCRIBE, and reads SUBSCRIBE_OK.
+	// `state.stream` is populated as soon as the stream opens so the caller
+	// can clean it up on timeout even before this promise settles.
+	async #openSubscribe(state: { stream?: Stream }, msg: Subscribe): Promise<Stream> {
+		state.stream = await Stream.open(this.#quic);
+		await state.stream.writer.u53(StreamId.Subscribe);
+		await msg.encode(state.stream.writer, this.version);
+
+		// The first response MUST be a SUBSCRIBE_OK.
+		const resp = await decodeSubscribeResponse(state.stream.reader, this.version);
+		if (!("ok" in resp)) {
+			throw new Error("first subscribe response must be SUBSCRIBE_OK");
+		}
+		return state.stream;
 	}
 
 	/**
