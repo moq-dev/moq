@@ -30,12 +30,12 @@ public = ""
 #
 #   .stats/node/local/host
 #
-# carrying four gzipped JSON tracks (publisher.json.gz, subscriber.json.gz,
-# internal/publisher.json.gz, internal/subscriber.json.gz) of {path:
-# counters} for every broadcast active within the last `retention_ticks`
-# ticks.
+# carrying four JSON tracks (publisher.json, subscriber.json,
+# internal/publisher.json, internal/subscriber.json) of {path: counters}
+# for every broadcast active within the last `retention_ticks` ticks.
 [stats]
 enabled = true
+
 # `node` is the suffix that disambiguates per-relay broadcasts in a cluster.
 # It can be multi-segment (e.g. `sjc/1`, `sjc/2`) to nest multiple hosts under
 # a shared region key. Single-node setups can leave it unset.

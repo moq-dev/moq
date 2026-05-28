@@ -5,12 +5,12 @@
 //! broadcast (or `<prefix>/node` when no node is configured). The broadcast
 //! carries four tracks, one per `(tier, role)` pair:
 //!
-//! * `publisher.json.gz`           : external (e.g. customer) egress
-//! * `subscriber.json.gz`          : external ingress
-//! * `internal/publisher.json.gz`  : internal (e.g. mTLS cluster peer) egress
-//! * `internal/subscriber.json.gz` : internal ingress
+//! * `publisher.json`           : external (e.g. customer) egress
+//! * `subscriber.json`          : external ingress
+//! * `internal/publisher.json`  : internal (e.g. mTLS cluster peer) egress
+//! * `internal/subscriber.json` : internal ingress
 //!
-//! Each frame is a gzipped JSON object mapping broadcast path to a cumulative
+//! Each frame is a JSON object mapping broadcast path to a cumulative
 //! counter snapshot. Tier, role, and node are implied by the track and
 //! broadcast paths, so they aren't repeated inside the frame. A broadcast
 //! appears in the frame for a given (tier, role) while it has at least one
@@ -59,7 +59,6 @@
 
 use std::{
 	collections::{BTreeMap, HashMap},
-	io::Write,
 	sync::{
 		Arc, Weak,
 		atomic::{AtomicU64, Ordering},
@@ -67,7 +66,6 @@ use std::{
 	time::Duration,
 };
 
-use flate2::{Compression, write::GzEncoder};
 use serde::Serialize;
 use web_async::{Lock, spawn};
 
@@ -131,10 +129,10 @@ fn slot_index(tier: Tier, role: Role) -> usize {
 }
 
 const TRACK_NAMES: [&str; NUM_SLOTS] = [
-	"publisher.json.gz",
-	"subscriber.json.gz",
-	"internal/publisher.json.gz",
-	"internal/subscriber.json.gz",
+	"publisher.json",
+	"subscriber.json",
+	"internal/publisher.json",
+	"internal/subscriber.json",
 ];
 
 /// Top-level stats aggregator. Cheap to clone (`Arc` inside). One instance per
@@ -683,14 +681,7 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 			if &json == last {
 				continue;
 			}
-			let compressed = match gzip(&json) {
-				Ok(b) => b,
-				Err(err) => {
-					tracing::debug!(?err, slot, "stats: failed to gzip frame");
-					continue;
-				}
-			};
-			if let Err(err) = track.write_frame(compressed) {
+			if let Err(err) = track.write_frame(json.clone()) {
 				tracing::debug!(?err, slot, "stats: failed to write frame");
 				// Leave `last_payload` untouched so the next tick retries this
 				// snapshot instead of skipping it as "already written".
@@ -725,12 +716,6 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 	}
 }
 
-fn gzip(data: &[u8]) -> std::io::Result<Vec<u8>> {
-	let mut enc = GzEncoder::new(Vec::new(), Compression::default());
-	enc.write_all(data)?;
-	enc.finish()
-}
-
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(serde::Deserialize))]
 struct Snapshot {
@@ -756,9 +741,7 @@ fn advertised_path(prefix: &Path, node: Option<&str>) -> PathOwned {
 
 #[cfg(test)]
 mod tests {
-	use std::{collections::BTreeMap, io::Read, sync::atomic::Ordering::Relaxed};
-
-	use flate2::read::GzDecoder;
+	use std::{collections::BTreeMap, sync::atomic::Ordering::Relaxed};
 
 	use crate::{Origin, Path};
 
@@ -1035,7 +1018,7 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn gzip_frame_decompresses_to_expected_json() {
+	async fn frame_round_trips_as_json() {
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume();
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -1049,7 +1032,7 @@ mod tests {
 		let broadcast = broadcast.expect("active");
 		let track = broadcast
 			.subscribe_track(&Track {
-				name: "publisher.json.gz".into(),
+				name: "publisher.json".into(),
 				priority: 0,
 			})
 			.expect("subscribe");
@@ -1062,9 +1045,6 @@ mod tests {
 
 	async fn read_frame(mut track: crate::TrackConsumer) -> BTreeMap<String, Snapshot> {
 		let bytes = track.read_frame().await.expect("ok").expect("frame");
-		let mut dec = GzDecoder::new(bytes.as_ref());
-		let mut json = String::new();
-		dec.read_to_string(&mut json).expect("decompress");
-		serde_json::from_str(&json).expect("json parse")
+		serde_json::from_slice(&bytes).expect("json parse")
 	}
 }

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// session the relay accepts (and every cluster dial). The aggregator
 /// publishes a single `<prefix>/node/<node>` broadcast (or `<prefix>/node`
 /// when [`Self::node`] is unset) on the cluster origin. Each frame is a
-/// gzipped JSON map of broadcast path to a cumulative counter snapshot,
+/// JSON map of broadcast path to a cumulative counter snapshot,
 /// covering every broadcast that has had an active subscription within the
 /// last [`Self::retention_ticks`] ticks.
 #[derive(Args, Clone, Debug, Default, Deserialize, Serialize)]
@@ -52,7 +52,7 @@ pub struct StatsConfig {
 	pub tick_secs: Option<u64>,
 
 	/// Number of ticks an idle broadcast lingers in the emitted frame after
-	/// its last observed active subscription. Defaults to 10. A short
+	/// its last observed active subscription. Defaults to 1. A short
 	/// reconnect window keeps the entry visible across brief disconnects.
 	#[arg(long = "stats-retention-ticks", env = "MOQ_STATS_RETENTION_TICKS")]
 	pub retention_ticks: Option<u32>,
@@ -80,7 +80,7 @@ impl StatsConfig {
 		}
 		let prefix = self.prefix.clone().unwrap_or_else(|| ".stats".to_string());
 		let tick = Duration::from_secs(self.tick_secs.unwrap_or(1).max(1));
-		let retention_ticks = self.retention_ticks.unwrap_or(10).max(1);
+		let retention_ticks = self.retention_ticks.unwrap_or(1).max(1);
 		let node = self.node.clone().map(PathOwned::from);
 		tracing::info!(prefix, tick_secs = tick.as_secs(), retention_ticks, node = ?node, "stats publishing enabled");
 		Stats::new(prefix, tick, retention_ticks, node, origin)

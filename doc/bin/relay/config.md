@@ -150,7 +150,7 @@ tls.disable_verify = true
 
 Per-node stats publishing. When enabled, the relay publishes a single
 `<prefix>/node/<node>` broadcast (or `<prefix>/node` when `node` is unset)
-carrying gzipped JSON snapshots of every broadcast it's currently serving.
+carrying JSON snapshots of every broadcast it's currently serving.
 
 ```toml
 [stats]
@@ -177,14 +177,14 @@ node = "sjc/1"
 
 Each stats broadcast carries four tracks, one per `(tier, role)` pair:
 
-| Track                          | What it covers                              |
-|--------------------------------|---------------------------------------------|
-| `publisher.json.gz`            | external (e.g. customer) egress             |
-| `subscriber.json.gz`           | external ingress                            |
-| `internal/publisher.json.gz`   | internal (e.g. mTLS cluster peer) egress    |
-| `internal/subscriber.json.gz`  | internal ingress                            |
+| Track                       | What it covers                              |
+|-----------------------------|---------------------------------------------|
+| `publisher.json`            | external (e.g. customer) egress             |
+| `subscriber.json`           | external ingress                            |
+| `internal/publisher.json`   | internal (e.g. mTLS cluster peer) egress    |
+| `internal/subscriber.json`  | internal ingress                            |
 
-Each frame is a gzipped JSON object mapping broadcast path to a cumulative
+Each frame is a JSON object mapping broadcast path to a cumulative
 counter snapshot. A broadcast appears in the frame while it has at least one
 active subscription on that `(tier, role)` slot, and lingers for
 `retention_ticks` ticks after the last one drops:

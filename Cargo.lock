@@ -3809,7 +3809,6 @@ version = "0.1.4"
 dependencies = [
  "bytes",
  "conducer",
- "flate2",
  "futures",
  "num_enum",
  "rand 0.9.4",
