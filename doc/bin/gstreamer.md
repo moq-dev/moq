@@ -52,9 +52,21 @@ nix shell github:moq-dev/moq#moq-gst --command gst-inspect-1.0 moq
 
 Lists `moqsink` and `moqsrc`. As a one-liner: `nix run github:moq-dev/moq#moq-gst -- moq`.
 
-### Publish and subscribe via the public relay
+### Subscribe to the public test broadcast
 
-`cdn.moq.dev/anon` accepts both publishers and subscribers without auth, which makes it the fastest way to try the plugin without running anything yourself. There is no always-on broadcast, so you publish your own and subscribe to it.
+`cdn.moq.dev/demo` hosts an always-on `bbb.hang` broadcast (looping Big Buck Bunny). Render it to a window:
+
+```bash
+nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
+  moqsrc url=https://cdn.moq.dev/demo broadcast=bbb.hang \
+  ! decodebin3 ! videoconvert ! autovideosink
+```
+
+Audio-only variant: swap the tail for `! decodebin3 ! audioconvert ! autoaudiosink`.
+
+### Publish your own broadcast
+
+`cdn.moq.dev/anon` accepts publishers without auth. Pick a name, publish, then subscribe to that same name (in another terminal or from another machine).
 
 ```bash
 # Download a pre-fragmented CMAF test file (one time).
@@ -69,13 +81,11 @@ nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
 ```
 
 ```bash
-# Terminal 2 (same or different machine): render it.
+# Terminal 2: render it.
 nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
   moqsrc url=https://cdn.moq.dev/anon broadcast=<your-name>.hang \
   ! decodebin3 ! videoconvert ! autovideosink
 ```
-
-Audio-only variant for the receiver: swap the tail for `! decodebin3 ! audioconvert ! autoaudiosink`.
 
 ### Local relay
 

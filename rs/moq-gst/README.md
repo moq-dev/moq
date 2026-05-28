@@ -39,18 +39,18 @@ The `moq-gst` flake output bundles the plugin with wrappers around `gst-inspect-
 # Inspect: list moqsink + moqsrc. (Or one-shot: `nix run github:moq-dev/moq#moq-gst -- moq`.)
 nix shell github:moq-dev/moq#moq-gst --command gst-inspect-1.0 moq
 
-# Publish a looping CMAF file as a broadcast on the public anon relay.
+# Subscribe to the always-on public test broadcast and render to a window.
+nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
+  moqsrc url=https://cdn.moq.dev/demo broadcast=bbb.hang \
+  ! decodebin3 ! videoconvert ! autovideosink
+
+# Publish your own broadcast on the public anon relay (then sub to it from anywhere).
 curl -fsSL https://vid.moq.dev/bbb.mp4 -o bbb.mp4
 nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
   multifilesrc location=bbb.mp4 loop=true ! parsebin name=parse \
     parse. ! queue ! identity sync=true ! mux.sink_0 \
     parse. ! queue ! identity sync=true ! mux.sink_1 \
     moqsink name=mux url=https://cdn.moq.dev/anon broadcast=my-broadcast.hang
-
-# In another terminal: subscribe to it and render to a window.
-nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
-  moqsrc url=https://cdn.moq.dev/anon broadcast=my-broadcast.hang \
-  ! decodebin3 ! videoconvert ! autovideosink
 ```
 
 See [`doc/bin/gstreamer.md`](https://github.com/moq-dev/moq/blob/main/doc/bin/gstreamer.md) for local-relay setup and audio-only variants.
