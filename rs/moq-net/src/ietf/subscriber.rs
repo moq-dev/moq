@@ -745,8 +745,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				}
 			} else {
 				if size > MAX_FRAME_SIZE {
-					tracing::debug!(%size, max = %MAX_FRAME_SIZE, "frame size exceeds limit");
-					return Err(Error::WrongSize);
+					return Err(Error::FrameTooLarge);
 				}
 				let mut frame = producer.create_frame(Frame { size })?;
 

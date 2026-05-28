@@ -458,8 +458,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		while let Some(size) = stream.decode_maybe::<u64>().await? {
 			if size > MAX_FRAME_SIZE {
-				tracing::debug!(%size, max = %MAX_FRAME_SIZE, "frame size exceeds limit");
-				return Err(Error::WrongSize);
+				return Err(Error::FrameTooLarge);
 			}
 			let mut frame = group.create_frame(Frame { size })?;
 			track_stats.frame();
