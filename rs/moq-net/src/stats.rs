@@ -604,7 +604,7 @@ async fn run_publisher(weak: Weak<Level>) {
 		let mut make = |name: &str| {
 			broadcast.create_track(Track {
 				name: name.into(),
-				priority: 0,
+				..Default::default()
 			})
 		};
 		let ext_pub = match make("publisher.json") {

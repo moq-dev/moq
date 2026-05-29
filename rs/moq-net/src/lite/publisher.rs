@@ -4,8 +4,8 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::Stats;
 
 use crate::{
-	AnnounceConsumer, AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats,
-	Track, TrackConsumer,
+	AnnounceConsumer, AsPath, BroadcastConsumer, Compression, Error, Origin, OriginConsumer, OriginList,
+	StatsHandle as MoqStats, Track, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -363,6 +363,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track = Track {
 			name: subscribe.track.to_string(),
 			priority: subscribe.priority,
+			compress: false,
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
@@ -370,12 +371,26 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// TODO wait until track.info() to get the *real* priority
 
+		// Compress only when the producer marked the track worth it and the
+		// negotiated draft understands the SUBSCRIBE_OK codec field. Older drafts
+		// (lite-04 and below) get None and the frames stream verbatim.
+		let supports_compression = !matches!(
+			version,
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Lite04
+		);
+		let compression = if track.compress && supports_compression {
+			Compression::Deflate
+		} else {
+			Compression::None
+		};
+
 		let info = lite::SubscribeOk {
 			priority: track.priority,
 			ordered: false,
 			max_latency: std::time::Duration::ZERO,
 			start_group: None,
 			end_group: None,
+			compression,
 		};
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
@@ -395,6 +410,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority,
 			track_priority: track_priority_rx,
 			version,
+			compression,
 		};
 
 		// `end_group` is a serving cap, not a subscription terminator: groups with
@@ -429,6 +445,9 @@ struct Subscription<S: web_transport_trait::Session> {
 	priority: PriorityQueue,
 	track_priority: tokio::sync::watch::Receiver<u8>,
 	version: Version,
+	/// Codec announced in SUBSCRIBE_OK; every frame on this subscription is
+	/// compressed with it before hitting the wire.
+	compression: Compression,
 }
 
 impl<S: web_transport_trait::Session> Subscription<S> {
@@ -543,45 +562,87 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 				None => break,
 			};
 
-			stream.encode(&frame.size).await?;
-			self.track_stats.frame();
+			match self.compression {
+				Compression::None => {
+					stream.encode(&frame.size).await?;
+					self.track_stats.frame();
 
-			loop {
-				let chunk = tokio::select! {
-					biased;
-					_ = stream.closed() => return Err(Error::Cancel),
-					chunk = frame.read_chunk() => chunk,
-					new_pri = priority.next() => {
-						stream.set_priority(new_pri);
-						continue;
-					}
-					Ok(()) = self.track_priority.changed() => {
-						priority.set_track(*self.track_priority.borrow_and_update());
-						continue;
-					}
-				};
+					loop {
+						let chunk = tokio::select! {
+							biased;
+							_ = stream.closed() => return Err(Error::Cancel),
+							chunk = frame.read_chunk() => chunk,
+							new_pri = priority.next() => {
+								stream.set_priority(new_pri);
+								continue;
+							}
+							Ok(()) = self.track_priority.changed() => {
+								priority.set_track(*self.track_priority.borrow_and_update());
+								continue;
+							}
+						};
 
-				match chunk? {
-					Some(mut chunk) => {
-						let n = chunk.len() as u64;
-						loop {
-							tokio::select! {
-								biased;
-								result = stream.write_all(&mut chunk) => {
-									result?;
-									break;
+						match chunk? {
+							Some(mut chunk) => {
+								let n = chunk.len() as u64;
+								loop {
+									tokio::select! {
+										biased;
+										result = stream.write_all(&mut chunk) => {
+											result?;
+											break;
+										}
+										new_pri = priority.next() => {
+											stream.set_priority(new_pri);
+										}
+										Ok(()) = self.track_priority.changed() => {
+											priority.set_track(*self.track_priority.borrow_and_update());
+										}
+									}
 								}
-								new_pri = priority.next() => {
-									stream.set_priority(new_pri);
-								}
-								Ok(()) = self.track_priority.changed() => {
-									priority.set_track(*self.track_priority.borrow_and_update());
-								}
+								self.track_stats.bytes(n);
+							}
+							None => break,
+						}
+					}
+				}
+				compression => {
+					// Compression operates on the whole payload, so wait for the
+					// frame to fill before emitting anything. The wire size becomes
+					// the compressed length; the subscriber learns to inflate it
+					// from the codec in SUBSCRIBE_OK.
+					let payload = loop {
+						tokio::select! {
+							biased;
+							_ = stream.closed() => return Err(Error::Cancel),
+							data = frame.read_all() => break data?,
+							new_pri = priority.next() => stream.set_priority(new_pri),
+							Ok(()) = self.track_priority.changed() => {
+								priority.set_track(*self.track_priority.borrow_and_update());
 							}
 						}
-						self.track_stats.bytes(n);
+					};
+
+					let mut chunk = bytes::Bytes::from(compression.compress(&payload));
+					let n = chunk.len() as u64;
+
+					stream.encode(&n).await?;
+					self.track_stats.frame();
+
+					loop {
+						tokio::select! {
+							biased;
+							result = stream.write_all(&mut chunk) => {
+								result?;
+								break;
+							}
+							new_pri = priority.next() => stream.set_priority(new_pri),
+							Ok(()) = self.track_priority.changed() => {
+								priority.set_track(*self.track_priority.borrow_and_update());
+							}
+						}
 					}
-					None => break,
+					self.track_stats.bytes(n);
 				}
 			}
 		}

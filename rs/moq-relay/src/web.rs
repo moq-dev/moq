@@ -509,7 +509,7 @@ async fn serve_fetch(
 
 	let track = moq_net::Track {
 		name: track,
-		priority: 0,
+		..Default::default()
 	};
 
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
