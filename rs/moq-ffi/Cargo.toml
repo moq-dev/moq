@@ -19,6 +19,9 @@ crate-type = ["staticlib", "cdylib"]
 name = "uniffi-bindgen"
 path = "./uniffi-bindgen.rs"
 
+[features]
+android-logcat = ["dep:tracing-android", "dep:tracing-subscriber"]
+
 [dependencies]
 bytes = "1"
 hang = { workspace = true }
@@ -29,8 +32,12 @@ moq-net = { workspace = true, features = ["serde"] }
 thiserror = "2"
 tokio = { workspace = true, features = ["macros"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 uniffi = { version = "0.31", features = ["cli"] }
 url = "2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+tracing-android = { version = "0.2", optional = true }
 
 [build-dependencies]
 uniffi = { version = "0.31", features = ["build"] }
