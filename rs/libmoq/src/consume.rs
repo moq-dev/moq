@@ -366,10 +366,7 @@ impl Consume {
 	/// in arrival order. Frames must be released with [`Self::raw_frame_close`].
 	pub fn raw_track(&mut self, broadcast: Id, name: &str, on_frame: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
-		let track = broadcast.subscribe_track(&moq_net::Track {
-			name: name.to_string(),
-			priority: 0,
-		})?;
+		let track = broadcast.subscribe_track(&moq_net::Track::new(name))?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
