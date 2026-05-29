@@ -68,7 +68,6 @@ needs() {
 MOQ="$REPO_ROOT/target/debug/moq-cli"
 RELAY="$REPO_ROOT/target/debug/moq-relay"
 TMP=$(mktemp -d)
-ASSET="$TMP/asset"
 RELAY_PID=""
 
 kill_tree() {
@@ -90,7 +89,7 @@ trap cleanup EXIT
 
 require_tools() {
     local missing=() t
-    for t in cargo ffmpeg curl pgrep timeout python3; do
+    for t in cargo ffmpeg curl pgrep timeout; do
         command -v "$t" >/dev/null 2>&1 || missing+=("$t")
     done
     if needs python; then command -v uv >/dev/null 2>&1 || missing+=("uv"); fi
@@ -106,9 +105,6 @@ require_tools
 
 echo "building moq-relay + moq-cli..."
 cargo build -q -p moq-relay -p moq-cli
-
-echo "generating H.264 asset..."
-SMOKE_FPS="$FPS" "$SMOKE_DIR/gen-asset.sh" "$ASSET"
 
 if needs python; then
     echo "preparing python bindings..."
@@ -137,23 +133,31 @@ if ! curl -sf "$URL/certificate.sha256" >/dev/null 2>&1; then
 fi
 
 # ── client dispatch ─────────────────────────────────────────────────────────
+# Encode an endless H.264 Annex-B stream from a synthetic source to stdout.
+# Paced with -re so the broadcast streams in real time until the reader closes.
+# Baseline + repeat-headers re-emits SPS/PPS before every keyframe so a late
+# subscriber (or the stream importer) can initialize without the first packet.
+ffmpeg_h264() {
+    ffmpeg -hide_banner -loglevel error -re -f lavfi -i "testsrc=size=${SIZE}:rate=${FPS}" \
+        -an -c:v libx264 -profile:v baseline -preset ultrafast -pix_fmt yuv420p \
+        -x264-params "keyint=${FPS}:min-keyint=${FPS}:scenecut=0:repeat-headers=1" \
+        -f h264 -
+}
+
 # Sets global PUB_PID. Called in the current shell (no command substitution) so
 # $! refers to the backgrounded job and kill_tree can reap the whole pipeline.
+# Every publisher just consumes the same ffmpeg Annex-B stream on stdin; the
+# client frames it (moq-cli / moq-ffi only frame-and-forward, ffmpeg encodes).
 PUB_PID=""
 start_publisher() {
     local lang="$1" broadcast="$2" log="$TMP/pub-$1.log"
     case "$lang" in
         rust)
-            # Encode live from an infinite lavfi source (paced with -re) so the
-            # broadcast streams until we kill it. moq-cli only frames/forwards.
-            (ffmpeg -hide_banner -loglevel error -re -f lavfi -i "testsrc=size=${SIZE}:rate=${FPS}" \
-                -an -c:v libx264 -profile:v baseline -preset ultrafast -pix_fmt yuv420p \
-                -x264-params "keyint=${FPS}:min-keyint=${FPS}:scenecut=0:repeat-headers=1" \
-                -f h264 - | "$MOQ" publish --url "$URL" --broadcast "$broadcast" avc3) >"$log" 2>&1 &
+            (ffmpeg_h264 | "$MOQ" publish --url "$URL" --broadcast "$broadcast" avc3) >"$log" 2>&1 &
             ;;
         python)
-            (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync python examples/interop.py \
-                publish --url "$URL" --broadcast "$broadcast" --asset "$ASSET") >"$log" 2>&1 &
+            (ffmpeg_h264 | (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync python examples/interop.py \
+                publish --url "$URL" --broadcast "$broadcast")) >"$log" 2>&1 &
             ;;
         *)
             echo "unknown publisher: $lang" >&2
