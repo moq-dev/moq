@@ -180,11 +180,11 @@ Each stats broadcast carries four tracks, one per `(tier, role)` pair:
 | `internal/subscriber.json`  | internal ingress                            |
 
 Each frame is a JSON object mapping broadcast path to a cumulative
-counter snapshot. An entry surfaces while the broadcast is live (any open
-counter still exceeds its `*_closed` counterpart, so a subscription could
-begin at any moment) and on the tick its snapshot changes. Once every
-counter equals its `*_closed` counterpart no traffic can flow, so the
-entry is dropped:
+counter snapshot. An entry surfaces on any tick where the broadcast is
+live (any open counter still exceeds its `*_closed` counterpart, so a
+subscription could begin at any moment) or its snapshot changed since the
+previous tick. Once every counter equals its `*_closed` counterpart no
+traffic can flow, so the entry is dropped:
 
 ```json
 {

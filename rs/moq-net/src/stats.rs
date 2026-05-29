@@ -13,13 +13,13 @@
 //! Each frame is a JSON object mapping broadcast path to a cumulative
 //! counter snapshot. Tier, role, and node are implied by the track and
 //! broadcast paths, so they aren't repeated inside the frame. An entry
-//! appears in the frame for a given `(tier, role)` while the broadcast is
-//! live (any open counter still exceeds its `*_closed` counterpart, so a
-//! subscription could begin at any moment) and on the tick its snapshot
-//! changes. Once every counter equals its `*_closed` counterpart no
-//! traffic can flow, so the entry is dropped. A downstream aggregator
-//! computes rates from successive cumulative snapshots and slices the data
-//! however a dashboard wants.
+//! appears in the frame for a given `(tier, role)` on any tick where the
+//! broadcast is live (any open counter still exceeds its `*_closed`
+//! counterpart, so a subscription could begin at any moment) or its
+//! snapshot changed since the previous tick. Once every counter equals its
+//! `*_closed` counterpart no traffic can flow, so the entry is dropped. A
+//! downstream aggregator computes rates from successive cumulative
+//! snapshots and slices the data however a dashboard wants.
 //!
 //! Per-snapshot semantics:
 //!
