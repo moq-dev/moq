@@ -248,6 +248,31 @@ impl Bridges {
 	}
 }
 
+/// Build a [`Rtc`] with `CodecConfig` restricted to the supplied codecs.
+///
+/// Used by the two egress paths so we don't advertise codecs we have no
+/// source for in the catalog (WHIP client) or accept incoming codecs we
+/// can't fulfil (WHEP server). For both, the negotiated SDP intersects with
+/// what we can actually deliver, so `MediaAdded` only fires for codecs that
+/// [`crate::egress::EgressSource`] can match to a rendition.
+pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
+	use str0m::format::Codec;
+	let mut config = str0m::RtcConfig::new().clear_codecs();
+	for c in codecs {
+		config = match c {
+			Codec::Opus => config.enable_opus(true),
+			Codec::H264 => config.enable_h264(true),
+			Codec::Vp8 => config.enable_vp8(true),
+			Codec::Vp9 => config.enable_vp9(true),
+			// AV1 / H.265 are in str0m's enum but we don't yet support them
+			// on the egress side. Skip rather than enable a codec we can't
+			// pump frames for.
+			_ => config,
+		};
+	}
+	config.build(std::time::Instant::now())
+}
+
 /// Bind a UDP socket on `0.0.0.0:0` and return both the socket and the
 /// listed ICE candidates the caller should advertise.
 ///

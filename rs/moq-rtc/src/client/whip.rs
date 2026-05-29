@@ -7,10 +7,8 @@
 //! bitstream / RTP packetization is identical to the WHEP server path, so
 //! most of the work lives in [`crate::egress`].
 
-use std::time::Instant;
-
 use str0m::{
-	Candidate, Rtc,
+	Candidate,
 	change::SdpAnswer,
 	media::{Direction, MediaKind},
 };
@@ -20,18 +18,24 @@ use crate::{Error, Result, client::Client, egress::EgressSource, session};
 
 pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::BroadcastConsumer) -> Result<()> {
 	let source = EgressSource::new(broadcast).await?;
+	let codecs = source.catalog_codecs();
+	if codecs.is_empty() {
+		return Err(Error::Other(anyhow::anyhow!(
+			"catalog has no codecs we can egress (Opus / H.264 / VP8 / VP9)"
+		)));
+	}
 
 	let (socket, candidates) = session::bind_udp(&client.config().ice_candidates).await?;
-	let mut rtc = Rtc::new(Instant::now());
+	// Restrict to codecs the catalog can actually source so the remote
+	// answer doesn't pick a codec we have no rendition for.
+	let mut rtc = session::rtc_with_codecs(&codecs);
 	for addr in &candidates {
 		let cand = Candidate::host(*addr, "udp").map_err(str0m::RtcError::from)?;
 		rtc.add_local_candidate(cand);
 	}
 
-	// Advertise sendonly audio + video. str0m's default CodecConfig enables
-	// every codec it supports; the remote answer picks the intersection.
-	// EgressSource picks a matching catalog rendition once `MediaAdded`
-	// fires per accepted m-line.
+	// Advertise sendonly audio + video; `rtc_with_codecs` already pinned
+	// the offer's codec list to what the catalog can source.
 	let mut api = rtc.sdp_api();
 	api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
 	api.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);

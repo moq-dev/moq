@@ -11,7 +11,7 @@ use axum::{
 	response::{IntoResponse, Response},
 	routing::post,
 };
-use str0m::{Candidate, Rtc};
+use str0m::Candidate;
 
 use crate::{Error, Result, egress::EgressSource, sdp, server::Server, session};
 
@@ -53,9 +53,18 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 		.ok_or_else(|| Error::Other(anyhow::anyhow!("broadcast {path} not announced")))?;
 
 	let source = EgressSource::new(consumer).await?;
+	let codecs = source.catalog_codecs();
+	if codecs.is_empty() {
+		return Err(Error::Other(anyhow::anyhow!(
+			"catalog has no codecs we can egress (Opus / H.264 / VP8 / VP9)"
+		)));
+	}
 
 	let (socket, candidates) = session::bind_udp(&server.config().ice_candidates).await?;
-	let mut rtc = Rtc::new(std::time::Instant::now());
+	// Restrict our CodecConfig before accept_offer so the answer intersects
+	// the peer's offer with what the catalog actually has, instead of
+	// agreeing to a codec we can't fulfil.
+	let mut rtc = session::rtc_with_codecs(&codecs);
 	for addr in &candidates {
 		let cand = Candidate::host(*addr, "udp").map_err(str0m::RtcError::from)?;
 		rtc.add_local_candidate(cand);

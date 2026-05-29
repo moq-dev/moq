@@ -47,11 +47,13 @@ moq-rtc --relay https://relay.example.com --broadcast my-stream \
 moq-rtc --relay https://relay.example.com --broadcast cam0 \
         client --url https://camera.example.com/whep/cam0 subscribe
 
-# server subscribe (WHEP server, not yet implemented)
-moq-rtc --relay ... --broadcast foo server --listen ... subscribe
+# server subscribe (WHEP server): serve a MoQ broadcast over WHEP
+moq-rtc --relay https://relay.example.com --broadcast my-stream \
+        server --listen 0.0.0.0:8088 subscribe
 
-# client publish (WHIP client, not yet implemented)
-moq-rtc --relay ... --broadcast foo client --url https://twitch.tv/whip publish
+# client publish (WHIP client): push a MoQ broadcast to a remote WHIP endpoint
+moq-rtc --relay https://relay.example.com --broadcast my-stream \
+        client --url https://twitch.tv/whip publish
 ```
 
 ### Global flags
