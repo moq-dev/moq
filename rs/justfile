@@ -39,7 +39,7 @@ ci FILES="":
     cargo check --workspace --no-default-features
     cargo check --workspace --all-features
     cargo deny check --show-stats
-    just test --all-features
+    just rs test --all-features
     just build
 
 # Auto-fix clippy/format/shear/sort, then sweep stale target/.
