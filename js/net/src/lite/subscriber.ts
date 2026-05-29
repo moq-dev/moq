@@ -1,7 +1,8 @@
-import type { Signal } from "@moq/signals";
+import { Signal } from "@moq/signals";
 import { Announced } from "../announced.ts";
 import type { Bandwidth } from "../bandwidth.ts";
 import { Broadcast, type TrackRequest } from "../broadcast.ts";
+import { Compression, decompress } from "../compression.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
@@ -36,6 +37,12 @@ export interface AnnouncedOptions {
 	ignoreSelf?: boolean;
 }
 
+interface SubscribeEntry {
+	track: Track;
+	// undefined until SUBSCRIBE_OK arrives and tells us the negotiated codec.
+	compression: Signal<Compression | undefined>;
+}
+
 /**
  * Handles subscribing to broadcasts and managing their lifecycle.
  *
@@ -51,8 +58,10 @@ export class Subscriber {
 	// own announcements on a per-call basis (see {@link AnnouncedOptions}).
 	readonly origin: Origin;
 
-	// Our subscribed tracks.
-	#subscribes = new Map<bigint, Track>();
+	// Our subscribed tracks. `compression` resolves once SUBSCRIBE_OK arrives;
+	// group streams block on it before decoding any frame, since a group's QUIC
+	// stream can race ahead of SUBSCRIBE_OK on its own stream.
+	#subscribes = new Map<bigint, SubscribeEntry>();
 	#subscribeNext = 0n;
 
 	// Recv bandwidth producer (Lite03+ only).
@@ -179,8 +188,10 @@ export class Subscriber {
 	async #runSubscribe(broadcast: Path.Valid, request: TrackRequest) {
 		const id = this.#subscribeNext++;
 
-		// Save the writer so we can append groups to it.
-		this.#subscribes.set(id, request.track);
+		// Save the writer so we can append groups to it. `compression` stays
+		// undefined until SUBSCRIBE_OK resolves it; runGroup blocks on it.
+		const compression = new Signal<Compression | undefined>(undefined);
+		this.#subscribes.set(id, { track: request.track, compression });
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.track.name}`);
 
@@ -194,11 +205,14 @@ export class Subscriber {
 
 		let stream: Stream;
 		try {
-			stream = await withTimeout(
+			const ok = await withTimeout(
 				setup,
 				SUBSCRIBE_OK_TIMEOUT_MS,
 				`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
 			);
+			stream = ok.stream;
+			// Unblock any group streams waiting to learn how to decode frames.
+			compression.set(ok.compression);
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
 		} catch (err) {
 			const e = error(err);
@@ -251,7 +265,10 @@ export class Subscriber {
 	// Opens the subscribe stream, sends SUBSCRIBE, and reads SUBSCRIBE_OK.
 	// `state.stream` is populated as soon as the stream opens so the caller
 	// can clean it up on timeout even before this promise settles.
-	async #openSubscribe(state: { stream?: Stream }, msg: Subscribe): Promise<Stream> {
+	async #openSubscribe(
+		state: { stream?: Stream },
+		msg: Subscribe,
+	): Promise<{ stream: Stream; compression: Compression }> {
 		state.stream = await Stream.open(this.#quic);
 		await state.stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(state.stream.writer, this.version);
@@ -261,7 +278,7 @@ export class Subscriber {
 		if (!("ok" in resp)) {
 			throw new Error("first subscribe response must be SUBSCRIBE_OK");
 		}
-		return state.stream;
+		return { stream: state.stream, compression: resp.ok.compression };
 	}
 
 	/**
@@ -317,8 +334,8 @@ export class Subscriber {
 	 * @internal
 	 */
 	async runGroup(group: GroupMessage, stream: Reader) {
-		const subscribe = this.#subscribes.get(group.subscribe);
-		if (!subscribe) {
+		const entry = this.#subscribes.get(group.subscribe);
+		if (!entry) {
 			if (group.subscribe >= this.#subscribeNext) {
 				throw new Error(`unknown subscription: id=${group.subscribe}`);
 			}
@@ -326,19 +343,36 @@ export class Subscriber {
 			return;
 		}
 
+		const { track, compression } = entry;
 		const producer = new Group(group.sequence);
-		subscribe.writeGroup(producer);
+		track.writeGroup(producer);
 
 		try {
+			// Block until SUBSCRIBE_OK tells us the codec; the group's stream can
+			// arrive before SUBSCRIBE_OK lands on the subscribe stream.
+			let codec = compression.peek();
+			while (codec === undefined) {
+				if (track.state.closed.peek()) {
+					// Subscription ended before SUBSCRIBE_OK; nothing to decode.
+					producer.close();
+					stream.stop(new Error("cancel"));
+					return;
+				}
+				await Signal.race(compression, track.state.closed);
+				codec = compression.peek();
+			}
+
 			for (;;) {
-				const done = await Promise.race([stream.done(), subscribe.closed, producer.closed]);
+				const done = await Promise.race([stream.done(), track.closed, producer.closed]);
 				if (done !== false) break;
 
 				const size = await stream.u53();
 				const payload = await stream.read(size);
 				if (!payload) break;
 
-				producer.writeFrame(payload);
+				// On a compressed track the wire size is the compressed length;
+				// inflate it back to the original frame the consumer sees.
+				producer.writeFrame(codec === Compression.None ? payload : await decompress(codec, payload));
 			}
 
 			producer.close();
@@ -389,7 +423,7 @@ export class Subscriber {
 	}
 
 	close() {
-		for (const track of this.#subscribes.values()) {
+		for (const { track } of this.#subscribes.values()) {
 			track.close();
 		}
 

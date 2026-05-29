@@ -33,17 +33,31 @@ const MAX_GROUP_AGE: Duration = Duration::from_secs(5);
 /// while the track is alive. A subscriber learns them via
 /// [`BroadcastConsumer::subscribe_track`](crate::BroadcastConsumer::subscribe_track),
 /// which returns the publisher's [`Track`] once the subscription is accepted.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {
 	/// Identifier within a broadcast. Unique per [`crate::Broadcast`].
 	pub name: String,
+	/// Hint that this track's frames are worth compressing (e.g. a JSON catalog).
+	/// The publisher honors it by negotiating a codec in SUBSCRIBE_OK; codec-less
+	/// peers (older drafts) ignore it and send frames verbatim.
+	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
+	pub compress: bool,
 }
 
 impl Track {
 	/// Create a track with the given name.
 	pub fn new<T: Into<String>>(name: T) -> Self {
-		Self { name: name.into() }
+		Self {
+			name: name.into(),
+			compress: false,
+		}
+	}
+
+	/// Mark this track's frames as worth compressing, returning `self` for chaining.
+	pub fn with_compress(mut self, compress: bool) -> Self {
+		self.compress = compress;
+		self
 	}
 
 	/// Consume this [`Track`] to create a producer that owns its metadata.

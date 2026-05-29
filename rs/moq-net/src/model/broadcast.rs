@@ -174,7 +174,7 @@ impl BroadcastProducer {
 				.expect("u32 namespace exhausted")
 		};
 
-		self.create_track(Track { name })
+		self.create_track(Track::new(name))
 	}
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.

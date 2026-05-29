@@ -44,6 +44,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 conducer = { version = "0.3", path = "rs/conducer" }
+flate2 = "1.1"
 hang = { version = "0.18", path = "rs/hang" }
 moq-audio = { version = "0.0.1", path = "rs/moq-audio" }
 moq-loc = { version = "0.1", path = "rs/moq-loc" }
@@ -53,7 +54,6 @@ moq-native = { version = "0.15", path = "rs/moq-native", default-features = fals
 moq-net = { version = "0.1", path = "rs/moq-net" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
 qmux = { version = "0.0.7", default-features = false }
-
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
 web-async = { version = "0.1.3", features = ["tracing"] }

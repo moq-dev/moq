@@ -489,13 +489,18 @@ pub struct AuthToken {
 
 impl AuthToken {
 	/// Construct a token for a peer that was authenticated at the TLS layer
-	/// via mTLS. These peers are granted full (root-scoped) publish and
-	/// subscribe access and are flagged as internal. The cert's trust chain
-	/// (verified against the configured CA) is the only credential we require
-	/// — DNS SANs and the `?register=` name are no longer consulted.
-	pub fn unrestricted() -> Self {
+	/// via mTLS. These peers are granted full publish and subscribe access
+	/// within `root` and are flagged as internal. The cert's trust chain
+	/// (verified against the configured CA) is the only credential we require;
+	/// nothing else in the cert is inspected.
+	///
+	/// `root` is taken from the connection URL path, the same scoping a JWT
+	/// gets. An mTLS publisher dialing `/demo` therefore announces under
+	/// `demo/`, not the cluster root. Cluster peers dial `/`, so they resolve
+	/// to an empty root and keep unscoped access.
+	pub fn unrestricted(root: PathOwned) -> Self {
 		Self {
-			root: PathOwned::default(),
+			root,
 			subscribe: PathPrefixes::from(vec![Path::new("").to_owned()]),
 			publish: PathPrefixes::from(vec![Path::new("").to_owned()]),
 			internal: true,
@@ -2516,5 +2521,25 @@ api = "https://api.example.com/access"
 		assert!(auth.verify(&params).await.is_err());
 
 		Ok(())
+	}
+
+	#[test]
+	fn unrestricted_scopes_to_root() {
+		// An mTLS publisher dialing "/demo" must announce under the `demo` root,
+		// not the cluster root, so path-scoped subscribers (e.g. `demo/*`) see it.
+		let token = AuthToken::unrestricted(Path::new("/demo").to_owned());
+		assert_eq!(token.root, "demo".as_path());
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec!["".as_path()]);
+		assert!(token.internal);
+	}
+
+	#[test]
+	fn unrestricted_empty_root_is_unscoped() {
+		// Cluster peers dial "/", which normalizes to an empty root, leaving the
+		// grant unscoped across the whole cluster.
+		let token = AuthToken::unrestricted(Path::new("/").to_owned());
+		assert_eq!(token.root, "".as_path());
+		assert!(token.internal);
 	}
 }

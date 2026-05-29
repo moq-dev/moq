@@ -53,9 +53,9 @@ pub struct ServerTlsConfig {
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
 	///
 	/// When set, clients *may* present a certificate during the TLS handshake.
-	/// Valid presentations are exposed via [`Request::peer_identity`] and can be
-	/// used by the application to grant elevated access. Clients that do not
-	/// present a certificate are unaffected.
+	/// Valid presentations are reported via [`Request::has_peer_certificate`]
+	/// and can be used by the application to grant elevated access. Clients that
+	/// do not present a certificate are unaffected.
 	///
 	/// Only supported by the Quinn backend.
 	#[arg(
@@ -539,12 +539,6 @@ impl Server {
 	}
 }
 
-/// The identity of a peer that presented a client certificate during the TLS
-/// handshake, as validated against the configured [`ServerTlsConfig::root`].
-#[derive(Clone, Debug, Default)]
-#[non_exhaustive]
-pub struct PeerIdentity {}
-
 /// An incoming connection that can be accepted or rejected.
 pub(crate) enum RequestKind {
 	#[cfg(feature = "noq")]
@@ -682,23 +676,22 @@ impl Request {
 		}
 	}
 
-	/// Returns the peer's TLS-validated identity, if it presented a client
-	/// certificate during the handshake that chained to a configured
-	/// [`ServerTlsConfig::root`].
+	/// Whether the peer presented a client certificate during the handshake
+	/// that chained to a configured [`ServerTlsConfig::root`].
 	///
-	/// Only the Quinn backend supports mTLS; other backends always return `Ok(None)`.
-	pub fn peer_identity(&self) -> anyhow::Result<Option<PeerIdentity>> {
+	/// Only the Quinn backend supports mTLS; other backends always return `false`.
+	pub fn has_peer_certificate(&self) -> bool {
 		match self.kind {
 			#[cfg(feature = "quinn")]
-			RequestKind::Quinn(ref request) => request.peer_identity(),
+			RequestKind::Quinn(ref request) => request.has_peer_certificate(),
 			#[cfg(feature = "noq")]
-			RequestKind::Noq(_) => Ok(None),
+			RequestKind::Noq(_) => false,
 			#[cfg(feature = "quiche")]
-			RequestKind::Quiche(_) => Ok(None),
+			RequestKind::Quiche(_) => false,
 			#[cfg(feature = "iroh")]
-			RequestKind::Iroh(_) => Ok(None),
+			RequestKind::Iroh(_) => false,
 			#[cfg(feature = "websocket")]
-			RequestKind::WebSocket(_) => Ok(None),
+			RequestKind::WebSocket(_) => false,
 			#[cfg(not(any(
 				feature = "noq",
 				feature = "quinn",
@@ -706,7 +699,7 @@ impl Request {
 				feature = "iroh",
 				feature = "websocket"
 			)))]
-			_ => Ok(None),
+			_ => false,
 		}
 	}
 }

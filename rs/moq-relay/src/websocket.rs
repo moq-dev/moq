@@ -40,7 +40,7 @@ pub(crate) async fn serve_ws(
 
 	let params = AuthParams { path, jwt: query.jwt };
 	let token = if mtls.is_some() {
-		AuthToken::unrestricted()
+		AuthToken::unrestricted(moq_net::Path::new(&params.path).to_owned())
 	} else {
 		state.auth.verify(&params).await?
 	};

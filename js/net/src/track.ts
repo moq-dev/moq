@@ -10,6 +10,14 @@ export class TrackState {
 export class Track {
 	readonly name: string;
 
+	/**
+	 * Hint that this track's frames are worth compressing (e.g. a JSON catalog).
+	 * The publisher honors it by negotiating a codec in SUBSCRIBE_OK; codec-less
+	 * peers (older drafts) ignore it and send frames verbatim. Set it before the
+	 * track is served so the negotiated codec is known when SUBSCRIBE_OK is sent.
+	 */
+	compress = false;
+
 	state = new TrackState();
 	#next?: number;
 	#nextSequence = 0;
