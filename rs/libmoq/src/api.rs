@@ -385,7 +385,7 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 
 		let name = unsafe { ffi::parse_str(config.name, config.name_len)? };
 		let codec = unsafe { ffi::parse_str(config.codec, config.codec_len)? };
-		let codec = hang::catalog::VideoCodec::from_str(codec).map_err(|err| Error::Hang(err.into()))?;
+		let codec = hang::catalog::VideoCodec::from_str(codec).map_err(Error::Hang)?;
 
 		let mut video = hang::catalog::VideoConfig::new(codec);
 		if !config.description.is_null() {
@@ -423,7 +423,7 @@ pub unsafe extern "C" fn moq_publish_audio_config(broadcast: u32, config: *const
 
 		let name = unsafe { ffi::parse_str(config.name, config.name_len)? };
 		let codec = unsafe { ffi::parse_str(config.codec, config.codec_len)? };
-		let codec = hang::catalog::AudioCodec::from_str(codec).map_err(|err| Error::Hang(err.into()))?;
+		let codec = hang::catalog::AudioCodec::from_str(codec).map_err(Error::Hang)?;
 
 		let mut audio = hang::catalog::AudioConfig::new(codec, config.sample_rate, config.channel_count);
 		if !config.description.is_null() {

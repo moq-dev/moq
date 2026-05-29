@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Catalog producer API to author renditions directly (`moq_publish_video_config`, `moq_publish_audio_config`, `moq_publish_video_remove`, `moq_publish_audio_remove`), mirroring the consume-side config queries.
+
 ## [0.2.17](https://github.com/moq-dev/moq/compare/libmoq-v0.2.16...libmoq-v0.2.17) - 2026-05-24
 
 ### Added
