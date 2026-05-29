@@ -41,11 +41,13 @@ struct Cli {
 	#[arg(long, alias = "name", env = "MOQ_RTC_BROADCAST")]
 	broadcast: String,
 
-	/// Public UDP socket address(es) to advertise as ICE host candidates.
-	/// Repeat the flag for multi-homed deployments. Without this the
-	/// kernel-picked address is used (loopback testing only).
-	#[arg(long = "ice-candidate", env = "MOQ_RTC_ICE_CANDIDATE", value_delimiter = ',')]
-	ice_candidates: Vec<SocketAddr>,
+	/// Public UDP socket address to advertise as an ICE host candidate.
+	/// Optional: when unset, the session relies on str0m discovering
+	/// peer-reflexive candidates via STUN binding requests, which is
+	/// enough for most NAT traversal scenarios. Set this only when the
+	/// gateway is behind a NAT that needs an explicit external address.
+	#[arg(long, env = "MOQ_RTC_PUBLIC_ADDR")]
+	public_addr: Option<SocketAddr>,
 
 	#[command(subcommand)]
 	role: Role,
@@ -100,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
 		moq_client,
 		relay,
 		broadcast,
-		ice_candidates,
+		public_addr,
 		role,
 	} = Cli::parse();
 	log.init();
@@ -124,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
 	#[cfg(unix)]
 	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
-	let driver = run_role(role, &broadcast, ice_candidates, publisher, subscriber_consumer);
+	let driver = run_role(role, &broadcast, public_addr, publisher, subscriber_consumer);
 
 	tokio::select! {
 		res = driver => res,
@@ -136,10 +138,11 @@ async fn main() -> anyhow::Result<()> {
 async fn run_role(
 	role: Role,
 	broadcast: &str,
-	ice_candidates: Vec<SocketAddr>,
+	public_addr: Option<SocketAddr>,
 	publisher: moq_net::OriginProducer,
 	subscriber: moq_net::OriginConsumer,
 ) -> anyhow::Result<()> {
+	let ice_candidates = public_addr.into_iter().collect::<Vec<_>>();
 	match role {
 		Role::Server {
 			listen,
@@ -234,9 +237,12 @@ async fn serve(app: Router, bind: SocketAddr, cert: Option<PathBuf>, key: Option
 				.context("failed to load TLS cert/key")?;
 			axum_server::bind_rustls(bind, config).serve(service).await?;
 		}
-		_ => {
+		(None, None) => {
 			axum_server::bind(bind).serve(service).await?;
 		}
+		// clap's `requires` already gates this at parse time; the explicit
+		// arm is belt-and-suspenders in case someone strips the attribute.
+		(Some(_), None) | (None, Some(_)) => anyhow::bail!("--tls-cert and --tls-key must be set together"),
 	}
 	Ok(())
 }
