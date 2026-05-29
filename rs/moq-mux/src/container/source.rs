@@ -50,7 +50,7 @@ impl CatalogSource {
 		})
 	}
 
-	pub(crate) fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<hang::Catalog>>> {
+	pub(crate) fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<hang::Catalog>>> {
 		match self {
 			Self::Hang(c) => c.poll_next(waiter).map_err(Into::into),
 			Self::Msf(c) => c.poll_next(waiter),
@@ -150,7 +150,7 @@ impl ExportSource {
 	/// Parameter-only frames (SPS/PPS-only inputs to the Avc3 transform) are
 	/// absorbed and the next frame is polled. Returns `Ready(None)` at
 	/// end-of-track.
-	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
+	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Frame>>> {
 		loop {
 			let frame = match self.consumer.poll_read(waiter) {
 				Poll::Ready(Ok(Some(f))) => f,

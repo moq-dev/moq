@@ -15,6 +15,7 @@ SUBSCRIBERS="rust,python"
 TIMEOUT="${SMOKE_TIMEOUT:-20}"
 FPS="${SMOKE_FPS:-30}"
 SIZE="${SMOKE_SIZE:-320x240}"
+WARMUP="${SMOKE_WARMUP:-2}"
 URL="http://127.0.0.1:4443"
 NEGATIVE=0
 
@@ -93,6 +94,10 @@ require_tools() {
         command -v "$t" >/dev/null 2>&1 || missing+=("$t")
     done
     if needs python; then command -v uv >/dev/null 2>&1 || missing+=("uv"); fi
+    if needs js-browser; then
+        command -v bun >/dev/null 2>&1 || missing+=("bun")
+        [[ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]] || missing+=("PLAYWRIGHT_BROWSERS_PATH (run inside 'nix develop')")
+    fi
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo "error: missing required tools: ${missing[*]}" >&2
         echo "       run inside 'nix develop' (or install them) and retry." >&2
@@ -112,6 +117,12 @@ if needs python; then
     # moq-rs editable wheel (moq-ffi cdylib + uniffi bindings) from py/moq-rs.
     (cd "$REPO_ROOT/py" && uv sync --no-install-workspace)
     (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync maturin develop --uv)
+fi
+
+if needs js-browser; then
+    echo "preparing browser harness..."
+    (cd "$REPO_ROOT" && bun install)
+    (cd "$REPO_ROOT/test/browser" && bunx vite build)
 fi
 
 if curl -sf "$URL/certificate.sha256" >/dev/null 2>&1; then
@@ -159,6 +170,12 @@ start_publisher() {
             (ffmpeg_h264 | (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync python examples/smoke.py \
                 publish --url "$URL" --broadcast "$broadcast")) >"$log" 2>&1 &
             ;;
+        js-browser)
+            # Headless Chromium encodes its own H.264 from a fake camera via
+            # WebCodecs (lazily, once a subscriber creates demand).
+            (cd "$REPO_ROOT" && bun test/browser/driver.ts publish \
+                --url "$URL" --broadcast "$broadcast") >"$log" 2>&1 &
+            ;;
         *)
             echo "unknown publisher: $lang" >&2
             return 1
@@ -182,6 +199,11 @@ run_subscriber() {
             (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync python examples/smoke.py \
                 subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT")
             ;;
+        js-browser)
+            # Headless Chromium decodes via WebCodecs; exits 0 once a frame lands.
+            (cd "$REPO_ROOT" && bun test/browser/driver.ts subscribe \
+                --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT")
+            ;;
         *)
             echo "unknown subscriber: $lang" >&2
             return 1
@@ -195,6 +217,10 @@ overall=0
 run_round() {
     local pub="$1" broadcast="$2" pub_pid="$3"
     local pids=() names=() i sub
+    # Let the publisher announce the broadcast + catalog before subscribers
+    # connect. Native subscribers tolerate the race, but the browser watch gives
+    # up on a catalog RESET_STREAM if it connects first.
+    [[ -n "$pub_pid" ]] && sleep "$WARMUP"
     for sub in "${SUB_LIST[@]}"; do
         (run_subscriber "$sub" "$broadcast") >"$TMP/$pub-$sub.log" 2>&1 &
         pids+=("$!")

@@ -301,7 +301,7 @@ impl OriginConsumerState {
 #[derive(Clone)]
 struct OriginConsumerNotify {
 	root: PathOwned,
-	state: conducer::Producer<OriginConsumerState>,
+	state: kio::Producer<OriginConsumerState>,
 }
 
 impl OriginConsumerNotify {
@@ -781,7 +781,7 @@ pub struct OriginConsumer {
 
 	// Pending updates queued for this consumer. Coalesced so a slow consumer
 	// can't accumulate redundant announce/unannounce pairs.
-	state: conducer::Producer<OriginConsumerState>,
+	state: kio::Producer<OriginConsumerState>,
 
 	// A prefix that is automatically stripped from all paths.
 	root: PathOwned,
@@ -797,7 +797,7 @@ impl std::ops::Deref for OriginConsumer {
 
 impl OriginConsumer {
 	fn new(info: Origin, root: PathOwned, nodes: OriginNodes) -> Self {
-		let state = conducer::Producer::<OriginConsumerState>::default();
+		let state = kio::Producer::<OriginConsumerState>::default();
 		let id = ConsumerId::new();
 
 		for (_, node) in &nodes.nodes {
@@ -825,7 +825,7 @@ impl OriginConsumer {
 	///
 	/// Note: The returned path is absolute and will always match this consumer's prefix.
 	pub async fn announced(&mut self) -> Option<OriginAnnounce> {
-		conducer::wait(|waiter| self.poll_announced(waiter)).await
+		kio::wait(|waiter| self.poll_announced(waiter)).await
 	}
 
 	/// Poll for the next (un)announced broadcast, without blocking.
@@ -833,7 +833,7 @@ impl OriginConsumer {
 	/// Returns `Poll::Ready(Some(_))` for an update, `Poll::Ready(None)` if the
 	/// consumer is closed, or `Poll::Pending` after registering `waiter` to be
 	/// notified when the next update arrives.
-	pub fn poll_announced(&mut self, waiter: &conducer::Waiter) -> Poll<Option<OriginAnnounce>> {
+	pub fn poll_announced(&mut self, waiter: &kio::Waiter) -> Poll<Option<OriginAnnounce>> {
 		match self.state.poll(waiter, |state| match state.take() {
 			Some(item) => Poll::Ready(item),
 			None => Poll::Pending,
@@ -1200,7 +1200,7 @@ mod tests {
 		assert!(origin.consume().get_broadcast("test").is_none());
 	}
 	// A previous mpsc-based implementation could only deliver the first 127 broadcasts
-	// instantly via `assert_next` (which uses `now_or_never`). The conducer-backed
+	// instantly via `assert_next` (which uses `now_or_never`). The kio-backed
 	// implementation polls synchronously and can deliver all of them without yielding.
 	// Names are zero-padded so lexicographic delivery order matches the loop index.
 	#[tokio::test]
