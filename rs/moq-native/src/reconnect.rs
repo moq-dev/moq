@@ -66,13 +66,15 @@ impl Default for Backoff {
 pub struct Reconnect {
 	abort: tokio::task::AbortHandle,
 	closed_rx: tokio::sync::watch::Receiver<Option<Arc<anyhow::Error>>>,
+	connected_rx: tokio::sync::watch::Receiver<u64>,
 }
 
 impl Reconnect {
 	pub(crate) fn new(client: Client, url: Url, backoff: Backoff) -> Self {
 		let (closed_tx, closed_rx) = tokio::sync::watch::channel(None::<Arc<anyhow::Error>>);
+		let (connected_tx, connected_rx) = tokio::sync::watch::channel(0u64);
 		let task = tokio::spawn(async move {
-			if let Err(err) = Self::run(client, url, backoff).await {
+			if let Err(err) = Self::run(client, url, backoff, connected_tx).await {
 				tracing::error!(err = %format!("{err:#}"), "reconnect loop exited");
 				let _ = closed_tx.send(Some(Arc::new(err)));
 			}
@@ -80,10 +82,16 @@ impl Reconnect {
 		Self {
 			abort: task.abort_handle(),
 			closed_rx,
+			connected_rx,
 		}
 	}
 
-	async fn run(client: Client, url: Url, backoff: Backoff) -> anyhow::Result<()> {
+	async fn run(
+		client: Client,
+		url: Url,
+		backoff: Backoff,
+		connected_tx: tokio::sync::watch::Sender<u64>,
+	) -> anyhow::Result<()> {
 		let mut delay = backoff.initial;
 		let mut retry_start = tokio::time::Instant::now();
 		let mut last_error: Option<anyhow::Error> = None;
@@ -103,6 +111,7 @@ impl Reconnect {
 					tracing::info!(%url, "connected");
 					delay = backoff.initial;
 					last_error = None;
+					connected_tx.send_modify(|epoch| *epoch += 1);
 					let _ = session.closed().await;
 					tracing::warn!(%url, "session closed, reconnecting");
 					retry_start = tokio::time::Instant::now();
@@ -114,6 +123,24 @@ impl Reconnect {
 					delay = std::cmp::min(delay * backoff.multiplier, backoff.max);
 				}
 			}
+		}
+	}
+
+	/// Wait for the next successful (re)connect after the given epoch.
+	///
+	/// The epoch counts successful connects: it is 1 after the first connect,
+	/// 2 after the first reconnect, and so on. Pass the previously returned
+	/// value to wait for a newer connection, or 0 to wait for the first.
+	///
+	/// Never resolves once the reconnect loop has stopped, so pair it with
+	/// [`closed`](Self::closed) in a `select!` to observe termination.
+	pub async fn connected(&self, since: u64) -> u64 {
+		let mut rx = self.connected_rx.clone();
+		// Copy the epoch out so the watch guard isn't held across the pending() await.
+		let epoch = rx.wait_for(|epoch| *epoch > since).await.ok().map(|epoch| *epoch);
+		match epoch {
+			Some(epoch) => epoch,
+			None => std::future::pending().await,
 		}
 	}
 
