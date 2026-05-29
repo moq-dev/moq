@@ -1,3 +1,14 @@
 [workspace]
 dependencies_update = true
 git_release_enable = false
+
+# No external consumers yet, so a deliberate API break only warrants a patch
+# bump. Disabling semver_check stops release-plz from detecting the break and
+# forcing a 0.x minor bump; the bump falls back to patch from the commits.
+[[package]]
+name = "moq-net"
+semver_check = false
+
+[[package]]
+name = "moq-relay"
+semver_check = false

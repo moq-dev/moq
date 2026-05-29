@@ -84,6 +84,10 @@ impl StatsConfig {
 		let retention = self.retention.unwrap_or(1).max(1);
 		let node = self.node.clone().map(PathOwned::from);
 		tracing::info!(prefix, interval_secs = interval.as_secs(), retention, node = ?node, "stats publishing enabled");
-		Stats::new(prefix, interval, retention, node, origin)
+		Stats::new(origin)
+			.with_prefix(prefix)
+			.with_interval(interval)
+			.with_retention(retention)
+			.with_node(node)
 	}
 }
