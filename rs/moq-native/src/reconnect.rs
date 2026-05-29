@@ -76,25 +76,34 @@ pub enum Status {
 /// distinguishes a permanent give-up from a graceful close.
 #[derive(Default)]
 struct State {
-	/// Number of connect/disconnect transitions so far. Connects and disconnects strictly
-	/// alternate starting with a connect, so odd values are [`Status::Connected`] and even
-	/// values are [`Status::Disconnected`].
-	epoch: u64,
+	/// Current connection status, or `None` before the first connect.
+	status: Option<Status>,
 	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
 	error: Option<Arc<anyhow::Error>>,
 }
 
+/// Aborts the background reconnect task when the last [`Reconnect`] handle is dropped.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+	fn drop(&mut self) {
+		self.0.abort();
+	}
+}
+
 /// Handle to a background reconnect loop.
 ///
-/// Spawns a tokio task that connects, waits for session close, then reconnects
-/// with exponential backoff. [`status`](Self::status) reports each connect/disconnect
-/// transition in order; [`closed`](Self::closed) waits for the loop to stop. Dropping
-/// the handle aborts the background task.
+/// Spawns a tokio task that connects, waits for session close, then reconnects with exponential
+/// backoff. [`status`](Self::status) reports connection changes; [`closed`](Self::closed) waits for
+/// the loop to stop. Cheaply cloneable for multiple handles; the loop stops once the last handle
+/// is dropped.
+#[derive(Clone)]
 pub struct Reconnect {
-	abort: tokio::task::AbortHandle,
+	#[allow(dead_code)] // Held for its Drop: aborts the task when the last handle goes.
+	abort: Arc<AbortOnDrop>,
 	state: conducer::Consumer<State>,
-	/// Transitions already returned by [`status`](Self::status).
-	cursor: u64,
+	/// The last status returned by this handle's [`status`](Self::status), for change detection.
+	last_reported: Option<Status>,
 }
 
 impl Reconnect {
@@ -111,9 +120,9 @@ impl Reconnect {
 			// Dropping the producer here closes the channel, signaling consumers.
 		});
 		Self {
-			abort: task.abort_handle(),
+			abort: Arc::new(AbortOnDrop(task.abort_handle())),
 			state,
-			cursor: 0,
+			last_reported: None,
 		}
 	}
 
@@ -137,15 +146,13 @@ impl Reconnect {
 					tracing::info!(%url, "connected");
 					delay = backoff.initial;
 					last_error = None;
-					// Odd epoch: connected.
 					if let Ok(mut state) = state.write() {
-						state.epoch += 1;
+						state.status = Some(Status::Connected);
 					}
 					let _ = session.closed().await;
 					tracing::warn!(%url, "session closed, reconnecting");
-					// Even epoch: disconnected.
 					if let Ok(mut state) = state.write() {
-						state.epoch += 1;
+						state.status = Some(Status::Disconnected);
 					}
 					retry_start = tokio::time::Instant::now();
 				}
@@ -159,54 +166,50 @@ impl Reconnect {
 		}
 	}
 
-	/// Wait for the next connect/disconnect transition, in order.
+	/// Wait until the connection status changes from what this handle last reported.
 	///
-	/// Connects and disconnects strictly alternate (connect, disconnect, connect, ...), so
-	/// successive calls return `Connected`, `Disconnected`, `Connected`, ... Each call advances
-	/// an internal cursor, so a caller never misses or reorders a transition even if the loop
-	/// has already raced several reconnects ahead.
+	/// Returns the current [`Status`] (`Connected` or `Disconnected`). Since the loop alternates
+	/// between the two, successive calls alternate as well, but a status that flips and flips back
+	/// before the caller polls is reported once: this tracks the *current* state, not every edge.
 	///
 	/// Returns `Err` once the loop has stopped: the give-up error if it exhausted its backoff
-	/// timeout, or a generic "stopped" error after [`close`](Self::close) / drop.
+	/// timeout, or a generic "stopped" error after the last handle is dropped.
 	pub async fn status(&mut self) -> anyhow::Result<Status> {
-		let since = self.cursor;
+		let last = self.last_reported;
 
-		// Clone the consumer so the borrow doesn't outlive the await, freeing us to bump the cursor.
-		// Collapse the poll result to a bool inside the closure: a `Ref` in the poll output would
-		// make the resulting future non-Send.
+		// Clone the consumer so the borrow doesn't outlive the await, freeing us to update
+		// `last_reported`. Collapse the poll result to an owned value inside the closure: a `Ref`
+		// in the poll output would make the resulting future non-Send.
 		let consumer = self.state.clone();
-		let advanced = conducer::wait(|waiter| {
-			match consumer.poll(waiter, |state| match state.epoch > since {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
+		let current = conducer::wait(|waiter| {
+			match consumer.poll(waiter, |state| match state.status {
+				Some(status) if Some(status) != last => Poll::Ready(status),
+				_ => Poll::Pending,
 			}) {
-				Poll::Ready(Ok(())) => Poll::Ready(true),
-				Poll::Ready(Err(_)) => Poll::Ready(false),
+				Poll::Ready(Ok(status)) => Poll::Ready(Some(status)),
+				Poll::Ready(Err(_)) => Poll::Ready(None),
 				Poll::Pending => Poll::Pending,
 			}
 		})
 		.await;
 
-		if !advanced {
+		match current {
+			Some(status) => {
+				self.last_reported = Some(status);
+				Ok(status)
+			}
 			// Channel closed: surface the terminal error (or a generic one for a graceful stop).
-			return Err(self
+			None => Err(self
 				.outcome()
 				.err()
-				.unwrap_or_else(|| anyhow::anyhow!("reconnect stopped")));
+				.unwrap_or_else(|| anyhow::anyhow!("reconnect stopped"))),
 		}
-
-		// Position `since + 1`: odd is a connect, even is a disconnect.
-		self.cursor = since + 1;
-		Ok(match self.cursor % 2 {
-			1 => Status::Connected,
-			_ => Status::Disconnected,
-		})
 	}
 
 	/// Poll whether the reconnect loop has stopped.
 	///
 	/// Ready with `Err` if it permanently gave up (reconnect timeout exceeded),
-	/// or `Ok(())` if stopped via [`close`](Self::close) or drop.
+	/// or `Ok(())` if stopped by dropping the last handle.
 	pub fn poll_closed(&self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<()>> {
 		match self.state.poll_closed(waiter) {
 			Poll::Ready(()) => Poll::Ready(self.outcome()),
@@ -216,7 +219,7 @@ impl Reconnect {
 
 	/// Wait until the reconnect loop stops.
 	///
-	/// Returns `Ok(())` if closed via [`close`](Self::close) or drop.
+	/// Returns `Ok(())` if stopped by dropping the last handle.
 	/// Returns `Err` with the most recent connection error if the reconnect
 	/// timeout was exceeded.
 	pub async fn closed(&self) -> anyhow::Result<()> {
@@ -229,17 +232,6 @@ impl Reconnect {
 			Some(err) => Err(anyhow::anyhow!("{err:#}")),
 			None => Ok(()),
 		}
-	}
-
-	/// Stop the background reconnect loop.
-	pub fn close(self) {
-		self.abort.abort();
-	}
-}
-
-impl Drop for Reconnect {
-	fn drop(&mut self) {
-		self.abort.abort();
 	}
 }
 

@@ -73,8 +73,8 @@ impl Session {
 			.with_consume(consume)
 			.reconnect(url);
 
-		// status() returns transitions in order and Err on terminal give-up, so the ? both ends
-		// the loop and propagates the negative status code.
+		// status() reports connection changes and Err on terminal give-up, so the ? both ends the
+		// loop and propagates the negative status code.
 		let mut connects: u64 = 0;
 		loop {
 			match reconnect.status().await.map_err(|err| Error::Connect(Arc::new(err)))? {
@@ -86,8 +86,8 @@ impl Session {
 						.map_err(|_| Error::Connect(Arc::new(anyhow::anyhow!("connection epoch exceeded i32::MAX"))))?;
 					Self::notify(task_id, code);
 				}
-				// Status 0: transiently disconnected, reconnect in progress.
-				moq_native::Status::Disconnected => Self::notify(task_id, 0),
+				// Don't report disconnects: a separate change reserves status 0 for "closed".
+				moq_native::Status::Disconnected => {}
 			}
 		}
 	}

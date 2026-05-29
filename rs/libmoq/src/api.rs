@@ -123,10 +123,10 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 /// The `on_status` callback reports connection state via the sign of the code:
 /// - positive: connected. The value is the connection epoch (1 on the first connect, 2 on the
 ///   first reconnect, and so on), so callers can distinguish a reconnect from the initial connect.
-/// - zero: transiently disconnected, with a reconnect in progress.
 /// - negative: reconnection permanently gave up (the backoff timeout is exceeded). Terminal.
 ///
-/// The `on_status` callback will NOT be called after [moq_session_close].
+/// Transient disconnects are not reported. The `on_status` callback will NOT be called after
+/// [moq_session_close].
 ///
 /// # Safety
 /// - The caller must ensure that url is a valid pointer to url_len bytes of data.
