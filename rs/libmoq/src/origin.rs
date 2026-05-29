@@ -4,10 +4,13 @@ use tokio::sync::oneshot;
 use crate::ffi::OnStatus;
 use crate::{Error, Id, NonZeroSlab, State, moq_announced};
 
-/// A spawned task entry: close sender to signal shutdown, callback to deliver status.
+/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
+///
+/// `close` is an `Option` so `*_close` can drop just the sender without
+/// removing the entry. The task delivers one final terminal callback and then
+/// removes itself, so `user_data` stays valid until that callback fires.
 struct TaskEntry {
-	#[allow(dead_code)] // Dropping the sender signals the receiver.
-	close: oneshot::Sender<()>,
+	close: Option<oneshot::Sender<()>>,
 	callback: OnStatus,
 }
 
@@ -25,7 +28,7 @@ pub struct Origin {
 	/// Broadcast announcement information (path, active status).
 	announced: NonZeroSlab<(String, bool)>,
 
-	/// Announcement listener tasks. Close takes the entry to revoke the callback.
+	/// Announcement listener tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
 	announced_task: NonZeroSlab<Option<TaskEntry>>,
 }
 
@@ -44,19 +47,21 @@ impl Origin {
 		let channel = oneshot::channel();
 
 		let entry = TaskEntry {
-			close: channel.0,
+			close: Some(channel.0),
 			callback: on_announce,
 		};
 		let id = self.announced_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_announced(id, consumer) => res,
+				res = Self::run_announced(on_announce, consumer) => res,
 				_ = channel.1 => Ok(()),
 			};
 
-			// The lock is dropped before the callback is invoked.
-			if let Some(entry) = State::lock().origin.announced_task.remove(id).flatten() {
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().origin.announced_task.remove(id).flatten();
+			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
 		});
@@ -64,20 +69,13 @@ impl Origin {
 		Ok(id)
 	}
 
-	async fn run_announced(task_id: Id, mut consumer: moq_net::OriginConsumer) -> Result<(), Error> {
+	async fn run_announced(callback: OnStatus, mut consumer: moq_net::OriginConsumer) -> Result<(), Error> {
 		while let Some((path, broadcast)) = consumer.announced().await {
-			let mut state = State::lock();
-
-			// Stop if the callback was revoked by close.
-			let Some(Some(entry)) = state.origin.announced_task.get(task_id) else {
-				return Ok(());
-			};
-			let callback = entry.callback;
-
-			let announced_id = state.origin.announced.insert((path.to_string(), broadcast.is_some()))?;
-			drop(state);
-
-			// The lock is dropped before the callback is invoked.
+			// Hold the lock only to buffer the announcement; release it before the callback.
+			let announced_id = State::lock()
+				.origin
+				.announced
+				.insert((path.to_string(), broadcast.is_some()))?;
 			callback.call(announced_id);
 		}
 
@@ -95,10 +93,12 @@ impl Origin {
 	}
 
 	pub fn announced_close(&mut self, announced: Id) -> Result<(), Error> {
-		// Take the entire entry: drops the sender (signals shutdown) and revokes the callback.
+		// Signal shutdown; the task delivers a final callback and removes itself.
 		self.announced_task
 			.get_mut(announced)
+			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::AnnouncementNotFound)?
+			.close
 			.take()
 			.ok_or(Error::AnnouncementNotFound)?;
 		Ok(())

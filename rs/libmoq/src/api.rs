@@ -116,12 +116,19 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 /// Returns a non-zero handle to the session on success, or a negative code on (immediate) failure.
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
-/// The callback is called on success (status 0) and later when closed (status non-zero).
-/// The `on_status` callback will NOT be called after [moq_session_close].
+/// `on_status` reports the session lifecycle through its status code:
+/// - `1` once the session is connected.
+/// - `0` when the session closes cleanly (terminal).
+/// - a negative error code if the session fails (terminal).
+///
+/// After a terminal (`<= 0`) status, `on_status` is never called again and
+/// `user_data` is never touched again, so that final callback is the point to
+/// release `user_data`. The terminal callback fires even after
+/// [moq_session_close], so do not free `user_data` on the close call itself.
 ///
 /// # Safety
 /// - The caller must ensure that url is a valid pointer to url_len bytes of data.
-/// - The caller must ensure that `on_status` is valid until [moq_session_close] is called.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_status` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_session_connect(
 	url: *const c_char,
@@ -149,11 +156,14 @@ pub unsafe extern "C" fn moq_session_connect(
 	})
 }
 
-/// Close a connection to a MoQ server and cancel its background task.
+/// Request that a session shut down.
 ///
-/// Returns a zero on success, or a negative code on failure.
-///
-/// The [moq_session_connect] `on_status` callback will NOT be called.
+/// Returns immediately: zero on success, or a negative code if the session is
+/// unknown or already closing. Does NOT free `user_data`. The
+/// [moq_session_connect] `on_status` callback still fires once more with a
+/// terminal `0` (or a negative error), and that final callback is where
+/// `user_data` should be released. Safe to call from any thread, including from
+/// within `on_status`.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_session_close(session: u32) -> i32 {
 	ffi::enter(move || {
@@ -199,7 +209,11 @@ pub unsafe extern "C" fn moq_origin_publish(origin: u32, path: *const c_char, pa
 
 /// Learn about all broadcasts published to an origin.
 ///
-/// The callback is called with an announced ID when a new broadcast is published.
+/// `on_announce` is invoked with a positive announced ID for each broadcast,
+/// then exactly once more with a terminal code: `0` (stopped cleanly) or a
+/// negative error. After the terminal (`<= 0`) callback, `on_announce` is never
+/// called again and `user_data` is never touched again, so release `user_data`
+/// there. The terminal callback fires even after [moq_origin_announced_close].
 ///
 /// - [moq_origin_announced_info] is used to query information about the broadcast.
 /// - [moq_origin_announced_close] is used to stop receiving announcements.
@@ -207,7 +221,7 @@ pub unsafe extern "C" fn moq_origin_publish(origin: u32, path: *const c_char, pa
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `on_announce` is valid until [moq_origin_announced_close] is called.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_announce` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_announced(
 	origin: u32,
@@ -240,7 +254,10 @@ pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq
 
 /// Stop receiving announcements for broadcasts published to an origin.
 ///
-/// Returns a zero on success, or a negative code on failure.
+/// Returns immediately: zero on success, or a negative code if already closed.
+/// Does NOT free `user_data`. The [moq_origin_announced] `on_announce` callback
+/// still fires once more with a terminal `0` (or a negative error), and that
+/// final callback is where `user_data` should be released.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_origin_announced_close(announced: u32) -> i32 {
 	ffi::enter(move || {
@@ -564,13 +581,17 @@ pub extern "C" fn moq_publish_group_close(group: u32) -> i32 {
 
 /// Create a catalog consumer for a broadcast.
 ///
-/// The callback is called with a catalog ID when a new catalog is available.
-/// The catalog ID can be used to query video/audio track information.
+/// `on_catalog` is invoked with a positive catalog ID for each catalog update
+/// (usable to query video/audio track information), then exactly once more with
+/// a terminal code: `0` (closed cleanly) or a negative error. After the terminal
+/// (`<= 0`) callback, `on_catalog` is never called again and `user_data` is never
+/// touched again, so release `user_data` there. The terminal callback fires even
+/// after [moq_consume_catalog_close].
 ///
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `on_catalog` is valid until [moq_consume_catalog_close] is called.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_catalog` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_catalog(
 	broadcast: u32,
@@ -584,13 +605,13 @@ pub unsafe extern "C" fn moq_consume_catalog(
 	})
 }
 
-/// Close a catalog consumer and cancel its background task.
+/// Stop a catalog consumer's background subscription.
 ///
-/// This only stops the background subscription; catalog snapshots previously
-/// delivered via the [moq_consume_catalog] callback remain valid until freed
-/// with [moq_consume_catalog_free].
-///
-/// Returns a zero on success, or a negative code on failure.
+/// Returns immediately: zero on success, or a negative code if already closed.
+/// Does NOT free `user_data`; the [moq_consume_catalog] callback still fires once
+/// more with a terminal `0` (or a negative error), which is where `user_data`
+/// should be released. Catalog snapshots previously delivered via the callback
+/// remain valid until freed with [moq_consume_catalog_free].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_catalog_close(catalog: u32) -> i32 {
 	ffi::enter(move || {
@@ -654,12 +675,16 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 /// Consume a video track from a broadcast, delivering frames in order.
 ///
 /// - `max_latency_ms` controls the maximum amount of buffering allowed before skipping a GoP.
-/// - `on_frame` is called with a frame ID when a new frame is available.
+/// - `on_frame` is called with a positive frame ID per frame, then exactly once
+///   more with a terminal code: `0` (closed cleanly) or a negative error. After
+///   the terminal (`<= 0`) callback, `on_frame` is never called again and
+///   `user_data` is never touched again, so release `user_data` there. The
+///   terminal callback fires even after [moq_consume_video_close].
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `on_frame` is valid until the track is closed.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_frame` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_video_ordered(
 	catalog: u32,
@@ -679,9 +704,12 @@ pub unsafe extern "C" fn moq_consume_video_ordered(
 	})
 }
 
-/// Close a video track consumer and clean up its resources.
+/// Stop a video track consumer's background task.
 ///
-/// Returns a zero on success, or a negative code on failure.
+/// Returns immediately: zero on success, or a negative code if already closed.
+/// Does NOT free `user_data`; the [moq_consume_video_ordered] `on_frame` callback
+/// still fires once more with a terminal `0` (or a negative error), which is
+/// where `user_data` should be released.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 	ffi::enter(move || {
@@ -692,13 +720,17 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 
 /// Consume an audio track from a broadcast, emitting the frames in order.
 ///
-/// The callback is called with a frame ID when a new frame is available.
+/// `on_frame` is called with a positive frame ID per frame, then exactly once
+/// more with a terminal code: `0` (closed cleanly) or a negative error. After
+/// the terminal (`<= 0`) callback, `on_frame` is never called again and
+/// `user_data` is never touched again, so release `user_data` there. The
+/// terminal callback fires even after [moq_consume_audio_close].
 /// The `max_latency_ms` parameter controls how long to wait before skipping frames.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `on_frame` is valid until [moq_consume_audio_close] is called.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_frame` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_audio_ordered(
 	catalog: u32,
@@ -718,9 +750,12 @@ pub unsafe extern "C" fn moq_consume_audio_ordered(
 	})
 }
 
-/// Close an audio track consumer and clean up its resources.
+/// Stop an audio track consumer's background task.
 ///
-/// Returns a zero on success, or a negative code on failure.
+/// Returns immediately: zero on success, or a negative code if already closed.
+/// Does NOT free `user_data`; the [moq_consume_audio_ordered] `on_frame` callback
+/// still fires once more with a terminal `0` (or a negative error), which is
+/// where `user_data` should be released.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_audio_close(track: u32) -> i32 {
 	ffi::enter(move || {
@@ -775,15 +810,19 @@ pub extern "C" fn moq_consume_close(consume: u32) -> i32 {
 /// Subscribe to a raw track by name, delivering each frame's payload as-is.
 ///
 /// This is the counterpart to [moq_publish_track]: no catalog lookup or
-/// container parsing. `on_frame` is called with a raw frame ID for each frame
-/// in arrival order. Read each frame with [moq_consume_track_frame] and release
-/// it with [moq_consume_track_frame_close].
+/// container parsing. `on_frame` is called with a positive raw frame ID for each
+/// frame in arrival order, then exactly once more with a terminal code: `0`
+/// (closed cleanly) or a negative error. After the terminal (`<= 0`) callback,
+/// `on_frame` is never called again and `user_data` is never touched again, so
+/// release `user_data` there. The terminal callback fires even after
+/// [moq_consume_track_close]. Read each frame with [moq_consume_track_frame] and
+/// release it with [moq_consume_track_frame_close].
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that name is a valid pointer to name_len bytes of data.
-/// - The caller must ensure that `on_frame` is valid until [moq_consume_track_close] is called.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_frame` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_track(
 	broadcast: u32,
@@ -830,12 +869,13 @@ pub extern "C" fn moq_consume_track_frame_close(frame: u32) -> i32 {
 	})
 }
 
-/// Close a raw track consumer and cancel its background task.
+/// Stop a raw track consumer's background task.
 ///
-/// Frames already delivered via the callback remain valid until released with
-/// [moq_consume_track_frame_close].
-///
-/// Returns a zero on success, or a negative code on failure.
+/// Returns immediately: zero on success, or a negative code if already closed.
+/// Does NOT free `user_data`; the [moq_consume_track] `on_frame` callback still
+/// fires once more with a terminal `0` (or a negative error), which is where
+/// `user_data` should be released. Frames already delivered via the callback
+/// remain valid until released with [moq_consume_track_frame_close].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_track_close(track: u32) -> i32 {
 	ffi::enter(move || {

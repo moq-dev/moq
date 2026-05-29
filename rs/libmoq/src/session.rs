@@ -5,16 +5,19 @@ use url::Url;
 
 use crate::{Error, Id, NonZeroSlab, State, ffi};
 
-/// A spawned task entry: close sender to signal shutdown, callback to deliver status.
+/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
+///
+/// `close` is an `Option` so `close()` can drop just the sender without
+/// removing the entry. The task delivers one final terminal callback and then
+/// removes itself, so `user_data` stays valid until that callback fires.
 struct TaskEntry {
-	#[allow(dead_code)] // Dropping the sender signals the receiver.
-	close: oneshot::Sender<()>,
+	close: Option<oneshot::Sender<()>>,
 	callback: ffi::OnStatus,
 }
 
 #[derive(Default)]
 pub struct Session {
-	/// Session tasks. Close takes the entry to revoke the callback.
+	/// Session tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
 	task: NonZeroSlab<Option<TaskEntry>>,
 }
 
@@ -29,19 +32,23 @@ impl Session {
 		let closed = oneshot::channel();
 
 		let entry = TaskEntry {
-			close: closed.0,
+			close: Some(closed.0),
 			callback,
 		};
 		let id = self.task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				_ = closed.1 => Err(Error::Closed),
-				res = Self::connect_run(id, url, publish, consume) => res,
+				// close() requested: a clean shutdown delivers a terminal 0.
+				_ = closed.1 => Ok(()),
+				res = Self::connect_run(callback, url, publish, consume) => res,
 			};
 
-			// The lock is dropped before the callback is invoked.
-			if let Some(entry) = State::lock().session.task.remove(id).flatten() {
+			// Deliver one final terminal callback (0 = closed, < 0 = error), then
+			// drop the entry. Pull it out from under the lock so the callback never
+			// runs while held.
+			let entry = State::lock().session.task.remove(id).flatten();
+			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
 		});
@@ -50,7 +57,7 @@ impl Session {
 	}
 
 	async fn connect_run(
-		task_id: Id,
+		callback: ffi::OnStatus,
 		url: Url,
 		publish: Option<moq_net::OriginConsumer>,
 		consume: Option<moq_net::OriginProducer>,
@@ -66,20 +73,20 @@ impl Session {
 			.await
 			.map_err(|err| Error::Connect(Arc::new(err)))?;
 
-		// "Connected" callback — copy from slab if not revoked.
-		if let Some(Some(entry)) = State::lock().session.task.get(task_id) {
-			entry.callback.call(());
-		}
+		// Connected: positive sentinel 1. (0 is reserved for a clean close.)
+		callback.call(1i32);
 
 		session.closed().await?;
 		Ok(())
 	}
 
 	pub fn close(&mut self, id: Id) -> Result<(), Error> {
-		// Take the entire entry: drops the sender (signals shutdown) and revokes the callback.
+		// Signal shutdown; the task delivers a final callback and removes itself.
 		self.task
 			.get_mut(id)
+			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::SessionNotFound)?
+			.close
 			.take()
 			.ok_or(Error::SessionNotFound)?;
 		Ok(())

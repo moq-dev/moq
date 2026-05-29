@@ -39,8 +39,13 @@ impl Callback {
 		self.rx.recv_timeout(TIMEOUT).expect("callback timed out")
 	}
 
-	fn try_recv(&self, timeout: Duration) -> Option<i32> {
-		self.rx.recv_timeout(timeout).ok()
+	/// Wait for the terminal callback (code <= 0) the task delivers after close
+	/// or stream end. Must be drained before the Callback (user_data) drops,
+	/// since user_data must outlive the final callback.
+	fn recv_terminal(&self) -> i32 {
+		let code = self.recv();
+		assert!(code <= 0, "expected terminal code <= 0, got {code}");
+		code
 	}
 }
 
@@ -267,6 +272,7 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -355,6 +361,9 @@ fn raw_track_publish_consume() {
 	}
 
 	assert_eq!(moq_consume_track_close(consumer), 0);
+	// The task delivers one final terminal callback after close; drain it
+	// before the Callback (user_data) drops.
+	assert_eq!(frame_cb.recv_terminal(), 0, "clean close delivers terminal 0");
 	assert!(moq_consume_track_close(consumer) < 0, "double-close should fail");
 	assert_eq!(moq_publish_track_close(track), 0);
 	assert!(moq_publish_track_close(track) < 0, "double-close should fail");
@@ -437,12 +446,14 @@ fn double_close_all_resource_types() {
 	assert!(moq_consume_frame_close(frame_id) < 0);
 
 	assert_eq!(moq_consume_audio_close(track), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
 	assert!(moq_consume_audio_close(track) < 0);
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert!(moq_consume_catalog_free(catalog_id) < 0);
 
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert!(moq_consume_catalog_close(catalog_task) < 0);
 
 	assert_eq!(moq_consume_close(consume), 0);
@@ -501,6 +512,7 @@ fn local_announce() {
 	assert_eq!(announced_path, "test/broadcast");
 
 	assert_eq!(moq_origin_announced_close(announced_task), 0);
+	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -534,6 +546,7 @@ fn announced_deactivation() {
 	assert!(!info.active, "broadcast should be inactive after publisher closes");
 
 	assert_eq!(moq_origin_announced_close(announced_task), 0);
+	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -631,8 +644,10 @@ fn local_publish_consume() {
 
 	assert_eq!(moq_consume_frame_close(frame_id), 0);
 	assert_eq!(moq_consume_audio_close(track), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_close(media), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -740,8 +755,10 @@ fn video_publish_consume() {
 
 	assert_eq!(moq_consume_frame_close(frame_id), 0);
 	assert_eq!(moq_consume_video_close(track), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0, "video close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_close(media), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -807,8 +824,10 @@ fn multiple_frames_ordering() {
 	}
 
 	assert_eq!(moq_consume_audio_close(track), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_close(media), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -874,6 +893,7 @@ fn catalog_update_on_new_track() {
 	assert_eq!(moq_consume_catalog_free(catalog_id1), 0);
 	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_close(media1), 0);
 	assert_eq!(moq_publish_media_close(media2), 0);
@@ -936,10 +956,9 @@ fn session_connect_and_close() {
 		)
 	});
 
+	// close() requests shutdown; the task still delivers exactly one terminal
+	// callback (0 = clean close, or a negative connect error), after which
+	// user_data is safe to free.
 	assert_eq!(moq_session_close(session), 0);
-
-	assert!(
-		cb.try_recv(Duration::from_millis(200)).is_none(),
-		"callback should not fire after session_close"
-	);
+	assert!(cb.recv() <= 0, "session close delivers a terminal code");
 }
