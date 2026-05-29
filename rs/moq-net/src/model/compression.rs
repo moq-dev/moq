@@ -40,7 +40,7 @@ impl Compression {
 	}
 
 	/// Decompress a whole frame payload, rejecting anything that inflates past
-	/// [`MAX_FRAME_SIZE`] so a malicious peer can't zip-bomb the receiver.
+	/// `MAX_FRAME_SIZE` so a malicious peer can't zip-bomb the receiver.
 	pub fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
 		match self {
 			Self::None => Ok(data.to_vec()),
