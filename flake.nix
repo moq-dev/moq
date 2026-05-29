@@ -177,6 +177,18 @@
           };
         };
 
+        # Re-export gst_all_1 so users can pair the plugin with a matching
+        # gstreamer in one nix invocation:
+        #   nix shell .#moq-gst .#gst_all_1.gstreamer --command gst-inspect-1.0 moq
+        # Sourcing from the same nixpkgs the moq-gst build linked against
+        # avoids the duplicate-symbol crash you get with
+        # `nixpkgs#gst_all_1.gstreamer`, which can resolve to a different
+        # store hash. Lives under legacyPackages because nested attrsets
+        # are disallowed in the flake `packages` schema.
+        legacyPackages = {
+          inherit (pkgs) gst_all_1;
+        };
+
         devShells.default = pkgs.mkShell {
           packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps ++ packagingDeps ++ lintDeps;
 

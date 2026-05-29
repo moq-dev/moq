@@ -31,9 +31,33 @@ sudo dnf config-manager --add-repo https://rpm.moq.dev/moq.repo
 sudo dnf install gstreamer1-moq
 ```
 
+### Nix (any platform with Nix installed)
+
+The `moq-gst` flake output bundles the plugin with wrappers around `gst-inspect-1.0` / `gst-launch-1.0` that preload moq + the standard `gst-plugins-{base,good,bad}` set, so no `GST_PLUGIN_PATH` setup is needed.
+
+```bash
+# Inspect: list moqsink + moqsrc. (Or one-shot: `nix run github:moq-dev/moq#moq-gst -- moq`.)
+nix shell github:moq-dev/moq#moq-gst --command gst-inspect-1.0 moq
+
+# Subscribe to the always-on public test broadcast and render to a window.
+nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
+  moqsrc url=https://cdn.moq.dev/demo broadcast=bbb.hang \
+  ! decodebin3 ! videoconvert ! autovideosink
+
+# Publish your own broadcast on the public anon relay (then sub to it from anywhere).
+curl -fsSL https://vid.moq.dev/bbb.mp4 -o bbb.mp4
+nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
+  multifilesrc location=bbb.mp4 loop=true ! parsebin name=parse \
+    parse. ! queue ! identity sync=true ! mux.sink_0 \
+    parse. ! queue ! identity sync=true ! mux.sink_1 \
+    moqsink name=mux url=https://cdn.moq.dev/anon broadcast=my-broadcast.hang
+```
+
+See [`doc/bin/gstreamer.md`](https://github.com/moq-dev/moq/blob/main/doc/bin/gstreamer.md) for local-relay setup and audio-only variants.
+
 ### Manual install (tarball)
 
-Download the tarball for your platform from the [releases page](https://github.com/moq-dev/moq/releases?q=moq-gst) and extract `lib/libgstmoq.{so,dylib}` into a directory GStreamer scans for plugins:
+Download the tarball for your platform from the [releases page](https://github.com/moq-dev/moq/releases?q=moq-gst) and copy `lib/gstreamer-1.0/libgstmoq.{so,dylib}` into a directory GStreamer scans for plugins:
 
 - **Linux**: `~/.local/share/gstreamer-1.0/plugins/` (per-user) or `/usr/lib/x86_64-linux-gnu/gstreamer-1.0/` (system-wide). Alternatively, `export GST_PLUGIN_PATH=/path/to/dir`.
 - **macOS**: `~/Library/Application Support/GStreamer/1.0/plugins/`. Alternatively, `export GST_PLUGIN_PATH=/path/to/dir`.
@@ -75,5 +99,5 @@ For a reproducible build matching the release artifacts (Linux + macOS):
 
 ```bash
 nix build .#moq-gst
-ls result/lib/
+ls result/lib/gstreamer-1.0/
 ```

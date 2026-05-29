@@ -38,11 +38,19 @@ Published to Maven Central via [release-kt.yml](https://github.com/moq-dev/moq/b
 ```kotlin
 import dev.moq.*
 import kotlinx.coroutines.flow.collect
+import uniffi.moq.MoqClient
 import uniffi.moq.MoqOriginProducer
 
-val session = Moq.connect("https://relay.example.com")
+// Wire an origin as both publish source and consume sink. Set just one
+// side for a subscribe-only or publish-only client.
+val origin = MoqOriginProducer()
+val client = MoqClient()
+client.setPublish(origin)
+client.setConsume(origin)
 
-MoqOriginProducer().use { origin ->
+val session = client.connect("https://relay.example.com")
+
+origin.use {
     val consumer = origin.consume()
     val announced = consumer.announced("demos/")
     announced.announcements().collect { announcement ->
@@ -53,6 +61,8 @@ MoqOriginProducer().use { origin ->
         }
     }
 }
+
+session.shutdown()
 ```
 
 Cancelling the surrounding coroutine scope propagates through to the native consumer's `cancel()` via the wrapper's `onCompletion` hook.
