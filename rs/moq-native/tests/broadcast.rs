@@ -668,7 +668,7 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	let addr = server.local_addr().expect("server addr");
 
 	let sub_origin = Origin::random().produce();
-	let mut announcements = sub_origin.consume();
+	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
@@ -689,7 +689,7 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 		.expect("connect timeout")
 		.expect("connect failed");
 
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announce timeout")
 		.expect("origin closed");
