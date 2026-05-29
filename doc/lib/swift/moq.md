@@ -7,7 +7,7 @@ description: Swift Package Manager target for Media over QUIC
 
 The Swift Package Manager target for [Media over QUIC](/).
 
-This is an ergonomic wrapper around the UniFFI-generated `MoqFFI` types, providing `AsyncSequence` adapters, Swift-friendly errors, and a `Moq.connect` helper that returns a session you can `await`.
+This is an ergonomic wrapper around the UniFFI-generated `MoqFFI` types, providing `AsyncSequence` adapters and Swift-friendly errors.
 
 ## Install
 
@@ -33,15 +33,38 @@ Supported platforms: iOS 15+, iPadOS 15+, macOS 12+. The package ships an XCFram
 ```swift
 import Moq
 
-let session = try await Moq.connect(url: "https://relay.example.com")
+// Wire an origin as both publish source and consume sink for the
+// typical full-duplex client. Set just one side for a subscribe-only
+// or publish-only client.
+let origin = MoqOriginProducer()
+let client = MoqClient()
+client.setPublish(origin: origin)
+client.setConsume(origin: origin)
+
+let session = try await client.connect(url: "https://relay.example.com")
 ```
 
-For development against a relay using a self-signed certificate, pass `tlsVerify: false`.
+For development against a relay with a self-signed certificate, configure the client before connecting:
+
+```swift
+let client = MoqClient()
+client.setTlsDisableVerify(disable: true)
+try client.setBind(addr: "127.0.0.1:0")
+client.setPublish(origin: origin)
+client.setConsume(origin: origin)
+let session = try await client.connect(url: "https://localhost:4443")
+```
+
+When you're done, signal graceful shutdown to the peer:
+
+```swift
+session.shutdown()  // alias for cancel(code: 0)
+```
 
 ## Subscribe
 
 ```swift
-let consumer = MoqOriginProducer().consume()
+let consumer = origin.consume()
 let announced = try consumer.announced(prefix: "demos/")
 
 for try await announcement in announced.announcements {
@@ -55,15 +78,15 @@ for try await announcement in announced.announcements {
 ## Publish
 
 ```swift
-let broadcast = MoqBroadcastProducer()
+let broadcast = try MoqBroadcastProducer()
 let audio = try broadcast.publishMedia(format: "opus", init: opusInitBytes)
 
-try session.publish(path: "my-stream", broadcast: broadcast)
+try origin.publish(path: "my-stream", broadcast: broadcast)
 
 try audio.writeFrame(payload: payload, timestampUs: 0)
 try audio.writeFrame(payload: payload, timestampUs: 20_000)
-audio.finish()
-broadcast.finish()
+try audio.finish()
+try broadcast.finish()
 ```
 
 ## Cancellation

@@ -1,5 +1,5 @@
 import Foundation
-import MoqFFI
+@_exported import MoqFFI
 
 extension MoqSession {
     /// Suspend until the session is closed.

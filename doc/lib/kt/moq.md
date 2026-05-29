@@ -7,7 +7,7 @@ description: Kotlin Multiplatform library for Media over QUIC
 
 The Kotlin Multiplatform module for [Media over QUIC](/).
 
-A single Maven coordinate that publishes JVM and Android variants. Gradle metadata picks the right one for your target — no per-platform artifacts to track.
+A single Maven coordinate that publishes JVM and Android variants. Gradle metadata picks the right one for your target, so there are no per-platform artifacts to track.
 
 ## Install
 
@@ -29,29 +29,50 @@ Android uses JNI (`jniLibs/`), desktop JVM uses JNA (resource-classpath layout).
 ## Connect
 
 ```kotlin
-import dev.moq.Moq
+import uniffi.moq.MoqClient
+import uniffi.moq.MoqOriginProducer
 
-val session = Moq.connect("https://relay.example.com")
+// Wire an origin as both publish source and consume sink for the
+// typical full-duplex client. Set just one side for a subscribe-only
+// or publish-only client.
+val origin = MoqOriginProducer()
+val client = MoqClient()
+client.setPublish(origin)
+client.setConsume(origin)
+
+val session = client.connect("https://relay.example.com")
 ```
 
-For development against a relay using a self-signed certificate, pass `tlsVerify = false`.
+For development against a relay with a self-signed certificate, configure the client before connecting:
+
+```kotlin
+val client = MoqClient()
+client.setTlsDisableVerify(true)
+client.setBind("127.0.0.1:0")
+client.setPublish(origin)
+client.setConsume(origin)
+val session = client.connect("https://localhost:4443")
+```
+
+When you're done, signal graceful shutdown to the peer:
+
+```kotlin
+session.shutdown()  // alias for cancel(0u)
+```
 
 ## Subscribe
 
 ```kotlin
 import dev.moq.*
 import kotlinx.coroutines.flow.collect
-import uniffi.moq.MoqOriginProducer
 
-MoqOriginProducer().use { origin ->
-    val consumer = origin.consume()
-    val announced = consumer.announced("demos/")
+val consumer = origin.consume()
+val announced = consumer.announced("demos/")
 
-    announced.announcements().collect { announcement ->
-        val catalog = announcement.broadcast().subscribeCatalog()
-        catalog.updates().collect { update ->
-            println("catalog: $update")
-        }
+announced.announcements().collect { announcement ->
+    val catalog = announcement.broadcast().subscribeCatalog()
+    catalog.updates().collect { update ->
+        println("catalog: $update")
     }
 }
 ```
@@ -65,10 +86,10 @@ import uniffi.moq.MoqBroadcastProducer
 val broadcast = MoqBroadcastProducer()
 val audio = broadcast.publishMedia("opus", opusInitBytes)
 
-session.publish("my-stream", broadcast)
+origin.publish("my-stream", broadcast)
 
-audio.writeFrame(payload, timestampUs = 0)
-audio.writeFrame(payload, timestampUs = 20_000)
+audio.writeFrame(payload, timestampUs = 0u)
+audio.writeFrame(payload, timestampUs = 20_000u)
 audio.finish()
 broadcast.finish()
 ```

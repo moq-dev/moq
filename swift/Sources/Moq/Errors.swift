@@ -1,5 +1,5 @@
 import Foundation
-import MoqFFI
+@_exported import MoqFFI
 
 extension MoqError {
     /// True for `Cancelled` and `Closed`, which arise from graceful shutdown

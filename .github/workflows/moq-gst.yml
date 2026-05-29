@@ -44,17 +44,48 @@ jobs:
 
       - name: Build and package (tarball)
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.parse.outputs.version }}
         run: |
           ./rs/moq-gst/build.sh \
-            --target ${{ matrix.target }} \
-            --version ${{ steps.parse.outputs.version }} \
+            --target "$TARGET" \
+            --version "$VERSION" \
             --output dist
+
+      # Load the produced plugin against a system GStreamer the runner just
+      # installed (separate from the nix copy the build linked against).
+      # This is the customer-facing scenario: `nix build .#moq-gst` then
+      # `gst-inspect-1.0 moq`. If dyld/ld.so can't resolve the plugin's deps
+      # against the system GStreamer, this step fails.
+      - name: Install system GStreamer
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends \
+              gstreamer1.0-tools \
+              gstreamer1.0-plugins-base \
+              gstreamer1.0-plugins-good
+          else
+            brew install gstreamer
+          fi
+
+      - name: Smoke test (gst-inspect against system GStreamer)
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          set -euo pipefail
+          tar -xzf "dist/moq-gst-${VERSION}-${TARGET}.tar.gz" -C dist/
+          ./rs/moq-gst/smoke.sh "dist/moq-gst-${VERSION}-${TARGET}/lib/gstreamer-1.0"
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: moq-gst-${{ matrix.target }}
-          path: dist/*
+          path: dist/*.tar.gz
 
   package:
     name: Package .deb/.rpm (${{ matrix.target }})

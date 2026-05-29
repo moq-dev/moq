@@ -146,6 +146,105 @@ tls.disable_verify = true
 # tls.root = ["/path/to/root.pem"]
 ```
 
+### \[stats]
+
+Per-node stats publishing. When enabled, the relay publishes a single
+`<prefix>/node/<node>` broadcast (or `<prefix>/node` when `node` is unset)
+carrying JSON snapshots of every broadcast it's currently serving.
+
+```toml
+[stats]
+# Master switch (defaults to false)
+enabled = true
+
+# Top-level path under which stats broadcasts are published (defaults to ".stats")
+prefix = ".stats"
+
+# Seconds between snapshot publishes (defaults to 1)
+interval = 1
+
+# Number of intervals an entry lingers in the emitted frame after its
+# last observed change (defaults to 1). A short reconnect window keeps
+# the entry visible across brief disconnects.
+retention = 1
+
+# Node identifier appended to the advertised path to disambiguate broadcasts
+# when multiple relays share a cluster origin. May be multi-segment, e.g.
+# "sjc/1" / "sjc/2" for two hosts nested under a shared region key.
+# Single-relay deployments can omit this.
+node = "sjc/1"
+```
+
+Each stats broadcast carries four tracks, one per `(tier, role)` pair:
+
+| Track                       | What it covers                              |
+|-----------------------------|---------------------------------------------|
+| `publisher.json`            | external (e.g. customer) egress             |
+| `subscriber.json`           | external ingress                            |
+| `internal/publisher.json`   | internal (e.g. mTLS cluster peer) egress    |
+| `internal/subscriber.json`  | internal ingress                            |
+
+Each frame is a JSON object mapping broadcast path to a cumulative
+counter snapshot. An entry surfaces whenever its snapshot differs from
+the last one emitted, and lingers for `retention` intervals past the
+most recent change:
+
+```json
+{
+  "demo/bbb": {
+    "announced": 1, "announced_closed": 0,
+    "broadcasts": 1, "broadcasts_closed": 0,
+    "subscriptions": 5, "subscriptions_closed": 2,
+    "bytes": 12345, "frames": 678, "groups": 9
+  },
+  "anon/foo": {
+    "announced": 1, "announced_closed": 0,
+    "broadcasts": 1, "broadcasts_closed": 0,
+    "subscriptions": 2, "subscriptions_closed": 0,
+    "bytes": 234, "frames": 12, "groups": 1
+  }
+}
+```
+
+Field semantics:
+
+- `announced` / `announced_closed`: cumulative count of every broadcast
+  announce/unannounce event on this `(tier, role)` slot, regardless of
+  whether any subscription happened. Use this for "all known broadcasts".
+- `broadcasts` / `broadcasts_closed`: derived in the snapshot task from
+  subscription transitions. Bumps each time the slot transitions from
+  "no active subs" to "at least one active sub" (a flicker through 0
+  inside a single tick counts as a full open/close pair). Use this for
+  "broadcasts with viewers", which is typically what billing and UI
+  want.
+- `subscriptions` / `subscriptions_closed`: cumulative count of
+  track-level subscription guards opened and dropped.
+- `bytes` / `frames` / `groups`: cumulative payload counters from the
+  lite session loops.
+
+Tier, role, and node are implied by the track and broadcast paths, so
+they aren't repeated inside the frame. Counters are cumulative and
+strictly monotonic; a counter going *backwards* across successive
+snapshots means the underlying entry was garbage-collected and
+re-created (relay restart or a long idle gap). Downstream consumers
+should treat decreases as a fresh session segment and sum across resets
+when computing lifetime totals.
+
+Each snapshot reads `*_closed` atomics before their open counterparts,
+which guarantees the emitted snapshot never shows `closed > open` even
+under concurrent bumps (it can momentarily show an inflated *open* count,
+which is logically valid).
+
+Frames for any one `(tier, role)` are skipped when the JSON is
+byte-identical to the last emitted frame; new subscribers still pick up
+a baseline immediately via track-latest semantics.
+
+Every flag also accepts an equivalent CLI argument (`--stats-enabled`,
+`--stats-prefix`, `--stats-interval`, `--stats-retention`,
+`--stats-node`) and environment variable (`MOQ_STATS_ENABLED`,
+`MOQ_STATS_PREFIX`, `MOQ_STATS_INTERVAL`, `MOQ_STATS_RETENTION`,
+`MOQ_STATS_NODE`).
+
 ### \[iroh]
 
 Experimental P2P support via iroh.
