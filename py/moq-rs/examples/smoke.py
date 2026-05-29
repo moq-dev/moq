@@ -30,8 +30,10 @@ async def publish(url: str, broadcast: str) -> None:
         loop = asyncio.get_running_loop()
         stdin = sys.stdin.buffer
         while True:
-            # Blocking read off the event loop so the client keeps flushing.
-            chunk = await loop.run_in_executor(None, stdin.read, READ_CHUNK)
+            # read1 returns as soon as any bytes are available (read() would
+            # block for a full chunk and batch up ffmpeg's real-time output).
+            # Run off the event loop so the client keeps flushing.
+            chunk = await loop.run_in_executor(None, stdin.read1, READ_CHUNK)
             if not chunk:
                 break
             media.write(chunk)
