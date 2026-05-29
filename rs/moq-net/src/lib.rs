@@ -44,8 +44,8 @@
 //! Otherwise you risk a panic.
 //!
 //! This requirement is being phased out as more methods grow `poll_xxx` counterparts
-//! built on [`conducer`], so you can drive them from custom executors without a tokio
-//! runtime. You can also call them synchronously, since [`conducer`] is built on the
+//! built on [`kio`], so you can drive them from custom executors without a tokio
+//! runtime. You can also call them synchronously, since [`kio`] is built on the
 //! standard [`std::task::Waker`] API and any [`std::task::Waker`] is a valid driver.
 
 mod client;
@@ -73,3 +73,6 @@ pub use version::*;
 
 // Re-export the bytes crate
 pub use bytes;
+
+// Re-export the kio crate, since it appears in the public API (e.g. poll_* waiters).
+pub use kio;

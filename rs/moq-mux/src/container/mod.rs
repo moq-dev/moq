@@ -80,7 +80,7 @@ pub trait Container {
 	fn poll_read(
 		&self,
 		group: &mut moq_net::GroupConsumer,
-		waiter: &conducer::Waiter,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>>;
 
 	/// Async wrapper around [`Self::poll_read`].
@@ -91,6 +91,6 @@ pub trait Container {
 	where
 		Self: Sync,
 	{
-		async { conducer::wait(|waiter| self.poll_read(group, waiter)).await }
+		async { kio::wait(|waiter| self.poll_read(group, waiter)).await }
 	}
 }

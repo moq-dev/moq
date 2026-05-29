@@ -126,7 +126,7 @@ impl GroupState {
 	}
 }
 
-fn modify(state: &conducer::Producer<GroupState>) -> Result<conducer::Mut<'_, GroupState>> {
+fn modify(state: &kio::Producer<GroupState>) -> Result<kio::Mut<'_, GroupState>> {
 	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 }
 
@@ -137,7 +137,7 @@ fn modify(state: &conducer::Producer<GroupState>) -> Result<conducer::Mut<'_, Gr
 /// or [Self::create_frame] for multi-chunk streaming writes.
 pub struct GroupProducer {
 	// Mutable stream state.
-	state: conducer::Producer<GroupState>,
+	state: kio::Producer<GroupState>,
 
 	// The group header containing the sequence number.
 	info: Group,
@@ -156,7 +156,7 @@ impl GroupProducer {
 	pub fn new(info: Group) -> Self {
 		Self {
 			info,
-			state: conducer::Producer::default(),
+			state: kio::Producer::default(),
 		}
 	}
 
@@ -262,7 +262,7 @@ impl From<Group> for GroupProducer {
 #[derive(Clone)]
 pub struct GroupConsumer {
 	// Shared state with the producer.
-	state: conducer::Consumer<GroupState>,
+	state: kio::Consumer<GroupState>,
 
 	// Immutable stream state.
 	info: Group,
@@ -282,9 +282,9 @@ impl std::ops::Deref for GroupConsumer {
 
 impl GroupConsumer {
 	// A helper to automatically apply Dropped if the state is closed without an error.
-	fn poll<F, R>(&self, waiter: &conducer::Waiter, f: F) -> Poll<Result<R>>
+	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
-		F: Fn(&conducer::Ref<'_, GroupState>) -> Poll<Result<R>>,
+		F: Fn(&kio::Ref<'_, GroupState>) -> Poll<Result<R>>,
 	{
 		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
 			Ok(res) => res,
@@ -297,25 +297,25 @@ impl GroupConsumer {
 	///
 	/// Returns None if the group is finished and the index is out of range.
 	pub async fn get_frame(&self, index: usize) -> Result<Option<FrameConsumer>> {
-		conducer::wait(|waiter| self.poll_get_frame(waiter, index)).await
+		kio::wait(|waiter| self.poll_get_frame(waiter, index)).await
 	}
 
 	/// Poll for the frame at the given index, without blocking.
 	///
 	/// Returns None if the group is finished and the index is out of range.
-	pub fn poll_get_frame(&self, waiter: &conducer::Waiter, index: usize) -> Poll<Result<Option<FrameConsumer>>> {
+	pub fn poll_get_frame(&self, waiter: &kio::Waiter, index: usize) -> Poll<Result<Option<FrameConsumer>>> {
 		self.poll(waiter, |state| state.poll_get_frame(index))
 	}
 
 	/// Return a consumer for the next frame for chunked reading.
 	pub async fn next_frame(&mut self) -> Result<Option<FrameConsumer>> {
-		conducer::wait(|waiter| self.poll_next_frame(waiter)).await
+		kio::wait(|waiter| self.poll_next_frame(waiter)).await
 	}
 
 	/// Poll for the next frame, without blocking.
 	///
 	/// Returns None if the group is finished and the index is out of range.
-	pub fn poll_next_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<FrameConsumer>>> {
+	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<FrameConsumer>>> {
 		let Some(frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
 			return Poll::Ready(Ok(None));
 		};
@@ -325,7 +325,7 @@ impl GroupConsumer {
 	}
 
 	/// Read the next frame's data all at once, without blocking.
-	pub fn poll_read_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Bytes>>> {
+	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
 			return Poll::Ready(Ok(None));
 		};
@@ -338,11 +338,11 @@ impl GroupConsumer {
 
 	/// Read the next frame's data all at once.
 	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
-		conducer::wait(|waiter| self.poll_read_frame(waiter)).await
+		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
 
 	/// Read all of the chunks of the next frame, without blocking.
-	pub fn poll_read_frame_chunks(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Vec<Bytes>>>> {
+	pub fn poll_read_frame_chunks(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Vec<Bytes>>>> {
 		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
 			return Poll::Ready(Ok(None));
 		};
@@ -355,17 +355,17 @@ impl GroupConsumer {
 
 	/// Read all of the chunks of the next frame.
 	pub async fn read_frame_chunks(&mut self) -> Result<Option<Vec<Bytes>>> {
-		conducer::wait(|waiter| self.poll_read_frame_chunks(waiter)).await
+		kio::wait(|waiter| self.poll_read_frame_chunks(waiter)).await
 	}
 
 	/// Poll for the final number of frames in the group.
-	pub fn poll_finished(&mut self, waiter: &conducer::Waiter) -> Poll<Result<u64>> {
+	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
 		self.poll(waiter, |state| state.poll_finished())
 	}
 
 	/// Block until the group is finished, returning the number of frames in the group.
 	pub async fn finished(&mut self) -> Result<u64> {
-		conducer::wait(|waiter| self.poll_finished(waiter)).await
+		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
 }
 

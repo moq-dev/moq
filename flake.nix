@@ -92,6 +92,10 @@
           bun
           # Only for NPM publishing
           nodejs_24
+          # Headless Chromium for the cross-language smoke test (test/browser).
+          # Pin the npm `playwright` version to match this driver (see
+          # test/browser/package.json).
+          playwright-driver.browsers
         ];
 
         # Python dependencies
@@ -198,6 +202,9 @@
 
           shellHook = ''
             export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
+            # Use the nix-provided Chromium instead of letting Playwright download one.
+            export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
+            export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
           '';
         };
 

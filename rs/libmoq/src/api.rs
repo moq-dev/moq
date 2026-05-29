@@ -116,15 +116,22 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 /// Returns a non-zero handle to the session on success, or a negative code on (immediate) failure.
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
-/// `on_status` reports the session lifecycle through its status code:
-/// - `1` once the session is connected.
-/// - `0` when the session closes cleanly (terminal).
-/// - a negative error code if the session fails (terminal).
+/// The session reconnects automatically with exponential backoff if the connection drops.
+/// Published broadcasts are re-announced and consumers re-subscribed on each reconnect,
+/// since the origins outlive the underlying connection.
 ///
-/// After a terminal (`<= 0`) status, `on_status` is never called again and
-/// `user_data` is never touched again, so that final callback is the point to
-/// release `user_data`. The terminal callback fires even after
-/// [moq_session_close], so do not free `user_data` on the close call itself.
+/// `on_status` reports the session lifecycle through its status code:
+/// - `> 0` on every (re)connect, carrying the connection epoch (`1` = first connect,
+///   `2` = first reconnect, and so on), so a reconnect is distinguishable from the
+///   initial connect. May fire repeatedly. Transient disconnects are not reported.
+/// - `0` when the session is closed cleanly via [moq_session_close] (terminal).
+/// - a negative error code if reconnection permanently gives up, e.g. the backoff
+///   timeout is exceeded (terminal).
+///
+/// After a terminal (`<= 0`) status, `on_status` is never called again and `user_data`
+/// is never touched again, so that final callback is the point to release `user_data`.
+/// The terminal `0` fires even after [moq_session_close], so do not free `user_data` on
+/// the close call itself.
 ///
 /// # Safety
 /// - The caller must ensure that url is a valid pointer to url_len bytes of data.

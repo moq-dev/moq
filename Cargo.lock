@@ -975,13 +975,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "conducer"
-version = "0.3.7"
-dependencies = [
- "smallvec",
-]
-
-[[package]]
 name = "console-api"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3387,6 +3380,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kio"
+version = "0.3.0"
+dependencies = [
+ "smallvec",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3743,10 +3743,10 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bytes",
- "conducer",
  "futures",
  "h264-parser",
  "hang",
+ "kio",
  "m3u8-rs",
  "moq-loc",
  "moq-msf",
@@ -3809,8 +3809,8 @@ name = "moq-net"
 version = "0.1.5"
 dependencies = [
  "bytes",
- "conducer",
  "futures",
+ "kio",
  "num_enum",
  "rand 0.9.4",
  "serde",
