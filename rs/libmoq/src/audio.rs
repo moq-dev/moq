@@ -184,10 +184,7 @@ impl Audio {
 		let id = self.consumer_tasks.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run(on_frame, consumer) => res,
-				_ = channel.1 => Ok(()),
-			};
+			let res = Self::run(on_frame, consumer, channel.1).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -200,13 +197,26 @@ impl Audio {
 		Ok(id)
 	}
 
-	async fn run(callback: OnStatus, mut consumer: moq_audio::AudioConsumer) -> Result<(), Error> {
-		while let Some(frame) = consumer.read().await? {
+	async fn run(
+		callback: OnStatus,
+		mut consumer: moq_audio::AudioConsumer,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		loop {
+			// `biased` so a pending close always wins over a ready frame.
+			let frame = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				frame = consumer.read() => match frame? {
+					Some(frame) => frame,
+					None => return Ok(()),
+				},
+			};
+
 			// Hold the lock only to buffer the frame; release it before the callback.
 			let frame_id = State::lock().audio.frames.insert(frame)?;
 			callback.call(Ok(frame_id));
 		}
-		Ok(())
 	}
 
 	pub fn consume_close(&mut self, id: Id) -> Result<(), Error> {

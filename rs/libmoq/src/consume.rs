@@ -66,10 +66,7 @@ impl Consume {
 		let id = self.catalog_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_catalog(on_catalog, broadcast, catalog.into()) => res,
-				_ = channel.1 => Ok(()),
-			};
+			let res = Self::run_catalog(on_catalog, broadcast, catalog.into(), channel.1).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -86,36 +83,47 @@ impl Consume {
 		callback: OnStatus,
 		broadcast: moq_net::BroadcastConsumer,
 		mut catalog: moq_mux::catalog::hang::Consumer,
+		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		while let Some(catalog) = catalog.next().await? {
+		loop {
+			// `biased` so a pending close always wins over a ready update: a hot
+			// stream must not be able to starve the close signal, and we must not
+			// deliver another update once close has been requested.
+			let update = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				next = catalog.next() => match next? {
+					Some(update) => update,
+					None => return Ok(()),
+				},
+			};
+
 			// Unfortunately we need to store the codec information on the heap.
-			let audio_codec = catalog
+			let audio_codec = update
 				.audio
 				.renditions
 				.values()
 				.map(|config| config.codec.to_string())
 				.collect();
 
-			let video_codec = catalog
+			let video_codec = update
 				.video
 				.renditions
 				.values()
 				.map(|config| config.codec.to_string())
 				.collect();
 
-			let catalog = ConsumeCatalog {
+			let snapshot = ConsumeCatalog {
 				broadcast: broadcast.clone(),
-				catalog,
+				catalog: update,
 				audio_codec,
 				video_codec,
 			};
 
 			// Hold the lock only to buffer the snapshot; release it before the callback.
-			let snapshot_id = State::lock().consume.catalog.insert(catalog)?;
+			let snapshot_id = State::lock().consume.catalog.insert(snapshot)?;
 			callback.call(Ok(snapshot_id));
 		}
-
-		Ok(())
 	}
 
 	pub fn video_config(&mut self, catalog: Id, index: usize, dst: &mut moq_video_config) -> Result<(), Error> {
@@ -236,10 +244,7 @@ impl Consume {
 		let id = self.track_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_track(on_frame, track) => res,
-				_ = channel.1 => Ok(()),
-			};
+			let res = Self::run_track(on_frame, track, channel.1).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -283,10 +288,7 @@ impl Consume {
 		let id = self.track_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_track(on_frame, track) => res,
-				_ = channel.1 => Ok(()),
-			};
+			let res = Self::run_track(on_frame, track, channel.1).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -302,14 +304,23 @@ impl Consume {
 	async fn run_track(
 		callback: OnStatus,
 		mut track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
+		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		while let Some(frame) = track.read().await? {
+		loop {
+			// `biased` so a pending close always wins over a ready frame.
+			let frame = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				frame = track.read() => match frame? {
+					Some(frame) => frame,
+					None => return Ok(()),
+				},
+			};
+
 			// Hold the lock only to buffer the frame; release it before the callback.
 			let frame_id = State::lock().consume.frame.insert(frame)?;
 			callback.call(Ok(frame_id));
 		}
-
-		Ok(())
 	}
 
 	pub fn track_close(&mut self, track: Id) -> Result<(), Error> {
@@ -373,10 +384,7 @@ impl Consume {
 		let id = self.raw_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_raw(on_frame, track) => res,
-				_ = channel.1 => Ok(()),
-			};
+			let res = Self::run_raw(on_frame, track, channel.1).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -389,20 +397,41 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_raw(callback: OnStatus, mut track: moq_net::TrackConsumer) -> Result<(), Error> {
+	async fn run_raw(
+		callback: OnStatus,
+		mut track: moq_net::TrackConsumer,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
 		// Deliver every frame in sequence order, reading all frames within each
 		// group rather than the one-frame-per-group convenience. This is the
 		// "raw track contents" model: the consumer sees exactly what the
 		// producer wrote, regardless of how it was grouped.
-		while let Some(mut group) = track.next_group().await? {
-			while let Some(payload) = group.read_frame().await? {
+		loop {
+			// `biased` so a pending close always wins over a ready group.
+			let mut group = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				group = track.next_group() => match group? {
+					Some(group) => group,
+					None => return Ok(()),
+				},
+			};
+
+			loop {
+				let payload = tokio::select! {
+					biased;
+					_ = &mut close => return Ok(()),
+					payload = group.read_frame() => match payload? {
+						Some(payload) => payload,
+						None => break,
+					},
+				};
+
 				// Hold the lock only to buffer the frame; release it before the callback.
 				let frame_id = State::lock().consume.raw_frame.insert(payload)?;
 				callback.call(Ok(frame_id));
 			}
 		}
-
-		Ok(())
 	}
 
 	pub fn raw_track_close(&mut self, track: Id) -> Result<(), Error> {

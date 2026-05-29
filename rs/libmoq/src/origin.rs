@@ -53,10 +53,7 @@ impl Origin {
 		let id = self.announced_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_announced(on_announce, consumer) => res,
-				_ = channel.1 => Ok(()),
-			};
+			let res = Self::run_announced(on_announce, consumer, channel.1).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -69,8 +66,22 @@ impl Origin {
 		Ok(id)
 	}
 
-	async fn run_announced(callback: OnStatus, mut consumer: moq_net::OriginConsumer) -> Result<(), Error> {
-		while let Some((path, broadcast)) = consumer.announced().await {
+	async fn run_announced(
+		callback: OnStatus,
+		mut consumer: moq_net::OriginConsumer,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		loop {
+			// `biased` so a pending close always wins over a ready announcement.
+			let (path, broadcast) = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				next = consumer.announced() => match next {
+					Some(announced) => announced,
+					None => return Ok(()),
+				},
+			};
+
 			// Hold the lock only to buffer the announcement; release it before the callback.
 			let announced_id = State::lock()
 				.origin
@@ -78,8 +89,6 @@ impl Origin {
 				.insert((path.to_string(), broadcast.is_some()))?;
 			callback.call(announced_id);
 		}
-
-		Ok(())
 	}
 
 	pub fn announced_info(&self, announced: Id, dst: &mut moq_announced) -> Result<(), Error> {
