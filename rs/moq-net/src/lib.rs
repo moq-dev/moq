@@ -74,5 +74,5 @@ pub use version::*;
 // Re-export the bytes crate
 pub use bytes;
 
-// Re-export the conducer crate, since it appears in the public API (e.g. poll_* waiters).
-pub use conducer;
+// Re-export the kio crate, since it appears in the public API (e.g. poll_* waiters).
+pub use kio;

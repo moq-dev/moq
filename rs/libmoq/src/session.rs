@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Context;
 use tokio::sync::oneshot;
 use url::Url;
 
@@ -57,37 +58,41 @@ impl Session {
 
 	/// Connect and stay connected, reconnecting with exponential backoff if the session drops.
 	///
-	/// Reports each transition through the status callback: a positive connection epoch on every
-	/// (re)connect, 0 on each transient disconnect, and a negative code only when reconnection
-	/// permanently gives up (the backoff timeout is exceeded), which is terminal.
+	/// Reports a positive connection epoch through the status callback on every (re)connect, and a
+	/// negative code only when reconnection permanently gives up (the backoff timeout is exceeded),
+	/// which is terminal.
 	async fn connect_run(
 		task_id: Id,
 		url: Url,
 		publish: Option<moq_net::OriginConsumer>,
 		consume: Option<moq_net::OriginProducer>,
 	) -> Result<(), Error> {
-		let mut reconnect = moq_native::ClientConfig::default()
+		let reconnect = moq_native::ClientConfig::default()
 			.init()
 			.map_err(|err| Error::Connect(Arc::new(err)))?
 			.with_publish(publish)
 			.with_consume(consume)
 			.reconnect(url);
 
-		// status() reports connection changes and Err on terminal give-up, so the ? both ends the
-		// loop and propagates the negative status code.
+		// report() runs until the reconnect loop gives up; map its terminal error to Connect.
+		Self::report(task_id, reconnect)
+			.await
+			.map_err(|err| Error::Connect(Arc::new(err)))
+	}
+
+	/// Forward connection epochs to the status callback until the reconnect loop stops.
+	///
+	/// Returns the terminal error via `?`. Disconnects aren't reported: a separate change reserves
+	/// status 0 for "closed".
+	async fn report(task_id: Id, mut reconnect: moq_native::Reconnect) -> anyhow::Result<()> {
 		let mut connects: u64 = 0;
 		loop {
-			match reconnect.status().await.map_err(|err| Error::Connect(Arc::new(err)))? {
-				moq_native::Status::Connected => {
-					connects += 1;
-					// Positive status carries the connection epoch, so callers can tell a
-					// reconnect (>1) from the first connect (1).
-					let code = i32::try_from(connects)
-						.map_err(|_| Error::Connect(Arc::new(anyhow::anyhow!("connection epoch exceeded i32::MAX"))))?;
-					Self::notify(task_id, code);
-				}
-				// Don't report disconnects: a separate change reserves status 0 for "closed".
-				moq_native::Status::Disconnected => {}
+			if let moq_native::Status::Connected = reconnect.status().await? {
+				connects += 1;
+				// Positive status carries the connection epoch, so callers can tell a
+				// reconnect (>1) from the first connect (1).
+				let code = i32::try_from(connects).context("connection epoch exceeded i32::MAX")?;
+				Self::notify(task_id, code);
 			}
 		}
 	}

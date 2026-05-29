@@ -1,8 +1,7 @@
-use std::sync::Arc;
-use std::task::Poll;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
-use moq_net::conducer;
+use moq_net::kio;
 use url::Url;
 
 use crate::Client;
@@ -70,7 +69,7 @@ pub enum Status {
 	Disconnected,
 }
 
-/// Shared reconnect state, observed by consumers through a [`conducer`] channel.
+/// Shared reconnect state, observed by consumers through a [`kio`] channel.
 ///
 /// The channel closing (all producers dropped) is the terminal signal; `error`
 /// distinguishes a permanent give-up from a graceful close.
@@ -79,54 +78,42 @@ struct State {
 	/// Current connection status, or `None` before the first connect.
 	status: Option<Status>,
 	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
-	error: Option<Arc<anyhow::Error>>,
-}
-
-/// Aborts the background reconnect task when the last [`Reconnect`] handle is dropped.
-struct AbortOnDrop(tokio::task::AbortHandle);
-
-impl Drop for AbortOnDrop {
-	fn drop(&mut self) {
-		self.0.abort();
-	}
+	error: Option<anyhow::Error>,
 }
 
 /// Handle to a background reconnect loop.
 ///
 /// Spawns a tokio task that connects, waits for session close, then reconnects with exponential
 /// backoff. [`status`](Self::status) reports connection changes; [`closed`](Self::closed) waits for
-/// the loop to stop. Cheaply cloneable for multiple handles; the loop stops once the last handle
-/// is dropped.
-#[derive(Clone)]
+/// the loop to stop. Dropping the handle aborts the background task.
 pub struct Reconnect {
-	#[allow(dead_code)] // Held for its Drop: aborts the task when the last handle goes.
-	abort: Arc<AbortOnDrop>,
-	state: conducer::Consumer<State>,
-	/// The last status returned by this handle's [`status`](Self::status), for change detection.
+	abort: tokio::task::AbortHandle,
+	state: kio::Consumer<State>,
+	/// The last status returned by [`status`](Self::status), for change detection.
 	last_reported: Option<Status>,
 }
 
 impl Reconnect {
 	pub(crate) fn new(client: Client, url: Url, backoff: Backoff) -> Self {
-		let producer = conducer::Producer::<State>::default();
+		let producer = kio::Producer::<State>::default();
 		let state = producer.consume();
 		let task = tokio::spawn(async move {
 			if let Err(err) = Self::run(&producer, client, url, backoff).await {
 				tracing::error!(err = %format!("{err:#}"), "reconnect loop exited");
 				if let Ok(mut state) = producer.write() {
-					state.error = Some(Arc::new(err));
+					state.error = Some(err);
 				}
 			}
 			// Dropping the producer here closes the channel, signaling consumers.
 		});
 		Self {
-			abort: Arc::new(AbortOnDrop(task.abort_handle())),
+			abort: task.abort_handle(),
 			state,
 			last_reported: None,
 		}
 	}
 
-	async fn run(state: &conducer::Producer<State>, client: Client, url: Url, backoff: Backoff) -> anyhow::Result<()> {
+	async fn run(state: &kio::Producer<State>, client: Client, url: Url, backoff: Backoff) -> anyhow::Result<()> {
 		let mut delay = backoff.initial;
 		let mut retry_start = tokio::time::Instant::now();
 		let mut last_error: Option<anyhow::Error> = None;
@@ -166,72 +153,62 @@ impl Reconnect {
 		}
 	}
 
+	/// Poll for the next connection status change since this handle last reported one.
+	///
+	/// `Ready(Ok(status))` on a change, `Ready(Err)` once the loop has stopped (the give-up error,
+	/// or a generic one when the handle is dropped), `Pending` otherwise.
+	pub fn poll_status(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Status>> {
+		let last = self.last_reported;
+		let status = match ready!(self.state.poll(waiter, |state| match state.status {
+			Some(status) if Some(status) != last => Poll::Ready(status),
+			_ => Poll::Pending,
+		})) {
+			Ok(status) => status,
+			Err(state) => return Poll::Ready(Err(terminal(&state))),
+		};
+
+		self.last_reported = Some(status);
+		Poll::Ready(Ok(status))
+	}
+
 	/// Wait until the connection status changes from what this handle last reported.
 	///
-	/// Returns the current [`Status`] (`Connected` or `Disconnected`). Since the loop alternates
-	/// between the two, successive calls alternate as well, but a status that flips and flips back
-	/// before the caller polls is reported once: this tracks the *current* state, not every edge.
-	///
-	/// Returns `Err` once the loop has stopped: the give-up error if it exhausted its backoff
-	/// timeout, or a generic "stopped" error after the last handle is dropped.
+	/// Returns the current [`Status`]. The loop alternates `Connected`/`Disconnected`, so successive
+	/// calls alternate too; but a status that flips and flips back before the caller polls is
+	/// reported once. This tracks the *current* state, not every edge.
 	pub async fn status(&mut self) -> anyhow::Result<Status> {
-		let last = self.last_reported;
-
-		// Clone the consumer so the borrow doesn't outlive the await, freeing us to update
-		// `last_reported`. Collapse the poll result to an owned value inside the closure: a `Ref`
-		// in the poll output would make the resulting future non-Send.
-		let consumer = self.state.clone();
-		let current = conducer::wait(|waiter| {
-			match consumer.poll(waiter, |state| match state.status {
-				Some(status) if Some(status) != last => Poll::Ready(status),
-				_ => Poll::Pending,
-			}) {
-				Poll::Ready(Ok(status)) => Poll::Ready(Some(status)),
-				Poll::Ready(Err(_)) => Poll::Ready(None),
-				Poll::Pending => Poll::Pending,
-			}
-		})
-		.await;
-
-		match current {
-			Some(status) => {
-				self.last_reported = Some(status);
-				Ok(status)
-			}
-			// Channel closed: surface the terminal error (or a generic one for a graceful stop).
-			None => Err(self
-				.outcome()
-				.err()
-				.unwrap_or_else(|| anyhow::anyhow!("reconnect stopped"))),
-		}
+		kio::wait(|waiter| self.poll_status(waiter)).await
 	}
 
 	/// Poll whether the reconnect loop has stopped.
 	///
-	/// Ready with `Err` if it permanently gave up (reconnect timeout exceeded),
-	/// or `Ok(())` if stopped by dropping the last handle.
-	pub fn poll_closed(&self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<()>> {
-		match self.state.poll_closed(waiter) {
-			Poll::Ready(()) => Poll::Ready(self.outcome()),
-			Poll::Pending => Poll::Pending,
-		}
+	/// `Ready(Err)` if it permanently gave up (reconnect timeout exceeded), `Ready(Ok(()))` if
+	/// stopped by dropping the handle, `Pending` while it's still running.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<anyhow::Result<()>> {
+		ready!(self.state.poll_closed(waiter));
+		Poll::Ready(match &self.state.read().error {
+			Some(err) => Err(anyhow::anyhow!("{err:#}")),
+			None => Ok(()),
+		})
 	}
 
 	/// Wait until the reconnect loop stops.
-	///
-	/// Returns `Ok(())` if stopped by dropping the last handle.
-	/// Returns `Err` with the most recent connection error if the reconnect
-	/// timeout was exceeded.
 	pub async fn closed(&self) -> anyhow::Result<()> {
-		conducer::wait(|waiter| self.poll_closed(waiter)).await
+		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
+}
 
-	/// Read the terminal outcome; only meaningful once the channel has closed.
-	fn outcome(&self) -> anyhow::Result<()> {
-		match self.state.read().error.clone() {
-			Some(err) => Err(anyhow::anyhow!("{err:#}")),
-			None => Ok(()),
-		}
+impl Drop for Reconnect {
+	fn drop(&mut self) {
+		self.abort.abort();
+	}
+}
+
+/// The terminal error read from a closed channel's final state.
+fn terminal(state: &State) -> anyhow::Error {
+	match &state.error {
+		Some(err) => anyhow::anyhow!("{err:#}"),
+		None => anyhow::anyhow!("reconnect stopped"),
 	}
 }
 
