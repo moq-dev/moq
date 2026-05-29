@@ -456,7 +456,7 @@ async fn server_client_roundtrip() {
 	// `cancel(code)` on the server side, so both shutdown paths run.
 	media.finish().unwrap();
 	broadcast.finish().unwrap();
-	cs.session().shutdown();
+	cs.shutdown();
 	server_session.cancel(0);
 	server.cancel();
 }
@@ -528,7 +528,7 @@ async fn server_client_roundtrip_auto_origin() {
 
 	media.finish().unwrap();
 	broadcast.finish().unwrap();
-	cs.session().shutdown();
+	cs.shutdown();
 	server_session.cancel(0);
 	server.cancel();
 }
@@ -675,7 +675,7 @@ async fn request_per_session_publish_override() {
 	assert_eq!(announcement.path(), "override-only");
 
 	broadcast.finish().unwrap();
-	cs.session().cancel(0);
+	cs.cancel(0);
 	server_session.cancel(0);
 	server.cancel();
 }

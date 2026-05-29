@@ -62,11 +62,7 @@ class Client:
         if self._consume_origin is not None:
             self._inner.set_consume(self._consume_origin._inner)
 
-        # MoqClient.connect now returns a MoqClientSession; this wrapper
-        # always sets publish/consume above, so its auto-origin sides are
-        # always None. Keep the public `session` property pointing at the
-        # underlying MoqSession for backwards compatibility.
-        self._session = (await self._inner.connect(self._url)).session()
+        self._session = await self._inner.connect(self._url)
 
         # Create consumer from whichever origin handles consuming.
         origin = self._consume_origin or self._publish_origin

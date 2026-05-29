@@ -37,7 +37,7 @@ let client = MoqClient()
 let cs = try await client.connect(url: "https://relay.example.com")
 ```
 
-`MoqClient.connect(url:)` returns a `MoqClientSession` that bundles the session with auto-created publish and consume origin sides. The convenience accessors `cs.publisher()` and `cs.consumer()` return those origins (or `nil` if you wired your own via `setPublish` / `setConsume` before connect).
+`MoqClient.connect(url:)` returns a `MoqSession` that bundles the session with auto-created publish and consume origin sides. The convenience accessors `cs.publisher()` and `cs.consumer()` return those origins (or `nil` if you wired your own via `setPublish` / `setConsume` before connect).
 
 For development against a relay with a self-signed certificate, configure the client before connecting:
 
@@ -51,7 +51,7 @@ let cs = try await client.connect(url: "https://localhost:4443")
 When you're done, signal graceful shutdown to the peer:
 
 ```swift
-cs.session().shutdown()  // alias for cancel(code: 0)
+cs.shutdown()  // alias for cancel(code: 0)
 ```
 
 ## Subscribe

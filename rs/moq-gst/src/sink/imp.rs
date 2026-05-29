@@ -400,10 +400,10 @@ async fn run_session(
 	);
 
 	let client = client.with_publish(origin.consume());
-	let cs = client.connect(settings.url.clone()).await?;
+	let session = client.connect(settings.url.clone()).await?;
 
 	let mut runtime = RuntimeState {
-		session: cs.session,
+		session,
 		broadcast,
 		catalog,
 		pads: HashMap::new(),

@@ -67,7 +67,7 @@ for try await announcement in announced.announcements {
     }
 }
 
-cs.session().shutdown()
+cs.shutdown()
 ```
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer.

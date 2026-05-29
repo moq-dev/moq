@@ -2,19 +2,31 @@ use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use web_transport_trait::Stats;
 
-use crate::{BandwidthConsumer, BandwidthProducer, Error, Version};
+use crate::{BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, Version};
 
 /// A MoQ transport session, wrapping a WebTransport connection.
 ///
 /// Created via:
 /// - [`crate::Client::connect`] for clients.
 /// - [`crate::Server::accept`] for servers.
+///
+/// If the caller didn't wire its own origin via
+/// [`Client::with_publish`](crate::Client::with_publish) /
+/// [`Client::with_consume`](crate::Client::with_consume) /
+/// [`Client::with_origin`](crate::Client::with_origin) (or the matching
+/// methods on [`Server`](crate::Server)), connect/accept auto-create a
+/// fresh [`Origin`](crate::Origin) and surface the producer and consumer
+/// sides as [`publisher`](Self::publisher) and [`consumer`](Self::consumer).
+/// Callers that wired their own origin see both as `None` and continue
+/// to drive things through what they already hold.
 #[derive(Clone)]
 pub struct Session {
 	session: Arc<dyn SessionInner>,
 	version: Version,
 	send_bandwidth: Option<BandwidthConsumer>,
 	recv_bandwidth: Option<BandwidthConsumer>,
+	publisher: Option<OriginProducer>,
+	consumer: Option<OriginConsumer>,
 	closed: bool,
 }
 
@@ -44,8 +56,20 @@ impl Session {
 			version,
 			send_bandwidth,
 			recv_bandwidth,
+			publisher: None,
+			consumer: None,
 			closed: false,
 		}
+	}
+
+	/// Attach the auto-created origin sides. Called by `Client::connect` /
+	/// `Server::accept` on the no-config path so the caller can publish
+	/// broadcasts and read announcements without constructing an Origin
+	/// themselves.
+	pub(crate) fn with_origins(mut self, publisher: Option<OriginProducer>, consumer: Option<OriginConsumer>) -> Self {
+		self.publisher = publisher;
+		self.consumer = consumer;
+		self
 	}
 
 	/// Returns the negotiated protocol version.
@@ -65,6 +89,18 @@ impl Session {
 	/// Returns `None` if the MoQ version doesn't support PROBE (requires moq-lite-03+).
 	pub fn recv_bandwidth(&self) -> Option<BandwidthConsumer> {
 		self.recv_bandwidth.clone()
+	}
+
+	/// The auto-created origin producer side. `Some` only when the caller
+	/// didn't wire its own publish/consume origin before connect/accept.
+	pub fn publisher(&self) -> Option<&OriginProducer> {
+		self.publisher.as_ref()
+	}
+
+	/// The auto-created origin consumer side. `Some` only when the caller
+	/// didn't wire its own publish/consume origin before connect/accept.
+	pub fn consumer(&self) -> Option<&OriginConsumer> {
+		self.consumer.as_ref()
 	}
 
 	/// Close the underlying transport session.

@@ -103,7 +103,7 @@ impl Reconnect {
 					tracing::info!(%url, "connected");
 					delay = backoff.initial;
 					last_error = None;
-					let _ = cs.session.closed().await;
+					let _ = cs.closed().await;
 					tracing::warn!(%url, "session closed, reconnecting");
 					retry_start = tokio::time::Instant::now();
 				}

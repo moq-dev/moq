@@ -696,11 +696,7 @@ async fn broadcast_websocket_uses_newest_version() {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	assert_eq!(
-		cs.session.version(),
-		expected_version,
-		"client negotiated stale version"
-	);
+	assert_eq!(cs.version(), expected_version, "client negotiated stale version");
 
 	drop(cs);
 	server_handle
@@ -776,11 +772,7 @@ async fn broadcast_race_quic_wins() {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	assert_eq!(
-		cs.session.version(),
-		expected_version,
-		"client negotiated stale version"
-	);
+	assert_eq!(cs.version(), expected_version, "client negotiated stale version");
 
 	drop(cs);
 	server_handle

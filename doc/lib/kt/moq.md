@@ -35,7 +35,7 @@ val client = MoqClient()
 val cs = client.connect("https://relay.example.com")
 ```
 
-`MoqClient.connect(url)` returns a `MoqClientSession` that bundles the session with auto-created publish and consume origin sides. The convenience accessors `cs.publisher()` and `cs.consumer()` return those origins (or `null` if you wired your own via `setPublish` / `setConsume` before connect).
+`MoqClient.connect(url)` returns a `MoqSession` that bundles the session with auto-created publish and consume origin sides. The convenience accessors `cs.publisher()` and `cs.consumer()` return those origins (or `null` if you wired your own via `setPublish` / `setConsume` before connect).
 
 For development against a relay with a self-signed certificate, configure the client before connecting:
 
@@ -49,7 +49,7 @@ val cs = client.connect("https://localhost:4443")
 When you're done, signal graceful shutdown to the peer:
 
 ```kotlin
-cs.session().shutdown()  // alias for cancel(0u)
+cs.shutdown()  // alias for cancel(0u)
 ```
 
 ## Subscribe

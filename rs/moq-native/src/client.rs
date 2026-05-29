@@ -345,7 +345,7 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	)))]
-	pub async fn connect(&self, _url: Url) -> anyhow::Result<moq_net::ClientSession> {
+	pub async fn connect(&self, _url: Url) -> anyhow::Result<moq_net::Session> {
 		anyhow::bail!("no backend compiled; enable noq, quinn, quiche, iroh, or websocket feature");
 	}
 
@@ -356,9 +356,9 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	))]
-	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_net::ClientSession> {
+	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_net::Session> {
 		let cs = self.connect_inner(url).await?;
-		tracing::info!(version = %cs.session.version(), "connected");
+		tracing::info!(version = %cs.version(), "connected");
 		Ok(cs)
 	}
 
@@ -369,7 +369,7 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	))]
-	async fn connect_inner(&self, url: Url) -> anyhow::Result<moq_net::ClientSession> {
+	async fn connect_inner(&self, url: Url) -> anyhow::Result<moq_net::Session> {
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;

@@ -14,22 +14,6 @@ pub struct Client {
 	versions: Versions,
 }
 
-/// A connected MoQ client session plus, optionally, the [`OriginProducer`]
-/// and [`OriginConsumer`] that [`Client::connect`] auto-created when no
-/// publish or consume origin had been set on the [`Client`].
-///
-/// `publisher` and `consumer` are `Some(_)` only on the no-config path
-/// (i.e. neither [`Client::with_publish`] / [`Client::with_consume`] /
-/// [`Client::with_origin`] was called before connect). When the caller
-/// wires its own origin(s), both fields are `None` and the caller
-/// continues to drive publishing and consuming through the origins it
-/// already holds.
-pub struct ClientSession {
-	pub session: Session,
-	pub publisher: Option<OriginProducer>,
-	pub consumer: Option<OriginConsumer>,
-}
-
 impl Client {
 	pub fn new() -> Self {
 		Default::default()
@@ -70,15 +54,15 @@ impl Client {
 	///
 	/// If neither a publish nor a consume origin was set on this builder,
 	/// connect auto-creates a fresh [`Origin`] and wires it as both, then
-	/// returns the producer and consumer sides on the resulting
-	/// [`ClientSession`]. Callers who configured their own origin(s) see
-	/// `ClientSession::publisher` and `ClientSession::consumer` as `None`
-	/// and continue to drive publishing / consuming through the origins
-	/// they already hold.
-	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<ClientSession, Error> {
+	/// surfaces the producer and consumer sides on the returned
+	/// [`Session`] via [`Session::publisher`] and [`Session::consumer`].
+	/// Callers who configured their own origin(s) see both as `None` and
+	/// continue to drive publishing / consuming through the origins they
+	/// already hold.
+	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
 		// Effective publish / consume after potential auto-creation. The
 		// `auto_*` locals are populated only on the no-config path so the
-		// returned ClientSession reflects what we actually own.
+		// returned Session reflects what we actually own.
 		let (publish, consume, auto_publisher, auto_consumer) = match (self.publish.clone(), self.consume.clone()) {
 			(None, None) => {
 				let producer = Origin::random().produce();
@@ -117,11 +101,7 @@ impl Client {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(ClientSession {
-					session: Session::new(session, v, None),
-					publisher: auto_publisher,
-					consumer: auto_consumer,
-				});
+				return Ok(Session::new(session, v, None).with_origins(auto_publisher, auto_consumer));
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -141,11 +121,7 @@ impl Client {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(ClientSession {
-					session: Session::new(session, v, None),
-					publisher: auto_publisher,
-					consumer: auto_consumer,
-				});
+				return Ok(Session::new(session, v, None).with_origins(auto_publisher, auto_consumer));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -182,11 +158,8 @@ impl Client {
 					lite::Version::Lite05Wip,
 				)?;
 
-				return Ok(ClientSession {
-					session: Session::new(session, lite::Version::Lite05Wip.into(), recv_bw),
-					publisher: auto_publisher,
-					consumer: auto_consumer,
-				});
+				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw)
+					.with_origins(auto_publisher, auto_consumer));
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
@@ -202,11 +175,8 @@ impl Client {
 					lite::Version::Lite04,
 				)?;
 
-				return Ok(ClientSession {
-					session: Session::new(session, lite::Version::Lite04.into(), recv_bw),
-					publisher: auto_publisher,
-					consumer: auto_consumer,
-				});
+				return Ok(Session::new(session, lite::Version::Lite04.into(), recv_bw)
+					.with_origins(auto_publisher, auto_consumer));
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
@@ -223,11 +193,8 @@ impl Client {
 					lite::Version::Lite03,
 				)?;
 
-				return Ok(ClientSession {
-					session: Session::new(session, lite::Version::Lite03.into(), recv_bw),
-					publisher: auto_publisher,
-					consumer: auto_consumer,
-				});
+				return Ok(Session::new(session, lite::Version::Lite03.into(), recv_bw)
+					.with_origins(auto_publisher, auto_consumer));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -279,11 +246,7 @@ impl Client {
 			}
 		};
 
-		Ok(ClientSession {
-			session: Session::new(session, version, recv_bw),
-			publisher: auto_publisher,
-			consumer: auto_consumer,
-		})
+		Ok(Session::new(session, version, recv_bw).with_origins(auto_publisher, auto_consumer))
 	}
 }
 

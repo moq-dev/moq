@@ -74,7 +74,7 @@ impl Session {
 		// libmoq users wire their own origin via the explicit `publish`/
 		// `consume` params, so `cs.publisher` / `cs.consumer` are always
 		// None here; the relevant handle is just the session.
-		cs.session.closed().await?;
+		cs.closed().await?;
 		Ok(())
 	}
 

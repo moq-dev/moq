@@ -452,7 +452,7 @@ impl Cluster {
 			.await
 			.context("failed to connect to cluster peer")?;
 
-		cs.session.closed().await.map_err(Into::into)
+		cs.closed().await.map_err(Into::into)
 	}
 }
 

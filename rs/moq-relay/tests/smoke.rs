@@ -132,7 +132,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	.expect("publisher connect timeout")
 	.expect("publisher connect failed");
 	assert_eq!(
-		pub_session.session.version(),
+		pub_session.version(),
 		expected_version,
 		"publisher negotiated stale version"
 	);
@@ -146,7 +146,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
 	assert_eq!(
-		sub_session.session.version(),
+		sub_session.version(),
 		expected_version,
 		"subscriber negotiated stale version"
 	);

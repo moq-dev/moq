@@ -57,7 +57,7 @@ announced.announcements().collect { announcement ->
     }
 }
 
-cs.session().shutdown()
+cs.shutdown()
 ```
 
 Cancelling the surrounding coroutine scope propagates through to the native consumer's `cancel()` via the wrapper's `onCompletion` hook.

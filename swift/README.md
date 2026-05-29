@@ -20,7 +20,7 @@ import Moq
 let client = MoqClient()
 let cs = try await client.connect(url: "https://relay.example.com")
 
-// The auto-created origin sides on the returned MoqClientSession let you
+// The auto-created origin sides on the returned MoqSession let you
 // publish broadcasts and read announcements without ever constructing a
 // MoqOriginProducer yourself. For subscribe-only / publish-only / split
 // origins, call setPublish / setConsume on the client before connect and
@@ -37,10 +37,10 @@ for try await announcement in announced.announcements {
     }
 }
 
-cs.session().shutdown()
+cs.shutdown()
 ```
 
-Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `cs.session().shutdown()` is an alias for `cancel(code: 0)` that documents the convention that code 0 means "no error".
+Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `cs.shutdown()` is an alias for `cancel(code: 0)` that documents the convention that code 0 means "no error".
 
 To publish a broadcast through the auto-created origin:
 
