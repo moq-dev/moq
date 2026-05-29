@@ -219,6 +219,7 @@ impl Consume {
 		let track = consume.broadcast.subscribe_track(&moq_net::Track {
 			name: rendition.clone(),
 			priority: 1, // TODO: Remove priority
+			..Default::default()
 		})?;
 		let track =
 			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
@@ -264,6 +265,7 @@ impl Consume {
 		let track = consume.broadcast.subscribe_track(&moq_net::Track {
 			name: rendition.clone(),
 			priority: 2, // TODO: Remove priority
+			..Default::default()
 		})?;
 		let track =
 			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
