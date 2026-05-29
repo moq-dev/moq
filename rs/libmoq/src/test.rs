@@ -288,25 +288,7 @@ fn raw_track_publish_consume() {
 	let origin = id(moq_origin_create());
 	let broadcast = id(moq_publish_create());
 
-	// Describe an audio rendition so the catalog is non-empty. This lets the
-	// catalog handshake below complete, which warms the broadcast connection
-	// before we publish raw frames (otherwise the first frame can race ahead of
-	// the subscription and be dropped under live semantics).
-	let audio_name = b"audio";
-	let audio_codec = b"opus";
-	let audio = moq_audio_config {
-		name: audio_name.as_ptr() as *const c_char,
-		name_len: audio_name.len(),
-		codec: audio_codec.as_ptr() as *const c_char,
-		codec_len: audio_codec.len(),
-		description: std::ptr::null(),
-		description_len: 0,
-		sample_rate: 48000,
-		channel_count: 2,
-	};
-	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
-
-	// Create a raw, non-media track.
+	// A raw, non-media track: arbitrary bytes, no codec/container/catalog.
 	let track_name = b"data";
 	let track = id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len()) });
 
@@ -317,14 +299,6 @@ fn raw_track_publish_consume() {
 	);
 
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
-
-	// Subscribe to the catalog first and wait for it. This forces the broadcast
-	// consumer to actually connect before we publish frames, so the raw track
-	// subscription below lands on a warm broadcast (matching the handshake in
-	// the media publish/consume tests).
-	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
-	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
 	let consumer = id(unsafe {
@@ -384,8 +358,6 @@ fn raw_track_publish_consume() {
 	assert!(moq_consume_track_close(consumer) < 0, "double-close should fail");
 	assert_eq!(moq_publish_track_close(track), 0);
 	assert!(moq_publish_track_close(track) < 0, "double-close should fail");
-	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
