@@ -11,6 +11,9 @@ mod kt
 mod swift
 mod go
 
+# Unit tests per language plus the cross-language smoke test (`just test smoke`).
+mod test
+
 # Demos and infra.
 mod demo
 mod infra
@@ -112,12 +115,6 @@ fix:
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); fi
     @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); do just --fmt --unstable --justfile "$f"; done
 
-# Run unit tests for every language.
-test *args:
-    just js test
-    just rs test {{ args }}
-    if command -v uv &> /dev/null; then just py test; fi
-
 # Build the packages.
 build:
     just js build
@@ -133,7 +130,3 @@ update:
 # Serve the documentation locally.
 doc:
     cd doc && bun run dev
-
-# Cross-language media interop smoke test (see smoke/).
-smoke *args:
-    smoke/run.sh {{ args }}

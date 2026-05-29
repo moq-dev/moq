@@ -47,4 +47,4 @@ jobs:
         with:
           cache-on-failure: true
 
-      - run: nix develop --command just smoke
+      - run: nix develop --command just test smoke
