@@ -14,7 +14,10 @@ set -u
 
 command -v direnv >/dev/null 2>&1 || exit 0
 
-cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
+# Require an explicit project dir so we never approve/export a stray .envrc from
+# some unrelated working directory.
+[ -n "${CLAUDE_PROJECT_DIR:-}" ] || exit 0
+cd "$CLAUDE_PROJECT_DIR" || exit 0
 [ -f .envrc ] || exit 0
 
 # Clear any inherited direnv state so `export` recomputes the full diff. Without
@@ -23,6 +26,6 @@ cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
 unset DIRENV_DIR DIRENV_DIFF DIRENV_WATCHES DIRENV_FILE DIRENV_LAYOUT
 
 direnv allow . 2>/dev/null
-direnv export bash >> "$CLAUDE_ENV_FILE" 2>/dev/null
+direnv export bash >>"$CLAUDE_ENV_FILE" 2>/dev/null
 
 exit 0
