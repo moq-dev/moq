@@ -101,7 +101,7 @@ async fn handle_viewer_commands(
 ) -> anyhow::Result<()> {
 	let command_track = moq_net::Track {
 		name: "command".to_string(),
-		priority: 0,
+		..Default::default()
 	};
 
 	let mut track = broadcast.subscribe_track(&command_track)?;

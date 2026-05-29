@@ -7,8 +7,9 @@ use std::{
 use futures::{StreamExt, stream::FuturesUnordered};
 
 use crate::{
-	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer,
-	MAX_FRAME_SIZE, OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer,
+	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Compression, Error, Frame, FrameProducer, Group,
+	GroupProducer, MAX_FRAME_SIZE, OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack,
+	TrackProducer,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -57,6 +58,10 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 struct TrackEntry {
 	producer: TrackProducer,
 	stats: Arc<SubscriberTrack>,
+	/// Codec for this subscription, learned from SUBSCRIBE_OK. `None` until that
+	/// message arrives; group streams block on it before decoding any frame,
+	/// since a group can race ahead of SUBSCRIBE_OK on its own QUIC stream.
+	compression: tokio::sync::watch::Receiver<Option<Compression>>,
 }
 
 /// Result of an upstream subscribe lifecycle.
@@ -363,11 +368,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&track.name));
 
 		let id = self.next_id.fetch_add(1, atomic::Ordering::Relaxed);
+
+		// Resolved once SUBSCRIBE_OK arrives; group streams wait on the receiver.
+		let (compression_tx, compression_rx) = tokio::sync::watch::channel(None);
 		self.subscribes.lock().insert(
 			id,
 			TrackEntry {
 				producer: track.clone(),
 				stats: track_stats.clone(),
+				compression: compression_rx,
 			},
 		);
 
@@ -391,7 +400,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let result = tokio::select! {
 			err = broadcast.closed() => SessionOutcome::BroadcastClosed(err),
-			res = self.run_subscribe_session(&track, msg) => res,
+			res = self.run_subscribe_session(&track, msg, compression_tx) => res,
 		};
 
 		self.subscribes.lock().remove(&id);
@@ -416,7 +425,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	async fn run_subscribe_session(&self, track: &TrackProducer, msg: lite::Subscribe<'_>) -> SessionOutcome {
+	async fn run_subscribe_session(
+		&self,
+		track: &TrackProducer,
+		msg: lite::Subscribe<'_>,
+		compression_tx: tokio::sync::watch::Sender<Option<Compression>>,
+	) -> SessionOutcome {
 		// Stash the original parameters so SubscribeUpdate messages can echo them
 		// while only varying the linger-related fields (priority, end_group).
 		let original_priority = msg.priority;
@@ -449,11 +463,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return SessionOutcome::Error(err);
 			}
 		};
-		let lite::SubscribeResponse::Ok(_info) = resp else {
+		let lite::SubscribeResponse::Ok(info) = resp else {
 			let err = Error::ProtocolViolation;
 			stream.writer.abort(&err);
 			return SessionOutcome::Error(err);
 		};
+
+		// Unblock any group streams waiting to learn how to decode frames. A send
+		// error just means every receiver already left, which is harmless here.
+		let _ = compression_tx.send(Some(info.compression));
 
 		// Lifecycle loop: serve → linger → resume → serve → ... → FIN.
 		loop {
@@ -536,22 +554,39 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let (mut group, track, track_stats) = {
+		let (mut group, track, track_stats, mut compression_rx) = {
 			let mut subs = self.subscribes.lock();
 			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
 			let group_info = Group { sequence: hdr.sequence };
 			let group = entry.producer.create_group(group_info)?;
-			(group, entry.producer.clone(), entry.stats.clone())
+			(
+				group,
+				entry.producer.clone(),
+				entry.stats.clone(),
+				entry.compression.clone(),
+			)
 		};
 
 		// Bump groups counter for this incoming group on the subscriber side.
 		track_stats.group();
 
+		// Block until SUBSCRIBE_OK tells us the codec. The group's QUIC stream can
+		// arrive before SUBSCRIBE_OK lands on the subscribe stream, so we can't
+		// decode frames until this resolves. A receiver error means the
+		// subscription ended before SUBSCRIBE_OK, so treat it as cancelled.
+		let compression = {
+			let guard = compression_rx
+				.wait_for(Option::is_some)
+				.await
+				.map_err(|_| Error::Cancel)?;
+			(*guard).expect("present after wait_for")
+		};
+
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = group.closed() => Err(err),
-			res = self.run_group(stream, group.clone(), track_stats.clone()) => res,
+			res = self.run_group(stream, group.clone(), track_stats.clone(), compression) => res,
 		};
 
 		match res {
@@ -575,20 +610,40 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
 		track_stats: Arc<SubscriberTrack>,
+		compression: Compression,
 	) -> Result<(), Error> {
 		while let Some(size) = stream.decode_maybe::<u64>().await? {
 			if size > MAX_FRAME_SIZE {
 				return Err(Error::FrameTooLarge);
 			}
-			let mut frame = group.create_frame(Frame { size })?;
-			track_stats.frame();
 
-			if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
-				let _ = frame.abort(err.clone());
-				return Err(err);
+			match compression {
+				Compression::None => {
+					let mut frame = group.create_frame(Frame { size })?;
+					track_stats.frame();
+
+					if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
+						let _ = frame.abort(err.clone());
+						return Err(err);
+					}
+
+					frame.finish()?;
+				}
+				compression => {
+					// `size` is the compressed length; pull it off the wire, then
+					// inflate. The frame the consumer sees carries the original size.
+					let packed = stream.read_exact(size as usize).await?;
+					track_stats.frame();
+					track_stats.bytes(size);
+
+					let payload = compression.decompress(&packed)?;
+					let mut frame = group.create_frame(Frame {
+						size: payload.len() as u64,
+					})?;
+					frame.write(bytes::Bytes::from(payload))?;
+					frame.finish()?;
+				}
 			}
-
-			frame.finish()?;
 		}
 
 		Ok(())

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Catalog producer API to author renditions directly (`moq_publish_video_config`, `moq_publish_audio_config`, `moq_publish_video_remove`, `moq_publish_audio_remove`), mirroring the consume-side config queries.
+- Raw moq-net track API for arbitrary (non-media) byte tracks, mirroring the moq-ffi primitives:
+  - Publish: `moq_publish_track`, `moq_publish_track_group`, `moq_publish_track_frame`, `moq_publish_group_frame`, `moq_publish_group_close`, `moq_publish_track_close`.
+  - Consume: `moq_consume_track`, `moq_consume_track_frame`, `moq_consume_track_frame_close`, `moq_consume_track_close`.
+
 ## [0.2.17](https://github.com/moq-dev/moq/compare/libmoq-v0.2.16...libmoq-v0.2.17) - 2026-05-24
 
 ### Added

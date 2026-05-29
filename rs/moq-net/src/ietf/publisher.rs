@@ -116,6 +116,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track = Track {
 			name: msg.track_name.to_string(),
 			priority: msg.subscriber_priority,
+			..Default::default()
 		};
 
 		let track = match broadcast.subscribe_track(&track) {

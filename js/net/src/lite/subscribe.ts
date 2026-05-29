@@ -1,3 +1,4 @@
+import { Compression, compressionFromCode } from "../compression.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
@@ -169,6 +170,13 @@ export class SubscribeOk {
 	maxLatency: number;
 	startGroup?: number;
 	endGroup?: number;
+	/**
+	 * Codec the publisher will use for every frame on this track. Negotiated here
+	 * (not in SUBSCRIBE) so the subscriber blocks on this message before it can
+	 * decode any frame payload. Draft-05+ only; older drafts are always
+	 * {@link Compression.None}.
+	 */
+	compression: Compression;
 
 	constructor({
 		priority = 0,
@@ -176,18 +184,21 @@ export class SubscribeOk {
 		maxLatency = 0,
 		startGroup = undefined,
 		endGroup = undefined,
+		compression = Compression.None,
 	}: {
 		priority?: number;
 		ordered?: boolean;
 		maxLatency?: number;
 		startGroup?: number;
 		endGroup?: number;
+		compression?: Compression;
 	}) {
 		this.priority = priority;
 		this.ordered = ordered;
 		this.maxLatency = maxLatency;
 		this.startGroup = startGroup;
 		this.endGroup = endGroup;
+		this.compression = compression;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -198,12 +209,21 @@ export class SubscribeOk {
 			case Version.DRAFT_01:
 				await w.u8(this.priority ?? 0);
 				break;
+			case Version.DRAFT_03:
+			case Version.DRAFT_04:
+				await w.u8(this.priority);
+				await w.bool(this.ordered);
+				await w.u53(this.maxLatency);
+				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
+				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
+				break;
 			default:
 				await w.u8(this.priority);
 				await w.bool(this.ordered);
 				await w.u53(this.maxLatency);
 				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
+				await w.u53(this.compression);
 				break;
 		}
 	}
@@ -214,6 +234,7 @@ export class SubscribeOk {
 		let maxLatency: number | undefined;
 		let startGroup: number | undefined;
 		let endGroup: number | undefined;
+		let compression: Compression = Compression.None;
 
 		switch (version) {
 			case Version.DRAFT_02:
@@ -222,12 +243,21 @@ export class SubscribeOk {
 			case Version.DRAFT_01:
 				priority = await r.u8();
 				break;
+			case Version.DRAFT_03:
+			case Version.DRAFT_04:
+				priority = await r.u8();
+				ordered = await r.bool();
+				maxLatency = await r.u53();
+				startGroup = await r.u53();
+				endGroup = await r.u53();
+				break;
 			default:
 				priority = await r.u8();
 				ordered = await r.bool();
 				maxLatency = await r.u53();
 				startGroup = await r.u53();
 				endGroup = await r.u53();
+				compression = compressionFromCode(await r.u53());
 				break;
 		}
 
@@ -237,6 +267,7 @@ export class SubscribeOk {
 			maxLatency,
 			startGroup: startGroup !== undefined && startGroup > 0 ? startGroup - 1 : undefined,
 			endGroup: endGroup !== undefined && endGroup > 0 ? endGroup - 1 : undefined,
+			compression,
 		});
 	}
 

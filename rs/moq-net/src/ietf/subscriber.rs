@@ -464,7 +464,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let track = Track {
 			name: msg.track_name.to_string(),
-			priority: 0,
+			..Default::default()
 		}
 		.produce();
 
