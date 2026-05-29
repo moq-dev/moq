@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
+use moq_net::conducer;
 use url::Url;
 
 use crate::Client;
@@ -59,39 +61,52 @@ impl Default for Backoff {
 	}
 }
 
+/// Shared reconnect state, observed by consumers through a [`conducer`] channel.
+///
+/// The channel closing (all producers dropped) is the terminal signal; `error`
+/// distinguishes a permanent give-up from a graceful close.
+#[derive(Default)]
+struct State {
+	/// Incremented on each successful connect: 1 after the first, 2 after the first reconnect, etc.
+	connects: u64,
+	/// Incremented each time an established session drops.
+	disconnects: u64,
+	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
+	error: Option<Arc<anyhow::Error>>,
+}
+
 /// Handle to a background reconnect loop.
 ///
 /// Spawns a tokio task that connects, waits for session close, then reconnects
-/// with exponential backoff. Dropping the handle aborts the background task.
+/// with exponential backoff. [`connected`](Self::connected) and
+/// [`disconnected`](Self::disconnected) report each transition;
+/// [`closed`](Self::closed) is the only terminal signal. Dropping the handle
+/// aborts the background task.
 pub struct Reconnect {
 	abort: tokio::task::AbortHandle,
-	closed_rx: tokio::sync::watch::Receiver<Option<Arc<anyhow::Error>>>,
-	connected_rx: tokio::sync::watch::Receiver<u64>,
+	state: conducer::Consumer<State>,
 }
 
 impl Reconnect {
 	pub(crate) fn new(client: Client, url: Url, backoff: Backoff) -> Self {
-		let (closed_tx, closed_rx) = tokio::sync::watch::channel(None::<Arc<anyhow::Error>>);
-		let (connected_tx, connected_rx) = tokio::sync::watch::channel(0u64);
+		let producer = conducer::Producer::<State>::default();
+		let state = producer.consume();
 		let task = tokio::spawn(async move {
-			if let Err(err) = Self::run(client, url, backoff, connected_tx).await {
+			if let Err(err) = Self::run(&producer, client, url, backoff).await {
 				tracing::error!(err = %format!("{err:#}"), "reconnect loop exited");
-				let _ = closed_tx.send(Some(Arc::new(err)));
+				if let Ok(mut state) = producer.write() {
+					state.error = Some(Arc::new(err));
+				}
 			}
+			// Dropping the producer here closes the channel, signaling consumers.
 		});
 		Self {
 			abort: task.abort_handle(),
-			closed_rx,
-			connected_rx,
+			state,
 		}
 	}
 
-	async fn run(
-		client: Client,
-		url: Url,
-		backoff: Backoff,
-		connected_tx: tokio::sync::watch::Sender<u64>,
-	) -> anyhow::Result<()> {
+	async fn run(state: &conducer::Producer<State>, client: Client, url: Url, backoff: Backoff) -> anyhow::Result<()> {
 		let mut delay = backoff.initial;
 		let mut retry_start = tokio::time::Instant::now();
 		let mut last_error: Option<anyhow::Error> = None;
@@ -111,9 +126,14 @@ impl Reconnect {
 					tracing::info!(%url, "connected");
 					delay = backoff.initial;
 					last_error = None;
-					connected_tx.send_modify(|epoch| *epoch += 1);
+					if let Ok(mut state) = state.write() {
+						state.connects += 1;
+					}
 					let _ = session.closed().await;
 					tracing::warn!(%url, "session closed, reconnecting");
+					if let Ok(mut state) = state.write() {
+						state.disconnects += 1;
+					}
 					retry_start = tokio::time::Instant::now();
 				}
 				Err(err) => {
@@ -126,21 +146,67 @@ impl Reconnect {
 		}
 	}
 
-	/// Wait for the next successful (re)connect after the given epoch.
+	/// Poll for the next successful (re)connect after `since`.
 	///
-	/// The epoch counts successful connects: it is 1 after the first connect,
-	/// 2 after the first reconnect, and so on. Pass the previously returned
-	/// value to wait for a newer connection, or 0 to wait for the first.
+	/// Stays [`Poll::Pending`] once the loop has stopped; observe termination via
+	/// [`poll_closed`](Self::poll_closed).
+	pub fn poll_connected(&self, waiter: &conducer::Waiter, since: u64) -> Poll<u64> {
+		match self.state.poll(waiter, |state| match state.connects {
+			connects if connects > since => Poll::Ready(connects),
+			_ => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(connects)) => Poll::Ready(connects),
+			// Loop stopped: let `closed` deliver the outcome instead.
+			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Wait for the next successful (re)connect after `since`, returning the new epoch.
+	///
+	/// The epoch counts successful connects: 1 after the first connect, 2 after the
+	/// first reconnect, and so on. Pass the previously returned value to wait for a
+	/// newer connection, or 0 to wait for the first.
 	///
 	/// Never resolves once the reconnect loop has stopped, so pair it with
 	/// [`closed`](Self::closed) in a `select!` to observe termination.
 	pub async fn connected(&self, since: u64) -> u64 {
-		let mut rx = self.connected_rx.clone();
-		// Copy the epoch out so the watch guard isn't held across the pending() await.
-		let epoch = rx.wait_for(|epoch| *epoch > since).await.ok().map(|epoch| *epoch);
-		match epoch {
-			Some(epoch) => epoch,
-			None => std::future::pending().await,
+		conducer::wait(|waiter| self.poll_connected(waiter, since)).await
+	}
+
+	/// Poll for the next session drop after `since`.
+	///
+	/// Stays [`Poll::Pending`] once the loop has stopped; observe termination via
+	/// [`poll_closed`](Self::poll_closed).
+	pub fn poll_disconnected(&self, waiter: &conducer::Waiter, since: u64) -> Poll<u64> {
+		match self.state.poll(waiter, |state| match state.disconnects {
+			disconnects if disconnects > since => Poll::Ready(disconnects),
+			_ => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(disconnects)) => Poll::Ready(disconnects),
+			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Wait for the next session drop after `since`, returning the new epoch.
+	///
+	/// A disconnect is not fatal: the loop keeps reconnecting. The epoch counts
+	/// session drops. Pass the previously returned value to wait for a newer drop,
+	/// or 0 to wait for the first.
+	///
+	/// Never resolves once the reconnect loop has stopped; [`closed`](Self::closed)
+	/// is the only terminal signal.
+	pub async fn disconnected(&self, since: u64) -> u64 {
+		conducer::wait(|waiter| self.poll_disconnected(waiter, since)).await
+	}
+
+	/// Poll whether the reconnect loop has stopped.
+	///
+	/// Ready with `Err` if it permanently gave up (reconnect timeout exceeded),
+	/// or `Ok(())` if stopped via [`close`](Self::close) or drop.
+	pub fn poll_closed(&self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<()>> {
+		match self.state.poll_closed(waiter) {
+			Poll::Ready(()) => Poll::Ready(self.outcome()),
+			Poll::Pending => Poll::Pending,
 		}
 	}
 
@@ -150,13 +216,14 @@ impl Reconnect {
 	/// Returns `Err` with the most recent connection error if the reconnect
 	/// timeout was exceeded.
 	pub async fn closed(&self) -> anyhow::Result<()> {
-		let mut rx = self.closed_rx.clone();
-		match rx.wait_for(|v| v.is_some()).await {
-			Ok(v) => {
-				let err = Arc::clone(v.as_ref().expect("predicate matched Some"));
-				Err(anyhow::anyhow!("{err:#}"))
-			}
-			Err(_) => Ok(()),
+		conducer::wait(|waiter| self.poll_closed(waiter)).await
+	}
+
+	/// Read the terminal outcome; only meaningful once the channel has closed.
+	fn outcome(&self) -> anyhow::Result<()> {
+		match self.state.read().error.clone() {
+			Some(err) => Err(anyhow::anyhow!("{err:#}")),
+			None => Ok(()),
 		}
 	}
 

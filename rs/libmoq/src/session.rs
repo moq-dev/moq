@@ -51,35 +51,57 @@ impl Session {
 
 	/// Connect and stay connected, reconnecting with exponential backoff if the session drops.
 	///
-	/// Fires the "connected" callback on every successful (re)connect. Returns only when
-	/// reconnection permanently gives up (the backoff timeout is exceeded), propagating the
-	/// last connection error.
+	/// Reports each transition through the status callback: a positive connection epoch on every
+	/// (re)connect, 0 on each transient disconnect, and a negative code only when reconnection
+	/// permanently gives up (the backoff timeout is exceeded), which is terminal.
 	async fn connect_run(
 		task_id: Id,
 		url: Url,
 		publish: Option<moq_net::OriginConsumer>,
 		consume: Option<moq_net::OriginProducer>,
 	) -> Result<(), Error> {
-		let client = moq_native::ClientConfig::default()
+		let reconnect = moq_native::ClientConfig::default()
 			.init()
 			.map_err(|err| Error::Connect(Arc::new(err)))?
 			.with_publish(publish)
-			.with_consume(consume);
+			.with_consume(consume)
+			.reconnect(url);
 
-		let reconnect = client.reconnect(url);
-		let mut epoch = 0;
+		let mut connects = 0;
+		let mut disconnects = 0;
 
 		loop {
 			tokio::select! {
 				res = reconnect.closed() => return res.map_err(|err| Error::Connect(Arc::new(err))),
-				next = reconnect.connected(epoch) => {
-					epoch = next;
-					// "Connected" callback: copy from slab if not revoked.
-					if let Some(Some(entry)) = State::lock().session.task.get(task_id) {
-						entry.callback.call(());
-					}
+				epoch = reconnect.connected(connects) => {
+					connects = epoch;
+					// Positive status carries the connection epoch, so callers can tell a
+					// reconnect (>1) from the first connect (1).
+					Self::notify(task_id, i32::try_from(epoch).unwrap_or(i32::MAX));
+				}
+				epoch = reconnect.disconnected(disconnects) => {
+					disconnects = epoch;
+					// Status 0: transiently disconnected, reconnect in progress.
+					Self::notify(task_id, 0);
 				}
 			}
+		}
+	}
+
+	/// Invoke a session's status callback unless it has been revoked.
+	///
+	/// Copies the callback out before releasing the lock, so the C callback never runs while
+	/// the global state is held.
+	fn notify(task_id: Id, code: i32) {
+		let callback = State::lock()
+			.session
+			.task
+			.get(task_id)
+			.and_then(|entry| entry.as_ref())
+			.map(|entry| entry.callback);
+
+		if let Some(callback) = callback {
+			callback.call(code);
 		}
 	}
 
