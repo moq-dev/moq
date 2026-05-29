@@ -54,19 +54,20 @@
 //!
 //! # Disabled stats
 //!
-//! [`Stats::disabled`] (and the matching [`Default`] impl) returns a no-op
-//! aggregator. All counter bumps through it are silently dropped and no
-//! snapshot task is ever spawned, so call sites can hold a [`StatsHandle`]
-//! unconditionally instead of threading an `Option`.
+//! A [`StatsConfig`] with no origin (the default) builds a no-op aggregator:
+//! all counter bumps are silently dropped, no snapshot task spawns, and no
+//! broadcast is published. [`Stats::default`] / [`StatsHandle::default`]
+//! return one, so call sites can hold a [`StatsHandle`] unconditionally
+//! instead of threading an `Option`.
 //!
 //! # Lifecycle
 //!
-//! No background work runs until something happens worth reporting. The first
-//! `broadcast()` call on any path spawns the snapshot task, which constructs
-//! the stats broadcast, ticks at the configured interval, and writes a frame
-//! per (tier, role) track. The task exits once the entry map has been empty
-//! for a couple of intervals, dropping the broadcast and unannouncing. The
-//! next `broadcast()` call respawns it.
+//! When the config has an origin, [`Stats::new`] spawns the snapshot task
+//! immediately, publishes the stats broadcast, and ticks at the configured
+//! interval, writing a frame per (tier, role) track. The broadcast stays
+//! announced for the lifetime of the [`Stats`] aggregator, even while idle
+//! (frames just go to `{}`). The task exits when the last [`Stats`] clone is
+//! dropped (the task holds only a `Weak` to the shared state).
 //!
 //! # Idle frame skipping
 //!
@@ -110,7 +111,7 @@ use std::{
 use serde::Serialize;
 use web_async::{Lock, spawn};
 
-use crate::{AsPath, Broadcast, Origin, OriginProducer, Path, PathOwned, Track, TrackProducer};
+use crate::{AsPath, Broadcast, OriginProducer, Path, PathOwned, Track, TrackProducer};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
@@ -193,9 +194,12 @@ impl Tier {
 }
 
 /// Settings for a [`Stats`] aggregator. Construct with [`StatsConfig::new`]
-/// (the origin is required) and chain the `with_*` setters (e.g.
-/// `StatsConfig::new(origin).with_prefix(".foo")`), then hand it to
-/// [`Stats::new`].
+/// and chain the `with_*` setters (e.g.
+/// `StatsConfig::new().with_origin(origin).with_prefix(".foo")`), then hand it
+/// to [`Stats::new`].
+///
+/// With no origin set the resulting aggregator is a no-op: bumps are dropped
+/// and no task spawns. Call [`StatsConfig::with_origin`] to publish.
 ///
 /// Distinct from the relay's clap-derived `StatsConfig`, which holds the raw
 /// CLI/TOML knobs and resolves into one of these.
@@ -206,7 +210,8 @@ impl Tier {
 #[non_exhaustive]
 pub struct StatsConfig {
 	/// Origin that receives the stats broadcast's `publish_broadcast` calls.
-	pub origin: OriginProducer,
+	/// When `None`, [`Stats::new`] spawns no task and publishes nothing.
+	pub origin: Option<OriginProducer>,
 	/// Top-level path stats are published under (default `.stats`). The full
 	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
 	/// `node` is unset).
@@ -222,15 +227,23 @@ pub struct StatsConfig {
 }
 
 impl StatsConfig {
-	/// A config publishing on `origin`, with default settings: `.stats` prefix,
-	/// 1s snapshot interval, and no node suffix.
-	pub fn new(origin: OriginProducer) -> Self {
+	/// A config with default settings: no origin (no-op), `.stats` prefix, 1s
+	/// snapshot interval, and no node suffix. Call [`Self::with_origin`] to
+	/// actually publish.
+	pub fn new() -> Self {
 		Self {
-			origin,
+			origin: None,
 			prefix: PathOwned::from(".stats"),
 			node: None,
 			interval: Duration::from_secs(1),
 		}
+	}
+
+	/// Set the origin to publish the stats broadcast on. Without this the
+	/// aggregator is a no-op.
+	pub fn with_origin(mut self, origin: impl Into<Option<OriginProducer>>) -> Self {
+		self.origin = origin.into();
+		self
 	}
 
 	/// Override the top-level prefix (default `.stats`).
@@ -252,24 +265,28 @@ impl StatsConfig {
 	}
 }
 
+impl Default for StatsConfig {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 /// Top-level stats aggregator. Cheap to clone (`Arc` inside for the shared
 /// runtime state). One instance per relay; sessions get tier-scoped handles via
 /// [`Stats::tier`]. Build it from a [`StatsConfig`] via [`Stats::new`].
 #[derive(Clone)]
 pub struct Stats {
 	prefix: PathOwned,
-	node: Option<PathOwned>,
-	interval: Duration,
-	enabled: bool,
-	shared: Arc<StatsShared>,
+	/// `None` for a no-op aggregator (config had no origin): bumps are
+	/// dropped and no task was spawned.
+	shared: Option<Arc<StatsShared>>,
 }
 
 /// Runtime state shared by every clone of a [`Stats`] and held by the
-/// snapshot task through a `Weak`.
+/// snapshot task through a `Weak`. Only allocated when an origin is set.
 struct StatsShared {
 	origin: OriginProducer,
 	entries: Lock<HashMap<PathOwned, Arc<BroadcastEntry>>>,
-	task: Lock<Option<()>>,
 }
 
 /// Per-broadcast counters split by side then tier. The two side fields are
@@ -359,6 +376,12 @@ const TRACK_ORDER: [&str; NUM_SLOTS] = [
 
 impl Stats {
 	/// Build a stats aggregator from `config`.
+	///
+	/// When `config` has an origin, this spawns the snapshot task immediately
+	/// and publishes the stats broadcast; the task runs until the last [`Stats`]
+	/// clone is dropped. With no origin the aggregator is a no-op (bumps are
+	/// dropped, nothing is published) and no task spawns, so it's safe to build
+	/// outside an async runtime.
 	pub fn new(config: StatsConfig) -> Self {
 		let StatsConfig {
 			origin,
@@ -371,34 +394,18 @@ impl Stats {
 		// We do this here (not in `with_node`) so a directly-assigned
 		// `config.node` is normalized too.
 		let node = node.filter(|p| !p.is_empty());
-		Self {
-			prefix,
-			node,
-			interval,
-			enabled: true,
-			shared: Arc::new(StatsShared {
+
+		let shared = origin.map(|origin| {
+			let shared = Arc::new(StatsShared {
 				origin,
 				entries: Lock::default(),
-				task: Lock::new(None),
-			}),
-		}
-	}
+			});
+			let advertised = advertised_path(&prefix, node.as_ref().map(|p| p.as_str()));
+			spawn(run_publisher(Arc::downgrade(&shared), advertised, interval));
+			shared
+		});
 
-	/// A no-op aggregator. Counter bumps are silently dropped and no snapshot
-	/// task is ever spawned. Use this when stats are disabled so call sites
-	/// can hold a [`Stats`] (or [`StatsHandle`]) unconditionally.
-	pub fn disabled() -> Self {
-		Self {
-			prefix: PathOwned::default(),
-			node: None,
-			interval: Duration::from_secs(1),
-			enabled: false,
-			shared: Arc::new(StatsShared {
-				origin: Origin::random().produce(),
-				entries: Lock::default(),
-				task: Lock::new(None),
-			}),
-		}
+		Self { prefix, shared }
 	}
 
 	/// Returns the configured top-level prefix.
@@ -406,12 +413,11 @@ impl Stats {
 		&self.prefix
 	}
 
-	/// The path the stats broadcast publishes on. Derived from `prefix` +
-	/// `node` on demand; the snapshot task spawns rarely, so recomputing here
-	/// is cheaper than threading it through the shared state. Only meaningful
-	/// when enabled (a disabled aggregator never spawns a task).
-	fn advertised(&self) -> PathOwned {
-		advertised_path(&self.prefix, self.node.as_ref().map(|p| p.as_str()))
+	/// The shared state, panicking for a no-op aggregator. Tests build with an
+	/// origin so this is always present.
+	#[cfg(test)]
+	fn shared(&self) -> &Arc<StatsShared> {
+		self.shared.as_ref().expect("enabled stats aggregator")
 	}
 
 	/// Returns a tier-scoped handle. Bumps through this handle land in the
@@ -424,10 +430,8 @@ impl Stats {
 	}
 
 	fn entry(&self, path: impl AsPath) -> Option<Arc<BroadcastEntry>> {
-		// Disabled aggregator never allocates state.
-		if !self.enabled {
-			return None;
-		}
+		// No-op aggregator (no origin) never allocates state.
+		let shared = self.shared.as_ref()?;
 		let path = path.as_path();
 		// Skip our own stats broadcasts (and any sibling category under the
 		// same prefix) so serving a stats broadcast doesn't generate more
@@ -436,21 +440,19 @@ impl Stats {
 			return None;
 		}
 		let owned = path.to_owned();
-		let arc = {
-			let mut entries = self.shared.entries.lock();
+		let mut entries = shared.entries.lock();
+		Some(
 			entries
 				.entry(owned)
 				.or_insert_with(|| Arc::new(BroadcastEntry::new()))
-				.clone()
-		};
-		ensure_task(self);
-		Some(arc)
+				.clone(),
+		)
 	}
 }
 
 impl Default for Stats {
 	fn default() -> Self {
-		Self::disabled()
+		Self::new(StatsConfig::new())
 	}
 }
 
@@ -463,11 +465,6 @@ pub struct StatsHandle {
 }
 
 impl StatsHandle {
-	/// A no-op handle. See [`Stats::disabled`].
-	pub fn disabled() -> Self {
-		Stats::disabled().tier(Tier::External)
-	}
-
 	/// The aggregator this handle is tied to.
 	pub fn parent(&self) -> &Stats {
 		&self.stats
@@ -492,8 +489,9 @@ impl StatsHandle {
 }
 
 impl Default for StatsHandle {
+	/// A no-op handle backed by a [`Stats::default`] aggregator.
 	fn default() -> Self {
-		Self::disabled()
+		Stats::default().tier(Tier::External)
 	}
 }
 
@@ -723,22 +721,6 @@ impl Drop for SubscriberTrack {
 	}
 }
 
-fn ensure_task(stats: &Stats) {
-	if !stats.enabled {
-		return;
-	}
-	let mut slot = stats.shared.task.lock();
-	if slot.is_none() {
-		*slot = Some(());
-		let weak = Arc::downgrade(&stats.shared);
-		spawn(run_publisher(weak, stats.advertised(), stats.interval));
-	}
-}
-
-fn clear_task(shared: &StatsShared) {
-	*shared.task.lock() = None;
-}
-
 /// Per-tick work for a single `(side, tier)` slot: derive `broadcasts` /
 /// `broadcasts_closed` from subscription transitions, build the emitted
 /// `Snapshot`, update the slot's `prev_emitted`, and hand the snap to `emit`
@@ -814,11 +796,9 @@ fn process_slot(counters: &Counters, slot_state: &mut SlotState, mut emit: impl 
 	}
 }
 
-/// How many consecutive empty ticks before the snapshot task exits and
-/// unannounces. A small grace avoids spawn/exit churn when broadcasts come
-/// and go between ticks; the next `broadcast()` respawns the task.
-const EMPTY_EXIT_TICKS: u32 = 2;
-
+/// Publishes the stats broadcast and writes a frame per tick. Spawned once by
+/// [`Stats::new`] when an origin is set; runs until every [`Stats`] clone is
+/// dropped (`weak.upgrade()` returns `None`).
 async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval: Duration) {
 	let Some(shared) = weak.upgrade() else {
 		return;
@@ -834,14 +814,12 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 			Ok(t) => tracks.push(t),
 			Err(err) => {
 				tracing::warn!(?err, name, "stats: failed to create track");
-				clear_task(&shared);
 				return;
 			}
 		}
 	}
 	if !shared.origin.publish_broadcast(&advertised, broadcast.consume()) {
 		tracing::warn!(advertised = %advertised, "stats: origin rejected stats broadcast");
-		clear_task(&shared);
 		return;
 	}
 	drop(shared);
@@ -851,7 +829,6 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 	// derivation across ticks.
 	let mut local: HashMap<PathOwned, EntrySnapState> = HashMap::new();
 	let mut last_payload: [Vec<u8>; NUM_SLOTS] = Default::default();
-	let mut empty_ticks: u32 = 0;
 
 	let mut ticker = tokio::time::interval(interval);
 	ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -921,28 +898,7 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 			*last = json;
 		}
 
-		let map_empty = shared.entries.lock().is_empty();
-		if map_empty {
-			empty_ticks = empty_ticks.saturating_add(1);
-			// Once the map has been empty long enough that no consumer could
-			// learn anything new, drop the broadcast and let the next bump
-			// respawn us. Take the task slot under lock and re-check the map
-			// to avoid racing with a fresh insert.
-			if empty_ticks >= EMPTY_EXIT_TICKS {
-				let mut slot = shared.task.lock();
-				if shared.entries.lock().is_empty() {
-					*slot = None;
-					drop(slot);
-					drop(shared);
-					drop(tracks);
-					drop(broadcast);
-					return;
-				}
-				empty_ticks = 0;
-			}
-		} else {
-			empty_ticks = 0;
-		}
+		drop(shared);
 	}
 }
 
@@ -985,8 +941,11 @@ mod tests {
 
 	fn test_stats(node: Option<&str>) -> (Stats, OriginProducer) {
 		let origin = Origin::random().produce();
-		let stats =
-			Stats::new(StatsConfig::new(origin.clone()).with_node(node.map(|s| PathOwned::from(s.to_string()))));
+		let stats = Stats::new(
+			StatsConfig::new()
+				.with_origin(origin.clone())
+				.with_node(node.map(|s| PathOwned::from(s.to_string()))),
+		);
 		(stats, origin)
 	}
 
@@ -1001,14 +960,26 @@ mod tests {
 		assert_eq!(advertised_path(&prefix, Some("lon")).as_str(), "metrics/node/lon");
 	}
 
-	#[test]
-	fn new_normalizes_and_drops_empty_node() {
+	/// The advertised path normalizes a messy node suffix and drops an
+	/// all-empty one. Observed through the announced path, since the task
+	/// announces at construction.
+	async fn announced_path_for_node(node: &str) -> String {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(StatsConfig::new(origin.clone()).with_node(PathOwned::from("/sjc//1/".to_string())));
-		assert_eq!(stats.advertised().as_str(), ".stats/node/sjc/1");
+		let _stats = Stats::new(
+			StatsConfig::new()
+				.with_origin(origin.clone())
+				.with_node(PathOwned::from(node.to_string())),
+		);
+		let mut consumer = origin.consume();
+		tokio::time::advance(Duration::from_millis(1)).await;
+		let (path, _broadcast) = consumer.announced().await.expect("expected announce");
+		path.as_str().to_string()
+	}
 
-		let stats = Stats::new(StatsConfig::new(origin).with_node(PathOwned::from("///".to_string())));
-		assert_eq!(stats.advertised().as_str(), ".stats/node");
+	#[tokio::test(start_paused = true)]
+	async fn new_normalizes_and_drops_empty_node() {
+		assert_eq!(announced_path_for_node("/sjc//1/").await, ".stats/node/sjc/1");
+		assert_eq!(announced_path_for_node("///").await, ".stats/node");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1022,7 +993,7 @@ mod tests {
 		let g2 = bs2.publisher().track("video");
 		g2.bytes(7);
 
-		let entries = stats.shared.entries.lock();
+		let entries = stats.shared().entries.lock();
 		let e1 = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
 		let e2 = entries.get(&PathOwned::from("demo/ccc")).expect("entry");
 		assert_eq!(e1.publisher[Tier::External.idx()].bytes.load(Relaxed), 100);
@@ -1040,7 +1011,7 @@ mod tests {
 		let int_track = int.broadcast("demo/bbb").subscriber().track("audio");
 		int_track.bytes(7);
 
-		let entries = stats.shared.entries.lock();
+		let entries = stats.shared().entries.lock();
 		let entry = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
 		assert_eq!(entry.publisher[Tier::External.idx()].bytes.load(Relaxed), 100);
 		assert_eq!(entry.subscriber[Tier::External.idx()].bytes.load(Relaxed), 0);
@@ -1060,12 +1031,15 @@ mod tests {
 		track.bytes(100);
 		drop(track);
 		drop(p);
-		assert!(stats.shared.entries.lock().is_empty());
+		assert!(stats.shared().entries.lock().is_empty());
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn disabled_stats_are_noop() {
-		let stats = Stats::disabled();
+		// A no-op aggregator (no origin) allocates no shared state and never
+		// announces; every handle is empty and bumps are dropped.
+		let stats = Stats::default();
+		assert!(stats.shared.is_none());
 		let bs = stats.tier(Tier::External).broadcast("demo/bbb");
 		assert!(bs.is_empty());
 		let p = bs.publisher();
@@ -1073,7 +1047,6 @@ mod tests {
 		track.bytes(100);
 		drop(track);
 		drop(p);
-		assert!(stats.shared.entries.lock().is_empty());
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1097,7 +1070,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn task_announces_without_node_suffix() {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(StatsConfig::new(origin.clone()));
+		let stats = Stats::new(StatsConfig::new().with_origin(origin.clone()));
 		let mut consumer = origin.consume();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -1137,7 +1110,7 @@ mod tests {
 
 		drive_ticks(5).await;
 		assert!(
-			stats.shared.entries.lock().contains_key(&key),
+			stats.shared().entries.lock().contains_key(&key),
 			"announced-but-idle broadcast must stay while the guard is held"
 		);
 
@@ -1147,7 +1120,7 @@ mod tests {
 		// the entry is dropped on the next tick.
 		drive_ticks(1).await;
 		assert!(
-			!stats.shared.entries.lock().contains_key(&key),
+			!stats.shared().entries.lock().contains_key(&key),
 			"entry dropped once the announce guard closes"
 		);
 	}
@@ -1163,7 +1136,7 @@ mod tests {
 
 		drive_ticks(1).await;
 		assert!(
-			stats.shared.entries.lock().contains_key(&key),
+			stats.shared().entries.lock().contains_key(&key),
 			"live entry present while the track guard is held"
 		);
 
@@ -1171,7 +1144,7 @@ mod tests {
 		drop(bs);
 		drive_ticks(1).await;
 		assert!(
-			!stats.shared.entries.lock().contains_key(&key),
+			!stats.shared().entries.lock().contains_key(&key),
 			"fully-closed entry dropped on the next tick"
 		);
 	}
@@ -1282,7 +1255,7 @@ mod tests {
 
 		drive_ticks(2).await;
 		{
-			let entries = stats.shared.entries.lock();
+			let entries = stats.shared().entries.lock();
 			let entry = entries.get(&PathOwned::from("foo/bar")).expect("entry");
 			let raw = entry.publisher[Tier::External.idx()].snapshot();
 			assert_eq!(raw.subscriptions, 2, "two track subs");
@@ -1301,7 +1274,7 @@ mod tests {
 		// broadcasts_closed (which lives in task-local state, not on the
 		// global entry) gets bumped to 1, but we can only see that through
 		// the wire frame. Here we just confirm the raw counters squared up.
-		let entries = stats.shared.entries.lock();
+		let entries = stats.shared().entries.lock();
 		let entry = entries
 			.get(&PathOwned::from("foo/bar"))
 			.expect("entry still live (publisher guard held)");

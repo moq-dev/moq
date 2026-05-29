@@ -24,7 +24,7 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// Receiver-side bandwidth producer for PROBE feedback. None disables the
 	/// feature (used by versions that don't carry probe streams).
 	pub recv_bandwidth: Option<BandwidthProducer>,
-	/// Stats aggregator for this session's ingress. Use [`StatsHandle::disabled`]
+	/// Stats aggregator for this session's ingress. Use [`StatsHandle::default`]
 	/// to opt out.
 	pub stats: StatsHandle,
 	pub version: Version,

@@ -68,18 +68,19 @@ pub struct StatsConfig {
 impl StatsConfig {
 	/// Build a [`Stats`] aggregator from this config, publishing on `origin`.
 	///
-	/// Returns [`Stats::disabled`] (a no-op aggregator) when [`Self::enabled`]
+	/// Returns a no-op aggregator ([`Stats::default`]) when [`Self::enabled`]
 	/// is false, so the relay can attach the result unconditionally.
 	pub fn build(&self, origin: OriginProducer) -> Stats {
 		if !self.enabled.unwrap_or(false) {
-			return Stats::disabled();
+			return Stats::default();
 		}
 		let prefix = self.prefix.clone().unwrap_or_else(|| ".stats".to_string());
 		let interval = Duration::from_secs(self.interval.unwrap_or(1).max(1));
 		let node = self.node.clone().map(PathOwned::from);
 		tracing::info!(prefix, interval_secs = interval.as_secs(), node = ?node, "stats publishing enabled");
 		// Fully qualified to disambiguate from this module's clap-derived StatsConfig.
-		let config = moq_net::StatsConfig::new(origin)
+		let config = moq_net::StatsConfig::new()
+			.with_origin(origin)
 			.with_prefix(prefix)
 			.with_interval(interval)
 			.with_node(node);
