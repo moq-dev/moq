@@ -81,9 +81,10 @@ pub struct HttpsConfig {
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
 	///
 	/// When set, clients *may* present a certificate during the TLS handshake.
-	/// A verified peer is granted an unrestricted [`AuthToken`] without a JWT,
-	/// mirroring the QUIC server's `--server-tls-root` behavior. Clients that
-	/// don't present a cert continue through the normal JWT path.
+	/// A verified peer is granted full publish/subscribe access scoped to the
+	/// URL path without a JWT, mirroring the QUIC server's `--server-tls-root`
+	/// behavior. Clients that don't present a cert continue through the normal
+	/// JWT path.
 	///
 	/// In config files, accepts either a single string or a TOML array.
 	#[arg(
@@ -454,7 +455,7 @@ async fn serve_announced(
 		jwt: query.jwt,
 	};
 	let token = if mtls.is_some() {
-		AuthToken::unrestricted()
+		AuthToken::unrestricted(moq_net::Path::new(&params.path).to_owned())
 	} else {
 		state.auth.verify(&params).await?
 	};
@@ -495,7 +496,7 @@ async fn serve_fetch(
 		jwt: params.auth.jwt,
 	};
 	let token = if mtls.is_some() {
-		AuthToken::unrestricted()
+		AuthToken::unrestricted(moq_net::Path::new(&auth.path).to_owned())
 	} else {
 		state.auth.verify(&auth).await?
 	};

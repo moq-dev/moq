@@ -2,6 +2,7 @@ use crate::{Auth, AuthError, AuthParams, AuthToken, Cluster};
 
 use axum::http;
 use moq_native::Request;
+use moq_net::{Path, PathOwned};
 
 /// An error carrying the HTTP status to send when closing the request.
 ///
@@ -112,7 +113,13 @@ impl Connection {
 
 		if peer.is_some() {
 			tracing::debug!("mTLS peer authenticated");
-			return Ok(AuthToken::unrestricted());
+			// Scope the grant to the URL path, the same root a JWT would resolve
+			// to. Cluster peers dial "/" and so keep an empty (unscoped) root.
+			let root = match self.request.url() {
+				Some(url) => Path::new(&self.auth.params_from_url(url).path).to_owned(),
+				None => PathOwned::default(),
+			};
+			return Ok(AuthToken::unrestricted(root));
 		}
 
 		let params = match self.request.url() {
