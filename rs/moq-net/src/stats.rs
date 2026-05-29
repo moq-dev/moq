@@ -190,13 +190,81 @@ impl Tier {
 	}
 }
 
-/// Top-level stats aggregator. Cheap to clone (`Arc` inside). One instance per
-/// relay; sessions get tier-scoped handles via [`Stats::tier`].
+/// Settings for a [`Stats`] aggregator. Construct with [`StatsConfig::new`]
+/// (the origin is required) and chain the `with_*` setters (e.g.
+/// `StatsConfig::new(origin).with_prefix(".foo")`), then hand it to
+/// [`Stats::new`].
+///
+/// Distinct from the relay's clap-derived `StatsConfig`, which holds the raw
+/// CLI/TOML knobs and resolves into one of these.
+///
+/// `#[non_exhaustive]` so new knobs can land without breaking call sites; build
+/// via [`StatsConfig::new`] rather than a struct literal.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct StatsConfig {
+	/// Origin that receives the stats broadcast's `publish_broadcast` calls.
+	pub origin: OriginProducer,
+	/// Top-level path stats are published under (default `.stats`). The full
+	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
+	/// `node` is unset).
+	pub prefix: PathOwned,
+	/// Node suffix that disambiguates broadcasts from different relays sharing a
+	/// cluster origin. Set this on every node in multi-relay deployments. May be
+	/// multi-segment (e.g. `sjc/1`, `sjc/2`) so a region with multiple hosts can
+	/// nest under a shared region key. An empty path is treated as unset.
+	/// Default none.
+	pub node: Option<PathOwned>,
+	/// How long the snapshot task waits between publishes. Default 1s.
+	pub interval: Duration,
+	/// How many intervals an entry lingers in the emitted frame after its last
+	/// observed change, so a short reconnect window doesn't erase it. Default 1.
+	pub retention: u32,
+}
+
+impl StatsConfig {
+	/// A config publishing on `origin`, with default settings: `.stats` prefix,
+	/// 1s snapshot interval, retention 1, and no node suffix.
+	pub fn new(origin: OriginProducer) -> Self {
+		Self {
+			origin,
+			prefix: PathOwned::from(".stats"),
+			node: None,
+			interval: Duration::from_secs(1),
+			retention: 1,
+		}
+	}
+
+	/// Override the top-level prefix (default `.stats`).
+	pub fn with_prefix(mut self, prefix: impl Into<PathOwned>) -> Self {
+		self.prefix = prefix.into();
+		self
+	}
+
+	/// Override the snapshot interval (default 1s).
+	pub fn with_interval(mut self, interval: Duration) -> Self {
+		self.interval = interval;
+		self
+	}
+
+	/// Override the retention window, in intervals (default 1).
+	pub fn with_retention(mut self, retention: u32) -> Self {
+		self.retention = retention;
+		self
+	}
+
+	/// Set the node suffix (default none). An empty path is treated as unset.
+	pub fn with_node(mut self, node: impl Into<Option<PathOwned>>) -> Self {
+		self.node = node.into();
+		self
+	}
+}
+
+/// Top-level stats aggregator. Cheap to clone (`Arc` inside for the shared
+/// runtime state). One instance per relay; sessions get tier-scoped handles via
+/// [`Stats::tier`]. Build it from a [`StatsConfig`] via [`Stats::new`].
 #[derive(Clone)]
 pub struct Stats {
-	// Set-once config. These live outside the `Arc` so the by-value `with_*`
-	// builder is a plain field write, with no "already cloned" hazard that an
-	// `Arc::get_mut` builder would have.
 	prefix: PathOwned,
 	node: Option<PathOwned>,
 	interval: Duration,
@@ -313,19 +381,25 @@ const TRACK_ORDER: [&str; NUM_SLOTS] = [
 ];
 
 impl Stats {
-	/// Build a stats aggregator that publishes on `origin`, with default
-	/// settings: `.stats` prefix, 1s snapshot interval, retention 1, and no
-	/// node suffix. Chain the `with_*` setters to override before handing out
-	/// [`tier`](Self::tier) handles.
-	///
-	/// The full advertised path is `<prefix>/node/<node>` (or `<prefix>/node`
-	/// when no node is set).
-	pub fn new(origin: OriginProducer) -> Self {
+	/// Build a stats aggregator from `config`.
+	pub fn new(config: StatsConfig) -> Self {
+		let StatsConfig {
+			origin,
+			prefix,
+			node,
+			interval,
+			retention,
+		} = config;
+		// An empty path after normalization is indistinguishable from "no node
+		// set"; collapse it so downstream code only sees a single representation.
+		// We do this here (not in `with_node`) so a directly-assigned
+		// `config.node` is normalized too.
+		let node = node.filter(|p| !p.is_empty());
 		Self {
-			prefix: PathOwned::from(".stats"),
-			node: None,
-			interval: Duration::from_secs(1),
-			retention: 1,
+			prefix,
+			node,
+			interval,
+			retention,
 			enabled: true,
 			shared: Arc::new(StatsShared {
 				origin,
@@ -334,40 +408,6 @@ impl Stats {
 				tick_counter: AtomicU64::new(0),
 			}),
 		}
-	}
-
-	/// Override the top-level prefix stats are published under (default
-	/// `.stats`).
-	pub fn with_prefix(mut self, prefix: impl Into<PathOwned>) -> Self {
-		self.prefix = prefix.into();
-		self
-	}
-
-	/// Override the snapshot interval (default 1s): how long the snapshot task
-	/// waits between publishes.
-	pub fn with_interval(mut self, interval: Duration) -> Self {
-		self.interval = interval;
-		self
-	}
-
-	/// Override how many intervals an entry lingers in the emitted frame after
-	/// its last observed change (default 1), so a short reconnect window
-	/// doesn't erase the entry.
-	pub fn with_retention(mut self, retention: u32) -> Self {
-		self.retention = retention;
-		self
-	}
-
-	/// Set the node suffix that disambiguates broadcasts published by
-	/// different relays into a shared cluster origin. Set this on every node
-	/// in multi-relay deployments. The value may be multi-segment (e.g.
-	/// `sjc/1`, `sjc/2`) so a region with multiple hosts can nest under a
-	/// shared region key. An empty path (after normalization) clears it.
-	pub fn with_node(mut self, node: impl Into<Option<PathOwned>>) -> Self {
-		// An empty path after normalization is indistinguishable from "no node
-		// set"; collapse it so downstream code only sees a single representation.
-		self.node = node.into().filter(|p| !p.is_empty());
-		self
 	}
 
 	/// A no-op aggregator. Counter bumps are silently dropped and no snapshot
@@ -992,9 +1032,11 @@ mod tests {
 
 	fn test_stats(node: Option<&str>) -> (Stats, OriginProducer) {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(origin.clone())
-			.with_retention(10)
-			.with_node(node.map(|s| PathOwned::from(s.to_string())));
+		let stats = Stats::new(
+			StatsConfig::new(origin.clone())
+				.with_retention(10)
+				.with_node(node.map(|s| PathOwned::from(s.to_string()))),
+		);
 		(stats, origin)
 	}
 
@@ -1012,14 +1054,18 @@ mod tests {
 	#[test]
 	fn new_normalizes_and_drops_empty_node() {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(origin.clone())
-			.with_retention(10)
-			.with_node(PathOwned::from("/sjc//1/".to_string()));
+		let stats = Stats::new(
+			StatsConfig::new(origin.clone())
+				.with_retention(10)
+				.with_node(PathOwned::from("/sjc//1/".to_string())),
+		);
 		assert_eq!(stats.advertised().as_str(), ".stats/node/sjc/1");
 
-		let stats = Stats::new(origin)
-			.with_retention(10)
-			.with_node(PathOwned::from("///".to_string()));
+		let stats = Stats::new(
+			StatsConfig::new(origin)
+				.with_retention(10)
+				.with_node(PathOwned::from("///".to_string())),
+		);
 		assert_eq!(stats.advertised().as_str(), ".stats/node");
 	}
 
@@ -1109,7 +1155,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn task_announces_without_node_suffix() {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(origin.clone()).with_retention(10);
+		let stats = Stats::new(StatsConfig::new(origin.clone()).with_retention(10));
 		let mut consumer = origin.consume();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -1145,9 +1191,11 @@ mod tests {
 		// retention countdown starts from the tick that observes the drop,
 		// not the tick that observed the open guard.
 		let origin = Origin::random().produce();
-		let stats = Stats::new(origin)
-			.with_retention(2)
-			.with_node(PathOwned::from("sjc".to_string()));
+		let stats = Stats::new(
+			StatsConfig::new(origin)
+				.with_retention(2)
+				.with_node(PathOwned::from("sjc".to_string())),
+		);
 		let key = PathOwned::from("foo/bar".to_string());
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let track = bs.publisher().track("video");
@@ -1209,9 +1257,11 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn retention_evicts_after_window() {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(origin)
-			.with_retention(2)
-			.with_node(PathOwned::from("sjc".to_string()));
+		let stats = Stats::new(
+			StatsConfig::new(origin)
+				.with_retention(2)
+				.with_node(PathOwned::from("sjc".to_string())),
+		);
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let track = bs.publisher().track("video");
 

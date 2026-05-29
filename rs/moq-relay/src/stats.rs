@@ -84,10 +84,12 @@ impl StatsConfig {
 		let retention = self.retention.unwrap_or(1).max(1);
 		let node = self.node.clone().map(PathOwned::from);
 		tracing::info!(prefix, interval_secs = interval.as_secs(), retention, node = ?node, "stats publishing enabled");
-		Stats::new(origin)
+		// Fully qualified to disambiguate from this module's clap-derived StatsConfig.
+		let config = moq_net::StatsConfig::new(origin)
 			.with_prefix(prefix)
 			.with_interval(interval)
 			.with_retention(retention)
-			.with_node(node)
+			.with_node(node);
+		Stats::new(config)
 	}
 }
