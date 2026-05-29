@@ -2,7 +2,7 @@ use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
 	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, MAX_FRAME_SIZE, OriginProducer,
-	Path, PathOwned, Track, TrackProducer,
+	Path, PathOwned, Track, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
@@ -462,11 +462,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
-		let track = Track {
-			name: msg.track_name.to_string(),
-			priority: 0,
-		}
-		.produce();
+		let track = Track::new(msg.track_name.to_string()).produce();
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
@@ -499,9 +495,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: BroadcastDynamic) -> Result<(), Error> {
 		loop {
-			let track = tokio::select! {
-				producer = broadcast.requested_track() => match producer {
-					Ok(producer) => producer,
+			let request = tokio::select! {
+				request = broadcast.requested_track() => match request {
+					Ok(request) => request,
 					Err(err) => {
 						tracing::debug!(%err, "broadcast closed");
 						break;
@@ -515,14 +511,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let path = path.to_owned();
 			let broadcast = broadcast.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(path, broadcast, track).await;
+				this.run_subscribe(path, broadcast, request).await;
 			});
 		}
 
 		Ok(())
 	}
 
-	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, broadcast: BroadcastDynamic, mut track: TrackProducer) {
+	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, broadcast: BroadcastDynamic, request: TrackRequest) {
+		// Accept right away: IETF group data can arrive before SubscribeOk, so we
+		// need the producer in place to route it. This also unblocks the
+		// downstream subscriber's `subscribe_track`.
+		let name = request.name().to_string();
+		let mut track = match request.accept(Track::new(name)) {
+			Ok(track) => track,
+			Err(err) => {
+				tracing::debug!(%err, "failed to accept track request");
+				return;
+			}
+		};
+
 		let request_id = match self.control.next_request_id().await {
 			Ok(id) => id,
 			Err(err) => {
@@ -633,7 +641,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				request_id,
 				track_namespace: broadcast.to_owned(),
 				track_name: (&track.name).into(),
-				subscriber_priority: track.priority,
+				subscriber_priority: track.subscription().priority,
 				group_order: GroupOrder::Descending,
 				filter_type: FilterType::LargestObject,
 			})

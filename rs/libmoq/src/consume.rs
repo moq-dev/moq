@@ -47,7 +47,6 @@ impl Consume {
 
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
-		let catalog = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -56,9 +55,19 @@ impl Consume {
 		};
 		let id = self.catalog_task.insert(Some(entry))?;
 
+		// `subscribe_track` now blocks on SUBSCRIBE_OK, so run it inside the task
+		// to keep this entrypoint non-blocking.
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_catalog(id, broadcast, catalog.into()) => res,
+				res = async {
+					let catalog = broadcast
+						.subscribe_track(
+							hang::catalog::Catalog::DEFAULT_NAME,
+							hang::catalog::Catalog::default_subscription(),
+						)
+						.await?;
+					Self::run_catalog(id, broadcast.clone(), catalog.into()).await
+				} => res,
 				_ = channel.1 => Ok(()),
 			};
 
@@ -208,20 +217,15 @@ impl Consume {
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let rendition = consume
+		let name = consume
 			.catalog
 			.video
 			.renditions
 			.keys()
 			.nth(index)
-			.ok_or(Error::NoIndex)?;
-
-		let track = consume.broadcast.subscribe_track(&moq_net::Track {
-			name: rendition.clone(),
-			priority: 1, // TODO: Remove priority
-		})?;
-		let track =
-			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
+			.ok_or(Error::NoIndex)?
+			.clone();
+		let broadcast = consume.broadcast.clone();
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -230,9 +234,15 @@ impl Consume {
 		};
 		let id = self.track_task.insert(Some(entry))?;
 
+		// `subscribe_track` now blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(id, track) => res,
+				res = async {
+					let track = broadcast.subscribe_track(&name, moq_net::Subscription::new(1)).await?;
+					let track = moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy)
+						.with_latency(latency);
+					Self::run_track(id, track).await
+				} => res,
 				_ = channel.1 => Ok(()),
 			};
 
@@ -253,20 +263,15 @@ impl Consume {
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let rendition = consume
+		let name = consume
 			.catalog
 			.audio
 			.renditions
 			.keys()
 			.nth(index)
-			.ok_or(Error::NoIndex)?;
-
-		let track = consume.broadcast.subscribe_track(&moq_net::Track {
-			name: rendition.clone(),
-			priority: 2, // TODO: Remove priority
-		})?;
-		let track =
-			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
+			.ok_or(Error::NoIndex)?
+			.clone();
+		let broadcast = consume.broadcast.clone();
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -275,9 +280,15 @@ impl Consume {
 		};
 		let id = self.track_task.insert(Some(entry))?;
 
+		// `subscribe_track` now blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(id, track) => res,
+				res = async {
+					let track = broadcast.subscribe_track(&name, moq_net::Subscription::new(2)).await?;
+					let track = moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy)
+						.with_latency(latency);
+					Self::run_track(id, track).await
+				} => res,
 				_ = channel.1 => Ok(()),
 			};
 

@@ -112,7 +112,9 @@ The [hang](/concept/layer/hang) catalog describes available media tracks.
 Subscribe to it using [`CatalogConsumer`](https://docs.rs/hang/latest/hang/catalog/struct.CatalogConsumer.html):
 
 ```rust
-let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track());
+let catalog_track = broadcast
+    .subscribe_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_subscription())
+    .await?;
 let mut catalog = hang::CatalogConsumer::new(catalog_track);
 let info = catalog.next().await?.expect("no catalog");
 ```
@@ -126,7 +128,9 @@ See the full [subscribe.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/exa
 Subscribe to a media track and read frames using [`OrderedConsumer`](https://docs.rs/hang/latest/hang/container/struct.OrderedConsumer.html):
 
 ```rust
-let track_consumer = broadcast.subscribe_track(&track);
+let track_consumer = broadcast
+    .subscribe_track(&track_name, moq_net::Subscription::new(1))
+    .await?;
 let mut ordered = hang::container::OrderedConsumer::new(
     track_consumer,
     Duration::from_millis(500), // max latency before skipping groups

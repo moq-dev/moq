@@ -88,7 +88,8 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+		.subscribe_track("video", moq_native::moq_net::Subscription::default())
+		.await
 		.expect("subscribe_track failed");
 
 	// Read one group.
@@ -500,7 +501,8 @@ async fn broadcast_websocket() {
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+		.subscribe_track("video", moq_native::moq_net::Subscription::default())
+		.await
 		.expect("subscribe_track failed");
 
 	// Read one group.
@@ -607,7 +609,8 @@ async fn broadcast_websocket_fallback() {
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+		.subscribe_track("video", moq_native::moq_net::Subscription::default())
+		.await
 		.expect("subscribe_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
@@ -847,7 +850,10 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	let bc = bc.expect("expected announce");
 
 	// First subscription: receive group 0.
-	let mut sub1 = bc.subscribe_track(&Track::new("video")).expect("subscribe1");
+	let mut sub1 = bc
+		.subscribe_track("video", moq_native::moq_net::Subscription::default())
+		.await
+		.expect("subscribe1");
 	let mut g = tokio::time::timeout(TIMEOUT, sub1.recv_group())
 		.await
 		.expect("recv group 0 timeout")
@@ -871,7 +877,10 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	tokio::time::sleep(Duration::from_millis(20)).await;
 
 	// Resubscribe well inside the 5s linger window.
-	let mut sub2 = bc.subscribe_track(&Track::new("video")).expect("subscribe2");
+	let mut sub2 = bc
+		.subscribe_track("video", moq_native::moq_net::Subscription::default())
+		.await
+		.expect("subscribe2");
 
 	// A new group published after the resubscribe must reach the consumer
 	// regardless of which linger branch fired.

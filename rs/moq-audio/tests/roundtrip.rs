@@ -74,6 +74,7 @@ async fn opus_round_trip_48k_stereo() {
 			..DecoderOutput::default()
 		},
 	)
+	.await
 	.unwrap();
 
 	producer.finish().unwrap();
@@ -160,6 +161,7 @@ async fn opus_round_trip_44100_s16_resampled() {
 			latency_max: Some(Duration::from_millis(500)),
 		},
 	)
+	.await
 	.unwrap();
 	assert_eq!(consumer.sample_rate(), 44_100);
 	assert_eq!(consumer.channels(), 1);

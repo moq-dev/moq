@@ -18,6 +18,7 @@ use super::{Group, GroupConsumer, GroupProducer};
 
 use std::{
 	collections::{HashSet, VecDeque},
+	sync::{Arc, Mutex, Weak},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -26,28 +27,71 @@ use std::{
 // TODO: Replace with a configurable cache size.
 const MAX_GROUP_AGE: Duration = Duration::from_secs(5);
 
-/// A track is a collection of groups, delivered out-of-order until expired.
+/// Publisher-side properties of a track.
+///
+/// These are fixed by the publisher when the track is created and don't change
+/// while the track is alive. A subscriber learns them via
+/// [`BroadcastConsumer::subscribe_track`](crate::BroadcastConsumer::subscribe_track),
+/// which returns the publisher's [`Track`] once the subscription is accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {
 	/// Identifier within a broadcast. Unique per [`crate::Broadcast`].
 	pub name: String,
-	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
-	pub priority: u8,
 }
 
 impl Track {
-	/// Create a track with the given name and default priority (`0`).
+	/// Create a track with the given name.
 	pub fn new<T: Into<String>>(name: T) -> Self {
-		Self {
-			name: name.into(),
-			priority: 0,
-		}
+		Self { name: name.into() }
 	}
 
 	/// Consume this [`Track`] to create a producer that owns its metadata.
 	pub fn produce(self) -> TrackProducer {
 		TrackProducer::new(self)
+	}
+}
+
+/// Subscriber-side preferences for receiving a track.
+///
+/// Each subscriber holds its own [`Subscription`]; the publisher observes an
+/// aggregate across all live subscribers via [`TrackProducer::subscription`].
+/// A subscriber can change its preferences after the fact with
+/// [`TrackConsumer::update_subscription`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Subscription {
+	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
+	pub priority: u8,
+	/// Whether groups should be delivered in sequence order.
+	pub ordered: bool,
+	/// Maximum delay before a group is considered stale. `Duration::ZERO` means
+	/// no deadline (wait forever).
+	pub max_latency: Duration,
+	/// First group to deliver, or `None` to start at the latest group.
+	pub start_group: Option<u64>,
+	/// Last group to deliver (inclusive), or `None` for no end.
+	pub end_group: Option<u64>,
+}
+
+impl Default for Subscription {
+	fn default() -> Self {
+		Self {
+			priority: 0,
+			ordered: true,
+			max_latency: Duration::ZERO,
+			start_group: None,
+			end_group: None,
+		}
+	}
+}
+
+impl Subscription {
+	/// Create a subscription with the given priority and otherwise default preferences.
+	pub fn new(priority: u8) -> Self {
+		Self {
+			priority,
+			..Default::default()
+		}
 	}
 }
 
@@ -60,6 +104,10 @@ struct State {
 	max_sequence: Option<u64>,
 	final_sequence: Option<u64>,
 	abort: Option<Error>,
+	/// Live subscribers' preferences, aggregated by [`TrackProducer::subscription`].
+	/// Weak so dropped consumers don't leak across consumer churn while the
+	/// producer lingers.
+	subscriptions: Vec<Weak<Mutex<Subscription>>>,
 }
 
 impl State {
@@ -255,6 +303,60 @@ impl State {
 			Poll::Pending
 		}
 	}
+
+	/// Aggregate every live subscriber's preferences into a single [`Subscription`]
+	/// describing the most demanding request, pruning entries for dropped consumers.
+	///
+	/// The result is what an upstream relay should forward: highest priority,
+	/// ordered if anyone wants it, the tightest latency deadline, the earliest
+	/// start group, and the latest end group (unbounded wins).
+	fn aggregate_subscription(&mut self) -> Subscription {
+		self.subscriptions.retain(|s| s.strong_count() > 0);
+
+		let mut agg: Option<Subscription> = None;
+		for weak in &self.subscriptions {
+			let Some(arc) = weak.upgrade() else { continue };
+			let sub = arc.lock().unwrap().clone();
+			agg = Some(match agg {
+				None => sub,
+				Some(acc) => Subscription {
+					priority: acc.priority.max(sub.priority),
+					ordered: acc.ordered || sub.ordered,
+					max_latency: tightest_latency(acc.max_latency, sub.max_latency),
+					start_group: min_option(acc.start_group, sub.start_group),
+					end_group: max_end_group(acc.end_group, sub.end_group),
+				},
+			});
+		}
+
+		agg.unwrap_or_default()
+	}
+}
+
+/// The tighter of two latency deadlines. `Duration::ZERO` means no deadline, so
+/// any real deadline beats it; otherwise the smaller (sooner) deadline wins.
+fn tightest_latency(a: Duration, b: Duration) -> Duration {
+	match (a.is_zero(), b.is_zero()) {
+		(true, _) => b,
+		(_, true) => a,
+		_ => a.min(b),
+	}
+}
+
+/// The smaller of two optional bounds, treating `None` as "no preference".
+fn min_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+	match (a, b) {
+		(Some(a), Some(b)) => Some(a.min(b)),
+		(a, b) => a.or(b),
+	}
+}
+
+/// The later end group. `None` means unbounded, which dominates any bound.
+fn max_end_group(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+	match (a, b) {
+		(Some(a), Some(b)) => Some(a.max(b)),
+		_ => None,
+	}
 }
 
 /// A producer for a track, used to create new groups.
@@ -380,15 +482,37 @@ impl TrackProducer {
 		Ok(())
 	}
 
-	/// Create a new consumer for the track, starting at the beginning.
-	pub fn consume(&self) -> TrackConsumer {
+	/// Create a new consumer for the track with the given subscriber preferences.
+	///
+	/// The preferences feed the producer's [`Self::subscription`] aggregate and
+	/// can be changed later via [`TrackConsumer::update_subscription`].
+	pub fn consume_with(&self, subscription: Subscription) -> TrackConsumer {
+		let subscription = Arc::new(Mutex::new(subscription));
+		if let Ok(mut state) = self.state.write() {
+			state.subscriptions.push(Arc::downgrade(&subscription));
+		}
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
+			subscription,
 			index: 0,
 			min_sequence: 0,
 			next_sequence: 0,
 			end_sequence: None,
+		}
+	}
+
+	/// Create a new consumer for the track with default ([`Subscription::default`]) preferences.
+	pub fn consume(&self) -> TrackConsumer {
+		self.consume_with(Subscription::default())
+	}
+
+	/// The aggregate of every live subscriber's [`Subscription`] (most demanding
+	/// request across all consumers). Returns the default when there are none.
+	pub fn subscription(&self) -> Subscription {
+		match self.state.write() {
+			Ok(mut state) => state.aggregate_subscription(),
+			Err(_) => Subscription::default(),
 		}
 	}
 
@@ -471,10 +595,19 @@ impl TrackWeak {
 		self.state.is_closed()
 	}
 
-	pub fn consume(&self) -> TrackConsumer {
+	pub fn consume_with(&self, subscription: Subscription) -> TrackConsumer {
+		let subscription = Arc::new(Mutex::new(subscription));
+		// Register the preference if the producer is still alive so it shows up
+		// in the aggregate; otherwise the consumer will just observe close.
+		if let Some(producer) = self.state.produce()
+			&& let Ok(mut state) = producer.write()
+		{
+			state.subscriptions.push(Arc::downgrade(&subscription));
+		}
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
+			subscription,
 			index: 0,
 			min_sequence: 0,
 			next_sequence: 0,
@@ -497,6 +630,9 @@ impl TrackWeak {
 pub struct TrackConsumer {
 	info: Track,
 	state: conducer::Consumer<State>,
+	/// This subscriber's preferences, shared with the producer's aggregate.
+	/// Cloning a consumer shares the same preferences (one subscription, fanned out).
+	subscription: Arc<Mutex<Subscription>>,
 	/// Arrival-order cursor used by [`Self::recv_group`].
 	index: usize,
 	/// Minimum sequence to return from any `recv` method. Set by [`Self::start_at`].
@@ -669,6 +805,16 @@ impl TrackConsumer {
 	/// consumer's current cursor parks the consumer until the cap is raised.
 	pub fn end_at(&mut self, sequence: impl Into<Option<u64>>) {
 		self.end_sequence = sequence.into();
+	}
+
+	/// This subscriber's current preferences.
+	pub fn subscription(&self) -> Subscription {
+		self.subscription.lock().unwrap().clone()
+	}
+
+	/// Replace this subscriber's preferences, updating the producer's aggregate.
+	pub fn update_subscription(&self, subscription: Subscription) {
+		*self.subscription.lock().unwrap() = subscription;
 	}
 
 	/// Return the latest sequence number in the track.

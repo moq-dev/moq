@@ -5,7 +5,7 @@ use web_transport_trait::Stats;
 
 use crate::{
 	AnnounceConsumer, AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats,
-	Track, TrackConsumer,
+	TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -360,18 +360,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
-		let track = Track {
-			name: subscribe.track.to_string(),
+		let subscription = crate::Subscription {
 			priority: subscribe.priority,
+			ordered: subscribe.ordered,
+			max_latency: subscribe.max_latency,
+			start_group: subscribe.start_group,
+			end_group: subscribe.end_group,
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&track)?;
-
-		// TODO wait until track.info() to get the *real* priority
+		let track = broadcast.subscribe_track(&subscribe.track, subscription).await?;
 
 		let info = lite::SubscribeOk {
-			priority: track.priority,
+			priority: subscribe.priority,
 			ordered: false,
 			max_latency: std::time::Duration::ZERO,
 			start_group: None,
@@ -385,7 +386,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// tasks (so in-flight groups update via PriorityHandle::set_track). The Sender
 		// stays in run_subscribe and gets handed to run_track so the same loop that
 		// parses SUBSCRIBE_UPDATEs also fans the new priority out.
-		let (track_priority_tx, track_priority_rx) = tokio::sync::watch::channel(track.priority);
+		let (track_priority_tx, track_priority_rx) = tokio::sync::watch::channel(subscribe.priority);
 
 		let sub = Subscription {
 			session,

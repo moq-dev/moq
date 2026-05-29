@@ -160,7 +160,10 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.expect("expected announce, got unannounce");
 
-	let mut track_sub = bc.subscribe_track(&Track::new("video")).expect("subscribe_track");
+	let mut track_sub = bc
+		.subscribe_track("video", moq_native::moq_net::Subscription::default())
+		.await
+		.expect("subscribe_track");
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timeout")

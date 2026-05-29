@@ -77,10 +77,13 @@ impl Catalog {
 	}
 
 	pub fn default_track() -> moq_net::Track {
-		moq_net::Track {
-			name: Catalog::DEFAULT_NAME.to_string(),
-			priority: 100,
-		}
+		moq_net::Track::new(Catalog::DEFAULT_NAME)
+	}
+
+	/// The subscription preferences used for the catalog track (high priority so
+	/// it preempts media tracks).
+	pub fn default_subscription() -> moq_net::Subscription {
+		moq_net::Subscription::new(100)
 	}
 }
 

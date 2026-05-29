@@ -60,17 +60,14 @@ async fn main() -> anyhow::Result<()> {
 
 	tracing::info!(url = ?config.url, "connecting to server");
 
-	let track = Track {
-		name: config.track,
-		priority: 0,
-	};
+	let track = config.track;
 
 	let origin = moq_net::Origin::random().produce();
 
 	match config.role {
 		Command::Publish => {
 			let mut broadcast = moq_net::Broadcast::new().produce();
-			let track = broadcast.create_track(track)?;
+			let track = broadcast.create_track(moq_net::Track::new(track))?;
 			let clock = Publisher::new(track);
 
 			origin.publish_broadcast(&config.broadcast, broadcast.consume());
@@ -104,7 +101,9 @@ async fn main() -> anyhow::Result<()> {
 					Some(announce) = origin.next() => match announce {
 						(path, Some(broadcast)) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
-							let track = broadcast.subscribe_track(&track)?;
+							let track = broadcast
+								.subscribe_track(&track, moq_net::Subscription::default())
+								.await?;
 							clock = Some(Subscriber::new(track));
 						}
 						(path, None) => {

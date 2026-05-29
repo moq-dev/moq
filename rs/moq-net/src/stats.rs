@@ -799,10 +799,7 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 	let mut broadcast = Broadcast::new().produce();
 	let mut tracks: Vec<TrackProducer> = Vec::with_capacity(NUM_SLOTS);
 	for name in TRACK_ORDER {
-		match broadcast.create_track(Track {
-			name: name.into(),
-			priority: 0,
-		}) {
+		match broadcast.create_track(Track::new(name)) {
 			Ok(t) => tracks.push(t),
 			Err(err) => {
 				tracing::warn!(?err, name, "stats: failed to create track");
@@ -965,7 +962,7 @@ fn advertised_path(prefix: &Path, node: Option<&str>) -> PathOwned {
 mod tests {
 	use std::{collections::BTreeMap, sync::atomic::Ordering::Relaxed};
 
-	use crate::{Origin, Path};
+	use crate::{Origin, Path, Subscription};
 
 	use super::*;
 
@@ -1237,10 +1234,8 @@ mod tests {
 		let (_path, broadcast) = consumer.next().await.expect("expected announce");
 		let broadcast = broadcast.expect("active");
 		let track = broadcast
-			.subscribe_track(&Track {
-				name: "publisher.json".into(),
-				priority: 0,
-			})
+			.subscribe_track("publisher.json", Subscription::default())
+			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
@@ -1265,10 +1260,8 @@ mod tests {
 		let (_path, broadcast) = consumer.next().await.expect("announce");
 		let broadcast = broadcast.expect("active");
 		let track = broadcast
-			.subscribe_track(&Track {
-				name: "publisher.json".into(),
-				priority: 0,
-			})
+			.subscribe_track("publisher.json", Subscription::default())
+			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
@@ -1298,10 +1291,8 @@ mod tests {
 		let (_path, broadcast) = consumer.next().await.expect("announce");
 		let broadcast = broadcast.expect("active");
 		let track = broadcast
-			.subscribe_track(&Track {
-				name: "publisher.json".into(),
-				priority: 0,
-			})
+			.subscribe_track("publisher.json", Subscription::default())
+			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
@@ -1376,10 +1367,8 @@ mod tests {
 
 		// External publisher slot SHOULD include foo/bar.
 		let pub_track = broadcast
-			.subscribe_track(&Track {
-				name: "publisher.json".into(),
-				priority: 0,
-			})
+			.subscribe_track("publisher.json", Subscription::default())
+			.await
 			.expect("subscribe");
 		assert!(
 			read_frame(pub_track).await.contains_key("foo/bar"),
@@ -1390,10 +1379,8 @@ mod tests {
 		// each must be `{}`, not `{"foo/bar": {all zeros}}`.
 		for name in ["subscriber.json", "internal/publisher.json", "internal/subscriber.json"] {
 			let t = broadcast
-				.subscribe_track(&Track {
-					name: name.into(),
-					priority: 0,
-				})
+				.subscribe_track(name, Subscription::default())
+				.await
 				.expect("subscribe");
 			let frame = read_frame(t).await;
 			assert!(

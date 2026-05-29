@@ -22,14 +22,18 @@ pub enum Consumer {
 
 impl Consumer {
 	/// Subscribe to the catalog track advertised by `format`.
-	pub fn new(broadcast: &moq_net::BroadcastConsumer, format: CatalogFormat) -> Result<Self, crate::Error> {
+	pub async fn new(broadcast: &moq_net::BroadcastConsumer, format: CatalogFormat) -> Result<Self, crate::Error> {
 		Ok(match format {
 			CatalogFormat::Hang => {
-				let track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
+				let track = broadcast
+					.subscribe_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_subscription())
+					.await?;
 				Self::Hang(super::hang::Consumer::new(track))
 			}
 			CatalogFormat::Msf => {
-				let track = broadcast.subscribe_track(&moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
+				let track = broadcast
+					.subscribe_track(moq_msf::DEFAULT_NAME, moq_net::Subscription::default())
+					.await?;
 				Self::Msf(super::msf::Consumer::new(track))
 			}
 		})

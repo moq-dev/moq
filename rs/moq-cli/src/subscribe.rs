@@ -226,8 +226,8 @@ impl Subscribe {
 	}
 
 	/// Build the catalog stream from the configured filter/target flags.
-	fn stream(&self) -> anyhow::Result<catalog::Target<catalog::Filter<catalog::Consumer>>> {
-		let consumer = catalog::Consumer::new(&self.broadcast, self.catalog)?;
+	async fn stream(&self) -> anyhow::Result<catalog::Target<catalog::Filter<catalog::Consumer>>> {
+		let consumer = catalog::Consumer::new(&self.broadcast, self.catalog).await?;
 
 		let mut filter = consumer.filter();
 		filter.set_video(self.args.filter_video()?);
@@ -252,7 +252,7 @@ impl Subscribe {
 	async fn run_fmp4(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
-		let stream = self.stream()?;
+		let stream = self.stream().await?;
 		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.broadcast.clone(), stream)
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
@@ -268,7 +268,7 @@ impl Subscribe {
 	async fn run_mkv(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
-		let stream = self.stream()?;
+		let stream = self.stream().await?;
 		let mut mkv = moq_mux::container::mkv::Export::new(self.broadcast.clone(), stream)
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
@@ -284,7 +284,7 @@ impl Subscribe {
 	async fn run_h264(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
-		let stream = self.stream()?;
+		let stream = self.stream().await?;
 		let mut h264 =
 			moq_mux::codec::h264::Export::new(self.broadcast.clone(), stream).with_latency(self.args.max_latency);
 
@@ -299,7 +299,7 @@ impl Subscribe {
 	async fn run_h265(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
-		let stream = self.stream()?;
+		let stream = self.stream().await?;
 		let mut h265 =
 			moq_mux::codec::h265::Export::new(self.broadcast.clone(), stream).with_latency(self.args.max_latency);
 

@@ -239,8 +239,6 @@ impl MoqBroadcastConsumer {
 		catalog_audio: crate::media::MoqAudio,
 		output: MoqAudioDecoderOutput,
 	) -> Result<Arc<MoqAudioConsumer>, MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
-
 		let mut cfg = hang::catalog::AudioConfig::new(
 			hang::catalog::AudioCodec::Opus,
 			catalog_audio.sample_rate,
@@ -250,7 +248,9 @@ impl MoqBroadcastConsumer {
 		cfg.description = catalog_audio.description.map(Into::into);
 		cfg.container = catalog_audio.container.into();
 
-		let consumer = moq_audio::AudioConsumer::new(
+		// `subscribe_track` now blocks on SUBSCRIBE_OK; drive it on the runtime so
+		// this synchronous FFI method keeps its signature.
+		let consumer = crate::ffi::RUNTIME.block_on(moq_audio::AudioConsumer::new(
 			self.inner(),
 			&cfg,
 			name,
@@ -260,7 +260,7 @@ impl MoqBroadcastConsumer {
 				channels: output.channels,
 				latency_max: output.latency_max_ms.map(Duration::from_millis),
 			},
-		)?;
+		))?;
 
 		Ok(Arc::new(MoqAudioConsumer {
 			task: Task::new(ConsumerInner { consumer }),
