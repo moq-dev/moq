@@ -141,7 +141,7 @@
           shfmt
           actionlint
           taplo
-          nixfmt-rfc-style
+          nixfmt
         ];
 
         # Apply our overlay to get the package definitions
