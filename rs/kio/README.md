@@ -2,11 +2,11 @@
 	<img height="128px" src="https://raw.githubusercontent.com/moq-dev/moq/main/.github/logo.svg" alt="Media over QUIC">
 </p>
 
-[![Documentation](https://docs.rs/conducer/badge.svg)](https://docs.rs/conducer/)
-[![Crates.io](https://img.shields.io/crates/v/conducer.svg)](https://crates.io/crates/conducer)
+[![Documentation](https://docs.rs/kio/badge.svg)](https://docs.rs/kio/)
+[![Crates.io](https://img.shields.io/crates/v/kio.svg)](https://crates.io/crates/kio)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/moq-dev/moq/blob/main/LICENSE-MIT)
 
-# conducer
+# kio
 
 Producer/consumer shared state with async waker-based notification.
 
@@ -16,4 +16,4 @@ The channel auto-closes when all producers are dropped.
 
 It's used internally by [moq-net](https://github.com/moq-dev/moq/tree/main/rs/moq-net) and friends, but is generic enough to be useful on its own.
 
-See the [API documentation](https://docs.rs/conducer/) for details.
+See the [API documentation](https://docs.rs/kio/) for details.

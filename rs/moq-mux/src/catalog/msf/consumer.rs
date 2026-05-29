@@ -25,7 +25,7 @@ impl Consumer {
 	}
 
 	/// Poll for the next catalog update, returned as a [`hang::Catalog`].
-	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<anyhow::Result<Option<hang::Catalog>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<hang::Catalog>>> {
 		// Drain pending groups, keeping only the newest. Remember whether the track is done
 		// so we can distinguish "more groups may arrive" from "no more groups, ever".
 		let track_finished = loop {
@@ -62,7 +62,7 @@ impl Consumer {
 	/// Waits for the next MSF catalog publication and returns it converted to a
 	/// [`hang::Catalog`]. Returns `None` when the track has ended with no further updates.
 	pub async fn next(&mut self) -> anyhow::Result<Option<hang::Catalog>> {
-		conducer::wait(|waiter| self.poll_next(waiter)).await
+		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 

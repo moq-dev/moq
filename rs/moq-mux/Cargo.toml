@@ -20,9 +20,9 @@ doctest = false
 anyhow = "1"
 base64 = "0.22"
 bytes = "1"
-conducer = { workspace = true }
 h264-parser = { version = "0.4.0" }
 hang = { workspace = true }
+kio = { workspace = true }
 m3u8-rs = { version = "6" }
 moq-loc = { workspace = true }
 moq-msf = { workspace = true }

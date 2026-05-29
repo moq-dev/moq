@@ -1,11 +1,11 @@
 [package]
-name = "conducer"
+name = "kio"
 description = "Easy async"
 authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.3.7"
+version = "0.3.0"
 edition = "2024"
 rust-version.workspace = true
 
