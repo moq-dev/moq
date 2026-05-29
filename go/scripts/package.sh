@@ -105,12 +105,21 @@ for license in LICENSE-MIT LICENSE-APACHE; do
 done
 
 # --- 2. Generated uniffi-bindgen-go output ---
+# uniffi-bindgen-go emits both moq.go and a C header moq.h. moq.go's cgo
+# preamble does `#include <moq.h>`, so the header must ship alongside it or
+# consumers hit `fatal error: 'moq.h' file not found` on `go build`.
 GENERATED_GO="$BINDINGS_DIR/moq/moq.go"
+GENERATED_H="$BINDINGS_DIR/moq/moq.h"
 [[ -f "$GENERATED_GO" ]] || {
     echo "Error: uniffi-bindgen-go output not found at $GENERATED_GO" >&2
     exit 1
 }
+[[ -f "$GENERATED_H" ]] || {
+    echo "Error: generated C header not found at $GENERATED_H" >&2
+    exit 1
+}
 cp "$GENERATED_GO" "$PKG_STAGE/moq/moq.go"
+cp "$GENERATED_H" "$PKG_STAGE/moq/moq.h"
 
 # --- 3. Per-target static libraries ---
 # Entries are "<cargo-target>:<goos>_<goarch>:<libname>"; the GOOS/GOARCH

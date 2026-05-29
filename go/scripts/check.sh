@@ -87,11 +87,10 @@ echo "go check: generating bindings..."
 uniffi-bindgen-go --library "$CDYLIB" --out-dir "$STAGE_BINDINGS"
 
 # Re-shape bindings dir to match package.sh's --bindings-dir expectation
-# (which wants moq/moq.go directly). uniffi-bindgen-go emits
-# uniffi/moq/moq.go by default; flatten if so.
-if [[ -f "$STAGE_BINDINGS/uniffi/moq/moq.go" && ! -f "$STAGE_BINDINGS/moq/moq.go" ]]; then
-    mkdir -p "$STAGE_BINDINGS/moq"
-    cp "$STAGE_BINDINGS/uniffi/moq/moq.go" "$STAGE_BINDINGS/moq/moq.go"
+# (which wants moq/ directly). Some uniffi-bindgen-go versions nest under
+# uniffi/moq/; copy the whole dir so moq.h rides along with moq.go.
+if [[ -d "$STAGE_BINDINGS/uniffi/moq" && ! -d "$STAGE_BINDINGS/moq" ]]; then
+    cp -R "$STAGE_BINDINGS/uniffi/moq" "$STAGE_BINDINGS/moq"
 fi
 
 echo "go check: assembling module..."
