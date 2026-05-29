@@ -83,4 +83,58 @@ impl Publish {
 		decoder.finish().map_err(|err| Error::DecodeFailed(Arc::new(err)))?;
 		Ok(())
 	}
+
+	/// Insert or replace a video rendition in the broadcast's catalog.
+	///
+	/// The catalog is republished automatically.
+	pub fn video_config(
+		&mut self,
+		broadcast: Id,
+		name: &str,
+		config: hang::catalog::VideoConfig,
+	) -> Result<(), Error> {
+		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		catalog
+			.lock()
+			.video
+			.insert(name, config)
+			.map_err(|err| Error::Hang(err.into()))?;
+		Ok(())
+	}
+
+	/// Insert or replace an audio rendition in the broadcast's catalog.
+	///
+	/// The catalog is republished automatically.
+	pub fn audio_config(
+		&mut self,
+		broadcast: Id,
+		name: &str,
+		config: hang::catalog::AudioConfig,
+	) -> Result<(), Error> {
+		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		catalog
+			.lock()
+			.audio
+			.insert(name, config)
+			.map_err(|err| Error::Hang(err.into()))?;
+		Ok(())
+	}
+
+	/// Remove a video rendition from the broadcast's catalog by name.
+	///
+	/// The catalog is republished automatically.
+	pub fn video_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
+		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		catalog.lock().video.remove(name);
+		Ok(())
+	}
+
+	/// Remove an audio rendition from the broadcast's catalog by name.
+	///
+	/// The catalog is republished automatically.
+	pub fn audio_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
+		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		catalog.lock().audio.remove(name);
+		Ok(())
+	}
 }

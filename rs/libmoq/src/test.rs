@@ -117,6 +117,162 @@ fn publish_media_lifecycle() {
 }
 
 #[test]
+fn publish_catalog_config_invalid_broadcast() {
+	let name = "video";
+	let codec = "vp8";
+	let video = moq_video_config {
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: std::ptr::null(),
+		coded_height: std::ptr::null(),
+	};
+	assert!(unsafe { moq_publish_video_config(0, &video) } < 0);
+
+	let audio_codec = "opus";
+	let audio = moq_audio_config {
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
+		codec: audio_codec.as_ptr() as *const c_char,
+		codec_len: audio_codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 48000,
+		channel_count: 2,
+	};
+	assert!(unsafe { moq_publish_audio_config(0, &audio) } < 0);
+
+	assert!(unsafe { moq_publish_video_remove(0, name.as_ptr() as *const c_char, name.len()) } < 0);
+	assert!(unsafe { moq_publish_audio_remove(0, name.as_ptr() as *const c_char, name.len()) } < 0);
+}
+
+#[test]
+fn publish_catalog_config_null_pointer() {
+	let broadcast = id(moq_publish_create());
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, std::ptr::null()) },
+		-6,
+		"null config should return InvalidPointer (-6)"
+	);
+	assert_eq!(
+		unsafe { moq_publish_audio_config(broadcast, std::ptr::null()) },
+		-6,
+		"null config should return InvalidPointer (-6)"
+	);
+	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+#[test]
+fn publish_catalog_roundtrip() {
+	let origin = id(moq_origin_create());
+	let broadcast = id(moq_publish_create());
+
+	// Author the catalog directly instead of via moq_publish_media_ordered.
+	let video_name = "video";
+	let video_codec = "vp8";
+	let width: u32 = 1920;
+	let height: u32 = 1080;
+	let description: &[u8] = &[0x01, 0x02, 0x03];
+	let video = moq_video_config {
+		name: video_name.as_ptr() as *const c_char,
+		name_len: video_name.len(),
+		codec: video_codec.as_ptr() as *const c_char,
+		codec_len: video_codec.len(),
+		description: description.as_ptr(),
+		description_len: description.len(),
+		coded_width: &width,
+		coded_height: &height,
+	};
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
+
+	let audio_name = "audio";
+	let audio_codec = "opus";
+	let audio = moq_audio_config {
+		name: audio_name.as_ptr() as *const c_char,
+		name_len: audio_name.len(),
+		codec: audio_codec.as_ptr() as *const c_char,
+		codec_len: audio_codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 48000,
+		channel_count: 2,
+	};
+	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
+
+	// Publish and consume the broadcast to verify the catalog round-trips.
+	let path = b"catalog-producer";
+	assert_eq!(
+		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
+		0
+	);
+
+	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	// The video rendition we authored comes back through the consume API.
+	let mut video_cfg = moq_video_config {
+		name: std::ptr::null(),
+		name_len: 0,
+		codec: std::ptr::null(),
+		codec_len: 0,
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: std::ptr::null(),
+		coded_height: std::ptr::null(),
+	};
+	assert_eq!(unsafe { moq_consume_video_config(catalog_id, 0, &mut video_cfg) }, 0);
+	let codec = unsafe {
+		std::str::from_utf8(std::slice::from_raw_parts(
+			video_cfg.codec as *const u8,
+			video_cfg.codec_len,
+		))
+	}
+	.unwrap();
+	assert_eq!(codec, "vp8");
+	assert_eq!(unsafe { *video_cfg.coded_width }, 1920);
+	assert_eq!(unsafe { *video_cfg.coded_height }, 1080);
+
+	// And so does the audio rendition.
+	let mut audio_cfg = moq_audio_config {
+		name: std::ptr::null(),
+		name_len: 0,
+		codec: std::ptr::null(),
+		codec_len: 0,
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 0,
+		channel_count: 0,
+	};
+	assert_eq!(unsafe { moq_consume_audio_config(catalog_id, 0, &mut audio_cfg) }, 0);
+	assert_eq!(audio_cfg.sample_rate, 48000);
+	assert_eq!(audio_cfg.channel_count, 2);
+
+	// Removing the video rendition republishes a catalog without it.
+	assert_eq!(
+		unsafe { moq_publish_video_remove(broadcast, video_name.as_ptr() as *const c_char, video_name.len()) },
+		0
+	);
+	let catalog_id2 = id(catalog_cb.recv());
+	assert!(
+		unsafe { moq_consume_video_config(catalog_id2, 0, &mut video_cfg) } < 0,
+		"video rendition should be gone after remove"
+	);
+	assert_eq!(unsafe { moq_consume_audio_config(catalog_id2, 0, &mut audio_cfg) }, 0);
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn close_invalid_or_zero_ids() {
 	assert!(moq_origin_close(9999) < 0);
 	assert!(moq_session_close(9999) < 0);

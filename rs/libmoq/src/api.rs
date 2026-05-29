@@ -359,6 +359,118 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 	})
 }
 
+/// Add or replace a video rendition in a broadcast's catalog.
+///
+/// This is the producer counterpart to [moq_consume_video_config]: instead of
+/// reading a rendition out of a catalog, it writes one into the catalog of a
+/// broadcast created with [moq_publish_create]. The rendition is keyed by
+/// `config.name`; calling this again with the same name replaces it. The
+/// updated catalog is published to subscribers automatically.
+///
+/// The struct fields are read as inputs:
+/// - `name` / `codec` are required (NOT NULL terminated) string slices.
+/// - `description` may be NULL to omit it.
+/// - `coded_width` / `coded_height` may be NULL to omit them.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `config` points to a valid [moq_video_config].
+/// - The caller must ensure each non-NULL pointer inside `config` is valid for its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const moq_video_config) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+
+		let name = unsafe { ffi::parse_str(config.name, config.name_len)? };
+		let codec = unsafe { ffi::parse_str(config.codec, config.codec_len)? };
+		let codec = hang::catalog::VideoCodec::from_str(codec).map_err(|err| Error::Hang(err.into()))?;
+
+		let mut video = hang::catalog::VideoConfig::new(codec);
+		if !config.description.is_null() {
+			let description = unsafe { ffi::parse_slice(config.description, config.description_len)? };
+			video.description = Some(bytes::Bytes::copy_from_slice(description));
+		}
+		video.coded_width = unsafe { config.coded_width.as_ref() }.copied();
+		video.coded_height = unsafe { config.coded_height.as_ref() }.copied();
+
+		State::lock().publish.video_config(broadcast, name, video)
+	})
+}
+
+/// Add or replace an audio rendition in a broadcast's catalog.
+///
+/// This is the producer counterpart to [moq_consume_audio_config]. The rendition
+/// is keyed by `config.name`; calling this again with the same name replaces it.
+/// The updated catalog is published to subscribers automatically.
+///
+/// The struct fields are read as inputs:
+/// - `name` / `codec` are required (NOT NULL terminated) string slices.
+/// - `sample_rate` / `channel_count` are required.
+/// - `description` may be NULL to omit it.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `config` points to a valid [moq_audio_config].
+/// - The caller must ensure each non-NULL pointer inside `config` is valid for its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_audio_config(broadcast: u32, config: *const moq_audio_config) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+
+		let name = unsafe { ffi::parse_str(config.name, config.name_len)? };
+		let codec = unsafe { ffi::parse_str(config.codec, config.codec_len)? };
+		let codec = hang::catalog::AudioCodec::from_str(codec).map_err(|err| Error::Hang(err.into()))?;
+
+		let mut audio = hang::catalog::AudioConfig::new(codec, config.sample_rate, config.channel_count);
+		if !config.description.is_null() {
+			let description = unsafe { ffi::parse_slice(config.description, config.description_len)? };
+			audio.description = Some(bytes::Bytes::copy_from_slice(description));
+		}
+
+		State::lock().publish.audio_config(broadcast, name, audio)
+	})
+}
+
+/// Remove a video rendition from a broadcast's catalog by name.
+///
+/// This is a no-op if no rendition with that name exists. The updated catalog is
+/// published to subscribers automatically.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_video_remove(broadcast: u32, name: *const c_char, name_len: usize) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		State::lock().publish.video_remove(broadcast, name)
+	})
+}
+
+/// Remove an audio rendition from a broadcast's catalog by name.
+///
+/// This is a no-op if no rendition with that name exists. The updated catalog is
+/// published to subscribers automatically.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_audio_remove(broadcast: u32, name: *const c_char, name_len: usize) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		State::lock().publish.audio_remove(broadcast, name)
+	})
+}
+
 /// Create a catalog consumer for a broadcast.
 ///
 /// The callback is called with a catalog ID when a new catalog is available.
