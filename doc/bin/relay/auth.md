@@ -185,10 +185,11 @@ Set `public = ""` to make everything public (development only).
 In addition to JWT auth, the relay can authenticate peers via mutual TLS. When
 the server is configured with a trusted root CA, any client that presents a
 certificate chaining to that CA is granted **full publish and subscribe access
-within the connection URL path**, plus cluster privileges. The URL path scopes
-the grant exactly like a JWT's `root` claim, so a peer dialing `/demo` can only
-publish and subscribe under `demo/`. A peer dialing `/` (as cluster nodes do)
-gets an empty root and unscoped, cluster-wide access.
+within the connection URL path**. The URL path scopes the grant exactly like a
+JWT's `root` claim, so a peer dialing `/demo` can only publish and subscribe
+under `demo/`. A peer dialing `/` (as cluster nodes do) gets an empty root and
+unscoped, cluster-wide access. The token is also flagged as internal, which only
+selects the stats tier used for billing; it grants no extra permissions.
 
 This is primarily intended for relay-to-relay (clustering) authentication, as a
 simpler alternative to distributing long-lived JWTs.
