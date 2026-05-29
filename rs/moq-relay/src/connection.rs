@@ -103,15 +103,10 @@ impl Connection {
 	/// close the request with the mapped HTTP status exactly once.
 	///
 	/// If the client presented a valid mTLS client certificate, JWT is skipped
-	/// and full (cluster) access is granted. The cert's chain to the configured
-	/// CA is the only credential we require.
+	/// and full access is granted within the URL path's root. The cert's chain
+	/// to the configured CA is the only credential we require.
 	async fn authenticate(&self) -> Result<AuthToken, StatusError> {
-		let peer = self.request.peer_identity().map_err(|source| StatusError {
-			status: http::StatusCode::FORBIDDEN,
-			source,
-		})?;
-
-		if peer.is_some() {
+		if self.request.has_peer_certificate() {
 			tracing::debug!("mTLS peer authenticated");
 			// Scope the grant to the URL path, the same root a JWT would resolve
 			// to. Cluster peers dial "/" and so keep an empty (unscoped) root.

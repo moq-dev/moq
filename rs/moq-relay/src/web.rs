@@ -270,9 +270,9 @@ async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, 
 }
 
 /// Marker inserted as a request extension when rustls verified a client cert
-/// against the configured mTLS CA. We don't carry the cert bytes — "verified
-/// by our CA" is the entire signal we need (mirrors `PeerIdentity` on the QUIC
-/// side).
+/// against the configured mTLS CA. We don't carry the cert bytes. "Verified
+/// by our CA" is the entire signal we need (mirrors `has_peer_certificate` on
+/// the QUIC side).
 #[derive(Clone, Debug)]
 pub(crate) struct MtlsPeer;
 
