@@ -10,9 +10,9 @@
 //! | HTTP client | [`Client::subscribe`] (WHEP client) | [`Client::publish`] (WHIP client, 501) |
 //!
 //! The two HTTP-client paths and the two HTTP-server paths share a single
-//! [`session::Session`] driver and the same per-codec bridges in [`codec`];
-//! the per-direction trait split lives in [`session::MediaSink`] /
-//! [`session::MediaSource`].
+//! [`session::Session`] driver and the same per-codec adapters in [`codec`];
+//! the per-direction split lives in [`session::MediaSink`] (ingest) /
+//! [`egress::EgressSource`] (egress).
 //!
 //! ## Bitstream gotcha
 //!

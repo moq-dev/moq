@@ -16,12 +16,20 @@ or dial out to a remote WebRTC server.
 |---|---|---|---|
 | `server publish` | accept WHIP publishes | RTP into MoQ | working |
 | `client subscribe` | dial a remote WHEP URL | RTP into MoQ | working |
-| `server subscribe` | serve WHEP subscriptions | MoQ -> RTP | 501 (re-packetizer pending) |
-| `client publish` | dial a remote WHIP URL | MoQ -> RTP | 501 (re-packetizer pending) |
+| `server subscribe` | serve WHEP subscriptions | MoQ -> RTP | working |
+| `client publish` | dial a remote WHIP URL | MoQ -> RTP | working |
 
-The two ingest paths (`server publish` and `client subscribe`) work today.
-The two egress paths share a single blocker: per-codec re-packetization
-(MoQ frame -> RTP) is not implemented yet.
+All four paths work. The egress paths use str0m's Frame API to packetize
+MoQ frames back into RTP; the per-codec adapters live in `codec::Track`
+and are the same shape regardless of HTTP role.
+
+### Keyframe latency on the egress side
+
+WebRTC subscribers expect a keyframe within ~2 s of joining. If the
+upstream MoQ broadcast uses long GOPs, freshly-connected WHEP / WHIP-out
+peers see a black screen until the next natural keyframe arrives.
+`KeyframeRequest` events from the peer are logged but not propagated
+upstream; PLI-to-MoQ back-pressure is a future enhancement.
 
 AV1 / H.265 aren't in str0m 0.19's codec enum, so they're not negotiated;
 this is tracked as a follow-up. Use H.264 or VP9 for now.

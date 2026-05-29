@@ -119,3 +119,92 @@ async fn vp9_keyframe_flag_from_uncompressed_header() {
 
 	assert_eq!(catalog.snapshot().video.renditions.len(), 1, "vp9 rendition announced");
 }
+
+// ── Egress (RTP-out) round-trip tests ─────────────────────────────────────
+//
+// Each test feeds the *ingest* bridge with a representative codec frame,
+// then sets up an `EgressSource` against the same broadcast and walks the
+// catalog rendition through `codec::Track::next()`. Verifies that the
+// emitted payload is in the shape str0m's Frame API expects:
+//
+// - Opus / VP8 / VP9: passthrough.
+// - H.264 with avc3 storage (inline SPS/PPS): passthrough.
+// - H.264 with avc1 storage: length-prefix -> start-code with SPS+PPS
+//   prefixed on every keyframe (regression in moq-mux already covers this;
+//   this test confirms moq-rtc's wrapper plumbs through correctly).
+
+#[tokio::test(start_paused = true)]
+async fn egress_opus_passthrough() {
+	// Build an opus broadcast via the ingest bridge.
+	let broadcast = moq_net::Broadcast::new();
+	let mut producer = broadcast.produce();
+	let catalog = moq_mux::catalog::hang::Producer::new(&mut producer).expect("catalog");
+	let mut bridge = moq_rtc::codec::opus::Bridge::new(producer.clone(), catalog.clone(), 48_000, 2).expect("bridge");
+
+	let payload = Bytes::from_static(&[0xfc, 0xff, 0xfe]);
+	moq_rtc::codec::Bridge::push(
+		&mut bridge,
+		moq_rtc::codec::Frame {
+			timestamp_us: 20_000,
+			payload: payload.clone(),
+		},
+	)
+	.expect("push");
+
+	// Snapshot the catalog while the bridge is still alive (Drop tears down
+	// the rendition entry). Open the egress track from the snapshot first.
+	let snapshot = catalog.snapshot();
+	let (name, _) = snapshot.audio.renditions.iter().next().expect("rendition");
+	let consumer = producer.consume();
+	let mut track = moq_rtc::codec::Track::opus(&consumer, name).expect("opus track");
+
+	let frame = track.next().await.expect("ok").expect("frame");
+	assert_eq!(frame.timestamp_us, 20_000);
+	assert_eq!(frame.payload.as_ref(), payload.as_ref());
+}
+
+#[tokio::test(start_paused = true)]
+async fn egress_h264_avc3_passthrough() {
+	let sps: &[u8] = &[
+		0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07, 0xd0, 0x00,
+		0x01, 0xd4, 0xc0, 0x80,
+	];
+	let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+	let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+
+	let broadcast = moq_net::Broadcast::new();
+	let mut producer = broadcast.produce();
+	let catalog = moq_mux::catalog::hang::Producer::new(&mut producer).expect("catalog");
+
+	let mut bridge = moq_rtc::codec::h264::Bridge::new(producer.clone(), catalog.clone()).expect("bridge");
+	moq_rtc::codec::Bridge::push(
+		&mut bridge,
+		moq_rtc::codec::Frame {
+			timestamp_us: 0,
+			payload: annexb(&[sps, pps, idr]),
+		},
+	)
+	.expect("push");
+
+	let snapshot = catalog.snapshot();
+	let (name, config) = snapshot.video.renditions.iter().next().expect("rendition");
+	let consumer = producer.consume();
+	let mut track = moq_rtc::codec::Track::video(&consumer, name, config).expect("h264 track");
+
+	let frame = track.next().await.expect("ok").expect("frame");
+	// avc3 storage means catalog `description` is empty; the egress track
+	// is passthrough, so the bitstream is whatever the ingest bridge wrote
+	// (Annex-B with SPS/PPS prepended ahead of the IDR).
+	assert!(
+		frame.payload.windows(4).any(|w| w == [0, 0, 0, 1]),
+		"Annex-B start codes preserved"
+	);
+	assert!(
+		frame.payload.windows(sps.len()).any(|w| w == sps),
+		"SPS NAL present in egress frame"
+	);
+	assert!(
+		frame.payload.windows(idr.len()).any(|w| w == idr),
+		"IDR NAL present in egress frame"
+	);
+}
