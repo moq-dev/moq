@@ -40,9 +40,15 @@ impl Session {
 				res = Self::connect_run(id, url, publish, consume) => res,
 			};
 
-			// The lock is dropped before the callback is invoked.
-			if let Some(entry) = State::lock().session.task.remove(id).flatten() {
-				entry.callback.call(res);
+			// Snapshot the callback so the lock is released before invoking user code.
+			let callback = State::lock()
+				.session
+				.task
+				.remove(id)
+				.flatten()
+				.map(|entry| entry.callback);
+			if let Some(callback) = callback {
+				callback.call(res);
 			}
 		});
 
@@ -69,18 +75,24 @@ impl Session {
 
 		let mut connects = 0;
 		let mut disconnects = 0;
+		let mut connected = false;
 
+		// Connects and disconnects strictly alternate (C1, D1, C2, D2, ...). Awaiting only the
+		// transition that can legitimately come next keeps notifications in order, even when the
+		// background loop has already raced ahead by several reconnects.
 		loop {
 			tokio::select! {
 				res = reconnect.closed() => return res.map_err(|err| Error::Connect(Arc::new(err))),
-				epoch = reconnect.connected(connects) => {
+				epoch = reconnect.connected(connects), if !connected => {
 					connects = epoch;
+					connected = true;
 					// Positive status carries the connection epoch, so callers can tell a
 					// reconnect (>1) from the first connect (1).
 					Self::notify(task_id, i32::try_from(epoch).unwrap_or(i32::MAX));
 				}
-				epoch = reconnect.disconnected(disconnects) => {
+				epoch = reconnect.disconnected(disconnects), if connected => {
 					disconnects = epoch;
+					connected = false;
 					// Status 0: transiently disconnected, reconnect in progress.
 					Self::notify(task_id, 0);
 				}
