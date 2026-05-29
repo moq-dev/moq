@@ -41,13 +41,13 @@ struct Cli {
 	#[arg(long, alias = "name", env = "MOQ_RTC_BROADCAST")]
 	broadcast: String,
 
-	/// Public UDP socket address to advertise as an ICE host candidate.
-	/// Optional: when unset, the session relies on str0m discovering
-	/// peer-reflexive candidates via STUN binding requests, which is
-	/// enough for most NAT traversal scenarios. Set this only when the
-	/// gateway is behind a NAT that needs an explicit external address.
-	#[arg(long, env = "MOQ_RTC_PUBLIC_ADDR")]
-	public_addr: Option<SocketAddr>,
+	/// Public UDP socket address(es) to advertise as ICE host candidates.
+	/// Repeat the flag (or comma-separate) to advertise both an IPv4 and
+	/// an IPv6 candidate on a dual-stack deployment. When empty, the
+	/// session relies on str0m discovering peer-reflexive candidates via
+	/// STUN binding requests, which is enough for most NAT scenarios.
+	#[arg(long, env = "MOQ_RTC_PUBLIC_ADDR", value_delimiter = ',')]
+	public_addr: Vec<SocketAddr>,
 
 	#[command(subcommand)]
 	role: Role,
@@ -138,37 +138,25 @@ async fn main() -> anyhow::Result<()> {
 async fn run_role(
 	role: Role,
 	broadcast: &str,
-	public_addr: Option<SocketAddr>,
+	public_addr: Vec<SocketAddr>,
 	publisher: moq_net::OriginProducer,
 	subscriber: moq_net::OriginConsumer,
 ) -> anyhow::Result<()> {
-	let ice_candidates = public_addr.into_iter().collect::<Vec<_>>();
 	match role {
 		Role::Server {
 			listen,
 			tls_cert,
 			tls_key,
 			direction,
-		} => {
-			run_server(
-				ice_candidates,
-				publisher,
-				subscriber,
-				listen,
-				tls_cert,
-				tls_key,
-				direction,
-			)
-			.await
-		}
+		} => run_server(public_addr, publisher, subscriber, listen, tls_cert, tls_key, direction).await,
 		Role::Client { url, direction } => {
-			run_client(broadcast, ice_candidates, publisher, subscriber, url, direction).await
+			run_client(broadcast, public_addr, publisher, subscriber, url, direction).await
 		}
 	}
 }
 
 async fn run_server(
-	ice_candidates: Vec<SocketAddr>,
+	public_addr: Vec<SocketAddr>,
 	publisher: moq_net::OriginProducer,
 	subscriber: moq_net::OriginConsumer,
 	listen: SocketAddr,
@@ -176,7 +164,9 @@ async fn run_server(
 	tls_key: Option<PathBuf>,
 	direction: Direction,
 ) -> anyhow::Result<()> {
-	let config = moq_rtc::server::Config { ice_candidates };
+	let config = moq_rtc::server::Config {
+		ice_candidates: public_addr,
+	};
 	let server = Server::new(config, publisher, subscriber);
 
 	let app = match direction {
@@ -191,13 +181,15 @@ async fn run_server(
 
 async fn run_client(
 	broadcast_name: &str,
-	ice_candidates: Vec<SocketAddr>,
+	public_addr: Vec<SocketAddr>,
 	publisher: moq_net::OriginProducer,
 	subscriber: moq_net::OriginConsumer,
 	url: Url,
 	direction: Direction,
 ) -> anyhow::Result<()> {
-	let config = moq_rtc::client::Config { ice_candidates };
+	let config = moq_rtc::client::Config {
+		ice_candidates: public_addr,
+	};
 	let client = Client::new(config);
 
 	match direction {

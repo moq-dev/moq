@@ -60,11 +60,11 @@ moq-rtc --relay https://relay.example.com --broadcast my-stream \
 
 - `--relay`: upstream MoQ relay to publish to / subscribe from.
 - `--broadcast`: MoQ broadcast name this gateway binds to.
-- `--public-addr`: optional public UDP socket address to advertise as an
-  ICE host candidate. When unset, str0m discovers peer-reflexive
+- `--public-addr`: optional public UDP socket address(es) to advertise as
+  ICE host candidates. Repeat the flag (or comma-separate) for dual-stack
+  IPv4 + IPv6 deployments. When empty, str0m discovers peer-reflexive
   candidates via STUN binding requests, which works for most NAT
-  scenarios. Set this only when the gateway needs an explicit external
-  address.
+  scenarios.
 
 ### Server flags
 
