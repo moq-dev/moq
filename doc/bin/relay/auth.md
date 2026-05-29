@@ -184,9 +184,12 @@ Set `public = ""` to make everything public (development only).
 
 In addition to JWT auth, the relay can authenticate peers via mutual TLS. When
 the server is configured with a trusted root CA, any client that presents a
-certificate chaining to that CA is granted **full access**: root-scoped publish
-and subscribe permissions plus cluster privileges — equivalent to a JWT with
-`publish: ""`, `subscribe: ""`, and `cluster: true`.
+certificate chaining to that CA is granted **full publish and subscribe access
+within the connection URL path**. The URL path scopes the grant exactly like a
+JWT's `root` claim, so a peer dialing `/demo` can only publish and subscribe
+under `demo/`. A peer dialing `/` (as cluster nodes do) gets an empty root and
+unscoped, cluster-wide access. The token is also flagged as internal, which only
+selects the stats tier used for billing; it grants no extra permissions.
 
 This is primarily intended for relay-to-relay (clustering) authentication, as a
 simpler alternative to distributing long-lived JWTs.
@@ -202,10 +205,11 @@ key  = ["/etc/moq/server.key"]
 root = ["/etc/moq/peer-ca.pem"]
 ```
 
-The peer's cluster node name is taken from the **first DNS SAN** on its leaf
-certificate, so node identity is cryptographically bound to the cert.
-Certificates without a DNS SAN are still accepted but will not register as
-cluster nodes.
+The certificate is used only to authenticate the peer: the relay verifies the
+chain against the configured CA and reads nothing else from it. A node
+advertises its own identity by setting `--cluster-mesh` to its
+externally-reachable URL, which it publishes on the cluster origin for other
+peers to discover and dial.
 
 Only the `quinn` QUIC backend supports mTLS; configuring `tls.root` with any
 other backend is a startup error.

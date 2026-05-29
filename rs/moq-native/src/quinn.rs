@@ -1,8 +1,7 @@
 use crate::client::ClientConfig;
-use crate::server::{PeerIdentity, ServerConfig, ServerId, ServerTlsInfo};
+use crate::server::{ServerConfig, ServerId, ServerTlsInfo};
 use crate::tls::{FingerprintVerifier, ServeCerts};
 use anyhow::Context;
-use rustls::pki_types::CertificateDer;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::{net, time};
@@ -139,20 +138,6 @@ impl QuinnClient {
 
 		Ok(session)
 	}
-}
-
-// ── Peer identity extraction ───────────────────────────────────────
-
-fn extract_peer_identity(conn: &quinn::Connection) -> anyhow::Result<Option<PeerIdentity>> {
-	// rustls already validated the client cert chain against our configured
-	// `tls.root` during the handshake, so we just need to report whether one
-	// was presented. The caller uses that as the gate for cluster-level trust.
-	let Some(any) = conn.peer_identity() else {
-		return Ok(None);
-	};
-	any.downcast::<Vec<CertificateDer<'static>>>()
-		.map_err(|_| anyhow::anyhow!("peer identity is not a rustls certificate chain"))?;
-	Ok(Some(PeerIdentity::default()))
 }
 
 // ── Server ──────────────────────────────────────────────────────────
@@ -378,13 +363,14 @@ impl QuinnRequest {
 		}
 	}
 
-	/// Returns the peer's validated client certificate identity, if any.
-	pub fn peer_identity(&self) -> anyhow::Result<Option<PeerIdentity>> {
+	/// Whether the peer presented a client certificate that rustls validated
+	/// against the configured `tls.root` during the handshake.
+	pub fn has_peer_certificate(&self) -> bool {
 		let conn = match self {
 			QuinnRequest::Raw { connection, .. } => connection,
 			QuinnRequest::WebTransport { request, .. } => request.conn(),
 		};
-		extract_peer_identity(conn)
+		conn.peer_identity().is_some()
 	}
 
 	/// Reject the session with a status code.
