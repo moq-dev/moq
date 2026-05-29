@@ -5,8 +5,8 @@ publish:   read raw Annex-B H.264 from stdin (e.g. piped from ffmpeg) and feed
 subscribe: connect, find the video track in the catalog, and exit 0 as soon as
            any non-empty frame arrives (exit 1 on timeout / no data).
 
-    ffmpeg ... -f h264 - | python interop.py publish --url http://localhost:4443 --broadcast b.hang
-    python interop.py subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
+    ffmpeg ... -f h264 - | python smoke.py publish --url http://localhost:4443 --broadcast b.hang
+    python smoke.py subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
 """
 
 import argparse

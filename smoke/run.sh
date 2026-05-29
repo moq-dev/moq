@@ -7,8 +7,8 @@
 # implementations, not that H.264 decodes.
 set -euo pipefail
 
-REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-SMOKE_DIR="$REPO_ROOT/demo/smoke"
+SMOKE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SMOKE_DIR/.." && pwd)
 
 PUBLISHERS="rust,python"
 SUBSCRIBERS="rust,python"
@@ -156,7 +156,7 @@ start_publisher() {
             (ffmpeg_h264 | "$MOQ" publish --url "$URL" --broadcast "$broadcast" avc3) >"$log" 2>&1 &
             ;;
         python)
-            (ffmpeg_h264 | (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync python examples/interop.py \
+            (ffmpeg_h264 | (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync python examples/smoke.py \
                 publish --url "$URL" --broadcast "$broadcast")) >"$log" 2>&1 &
             ;;
         *)
@@ -179,7 +179,7 @@ run_subscriber() {
             [[ "${n:-0}" -ge 1 ]]
             ;;
         python)
-            (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync python examples/interop.py \
+            (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync python examples/smoke.py \
                 subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT")
             ;;
         *)

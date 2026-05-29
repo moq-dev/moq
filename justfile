@@ -134,6 +134,6 @@ update:
 doc:
     cd doc && bun run dev
 
-# Cross-language media interop smoke test (see demo/smoke).
+# Cross-language media interop smoke test (see smoke/).
 smoke *args:
-    demo/smoke/run.sh {{ args }}
+    smoke/run.sh {{ args }}
