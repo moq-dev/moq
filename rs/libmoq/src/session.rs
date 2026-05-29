@@ -66,36 +66,28 @@ impl Session {
 		publish: Option<moq_net::OriginConsumer>,
 		consume: Option<moq_net::OriginProducer>,
 	) -> Result<(), Error> {
-		let reconnect = moq_native::ClientConfig::default()
+		let mut reconnect = moq_native::ClientConfig::default()
 			.init()
 			.map_err(|err| Error::Connect(Arc::new(err)))?
 			.with_publish(publish)
 			.with_consume(consume)
 			.reconnect(url);
 
-		let mut connects = 0;
-		let mut disconnects = 0;
-		let mut connected = false;
-
-		// Connects and disconnects strictly alternate (C1, D1, C2, D2, ...). Awaiting only the
-		// transition that can legitimately come next keeps notifications in order, even when the
-		// background loop has already raced ahead by several reconnects.
+		// status() returns transitions in order and Err on terminal give-up, so the ? both ends
+		// the loop and propagates the negative status code.
+		let mut connects: u64 = 0;
 		loop {
-			tokio::select! {
-				res = reconnect.closed() => return res.map_err(|err| Error::Connect(Arc::new(err))),
-				epoch = reconnect.connected(connects), if !connected => {
-					connects = epoch;
-					connected = true;
+			match reconnect.status().await.map_err(|err| Error::Connect(Arc::new(err)))? {
+				moq_native::Status::Connected => {
+					connects += 1;
 					// Positive status carries the connection epoch, so callers can tell a
 					// reconnect (>1) from the first connect (1).
-					Self::notify(task_id, i32::try_from(epoch).unwrap_or(i32::MAX));
+					let code = i32::try_from(connects)
+						.map_err(|_| Error::Connect(Arc::new(anyhow::anyhow!("connection epoch exceeded i32::MAX"))))?;
+					Self::notify(task_id, code);
 				}
-				epoch = reconnect.disconnected(disconnects), if connected => {
-					disconnects = epoch;
-					connected = false;
-					// Status 0: transiently disconnected, reconnect in progress.
-					Self::notify(task_id, 0);
-				}
+				// Status 0: transiently disconnected, reconnect in progress.
+				moq_native::Status::Disconnected => Self::notify(task_id, 0),
 			}
 		}
 	}
