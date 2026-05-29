@@ -29,11 +29,14 @@ async def publish(url: str, broadcast: str) -> None:
 
         loop = asyncio.get_running_loop()
         stdin = sys.stdin.buffer
+        # read1 returns as soon as any bytes are available (read() would block
+        # for a full chunk and batch up ffmpeg's real-time output). getattr both
+        # keeps pyright happy (BinaryIO doesn't declare read1) and falls back if
+        # the stream lacks it.
+        read = getattr(stdin, "read1", stdin.read)
         while True:
-            # read1 returns as soon as any bytes are available (read() would
-            # block for a full chunk and batch up ffmpeg's real-time output).
-            # Run off the event loop so the client keeps flushing.
-            chunk = await loop.run_in_executor(None, stdin.read1, READ_CHUNK)
+            # Blocking read off the event loop so the client keeps flushing.
+            chunk = await loop.run_in_executor(None, read, READ_CHUNK)
             if not chunk:
                 break
             media.write(chunk)
