@@ -37,7 +37,7 @@ impl Session {
 		tokio::spawn(async move {
 			let res = tokio::select! {
 				_ = closed.1 => Err(Error::Closed),
-				res = Self::connect_run(id, url, publish, consume) => res,
+				res = Self::connect_run(url, publish, consume) => res,
 			};
 
 			// The lock is dropped before the callback is invoked.
@@ -49,30 +49,26 @@ impl Session {
 		Ok(id)
 	}
 
+	/// Connect and stay connected, reconnecting with exponential backoff if the session drops.
+	///
+	/// Returns only when reconnection permanently gives up (the backoff timeout is exceeded),
+	/// propagating the last connection error.
 	async fn connect_run(
-		task_id: Id,
 		url: Url,
 		publish: Option<moq_net::OriginConsumer>,
 		consume: Option<moq_net::OriginProducer>,
 	) -> Result<(), Error> {
 		let client = moq_native::ClientConfig::default()
 			.init()
-			.map_err(|err| Error::Connect(Arc::new(err)))?;
-
-		let session = client
+			.map_err(|err| Error::Connect(Arc::new(err)))?
 			.with_publish(publish)
-			.with_consume(consume)
-			.connect(url)
+			.with_consume(consume);
+
+		client
+			.reconnect(url)
+			.closed()
 			.await
-			.map_err(|err| Error::Connect(Arc::new(err)))?;
-
-		// "Connected" callback — copy from slab if not revoked.
-		if let Some(Some(entry)) = State::lock().session.task.get(task_id) {
-			entry.callback.call(());
-		}
-
-		session.closed().await?;
-		Ok(())
+			.map_err(|err| Error::Connect(Arc::new(err)))
 	}
 
 	pub fn close(&mut self, id: Id) -> Result<(), Error> {
