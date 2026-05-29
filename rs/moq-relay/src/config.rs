@@ -130,7 +130,8 @@ mod tests {
 		let toml = r#"
 [stats]
 enabled = true
-levels = 3
+interval = 5
+retention = 20
 node = "localhost"
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
@@ -148,7 +149,11 @@ node = "localhost"
 			 (any new bare-bool field on a flatten-derived config will have the same bug; \
 			 type it as Option<bool>)"
 		);
-		assert_eq!(config.stats.levels, Some(3));
+		// New `interval` / `retention` flags must survive the CLI re-parse
+		// the same way. They're typed as `Option<u64>` / `Option<u32>`
+		// rather than bare numeric types for exactly this reason.
+		assert_eq!(config.stats.interval, Some(5));
+		assert_eq!(config.stats.retention, Some(20));
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
 	}
 

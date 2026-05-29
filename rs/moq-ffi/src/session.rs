@@ -145,4 +145,14 @@ impl MoqSession {
 		// NOTE: we don't abort the closed Task because it will be aborted via above ^
 		// We'll get a slightly better error message instead of Cancelled.
 	}
+
+	/// Graceful shutdown. Equivalent to `cancel(0)`. Documents the
+	/// convention that code 0 means "no error" so callers don't have to
+	/// pick one. Named `shutdown` (not `close`) because UniFFI's Kotlin
+	/// generator already emits an `AutoCloseable.close()` that releases
+	/// the FFI handle, and shadowing it would silently mean a different
+	/// thing per binding.
+	pub fn shutdown(&self) {
+		self.cancel(0);
+	}
 }

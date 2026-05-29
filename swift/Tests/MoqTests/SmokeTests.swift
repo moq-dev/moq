@@ -1,7 +1,6 @@
 import Foundation
 import XCTest
 @testable import Moq
-import MoqFFI
 
 final class SmokeTests: XCTestCase {
     /// Verifies the native lib loads and the wrapper compiles against

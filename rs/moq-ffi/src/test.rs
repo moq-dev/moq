@@ -452,10 +452,11 @@ async fn server_client_roundtrip() {
 	assert_eq!(frame.payload, payload);
 	assert_eq!(frame.timestamp_us, 1_000_000);
 
-	// Clean up.
+	// Clean up. Exercise `shutdown()` on the client side and the underlying
+	// `cancel(code)` on the server side, so both shutdown paths run.
 	media.finish().unwrap();
 	broadcast.finish().unwrap();
-	session.cancel(0);
+	session.shutdown();
 	server_session.cancel(0);
 	server.cancel();
 }

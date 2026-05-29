@@ -49,9 +49,16 @@ The package depends on a prebuilt `MoqFFI.xcframework` attached to the matching 
 ```swift
 import Moq
 
-let session = try await Moq.connect(url: "https://relay.example.com")
+// Wire an origin as both publish source and consume sink. Set just one
+// side for a subscribe-only or publish-only client.
+let origin = MoqOriginProducer()
+let client = MoqClient()
+client.setPublish(origin: origin)
+client.setConsume(origin: origin)
 
-let consumer = MoqOriginProducer().consume()
+let session = try await client.connect(url: "https://relay.example.com")
+
+let consumer = origin.consume()
 let announced = try consumer.announced(prefix: "demos/")
 for try await announcement in announced.announcements {
     print("got broadcast \(announcement.path())")
@@ -61,6 +68,8 @@ for try await announcement in announced.announcements {
         print("catalog: \(update)")
     }
 }
+
+session.shutdown()
 ```
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer.

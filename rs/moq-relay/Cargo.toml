@@ -64,4 +64,5 @@ sd-notify = "0.5"
 [dev-dependencies]
 rcgen = "0.13"
 tempfile = "3"
+web-transport-trait = { workspace = true }
 wiremock = "0.6"
