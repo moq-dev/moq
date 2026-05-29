@@ -43,7 +43,7 @@ async def publish(url: str, broadcast: str) -> None:
         media.finish()
 
 
-async def _catalog_with_video(consumer):
+async def _catalog_with_video(consumer: moq.BroadcastConsumer) -> moq.Catalog:
     # The catalog is a live track. A lazy publisher (e.g. the browser, which only
     # encodes on demand) may announce video in a *later* update, not the first
     # snapshot, so wait for a catalog that actually has a video track.
