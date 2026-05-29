@@ -99,11 +99,11 @@ impl Reconnect {
 			tracing::info!(%url, "connecting");
 
 			match client.connect(url.clone()).await {
-				Ok(session) => {
+				Ok(cs) => {
 					tracing::info!(%url, "connected");
 					delay = backoff.initial;
 					last_error = None;
-					let _ = session.closed().await;
+					let _ = cs.session.closed().await;
 					tracing::warn!(%url, "session closed, reconnecting");
 					retry_start = tokio::time::Instant::now();
 				}

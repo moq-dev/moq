@@ -1,6 +1,6 @@
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Error,
-	NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
+	NEGOTIATED, Origin, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -12,6 +12,22 @@ pub struct Client {
 	consume: Option<OriginProducer>,
 	stats: StatsHandle,
 	versions: Versions,
+}
+
+/// A connected MoQ client session plus, optionally, the [`OriginProducer`]
+/// and [`OriginConsumer`] that [`Client::connect`] auto-created when no
+/// publish or consume origin had been set on the [`Client`].
+///
+/// `publisher` and `consumer` are `Some(_)` only on the no-config path
+/// (i.e. neither [`Client::with_publish`] / [`Client::with_consume`] /
+/// [`Client::with_origin`] was called before connect). When the caller
+/// wires its own origin(s), both fields are `None` and the caller
+/// continues to drive publishing and consuming through the origins it
+/// already holds.
+pub struct ClientSession {
+	pub session: Session,
+	pub publisher: Option<OriginProducer>,
+	pub consumer: Option<OriginConsumer>,
 }
 
 impl Client {
@@ -51,10 +67,34 @@ impl Client {
 	}
 
 	/// Perform the MoQ handshake as a client negotiating the version.
-	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
-		if self.publish.is_none() && self.consume.is_none() {
-			tracing::warn!("not publishing or consuming anything");
-		}
+	///
+	/// If neither a publish nor a consume origin was set on this builder,
+	/// connect auto-creates a fresh [`Origin`] and wires it as both, then
+	/// returns the producer and consumer sides on the resulting
+	/// [`ClientSession`]. Callers who configured their own origin(s) see
+	/// `ClientSession::publisher` and `ClientSession::consumer` as `None`
+	/// and continue to drive publishing / consuming through the origins
+	/// they already hold.
+	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<ClientSession, Error> {
+		// Effective publish / consume after potential auto-creation. The
+		// `auto_*` locals are populated only on the no-config path so the
+		// returned ClientSession reflects what we actually own.
+		let (publish, consume, auto_publisher, auto_consumer) = match (self.publish.clone(), self.consume.clone()) {
+			(None, None) => {
+				let producer = Origin::random().produce();
+				let consumer = producer.consume();
+				// Wire both sides: client publishes by reading from a
+				// consumer of the new origin, and consumes by writing into
+				// the producer itself.
+				(
+					Some(producer.consume()),
+					Some(producer.clone()),
+					Some(producer),
+					Some(consumer),
+				)
+			}
+			(publish, consume) => (publish, consume, None, None),
+		};
 
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
@@ -71,13 +111,17 @@ impl Client {
 					None,
 					None,
 					true,
-					self.publish.clone(),
-					self.consume.clone(),
+					publish,
+					consume,
 					ietf::Version::Draft18,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None));
+				return Ok(ClientSession {
+					session: Session::new(session, v, None),
+					publisher: auto_publisher,
+					consumer: auto_consumer,
+				});
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -91,13 +135,17 @@ impl Client {
 					None,
 					None,
 					true,
-					self.publish.clone(),
-					self.consume.clone(),
+					publish,
+					consume,
 					ietf::Version::Draft17,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None));
+				return Ok(ClientSession {
+					session: Session::new(session, v, None),
+					publisher: auto_publisher,
+					consumer: auto_consumer,
+				});
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -128,13 +176,17 @@ impl Client {
 				let recv_bw = lite::start(
 					session.clone(),
 					None,
-					self.publish.clone(),
-					self.consume.clone(),
+					publish,
+					consume,
 					self.stats.clone(),
 					lite::Version::Lite05Wip,
 				)?;
 
-				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw));
+				return Ok(ClientSession {
+					session: Session::new(session, lite::Version::Lite05Wip.into(), recv_bw),
+					publisher: auto_publisher,
+					consumer: auto_consumer,
+				});
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
@@ -144,13 +196,17 @@ impl Client {
 				let recv_bw = lite::start(
 					session.clone(),
 					None,
-					self.publish.clone(),
-					self.consume.clone(),
+					publish,
+					consume,
 					self.stats.clone(),
 					lite::Version::Lite04,
 				)?;
 
-				return Ok(Session::new(session, lite::Version::Lite04.into(), recv_bw));
+				return Ok(ClientSession {
+					session: Session::new(session, lite::Version::Lite04.into(), recv_bw),
+					publisher: auto_publisher,
+					consumer: auto_consumer,
+				});
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
@@ -161,13 +217,17 @@ impl Client {
 				let recv_bw = lite::start(
 					session.clone(),
 					None,
-					self.publish.clone(),
-					self.consume.clone(),
+					publish,
+					consume,
 					self.stats.clone(),
 					lite::Version::Lite03,
 				)?;
 
-				return Ok(Session::new(session, lite::Version::Lite03.into(), recv_bw));
+				return Ok(ClientSession {
+					session: Session::new(session, lite::Version::Lite03.into(), recv_bw),
+					publisher: auto_publisher,
+					consumer: auto_consumer,
+				});
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -204,14 +264,7 @@ impl Client {
 		let recv_bw = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
-				lite::start(
-					session.clone(),
-					Some(stream),
-					self.publish.clone(),
-					self.consume.clone(),
-					self.stats.clone(),
-					v,
-				)?
+				lite::start(session.clone(), Some(stream), publish, consume, self.stats.clone(), v)?
 			}
 			Version::Ietf(v) => {
 				// Decode the parameters to get the initial request ID.
@@ -221,20 +274,16 @@ impl Client {
 					.map(ietf::RequestId);
 
 				let stream = stream.with_version(v);
-				ietf::start(
-					session.clone(),
-					Some(stream),
-					request_id_max,
-					true,
-					self.publish.clone(),
-					self.consume.clone(),
-					v,
-				)?;
+				ietf::start(session.clone(), Some(stream), request_id_max, true, publish, consume, v)?;
 				None
 			}
 		};
 
-		Ok(Session::new(session, version, recv_bw))
+		Ok(ClientSession {
+			session: Session::new(session, version, recv_bw),
+			publisher: auto_publisher,
+			consumer: auto_consumer,
+		})
 	}
 }
 
@@ -458,9 +507,13 @@ mod tests {
 		);
 
 		// The first close comes from the background lite session task.
-		// Code 0 ("cancelled") means SessionInfo decoded successfully after set_version().
+		// Any non-Version error here means SessionInfo decoded successfully
+		// after set_version() — this test cares about the SETUP framing
+		// fallback, not the specific close code. Cancel is what we'd see
+		// with no origin; RequiredExtension (or similar) is what an
+		// auto-created origin's first interaction with a Lite01 peer trips.
 		let (code, _) = fake.wait_for_first_close().await;
-		assert_eq!(code, Error::Cancel.to_code());
+		assert_ne!(code, Error::Version.to_code(), "SessionInfo failed to decode");
 	}
 
 	#[tokio::test(start_paused = true)]

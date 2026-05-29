@@ -691,14 +691,18 @@ async fn broadcast_websocket_uses_newest_version() {
 	});
 
 	let client = client.with_consume(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	assert_eq!(session.version(), expected_version, "client negotiated stale version");
+	assert_eq!(
+		cs.session.version(),
+		expected_version,
+		"client negotiated stale version"
+	);
 
-	drop(session);
+	drop(cs);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -767,14 +771,18 @@ async fn broadcast_race_quic_wins() {
 	});
 
 	let client = client.with_consume(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	assert_eq!(session.version(), expected_version, "client negotiated stale version");
+	assert_eq!(
+		cs.session.version(),
+		expected_version,
+		"client negotiated stale version"
+	);
 
-	drop(session);
+	drop(cs);
 	server_handle
 		.await
 		.expect("server task panicked")

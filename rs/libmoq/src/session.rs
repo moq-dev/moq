@@ -59,7 +59,7 @@ impl Session {
 			.init()
 			.map_err(|err| Error::Connect(Arc::new(err)))?;
 
-		let session = client
+		let cs = client
 			.with_publish(publish)
 			.with_consume(consume)
 			.connect(url)
@@ -71,7 +71,10 @@ impl Session {
 			entry.callback.call(());
 		}
 
-		session.closed().await?;
+		// libmoq users wire their own origin via the explicit `publish`/
+		// `consume` params, so `cs.publisher` / `cs.consumer` are always
+		// None here; the relevant handle is just the session.
+		cs.session.closed().await?;
 		Ok(())
 	}
 

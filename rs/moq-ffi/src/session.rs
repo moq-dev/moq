@@ -24,14 +24,17 @@ impl Client {
 		let publish = self.publish.as_ref().map(|o| o.inner().consume());
 		let consume = self.consume.as_ref().map(|o| o.inner().clone());
 
-		let session = client
+		let cs = client
 			.with_publish(publish)
 			.with_consume(consume)
 			.connect(url)
 			.await
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
-		Ok(Arc::new(MoqSession::new(session)))
+		// FFI users wire their own origin via setPublish/setConsume above,
+		// so the auto-created origin sides on the ClientSession are always
+		// None here. Discard them and keep just the session.
+		Ok(Arc::new(MoqSession::new(cs.session)))
 	}
 }
 

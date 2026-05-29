@@ -444,7 +444,7 @@ impl Cluster {
 			.context("internal: cluster peer dial without an attached QUIC client")?;
 
 		// Cluster-to-cluster traffic is internal by definition.
-		let session = client
+		let cs = client
 			.with_publish(self.origin.consume())
 			.with_consume(self.origin.clone())
 			.with_stats(self.stats.tier(Tier::Internal))
@@ -452,7 +452,7 @@ impl Cluster {
 			.await
 			.context("failed to connect to cluster peer")?;
 
-		session.closed().await.map_err(Into::into)
+		cs.session.closed().await.map_err(Into::into)
 	}
 }
 
