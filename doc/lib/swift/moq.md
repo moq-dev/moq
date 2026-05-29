@@ -33,16 +33,11 @@ Supported platforms: iOS 15+, iPadOS 15+, macOS 12+. The package ships an XCFram
 ```swift
 import Moq
 
-// Wire an origin as both publish source and consume sink for the
-// typical full-duplex client. Set just one side for a subscribe-only
-// or publish-only client.
-let origin = MoqOriginProducer()
 let client = MoqClient()
-client.setPublish(origin: origin)
-client.setConsume(origin: origin)
-
-let session = try await client.connect(url: "https://relay.example.com")
+let cs = try await client.connect(url: "https://relay.example.com")
 ```
+
+`MoqClient.connect(url:)` returns a `MoqClientSession` that bundles the session with auto-created publish and consume origin sides. The convenience accessors `cs.publisher()` and `cs.consumer()` return those origins (or `nil` if you wired your own via `setPublish` / `setConsume` before connect).
 
 For development against a relay with a self-signed certificate, configure the client before connecting:
 
@@ -50,21 +45,19 @@ For development against a relay with a self-signed certificate, configure the cl
 let client = MoqClient()
 client.setTlsDisableVerify(disable: true)
 try client.setBind(addr: "127.0.0.1:0")
-client.setPublish(origin: origin)
-client.setConsume(origin: origin)
-let session = try await client.connect(url: "https://localhost:4443")
+let cs = try await client.connect(url: "https://localhost:4443")
 ```
 
 When you're done, signal graceful shutdown to the peer:
 
 ```swift
-session.shutdown()  // alias for cancel(code: 0)
+cs.session().shutdown()  // alias for cancel(code: 0)
 ```
 
 ## Subscribe
 
 ```swift
-let consumer = origin.consume()
+let consumer = cs.consumer()!
 let announced = try consumer.announced(prefix: "demos/")
 
 for try await announcement in announced.announcements {
@@ -81,7 +74,7 @@ for try await announcement in announced.announcements {
 let broadcast = try MoqBroadcastProducer()
 let audio = try broadcast.publishMedia(format: "opus", init: opusInitBytes)
 
-try origin.publish(path: "my-stream", broadcast: broadcast)
+try cs.publisher()!.addBroadcast(path: "my-stream", broadcast: broadcast)
 
 try audio.writeFrame(payload: payload, timestampUs: 0)
 try audio.writeFrame(payload: payload, timestampUs: 20_000)

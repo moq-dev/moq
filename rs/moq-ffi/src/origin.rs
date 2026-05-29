@@ -72,6 +72,18 @@ impl MoqOriginProducer {
 	pub(crate) fn inner(&self) -> &moq_net::OriginProducer {
 		&self.inner
 	}
+
+	/// Wrap an existing `moq_net::OriginProducer` (e.g. one auto-created
+	/// during `MoqClient::connect`) so it can cross the FFI boundary.
+	pub(crate) fn from_inner(inner: moq_net::OriginProducer) -> Self {
+		Self { inner }
+	}
+}
+
+impl MoqOriginConsumer {
+	pub(crate) fn from_inner(inner: moq_net::OriginConsumer) -> Self {
+		Self { inner }
+	}
 }
 
 #[uniffi::export]
@@ -93,8 +105,11 @@ impl MoqOriginProducer {
 		})
 	}
 
-	/// Publish a broadcast to this origin under the given path.
-	pub fn publish(&self, path: String, broadcast: &MoqBroadcastProducer) -> Result<(), MoqError> {
+	/// Add a broadcast to this origin under the given path so subscribers
+	/// can discover it. Named `add_broadcast` (not `publish`) so the
+	/// `MoqClientSession::publisher().add_broadcast(...)` chain doesn't
+	/// stutter "publisher.publish".
+	pub fn add_broadcast(&self, path: String, broadcast: &MoqBroadcastProducer) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let consumer = broadcast.consume_inner()?;
 		if !self.inner.publish_broadcast(path.as_str(), consumer) {

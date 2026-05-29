@@ -17,17 +17,16 @@ The mirror repo is updated by [`swift/scripts/publish.sh`](scripts/publish.sh) o
 ```swift
 import Moq
 
-// Wire an origin as both publish source and consume sink. The typical
-// full-duplex client; for a subscribe-only or publish-only client, just
-// set one side.
-let origin = MoqOriginProducer()
 let client = MoqClient()
-client.setPublish(origin: origin)
-client.setConsume(origin: origin)
+let cs = try await client.connect(url: "https://relay.example.com")
 
-let session = try await client.connect(url: "https://relay.example.com")
-
-let consumer = origin.consume()
+// The auto-created origin sides on the returned MoqClientSession let you
+// publish broadcasts and read announcements without ever constructing a
+// MoqOriginProducer yourself. For subscribe-only / publish-only / split
+// origins, call setPublish / setConsume on the client before connect and
+// drive those origins manually (cs.publisher() and cs.consumer() return
+// nil in that case).
+let consumer = cs.consumer()!
 let announced = try consumer.announced(prefix: "demos/")
 for try await announcement in announced.announcements {
     print("got broadcast \(announcement.path())")
@@ -38,10 +37,19 @@ for try await announcement in announced.announcements {
     }
 }
 
-session.shutdown()
+cs.session().shutdown()
 ```
 
-Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` is an alias for `cancel(code: 0)` that documents the convention that code 0 means "no error".
+Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `cs.session().shutdown()` is an alias for `cancel(code: 0)` that documents the convention that code 0 means "no error".
+
+To publish a broadcast through the auto-created origin:
+
+```swift
+let pub = cs.publisher()!
+let broadcast = try MoqBroadcastProducer()
+// ... configure tracks on broadcast ...
+try pub.addBroadcast(path: "my-stream", broadcast: broadcast)
+```
 
 A note on enum casing: UniFFI keeps Rust's casing for error variants (every `MoqError` case is PascalCase and carries `message: String`, e.g. `MoqError.Closed(message: "...")`), but plain enums round-trip to lowerCamelCase (`MoqAudioFormat.s16`, `MoqAudioCodec.opus`).
 

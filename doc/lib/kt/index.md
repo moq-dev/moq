@@ -39,30 +39,25 @@ Published to Maven Central via [release-kt.yml](https://github.com/moq-dev/moq/b
 import dev.moq.*
 import kotlinx.coroutines.flow.collect
 import uniffi.moq.MoqClient
-import uniffi.moq.MoqOriginProducer
 
-// Wire an origin as both publish source and consume sink. Set just one
-// side for a subscribe-only or publish-only client.
-val origin = MoqOriginProducer()
 val client = MoqClient()
-client.setPublish(origin)
-client.setConsume(origin)
+val cs = client.connect("https://relay.example.com")
 
-val session = client.connect("https://relay.example.com")
+// `cs.consumer()` returns the auto-created origin consumer for reading
+// announcements; `cs.publisher()` returns the producer side for publishing
+// broadcasts. Both are null if you set publish / consume manually before
+// connect (subscribe-only, publish-only, or custom split-origin cases).
+val consumer = cs.consumer()!!
+val announced = consumer.announced("demos/")
+announced.announcements().collect { announcement ->
+    println("got broadcast ${announcement.path()}")
 
-origin.use {
-    val consumer = origin.consume()
-    val announced = consumer.announced("demos/")
-    announced.announcements().collect { announcement ->
-        println("got broadcast ${announcement.path()}")
-
-        announcement.broadcast().subscribeCatalog().updates().collect { catalog ->
-            println("catalog: $catalog")
-        }
+    announcement.broadcast().subscribeCatalog().updates().collect { catalog ->
+        println("catalog: $catalog")
     }
 }
 
-session.shutdown()
+cs.session().shutdown()
 ```
 
 Cancelling the surrounding coroutine scope propagates through to the native consumer's `cancel()` via the wrapper's `onCompletion` hook.
