@@ -38,6 +38,12 @@ pub struct Consume {
 
 	/// Buffered frames ready for consumption.
 	frame: NonZeroSlab<moq_mux::container::Frame>,
+
+	/// Raw track consumer tasks (no media/container framing).
+	raw_task: NonZeroSlab<Option<TaskEntry>>,
+
+	/// Buffered raw frames ready for consumption.
+	raw_frame: NonZeroSlab<bytes::Bytes>,
 }
 
 impl Consume {
@@ -348,6 +354,95 @@ impl Consume {
 
 	pub fn close(&mut self, consume: Id) -> Result<(), Error> {
 		self.broadcast.remove(consume).ok_or(Error::BroadcastNotFound)?;
+		Ok(())
+	}
+
+	/// Subscribe to a raw track by name, delivering each frame's payload as-is.
+	///
+	/// No catalog lookup or container parsing. This is the moq-net primitive for
+	/// non-media tracks. `on_frame` is called with a raw frame ID for each frame,
+	/// in arrival order. Frames must be released with [`Self::raw_frame_close`].
+	pub fn raw_track(&mut self, broadcast: Id, name: &str, on_frame: OnStatus) -> Result<Id, Error> {
+		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let track = broadcast.subscribe_track(&moq_net::Track {
+			name: name.to_string(),
+			priority: 0,
+		})?;
+
+		let channel = oneshot::channel();
+		let entry = TaskEntry {
+			close: channel.0,
+			callback: on_frame,
+		};
+		let id = self.raw_task.insert(Some(entry))?;
+
+		tokio::spawn(async move {
+			let res = tokio::select! {
+				res = Self::run_raw(id, track) => res,
+				_ = channel.1 => Ok(()),
+			};
+
+			// The lock is dropped before the callback is invoked.
+			if let Some(entry) = State::lock().consume.raw_task.remove(id).flatten() {
+				entry.callback.call(res);
+			}
+		});
+
+		Ok(id)
+	}
+
+	async fn run_raw(task_id: Id, mut track: moq_net::TrackConsumer) -> Result<(), Error> {
+		// Deliver every frame in sequence order, reading all frames within each
+		// group rather than the one-frame-per-group convenience. This is the
+		// "raw track contents" model: the consumer sees exactly what the
+		// producer wrote, regardless of how it was grouped.
+		while let Some(mut group) = track.next_group().await? {
+			while let Some(payload) = group.read_frame().await? {
+				let mut state = State::lock();
+
+				// Stop if the callback was revoked by close.
+				let Some(Some(entry)) = state.consume.raw_task.get(task_id) else {
+					return Ok(());
+				};
+				let callback = entry.callback;
+
+				let frame_id = state.consume.raw_frame.insert(payload)?;
+				drop(state);
+
+				// The lock is dropped before the callback is invoked.
+				callback.call(Ok(frame_id));
+			}
+		}
+
+		Ok(())
+	}
+
+	pub fn raw_track_close(&mut self, track: Id) -> Result<(), Error> {
+		self.raw_task
+			.get_mut(track)
+			.ok_or(Error::TrackNotFound)?
+			.take()
+			.ok_or(Error::TrackNotFound)?;
+		Ok(())
+	}
+
+	/// Fill `dst` with a raw frame's payload. The pointer is valid until the
+	/// frame is released with [`Self::raw_frame_close`].
+	pub fn raw_frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
+		let payload = self.raw_frame.get(frame).ok_or(Error::FrameNotFound)?;
+
+		*dst = moq_frame {
+			payload: payload.as_ptr(),
+			payload_size: payload.len(),
+			timestamp_us: 0,
+			keyframe: false,
+		};
+
+		Ok(())
+	}
+
+	pub fn raw_frame_close(&mut self, frame: Id) -> Result<(), Error> {
+		self.raw_frame.remove(frame).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
 

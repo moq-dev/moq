@@ -75,6 +75,10 @@ pub enum Error {
 	#[error("track not found")]
 	TrackNotFound,
 
+	/// Group producer not found.
+	#[error("group not found")]
+	GroupNotFound,
+
 	/// Frame not found.
 	#[error("frame not found")]
 	FrameNotFound,
@@ -187,6 +191,7 @@ impl ffi::ReturnCode for Error {
 			Error::FrameNotFound => -28,
 			Error::Mux(_) => -29,
 			Error::Audio(_) => -30,
+			Error::GroupNotFound => -31,
 		}
 	}
 }

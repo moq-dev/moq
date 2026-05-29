@@ -273,6 +273,125 @@ fn publish_catalog_roundtrip() {
 }
 
 #[test]
+fn publish_track_invalid_broadcast() {
+	let name = b"data";
+	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len()) } < 0);
+	assert!(moq_publish_track_group(9999) < 0);
+	assert!(unsafe { moq_publish_track_frame(9999, name.as_ptr(), name.len()) } < 0);
+	assert!(unsafe { moq_publish_group_frame(9999, name.as_ptr(), name.len()) } < 0);
+	assert!(moq_publish_track_close(9999) < 0);
+	assert!(moq_publish_group_close(9999) < 0);
+}
+
+#[test]
+fn raw_track_publish_consume() {
+	let origin = id(moq_origin_create());
+	let broadcast = id(moq_publish_create());
+
+	// Describe an audio rendition so the catalog is non-empty. This lets the
+	// catalog handshake below complete, which warms the broadcast connection
+	// before we publish raw frames (otherwise the first frame can race ahead of
+	// the subscription and be dropped under live semantics).
+	let audio_name = b"audio";
+	let audio_codec = b"opus";
+	let audio = moq_audio_config {
+		name: audio_name.as_ptr() as *const c_char,
+		name_len: audio_name.len(),
+		codec: audio_codec.as_ptr() as *const c_char,
+		codec_len: audio_codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 48000,
+		channel_count: 2,
+	};
+	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
+
+	// Create a raw, non-media track.
+	let track_name = b"data";
+	let track = id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len()) });
+
+	let path = b"raw-track";
+	assert_eq!(
+		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
+		0
+	);
+
+	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
+
+	// Subscribe to the catalog first and wait for it. This forces the broadcast
+	// consumer to actually connect before we publish frames, so the raw track
+	// subscription below lands on a warm broadcast (matching the handshake in
+	// the media publish/consume tests).
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	let frame_cb = Callback::new();
+	let consumer = id(unsafe {
+		moq_consume_track(
+			consume,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			Some(channel_callback),
+			frame_cb.ptr,
+		)
+	});
+
+	// One-frame-per-group convenience write.
+	let payload = b"hello raw track";
+	assert_eq!(
+		unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len()) },
+		0
+	);
+
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp_us: 123, // should be overwritten with 0
+		keyframe: true,    // should be overwritten with false
+	};
+	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
+	assert_eq!(received, payload);
+	assert_eq!(frame.timestamp_us, 0, "raw frames have no timestamp");
+	assert!(!frame.keyframe, "raw frames have no keyframe flag");
+	assert_eq!(moq_consume_track_frame_close(frame_id), 0);
+
+	// Multi-frame group via the explicit group API.
+	let group = id(moq_publish_track_group(track));
+	let parts: [&[u8]; 2] = [b"part-0", b"part-1"];
+	for part in parts {
+		assert_eq!(unsafe { moq_publish_group_frame(group, part.as_ptr(), part.len()) }, 0);
+	}
+	assert_eq!(moq_publish_group_close(group), 0);
+
+	for expected in parts {
+		let frame_id = id(frame_cb.recv());
+		let mut frame = moq_frame {
+			payload: std::ptr::null(),
+			payload_size: 0,
+			timestamp_us: 0,
+			keyframe: false,
+		};
+		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
+		assert_eq!(received, expected);
+		assert_eq!(moq_consume_track_frame_close(frame_id), 0);
+	}
+
+	assert_eq!(moq_consume_track_close(consumer), 0);
+	assert!(moq_consume_track_close(consumer) < 0, "double-close should fail");
+	assert_eq!(moq_publish_track_close(track), 0);
+	assert!(moq_publish_track_close(track) < 0, "double-close should fail");
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn close_invalid_or_zero_ids() {
 	assert!(moq_origin_close(9999) < 0);
 	assert!(moq_session_close(9999) < 0);
