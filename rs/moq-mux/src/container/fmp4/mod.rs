@@ -247,14 +247,22 @@ pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<F
 			// depends_on_no_other (bits 24-25 == 0x2) means keyframe
 			let keyframe = (flags >> 24) & 0x3 == 0x2;
 
+			// Carry the sample-duration through at the track's scale when present, so
+			// the jitter buffer can use it and an exporter can write it back.
+			let sample_duration = entry.duration.or(default_duration);
+			let duration = sample_duration
+				.map(|d| Timestamp::new(d as u64, timescale))
+				.transpose()?;
+
 			frames.push(Frame {
 				timestamp,
 				payload,
 				keyframe,
+				duration,
 			});
 
 			offset = end;
-			dts += entry.duration.or(default_duration).unwrap_or(0) as u64;
+			dts += sample_duration.unwrap_or(0) as u64;
 		}
 	}
 
@@ -310,9 +318,13 @@ pub(crate) fn encode_fragment(
 		.iter()
 		.map(|f| {
 			let flags = if f.keyframe { 0x0200_0000 } else { 0x0001_0000 };
+			// Write the sample-duration back at the track's scale when we know it, so
+			// fMP4 -> fMP4 round-trips it. Frames without one stay byte-identical.
+			let duration = f.duration.map(|d| d.as_scale(timescale) as u32);
 			mp4_atom::TrunEntry {
 				size: Some(f.payload.len() as u32),
 				flags: Some(flags),
+				duration,
 				..Default::default()
 			}
 		})
@@ -506,5 +518,104 @@ pub(crate) fn default_video_timescale(config: &VideoConfig) -> u64 {
 		(fps * 1000.0) as u64
 	} else {
 		90000
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn ts(micros: u64) -> Timestamp {
+		Timestamp::from_micros(micros).unwrap()
+	}
+
+	#[test]
+	fn decode_reads_trun_sample_duration() {
+		use mp4_atom::Encode;
+
+		// Microsecond timescale so each tick maps 1:1 to the Timestamp's µs.
+		// decode() walks the mdat by sample size and ignores data_offset, so a
+		// hand-built moof+mdat with explicit per-sample durations is enough.
+		let timescale = moq_net::Timescale::MICRO;
+		let moof = mp4_atom::Moof {
+			mfhd: mp4_atom::Mfhd { sequence_number: 0 },
+			traf: vec![mp4_atom::Traf {
+				tfhd: mp4_atom::Tfhd {
+					track_id: 1,
+					..Default::default()
+				},
+				tfdt: Some(mp4_atom::Tfdt {
+					base_media_decode_time: 0,
+				}),
+				trun: vec![mp4_atom::Trun {
+					data_offset: Some(0),
+					entries: vec![
+						mp4_atom::TrunEntry {
+							size: Some(2),
+							duration: Some(33_333),
+							..Default::default()
+						},
+						mp4_atom::TrunEntry {
+							size: Some(2),
+							duration: Some(33_333),
+							..Default::default()
+						},
+					],
+				}],
+				..Default::default()
+			}],
+		};
+
+		let mut buf = Vec::new();
+		moof.encode(&mut buf).unwrap();
+		mp4_atom::Mdat {
+			data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+		}
+		.encode(&mut buf)
+		.unwrap();
+
+		let frames = decode(Bytes::from(buf), timescale).unwrap();
+		assert_eq!(frames.len(), 2);
+		assert_eq!(frames[0].timestamp, ts(0));
+		assert_eq!(frames[0].duration, Some(ts(33_333)));
+		assert_eq!(frames[1].timestamp, ts(33_333));
+		assert_eq!(frames[1].duration, Some(ts(33_333)));
+	}
+
+	#[test]
+	fn duration_round_trips_through_encode() {
+		// A frame with a known duration must survive encode -> decode.
+		let timescale = moq_net::Timescale::MICRO;
+		let input = vec![Frame {
+			timestamp: ts(0),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: Some(ts(33_333)),
+		}];
+
+		let fragment = encode_fragment(1, timescale, 0, &input).unwrap();
+		let frames = decode(fragment, timescale).unwrap();
+
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].duration, Some(ts(33_333)));
+	}
+
+	#[test]
+	fn decode_without_duration_reports_none() {
+		// encode_fragment writes no sample-duration for a duration-less frame,
+		// so decode must report None (and output stays byte-identical to before).
+		let timescale = moq_net::Timescale::new(90_000).unwrap();
+		let frames = vec![Frame {
+			timestamp: ts(0),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: None,
+		}];
+
+		let fragment = encode_fragment(1, timescale, 0, &frames).unwrap();
+		let frames = decode(fragment, timescale).unwrap();
+
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].duration, None);
 	}
 }

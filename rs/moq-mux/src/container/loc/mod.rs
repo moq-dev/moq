@@ -63,6 +63,8 @@ impl Container for Wire {
 			// LOC doesn't carry the keyframe bit on the wire; the
 			// wrapping Consumer fills it in from group position.
 			keyframe: false,
+			// LOC carries no per-frame duration.
+			duration: None,
 		}])))
 	}
 }
