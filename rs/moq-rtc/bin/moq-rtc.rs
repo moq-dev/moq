@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
 	let subscriber_consumer = subscriber.consume();
 
 	let reconnect = moq_client
-		.with_publish(publisher.consume())
+		.with_publish(publisher.clone())
 		.with_consume(subscriber)
 		.reconnect(relay.clone());
 
