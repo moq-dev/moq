@@ -109,8 +109,9 @@ pypi_exists() {
     local version="$2"
     local url="https://pypi.org/pypi/${dist}/${version}/json"
 
+    # Retry transient failures so a network blip doesn't fail the release gate.
     local code
-    code=$(curl -fsS -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --retry 3 --retry-connrefused "$url" 2>/dev/null || true)
 
     local exists
     case "$code" in
