@@ -802,6 +802,7 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 		match broadcast.create_track(Track {
 			name: name.into(),
 			priority: 0,
+			..Default::default()
 		}) {
 			Ok(t) => tracks.push(t),
 			Err(err) => {
@@ -1240,6 +1241,7 @@ mod tests {
 			.subscribe_track(&Track {
 				name: "publisher.json".into(),
 				priority: 0,
+				..Default::default()
 			})
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1268,6 +1270,7 @@ mod tests {
 			.subscribe_track(&Track {
 				name: "publisher.json".into(),
 				priority: 0,
+				..Default::default()
 			})
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1301,6 +1304,7 @@ mod tests {
 			.subscribe_track(&Track {
 				name: "publisher.json".into(),
 				priority: 0,
+				..Default::default()
 			})
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1379,6 +1383,7 @@ mod tests {
 			.subscribe_track(&Track {
 				name: "publisher.json".into(),
 				priority: 0,
+				..Default::default()
 			})
 			.expect("subscribe");
 		assert!(
@@ -1393,6 +1398,7 @@ mod tests {
 				.subscribe_track(&Track {
 					name: name.into(),
 					priority: 0,
+					..Default::default()
 				})
 				.expect("subscribe");
 			let frame = read_frame(t).await;

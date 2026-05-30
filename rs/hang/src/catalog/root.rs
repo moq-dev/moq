@@ -80,6 +80,8 @@ impl Catalog {
 		moq_net::Track {
 			name: Catalog::DEFAULT_NAME.to_string(),
 			priority: 100,
+			// The catalog is JSON and re-sent on every change, so it pays to compress.
+			compress: true,
 		}
 	}
 }

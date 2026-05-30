@@ -27,13 +27,18 @@ use std::{
 const MAX_GROUP_AGE: Duration = Duration::from_secs(5);
 
 /// A track is a collection of groups, delivered out-of-order until expired.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {
 	/// Identifier within a broadcast. Unique per [`crate::Broadcast`].
 	pub name: String,
 	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
 	pub priority: u8,
+	/// Hint that this track's frames are worth compressing (e.g. a JSON catalog).
+	/// The publisher honors it by negotiating a codec in SUBSCRIBE_OK; codec-less
+	/// peers (older drafts) ignore it and send frames verbatim.
+	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
+	pub compress: bool,
 }
 
 impl Track {
@@ -42,7 +47,14 @@ impl Track {
 		Self {
 			name: name.into(),
 			priority: 0,
+			compress: false,
 		}
+	}
+
+	/// Mark this track's frames as worth compressing, returning `self` for chaining.
+	pub fn with_compress(mut self, compress: bool) -> Self {
+		self.compress = compress;
+		self
 	}
 
 	/// Consume this [`Track`] to create a producer that owns its metadata.

@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
 
 	let track = Track {
 		name: config.track,
-		priority: 0,
+		..Default::default()
 	};
 
 	let origin = moq_net::Origin::random().produce();

@@ -81,9 +81,10 @@ pub struct HttpsConfig {
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
 	///
 	/// When set, clients *may* present a certificate during the TLS handshake.
-	/// A verified peer is granted an unrestricted [`AuthToken`] without a JWT,
-	/// mirroring the QUIC server's `--server-tls-root` behavior. Clients that
-	/// don't present a cert continue through the normal JWT path.
+	/// A verified peer is granted full publish/subscribe access scoped to the
+	/// URL path without a JWT, mirroring the QUIC server's `--server-tls-root`
+	/// behavior. Clients that don't present a cert continue through the normal
+	/// JWT path.
 	///
 	/// In config files, accepts either a single string or a TOML array.
 	#[arg(
@@ -269,9 +270,9 @@ async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, 
 }
 
 /// Marker inserted as a request extension when rustls verified a client cert
-/// against the configured mTLS CA. We don't carry the cert bytes — "verified
-/// by our CA" is the entire signal we need (mirrors `PeerIdentity` on the QUIC
-/// side).
+/// against the configured mTLS CA. We don't carry the cert bytes. "Verified
+/// by our CA" is the entire signal we need (mirrors `has_peer_certificate` on
+/// the QUIC side).
 #[derive(Clone, Debug)]
 pub(crate) struct MtlsPeer;
 
@@ -454,7 +455,7 @@ async fn serve_announced(
 		jwt: query.jwt,
 	};
 	let token = if mtls.is_some() {
-		AuthToken::unrestricted()
+		AuthToken::unrestricted(moq_net::Path::new(&params.path).to_owned())
 	} else {
 		state.auth.verify(&params).await?
 	};
@@ -496,7 +497,7 @@ async fn serve_fetch(
 		jwt: params.auth.jwt,
 	};
 	let token = if mtls.is_some() {
-		AuthToken::unrestricted()
+		AuthToken::unrestricted(moq_net::Path::new(&auth.path).to_owned())
 	} else {
 		state.auth.verify(&auth).await?
 	};
@@ -509,7 +510,7 @@ async fn serve_fetch(
 
 	let track = moq_net::Track {
 		name: track,
-		priority: 0,
+		..Default::default()
 	};
 
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);

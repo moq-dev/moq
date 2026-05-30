@@ -208,6 +208,58 @@ pub fn find_start_code(mut b: &[u8]) -> Option<(usize, usize)> {
 mod tests {
 	use super::*;
 
+	// Tests for from_length_prefixed - converts avc1/hvc1 to Annex-B,
+	// with optional SPS/PPS prefix injection on keyframes.
+
+	#[test]
+	fn from_length_prefixed_no_prefix() {
+		// One 4-byte length, then 2-byte NAL `0x65 0x88` (an H.264 IDR slice).
+		let payload = &[0, 0, 0, 2, 0x65, 0x88];
+		let out = from_length_prefixed(payload, 4, None).unwrap();
+		assert_eq!(out.as_ref(), &[0, 0, 0, 1, 0x65, 0x88]);
+	}
+
+	#[test]
+	fn from_length_prefixed_with_prefix_injects_verbatim() {
+		// SPS+PPS prefix built by `build_prefix` (start_code + sps_nal + start_code + pps_nal).
+		let sps = Bytes::from_static(&[0x67, 0x42, 0xc0, 0x1f]);
+		let pps = Bytes::from_static(&[0x68, 0xce, 0x3c, 0x80]);
+		let prefix = build_prefix([&sps, &pps]);
+		assert_eq!(
+			prefix.as_ref(),
+			&[
+				0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f, // start_code + SPS
+				0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80, // start_code + PPS
+			]
+		);
+
+		// One length-prefixed IDR slice.
+		let payload = &[0, 0, 0, 2, 0x65, 0x88];
+		let out = from_length_prefixed(payload, 4, Some(&prefix)).unwrap();
+
+		// Output must start with the prefix byte-for-byte, then the slice in Annex-B form.
+		assert_eq!(&out[..prefix.len()], prefix.as_ref());
+		assert_eq!(&out[prefix.len()..], &[0, 0, 0, 1, 0x65, 0x88]);
+	}
+
+	#[test]
+	fn from_length_prefixed_multiple_nals_with_prefix() {
+		// Two NALs in one frame: AUD then IDR slice. Prefix gets prepended once.
+		let prefix = build_prefix([&Bytes::from_static(&[0x67, 0x42])]);
+		let payload = &[
+			0, 0, 0, 2, 0x09, 0x10, // AUD
+			0, 0, 0, 2, 0x65, 0x88, // IDR slice
+		];
+		let out = from_length_prefixed(payload, 4, Some(&prefix)).unwrap();
+
+		// Single prefix followed by both NALs in Annex-B order.
+		let mut expected = Vec::new();
+		expected.extend_from_slice(&prefix);
+		expected.extend_from_slice(&[0, 0, 0, 1, 0x09, 0x10]); // AUD
+		expected.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88]); // IDR
+		assert_eq!(out.as_ref(), expected.as_slice());
+	}
+
 	// Tests for after_start_code - validates and measures start code at buffer beginning
 
 	#[test]

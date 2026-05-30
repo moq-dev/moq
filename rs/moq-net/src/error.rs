@@ -90,6 +90,10 @@ pub enum Error {
 	#[error("frame too large")]
 	FrameTooLarge,
 
+	/// A compressed frame payload could not be decompressed.
+	#[error("decompression failed")]
+	Decompress,
+
 	/// A remote error received via a stream/session reset code.
 	#[error("remote error: code={0}")]
 	Remote(u32),
@@ -123,6 +127,7 @@ impl Error {
 			Self::Closed => 25,
 			Self::CacheFull => 26,
 			Self::FrameTooLarge => 27,
+			Self::Decompress => 28,
 			Self::App(app) => *app as u32 + 64,
 			Self::Remote(code) => *code,
 		}

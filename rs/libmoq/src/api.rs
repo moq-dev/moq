@@ -359,6 +359,209 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 	})
 }
 
+/// Add or replace a video rendition in a broadcast's catalog.
+///
+/// This is the producer counterpart to [moq_consume_video_config]: instead of
+/// reading a rendition out of a catalog, it writes one into the catalog of a
+/// broadcast created with [moq_publish_create]. The rendition is keyed by
+/// `config.name`; calling this again with the same name replaces it. The
+/// updated catalog is published to subscribers automatically.
+///
+/// The struct fields are read as inputs:
+/// - `name` / `codec` are required (NOT NULL terminated) string slices.
+/// - `description` may be NULL to omit it.
+/// - `coded_width` / `coded_height` may be NULL to omit them.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `config` points to a valid [moq_video_config].
+/// - The caller must ensure each non-NULL pointer inside `config` is valid for its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const moq_video_config) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+
+		let name = unsafe { ffi::parse_str(config.name, config.name_len)? };
+		let codec = unsafe { ffi::parse_str(config.codec, config.codec_len)? };
+		let codec = hang::catalog::VideoCodec::from_str(codec).map_err(Error::Hang)?;
+
+		let mut video = hang::catalog::VideoConfig::new(codec);
+		if !config.description.is_null() {
+			let description = unsafe { ffi::parse_slice(config.description, config.description_len)? };
+			video.description = Some(bytes::Bytes::copy_from_slice(description));
+		}
+		video.coded_width = unsafe { config.coded_width.as_ref() }.copied();
+		video.coded_height = unsafe { config.coded_height.as_ref() }.copied();
+
+		State::lock().publish.video_config(broadcast, name, video)
+	})
+}
+
+/// Add or replace an audio rendition in a broadcast's catalog.
+///
+/// This is the producer counterpart to [moq_consume_audio_config]. The rendition
+/// is keyed by `config.name`; calling this again with the same name replaces it.
+/// The updated catalog is published to subscribers automatically.
+///
+/// The struct fields are read as inputs:
+/// - `name` / `codec` are required (NOT NULL terminated) string slices.
+/// - `sample_rate` / `channel_count` are required.
+/// - `description` may be NULL to omit it.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `config` points to a valid [moq_audio_config].
+/// - The caller must ensure each non-NULL pointer inside `config` is valid for its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_audio_config(broadcast: u32, config: *const moq_audio_config) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+
+		let name = unsafe { ffi::parse_str(config.name, config.name_len)? };
+		let codec = unsafe { ffi::parse_str(config.codec, config.codec_len)? };
+		let codec = hang::catalog::AudioCodec::from_str(codec).map_err(Error::Hang)?;
+
+		let mut audio = hang::catalog::AudioConfig::new(codec, config.sample_rate, config.channel_count);
+		if !config.description.is_null() {
+			let description = unsafe { ffi::parse_slice(config.description, config.description_len)? };
+			audio.description = Some(bytes::Bytes::copy_from_slice(description));
+		}
+
+		State::lock().publish.audio_config(broadcast, name, audio)
+	})
+}
+
+/// Remove a video rendition from a broadcast's catalog by name.
+///
+/// This is a no-op if no rendition with that name exists. The updated catalog is
+/// published to subscribers automatically.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_video_remove(broadcast: u32, name: *const c_char, name_len: usize) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		State::lock().publish.video_remove(broadcast, name)
+	})
+}
+
+/// Remove an audio rendition from a broadcast's catalog by name.
+///
+/// This is a no-op if no rendition with that name exists. The updated catalog is
+/// published to subscribers automatically.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_audio_remove(broadcast: u32, name: *const c_char, name_len: usize) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		State::lock().publish.audio_remove(broadcast, name)
+	})
+}
+
+/// Create a raw track on a broadcast for arbitrary byte payloads.
+///
+/// Unlike [moq_publish_media_ordered], this is the bare moq-net primitive: no
+/// codec, container, or catalog framing. Frames written to it are delivered
+/// as-is to subscribers using [moq_consume_track]. Use it for non-media tracks
+/// (control channels, JSON metadata, etc.), or pair it with
+/// [moq_publish_video_config] / [moq_publish_audio_config] to also describe the
+/// track in the catalog.
+///
+/// Returns a non-zero handle to the track on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_track(broadcast: u32, name: *const c_char, name_len: usize) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		State::lock().publish.track(broadcast, name)
+	})
+}
+
+/// Append a new group to a raw track, returning a group producer.
+///
+/// Groups are delivered independently and each may contain any number of frames
+/// written via [moq_publish_group_frame]. Sequence numbers auto-increment.
+///
+/// Returns a non-zero handle to the group on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_track_group(track: u32) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		State::lock().publish.track_group(track)
+	})
+}
+
+/// Write a single-frame group to a raw track.
+///
+/// Convenience for the common one-frame-per-group pattern. Equivalent to
+/// appending a group, writing one frame, and finishing it.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_track_frame(track: u32, payload: *const u8, payload_size: usize) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
+		State::lock().publish.track_frame(track, payload)
+	})
+}
+
+/// Finish a raw track. No more groups or frames can be written.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_track_close(track: u32) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		State::lock().publish.track_finish(track)
+	})
+}
+
+/// Write a frame into a raw group created by [moq_publish_track_group].
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_group_frame(group: u32, payload: *const u8, payload_size: usize) -> i32 {
+	ffi::enter(move || {
+		let group = ffi::parse_id(group)?;
+		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
+		State::lock().publish.group_frame(group, payload)
+	})
+}
+
+/// Finish a raw group. No more frames can be written.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_group_close(group: u32) -> i32 {
+	ffi::enter(move || {
+		let group = ffi::parse_id(group)?;
+		State::lock().publish.group_finish(group)
+	})
+}
+
 /// Create a catalog consumer for a broadcast.
 ///
 /// The callback is called with a catalog ID when a new catalog is available.
@@ -566,5 +769,77 @@ pub extern "C" fn moq_consume_close(consume: u32) -> i32 {
 	ffi::enter(move || {
 		let consume = ffi::parse_id(consume)?;
 		State::lock().consume.close(consume)
+	})
+}
+
+/// Subscribe to a raw track by name, delivering each frame's payload as-is.
+///
+/// This is the counterpart to [moq_publish_track]: no catalog lookup or
+/// container parsing. `on_frame` is called with a raw frame ID for each frame
+/// in arrival order. Read each frame with [moq_consume_track_frame] and release
+/// it with [moq_consume_track_frame_close].
+///
+/// Returns a non-zero handle to the track on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that name is a valid pointer to name_len bytes of data.
+/// - The caller must ensure that `on_frame` is valid until [moq_consume_track_close] is called.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_track(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let name = unsafe { ffi::parse_str(name, name_len)? };
+		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
+		State::lock().consume.raw_track(broadcast, name, on_frame)
+	})
+}
+
+/// Read a raw frame's payload delivered via the [moq_consume_track] callback.
+///
+/// Fills `dst.payload` / `dst.payload_size`; the pointer is valid until the
+/// frame is released with [moq_consume_frame_close]. `dst.timestamp_us` and
+/// `dst.keyframe` are reported as 0 / false (not meaningful for raw tracks).
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_frame] struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_track_frame(frame: u32, dst: *mut moq_frame) -> i32 {
+	ffi::enter(move || {
+		let frame = ffi::parse_id(frame)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().consume.raw_frame(frame, dst)
+	})
+}
+
+/// Close a raw frame and clean up its resources.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_track_frame_close(frame: u32) -> i32 {
+	ffi::enter(move || {
+		let frame = ffi::parse_id(frame)?;
+		State::lock().consume.raw_frame_close(frame)
+	})
+}
+
+/// Close a raw track consumer and cancel its background task.
+///
+/// Frames already delivered via the callback remain valid until released with
+/// [moq_consume_track_frame_close].
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_track_close(track: u32) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		State::lock().consume.raw_track_close(track)
 	})
 }

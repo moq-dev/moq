@@ -60,7 +60,7 @@ impl AudioProducer {
 		let name = name.into();
 		let track = broadcast.create_track(moq_net::Track {
 			name: name.clone(),
-			priority: 0,
+			..Default::default()
 		})?;
 		let track = moq_mux::container::Producer::new(track, moq_mux::container::legacy::Wire);
 
