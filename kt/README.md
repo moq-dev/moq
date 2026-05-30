@@ -27,8 +27,7 @@ val session = Moq.connect("https://relay.example.com")
 
 MoqOriginProducer().use { origin ->
     val consumer = origin.consume()
-    val announced = consumer.announced("demos/")
-    announced.announcements().collect { announcement ->
+    consumer.announcements("demos/").collect { announcement ->
         println("got broadcast ${announcement.path()}")
 
         announcement.broadcast().subscribeCatalog().updates().collect { catalog ->

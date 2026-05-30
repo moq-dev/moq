@@ -46,8 +46,7 @@ val cs = client.connect("https://relay.example.com")
 // cs.consumer() and cs.publisher() are always populated: by whatever
 // origin you wired via setPublish / setConsume before connect, or by a
 // fresh auto-created one for any side you didn't set.
-val announced = cs.consumer().announced("demos/")
-announced.announcements().collect { announcement ->
+cs.consumer().announcements("demos/").collect { announcement ->
     println("got broadcast ${announcement.path()}")
 
     announcement.broadcast().subscribeCatalog().updates().collect { catalog ->

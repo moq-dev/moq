@@ -56,7 +56,7 @@ let cs = try await client.connect(url: "https://cdn.moq.dev/anon/demo")
 // origin you wired via setPublish / setConsume before connect, or by a
 // fresh auto-created one for any side you didn't set.
 let announced = try cs.consumer().announced(prefix: "demos/")
-for try await announcement in announced.announcements {
+for try await announcement in announced {
     print("got broadcast \(announcement.path())")
 
     let catalog = try announcement.broadcast().subscribeCatalog()

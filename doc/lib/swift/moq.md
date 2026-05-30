@@ -59,7 +59,7 @@ cs.shutdown()  // alias for cancel(code: 0)
 ```swift
 let announced = try cs.consumer().announced(prefix: "demos/")
 
-for try await announcement in announced.announcements {
+for try await announcement in announced {
     let catalog = try announcement.broadcast().subscribeCatalog()
     for try await update in catalog.updates {
         print("catalog: \(update)")

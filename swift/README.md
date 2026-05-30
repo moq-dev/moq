@@ -26,7 +26,7 @@ let cs = try await client.connect(url: "https://relay.example.com")
 // path (the typical client) shares one origin between both.
 let consumer = cs.consumer()
 let announced = try consumer.announced(prefix: "demos/")
-for try await announcement in announced.announcements {
+for try await announcement in announced {
     print("got broadcast \(announcement.path())")
 
     let catalog = try announcement.broadcast().subscribeCatalog()

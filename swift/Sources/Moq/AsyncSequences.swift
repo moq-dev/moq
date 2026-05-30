@@ -138,10 +138,14 @@ extension MoqGroupConsumer {
     }
 }
 
-extension MoqAnnounced {
-    /// Stream of broadcast announcements. Terminates when the origin closes.
-    public var announcements: AsyncThrowingStream<MoqAnnouncement, Error> {
-        AsyncThrowingStream { continuation in
+extension MoqAnnounced: AsyncSequence {
+    public typealias Element = MoqAnnouncement
+
+    /// Iterate broadcast announcements directly: `for try await a in announced`.
+    /// The sequence terminates when the origin closes; cancelling the consuming
+    /// task cancels the underlying subscription.
+    public func makeAsyncIterator() -> AsyncThrowingStream<MoqAnnouncement, Error>.Iterator {
+        AsyncThrowingStream<MoqAnnouncement, Error> { continuation in
             let task = Task {
                 do {
                     while let announcement = try await self.next() {
@@ -157,6 +161,6 @@ extension MoqAnnounced {
                 task.cancel()
                 self?.cancel()
             }
-        }
+        }.makeAsyncIterator()
     }
 }
