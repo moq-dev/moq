@@ -2416,7 +2416,7 @@ checksum = "253b313319f7109de64e480ffb606f89475cd758bae82e096e00c5d95341d30e"
 
 [[package]]
 name = "hang"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3431,7 +3431,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3650,7 +3650,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -3670,7 +3670,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.7.27"
+version = "0.7.28"
 dependencies = [
  "anyhow",
  "axum",
@@ -3691,7 +3691,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "bytes",
  "hang",
@@ -3771,7 +3771,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3813,7 +3813,7 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bytes",
  "futures",
@@ -3831,7 +3831,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -3889,7 +3889,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.27"
+version = "0.5.28"
 dependencies = [
  "anyhow",
  "clap",

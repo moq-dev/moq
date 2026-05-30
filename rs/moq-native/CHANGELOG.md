@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1](https://github.com/moq-dev/moq/compare/moq-native-v0.16.0...moq-native-v0.16.1) - 2026-05-30
+
+### Other
+
+- route Android logs to logcat ([#1541](https://github.com/moq-dev/moq/pull/1541))
+
 ## [0.16.0](https://github.com/moq-dev/moq/compare/moq-native-v0.15.0...moq-native-v0.16.0) - 2026-05-30
 
 ### Fixed

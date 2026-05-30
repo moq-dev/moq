@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/moq-dev/moq/compare/libmoq-v0.3.0...libmoq-v0.3.1) - 2026-05-30
+
+### Other
+
+- add moq_origin_consume_announced to wait for a broadcast ([#1552](https://github.com/moq-dev/moq/pull/1552))
+- route Android logs to logcat ([#1541](https://github.com/moq-dev/moq/pull/1541))
+
 ## [0.3.0](https://github.com/moq-dev/moq/compare/libmoq-v0.2.17...libmoq-v0.3.0) - 2026-05-30
 
 ### Other

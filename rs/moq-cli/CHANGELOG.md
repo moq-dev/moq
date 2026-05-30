@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.28](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.27...moq-cli-v0.7.28) - 2026-05-30
+
+### Other
+
+- route Android logs to logcat ([#1541](https://github.com/moq-dev/moq/pull/1541))
+
 ## [0.7.27](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.26...moq-cli-v0.7.27) - 2026-05-30
 
 ### Other
