@@ -2,9 +2,11 @@
 #
 # Shared release helpers for GitHub Actions workflows.
 # Usage:
-#   release.sh parse-version <prefix>     — extract SemVer from GITHUB_REF given a tag prefix
-#   release.sh prev-tag <prefix>          — find the tag immediately before the current one
-#   release.sh create <artifacts_dir>     — create or update a GitHub release with artifacts
+#   release.sh parse-version <prefix>          — extract SemVer from GITHUB_REF given a tag prefix
+#   release.sh prev-tag <prefix>               — find the tag immediately before the current one
+#   release.sh create <artifacts_dir>          — create or update a GitHub release with artifacts
+#   release.sh read-version <pyproject.toml>   — read `version = "x.y.z"` from a manifest
+#   release.sh pypi-exists <dist> <version>    — check whether <dist>==<version> is already on PyPI
 #
 # Environment:
 #   GITHUB_REF        — set by GitHub Actions (e.g. refs/tags/moq-relay-v1.2.3)
@@ -77,13 +79,65 @@ create_release() {
     fi
 }
 
+# Read the static `version = "x.y.z"` from the [project] table of a
+# pyproject.toml. Scoped to [project] so a `version` key in another table
+# (e.g. a [tool.*] section) can't be picked up by mistake. Writes
+# version=<ver> to $GITHUB_OUTPUT and stdout.
+read_version() {
+    local manifest="$1"
+    local version
+    version=$(sed -n '/^\[project\]/,/^\[/{
+        s/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p
+    }' "$manifest" | head -n1)
+    if [[ -z "$version" ]]; then
+        echo "Could not read version from [project] in $manifest" >&2
+        exit 1
+    fi
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        echo "version=${version}" >>"$GITHUB_OUTPUT"
+    fi
+    echo "$version"
+}
+
+# Check whether a distribution+version is already published on PyPI. This is the
+# release gate (like release-plz checking the registry): the git tag is just a
+# record, the registry is the source of truth. Writes exists=true|false to
+# $GITHUB_OUTPUT. A non-200/404 response is treated as fatal rather than
+# silently re-publishing.
+pypi_exists() {
+    local dist="$1"
+    local version="$2"
+    local url="https://pypi.org/pypi/${dist}/${version}/json"
+
+    # Retry transient failures so a network blip doesn't fail the release gate.
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --retry 3 --retry-connrefused "$url" 2>/dev/null || true)
+
+    local exists
+    case "$code" in
+        200) exists=true ;;
+        404) exists=false ;;
+        *)
+            echo "Unexpected status $code querying $url" >&2
+            exit 1
+            ;;
+    esac
+
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        echo "exists=${exists}" >>"$GITHUB_OUTPUT"
+    fi
+    echo "PyPI ${dist}==${version}: exists=${exists}"
+}
+
 # Dispatch subcommands
 case "${1:-}" in
     parse-version) parse_version "$2" ;;
     prev-tag) prev_tag "$2" ;;
     create) create_release "$2" ;;
+    read-version) read_version "$2" ;;
+    pypi-exists) pypi_exists "$2" "$3" ;;
     *)
-        echo "Usage: $0 {parse-version|prev-tag|create} <args>" >&2
+        echo "Usage: $0 {parse-version|prev-tag|create|read-version|pypi-exists} <args>" >&2
         exit 1
         ;;
 esac

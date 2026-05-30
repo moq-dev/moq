@@ -1,0 +1,165 @@
+name: Release Py FFI
+
+# Builds the `moq-ffi` wheel (raw uniffi bindings). Driven by the
+# `moq-ffi-v*` tag that release-plz pushes when it bumps rs/moq-ffi/Cargo.toml.
+# The wheel inherits its version from that same Cargo.toml (via maturin's
+# dynamic version), so the moq-ffi package stays lockstep with the moq-ffi
+# crate. The ergonomic `moq-rs` wrapper is released separately (release-py.yml).
+
+on:
+  push:
+    tags:
+      - "moq-ffi-v*"
+  pull_request:
+    paths:
+      - ".github/workflows/release-py-ffi.yml"
+      - ".github/scripts/release.sh"
+
+permissions:
+  contents: read
+
+# Scope by event + ref so a PR dry-run can't queue ahead of a tag publish.
+concurrency:
+  group: release-py-ffi-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  parse-version:
+    name: Parse version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Parse version
+        id: parse
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            CARGO_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
+          else
+            .github/scripts/release.sh parse-version moq-ffi
+          fi
+
+      # Maturin reads the wheel version from rs/moq-ffi/Cargo.toml (via
+      # `dynamic = ["version"]` in pyproject.toml). If a tag is pushed by
+      # hand without bumping Cargo.toml first, the wheel would ship with
+      # the previous version and PyPI would reject the duplicate upload.
+      - name: Verify Cargo.toml matches tag
+        if: github.event_name == 'push'
+        env:
+          TAG_VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          CARGO_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [[ "$TAG_VERSION" != "$CARGO_VERSION" ]]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match rs/moq-ffi/Cargo.toml version ($CARGO_VERSION). Bump Cargo.toml before tagging."
+            exit 1
+          fi
+          echo "Cargo.toml version matches tag: $TAG_VERSION"
+
+  build:
+    name: Build wheels (${{ matrix.target }})
+    needs: [parse-version]
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            # Use manylinux_2_28 for aarch64-linux to get a newer GCC.
+            # manylinux2014 ships GCC 4.8.5 which can't compile aws-lc-sys.
+            manylinux: 2_28
+            # The cross image sets TARGET_CC/CXX which leaks into host builds.
+            before-script-linux: "unset TARGET_CC TARGET_CXX"
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          # py/moq-ffi/pyproject.toml drives the build; its [tool.maturin]
+          # block points at rs/moq-ffi/Cargo.toml.
+          working-directory: py/moq-ffi
+          args: --release --out dist
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          before-script-linux: ${{ matrix.before-script-linux || '' }}
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: python-${{ matrix.target }}
+          path: py/moq-ffi/dist/*.whl
+
+  sdist:
+    name: Build sdist
+    needs: [parse-version]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          working-directory: py/moq-ffi
+          command: sdist
+          args: --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: python-sdist
+          path: py/moq-ffi/dist/*.tar.gz
+
+  publish:
+    name: Publish to PyPI
+    needs: [build, sdist]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    environment:
+      name: pypi
+      url: https://pypi.org/p/moq-ffi
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: python-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

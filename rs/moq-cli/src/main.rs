@@ -120,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
 		.expect("failed to install default crypto provider");
 
 	let cli = Cli::parse();
-	cli.log.init();
+	cli.log.init()?;
 
 	#[cfg(feature = "iroh")]
 	let iroh = cli.iroh.bind().await?;

@@ -9,6 +9,7 @@ on:
       - ".github/workflows/moq-relay.yml"
       - ".github/scripts/release.sh"
       - "rs/scripts/package-binary.sh"
+      - "rs/scripts/scrub-macho.sh"
       - "packaging/moq-relay/**"
       - ".github/actions/setup-packaging/**"
 

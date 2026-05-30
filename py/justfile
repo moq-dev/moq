@@ -2,21 +2,32 @@
 #
 # Language-specific recipes for the Python packages under py/. Invoked
 # from the repo root as `just py <recipe>` via the `mod py` import.
+#
+# Two workspace members:
+#   moq-ffi/  maturin project: rs/moq-ffi cdylib + uniffi bindings (dist `moq-ffi`)
+#   moq-rs/   pure-python ergonomic wrapper depending on moq-ffi (dist `moq-rs`,
+#             import `moq`)
 
 set working-directory := '.'
 
 default:
     just check
 
-# Lint + format + maturin source build + pyright. `--no-install-workspace`
-# installs the root dev group (ruff, maturin, pyright, pytest) without
-# trying to pip-build moq-rs; `maturin develop` then installs moq-rs
-# as an editable wheel with the rs/moq-ffi cdylib + uniffi bindings.
+# Build moq-ffi (maturin cdylib + bindings) and install the pure-python moq-rs
+# wrapper, both editable into the workspace venv. `--no-deps` on the wrapper
+# keeps uv from fetching moq-ffi off PyPI; maturin just installed it locally.
+_develop:
+    cd moq-ffi && uv run --no-sync maturin develop --uv
+    uv pip install --no-deps -e moq-rs
+
+# Lint + format + editable build + pyright. `--no-install-workspace` installs
+# the root dev group (ruff, maturin, pyright, pytest) without trying to
+# pip-build the workspace members; `_develop` then installs them editable.
 check:
     uv sync --no-install-workspace
     uv run --no-sync ruff check .
     uv run --no-sync ruff format --check .
-    cd moq-rs && uv run --no-sync maturin develop --uv
+    just _develop
     uv run --no-sync pyright
 
 fix:
@@ -26,18 +37,25 @@ fix:
 
 test:
     uv sync --no-install-workspace
-    cd moq-rs && uv run --no-sync maturin develop --uv
-    uv run --no-sync pytest moq-rs/tests/
+    just _develop
+    uv run --no-sync pytest moq-rs/tests/ moq-ffi/tests/
 
-# Local dev build: produces an editable install of moq-rs (with the
-# moq-ffi cdylib + uniffi bindings) into the workspace venv.
+# Local dev build: editable install of moq-ffi (with the cdylib + uniffi
+# bindings) and the moq-rs wrapper into the workspace venv.
 build:
     uv sync --no-install-workspace
-    cd moq-rs && uv run --no-sync maturin develop --uv
+    just _develop
+
+# Build the pure-python moq-rs wrapper sdist + wheel into py/dist (for release).
+# moq-ffi is built separately by maturin (see release-py.yml); the wrapper is
+# pure python so it needs no compilation, just a metadata-correct wheel.
+package:
+    rm -rf dist
+    uv build --package moq-rs --out-dir dist
 
 # Full Python CI: lint + tests + build. Takes a newline-separated list
 # of changed files; skips if FILES is non-empty and none match the
-# Python scope (which includes rs/moq-ffi because py bundles it via
+# Python scope (which includes rs/moq-ffi because moq-ffi bundles it via
 # maturin). Run `just py ci` (no FILES) to force-run everything.
 ci FILES="":
     #!/usr/bin/env bash

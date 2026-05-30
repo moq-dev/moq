@@ -4,7 +4,7 @@ import asyncio
 import struct
 
 import moq
-import moq._uniffi as moq_ffi
+import moq_ffi
 import pytest
 
 

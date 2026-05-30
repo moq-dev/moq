@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/moq-dev/moq/compare/libmoq-v0.3.0...libmoq-v0.3.1) - 2026-05-30
+
+### Other
+
+- add moq_origin_consume_announced to wait for a broadcast ([#1552](https://github.com/moq-dev/moq/pull/1552))
+- route Android logs to logcat ([#1541](https://github.com/moq-dev/moq/pull/1541))
+
+## [0.3.0](https://github.com/moq-dev/moq/compare/libmoq-v0.2.17...libmoq-v0.3.0) - 2026-05-30
+
+### Other
+
+- terminal-callback lifetime contract for C consumers ([#1546](https://github.com/moq-dev/moq/pull/1546))
+- auto-reconnect sessions; conducer-based Reconnect notifications ([#1544](https://github.com/moq-dev/moq/pull/1544))
+- Add libmoq catalog producer + raw moq-net track API ([#1533](https://github.com/moq-dev/moq/pull/1533))
+- lint shell, workflows, TOML, Nix, and justfiles via nix devShell ([#1519](https://github.com/moq-dev/moq/pull/1519))
+
 ### Added
 
 - Catalog producer API to author renditions directly (`moq_publish_video_config`, `moq_publish_audio_config`, `moq_publish_video_remove`, `moq_publish_audio_remove`), mirroring the consume-side config queries.

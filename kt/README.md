@@ -66,7 +66,7 @@ kt/
   scripts/                  check.sh, package.sh, publish.sh
 ```
 
-The Kotlin module stays as a single `moq-ffi` artifact because uniffi-linked libraries can't be split across separately packaged wheels/artifacts. The Python wheel (`moq-rs`) follows the same umbrella shape for the same reason.
+The Kotlin module stays as a single `moq-ffi` artifact because uniffi-linked libraries can't be split across separately packaged wheels/artifacts. That constraint is about splitting the native library itself; a pure-source wrapper layered on top is fine. Python already does this: the `moq-ffi` wheel carries the native bindings and the pure-python `moq-rs` wheel (imported as `moq`) wraps it with an independently versioned ergonomic API. Kotlin could follow the same shape (a `dev.moq:moq-ffi` artifact plus a `dev.moq:moq` wrapper) if it wants independent wrapper versioning.
 
 ## Publishing to Maven Central
 

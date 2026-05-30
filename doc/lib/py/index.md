@@ -9,34 +9,35 @@ The Python bindings expose [Media over QUIC](/) to scripts, services, and protot
 
 ## Packages
 
-### moq-net
+Two packages, split so the ergonomic API can evolve on its own cadence:
 
-[![PyPI](https://img.shields.io/pypi/v/moq-net)](https://pypi.org/project/moq-net/)
+### moq-rs
 
-The networking layer for MoQ in Python: real-time pub/sub with built-in caching, fan-out, and prioritization on top of QUIC. At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
+[![PyPI](https://img.shields.io/pypi/v/moq-rs)](https://pypi.org/project/moq-rs/)
 
-**Features:**
+The package you want. Install `moq-rs` (the `moq` name is taken on PyPI), import `moq`. Real-time pub/sub with built-in caching, fan-out, and prioritization on top of QUIC, with a Pythonic API (no `Moq` prefixes, async context managers, async iterators). At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
 
-- Async context managers and async iterators throughout
-- Native QUIC via the Rust [`moq-net`](/lib/rs/crate/moq-net) crate
-- WebCodecs-style catalog + container format via [`hang`](/lib/rs/crate/hang)
-- Pythonic API with no `Moq` prefixes ([more details](/lib/py/moq-net))
+It is pure Python and depends on `moq-ffi` via a compatible-release pin, so it floats to the latest `moq-ffi` patch automatically. It is versioned independently of the Rust crates.
 
-[Learn more](/lib/py/moq-net)
+### moq-ffi
+
+[![PyPI](https://img.shields.io/pypi/v/moq-ffi)](https://pypi.org/project/moq-ffi/)
+
+The raw UniFFI bindings (the `Moq`-prefixed classes), tracking the [`moq-ffi`](https://crates.io/crates/moq-ffi) Rust crate one-to-one. `moq-rs` pulls this in for you. Install it directly only if you need the unwrapped API or are building your own wrapper.
 
 ## Installation
 
 ```bash
-pip install moq-net
+pip install moq-rs
 ```
 
-Prebuilt wheels are published for:
+This pulls in `moq-ffi`, for which prebuilt wheels are published for:
 
 - Linux x86_64 / aarch64 (manylinux_2_28)
 - macOS x86_64 / aarch64
 - Windows x86_64
 
-For other platforms (Alpine, BSD, etc.) `pip` falls back to building from source via the published sdist. You'll need a Rust toolchain and a C compiler.
+For other platforms (Alpine, BSD, etc.) `pip` falls back to building `moq-ffi` from source via the published sdist. You'll need a Rust toolchain and a C compiler.
 
 ## Quickstart
 
@@ -44,7 +45,7 @@ For other platforms (Alpine, BSD, etc.) `pip` falls back to building from source
 
 ```python
 import asyncio
-import moq_net as moq
+import moq
 
 async def main():
     async with moq.Client("https://relay.quic.video") as client:
@@ -62,7 +63,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
-import moq_net as moq
+import moq
 
 async def main():
     async with moq.Client("https://relay.quic.video") as client:
@@ -81,6 +82,6 @@ asyncio.run(main())
 
 ## Source and issues
 
-- Source: [py/moq-net](https://github.com/moq-dev/moq/tree/main/py/moq-net)
-- README: [py/moq-net/README.md](https://github.com/moq-dev/moq/blob/main/py/moq-net/README.md)
-- Example scripts: [py/moq-net/examples](https://github.com/moq-dev/moq/tree/main/py/moq-net/examples)
+- Source: [py/moq-rs](https://github.com/moq-dev/moq/tree/main/py/moq-rs) (wrapper), [py/moq-ffi](https://github.com/moq-dev/moq/tree/main/py/moq-ffi) (raw bindings)
+- README: [py/moq-rs/README.md](https://github.com/moq-dev/moq/blob/main/py/moq-rs/README.md)
+- Example scripts: [py/moq-rs/examples](https://github.com/moq-dev/moq/tree/main/py/moq-rs/examples)

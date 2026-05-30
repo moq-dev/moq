@@ -1,14 +1,21 @@
 [build-system]
-requires = ["maturin>=1.7,<2.0"]
-build-backend = "maturin"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Dist name is moq-rs but the import package is `moq`, so point hatchling at it.
+[tool.hatch.build.targets.wheel]
+packages = ["moq"]
 
 [project]
 name = "moq-rs"
-# Version is injected at build time from the moq-ffi-v* tag (see
-# .github/workflows/release-py.yml). For local dev `maturin develop`
-# reads it from rs/moq-ffi/Cargo.toml.
-dynamic = ["version"]
-description = "Python bindings for the Media over QUIC Rust crates: real-time pub/sub with built-in caching, fan-out, and prioritization."
+# Distribution is `moq-rs` (the `moq` name is taken on PyPI); the import name
+# stays `moq`. Versioned independently of the moq-ffi crate: bump this by hand
+# in a PR. On merge to main, release-py.yml publishes to PyPI if this version
+# isn't already there (no tag needed; the registry is the gate).
+# Starts at 0.3.0 to open a new line above the old lockstep 0.2.x releases that
+# bundled the bindings.
+version = "0.3.0"
+description = "Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization, with a Pythonic API. Import as `moq`."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 requires-python = ">=3.10"
@@ -21,21 +28,15 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio",
     "Topic :: Multimedia :: Video",
 ]
+# Compatible-release pin: floats to the latest 0.2.x moq-ffi patch without a
+# wrapper re-release. A moq-ffi minor bump (0.3) is the only thing that forces
+# bumping this constraint.
+dependencies = ["moq-ffi ~= 0.2.16"]
 
 [project.urls]
 Homepage = "https://github.com/moq-dev/moq"
 Repository = "https://github.com/moq-dev/moq"
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-
-# Maturin builds the rs/moq-ffi crate, runs uniffi-bindgen, and packages
-# the cdylib + generated bindings as a private `moq._uniffi` subpackage
-# (the leading underscore signals "internal"; the public API lives at the
-# top of moq). The PyPI distribution is `moq-rs` but the import name is
-# `moq` for ergonomics.
-[tool.maturin]
-bindings = "uniffi"
-manifest-path = "../../rs/moq-ffi/Cargo.toml"
-python-source = "."
-module-name = "moq._uniffi"
+# Local dev resolves moq-ffi from the workspace member rather than PyPI.
+[tool.uv.sources]
+moq-ffi = { workspace = true }

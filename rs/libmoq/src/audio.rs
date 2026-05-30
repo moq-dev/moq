@@ -131,9 +131,13 @@ pub struct Audio {
 	frames: NonZeroSlab<moq_audio::Frame>,
 }
 
+/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
+///
+/// `close` is an `Option` so `consume_close` can drop just the sender without
+/// removing the entry. The task delivers one final terminal callback and then
+/// removes itself, so `user_data` stays valid until that callback fires.
 struct AudioTaskEntry {
-	#[allow(dead_code)] // Dropping signals shutdown via channel.
-	close: oneshot::Sender<()>,
+	close: Option<oneshot::Sender<()>>,
 	callback: OnStatus,
 }
 
@@ -174,18 +178,18 @@ impl Audio {
 
 		let channel = oneshot::channel();
 		let entry = AudioTaskEntry {
-			close: channel.0,
+			close: Some(channel.0),
 			callback: on_frame,
 		};
 		let id = self.consumer_tasks.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run(id, consumer) => res,
-				_ = channel.1 => Ok(()),
-			};
+			let res = Self::run(on_frame, consumer, channel.1).await;
 
-			if let Some(entry) = State::lock().audio.consumer_tasks.remove(id).flatten() {
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().audio.consumer_tasks.remove(id).flatten();
+			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
 		});
@@ -193,25 +197,35 @@ impl Audio {
 		Ok(id)
 	}
 
-	async fn run(task_id: Id, mut consumer: moq_audio::AudioConsumer) -> Result<(), Error> {
-		while let Some(frame) = consumer.read().await? {
-			let mut state = State::lock();
-			let Some(Some(entry)) = state.audio.consumer_tasks.get(task_id) else {
-				return Ok(());
+	async fn run(
+		callback: OnStatus,
+		mut consumer: moq_audio::AudioConsumer,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		loop {
+			// `biased` so a pending close always wins over a ready frame.
+			let frame = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				frame = consumer.read() => match frame? {
+					Some(frame) => frame,
+					None => return Ok(()),
+				},
 			};
-			let callback = entry.callback;
-			let frame_id = state.audio.frames.insert(frame)?;
-			drop(state);
 
+			// Hold the lock only to buffer the frame; release it before the callback.
+			let frame_id = State::lock().audio.frames.insert(frame)?;
 			callback.call(Ok(frame_id));
 		}
-		Ok(())
 	}
 
 	pub fn consume_close(&mut self, id: Id) -> Result<(), Error> {
+		// Signal shutdown; the task delivers a final callback and removes itself.
 		self.consumer_tasks
 			.get_mut(id)
+			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::TrackNotFound)?
+			.close
 			.take()
 			.ok_or(Error::TrackNotFound)?;
 		Ok(())
@@ -345,9 +359,15 @@ pub extern "C" fn moq_publish_audio_raw_close(producer: u32) -> i32 {
 ///
 /// Returns a non-zero handle on success or a negative error code.
 ///
+/// `on_frame` is called with a positive frame ID per frame, then exactly once
+/// more with a terminal code: `0` (closed cleanly) or a negative error. After
+/// the terminal (`<= 0`) callback, `on_frame` is never called again and
+/// `user_data` is never touched again, so release `user_data` there. The
+/// terminal callback fires even after [`moq_consume_audio_raw_close`].
+///
 /// # Safety
 /// - `output` must point to a valid [`moq_audio_decoder_output`].
-/// - `on_frame` must remain valid until [`moq_consume_audio_raw_close`] is called.
+/// - `user_data` must stay valid until the terminal (`<= 0`) `on_frame` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_audio_raw(
 	catalog: u32,
@@ -384,11 +404,13 @@ pub unsafe extern "C" fn moq_consume_audio_raw(
 	})
 }
 
-/// Stop consuming an audio track and cancel its background task.
+/// Stop an audio (raw PCM) consumer's background task.
 ///
-/// Does *not* free any frame IDs already delivered to the on-frame
-/// callback. Each one must be released explicitly with
-/// [`moq_consume_audio_raw_frame_free`].
+/// Returns immediately: zero on success, or a negative code if already closed.
+/// Does NOT free `user_data`; the on-frame callback still fires once more with a
+/// terminal `0` (or a negative error), which is where `user_data` should be
+/// released. Frame IDs already delivered to the callback are likewise not freed;
+/// release each with [`moq_consume_audio_raw_frame_free`].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_audio_raw_close(consumer: u32) -> i32 {
 	ffi::enter(move || {

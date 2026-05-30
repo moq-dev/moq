@@ -1,16 +1,16 @@
-# moq-rs
+# moq
 
-Python bindings for the [Media over QUIC](https://github.com/moq-dev/moq) Rust crates: real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC.
+Python bindings for [Media over QUIC](https://github.com/moq-dev/moq): real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC.
 
-`moq-rs` wraps the auto-generated [moq-ffi](https://crates.io/crates/moq-ffi) UniFFI bindings with a Pythonic API: no `Moq` prefixes, async iterators, context managers, and simplified connection setup. At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
+`moq` wraps the auto-generated [`moq-ffi`](https://pypi.org/project/moq-ffi/) UniFFI bindings with a Pythonic API: no `Moq` prefixes, async iterators, context managers, and simplified connection setup. At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
 
 ## Installation
 
 ```bash
-pip install moq-rs
+pip install moq
 ```
 
-The distribution is `moq-rs`; the import name is `moq`.
+This pulls in the `moq-ffi` native bindings automatically. `moq` is pure Python and is versioned independently of `moq-ffi`; it floats to the latest compatible `moq-ffi` patch.
 
 ## Quick Start
 
@@ -61,7 +61,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
-import moq_lite as moq
+import moq
 
 async def main():
     async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
@@ -148,5 +148,5 @@ client = moq.Client(
 
 ## See Also
 
-- [moq-ffi](https://crates.io/crates/moq-ffi). The Rust crate that produces the UniFFI bindings vendored as `moq._uniffi`.
+- [`moq-ffi`](https://pypi.org/project/moq-ffi/). The raw UniFFI bindings this package wraps. Use it directly only if you need the unwrapped `Moq`-prefixed API.
 - [MoQ project](https://github.com/moq-dev/moq). Full monorepo with Rust server, TypeScript browser lib, and more.

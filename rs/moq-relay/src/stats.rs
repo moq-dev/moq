@@ -16,9 +16,10 @@ use serde::{Deserialize, Serialize};
 /// publishes a single `<prefix>/node/<node>` broadcast (or `<prefix>/node`
 /// when [`Self::node`] is unset) on the cluster origin. Each frame is a
 /// JSON map of broadcast path to a cumulative counter snapshot; an entry
-/// surfaces whenever its snapshot changes, and lingers for
-/// [`Self::retention`] ticks past the most recent change. See
-/// `moq_net::stats` for the per-field semantics.
+/// surfaces while the broadcast is live (any open counter exceeds its
+/// `*_closed` counterpart) and on the tick its snapshot changes, then is
+/// dropped once fully closed. See `moq_net::stats` for the per-field
+/// semantics.
 #[derive(Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -52,12 +53,6 @@ pub struct StatsConfig {
 	#[arg(long = "stats-interval", env = "MOQ_STATS_INTERVAL")]
 	pub interval: Option<u64>,
 
-	/// Number of intervals an entry lingers in the emitted frame after its
-	/// last observed change. Defaults to 1. A short reconnect window keeps
-	/// the entry visible across brief disconnects.
-	#[arg(long = "stats-retention", env = "MOQ_STATS_RETENTION")]
-	pub retention: Option<u32>,
-
 	/// Node identifier appended to the advertised stats path to disambiguate
 	/// broadcasts when multiple relays share a cluster origin. Without this,
 	/// peer relays would publish to the same `<prefix>/node` path and the
@@ -73,22 +68,21 @@ pub struct StatsConfig {
 impl StatsConfig {
 	/// Build a [`Stats`] aggregator from this config, publishing on `origin`.
 	///
-	/// Returns [`Stats::disabled`] (a no-op aggregator) when [`Self::enabled`]
+	/// Returns a no-op aggregator ([`Stats::default`]) when [`Self::enabled`]
 	/// is false, so the relay can attach the result unconditionally.
 	pub fn build(&self, origin: OriginProducer) -> Stats {
 		if !self.enabled.unwrap_or(false) {
-			return Stats::disabled();
+			return Stats::default();
 		}
 		let prefix = self.prefix.clone().unwrap_or_else(|| ".stats".to_string());
 		let interval = Duration::from_secs(self.interval.unwrap_or(1).max(1));
-		let retention = self.retention.unwrap_or(1).max(1);
 		let node = self.node.clone().map(PathOwned::from);
-		tracing::info!(prefix, interval_secs = interval.as_secs(), retention, node = ?node, "stats publishing enabled");
+		tracing::info!(prefix, interval_secs = interval.as_secs(), node = ?node, "stats publishing enabled");
 		// Fully qualified to disambiguate from this module's clap-derived StatsConfig.
-		let config = moq_net::StatsConfig::new(origin)
+		let config = moq_net::StatsConfig::new()
+			.with_origin(origin)
 			.with_prefix(prefix)
 			.with_interval(interval)
-			.with_retention(retention)
 			.with_node(node);
 		Stats::new(config)
 	}

@@ -49,7 +49,7 @@ moq-audio = { version = "0.0.1", path = "rs/moq-audio" }
 moq-loc = { version = "0.1", path = "rs/moq-loc" }
 moq-msf = { version = "0.2", path = "rs/moq-msf" }
 moq-mux = { version = "0.5", path = "rs/moq-mux" }
-moq-native = { version = "0.15", path = "rs/moq-native", default-features = false }
+moq-native = { version = "0.16", path = "rs/moq-native", default-features = false }
 moq-net = { version = "0.1", path = "rs/moq-net" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
 qmux = { version = "0.0.7", default-features = false }

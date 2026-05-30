@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.15.0"
+version = "0.16.1"
 edition = "2024"
 rust-version.workspace = true
 
@@ -26,6 +26,7 @@ jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["dep:qmux"]
 ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring"]
 tokio-console = ["dep:console-subscriber"]
+android-logcat = ["dep:tracing-android"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
@@ -60,6 +61,9 @@ web-transport-noq = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
 web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+tracing-android = { version = "0.2", optional = true }
 
 [dev-dependencies]
 bytes = "1"

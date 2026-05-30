@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 [manifest]
 members = [
     "moq",
+    "moq-ffi",
     "moq-rs",
 ]
 
@@ -97,8 +98,19 @@ dev = [
 ]
 
 [[package]]
+name = "moq-ffi"
+source = { editable = "py/moq-ffi" }
+
+[[package]]
 name = "moq-rs"
+version = "0.3.0"
 source = { editable = "py/moq-rs" }
+dependencies = [
+    { name = "moq-ffi" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "moq-ffi", editable = "py/moq-ffi" }]
 
 [[package]]
 name = "nodeenv"

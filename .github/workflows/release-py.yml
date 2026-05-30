@@ -1,150 +1,88 @@
 name: Release Py
 
-# Driven by the `moq-ffi-v*` tag that release-plz pushes when it bumps
-# rs/moq-ffi/Cargo.toml. The wheel inherits its version from that same
-# Cargo.toml (via maturin's dynamic version), so the moq-rs package
-# stays lockstep with the moq-ffi crate without a separate bump.
+# Publishes the pure-python `moq-rs` wrapper wheel (import name `moq`) to PyPI.
+# This is the package most callers install; the raw `moq-ffi` bindings it
+# depends on are built separately (release-py-ffi.yml).
+#
+# Versioned independently of the moq-ffi crate: bump `version` in
+# py/moq-rs/pyproject.toml by hand in a normal PR. On merge to main this reads
+# that version and publishes only if it isn't already on PyPI. That registry
+# check is the release gate (the same model release-plz uses for crates), so
+# there's no separate tag to remember. The wrapper depends on `moq-ffi ~= 0.2.x`
+# and floats to the latest compatible moq-ffi patch, so a moq-ffi patch needs no
+# wrapper re-release.
 
 on:
   push:
-    tags:
-      - "moq-ffi-v*"
+    branches:
+      - main
+    paths:
+      - "py/moq-rs/**"
+      - ".github/workflows/release-py.yml"
+      - ".github/scripts/release.sh"
   pull_request:
     paths:
+      - "py/moq-rs/**"
       - ".github/workflows/release-py.yml"
       - ".github/scripts/release.sh"
 
 permissions:
   contents: read
 
+# Separate PR builds from mainline publishes so a PR run can't queue ahead of
+# (and delay) a release on main.
 concurrency:
-  group: release-py
+  group: release-py-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  parse-version:
-    name: Parse version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.parse.outputs.version }}
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-
-      - name: Parse version
-        id: parse
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            CARGO_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
-          else
-            .github/scripts/release.sh parse-version moq-ffi
-          fi
-
-      # Maturin reads the wheel version from rs/moq-ffi/Cargo.toml (via
-      # `dynamic = ["version"]` in pyproject.toml). If a tag is pushed by
-      # hand without bumping Cargo.toml first, the wheel would ship with
-      # the previous version and PyPI would reject the duplicate upload.
-      - name: Verify Cargo.toml matches tag
-        if: github.event_name == 'push'
-        env:
-          TAG_VERSION: ${{ steps.parse.outputs.version }}
-        run: |
-          CARGO_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          if [[ "$TAG_VERSION" != "$CARGO_VERSION" ]]; then
-            echo "::error::Tag version ($TAG_VERSION) does not match rs/moq-ffi/Cargo.toml version ($CARGO_VERSION). Bump Cargo.toml before tagging."
-            exit 1
-          fi
-          echo "Cargo.toml version matches tag: $TAG_VERSION"
-
   build:
-    name: Build wheels (${{ matrix.target }})
-    needs: [parse-version]
-    runs-on: ${{ matrix.os }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            # Use manylinux_2_28 for aarch64-linux to get a newer GCC.
-            # manylinux2014 ships GCC 4.8.5 which can't compile aws-lc-sys.
-            manylinux: 2_28
-            # The cross image sets TARGET_CC/CXX which leaks into host builds.
-            before-script-linux: "unset TARGET_CC TARGET_CXX"
-          - target: x86_64-apple-darwin
-            os: macos-15-intel
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: "3.12"
-
-      - name: Build wheels
-        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
-        with:
-          # py/moq-rs/pyproject.toml drives the build; its [tool.maturin]
-          # block points at rs/moq-ffi/Cargo.toml.
-          working-directory: py/moq-rs
-          args: --release --out dist
-          target: ${{ matrix.target }}
-          manylinux: ${{ matrix.manylinux || 'auto' }}
-          before-script-linux: ${{ matrix.before-script-linux || '' }}
-
-      - name: Upload wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: python-${{ matrix.target }}
-          path: py/moq-rs/dist/*.whl
-
-  sdist:
-    name: Build sdist
-    needs: [parse-version]
+    name: Build wheel + sdist
     runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'moq-dev' }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      # On PRs we always "publish" into the dry-run sense (build only). On main
+      # we publish only when the version isn't already on PyPI.
+      publish: ${{ github.event_name == 'push' && steps.pypi.outputs.exists == 'false' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: "3.12"
+      - name: Read version
+        id: version
+        run: .github/scripts/release.sh read-version py/moq-rs/pyproject.toml
 
-      - name: Build sdist
-        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
-        with:
-          working-directory: py/moq-rs
-          command: sdist
-          args: --out dist
+      # The release gate: skip publishing a version that's already on PyPI
+      # (re-uploads are rejected anyway, but this keeps the run green and makes
+      # the no-op explicit). Runs on PRs too, as an informational dry-run.
+      - name: Check PyPI
+        id: pypi
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: .github/scripts/release.sh pypi-exists moq-rs "$VERSION"
 
-      - name: Upload sdist
+      - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
+        with:
+          determinate: false
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
+
+      - name: Build
+        run: nix develop --command just py package
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: python-sdist
-          path: py/moq-rs/dist/*.tar.gz
+          name: python-wrapper
+          path: py/dist/*
 
   publish:
     name: Publish to PyPI
-    needs: [build, sdist]
+    needs: [build]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: ${{ needs.build.outputs.publish == 'true' }}
     environment:
       name: pypi
       url: https://pypi.org/p/moq-rs
@@ -152,12 +90,11 @@ jobs:
       id-token: write
 
     steps:
-      - name: Download wheels
+      - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          pattern: python-*
+          name: python-wrapper
           path: dist
-          merge-multiple: true
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

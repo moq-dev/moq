@@ -24,7 +24,7 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// Receiver-side bandwidth producer for PROBE feedback. None disables the
 	/// feature (used by versions that don't carry probe streams).
 	pub recv_bandwidth: Option<BandwidthProducer>,
-	/// Stats aggregator for this session's ingress. Use [`StatsHandle::disabled`]
+	/// Stats aggregator for this session's ingress. Use [`StatsHandle::default`]
 	/// to opt out.
 	pub stats: StatsHandle,
 	pub version: Version,
@@ -36,6 +36,10 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 	origin: Option<OriginProducer>,
 	stats: StatsHandle,
+	/// Per-session ingress broadcast-subscription tracker. Each upstream
+	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
+	/// distinct upstream sessions feeding each broadcast.
+	broadcasts: crate::SessionBroadcasts,
 	recv_bandwidth: Option<BandwidthProducer>,
 	// Session-level origin id shared with the Publisher. Used to filter out
 	// reflected announces: we ask the peer (via AnnounceInterest.exclude_hop)
@@ -61,10 +65,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// loop detection. If no origin is attached (the announce loop is
 		// inert anyway), fall back to a random session-local id.
 		let self_origin = config.origin.as_deref().copied().unwrap_or_else(crate::Origin::random);
+		let broadcasts = config.stats.subscriber_broadcasts();
 		Self {
 			session: config.session,
 			origin: config.origin,
 			stats: config.stats,
+			broadcasts,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
 			subscribes: Default::default(),
@@ -337,6 +343,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// is tracked separately by the announce loop's `stats_guards`.
 		let abs = self.origin.as_ref().unwrap().absolute(&path);
 		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&track.name));
+		// The per-(session, broadcast) `broadcasts` sentinel is taken later, once
+		// the upstream confirms with SUBSCRIBE_OK (see `run_track_stream`), so a
+		// sub cancelled before then isn't counted as a feeding session.
 
 		self.subscribes.lock().insert(
 			id,
@@ -406,6 +415,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let lite::SubscribeResponse::Ok(_info) = resp else {
 			return Err(Error::ProtocolViolation);
 		};
+
+		// Upstream confirmed the subscription, so this session is now actively
+		// feeding the broadcast: take the `broadcasts` sentinel. It drops with
+		// this fn (subscription end / cancel), releasing `broadcasts_closed`.
+		let abs = self.origin.as_ref().unwrap().absolute(&msg.broadcast);
+		let _broadcast_sub = self.broadcasts.subscribe(&abs);
 
 		// TODO handle additional SUBSCRIBE_OK and SUBSCRIBE_DROP messages.
 		stream.reader.closed().await?;

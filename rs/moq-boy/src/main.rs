@@ -439,7 +439,7 @@ fn run_emulator(
 #[tokio::main]
 async fn main() -> Result<()> {
 	let config = Config::parse();
-	config.log.init();
+	config.log.init()?;
 
 	#[cfg(feature = "jemalloc")]
 	let jemalloc = moq_native::jemalloc::run();
