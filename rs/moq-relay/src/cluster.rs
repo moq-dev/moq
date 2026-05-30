@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::Context;
-use moq_net::{BroadcastProducer, Origin, OriginConsumer, OriginProducer, Path, Stats, Tier};
+use moq_net::{BroadcastProducer, Origin, OriginProducer, Path, Stats, Tier};
 use tokio::task::AbortHandle;
 use url::Url;
 
@@ -212,9 +212,12 @@ impl Cluster {
 		self
 	}
 
-	/// Returns an [`OriginConsumer`] scoped to this session's subscribe permissions.
-	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginConsumer> {
-		Some(self.origin.with_root(&token.root)?.scope(&token.subscribe)?.consume())
+	/// Returns an [`OriginProducer`] scoped to this session's subscribe permissions.
+	///
+	/// Pass straight to [`moq_net::Server::with_publish`] (or the
+	/// equivalent per-request setter). moq-net derives the read handle.
+	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginProducer> {
+		self.origin.with_root(&token.root)?.scope(&token.subscribe)
 	}
 
 	/// Returns an [`OriginProducer`] scoped to this session's publish permissions.
@@ -445,7 +448,7 @@ impl Cluster {
 
 		// Cluster-to-cluster traffic is internal by definition.
 		let cs = client
-			.with_publish(self.origin.consume())
+			.with_publish(self.origin.clone())
 			.with_consume(self.origin.clone())
 			.with_stats(self.stats.tier(Tier::Internal))
 			.connect(url.clone())

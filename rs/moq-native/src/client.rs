@@ -314,7 +314,7 @@ impl Client {
 		self
 	}
 
-	pub fn with_publish(mut self, publish: impl Into<Option<moq_net::OriginConsumer>>) -> Self {
+	pub fn with_publish(mut self, publish: impl Into<Option<moq_net::OriginProducer>>) -> Self {
 		self.moq = self.moq.with_publish(publish);
 		self
 	}

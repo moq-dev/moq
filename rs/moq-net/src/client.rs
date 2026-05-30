@@ -1,6 +1,6 @@
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Error,
-	NEGOTIATED, Origin, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
+	NEGOTIATED, Origin, OriginProducer, Session, StatsHandle, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -8,7 +8,7 @@ use crate::{
 /// A MoQ client session builder.
 #[derive(Default, Clone)]
 pub struct Client {
-	publish: Option<OriginConsumer>,
+	publish: Option<OriginProducer>,
 	consume: Option<OriginProducer>,
 	stats: StatsHandle,
 	versions: Versions,
@@ -19,24 +19,20 @@ impl Client {
 		Default::default()
 	}
 
-	/// Override the publish-side source: the client reads broadcasts
-	/// from this [`OriginConsumer`] to forward to the remote. When set,
-	/// [`Session::publisher`] becomes a standalone auto-created
-	/// [`OriginProducer`] decoupled from the wire (the caller drives
-	/// publishing through whatever produces into the consumer they
-	/// passed). When unset, the session's auto-created publisher
-	/// supplies the wire as well.
-	pub fn with_publish(mut self, publish: impl Into<Option<OriginConsumer>>) -> Self {
+	/// Override the publish-side origin: the [`OriginProducer`] this
+	/// client reads from when forwarding local broadcasts to the remote.
+	/// Surfaced as [`Session::publisher`] so callers can keep
+	/// `.announce(path, broadcast)`-ing after connect.
+	///
+	/// Pre-scoped via [`OriginProducer::scope`] for token-gated relays.
+	pub fn with_publish(mut self, publish: impl Into<Option<OriginProducer>>) -> Self {
 		self.publish = publish.into();
 		self
 	}
 
-	/// Override the consume-side sink: the client writes broadcasts
-	/// from the remote into this [`OriginProducer`]. When set,
-	/// [`Session::consumer`] becomes a standalone auto-created
-	/// [`OriginConsumer`] decoupled from the wire (the caller reads
-	/// announcements through their own producer's consumer view). When
-	/// unset, the session's auto-created consumer reads from the wire.
+	/// Override the consume-side origin: the [`OriginProducer`] this
+	/// client writes into as the remote announces broadcasts. A consumer
+	/// view is surfaced as [`Session::consumer`].
 	pub fn with_consume(mut self, consume: impl Into<Option<OriginProducer>>) -> Self {
 		self.consume = consume.into();
 		self
@@ -52,9 +48,10 @@ impl Client {
 
 	/// Set both publish and consume from one shared [`OriginProducer`].
 	///
-	/// Equivalent to `with_publish(origin.consume()).with_consume(origin)`.
+	/// Equivalent to calling [`with_publish`](Self::with_publish) and
+	/// [`with_consume`](Self::with_consume) with the same origin.
 	pub fn with_origin(self, origin: OriginProducer) -> Self {
-		self.with_publish(origin.consume()).with_consume(origin)
+		self.with_publish(origin.clone()).with_consume(origin)
 	}
 
 	pub fn with_versions(mut self, versions: Versions) -> Self {
@@ -65,16 +62,16 @@ impl Client {
 	/// Perform the MoQ handshake as a client negotiating the version.
 	///
 	/// The returned [`Session`] always exposes both
-	/// [`publisher`](Session::publisher) and [`consumer`](Session::consumer).
-	/// When the caller didn't override via [`Self::with_publish`] /
-	/// [`Self::with_consume`] / [`Self::with_origin`], a single fresh
-	/// [`Origin`] is auto-created and shared between both sides (the
-	/// typical full-duplex client). The same origin drives the wire.
-	/// When the caller did override either side, the session's publisher
-	/// / consumer for that side become standalone auto-created
-	/// no-ops decoupled from the wire.
+	/// [`publisher`](Session::publisher) and [`consumer`](Session::consumer):
+	/// whatever was set via [`Self::with_publish`] / [`Self::with_consume`]
+	/// / [`Self::with_origin`], or a fresh auto-created [`Origin`] for
+	/// any side the caller left unset. When neither side is set, both
+	/// default to the same shared origin (the typical full-duplex client).
 	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
-		let (publisher, consumer_view, publish, consume) = resolve_origins(self.publish.clone(), self.consume.clone());
+		let (publisher, consumer) = resolve_origins(self.publish.clone(), self.consume.clone());
+		let publish = Some(publisher.consume());
+		let consume = Some(consumer.clone());
+		let consumer_view = consumer.consume();
 
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
@@ -261,68 +258,20 @@ impl Client {
 	}
 }
 
-/// Resolve `(Session.publisher, Session.consumer, wire-publish, wire-consume)`
-/// from the user-supplied overrides.
-///
-/// The session always exposes a publisher / consumer; whether they drive
-/// the wire depends on whether the user overrode that side:
-/// - Neither overridden: one shared origin powers everything (duplex).
-/// - Override only publish: the user's consumer drives the wire publish
-///   side; `Session.publisher` becomes a standalone no-op producer.
-///   `Session.consumer` and wire-consume share a fresh shared origin.
-/// - Override only consume: symmetric to above.
-/// - Both overridden: `Session.publisher` and `Session.consumer` are
-///   independent standalone defaults (no-ops); the wire uses what the
-///   user passed.
+/// Pick the publish / consume [`OriginProducer`]s for a session,
+/// defaulting any side the caller didn't set. When both are unset, a
+/// single shared fresh origin powers both (the typical duplex client).
 pub(crate) fn resolve_origins(
-	publish: Option<OriginConsumer>,
+	publish: Option<OriginProducer>,
 	consume: Option<OriginProducer>,
-) -> (
-	OriginProducer,
-	OriginConsumer,
-	Option<OriginConsumer>,
-	Option<OriginProducer>,
-) {
+) -> (OriginProducer, OriginProducer) {
 	match (publish, consume) {
+		(Some(p), Some(c)) => (p, c),
+		(Some(p), None) => (p, Origin::random().produce()),
+		(None, Some(c)) => (Origin::random().produce(), c),
 		(None, None) => {
-			// Duplex default: one shared origin powers Session.publisher,
-			// Session.consumer, and both wire directions.
 			let shared = Origin::random().produce();
-			let publisher = shared.clone();
-			let consumer_view = shared.consume();
-			let wire_publish = shared.consume();
-			let wire_consume = shared;
-			(publisher, consumer_view, Some(wire_publish), Some(wire_consume))
-		}
-		(Some(wire_publish), None) => {
-			// User drives wire-publish via their own consumer. Surface a
-			// standalone publisher for Session.publisher (no-op for wire),
-			// but the consume side stays auto-wired: one shared origin
-			// drives Session.consumer + wire-consume.
-			let publisher = Origin::random().produce();
-			let consume_shared = Origin::random().produce();
-			let consumer_view = consume_shared.consume();
-			(publisher, consumer_view, Some(wire_publish), Some(consume_shared))
-		}
-		(None, Some(wire_consume)) => {
-			// Symmetric: user-provided consume producer drives wire; the
-			// publish side gets a fresh shared origin.
-			let publish_shared = Origin::random().produce();
-			let publisher = publish_shared.clone();
-			let consumer_view = Origin::random().produce().consume();
-			(
-				publisher,
-				consumer_view,
-				Some(publish_shared.consume()),
-				Some(wire_consume),
-			)
-		}
-		(Some(wire_publish), Some(wire_consume)) => {
-			// Fully manual: Session.publisher / Session.consumer are
-			// standalone no-ops, the wire uses the user's overrides.
-			let publisher = Origin::random().produce();
-			let consumer_view = Origin::random().produce().consume();
-			(publisher, consumer_view, Some(wire_publish), Some(wire_consume))
+			(shared.clone(), shared)
 		}
 	}
 }

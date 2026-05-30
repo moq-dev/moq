@@ -1,6 +1,6 @@
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Error,
-	NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
+	NEGOTIATED, OriginProducer, Session, StatsHandle, Version, Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -8,7 +8,7 @@ use crate::{
 /// A MoQ server session builder.
 #[derive(Default, Clone)]
 pub struct Server {
-	publish: Option<OriginConsumer>,
+	publish: Option<OriginProducer>,
 	consume: Option<OriginProducer>,
 	stats: StatsHandle,
 	versions: Versions,
@@ -19,19 +19,18 @@ impl Server {
 		Default::default()
 	}
 
-	/// Override the publish-side source: the server reads broadcasts
-	/// from this [`OriginConsumer`] to forward to the connected client.
-	/// When set, [`Session::publisher`] becomes a standalone auto-created
-	/// [`OriginProducer`] decoupled from the wire.
-	pub fn with_publish(mut self, publish: impl Into<Option<OriginConsumer>>) -> Self {
+	/// Override the publish-side origin: the [`OriginProducer`] the
+	/// server reads from when forwarding broadcasts to the connected
+	/// client. Surfaced as [`Session::publisher`]. Pre-scoped via
+	/// [`OriginProducer::scope`] for token-gated relays.
+	pub fn with_publish(mut self, publish: impl Into<Option<OriginProducer>>) -> Self {
 		self.publish = publish.into();
 		self
 	}
 
-	/// Override the consume-side sink: the server writes broadcasts
-	/// from the client into this [`OriginProducer`]. When set,
-	/// [`Session::consumer`] becomes a standalone auto-created
-	/// [`OriginConsumer`] decoupled from the wire.
+	/// Override the consume-side origin: the [`OriginProducer`] the
+	/// server writes into as the client announces broadcasts. A consumer
+	/// view is surfaced as [`Session::consumer`].
 	pub fn with_consume(mut self, consume: impl Into<Option<OriginProducer>>) -> Self {
 		self.consume = consume.into();
 		self
@@ -46,10 +45,8 @@ impl Server {
 	}
 
 	/// Set both publish and consume from one shared [`OriginProducer`].
-	///
-	/// Equivalent to `with_publish(origin.consume()).with_consume(origin)`.
 	pub fn with_origin(self, origin: OriginProducer) -> Self {
-		self.with_publish(origin.consume()).with_consume(origin)
+		self.with_publish(origin.clone()).with_consume(origin)
 	}
 
 	pub fn with_versions(mut self, versions: Versions) -> Self {
@@ -60,15 +57,16 @@ impl Server {
 	/// Perform the MoQ handshake as a server for the given session.
 	///
 	/// The returned [`Session`] always exposes both
-	/// [`publisher`](Session::publisher) and [`consumer`](Session::consumer).
-	/// When the caller didn't override either side, a single fresh
-	/// [`Origin`](crate::Origin) is auto-created and shared between
-	/// both. The same origin drives the wire. When the caller
-	/// overrode either side, the session's accessor for that side
-	/// becomes a standalone auto-created no-op decoupled from the wire.
+	/// [`publisher`](Session::publisher) and [`consumer`](Session::consumer):
+	/// whatever was set via [`Self::with_publish`] / [`Self::with_consume`]
+	/// / [`Self::with_origin`], or a fresh auto-created
+	/// [`Origin`](crate::Origin) for any side the caller left unset. When
+	/// neither side is set, both default to the same shared origin.
 	pub async fn accept<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
-		let (publisher, consumer_view, publish, consume) =
-			crate::client::resolve_origins(self.publish.clone(), self.consume.clone());
+		let (publisher, consumer) = crate::client::resolve_origins(self.publish.clone(), self.consume.clone());
+		let publish = Some(publisher.consume());
+		let consume = Some(consumer.clone());
+		let consumer_view = consumer.consume();
 
 		let (encoding, supported) = match session.protocol() {
 			Some(ALPN_18) => {
