@@ -22,7 +22,7 @@ pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	/// The origin we read local broadcasts from. None gives this session a
 	/// dummy, immediately-closed origin (i.e. nothing to publish).
 	pub origin: Option<OriginConsumer>,
-	/// Stats aggregator for this session's egress. Use [`MoqStats::disabled`]
+	/// Stats aggregator for this session's egress. Use [`MoqStats::default`]
 	/// to opt out.
 	pub stats: MoqStats,
 	pub version: Version,

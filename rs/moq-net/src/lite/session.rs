@@ -13,7 +13,7 @@ pub fn start<S: web_transport_trait::Session>(
 	publish: Option<OriginConsumer>,
 	// We will consume any remote broadcasts, inserting them into this origin.
 	subscribe: Option<OriginProducer>,
-	// Tier-scoped stats handle. Pass [`StatsHandle::disabled`] to opt out.
+	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
 	stats: StatsHandle,
 	// The version of the protocol to use.
 	version: Version,

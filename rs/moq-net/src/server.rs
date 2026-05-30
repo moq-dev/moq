@@ -31,7 +31,7 @@ impl Server {
 
 	/// Attach a tier-scoped [`StatsHandle`]. Per-broadcast and per-subscription
 	/// counters will be bumped through this handle for the lifetime of the session.
-	/// Pass [`StatsHandle::disabled`] (also the default) to opt out.
+	/// Pass [`StatsHandle::default`] (a no-op handle) to opt out.
 	pub fn with_stats(mut self, stats: StatsHandle) -> Self {
 		self.stats = stats;
 		self

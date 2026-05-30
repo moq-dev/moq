@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.16](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.15...moq-ffi-v0.2.16) - 2026-05-30
+
+### Other
+
+- ship moq.h and linux staticlibs so the Go module builds for consumers ([#1549](https://github.com/moq-dev/moq/pull/1549))
+- streaming media import + cross-language interop smoke test ([#1529](https://github.com/moq-dev/moq/pull/1529))
+- re-export FFI, session.shutdown(); explicit Origin wiring ([#1526](https://github.com/moq-dev/moq/pull/1526))
+
 ## [0.2.15](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.14...moq-ffi-v0.2.15) - 2026-05-27
 
 ### Other

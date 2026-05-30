@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
 use tracing::Level;
@@ -34,40 +35,49 @@ impl Log {
 		LevelFilter::from_level(self.level)
 	}
 
-	pub fn init(&self) {
+	pub fn init(&self) -> anyhow::Result<()> {
 		let filter = EnvFilter::builder()
 			.with_default_directive(self.level().into()) // Default to our -q/-v args
 			.from_env_lossy() // Allow overriding with RUST_LOG
-			.add_directive("h2=warn".parse().unwrap())
-			.add_directive("quinn=info".parse().unwrap())
-			.add_directive("tungstenite=info".parse().unwrap())
-			.add_directive("rustls=info".parse().unwrap())
-			.add_directive("tracing::span=off".parse().unwrap())
-			.add_directive("tracing::span::active=off".parse().unwrap())
-			.add_directive("tokio=info".parse().unwrap())
-			.add_directive("runtime=info".parse().unwrap());
+			.add_directive("h2=warn".parse()?)
+			.add_directive("quinn=info".parse()?)
+			.add_directive("tungstenite=info".parse()?)
+			.add_directive("rustls=info".parse()?)
+			.add_directive("tracing::span=off".parse()?)
+			.add_directive("tracing::span::active=off".parse()?)
+			.add_directive("tokio=info".parse()?)
+			.add_directive("runtime=info".parse()?);
 
-		let fmt_layer = tracing_subscriber::fmt::layer()
-			.with_writer(std::io::stderr)
-			.with_filter(filter);
+		let registry = tracing_subscriber::registry();
+
+		// On Android, route logs to logcat so they can be inspected via ADB/Android Studio.
+		// Everywhere else, format to stderr.
+		#[cfg(all(target_os = "android", feature = "android-logcat"))]
+		let registry = {
+			let logcat_layer = tracing_android::layer("MoQNative")
+				.context("failed to initialize Android logcat layer")?
+				.with_filter(filter);
+			registry.with(logcat_layer)
+		};
+
+		#[cfg(not(all(target_os = "android", feature = "android-logcat")))]
+		let registry = {
+			let fmt_layer = tracing_subscriber::fmt::layer()
+				.with_writer(std::io::stderr)
+				.with_filter(filter);
+			registry.with(fmt_layer)
+		};
 
 		#[cfg(feature = "tokio-console")]
-		{
-			let console_layer = console_subscriber::spawn();
-			tracing_subscriber::registry()
-				.with(fmt_layer)
-				.with(console_layer)
-				.init();
-		}
+		let registry = registry.with(console_subscriber::spawn());
 
-		#[cfg(not(feature = "tokio-console"))]
-		{
-			tracing_subscriber::registry().with(fmt_layer).init();
-		}
+		registry.try_init().context("failed to set global tracing subscriber")?;
 
 		// Start deadlock detection thread (only in debug builds)
 		#[cfg(debug_assertions)]
 		std::thread::spawn(Self::deadlock_detector);
+
+		Ok(())
 	}
 
 	#[cfg(debug_assertions)]

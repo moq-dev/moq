@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.1...moq-mux-v0.5.2) - 2026-05-30
+
+### Other
+
+- rename conducer crate to kio ([#1547](https://github.com/moq-dev/moq/pull/1547))
+- add seek(sequence) on importers for explicit group boundaries ([#1515](https://github.com/moq-dev/moq/pull/1515))
+
 ## [0.5.1](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.0...moq-mux-v0.5.1) - 2026-05-24
 
 ### Other
