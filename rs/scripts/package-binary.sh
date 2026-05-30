@@ -108,50 +108,12 @@ chmod 0755 "$PACKAGE_DIR/bin/$CRATE"
 # On macOS the nix toolchain links the nix-store copy of libiconv, whose
 # absolute path doesn't exist on a user's Mac, so dyld aborts at startup
 # (the brew channel's "Library not loaded: /nix/store/.../libiconv.2.dylib").
-# Rewrite every non-system LC_LOAD_DYLIB to @rpath/<basename>, strip leaked
-# /nix rpaths, and add /usr/lib so dyld resolves them from the system dyld
-# shared cache (where libiconv et al live) like a plain `cargo build` does.
-# See rs/moq-gst/scrub.sh for the same treatment on the GStreamer plugin.
+# Rewrite the leaked paths to load from the system dyld shared cache (via
+# /usr/lib), like a plain `cargo build` does. scrub-macho.sh also asserts no
+# /nix path survives, so this can't silently ship again.
 if [[ "$(uname)" == "Darwin" ]]; then
     bin="$PACKAGE_DIR/bin/$CRATE"
-
-    # tail -n +2 drops otool's header line (the binary's own path).
-    otool -L "$bin" |
-        tail -n +2 |
-        awk '{print $1}' |
-        { grep -vE '^(@|/usr/lib/|/System/)' || true; } |
-        sort -u |
-        while read -r ref; do
-            install_name_tool -change "$ref" "@rpath/$(basename "$ref")" "$bin"
-        done
-
-    otool -l "$bin" |
-        awk '/^ *cmd LC_RPATH$/{f=1; next} f && /^ *path /{print $2; f=0}' |
-        { grep '^/nix/' || true; } |
-        while read -r rp; do
-            install_name_tool -delete_rpath "$rp" "$bin"
-        done
-    install_name_tool -add_rpath /usr/lib "$bin"
-
-    # Whitelist assertion: nothing may resolve through /nix anymore, so this
-    # can't silently ship again.
-    bad="$(otool -L "$bin" |
-        tail -n +2 |
-        awk '{print $1}' |
-        { grep -vE '^(@|/usr/lib/|/System/)' || true; })"
-    if [[ -n "$bad" ]]; then
-        echo "Error: $bin has non-portable LC_LOAD_DYLIB entries:" >&2
-        echo "$bad" >&2
-        exit 1
-    fi
-    bad_rp="$(otool -l "$bin" |
-        awk '/^ *cmd LC_RPATH$/{f=1; next} f && /^ *path /{print $2; f=0}' |
-        { grep '^/nix/' || true; })"
-    if [[ -n "$bad_rp" ]]; then
-        echo "Error: $bin has /nix LC_RPATH entries:" >&2
-        echo "$bad_rp" >&2
-        exit 1
-    fi
+    "$SCRIPT_DIR/scrub-macho.sh" "$bin"
 
     # Prove dyld actually loads the scrubbed binary. host==target is enforced
     # above, so it runs natively; --help triggers dyld's dependency load (the

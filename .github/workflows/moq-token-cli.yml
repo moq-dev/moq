@@ -9,6 +9,7 @@ on:
       - ".github/workflows/moq-token-cli.yml"
       - ".github/scripts/release.sh"
       - "rs/scripts/package-binary.sh"
+      - "rs/scripts/scrub-macho.sh"
       - "packaging/moq-token-cli/**"
       - ".github/actions/setup-packaging/**"
 
