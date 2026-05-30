@@ -65,6 +65,6 @@ int32_t moq_consume_audio_ordered(uint32_t catalog, uint32_t index, uint64_t max
 int32_t moq_consume_audio_close(uint32_t track);
 
 // Consuming: Frames
-int32_t moq_consume_frame_chunk(uint32_t frame, uint32_t index, moq_frame *dst);
+int32_t moq_consume_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_frame_close(uint32_t frame);
 ```
