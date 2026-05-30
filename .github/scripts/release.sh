@@ -79,14 +79,18 @@ create_release() {
     fi
 }
 
-# Read the static `version = "x.y.z"` from a pyproject.toml (or any TOML with a
-# top-level version key). Writes version=<ver> to $GITHUB_OUTPUT and stdout.
+# Read the static `version = "x.y.z"` from the [project] table of a
+# pyproject.toml. Scoped to [project] so a `version` key in another table
+# (e.g. a [tool.*] section) can't be picked up by mistake. Writes
+# version=<ver> to $GITHUB_OUTPUT and stdout.
 read_version() {
     local manifest="$1"
     local version
-    version=$(grep -m1 '^version' "$manifest" | sed 's/.*"\(.*\)".*/\1/')
+    version=$(sed -n '/^\[project\]/,/^\[/{
+        s/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p
+    }' "$manifest" | head -n1)
     if [[ -z "$version" ]]; then
-        echo "Could not read version from $manifest" >&2
+        echo "Could not read version from [project] in $manifest" >&2
         exit 1
     fi
     if [[ -n "${GITHUB_OUTPUT:-}" ]]; then

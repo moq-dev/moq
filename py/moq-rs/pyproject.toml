@@ -10,8 +10,8 @@ packages = ["moq"]
 name = "moq-rs"
 # Distribution is `moq-rs` (the `moq` name is taken on PyPI); the import name
 # stays `moq`. Versioned independently of the moq-ffi crate: bump this by hand
-# in a PR. On merge to main, release-py-wrapper.yml publishes to PyPI if this
-# version isn't already there (no tag needed; the registry is the gate).
+# in a PR. On merge to main, release-py.yml publishes to PyPI if this version
+# isn't already there (no tag needed; the registry is the gate).
 # Starts at 0.3.0 to open a new line above the old lockstep 0.2.x releases that
 # bundled the bindings.
 version = "0.3.0"

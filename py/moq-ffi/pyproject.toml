@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "moq-ffi"
 # Version is injected at build time from the moq-ffi-v* tag (see
-# .github/workflows/release-py.yml). For local dev `maturin develop`
+# .github/workflows/release-py-ffi.yml). For local dev `maturin develop`
 # reads it from rs/moq-ffi/Cargo.toml.
 dynamic = ["version"]
 description = "Raw UniFFI bindings for the Media over QUIC Rust crates. Most callers want the ergonomic `moq` wrapper instead."
