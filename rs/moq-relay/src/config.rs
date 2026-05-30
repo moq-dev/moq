@@ -62,7 +62,7 @@ impl Config {
 	/// the logger.
 	pub fn load() -> anyhow::Result<Self> {
 		let config = Self::parse_and_merge(std::env::args_os())?;
-		config.log.init();
+		config.log.init()?;
 		tracing::trace!(?config, "final config");
 		Ok(config)
 	}

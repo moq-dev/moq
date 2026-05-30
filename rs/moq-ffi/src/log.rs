@@ -21,42 +21,10 @@ pub fn moq_log_level(level: String) -> Result<(), MoqError> {
 		return Err(MoqError::Log("logging already initialized".into()));
 	}
 
-	init_logging(level)?;
+	moq_native::Log::new(level)
+		.init()
+		.inspect_err(|_| INITIALIZED.store(false, Ordering::SeqCst))
+		.map_err(|err| MoqError::Log(err.to_string()))?;
 
-	Ok(())
-}
-
-#[cfg(all(target_os = "android", feature = "android-logcat"))]
-fn init_logging(level: Level) -> Result<(), MoqError> {
-	use tracing::level_filters::LevelFilter;
-	use tracing_subscriber::EnvFilter;
-	use tracing_subscriber::Layer;
-	use tracing_subscriber::layer::SubscriberExt;
-	use tracing_subscriber::util::SubscriberInitExt;
-
-	let filter = EnvFilter::builder()
-		.with_default_directive(LevelFilter::from_level(level).into())
-		.from_env_lossy()
-		.add_directive("h2=warn".parse().unwrap())
-		.add_directive("quinn=trace".parse().unwrap())
-		.add_directive("tungstenite=info".parse().unwrap())
-		.add_directive("rustls=info".parse().unwrap())
-		.add_directive("tracing::span=off".parse().unwrap())
-		.add_directive("tracing::span::active=off".parse().unwrap())
-		.add_directive("tokio=info".parse().unwrap())
-		.add_directive("runtime=info".parse().unwrap());
-
-	let logcat_layer = tracing_android::layer("MoQNative")
-		.map_err(|err| MoqError::Log(format!("failed to initialize Android logcat layer: {err}")))?
-		.with_filter(filter);
-
-	tracing_subscriber::registry().with(logcat_layer).init();
-
-	Ok(())
-}
-
-#[cfg(not(all(target_os = "android", feature = "android-logcat")))]
-fn init_logging(level: Level) -> Result<(), MoqError> {
-	moq_native::Log::new(level).init();
 	Ok(())
 }
