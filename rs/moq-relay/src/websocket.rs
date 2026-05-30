@@ -105,8 +105,8 @@ where
 	};
 	let ws = bare.accept();
 	let session = moq_net::Server::new()
-		.with_publish(subscribe)
-		.with_consume(publish)
+		.with_publisher(subscribe)
+		.with_consumer(publish)
 		.with_stats(stats)
 		.accept(ws)
 		.await?;

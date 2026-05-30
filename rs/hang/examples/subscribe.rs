@@ -29,9 +29,9 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	let url = url::Url::parse("https://cdn.moq.dev/anon/video-example").unwrap();
 
 	// Establish a connection with automatic reconnection.
-	// with_consume() registers an OriginProducer for incoming data.
-	// Use with_publish() if you also want to publish from the session.
-	let reconnect = client.with_consume(origin).reconnect(url);
+	// with_consumer() registers an OriginProducer for incoming data.
+	// Use with_publisher() if you also want to publish from the session.
+	let reconnect = client.with_consumer(origin).reconnect(url);
 
 	// Wait until the reconnect loop stops (e.g. timeout exceeded).
 	reconnect.closed().await

@@ -27,7 +27,7 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	let url = url::Url::parse("https://cdn.moq.dev/anon/chat-example").unwrap();
 
 	// Establish a WebTransport/QUIC connection and MoQ handshake.
-	let cs = client.with_publish(origin).connect(url).await?;
+	let cs = client.with_publisher(origin).connect(url).await?;
 
 	// Wait until the session is closed.
 	cs.closed().await.map_err(Into::into)

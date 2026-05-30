@@ -23,7 +23,7 @@ impl Server {
 	/// server reads from when forwarding broadcasts to the connected
 	/// client. Surfaced as [`Session::publisher`]. Pre-scoped via
 	/// [`OriginProducer::scope`] for token-gated relays.
-	pub fn with_publish(mut self, publish: impl Into<Option<OriginProducer>>) -> Self {
+	pub fn with_publisher(mut self, publish: impl Into<Option<OriginProducer>>) -> Self {
 		self.publish = publish.into();
 		self
 	}
@@ -31,7 +31,7 @@ impl Server {
 	/// Override the consume-side origin: the [`OriginProducer`] the
 	/// server writes into as the client announces broadcasts. A consumer
 	/// view is surfaced as [`Session::consumer`].
-	pub fn with_consume(mut self, consume: impl Into<Option<OriginProducer>>) -> Self {
+	pub fn with_consumer(mut self, consume: impl Into<Option<OriginProducer>>) -> Self {
 		self.consume = consume.into();
 		self
 	}
@@ -46,7 +46,7 @@ impl Server {
 
 	/// Set both publish and consume from one shared [`OriginProducer`].
 	pub fn with_origin(self, origin: OriginProducer) -> Self {
-		self.with_publish(origin.clone()).with_consume(origin)
+		self.with_publisher(origin.clone()).with_consumer(origin)
 	}
 
 	pub fn with_versions(mut self, versions: Versions) -> Self {
@@ -58,7 +58,7 @@ impl Server {
 	///
 	/// The returned [`Session`] always exposes both
 	/// [`publisher`](Session::publisher) and [`consumer`](Session::consumer):
-	/// whatever was set via [`Self::with_publish`] / [`Self::with_consume`]
+	/// whatever was set via [`Self::with_publisher`] / [`Self::with_consumer`]
 	/// / [`Self::with_origin`], or a fresh auto-created
 	/// [`Origin`](crate::Origin) for any side the caller left unset. When
 	/// neither side is set, both default to the same shared origin.

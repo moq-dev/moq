@@ -85,8 +85,8 @@ impl Connection {
 		// We subscribe to the tracks the client is allowed to publish.
 		let session = self
 			.request
-			.with_publish(subscribe)
-			.with_consume(publish)
+			.with_publisher(subscribe)
+			.with_consumer(publish)
 			.with_stats(stats)
 			.ok()
 			.await?;

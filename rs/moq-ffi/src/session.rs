@@ -25,8 +25,8 @@ impl Client {
 		let consume = self.consume.as_ref().map(|o| o.inner().clone());
 
 		let session = client
-			.with_publish(publish)
-			.with_consume(consume)
+			.with_publisher(publish)
+			.with_consumer(consume)
 			.connect(url)
 			.await
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;

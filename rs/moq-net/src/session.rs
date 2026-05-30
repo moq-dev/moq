@@ -12,8 +12,8 @@ use crate::{BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginP
 ///
 /// Both [`publisher`](Self::publisher) and [`consumer`](Self::consumer)
 /// are always populated: by whatever the caller wired via
-/// [`Client::with_publish`](crate::Client::with_publish) /
-/// [`Client::with_consume`](crate::Client::with_consume) /
+/// [`Client::with_publisher`](crate::Client::with_publisher) /
+/// [`Client::with_consumer`](crate::Client::with_consumer) /
 /// [`Client::with_origin`](crate::Client::with_origin) (or the matching
 /// methods on [`Server`](crate::Server)), or by an auto-created fresh
 /// [`Origin`](crate::Origin) for any side the caller left unset. Use
@@ -85,8 +85,8 @@ impl Session {
 
 	/// The publish-side origin: where local broadcasts get advertised
 	/// to the remote. Either the producer the caller passed via
-	/// [`Client::with_publish`](crate::Client::with_publish) /
-	/// [`Server::with_publish`](crate::Server::with_publish) /
+	/// [`Client::with_publisher`](crate::Client::with_publisher) /
+	/// [`Server::with_publisher`](crate::Server::with_publisher) /
 	/// `with_origin`, or one auto-created at connect/accept time.
 	pub fn publisher(&self) -> &OriginProducer {
 		&self.publisher
@@ -95,8 +95,8 @@ impl Session {
 	/// The subscribe-side origin: a cheap read handle for receiving
 	/// announcements pushed by the remote. Either derived from the
 	/// producer the caller passed via
-	/// [`Client::with_consume`](crate::Client::with_consume) /
-	/// [`Server::with_consume`](crate::Server::with_consume) /
+	/// [`Client::with_consumer`](crate::Client::with_consumer) /
+	/// [`Server::with_consumer`](crate::Server::with_consumer) /
 	/// `with_origin`, or auto-created at connect/accept time.
 	pub fn consumer(&self) -> &OriginConsumer {
 		&self.consumer

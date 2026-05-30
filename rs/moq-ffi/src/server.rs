@@ -238,8 +238,8 @@ impl MoqRequest {
 				let publish = state.publish.as_ref().map(|o| o.inner().clone());
 				let consume = state.consume.as_ref().map(|o| o.inner().clone());
 				let session = request
-					.with_publish(publish)
-					.with_consume(consume)
+					.with_publisher(publish)
+					.with_consumer(consume)
 					.ok()
 					.await
 					.map_err(|err| MoqError::Connect(format!("{err}")))?;

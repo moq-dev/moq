@@ -214,7 +214,7 @@ impl Cluster {
 
 	/// Returns an [`OriginProducer`] scoped to this session's subscribe permissions.
 	///
-	/// Pass straight to [`moq_net::Server::with_publish`] (or the
+	/// Pass straight to [`moq_net::Server::with_publisher`] (or the
 	/// equivalent per-request setter). moq-net derives the read handle.
 	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginProducer> {
 		self.origin.with_root(&token.root)?.scope(&token.subscribe)
@@ -448,8 +448,8 @@ impl Cluster {
 
 		// Cluster-to-cluster traffic is internal by definition.
 		let cs = client
-			.with_publish(self.origin.clone())
-			.with_consume(self.origin.clone())
+			.with_publisher(self.origin.clone())
+			.with_consumer(self.origin.clone())
 			.with_stats(self.stats.tier(Tier::Internal))
 			.connect(url.clone())
 			.await

@@ -60,8 +60,8 @@ impl Session {
 			.map_err(|err| Error::Connect(Arc::new(err)))?;
 
 		let cs = client
-			.with_publish(publish)
-			.with_consume(consume)
+			.with_publisher(publish)
+			.with_consumer(consume)
 			.connect(url)
 			.await
 			.map_err(|err| Error::Connect(Arc::new(err)))?;

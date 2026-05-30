@@ -66,7 +66,7 @@ The key pattern is: create an [`Origin`](https://docs.rs/moq-net/latest/moq_net/
 ```rust
 let origin = moq_net::Origin::new().produce();
 let session = client
-    .with_publish(origin.consume())
+    .with_publisher(origin.consume())
     .connect(url).await?;
 
 let mut broadcast = moq_net::Broadcast::new().produce();
@@ -80,13 +80,13 @@ See the full [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/example
 
 The [subscribe example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs) demonstrates subscribing end-to-end.
 
-To consume a broadcast, use `with_consume()` and listen for announcements:
+To consume a broadcast, use `with_consumer()` and listen for announcements:
 
 ```rust
 let origin = moq_net::Origin::new().produce();
 let mut consumer = origin.consume();
 let session = client
-    .with_consume(origin)
+    .with_consumer(origin)
     .connect(url).await?;
 
 // Wait for broadcasts to be announced.
