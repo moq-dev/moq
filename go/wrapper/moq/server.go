@@ -181,8 +181,14 @@ func (s *Server) Publish(path string, broadcast *BroadcastProducer) error {
 }
 
 // Accept returns the next incoming request, or (nil, nil) when the server stops.
+//
+// The ffi listener has no per-accept cancellation (its only cancel is the
+// server-wide one Close uses). Canceling ctx therefore makes Accept return
+// ctx.Err() while the underlying accept keeps running in the background until a
+// connection arrives or Close stops the server. Use Close to tear the listener
+// down; don't rely on a per-call ctx to do it. Serve handles this for you.
 func (s *Server) Accept(ctx context.Context) (*Request, error) {
-	res, err := runCancellable(ctx, s.inner.Cancel, s.inner.Accept)
+	res, err := runCancellable(ctx, nil, s.inner.Accept)
 	if err != nil {
 		return nil, err
 	}
@@ -226,6 +232,11 @@ func (s *Server) Serve(ctx context.Context, onRequest func(*Request) (bool, erro
 	for {
 		req, err := s.Accept(ctx)
 		if err != nil {
+			// ctx-driven shutdown: Close stops the listener and unblocks the
+			// background accept (which has no per-call cancel of its own).
+			if ctx.Err() != nil {
+				_ = s.Close()
+			}
 			return err
 		}
 		if req == nil {

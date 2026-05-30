@@ -96,11 +96,11 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	}
 	c.session = session
 
-	// Build a consumer from whichever origin handles consuming.
-	if origin := c.consumeOrigin; origin != nil {
-		c.consumer = origin.Consume()
-	} else if origin := c.publishOrigin; origin != nil {
-		c.consumer = origin.Consume()
+	// Only a configured consume origin yields a consumer. A publish-only client
+	// has none, so Announced/AnnouncedBroadcast surface ErrNoConsumeOrigin
+	// rather than silently reading from the local publish origin.
+	if c.consumeOrigin != nil {
+		c.consumer = c.consumeOrigin.Consume()
 	}
 
 	return c, nil

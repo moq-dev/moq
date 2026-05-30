@@ -46,9 +46,9 @@ for ann, err := range announced.All(ctx) {
 
 ## Versioning
 
-`VERSION` holds the human-owned `MAJOR.MINOR` line (the wrapper API version). Bump it in a PR when the wrapper's own API changes. The patch number is derived by CI from the existing mirror tags, so every release — whether triggered by a wrapper change or by a new `moq-go-ffi` — just takes the next patch on that line.
+`VERSION` holds the human-owned `MAJOR.MINOR` line (the wrapper API version). Bump it in a PR when the wrapper's own API changes. The patch number is derived by CI from the existing mirror tags, so every release (whether triggered by a wrapper change or by a new `moq-go-ffi`) just takes the next patch on that line.
 
-The committed `go.mod` carries a `require github.com/moq-dev/moq-go-ffi v0.0.0` **placeholder**. Do not "fix" it or add a `replace`: `just go check` injects a local `replace` to the freshly-generated bindings, and CI rewrites the `require` to the latest published `moq-go-ffi` at release time. Because Go resolves to the maximum version across the build graph, that `require` is a floor — consumers always get an ffi at least as new as the wrapper was built against.
+The committed `go.mod` carries a `require github.com/moq-dev/moq-go-ffi v0.0.0` **placeholder**. Do not "fix" it or add a `replace`: `just go check` injects a local `replace` to the freshly-generated bindings, and CI rewrites the `require` to the latest published `moq-go-ffi` at release time. Because Go resolves to the maximum version across the build graph, that `require` is a floor. Consumers always get an ffi at least as new as the wrapper was built against.
 
 ## Local development
 

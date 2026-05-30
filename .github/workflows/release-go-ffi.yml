@@ -87,6 +87,9 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Don't let untrusted PR builds populate caches reused by trusted runs.
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -127,6 +130,9 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Don't let untrusted PR builds populate caches reused by trusted runs.
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Install uniffi-bindgen-go
         run: |

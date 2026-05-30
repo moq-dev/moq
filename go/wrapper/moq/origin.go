@@ -2,6 +2,7 @@ package moq
 
 import (
 	"context"
+	"errors"
 	"iter"
 
 	ffi "github.com/moq-dev/moq-go-ffi/moq"
@@ -26,6 +27,9 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 
 // Publish announces a broadcast at the given path.
 func (o *OriginProducer) Publish(path string, broadcast *BroadcastProducer) error {
+	if broadcast == nil {
+		return errors.New("moq: nil broadcast producer")
+	}
 	return o.inner.Publish(path, broadcast.inner)
 }
 

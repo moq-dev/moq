@@ -105,20 +105,25 @@ bash "$GO_DIR/scripts/package-ffi.sh" \
 FFI_PKG="$STAGE_FFI/moq-ffi-0.0.0-dev-go"
 
 echo "go check: staging wrapper module..."
-# Build the wrapper against the freshly-generated ffi via a local replace, so
-# the hand-written API is checked against the exact bindings from this tree.
+# Run the real publish packager (so check exercises the same assembly), then
+# build against the freshly-generated ffi via a local replace so the
+# hand-written API is checked against the exact bindings from this tree.
 # Nothing is written into go/ffi or go/wrapper; this all lives under dist/.
-mkdir -p "$STAGE_WRAPPER/moq"
-cp "$GO_DIR/wrapper/go.mod" "$STAGE_WRAPPER/"
-cp "$GO_DIR/wrapper/VERSION" "$STAGE_WRAPPER/"
-cp "$GO_DIR"/wrapper/moq/*.go "$STAGE_WRAPPER/moq/"
+WRAPPER_LINE=$(tr -d '[:space:]' <"$GO_DIR/wrapper/VERSION")
+bash "$GO_DIR/scripts/package-wrapper.sh" \
+    --line "$WRAPPER_LINE" \
+    --ffi-version "0.0.0-dev" \
+    --source-dir "$GO_DIR/wrapper" \
+    --output "$STAGE_WRAPPER" \
+    --skip-tidy \
+    --no-archive
+WRAPPER_PKG="$STAGE_WRAPPER/moq-go-${WRAPPER_LINE}-wrapper"
 (
-    cd "$STAGE_WRAPPER"
-    go mod edit -require="github.com/moq-dev/moq-go-ffi@v0.0.0-dev"
+    cd "$WRAPPER_PKG"
     go mod edit -replace="github.com/moq-dev/moq-go-ffi=$FFI_PKG"
 )
 
-cd "$STAGE_WRAPPER"
+cd "$WRAPPER_PKG"
 export CGO_ENABLED=1 GOFLAGS=-mod=mod
 echo "go check: go vet ./..."
 go vet ./...

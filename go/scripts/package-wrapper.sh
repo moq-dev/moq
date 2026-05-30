@@ -82,6 +82,14 @@ SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
 }
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="dist"
 
+# --line must match the source VERSION, or the staged package name (which encodes
+# the line) would diverge from what publish-wrapper.sh reads back out of VERSION.
+SOURCE_LINE=$(tr -d '[:space:]' <"$SOURCE_DIR/VERSION")
+[[ "$SOURCE_LINE" == "$LINE" ]] || {
+    echo "Error: --line '$LINE' does not match $SOURCE_DIR/VERSION '$SOURCE_LINE'" >&2
+    exit 1
+}
+
 # Accept a leading v on the ffi version, normalize it off.
 FFI_VERSION="${FFI_VERSION#v}"
 
@@ -138,7 +146,7 @@ go get github.com/moq-dev/moq-go@latest
 import "github.com/moq-dev/moq-go/moq"
 \`\`\`
 
-Pure Go on top of the raw [github.com/moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) bindings, which carry the prebuilt native libraries. \`CGO_ENABLED=1\` is required (the default on Unix).
+Hand-written Go on top of the raw [github.com/moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) bindings, which carry the prebuilt native libraries. \`CGO_ENABLED=1\` is required (the default on Unix).
 
 See [moq-dev/moq/go/wrapper/README.md](https://github.com/moq-dev/moq/blob/main/go/wrapper/README.md) for usage and the release process.
 
@@ -151,7 +159,8 @@ EOF
 if [[ "$TIDY" == true ]]; then
     (
         cd "$PKG_STAGE"
-        GOFLAGS=-mod=mod GOPROXY="${GOPROXY:-direct}" go mod tidy
+        # GOWORK=off so an ambient parent go.work can't influence the staged go.sum.
+        GOWORK=off GOFLAGS=-mod=mod GOPROXY="${GOPROXY:-direct}" go mod tidy
     )
 else
     echo "  skipping go mod tidy (no go.sum staged)"

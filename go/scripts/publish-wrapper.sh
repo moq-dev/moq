@@ -7,11 +7,11 @@ set -euo pipefail
 #
 #   * MAJOR.MINOR comes from the staged VERSION file (human-owned API line).
 #   * PATCH is derived here from the mirror's existing v<line>.* tags
-#     (highest + 1, or .0 for a fresh line) — the registry is the gate, like
+#     (highest + 1, or .0 for a fresh line). The registry is the gate, like
 #     release-plz and the PyPI check in release.sh.
 #
 # Idempotency: the staged tree is patch-independent (see package-wrapper.sh), so
-# if it matches the mirror HEAD we publish NOTHING — no commit, no tag, no push.
+# if it matches the mirror HEAD we publish NOTHING: no commit, no tag, no push.
 # That keeps an ffi tag that didn't actually move the ffi version (or any other
 # no-op trigger) from minting an empty patch release. The patch is computed only
 # after a real diff is confirmed, so no-ops never consume a patch number.

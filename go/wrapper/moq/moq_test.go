@@ -4,9 +4,14 @@ import (
 	"context"
 	"encoding/binary"
 	"testing"
+	"time"
 
 	"github.com/moq-dev/moq-go/moq"
 )
+
+// testTimeout bounds the blocking stream calls so a regression fails the test
+// job instead of hanging it.
+const testTimeout = 10 * time.Second
 
 // opusHead builds a valid OpusHead init buffer (RFC 7845): 48 kHz, 2 channels.
 func opusHead() []byte {
@@ -55,7 +60,8 @@ func TestUnknownFormat(t *testing.T) {
 }
 
 func TestLocalPublishConsumeAudio(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
 
 	origin := moq.NewOriginProducer()
 	broadcast, err := moq.NewBroadcastProducer()
@@ -129,7 +135,8 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 }
 
 func TestTrackPublishConsume(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
 
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {

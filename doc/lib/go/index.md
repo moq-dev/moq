@@ -11,7 +11,7 @@ The Go bindings expose [Media over QUIC](/) to Go applications via cgo. Built on
 
 ### moq
 
-The ergonomic wrapper, and the package most callers want. Idiomatic Go over the raw bindings: `context.Context` cancellation, Go `error` returns, and Go 1.23 `iter.Seq2` iterators for live streams. Pure Go; the native libraries come transitively from `moq-ffi`.
+The ergonomic wrapper, and the package most callers want. Idiomatic Go over the raw bindings: `context.Context` cancellation, Go `error` returns, and Go 1.23 `iter.Seq2` iterators for live streams. The wrapper itself is hand-written Go; the native libraries come transitively from `moq-ffi`, so a build still needs `CGO_ENABLED=1`.
 
 [Learn more](/lib/go/moq)
 
