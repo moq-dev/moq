@@ -9,15 +9,15 @@ The Kotlin bindings expose [Media over QUIC](/) to Android apps and JVM-based se
 
 ## Packages
 
+Two Kotlin Multiplatform artifacts, each publishing JVM and Android variants under one coordinate.
+
 ### dev.moq:moq
 
-A single Kotlin Multiplatform module that publishes both JVM and Android variants under one coordinate. Consumers add `dev.moq:moq:VERSION` and Gradle metadata resolution picks the right artifact for their target.
+The ergonomic wrapper. Pure Kotlin layered on `dev.moq:moq-ffi`: a `Moq.connect(...)` facade, `Flow`-based async sequences with structured cancellation, and clean `dev.moq` typealiases for the FFI types. Versioned independently of the crate. **Most consumers want this.**
 
-**Features:**
+### dev.moq:moq-ffi
 
-- Android (arm64-v8a, armeabi-v7a, x86_64) and desktop JVM (Linux, macOS, Windows)
-- `Flow`-based async sequences with structured cancellation
-- Native binaries bundled via JNI (Android) / JNA (desktop JVM)
+The raw UniFFI bindings (`uniffi.moq.*`) plus the native binaries (JNI on Android, JNA on desktop JVM: Linux, macOS, Windows; arm64-v8a, armeabi-v7a, x86_64). Auto-released on every `moq-ffi-v*` tag, so its version tracks the crate. Depend on it directly only if you want the FFI surface without the wrapper.
 
 [Learn more](/lib/kt/moq)
 
@@ -26,38 +26,31 @@ A single Kotlin Multiplatform module that publishes both JVM and Android variant
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("dev.moq:moq:0.2.0")
+    implementation("dev.moq:moq:0.3.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 ```
 
-Published to Maven Central via [release-kt.yml](https://github.com/moq-dev/moq/blob/main/.github/workflows/release-kt.yml). Native binaries for all supported targets are bundled in the artifact, so no extra setup is required on the consumer side.
+The wrapper depends on `dev.moq:moq-ffi:[0.2,0.3)`, so Gradle pulls the newest bindings patch (with its bundled native binaries) automatically; no extra setup is needed on the consumer side. The wrapper publishes via [release-kt-wrapper.yml](https://github.com/moq-dev/moq/blob/main/.github/workflows/release-kt-wrapper.yml) and the bindings via [release-kt.yml](https://github.com/moq-dev/moq/blob/main/.github/workflows/release-kt.yml).
 
 ## Quickstart
 
 ```kotlin
 import dev.moq.*
 import kotlinx.coroutines.flow.collect
-import uniffi.moq.MoqClient
 
-val client = MoqClient()
-val cs = client.connect("https://relay.example.com")
+Moq.connect("https://relay.example.com").use { moq ->
+    moq.announcements("demos/").collect { announcement ->
+        println("got broadcast ${announcement.path()}")
 
-// cs.consumer() and cs.publisher() are always populated: by whatever
-// origin you wired via setPublish / setConsume before connect, or by a
-// fresh auto-created one for any side you didn't set.
-cs.consumer().announcements("demos/").collect { announcement ->
-    println("got broadcast ${announcement.path()}")
-
-    announcement.broadcast().subscribeCatalog().updates().collect { catalog ->
-        println("catalog: $catalog")
+        announcement.broadcast().subscribeCatalog().updates().collect { catalog ->
+            println("catalog: $catalog")
+        }
     }
 }
-
-cs.shutdown()
 ```
 
-Cancelling the surrounding coroutine scope propagates through to the native consumer's `cancel()` via the wrapper's `onCompletion` hook.
+`Moq.connect` wires an internal origin for publish + subscribe and returns a `Moq` you can `use {}`. Cancelling the surrounding coroutine scope propagates through to the native consumer's `cancel()` via the wrapper's `onCompletion` hook.
 
 ## Source and issues
 

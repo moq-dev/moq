@@ -1,25 +1,35 @@
-// Kotlin Multiplatform module for the ergonomic `dev.moq` wrapper.
+// Kotlin Multiplatform module for the raw moq-ffi UniFFI bindings.
 //
-// Publishes `dev.moq:moq` (JVM + Android variants). This module ships no native
-// code: it is pure Kotlin layered over `dev.moq:moq-ffi`, which carries the
-// UniFFI bindings + native libs. It re-exports the common FFI types as
-// `dev.moq.*` typealiases and adds idiomatic helpers (a `connect()` facade,
-// Flow extensions, AutoCloseable ergonomics).
+// Publishes `dev.moq:moq-ffi` with both JVM and Android variants. This artifact
+// carries the UniFFI-generated Kotlin (`uniffi.moq.*`) plus the native libs;
+// it is auto-released on every `moq-ffi-v*` tag, so its version tracks the
+// `moq-ffi` crate. The ergonomic `dev.moq:moq` wrapper depends on it.
 //
-// Versioning is INDEPENDENT of the crate: `-Pmoq.version` (default in
-// gradle.properties), bumped by hand. release-kt-wrapper.yml publishes a new
-// version only when that property changes. The dependency on `moq-ffi` is a
-// floating range so consumers transitively pick up new bindings patches
-// without this wrapper being re-cut. See MOQ_FFI_RANGE below.
+// Source set hierarchy:
+//   commonMain                       (empty today; reserved for future K/N targets)
+//   └─ jvmAndAndroidMain             UniFFI-generated kotlin (uses JNA)
+//      ├─ jvmMain                    JVM-specific: native libs as JAR resources
+//      └─ androidMain                Android-specific: native libs in jniLibs
 //
-// Local builds and CI resolve `moq-ffi` from the sibling project via the
-// dependency substitution below, so tests run against freshly-built bindings.
-// The published POM keeps the range (substitution only affects resolution).
+// Native libraries + bindings are populated by `kt/scripts/package.sh`:
+//   src/jvmMain/resources/<os>-<arch>/<libname>          (JNA classpath layout)
+//   src/androidMain/jniLibs/<abi>/libmoq_ffi.so          (Android packaging layout)
+//   src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt       (uniffi-bindgen output)
+// All three are gitignored; see kt/.gitignore.
+//
+// Android target is opt-in via `-Pandroid.enabled=true`. CI always sets it.
+// AGP is declared `apply false` here (rather than only added when enabled)
+// so its types are on this script's compile classpath. Without that, the
+// `extensions.configure<LibraryExtension>` call wouldn't compile even when
+// guarded behind `if (androidEnabled)`. The plugin marker resolves against
+// google() at sync regardless of the flag, so that repo needs to be
+// reachable; the actual `apply` only runs when the flag is set.
 //
 // Publishing uses com.vanniktech.maven.publish; CI runs
-// `:moq:publishAndReleaseToMavenCentral`. Credentials come from env vars set by
-// release-kt-wrapper.yml (ORG_GRADLE_PROJECT_*). If the signing key isn't set,
-// signAllPublications() becomes a no-op so local builds still work.
+// `:moq-ffi:publishAndReleaseToMavenCentral`. Credentials come from env vars
+// set by release-kt.yml (ORG_GRADLE_PROJECT_*). If the signing key isn't set
+// (e.g. a local `:moq-ffi:assemble` without secrets), signAllPublications()
+// becomes a no-op so local builds still work.
 
 import com.android.build.gradle.LibraryExtension
 import com.vanniktech.maven.publish.SonatypeHost
@@ -32,24 +42,12 @@ plugins {
     id("com.vanniktech.maven.publish") version "0.30.0"
 }
 
-version = providers.gradleProperty("moq.version").get()
-
-// Compatible-patch range for the bindings: any 0.2.x, never 0.3.0. Published
-// into the wrapper's POM so consumers float to the newest bindings patch.
-val MOQ_FFI_RANGE = "[0.2,0.3)"
+version = providers.gradleProperty("moqffi.version").get()
 
 val androidEnabled = providers.gradleProperty("android.enabled").orNull == "true"
 
 if (androidEnabled) {
     apply(plugin = "com.android.library")
-}
-
-// Resolve `dev.moq:moq-ffi` from the sibling project for local/CI builds while
-// the published metadata keeps the floating range declared below.
-configurations.all {
-    resolutionStrategy.dependencySubstitution {
-        substitute(module("dev.moq:moq-ffi")).using(project(":moq-ffi"))
-    }
 }
 
 kotlin {
@@ -78,11 +76,8 @@ kotlin {
         val jvmAndAndroidMain by creating {
             dependsOn(commonMain)
             dependencies {
-                // api: the wrapper re-exports the FFI types, so consumers get
-                // `uniffi.moq.*` (and the native libs) transitively.
-                api("dev.moq:moq-ffi") {
-                    version { require(MOQ_FFI_RANGE) }
-                }
+                // compileOnly: each platform's runtime adds its own JNA artifact.
+                compileOnly("net.java.dev.jna:jna:5.15.0")
             }
         }
         val jvmAndAndroidTest by creating {
@@ -91,6 +86,9 @@ kotlin {
 
         val jvmMain by getting {
             dependsOn(jvmAndAndroidMain)
+            dependencies {
+                implementation("net.java.dev.jna:jna:5.15.0")
+            }
         }
         val jvmTest by getting {
             dependsOn(jvmAndAndroidTest)
@@ -99,6 +97,9 @@ kotlin {
         if (androidEnabled) {
             val androidMain by getting {
                 dependsOn(jvmAndAndroidMain)
+                dependencies {
+                    implementation("net.java.dev.jna:jna:5.15.0@aar")
+                }
             }
             val androidUnitTest by getting {
                 dependsOn(jvmAndAndroidTest)
@@ -109,10 +110,15 @@ kotlin {
 
 if (androidEnabled) {
     extensions.configure<LibraryExtension>("android") {
-        namespace = "dev.moq"
+        // Distinct from the wrapper module's `dev.moq` so the two R classes
+        // don't collide when both are on an Android consumer's classpath.
+        namespace = "dev.moq.ffi"
         compileSdk = 35
         defaultConfig {
             minSdk = 24
+            ndk {
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            }
         }
         compileOptions {
             sourceCompatibility = JavaVersion.VERSION_17
@@ -123,17 +129,18 @@ if (androidEnabled) {
                 withSourcesJar()
             }
         }
+        sourceSets.getByName("main").jniLibs.srcDirs("src/androidMain/jniLibs")
     }
 }
 
 mavenPublishing {
     publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
     signAllPublications()
-    coordinates("dev.moq", "moq", version.toString())
+    coordinates("dev.moq", "moq-ffi", version.toString())
 
     pom {
-        name.set("moq")
-        description.set("Ergonomic Kotlin bindings for Media over QUIC")
+        name.set("moq-ffi")
+        description.set("UniFFI bindings for Media over QUIC (native)")
         url.set("https://github.com/moq-dev/moq")
         licenses {
             license {

@@ -5,52 +5,42 @@ description: Kotlin Multiplatform library for Media over QUIC
 
 # dev.moq:moq
 
-The Kotlin Multiplatform module for [Media over QUIC](/).
-
-A single Maven coordinate that publishes JVM and Android variants. Gradle metadata picks the right one for your target, so there are no per-platform artifacts to track.
+The ergonomic Kotlin wrapper for [Media over QUIC](/), layered on the [`dev.moq:moq-ffi`](https://central.sonatype.com/artifact/dev.moq/moq-ffi) bindings. Both publish JVM and Android variants under one coordinate; Gradle metadata picks the right one for your target.
 
 ## Install
 
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("dev.moq:moq:0.2.0")
+    implementation("dev.moq:moq:0.3.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 ```
 
-Native binaries are bundled for:
+The wrapper depends on `dev.moq:moq-ffi:[0.2,0.3)`, so Gradle resolves the latest bindings patch automatically. The bindings carry the native binaries:
 
 - Android: arm64-v8a, armeabi-v7a, x86_64
 - JVM: Linux x86_64 + aarch64, macOS x86_64 + aarch64, Windows x86_64
 
-Android uses JNI (`jniLibs/`), desktop JVM uses JNA (resource-classpath layout). Both are bundled in the same AAR/JAR.
+Android uses JNI (`jniLibs/`), desktop JVM uses JNA (resource-classpath layout).
 
 ## Connect
 
 ```kotlin
-import uniffi.moq.MoqClient
+import dev.moq.*
 
-val client = MoqClient()
-val cs = client.connect("https://relay.example.com")
+val moq = Moq.connect("https://relay.example.com")
 ```
 
-`MoqClient.connect(url)` returns a `MoqSession`. The accessors `cs.publisher()` and `cs.consumer()` are always populated: by whatever origin you wired via `setPublish` / `setConsume` before connect, or by a fresh auto-created one for any side you didn't set.
-
-For development against a relay with a self-signed certificate, configure the client before connecting:
+`Moq.connect(url)` builds the client, wires an internal origin for both publishing and subscribing, and returns a `Moq` connection. It is `AutoCloseable`, so prefer `use {}`:
 
 ```kotlin
-val client = MoqClient()
-client.setTlsDisableVerify(true)
-client.setBind("127.0.0.1:0")
-val cs = client.connect("https://localhost:4443")
+Moq.connect("https://localhost:4443", tlsVerify = false, bind = "127.0.0.1:0").use { moq ->
+    // ... moq.session is the underlying MoqSession ...
+}  // close() cancels the client + session
 ```
 
-When you're done, signal graceful shutdown to the peer:
-
-```kotlin
-cs.shutdown()  // alias for cancel(0u)
-```
+Advanced callers can pass their own `publish` / `subscribe` origins, or skip the facade entirely and drive `uniffi.moq.MoqClient` directly.
 
 ## Subscribe
 
@@ -58,10 +48,11 @@ cs.shutdown()  // alias for cancel(0u)
 import dev.moq.*
 import kotlinx.coroutines.flow.collect
 
-cs.consumer().announcements("demos/").collect { announcement ->
-    val catalog = announcement.broadcast().subscribeCatalog()
-    catalog.updates().collect { update ->
-        println("catalog: $update")
+Moq.connect("https://relay.example.com").use { moq ->
+    moq.announcements("demos/").collect { announcement ->
+        // Convenience: subscribe and grab the current catalog.
+        val catalog = announcement.broadcast().catalog()
+        println("catalog: $catalog")
     }
 }
 ```
@@ -70,17 +61,18 @@ cs.consumer().announcements("demos/").collect { announcement ->
 
 ```kotlin
 import dev.moq.*
-import uniffi.moq.MoqBroadcastProducer
 
-val broadcast = MoqBroadcastProducer()
-val audio = broadcast.publishMedia("opus", opusInitBytes)
+Moq.connect("https://relay.example.com").use { moq ->
+    val broadcast = BroadcastProducer()
+    val audio = broadcast.publishMedia("opus", opusInitBytes)
 
-cs.publisher().announce("my-stream", broadcast)
+    moq.publish("my-stream", broadcast)
 
-audio.writeFrame(payload, timestampUs = 0u)
-audio.writeFrame(payload, timestampUs = 20_000u)
-audio.finish()
-broadcast.finish()
+    audio.writeFrame(payload, timestampUs = 0u)
+    audio.writeFrame(payload, timestampUs = 20_000u)
+    audio.finish()
+    broadcast.finish()
+}
 ```
 
 ## Cancellation
@@ -103,10 +95,10 @@ job.cancel()  // releases native resources
 To build and run the JVM tests locally:
 
 ```bash
-just check-ffi
+just kt check
 ```
 
-This builds `moq-ffi` for the host arch, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the JNA resource layout, and runs `gradle :moq:jvmTest`.
+This builds `moq-ffi` for the host arch, regenerates the UniFFI Kotlin bindings, drops the host cdylib into the `:moq-ffi` JNA resource layout, and runs `gradle :moq-ffi:jvmTest :moq:jvmTest`. The wrapper resolves `:moq-ffi` from the sibling project, so it builds against the freshly generated bindings.
 
 Android targets are opt-in via `-Pandroid.enabled=true`. Local builds without the Android SDK still produce a working JVM variant.
 

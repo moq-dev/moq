@@ -1,4 +1,8 @@
-name: Release Kotlin
+name: Release Kotlin bindings
+
+# Publishes the `dev.moq:moq-ffi` artifact (UniFFI bindings + native libs) on
+# every `moq-ffi-v*` tag, so its version tracks the crate. The ergonomic
+# `dev.moq:moq` wrapper is published separately by release-kt-wrapper.yml.
 
 on:
   push:
@@ -207,7 +211,7 @@ jobs:
           gradle -p kt \
             -Pmoqffi.version="$MOQFFI_VERSION" \
             -Pandroid.enabled=true \
-            :moq:publishAndReleaseToMavenCentral --no-configuration-cache
+            :moq-ffi:publishAndReleaseToMavenCentral --no-configuration-cache
 
       - name: Publish to Maven Local (PR dry-run)
         if: github.event_name == 'pull_request'
@@ -217,7 +221,7 @@ jobs:
           gradle -p kt \
             -Pmoqffi.version="$MOQFFI_VERSION" \
             -Pandroid.enabled=true \
-            :moq:publishToMavenLocal --no-configuration-cache
+            :moq-ffi:publishToMavenLocal --no-configuration-cache
 
       - name: Upload local maven layout
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

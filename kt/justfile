@@ -9,7 +9,8 @@ set working-directory := '.'
 default:
     just check
 
-# Build moq-ffi for the host, regenerate uniffi bindings, run :moq:jvmTest.
+# Build moq-ffi for the host, regenerate uniffi bindings, run
+# :moq-ffi:jvmTest + :moq:jvmTest.
 
 # Skips cleanly if cargo, java, or gradle is missing.
 check:

@@ -9,8 +9,10 @@ import kotlinx.coroutines.flow.onCompletion
 import uniffi.moq.MoqAnnouncement
 import uniffi.moq.MoqAudioConsumer
 import uniffi.moq.MoqAudioFrame
+import uniffi.moq.MoqBroadcastConsumer
 import uniffi.moq.MoqCatalog
 import uniffi.moq.MoqCatalogConsumer
+import uniffi.moq.MoqException
 import uniffi.moq.MoqFrame
 import uniffi.moq.MoqGroupConsumer
 import uniffi.moq.MoqMediaConsumer
@@ -31,6 +33,20 @@ fun MoqCatalogConsumer.updates(): Flow<MoqCatalog> = flow {
     }
 }.onCompletion { cause ->
     if (cause is CancellationException) cancel()
+}
+
+/**
+ * Subscribe to the catalog track and return the first catalog, cancelling the
+ * subscription before returning. Convenience for callers that only need the
+ * current catalog rather than a stream of updates (use [updates] for that).
+ */
+suspend fun MoqBroadcastConsumer.catalog(): MoqCatalog {
+    val consumer = subscribeCatalog()
+    try {
+        return consumer.next() ?: throw MoqException.Closed("broadcast closed before a catalog was published")
+    } finally {
+        consumer.cancel()
+    }
 }
 
 /** Stream of decoded media frames in decode order. */
