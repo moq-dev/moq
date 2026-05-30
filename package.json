@@ -37,7 +37,6 @@
 		"js/signals",
 		"demo/boy",
 		"demo/web",
-		"js/moq-boy",
-		"test/browser"
+		"js/moq-boy"
 	]
 }

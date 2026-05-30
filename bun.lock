@@ -79,7 +79,7 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.2.6",
+      "version": "0.2.7",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.8.8",
@@ -131,7 +131,7 @@
     },
     "js/msf": {
       "name": "@moq/msf",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "@moq/net": "workspace:^",
         "zod": "^4.1.5",
@@ -143,7 +143,7 @@
     },
     "js/net": {
       "name": "@moq/net",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "dependencies": {
         "@moq/qmux": "^0.0.6",
         "@moq/signals": "workspace:*",
@@ -163,7 +163,7 @@
     },
     "js/publish": {
       "name": "@moq/publish",
-      "version": "0.2.8",
+      "version": "0.2.9",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/net": "workspace:^",
@@ -180,7 +180,7 @@
     },
     "js/signals": {
       "name": "@moq/signals",
-      "version": "0.1.6",
+      "version": "0.1.7",
       "devDependencies": {
         "@types/react": "^19.1.8",
         "rimraf": "^6.0.1",
@@ -219,7 +219,7 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.2.12",
+      "version": "0.2.13",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/msf": "workspace:^",
@@ -233,17 +233,6 @@
         "esbuild": "^0.27.0",
         "rimraf": "^6.0.1",
         "typescript": "^6.0.0",
-        "vite": "^7.3.1",
-      },
-    },
-    "test/browser": {
-      "name": "@moq/smoke-browser",
-      "dependencies": {
-        "@moq/publish": "workspace:*",
-        "@moq/watch": "workspace:*",
-      },
-      "devDependencies": {
-        "playwright": "1.58.2",
         "vite": "^7.3.1",
       },
     },
@@ -523,8 +512,6 @@
     "@moq/qmux": ["@moq/qmux@0.0.6", "", {}, "sha512-ISuGz05lUvf1hzHW3Aw3VnsGRJe1w9Qdog3LQ66KS+l+5mzQsPANvW8yOioEe1Z9dJO2G3sAHoGPnzwnsY9SIQ=="],
 
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
-
-    "@moq/smoke-browser": ["@moq/smoke-browser@workspace:test/browser"],
 
     "@moq/token": ["@moq/token@workspace:js/token"],
 
@@ -1254,10 +1241,6 @@
 
     "picomatch": ["picomatch@4.0.3", "", {}, "sha512-5gTmgEY/sqK6gFXLIsQNH19lWb4ebPDLA4SdLP7dsWkIXHWlG66oPuVvXSGFPppYZz8ZDZq0dYYrbHfBCVUb1Q=="],
 
-    "playwright": ["playwright@1.58.2", "", { "dependencies": { "playwright-core": "1.58.2" }, "optionalDependencies": { "fsevents": "2.3.2" }, "bin": { "playwright": "cli.js" } }, "sha512-vA30H8Nvkq/cPBnNw4Q8TWz1EJyqgpuinBcHET0YVJVFldr8JDNiU9LaWAE1KqSkRYazuaBhTpB5ZzShOezQ6A=="],
-
-    "playwright-core": ["playwright-core@1.58.2", "", { "bin": { "playwright-core": "cli.js" } }, "sha512-yZkEtftgwS8CsfYo7nm0KE8jsvm6i/PTgVtB8DL726wNf6H2IMsDuxCpJj59KDaxCtSnrWan2AeDqM7JBaultg=="],
-
     "pluralize": ["pluralize@8.0.0", "", {}, "sha512-Nc3IT5yHzflTfbjgqWcCPpo7DaKy4FnpB0l/zCAW0Tc7jxAiuqSxHasntB3D7887LSrA93kDJ9IXovxJYxyLCA=="],
 
     "postcss": ["postcss@8.5.6", "", { "dependencies": { "nanoid": "^3.3.11", "picocolors": "^1.1.1", "source-map-js": "^1.2.1" } }, "sha512-3Ybi1tAuwAP9s0r1UQ2J4n5Y0G05bJkpUIO0/bI9MhwmD70S5aTWbXGBwxHrelT+XM1k6dM0pk+SwNkpTRN7Pg=="],
@@ -1683,8 +1666,6 @@
     "npm-pick-manifest/semver": ["semver@7.7.4", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-vFKC2IEtQnVhpT78h1Yp8wzwrf8CM+MzKMHGJZfBtzhZNycRFnXsHk6E5TxIkkMsgNS7mdX3AGB7x2QM2di4lA=="],
 
     "parse-entities/@types/unist": ["@types/unist@2.0.11", "", {}, "sha512-CmBKiL6NNo/OqgmMn95Fk9Whlp2mtvIv+KNpQKN2F4SjvrEesubTRWGYSg+BnWZOnlCaSTU1sMpsBOzgbYhnsA=="],
-
-    "playwright/fsevents": ["fsevents@2.3.2", "", { "os": "darwin" }, "sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA=="],
 
     "readdirp/picomatch": ["picomatch@2.3.1", "", {}, "sha512-JU3teHTNjmE2VCGFzuY8EXzCDVwEqB2a8fsIvwaStHhAWJEeVd1o1QD80CU6+ZdEXXSLbSsuLwJjkCBWqRQUVA=="],
 
