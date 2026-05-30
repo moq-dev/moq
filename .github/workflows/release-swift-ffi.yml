@@ -4,7 +4,7 @@ name: Release Swift FFI
 # prebuilt XCFramework). Driven by the `moq-ffi-v*` tag that release-plz pushes
 # when it bumps rs/moq-ffi/Cargo.toml, so this package stays lockstep with the
 # moq-ffi crate. The ergonomic `Moq` wrapper is released separately
-# (release-swift.yml) and versions independently.
+# (release-swift-lib.yml) and versions independently.
 
 on:
   push:

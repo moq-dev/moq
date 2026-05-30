@@ -79,7 +79,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 /swift/               # Swift over rs/moq-ffi (SwiftPM). Split like py: the
                       # ergonomic `Moq` wrapper (Sources/Moq) versions
                       # independently via swift/VERSION and mirrors to
-                      # moq-dev/moq-swift on a VERSION bump (release-swift.yml,
+                      # moq-dev/moq-swift on a VERSION bump (release-swift-lib.yml,
                       # registry-gated like release-plz); the raw `MoqFFI`
                       # bindings + XCFramework mirror to moq-dev/moq-swift-ffi
                       # lockstep with the crate on each moq-ffi-v* tag

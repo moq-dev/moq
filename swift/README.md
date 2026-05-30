@@ -92,11 +92,11 @@ Edit the templates when changing a released manifest; never copy the monolithic 
 Two workflows, mirroring the two packages:
 
 - **`release-swift-ffi.yml`** fires on each `moq-ffi-v*` tag (pushed by release-plz). It builds the per-target libs + bindings, assembles the `MoqFFI` package via `package-ffi.sh`, attaches `MoqFFI.xcframework.zip` to the `moq-ffi-v*` GitHub Release, verifies the staged package resolves (`verify-ffi.sh`), and mirrors it to [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi) on a bare-semver tag (`publish-ffi.sh`).
-- **`release-swift.yml`** fires on push to `main`/`dev` when `swift/VERSION` (or the wrapper sources) change. It reads `swift/VERSION`, checks whether that tag already exists on the mirror (the release gate, the same model release-plz uses for crates), assembles the wrapper via `package.sh` (substituting the `moq-ffi` pin from `rs/moq-ffi/Cargo.toml`), verifies it resolves against the published `MoqFFI` (`verify.sh`), and publishes to [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift) only when the version is new (`publish.sh`).
+- **`release-swift-lib.yml`** fires on push to `main`/`dev` when `swift/VERSION` (or the wrapper sources) change. It reads `swift/VERSION`, checks whether that tag already exists on the mirror (the release gate, the same model release-plz uses for crates), assembles the wrapper via `package.sh` (substituting the `moq-ffi` pin from `rs/moq-ffi/Cargo.toml`), verifies it resolves against the published `MoqFFI` (`verify.sh`), and publishes to [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift) only when the version is new (`publish.sh`).
 
 Both `verify` jobs build a throwaway SPM consumer against the staged package before any mirror push, so a manifest SPM cannot resolve never reaches consumers. The `moq-bot` GitHub App mints a fresh installation token per run, scoped to the relevant mirror.
 
-To release a new wrapper version: bump `swift/VERSION` in a PR. On merge, `release-swift.yml` publishes it.
+To release a new wrapper version: bump `swift/VERSION` in a PR. On merge, `release-swift-lib.yml` publishes it.
 
 To dry-run a publish locally against a staged tarball:
 

@@ -1,4 +1,4 @@
-name: Release Swift
+name: Release Swift Lib
 
 # Publishes the ergonomic `Moq` Swift wrapper to the moq-dev/moq-swift mirror.
 # This is the package most callers install; the raw `MoqFFI` bindings it depends
@@ -24,7 +24,7 @@ on:
       - "swift/scripts/package.sh"
       - "swift/scripts/publish.sh"
       - "swift/scripts/verify.sh"
-      - ".github/workflows/release-swift.yml"
+      - ".github/workflows/release-swift-lib.yml"
       - ".github/scripts/release.sh"
   pull_request:
     paths:
@@ -35,7 +35,7 @@ on:
       - "swift/scripts/package.sh"
       - "swift/scripts/publish.sh"
       - "swift/scripts/verify.sh"
-      - ".github/workflows/release-swift.yml"
+      - ".github/workflows/release-swift-lib.yml"
       - ".github/scripts/release.sh"
 
 permissions:
@@ -44,7 +44,7 @@ permissions:
 # Separate PR builds from mainline publishes so a PR run can't queue ahead of
 # (and delay) a release on main.
 concurrency:
-  group: release-swift-${{ github.event_name }}-${{ github.ref }}
+  group: release-swift-lib-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
