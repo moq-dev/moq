@@ -105,13 +105,13 @@ jobs:
           LINE: ${{ steps.line.outputs.line }}
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
           # PR dry-runs can't tidy against a (possibly) unpublished ffi tag.
-          TIDY_FLAG: ${{ github.event_name == 'pull_request' && '--skip-tidy' || '' }}
+          SKIP_TIDY: ${{ github.event_name == 'pull_request' }}
         run: |
-          ./go/scripts/package-wrapper.sh \
-            --line "$LINE" \
-            --ffi-version "$FFI_VERSION" \
-            --output release-out \
-            $TIDY_FLAG
+          args=(--line "$LINE" --ffi-version "$FFI_VERSION" --output release-out)
+          if [[ "$SKIP_TIDY" == "true" ]]; then
+            args+=(--skip-tidy)
+          fi
+          ./go/scripts/package-wrapper.sh "${args[@]}"
 
       - name: Upload wrapper module
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
