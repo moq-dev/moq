@@ -11,7 +11,7 @@ mod kt
 mod swift
 mod go
 
-# Unit tests per language plus the cross-language smoke test (`just test smoke`).
+# Unit tests per language (`just test`).
 mod test
 
 # Demos and infra.
