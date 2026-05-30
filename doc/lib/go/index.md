@@ -11,7 +11,13 @@ The Go bindings expose [Media over QUIC](/) to Go applications via cgo. Built on
 
 ### moq
 
-A single Go module that exposes the UniFFI surface as ordinary Go types. The module ships prebuilt `libmoq_ffi.a` per supported platform and links statically through cgo, so consumers don't need a Rust toolchain or a runtime shared library on their path.
+The ergonomic wrapper, and the package most callers want. Idiomatic Go over the raw bindings: `context.Context` cancellation, Go `error` returns, and Go 1.23 `iter.Seq2` iterators for live streams. Pure Go; the native libraries come transitively from `moq-ffi`.
+
+[Learn more](/lib/go/moq)
+
+### moq-ffi
+
+The raw UniFFI bindings (`MoqClient`, `MoqSession`, etc.) with blocking methods, plus the prebuilt `libmoq_ffi.a` per platform, linked statically through cgo. Released lockstep with the `moq-ffi` crate. Most callers use `moq` instead.
 
 **Supported platforms:**
 
@@ -19,24 +25,22 @@ A single Go module that exposes the UniFFI surface as ordinary Go types. The mod
 - `darwin/amd64`, `darwin/arm64`
 - `windows/amd64`
 
-[Learn more](/lib/go/moq)
+[Learn more](/lib/go/moq-ffi)
 
 ## Installation
 
-The module lives in [moq-dev/moq-go](https://github.com/moq-dev/moq-go), a mirror repo populated by CI on every `moq-ffi-v*` tag.
-
 ```bash
-go get github.com/moq-dev/moq-go@v0.2.11
+go get github.com/moq-dev/moq-go@latest
 ```
 
 ```go
 import "github.com/moq-dev/moq-go/moq"
 ```
 
-cgo picks the right `libmoq_ffi.a` automatically via build tags; no `LD_LIBRARY_PATH` or extra setup required. Building requires `CGO_ENABLED=1` (the default on Unix).
+cgo picks the right `libmoq_ffi.a` automatically via build tags; no `LD_LIBRARY_PATH` or extra setup required. Building requires `CGO_ENABLED=1` (the default on Unix). `@latest` always pulls the newest native core: CI re-publishes the wrapper with its `moq-ffi` require bumped on every release.
 
 ## Source and issues
 
 - Source: [go/](https://github.com/moq-dev/moq/tree/main/go) (in the monorepo)
-- Mirror (what `go get` resolves): [moq-dev/moq-go](https://github.com/moq-dev/moq-go)
-- README: [go/README.md](https://github.com/moq-dev/moq/blob/main/go/README.md)
+- Wrapper mirror (what `go get` resolves): [moq-dev/moq-go](https://github.com/moq-dev/moq-go)
+- Raw bindings mirror: [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi)

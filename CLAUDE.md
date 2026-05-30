@@ -89,9 +89,19 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
                       # two-package split exists only in released artifacts
                       # (Package.swift.template + ffi/Package.swift.template).
 /kt/                  # Kotlin wrapper over rs/moq-ffi (Gradle, KMP)
-/go/                  # Go wrapper over rs/moq-ffi (uniffi-bindgen-go)
-                      # kt/go are in-tree source skeletons. CI mirrors them to
-                      # moq-dev/moq-{kotlin,go} on each moq-ffi-v* tag.
+/go/                  # Go bindings, split like py/ into two modules:
+  ffi/               # Raw uniffi-bindgen-go bindings + native libs.
+                     # Module github.com/moq-dev/moq-go-ffi; mirrored to
+                     # moq-dev/moq-go-ffi by release-go-ffi.yml on each
+                     # moq-ffi-v* tag, lockstep with the moq-ffi crate.
+  wrapper/           # Ergonomic wrapper (package moq, full re-wrap with
+                     # context.Context + iter.Seq2). Module
+                     # github.com/moq-dev/moq-go; mirrored to moq-dev/moq-go
+                     # by release-go.yml, versioned independently. VERSION
+                     # holds the MAJOR.MINOR line; CI derives the patch from
+                     # mirror tags and auto-bumps the moq-go-ffi require on
+                     # each ffi release so moq-go@latest pulls the newest ffi.
+                     # Needs go 1.23.
 
 /demo/                # Demos and test media
   boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)
@@ -176,7 +186,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt,go}/`, `doc/lib/{py,swift,kt,go,c}` |
+| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt}/`, `go/wrapper/moq/*.go` (the `go/ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs`), `doc/lib/{py,swift,kt,go,c}` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept` |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept` |
 | `rs/moq-token` | `js/token` |

@@ -1,0 +1,219 @@
+package moq
+
+import (
+	"context"
+
+	ffi "github.com/moq-dev/moq-go-ffi/moq"
+)
+
+// BroadcastProducer publishes a collection of tracks. Build one, publish tracks
+// onto it, then publish the broadcast itself to an origin/client/server.
+type BroadcastProducer struct {
+	inner *ffi.MoqBroadcastProducer
+}
+
+// NewBroadcastProducer creates an empty broadcast.
+func NewBroadcastProducer() (*BroadcastProducer, error) {
+	inner, err := ffi.NewMoqBroadcastProducer()
+	if err != nil {
+		return nil, err
+	}
+	return &BroadcastProducer{inner: inner}, nil
+}
+
+// PublishMedia publishes a media track from an init segment, fed frame by
+// frame with explicit timestamps.
+func (b *BroadcastProducer) PublishMedia(format string, init []byte) (*MediaProducer, error) {
+	inner, err := b.inner.PublishMedia(format, init)
+	if err != nil {
+		return nil, err
+	}
+	return &MediaProducer{inner: inner}, nil
+}
+
+// PublishMediaStream publishes a media track fed by a raw byte stream with
+// unknown frame boundaries (e.g. Annex-B H.264). format is a stream format:
+// avc3, hev1, av01, fmp4, or mkv.
+func (b *BroadcastProducer) PublishMediaStream(format string) (*MediaStreamProducer, error) {
+	inner, err := b.inner.PublishMediaStream(format)
+	if err != nil {
+		return nil, err
+	}
+	return &MediaStreamProducer{inner: inner}, nil
+}
+
+// PublishAudio publishes a raw-audio track with an in-process Opus encoder.
+func (b *BroadcastProducer) PublishAudio(name string, input AudioEncoderInput, output AudioEncoderOutput) (*AudioProducer, error) {
+	inner, err := b.inner.PublishAudio(name, input, output)
+	if err != nil {
+		return nil, err
+	}
+	return &AudioProducer{inner: inner}, nil
+}
+
+// PublishTrack creates a track that carries arbitrary byte payloads with no
+// codec validation.
+func (b *BroadcastProducer) PublishTrack(name string) (*TrackProducer, error) {
+	inner, err := b.inner.PublishTrack(name)
+	if err != nil {
+		return nil, err
+	}
+	return &TrackProducer{inner: inner}, nil
+}
+
+// Consume returns a consumer that reads from this broadcast's tracks.
+func (b *BroadcastProducer) Consume() (*BroadcastConsumer, error) {
+	inner, err := b.inner.Consume()
+	if err != nil {
+		return nil, err
+	}
+	return &BroadcastConsumer{inner: inner}, nil
+}
+
+// Finish closes the broadcast.
+func (b *BroadcastProducer) Finish() error {
+	return b.inner.Finish()
+}
+
+// MediaProducer writes timestamped frames into a media track.
+type MediaProducer struct {
+	inner *ffi.MoqMediaProducer
+}
+
+// Name is the generated media track name.
+func (m *MediaProducer) Name() (string, error) {
+	return m.inner.Name()
+}
+
+// Used blocks until the track has at least one active subscriber. There is no
+// underlying cancel, so a cancelled ctx returns ctx.Err() while the wait
+// unwinds when the track is finished or dropped.
+func (m *MediaProducer) Used(ctx context.Context) error {
+	return runErr(ctx, nil, m.inner.Used)
+}
+
+// Unused blocks until the track has no active subscribers. See Used regarding
+// cancellation.
+func (m *MediaProducer) Unused(ctx context.Context) error {
+	return runErr(ctx, nil, m.inner.Unused)
+}
+
+// WriteFrame appends a frame with a presentation timestamp in microseconds.
+func (m *MediaProducer) WriteFrame(payload []byte, timestampUs uint64) error {
+	return m.inner.WriteFrame(payload, timestampUs)
+}
+
+// Finish closes the media track.
+func (m *MediaProducer) Finish() error {
+	return m.inner.Finish()
+}
+
+// MediaStreamProducer feeds a raw encoder byte stream; whole frames are emitted
+// as they complete.
+type MediaStreamProducer struct {
+	inner *ffi.MoqMediaStreamProducer
+}
+
+// Write pushes raw stream bytes.
+func (m *MediaStreamProducer) Write(payload []byte) error {
+	return m.inner.Write(payload)
+}
+
+// Finish closes the stream.
+func (m *MediaStreamProducer) Finish() error {
+	return m.inner.Finish()
+}
+
+// TrackProducer writes arbitrary byte payloads with no codec required.
+type TrackProducer struct {
+	inner *ffi.MoqTrackProducer
+}
+
+// Name is the track name.
+func (t *TrackProducer) Name() (string, error) {
+	return t.inner.Name()
+}
+
+// Used blocks until the track has at least one active subscriber. See
+// MediaProducer.Used regarding cancellation.
+func (t *TrackProducer) Used(ctx context.Context) error {
+	return runErr(ctx, nil, t.inner.Used)
+}
+
+// Unused blocks until the track has no active subscribers. See
+// MediaProducer.Used regarding cancellation.
+func (t *TrackProducer) Unused(ctx context.Context) error {
+	return runErr(ctx, nil, t.inner.Unused)
+}
+
+// AppendGroup starts a new group; write frames into it, then Finish.
+func (t *TrackProducer) AppendGroup() (*GroupProducer, error) {
+	inner, err := t.inner.AppendGroup()
+	if err != nil {
+		return nil, err
+	}
+	return &GroupProducer{inner: inner}, nil
+}
+
+// WriteFrame writes a single-frame group in one call.
+func (t *TrackProducer) WriteFrame(payload []byte) error {
+	return t.inner.WriteFrame(payload)
+}
+
+// Consume reads directly from this producer's track.
+func (t *TrackProducer) Consume() (*TrackConsumer, error) {
+	inner, err := t.inner.Consume()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackConsumer{inner: inner}, nil
+}
+
+// Finish closes the track.
+func (t *TrackProducer) Finish() error {
+	return t.inner.Finish()
+}
+
+// GroupProducer writes frames into a single group on a track.
+type GroupProducer struct {
+	inner *ffi.MoqGroupProducer
+}
+
+// Sequence is this group's sequence number within the track.
+func (g *GroupProducer) Sequence() uint64 {
+	return g.inner.Sequence()
+}
+
+// Consume reads frames from this group.
+func (g *GroupProducer) Consume() (*GroupConsumer, error) {
+	inner, err := g.inner.Consume()
+	if err != nil {
+		return nil, err
+	}
+	return &GroupConsumer{inner: inner}, nil
+}
+
+// WriteFrame appends a frame to the group.
+func (g *GroupProducer) WriteFrame(payload []byte) error {
+	return g.inner.WriteFrame(payload)
+}
+
+// Finish closes the group.
+func (g *GroupProducer) Finish() error {
+	return g.inner.Finish()
+}
+
+// AudioProducer pushes raw PCM and lets libopus encode it on the way out.
+type AudioProducer struct {
+	inner *ffi.MoqAudioProducer
+}
+
+// Write pushes one frame of PCM in the configured input format.
+func (a *AudioProducer) Write(frame AudioFrame) error {
+	return a.inner.Write(frame)
+}
+
+// Finish flushes pending samples and finalizes the track.
+func (a *AudioProducer) Finish() error {
+	return a.inner.Finish()
+}

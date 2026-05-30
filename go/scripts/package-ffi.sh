@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Assemble the moq-ffi Go module: copy the in-tree source skeleton, drop
+# Assemble the moq-go-ffi Go module: copy the in-tree source skeleton, drop
 # in the uniffi-bindgen-go output, bundle per-target static libs into
 # moq/lib/<goos>_<goarch>/, and tar the result.
 #
@@ -10,7 +10,10 @@ set -euo pipefail
 # output at $BINDINGS_DIR/moq/moq.go.
 #
 # Usage:
-#   go/scripts/package.sh --version 0.0.0-dev --lib-dir libs --bindings-dir bindings --output dist
+#   go/scripts/package-ffi.sh --version 0.0.0-dev --lib-dir libs --bindings-dir bindings --output dist
+#
+# Optional:
+#   --source-dir DIR   in-tree ffi module skeleton (default: go/ffi)
 #
 # Expected $LIB_DIR layout (per cargo target):
 #   $LIB_DIR/x86_64-unknown-linux-gnu/libmoq_ffi.a
@@ -20,13 +23,14 @@ set -euo pipefail
 #   $LIB_DIR/x86_64-pc-windows-msvc/moq_ffi.lib
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-WORKSPACE_DIR="$(cd "$GO_DIR/.." && pwd)"
+GO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORKSPACE_DIR="$(cd "$GO_ROOT/.." && pwd)"
 
 VERSION=""
 LIB_DIR=""
 BINDINGS_DIR=""
 OUTPUT_DIR=""
+SOURCE_DIR=""
 ARCHIVE=true
 
 while [[ $# -gt 0 ]]; do
@@ -47,6 +51,10 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
+        --source-dir)
+            SOURCE_DIR="$2"
+            shift 2
+            ;;
         --no-archive)
             ARCHIVE=false
             shift
@@ -61,6 +69,9 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+[[ -z "$SOURCE_DIR" ]] && SOURCE_DIR="$GO_ROOT/ffi"
+SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
 
 [[ -z "$VERSION" ]] && {
     echo "Error: --version is required" >&2
@@ -85,12 +96,12 @@ rm -rf "$PKG_STAGE"
 mkdir -p "$PKG_STAGE/moq/lib"
 
 # --- 1. Copy in-tree source ---
-cp "$GO_DIR/go.mod" "$PKG_STAGE/"
-cp "$GO_DIR/README.md" "$PKG_STAGE/"
+cp "$SOURCE_DIR/go.mod" "$PKG_STAGE/"
+cp "$SOURCE_DIR/README.md" "$PKG_STAGE/"
 # Copy hand-written .go files (cgo.go and anything else that lands later).
 # Skip the generated moq.go from the source tree (gitignored, shouldn't
 # exist there, but defensive).
-for f in "$GO_DIR"/moq/*.go; do
+for f in "$SOURCE_DIR"/moq/*.go; do
     [[ "$(basename "$f")" == "moq.go" ]] && continue
     cp "$f" "$PKG_STAGE/moq/"
 done
@@ -156,23 +167,23 @@ fi
 
 # --- 4. Minimal consumer-facing README rewrite ---
 # The full developer README lives in the monorepo; the staged copy
-# (which ends up on moq-dev/moq-go) gets a thin orientation pointer.
+# (which ends up on moq-dev/moq-go-ffi) gets a thin orientation pointer.
 cat >"$PKG_STAGE/README.md" <<EOF
-# Moq (Go module)
+# moq-go-ffi (Go module)
 
-Auto-generated mirror of the Go module for [Media over QUIC](https://github.com/moq-dev/moq).
+Auto-generated mirror of the raw Go bindings for [Media over QUIC](https://github.com/moq-dev/moq). Most callers want the ergonomic [github.com/moq-dev/moq-go](https://github.com/moq-dev/moq-go) wrapper instead.
 
 Source, issues, and pull requests live in [moq-dev/moq](https://github.com/moq-dev/moq); this repo only carries tagged Go module releases.
 
 ## Install
 
 \`\`\`bash
-go get github.com/moq-dev/moq-go@v${VERSION}
+go get github.com/moq-dev/moq-go-ffi@v${VERSION}
 \`\`\`
 
 The module bundles prebuilt native libraries for \`linux/amd64\`, \`linux/arm64\`, \`darwin/amd64\`, \`darwin/arm64\` (\`libmoq_ffi.a\`), and \`windows/amd64\` (\`moq_ffi.lib\`); cgo selects the right one automatically.
 
-See [moq-dev/moq/go/README.md](https://github.com/moq-dev/moq/blob/main/go/README.md) for usage and the release process.
+See [moq-dev/moq/go/ffi/README.md](https://github.com/moq-dev/moq/blob/main/go/ffi/README.md) for usage and the release process.
 
 Licensed under MIT OR Apache-2.0.
 EOF

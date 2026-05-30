@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Push the staged Go module contents to the moq-dev/moq-go mirror repo
-# on a bare-semver tag (e.g. v0.2.11). Go modules resolve from VCS tags,
-# and the Go module proxy only recognizes `v<semver>` tags, not the
-# prefixed `moq-ffi-v*` tags used in this monorepo.
+# Push the staged moq-go-ffi module contents to the moq-dev/moq-go-ffi mirror
+# repo on a bare-semver tag (e.g. v0.2.18) lockstep with the moq-ffi crate. Go
+# modules resolve from VCS tags, and the Go module proxy only recognizes
+# `v<semver>` tags, not the prefixed `moq-ffi-v*` tags used in this monorepo.
 #
 # Required environment:
-#   BUILD_VERSION    - version string (e.g. 0.2.11)
-#   GO_MIRROR_TOKEN  - PAT or GitHub App token with contents:write
-#                      on $MIRROR_REPO
+#   BUILD_VERSION       - version string (e.g. 0.2.18)
+#   GO_FFI_MIRROR_TOKEN - PAT or GitHub App token with contents:write
+#                         on $MIRROR_REPO
 #
 # Optional environment:
-#   GO_MIRROR_REPO   - defaults to moq-dev/moq-go
-#   GIT_AUTHOR_NAME  - defaults to "moq-go-release"
-#   GIT_AUTHOR_EMAIL - defaults to "release@moq.dev"
+#   GO_FFI_MIRROR_REPO  - defaults to moq-dev/moq-go-ffi
+#   GIT_AUTHOR_NAME     - defaults to "moq-go-release"
+#   GIT_AUTHOR_EMAIL    - defaults to "release@moq.dev"
 #
 # Flags:
 #   --dry-run        Stage and diff against the mirror but skip the
@@ -22,7 +22,7 @@ set -euo pipefail
 #                    pipeline locally without touching the mirror.
 #
 # Expects the staged Go module tarball under `go-out/`, produced by
-# package.sh as `moq-ffi-${BUILD_VERSION}-go.tar.gz`.
+# package-ffi.sh as `moq-ffi-${BUILD_VERSION}-go.tar.gz`.
 
 DRY_RUN=false
 while [[ $# -gt 0 ]]; do
@@ -44,10 +44,10 @@ done
 
 : "${BUILD_VERSION:?BUILD_VERSION is required}"
 if [[ "$DRY_RUN" != true ]]; then
-    : "${GO_MIRROR_TOKEN:?GO_MIRROR_TOKEN is required (or pass --dry-run)}"
+    : "${GO_FFI_MIRROR_TOKEN:?GO_FFI_MIRROR_TOKEN is required (or pass --dry-run)}"
 fi
 
-MIRROR_REPO="${GO_MIRROR_REPO:-moq-dev/moq-go}"
+MIRROR_REPO="${GO_FFI_MIRROR_REPO:-moq-dev/moq-go-ffi}"
 # Go modules resolve bare v<semver> tags; the moq-ffi-v* prefix used in
 # this monorepo would be invisible to the proxy.
 MIRROR_TAG="v${BUILD_VERSION}"
@@ -63,12 +63,12 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 # --- 1. Clone the mirror ---
-if [[ -n "${GO_MIRROR_TOKEN:-}" ]]; then
-    CLONE_URL="https://x-access-token:${GO_MIRROR_TOKEN}@github.com/${MIRROR_REPO}"
+if [[ -n "${GO_FFI_MIRROR_TOKEN:-}" ]]; then
+    CLONE_URL="https://x-access-token:${GO_FFI_MIRROR_TOKEN}@github.com/${MIRROR_REPO}"
 else
     CLONE_URL="https://github.com/${MIRROR_REPO}"
 fi
-git clone --depth 1 "$CLONE_URL" "$WORK/mirror" 2>&1 | sed "s|${GO_MIRROR_TOKEN:-__no_token__}|***|g"
+git clone --depth 1 "$CLONE_URL" "$WORK/mirror" 2>&1 | sed "s|${GO_FFI_MIRROR_TOKEN:-__no_token__}|***|g"
 
 # --- 2. Idempotency: skip if the mirror tag already exists ---
 if [[ -n "$(git -C "$WORK/mirror" ls-remote --tags origin "refs/tags/${MIRROR_TAG}")" ]]; then

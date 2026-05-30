@@ -1,12 +1,14 @@
-// Package moq provides Go bindings for Media over QUIC.
+// Package moq is the raw UniFFI binding layer for Media over QUIC, published as
+// github.com/moq-dev/moq-go-ffi. Most callers want the ergonomic
+// github.com/moq-dev/moq-go wrapper, which builds on this package.
 //
 // The exported API is generated from rs/moq-ffi via uniffi-bindgen-go and
-// dropped in alongside this file (moq.go) by scripts/package.sh; the in-tree
+// dropped in alongside this file (moq.go) by scripts/package-ffi.sh; the in-tree
 // source therefore does not build on its own. Run scripts/check.sh to stage a
 // complete copy into dist/ and exercise it.
 //
 // The per-platform static archive is loaded from moq/lib/<goos>_<goarch>/
-// inside the staged module, populated by scripts/package.sh from the release
+// inside the staged module, populated by scripts/package-ffi.sh from the release
 // build matrix.
 package moq
 

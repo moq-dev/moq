@@ -63,7 +63,7 @@ esac
     exit 1
 }
 
-# Reject unsupported hosts up front; package.sh derives the cgo
+# Reject unsupported hosts up front; package-ffi.sh derives the cgo
 # subdir name from the cargo target via its own mapping.
 case "$HOST_TARGET" in
     x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu | x86_64-apple-darwin | aarch64-apple-darwin | x86_64-pc-windows-msvc) ;;
@@ -77,8 +77,9 @@ esac
 STAGE_PARENT="$WORKSPACE_DIR/dist"
 STAGE_LIBS="$STAGE_PARENT/go-libs/$HOST_TARGET"
 STAGE_BINDINGS="$STAGE_PARENT/go-bindings"
-STAGE_PKG="$STAGE_PARENT/go-pkg"
-rm -rf "$STAGE_LIBS" "$STAGE_BINDINGS" "$STAGE_PKG"
+STAGE_FFI="$STAGE_PARENT/go-ffi-pkg"
+STAGE_WRAPPER="$STAGE_PARENT/go-wrapper-pkg"
+rm -rf "$STAGE_LIBS" "$STAGE_BINDINGS" "$STAGE_FFI" "$STAGE_WRAPPER"
 mkdir -p "$STAGE_LIBS" "$STAGE_BINDINGS"
 
 cp "$STATICLIB" "$STAGE_LIBS/"
@@ -86,26 +87,43 @@ cp "$STATICLIB" "$STAGE_LIBS/"
 echo "go check: generating bindings..."
 uniffi-bindgen-go --library "$CDYLIB" --out-dir "$STAGE_BINDINGS"
 
-# Re-shape bindings dir to match package.sh's --bindings-dir expectation
+# Re-shape bindings dir to match package-ffi.sh's --bindings-dir expectation
 # (which wants moq/ directly). Some uniffi-bindgen-go versions nest under
 # uniffi/moq/; copy the whole dir so moq.h rides along with moq.go.
 if [[ -d "$STAGE_BINDINGS/uniffi/moq" && ! -d "$STAGE_BINDINGS/moq" ]]; then
     cp -R "$STAGE_BINDINGS/uniffi/moq" "$STAGE_BINDINGS/moq"
 fi
 
-echo "go check: assembling module..."
-bash "$GO_DIR/scripts/package.sh" \
+echo "go check: assembling ffi module..."
+bash "$GO_DIR/scripts/package-ffi.sh" \
     --version "0.0.0-dev" \
+    --source-dir "$GO_DIR/ffi" \
     --lib-dir "$STAGE_PARENT/go-libs" \
     --bindings-dir "$STAGE_BINDINGS" \
-    --output "$STAGE_PKG" \
+    --output "$STAGE_FFI" \
     --no-archive
+FFI_PKG="$STAGE_FFI/moq-ffi-0.0.0-dev-go"
 
-cd "$STAGE_PKG/moq-ffi-0.0.0-dev-go"
+echo "go check: staging wrapper module..."
+# Build the wrapper against the freshly-generated ffi via a local replace, so
+# the hand-written API is checked against the exact bindings from this tree.
+# Nothing is written into go/ffi or go/wrapper; this all lives under dist/.
+mkdir -p "$STAGE_WRAPPER/moq"
+cp "$GO_DIR/wrapper/go.mod" "$STAGE_WRAPPER/"
+cp "$GO_DIR/wrapper/VERSION" "$STAGE_WRAPPER/"
+cp "$GO_DIR"/wrapper/moq/*.go "$STAGE_WRAPPER/moq/"
+(
+    cd "$STAGE_WRAPPER"
+    go mod edit -require="github.com/moq-dev/moq-go-ffi@v0.0.0-dev"
+    go mod edit -replace="github.com/moq-dev/moq-go-ffi=$FFI_PKG"
+)
+
+cd "$STAGE_WRAPPER"
+export CGO_ENABLED=1 GOFLAGS=-mod=mod
 echo "go check: go vet ./..."
-CGO_ENABLED=1 go vet ./...
+go vet ./...
 echo "go check: go build ./..."
-CGO_ENABLED=1 go build ./...
+go build ./...
 echo "go check: go test ./..."
-CGO_ENABLED=1 go test ./...
+go test ./...
 echo "go check: ok"
