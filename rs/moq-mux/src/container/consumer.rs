@@ -74,14 +74,14 @@ impl<F: Container> Consumer<F> {
 	///
 	/// Returns `None` when the track has ended.
 	pub async fn read(&mut self) -> Result<Option<Frame>, F::Error> {
-		conducer::wait(|waiter| self.poll_read(waiter)).await
+		kio::wait(|waiter| self.poll_read(waiter)).await
 	}
 
 	/// Poll-based implementation of the read loop.
 	///
-	/// Uses a single waiter that gets registered on all relevant conducer channels,
+	/// Uses a single waiter that gets registered on all relevant kio channels,
 	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
-	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
+	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter)?.is_ready();
 
@@ -198,7 +198,7 @@ impl<F: Container> Consumer<F> {
 	// Reads any new groups from the track until we're completely finished.
 	//
 	// Returns Pending until all groups have been consumed.
-	fn poll_read_finish(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), F::Error>> {
+	fn poll_read_finish(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), F::Error>> {
 		loop {
 			let Some(group) = ready!(self.track.poll_recv_group(waiter)?) else {
 				// Track is finished.
@@ -265,11 +265,7 @@ impl GroupBuffer {
 	}
 
 	/// Poll for the next frame from this group.
-	fn poll_read<F: Container>(
-		&mut self,
-		waiter: &conducer::Waiter,
-		format: &F,
-	) -> Poll<Result<Option<Frame>, F::Error>> {
+	fn poll_read<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Option<Frame>, F::Error>> {
 		if let Some(frame) = self.buffered.pop_front() {
 			return Poll::Ready(Ok(Some(frame)));
 		}
@@ -283,7 +279,7 @@ impl GroupBuffer {
 	// Add one more frame to the buffer if possible.
 	//
 	// Returns false if the group is finished.
-	fn buffer_once<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
+	fn buffer_once<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
 		let Some(frames) = ready!(format.poll_read(&mut self.group, waiter)?) else {
 			return Poll::Ready(Ok(false));
 		};
@@ -314,7 +310,7 @@ impl GroupBuffer {
 		Poll::Ready(Ok(true))
 	}
 
-	fn buffer_one<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
+	fn buffer_one<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
 		loop {
 			if !self.buffered.is_empty() {
 				return Poll::Ready(Ok(true));
@@ -326,7 +322,7 @@ impl GroupBuffer {
 		}
 	}
 
-	fn buffer_all<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<(), F::Error>> {
+	fn buffer_all<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<(), F::Error>> {
 		while ready!(self.buffer_once(waiter, format)?) {}
 		Poll::Ready(Ok(()))
 	}
@@ -334,7 +330,7 @@ impl GroupBuffer {
 	/// Poll for the maximum timestamp in this group.
 	fn poll_max_timestamp<F: Container>(
 		&mut self,
-		waiter: &conducer::Waiter,
+		waiter: &kio::Waiter,
 		format: &F,
 	) -> Poll<Result<Timestamp, F::Error>> {
 		// Keep reading more frames just to advance the max timestamp.
@@ -353,7 +349,7 @@ impl GroupBuffer {
 
 	fn poll_min_timestamp<F: Container>(
 		&mut self,
-		waiter: &conducer::Waiter,
+		waiter: &kio::Waiter,
 		format: &F,
 	) -> Poll<Result<Timestamp, F::Error>> {
 		let _ = self.buffer_one(waiter, format)?;

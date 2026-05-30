@@ -333,7 +333,7 @@ impl Client {
 	/// Start a background reconnect loop that connects to the given URL,
 	/// waits for the session to close, then reconnects with exponential backoff.
 	///
-	/// Returns a [`Reconnect`] handle. Drop or call [`Reconnect::close`] to stop.
+	/// Returns a [`Reconnect`] handle; drop the last handle to stop the loop.
 	pub fn reconnect(&self, url: Url) -> Reconnect {
 		Reconnect::new(self.clone(), url, self.backoff.clone())
 	}

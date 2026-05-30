@@ -21,14 +21,14 @@ use super::{Filter, Target};
 /// Stream types are required to be `Send + 'static` so they can be moved
 /// across threads and held inside exporters without per-call bounds.
 pub trait Stream: Send + 'static {
-	fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<crate::Result<Option<Catalog>>>;
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>>;
 
 	/// Wait for the next snapshot.
 	fn next(&mut self) -> impl std::future::Future<Output = crate::Result<Option<Catalog>>> + Send
 	where
 		Self: Sized,
 	{
-		async move { conducer::wait(|waiter| self.poll_next(waiter)).await }
+		async move { kio::wait(|waiter| self.poll_next(waiter)).await }
 	}
 
 	/// Wrap this stream in a [`Filter`] that drops renditions which don't

@@ -74,10 +74,10 @@ impl<S: Stream> Export<S> {
 	}
 
 	pub async fn next(&mut self) -> crate::Result<Option<Bytes>> {
-		conducer::wait(|waiter| self.poll_next(waiter)).await
+		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<crate::Result<Option<Bytes>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Bytes>>> {
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
 				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot)?,
@@ -198,7 +198,7 @@ mod tests {
 	struct Once(Option<Catalog>);
 
 	impl Stream for Once {
-		fn poll_next(&mut self, _: &conducer::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+		fn poll_next(&mut self, _: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
 			Poll::Ready(Ok(self.0.take()))
 		}
 	}

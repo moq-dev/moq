@@ -54,7 +54,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	let config = Config::parse();
-	config.log.init();
+	config.log.init()?;
 
 	let client = config.client.init()?;
 

@@ -4,10 +4,13 @@ use tokio::sync::oneshot;
 use crate::ffi::OnStatus;
 use crate::{Error, Id, NonZeroSlab, State, moq_announced};
 
-/// A spawned task entry: close sender to signal shutdown, callback to deliver status.
+/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
+///
+/// `close` is an `Option` so `*_close` can drop just the sender without
+/// removing the entry. The task delivers one final terminal callback and then
+/// removes itself, so `user_data` stays valid until that callback fires.
 struct TaskEntry {
-	#[allow(dead_code)] // Dropping the sender signals the receiver.
-	close: oneshot::Sender<()>,
+	close: Option<oneshot::Sender<()>>,
 	callback: OnStatus,
 }
 
@@ -25,8 +28,11 @@ pub struct Origin {
 	/// Broadcast announcement information (path, active status).
 	announced: NonZeroSlab<(String, bool)>,
 
-	/// Announcement listener tasks. Close takes the entry to revoke the callback.
+	/// Announcement listener tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
 	announced_task: NonZeroSlab<Option<TaskEntry>>,
+
+	/// Pending consume-until-announced tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
+	consume_task: NonZeroSlab<Option<TaskEntry>>,
 }
 
 impl Origin {
@@ -44,19 +50,18 @@ impl Origin {
 		let channel = oneshot::channel();
 
 		let entry = TaskEntry {
-			close: channel.0,
+			close: Some(channel.0),
 			callback: on_announce,
 		};
 		let id = self.announced_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_announced(id, consumer) => res,
-				_ = channel.1 => Ok(()),
-			};
+			let res = Self::run_announced(on_announce, consumer, channel.1).await;
 
-			// The lock is dropped before the callback is invoked.
-			if let Some(entry) = State::lock().origin.announced_task.remove(id).flatten() {
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().origin.announced_task.remove(id).flatten();
+			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
 		});
@@ -64,24 +69,29 @@ impl Origin {
 		Ok(id)
 	}
 
-	async fn run_announced(task_id: Id, mut consumer: moq_net::AnnounceConsumer) -> Result<(), Error> {
-		while let Some((path, broadcast)) = consumer.next().await {
-			let mut state = State::lock();
-
-			// Stop if the callback was revoked by close.
-			let Some(Some(entry)) = state.origin.announced_task.get(task_id) else {
-				return Ok(());
+	async fn run_announced(
+		callback: OnStatus,
+		mut consumer: moq_net::AnnounceConsumer,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		loop {
+			// `biased` so a pending close always wins over a ready announcement.
+			let (path, broadcast) = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				next = consumer.next() => match next {
+					Some(announced) => announced,
+					None => return Ok(()),
+				},
 			};
-			let callback = entry.callback;
 
-			let announced_id = state.origin.announced.insert((path.to_string(), broadcast.is_some()))?;
-			drop(state);
-
-			// The lock is dropped before the callback is invoked.
+			// Hold the lock only to buffer the announcement; release it before the callback.
+			let announced_id = State::lock()
+				.origin
+				.announced
+				.insert((path.to_string(), broadcast.is_some()))?;
 			callback.call(announced_id);
 		}
-
-		Ok(())
 	}
 
 	pub fn announced_info(&self, announced: Id, dst: &mut moq_announced) -> Result<(), Error> {
@@ -95,10 +105,12 @@ impl Origin {
 	}
 
 	pub fn announced_close(&mut self, announced: Id) -> Result<(), Error> {
-		// Take the entire entry: drops the sender (signals shutdown) and revokes the callback.
+		// Signal shutdown; the task delivers a final callback and removes itself.
 		self.announced_task
 			.get_mut(announced)
+			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::AnnouncementNotFound)?
+			.close
 			.take()
 			.ok_or(Error::AnnouncementNotFound)?;
 		Ok(())
@@ -106,9 +118,70 @@ impl Origin {
 
 	pub fn consume<P: moq_net::AsPath>(&mut self, origin: Id, path: P) -> Result<moq_net::BroadcastConsumer, Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		// TODO: expose an async variant backed by `announced_broadcast` so FFI callers can wait
-		// for gossip instead of racing it.
+		// Synchronous lookup races announcement gossip; consume() is a cheap handle over this
+		// origin's tree. Use `consume_announced` to wait for the announcement instead.
 		origin.consume().get_broadcast(path).ok_or(Error::BroadcastNotFound)
+	}
+
+	/// Wait until the broadcast at `path` is announced, then deliver its handle via the callback.
+	///
+	/// The callback fires the broadcast handle (> 0) once announced, then a terminal `0`. On error
+	/// or cancellation it fires a single terminal code (`0` on close, negative on error). Returns a
+	/// task handle for cancellation via [`Self::consume_announced_close`].
+	pub fn consume_announced(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
+		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
+		let consumer = origin.consume();
+		let channel = oneshot::channel();
+
+		let entry = TaskEntry {
+			close: Some(channel.0),
+			callback: on_broadcast,
+		};
+		let id = self.consume_task.insert(Some(entry))?;
+
+		tokio::spawn(async move {
+			let res = Self::run_consume_announced(on_broadcast, consumer, path, channel.1).await;
+
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().origin.consume_task.remove(id).flatten();
+			if let Some(entry) = entry {
+				entry.callback.call(res);
+			}
+		});
+
+		Ok(id)
+	}
+
+	async fn run_consume_announced(
+		callback: OnStatus,
+		consumer: moq_net::OriginConsumer,
+		path: String,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		// `biased` so a pending close always wins over a ready announcement.
+		let broadcast = tokio::select! {
+			biased;
+			_ = &mut close => return Ok(()),
+			found = consumer.announced_broadcast(path.as_str()) => found.ok_or(Error::BroadcastNotFound)?,
+		};
+
+		// Hold the lock only to buffer the broadcast; release it before the callback.
+		let broadcast_id = State::lock().consume.start(broadcast)?;
+		callback.call(broadcast_id);
+		Ok(())
+	}
+
+	pub fn consume_announced_close(&mut self, task: Id) -> Result<(), Error> {
+		// Signal shutdown; the task delivers a final callback and removes itself.
+		self.consume_task
+			.get_mut(task)
+			.and_then(|entry| entry.as_mut())
+			.ok_or(Error::NotFound)?
+			.close
+			.take()
+			.ok_or(Error::NotFound)?;
+		Ok(())
 	}
 
 	pub fn publish<P: moq_net::AsPath>(

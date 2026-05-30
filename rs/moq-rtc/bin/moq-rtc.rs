@@ -105,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
 		public_addr,
 		role,
 	} = Cli::parse();
-	log.init();
+	log.init()?;
 
 	let moq_client = moq_client.init().context("failed to init moq client")?;
 

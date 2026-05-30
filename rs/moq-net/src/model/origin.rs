@@ -301,7 +301,7 @@ impl OriginConsumerState {
 #[derive(Clone)]
 struct AnnounceConsumerNotify {
 	root: PathOwned,
-	state: conducer::Producer<OriginConsumerState>,
+	state: kio::Producer<OriginConsumerState>,
 }
 
 impl AnnounceConsumerNotify {
@@ -946,12 +946,12 @@ pub struct AnnounceConsumer {
 
 	// Pending updates queued for this cursor. Coalesced so a slow consumer
 	// can't accumulate redundant announce/unannounce pairs.
-	state: conducer::Producer<OriginConsumerState>,
+	state: kio::Producer<OriginConsumerState>,
 }
 
 impl AnnounceConsumer {
 	fn new(root: PathOwned, nodes: OriginNodes) -> Self {
-		let state = conducer::Producer::<OriginConsumerState>::default();
+		let state = kio::Producer::<OriginConsumerState>::default();
 		let id = ConsumerId::new();
 
 		for (_, node) in &nodes.nodes {
@@ -972,7 +972,7 @@ impl AnnounceConsumer {
 	/// The same path won't be announced/unannounced twice in a row; instead it
 	/// toggles. Returns None if the cursor is closed.
 	pub async fn next(&mut self) -> Option<OriginAnnounce> {
-		conducer::wait(|waiter| self.poll_next(waiter)).await
+		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
 	/// Poll for the next (un)announced broadcast, without blocking.
@@ -980,7 +980,7 @@ impl AnnounceConsumer {
 	/// Returns `Poll::Ready(Some(_))` for an update, `Poll::Ready(None)` if the
 	/// cursor is closed, or `Poll::Pending` after registering `waiter` to be
 	/// notified when the next update arrives.
-	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<Option<OriginAnnounce>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<OriginAnnounce>> {
 		match self.state.poll(waiter, |state| match state.take() {
 			Some(item) => Poll::Ready(item),
 			None => Poll::Pending,
@@ -1262,7 +1262,7 @@ mod tests {
 		assert!(origin.consume().get_broadcast("test").is_none());
 	}
 	// A previous mpsc-based implementation could only deliver the first 127 broadcasts
-	// instantly via `assert_next` (which uses `now_or_never`). The conducer-backed
+	// instantly via `assert_next` (which uses `now_or_never`). The kio-backed
 	// implementation polls synchronously and can deliver all of them without yielding.
 	// Names are zero-padded so lexicographic delivery order matches the loop index.
 	#[tokio::test]

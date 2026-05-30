@@ -18,6 +18,13 @@ struct MediaProducer {
 	track: moq_net::TrackProducer,
 }
 
+struct MediaStreamProducer {
+	decoder: moq_mux::import::Stream,
+	// Carries the partial trailing frame between `write` calls; `decode_stream`
+	// consumes whole frames and leaves the remainder here.
+	buffer: bytes::BytesMut,
+}
+
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastProducer {
 	state: std::sync::Mutex<Option<BroadcastProducer>>,
@@ -46,6 +53,11 @@ impl MoqBroadcastProducer {
 #[derive(uniffi::Object)]
 pub struct MoqMediaProducer {
 	inner: std::sync::Mutex<Option<MediaProducer>>,
+}
+
+#[derive(uniffi::Object)]
+pub struct MoqMediaStreamProducer {
+	inner: std::sync::Mutex<Option<MediaStreamProducer>>,
 }
 
 #[uniffi::export]
@@ -94,6 +106,30 @@ impl MoqBroadcastProducer {
 
 		Ok(Arc::new(MoqMediaProducer {
 			inner: std::sync::Mutex::new(Some(MediaProducer { decoder, track })),
+		}))
+	}
+
+	/// Create a media track fed by a raw byte stream with unknown frame
+	/// boundaries (e.g. piped Annex-B H.264 straight from an encoder).
+	///
+	/// Unlike [`Self::publish_media`], the importer infers frame boundaries, so
+	/// the caller just pushes bytes via [`MoqMediaStreamProducer::write`]. Only
+	/// self-describing stream formats are supported (avc3, hev1, av01, fmp4, mkv).
+	pub fn publish_media_stream(&self, format: String) -> Result<Arc<MoqMediaStreamProducer>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let guard = self.state.lock().unwrap();
+		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let format = moq_mux::import::StreamFormat::from_str(&format)
+			.map_err(|_| MoqError::Codec(format!("unknown stream format: {format}")))?;
+
+		let decoder = moq_mux::import::Stream::new(state.broadcast.clone(), state.catalog.clone(), format)
+			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+
+		Ok(Arc::new(MoqMediaStreamProducer {
+			inner: std::sync::Mutex::new(Some(MediaStreamProducer {
+				decoder,
+				buffer: bytes::BytesMut::new(),
+			})),
 		}))
 	}
 
@@ -314,6 +350,41 @@ impl MoqMediaProducer {
 	}
 
 	/// Finish this media track and finalize encoding.
+	pub fn finish(&self) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let mut guard = self.inner.lock().unwrap();
+		let mut media = guard.take().ok_or_else(|| MoqError::Closed)?;
+		media
+			.decoder
+			.finish()
+			.map_err(|err| MoqError::Codec(format!("finish failed: {err}")))?;
+		Ok(())
+	}
+}
+
+#[uniffi::export]
+impl MoqMediaStreamProducer {
+	/// Push raw stream bytes (e.g. Annex-B H.264 from an encoder). The importer
+	/// frames whole access units and keeps any partial trailing frame for the
+	/// next call, so callers can write arbitrary chunks.
+	pub fn write(&self, payload: Vec<u8>) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let mut guard = self.inner.lock().unwrap();
+		let media = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
+
+		media.buffer.extend_from_slice(&payload);
+		media
+			.decoder
+			.decode_stream(&mut media.buffer)
+			.map_err(|err| MoqError::Codec(format!("decode failed: {err}")))?;
+		Ok(())
+	}
+
+	/// Finalize the track.
+	///
+	/// The importer emits each access unit when the *next* one's start code
+	/// arrives, so a trailing access unit with no following delimiter (e.g. the
+	/// last frame at EOF) is not emitted. This matches moq-cli's stdin path.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();

@@ -163,11 +163,6 @@ prefix = ".stats"
 # Seconds between snapshot publishes (defaults to 1)
 interval = 1
 
-# Number of intervals an entry lingers in the emitted frame after its
-# last observed change (defaults to 1). A short reconnect window keeps
-# the entry visible across brief disconnects.
-retention = 1
-
 # Node identifier appended to the advertised path to disambiguate broadcasts
 # when multiple relays share a cluster origin. May be multi-segment, e.g.
 # "sjc/1" / "sjc/2" for two hosts nested under a shared region key.
@@ -185,9 +180,11 @@ Each stats broadcast carries four tracks, one per `(tier, role)` pair:
 | `internal/subscriber.json`  | internal ingress                            |
 
 Each frame is a JSON object mapping broadcast path to a cumulative
-counter snapshot. An entry surfaces whenever its snapshot differs from
-the last one emitted, and lingers for `retention` intervals past the
-most recent change:
+counter snapshot. An entry surfaces on any tick where the broadcast is
+live (any open counter still exceeds its `*_closed` counterpart, so a
+subscription could begin at any moment) or its snapshot changed since the
+previous tick. Once every counter equals its `*_closed` counterpart no
+traffic can flow, so the entry is dropped:
 
 ```json
 {
@@ -240,9 +237,8 @@ byte-identical to the last emitted frame; new subscribers still pick up
 a baseline immediately via track-latest semantics.
 
 Every flag also accepts an equivalent CLI argument (`--stats-enabled`,
-`--stats-prefix`, `--stats-interval`, `--stats-retention`,
-`--stats-node`) and environment variable (`MOQ_STATS_ENABLED`,
-`MOQ_STATS_PREFIX`, `MOQ_STATS_INTERVAL`, `MOQ_STATS_RETENTION`,
+`--stats-prefix`, `--stats-interval`, `--stats-node`) and environment
+variable (`MOQ_STATS_ENABLED`, `MOQ_STATS_PREFIX`, `MOQ_STATS_INTERVAL`,
 `MOQ_STATS_NODE`).
 
 ### \[iroh]

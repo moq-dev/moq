@@ -171,7 +171,7 @@ pub struct Cluster {
 	/// Stats aggregator. One instance per relay; sessions pick a tier via
 	/// [`Stats::tier`] at acceptance time so external (non-mTLS) and internal
 	/// (mTLS / cluster peer) traffic land in separate counter sets. Defaults
-	/// to [`Stats::disabled`] (a no-op aggregator) until [`with_stats`](Self::with_stats)
+	/// to a no-op aggregator ([`Stats::default`]) until [`with_stats`](Self::with_stats)
 	/// is called.
 	pub stats: Stats,
 }
@@ -189,7 +189,7 @@ impl Cluster {
 			config,
 			client: None,
 			origin,
-			stats: Stats::disabled(),
+			stats: Stats::default(),
 		}
 	}
 

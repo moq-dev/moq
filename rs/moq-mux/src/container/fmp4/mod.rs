@@ -184,7 +184,7 @@ impl Container for Wire {
 	fn poll_read(
 		&self,
 		group: &mut moq_net::GroupConsumer,
-		waiter: &conducer::Waiter,
+		waiter: &kio::Waiter,
 	) -> Poll<std::result::Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;
 

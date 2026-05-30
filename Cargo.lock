@@ -68,6 +68,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "android_log-sys"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85965b6739a430150bdd138e2374a98af0c3ee0d030b3bb7fc3bddff58d0102e"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -984,13 +990,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
-]
-
-[[package]]
-name = "conducer"
-version = "0.3.7"
-dependencies = [
- "smallvec",
 ]
 
 [[package]]
@@ -3471,6 +3470,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kio"
+version = "0.3.0"
+dependencies = [
+ "smallvec",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3509,7 +3515,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.2.17"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3728,7 +3734,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -3748,7 +3754,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.7.26"
+version = "0.7.27"
 dependencies = [
  "anyhow",
  "axum",
@@ -3769,7 +3775,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.2.15"
+version = "0.2.16"
 dependencies = [
  "bytes",
  "hang",
@@ -3823,14 +3829,14 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "conducer",
  "futures",
  "h264-parser",
  "hang",
+ "kio",
  "m3u8-rs",
  "moq-loc",
  "moq-msf",
@@ -3849,7 +3855,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3878,6 +3884,7 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+ "tracing-android",
  "tracing-subscriber",
  "tracing-test",
  "url",
@@ -3890,12 +3897,12 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "bytes",
- "conducer",
  "flate2",
  "futures",
+ "kio",
  "num_enum",
  "rand 0.9.4",
  "serde",
@@ -3909,7 +3916,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.12.1"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -7397,6 +7404,17 @@ dependencies = [
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-android"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12612be8f868a09c0ceae7113ff26afe79d81a24473a393cb9120ece162e86c0"
+dependencies = [
+ "android_log-sys",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

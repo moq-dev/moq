@@ -16,14 +16,14 @@ struct State {
 /// Produces bandwidth estimates, notifying consumers when the value changes.
 #[derive(Clone)]
 pub struct BandwidthProducer {
-	state: conducer::Producer<State>,
+	state: kio::Producer<State>,
 }
 
 impl BandwidthProducer {
 	/// Create a fresh producer with no current estimate.
 	pub fn new() -> Self {
 		Self {
-			state: conducer::Producer::default(),
+			state: kio::Producer::default(),
 		}
 	}
 
@@ -73,7 +73,7 @@ impl BandwidthProducer {
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
-	fn modify(&self) -> Result<conducer::Mut<'_, State>> {
+	fn modify(&self) -> Result<kio::Mut<'_, State>> {
 		self.state
 			.write()
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
@@ -89,7 +89,7 @@ impl Default for BandwidthProducer {
 /// Consumes bandwidth estimates, allowing reads and async change notifications.
 #[derive(Clone)]
 pub struct BandwidthConsumer {
-	state: conducer::Consumer<State>,
+	state: kio::Consumer<State>,
 	last: Option<u64>,
 }
 
@@ -100,7 +100,7 @@ impl BandwidthConsumer {
 	}
 
 	/// Poll for a bandwidth change without blocking.
-	pub fn poll_changed(&mut self, waiter: &conducer::Waiter) -> Poll<Option<u64>> {
+	pub fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let last = self.last;
 
 		match self.state.poll(waiter, |state| {
@@ -123,6 +123,6 @@ impl BandwidthConsumer {
 	/// Block until the bandwidth estimate changes. Returns the new value.
 	/// Returns `None` if the producer is dropped or the estimate is unavailable.
 	pub async fn changed(&mut self) -> Option<u64> {
-		conducer::wait(|waiter| self.poll_changed(waiter)).await
+		kio::wait(|waiter| self.poll_changed(waiter)).await
 	}
 }

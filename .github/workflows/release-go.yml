@@ -173,18 +173,22 @@ jobs:
           path: bindings-raw
 
       - name: Flatten bindings layout
-        # uniffi-bindgen-go emits uniffi/moq/moq.go; package.sh expects moq/moq.go.
+        # uniffi-bindgen-go emits moq/{moq.go,moq.h} (some versions nest it
+        # under uniffi/). package.sh expects bindings/moq/. Copy the whole
+        # dir so the generated C header (moq.h, #include'd by moq.go's cgo
+        # preamble) travels with it.
         run: |
-          mkdir -p bindings/moq
-          if [[ -f bindings-raw/uniffi/moq/moq.go ]]; then
-            cp bindings-raw/uniffi/moq/moq.go bindings/moq/moq.go
-          elif [[ -f bindings-raw/moq/moq.go ]]; then
-            cp bindings-raw/moq/moq.go bindings/moq/moq.go
+          if [[ -d bindings-raw/uniffi/moq ]]; then
+            cp -R bindings-raw/uniffi/moq bindings-moq
+          elif [[ -d bindings-raw/moq ]]; then
+            cp -R bindings-raw/moq bindings-moq
           else
-            echo "Error: could not locate moq.go under bindings-raw/" >&2
+            echo "Error: could not locate moq bindings dir under bindings-raw/" >&2
             find bindings-raw -type f
             exit 1
           fi
+          mkdir -p bindings
+          mv bindings-moq bindings/moq
 
       - name: Package
         env:
