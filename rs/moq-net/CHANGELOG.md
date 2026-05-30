@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/moq-dev/moq/compare/moq-net-v0.1.5...moq-net-v0.1.6) - 2026-05-30
+
+### Other
+
+- retain entries by liveness instead of a tick retention window ([#1548](https://github.com/moq-dev/moq/pull/1548))
+- auto-reconnect sessions; conducer-based Reconnect notifications ([#1544](https://github.com/moq-dev/moq/pull/1544))
+- rename conducer crate to kio ([#1547](https://github.com/moq-dev/moq/pull/1547))
+
 ## [0.1.4](https://github.com/moq-dev/moq/compare/moq-net-v0.1.3...moq-net-v0.1.4) - 2026-05-24
 
 ### Other

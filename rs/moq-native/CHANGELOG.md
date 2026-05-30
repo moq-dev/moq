@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0](https://github.com/moq-dev/moq/compare/moq-native-v0.15.0...moq-native-v0.16.0) - 2026-05-30
+
+### Fixed
+
+- *(changelog)* repair malformed CHANGELOGs blocking release-plz ([#1511](https://github.com/moq-dev/moq/pull/1511))
+
+### Other
+
+- auto-reconnect sessions; conducer-based Reconnect notifications ([#1544](https://github.com/moq-dev/moq/pull/1544))
+- scope mTLS grants to the connection URL path ([#1535](https://github.com/moq-dev/moq/pull/1535))
+- stop downgrading WebSocket clients to moq-lite-02 ([#1523](https://github.com/moq-dev/moq/pull/1523))
+- lint shell, workflows, TOML, Nix, and justfiles via nix devShell ([#1519](https://github.com/moq-dev/moq/pull/1519))
+- advertise QUIC preferred_address in the server config ([#1512](https://github.com/moq-dev/moq/pull/1512))
+- *(jemalloc)* drop runtime activation; fixes moq-boy startup crash ([#1509](https://github.com/moq-dev/moq/pull/1509))
+- release ([#1493](https://github.com/moq-dev/moq/pull/1493))
+
 ## [0.15.0](https://github.com/moq-dev/moq/compare/moq-native-v0.14.4...moq-native-v0.15.0) - 2026-05-25
 
 ### Other
