@@ -17,7 +17,7 @@ check:
     bash scripts/check.sh
 
 # Assemble the KMP module from per-target moq-ffi binaries + bindings.
-# Used by .github/workflows/release-kt.yml; see kt/README.md for the
+# Used by .github/workflows/release-kt-ffi.yml; see kt/README.md for the
 
 # expected --lib-dir layout.
 package *args:

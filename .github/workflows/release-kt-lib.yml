@@ -1,6 +1,6 @@
-name: Release Kotlin wrapper
+name: Release Kotlin lib
 
-# Publishes the ergonomic `dev.moq:moq` wrapper. Unlike release-kt.yml (which
+# Publishes the ergonomic `dev.moq:moq` wrapper. Unlike release-kt-ffi.yml (which
 # tracks the crate via `moq-ffi-v*` tags), the wrapper is versioned by hand:
 # `moq.version` in kt/gradle.properties is the source of truth. This workflow
 # checks whether that version is already on Maven Central and publishes only
@@ -24,14 +24,14 @@ on:
       - "kt/gradle.properties"
       - "kt/build.gradle.kts"
       - "kt/settings.gradle.kts"
-      - ".github/workflows/release-kt-wrapper.yml"
+      - ".github/workflows/release-kt-lib.yml"
   pull_request:
     paths:
       - "kt/moq/**"
       - "kt/gradle.properties"
       - "kt/build.gradle.kts"
       - "kt/settings.gradle.kts"
-      - ".github/workflows/release-kt-wrapper.yml"
+      - ".github/workflows/release-kt-lib.yml"
       - "rs/moq-ffi/build.sh"
   # Manual trigger so a wrapper bump can be published once the bindings it
   # depends on land on Maven Central (the guard below skips otherwise).
@@ -41,7 +41,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-kt-wrapper
+  group: release-kt-lib
   cancel-in-progress: false
 
 jobs:
@@ -78,7 +78,7 @@ jobs:
           # Bindings guard: the wrapper POM declares dev.moq:moq-ffi:[0.2,0.3),
           # so don't publish a wrapper that consumers can't resolve. Require a
           # 0.2.x bindings release to exist first (it's published separately by
-          # release-kt.yml on a moq-ffi-v* tag). Re-run via workflow_dispatch
+          # release-kt-ffi.yml on a moq-ffi-v* tag). Re-run via workflow_dispatch
           # once it lands.
           FFI_META="https://repo1.maven.org/maven2/dev/moq/moq-ffi/maven-metadata.xml"
           if curl -sf "$FFI_META" 2>/dev/null | grep -q "<version>0\.2\."; then

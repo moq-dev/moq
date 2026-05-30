@@ -52,7 +52,7 @@ The `dev.moq` package is intentionally thin: Kotlin has extension functions, so 
 ## Versioning
 
 - `moqffi.version` (gradle.properties): the bindings version. CI overrides it from the `moq-ffi-v*` tag; only used for local dev otherwise.
-- `moq.version` (gradle.properties): the wrapper version, the source of truth. **Bump this by hand** to ship a new wrapper. `release-kt-wrapper.yml` reads it, checks whether `dev.moq:moq:<version>` is already on Maven Central, and publishes only if it isn't. Must stay `>= 0.3.0` (the line continues from the pre-split `dev.moq:moq` releases).
+- `moq.version` (gradle.properties): the wrapper version, the source of truth. **Bump this by hand** to ship a new wrapper. `release-kt-lib.yml` reads it, checks whether `dev.moq:moq:<version>` is already on Maven Central, and publishes only if it isn't. Must stay `>= 0.3.0` (the line continues from the pre-split `dev.moq:moq` releases).
 
 ## Local development
 
@@ -88,7 +88,7 @@ The native/UniFFI layer stays in a single `dev.moq:moq-ffi` artifact because uni
 
 ## Publishing to Maven Central
 
-Both `release-kt.yml` (bindings) and `release-kt-wrapper.yml` (wrapper) use [`com.vanniktech.maven.publish`](https://vanniktech.github.io/gradle-maven-publish-plugin/) to upload to the [Sonatype Central Portal](https://central.sonatype.com) and trigger the release automatically. Required setup (one-time):
+Both `release-kt-ffi.yml` (bindings) and `release-kt-lib.yml` (wrapper) use [`com.vanniktech.maven.publish`](https://vanniktech.github.io/gradle-maven-publish-plugin/) to upload to the [Sonatype Central Portal](https://central.sonatype.com) and trigger the release automatically. Required setup (one-time):
 
 1. Register at https://central.sonatype.com and claim the `dev.moq` namespace (TXT record on `moq.dev` with the verification key). The auto-verified alternative `io.github.moq-dev` works without DNS setup but changes artifact coordinates.
 2. Account menu -> Generate User Token. Save the username/password (one-time view).

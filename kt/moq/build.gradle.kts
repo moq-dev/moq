@@ -7,7 +7,7 @@
 // Flow extensions, AutoCloseable ergonomics).
 //
 // Versioning is INDEPENDENT of the crate: `-Pmoq.version` (default in
-// gradle.properties), bumped by hand. release-kt-wrapper.yml publishes a new
+// gradle.properties), bumped by hand. release-kt-lib.yml publishes a new
 // version only when that property changes. The dependency on `moq-ffi` is a
 // floating range so consumers transitively pick up new bindings patches
 // without this wrapper being re-cut. See MOQ_FFI_RANGE below.
@@ -18,7 +18,7 @@
 //
 // Publishing uses com.vanniktech.maven.publish; CI runs
 // `:moq:publishAndReleaseToMavenCentral`. Credentials come from env vars set by
-// release-kt-wrapper.yml (ORG_GRADLE_PROJECT_*). If the signing key isn't set,
+// release-kt-lib.yml (ORG_GRADLE_PROJECT_*). If the signing key isn't set,
 // signAllPublications() becomes a no-op so local builds still work.
 
 import com.android.build.gradle.LibraryExtension

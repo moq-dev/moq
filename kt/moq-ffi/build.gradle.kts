@@ -27,7 +27,7 @@
 //
 // Publishing uses com.vanniktech.maven.publish; CI runs
 // `:moq-ffi:publishAndReleaseToMavenCentral`. Credentials come from env vars
-// set by release-kt.yml (ORG_GRADLE_PROJECT_*). If the signing key isn't set
+// set by release-kt-ffi.yml (ORG_GRADLE_PROJECT_*). If the signing key isn't set
 // (e.g. a local `:moq-ffi:assemble` without secrets), signAllPublications()
 // becomes a no-op so local builds still work.
 

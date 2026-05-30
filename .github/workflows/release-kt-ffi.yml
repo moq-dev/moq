@@ -1,8 +1,8 @@
-name: Release Kotlin bindings
+name: Release Kotlin FFI
 
 # Publishes the `dev.moq:moq-ffi` artifact (UniFFI bindings + native libs) on
 # every `moq-ffi-v*` tag, so its version tracks the crate. The ergonomic
-# `dev.moq:moq` wrapper is published separately by release-kt-wrapper.yml.
+# `dev.moq:moq` wrapper is published separately by release-kt-lib.yml.
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
       - "moq-ffi-v*"
   pull_request:
     paths:
-      - ".github/workflows/release-kt.yml"
+      - ".github/workflows/release-kt-ffi.yml"
       - ".github/scripts/release.sh"
       - "kt/**"
       - "rs/moq-ffi/build.sh"

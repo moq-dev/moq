@@ -31,7 +31,7 @@ dependencies {
 }
 ```
 
-The wrapper depends on `dev.moq:moq-ffi:[0.2,0.3)`, so Gradle pulls the newest bindings patch (with its bundled native binaries) automatically; no extra setup is needed on the consumer side. The wrapper publishes via [release-kt-wrapper.yml](https://github.com/moq-dev/moq/blob/main/.github/workflows/release-kt-wrapper.yml) and the bindings via [release-kt.yml](https://github.com/moq-dev/moq/blob/main/.github/workflows/release-kt.yml).
+The wrapper depends on `dev.moq:moq-ffi:[0.2,0.3)`, so Gradle pulls the newest bindings patch (with its bundled native binaries) automatically; no extra setup is needed on the consumer side. The wrapper publishes via [release-kt-lib.yml](https://github.com/moq-dev/moq/blob/main/.github/workflows/release-kt-lib.yml) and the bindings via [release-kt-ffi.yml](https://github.com/moq-dev/moq/blob/main/.github/workflows/release-kt-ffi.yml).
 
 ## Quickstart
 

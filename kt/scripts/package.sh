@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Assemble the dev.moq:moq-ffi Kotlin bindings package and stage it for
 # publication. (The dev.moq:moq wrapper is pure Kotlin and published
-# separately by release-kt-wrapper.yml.)
+# separately by release-kt-lib.yml.)
 #
 # Designed to run after the workflow has placed per-target moq-ffi
 # native libs into $LIB_DIR (one subdir per cargo target) and the
