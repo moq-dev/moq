@@ -211,12 +211,13 @@ Field semantics:
 - `announced` / `announced_closed`: cumulative count of every broadcast
   announce/unannounce event on this `(tier, role)` slot, regardless of
   whether any subscription happened. Use this for "all known broadcasts".
-- `broadcasts` / `broadcasts_closed`: derived in the snapshot task from
-  subscription transitions. Bumps each time the slot transitions from
-  "no active subs" to "at least one active sub" (a flicker through 0
-  inside a single tick counts as a full open/close pair). Use this for
-  "broadcasts with viewers", which is typically what billing and UI
-  want.
+- `broadcasts` / `broadcasts_closed`: per-(broadcast, session)
+  subscription sentinel. The first active subscription a peer session
+  opens for a broadcast bumps `broadcasts`; the last one it closes bumps
+  `broadcasts_closed`. Summed across sessions, `broadcasts -
+  broadcasts_closed` is the number of distinct sessions currently
+  subscribed to the broadcast (i.e. viewers on the egress side), which is
+  typically what billing and UI want.
 - `subscriptions` / `subscriptions_closed`: cumulative count of
   track-level subscription guards opened and dropped.
 - `bytes` / `frames` / `groups`: cumulative payload counters from the

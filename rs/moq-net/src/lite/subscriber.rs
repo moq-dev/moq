@@ -36,6 +36,10 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 	origin: Option<OriginProducer>,
 	stats: StatsHandle,
+	/// Per-session ingress broadcast-subscription tracker. Each upstream
+	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
+	/// distinct upstream sessions feeding each broadcast.
+	broadcasts: crate::SessionBroadcasts,
 	recv_bandwidth: Option<BandwidthProducer>,
 	// Session-level origin id shared with the Publisher. Used to filter out
 	// reflected announces: we ask the peer (via AnnounceInterest.exclude_hop)
@@ -61,10 +65,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// loop detection. If no origin is attached (the announce loop is
 		// inert anyway), fall back to a random session-local id.
 		let self_origin = config.origin.as_deref().copied().unwrap_or_else(crate::Origin::random);
+		let broadcasts = config.stats.subscriber_broadcasts();
 		Self {
 			session: config.session,
 			origin: config.origin,
 			stats: config.stats,
+			broadcasts,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
 			subscribes: Default::default(),
@@ -337,6 +343,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// is tracked separately by the announce loop's `stats_guards`.
 		let abs = self.origin.as_ref().unwrap().absolute(&path);
 		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&track.name));
+		// Per-(session, broadcast) sentinel; held until this subscription ends.
+		// The session's first sub to the broadcast bumps `broadcasts`, the last
+		// to drop bumps `broadcasts_closed`.
+		let _broadcast_sub = self.broadcasts.subscribe(&abs);
 
 		self.subscribes.lock().insert(
 			id,

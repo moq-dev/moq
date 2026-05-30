@@ -32,6 +32,10 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: OriginConsumer,
 	stats: MoqStats,
+	/// Per-session egress broadcast-subscription tracker. Each downstream
+	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts
+	/// the distinct sessions (viewers) watching each broadcast.
+	broadcasts: crate::SessionBroadcasts,
 	self_origin: Origin,
 	priority: PriorityQueue,
 	version: Version,
@@ -45,10 +49,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// origin we're consuming so it matches the local relay identity
 		// across every session, required for cross-session loop detection.
 		let self_origin = *origin;
+		let broadcasts = config.stats.publisher_broadcasts();
 		Self {
 			session: config.session,
 			origin,
 			stats: config.stats,
+			broadcasts,
 			self_origin,
 			priority: Default::default(),
 			version: config.version,
@@ -313,9 +319,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let priority = self.priority.clone();
 		let version = self.version;
 
-		// Per-track subscription guard. The broadcast itself is tracked elsewhere by
-		// run_announce, so we use publisher_track to avoid double-counting broadcasts.
+		// Per-track subscription guard (bumps `subscriptions`). Separately, a
+		// per-(session, broadcast) guard drives the `broadcasts` sentinel: the
+		// session's first subscription to this broadcast bumps `broadcasts`, the
+		// last to drop bumps `broadcasts_closed`, so `broadcasts` counts viewers.
 		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
+		let broadcast_sub = self.broadcasts.subscribe(&absolute);
 
 		let session = self.session.clone();
 		web_async::spawn(async move {
@@ -325,7 +334,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				&subscribe,
 				broadcast,
 				priority,
-				track_stats,
+				(track_stats, broadcast_sub),
 				version,
 			)
 			.await
@@ -354,9 +363,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		subscribe: &lite::Subscribe<'_>,
 		consumer: Option<BroadcastConsumer>,
 		priority: PriorityQueue,
-		track_stats: crate::PublisherTrack,
+		// The track guard (bumps `subscriptions`) plus the per-(session,
+		// broadcast) sentinel guard (drives `broadcasts`). Both held for the
+		// subscription's lifetime.
+		stats: (crate::PublisherTrack, crate::BroadcastSubscription),
 		version: Version,
 	) -> Result<(), Error> {
+		let (track_stats, _broadcast_sub) = stats;
 		let track = Track {
 			name: subscribe.track.to_string(),
 			priority: subscribe.priority,

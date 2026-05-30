@@ -24,13 +24,14 @@
 //! * `announced` / `announced_closed`: cumulative count of broadcast
 //!   announce/unannounce events on this `(tier, role)`. Bumped on every
 //!   `publisher()` / `subscriber()` guard creation and drop.
-//! * `broadcasts` / `broadcasts_closed`: derived by the snapshot task from
-//!   subscription transitions. `broadcasts` bumps each tick the slot
-//!   transitions from "no active subs" to "one or more active subs" (or
-//!   when subs flickered through 0 within a tick). `broadcasts_closed`
-//!   bumps on the reverse transition. Use these for "active broadcasts"
-//!   billing/UI metrics; use `announced` if you want all broadcasts ever
-//!   seen.
+//! * `broadcasts` / `broadcasts_closed`: per-(broadcast, session)
+//!   subscription sentinel. The first active subscription a peer session
+//!   opens for a broadcast bumps `broadcasts`; the last one it closes bumps
+//!   `broadcasts_closed`. Summed across sessions, `broadcasts -
+//!   broadcasts_closed` is the number of distinct sessions currently
+//!   subscribed to the broadcast (i.e. viewers on the egress side). Driven
+//!   by [`SessionBroadcasts`]; use `announced` if you want all broadcasts
+//!   ever seen.
 //! * `subscriptions` / `subscriptions_closed`: cumulative count of
 //!   track-level subscription guards opened/dropped.
 //! * `bytes` / `frames` / `groups`: cumulative payload counters bumped from
@@ -112,11 +113,13 @@ use crate::{AsPath, Broadcast, Origin, OriginProducer, Path, PathOwned, Track, T
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
-/// Only `announced` / `announced_closed` and `subscriptions` /
-/// `subscriptions_closed` (and the payload counters) are bumped from the
-/// hot bump path. `broadcasts` / `broadcasts_closed` are not stored here;
-/// they're derived in the snapshot task from observed subscription
-/// transitions.
+/// Every field is bumped from a RAII guard: the open counters on construction
+/// and their `_closed` counterparts on drop. `broadcasts` / `broadcasts_closed`
+/// are the per-(broadcast, session) subscription sentinel driven by
+/// [`SessionBroadcasts`] (the first active subscription a session opens for the
+/// broadcast bumps `broadcasts`, the last to close bumps `broadcasts_closed`),
+/// so summed across sessions `broadcasts - broadcasts_closed` is the count of
+/// distinct sessions currently subscribed.
 #[derive(Default, Debug)]
 #[non_exhaustive]
 pub struct Counters {
@@ -124,6 +127,8 @@ pub struct Counters {
 	pub announced_closed: AtomicU64,
 	pub subscriptions: AtomicU64,
 	pub subscriptions_closed: AtomicU64,
+	pub broadcasts: AtomicU64,
+	pub broadcasts_closed: AtomicU64,
 	pub bytes: AtomicU64,
 	pub frames: AtomicU64,
 	pub groups: AtomicU64,
@@ -140,14 +145,18 @@ impl Counters {
 	fn snapshot(&self) -> RawCounts {
 		let announced_closed = self.announced_closed.load(Ordering::Acquire);
 		let subscriptions_closed = self.subscriptions_closed.load(Ordering::Acquire);
+		let broadcasts_closed = self.broadcasts_closed.load(Ordering::Acquire);
 		let announced = self.announced.load(Ordering::Relaxed);
 		let subscriptions = self.subscriptions.load(Ordering::Relaxed);
+		let broadcasts = self.broadcasts.load(Ordering::Relaxed);
 		let bytes = self.bytes.load(Ordering::Relaxed);
 		let frames = self.frames.load(Ordering::Relaxed);
 		let groups = self.groups.load(Ordering::Relaxed);
 		RawCounts {
 			announced,
 			announced_closed,
+			broadcasts,
+			broadcasts_closed,
 			subscriptions,
 			subscriptions_closed,
 			bytes,
@@ -157,13 +166,13 @@ impl Counters {
 	}
 }
 
-/// Raw counter readout, before the snapshot task layers on derived
-/// `broadcasts` / `broadcasts_closed`. Intermediate type that doesn't
-/// escape this module.
+/// Raw counter readout. Intermediate type that doesn't escape this module.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct RawCounts {
 	announced: u64,
 	announced_closed: u64,
+	broadcasts: u64,
+	broadcasts_closed: u64,
 	subscriptions: u64,
 	subscriptions_closed: u64,
 	bytes: u64,
@@ -309,13 +318,6 @@ impl BroadcastEntry {
 /// [`BroadcastEntry`].
 #[derive(Default, Clone)]
 struct SlotState {
-	/// Cumulative count of `inactive -> active` subscription transitions on
-	/// this slot since the snapshot task started. Resets to 0 when the
-	/// entry is GC'd from the local map (consumers must treat decreases as
-	/// a session restart).
-	derived_broadcasts: u64,
-	/// Cumulative count of `active -> inactive` transitions.
-	derived_broadcasts_closed: u64,
 	/// Last `Snapshot` we wrote to the frame for this slot, used to detect
 	/// changes that warrant re-emission.
 	prev_emitted: Option<Snapshot>,
@@ -517,6 +519,20 @@ impl StatsHandle {
 			tier: self.tier,
 		}
 	}
+
+	/// Per-session egress (publisher) broadcast-subscription tracker. Construct
+	/// one per session and call [`SessionBroadcasts::subscribe`] for each
+	/// downstream subscription so `broadcasts - broadcasts_closed` counts the
+	/// distinct sessions watching each broadcast.
+	pub fn publisher_broadcasts(&self) -> SessionBroadcasts {
+		SessionBroadcasts::new(self.stats.clone(), self.tier, Side::Publisher)
+	}
+
+	/// Per-session ingress (subscriber) counterpart to
+	/// [`Self::publisher_broadcasts`].
+	pub fn subscriber_broadcasts(&self) -> SessionBroadcasts {
+		SessionBroadcasts::new(self.stats.clone(), self.tier, Side::Subscriber)
+	}
 }
 
 impl Default for StatsHandle {
@@ -547,8 +563,8 @@ impl BroadcastStats {
 
 	/// Open a broadcast-lifetime guard for the publisher (egress) role.
 	/// Bumps `announced` on construction and `announced_closed` on drop.
-	/// (The emitted `broadcasts` counter is derived in the snapshot task
-	/// from subscription activity; see the module docs.)
+	/// (The `broadcasts` sentinel is driven separately by
+	/// [`SessionBroadcasts`]; see the module docs.)
 	pub fn publisher(&self) -> PublisherStats {
 		if let Some(entry) = &self.entry {
 			entry.publisher[self.tier.idx()]
@@ -563,8 +579,8 @@ impl BroadcastStats {
 
 	/// Open a broadcast-lifetime guard for the subscriber (ingress) role.
 	/// Bumps `announced` on construction and `announced_closed` on drop.
-	/// (The emitted `broadcasts` counter is derived in the snapshot task
-	/// from subscription activity; see the module docs.)
+	/// (The `broadcasts` sentinel is driven separately by
+	/// [`SessionBroadcasts`]; see the module docs.)
 	pub fn subscriber(&self) -> SubscriberStats {
 		if let Some(entry) = &self.entry {
 			entry.subscriber[self.tier.idx()]
@@ -604,6 +620,127 @@ impl BroadcastStats {
 		SubscriberTrack {
 			entry: self.entry.clone(),
 			tier: self.tier,
+		}
+	}
+}
+
+/// Which side of a [`BroadcastEntry`] a [`SessionBroadcasts`] bumps.
+#[derive(Copy, Clone)]
+enum Side {
+	Publisher,
+	Subscriber,
+}
+
+impl Side {
+	fn counters(self, entry: &BroadcastEntry, tier: Tier) -> &Counters {
+		match self {
+			Side::Publisher => &entry.publisher[tier.idx()],
+			Side::Subscriber => &entry.subscriber[tier.idx()],
+		}
+	}
+}
+
+/// Per-session tracker that turns a peer session's per-broadcast subscription
+/// lifecycle into `broadcasts` / `broadcasts_closed` bumps.
+///
+/// Hold one per session (and side). Call [`Self::subscribe`] for every
+/// subscription the session opens and keep the returned [`BroadcastSubscription`]
+/// alive for that subscription's lifetime. The guard refcounts subscriptions per
+/// broadcast for this session, so the session's *first* subscription to a
+/// broadcast bumps `broadcasts` and its *last* to drop bumps `broadcasts_closed`.
+/// Summed across sessions, `broadcasts - broadcasts_closed` is the number of
+/// distinct sessions currently subscribed to the broadcast (viewers on the
+/// egress side).
+///
+/// Cheap to clone; clones share the same per-broadcast refcounts (so a single
+/// logical session that clones its handle still counts as one).
+#[derive(Clone)]
+pub struct SessionBroadcasts {
+	stats: Stats,
+	tier: Tier,
+	side: Side,
+	counts: Arc<std::sync::Mutex<HashMap<PathOwned, u32>>>,
+}
+
+impl SessionBroadcasts {
+	fn new(stats: Stats, tier: Tier, side: Side) -> Self {
+		Self {
+			stats,
+			tier,
+			side,
+			counts: Arc::new(std::sync::Mutex::new(HashMap::new())),
+		}
+	}
+
+	/// Register one active subscription to `path` for this session. Hold the
+	/// returned guard for the subscription's lifetime; dropping it releases the
+	/// subscription (bumping `broadcasts_closed` when it was the session's last
+	/// for that broadcast).
+	pub fn subscribe(&self, path: impl AsPath) -> BroadcastSubscription {
+		let path = path.as_path().to_owned();
+		let entry = self.stats.entry(&path);
+		let first = {
+			let mut counts = self.counts.lock().expect("stats refcount poisoned");
+			let n = counts.entry(path.clone()).or_insert(0);
+			let first = *n == 0;
+			*n += 1;
+			first
+		};
+		if first {
+			if let Some(entry) = &entry {
+				self.side
+					.counters(entry, self.tier)
+					.broadcasts
+					.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+		BroadcastSubscription {
+			entry,
+			tier: self.tier,
+			side: self.side,
+			counts: self.counts.clone(),
+			path,
+		}
+	}
+}
+
+/// RAII guard for one of a session's per-broadcast subscriptions.
+/// See [`SessionBroadcasts::subscribe`].
+#[must_use = "drop the guard to release the subscription"]
+pub struct BroadcastSubscription {
+	entry: Option<Arc<BroadcastEntry>>,
+	tier: Tier,
+	side: Side,
+	counts: Arc<std::sync::Mutex<HashMap<PathOwned, u32>>>,
+	path: PathOwned,
+}
+
+impl Drop for BroadcastSubscription {
+	fn drop(&mut self) {
+		let last = {
+			let mut counts = self.counts.lock().expect("stats refcount poisoned");
+			match counts.get_mut(&self.path) {
+				Some(n) => {
+					*n -= 1;
+					if *n == 0 {
+						counts.remove(&self.path);
+						true
+					} else {
+						false
+					}
+				}
+				None => false,
+			}
+		};
+		if last {
+			if let Some(entry) = &self.entry {
+				// Release pairs with the snapshot reader's Acquire load of
+				// `broadcasts_closed`; see `PublisherStats::drop`.
+				self.side
+					.counters(entry, self.tier)
+					.broadcasts_closed
+					.fetch_add(1, Ordering::Release);
+			}
 		}
 	}
 }
@@ -776,11 +913,10 @@ fn within_retention<'a>(slots: impl IntoIterator<Item = &'a SlotState>, current_
 		.any(|s| s.last_change_tick != 0 && current_tick.saturating_sub(s.last_change_tick) <= retention as u64)
 }
 
-/// Per-tick work for a single `(side, tier)` slot: derive `broadcasts` /
-/// `broadcasts_closed` from subscription transitions, build the emitted
-/// `Snapshot`, update the slot's `prev_emitted` / `last_change_tick`, and
-/// hand the snap to `emit` iff the slot is still within the retention
-/// window of its most recent change.
+/// Per-tick work for a single `(side, tier)` slot: build the emitted
+/// `Snapshot` from the raw counters, update the slot's `prev_emitted` /
+/// `last_change_tick`, and hand the snap to `emit` iff the slot is still
+/// within the retention window of its most recent change.
 fn process_slot(
 	counters: &Counters,
 	slot_state: &mut SlotState,
@@ -790,37 +926,11 @@ fn process_slot(
 ) {
 	let raw = counters.snapshot();
 
-	// Derive `broadcasts` / `broadcasts_closed` from subscription-active
-	// transitions observed across ticks. `delta_subs > 0` catches the case
-	// where a sub opened AND closed within a single tick window so the
-	// snapshot shows `subs == subs_closed` (curr_active false) but real
-	// activity happened. Such flickers count as a full open/close pair.
-	let (prev_subs, prev_subs_closed, prev_broadcasts, prev_broadcasts_closed) = match &slot_state.prev_emitted {
-		Some(prev) => (
-			prev.subscriptions,
-			prev.subscriptions_closed,
-			prev.broadcasts,
-			prev.broadcasts_closed,
-		),
-		None => (0, 0, 0, 0),
-	};
-	let prev_active = prev_subs > prev_subs_closed;
-	let curr_active = raw.subscriptions > raw.subscriptions_closed;
-	let delta_subs = raw.subscriptions.saturating_sub(prev_subs);
-	let active_during = prev_active || curr_active || delta_subs > 0;
-
-	if !prev_active && active_during {
-		slot_state.derived_broadcasts = prev_broadcasts.saturating_add(1);
-	}
-	if active_during && !curr_active {
-		slot_state.derived_broadcasts_closed = prev_broadcasts_closed.saturating_add(1);
-	}
-
 	let snap = Snapshot {
 		announced: raw.announced,
 		announced_closed: raw.announced_closed,
-		broadcasts: slot_state.derived_broadcasts,
-		broadcasts_closed: slot_state.derived_broadcasts_closed,
+		broadcasts: raw.broadcasts,
+		broadcasts_closed: raw.broadcasts_closed,
 		subscriptions: raw.subscriptions,
 		subscriptions_closed: raw.subscriptions_closed,
 		bytes: raw.bytes,
@@ -993,10 +1103,10 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 	}
 }
 
-/// What we emit for one entry on one tier-role track. `announced` /
-/// `announced_closed` and the subscription / payload counters come straight
-/// from [`RawCounts`]; `broadcasts` / `broadcasts_closed` are derived in
-/// the snapshot task from observed subscription transitions.
+/// What we emit for one entry on one tier-role track. Every field comes
+/// straight from [`RawCounts`]; `broadcasts` / `broadcasts_closed` are the
+/// per-(broadcast, session) subscription sentinel maintained by
+/// [`SessionBroadcasts`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(serde::Deserialize))]
 struct Snapshot {
@@ -1187,9 +1297,9 @@ mod tests {
 	async fn retention_boundary_after_drop() {
 		// retention=2 lingers exactly 2 idle ticks after the LAST
 		// snapshot change. The drop itself is a change (it bumps
-		// announced_closed/subs_closed/derived broadcasts_closed), so the
-		// retention countdown starts from the tick that observes the drop,
-		// not the tick that observed the open guard.
+		// announced_closed / subscriptions_closed), so the retention
+		// countdown starts from the tick that observes the drop, not the
+		// tick that observed the open guard.
 		let origin = Origin::random().produce();
 		let stats = Stats::new(
 			StatsConfig::new(origin)
@@ -1205,7 +1315,7 @@ mod tests {
 		drop(track);
 		drop(bs);
 
-		// Tick 2: observe drop. snapshot changes (broadcasts_closed bumps).
+		// Tick 2: observe drop. snapshot changes (subscriptions_closed bumps).
 		drive_ticks(1).await;
 		assert!(
 			stats.shared.entries.lock().contains_key(&key),
@@ -1282,6 +1392,8 @@ mod tests {
 		let track = bs.publisher().track("video");
 		track.bytes(42);
 		track.frame();
+		let sessions = stats.tier(Tier::External).publisher_broadcasts();
+		let _sub = sessions.subscribe("foo/bar");
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
@@ -1296,7 +1408,7 @@ mod tests {
 		let frame = read_frame(track).await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
 		assert_eq!(snap.announced, 1, "publisher() guard bumps announced");
-		assert_eq!(snap.broadcasts, 1, "subs went 0->1, derived broadcasts++");
+		assert_eq!(snap.broadcasts, 1, "one session subscribed");
 		assert_eq!(snap.subscriptions, 1);
 		assert_eq!(snap.bytes, 42);
 		assert_eq!(snap.frames, 1);
@@ -1304,8 +1416,8 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn announced_decouples_from_broadcasts() {
-		// publisher() with no track subscription should bump announced but
-		// NOT broadcasts (which only counts slots with sub activity).
+		// publisher() (announce) with no subscription should bump announced but
+		// NOT broadcasts (which only counts sessions with an active sub).
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume();
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -1324,24 +1436,27 @@ mod tests {
 		let frame = read_frame(track).await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
 		assert_eq!(snap.announced, 1);
-		assert_eq!(snap.broadcasts, 0, "no sub, no derived broadcasts");
+		assert_eq!(snap.broadcasts, 0, "no subscription, no broadcasts sentinel");
 		assert_eq!(snap.subscriptions, 0);
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn short_lived_sub_is_surfaced() {
 		// A subscription that opens AND closes within a single tick window
-		// must still surface as a complete broadcasts open/close cycle.
-		// Before the change-driven inclusion fix, this entry would never
-		// have appeared in any frame and would have been GC'd silently.
+		// must still surface as a complete broadcasts open/close cycle. The
+		// cumulative counters retain broadcasts=1/broadcasts_closed=1, and the
+		// change-driven inclusion surfaces the entry even though it's net-idle
+		// by snapshot time.
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume();
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let sessions = stats.tier(Tier::External).publisher_broadcasts();
 		{
 			let track = bs.publisher().track("video");
 			track.bytes(123);
 			track.frame();
-			// track dropped here, all within tick 1
+			let _sub = sessions.subscribe("foo/bar");
+			// track + sub dropped here, all within tick 1
 		}
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
@@ -1356,11 +1471,10 @@ mod tests {
 			.expect("subscribe");
 		let frame = read_frame(track).await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
-		// subs went 0->1->0 within the same tick. delta_subs > 0 triggers
-		// both broadcasts++ and broadcasts_closed++.
+		// One session opened then closed a subscription within the tick.
 		assert_eq!(snap.subscriptions, 1);
 		assert_eq!(snap.subscriptions_closed, 1);
-		assert_eq!(snap.broadcasts, 1, "flicker counts as one broadcast");
+		assert_eq!(snap.broadcasts, 1, "one session subscribed");
 		assert_eq!(snap.broadcasts_closed, 1);
 		assert_eq!(snap.bytes, 123);
 		assert_eq!(snap.frames, 1);
@@ -1368,43 +1482,74 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn multiple_subs_count_as_one_broadcast() {
-		// Two concurrent subs on the same slot should bump broadcasts by 1,
-		// not 2. broadcasts is "broadcasts that had >=1 active sub" not
-		// "subscription count". And dropping both subs should bump
-		// broadcasts_closed by 1 (the 1->0 transition is one event).
+		// Two concurrent subs from the SAME session count as one broadcast, not
+		// two: broadcasts is "distinct sessions with >=1 active sub", not
+		// "subscription count". broadcasts_closed only bumps once the session's
+		// last sub for the broadcast closes.
 		let (stats, _origin) = test_stats(Some("sjc"));
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
+		let sessions = stats.tier(Tier::External).publisher_broadcasts();
 		let pub_guard = bs.publisher();
 		let t1 = pub_guard.track("video");
 		let t2 = pub_guard.track("audio");
+		let s1 = sessions.subscribe("foo/bar");
+		let s2 = sessions.subscribe("foo/bar");
 
-		drive_ticks(2).await;
-		{
+		let raw = || {
 			let entries = stats.shared.entries.lock();
 			let entry = entries.get(&PathOwned::from("foo/bar")).expect("entry");
-			let raw = entry.publisher[Tier::External.idx()].snapshot();
-			assert_eq!(raw.subscriptions, 2, "two track subs");
-			assert_eq!(raw.subscriptions_closed, 0, "neither dropped yet");
-		}
+			entry.publisher[Tier::External.idx()].snapshot()
+		};
 
+		let r = raw();
+		assert_eq!(r.subscriptions, 2, "two track subs");
+		assert_eq!(r.subscriptions_closed, 0, "neither dropped yet");
+		assert_eq!(r.broadcasts, 1, "one session => one broadcast");
+		assert_eq!(r.broadcasts_closed, 0);
+
+		drop(s1);
+		assert_eq!(raw().broadcasts_closed, 0, "session still has a sub open");
+
+		drop(s2);
 		drop(t1);
 		drop(t2);
+		let r = raw();
+		assert_eq!(r.subscriptions_closed, 2, "both track subs dropped");
+		assert_eq!(r.broadcasts, 1);
+		assert_eq!(r.broadcasts_closed, 1, "last sub closed => one broadcasts_closed");
+
 		drop(pub_guard);
 		drop(bs);
-		drive_ticks(1).await;
+	}
 
-		// All subs dropped: subscriptions_closed catches up to subscriptions.
-		// The snapshot task observes the 1->0 transition; derived
-		// broadcasts_closed (which lives in task-local state, not on the
-		// global entry) gets bumped to 1, but we can only see that through
-		// the wire frame. Here we just confirm the raw counters squared up.
-		let entries = stats.shared.entries.lock();
-		let entry = entries
-			.get(&PathOwned::from("foo/bar"))
-			.expect("entry still in retention");
-		let raw = entry.publisher[Tier::External.idx()].snapshot();
-		assert_eq!(raw.subscriptions, 2);
-		assert_eq!(raw.subscriptions_closed, 2, "both dropped");
+	#[tokio::test(start_paused = true)]
+	async fn distinct_sessions_count_as_separate_broadcasts() {
+		// The viewer-count invariant: two different sessions subscribing to the
+		// same broadcast bump broadcasts to 2 (each is a distinct viewer).
+		let (stats, _origin) = test_stats(Some("sjc"));
+		let viewer1 = stats.tier(Tier::External).publisher_broadcasts();
+		let viewer2 = stats.tier(Tier::External).publisher_broadcasts();
+
+		let raw = || {
+			let entries = stats.shared.entries.lock();
+			let entry = entries.get(&PathOwned::from("foo/bar")).expect("entry");
+			entry.publisher[Tier::External.idx()].snapshot()
+		};
+
+		let s1 = viewer1.subscribe("foo/bar");
+		assert_eq!(raw().broadcasts, 1, "one viewer");
+		let s2 = viewer2.subscribe("foo/bar");
+		assert_eq!(raw().broadcasts, 2, "two distinct viewers");
+		assert_eq!(raw().broadcasts_closed, 0);
+
+		drop(s1);
+		let r = raw();
+		assert_eq!(r.broadcasts, 2, "broadcasts is cumulative");
+		assert_eq!(r.broadcasts_closed, 1, "one viewer left");
+		// broadcasts - broadcasts_closed = 1 remaining viewer.
+
+		drop(s2);
+		assert_eq!(raw().broadcasts_closed, 2, "both viewers gone");
 	}
 
 	#[tokio::test(start_paused = true)]
