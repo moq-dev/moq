@@ -323,7 +323,7 @@ impl BroadcastEntry {
 #[derive(Default)]
 struct SlotState {
 	/// Last `Snapshot` we wrote to the frame for this slot, used to detect
-	/// changes that warrant re-emission and to derive `broadcasts` transitions.
+	/// changes that warrant re-emission.
 	prev_emitted: Option<Snapshot>,
 }
 
@@ -935,8 +935,7 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 	drop(shared);
 
 	// Per-path snapshot state owned by this task. Mirrors the global entries
-	// and serves as the diff source for change detection and `broadcasts`
-	// derivation across ticks.
+	// and serves as the diff source for change detection across ticks.
 	let mut local: HashMap<PathOwned, EntrySnapState> = HashMap::new();
 	let mut last_payload: [Vec<u8>; NUM_SLOTS] = Default::default();
 
