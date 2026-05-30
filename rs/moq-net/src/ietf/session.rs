@@ -1,5 +1,5 @@
 use crate::{
-	Error, OriginConsumer, OriginProducer,
+	Error, OriginConsumer, OriginProducer, StatsHandle,
 	coding::{Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
@@ -7,6 +7,9 @@ use crate::{
 
 use super::{Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter};
 
+// Handshake dispatcher: each argument is an independent session parameter, so
+// bundling them into a config struct would just add indirection.
+#[allow(clippy::too_many_arguments)]
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
 	setup: Option<Stream<S, Version>>,
@@ -14,6 +17,8 @@ pub fn start<S: web_transport_trait::Session>(
 	client: bool,
 	publish: Option<OriginConsumer>,
 	subscribe: Option<OriginProducer>,
+	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
+	stats: StatsHandle,
 	version: Version,
 ) -> Result<(), Error> {
 	web_async::spawn(async move {
@@ -26,8 +31,8 @@ pub fn start<S: web_transport_trait::Session>(
 				let control = Control::new(request_id_max, client);
 				let adapter = ControlStreamAdapter::new(session.clone(), tx, control.clone(), version);
 
-				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), version);
-				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, version);
+				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), stats.clone(), version);
+				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, stats, version);
 
 				let dispatch_session = adapter.clone();
 				let mut sub_ns = subscriber.clone();
@@ -71,8 +76,8 @@ pub fn start<S: web_transport_trait::Session>(
 				});
 
 				let control = Control::new(None, client);
-				let publisher = Publisher::new(session.clone(), publish, control.clone(), version);
-				let subscriber = Subscriber::new(session.clone(), subscribe, control, version);
+				let publisher = Publisher::new(session.clone(), publish, control.clone(), stats.clone(), version);
+				let subscriber = Subscriber::new(session.clone(), subscribe, control, stats, version);
 
 				let sub_ns_session = session.clone();
 				let mut sub_ns = subscriber.clone();

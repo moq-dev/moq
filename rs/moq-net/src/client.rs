@@ -73,6 +73,7 @@ impl Client {
 					true,
 					self.publish.clone(),
 					self.consume.clone(),
+					self.stats.clone(),
 					ietf::Version::Draft18,
 				)?;
 
@@ -93,6 +94,7 @@ impl Client {
 					true,
 					self.publish.clone(),
 					self.consume.clone(),
+					self.stats.clone(),
 					ietf::Version::Draft17,
 				)?;
 
@@ -228,6 +230,7 @@ impl Client {
 					true,
 					self.publish.clone(),
 					self.consume.clone(),
+					self.stats.clone(),
 					v,
 				)?;
 				None

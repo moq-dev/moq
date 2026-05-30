@@ -37,7 +37,7 @@
 //! * `subscriptions` / `subscriptions_closed`: cumulative count of
 //!   track-level subscription guards opened/dropped.
 //! * `bytes` / `frames` / `groups`: cumulative payload counters bumped from
-//!   the lite session loops.
+//!   the session loops (both lite and IETF).
 //!
 //! Counters are strictly monotonic (only `fetch_add`); a counter going
 //! backwards across snapshots means the underlying entry was garbage

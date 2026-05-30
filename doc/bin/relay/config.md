@@ -218,7 +218,7 @@ Field semantics:
 - `subscriptions` / `subscriptions_closed`: cumulative count of
   track-level subscription guards opened and dropped.
 - `bytes` / `frames` / `groups`: cumulative payload counters from the
-  lite session loops.
+  session loops (both the `moq-lite` and IETF `moq-transport` paths).
 
 Tier, role, and node are implied by the track and broadcast paths, so
 they aren't repeated inside the frame. Counters are cumulative and

@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::SendStream;
 
 use crate::{
-	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, Error, Origin, OriginConsumer, StatsHandle, Track, TrackConsumer,
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	model::GroupConsumer,
@@ -18,16 +18,30 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: OriginConsumer,
 	control: Control,
+	stats: StatsHandle,
+	/// Per-session egress broadcast-subscription tracker. Each downstream
+	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts
+	/// the distinct sessions (viewers) watching each broadcast.
+	broadcasts: crate::SessionBroadcasts,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(session: S, origin: Option<OriginConsumer>, control: Control, version: Version) -> Self {
+	pub fn new(
+		session: S,
+		origin: Option<OriginConsumer>,
+		control: Control,
+		stats: StatsHandle,
+		version: Version,
+	) -> Self {
 		let origin = origin.unwrap_or_else(|| Origin::random().produce().consume());
+		let broadcasts = stats.publisher_broadcasts();
 		Self {
 			session,
 			origin,
 			control,
+			stats,
+			broadcasts,
 			version,
 		}
 	}
@@ -105,6 +119,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::info!(id = %request_id, broadcast = %absolute, track = %track_name, "subscribe started");
 
+		// Per-track subscription guard (bumps `subscriptions`). Taken before
+		// validation so a stale/invalid SUBSCRIBE still counts as an attempt,
+		// matching the lite path. The per-(session, broadcast) `broadcasts`
+		// sentinel that counts viewers is taken only once the subscription is
+		// validated and active, below.
+		let track_stats = std::sync::Arc::new(self.stats.broadcast(&absolute).publisher_track(&track_name));
+
 		// We just received a subscribe for this exact namespace, so the peer must have already
 		// seen the announcement — synchronous lookup is appropriate here.
 		let Some(broadcast) = self.origin.get_broadcast(&msg.track_namespace) else {
@@ -127,6 +148,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		};
 
+		// Subscription is now active: count this session as a viewer of the
+		// broadcast. Dropping this guard (subscription end) releases it.
+		let _broadcast_sub = self.broadcasts.subscribe(&absolute);
+
 		// Send SubscribeOk on the stream
 		stream.writer.encode(&ietf::SubscribeOk::ID).await?;
 		stream
@@ -142,7 +167,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Run the track, cancelling on reader close (Unsubscribe or stream close)
 		let res = tokio::select! {
-			res = self.run_track(track, request_id) => res,
+			res = self.run_track(track, request_id, track_stats) => res,
 			_ = stream.reader.closed() => Ok(()),
 			_ = self.session.closed() => Ok(()),
 		};
@@ -217,7 +242,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	/// Serve a track using FuturesUnordered for unlimited concurrent groups.
-	async fn run_track(&self, mut track: TrackConsumer, request_id: RequestId) -> Result<(), Error> {
+	async fn run_track(
+		&self,
+		mut track: TrackConsumer,
+		request_id: RequestId,
+		track_stats: std::sync::Arc<crate::PublisherTrack>,
+	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
 
 		loop {
@@ -242,7 +272,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				flags: Default::default(),
 			};
 
-			tasks.push(Self::run_group(self.session.clone(), msg, track.priority, group, self.version).map(|_| ()));
+			tasks.push(
+				Self::run_group(
+					self.session.clone(),
+					msg,
+					track.priority,
+					group,
+					track_stats.clone(),
+					self.version,
+				)
+				.map(|_| ()),
+			);
 		}
 	}
 
@@ -251,6 +291,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		msg: ietf::GroupHeader,
 		priority: u8,
 		mut group: GroupConsumer,
+		track_stats: std::sync::Arc<crate::PublisherTrack>,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -259,6 +300,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut stream = Writer::new(stream, version);
 
 		stream.encode(&msg).await?;
+		track_stats.group();
 
 		loop {
 			let frame = tokio::select! {
@@ -282,6 +324,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			// Write the size of the frame.
 			stream.encode(&frame.size).await?;
+			track_stats.frame();
 
 			if frame.size == 0 {
 				// Have to write the object status too.
@@ -297,7 +340,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					match chunk? {
 						Some(mut chunk) => {
+							let n = chunk.len() as u64;
 							stream.write_all(&mut chunk).await?;
+							track_stats.bytes(n);
 						}
 						None => break,
 					}
@@ -438,7 +483,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	/// Outgoing PublishNamespace: announce each namespace via a bidi stream.
 	async fn run_announce(mut self) -> Result<(), Error> {
-		let mut namespace_streams: HashMap<crate::PathOwned, (RequestId, Stream<S, Version>)> = HashMap::new();
+		// Each accepted namespace holds a `publisher()` announce guard (bumps
+		// `announced` / `announced_closed`) alongside its stream, so dropping the
+		// tuple on unannounce or cleanup records the close.
+		let mut namespace_streams: HashMap<crate::PathOwned, (RequestId, Stream<S, Version>, crate::PublisherStats)> =
+			HashMap::new();
 
 		loop {
 			let announced = tokio::select! {
@@ -455,6 +504,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			if active.is_some() {
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "announce");
+				let absolute = self.origin.absolute(&path).to_owned();
 
 				let request_id = self.control.next_request_id().await?;
 				let mut stream = Stream::open(&self.session, self.version).await?;
@@ -479,7 +529,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					(Version::Draft14, ietf::PublishNamespaceOk::ID) => {
 						let msg = ietf::PublishNamespaceOk::decode_msg(&mut data, self.version)?;
 						tracing::debug!(message = ?msg, "publish namespace ok");
-						namespace_streams.insert(suffix, (request_id, stream));
+						let guard = self.stats.broadcast(&absolute).publisher();
+						namespace_streams.insert(suffix, (request_id, stream, guard));
 					}
 					(Version::Draft14, ietf::PublishNamespaceError::ID) => {
 						let msg = ietf::PublishNamespaceError::decode_msg(&mut data, self.version)?;
@@ -489,7 +540,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					(_, ietf::RequestOk::ID) => {
 						let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
 						tracing::debug!(message = ?msg, "publish namespace ok");
-						namespace_streams.insert(suffix, (request_id, stream));
+						let guard = self.stats.broadcast(&absolute).publisher();
+						namespace_streams.insert(suffix, (request_id, stream, guard));
 					}
 					(_, ietf::RequestError::ID) => {
 						let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
@@ -499,7 +551,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				}
 			} else {
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounce");
-				if let Some((request_id, mut stream)) = namespace_streams.remove(&suffix) {
+				if let Some((request_id, mut stream, _stats)) = namespace_streams.remove(&suffix) {
 					// v14-16 sends PublishNamespaceDone; v17+ just closes the stream.
 					match self.version {
 						Version::Draft14 | Version::Draft15 | Version::Draft16 => {
@@ -519,7 +571,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 
 		// Clean up remaining streams
-		for (suffix, (request_id, mut stream)) in namespace_streams {
+		for (suffix, (request_id, mut stream, _stats)) in namespace_streams {
 			match self.version {
 				Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 					let _ = stream

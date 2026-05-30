@@ -1,8 +1,10 @@
 use std::collections::{HashMap, hash_map::Entry};
 
+use std::sync::Arc;
+
 use crate::{
 	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, MAX_FRAME_SIZE, OriginProducer,
-	Path, PathOwned, Track, TrackProducer,
+	Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, Track, TrackProducer,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
@@ -30,6 +32,9 @@ struct State {
 struct TrackState {
 	producer: TrackProducer,
 	alias: Option<u64>,
+	/// Subscriber-side track stats; counters bump as frames/bytes/groups arrive.
+	/// Dropping on subscription end records `subscriptions_closed`.
+	stats: Arc<SubscriberTrack>,
 }
 
 struct BroadcastState {
@@ -37,6 +42,10 @@ struct BroadcastState {
 
 	// active number of PUBLISH or PUBLISH_NAMESPACE messages.
 	count: usize,
+
+	/// Subscriber-side announce guard (bumps `announced` / `announced_closed`),
+	/// held for as long as the broadcast is announced into our origin.
+	_stats: SubscriberStats,
 }
 
 #[derive(Clone)]
@@ -44,16 +53,30 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 	origin: Option<OriginProducer>,
 	control: Control,
+	stats: StatsHandle,
+	/// Per-session ingress broadcast-subscription tracker. Each upstream
+	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
+	/// distinct upstream sessions feeding each broadcast.
+	broadcasts: crate::SessionBroadcasts,
 	state: Lock<State>,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: Option<OriginProducer>, control: Control, version: Version) -> Self {
+	pub fn new(
+		session: S,
+		origin: Option<OriginProducer>,
+		control: Control,
+		stats: StatsHandle,
+		version: Version,
+	) -> Self {
+		let broadcasts = stats.subscriber_broadcasts();
 		Self {
 			session,
 			origin,
 			control,
+			stats,
+			broadcasts,
 			state: Default::default(),
 			version,
 		}
@@ -230,6 +253,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let res = self.write_publish_ok(&mut stream, &msg).await;
 
 		if res.is_ok() {
+			// PUBLISH is the peer feeding us a broadcast, so count this session as
+			// an active upstream feed for the lifetime of the publish. The guard
+			// drops (releasing `broadcasts_closed`) when the stream closes below.
+			let abs = match &self.origin {
+				Some(origin) => origin.absolute(&msg.track_namespace).to_owned(),
+				None => msg.track_namespace.to_owned(),
+			};
+			let _broadcast_sub = self.broadcasts.subscribe(&abs);
+
 			// Wait for PublishDone or stream close
 			let _ = stream.reader.closed().await;
 		}
@@ -406,6 +438,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Err(Error::InvalidRole);
 		};
 
+		let abs = origin.absolute(&path).to_owned();
+
 		let mut state = self.state.lock();
 		let broadcast = match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
@@ -418,6 +452,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),
 					count: 1,
+					_stats: self.stats.broadcast(&abs).subscriber(),
 				});
 				broadcast
 			}
@@ -468,12 +503,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 		.produce();
 
+		let abs = match &self.origin {
+			Some(origin) => origin.absolute(&msg.track_namespace).to_owned(),
+			None => msg.track_namespace.to_owned(),
+		};
+		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&msg.track_name));
+
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
 			Entry::Vacant(entry) => {
 				entry.insert(TrackState {
 					producer: track.clone(),
 					alias: Some(msg.track_alias),
+					stats: track_stats,
 				});
 			}
 			Entry::Occupied(_) => return Err(Error::Duplicate),
@@ -540,6 +582,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
+		let abs = self
+			.origin
+			.as_ref()
+			.expect("origin set by start_announce")
+			.absolute(&broadcast_path)
+			.to_owned();
+		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&track.name));
+
 		// Pre-register the track so group data arriving before SubscribeOk can be routed.
 		// The publisher uses request_id.0 as track_alias, and recv_group falls back to
 		// RequestId(track_alias) when no alias mapping exists, so this works.
@@ -550,6 +600,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				TrackState {
 					producer: track.clone(),
 					alias: None,
+					stats: track_stats,
 				},
 			);
 		}
@@ -586,6 +637,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return;
 			}
 		};
+
+		// Upstream confirmed (SubscribeOk), so this session is now actively feeding
+		// the broadcast: take the `broadcasts` sentinel for the subscription's
+		// lifetime. It drops (releasing `broadcasts_closed`) when this fn returns.
+		let _broadcast_sub = self.broadcasts.subscribe(&abs);
 
 		tokio::select! {
 			_ = track.unused() => {
@@ -675,7 +731,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Err(Error::Unsupported);
 		}
 
-		let (mut producer, track) = {
+		let (mut producer, track, track_stats) = {
 			let mut state = self.state.lock();
 			let request_id = match state.aliases.get(&group.track_alias) {
 				Some(request_id) => *request_id,
@@ -690,13 +746,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				sequence: group.group_id,
 			};
 			let producer = track.producer.create_group(group_info)?;
-			(producer, track.producer.clone())
+			(producer, track.producer.clone(), track.stats.clone())
 		};
+
+		// Bump groups counter for this incoming group on the subscriber side.
+		track_stats.group();
 
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = producer.closed() => Err(err),
-			res = self.run_group(group, stream, producer.clone()) => res,
+			res = self.run_group(group, stream, producer.clone(), track_stats.clone()) => res,
 		};
 
 		match res {
@@ -720,6 +779,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		group: ietf::GroupHeader,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut producer: GroupProducer,
+		track_stats: Arc<SubscriberTrack>,
 	) -> Result<(), Error> {
 		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
 			if id_delta != 0 {
@@ -737,6 +797,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
 					let mut frame = producer.create_frame(Frame { size: 0 })?;
+					track_stats.frame();
 					frame.finish()?;
 				} else if status == 3 && !group.flags.has_end {
 					break;
@@ -748,8 +809,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::FrameTooLarge);
 				}
 				let mut frame = producer.create_frame(Frame { size })?;
+				track_stats.frame();
 
-				if let Err(err) = self.run_frame(stream, frame.clone()).await {
+				if let Err(err) = self.run_frame(stream, frame.clone(), &track_stats).await {
 					let _ = frame.abort(err.clone());
 					return Err(err);
 				}
@@ -765,12 +827,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut frame: FrameProducer,
+		track_stats: &SubscriberTrack,
 	) -> Result<(), Error> {
 		// FrameProducer impls BufMut; read_buf writes stream bytes directly into
 		// the per-frame buffer (see lite/subscriber.rs run_frame for rationale).
 		while bytes::BufMut::has_remaining_mut(&frame) {
 			match stream.read_buf(&mut frame).await? {
-				Some(n) if n > 0 => {}
+				Some(n) if n > 0 => {
+					track_stats.bytes(n as u64);
+				}
 				_ => return Err(Error::WrongSize),
 			}
 		}
