@@ -76,8 +76,9 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
                      # (PyPI, since `moq` is taken); import `moq`. Depends on
                      # moq-ffi via a compatible-release pin (~=0.2.x) so it
                      # floats to the latest moq-ffi patch. Versioned
-                     # independently: bump py/moq-rs/pyproject.toml by hand,
-                     # push a moq-py-v* tag (release-py-wrapper.yml).
+                     # independently: bump py/moq-rs/pyproject.toml by hand; on
+                     # merge to main release-py-wrapper.yml publishes to PyPI if
+                     # that version isn't already there (registry is the gate).
 
 /swift/               # Swift wrapper over rs/moq-ffi (SwiftPM)
 /kt/                  # Kotlin wrapper over rs/moq-ffi (Gradle, KMP)
