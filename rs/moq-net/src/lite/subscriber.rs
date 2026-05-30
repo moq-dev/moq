@@ -194,7 +194,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				lite::Announce::Active { suffix, hops } => {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.absolute(&path).to_owned();
-					if self.start_announce(path.clone(), hops, &mut producers)? {
+					if lite::restart_supported(self.version) && producers.contains_key(&path) {
+						// lite-05+ only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
+						// atomically replace the broadcast. Older versions fall through to start_announce,
+						// which rejects the duplicate (Error::Duplicate).
+						if self.restart_announce(path.clone(), hops, &mut producers)? {
+							// Continuity: keep the existing stats guard if present.
+							stats_guards
+								.entry(abs.clone())
+								.or_insert_with(|| self.stats.broadcast(&abs).subscriber());
+						} else {
+							stats_guards.remove(&abs);
+						}
+					} else if self.start_announce(path.clone(), hops, &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
@@ -304,6 +316,46 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		self.origin.publish_broadcast(path.clone(), broadcast.consume());
 
 		web_async::spawn(self.clone().run_broadcast(path, dynamic));
+
+		Ok(true)
+	}
+
+	/// Handle a RESTART (a duplicate ANNOUNCE): atomically replace the broadcast at `path`.
+	///
+	/// Publishing the replacement before retiring the old producer lets the origin demote the old
+	/// broadcast to a backup and emit a single restart downstream, rather than an
+	/// unannounce/announce pair with a visible gap. Returns `Ok(false)` if the replacement was a
+	/// reflected loop (the broadcast is now gone), `Ok(true)` otherwise.
+	fn restart_announce(
+		&mut self,
+		path: PathOwned,
+		hops: crate::OriginList,
+		producers: &mut HashMap<PathOwned, BroadcastProducer>,
+	) -> Result<bool, Error> {
+		// Reflected loop: the replacement passed through us. Retire the broadcast.
+		if hops.contains(&self.self_origin) {
+			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected restart");
+			if let Some(mut old) = producers.remove(&path) {
+				old.abort(Error::Cancel).ok();
+			}
+			return Ok(false);
+		}
+
+		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
+
+		let broadcast = Broadcast { hops }.produce();
+		let dynamic = broadcast.dynamic();
+
+		// Publish the replacement first so the origin restarts atomically; the old broadcast is
+		// demoted to a backup and dropped silently when we abort it below.
+		self.origin.publish_broadcast(path.clone(), broadcast.consume());
+
+		let old = producers.insert(path.clone(), broadcast.clone());
+		web_async::spawn(self.clone().run_broadcast(path.clone(), dynamic));
+
+		if let Some(mut old) = old {
+			old.abort(Error::Cancel).ok();
+		}
 
 		Ok(true)
 	}

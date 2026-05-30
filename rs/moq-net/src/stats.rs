@@ -1063,8 +1063,8 @@ mod tests {
 		let _t2 = bs2.publisher().track("video");
 
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let (path, broadcast) = consumer.next().await.expect("expected announce");
-		assert!(broadcast.is_some());
+		let (path, event) = consumer.next().await.expect("expected announce");
+		assert!(event.broadcast().is_some());
 		assert_eq!(path.as_str(), ".stats/node/sjc/1");
 	}
 
@@ -1078,8 +1078,8 @@ mod tests {
 		let _t = bs.publisher().track("video");
 
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let (path, broadcast) = consumer.next().await.expect("expected announce");
-		assert!(broadcast.is_some());
+		let (path, event) = consumer.next().await.expect("expected announce");
+		assert!(event.broadcast().is_some());
 		assert_eq!(path.as_str(), ".stats/node");
 	}
 
@@ -1161,8 +1161,8 @@ mod tests {
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
-		let (_path, broadcast) = consumer.next().await.expect("expected announce");
-		let broadcast = broadcast.expect("active");
+		let (_path, event) = consumer.next().await.expect("expected announce");
+		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
 			.subscribe_track(&Track {
 				name: "publisher.json".into(),
@@ -1190,8 +1190,8 @@ mod tests {
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
-		let (_path, broadcast) = consumer.next().await.expect("announce");
-		let broadcast = broadcast.expect("active");
+		let (_path, event) = consumer.next().await.expect("announce");
+		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
 			.subscribe_track(&Track {
 				name: "publisher.json".into(),
@@ -1224,8 +1224,8 @@ mod tests {
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
-		let (_path, broadcast) = consumer.next().await.expect("announce");
-		let broadcast = broadcast.expect("active");
+		let (_path, event) = consumer.next().await.expect("announce");
+		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
 			.subscribe_track(&Track {
 				name: "publisher.json".into(),
@@ -1302,8 +1302,8 @@ mod tests {
 
 		drive_ticks(2).await;
 
-		let (_path, broadcast) = consumer.next().await.expect("announce");
-		let broadcast = broadcast.expect("active");
+		let (_path, event) = consumer.next().await.expect("announce");
+		let broadcast = event.broadcast().expect("active");
 
 		// External publisher slot SHOULD include foo/bar.
 		let pub_track = broadcast

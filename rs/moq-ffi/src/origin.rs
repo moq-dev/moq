@@ -28,14 +28,16 @@ impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnouncement>>, MoqError> {
 		loop {
 			match self.inner.next().await {
-				Some((path, Some(broadcast))) => {
+				// Active and Restart both carry a broadcast; skip unannounce events.
+				Some((path, event)) => {
+					let Some(broadcast) = event.broadcast() else {
+						continue;
+					};
 					return Ok(Some(Arc::new(MoqAnnouncement {
 						path: path.to_string(),
 						broadcast: Arc::new(MoqBroadcastConsumer::new(broadcast)),
 					})));
 				}
-				// TODO moq-lite will change to not emit None (unannounce) events here.
-				Some((_path, None)) => continue,
 				None => return Ok(None),
 			}
 		}
@@ -44,11 +46,11 @@ impl Announced {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		loop {
 			match self.inner.next().await {
-				Some((_path, Some(broadcast))) => {
-					return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)));
-				}
-				// TODO moq-lite will change to not emit None (unannounce) events here.
-				Some((_path, None)) => continue,
+				// Active and Restart both carry a broadcast; skip unannounce events.
+				Some((_path, event)) => match event.broadcast() {
+					Some(broadcast) => return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast))),
+					None => continue,
+				},
 				None => return Err(MoqError::Closed),
 			}
 		}

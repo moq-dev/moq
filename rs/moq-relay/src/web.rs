@@ -466,8 +466,8 @@ async fn serve_announced(
 	let mut announced = origin.consume().announced();
 	let mut broadcasts = Vec::new();
 
-	while let Some((suffix, active)) = announced.try_next() {
-		if active.is_some() {
+	while let Some((suffix, event)) = announced.try_next() {
+		if event.broadcast().is_some() {
 			broadcasts.push(suffix);
 		}
 	}

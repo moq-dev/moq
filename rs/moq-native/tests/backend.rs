@@ -67,7 +67,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
 	let mut track_sub = bc
 		.subscribe_track(&Track::new("video"))
@@ -219,7 +219,7 @@ async fn iroh_connect() {
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
 	let mut track_sub = bc
 		.subscribe_track(&Track::new("video"))

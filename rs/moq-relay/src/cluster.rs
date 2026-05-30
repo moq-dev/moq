@@ -20,7 +20,7 @@ const MESH_PREFIX: &str = ".internal/origins";
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long a peer must stay unannounced before we abort the dial. Must clear the
-/// "prefer shorter hop" reannounce flap (which arrives as unannounce-then-announce
+/// "prefer shorter hop" restart flap (which arrives as unannounce-then-announce
 /// within sub-milliseconds) plus reasonable churn from a peer restart.
 const STALE_AFTER: Duration = Duration::from_secs(60);
 
@@ -76,7 +76,7 @@ impl DialMap {
 	}
 
 	/// Clear any pending-unannounce on `peer`. Returns `true` if a timestamp was
-	/// actually cleared (useful for callers that want to log the reannounce).
+	/// actually cleared (useful for callers that want to log the restart).
 	fn mark_announced(&self, peer: &str) -> bool {
 		let mut map = self.inner.lock().expect("dial map poisoned");
 		map.get_mut(peer)
@@ -343,7 +343,7 @@ impl Cluster {
 	/// announced URL. Unannounces don't abort immediately — they just mark the
 	/// entry as "pending cleanup" with a timestamp. A periodic sweep evicts
 	/// entries whose unannounce has stuck for [`STALE_AFTER`]. The "prefer
-	/// shorter hop" path in OriginProducer delivers reannouncements as
+	/// shorter hop" path in OriginProducer delivers restartments as
 	/// unannounce-then-announce within sub-milliseconds, which clears the
 	/// pending-cleanup timestamp long before the sweep fires.
 	async fn run_discovery(self, self_url: String, token: String, dialed: DialMap) {
@@ -361,17 +361,17 @@ impl Cluster {
 		loop {
 			tokio::select! {
 				ann = announced.next() => {
-					let Some((relative, announced)) = ann else { return; };
+					let Some((relative, event)) = ann else { return; };
 					let peer = relative.as_str();
 					if peer == self_url {
 						continue;
 					}
 					let peer = peer.to_owned();
-					match announced {
+					match event.broadcast() {
 						Some(_) => {
 							if dialed.contains(&peer) {
 								if dialed.mark_announced(&peer) {
-									tracing::debug!(%peer, "reannounce within sweep window; keeping dial");
+									tracing::debug!(%peer, "restart within sweep window; keeping dial");
 								}
 								continue;
 							}
@@ -525,7 +525,7 @@ mod tests {
 		assert!(dialed.contains("healthy:4443"));
 	}
 
-	/// A reannounce after an unannounce clears the pending-sweep timestamp, so
+	/// A restart after an unannounce clears the pending-sweep timestamp, so
 	/// the entry survives even if the original unannounce was old enough to
 	/// otherwise trigger eviction.
 	#[tokio::test]
@@ -637,9 +637,9 @@ mod tests {
 		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
 		// The self-registration broadcast must be visible on the origin.
-		let (path, broadcast) = watcher.try_next().expect("self-registration must be published");
+		let (path, event) = watcher.try_next().expect("self-registration must be published");
 		assert_eq!(path.as_str(), ".internal/origins/rendezvous.example.com:4443");
-		assert!(broadcast.is_some());
+		assert!(event.broadcast().is_some());
 
 		// run() must NOT have returned: dropping the broadcast (via run returning)
 		// would unannounce the registration immediately. Use a short timeout to

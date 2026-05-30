@@ -101,13 +101,13 @@ async fn main() -> anyhow::Result<()> {
 
 			loop {
 				tokio::select! {
-					Some(announce) = origin.next() => match announce {
-						(path, Some(broadcast)) => {
+					Some((path, event)) = origin.next() => match event.broadcast() {
+						Some(broadcast) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
 							let track = broadcast.subscribe_track(&track)?;
 							clock = Some(Subscriber::new(track));
 						}
-						(path, None) => {
+						None => {
 							tracing::warn!(broadcast = %path, "broadcast is offline, waiting...");
 						}
 					},
