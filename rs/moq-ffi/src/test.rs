@@ -497,8 +497,8 @@ async fn server_client_roundtrip_auto_origin() {
 		.expect("connect timed out")
 		.expect("connect failed");
 
-	let publisher = cs.publisher().expect("auto-created publisher");
-	let consumer = cs.consumer().expect("auto-created consumer");
+	let publisher = cs.publisher();
+	let consumer = cs.consumer();
 
 	let server_session = tokio::time::timeout(TIMEOUT, accept)
 		.await

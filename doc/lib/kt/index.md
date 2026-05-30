@@ -43,11 +43,10 @@ import uniffi.moq.MoqClient
 val client = MoqClient()
 val cs = client.connect("https://relay.example.com")
 
-// `cs.consumer()` returns the auto-created origin consumer for reading
-// announcements; `cs.publisher()` returns the producer side for publishing
-// broadcasts. Both are null if you set publish / consume manually before
-// connect (subscribe-only, publish-only, or custom split-origin cases).
-val consumer = cs.consumer()!!
+// cs.consumer() and cs.publisher() are always populated: by whatever
+// origin you wired via setPublish / setConsume before connect, or by a
+// fresh auto-created one for any side you didn't set.
+val consumer = cs.consumer()
 val announced = consumer.announced("demos/")
 announced.announcements().collect { announcement ->
     println("got broadcast ${announcement.path()}")

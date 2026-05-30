@@ -21,7 +21,7 @@ impl Client {
 			.init()
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
-		let publish = self.publish.as_ref().map(|o| o.inner().consume());
+		let publish = self.publish.as_ref().map(|o| o.inner().clone());
 		let consume = self.consume.as_ref().map(|o| o.inner().clone());
 
 		let session = client
@@ -115,22 +115,16 @@ impl MoqClient {
 pub struct MoqSession {
 	inner: Option<moq_net::Session>,
 	closed: Task<Session>,
-	publisher: Option<Arc<MoqOriginProducer>>,
-	consumer: Option<Arc<MoqOriginConsumer>>,
+	publisher: Arc<MoqOriginProducer>,
+	consumer: Arc<MoqOriginConsumer>,
 }
 
 impl MoqSession {
 	pub(crate) fn new(session: moq_net::Session) -> Self {
-		// Eagerly wrap the auto-created origin sides (if any) so each
+		// Eagerly wrap the always-set origin sides so each
 		// publisher()/consumer() call hands back the same Arc.
-		let publisher = session
-			.publisher()
-			.cloned()
-			.map(|p| Arc::new(MoqOriginProducer::from_inner(p)));
-		let consumer = session
-			.consumer()
-			.cloned()
-			.map(|c| Arc::new(MoqOriginConsumer::from_inner(c)));
+		let publisher = Arc::new(MoqOriginProducer::from_inner(session.publisher().clone()));
+		let consumer = Arc::new(MoqOriginConsumer::from_inner(session.consumer().clone()));
 		Self {
 			inner: Some(session.clone()),
 			closed: Task::new(session),
@@ -177,17 +171,19 @@ impl MoqSession {
 		self.cancel(0);
 	}
 
-	/// Auto-created origin producer side. `Some` only when neither
-	/// `set_publish` nor `set_consume` was called on the client/request
-	/// before connect/accept.
-	pub fn publisher(&self) -> Option<Arc<MoqOriginProducer>> {
+	/// The publish-side origin: where local broadcasts get advertised
+	/// to the remote. Either the producer the caller wired via
+	/// `set_publish` / `set_consume` before connect/accept, or one
+	/// auto-created if neither was set.
+	pub fn publisher(&self) -> Arc<MoqOriginProducer> {
 		self.publisher.clone()
 	}
 
-	/// Auto-created origin consumer side. `Some` only when neither
-	/// `set_publish` nor `set_consume` was called on the client/request
-	/// before connect/accept.
-	pub fn consumer(&self) -> Option<Arc<MoqOriginConsumer>> {
+	/// The subscribe-side origin: a read handle for receiving
+	/// announcements pushed by the remote. Either derived from the
+	/// origin the caller wired via `set_consume`, or auto-created if
+	/// neither was set.
+	pub fn consumer(&self) -> Arc<MoqOriginConsumer> {
 		self.consumer.clone()
 	}
 }

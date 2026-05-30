@@ -1,6 +1,6 @@
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Error,
-	NEGOTIATED, Origin, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
+	NEGOTIATED, OriginProducer, Session, StatsHandle, Version, Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -8,7 +8,7 @@ use crate::{
 /// A MoQ server session builder.
 #[derive(Default, Clone)]
 pub struct Server {
-	publish: Option<OriginConsumer>,
+	publish: Option<OriginProducer>,
 	consume: Option<OriginProducer>,
 	stats: StatsHandle,
 	versions: Versions,
@@ -19,11 +19,17 @@ impl Server {
 		Default::default()
 	}
 
-	pub fn with_publish(mut self, publish: impl Into<Option<OriginConsumer>>) -> Self {
+	/// Set the publish-side origin: the [`OriginProducer`] the server
+	/// reads from when forwarding broadcasts to the connected client.
+	/// Surfaced as [`Session::publisher`] on the resulting session.
+	pub fn with_publish(mut self, publish: impl Into<Option<OriginProducer>>) -> Self {
 		self.publish = publish.into();
 		self
 	}
 
+	/// Set the consume-side origin: the [`OriginProducer`] the server
+	/// writes into as the client announces broadcasts. A consumer view
+	/// is surfaced as [`Session::consumer`].
 	pub fn with_consume(mut self, consume: impl Into<Option<OriginProducer>>) -> Self {
 		self.consume = consume.into();
 		self
@@ -37,12 +43,12 @@ impl Server {
 		self
 	}
 
-	/// Set both publish and consume from an `OriginProducer`.
+	/// Set both publish and consume from one shared [`OriginProducer`].
 	///
-	/// This is equivalent to calling `with_publish(origin.consume())` and `with_consume(origin)`.
+	/// Equivalent to calling [`with_publish`](Self::with_publish) and
+	/// [`with_consume`](Self::with_consume) with the same origin.
 	pub fn with_origin(self, origin: OriginProducer) -> Self {
-		let consumer = origin.consume();
-		self.with_publish(consumer).with_consume(origin)
+		self.with_publish(origin.clone()).with_consume(origin)
 	}
 
 	pub fn with_versions(mut self, versions: Versions) -> Self {
@@ -52,30 +58,17 @@ impl Server {
 
 	/// Perform the MoQ handshake as a server for the given session.
 	///
-	/// If neither a publish nor a consume origin was set on this builder,
-	/// accept auto-creates a fresh [`Origin`] and wires it as both, then
-	/// surfaces the producer and consumer sides on the returned
-	/// [`Session`] via [`Session::publisher`] and [`Session::consumer`].
-	/// Callers who configured their own origin(s) see both as `None` and
-	/// continue to drive publishing / consuming through the origins they
-	/// already hold.
+	/// The returned [`Session`] always exposes both
+	/// [`publisher`](Session::publisher) and [`consumer`](Session::consumer):
+	/// whatever was passed to [`Self::with_publish`] /
+	/// [`Self::with_consume`] / [`Self::with_origin`], or a fresh
+	/// auto-created [`Origin`] for any side the caller left unset. When
+	/// neither side is set, both default to the same shared origin.
 	pub async fn accept<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
-		// Effective publish / consume after potential auto-creation. The
-		// `auto_*` locals are populated only on the no-config path so the
-		// returned Session reflects what we actually own.
-		let (publish, consume, auto_publisher, auto_consumer) = match (self.publish.clone(), self.consume.clone()) {
-			(None, None) => {
-				let producer = Origin::random().produce();
-				let consumer = producer.consume();
-				(
-					Some(producer.consume()),
-					Some(producer.clone()),
-					Some(producer),
-					Some(consumer),
-				)
-			}
-			(publish, consume) => (publish, consume, None, None),
-		};
+		let (publisher, consumer) = crate::client::resolve_origins(self.publish.clone(), self.consume.clone());
+		let publish = Some(publisher.consume());
+		let consume = Some(consumer.clone());
+		let consumer_view = consumer.consume();
 
 		let (encoding, supported) = match session.protocol() {
 			Some(ALPN_18) => {
@@ -96,7 +89,7 @@ impl Server {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None).with_origins(auto_publisher, auto_consumer));
+				return Ok(Session::new(session, v, None, publisher.clone(), consumer_view.clone()));
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -117,7 +110,7 @@ impl Server {
 
 				tracing::debug!(version = ?v, "connected");
 				// TODO: ietf code path does not yet record stats.
-				return Ok(Session::new(session, v, None).with_origins(auto_publisher, auto_consumer));
+				return Ok(Session::new(session, v, None, publisher.clone(), consumer_view.clone()));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -154,8 +147,13 @@ impl Server {
 					lite::Version::Lite05Wip,
 				)?;
 
-				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw)
-					.with_origins(auto_publisher, auto_consumer));
+				return Ok(Session::new(
+					session,
+					lite::Version::Lite05Wip.into(),
+					recv_bw,
+					publisher.clone(),
+					consumer_view.clone(),
+				));
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
@@ -171,8 +169,13 @@ impl Server {
 					lite::Version::Lite04,
 				)?;
 
-				return Ok(Session::new(session, lite::Version::Lite04.into(), recv_bw)
-					.with_origins(auto_publisher, auto_consumer));
+				return Ok(Session::new(
+					session,
+					lite::Version::Lite04.into(),
+					recv_bw,
+					publisher.clone(),
+					consumer_view.clone(),
+				));
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
@@ -189,8 +192,13 @@ impl Server {
 					lite::Version::Lite03,
 				)?;
 
-				return Ok(Session::new(session, lite::Version::Lite03.into(), recv_bw)
-					.with_origins(auto_publisher, auto_consumer));
+				return Ok(Session::new(
+					session,
+					lite::Version::Lite03.into(),
+					recv_bw,
+					publisher.clone(),
+					consumer_view.clone(),
+				));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -261,6 +269,6 @@ impl Server {
 			}
 		};
 
-		Ok(Session::new(session, version, recv_bw).with_origins(auto_publisher, auto_consumer))
+		Ok(Session::new(session, version, recv_bw, publisher, consumer_view))
 	}
 }

@@ -10,23 +10,23 @@ use crate::{BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginP
 /// - [`crate::Client::connect`] for clients.
 /// - [`crate::Server::accept`] for servers.
 ///
-/// If the caller didn't wire its own origin via
+/// Both [`publisher`](Self::publisher) and [`consumer`](Self::consumer)
+/// are always populated: by whatever the caller wired via
 /// [`Client::with_publish`](crate::Client::with_publish) /
 /// [`Client::with_consume`](crate::Client::with_consume) /
 /// [`Client::with_origin`](crate::Client::with_origin) (or the matching
-/// methods on [`Server`](crate::Server)), connect/accept auto-create a
-/// fresh [`Origin`](crate::Origin) and surface the producer and consumer
-/// sides as [`publisher`](Self::publisher) and [`consumer`](Self::consumer).
-/// Callers that wired their own origin see both as `None` and continue
-/// to drive things through what they already hold.
+/// methods on [`Server`](crate::Server)), or by an auto-created fresh
+/// [`Origin`](crate::Origin) for any side the caller left unset. Use
+/// `publisher()` to publish broadcasts and `consumer()` to read
+/// announcements without ever having to construct an Origin yourself.
 #[derive(Clone)]
 pub struct Session {
 	session: Arc<dyn SessionInner>,
 	version: Version,
 	send_bandwidth: Option<BandwidthConsumer>,
 	recv_bandwidth: Option<BandwidthConsumer>,
-	publisher: Option<OriginProducer>,
-	consumer: Option<OriginConsumer>,
+	publisher: OriginProducer,
+	consumer: OriginConsumer,
 	closed: bool,
 }
 
@@ -35,6 +35,8 @@ impl Session {
 		session: S,
 		version: Version,
 		recv_bandwidth: Option<BandwidthConsumer>,
+		publisher: OriginProducer,
+		consumer: OriginConsumer,
 	) -> Self {
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
 		let send_bandwidth = if session.stats().estimated_send_rate().is_some() {
@@ -56,20 +58,10 @@ impl Session {
 			version,
 			send_bandwidth,
 			recv_bandwidth,
-			publisher: None,
-			consumer: None,
+			publisher,
+			consumer,
 			closed: false,
 		}
-	}
-
-	/// Attach the auto-created origin sides. Called by `Client::connect` /
-	/// `Server::accept` on the no-config path so the caller can publish
-	/// broadcasts and read announcements without constructing an Origin
-	/// themselves.
-	pub(crate) fn with_origins(mut self, publisher: Option<OriginProducer>, consumer: Option<OriginConsumer>) -> Self {
-		self.publisher = publisher;
-		self.consumer = consumer;
-		self
 	}
 
 	/// Returns the negotiated protocol version.
@@ -91,16 +83,23 @@ impl Session {
 		self.recv_bandwidth.clone()
 	}
 
-	/// The auto-created origin producer side. `Some` only when the caller
-	/// didn't wire its own publish/consume origin before connect/accept.
-	pub fn publisher(&self) -> Option<&OriginProducer> {
-		self.publisher.as_ref()
+	/// The publish-side origin: where local broadcasts get advertised
+	/// to the remote. Either the producer the caller passed via
+	/// [`Client::with_publish`](crate::Client::with_publish) /
+	/// [`Server::with_publish`](crate::Server::with_publish) /
+	/// `with_origin`, or one auto-created at connect/accept time.
+	pub fn publisher(&self) -> &OriginProducer {
+		&self.publisher
 	}
 
-	/// The auto-created origin consumer side. `Some` only when the caller
-	/// didn't wire its own publish/consume origin before connect/accept.
-	pub fn consumer(&self) -> Option<&OriginConsumer> {
-		self.consumer.as_ref()
+	/// The subscribe-side origin: a cheap read handle for receiving
+	/// announcements pushed by the remote. Either derived from the
+	/// producer the caller passed via
+	/// [`Client::with_consume`](crate::Client::with_consume) /
+	/// [`Server::with_consume`](crate::Server::with_consume) /
+	/// `with_origin`, or auto-created at connect/accept time.
+	pub fn consumer(&self) -> &OriginConsumer {
+		&self.consumer
 	}
 
 	/// Close the underlying transport session.

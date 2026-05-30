@@ -52,11 +52,10 @@ import Moq
 let client = MoqClient()
 let cs = try await client.connect(url: "https://relay.example.com")
 
-// `cs.consumer()` returns the auto-created origin consumer for reading
-// announcements; `cs.publisher()` returns the producer side for publishing
-// broadcasts. Both are nil if you set publish / consume manually before
-// connect (subscribe-only, publish-only, or custom split-origin cases).
-let consumer = cs.consumer()!
+// cs.consumer() and cs.publisher() are always populated: by whatever
+// origin you wired via setPublish / setConsume before connect, or by a
+// fresh auto-created one for any side you didn't set.
+let consumer = cs.consumer()
 let announced = try consumer.announced(prefix: "demos/")
 for try await announcement in announced.announcements {
     print("got broadcast \(announcement.path())")

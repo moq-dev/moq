@@ -20,13 +20,11 @@ import Moq
 let client = MoqClient()
 let cs = try await client.connect(url: "https://relay.example.com")
 
-// The auto-created origin sides on the returned MoqSession let you
-// publish broadcasts and read announcements without ever constructing a
-// MoqOriginProducer yourself. For subscribe-only / publish-only / split
-// origins, call setPublish / setConsume on the client before connect and
-// drive those origins manually (cs.publisher() and cs.consumer() return
-// nil in that case).
-let consumer = cs.consumer()!
+// cs.publisher() and cs.consumer() are always populated: by whatever
+// origin you wired via setPublish / setConsume before connect, or by a
+// fresh auto-created one for any side you didn't set. The duplex no-config
+// path (the typical client) shares one origin between both.
+let consumer = cs.consumer()
 let announced = try consumer.announced(prefix: "demos/")
 for try await announcement in announced.announcements {
     print("got broadcast \(announcement.path())")
@@ -45,7 +43,7 @@ Cancelling the surrounding Swift `Task` propagates through to the underlying `ca
 To publish a broadcast through the auto-created origin:
 
 ```swift
-let pub = cs.publisher()!
+let pub = cs.publisher()
 let broadcast = try MoqBroadcastProducer()
 // ... configure tracks on broadcast ...
 try pub.addBroadcast(path: "my-stream", broadcast: broadcast)

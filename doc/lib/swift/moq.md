@@ -37,7 +37,7 @@ let client = MoqClient()
 let cs = try await client.connect(url: "https://relay.example.com")
 ```
 
-`MoqClient.connect(url:)` returns a `MoqSession` that bundles the session with auto-created publish and consume origin sides. The convenience accessors `cs.publisher()` and `cs.consumer()` return those origins (or `nil` if you wired your own via `setPublish` / `setConsume` before connect).
+`MoqClient.connect(url:)` returns a `MoqSession`. The accessors `cs.publisher()` and `cs.consumer()` are always populated: by whatever origin you wired via `setPublish` / `setConsume` before connect, or by a fresh auto-created one for any side you didn't set.
 
 For development against a relay with a self-signed certificate, configure the client before connecting:
 
@@ -57,7 +57,7 @@ cs.shutdown()  // alias for cancel(code: 0)
 ## Subscribe
 
 ```swift
-let consumer = cs.consumer()!
+let consumer = cs.consumer()
 let announced = try consumer.announced(prefix: "demos/")
 
 for try await announcement in announced.announcements {
@@ -74,7 +74,7 @@ for try await announcement in announced.announcements {
 let broadcast = try MoqBroadcastProducer()
 let audio = try broadcast.publishMedia(format: "opus", init: opusInitBytes)
 
-try cs.publisher()!.addBroadcast(path: "my-stream", broadcast: broadcast)
+try cs.publisher().addBroadcast(path: "my-stream", broadcast: broadcast)
 
 try audio.writeFrame(payload: payload, timestampUs: 0)
 try audio.writeFrame(payload: payload, timestampUs: 20_000)

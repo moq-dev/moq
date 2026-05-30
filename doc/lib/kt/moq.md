@@ -35,7 +35,7 @@ val client = MoqClient()
 val cs = client.connect("https://relay.example.com")
 ```
 
-`MoqClient.connect(url)` returns a `MoqSession` that bundles the session with auto-created publish and consume origin sides. The convenience accessors `cs.publisher()` and `cs.consumer()` return those origins (or `null` if you wired your own via `setPublish` / `setConsume` before connect).
+`MoqClient.connect(url)` returns a `MoqSession`. The accessors `cs.publisher()` and `cs.consumer()` are always populated: by whatever origin you wired via `setPublish` / `setConsume` before connect, or by a fresh auto-created one for any side you didn't set.
 
 For development against a relay with a self-signed certificate, configure the client before connecting:
 
@@ -58,7 +58,7 @@ cs.shutdown()  // alias for cancel(0u)
 import dev.moq.*
 import kotlinx.coroutines.flow.collect
 
-val consumer = cs.consumer()!!
+val consumer = cs.consumer()
 val announced = consumer.announced("demos/")
 
 announced.announcements().collect { announcement ->
@@ -78,7 +78,7 @@ import uniffi.moq.MoqBroadcastProducer
 val broadcast = MoqBroadcastProducer()
 val audio = broadcast.publishMedia("opus", opusInitBytes)
 
-cs.publisher()!!.addBroadcast("my-stream", broadcast)
+cs.publisher().addBroadcast("my-stream", broadcast)
 
 audio.writeFrame(payload, timestampUs = 0u)
 audio.writeFrame(payload, timestampUs = 20_000u)
