@@ -16,47 +16,6 @@ import "github.com/moq-dev/moq-go/moq"
 
 The published module ships prebuilt `libmoq_ffi.a` for `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`. cgo selects the right archive at link time via build tags; no `LD_LIBRARY_PATH` or extra setup needed.
 
-## Usage
-
-The generated bindings expose pull-based `Next()` handles; the hand-written
-iterators in `moq/iter.go` wrap those as range-over-func, so streams read
-idiomatically:
-
-```go
-client := moq.NewMoqClient()
-session, err := client.Connect("https://relay.example.com")
-if err != nil {
-    log.Fatal(err)
-}
-defer session.Shutdown()
-
-// Consumer() and Publisher() are always populated: by whatever origin you
-// wired via SetConsume / SetPublish before connect, or by a fresh
-// auto-created one for any side you didn't set.
-consumer := session.Consumer()
-for announcement, err := range consumer.Announcements("demos/") {
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Println("got broadcast", announcement.Path())
-
-    catalog, err := announcement.Broadcast().SubscribeCatalog()
-    if err != nil {
-        log.Fatal(err)
-    }
-    for update, err := range catalog.Updates() {
-        if err != nil {
-            log.Fatal(err)
-        }
-        fmt.Println("catalog:", update)
-    }
-}
-```
-
-`Announcements` cancels the subscription it acquired when the loop ends. The
-consumer-owned iterators (`Groups`, `Frames`, `Updates`) leave the consumer
-intact, so cancel it yourself to tear down the underlying stream.
-
 ## Local development
 
 `go/scripts/check.sh` builds `moq-ffi` for the host, runs `uniffi-bindgen-go` to regenerate `moq.go`, stages the in-tree source + host `libmoq_ffi.a` into `dist/go-pkg/`, and runs `go build`/`go vet`/`go test` from there. Run via `just go check`. Skips cleanly without `cargo`, `go`, or `uniffi-bindgen-go`.
