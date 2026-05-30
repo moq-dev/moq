@@ -234,7 +234,7 @@ async fn run(config: &Config) -> Result<()> {
 	tracing::info!(url = %config.url, %name, broadcast = %broadcast_path, "connecting to relay");
 
 	let reconnect = client
-		.with_publish(publish_origin.clone())
+		.with_publish(publish_origin.consume())
 		.with_consume(consume_origin)
 		.reconnect(config.url.clone());
 

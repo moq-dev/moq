@@ -21,7 +21,7 @@ impl Client {
 			.init()
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
-		let publish = self.publish.as_ref().map(|o| o.inner().clone());
+		let publish = self.publish.as_ref().map(|o| o.inner().consume());
 		let consume = self.consume.as_ref().map(|o| o.inner().clone());
 
 		let session = client

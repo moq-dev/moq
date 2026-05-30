@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
 
 			origin.publish_broadcast(&config.broadcast, broadcast.consume());
 
-			let reconnect = client.with_publish(origin.clone()).reconnect(config.url);
+			let reconnect = client.with_publish(origin.consume()).reconnect(config.url);
 
 			tokio::select! {
 				res = reconnect.closed() => res,

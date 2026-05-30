@@ -124,10 +124,13 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	group.write_frame(b"hello".as_ref()).expect("write frame");
 	group.finish().expect("finish group");
 
-	let pub_session = tokio::time::timeout(TIMEOUT, client().with_publish(pub_origin.clone()).connect(url.clone()))
-		.await
-		.expect("publisher connect timeout")
-		.expect("publisher connect failed");
+	let pub_session = tokio::time::timeout(
+		TIMEOUT,
+		client().with_publish(pub_origin.consume()).connect(url.clone()),
+	)
+	.await
+	.expect("publisher connect timeout")
+	.expect("publisher connect failed");
 	assert_eq!(
 		pub_session.version(),
 		expected_version,

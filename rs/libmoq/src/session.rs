@@ -22,7 +22,7 @@ impl Session {
 	pub fn connect(
 		&mut self,
 		url: Url,
-		publish: Option<moq_net::OriginProducer>,
+		publish: Option<moq_net::OriginConsumer>,
 		consume: Option<moq_net::OriginProducer>,
 		callback: ffi::OnStatus,
 	) -> Result<Id, Error> {
@@ -52,7 +52,7 @@ impl Session {
 	async fn connect_run(
 		task_id: Id,
 		url: Url,
-		publish: Option<moq_net::OriginProducer>,
+		publish: Option<moq_net::OriginConsumer>,
 		consume: Option<moq_net::OriginProducer>,
 	) -> Result<(), Error> {
 		let client = moq_native::ClientConfig::default()

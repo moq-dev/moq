@@ -50,13 +50,12 @@ The package depends on a prebuilt `MoqFFI.xcframework` attached to the matching 
 import Moq
 
 let client = MoqClient()
-let cs = try await client.connect(url: "https://relay.example.com")
+let cs = try await client.connect(url: "https://cdn.moq.dev/anon/demo")
 
 // cs.consumer() and cs.publisher() are always populated: by whatever
 // origin you wired via setPublish / setConsume before connect, or by a
 // fresh auto-created one for any side you didn't set.
-let consumer = cs.consumer()
-let announced = try consumer.announced(prefix: "demos/")
+let announced = try cs.consumer().announced(prefix: "demos/")
 for try await announcement in announced.announcements {
     print("got broadcast \(announcement.path())")
 

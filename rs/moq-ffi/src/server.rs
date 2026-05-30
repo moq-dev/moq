@@ -235,7 +235,7 @@ impl MoqRequest {
 		self.task
 			.run(|mut state| async move {
 				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
-				let publish = state.publish.as_ref().map(|o| o.inner().clone());
+				let publish = state.publish.as_ref().map(|o| o.inner().consume());
 				let consume = state.consume.as_ref().map(|o| o.inner().clone());
 				let session = request
 					.with_publish(publish)

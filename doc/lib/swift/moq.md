@@ -34,7 +34,7 @@ Supported platforms: iOS 15+, iPadOS 15+, macOS 12+. The package ships an XCFram
 import Moq
 
 let client = MoqClient()
-let cs = try await client.connect(url: "https://relay.example.com")
+let cs = try await client.connect(url: "https://cdn.moq.dev/anon/demo")
 ```
 
 `MoqClient.connect(url:)` returns a `MoqSession`. The accessors `cs.publisher()` and `cs.consumer()` are always populated: by whatever origin you wired via `setPublish` / `setConsume` before connect, or by a fresh auto-created one for any side you didn't set.
@@ -74,7 +74,7 @@ for try await announcement in announced.announcements {
 let broadcast = try MoqBroadcastProducer()
 let audio = try broadcast.publishMedia(format: "opus", init: opusInitBytes)
 
-try cs.publisher().addBroadcast(path: "my-stream", broadcast: broadcast)
+try cs.publisher().announce(path: "my-stream", broadcast: broadcast)
 
 try audio.writeFrame(payload: payload, timestampUs: 0)
 try audio.writeFrame(payload: payload, timestampUs: 20_000)

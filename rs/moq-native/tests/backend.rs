@@ -46,7 +46,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publish(pub_origin.clone()).ok().await?;
+		let session = request.with_publish(pub_origin.consume()).ok().await?;
 
 		let _broadcast = broadcast;
 		let _track = track;
@@ -198,7 +198,7 @@ async fn iroh_connect() {
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publish(pub_origin.clone()).ok().await?;
+		let session = request.with_publish(pub_origin.consume()).ok().await?;
 
 		let _broadcast = broadcast;
 		let _track = track;

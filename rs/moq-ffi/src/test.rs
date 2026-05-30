@@ -119,7 +119,7 @@ async fn local_publish_consume_audio() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
 	let media = broadcast.publish_media("opus".into(), init).unwrap();
-	origin.add_broadcast("live".into(), &broadcast).unwrap();
+	origin.announce("live".into(), &broadcast).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -171,7 +171,7 @@ async fn video_publish_consume() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = h264_init();
 	let media = broadcast.publish_media("avc3".into(), init).unwrap();
-	origin.add_broadcast("video-test".into(), &broadcast).unwrap();
+	origin.announce("video-test".into(), &broadcast).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -226,7 +226,7 @@ async fn multiple_frames_ordering() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
 	let media = broadcast.publish_media("opus".into(), init).unwrap();
-	origin.add_broadcast("ordering-test".into(), &broadcast).unwrap();
+	origin.announce("ordering-test".into(), &broadcast).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -274,7 +274,7 @@ async fn catalog_update_on_new_track() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
 	let _media1 = broadcast.publish_media("opus".into(), init.clone()).unwrap();
-	origin.add_broadcast("catalog-update".into(), &broadcast).unwrap();
+	origin.announce("catalog-update".into(), &broadcast).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -322,7 +322,7 @@ fn finish_closes_producer() {
 async fn announced_broadcast() {
 	let origin = MoqOriginProducer::new();
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	origin.add_broadcast("test/broadcast".into(), &broadcast).unwrap();
+	origin.announce("test/broadcast".into(), &broadcast).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -347,7 +347,7 @@ fn without_runtime() {
 		let init = opus_head();
 		let media = broadcast.publish_media("opus".into(), init).unwrap();
 		media.write_frame(b"hello".to_vec(), 1000).unwrap();
-		origin.add_broadcast("test".into(), &broadcast).unwrap();
+		origin.announce("test".into(), &broadcast).unwrap();
 
 		let announced = consumer.announced("".into()).unwrap();
 		let announcement = pollster::block_on(announced.next()).unwrap().unwrap();
@@ -416,7 +416,7 @@ async fn server_client_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
 	let media = broadcast.publish_media("opus".into(), init).unwrap();
-	server_origin.add_broadcast("hello".into(), &broadcast).unwrap();
+	server_origin.announce("hello".into(), &broadcast).unwrap();
 
 	// Receive the announcement on the client side via the consume origin.
 	let consumer = client_origin.consume();
@@ -509,7 +509,7 @@ async fn server_client_roundtrip_auto_origin() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
 	let media = broadcast.publish_media("opus".into(), init).unwrap();
-	server_origin.add_broadcast("hello".into(), &broadcast).unwrap();
+	server_origin.announce("hello".into(), &broadcast).unwrap();
 
 	let announced = consumer.announced("".into()).unwrap();
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
@@ -520,10 +520,10 @@ async fn server_client_roundtrip_auto_origin() {
 	assert_eq!(announcement.path(), "hello");
 
 	// The auto publisher is wired too: dropping it should not break anything,
-	// and a local add_broadcast on it should succeed (though the server
+	// and a local announce() on it should succeed (though the server
 	// isn't consuming, so we only verify the call doesn't error).
 	let local_broadcast = MoqBroadcastProducer::new().unwrap();
-	publisher.add_broadcast("local-only".into(), &local_broadcast).unwrap();
+	publisher.announce("local-only".into(), &local_broadcast).unwrap();
 	local_broadcast.finish().unwrap();
 
 	media.finish().unwrap();
@@ -661,9 +661,7 @@ async fn request_per_session_publish_override() {
 
 	// Publishing on the override origin must reach the client.
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	override_origin
-		.add_broadcast("override-only".into(), &broadcast)
-		.unwrap();
+	override_origin.announce("override-only".into(), &broadcast).unwrap();
 
 	let consumer = client_origin.consume();
 	let announced = consumer.announced("".into()).unwrap();

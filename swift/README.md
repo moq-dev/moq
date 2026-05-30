@@ -46,7 +46,7 @@ To publish a broadcast through the auto-created origin:
 let pub = cs.publisher()
 let broadcast = try MoqBroadcastProducer()
 // ... configure tracks on broadcast ...
-try pub.addBroadcast(path: "my-stream", broadcast: broadcast)
+try pub.announce(path: "my-stream", broadcast: broadcast)
 ```
 
 A note on enum casing: UniFFI keeps Rust's casing for error variants (every `MoqError` case is PascalCase and carries `message: String`, e.g. `MoqError.Closed(message: "...")`), but plain enums round-trip to lowerCamelCase (`MoqAudioFormat.s16`, `MoqAudioCodec.opus`).

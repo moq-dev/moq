@@ -78,7 +78,7 @@ import uniffi.moq.MoqBroadcastProducer
 val broadcast = MoqBroadcastProducer()
 val audio = broadcast.publishMedia("opus", opusInitBytes)
 
-cs.publisher().addBroadcast("my-stream", broadcast)
+cs.publisher().announce("my-stream", broadcast)
 
 audio.writeFrame(payload, timestampUs = 0u)
 audio.writeFrame(payload, timestampUs = 20_000u)

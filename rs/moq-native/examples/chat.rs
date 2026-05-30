@@ -12,13 +12,13 @@ async fn main() -> anyhow::Result<()> {
 	// This is a simple example of how you can concurrently run multiple tasks.
 	// tokio::spawn works too.
 	tokio::select! {
-		res = run_session(origin.clone()) => res,
+		res = run_session(origin.consume()) => res,
 		res = run_broadcast(origin) => res,
 	}
 }
 
 // Connect to the server and publish our origin of broadcasts.
-async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
+async fn run_session(origin: moq_net::OriginConsumer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 

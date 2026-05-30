@@ -92,4 +92,4 @@ class OriginProducer:
         return OriginConsumer(self._inner.consume())
 
     def publish(self, path: str, broadcast: BroadcastProducer) -> None:
-        self._inner.add_broadcast(path, broadcast._inner)
+        self._inner.announce(path, broadcast._inner)
