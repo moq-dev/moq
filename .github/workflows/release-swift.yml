@@ -111,7 +111,11 @@ jobs:
         id: ffi
         env:
           FFI_VERSION: ${{ needs.build.outputs.ffi_version }}
-        run: .github/scripts/release.sh git-tag-exists moq-dev/moq-swift-ffi "$FFI_VERSION"
+        # Treat a missing mirror repo / unreachable remote as "not published"
+        # rather than a hard failure, so the first bootstrap (before
+        # moq-swift-ffi exists) skips the cross-package resolve instead of
+        # failing the job. publish.sh stays idempotent regardless.
+        run: .github/scripts/release.sh git-tag-exists moq-dev/moq-swift-ffi "$FFI_VERSION" || echo "exists=false" >> "$GITHUB_OUTPUT"
 
       - name: Download staged package
         if: steps.ffi.outputs.exists == 'true'
