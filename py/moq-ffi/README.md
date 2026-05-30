@@ -15,10 +15,17 @@ pip install moq-ffi
 The distribution is `moq-ffi`; the import name is `moq_ffi`.
 
 ```python
+import asyncio
+
 import moq_ffi
 
-client = moq_ffi.MoqClient()
-session = await client.connect("https://relay.quic.video")
+
+async def main() -> None:
+    client = moq_ffi.MoqClient()
+    session = await client.connect("https://relay.quic.video")
+
+
+asyncio.run(main())
 ```
 
 ## See Also
