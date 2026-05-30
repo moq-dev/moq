@@ -1,4 +1,3 @@
-#[cfg(all(target_os = "android", feature = "android-logcat"))]
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
@@ -40,14 +39,14 @@ impl Log {
 		let filter = EnvFilter::builder()
 			.with_default_directive(self.level().into()) // Default to our -q/-v args
 			.from_env_lossy() // Allow overriding with RUST_LOG
-			.add_directive("h2=warn".parse().unwrap())
-			.add_directive("quinn=info".parse().unwrap())
-			.add_directive("tungstenite=info".parse().unwrap())
-			.add_directive("rustls=info".parse().unwrap())
-			.add_directive("tracing::span=off".parse().unwrap())
-			.add_directive("tracing::span::active=off".parse().unwrap())
-			.add_directive("tokio=info".parse().unwrap())
-			.add_directive("runtime=info".parse().unwrap());
+			.add_directive("h2=warn".parse()?)
+			.add_directive("quinn=info".parse()?)
+			.add_directive("tungstenite=info".parse()?)
+			.add_directive("rustls=info".parse()?)
+			.add_directive("tracing::span=off".parse()?)
+			.add_directive("tracing::span::active=off".parse()?)
+			.add_directive("tokio=info".parse()?)
+			.add_directive("runtime=info".parse()?);
 
 		let registry = tracing_subscriber::registry();
 
@@ -72,7 +71,7 @@ impl Log {
 		#[cfg(feature = "tokio-console")]
 		let registry = registry.with(console_subscriber::spawn());
 
-		registry.init();
+		registry.try_init().context("failed to set global tracing subscriber")?;
 
 		// Start deadlock detection thread (only in debug builds)
 		#[cfg(debug_assertions)]
