@@ -59,8 +59,14 @@ otool -l "$macho" |
         install_name_tool -delete_rpath "$rp" "$macho"
     done
 
+# install_name_tool -add_rpath errors (and aborts the script under set -e)
+# if the rpath is already present, so skip ones that already exist.
+existing_rpaths="$(otool -l "$macho" |
+    awk '/^ *cmd LC_RPATH$/{f=1; next} f && /^ *path /{print $2; f=0}')"
 for rp in "${rpaths[@]}"; do
-    install_name_tool -add_rpath "$rp" "$macho"
+    if ! grep -Fxq "$rp" <<<"$existing_rpaths"; then
+        install_name_tool -add_rpath "$rp" "$macho"
+    fi
 done
 
 # Whitelist assertion: every LC_LOAD_DYLIB must resolve via @rpath,
