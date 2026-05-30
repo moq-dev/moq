@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "moq"
+# Versioned independently of the moq-ffi crate. Bump this by hand and push a
+# `moq-py-v<version>` tag to release (see .github/workflows/release-py-wrapper.yml).
+version = "0.1.0"
+description = "Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization, with a Pythonic API."
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "Luke Curley", email = "kixelated@gmail.com" }]
+keywords = ["quic", "http3", "webtransport", "media", "live", "streaming"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Video",
+]
+# Compatible-release pin: floats to the latest 0.2.x moq-ffi patch without a
+# wrapper re-release. A moq-ffi minor bump (0.3) is the only thing that forces
+# bumping this constraint.
+dependencies = ["moq-ffi ~= 0.2.16"]
+
+[project.urls]
+Homepage = "https://github.com/moq-dev/moq"
+Repository = "https://github.com/moq-dev/moq"
+
+# Local dev resolves moq-ffi from the workspace member rather than PyPI.
+[tool.uv.sources]
+moq-ffi = { workspace = true }

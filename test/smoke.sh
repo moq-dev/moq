@@ -114,9 +114,11 @@ cargo build -q -p moq-relay -p moq-cli
 if needs python; then
     echo "preparing python bindings..."
     # sync the workspace dev group (ruff/maturin/...) from py/, then build the
-    # moq-rs editable wheel (moq-ffi cdylib + uniffi bindings) from py/moq-rs.
+    # moq-ffi editable wheel (cdylib + uniffi bindings) and install the pure
+    # python moq wrapper that depends on it.
     (cd "$REPO_ROOT/py" && uv sync --no-install-workspace)
-    (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync maturin develop --uv)
+    (cd "$REPO_ROOT/py/moq-ffi" && uv run --no-sync maturin develop --uv)
+    (cd "$REPO_ROOT/py" && uv pip install --no-deps -e moq)
 fi
 
 if needs js-browser; then
@@ -167,7 +169,7 @@ start_publisher() {
             (ffmpeg_h264 | "$MOQ" publish --url "$URL" --broadcast "$broadcast" avc3) >"$log" 2>&1 &
             ;;
         python)
-            (ffmpeg_h264 | (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync python examples/smoke.py \
+            (ffmpeg_h264 | (cd "$REPO_ROOT/py/moq" && uv run --no-sync python examples/smoke.py \
                 publish --url "$URL" --broadcast "$broadcast")) >"$log" 2>&1 &
             ;;
         js-browser)
@@ -196,7 +198,7 @@ run_subscriber() {
             [[ "${n:-0}" -ge 1 ]]
             ;;
         python)
-            (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync python examples/smoke.py \
+            (cd "$REPO_ROOT/py/moq" && uv run --no-sync python examples/smoke.py \
                 subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT")
             ;;
         js-browser)

@@ -215,7 +215,7 @@ export default defineConfig({
 						{
 							text: "Python",
 							link: "/lib/py/",
-							items: [{ text: "moq-net", link: "/lib/py/moq-net" }],
+							items: [{ text: "moq", link: "/lib/py/moq" }],
 						},
 						{
 							text: "Kotlin",

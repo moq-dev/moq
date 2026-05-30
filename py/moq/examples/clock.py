@@ -4,8 +4,8 @@ Each minute is a new group; each second is a frame inside that group. The first
 frame of every group is the "YYYY-MM-DD HH:MM:" prefix, followed by one "SS"
 frame per second.
 
-    python py/moq-rs/examples/clock.py publish   --url https://relay.example.com --broadcast clock
-    python py/moq-rs/examples/clock.py subscribe --url https://relay.example.com --broadcast clock
+    python py/moq/examples/clock.py publish   --url https://relay.example.com --broadcast clock
+    python py/moq/examples/clock.py subscribe --url https://relay.example.com --broadcast clock
 """
 
 import argparse

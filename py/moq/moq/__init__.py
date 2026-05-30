@@ -3,7 +3,8 @@
 Real-time pub/sub with built-in caching, fan-out, and prioritization.
 """
 
-from ._uniffi import MoqSession as Session
+from moq_ffi import MoqSession as Session
+
 from .client import Client
 from .origin import Announced, AnnouncedBroadcast, Announcement, OriginConsumer, OriginProducer
 from .publish import AudioProducer, BroadcastProducer, GroupProducer, MediaProducer, TrackProducer

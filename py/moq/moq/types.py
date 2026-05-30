@@ -1,36 +1,36 @@
 """Re-export moq-ffi record types without the Moq prefix."""
 
-from ._uniffi import (
+from moq_ffi import (
     MoqAudio as Audio,
 )
-from ._uniffi import (
+from moq_ffi import (
     MoqAudioCodec as AudioCodec,
 )
-from ._uniffi import (
+from moq_ffi import (
     MoqAudioDecoderOutput as AudioDecoderOutput,
 )
-from ._uniffi import (
+from moq_ffi import (
     MoqAudioEncoderInput as AudioEncoderInput,
 )
-from ._uniffi import (
+from moq_ffi import (
     MoqAudioEncoderOutput as AudioEncoderOutput,
 )
-from ._uniffi import (
+from moq_ffi import (
     MoqAudioFormat as AudioFormat,
 )
-from ._uniffi import (
+from moq_ffi import (
     MoqAudioFrame as AudioFrame,
 )
-from ._uniffi import (
+from moq_ffi import (
     MoqCatalog as Catalog,
 )
-from ._uniffi import (
+from moq_ffi import (
     MoqDimensions as Dimensions,
 )
-from ._uniffi import (
+from moq_ffi import (
     MoqFrame as Frame,
 )
-from ._uniffi import (
+from moq_ffi import (
     MoqVideo as Video,
 )
 

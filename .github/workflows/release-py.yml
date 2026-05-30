@@ -1,9 +1,10 @@
-name: Release Py
+name: Release Py FFI
 
-# Driven by the `moq-ffi-v*` tag that release-plz pushes when it bumps
-# rs/moq-ffi/Cargo.toml. The wheel inherits its version from that same
-# Cargo.toml (via maturin's dynamic version), so the moq-rs package
-# stays lockstep with the moq-ffi crate without a separate bump.
+# Builds the `moq-ffi` wheel (raw uniffi bindings). Driven by the
+# `moq-ffi-v*` tag that release-plz pushes when it bumps rs/moq-ffi/Cargo.toml.
+# The wheel inherits its version from that same Cargo.toml (via maturin's
+# dynamic version), so the moq-ffi package stays lockstep with the moq-ffi
+# crate. The ergonomic `moq` wrapper is released separately (release-py-wrapper.yml).
 
 on:
   push:
@@ -99,9 +100,9 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
-          # py/moq-rs/pyproject.toml drives the build; its [tool.maturin]
+          # py/moq-ffi/pyproject.toml drives the build; its [tool.maturin]
           # block points at rs/moq-ffi/Cargo.toml.
-          working-directory: py/moq-rs
+          working-directory: py/moq-ffi
           args: --release --out dist
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
@@ -111,7 +112,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-${{ matrix.target }}
-          path: py/moq-rs/dist/*.whl
+          path: py/moq-ffi/dist/*.whl
 
   sdist:
     name: Build sdist
@@ -130,7 +131,7 @@ jobs:
       - name: Build sdist
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
-          working-directory: py/moq-rs
+          working-directory: py/moq-ffi
           command: sdist
           args: --out dist
 
@@ -138,7 +139,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-sdist
-          path: py/moq-rs/dist/*.tar.gz
+          path: py/moq-ffi/dist/*.tar.gz
 
   publish:
     name: Publish to PyPI
@@ -147,7 +148,7 @@ jobs:
     if: github.event_name == 'push'
     environment:
       name: pypi
-      url: https://pypi.org/p/moq-rs
+      url: https://pypi.org/p/moq-ffi
     permissions:
       id-token: write
 

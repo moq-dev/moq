@@ -1,0 +1,98 @@
+name: Release Py Wrapper
+
+# Builds the pure-python `moq` wrapper wheel. Versioned independently of the
+# moq-ffi crate: bump py/moq/pyproject.toml by hand and push a `moq-py-v<ver>`
+# tag. The wrapper depends on `moq-ffi ~= 0.2.x`, so it floats to the latest
+# compatible moq-ffi patch without a re-release.
+
+on:
+  push:
+    tags:
+      - "moq-py-v*"
+  pull_request:
+    paths:
+      - ".github/workflows/release-py-wrapper.yml"
+      - ".github/scripts/release.sh"
+      - "py/moq/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-py-wrapper
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build wheel + sdist
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Parse version
+        id: parse
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            PY_VERSION=$(grep '^version' py/moq/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            echo "version=$PY_VERSION" >> "$GITHUB_OUTPUT"
+            echo "Using version from pyproject.toml (PR dry-run): $PY_VERSION"
+          else
+            .github/scripts/release.sh parse-version moq-py
+          fi
+
+      # The wrapper version is static in pyproject.toml. If a tag is pushed
+      # without bumping it, the wheel would ship the previous version and PyPI
+      # would reject the duplicate upload.
+      - name: Verify pyproject.toml matches tag
+        if: github.event_name == 'push'
+        env:
+          TAG_VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          PY_VERSION=$(grep '^version' py/moq/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [[ "$TAG_VERSION" != "$PY_VERSION" ]]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match py/moq/pyproject.toml version ($PY_VERSION). Bump pyproject.toml before tagging."
+            exit 1
+          fi
+          echo "pyproject.toml version matches tag: $TAG_VERSION"
+
+      - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
+        with:
+          determinate: false
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
+
+      - name: Build
+        run: nix develop --command just py package
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: python-wrapper
+          path: py/dist/*
+
+  publish:
+    name: Publish to PyPI
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    environment:
+      name: pypi
+      url: https://pypi.org/p/moq
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: python-wrapper
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

@@ -6,8 +6,8 @@ second is a frame, in the same format as `examples/clock.py`.
 
 Run a subscriber against it with TLS verification disabled, e.g.:
 
-    python py/moq-rs/examples/serve_clock.py --bind 127.0.0.1:4443
-    python py/moq-rs/examples/clock.py subscribe \\
+    python py/moq/examples/serve_clock.py --bind 127.0.0.1:4443
+    python py/moq/examples/clock.py subscribe \\
         --url https://127.0.0.1:4443 --broadcast clock --no-tls-verify
 """
 

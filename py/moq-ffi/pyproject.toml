@@ -3,12 +3,12 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "moq-rs"
+name = "moq-ffi"
 # Version is injected at build time from the moq-ffi-v* tag (see
 # .github/workflows/release-py.yml). For local dev `maturin develop`
 # reads it from rs/moq-ffi/Cargo.toml.
 dynamic = ["version"]
-description = "Python bindings for the Media over QUIC Rust crates: real-time pub/sub with built-in caching, fan-out, and prioritization."
+description = "Raw UniFFI bindings for the Media over QUIC Rust crates. Most callers want the ergonomic `moq` wrapper instead."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 requires-python = ">=3.10"
@@ -26,16 +26,13 @@ classifiers = [
 Homepage = "https://github.com/moq-dev/moq"
 Repository = "https://github.com/moq-dev/moq"
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-
 # Maturin builds the rs/moq-ffi crate, runs uniffi-bindgen, and packages
-# the cdylib + generated bindings as a private `moq._uniffi` subpackage
-# (the leading underscore signals "internal"; the public API lives at the
-# top of moq). The PyPI distribution is `moq-rs` but the import name is
-# `moq` for ergonomics.
+# the cdylib + generated bindings as a private `moq_ffi._uniffi` subpackage
+# (the leading underscore signals "internal"; moq_ffi/__init__.py re-exports
+# the raw classes). The ergonomic `moq` wrapper depends on this package and
+# is versioned independently.
 [tool.maturin]
 bindings = "uniffi"
 manifest-path = "../../rs/moq-ffi/Cargo.toml"
 python-source = "."
-module-name = "moq._uniffi"
+module-name = "moq_ffi._uniffi"

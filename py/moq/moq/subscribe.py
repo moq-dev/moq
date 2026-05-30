@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._uniffi import (
+from moq_ffi import (
     Container,
     MoqAudioConsumer,
     MoqBroadcastConsumer,
@@ -11,6 +11,7 @@ from ._uniffi import (
     MoqMediaConsumer,
     MoqTrackConsumer,
 )
+
 from .types import Audio, AudioDecoderOutput, AudioFrame, Catalog, Frame
 
 
