@@ -55,16 +55,18 @@ impl Session {
 		publish: Option<moq_net::OriginProducer>,
 		consume: Option<moq_net::OriginProducer>,
 	) -> Result<(), Error> {
-		let client = moq_native::ClientConfig::default()
+		let mut client = moq_native::ClientConfig::default()
 			.init()
 			.map_err(|err| Error::Connect(Arc::new(err)))?;
 
-		let cs = client
-			.with_publisher(publish)
-			.with_consumer(consume)
-			.connect(url)
-			.await
-			.map_err(|err| Error::Connect(Arc::new(err)))?;
+		if let Some(publish) = publish {
+			client = client.with_publisher(publish);
+		}
+		if let Some(consume) = consume {
+			client = client.with_consumer(consume);
+		}
+
+		let cs = client.connect(url).await.map_err(|err| Error::Connect(Arc::new(err)))?;
 
 		// "Connected" callback — copy from slab if not revoked.
 		if let Some(Some(entry)) = State::lock().session.task.get(task_id) {

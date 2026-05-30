@@ -21,12 +21,17 @@ impl Client {
 			.init()
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
-		let publish = self.publish.as_ref().map(|o| o.inner().clone());
-		let consume = self.consume.as_ref().map(|o| o.inner().clone());
+		// moq-net defaults both sides if unset; only override when the
+		// FFI caller wired their own.
+		let mut client = client;
+		if let Some(publish) = self.publish.as_ref() {
+			client = client.with_publisher(publish.inner().clone());
+		}
+		if let Some(consume) = self.consume.as_ref() {
+			client = client.with_consumer(consume.inner().clone());
+		}
 
 		let session = client
-			.with_publisher(publish)
-			.with_consumer(consume)
 			.connect(url)
 			.await
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;

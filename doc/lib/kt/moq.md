@@ -58,8 +58,7 @@ cs.shutdown()  // alias for cancel(0u)
 import dev.moq.*
 import kotlinx.coroutines.flow.collect
 
-val consumer = cs.consumer()
-val announced = consumer.announced("demos/")
+val announced = cs.consumer().announced("demos/")
 
 announced.announcements().collect { announcement ->
     val catalog = announcement.broadcast().subscribeCatalog()

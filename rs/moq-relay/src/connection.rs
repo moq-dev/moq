@@ -83,13 +83,18 @@ impl Connection {
 		// NOTE: subscribe and publish seem backwards because of how relays work.
 		// We publish the tracks the client is allowed to subscribe to.
 		// We subscribe to the tracks the client is allowed to publish.
-		let session = self
-			.request
-			.with_publisher(subscribe)
-			.with_consumer(publish)
-			.with_stats(stats)
-			.ok()
-			.await?;
+		//
+		// Only set the side the token actually grants. moq-net defaults the
+		// unset side to a fresh no-op origin, which is fine for a publish-only
+		// or subscribe-only token.
+		let mut request = self.request.with_stats(stats);
+		if let Some(subscribe) = subscribe {
+			request = request.with_publisher(subscribe);
+		}
+		if let Some(publish) = publish {
+			request = request.with_consumer(publish);
+		}
+		let session = request.ok().await?;
 
 		tracing::info!(version = %session.version(), transport, "negotiated");
 

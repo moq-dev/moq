@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::SendStream;
 
 use crate::{
-	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, Error, OriginConsumer, Track, TrackConsumer,
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	model::GroupConsumer,
@@ -22,8 +22,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(session: S, origin: Option<OriginConsumer>, control: Control, version: Version) -> Self {
-		let origin = origin.unwrap_or_else(|| Origin::random().produce().consume());
+	pub fn new(session: S, origin: OriginConsumer, control: Control, version: Version) -> Self {
 		Self {
 			session,
 			origin,

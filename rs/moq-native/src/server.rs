@@ -300,12 +300,12 @@ impl Server {
 		self
 	}
 
-	pub fn with_publisher(mut self, publish: impl Into<Option<moq_net::OriginProducer>>) -> Self {
+	pub fn with_publisher(mut self, publish: moq_net::OriginProducer) -> Self {
 		self.moq = self.moq.with_publisher(publish);
 		self
 	}
 
-	pub fn with_consumer(mut self, consume: impl Into<Option<moq_net::OriginProducer>>) -> Self {
+	pub fn with_consumer(mut self, consume: moq_net::OriginProducer) -> Self {
 		self.moq = self.moq.with_consumer(consume);
 		self
 	}
@@ -602,13 +602,13 @@ impl Request {
 	}
 
 	/// Publish the given origin to the session.
-	pub fn with_publisher(mut self, publish: impl Into<Option<moq_net::OriginProducer>>) -> Self {
+	pub fn with_publisher(mut self, publish: moq_net::OriginProducer) -> Self {
 		self.server = self.server.with_publisher(publish);
 		self
 	}
 
 	/// Consume the given origin from the session.
-	pub fn with_consumer(mut self, consume: impl Into<Option<moq_net::OriginProducer>>) -> Self {
+	pub fn with_consumer(mut self, consume: moq_net::OriginProducer) -> Self {
 		self.server = self.server.with_consumer(consume);
 		self
 	}

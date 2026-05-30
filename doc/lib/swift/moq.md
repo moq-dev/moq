@@ -57,8 +57,7 @@ cs.shutdown()  // alias for cancel(code: 0)
 ## Subscribe
 
 ```swift
-let consumer = cs.consumer()
-let announced = try consumer.announced(prefix: "demos/")
+let announced = try cs.consumer().announced(prefix: "demos/")
 
 for try await announcement in announced.announcements {
     let catalog = try announcement.broadcast().subscribeCatalog()

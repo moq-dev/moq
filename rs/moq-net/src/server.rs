@@ -6,12 +6,24 @@ use crate::{
 };
 
 /// A MoQ server session builder.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct Server {
-	publish: Option<OriginProducer>,
-	consume: Option<OriginProducer>,
+	publish: OriginProducer,
+	consume: OriginProducer,
 	stats: StatsHandle,
 	versions: Versions,
+}
+
+impl Default for Server {
+	fn default() -> Self {
+		let shared = crate::Origin::random().produce();
+		Self {
+			publish: shared.clone(),
+			consume: shared,
+			stats: StatsHandle::default(),
+			versions: Versions::default(),
+		}
+	}
 }
 
 impl Server {
@@ -23,16 +35,16 @@ impl Server {
 	/// server reads from when forwarding broadcasts to the connected
 	/// client. Surfaced as [`Session::publisher`]. Pre-scoped via
 	/// [`OriginProducer::scope`] for token-gated relays.
-	pub fn with_publisher(mut self, publish: impl Into<Option<OriginProducer>>) -> Self {
-		self.publish = publish.into();
+	pub fn with_publisher(mut self, publish: OriginProducer) -> Self {
+		self.publish = publish;
 		self
 	}
 
 	/// Override the consume-side origin: the [`OriginProducer`] the
 	/// server writes into as the client announces broadcasts. A consumer
 	/// view is surfaced as [`Session::consumer`].
-	pub fn with_consumer(mut self, consume: impl Into<Option<OriginProducer>>) -> Self {
-		self.consume = consume.into();
+	pub fn with_consumer(mut self, consume: OriginProducer) -> Self {
+		self.consume = consume;
 		self
 	}
 
@@ -55,17 +67,11 @@ impl Server {
 	}
 
 	/// Perform the MoQ handshake as a server for the given session.
-	///
-	/// The returned [`Session`] always exposes both
-	/// [`publisher`](Session::publisher) and [`consumer`](Session::consumer):
-	/// whatever was set via [`Self::with_publisher`] / [`Self::with_consumer`]
-	/// / [`Self::with_origin`], or a fresh auto-created
-	/// [`Origin`](crate::Origin) for any side the caller left unset. When
-	/// neither side is set, both default to the same shared origin.
 	pub async fn accept<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
-		let (publisher, consumer) = crate::client::resolve_origins(self.publish.clone(), self.consume.clone());
-		let publish = Some(publisher.consume());
-		let consume = Some(consumer.clone());
+		let publisher = self.publish.clone();
+		let consumer = self.consume.clone();
+		let publish = publisher.consume();
+		let consume = consumer.clone();
 		let consumer_view = consumer.consume();
 
 		let (encoding, supported) = match session.protocol() {

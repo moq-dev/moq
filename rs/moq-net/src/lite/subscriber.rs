@@ -27,7 +27,7 @@ const LINGER_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	pub session: S,
 	/// The origin into which remote broadcasts are inserted.
-	pub origin: Option<OriginProducer>,
+	pub origin: OriginProducer,
 	/// Receiver-side bandwidth producer for PROBE feedback. None disables the
 	/// feature (used by versions that don't carry probe streams).
 	pub recv_bandwidth: Option<BandwidthProducer>,
@@ -41,7 +41,7 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 
-	origin: Option<OriginProducer>,
+	origin: OriginProducer,
 	stats: StatsHandle,
 	recv_bandwidth: Option<BandwidthProducer>,
 	// Session-level origin id shared with the Publisher. Used to filter out
@@ -81,9 +81,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Identity for incoming-hop loop detection. Derived from the local
 		// origin we publish into so it matches the relay identity across
 		// every session sharing that origin, required for cross-session
-		// loop detection. If no origin is attached (the announce loop is
-		// inert anyway), fall back to a random session-local id.
-		let self_origin = config.origin.as_deref().copied().unwrap_or_else(crate::Origin::random);
+		// loop detection.
+		let self_origin = *config.origin;
 		Self {
 			session: config.session,
 			origin: config.origin,
@@ -135,12 +134,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_announce(self) -> Result<(), Error> {
-		let origin = match &self.origin {
-			Some(origin) => origin,
-			None => return Ok(()),
-		};
-
-		let prefixes: Vec<PathOwned> = origin.allowed().map(|p| p.to_owned()).collect();
+		let prefixes: Vec<PathOwned> = self.origin.allowed().map(|p| p.to_owned()).collect();
 
 		let mut tasks = FuturesUnordered::new();
 		for prefix in prefixes {
@@ -183,7 +177,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
 				for suffix in msg.suffixes {
 					let path = prefix.join(&suffix);
-					let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
+					let abs = self.origin.absolute(&path).to_owned();
 					// Lite01/02 don't carry hop information; the broadcast starts with an empty chain.
 					if self.start_announce(path.clone(), crate::OriginList::new(), &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
@@ -199,7 +193,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			match announce {
 				lite::Announce::Active { suffix, hops } => {
 					let path = prefix.join(&suffix);
-					let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
+					let abs = self.origin.absolute(&path).to_owned();
 					if self.start_announce(path.clone(), hops, &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
@@ -213,7 +207,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// `producers` has no entry; that's expected, not an error.
 					if let Some(mut producer) = producers.remove(&path) {
 						producer.abort(Error::Cancel).ok();
-						let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
+						let abs = self.origin.absolute(&path).to_owned();
 						stats_guards.remove(&abs);
 					}
 				}
@@ -227,18 +221,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	/// Opens a PROBE stream on demand while a consumer is interested.
 	///
-	/// PROBE measures the peer's upload bandwidth to us, which is only meaningful
-	/// when the peer is publishing broadcasts. If we have no origin to insert
-	/// remote broadcasts into, skip the probe stream entirely.
-	///
-	/// Otherwise loop forever: wait for a consumer, race the probe stream against
+	/// Loops forever: wait for a consumer, race the probe stream against
 	/// the consumer leaving, then loop back. Probe is best-effort, so stream
 	/// errors are logged but never tear down the session.
 	async fn run_recv_bandwidth(self) -> Result<(), Error> {
-		if self.origin.is_none() {
-			return Ok(());
-		}
-
 		let Some(bandwidth) = &self.recv_bandwidth else {
 			return Ok(());
 		};
@@ -315,10 +301,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let dynamic = broadcast.dynamic();
 
 		// Run the broadcast in the background until all consumers are dropped.
-		self.origin
-			.as_mut()
-			.unwrap()
-			.publish_broadcast(path.clone(), broadcast.consume());
+		self.origin.publish_broadcast(path.clone(), broadcast.consume());
 
 		web_async::spawn(self.clone().run_broadcast(path, dynamic));
 
@@ -364,7 +347,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Drop on subscription end records `subscriber.subscriptions_closed`. We use
 		// subscriber_track to avoid double-counting broadcasts: the broadcast lifetime
 		// is tracked separately by the announce loop's `stats_guards`.
-		let abs = self.origin.as_ref().unwrap().absolute(&path);
+		let abs = self.origin.absolute(&path);
 		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&track.name));
 
 		let id = self.next_id.fetch_add(1, atomic::Ordering::Relaxed);
@@ -671,6 +654,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	fn log_path(&self, path: impl AsPath) -> Path<'_> {
-		self.origin.as_ref().unwrap().root().join(path)
+		self.origin.root().join(path)
 	}
 }

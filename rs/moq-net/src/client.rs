@@ -6,12 +6,26 @@ use crate::{
 };
 
 /// A MoQ client session builder.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct Client {
-	publish: Option<OriginProducer>,
-	consume: Option<OriginProducer>,
+	publish: OriginProducer,
+	consume: OriginProducer,
 	stats: StatsHandle,
 	versions: Versions,
+}
+
+impl Default for Client {
+	fn default() -> Self {
+		// Default to one shared fresh origin so the typical duplex
+		// client just works without any setup.
+		let shared = Origin::random().produce();
+		Self {
+			publish: shared.clone(),
+			consume: shared,
+			stats: StatsHandle::default(),
+			versions: Versions::default(),
+		}
+	}
 }
 
 impl Client {
@@ -22,19 +36,19 @@ impl Client {
 	/// Override the publish-side origin: the [`OriginProducer`] this
 	/// client reads from when forwarding local broadcasts to the remote.
 	/// Surfaced as [`Session::publisher`] so callers can keep
-	/// `.announce(path, broadcast)`-ing after connect.
+	/// `.publish_broadcast(path, broadcast)`-ing after connect.
 	///
 	/// Pre-scoped via [`OriginProducer::scope`] for token-gated relays.
-	pub fn with_publisher(mut self, publish: impl Into<Option<OriginProducer>>) -> Self {
-		self.publish = publish.into();
+	pub fn with_publisher(mut self, publish: OriginProducer) -> Self {
+		self.publish = publish;
 		self
 	}
 
 	/// Override the consume-side origin: the [`OriginProducer`] this
 	/// client writes into as the remote announces broadcasts. A consumer
 	/// view is surfaced as [`Session::consumer`].
-	pub fn with_consumer(mut self, consume: impl Into<Option<OriginProducer>>) -> Self {
-		self.consume = consume.into();
+	pub fn with_consumer(mut self, consume: OriginProducer) -> Self {
+		self.consume = consume;
 		self
 	}
 
@@ -60,17 +74,11 @@ impl Client {
 	}
 
 	/// Perform the MoQ handshake as a client negotiating the version.
-	///
-	/// The returned [`Session`] always exposes both
-	/// [`publisher`](Session::publisher) and [`consumer`](Session::consumer):
-	/// whatever was set via [`Self::with_publisher`] / [`Self::with_consumer`]
-	/// / [`Self::with_origin`], or a fresh auto-created [`Origin`] for
-	/// any side the caller left unset. When neither side is set, both
-	/// default to the same shared origin (the typical full-duplex client).
 	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
-		let (publisher, consumer) = resolve_origins(self.publish.clone(), self.consume.clone());
-		let publish = Some(publisher.consume());
-		let consume = Some(consumer.clone());
+		let publisher = self.publish.clone();
+		let consumer = self.consume.clone();
+		let publish = publisher.consume();
+		let consume = consumer.clone();
 		let consumer_view = consumer.consume();
 
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
@@ -255,24 +263,6 @@ impl Client {
 		};
 
 		Ok(Session::new(session, version, recv_bw, publisher, consumer_view))
-	}
-}
-
-/// Pick the publish / consume [`OriginProducer`]s for a session,
-/// defaulting any side the caller didn't set. When both are unset, a
-/// single shared fresh origin powers both (the typical duplex client).
-pub(crate) fn resolve_origins(
-	publish: Option<OriginProducer>,
-	consume: Option<OriginProducer>,
-) -> (OriginProducer, OriginProducer) {
-	match (publish, consume) {
-		(Some(p), Some(c)) => (p, c),
-		(Some(p), None) => (p, Origin::random().produce()),
-		(None, Some(c)) => (Origin::random().produce(), c),
-		(None, None) => {
-			let shared = Origin::random().produce();
-			(shared.clone(), shared)
-		}
 	}
 }
 

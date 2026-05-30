@@ -104,12 +104,17 @@ where
 		None => bare,
 	};
 	let ws = bare.accept();
-	let session = moq_net::Server::new()
-		.with_publisher(subscribe)
-		.with_consumer(publish)
-		.with_stats(stats)
-		.accept(ws)
-		.await?;
+	// Only set the side the token actually grants. moq-net defaults the
+	// unset side to a fresh no-op origin, which is fine for a
+	// publish-only or subscribe-only token.
+	let mut server = moq_net::Server::new().with_stats(stats);
+	if let Some(subscribe) = subscribe {
+		server = server.with_publisher(subscribe);
+	}
+	if let Some(publish) = publish {
+		server = server.with_consumer(publish);
+	}
+	let session = server.accept(ws).await?;
 	session.closed().await.map_err(Into::into)
 }
 
