@@ -58,6 +58,13 @@ jobs:
       - name: Build and cache
         env:
           PACKAGE: ${{ steps.pkg.outputs.name }}
+          OS: ${{ matrix.os }}
         run: |
           nix build ".#$PACKAGE" --print-build-logs
           cachix push kixelated ./result
+          # Pin so released paths are exempt from GC, otherwise a consumer
+          # pinning a few-weeks-old tag silently falls back to building once
+          # the cache GCs the path. keep-revisions bounds storage for the
+          # free plan; the pin name is per package+OS so each platform keeps
+          # its own last-N releases instead of clobbering the other's.
+          cachix pin kixelated "$PACKAGE-$OS" ./result --keep-revisions 10
