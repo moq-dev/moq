@@ -62,7 +62,7 @@ impl Server {
 	/// [`publisher`](Session::publisher) and [`consumer`](Session::consumer):
 	/// whatever was passed to [`Self::with_publish`] /
 	/// [`Self::with_consume`] / [`Self::with_origin`], or a fresh
-	/// auto-created [`Origin`] for any side the caller left unset. When
+	/// auto-created [`Origin`](crate::Origin) for any side the caller left unset. When
 	/// neither side is set, both default to the same shared origin.
 	pub async fn accept<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
 		let (publisher, consumer) = crate::client::resolve_origins(self.publish.clone(), self.consume.clone());
