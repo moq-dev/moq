@@ -1627,6 +1627,14 @@ mod tests {
 			subs_closed_pos < subs_pos,
 			"subscriptions_closed must be loaded before subscriptions",
 		);
+		let bcast_closed_pos = body
+			.find("self.broadcasts_closed.load")
+			.expect("broadcasts_closed load");
+		let bcast_pos = body.find("self.broadcasts.load").expect("broadcasts load");
+		assert!(
+			bcast_closed_pos < bcast_pos,
+			"broadcasts_closed must be loaded before broadcasts",
+		);
 	}
 
 	async fn read_frame(mut track: crate::TrackConsumer) -> BTreeMap<String, Snapshot> {

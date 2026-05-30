@@ -343,10 +343,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// is tracked separately by the announce loop's `stats_guards`.
 		let abs = self.origin.as_ref().unwrap().absolute(&path);
 		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&track.name));
-		// Per-(session, broadcast) sentinel; held until this subscription ends.
-		// The session's first sub to the broadcast bumps `broadcasts`, the last
-		// to drop bumps `broadcasts_closed`.
-		let _broadcast_sub = self.broadcasts.subscribe(&abs);
+		// The per-(session, broadcast) `broadcasts` sentinel is taken later, once
+		// the upstream confirms with SUBSCRIBE_OK (see `run_track_stream`), so a
+		// sub cancelled before then isn't counted as a feeding session.
 
 		self.subscribes.lock().insert(
 			id,
@@ -416,6 +415,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let lite::SubscribeResponse::Ok(_info) = resp else {
 			return Err(Error::ProtocolViolation);
 		};
+
+		// Upstream confirmed the subscription, so this session is now actively
+		// feeding the broadcast: take the `broadcasts` sentinel. It drops with
+		// this fn (subscription end / cancel), releasing `broadcasts_closed`.
+		let abs = self.origin.as_ref().unwrap().absolute(&msg.broadcast);
+		let _broadcast_sub = self.broadcasts.subscribe(&abs);
 
 		// TODO handle additional SUBSCRIBE_OK and SUBSCRIBE_DROP messages.
 		stream.reader.closed().await?;

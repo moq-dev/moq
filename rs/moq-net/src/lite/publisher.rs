@@ -319,12 +319,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let priority = self.priority.clone();
 		let version = self.version;
 
-		// Per-track subscription guard (bumps `subscriptions`). Separately, a
-		// per-(session, broadcast) guard drives the `broadcasts` sentinel: the
-		// session's first subscription to this broadcast bumps `broadcasts`, the
-		// last to drop bumps `broadcasts_closed`, so `broadcasts` counts viewers.
+		// Per-track subscription guard (bumps `subscriptions`). The per-(session,
+		// broadcast) `broadcasts` sentinel that counts viewers is taken inside
+		// `run_subscribe`, only once the subscription is validated and active, so
+		// a stale/invalid SUBSCRIBE isn't counted as a viewer.
 		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
-		let broadcast_sub = self.broadcasts.subscribe(&absolute);
+		let broadcasts = self.broadcasts.clone();
 
 		let session = self.session.clone();
 		web_async::spawn(async move {
@@ -334,7 +334,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				&subscribe,
 				broadcast,
 				priority,
-				(track_stats, broadcast_sub),
+				(track_stats, broadcasts, absolute.clone()),
 				version,
 			)
 			.await
@@ -363,13 +363,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		subscribe: &lite::Subscribe<'_>,
 		consumer: Option<BroadcastConsumer>,
 		priority: PriorityQueue,
-		// The track guard (bumps `subscriptions`) plus the per-(session,
-		// broadcast) sentinel guard (drives `broadcasts`). Both held for the
-		// subscription's lifetime.
-		stats: (crate::PublisherTrack, crate::BroadcastSubscription),
+		// The track guard (bumps `subscriptions`), the per-session broadcast
+		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
+		// below, after the subscription is validated, and held for its lifetime.
+		stats: (crate::PublisherTrack, crate::SessionBroadcasts, crate::PathOwned),
 		version: Version,
 	) -> Result<(), Error> {
-		let (track_stats, _broadcast_sub) = stats;
+		let (track_stats, broadcasts, absolute) = stats;
 		let track = Track {
 			name: subscribe.track.to_string(),
 			priority: subscribe.priority,
@@ -377,6 +377,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
 		let track = broadcast.subscribe_track(&track)?;
+
+		// Subscription is now active: count this session as a viewer of the
+		// broadcast. Dropping this guard (subscription end) releases it.
+		let _broadcast_sub = broadcasts.subscribe(&absolute);
 
 		// TODO wait until track.info() to get the *real* priority
 
