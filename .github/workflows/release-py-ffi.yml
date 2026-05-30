@@ -18,8 +18,9 @@ on:
 permissions:
   contents: read
 
+# Scope by event + ref so a PR dry-run can't queue ahead of a tag publish.
 concurrency:
-  group: release-py-ffi
+  group: release-py-ffi-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:

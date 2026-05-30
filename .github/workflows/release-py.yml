@@ -60,7 +60,9 @@ jobs:
       # the no-op explicit). Runs on PRs too, as an informational dry-run.
       - name: Check PyPI
         id: pypi
-        run: .github/scripts/release.sh pypi-exists moq-rs "${{ steps.version.outputs.version }}"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: .github/scripts/release.sh pypi-exists moq-rs "$VERSION"
 
       - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
         with:
