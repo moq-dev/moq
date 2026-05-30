@@ -655,6 +655,96 @@ fn local_publish_consume() {
 }
 
 #[test]
+fn consume_announced_local() {
+	let origin = id(moq_origin_create());
+
+	// Start waiting before the broadcast exists: the announcement arrives afterwards.
+	let cb = Callback::new();
+	let path = b"live";
+	let _task = id(unsafe {
+		moq_origin_consume_announced(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+
+	let broadcast = id(moq_publish_create());
+	let init = opus_head();
+	let format = b"opus";
+	let media = id(unsafe {
+		moq_publish_media_ordered(
+			broadcast,
+			format.as_ptr() as *const c_char,
+			format.len(),
+			init.as_ptr(),
+			init.len(),
+		)
+	});
+	assert_eq!(
+		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
+		0
+	);
+
+	// First the broadcast handle, then a terminal 0 once the wait finishes.
+	let consume = id(cb.recv());
+	assert_eq!(cb.recv_terminal(), 0, "wait delivers terminal 0 after the handle");
+
+	// The delivered handle behaves like one from moq_origin_consume.
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	let mut audio_cfg = moq_audio_config {
+		name: std::ptr::null(),
+		name_len: 0,
+		codec: std::ptr::null(),
+		codec_len: 0,
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 0,
+		channel_count: 0,
+	};
+	assert_eq!(unsafe { moq_consume_audio_config(catalog_id, 0, &mut audio_cfg) }, 0);
+	assert_eq!(audio_cfg.sample_rate, 48000);
+	assert_eq!(audio_cfg.channel_count, 2);
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_media_close(media), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn consume_announced_close_cancels() {
+	let origin = id(moq_origin_create());
+
+	// Wait for a broadcast that never arrives, then cancel it.
+	let cb = Callback::new();
+	let path = b"never";
+	let task = id(unsafe {
+		moq_origin_consume_announced(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+
+	assert_eq!(moq_origin_consume_announced_close(task), 0);
+	assert_eq!(cb.recv_terminal(), 0, "close delivers terminal 0");
+	assert!(moq_origin_consume_announced_close(task) < 0, "double-close should fail");
+
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn video_publish_consume() {
 	let origin = id(moq_origin_create());
 	let broadcast = id(moq_publish_create());

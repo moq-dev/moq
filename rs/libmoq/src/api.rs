@@ -292,6 +292,56 @@ pub unsafe extern "C" fn moq_origin_consume(origin: u32, path: *const c_char, pa
 	})
 }
 
+/// Consume a broadcast from an origin by path, waiting until it is announced.
+///
+/// Unlike [moq_origin_consume], which fails immediately with a not-found code when the broadcast
+/// has not been announced yet, this waits for the announcement to arrive (e.g. over the network)
+/// and then delivers the broadcast handle via `on_broadcast`. Use it right after [moq_session_connect]
+/// to avoid racing announcement gossip, instead of polling [moq_origin_consume] in a retry loop.
+///
+/// `on_broadcast` is invoked with a positive broadcast handle once announced, then exactly once
+/// more with a terminal code: `0` (the wait finished, including after
+/// [moq_origin_consume_announced_close]) or a negative error. After the terminal (`<= 0`) callback,
+/// `on_broadcast` is never called again and `user_data` is never touched again, so release
+/// `user_data` there. The broadcast handle is usable with [moq_consume_catalog] / [moq_consume_track]
+/// and must be freed separately with [moq_consume_close].
+///
+/// Returns a non-zero handle to the wait on success, or a negative code on (immediate) failure.
+///
+/// # Safety
+/// - The caller must ensure that path is a valid pointer to path_len bytes of data.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_broadcast` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_origin_consume_announced(
+	origin: u32,
+	path: *const c_char,
+	path_len: usize,
+	on_broadcast: Option<extern "C" fn(user_data: *mut c_void, broadcast: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let origin = ffi::parse_id(origin)?;
+		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
+		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast) };
+		State::lock().origin.consume_announced(origin, path, on_broadcast)
+	})
+}
+
+/// Abort a wait started by [moq_origin_consume_announced].
+///
+/// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
+/// `user_data`. The [moq_origin_consume_announced] `on_broadcast` callback still fires once more
+/// with a terminal `0` (or a negative error), and that final callback is where `user_data` should
+/// be released. Any broadcast handle already delivered is unaffected and must still be freed with
+/// [moq_consume_close].
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_origin_consume_announced_close(task: u32) -> i32 {
+	ffi::enter(move || {
+		let task = ffi::parse_id(task)?;
+		State::lock().origin.consume_announced_close(task)
+	})
+}
+
 /// Close an origin and clean up its resources.
 ///
 /// Returns a zero on success, or a negative code on failure.
