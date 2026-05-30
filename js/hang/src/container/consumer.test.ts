@@ -486,3 +486,100 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 	expect(frames[1].timestamp).toBe(33_333 as Time.Micro); // 3000/90000 * 1_000_000
 	consumer.close();
 });
+
+test("CmafFormat decodes the per-sample duration", () => {
+	const format = new CmafFormat(TEST_INIT);
+	const segment = encodeDataSegment({
+		data: new Uint8Array([0xca, 0xfe]),
+		timestamp: 0,
+		duration: 3000,
+		keyframe: true,
+		sequence: 0,
+	});
+
+	const [frame] = format.decode(segment);
+	// 3000 ticks / 90000 timescale * 1_000_000 = 33333µs
+	expect(frame.duration).toBe(33_333 as Time.Micro);
+});
+
+// --- Duration skipping ---
+
+// Format whose frames carry a fixed 33ms duration; the timestamp is byte 0 (ms).
+const durationFormat: ContainerFormat = {
+	decode(frame: Uint8Array): Frame[] {
+		return [
+			{
+				data: frame,
+				timestamp: (frame[0] * 1000) as Time.Micro,
+				duration: 33_000 as Time.Micro,
+				keyframe: false,
+			},
+		];
+	},
+};
+
+test("Consumer duration-skips a stalled group once it is covered", async () => {
+	const track = new Track("test");
+	// Latency dwarfs the gap, so only duration coverage can trigger the skip.
+	const consumer = new Consumer(track, { format: durationFormat, latency: 10_000 as Time.Milli });
+
+	// Group 0: one frame at ts=0 lasting 33ms, never closed (stalled).
+	const g0 = new Group(0);
+	g0.writeFrame(new Uint8Array([0]));
+
+	// Group 1: closed, starts exactly where group 0's frame ends.
+	const g1 = new Group(1);
+	g1.writeFrame(new Uint8Array([33]));
+	g1.close();
+
+	track.writeGroup(g0);
+	track.writeGroup(g1);
+	track.close();
+
+	const frames = await drainFrames(consumer, 200);
+	expect(frames.map((f) => f.timestamp as number)).toEqual([0, 33_000]);
+	expect(frames.map((f) => f.group)).toEqual([0, 1]);
+	consumer.close();
+});
+
+test("Consumer does not duration-skip when the gap is not covered", async () => {
+	// Format whose frames last only 10ms, short of the 33ms gap to the next group.
+	const shortFormat: ContainerFormat = {
+		decode(frame: Uint8Array): Frame[] {
+			return [
+				{
+					data: frame,
+					timestamp: (frame[0] * 1000) as Time.Micro,
+					duration: 10_000 as Time.Micro,
+					keyframe: false,
+				},
+			];
+		},
+	};
+
+	const track = new Track("test");
+	const consumer = new Consumer(track, { format: shortFormat, latency: 10_000 as Time.Milli });
+
+	// Group 0 stays open and later receives a second frame; nothing covers the gap,
+	// so that late frame must survive rather than being skipped.
+	const g0 = new Group(0);
+	g0.writeFrame(new Uint8Array([0]));
+
+	const g1 = new Group(1);
+	g1.writeFrame(new Uint8Array([33]));
+	g1.close();
+
+	track.writeGroup(g0);
+	track.writeGroup(g1);
+
+	// Let the consumer settle on group 0, then extend it before closing.
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	g0.writeFrame(new Uint8Array([20]));
+	g0.close();
+	track.close();
+
+	const frames = await drainFrames(consumer, 200);
+	expect(frames.map((f) => f.timestamp as number)).toEqual([0, 20_000, 33_000]);
+	expect(frames.map((f) => f.group)).toEqual([0, 0, 1]);
+	consumer.close();
+});

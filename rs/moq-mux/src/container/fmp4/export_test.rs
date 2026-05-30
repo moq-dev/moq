@@ -54,6 +54,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 			timestamp: Timestamp::from_micros(0).unwrap(),
 			payload: keyframe_payload,
 			keyframe: true,
+			duration: None,
 		})
 		.unwrap();
 	track_producer.finish().unwrap();

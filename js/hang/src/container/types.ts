@@ -4,6 +4,13 @@ export interface Frame {
 	data: Uint8Array;
 	timestamp: Time.Micro;
 	keyframe: boolean;
+
+	// How long this frame occupies the presentation timeline. CMAF carries a
+	// per-sample duration; containers that don't (Legacy) leave it undefined,
+	// which the consumer treats as zero. The consumer adds it to `timestamp` to
+	// learn how far a group has presented, so it can advance to a newer group as
+	// soon as the gap is covered instead of waiting out the latency budget.
+	duration?: Time.Micro;
 }
 
 export interface BufferedRange {

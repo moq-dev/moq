@@ -123,6 +123,7 @@ impl AudioProducer {
 			timestamp,
 			payload,
 			keyframe: true,
+			duration: None,
 		};
 		self.track.write(mux_frame)?;
 		self.track.finish_group()?;

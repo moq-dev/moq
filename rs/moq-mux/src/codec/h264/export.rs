@@ -247,6 +247,7 @@ mod tests {
 			timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
 			payload: payload.freeze(),
 			keyframe: false, // Legacy wire format drops this; Consumer reconstructs.
+			duration: None,
 		};
 		<crate::catalog::hang::Container as crate::container::Container>::write(
 			&crate::catalog::hang::Container::Legacy,

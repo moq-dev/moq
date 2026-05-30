@@ -306,6 +306,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 			timestamp: Timestamp::from_micros(0).unwrap(),
 			payload: keyframe_payload,
 			keyframe: true,
+			duration: None,
 		})
 		.unwrap();
 	track_producer
@@ -313,6 +314,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 			timestamp: Timestamp::from_micros(33_000).unwrap(),
 			payload: pslice_payload,
 			keyframe: false,
+			duration: None,
 		})
 		.unwrap();
 	track_producer.finish().unwrap();

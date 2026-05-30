@@ -107,6 +107,8 @@ export interface Sample {
 	timestamp: number;
 	/** Whether this is a keyframe (sync sample) */
 	keyframe: boolean;
+	/** Sample duration in microseconds (0 when the fragment doesn't carry one) */
+	duration: number;
 }
 
 // Helper to convert Uint8Array to ArrayBuffer for the library
@@ -392,6 +394,7 @@ export function decodeDataSegment(segment: Uint8Array, init: InitSegment): Sampl
 		// PTS = (decode_time + composition_offset) * 1_000_000 / timescale
 		const pts = decodeTime + compositionOffset;
 		const timestamp = Math.round((pts * 1_000_000) / init.timescale);
+		const duration = Math.round((sampleDuration * 1_000_000) / init.timescale);
 
 		// Check if keyframe (sample_is_non_sync_sample flag is bit 16)
 		// If flag is 0, treat as keyframe for safety
@@ -401,6 +404,7 @@ export function decodeDataSegment(segment: Uint8Array, init: InitSegment): Sampl
 			data,
 			timestamp,
 			keyframe,
+			duration,
 		});
 
 		decodeTime += sampleDuration;
