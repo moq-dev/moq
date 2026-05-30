@@ -2,12 +2,19 @@
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# Dist name is moq-rs but the import package is `moq`, so point hatchling at it.
+[tool.hatch.build.targets.wheel]
+packages = ["moq"]
+
 [project]
-name = "moq"
-# Versioned independently of the moq-ffi crate. Bump this by hand and push a
-# `moq-py-v<version>` tag to release (see .github/workflows/release-py-wrapper.yml).
-version = "0.1.0"
-description = "Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization, with a Pythonic API."
+name = "moq-rs"
+# Distribution is `moq-rs` (the `moq` name is taken on PyPI); the import name
+# stays `moq`. Versioned independently of the moq-ffi crate: bump this by hand
+# and push a `moq-py-v<version>` tag to release (see release-py-wrapper.yml).
+# Starts at 0.3.0 to open a new line above the old lockstep 0.2.x releases that
+# bundled the bindings.
+version = "0.3.0"
+description = "Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization, with a Pythonic API. Import as `moq`."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 requires-python = ">=3.10"

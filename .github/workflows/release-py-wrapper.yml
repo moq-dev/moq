@@ -1,9 +1,9 @@
 name: Release Py Wrapper
 
-# Builds the pure-python `moq` wrapper wheel. Versioned independently of the
-# moq-ffi crate: bump py/moq/pyproject.toml by hand and push a `moq-py-v<ver>`
-# tag. The wrapper depends on `moq-ffi ~= 0.2.x`, so it floats to the latest
-# compatible moq-ffi patch without a re-release.
+# Builds the pure-python `moq-rs` wrapper wheel (import name `moq`). Versioned
+# independently of the moq-ffi crate: bump py/moq-rs/pyproject.toml by hand and
+# push a `moq-py-v<ver>` tag. The wrapper depends on `moq-ffi ~= 0.2.x`, so it
+# floats to the latest compatible moq-ffi patch without a re-release.
 
 on:
   push:
@@ -13,7 +13,7 @@ on:
     paths:
       - ".github/workflows/release-py-wrapper.yml"
       - ".github/scripts/release.sh"
-      - "py/moq/**"
+      - "py/moq-rs/**"
 
 permissions:
   contents: read
@@ -40,7 +40,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            PY_VERSION=$(grep '^version' py/moq/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            PY_VERSION=$(grep '^version' py/moq-rs/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
             echo "version=$PY_VERSION" >> "$GITHUB_OUTPUT"
             echo "Using version from pyproject.toml (PR dry-run): $PY_VERSION"
           else
@@ -55,9 +55,9 @@ jobs:
         env:
           TAG_VERSION: ${{ steps.parse.outputs.version }}
         run: |
-          PY_VERSION=$(grep '^version' py/moq/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          PY_VERSION=$(grep '^version' py/moq-rs/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           if [[ "$TAG_VERSION" != "$PY_VERSION" ]]; then
-            echo "::error::Tag version ($TAG_VERSION) does not match py/moq/pyproject.toml version ($PY_VERSION). Bump pyproject.toml before tagging."
+            echo "::error::Tag version ($TAG_VERSION) does not match py/moq-rs/pyproject.toml version ($PY_VERSION). Bump pyproject.toml before tagging."
             exit 1
           fi
           echo "pyproject.toml version matches tag: $TAG_VERSION"
@@ -83,7 +83,7 @@ jobs:
     if: github.event_name == 'push'
     environment:
       name: pypi
-      url: https://pypi.org/p/moq
+      url: https://pypi.org/p/moq-rs
     permissions:
       id-token: write
 

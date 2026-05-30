@@ -71,13 +71,13 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
                      # wheel covers every crate exposed via moq-ffi because
                      # uniffi-linked libraries can't be split across separate
                      # wheels. Version tracks rs/moq-ffi (release-py.yml fires
-                     # on moq-ffi-v* tags). Most callers want `moq`, not this.
-  moq/               # Pure-python ergonomic wrapper. Distribution `moq`
-                     # (PyPI); import `moq`. Depends on moq-ffi via a
-                     # compatible-release pin (~=0.2.x) so it floats to the
-                     # latest moq-ffi patch. Versioned independently: bump
-                     # py/moq/pyproject.toml by hand, push a moq-py-v* tag
-                     # (release-py-wrapper.yml).
+                     # on moq-ffi-v* tags). Most callers want `moq-rs`, not this.
+  moq-rs/            # Pure-python ergonomic wrapper. Distribution `moq-rs`
+                     # (PyPI, since `moq` is taken); import `moq`. Depends on
+                     # moq-ffi via a compatible-release pin (~=0.2.x) so it
+                     # floats to the latest moq-ffi patch. Versioned
+                     # independently: bump py/moq-rs/pyproject.toml by hand,
+                     # push a moq-py-v* tag (release-py-wrapper.yml).
 
 /swift/               # Swift wrapper over rs/moq-ffi (SwiftPM)
 /kt/                  # Kotlin wrapper over rs/moq-ffi (Gradle, KMP)

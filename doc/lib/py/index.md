@@ -11,11 +11,11 @@ The Python bindings expose [Media over QUIC](/) to scripts, services, and protot
 
 Two packages, split so the ergonomic API can evolve on its own cadence:
 
-### moq
+### moq-rs
 
-[![PyPI](https://img.shields.io/pypi/v/moq)](https://pypi.org/project/moq/)
+[![PyPI](https://img.shields.io/pypi/v/moq-rs)](https://pypi.org/project/moq-rs/)
 
-The package you want. Real-time pub/sub with built-in caching, fan-out, and prioritization on top of QUIC, with a Pythonic API (no `Moq` prefixes, async context managers, async iterators). At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
+The package you want. Install `moq-rs` (the `moq` name is taken on PyPI), import `moq`. Real-time pub/sub with built-in caching, fan-out, and prioritization on top of QUIC, with a Pythonic API (no `Moq` prefixes, async context managers, async iterators). At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
 
 It is pure Python and depends on `moq-ffi` via a compatible-release pin, so it floats to the latest `moq-ffi` patch automatically. It is versioned independently of the Rust crates.
 
@@ -23,12 +23,12 @@ It is pure Python and depends on `moq-ffi` via a compatible-release pin, so it f
 
 [![PyPI](https://img.shields.io/pypi/v/moq-ffi)](https://pypi.org/project/moq-ffi/)
 
-The raw UniFFI bindings (the `Moq`-prefixed classes), tracking the [`moq-ffi`](https://crates.io/crates/moq-ffi) Rust crate one-to-one. `moq` pulls this in for you. Install it directly only if you need the unwrapped API or are building your own wrapper.
+The raw UniFFI bindings (the `Moq`-prefixed classes), tracking the [`moq-ffi`](https://crates.io/crates/moq-ffi) Rust crate one-to-one. `moq-rs` pulls this in for you. Install it directly only if you need the unwrapped API or are building your own wrapper.
 
 ## Installation
 
 ```bash
-pip install moq
+pip install moq-rs
 ```
 
 This pulls in `moq-ffi`, for which prebuilt wheels are published for:
@@ -82,6 +82,6 @@ asyncio.run(main())
 
 ## Source and issues
 
-- Source: [py/moq](https://github.com/moq-dev/moq/tree/main/py/moq) (wrapper), [py/moq-ffi](https://github.com/moq-dev/moq/tree/main/py/moq-ffi) (raw bindings)
-- README: [py/moq/README.md](https://github.com/moq-dev/moq/blob/main/py/moq/README.md)
-- Example scripts: [py/moq/examples](https://github.com/moq-dev/moq/tree/main/py/moq/examples)
+- Source: [py/moq-rs](https://github.com/moq-dev/moq/tree/main/py/moq-rs) (wrapper), [py/moq-ffi](https://github.com/moq-dev/moq/tree/main/py/moq-ffi) (raw bindings)
+- README: [py/moq-rs/README.md](https://github.com/moq-dev/moq/blob/main/py/moq-rs/README.md)
+- Example scripts: [py/moq-rs/examples](https://github.com/moq-dev/moq/tree/main/py/moq-rs/examples)

@@ -6,7 +6,7 @@ requires-python = ">=3.10"
 members = [
     "moq",
     "moq-ffi",
-    "moq-workspace",
+    "moq-rs",
 ]
 
 [[package]]
@@ -74,21 +74,6 @@ wheels = [
 
 [[package]]
 name = "moq"
-version = "0.1.0"
-source = { editable = "py/moq" }
-dependencies = [
-    { name = "moq-ffi" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "moq-ffi", editable = "py/moq-ffi" }]
-
-[[package]]
-name = "moq-ffi"
-source = { editable = "py/moq-ffi" }
-
-[[package]]
-name = "moq-workspace"
 version = "0.0.0"
 source = { virtual = "." }
 
@@ -111,6 +96,21 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
+
+[[package]]
+name = "moq-ffi"
+source = { editable = "py/moq-ffi" }
+
+[[package]]
+name = "moq-rs"
+version = "0.3.0"
+source = { editable = "py/moq-rs" }
+dependencies = [
+    { name = "moq-ffi" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "moq-ffi", editable = "py/moq-ffi" }]
 
 [[package]]
 name = "nodeenv"
