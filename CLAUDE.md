@@ -76,12 +76,22 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
                      # libraries can't be split across separately
                      # packaged Python wheels.
 
-/swift/               # Swift wrapper over rs/moq-ffi (SwiftPM)
+/swift/               # Swift over rs/moq-ffi (SwiftPM). Split like py: the
+                      # ergonomic `Moq` wrapper (Sources/Moq) versions
+                      # independently via swift/VERSION and mirrors to
+                      # moq-dev/moq-swift on a VERSION bump (release-swift.yml,
+                      # registry-gated like release-plz); the raw `MoqFFI`
+                      # bindings + XCFramework mirror to moq-dev/moq-swift-ffi
+                      # lockstep with the crate on each moq-ffi-v* tag
+                      # (release-swift-ffi.yml). The wrapper pins MoqFFI at
+                      # .upToNextMinor so a crate patch needs no wrapper release.
+                      # Local dev uses one monolithic swift/Package.swift; the
+                      # two-package split exists only in released artifacts
+                      # (Package.swift.template + ffi/Package.swift.template).
 /kt/                  # Kotlin wrapper over rs/moq-ffi (Gradle, KMP)
 /go/                  # Go wrapper over rs/moq-ffi (uniffi-bindgen-go)
-                      # swift/kt/go are in-tree source skeletons.
-                      # CI mirrors them to moq-dev/moq-{swift,kotlin,go}
-                      # on each moq-ffi-v* tag.
+                      # kt/go are in-tree source skeletons. CI mirrors them to
+                      # moq-dev/moq-{kotlin,go} on each moq-ffi-v* tag.
 
 /demo/                # Demos and test media
   boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)
@@ -173,6 +183,8 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 | `rs/moq-cli` | `doc/bin/cli.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
+
+For `swift/`, the wrapper re-exports `moq-ffi` records/enums via typealias, so new catalog/audio *fields* flow through automatically. Only a new FFI *method* (or a renamed/removed one) needs a matching change in the de-prefixed `Sources/Moq` wrapper.
 
 ## Branch Targeting
 

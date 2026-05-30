@@ -1,26 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Push the staged `Moq` wrapper package to the moq-dev/moq-swift mirror repo on
-# a bare-semver tag from swift/VERSION (e.g. 0.3.0). SPM consumers point at the
-# mirror because Package.swift must live at the root of the resolved tag, and
-# the wrapper versions independently of the moq-ffi crate.
+# Push the staged MoqFFI Swift Package to the moq-dev/moq-swift-ffi mirror repo
+# on a bare-semver tag matching the moq-ffi crate version (e.g. 0.2.17). SPM
+# consumers point at the mirror because Package.swift must live at the root of
+# the resolved tag, and SPM only recognizes semver tags (X.Y.Z or vX.Y.Z), not
+# the prefixed moq-ffi-v* tags used here.
 #
 # Required environment:
-#   BUILD_VERSION       - wrapper version, from swift/VERSION (e.g. 0.3.0)
+#   BUILD_VERSION       - moq-ffi crate version (e.g. 0.2.17)
 #   SWIFT_MIRROR_TOKEN  - PAT or GitHub App token with contents:write on the repo
 #
 # Optional environment:
-#   SWIFT_MIRROR_REPO   - defaults to moq-dev/moq-swift
-#   GIT_AUTHOR_NAME     - defaults to "moq-swift-release"
-#   GIT_AUTHOR_EMAIL    - defaults to "release@moq.dev"
+#   SWIFT_FFI_MIRROR_REPO - defaults to moq-dev/moq-swift-ffi
+#   GIT_AUTHOR_NAME       - defaults to "moq-swift-release"
+#   GIT_AUTHOR_EMAIL      - defaults to "release@moq.dev"
 #
 # Flags:
 #   --dry-run           Stage and diff against the mirror but skip the commit,
 #                       tag, and push.
 #
 # Expects the staged tarball under `swift-out/` as
-# `moq-${BUILD_VERSION}-swift.tar.gz` (produced by package.sh).
+# `moq-ffi-${BUILD_VERSION}-swift-ffi.tar.gz` (produced by package-ffi.sh).
 
 DRY_RUN=false
 while [[ $# -gt 0 ]]; do
@@ -45,10 +46,11 @@ if [[ "$DRY_RUN" != true ]]; then
     : "${SWIFT_MIRROR_TOKEN:?SWIFT_MIRROR_TOKEN is required (or pass --dry-run)}"
 fi
 
-MIRROR_REPO="${SWIFT_MIRROR_REPO:-moq-dev/moq-swift}"
+MIRROR_REPO="${SWIFT_FFI_MIRROR_REPO:-moq-dev/moq-swift-ffi}"
 MIRROR_TAG="${BUILD_VERSION}"
+SOURCE_TAG="moq-ffi-v${BUILD_VERSION}"
 
-TARBALL="swift-out/moq-${BUILD_VERSION}-swift.tar.gz"
+TARBALL="swift-out/moq-ffi-${BUILD_VERSION}-swift-ffi.tar.gz"
 [[ -f "$TARBALL" ]] || {
     echo "Error: missing $TARBALL" >&2
     exit 1
@@ -73,7 +75,7 @@ fi
 
 # --- 3. Extract staged package ---
 tar -xzf "$TARBALL" -C "$WORK"
-STAGED="$WORK/moq-${BUILD_VERSION}-swift"
+STAGED="$WORK/moq-ffi-${BUILD_VERSION}-swift-ffi"
 [[ -d "$STAGED" ]] || {
     echo "Error: tarball did not contain $STAGED" >&2
     exit 1
@@ -104,7 +106,7 @@ fi
 git -C "$WORK/mirror" config user.name "${GIT_AUTHOR_NAME:-moq-swift-release}"
 git -C "$WORK/mirror" config user.email "${GIT_AUTHOR_EMAIL:-release@moq.dev}"
 
-git -C "$WORK/mirror" commit -m "Release ${MIRROR_TAG}"
+git -C "$WORK/mirror" commit -m "Release ${MIRROR_TAG} (mirrors ${SOURCE_TAG})"
 git -C "$WORK/mirror" tag "${MIRROR_TAG}"
 # Push to refs/heads/main explicitly so first-publish to an empty repo lands the
 # branch under the expected name regardless of the runner's init.defaultBranch.

@@ -9,9 +9,13 @@ The Swift bindings expose [Media over QUIC](/) to iOS, iPadOS, macOS, and the iO
 
 ## Packages
 
+Two Swift packages, split so the ergonomic API can evolve on its own cadence:
+
 ### Moq
 
-A single Swift Package Manager target that wraps the UniFFI bindings with `AsyncSequence` adapters, structured-concurrency-friendly cancellation, and a session helper.
+[moq-dev/moq-swift](https://github.com/moq-dev/moq-swift)
+
+The package you want. A Swift-native wrapper: de-prefixed types (`Client`, `Session`, `BroadcastProducer`), `AsyncSequence` conformance on every consumer, structured-concurrency cancellation, and `Sendable` handles. The raw `MoqFFI` types stay behind it.
 
 **Features:**
 
@@ -19,16 +23,23 @@ A single Swift Package Manager target that wraps the UniFFI bindings with `Async
 - Universal binary for Apple Silicon and Intel Macs
 - iOS device + iOS Simulator slices (arm64 and x86_64)
 - Cancellation through Swift `Task` propagates to native consumers
+- Versioned independently of the Rust crates; floats to the latest compatible `MoqFFI` patch
 
 [Learn more](/lib/swift/moq)
 
+### MoqFFI
+
+[moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi)
+
+The raw UniFFI bindings (the `Moq`-prefixed classes) plus the prebuilt `MoqFFI.xcframework`, tracking the [`moq-ffi`](https://crates.io/crates/moq-ffi) Rust crate one-to-one. `Moq` pulls this in for you; depend on it directly only if you need the unwrapped API.
+
 ## Installation
 
-The package lives in [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift), a mirror repo that SPM resolves with bare-semver tags. Add it to your `Package.swift`:
+Add the `Moq` wrapper; SPM resolves `MoqFFI` (and its XCFramework) transitively:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/moq-dev/moq-swift", from: "0.2.0"),
+    .package(url: "https://github.com/moq-dev/moq-swift", from: "0.3.0"),
 ],
 targets: [
     .target(
@@ -42,30 +53,31 @@ targets: [
 
 Or in Xcode: File → Add Package Dependencies → enter the URL.
 
-The package depends on a prebuilt `MoqFFI.xcframework` attached to the matching [`moq-ffi-v*` release](https://github.com/moq-dev/moq/releases) on the source repo. SPM downloads it transparently; no manual asset handling required.
+The transitive `MoqFFI.xcframework` is attached to the matching [`moq-ffi-v*` release](https://github.com/moq-dev/moq/releases) on the source repo. SPM downloads it transparently; no manual asset handling required.
 
 ## Quickstart
 
 ```swift
 import Moq
 
-let client = MoqClient()
-let cs = try await client.connect(url: "https://cdn.moq.dev/anon/demo")
+let client = Client()
+let session = try await client.connect(to: "https://relay.example.com")
 
-// cs.consumer() and cs.publisher() are always populated: by whatever
-// origin you wired via setPublish / setConsume before connect, or by a
-// fresh auto-created one for any side you didn't set.
-let announced = try cs.consumer().announced(prefix: "demos/")
+// session.publisher and session.consumer are always populated: by whatever
+// origin you wired via setPublish / setConsume before connect, or by a fresh
+// auto-created one. The duplex no-config path (the typical client) shares one
+// origin between both sides.
+let announced = try session.consumer.announced(prefix: "demos/")
 for try await announcement in announced {
-    print("got broadcast \(announcement.path())")
+    print("got broadcast \(announcement.path)")
 
-    let catalog = try announcement.broadcast().subscribeCatalog()
-    for try await update in catalog.updates {
+    let catalog = try announcement.broadcast.subscribeCatalog()
+    for try await update in catalog {
         print("catalog: \(update)")
     }
 }
 
-cs.shutdown()
+session.shutdown()
 ```
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer.
@@ -73,5 +85,5 @@ Cancelling the surrounding Swift `Task` propagates through to the underlying `ca
 ## Source and issues
 
 - Source: [swift/](https://github.com/moq-dev/moq/tree/main/swift) (in the monorepo)
-- Mirror (what SPM resolves): [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift)
+- Mirrors (what SPM resolves): [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift) (wrapper), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi) (raw bindings)
 - README: [swift/README.md](https://github.com/moq-dev/moq/blob/main/swift/README.md)

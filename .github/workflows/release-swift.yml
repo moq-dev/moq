@@ -1,249 +1,142 @@
 name: Release Swift
 
+# Publishes the ergonomic `Moq` Swift wrapper to the moq-dev/moq-swift mirror.
+# This is the package most callers install; the raw `MoqFFI` bindings it depends
+# on are built separately (release-swift-ffi.yml).
+#
+# Versioned independently of the moq-ffi crate: bump `swift/VERSION` by hand in a
+# normal PR. On merge to main/dev this reads that version and publishes only if
+# it isn't already tagged on the mirror. That tag check is the release gate (the
+# same model release-plz uses for crates), so there's no separate tag to
+# remember. The wrapper pins moq-ffi at .upToNextMinor and floats to the latest
+# compatible patch, so a moq-ffi patch needs no wrapper re-release.
+
 on:
   push:
-    tags:
-      - "moq-ffi-v*"
-  pull_request:
+    branches:
+      - main
+      - dev
     paths:
-      - ".github/workflows/release-swift.yml"
-      - ".github/scripts/release.sh"
+      - "swift/VERSION"
       - "swift/Package.swift.template"
+      - "swift/Sources/Moq/**"
+      - "swift/Tests/**"
       - "swift/scripts/package.sh"
       - "swift/scripts/publish.sh"
       - "swift/scripts/verify.sh"
-      - "rs/moq-ffi/build.sh"
+      - ".github/workflows/release-swift.yml"
+      - ".github/scripts/release.sh"
+  pull_request:
+    paths:
+      - "swift/VERSION"
+      - "swift/Package.swift.template"
+      - "swift/Sources/Moq/**"
+      - "swift/Tests/**"
+      - "swift/scripts/package.sh"
+      - "swift/scripts/publish.sh"
+      - "swift/scripts/verify.sh"
+      - ".github/workflows/release-swift.yml"
+      - ".github/scripts/release.sh"
 
 permissions:
   contents: read
 
+# Separate PR builds from mainline publishes so a PR run can't queue ahead of
+# (and delay) a release on main.
 concurrency:
-  group: release-swift
+  group: release-swift-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  parse-version:
-    name: Parse version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.parse.outputs.version }}
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-
-      - name: Parse version
-        id: parse
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            CARGO_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
-          else
-            .github/scripts/release.sh parse-version moq-ffi
-          fi
-
   build:
-    name: Build moq-ffi (${{ matrix.target }})
-    needs: [parse-version]
+    name: Build wrapper package
     runs-on: macos-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - aarch64-apple-ios
-          - aarch64-apple-ios-sim
-          # x86_64-apple-ios is the Intel iOS simulator slice (Apple never
-          # shipped Intel iOS devices), still needed for Xcode users on
-          # Intel Macs running the simulator.
-          - x86_64-apple-ios
-          - universal-apple-darwin
+    if: ${{ github.repository_owner == 'moq-dev' }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      ffi_version: ${{ steps.version.outputs.ffi_version }}
+      # On PRs we only build (dry-run). On main/dev we publish when the version
+      # isn't already tagged on the mirror.
+      publish: ${{ github.event_name == 'push' && steps.gate.outputs.exists == 'false' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: ${{ matrix.target == 'universal-apple-darwin' && 'x86_64-apple-darwin,aarch64-apple-darwin' || matrix.target }}
+      - name: Read versions
+        id: version
+        run: |
+          VERSION=$(tr -d '[:space:]' < swift/VERSION)
+          FFI_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "ffi_version=$FFI_VERSION" >> "$GITHUB_OUTPUT"
+          echo "wrapper $VERSION, moq-ffi pin $FFI_VERSION"
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-
-      - name: Build
-        shell: bash
+      # The release gate: skip publishing a version already tagged on the mirror.
+      # Runs on PRs too, as an informational dry-run.
+      - name: Check mirror tag
+        id: gate
         env:
-          BUILD_TARGET: ${{ matrix.target }}
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-          # Set iOS deployment target to avoid ___chkstk_darwin linker errors.
-          IPHONEOS_DEPLOYMENT_TARGET: ${{ contains(matrix.target, 'apple-ios') && '16.0' || '' }}
-        run: |
-          ./rs/moq-ffi/build.sh \
-            --target "$BUILD_TARGET" \
-            --version "$BUILD_VERSION" \
-            --output dist
-
-      - name: Upload lib
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: swift-lib-${{ matrix.target }}
-          path: dist/moq-ffi-${{ needs.parse-version.outputs.version }}-${{ matrix.target }}/lib/
-
-  bindings:
-    name: Generate bindings
-    needs: [parse-version]
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-
-      - name: Generate bindings
-        env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-        run: |
-          ./rs/moq-ffi/build.sh \
-            --bindings-only \
-            --version "$BUILD_VERSION" \
-            --output dist
-
-      - name: Upload bindings
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: swift-bindings
-          path: dist/bindings/swift/
-
-  package:
-    name: Package
-    needs: [parse-version, build, bindings]
-    runs-on: macos-latest
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-
-      - name: Download per-target libs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          path: libs-raw
-          pattern: swift-lib-*
-
-      - name: Flatten lib layout
-        run: |
-          mkdir -p libs
-          for dir in libs-raw/swift-lib-*; do
-            target="${dir#libs-raw/swift-lib-}"
-            mv "$dir" "libs/$target"
-          done
-          ls -la libs
-
-      - name: Download bindings
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: swift-bindings
-          path: bindings
+          VERSION: ${{ steps.version.outputs.version }}
+        run: .github/scripts/release.sh git-tag-exists moq-dev/moq-swift "$VERSION"
 
       - name: Package
         env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-        run: |
-          ./swift/scripts/package.sh \
-            --version "$BUILD_VERSION" \
-            --lib-dir libs \
-            --bindings-dir bindings \
-            --output release-out
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
+        run: ./swift/scripts/package.sh --version "$BUILD_VERSION" --output release-out
 
       - name: Upload Swift package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: swift-package
+          name: swift-wrapper-package
           path: release-out/*
 
-  release:
-    # Attach MoqFFI.xcframework.zip (and the staged Swift package
-    # tarball) to the moq-ffi-v* GitHub release. The mirror's
-    # Package.swift binaryTarget URL points at this asset, so it must
-    # exist before any consumer resolves the SPM tag.
-    name: Attach assets to GitHub release
-    needs: [package, parse-version]
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          fetch-depth: 0
-          # No git operations here use the stored credential. gh CLI
-          # below picks up GH_TOKEN directly, so don't persist a
-          # contents-write token in .git/config.
-          persist-credentials: false
-
-      - name: Find previous tag
-        id: prev_tag
-        run: .github/scripts/release.sh prev-tag moq-ffi
-
-      - name: Download package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: swift-package
-          path: artifacts
-
-      - name: Create or update release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          RELEASE_TITLE: "moq-ffi v${{ needs.parse-version.outputs.version }}"
-          RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
-        run: .github/scripts/release.sh create artifacts
-
   verify:
-    # Gate the mirror push on actually being able to resolve the staged
-    # package against the live release asset. Catches manifests that
-    # look syntactically fine but SPM cannot resolve (e.g. a path-based
-    # binaryTarget slipping in where a URL+checksum is expected).
+    # Build a throwaway SPM consumer against the staged wrapper, which pulls the
+    # published moq-swift-ffi transitively. Proves the moq-ffi pin resolves
+    # against a real release before the wrapper reaches the mirror. Skipped (not
+    # failed) when the pinned moq-ffi version isn't mirrored yet, so the first
+    # bootstrap doesn't deadlock on a not-yet-published FFI package.
     name: Verify staged package resolves
-    needs: [release, parse-version]
+    needs: [build]
     runs-on: macos-latest
-    if: github.event_name == 'push'
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+
+      - name: Check FFI mirror tag
+        id: ffi
+        env:
+          FFI_VERSION: ${{ needs.build.outputs.ffi_version }}
+        run: .github/scripts/release.sh git-tag-exists moq-dev/moq-swift-ffi "$FFI_VERSION"
 
       - name: Download staged package
+        if: steps.ffi.outputs.exists == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: swift-package
+          name: swift-wrapper-package
           path: artifacts
 
       - name: Resolve and build smoke consumer
+        if: steps.ffi.outputs.exists == 'true'
         env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-        run: |
-          ./swift/scripts/verify.sh --tarball "artifacts/moq-ffi-${BUILD_VERSION}-swift.tar.gz"
+          BUILD_VERSION: ${{ needs.build.outputs.version }}
+        run: ./swift/scripts/verify.sh --tarball "artifacts/moq-${BUILD_VERSION}-swift.tar.gz"
+
+      - name: Skip notice
+        if: steps.ffi.outputs.exists != 'true'
+        env:
+          FFI_VERSION: ${{ needs.build.outputs.ffi_version }}
+        run: echo "::notice::moq-swift-ffi ${FFI_VERSION} not published yet; skipping cross-package resolve."
 
   publish:
     name: Publish to Swift Package mirror
-    needs: [verify, parse-version]
+    needs: [build, verify]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: ${{ needs.build.outputs.publish == 'true' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -258,30 +151,27 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: moq-dev
           repositories: moq-swift
-          # Narrow the minted token to only what publish.sh needs,
-          # rather than inheriting the full App installation scope.
+          # Narrow the minted token to only what publish.sh needs.
           permission-contents: write
 
       - name: Download package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: swift-package
+          name: swift-wrapper-package
           path: swift-out
 
       - name: Publish to moq-dev/moq-swift mirror
         env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          BUILD_VERSION: ${{ needs.build.outputs.version }}
           # Token is minted fresh per run, expires in 1 hour, never at rest.
           SWIFT_MIRROR_TOKEN: ${{ steps.token.outputs.token }}
-          # Use the moq-bot identity for the commit author so the
-          # mirror's git log reflects who actually pushed.
           GIT_AUTHOR_NAME: moq-bot
           GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
         run: ./swift/scripts/publish.sh
 
   publish-dry-run:
     name: Publish dry-run
-    needs: [package, parse-version]
+    needs: [build]
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
 
@@ -293,10 +183,10 @@ jobs:
       - name: Download package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: swift-package
+          name: swift-wrapper-package
           path: swift-out
 
       - name: Dry-run publish to mirror
         env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          BUILD_VERSION: ${{ needs.build.outputs.version }}
         run: ./swift/scripts/publish.sh --dry-run

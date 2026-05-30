@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Smoke-test a staged `Moq` wrapper package by building a throwaway SPM consumer
-# that depends on it via `.package(path:)`. The wrapper itself depends on the
-# published moq-dev/moq-swift-ffi package (URL), so `swift package resolve`
-# transitively fetches the bindings + their XCFramework from GitHub, and
-# `swift build` compiles + links the whole stack.
+# Smoke-test a staged MoqFFI Swift package by building a throwaway SPM consumer
+# that depends on it via `.package(path:)`. Runs `swift package resolve`
+# (downloads MoqFFI.xcframework.zip and verifies its SHA-256 against the
+# manifest's checksum) and `swift build` (compiles + links against the host
+# slice of the xcframework).
 #
-# This is the cross-package gate: it proves the wrapper's moq-ffi pin actually
-# resolves against a real published FFI release before the wrapper reaches the
-# mirror. It requires network access and that the pinned moq-ffi version is
-# already published (true on a normal release; a correct failure otherwise).
+# This catches a class of release regression where the staged Package.swift
+# looks textually fine but SPM cannot actually resolve it. Used by
+# release-swift-ffi.yml as a gate *before* the mirror push, so a broken manifest
+# never reaches consumers.
 #
 # Usage:
-#   swift/scripts/verify.sh --staged-dir <path>
-#   swift/scripts/verify.sh --tarball <path/to/moq-X.Y.Z-swift.tar.gz>
+#   swift/scripts/verify-ffi.sh --staged-dir <path>
+#   swift/scripts/verify-ffi.sh --tarball <path/to/moq-ffi-X.Y.Z-swift-ffi.tar.gz>
 #
 #   Exactly one of --staged-dir / --tarball must be passed.
 
@@ -65,10 +65,10 @@ if [[ -n "$TARBALL" ]]; then
         exit 1
     }
     tar -xzf "$TARBALL" -C "$WORK"
-    # The tarball wraps a single top-level moq-${VERSION}-swift dir.
-    extracted=("$WORK"/moq-*-swift)
+    # The tarball wraps a single top-level moq-ffi-${VERSION}-swift-ffi dir.
+    extracted=("$WORK"/moq-ffi-*-swift-ffi)
     [[ ${#extracted[@]} -eq 1 && -d "${extracted[0]}" ]] || {
-        echo "Error: expected exactly one moq-*-swift dir in tarball, got: ${extracted[*]}" >&2
+        echo "Error: expected exactly one moq-ffi-*-swift-ffi dir in tarball, got: ${extracted[*]}" >&2
         exit 1
     }
     STAGED_DIR="${extracted[0]}"
@@ -82,15 +82,16 @@ STAGED_DIR=$(cd "$STAGED_DIR" && pwd)
     exit 1
 }
 
-echo "verify: staged package at $STAGED_DIR"
-echo "verify: --- Package.swift ---"
+echo "verify-ffi: staged package at $STAGED_DIR"
+echo "verify-ffi: --- Package.swift ---"
 cat "$STAGED_DIR/Package.swift"
-echo "verify: ---"
+echo "verify-ffi: ---"
 
-# SPM derives a path-based package's identity from the final path component.
-# Expose the staged dir under the published mirror name so the smoke project's
-# `.product(package:)` reference matches the identity real consumers see.
-PKG_IDENTITY="moq-swift"
+# SPM derives a path-based package's identity from the final path component,
+# not from the manifest's `name:` field. Expose the staged dir under the
+# published mirror name so the smoke project's `.product(package:)` reference
+# matches the identity real consumers see.
+PKG_IDENTITY="moq-swift-ffi"
 PKG_LINK="$WORK/$PKG_IDENTITY"
 ln -s "$STAGED_DIR" "$PKG_LINK"
 
@@ -110,7 +111,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Smoke",
-            dependencies: [.product(name: "Moq", package: "$PKG_IDENTITY")],
+            dependencies: [.product(name: "MoqFFI", package: "$PKG_IDENTITY")],
             path: "Sources/Smoke"
         ),
     ]
@@ -118,16 +119,16 @@ let package = Package(
 EOF
 
 cat >"$SMOKE/Sources/Smoke/main.swift" <<'EOF'
-import Moq
-// Verify the wrapper + transitive MoqFFI binding symbols link, not just resolve.
-let client = Client()
+import MoqFFI
+// Verify that the binary target's symbols are linkable, not just resolvable.
+let client = MoqClient()
 client.cancel()
-print("moq-swift verify ok")
+print("moq-swift-ffi verify ok")
 EOF
 
 cd "$SMOKE"
-echo "verify: swift package resolve (fetches moq-swift-ffi transitively)"
+echo "verify-ffi: swift package resolve"
 swift package resolve
-echo "verify: swift build"
+echo "verify-ffi: swift build"
 swift build
-echo "verify: ok"
+echo "verify-ffi: ok"

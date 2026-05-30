@@ -47,7 +47,7 @@ Coroutines and `Flow` for Android and the JVM. Published as `dev.moq:moq` on Mav
 
 ### [Swift](/lib/swift/)
 
-Async sequences and structured concurrency for iOS, iPadOS, and macOS. Distributed via Swift Package Manager.
+Async sequences and structured concurrency for iOS, iPadOS, and macOS. Distributed via Swift Package Manager as [`Moq`](https://github.com/moq-dev/moq-swift) (the ergonomic wrapper, versioned independently), atop the raw [`MoqFFI`](https://github.com/moq-dev/moq-swift-ffi) bindings.
 
 ### [Go](/lib/go/)
 
