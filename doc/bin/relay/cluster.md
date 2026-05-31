@@ -35,17 +35,41 @@ Pick the shape that matches your traffic. Linear chains are great for fanout; sm
 
 ## Auto-discovery
 
-Listing every peer by hand can get tedious in larger clusters. Set `cluster.mesh` to this relay's own URL and connected peers will discover and dial it back automatically:
+Listing every peer by hand can get tedious in larger clusters. Tell the relay its own URL with `cluster.node`, then enable gossip with `cluster.mesh`; connected peers will discover and dial it back automatically:
 
 ```toml
 [cluster]
 connect = ["us-east.example.com:4443"]
-mesh    = "us-west.example.com:4443"
+node    = "us-west.example.com:4443"
+mesh    = true
 ```
 
-Each node with `mesh` set creates a broadcast carrying its address, which other nodes pick up. `connect` is optional once gossip is running, but you still need at least one connection somewhere (either you dial a peer or a peer dials you) for the advertisement to flow.
+`node` is this relay's identity (its externally-reachable URL); `mesh` is a boolean that turns gossip on. Each gossiping node creates a broadcast carrying its `node` address, which other nodes pick up. `connect` is optional once gossip is running, but you still need at least one connection somewhere (either you dial a peer or a peer dials you) for the advertisement to flow. Enabling `mesh` without `node` is an error, since there'd be no address to advertise.
 
-A relay with `mesh` set and no `connect` is a passive rendezvous: it sits and waits for inbound connections, then helps everyone else find each other.
+A relay with `node` + `mesh` and no `connect` is a passive rendezvous: it sits and waits for inbound connections, then helps everyone else find each other.
+
+## Dynamic peer lists
+
+`cluster.connect` is fixed at startup, so adding or removing a node means editing every affected config and restarting. When you'd rather keep the topology somewhere external and change it without a redeploy, point `cluster.connect_api` at an HTTP(S) endpoint or a local file:
+
+```toml
+[cluster]
+connect_api = "https://api.example.com/cluster/connect"
+mesh        = "us-west.example.com:4443"
+```
+
+The source returns a bare JSON array of peer hostnames:
+
+```json
+["eu-west.example.com:4443", "us-east.example.com:4443"]
+```
+
+The relay reconciles that list against its live dials: new entries are dialed, entries that disappear are dropped. It composes with `connect` (static seeds that are never reconciled away) and `mesh` (gossip). The relay's own `node` value, when set, is sent as a `?node=` query parameter so the endpoint can return the peers for that specific node; for mTLS-gated endpoints the cluster client certificate identifies the caller as well.
+
+- **HTTP(S) URL**: polled, with the re-poll cadence taken from the response's `Cache-Control` reuse window (`max-age` plus any `stale-while-revalidate`; default 30s, floored at 5s). Conditional revalidation (`ETag` / `Last-Modified`) and stale-if-error (serving the last cached body when a revalidation request fails) are handled by the underlying HTTP cache, so transient endpoint blips don't churn the dial set.
+- **Local file** (a path or `file://` URL): re-read whenever its mtime changes.
+
+If a fetch fails or returns garbage, the relay logs and keeps the last good list rather than tearing the cluster down. This keeps the moq-relay binary generic: all routing decisions (which node connects where) live in whatever service answers the endpoint.
 
 ## Authentication
 
@@ -58,13 +82,13 @@ See [Authentication](/bin/relay/auth) for the full setup.
 
 ## Migration from older configs
 
-`cluster.root` and `cluster.node` were both removed. If a config still sets either flag, the relay errors at startup with a message pointing at the replacements:
+`cluster.root` was removed; setting it errors at startup with a message pointing at the replacement. `cluster.mesh` is now a boolean gossip toggle (it used to take this relay's URL); the URL moved to `cluster.node`.
 
 | Old | New |
 |---|---|
-| `root = "rendezvous:4443"` + `node = "us-east:4443"` | `connect = ["rendezvous:4443"]` + `mesh = "us-east:4443"` |
-| `root = "rendezvous:4443"` only | `mesh = "rendezvous:4443"` (passive rendezvous) |
-| `node = "us-east:4443"` | `mesh = "us-east:4443"` |
+| `root = "rendezvous:4443"` + `node = "us-east:4443"` | `connect = ["rendezvous:4443"]` + `node = "us-east:4443"` + `mesh = true` |
+| `root = "rendezvous:4443"` only | `node = "rendezvous:4443"` + `mesh = true` (passive rendezvous) |
+| `mesh = "us-east:4443"` | `node = "us-east:4443"` + `mesh = true` |
 
 ## Next steps
 

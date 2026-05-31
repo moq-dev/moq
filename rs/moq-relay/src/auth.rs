@@ -1,6 +1,5 @@
 use anyhow::Context;
 use axum::http;
-use http_cache_reqwest::{Cache, CacheMode, HttpCache, HttpCacheOptions, MokaManager};
 #[cfg(test)]
 use moq_net::AsPath;
 use moq_net::{Path, PathOwned, PathPrefixes};
@@ -810,19 +809,7 @@ impl Auth {
 	}
 
 	fn build_client(tls: &rustls::ClientConfig) -> anyhow::Result<ClientWithMiddleware> {
-		let client = reqwest::Client::builder()
-			.timeout(std::time::Duration::from_secs(10))
-			.use_preconfigured_tls(tls.clone())
-			.build()
-			.context("failed to build HTTP client")?;
-
-		Ok(reqwest_middleware::ClientBuilder::new(client)
-			.with(Cache(HttpCache {
-				mode: CacheMode::Default,
-				manager: MokaManager::default(),
-				options: HttpCacheOptions::default(),
-			}))
-			.build())
+		crate::http_client::build(tls)
 	}
 }
 

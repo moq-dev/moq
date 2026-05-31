@@ -123,9 +123,17 @@ Clustering configuration for multi-relay deployments.
 # Peers this relay dials. The topology is whatever you draw with these links.
 connect = ["us-east.example.com:4443"]
 
-# Optional. Set to this relay's own URL to advertise it so other peers find
-# you automatically.
-mesh = "us-west.example.com:4443"
+# Optional. This relay's own externally-reachable URL (identity). Advertised to
+# peers when gossip is on, and sent to connect_api as ?node=.
+node = "us-west.example.com:4443"
+
+# Optional. Enable gossip discovery: advertise `node` so peers find you
+# automatically. Boolean; requires `node` to be set.
+mesh = true
+
+# Optional. Fetch the peer list from an HTTP(S) endpoint or local file (a JSON
+# array of hostnames) and reconcile it at runtime, no restart needed.
+connect_api = "https://api.example.com/cluster/connect"
 
 # JWT used for outbound cluster dials (alternative to mTLS).
 token = "cluster.jwt"
