@@ -11,7 +11,9 @@
   # trust the cache permanently instead, run: cachix use kixelated
   nixConfig = {
     extra-substituters = [ "https://kixelated.cachix.org" ];
-    extra-trusted-public-keys = [ "kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=" ];
+    extra-trusted-public-keys = [
+      "kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk="
+    ];
   };
 
   inputs = {
