@@ -241,11 +241,13 @@ struct OriginBroadcast {
 fn route_key(name: &Path, hops: &OriginList) -> (usize, u64) {
 	// FNV-1a, not the std hasher: its output is fixed across Rust versions and
 	// builds, which matters when nodes run mismatched binaries during a rolling
-	// deploy and still need to agree on the same route.
-	const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+	// deploy and still need to agree on the same route. SEED is a custom basis
+	// (any nonzero u64 works, the textbook one is just as arbitrary); FNV_PRIME is
+	// the standard FNV-64 prime and should stay put.
+	const SEED: u64 = 0x420_C0DEC_B00B;
 	const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-	let mut hash = FNV_OFFSET;
+	let mut hash = SEED;
 	for &byte in name.as_str().as_bytes() {
 		hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
 	}
