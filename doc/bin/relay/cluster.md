@@ -7,7 +7,7 @@ description: Run multiple moq-relay instances across multiple hosts/regions
 
 Relays can be joined together to proxy announcements and subscriptions between each other. A viewer talks to whichever relay is closest; if their broadcast lives somewhere else in the cluster, the local relay fetches it from a neighbor and caches it.
 
-A broadcast carries a small hop list as it travels. Each relay it passes through adds itself to the list, which is how loops are caught and how the network picks the shortest path when there's more than one.
+A broadcast carries a small hop list as it travels. Each relay it passes through adds itself to the list, which is how loops are caught and how the network picks the shortest path when there's more than one. When two paths are the same length, every relay breaks the tie the same way (a hash of the broadcast name and hop list), so the whole cluster converges on one route instead of flapping between equals.
 
 ## Topology
 
