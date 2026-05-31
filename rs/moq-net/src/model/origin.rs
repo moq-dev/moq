@@ -231,6 +231,35 @@ struct OriginBroadcast {
 	backup: VecDeque<BroadcastConsumer>,
 }
 
+/// Ordering key used to pick the active route among broadcasts at the same path.
+///
+/// Lower wins. Shorter hop chains sort first; equal-length chains are broken by a
+/// deterministic hash of the broadcast name and hop chain, so every node in the
+/// cluster, given the same candidate routes, converges on the same winner instead
+/// of relying on arrival order. Mixing the name in spreads equal-length routes
+/// across different upstreams rather than funneling every broadcast onto one.
+fn route_key(name: &Path, hops: &OriginList) -> (usize, u64) {
+	// FNV-1a, not the std hasher: its output is fixed across Rust versions and
+	// builds, which matters when nodes run mismatched binaries during a rolling
+	// deploy and still need to agree on the same route. SEED is a custom basis
+	// (any nonzero u64 works, the textbook one is just as arbitrary); FNV_PRIME is
+	// the standard FNV-64 prime and should stay put.
+	const SEED: u64 = 0x420C0DECB00B; // 420 C0DEC B00B
+	const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+	let mut hash = SEED;
+	for &byte in name.as_str().as_bytes() {
+		hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+	}
+	for hop in hops {
+		for &byte in &hop.id.to_le_bytes() {
+			hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+		}
+	}
+
+	(hops.len(), hash)
+}
+
 /// One coalesced update queued for an `OriginConsumer`.
 ///
 /// At most one entry exists per path, so a slow consumer's pending set is bounded
@@ -421,8 +450,9 @@ impl OriginNode {
 			// Not using entry to avoid allocating a string most of the time.
 			self.entry(dir).lock().publish(&full, broadcast, &relative);
 		} else if let Some(existing) = &mut self.broadcast {
-			// This node is a leaf with an existing broadcast. Prefer the shorter or equal hop path;
-			// on ties, the newer broadcast wins, since the previous one may be about to close.
+			// This node is a leaf with an existing broadcast. Prefer the route with the
+			// lower ordering key (shorter hop chain, deterministic hash on ties), so every
+			// node converges on the same route regardless of the order announces arrive.
 			//
 			// Drop duplicates (same underlying broadcast delivered via multiple links) so the
 			// backup queue can't accumulate clones of the active entry and trigger redundant
@@ -431,14 +461,15 @@ impl OriginNode {
 				return;
 			}
 
-			if broadcast.hops.len() <= existing.active.hops.len() {
+			if route_key(&full, &broadcast.hops) < route_key(&full, &existing.active.hops) {
 				let old = existing.active.clone();
 				existing.active = broadcast.clone();
 				existing.backup.push_back(old);
 
 				self.notify.lock().reannounce(full, broadcast);
 			} else {
-				// Longer path: keep as a backup in case the active one drops.
+				// Loses the ordering (longer path, or the tie-break): keep as a backup
+				// in case the active one drops.
 				existing.backup.push_back(broadcast.clone());
 			}
 		} else {
@@ -518,13 +549,13 @@ impl OriginNode {
 			// Okay so it must be the active broadcast or else we fucked up.
 			assert!(entry.active.is_clone(&broadcast));
 
-			// Promote the backup with the shortest hop chain so we keep preferring short paths.
-			// Ties break toward the oldest (FIFO) since min_by_key returns the first minimum.
+			// Promote the backup with the lowest ordering key, the same rule used when
+			// publishing, so the route a node heals to still matches its peers.
 			let best = entry
 				.backup
 				.iter()
 				.enumerate()
-				.min_by_key(|(_, b)| b.hops.len())
+				.min_by_key(|(_, b)| route_key(&full, &b.hops))
 				.map(|(i, _)| i);
 			if let Some(idx) = best {
 				let active = entry.backup.remove(idx).expect("index in range");
@@ -677,8 +708,10 @@ impl OriginProducer {
 	///
 	/// The broadcast will be unannounced when it is closed.
 	/// If there is already a broadcast with the same path, the new one replaces the active only
-	/// if its hop path is shorter or equal; otherwise it is queued as a backup.
-	/// When the active broadcast closes, the backup with the shortest hop path is promoted and
+	/// if it has a shorter hop path, or an equal-length path that wins a deterministic tie-break
+	/// (a hash of the broadcast name and hop chain); otherwise it is queued as a backup. The
+	/// tie-break is identical on every node, so a cluster converges on the same route.
+	/// When the active broadcast closes, the backup that wins the same ordering is promoted and
 	/// reannounced. Backups that close before being promoted are silently dropped.
 	///
 	/// Returns false if the broadcast is not allowed to be published.
@@ -1117,11 +1150,9 @@ mod tests {
 		origin.publish_broadcast("test", consumer3.clone());
 		assert!(consumer.get_broadcast("test").is_some());
 
-		// On equal hop lengths, each new publish replaces the active and reannounces.
-		// Because the consumer hasn't drained between publishes, the stale announces
-		// collapse with their following unannounces and only the final active broadcast
-		// is delivered.
-		consumer.assert_next("test", &consumer3);
+		// Identical (empty) hop chains tie on the deterministic key, so the first publish
+		// stays active and the rest queue as backups. No churn, no reannounce.
+		consumer.assert_next("test", &consumer1);
 		consumer.assert_next_wait();
 
 		// Drop a backup, nothing should change.
@@ -1134,17 +1165,17 @@ mod tests {
 		consumer.assert_next_wait();
 
 		// Drop the active, we should reannounce with the remaining backup.
-		drop(broadcast3);
+		drop(broadcast1);
 
 		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
 		assert!(consumer.get_broadcast("test").is_some());
 		consumer.assert_next_none("test");
-		consumer.assert_next("test", &consumer1);
+		consumer.assert_next("test", &consumer3);
 
 		// Drop the final broadcast, we should unannounce.
-		drop(broadcast1);
+		drop(broadcast3);
 
 		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
@@ -1178,6 +1209,40 @@ mod tests {
 		// Wait for the cleanup async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 		assert!(origin.consume().get_broadcast("test").is_none());
+	}
+
+	#[tokio::test]
+	async fn test_deterministic_tiebreak() {
+		tokio::time::pause();
+
+		// Build a broadcast carrying a specific hop chain.
+		fn route(ids: &[u64]) -> BroadcastProducer {
+			let hops = OriginList::try_from(ids.iter().copied().map(Origin::from).collect::<Vec<_>>()).unwrap();
+			Broadcast { hops }.produce()
+		}
+
+		// Resolve the active route for "test" after publishing both routes in the given order.
+		fn winner(first: &[u64], second: &[u64]) -> OriginList {
+			let origin = Origin::random().produce();
+			let a = route(first);
+			let b = route(second);
+			origin.publish_broadcast("test", a.consume());
+			origin.publish_broadcast("test", b.consume());
+			let hops = origin.consume().get_broadcast("test").unwrap().hops.clone();
+			// Keep the producers alive until after we read the active route.
+			drop((a, b));
+			hops
+		}
+
+		// Two routes with equal hop counts but distinct chains. The winner is decided by
+		// the deterministic key, not arrival order, so both publish orders converge.
+		let forward = winner(&[10, 20], &[30, 40]);
+		let reverse = winner(&[30, 40], &[10, 20]);
+		assert_eq!(forward, reverse, "tie-break must not depend on publish order");
+
+		// A strictly shorter chain always wins regardless of the hash.
+		assert_eq!(winner(&[10, 20], &[30]).len(), 1);
+		assert_eq!(winner(&[30], &[10, 20]).len(), 1);
 	}
 
 	#[tokio::test]

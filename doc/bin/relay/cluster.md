@@ -7,7 +7,7 @@ description: Run multiple moq-relay instances across multiple hosts/regions
 
 Relays can be joined together to proxy announcements and subscriptions between each other. A viewer talks to whichever relay is closest; if their broadcast lives somewhere else in the cluster, the local relay fetches it from a neighbor and caches it.
 
-A broadcast carries a small hop list as it travels. Each relay it passes through adds itself to the list, which is how loops are caught and how the network picks the shortest path when there's more than one.
+A broadcast carries a small hop list as it travels. Each relay it passes through adds itself to the list, which is how loops are caught and how the network picks the shortest path when there's more than one. When two paths are the same length, every relay breaks the tie the same way (a hash of the broadcast name and hop list), so the whole cluster converges on one route instead of flapping between equals.
 
 ## Topology
 
@@ -46,6 +46,8 @@ mesh    = true
 
 `node` is this relay's identity (its externally-reachable URL); `mesh` is a boolean that turns gossip on. Each gossiping node creates a broadcast carrying its `node` address, which other nodes pick up. `connect` is optional once gossip is running, but you still need at least one connection somewhere (either you dial a peer or a peer dials you) for the advertisement to flow. Enabling `mesh` without `node` is an error, since there'd be no address to advertise.
 
+When two gossiping nodes discover each other, only one of them dials: the node with the lexicographically-smaller URL is the client, the larger is the server. The session is bidirectional, so a single connection carries announcements both ways and the pair avoids opening two redundant links. This tiebreaker applies only to gossip-discovered peers; an explicit `connect` entry always dials.
+
 A relay with `node` + `mesh` and no `connect` is a passive rendezvous: it sits and waits for inbound connections, then helps everyone else find each other.
 
 ## Dynamic peer lists
@@ -55,7 +57,7 @@ A relay with `node` + `mesh` and no `connect` is a passive rendezvous: it sits a
 ```toml
 [cluster]
 connect_api = "https://api.example.com/cluster/connect"
-mesh        = "us-west.example.com:4443"
+node        = "us-west.example.com:4443"
 ```
 
 The source returns a bare JSON array of peer hostnames:
