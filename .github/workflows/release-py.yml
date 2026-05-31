@@ -64,7 +64,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: .github/scripts/release.sh pypi-exists moq-rs "$VERSION"
 
-      - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
       - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
