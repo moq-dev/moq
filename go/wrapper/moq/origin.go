@@ -30,7 +30,7 @@ func (o *OriginProducer) Publish(path string, broadcast *BroadcastProducer) erro
 	if broadcast == nil {
 		return errors.New("moq: nil broadcast producer")
 	}
-	return o.inner.Publish(path, broadcast.inner)
+	return o.inner.Announce(path, broadcast.inner)
 }
 
 // OriginConsumer discovers broadcasts announced to an origin.
