@@ -24,6 +24,16 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 /// within sub-milliseconds) plus reasonable churn from a peer restart.
 const STALE_AFTER: Duration = Duration::from_secs(60);
 
+/// Mesh tiebreaker for gossip-discovered peers. In a full mesh both peers
+/// discover each other and would each open a dial, leaving two redundant
+/// sessions. The session is bidirectional (we publish *and* consume on it), so
+/// one suffices. Break the symmetry on URL order: only dial peers that sort
+/// after us, making the lexicographically-smaller node the client and the
+/// larger the server. The skipped side still gets the connection inbound.
+fn should_dial(self_url: &str, peer: &str) -> bool {
+	peer > self_url
+}
+
 /// One entry in [`DialMap`]. `is_static` flags peers seeded from
 /// `--cluster-connect`; those keep retrying forever even if their gossip
 /// registration goes away (operator intent says "always dial"). Gossip-discovered
@@ -337,7 +347,9 @@ impl Cluster {
 	}
 
 	/// Watch `.internal/origins/*` for peer registrations and dial each newly-
-	/// announced URL. Unannounces don't abort immediately — they just mark the
+	/// announced URL that sorts after our own (see [`should_dial`]); the peer on
+	/// the other side of that comparison dials us, so each pair opens one session
+	/// instead of two. Unannounces don't abort immediately. They just mark the
 	/// entry as "pending cleanup" with a timestamp. A periodic sweep evicts
 	/// entries whose unannounce has stuck for [`STALE_AFTER`]. The "prefer
 	/// shorter hop" path in OriginProducer delivers reannouncements as
@@ -359,7 +371,9 @@ impl Cluster {
 				ann = consumer.announced() => {
 					let Some((relative, announced)) = ann else { return; };
 					let peer = relative.as_str();
-					if peer == self_url {
+					// Skip self and any peer we lose the tiebreaker to; that side
+					// dials us instead, so each pair forms a single session.
+					if !should_dial(&self_url, peer) {
 						continue;
 					}
 					let peer = peer.to_owned();
@@ -540,6 +554,18 @@ mod tests {
 		assert!(dialed.contains("flap:4443"));
 		// Second mark_announced has nothing to clear.
 		assert!(!dialed.mark_announced("flap:4443"));
+	}
+
+	/// The mesh tiebreaker only dials peers that sort after us, so exactly one
+	/// side of each pair opens the dial. Self never dials self.
+	#[test]
+	fn should_dial_prefers_larger_url() {
+		// Smaller hostname is the client: it dials the larger.
+		assert!(should_dial("a.example.com:4443", "b.example.com:4443"));
+		// Larger hostname is the server: it waits for the inbound dial.
+		assert!(!should_dial("b.example.com:4443", "a.example.com:4443"));
+		// Never dial self.
+		assert!(!should_dial("self.example.com:4443", "self.example.com:4443"));
 	}
 
 	/// Setting `cluster.root` (the removed flag) at startup must surface a migration

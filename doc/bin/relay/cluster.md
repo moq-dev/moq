@@ -45,6 +45,8 @@ mesh    = "us-west.example.com:4443"
 
 Each node with `mesh` set creates a broadcast carrying its address, which other nodes pick up. `connect` is optional once gossip is running, but you still need at least one connection somewhere (either you dial a peer or a peer dials you) for the advertisement to flow.
 
+When two gossiping nodes discover each other, only one of them dials: the node with the lexicographically-smaller URL is the client, the larger is the server. The session is bidirectional, so a single connection carries announcements both ways and the pair avoids opening two redundant links. This tiebreaker applies only to gossip-discovered peers; an explicit `connect` entry always dials.
+
 A relay with `mesh` set and no `connect` is a passive rendezvous: it sits and waits for inbound connections, then helps everyone else find each other.
 
 ## Authentication
