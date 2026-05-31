@@ -1,11 +1,18 @@
 {
   description = "MoQ - Media over QUIC";
 
-  # For pre-built binaries (faster builds), add our Cachix cache to your Nix config:
-  #   extra-substituters = https://kixelated.cachix.org
-  #   extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+  # Pre-built binaries live in our Cachix cache. Only tagged releases are
+  # pushed (CI fires on moq-relay-v*, moq-cli-v*, etc.), so pin the flake ref
+  # to a recent tag to get a hit. The default branch HEAD is not cached and
+  # builds from source:
+  #   nix run github:moq-dev/moq/moq-relay-v0.12.4#moq-relay --accept-flake-config
   #
-  # Or run: cachix use kixelated
+  # --accept-flake-config opts into the nixConfig below for one command. To
+  # trust the cache permanently instead, run: cachix use kixelated
+  nixConfig = {
+    extra-substituters = [ "https://kixelated.cachix.org" ];
+    extra-trusted-public-keys = [ "kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=" ];
+  };
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
