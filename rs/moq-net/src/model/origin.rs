@@ -244,7 +244,7 @@ fn route_key(name: &Path, hops: &OriginList) -> (usize, u64) {
 	// deploy and still need to agree on the same route. SEED is a custom basis
 	// (any nonzero u64 works, the textbook one is just as arbitrary); FNV_PRIME is
 	// the standard FNV-64 prime and should stay put.
-	const SEED: u64 = 0x420_C0DEC_B00B;
+	const SEED: u64 = 0x420C0DECB00B; // 420 C0DEC B00B
 	const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 	let mut hash = SEED;
