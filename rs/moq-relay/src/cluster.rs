@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::Context;
 use moq_net::{BroadcastProducer, Origin, OriginConsumer, OriginProducer, Path, Stats, Tier};
+use notify::Watcher;
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::task::AbortHandle;
 use url::Url;
@@ -33,29 +34,63 @@ const CONNECT_API_DEFAULT_INTERVAL: Duration = Duration::from_secs(30);
 /// window can't spin the relay into a tight fetch loop.
 const CONNECT_API_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
-/// How often a local `--cluster-connect-api` file is stat'd for mtime changes.
+/// Safety-net re-check interval for a local `--cluster-connect-api` file, backing
+/// up the OS filesystem watcher (and the sole mechanism if no watcher can be made).
 const CONNECT_API_FILE_INTERVAL: Duration = Duration::from_secs(5);
 
-/// How a dial was sourced, which decides how it's torn down.
+/// A mechanism that wants a dial kept alive. A single peer can be wanted by more
+/// than one at once (e.g. gossiped *and* listed by `--cluster-connect-api`), so
+/// [`DialEntry`] tracks a set of these and only tears the dial down when the last
+/// one releases it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DialSource {
-	/// Seeded from `--cluster-connect`. Dialed forever (operator intent says
-	/// "always dial"); never swept or reconciled away.
+	/// Seeded from `--cluster-connect`. Never released, so the dial retries forever
+	/// (operator intent says "always dial").
 	Static,
-	/// Discovered via gossip on `.internal/origins/*`. Aborted by the periodic
+	/// Discovered via gossip on `.internal/origins/*`. Released by the periodic
 	/// stale-sweep once its unannounce has stuck for [`STALE_AFTER`].
 	Gossip,
-	/// Supplied by `--cluster-connect-api`. Added/removed by reconciling against
-	/// each fetched peer list; immune to the gossip stale-sweep.
+	/// Supplied by `--cluster-connect-api`. Released when a fetched peer list no
+	/// longer contains the peer.
 	Api,
 }
 
-/// One entry in [`DialMap`]. Gossip-discovered peers carry an `unannounced_at`
-/// timestamp that the periodic sweep uses to decide when a peer has truly left
-/// vs. is just flapping between paths.
+/// The set of [`DialSource`]s currently keeping a dial alive.
+#[derive(Clone, Copy, Default)]
+struct DialSources {
+	static_: bool,
+	gossip: bool,
+	api: bool,
+}
+
+impl DialSources {
+	fn set(&mut self, source: DialSource) {
+		match source {
+			DialSource::Static => self.static_ = true,
+			DialSource::Gossip => self.gossip = true,
+			DialSource::Api => self.api = true,
+		}
+	}
+
+	fn clear(&mut self, source: DialSource) {
+		match source {
+			DialSource::Static => self.static_ = false,
+			DialSource::Gossip => self.gossip = false,
+			DialSource::Api => self.api = false,
+		}
+	}
+
+	fn any(&self) -> bool {
+		self.static_ || self.gossip || self.api
+	}
+}
+
+/// One entry in [`DialMap`]. `unannounced_at` carries the gossip stale timer; the
+/// sweep uses it to decide when the gossip source has truly gone vs. is just
+/// flapping between paths. It's only meaningful while `sources.gossip` is set.
 struct DialEntry {
 	handle: AbortHandle,
-	source: DialSource,
+	sources: DialSources,
 	unannounced_at: Option<Instant>,
 }
 
@@ -73,76 +108,114 @@ impl DialMap {
 		self.inner.lock().expect("dial map poisoned").contains_key(peer)
 	}
 
-	/// Record a new dial under `peer`. Caller is responsible for spawning the
-	/// task and passing its [`AbortHandle`]. Replaces any existing entry (callers
-	/// should check [`Self::contains`] first; this is just defensive).
+	/// Record a freshly-spawned dial for `peer` under `source`. If `peer` is
+	/// already dialed, add `source` to its set and abort the redundant `handle`
+	/// (the existing dial stands, since dialing dedupes by URL). Always spawn the
+	/// task first, then call this: it resolves the "two sources discover the same
+	/// peer at once" race without leaking a task.
 	fn insert(&self, peer: String, handle: AbortHandle, source: DialSource) {
-		self.inner.lock().expect("dial map poisoned").insert(
-			peer,
-			DialEntry {
-				handle,
-				source,
-				unannounced_at: None,
-			},
-		);
+		let mut map = self.inner.lock().expect("dial map poisoned");
+		match map.get_mut(&peer) {
+			Some(entry) => {
+				entry.sources.set(source);
+				if source == DialSource::Gossip {
+					entry.unannounced_at = None;
+				}
+				drop(map);
+				handle.abort();
+			}
+			None => {
+				let mut sources = DialSources::default();
+				sources.set(source);
+				map.insert(
+					peer,
+					DialEntry {
+						handle,
+						sources,
+						unannounced_at: None,
+					},
+				);
+			}
+		}
 	}
 
-	/// Mark a gossip peer as unannounced if it isn't already. No-op for static /
-	/// API peers or unknown URLs. Idempotent: a repeat unannounce while a
-	/// timestamp is already pending doesn't reset the clock.
+	/// Add `source` to an already-dialed `peer` (no-op if absent). Used when a
+	/// peer reached via one source is also discovered via another, without opening
+	/// a second dial. Adding [`DialSource::Gossip`] also clears any pending
+	/// unannounce; returns whether such a timestamp was cleared (a reannounce).
+	fn add_source(&self, peer: &str, source: DialSource) -> bool {
+		let mut map = self.inner.lock().expect("dial map poisoned");
+		let Some(entry) = map.get_mut(peer) else { return false };
+		entry.sources.set(source);
+		source == DialSource::Gossip && entry.unannounced_at.take().is_some()
+	}
+
+	/// Start the gossip stale timer on `peer` if it isn't already pending. No-op
+	/// unless the peer is currently wanted by gossip. Idempotent: a repeat
+	/// unannounce while a timestamp is pending doesn't reset the clock.
 	fn mark_unannounced(&self, peer: &str, now: Instant) {
 		let mut map = self.inner.lock().expect("dial map poisoned");
 		if let Some(entry) = map.get_mut(peer) {
-			if entry.source == DialSource::Gossip {
+			if entry.sources.gossip {
 				entry.unannounced_at.get_or_insert(now);
 			}
 		}
 	}
 
-	/// Clear any pending-unannounce on `peer`. Returns `true` if a timestamp was
-	/// actually cleared (useful for callers that want to log the reannounce).
-	fn mark_announced(&self, peer: &str) -> bool {
-		let mut map = self.inner.lock().expect("dial map poisoned");
-		map.get_mut(peer)
-			.is_some_and(|entry| entry.unannounced_at.take().is_some())
-	}
-
-	/// Abort and remove gossip-discovered entries whose unannounce has persisted
-	/// for at least `threshold`. Static / API peers are skipped, as are entries
-	/// that are currently announced (`unannounced_at == None`).
+	/// Release the gossip source from entries whose unannounce has stuck for at
+	/// least `threshold`, aborting the dial only if no other source still wants it.
 	fn sweep_stale(&self, now: Instant, threshold: Duration) {
 		let mut map = self.inner.lock().expect("dial map poisoned");
 		map.retain(|peer, entry| {
-			if entry.source != DialSource::Gossip {
+			let Some(at) = entry.unannounced_at else { return true };
+			if now.duration_since(at) < threshold {
 				return true;
 			}
-			let Some(at) = entry.unannounced_at else { return true };
-			if now.duration_since(at) >= threshold {
+			entry.unannounced_at = None;
+			entry.sources.clear(DialSource::Gossip);
+			if entry.sources.any() {
+				tracing::debug!(%peer, "peer no longer gossiped; still wanted by another source");
+				true
+			} else {
 				tracing::info!(%peer, "peer no longer gossiped; abandoning dial");
 				entry.handle.abort();
 				false
-			} else {
-				true
 			}
 		});
 	}
 
-	/// Reconcile the set of [`DialSource::Api`] dials against `desired`: abort and
-	/// drop API dials no longer listed, and return the desired peers not yet
-	/// dialed (the caller spawns those and re-inserts them as [`DialSource::Api`]).
-	/// Static / Gossip dials, and peers already dialed via any source, are left
-	/// untouched (dialing dedupes by URL).
+	/// Reconcile the API source against `desired`: release [`DialSource::Api`] from
+	/// entries no longer listed (aborting only those nothing else wants), mark the
+	/// API source on already-dialed peers that are listed, and return the desired
+	/// peers not yet dialed (the caller spawns those and re-inserts them).
 	fn reconcile_api(&self, desired: &HashSet<String>) -> Vec<String> {
 		let mut map = self.inner.lock().expect("dial map poisoned");
 		map.retain(|peer, entry| {
-			if entry.source == DialSource::Api && !desired.contains(peer) {
+			if !entry.sources.api || desired.contains(peer) {
+				return true;
+			}
+			entry.sources.clear(DialSource::Api);
+			if entry.sources.any() {
+				tracing::debug!(%peer, "peer dropped from cluster-connect-api; still wanted by another source");
+				true
+			} else {
 				tracing::info!(%peer, "peer dropped from cluster-connect-api; abandoning dial");
 				entry.handle.abort();
-				return false;
+				false
 			}
-			true
 		});
-		desired.iter().filter(|p| !map.contains_key(*p)).cloned().collect()
+
+		desired
+			.iter()
+			.filter(|peer| match map.get_mut(*peer) {
+				Some(entry) => {
+					entry.sources.set(DialSource::Api);
+					false
+				}
+				None => true,
+			})
+			.cloned()
+			.collect()
 	}
 }
 
@@ -178,8 +251,9 @@ pub struct ClusterConfig {
 	/// of peer hostnames: `["a.pop.example", "b.pop.example"]`. An http(s) URL is
 	/// polled (the re-poll cadence follows `Cache-Control` `max-age` +
 	/// `stale-while-revalidate`, with conditional revalidation and stale-if-error
-	/// handled by the shared cache client); a local path is re-read when its mtime
-	/// changes. This relay's own [`Self::node`] value, when set, is sent as a
+	/// handled by the shared cache client); a local path is watched via OS
+	/// filesystem notifications (with a periodic re-check fallback). This relay's
+	/// own [`Self::node`] value, when set, is sent as a
 	/// `?node=` query param so the server can return this node's peers. The relay
 	/// keeps the last good list if a fetch fails. Composes with [`Self::connect`]
 	/// and [`Self::mesh`].
@@ -386,17 +460,17 @@ impl Cluster {
 		}
 
 		if let Some(source) = self.config.connect_api.clone() {
-			let tls = self
-				.client_tls
-				.clone()
-				.context("cluster.connect_api set but no client TLS attached (call Cluster::with_client_tls)")?;
-			let http = crate::http_client::build(&tls)?;
+			// Only http(s) sources need the TLS client; a local file doesn't.
+			anyhow::ensure!(
+				!connect_api_is_http(&source) || self.client_tls.is_some(),
+				"cluster.connect_api with an http(s) URL needs client TLS (call Cluster::with_client_tls)"
+			);
 			let this = self.clone();
 			let token = token.clone();
 			let dialed = dialed.clone();
 			let node = self.config.node.clone();
 			tasks.spawn(async move {
-				this.run_connect_api(source, node, token, dialed, http).await;
+				this.run_connect_api(source, node, token, dialed).await;
 			});
 		}
 
@@ -411,7 +485,7 @@ impl Cluster {
 				.origin
 				.create_broadcast(&path)
 				.expect(".internal/origins is within the relay origin's root");
-			tracing::info!(url = %node, %path, "advertising cluster node URL");
+			tracing::info!(%node, %path, "advertising cluster node URL");
 
 			if has_outbound {
 				let this = self.clone();
@@ -468,7 +542,9 @@ impl Cluster {
 					match announced {
 						Some(_) => {
 							if dialed.contains(&peer) {
-								if dialed.mark_announced(&peer) {
+								// Already dialed (possibly via another source). Mark gossip as
+								// a wanter and cancel any pending stale-sweep.
+								if dialed.add_source(&peer, DialSource::Gossip) {
 									tracing::debug!(%peer, "reannounce within sweep window; keeping dial");
 								}
 								continue;
@@ -497,18 +573,23 @@ impl Cluster {
 	}
 
 	/// Drive `--cluster-connect-api`: an http(s) URL is polled, a local path (or
-	/// `file://` URL) is watched for mtime changes. Either way the source yields a
-	/// JSON array of peer hostnames that's reconciled into the shared dial map.
-	async fn run_connect_api(
-		self,
-		source: String,
-		node: Option<String>,
-		token: String,
-		dialed: DialMap,
-		http: ClientWithMiddleware,
-	) {
+	/// `file://` URL) is watched for changes. Either way the source yields a JSON
+	/// array of peer hostnames that's reconciled into the shared dial map.
+	async fn run_connect_api(self, source: String, node: Option<String>, token: String, dialed: DialMap) {
 		match Url::parse(&source) {
 			Ok(url) if matches!(url.scheme(), "http" | "https") => {
+				// Validated in `run`: an http(s) source has client TLS attached.
+				let tls = self
+					.client_tls
+					.as_ref()
+					.expect("http(s) connect_api source requires client TLS");
+				let http = match crate::http_client::build(tls) {
+					Ok(http) => http,
+					Err(err) => {
+						tracing::error!(%err, "cluster.connect_api: failed to build HTTP client");
+						return;
+					}
+				};
 				self.run_connect_api_http(url, node, token, dialed, http).await;
 			}
 			Ok(url) if url.scheme() == "file" => match url.to_file_path() {
@@ -558,31 +639,84 @@ impl Cluster {
 		}
 	}
 
-	/// Watch a local peer-list file, reconciling whenever its mtime changes. Fails
-	/// static: a missing or malformed file keeps the current dials.
+	/// Watch a local peer-list file, reconciling whenever it changes. Prefers OS
+	/// filesystem notifications (inotify / FSEvents / kqueue via `notify`), with a
+	/// periodic re-check as a safety net for missed events and network filesystems.
+	/// Fails static: a missing or malformed file keeps the current dials.
 	async fn run_connect_api_file(&self, path: PathBuf, node: Option<String>, token: String, dialed: DialMap) {
 		let mut last_mtime = None;
-		loop {
-			match std::fs::metadata(&path).and_then(|m| m.modified()) {
-				Ok(mtime) if last_mtime != Some(mtime) => match std::fs::read_to_string(&path) {
-					Ok(body) => match serde_json::from_str::<Vec<String>>(&body) {
-						Ok(list) => {
-							last_mtime = Some(mtime);
-							self.apply_peer_list(list, &node, &token, &dialed);
-						}
-						Err(err) => {
-							tracing::warn!(%err, ?path, "cluster.connect_api file is not a JSON array; keeping current peers")
-						}
-					},
-					Err(err) => {
-						tracing::warn!(%err, ?path, "failed to read cluster.connect_api file; keeping current peers")
-					}
-				},
-				Ok(_) => {} // unchanged
-				Err(err) => tracing::warn!(%err, ?path, "cluster.connect_api file unavailable; keeping current peers"),
-			}
+		self.reload_connect_api_file(&path, &mut last_mtime, &node, &token, &dialed);
 
-			tokio::time::sleep(CONNECT_API_FILE_INTERVAL).await;
+		let mut tick = tokio::time::interval(CONNECT_API_FILE_INTERVAL);
+		tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+		tick.tick().await; // Consume the immediate first tick; we just loaded.
+
+		// Watch the parent directory, not the file: editors and `mv` replace the
+		// file by atomic rename, which swaps its inode and would drop a watch set
+		// directly on it.
+		let watcher = path.parent().and_then(|dir| {
+			let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+			let mut watcher = notify::recommended_watcher(move |event| {
+				let _ = tx.send(event);
+			})
+			.ok()?;
+			watcher.watch(dir, notify::RecursiveMode::NonRecursive).ok()?;
+			Some((watcher, rx))
+		});
+
+		if let Some((_watcher, mut events)) = watcher {
+			loop {
+				tokio::select! {
+					event = events.recv() => match event {
+						Some(Ok(_)) => {}
+						Some(Err(err)) => tracing::warn!(%err, ?path, "cluster.connect_api file watcher error"),
+						None => break, // watcher gone; drop to polling below
+					},
+					_ = tick.tick() => {}
+				}
+				self.reload_connect_api_file(&path, &mut last_mtime, &node, &token, &dialed);
+			}
+		}
+
+		// Polling fallback: no watcher could be created, or it stopped.
+		loop {
+			tick.tick().await;
+			self.reload_connect_api_file(&path, &mut last_mtime, &node, &token, &dialed);
+		}
+	}
+
+	/// Re-read the peer-list file and reconcile if its mtime changed since the last
+	/// successful load. Any read/parse error keeps the current dials.
+	fn reload_connect_api_file(
+		&self,
+		path: &std::path::Path,
+		last_mtime: &mut Option<std::time::SystemTime>,
+		node: &Option<String>,
+		token: &str,
+		dialed: &DialMap,
+	) {
+		let mtime = match std::fs::metadata(path).and_then(|m| m.modified()) {
+			Ok(mtime) => mtime,
+			Err(err) => {
+				tracing::warn!(%err, ?path, "cluster.connect_api file unavailable; keeping current peers");
+				return;
+			}
+		};
+		if *last_mtime == Some(mtime) {
+			return;
+		}
+
+		match std::fs::read_to_string(path) {
+			Ok(body) => match serde_json::from_str::<Vec<String>>(&body) {
+				Ok(list) => {
+					*last_mtime = Some(mtime);
+					self.apply_peer_list(list, node, token, dialed);
+				}
+				Err(err) => {
+					tracing::warn!(%err, ?path, "cluster.connect_api file is not a JSON array; keeping current peers")
+				}
+			},
+			Err(err) => tracing::warn!(%err, ?path, "failed to read cluster.connect_api file; keeping current peers"),
 		}
 	}
 
@@ -720,6 +854,12 @@ fn revalidate_after(cache_control: &str) -> Option<Duration> {
 	}
 }
 
+/// Whether a `--cluster-connect-api` source is an http(s) URL (otherwise it's
+/// treated as a local file path, which needs no TLS client).
+fn connect_api_is_http(source: &str) -> bool {
+	Url::parse(source).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -790,21 +930,59 @@ mod tests {
 	/// the entry survives even if the original unannounce was old enough to
 	/// otherwise trigger eviction.
 	#[tokio::test]
-	async fn mark_announced_cancels_pending_sweep() {
+	async fn reannounce_cancels_pending_sweep() {
 		let dialed = DialMap::default();
 		let now = Instant::now();
 		dialed.insert("flap:4443".into(), placeholder_handle(), DialSource::Gossip);
 		dialed.mark_unannounced("flap:4443", now - STALE_AFTER - Duration::from_secs(1));
 
+		// Re-adding the gossip source (a reannounce) clears the pending sweep.
 		assert!(
-			dialed.mark_announced("flap:4443"),
+			dialed.add_source("flap:4443", DialSource::Gossip),
 			"should report a cleared pending-sweep"
 		);
 		dialed.sweep_stale(now, STALE_AFTER);
 
 		assert!(dialed.contains("flap:4443"));
-		// Second mark_announced has nothing to clear.
-		assert!(!dialed.mark_announced("flap:4443"));
+		// A second reannounce has nothing to clear.
+		assert!(!dialed.add_source("flap:4443", DialSource::Gossip));
+	}
+
+	/// A peer wanted by both gossip and the API survives losing either source: the
+	/// dial is only torn down once the last source releases it.
+	#[tokio::test]
+	async fn multi_source_peer_survives_until_last_release() {
+		let dialed = DialMap::default();
+		let now = Instant::now();
+		// Gossiped first, then also appears in the API list.
+		dialed.insert("both:4443".into(), placeholder_handle(), DialSource::Gossip);
+		let desired: HashSet<String> = ["both:4443".to_string()].into_iter().collect();
+		assert!(
+			dialed.reconcile_api(&desired).is_empty(),
+			"already dialed; no new spawn"
+		);
+
+		// Dropped from the API list -> still wanted by gossip.
+		assert!(dialed.reconcile_api(&HashSet::new()).is_empty());
+		assert!(dialed.contains("both:4443"), "gossip still wants it");
+
+		// Now gossip goes stale too -> the dial is finally released.
+		dialed.mark_unannounced("both:4443", now - STALE_AFTER - Duration::from_secs(1));
+		dialed.sweep_stale(now, STALE_AFTER);
+		assert!(!dialed.contains("both:4443"));
+	}
+
+	/// `insert` for an already-dialed peer merges the source onto the existing
+	/// entry (and aborts the redundant handle) rather than opening a second dial.
+	#[tokio::test]
+	async fn insert_merges_redundant_dial() {
+		let dialed = DialMap::default();
+		dialed.insert("p:4443".into(), placeholder_handle(), DialSource::Gossip);
+		dialed.insert("p:4443".into(), placeholder_handle(), DialSource::Api);
+
+		// Dropping the API source leaves the gossip source holding the dial.
+		assert!(dialed.reconcile_api(&HashSet::new()).is_empty());
+		assert!(dialed.contains("p:4443"), "gossip source still holds the dial");
 	}
 
 	/// `reconcile_api` drops API dials missing from the desired set, reports the

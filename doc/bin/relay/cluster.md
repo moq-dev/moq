@@ -67,7 +67,7 @@ The source returns a bare JSON array of peer hostnames:
 The relay reconciles that list against its live dials: new entries are dialed, entries that disappear are dropped. It composes with `connect` (static seeds that are never reconciled away) and `mesh` (gossip). The relay's own `node` value, when set, is sent as a `?node=` query parameter so the endpoint can return the peers for that specific node; for mTLS-gated endpoints the cluster client certificate identifies the caller as well.
 
 - **HTTP(S) URL**: polled, with the re-poll cadence taken from the response's `Cache-Control` reuse window (`max-age` plus any `stale-while-revalidate`; default 30s, floored at 5s). Conditional revalidation (`ETag` / `Last-Modified`) and stale-if-error (serving the last cached body when a revalidation request fails) are handled by the underlying HTTP cache, so transient endpoint blips don't churn the dial set.
-- **Local file** (a path or `file://` URL): re-read whenever its mtime changes.
+- **Local file** (a path or `file://` URL): watched via OS filesystem notifications (inotify / FSEvents / kqueue), with a periodic re-check as a safety net.
 
 If a fetch fails or returns garbage, the relay logs and keeps the last good list rather than tearing the cluster down. This keeps the moq-relay binary generic: all routing decisions (which node connects where) live in whatever service answers the endpoint.
 
