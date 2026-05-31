@@ -658,8 +658,8 @@ impl Cluster {
 	/// periodic re-check as a safety net for missed events and network filesystems.
 	/// Fails static: a missing or malformed file keeps the current dials.
 	async fn run_connect_api_file(&self, path: PathBuf, node: Option<String>, token: String, dialed: DialMap) {
-		let mut last_mtime = None;
-		self.reload_connect_api_file(&path, &mut last_mtime, &node, &token, &dialed);
+		let mut last_seen_mtime = None;
+		self.reload_connect_api_file(&path, &mut last_seen_mtime, &node, &token, &dialed);
 
 		let mut tick = tokio::time::interval(CONNECT_API_FILE_INTERVAL);
 		tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -688,23 +688,26 @@ impl Cluster {
 					},
 					_ = tick.tick() => {}
 				}
-				self.reload_connect_api_file(&path, &mut last_mtime, &node, &token, &dialed);
+				self.reload_connect_api_file(&path, &mut last_seen_mtime, &node, &token, &dialed);
 			}
 		}
 
 		// Polling fallback: no watcher could be created, or it stopped.
 		loop {
 			tick.tick().await;
-			self.reload_connect_api_file(&path, &mut last_mtime, &node, &token, &dialed);
+			self.reload_connect_api_file(&path, &mut last_seen_mtime, &node, &token, &dialed);
 		}
 	}
 
 	/// Re-read the peer-list file and reconcile if its mtime changed since the last
-	/// successful load. Any read/parse error keeps the current dials.
+	/// attempt. `last_seen_mtime` advances as soon as a new mtime is observed (not
+	/// only on success), so a malformed file isn't reread and re-warned every tick.
+	/// Any read/parse error keeps the current dials; the next real edit bumps the
+	/// mtime and triggers a fresh attempt.
 	fn reload_connect_api_file(
 		&self,
 		path: &std::path::Path,
-		last_mtime: &mut Option<std::time::SystemTime>,
+		last_seen_mtime: &mut Option<std::time::SystemTime>,
 		node: &Option<String>,
 		token: &str,
 		dialed: &DialMap,
@@ -716,16 +719,14 @@ impl Cluster {
 				return;
 			}
 		};
-		if *last_mtime == Some(mtime) {
+		if *last_seen_mtime == Some(mtime) {
 			return;
 		}
+		*last_seen_mtime = Some(mtime);
 
 		match std::fs::read_to_string(path) {
 			Ok(body) => match serde_json::from_str::<Vec<String>>(&body) {
-				Ok(list) => {
-					*last_mtime = Some(mtime);
-					self.apply_peer_list(list, node, token, dialed);
-				}
+				Ok(list) => self.apply_peer_list(list, node, token, dialed),
 				Err(err) => {
 					tracing::warn!(%err, ?path, "cluster.connect_api file is not a JSON array; keeping current peers")
 				}
