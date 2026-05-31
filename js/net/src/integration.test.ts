@@ -64,6 +64,12 @@ test("integration: lite draft-03", async () => {
 	await runPublishSubscribeFlow(Lite.ALPN_03);
 });
 
+test("integration: lite draft-05-wip", async () => {
+	// Exercises AnnounceOk: the announce flow only completes if the subscriber
+	// reads the publisher's AnnounceOk before the initial Announce messages.
+	await runPublishSubscribeFlow(Lite.ALPN_05_WIP);
+});
+
 test("integration: ietf draft-14", async () => {
 	await runPublishSubscribeFlow("", Ietf.Version.DRAFT_14);
 });

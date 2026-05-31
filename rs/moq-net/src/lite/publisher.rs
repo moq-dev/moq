@@ -229,8 +229,59 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				let announce_init = lite::AnnounceInit { suffixes: init };
 				stream.writer.encode(&announce_init).await?;
 			}
+			Version::Lite05Wip => {
+				// Drain the current active set synchronously (like the Lite01/02 path),
+				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
+				// them afterward. The receiver stamps our origin onto each hop chain, so we
+				// forward the stored chain as-is (no self push here).
+				let mut initial: Vec<(crate::PathOwned, OriginList)> = Vec::new();
+				while let Some((path, event)) = announced.try_next() {
+					let suffix = path
+						.strip_prefix(&prefix)
+						.expect("origin returned invalid path")
+						.to_owned();
+					let absolute = origin.absolute(&path).to_owned();
+
+					match event.broadcast() {
+						Some(broadcast) => {
+							let hops = &broadcast.hops;
+							// Apply the same exclude_hop and reflected-announce skips as the live
+							// loop so the count matches exactly what we send (minus the self push).
+							if exclude_hop != 0 && hops.iter().any(|h| h.id == exclude_hop) {
+								continue;
+							}
+							if hops.contains(&self_origin) {
+								continue;
+							}
+							tracing::debug!(broadcast = %absolute, "announce");
+							let guard = stats.broadcast(&absolute).publisher();
+							stats_guards.entry(absolute).or_insert(guard);
+							initial.retain(|(s, _)| s != &suffix);
+							initial.push((suffix, hops.clone()));
+						}
+						None => {
+							// A potential race: a just-announced path already unannounced.
+							tracing::debug!(broadcast = %absolute, "unannounce");
+							stats_guards.remove(&absolute);
+							initial.retain(|(s, _)| s != &suffix);
+						}
+					}
+				}
+
+				// Report our origin id (stamped onto hops by the receiver, not us)
+				// and the count of initial announces that follow immediately.
+				let ok = lite::AnnounceOk {
+					origin: self_origin,
+					active: initial.len() as u64,
+				};
+				stream.writer.encode(&ok).await?;
+
+				for (suffix, hops) in initial {
+					stream.writer.encode(&lite::Announce::Active { suffix, hops }).await?;
+				}
+			}
 			_ => {
-				// Lite03+: no more announce init.
+				// Lite03/Lite04: no announce init, no AnnounceOk.
 			}
 		}
 
@@ -250,7 +301,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 						match event {
 							crate::Announced::Active(active) => {
-								let Some(hops) = Self::prepare_active_hops(&active.hops, self_origin, exclude_hop, &absolute) else {
+								let Some(hops) = Self::prepare_active_hops(&active.hops, self_origin, exclude_hop, version, &absolute) else {
 									continue;
 								};
 								tracing::debug!(broadcast = %absolute, "announce");
@@ -263,7 +314,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								// On lite-05+ a restart travels as a duplicate ANNOUNCE (a second
 								// `Active` for an already-announced path). Older versions never defined
 								// that, so split it into an unannounce followed by a fresh announce.
-								match Self::prepare_active_hops(&active.hops, self_origin, exclude_hop, &absolute) {
+								match Self::prepare_active_hops(&active.hops, self_origin, exclude_hop, version, &absolute) {
 									Some(hops) => {
 										tracing::debug!(broadcast = %absolute, "restart");
 										// Continuity: keep the existing stats guard (no close + reopen).
@@ -308,6 +359,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		hops: &OriginList,
 		self_origin: Origin,
 		exclude_hop: u64,
+		version: Version,
 		absolute: &crate::Path,
 	) -> Option<OriginList> {
 		if exclude_hop != 0 && hops.iter().any(|h| h.id == exclude_hop) {
@@ -319,7 +371,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			return None;
 		}
 		let mut hops = hops.clone();
-		if hops.push(self_origin).is_err() {
+		// Lite05+ moves the self-stamp to the receiver, which appends our id (reported
+		// once via AnnounceOk) on receipt. Older versions stamp it here, dropping if the
+		// chain is full.
+		if !matches!(version, Version::Lite05Wip) && hops.push(self_origin).is_err() {
 			tracing::warn!(broadcast = %absolute, "dropping announce; hop chain at MAX_HOPS (possible loop)");
 			return None;
 		}

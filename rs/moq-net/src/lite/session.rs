@@ -1,9 +1,19 @@
+use tokio::sync::oneshot;
+
 use crate::{
 	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, StatsHandle, coding::Stream,
 	lite::SessionInfo,
 };
 
-use super::{Publisher, PublisherConfig, Subscriber, SubscriberConfig, Version};
+use super::{Publisher, PublisherConfig, Subscriber, SubscriberConfig, SyncLatch, Version};
+
+/// Start a lite session.
+///
+/// Returns the receive-bandwidth consumer (if any) and a `synced` receiver that
+/// resolves once the initial announce set has been inserted into the subscribe
+/// origin, letting `connect()` block past the startup race. The receiver fires
+/// immediately when there is nothing to wait on (no subscribe origin, or a version
+/// without an initial-set boundary).
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
 	// The stream used to setup the session, after exchanging setup messages.
@@ -17,7 +27,7 @@ pub fn start<S: web_transport_trait::Session>(
 	stats: StatsHandle,
 	// The version of the protocol to use.
 	version: Version,
-) -> Result<Option<BandwidthConsumer>, Error> {
+) -> Result<(Option<BandwidthConsumer>, oneshot::Receiver<()>), Error> {
 	let recv_bw = BandwidthProducer::new();
 
 	let recv_bw_consumer = match version {
@@ -28,6 +38,19 @@ pub fn start<S: web_transport_trait::Session>(
 	let recv_bw_for_sub = match version {
 		Version::Lite01 | Version::Lite02 => None,
 		_ => Some(recv_bw),
+	};
+
+	// Connect-sync latch. Only block on the initial set for versions with an
+	// initial-set boundary (AnnounceInit for Lite01/02, AnnounceOk for Lite05);
+	// otherwise fire now so connect() doesn't block. An empty subscribe origin still
+	// resolves immediately because the subscriber arms the latch with a prefix count
+	// of zero.
+	let (synced_latch, synced_rx) = SyncLatch::new();
+	let sub_synced = if matches!(version, Version::Lite01 | Version::Lite02 | Version::Lite05Wip) {
+		Some(synced_latch)
+	} else {
+		synced_latch.fire();
+		None
 	};
 
 	// Publisher and Subscriber each derive their identity from their own
@@ -46,6 +69,7 @@ pub fn start<S: web_transport_trait::Session>(
 		origin: subscribe,
 		recv_bandwidth: recv_bw_for_sub,
 		stats,
+		synced: sub_synced,
 		version,
 	});
 
@@ -72,7 +96,7 @@ pub fn start<S: web_transport_trait::Session>(
 		}
 	});
 
-	Ok(recv_bw_consumer)
+	Ok((recv_bw_consumer, synced_rx))
 }
 
 // TODO do something useful with this

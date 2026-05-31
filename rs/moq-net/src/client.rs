@@ -150,7 +150,7 @@ impl Client {
 					.select(Version::Lite(lite::Version::Lite05Wip))
 					.ok_or(Error::Version)?;
 
-				let recv_bw = lite::start(
+				let (recv_bw, synced) = lite::start(
 					session.clone(),
 					None,
 					publish,
@@ -158,6 +158,10 @@ impl Client {
 					self.stats.clone(),
 					lite::Version::Lite05Wip,
 				)?;
+
+				// Block until the initial announce set has landed (Lite05 reports it
+				// via AnnounceOk + N), so a synchronous get_broadcast() won't race it.
+				let _ = synced.await;
 
 				return Ok(Session::new(
 					session,
@@ -172,7 +176,7 @@ impl Client {
 					.select(Version::Lite(lite::Version::Lite04))
 					.ok_or(Error::Version)?;
 
-				let recv_bw = lite::start(
+				let (recv_bw, synced) = lite::start(
 					session.clone(),
 					None,
 					publish,
@@ -180,6 +184,9 @@ impl Client {
 					self.stats.clone(),
 					lite::Version::Lite04,
 				)?;
+
+				// Lite04 has no initial-set boundary, so this resolves immediately.
+				let _ = synced.await;
 
 				return Ok(Session::new(
 					session,
@@ -195,7 +202,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				// Starting with draft-03, there's no more SETUP control stream.
-				let recv_bw = lite::start(
+				let (recv_bw, synced) = lite::start(
 					session.clone(),
 					None,
 					publish,
@@ -203,6 +210,9 @@ impl Client {
 					self.stats.clone(),
 					lite::Version::Lite03,
 				)?;
+
+				// Lite03 has no initial-set boundary, so this resolves immediately.
+				let _ = synced.await;
 
 				return Ok(Session::new(
 					session,
@@ -247,7 +257,14 @@ impl Client {
 		let recv_bw = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
-				lite::start(session.clone(), Some(stream), publish, consume, self.stats.clone(), v)?
+				let (recv_bw, synced) =
+					lite::start(session.clone(), Some(stream), publish, consume, self.stats.clone(), v)?;
+
+				// Block until the initial announce set has landed (for versions that
+				// report one); resolves immediately otherwise.
+				let _ = synced.await;
+
+				recv_bw
 			}
 			Version::Ietf(v) => {
 				// Decode the parameters to get the initial request ID.

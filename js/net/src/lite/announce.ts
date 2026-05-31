@@ -185,3 +185,52 @@ export class AnnounceInit {
 		return Message.decode(r, AnnounceInit.#decode);
 	}
 }
+
+/// Sent by the publisher as the first message on an announce stream, before any
+/// individual Announce messages. Lite05+ only; the successor to AnnounceInit.
+///
+/// `origin` is the responder's origin id, which the subscriber stamps onto each
+/// announce's hop chain (the publisher no longer stamps itself). `active` is the
+/// number of initial Announce messages that follow immediately.
+export class AnnounceOk {
+	origin: Origin;
+	active: number;
+
+	constructor(origin: Origin, active: number) {
+		this.origin = origin;
+		this.active = active;
+	}
+
+	static #guard(version: Version) {
+		switch (version) {
+			case Version.DRAFT_05_WIP:
+				break;
+			default:
+				throw new Error("announce ok not supported for this version");
+		}
+	}
+
+	async #encode(w: Writer) {
+		await w.u62(this.origin);
+		await w.u53(this.active);
+	}
+
+	static async #decode(r: Reader): Promise<AnnounceOk> {
+		const raw = await r.u62();
+		// A zero responder id is never legitimate; it would stamp a placeholder onto chains.
+		if (raw === 0n) throw new Error("announce ok origin must be non-zero");
+		const origin = OriginSchema.parse(raw);
+		const active = await r.u53();
+		return new AnnounceOk(origin, active);
+	}
+
+	async encode(w: Writer, version: Version): Promise<void> {
+		AnnounceOk.#guard(version);
+		return Message.encode(w, this.#encode.bind(this));
+	}
+
+	static async decode(r: Reader, version: Version): Promise<AnnounceOk> {
+		AnnounceOk.#guard(version);
+		return Message.decode(r, AnnounceOk.#decode);
+	}
+}

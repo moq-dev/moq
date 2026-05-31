@@ -887,7 +887,10 @@ impl OriginConsumer {
 	/// later. Subscribers should watch [`BroadcastConsumer::closed`] to react to that.
 	///
 	/// Prefer this over [`Self::get_broadcast`] when you know the exact path you want but
-	/// cannot guarantee the announcement has already been received.
+	/// cannot guarantee the announcement has already been received. With moq-lite-05 (and
+	/// the older Lite01/02) `connect()` already blocks until the initial announce set lands,
+	/// so [`Self::get_broadcast`] is race-free for broadcasts that were live at connect time;
+	/// this method is still needed to wait for a broadcast that comes online *after* connect.
 	pub async fn announced_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
 

@@ -111,6 +111,9 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
+	} else if (protocol === Lite.ALPN_05_WIP) {
+		// moq-lite draft-05 (WIP) doesn't use a session stream, so we return immediately.
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_05_WIP, undefined);
 	} else if (protocol === Lite.ALPN_04) {
 		// moq-lite draft-04 doesn't use a session stream, so we return immediately.
 		return new Lite.Connection(url, session, Lite.Version.DRAFT_04, undefined);
@@ -193,6 +196,8 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
+	} else if (protocol === Lite.ALPN_05_WIP) {
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_05_WIP, undefined);
 	} else if (protocol === Lite.ALPN_04) {
 		return new Lite.Connection(url, session, Lite.Version.DRAFT_04, undefined);
 	} else if (protocol === Lite.ALPN_03) {

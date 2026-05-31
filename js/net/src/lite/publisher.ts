@@ -6,7 +6,7 @@ import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
-import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
+import { Announce, AnnounceInit, type AnnounceInterest, AnnounceOk } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -106,6 +106,10 @@ export class Publisher {
 			active.add(suffix);
 		}
 
+		// Lite05+ reports our origin once via AnnounceOk; the subscriber stamps it
+		// onto each announce, so we no longer put it in the per-announce hop list.
+		const selfHops = this.version === Version.DRAFT_05_WIP ? [] : [this.origin];
+
 		switch (this.version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02: {
@@ -113,10 +117,20 @@ export class Publisher {
 				await init.encode(stream.writer, this.version);
 				break;
 			}
-			default:
-				// Draft03+: send individual Announce messages for initial state.
+			case Version.DRAFT_05_WIP: {
+				// Report our origin id and the count of initial announces that follow.
+				const ok = new AnnounceOk(this.origin, active.size);
+				await ok.encode(stream.writer, this.version);
 				for (const suffix of active) {
-					const wire = new Announce({ suffix, active: true, hops: [this.origin] });
+					const wire = new Announce({ suffix, active: true, hops: selfHops });
+					await wire.encode(stream.writer, this.version);
+				}
+				break;
+			}
+			default:
+				// Draft03/04: send individual Announce messages for initial state.
+				for (const suffix of active) {
+					const wire = new Announce({ suffix, active: true, hops: selfHops });
 					await wire.encode(stream.writer, this.version);
 				}
 				break;
@@ -147,7 +161,7 @@ export class Publisher {
 			// Announce any new broadcasts.
 			for (const added of newActive.difference(active)) {
 				console.debug(`announce: broadcast=${added} active=true`);
-				const wire = new Announce({ suffix: added, active: true, hops: [this.origin] });
+				const wire = new Announce({ suffix: added, active: true, hops: selfHops });
 				await wire.encode(stream.writer, this.version);
 			}
 

@@ -10,7 +10,7 @@ import type * as Time from "../time.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
-import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
+import { Announce, AnnounceInit, AnnounceInterest, AnnounceOk } from "./announce.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -119,6 +119,15 @@ export class Subscriber {
 			await stream.writer.u53(StreamId.Announce);
 			await msg.encode(stream.writer, this.version);
 
+			// Lite05+: the publisher reports its own origin id before any announces.
+			// It no longer stamps itself onto each hop chain, so we append it here to
+			// keep the ignoreSelf loop check seeing the full chain.
+			let responderOrigin: Origin | undefined;
+			if (this.version === Version.DRAFT_05_WIP) {
+				const ok = await AnnounceOk.decode(stream.reader, this.version);
+				responderOrigin = ok.origin;
+			}
+
 			switch (this.version) {
 				case Version.DRAFT_01:
 				case Version.DRAFT_02: {
@@ -148,8 +157,11 @@ export class Subscriber {
 				if (announce instanceof Error) throw announce;
 
 				// Optionally drop reflected announces so callers asking for
-				// "someone else's broadcasts" don't re-see their own publishes.
-				if (options.ignoreSelf && announce.hops.includes(this.origin)) {
+				// "someone else's broadcasts" don't re-see their own publishes. In
+				// Lite05 the sender's origin arrives via AnnounceOk, not in each hop
+				// list, so fold it back in before checking.
+				const hops = responderOrigin !== undefined ? [...announce.hops, responderOrigin] : announce.hops;
+				if (options.ignoreSelf && hops.includes(this.origin)) {
 					continue;
 				}
 

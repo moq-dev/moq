@@ -17,12 +17,82 @@ use crate::{
 
 use super::Version;
 
+use tokio::sync::oneshot;
 use web_async::Lock;
 
 /// Keep an upstream subscription alive briefly after the last consumer leaves,
 /// so a returning subscriber reuses the same TrackProducer instead of forcing a
 /// fresh fetch (and the publisher re-serving the latest cached group).
 const LINGER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// One-shot latch that fires once every announce-prefix stream has received its
+/// initial set (AnnounceInit for Lite01/02, AnnounceOk + N for Lite05). Lets
+/// `connect()` block until the initial broadcasts are available locally.
+pub(super) struct SyncLatch {
+	remaining: atomic::AtomicUsize,
+	sender: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl SyncLatch {
+	/// Create a latch and its completion receiver. The latch starts unarmed;
+	/// call [`SyncLatch::arm`] once the prefix count is known.
+	pub(super) fn new() -> (Arc<Self>, oneshot::Receiver<()>) {
+		let (tx, rx) = oneshot::channel();
+		let latch = Arc::new(Self {
+			remaining: atomic::AtomicUsize::new(0),
+			sender: std::sync::Mutex::new(Some(tx)),
+		});
+		(latch, rx)
+	}
+
+	/// Set the number of prefix streams that must complete before firing. Fires
+	/// immediately if `count` is zero. Called once, before any prefix task starts.
+	pub(super) fn arm(&self, count: usize) {
+		self.remaining.store(count, atomic::Ordering::Release);
+		if count == 0 {
+			self.fire();
+		}
+	}
+
+	/// Record one prefix stream's initial set as complete, firing when the last lands.
+	fn complete_one(&self) {
+		if self.remaining.fetch_sub(1, atomic::Ordering::AcqRel) == 1 {
+			self.fire();
+		}
+	}
+
+	/// Fire the latch. Idempotent: the sender is taken on the first call.
+	pub(super) fn fire(&self) {
+		if let Some(tx) = self.sender.lock().unwrap().take() {
+			let _ = tx.send(());
+		}
+	}
+}
+
+/// Ensures a prefix stream reports exactly one completion to its [`SyncLatch`],
+/// even if it errors before receiving its full initial set, so `connect()` can't
+/// hang waiting on a stream that died early.
+struct PrefixSyncGuard {
+	latch: Option<Arc<SyncLatch>>,
+}
+
+impl PrefixSyncGuard {
+	fn new(latch: Option<Arc<SyncLatch>>) -> Self {
+		Self { latch }
+	}
+
+	fn complete(&mut self) {
+		if let Some(latch) = self.latch.take() {
+			latch.complete_one();
+		}
+	}
+}
+
+impl Drop for PrefixSyncGuard {
+	fn drop(&mut self) {
+		self.complete();
+	}
+}
 
 pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	pub session: S,
@@ -34,6 +104,10 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// Stats aggregator for this session's ingress. Use [`StatsHandle::default`]
 	/// to opt out.
 	pub stats: StatsHandle,
+	/// Connect-sync latch fired once every announce-prefix stream has its initial
+	/// set. None when there is nothing to wait on (no origin, or a version with no
+	/// initial-set boundary), in which case the caller's receiver fires immediately.
+	pub synced: Option<Arc<SyncLatch>>,
 	pub version: Version,
 }
 
@@ -51,6 +125,8 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	self_origin: crate::Origin,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	next_id: Arc<atomic::AtomicU64>,
+	// Connect-sync latch; see SubscriberConfig::synced.
+	synced: Option<Arc<SyncLatch>>,
 	version: Version,
 }
 
@@ -91,6 +167,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			self_origin,
 			subscribes: Default::default(),
 			next_id: Default::default(),
+			synced: config.synced,
 			version: config.version,
 		}
 	}
@@ -136,6 +213,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_announce(self) -> Result<(), Error> {
 		let prefixes: Vec<PathOwned> = self.origin.allowed().map(|p| p.to_owned()).collect();
 
+		// Each prefix stream reports once when its initial set lands; the latch
+		// fires (unblocking connect) when the last one does.
+		if let Some(latch) = &self.synced {
+			latch.arm(prefixes.len());
+		}
+
 		let mut tasks = FuturesUnordered::new();
 		for prefix in prefixes {
 			tasks.push(self.clone().run_announce_prefix(prefix));
@@ -161,6 +244,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 		stream.writer.encode(&msg).await?;
 
+		// Lite05+: the publisher reports its own origin id (which we stamp onto every
+		// received Announce's hop chain, since it no longer does so itself) plus the
+		// count of initial active announces that follow immediately.
+		let (responder_origin, initial_count) = match self.version {
+			Version::Lite05Wip => {
+				let ok: lite::AnnounceOk = stream.reader.decode().await?;
+				(Some(ok.origin), ok.active)
+			}
+			_ => (None, 0),
+		};
+
 		let mut producers = HashMap::new();
 		// Per-broadcast subscriber-side stats guards. Dropping the guard records
 		// `subscriber.broadcasts_closed`. We only insert a guard when start_announce
@@ -179,7 +273,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.absolute(&path).to_owned();
 					// Lite01/02 don't carry hop information; the broadcast starts with an empty chain.
-					if self.start_announce(path.clone(), crate::OriginList::new(), &mut producers)? {
+					if self.start_announce(path.clone(), crate::OriginList::new(), responder_origin, &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
@@ -188,6 +282,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				// Lite03+: no AnnounceInit, initial state comes via Announce messages.
 			}
 		}
+
+		// Report this prefix's initial set to the connect-sync latch. Lite01/02
+		// delivered it via AnnounceInit (consumed just above); Lite05 delivers
+		// `initial_count` Announce::Active counted in the loop below; Lite03/04 have
+		// no boundary (latch is None, so this is inert). The guard also fires on an
+		// early stream error, so connect() never hangs.
+		let mut synced = PrefixSyncGuard::new(self.synced.clone());
+		let mut initial_remaining = match self.version {
+			Version::Lite01 | Version::Lite02 => {
+				synced.complete();
+				0
+			}
+			Version::Lite05Wip => {
+				if initial_count == 0 {
+					synced.complete();
+				}
+				initial_count
+			}
+			_ => 0,
+		};
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {
 			match announce {
@@ -198,7 +312,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						// lite-05+ only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
 						// atomically replace the broadcast. Older versions fall through to start_announce,
 						// which rejects the duplicate (Error::Duplicate).
-						if self.restart_announce(path.clone(), hops, &mut producers)? {
+						if self.restart_announce(path.clone(), hops, responder_origin, &mut producers)? {
 							// Continuity: keep the existing stats guard if present.
 							stats_guards
 								.entry(abs.clone())
@@ -206,8 +320,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						} else {
 							stats_guards.remove(&abs);
 						}
-					} else if self.start_announce(path.clone(), hops, &mut producers)? {
+					} else if self.start_announce(path.clone(), hops, responder_origin, &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
+					}
+					// The first `initial_count` Active messages are the initial set.
+					if initial_remaining > 0 {
+						initial_remaining -= 1;
+						if initial_remaining == 0 {
+							synced.complete();
+						}
 					}
 				}
 				lite::Announce::Ended { suffix, .. } => {
@@ -284,9 +405,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_announce(
 		&mut self,
 		path: PathOwned,
-		hops: crate::OriginList,
+		mut hops: crate::OriginList,
+		// Lite05+: the announce sender's origin id (from AnnounceOk). The sender no
+		// longer stamps itself onto the chain, so we append it here to reconstruct
+		// the full `[src...sender]` chain Lite04 stored. None for older versions,
+		// where the sender already appended itself.
+		responder_origin: Option<crate::Origin>,
 		producers: &mut HashMap<PathOwned, BroadcastProducer>,
 	) -> Result<bool, Error> {
+		if let Some(responder) = responder_origin {
+			// If the chain is already full, drop the announce — the same decision
+			// the Lite04 sender makes at its push site.
+			if hops.push(responder).is_err() {
+				tracing::warn!(
+					broadcast = %self.log_path(&path),
+					"dropping announce; hop chain at MAX_HOPS (possible loop)",
+				);
+				return Ok(false);
+			}
+		}
+
 		// Drop announces that already passed through us — this connection is
 		// a reflection, not a new path. Peers should be filtering via
 		// AnnounceInterest.exclude_hop, but Lite03 peers can't, so this is
@@ -329,11 +467,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn restart_announce(
 		&mut self,
 		path: PathOwned,
-		hops: crate::OriginList,
+		mut hops: crate::OriginList,
+		// Lite05+: the announce sender's origin id (from AnnounceOk), appended here to
+		// rebuild the full chain since the sender no longer stamps itself. None for older
+		// versions. See `start_announce`.
+		responder_origin: Option<crate::Origin>,
 		producers: &mut HashMap<PathOwned, BroadcastProducer>,
 	) -> Result<bool, Error> {
-		// Reflected loop: the replacement passed through us. Retire the broadcast.
-		if hops.contains(&self.self_origin) {
+		// Reflected loop (or a full chain): the replacement can't be used here. Retire the broadcast.
+		let reflected = match responder_origin {
+			Some(responder) => hops.push(responder).is_err() || hops.contains(&self.self_origin),
+			None => hops.contains(&self.self_origin),
+		};
+		if reflected {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected restart");
 			if let Some(mut old) = producers.remove(&path) {
 				old.abort(Error::Cancel).ok();
@@ -707,5 +853,49 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	fn log_path(&self, path: impl AsPath) -> Path<'_> {
 		self.origin.root().join(path)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn sync_latch_fires_after_all_prefixes() {
+		let (latch, mut rx) = SyncLatch::new();
+		latch.arm(2);
+		assert!(rx.try_recv().is_err(), "should not fire before any prefix completes");
+		latch.complete_one();
+		assert!(rx.try_recv().is_err(), "should not fire after only 1 of 2");
+		latch.complete_one();
+		assert_eq!(rx.try_recv(), Ok(()), "should fire once the last prefix completes");
+	}
+
+	#[test]
+	fn sync_latch_zero_fires_immediately() {
+		let (latch, mut rx) = SyncLatch::new();
+		latch.arm(0);
+		assert_eq!(rx.try_recv(), Ok(()), "arm(0) should fire immediately");
+	}
+
+	#[test]
+	fn prefix_guard_completes_on_drop() {
+		// A prefix that errors before its initial set must still release connect().
+		let (latch, mut rx) = SyncLatch::new();
+		latch.arm(1);
+		drop(PrefixSyncGuard::new(Some(latch.clone())));
+		assert_eq!(rx.try_recv(), Ok(()), "dropping the guard should complete the prefix");
+	}
+
+	#[test]
+	fn prefix_guard_completes_once() {
+		let (latch, mut rx) = SyncLatch::new();
+		latch.arm(1);
+		let mut guard = PrefixSyncGuard::new(Some(latch.clone()));
+		guard.complete();
+		assert_eq!(rx.try_recv(), Ok(()), "explicit completion should fire");
+		// A second completion (and the eventual Drop) must not over-decrement.
+		guard.complete();
+		drop(guard);
 	}
 }
