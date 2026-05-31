@@ -68,7 +68,7 @@ enum DialSource {
 /// The set of [`DialSource`]s currently keeping a dial alive.
 #[derive(Clone, Copy, Default)]
 struct DialSources {
-	static_: bool,
+	seeded: bool,
 	gossip: bool,
 	api: bool,
 }
@@ -76,7 +76,7 @@ struct DialSources {
 impl DialSources {
 	fn set(&mut self, source: DialSource) {
 		match source {
-			DialSource::Static => self.static_ = true,
+			DialSource::Static => self.seeded = true,
 			DialSource::Gossip => self.gossip = true,
 			DialSource::Api => self.api = true,
 		}
@@ -84,14 +84,14 @@ impl DialSources {
 
 	fn clear(&mut self, source: DialSource) {
 		match source {
-			DialSource::Static => self.static_ = false,
+			DialSource::Static => self.seeded = false,
 			DialSource::Gossip => self.gossip = false,
 			DialSource::Api => self.api = false,
 		}
 	}
 
 	fn any(&self) -> bool {
-		self.static_ || self.gossip || self.api
+		self.seeded || self.gossip || self.api
 	}
 }
 
@@ -125,27 +125,24 @@ impl DialMap {
 	/// peer at once" race without leaking a task.
 	fn insert(&self, peer: String, handle: AbortHandle, source: DialSource) {
 		let mut map = self.inner.lock().expect("dial map poisoned");
-		match map.get_mut(&peer) {
-			Some(entry) => {
-				entry.sources.set(source);
-				if source == DialSource::Gossip {
-					entry.unannounced_at = None;
-				}
-				drop(map);
-				handle.abort();
+		if let Some(entry) = map.get_mut(&peer) {
+			entry.sources.set(source);
+			if source == DialSource::Gossip {
+				entry.unannounced_at = None;
 			}
-			None => {
-				let mut sources = DialSources::default();
-				sources.set(source);
-				map.insert(
-					peer,
-					DialEntry {
-						handle,
-						sources,
-						unannounced_at: None,
-					},
-				);
-			}
+			drop(map);
+			handle.abort();
+		} else {
+			let mut sources = DialSources::default();
+			sources.set(source);
+			map.insert(
+				peer,
+				DialEntry {
+					handle,
+					sources,
+					unannounced_at: None,
+				},
+			);
 		}
 	}
 
@@ -200,8 +197,15 @@ impl DialMap {
 	/// peers not yet dialed (the caller spawns those and re-inserts them).
 	fn reconcile_api(&self, desired: &HashSet<String>) -> Vec<String> {
 		let mut map = self.inner.lock().expect("dial map poisoned");
+
+		// One mutable pass: set the API source on listed peers, release it from the
+		// rest (aborting only those nothing else wants).
 		map.retain(|peer, entry| {
-			if !entry.sources.api || desired.contains(peer) {
+			if desired.contains(peer) {
+				entry.sources.set(DialSource::Api);
+				return true;
+			}
+			if !entry.sources.api {
 				return true;
 			}
 			entry.sources.clear(DialSource::Api);
@@ -215,15 +219,10 @@ impl DialMap {
 			}
 		});
 
+		// Whatever's left in `desired` but absent from the map needs a fresh dial.
 		desired
 			.iter()
-			.filter(|peer| match map.get_mut(*peer) {
-				Some(entry) => {
-					entry.sources.set(DialSource::Api);
-					false
-				}
-				None => true,
-			})
+			.filter(|peer| !map.contains_key(*peer))
 			.cloned()
 			.collect()
 	}
@@ -284,7 +283,12 @@ pub struct ClusterConfig {
 	/// Enable gossip discovery: advertise this relay's [`Self::node`] URL on the
 	/// cluster origin so peers can find and dial it (and so this relay discovers
 	/// peers the same way). Requires [`Self::node`]. Boolean flag: pass
-	/// `--cluster-mesh` to enable.
+	/// `--cluster-mesh` (or `=true` / `=false`).
+	///
+	/// Kept as a string for backwards compatibility: `--cluster-mesh` used to take
+	/// this relay's URL. A non-boolean value is treated as a legacy [`Self::node`]
+	/// (with a deprecation warning), or an error if it conflicts with an explicit
+	/// `--cluster-node`. Accepts a TOML boolean or string.
 	#[arg(
 		id = "cluster-mesh",
 		long = "cluster-mesh",
@@ -292,9 +296,9 @@ pub struct ClusterConfig {
 		default_missing_value = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 	)]
-	pub mesh: Option<bool>,
+	#[serde(default, deserialize_with = "deserialize_bool_or_string")]
+	pub mesh: Option<String>,
 
 	/// Use the token in this file when connecting to other nodes.
 	#[arg(id = "cluster-token", long = "cluster-token", env = "MOQ_CLUSTER_TOKEN")]
@@ -392,6 +396,36 @@ impl Cluster {
 		self.origin.with_root(&token.root)?.scope(&token.publish)
 	}
 
+	/// Resolve whether gossip is on and which URL this relay advertises, from
+	/// `cluster.node` and the (string-typed) `cluster.mesh` toggle.
+	///
+	/// `mesh` is `"true"` / `"false"` normally. For backwards compatibility a
+	/// non-boolean value is the legacy "advertise this URL" form: it turns gossip
+	/// on and supplies the node URL (with a deprecation warning), unless it
+	/// conflicts with an explicit `cluster.node`, which is an error.
+	fn resolve_mesh(&self) -> anyhow::Result<(bool, Option<String>)> {
+		let node = self.config.node.clone();
+		match self.config.mesh.as_deref() {
+			None => Ok((false, node)),
+			Some("true") => Ok((true, node)),
+			Some("false") => Ok((false, node)),
+			Some(legacy) => {
+				tracing::warn!(
+					value = %legacy,
+					"`--cluster-mesh` is now a boolean; treating the value as `--cluster-node` for backwards \
+					 compatibility. Set `--cluster-node <url>` and `--cluster-mesh` instead."
+				);
+				match &node {
+					Some(node) if node != legacy => anyhow::bail!(
+						"`--cluster-mesh` was given URL {legacy:?}, which conflicts with `--cluster-node` {node:?}. \
+						 `--cluster-mesh` is now a boolean; set the address only via `--cluster-node`."
+					),
+					_ => Ok((true, Some(legacy.to_owned()))),
+				}
+			}
+		}
+	}
+
 	/// Runs the cluster event loop.
 	///
 	/// Modes are derived from config: standalone (no work) returns immediately;
@@ -414,9 +448,9 @@ impl Cluster {
 			);
 		}
 
-		let gossip = self.config.mesh.unwrap_or(false);
+		let (gossip, node) = self.resolve_mesh()?;
 		anyhow::ensure!(
-			!gossip || self.config.node.is_some(),
+			!gossip || node.is_some(),
 			"`--cluster-mesh` (gossip) requires `--cluster-node <self-url>` so there's an address to advertise. \
 			 See https://doc.moq.dev/bin/relay/cluster."
 		);
@@ -478,7 +512,7 @@ impl Cluster {
 			let this = self.clone();
 			let token = token.clone();
 			let dialed = dialed.clone();
-			let node = self.config.node.clone();
+			let node = node.clone();
 			tasks.spawn(async move {
 				this.run_connect_api(source, node, token, dialed).await;
 			});
@@ -489,7 +523,7 @@ impl Cluster {
 		// nothing to discover, so we only run it when we also have an outbound peer.
 		let _self_registration: Option<BroadcastProducer> = if gossip {
 			// Checked above: gossip requires `node`.
-			let node = self.config.node.as_deref().expect("gossip requires --cluster-node");
+			let node = node.as_deref().expect("gossip requires --cluster-node");
 			let path = Path::new(MESH_PREFIX).join(node);
 			let broadcast = self
 				.origin
@@ -653,22 +687,19 @@ impl Cluster {
 		}
 	}
 
-	/// Watch a local peer-list file, reconciling whenever it changes. Prefers OS
-	/// filesystem notifications (inotify / FSEvents / kqueue via `notify`), with a
-	/// periodic re-check as a safety net for missed events and network filesystems.
-	/// Fails static: a missing or malformed file keeps the current dials.
+	/// Watch a local peer-list file, reconciling whenever it changes. Uses OS
+	/// filesystem notifications (inotify / FSEvents / kqueue via `notify`), falling
+	/// back to polling only if a watcher can't be created. Fails static: a missing
+	/// or malformed file keeps the current dials.
 	async fn run_connect_api_file(&self, path: PathBuf, node: Option<String>, token: String, dialed: DialMap) {
 		let mut last_seen_mtime = None;
 		self.reload_connect_api_file(&path, &mut last_seen_mtime, &node, &token, &dialed);
 
-		let mut tick = tokio::time::interval(CONNECT_API_FILE_INTERVAL);
-		tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-		tick.tick().await; // Consume the immediate first tick; we just loaded.
-
 		// Watch the parent directory, not the file: editors and `mv` replace the
 		// file by atomic rename, which swaps its inode and would drop a watch set
-		// directly on it.
-		let watcher = path.parent().and_then(|dir| {
+		// directly on it. The channel bridges notify's off-runtime callback to this
+		// async task, where reconciling can spawn dials on the tokio runtime.
+		let watch = path.parent().and_then(|dir| {
 			let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 			let mut watcher = notify::recommended_watcher(move |event| {
 				let _ = tx.send(event);
@@ -678,24 +709,25 @@ impl Cluster {
 			Some((watcher, rx))
 		});
 
-		if let Some((_watcher, mut events)) = watcher {
-			loop {
-				tokio::select! {
-					event = events.recv() => match event {
-						Some(Ok(_)) => {}
-						Some(Err(err)) => tracing::warn!(%err, ?path, "cluster.connect_api file watcher error"),
-						None => break, // watcher gone; drop to polling below
-					},
-					_ = tick.tick() => {}
+		match watch {
+			// The mtime check in reload coalesces the duplicate events notify emits
+			// per change and ignores activity on other files in the directory.
+			Some((_watcher, mut events)) => {
+				while let Some(event) = events.recv().await {
+					if let Err(err) = event {
+						tracing::warn!(%err, ?path, "cluster.connect_api file watcher error");
+						continue;
+					}
+					self.reload_connect_api_file(&path, &mut last_seen_mtime, &node, &token, &dialed);
 				}
-				self.reload_connect_api_file(&path, &mut last_seen_mtime, &node, &token, &dialed);
 			}
-		}
-
-		// Polling fallback: no watcher could be created, or it stopped.
-		loop {
-			tick.tick().await;
-			self.reload_connect_api_file(&path, &mut last_seen_mtime, &node, &token, &dialed);
+			None => {
+				let mut tick = tokio::time::interval(CONNECT_API_FILE_INTERVAL);
+				loop {
+					tick.tick().await;
+					self.reload_connect_api_file(&path, &mut last_seen_mtime, &node, &token, &dialed);
+				}
+			}
 		}
 	}
 
@@ -712,12 +744,9 @@ impl Cluster {
 		token: &str,
 		dialed: &DialMap,
 	) {
-		let mtime = match std::fs::metadata(path).and_then(|m| m.modified()) {
-			Ok(mtime) => mtime,
-			Err(err) => {
-				tracing::warn!(%err, ?path, "cluster.connect_api file unavailable; keeping current peers");
-				return;
-			}
+		let Ok(mtime) = std::fs::metadata(path).and_then(|m| m.modified()) else {
+			tracing::warn!(?path, "cluster.connect_api file unavailable; keeping current peers");
+			return;
 		};
 		if *last_seen_mtime == Some(mtime) {
 			return;
@@ -873,6 +902,30 @@ fn revalidate_after(cache_control: &str) -> Option<Duration> {
 /// treated as a local file path, which needs no TLS client).
 fn connect_api_is_http(source: &str) -> bool {
 	Url::parse(source).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+/// Deserialize a field that accepts either a TOML boolean or string into an
+/// `Option<String>` (booleans become `"true"` / `"false"`). Lets `cluster.mesh`
+/// take the modern `mesh = true` form or the legacy `mesh = "<url>"` form.
+fn deserialize_bool_or_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+	D: serde::Deserializer<'de>,
+{
+	use serde::Deserialize as _;
+
+	#[derive(serde::Deserialize)]
+	#[serde(untagged)]
+	enum BoolOrString {
+		Bool(bool),
+		Str(String),
+	}
+
+	Ok(
+		Option::<BoolOrString>::deserialize(deserializer)?.map(|value| match value {
+			BoolOrString::Bool(value) => value.to_string(),
+			BoolOrString::Str(value) => value,
+		}),
+	)
 }
 
 #[cfg(test)]
@@ -1102,7 +1155,7 @@ mod tests {
 	#[tokio::test]
 	async fn gossip_without_node_errors() {
 		let config = ClusterConfig {
-			mesh: Some(true),
+			mesh: Some("true".to_string()),
 			..Default::default()
 		};
 		let err = Cluster::new(config).run().await.expect_err("should error");
@@ -1139,7 +1192,7 @@ mod tests {
 	async fn passive_rendezvous_runs_without_client_and_advertises_self() {
 		let cluster = Cluster::new(ClusterConfig {
 			node: Some("rendezvous.example.com:4443".to_string()),
-			mesh: Some(true),
+			mesh: Some("true".to_string()),
 			..Default::default()
 		});
 
@@ -1169,9 +1222,9 @@ mod tests {
 		handle.abort();
 	}
 
-	/// `cluster.node` (identity) and the boolean `cluster.mesh` (gossip toggle)
-	/// round-trip through TOML and survive the CLI re-parse when no flags override
-	/// them. `mesh` is `Option<bool>` for exactly that clobber-safety.
+	/// `cluster.node` (identity) and `cluster.mesh` (gossip toggle) round-trip
+	/// through TOML and survive the CLI re-parse when no flags override them.
+	/// `mesh` is a string (clobber-safe) that accepts a TOML boolean.
 	#[test]
 	fn cluster_node_and_mesh_round_trip() {
 		let toml =
@@ -1184,8 +1237,35 @@ mod tests {
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.cluster.node.as_deref(), Some("us-east.example.com:4443"));
-		assert_eq!(config.cluster.mesh, Some(true));
+		// A TOML boolean deserializes into the string form.
+		assert_eq!(config.cluster.mesh.as_deref(), Some("true"));
 		assert_eq!(config.cluster.connect, vec!["root.example.com:4443".to_string()]);
+	}
+
+	/// The legacy `--cluster-mesh <url>` form (now a boolean) is honored for
+	/// backwards compatibility: it enables gossip and supplies the node URL.
+	#[test]
+	fn legacy_mesh_url_enables_gossip_as_node() {
+		let cluster = Cluster::new(ClusterConfig {
+			mesh: Some("rendezvous.example.com:4443".to_string()),
+			..Default::default()
+		});
+		let (gossip, node) = cluster.resolve_mesh().expect("legacy mesh url resolves");
+		assert!(gossip);
+		assert_eq!(node.as_deref(), Some("rendezvous.example.com:4443"));
+	}
+
+	/// A legacy mesh URL that disagrees with an explicit `--cluster-node` is a
+	/// conflict, not a silent pick.
+	#[test]
+	fn legacy_mesh_url_conflicting_with_node_errors() {
+		let cluster = Cluster::new(ClusterConfig {
+			mesh: Some("a.example.com:4443".to_string()),
+			node: Some("b.example.com:4443".to_string()),
+			..Default::default()
+		});
+		let err = cluster.resolve_mesh().expect_err("conflict should error");
+		assert!(format!("{err}").contains("conflicts with"), "got: {err}");
 	}
 
 	/// `cluster.connect_api` set in TOML must survive the CLI re-parse when no
