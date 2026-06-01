@@ -667,6 +667,9 @@ impl Cluster {
 		http: ClientWithMiddleware,
 	) {
 		let mut tick = tokio::time::interval(CONNECT_API_POLL_INTERVAL);
+		// A slow fetch must not bank missed ticks into a catch-up burst; just resume
+		// the cadence from the next whole interval.
+		tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 		loop {
 			tick.tick().await;
 
