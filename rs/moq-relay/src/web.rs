@@ -450,15 +450,14 @@ async fn serve_announced(
 		None => String::new(),
 	};
 
-	let mut params = AuthParams {
+	let params = AuthParams {
 		path: prefix,
 		jwt: query.jwt,
 	};
-	// Resolve a vanity/id alias in the first path segment to the canonical id,
-	// matching the QUIC/WebTransport path so all transports scope identically.
-	params.path = state.auth.resolve_path(&params.path).await;
 	let token = if mtls.is_some() {
-		AuthToken::unrestricted(moq_net::Path::new(&params.path).to_owned())
+		// mTLS peers only need the canonical root (--auth-api alias).
+		let root = state.auth.resolve_root(&params.path).await;
+		AuthToken::unrestricted(moq_net::Path::new(&root).to_owned())
 	} else {
 		state.auth.verify(&params).await?
 	};
@@ -493,18 +492,19 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let mut auth = AuthParams {
+	let auth = AuthParams {
 		path: path.join("/"),
 		jwt: params.auth.jwt,
 	};
-	// Resolve a vanity/id alias in the first path segment to the canonical id.
-	auth.path = state.auth.resolve_path(&auth.path).await;
-	let broadcast = auth.path.clone();
 	let token = if mtls.is_some() {
-		AuthToken::unrestricted(moq_net::Path::new(&auth.path).to_owned())
+		// mTLS peers only need the canonical root (--auth-api alias).
+		let root = state.auth.resolve_root(&auth.path).await;
+		AuthToken::unrestricted(moq_net::Path::new(&root).to_owned())
 	} else {
 		state.auth.verify(&auth).await?
 	};
+	// The token's root is the canonical (alias-resolved) broadcast path.
+	let broadcast = token.root.to_string();
 
 	let Some(origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());

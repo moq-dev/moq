@@ -112,24 +112,19 @@ impl Connection {
 	/// and full access is granted within the URL path's root. The cert's chain
 	/// to the configured CA is the only credential we require.
 	async fn authenticate(&self) -> Result<AuthToken, StatusError> {
-		// Resolve the URL path once (subdomain slug routing + alias resolution)
-		// so both the mTLS and JWT branches scope to the same canonical root.
 		let params = match self.request.url() {
-			Some(url) => {
-				let mut params = self.auth.params_from_url(url);
-				params.path = self.auth.resolve_path(&params.path).await;
-				params
-			}
+			Some(url) => self.auth.params_from_url(url),
 			None => AuthParams::default(),
 		};
 
 		if self.request.has_peer_certificate() {
 			tracing::debug!("mTLS peer authenticated");
-			// Scope the grant to the resolved URL path, the same root a JWT
-			// would resolve to. An mTLS publisher dialing a vanity alias lands
-			// on the canonical tree. Cluster peers dial "/", which resolves to
-			// an empty (unscoped) root.
-			return Ok(AuthToken::unrestricted(Path::new(&params.path).to_owned()));
+			// Scope the grant to the canonical root. An mTLS publisher dialing a
+			// vanity alias lands on the same tree a JWT would; cluster peers dial
+			// "/", which resolves to an empty (unscoped) root. mTLS peers skip the
+			// JWT/public parts of --auth-api, so only the alias is resolved.
+			let root = self.auth.resolve_root(&params.path).await;
+			return Ok(AuthToken::unrestricted(Path::new(&root).to_owned()));
 		}
 
 		Ok(self.auth.verify(&params).await?)

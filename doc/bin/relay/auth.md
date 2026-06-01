@@ -149,24 +149,24 @@ The client's connection URL path does **not** need to match the token's `root` e
 
 The connection is also rejected if the resulting permissions are empty (no publish or subscribe paths remain after scoping).
 
-### Alias Resolution
+### Unified Auth API (`--auth-api`)
 
-The relay can rewrite the **first path segment** of an incoming connection from a vanity/id alias to a project's canonical id before auth and origin-scoping run. This lets a project stay reachable by both its stable id and its current (or recently-changed) vanity path, all mapping to the same broadcast tree.
+Instead of wiring `--auth-key-dir` (URL form) and `--auth-public-api` separately, a relay can resolve **everything it needs to authorize a connection in one call** with `--auth-api <url>` (env `MOQ_AUTH_API`, or `auth_api` under `[auth]` in TOML). It is mutually exclusive with `--auth-key`, `--auth-key-dir`, `--auth-public`, and `--auth-public-api` (configuring both is a startup error); `--auth-domain` still applies.
 
-Configure it with `--auth-alias-api <url>` (env `MOQ_AUTH_ALIAS_API`, or `alias_api` under `[auth]` in TOML). On each connection the relay does `GET <base>/<first-segment>` over the same cached, mTLS-gated HTTP client used for `--auth-key-dir` and `--auth-public-api`:
+Per connection the relay issues `GET <base>/<connection-path>?kid=<kid>` over the same cached, mTLS-gated HTTP client used by the other auth fetches. The `kid` query is sent only when the connection carries a JWT (value taken from its header). The JSON response has three **optional** fields:
 
-- `200 {"root":"<canonical-id>"}` rewrites the first segment to `<canonical-id>`. The API may echo back the value it was given (a harmless no-op when the client already used the canonical id).
-- `404` leaves the path unchanged (no mapping).
+- `alias` — the canonical full root to scope this connection to: the path with its first segment (a stable id, current vanity, or recently-changed vanity) resolved to the project's canonical id, the rest of the path preserved (e.g. `demo/room/cam` → `x7k2qp/room/cam`). The relay uses it verbatim, so the server owns the entire mapping. Absent → the request path is used unchanged.
+- `public` — `{ "subscribe": [...], "publish": [...] }` anonymous access prefixes (relative to the root), used when there is no JWT. Absent → no public access.
+- `key` — the verifying JWK (a JSON string) for the requested `kid`. Absent → key-not-found, and the JWT is rejected.
 
-For example, with the API mapping `demo` to `x7k2qp`, both `cdn.moq.dev/demo/foo` and `cdn.moq.dev/x7k2qp/foo` resolve to the same `/x7k2qp/foo` tree.
+This lets a project stay reachable by both its stable id and its current/old vanity path, all mapping to the same broadcast tree: with the API resolving `demo` → `x7k2qp`, both `cdn.moq.dev/demo/foo` and `cdn.moq.dev/x7k2qp/foo` scope to `/x7k2qp/foo`.
 
 ```toml
 [auth]
-key = "my-key.jwk"
-alias_api = "https://api.moq.dev/cluster/alias"
+auth_api = "https://api.moq.dev/cluster/auth"
 ```
 
-Alias resolution **fails open**: on any network error, non-2xx-non-404 status, or unparseable response, the path is left unchanged and a warning is logged. The canonical id is the SDK default, so id-based connections keep working during an API outage; the endpoint's `Cache-Control` softens transient failures. (This is the opposite of the public-access API, which fails closed.) A root connection (`/`, e.g. a cluster peer) has no first segment and skips the API entirely.
+Unlike the standalone flags, the unified call **fails closed**: any network error, non-2xx status, or unparseable response rejects the connection. The verifying key itself comes from this call, so there is no safe fallback; the endpoint's `Cache-Control` softens transient failures. A root connection (`/`, e.g. a cluster peer) has no project segment, so mTLS peers skip the call entirely.
 
 ## Supported Algorithms
 

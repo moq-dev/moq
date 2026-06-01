@@ -98,32 +98,6 @@ fn match_domain(host: Option<&str>, domains: &[String]) -> Option<String> {
 	None
 }
 
-/// Rewrite the first path segment of `path` to `canonical`, preserving the rest
-/// of the path and the leading-`/` shape.
-///
-/// Pure (no HTTP) so the rewrite logic can be unit-tested directly. Callers
-/// guarantee `canonical` is non-empty and that `path` has a non-empty first
-/// segment; a root path (`/` or empty first segment) is returned unchanged as
-/// a defensive no-op.
-fn rewrite_first_segment(path: &str, canonical: &str) -> String {
-	let trimmed = path.strip_prefix('/').unwrap_or(path);
-	let (first, rest) = match trimmed.split_once('/') {
-		Some((first, rest)) => (first, rest),
-		None => (trimmed, ""),
-	};
-
-	// No first segment to rewrite (root connection): leave it alone.
-	if first.is_empty() {
-		return path.to_string();
-	}
-
-	if rest.is_empty() {
-		format!("/{canonical}")
-	} else {
-		format!("/{canonical}/{rest}")
-	}
-}
-
 /// Errors returned when authentication or authorization fails.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -333,34 +307,40 @@ pub struct AuthConfig {
 	#[serde_as(as = "OneOrMany<_>")]
 	pub domains: Vec<String>,
 
-	/// Base URL of an alias-resolution API that maps a vanity/id alias to a
-	/// project's canonical id.
+	/// Base URL of a unified auth API that resolves everything the relay needs to
+	/// authorize a connection in ONE call, replacing per-call `--auth-key-dir`
+	/// (URL form) + `--auth-public-api`.
 	///
-	/// When set, the relay rewrites the FIRST path segment of every incoming
-	/// connection before auth and origin-scoping run. The first segment is
-	/// appended to this base (`GET <base>/<segment>`) over the same cached,
-	/// mTLS-gated HTTP client used for `--auth-key-dir` and `--auth-public-api`.
-	/// The API responds with `{"root":"<canonical-id>"}` (200) to rewrite the
-	/// segment, or `404` to leave the path unchanged. The returned value may
-	/// equal the segment the relay sent (a harmless no-op when the client
-	/// already used the canonical id).
+	/// Mutually exclusive with `--auth-key`, `--auth-key-dir`, `--auth-public`,
+	/// and `--auth-public-api` (configuring both is a startup error).
+	/// `--auth-domain` still applies (subdomain->path runs first).
 	///
-	/// This lets a project stay reachable by both its stable id and its
-	/// current/old vanity path, all mapping to the same broadcast tree: e.g.
-	/// `cdn.moq.dev/demo/foo` and `cdn.moq.dev/x7k2qp/foo` resolve to the
-	/// same `/x7k2qp/foo`.
+	/// Per connection the relay issues `GET <base>/<connection-path>?kid=<kid>`
+	/// over the same cached, mTLS-gated HTTP client used by the other auth
+	/// fetches. The `kid` query is sent only when the connection carries a JWT
+	/// (value from its header). The response is a JSON object whose fields are
+	/// ALL optional:
 	///
-	/// Resolution FAILS OPEN: on any network error, non-2xx-non-404 status,
-	/// JSON parse error, or URL-join error the path is left unchanged and a
-	/// warning is logged. The canonical id is the SDK default, so id-based
-	/// connections must keep working during an API outage; the response cache
-	/// (`Cache-Control` from the endpoint) softens transient failures. This is
-	/// deliberately the opposite of the public-API path, which fails closed.
+	/// - `alias`: the canonical full root to scope this connection to (the path
+	///   with its first segment resolved to the project's stable id, the rest
+	///   preserved, e.g. `demo/room/cam` -> `x7k2qp/room/cam`). Used verbatim;
+	///   the server controls the whole mapping. Absent -> the request path is
+	///   used unchanged.
+	/// - `public`: `{ "subscribe": [...], "publish": [...] }` anonymous access
+	///   prefixes, relative to the root, used when there is no JWT. Absent ->
+	///   no public access.
+	/// - `key`: the verifying JWK (a JSON string) for the requested `kid`.
+	///   Absent -> key-not-found (the JWT is rejected).
 	///
-	/// Example: `https://api.moq.dev/cluster/alias`.
-	#[arg(long = "auth-alias-api", env = "MOQ_AUTH_ALIAS_API")]
+	/// FAILS CLOSED: any network error, non-2xx status, or parse error rejects
+	/// the connection. Unlike the standalone flags, the verifying key itself
+	/// comes from this call, so there is no safe fallback; the response cache
+	/// (`Cache-Control` from the endpoint) softens transient failures.
+	///
+	/// Example: `https://api.moq.dev/cluster/auth`.
+	#[arg(long = "auth-api", env = "MOQ_AUTH_API")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub alias_api: Option<String>,
+	pub auth_api: Option<String>,
 }
 
 /// Public access configuration.
@@ -475,19 +455,29 @@ impl Serialize for PublicConfig {
 	}
 }
 
-/// Response from the alias-resolution API: the project's canonical id.
-#[derive(Debug, Deserialize)]
-struct AliasResponse {
-	root: String,
-}
-
-/// Response from a public access API endpoint.
-#[derive(Debug, Deserialize)]
+/// Response from a public access API endpoint, and the `public` field of the
+/// unified [`AuthApiResponse`].
+#[derive(Debug, Default, Deserialize)]
 struct PublicResponse {
 	#[serde(default)]
 	subscribe: Vec<String>,
 	#[serde(default)]
 	publish: Vec<String>,
+}
+
+/// Response from the unified `--auth-api` endpoint. Every field is optional; the
+/// relay defaults anything absent (see [`AuthConfig::auth_api`]).
+#[derive(Debug, Default, Deserialize)]
+struct AuthApiResponse {
+	/// Canonical full root to scope to; absent -> use the request path as-is.
+	#[serde(default)]
+	alias: Option<String>,
+	/// Anonymous access prefixes; absent -> no public access.
+	#[serde(default)]
+	public: Option<PublicResponse>,
+	/// Verifying JWK (JSON string) for the requested kid; absent -> not found.
+	#[serde(default)]
+	key: Option<String>,
 }
 
 /// Resolved public access configuration.
@@ -522,6 +512,7 @@ impl AuthConfig {
 			&& self.public_subscribe.is_none()
 			&& self.public_publish.is_none()
 			&& self.public_api.is_none()
+			&& self.auth_api.is_none()
 	}
 }
 
@@ -643,10 +634,10 @@ pub struct Auth {
 	public: PublicAccess,
 	/// Domain suffixes for subdomain-based slug routing. See [`AuthConfig::domains`].
 	domains: Arc<[String]>,
-	/// Optional alias-resolution API: the first path segment is appended to the
-	/// base URL to resolve a vanity/id alias to a canonical id. See
-	/// [`AuthConfig::alias_api`].
-	alias: Option<(url::Url, ClientWithMiddleware)>,
+	/// Optional unified auth API: one call per connection resolves the key,
+	/// public access, and alias together. Mutually exclusive with the standalone
+	/// key/public sources. See [`AuthConfig::auth_api`].
+	auth_api: Option<(url::Url, ClientWithMiddleware)>,
 }
 
 impl Auth {
@@ -654,6 +645,19 @@ impl Auth {
 		anyhow::ensure!(
 			config.key.is_none() || config.key_dir.is_none(),
 			"cannot specify both --auth-key and --auth-key-dir"
+		);
+
+		// The unified --auth-api supplies key + public + alias itself, so it
+		// can't be combined with the standalone key/public sources.
+		anyhow::ensure!(
+			config.auth_api.is_none()
+				|| (config.key.is_none()
+					&& config.key_dir.is_none()
+					&& config.public.is_none()
+					&& config.public_subscribe.is_none()
+					&& config.public_publish.is_none()
+					&& config.public_api.is_none()),
+			"--auth-api cannot be combined with --auth-key/--auth-key-dir/--auth-public/--auth-public-api"
 		);
 
 		let tls = config.tls.to_client_tls()?.build()?;
@@ -738,8 +742,8 @@ impl Auth {
 			api,
 		};
 
-		if resolver.is_none() && public.is_empty() {
-			anyhow::bail!("no auth-key, auth-key-dir, or public path configured");
+		if resolver.is_none() && public.is_empty() && config.auth_api.is_none() {
+			anyhow::bail!("no auth-key, auth-key-dir, auth-api, or public path configured");
 		}
 
 		// Canonicalize domain suffixes once at startup: lowercase and prefix
@@ -757,10 +761,10 @@ impl Auth {
 		domains.sort_by_key(|d| std::cmp::Reverse(d.len()));
 
 		// Mirror the public-API base-URL handling: ensure a trailing slash so
-		// `Url::join` appends the first path segment rather than replacing the
-		// last URL segment.
-		let alias = if let Some(url_str) = config.alias_api {
-			let mut url = Url::parse(&url_str).context("invalid --auth-alias-api URL")?;
+		// `Url::join` appends the connection path rather than replacing the last
+		// URL segment.
+		let auth_api = if let Some(url_str) = config.auth_api {
+			let mut url = Url::parse(&url_str).context("invalid --auth-api URL")?;
 			if !url.path().ends_with('/') {
 				url.set_path(&format!("{}/", url.path()));
 			}
@@ -773,7 +777,7 @@ impl Auth {
 			resolver,
 			public,
 			domains: Arc::from(domains.into_boxed_slice()),
-			alias,
+			auth_api,
 		})
 	}
 
@@ -783,61 +787,98 @@ impl Auth {
 		AuthParams::from_url(url, &self.domains)
 	}
 
-	/// Resolve the first path segment of a connection path from a vanity/id
-	/// alias to the project's canonical id, via the configured alias API.
-	///
-	/// Returns `path` unchanged when no alias API is configured (the default),
-	/// when `path` has no first segment (a root `/` connection), when the API
-	/// returns 404 (no mapping), or on ANY error (fail-open; see
-	/// [`AuthConfig::alias_api`]). A successful 200 rewrites only the first
-	/// segment, preserving the rest of the path and the leading-`/` shape that
-	/// [`AuthParams::from_url`] produces.
-	pub(crate) async fn resolve_path(&self, path: &str) -> String {
-		let Some((base, client)) = &self.alias else {
+	/// Resolve a connection path to its canonical root via the unified
+	/// `--auth-api`, for callers that only need the root (i.e. mTLS peers, which
+	/// are already trusted and skip JWT/public). Returns `path` unchanged when no
+	/// auth API is configured, when `path` is a root (`/`) connection, or on ANY
+	/// error — mTLS peers fail OPEN since the cert is the credential, not the API.
+	pub(crate) async fn resolve_root(&self, path: &str) -> String {
+		let Some((base, client)) = &self.auth_api else {
 			return path.to_string();
 		};
 
-		// Trim a single leading '/', then split off the first segment.
-		let trimmed = path.strip_prefix('/').unwrap_or(path);
-		let (first, _rest) = match trimmed.split_once('/') {
-			Some((first, rest)) => (first, rest),
-			None => (trimmed, ""),
-		};
-
-		// Root connection ("/" or ""): nothing to resolve.
-		if first.is_empty() {
+		// Root connection ("/" or ""): nothing to resolve, skip the call.
+		if path.trim_matches('/').is_empty() {
 			return path.to_string();
 		}
 
-		let url = match base.join(first) {
-			Ok(url) => url,
+		match Self::fetch_auth_api(client, base, path, None).await {
+			Ok(resp) => resp.alias.unwrap_or_else(|| path.to_string()),
 			Err(err) => {
-				tracing::warn!(%err, %first, "alias resolution URL join failed; leaving path unchanged");
-				return path.to_string();
-			}
-		};
-
-		match Self::fetch_alias(client, &url).await {
-			Ok(Some(canonical)) if !canonical.is_empty() => rewrite_first_segment(path, &canonical),
-			Ok(_) => path.to_string(),
-			Err(err) => {
-				tracing::warn!(%err, %first, "alias resolution failed; leaving path unchanged (fail-open)");
+				tracing::warn!(%err, %path, "auth-api root resolution failed; using path unchanged");
 				path.to_string()
 			}
 		}
 	}
 
-	/// Fetch a single alias mapping. `Ok(None)` means 404 (no mapping);
-	/// `Ok(Some(root))` is a 200 with the canonical id; `Err` is any other
-	/// failure (network, non-2xx-non-404 status, or JSON parse).
-	async fn fetch_alias(client: &ClientWithMiddleware, url: &url::Url) -> Result<Option<String>, AuthError> {
-		let response = client.get(url.clone()).send().await?;
-		if response.status() == http::StatusCode::NOT_FOUND {
-			return Ok(None);
+	/// Build the unified auth-API request URL: the connection path appended to
+	/// the base (which has a trailing slash), with `kid` as a query param when a
+	/// JWT is present.
+	fn auth_api_url(base: &url::Url, path: &str, kid: Option<&str>) -> Result<url::Url, AuthError> {
+		let mut url = base.join(path.trim_start_matches('/'))?;
+		if let Some(kid) = kid {
+			url.query_pairs_mut().append_pair("kid", kid);
 		}
-		let body = response.error_for_status()?.text().await?;
-		let parsed: AliasResponse = serde_json::from_str(&body).map_err(|_| AuthError::DecodeFailed)?;
-		Ok(Some(parsed.root))
+		Ok(url)
+	}
+
+	/// One unified auth-API call. Fails CLOSED (any network / non-2xx / parse
+	/// error is an `Err`): with `--auth-api` the verifying key comes from here,
+	/// so there is no safe fallback.
+	async fn fetch_auth_api(
+		client: &ClientWithMiddleware,
+		base: &url::Url,
+		path: &str,
+		kid: Option<&str>,
+	) -> Result<AuthApiResponse, AuthError> {
+		let url = Self::auth_api_url(base, path, kid)?;
+		let body = client.get(url).send().await?.error_for_status()?.text().await?;
+		serde_json::from_str(&body).map_err(|_| AuthError::DecodeFailed)
+	}
+
+	/// Verify a connection via the unified `--auth-api`: one call returns the
+	/// alias (root), public access, and verifying key.
+	async fn verify_via_api(
+		&self,
+		base: &url::Url,
+		client: &ClientWithMiddleware,
+		params: &AuthParams,
+	) -> Result<AuthToken, AuthError> {
+		// A JWT's kid selects the verifying key; extract it (no kid -> the API
+		// returns no key -> we reject below).
+		let kid = match params.jwt.as_deref() {
+			Some(token) => {
+				jsonwebtoken::decode_header(token)
+					.map_err(|_| AuthError::DecodeFailed)?
+					.kid
+			}
+			None => None,
+		};
+
+		let resp = Self::fetch_auth_api(client, base, &params.path, kid.as_deref()).await?;
+		// Absent alias -> use the request path unchanged.
+		let root = resp.alias.unwrap_or_else(|| params.path.clone());
+
+		let claims = if let Some(token) = params.jwt.as_deref() {
+			let key_jwk = resp.key.ok_or(AuthError::KeyNotFound)?;
+			let key = Key::from_str(&key_jwk).map_err(|_| AuthError::DecodeFailed)?;
+			key.decode(token).map_err(|_| AuthError::DecodeFailed)?
+		} else {
+			let public = resp.public.unwrap_or_default();
+			if public.subscribe.is_empty() && public.publish.is_empty() {
+				return Err(AuthError::ExpectedToken);
+			}
+			// Public prefixes are relative to the connection root, so anchor the
+			// claims there (mirrors the standalone --auth-public-api path).
+			moq_token::Claims {
+				root: root.clone(),
+				subscribe: public.subscribe,
+				publish: public.publish,
+				..Default::default()
+			}
+		};
+
+		Self::finalize(&root, claims)
 	}
 
 	async fn fetch_public_response(client: &ClientWithMiddleware, url: &url::Url) -> Result<PublicResponse, AuthError> {
@@ -849,6 +890,11 @@ impl Auth {
 	/// If no token is provided, then the claims will use the public access configuration.
 	#[allow(deprecated)] // `claims.cluster` is deprecated but still accepted for backwards compat
 	pub async fn verify(&self, params: &AuthParams) -> Result<AuthToken, AuthError> {
+		// The unified API resolves key + public + alias in one call.
+		if let Some((base, client)) = &self.auth_api {
+			return self.verify_via_api(base, client, params).await;
+		}
+
 		let claims = if let Some(token) = params.jwt.as_deref() {
 			let Some(resolver) = &self.resolver else {
 				return Err(AuthError::UnexpectedToken);
@@ -894,8 +940,16 @@ impl Auth {
 			return Err(AuthError::ExpectedToken);
 		};
 
-		// Get the path from the URL, removing any leading or trailing slashes.
-		let root = Path::new(&params.path);
+		Self::finalize(&params.path, claims)
+	}
+
+	/// Reduce verified `claims` against the connection `root_str` into an
+	/// [`AuthToken`]. The connection path and the token root must overlap; the
+	/// permission prefixes are re-based onto the connection root and any that
+	/// fall outside it are dropped. Shared by the standalone and `--auth-api`
+	/// paths.
+	fn finalize(root_str: &str, claims: moq_token::Claims) -> Result<AuthToken, AuthError> {
+		let root = Path::new(root_str);
 		let claims_root = Path::new(&claims.root);
 
 		// The URL path and the token root must overlap:
@@ -2667,69 +2721,13 @@ api = "https://api.example.com/access"
 	}
 
 	// ---------------------------------------------------------------------
-	// Alias resolution
+	// Unified --auth-api
 	// ---------------------------------------------------------------------
 
-	#[test]
-	fn rewrite_first_segment_simple() {
-		assert_eq!(rewrite_first_segment("/demo", "x7k2qp"), "/x7k2qp");
-	}
-
-	#[test]
-	fn rewrite_first_segment_with_rest() {
-		assert_eq!(rewrite_first_segment("/demo/room/cam", "x7k2qp"), "/x7k2qp/room/cam");
-	}
-
-	#[test]
-	fn rewrite_first_segment_no_leading_slash() {
-		// serve_fetch passes paths without a leading slash; the output still
-		// gets the canonical leading-slash shape (harmless; Path normalizes it).
-		assert_eq!(rewrite_first_segment("demo/room", "x7k2qp"), "/x7k2qp/room");
-	}
-
-	#[test]
-	fn rewrite_first_segment_trailing_slash() {
-		// A single-segment path with a trailing slash has an empty `rest`, so the
-		// trailing slash is dropped. Harmless: Path normalizes trailing slashes
-		// anyway, and both `/x7k2qp` and `/x7k2qp/` scope to the same root.
-		assert_eq!(rewrite_first_segment("/demo/", "x7k2qp"), "/x7k2qp");
-	}
-
-	#[test]
-	fn rewrite_first_segment_id_to_id_noop_shape() {
-		// The API may echo the same value when the client already used the id.
-		assert_eq!(rewrite_first_segment("/x7k2qp/room", "x7k2qp"), "/x7k2qp/room");
-	}
-
-	#[test]
-	fn rewrite_first_segment_root_unchanged() {
-		// Empty first segment (root connection) is a defensive no-op.
-		assert_eq!(rewrite_first_segment("/", "x7k2qp"), "/");
-		assert_eq!(rewrite_first_segment("", "x7k2qp"), "");
-	}
-
-	#[tokio::test]
-	async fn resolve_path_no_alias_api_is_noop() -> anyhow::Result<()> {
-		// Without --auth-alias-api, resolve_path returns the input verbatim. This
-		// is the default for the vast majority of deployments and is what keeps
-		// the existing `verify` tests (which never configure an alias) valid.
-		let auth = Auth::new(AuthConfig {
-			public: simple_public("demo"),
-			..Default::default()
-		})
-		.await?;
-
-		assert_eq!(auth.resolve_path("/demo/room").await, "/demo/room");
-		assert_eq!(auth.resolve_path("/").await, "/");
-		assert_eq!(auth.resolve_path("").await, "");
-		Ok(())
-	}
-
-	/// Build an Auth wired to a wiremock server's `/alias/` URL alias API.
-	async fn auth_with_alias_api(server: &MockServer) -> Auth {
+	/// Build an Auth wired to a wiremock server's `/auth/` unified endpoint.
+	async fn auth_with_api(server: &MockServer) -> Auth {
 		Auth::new(AuthConfig {
-			public: simple_public(""),
-			alias_api: Some(format!("{}/alias/", server.uri())),
+			auth_api: Some(format!("{}/auth/", server.uri())),
 			..Default::default()
 		})
 		.await
@@ -2737,87 +2735,209 @@ api = "https://api.example.com/access"
 	}
 
 	#[tokio::test]
-	async fn resolve_path_rewrites_via_http() -> anyhow::Result<()> {
+	async fn auth_api_jwt_scopes_to_alias() -> anyhow::Result<()> {
+		// JWT connection: the unified call returns the verifying key plus the
+		// full resolved alias; the token scopes to that alias root.
 		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+
 		Mock::given(method("GET"))
-			.and(path_matcher("/alias/demo"))
-			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"root":"x7k2qp"}"#))
+			.and(path_matcher("/auth/demo/room"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(format!(
+				r#"{{"alias":"x7k2qp/room","key":{}}}"#,
+				serde_json::to_string(&jwk_body(&key))?
+			)))
 			.mount(&server)
 			.await;
 
-		let auth = auth_with_alias_api(&server).await;
-		assert_eq!(auth.resolve_path("/demo/room").await, "/x7k2qp/room");
+		let auth = auth_with_api(&server).await;
+
+		let claims = moq_token::Claims {
+			root: "x7k2qp/room".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/demo/room".into(),
+				jwt: Some(token),
+			})
+			.await?;
+		assert_eq!(verified.root, "x7k2qp/room".as_path());
+		assert_eq!(verified.subscribe, vec!["".as_path()]);
 		Ok(())
 	}
 
 	#[tokio::test]
-	async fn resolve_path_404_unchanged() -> anyhow::Result<()> {
+	async fn auth_api_full_root_passthrough() -> anyhow::Result<()> {
+		// The server returns the FULL resolved root (deep path preserved); the
+		// relay uses it verbatim — no client-side first-segment rewriting.
 		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+
 		Mock::given(method("GET"))
-			.respond_with(ResponseTemplate::new(404))
+			.and(path_matcher("/auth/demo/room/cam"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(format!(
+				r#"{{"alias":"x7k2qp/room/cam","key":{}}}"#,
+				serde_json::to_string(&jwk_body(&key))?
+			)))
 			.mount(&server)
 			.await;
 
-		let auth = auth_with_alias_api(&server).await;
-		assert_eq!(auth.resolve_path("/unknown/room").await, "/unknown/room");
+		let auth = auth_with_api(&server).await;
+		let claims = moq_token::Claims {
+			root: "x7k2qp".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/demo/room/cam".into(),
+				jwt: Some(token),
+			})
+			.await?;
+		assert_eq!(verified.root, "x7k2qp/room/cam".as_path());
 		Ok(())
 	}
 
 	#[tokio::test]
-	async fn resolve_path_server_error_fails_open() -> anyhow::Result<()> {
+	async fn auth_api_anonymous_uses_public() -> anyhow::Result<()> {
+		// No JWT: claims come from the `public` field, anchored at the alias root.
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth/demo"))
+			.respond_with(
+				ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp","public":{"subscribe":["cam"]}}"#),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let verified = auth.verify(&AuthParams::new("/demo")).await?;
+		assert_eq!(verified.root, "x7k2qp".as_path());
+		assert_eq!(verified.subscribe, vec!["cam".as_path()]);
+		assert_eq!(verified.publish, vec![]);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_unknown_project_echoes_path() -> anyhow::Result<()> {
+		// Absent `alias` -> the relay falls back to the request path as the root.
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth/unknown"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.set_body_string(format!(r#"{{"key":{}}}"#, serde_json::to_string(&jwk_body(&key))?)),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let claims = moq_token::Claims {
+			root: "unknown".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/unknown".into(),
+				jwt: Some(token),
+			})
+			.await?;
+		assert_eq!(verified.root, "unknown".as_path());
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_missing_key_rejects_jwt() -> anyhow::Result<()> {
+		// A JWT connection whose kid the API can't resolve (no `key`) is rejected.
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth/demo"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp"}"#))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let token = key.encode(&moq_token::Claims {
+			root: "x7k2qp".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		})?;
+		let result = auth
+			.verify(&AuthParams {
+				path: "/demo".into(),
+				jwt: Some(token),
+			})
+			.await;
+		assert!(matches!(result, Err(AuthError::KeyNotFound)));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_server_error_fails_closed() -> anyhow::Result<()> {
+		// Unlike the old alias step, the unified call fails CLOSED: the key comes
+		// from here, so a 5xx must reject rather than silently allow.
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
 			.respond_with(ResponseTemplate::new(500))
 			.mount(&server)
 			.await;
 
-		let auth = auth_with_alias_api(&server).await;
-		// Fail-open: a 5xx must NOT take down id-based connections.
-		assert_eq!(auth.resolve_path("/demo/room").await, "/demo/room");
+		let auth = auth_with_api(&server).await;
+		let result = auth.verify(&AuthParams::new("/demo")).await;
+		assert!(result.is_err());
 		Ok(())
 	}
 
 	#[tokio::test]
-	async fn resolve_path_invalid_json_fails_open() -> anyhow::Result<()> {
+	async fn auth_api_mtls_resolve_root_uses_alias() -> anyhow::Result<()> {
+		// mTLS peers only need the canonical root; resolve_root returns the alias.
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
-			.respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+			.and(path_matcher("/auth/demo/room"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp/room"}"#))
 			.mount(&server)
 			.await;
 
-		let auth = auth_with_alias_api(&server).await;
-		assert_eq!(auth.resolve_path("/demo/room").await, "/demo/room");
+		let auth = auth_with_api(&server).await;
+		assert_eq!(auth.resolve_root("/demo/room").await, "x7k2qp/room");
 		Ok(())
 	}
 
 	#[tokio::test]
-	async fn resolve_path_root_segment_skips_api() -> anyhow::Result<()> {
+	async fn auth_api_resolve_root_skips_api_for_root() -> anyhow::Result<()> {
+		// A root connection ("/") has no project segment, so cluster peers don't
+		// hit the API at all.
 		let server = MockServer::start().await;
-		// expect(0): a root connection ("/") has no first segment, so the API
-		// must never be hit (cluster peers dial "/").
 		Mock::given(method("GET"))
 			.respond_with(ResponseTemplate::new(500))
 			.expect(0)
 			.mount(&server)
 			.await;
 
-		let auth = auth_with_alias_api(&server).await;
-		assert_eq!(auth.resolve_path("/").await, "/");
+		let auth = auth_with_api(&server).await;
+		assert_eq!(auth.resolve_root("/").await, "/");
 		Ok(())
 	}
 
 	#[tokio::test]
-	async fn resolve_path_empty_root_response_unchanged() -> anyhow::Result<()> {
-		let server = MockServer::start().await;
-		Mock::given(method("GET"))
-			.and(path_matcher("/alias/demo"))
-			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"root":""}"#))
-			.mount(&server)
-			.await;
-
-		let auth = auth_with_alias_api(&server).await;
-		// An empty `root` is treated as no mapping.
-		assert_eq!(auth.resolve_path("/demo/room").await, "/demo/room");
-		Ok(())
+	async fn auth_api_mutually_exclusive_with_key_dir() {
+		// --auth-api can't be combined with the standalone key/public sources.
+		let result = Auth::new(AuthConfig {
+			auth_api: Some("https://api.example.com/cluster/auth".into()),
+			key_dir: Some("https://api.example.com/cluster/keys".into()),
+			..Default::default()
+		})
+		.await;
+		assert!(result.is_err());
 	}
 }
