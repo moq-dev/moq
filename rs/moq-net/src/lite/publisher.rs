@@ -646,7 +646,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		// every subsequent delta is signed against the previous frame.
 		let mut prev_ts: u64 = 0;
 		while let Some(frame) = self.next_frame(&mut stream, &mut priority, &mut group).await? {
-			self.serve_frame(&mut stream, &mut priority, frame, &mut prev_ts).await?;
+			self.serve_frame(&mut stream, &mut priority, frame, &mut prev_ts)
+				.await?;
 		}
 
 		stream.finish()?;

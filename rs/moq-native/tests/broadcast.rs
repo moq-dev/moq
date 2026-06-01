@@ -206,9 +206,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 			.expect("next_frame failed")
 			.expect("group closed prematurely");
 
-		let ts = frame_sub
-			.timestamp
-			.expect("Lite05 must carry per-frame timestamps");
+		let ts = frame_sub.timestamp.expect("Lite05 must carry per-frame timestamps");
 		assert_eq!(ts.scale(), Timescale::MICRO);
 		assert_eq!(ts.value(), expected_us);
 
