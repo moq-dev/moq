@@ -1,6 +1,9 @@
 import { Signal } from "@moq/signals";
 import { Group } from "./group.ts";
 
+/** Default {@link Track.cache} window (milliseconds) when the publisher doesn't set one. */
+export const DEFAULT_CACHE_MS = 5000;
+
 export class TrackState {
 	groups = new Signal<Group[]>([]);
 	closed = new Signal<boolean | Error>(false);
@@ -17,6 +20,13 @@ export class Track {
 	 * track is served so the negotiated codec is known when SUBSCRIBE_OK is sent.
 	 */
 	compress = false;
+
+	/**
+	 * How long (milliseconds) the publisher keeps old groups available before
+	 * evicting them. Announced in SUBSCRIBE_OK so relays re-serve with the same
+	 * window. Lite05+ only; older drafts assume {@link DEFAULT_CACHE_MS}.
+	 */
+	cache = DEFAULT_CACHE_MS;
 
 	state = new TrackState();
 	#next?: number;

@@ -23,9 +23,8 @@ use std::{
 	time::Duration,
 };
 
-/// Groups older than this are evicted from the track cache (unless they are the max_sequence group).
-// TODO: Replace with a configurable cache size.
-const MAX_GROUP_AGE: Duration = Duration::from_secs(5);
+/// Default [`Track::cache`] age when the publisher doesn't set one.
+pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
 
 /// Publisher-side properties of a track.
 ///
@@ -33,7 +32,7 @@ const MAX_GROUP_AGE: Duration = Duration::from_secs(5);
 /// while the track is alive. A subscriber learns them via
 /// [`BroadcastConsumer::consume_track`](crate::BroadcastConsumer::consume_track),
 /// which returns the publisher's [`Track`] once the subscription is accepted.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {
 	/// Identifier within a broadcast. Unique per [`crate::Broadcast`].
@@ -52,6 +51,52 @@ pub struct Track {
 	/// the wrong scale prevents silent corruption.
 	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
 	pub timescale: Option<Timescale>,
+	/// How long the publisher keeps old groups available before evicting them
+	/// (the newest group is always retained). A subscriber's
+	/// [`Subscription::stale`] window is clamped to this, since a group can't be
+	/// waited for longer than it's kept around. Announced in SUBSCRIBE_OK so
+	/// relays re-serve with the same window. Defaults to [`DEFAULT_CACHE`].
+	#[cfg_attr(
+		feature = "serde",
+		serde(
+			default = "default_cache",
+			skip_serializing_if = "is_default_cache",
+			with = "cache_millis"
+		)
+	)]
+	pub cache: Duration,
+}
+
+impl Default for Track {
+	fn default() -> Self {
+		Self::new(String::new())
+	}
+}
+
+#[cfg(feature = "serde")]
+fn default_cache() -> Duration {
+	DEFAULT_CACHE
+}
+
+#[cfg(feature = "serde")]
+fn is_default_cache(cache: &Duration) -> bool {
+	*cache == DEFAULT_CACHE
+}
+
+/// Serialize [`Track::cache`] as a bare integer of milliseconds, matching the
+/// catalog's other durations (and the wire), rather than serde's `{secs, nanos}`.
+#[cfg(feature = "serde")]
+mod cache_millis {
+	use std::time::Duration;
+
+	pub fn serialize<S: serde::Serializer>(cache: &Duration, s: S) -> Result<S::Ok, S::Error> {
+		s.serialize_u64(cache.as_millis() as u64)
+	}
+
+	pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+		let ms = <u64 as serde::Deserialize>::deserialize(d)?;
+		Ok(Duration::from_millis(ms))
+	}
 }
 
 impl Track {
@@ -61,6 +106,7 @@ impl Track {
 			name: name.into(),
 			compress: false,
 			timescale: None,
+			cache: DEFAULT_CACHE,
 		}
 	}
 
@@ -76,6 +122,19 @@ impl Track {
 	pub fn with_timescale(mut self, timescale: Timescale) -> Self {
 		self.timescale = Some(timescale);
 		self
+	}
+
+	/// Set how long old groups stay available before eviction, returning `self` for chaining.
+	pub fn with_cache(mut self, cache: Duration) -> Self {
+		self.cache = cache;
+		self
+	}
+
+	/// Clamp a subscriber's stale window to this track's [`Self::cache`]: a
+	/// subscriber can't wait for a late group longer than the publisher keeps it.
+	/// `Duration::ZERO` (skip immediately) is left untouched by the `min`.
+	fn clamp_stale(&self, stale: Duration) -> Duration {
+		stale.min(self.cache)
 	}
 
 	/// Consume this [`Track`] to create a producer that owns its metadata.
@@ -333,13 +392,13 @@ impl State {
 		}
 	}
 
-	/// Evict groups older than MAX_GROUP_AGE, never evicting the max_sequence group.
+	/// Evict groups older than `max_age`, never evicting the max_sequence group.
 	///
 	/// Groups are in arrival order, so we can stop early when we hit a non-expired,
 	/// non-max_sequence group (everything after it arrived even later).
 	/// When max_sequence is at the front, we skip past it and tombstone expired groups
 	/// behind it.
-	fn evict_expired(&mut self, now: tokio::time::Instant) {
+	fn evict_expired(&mut self, now: tokio::time::Instant, max_age: Duration) {
 		for slot in self.groups.iter_mut() {
 			let Some((group, created_at)) = slot else { continue };
 
@@ -347,7 +406,7 @@ impl State {
 				continue;
 			}
 
-			if now.duration_since(*created_at) <= MAX_GROUP_AGE {
+			if now.duration_since(*created_at) <= max_age {
 				break;
 			}
 
@@ -469,7 +528,7 @@ impl TrackProducer {
 		let now = tokio::time::Instant::now();
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.sequence));
 		state.groups.push_back(Some((group.clone(), now)));
-		state.evict_expired(now);
+		state.evict_expired(now, self.info.cache);
 
 		Ok(group)
 	}
@@ -493,7 +552,7 @@ impl TrackProducer {
 		state.duplicates.insert(sequence);
 		state.max_sequence = Some(sequence);
 		state.groups.push_back(Some((group.clone(), now)));
-		state.evict_expired(now);
+		state.evict_expired(now, self.info.cache);
 
 		Ok(group)
 	}
@@ -555,7 +614,8 @@ impl TrackProducer {
 	///
 	/// The preferences feed the producer's [`Self::subscription`] aggregate and
 	/// can be changed later via [`TrackSubscriber::update`].
-	pub fn subscribe(&self, subscription: Subscription) -> TrackSubscriber {
+	pub fn subscribe(&self, mut subscription: Subscription) -> TrackSubscriber {
+		subscription.stale = self.info.clamp_stale(subscription.stale);
 		let subscription = Arc::new(Mutex::new(subscription));
 		if let Ok(mut state) = self.state.write() {
 			state.subscriptions.push(Arc::downgrade(&subscription));
@@ -664,7 +724,8 @@ impl TrackWeak {
 		self.state.is_closed()
 	}
 
-	pub fn subscribe(&self, subscription: Subscription) -> TrackSubscriber {
+	pub fn subscribe(&self, mut subscription: Subscription) -> TrackSubscriber {
+		subscription.stale = self.info.clamp_stale(subscription.stale);
 		let subscription = Arc::new(Mutex::new(subscription));
 		// Register the preference if the producer is still alive so it shows up
 		// in the aggregate; otherwise the consumer will just observe close.
@@ -886,7 +947,8 @@ impl TrackSubscriber {
 	}
 
 	/// Replace this subscriber's preferences, updating the producer's aggregate.
-	pub fn update(&self, subscription: Subscription) {
+	pub fn update(&self, mut subscription: Subscription) {
+		subscription.stale = self.info.clamp_stale(subscription.stale);
 		*self.subscription.lock().unwrap() = subscription;
 	}
 
@@ -981,7 +1043,7 @@ mod test {
 		}
 
 		// Advance time past the eviction threshold.
-		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
 
 		// Append a new group to trigger eviction.
 		producer.append_group().unwrap(); // seq 3
@@ -1008,7 +1070,7 @@ mod test {
 		producer.append_group().unwrap(); // seq 0
 
 		// Advance time past threshold.
-		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
 
 		// Append another group; seq 0 is expired and evicted.
 		producer.append_group().unwrap(); // seq 1
@@ -1046,12 +1108,47 @@ mod test {
 
 		let mut consumer = producer.subscribe_default();
 
-		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
 		producer.append_group().unwrap(); // seq 1
 
 		// Group 0 was evicted. Consumer should get group 1.
 		let group = consumer.assert_group();
 		assert_eq!(group.sequence, 1);
+	}
+
+	#[tokio::test]
+	async fn cache_age_controls_eviction() {
+		tokio::time::pause();
+
+		// A shorter cache evicts sooner than the default.
+		let mut producer = Track::new("test").with_cache(Duration::from_secs(1)).produce();
+		producer.append_group().unwrap(); // seq 0
+
+		// Past the custom cache but well within DEFAULT_CACHE.
+		tokio::time::advance(Duration::from_secs(2)).await;
+		producer.append_group().unwrap(); // seq 1
+
+		// Seq 0 is gone because the publisher only keeps groups for 1s.
+		let state = producer.state.read();
+		assert_eq!(live_groups(&state), 1);
+		assert_eq!(first_live_sequence(&state), 1);
+	}
+
+	#[test]
+	fn stale_clamped_to_cache() {
+		let producer = Track::new("test").with_cache(Duration::from_secs(2)).produce();
+
+		// A stale window beyond the cache is capped to the cache; a group can't be
+		// waited for longer than the publisher keeps it.
+		let subscriber = producer.subscribe(Subscription::default().with_stale(Duration::from_secs(10)));
+		assert_eq!(subscriber.subscription().stale, Duration::from_secs(2));
+
+		// A window within the cache is left alone, and ZERO (skip immediately) stays ZERO.
+		subscriber.update(Subscription::default().with_stale(Duration::from_millis(500)));
+		assert_eq!(subscriber.subscription().stale, Duration::from_millis(500));
+
+		subscriber.update(Subscription::default().with_stale(Duration::ZERO));
+		assert_eq!(subscriber.subscription().stale, Duration::ZERO);
 	}
 
 	#[tokio::test]
@@ -1072,7 +1169,7 @@ mod test {
 		}
 
 		// Expire all three groups.
-		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
 
 		// Append seq 6 (becomes new max_sequence).
 		producer.append_group().unwrap(); // seq 6
@@ -1099,7 +1196,7 @@ mod test {
 		// Arrive: seq 5, then seq 3.
 		producer.create_group(Group { sequence: 5 }).unwrap();
 
-		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
 
 		// Seq 3 arrives late; max_sequence is still 5 (at front).
 		producer.create_group(Group { sequence: 3 }).unwrap();
@@ -1113,7 +1210,7 @@ mod test {
 		}
 
 		// Expire seq 3 as well.
-		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
 
 		// Seq 2 arrives late, triggering eviction.
 		producer.create_group(Group { sequence: 2 }).unwrap();
