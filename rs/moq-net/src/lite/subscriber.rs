@@ -744,13 +744,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		.await
 		.ok_or(Error::Cancel)?;
 
-		// Lite05+ MUST advertise a timescale alongside Compression; if the peer
-		// negotiated a versioned wire format without one, treat it as malformed.
-		if self.version.has_timestamps() && timescale.is_none() {
-			let _ = group.abort(Error::ProtocolViolation);
-			return Err(Error::ProtocolViolation);
-		}
-
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = group.closed() => Err(err),
@@ -782,15 +775,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		// Previous frame's raw timestamp value (in `timescale` units), for the
-		// zigzag-delta decode on Lite05+. The first frame's delta is its absolute
-		// value (prev_ts = 0 implicitly).
+		// zigzag-delta decode when timestamps are negotiated. The first frame's
+		// delta is its absolute value (prev_ts = 0 implicitly).
 		let mut prev_ts: u64 = 0;
 
 		loop {
-			let timestamp = if self.version.has_timestamps() {
-				// The subscriber gated on `timescale.is_some()` in `recv_group`
-				// before calling us, so unwrapping is safe here.
-				let scale = timescale.expect("has_timestamps implies negotiated timescale");
+			let timestamp = if let Some(scale) = timescale {
+				// Publisher advertised a timescale, so every frame on this stream
+				// is prefixed with a zigzag-delta timestamp varint.
 				let Some(zz) = stream.decode_maybe::<crate::coding::VarInt>().await? else {
 					break;
 				};

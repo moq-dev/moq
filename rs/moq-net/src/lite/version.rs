@@ -15,8 +15,11 @@ pub enum Version {
 }
 
 impl Version {
-	/// Whether this version carries per-frame timestamps and per-track timescale
-	/// on the wire.
+	/// Whether SUBSCRIBE_OK can carry a per-track timescale. When the publisher
+	/// advertises one, the publisher and subscriber agree to prefix every frame
+	/// with a zigzag-delta timestamp varint; with `None` the wire skips the
+	/// byte entirely, so this method only governs whether the negotiation field
+	/// exists, not whether timestamps are always present.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_timestamps(self) -> bool {
 		// Match form so future versions default forward (CLAUDE.md convention).

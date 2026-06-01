@@ -464,12 +464,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			Compression::None
 		};
 
-		// Lite05+ requires a track timescale to encode per-frame timestamps; a
-		// producer that didn't set one can't safely participate.
-		if version.has_timestamps() && track.timescale.is_none() {
-			return Err(Error::ProtocolViolation);
-		}
-		let timescale = track.timescale;
+		// Per-frame timestamps require both a publisher-advertised timescale and
+		// a wire format that carries it. Older drafts ignore `track.timescale`
+		// (the field never lands on the wire) and stream untimed frames; Lite05+
+		// honors `Some(_)` and skips the timestamp byte for `None`.
+		let timescale = if version.has_timestamps() {
+			track.timescale
+		} else {
+			None
+		};
 
 		let info = lite::SubscribeOk {
 			priority: subscribe.priority,
@@ -662,11 +665,13 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		mut frame: FrameConsumer,
 		prev_ts: &mut u64,
 	) -> Result<(), Error> {
-		if self.version.has_timestamps() {
-			// Lite05 wire layout per frame: [zigzag-delta timestamp][size][payload].
-			// Refuse a frame missing a timestamp or at the wrong scale rather than
-			// silently encoding a zero delta and corrupting decode.
-			let track_timescale = self.timescale.ok_or(Error::ProtocolViolation)?;
+		// Per-frame wire layout when `self.timescale` is Some:
+		// `[zigzag-delta timestamp][size][payload]`. With `None`, the timestamp
+		// is omitted entirely — saves a byte per frame on tracks where timing
+		// isn't meaningful (catalogs, control channels, IETF transport).
+		// Refuse a frame missing a timestamp or at the wrong scale rather than
+		// silently encoding a zero delta and corrupting decode.
+		if let Some(track_timescale) = self.timescale {
 			let ts = frame.timestamp.ok_or(Error::ProtocolViolation)?;
 			if ts.scale() != track_timescale {
 				return Err(Error::ProtocolViolation);

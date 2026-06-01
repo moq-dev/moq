@@ -229,6 +229,89 @@ async fn broadcast_moq_lite_05_timestamps_webtransport() {
 	lite05_timestamp_roundtrip("https").await;
 }
 
+/// On Lite05 a publisher that doesn't advertise a timescale still works:
+/// SUBSCRIBE_OK carries `timescale = 0` and neither side encodes a
+/// per-frame timestamp byte. Subscribers receive `frame.timestamp = None`.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_lite_05_without_timescale() {
+	use moq_native::moq_net::Subscription;
+
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let mut track = broadcast.create_track(Track::new("video")).expect("create track");
+
+	let mut group = track.append_group().expect("append group");
+	group.write_frame(b"hello".as_ref()).expect("write frame");
+	group.finish().expect("finish group");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-lite-05-wip".parse().unwrap()];
+	let mut server = server_config.init().expect("init server");
+	let addr = server.local_addr().expect("local addr");
+
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.version = vec!["moq-lite-05-wip".parse().unwrap()];
+	let client = client_config.init().expect("init client");
+	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("accept");
+		let session = request.with_publisher(pub_origin.clone()).ok().await?;
+		let _broadcast = broadcast;
+		let _track = track;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_consumer(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timeout")
+		.expect("connect failed");
+
+	let (_, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announce timeout")
+		.expect("origin closed");
+	let bc = bc.broadcast().expect("expected announce");
+
+	let mut track_sub = bc
+		.subscribe_track("video", Subscription::default())
+		.ok()
+		.await
+		.expect("subscribe_track failed");
+
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+		.await
+		.expect("recv_group timeout")
+		.expect("recv_group failed")
+		.expect("track closed");
+
+	let frame_sub = tokio::time::timeout(TIMEOUT, group_sub.next_frame())
+		.await
+		.expect("next_frame timeout")
+		.expect("next_frame failed")
+		.expect("group closed");
+
+	assert_eq!(
+		frame_sub.timestamp, None,
+		"no timescale negotiated, no per-frame timestamp"
+	);
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
 // ── Raw QUIC (moqt://) – same version on both sides ─────────────────
 
 #[tracing_test::traced_test]
