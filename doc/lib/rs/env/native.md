@@ -125,7 +125,7 @@ Subscribe to a media track and read frames using [`OrderedConsumer`](https://doc
 ```rust
 let track_consumer = broadcast
     .consume_track(&track_name)
-    .subscribe(moq_net::Subscription::new(1))
+    .subscribe(moq_net::Subscription::default().with_priority(1))
     .await?;
 let mut ordered = hang::container::OrderedConsumer::new(
     track_consumer,

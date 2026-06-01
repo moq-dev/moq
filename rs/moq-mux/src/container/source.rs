@@ -85,7 +85,7 @@ impl ExportSource {
 			state: SourceState::Subscribing(
 				broadcast
 					.consume_track(name)
-					.subscribe_pending(moq_net::Subscription::default()),
+					.subscribe(moq_net::Subscription::default()),
 			),
 			media: Some(media),
 			latency,
@@ -111,7 +111,7 @@ impl ExportSource {
 			state: SourceState::Subscribing(
 				broadcast
 					.consume_track(name)
-					.subscribe_pending(moq_net::Subscription::default()),
+					.subscribe(moq_net::Subscription::default()),
 			),
 			media: Some(media),
 			latency,
@@ -135,7 +135,7 @@ impl ExportSource {
 			state: SourceState::Subscribing(
 				broadcast
 					.consume_track(name)
-					.subscribe_pending(moq_net::Subscription::default()),
+					.subscribe(moq_net::Subscription::default()),
 			),
 			media: Some(media),
 			latency,

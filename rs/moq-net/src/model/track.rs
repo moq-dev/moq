@@ -113,6 +113,38 @@ impl Default for Subscription {
 	}
 }
 
+impl Subscription {
+	/// Set the delivery priority, returning `self` for chaining.
+	pub fn with_priority(mut self, priority: u8) -> Self {
+		self.priority = priority;
+		self
+	}
+
+	/// Set whether groups are delivered in sequence order, returning `self` for chaining.
+	pub fn with_ordered(mut self, ordered: bool) -> Self {
+		self.ordered = ordered;
+		self
+	}
+
+	/// Set how long to wait for a group before skipping it, returning `self` for chaining.
+	pub fn with_stale(mut self, stale: Duration) -> Self {
+		self.stale = stale;
+		self
+	}
+
+	/// Set the first group to deliver, returning `self` for chaining.
+	pub fn with_group_start(mut self, group_start: impl Into<Option<u64>>) -> Self {
+		self.group_start = group_start.into();
+		self
+	}
+
+	/// Set the last group to deliver (inclusive), returning `self` for chaining.
+	pub fn with_group_end(mut self, group_end: impl Into<Option<u64>>) -> Self {
+		self.group_end = group_end.into();
+		self
+	}
+}
+
 #[derive(Default)]
 struct State {
 	/// Groups in arrival order. `None` entries are tombstones for evicted groups.
