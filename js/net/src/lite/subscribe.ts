@@ -1,6 +1,7 @@
 import { Compression, compressionFromCode } from "../compression.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { DEFAULT_CACHE_MS } from "../track.ts";
 import * as Message from "./message.ts";
 import { Version } from "./version.ts";
 
@@ -177,6 +178,11 @@ export class SubscribeOk {
 	 * {@link Compression.None}.
 	 */
 	compression: Compression;
+	/**
+	 * How long (milliseconds) the publisher keeps old groups available before
+	 * evicting them. Draft-05+ only; older drafts assume {@link DEFAULT_CACHE_MS}.
+	 */
+	cache: number;
 
 	constructor({
 		priority = 0,
@@ -185,6 +191,7 @@ export class SubscribeOk {
 		startGroup = undefined,
 		endGroup = undefined,
 		compression = Compression.None,
+		cache = DEFAULT_CACHE_MS,
 	}: {
 		priority?: number;
 		ordered?: boolean;
@@ -192,6 +199,7 @@ export class SubscribeOk {
 		startGroup?: number;
 		endGroup?: number;
 		compression?: Compression;
+		cache?: number;
 	}) {
 		this.priority = priority;
 		this.ordered = ordered;
@@ -199,6 +207,7 @@ export class SubscribeOk {
 		this.startGroup = startGroup;
 		this.endGroup = endGroup;
 		this.compression = compression;
+		this.cache = cache;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -224,6 +233,7 @@ export class SubscribeOk {
 				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				await w.u53(this.compression);
+				await w.u53(this.cache);
 				break;
 		}
 	}
@@ -235,6 +245,7 @@ export class SubscribeOk {
 		let startGroup: number | undefined;
 		let endGroup: number | undefined;
 		let compression: Compression = Compression.None;
+		let cache: number = DEFAULT_CACHE_MS;
 
 		switch (version) {
 			case Version.DRAFT_02:
@@ -258,6 +269,7 @@ export class SubscribeOk {
 				startGroup = await r.u53();
 				endGroup = await r.u53();
 				compression = compressionFromCode(await r.u53());
+				cache = await r.u53();
 				break;
 		}
 
@@ -268,6 +280,7 @@ export class SubscribeOk {
 			startGroup: startGroup !== undefined && startGroup > 0 ? startGroup - 1 : undefined,
 			endGroup: endGroup !== undefined && endGroup > 0 ? endGroup - 1 : undefined,
 			compression,
+			cache,
 		});
 	}
 

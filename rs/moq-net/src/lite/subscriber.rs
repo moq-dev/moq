@@ -602,6 +602,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// path) can validate per-frame timestamps at the model layer.
 		let mut local_info = Track::new(name);
 		local_info.timescale = info.timescale;
+		// Carry the publisher's cache window so the local producer evicts (and
+		// clamps downstream stale windows) with the same bound when re-served.
+		local_info.cache = info.cache;
 		let mut track = match request.accept(local_info) {
 			Ok(track) => track,
 			Err(err) => {

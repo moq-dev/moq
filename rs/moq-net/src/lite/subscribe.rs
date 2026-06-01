@@ -89,6 +89,11 @@ pub struct SubscribeOk {
 	/// headers omit them). Lite05+ only; older drafts always decode as `None`.
 	/// On the wire `None` is `0` and `Some(n)` is `n`.
 	pub timescale: Option<Timescale>,
+	/// How long the publisher keeps old groups available before evicting them.
+	/// A relay re-serves with the same window and clamps each subscriber's stale
+	/// preference to it. Lite05+ only; older drafts always get
+	/// [`crate::DEFAULT_CACHE`].
+	pub cache: std::time::Duration,
 }
 
 impl Message for SubscribeOk {
@@ -113,6 +118,7 @@ impl Message for SubscribeOk {
 				self.end_group.encode(w, version)?;
 				self.compression.to_code().encode(w, version)?;
 				self.timescale.map(u64::from).unwrap_or(0).encode(w, version)?;
+				self.cache.encode(w, version)?;
 			}
 		}
 
@@ -129,6 +135,7 @@ impl Message for SubscribeOk {
 				end_group: None,
 				compression: Compression::None,
 				timescale: None,
+				cache: crate::DEFAULT_CACHE,
 			}),
 			Version::Lite02 => Ok(Self {
 				priority: 0,
@@ -138,6 +145,7 @@ impl Message for SubscribeOk {
 				end_group: None,
 				compression: Compression::None,
 				timescale: None,
+				cache: crate::DEFAULT_CACHE,
 			}),
 			Version::Lite03 | Version::Lite04 => {
 				let priority = u8::decode(r, version)?;
@@ -154,6 +162,7 @@ impl Message for SubscribeOk {
 					end_group,
 					compression: Compression::None,
 					timescale: None,
+					cache: crate::DEFAULT_CACHE,
 				})
 			}
 			_ => {
@@ -165,6 +174,7 @@ impl Message for SubscribeOk {
 				let compression =
 					Compression::from_code(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
 				let timescale = Timescale::new(u64::decode(r, version)?).ok();
+				let cache = std::time::Duration::decode(r, version)?;
 
 				Ok(Self {
 					priority,
@@ -174,6 +184,7 @@ impl Message for SubscribeOk {
 					end_group,
 					compression,
 					timescale,
+					cache,
 				})
 			}
 		}
@@ -387,6 +398,7 @@ mod test {
 			end_group: None,
 			compression: Compression::Deflate,
 			timescale: Some(Timescale::MICRO),
+			cache: Duration::from_secs(10),
 		}
 	}
 
@@ -442,5 +454,16 @@ mod test {
 		let mut ok = sample();
 		ok.timescale = None;
 		assert_eq!(roundtrip(Version::Lite05Wip, &ok).timescale, None);
+	}
+
+	#[test]
+	fn cache_roundtrips_on_lite05() {
+		assert_eq!(roundtrip(Version::Lite05Wip, &sample()).cache, Duration::from_secs(10));
+	}
+
+	#[test]
+	fn cache_absent_before_lite05() {
+		// Lite04 doesn't carry the cache varint, so it always decodes as the default.
+		assert_eq!(roundtrip(Version::Lite04, &sample()).cache, crate::DEFAULT_CACHE);
 	}
 }

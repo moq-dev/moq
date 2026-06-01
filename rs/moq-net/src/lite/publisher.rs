@@ -485,6 +485,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			end_group: None,
 			compression,
 			timescale,
+			// Announce the publisher's cache window so the subscriber (a relay)
+			// re-serves with the same eviction window. Pre-lite-05 peers ignore it.
+			cache: track.cache,
 		};
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
@@ -579,7 +582,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 				// next_group respects the cap set via track.end_at and parks
 				// while the next sequence is above the cap. Groups beyond the
-				// cap stay in the producer's cache (bounded by its 5s eviction).
+				// cap stay in the producer's cache (bounded by its cache window).
 				res = track.next_group() => {
 					match res? {
 						Some(group) => self.spawn_serve(group, &mut tasks),

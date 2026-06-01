@@ -102,6 +102,9 @@ Each Subscription consists of a few properties:
 - **Group Order**: The order in which groups are delivered. Defaults to descending; higher IDs are delivered first.
 - **Group Timeout**: The maximum duration to keep old groups in cache/transit. Defaults to 30 seconds.
 
+The publisher also caps how long it retains old groups via a per-track **cache** age, announced in `SUBSCRIBE_OK` so relays re-serve with the same window.
+A subscriber's Group Timeout can only be smaller than this cache age, since a group can't be waited for longer than it's kept around.
+
 By utilizing these properties, you can choose how your application behaves during congestion.
 For example, consider a conference room with Alice and Bob:
 

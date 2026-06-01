@@ -225,6 +225,8 @@ export class Subscriber {
 			stream = ok.stream;
 			// Unblock any group streams waiting to learn how to decode frames.
 			compression.set(ok.compression);
+			// Learn the publisher's cache window so a re-serving relay matches it.
+			request.track.cache = ok.cache;
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
 		} catch (err) {
 			const e = error(err);
@@ -280,7 +282,7 @@ export class Subscriber {
 	async #openSubscribe(
 		state: { stream?: Stream },
 		msg: Subscribe,
-	): Promise<{ stream: Stream; compression: Compression }> {
+	): Promise<{ stream: Stream; compression: Compression; cache: number }> {
 		state.stream = await Stream.open(this.#quic);
 		await state.stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(state.stream.writer, this.version);
@@ -290,7 +292,7 @@ export class Subscriber {
 		if (!("ok" in resp)) {
 			throw new Error("first subscribe response must be SUBSCRIBE_OK");
 		}
-		return { stream: state.stream, compression: resp.ok.compression };
+		return { stream: state.stream, compression: resp.ok.compression, cache: resp.ok.cache };
 	}
 
 	/**

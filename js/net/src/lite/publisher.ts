@@ -203,7 +203,9 @@ export class Publisher {
 			const compression =
 				track.compress && supportsCompression(this.version) ? Compression.Deflate : Compression.None;
 
-			const info = new SubscribeOk({ priority: msg.priority, compression });
+			// Announce the publisher's cache window so a relay re-serves with the
+			// same eviction bound. Pre-lite-05 peers ignore it.
+			const info = new SubscribeOk({ priority: msg.priority, compression, cache: track.cache });
 			await encodeSubscribeResponse(stream.writer, { ok: info }, this.version);
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
