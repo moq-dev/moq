@@ -131,7 +131,13 @@ GO_LIBS=(
     "aarch64-apple-darwin:darwin_arm64:libmoq_ffi.a"
     "x86_64-pc-windows-msvc:windows_amd64:moq_ffi.lib"
 )
+# GitHub's pre-receive hook rejects any file >= 100 MiB. The mirror commits
+# these libs into git, so an oversized lib fails the publish push (GH001).
+# Catch it here, where the error names the file and points at the fix, rather
+# than after a multi-target build burns an hour to die at `git push`.
+GITHUB_FILE_LIMIT=$((100 * 1024 * 1024))
 STAGED_ANY=false
+OVERSIZED=()
 for entry in "${GO_LIBS[@]}"; do
     target="${entry%%:*}"
     rest="${entry#*:}"
@@ -142,7 +148,9 @@ for entry in "${GO_LIBS[@]}"; do
         dest="$PKG_STAGE/moq/lib/$goarch"
         mkdir -p "$dest"
         cp "$src" "$dest/"
-        echo "  go lib $goarch <- $target"
+        size=$(wc -c <"$src")
+        echo "  go lib $goarch <- $target ($((size / 1024 / 1024)) MiB)"
+        [[ "$size" -ge "$GITHUB_FILE_LIMIT" ]] && OVERSIZED+=("$goarch/$libname: $((size / 1024 / 1024)) MiB")
         STAGED_ANY=true
     else
         echo "  go lib $goarch: skipped, $src missing"
@@ -151,6 +159,13 @@ done
 
 if [[ "$STAGED_ANY" != true ]]; then
     echo "Error: no per-target libs were staged; check --lib-dir layout" >&2
+    exit 1
+fi
+
+if [[ "${#OVERSIZED[@]}" -gt 0 ]]; then
+    echo "Error: staged libs exceed GitHub's 100 MiB push limit:" >&2
+    printf '  %s\n' "${OVERSIZED[@]}" >&2
+    echo "The mirror push would be rejected (GH001). Shrink the staticlib in rs/moq-ffi/build.sh (LTO)." >&2
     exit 1
 fi
 
