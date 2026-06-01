@@ -117,7 +117,7 @@ A subscription starts at a configurable Group (defaulting to the latest) and con
 The subscriber and publisher both indicate their delivery preference:
 - `Priority` indicates if Track A should be transmitted instead of Track B.
 - `Ordered` indicates if the Groups within a Track should be transmitted in order.
-- `Max Latency` indicates the maximum duration before a Group is abandoned.
+- `Stale` (subscriber) indicates the maximum age before a non-latest Group is dropped from live delivery; `Cache` (publisher) indicates the minimum retention guarantee for FETCH and reconnects.
 
 The combination of these preferences enables the most important content to arrive during network degradation while still respecting encoding dependencies.
 
@@ -387,19 +387,20 @@ An application MUST support gaps and out-of-order delivery even when `ordered` i
 
 
 ## Expiration
-The Publisher and Subscriber both transmit a `Max Latency` value, indicating the maximum duration before a group is expired.
+Expiration governs when an older group is dropped from a live subscription's Group Stream(s).
+It is distinct from the publisher's retention guarantee (see `Publisher Cache` in [SUBSCRIBE_OK](#subscribe-ok)), which controls whether older groups remain available for FETCH or future subscriptions.
 
 It is not crucial to aggressively expire groups thanks to [prioritization](#prioritization).
 However, a lower priority group will still consume RAM, bandwidth, and potentially flow control.
 It is RECOMMENDED that an application set conservative limits and only resort to expiration when data is absolutely no longer needed.
 
-A subscriber SHOULD expire groups based on the `Subscriber Max Latency` in SUBSCRIBE/SUBSCRIBE_UPDATE.
-A publisher SHOULD expire groups based on the `Publisher Max Latency` in SUBSCRIBE_OK.
-An implementation MAY use the minimum of both when determining when to expire a group.
+The publisher SHOULD reset Group Streams for non-latest groups whose age relative to the latest group exceeds the `Subscriber Stale` value in SUBSCRIBE/SUBSCRIBE_UPDATE.
+The subscriber MAY also locally drop such groups for its own resource accounting.
+Expiration only removes the group from the live subscription's stream; if the group's age is still within `Publisher Cache`, the publisher SHOULD retain it for FETCH or new subscriptions.
 
 Group age is computed relative to the latest group by sequence number.
 A group is never expired until at least the next group (by sequence number) has been received or queued.
-Once a newer group exists, a group is considered expired if the time between its first frame and the latest group's first frame exceeds `Max Latency`.
+Once a newer group exists, a group is considered expired if the time between its first frame and the latest group's first frame exceeds `Subscriber Stale`.
 
 If the Track's negotiated `Timescale` is non-zero, the time delta is computed from per-frame timestamps (see [Frame](#frame)).
 Otherwise the delta is computed from wall-clock arrival time: the first byte of a group received (subscriber) or queued (publisher).
@@ -606,7 +607,7 @@ SUBSCRIBE Message {
   Track Name (s)
   Subscriber Priority (8)
   Subscriber Ordered (8)
-  Subscriber Max Latency (i)
+  Subscriber Stale (i)
   Start Group (i)
   End Group (i)
 }
@@ -626,9 +627,12 @@ A single byte representing whether groups are transmitted in ascending (0x1) or 
 The publisher SHOULD transmit *older* groups first during congestion if true.
 See the [Prioritization](#prioritization) section for more information.
 
-**Subscriber Max Latency**:
-This value is encoded in milliseconds and represents the maximum age of a group relative to the latest group.
-The publisher SHOULD reset old group streams when the difference in arrival time between the group and the latest group exceeds this duration.
+**Subscriber Stale**:
+The subscriber's preference, in milliseconds, for how long a non-latest group may remain in flight before being considered stale and dropped from live delivery.
+The publisher SHOULD reset (at the QUIC level) Group Streams for groups whose age relative to the latest group exceeds this duration.
+Applies only to non-latest groups; the latest group is never dropped on staleness grounds.
+A value of `0` means the subscriber wants only the latest group in live delivery (older groups are immediately stale once a newer group arrives).
+This is a delivery-time preference, not a retention rule: the publisher's cache (see `Publisher Cache` in [SUBSCRIBE_OK](#subscribe-ok)) may still hold these groups for FETCH or future subscriptions.
 See the [Expiration](#expiration) section for more information.
 
 **Start Group**:
@@ -652,7 +656,7 @@ SUBSCRIBE_UPDATE Message {
   Message Length (i)
   Subscriber Priority (8)
   Subscriber Ordered (8)
-  Subscriber Max Latency (i)
+  Subscriber Stale (i)
   Start Group (i)
   End Group (i)
 }
@@ -672,11 +676,10 @@ SUBSCRIBE_OK Message {
   Message Length (i)
   Publisher Priority (8)
   Publisher Ordered (8)
-  Publisher Max Latency (i)
+  Publisher Cache (i)
   Start Group (i)
   End Group (i)
   Publisher Timescale (i)
-  Publisher Cache (i)
   Publisher Compression (i)
 }
 ~~~
@@ -702,11 +705,15 @@ A non-zero value is fixed for the lifetime of the subscription and MUST NOT chan
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (audio sample rate), and `90000` (RTP video clock).
 
 **Publisher Cache**:
-The maximum age, in milliseconds, of the oldest group the publisher is willing to retain for late-arriving or reconnecting subscribers.
-Analogous to HTTP `Cache-Control: max-age`.
-A value of `0` means no historical retention beyond what is required for in-flight delivery; only live groups are available.
-A non-zero value indicates that the publisher will keep groups for at least this many milliseconds past their arrival, allowing a subscriber to issue a SUBSCRIBE or FETCH with an older `Start Group` and still receive the data.
-The unit is milliseconds (independent of `Publisher Timescale`) for consistency with `Publisher Max Latency` and to avoid coupling cache retention to media time when timescale is unspecified.
+The minimum age, in milliseconds, the publisher guarantees to retain a group past the arrival of a newer group.
+Applies only to non-latest groups; the latest group is always retained.
+Analogous to HTTP `Cache-Control: max-age` as a lower bound:
+
+- A subscriber MAY issue a SUBSCRIBE or FETCH with an older `Start Group` and expect the publisher to still have it, as long as the group's age does not exceed `Publisher Cache`.
+- The publisher MAY retain groups longer than `Publisher Cache` (a best-effort cache beyond the guarantee); subscribers MUST NOT assume older groups are unavailable.
+
+A value of `0` means no retention guarantee beyond live delivery; older groups MAY still be available but the publisher makes no promise.
+The unit is milliseconds (independent of `Publisher Timescale`) so cache retention is decoupled from media time when timescale is unspecified.
 The value MAY change in subsequent SUBSCRIBE_OK messages to reflect changing publisher policy; the subscriber SHOULD use the most recent value.
 
 **Publisher Compression**:
@@ -895,7 +902,8 @@ A generic library or relay MUST NOT inspect or modify the decompressed contents 
 - Added `Publisher Timescale` to SUBSCRIBE_OK for per-track timestamp negotiation. When `Publisher Timescale` is 0, the per-frame timestamp/duration fields are omitted entirely from FRAME and datagram bodies.
 - Added `Timestamp Delta` and `Duration Delta` to FRAME, both zigzag-encoded signed varints (present only when timescale is non-zero). `Duration Delta = 0` is the common "unchanged" case and fits in one byte; a resolved duration of `0` means "until the next frame".
 - Added `Timestamp` and `Duration` to the QUIC datagram body (absolute, present only when timescale is non-zero).
-- Added `Publisher Cache` to SUBSCRIBE_OK, expressing maximum group retention for late or reconnecting subscribers (milliseconds, similar to HTTP `Cache-Control: max-age`).
+- Renamed `Publisher Max Latency` to `Publisher Cache` in SUBSCRIBE_OK, now defined as a minimum retention guarantee (similar to HTTP `Cache-Control: max-age`). Groups may live longer than `Publisher Cache` and remain FETCH-able.
+- Renamed `Subscriber Max Latency` to `Subscriber Stale` in SUBSCRIBE/SUBSCRIBE_UPDATE. It is the subscriber's delivery-time preference for dropping non-latest stale groups, separate from the publisher's retention guarantee.
 - Timestamp-based expiration replaces wall-clock arrival time when a Track timescale is negotiated.
 - Added QUIC datagram delivery for groups, sharing Subscribe IDs with existing subscriptions (no separate control stream).
 - Added `Publisher Compression` to SUBSCRIBE_OK for per-frame payload compression (`none` or `deflate`).
@@ -919,7 +927,7 @@ A generic library or relay MUST NOT inspect or modify the decompressed contents 
 - Added PROBE stream replacing SESSION_UPDATE bitrate.
 - Removed ANNOUNCE_INIT message.
 - Added `Hops` to ANNOUNCE.
-- Added `Subscriber Max Latency` and `Subscriber Ordered` to SUBSCRIBE and SUBSCRIBE_UPDATE.
+- Added `Subscriber Stale` and `Subscriber Ordered` to SUBSCRIBE and SUBSCRIBE_UPDATE.
 - Added `Publisher Priority`, `Publisher Max Latency`, and `Publisher Ordered` to SUBSCRIBE_OK.
 - SUBSCRIBE_OK may be sent multiple times.
 
