@@ -107,7 +107,8 @@ Subscribe to it using [`CatalogConsumer`](https://docs.rs/hang/latest/hang/catal
 
 ```rust
 let catalog_track = broadcast
-    .subscribe_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_subscription())
+    .consume_track(hang::Catalog::DEFAULT_NAME)
+    .subscribe(hang::Catalog::default_subscription())
     .await?;
 let mut catalog = hang::CatalogConsumer::new(catalog_track);
 let info = catalog.next().await?.expect("no catalog");
@@ -123,7 +124,8 @@ Subscribe to a media track and read frames using [`OrderedConsumer`](https://doc
 
 ```rust
 let track_consumer = broadcast
-    .subscribe_track(&track_name, moq_net::Subscription::new(1))
+    .consume_track(&track_name)
+    .subscribe(moq_net::Subscription::default().with_priority(1))
     .await?;
 let mut ordered = hang::container::OrderedConsumer::new(
     track_consumer,

@@ -48,7 +48,7 @@ impl VideoTransform {
 
 /// A subscription that resolves on first poll, then the live consumer.
 enum SourceState {
-	/// Waiting for `subscribe_track` to resolve (blocks on the publisher's response).
+	/// Waiting for the subscription to resolve (blocks on the publisher's SUBSCRIBE_OK).
 	Subscribing(moq_net::TrackPending),
 	/// The resolved consumer, reading frames.
 	Active(Consumer<HangContainer>),
@@ -82,7 +82,11 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(broadcast.subscribe_track(name, moq_net::Subscription::default())),
+			state: SourceState::Subscribing(
+				broadcast
+					.consume_track(name)
+					.subscribe(moq_net::Subscription::default()),
+			),
 			media: Some(media),
 			latency,
 			transform,
@@ -104,7 +108,11 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(broadcast.subscribe_track(name, moq_net::Subscription::default())),
+			state: SourceState::Subscribing(
+				broadcast
+					.consume_track(name)
+					.subscribe(moq_net::Subscription::default()),
+			),
 			media: Some(media),
 			latency,
 			transform: None,
@@ -124,7 +132,11 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(broadcast.subscribe_track(name, moq_net::Subscription::default())),
+			state: SourceState::Subscribing(
+				broadcast
+					.consume_track(name)
+					.subscribe(moq_net::Subscription::default()),
+			),
 			media: Some(media),
 			latency,
 			transform: None,

@@ -84,10 +84,7 @@ impl Catalog {
 	/// The subscription preferences used for the catalog track (high priority so
 	/// it preempts media tracks).
 	pub fn default_subscription() -> moq_net::Subscription {
-		moq_net::Subscription {
-			priority: 100,
-			..Default::default()
-		}
+		moq_net::Subscription::default().with_priority(100)
 	}
 }
 

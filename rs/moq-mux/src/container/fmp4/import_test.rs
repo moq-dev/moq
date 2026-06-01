@@ -5,7 +5,7 @@ use mp4_atom::{Decode, Encode};
 /// Drain every group currently buffered on the consumer without waiting for new ones.
 /// Used in tests where the producer is still alive after writing.
 #[cfg(test)]
-fn drain_group_sequences(consumer: &mut moq_net::TrackConsumer) -> Vec<u64> {
+fn drain_group_sequences(consumer: &mut moq_net::TrackSubscriber) -> Vec<u64> {
 	let mut sequences = Vec::new();
 	while let Some(group) = consumer.recv_group().now_or_never().and_then(|r| r.ok().flatten()) {
 		sequences.push(group.sequence);
@@ -183,8 +183,8 @@ async fn test_seek_sets_initial_sequence() {
 	let snap = catalog.snapshot();
 	let video_name = snap.video.renditions.keys().next().expect("video track").clone();
 	let mut video_track = broadcast_consumer
-		.subscribe_track(&video_name, moq_net::Subscription::default())
-		.ok()
+		.consume_track(&video_name)
+		.subscribe(moq_net::Subscription::default())
 		.await
 		.expect("video track should exist");
 
@@ -211,7 +211,7 @@ async fn test_seek_sets_initial_sequence() {
 #[tokio::test]
 async fn test_msf_catalog_roundtrip() {
 	let mut broadcast = moq_net::Broadcast::new().produce();
-	// Take the consumer before adding tracks; subscribe_track is called after the
+	// Take the consumer before adding tracks; consume_track is called after the
 	// MSF catalog track has been created by `catalog::Producer::new`.
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
@@ -223,8 +223,8 @@ async fn test_msf_catalog_roundtrip() {
 	let _ = fmp4.decode(&mut buf);
 
 	let track = consumer
-		.subscribe_track(moq_msf::DEFAULT_NAME, moq_net::Subscription::default())
-		.ok()
+		.consume_track(moq_msf::DEFAULT_NAME)
+		.subscribe(moq_net::Subscription::default())
 		.await
 		.expect("MSF catalog track should exist");
 	let mut msf = crate::catalog::msf::Consumer::new(track);

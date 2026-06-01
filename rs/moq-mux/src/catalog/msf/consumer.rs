@@ -14,7 +14,7 @@ use crate::catalog::msf::Error;
 /// so the rest of the pipeline only deals with hang types.
 pub struct Consumer {
 	/// Access to the underlying track consumer.
-	pub track: moq_net::TrackConsumer,
+	pub track: moq_net::TrackSubscriber,
 	group: Option<moq_net::GroupConsumer>,
 }
 
@@ -22,7 +22,7 @@ impl Consumer {
 	/// Create a new MSF catalog consumer from a MoQ track consumer.
 	///
 	/// The track is expected to carry MSF catalog payloads (track name [`moq_msf::DEFAULT_NAME`]).
-	pub fn new(track: moq_net::TrackConsumer) -> Self {
+	pub fn new(track: moq_net::TrackSubscriber) -> Self {
 		Self { track, group: None }
 	}
 
@@ -68,8 +68,8 @@ impl Consumer {
 	}
 }
 
-impl From<moq_net::TrackConsumer> for Consumer {
-	fn from(inner: moq_net::TrackConsumer) -> Self {
+impl From<moq_net::TrackSubscriber> for Consumer {
+	fn from(inner: moq_net::TrackSubscriber) -> Self {
 		Self::new(inner)
 	}
 }

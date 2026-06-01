@@ -84,11 +84,8 @@ impl MoqBroadcastConsumer {
 	pub async fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
 		let track = self
 			.inner
-			.subscribe_track(
-				hang::catalog::Catalog::DEFAULT_NAME,
-				hang::catalog::Catalog::default_subscription(),
-			)
-			.ok()
+			.consume_track(hang::catalog::Catalog::DEFAULT_NAME)
+			.subscribe(hang::catalog::Catalog::default_subscription())
 			.await?;
 		let consumer = moq_mux::catalog::hang::Consumer::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
@@ -102,8 +99,8 @@ impl MoqBroadcastConsumer {
 	pub async fn subscribe_track(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		let track = self
 			.inner
-			.subscribe_track(&name, moq_net::Subscription::default())
-			.ok()
+			.consume_track(&name)
+			.subscribe(moq_net::Subscription::default())
 			.await?;
 		Ok(Arc::new(MoqTrackConsumer::new(track)))
 	}
@@ -126,8 +123,8 @@ impl MoqBroadcastConsumer {
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
 		let track = self
 			.inner
-			.subscribe_track(&name, moq_net::Subscription::default())
-			.ok()
+			.consume_track(&name)
+			.subscribe(moq_net::Subscription::default())
 			.await?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
@@ -140,7 +137,7 @@ impl MoqBroadcastConsumer {
 // ---- Track Consumer ----
 
 struct TrackInner {
-	track: moq_net::TrackConsumer,
+	track: moq_net::TrackSubscriber,
 }
 
 impl TrackInner {
@@ -163,7 +160,7 @@ pub struct MoqTrackConsumer {
 }
 
 impl MoqTrackConsumer {
-	pub(crate) fn new(track: moq_net::TrackConsumer) -> Self {
+	pub(crate) fn new(track: moq_net::TrackSubscriber) -> Self {
 		Self {
 			task: Task::new(TrackInner { track }),
 		}

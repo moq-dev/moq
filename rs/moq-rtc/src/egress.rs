@@ -52,8 +52,8 @@ impl EgressSource {
 	/// which takes the receiver via [`Self::take_writes`].
 	pub async fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self> {
 		let catalog_track = broadcast
-			.subscribe_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_subscription())
-			.ok()
+			.consume_track(hang::Catalog::DEFAULT_NAME)
+			.subscribe(hang::Catalog::default_subscription())
 			.await?;
 		let mut consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
 		let catalog = consumer
@@ -83,7 +83,7 @@ impl EgressSource {
 	/// the codec's negotiated RTP clock. The pump subscribes to a matching
 	/// catalog rendition and forwards every frame as a [`WriteRequest`].
 	pub fn on_track(&mut self, mid: Mid, codec: Codec, pt: Pt, clock_rate: Frequency) -> Result<()> {
-		// `subscribe_track` now blocks on SUBSCRIBE_OK, so pick + subscribe inside
+		// the `subscribe` call blocks on SUBSCRIBE_OK, so pick + subscribe inside
 		// the pump task to keep this str0m callback non-blocking.
 		let tx = self.writes_tx.clone();
 		let broadcast = self.broadcast.clone();

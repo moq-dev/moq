@@ -1160,8 +1160,8 @@ mod tests {
 		let (_path, event) = consumer.next().await.expect("expected announce");
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
-			.subscribe_track("publisher.json", Subscription::default())
-			.ok()
+			.consume_track("publisher.json")
+			.subscribe(Subscription::default())
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1187,8 +1187,8 @@ mod tests {
 		let (_path, event) = consumer.next().await.expect("announce");
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
-			.subscribe_track("publisher.json", Subscription::default())
-			.ok()
+			.consume_track("publisher.json")
+			.subscribe(Subscription::default())
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1219,8 +1219,8 @@ mod tests {
 		let (_path, event) = consumer.next().await.expect("announce");
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
-			.subscribe_track("publisher.json", Subscription::default())
-			.ok()
+			.consume_track("publisher.json")
+			.subscribe(Subscription::default())
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1297,8 +1297,8 @@ mod tests {
 
 		// External publisher slot SHOULD include foo/bar.
 		let pub_track = broadcast
-			.subscribe_track("publisher.json", Subscription::default())
-			.ok()
+			.consume_track("publisher.json")
+			.subscribe(Subscription::default())
 			.await
 			.expect("subscribe");
 		assert!(
@@ -1310,8 +1310,8 @@ mod tests {
 		// each must be `{}`, not `{"foo/bar": {all zeros}}`.
 		for name in ["subscriber.json", "internal/publisher.json", "internal/subscriber.json"] {
 			let t = broadcast
-				.subscribe_track(name, Subscription::default())
-				.ok()
+				.consume_track(name)
+				.subscribe(Subscription::default())
 				.await
 				.expect("subscribe");
 			let frame = read_frame(t).await;
@@ -1352,7 +1352,7 @@ mod tests {
 		);
 	}
 
-	async fn read_frame(mut track: crate::TrackConsumer) -> BTreeMap<String, Snapshot> {
+	async fn read_frame(mut track: crate::TrackSubscriber) -> BTreeMap<String, Snapshot> {
 		let bytes = track.read_frame().await.expect("ok").expect("frame");
 		serde_json::from_slice(&bytes).expect("json parse")
 	}

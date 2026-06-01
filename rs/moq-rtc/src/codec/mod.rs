@@ -80,8 +80,8 @@ impl Track {
 	pub async fn opus(broadcast: &moq_net::BroadcastConsumer, name: &str) -> Result<Self> {
 		let container = moq_mux::catalog::hang::Container::Legacy;
 		let track = broadcast
-			.subscribe_track(name, moq_net::Subscription::default())
-			.ok()
+			.consume_track(name)
+			.subscribe(moq_net::Subscription::default())
 			.await?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
 		Ok(Self {
@@ -96,8 +96,8 @@ impl Track {
 	pub async fn video(broadcast: &moq_net::BroadcastConsumer, name: &str, config: &VideoConfig) -> Result<Self> {
 		let container: moq_mux::catalog::hang::Container = (&config.container).try_into()?;
 		let track = broadcast
-			.subscribe_track(name, moq_net::Subscription::default())
-			.ok()
+			.consume_track(name)
+			.subscribe(moq_net::Subscription::default())
 			.await?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
 

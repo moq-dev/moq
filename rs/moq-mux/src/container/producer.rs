@@ -184,7 +184,7 @@ impl<C: Container> Producer<C> {
 	}
 
 	/// Create a consumer for this track.
-	pub fn consume(&self) -> moq_net::TrackConsumer {
+	pub fn consume(&self) -> moq_net::TrackSubscriber {
 		self.inner.subscribe_default()
 	}
 }
@@ -215,7 +215,7 @@ mod tests {
 	}
 
 	/// Drain all groups from a finished track, returning their frame counts.
-	async fn collect_groups(mut consumer: moq_net::TrackConsumer) -> Vec<usize> {
+	async fn collect_groups(mut consumer: moq_net::TrackSubscriber) -> Vec<usize> {
 		let mut groups = Vec::new();
 		while let Some(mut group) = consumer.recv_group().await.unwrap() {
 			let mut count = 0;
@@ -270,7 +270,7 @@ mod tests {
 	}
 
 	/// Drain all groups from a finished track, returning their sequence numbers.
-	async fn collect_sequences(mut consumer: moq_net::TrackConsumer) -> Vec<u64> {
+	async fn collect_sequences(mut consumer: moq_net::TrackSubscriber) -> Vec<u64> {
 		let mut sequences = Vec::new();
 		while let Some(group) = consumer.recv_group().await.unwrap() {
 			sequences.push(group.sequence);

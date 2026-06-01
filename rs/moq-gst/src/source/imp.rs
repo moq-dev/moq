@@ -433,11 +433,8 @@ async fn run_session(
 	};
 
 	let catalog_track = broadcast
-		.subscribe_track(
-			hang::catalog::Catalog::DEFAULT_NAME,
-			hang::catalog::Catalog::default_subscription(),
-		)
-		.ok()
+		.consume_track(hang::catalog::Catalog::DEFAULT_NAME)
+		.subscribe(hang::catalog::Catalog::default_subscription())
 		.await?;
 	let mut catalog = moq_mux::catalog::hang::Consumer::new(catalog_track);
 	let catalog = catalog.next().await?.context("catalog missing")?.clone();
@@ -452,8 +449,8 @@ async fn run_session(
 		let caps = video_caps(&config)?;
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_consumer = broadcast
-			.subscribe_track(&track_name, moq_net::Subscription::default())
-			.ok()
+			.consume_track(&track_name)
+			.subscribe(moq_net::Subscription::default())
 			.await?;
 		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
 			.with_latency(Duration::from_secs(1));
@@ -468,8 +465,8 @@ async fn run_session(
 		let caps = audio_caps(&config)?;
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_consumer = broadcast
-			.subscribe_track(&track_name, moq_net::Subscription::default())
-			.ok()
+			.consume_track(&track_name)
+			.subscribe(moq_net::Subscription::default())
 			.await?;
 		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
 			.with_latency(Duration::from_secs(1));
