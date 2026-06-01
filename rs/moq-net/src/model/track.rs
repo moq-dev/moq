@@ -421,7 +421,7 @@ impl TrackProducer {
 
 	/// Create a new group with the given sequence number.
 	pub fn create_group(&mut self, info: Group) -> Result<GroupProducer> {
-		let group = info.produce();
+		let group = GroupProducer::new_with_timescale(info, self.info.timescale);
 
 		let mut state = self.modify()?;
 		if let Some(fin) = state.final_sequence
@@ -455,7 +455,7 @@ impl TrackProducer {
 			return Err(Error::Closed);
 		}
 
-		let group = Group { sequence }.produce();
+		let group = GroupProducer::new_with_timescale(Group { sequence }, self.info.timescale);
 
 		let now = tokio::time::Instant::now();
 		state.duplicates.insert(sequence);

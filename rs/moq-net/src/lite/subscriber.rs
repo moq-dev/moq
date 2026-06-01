@@ -596,7 +596,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// subscriber) and start routing incoming groups to it. SUBSCRIBE_OK is known
 		// now, so the group streams never have to wait; they still read it through a
 		// kio channel (a group's QUIC stream can otherwise race ahead of SUBSCRIBE_OK).
-		let mut track = match request.accept(Track::new(name)) {
+		//
+		// Stamp the negotiated timescale onto the local Track so groups inherit
+		// it and downstream consumers (including this subscriber's frame decode
+		// path) can validate per-frame timestamps at the model layer.
+		let mut local_info = Track::new(name);
+		local_info.timescale = info.timescale;
+		let mut track = match request.accept(local_info) {
 			Ok(track) => track,
 			Err(err) => {
 				stream.writer.abort(&err);

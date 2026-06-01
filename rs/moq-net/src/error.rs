@@ -94,6 +94,12 @@ pub enum Error {
 	#[error("decompression failed")]
 	Decompress,
 
+	/// A frame's timestamp doesn't match its track's negotiated timescale: it's
+	/// missing on a timed track, present on an untimed track, or carries a
+	/// different scale than the track advertised.
+	#[error("frame timestamp doesn't match track timescale")]
+	TimestampMismatch,
+
 	/// A remote error received via a stream/session reset code.
 	#[error("remote error: code={0}")]
 	Remote(u32),
@@ -128,6 +134,7 @@ impl Error {
 			Self::CacheFull => 26,
 			Self::FrameTooLarge => 27,
 			Self::Decompress => 28,
+			Self::TimestampMismatch => 29,
 			Self::App(app) => *app as u32 + 64,
 			Self::Remote(code) => *code,
 		}

@@ -669,13 +669,12 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		// `[zigzag-delta timestamp][size][payload]`. With `None`, the timestamp
 		// is omitted entirely — saves a byte per frame on tracks where timing
 		// isn't meaningful (catalogs, control channels, IETF transport).
-		// Refuse a frame missing a timestamp or at the wrong scale rather than
-		// silently encoding a zero delta and corrupting decode.
-		if let Some(track_timescale) = self.timescale {
-			let ts = frame.timestamp.ok_or(Error::ProtocolViolation)?;
-			if ts.scale() != track_timescale {
-				return Err(Error::ProtocolViolation);
-			}
+		//
+		// The model layer (`GroupProducer::append_frame`) already enforced that
+		// `frame.timestamp` matches the track timescale, so the unwraps below
+		// are infallible at this point.
+		if self.timescale.is_some() {
+			let ts = frame.timestamp.expect("model layer validated timestamp presence");
 			let curr = ts.value();
 			let delta: i64 = (curr as i128 - *prev_ts as i128)
 				.try_into()
