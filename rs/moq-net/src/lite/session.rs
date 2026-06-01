@@ -1,24 +1,21 @@
-use tokio::sync::oneshot;
-
 use crate::{
 	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, StatsHandle, coding::Stream,
 	lite::SessionInfo,
 };
 
-use super::{Publisher, PublisherConfig, Subscriber, SubscriberConfig, SyncLatch, Version};
+use super::{Connecting, Publisher, PublisherConfig, Subscriber, SubscriberConfig, Version};
 
 /// Start a lite session.
 ///
-/// Returns the receive-bandwidth consumer (if any) and a `synced` receiver that
-/// resolves once the initial announce set has been inserted into the subscribe
-/// origin, letting `connect()` block past the startup race. The receiver fires
-/// immediately when there is nothing to wait on (no subscribe origin, or a version
-/// without an initial-set boundary).
+/// Returns the receive-bandwidth consumer (if any) and a [`Connecting`] handle that
+/// becomes ready once the initial announce set has been inserted into the subscribe
+/// origin, letting `connect()` block past the startup race. It is ready immediately
+/// when there is nothing to wait on (a version without an initial-set boundary).
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
-	// The stream used to setup the session, after exchanging setup messages.
+	// The stream used to set up the session, after exchanging setup messages.
 	// NOTE: No longer used in draft-03.
-	setup: Option<Stream<S, Version>>,
+	setup_stream: Option<Stream<S, Version>>,
 	// We will publish any local broadcasts from this origin.
 	publish: OriginConsumer,
 	// We will consume any remote broadcasts, inserting them into this origin.
@@ -27,7 +24,7 @@ pub fn start<S: web_transport_trait::Session>(
 	stats: StatsHandle,
 	// The version of the protocol to use.
 	version: Version,
-) -> Result<(Option<BandwidthConsumer>, oneshot::Receiver<()>), Error> {
+) -> Result<(Option<BandwidthConsumer>, Connecting), Error> {
 	let recv_bw = BandwidthProducer::new();
 
 	let recv_bw_consumer = match version {
@@ -40,16 +37,15 @@ pub fn start<S: web_transport_trait::Session>(
 		_ => Some(recv_bw),
 	};
 
-	// Connect-sync latch. Only block on the initial set for versions with an
-	// initial-set boundary (AnnounceInit for Lite01/02, AnnounceOk for Lite05);
-	// otherwise fire now so connect() doesn't block. An empty subscribe origin still
-	// resolves immediately because the subscriber arms the latch with a prefix count
-	// of zero.
-	let (synced_latch, synced_rx) = SyncLatch::new();
-	let sub_synced = if matches!(version, Version::Lite01 | Version::Lite02 | Version::Lite05Wip) {
-		Some(synced_latch)
+	// Connection-progress tracker. Only block on the initial set for versions with an
+	// initial-set boundary (AnnounceInit for Lite01/02, AnnounceOk for Lite05). For other
+	// versions we drop the producer here, which closes the channel and makes
+	// `Connecting::ready` resolve immediately. An empty subscribe origin also resolves
+	// immediately because the subscriber arms with a prefix count of zero.
+	let (connecting_producer, connecting) = Connecting::new();
+	let sub_connecting = if matches!(version, Version::Lite01 | Version::Lite02 | Version::Lite05Wip) {
+		Some(connecting_producer)
 	} else {
-		synced_latch.fire();
 		None
 	};
 
@@ -69,15 +65,14 @@ pub fn start<S: web_transport_trait::Session>(
 		origin: subscribe,
 		recv_bandwidth: recv_bw_for_sub,
 		stats,
-		synced: sub_synced,
 		version,
 	});
 
 	web_async::spawn(async move {
 		let res = tokio::select! {
-			Err(res) = run_session(setup) => Err(res),
+			Err(res) = run_session(setup_stream) => Err(res),
 			res = publisher.run() => res,
-			res = subscriber.run() => res,
+			res = subscriber.run(sub_connecting) => res,
 		};
 
 		match res {
@@ -96,7 +91,7 @@ pub fn start<S: web_transport_trait::Session>(
 		}
 	});
 
-	Ok((recv_bw_consumer, synced_rx))
+	Ok((recv_bw_consumer, connecting))
 }
 
 // TODO do something useful with this

@@ -106,10 +106,6 @@ export class Publisher {
 			active.add(suffix);
 		}
 
-		// Lite05+ reports our origin once via AnnounceOk; the subscriber stamps it
-		// onto each announce, so we no longer put it in the per-announce hop list.
-		const selfHops = this.version === Version.DRAFT_05_WIP ? [] : [this.origin];
-
 		switch (this.version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02: {
@@ -118,19 +114,20 @@ export class Publisher {
 				break;
 			}
 			case Version.DRAFT_05_WIP: {
-				// Report our origin id and the count of initial announces that follow.
+				// Report our origin id once via AnnounceOk and the count of initial announces
+				// that follow; the subscriber stamps our origin onto each hop chain, so we omit it.
 				const ok = new AnnounceOk(this.origin, active.size);
 				await ok.encode(stream.writer, this.version);
 				for (const suffix of active) {
-					const wire = new Announce({ suffix, active: true, hops: selfHops });
+					const wire = new Announce({ suffix, active: true });
 					await wire.encode(stream.writer, this.version);
 				}
 				break;
 			}
 			default:
-				// Draft03/04: send individual Announce messages for initial state.
+				// Draft03/04: send individual Announce messages, stamping our origin as a hop.
 				for (const suffix of active) {
-					const wire = new Announce({ suffix, active: true, hops: selfHops });
+					const wire = new Announce({ suffix, active: true, hops: [this.origin] });
 					await wire.encode(stream.writer, this.version);
 				}
 				break;
@@ -158,10 +155,12 @@ export class Publisher {
 				newActive.add(suffix);
 			}
 
-			// Announce any new broadcasts.
+			// Announce any new broadcasts. Lite05+ reports our origin once via AnnounceOk, so
+			// the subscriber stamps it onto each hop chain; older versions stamp it here.
 			for (const added of newActive.difference(active)) {
 				console.debug(`announce: broadcast=${added} active=true`);
-				const wire = new Announce({ suffix: added, active: true, hops: selfHops });
+				const hops = this.version === Version.DRAFT_05_WIP ? [] : [this.origin];
+				const wire = new Announce({ suffix: added, active: true, hops });
 				await wire.encode(stream.writer, this.version);
 			}
 

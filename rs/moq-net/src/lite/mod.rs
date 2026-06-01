@@ -5,6 +5,7 @@
 //! Specification: [<https://github.com/moq-dev/drafts>]
 
 mod announce;
+mod connecting;
 mod fetch;
 mod goaway;
 mod group;
@@ -21,6 +22,7 @@ mod subscriber;
 mod version;
 
 pub use announce::*;
+pub(crate) use connecting::*;
 #[allow(unused_imports)]
 pub use fetch::*;
 #[allow(unused_imports)]

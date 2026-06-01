@@ -143,7 +143,7 @@ impl Server {
 					.ok_or(Error::Version)?;
 
 				// Server side never blocks on the initial set; discard the synced receiver.
-				let (recv_bw, _synced) = lite::start(
+				let (recv_bw, _connecting) = lite::start(
 					session.clone(),
 					None,
 					publish.clone(),
@@ -165,7 +165,7 @@ impl Server {
 					.select(Version::Lite(lite::Version::Lite04))
 					.ok_or(Error::Version)?;
 
-				let (recv_bw, _synced) = lite::start(
+				let (recv_bw, _connecting) = lite::start(
 					session.clone(),
 					None,
 					publish.clone(),
@@ -188,7 +188,7 @@ impl Server {
 					.ok_or(Error::Version)?;
 
 				// Starting with draft-03, there's no more SETUP control stream.
-				let (recv_bw, _synced) = lite::start(
+				let (recv_bw, _connecting) = lite::start(
 					session.clone(),
 					None,
 					publish.clone(),
@@ -244,7 +244,7 @@ impl Server {
 		let recv_bw = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
-				let (recv_bw, _synced) = lite::start(
+				let (recv_bw, _connecting) = lite::start(
 					session.clone(),
 					Some(stream),
 					publish.clone(),
