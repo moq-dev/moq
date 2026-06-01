@@ -130,10 +130,16 @@ const QMUX_VERSIONS: &[qmux::Version] = &[qmux::Version::QMux01, qmux::Version::
 /// performs. Without the versioned entries, axum picks bare `webtransport`,
 /// qmux can't resolve a moq version from it, and the relay silently
 /// downgrades clients to Lite02 via SETUP-based negotiation.
+///
+/// `qmux-00.moqt-18` is excluded: moq-transport-18 requires qmux-01, so that
+/// pair is illegal (matches `js/net`'s `connect.ts`).
 fn supported_subprotocols() -> Vec<String> {
 	let mut out = Vec::with_capacity(QMUX_VERSIONS.len() * moq_net::ALPNS.len() + qmux::ALPNS.len());
 	for &version in QMUX_VERSIONS {
 		for &alpn in moq_net::ALPNS {
+			if version == qmux::Version::QMux00 && alpn == QMUX01_ONLY_ALPN {
+				continue;
+			}
 			out.push(format!("{}{alpn}", version.prefix()));
 		}
 	}
@@ -142,6 +148,9 @@ fn supported_subprotocols() -> Vec<String> {
 	}
 	out
 }
+
+/// moq-transport-18 requires qmux-01, so we never pair it with qmux-00.
+const QMUX01_ONLY_ALPN: &str = "moqt-18";
 
 // https://github.com/tokio-rs/axum/discussions/848#discussioncomment-11443587
 
@@ -210,6 +219,12 @@ mod tests {
 
 	#[test]
 	fn supported_subprotocols_lists_full_matrix() {
+		// Guard the literal: it must stay the IETF draft-18 ALPN (wire 0xff000012).
+		assert_eq!(
+			moq_net::Version::from_alpn(QMUX01_ONLY_ALPN).map(|v| v.code()),
+			Some(0xff000012)
+		);
+
 		let list = supported_subprotocols();
 
 		// Newest moq ALPN under the preferred prefix must come first so axum
@@ -217,10 +232,15 @@ mod tests {
 		let expected_first = format!("{}{}", preferred_qmux_prefix(), newest_moq_alpn());
 		assert_eq!(list.first().map(String::as_str), Some(expected_first.as_str()));
 
-		// Every moq ALPN must appear under every qmux version's prefix.
+		// Every moq ALPN must appear under every qmux version's prefix, except
+		// the illegal `qmux-00.moqt-18` pair (moq-transport-18 needs qmux-01).
 		for &version in QMUX_VERSIONS {
 			for &alpn in moq_net::ALPNS {
 				let entry = format!("{}{alpn}", version.prefix());
+				if version == qmux::Version::QMux00 && alpn == QMUX01_ONLY_ALPN {
+					assert!(!list.contains(&entry), "illegal pair {entry} must not be advertised");
+					continue;
+				}
 				assert!(list.contains(&entry), "missing {entry}");
 			}
 		}
