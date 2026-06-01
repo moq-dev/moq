@@ -81,6 +81,7 @@ impl Track {
 		let container = moq_mux::catalog::hang::Container::Legacy;
 		let track = broadcast
 			.subscribe_track(name, moq_net::Subscription::default())
+			.ok()
 			.await?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
 		Ok(Self {
@@ -96,6 +97,7 @@ impl Track {
 		let container: moq_mux::catalog::hang::Container = (&config.container).try_into()?;
 		let track = broadcast
 			.subscribe_track(name, moq_net::Subscription::default())
+			.ok()
 			.await?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
 

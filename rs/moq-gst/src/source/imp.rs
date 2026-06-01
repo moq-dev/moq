@@ -437,6 +437,7 @@ async fn run_session(
 			hang::catalog::Catalog::DEFAULT_NAME,
 			hang::catalog::Catalog::default_subscription(),
 		)
+		.ok()
 		.await?;
 	let mut catalog = moq_mux::catalog::hang::Consumer::new(catalog_track);
 	let catalog = catalog.next().await?.context("catalog missing")?.clone();
@@ -452,6 +453,7 @@ async fn run_session(
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_consumer = broadcast
 			.subscribe_track(&track_name, moq_net::Subscription::default())
+			.ok()
 			.await?;
 		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
 			.with_latency(Duration::from_secs(1));
@@ -467,6 +469,7 @@ async fn run_session(
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_consumer = broadcast
 			.subscribe_track(&track_name, moq_net::Subscription::default())
+			.ok()
 			.await?;
 		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
 			.with_latency(Duration::from_secs(1));

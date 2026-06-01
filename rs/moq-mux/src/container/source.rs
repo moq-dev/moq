@@ -13,9 +13,7 @@
 //! existing `description` (for already-out-of-band sources) or the synthesized
 //! avcC/hvcC (for Annex-B sources).
 
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -51,7 +49,7 @@ impl VideoTransform {
 /// A subscription that resolves on first poll, then the live consumer.
 enum SourceState {
 	/// Waiting for `subscribe_track` to resolve (blocks on the publisher's response).
-	Subscribing(Pin<Box<dyn Future<Output = Result<moq_net::TrackConsumer, moq_net::Error>>>>),
+	Subscribing(moq_net::TrackPending),
 	/// The resolved consumer, reading frames.
 	Active(Consumer<HangContainer>),
 }
@@ -71,17 +69,6 @@ pub(crate) struct ExportSource {
 	description: Option<Bytes>,
 }
 
-/// Build the (deferred) subscribe future so `ExportSource` constructors stay
-/// synchronous and the subscription resolves inside the existing poll loop.
-fn subscribe_future(
-	broadcast: &moq_net::BroadcastConsumer,
-	name: &str,
-) -> Pin<Box<dyn Future<Output = Result<moq_net::TrackConsumer, moq_net::Error>>>> {
-	let broadcast = broadcast.clone();
-	let name = name.to_string();
-	Box::pin(async move { broadcast.subscribe_track(&name, moq_net::Subscription::default()).await })
-}
-
 impl ExportSource {
 	/// Subscribe to a video rendition and build an `ExportSource`.
 	pub fn for_video(
@@ -95,7 +82,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(subscribe_future(broadcast, name)),
+			state: SourceState::Subscribing(broadcast.subscribe_track(name, moq_net::Subscription::default())),
 			media: Some(media),
 			latency,
 			transform,
@@ -117,7 +104,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(subscribe_future(broadcast, name)),
+			state: SourceState::Subscribing(broadcast.subscribe_track(name, moq_net::Subscription::default())),
 			media: Some(media),
 			latency,
 			transform: None,
@@ -137,7 +124,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(subscribe_future(broadcast, name)),
+			state: SourceState::Subscribing(broadcast.subscribe_track(name, moq_net::Subscription::default())),
 			media: Some(media),
 			latency,
 			transform: None,
@@ -164,13 +151,12 @@ impl ExportSource {
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		// Resolve the subscription before reading any frames.
 		if matches!(self.state, SourceState::Subscribing(_)) {
-			// Scope the `future` borrow so it ends before we touch `self.media`/`self.state`.
+			// Scope the `pending` borrow so it ends before we touch `self.media`/`self.state`.
 			let track = {
-				let SourceState::Subscribing(future) = &mut self.state else {
+				let SourceState::Subscribing(pending) = &self.state else {
 					unreachable!("just matched Subscribing");
 				};
-				let mut cx = Context::from_waker(waiter.waker());
-				match future.as_mut().poll(&mut cx) {
+				match pending.poll_ok(waiter) {
 					Poll::Ready(Ok(track)) => track,
 					Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
 					Poll::Pending => return Poll::Pending,

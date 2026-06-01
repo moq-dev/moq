@@ -1,6 +1,7 @@
 use std::{
 	collections::{HashMap, hash_map::Entry},
 	sync::{Arc, atomic},
+	task::Poll,
 	time::Duration,
 };
 
@@ -58,10 +59,10 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 struct TrackEntry {
 	producer: TrackProducer,
 	stats: Arc<SubscriberTrack>,
-	/// Codec for this subscription, learned from SUBSCRIBE_OK. `None` until that
-	/// message arrives; group streams block on it before decoding any frame,
-	/// since a group can race ahead of SUBSCRIBE_OK on its own QUIC stream.
-	compression: tokio::sync::watch::Receiver<Option<Compression>>,
+	/// The SUBSCRIBE_OK for this subscription. `None` until it arrives; group
+	/// streams block on it before decoding any frame, since a group can race
+	/// ahead of SUBSCRIBE_OK on its own QUIC stream.
+	subscribe_ok: kio::Consumer<Option<lite::SubscribeOk>>,
 }
 
 /// Result of an upstream subscribe lifecycle.
@@ -413,9 +414,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			track: (&name).into(),
 			priority: subscription.priority,
 			ordered: subscription.ordered,
-			max_latency: subscription.max_latency,
-			start_group: subscription.start_group,
-			end_group: subscription.end_group,
+			max_latency: subscription.stale,
+			start_group: subscription.group_start,
+			end_group: subscription.group_end,
 		};
 
 		tracing::info!(id, broadcast = %self.log_path(&path), track = %name, "subscribe started");
@@ -508,10 +509,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 
 		// The publisher accepted: create the producer (unblocking the downstream
-		// subscriber) and start routing incoming groups to it. The negotiated codec
-		// from SUBSCRIBE_OK is known now, so the group streams never have to wait;
-		// they still read it through a watch receiver (a group's QUIC stream can
-		// otherwise race ahead of SUBSCRIBE_OK).
+		// subscriber) and start routing incoming groups to it. SUBSCRIBE_OK is known
+		// now, so the group streams never have to wait; they still read it through a
+		// kio channel (a group's QUIC stream can otherwise race ahead of SUBSCRIBE_OK).
 		let mut track = match request.accept(Track::new(name)) {
 			Ok(track) => track,
 			Err(err) => {
@@ -519,13 +519,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return SessionOutcome::Error(err);
 			}
 		};
-		let (_compression_tx, compression_rx) = tokio::sync::watch::channel(Some(info.compression));
+		let subscribe_ok = kio::Producer::new(Some(info)).consume();
 		self.subscribes.lock().insert(
 			id,
 			TrackEntry {
 				producer: track.clone(),
 				stats: track_stats,
-				compression: compression_rx,
+				subscribe_ok,
 			},
 		);
 
@@ -622,7 +622,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let (mut group, track, track_stats, mut compression_rx) = {
+		let (mut group, track, track_stats, subscribe_ok) = {
 			let mut subs = self.subscribes.lock();
 			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
@@ -632,24 +632,33 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				group,
 				entry.producer.clone(),
 				entry.stats.clone(),
-				entry.compression.clone(),
+				entry.subscribe_ok.clone(),
 			)
 		};
 
 		// Bump groups counter for this incoming group on the subscriber side.
 		track_stats.group();
 
-		// Block until SUBSCRIBE_OK tells us the codec. The group's QUIC stream can
-		// arrive before SUBSCRIBE_OK lands on the subscribe stream, so we can't
-		// decode frames until this resolves. A receiver error means the
-		// subscription ended before SUBSCRIBE_OK, so treat it as cancelled.
-		let compression = {
-			let guard = compression_rx
-				.wait_for(Option::is_some)
-				.await
-				.map_err(|_| Error::Cancel)?;
-			(*guard).expect("present after wait_for")
-		};
+		// Block until SUBSCRIBE_OK arrives. The group's QUIC stream can arrive
+		// before SUBSCRIBE_OK lands on the subscribe stream, so we can't decode
+		// frames until this resolves. A closed channel means the subscription
+		// ended before SUBSCRIBE_OK, so treat it as cancelled.
+		//
+		// Map the closed `Ref` to `None` inside the poll closure (rather than using
+		// `Consumer::wait`) so the `!Send` guard never enters this spawned future.
+		let compression = kio::wait(|waiter| {
+			let poll = subscribe_ok.poll(waiter, |ok| match &**ok {
+				Some(ok) => Poll::Ready(ok.compression),
+				None => Poll::Pending,
+			});
+			match poll {
+				Poll::Ready(Ok(compression)) => Poll::Ready(Some(compression)),
+				Poll::Ready(Err(_closed)) => Poll::Ready(None),
+				Poll::Pending => Poll::Pending,
+			}
+		})
+		.await
+		.ok_or(Error::Cancel)?;
 
 		let res = tokio::select! {
 			err = track.closed() => Err(err),

@@ -71,6 +71,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 
 	let mut track_sub = bc
 		.subscribe_track("video", moq_native::moq_net::Subscription::default())
+		.ok()
 		.await
 		.expect("subscribe_track failed");
 
@@ -224,6 +225,7 @@ async fn iroh_connect() {
 
 	let mut track_sub = bc
 		.subscribe_track("video", moq_native::moq_net::Subscription::default())
+		.ok()
 		.await
 		.expect("subscribe_track failed");
 

@@ -28,7 +28,7 @@ Add `Moq` to your target's dependencies:
 
 The raw `MoqFFI` bindings and the prebuilt XCFramework are pulled in transitively from [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi); you only depend on `moq-swift`.
 
-Supported platforms: iOS 15+, iPadOS 15+, macOS 12+. The XCFramework ships iOS device (arm64), iOS Simulator (arm64 + x86_64), and macOS universal slices.
+Supported platforms: iOS 15+, iPadOS 15+, macOS 12+. The XCFramework ships iOS device (arm64), iOS Simulator (arm64 + x86\_64), and macOS universal slices.
 
 ## Connect
 

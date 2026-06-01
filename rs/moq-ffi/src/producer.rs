@@ -203,7 +203,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(Arc::new(MoqTrackConsumer::new(track.consume())))
+		Ok(Arc::new(MoqTrackConsumer::new(track.subscribe_default())))
 	}
 
 	/// Append a new group to the track, returning a producer for writing frames into it.

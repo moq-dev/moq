@@ -388,13 +388,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let subscription = crate::Subscription {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
-			max_latency: subscribe.max_latency,
-			start_group: subscribe.start_group,
-			end_group: subscribe.end_group,
+			stale: subscribe.max_latency,
+			group_start: subscribe.start_group,
+			group_end: subscribe.end_group,
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&subscribe.track, subscription).await?;
+		let track = broadcast.subscribe_track(&subscribe.track, subscription).ok().await?;
 
 		// Compress only when the producer marked the track worth it and the
 		// negotiated draft understands the SUBSCRIBE_OK codec field. Older drafts

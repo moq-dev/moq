@@ -112,9 +112,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			return Ok(());
 		};
 
-		let subscription = Subscription::new(msg.subscriber_priority);
+		let subscription = Subscription {
+			priority: msg.subscriber_priority,
+			..Default::default()
+		};
 
-		let track = match broadcast.subscribe_track(&msg.track_name, subscription).await {
+		let track = match broadcast.subscribe_track(&msg.track_name, subscription).ok().await {
 			Ok(track) => track,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())

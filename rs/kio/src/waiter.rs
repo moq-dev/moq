@@ -42,15 +42,6 @@ impl Waiter {
 	pub fn register(&self, list: &mut WaiterList) {
 		list.register(self);
 	}
-
-	/// The underlying async [`Waker`].
-	///
-	/// Lets a poll function drive a plain `std` future inside the kio poll
-	/// model: build a [`Context`] from this waker, poll the future, and return
-	/// [`Poll::Pending`] to suspend like any other pending branch.
-	pub fn waker(&self) -> &Waker {
-		&self.waker
-	}
 }
 
 /// A list of weak wakers waiting for notification.

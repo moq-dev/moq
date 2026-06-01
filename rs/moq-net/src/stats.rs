@@ -1161,6 +1161,7 @@ mod tests {
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
 			.subscribe_track("publisher.json", Subscription::default())
+			.ok()
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1187,6 +1188,7 @@ mod tests {
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
 			.subscribe_track("publisher.json", Subscription::default())
+			.ok()
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1218,6 +1220,7 @@ mod tests {
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
 			.subscribe_track("publisher.json", Subscription::default())
+			.ok()
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1295,6 +1298,7 @@ mod tests {
 		// External publisher slot SHOULD include foo/bar.
 		let pub_track = broadcast
 			.subscribe_track("publisher.json", Subscription::default())
+			.ok()
 			.await
 			.expect("subscribe");
 		assert!(
@@ -1307,6 +1311,7 @@ mod tests {
 		for name in ["subscriber.json", "internal/publisher.json", "internal/subscriber.json"] {
 			let t = broadcast
 				.subscribe_track(name, Subscription::default())
+				.ok()
 				.await
 				.expect("subscribe");
 			let frame = read_frame(t).await;

@@ -4,8 +4,6 @@ use std::{
 	task::{Poll, ready},
 };
 
-use tokio::sync::oneshot;
-
 use crate::{Error, Subscription, TrackConsumer, TrackProducer, model::track::TrackWeak};
 
 use super::{OriginList, Track};
@@ -34,18 +32,33 @@ impl Broadcast {
 	}
 }
 
-/// One subscriber awaiting a pending request: its preferences and the channel
-/// that delivers the resolved [`TrackConsumer`] (or an error).
-type Resolver = (Subscription, oneshot::Sender<Result<TrackConsumer, Error>>);
+/// The slot a pending subscription resolves into: `None` until the publisher
+/// accepts (delivering the consumer) or denies (delivering an error). Carried by
+/// a [`kio`] channel so subscribers can `poll_ok` it without tokio. The consumer
+/// is created at accept time so it counts toward the producer immediately, before
+/// the subscriber even polls.
+type PendingSlot = Option<Result<TrackConsumer, Error>>;
+
+/// One waiting subscriber: its preferences and the producer side of its resolver channel.
+type Resolver = (Subscription, kio::Producer<PendingSlot>);
 
 /// A track that has been subscribed to but not yet served by the dynamic handler.
 ///
 /// Multiple subscribers to the same name before it is accepted coalesce into one
-/// pending request, each adding a [`Resolver`] so they all receive a consumer
+/// pending request, each adding a resolver channel so they all receive a consumer
 /// for the same producer once it is accepted.
 #[derive(Default)]
 struct PendingRequest {
 	resolvers: Vec<Resolver>,
+}
+
+/// Resolve every waiting subscriber with `err`.
+fn fail_resolvers(resolvers: Vec<Resolver>, err: &Error) {
+	for (_, slot) in resolvers {
+		if let Ok(mut slot) = slot.write() {
+			*slot = Some(Err(err.clone()));
+		}
+	}
 }
 
 #[derive(Default)]
@@ -90,9 +103,7 @@ impl State {
 	fn abort_requests(&mut self, err: &Error) {
 		self.request_order.clear();
 		for (_, pending) in self.requests.drain() {
-			for (_, tx) in pending.resolvers {
-				let _ = tx.send(Err(err.clone()));
-			}
+			fail_resolvers(pending.resolvers, err);
 		}
 	}
 
@@ -100,9 +111,7 @@ impl State {
 	fn deny_request(&mut self, name: &str, err: Error) {
 		self.request_order.retain(|n| n != name);
 		if let Some(pending) = self.requests.remove(name) {
-			for (_, tx) in pending.resolvers {
-				let _ = tx.send(Err(err.clone()));
-			}
+			fail_resolvers(pending.resolvers, &err);
 		}
 	}
 }
@@ -153,8 +162,11 @@ impl BroadcastProducer {
 	}
 
 	/// Produce a new track and insert it into the broadcast.
-	pub fn create_track(&mut self, track: Track) -> Result<TrackProducer, Error> {
-		let track = TrackProducer::new(track);
+	///
+	/// Accepts anything that converts into a [`Track`], so a bare name works:
+	/// `create_track("video")`.
+	pub fn create_track(&mut self, track: impl Into<Track>) -> Result<TrackProducer, Error> {
+		let track = TrackProducer::new(track.into());
 		let mut state = modify(&self.state)?;
 		state.insert_track(track.weak())?;
 		drop(state);
@@ -221,7 +233,8 @@ impl BroadcastProducer {
 	}
 
 	pub fn assert_insert_track(&mut self, track: &TrackProducer) {
-		self.insert_track(track.consume()).expect("should not have errored")
+		self.insert_track(track.subscribe_default())
+			.expect("should not have errored")
 	}
 }
 
@@ -276,8 +289,13 @@ impl TrackRequest {
 		state.tracks.insert(self.name.clone(), producer.weak());
 
 		// Hand each waiting subscriber a consumer carrying its own preferences.
-		for (subscription, tx) in pending.resolvers {
-			let _ = tx.send(Ok(producer.consume_with(subscription)));
+		// Building it here (not when the subscriber polls) means it counts toward
+		// the producer immediately, so a publisher checking `unused()` right after
+		// accept doesn't see zero consumers and tear the track down.
+		for (subscription, slot) in pending.resolvers {
+			if let Ok(mut slot) = slot.write() {
+				*slot = Some(Ok(producer.subscribe(subscription)));
+			}
 		}
 
 		drop(state);
@@ -325,6 +343,60 @@ impl Drop for TrackRequest {
 		{
 			state.deny_request(&self.name, Error::Cancel);
 		}
+	}
+}
+
+/// A pending subscription returned by [`BroadcastConsumer::subscribe_track`].
+///
+/// The subscription isn't live until the publisher accepts it (for the wire,
+/// SUBSCRIBE_OK). Drive it with [`Self::poll_ok`] inside a `kio` poll loop, or
+/// await [`Self::ok`]; both yield the [`TrackConsumer`] (or an error).
+pub struct TrackPending {
+	inner: TrackPendingInner,
+}
+
+enum TrackPendingInner {
+	/// Resolved synchronously: the track already existed, or it failed immediately.
+	Ready(Result<TrackConsumer, Error>),
+	/// Waiting for the publisher to accept or deny via the dynamic handler.
+	Waiting(kio::Consumer<PendingSlot>),
+}
+
+impl TrackPending {
+	fn ready(result: Result<TrackConsumer, Error>) -> Self {
+		Self {
+			inner: TrackPendingInner::Ready(result),
+		}
+	}
+
+	fn waiting(consumer: kio::Consumer<PendingSlot>) -> Self {
+		Self {
+			inner: TrackPendingInner::Waiting(consumer),
+		}
+	}
+
+	/// Poll for the resolved [`TrackConsumer`], without blocking.
+	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<TrackConsumer, Error>> {
+		match &self.inner {
+			TrackPendingInner::Ready(result) => Poll::Ready(result.clone()),
+			TrackPendingInner::Waiting(consumer) => match consumer.poll(waiter, |slot| match &**slot {
+				Some(result) => Poll::Ready(result.clone()),
+				None => Poll::Pending,
+			}) {
+				Poll::Ready(Ok(result)) => Poll::Ready(result),
+				// Channel closed: the resolver may have left the final result behind.
+				Poll::Ready(Err(closed)) => Poll::Ready(match &*closed {
+					Some(result) => result.clone(),
+					None => Err(Error::Cancel),
+				}),
+				Poll::Pending => Poll::Pending,
+			},
+		}
+	}
+
+	/// Block until the publisher accepts the subscription, returning the consumer.
+	pub async fn ok(self) -> Result<TrackConsumer, Error> {
+		kio::wait(|waiter| self.poll_ok(waiter)).await
 	}
 }
 
@@ -499,62 +571,58 @@ impl Deref for BroadcastConsumer {
 }
 
 impl BroadcastConsumer {
-	/// Subscribe to a track on this broadcast, returning once the publisher has
-	/// accepted the subscription.
+	/// Subscribe to a track on this broadcast.
 	///
-	/// Reuses an existing producer if one is already publishing the track and
-	/// returns immediately. Otherwise queues a dynamic request and waits for the
-	/// broadcast's producer to serve it via [`BroadcastDynamic::requested_track`]
-	/// and [`TrackRequest::accept`] (for the wire this happens on SUBSCRIBE_OK).
-	/// Returns [`Error::NotFound`] if no dynamic producer exists to handle the
-	/// request.
+	/// Returns a [`TrackPending`] immediately; poll it with [`TrackPending::poll_ok`]
+	/// (or await [`TrackPending::ok`]) to get the [`TrackConsumer`] once the
+	/// publisher accepts the subscription. Reuses a live producer if one is already
+	/// publishing the track (the pending resolves right away), otherwise queues a
+	/// dynamic request served via [`BroadcastDynamic::requested_track`] and
+	/// [`TrackRequest::accept`] (for the wire this is SUBSCRIBE_OK). Resolves to
+	/// [`Error::NotFound`] if no dynamic producer exists to handle the request.
 	///
 	/// The returned [`TrackConsumer`] carries the publisher's [`Track`]; the given
 	/// [`Subscription`] is this subscriber's preferences and feeds the producer's
 	/// [`TrackProducer::subscription`] aggregate.
-	pub async fn subscribe_track(&self, name: &str, subscription: Subscription) -> Result<TrackConsumer, Error> {
-		let rx = {
-			// Upgrade to a temporary producer so we can modify the state.
-			let producer = self
-				.state
-				.produce()
-				.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))?;
-			let mut state = modify(&producer)?;
-
-			// Reuse a live producer if one is already publishing the track.
-			if let Some(weak) = state.tracks.get(name) {
-				if !weak.is_closed() {
-					return Ok(weak.consume_with(subscription));
-				}
-				// Drop the stale entry and fall through to a fresh request.
-				state.tracks.remove(name);
-			}
-
-			let (tx, rx) = oneshot::channel();
-
-			if let Some(pending) = state.requests.get_mut(name) {
-				// Coalesce onto an in-flight request for the same name.
-				pending.resolvers.push((subscription, tx));
-			} else if state.dynamic == 0 {
-				return Err(Error::NotFound);
-			} else {
-				state.requests.insert(
-					name.to_string(),
-					PendingRequest {
-						resolvers: vec![(subscription, tx)],
-					},
-				);
-				state.request_order.push_back(name.to_string());
-			}
-
-			rx
+	pub fn subscribe_track(&self, name: &str, subscription: Subscription) -> TrackPending {
+		// Upgrade to a temporary producer so we can modify the state.
+		let Some(producer) = self.state.produce() else {
+			let err = self.state.read().abort.clone().unwrap_or(Error::Dropped);
+			return TrackPending::ready(Err(err));
+		};
+		let mut state = match modify(&producer) {
+			Ok(state) => state,
+			Err(err) => return TrackPending::ready(Err(err)),
 		};
 
-		match rx.await {
-			Ok(res) => res,
-			// Sender dropped without sending: the broadcast was torn down.
-			Err(_) => Err(self.state.read().abort.clone().unwrap_or(Error::Cancel)),
+		// Reuse a live producer if one is already publishing the track.
+		if let Some(weak) = state.tracks.get(name) {
+			if !weak.is_closed() {
+				return TrackPending::ready(Ok(weak.subscribe(subscription)));
+			}
+			// Drop the stale entry and fall through to a fresh request.
+			state.tracks.remove(name);
 		}
+
+		let slot = kio::Producer::new(None);
+		let consumer = slot.consume();
+
+		if let Some(pending) = state.requests.get_mut(name) {
+			// Coalesce onto an in-flight request for the same name.
+			pending.resolvers.push((subscription, slot));
+		} else if state.dynamic == 0 {
+			return TrackPending::ready(Err(Error::NotFound));
+		} else {
+			state.requests.insert(
+				name.to_string(),
+				PendingRequest {
+					resolvers: vec![(subscription, slot)],
+				},
+			);
+			state.request_order.push_back(name.to_string());
+		}
+
+		TrackPending::waiting(consumer)
 	}
 
 	/// Block until the broadcast is closed and return the cause.
@@ -601,17 +669,16 @@ impl BroadcastConsumer {
 mod test {
 	use super::*;
 
-	/// Begin a subscribe and poll it once so the dynamic request registers,
-	/// asserting it hasn't resolved yet (it blocks until a publisher accepts).
-	/// Returns the still-pending future to await after accepting the request.
+	/// Subscribe and assert the result hasn't resolved yet (it stays pending until
+	/// a publisher accepts). Returns the [`TrackPending`] to resolve after accepting.
 	macro_rules! subscribe_pending {
 		($consumer:expr, $name:expr) => {{
-			let mut fut = Box::pin($consumer.subscribe_track($name, Subscription::default()));
+			let pending = $consumer.subscribe_track($name, Subscription::default());
 			assert!(
-				futures::poll!(fut.as_mut()).is_pending(),
-				"subscribe_track should block until the request is accepted"
+				pending.poll_ok(&kio::Waiter::noop()).is_pending(),
+				"subscribe_track should stay pending until the request is accepted"
 			);
-			fut
+			pending
 		}};
 	}
 
@@ -629,6 +696,7 @@ mod test {
 		// The track already exists, so subscribe resolves immediately.
 		let mut track1_sub = consumer
 			.subscribe_track("track1", Subscription::default())
+			.ok()
 			.await
 			.unwrap();
 		track1_sub.assert_group();
@@ -639,6 +707,7 @@ mod test {
 		let consumer2 = producer.consume();
 		let mut track2_consumer = consumer2
 			.subscribe_track("track2", Subscription::default())
+			.ok()
 			.await
 			.unwrap();
 		track2_consumer.assert_no_group();
@@ -660,6 +729,7 @@ mod test {
 		let track1 = producer.assert_create_track(&Track::new("track1"));
 		let track1c = consumer
 			.subscribe_track("track1", Subscription::default())
+			.ok()
 			.await
 			.unwrap();
 
@@ -670,7 +740,7 @@ mod test {
 		producer.abort(Error::Cancel).unwrap();
 
 		// track2 was a pending dynamic request, so its subscribe surfaces the abort.
-		assert!(track2_fut.await.is_err());
+		assert!(track2_fut.ok().await.is_err());
 
 		// track1's producer is held outside the broadcast, so it survives.
 		assert!(!track1.is_closed());
@@ -695,12 +765,12 @@ mod test {
 
 		// Accept it, which resolves both waiting subscribers.
 		let mut track3 = request.accept(Track::new("track1")).unwrap();
-		let mut track1 = track1_fut.await.unwrap();
-		let mut track2 = track2_fut.await.unwrap();
+		let mut track1 = track1_fut.ok().await.unwrap();
+		let mut track2 = track2_fut.ok().await.unwrap();
 
 		track1.assert_not_closed();
 		track1.assert_is_clone(&track2);
-		track3.consume().assert_is_clone(&track1);
+		track3.subscribe_default().assert_is_clone(&track1);
 
 		// Append a group and make sure they all get it.
 		track3.append_group().unwrap();
@@ -710,10 +780,10 @@ mod test {
 		// A pending request is cancelled when the dynamic producer is dropped.
 		let track4_fut = subscribe_pending!(consumer, "track2");
 		drop(producer);
-		assert!(track4_fut.await.is_err());
+		assert!(track4_fut.ok().await.is_err());
 
 		// With no dynamic producer left, new subscribes fail outright.
-		let track5 = consumer2.subscribe_track("track3", Subscription::default()).await;
+		let track5 = consumer2.subscribe_track("track3", Subscription::default()).ok().await;
 		assert!(track5.is_err(), "should have errored");
 	}
 
@@ -725,7 +795,7 @@ mod test {
 		// Subscribe to a track and serve it.
 		let track1_fut = subscribe_pending!(consumer, "track1");
 		let mut producer1 = broadcast.assert_request().accept(Track::new("track1")).unwrap();
-		let track1 = track1_fut.await.unwrap();
+		let track1 = track1_fut.ok().await.unwrap();
 
 		// Close the producer (simulating publisher disconnect).
 		producer1.append_group().unwrap();
@@ -738,7 +808,7 @@ mod test {
 		// Subscribe again to the same track: should get a NEW producer, not the stale one.
 		let track2_fut = subscribe_pending!(consumer, "track1");
 		let mut producer2 = broadcast.assert_request().accept(Track::new("track1")).unwrap();
-		let mut track2 = track2_fut.await.unwrap();
+		let mut track2 = track2_fut.ok().await.unwrap();
 		track2.assert_not_closed();
 		track2.assert_not_clone(&track1);
 
@@ -755,7 +825,7 @@ mod test {
 		// Subscribe to a track that doesn't exist yet, then serve it.
 		let c1_fut = subscribe_pending!(bc, "unknown_track");
 		let mut producer1 = broadcast.assert_request().accept(Track::new("unknown_track")).unwrap();
-		let consumer1 = c1_fut.await.unwrap();
+		let consumer1 = c1_fut.ok().await.unwrap();
 
 		// The producer should NOT be unused yet because there's a consumer.
 		assert!(
@@ -766,6 +836,7 @@ mod test {
 		// A second subscriber reuses the live producer (fast path / dedup).
 		let consumer2 = bc
 			.subscribe_track("unknown_track", Subscription::default())
+			.ok()
 			.await
 			.unwrap();
 		consumer2.assert_is_clone(&consumer1);
@@ -787,9 +858,10 @@ mod test {
 		// subscriptions across transient consumer churn.
 		let consumer3 = bc
 			.subscribe_track("unknown_track", Subscription::default())
+			.ok()
 			.await
 			.unwrap();
-		consumer3.assert_is_clone(&producer1.consume());
+		consumer3.assert_is_clone(&producer1.subscribe_default());
 		broadcast.assert_no_request();
 		drop(consumer3);
 
@@ -800,7 +872,7 @@ mod test {
 
 		let c4_fut = subscribe_pending!(bc, "unknown_track");
 		let producer2 = broadcast.assert_request().accept(Track::new("unknown_track")).unwrap();
-		let consumer4 = c4_fut.await.unwrap();
+		let consumer4 = c4_fut.ok().await.unwrap();
 		drop(consumer4);
 		assert!(
 			producer2.unused().now_or_never().is_some(),

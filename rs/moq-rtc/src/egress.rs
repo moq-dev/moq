@@ -53,6 +53,7 @@ impl EgressSource {
 	pub async fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self> {
 		let catalog_track = broadcast
 			.subscribe_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_subscription())
+			.ok()
 			.await?;
 		let mut consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
 		let catalog = consumer

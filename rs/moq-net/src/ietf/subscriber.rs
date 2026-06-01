@@ -476,7 +476,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		drop(state);
 
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
-		broadcast.insert_track(track.consume())?;
+		broadcast.insert_track(track.subscribe_default())?;
 
 		Ok(())
 	}
@@ -629,7 +629,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				request_id,
 				track_namespace: broadcast.to_owned(),
 				track_name: (&track.name).into(),
-				subscriber_priority: track.subscription().priority,
+				subscriber_priority: track.subscription().map(|s| s.priority).unwrap_or(0),
 				group_order: GroupOrder::Descending,
 				filter_type: FilterType::LargestObject,
 			})

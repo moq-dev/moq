@@ -10,26 +10,26 @@ public final class BroadcastConsumer: Sendable {
     }
 
     /// Subscribe to the broadcast's catalog (the description of its tracks).
-    public func subscribeCatalog() throws -> CatalogConsumer {
-        CatalogConsumer(try ffi.subscribeCatalog())
+    public func subscribeCatalog() async throws -> CatalogConsumer {
+        CatalogConsumer(try await ffi.subscribeCatalog())
     }
 
     /// Subscribe to a track by name, delivering raw frame payloads with no codec
     /// or container parsing.
-    public func subscribeTrack(name: String) throws -> TrackConsumer {
-        TrackConsumer(try ffi.subscribeTrack(name: name))
+    public func subscribeTrack(name: String) async throws -> TrackConsumer {
+        TrackConsumer(try await ffi.subscribeTrack(name: name))
     }
 
     /// Subscribe to a media track, delivering frames in decode order. `container`
     /// comes from the catalog; `maxLatencyMs` bounds buffering before skipping a GoP.
-    public func subscribeMedia(name: String, container: Container, maxLatencyMs: UInt64) throws -> MediaConsumer {
-        MediaConsumer(try ffi.subscribeMedia(name: name, container: container, maxLatencyMs: maxLatencyMs))
+    public func subscribeMedia(name: String, container: Container, maxLatencyMs: UInt64) async throws -> MediaConsumer {
+        MediaConsumer(try await ffi.subscribeMedia(name: name, container: container, maxLatencyMs: maxLatencyMs))
     }
 
     /// Subscribe to a raw-audio track, decoding to PCM in the layout `output`
     /// declares. `catalogAudio` is the matching rendition from the catalog.
-    public func subscribeAudio(name: String, catalogAudio: Audio, output: AudioDecoderOutput) throws -> AudioConsumer {
-        AudioConsumer(try ffi.subscribeAudio(name: name, catalogAudio: catalogAudio, output: output))
+    public func subscribeAudio(name: String, catalogAudio: Audio, output: AudioDecoderOutput) async throws -> AudioConsumer {
+        AudioConsumer(try await ffi.subscribeAudio(name: name, catalogAudio: catalogAudio, output: output))
     }
 }
 

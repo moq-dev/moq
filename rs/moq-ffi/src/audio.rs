@@ -233,7 +233,7 @@ impl MoqBroadcastConsumer {
 	/// the catalog (see
 	/// [`MoqCatalogConsumer::next`](crate::consumer::MoqCatalogConsumer::next));
 	/// the codec is inferred from it.
-	pub fn subscribe_audio(
+	pub async fn subscribe_audio(
 		&self,
 		name: String,
 		catalog_audio: crate::media::MoqAudio,
@@ -248,9 +248,7 @@ impl MoqBroadcastConsumer {
 		cfg.description = catalog_audio.description.map(Into::into);
 		cfg.container = catalog_audio.container.into();
 
-		// `subscribe_track` now blocks on SUBSCRIBE_OK; drive it on the runtime so
-		// this synchronous FFI method keeps its signature.
-		let consumer = crate::ffi::RUNTIME.block_on(moq_audio::AudioConsumer::new(
+		let consumer = moq_audio::AudioConsumer::new(
 			self.inner(),
 			&cfg,
 			name,
@@ -260,7 +258,8 @@ impl MoqBroadcastConsumer {
 				channels: output.channels,
 				latency_max: output.latency_max_ms.map(Duration::from_millis),
 			},
-		))?;
+		)
+		.await?;
 
 		Ok(Arc::new(MoqAudioConsumer {
 			task: Task::new(ConsumerInner { consumer }),

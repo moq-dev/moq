@@ -17,7 +17,7 @@ The ergonomic wrapper. Pure Kotlin layered on `dev.moq:moq-ffi`: a `Moq.connect(
 
 ### dev.moq:moq-ffi
 
-The raw UniFFI bindings (`uniffi.moq.*`) plus the native binaries (JNI on Android, JNA on desktop JVM: Linux, macOS, Windows; arm64-v8a, armeabi-v7a, x86_64). Auto-released on every `moq-ffi-v*` tag, so its version tracks the crate. Depend on it directly only if you want the FFI surface without the wrapper.
+The raw UniFFI bindings (`uniffi.moq.*`) plus the native binaries (JNI on Android, JNA on desktop JVM: Linux, macOS, Windows; arm64-v8a, armeabi-v7a, x86\_64). Auto-released on every `moq-ffi-v*` tag, so its version tracks the crate. Depend on it directly only if you want the FFI surface without the wrapper.
 
 [Learn more](/lib/kt/moq)
 

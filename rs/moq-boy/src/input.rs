@@ -101,6 +101,7 @@ async fn handle_viewer_commands(
 ) -> anyhow::Result<()> {
 	let mut track = broadcast
 		.subscribe_track("command", moq_net::Subscription::default())
+		.ok()
 		.await?;
 
 	while let Some(mut group) = track.recv_group().await? {

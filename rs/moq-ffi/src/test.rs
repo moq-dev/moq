@@ -79,7 +79,7 @@ async fn media_track_activity_and_name() {
 	assert_eq!(track_name, "0.opus");
 
 	let broadcast_consumer = broadcast.consume().unwrap();
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().unwrap();
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
@@ -87,7 +87,7 @@ async fn media_track_activity_and_name() {
 		.expect("expected a catalog");
 	assert!(catalog.audio.contains_key(&track_name));
 
-	let track_consumer = broadcast_consumer.subscribe_track(track_name).unwrap();
+	let track_consumer = broadcast_consumer.subscribe_track(track_name).await.unwrap();
 	tokio::time::timeout(TIMEOUT, media.used())
 		.await
 		.expect("timed out waiting for media track to become used")
@@ -133,7 +133,7 @@ async fn local_publish_consume_audio() {
 	assert_eq!(announcement.path(), "live");
 
 	let broadcast_consumer = announcement.broadcast();
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().unwrap();
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -150,6 +150,7 @@ async fn local_publish_consume_audio() {
 
 	let media_consumer = broadcast_consumer
 		.subscribe_media(track_name.clone(), audio.container.clone(), 10_000)
+		.await
 		.unwrap();
 
 	let payload = b"opus audio payload data".to_vec();
@@ -183,7 +184,7 @@ async fn video_publish_consume() {
 		.expect("expected announcement");
 
 	let broadcast_consumer = announcement.broadcast();
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().unwrap();
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -205,6 +206,7 @@ async fn video_publish_consume() {
 
 	let media_consumer = broadcast_consumer
 		.subscribe_media(track_name.clone(), video.container.clone(), 10_000)
+		.await
 		.unwrap();
 
 	let keyframe = vec![0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC];
@@ -237,7 +239,7 @@ async fn multiple_frames_ordering() {
 		.unwrap();
 
 	let broadcast_consumer = announcement.broadcast();
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().unwrap();
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.unwrap()
@@ -247,6 +249,7 @@ async fn multiple_frames_ordering() {
 	let (track_name, audio) = catalog.audio.iter().next().unwrap();
 	let media_consumer = broadcast_consumer
 		.subscribe_media(track_name.clone(), audio.container.clone(), 10_000)
+		.await
 		.unwrap();
 
 	let timestamps: [u64; 5] = [0, 20_000, 40_000, 60_000, 80_000];
@@ -285,7 +288,7 @@ async fn catalog_update_on_new_track() {
 		.unwrap();
 
 	let broadcast_consumer = announcement.broadcast();
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().unwrap();
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
 
 	let catalog1 = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -334,7 +337,7 @@ async fn announced_broadcast() {
 		.expect("expected announcement");
 
 	assert_eq!(announcement.path(), "test/broadcast");
-	let _catalog = announcement.broadcast().subscribe_catalog().unwrap();
+	let _catalog = announcement.broadcast().subscribe_catalog().await.unwrap();
 }
 
 #[test]
@@ -430,7 +433,7 @@ async fn server_client_roundtrip() {
 
 	// Subscribe to the audio track and verify a frame round-trips.
 	let bc = announcement.broadcast();
-	let catalog_consumer = bc.subscribe_catalog().unwrap();
+	let catalog_consumer = bc.subscribe_catalog().await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
@@ -439,6 +442,7 @@ async fn server_client_roundtrip() {
 	let (track_name, audio) = catalog.audio.iter().next().unwrap();
 	let media_consumer = bc
 		.subscribe_media(track_name.clone(), audio.container.clone(), 10_000)
+		.await
 		.unwrap();
 
 	let payload = b"hello over the wire".to_vec();

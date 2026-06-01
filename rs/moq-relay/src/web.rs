@@ -521,6 +521,7 @@ async fn serve_fetch(
 			.ok_or(StatusCode::NOT_FOUND)?;
 		let mut track = broadcast
 			.subscribe_track(&track, moq_net::Subscription::default())
+			.ok()
 			.await
 			.map_err(|err| match err {
 				moq_net::Error::NotFound => StatusCode::NOT_FOUND,

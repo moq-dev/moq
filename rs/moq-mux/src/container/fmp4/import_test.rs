@@ -184,6 +184,7 @@ async fn test_seek_sets_initial_sequence() {
 	let video_name = snap.video.renditions.keys().next().expect("video track").clone();
 	let mut video_track = broadcast_consumer
 		.subscribe_track(&video_name, moq_net::Subscription::default())
+		.ok()
 		.await
 		.expect("video track should exist");
 
@@ -223,6 +224,7 @@ async fn test_msf_catalog_roundtrip() {
 
 	let track = consumer
 		.subscribe_track(moq_msf::DEFAULT_NAME, moq_net::Subscription::default())
+		.ok()
 		.await
 		.expect("MSF catalog track should exist");
 	let mut msf = crate::catalog::msf::Consumer::new(track);

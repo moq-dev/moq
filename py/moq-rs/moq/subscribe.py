@@ -189,14 +189,14 @@ class BroadcastConsumer:
     def __init__(self, inner: MoqBroadcastConsumer) -> None:
         self._inner = inner
 
-    def subscribe_catalog(self) -> CatalogConsumer:
-        return CatalogConsumer(self._inner.subscribe_catalog())
+    async def subscribe_catalog(self) -> CatalogConsumer:
+        return CatalogConsumer(await self._inner.subscribe_catalog())
 
-    def subscribe_track(self, name: str) -> TrackConsumer:
+    async def subscribe_track(self, name: str) -> TrackConsumer:
         """Subscribe to a track — receive arbitrary byte payloads."""
-        return TrackConsumer(self._inner.subscribe_track(name))
+        return TrackConsumer(await self._inner.subscribe_track(name))
 
-    def subscribe_media(self, name: str, track: Video | Audio, max_latency_ms: int = 10000) -> MediaConsumer:
+    async def subscribe_media(self, name: str, track: Video | Audio, max_latency_ms: int = 10000) -> MediaConsumer:
         """Subscribe to a media track, delivering frames in decode order.
 
         ``track`` is the catalog entry for this track (e.g.
@@ -204,9 +204,9 @@ class BroadcastConsumer:
         bitstream, so the caller doesn't construct a :class:`Container` by hand.
         ``max_latency_ms`` bounds buffering before a stalled GoP is skipped.
         """
-        return MediaConsumer(self._inner.subscribe_media(name, track.container, max_latency_ms))
+        return MediaConsumer(await self._inner.subscribe_media(name, track.container, max_latency_ms))
 
-    def subscribe_audio(
+    async def subscribe_audio(
         self,
         name: str,
         catalog_audio: Audio,
@@ -222,9 +222,9 @@ class BroadcastConsumer:
         the congestion-control knob. (Named ``_max`` to leave room for
         a future ``latency_min_ms`` jitter-buffer floor.)
         """
-        return AudioConsumer(self._inner.subscribe_audio(name, catalog_audio, output))
+        return AudioConsumer(await self._inner.subscribe_audio(name, catalog_audio, output))
 
     async def catalog(self) -> Catalog:
         """Convenience: subscribe and return the first catalog."""
-        consumer = self.subscribe_catalog()
+        consumer = await self.subscribe_catalog()
         return await anext(consumer)

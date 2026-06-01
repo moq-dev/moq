@@ -73,6 +73,7 @@ impl Consume {
 						hang::catalog::Catalog::DEFAULT_NAME,
 						hang::catalog::Catalog::default_subscription(),
 					)
+					.ok()
 					.await?;
 				Self::run_catalog(on_catalog, broadcast.clone(), catalog.into(), channel.1).await
 			}
@@ -251,7 +252,16 @@ impl Consume {
 		// `subscribe_track` now blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = async move {
-				let track = broadcast.subscribe_track(&name, moq_net::Subscription::new(1)).await?;
+				let track = broadcast
+					.subscribe_track(
+						&name,
+						moq_net::Subscription {
+							priority: 1,
+							..Default::default()
+						},
+					)
+					.ok()
+					.await?;
 				let track = moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy)
 					.with_latency(latency);
 				Self::run_track(on_frame, track, channel.1).await
@@ -297,7 +307,16 @@ impl Consume {
 		// `subscribe_track` now blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = async move {
-				let track = broadcast.subscribe_track(&name, moq_net::Subscription::new(2)).await?;
+				let track = broadcast
+					.subscribe_track(
+						&name,
+						moq_net::Subscription {
+							priority: 2,
+							..Default::default()
+						},
+					)
+					.ok()
+					.await?;
 				let track = moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy)
 					.with_latency(latency);
 				Self::run_track(on_frame, track, channel.1).await
@@ -399,6 +418,7 @@ impl Consume {
 			let res = async move {
 				let track = broadcast
 					.subscribe_track(&name, moq_net::Subscription::default())
+					.ok()
 					.await?;
 				Self::run_raw(on_frame, track, channel.1).await
 			}

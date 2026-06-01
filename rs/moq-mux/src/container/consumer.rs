@@ -413,7 +413,7 @@ mod tests {
 
 	/// Subscribe to a track with default preferences (test helper).
 	fn subscribe_default(track: &moq_net::TrackProducer) -> moq_net::TrackConsumer {
-		track.consume()
+		track.subscribe_default()
 	}
 
 	/// Test-only container that round-trips a per-sample duration on the wire, so the
@@ -995,7 +995,7 @@ mod tests {
 	async fn max_timestamp_tracks_through_bframes() {
 		tokio::time::pause();
 		let mut track = moq_net::Track::new("test").produce();
-		let consumer_track = track.consume();
+		let consumer_track = track.subscribe_default();
 		// latency must exceed (group1_max - group0_min) = 100ms - 0ms = 100ms
 		// to avoid the latency skip and test B-frame timestamp tracking.
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(110));
@@ -1331,7 +1331,7 @@ mod tests {
 		tokio::time::pause();
 
 		let mut track = moq_net::Track::new("video").produce();
-		let consumer_track = track.consume();
+		let consumer_track = track.subscribe_default();
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		// Write frames using Container::Legacy encoding
@@ -1371,7 +1371,7 @@ mod tests {
 	async fn duration_skip_advances_to_next_group() {
 		tokio::time::pause();
 		let mut track = moq_net::Track::new("test").produce();
-		let consumer_track = track.consume();
+		let consumer_track = track.subscribe_default();
 		// Latency dwarfs the gap, so only duration coverage can trigger the skip.
 		let mut consumer = Consumer::new(consumer_track, DurationWire).with_latency(Duration::from_secs(10));
 
@@ -1411,7 +1411,7 @@ mod tests {
 	async fn duration_below_gap_does_not_skip() {
 		tokio::time::pause();
 		let mut track = moq_net::Track::new("test").produce();
-		let consumer_track = track.consume();
+		let consumer_track = track.subscribe_default();
 		let mut consumer = Consumer::new(consumer_track, DurationWire).with_latency(Duration::from_secs(10));
 
 		// Group 0: frame at ts=0 lasting only 10ms, far short of group 1 at 33ms.

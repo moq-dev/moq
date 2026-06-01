@@ -185,7 +185,7 @@ impl<C: Container> Producer<C> {
 
 	/// Create a consumer for this track.
 	pub fn consume(&self) -> moq_net::TrackConsumer {
-		self.inner.consume()
+		self.inner.subscribe_default()
 	}
 }
 
@@ -231,7 +231,7 @@ mod tests {
 	#[tokio::test]
 	async fn keyframe_closes_group_immediately() {
 		let track = moq_net::Track::new("test").produce();
-		let consumer = track.consume();
+		let consumer = track.subscribe_default();
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap(); // first frame must be a keyframe
@@ -247,7 +247,7 @@ mod tests {
 	#[tokio::test]
 	async fn finish_group_closes_immediately() {
 		let track = moq_net::Track::new("test").produce();
-		let consumer = track.consume();
+		let consumer = track.subscribe_default();
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
@@ -282,7 +282,7 @@ mod tests {
 	#[tokio::test]
 	async fn seek_uses_explicit_sequence() {
 		let track = moq_net::Track::new("test").produce();
-		let consumer = track.consume();
+		let consumer = track.subscribe_default();
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap(); // seq 0
@@ -297,7 +297,7 @@ mod tests {
 	#[tokio::test]
 	async fn seek_clears_pending_after_use() {
 		let track = moq_net::Track::new("test").produce();
-		let consumer = track.consume();
+		let consumer = track.subscribe_default();
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.seek(5).unwrap();

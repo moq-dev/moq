@@ -162,6 +162,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 	let mut track_sub = bc
 		.subscribe_track("video", moq_native::moq_net::Subscription::default())
+		.ok()
 		.await
 		.expect("subscribe_track");
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())

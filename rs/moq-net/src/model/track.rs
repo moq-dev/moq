@@ -66,25 +66,39 @@ impl Track {
 	}
 }
 
+impl From<&str> for Track {
+	fn from(name: &str) -> Self {
+		Track::new(name)
+	}
+}
+
+impl From<String> for Track {
+	fn from(name: String) -> Self {
+		Track::new(name)
+	}
+}
+
 /// Subscriber-side preferences for receiving a track.
 ///
 /// Each subscriber holds its own [`Subscription`]; the publisher observes an
 /// aggregate across all live subscribers via [`TrackProducer::subscription`].
 /// A subscriber can change its preferences after the fact with
-/// [`TrackConsumer::update_subscription`].
+/// [`TrackConsumer::update`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subscription {
 	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
 	pub priority: u8,
 	/// Whether groups should be delivered in sequence order.
 	pub ordered: bool,
-	/// Maximum delay before a group is considered stale. `Duration::ZERO` means
-	/// no deadline (wait forever).
-	pub max_latency: Duration,
+	/// How long to wait for a group before skipping it once a newer group has
+	/// arrived. `Duration::ZERO` skips immediately (e.g. group 8 arriving means
+	/// group 7 is skipped); a larger value tolerates that much reordering before
+	/// giving up on the older group.
+	pub stale: Duration,
 	/// First group to deliver, or `None` to start at the latest group.
-	pub start_group: Option<u64>,
+	pub group_start: Option<u64>,
 	/// Last group to deliver (inclusive), or `None` for no end.
-	pub end_group: Option<u64>,
+	pub group_end: Option<u64>,
 }
 
 impl Default for Subscription {
@@ -92,19 +106,9 @@ impl Default for Subscription {
 		Self {
 			priority: 0,
 			ordered: true,
-			max_latency: Duration::ZERO,
-			start_group: None,
-			end_group: None,
-		}
-	}
-}
-
-impl Subscription {
-	/// Create a subscription with the given priority and otherwise default preferences.
-	pub fn new(priority: u8) -> Self {
-		Self {
-			priority,
-			..Default::default()
+			stale: Duration::ZERO,
+			group_start: None,
+			group_end: None,
 		}
 	}
 }
@@ -321,10 +325,11 @@ impl State {
 	/// Aggregate every live subscriber's preferences into a single [`Subscription`]
 	/// describing the most demanding request, pruning entries for dropped consumers.
 	///
-	/// The result is what an upstream relay should forward: highest priority,
-	/// ordered if anyone wants it, the tightest latency deadline, the earliest
-	/// start group, and the latest end group (unbounded wins).
-	fn aggregate_subscription(&mut self) -> Subscription {
+	/// Returns `None` when there are no live subscribers. Otherwise the result is
+	/// what an upstream relay should forward: highest priority, ordered if anyone
+	/// wants it, the tightest stale deadline, the earliest group start, and the
+	/// latest group end (unbounded wins).
+	fn aggregate_subscription(&mut self) -> Option<Subscription> {
 		self.subscriptions.retain(|s| s.strong_count() > 0);
 
 		let mut agg: Option<Subscription> = None;
@@ -336,20 +341,20 @@ impl State {
 				Some(acc) => Subscription {
 					priority: acc.priority.max(sub.priority),
 					ordered: acc.ordered || sub.ordered,
-					max_latency: tightest_latency(acc.max_latency, sub.max_latency),
-					start_group: min_option(acc.start_group, sub.start_group),
-					end_group: max_end_group(acc.end_group, sub.end_group),
+					stale: tightest_stale(acc.stale, sub.stale),
+					group_start: min_option(acc.group_start, sub.group_start),
+					group_end: max_option(acc.group_end, sub.group_end),
 				},
 			});
 		}
 
-		agg.unwrap_or_default()
+		agg
 	}
 }
 
-/// The tighter of two latency deadlines. `Duration::ZERO` means no deadline, so
+/// The tighter of two stale deadlines. `Duration::ZERO` skips immediately, so
 /// any real deadline beats it; otherwise the smaller (sooner) deadline wins.
-fn tightest_latency(a: Duration, b: Duration) -> Duration {
+fn tightest_stale(a: Duration, b: Duration) -> Duration {
 	match (a.is_zero(), b.is_zero()) {
 		(true, _) => b,
 		(_, true) => a,
@@ -365,8 +370,8 @@ fn min_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 	}
 }
 
-/// The later end group. `None` means unbounded, which dominates any bound.
-fn max_end_group(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+/// The later group end. `None` means unbounded, which dominates any bound.
+fn max_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.max(b)),
 		_ => None,
@@ -499,8 +504,8 @@ impl TrackProducer {
 	/// Create a new consumer for the track with the given subscriber preferences.
 	///
 	/// The preferences feed the producer's [`Self::subscription`] aggregate and
-	/// can be changed later via [`TrackConsumer::update_subscription`].
-	pub fn consume_with(&self, subscription: Subscription) -> TrackConsumer {
+	/// can be changed later via [`TrackConsumer::update`].
+	pub fn subscribe(&self, subscription: Subscription) -> TrackConsumer {
 		let subscription = Arc::new(Mutex::new(subscription));
 		if let Ok(mut state) = self.state.write() {
 			state.subscriptions.push(Arc::downgrade(&subscription));
@@ -517,17 +522,17 @@ impl TrackProducer {
 	}
 
 	/// Create a new consumer for the track with default ([`Subscription::default`]) preferences.
-	pub fn consume(&self) -> TrackConsumer {
-		self.consume_with(Subscription::default())
+	pub fn subscribe_default(&self) -> TrackConsumer {
+		self.subscribe(Subscription::default())
 	}
 
 	/// The aggregate of every live subscriber's [`Subscription`] (most demanding
-	/// request across all consumers). Returns the default when there are none.
-	pub fn subscription(&self) -> Subscription {
-		match self.state.write() {
-			Ok(mut state) => state.aggregate_subscription(),
-			Err(_) => Subscription::default(),
-		}
+	/// request across all consumers), or `None` when there are no live subscribers.
+	pub fn subscription(&self) -> Option<Subscription> {
+		self.state
+			.write()
+			.ok()
+			.and_then(|mut state| state.aggregate_subscription())
 	}
 
 	/// Block until there are no active consumers.
@@ -609,7 +614,7 @@ impl TrackWeak {
 		self.state.is_closed()
 	}
 
-	pub fn consume_with(&self, subscription: Subscription) -> TrackConsumer {
+	pub fn subscribe(&self, subscription: Subscription) -> TrackConsumer {
 		let subscription = Arc::new(Mutex::new(subscription));
 		// Register the preference if the producer is still alive so it shows up
 		// in the aggregate; otherwise the consumer will just observe close.
@@ -827,7 +832,7 @@ impl TrackConsumer {
 	}
 
 	/// Replace this subscriber's preferences, updating the producer's aggregate.
-	pub fn update_subscription(&self, subscription: Subscription) {
+	pub fn update(&self, subscription: Subscription) {
 		*self.subscription.lock().unwrap() = subscription;
 	}
 
@@ -985,7 +990,7 @@ mod test {
 		let mut producer = Track::new("test").produce();
 		producer.append_group().unwrap(); // seq 0
 
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 
 		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
 		producer.append_group().unwrap(); // seq 1
@@ -1073,7 +1078,7 @@ mod test {
 		}
 
 		// Consumer should still be able to read through the hole.
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 		let group = consumer.assert_group();
 		// consume() starts at index 0, first non-tombstoned group is seq 5.
 		assert_eq!(group.sequence, 5);
@@ -1124,7 +1129,7 @@ mod test {
 		producer.create_group(Group { sequence: 1 }).unwrap();
 		producer.finish_at(1).unwrap();
 
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 		assert_eq!(consumer.assert_group().sequence, 1);
 
 		let done = consumer
@@ -1138,7 +1143,7 @@ mod test {
 	#[tokio::test]
 	async fn next_group_skips_late_arrivals() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 
 		// Seq 5 arrives first.
 		producer.create_group(Group { sequence: 5 }).unwrap();
@@ -1175,7 +1180,7 @@ mod test {
 	#[tokio::test]
 	async fn next_group_returns_arrivals_in_order() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 
 		// Seq 3 arrives first, then seq 5 — both should be returned in arrival order.
 		producer.create_group(Group { sequence: 3 }).unwrap();
@@ -1201,7 +1206,7 @@ mod test {
 	#[tokio::test]
 	async fn next_group_and_recv_group_use_independent_cursors() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 
 		// Out-of-order arrivals: seq 5 first, then seq 3.
 		producer.create_group(Group { sequence: 5 }).unwrap();
@@ -1225,7 +1230,7 @@ mod test {
 	#[tokio::test]
 	async fn end_at_caps_next_group() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 
 		for s in 0..6 {
 			producer.create_group(Group { sequence: s }).unwrap();
@@ -1257,7 +1262,7 @@ mod test {
 	#[tokio::test]
 	async fn end_at_release_drains_cached_groups() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 
 		for s in 0..6 {
 			producer.create_group(Group { sequence: s }).unwrap();
@@ -1302,7 +1307,7 @@ mod test {
 	#[tokio::test]
 	async fn end_at_lower_than_cursor_parks_consumer() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 
 		for s in 0..3 {
 			producer.create_group(Group { sequence: s }).unwrap();
@@ -1346,7 +1351,7 @@ mod test {
 	#[tokio::test]
 	async fn end_at_toggling_around_late_arrivals() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 
 		consumer.end_at(5);
 
@@ -1389,7 +1394,7 @@ mod test {
 	#[tokio::test]
 	async fn read_frame_returns_single_frame_per_group() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 
 		producer.write_frame(b"hello".as_slice()).unwrap();
 		producer.write_frame(b"world".as_slice()).unwrap();
@@ -1414,7 +1419,7 @@ mod test {
 	#[tokio::test]
 	async fn read_frame_skips_stalled_group_for_newer_ready_frame() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 
 		// Seq 3: group open, no frame yet (stalled).
 		let _stalled = producer.create_group(Group { sequence: 3 }).unwrap();
@@ -1436,7 +1441,7 @@ mod test {
 	#[tokio::test]
 	async fn read_frame_discards_rest_of_multi_frame_group() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 
 		// Group 0 has two frames; only the first is returned.
 		let mut g0 = producer.create_group(Group { sequence: 0 }).unwrap();
@@ -1470,7 +1475,7 @@ mod test {
 		// finish() sets final_sequence, but groups already created with lower sequences
 		// can still produce frames. read_frame must not return None prematurely.
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 
 		let mut g0 = producer.create_group(Group { sequence: 0 }).unwrap();
 		producer.finish().unwrap();
@@ -1497,7 +1502,7 @@ mod test {
 		// start_at sets min_sequence; read_frame must skip groups below it even though
 		// next_sequence is still 0.
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 		consumer.start_at(5);
 
 		// Seq 3 has a frame but is below min_sequence — must be skipped.
@@ -1521,7 +1526,7 @@ mod test {
 	#[tokio::test]
 	async fn read_frame_returns_none_when_finished() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.consume();
+		let mut consumer = producer.subscribe_default();
 
 		producer.write_frame(b"only".as_slice()).unwrap();
 		producer.finish().unwrap();
@@ -1548,7 +1553,7 @@ mod test {
 		producer.create_group(Group { sequence: 1 }).unwrap();
 		producer.finish_at(1).unwrap();
 
-		let consumer = producer.consume();
+		let consumer = producer.subscribe_default();
 		// get_group(0) blocks because group 0 is below final_sequence and could still arrive.
 		assert!(
 			consumer.get_group(0).now_or_never().is_none(),
