@@ -121,12 +121,13 @@ pub(crate) async fn connect(
 		tokio_tungstenite::Connector::Plain
 	};
 
-	// Each moq ALPN can ride on any QMux draft; pass `&[]` to let the polyfill
-	// expand to every QMux version it knows about. `without_protocol` also
-	// offers the bare ALPNs (`qmux-01`, `qmux-00`, `webtransport`) so we still
-	// interop with relays that only know a wire-format version.
+	// Most moq ALPNs can ride on any QMux draft (`&[]` lets the polyfill expand
+	// to every version it knows). `qmux_versions_for` pins the few that the spec
+	// restricts. `without_protocol` also offers the bare ALPNs (`qmux-01`,
+	// `qmux-00`, `webtransport`) so we still interop with relays that only know a
+	// wire-format version.
 	let session = qmux::Client::new()
-		.with_protocols(alpns.iter().map(|&a| (a, &[] as &[qmux::Version])))
+		.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
 		.without_protocol()
 		.with_connector(connector)
 		.connect(url.as_str())
@@ -137,6 +138,18 @@ pub(crate) async fn connect(
 	WEBSOCKET_WON.lock().unwrap().insert(key);
 
 	Ok(session)
+}
+
+/// The QMux drafts a moq ALPN is allowed to ride on, for `qmux::*::with_protocols`.
+///
+/// moq-transport-18 requires qmux-01, so we never offer `qmux-00.moqt-18` (an
+/// illegal pair). This mirrors the policy in `js/net`'s `connect.ts`. Every other
+/// ALPN returns `&[]`, which qmux expands to every draft it knows about.
+fn qmux_versions_for(alpn: &str) -> &'static [qmux::Version] {
+	match alpn {
+		"moqt-18" => &[qmux::Version::QMux01],
+		_ => &[],
+	}
 }
 
 /// Listens for incoming WebSocket connections on a TCP port.
@@ -155,11 +168,11 @@ impl WebSocketListener {
 
 	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> anyhow::Result<Self> {
 		let listener = tokio::net::TcpListener::bind(addr).await?;
-		// `&[]` per entry expands to every QMux draft on the wire;
-		// `without_protocol` also accepts legacy clients that only offer a
-		// bare wire-format ALPN (today's moq-net clients still do).
+		// `qmux_versions_for` returns `&[]` (every QMux draft) for ALPNs the spec
+		// doesn't restrict; `without_protocol` also accepts legacy clients that
+		// only offer a bare wire-format ALPN (today's moq-net clients still do).
 		let server = qmux::Server::new()
-			.with_protocols(alpns.iter().map(|&a| (a, &[] as &[qmux::Version])))
+			.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
 			.without_protocol();
 		Ok(Self { listener, server })
 	}
@@ -181,6 +194,29 @@ impl WebSocketListener {
 				)
 			}
 			Err(e) => Some(Err(e.into())),
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn moqt_18_pins_to_qmux01() {
+		// The "moqt-18" literal in `qmux_versions_for` must stay the IETF
+		// draft-18 ALPN; otherwise the pin silently stops matching.
+		assert_eq!(
+			moq_net::Version::from_alpn("moqt-18").map(|v| v.code()),
+			Some(0xff000012)
+		);
+		assert_eq!(qmux_versions_for("moqt-18"), &[qmux::Version::QMux01]);
+
+		// Everything else stays unrestricted (qmux expands `&[]` to all drafts).
+		for &alpn in moq_net::ALPNS {
+			if alpn != "moqt-18" {
+				assert!(qmux_versions_for(alpn).is_empty(), "{alpn} should not be pinned");
+			}
 		}
 	}
 }
