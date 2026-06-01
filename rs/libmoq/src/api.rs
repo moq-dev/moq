@@ -104,6 +104,22 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 	})
 }
 
+/// Human-readable reason for the most recent failed call on the calling thread.
+///
+/// libmoq functions return only a negative code; this exposes the matching message
+/// (including detail the code can't carry, e.g. which URL failed to parse or why a
+/// decode failed). The string is only meaningful after a call returned a negative
+/// code; check the code first.
+///
+/// Returns a NUL-terminated, UTF-8 pointer valid until the next libmoq call **on the
+/// same thread**, or NULL if no error has been recorded on this thread. Copy it if you
+/// need it to outlive the next call. Errors delivered through status callbacks carry
+/// their code directly; read this from inside the callback to get their reason.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_error() -> *const c_char {
+	ffi::last_error_ptr()
+}
+
 /// Start establishing a connection to a MoQ server.
 ///
 /// Takes origin handles, which are used for publishing and consuming broadcasts respectively.

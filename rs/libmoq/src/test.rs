@@ -95,6 +95,37 @@ fn origin_lifecycle() {
 }
 
 #[test]
+fn last_error_reports_reason() {
+	// A failed call records a retrievable reason string for moq_error().
+	assert!(moq_origin_close(9999) < 0);
+	let ptr = moq_error();
+	assert!(!ptr.is_null(), "expected a recorded error message");
+	let msg = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_str().unwrap();
+	assert_eq!(msg, "origin not found");
+}
+
+#[test]
+fn last_error_set_before_callback() {
+	use crate::Error;
+	use crate::ffi::OnStatus;
+
+	// A binding reads moq_error() from inside the callback; the reason for a
+	// negative status must already be recorded by the time the callback runs.
+	extern "C" fn capture(user_data: *mut c_void, code: i32) {
+		assert!(code < 0, "expected a negative status, got {code}");
+		let slot = unsafe { &mut *(user_data as *mut Option<String>) };
+		let ptr = moq_error();
+		*slot = (!ptr.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(ptr) }.to_str().unwrap().to_owned());
+	}
+
+	let mut captured: Option<String> = None;
+	let cb = unsafe { OnStatus::new(&mut captured as *mut _ as *mut c_void, Some(capture)) };
+	cb.call(Err::<(), Error>(Error::OriginNotFound));
+
+	assert_eq!(captured.as_deref(), Some("origin not found"));
+}
+
+#[test]
 fn publish_media_lifecycle() {
 	let broadcast = id(moq_publish_create());
 	let _guard = Guard(Some(|| {
