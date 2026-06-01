@@ -3,7 +3,7 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// Optional: Use moq_native to configure a logger.
-	moq_native::Log::new(tracing::Level::DEBUG).init();
+	moq_native::Log::new(tracing::Level::DEBUG).init()?;
 
 	// Create an origin that we can publish to and the session can consume from.
 	let origin = moq_net::Origin::random().produce();
@@ -12,13 +12,13 @@ async fn main() -> anyhow::Result<()> {
 	// This is a simple example of how you can concurrently run multiple tasks.
 	// tokio::spawn works too.
 	tokio::select! {
-		res = run_session(origin.consume()) => res,
+		res = run_session(origin.clone()) => res,
 		res = run_broadcast(origin) => res,
 	}
 }
 
 // Connect to the server and publish our origin of broadcasts.
-async fn run_session(origin: moq_net::OriginConsumer) -> anyhow::Result<()> {
+async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 
@@ -27,10 +27,10 @@ async fn run_session(origin: moq_net::OriginConsumer) -> anyhow::Result<()> {
 	let url = url::Url::parse("https://cdn.moq.dev/anon/chat-example").unwrap();
 
 	// Establish a WebTransport/QUIC connection and MoQ handshake.
-	let session = client.with_publish(origin).connect(url).await?;
+	let cs = client.with_publisher(origin).connect(url).await?;
 
 	// Wait until the session is closed.
-	session.closed().await.map_err(Into::into)
+	cs.closed().await.map_err(Into::into)
 }
 
 // Produce a broadcast and publish it to the origin.
@@ -41,11 +41,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 
 	// Create a track that we'll insert into the broadcast.
 	// A track is a series of groups representing a live stream.
-	let mut track = broadcast.create_track(moq_net::Track {
-		name: "chat".to_string(),
-		priority: 0,
-		timescale: None,
-	})?;
+	let mut track = broadcast.create_track(moq_net::Track::new("chat"))?;
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// If you put "alice" here, it would be published as "anon/chat-example/alice".

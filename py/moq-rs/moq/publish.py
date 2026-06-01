@@ -9,6 +9,7 @@ from ._uniffi import (
     MoqBroadcastProducer,
     MoqGroupProducer,
     MoqMediaProducer,
+    MoqMediaStreamProducer,
     MoqTrackProducer,
 )
 from .types import AudioEncoderInput, AudioEncoderOutput, AudioFrame
@@ -38,6 +39,26 @@ class MediaProducer:
 
     def write_frame(self, payload: bytes, timestamp_us: int) -> None:
         self._inner.write_frame(payload, timestamp_us)
+
+    def finish(self) -> None:
+        self._inner.finish()
+
+
+class MediaStreamProducer:
+    """Wraps MoqMediaStreamProducer — feed a raw byte stream (e.g. Annex-B
+    H.264) and let the importer infer frame boundaries.
+
+    Built via :meth:`BroadcastProducer.publish_media_stream`. Unlike
+    :class:`MediaProducer`, no per-frame timestamps are needed; just push
+    encoder bytes as they arrive.
+    """
+
+    def __init__(self, inner: MoqMediaStreamProducer) -> None:
+        self._inner = inner
+
+    def write(self, payload: bytes) -> None:
+        """Push raw stream bytes; whole frames are emitted as they complete."""
+        self._inner.write(payload)
 
     def finish(self) -> None:
         self._inner.finish()
@@ -136,6 +157,11 @@ class BroadcastProducer:
 
     def publish_media(self, format: str, init: bytes) -> MediaProducer:
         return MediaProducer(self._inner.publish_media(format, init))
+
+    def publish_media_stream(self, format: str) -> MediaStreamProducer:
+        """Publish a media track fed by a raw byte stream (unknown frame
+        boundaries). `format` is a stream format (avc3, hev1, av01, fmp4, mkv)."""
+        return MediaStreamProducer(self._inner.publish_media_stream(format))
 
     def publish_audio(
         self,

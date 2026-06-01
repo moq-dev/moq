@@ -62,7 +62,7 @@ impl Config {
 	/// the logger.
 	pub fn load() -> anyhow::Result<Self> {
 		let config = Self::parse_and_merge(std::env::args_os())?;
-		config.log.init();
+		config.log.init()?;
 		tracing::trace!(?config, "final config");
 		Ok(config)
 	}
@@ -130,7 +130,7 @@ mod tests {
 		let toml = r#"
 [stats]
 enabled = true
-levels = 3
+interval = 5
 node = "localhost"
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
@@ -148,7 +148,10 @@ node = "localhost"
 			 (any new bare-bool field on a flatten-derived config will have the same bug; \
 			 type it as Option<bool>)"
 		);
-		assert_eq!(config.stats.levels, Some(3));
+		// The `interval` flag must survive the CLI re-parse the same way.
+		// It's typed as `Option<u64>` rather than a bare numeric type for
+		// exactly this reason.
+		assert_eq!(config.stats.interval, Some(5));
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
 	}
 

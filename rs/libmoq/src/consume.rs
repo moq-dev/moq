@@ -14,11 +14,14 @@ struct ConsumeCatalog {
 	video_codec: Vec<String>,
 }
 
-/// A spawned task entry: close sender to signal shutdown, callback to deliver status.
-/// Close revokes the callback by taking the entire entry.
+/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
+///
+/// `close` is an `Option` so `*_close` can drop just the sender (signalling
+/// shutdown) without removing the entry or revoking the callback. The task
+/// removes its own entry only after delivering one final terminal callback,
+/// so `user_data` stays valid until that callback fires.
 struct TaskEntry {
-	#[allow(dead_code)] // Dropping the sender signals the receiver.
-	close: oneshot::Sender<()>,
+	close: Option<oneshot::Sender<()>>,
 	callback: OnStatus,
 }
 
@@ -30,7 +33,7 @@ pub struct Consume {
 	/// Active catalog consumers and their broadcast references.
 	catalog: NonZeroSlab<ConsumeCatalog>,
 
-	/// Catalog consumer tasks. Close takes the entry to revoke the callback.
+	/// Catalog consumer tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
 	catalog_task: NonZeroSlab<Option<TaskEntry>>,
 
 	/// Track consumer tasks (video and audio).
@@ -38,6 +41,12 @@ pub struct Consume {
 
 	/// Buffered frames ready for consumption.
 	frame: NonZeroSlab<moq_mux::container::Frame>,
+
+	/// Raw track consumer tasks (no media/container framing).
+	raw_task: NonZeroSlab<Option<TaskEntry>>,
+
+	/// Buffered raw frames ready for consumption.
+	raw_frame: NonZeroSlab<bytes::Bytes>,
 }
 
 impl Consume {
@@ -47,23 +56,33 @@ impl Consume {
 
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
-		let catalog = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
-			close: channel.0,
+			close: Some(channel.0),
 			callback: on_catalog,
 		};
 		let id = self.catalog_task.insert(Some(entry))?;
 
+		// `subscribe_track` now blocks on SUBSCRIBE_OK, so run it inside the task
+		// to keep this entrypoint non-blocking.
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_catalog(id, broadcast, catalog.into()) => res,
-				_ = channel.1 => Ok(()),
-			};
+			let res = async move {
+				let catalog = broadcast
+					.subscribe_track(
+						hang::catalog::Catalog::DEFAULT_NAME,
+						hang::catalog::Catalog::default_subscription(),
+					)
+					.ok()
+					.await?;
+				Self::run_catalog(on_catalog, broadcast.clone(), catalog.into(), channel.1).await
+			}
+			.await;
 
-			// The lock is dropped before the callback is invoked.
-			if let Some(entry) = State::lock().consume.catalog_task.remove(id).flatten() {
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().consume.catalog_task.remove(id).flatten();
+			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
 		});
@@ -72,49 +91,50 @@ impl Consume {
 	}
 
 	async fn run_catalog(
-		task_id: Id,
+		callback: OnStatus,
 		broadcast: moq_net::BroadcastConsumer,
 		mut catalog: moq_mux::catalog::hang::Consumer,
+		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		while let Some(catalog) = catalog.next().await? {
+		loop {
+			// `biased` so a pending close always wins over a ready update: a hot
+			// stream must not be able to starve the close signal, and we must not
+			// deliver another update once close has been requested.
+			let update = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				next = catalog.next() => match next? {
+					Some(update) => update,
+					None => return Ok(()),
+				},
+			};
+
 			// Unfortunately we need to store the codec information on the heap.
-			let audio_codec = catalog
+			let audio_codec = update
 				.audio
 				.renditions
 				.values()
 				.map(|config| config.codec.to_string())
 				.collect();
 
-			let video_codec = catalog
+			let video_codec = update
 				.video
 				.renditions
 				.values()
 				.map(|config| config.codec.to_string())
 				.collect();
 
-			let catalog = ConsumeCatalog {
+			let snapshot = ConsumeCatalog {
 				broadcast: broadcast.clone(),
-				catalog,
+				catalog: update,
 				audio_codec,
 				video_codec,
 			};
 
-			let mut state = State::lock();
-
-			// Stop if the callback was revoked by close.
-			let Some(Some(entry)) = state.consume.catalog_task.get(task_id) else {
-				return Ok(());
-			};
-			let callback = entry.callback;
-
-			let snapshot_id = state.consume.catalog.insert(catalog)?;
-			drop(state);
-
-			// The lock is dropped before the callback is invoked.
+			// Hold the lock only to buffer the snapshot; release it before the callback.
+			let snapshot_id = State::lock().consume.catalog.insert(snapshot)?;
 			callback.call(Ok(snapshot_id));
 		}
-
-		Ok(())
 	}
 
 	pub fn video_config(&mut self, catalog: Id, index: usize, dst: &mut moq_video_config) -> Result<(), Error> {
@@ -186,10 +206,14 @@ impl Consume {
 	}
 
 	pub fn catalog_close(&mut self, catalog: Id) -> Result<(), Error> {
-		// Take the entire entry: drops the sender (signals shutdown) and revokes the callback.
+		// Signal shutdown by dropping the sender. The task still delivers one
+		// final callback and then removes itself, so this neither revokes the
+		// callback nor frees user_data. Errors if already closed.
 		self.catalog_task
 			.get_mut(catalog)
+			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::CatalogNotFound)?
+			.close
 			.take()
 			.ok_or(Error::CatalogNotFound)?;
 		Ok(())
@@ -208,37 +232,46 @@ impl Consume {
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let rendition = consume
+		let name = consume
 			.catalog
 			.video
 			.renditions
 			.keys()
 			.nth(index)
-			.ok_or(Error::NoIndex)?;
-
-		let track = consume.broadcast.subscribe_track(&moq_net::Track {
-			name: rendition.clone(),
-			priority: 1, // TODO: Remove priority
-			timescale: None,
-		})?;
-		let track =
-			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
+			.ok_or(Error::NoIndex)?
+			.clone();
+		let broadcast = consume.broadcast.clone();
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
-			close: channel.0,
+			close: Some(channel.0),
 			callback: on_frame,
 		};
 		let id = self.track_task.insert(Some(entry))?;
 
+		// `subscribe_track` now blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_track(id, track) => res,
-				_ = channel.1 => Ok(()),
-			};
+			let res = async move {
+				let track = broadcast
+					.subscribe_track(
+						&name,
+						moq_net::Subscription {
+							priority: 1,
+							..Default::default()
+						},
+					)
+					.ok()
+					.await?;
+				let track = moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy)
+					.with_latency(latency);
+				Self::run_track(on_frame, track, channel.1).await
+			}
+			.await;
 
-			// The lock is dropped before the callback is invoked.
-			if let Some(entry) = State::lock().consume.track_task.remove(id).flatten() {
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().consume.track_task.remove(id).flatten();
+			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
 		});
@@ -254,37 +287,46 @@ impl Consume {
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let rendition = consume
+		let name = consume
 			.catalog
 			.audio
 			.renditions
 			.keys()
 			.nth(index)
-			.ok_or(Error::NoIndex)?;
-
-		let track = consume.broadcast.subscribe_track(&moq_net::Track {
-			name: rendition.clone(),
-			priority: 2, // TODO: Remove priority
-			timescale: None,
-		})?;
-		let track =
-			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
+			.ok_or(Error::NoIndex)?
+			.clone();
+		let broadcast = consume.broadcast.clone();
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
-			close: channel.0,
+			close: Some(channel.0),
 			callback: on_frame,
 		};
 		let id = self.track_task.insert(Some(entry))?;
 
+		// `subscribe_track` now blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_track(id, track) => res,
-				_ = channel.1 => Ok(()),
-			};
+			let res = async move {
+				let track = broadcast
+					.subscribe_track(
+						&name,
+						moq_net::Subscription {
+							priority: 2,
+							..Default::default()
+						},
+					)
+					.ok()
+					.await?;
+				let track = moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy)
+					.with_latency(latency);
+				Self::run_track(on_frame, track, channel.1).await
+			}
+			.await;
 
-			// The lock is dropped before the callback is invoked.
-			if let Some(entry) = State::lock().consume.track_task.remove(id).flatten() {
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().consume.track_task.remove(id).flatten();
+			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
 		});
@@ -293,32 +335,34 @@ impl Consume {
 	}
 
 	async fn run_track(
-		task_id: Id,
+		callback: OnStatus,
 		mut track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
+		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		while let Some(frame) = track.read().await? {
-			let mut state = State::lock();
-
-			// Stop if the callback was revoked by close.
-			let Some(Some(entry)) = state.consume.track_task.get(task_id) else {
-				return Ok(());
+		loop {
+			// `biased` so a pending close always wins over a ready frame.
+			let frame = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				frame = track.read() => match frame? {
+					Some(frame) => frame,
+					None => return Ok(()),
+				},
 			};
-			let callback = entry.callback;
 
-			let frame_id = state.consume.frame.insert(frame)?;
-			drop(state);
-
-			// The lock is dropped before the callback is invoked.
+			// Hold the lock only to buffer the frame; release it before the callback.
+			let frame_id = State::lock().consume.frame.insert(frame)?;
 			callback.call(Ok(frame_id));
 		}
-
-		Ok(())
 	}
 
 	pub fn track_close(&mut self, track: Id) -> Result<(), Error> {
+		// Signal shutdown; the task delivers a final callback and removes itself.
 		self.track_task
 			.get_mut(track)
+			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::TrackNotFound)?
+			.close
 			.take()
 			.ok_or(Error::TrackNotFound)?;
 		Ok(())
@@ -350,6 +394,113 @@ impl Consume {
 
 	pub fn close(&mut self, consume: Id) -> Result<(), Error> {
 		self.broadcast.remove(consume).ok_or(Error::BroadcastNotFound)?;
+		Ok(())
+	}
+
+	/// Subscribe to a raw track by name, delivering each frame's payload as-is.
+	///
+	/// No catalog lookup or container parsing. This is the moq-net primitive for
+	/// non-media tracks. `on_frame` is called with a raw frame ID for each frame,
+	/// in arrival order. Frames must be released with [`Self::raw_frame_close`].
+	pub fn raw_track(&mut self, broadcast: Id, name: &str, on_frame: OnStatus) -> Result<Id, Error> {
+		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
+		let name = name.to_string();
+
+		let channel = oneshot::channel();
+		let entry = TaskEntry {
+			close: Some(channel.0),
+			callback: on_frame,
+		};
+		let id = self.raw_task.insert(Some(entry))?;
+
+		// `subscribe_track` now blocks on SUBSCRIBE_OK, so run it inside the task.
+		tokio::spawn(async move {
+			let res = async move {
+				let track = broadcast
+					.subscribe_track(&name, moq_net::Subscription::default())
+					.ok()
+					.await?;
+				Self::run_raw(on_frame, track, channel.1).await
+			}
+			.await;
+
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().consume.raw_task.remove(id).flatten();
+			if let Some(entry) = entry {
+				entry.callback.call(res);
+			}
+		});
+
+		Ok(id)
+	}
+
+	async fn run_raw(
+		callback: OnStatus,
+		mut track: moq_net::TrackConsumer,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		// Deliver every frame in sequence order, reading all frames within each
+		// group rather than the one-frame-per-group convenience. This is the
+		// "raw track contents" model: the consumer sees exactly what the
+		// producer wrote, regardless of how it was grouped.
+		loop {
+			// `biased` so a pending close always wins over a ready group.
+			let mut group = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				group = track.next_group() => match group? {
+					Some(group) => group,
+					None => return Ok(()),
+				},
+			};
+
+			loop {
+				let payload = tokio::select! {
+					biased;
+					_ = &mut close => return Ok(()),
+					payload = group.read_frame() => match payload? {
+						Some(payload) => payload,
+						None => break,
+					},
+				};
+
+				// Hold the lock only to buffer the frame; release it before the callback.
+				let frame_id = State::lock().consume.raw_frame.insert(payload)?;
+				callback.call(Ok(frame_id));
+			}
+		}
+	}
+
+	pub fn raw_track_close(&mut self, track: Id) -> Result<(), Error> {
+		// Signal shutdown; the task delivers a final callback and removes itself.
+		self.raw_task
+			.get_mut(track)
+			.and_then(|entry| entry.as_mut())
+			.ok_or(Error::TrackNotFound)?
+			.close
+			.take()
+			.ok_or(Error::TrackNotFound)?;
+		Ok(())
+	}
+
+	/// Fill `dst` with a raw frame's payload. The pointer is valid until the
+	/// frame is released with [`Self::raw_frame_close`].
+	pub fn raw_frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
+		let payload = self.raw_frame.get(frame).ok_or(Error::FrameNotFound)?;
+
+		*dst = moq_frame {
+			payload: payload.as_ptr(),
+			payload_size: payload.len(),
+			timestamp_us: 0,
+			keyframe: false,
+		};
+
+		Ok(())
+	}
+
+	pub fn raw_frame_close(&mut self, frame: Id) -> Result<(), Error> {
+		self.raw_frame.remove(frame).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
 

@@ -9,14 +9,15 @@ set working-directory := '.'
 default:
     just check
 
-# Build moq-ffi for the host, regenerate uniffi bindings, run :moq:jvmTest.
+# Build moq-ffi for the host, regenerate uniffi bindings, run
+# :moq-ffi:jvmTest + :moq:jvmTest.
 
 # Skips cleanly if cargo, java, or gradle is missing.
 check:
     bash scripts/check.sh
 
 # Assemble the KMP module from per-target moq-ffi binaries + bindings.
-# Used by .github/workflows/release-kt.yml; see kt/README.md for the
+# Used by .github/workflows/release-kt-ffi.yml; see kt/README.md for the
 
 # expected --lib-dir layout.
 package *args:

@@ -1,6 +1,8 @@
-// Single KMP module that publishes `dev.moq:moq` with both JVM and Android
-// variants. When `moq-ffi` splits into `moq-mux-ffi` + `moq-net-ffi`, add
-// sibling modules here (`moq-mux`, `moq-net`).
+// Two KMP modules:
+//   :moq-ffi  publishes `dev.moq:moq-ffi`: the UniFFI bindings + native libs,
+//             auto-released on every `moq-ffi-v*` tag (version tracks the crate).
+//   :moq      publishes `dev.moq:moq`: the ergonomic wrapper layered on top,
+//             versioned independently and published when `moq.version` changes.
 
 pluginManagement {
     repositories {
@@ -27,4 +29,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "moq"
-include(":moq")
+include(":moq-ffi", ":moq")

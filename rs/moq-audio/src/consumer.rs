@@ -23,7 +23,7 @@ pub struct AudioConsumer {
 impl AudioConsumer {
 	/// Subscribe to `name` in `broadcast` using the catalog entry to
 	/// pick the codec.
-	pub fn new(
+	pub async fn new(
 		broadcast: &moq_net::BroadcastConsumer,
 		catalog: &hang::catalog::AudioConfig,
 		name: impl Into<String>,
@@ -53,7 +53,10 @@ impl AudioConsumer {
 		};
 
 		let name = name.into();
-		let track = broadcast.subscribe_track(&moq_net::Track { name, priority: 0 })?;
+		let track = broadcast
+			.subscribe_track(&name, moq_net::Subscription::default())
+			.ok()
+			.await?;
 		let mut track = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
 		if let Some(latency) = output.latency_max {
 			track = track.with_latency(latency);

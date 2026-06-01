@@ -71,7 +71,7 @@ pub async fn handle_viewers(
 
 		let viewer_id = path.to_string();
 
-		if let Some(broadcast) = broadcast {
+		if let Some(broadcast) = broadcast.broadcast() {
 			tracing::info!(%viewer_id, "viewer connected");
 			let cmd_tx = cmd_tx.clone();
 			let vid = viewer_id.clone();
@@ -99,7 +99,10 @@ async fn handle_viewer_commands(
 	broadcast: moq_net::BroadcastConsumer,
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
-	let mut track = broadcast.subscribe_track(&moq_net::Track::new("command"))?;
+	let mut track = broadcast
+		.subscribe_track("command", moq_net::Subscription::default())
+		.ok()
+		.await?;
 
 	while let Some(mut group) = track.recv_group().await? {
 		while let Some(frame) = group.read_frame().await? {

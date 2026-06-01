@@ -77,10 +77,16 @@ impl Catalog {
 	}
 
 	pub fn default_track() -> moq_net::Track {
-		moq_net::Track {
-			name: Catalog::DEFAULT_NAME.to_string(),
+		// The catalog is JSON and re-sent on every change, so it pays to compress.
+		moq_net::Track::new(Catalog::DEFAULT_NAME).with_compress(true)
+	}
+
+	/// The subscription preferences used for the catalog track (high priority so
+	/// it preempts media tracks).
+	pub fn default_subscription() -> moq_net::Subscription {
+		moq_net::Subscription {
 			priority: 100,
-			timescale: None,
+			..Default::default()
 		}
 	}
 }

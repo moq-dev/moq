@@ -46,6 +46,16 @@ pub struct Frame {
 	/// order. B-frames may have non-monotonic presentation timestamps.
 	pub timestamp: moq_net::Timestamp,
 
+	/// How long this frame occupies the presentation timeline, in the frame's
+	/// own scale, when the container reports it.
+	///
+	/// CMAF carries a per-sample duration (trun sample-duration); containers
+	/// that don't (Legacy, LOC) leave this `None`. The [`Consumer`] adds it to
+	/// `timestamp` to learn how far a group has presented, so it can advance to
+	/// a newer group as soon as the gap is covered instead of waiting out the
+	/// latency budget.
+	pub duration: Option<moq_net::Timestamp>,
+
 	/// Encoded codec payload.
 	pub payload: Bytes,
 
@@ -79,7 +89,7 @@ pub trait Container {
 	fn poll_read(
 		&self,
 		group: &mut moq_net::GroupConsumer,
-		waiter: &conducer::Waiter,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>>;
 
 	/// Async wrapper around [`Self::poll_read`].
@@ -90,6 +100,6 @@ pub trait Container {
 	where
 		Self: Sync,
 	{
-		async { conducer::wait(|waiter| self.poll_read(group, waiter)).await }
+		async { kio::wait(|waiter| self.poll_read(group, waiter)).await }
 	}
 }

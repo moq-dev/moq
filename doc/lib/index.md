@@ -47,20 +47,20 @@ Coroutines and `Flow` for Android and the JVM. Published as `dev.moq:moq` on Mav
 
 ### [Swift](/lib/swift/)
 
-Async sequences and structured concurrency for iOS, iPadOS, and macOS. Distributed via Swift Package Manager.
+Async sequences and structured concurrency for iOS, iPadOS, and macOS. Distributed via Swift Package Manager as [`Moq`](https://github.com/moq-dev/moq-swift) (the ergonomic wrapper, versioned independently), atop the raw [`MoqFFI`](https://github.com/moq-dev/moq-swift-ffi) bindings.
 
 ### [Go](/lib/go/)
 
-cgo bindings with prebuilt static libraries per platform. Resolved via `go get github.com/moq-dev/moq-go`.
+cgo bindings with prebuilt static libraries per platform. Published as [`github.com/moq-dev/moq-go`](https://github.com/moq-dev/moq-go) (the ergonomic wrapper, imported as `moq`), atop the raw [`github.com/moq-dev/moq-go-ffi`](https://github.com/moq-dev/moq-go-ffi) bindings.
 
 ## Picking a language
 
-- **Server, CLI, or anything native** &rarr; [Rust](/lib/rs/)
-- **Web browser or Node/Bun/Deno** &rarr; [TypeScript](/lib/js/)
-- **iOS / macOS app** &rarr; [Swift](/lib/swift/)
-- **Android app or JVM service** &rarr; [Kotlin](/lib/kt/)
-- **Scripts, ML pipelines, prototypes** &rarr; [Python](/lib/py/)
-- **Go service or tooling** &rarr; [Go](/lib/go/)
-- **Anything else with a C ABI** &rarr; [C](/lib/c/)
+- **Server, CLI, or anything native** → [Rust](/lib/rs/)
+- **Web browser or Node/Bun/Deno** → [TypeScript](/lib/js/)
+- **iOS / macOS app** → [Swift](/lib/swift/)
+- **Android app or JVM service** → [Kotlin](/lib/kt/)
+- **Scripts, ML pipelines, prototypes** → [Python](/lib/py/)
+- **Go service or tooling** → [Go](/lib/go/)
+- **Anything else with a C ABI** → [C](/lib/c/)
 
 All FFI bindings expose the same protocol surface as the Rust core, so a publisher in Python can be consumed by a Swift subscriber, etc.

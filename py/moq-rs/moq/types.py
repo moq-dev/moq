@@ -1,6 +1,9 @@
 """Re-export moq-ffi record types without the Moq prefix."""
 
 from ._uniffi import (
+    Container as Container,
+)
+from ._uniffi import (
     MoqAudio as Audio,
 )
 from ._uniffi import (
@@ -43,6 +46,7 @@ __all__ = [
     "AudioFormat",
     "AudioFrame",
     "Catalog",
+    "Container",
     "Dimensions",
     "Frame",
     "Video",

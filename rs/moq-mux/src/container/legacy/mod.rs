@@ -31,7 +31,7 @@ impl Container for Wire {
 	fn poll_read(
 		&self,
 		group: &mut moq_net::GroupConsumer,
-		waiter: &conducer::Waiter,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;
 
@@ -48,6 +48,8 @@ impl Container for Wire {
 			// Legacy doesn't carry the keyframe bit on the wire; the
 			// wrapping Consumer fills it in from group position.
 			keyframe: false,
+			// Legacy carries no per-frame duration.
+			duration: None,
 		}])))
 	}
 }

@@ -58,11 +58,7 @@ impl AudioProducer {
 		};
 
 		let name = name.into();
-		let track = broadcast.create_track(moq_net::Track {
-			name: name.clone(),
-			priority: 0,
-			timescale: None,
-		})?;
+		let track = broadcast.create_track(moq_net::Track::new(name.clone()))?;
 		let track = moq_mux::container::Producer::new(track, moq_mux::container::legacy::Wire);
 
 		let mut catalog_mut = catalog.clone();
@@ -124,6 +120,7 @@ impl AudioProducer {
 			timestamp,
 			payload,
 			keyframe: true,
+			duration: None,
 		};
 		self.track.write(mux_frame)?;
 		self.track.finish_group()?;

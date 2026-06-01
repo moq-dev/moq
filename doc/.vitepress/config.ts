@@ -230,7 +230,10 @@ export default defineConfig({
 						{
 							text: "Go",
 							link: "/lib/go/",
-							items: [{ text: "moq", link: "/lib/go/moq" }],
+							items: [
+								{ text: "moq", link: "/lib/go/moq" },
+								{ text: "moq-ffi", link: "/lib/go/moq-ffi" },
+							],
 						},
 					],
 				},

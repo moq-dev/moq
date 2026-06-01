@@ -1,17 +1,16 @@
 import Foundation
 import XCTest
 @testable import Moq
-import MoqFFI
 
 final class SmokeTests: XCTestCase {
-    /// Verifies the native lib loads and the wrapper compiles against
-    /// the generated API. No network needed: we just instantiate a few
-    /// types and exercise the cancel path.
+    /// Verifies the native lib loads and the wrapper compiles against the
+    /// generated API. No network needed: we just instantiate a few types and
+    /// exercise the cancel path.
     func testClientConstructsAndCancels() async throws {
-        let client = MoqClient()
+        let client = Client()
         client.cancel()
         do {
-            _ = try await client.connect(url: "https://localhost:0/test")
+            _ = try await client.connect(to: "https://localhost:0/test")
             XCTFail("expected error from cancelled client")
         } catch let error as MoqError {
             XCTAssertTrue(
@@ -28,7 +27,15 @@ final class SmokeTests: XCTestCase {
     }
 
     func testOriginProducerIsConstructible() {
-        let origin = MoqOriginProducer()
+        let origin = OriginProducer()
         _ = origin.consume()
+    }
+
+    func testBroadcastProducerOpensTracks() throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "events")
+        XCTAssertEqual(try track.name, "events")
+        try track.finish()
+        try broadcast.finish()
     }
 }

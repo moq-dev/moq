@@ -61,17 +61,14 @@ See the [Authentication guide](/bin/relay/auth) for how to generate tokens.
 
 The [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) demonstrates publishing end-to-end.
 
-The key pattern is: create an [`Origin`](https://docs.rs/moq-net/latest/moq_net/struct.Origin.html), connect a session to it, then publish broadcasts:
+The connected [`Session`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html) exposes a [`publisher()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.publisher) [`OriginProducer`](https://docs.rs/moq-net/latest/moq_net/struct.OriginProducer.html) you publish broadcasts into:
 
 ```rust
-let origin = moq_net::Origin::new().produce();
-let session = client
-    .with_publish(origin.consume())
-    .connect(url).await?;
+let session = client.connect(url).await?;
 
 let mut broadcast = moq_net::Broadcast::new().produce();
 // ... add catalog and tracks to the broadcast ...
-origin.publish_broadcast("", broadcast.consume());
+session.publisher().publish_broadcast("", broadcast.consume());
 ```
 
 See the full [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) example for catalog setup, track creation, and frame encoding.
@@ -80,17 +77,14 @@ See the full [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/example
 
 The [subscribe example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs) demonstrates subscribing end-to-end.
 
-To consume a broadcast, use `with_consume()` and listen for announcements:
+The session also exposes a [`consumer()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.consumer) [`OriginConsumer`](https://docs.rs/moq-net/latest/moq_net/struct.OriginConsumer.html) for receiving announcements:
 
 ```rust
-let origin = moq_net::Origin::new().produce();
-let mut consumer = origin.consume();
-let session = client
-    .with_consume(origin)
-    .connect(url).await?;
+let session = client.connect(url).await?;
+let mut announced = session.consumer().announced();
 
 // Wait for broadcasts to be announced.
-while let Some((path, broadcast)) = consumer.announced().await {
+while let Some((path, broadcast)) = announced.next().await {
     let Some(broadcast) = broadcast else {
         tracing::info!(%path, "broadcast ended");
         continue;
@@ -102,7 +96,7 @@ while let Some((path, broadcast)) = consumer.announced().await {
 If you already know the broadcast path, you can subscribe directly:
 
 ```rust
-let broadcast = consumer.consume_broadcast("my-stream")
+let broadcast = session.consumer().get_broadcast("my-stream")
     .expect("broadcast not found");
 ```
 
@@ -112,7 +106,9 @@ The [hang](/concept/layer/hang) catalog describes available media tracks.
 Subscribe to it using [`CatalogConsumer`](https://docs.rs/hang/latest/hang/catalog/struct.CatalogConsumer.html):
 
 ```rust
-let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track());
+let catalog_track = broadcast
+    .subscribe_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_subscription())
+    .await?;
 let mut catalog = hang::CatalogConsumer::new(catalog_track);
 let info = catalog.next().await?.expect("no catalog");
 ```
@@ -126,7 +122,9 @@ See the full [subscribe.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/exa
 Subscribe to a media track and read frames using [`OrderedConsumer`](https://docs.rs/hang/latest/hang/container/struct.OrderedConsumer.html):
 
 ```rust
-let track_consumer = broadcast.subscribe_track(&track);
+let track_consumer = broadcast
+    .subscribe_track(&track_name, moq_net::Subscription::new(1))
+    .await?;
 let mut ordered = hang::container::OrderedConsumer::new(
     track_consumer,
     Duration::from_millis(500), // max latency before skipping groups

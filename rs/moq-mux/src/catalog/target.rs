@@ -46,15 +46,15 @@ struct TargetState {
 
 /// A [`Stream`] that picks one rendition per axis from the inner snapshot.
 ///
-/// Selection criteria live behind a [`conducer::Producer`], so calls to
+/// Selection criteria live behind a [`kio::Producer`], so calls to
 /// [`set_video`](Self::set_video) / [`set_audio`](Self::set_audio) wake any
 /// pending `poll_next` instead of silently waiting for the next upstream
 /// snapshot. That makes the type usable as the foothold for bandwidth-driven
 /// ABR retargeting.
 pub struct Target<S: Stream> {
 	inner: S,
-	state: conducer::Producer<TargetState>,
-	state_consumer: conducer::Consumer<TargetState>,
+	state: kio::Producer<TargetState>,
+	state_consumer: kio::Consumer<TargetState>,
 	/// Last raw snapshot from `inner`, retained so a target change between
 	/// snapshots can be re-applied without polling upstream.
 	last_input: Option<Catalog>,
@@ -67,7 +67,7 @@ pub struct Target<S: Stream> {
 
 impl<S: Stream> Target<S> {
 	pub fn new(inner: S) -> Self {
-		let state = conducer::Producer::new(TargetState::default());
+		let state = kio::Producer::new(TargetState::default());
 		let state_consumer = state.consume();
 		Self {
 			inner,
@@ -102,7 +102,7 @@ impl<S: Stream> Target<S> {
 }
 
 impl<S: Stream> Stream for Target<S> {
-	fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
 		// Drain inner: the latest snapshot wins. `poll_next` registers the
 		// waiter on its own Pending branch.
 		let inner_eof = loop {

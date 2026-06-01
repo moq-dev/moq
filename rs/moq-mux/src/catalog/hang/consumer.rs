@@ -22,7 +22,7 @@ impl Consumer {
 	}
 
 	/// Poll for the next catalog update.
-	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Catalog>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog>>> {
 		// Drain pending groups, keeping only the newest. Remember whether the track is done
 		// so we can distinguish "more groups may arrive" from "no more groups, ever".
 		let track_finished = loop {
@@ -56,7 +56,7 @@ impl Consumer {
 	/// This method waits for the next catalog publication and returns the
 	/// catalog data. If there are no more updates, `None` is returned.
 	pub async fn next(&mut self) -> Result<Option<Catalog>> {
-		conducer::wait(|waiter| self.poll_next(waiter)).await
+		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 
@@ -94,10 +94,10 @@ mod test {
 	#[test]
 	fn waits_for_pending_catalog_group_payload() {
 		let mut track = Catalog::default_track().produce();
-		let mut consumer = Consumer::new(track.consume());
+		let mut consumer = Consumer::new(track.subscribe_default());
 		let mut group = track.append_group().expect("catalog group should append");
 
-		let waiter = conducer::Waiter::noop();
+		let waiter = kio::Waiter::noop();
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
 		let (catalog, payload) = catalog_payload("pending");
@@ -110,12 +110,12 @@ mod test {
 	#[test]
 	fn waits_for_pending_catalog_group_payload_after_track_finish() {
 		let mut track = Catalog::default_track().produce();
-		let mut consumer = Consumer::new(track.consume());
+		let mut consumer = Consumer::new(track.subscribe_default());
 		let mut group = track.append_group().expect("catalog group should append");
 
 		track.finish().expect("catalog track should finish");
 
-		let waiter = conducer::Waiter::noop();
+		let waiter = kio::Waiter::noop();
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
 		let (catalog, payload) = catalog_payload("finished");
@@ -128,8 +128,8 @@ mod test {
 	#[test]
 	fn returns_latest_complete_catalog_group() {
 		let mut track = Catalog::default_track().produce();
-		let mut consumer = Consumer::new(track.consume());
-		let waiter = conducer::Waiter::noop();
+		let mut consumer = Consumer::new(track.subscribe_default());
+		let waiter = kio::Waiter::noop();
 
 		let (_old, old_payload) = catalog_payload("old");
 		let (latest, latest_payload) = catalog_payload("latest");
@@ -154,8 +154,8 @@ mod test {
 	#[test]
 	fn waits_for_newer_pending_group_instead_of_returning_older_ready_group() {
 		let mut track = Catalog::default_track().produce();
-		let mut consumer = Consumer::new(track.consume());
-		let waiter = conducer::Waiter::noop();
+		let mut consumer = Consumer::new(track.subscribe_default());
+		let waiter = kio::Waiter::noop();
 
 		let (_old, old_payload) = catalog_payload("old");
 		let (latest, latest_payload) = catalog_payload("latest");
@@ -181,8 +181,8 @@ mod test {
 	#[test]
 	fn retained_pending_group_is_superseded_by_newer_group() {
 		let mut track = Catalog::default_track().produce();
-		let mut consumer = Consumer::new(track.consume());
-		let waiter = conducer::Waiter::noop();
+		let mut consumer = Consumer::new(track.subscribe_default());
+		let waiter = kio::Waiter::noop();
 
 		let (_old, old_payload) = catalog_payload("old");
 		let (latest, latest_payload) = catalog_payload("latest");
@@ -211,8 +211,8 @@ mod test {
 	#[test]
 	fn returns_none_when_empty_track_finishes() {
 		let mut track = Catalog::default_track().produce();
-		let mut consumer = Consumer::new(track.consume());
-		let waiter = conducer::Waiter::noop();
+		let mut consumer = Consumer::new(track.subscribe_default());
+		let waiter = kio::Waiter::noop();
 
 		track.finish().expect("catalog track should finish");
 

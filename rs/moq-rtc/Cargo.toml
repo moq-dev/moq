@@ -1,0 +1,54 @@
+[package]
+name = "moq-rtc"
+description = "WebRTC (WHIP/WHEP) gateway for Media over QUIC"
+authors = ["Luke Curley <kixelated@gmail.com>"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+version = "0.0.1"
+edition = "2024"
+rust-version.workspace = true
+
+keywords = ["webrtc", "whip", "whep", "moq", "media"]
+categories = ["multimedia", "network-programming", "web-programming"]
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "moq-rtc"
+path = "bin/moq-rtc.rs"
+doc = false
+
+[features]
+default = ["iroh", "quinn", "websocket"]
+iroh = ["moq-native/iroh"]
+quinn = ["moq-native/quinn"]
+quiche = ["moq-native/quiche"]
+websocket = ["moq-native/websocket"]
+
+[dependencies]
+anyhow = { version = "1", features = ["backtrace"] }
+axum = { version = "0.8", features = ["tokio"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+hang = { workspace = true }
+moq-mux = { workspace = true }
+moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+moq-net = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
+str0m = "0.19"
+thiserror = "2"
+tokio = { workspace = true, features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+sd-notify = "0.5"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

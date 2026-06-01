@@ -399,7 +399,7 @@ async fn run_session(
 		settings.broadcast
 	);
 
-	let client = client.with_publish(origin.consume());
+	let client = client.with_publisher(origin.clone());
 	let session = client.connect(settings.url.clone()).await?;
 
 	let mut runtime = RuntimeState {

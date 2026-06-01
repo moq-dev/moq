@@ -314,13 +314,13 @@ impl Client {
 		self
 	}
 
-	pub fn with_publish(mut self, publish: impl Into<Option<moq_net::OriginConsumer>>) -> Self {
-		self.moq = self.moq.with_publish(publish);
+	pub fn with_publisher(mut self, publish: moq_net::OriginProducer) -> Self {
+		self.moq = self.moq.with_publisher(publish);
 		self
 	}
 
-	pub fn with_consume(mut self, consume: impl Into<Option<moq_net::OriginProducer>>) -> Self {
-		self.moq = self.moq.with_consume(consume);
+	pub fn with_consumer(mut self, consume: moq_net::OriginProducer) -> Self {
+		self.moq = self.moq.with_consumer(consume);
 		self
 	}
 
@@ -333,7 +333,7 @@ impl Client {
 	/// Start a background reconnect loop that connects to the given URL,
 	/// waits for the session to close, then reconnects with exponential backoff.
 	///
-	/// Returns a [`Reconnect`] handle. Drop or call [`Reconnect::close`] to stop.
+	/// Returns a [`Reconnect`] handle; drop the last handle to stop the loop.
 	pub fn reconnect(&self, url: Url) -> Reconnect {
 		Reconnect::new(self.clone(), url, self.backoff.clone())
 	}
@@ -357,9 +357,9 @@ impl Client {
 		feature = "websocket"
 	))]
 	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_net::Session> {
-		let session = self.connect_inner(url).await?;
-		tracing::info!(version = %session.version(), "connected");
-		Ok(session)
+		let cs = self.connect_inner(url).await?;
+		tracing::info!(version = %cs.version(), "connected");
+		Ok(cs)
 	}
 
 	#[cfg(any(

@@ -92,6 +92,10 @@
           bun
           # Only for NPM publishing
           nodejs_24
+          # Headless Chromium for the cross-language smoke test (test/browser).
+          # Pin the npm `playwright` version to match this driver (see
+          # test/browser/package.json).
+          playwright-driver.browsers
         ];
 
         # Python dependencies
@@ -141,7 +145,7 @@
           shfmt
           actionlint
           taplo
-          nixfmt-rfc-style
+          nixfmt
         ];
 
         # Apply our overlay to get the package definitions
@@ -177,6 +181,18 @@
           };
         };
 
+        # Re-export gst_all_1 so users can pair the plugin with a matching
+        # gstreamer in one nix invocation:
+        #   nix shell .#moq-gst .#gst_all_1.gstreamer --command gst-inspect-1.0 moq
+        # Sourcing from the same nixpkgs the moq-gst build linked against
+        # avoids the duplicate-symbol crash you get with
+        # `nixpkgs#gst_all_1.gstreamer`, which can resolve to a different
+        # store hash. Lives under legacyPackages because nested attrsets
+        # are disallowed in the flake `packages` schema.
+        legacyPackages = {
+          inherit (pkgs) gst_all_1;
+        };
+
         devShells.default = pkgs.mkShell {
           packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps ++ packagingDeps ++ lintDeps;
 
@@ -186,6 +202,9 @@
 
           shellHook = ''
             export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
+            # Use the nix-provided Chromium instead of letting Playwright download one.
+            export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
+            export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
           '';
         };
 

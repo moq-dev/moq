@@ -1,35 +1,24 @@
-// Kotlin Multiplatform module for moq-ffi.
+// Kotlin Multiplatform module for the ergonomic `dev.moq` wrapper.
 //
-// Publishes `dev.moq:moq` with both JVM and Android variants. Consumers add
-// `dev.moq:moq:VERSION` and Gradle metadata resolution picks the right one.
+// Publishes `dev.moq:moq` (JVM + Android variants). This module ships no native
+// code: it is pure Kotlin layered over `dev.moq:moq-ffi`, which carries the
+// UniFFI bindings + native libs. It re-exports the common FFI types as
+// `dev.moq.*` typealiases and adds idiomatic helpers (a `connect()` facade,
+// Flow extensions, AutoCloseable ergonomics).
 //
-// Source set hierarchy:
-//   commonMain                       (empty today; reserved for future K/N targets)
-//   └─ jvmAndAndroidMain             Wrappers + UniFFI-generated kotlin (uses JNA)
-//      ├─ jvmMain                    JVM-specific: native libs as JAR resources
-//      └─ androidMain                Android-specific: native libs in jniLibs
+// Versioning is INDEPENDENT of the crate: `-Pmoq.version` (default in
+// gradle.properties), bumped by hand. release-kt-lib.yml publishes a new
+// version only when that property changes. The dependency on `moq-ffi` is a
+// floating range so consumers transitively pick up new bindings patches
+// without this wrapper being re-cut. See MOQ_FFI_RANGE below.
 //
-// Native libraries are populated by `kt/scripts/package.sh`:
-//   src/jvmMain/resources/<os>-<arch>/<libname>     (JNA classpath layout)
-//   src/androidMain/jniLibs/<abi>/libmoq_ffi.so     (Android packaging layout)
+// Local builds and CI resolve `moq-ffi` from the sibling project via the
+// dependency substitution below, so tests run against freshly-built bindings.
+// The published POM keeps the range (substitution only affects resolution).
 //
-// Android target is opt-in via `-Pandroid.enabled=true`. CI always sets it.
-// AGP is declared `apply false` here (rather than only added when enabled)
-// so its types are on this script's compile classpath. Without that, the
-// `extensions.configure<LibraryExtension>` call wouldn't compile even when
-// guarded behind `if (androidEnabled)`. The plugin marker resolves against
-// google() at sync regardless of the flag, so that repo needs to be
-// reachable; the actual `apply` only runs when the flag is set.
-//
-// Publishing uses com.vanniktech.maven.publish, which handles the Sonatype
-// Central Portal upload protocol + GPG signing in a single Gradle task.
-// CI runs `:moq:publishAndReleaseToMavenCentral`. Credentials are picked
-// up from env vars set by release-kt.yml:
-//   ORG_GRADLE_PROJECT_mavenCentralUsername
-//   ORG_GRADLE_PROJECT_mavenCentralPassword
-//   ORG_GRADLE_PROJECT_signingInMemoryKey
-//   ORG_GRADLE_PROJECT_signingInMemoryKeyPassword
-// If the signing key isn't set (e.g., local `:moq:assemble` without secrets),
+// Publishing uses com.vanniktech.maven.publish; CI runs
+// `:moq:publishAndReleaseToMavenCentral`. Credentials come from env vars set by
+// release-kt-lib.yml (ORG_GRADLE_PROJECT_*). If the signing key isn't set,
 // signAllPublications() becomes a no-op so local builds still work.
 
 import com.android.build.gradle.LibraryExtension
@@ -43,10 +32,24 @@ plugins {
     id("com.vanniktech.maven.publish") version "0.30.0"
 }
 
+version = providers.gradleProperty("moq.version").get()
+
+// Compatible-patch range for the bindings: any 0.2.x, never 0.3.0. Published
+// into the wrapper's POM so consumers float to the newest bindings patch.
+val MOQ_FFI_RANGE = "[0.2,0.3)"
+
 val androidEnabled = providers.gradleProperty("android.enabled").orNull == "true"
 
 if (androidEnabled) {
     apply(plugin = "com.android.library")
+}
+
+// Resolve `dev.moq:moq-ffi` from the sibling project for local/CI builds while
+// the published metadata keeps the floating range declared below.
+configurations.all {
+    resolutionStrategy.dependencySubstitution {
+        substitute(module("dev.moq:moq-ffi")).using(project(":moq-ffi"))
+    }
 }
 
 kotlin {
@@ -75,8 +78,11 @@ kotlin {
         val jvmAndAndroidMain by creating {
             dependsOn(commonMain)
             dependencies {
-                // compileOnly: each platform's runtime adds its own JNA artifact.
-                compileOnly("net.java.dev.jna:jna:5.15.0")
+                // api: the wrapper re-exports the FFI types, so consumers get
+                // `uniffi.moq.*` (and the native libs) transitively.
+                api("dev.moq:moq-ffi") {
+                    version { require(MOQ_FFI_RANGE) }
+                }
             }
         }
         val jvmAndAndroidTest by creating {
@@ -85,9 +91,6 @@ kotlin {
 
         val jvmMain by getting {
             dependsOn(jvmAndAndroidMain)
-            dependencies {
-                implementation("net.java.dev.jna:jna:5.15.0")
-            }
         }
         val jvmTest by getting {
             dependsOn(jvmAndAndroidTest)
@@ -96,9 +99,6 @@ kotlin {
         if (androidEnabled) {
             val androidMain by getting {
                 dependsOn(jvmAndAndroidMain)
-                dependencies {
-                    implementation("net.java.dev.jna:jna:5.15.0@aar")
-                }
             }
             val androidUnitTest by getting {
                 dependsOn(jvmAndAndroidTest)
@@ -113,9 +113,6 @@ if (androidEnabled) {
         compileSdk = 35
         defaultConfig {
             minSdk = 24
-            ndk {
-                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-            }
         }
         compileOptions {
             sourceCompatibility = JavaVersion.VERSION_17
@@ -126,7 +123,6 @@ if (androidEnabled) {
                 withSourcesJar()
             }
         }
-        sourceSets.getByName("main").jniLibs.srcDirs("src/androidMain/jniLibs")
     }
 }
 
@@ -137,7 +133,7 @@ mavenPublishing {
 
     pom {
         name.set("moq")
-        description.set("Kotlin bindings for Media over QUIC")
+        description.set("Ergonomic Kotlin bindings for Media over QUIC")
         url.set("https://github.com/moq-dev/moq")
         licenses {
             license {

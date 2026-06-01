@@ -121,8 +121,13 @@ pub(crate) async fn connect(
 		tokio_tungstenite::Connector::Plain
 	};
 
+	// Each moq ALPN can ride on any QMux draft; pass `&[]` to let the polyfill
+	// expand to every QMux version it knows about. `without_protocol` also
+	// offers the bare ALPNs (`qmux-01`, `qmux-00`, `webtransport`) so we still
+	// interop with relays that only know a wire-format version.
 	let session = qmux::Client::new()
-		.with_protocols(alpns)
+		.with_protocols(alpns.iter().map(|&a| (a, &[] as &[qmux::Version])))
+		.without_protocol()
 		.with_connector(connector)
 		.connect(url.as_str())
 		.await
@@ -150,7 +155,12 @@ impl WebSocketListener {
 
 	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> anyhow::Result<Self> {
 		let listener = tokio::net::TcpListener::bind(addr).await?;
-		let server = qmux::Server::new().with_protocols(alpns);
+		// `&[]` per entry expands to every QMux draft on the wire;
+		// `without_protocol` also accepts legacy clients that only offer a
+		// bare wire-format ALPN (today's moq-net clients still do).
+		let server = qmux::Server::new()
+			.with_protocols(alpns.iter().map(|&a| (a, &[] as &[qmux::Version])))
+			.without_protocol();
 		Ok(Self { listener, server })
 	}
 

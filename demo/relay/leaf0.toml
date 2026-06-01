@@ -51,5 +51,4 @@ publish = ["anon", "demo/viewer"]
 
 [stats]
 enabled = true
-levels = 3
 node = "local/leaf0"

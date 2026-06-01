@@ -54,7 +54,7 @@ HUMOR ME.
 - **RTMP** ([Real-Time Messaging Protocol](https://en.wikipedia.org/wiki/Real-Time_Messaging_Protocol)) - The classic Flash-era protocol
 - **SRT** ([Secure Reliable Transport](https://en.wikipedia.org/wiki/Secure_Reliable_Transport)) - Modern "low-latency" alternative
 - **E-RTMP** ([Enhanced RTMP](https://en.wikipedia.org/wiki/Real-Time_Messaging_Protocol#Enhanced_RTMP)) - Modernized version of RTMP
-- **WebRTC** ([Web Real-Time Communication](https://en.wikipedia.org/wiki/WebRTC)) - Can be used for contribution via [WHIP](https://www.rfc-editor.org/rfc/rfc9725.html)
+- **WebRTC** ([Web Real-Time Communication](https://en.wikipedia.org/wiki/WebRTC)) - Can be used for contribution via [WHIP](https://www.rfc-editor.org/rfc/rfc9725.html). MoQ ships a gateway for this; see [moq-rtc](/bin/rtc).
 - **RTSP** ([Real-Time Streaming Protocol](https://en.wikipedia.org/wiki/Real-Time_Streaming_Protocol)) - Used in IP cameras
 
 User-generated content (YouTube/Twitch/Facebook) primarily uses RTMP.

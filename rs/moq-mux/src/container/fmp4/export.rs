@@ -116,11 +116,11 @@ impl<S: Stream> Export<S> {
 	/// timestamp order across tracks. Returns `None` when the catalog and every track
 	/// have ended.
 	pub async fn next(&mut self) -> Result<Option<Bytes>> {
-		conducer::wait(|waiter| self.poll_next(waiter)).await
+		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
 	/// Poll-based variant of [`Self::next`].
-	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Bytes>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		// 1. Drain catalog updates and (un)subscribe tracks accordingly.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {

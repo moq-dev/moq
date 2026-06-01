@@ -4,24 +4,23 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::Stats;
 
 use crate::{
-	AnnounceConsumer, AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats,
-	Track, TrackConsumer,
+	AnnounceConsumer, AsPath, BroadcastConsumer, Compression, Error, Origin, OriginConsumer, OriginList,
+	StatsHandle as MoqStats, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
 		priority::{Priority, PriorityHandle, PriorityQueue},
 	},
-	model::GroupConsumer,
+	model::{FrameConsumer, GroupConsumer},
 };
 
 use super::Version;
 
 pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	pub session: S,
-	/// The origin we read local broadcasts from. None gives this session a
-	/// dummy, immediately-closed origin (i.e. nothing to publish).
-	pub origin: Option<OriginConsumer>,
-	/// Stats aggregator for this session's egress. Use [`MoqStats::disabled`]
+	/// The origin we read local broadcasts from.
+	pub origin: OriginConsumer,
+	/// Stats aggregator for this session's egress. Use [`MoqStats::default`]
 	/// to opt out.
 	pub stats: MoqStats,
 	pub version: Version,
@@ -38,15 +37,13 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 
 impl<S: web_transport_trait::Session> Publisher<S> {
 	pub fn new(config: PublisherConfig<S>) -> Self {
-		// Default to a dummy origin that is immediately closed.
-		let origin = config.origin.unwrap_or_else(|| Origin::random().produce().consume());
 		// Identity stamped onto outbound announce hops. Derived from the
 		// origin we're consuming so it matches the local relay identity
 		// across every session, required for cross-session loop detection.
-		let self_origin = *origin;
+		let self_origin = *config.origin;
 		Self {
 			session: config.session,
-			origin,
+			origin: config.origin,
 			stats: config.stats,
 			self_origin,
 			priority: Default::default(),
@@ -205,29 +202,86 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 				// Send ANNOUNCE_INIT as the first message with all currently active paths
 				// We use `try_next()` to synchronously get the initial updates.
-				while let Some((path, active)) = announced.try_next() {
-					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
+				while let Some((path, event)) = announced.try_next() {
+					let suffix = path
+						.strip_prefix(&prefix)
+						.expect("origin returned invalid path")
+						.to_owned();
+					let absolute = origin.absolute(&path).to_owned();
 
-					if active.is_some() {
-						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-						let absolute = origin.absolute(&path).to_owned();
+					// Lite01/02 only carries the set of active paths, so a restart is
+					// indistinguishable from an active here.
+					if event.broadcast().is_some() {
+						tracing::debug!(broadcast = %absolute, "announce");
 						let guard = stats.broadcast(&absolute).publisher();
-						let prev = stats_guards.insert(absolute, guard);
-						debug_assert!(prev.is_none(), "origin announced a path that was already active");
-						init.push(suffix.to_owned());
+						stats_guards.entry(absolute).or_insert(guard);
+						if !init.contains(&suffix) {
+							init.push(suffix);
+						}
 					} else {
 						// A potential race.
-						tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-						stats_guards.remove(&origin.absolute(&path).to_owned());
-						init.retain(|path| path != &suffix);
+						tracing::debug!(broadcast = %absolute, "unannounce");
+						stats_guards.remove(&absolute);
+						init.retain(|p| p != &suffix);
 					}
 				}
 
 				let announce_init = lite::AnnounceInit { suffixes: init };
 				stream.writer.encode(&announce_init).await?;
 			}
+			Version::Lite05Wip => {
+				// Drain the current active set synchronously (like the Lite01/02 path),
+				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
+				// them afterward. The receiver stamps our origin onto each hop chain, so we
+				// forward the stored chain as-is (no self push here).
+				let mut initial: Vec<(crate::PathOwned, OriginList)> = Vec::new();
+				while let Some((path, event)) = announced.try_next() {
+					let suffix = path
+						.strip_prefix(&prefix)
+						.expect("origin returned invalid path")
+						.to_owned();
+					let absolute = origin.absolute(&path).to_owned();
+
+					match event.broadcast() {
+						Some(broadcast) => {
+							let hops = &broadcast.hops;
+							// Apply the same exclude_hop and reflected-announce skips as the live
+							// loop so the count matches exactly what we send (minus the self push).
+							if exclude_hop != 0 && hops.iter().any(|h| h.id == exclude_hop) {
+								continue;
+							}
+							if hops.contains(&self_origin) {
+								continue;
+							}
+							tracing::debug!(broadcast = %absolute, "announce");
+							let guard = stats.broadcast(&absolute).publisher();
+							stats_guards.entry(absolute).or_insert(guard);
+							initial.retain(|(s, _)| s != &suffix);
+							initial.push((suffix, hops.clone()));
+						}
+						None => {
+							// A potential race: a just-announced path already unannounced.
+							tracing::debug!(broadcast = %absolute, "unannounce");
+							stats_guards.remove(&absolute);
+							initial.retain(|(s, _)| s != &suffix);
+						}
+					}
+				}
+
+				// Report our origin id (stamped onto hops by the receiver, not us)
+				// and the count of initial announces that follow immediately.
+				let ok = lite::AnnounceOk {
+					origin: self_origin,
+					active: initial.len() as u64,
+				};
+				stream.writer.encode(&ok).await?;
+
+				for (suffix, hops) in initial {
+					stream.writer.encode(&lite::Announce::Active { suffix, hops }).await?;
+				}
+			}
 			_ => {
-				// Lite03+: no more announce init.
+				// Lite03/Lite04: no announce init, no AnnounceOk.
 			}
 		}
 
@@ -237,68 +291,94 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				biased;
 				res = stream.reader.closed() => return res,
 				next = announced.next() => {
-					match next {
-						Some((path, active)) => {
-							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
+						let Some((path, event)) = next else {
+							stream.writer.finish()?;
+							return stream.writer.closed().await;
+						};
 
-							if let Some(active) = active {
-								// Skip if the peer asked us to exclude announces whose hop chain
-								// contains their id — they already saw this broadcast upstream.
-								if exclude_hop != 0 && active.hops.iter().any(|h| h.id == exclude_hop) {
-									tracing::debug!(
-										broadcast = %origin.absolute(&path),
-										%exclude_hop,
-										"skipping announce per peer's exclude_hop",
-									);
+						let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
+						let absolute = origin.absolute(&path).to_owned();
+
+						match event {
+							crate::Announced::Active(active) => {
+								let Some(hops) = Self::prepare_active_hops(&active.hops, self_origin, exclude_hop, version, &absolute) else {
 									continue;
-								}
-								// Defense in depth: never echo an announce that already passed
-								// through us. The subscriber should drop these before they reach
-								// our origin, but if one slips through, don't propagate the loop.
-								if active.hops.contains(&self_origin) {
-									tracing::debug!(
-										broadcast = %origin.absolute(&path),
-										"skipping reflected announce",
-									);
-									continue;
-								}
-								tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-								// Append our origin id to the hops so the next relay can detect loops.
-								// If the chain is already at MAX_HOPS, skip the announce — this link is
-								// effectively unreachable and the peer will eventually prune the loop.
-								let mut hops = active.hops.clone();
-								if hops.push(self_origin).is_err() {
-									tracing::warn!(
-										broadcast = %origin.absolute(&path),
-										"dropping announce; hop chain at MAX_HOPS (possible loop)",
-									);
-									continue;
-								}
-								let absolute = origin.absolute(&path).to_owned();
+								};
+								tracing::debug!(broadcast = %absolute, "announce");
 								let guard = stats.broadcast(&absolute).publisher();
 								let prev = stats_guards.insert(absolute, guard);
 								debug_assert!(prev.is_none(), "origin announced a path that was already active");
-								let msg = lite::Announce::Active { suffix, hops };
-								stream.writer.encode(&msg).await?;
-							} else {
-								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-								stats_guards.remove(&origin.absolute(&path).to_owned());
-								// An ended announce doesn't need hops — the receiver matches on path only.
-								let msg = lite::Announce::Ended {
-									suffix,
-									hops: OriginList::new(),
-								};
-								stream.writer.encode(&msg).await?;
+								stream.writer.encode(&lite::Announce::Active { suffix, hops }).await?;
 							}
-						},
-						None => {
-							stream.writer.finish()?;
-							return stream.writer.closed().await;
+							crate::Announced::Restart(active) => {
+								// On lite-05+ a restart travels as a duplicate ANNOUNCE (a second
+								// `Active` for an already-announced path). Older versions never defined
+								// that, so split it into an unannounce followed by a fresh announce.
+								match Self::prepare_active_hops(&active.hops, self_origin, exclude_hop, version, &absolute) {
+									Some(hops) => {
+										tracing::debug!(broadcast = %absolute, "restart");
+										// Continuity: keep the existing stats guard (no close + reopen).
+										if lite::restart_supported(version) {
+											stream.writer.encode(&lite::Announce::Active { suffix, hops }).await?;
+										} else {
+											stream
+												.writer
+												.encode(&lite::Announce::Ended {
+													suffix: suffix.clone(),
+													hops: OriginList::new(),
+												})
+												.await?;
+											stream.writer.encode(&lite::Announce::Active { suffix, hops }).await?;
+										}
+									}
+									None => {
+										// The replacement loops back to us; from this peer's view the broadcast is gone.
+										tracing::debug!(broadcast = %absolute, "restart replacement looped; unannouncing");
+										stats_guards.remove(&absolute);
+										stream.writer.encode(&lite::Announce::Ended { suffix, hops: OriginList::new() }).await?;
+									}
+								}
+							}
+							crate::Announced::Ended => {
+								tracing::debug!(broadcast = %absolute, "unannounce");
+								stats_guards.remove(&absolute);
+								// An ended announce doesn't need hops; the receiver matches on path only.
+								stream.writer.encode(&lite::Announce::Ended { suffix, hops: OriginList::new() }).await?;
+							}
 						}
 					}
-				}
 			}
 		}
+	}
+
+	/// Decide whether to forward an active announcement and compute the outgoing hop chain.
+	///
+	/// Returns `None` when the announce should be skipped: the peer asked us to exclude it
+	/// (`exclude_hop`), it already passed through us (reflected loop), or the hop chain is full.
+	fn prepare_active_hops(
+		hops: &OriginList,
+		self_origin: Origin,
+		exclude_hop: u64,
+		version: Version,
+		absolute: &crate::Path,
+	) -> Option<OriginList> {
+		if exclude_hop != 0 && hops.iter().any(|h| h.id == exclude_hop) {
+			tracing::debug!(broadcast = %absolute, %exclude_hop, "skipping announce per peer's exclude_hop");
+			return None;
+		}
+		if hops.contains(&self_origin) {
+			tracing::debug!(broadcast = %absolute, "skipping reflected announce");
+			return None;
+		}
+		let mut hops = hops.clone();
+		// Lite05+ moves the self-stamp to the receiver, which appends our id (reported
+		// once via AnnounceOk) on receipt. Older versions stamp it here, dropping if the
+		// chain is full.
+		if !matches!(version, Version::Lite05Wip) && hops.push(self_origin).is_err() {
+			tracing::warn!(broadcast = %absolute, "dropping announce; hop chain at MAX_HOPS (possible loop)");
+			return None;
+		}
+		Some(hops)
 	}
 
 	pub async fn recv_subscribe(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
@@ -360,30 +440,37 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
-		let track = Track {
-			name: subscribe.track.to_string(),
+		let subscription = crate::Subscription {
 			priority: subscribe.priority,
-			timescale: None,
+			ordered: subscribe.ordered,
+			stale: subscribe.max_latency,
+			group_start: subscribe.start_group,
+			group_end: subscribe.end_group,
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&track)?;
+		let track = broadcast.subscribe_track(&subscribe.track, subscription).ok().await?;
 
-		// TODO wait until track.info() to get the *real* priority
-
-		// Lite05+ requires a track timescale to encode per-frame timestamps; reject
-		// tracks that don't advertise one before sending SUBSCRIBE_OK.
-		if version.has_timestamps() && track.timescale.is_none() {
-			return Err(Error::ProtocolViolation);
-		}
+		// Compress only when the producer marked the track worth it and the
+		// negotiated draft understands the SUBSCRIBE_OK codec field. Older drafts
+		// (lite-04 and below) get None and the frames stream verbatim.
+		let supports_compression = !matches!(
+			version,
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Lite04
+		);
+		let compression = if track.compress && supports_compression {
+			Compression::Deflate
+		} else {
+			Compression::None
+		};
 
 		let info = lite::SubscribeOk {
-			priority: track.priority,
+			priority: subscribe.priority,
 			ordered: false,
 			max_latency: std::time::Duration::ZERO,
 			start_group: None,
 			end_group: None,
-			timescale: track.timescale,
+			compression,
 		};
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
@@ -393,7 +480,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// tasks (so in-flight groups update via PriorityHandle::set_track). The Sender
 		// stays in run_subscribe and gets handed to run_track so the same loop that
 		// parses SUBSCRIBE_UPDATEs also fans the new priority out.
-		let (track_priority_tx, track_priority_rx) = tokio::sync::watch::channel(track.priority);
+		let (track_priority_tx, track_priority_rx) = tokio::sync::watch::channel(subscribe.priority);
 
 		let sub = Subscription {
 			session,
@@ -403,7 +490,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority,
 			track_priority: track_priority_rx,
 			version,
-			track_timescale: track.timescale,
+			compression,
 		};
 
 		// `end_group` is a serving cap, not a subscription terminator: groups with
@@ -438,8 +525,9 @@ struct Subscription<S: web_transport_trait::Session> {
 	priority: PriorityQueue,
 	track_priority: tokio::sync::watch::Receiver<u8>,
 	version: Version,
-	/// Track's negotiated timescale, used to encode per-frame timestamps on Lite05+.
-	track_timescale: Option<crate::Timescale>,
+	/// Codec announced in SUBSCRIBE_OK; every frame on this subscription is
+	/// compressed with it before hitting the wire.
+	compression: Compression,
 }
 
 impl<S: web_transport_trait::Session> Subscription<S> {
@@ -534,88 +622,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		stream.encode(&msg).await?;
 		self.track_stats.group();
 
-		// Previous frame's raw timestamp value, for zigzag-delta encoding on Lite05+.
-		let mut prev_ts: u64 = 0;
-
-		loop {
-			let frame = tokio::select! {
-				biased;
-				_ = stream.closed() => return Err(Error::Cancel),
-				frame = group.next_frame() => frame,
-				new_pri = priority.next() => {
-					stream.set_priority(new_pri);
-					continue;
-				}
-				Ok(()) = self.track_priority.changed() => {
-					priority.set_track(*self.track_priority.borrow_and_update());
-					continue;
-				}
-			};
-
-			let mut frame = match frame? {
-				Some(frame) => frame,
-				None => break,
-			};
-
-			if self.version.has_timestamps() {
-				// Lite05 requires a per-frame timestamp at the track's negotiated scale.
-				// Encoding a zero delta for a missing timestamp would silently corrupt
-				// the stream, so refuse the frame instead.
-				let track_timescale = self.track_timescale.ok_or(Error::ProtocolViolation)?;
-				let ts = frame.timestamp.ok_or(Error::ProtocolViolation)?;
-				if ts.scale() != track_timescale {
-					return Err(Error::ProtocolViolation);
-				}
-				let curr = ts.value();
-				let delta: i64 = (curr as i128 - prev_ts as i128)
-					.try_into()
-					.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-				let zz = crate::coding::VarInt::from_zigzag(delta).map_err(crate::coding::EncodeError::from)?;
-				stream.encode(&zz).await?;
-				prev_ts = curr;
-			}
-
-			stream.encode(&frame.size).await?;
-			self.track_stats.frame();
-
-			loop {
-				let chunk = tokio::select! {
-					biased;
-					_ = stream.closed() => return Err(Error::Cancel),
-					chunk = frame.read_chunk() => chunk,
-					new_pri = priority.next() => {
-						stream.set_priority(new_pri);
-						continue;
-					}
-					Ok(()) = self.track_priority.changed() => {
-						priority.set_track(*self.track_priority.borrow_and_update());
-						continue;
-					}
-				};
-
-				match chunk? {
-					Some(mut chunk) => {
-						let n = chunk.len() as u64;
-						loop {
-							tokio::select! {
-								biased;
-								result = stream.write_all(&mut chunk) => {
-									result?;
-									break;
-								}
-								new_pri = priority.next() => {
-									stream.set_priority(new_pri);
-								}
-								Ok(()) = self.track_priority.changed() => {
-									priority.set_track(*self.track_priority.borrow_and_update());
-								}
-							}
-						}
-						self.track_stats.bytes(n);
-					}
-					None => break,
-				}
-			}
+		while let Some(frame) = self.next_frame(&mut stream, &mut priority, &mut group).await? {
+			self.serve_frame(&mut stream, &mut priority, frame).await?;
 		}
 
 		stream.finish()?;
@@ -623,6 +631,116 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 		tracing::debug!(sequence, "finished group");
 
+		Ok(())
+	}
+
+	/// Send one frame. Uncompressed frames stream chunk-by-chunk so we never
+	/// buffer the whole payload; a compressed frame must buffer to feed the
+	/// codec, and its wire size becomes the compressed length (the subscriber
+	/// inflates it from the codec in SUBSCRIBE_OK).
+	async fn serve_frame(
+		&mut self,
+		stream: &mut Writer<S::SendStream, Version>,
+		priority: &mut PriorityHandle,
+		mut frame: FrameConsumer,
+	) -> Result<(), Error> {
+		match self.compression {
+			Compression::None => {
+				stream.encode(&frame.size).await?;
+				self.track_stats.frame();
+
+				while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
+					self.write_chunk(stream, priority, chunk).await?;
+				}
+			}
+			compression => {
+				let payload = self.read_all(stream, priority, &mut frame).await?;
+				let chunk = bytes::Bytes::from(compression.compress(&payload));
+				stream.encode(&(chunk.len() as u64)).await?;
+				self.track_stats.frame();
+				self.write_chunk(stream, priority, chunk).await?;
+			}
+		}
+
+		Ok(())
+	}
+
+	/// Await the next frame in the group, applying any priority changes that
+	/// arrive meanwhile. Errors with [`Error::Cancel`] if the peer closes first.
+	async fn next_frame(
+		&mut self,
+		stream: &mut Writer<S::SendStream, Version>,
+		priority: &mut PriorityHandle,
+		group: &mut GroupConsumer,
+	) -> Result<Option<FrameConsumer>, Error> {
+		loop {
+			tokio::select! {
+				biased;
+				_ = stream.closed() => return Err(Error::Cancel),
+				frame = group.next_frame() => return frame,
+				new_pri = priority.next() => stream.set_priority(new_pri),
+				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
+			}
+		}
+	}
+
+	/// Await the next chunk of `frame`, applying priority changes meanwhile.
+	async fn read_chunk(
+		&mut self,
+		stream: &mut Writer<S::SendStream, Version>,
+		priority: &mut PriorityHandle,
+		frame: &mut FrameConsumer,
+	) -> Result<Option<bytes::Bytes>, Error> {
+		loop {
+			tokio::select! {
+				biased;
+				_ = stream.closed() => return Err(Error::Cancel),
+				chunk = frame.read_chunk() => return chunk,
+				new_pri = priority.next() => stream.set_priority(new_pri),
+				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
+			}
+		}
+	}
+
+	/// Await the full frame payload, applying priority changes meanwhile.
+	async fn read_all(
+		&mut self,
+		stream: &mut Writer<S::SendStream, Version>,
+		priority: &mut PriorityHandle,
+		frame: &mut FrameConsumer,
+	) -> Result<bytes::Bytes, Error> {
+		loop {
+			tokio::select! {
+				biased;
+				_ = stream.closed() => return Err(Error::Cancel),
+				data = frame.read_all() => return data,
+				new_pri = priority.next() => stream.set_priority(new_pri),
+				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
+			}
+		}
+	}
+
+	/// Write a whole chunk, applying priority changes between partial writes,
+	/// then count the bytes sent.
+	async fn write_chunk(
+		&mut self,
+		stream: &mut Writer<S::SendStream, Version>,
+		priority: &mut PriorityHandle,
+		mut chunk: bytes::Bytes,
+	) -> Result<(), Error> {
+		let n = chunk.len() as u64;
+		loop {
+			tokio::select! {
+				biased;
+				result = stream.write_all(&mut chunk) => {
+					result?;
+					break;
+				}
+				new_pri = priority.next() => stream.set_priority(new_pri),
+				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
+			}
+		}
+		self.track_stats.bytes(n);
 		Ok(())
 	}
 }

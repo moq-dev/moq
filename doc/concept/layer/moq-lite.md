@@ -64,6 +64,9 @@ This is extremely useful for conference rooms, as you can live discover when par
 It's also useful for individual broadcasts as you can get notifications it comes online or goes offline (no spamming F5).
 The [moq-relay clustering](/bin/relay/cluster) feature actually uses this to discover other nodes in the cluster AND what broadcasts are available on each node.
 
+The peer first replies with the set of broadcasts that are currently live, then streams updates as they change.
+This initial set is a discrete batch: the latest draft reports how many entries to expect up front, so a freshly connected session can wait until that snapshot has fully arrived before listing what's available, rather than racing the gossip.
+
 ### Subscriptions
 
 All data transfers are initiated by subscriptions.

@@ -40,6 +40,20 @@ The library will be in `target/release/libmoq.a` (static) and `target/release/li
 
 Prebuilt binaries are attached to each [`libmoq-v*` release](https://github.com/moq-dev/moq/releases) for the major Tier 1 targets.
 
+## Callback lifetime
+
+Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_consume_catalog`, `moq_consume_video_ordered`, `moq_consume_audio_ordered`, `moq_consume_track`, `moq_consume_audio_raw`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:
+
+- **`> 0`** — a live result you can use: a frame, catalog, or announce ID (or `1` to mean "session connected"). May fire any number of times.
+- **`0`** — closed cleanly. **Terminal.**
+- **`< 0`** — closed with an error. **Terminal.**
+
+Once a callback fires with any non-positive (`<= 0`) code, libmoq will never invoke it again and never touch `user_data` again. Release `user_data` in response to that final callback.
+
+The matching `*_close` function only *requests* shutdown: it returns immediately, does **not** free `user_data`, and does **not** cancel the final callback. The terminal callback still fires (on libmoq's internal thread) once the background task stops, and that is the one safe point to free `user_data`. This means you never have to guess whether an in-flight callback is still running after `close`, and you don't need an external weak-reference or refcount around `user_data`.
+
+Because the terminal callback runs on libmoq's thread, bindings that own thread-affine objects (e.g. a Qt `QObject`) should hop to the owning thread to perform the actual destruction; the `user_data` lifetime contract holds regardless of which thread tears the object down.
+
 ## Use cases
 
 - **C/C++ applications** integrating MoQ without a Rust toolchain

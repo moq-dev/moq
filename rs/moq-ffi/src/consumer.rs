@@ -81,9 +81,15 @@ impl Media {
 #[uniffi::export]
 impl MoqBroadcastConsumer {
 	/// Subscribe to the catalog for this broadcast.
-	pub fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
-		let track = self.inner.subscribe_track(&hang::catalog::Catalog::default_track())?;
+	pub async fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
+		let track = self
+			.inner
+			.subscribe_track(
+				hang::catalog::Catalog::DEFAULT_NAME,
+				hang::catalog::Catalog::default_subscription(),
+			)
+			.ok()
+			.await?;
 		let consumer = moq_mux::catalog::hang::Consumer::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
 			task: Task::new(Catalog { inner: consumer }),
@@ -93,9 +99,12 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to a track by name — same pattern as moq-boy's command/status tracks.
 	///
 	/// Frames are returned as plain byte payloads with no codec or container parsing.
-	pub fn subscribe_track(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
-		let track = self.inner.subscribe_track(&moq_net::Track { name, priority: 0, timescale: None })?;
+	pub async fn subscribe_track(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
+		let track = self
+			.inner
+			.subscribe_track(&name, moq_net::Subscription::default())
+			.ok()
+			.await?;
 		Ok(Arc::new(MoqTrackConsumer::new(track)))
 	}
 
@@ -103,20 +112,23 @@ impl MoqBroadcastConsumer {
 	///
 	/// `container` is the track container from the catalog.
 	/// `max_latency_ms` controls the maximum buffering before skipping a GoP.
-	pub fn subscribe_media(
+	pub async fn subscribe_media(
 		&self,
 		name: String,
 		container: Container,
 		max_latency_ms: u64,
 	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
 		// Parse the container before subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
 		let container: hang::catalog::Container = container.into();
 		let media: moq_mux::catalog::hang::Container = (&container)
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
-		let track = self.inner.subscribe_track(&moq_net::Track { name, priority: 0, timescale: None })?;
+		let track = self
+			.inner
+			.subscribe_track(&name, moq_net::Subscription::default())
+			.ok()
+			.await?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {

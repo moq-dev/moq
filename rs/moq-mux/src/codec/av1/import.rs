@@ -357,6 +357,7 @@ impl Import {
 			timestamp: pts,
 			payload,
 			keyframe: self.current.contains_keyframe,
+			duration: None,
 		};
 
 		track.write(frame)?;

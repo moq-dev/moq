@@ -26,17 +26,17 @@ listen = "[::]:4443"
 # Allow anonymous access to everything.
 public = ""
 
-# Publish stats broadcasts on the cluster origin. A broadcast at path
-# `anon/bbb` aggregates into each of its path prefixes (up to `levels`):
+# Publish a single per-node stats broadcast on the cluster origin:
 #
-#   .stats/prefix/localhost
-#   .stats/prefix/anon/localhost
-#   .stats/prefix/anon/bbb/localhost
+#   .stats/node/local/host
+#
+# carrying four JSON tracks (publisher.json, subscriber.json,
+# internal/publisher.json, internal/subscriber.json) of {path: counters}
+# for every broadcast that has changed within the last `retention`
+# intervals. See doc/bin/relay/config.md for the field semantics.
 [stats]
 enabled = true
-# `/anon/bbb` is the typical localhost broadcast, so 3 levels covers the root,
-# the anon prefix, and the broadcast itself.
-levels = 3
+
 # `node` is the suffix that disambiguates per-relay broadcasts in a cluster.
 # It can be multi-segment (e.g. `sjc/1`, `sjc/2`) to nest multiple hosts under
 # a shared region key. Single-node setups can leave it unset.

@@ -241,6 +241,7 @@ impl Import {
 			timestamp: pts,
 			payload: data.to_vec().into(),
 			keyframe,
+			duration: None,
 		})?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
@@ -400,6 +401,7 @@ impl Import {
 			timestamp: pts,
 			payload,
 			keyframe,
+			duration: None,
 		})?;
 
 		if let Some(jitter) = self.jitter.observe(pts)

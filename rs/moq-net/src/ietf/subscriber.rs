@@ -2,7 +2,7 @@ use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
 	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, MAX_FRAME_SIZE, OriginProducer,
-	Path, PathOwned, Track, TrackProducer,
+	Path, PathOwned, Track, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
@@ -42,14 +42,14 @@ struct BroadcastState {
 #[derive(Clone)]
 pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
-	origin: Option<OriginProducer>,
+	origin: OriginProducer,
 	control: Control,
 	state: Lock<State>,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: Option<OriginProducer>, control: Control, version: Version) -> Self {
+	pub fn new(session: S, origin: OriginProducer, control: Control, version: Version) -> Self {
 		Self {
 			session,
 			origin,
@@ -59,10 +59,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	pub fn has_origin(&self) -> bool {
-		self.origin.is_some()
-	}
-
 	/// Send SUBSCRIBE_NAMESPACE on a bidi stream.
 	/// The caller is responsible for opening the appropriate stream type
 	/// (virtual for v14/v15, real bidi for v16+).
@@ -70,7 +66,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		mut stream: Stream<T, Version>,
 	) -> Result<(), Error> {
-		let prefix = self.origin.as_ref().ok_or(Error::InvalidRole)?.root().to_owned();
+		let prefix = self.origin.root().to_owned();
 		let request_id = self.control.next_request_id().await?;
 
 		// Write SubscribeNamespace
@@ -402,10 +398,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	fn start_announce(&mut self, path: PathOwned) -> Result<BroadcastProducer, Error> {
-		let Some(origin) = &self.origin else {
-			return Err(Error::InvalidRole);
-		};
-
 		let mut state = self.state.lock();
 		let broadcast = match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
@@ -414,7 +406,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Entry::Vacant(entry) => {
 				let broadcast = Broadcast::new().produce();
-				origin.publish_broadcast(path.clone(), broadcast.consume());
+				self.origin.publish_broadcast(path.clone(), broadcast.consume());
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),
 					count: 1,
@@ -423,7 +415,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+		tracing::debug!(broadcast = %self.origin.absolute(&path), "announce");
 
 		let this = self.clone();
 		let producer = broadcast.clone();
@@ -439,17 +431,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	fn stop_announce(&mut self, path: PathOwned) -> Result<(), Error> {
-		let Some(origin) = &self.origin else {
-			return Err(Error::InvalidRole);
-		};
-
 		let mut state = self.state.lock();
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
 				entry.get_mut().count -= 1;
 				if entry.get().count == 0 {
-					tracing::debug!(broadcast = %origin.absolute(&path), "unannounced");
+					tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounced");
 					entry.remove();
 				}
 			}
@@ -462,12 +450,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
-		let track = Track {
-			name: msg.track_name.to_string(),
-			priority: 0,
-			timescale: None,
-		}
-		.produce();
+		let track = Track::new(msg.track_name.to_string()).produce();
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
@@ -493,16 +476,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		drop(state);
 
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
-		broadcast.insert_track(track.consume())?;
+		broadcast.insert_track(track.subscribe_default())?;
 
 		Ok(())
 	}
 
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: BroadcastDynamic) -> Result<(), Error> {
 		loop {
-			let track = tokio::select! {
-				producer = broadcast.requested_track() => match producer {
-					Ok(producer) => producer,
+			let request = tokio::select! {
+				request = broadcast.requested_track() => match request {
+					Ok(request) => request,
 					Err(err) => {
 						tracing::debug!(%err, "broadcast closed");
 						break;
@@ -516,14 +499,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let path = path.to_owned();
 			let broadcast = broadcast.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(path, broadcast, track).await;
+				this.run_subscribe(path, broadcast, request).await;
 			});
 		}
 
 		Ok(())
 	}
 
-	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, broadcast: BroadcastDynamic, mut track: TrackProducer) {
+	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, broadcast: BroadcastDynamic, request: TrackRequest) {
+		// Accept right away: IETF group data can arrive before SubscribeOk, so we
+		// need the producer in place to route it. This also unblocks the
+		// downstream subscriber's `subscribe_track`.
+		let name = request.name().to_string();
+		let mut track = match request.accept(Track::new(name)) {
+			Ok(track) => track,
+			Err(err) => {
+				tracing::debug!(%err, "failed to accept track request");
+				return;
+			}
+		};
+
 		let request_id = match self.control.next_request_id().await {
 			Ok(id) => id,
 			Err(err) => {
@@ -566,7 +561,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return;
 		}
 
-		tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe started");
+		tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name, "subscribe started");
 
 		// Read the response and register the alias mapping
 		let track_alias = match self.read_subscribe_response(&mut stream).await {
@@ -590,17 +585,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tokio::select! {
 			_ = track.unused() => {
-				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe cancelled");
+				tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name, "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
 			}
 			err = broadcast.closed() => {
-				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "broadcast closed");
+				tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name, "broadcast closed");
 				let _ = track.abort(err);
 			}
 			res = stream.reader.closed() => {
 				match res {
 					Ok(()) => {
-						tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe complete");
+						tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name, "subscribe complete");
 						let _ = track.finish();
 					}
 					Err(err) => {
@@ -634,7 +629,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				request_id,
 				track_namespace: broadcast.to_owned(),
 				track_name: (&track.name).into(),
-				subscriber_priority: track.priority,
+				subscriber_priority: track.subscription().map(|s| s.priority).unwrap_or(0),
 				group_order: GroupOrder::Descending,
 				filter_type: FilterType::LargestObject,
 			})

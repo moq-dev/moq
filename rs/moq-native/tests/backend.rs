@@ -46,7 +46,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publish(pub_origin.consume()).ok().await?;
+		let session = request.with_publisher(pub_origin.clone()).ok().await?;
 
 		let _broadcast = broadcast;
 		let _track = track;
@@ -55,7 +55,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let client = client.with_consume(sub_origin);
+	let client = client.with_consumer(sub_origin);
 	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
@@ -67,10 +67,11 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
 	let mut track_sub = bc
-		.subscribe_track("video", moq_net::Subscription::default())
+		.subscribe_track("video", moq_native::moq_net::Subscription::default())
+		.ok()
 		.await
 		.expect("subscribe_track failed");
 
@@ -199,7 +200,7 @@ async fn iroh_connect() {
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publish(pub_origin.consume()).ok().await?;
+		let session = request.with_publisher(pub_origin.clone()).ok().await?;
 
 		let _broadcast = broadcast;
 		let _track = track;
@@ -208,7 +209,7 @@ async fn iroh_connect() {
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let client = client.with_consume(sub_origin);
+	let client = client.with_consumer(sub_origin);
 	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
@@ -220,10 +221,11 @@ async fn iroh_connect() {
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
 	let mut track_sub = bc
-		.subscribe_track("video", moq_net::Subscription::default())
+		.subscribe_track("video", moq_native::moq_net::Subscription::default())
+		.ok()
 		.await
 		.expect("subscribe_track failed");
 

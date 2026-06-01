@@ -373,6 +373,7 @@ impl Import {
 			timestamp,
 			payload: Bytes::copy_from_slice(payload),
 			keyframe,
+			duration: None,
 		};
 
 		// Manage groups: new group on video keyframe; audio always finishes its group immediately.

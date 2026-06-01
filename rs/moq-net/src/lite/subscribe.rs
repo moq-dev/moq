@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::{
-	Path, Timescale,
+	Compression, Path,
 	coding::{Decode, DecodeError, Encode, EncodeError, Sizer},
 };
 
@@ -72,18 +72,18 @@ impl Message for Subscribe<'_> {
 	}
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SubscribeOk {
 	pub priority: u8,
 	pub ordered: bool,
 	pub max_latency: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
-	/// Track timescale negotiated by the publisher. `None` means the publisher
-	/// hasn't negotiated a timescale (Lite04 and earlier, or Lite05+ with the
-	/// wire field set to `0`). Carried on the wire for [`Version::Lite05Wip`] and
-	/// later: `None` encodes as `0`, `Some(n)` encodes as `n`.
-	pub timescale: Option<Timescale>,
+	/// Codec the publisher will use for every frame on this track. Negotiated
+	/// here (not in SUBSCRIBE) so the subscriber blocks on this message before it
+	/// can decode any frame payload. Lite05+ only; older drafts always get
+	/// [`Compression::None`].
+	pub compression: Compression,
 }
 
 impl Message for SubscribeOk {
@@ -106,7 +106,7 @@ impl Message for SubscribeOk {
 				self.max_latency.encode(w, version)?;
 				self.start_group.encode(w, version)?;
 				self.end_group.encode(w, version)?;
-				self.timescale.map(u64::from).unwrap_or(0).encode(w, version)?;
+				self.compression.to_code().encode(w, version)?;
 			}
 		}
 
@@ -117,9 +117,20 @@ impl Message for SubscribeOk {
 		match version {
 			Version::Lite01 => Ok(Self {
 				priority: u8::decode(r, version)?,
-				..Self::default()
+				ordered: false,
+				max_latency: std::time::Duration::ZERO,
+				start_group: None,
+				end_group: None,
+				compression: Compression::None,
 			}),
-			Version::Lite02 => Ok(Self::default()),
+			Version::Lite02 => Ok(Self {
+				priority: 0,
+				ordered: false,
+				max_latency: std::time::Duration::ZERO,
+				start_group: None,
+				end_group: None,
+				compression: Compression::None,
+			}),
 			Version::Lite03 | Version::Lite04 => {
 				let priority = u8::decode(r, version)?;
 				let ordered = u8::decode(r, version)? != 0;
@@ -133,7 +144,7 @@ impl Message for SubscribeOk {
 					max_latency,
 					start_group,
 					end_group,
-					timescale: None,
+					compression: Compression::None,
 				})
 			}
 			_ => {
@@ -142,7 +153,8 @@ impl Message for SubscribeOk {
 				let max_latency = std::time::Duration::decode(r, version)?;
 				let start_group = Option::<u64>::decode(r, version)?;
 				let end_group = Option::<u64>::decode(r, version)?;
-				let timescale = Timescale::new(u64::decode(r, version)?).ok();
+				let compression =
+					Compression::from_code(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
 
 				Ok(Self {
 					priority,
@@ -150,7 +162,7 @@ impl Message for SubscribeOk {
 					max_latency,
 					start_group,
 					end_group,
-					timescale,
+					compression,
 				})
 			}
 		}
@@ -350,56 +362,51 @@ impl Decode<Version> for SubscribeResponse {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
+	use std::time::Duration;
+
 	use super::*;
-	use bytes::BytesMut;
 
-	fn roundtrip_ok(version: Version, original: SubscribeOk) -> SubscribeOk {
-		let mut buf = BytesMut::new();
-		original.encode_msg(&mut buf, version).unwrap();
-		let mut bytes = buf.freeze();
-		SubscribeOk::decode_msg(&mut bytes, version).unwrap()
-	}
-
-	#[test]
-	fn subscribe_ok_lite04_drops_timescale() {
-		// On Lite04, timescale is not serialized; it should round-trip as None.
-		let ok = SubscribeOk {
+	fn sample() -> SubscribeOk {
+		SubscribeOk {
 			priority: 7,
 			ordered: true,
-			max_latency: std::time::Duration::from_millis(500),
-			start_group: Some(2),
-			end_group: Some(10),
-			timescale: Some(Timescale::MICRO),
-		};
-		let decoded = roundtrip_ok(Version::Lite04, ok);
-		assert_eq!(decoded.priority, 7);
-		assert!(decoded.ordered);
-		assert_eq!(decoded.start_group, Some(2));
-		assert_eq!(decoded.end_group, Some(10));
-		assert_eq!(decoded.timescale, None);
-	}
-
-	#[test]
-	fn subscribe_ok_lite05_carries_timescale() {
-		let ok = SubscribeOk {
-			priority: 3,
-			ordered: false,
-			max_latency: std::time::Duration::from_millis(100),
-			start_group: None,
+			max_latency: Duration::from_millis(250),
+			start_group: Some(3),
 			end_group: None,
-			timescale: Some(Timescale::MICRO),
-		};
-		let decoded = roundtrip_ok(Version::Lite05Wip, ok);
-		assert_eq!(decoded.priority, 3);
-		assert_eq!(decoded.timescale, Some(Timescale::MICRO));
+			compression: Compression::Deflate,
+		}
+	}
+
+	fn roundtrip(version: Version, ok: &SubscribeOk) -> SubscribeOk {
+		let mut buf = Vec::new();
+		ok.encode_msg(&mut buf, version).unwrap();
+		let mut slice = buf.as_slice();
+		SubscribeOk::decode_msg(&mut slice, version).unwrap()
 	}
 
 	#[test]
-	fn subscribe_ok_lite05_unspecified_timescale() {
-		// timescale = None round-trips on Lite05 (wire field is 0).
-		let ok = SubscribeOk::default();
-		let decoded = roundtrip_ok(Version::Lite05Wip, ok);
-		assert_eq!(decoded.timescale, None);
+	fn compression_roundtrips_on_lite05() {
+		let got = roundtrip(Version::Lite05Wip, &sample());
+		assert_eq!(got.compression, Compression::Deflate);
+		assert_eq!(got.priority, 7);
+		assert!(got.ordered);
+		assert_eq!(got.start_group, Some(3));
+		assert_eq!(got.end_group, None);
+	}
+
+	#[test]
+	fn compression_absent_before_lite05() {
+		let ok = sample();
+
+		// The compression varint only exists on lite-05+, so the older encoding is
+		// strictly shorter and always decodes back as None.
+		let mut buf04 = Vec::new();
+		ok.encode_msg(&mut buf04, Version::Lite04).unwrap();
+		let mut buf05 = Vec::new();
+		ok.encode_msg(&mut buf05, Version::Lite05Wip).unwrap();
+		assert!(buf05.len() > buf04.len(), "lite-05 carries an extra compression varint");
+
+		assert_eq!(roundtrip(Version::Lite04, &ok).compression, Compression::None);
 	}
 }

@@ -40,6 +40,78 @@ If you're using Nix, GStreamer is included in the dev shell automatically. Other
 - **Debian/Ubuntu:** `apt install libgstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad`
 - **Arch:** `pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad`
 
+## Quick start with Nix
+
+If you have Nix installed, you don't need to build anything or set any environment variables. The `moq-gst` flake output bundles the plugin with wrappers around `gst-inspect-1.0` / `gst-launch-1.0` that preload moq alongside `gst-plugins-{base,good,bad}`, so the standard tools find `moqsink` / `moqsrc` automatically.
+
+### Inspect the plugin
+
+```bash
+nix shell github:moq-dev/moq#moq-gst --command gst-inspect-1.0 moq
+```
+
+Lists `moqsink` and `moqsrc`. As a one-liner: `nix run github:moq-dev/moq#moq-gst -- moq`.
+
+### Subscribe to the public test broadcast
+
+`cdn.moq.dev/demo` hosts an always-on `bbb.hang` broadcast (looping Big Buck Bunny). Render it to a window:
+
+```bash
+nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
+  moqsrc url=https://cdn.moq.dev/demo broadcast=bbb.hang \
+  ! decodebin3 ! videoconvert ! autovideosink
+```
+
+Audio-only variant: swap the tail for `! decodebin3 ! audioconvert ! autoaudiosink`.
+
+### Publish your own broadcast
+
+`cdn.moq.dev/anon` accepts publishers without auth. Pick a name, publish, then subscribe to that same name (in another terminal or from another machine).
+
+```bash
+# Download a pre-fragmented CMAF test file (one time).
+curl -fsSL https://vid.moq.dev/bbb.mp4 -o bbb.mp4
+
+# Terminal 1: loop the file as a broadcast named `<your-name>.hang`.
+nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
+  multifilesrc location=bbb.mp4 loop=true ! parsebin name=parse \
+    parse. ! queue ! identity sync=true ! mux.sink_0 \
+    parse. ! queue ! identity sync=true ! mux.sink_1 \
+    moqsink name=mux url=https://cdn.moq.dev/anon broadcast=<your-name>.hang
+```
+
+```bash
+# Terminal 2: render it.
+nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
+  moqsrc url=https://cdn.moq.dev/anon broadcast=<your-name>.hang \
+  ! decodebin3 ! videoconvert ! autovideosink
+```
+
+### Local relay
+
+If you'd rather run a relay yourself, the [relay binary](/bin/relay/) is in the same flake:
+
+```bash
+# Terminal 1: start a relay on localhost:4443.
+nix run github:moq-dev/moq#moq-relay -- demo/relay/localhost.toml
+
+# Terminal 2: publish.
+nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
+  multifilesrc location=bbb.mp4 loop=true ! parsebin name=parse \
+    parse. ! queue ! identity sync=true ! mux.sink_0 \
+    parse. ! queue ! identity sync=true ! mux.sink_1 \
+    moqsink name=mux url=http://localhost:4443/anon broadcast=bbb.hang
+
+# Terminal 3: subscribe.
+nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
+  moqsrc url=http://localhost:4443/anon broadcast=bbb.hang \
+  ! decodebin3 ! videoconvert ! autovideosink
+```
+
+::: tip
+`http://` URLs auto-verify TLS via `/certificate.sha256` fingerprint pinning, so localhost development needs no certificate setup.
+:::
+
 ## Building
 
 ```bash

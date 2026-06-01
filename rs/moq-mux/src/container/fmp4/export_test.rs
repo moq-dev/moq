@@ -54,12 +54,14 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 			timestamp: Timestamp::from_micros(0).unwrap(),
 			payload: keyframe_payload,
 			keyframe: true,
+			duration: None,
 		})
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let catalog_stream =
-		crate::catalog::Consumer::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
+	let catalog_stream = crate::catalog::Consumer::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
@@ -123,8 +125,9 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 	let mut buf = BytesMut::from(data.as_slice());
 	let _ = importer.decode(&mut buf);
 
-	let catalog_stream =
-		crate::catalog::Consumer::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
+	let catalog_stream = crate::catalog::Consumer::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())

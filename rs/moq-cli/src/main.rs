@@ -120,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
 		.expect("failed to install default crypto provider");
 
 	let cli = Cli::parse();
-	cli.log.init();
+	cli.log.init()?;
 
 	#[cfg(feature = "iroh")]
 	let iroh = cli.iroh.bind().await?;
@@ -223,7 +223,7 @@ async fn run_subscribe(
 
 	tracing::info!(%url, %broadcast, "connecting");
 
-	let reconnect = client.with_consume(origin).reconnect(url);
+	let reconnect = client.with_consumer(origin).reconnect(url);
 
 	#[cfg(unix)]
 	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
