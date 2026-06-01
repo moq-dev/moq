@@ -230,7 +230,9 @@ mod tests {
 	/// Explicit keyframe closes the current group and starts a new one.
 	#[tokio::test]
 	async fn keyframe_closes_group_immediately() {
-		let track = moq_net::Track::new("test").produce();
+		let track = moq_net::Track::new("test")
+			.with_timescale(hang::container::TIMESCALE)
+			.produce();
 		let consumer = track.subscribe_default();
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -246,7 +248,9 @@ mod tests {
 	/// `finish_group()` flushes the current group immediately; the next write must be a keyframe.
 	#[tokio::test]
 	async fn finish_group_closes_immediately() {
-		let track = moq_net::Track::new("test").produce();
+		let track = moq_net::Track::new("test")
+			.with_timescale(hang::container::TIMESCALE)
+			.produce();
 		let consumer = track.subscribe_default();
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -262,7 +266,9 @@ mod tests {
 	/// Writing a non-keyframe with no open group is a protocol violation.
 	#[test]
 	fn first_frame_must_be_keyframe() {
-		let track = moq_net::Track::new("test").produce();
+		let track = moq_net::Track::new("test")
+			.with_timescale(hang::container::TIMESCALE)
+			.produce();
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		let err = producer.write(frame(0, false)).unwrap_err();
@@ -281,7 +287,9 @@ mod tests {
 	/// `seek(n)` opens the next group at sequence `n`.
 	#[tokio::test]
 	async fn seek_uses_explicit_sequence() {
-		let track = moq_net::Track::new("test").produce();
+		let track = moq_net::Track::new("test")
+			.with_timescale(hang::container::TIMESCALE)
+			.produce();
 		let consumer = track.subscribe_default();
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -296,7 +304,9 @@ mod tests {
 	/// `seek` is consumed on the next group creation; subsequent groups auto-increment from there.
 	#[tokio::test]
 	async fn seek_clears_pending_after_use() {
-		let track = moq_net::Track::new("test").produce();
+		let track = moq_net::Track::new("test")
+			.with_timescale(hang::container::TIMESCALE)
+			.produce();
 		let consumer = track.subscribe_default();
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -334,7 +344,9 @@ mod tests {
 	/// group's last frame, without buffering an extra frame.
 	#[tokio::test]
 	async fn keyframe_backfills_last_frame_duration() {
-		let track = moq_net::Track::new("test").produce();
+		let track = moq_net::Track::new("test")
+			.with_timescale(hang::container::TIMESCALE)
+			.produce();
 		let recording = Recording::default();
 		let mut producer = Producer::new(track, recording.clone()).with_latency(std::time::Duration::from_secs(10));
 

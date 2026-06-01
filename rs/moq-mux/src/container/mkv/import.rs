@@ -285,7 +285,9 @@ impl Import {
 			}
 		};
 
-		let track = self.broadcast.unique_track(suffix)?;
+		let track = self.broadcast.create_track(
+			moq_net::Track::new(self.broadcast.unique_name(suffix)).with_timescale(hang::container::TIMESCALE),
+		)?;
 		let mut catalog = self.catalog.clone();
 		let mut catalog = catalog.lock();
 

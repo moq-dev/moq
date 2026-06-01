@@ -87,7 +87,9 @@ impl Import {
 			catalog.video.renditions.remove(&track.name);
 		}
 
-		let track = self.broadcast.unique_track(".hev1")?;
+		let track = self.broadcast.create_track(
+			moq_net::Track::new(self.broadcast.unique_name(".hev1")).with_timescale(hang::container::TIMESCALE),
+		)?;
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 

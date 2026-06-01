@@ -24,7 +24,9 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
-	let track = producer.unique_track(".avc3").unwrap();
+	let track = producer
+		.create_track(moq_net::Track::new(producer.unique_name(".avc3")).with_timescale(hang::container::TIMESCALE))
+		.unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x42,
 		constraints: 0xc0,

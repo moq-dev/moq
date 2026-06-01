@@ -20,7 +20,9 @@ impl Import {
 		mut catalog: crate::catalog::hang::Producer,
 		config: Config,
 	) -> crate::Result<Self> {
-		let track = broadcast.unique_track(".aac")?;
+		let track = broadcast.create_track(
+			moq_net::Track::new(broadcast.unique_name(".aac")).with_timescale(hang::container::TIMESCALE),
+		)?;
 
 		let mut audio_config = hang::catalog::AudioConfig::new(
 			hang::catalog::AAC {

@@ -275,7 +275,9 @@ mod tests {
 
 		// Producer side: publish the broadcast with one length-prefixed video track.
 		let mut broadcast = moq_net::Broadcast::new().produce();
-		let mut track = broadcast.create_track(moq_net::Track::new("video.m4s")).unwrap();
+		let mut track = broadcast
+			.create_track(moq_net::Track::new("video.m4s").with_timescale(hang::container::TIMESCALE))
+			.unwrap();
 
 		// Group 0 (keyframe-starting group): one IDR frame.
 		let mut g0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();

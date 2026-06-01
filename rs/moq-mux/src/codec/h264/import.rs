@@ -86,7 +86,9 @@ impl Import {
 				};
 			}
 			Mode::Avc3 => {
-				let track = self.broadcast.unique_track(".avc3")?;
+				let track = self.broadcast.create_track(
+					moq_net::Track::new(self.broadcast.unique_name(".avc3")).with_timescale(hang::container::TIMESCALE),
+				)?;
 				self.track = Some(crate::container::Producer::new(
 					track,
 					crate::catalog::hang::Container::Legacy,
@@ -167,7 +169,9 @@ impl Import {
 				pps: None,
 			};
 			if self.track.is_none() {
-				let track = self.broadcast.unique_track(".avc3")?;
+				let track = self.broadcast.create_track(
+					moq_net::Track::new(self.broadcast.unique_name(".avc3")).with_timescale(hang::container::TIMESCALE),
+				)?;
 				self.track = Some(crate::container::Producer::new(
 					track,
 					crate::catalog::hang::Container::Legacy,
@@ -426,7 +430,9 @@ impl Import {
 			tracing::debug!(name = ?track.name, "reinitializing H.264 track");
 			catalog.video.renditions.remove(&track.name);
 		}
-		let track = self.broadcast.unique_track(suffix)?;
+		let track = self.broadcast.create_track(
+			moq_net::Track::new(self.broadcast.unique_name(suffix)).with_timescale(hang::container::TIMESCALE),
+		)?;
 		tracing::debug!(name = ?track.name, ?config, "starting H.264 track");
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 

@@ -94,7 +94,9 @@ impl Import {
 			self.catalog.lock().video.renditions.remove(&track.name);
 		}
 
-		let track = self.broadcast.unique_track(".av01")?;
+		let track = self.broadcast.create_track(
+			moq_net::Track::new(self.broadcast.unique_name(".av01")).with_timescale(hang::container::TIMESCALE),
+		)?;
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 		self.catalog
 			.lock()
@@ -129,7 +131,9 @@ impl Import {
 		});
 		config.container = hang::catalog::Container::Legacy;
 
-		let track = self.broadcast.unique_track(".av01")?;
+		let track = self.broadcast.create_track(
+			moq_net::Track::new(self.broadcast.unique_name(".av01")).with_timescale(hang::container::TIMESCALE),
+		)?;
 		tracing::debug!(name = ?track.name, "starting track with minimal config");
 		self.catalog
 			.lock()
@@ -206,7 +210,9 @@ impl Import {
 			self.catalog.lock().video.renditions.remove(&track.name);
 		}
 
-		let track = self.broadcast.unique_track(".av01")?;
+		let track = self.broadcast.create_track(
+			moq_net::Track::new(self.broadcast.unique_name(".av01")).with_timescale(hang::container::TIMESCALE),
+		)?;
 		self.catalog
 			.lock()
 			.video

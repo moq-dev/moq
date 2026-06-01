@@ -149,7 +149,9 @@ impl Import {
 			let handler = &trak.mdia.hdlr.handler;
 			let suffix = ".m4s";
 
-			let track = self.broadcast.unique_track(suffix)?;
+			let track = self.broadcast.create_track(
+				moq_net::Track::new(self.broadcast.unique_name(suffix)).with_timescale(hang::container::TIMESCALE),
+			)?;
 
 			let kind = match handler.as_ref() {
 				b"vide" => {

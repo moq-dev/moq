@@ -14,7 +14,9 @@ pub struct Bridge {
 
 impl Bridge {
 	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::hang::Producer) -> Result<Self> {
-		let track = broadcast.unique_track(".vp8")?;
+		let track = broadcast.create_track(
+			moq_net::Track::new(broadcast.unique_name(".vp8")).with_timescale(hang::container::TIMESCALE),
+		)?;
 		let producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
 		Ok(Self {
 			catalog,

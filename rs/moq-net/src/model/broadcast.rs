@@ -178,15 +178,21 @@ impl BroadcastProducer {
 	/// Generates names like `0{suffix}`, `1{suffix}`, etc. and picks the first
 	/// one not already used in this broadcast.
 	pub fn unique_track(&mut self, suffix: &str) -> Result<TrackProducer, Error> {
-		let name = {
-			let state = self.state.read();
-			(0u32..)
-				.map(|i| format!("{i}{suffix}"))
-				.find(|name| !state.tracks.contains_key(name))
-				.expect("u32 namespace exhausted")
-		};
-
+		let name = self.unique_name(suffix);
 		self.create_track(Track::new(name))
+	}
+
+	/// Generate a unique track name from a suffix without creating the track.
+	///
+	/// Returns a fresh name like `0{suffix}`, `1{suffix}`, etc. Use this when
+	/// you need to set non-default Track properties (e.g. `with_timescale`,
+	/// `with_compress`) before handing the Track to [`Self::create_track`].
+	pub fn unique_name(&self, suffix: &str) -> String {
+		let state = self.state.read();
+		(0u32..)
+			.map(|i| format!("{i}{suffix}"))
+			.find(|name| !state.tracks.contains_key(name))
+			.expect("u32 namespace exhausted")
 	}
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
