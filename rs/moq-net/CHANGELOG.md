@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/moq-dev/moq/compare/moq-net-v0.1.7...moq-net-v0.1.8) - 2026-06-01
+
+### Other
+
+- count connected sessions per auth root for billing ([#1574](https://github.com/moq-dev/moq/pull/1574))
+- deterministic route tie-break for equal-length paths ([#1570](https://github.com/moq-dev/moq/pull/1570))
+- wire session stats into the IETF protocol path ([#1560](https://github.com/moq-dev/moq/pull/1560))
+- count viewers as distinct per-session subscriptions ([#1553](https://github.com/moq-dev/moq/pull/1553))
+
 ## [0.1.7](https://github.com/moq-dev/moq/compare/moq-net-v0.1.6...moq-net-v0.1.7) - 2026-05-30
 
 ### Other

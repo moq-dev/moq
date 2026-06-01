@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.5](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.4...moq-relay-v0.12.5) - 2026-06-01
+
+### Other
+
+- count connected sessions per auth root for billing ([#1574](https://github.com/moq-dev/moq/pull/1574))
+- simplify cluster-connect-api polling onto the HTTP cache ([#1572](https://github.com/moq-dev/moq/pull/1572))
+- add --cluster-connect-api and split cluster identity from gossip ([#1571](https://github.com/moq-dev/moq/pull/1571))
+- dedup mesh dials with a URL-order tiebreaker ([#1569](https://github.com/moq-dev/moq/pull/1569))
+
 ## [0.12.4](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.3...moq-relay-v0.12.4) - 2026-05-30
 
 ### Other
