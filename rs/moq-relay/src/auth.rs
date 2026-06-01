@@ -331,6 +331,9 @@ pub struct AuthConfig {
 	///   no public access.
 	/// - `key`: the verifying JWK (a JSON string) for the requested `kid`.
 	///   Absent -> key-not-found (the JWT is rejected).
+	/// - `internal`: when `true`, promote this connection to the internal billing
+	///   tier (e.g. a first-party dashboard token). mTLS peers are internal
+	///   regardless; absent/false leaves the connection on the external tier.
 	///
 	/// FAILS CLOSED: any network error, non-2xx status, or parse error rejects
 	/// the connection. Unlike the standalone flags, the verifying key itself
@@ -478,6 +481,11 @@ struct AuthApiResponse {
 	/// Verifying JWK (JSON string) for the requested kid; absent -> not found.
 	#[serde(default)]
 	key: Option<String>,
+	/// Promote this (non-mTLS) connection to the internal billing tier, e.g. a
+	/// first-party dashboard token. mTLS peers are always internal regardless;
+	/// absent/false leaves a JWT/public connection on the external tier.
+	#[serde(default)]
+	internal: bool,
 }
 
 /// Resolved public access configuration.
@@ -878,7 +886,11 @@ impl Auth {
 			}
 		};
 
-		Self::finalize(&root, claims)
+		let mut token = Self::finalize(&root, claims)?;
+		// The API may promote a non-mTLS connection to the internal tier (mTLS
+		// peers never reach this path; they're already internal).
+		token.internal = resp.internal;
+		Ok(token)
 	}
 
 	async fn fetch_public_response(client: &ClientWithMiddleware, url: &url::Url) -> Result<PublicResponse, AuthError> {
@@ -2821,6 +2833,27 @@ api = "https://api.example.com/access"
 		assert_eq!(verified.root, "x7k2qp".as_path());
 		assert_eq!(verified.subscribe, vec!["cam".as_path()]);
 		assert_eq!(verified.publish, vec![]);
+		assert!(!verified.internal);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_internal_flag_promotes_tier() -> anyhow::Result<()> {
+		// A non-mTLS connection can be marked internal by the API (e.g. a
+		// first-party dashboard token), defaulting to external otherwise.
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth/demo"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.set_body_string(r#"{"alias":"x7k2qp","public":{"subscribe":[""]},"internal":true}"#),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let verified = auth.verify(&AuthParams::new("/demo")).await?;
+		assert!(verified.internal);
 		Ok(())
 	}
 
