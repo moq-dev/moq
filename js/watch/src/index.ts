@@ -1,3 +1,4 @@
+export * as Hang from "@moq/hang";
 export * as Net from "@moq/net";
 /** @deprecated Use `Net` instead. */
 export * as Lite from "@moq/net";
@@ -10,6 +11,7 @@ export * as Location from "./location";
 export * as Mse from "./mse";
 export * from "./preview";
 export * from "./sync";
+export * as User from "./user";
 export * as Video from "./video";
 
 // NOTE: element is not exported from this module
