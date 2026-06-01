@@ -117,6 +117,118 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("server task failed");
 }
 
+/// Lite05 publisher↔subscriber round-trip exercising the per-frame timestamp
+/// delta encoding, including negative deltas (B-frame ordering).
+async fn lite05_timestamp_roundtrip(scheme: &str) {
+	use moq_native::moq_net::{Subscription, Timescale, Timestamp};
+
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+
+	// Track with an advertised microsecond timescale. Without it, Lite05 publish
+	// fails with ProtocolViolation.
+	let mut track = broadcast
+		.create_track(Track::new("video").with_timescale(Timescale::MICRO))
+		.expect("failed to create track");
+
+	// Three frames where the middle PTS goes backwards (B-frame decode order)
+	// so the zigzag encoding has to carry a negative delta.
+	let timestamps_us = [10_000u64, 30_000, 20_000];
+	let mut group = track.append_group().expect("failed to append group");
+	for &us in &timestamps_us {
+		let payload = format!("frame@{us}").into_bytes();
+		let frame = moq_native::moq_net::Frame {
+			size: payload.len() as u64,
+			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
+		};
+		let mut writer = group.create_frame(frame).expect("failed to create frame");
+		writer
+			.write(bytes::Bytes::from(payload))
+			.expect("failed to write frame");
+		writer.finish().expect("failed to finish frame");
+	}
+	group.finish().expect("failed to finish group");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-lite-05-wip".parse().unwrap()];
+	let mut server = server_config.init().expect("failed to init server");
+	let addr = server.local_addr().expect("failed to get local addr");
+
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.version = vec!["moq-lite-05-wip".parse().unwrap()];
+	let client = client_config.init().expect("failed to init client");
+	let url: url::Url = format!("{scheme}://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.with_publisher(pub_origin.clone()).ok().await?;
+		let _broadcast = broadcast;
+		let _track = track;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_consumer(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+	assert_eq!(path.as_str(), "test");
+	let bc = bc.broadcast().expect("expected announce, got unannounce");
+
+	let mut track_sub = bc
+		.subscribe_track("video", Subscription::default())
+		.ok()
+		.await
+		.expect("subscribe_track failed");
+
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+		.await
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
+		.expect("track closed prematurely");
+
+	for &expected_us in &timestamps_us {
+		let mut frame_sub = tokio::time::timeout(TIMEOUT, group_sub.next_frame())
+			.await
+			.expect("next_frame timed out")
+			.expect("next_frame failed")
+			.expect("group closed prematurely");
+
+		let ts = frame_sub
+			.timestamp
+			.expect("Lite05 must carry per-frame timestamps");
+		assert_eq!(ts.scale(), Timescale::MICRO);
+		assert_eq!(ts.value(), expected_us);
+
+		// Drain the payload so the stream advances to the next frame.
+		let _ = frame_sub.read_all().await;
+	}
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_lite_05_timestamps_webtransport() {
+	lite05_timestamp_roundtrip("https").await;
+}
+
 // ── Raw QUIC (moqt://) – same version on both sides ─────────────────
 
 #[tracing_test::traced_test]

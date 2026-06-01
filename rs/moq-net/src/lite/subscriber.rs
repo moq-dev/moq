@@ -10,7 +10,7 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use crate::{
 	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Compression, Error, Frame, FrameProducer, Group,
 	GroupProducer, MAX_FRAME_SIZE, OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack,
-	Track, TrackProducer, TrackRequest,
+	Timescale, Timestamp, Track, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -730,13 +730,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		//
 		// Map the closed `Ref` to `None` inside the poll closure (rather than using
 		// `Consumer::wait`) so the `!Send` guard never enters this spawned future.
-		let compression = kio::wait(|waiter| {
+		let (compression, timescale) = kio::wait(|waiter| {
 			let poll = subscribe_ok.poll(waiter, |ok| match &**ok {
-				Some(ok) => Poll::Ready(ok.compression),
+				Some(ok) => Poll::Ready((ok.compression, ok.timescale)),
 				None => Poll::Pending,
 			});
 			match poll {
-				Poll::Ready(Ok(compression)) => Poll::Ready(Some(compression)),
+				Poll::Ready(Ok(pair)) => Poll::Ready(Some(pair)),
 				Poll::Ready(Err(_closed)) => Poll::Ready(None),
 				Poll::Pending => Poll::Pending,
 			}
@@ -744,10 +744,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		.await
 		.ok_or(Error::Cancel)?;
 
+		// Lite05+ MUST advertise a timescale alongside Compression; if the peer
+		// negotiated a versioned wire format without one, treat it as malformed.
+		if self.version.has_timestamps() && timescale.is_none() {
+			let _ = group.abort(Error::ProtocolViolation);
+			return Err(Error::ProtocolViolation);
+		}
+
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = group.closed() => Err(err),
-			res = self.run_group(stream, group.clone(), track_stats.clone(), compression) => res,
+			res = self.run_group(stream, group.clone(), track_stats.clone(), compression, timescale) => res,
 		};
 
 		match res {
@@ -772,15 +779,41 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		mut group: GroupProducer,
 		track_stats: Arc<SubscriberTrack>,
 		compression: Compression,
+		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
-		while let Some(size) = stream.decode_maybe::<u64>().await? {
+		// Previous frame's raw timestamp value (in `timescale` units), for the
+		// zigzag-delta decode on Lite05+. The first frame's delta is its absolute
+		// value (prev_ts = 0 implicitly).
+		let mut prev_ts: u64 = 0;
+
+		loop {
+			let timestamp = if self.version.has_timestamps() {
+				// The subscriber gated on `timescale.is_some()` in `recv_group`
+				// before calling us, so unwrapping is safe here.
+				let scale = timescale.expect("has_timestamps implies negotiated timescale");
+				let Some(zz) = stream.decode_maybe::<crate::coding::VarInt>().await? else {
+					break;
+				};
+				let delta = zz.to_zigzag();
+				let next: u64 = (prev_ts as i128 + delta as i128)
+					.try_into()
+					.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+				prev_ts = next;
+				Some(Timestamp::new(next, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?)
+			} else {
+				None
+			};
+
+			let Some(size) = stream.decode_maybe::<u64>().await? else {
+				break;
+			};
 			if size > MAX_FRAME_SIZE {
 				return Err(Error::FrameTooLarge);
 			}
 
 			match compression {
 				Compression::None => {
-					let mut frame = group.create_frame(Frame { size, timestamp: None })?;
+					let mut frame = group.create_frame(Frame { size, timestamp })?;
 					track_stats.frame();
 
 					if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
@@ -798,7 +831,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					track_stats.bytes(size);
 
 					let payload = compression.decompress(&packed)?;
-					let mut frame = group.create_frame(Frame { size: payload.len() as u64, timestamp: None })?;
+					let mut frame = group.create_frame(Frame {
+						size: payload.len() as u64,
+						timestamp,
+					})?;
 					frame.write(bytes::Bytes::from(payload))?;
 					frame.finish()?;
 				}

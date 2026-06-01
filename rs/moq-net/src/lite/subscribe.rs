@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::{
-	Compression, Path,
+	Compression, Path, Timescale,
 	coding::{Decode, DecodeError, Encode, EncodeError, Sizer},
 };
 
@@ -84,6 +84,11 @@ pub struct SubscribeOk {
 	/// can decode any frame payload. Lite05+ only; older drafts always get
 	/// [`Compression::None`].
 	pub compression: Compression,
+	/// Per-frame timestamp scale advertised by the publisher. `None` means the
+	/// publisher doesn't carry per-frame timestamps on the wire (so frame
+	/// headers omit them). Lite05+ only; older drafts always decode as `None`.
+	/// On the wire `None` is `0` and `Some(n)` is `n`.
+	pub timescale: Option<Timescale>,
 }
 
 impl Message for SubscribeOk {
@@ -107,6 +112,7 @@ impl Message for SubscribeOk {
 				self.start_group.encode(w, version)?;
 				self.end_group.encode(w, version)?;
 				self.compression.to_code().encode(w, version)?;
+				self.timescale.map(u64::from).unwrap_or(0).encode(w, version)?;
 			}
 		}
 
@@ -122,6 +128,7 @@ impl Message for SubscribeOk {
 				start_group: None,
 				end_group: None,
 				compression: Compression::None,
+				timescale: None,
 			}),
 			Version::Lite02 => Ok(Self {
 				priority: 0,
@@ -130,6 +137,7 @@ impl Message for SubscribeOk {
 				start_group: None,
 				end_group: None,
 				compression: Compression::None,
+				timescale: None,
 			}),
 			Version::Lite03 | Version::Lite04 => {
 				let priority = u8::decode(r, version)?;
@@ -145,6 +153,7 @@ impl Message for SubscribeOk {
 					start_group,
 					end_group,
 					compression: Compression::None,
+					timescale: None,
 				})
 			}
 			_ => {
@@ -155,6 +164,7 @@ impl Message for SubscribeOk {
 				let end_group = Option::<u64>::decode(r, version)?;
 				let compression =
 					Compression::from_code(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
+				let timescale = Timescale::new(u64::decode(r, version)?).ok();
 
 				Ok(Self {
 					priority,
@@ -163,6 +173,7 @@ impl Message for SubscribeOk {
 					start_group,
 					end_group,
 					compression,
+					timescale,
 				})
 			}
 		}
@@ -375,6 +386,7 @@ mod test {
 			start_group: Some(3),
 			end_group: None,
 			compression: Compression::Deflate,
+			timescale: Some(Timescale::MICRO),
 		}
 	}
 
@@ -405,8 +417,30 @@ mod test {
 		ok.encode_msg(&mut buf04, Version::Lite04).unwrap();
 		let mut buf05 = Vec::new();
 		ok.encode_msg(&mut buf05, Version::Lite05Wip).unwrap();
-		assert!(buf05.len() > buf04.len(), "lite-05 carries an extra compression varint");
+		assert!(
+			buf05.len() > buf04.len(),
+			"lite-05 carries extra compression + timescale varints"
+		);
 
 		assert_eq!(roundtrip(Version::Lite04, &ok).compression, Compression::None);
+	}
+
+	#[test]
+	fn timescale_roundtrips_on_lite05() {
+		let got = roundtrip(Version::Lite05Wip, &sample());
+		assert_eq!(got.timescale, Some(Timescale::MICRO));
+	}
+
+	#[test]
+	fn timescale_absent_before_lite05() {
+		// Lite04 doesn't carry the timescale varint, so it always decodes as None.
+		assert_eq!(roundtrip(Version::Lite04, &sample()).timescale, None);
+	}
+
+	#[test]
+	fn timescale_zero_on_wire_decodes_as_none() {
+		let mut ok = sample();
+		ok.timescale = None;
+		assert_eq!(roundtrip(Version::Lite05Wip, &ok).timescale, None);
 	}
 }

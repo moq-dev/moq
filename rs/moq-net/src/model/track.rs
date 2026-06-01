@@ -12,7 +12,7 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use crate::{Error, Result, coding};
+use crate::{Error, Result, Timescale, coding};
 
 use super::{Group, GroupConsumer, GroupProducer};
 
@@ -43,6 +43,15 @@ pub struct Track {
 	/// peers (older drafts) ignore it and send frames verbatim.
 	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
 	pub compress: bool,
+	/// Units per second for per-frame timestamps on this track.
+	///
+	/// `None` means the publisher hasn't advertised a timescale; subscribers
+	/// receive frames with `timestamp: None`. On Lite05+ a `Some(_)` value is
+	/// echoed in SUBSCRIBE_OK and the publisher zigzag-delta encodes
+	/// per-frame timestamps at that scale on the wire; rejecting a frame at
+	/// the wrong scale prevents silent corruption.
+	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+	pub timescale: Option<Timescale>,
 }
 
 impl Track {
@@ -51,12 +60,21 @@ impl Track {
 		Self {
 			name: name.into(),
 			compress: false,
+			timescale: None,
 		}
 	}
 
 	/// Mark this track's frames as worth compressing, returning `self` for chaining.
 	pub fn with_compress(mut self, compress: bool) -> Self {
 		self.compress = compress;
+		self
+	}
+
+	/// Set the per-frame timestamp scale, returning `self` for chaining.
+	///
+	/// Required for Lite05+ peers to encode per-frame timestamps on the wire.
+	pub fn with_timescale(mut self, timescale: Timescale) -> Self {
+		self.timescale = Some(timescale);
 		self
 	}
 
