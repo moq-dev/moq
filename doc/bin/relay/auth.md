@@ -149,6 +149,25 @@ The client's connection URL path does **not** need to match the token's `root` e
 
 The connection is also rejected if the resulting permissions are empty (no publish or subscribe paths remain after scoping).
 
+### Alias Resolution
+
+The relay can rewrite the **first path segment** of an incoming connection from a vanity/id alias to a project's canonical id before auth and origin-scoping run. This lets a project stay reachable by both its stable id and its current (or recently-changed) vanity path, all mapping to the same broadcast tree.
+
+Configure it with `--auth-alias-api <url>` (env `MOQ_AUTH_ALIAS_API`, or `alias_api` under `[auth]` in TOML). On each connection the relay does `GET <base>/<first-segment>` over the same cached, mTLS-gated HTTP client used for `--auth-key-dir` and `--auth-public-api`:
+
+- `200 {"root":"<canonical-id>"}` rewrites the first segment to `<canonical-id>`. The API may echo back the value it was given (a harmless no-op when the client already used the canonical id).
+- `404` leaves the path unchanged (no mapping).
+
+For example, with the API mapping `demo` to `x7k2qp`, both `cdn.moq.dev/demo/foo` and `cdn.moq.dev/x7k2qp/foo` resolve to the same `/x7k2qp/foo` tree.
+
+```toml
+[auth]
+key = "my-key.jwk"
+alias_api = "https://api.moq.dev/cluster/alias"
+```
+
+Alias resolution **fails open**: on any network error, non-2xx-non-404 status, or unparseable response, the path is left unchanged and a warning is logged. The canonical id is the SDK default, so id-based connections keep working during an API outage; the endpoint's `Cache-Control` softens transient failures. (This is the opposite of the public-access API, which fails closed.) A root connection (`/`, e.g. a cluster peer) has no first segment and skips the API entirely.
+
 ## Supported Algorithms
 
 ### Symmetric (HMAC)

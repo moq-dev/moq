@@ -450,10 +450,13 @@ async fn serve_announced(
 		None => String::new(),
 	};
 
-	let params = AuthParams {
+	let mut params = AuthParams {
 		path: prefix,
 		jwt: query.jwt,
 	};
+	// Resolve a vanity/id alias in the first path segment to the canonical id,
+	// matching the QUIC/WebTransport path so all transports scope identically.
+	params.path = state.auth.resolve_path(&params.path).await;
 	let token = if mtls.is_some() {
 		AuthToken::unrestricted(moq_net::Path::new(&params.path).to_owned())
 	} else {
@@ -490,11 +493,13 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let broadcast = path.join("/");
-	let auth = AuthParams {
-		path: broadcast.clone(),
+	let mut auth = AuthParams {
+		path: path.join("/"),
 		jwt: params.auth.jwt,
 	};
+	// Resolve a vanity/id alias in the first path segment to the canonical id.
+	auth.path = state.auth.resolve_path(&auth.path).await;
+	let broadcast = auth.path.clone();
 	let token = if mtls.is_some() {
 		AuthToken::unrestricted(moq_net::Path::new(&auth.path).to_owned())
 	} else {

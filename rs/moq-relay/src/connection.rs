@@ -2,7 +2,7 @@ use crate::{Auth, AuthError, AuthParams, AuthToken, Cluster};
 
 use axum::http;
 use moq_native::Request;
-use moq_net::{Path, PathOwned};
+use moq_net::Path;
 
 /// An error carrying the HTTP status to send when closing the request.
 ///
@@ -112,21 +112,26 @@ impl Connection {
 	/// and full access is granted within the URL path's root. The cert's chain
 	/// to the configured CA is the only credential we require.
 	async fn authenticate(&self) -> Result<AuthToken, StatusError> {
-		if self.request.has_peer_certificate() {
-			tracing::debug!("mTLS peer authenticated");
-			// Scope the grant to the URL path, the same root a JWT would resolve
-			// to. Cluster peers dial "/" and so keep an empty (unscoped) root.
-			let root = match self.request.url() {
-				Some(url) => Path::new(&self.auth.params_from_url(url).path).to_owned(),
-				None => PathOwned::default(),
-			};
-			return Ok(AuthToken::unrestricted(root));
-		}
-
+		// Resolve the URL path once (subdomain slug routing + alias resolution)
+		// so both the mTLS and JWT branches scope to the same canonical root.
 		let params = match self.request.url() {
-			Some(url) => self.auth.params_from_url(url),
+			Some(url) => {
+				let mut params = self.auth.params_from_url(url);
+				params.path = self.auth.resolve_path(&params.path).await;
+				params
+			}
 			None => AuthParams::default(),
 		};
+
+		if self.request.has_peer_certificate() {
+			tracing::debug!("mTLS peer authenticated");
+			// Scope the grant to the resolved URL path, the same root a JWT
+			// would resolve to. An mTLS publisher dialing a vanity alias lands
+			// on the canonical tree. Cluster peers dial "/", which resolves to
+			// an empty (unscoped) root.
+			return Ok(AuthToken::unrestricted(Path::new(&params.path).to_owned()));
+		}
+
 		Ok(self.auth.verify(&params).await?)
 	}
 }

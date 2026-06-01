@@ -225,4 +225,36 @@ preferred_v6 = "[2001:db8::1]:443"
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.stats.enabled, Some(false));
 	}
+
+	/// Same clap+TOML clobber guard applied to `auth.alias_api`. It's typed as
+	/// `Option<String>` so an absent `--auth-alias-api` CLI flag must not wipe a
+	/// TOML-configured value during the `update_from` re-parse.
+	static ALIAS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	#[test]
+	fn cli_does_not_clobber_toml_alias_api() {
+		let _guard = ALIAS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: ALIAS_ENV_LOCK serializes this with any sibling test touching
+		// the same env var.
+		unsafe { std::env::remove_var("MOQ_AUTH_ALIAS_API") };
+
+		let toml = r#"
+[auth]
+public = "demo"
+alias_api = "https://api.moq.dev/cluster/alias"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("alias-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.auth.alias_api.as_deref(),
+			Some("https://api.moq.dev/cluster/alias"),
+			"TOML's auth.alias_api must not be clobbered by the CLI re-parse",
+		);
+	}
 }

@@ -98,6 +98,32 @@ fn match_domain(host: Option<&str>, domains: &[String]) -> Option<String> {
 	None
 }
 
+/// Rewrite the first path segment of `path` to `canonical`, preserving the rest
+/// of the path and the leading-`/` shape.
+///
+/// Pure (no HTTP) so the rewrite logic can be unit-tested directly. Callers
+/// guarantee `canonical` is non-empty and that `path` has a non-empty first
+/// segment; a root path (`/` or empty first segment) is returned unchanged as
+/// a defensive no-op.
+fn rewrite_first_segment(path: &str, canonical: &str) -> String {
+	let trimmed = path.strip_prefix('/').unwrap_or(path);
+	let (first, rest) = match trimmed.split_once('/') {
+		Some((first, rest)) => (first, rest),
+		None => (trimmed, ""),
+	};
+
+	// No first segment to rewrite (root connection): leave it alone.
+	if first.is_empty() {
+		return path.to_string();
+	}
+
+	if rest.is_empty() {
+		format!("/{canonical}")
+	} else {
+		format!("/{canonical}/{rest}")
+	}
+}
+
 /// Errors returned when authentication or authorization fails.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -306,6 +332,35 @@ pub struct AuthConfig {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "OneOrMany<_>")]
 	pub domains: Vec<String>,
+
+	/// Base URL of an alias-resolution API that maps a vanity/id alias to a
+	/// project's canonical id.
+	///
+	/// When set, the relay rewrites the FIRST path segment of every incoming
+	/// connection before auth and origin-scoping run. The first segment is
+	/// appended to this base (`GET <base>/<segment>`) over the same cached,
+	/// mTLS-gated HTTP client used for `--auth-key-dir` and `--auth-public-api`.
+	/// The API responds with `{"root":"<canonical-id>"}` (200) to rewrite the
+	/// segment, or `404` to leave the path unchanged. The returned value may
+	/// equal the segment the relay sent (a harmless no-op when the client
+	/// already used the canonical id).
+	///
+	/// This lets a project stay reachable by both its stable id and its
+	/// current/old vanity path, all mapping to the same broadcast tree: e.g.
+	/// `cdn.moq.dev/demo/foo` and `cdn.moq.dev/x7k2qp/foo` resolve to the
+	/// same `/x7k2qp/foo`.
+	///
+	/// Resolution FAILS OPEN: on any network error, non-2xx-non-404 status,
+	/// JSON parse error, or URL-join error the path is left unchanged and a
+	/// warning is logged. The canonical id is the SDK default, so id-based
+	/// connections must keep working during an API outage; the response cache
+	/// (`Cache-Control` from the endpoint) softens transient failures. This is
+	/// deliberately the opposite of the public-API path, which fails closed.
+	///
+	/// Example: `https://api.moq.dev/cluster/alias`.
+	#[arg(long = "auth-alias-api", env = "MOQ_AUTH_ALIAS_API")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub alias_api: Option<String>,
 }
 
 /// Public access configuration.
@@ -418,6 +473,12 @@ impl Serialize for PublicConfig {
 			PublicConfig::Detailed(d) => d.serialize(serializer),
 		}
 	}
+}
+
+/// Response from the alias-resolution API: the project's canonical id.
+#[derive(Debug, Deserialize)]
+struct AliasResponse {
+	root: String,
 }
 
 /// Response from a public access API endpoint.
@@ -582,6 +643,10 @@ pub struct Auth {
 	public: PublicAccess,
 	/// Domain suffixes for subdomain-based slug routing. See [`AuthConfig::domains`].
 	domains: Arc<[String]>,
+	/// Optional alias-resolution API: the first path segment is appended to the
+	/// base URL to resolve a vanity/id alias to a canonical id. See
+	/// [`AuthConfig::alias_api`].
+	alias: Option<(url::Url, ClientWithMiddleware)>,
 }
 
 impl Auth {
@@ -691,10 +756,24 @@ impl Auth {
 		}
 		domains.sort_by_key(|d| std::cmp::Reverse(d.len()));
 
+		// Mirror the public-API base-URL handling: ensure a trailing slash so
+		// `Url::join` appends the first path segment rather than replacing the
+		// last URL segment.
+		let alias = if let Some(url_str) = config.alias_api {
+			let mut url = Url::parse(&url_str).context("invalid --auth-alias-api URL")?;
+			if !url.path().ends_with('/') {
+				url.set_path(&format!("{}/", url.path()));
+			}
+			Some((url, Self::build_client(&tls)?))
+		} else {
+			None
+		};
+
 		Ok(Self {
 			resolver,
 			public,
 			domains: Arc::from(domains.into_boxed_slice()),
+			alias,
 		})
 	}
 
@@ -702,6 +781,63 @@ impl Auth {
 	/// configured subdomain-based slug routing.
 	pub(crate) fn params_from_url(&self, url: &url::Url) -> AuthParams {
 		AuthParams::from_url(url, &self.domains)
+	}
+
+	/// Resolve the first path segment of a connection path from a vanity/id
+	/// alias to the project's canonical id, via the configured alias API.
+	///
+	/// Returns `path` unchanged when no alias API is configured (the default),
+	/// when `path` has no first segment (a root `/` connection), when the API
+	/// returns 404 (no mapping), or on ANY error (fail-open; see
+	/// [`AuthConfig::alias_api`]). A successful 200 rewrites only the first
+	/// segment, preserving the rest of the path and the leading-`/` shape that
+	/// [`AuthParams::from_url`] produces.
+	pub(crate) async fn resolve_path(&self, path: &str) -> String {
+		let Some((base, client)) = &self.alias else {
+			return path.to_string();
+		};
+
+		// Trim a single leading '/', then split off the first segment.
+		let trimmed = path.strip_prefix('/').unwrap_or(path);
+		let (first, _rest) = match trimmed.split_once('/') {
+			Some((first, rest)) => (first, rest),
+			None => (trimmed, ""),
+		};
+
+		// Root connection ("/" or ""): nothing to resolve.
+		if first.is_empty() {
+			return path.to_string();
+		}
+
+		let url = match base.join(first) {
+			Ok(url) => url,
+			Err(err) => {
+				tracing::warn!(%err, %first, "alias resolution URL join failed; leaving path unchanged");
+				return path.to_string();
+			}
+		};
+
+		match Self::fetch_alias(client, &url).await {
+			Ok(Some(canonical)) if !canonical.is_empty() => rewrite_first_segment(path, &canonical),
+			Ok(_) => path.to_string(),
+			Err(err) => {
+				tracing::warn!(%err, %first, "alias resolution failed; leaving path unchanged (fail-open)");
+				path.to_string()
+			}
+		}
+	}
+
+	/// Fetch a single alias mapping. `Ok(None)` means 404 (no mapping);
+	/// `Ok(Some(root))` is a 200 with the canonical id; `Err` is any other
+	/// failure (network, non-2xx-non-404 status, or JSON parse).
+	async fn fetch_alias(client: &ClientWithMiddleware, url: &url::Url) -> Result<Option<String>, AuthError> {
+		let response = client.get(url.clone()).send().await?;
+		if response.status() == http::StatusCode::NOT_FOUND {
+			return Ok(None);
+		}
+		let body = response.error_for_status()?.text().await?;
+		let parsed: AliasResponse = serde_json::from_str(&body).map_err(|_| AuthError::DecodeFailed)?;
+		Ok(Some(parsed.root))
 	}
 
 	async fn fetch_public_response(client: &ClientWithMiddleware, url: &url::Url) -> Result<PublicResponse, AuthError> {
@@ -2528,5 +2664,160 @@ api = "https://api.example.com/access"
 		let token = AuthToken::unrestricted(Path::new("/").to_owned());
 		assert_eq!(token.root, "".as_path());
 		assert!(token.internal);
+	}
+
+	// ---------------------------------------------------------------------
+	// Alias resolution
+	// ---------------------------------------------------------------------
+
+	#[test]
+	fn rewrite_first_segment_simple() {
+		assert_eq!(rewrite_first_segment("/demo", "x7k2qp"), "/x7k2qp");
+	}
+
+	#[test]
+	fn rewrite_first_segment_with_rest() {
+		assert_eq!(rewrite_first_segment("/demo/room/cam", "x7k2qp"), "/x7k2qp/room/cam");
+	}
+
+	#[test]
+	fn rewrite_first_segment_no_leading_slash() {
+		// serve_fetch passes paths without a leading slash; the output still
+		// gets the canonical leading-slash shape (harmless; Path normalizes it).
+		assert_eq!(rewrite_first_segment("demo/room", "x7k2qp"), "/x7k2qp/room");
+	}
+
+	#[test]
+	fn rewrite_first_segment_trailing_slash() {
+		// A single-segment path with a trailing slash has an empty `rest`, so the
+		// trailing slash is dropped. Harmless: Path normalizes trailing slashes
+		// anyway, and both `/x7k2qp` and `/x7k2qp/` scope to the same root.
+		assert_eq!(rewrite_first_segment("/demo/", "x7k2qp"), "/x7k2qp");
+	}
+
+	#[test]
+	fn rewrite_first_segment_id_to_id_noop_shape() {
+		// The API may echo the same value when the client already used the id.
+		assert_eq!(rewrite_first_segment("/x7k2qp/room", "x7k2qp"), "/x7k2qp/room");
+	}
+
+	#[test]
+	fn rewrite_first_segment_root_unchanged() {
+		// Empty first segment (root connection) is a defensive no-op.
+		assert_eq!(rewrite_first_segment("/", "x7k2qp"), "/");
+		assert_eq!(rewrite_first_segment("", "x7k2qp"), "");
+	}
+
+	#[tokio::test]
+	async fn resolve_path_no_alias_api_is_noop() -> anyhow::Result<()> {
+		// Without --auth-alias-api, resolve_path returns the input verbatim. This
+		// is the default for the vast majority of deployments and is what keeps
+		// the existing `verify` tests (which never configure an alias) valid.
+		let auth = Auth::new(AuthConfig {
+			public: simple_public("demo"),
+			..Default::default()
+		})
+		.await?;
+
+		assert_eq!(auth.resolve_path("/demo/room").await, "/demo/room");
+		assert_eq!(auth.resolve_path("/").await, "/");
+		assert_eq!(auth.resolve_path("").await, "");
+		Ok(())
+	}
+
+	/// Build an Auth wired to a wiremock server's `/alias/` URL alias API.
+	async fn auth_with_alias_api(server: &MockServer) -> Auth {
+		Auth::new(AuthConfig {
+			public: simple_public(""),
+			alias_api: Some(format!("{}/alias/", server.uri())),
+			..Default::default()
+		})
+		.await
+		.unwrap()
+	}
+
+	#[tokio::test]
+	async fn resolve_path_rewrites_via_http() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/alias/demo"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"root":"x7k2qp"}"#))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_alias_api(&server).await;
+		assert_eq!(auth.resolve_path("/demo/room").await, "/x7k2qp/room");
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn resolve_path_404_unchanged() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(404))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_alias_api(&server).await;
+		assert_eq!(auth.resolve_path("/unknown/room").await, "/unknown/room");
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn resolve_path_server_error_fails_open() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(500))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_alias_api(&server).await;
+		// Fail-open: a 5xx must NOT take down id-based connections.
+		assert_eq!(auth.resolve_path("/demo/room").await, "/demo/room");
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn resolve_path_invalid_json_fails_open() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_alias_api(&server).await;
+		assert_eq!(auth.resolve_path("/demo/room").await, "/demo/room");
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn resolve_path_root_segment_skips_api() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		// expect(0): a root connection ("/") has no first segment, so the API
+		// must never be hit (cluster peers dial "/").
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(500))
+			.expect(0)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_alias_api(&server).await;
+		assert_eq!(auth.resolve_path("/").await, "/");
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn resolve_path_empty_root_response_unchanged() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/alias/demo"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"root":""}"#))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_alias_api(&server).await;
+		// An empty `root` is treated as no mapping.
+		assert_eq!(auth.resolve_path("/demo/room").await, "/demo/room");
+		Ok(())
 	}
 }
