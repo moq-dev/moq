@@ -200,8 +200,8 @@ fn tungstenite_to_axum(
 mod tests {
 	use super::*;
 	use axum::{Router, extract::WebSocketUpgrade, routing::any};
-	use std::sync::Mutex;
-	use tokio::sync::oneshot;
+	use std::time::Duration;
+	use tokio::sync::mpsc;
 	// Brings `qmux::Session::protocol` and `::closed` into scope.
 	use web_transport_trait::Session as _;
 
@@ -265,57 +265,83 @@ mod tests {
 		}
 	}
 
-	/// End-to-end regression: connect a qmux client offering the full moq
-	/// ALPN list to an axum router that mirrors `serve_ws`'s subprotocol
-	/// wiring. Both client and server must observe the newest moq ALPN
-	/// (`moq_net::ALPNS[0]`) on the resulting qmux session. A bug in
-	/// `supported_subprotocols` or in the `Bare::with_alpn` plumbing
-	/// collapses this to `None` / bare `webtransport`, and moq-net then
-	/// downgrades to Lite02 via SETUP.
-	#[tokio::test]
-	async fn axum_ws_negotiates_newest_moq_alpn() {
-		let (server_alpn_tx, server_alpn_rx) = oneshot::channel::<Option<String>>();
-		let server_alpn_tx = Arc::new(Mutex::new(Some(server_alpn_tx)));
+	/// What a single accepted WebSocket connection negotiated, as seen by the server.
+	#[derive(Debug)]
+	struct Observed {
+		/// Raw `Sec-WebSocket-Protocol` axum selected (keeps the `qmux-XX.` prefix).
+		wire: Option<String>,
+		/// The moq app ALPN qmux derived from it (prefix stripped, `None` for bare).
+		app: Option<String>,
+	}
 
-		let route = {
-			let server_alpn_tx = server_alpn_tx.clone();
-			any(move |ws: WebSocketUpgrade| {
-				let server_alpn_tx = server_alpn_tx.clone();
-				async move {
-					let ws = ws.protocols(supported_subprotocols());
-					ws.on_upgrade(move |socket| async move {
-						let alpn = socket.protocol().and_then(|h| h.to_str().ok()).map(str::to_owned);
-						let socket = socket
-							.map(axum_to_tungstenite)
-							.sink_map_err(|_| tungstenite::Error::ConnectionClosed)
-							.with(tungstenite_to_axum);
+	/// Spawn an axum server that mirrors `serve_ws`'s subprotocol wiring.
+	///
+	/// Returns its address and a receiver yielding one [`Observed`] per accepted
+	/// connection, in acceptance order.
+	async fn spawn_test_server() -> (std::net::SocketAddr, mpsc::UnboundedReceiver<Observed>) {
+		let (tx, rx) = mpsc::unbounded_channel::<Observed>();
 
-						let upgraded = qmux::ws::Upgraded::new(socket);
-						let upgraded = match alpn.as_deref() {
-							Some(alpn) => upgraded.with_alpn(alpn),
-							None => upgraded,
-						};
-						let session = upgraded.accept();
-						if let Some(tx) = server_alpn_tx.lock().unwrap().take() {
-							let _ = tx.send(session.protocol().map(str::to_owned));
-						}
-						// Hold the session open so the client side stays alive
-						// long enough to observe the negotiated subprotocol.
-						let _ = session.closed().await;
-					})
-				}
-			})
-		};
+		let route = any(move |ws: WebSocketUpgrade| {
+			let tx = tx.clone();
+			async move {
+				let ws = ws.protocols(supported_subprotocols());
+				ws.on_upgrade(move |socket| async move {
+					let wire = socket.protocol().and_then(|h| h.to_str().ok()).map(str::to_owned);
+					let socket = socket
+						.map(axum_to_tungstenite)
+						.sink_map_err(|_| tungstenite::Error::ConnectionClosed)
+						.with(tungstenite_to_axum);
+
+					let upgraded = qmux::ws::Upgraded::new(socket);
+					let upgraded = match wire.as_deref() {
+						Some(alpn) => upgraded.with_alpn(alpn),
+						None => upgraded,
+					};
+					let session = upgraded.accept();
+					let _ = tx.send(Observed {
+						wire,
+						app: session.protocol().map(str::to_owned),
+					});
+					// Hold the session open so the client stays alive long enough
+					// to observe the negotiated subprotocol.
+					let _ = session.closed().await;
+				})
+			}
+		});
 
 		let app = Router::new().route("/", route);
-
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
 			.await
 			.expect("bind listener");
 		let addr = listener.local_addr().expect("local addr");
-		let server = tokio::spawn(async move {
+		tokio::spawn(async move {
 			axum::serve(listener, app).await.expect("axum serve");
 		});
+		(addr, rx)
+	}
+
+	async fn next_observed(rx: &mut mpsc::UnboundedReceiver<Observed>) -> Observed {
+		tokio::time::timeout(Duration::from_secs(5), rx.recv())
+			.await
+			.expect("server did not report a connection")
+			.expect("server channel closed")
+	}
+
+	/// Split an advertised `{qmux-XX.}{moq-alpn}` pair into its parts, or `None`
+	/// for a bare fallback (`qmux-01`, `qmux-00`, `webtransport`).
+	fn split_pair(entry: &str) -> Option<(qmux::Version, &str)> {
+		QMUX_VERSIONS
+			.iter()
+			.find_map(|&v| entry.strip_prefix(v.prefix()).map(|app| (v, app)))
+	}
+
+	/// End-to-end regression: a qmux client offering the full moq ALPN list must
+	/// land on the newest moq ALPN (`moq_net::ALPNS[0]`) on both sides. A bug in
+	/// `supported_subprotocols` or the `with_alpn` plumbing collapses this to
+	/// `None` / bare `webtransport`, and moq-net then downgrades to Lite02.
+	#[tokio::test]
+	async fn axum_ws_negotiates_newest_moq_alpn() {
+		let (addr, mut rx) = spawn_test_server().await;
 
 		let session = qmux::Client::new()
 			.with_protocols(moq_net::ALPNS.iter().map(|&a| (a, &[] as &[qmux::Version])))
@@ -330,17 +356,59 @@ mod tests {
 			session.protocol(),
 		);
 
-		let server_alpn = tokio::time::timeout(std::time::Duration::from_secs(5), server_alpn_rx)
-			.await
-			.expect("server alpn channel timed out")
-			.expect("server alpn channel dropped");
+		let observed = next_observed(&mut rx).await;
 		assert_eq!(
-			server_alpn.as_deref(),
+			observed.app.as_deref(),
 			Some(newest_moq_alpn()),
-			"server side should see the newest moq ALPN after Bare::with_alpn",
+			"server side should see the newest moq ALPN after with_alpn",
 		);
 
 		drop(session);
-		server.abort();
+	}
+
+	/// Every versioned `(qmux, moq)` pair we advertise must be acceptable: a
+	/// client offering exactly that pair negotiates it end-to-end. Conversely,
+	/// the excluded `qmux-00.moqt-18` pair must never be selected, even when a
+	/// client explicitly offers it.
+	#[tokio::test]
+	async fn every_advertised_pair_is_acceptable() {
+		let (addr, mut rx) = spawn_test_server().await;
+		let url = format!("ws://{addr}/");
+
+		for entry in supported_subprotocols() {
+			// Bare fallbacks can't be offered in isolation via the qmux client API;
+			// they're covered by `axum_ws_negotiates_newest_moq_alpn`.
+			let Some((version, app)) = split_pair(&entry) else {
+				continue;
+			};
+
+			let session = qmux::Client::new()
+				.with_protocol(app, &[version])
+				.connect(&url)
+				.await
+				.unwrap_or_else(|e| panic!("server rejected advertised pair {entry}: {e}"));
+
+			let observed = next_observed(&mut rx).await;
+			assert_eq!(
+				observed.wire.as_deref(),
+				Some(entry.as_str()),
+				"offered advertised pair {entry}, but server negotiated {:?}",
+				observed.wire,
+			);
+			drop(session);
+		}
+
+		// The illegal pair is advertised by nobody. A client offering only
+		// `qmux-00.moqt-18` finds no match, and qmux surfaces the empty
+		// subprotocol selection as a failed handshake rather than a silent
+		// downgrade to a different version.
+		let result = qmux::Client::new()
+			.with_protocol("moqt-18", &[qmux::Version::QMux00])
+			.connect(&url)
+			.await;
+		assert!(
+			result.is_err(),
+			"server must reject the illegal qmux-00.moqt-18 pair, but the handshake succeeded",
+		);
 	}
 }
