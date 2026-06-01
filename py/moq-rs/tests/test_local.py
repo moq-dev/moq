@@ -110,7 +110,7 @@ async def test_local_publish_consume_audio():
         assert audio.sample_rate == 48000
         assert audio.channel_count == 2
 
-        media_consumer = announcement.broadcast.subscribe_media(track_name, audio.container, 10_000)
+        media_consumer = announcement.broadcast.subscribe_media(track_name, audio, 10_000)
 
         payload = b"opus audio payload data"
         media.write_frame(payload, 1_000_000)
@@ -144,7 +144,7 @@ async def test_video_publish_consume():
         assert video.coded.width == 1280
         assert video.coded.height == 720
 
-        media_consumer = announcement.broadcast.subscribe_media(track_name, video.container, 10_000)
+        media_consumer = announcement.broadcast.subscribe_media(track_name, video, 10_000)
 
         keyframe = bytes([0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC])
         media.write_frame(keyframe, 0)
@@ -169,7 +169,7 @@ async def test_multiple_frames_ordering():
         catalog = await announcement.broadcast.catalog()
         track_name = list(catalog.audio.keys())[0]
         audio = catalog.audio[track_name]
-        media_consumer = announcement.broadcast.subscribe_media(track_name, audio.container, 10_000)
+        media_consumer = announcement.broadcast.subscribe_media(track_name, audio, 10_000)
 
         timestamps = [0, 20_000, 40_000, 60_000, 80_000]
         for i, ts in enumerate(timestamps):
@@ -321,6 +321,43 @@ def test_raw_parallel_groups():
     g0.write_frame(b"a1")
     g0.finish()
     g1.finish()
+
+
+def test_public_api_exports():
+    """The ergonomic surface is reachable from the top-level package, so users
+    never have to import the private `moq._uniffi` module."""
+    assert issubclass(moq.Error, Exception)
+    # Flat-error variants are accessible as attributes for selective catching.
+    assert hasattr(moq.Error, "AlreadyResponded")
+    assert hasattr(moq.Error, "Cancelled")
+    assert callable(moq.log_level)
+    assert isinstance(moq.connect("https://example.com"), moq.Client)
+
+
+async def test_subscribe_media_default_latency_and_context_manager():
+    """subscribe_media takes the catalog record directly and defaults the
+    latency; the returned consumer is also an async context manager."""
+    origin = moq.OriginProducer()
+    broadcast = moq.BroadcastProducer()
+    media = broadcast.publish_media("opus", opus_head())
+    origin.publish("live", broadcast)
+
+    consumer = origin.consume()
+
+    async for announcement in consumer.announced():
+        catalog = await announcement.broadcast.catalog()
+        track_name, audio = next(iter(catalog.audio.items()))
+
+        # No container argument, no explicit latency.
+        payload = b"opus audio payload data"
+        media.write_frame(payload, 1_000_000)
+
+        async with announcement.broadcast.subscribe_media(track_name, audio) as media_consumer:
+            async for frame in media_consumer:
+                assert frame.payload == payload
+                break
+
+        break
 
 
 async def test_raw_publish_consume():

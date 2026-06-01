@@ -463,11 +463,11 @@ async fn serve_announced(
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
-	let mut announced = origin.announced();
+	let mut announced = origin.consume().announced();
 	let mut broadcasts = Vec::new();
 
-	while let Some((suffix, active)) = announced.try_next() {
-		if active.is_some() {
+	while let Some((suffix, event)) = announced.try_next() {
+		if event.broadcast().is_some() {
 			broadcasts.push(suffix);
 		}
 	}
@@ -514,7 +514,11 @@ async fn serve_fetch(
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until the broadcast has been announced (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before gossip arrives.
-		let broadcast = origin.announced_broadcast("").await.ok_or(StatusCode::NOT_FOUND)?;
+		let broadcast = origin
+			.consume()
+			.announced_broadcast("")
+			.await
+			.ok_or(StatusCode::NOT_FOUND)?;
 		let mut track = broadcast
 			.subscribe_track(&track, moq_net::Subscription::default())
 			.await

@@ -155,7 +155,7 @@ impl State {
 		&self,
 		index: usize,
 		next_sequence: u64,
-		waiter: &conducer::Waiter,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<(bytes::Bytes, usize, u64)>>> {
 		let start = index.saturating_sub(self.offset);
 		let mut pending_seen = false;
@@ -376,7 +376,7 @@ fn max_end_group(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 /// A producer for a track, used to create new groups.
 pub struct TrackProducer {
 	info: Track,
-	state: conducer::Producer<State>,
+	state: kio::Producer<State>,
 }
 
 impl std::ops::Deref for TrackProducer {
@@ -392,7 +392,7 @@ impl TrackProducer {
 	pub fn new(info: Track) -> Self {
 		Self {
 			info,
-			state: conducer::Producer::default(),
+			state: kio::Producer::default(),
 		}
 	}
 
@@ -575,7 +575,7 @@ impl TrackProducer {
 		}
 	}
 
-	fn modify(&self) -> Result<conducer::Mut<'_, State>> {
+	fn modify(&self) -> Result<kio::Mut<'_, State>> {
 		self.state
 			.write()
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
@@ -601,7 +601,7 @@ impl From<Track> for TrackProducer {
 #[derive(Clone)]
 pub(crate) struct TrackWeak {
 	pub(crate) info: Track,
-	state: conducer::Weak<State>,
+	state: kio::Weak<State>,
 }
 
 impl TrackWeak {
@@ -643,7 +643,7 @@ impl TrackWeak {
 #[derive(Clone)]
 pub struct TrackConsumer {
 	info: Track,
-	state: conducer::Consumer<State>,
+	state: kio::Consumer<State>,
 	/// This subscriber's preferences, shared with the producer's aggregate.
 	/// Cloning a consumer shares the same preferences (one subscription, fanned out).
 	subscription: Arc<Mutex<Subscription>>,
@@ -671,9 +671,9 @@ impl std::ops::Deref for TrackConsumer {
 
 impl TrackConsumer {
 	// A helper to automatically apply Dropped if the state is closed without an error.
-	fn poll<F, R>(&self, waiter: &conducer::Waiter, f: F) -> Poll<Result<R>>
+	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
-		F: Fn(&conducer::Ref<'_, State>) -> Poll<Result<R>>,
+		F: Fn(&kio::Ref<'_, State>) -> Poll<Result<R>>,
 	{
 		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
 			Ok(res) => res,
@@ -692,7 +692,7 @@ impl TrackConsumer {
 	/// `Poll::Ready(Ok(None))` when the track is finished,
 	/// `Poll::Ready(Err(e))` when the track has been aborted, or
 	/// `Poll::Pending` when no group is available yet.
-	pub fn poll_recv_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
 		let Some((consumer, found_index)) =
 			ready!(self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence))?)
 		else {
@@ -709,7 +709,7 @@ impl TrackConsumer {
 	/// be out of sequence due to network reordering or loss. Use [`Self::next_group`] if you
 	/// only want groups whose sequence number is higher than any previously returned.
 	pub async fn recv_group(&mut self) -> Result<Option<GroupConsumer>> {
-		conducer::wait(|waiter| self.poll_recv_group(waiter)).await
+		kio::wait(|waiter| self.poll_recv_group(waiter)).await
 	}
 
 	/// Poll for the next group with a higher sequence number than any previously returned.
@@ -720,7 +720,7 @@ impl TrackConsumer {
 	///
 	/// Honors the cap set by [`Self::end_at`]: groups with sequence past the cap are left
 	/// in the producer's cache and become eligible again if the cap is raised or removed.
-	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
 		let floor = self.next_sequence.max(self.min_sequence);
 		let Some(group) = ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, self.end_sequence))?) else {
 			return Poll::Ready(Ok(None));
@@ -735,13 +735,13 @@ impl TrackConsumer {
 	/// produces a monotonically increasing sequence at the cost of dropping out-of-order
 	/// groups. Use [`Self::recv_group`] to see every group in arrival order instead.
 	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
-		conducer::wait(|waiter| self.poll_next_group(waiter)).await
+		kio::wait(|waiter| self.poll_next_group(waiter)).await
 	}
 
 	/// A helper that calls [`Self::poll_next_group`] and returns its first frame,
 	/// skipping the rest of the group. Intended for single-frame groups (see
 	/// [`TrackProducer::write_frame`]).
-	pub fn poll_read_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<bytes::Bytes>>> {
+	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<bytes::Bytes>>> {
 		let lower = self.min_sequence.max(self.next_sequence);
 		let Some((frame, found_index, sequence)) =
 			ready!(self.poll(waiter, |state| { state.poll_read_frame(self.index, lower, waiter) })?)
@@ -758,11 +758,11 @@ impl TrackConsumer {
 	///
 	/// See [`Self::poll_read_frame`] for semantics.
 	pub async fn read_frame(&mut self) -> Result<Option<bytes::Bytes>> {
-		conducer::wait(|waiter| self.poll_read_frame(waiter)).await
+		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
 
 	/// Poll for the group with the given sequence, without blocking.
-	pub fn poll_get_group(&self, waiter: &conducer::Waiter, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
+	pub fn poll_get_group(&self, waiter: &kio::Waiter, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
 		self.poll(waiter, |state| state.poll_get_group(sequence))
 	}
 
@@ -774,11 +774,11 @@ impl TrackConsumer {
 	/// group can never be produced. Sequences below `final_sequence` still
 	/// wait, since older groups may still arrive out of order.
 	pub async fn get_group(&self, sequence: u64) -> Result<Option<GroupConsumer>> {
-		conducer::wait(|waiter| self.poll_get_group(waiter, sequence)).await
+		kio::wait(|waiter| self.poll_get_group(waiter, sequence)).await
 	}
 
 	/// Poll for track closure, without blocking.
-	pub fn poll_closed(&self, waiter: &conducer::Waiter) -> Poll<Result<()>> {
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		self.poll(waiter, |state| state.poll_closed())
 	}
 
@@ -786,7 +786,7 @@ impl TrackConsumer {
 	///
 	/// Returns Ok() is the track was cleanly finished.
 	pub async fn closed(&self) -> Result<()> {
-		conducer::wait(|waiter| self.poll_closed(waiter)).await
+		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
 	/// Whether `other` was cloned from this consumer (shares the same underlying state).
@@ -795,13 +795,13 @@ impl TrackConsumer {
 	}
 
 	/// Poll for the total number of groups in the track.
-	pub fn poll_finished(&mut self, waiter: &conducer::Waiter) -> Poll<Result<u64>> {
+	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
 		self.poll(waiter, |state| state.poll_finished())
 	}
 
 	/// Block until the track is finished, returning the total number of groups.
 	pub async fn finished(&mut self) -> Result<u64> {
-		conducer::wait(|waiter| self.poll_finished(waiter)).await
+		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
 
 	/// Start the consumer at the specified sequence.

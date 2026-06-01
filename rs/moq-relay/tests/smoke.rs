@@ -126,7 +126,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 	let pub_session = tokio::time::timeout(
 		TIMEOUT,
-		client().with_publish(pub_origin.consume()).connect(url.clone()),
+		client().with_publisher(pub_origin.clone()).connect(url.clone()),
 	)
 	.await
 	.expect("publisher connect timeout")
@@ -141,7 +141,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
 
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_consume(sub_origin).connect(url))
+	let sub_session = tokio::time::timeout(TIMEOUT, client().with_consumer(sub_origin).connect(url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
@@ -158,7 +158,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 		.expect("origin closed");
 	// Auth root for `/smoke` is "smoke"; the broadcast "test" announces underneath.
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
 	let mut track_sub = bc
 		.subscribe_track("video", moq_native::moq_net::Subscription::default())

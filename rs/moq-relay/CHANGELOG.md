@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.1...moq-relay-v0.12.3) - 2026-05-30
+
+### Fixed
+
+- *(changelog)* repair malformed CHANGELOGs blocking release-plz ([#1511](https://github.com/moq-dev/moq/pull/1511))
+
+### Other
+
+- retain entries by liveness instead of a tick retention window ([#1548](https://github.com/moq-dev/moq/pull/1548))
+- *(stats)* take a StatsConfig value type in Stats::new ([#1537](https://github.com/moq-dev/moq/pull/1537))
+- scope mTLS grants to the connection URL path ([#1535](https://github.com/moq-dev/moq/pull/1535))
+- *(stats)* aggregate per-node into a single gzipped broadcast ([#1517](https://github.com/moq-dev/moq/pull/1517))
+- stop downgrading WebSocket clients to moq-lite-02 ([#1523](https://github.com/moq-dev/moq/pull/1523))
+- restore gossip-style cluster discovery via --cluster-mesh ([#1504](https://github.com/moq-dev/moq/pull/1504))
+- advertise QUIC preferred_address in the server config ([#1512](https://github.com/moq-dev/moq/pull/1512))
+- release ([#1493](https://github.com/moq-dev/moq/pull/1493))
+
 ## [0.12.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.0...moq-relay-v0.12.1) - 2026-05-25
 
 ### Other

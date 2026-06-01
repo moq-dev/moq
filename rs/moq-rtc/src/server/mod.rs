@@ -1,0 +1,86 @@
+//! HTTP-server side: accept WHIP/WHEP offers from remote clients.
+//!
+//! Mounts axum routers that publish into [`moq_net::OriginProducer`] (WHIP
+//! / `server publish`) and pull from [`moq_net::OriginConsumer`] (WHEP /
+//! `server subscribe`). The HTTP listener itself is the caller's
+//! responsibility; the binary in `bin/moq-rtc.rs` mounts these under
+//! axum_server.
+
+pub mod whep;
+pub mod whip;
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::Router;
+
+/// Configuration shared by both `server publish` and `server subscribe`.
+#[derive(Clone, Debug, Default)]
+pub struct Config {
+	/// Public UDP socket addresses that should be advertised as ICE host
+	/// candidates. Each is sent as a separate `candidate` line in the SDP
+	/// answer so a remote peer can reach us.
+	///
+	/// If empty, the session loop binds an ephemeral port and uses whatever
+	/// address the OS picks. That works for loopback testing but not behind
+	/// NAT.
+	pub ice_candidates: Vec<SocketAddr>,
+}
+
+/// Glue that owns the moq-net origin pair and hands axum routers to the caller.
+///
+/// `publisher` is where `server publish` (WHIP) writes ingested broadcasts;
+/// `subscriber` is what `server subscribe` (WHEP) reads from. They're
+/// typically the two halves of the same upstream [`moq_net::Session`].
+#[derive(Clone)]
+pub struct Server {
+	inner: Arc<Inner>,
+}
+
+struct Inner {
+	config: Config,
+	publisher: moq_net::OriginProducer,
+	// Held for `server subscribe`, which is gated until the per-codec
+	// re-packetizers land.
+	#[allow(dead_code)]
+	subscriber: moq_net::OriginConsumer,
+}
+
+impl Server {
+	/// Build a server. `publisher` receives WHIP broadcasts; `subscriber`
+	/// is the source for WHEP egress.
+	pub fn new(config: Config, publisher: moq_net::OriginProducer, subscriber: moq_net::OriginConsumer) -> Self {
+		Self {
+			inner: Arc::new(Inner {
+				config,
+				publisher,
+				subscriber,
+			}),
+		}
+	}
+
+	/// Router for `server publish` (WHIP). Mount under whichever HTTP path
+	/// the deployment prefers (`/whip`, `/`, ...).
+	pub fn publish_router(&self) -> Router {
+		whip::router(self.clone())
+	}
+
+	/// Router for `server subscribe` (WHEP). Currently returns 501 until
+	/// the egress re-packetizer lands.
+	pub fn subscribe_router(&self) -> Router {
+		whep::router(self.clone())
+	}
+
+	pub(crate) fn config(&self) -> &Config {
+		&self.inner.config
+	}
+
+	pub(crate) fn publisher(&self) -> &moq_net::OriginProducer {
+		&self.inner.publisher
+	}
+
+	#[allow(dead_code)]
+	pub(crate) fn subscriber(&self) -> &moq_net::OriginConsumer {
+		&self.inner.subscriber
+	}
+}

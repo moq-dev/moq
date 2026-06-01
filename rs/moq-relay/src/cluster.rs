@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::Context;
-use moq_net::{BroadcastProducer, Origin, OriginConsumer, OriginProducer, Path, Stats, Tier};
+use moq_net::{BroadcastProducer, Origin, OriginProducer, Path, Stats, Tier};
 use tokio::task::AbortHandle;
 use url::Url;
 
@@ -20,7 +20,7 @@ const MESH_PREFIX: &str = ".internal/origins";
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long a peer must stay unannounced before we abort the dial. Must clear the
-/// "prefer shorter hop" reannounce flap (which arrives as unannounce-then-announce
+/// "prefer shorter hop" restart flap (which arrives as unannounce-then-announce
 /// within sub-milliseconds) plus reasonable churn from a peer restart.
 const STALE_AFTER: Duration = Duration::from_secs(60);
 
@@ -76,7 +76,7 @@ impl DialMap {
 	}
 
 	/// Clear any pending-unannounce on `peer`. Returns `true` if a timestamp was
-	/// actually cleared (useful for callers that want to log the reannounce).
+	/// actually cleared (useful for callers that want to log the restart).
 	fn mark_announced(&self, peer: &str) -> bool {
 		let mut map = self.inner.lock().expect("dial map poisoned");
 		map.get_mut(peer)
@@ -171,7 +171,7 @@ pub struct Cluster {
 	/// Stats aggregator. One instance per relay; sessions pick a tier via
 	/// [`Stats::tier`] at acceptance time so external (non-mTLS) and internal
 	/// (mTLS / cluster peer) traffic land in separate counter sets. Defaults
-	/// to [`Stats::disabled`] (a no-op aggregator) until [`with_stats`](Self::with_stats)
+	/// to a no-op aggregator ([`Stats::default`]) until [`with_stats`](Self::with_stats)
 	/// is called.
 	pub stats: Stats,
 }
@@ -189,7 +189,7 @@ impl Cluster {
 			config,
 			client: None,
 			origin,
-			stats: Stats::disabled(),
+			stats: Stats::default(),
 		}
 	}
 
@@ -212,9 +212,12 @@ impl Cluster {
 		self
 	}
 
-	/// Returns an [`OriginConsumer`] scoped to this session's subscribe permissions.
-	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginConsumer> {
-		Some(self.origin.with_root(&token.root)?.scope(&token.subscribe)?.consume())
+	/// Returns an [`OriginProducer`] scoped to this session's subscribe permissions.
+	///
+	/// Pass straight to [`moq_net::Server::with_publisher`] (or the
+	/// equivalent per-request setter). moq-net derives the read handle.
+	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginProducer> {
+		self.origin.with_root(&token.root)?.scope(&token.subscribe)
 	}
 
 	/// Returns an [`OriginProducer`] scoped to this session's publish permissions.
@@ -340,7 +343,7 @@ impl Cluster {
 	/// announced URL. Unannounces don't abort immediately — they just mark the
 	/// entry as "pending cleanup" with a timestamp. A periodic sweep evicts
 	/// entries whose unannounce has stuck for [`STALE_AFTER`]. The "prefer
-	/// shorter hop" path in OriginProducer delivers reannouncements as
+	/// shorter hop" path in OriginProducer delivers restartments as
 	/// unannounce-then-announce within sub-milliseconds, which clears the
 	/// pending-cleanup timestamp long before the sweep fires.
 	async fn run_discovery(self, self_url: String, token: String, dialed: DialMap) {
@@ -358,17 +361,17 @@ impl Cluster {
 		loop {
 			tokio::select! {
 				ann = announced.next() => {
-					let Some((relative, announced)) = ann else { return; };
+					let Some((relative, event)) = ann else { return; };
 					let peer = relative.as_str();
 					if peer == self_url {
 						continue;
 					}
 					let peer = peer.to_owned();
-					match announced {
+					match event.broadcast() {
 						Some(_) => {
 							if dialed.contains(&peer) {
 								if dialed.mark_announced(&peer) {
-									tracing::debug!(%peer, "reannounce within sweep window; keeping dial");
+									tracing::debug!(%peer, "restart within sweep window; keeping dial");
 								}
 								continue;
 							}
@@ -444,15 +447,15 @@ impl Cluster {
 			.context("internal: cluster peer dial without an attached QUIC client")?;
 
 		// Cluster-to-cluster traffic is internal by definition.
-		let session = client
-			.with_publish(self.origin.consume())
-			.with_consume(self.origin.clone())
+		let cs = client
+			.with_publisher(self.origin.clone())
+			.with_consumer(self.origin.clone())
 			.with_stats(self.stats.tier(Tier::Internal))
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;
 
-		session.closed().await.map_err(Into::into)
+		cs.closed().await.map_err(Into::into)
 	}
 }
 
@@ -522,7 +525,7 @@ mod tests {
 		assert!(dialed.contains("healthy:4443"));
 	}
 
-	/// A reannounce after an unannounce clears the pending-sweep timestamp, so
+	/// A restart after an unannounce clears the pending-sweep timestamp, so
 	/// the entry survives even if the original unannounce was old enough to
 	/// otherwise trigger eviction.
 	#[tokio::test]
@@ -634,9 +637,9 @@ mod tests {
 		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
 		// The self-registration broadcast must be visible on the origin.
-		let (path, broadcast) = watcher.try_next().expect("self-registration must be published");
+		let (path, event) = watcher.try_next().expect("self-registration must be published");
 		assert_eq!(path.as_str(), ".internal/origins/rendezvous.example.com:4443");
-		assert!(broadcast.is_some());
+		assert!(event.broadcast().is_some());
 
 		// run() must NOT have returned: dropping the broadcast (via run returning)
 		// would unannounce the registration immediately. Use a short timeout to

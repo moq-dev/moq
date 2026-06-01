@@ -45,7 +45,7 @@ impl ContainerTrait for Container {
 	fn poll_read(
 		&self,
 		group: &mut moq_net::GroupConsumer,
-		waiter: &conducer::Waiter,
+		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		match self {
 			Self::Legacy => legacy::Wire.poll_read(group, waiter),

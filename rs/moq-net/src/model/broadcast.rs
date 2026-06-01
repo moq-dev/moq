@@ -69,7 +69,7 @@ struct State {
 	abort: Option<Error>,
 }
 
-fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>, Error> {
+fn modify(state: &kio::Producer<State>) -> Result<kio::Mut<'_, State>, Error> {
 	match state.write() {
 		Ok(state) => Ok(state),
 		Err(r) => Err(r.abort.clone().unwrap_or(Error::Dropped)),
@@ -114,7 +114,7 @@ impl State {
 #[derive(Clone)]
 pub struct BroadcastProducer {
 	info: Broadcast,
-	state: conducer::Producer<State>,
+	state: kio::Producer<State>,
 }
 
 impl Deref for BroadcastProducer {
@@ -234,7 +234,7 @@ impl BroadcastProducer {
 pub struct TrackRequest {
 	name: String,
 	subscription: Subscription,
-	state: conducer::Weak<State>,
+	state: kio::Weak<State>,
 	/// Set once accepted or denied so [`Drop`] doesn't deny a second time.
 	completed: bool,
 }
@@ -337,7 +337,7 @@ impl Drop for TrackRequest {
 /// are automatically aborted.
 pub struct BroadcastDynamic {
 	info: Broadcast,
-	state: conducer::Producer<State>,
+	state: kio::Producer<State>,
 }
 
 impl Clone for BroadcastDynamic {
@@ -366,7 +366,7 @@ impl Deref for BroadcastDynamic {
 }
 
 impl BroadcastDynamic {
-	fn new(info: Broadcast, state: conducer::Producer<State>) -> Self {
+	fn new(info: Broadcast, state: kio::Producer<State>) -> Self {
 		if let Ok(mut state) = state.write() {
 			// If the broadcast is already closed, we can't handle any new requests.
 			state.dynamic += 1;
@@ -376,9 +376,9 @@ impl BroadcastDynamic {
 	}
 
 	// A helper to automatically apply Dropped if the state is closed without an error.
-	fn poll<F, R>(&self, waiter: &conducer::Waiter, f: F) -> Poll<Result<R, Error>>
+	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R, Error>>
 	where
-		F: FnMut(&mut conducer::Mut<'_, State>) -> Poll<R>,
+		F: FnMut(&mut kio::Mut<'_, State>) -> Poll<R>,
 	{
 		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
 			Ok(r) => Ok(r),
@@ -387,7 +387,7 @@ impl BroadcastDynamic {
 	}
 
 	/// Poll for the next consumer-requested track, without blocking.
-	pub fn poll_requested_track(&mut self, waiter: &conducer::Waiter) -> Poll<Result<TrackRequest, Error>> {
+	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<TrackRequest, Error>> {
 		let weak = self.state.weak();
 		self.poll(waiter, |state| {
 			let Some(name) = state.request_order.pop_front() else {
@@ -411,7 +411,7 @@ impl BroadcastDynamic {
 
 	/// Block until a consumer requests a track, returning a [`TrackRequest`] to serve.
 	pub async fn requested_track(&mut self) -> Result<TrackRequest, Error> {
-		conducer::wait(|waiter| self.poll_requested_track(waiter)).await
+		kio::wait(|waiter| self.poll_requested_track(waiter)).await
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
@@ -487,7 +487,7 @@ impl BroadcastDynamic {
 #[derive(Clone)]
 pub struct BroadcastConsumer {
 	info: Broadcast,
-	state: conducer::Consumer<State>,
+	state: kio::Consumer<State>,
 }
 
 impl Deref for BroadcastConsumer {
@@ -571,12 +571,12 @@ impl BroadcastConsumer {
 		self.state.read().is_closed()
 	}
 
-	/// Register a [`conducer::Waiter`] that fires when the broadcast closes.
+	/// Register a [`kio::Waiter`] that fires when the broadcast closes.
 	///
 	/// Returns [`Poll::Ready`] if already closed, otherwise [`Poll::Pending`] after
 	/// arming the waiter. Useful for composing close-detection into a larger poll
 	/// without spawning a task per broadcast.
-	pub fn poll_closed(&self, waiter: &conducer::Waiter) -> Poll<()> {
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state.poll_closed(waiter)
 	}
 

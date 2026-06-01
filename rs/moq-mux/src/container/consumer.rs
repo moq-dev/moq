@@ -19,9 +19,15 @@ use super::{Container, Frame};
 /// a group in arrival order, but across groups it advances by sequence number, skipping
 /// stalled or missing groups when the difference between the oldest pending timestamp
 /// and the newest available timestamp exceeds the configured latency. With the default
-/// latency of zero, the consumer skips aggressively — any group that has a newer
+/// latency of zero, the consumer skips aggressively. Any group that has a newer
 /// alternative is dropped. With a non-zero latency, slow groups are tolerated up to that
 /// budget before being skipped.
+///
+/// A stalled group is also skipped early, regardless of the latency budget, once it has
+/// presented up to where the next group begins. CMAF frames carry a per-sample duration,
+/// so a group whose most recent frame ends (timestamp + duration) at or past the next
+/// group's first timestamp has nothing left worth waiting for. Containers without a
+/// duration report zero, which disables this check and falls back to the latency budget.
 ///
 /// Set the latency with [`with_latency`](Self::with_latency) (builder) or
 /// [`set_latency`](Self::set_latency) (mid-stream).
@@ -74,14 +80,14 @@ impl<F: Container> Consumer<F> {
 	///
 	/// Returns `None` when the track has ended.
 	pub async fn read(&mut self) -> Result<Option<Frame>, F::Error> {
-		conducer::wait(|waiter| self.poll_read(waiter)).await
+		kio::wait(|waiter| self.poll_read(waiter)).await
 	}
 
 	/// Poll-based implementation of the read loop.
 	///
-	/// Uses a single waiter that gets registered on all relevant conducer channels,
+	/// Uses a single waiter that gets registered on all relevant kio channels,
 	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
-	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
+	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter)?.is_ready();
 
@@ -124,27 +130,28 @@ impl<F: Container> Consumer<F> {
 				self.current += 1
 			}
 
-			// Get the current group's min timestamp as the reference for latency comparison.
-			let oldest_timestamp = if let Some(current) = self.pending.front_mut()
+			// Get the current group's min timestamp (the reference for latency
+			// comparison) and its furthest presentation point (timestamp + duration).
+			let (oldest_timestamp, current_end) = if let Some(current) = self.pending.front_mut()
 				&& current.sequence <= self.current
 			{
 				match current.poll_min_timestamp(waiter, &self.format) {
-					Poll::Ready(Ok(ts)) => Some(std::time::Duration::from(ts)),
-					_ => None,
+					Poll::Ready(Ok(ts)) => (Some(std::time::Duration::from(ts)), current.max_end),
+					_ => (None, None),
 				}
 			} else {
-				None
+				(None, None)
 			};
 
-			// Find the first newer group with data (our skip target).
-			let mut min_idx = None;
+			// Find the first newer group with data (our skip target) and where it starts.
+			let mut next_group = None;
 			for (i, group) in self.pending.iter_mut().enumerate() {
 				if group.sequence <= self.current {
 					continue;
 				}
 
-				if let Poll::Ready(Ok(_)) = group.poll_min_timestamp(waiter, &self.format) {
-					min_idx = Some(i);
+				if let Poll::Ready(Ok(ts)) = group.poll_min_timestamp(waiter, &self.format) {
+					next_group = Some((i, std::time::Duration::from(ts)));
 					break;
 				}
 			}
@@ -162,10 +169,15 @@ impl<F: Container> Consumer<F> {
 				}
 			}
 
-			let should_skip = if min_idx.is_some() {
+			let should_skip = if let Some((_, next_start)) = next_group {
 				if let Some(oldest) = oldest_timestamp {
-					// Current group is blocking: skip if newer groups exceed latency threshold
-					max_timestamp.saturating_sub(oldest) >= self.latency
+					// Current group is blocking. Skip if newer groups have pulled past
+					// the latency budget, or if the current group has already presented
+					// up to where the next group begins (duration coverage) so there's
+					// nothing left worth waiting for.
+					let over_latency = max_timestamp.saturating_sub(oldest) >= self.latency;
+					let covered = current_end.is_some_and(|end| end >= next_start);
+					over_latency || covered
 				} else {
 					// Sequence gap: current group consumed but next sequence missing.
 					// Only skip if track is fully received (no more groups coming).
@@ -175,7 +187,7 @@ impl<F: Container> Consumer<F> {
 				false
 			};
 
-			if let Some(new_idx) = min_idx
+			if let Some((new_idx, _)) = next_group
 				&& should_skip
 			{
 				self.pending.drain(0..new_idx);
@@ -198,7 +210,7 @@ impl<F: Container> Consumer<F> {
 	// Reads any new groups from the track until we're completely finished.
 	//
 	// Returns Pending until all groups have been consumed.
-	fn poll_read_finish(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), F::Error>> {
+	fn poll_read_finish(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), F::Error>> {
 		loop {
 			let Some(group) = ready!(self.track.poll_recv_group(waiter)?) else {
 				// Track is finished.
@@ -251,6 +263,11 @@ struct GroupBuffer {
 
 	// The maximum timestamp in the group.
 	max_timestamp: Option<Timestamp>,
+
+	// The furthest presentation point reached so far, i.e. max(timestamp + duration).
+	// Equals the max timestamp when the container carries no per-frame duration.
+	// Stored as a wall-clock duration so cross-scale comparisons are cheap.
+	max_end: Option<std::time::Duration>,
 }
 
 impl GroupBuffer {
@@ -261,15 +278,12 @@ impl GroupBuffer {
 			buffered: VecDeque::new(),
 			max_timestamp: None,
 			min_timestamp: None,
+			max_end: None,
 		}
 	}
 
 	/// Poll for the next frame from this group.
-	fn poll_read<F: Container>(
-		&mut self,
-		waiter: &conducer::Waiter,
-		format: &F,
-	) -> Poll<Result<Option<Frame>, F::Error>> {
+	fn poll_read<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Option<Frame>, F::Error>> {
 		if let Some(frame) = self.buffered.pop_front() {
 			return Poll::Ready(Ok(Some(frame)));
 		}
@@ -283,12 +297,12 @@ impl GroupBuffer {
 	// Add one more frame to the buffer if possible.
 	//
 	// Returns false if the group is finished.
-	fn buffer_once<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
+	fn buffer_once<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
 		let Some(frames) = ready!(format.poll_read(&mut self.group, waiter)?) else {
 			return Poll::Ready(Ok(false));
 		};
 
-		for frame in frames {
+		for mut frame in frames {
 			self.min_timestamp = Some(match self.min_timestamp {
 				Some(existing) => existing.min(frame.timestamp),
 				None => frame.timestamp,
@@ -299,22 +313,28 @@ impl GroupBuffer {
 				None => frame.timestamp,
 			});
 
+			// Furthest presentation point, in wall-clock terms so timestamp and
+			// duration can be at different scales without extra conversions. A frame
+			// with no duration contributes only its timestamp.
+			let duration = frame.duration.map(std::time::Duration::from).unwrap_or_default();
+			let end = std::time::Duration::from(frame.timestamp) + duration;
+			self.max_end = Some(match self.max_end {
+				Some(existing) => existing.max(end),
+				None => end,
+			});
+
 			// First frame of a group is always a keyframe by protocol invariant; trust
 			// the container's flag otherwise so CMAF mid-group keyframes survive.
-			let keyframe = frame.keyframe || self.index == 0;
+			frame.keyframe = frame.keyframe || self.index == 0;
 			self.index += 1;
 
-			self.buffered.push_back(Frame {
-				timestamp: frame.timestamp,
-				payload: frame.payload,
-				keyframe,
-			});
+			self.buffered.push_back(frame);
 		}
 
 		Poll::Ready(Ok(true))
 	}
 
-	fn buffer_one<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
+	fn buffer_one<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
 		loop {
 			if !self.buffered.is_empty() {
 				return Poll::Ready(Ok(true));
@@ -326,7 +346,7 @@ impl GroupBuffer {
 		}
 	}
 
-	fn buffer_all<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<(), F::Error>> {
+	fn buffer_all<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<(), F::Error>> {
 		while ready!(self.buffer_once(waiter, format)?) {}
 		Poll::Ready(Ok(()))
 	}
@@ -334,7 +354,7 @@ impl GroupBuffer {
 	/// Poll for the maximum timestamp in this group.
 	fn poll_max_timestamp<F: Container>(
 		&mut self,
-		waiter: &conducer::Waiter,
+		waiter: &kio::Waiter,
 		format: &F,
 	) -> Poll<Result<Timestamp, F::Error>> {
 		// Keep reading more frames just to advance the max timestamp.
@@ -353,7 +373,7 @@ impl GroupBuffer {
 
 	fn poll_min_timestamp<F: Container>(
 		&mut self,
-		waiter: &conducer::Waiter,
+		waiter: &kio::Waiter,
 		format: &F,
 	) -> Poll<Result<Timestamp, F::Error>> {
 		let _ = self.buffer_one(waiter, format)?;
@@ -396,6 +416,61 @@ mod tests {
 		track.consume()
 	}
 
+	/// Test-only container that round-trips a per-sample duration on the wire, so the
+	/// duration-based skip can be exercised without building a real CMAF init segment.
+	/// Each frame is `[timestamp_us: u64 LE][duration_us: u64 LE][payload]`.
+	struct DurationWire;
+
+	/// Encode a `[timestamp][duration][payload]` DurationWire frame.
+	fn encode_duration_frame(timestamp: Timestamp, duration: Timestamp) -> Vec<u8> {
+		let mut buf = Vec::with_capacity(18);
+		buf.extend_from_slice(&(timestamp.as_micros() as u64).to_le_bytes());
+		buf.extend_from_slice(&(duration.as_micros() as u64).to_le_bytes());
+		buf.extend_from_slice(&[0xDE, 0xAD]);
+		buf
+	}
+
+	impl ContainerTrait for DurationWire {
+		type Error = crate::Error;
+
+		fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+			// The duration tests write frames directly via `write_duration_frame`;
+			// this path just preserves the timestamp with an unknown duration.
+			for frame in frames {
+				group.write_frame(encode_duration_frame(frame.timestamp, ts(0)))?;
+			}
+			Ok(())
+		}
+
+		fn poll_read(
+			&self,
+			group: &mut moq_net::GroupConsumer,
+			waiter: &kio::Waiter,
+		) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+			use bytes::Buf;
+
+			let Some(mut data) = ready!(group.poll_read_frame(waiter)?) else {
+				return Poll::Ready(Ok(None));
+			};
+
+			let timestamp = ts(data.get_u64_le());
+			let duration = ts(data.get_u64_le());
+			let payload = data.copy_to_bytes(data.remaining());
+
+			Poll::Ready(Ok(Some(vec![Frame {
+				timestamp,
+				payload,
+				keyframe: false,
+				duration: Some(duration),
+			}])))
+		}
+	}
+
+	/// Write one DurationWire frame (timestamp and duration in µs) into a group.
+	fn write_duration_frame(group: &mut moq_net::GroupProducer, timestamp: Timestamp, duration: Timestamp) {
+		group.write_frame(encode_duration_frame(timestamp, duration)).unwrap();
+	}
+
 	/// Write a finished group with explicit sequence and timestamps (Container::Legacy format).
 	fn write_group(track: &mut moq_net::TrackProducer, sequence: u64, timestamps: &[Timestamp]) {
 		let mut group = track.create_group(moq_net::Group { sequence }).unwrap();
@@ -404,6 +479,7 @@ mod tests {
 				timestamp,
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
 				keyframe: false,
+				duration: None,
 			};
 			Container::Legacy.write(&mut group, &[frame]).unwrap();
 		}
@@ -500,6 +576,7 @@ mod tests {
 						timestamp: ts(f * 2_000),
 						payload: Bytes::from_static(&[0xDE, 0xAD]),
 						keyframe: false,
+						duration: None,
 					}],
 				)
 				.unwrap();
@@ -539,6 +616,7 @@ mod tests {
 					timestamp: ts(400_000),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
+					duration: None,
 				}],
 			)
 			.unwrap();
@@ -575,6 +653,7 @@ mod tests {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
+					duration: None,
 				}],
 			)
 			.unwrap();
@@ -617,6 +696,7 @@ mod tests {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
+					duration: None,
 				}],
 			)
 			.unwrap();
@@ -810,6 +890,7 @@ mod tests {
 					payload: Bytes::from(payload_bytes.clone()),
 
 					keyframe: false,
+					duration: None,
 				}],
 			)
 			.unwrap();
@@ -845,6 +926,7 @@ mod tests {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
+					duration: None,
 				}],
 			)
 			.unwrap();
@@ -927,6 +1009,7 @@ mod tests {
 						timestamp,
 						payload: Bytes::from_static(&[0xDE, 0xAD]),
 						keyframe: false,
+						duration: None,
 					}],
 				)
 				.unwrap();
@@ -978,6 +1061,7 @@ mod tests {
 					timestamp: ts(300_000),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
+					duration: None,
 				}],
 			)
 			.unwrap();
@@ -991,6 +1075,7 @@ mod tests {
 						timestamp: ts(400_000),
 						payload: Bytes::from_static(&[0xBE, 0xEF]),
 						keyframe: false,
+						duration: None,
 					}],
 				)
 				.unwrap();
@@ -1064,6 +1149,7 @@ mod tests {
 					payload: Bytes::from_static(&[0xAA]),
 
 					keyframe: false,
+					duration: None,
 				}],
 			)
 			.unwrap();
@@ -1099,6 +1185,7 @@ mod tests {
 					payload: Bytes::from_static(&[0xAA]),
 
 					keyframe: false,
+					duration: None,
 				}],
 			)
 			.unwrap();
@@ -1136,6 +1223,7 @@ mod tests {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
+					duration: None,
 				}],
 			)
 			.unwrap();
@@ -1253,6 +1341,7 @@ mod tests {
 				timestamp: ts(i * 33_333),
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
 				keyframe: false,
+				duration: None,
 			};
 			Container::Legacy.write(&mut group, &[frame]).unwrap();
 		}
@@ -1271,5 +1360,93 @@ mod tests {
 		assert!(!frames[1].keyframe);
 		assert_eq!(frames[2].timestamp, ts(66_666));
 		assert!(!frames[2].keyframe);
+	}
+
+	// ---- Duration Skipping ----
+
+	/// A stalled group whose frame covers up to the next group's start is skipped
+	/// immediately, even with a latency budget far larger than the gap. Without
+	/// duration support the consumer would block on the unfinished group forever.
+	#[tokio::test]
+	async fn duration_skip_advances_to_next_group() {
+		tokio::time::pause();
+		let mut track = moq_net::Track::new("test").produce();
+		let consumer_track = track.consume();
+		// Latency dwarfs the gap, so only duration coverage can trigger the skip.
+		let mut consumer = Consumer::new(consumer_track, DurationWire).with_latency(Duration::from_secs(10));
+
+		// Group 0: one frame at ts=0 lasting 33ms, never finished.
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
+		write_duration_frame(&mut group0, ts(0), ts(33_000));
+
+		// Group 1: finished, starts exactly where group 0's frame ends.
+		let mut group1 = track.create_group(moq_net::Group { sequence: 1 }).unwrap();
+		write_duration_frame(&mut group1, ts(33_000), ts(33_000));
+		group1.finish().unwrap();
+
+		track.finish().unwrap();
+
+		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+			let mut frames = Vec::new();
+			while let Some(frame) = consumer.read().await.unwrap() {
+				frames.push(frame);
+			}
+			frames
+		})
+		.await
+		.expect("consumer hung — duration skip regression");
+
+		assert_eq!(frames.len(), 2);
+		assert_eq!(frames[0].timestamp, ts(0));
+		assert_eq!(frames[1].timestamp, ts(33_000));
+
+		// group0 is intentionally never finished.
+		drop(group0);
+	}
+
+	/// When the current group's frame ends before the next group begins, there is
+	/// still a gap to cover, so we don't skip early: a late-arriving frame on the
+	/// slow group is delivered rather than dropped.
+	#[tokio::test]
+	async fn duration_below_gap_does_not_skip() {
+		tokio::time::pause();
+		let mut track = moq_net::Track::new("test").produce();
+		let consumer_track = track.consume();
+		let mut consumer = Consumer::new(consumer_track, DurationWire).with_latency(Duration::from_secs(10));
+
+		// Group 0: frame at ts=0 lasting only 10ms, far short of group 1 at 33ms.
+		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
+		write_duration_frame(&mut group0, ts(0), ts(10_000));
+
+		// Group 1: finished at 33ms.
+		let mut group1 = track.create_group(moq_net::Group { sequence: 1 }).unwrap();
+		write_duration_frame(&mut group1, ts(33_000), ts(33_000));
+		group1.finish().unwrap();
+		track.finish().unwrap();
+
+		// A second frame lands on group 0 and finishes it after the consumer has
+		// had a chance to (incorrectly) skip.
+		let finisher = tokio::spawn(async move {
+			tokio::time::sleep(Duration::from_millis(20)).await;
+			write_duration_frame(&mut group0, ts(20_000), ts(10_000));
+			group0.finish().unwrap();
+		});
+
+		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+			let mut frames = Vec::new();
+			while let Some(frame) = consumer.read().await.unwrap() {
+				frames.push(frame);
+			}
+			frames
+		})
+		.await
+		.expect("consumer hung");
+
+		// The slow group's late frame survives because nothing covered the gap.
+		assert_eq!(frames.len(), 3);
+		assert_eq!(frames[0].timestamp, ts(0));
+		assert_eq!(frames[1].timestamp, ts(20_000));
+		assert_eq!(frames[2].timestamp, ts(33_000));
+		finisher.await.unwrap();
 	}
 }

@@ -71,7 +71,7 @@ pub async fn handle_viewers(
 
 		let viewer_id = path.to_string();
 
-		if let Some(broadcast) = broadcast {
+		if let Some(broadcast) = broadcast.broadcast() {
 			tracing::info!(%viewer_id, "viewer connected");
 			let cmd_tx = cmd_tx.clone();
 			let vid = viewer_id.clone();

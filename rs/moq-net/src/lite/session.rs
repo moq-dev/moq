@@ -10,10 +10,10 @@ pub fn start<S: web_transport_trait::Session>(
 	// NOTE: No longer used in draft-03.
 	setup: Option<Stream<S, Version>>,
 	// We will publish any local broadcasts from this origin.
-	publish: Option<OriginConsumer>,
+	publish: OriginConsumer,
 	// We will consume any remote broadcasts, inserting them into this origin.
-	subscribe: Option<OriginProducer>,
-	// Tier-scoped stats handle. Pass [`StatsHandle::disabled`] to opt out.
+	subscribe: OriginProducer,
+	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
 	stats: StatsHandle,
 	// The version of the protocol to use.
 	version: Version,

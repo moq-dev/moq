@@ -2,10 +2,12 @@
 
 use std::time::Duration;
 
+use anyhow::Context;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// Optional: Use moq_native to configure a logger.
-	moq_native::Log::new(tracing::Level::DEBUG).init();
+	moq_native::Log::new(tracing::Level::DEBUG).init()?;
 
 	// Create an origin that the session can publish incoming broadcasts to.
 	let origin = moq_net::Origin::random().produce();
@@ -29,9 +31,9 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	let url = url::Url::parse("https://cdn.moq.dev/anon/video-example").unwrap();
 
 	// Establish a connection with automatic reconnection.
-	// with_consume() registers an OriginProducer for incoming data.
-	// Use with_publish() if you also want to publish from the session.
-	let reconnect = client.with_consume(origin).reconnect(url);
+	// with_consumer() registers an OriginProducer for incoming data.
+	// Use with_publisher() if you also want to publish from the session.
+	let reconnect = client.with_consumer(origin).reconnect(url);
 
 	// Wait until the reconnect loop stops (e.g. timeout exceeded).
 	reconnect.closed().await
@@ -40,13 +42,11 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 // Subscribe to a broadcast and read media frames.
 async fn run_subscribe(consumer: moq_net::OriginConsumer) -> anyhow::Result<()> {
 	// Wait for a broadcast to be announced.
-	let (path, broadcast) = consumer
-		.announced()
-		.next()
-		.await
-		.ok_or_else(|| anyhow::anyhow!("origin closed"))?;
+	let (path, broadcast) = consumer.announced().next().await.context("origin closed")?;
 
-	let broadcast = broadcast.ok_or_else(|| anyhow::anyhow!("broadcast unannounced: {path}"))?;
+	let broadcast = broadcast
+		.broadcast()
+		.with_context(|| format!("broadcast unannounced: {path}"))?;
 
 	tracing::info!(%path, "broadcast announced");
 

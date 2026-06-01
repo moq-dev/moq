@@ -10,7 +10,7 @@ name: release-brew
 # download them.
 #
 # Authenticates as the moq-bot GitHub App. The APP_ID and APP_PRIVATE_KEY
-# repo secrets are already wired (see release-swift.yml). The minted
+# repo secrets are already wired (see release-swift-lib.yml). The minted
 # installation token is scoped to moq-dev/homebrew-tap and expires in 1
 # hour.
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Assemble the moq-ffi Kotlin package and stage it for publication.
+# Assemble the dev.moq:moq-ffi Kotlin bindings package and stage it for
+# publication. (The dev.moq:moq wrapper is pure Kotlin and published
+# separately by release-kt-lib.yml.)
 #
 # Designed to run after the workflow has placed per-target moq-ffi
 # native libs into $LIB_DIR (one subdir per cargo target) and the
@@ -71,11 +73,11 @@ done
 mkdir -p "$OUTPUT_DIR"
 
 # Clean staging dirs.
-rm -rf "$KT_DIR/moq/src/androidMain/jniLibs"
-rm -rf "$KT_DIR/moq/src/jvmMain/resources"
-rm -rf "$KT_DIR/moq/src/jvmAndAndroidMain/kotlin/uniffi"
-mkdir -p "$KT_DIR/moq/src/androidMain/jniLibs"
-mkdir -p "$KT_DIR/moq/src/jvmMain/resources"
+rm -rf "$KT_DIR/moq-ffi/src/androidMain/jniLibs"
+rm -rf "$KT_DIR/moq-ffi/src/jvmMain/resources"
+rm -rf "$KT_DIR/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi"
+mkdir -p "$KT_DIR/moq-ffi/src/androidMain/jniLibs"
+mkdir -p "$KT_DIR/moq-ffi/src/jvmMain/resources"
 
 # Entries are "<cargo-target>:<...>" so the script stays portable to Bash 3.2
 # (default on macOS), which has no associative arrays.
@@ -92,7 +94,7 @@ for entry in "${ANDROID_ABIS[@]}"; do
     abi="${entry##*:}"
     src="$LIB_DIR/$target/libmoq_ffi.so"
     if [[ -f "$src" ]]; then
-        dest="$KT_DIR/moq/src/androidMain/jniLibs/$abi"
+        dest="$KT_DIR/moq-ffi/src/androidMain/jniLibs/$abi"
         mkdir -p "$dest"
         cp "$src" "$dest/"
         echo "  android $abi <- $target"
@@ -119,7 +121,7 @@ for entry in "${JVM_LIBS[@]}"; do
     libname="${rest##*:}"
     src="$LIB_DIR/$target/$libname"
     if [[ -f "$src" ]]; then
-        dest="$KT_DIR/moq/src/jvmMain/resources/$dir"
+        dest="$KT_DIR/moq-ffi/src/jvmMain/resources/$dir"
         mkdir -p "$dest"
         cp "$src" "$dest/"
         echo "  jvm $dir <- $target"
@@ -134,8 +136,8 @@ GENERATED_KT="$BINDINGS_DIR/uniffi/moq/moq.kt"
     echo "Error: uniffi-bindgen output not found at $GENERATED_KT" >&2
     exit 1
 }
-mkdir -p "$KT_DIR/moq/src/jvmAndAndroidMain/kotlin/uniffi/moq"
-cp "$GENERATED_KT" "$KT_DIR/moq/src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt"
+mkdir -p "$KT_DIR/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq"
+cp "$GENERATED_KT" "$KT_DIR/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt"
 
 # --- Maven-local publish ---
 MAVEN_LOCAL="$OUTPUT_DIR/maven-local"
@@ -152,4 +154,4 @@ GRADLE_CMD="${GRADLE_CMD:-$(command -v gradle || true)}"
     exit 1
 }
 
-"$GRADLE_CMD" -p "$KT_DIR" "${GRADLE_ARGS[@]}" :moq:assemble :moq:publishToMavenLocal
+"$GRADLE_CMD" -p "$KT_DIR" "${GRADLE_ARGS[@]}" :moq-ffi:assemble :moq-ffi:publishToMavenLocal

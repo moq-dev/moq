@@ -4,7 +4,7 @@ use bytes::Bytes;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// Optional: Use moq_native to configure a logger.
-	moq_native::Log::new(tracing::Level::DEBUG).init();
+	moq_native::Log::new(tracing::Level::DEBUG).init()?;
 
 	// Create an origin that we can publish to and the session can consume from.
 	let origin = moq_net::Origin::random().produce();
@@ -13,14 +13,14 @@ async fn main() -> anyhow::Result<()> {
 	// This is a simple example of how you can concurrently run multiple tasks.
 	// tokio::spawn works too.
 	tokio::select! {
-		res = run_session(origin.consume()) => res,
+		res = run_session(origin.clone()) => res,
 		res = run_broadcast(origin) => res,
 	}
 }
 
 // Connect to the server and publish our origin of broadcasts.
 // Automatically reconnects if the connection drops.
-async fn run_session(origin: moq_net::OriginConsumer) -> anyhow::Result<()> {
+async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 
@@ -29,9 +29,10 @@ async fn run_session(origin: moq_net::OriginConsumer) -> anyhow::Result<()> {
 	let url = url::Url::parse("https://cdn.moq.dev/anon/video-example").unwrap();
 
 	// Establish a connection with automatic reconnection.
-	// with_publish() registers an OriginConsumer for outgoing data.
-	// Use with_consume() if you also want to subscribe/consume from the session.
-	let reconnect = client.with_publish(origin).reconnect(url);
+	// with_publisher() registers an OriginProducer. moq-net reads from its
+	// consumer view internally. Pair with with_consumer() if you also want
+	// to subscribe to remote announcements.
+	let reconnect = client.with_publisher(origin).reconnect(url);
 
 	// Wait until the reconnect loop stops (e.g. timeout exceeded).
 	reconnect.closed().await
@@ -103,6 +104,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 		timestamp: moq_net::Timestamp::from_secs(1).unwrap(),
 		payload: Bytes::from_static(b"keyframe NAL data"),
 		keyframe: true,
+		duration: None,
 	};
 	producer.write(frame)?;
 
@@ -112,6 +114,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 		timestamp: moq_net::Timestamp::from_secs(2).unwrap(),
 		payload: Bytes::from_static(b"delta NAL data"),
 		keyframe: false,
+		duration: None,
 	};
 	producer.write(frame)?;
 
@@ -122,6 +125,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 		timestamp: moq_net::Timestamp::from_secs(3).unwrap(),
 		payload: Bytes::from_static(b"keyframe NAL data"),
 		keyframe: true,
+		duration: None,
 	};
 	producer.write(frame)?;
 

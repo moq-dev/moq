@@ -43,14 +43,14 @@ struct FilterState {
 
 /// A [`Stream`] that drops renditions failing a [`FilterVideo`] / [`FilterAudio`].
 ///
-/// Selection criteria live behind a [`conducer::Producer`], so calls to
+/// Selection criteria live behind a [`kio::Producer`], so calls to
 /// [`set_video`](Self::set_video) / [`set_audio`](Self::set_audio) wake any
 /// pending `poll_next` instead of silently waiting for the next upstream
 /// snapshot.
 pub struct Filter<S: Stream> {
 	inner: S,
-	state: conducer::Producer<FilterState>,
-	state_consumer: conducer::Consumer<FilterState>,
+	state: kio::Producer<FilterState>,
+	state_consumer: kio::Consumer<FilterState>,
 	/// Last raw snapshot from `inner`, retained so a setter between snapshots
 	/// can re-apply without polling upstream.
 	last_input: Option<Catalog>,
@@ -62,7 +62,7 @@ pub struct Filter<S: Stream> {
 
 impl<S: Stream> Filter<S> {
 	pub fn new(inner: S) -> Self {
-		let state = conducer::Producer::new(FilterState::default());
+		let state = kio::Producer::new(FilterState::default());
 		let state_consumer = state.consume();
 		Self {
 			inner,
@@ -97,7 +97,7 @@ impl<S: Stream> Filter<S> {
 }
 
 impl<S: Stream> Stream for Filter<S> {
-	fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
 		let inner_eof = loop {
 			match self.inner.poll_next(waiter)? {
 				Poll::Ready(Some(snapshot)) => {
@@ -190,7 +190,7 @@ mod test {
 	struct Once(Option<Catalog>);
 
 	impl Stream for Once {
-		fn poll_next(&mut self, _: &conducer::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+		fn poll_next(&mut self, _: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
 			Poll::Ready(Ok(self.0.take()))
 		}
 	}
@@ -246,7 +246,7 @@ mod test {
 			..Default::default()
 		});
 
-		let out = match f.poll_next(&conducer::Waiter::noop()) {
+		let out = match f.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(c))) => c,
 			other => panic!("expected snapshot, got {other:?}"),
 		};
@@ -261,7 +261,7 @@ mod test {
 			name: Some("hi".into()),
 			..Default::default()
 		});
-		let out = match f.poll_next(&conducer::Waiter::noop()) {
+		let out = match f.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(c))) => c,
 			other => panic!("got {other:?}"),
 		};
@@ -276,7 +276,7 @@ mod test {
 			name: Some("es".into()),
 			..Default::default()
 		});
-		let out = match f.poll_next(&conducer::Waiter::noop()) {
+		let out = match f.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(c))) => c,
 			other => panic!("got {other:?}"),
 		};
@@ -289,7 +289,7 @@ mod test {
 		let snapshot = catalog_with(vec![h264("lo"), h264("hi")], vec![]);
 		let mut f = Filter::new(Once(Some(snapshot)));
 
-		let first = match f.poll_next(&conducer::Waiter::noop()) {
+		let first = match f.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(c))) => c,
 			other => panic!("got {other:?}"),
 		};
@@ -300,7 +300,7 @@ mod test {
 			..Default::default()
 		});
 
-		let again = match f.poll_next(&conducer::Waiter::noop()) {
+		let again = match f.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(c))) => c,
 			other => panic!("expected re-emit, got {other:?}"),
 		};

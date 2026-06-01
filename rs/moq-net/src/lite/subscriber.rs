@@ -27,11 +27,11 @@ const LINGER_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	pub session: S,
 	/// The origin into which remote broadcasts are inserted.
-	pub origin: Option<OriginProducer>,
+	pub origin: OriginProducer,
 	/// Receiver-side bandwidth producer for PROBE feedback. None disables the
 	/// feature (used by versions that don't carry probe streams).
 	pub recv_bandwidth: Option<BandwidthProducer>,
-	/// Stats aggregator for this session's ingress. Use [`StatsHandle::disabled`]
+	/// Stats aggregator for this session's ingress. Use [`StatsHandle::default`]
 	/// to opt out.
 	pub stats: StatsHandle,
 	pub version: Version,
@@ -41,7 +41,7 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 
-	origin: Option<OriginProducer>,
+	origin: OriginProducer,
 	stats: StatsHandle,
 	recv_bandwidth: Option<BandwidthProducer>,
 	// Session-level origin id shared with the Publisher. Used to filter out
@@ -81,9 +81,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Identity for incoming-hop loop detection. Derived from the local
 		// origin we publish into so it matches the relay identity across
 		// every session sharing that origin, required for cross-session
-		// loop detection. If no origin is attached (the announce loop is
-		// inert anyway), fall back to a random session-local id.
-		let self_origin = config.origin.as_deref().copied().unwrap_or_else(crate::Origin::random);
+		// loop detection.
+		let self_origin = *config.origin;
 		Self {
 			session: config.session,
 			origin: config.origin,
@@ -135,12 +134,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_announce(self) -> Result<(), Error> {
-		let origin = match &self.origin {
-			Some(origin) => origin,
-			None => return Ok(()),
-		};
-
-		let prefixes: Vec<PathOwned> = origin.allowed().map(|p| p.to_owned()).collect();
+		let prefixes: Vec<PathOwned> = self.origin.allowed().map(|p| p.to_owned()).collect();
 
 		let mut tasks = FuturesUnordered::new();
 		for prefix in prefixes {
@@ -183,7 +177,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
 				for suffix in msg.suffixes {
 					let path = prefix.join(&suffix);
-					let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
+					let abs = self.origin.absolute(&path).to_owned();
 					// Lite01/02 don't carry hop information; the broadcast starts with an empty chain.
 					if self.start_announce(path.clone(), crate::OriginList::new(), &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
@@ -199,8 +193,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			match announce {
 				lite::Announce::Active { suffix, hops } => {
 					let path = prefix.join(&suffix);
-					let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
-					if self.start_announce(path.clone(), hops, &mut producers)? {
+					let abs = self.origin.absolute(&path).to_owned();
+					if lite::restart_supported(self.version) && producers.contains_key(&path) {
+						// lite-05+ only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
+						// atomically replace the broadcast. Older versions fall through to start_announce,
+						// which rejects the duplicate (Error::Duplicate).
+						if self.restart_announce(path.clone(), hops, &mut producers)? {
+							// Continuity: keep the existing stats guard if present.
+							stats_guards
+								.entry(abs.clone())
+								.or_insert_with(|| self.stats.broadcast(&abs).subscriber());
+						} else {
+							stats_guards.remove(&abs);
+						}
+					} else if self.start_announce(path.clone(), hops, &mut producers)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
@@ -213,7 +219,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// `producers` has no entry; that's expected, not an error.
 					if let Some(mut producer) = producers.remove(&path) {
 						producer.abort(Error::Cancel).ok();
-						let abs = self.origin.as_ref().unwrap().absolute(&path).to_owned();
+						let abs = self.origin.absolute(&path).to_owned();
 						stats_guards.remove(&abs);
 					}
 				}
@@ -227,18 +233,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	/// Opens a PROBE stream on demand while a consumer is interested.
 	///
-	/// PROBE measures the peer's upload bandwidth to us, which is only meaningful
-	/// when the peer is publishing broadcasts. If we have no origin to insert
-	/// remote broadcasts into, skip the probe stream entirely.
-	///
-	/// Otherwise loop forever: wait for a consumer, race the probe stream against
+	/// Loops forever: wait for a consumer, race the probe stream against
 	/// the consumer leaving, then loop back. Probe is best-effort, so stream
 	/// errors are logged but never tear down the session.
 	async fn run_recv_bandwidth(self) -> Result<(), Error> {
-		if self.origin.is_none() {
-			return Ok(());
-		}
-
 		let Some(bandwidth) = &self.recv_bandwidth else {
 			return Ok(());
 		};
@@ -315,12 +313,49 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let dynamic = broadcast.dynamic();
 
 		// Run the broadcast in the background until all consumers are dropped.
-		self.origin
-			.as_mut()
-			.unwrap()
-			.publish_broadcast(path.clone(), broadcast.consume());
+		self.origin.publish_broadcast(path.clone(), broadcast.consume());
 
 		web_async::spawn(self.clone().run_broadcast(path, dynamic));
+
+		Ok(true)
+	}
+
+	/// Handle a RESTART (a duplicate ANNOUNCE): atomically replace the broadcast at `path`.
+	///
+	/// Publishing the replacement before retiring the old producer lets the origin demote the old
+	/// broadcast to a backup and emit a single restart downstream, rather than an
+	/// unannounce/announce pair with a visible gap. Returns `Ok(false)` if the replacement was a
+	/// reflected loop (the broadcast is now gone), `Ok(true)` otherwise.
+	fn restart_announce(
+		&mut self,
+		path: PathOwned,
+		hops: crate::OriginList,
+		producers: &mut HashMap<PathOwned, BroadcastProducer>,
+	) -> Result<bool, Error> {
+		// Reflected loop: the replacement passed through us. Retire the broadcast.
+		if hops.contains(&self.self_origin) {
+			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected restart");
+			if let Some(mut old) = producers.remove(&path) {
+				old.abort(Error::Cancel).ok();
+			}
+			return Ok(false);
+		}
+
+		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
+
+		let broadcast = Broadcast { hops }.produce();
+		let dynamic = broadcast.dynamic();
+
+		// Publish the replacement first so the origin restarts atomically; the old broadcast is
+		// demoted to a backup and dropped silently when we abort it below.
+		self.origin.publish_broadcast(path.clone(), broadcast.consume());
+
+		let old = producers.insert(path.clone(), broadcast.clone());
+		web_async::spawn(self.clone().run_broadcast(path.clone(), dynamic));
+
+		if let Some(mut old) = old {
+			old.abort(Error::Cancel).ok();
+		}
 
 		Ok(true)
 	}
@@ -365,7 +400,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// subscriber_track to avoid double-counting broadcasts: the broadcast lifetime
 		// is tracked separately by the announce loop's `stats_guards`.
 		let name = request.name().to_string();
-		let abs = self.origin.as_ref().unwrap().absolute(&path);
+		let abs = self.origin.absolute(&path);
 		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&name));
 
 		let id = self.next_id.fetch_add(1, atomic::Ordering::Relaxed);
@@ -704,6 +739,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	fn log_path(&self, path: impl AsPath) -> Path<'_> {
-		self.origin.as_ref().unwrap().root().join(path)
+		self.origin.root().join(path)
 	}
 }

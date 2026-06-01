@@ -157,7 +157,7 @@ struct FrameState {
 /// pre-allocated buffer (e.g. via `tokio::io::AsyncReadExt::read_buf`).
 pub struct FrameProducer {
 	info: Frame,
-	state: conducer::Producer<FrameState>,
+	state: kio::Producer<FrameState>,
 	buf: FrameBuf,
 }
 
@@ -175,7 +175,7 @@ impl FrameProducer {
 		let buf = FrameBuf::new(info.size as usize);
 		Self {
 			info,
-			state: conducer::Producer::new(FrameState::default()),
+			state: kio::Producer::new(FrameState::default()),
 			buf,
 		}
 	}
@@ -234,7 +234,7 @@ impl FrameProducer {
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
-	fn modify(&mut self) -> Result<conducer::Mut<'_, FrameState>> {
+	fn modify(&mut self) -> Result<kio::Mut<'_, FrameState>> {
 		self.state
 			.write()
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
@@ -282,8 +282,8 @@ unsafe impl BufMut for FrameProducer {
 		// Safety: sole-writer invariant + bounds-checked above.
 		unsafe { self.buf.store_written(prev + cnt) };
 
-		// Briefly take the conducer write lock to wake waiters; drop of `Mut`
-		// triggers conducer's notify. Also flip `fin` if we just filled the buffer.
+		// Briefly take the kio write lock to wake waiters; drop of `Mut`
+		// triggers kio's notify. Also flip `fin` if we just filled the buffer.
 		if let Ok(mut state) = self.state.write() {
 			if prev + cnt == cap {
 				state.fin = true;
@@ -312,7 +312,7 @@ impl From<Frame> for FrameProducer {
 #[derive(Clone)]
 pub struct FrameConsumer {
 	info: Frame,
-	state: conducer::Consumer<FrameState>,
+	state: kio::Consumer<FrameState>,
 	buf: FrameBuf,
 	// Byte offset into the buffer; cloned consumers inherit this offset and
 	// read independently from there.
@@ -329,9 +329,9 @@ impl std::ops::Deref for FrameConsumer {
 
 impl FrameConsumer {
 	// A helper to automatically apply Dropped if the state is closed without an error.
-	fn poll<F, R>(&self, waiter: &conducer::Waiter, f: F) -> Poll<Result<R>>
+	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
-		F: Fn(&conducer::Ref<'_, FrameState>) -> Poll<Result<R>>,
+		F: Fn(&kio::Ref<'_, FrameState>) -> Poll<Result<R>>,
 	{
 		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
 			Ok(res) => res,
@@ -354,7 +354,7 @@ impl FrameConsumer {
 	///
 	/// Waits until the frame is finished (written == size); then returns the
 	/// remaining bytes from `read_idx` to the end as a single zero-copy slice.
-	pub fn poll_read_all(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Bytes>> {
+	pub fn poll_read_all(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
 		let read_idx = self.read_idx;
 		let res = ready!(self.poll(waiter, |state| {
 			if state.fin {
@@ -380,12 +380,12 @@ impl FrameConsumer {
 
 	/// Return all of the remaining bytes, blocking until the frame is finished.
 	pub async fn read_all(&mut self) -> Result<Bytes> {
-		conducer::wait(|waiter| self.poll_read_all(waiter)).await
+		kio::wait(|waiter| self.poll_read_all(waiter)).await
 	}
 
 	/// Poll for all remaining bytes (split into a single-element vec for backwards
 	/// compatibility with the previous chunk-based API).
-	pub fn poll_read_all_chunks(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Vec<Bytes>>> {
+	pub fn poll_read_all_chunks(&mut self, waiter: &kio::Waiter) -> Poll<Result<Vec<Bytes>>> {
 		let bytes = ready!(self.poll_read_all(waiter)?);
 		Poll::Ready(Ok(if bytes.is_empty() { Vec::new() } else { vec![bytes] }))
 	}
@@ -395,7 +395,7 @@ impl FrameConsumer {
 	/// Returns whatever bytes have been written since the consumer's `read_idx` —
 	/// could span multiple producer writes. Returns `None` once the frame is
 	/// finished and all bytes have been consumed.
-	pub fn poll_read_chunk(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Bytes>>> {
+	pub fn poll_read_chunk(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		let read_idx = self.read_idx;
 		let res = ready!(self.poll(waiter, |state| {
 			let written = self.buf.written(Ordering::Acquire);
@@ -423,12 +423,12 @@ impl FrameConsumer {
 
 	/// Return the next chunk of bytes since the last read.
 	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
-		conducer::wait(|waiter| self.poll_read_chunk(waiter)).await
+		kio::wait(|waiter| self.poll_read_chunk(waiter)).await
 	}
 
 	/// Poll for the next chunk; for backwards compatibility, wraps
 	/// [Self::poll_read_chunk] in a vec (single element if any data is available).
-	pub fn poll_read_chunks(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Vec<Bytes>>> {
+	pub fn poll_read_chunks(&mut self, waiter: &kio::Waiter) -> Poll<Result<Vec<Bytes>>> {
 		match ready!(self.poll_read_chunk(waiter)?) {
 			Some(b) => Poll::Ready(Ok(vec![b])),
 			None => Poll::Ready(Ok(Vec::new())),
@@ -437,7 +437,7 @@ impl FrameConsumer {
 
 	/// Read the next chunk into a vector (single element if available, empty on eof).
 	pub async fn read_chunks(&mut self) -> Result<Vec<Bytes>> {
-		conducer::wait(|waiter| self.poll_read_chunks(waiter)).await
+		kio::wait(|waiter| self.poll_read_chunks(waiter)).await
 	}
 }
 

@@ -15,10 +15,6 @@ pub type Status = i32;
 #[derive(Debug, thiserror::Error, Clone)]
 #[non_exhaustive]
 pub enum Error {
-	/// Resource was closed.
-	#[error("closed")]
-	Closed,
-
 	/// Error from the underlying MoQ protocol layer.
 	#[error("moq error: {0}")]
 	Moq(#[from] moq_net::Error),
@@ -87,6 +83,10 @@ pub enum Error {
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
 
+	/// Initialization failed (e.g. logging setup).
+	#[error("init failed: {0}")]
+	InitFailed(Arc<anyhow::Error>),
+
 	/// Buffer was not fully consumed.
 	#[error("buffer was not fully consumed")]
 	BufferNotConsumed,
@@ -148,7 +148,6 @@ impl ffi::ReturnCode for Error {
 	fn code(&self) -> i32 {
 		tracing::error!("{}", self);
 		match self {
-			Error::Closed => -1,
 			Error::Moq(_) => -2,
 			Error::Url(_) => -3,
 			Error::Utf8(_) => -4,
@@ -157,6 +156,7 @@ impl ffi::ReturnCode for Error {
 			Error::InvalidId => -7,
 			Error::NotFound => -8,
 			Error::UnknownFormat(_) => -9,
+			Error::InitFailed(_) => -10,
 			Error::TimestampOverflow(_) => -13,
 			Error::Level(_) => -14,
 			Error::InvalidCode => -15,

@@ -60,7 +60,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publish(pub_origin.consume()).ok().await?;
+		let session = request.with_publisher(pub_origin.clone()).ok().await?;
 
 		// Keep producers alive so the subscriber can read data.
 		let _broadcast = broadcast;
@@ -71,7 +71,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let client = client.with_consume(sub_origin);
+	let client = client.with_consumer(sub_origin);
 	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
@@ -84,7 +84,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
 	// Subscribe to the track.
 	let mut track_sub = bc
@@ -475,7 +475,7 @@ async fn broadcast_websocket() {
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
 		assert_eq!(request.transport(), "websocket");
-		let session = request.with_publish(pub_origin.consume()).ok().await?;
+		let session = request.with_publisher(pub_origin.clone()).ok().await?;
 
 		let _broadcast = broadcast;
 		let _track = track;
@@ -484,7 +484,7 @@ async fn broadcast_websocket() {
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let client = client.with_consume(sub_origin);
+	let client = client.with_consumer(sub_origin);
 	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
@@ -497,7 +497,7 @@ async fn broadcast_websocket() {
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
 	// Subscribe to the track.
 	let mut track_sub = bc
@@ -583,7 +583,7 @@ async fn broadcast_websocket_fallback() {
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
 		assert_eq!(request.transport(), "websocket");
-		let session = request.with_publish(pub_origin.consume()).ok().await?;
+		let session = request.with_publisher(pub_origin.clone()).ok().await?;
 
 		let _broadcast = broadcast;
 		let _track = track;
@@ -592,7 +592,7 @@ async fn broadcast_websocket_fallback() {
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let client = client.with_consume(sub_origin);
+	let client = client.with_consumer(sub_origin);
 	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
@@ -605,7 +605,7 @@ async fn broadcast_websocket_fallback() {
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
 	// Subscribe to the track.
 	let mut track_sub = bc
@@ -685,7 +685,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
 		assert_eq!(request.transport(), "websocket");
-		let session = request.with_publish(pub_origin.consume()).ok().await?;
+		let session = request.with_publisher(pub_origin.clone()).ok().await?;
 		assert_eq!(session.version(), expected_version, "server negotiated stale version");
 		let _broadcast = broadcast;
 		let _track = track;
@@ -693,15 +693,15 @@ async fn broadcast_websocket_uses_newest_version() {
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let client = client.with_consume(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let client = client.with_consumer(sub_origin);
+	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	assert_eq!(session.version(), expected_version, "client negotiated stale version");
+	assert_eq!(cs.version(), expected_version, "client negotiated stale version");
 
-	drop(session);
+	drop(cs);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -761,7 +761,7 @@ async fn broadcast_race_quic_wins() {
 			"quic",
 			"QUIC lost the race to WebSocket with both reachable",
 		);
-		let session = request.with_publish(pub_origin.consume()).ok().await?;
+		let session = request.with_publisher(pub_origin.clone()).ok().await?;
 		assert_eq!(session.version(), expected_version, "server negotiated stale version");
 		let _broadcast = broadcast;
 		let _track = track;
@@ -769,15 +769,15 @@ async fn broadcast_race_quic_wins() {
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let client = client.with_consume(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let client = client.with_consumer(sub_origin);
+	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	assert_eq!(session.version(), expected_version, "client negotiated stale version");
+	assert_eq!(cs.version(), expected_version, "client negotiated stale version");
 
-	drop(session);
+	drop(cs);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -831,12 +831,12 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
-		let session = request.with_publish(pub_origin.consume()).ok().await?;
+		let session = request.with_publisher(pub_origin.clone()).ok().await?;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let client = client.with_consume(sub_origin);
+	let client = client.with_consumer(sub_origin);
 	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timeout")
@@ -847,7 +847,7 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 		.expect("announce timeout")
 		.expect("origin closed");
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce");
+	let bc = bc.broadcast().expect("expected announce");
 
 	// First subscription: receive group 0.
 	let mut sub1 = bc

@@ -231,18 +231,21 @@ struct OriginBroadcast {
 	backup: VecDeque<BroadcastConsumer>,
 }
 
-/// One coalesced update queued for an `OriginConsumer`.
+/// One coalesced update queued for an `AnnounceConsumer`.
 ///
 /// At most one entry exists per path, so a slow consumer's pending set is bounded
-/// by the number of distinct paths. `UnannounceAnnounce` preserves the
-/// signal that the broadcast at a path was replaced (the consumer must see
-/// `(path, None)` before `(path, Some(new))`), while a stale
-/// `Announce` cancels with a subsequent `unannounce` because the consumer
-/// has not yet observed it.
+/// by the number of distinct paths. `UnannounceAnnounce` preserves the signal
+/// that a broadcast genuinely went away and a different one took its place (the
+/// consumer must see [`Announced::Ended`] before [`Announced::Active`]), while a
+/// stale `Announce` cancels with a subsequent `unannounce` because the consumer
+/// has not yet observed it. `Restart` is the atomic replacement: the broadcast
+/// at the path never became unavailable, so it collapses to a single
+/// [`Announced::Restart`] delivery.
 enum PendingUpdate {
 	Announce(BroadcastConsumer),
 	Unannounce,
 	UnannounceAnnounce(BroadcastConsumer),
+	Restart(BroadcastConsumer),
 }
 
 /// Pending updates keyed by path. `BTreeMap` keeps memory strictly bounded by
@@ -263,6 +266,22 @@ impl OriginConsumerState {
 			Some(PendingUpdate::Unannounce | PendingUpdate::UnannounceAnnounce(_)) => {
 				PendingUpdate::UnannounceAnnounce(broadcast)
 			}
+			// A restart the consumer hasn't drained yet; just swap in the newer broadcast.
+			Some(PendingUpdate::Restart(_)) => PendingUpdate::Restart(broadcast),
+		};
+		self.pending.insert(path, new);
+	}
+
+	fn apply_restart(&mut self, path: PathOwned, broadcast: BroadcastConsumer) {
+		let new = match self.pending.remove(&path) {
+			// Consumer has already drained the prior active; replace it atomically.
+			None => PendingUpdate::Restart(broadcast),
+			// Consumer hasn't seen the original announce yet; keep it a fresh announce.
+			Some(PendingUpdate::Announce(_)) => PendingUpdate::Announce(broadcast),
+			// Consumer saw the original active; collapse everything into one restart.
+			Some(PendingUpdate::Unannounce | PendingUpdate::UnannounceAnnounce(_) | PendingUpdate::Restart(_)) => {
+				PendingUpdate::Restart(broadcast)
+			}
 		};
 		self.pending.insert(path, new);
 	}
@@ -274,9 +293,9 @@ impl OriginConsumerState {
 			None | Some(PendingUpdate::Unannounce) => {
 				self.pending.insert(path, PendingUpdate::Unannounce);
 			}
-			// The embedded announce cancels with this unannounce; the consumer
-			// still needs the leading unannounce.
-			Some(PendingUpdate::UnannounceAnnounce(_)) => {
+			// The embedded/replacement announce cancels with this unannounce; the
+			// consumer still needs the leading unannounce.
+			Some(PendingUpdate::UnannounceAnnounce(_) | PendingUpdate::Restart(_)) => {
 				self.pending.insert(path, PendingUpdate::Unannounce);
 			}
 		}
@@ -285,23 +304,24 @@ impl OriginConsumerState {
 	/// Take one update to deliver to the consumer, if any.
 	fn take(&mut self) -> Option<OriginAnnounce> {
 		let path = self.pending.keys().next()?.clone();
-		match self.pending.remove(&path).unwrap() {
-			PendingUpdate::Announce(broadcast) => Some((path, Some(broadcast))),
-			PendingUpdate::Unannounce => Some((path, None)),
+		Some(match self.pending.remove(&path).unwrap() {
+			PendingUpdate::Announce(broadcast) => (path, Announced::Active(broadcast)),
+			PendingUpdate::Unannounce => (path, Announced::Ended),
 			PendingUpdate::UnannounceAnnounce(broadcast) => {
 				// Deliver the unannounce now; leave the trailing announce pending so
 				// the next take returns it for the same path.
 				self.pending.insert(path.clone(), PendingUpdate::Announce(broadcast));
-				Some((path, None))
+				(path, Announced::Ended)
 			}
-		}
+			PendingUpdate::Restart(broadcast) => (path, Announced::Restart(broadcast)),
+		})
 	}
 }
 
 #[derive(Clone)]
 struct AnnounceConsumerNotify {
 	root: PathOwned,
-	state: conducer::Producer<OriginConsumerState>,
+	state: kio::Producer<OriginConsumerState>,
 }
 
 impl AnnounceConsumerNotify {
@@ -314,11 +334,13 @@ impl AnnounceConsumerNotify {
 			.apply_announce(path, broadcast);
 	}
 
-	fn reannounce(&self, path: impl AsPath, broadcast: BroadcastConsumer) {
+	fn restart(&self, path: impl AsPath, broadcast: BroadcastConsumer) {
 		let path = path.as_path().strip_prefix(&self.root).unwrap().to_owned();
-		let mut state = self.state.write().ok().expect("consumer closed");
-		state.apply_unannounce(path.clone());
-		state.apply_announce(path, broadcast);
+		self.state
+			.write()
+			.ok()
+			.expect("consumer closed")
+			.apply_restart(path, broadcast);
 	}
 
 	fn unannounce(&self, path: impl AsPath) {
@@ -353,13 +375,13 @@ impl NotifyNode {
 		}
 	}
 
-	fn reannounce(&mut self, path: impl AsPath, broadcast: &BroadcastConsumer) {
+	fn restart(&mut self, path: impl AsPath, broadcast: &BroadcastConsumer) {
 		for consumer in self.consumers.values() {
-			consumer.reannounce(path.as_path(), broadcast.clone());
+			consumer.restart(path.as_path(), broadcast.clone());
 		}
 
 		if let Some(parent) = &self.parent {
-			parent.lock().reannounce(path, broadcast);
+			parent.lock().restart(path, broadcast);
 		}
 	}
 
@@ -426,7 +448,7 @@ impl OriginNode {
 			//
 			// Drop duplicates (same underlying broadcast delivered via multiple links) so the
 			// backup queue can't accumulate clones of the active entry and trigger redundant
-			// reannouncements when a peer churns.
+			// restartments when a peer churns.
 			if existing.active.is_clone(broadcast) || existing.backup.iter().any(|b| b.is_clone(broadcast)) {
 				return;
 			}
@@ -436,7 +458,7 @@ impl OriginNode {
 				existing.active = broadcast.clone();
 				existing.backup.push_back(old);
 
-				self.notify.lock().reannounce(full, broadcast);
+				self.notify.lock().restart(full, broadcast);
 			} else {
 				// Longer path: keep as a backup in case the active one drops.
 				existing.backup.push_back(broadcast.clone());
@@ -529,7 +551,7 @@ impl OriginNode {
 			if let Some(idx) = best {
 				let active = entry.backup.remove(idx).expect("index in range");
 				entry.active = active;
-				self.notify.lock().reannounce(full, &entry.active);
+				self.notify.lock().restart(full, &entry.active);
 			} else {
 				// No more backups, so remove the entry.
 				self.broadcast = None;
@@ -626,8 +648,39 @@ impl Default for OriginNodes {
 	}
 }
 
-/// A broadcast path and its associated consumer, or None if closed.
-pub type OriginAnnounce = (PathOwned, Option<BroadcastConsumer>);
+/// A path and what happened to the broadcast there, delivered by [`AnnounceConsumer`].
+pub type OriginAnnounce = (PathOwned, Announced);
+
+/// What happened to a broadcast at a path.
+#[derive(Clone)]
+pub enum Announced {
+	/// A broadcast became available.
+	Active(BroadcastConsumer),
+	/// The broadcast was replaced without an interruption in availability (e.g. a
+	/// relay failover or a shorter hop path arriving).
+	///
+	/// Carries the replacement broadcast. On the wire this is a duplicate ANNOUNCE
+	/// (an active announcement for a path that is already announced, with no
+	/// intervening unannounce); there is no distinct status byte.
+	Restart(BroadcastConsumer),
+	/// The broadcast is no longer available.
+	Ended,
+}
+
+impl Announced {
+	/// The broadcast consumer, or `None` if the broadcast ended.
+	///
+	/// Both [`Active`](Self::Active) and [`Restart`](Self::Restart) carry a
+	/// broadcast; [`Ended`](Self::Ended) does not. This is the legacy
+	/// `Option<BroadcastConsumer>` view for callers that don't distinguish a fresh
+	/// announce from a restart.
+	pub fn broadcast(self) -> Option<BroadcastConsumer> {
+		match self {
+			Self::Active(broadcast) | Self::Restart(broadcast) => Some(broadcast),
+			Self::Ended => None,
+		}
+	}
+}
 
 /// Announces broadcasts to consumers over the network.
 #[derive(Clone)]
@@ -679,7 +732,7 @@ impl OriginProducer {
 	/// If there is already a broadcast with the same path, the new one replaces the active only
 	/// if its hop path is shorter or equal; otherwise it is queued as a backup.
 	/// When the active broadcast closes, the backup with the shortest hop path is promoted and
-	/// reannounced. Backups that close before being promoted are silently dropped.
+	/// restartd. Backups that close before being promoted are silently dropped.
 	///
 	/// Returns false if the broadcast is not allowed to be published.
 	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
@@ -850,10 +903,10 @@ impl OriginConsumer {
 
 		let mut announced = consumer.announced();
 		loop {
-			let (announced_path, broadcast) = announced.next().await?;
+			let (announced_path, event) = announced.next().await?;
 			// `scope` narrows by prefix, but we only want an exact-path match.
 			if announced_path.as_path() == path {
-				if let Some(broadcast) = broadcast {
+				if let Some(broadcast) = event.broadcast() {
 					return Some(broadcast);
 				}
 			}
@@ -946,12 +999,12 @@ pub struct AnnounceConsumer {
 
 	// Pending updates queued for this cursor. Coalesced so a slow consumer
 	// can't accumulate redundant announce/unannounce pairs.
-	state: conducer::Producer<OriginConsumerState>,
+	state: kio::Producer<OriginConsumerState>,
 }
 
 impl AnnounceConsumer {
 	fn new(root: PathOwned, nodes: OriginNodes) -> Self {
-		let state = conducer::Producer::<OriginConsumerState>::default();
+		let state = kio::Producer::<OriginConsumerState>::default();
 		let id = ConsumerId::new();
 
 		for (_, node) in &nodes.nodes {
@@ -972,7 +1025,7 @@ impl AnnounceConsumer {
 	/// The same path won't be announced/unannounced twice in a row; instead it
 	/// toggles. Returns None if the cursor is closed.
 	pub async fn next(&mut self) -> Option<OriginAnnounce> {
-		conducer::wait(|waiter| self.poll_next(waiter)).await
+		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
 	/// Poll for the next (un)announced broadcast, without blocking.
@@ -980,7 +1033,7 @@ impl AnnounceConsumer {
 	/// Returns `Poll::Ready(Some(_))` for an update, `Poll::Ready(None)` if the
 	/// cursor is closed, or `Poll::Pending` after registering `waiter` to be
 	/// notified when the next update arrives.
-	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<Option<OriginAnnounce>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<OriginAnnounce>> {
 		match self.state.poll(waiter, |state| match state.take() {
 			Some(item) => Poll::Ready(item),
 			None => Poll::Pending,
@@ -1031,23 +1084,41 @@ use futures::FutureExt;
 impl AnnounceConsumer {
 	pub fn assert_next(&mut self, expected: impl AsPath, broadcast: &BroadcastConsumer) {
 		let expected = expected.as_path();
-		let (path, active) = self.next().now_or_never().expect("next blocked").expect("no next");
+		let (path, event) = self.next().now_or_never().expect("next blocked").expect("no next");
+		assert!(matches!(event, Announced::Active(_)), "should be an active announce");
 		assert_eq!(path, expected, "wrong path");
-		assert!(active.unwrap().is_clone(broadcast), "should be the same broadcast");
+		assert!(
+			event.broadcast().unwrap().is_clone(broadcast),
+			"should be the same broadcast"
+		);
+	}
+
+	pub fn assert_next_restart(&mut self, expected: impl AsPath, broadcast: &BroadcastConsumer) {
+		let expected = expected.as_path();
+		let (path, event) = self.next().now_or_never().expect("next blocked").expect("no next");
+		assert!(matches!(event, Announced::Restart(_)), "should be a restart");
+		assert_eq!(path, expected, "wrong path");
+		assert!(
+			event.broadcast().unwrap().is_clone(broadcast),
+			"should be the same broadcast"
+		);
 	}
 
 	pub fn assert_try_next(&mut self, expected: impl AsPath, broadcast: &BroadcastConsumer) {
 		let expected = expected.as_path();
-		let (path, active) = self.try_next().expect("no next");
+		let (path, event) = self.try_next().expect("no next");
 		assert_eq!(path, expected, "wrong path");
-		assert!(active.unwrap().is_clone(broadcast), "should be the same broadcast");
+		assert!(
+			event.broadcast().unwrap().is_clone(broadcast),
+			"should be the same broadcast"
+		);
 	}
 
 	pub fn assert_next_none(&mut self, expected: impl AsPath) {
 		let expected = expected.as_path();
-		let (path, active) = self.next().now_or_never().expect("next blocked").expect("no next");
+		let (path, event) = self.next().now_or_never().expect("next blocked").expect("no next");
 		assert_eq!(path, expected, "wrong path");
-		assert!(active.is_none(), "should be unannounced");
+		assert!(event.broadcast().is_none(), "should be unannounced");
 	}
 
 	pub fn assert_next_wait(&mut self) {
@@ -1179,7 +1250,7 @@ mod tests {
 		origin.publish_broadcast("test", consumer3.clone());
 		assert!(consumer.get_broadcast("test").is_some());
 
-		// On equal hop lengths, each new publish replaces the active and reannounces.
+		// On equal hop lengths, each new publish replaces the active and restarts.
 		// Because the cursor hasn't drained between publishes, the stale announces
 		// collapse with their following unannounces and only the final active broadcast
 		// is delivered.
@@ -1195,15 +1266,14 @@ mod tests {
 		assert!(consumer.get_broadcast("test").is_some());
 		announced.assert_next_wait();
 
-		// Drop the active, we should reannounce with the remaining backup.
+		// Drop the active, we should restart with the remaining backup.
 		drop(broadcast3);
 
 		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
 		assert!(consumer.get_broadcast("test").is_some());
-		announced.assert_next_none("test");
-		announced.assert_next("test", &consumer1);
+		announced.assert_next_restart("test", &consumer1);
 
 		// Drop the final broadcast, we should unannounce.
 		drop(broadcast1);
@@ -1213,6 +1283,39 @@ mod tests {
 		assert!(consumer.get_broadcast("test").is_none());
 
 		announced.assert_next_none("test");
+		announced.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_restart_after_drain() {
+		// Replacing the active broadcast (equal hops) after the consumer has drained
+		// the original announce is delivered as a single atomic restart.
+		let origin = Origin::random().produce();
+		let a = Broadcast::new().produce();
+		let b = Broadcast::new().produce();
+
+		let mut announced = origin.consume().announced();
+		origin.publish_broadcast("test", a.consume());
+		announced.assert_next("test", &a.consume());
+
+		origin.publish_broadcast("test", b.consume());
+		announced.assert_next_restart("test", &b.consume());
+		announced.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_restart_undrained_stays_active() {
+		// If the consumer hasn't observed the original announce yet, a restart just
+		// swaps in the newer broadcast and is still delivered as a fresh Active.
+		let origin = Origin::random().produce();
+		let a = Broadcast::new().produce();
+		let b = Broadcast::new().produce();
+
+		let mut announced = origin.consume().announced();
+		origin.publish_broadcast("test", a.consume());
+		origin.publish_broadcast("test", b.consume());
+
+		announced.assert_next("test", &b.consume());
 		announced.assert_next_wait();
 	}
 
@@ -1262,7 +1365,7 @@ mod tests {
 		assert!(origin.consume().get_broadcast("test").is_none());
 	}
 	// A previous mpsc-based implementation could only deliver the first 127 broadcasts
-	// instantly via `assert_next` (which uses `now_or_never`). The conducer-backed
+	// instantly via `assert_next` (which uses `now_or_never`). The kio-backed
 	// implementation polls synchronously and can deliver all of them without yielding.
 	// Names are zero-padded so lexicographic delivery order matches the loop index.
 	#[tokio::test]

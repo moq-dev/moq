@@ -75,6 +75,7 @@ impl Import {
 			timestamp: pts,
 			payload: payload.freeze(),
 			keyframe: true,
+			duration: None,
 		};
 
 		self.track.write(frame)?;

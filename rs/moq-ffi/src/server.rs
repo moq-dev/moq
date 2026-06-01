@@ -234,15 +234,14 @@ impl MoqRequest {
 	pub async fn ok(&self) -> Result<Arc<MoqSession>, MoqError> {
 		self.task
 			.run(|mut state| async move {
-				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
-				let publish = state.publish.as_ref().map(|o| o.inner().consume());
-				let consume = state.consume.as_ref().map(|o| o.inner().clone());
-				let session = request
-					.with_publish(publish)
-					.with_consume(consume)
-					.ok()
-					.await
-					.map_err(|err| MoqError::Connect(format!("{err}")))?;
+				let mut request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
+				if let Some(publish) = state.publish.as_ref() {
+					request = request.with_publisher(publish.inner().clone());
+				}
+				if let Some(consume) = state.consume.as_ref() {
+					request = request.with_consumer(consume.inner().clone());
+				}
+				let session = request.ok().await.map_err(|err| MoqError::Connect(format!("{err}")))?;
 				Ok(Arc::new(MoqSession::new(session)))
 			})
 			.await

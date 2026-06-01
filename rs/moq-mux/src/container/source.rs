@@ -161,7 +161,7 @@ impl ExportSource {
 	/// Parameter-only frames (SPS/PPS-only inputs to the Avc3 transform) are
 	/// absorbed and the next frame is polled. Returns `Ready(None)` at
 	/// end-of-track.
-	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<crate::Result<Option<Frame>>> {
+	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		// Resolve the subscription before reading any frames.
 		if matches!(self.state, SourceState::Subscribing(_)) {
 			// Scope the `future` borrow so it ends before we touch `self.media`/`self.state`.

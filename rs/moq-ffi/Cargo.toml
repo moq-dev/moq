@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>", "Brian Medley <bpm@bmedley.org>"
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.2.15"
+version = "0.2.16"
 edition = "2024"
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
@@ -18,6 +18,9 @@ crate-type = ["staticlib", "cdylib"]
 [[bin]]
 name = "uniffi-bindgen"
 path = "./uniffi-bindgen.rs"
+
+[features]
+android-logcat = ["moq-native/android-logcat"]
 
 [dependencies]
 bytes = "1"

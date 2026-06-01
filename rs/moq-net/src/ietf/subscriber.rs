@@ -42,14 +42,14 @@ struct BroadcastState {
 #[derive(Clone)]
 pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
-	origin: Option<OriginProducer>,
+	origin: OriginProducer,
 	control: Control,
 	state: Lock<State>,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: Option<OriginProducer>, control: Control, version: Version) -> Self {
+	pub fn new(session: S, origin: OriginProducer, control: Control, version: Version) -> Self {
 		Self {
 			session,
 			origin,
@@ -59,10 +59,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	pub fn has_origin(&self) -> bool {
-		self.origin.is_some()
-	}
-
 	/// Send SUBSCRIBE_NAMESPACE on a bidi stream.
 	/// The caller is responsible for opening the appropriate stream type
 	/// (virtual for v14/v15, real bidi for v16+).
@@ -70,7 +66,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		mut stream: Stream<T, Version>,
 	) -> Result<(), Error> {
-		let prefix = self.origin.as_ref().ok_or(Error::InvalidRole)?.root().to_owned();
+		let prefix = self.origin.root().to_owned();
 		let request_id = self.control.next_request_id().await?;
 
 		// Write SubscribeNamespace
@@ -402,10 +398,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	fn start_announce(&mut self, path: PathOwned) -> Result<BroadcastProducer, Error> {
-		let Some(origin) = &self.origin else {
-			return Err(Error::InvalidRole);
-		};
-
 		let mut state = self.state.lock();
 		let broadcast = match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
@@ -414,7 +406,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Entry::Vacant(entry) => {
 				let broadcast = Broadcast::new().produce();
-				origin.publish_broadcast(path.clone(), broadcast.consume());
+				self.origin.publish_broadcast(path.clone(), broadcast.consume());
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),
 					count: 1,
@@ -423,7 +415,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+		tracing::debug!(broadcast = %self.origin.absolute(&path), "announce");
 
 		let this = self.clone();
 		let producer = broadcast.clone();
@@ -439,17 +431,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	fn stop_announce(&mut self, path: PathOwned) -> Result<(), Error> {
-		let Some(origin) = &self.origin else {
-			return Err(Error::InvalidRole);
-		};
-
 		let mut state = self.state.lock();
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
 				entry.get_mut().count -= 1;
 				if entry.get().count == 0 {
-					tracing::debug!(broadcast = %origin.absolute(&path), "unannounced");
+					tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounced");
 					entry.remove();
 				}
 			}
@@ -573,7 +561,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return;
 		}
 
-		tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe started");
+		tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name, "subscribe started");
 
 		// Read the response and register the alias mapping
 		let track_alias = match self.read_subscribe_response(&mut stream).await {
@@ -597,17 +585,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tokio::select! {
 			_ = track.unused() => {
-				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe cancelled");
+				tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name, "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
 			}
 			err = broadcast.closed() => {
-				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "broadcast closed");
+				tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name, "broadcast closed");
 				let _ = track.abort(err);
 			}
 			res = stream.reader.closed() => {
 				match res {
 					Ok(()) => {
-						tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe complete");
+						tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name, "subscribe complete");
 						let _ = track.finish();
 					}
 					Err(err) => {
