@@ -5,15 +5,13 @@ import type * as Moq from "@moq/net";
 import type { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Capture from "./capture";
+import { toEncoderConfig } from "./encoder-config";
 import { type Kind, normalizeSource, type Source } from "./types";
 
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
 const OPUS_BITRATE_PER_CHANNEL = 32_000;
 const OPUS_FRAME_DURATION = 20;
-
-// Compiled and inlined as a blob URL via vite-plugin-worklet.
-import CaptureWorklet from "./capture-worklet.ts?worklet";
 
 // The initial values for our signals.
 export type EncoderProps = {
@@ -95,6 +93,8 @@ export class Encoder {
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
+			// Compiled and inlined as a blob URL via vite-plugin-worklet.
+			const { default: CaptureWorklet } = await import("./capture-worklet.ts?worklet");
 			await context.audioWorklet.addModule(CaptureWorklet);
 			if (context.state === "closed") return;
 
@@ -260,30 +260,4 @@ export class Encoder {
 	}
 }
 
-// `application` and `signal` are in the WebCodecs spec but missing from lib.dom.d.ts.
-// https://www.w3.org/TR/webcodecs-opus-codec-registration/#dom-opusencoderconfig
-interface OpusEncoderConfigExt extends OpusEncoderConfig {
-	application?: "voip" | "audio" | "lowdelay";
-	signal?: "auto" | "voice" | "music";
-}
-
-// Build the WebCodecs encoder config from the catalog (decoder) config plus a Kind hint.
-// Opus-only knobs are kept out of the catalog since they only affect encoding.
-function toEncoderConfig(config: Catalog.AudioConfig, kind: Kind): AudioEncoderConfig {
-	const encoderConfig: AudioEncoderConfig = {
-		codec: config.codec,
-		sampleRate: config.sampleRate,
-		numberOfChannels: config.numberOfChannels,
-		bitrate: config.bitrate,
-	};
-
-	if (config.codec === "opus" && kind !== "auto") {
-		const opus: OpusEncoderConfigExt = {
-			application: kind === "voice" ? "voip" : "audio",
-			signal: kind,
-		};
-		encoderConfig.opus = opus;
-	}
-
-	return encoderConfig;
-}
+export { toEncoderConfig } from "./encoder-config";
