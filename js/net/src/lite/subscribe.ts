@@ -183,6 +183,14 @@ export class SubscribeOk {
 	 * evicting them. Draft-05+ only; older drafts assume {@link DEFAULT_CACHE_MS}.
 	 */
 	cache: number;
+	/**
+	 * Per-frame timestamp scale (units per second) advertised by the publisher.
+	 * `0` means no per-frame timestamps on the wire (frame headers omit them).
+	 * Draft-05+ only; older drafts are always `0`. This implementation doesn't
+	 * yet produce per-frame timestamps, so publishers always send `0`; subscribers
+	 * read the delta to stay in sync with a timestamped (e.g. Rust) publisher.
+	 */
+	timescale: number;
 
 	constructor({
 		priority = 0,
@@ -192,6 +200,7 @@ export class SubscribeOk {
 		endGroup = undefined,
 		compression = Compression.None,
 		cache = DEFAULT_CACHE_MS,
+		timescale = 0,
 	}: {
 		priority?: number;
 		ordered?: boolean;
@@ -200,6 +209,7 @@ export class SubscribeOk {
 		endGroup?: number;
 		compression?: Compression;
 		cache?: number;
+		timescale?: number;
 	}) {
 		this.priority = priority;
 		this.ordered = ordered;
@@ -208,6 +218,7 @@ export class SubscribeOk {
 		this.endGroup = endGroup;
 		this.compression = compression;
 		this.cache = cache;
+		this.timescale = timescale;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -232,8 +243,10 @@ export class SubscribeOk {
 				await w.u53(this.maxLatency);
 				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
-				await w.u53(this.compression);
+				// Order matches draft-lcurley-moq-lite-05 SUBSCRIBE_OK: Timescale, Cache, Compression.
+				await w.u53(this.timescale);
 				await w.u53(this.cache);
+				await w.u53(this.compression);
 				break;
 		}
 	}
@@ -246,6 +259,7 @@ export class SubscribeOk {
 		let endGroup: number | undefined;
 		let compression: Compression = Compression.None;
 		let cache: number = DEFAULT_CACHE_MS;
+		let timescale = 0;
 
 		switch (version) {
 			case Version.DRAFT_02:
@@ -268,8 +282,10 @@ export class SubscribeOk {
 				maxLatency = await r.u53();
 				startGroup = await r.u53();
 				endGroup = await r.u53();
-				compression = compressionFromCode(await r.u53());
+				// Order matches draft-lcurley-moq-lite-05 SUBSCRIBE_OK: Timescale, Cache, Compression.
+				timescale = await r.u53();
 				cache = await r.u53();
+				compression = compressionFromCode(await r.u53());
 				break;
 		}
 
@@ -280,6 +296,7 @@ export class SubscribeOk {
 			startGroup: startGroup !== undefined && startGroup > 0 ? startGroup - 1 : undefined,
 			endGroup: endGroup !== undefined && endGroup > 0 ? endGroup - 1 : undefined,
 			compression,
+			timescale,
 			cache,
 		});
 	}

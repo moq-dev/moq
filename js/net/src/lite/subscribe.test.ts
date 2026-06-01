@@ -29,7 +29,7 @@ async function roundtrip(version: Version, ok: SubscribeOk): Promise<SubscribeOk
 	return SubscribeOk.decode(reader, version);
 }
 
-test("SubscribeOk: compression and cache round-trip on draft-05", async () => {
+test("SubscribeOk: timescale, cache, and compression round-trip on draft-05", async () => {
 	const ok = new SubscribeOk({
 		priority: 7,
 		ordered: true,
@@ -37,20 +37,23 @@ test("SubscribeOk: compression and cache round-trip on draft-05", async () => {
 		startGroup: 3,
 		compression: Compression.Deflate,
 		cache: 10000,
+		timescale: 90000,
 	});
 
 	const got = await roundtrip(Version.DRAFT_05_WIP, ok);
 	expect(got.compression).toBe(Compression.Deflate);
 	expect(got.cache).toBe(10000);
+	expect(got.timescale).toBe(90000);
 	expect(got.priority).toBe(7);
 	expect(got.ordered).toBe(true);
 	expect(got.startGroup).toBe(3);
 });
 
-test("SubscribeOk: compression and cache fields are absent before draft-05", async () => {
-	// draft-04 has no compression/cache varints on the wire, so they decode to defaults.
-	const ok = new SubscribeOk({ priority: 7, compression: Compression.Deflate, cache: 10000 });
+test("SubscribeOk: timescale, cache, and compression fields are absent before draft-05", async () => {
+	// draft-04 has no draft-05 trailing varints, so they decode to defaults.
+	const ok = new SubscribeOk({ priority: 7, compression: Compression.Deflate, cache: 10000, timescale: 90000 });
 	const got = await roundtrip(Version.DRAFT_04, ok);
 	expect(got.compression).toBe(Compression.None);
 	expect(got.cache).toBe(DEFAULT_CACHE_MS);
+	expect(got.timescale).toBe(0);
 });

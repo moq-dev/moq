@@ -41,6 +41,10 @@ interface SubscribeEntry {
 	track: Track;
 	// undefined until SUBSCRIBE_OK arrives and tells us the negotiated codec.
 	compression: Signal<Compression | undefined>;
+	// Per-frame timestamp scale (0 = none). undefined until SUBSCRIBE_OK arrives.
+	// A non-zero value means each frame on the group stream is prefixed with a
+	// zigzag-delta timestamp varint that runGroup must consume to stay in sync.
+	timescale: Signal<number | undefined>;
 }
 
 /**
@@ -203,7 +207,8 @@ export class Subscriber {
 		// Save the writer so we can append groups to it. `compression` stays
 		// undefined until SUBSCRIBE_OK resolves it; runGroup blocks on it.
 		const compression = new Signal<Compression | undefined>(undefined);
-		this.#subscribes.set(id, { track: request.track, compression });
+		const timescale = new Signal<number | undefined>(undefined);
+		this.#subscribes.set(id, { track: request.track, compression, timescale });
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.track.name}`);
 
@@ -225,6 +230,7 @@ export class Subscriber {
 			stream = ok.stream;
 			// Unblock any group streams waiting to learn how to decode frames.
 			compression.set(ok.compression);
+			timescale.set(ok.timescale);
 			// Learn the publisher's cache window so a re-serving relay matches it.
 			request.track.cache = ok.cache;
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
@@ -282,7 +288,7 @@ export class Subscriber {
 	async #openSubscribe(
 		state: { stream?: Stream },
 		msg: Subscribe,
-	): Promise<{ stream: Stream; compression: Compression; cache: number }> {
+	): Promise<{ stream: Stream; compression: Compression; cache: number; timescale: number }> {
 		state.stream = await Stream.open(this.#quic);
 		await state.stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(state.stream.writer, this.version);
@@ -292,7 +298,12 @@ export class Subscriber {
 		if (!("ok" in resp)) {
 			throw new Error("first subscribe response must be SUBSCRIBE_OK");
 		}
-		return { stream: state.stream, compression: resp.ok.compression, cache: resp.ok.cache };
+		return {
+			stream: state.stream,
+			compression: resp.ok.compression,
+			cache: resp.ok.cache,
+			timescale: resp.ok.timescale,
+		};
 	}
 
 	/**
@@ -357,7 +368,7 @@ export class Subscriber {
 			return;
 		}
 
-		const { track, compression } = entry;
+		const { track, compression, timescale } = entry;
 		const producer = new Group(group.sequence);
 		track.writeGroup(producer);
 
@@ -376,9 +387,21 @@ export class Subscriber {
 				codec = compression.peek();
 			}
 
+			// timescale resolves together with compression at SUBSCRIBE_OK. A
+			// non-zero scale means every frame is prefixed with a zigzag-delta
+			// timestamp varint (see the lite-05 FRAME format). We don't surface
+			// per-frame timestamps to the application yet, but we must still read
+			// the varint to keep the frame framing in sync with the publisher.
+			const scale = timescale.peek() ?? 0;
+
 			for (;;) {
 				const done = await Promise.race([stream.done(), track.closed, producer.closed]);
 				if (done !== false) break;
+
+				if (scale !== 0) {
+					// Consume (and discard) the per-frame timestamp delta.
+					await stream.u62();
+				}
 
 				const size = await stream.u53();
 				const payload = await stream.read(size);

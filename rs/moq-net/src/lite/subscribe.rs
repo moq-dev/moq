@@ -116,9 +116,10 @@ impl Message for SubscribeOk {
 				self.max_latency.encode(w, version)?;
 				self.start_group.encode(w, version)?;
 				self.end_group.encode(w, version)?;
-				self.compression.to_code().encode(w, version)?;
+				// Order matches draft-lcurley-moq-lite-05 SUBSCRIBE_OK: Timescale, Cache, Compression.
 				self.timescale.map(u64::from).unwrap_or(0).encode(w, version)?;
 				self.cache.encode(w, version)?;
+				self.compression.to_code().encode(w, version)?;
 			}
 		}
 
@@ -171,10 +172,11 @@ impl Message for SubscribeOk {
 				let max_latency = std::time::Duration::decode(r, version)?;
 				let start_group = Option::<u64>::decode(r, version)?;
 				let end_group = Option::<u64>::decode(r, version)?;
-				let compression =
-					Compression::from_code(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
+				// Order matches draft-lcurley-moq-lite-05 SUBSCRIBE_OK: Timescale, Cache, Compression.
 				let timescale = Timescale::new(u64::decode(r, version)?).ok();
 				let cache = std::time::Duration::decode(r, version)?;
+				let compression =
+					Compression::from_code(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
 
 				Ok(Self {
 					priority,
