@@ -25,7 +25,7 @@ export function toEncoderConfig(config: Catalog.AudioConfig, kind: Kind): AudioE
 		const opus: OpusEncoderConfigExt = {
 			application: kind === "voice" ? "voip" : "audio",
 			signal: kind,
-			usedtx: kind === "voice",
+			...(kind === "voice" && { usedtx: true }),
 		};
 		encoderConfig.opus = opus;
 	}
