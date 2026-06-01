@@ -26,13 +26,12 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 /// within sub-milliseconds) plus reasonable churn from a peer restart.
 const STALE_AFTER: Duration = Duration::from_secs(60);
 
-/// Re-poll cadence for `--cluster-connect-api` when the response carries no
-/// `Cache-Control` reuse window (`max-age` / `stale-while-revalidate`).
-const CONNECT_API_DEFAULT_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Floor on the `--cluster-connect-api` poll cadence, so a tiny (or zero) reuse
-/// window can't spin the relay into a tight fetch loop.
-const CONNECT_API_MIN_INTERVAL: Duration = Duration::from_secs(5);
+/// How often the relay re-checks an http(s) `--cluster-connect-api` endpoint. The
+/// HTTP cache middleware suppresses the actual network round-trip while the cached
+/// list is still fresh (per the response's `Cache-Control`), so this is the floor
+/// on responsiveness, not on origin load: a tighter `max-age` means more of these
+/// ticks turn into real conditional GETs.
+const CONNECT_API_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Safety-net re-check interval for a local `--cluster-connect-api` file, backing
 /// up the OS filesystem watcher (and the sole mechanism if no watcher can be made).
@@ -258,14 +257,14 @@ pub struct ClusterConfig {
 	/// Fetch the list of peers to dial from an HTTP(S) URL or a local file,
 	/// reloading at runtime without a restart. The source returns a JSON array
 	/// of peer hostnames: `["a.pop.example", "b.pop.example"]`. An http(s) URL is
-	/// polled (the re-poll cadence follows `Cache-Control` `max-age` +
-	/// `stale-while-revalidate`, with conditional revalidation and stale-if-error
-	/// handled by the shared cache client); a local path is watched via OS
-	/// filesystem notifications (with a periodic re-check fallback). This relay's
-	/// own [`Self::node`] value, when set, is sent as a
-	/// `?node=` query param so the server can return this node's peers. The relay
-	/// keeps the last good list if a fetch fails. Composes with [`Self::connect`]
-	/// and [`Self::mesh`].
+	/// re-checked on a fixed cadence, with caching, conditional revalidation
+	/// (`ETag` / `Last-Modified`), and stale-if-error handled by the shared HTTP
+	/// cache client, so the response's `Cache-Control` controls how often a real
+	/// fetch hits the endpoint; a local path is watched via OS filesystem
+	/// notifications (with a periodic re-check fallback). This relay's own
+	/// [`Self::node`] value, when set, is sent as a `?node=` query param so the
+	/// server can return this node's peers. The relay keeps the last good list if
+	/// a fetch fails. Composes with [`Self::connect`] and [`Self::mesh`].
 	#[arg(
 		id = "cluster-connect-api",
 		long = "cluster-connect-api",
@@ -652,8 +651,11 @@ impl Cluster {
 		}
 	}
 
-	/// Poll an http(s) endpoint for the peer list. The re-poll cadence follows the
-	/// response's `Cache-Control` reuse window (`max-age` + `stale-while-revalidate`).
+	/// Poll an http(s) endpoint for the peer list on a fixed cadence
+	/// ([`CONNECT_API_POLL_INTERVAL`]). Freshness is the HTTP cache middleware's job:
+	/// while the cached list is still fresh, `send` is served from cache with no
+	/// network round-trip; once it's stale the middleware issues a conditional GET
+	/// (`ETag` / `Last-Modified`) and serves the cached body if revalidation fails.
 	/// Fails static: a failed fetch logs and keeps the current dials rather than
 	/// tearing the cluster down.
 	async fn run_connect_api_http(
@@ -664,26 +666,19 @@ impl Cluster {
 		dialed: DialMap,
 		http: ClientWithMiddleware,
 	) {
+		let mut tick = tokio::time::interval(CONNECT_API_POLL_INTERVAL);
 		loop {
+			tick.tick().await;
+
 			let mut req_url = url.clone();
 			if let Some(node) = &node {
 				req_url.query_pairs_mut().append_pair("node", node);
 			}
 
-			let sleep_for = match Self::fetch_peer_list(&http, req_url).await {
-				Ok((list, revalidate)) => {
-					self.apply_peer_list(list, &node, &token, &dialed);
-					revalidate
-						.unwrap_or(CONNECT_API_DEFAULT_INTERVAL)
-						.max(CONNECT_API_MIN_INTERVAL)
-				}
-				Err(err) => {
-					tracing::warn!(%err, "cluster.connect_api fetch failed; keeping current peers");
-					CONNECT_API_DEFAULT_INTERVAL
-				}
-			};
-
-			tokio::time::sleep(sleep_for).await;
+			match Self::fetch_peer_list(&http, req_url).await {
+				Ok(list) => self.apply_peer_list(list, &node, &token, &dialed),
+				Err(err) => tracing::warn!(%err, "cluster.connect_api fetch failed; keeping current peers"),
+			}
 		}
 	}
 
@@ -764,32 +759,22 @@ impl Cluster {
 		}
 	}
 
-	/// Fetch and parse the peer list, returning it alongside the reuse window
-	/// derived from the response's `Cache-Control` header (`max-age` plus any
-	/// `stale-while-revalidate`). The shared cache client also handles conditional
-	/// revalidation and stale-if-error (serving the cached body when revalidation
-	/// fails), so transient endpoint blips don't disturb the dial set.
-	async fn fetch_peer_list(http: &ClientWithMiddleware, url: Url) -> anyhow::Result<(Vec<String>, Option<Duration>)> {
-		let response = http
+	/// Fetch and parse the peer list. Caching, conditional revalidation, and
+	/// stale-if-error are handled by the HTTP cache middleware on `http`, so this
+	/// just issues the request and parses the (possibly cache-served) body.
+	async fn fetch_peer_list(http: &ClientWithMiddleware, url: Url) -> anyhow::Result<Vec<String>> {
+		let body = http
 			.get(url)
 			.send()
 			.await
 			.context("cluster.connect_api request failed")?
 			.error_for_status()
-			.context("cluster.connect_api returned an error status")?;
-
-		let revalidate = response
-			.headers()
-			.get(reqwest::header::CACHE_CONTROL)
-			.and_then(|value| value.to_str().ok())
-			.and_then(revalidate_after);
-		let body = response
+			.context("cluster.connect_api returned an error status")?
 			.text()
 			.await
 			.context("failed to read cluster.connect_api body")?;
-		let list =
-			serde_json::from_str(&body).context("cluster.connect_api response is not a JSON array of hostnames")?;
-		Ok((list, revalidate))
+
+		serde_json::from_str(&body).context("cluster.connect_api response is not a JSON array of hostnames")
 	}
 
 	/// Reconcile a freshly fetched peer list into the dial map: dial peers that
@@ -873,28 +858,6 @@ impl Cluster {
 			.context("failed to connect to cluster peer")?;
 
 		session.closed().await.map_err(Into::into)
-	}
-}
-
-/// How long a fetched peer list may be reused before the relay revalidates,
-/// from a `Cache-Control` value: `max-age` plus any `stale-while-revalidate`
-/// window (RFC 5861). Within that combined window the background poller keeps
-/// serving the current list. `None` if neither directive is present (the caller
-/// falls back to a default interval). The `http-cache` layer doesn't parse
-/// `stale-while-revalidate` itself, so we fold it into the poll cadence here.
-fn revalidate_after(cache_control: &str) -> Option<Duration> {
-	let seconds = |name: &str| {
-		cache_control.split(',').find_map(|directive| {
-			let value = directive.trim().strip_prefix(name)?.trim_start().strip_prefix('=')?;
-			value.trim().parse::<u64>().ok()
-		})
-	};
-
-	match (seconds("max-age"), seconds("stale-while-revalidate")) {
-		(None, None) => None,
-		(max_age, swr) => Some(Duration::from_secs(
-			max_age.unwrap_or(0).saturating_add(swr.unwrap_or(0)),
-		)),
 	}
 }
 
@@ -1100,27 +1063,6 @@ mod tests {
 			list,
 			vec!["a.pop.example".to_string(), "b.pop.example:4443".to_string()]
 		);
-	}
-
-	/// The poll cadence is `max-age` plus any `stale-while-revalidate` window, so
-	/// the relay keeps serving the cached list across that whole span before
-	/// revalidating. Neither directive present -> fall back to the default.
-	#[test]
-	fn revalidate_after_sums_max_age_and_swr() {
-		assert_eq!(revalidate_after("max-age=300"), Some(Duration::from_secs(300)));
-		assert_eq!(
-			revalidate_after("public, max-age=30, stale-while-revalidate=60"),
-			Some(Duration::from_secs(90))
-		);
-		assert_eq!(
-			revalidate_after("stale-while-revalidate=60"),
-			Some(Duration::from_secs(60))
-		);
-		assert_eq!(revalidate_after("max-age = 15"), Some(Duration::from_secs(15)));
-		assert_eq!(revalidate_after("no-cache"), None);
-		assert_eq!(revalidate_after(""), None);
-		// `s-maxage` must not be mistaken for `max-age`.
-		assert_eq!(revalidate_after("s-maxage=99"), None);
 	}
 
 	/// The mesh tiebreaker only dials peers that sort after us, so exactly one
