@@ -3,16 +3,22 @@
 //! [`Stats`] aggregates per-broadcast counter bumps for traffic this relay
 //! node is handling and publishes them on a single `<prefix>/node/<node>`
 //! broadcast (or `<prefix>/node` when no node is configured). The broadcast
-//! carries four tracks, one per `(tier, role)` pair:
+//! carries four per-broadcast tracks, one per `(tier, role)` pair:
 //!
 //! * `publisher.json`           : external (e.g. customer) egress
 //! * `subscriber.json`          : external ingress
 //! * `internal/publisher.json`  : internal (e.g. mTLS cluster peer) egress
 //! * `internal/subscriber.json` : internal ingress
 //!
-//! Each frame is a JSON object mapping broadcast path to a cumulative
-//! counter snapshot. Tier, role, and node are implied by the track and
-//! broadcast paths, so they aren't repeated inside the frame. An entry
+//! plus two session tracks, one per tier, that count connected sessions
+//! keyed by auth root rather than broadcast:
+//!
+//! * `sessions.json`            : external sessions by root
+//! * `internal/sessions.json`   : internal sessions by root
+//!
+//! Each per-broadcast frame is a JSON object mapping broadcast path to a
+//! cumulative counter snapshot. Tier, role, and node are implied by the track
+//! and broadcast paths, so they aren't repeated inside the frame. An entry
 //! appears in the frame for a given `(tier, role)` on any tick where the
 //! broadcast is live (any open counter still exceeds its `*_closed`
 //! counterpart, so a subscription could begin at any moment) or its
@@ -20,6 +26,14 @@
 //! `*_closed` counterpart no traffic can flow, so the entry is dropped. A
 //! downstream aggregator computes rates from successive cumulative
 //! snapshots and slices the data however a dashboard wants.
+//!
+//! Each session frame maps auth root to a `{ sessions, sessions_closed }`
+//! snapshot: `sessions` bumps when a session authenticated under that root
+//! connects, `sessions_closed` when it disconnects, so `sessions -
+//! sessions_closed` is the live session count for the root. This counts
+//! connected sessions regardless of whether any data flows, which is what
+//! presence-based billing wants. A root entry is emitted while live or on the
+//! tick it changed, then dropped once no session under it remains.
 //!
 //! Per-snapshot semantics:
 //!
@@ -38,6 +52,9 @@
 //!   track-level subscription guards opened/dropped.
 //! * `bytes` / `frames` / `groups`: cumulative payload counters bumped from
 //!   the session loops (both lite and IETF).
+//! * `sessions` / `sessions_closed` (session tracks only): cumulative count
+//!   of sessions connected/disconnected under an auth root on this tier.
+//!   Driven by [`StatsHandle::session`].
 //!
 //! Counters are strictly monotonic (only `fetch_add`); a counter going
 //! backwards across snapshots means the underlying entry was garbage
@@ -169,6 +186,26 @@ impl Counters {
 	}
 }
 
+/// Per-(tier, root) session gauge. One of these is shared (via `Arc`) by every
+/// [`SessionStats`] guard for the same auth root on the same tier: `sessions`
+/// bumps on connect, `sessions_closed` on disconnect.
+#[derive(Default, Debug)]
+struct SessionCounters {
+	sessions: AtomicU64,
+	sessions_closed: AtomicU64,
+}
+
+impl SessionCounters {
+	/// Read `(sessions, sessions_closed)`. Closed is loaded with `Acquire`
+	/// before open with `Relaxed`, the same pairing as [`Counters::snapshot`],
+	/// so the readout never shows `closed > open`.
+	fn snapshot(&self) -> (u64, u64) {
+		let closed = self.sessions_closed.load(Ordering::Acquire);
+		let open = self.sessions.load(Ordering::Relaxed);
+		(open, closed)
+	}
+}
+
 /// Raw counter readout. Intermediate type that doesn't escape this module.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct RawCounts {
@@ -296,6 +333,10 @@ pub struct Stats {
 struct StatsShared {
 	origin: OriginProducer,
 	entries: Lock<HashMap<PathOwned, Arc<BroadcastEntry>>>,
+	/// Connected-session gauges keyed by auth root, one map per tier (indexed
+	/// by `Tier::idx`). Independent of any broadcast; surfaced on the session
+	/// tracks.
+	sessions: [Lock<HashMap<PathOwned, Arc<SessionCounters>>>; 2],
 }
 
 /// Per-broadcast counters split by side then tier. The two side fields are
@@ -376,6 +417,10 @@ const TRACK_ORDER: [&str; NUM_SLOTS] = [
 	"internal/subscriber.json",
 ];
 
+/// Session track names, indexed by [`Tier::idx`]: external first, internal
+/// second.
+const SESSION_TRACK_ORDER: [&str; 2] = ["sessions.json", "internal/sessions.json"];
+
 impl Stats {
 	/// Build a stats aggregator from `config`.
 	///
@@ -401,6 +446,7 @@ impl Stats {
 			let shared = Arc::new(StatsShared {
 				origin,
 				entries: Lock::default(),
+				sessions: Default::default(),
 			});
 			let advertised = advertised_path(&prefix, node.as_ref().map(|p| p.as_str()));
 			spawn(run_publisher(Arc::downgrade(&shared), advertised, interval));
@@ -449,6 +495,16 @@ impl Stats {
 				.or_insert_with(|| Arc::new(BroadcastEntry::new()))
 				.clone(),
 		)
+	}
+
+	/// Get-or-create the session gauge for `root` on `tier`. `None` for a no-op
+	/// aggregator. Unlike [`Self::entry`], roots are auth scopes (never under
+	/// the stats prefix), so no cycle-breaking filter is needed.
+	fn session_counters(&self, tier: Tier, root: impl AsPath) -> Option<Arc<SessionCounters>> {
+		let shared = self.shared.as_ref()?;
+		let owned = root.as_path().to_owned();
+		let mut sessions = shared.sessions[tier.idx()].lock();
+		Some(sessions.entry(owned).or_default().clone())
 	}
 }
 
@@ -501,6 +557,15 @@ impl StatsHandle {
 	/// [`Self::publisher_broadcasts`].
 	pub fn subscriber_broadcasts(&self) -> SessionBroadcasts {
 		SessionBroadcasts::new(self.stats.clone(), self.tier, Side::Subscriber)
+	}
+
+	/// Record a connected session authenticated under `root` on this tier. Hold
+	/// the returned guard for the session's lifetime; dropping it bumps
+	/// `sessions_closed`. Counts presence regardless of any data flow, so a
+	/// session that merely connects is still billable. Surfaced on the session
+	/// track for this tier, keyed by `root`.
+	pub fn session(&self, root: impl AsPath) -> SessionStats {
+		SessionStats::new(self.stats.session_counters(self.tier, root))
 	}
 }
 
@@ -715,6 +780,34 @@ impl Drop for BroadcastSubscription {
 	}
 }
 
+/// RAII guard for a connected session, keyed by auth root and tier. Bumps
+/// `sessions` on construction and `sessions_closed` on drop. See
+/// [`StatsHandle::session`].
+#[must_use = "drop the guard to record the session as closed"]
+pub struct SessionStats {
+	/// `None` for a no-op aggregator; bumps are then dropped.
+	counters: Option<Arc<SessionCounters>>,
+}
+
+impl SessionStats {
+	fn new(counters: Option<Arc<SessionCounters>>) -> Self {
+		if let Some(counters) = &counters {
+			counters.sessions.fetch_add(1, Ordering::Relaxed);
+		}
+		Self { counters }
+	}
+}
+
+impl Drop for SessionStats {
+	fn drop(&mut self) {
+		if let Some(counters) = &self.counters {
+			// Release pairs with the snapshot reader's Acquire load of
+			// `sessions_closed`; see `PublisherStats::drop`.
+			counters.sessions_closed.fetch_add(1, Ordering::Release);
+		}
+	}
+}
+
 /// RAII broadcast guard for the publisher role. See [`BroadcastStats::publisher`].
 #[must_use = "drop the guard to record the broadcast as closed"]
 pub struct PublisherStats {
@@ -906,6 +999,60 @@ fn process_slot(counters: &Counters, slot_state: &mut SlotState, mut emit: impl 
 	}
 }
 
+/// Snapshot-task-local change-detection state for one session-track root,
+/// mirroring [`SlotState`].
+#[derive(Default)]
+struct SessionSlotState {
+	prev_emitted: Option<SessionSnapshot>,
+}
+
+/// Per-tick work for one session-track root (a `(tier, root)` gauge): build the
+/// snapshot, update `prev_emitted`, and emit iff a session is connected
+/// (`sessions != sessions_closed`) or the snapshot changed this tick. Same
+/// live-or-changed rule as [`process_slot`].
+fn process_session_slot(
+	counters: &SessionCounters,
+	slot_state: &mut SessionSlotState,
+	mut emit: impl FnMut(SessionSnapshot),
+) {
+	let (sessions, sessions_closed) = counters.snapshot();
+	let snap = SessionSnapshot {
+		sessions,
+		sessions_closed,
+	};
+
+	let live = sessions != sessions_closed;
+	let prev_snap = slot_state.prev_emitted.unwrap_or_default();
+	let changed = snap != prev_snap;
+	if changed {
+		slot_state.prev_emitted = Some(snap);
+	}
+	if live || changed {
+		emit(snap);
+	}
+}
+
+/// Serialize `frame` and write it to `track` unless it's byte-identical to
+/// `last` (idle-frame skipping). On success `last` is updated; on a serialize
+/// or write error it's left untouched so the next tick retries.
+fn flush_track<T: Serialize>(track: &mut TrackProducer, frame: &T, last: &mut Vec<u8>, name: &str) {
+	let json = match serde_json::to_vec(frame) {
+		Ok(b) => b,
+		Err(err) => {
+			tracing::debug!(?err, name, "stats: failed to serialize frame");
+			return;
+		}
+	};
+	if &json == last {
+		return;
+	}
+	if let Err(err) = track.write_frame(json.clone()) {
+		tracing::debug!(?err, name, "stats: failed to write frame");
+		return;
+	}
+	*last = json;
+}
+
 /// Publishes the stats broadcast and writes a frame per tick. Spawned once by
 /// [`Stats::new`] when an origin is set; runs until every [`Stats`] clone is
 /// dropped (`weak.upgrade()` returns `None`).
@@ -915,19 +1062,34 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 	};
 
 	let mut broadcast = Broadcast::new().produce();
+
+	// Create the four per-broadcast tracks and the two session tracks up front.
+	let create = |broadcast: &mut crate::BroadcastProducer, name: &str| match broadcast.create_track(Track {
+		name: name.into(),
+		priority: 0,
+	}) {
+		Ok(t) => Some(t),
+		Err(err) => {
+			tracing::warn!(?err, name, "stats: failed to create track");
+			None
+		}
+	};
+
 	let mut tracks: Vec<TrackProducer> = Vec::with_capacity(NUM_SLOTS);
 	for name in TRACK_ORDER {
-		match broadcast.create_track(Track {
-			name: name.into(),
-			priority: 0,
-		}) {
-			Ok(t) => tracks.push(t),
-			Err(err) => {
-				tracing::warn!(?err, name, "stats: failed to create track");
-				return;
-			}
-		}
+		let Some(t) = create(&mut broadcast, name) else {
+			return;
+		};
+		tracks.push(t);
 	}
+	let mut session_tracks: Vec<TrackProducer> = Vec::with_capacity(SESSION_TRACK_ORDER.len());
+	for name in SESSION_TRACK_ORDER {
+		let Some(t) = create(&mut broadcast, name) else {
+			return;
+		};
+		session_tracks.push(t);
+	}
+
 	if !shared.origin.publish_broadcast(&advertised, broadcast.consume()) {
 		tracing::warn!(advertised = %advertised, "stats: origin rejected stats broadcast");
 		return;
@@ -938,6 +1100,9 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 	// and serves as the diff source for change detection across ticks.
 	let mut local: HashMap<PathOwned, EntrySnapState> = HashMap::new();
 	let mut last_payload: [Vec<u8>; NUM_SLOTS] = Default::default();
+	// Same, for the session tracks: per-tier root -> change-detection state.
+	let mut session_local: [HashMap<PathOwned, SessionSlotState>; 2] = Default::default();
+	let mut session_last_payload: [Vec<u8>; 2] = Default::default();
 
 	let mut ticker = tokio::time::interval(interval);
 	ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -982,29 +1147,35 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 			local.retain(|path, _| map.contains_key(path));
 		}
 
-		for (((frame, last), track), slot) in frames
-			.iter()
-			.zip(last_payload.iter_mut())
-			.zip(tracks.iter_mut())
-			.zip(0usize..)
-		{
-			let json = match serde_json::to_vec(frame) {
-				Ok(b) => b,
-				Err(err) => {
-					tracing::debug!(?err, slot, "stats: failed to serialize frame");
-					continue;
-				}
+		// Session tracks: one frame per tier, keyed by auth root.
+		let mut session_frames: [BTreeMap<String, SessionSnapshot>; 2] = Default::default();
+		for tier_idx in 0..2 {
+			let roots: Vec<(PathOwned, Arc<SessionCounters>)> = {
+				let map = shared.sessions[tier_idx].lock();
+				map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 			};
-			if &json == last {
-				continue;
+			let states = &mut session_local[tier_idx];
+			for (root, counters) in &roots {
+				let state = states.entry(root.clone()).or_default();
+				process_session_slot(counters, state, |snap| {
+					session_frames[tier_idx].insert(root.as_str().to_string(), snap);
+				});
 			}
-			if let Err(err) = track.write_frame(json.clone()) {
-				tracing::debug!(?err, slot, "stats: failed to write frame");
-				// Leave `last_payload` untouched so the next tick retries this
-				// snapshot instead of skipping it as "already written".
-				continue;
-			}
-			*last = json;
+			drop(roots);
+
+			// GC roots whose last session guard has dropped (`strong_count == 1`
+			// is just the map's own `Arc`), then forget their local state. The
+			// final snapshot was already emitted above.
+			let mut map = shared.sessions[tier_idx].lock();
+			map.retain(|_, counters| Arc::strong_count(counters) > 1);
+			states.retain(|root, _| map.contains_key(root));
+		}
+
+		for (i, (frame, last)) in frames.iter().zip(last_payload.iter_mut()).enumerate() {
+			flush_track(&mut tracks[i], frame, last, TRACK_ORDER[i]);
+		}
+		for (i, (frame, last)) in session_frames.iter().zip(session_last_payload.iter_mut()).enumerate() {
+			flush_track(&mut session_tracks[i], frame, last, SESSION_TRACK_ORDER[i]);
 		}
 
 		drop(shared);
@@ -1027,6 +1198,15 @@ struct Snapshot {
 	bytes: u64,
 	frames: u64,
 	groups: u64,
+}
+
+/// What we emit for one root on a session track. `sessions - sessions_closed`
+/// is the live session count for the root.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(serde::Deserialize))]
+struct SessionSnapshot {
+	sessions: u64,
+	sessions_closed: u64,
 }
 
 fn advertised_path(prefix: &Path, node: Option<&str>) -> PathOwned {
@@ -1427,6 +1607,92 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
+	async fn session_counts_by_root() {
+		// session() counts connected sessions per auth root, independent of any
+		// broadcast: open bumps `sessions`, drop bumps `sessions_closed`.
+		let (stats, _origin) = test_stats(Some("sjc"));
+		let ext = stats.tier(Tier::External);
+
+		let snap = |root: &str| {
+			let map = stats.shared().sessions[Tier::External.idx()].lock();
+			map.get(&PathOwned::from(root.to_string())).map(|c| c.snapshot())
+		};
+
+		let a1 = ext.session("acme");
+		let a2 = ext.session("acme");
+		let b1 = ext.session("globex");
+		assert_eq!(snap("acme"), Some((2, 0)), "two sessions under one root");
+		assert_eq!(snap("globex"), Some((1, 0)), "a distinct root is counted separately");
+
+		drop(a1);
+		assert_eq!(snap("acme"), Some((2, 1)));
+		drop(a2);
+		drop(b1);
+		assert_eq!(snap("acme"), Some((2, 2)));
+		assert_eq!(snap("globex"), Some((1, 1)));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn session_track_surfaces_by_root() {
+		let (stats, origin) = test_stats(Some("sjc"));
+		let mut consumer = origin.consume();
+		let _a = stats.tier(Tier::External).session("acme");
+		let _b = stats.tier(Tier::External).session("acme");
+		let _c = stats.tier(Tier::Internal).session("peer");
+
+		tokio::time::advance(Duration::from_millis(1100)).await;
+
+		let (_path, broadcast) = consumer.announced().await.expect("announce");
+		let broadcast = broadcast.expect("active");
+
+		let track = broadcast
+			.subscribe_track(&Track {
+				name: "sessions.json".into(),
+				priority: 0,
+			})
+			.expect("subscribe");
+		let frame = read_session_frame(track).await;
+		let snap = frame.get("acme").expect("root entry");
+		assert_eq!(snap.sessions, 2);
+		assert_eq!(snap.sessions_closed, 0);
+		assert!(
+			!frame.contains_key("peer"),
+			"internal session must not appear on the external track"
+		);
+
+		let int_track = broadcast
+			.subscribe_track(&Track {
+				name: "internal/sessions.json".into(),
+				priority: 0,
+			})
+			.expect("subscribe");
+		let snap = *read_session_frame(int_track).await.get("peer").expect("internal entry");
+		assert_eq!(snap.sessions, 1);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn session_root_dropped_when_empty() {
+		// Once the last session under a root disconnects, the root leaves the
+		// map on the next tick (its final snapshot already emitted).
+		let (stats, _origin) = test_stats(Some("sjc"));
+		let key = PathOwned::from("acme");
+		let session = stats.tier(Tier::External).session("acme");
+
+		drive_ticks(1).await;
+		assert!(
+			stats.shared().sessions[Tier::External.idx()].lock().contains_key(&key),
+			"root present while a session is connected"
+		);
+
+		drop(session);
+		drive_ticks(1).await;
+		assert!(
+			!stats.shared().sessions[Tier::External.idx()].lock().contains_key(&key),
+			"root GC'd after the last session leaves"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
 	async fn unused_slots_dont_surface() {
 		// A broadcast that only sees External Publisher traffic must NOT
 		// appear in the other three tracks with zero counters. Regression
@@ -1511,7 +1777,27 @@ mod tests {
 		);
 	}
 
+	#[test]
+	fn session_snapshot_reads_closed_before_open() {
+		// Same `closed`-before-`open` invariant as `Counters::snapshot`, pinned
+		// at the source level so a reordering refactor can't let
+		// `sessions_closed > sessions` leak into an emitted session frame.
+		let src = include_str!("stats.rs");
+		let body_start = src
+			.find("fn snapshot(&self) -> (u64, u64)")
+			.expect("SessionCounters::snapshot fn present");
+		let body = &src[body_start..];
+		let closed_pos = body.find("self.sessions_closed.load").expect("sessions_closed load");
+		let open_pos = body.find("self.sessions.load").expect("sessions load");
+		assert!(closed_pos < open_pos, "sessions_closed must be loaded before sessions",);
+	}
+
 	async fn read_frame(mut track: crate::TrackConsumer) -> BTreeMap<String, Snapshot> {
+		let bytes = track.read_frame().await.expect("ok").expect("frame");
+		serde_json::from_slice(&bytes).expect("json parse")
+	}
+
+	async fn read_session_frame(mut track: crate::TrackConsumer) -> BTreeMap<String, SessionSnapshot> {
 		let bytes = track.read_frame().await.expect("ok").expect("frame");
 		serde_json::from_slice(&bytes).expect("json parse")
 	}

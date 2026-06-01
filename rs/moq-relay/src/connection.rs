@@ -79,6 +79,12 @@ impl Connection {
 		};
 		let stats = self.cluster.stats.tier(tier);
 
+		// Count this session against its auth root for the whole connection,
+		// independent of any data flow, so presence-based billing sees a client
+		// that connects to e.g. `/acme` even while idle. Dropped when
+		// the connection closes below.
+		let _session_stats = stats.session(&token.root);
+
 		// Accept the connection.
 		// NOTE: subscribe and publish seem backwards because of how relays work.
 		// We publish the tracks the client is allowed to subscribe to.

@@ -158,7 +158,8 @@ tls.disable_verify = true
 
 Per-node stats publishing. When enabled, the relay publishes a single
 `<prefix>/node/<node>` broadcast (or `<prefix>/node` when `node` is unset)
-carrying JSON snapshots of every broadcast it's currently serving.
+carrying JSON snapshots of the broadcasts it's currently serving and of the
+sessions currently connected to it.
 
 ```toml
 [stats]
@@ -178,7 +179,8 @@ interval = 1
 node = "sjc/1"
 ```
 
-Each stats broadcast carries four tracks, one per `(tier, role)` pair:
+Each stats broadcast carries four per-broadcast tracks, one per
+`(tier, role)` pair, plus two session tracks (one per tier):
 
 | Track                       | What it covers                              |
 |-----------------------------|---------------------------------------------|
@@ -186,13 +188,15 @@ Each stats broadcast carries four tracks, one per `(tier, role)` pair:
 | `subscriber.json`           | external ingress                            |
 | `internal/publisher.json`   | internal (e.g. mTLS cluster peer) egress    |
 | `internal/subscriber.json`  | internal ingress                            |
+| `sessions.json`             | external connected sessions, keyed by root  |
+| `internal/sessions.json`    | internal connected sessions, keyed by root  |
 
-Each frame is a JSON object mapping broadcast path to a cumulative
-counter snapshot. An entry surfaces on any tick where the broadcast is
-live (any open counter still exceeds its `*_closed` counterpart, so a
-subscription could begin at any moment) or its snapshot changed since the
-previous tick. Once every counter equals its `*_closed` counterpart no
-traffic can flow, so the entry is dropped:
+Each per-broadcast frame is a JSON object mapping broadcast path to a
+cumulative counter snapshot. An entry surfaces on any tick where the
+broadcast is live (any open counter still exceeds its `*_closed`
+counterpart, so a subscription could begin at any moment) or its snapshot
+changed since the previous tick. Once every counter equals its `*_closed`
+counterpart no traffic can flow, so the entry is dropped:
 
 ```json
 {
@@ -227,6 +231,22 @@ Field semantics:
   track-level subscription guards opened and dropped.
 - `bytes` / `frames` / `groups`: cumulative payload counters from the
   session loops (both the `moq-lite` and IETF `moq-transport` paths).
+
+The session tracks (`sessions.json`, `internal/sessions.json`) instead map
+each auth root to a `{ sessions, sessions_closed }` snapshot. `sessions`
+bumps when a session authenticated under that root connects and
+`sessions_closed` when it disconnects, so `sessions - sessions_closed` is
+the number of sessions currently connected under the root. This counts
+presence regardless of whether any data flows, so a client connected to
+e.g. `/acme` is billable even while idle. A root entry is emitted while live
+or on the tick it changed, then dropped once no session under it remains:
+
+```json
+{
+  "acme":   { "sessions": 3, "sessions_closed": 1 },
+  "globex": { "sessions": 1, "sessions_closed": 0 }
+}
+```
 
 Tier, role, and node are implied by the track and broadcast paths, so
 they aren't repeated inside the frame. Counters are cumulative and
