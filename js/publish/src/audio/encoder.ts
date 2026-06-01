@@ -13,8 +13,6 @@ const FADE_TIME = 0.2;
 const OPUS_BITRATE_PER_CHANNEL = 32_000;
 const OPUS_FRAME_DURATION = 20;
 
-// Compiled and inlined as a blob URL via vite-plugin-worklet.
-import CaptureWorklet from "./capture-worklet.ts?worklet";
 
 // The initial values for our signals.
 export type EncoderProps = {
@@ -96,6 +94,8 @@ export class Encoder {
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
+			// Compiled and inlined as a blob URL via vite-plugin-worklet.
+			const { default: CaptureWorklet } = await import("./capture-worklet.ts?worklet");
 			await context.audioWorklet.addModule(CaptureWorklet);
 			if (context.state === "closed") return;
 
