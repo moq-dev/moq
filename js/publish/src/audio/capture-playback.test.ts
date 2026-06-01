@@ -16,14 +16,14 @@ const BASE_CONFIG: Catalog.AudioConfig = {
 
 describe("toEncoderConfig opus flags", () => {
 	test("voice sets voip application, voice signal, and enables DTX", () => {
-		const { opus } = toEncoderConfig(BASE_CONFIG, "voice") as { opus: Record<string, unknown> };
+		const opus = (toEncoderConfig(BASE_CONFIG, "voice") as unknown as { opus: Record<string, unknown> }).opus;
 		expect(opus?.application).toBe("voip");
 		expect(opus?.signal).toBe("voice");
 		expect(opus?.usedtx).toBe(true);
 	});
 
 	test("music sets audio application, music signal, and leaves DTX off", () => {
-		const { opus } = toEncoderConfig(BASE_CONFIG, "music") as { opus: Record<string, unknown> };
+		const opus = (toEncoderConfig(BASE_CONFIG, "music") as unknown as { opus: Record<string, unknown> }).opus;
 		expect(opus?.application).toBe("audio");
 		expect(opus?.signal).toBe("music");
 		expect(opus?.usedtx).toBeUndefined();

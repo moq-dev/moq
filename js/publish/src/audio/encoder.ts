@@ -13,7 +13,6 @@ const FADE_TIME = 0.2;
 const OPUS_BITRATE_PER_CHANNEL = 32_000;
 const OPUS_FRAME_DURATION = 20;
 
-
 // The initial values for our signals.
 export type EncoderProps = {
 	enabled?: boolean | Signal<boolean>;
