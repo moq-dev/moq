@@ -188,10 +188,10 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
 	let mut track_sub = bc
-		.subscribe_track("video", Subscription::default())
-		.ok()
+		.consume_track("video")
+		.subscribe(Subscription::default())
 		.await
-		.expect("subscribe_track failed");
+		.expect("consume_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
@@ -283,10 +283,10 @@ async fn broadcast_moq_lite_05_without_timescale() {
 	let bc = bc.broadcast().expect("expected announce");
 
 	let mut track_sub = bc
-		.subscribe_track("video", Subscription::default())
-		.ok()
+		.consume_track("video")
+		.subscribe(Subscription::default())
 		.await
-		.expect("subscribe_track failed");
+		.expect("consume_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
