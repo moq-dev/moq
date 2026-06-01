@@ -88,10 +88,10 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.subscribe_track("video", moq_native::moq_net::Subscription::default())
-		.ok()
+		.consume_track("video")
+		.subscribe(moq_native::moq_net::Subscription::default())
 		.await
-		.expect("subscribe_track failed");
+		.expect("consume_track failed");
 
 	// Read one group.
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
@@ -502,10 +502,10 @@ async fn broadcast_websocket() {
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.subscribe_track("video", moq_native::moq_net::Subscription::default())
-		.ok()
+		.consume_track("video")
+		.subscribe(moq_native::moq_net::Subscription::default())
 		.await
-		.expect("subscribe_track failed");
+		.expect("consume_track failed");
 
 	// Read one group.
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
@@ -611,10 +611,10 @@ async fn broadcast_websocket_fallback() {
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.subscribe_track("video", moq_native::moq_net::Subscription::default())
-		.ok()
+		.consume_track("video")
+		.subscribe(moq_native::moq_net::Subscription::default())
 		.await
-		.expect("subscribe_track failed");
+		.expect("consume_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
@@ -854,8 +854,8 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 
 	// First subscription: receive group 0.
 	let mut sub1 = bc
-		.subscribe_track("video", moq_native::moq_net::Subscription::default())
-		.ok()
+		.consume_track("video")
+		.subscribe(moq_native::moq_net::Subscription::default())
 		.await
 		.expect("subscribe1");
 	let mut g = tokio::time::timeout(TIMEOUT, sub1.recv_group())
@@ -882,8 +882,8 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 
 	// Resubscribe well inside the 5s linger window.
 	let mut sub2 = bc
-		.subscribe_track("video", moq_native::moq_net::Subscription::default())
-		.ok()
+		.consume_track("video")
+		.subscribe(moq_native::moq_net::Subscription::default())
 		.await
 		.expect("subscribe2");
 

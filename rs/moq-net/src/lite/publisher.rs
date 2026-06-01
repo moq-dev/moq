@@ -5,7 +5,7 @@ use web_transport_trait::Stats;
 
 use crate::{
 	AnnounceConsumer, AsPath, BroadcastConsumer, Compression, Error, Origin, OriginConsumer, OriginList,
-	StatsHandle as MoqStats, TrackConsumer,
+	StatsHandle as MoqStats, TrackSubscriber,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -394,7 +394,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&subscribe.track, subscription).ok().await?;
+		let track = broadcast
+			.consume_track(&subscribe.track)
+			.subscribe(subscription)
+			.await?;
 
 		// Compress only when the producer marked the track worth it and the
 		// negotiated draft understands the SUBSCRIBE_OK codec field. Older drafts
@@ -478,7 +481,7 @@ struct Subscription<S: web_transport_trait::Session> {
 impl<S: web_transport_trait::Session> Subscription<S> {
 	async fn run_track(
 		mut self,
-		mut track: TrackConsumer,
+		mut track: TrackSubscriber,
 		start_group: Option<u64>,
 		initial_end_group: Option<u64>,
 		reader: &mut crate::coding::Reader<S::RecvStream, Version>,

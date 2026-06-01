@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::SendStream;
 
 use crate::{
-	AsPath, Error, OriginConsumer, Subscription, TrackConsumer,
+	AsPath, Error, OriginConsumer, Subscription, TrackSubscriber,
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	model::GroupConsumer,
@@ -117,7 +117,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			..Default::default()
 		};
 
-		let track = match broadcast.subscribe_track(&msg.track_name, subscription).ok().await {
+		let track = match broadcast.consume_track(&msg.track_name).subscribe(subscription).await {
 			Ok(track) => track,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())
@@ -216,7 +216,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	/// Serve a track using FuturesUnordered for unlimited concurrent groups.
-	async fn run_track(&self, mut track: TrackConsumer, request_id: RequestId) -> Result<(), Error> {
+	async fn run_track(&self, mut track: TrackSubscriber, request_id: RequestId) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
 
 		loop {

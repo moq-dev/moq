@@ -1,14 +1,14 @@
-//! A track is a collection of semi-reliable and semi-ordered streams, split into a [TrackProducer] and [TrackConsumer] handle.
+//! A track is a collection of semi-reliable and semi-ordered streams, split into a [TrackProducer] and [TrackSubscriber] handle.
 //!
 //! A [TrackProducer] creates streams with a sequence number and priority.
 //! The sequence number is used to determine the order of streams, while the priority is used to determine which stream to transmit first.
 //! This may seem counter-intuitive, but is designed for live streaming where the newest streams may be higher priority.
 //! A cloned [TrackProducer] can be used to create streams in parallel, but will error if a duplicate sequence number is used.
 //!
-//! A [TrackConsumer] may not receive all streams in order or at all.
+//! A [TrackSubscriber] may not receive all streams in order or at all.
 //! These streams are meant to be transmitted over congested networks and the key to MoQ Transport is to not block on them.
 //! Streams will be cached for a potentially limited duration added to the unreliable nature.
-//! A cloned [TrackConsumer] will receive a copy of all new streams going forward (fanout).
+//! A cloned [TrackSubscriber] will receive a copy of all new streams going forward (fanout).
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
@@ -31,7 +31,7 @@ const MAX_GROUP_AGE: Duration = Duration::from_secs(5);
 ///
 /// These are fixed by the publisher when the track is created and don't change
 /// while the track is alive. A subscriber learns them via
-/// [`BroadcastConsumer::subscribe_track`](crate::BroadcastConsumer::subscribe_track),
+/// [`BroadcastConsumer::consume_track`](crate::BroadcastConsumer::consume_track),
 /// which returns the publisher's [`Track`] once the subscription is accepted.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -83,7 +83,7 @@ impl From<String> for Track {
 /// Each subscriber holds its own [`Subscription`]; the publisher observes an
 /// aggregate across all live subscribers via [`TrackProducer::subscription`].
 /// A subscriber can change its preferences after the fact with
-/// [`TrackConsumer::update`].
+/// [`TrackSubscriber::update`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subscription {
 	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
@@ -198,7 +198,7 @@ impl State {
 
 	/// Find the smallest-sequence cached group satisfying
 	/// `next_sequence <= seq <= end_sequence (if set)`. Used by
-	/// [`TrackConsumer::next_group`] so the range can be widened (or unset)
+	/// [`TrackSubscriber::next_group`] so the range can be widened (or unset)
 	/// after the fact and previously-skipped cached groups become available
 	/// without scanning past them in arrival order.
 	///
@@ -501,16 +501,16 @@ impl TrackProducer {
 		Ok(())
 	}
 
-	/// Create a new consumer for the track with the given subscriber preferences.
+	/// Subscribe to the track in-process with the given subscriber preferences.
 	///
 	/// The preferences feed the producer's [`Self::subscription`] aggregate and
-	/// can be changed later via [`TrackConsumer::update`].
-	pub fn subscribe(&self, subscription: Subscription) -> TrackConsumer {
+	/// can be changed later via [`TrackSubscriber::update`].
+	pub fn subscribe(&self, subscription: Subscription) -> TrackSubscriber {
 		let subscription = Arc::new(Mutex::new(subscription));
 		if let Ok(mut state) = self.state.write() {
 			state.subscriptions.push(Arc::downgrade(&subscription));
 		}
-		TrackConsumer {
+		TrackSubscriber {
 			info: self.info.clone(),
 			state: self.state.consume(),
 			subscription,
@@ -521,8 +521,8 @@ impl TrackProducer {
 		}
 	}
 
-	/// Create a new consumer for the track with default ([`Subscription::default`]) preferences.
-	pub fn subscribe_default(&self) -> TrackConsumer {
+	/// Subscribe to the track in-process with default ([`Subscription::default`]) preferences.
+	pub fn subscribe_default(&self) -> TrackSubscriber {
 		self.subscribe(Subscription::default())
 	}
 
@@ -614,7 +614,7 @@ impl TrackWeak {
 		self.state.is_closed()
 	}
 
-	pub fn subscribe(&self, subscription: Subscription) -> TrackConsumer {
+	pub fn subscribe(&self, subscription: Subscription) -> TrackSubscriber {
 		let subscription = Arc::new(Mutex::new(subscription));
 		// Register the preference if the producer is still alive so it shows up
 		// in the aggregate; otherwise the consumer will just observe close.
@@ -623,7 +623,7 @@ impl TrackWeak {
 		{
 			state.subscriptions.push(Arc::downgrade(&subscription));
 		}
-		TrackConsumer {
+		TrackSubscriber {
 			info: self.info.clone(),
 			state: self.state.consume(),
 			subscription,
@@ -644,13 +644,17 @@ impl TrackWeak {
 	}
 }
 
-/// A consumer for a track, used to read groups.
+/// A live subscription to a track, used to read its groups.
+///
+/// Created via [`TrackConsumer::subscribe`](crate::TrackConsumer::subscribe), or
+/// directly from a [`TrackProducer`] for an in-process track. Carries this
+/// subscriber's [`Subscription`] preferences, which feed the producer's aggregate.
 #[derive(Clone)]
-pub struct TrackConsumer {
+pub struct TrackSubscriber {
 	info: Track,
 	state: kio::Consumer<State>,
 	/// This subscriber's preferences, shared with the producer's aggregate.
-	/// Cloning a consumer shares the same preferences (one subscription, fanned out).
+	/// Cloning a subscriber shares the same preferences (one subscription, fanned out).
 	subscription: Arc<Mutex<Subscription>>,
 	/// Arrival-order cursor used by [`Self::recv_group`].
 	index: usize,
@@ -666,7 +670,7 @@ pub struct TrackConsumer {
 	end_sequence: Option<u64>,
 }
 
-impl std::ops::Deref for TrackConsumer {
+impl std::ops::Deref for TrackSubscriber {
 	type Target = Track;
 
 	fn deref(&self) -> &Self::Target {
@@ -674,7 +678,7 @@ impl std::ops::Deref for TrackConsumer {
 	}
 }
 
-impl TrackConsumer {
+impl TrackSubscriber {
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
@@ -794,7 +798,7 @@ impl TrackConsumer {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// Whether `other` was cloned from this consumer (shares the same underlying state).
+	/// Whether `other` was cloned from this subscriber (shares the same underlying state).
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
@@ -854,7 +858,7 @@ impl TrackConsumer {
 use futures::FutureExt;
 
 #[cfg(test)]
-impl TrackConsumer {
+impl TrackSubscriber {
 	pub fn assert_group(&mut self) -> GroupConsumer {
 		self.recv_group()
 			.now_or_never()

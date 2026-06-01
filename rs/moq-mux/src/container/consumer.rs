@@ -8,7 +8,7 @@ use super::{Container, Frame};
 /// Decode a moq-lite track into a stream of media [`Frame`]s in latency-bounded
 /// presentation order.
 ///
-/// `Consumer` wraps a [`moq_net::TrackConsumer`] and a [`Container`]
+/// `Consumer` wraps a [`moq_net::TrackSubscriber`] and a [`Container`]
 /// format implementation, typically
 /// [`catalog::hang::Container`](crate::catalog::hang::Container). Yields
 /// decoded frames via [`read`](Self::read).
@@ -32,7 +32,7 @@ use super::{Container, Frame};
 /// Set the latency with [`with_latency`](Self::with_latency) (builder) or
 /// [`set_latency`](Self::set_latency) (mid-stream).
 pub struct Consumer<F: Container> {
-	track: moq_net::TrackConsumer,
+	track: moq_net::TrackSubscriber,
 
 	format: F,
 
@@ -52,7 +52,7 @@ pub struct Consumer<F: Container> {
 
 impl<F: Container> Consumer<F> {
 	/// Create a new Consumer wrapping the given moq-lite consumer.
-	pub fn new(track: moq_net::TrackConsumer, format: F) -> Self {
+	pub fn new(track: moq_net::TrackSubscriber, format: F) -> Self {
 		Self {
 			track,
 			format,
@@ -412,7 +412,7 @@ mod tests {
 	}
 
 	/// Subscribe to a track with default preferences (test helper).
-	fn subscribe_default(track: &moq_net::TrackProducer) -> moq_net::TrackConsumer {
+	fn subscribe_default(track: &moq_net::TrackProducer) -> moq_net::TrackSubscriber {
 		track.subscribe_default()
 	}
 

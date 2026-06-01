@@ -509,7 +509,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, broadcast: BroadcastDynamic, request: TrackRequest) {
 		// Accept right away: IETF group data can arrive before SubscribeOk, so we
 		// need the producer in place to route it. This also unblocks the
-		// downstream subscriber's `subscribe_track`.
+		// downstream subscriber's `consume_track`.
 		let name = request.name().to_string();
 		let mut track = match request.accept(Track::new(name)) {
 			Ok(track) => track,

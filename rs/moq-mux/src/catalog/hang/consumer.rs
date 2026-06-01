@@ -6,18 +6,18 @@ use crate::Result;
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
 ///
-/// This wraps a `moq_net::TrackConsumer` and automatically deserializes JSON
+/// This wraps a `moq_net::TrackSubscriber` and automatically deserializes JSON
 /// catalog data to discover available audio and video tracks in a broadcast.
 #[derive(Clone)]
 pub struct Consumer {
 	/// Access to the underlying track consumer.
-	pub track: moq_net::TrackConsumer,
+	pub track: moq_net::TrackSubscriber,
 	group: Option<moq_net::GroupConsumer>,
 }
 
 impl Consumer {
 	/// Create a new catalog consumer from a MoQ track consumer.
-	pub fn new(track: moq_net::TrackConsumer) -> Self {
+	pub fn new(track: moq_net::TrackSubscriber) -> Self {
 		Self { track, group: None }
 	}
 
@@ -60,8 +60,8 @@ impl Consumer {
 	}
 }
 
-impl From<moq_net::TrackConsumer> for Consumer {
-	fn from(inner: moq_net::TrackConsumer) -> Self {
+impl From<moq_net::TrackSubscriber> for Consumer {
+	fn from(inner: moq_net::TrackSubscriber) -> Self {
 		Self::new(inner)
 	}
 }
