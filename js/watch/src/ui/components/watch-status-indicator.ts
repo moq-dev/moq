@@ -28,7 +28,7 @@ export function watchStatusIndicator(parent: Effect, watch: MoqWatch): HTMLEleme
 	parent.run((effect) => {
 		const url = effect.get(watch.connection.url);
 		const conn = effect.get(watch.connection.status);
-		const broadcast = effect.get(watch.broadcast.status);
+		const broadcast = effect.get(watch.broadcast.output.status);
 		const { variant, text: label } = deriveStatus(url, conn, broadcast);
 
 		dot.className = `status-indicator-dot status-indicator-dot--${variant}`;

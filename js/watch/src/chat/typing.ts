@@ -1,43 +1,56 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
 
-export interface TypingProps {
+// Signals the component reads. Whoever owns the backing Signal does the writing.
+type TypingInput = {
+	broadcast: Getter<Moq.Broadcast | undefined>;
+
+	// The catalog to grab the chat section from.
+	catalog: Getter<Catalog.Root | undefined>;
+
 	// Whether to start downloading the chat.
 	// Defaults to false so you can make sure everything is ready before starting.
-	enabled?: boolean | Signal<boolean>;
-}
+	enabled: Getter<boolean>;
+};
 
-export class Typing {
-	broadcast: Signal<Moq.Broadcast | undefined>;
-	enabled: Signal<boolean>;
+type TypingOutput = {
 	active: Signal<boolean | undefined>;
 
-	#catalog = new Signal<Catalog.Track | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Track | undefined> = this.#catalog;
+	catalog: Signal<Catalog.Track | undefined>;
+};
+
+export type TypingProps = InputProps<TypingInput>;
+
+export class Typing {
+	readonly input: Readonlys<TypingInput>;
+
+	readonly #output: TypingOutput = {
+		active: new Signal<boolean | undefined>(undefined),
+		catalog: new Signal<Catalog.Track | undefined>(undefined),
+	};
+	readonly output = readonlys(this.#output);
 
 	#signals = new Effect();
 
-	constructor(
-		broadcast: Signal<Moq.Broadcast | undefined>,
-		catalog: Signal<Catalog.Root | undefined>,
-		props?: TypingProps,
-	) {
-		this.broadcast = broadcast;
-		this.active = new Signal<boolean | undefined>(undefined);
-		this.enabled = Signal.from(props?.enabled ?? false);
+	constructor(props?: TypingProps) {
+		this.input = {
+			broadcast: getter(props?.broadcast),
+			catalog: getter(props?.catalog),
+			enabled: getter(props?.enabled ?? false),
+		};
 
 		// Grab the chat section from the catalog (if it's changed).
 		this.#signals.run((effect) => {
-			if (!effect.get(this.enabled)) return;
-			this.#catalog.set(effect.get(catalog)?.chat?.typing);
+			if (!effect.get(this.input.enabled)) return;
+			this.#output.catalog.set(effect.get(this.input.catalog)?.chat?.typing);
 		});
 
 		this.#signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect) {
-		const values = effect.getAll([this.enabled, this.#catalog, this.broadcast]);
+		const values = effect.getAll([this.input.enabled, this.#output.catalog, this.input.broadcast]);
 		if (!values) return;
 		const [_, catalog, broadcast] = values;
 
@@ -49,11 +62,11 @@ export class Typing {
 				const value = await track.readBool();
 				if (value === undefined) break;
 
-				this.active.set(value);
+				this.#output.active.set(value);
 			}
 		});
 
-		effect.cleanup(() => this.active.set(undefined));
+		effect.cleanup(() => this.#output.active.set(undefined));
 	}
 
 	close() {

@@ -3,9 +3,10 @@ import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
 import { base64ToBytes } from "../base64";
+import type { Sync } from "../sync";
 import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
 
@@ -13,9 +14,29 @@ import type { Source } from "./source";
 const BUFFERING = 500 as Time.Milli;
 const SWITCH = 100 as Time.Milli;
 
-export type DecoderProps = {
-	enabled?: boolean | Signal<boolean>;
+type DecoderInput = {
+	// Whether to download the video track. Wired from the renderer's output by the parent.
+	enabled: Getter<boolean>;
 };
+
+type DecoderOutput = {
+	// The current frame to render.
+	frame: Signal<VideoFrame | undefined>;
+
+	// The timestamp of the current frame.
+	timestamp: Signal<Time.Milli | undefined>;
+
+	// The display size of the video in pixels, ideally sourced from the catalog.
+	display: Signal<{ width: number; height: number } | undefined>;
+
+	stalled: Signal<boolean>;
+	stats: Signal<Stats | undefined>;
+
+	// Combined buffered ranges (network jitter + decode buffer)
+	buffered: Signal<BufferedRanges>;
+};
+
+export type DecoderProps = InputProps<DecoderInput>;
 
 // The types in VideoDecoderConfig that cause a hard reload.
 // ex. codedWidth/Height are optional and can be changed in-band, so we don't want to trigger a reload.
@@ -23,49 +44,40 @@ export type DecoderProps = {
 type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight">;
 
 export class Decoder implements Backend {
-	enabled: Signal<boolean>; // Don't download any longer
+	readonly input: Readonlys<DecoderInput>;
 	source: Source;
+	sync: Sync;
+
+	readonly #output: DecoderOutput = {
+		frame: new Signal<VideoFrame | undefined>(undefined),
+		timestamp: new Signal<Time.Milli | undefined>(undefined),
+		display: new Signal<{ width: number; height: number } | undefined>(undefined),
+		stalled: new Signal<boolean>(false),
+		stats: new Signal<Stats | undefined>(undefined),
+		buffered: new Signal<BufferedRanges>([]),
+	};
+	readonly output = readonlys(this.#output);
 
 	// The current track running, held so we can cancel it when the new track is ready.
 	#active = new Signal<DecoderTrack | undefined>(undefined);
 
-	// Expose the current frame to render as a signal
-	#frame = new Signal<VideoFrame | undefined>(undefined);
-	readonly frame: Getter<VideoFrame | undefined> = this.#frame;
-
-	// The timestamp of the current frame.
-	#timestamp = new Signal<Time.Milli | undefined>(undefined);
-	readonly timestamp: Getter<Time.Milli | undefined> = this.#timestamp;
-
-	// The display size of the video in pixels, ideally sourced from the catalog.
-	#display = new Signal<{ width: number; height: number } | undefined>(undefined);
-	readonly display: Getter<{ width: number; height: number } | undefined> = this.#display;
-
-	#stalled = new Signal<boolean>(false);
-	readonly stalled: Getter<boolean> = this.#stalled;
-
-	#stats = new Signal<Stats | undefined>(undefined);
-	readonly stats: Getter<Stats | undefined> = this.#stats;
-
-	// Combined buffered ranges (network jitter + decode buffer)
-	#buffered = new Signal<BufferedRanges>([]);
-	readonly buffered: Getter<BufferedRanges> = this.#buffered;
-
 	#signals = new Effect();
 
 	#clearCurrentFrame(): void {
-		this.#frame.update((prev) => {
+		this.#output.frame.update((prev) => {
 			prev?.close();
 			return undefined;
 		});
-		this.#timestamp.set(undefined);
+		this.#output.timestamp.set(undefined);
 	}
 
-	constructor(source: Source, props?: DecoderProps) {
-		this.enabled = Signal.from(props?.enabled ?? false);
+	constructor(source: Source, sync: Sync, props?: DecoderProps) {
+		this.input = {
+			enabled: getter(props?.enabled ?? false),
+		};
 
 		this.source = source;
-		this.source.supported.set(supported); // super hacky
+		this.sync = sync;
 
 		this.#signals.run(this.#runPending.bind(this));
 		this.#signals.run(this.#runActive.bind(this));
@@ -74,31 +86,36 @@ export class Decoder implements Backend {
 	}
 
 	#runPending(effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.source.broadcast, this.source.track, this.source.config]);
+		const values = effect.getAll([
+			this.input.enabled,
+			this.source.input.broadcast,
+			this.source.output.track,
+			this.source.output.config,
+		]);
 		if (!values) {
 			// Close the active track when disabled (e.g. paused or not visible).
 			// The pending cleanup won't do this because it was already promoted to #active.
 			this.#active.set(undefined);
 			return;
 		}
-		const [_, source, track, config] = values;
+		const [_, broadcast, track, config] = values;
 
-		const broadcast: Moq.Broadcast | undefined = effect.get(source.active);
-		if (!broadcast) {
+		const active: Moq.Broadcast | undefined = effect.get(broadcast.output.active);
+		if (!active) {
 			// Going offline should clear the last rendered frame.
 			this.#active.set(undefined);
 			this.#clearCurrentFrame();
-			this.#buffered.set([]);
+			this.#output.buffered.set([]);
 			return;
 		}
 
 		// Start a new pending effect.
 		let pending: DecoderTrack | undefined = new DecoderTrack({
-			source: this.source,
-			broadcast,
+			sync: this.sync,
+			broadcast: active,
 			track,
 			config,
-			stats: this.#stats,
+			stats: this.#output.stats,
 		});
 
 		effect.cleanup(() => pending?.close());
@@ -106,10 +123,10 @@ export class Decoder implements Backend {
 		effect.run((effect) => {
 			if (!pending) return;
 
-			const active = effect.get(this.#active);
-			if (active) {
+			const current = effect.get(this.#active);
+			if (current) {
 				const pendingTimestamp = effect.get(pending.timestamp);
-				const activeTimestamp = effect.get(active.timestamp);
+				const activeTimestamp = effect.get(current.timestamp);
 
 				// Switch to the new track if it's ready and we've caught up enough.
 				if (!pendingTimestamp) return;
@@ -130,7 +147,7 @@ export class Decoder implements Backend {
 		const active = effect.get(this.#active);
 		if (!active) {
 			// Clear stale data when disabled (e.g. paused or not visible).
-			this.#buffered.set([]);
+			this.#output.buffered.set([]);
 			return;
 		}
 
@@ -140,51 +157,51 @@ export class Decoder implements Backend {
 		// proxy() would share the same reference, allowing the source to close our frame.
 		effect.run((inner) => {
 			const frame = inner.get(active.frame);
-			this.#frame.update((prev) => {
+			this.#output.frame.update((prev) => {
 				prev?.close();
 				return frame?.clone();
 			});
 		});
-		effect.proxy(this.#timestamp, active.timestamp);
-		effect.proxy(this.#buffered, active.buffered);
+		effect.proxy(this.#output.timestamp, active.timestamp);
+		effect.proxy(this.#output.buffered, active.buffered);
 	}
 
 	#runDisplay(effect: Effect): void {
-		const catalog = effect.get(this.source.catalog);
+		const catalog = effect.get(this.source.output.catalog);
 		if (!catalog) return;
 
 		const display = catalog.display;
 		if (display) {
-			effect.set(this.#display, {
+			effect.set(this.#output.display, {
 				width: display.width,
 				height: display.height,
 			});
 			return;
 		}
 
-		const frame = effect.get(this.frame);
+		const frame = effect.get(this.#output.frame);
 		if (!frame) return;
 
-		effect.set(this.#display, {
+		effect.set(this.#output.display, {
 			width: frame.displayWidth,
 			height: frame.displayHeight,
 		});
 	}
 
 	#runBuffering(effect: Effect): void {
-		const enabled = effect.get(this.enabled);
+		const enabled = effect.get(this.input.enabled);
 		if (!enabled) return;
 
-		const frame = effect.get(this.frame);
+		const frame = effect.get(this.#output.frame);
 		if (!frame) {
-			this.#stalled.set(true);
+			this.#output.stalled.set(true);
 			return;
 		}
 
-		this.#stalled.set(false);
+		this.#output.stalled.set(false);
 
 		effect.timer(() => {
-			this.#stalled.set(true);
+			this.#output.stalled.set(true);
 		}, BUFFERING);
 	}
 
@@ -196,7 +213,7 @@ export class Decoder implements Backend {
 }
 
 interface DecoderTrackProps {
-	source: Source;
+	sync: Sync;
 	broadcast: Moq.Broadcast;
 	track: string;
 	config: Catalog.VideoConfig;
@@ -205,7 +222,7 @@ interface DecoderTrackProps {
 }
 
 class DecoderTrack {
-	source: Source;
+	sync: Sync;
 	broadcast: Moq.Broadcast;
 	track: string;
 	config: RequiredDecoderConfig;
@@ -226,7 +243,7 @@ class DecoderTrack {
 		// Remove the codedWidth/Height from the config to avoid a hard reload if nothing else has changed.
 		const { codedWidth: _, codedHeight: __, ...requiredConfig } = props.config;
 
-		this.source = props.source;
+		this.sync = props.sync;
 		this.broadcast = props.broadcast;
 		this.track = props.track;
 		this.config = requiredConfig;
@@ -253,7 +270,7 @@ class DecoderTrack {
 						this.frame.set(frame.clone());
 					}
 
-					const wait = this.source.sync.wait(timestamp).then(() => true);
+					const wait = this.sync.wait(timestamp).then(() => true);
 					const ok = await Promise.race([wait, effect.cancel]);
 					if (!ok) return;
 
@@ -300,7 +317,7 @@ class DecoderTrack {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Container.Consumer(sub, {
 			format,
-			latency: this.source.sync.buffer,
+			latency: this.sync.output.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -338,7 +355,7 @@ class DecoderTrack {
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
-				this.source.sync.received(timestamp, "video");
+				this.sync.received(timestamp, "video");
 
 				const chunk = new EncodedVideoChunk({
 					type: frame.keyframe ? "key" : "delta",
@@ -380,7 +397,7 @@ class DecoderTrack {
 
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
-			latency: this.source.sync.buffer,
+			latency: this.sync.output.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -418,7 +435,7 @@ class DecoderTrack {
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
-				this.source.sync.received(timestamp, "video");
+				this.sync.received(timestamp, "video");
 
 				// Track stats
 				this.stats.update((current) => ({
@@ -494,7 +511,7 @@ class DecoderTrack {
 	}
 }
 
-async function supported(config: Catalog.VideoConfig): Promise<boolean> {
+export async function decoderSupported(config: Catalog.VideoConfig): Promise<boolean> {
 	let description: Uint8Array | undefined;
 	if (config.description) {
 		description = Util.Hex.toBytes(config.description);

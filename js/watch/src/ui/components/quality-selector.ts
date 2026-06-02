@@ -23,8 +23,8 @@ export function qualitySelector(parent: Effect, watch: MoqWatch): HTMLElement {
 	wrapper.append(label, select);
 
 	parent.run((effect) => {
-		const catalog = effect.get(watch.backend.video.source.catalog);
-		const active = effect.get(watch.backend.video.source.track);
+		const catalog = effect.get(watch.backend.video.source.output.catalog);
+		const active = effect.get(watch.backend.video.source.output.track);
 		const renditions = catalog?.renditions ?? {};
 
 		select.replaceChildren();
@@ -47,7 +47,7 @@ export function qualitySelector(parent: Effect, watch: MoqWatch): HTMLElement {
 
 	parent.event(select, "change", () => {
 		const value = select.value || undefined;
-		watch.backend.video.source.target.update((prev) => ({ ...prev, name: value }));
+		watch.controls.target.update((prev) => ({ ...prev, name: value }));
 	});
 
 	return wrapper;
