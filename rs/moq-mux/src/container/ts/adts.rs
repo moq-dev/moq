@@ -64,7 +64,7 @@ pub(super) fn write_header(
 ) -> anyhow::Result<[u8; 7]> {
 	// ADTS `profile` is the 2-bit audioObjectType - 1.
 	let profile = object_type.saturating_sub(1) & 0x03;
-	let freq_index = freq_index_from_rate(sample_rate);
+	let freq_index = freq_index_from_rate(sample_rate)?;
 	let channel_config = channel_config_from_count(channel_count);
 
 	let frame_len = raw_len + 7;
@@ -83,13 +83,14 @@ pub(super) fn write_header(
 	Ok(h)
 }
 
-fn freq_index_from_rate(sample_rate: u32) -> u8 {
+fn freq_index_from_rate(sample_rate: u32) -> anyhow::Result<u8> {
+	// ADTS has no explicit-rate escape (unlike AudioSpecificConfig), so a rate
+	// outside the table can't be represented. Fail rather than mislabel it.
 	SAMPLE_RATES
 		.iter()
 		.position(|&r| r == sample_rate)
 		.map(|i| i as u8)
-		// 0xF means "explicit rate follows", which we don't emit; fall back to 44.1 kHz.
-		.unwrap_or(4)
+		.with_context(|| format!("sample rate {sample_rate} not representable in ADTS"))
 }
 
 /// Map an AAC `channel_config` (ISO 14496-3 Table 1.19) to a channel count.

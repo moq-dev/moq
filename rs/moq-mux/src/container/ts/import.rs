@@ -22,10 +22,10 @@ use crate::container::Timestamp;
 
 /// Demuxes an MPEG-TS byte stream into a MoQ broadcast.
 ///
-/// Supports H.264 (stream type 0x1B), H.265 (0x24), and ADTS AAC (0x0F/0x11).
-/// Other elementary streams are logged and dropped. Each elementary stream is
-/// fed to its codec importer, which manages the track, catalog config, and
-/// keyframe-based group boundaries.
+/// Supports H.264 (stream type 0x1B), H.265 (0x24), and ADTS AAC (0x0F). LATM/LOAS
+/// AAC (0x11) is not ADTS-framed and is dropped. Other elementary streams are
+/// logged and dropped. Each elementary stream is fed to its codec importer, which
+/// manages the track, catalog config, and keyframe-based group boundaries.
 pub struct Import {
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::hang::Producer,
@@ -148,7 +148,9 @@ impl Import {
 				import: Box::new(h265::Import::new(self.broadcast.clone(), self.catalog.clone())),
 				unwrap: PtsUnwrap::default(),
 			},
-			StreamType::AdtsAac | StreamType::Mpeg4LoasMultiFormatFramedAudio => Stream::Aac(Box::new(AacStream {
+			// Only ADTS-framed AAC (0x0F). 0x11 is LATM/LOAS, which uses a different
+			// framing and syncword, so it falls through to the ignored arm below.
+			StreamType::AdtsAac => Stream::Aac(Box::new(AacStream {
 				import: None,
 				broadcast: self.broadcast.clone(),
 				catalog: self.catalog.clone(),
