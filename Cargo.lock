@@ -3808,6 +3808,7 @@ dependencies = [
  "moq-msf",
  "moq-net",
  "mp4-atom",
+ "mpeg2ts",
  "num_enum",
  "reqwest 0.12.28",
  "scuffle-av1",
@@ -3966,6 +3967,12 @@ dependencies = [
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "mpeg2ts"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7541fc1a42604cbd10e8607a4e6d4b231db982888fe8065ccb191b751d6368d6"
 
 [[package]]
 name = "muldiv"
