@@ -55,7 +55,7 @@ If you just want to read without tracking, use `signal.peek()` directly.
 ### Computed
 
 A `Computed` is a read-only signal derived from other signals.
-The compute function receives an `Effect` and reads its dependencies with `effect.get(...)`, exactly like a normal effect.
+The compute function reads its dependencies with `c.get(...)`, the same way an effect does.
 
 ```ts
 import { Signal, Computed } from "@moq/signals";
@@ -63,7 +63,7 @@ import { Signal, Computed } from "@moq/signals";
 const first = new Signal("Ada");
 const last = new Signal("Lovelace");
 
-const full = new Computed((effect) => `${effect.get(first)} ${effect.get(last)}`);
+const full = new Computed((c) => `${c.get(first)} ${c.get(last)}`);
 
 full.peek(); // "Ada Lovelace"
 first.set("Grace");
@@ -80,7 +80,7 @@ A computed that reads its own value (directly or through a cycle like `a` → `b
 A standalone `Computed` must be closed to stop tracking its dependencies:
 
 ```ts
-const sum = new Computed((effect) => effect.get(a) + effect.get(b));
+const sum = new Computed((c) => c.get(a) + c.get(b));
 // ...
 sum.close();
 ```
@@ -89,7 +89,7 @@ More commonly, create one inside an effect with `effect.computed(...)`, which cl
 
 ```ts
 const effect = new Effect((effect) => {
-  const total = effect.computed((e) => e.get(a) + e.get(b));
+  const total = effect.computed((c) => c.get(a) + c.get(b));
   console.log(effect.get(total));
 });
 ```
