@@ -1,8 +1,9 @@
 //! Tests for the MPEG-TS exporter.
 //!
-//! The muxer treats codec payloads as opaque (Annex-B passthrough for video,
-//! ADTS framing for audio), so these build a synthetic broadcast of raw bytes,
-//! export to TS, and re-parse with the `mpeg2ts` reader.
+//! Audio is framed as ADTS; video is normalized to length-prefixed NALU by
+//! `ExportSource` and rewritten to Annex-B by the muxer (re-injecting the
+//! parameter sets on keyframes). These build a synthetic broadcast, export to
+//! TS, and re-parse with the `mpeg2ts` reader.
 
 use std::io::Cursor;
 
@@ -14,6 +15,32 @@ use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 
 use crate::catalog::hang::Container as HangContainer;
 use crate::container::{Frame, Producer, Timestamp};
+
+const SC: &[u8] = &[0, 0, 0, 1];
+// Reusable H.264 parameter-set and slice NALs (NAL type = first byte & 0x1f).
+const SPS: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
+const PPS: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+
+/// Concatenate NALs into an Annex-B buffer (4-byte start code before each).
+fn annexb(nals: &[&[u8]]) -> Bytes {
+	let mut buf = BytesMut::new();
+	for nal in nals {
+		buf.extend_from_slice(SC);
+		buf.extend_from_slice(nal);
+	}
+	buf.freeze()
+}
+
+/// Concatenate NALs into a length-prefixed (avc1/hvc1) buffer (4-byte big-endian
+/// length before each), the wire shape of an out-of-band source.
+fn length_prefixed(nals: &[&[u8]]) -> Bytes {
+	let mut buf = BytesMut::new();
+	for nal in nals {
+		buf.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+		buf.extend_from_slice(nal);
+	}
+	buf.freeze()
+}
 
 /// Drive an exporter until it stops producing output, concatenating every chunk.
 ///
@@ -117,42 +144,11 @@ async fn export_aac_roundtrip() {
 	}
 }
 
-#[tokio::test(start_paused = true)]
-async fn export_video_carries_pcr_and_reassembles() {
-	let mut broadcast = moq_net::Broadcast::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
-
-	let track = broadcast.unique_track(".avc3").unwrap();
-	let name = track.name.clone();
-	{
-		let mut cfg = VideoConfig::new(H264 {
-			profile: 0x64,
-			constraints: 0,
-			level: 0x1f,
-			inline: true,
-		});
-		cfg.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(name.clone(), cfg);
-	}
-	let mut producer = Producer::new(track, HangContainer::Legacy);
-
-	// 300 bytes spans multiple TS packets.
-	let payload = Bytes::from(vec![0xABu8; 300]);
-	producer
-		.write(Frame {
-			timestamp: Timestamp::from_millis(0).unwrap(),
-			payload: payload.clone(),
-			keyframe: true,
-		})
-		.unwrap();
-	producer.finish().unwrap();
-
-	// Keep the producers alive (see `export_aac_roundtrip`).
-	let ts = drain(consumer).await;
-	assert_packet_aligned(&ts);
-
-	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+/// Re-parse a TS byte stream: assert the single video stream type, that the
+/// keyframe carries random-access + PCR in an unbounded PES, and return the
+/// reassembled Annex-B elementary stream.
+fn reassemble_video(ts: &[u8], expected_stream_type: StreamType) -> Vec<u8> {
+	let mut reader = TsPacketReader::new(Cursor::new(ts));
 	let mut video_pid = None;
 	let mut saw_random_access = false;
 	let mut saw_pcr = false;
@@ -163,7 +159,7 @@ async fn export_video_carries_pcr_and_reassembles() {
 		match packet.payload {
 			Some(TsPayload::Pmt(pmt)) => {
 				assert_eq!(pmt.es_info.len(), 1);
-				assert_eq!(pmt.es_info[0].stream_type, StreamType::H264);
+				assert_eq!(pmt.es_info[0].stream_type, expected_stream_type);
 				video_pid = Some(pmt.es_info[0].elementary_pid);
 			}
 			Some(TsPayload::PesStart(pes)) => {
@@ -184,5 +180,98 @@ async fn export_video_carries_pcr_and_reassembles() {
 	assert!(saw_random_access, "keyframe should set random_access_indicator");
 	assert!(saw_pcr, "PCR pid should carry a PCR on the keyframe");
 	assert!(unbounded, "video PES should be unbounded");
-	assert_eq!(reassembled.as_slice(), payload.as_ref(), "Annex-B payload mismatch");
+	reassembled
+}
+
+/// In-band avc3: SPS/PPS are inline in the bitstream. ExportSource strips them
+/// into a synthesized avcC, and the muxer re-injects them on the keyframe.
+#[tokio::test(start_paused = true)]
+async fn export_avc3_in_band_reassembles() {
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+
+	let track = broadcast.unique_track(".avc3").unwrap();
+	let name = track.name.clone();
+	{
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: true,
+		});
+		cfg.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(name.clone(), cfg);
+	}
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+
+	// IDR slice (NAL type 5), padded past 184 bytes to span multiple TS packets.
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 300));
+	// Annex-B keyframe: inline SPS + PPS + IDR.
+	producer
+		.write(Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			payload: annexb(&[SPS, PPS, &idr]),
+			keyframe: true,
+		})
+		.unwrap();
+	producer.finish().unwrap();
+
+	// Keep the producers alive (see `export_aac_roundtrip`).
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	let reassembled = reassemble_video(&ts, StreamType::H264);
+	// The parameter sets the muxer re-injected, followed by the slice, all Annex-B.
+	assert_eq!(reassembled.as_slice(), annexb(&[SPS, PPS, &idr]).as_ref());
+}
+
+/// Out-of-band avc1 (e.g. from fmp4 import): length-prefixed NALs with the
+/// SPS/PPS only in the catalog `description` (avcC). The muxer must parse the
+/// avcC, prepend the parameter sets as Annex-B on the keyframe, and rewrite the
+/// length prefixes to start codes.
+#[tokio::test(start_paused = true)]
+async fn export_avc1_out_of_band_reassembles() {
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(SPS, PPS).unwrap();
+
+	let track = broadcast.unique_track(".avc1").unwrap();
+	let name = track.name.clone();
+	{
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description = Some(avcc);
+		catalog.lock().video.renditions.insert(name.clone(), cfg);
+	}
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+
+	// IDR slice (NAL type 5), padded past 184 bytes to span multiple TS packets.
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 300));
+	// Length-prefixed keyframe: just the slice, no inline parameter sets.
+	producer
+		.write(Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			payload: length_prefixed(&[&idr]),
+			keyframe: true,
+		})
+		.unwrap();
+	producer.finish().unwrap();
+
+	// Keep the producers alive (see `export_aac_roundtrip`).
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	let reassembled = reassemble_video(&ts, StreamType::H264);
+	// SPS/PPS from the avcC must precede the slice, all converted to Annex-B.
+	assert_eq!(reassembled.as_slice(), annexb(&[SPS, PPS, &idr]).as_ref());
 }

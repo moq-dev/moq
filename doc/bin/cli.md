@@ -142,9 +142,10 @@ ffmpeg -i input.mp4 -c copy -f mpegts - | \
 moq-cli subscribe --url https://relay.example.com --broadcast my-stream --format ts | ffplay -
 ```
 
-TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. It needs in-band
-video (avc3 / hev1), which is what the moq-cli importers produce; out-of-band
-avc1 / hvc1 sources are rejected.
+TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
+(avc3 / hev1) and out-of-band (avc1 / hvc1, e.g. from an fMP4 import) video
+sources work: the parameter sets are read from the bitstream or the catalog
+`description` and re-injected as Annex-B on each keyframe.
 
 ## Authentication
 
