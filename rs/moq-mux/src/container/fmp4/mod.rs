@@ -342,6 +342,8 @@ pub(crate) fn synthesize_audio_trak(
 	timescale: u64,
 	config: &AudioConfig,
 ) -> Result<mp4_atom::Trak, Error> {
+	use mp4_atom::Decode;
+
 	let audio = mp4_atom::Audio {
 		data_reference_index: 1,
 		channel_count: config.channel_count as u16,
@@ -361,8 +363,6 @@ pub(crate) fn synthesize_audio_trak(
 			btrt: None,
 		}),
 		AudioCodec::AAC(_) => {
-			use mp4_atom::Decode;
-
 			// The catalog `description` is the AudioSpecificConfig (set by the TS
 			// importer via aac::Config::encode, or carried over from a CMAF source).
 			// mp4_atom models the esds DecoderSpecific as the parsed
