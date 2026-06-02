@@ -322,12 +322,13 @@ pub struct AuthConfig {
 	/// and `--auth-public-api` (configuring both is a startup error).
 	/// `--auth-domain` still applies (subdomain->path runs first).
 	///
-	/// Per connection the relay issues
-	/// `GET <base>/<connection-path>?kid=<kid>&mtls=true` over the same cached,
-	/// mTLS-gated HTTP client used by the other auth fetches. `kid` is sent only
-	/// when the connection carries a JWT (value from its header); `mtls=true` is
-	/// sent only when the peer presented a verified client cert. The response is
-	/// a JSON object whose fields are ALL optional:
+	/// Per connection the relay issues `GET <base>?root=<path>&kid=<kid>&mtls=true`
+	/// over the same cached, mTLS-gated HTTP client used by the other auth fetches.
+	/// `root` is the connection path (slashes preserved); `kid` is sent only when
+	/// the connection carries a JWT (value from its header); `mtls=true` is sent
+	/// only when the peer presented a verified client cert. All three are query
+	/// params (never path segments), so the base URL is used verbatim. The
+	/// response is a JSON object whose fields are ALL optional:
 	///
 	/// - `alias`: the canonical full root to scope this connection to (the path
 	///   with its first segment resolved to the project's stable id, the rest
@@ -349,7 +350,8 @@ pub struct AuthConfig {
 	/// comes from this call, so there is no safe fallback; the response cache
 	/// (`Cache-Control` from the endpoint) softens transient failures.
 	///
-	/// Example: `https://api.moq.dev/cluster/auth`.
+	/// Example: `https://api.moq.dev/cluster/auth` (called as
+	/// `?root=demo/room&kid=abc&mtls=true`).
 	#[arg(long = "auth-api", env = "MOQ_AUTH_API")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub auth_api: Option<String>,
@@ -780,14 +782,10 @@ impl Auth {
 		}
 		domains.sort_by_key(|d| std::cmp::Reverse(d.len()));
 
-		// Mirror the public-API base-URL handling: ensure a trailing slash so
-		// `Url::join` appends the connection path rather than replacing the last
-		// URL segment.
+		// The connection path, kid, and mtls flag all go in the query string, so
+		// the base URL is used verbatim (no trailing-slash / path-append handling).
 		let auth_api = if let Some(url_str) = config.auth_api {
-			let mut url = Url::parse(&url_str).context("invalid --auth-api URL")?;
-			if !url.path().ends_with('/') {
-				url.set_path(&format!("{}/", url.path()));
-			}
+			let url = Url::parse(&url_str).context("invalid --auth-api URL")?;
 			Some((url, Self::build_client(&tls)?))
 		} else {
 			None
@@ -834,25 +832,15 @@ impl Auth {
 		}
 	}
 
-	/// Build the unified auth-API request URL: the connection path appended to
-	/// the base as literal path segments, with `kid` (JWT) and `mtls` (verified
-	/// client cert) as query params.
-	///
-	/// Each segment is pushed via `path_segments_mut` rather than `Url::join` so
-	/// client-controlled values (`..`, `?`, etc.) are percent-encoded as literal
-	/// segments instead of being resolved as a relative reference that could
-	/// retarget the path or query.
-	fn auth_api_url(base: &url::Url, path: &str, kid: Option<&str>, mtls: bool) -> Result<url::Url, AuthError> {
+	/// Build the unified auth-API request URL. The connection path (`root`), the
+	/// JWT `kid`, and the `mtls` flag are all query params on the base URL — never
+	/// path segments — so client-controlled values are percent-encoded by
+	/// `query_pairs_mut` and can't retarget the path/query.
+	fn auth_api_url(base: &url::Url, path: &str, kid: Option<&str>, mtls: bool) -> url::Url {
 		let mut url = base.clone();
-		url.path_segments_mut()
-			// Only fails for cannot-be-a-base URLs; the base is a validated http(s) URL.
-			.map_err(|()| AuthError::InvalidUrl(url::ParseError::RelativeUrlWithCannotBeABaseBase))?
-			// The base carries a trailing slash (-> a trailing empty segment); drop
-			// it so we append cleanly instead of producing a double slash.
-			.pop_if_empty()
-			.extend(path.split('/').filter(|s| !s.is_empty()));
 		{
 			let mut q = url.query_pairs_mut();
+			q.append_pair("root", path.trim_matches('/'));
 			if let Some(kid) = kid {
 				q.append_pair("kid", kid);
 			}
@@ -860,7 +848,7 @@ impl Auth {
 				q.append_pair("mtls", "true");
 			}
 		}
-		Ok(url)
+		url
 	}
 
 	/// One unified auth-API call. Fails CLOSED (any network / non-2xx / parse
@@ -873,7 +861,7 @@ impl Auth {
 		kid: Option<&str>,
 		mtls: bool,
 	) -> Result<AuthApiResponse, AuthError> {
-		let url = Self::auth_api_url(base, path, kid, mtls)?;
+		let url = Self::auth_api_url(base, path, kid, mtls);
 		let body = client.get(url).send().await?.error_for_status()?.text().await?;
 		serde_json::from_str(&body).map_err(|_| AuthError::DecodeFailed)
 	}
@@ -2114,7 +2102,7 @@ api = "https://api.example.com/access"
 	// HTTP-based tests (URL key-dir + public API) using wiremock.
 	// ---------------------------------------------------------------------
 
-	use wiremock::matchers::{method, path as path_matcher};
+	use wiremock::matchers::{method, path as path_matcher, query_param};
 	use wiremock::{Mock, MockServer, ResponseTemplate};
 
 	/// Serialize a key as JSON for serving from a mock URL endpoint.
@@ -2769,10 +2757,10 @@ api = "https://api.example.com/access"
 	// Unified --auth-api
 	// ---------------------------------------------------------------------
 
-	/// Build an Auth wired to a wiremock server's `/auth/` unified endpoint.
+	/// Build an Auth wired to a wiremock server's `/auth` unified endpoint.
 	async fn auth_with_api(server: &MockServer) -> Auth {
 		Auth::new(AuthConfig {
-			auth_api: Some(format!("{}/auth/", server.uri())),
+			auth_api: Some(format!("{}/auth", server.uri())),
 			..Default::default()
 		})
 		.await
@@ -2787,7 +2775,8 @@ api = "https://api.example.com/access"
 		let key = create_test_key_with_kid("test-key");
 
 		Mock::given(method("GET"))
-			.and(path_matcher("/auth/demo/room"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo/room"))
 			.respond_with(
 				ResponseTemplate::new(200)
 					.set_body_string(format!(r#"{{"alias":"x7k2qp/room","key":{}}}"#, jwk_body(&key))),
@@ -2823,7 +2812,8 @@ api = "https://api.example.com/access"
 		let key = create_test_key_with_kid("test-key");
 
 		Mock::given(method("GET"))
-			.and(path_matcher("/auth/demo/room/cam"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo/room/cam"))
 			.respond_with(
 				ResponseTemplate::new(200)
 					.set_body_string(format!(r#"{{"alias":"x7k2qp/room/cam","key":{}}}"#, jwk_body(&key))),
@@ -2854,7 +2844,8 @@ api = "https://api.example.com/access"
 		// No JWT: claims come from the `public` field, anchored at the alias root.
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
-			.and(path_matcher("/auth/demo"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo"))
 			.respond_with(
 				ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp","public":{"subscribe":["cam"]}}"#),
 			)
@@ -2876,7 +2867,8 @@ api = "https://api.example.com/access"
 		// first-party dashboard token), defaulting to external otherwise.
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
-			.and(path_matcher("/auth/demo"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo"))
 			.respond_with(
 				ResponseTemplate::new(200)
 					.set_body_string(r#"{"alias":"x7k2qp","public":{"subscribe":[""]},"internal":true}"#),
@@ -2896,7 +2888,8 @@ api = "https://api.example.com/access"
 		let server = MockServer::start().await;
 		let key = create_test_key_with_kid("test-key");
 		Mock::given(method("GET"))
-			.and(path_matcher("/auth/unknown"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "unknown"))
 			.respond_with(ResponseTemplate::new(200).set_body_string(format!(r#"{{"key":{}}}"#, jwk_body(&key))))
 			.mount(&server)
 			.await;
@@ -2924,7 +2917,8 @@ api = "https://api.example.com/access"
 		let server = MockServer::start().await;
 		let key = create_test_key_with_kid("test-key");
 		Mock::given(method("GET"))
-			.and(path_matcher("/auth/demo"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo"))
 			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp"}"#))
 			.mount(&server)
 			.await;
@@ -2967,7 +2961,8 @@ api = "https://api.example.com/access"
 		// internal (trusted peer).
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
-			.and(path_matcher("/auth/demo/room"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo/room"))
 			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp/room"}"#))
 			.mount(&server)
 			.await;
@@ -2982,7 +2977,8 @@ api = "https://api.example.com/access"
 		// The API can demote a cert-verified connection to the external tier.
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
-			.and(path_matcher("/auth/demo"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo"))
 			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp","internal":false}"#))
 			.mount(&server)
 			.await;
