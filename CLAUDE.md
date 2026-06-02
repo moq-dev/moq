@@ -100,7 +100,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 ## Dependencies
 
 - When adding new dependencies, always use the **newest stable version** available.
-- **Prefer a well-maintained third-party crate/library over hand-rolling non-core functionality.** Anything that isn't the project's core competency (the MoQ protocol, media transport, and the hang catalog/container formats) should lean on an existing library: parsers for standard container/codec formats (e.g. MPEG-TS, fMP4, Matroska), compression, serialization, time/date, etc. Reserve hand-written implementations for the wire/protocol layers where we need full control or no suitable crate exists. When two crates compete, weigh maintenance and fit, but a single dependency that covers the need beats a bespoke implementation.
+- **Prefer a maintained third-party crate over hand-rolling non-core functionality** (standard container/codec parsers, compression, serialization, etc.). Reserve bespoke code for the wire/protocol layers where we need full control or no suitable crate exists.
 
 ## Development Tips
 
