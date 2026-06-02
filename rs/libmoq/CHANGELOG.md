@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/moq-dev/moq/compare/libmoq-v0.3.1...libmoq-v0.3.2) - 2026-06-02
+
+### Other
+
+- expose moq_error(), stop logging FFI errors ([#1586](https://github.com/moq-dev/moq/pull/1586))
+- shrink moq-ffi & libmoq staticlibs with LTO (unblocks the moq-go mirror push) ([#1577](https://github.com/moq-dev/moq/pull/1577))
+
 ## [0.3.1](https://github.com/moq-dev/moq/compare/libmoq-v0.3.0...libmoq-v0.3.1) - 2026-05-30
 
 ### Other

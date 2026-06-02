@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.2](https://github.com/moq-dev/moq/compare/moq-native-v0.16.1...moq-native-v0.16.2) - 2026-06-02
+
+### Other
+
+- enable WebSocket keep-alive on the client path ([#1580](https://github.com/moq-dev/moq/pull/1580))
+
 ## [0.16.1](https://github.com/moq-dev/moq/compare/moq-native-v0.16.0...moq-native-v0.16.1) - 2026-05-30
 
 ### Other
