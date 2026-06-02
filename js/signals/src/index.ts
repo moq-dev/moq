@@ -207,19 +207,27 @@ export class Effect {
 	#stack?: string;
 	#scheduled = false;
 
+	// Derived (lazy) mode: instead of rerunning asynchronously when a tracked signal
+	// changes, the effect calls this callback. The owner (a Computed) drives reruns
+	// synchronously via track(). Unset for normal effects.
+	#onInvalidate?: () => void;
+
 	#stopped: PromiseWithResolvers<void>;
 	#closed: PromiseWithResolvers<void>;
 
 	#abort: AbortController = new AbortController();
 
 	// If a function is provided, it will be run with the effect as an argument.
-	constructor(fn?: (effect: Effect) => void) {
+	// onInvalidate switches the effect into derived mode (see #onInvalidate); it's
+	// internal, used by Computed.
+	constructor(fn?: (effect: Effect) => void, onInvalidate?: () => void) {
 		if (DEV) {
 			const debug = new Error("created here:").stack ?? "No stack";
 			Effect.#finalizer.register(this, debug, this);
 		}
 
 		this.#fn = fn;
+		this.#onInvalidate = onInvalidate;
 
 		if (DEV) {
 			this.#stack = new Error().stack;
@@ -228,12 +236,19 @@ export class Effect {
 		this.#stopped = Promise.withResolvers();
 		this.#closed = Promise.withResolvers();
 
-		if (fn) {
+		// Derived effects don't self-run; their owner drives the first run via track().
+		if (fn && !onInvalidate) {
 			this.#schedule();
 		}
 	}
 
 	#schedule(): void {
+		// Derived mode: notify the owner instead of rerunning ourselves.
+		if (this.#onInvalidate) {
+			this.#onInvalidate();
+			return;
+		}
+
 		if (this.#scheduled) return;
 		this.#scheduled = true;
 
@@ -325,6 +340,30 @@ export class Effect {
 		this.#unwatch.push(dispose);
 
 		return value;
+	}
+
+	// Synchronously run fn within this effect's tracking scope, returning its value.
+	// Reads via get() are tracked as usual, but a later change invokes onInvalidate
+	// (derived mode) instead of an async rerun. Used by Computed.
+	track<T>(fn: (effect: Effect) => T): T {
+		if (this.#dispose === undefined) {
+			if (DEV) {
+				console.warn("Effect.track called when closed, running untracked");
+			}
+			return fn(this);
+		}
+
+		this.#abort.abort();
+		this.#abort = new AbortController();
+
+		// Drop the previous run's subscriptions and cleanups before re-tracking.
+		for (const unwatch of this.#unwatch) unwatch();
+		this.#unwatch.length = 0;
+
+		for (const dispose of this.#dispose) dispose();
+		this.#dispose.length = 0;
+
+		return fn(this);
 	}
 
 	// Temporarily set the value of a signal, unsetting it on cleanup.
@@ -456,6 +495,14 @@ export class Effect {
 	// Backwards compatibility with the old name.
 	effect(fn: (effect: Effect) => void) {
 		return this.run(fn);
+	}
+
+	// Create a derived signal whose lifetime is tied to this effect.
+	// It's closed (unsubscribing from its dependencies) when the effect reruns or closes.
+	computed<T>(fn: (effect: Effect) => T): Computed<T> {
+		const computed = new Computed(fn);
+		this.cleanup(() => computed.close());
+		return computed;
 	}
 
 	// Get the values of multiple signals, returning undefined if any are falsy.
@@ -622,6 +669,105 @@ export class Effect {
 
 	proxy<T>(dst: Setter<T>, src: Getter<T>): void {
 		this.subscribe(src, (value) => dst.update(() => value));
+	}
+}
+
+// A read-only signal derived from other signals.
+//
+// The compute function receives an Effect and reads its dependencies with
+// `effect.get(...)`, exactly like a normal effect. The result is cached and
+// recomputed when a dependency changes. Unlike an Effect, the compute function
+// should be pure: a derived value, not a side effect.
+//
+// The first computation runs lazily on first read, so the value is never
+// undefined. Subsequent reads recompute synchronously if a dependency has
+// changed; downstream notification stays async and coalesced, like any signal.
+export class Computed<T> implements Getter<T> {
+	#fn: (effect: Effect) => T;
+	#effect: Effect;
+
+	// Created on the first read so the value is never undefined.
+	#signal?: Signal<T>;
+
+	#dirty = true;
+	#scheduled = false;
+	#closed = false;
+
+	// True while the compute function is running, so a self-referential read can be
+	// caught instead of recursing forever. Also catches transitive cycles (a -> b -> a).
+	#evaluating = false;
+
+	constructor(fn: (effect: Effect) => T) {
+		this.#fn = fn;
+		this.#effect = new Effect(undefined, () => this.#invalidate());
+	}
+
+	#recompute(): void {
+		this.#dirty = false;
+		this.#scheduled = false;
+		this.#evaluating = true;
+
+		try {
+			const value = this.#effect.track(this.#fn);
+			if (this.#signal) {
+				this.#signal.set(value);
+			} else {
+				this.#signal = new Signal(value);
+			}
+		} finally {
+			this.#evaluating = false;
+		}
+	}
+
+	#assertNotEvaluating(): void {
+		if (this.#evaluating) {
+			throw new Error("Computed cycle detected: the compute function read its own value.");
+		}
+	}
+
+	#invalidate(): void {
+		if (this.#closed) return;
+
+		this.#dirty = true;
+		if (this.#scheduled) return;
+		this.#scheduled = true;
+
+		// Recompute on a microtask so multiple dependency changes in one tick coalesce,
+		// matching the async effect model. A read beforehand recomputes synchronously.
+		queueMicrotask(() => {
+			if (this.#dirty && !this.#closed) this.#recompute();
+		});
+	}
+
+	peek(): T {
+		this.#assertNotEvaluating();
+		if (!this.#signal || this.#dirty) this.#recompute();
+		return (this.#signal as Signal<T>).peek();
+	}
+
+	// Alias for peek(), matching Signal.get().
+	get(): T {
+		return this.peek();
+	}
+
+	changed(fn: Subscriber<T>): Dispose {
+		this.#assertNotEvaluating();
+		if (!this.#signal) this.#recompute();
+		return (this.#signal as Signal<T>).changed(fn);
+	}
+
+	subscribe(fn: Subscriber<T>): Dispose {
+		this.#assertNotEvaluating();
+		if (!this.#signal) this.#recompute();
+		return (this.#signal as Signal<T>).subscribe(fn);
+	}
+
+	// Stop tracking dependencies. Required for standalone computeds; an effect.computed()
+	// is closed automatically with its parent effect.
+	close(): void {
+		if (this.#closed) return;
+		this.#closed = true;
+		this.#effect.close();
 	}
 }
 
