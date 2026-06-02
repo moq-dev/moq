@@ -449,7 +449,7 @@ async fn main() -> Result<()> {
 	let result = tokio::select! {
 		res = run(&config) => res,
 		Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
-		_ = tokio::signal::ctrl_c() => Ok(()),
+		res = tokio::signal::ctrl_c() => res.context("failed to listen for ctrl-c"),
 	};
 
 	// run() owns a spawn_blocking emulator thread that loops forever. Returning from main
