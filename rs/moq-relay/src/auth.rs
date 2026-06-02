@@ -322,11 +322,12 @@ pub struct AuthConfig {
 	/// and `--auth-public-api` (configuring both is a startup error).
 	/// `--auth-domain` still applies (subdomain->path runs first).
 	///
-	/// Per connection the relay issues `GET <base>/<connection-path>?kid=<kid>`
-	/// over the same cached, mTLS-gated HTTP client used by the other auth
-	/// fetches. The `kid` query is sent only when the connection carries a JWT
-	/// (value from its header). The response is a JSON object whose fields are
-	/// ALL optional:
+	/// Per connection the relay issues
+	/// `GET <base>/<connection-path>?kid=<kid>&mtls=true` over the same cached,
+	/// mTLS-gated HTTP client used by the other auth fetches. `kid` is sent only
+	/// when the connection carries a JWT (value from its header); `mtls=true` is
+	/// sent only when the peer presented a verified client cert. The response is
+	/// a JSON object whose fields are ALL optional:
 	///
 	/// - `alias`: the canonical full root to scope this connection to (the path
 	///   with its first segment resolved to the project's stable id, the rest
@@ -338,9 +339,10 @@ pub struct AuthConfig {
 	///   no public access.
 	/// - `key`: the verifying JWK (a JSON object, deserialized directly) for the
 	///   requested `kid`. Absent -> key-not-found (the JWT is rejected).
-	/// - `internal`: when `true`, promote this connection to the internal billing
-	///   tier (e.g. a first-party dashboard token). mTLS peers are internal
-	///   regardless; absent/false leaves the connection on the external tier.
+	/// - `internal`: the billing tier. The relay forwards `mtls=true` and lets the
+	///   API decide. Absent defaults per connection: internal for mTLS peers
+	///   (trusted), external for JWT/public. So the API can promote a first-party
+	///   token to internal, or demote a cert-verified connection to external.
 	///
 	/// FAILS CLOSED: any network error, non-2xx status, or parse error rejects
 	/// the connection. Unlike the standalone flags, the verifying key itself
@@ -489,11 +491,11 @@ struct AuthApiResponse {
 	/// moq-token's serde); absent -> not found.
 	#[serde(default)]
 	key: Option<Key>,
-	/// Promote this (non-mTLS) connection to the internal billing tier, e.g. a
-	/// first-party dashboard token. mTLS peers are always internal regardless;
-	/// absent/false leaves a JWT/public connection on the external tier.
+	/// Billing tier for this connection. The relay sends `mtls=true` when the
+	/// peer presented a verified client cert and lets the API decide. Absent
+	/// defaults per path: internal for mTLS peers (trusted), external otherwise.
 	#[serde(default)]
-	internal: bool,
+	internal: Option<bool>,
 }
 
 /// Resolved public access configuration.
@@ -805,39 +807,42 @@ impl Auth {
 		AuthParams::from_url(url, &self.domains)
 	}
 
-	/// Resolve a connection path to its canonical root via the unified
-	/// `--auth-api`, for callers that only need the root (i.e. mTLS peers, which
-	/// are already trusted and skip JWT/public). Returns `path` unchanged when no
-	/// auth API is configured, when `path` is a root (`/`) connection, or on ANY
-	/// error — mTLS peers fail OPEN since the cert is the credential, not the API.
-	pub(crate) async fn resolve_root(&self, path: &str) -> String {
+	/// Resolve the canonical root and billing tier for an mTLS peer via the
+	/// unified `--auth-api`. mTLS peers are already trusted (the cert is the
+	/// credential), so this only fetches the alias + tier and FAILS OPEN: with no
+	/// auth API, a root (`/`) connection, or any error, the path is used unchanged
+	/// and the tier defaults to internal (trusted peer).
+	pub(crate) async fn resolve_mtls(&self, path: &str) -> (String, bool) {
 		let Some((base, client)) = &self.auth_api else {
-			return path.to_string();
+			return (path.to_string(), true);
 		};
 
 		// Root connection ("/" or ""): nothing to resolve, skip the call.
 		if path.trim_matches('/').is_empty() {
-			return path.to_string();
+			return (path.to_string(), true);
 		}
 
-		match Self::fetch_auth_api(client, base, path, None).await {
-			Ok(resp) => resp.alias.unwrap_or_else(|| path.to_string()),
+		match Self::fetch_auth_api(client, base, path, None, true).await {
+			Ok(resp) => (
+				resp.alias.unwrap_or_else(|| path.to_string()),
+				resp.internal.unwrap_or(true),
+			),
 			Err(err) => {
-				tracing::warn!(%err, %path, "auth-api root resolution failed; using path unchanged");
-				path.to_string()
+				tracing::warn!(%err, %path, "auth-api mTLS resolution failed; using path unchanged, internal tier");
+				(path.to_string(), true)
 			}
 		}
 	}
 
 	/// Build the unified auth-API request URL: the connection path appended to
-	/// the base as literal path segments, with `kid` as a query param when a JWT
-	/// is present.
+	/// the base as literal path segments, with `kid` (JWT) and `mtls` (verified
+	/// client cert) as query params.
 	///
 	/// Each segment is pushed via `path_segments_mut` rather than `Url::join` so
 	/// client-controlled values (`..`, `?`, etc.) are percent-encoded as literal
 	/// segments instead of being resolved as a relative reference that could
 	/// retarget the path or query.
-	fn auth_api_url(base: &url::Url, path: &str, kid: Option<&str>) -> Result<url::Url, AuthError> {
+	fn auth_api_url(base: &url::Url, path: &str, kid: Option<&str>, mtls: bool) -> Result<url::Url, AuthError> {
 		let mut url = base.clone();
 		url.path_segments_mut()
 			// Only fails for cannot-be-a-base URLs; the base is a validated http(s) URL.
@@ -846,8 +851,14 @@ impl Auth {
 			// it so we append cleanly instead of producing a double slash.
 			.pop_if_empty()
 			.extend(path.split('/').filter(|s| !s.is_empty()));
-		if let Some(kid) = kid {
-			url.query_pairs_mut().append_pair("kid", kid);
+		{
+			let mut q = url.query_pairs_mut();
+			if let Some(kid) = kid {
+				q.append_pair("kid", kid);
+			}
+			if mtls {
+				q.append_pair("mtls", "true");
+			}
 		}
 		Ok(url)
 	}
@@ -860,8 +871,9 @@ impl Auth {
 		base: &url::Url,
 		path: &str,
 		kid: Option<&str>,
+		mtls: bool,
 	) -> Result<AuthApiResponse, AuthError> {
-		let url = Self::auth_api_url(base, path, kid)?;
+		let url = Self::auth_api_url(base, path, kid, mtls)?;
 		let body = client.get(url).send().await?.error_for_status()?.text().await?;
 		serde_json::from_str(&body).map_err(|_| AuthError::DecodeFailed)
 	}
@@ -885,7 +897,7 @@ impl Auth {
 			None => None,
 		};
 
-		let resp = Self::fetch_auth_api(client, base, &params.path, kid.as_deref()).await?;
+		let resp = Self::fetch_auth_api(client, base, &params.path, kid.as_deref(), false).await?;
 		// Absent alias -> use the request path unchanged.
 		let root = resp.alias.unwrap_or_else(|| params.path.clone());
 
@@ -908,9 +920,9 @@ impl Auth {
 		};
 
 		let mut token = Self::finalize(&root, claims)?;
-		// The API may promote a non-mTLS connection to the internal tier (mTLS
-		// peers never reach this path; they're already internal).
-		token.internal = resp.internal;
+		// Non-mTLS connections default to external; the API may promote specific
+		// ones (e.g. a first-party dashboard token) to internal.
+		token.internal = resp.internal.unwrap_or(false);
 		Ok(token)
 	}
 
@@ -2950,8 +2962,9 @@ api = "https://api.example.com/access"
 	}
 
 	#[tokio::test]
-	async fn auth_api_mtls_resolve_root_uses_alias() -> anyhow::Result<()> {
-		// mTLS peers only need the canonical root; resolve_root returns the alias.
+	async fn auth_api_mtls_resolves_alias_and_tier() -> anyhow::Result<()> {
+		// mTLS peers get the canonical root + tier; absent `internal` defaults to
+		// internal (trusted peer).
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
 			.and(path_matcher("/auth/demo/room"))
@@ -2960,14 +2973,29 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		assert_eq!(auth.resolve_root("/demo/room").await, "x7k2qp/room");
+		assert_eq!(auth.resolve_mtls("/demo/room").await, ("x7k2qp/room".to_string(), true));
 		Ok(())
 	}
 
 	#[tokio::test]
-	async fn auth_api_resolve_root_skips_api_for_root() -> anyhow::Result<()> {
+	async fn auth_api_mtls_tier_override_external() -> anyhow::Result<()> {
+		// The API can demote a cert-verified connection to the external tier.
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth/demo"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp","internal":false}"#))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		assert_eq!(auth.resolve_mtls("/demo").await, ("x7k2qp".to_string(), false));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_mtls_skips_api_for_root() -> anyhow::Result<()> {
 		// A root connection ("/") has no project segment, so cluster peers don't
-		// hit the API at all.
+		// hit the API at all; they stay internal.
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
 			.respond_with(ResponseTemplate::new(500))
@@ -2976,7 +3004,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		assert_eq!(auth.resolve_root("/").await, "/");
+		assert_eq!(auth.resolve_mtls("/").await, ("/".to_string(), true));
 		Ok(())
 	}
 

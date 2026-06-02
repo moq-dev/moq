@@ -121,10 +121,12 @@ impl Connection {
 			tracing::debug!("mTLS peer authenticated");
 			// Scope the grant to the canonical root. An mTLS publisher dialing a
 			// vanity alias lands on the same tree a JWT would; cluster peers dial
-			// "/", which resolves to an empty (unscoped) root. mTLS peers skip the
-			// JWT/public parts of --auth-api, so only the alias is resolved.
-			let root = self.auth.resolve_root(&params.path).await;
-			return Ok(AuthToken::unrestricted(Path::new(&root).to_owned()));
+			// "/", which resolves to an empty (unscoped) root. The API also returns
+			// the billing tier (defaulting to internal for trusted peers).
+			let (root, internal) = self.auth.resolve_mtls(&params.path).await;
+			let mut token = AuthToken::unrestricted(Path::new(&root).to_owned());
+			token.internal = internal;
+			return Ok(token);
 		}
 
 		Ok(self.auth.verify(&params).await?)
