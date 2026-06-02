@@ -166,15 +166,24 @@ export class MultiBackend implements Backend {
 			paused: this.paused,
 		});
 
-		const videoRenderer = new Video.Renderer(videoSource, {
-			canvas: element,
-			paused: this.paused,
+		const videoElement = new Video.Element({ canvas: element });
+		const videoRenderer = new Video.Renderer(videoSource, { canvas: element });
+
+		// Sole writer of videoSource.enabled: download while on-screen and playing,
+		// or until a frame is painted to freeze on as a paused poster. The renderer
+		// keeps painting that last frame, so pausing never falls back to black.
+		effect.run((inner) => {
+			const paused = inner.get(this.paused);
+			const visible = inner.get(videoElement.visible);
+			const rendered = inner.get(videoRenderer.rendered);
+			videoSource.enabled.set(visible && (!paused || !rendered));
 		});
 
 		effect.cleanup(() => {
 			videoSource.close();
 			audioSource.close();
 			audioEmitter.close();
+			videoElement.close();
 			videoRenderer.close();
 		});
 

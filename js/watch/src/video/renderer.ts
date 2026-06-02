@@ -1,10 +1,14 @@
 import { Time } from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 
 export type RendererProps = {
 	canvas?: HTMLCanvasElement | Signal<HTMLCanvasElement | undefined>;
-	paused?: boolean | Signal<boolean>;
+
+	// Whether to paint decoded frames. When false the canvas is blanked and the
+	// last frame released. This gates display only; download gating lives on the
+	// Decoder's own `enabled`.
+	enabled?: boolean | Signal<boolean>;
 };
 
 // An component to render a video to a canvas.
@@ -14,8 +18,8 @@ export class Renderer {
 	// The canvas to render the video to.
 	canvas: Signal<HTMLCanvasElement | undefined>;
 
-	// Whether the video is paused.
-	paused: Signal<boolean>;
+	// Whether to paint frames (true) or blank the canvas (false).
+	enabled: Signal<boolean>;
 
 	// The most recently rendered frame, updated after each rAF paint.
 	readonly frame = new Signal<VideoFrame | undefined>(undefined);
@@ -23,22 +27,24 @@ export class Renderer {
 	// The media timestamp of the most recently rendered frame.
 	readonly timestamp = new Signal<Time.Milli | undefined>(undefined);
 
+	// Whether a real frame is currently painted. A download gate can watch this
+	// to stop once a paused poster is on screen, keyed off the actual paint (post-rAF).
+	#rendered = new Signal(false);
+	readonly rendered: Getter<boolean> = this.#rendered;
+
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
-	#visible = new Signal(false);
 	#signals = new Effect();
 
 	constructor(decoder: Decoder, props?: RendererProps) {
 		this.decoder = decoder;
 		this.canvas = Signal.from(props?.canvas);
-		this.paused = Signal.from(props?.paused ?? false);
+		this.enabled = Signal.from(props?.enabled ?? true);
 
 		this.#signals.run((effect) => {
 			const canvas = effect.get(this.canvas);
 			this.#ctx.set(canvas?.getContext("2d") ?? undefined);
 		});
 
-		this.#signals.run(this.#runVisible.bind(this));
-		this.#signals.run(this.#runEnabled.bind(this));
 		this.#signals.run(this.#runRender.bind(this));
 		this.#signals.run(this.#runResize.bind(this));
 	}
@@ -56,78 +62,25 @@ export class Renderer {
 		}
 	}
 
-	// Track whether the canvas is visible in the viewport and the tab is focused.
-	#runVisible(effect: Effect): void {
-		const canvas = effect.get(this.canvas);
-		if (!canvas) {
-			this.#visible.set(false);
-			return;
-		}
-
-		let intersecting = false;
-
-		const update = () => {
-			this.#visible.set(intersecting && !document.hidden);
-		};
-
-		const observer = new IntersectionObserver(
-			(entries) => {
-				for (const entry of entries) {
-					intersecting = entry.isIntersecting;
-					update();
-				}
-			},
-			{ threshold: 0.01 },
-		);
-
-		effect.event(document, "visibilitychange", update);
-
-		observer.observe(canvas);
-		effect.cleanup(() => observer.disconnect());
-		effect.cleanup(() => this.#visible.set(false));
-	}
-
-	// Detect when video should be downloaded.
-	#runEnabled(effect: Effect): void {
-		const paused = effect.get(this.paused);
-		const visible = effect.get(this.#visible);
-
-		effect.cleanup(() => this.decoder.enabled.set(false));
-
-		if (!paused) {
-			this.decoder.enabled.set(visible);
-			return;
-		}
-
-		// When paused, fetch a single preview frame then disable.
-		const frame = effect.get(this.decoder.frame);
-		this.decoder.enabled.set(!frame);
-	}
-
 	#runRender(effect: Effect) {
 		const ctx = effect.get(this.#ctx);
 		if (!ctx) return;
 
-		const frame = effect.get(this.decoder.frame);
+		// When disabled, blank the canvas and release the last frame instead of
+		// painting. The decoder keeps its frame, so re-enabling repaints it.
+		const enabled = effect.get(this.enabled);
+		const frame = enabled ? effect.get(this.decoder.frame) : undefined;
 
 		// Request a callback to render the frame based on the monitor's refresh rate.
-		// Always render, even when paused (to show last frame).
 		let animate: number | undefined = requestAnimationFrame(() => {
 			this.#render(ctx, frame);
 
-			if (frame) {
-				this.frame.update((current) => {
-					current?.close();
-					return frame.clone();
-				});
-				this.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
-			} else {
-				this.frame.update((current) => {
-					current?.close();
-					return undefined;
-				});
-				this.timestamp.set(undefined);
-			}
+			this.frame.update((current) => {
+				current?.close();
+				return frame?.clone();
+			});
+			this.timestamp.set(frame ? Time.Milli.fromMicro(frame.timestamp as Time.Micro) : undefined);
+			this.#rendered.set(!!frame);
 
 			animate = undefined;
 		});
