@@ -81,6 +81,7 @@ export class Game {
 	readonly videoSource: Watch.Video.Source;
 	readonly videoDecoder: Watch.Video.Decoder;
 	readonly videoRenderer: Watch.Video.Renderer;
+	readonly videoElement: Watch.Video.Element;
 	readonly audioSource: Watch.Audio.Source;
 	readonly audioDecoder: Watch.Audio.Decoder;
 	readonly audioEmitter: Watch.Audio.Emitter;
@@ -118,16 +119,20 @@ export class Game {
 
 		this.#signals.run(this.#runPixelBudget.bind(this));
 
-		// Video is enabled on the grid or when this game is expanded.
 		const videoEnabled = new Moq.Signals.Signal(true);
-		this.#signals.run(this.#runVideoEnabled.bind(this, videoEnabled));
-
 		this.videoDecoder = new Watch.Video.Decoder(this.videoSource, { enabled: videoEnabled });
 		this.#signals.cleanup(() => this.videoDecoder.close());
 
-		// Renderer needs a canvas — created by the UI layer, set via setCanvas().
+		// Renderer needs a canvas — created by the UI layer, set via GameCard.
 		this.videoRenderer = new Watch.Video.Renderer(this.videoDecoder);
 		this.#signals.cleanup(() => this.videoRenderer.close());
+
+		// Observe that canvas so we only download while the tile is actually on-screen.
+		this.videoElement = new Watch.Video.Element({ canvas: this.videoRenderer.canvas });
+		this.#signals.cleanup(() => this.videoElement.close());
+
+		// Video is enabled on the grid or when this game is expanded, but only while visible.
+		this.#signals.run(this.#runVideoEnabled.bind(this, videoEnabled));
 
 		// Audio pipeline — the emitter controls muted (volume) and paused (download).
 		this.audioSource = new Watch.Audio.Source(this.sync, { broadcast: this.broadcast });
@@ -210,7 +215,9 @@ export class Game {
 
 	#runVideoEnabled(videoEnabled: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
 		const exp = effect.get(this.expanded);
-		videoEnabled.set(exp === undefined || exp === this.sessionId);
+		const visible = effect.get(this.videoElement.visible);
+		// Download on the grid or when expanded, but never for an off-screen tile.
+		videoEnabled.set((exp === undefined || exp === this.sessionId) && visible);
 	}
 
 	#runAudioPaused(audioPaused: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
