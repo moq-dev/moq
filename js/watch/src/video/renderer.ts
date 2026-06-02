@@ -7,7 +7,7 @@ export type RendererProps = {
 	paused?: boolean | Signal<boolean>;
 };
 
-// An component to render a video to a canvas.
+// A component to render a video to a canvas.
 export class Renderer {
 	decoder: Decoder;
 
@@ -53,6 +53,13 @@ export class Renderer {
 		if (canvas.width !== display.width || canvas.height !== display.height) {
 			canvas.width = display.width;
 			canvas.height = display.height;
+
+			// Setting width/height blanks the canvas. Repaint the cached frame so a
+			// resize while paused (decoder off, no new frames coming) doesn't leave
+			// the canvas black.
+			const ctx = this.#ctx.peek();
+			const frame = this.frame.peek();
+			if (ctx && frame) this.#draw(ctx, frame);
 		}
 	}
 
@@ -100,7 +107,7 @@ export class Renderer {
 		}
 
 		// When paused, fetch a single preview frame then disable.
-		const frame = effect.get(this.decoder.frame);
+		const frame = effect.get(this.frame);
 		this.decoder.enabled.set(!frame);
 	}
 
@@ -108,45 +115,36 @@ export class Renderer {
 		const ctx = effect.get(this.#ctx);
 		if (!ctx) return;
 
-		const frame = effect.get(this.decoder.frame);
+		// When the canvas (and therefore ctx) is replaced, the new canvas starts
+		// blank. Paint the cached frame once so a swap while paused isn't black
+		// until playback resumes.
+		const cached = this.frame.peek();
+		if (cached) this.#draw(ctx, cached);
 
-		// Request a callback to render the frame based on the monitor's refresh rate.
-		// Always render, even when paused (to show last frame).
-		let animate: number | undefined = requestAnimationFrame(() => {
-			this.#render(ctx, frame);
+		let rafId: number | undefined;
 
+		const tick = () => {
+			const frame = this.decoder.consume();
 			if (frame) {
-				this.frame.update((current) => {
-					current?.close();
-					return frame.clone();
+				this.#draw(ctx, frame);
+				this.frame.update((old) => {
+					old?.close();
+					return frame; // transfer ownership from consume()
 				});
 				this.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
-			} else {
-				this.frame.update((current) => {
-					current?.close();
-					return undefined;
-				});
-				this.timestamp.set(undefined);
 			}
 
-			animate = undefined;
-		});
+			rafId = requestAnimationFrame(tick);
+		};
 
-		// Clean up any pending animation request.
+		rafId = requestAnimationFrame(tick);
+
 		effect.cleanup(() => {
-			if (animate) cancelAnimationFrame(animate);
+			if (rafId !== undefined) cancelAnimationFrame(rafId);
 		});
 	}
 
-	#render(ctx: CanvasRenderingContext2D, frame?: VideoFrame) {
-		if (!frame) {
-			// Clear canvas when no frame
-			ctx.fillStyle = "#000";
-			ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-			return;
-		}
-
-		// Prepare background and transformations for this draw
+	#draw(ctx: CanvasRenderingContext2D, frame: VideoFrame) {
 		ctx.save();
 		ctx.fillStyle = "#000";
 		ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);

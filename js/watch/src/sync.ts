@@ -37,10 +37,6 @@ export class Sync {
 	#buffer = new Signal<Time.Milli>(Time.Milli.zero);
 	readonly buffer: Signal<Time.Milli> = this.#buffer;
 
-	// A ghetto way to learn when the reference/buffer changes.
-	// There's probably a way to use Effect, but lets keep it simple for now.
-	#update: PromiseWithResolvers<void>;
-
 	// The media timestamp of the most recently received frame.
 	readonly timestamp = new Signal<Time.Milli | undefined>(undefined);
 
@@ -62,8 +58,6 @@ export class Sync {
 		this.#connection = props?.connection;
 		this.audio = Signal.from(props?.audio);
 		this.video = Signal.from(props?.video);
-
-		this.#update = Promise.withResolvers();
 
 		this.signals.run(this.#runJitter.bind(this));
 		this.signals.run(this.#runBuffer.bind(this));
@@ -105,9 +99,6 @@ export class Sync {
 
 		const buffer = Time.Milli.add(Time.Milli.max(video, audio), jitter);
 		this.#buffer.set(buffer);
-
-		this.#update.resolve();
-		this.#update = Promise.withResolvers();
 	}
 
 	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
@@ -118,9 +109,9 @@ export class Sync {
 		const currentRef = this.#reference.peek();
 
 		if (currentRef !== undefined) {
-			// Check if `wait()` would not sleep at all.
-			// NOTE: We check here instead of in `wait()` so we can identify when frames are received late.
-			// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
+			// Detect frames received later than their scheduled play time, so we can
+			// distinguish "the network is dropping us behind" from CPU starvation in
+			// downstream pacing.
 			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#buffer.peek());
 			if (sleep < 0) {
 				const entry = this.#late.get(label);
@@ -147,8 +138,6 @@ export class Sync {
 		}
 
 		this.#reference.set(ref);
-		this.#update.resolve();
-		this.#update = Promise.withResolvers();
 	}
 
 	// The PTS that should be rendering right now, derived from the reference + buffer.
@@ -157,35 +146,6 @@ export class Sync {
 		const reference = this.#reference.peek();
 		if (reference === undefined) return undefined;
 		return Time.Milli.sub(Time.Milli.sub(Time.Milli.now(), reference), this.#buffer.peek());
-	}
-
-	// Sleep until it's time to render this frame.
-	async wait(timestamp: Time.Milli): Promise<void> {
-		const reference = this.#reference.peek();
-		if (reference === undefined) {
-			throw new Error("reference not set; call update() first");
-		}
-
-		for (;;) {
-			// Sleep until it's time to decode the next frame.
-			// NOTE: This function runs in parallel for each frame.
-			const now = Time.Milli.now();
-			const ref = Time.Milli.sub(now, timestamp);
-
-			const currentRef = this.#reference.peek();
-			if (currentRef === undefined) return;
-
-			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#buffer.peek());
-			if (sleep <= 0) return;
-
-			// Skip setTimeout for small sleeps; the timer resolution (~4ms) would overshoot.
-			if (sleep < 5) return;
-
-			const wait = new Promise((resolve) => setTimeout(resolve, sleep)).then(() => true);
-
-			const ok = await Promise.race([this.#update.promise, wait]);
-			if (ok) return;
-		}
 	}
 
 	static #formatDuration(ms: number): string {
