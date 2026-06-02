@@ -239,6 +239,10 @@ pub struct AuthConfig {
 	///
 	/// File path: reads `{dir}/{kid}.jwk` from disk.
 	/// URL: fetches `{url}/{kid}.jwk` with HTTP caching.
+	///
+	/// DEPRECATED (URL form): prefer the unified `--auth-api`, which resolves the
+	/// key in the same call as public access and the alias. The file-directory
+	/// form remains supported for standalone relays.
 	#[arg(long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR")]
 	pub key_dir: Option<String>,
 
@@ -275,6 +279,9 @@ pub struct AuthConfig {
 	/// CLI-only shorthand: `--auth-public-api <url>` sets a URL endpoint that returns
 	/// `{ subscribe: [...], publish: [...] }` per namespace. The connection namespace is
 	/// appended to the URL. For TOML, use `[auth.public]` with an `api` field instead.
+	///
+	/// DEPRECATED: prefer the unified `--auth-api`, which returns public access in
+	/// the same call as the key and alias.
 	#[arg(long = "auth-public-api", env = "MOQ_AUTH_PUBLIC_API")]
 	#[serde(skip)]
 	pub public_api: Option<String>,
@@ -329,8 +336,8 @@ pub struct AuthConfig {
 	/// - `public`: `{ "subscribe": [...], "publish": [...] }` anonymous access
 	///   prefixes, relative to the root, used when there is no JWT. Absent ->
 	///   no public access.
-	/// - `key`: the verifying JWK (a JSON string) for the requested `kid`.
-	///   Absent -> key-not-found (the JWT is rejected).
+	/// - `key`: the verifying JWK (a JSON object, deserialized directly) for the
+	///   requested `kid`. Absent -> key-not-found (the JWT is rejected).
 	/// - `internal`: when `true`, promote this connection to the internal billing
 	///   tier (e.g. a first-party dashboard token). mTLS peers are internal
 	///   regardless; absent/false leaves the connection on the external tier.
@@ -478,9 +485,10 @@ struct AuthApiResponse {
 	/// Anonymous access prefixes; absent -> no public access.
 	#[serde(default)]
 	public: Option<PublicResponse>,
-	/// Verifying JWK (JSON string) for the requested kid; absent -> not found.
+	/// Verifying JWK for the requested kid (deserialized directly via
+	/// moq-token's serde); absent -> not found.
 	#[serde(default)]
-	key: Option<String>,
+	key: Option<Key>,
 	/// Promote this (non-mTLS) connection to the internal billing tier, e.g. a
 	/// first-party dashboard token. mTLS peers are always internal regardless;
 	/// absent/false leaves a JWT/public connection on the external tier.
@@ -684,6 +692,7 @@ impl Auth {
 			Some(source)
 		} else if let Some(key_dir) = config.key_dir {
 			let source = if let Ok(mut url) = Url::parse(&key_dir) {
+				tracing::warn!("--auth-key-dir with a URL is deprecated; prefer the unified --auth-api");
 				// Ensure trailing slash so Url::join appends rather than replaces the last segment
 				if !url.path().ends_with('/') {
 					url.set_path(&format!("{}/", url.path()));
@@ -733,6 +742,7 @@ impl Auth {
 		}
 
 		if let Some(url_str) = config.public_api {
+			tracing::warn!("--auth-public-api is deprecated; prefer the unified --auth-api");
 			anyhow::ensure!(
 				api.is_none(),
 				"cannot specify --auth-public-api alongside [auth.public] api"
@@ -820,10 +830,22 @@ impl Auth {
 	}
 
 	/// Build the unified auth-API request URL: the connection path appended to
-	/// the base (which has a trailing slash), with `kid` as a query param when a
-	/// JWT is present.
+	/// the base as literal path segments, with `kid` as a query param when a JWT
+	/// is present.
+	///
+	/// Each segment is pushed via `path_segments_mut` rather than `Url::join` so
+	/// client-controlled values (`..`, `?`, etc.) are percent-encoded as literal
+	/// segments instead of being resolved as a relative reference that could
+	/// retarget the path or query.
 	fn auth_api_url(base: &url::Url, path: &str, kid: Option<&str>) -> Result<url::Url, AuthError> {
-		let mut url = base.join(path.trim_start_matches('/'))?;
+		let mut url = base.clone();
+		url.path_segments_mut()
+			// Only fails for cannot-be-a-base URLs; the base is a validated http(s) URL.
+			.map_err(|()| AuthError::InvalidUrl(url::ParseError::RelativeUrlWithCannotBeABaseBase))?
+			// The base carries a trailing slash (-> a trailing empty segment); drop
+			// it so we append cleanly instead of producing a double slash.
+			.pop_if_empty()
+			.extend(path.split('/').filter(|s| !s.is_empty()));
 		if let Some(kid) = kid {
 			url.query_pairs_mut().append_pair("kid", kid);
 		}
@@ -868,8 +890,7 @@ impl Auth {
 		let root = resp.alias.unwrap_or_else(|| params.path.clone());
 
 		let claims = if let Some(token) = params.jwt.as_deref() {
-			let key_jwk = resp.key.ok_or(AuthError::KeyNotFound)?;
-			let key = Key::from_str(&key_jwk).map_err(|_| AuthError::DecodeFailed)?;
+			let key = resp.key.ok_or(AuthError::KeyNotFound)?;
 			key.decode(token).map_err(|_| AuthError::DecodeFailed)?
 		} else {
 			let public = resp.public.unwrap_or_default();
@@ -2755,10 +2776,10 @@ api = "https://api.example.com/access"
 
 		Mock::given(method("GET"))
 			.and(path_matcher("/auth/demo/room"))
-			.respond_with(ResponseTemplate::new(200).set_body_string(format!(
-				r#"{{"alias":"x7k2qp/room","key":{}}}"#,
-				serde_json::to_string(&jwk_body(&key))?
-			)))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.set_body_string(format!(r#"{{"alias":"x7k2qp/room","key":{}}}"#, jwk_body(&key))),
+			)
 			.mount(&server)
 			.await;
 
@@ -2791,10 +2812,10 @@ api = "https://api.example.com/access"
 
 		Mock::given(method("GET"))
 			.and(path_matcher("/auth/demo/room/cam"))
-			.respond_with(ResponseTemplate::new(200).set_body_string(format!(
-				r#"{{"alias":"x7k2qp/room/cam","key":{}}}"#,
-				serde_json::to_string(&jwk_body(&key))?
-			)))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.set_body_string(format!(r#"{{"alias":"x7k2qp/room/cam","key":{}}}"#, jwk_body(&key))),
+			)
 			.mount(&server)
 			.await;
 
@@ -2864,10 +2885,7 @@ api = "https://api.example.com/access"
 		let key = create_test_key_with_kid("test-key");
 		Mock::given(method("GET"))
 			.and(path_matcher("/auth/unknown"))
-			.respond_with(
-				ResponseTemplate::new(200)
-					.set_body_string(format!(r#"{{"key":{}}}"#, serde_json::to_string(&jwk_body(&key))?)),
-			)
+			.respond_with(ResponseTemplate::new(200).set_body_string(format!(r#"{{"key":{}}}"#, jwk_body(&key))))
 			.mount(&server)
 			.await;
 
