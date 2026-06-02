@@ -42,6 +42,10 @@ pub struct Import {
 	pending: HashMap<Pid, Pending>,
 	/// True once a PMT with at least one supported stream has been parsed.
 	initialized: bool,
+	/// Raw 90 kHz PTS of the first audio frame in the current consecutive run.
+	/// TS muxes audio in clumps separated by video, so the span of one run sizes
+	/// the audio catalog jitter (see [`AacStream::write`]). Reset on a video frame.
+	audio_burst: Option<u64>,
 }
 
 impl Import {
@@ -55,6 +59,7 @@ impl Import {
 			streams: HashMap::new(),
 			pending: HashMap::new(),
 			initialized: false,
+			audio_burst: None,
 		}
 	}
 
@@ -148,6 +153,7 @@ impl Import {
 				broadcast: self.broadcast.clone(),
 				catalog: self.catalog.clone(),
 				unwrap: PtsUnwrap::default(),
+				jitter: None,
 			})),
 			other => {
 				tracing::warn!(?other, pid = pid.as_u16(), "unsupported TS stream type, dropping");
@@ -168,9 +174,17 @@ impl Import {
 			self.flush(pid)?;
 		}
 
-		if !self.streams.contains_key(&pid) {
+		let Some(stream) = self.streams.get(&pid) else {
 			// PES before its PMT entry; ignore until the layout is known.
 			return Ok(());
+		};
+
+		// A video PES arriving marks the end of any preceding audio run; audio is
+		// muxed into the gaps between video frames. Resetting here (on delivery)
+		// rather than only on the video flush avoids over-counting the startup run,
+		// since unbounded video PES don't flush until the next one starts.
+		if matches!(stream, Stream::H264 { .. } | Stream::H265 { .. }) {
+			self.audio_burst = None;
 		}
 
 		let data_len = pes_data_len(&pes.header, pes.pes_packet_len);
@@ -204,10 +218,23 @@ impl Import {
 		let Some(pending) = self.pending.remove(&pid) else {
 			return Ok(());
 		};
+
+		// Track the start of the current consecutive audio run (audio PTS since the
+		// last video frame), so the audio stream can size its jitter to the burst.
+		let is_video = matches!(self.streams.get(&pid), Some(Stream::H264 { .. } | Stream::H265 { .. }));
+		let run_start = if is_video {
+			self.audio_burst = None;
+			None
+		} else if let Some(audio) = pending.pts {
+			Some(*self.audio_burst.get_or_insert(audio))
+		} else {
+			None
+		};
+
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
-		stream.write(pending)
+		stream.write(pending, run_start)
 	}
 
 	/// Close the current group on every track and reopen at `sequence`.
@@ -255,7 +282,7 @@ enum Stream {
 }
 
 impl Stream {
-	fn write(&mut self, pending: Pending) -> anyhow::Result<()> {
+	fn write(&mut self, pending: Pending, burst: Option<u64>) -> anyhow::Result<()> {
 		match self {
 			Stream::H264 { import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
@@ -265,7 +292,7 @@ impl Stream {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
 				import.decode_frame(&mut pending.data.as_slice(), pts)
 			}
-			Stream::Aac(stream) => stream.write(pending),
+			Stream::Aac(stream) => stream.write(pending, burst),
 			Stream::Ignored => Ok(()),
 		}
 	}
@@ -297,20 +324,24 @@ struct AacStream {
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::hang::Producer,
 	unwrap: PtsUnwrap,
+	/// Largest audio burst span seen, published as the catalog jitter.
+	jitter: Option<Timestamp>,
 }
 
 impl AacStream {
-	fn write(&mut self, pending: Pending) -> anyhow::Result<()> {
+	fn write(&mut self, pending: Pending, run_start: Option<u64>) -> anyhow::Result<()> {
 		let base = unwrap_pts(&mut self.unwrap, pending.pts)?;
 
 		// A single PES can carry several ADTS frames; split and feed each raw frame.
 		let data = &pending.data;
 		let mut offset = 0;
 		let mut index = 0u64;
+		let mut sample_rate = None;
 		while offset + 7 <= data.len() {
 			let header = adts::Header::parse(&data[offset..])?;
 			let end = offset + header.frame_len;
 			anyhow::ensure!(end <= data.len(), "ADTS frame exceeds PES payload");
+			sample_rate = Some(header.sample_rate);
 
 			let import = match &mut self.import {
 				Some(import) => import,
@@ -347,6 +378,49 @@ impl AacStream {
 
 			offset = end;
 			index += 1;
+		}
+
+		self.update_jitter(run_start, pending.pts, index, sample_rate)
+	}
+
+	/// Size the catalog jitter to the TS audio burst. MPEG-TS delivers audio in
+	/// clumps (several ADTS frames per PES, and runs of audio PES between video)
+	/// rather than one frame at a time, so without a matching jitter hint the
+	/// player under-buffers audio and stutters between bursts. The burst is the
+	/// PTS span from the start of the current audio run to this PES's last frame.
+	fn update_jitter(
+		&mut self,
+		run_start: Option<u64>,
+		pes_pts: Option<u64>,
+		frames: u64,
+		sample_rate: Option<u32>,
+	) -> anyhow::Result<()> {
+		let (Some(start), Some(pts), Some(rate)) = (run_start, pes_pts, sample_rate) else {
+			return Ok(());
+		};
+		if frames == 0 {
+			return Ok(());
+		}
+
+		let frame = 1024 * 90_000 / rate as u64;
+		// Span from the run start through this PES's frames, plus one frame slack.
+		let span = pts.saturating_sub(start) + frames * frame;
+		// Ignore implausible spans (e.g. across a 33-bit PTS wrap).
+		if span > 90_000 * 4 {
+			return Ok(());
+		}
+
+		let jitter = Timestamp::from_scale(span, 90_000)?;
+		if jitter <= self.jitter.unwrap_or(Timestamp::ZERO) {
+			return Ok(());
+		}
+		self.jitter = Some(jitter);
+
+		if let Some(import) = &self.import {
+			let name = import.track().name.clone();
+			if let Some(rendition) = self.catalog.lock().audio.renditions.get_mut(&name) {
+				rendition.jitter = Some(jitter.convert()?);
+			}
 		}
 		Ok(())
 	}
