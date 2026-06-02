@@ -267,6 +267,24 @@ describe("Computed", () => {
 		b.close();
 	});
 
+	test("a later cycle throws instead of returning the stale cached value", async () => {
+		const enabled = new Signal(false);
+		const c: Computed<number> = new Computed((e) => (e.get(enabled) ? e.get(c) + 1 : 1));
+
+		expect(c.peek()).toBe(1);
+
+		enabled.set(true); // flips the compute into a self-reference
+		await settle();
+
+		expect(() => c.peek()).toThrow("Computed cycle detected");
+
+		// Recovers once the dependency leaves the cyclic branch.
+		enabled.set(false);
+		await settle();
+		expect(c.peek()).toBe(1);
+		c.close();
+	});
+
 	test("a cycle does not poison unrelated computeds", () => {
 		const a: Computed<number> = new Computed((e) => e.get(a));
 		expect(() => a.peek()).toThrow();

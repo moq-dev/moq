@@ -703,7 +703,6 @@ export class Computed<T> implements Getter<T> {
 	}
 
 	#recompute(): void {
-		this.#dirty = false;
 		this.#scheduled = false;
 		this.#evaluating = true;
 
@@ -714,6 +713,11 @@ export class Computed<T> implements Getter<T> {
 			} else {
 				this.#signal = new Signal(value);
 			}
+
+			// Only mark clean after a successful compute. A throw (e.g. a cycle or a
+			// compute error) stays dirty so the failure resurfaces on the next read
+			// instead of leaving a stale cached value, and can recover later.
+			this.#dirty = false;
 		} finally {
 			this.#evaluating = false;
 		}
@@ -735,7 +739,13 @@ export class Computed<T> implements Getter<T> {
 		// Recompute on a microtask so multiple dependency changes in one tick coalesce,
 		// matching the async effect model. A read beforehand recomputes synchronously.
 		queueMicrotask(() => {
-			if (this.#dirty && !this.#closed) this.#recompute();
+			if (!this.#dirty || this.#closed) return;
+			try {
+				this.#recompute();
+			} catch {
+				// The compute threw (e.g. a cycle). We stay dirty, so the error
+				// resurfaces synchronously on the next read rather than escaping here.
+			}
 		});
 	}
 
