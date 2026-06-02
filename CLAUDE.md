@@ -100,6 +100,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 ## Dependencies
 
 - When adding new dependencies, always use the **newest stable version** available.
+- **Prefer a maintained third-party crate over hand-rolling non-core functionality** (standard container/codec parsers, compression, serialization, etc.). Reserve bespoke code for the wire/protocol layers where we need full control or no suitable crate exists.
 
 ## Development Tips
 

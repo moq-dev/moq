@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt;
 pub enum SubscribeFormat {
 	Fmp4,
 	Mkv,
+	Ts,
 }
 
 /// `clap` adapter for [`CatalogFormat`] (which is `#[non_exhaustive]` and so
@@ -84,6 +85,7 @@ impl Subscribe {
 		match self.args.format {
 			SubscribeFormat::Fmp4 => self.run_fmp4().await,
 			SubscribeFormat::Mkv => self.run_mkv().await,
+			SubscribeFormat::Ts => self.run_ts().await,
 		}
 	}
 
@@ -116,6 +118,23 @@ impl Subscribe {
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = mkv.next().await? {
+			stdout.write_all(&chunk).await?;
+			stdout.flush().await?;
+		}
+
+		Ok(())
+	}
+
+	async fn run_ts(self) -> anyhow::Result<()> {
+		let mut stdout = tokio::io::stdout();
+
+		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
+		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
+		// is re-framed as ADTS. `fragment_duration` does not apply to TS.
+		let mut ts = moq_mux::container::ts::Export::with_catalog_format(self.broadcast, self.catalog)?
+			.with_latency(self.args.max_latency);
+
+		while let Some(chunk) = ts.next().await? {
 			stdout.write_all(&chunk).await?;
 			stdout.flush().await?;
 		}

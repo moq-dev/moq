@@ -34,6 +34,8 @@ pub enum FramedFormat {
 	Opus,
 	/// Matroska / WebM container.
 	Mkv,
+	/// MPEG-TS (transport stream) container.
+	Ts,
 }
 
 impl FromStr for FramedFormat {
@@ -49,6 +51,7 @@ impl FromStr for FramedFormat {
 			"aac" => Ok(FramedFormat::Aac),
 			"opus" => Ok(FramedFormat::Opus),
 			"mkv" | "webm" | "matroska" => Ok(FramedFormat::Mkv),
+			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => Ok(FramedFormat::Ts),
 			_ => Err(Error::UnknownFormat(s.to_string())),
 		}
 	}
@@ -65,6 +68,7 @@ impl fmt::Display for FramedFormat {
 			FramedFormat::Aac => write!(f, "aac"),
 			FramedFormat::Opus => write!(f, "opus"),
 			FramedFormat::Mkv => write!(f, "mkv"),
+			FramedFormat::Ts => write!(f, "ts"),
 		}
 	}
 }
@@ -77,6 +81,7 @@ impl From<StreamFormat> for FramedFormat {
 			StreamFormat::Hev1 => FramedFormat::Hev1,
 			StreamFormat::Av01 => FramedFormat::Av01,
 			StreamFormat::Mkv => FramedFormat::Mkv,
+			StreamFormat::Ts => FramedFormat::Ts,
 		}
 	}
 }
@@ -93,6 +98,8 @@ enum FramedKind {
 	Opus(crate::codec::opus::Import),
 	// Boxed for the same reason as Fmp4.
 	Mkv(Box<crate::container::mkv::Import>),
+	// Boxed for the same reason as Fmp4.
+	Ts(Box<crate::container::ts::Import>),
 }
 
 /// An importer for formats with known frame boundaries.
@@ -152,6 +159,11 @@ impl Framed {
 				decoder.decode(buf)?;
 				FramedKind::Mkv(decoder)
 			}
+			FramedFormat::Ts => {
+				let mut decoder = Box::new(crate::container::ts::Import::new(broadcast, catalog));
+				decoder.decode(buf)?;
+				FramedKind::Ts(decoder)
+			}
 		};
 
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
@@ -169,6 +181,7 @@ impl Framed {
 			FramedKind::Aac(ref mut decoder) => decoder.finish(),
 			FramedKind::Opus(ref mut decoder) => decoder.finish(),
 			FramedKind::Mkv(ref mut decoder) => decoder.finish(),
+			FramedKind::Ts(ref mut decoder) => decoder.finish(),
 		}
 	}
 
@@ -182,6 +195,7 @@ impl Framed {
 			FramedKind::Aac(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Opus(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Mkv(ref mut decoder) => decoder.seek(sequence),
+			FramedKind::Ts(ref mut decoder) => decoder.seek(sequence),
 		}
 	}
 
@@ -195,6 +209,7 @@ impl Framed {
 			FramedKind::Aac(ref decoder) => Ok(decoder.track()),
 			FramedKind::Opus(ref decoder) => Ok(decoder.track()),
 			FramedKind::Mkv(_) => anyhow::bail!("mkv can contain multiple tracks"),
+			FramedKind::Ts(_) => anyhow::bail!("ts can contain multiple tracks"),
 		}
 	}
 
@@ -212,6 +227,10 @@ impl Framed {
 			FramedKind::Aac(ref mut decoder) => decoder.decode(buf, pts)?,
 			FramedKind::Opus(ref mut decoder) => decoder.decode(buf, pts)?,
 			FramedKind::Mkv(ref mut decoder) => {
+				let _ = pts;
+				decoder.decode(buf)?;
+			}
+			FramedKind::Ts(ref mut decoder) => {
 				let _ = pts;
 				decoder.decode(buf)?;
 			}
@@ -258,6 +277,8 @@ pub enum StreamFormat {
 	Av01,
 	/// Matroska / WebM container.
 	Mkv,
+	/// MPEG-TS (transport stream) container.
+	Ts,
 }
 
 impl FromStr for StreamFormat {
@@ -270,6 +291,7 @@ impl FromStr for StreamFormat {
 			"fmp4" | "cmaf" => Ok(StreamFormat::Fmp4),
 			"av01" | "av1" | "av1c" | "av1C" => Ok(StreamFormat::Av01),
 			"mkv" | "webm" | "matroska" => Ok(StreamFormat::Mkv),
+			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => Ok(StreamFormat::Ts),
 			_ => Err(Error::UnknownFormat(s.to_string())),
 		}
 	}
@@ -283,6 +305,7 @@ impl fmt::Display for StreamFormat {
 			StreamFormat::Hev1 => write!(f, "hev1"),
 			StreamFormat::Av01 => write!(f, "av01"),
 			StreamFormat::Mkv => write!(f, "mkv"),
+			StreamFormat::Ts => write!(f, "ts"),
 		}
 	}
 }
@@ -296,6 +319,8 @@ enum StreamKind {
 	Av01(crate::codec::av1::Import),
 	// Boxed for the same reason as Fmp4.
 	Mkv(Box<crate::container::mkv::Import>),
+	// Boxed for the same reason as Fmp4.
+	Ts(Box<crate::container::ts::Import>),
 }
 
 /// An importer for formats that support stream decoding (unknown frame boundaries).
@@ -322,6 +347,7 @@ impl Stream {
 			StreamFormat::Hev1 => StreamKind::Hev1(crate::codec::h265::Import::new(broadcast, catalog)),
 			StreamFormat::Av01 => StreamKind::Av01(crate::codec::av1::Import::new(broadcast, catalog)),
 			StreamFormat::Mkv => StreamKind::Mkv(Box::new(crate::container::mkv::Import::new(broadcast, catalog))),
+			StreamFormat::Ts => StreamKind::Ts(Box::new(crate::container::ts::Import::new(broadcast, catalog))),
 		};
 
 		Ok(Self { decoder })
@@ -339,6 +365,7 @@ impl Stream {
 			StreamKind::Hev1(ref mut decoder) => decoder.initialize(buf)?,
 			StreamKind::Av01(ref mut decoder) => decoder.initialize(buf)?,
 			StreamKind::Mkv(ref mut decoder) => decoder.decode(buf)?,
+			StreamKind::Ts(ref mut decoder) => decoder.decode(buf)?,
 		}
 
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
@@ -354,6 +381,7 @@ impl Stream {
 			StreamKind::Hev1(ref mut decoder) => decoder.decode_stream(buf, None),
 			StreamKind::Av01(ref mut decoder) => decoder.decode_stream(buf, None),
 			StreamKind::Mkv(ref mut decoder) => decoder.decode(buf),
+			StreamKind::Ts(ref mut decoder) => decoder.decode(buf),
 		}
 	}
 
@@ -365,6 +393,7 @@ impl Stream {
 			StreamKind::Hev1(ref mut decoder) => decoder.finish(),
 			StreamKind::Av01(ref mut decoder) => decoder.finish(),
 			StreamKind::Mkv(ref mut decoder) => decoder.finish(),
+			StreamKind::Ts(ref mut decoder) => decoder.finish(),
 		}
 	}
 
@@ -376,6 +405,7 @@ impl Stream {
 			StreamKind::Hev1(ref mut decoder) => decoder.seek(sequence),
 			StreamKind::Av01(ref mut decoder) => decoder.seek(sequence),
 			StreamKind::Mkv(ref mut decoder) => decoder.seek(sequence),
+			StreamKind::Ts(ref mut decoder) => decoder.seek(sequence),
 		}
 	}
 
@@ -387,6 +417,7 @@ impl Stream {
 			StreamKind::Hev1(ref decoder) => decoder.is_initialized(),
 			StreamKind::Av01(ref decoder) => decoder.is_initialized(),
 			StreamKind::Mkv(ref decoder) => decoder.is_initialized(),
+			StreamKind::Ts(ref decoder) => decoder.is_initialized(),
 		}
 	}
 }
