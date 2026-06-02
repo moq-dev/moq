@@ -185,6 +185,36 @@ pub(crate) fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8]) -> anyh
 	Ok(out.freeze())
 }
 
+/// Extract the parameter-set NALs (VPS, SPS, PPS in array order) and the NALU
+/// length size from an HEVCDecoderConfigurationRecord. The inverse of
+/// [`build_hvcc`]; used to re-emit out-of-band hvc1 parameter sets as inline
+/// Annex-B (e.g. for MPEG-TS).
+pub(crate) fn hvcc_params(hvcc: &[u8]) -> anyhow::Result<(usize, Vec<Bytes>)> {
+	anyhow::ensure!(hvcc.len() >= 23, "HEVCDecoderConfigurationRecord too short");
+	let length_size = (hvcc[21] & 0x03) as usize + 1;
+	let num_arrays = hvcc[22];
+
+	let mut params = Vec::new();
+	let mut pos = 23;
+	for _ in 0..num_arrays {
+		// Skip the array_completeness | NAL_unit_type byte.
+		anyhow::ensure!(hvcc.len() >= pos + 3, "truncated hvcC NAL array header");
+		pos += 1;
+		let num_nalus = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]);
+		pos += 2;
+		for _ in 0..num_nalus {
+			anyhow::ensure!(hvcc.len() >= pos + 2, "truncated hvcC NAL length");
+			let len = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
+			pos += 2;
+			anyhow::ensure!(hvcc.len() >= pos + len, "hvcC NAL exceeds buffer");
+			params.push(Bytes::copy_from_slice(&hvcc[pos..pos + len]));
+			pos += len;
+		}
+	}
+
+	Ok((length_size, params))
+}
+
 /// Pack the constraint flags from ITU H.265 V10 §7.3.3 Profile, tier and level syntax.
 pub(crate) fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] {
 	let mut flags = [0u8; 6];
@@ -193,4 +223,41 @@ pub(crate) fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] 
 		| ((profile.non_packed_constraint_flag as u8) << 5)
 		| ((profile.frame_only_constraint_flag as u8) << 4);
 	flags
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Hand-build an hvcC (the layout `build_hvcc` emits) and assert the
+	/// parameter sets and length size are recovered. Built by hand rather than
+	/// via `build_hvcc` so it doesn't need a real, parseable HEVC SPS.
+	#[test]
+	fn hvcc_params_parses_vps_sps_pps() {
+		let vps = &[0x40, 0x01, 0x0c][..]; // NAL type 32
+		let sps = &[0x42, 0x01, 0x01, 0x60][..]; // NAL type 33
+		let pps = &[0x44, 0x01, 0xc0][..]; // NAL type 34
+
+		let mut hvcc = BytesMut::new();
+		hvcc.extend_from_slice(&[0u8; 21]); // fixed fields up to (but not including) byte 21
+		hvcc.put_u8(0xfc | 0x03); // byte 21: ...| lengthSizeMinusOne = 3 -> length_size 4
+		hvcc.put_u8(3); // numOfArrays
+		for (nal_type, nal) in [
+			(u8::from(NALUnitType::VpsNut), vps),
+			(u8::from(NALUnitType::SpsNut), sps),
+			(u8::from(NALUnitType::PpsNut), pps),
+		] {
+			hvcc.put_u8(0x80 | (nal_type & 0x3f));
+			hvcc.put_u16(1); // numNalus
+			hvcc.put_u16(nal.len() as u16);
+			hvcc.put_slice(nal);
+		}
+
+		let (length_size, params) = hvcc_params(&hvcc).unwrap();
+		assert_eq!(length_size, 4);
+		assert_eq!(params.len(), 3);
+		assert_eq!(params[0].as_ref(), vps);
+		assert_eq!(params[1].as_ref(), sps);
+		assert_eq!(params[2].as_ref(), pps);
+	}
 }

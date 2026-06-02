@@ -5,10 +5,12 @@
 //! packetized into 188-byte TS packets. Video is carried as Annex-B, audio as
 //! ADTS AAC.
 //!
-//! Only in-band sources are supported: H.264 (`inline: true`), H.265
-//! (`in_band: true`), and AAC, all in the Legacy/LOC container (raw codec
-//! payloads). Out-of-band avc1/hvc1 (length-prefixed, `description` = avcC/hvcC)
-//! and CMAF tracks are rejected with a clear error.
+//! Video flows through [`ExportSource`], which normalizes every H.264/H.265
+//! source to length-prefixed NALU plus a resolved avcC/hvcC (parsing in-band
+//! avc3/hev1 parameter sets out of the bitstream, or taking the catalog
+//! `description` for out-of-band avc1/hvc1). The muxer then does one
+//! length-prefixed -> Annex-B conversion, re-injecting the parameter sets as
+//! inline NALs on every keyframe. CMAF tracks are rejected with a clear error.
 
 use std::collections::HashMap;
 use std::task::Poll;
@@ -27,8 +29,8 @@ use mpeg2ts::ts::{
 };
 
 use crate::catalog::CatalogFormat;
-use crate::catalog::hang::Container as HangContainer;
-use crate::container::{CatalogSource, Consumer, Frame};
+use crate::codec::annexb;
+use crate::container::{CatalogSource, ExportSource, Frame};
 
 use super::adts;
 
@@ -60,7 +62,7 @@ pub struct Export {
 }
 
 struct Track {
-	consumer: Consumer<HangContainer>,
+	source: ExportSource,
 	pending: Option<Frame>,
 	finished: bool,
 	pid: u16,
@@ -141,7 +143,38 @@ impl Export {
 			}
 		}
 
-		// 2. Emit the program tables once the layout is resolved.
+		// 2. Pull a frame into every idle track. ExportSource has already
+		// transformed Annex-B avc3/hev1 into length-prefixed form and resolved
+		// the avcC/hvcC. Before the program tables are written, drop slices that
+		// arrive before their codec config resolves: a receiver joining mid-GOP
+		// can't use them, and parking them would stop us polling for the keyframe
+		// that carries the parameter sets.
+		let waiting_for_header = self.psi.is_none();
+		for track in self.tracks.values_mut() {
+			if track.pending.is_some() || track.finished {
+				continue;
+			}
+			loop {
+				match track.source.poll_read(waiter) {
+					Poll::Ready(Ok(Some(frame))) => {
+						if waiting_for_header && !track.source.header_ready() {
+							continue;
+						}
+						track.pending = Some(frame);
+						break;
+					}
+					Poll::Ready(Ok(None)) => {
+						track.finished = true;
+						break;
+					}
+					Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+					Poll::Pending => break,
+				}
+			}
+		}
+
+		// 3. Emit the program tables once the layout is resolved and every
+		// track's codec config is ready.
 		if self.psi.is_none() {
 			if self.tracks.is_empty() {
 				// No tracks yet. If the catalog is also done, the broadcast is empty.
@@ -150,22 +183,17 @@ impl Export {
 				}
 				return Poll::Pending;
 			}
+			if !self.header_ready() {
+				// Still waiting on codec configs. If every track finished without
+				// producing one, the broadcast can't be muxed.
+				if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
+					return Poll::Ready(Ok(None));
+				}
+				return Poll::Pending;
+			}
 			self.build_psi()?;
 			let header = self.write_psi()?;
 			return Poll::Ready(Ok(Some(header)));
-		}
-
-		// 3. Pull a frame into every idle track.
-		for track in self.tracks.values_mut() {
-			if track.pending.is_some() || track.finished {
-				continue;
-			}
-			match track.consumer.poll_read(waiter) {
-				Poll::Ready(Ok(Some(frame))) => track.pending = Some(frame),
-				Poll::Ready(Ok(None)) => track.finished = true,
-				Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
-				Poll::Pending => {}
-			}
 		}
 
 		// 4. Emit the smallest-timestamp pending frame as a PES packet.
@@ -225,11 +253,11 @@ impl Export {
 				continue;
 			}
 			let kind = video_kind(config, name)?;
-			let consumer = self.subscribe(name, &config.container)?;
+			let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
 			self.tracks.insert(
 				name.clone(),
 				Track {
-					consumer,
+					source,
 					pending: None,
 					finished: false,
 					pid: next_pid,
@@ -244,11 +272,11 @@ impl Export {
 				continue;
 			}
 			let kind = audio_kind(config, name)?;
-			let consumer = self.subscribe(name, &config.container)?;
+			let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
 			self.tracks.insert(
 				name.clone(),
 				Track {
-					consumer,
+					source,
 					pending: None,
 					finished: false,
 					pid: next_pid,
@@ -262,10 +290,10 @@ impl Export {
 		Ok(())
 	}
 
-	fn subscribe(&self, name: &str, container: &Container) -> anyhow::Result<Consumer<HangContainer>> {
-		let media: HangContainer = container.try_into()?;
-		let track = self.broadcast.subscribe_track(&moq_net::Track::new(name.to_string()))?;
-		Ok(Consumer::new(track, media).with_latency(self.latency))
+	/// Header is ready when every track's [`ExportSource`] has resolved its
+	/// codec config (from the catalog `description`, or built by the transform).
+	fn header_ready(&self) -> bool {
+		self.tracks.values().all(|t| t.source.header_ready())
 	}
 
 	/// Build the PAT/PMT once every track's PID and codec is known.
@@ -344,6 +372,23 @@ impl Export {
 		let is_pcr = self.psi.as_ref().is_some_and(|p| p.pcr_pid == pid);
 		let is_video = matches!(kind, Kind::Video(_));
 
+		// Build the elementary-stream payload for this frame. Video needs the
+		// resolved avcC/hvcC to rewrite length-prefixed NALs as Annex-B.
+		let es_payload = match &kind {
+			Kind::Video(stream_type) => video_es_payload(*stream_type, track.source.description(), &frame)?,
+			Kind::Aac {
+				object_type,
+				sample_rate,
+				channel_count,
+			} => {
+				let header = adts::write_header(*object_type, *sample_rate, *channel_count, frame.payload.len())?;
+				let mut framed = Vec::with_capacity(7 + frame.payload.len());
+				framed.extend_from_slice(&header);
+				framed.extend_from_slice(&frame.payload);
+				framed
+			}
+		};
+
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
 
 		// Refresh PSI at keyframes or after the interval lapses.
@@ -360,22 +405,6 @@ impl Export {
 			self.last_psi = Some(frame.timestamp);
 		}
 
-		// Build the elementary-stream payload for this frame.
-		let payload = match &kind {
-			Kind::Video(_) => frame.payload.to_vec(),
-			Kind::Aac {
-				object_type,
-				sample_rate,
-				channel_count,
-			} => {
-				let header = adts::write_header(*object_type, *sample_rate, *channel_count, frame.payload.len())?;
-				let mut framed = Vec::with_capacity(7 + frame.payload.len());
-				framed.extend_from_slice(&header);
-				framed.extend_from_slice(&frame.payload);
-				framed
-			}
-		};
-
 		let unit = PesUnit {
 			pid,
 			is_pcr,
@@ -383,7 +412,7 @@ impl Export {
 			keyframe: frame.keyframe,
 			timestamp: frame.timestamp,
 		};
-		self.write_pes(&mut out, &unit, &payload)?;
+		self.write_pes(&mut out, &unit, &es_payload)?;
 		Ok(Bytes::from(out))
 	}
 
@@ -514,23 +543,37 @@ fn to_ts_timestamp(timestamp: crate::container::Timestamp) -> anyhow::Result<TsT
 
 fn video_kind(config: &VideoConfig, name: &str) -> anyhow::Result<Kind> {
 	ensure_raw(&config.container, "video", name)?;
+	// Both in-band (avc3/hev1) and out-of-band (avc1/hvc1) are accepted:
+	// ExportSource normalizes both to length-prefixed NALU + avcC/hvcC, and the
+	// muxer rewrites them to Annex-B.
 	match &config.codec {
-		VideoCodec::H264(h264) => {
-			anyhow::ensure!(
-				h264.inline,
-				"TS export needs in-band H.264 (avc3); track '{name}' is out-of-band (avc1)"
-			);
-			Ok(Kind::Video(StreamType::H264))
-		}
-		VideoCodec::H265(h265) => {
-			anyhow::ensure!(
-				h265.in_band,
-				"TS export needs in-band H.265 (hev1); track '{name}' is out-of-band (hvc1)"
-			);
-			Ok(Kind::Video(StreamType::H265))
-		}
+		VideoCodec::H264(_) => Ok(Kind::Video(StreamType::H264)),
+		VideoCodec::H265(_) => Ok(Kind::Video(StreamType::H265)),
 		other => anyhow::bail!("TS export does not support video codec {other:?} (track '{name}')"),
 	}
+}
+
+/// Build the Annex-B elementary-stream payload for one video frame: rewrite the
+/// length-prefixed NALs to start-code-delimited NALs, prepending the parameter
+/// sets (SPS/PPS, plus VPS for H.265) from the avcC/hvcC on keyframes so a
+/// receiver can tune in mid-stream.
+fn video_es_payload(stream_type: StreamType, description: Option<&Bytes>, frame: &Frame) -> anyhow::Result<Vec<u8>> {
+	let description = description.context("video codec config (avcC/hvcC) not resolved")?;
+	let (length_size, params) = match stream_type {
+		StreamType::H264 => crate::codec::h264::avcc_params(description)?,
+		StreamType::H265 => crate::codec::h265::hvcc_params(description)?,
+		other => anyhow::bail!("unsupported TS video stream type {other:?}"),
+	};
+
+	let mut out = Vec::with_capacity(frame.payload.len() + 64);
+	if frame.keyframe {
+		for nal in &params {
+			out.extend_from_slice(&annexb::START_CODE);
+			out.extend_from_slice(nal);
+		}
+	}
+	annexb::length_prefixed_to_annexb(&frame.payload, length_size, &mut out)?;
+	Ok(out)
 }
 
 fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
