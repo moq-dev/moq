@@ -1,12 +1,21 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, readonlys, Signal } from "@moq/signals";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
 import { base64ToBytes } from "../base64";
 import type { Muxer } from "../mse";
+import type { Sync } from "../sync";
 import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
+
+type MseOutput = {
+	// TODO implement stats
+	stats: Signal<Stats | undefined>;
+	buffered: Signal<BufferedRanges>;
+	stalled: Signal<boolean>;
+	timestamp: Signal<Moq.Time.Milli>;
+};
 
 /**
  * MSE-based video source for CMAF/fMP4 fragments.
@@ -14,27 +23,23 @@ import type { Source } from "./source";
  */
 export class Mse implements Backend {
 	muxer: Muxer;
+	sync: Sync;
 	source: Source;
 
-	// TODO implement stats
-	#stats = new Signal<Stats | undefined>(undefined);
-	readonly stats: Getter<Stats | undefined> = this.#stats;
-
-	#buffered = new Signal<BufferedRanges>([]);
-	readonly buffered: Getter<BufferedRanges> = this.#buffered;
-
-	#stalled = new Signal<boolean>(false);
-	readonly stalled: Getter<boolean> = this.#stalled;
-
-	#timestamp = new Signal<Moq.Time.Milli>(Moq.Time.Milli.zero);
-	readonly timestamp: Getter<Moq.Time.Milli> = this.#timestamp;
+	readonly #output: MseOutput = {
+		stats: new Signal<Stats | undefined>(undefined),
+		buffered: new Signal<BufferedRanges>([]),
+		stalled: new Signal<boolean>(false),
+		timestamp: new Signal<Moq.Time.Milli>(Moq.Time.Milli.zero),
+	};
+	readonly output = readonlys(this.#output);
 
 	signals = new Effect();
 
-	constructor(muxer: Muxer, source: Source) {
+	constructor(muxer: Muxer, sync: Sync, source: Source) {
 		this.muxer = muxer;
+		this.sync = sync;
 		this.source = source;
-		this.source.supported.set(supported); // super hacky
 
 		this.signals.run(this.#runMedia.bind(this));
 		this.signals.run(this.#runStalled.bind(this));
@@ -42,22 +47,22 @@ export class Mse implements Backend {
 	}
 
 	#runMedia(effect: Effect): void {
-		const element = effect.get(this.muxer.element);
+		const element = effect.get(this.muxer.input.element);
 		if (!element) return;
 
-		const mediaSource = effect.get(this.muxer.mediaSource);
+		const mediaSource = effect.get(this.muxer.output.mediaSource);
 		if (!mediaSource) return;
 
-		const broadcast = effect.get(this.source.broadcast);
+		const broadcast = effect.get(this.source.input.broadcast);
 		if (!broadcast) return;
 
-		const active = effect.get(broadcast.active);
+		const active = effect.get(broadcast.output.active);
 		if (!active) return;
 
-		const track = effect.get(this.source.track);
+		const track = effect.get(this.source.output.track);
 		if (!track) return;
 
-		const config = effect.get(this.source.config);
+		const config = effect.get(this.source.output.config);
 		if (!config) return;
 
 		const mime = `video/mp4; codecs="${config.codec}"`;
@@ -73,7 +78,7 @@ export class Mse implements Backend {
 		});
 
 		effect.event(sourceBuffer, "updateend", () => {
-			this.#buffered.set(timeRangesToArray(sourceBuffer.buffered));
+			this.#output.buffered.set(timeRangesToArray(sourceBuffer.buffered));
 		});
 
 		if (config.container.kind === "cmaf") {
@@ -125,7 +130,7 @@ export class Mse implements Backend {
 
 				// Extract the timestamp from the CMAF segment and mark when we received it.
 				const timestamp = Container.Cmaf.decodeTimestamp(frame, init);
-				this.source.sync.received(Moq.Time.Milli.fromMicro(timestamp), "video");
+				this.sync.received(Moq.Time.Milli.fromMicro(timestamp), "video");
 
 				await this.#appendBuffer(sourceBuffer, frame);
 
@@ -152,7 +157,7 @@ export class Mse implements Backend {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Container.Consumer(data, {
 			format,
-			latency: this.source.sync.buffer,
+			latency: this.sync.output.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -175,7 +180,7 @@ export class Mse implements Backend {
 
 				// Mark that we received this frame right now.
 				const timestamp = Moq.Time.Milli.fromMicro(pending.timestamp as Moq.Time.Micro);
-				this.source.sync.received(timestamp, "video");
+				this.sync.received(timestamp, "video");
 
 				break;
 			}
@@ -191,7 +196,7 @@ export class Mse implements Backend {
 
 					// Mark that we received this frame right now for latency calculation.
 					const timestamp = Moq.Time.Milli.fromMicro(frame.timestamp as Moq.Time.Micro);
-					this.source.sync.received(timestamp, "video");
+					this.sync.received(timestamp, "video");
 				}
 
 				// Wrap raw frame in moof+mdat
@@ -217,11 +222,11 @@ export class Mse implements Backend {
 	}
 
 	#runStalled(effect: Effect): void {
-		const element = effect.get(this.muxer.element);
+		const element = effect.get(this.muxer.input.element);
 		if (!element) return;
 
 		const update = () => {
-			this.#stalled.set(element.readyState <= HTMLMediaElement.HAVE_CURRENT_DATA);
+			this.#output.stalled.set(element.readyState <= HTMLMediaElement.HAVE_CURRENT_DATA);
 		};
 
 		// Set initial state
@@ -234,7 +239,7 @@ export class Mse implements Backend {
 	}
 
 	#runTimestamp(effect: Effect): void {
-		const element = effect.get(this.muxer.element);
+		const element = effect.get(this.muxer.input.element);
 		if (!element) return;
 
 		// Use requestVideoFrameCallback if available (frame-accurate)
@@ -244,7 +249,7 @@ export class Mse implements Backend {
 			let handle: number;
 			const onFrame = () => {
 				const timestamp = Moq.Time.Milli.fromSecond(video.currentTime as Moq.Time.Second);
-				this.#timestamp.set(timestamp);
+				this.#output.timestamp.set(timestamp);
 				handle = video.requestVideoFrameCallback(onFrame);
 			};
 			handle = video.requestVideoFrameCallback(onFrame);
@@ -254,17 +259,17 @@ export class Mse implements Backend {
 			// Fallback to timeupdate event
 			effect.event(element, "timeupdate", () => {
 				const timestamp = Moq.Time.Milli.fromSecond(element.currentTime as Moq.Time.Second);
-				this.#timestamp.set(timestamp);
+				this.#output.timestamp.set(timestamp);
 			});
 		}
 	}
 
 	close(): void {
-		this.source.close();
+		// The source is owned by MultiBackend, not by this backend; don't close it here.
 		this.signals.close();
 	}
 }
 
-async function supported(config: Catalog.VideoConfig): Promise<boolean> {
+export async function mseSupported(config: Catalog.VideoConfig): Promise<boolean> {
 	return MediaSource.isTypeSupported(`video/mp4; codecs="${config.codec}"`);
 }

@@ -1,27 +1,35 @@
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
-import { Effect, type Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type InputProps, type Readonlys } from "@moq/signals";
 import { Peers, type PeersProps } from "./peers";
 import { Window, type WindowProps } from "./window";
 
-export interface Props {
+type RootInput = {
+	broadcast: Getter<Moq.Broadcast | undefined>;
+	catalog: Getter<Catalog.Root | undefined>;
+};
+
+export type Props = InputProps<RootInput> & {
 	window?: WindowProps;
 	peers?: PeersProps;
-}
+};
 
 export class Root {
+	readonly input: Readonlys<RootInput>;
+
 	window: Window;
 	peers: Peers;
 
 	signals = new Effect();
 
-	constructor(
-		broadcast: Signal<Moq.Broadcast | undefined>,
-		catalog: Signal<Catalog.Root | undefined>,
-		props?: Props,
-	) {
-		this.window = new Window(broadcast, catalog, props?.window);
-		this.peers = new Peers(broadcast, catalog, props?.peers);
+	constructor(props?: Props) {
+		this.input = {
+			broadcast: getter(props?.broadcast),
+			catalog: getter(props?.catalog),
+		};
+
+		this.window = new Window({ ...props?.window, broadcast: this.input.broadcast, catalog: this.input.catalog });
+		this.peers = new Peers({ ...props?.peers, broadcast: this.input.broadcast, catalog: this.input.catalog });
 	}
 
 	close() {
