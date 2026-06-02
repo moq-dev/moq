@@ -40,6 +40,9 @@ fn import_bbb_catalog() {
 		"audio codec was {}",
 		audio.codec
 	);
+	// AAC must carry a synthesized AudioSpecificConfig so downstream consumers
+	// that need out-of-band config (fMP4/MKV export, WebCodecs) can configure.
+	assert!(audio.description.is_some(), "AAC track missing AudioSpecificConfig");
 }
 
 #[tokio::test(start_paused = true)]

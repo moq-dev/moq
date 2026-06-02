@@ -320,8 +320,16 @@ impl AacStream {
 						sample_rate: header.sample_rate,
 						channel_count: header.channel_count,
 					};
-					self.import
-						.insert(aac::Import::new(self.broadcast.clone(), self.catalog.clone(), config)?)
+					// Synthesize the AudioSpecificConfig from the first ADTS header so
+					// downstream consumers that need out-of-band config (fMP4/MKV export,
+					// WebCodecs) can configure the decoder. TS itself carries it inline.
+					let description = config.encode();
+					let import = aac::Import::new(self.broadcast.clone(), self.catalog.clone(), config)?;
+					let name = import.track().name.clone();
+					if let Some(rendition) = self.catalog.lock().audio.renditions.get_mut(&name) {
+						rendition.description = Some(description);
+					}
+					self.import.insert(import)
 				}
 			};
 
