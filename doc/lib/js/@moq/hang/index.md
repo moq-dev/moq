@@ -65,8 +65,8 @@ See the [hang specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-
 
 ## Next Steps
 
-- Learn about [watching streams](/lib/js/@moq/hang/watch)
-- Learn about [publishing streams](/lib/js/@moq/hang/publish)
+- Learn about [watching streams](/lib/js/@moq/watch)
+- Learn about [publishing streams](/lib/js/@moq/publish)
 - Use [Web Components](/lib/js/env/web)
 - Use [@moq/net](/lib/js/@moq/net) for custom protocols
 - View [code examples](https://github.com/moq-dev/moq/tree/main/js)
