@@ -173,7 +173,7 @@ impl Import {
 	fn handle_pes_start(&mut self, pid: Pid, pes: Pes) -> anyhow::Result<()> {
 		// A new PES start means the previous one for this PID is complete.
 		if self.pending.contains_key(&pid) {
-			self.flush(pid)?;
+			self.drain_pending(pid)?;
 		}
 
 		let Some(stream) = self.streams.get(&pid) else {
@@ -200,7 +200,7 @@ impl Import {
 		self.pending.insert(pid, pending);
 
 		if complete {
-			self.flush(pid)?;
+			self.drain_pending(pid)?;
 		}
 		Ok(())
 	}
@@ -211,12 +211,12 @@ impl Import {
 		};
 		pending.data.extend_from_slice(data);
 		if matches!(pending.data_len, Some(len) if pending.data.len() >= len) {
-			self.flush(pid)?;
+			self.drain_pending(pid)?;
 		}
 		Ok(())
 	}
 
-	fn flush(&mut self, pid: Pid) -> anyhow::Result<()> {
+	fn drain_pending(&mut self, pid: Pid) -> anyhow::Result<()> {
 		let Some(pending) = self.pending.remove(&pid) else {
 			return Ok(());
 		};
@@ -247,11 +247,22 @@ impl Import {
 		Ok(())
 	}
 
+	/// Close the current group on every track without finishing the tracks themselves.
+	///
+	/// Each track's next group opens at the natural next sequence (current + 1).
+	/// Use [`Self::seek`] to force a specific next sequence on every track.
+	pub fn flush(&mut self) -> anyhow::Result<()> {
+		for stream in self.streams.values_mut() {
+			stream.flush()?;
+		}
+		Ok(())
+	}
+
 	/// Flush any buffered PES and finish every track.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		let pids: Vec<Pid> = self.pending.keys().copied().collect();
 		for pid in pids {
-			self.flush(pid)?;
+			self.drain_pending(pid)?;
 		}
 		for stream in self.streams.values_mut() {
 			stream.finish()?;
@@ -304,6 +315,15 @@ impl Stream {
 			Stream::H264 { import, .. } => import.seek(sequence),
 			Stream::H265 { import, .. } => import.seek(sequence),
 			Stream::Aac(stream) => stream.seek(sequence),
+			Stream::Ignored => Ok(()),
+		}
+	}
+
+	fn flush(&mut self) -> anyhow::Result<()> {
+		match self {
+			Stream::H264 { import, .. } => import.flush(),
+			Stream::H265 { import, .. } => import.flush(),
+			Stream::Aac(stream) => stream.flush(),
 			Stream::Ignored => Ok(()),
 		}
 	}
@@ -430,6 +450,13 @@ impl AacStream {
 	fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
 		if let Some(import) = &mut self.import {
 			import.seek(sequence)?;
+		}
+		Ok(())
+	}
+
+	fn flush(&mut self) -> anyhow::Result<()> {
+		if let Some(import) = &mut self.import {
+			import.flush()?;
 		}
 		Ok(())
 	}

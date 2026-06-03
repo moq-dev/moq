@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `MoqMediaProducer.flush()` closes the current group without finishing the track, so the next `write_frame` opens a new group. Intended for real-time interactive use cases (e.g. voice-agent interruption) where the publisher needs to invalidate already-buffered frames so consumers can skip to live.
+
 ## [0.2.19](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.18...moq-ffi-v0.2.19) - 2026-06-03
 
 ### Other

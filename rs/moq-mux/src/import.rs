@@ -199,6 +199,29 @@ impl Framed {
 		}
 	}
 
+	/// Close the current group early without finishing the track.
+	///
+	/// The next [`decode_frame`](Self::decode_frame) opens a new group at the
+	/// natural next sequence (current + 1). Use [`Self::seek`] to force a
+	/// specific next sequence instead.
+	///
+	/// Intended for interactive cases where the publisher wants to invalidate
+	/// already-queued frames, e.g. voice-agent interruption: the bot stops
+	/// generating audio mid-utterance and wants consumers to drop the
+	/// buffered tail.
+	pub fn flush(&mut self) -> anyhow::Result<()> {
+		match self.decoder {
+			FramedKind::H264(ref mut decoder) => decoder.flush(),
+			FramedKind::Fmp4(ref mut decoder) => decoder.flush(),
+			FramedKind::Hev1(ref mut decoder) => decoder.flush(),
+			FramedKind::Av01(ref mut decoder) => decoder.flush(),
+			FramedKind::Aac(ref mut decoder) => decoder.flush(),
+			FramedKind::Opus(ref mut decoder) => decoder.flush(),
+			FramedKind::Mkv(ref mut decoder) => decoder.flush(),
+			FramedKind::Ts(ref mut decoder) => decoder.flush(),
+		}
+	}
+
 	/// Return the single track produced by this importer.
 	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
 		match self.decoder {

@@ -394,6 +394,18 @@ impl Import {
 		Ok(())
 	}
 
+	/// Close the current group early without finishing the track.
+	///
+	/// The next group opens at the natural next sequence (current + 1). No-op
+	/// if the track has not been initialized yet. Use [`Self::seek`] to force a
+	/// specific next sequence instead.
+	pub fn flush(&mut self) -> anyhow::Result<()> {
+		if let Some(track) = self.track.as_mut() {
+			track.finish_group()?;
+		}
+		Ok(())
+	}
+
 	pub fn is_initialized(&self) -> bool {
 		self.track.is_some()
 	}

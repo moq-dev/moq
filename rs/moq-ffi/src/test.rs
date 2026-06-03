@@ -304,6 +304,79 @@ async fn catalog_update_on_new_track() {
 	assert_eq!(catalog2.audio.len(), 2);
 }
 
+#[tokio::test]
+async fn flush_closes_current_group() {
+	// flush() should close the current group without finishing the track, so the
+	// next write_frame starts a new group. Verifies the "skip to live" primitive
+	// for use cases like voice-agent interruption.
+	let origin = MoqOriginProducer::new();
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let init = opus_head();
+	let media = broadcast.publish_media("opus".into(), init).unwrap();
+	origin.publish("flush-test".into(), &broadcast).unwrap();
+
+	let consumer = origin.consume();
+	let announced = consumer.announced("".into()).unwrap();
+	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+
+	let broadcast_consumer = announcement.broadcast();
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().unwrap();
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+
+	let (track_name, _audio) = catalog.audio.iter().next().unwrap();
+	let track_consumer = broadcast_consumer.subscribe_track(track_name.clone()).unwrap();
+
+	// Group 0: one frame, then flush.
+	media.write_frame(b"frame-a".to_vec(), 0).unwrap();
+	media.flush().unwrap();
+
+	// Group 1: one frame, then finish.
+	media.write_frame(b"frame-b".to_vec(), 20_000).unwrap();
+	media.finish().unwrap();
+
+	let group0 = tokio::time::timeout(TIMEOUT, track_consumer.recv_group())
+		.await
+		.unwrap()
+		.unwrap()
+		.expect("expected first group");
+	let group1 = tokio::time::timeout(TIMEOUT, track_consumer.recv_group())
+		.await
+		.unwrap()
+		.unwrap()
+		.expect("expected second group after flush");
+
+	assert_ne!(
+		group0.sequence(),
+		group1.sequence(),
+		"flush should advance the group sequence"
+	);
+
+	// Track should end after finish().
+	let third = tokio::time::timeout(TIMEOUT, track_consumer.recv_group())
+		.await
+		.unwrap()
+		.unwrap();
+	assert!(third.is_none(), "expected track to end after finish(), got another group");
+}
+
+#[test]
+fn flush_after_finish_is_closed() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let init = opus_head();
+	let media = broadcast.publish_media("opus".into(), init).unwrap();
+	media.finish().unwrap();
+	let err = media.flush().unwrap_err();
+	assert!(matches!(err, crate::error::MoqError::Closed), "expected Closed, got {err}");
+}
+
 #[test]
 fn finish_closes_producer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();

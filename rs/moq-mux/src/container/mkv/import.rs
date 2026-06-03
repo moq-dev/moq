@@ -400,6 +400,17 @@ impl Import {
 		Ok(())
 	}
 
+	/// Close the current group on every track without finishing the tracks themselves.
+	///
+	/// Each track's next group opens at the natural next sequence (current + 1).
+	/// Use [`Self::seek`] to force a specific next sequence on every track.
+	pub fn flush(&mut self) -> anyhow::Result<()> {
+		for track in self.tracks.values_mut() {
+			track.track.finish_group()?;
+		}
+		Ok(())
+	}
+
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		for track in self.tracks.values_mut() {

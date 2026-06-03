@@ -58,6 +58,15 @@ impl Import {
 		Ok(())
 	}
 
+	/// Close the current group early without finishing the track.
+	///
+	/// The next group opens at the natural next sequence (current + 1). Use
+	/// [`Self::seek`] to force a specific next sequence instead.
+	pub fn flush(&mut self) -> anyhow::Result<()> {
+		self.track.finish_group()?;
+		Ok(())
+	}
+
 	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 

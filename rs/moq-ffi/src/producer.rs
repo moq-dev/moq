@@ -357,6 +357,28 @@ impl MoqMediaProducer {
 			.map_err(|err| MoqError::Codec(format!("finish failed: {err}")))?;
 		Ok(())
 	}
+
+	/// Close the current group without finishing the track.
+	///
+	/// Use this to drop in-flight audio/video that has already been handed off
+	/// to the encoder, wire, or jitter buffer, e.g. voice-agent interruption
+	/// when the bot stops generating audio mid-utterance. The track stays open
+	/// and the next [`write_frame`](Self::write_frame) opens a new group at the
+	/// natural next sequence.
+	///
+	/// Consumers reading the closed group keep their existing frames; new
+	/// subscribers (and any consumer that supports "skip to live") will start
+	/// from the new group.
+	pub fn flush(&self) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let mut guard = self.inner.lock().unwrap();
+		let media = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
+		media
+			.decoder
+			.flush()
+			.map_err(|err| MoqError::Codec(format!("flush failed: {err}")))?;
+		Ok(())
+	}
 }
 
 #[uniffi::export]
@@ -392,4 +414,5 @@ impl MoqMediaStreamProducer {
 			.map_err(|err| MoqError::Codec(format!("finish failed: {err}")))?;
 		Ok(())
 	}
+
 }
