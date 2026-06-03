@@ -23,6 +23,7 @@ export type EncoderProps = {
 	muted?: boolean | Signal<boolean>;
 	volume?: number | Signal<number>;
 	sampleRate?: number | Signal<number | undefined>;
+	channelCount?: number | Signal<number | undefined>;
 
 	container?: Catalog.Container;
 };
@@ -36,6 +37,7 @@ export class Encoder {
 	muted: Signal<boolean>;
 	volume: Signal<number>;
 	sampleRate: Signal<number | undefined>;
+	channelCount: Signal<number | undefined>;
 
 	source: Signal<Source | undefined>;
 
@@ -60,6 +62,7 @@ export class Encoder {
 		this.muted = Signal.from(props?.muted ?? false);
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.sampleRate = Signal.from<number | undefined>(props?.sampleRate);
+		this.channelCount = Signal.from<number | undefined>(props?.channelCount);
 
 		this.#signals.run(this.#runSource.bind(this));
 		this.#signals.run(this.#runGain.bind(this));
@@ -75,6 +78,12 @@ export class Encoder {
 		const settings = source.track.getSettings();
 		const overrideSampleRate = effect.get(this.sampleRate);
 		const sampleRate = overrideSampleRate ?? settings.sampleRate;
+
+		// macOS misreports a mono mic as stereo: getSettings().channelCount is undefined and
+		// MediaStreamAudioSourceNode.channelCount defaults to 2, so the graph carries (and Opus
+		// encodes) duplicated mono as stereo. Prefer an explicitly requested channel count, from
+		// the prop or the track's applied getUserMedia constraint, and force the worklet to mix to it.
+		const requestedChannels = effect.get(this.channelCount) ?? requestedChannelCount(source.track);
 
 		const context = new AudioContext({
 			latencyHint: "interactive",
@@ -98,11 +107,15 @@ export class Encoder {
 			await context.audioWorklet.addModule(CaptureWorklet);
 			if (context.state === "closed") return;
 
-			const channelCount = settings.channelCount ?? root.channelCount;
+			const channelCount = requestedChannels ?? settings.channelCount ?? root.channelCount;
 			const worklet = new AudioWorkletNode(context, "capture", {
 				numberOfInputs: 1,
 				numberOfOutputs: 0,
 				channelCount,
+				// "explicit" forces Web Audio to (down)mix the input to channelCount before the
+				// worklet sees it. The default "max" just follows the input, which is the unreliable
+				// path on macOS. Only force it when we actually have a requested count to honor.
+				channelCountMode: requestedChannels !== undefined ? "explicit" : "max",
 			});
 
 			effect.set(this.#worklet, worklet);
@@ -258,6 +271,15 @@ export class Encoder {
 	close() {
 		this.#signals.close();
 	}
+}
+
+// getConstraints() echoes the constraints applied via getUserMedia, which (unlike getSettings)
+// survives the macOS mono->stereo misreport. Returns the requested channel count, if any.
+function requestedChannelCount(track: MediaStreamTrack): number | undefined {
+	const constraint = track.getConstraints().channelCount;
+	if (constraint === undefined) return undefined;
+	if (typeof constraint === "number") return constraint;
+	return constraint.exact ?? constraint.ideal ?? constraint.max ?? constraint.min;
 }
 
 // `application` and `signal` are in the WebCodecs spec but missing from lib.dom.d.ts.
