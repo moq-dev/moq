@@ -61,12 +61,23 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 #[derive(Clone)]
 struct TrackEntry {
-	producer: TrackProducer,
 	stats: Arc<SubscriberTrack>,
-	/// The SUBSCRIBE_OK for this subscription. `None` until it arrives; group
-	/// streams block on it before decoding any frame, since a group can race
-	/// ahead of SUBSCRIBE_OK on its own QUIC stream.
-	subscribe_ok: kio::Consumer<Option<lite::SubscribeOk>>,
+	/// Resolves once the upstream subscription is accepted: after TRACK_INFO on
+	/// lite-05, after SUBSCRIBE_OK on older drafts. Group streams park on this so a
+	/// group that races ahead of acceptance buffers (in QUIC flow control) instead
+	/// of being dropped. `None` until resolved; a closed channel means the
+	/// subscription ended first, which group streams treat as cancelled.
+	resolved: kio::Consumer<Option<ResolvedTrack>>,
+}
+
+/// The decoded-once-per-track state a group stream needs: where to write groups
+/// and how to parse their frames. Populated from TRACK_INFO (lite-05) so a single
+/// lookup is reused across every group instead of re-derived per response.
+#[derive(Clone)]
+struct ResolvedTrack {
+	producer: TrackProducer,
+	compression: Compression,
+	timescale: Option<Timescale>,
 }
 
 /// Result of an upstream subscribe lifecycle.
@@ -536,10 +547,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	/// Open the upstream subscribe stream, wait for SUBSCRIBE_OK, then accept the
-	/// pending request (unblocking the downstream subscriber) and run the linger
-	/// lifecycle. The producer is created only after SUBSCRIBE_OK, so a downstream
-	/// a downstream `subscribe` resolves exactly when the upstream confirms.
+	/// Open the upstream subscribe stream, resolve the track's immutable
+	/// properties, then accept the pending request (unblocking the downstream
+	/// subscriber) and run the linger lifecycle.
+	///
+	/// On lite-05 the properties come from a TRACK_INFO stream flighted alongside
+	/// SUBSCRIBE, so the first group still arrives in one round trip; older drafts
+	/// read them (implicitly) from SUBSCRIBE_OK. The producer is created once those
+	/// properties are known, so a downstream `subscribe` resolves exactly then.
 	async fn run_subscribe_session(
 		&self,
 		id: u64,
@@ -555,10 +570,24 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let ordered = msg.ordered;
 		let max_latency = msg.max_latency;
 		let start_group = msg.start_group;
+		let broadcast_path = msg.broadcast.clone();
 
 		// SubscribeUpdate only exists on Lite03+; older versions take the
 		// immediate-FIN path with no linger.
 		let supports_linger = !matches!(self.version, Version::Lite01 | Version::Lite02);
+
+		// Insert a pending entry up front so a group stream that races ahead of
+		// acceptance parks on `resolved` instead of being dropped. Held here for
+		// the session's lifetime; dropping it closes the channel and wakes any
+		// parked group streams with a cancellation.
+		let resolved_tx: kio::Producer<Option<ResolvedTrack>> = kio::Producer::new(None);
+		self.subscribes.lock().insert(
+			id,
+			TrackEntry {
+				stats: track_stats,
+				resolved: resolved_tx.consume(),
+			},
+		);
 
 		let mut stream = match Stream::open(&self.session, self.version).await {
 			Ok(s) => s,
@@ -579,49 +608,65 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return SessionOutcome::Error(err);
 		}
 
-		// The first response MUST be a SUBSCRIBE_OK. Bail if the broadcast dies first.
-		let resp = tokio::select! {
-			err = broadcast.closed() => {
-				request.deny(err.clone());
-				return SessionOutcome::BroadcastClosed(err);
-			}
-			resp = stream.reader.decode::<lite::SubscribeResponse>() => match resp {
-				Ok(r) => r,
-				Err(err) => {
-					stream.writer.abort(&err);
+		// Resolve the track's immutable properties (compression/timescale/cache).
+		// lite-05 fetches TRACK_INFO on its own stream (already racing the SUBSCRIBE
+		// above); older drafts take them from SUBSCRIBE_OK, which carries no such
+		// properties, so they fall back to the untimed/uncompressed defaults.
+		let (compression, timescale, cache) = if matches!(self.version, Version::Lite05Wip) {
+			tokio::select! {
+				err = broadcast.closed() => {
 					request.deny(err.clone());
-					return SessionOutcome::Error(err);
+					return SessionOutcome::BroadcastClosed(err);
+				}
+				res = self.fetch_track_info(&broadcast_path, name) => match res {
+					Ok(info) => (info.compression, info.timescale, info.cache),
+					Err(err) => {
+						stream.writer.abort(&err);
+						request.deny(err.clone());
+						return SessionOutcome::Error(err);
+					}
 				}
 			}
-		};
-		let lite::SubscribeResponse::Ok(info) = resp else {
-			let err = Error::ProtocolViolation;
-			stream.writer.abort(&err);
-			request.deny(err.clone());
-			return SessionOutcome::Error(err);
+		} else {
+			let resp = tokio::select! {
+				err = broadcast.closed() => {
+					request.deny(err.clone());
+					return SessionOutcome::BroadcastClosed(err);
+				}
+				resp = stream.reader.decode::<lite::SubscribeResponse>() => match resp {
+					Ok(r) => r,
+					Err(err) => {
+						stream.writer.abort(&err);
+						request.deny(err.clone());
+						return SessionOutcome::Error(err);
+					}
+				}
+			};
+			if !matches!(resp, lite::SubscribeResponse::Ok(_)) {
+				let err = Error::ProtocolViolation;
+				stream.writer.abort(&err);
+				request.deny(err.clone());
+				return SessionOutcome::Error(err);
+			}
+			(Compression::None, None, crate::DEFAULT_CACHE)
 		};
 
-		// Upstream confirmed the subscription, so this session is now actively
-		// feeding the broadcast: take the per-(session, broadcast) sentinel. It
-		// drops when this fn returns (subscription end / cancel), releasing
-		// `broadcasts_closed`. Taken only after SUBSCRIBE_OK so a sub cancelled
-		// before confirmation isn't counted as a feeding session.
+		// Upstream confirmed the subscription (TRACK_INFO on lite-05, SUBSCRIBE_OK on
+		// older drafts), so this session is now actively feeding the broadcast: take
+		// the per-(session, broadcast) sentinel. It drops when this fn returns
+		// (subscription end / cancel), releasing `broadcasts_closed`. Taken only
+		// after confirmation so a sub cancelled before it isn't counted as a feeding
+		// session.
 		let abs = self.origin.absolute(&msg.broadcast);
 		let _broadcast_sub = self.broadcasts.subscribe(&abs);
 
-		// The publisher accepted: create the producer (unblocking the downstream
-		// subscriber) and start routing incoming groups to it. SUBSCRIBE_OK is known
-		// now, so the group streams never have to wait; they still read it through a
-		// kio channel (a group's QUIC stream can otherwise race ahead of SUBSCRIBE_OK).
-		//
-		// Stamp the negotiated timescale onto the local Track so groups inherit
-		// it and downstream consumers (including this subscriber's frame decode
-		// path) can validate per-frame timestamps at the model layer.
+		// Stamp the negotiated timescale and cache window onto the local Track so
+		// groups inherit the timescale (the frame decode path validates per-frame
+		// timestamps at the model layer) and the producer evicts (and clamps
+		// downstream stale windows) with the same bound when re-served.
 		let mut local_info = Track::new(name);
-		local_info.timescale = info.timescale;
-		// Carry the publisher's cache window so the local producer evicts (and
-		// clamps downstream stale windows) with the same bound when re-served.
-		local_info.cache = info.cache;
+		local_info.timescale = timescale;
+		local_info.cache = cache;
 		let mut track = match request.accept(local_info) {
 			Ok(track) => track,
 			Err(err) => {
@@ -629,15 +674,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return SessionOutcome::Error(err);
 			}
 		};
-		let subscribe_ok = kio::Producer::new(Some(info)).consume();
-		self.subscribes.lock().insert(
-			id,
-			TrackEntry {
+
+		// Resolve the pending entry: group streams parked on it can now create
+		// groups (with the right timescale) and decode frames.
+		if let Ok(mut resolved) = resolved_tx.write() {
+			*resolved = Some(ResolvedTrack {
 				producer: track.clone(),
-				stats: track_stats,
-				subscribe_ok,
-			},
-		);
+				compression,
+				timescale,
+			});
+		}
 
 		// Lifecycle loop: serve → linger → resume → serve → ... → FIN.
 		let outcome = 'lifecycle: loop {
@@ -729,40 +775,47 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		outcome
 	}
 
+	/// Open a Track Stream, send TRACK, and read the single TRACK_INFO reply.
+	///
+	/// The publisher FINs after TRACK_INFO (or resets on error, e.g. the track
+	/// does not exist); we drop the stream once the reply is in. Lite05+ only.
+	async fn fetch_track_info(&self, broadcast: &Path<'_>, name: &str) -> Result<lite::TrackInfo, Error> {
+		let mut stream = Stream::open(&self.session, self.version).await?;
+		stream.writer.encode(&lite::ControlType::Track).await?;
+		let req = lite::Track {
+			broadcast: broadcast.clone(),
+			track: name.into(),
+		};
+		stream.writer.encode(&req).await?;
+
+		let info = stream.reader.decode::<lite::TrackInfo>().await?;
+		let _ = stream.writer.finish();
+		Ok(info)
+	}
+
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let (mut group, track, track_stats, subscribe_ok) = {
-			let mut subs = self.subscribes.lock();
-			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
-
-			let group_info = Group { sequence: hdr.sequence };
-			let group = entry.producer.create_group(group_info)?;
-			(
-				group,
-				entry.producer.clone(),
-				entry.stats.clone(),
-				entry.subscribe_ok.clone(),
-			)
+		let (resolved, track_stats) = {
+			let subs = self.subscribes.lock();
+			let entry = subs.get(&hdr.subscribe).ok_or(Error::Cancel)?;
+			(entry.resolved.clone(), entry.stats.clone())
 		};
 
-		// Bump groups counter for this incoming group on the subscriber side.
-		track_stats.group();
-
-		// Block until SUBSCRIBE_OK arrives. The group's QUIC stream can arrive
-		// before SUBSCRIBE_OK lands on the subscribe stream, so we can't decode
-		// frames until this resolves. A closed channel means the subscription
-		// ended before SUBSCRIBE_OK, so treat it as cancelled.
+		// Block until the upstream is accepted and TRACK_INFO is known. The group's
+		// QUIC stream can arrive before that resolves; its unread bytes stay
+		// buffered by QUIC flow control until we create the group below. A closed
+		// channel means the subscription ended first, so treat it as cancelled.
 		//
 		// Map the closed `Ref` to `None` inside the poll closure (rather than using
 		// `Consumer::wait`) so the `!Send` guard never enters this spawned future.
-		let (compression, timescale) = kio::wait(|waiter| {
-			let poll = subscribe_ok.poll(waiter, |ok| match &**ok {
-				Some(ok) => Poll::Ready((ok.compression, ok.timescale)),
+		let resolved = kio::wait(|waiter| {
+			let poll = resolved.poll(waiter, |r| match &**r {
+				Some(r) => Poll::Ready(r.clone()),
 				None => Poll::Pending,
 			});
 			match poll {
-				Poll::Ready(Ok(pair)) => Poll::Ready(Some(pair)),
+				Poll::Ready(Ok(r)) => Poll::Ready(Some(r)),
 				Poll::Ready(Err(_closed)) => Poll::Ready(None),
 				Poll::Pending => Poll::Pending,
 			}
@@ -770,10 +823,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		.await
 		.ok_or(Error::Cancel)?;
 
+		// Create the group now that the timescale is known, so it inherits the right
+		// per-frame timestamp scale.
+		let mut producer = resolved.producer.clone();
+		let mut group = producer.create_group(Group { sequence: hdr.sequence })?;
+
+		// Bump groups counter for this incoming group on the subscriber side.
+		track_stats.group();
+
 		let res = tokio::select! {
-			err = track.closed() => Err(err),
+			err = producer.closed() => Err(err),
 			err = group.closed() => Err(err),
-			res = self.run_group(stream, group.clone(), track_stats.clone(), compression, timescale) => res,
+			res = self.run_group(stream, group.clone(), track_stats.clone(), resolved.compression, resolved.timescale) => res,
 		};
 
 		match res {

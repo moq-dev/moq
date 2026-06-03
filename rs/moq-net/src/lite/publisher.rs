@@ -68,6 +68,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			if let Err(err) = match kind {
 				lite::ControlType::Announce => self.recv_announce(stream).await,
 				lite::ControlType::Subscribe => self.recv_subscribe(stream).await,
+				lite::ControlType::Track => self.recv_track(stream).await,
 				lite::ControlType::Probe => {
 					self.recv_probe(stream);
 					Ok(())
@@ -468,8 +469,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.await?;
 
 		// Compress only when the producer marked the track worth it and the
-		// negotiated draft understands the SUBSCRIBE_OK codec field. Older drafts
-		// (lite-04 and below) get None and the frames stream verbatim.
+		// negotiated draft understands the codec field (carried in SUBSCRIBE_OK on
+		// lite-04 and below, in TRACK_INFO on lite-05+). Older drafts without it
+		// get None and the frames stream verbatim.
 		let supports_compression = !matches!(
 			version,
 			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Lite04
@@ -494,20 +496,23 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// broadcast. Dropping this guard (subscription end) releases it.
 		let _broadcast_sub = broadcasts.subscribe(&absolute);
 
-		let info = lite::SubscribeOk {
-			priority: subscribe.priority,
-			ordered: false,
-			max_latency: std::time::Duration::ZERO,
-			start_group: None,
-			end_group: None,
-			compression,
-			timescale,
-			// Announce the publisher's cache window so the subscriber (a relay)
-			// re-serves with the same eviction window. Pre-lite-05 peers ignore it.
-			cache: track.cache,
-		};
+		// Lite05+ accepts a subscription implicitly (rejection is a stream reset)
+		// and serves the immutable properties over a TRACK_INFO stream instead.
+		// Older drafts confirm acceptance with SUBSCRIBE_OK here.
+		if matches!(
+			version,
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Lite04
+		) {
+			let info = lite::SubscribeOk {
+				priority: subscribe.priority,
+				ordered: false,
+				max_latency: std::time::Duration::ZERO,
+				start_group: None,
+				end_group: None,
+			};
 
-		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
+			stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
+		}
 
 		// Track-level subscriber priority. SUBSCRIBE_UPDATE messages broadcast new values
 		// to both run_track (so future groups inherit the new priority) and serve_group
@@ -542,6 +547,84 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		)
 		.await?;
 
+		stream.writer.finish()?;
+		stream.writer.closed().await
+	}
+
+	/// Serve a Track Stream: reply with the track's immutable [`lite::TrackInfo`]
+	/// and FIN, or reset on error (e.g. the track does not exist). Lite05+ only.
+	pub async fn recv_track(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+		let req = stream.reader.decode::<lite::Track>().await?;
+
+		let track = req.track.to_string();
+		let absolute = self.origin.absolute(&req.broadcast).to_owned();
+
+		tracing::debug!(broadcast = %absolute, %track, "track info requested");
+
+		let broadcast = self.origin.get_broadcast(&req.broadcast);
+		let version = self.version;
+
+		web_async::spawn(async move {
+			if let Err(err) = Self::run_track_info(&mut stream, &track, broadcast, version).await {
+				match &err {
+					Error::Cancel | Error::Transport(_) => {
+						tracing::debug!(broadcast = %absolute, %track, "track info cancelled")
+					}
+					err => tracing::warn!(broadcast = %absolute, %track, %err, "track info error"),
+				}
+				stream.writer.abort(&err);
+			}
+		});
+
+		Ok(())
+	}
+
+	async fn run_track_info(
+		stream: &mut Stream<S, Version>,
+		track_name: &str,
+		consumer: Option<BroadcastConsumer>,
+		version: Version,
+	) -> Result<(), Error> {
+		let broadcast = consumer.ok_or(Error::NotFound)?;
+
+		// The immutable properties are delivered when the (possibly dynamic)
+		// producer is accepted, so resolving them means subscribing. We read them
+		// off the subscriber and drop it immediately; a SUBSCRIBE flighted in
+		// parallel coalesces onto the same upstream producer, which linger keeps
+		// alive across this brief gap.
+		let track = broadcast
+			.consume_track(track_name)
+			.subscribe(crate::Subscription::default())
+			.await?;
+
+		// Mirror the negotiation in `run_subscribe` so the subscriber decodes
+		// frames the same way it'll see them served.
+		let supports_compression = !matches!(
+			version,
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Lite04
+		);
+		let compression = if track.compress && supports_compression {
+			Compression::Deflate
+		} else {
+			Compression::None
+		};
+		let timescale = if version.has_timestamps() {
+			track.timescale
+		} else {
+			None
+		};
+
+		let info = lite::TrackInfo {
+			// The model carries no publisher-chosen priority/order yet, so both
+			// default to the tie-break-neutral values.
+			priority: 0,
+			ordered: false,
+			cache: track.cache,
+			timescale,
+			compression,
+		};
+
+		stream.writer.encode(&info).await?;
 		stream.writer.finish()?;
 		stream.writer.closed().await
 	}
