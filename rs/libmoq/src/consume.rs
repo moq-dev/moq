@@ -407,10 +407,7 @@ impl Consume {
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = async move {
-				let track = broadcast
-					.consume_track(&name)
-					.subscribe(moq_net::Subscription::default())
-					.await?;
+				let track = broadcast.consume_track(&name).subscribe(None).await?;
 				Self::run_raw(on_frame, track, channel.1).await
 			}
 			.await;

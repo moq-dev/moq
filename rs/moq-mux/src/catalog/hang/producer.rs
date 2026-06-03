@@ -54,7 +54,7 @@ impl Producer {
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> Result<super::Consumer, moq_net::Error> {
-		let track = self.hang_track.subscribe_default();
+		let track = self.hang_track.subscribe(None);
 		let subscriber = track;
 		Ok(super::Consumer::new(subscriber))
 	}
