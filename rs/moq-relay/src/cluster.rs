@@ -161,10 +161,10 @@ impl DialMap {
 	/// unannounce while a timestamp is pending doesn't reset the clock.
 	fn mark_unannounced(&self, peer: &str, now: Instant) {
 		let mut map = self.inner.lock().expect("dial map poisoned");
-		if let Some(entry) = map.get_mut(peer) {
-			if entry.sources.gossip {
-				entry.unannounced_at.get_or_insert(now);
-			}
+		if let Some(entry) = map.get_mut(peer)
+			&& entry.sources.gossip
+		{
+			entry.unannounced_at.get_or_insert(now);
 		}
 	}
 

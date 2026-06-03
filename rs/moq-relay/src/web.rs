@@ -48,6 +48,11 @@ pub struct WebConfig {
 	#[arg(long = "web-ws", env = "MOQ_WEB_WS", default_value = "true")]
 	#[serde(default = "default_true")]
 	pub ws: bool,
+
+	/// Health endpoint (`/health`) thresholds for load shedding.
+	#[command(flatten)]
+	#[serde(default)]
+	pub health: crate::HealthConfig,
 }
 
 /// Plain HTTP listener configuration.
@@ -108,6 +113,8 @@ pub struct WebState {
 	pub tls_info: Arc<std::sync::RwLock<moq_native::ServerTlsInfo>>,
 	/// Monotonically increasing connection counter for WebSocket sessions.
 	pub conn_id: AtomicU64,
+	/// Host overload monitor backing the `/health` endpoint.
+	pub health: crate::Health,
 }
 
 /// Run a HTTP server using Axum
@@ -124,6 +131,7 @@ impl Web {
 	/// Runs the HTTP and/or HTTPS listeners until they shut down.
 	pub async fn run(self) -> anyhow::Result<()> {
 		let app = Router::new()
+			.route("/health", get(serve_health))
 			.route("/certificate.sha256", get(serve_fingerprint))
 			.route("/announced", get(serve_announced))
 			.route("/announced/{*prefix}", get(serve_announced))
@@ -363,6 +371,29 @@ pub(crate) fn landing_response() -> Response {
 /// Axum fallback handler for any unmatched route.
 async fn serve_landing() -> Response {
 	landing_response()
+}
+
+/// Liveness/load-shedding probe.
+///
+/// Returns `200 ok` when every configured threshold passes, or `503` with a
+/// plain-text `overloaded` header line followed by one line per breached
+/// threshold. Unauthenticated so load-balancer probes don't need a JWT.
+async fn serve_health(State(state): State<Arc<WebState>>) -> Response {
+	let mut breaches = state.health.check();
+	if let Some(msg) = state.health.check_api().await {
+		breaches.push(msg);
+	}
+
+	if breaches.is_empty() {
+		return (StatusCode::OK, "ok\n").into_response();
+	}
+
+	let mut body = String::from("overloaded\n");
+	for breach in &breaches {
+		body.push_str(breach);
+		body.push('\n');
+	}
+	(StatusCode::SERVICE_UNAVAILABLE, body).into_response()
 }
 
 async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {

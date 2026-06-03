@@ -74,6 +74,7 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 			cluster,
 			tls_info: server.tls_info(),
 			conn_id: AtomicU64::new(0),
+			health: web_config.health.build(),
 		},
 		web_config,
 	);
@@ -180,5 +181,23 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 	drop(pub_session);
 	drop(sub_session);
+	web_handle.abort();
+}
+
+/// With no thresholds configured, `/health` is a pure liveness probe that
+/// returns `200 ok`.
+#[tokio::test]
+async fn health_endpoint_reports_ok() {
+	let (port, web_handle) = spawn_relay().await;
+
+	let resp = tokio::time::timeout(TIMEOUT, reqwest::get(format!("http://127.0.0.1:{port}/health")))
+		.await
+		.expect("health request timeout")
+		.expect("health request failed");
+
+	assert_eq!(resp.status(), reqwest::StatusCode::OK);
+	let body = resp.text().await.expect("health body");
+	assert_eq!(body, "ok\n");
+
 	web_handle.abort();
 }
