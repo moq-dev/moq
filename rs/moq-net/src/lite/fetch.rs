@@ -16,9 +16,9 @@ pub struct Fetch<'a> {
 	pub track: Cow<'a, str>,
 	pub priority: u8,
 	pub group: u64,
-	/// 0-based index of the first frame to return. The publisher skips earlier
-	/// frames so a subscriber can resume partway through a partially-received
-	/// group; `0` returns the whole group. Lite05+ only; older drafts always 0.
+	/// The 0-based index of the first frame to return; the publisher skips all
+	/// earlier frames. `0` returns the entire group. Lite05+ only; older drafts
+	/// always return the whole group.
 	pub frame_start: u64,
 }
 
