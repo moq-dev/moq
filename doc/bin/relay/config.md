@@ -108,7 +108,7 @@ value syntax.
 [web.health]
 cpu = 75       # percent; `75` or `75%`
 ram = "80%"    # percent of total, or absolute (`32GB`)
-net_tx = "500MB"  # bytes/s; `b` = bits, `B` = bytes (`4Gb`)
+tx = "500MB"   # bytes/s; `b` = bits, `B` = bytes (`4Gb`)
 load5 = 6.0    # load average, Unix only
 ```
 

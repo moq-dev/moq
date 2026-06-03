@@ -1,7 +1,7 @@
 //! Host overload checks for the relay's `/health` endpoint.
 //!
 //! Operators configure resource thresholds (`--web-health-cpu`, `-ram`,
-//! `-net-rx`/`-tx`, `-load1`/`5`/`15`) and/or an external health service
+//! `-rx`/`-tx`, `-load1`/`5`/`15`) and/or an external health service
 //! (`--web-health-api`). A `GET /health` returns `200` when every configured
 //! check passes and `503` (with a plain-text list of breached thresholds) when
 //! any fails, so an upstream load balancer can shed traffic away from a
@@ -56,15 +56,15 @@ pub struct HealthConfig {
 	/// Return 503 when aggregate received throughput exceeds this rate. A unit
 	/// is required; lowercase `b` is bits, uppercase `B` is bytes (`4Gb`,
 	/// `500MB`). `/s` is always implied.
-	#[arg(long = "web-health-net-rx", id = "web-health-net-rx", env = "MOQ_WEB_HEALTH_NET_RX", value_parser = parse_rate)]
+	#[arg(long = "web-health-rx", id = "web-health-rx", env = "MOQ_WEB_HEALTH_RX", value_parser = parse_rate)]
 	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
-	pub net_rx: Option<Rate>,
+	pub rx: Option<Rate>,
 
 	/// Return 503 when aggregate transmitted throughput exceeds this rate.
-	/// Same syntax as `--web-health-net-rx`.
-	#[arg(long = "web-health-net-tx", id = "web-health-net-tx", env = "MOQ_WEB_HEALTH_NET_TX", value_parser = parse_rate)]
+	/// Same syntax as `--web-health-rx`.
+	#[arg(long = "web-health-tx", id = "web-health-tx", env = "MOQ_WEB_HEALTH_TX", value_parser = parse_rate)]
 	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
-	pub net_tx: Option<Rate>,
+	pub tx: Option<Rate>,
 
 	/// Return 503 when the 1-minute load average exceeds this value. Unix only.
 	#[cfg(unix)]
@@ -119,8 +119,8 @@ impl HealthConfig {
 
 		let want_cpu = self.cpu.is_some();
 		let want_ram = self.ram.is_some();
-		let want_rx = self.net_rx.is_some();
-		let want_tx = self.net_tx.is_some();
+		let want_rx = self.rx.is_some();
+		let want_tx = self.tx.is_some();
 		let want_net = want_rx || want_tx;
 
 		if want_cpu || want_ram || want_net {
@@ -262,24 +262,16 @@ fn evaluate(cfg: &HealthConfig, sample: &Sample, load: (f64, f64, f64)) -> Vec<S
 		breaches.extend(breach);
 	}
 
-	if let (Some(limit), Some(rx)) = (cfg.net_rx.as_ref(), sample.rx)
+	if let (Some(limit), Some(rx)) = (cfg.rx.as_ref(), sample.rx)
 		&& rx > limit.0
 	{
-		breaches.push(format!(
-			"net-rx {}/s exceeds {}/s",
-			human_bytes(rx),
-			human_bytes(limit.0)
-		));
+		breaches.push(format!("rx {}/s exceeds {}/s", human_bytes(rx), human_bytes(limit.0)));
 	}
 
-	if let (Some(limit), Some(tx)) = (cfg.net_tx.as_ref(), sample.tx)
+	if let (Some(limit), Some(tx)) = (cfg.tx.as_ref(), sample.tx)
 		&& tx > limit.0
 	{
-		breaches.push(format!(
-			"net-tx {}/s exceeds {}/s",
-			human_bytes(tx),
-			human_bytes(limit.0)
-		));
+		breaches.push(format!("tx {}/s exceeds {}/s", human_bytes(tx), human_bytes(limit.0)));
 	}
 
 	#[cfg(unix)]
@@ -505,7 +497,7 @@ mod tests {
 		let cfg = HealthConfig {
 			cpu: Some(75.0),
 			ram: Some(MemLimit::Percent(80.0)),
-			net_tx: Some(Rate(100_000_000)),
+			tx: Some(Rate(100_000_000)),
 			..Default::default()
 		};
 

@@ -93,7 +93,7 @@ curl -i http://localhost:4443/health
 # HTTP/1.1 503 Service Unavailable
 # overloaded
 # cpu 82.1% exceeds 75%
-# net-tx 612.0MB/s exceeds 500.0MB/s
+# tx 612.0MB/s exceeds 500.0MB/s
 ```
 
 Thresholds are read from the host via the cross-platform [`sysinfo`](https://crates.io/crates/sysinfo) crate.
@@ -111,8 +111,8 @@ ram = "80%"
 # Return 503 when aggregate received/transmitted throughput exceeds this rate.
 # A unit is required; lowercase `b` is bits, uppercase `B` is bytes (`4Gb`, `500MB`).
 # `/s` is always implied. Useful for shedding before you saturate the NIC.
-net_rx = "4Gb"
-net_tx = "500MB"
+rx = "4Gb"
+tx = "500MB"
 
 # Return 503 when the load average exceeds these values. Unix only;
 # these keys are rejected on Windows (which has no load average).
@@ -131,7 +131,7 @@ api = "http://localhost:9876/health"
 ```
 
 Every key also has a CLI flag (`--web-health-cpu 75`, `--web-health-ram 80%`,
-`--web-health-net-rx 4Gb`, `--web-health-net-tx 500MB`, `--web-health-load5 6`,
+`--web-health-rx 4Gb`, `--web-health-tx 500MB`, `--web-health-load5 6`,
 `--web-health-interval 2`, `--web-health-api http://localhost:9876/health`) and
 a matching `MOQ_WEB_HEALTH_*` environment variable.
 
