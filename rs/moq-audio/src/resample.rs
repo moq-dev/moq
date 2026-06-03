@@ -4,19 +4,21 @@
 //! producer/consumer doesn't have to convert to planar on every call.
 //! Currently sample-rate only; channel up/downmix is rejected upstream.
 
+use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{
-	Resampler as RubatoTrait, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+	Async, FixedAsync, Resampler as RubatoTrait, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 
 use crate::AudioError;
 
 /// Sample-rate converter over interleaved `f32` PCM.
 pub struct Resampler {
-	resampler: SincFixedIn<f32>,
+	resampler: Async<f32>,
 	chunk_frames: usize,
 	channels: usize,
 	input_planar: Vec<Vec<f32>>,
 	output_planar: Vec<Vec<f32>>,
+	output_frames_max: usize,
 	pending: Vec<f32>,
 }
 
@@ -39,16 +41,18 @@ impl Resampler {
 			oversampling_factor: 128,
 			window: WindowFunction::BlackmanHarris2,
 		};
-		let resampler = SincFixedIn::<f32>::new(
+		let resampler = Async::<f32>::new_sinc(
 			output_rate as f64 / input_rate as f64,
 			1.0,
-			params,
+			&params,
 			chunk_frames,
 			channels as usize,
+			FixedAsync::Input,
 		)?;
 
 		let input_planar = (0..channels as usize).map(|_| vec![0.0f32; chunk_frames]).collect();
-		let output_planar = resampler.output_buffer_allocate(true);
+		let output_frames_max = resampler.output_frames_max();
+		let output_planar = vec![vec![0.0f32; output_frames_max]; channels as usize];
 
 		Ok(Self {
 			resampler,
@@ -56,6 +60,7 @@ impl Resampler {
 			channels: channels as usize,
 			input_planar,
 			output_planar,
+			output_frames_max,
 			pending: Vec::new(),
 		})
 	}
@@ -83,9 +88,12 @@ impl Resampler {
 				}
 			}
 
-			let (_, produced) =
-				self.resampler
-					.process_into_buffer(&self.input_planar, &mut self.output_planar, None)?;
+			let input = SequentialSliceOfVecs::new(&self.input_planar, self.channels, self.chunk_frames)
+				.expect("resampler input buffer dimensions");
+			let mut output =
+				SequentialSliceOfVecs::new_mut(&mut self.output_planar, self.channels, self.output_frames_max)
+					.expect("resampler output buffer dimensions");
+			let (_, produced) = self.resampler.process_into_buffer(&input, &mut output, None)?;
 
 			let prev_len = out.len();
 			out.resize(prev_len + produced * self.channels, 0.0);

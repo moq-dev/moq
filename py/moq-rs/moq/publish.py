@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ._uniffi import (
+from moq_ffi import (
     MoqAudioProducer,
     MoqBroadcastProducer,
     MoqGroupProducer,
@@ -12,6 +12,7 @@ from ._uniffi import (
     MoqMediaStreamProducer,
     MoqTrackProducer,
 )
+
 from .types import AudioEncoderInput, AudioEncoderOutput, AudioFrame
 
 if TYPE_CHECKING:

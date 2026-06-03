@@ -1,0 +1,38 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "moq-ffi"
+# Version is injected at build time from the moq-ffi-v* tag (see
+# .github/workflows/release-py-ffi.yml). For local dev `maturin develop`
+# reads it from rs/moq-ffi/Cargo.toml.
+dynamic = ["version"]
+description = "Raw UniFFI bindings for the Media over QUIC Rust crates. Most callers want the ergonomic `moq` wrapper instead."
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "Luke Curley", email = "kixelated@gmail.com" }]
+keywords = ["quic", "http3", "webtransport", "media", "live", "streaming"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Video",
+]
+
+[project.urls]
+Homepage = "https://github.com/moq-dev/moq"
+Repository = "https://github.com/moq-dev/moq"
+
+# Maturin builds the rs/moq-ffi crate, runs uniffi-bindgen, and packages
+# the cdylib + generated bindings as a private `moq_ffi._uniffi` subpackage
+# (the leading underscore signals "internal"; moq_ffi/__init__.py re-exports
+# the raw classes). The ergonomic `moq` wrapper depends on this package and
+# is versioned independently.
+[tool.maturin]
+bindings = "uniffi"
+manifest-path = "../../rs/moq-ffi/Cargo.toml"
+python-source = "."
+module-name = "moq_ffi._uniffi"

@@ -6,7 +6,8 @@ import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Literal
 
-from ._uniffi import MoqRequest, MoqServer
+from moq_ffi import MoqRequest, MoqServer
+
 from .origin import OriginProducer
 from .publish import BroadcastProducer
 from .session import Session

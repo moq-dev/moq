@@ -3,7 +3,8 @@
 Real-time pub/sub with built-in caching, fan-out, and prioritization.
 """
 
-from ._uniffi import MoqError as Error
+from moq_ffi import MoqError as Error
+
 from .client import Client, connect
 from .log import log_level
 from .origin import Announced, AnnouncedBroadcast, Announcement, OriginConsumer, OriginProducer

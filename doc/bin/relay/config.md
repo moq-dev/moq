@@ -123,9 +123,17 @@ Clustering configuration for multi-relay deployments.
 # Peers this relay dials. The topology is whatever you draw with these links.
 connect = ["us-east.example.com:4443"]
 
-# Optional. Set to this relay's own URL to advertise it so other peers find
-# you automatically.
-mesh = "us-west.example.com:4443"
+# Optional. This relay's own externally-reachable URL (identity). Advertised to
+# peers when gossip is on, and sent to connect_api as ?node=.
+node = "us-west.example.com:4443"
+
+# Optional. Enable gossip discovery: advertise `node` so peers find you
+# automatically. Boolean; requires `node` to be set.
+mesh = true
+
+# Optional. Fetch the peer list from an HTTP(S) endpoint or local file (a JSON
+# array of hostnames) and reconcile it at runtime, no restart needed.
+connect_api = "https://api.example.com/cluster/connect"
 
 # JWT used for outbound cluster dials (alternative to mTLS).
 token = "cluster.jwt"
@@ -150,7 +158,8 @@ tls.disable_verify = true
 
 Per-node stats publishing. When enabled, the relay publishes a single
 `<prefix>/node/<node>` broadcast (or `<prefix>/node` when `node` is unset)
-carrying JSON snapshots of every broadcast it's currently serving.
+carrying JSON snapshots of the broadcasts it's currently serving and of the
+sessions currently connected to it.
 
 ```toml
 [stats]
@@ -170,7 +179,8 @@ interval = 1
 node = "sjc/1"
 ```
 
-Each stats broadcast carries four tracks, one per `(tier, role)` pair:
+Each stats broadcast carries four per-broadcast tracks, one per
+`(tier, role)` pair, plus two session tracks (one per tier):
 
 | Track                       | What it covers                              |
 |-----------------------------|---------------------------------------------|
@@ -178,13 +188,15 @@ Each stats broadcast carries four tracks, one per `(tier, role)` pair:
 | `subscriber.json`           | external ingress                            |
 | `internal/publisher.json`   | internal (e.g. mTLS cluster peer) egress    |
 | `internal/subscriber.json`  | internal ingress                            |
+| `sessions.json`             | external connected sessions, keyed by root  |
+| `internal/sessions.json`    | internal connected sessions, keyed by root  |
 
-Each frame is a JSON object mapping broadcast path to a cumulative
-counter snapshot. An entry surfaces on any tick where the broadcast is
-live (any open counter still exceeds its `*_closed` counterpart, so a
-subscription could begin at any moment) or its snapshot changed since the
-previous tick. Once every counter equals its `*_closed` counterpart no
-traffic can flow, so the entry is dropped:
+Each per-broadcast frame is a JSON object mapping broadcast path to a
+cumulative counter snapshot. An entry surfaces on any tick where the
+broadcast is live (any open counter still exceeds its `*_closed`
+counterpart, so a subscription could begin at any moment) or its snapshot
+changed since the previous tick. Once every counter equals its `*_closed`
+counterpart no traffic can flow, so the entry is dropped:
 
 ```json
 {
@@ -208,16 +220,33 @@ Field semantics:
 - `announced` / `announced_closed`: cumulative count of every broadcast
   announce/unannounce event on this `(tier, role)` slot, regardless of
   whether any subscription happened. Use this for "all known broadcasts".
-- `broadcasts` / `broadcasts_closed`: derived in the snapshot task from
-  subscription transitions. Bumps each time the slot transitions from
-  "no active subs" to "at least one active sub" (a flicker through 0
-  inside a single tick counts as a full open/close pair). Use this for
-  "broadcasts with viewers", which is typically what billing and UI
-  want.
+- `broadcasts` / `broadcasts_closed`: per-(broadcast, session)
+  subscription sentinel. The first active subscription a peer session
+  opens for a broadcast bumps `broadcasts`; the last one it closes bumps
+  `broadcasts_closed`. Summed across sessions, `broadcasts -
+  broadcasts_closed` is the number of distinct sessions currently
+  subscribed to the broadcast (i.e. viewers on the egress side), which is
+  typically what billing and UI want.
 - `subscriptions` / `subscriptions_closed`: cumulative count of
   track-level subscription guards opened and dropped.
 - `bytes` / `frames` / `groups`: cumulative payload counters from the
-  lite session loops.
+  session loops (both the `moq-lite` and IETF `moq-transport` paths).
+
+The session tracks (`sessions.json`, `internal/sessions.json`) instead map
+each auth root to a `{ sessions, sessions_closed }` snapshot. `sessions`
+bumps when a session authenticated under that root connects and
+`sessions_closed` when it disconnects, so `sessions - sessions_closed` is
+the number of sessions currently connected under the root. This counts
+presence regardless of whether any data flows, so a client connected to
+e.g. `/acme` is billable even while idle. A root entry is emitted while live
+or on the tick it changed, then dropped once no session under it remains:
+
+```json
+{
+  "acme":   { "sessions": 3, "sessions_closed": 1 },
+  "globex": { "sessions": 1, "sessions_closed": 0 }
+}
+```
 
 Tier, role, and node are implied by the track and broadcast paths, so
 they aren't repeated inside the frame. Counters are cumulative and

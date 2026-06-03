@@ -54,6 +54,21 @@ The matching `*_close` function only *requests* shutdown: it returns immediately
 
 Because the terminal callback runs on libmoq's thread, bindings that own thread-affine objects (e.g. a Qt `QObject`) should hop to the owning thread to perform the actual destruction; the `user_data` lifetime contract holds regardless of which thread tears the object down.
 
+## Error handling
+
+Functions return a negative code on failure (`0` or a positive handle on success). The code identifies the kind of failure, but the human-readable reason is available separately via `moq_error()`:
+
+```c
+int rc = moq_consume_catalog_close(catalog);
+if (rc < 0) {
+    fprintf(stderr, "close failed: %s\n", moq_error());
+}
+```
+
+`moq_error()` returns the reason for the most recent failed call **on the calling thread**, including detail the numeric code can't carry (which URL failed to parse, why a decode failed, etc.). The returned pointer is valid until the next libmoq call on that thread, so copy it if you need to keep it. It is only meaningful after a call returned a negative code; check the code first. Errors delivered through status callbacks carry their code directly, so read `moq_error()` from inside the callback if you want the matching reason.
+
+Failed calls are reported only through the return code and `moq_error()`, not logged. To surface libmoq's internal logs (moq-net / QUIC activity), call `moq_log_level("debug")` (or `"trace"`, `"info"`, etc.) to install a tracing subscriber.
+
 ## Use cases
 
 - **C/C++ applications** integrating MoQ without a Rust toolchain

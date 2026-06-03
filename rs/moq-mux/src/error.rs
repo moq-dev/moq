@@ -86,6 +86,17 @@ pub enum Error {
 	/// Importer dispatcher cannot return a single track for multi-track containers.
 	#[error("{0} can contain multiple tracks")]
 	MultipleTracks(&'static str),
+
+	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
+	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
+	#[error("{0}")]
+	Other(std::sync::Arc<anyhow::Error>),
+}
+
+impl From<anyhow::Error> for Error {
+	fn from(err: anyhow::Error) -> Self {
+		Error::Other(std::sync::Arc::new(err))
+	}
 }
 
 impl From<mp4_atom::Error> for Error {

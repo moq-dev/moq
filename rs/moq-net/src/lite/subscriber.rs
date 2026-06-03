@@ -44,6 +44,10 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 	origin: OriginProducer,
 	stats: StatsHandle,
+	/// Per-session ingress broadcast-subscription tracker. Each upstream
+	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
+	/// distinct upstream sessions feeding each broadcast.
+	broadcasts: crate::SessionBroadcasts,
 	recv_bandwidth: Option<BandwidthProducer>,
 	// Session-level origin id shared with the Publisher. Used to filter out
 	// reflected announces: we ask the peer (via AnnounceInterest.exclude_hop)
@@ -84,10 +88,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// every session sharing that origin, required for cross-session
 		// loop detection.
 		let self_origin = *config.origin;
+		let broadcasts = config.stats.subscriber_broadcasts();
 		Self {
 			session: config.session,
 			origin: config.origin,
 			stats: config.stats,
+			broadcasts,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
 			subscribes: Default::default(),
@@ -487,6 +493,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let name = request.name().to_string();
 		let abs = self.origin.absolute(&path);
 		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&name));
+		// The per-(session, broadcast) `broadcasts` sentinel is taken later, once
+		// the upstream confirms with SUBSCRIBE_OK (see `run_subscribe_session`), so a
+		// sub cancelled before then isn't counted as a feeding session.
 
 		let id = self.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 
@@ -591,6 +600,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			request.deny(err.clone());
 			return SessionOutcome::Error(err);
 		};
+
+		// Upstream confirmed the subscription, so this session is now actively
+		// feeding the broadcast: take the per-(session, broadcast) sentinel. It
+		// drops when this fn returns (subscription end / cancel), releasing
+		// `broadcasts_closed`. Taken only after SUBSCRIBE_OK so a sub cancelled
+		// before confirmation isn't counted as a feeding session.
+		let abs = self.origin.absolute(&msg.broadcast);
+		let _broadcast_sub = self.broadcasts.subscribe(&abs);
 
 		// The publisher accepted: create the producer (unblocking the downstream
 		// subscriber) and start routing incoming groups to it. SUBSCRIBE_OK is known

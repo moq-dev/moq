@@ -20,7 +20,9 @@ bytes = "1"
 hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-rubato = "0.16"
+# We only use the sinc resampler (Async::new_sinc), so skip the default
+# fft_resampler feature and its RustFFT/realfft dependencies.
+rubato = { version = "3.0", default-features = false }
 thiserror = "2"
 # Pure-Rust transpilation of libopus 1.3.1. No CMake toolchain, no C
 # linker hackery, and crucially still maintained, unlike the

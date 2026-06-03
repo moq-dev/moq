@@ -16,6 +16,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKSPACE_DIR="$(cd "$RS_DIR/.." && pwd)"
 
+# Shrink the release staticlib. libmoq.a carries the same heavy dep tree as
+# moq-ffi, so an unstripped build is ~75 MB+. libmoq ships as a release
+# tarball (not a git mirror, so no hard 100 MB limit like moq-go), but thin
+# LTO with a single codegen unit dead-strips the unused monomorphizations Rust
+# bakes into a staticlib, halving the artifact with no source or ABI changes.
+# This covers the Windows cargo path below; the nix/crane path (Linux/macOS)
+# sets the same vars in nix/overlay.nix. Scoped here so a plain
+# `cargo build --release` stays fast; a caller can still override.
+export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-thin}"
+export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-1}"
+
 TARGET=""
 VERSION=""
 OUTPUT_DIR="dist"

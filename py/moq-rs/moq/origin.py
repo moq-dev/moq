@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from ._uniffi import MoqAnnounced, MoqAnnouncedBroadcast, MoqAnnouncement, MoqOriginConsumer, MoqOriginProducer
+from moq_ffi import MoqAnnounced, MoqAnnouncedBroadcast, MoqAnnouncement, MoqOriginConsumer, MoqOriginProducer
+
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
 

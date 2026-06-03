@@ -455,7 +455,11 @@ async fn serve_announced(
 		jwt: query.jwt,
 	};
 	let token = if mtls.is_some() {
-		AuthToken::unrestricted(moq_net::Path::new(&params.path).to_owned())
+		// mTLS peers: the API returns the canonical root and the billing tier.
+		let (root, internal) = state.auth.resolve_mtls(&params.path).await;
+		let mut token = AuthToken::unrestricted(moq_net::Path::new(&root).to_owned());
+		token.internal = internal;
+		token
 	} else {
 		state.auth.verify(&params).await?
 	};
@@ -491,16 +495,21 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let broadcast = path.join("/");
 	let auth = AuthParams {
-		path: broadcast.clone(),
+		path: path.join("/"),
 		jwt: params.auth.jwt,
 	};
 	let token = if mtls.is_some() {
-		AuthToken::unrestricted(moq_net::Path::new(&auth.path).to_owned())
+		// mTLS peers: the API returns the canonical root and the billing tier.
+		let (root, internal) = state.auth.resolve_mtls(&auth.path).await;
+		let mut token = AuthToken::unrestricted(moq_net::Path::new(&root).to_owned());
+		token.internal = internal;
+		token
 	} else {
 		state.auth.verify(&auth).await?
 	};
+	// The token's root is the canonical (alias-resolved) broadcast path.
+	let broadcast = token.root.to_string();
 
 	let Some(origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
@@ -662,13 +671,14 @@ mod tests {
 		ca_params.distinguished_name.push(rcgen::DnType::CommonName, "Test CA");
 		ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 		let ca_cert = ca_params.self_signed(&ca_kp).unwrap();
+		let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_kp);
 
 		let server_kp = KeyPair::generate().unwrap();
 		let mut server_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
 		server_params
 			.distinguished_name
 			.push(rcgen::DnType::CommonName, "test-server");
-		let server_cert = server_params.signed_by(&server_kp, &ca_cert, &ca_kp).unwrap();
+		let server_cert = server_params.signed_by(&server_kp, &ca_issuer).unwrap();
 
 		let ca_path = dir.path().join("ca.pem");
 		let cert_path = dir.path().join("server.cert.pem");

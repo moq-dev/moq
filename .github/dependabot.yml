@@ -2,6 +2,12 @@
 # package ecosystems to update and where the package manifests are located.
 # Please see the documentation for all configuration options:
 # https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# cooldown.default-days holds back any newly published version until it is at
+# least N days old. This buys time for a compromised release (supply-chain
+# attack) to be noticed and yanked before we pull it in. Security updates
+# bypass the cooldown. It only gates Dependabot-driven updates, not a manual
+# `cargo update` / `bun update` / `uv lock`.
 
 version: 2
 updates:
@@ -11,3 +17,40 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      bun:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      uv:
+        patterns:
+          - "*"

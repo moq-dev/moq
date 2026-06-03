@@ -39,7 +39,7 @@ Raw C bindings via `libmoq`. The lowest-level entry point and the foundation for
 
 ### [Python](/lib/py/)
 
-Async/await with `asyncio`. Published as [`moq-net`](https://pypi.org/project/moq-net/) on PyPI.
+Async/await with `asyncio`. Published as [`moq-rs`](https://pypi.org/project/moq-rs/) on PyPI (the ergonomic wrapper, imported as `moq`), atop the raw [`moq-ffi`](https://pypi.org/project/moq-ffi/) bindings.
 
 ### [Kotlin](/lib/kt/)
 

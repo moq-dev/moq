@@ -145,8 +145,11 @@ impl From<tracing::metadata::ParseLevelError> for Error {
 }
 
 impl ffi::ReturnCode for Error {
+	fn error(&self) -> Option<&Error> {
+		Some(self)
+	}
+
 	fn code(&self) -> i32 {
-		tracing::error!("{}", self);
 		match self {
 			Error::Moq(_) => -2,
 			Error::Url(_) => -3,
