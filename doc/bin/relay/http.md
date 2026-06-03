@@ -133,9 +133,10 @@ api = "http://localhost:9876/health"
 ```
 
 Every key also has a CLI flag (`--web-health-cpu 75`, `--web-health-ram 80%`,
-`--web-health-rx 4Gb`, `--web-health-tx 500MB`, `--web-health-load5 80%`,
-`--web-health-interval 2`, `--web-health-api http://localhost:9876/health`) and
-a matching `MOQ_WEB_HEALTH_*` environment variable.
+`--web-health-rx 4Gb`, `--web-health-tx 500MB`, `--web-health-load1 8.0`,
+`--web-health-load5 80%`, `--web-health-load15 4.0`, `--web-health-interval 2`,
+`--web-health-api http://localhost:9876/health`) and a matching
+`MOQ_WEB_HEALTH_*` environment variable.
 
 ## See Also
 
