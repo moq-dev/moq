@@ -52,14 +52,28 @@ domain, and signing key already exist. To stand them up the first time:
    id, so no separate `KEY_ID` secret is needed.
 
 4. **Upload the public key** to both buckets so users can verify the
-   repository signature:
+   repository signature. The two ecosystems need different encodings of the
+   *same* key, so export it twice:
+
+   - **apt** verifies repos with `gpgv`, which reads **binary** keyrings only
+     and rejects ASCII armor (`gpgv: invalid packet (ctb=2d)` -> `NO_PUBKEY`).
+     Export without `--armor` (or `gpg --dearmor` an armored copy).
+   - **rpm**/dnf imports the key via `gpgkey=` and wants the conventional
+     **ASCII-armored** form.
+
+   The install docs do a plain `curl | tee` with no client-side dearmor, so the
+   bytes we serve have to be usable as-is.
 
    ```bash
-   gpg --export --armor admin@moq.dev > moq-archive-keyring.gpg
-   bun wrangler r2 object put apt-moq-dev/moq-archive-keyring.gpg \
-     --file moq-archive-keyring.gpg --remote
-   bun wrangler r2 object put rpm-moq-dev/moq-archive-keyring.gpg \
-     --file moq-archive-keyring.gpg --remote
+   # apt: binary / dearmored
+   gpg --export admin@moq.dev > moq-keyring.gpg
+   bun wrangler r2 object put apt-moq-dev/moq-keyring.gpg \
+     --file moq-keyring.gpg --remote
+
+   # rpm: ASCII-armored
+   gpg --export --armor admin@moq.dev > moq-keyring.asc
+   bun wrangler r2 object put rpm-moq-dev/moq-keyring.gpg \
+     --file moq-keyring.asc --remote
    ```
 
 5. **Configure GitHub Actions secrets** (Settings -> Secrets and variables
@@ -78,12 +92,12 @@ regenerates the repository metadata, signs it, and uploads the diff.
 
 ## Rotating the signing key
 
-If the key needs to be rotated, repeat steps 3 through 5 with a new key.
-Upload the new `moq-archive-keyring.gpg` alongside the old one (use a
-versioned filename, e.g. `moq-archive-keyring-2026.gpg`) and update the
-install docs at `doc/setup/linux.md` to point users at the new URL.
-Existing installations keep validating against the old key until they
-re-import.
+If the key needs to be rotated, repeat steps 3 through 5 with a new key
+(keeping the apt-binary / rpm-armored split). Upload the new keyring under a
+versioned filename, e.g. `moq-keyring-2026.gpg`, alongside the existing
+`moq-keyring.gpg`, and update the install docs at `doc/setup/linux.md` to point
+users at the new URL. Existing installations keep validating against the old
+key until they re-import.
 
 ## Manual regeneration
 

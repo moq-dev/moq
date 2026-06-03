@@ -18,11 +18,11 @@ on Debian 12+ / Ubuntu 24.04+; the other packages install on Ubuntu 22.04 too.
 
 ```bash
 # Trust the project's signing key.
-curl -fsSL https://apt.moq.dev/moq-archive-keyring.gpg \
-  | sudo tee /usr/share/keyrings/moq-archive-keyring.gpg > /dev/null
+curl -fsSL https://apt.moq.dev/moq-keyring.gpg \
+  | sudo tee /usr/share/keyrings/moq-keyring.gpg > /dev/null
 
 # Add the repository.
-echo "deb [signed-by=/usr/share/keyrings/moq-archive-keyring.gpg] https://apt.moq.dev stable main" \
+echo "deb [signed-by=/usr/share/keyrings/moq-keyring.gpg] https://apt.moq.dev stable main" \
   | sudo tee /etc/apt/sources.list.d/moq.list
 
 sudo apt update
@@ -100,12 +100,12 @@ If your distro doesn't have a native package on offer:
 The apt and rpm repositories are signed with the same project GPG key. The
 public key is served at:
 
-- <https://apt.moq.dev/moq-archive-keyring.gpg>
-- <https://rpm.moq.dev/moq-archive-keyring.gpg>
+- <https://apt.moq.dev/moq-keyring.gpg>
+- <https://rpm.moq.dev/moq-keyring.gpg>
 
 Verify the apt repository metadata signature manually:
 
 ```bash
-gpg --import moq-archive-keyring.gpg
+gpg --import moq-keyring.gpg
 gpg --verify Release.gpg Release
 ```

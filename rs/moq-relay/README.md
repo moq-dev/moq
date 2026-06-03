@@ -11,9 +11,9 @@ See [localhost.toml](https://github.com/moq-dev/moq/blob/main/demo/relay/localho
 ### Debian / Ubuntu
 
 ```bash
-curl -fsSL https://apt.moq.dev/moq-archive-keyring.gpg \
-  | sudo tee /usr/share/keyrings/moq-archive-keyring.gpg > /dev/null
-echo "deb [signed-by=/usr/share/keyrings/moq-archive-keyring.gpg] https://apt.moq.dev stable main" \
+curl -fsSL https://apt.moq.dev/moq-keyring.gpg \
+  | sudo tee /usr/share/keyrings/moq-keyring.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/moq-keyring.gpg] https://apt.moq.dev stable main" \
   | sudo tee /etc/apt/sources.list.d/moq.list
 sudo apt update && sudo apt install moq-relay
 ```
