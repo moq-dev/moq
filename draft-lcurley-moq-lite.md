@@ -295,7 +295,7 @@ Either endpoint MAY reset/cancel the stream at any time.
 ### Fetch
 A subscriber opens a Fetch Stream (0x3) to request a single Group from a Track.
 
-The subscriber sends a FETCH message containing the broadcast path, track name, priority, and group sequence.
+The subscriber sends a FETCH message containing the broadcast path, track name, priority, group sequence, and the frame index at which to start.
 Unlike Group Streams (which MUST start with a GROUP message), the publisher responds with FRAME messages directly on the same bidirectional stream — there is no preceding GROUP header.
 The Subscribe ID and Group Sequence for the returned FRAME messages are implicit, taken from the original FETCH request.
 The publisher FINs the stream after the last frame, or resets the stream on error.
@@ -608,8 +608,8 @@ SUBSCRIBE Message {
   Subscriber Priority (8)
   Subscriber Ordered (8)
   Subscriber Stale (i)
-  Start Group (i)
-  End Group (i)
+  Group Start (i)
+  Group End (i)
 }
 ~~~
 
@@ -635,12 +635,12 @@ A value of `0` means the subscriber wants only the latest group in live delivery
 This is a delivery-time preference, not a retention rule: the publisher's cache (see `Publisher Cache` in [SUBSCRIBE_OK](#subscribe-ok)) may still hold these groups for FETCH or future subscriptions.
 See the [Expiration](#expiration) section for more information.
 
-**Start Group**:
+**Group Start**:
 The first group to deliver.
 A value of 0 means the latest group (default).
 A non-zero value is the absolute group sequence + 1.
 
-**End Group**:
+**Group End**:
 The last group to deliver (inclusive).
 A value of 0 means unbounded (default).
 A non-zero value is the absolute group sequence + 1.
@@ -657,8 +657,8 @@ SUBSCRIBE_UPDATE Message {
   Subscriber Priority (8)
   Subscriber Ordered (8)
   Subscriber Stale (i)
-  Start Group (i)
-  End Group (i)
+  Group Start (i)
+  Group End (i)
 }
 ~~~
 
@@ -677,8 +677,8 @@ SUBSCRIBE_OK Message {
   Publisher Priority (8)
   Publisher Ordered (8)
   Publisher Cache (i)
-  Start Group (i)
-  End Group (i)
+  Group Start (i)
+  Group End (i)
   Publisher Timescale (i)
   Publisher Compression (i)
 }
@@ -687,12 +687,12 @@ SUBSCRIBE_OK Message {
 **Type**:
 Set to 0x0 to indicate a SUBSCRIBE_OK message.
 
-**Start Group**:
+**Group Start**:
 The resolved absolute start group sequence.
 A value of 0 means the start group is not yet known; the publisher MUST send a subsequent SUBSCRIBE_OK with a resolved value.
 A non-zero value is the absolute group sequence + 1.
 
-**End Group**:
+**Group End**:
 The resolved absolute end group sequence (inclusive).
 A value of 0 means unbounded.
 A non-zero value is the absolute group sequence + 1.
@@ -709,7 +709,7 @@ The minimum age, in milliseconds, the publisher guarantees to retain a group pas
 Applies only to non-latest groups; the latest group is always retained.
 Analogous to HTTP `Cache-Control: max-age` as a lower bound:
 
-- A subscriber MAY issue a SUBSCRIBE or FETCH with an older `Start Group` and expect the publisher to still have it, as long as the group's age does not exceed `Publisher Cache`.
+- A subscriber MAY issue a SUBSCRIBE or FETCH with an older `Group Start` and expect the publisher to still have it, as long as the group's age does not exceed `Publisher Cache`.
 - The publisher MAY retain groups longer than `Publisher Cache` (a best-effort cache beyond the guarantee); subscribers MUST NOT assume older groups are unavailable.
 
 A value of `0` means no retention guarantee beyond live delivery; older groups MAY still be available but the publisher makes no promise.
@@ -744,8 +744,8 @@ A SUBSCRIBE_DROP message is sent by the publisher on the Subscribe Stream when g
 SUBSCRIBE_DROP Message {
   Type (i) = 0x1
   Message Length (i)
-  Start Group (i)
-  End Group (i)
+  Group Start (i)
+  Group End (i)
   Error Code (i)
 }
 ~~~
@@ -753,10 +753,10 @@ SUBSCRIBE_DROP Message {
 **Type**:
 Set to 0x1 to indicate a SUBSCRIBE_DROP message.
 
-**Start Group**:
+**Group Start**:
 The first absolute group sequence in the dropped range.
 
-**End Group**:
+**Group End**:
 The last absolute group sequence in the dropped range (inclusive).
 
 **Error Code**:
@@ -773,6 +773,7 @@ FETCH Message {
   Track Name (s)
   Subscriber Priority (8)
   Group Sequence (i)
+  Frame Start (i)
 }
 ~~~
 
@@ -788,6 +789,15 @@ See the [Prioritization](#prioritization) section for more information.
 
 **Group Sequence**:
 The sequence number of the group to fetch.
+
+**Frame Start**:
+The index of the first frame to return, counting from `0` for the first frame in the group.
+The publisher skips all frames before this index and begins the response at this frame, allowing a subscriber to resume partway through a group.
+A value of `0` returns the entire group.
+If the group is still in progress and frame `Frame Start` has not yet been produced, the publisher waits and delivers it (and any later frames) as they arrive, just like a live subscription; it does not return early.
+Only once the group is complete is the out-of-range case resolved: if `Frame Start` is greater than or equal to the group's final frame count, the publisher returns no FRAME messages and FINs the stream.
+
+The returned FRAME messages are otherwise unchanged: when the Track's `Publisher Timescale` is non-zero, the first returned frame's `Timestamp Delta` is delta-encoded from `0` (i.e. its absolute timestamp), not from the timestamp of the skipped frame (see [FRAME](#frame)).
 
 The publisher responds with FRAME messages on the same stream.
 The publisher FINs the stream after the last frame, or resets on error.
@@ -897,6 +907,8 @@ A generic library or relay MUST NOT inspect or modify the decompressed contents 
 # Appendix A: Changelog
 
 ## moq-lite-05
+- Added `Frame Start` to FETCH so a subscriber can begin partway through a group instead of always at frame `0`, allowing resumption of a partially-received group.
+- Renamed `Start Group`/`End Group` to `Group Start`/`Group End` in SUBSCRIBE, SUBSCRIBE_UPDATE, SUBSCRIBE_OK, and SUBSCRIBE_DROP for consistency with the entity-first naming used elsewhere (e.g. `Group Sequence`). Wire format unchanged.
 - Allowed a duplicate `active` ANNOUNCE to atomically replace the prior advertisement (equivalent to UNANNOUNCE+ANNOUNCE). Used when only the origin or hop path changes (e.g. relay failover) without interrupting the broadcast. No new wire enum value — the existing `active` status carries the new metadata.
 - Added ANNOUNCE_OK message, sent once at the head of the Announce Stream response. Carries the publisher's `Hop ID` (hoisted out of every ANNOUNCE's Hop ID list) and an `Active Count` so subscribers can batch the initial set instead of reporting each ANNOUNCE as it trickles in.
 - Added `Publisher Timescale` to SUBSCRIBE_OK for per-track timestamp negotiation. When `Publisher Timescale` is 0, the per-frame timestamp/duration fields are omitted entirely from FRAME and datagram bodies.
