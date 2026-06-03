@@ -50,12 +50,19 @@ tos url='http://localhost:4443/anon' *args:
     just download tos
     just cmaf tos "{{ url }}" {{ args }}
 
-# Publish a video using ffmpeg to a relay server.
+# Publish a video using ffmpeg (CMAF / fMP4) to a relay server.
 cmaf name url='http://localhost:4443/anon' *args:
     cargo build --bin moq-cli
     just ffmpeg-cmaf "media/{{ name }}.mp4" |\
     cargo run --bin moq-cli -- \
     	{{ args }} publish --url "{{ url }}" --name "{{ name }}.hang" fmp4
+
+# Publish a video using ffmpeg (MPEG-TS) to a relay server.
+ts name url='http://localhost:4443/anon' *args:
+    cargo build --bin moq-cli
+    just ffmpeg-ts "media/{{ name }}.mp4" |\
+    cargo run --bin moq-cli -- \
+    	{{ args }} publish --url "{{ url }}" --name "{{ name }}.hang" ts
 
 # Publish a video via iroh.
 iroh name url prefix="":
@@ -249,3 +256,16 @@ ffmpeg-cmaf input output='-' *args:
     	-i "{{ input }}" \
     	-c copy \
     	-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame {{ args }} {{ output }}
+
+# Convert an h264 input file to MPEG-TS format to stdout.
+#
+# `-pes_payload_size 0` flushes one PES per audio frame instead of batching ~8
+# (the default 2930-byte minimum), so audio interleaves evenly with video rather
+# than arriving in ~185ms bursts. Without it the player must buffer a whole burst.
+[private]
+ffmpeg-ts input output='-' *args:
+    ffmpeg -hide_banner -v quiet \
+    	-stream_loop -1 -re \
+    	-i "{{ input }}" \
+    	-c copy \
+    	-f mpegts -pes_payload_size 0 {{ args }} {{ output }}

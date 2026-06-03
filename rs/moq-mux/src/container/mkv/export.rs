@@ -381,10 +381,17 @@ impl Export {
 		Ok(())
 	}
 
-	/// Header is ready when every track's [`ExportSource`] has resolved its
-	/// codec config — from the catalog `description` or built by the transform.
+	/// Header is ready when the catalog snapshot has arrived, at least one track
+	/// is subscribed, and every track's [`ExportSource`] has resolved its codec
+	/// config (from the catalog `description` or built by the transform).
+	///
+	/// The non-empty guard matters for a mid-stream subscriber: before the
+	/// catalog arrives `tracks` is empty, and `all()` would otherwise be
+	/// vacuously true and send us into `build_header` with no snapshot.
 	fn header_ready(&self) -> bool {
-		self.tracks.values().all(|t| t.source.header_ready())
+		self.catalog_snapshot.is_some()
+			&& !self.tracks.is_empty()
+			&& self.tracks.values().all(|t| t.source.header_ready())
 	}
 
 	fn build_header(&self) -> anyhow::Result<Bytes> {

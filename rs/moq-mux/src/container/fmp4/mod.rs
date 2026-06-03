@@ -63,6 +63,9 @@ pub enum Error {
 
 	#[error("can't synthesize CMAF init for {0}")]
 	UnsupportedSynthesis(String),
+
+	#[error("audio codec {0} needs a description (AudioSpecificConfig) to synthesize a CMAF init")]
+	MissingAudioDescription(String),
 }
 
 /// CMAF container: encodes/decodes a single track's moof+mdat fragments.
@@ -339,6 +342,8 @@ pub(crate) fn synthesize_audio_trak(
 	timescale: u64,
 	config: &AudioConfig,
 ) -> Result<mp4_atom::Trak, Error> {
+	use mp4_atom::Decode;
+
 	let audio = mp4_atom::Audio {
 		data_reference_index: 1,
 		channel_count: config.channel_count as u16,
@@ -357,6 +362,41 @@ pub(crate) fn synthesize_audio_trak(
 			},
 			btrt: None,
 		}),
+		AudioCodec::AAC(_) => {
+			// The catalog `description` is the AudioSpecificConfig (set by the TS
+			// importer via aac::Config::encode, or carried over from a CMAF source).
+			// mp4_atom models the esds DecoderSpecific as the parsed
+			// AudioSpecificConfig, so decode the blob back into that shape.
+			let description = config
+				.description
+				.as_ref()
+				.ok_or_else(|| Error::MissingAudioDescription(config.codec.to_string()))?;
+			let mut cursor = std::io::Cursor::new(description.as_ref());
+			let dec_specific = mp4_atom::esds::DecoderSpecific::decode(&mut cursor)?;
+
+			let bitrate = config.bitrate.unwrap_or(0) as u32;
+			mp4_atom::Codec::from(mp4_atom::Mp4a {
+				audio,
+				esds: mp4_atom::Esds {
+					es_desc: mp4_atom::esds::EsDescriptor {
+						// ISO/IEC 14496-14 §5.6: ES_ID is 0 in an MP4 file (the track id carries identity).
+						es_id: 0,
+						dec_config: mp4_atom::esds::DecoderConfig {
+							object_type_indication: 0x40, // MPEG-4 AAC
+							stream_type: 0x05,            // audio
+							up_stream: 0,
+							buffer_size_db: Default::default(),
+							max_bitrate: bitrate,
+							avg_bitrate: bitrate,
+							dec_specific,
+						},
+						sl_config: Default::default(),
+					},
+				},
+				btrt: None,
+				taic: None,
+			})
+		}
 		other => return Err(Error::UnsupportedSynthesis(format!("audio codec {:?}", other))),
 	};
 

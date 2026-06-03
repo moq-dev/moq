@@ -111,6 +111,42 @@ ffmpeg -i input.mp4 \
     -f mpegts - | moq-cli publish - https://relay.example.com/anon/stream
 ```
 
+## Container Formats
+
+`publish` selects its input container with a subcommand; `subscribe` selects its
+output container with `--format`.
+
+Publish (read from stdin unless noted):
+
+- `avc3` - raw H.264 Annex-B
+- `fmp4` - fragmented MP4 / CMAF
+- `ts` - MPEG-TS (H.264 / H.265 video, AAC audio)
+- `hls --playlist <url>` - HLS playlist ingest
+
+Subscribe (`--format`):
+
+- `fmp4` - fragmented MP4 / CMAF
+- `mkv` - Matroska / WebM
+- `ts` - MPEG-TS
+
+### MPEG-TS
+
+Ingest an MPEG-TS stream from FFmpeg and play one back out:
+
+```bash
+# Publish: remux a file to MPEG-TS and pipe it in
+ffmpeg -i input.mp4 -c copy -f mpegts - | \
+    moq-cli publish --url https://relay.example.com --broadcast my-stream ts
+
+# Subscribe: pull MPEG-TS back out and play it
+moq-cli subscribe --url https://relay.example.com --broadcast my-stream --format ts | ffplay -
+```
+
+TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
+(avc3 / hev1) and out-of-band (avc1 / hvc1, e.g. from an fMP4 import) video
+sources work: the parameter sets are read from the bitstream or the catalog
+`description` and re-injected as Annex-B on each keyframe.
+
 ## Authentication
 
 Pass a JWT token via the URL:

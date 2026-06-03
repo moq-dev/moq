@@ -239,6 +239,10 @@ pub struct AuthConfig {
 	///
 	/// File path: reads `{dir}/{kid}.jwk` from disk.
 	/// URL: fetches `{url}/{kid}.jwk` with HTTP caching.
+	///
+	/// DEPRECATED (URL form): prefer the unified `--auth-api`, which resolves the
+	/// key in the same call as public access and the alias. The file-directory
+	/// form remains supported for standalone relays.
 	#[arg(long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR")]
 	pub key_dir: Option<String>,
 
@@ -275,6 +279,9 @@ pub struct AuthConfig {
 	/// CLI-only shorthand: `--auth-public-api <url>` sets a URL endpoint that returns
 	/// `{ subscribe: [...], publish: [...] }` per namespace. The connection namespace is
 	/// appended to the URL. For TOML, use `[auth.public]` with an `api` field instead.
+	///
+	/// DEPRECATED: prefer the unified `--auth-api`, which returns public access in
+	/// the same call as the key and alias.
 	#[arg(long = "auth-public-api", env = "MOQ_AUTH_PUBLIC_API")]
 	#[serde(skip)]
 	pub public_api: Option<String>,
@@ -306,6 +313,48 @@ pub struct AuthConfig {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "OneOrMany<_>")]
 	pub domains: Vec<String>,
+
+	/// Base URL of a unified auth API that resolves everything the relay needs to
+	/// authorize a connection in ONE call, replacing per-call `--auth-key-dir`
+	/// (URL form) + `--auth-public-api`.
+	///
+	/// Mutually exclusive with `--auth-key`, `--auth-key-dir`, `--auth-public`,
+	/// and `--auth-public-api` (configuring both is a startup error).
+	/// `--auth-domain` still applies (subdomain->path runs first).
+	///
+	/// Per connection the relay issues `GET <base>?root=<path>&kid=<kid>&mtls=true`
+	/// over the same cached, mTLS-gated HTTP client used by the other auth fetches.
+	/// `root` is the connection path (slashes preserved); `kid` is sent only when
+	/// the connection carries a JWT (value from its header); `mtls=true` is sent
+	/// only when the peer presented a verified client cert. All three are query
+	/// params (never path segments), so the base URL is used verbatim. The
+	/// response is a JSON object whose fields are ALL optional:
+	///
+	/// - `alias`: the canonical full root to scope this connection to (the path
+	///   with its first segment resolved to the project's stable id, the rest
+	///   preserved, e.g. `demo/room/cam` -> `x7k2qp/room/cam`). Used verbatim;
+	///   the server controls the whole mapping. Absent -> the request path is
+	///   used unchanged.
+	/// - `public`: `{ "subscribe": [...], "publish": [...] }` anonymous access
+	///   prefixes, relative to the root, used when there is no JWT. Absent ->
+	///   no public access.
+	/// - `key`: the verifying JWK (a JSON object, deserialized directly) for the
+	///   requested `kid`. Absent -> key-not-found (the JWT is rejected).
+	/// - `internal`: the billing tier. The relay forwards `mtls=true` and lets the
+	///   API decide. Absent defaults per connection: internal for mTLS peers
+	///   (trusted), external for JWT/public. So the API can promote a first-party
+	///   token to internal, or demote a cert-verified connection to external.
+	///
+	/// FAILS CLOSED: any network error, non-2xx status, or parse error rejects
+	/// the connection. Unlike the standalone flags, the verifying key itself
+	/// comes from this call, so there is no safe fallback; the response cache
+	/// (`Cache-Control` from the endpoint) softens transient failures.
+	///
+	/// Example: `https://api.moq.dev/cluster/auth` (called as
+	/// `?root=demo/room&kid=abc&mtls=true`).
+	#[arg(long = "auth-api", env = "MOQ_AUTH_API")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub auth_api: Option<String>,
 }
 
 /// Public access configuration.
@@ -420,13 +469,35 @@ impl Serialize for PublicConfig {
 	}
 }
 
-/// Response from a public access API endpoint.
-#[derive(Debug, Deserialize)]
+/// Response from a public access API endpoint, and the `public` field of the
+/// unified [`AuthApiResponse`].
+#[derive(Debug, Default, Deserialize)]
 struct PublicResponse {
 	#[serde(default)]
 	subscribe: Vec<String>,
 	#[serde(default)]
 	publish: Vec<String>,
+}
+
+/// Response from the unified `--auth-api` endpoint. Every field is optional; the
+/// relay defaults anything absent (see [`AuthConfig::auth_api`]).
+#[derive(Debug, Default, Deserialize)]
+struct AuthApiResponse {
+	/// Canonical full root to scope to; absent -> use the request path as-is.
+	#[serde(default)]
+	alias: Option<String>,
+	/// Anonymous access prefixes; absent -> no public access.
+	#[serde(default)]
+	public: Option<PublicResponse>,
+	/// Verifying JWK for the requested kid (deserialized directly via
+	/// moq-token's serde); absent -> not found.
+	#[serde(default)]
+	key: Option<Key>,
+	/// Billing tier for this connection. The relay sends `mtls=true` when the
+	/// peer presented a verified client cert and lets the API decide. Absent
+	/// defaults per path: internal for mTLS peers (trusted), external otherwise.
+	#[serde(default)]
+	internal: Option<bool>,
 }
 
 /// Resolved public access configuration.
@@ -461,6 +532,7 @@ impl AuthConfig {
 			&& self.public_subscribe.is_none()
 			&& self.public_publish.is_none()
 			&& self.public_api.is_none()
+			&& self.auth_api.is_none()
 	}
 }
 
@@ -582,6 +654,10 @@ pub struct Auth {
 	public: PublicAccess,
 	/// Domain suffixes for subdomain-based slug routing. See [`AuthConfig::domains`].
 	domains: Arc<[String]>,
+	/// Optional unified auth API: one call per connection resolves the key,
+	/// public access, and alias together. Mutually exclusive with the standalone
+	/// key/public sources. See [`AuthConfig::auth_api`].
+	auth_api: Option<(url::Url, ClientWithMiddleware)>,
 }
 
 impl Auth {
@@ -589,6 +665,19 @@ impl Auth {
 		anyhow::ensure!(
 			config.key.is_none() || config.key_dir.is_none(),
 			"cannot specify both --auth-key and --auth-key-dir"
+		);
+
+		// The unified --auth-api supplies key + public + alias itself, so it
+		// can't be combined with the standalone key/public sources.
+		anyhow::ensure!(
+			config.auth_api.is_none()
+				|| (config.key.is_none()
+					&& config.key_dir.is_none()
+					&& config.public.is_none()
+					&& config.public_subscribe.is_none()
+					&& config.public_publish.is_none()
+					&& config.public_api.is_none()),
+			"--auth-api cannot be combined with --auth-key/--auth-key-dir/--auth-public/--auth-public-api"
 		);
 
 		let tls = config.tls.to_client_tls()?.build()?;
@@ -607,6 +696,7 @@ impl Auth {
 			Some(source)
 		} else if let Some(key_dir) = config.key_dir {
 			let source = if let Ok(mut url) = Url::parse(&key_dir) {
+				tracing::warn!("--auth-key-dir with a URL is deprecated; prefer the unified --auth-api");
 				// Ensure trailing slash so Url::join appends rather than replaces the last segment
 				if !url.path().ends_with('/') {
 					url.set_path(&format!("{}/", url.path()));
@@ -656,6 +746,7 @@ impl Auth {
 		}
 
 		if let Some(url_str) = config.public_api {
+			tracing::warn!("--auth-public-api is deprecated; prefer the unified --auth-api");
 			anyhow::ensure!(
 				api.is_none(),
 				"cannot specify --auth-public-api alongside [auth.public] api"
@@ -673,8 +764,8 @@ impl Auth {
 			api,
 		};
 
-		if resolver.is_none() && public.is_empty() {
-			anyhow::bail!("no auth-key, auth-key-dir, or public path configured");
+		if resolver.is_none() && public.is_empty() && config.auth_api.is_none() {
+			anyhow::bail!("no auth-key, auth-key-dir, auth-api, or public path configured");
 		}
 
 		// Canonicalize domain suffixes once at startup: lowercase and prefix
@@ -691,10 +782,20 @@ impl Auth {
 		}
 		domains.sort_by_key(|d| std::cmp::Reverse(d.len()));
 
+		// The connection path, kid, and mtls flag all go in the query string, so
+		// the base URL is used verbatim (no trailing-slash / path-append handling).
+		let auth_api = if let Some(url_str) = config.auth_api {
+			let url = Url::parse(&url_str).context("invalid --auth-api URL")?;
+			Some((url, Self::build_client(&tls)?))
+		} else {
+			None
+		};
+
 		Ok(Self {
 			resolver,
 			public,
 			domains: Arc::from(domains.into_boxed_slice()),
+			auth_api,
 		})
 	}
 
@@ -702,6 +803,115 @@ impl Auth {
 	/// configured subdomain-based slug routing.
 	pub(crate) fn params_from_url(&self, url: &url::Url) -> AuthParams {
 		AuthParams::from_url(url, &self.domains)
+	}
+
+	/// Resolve the canonical root and billing tier for an mTLS peer via the
+	/// unified `--auth-api`. mTLS peers are already trusted (the cert is the
+	/// credential), so this only fetches the alias + tier and FAILS OPEN: with no
+	/// auth API, a root (`/`) connection, or any error, the path is used unchanged
+	/// and the tier defaults to internal (trusted peer).
+	pub(crate) async fn resolve_mtls(&self, path: &str) -> (String, bool) {
+		let Some((base, client)) = &self.auth_api else {
+			return (path.to_string(), true);
+		};
+
+		// Root connection ("/" or ""): nothing to resolve, skip the call.
+		if path.trim_matches('/').is_empty() {
+			return (path.to_string(), true);
+		}
+
+		match Self::fetch_auth_api(client, base, path, None, true).await {
+			Ok(resp) => (
+				resp.alias.unwrap_or_else(|| path.to_string()),
+				resp.internal.unwrap_or(true),
+			),
+			Err(err) => {
+				tracing::warn!(%err, %path, "auth-api mTLS resolution failed; using path unchanged, internal tier");
+				(path.to_string(), true)
+			}
+		}
+	}
+
+	/// Build the unified auth-API request URL. The connection path (`root`), the
+	/// JWT `kid`, and the `mtls` flag are all query params on the base URL — never
+	/// path segments — so client-controlled values are percent-encoded by
+	/// `query_pairs_mut` and can't retarget the path/query.
+	fn auth_api_url(base: &url::Url, path: &str, kid: Option<&str>, mtls: bool) -> url::Url {
+		let mut url = base.clone();
+		{
+			let mut q = url.query_pairs_mut();
+			q.append_pair("root", path.trim_matches('/'));
+			if let Some(kid) = kid {
+				q.append_pair("kid", kid);
+			}
+			if mtls {
+				q.append_pair("mtls", "true");
+			}
+		}
+		url
+	}
+
+	/// One unified auth-API call. Fails CLOSED (any network / non-2xx / parse
+	/// error is an `Err`): with `--auth-api` the verifying key comes from here,
+	/// so there is no safe fallback.
+	async fn fetch_auth_api(
+		client: &ClientWithMiddleware,
+		base: &url::Url,
+		path: &str,
+		kid: Option<&str>,
+		mtls: bool,
+	) -> Result<AuthApiResponse, AuthError> {
+		let url = Self::auth_api_url(base, path, kid, mtls);
+		let body = client.get(url).send().await?.error_for_status()?.text().await?;
+		serde_json::from_str(&body).map_err(|_| AuthError::DecodeFailed)
+	}
+
+	/// Verify a connection via the unified `--auth-api`: one call returns the
+	/// alias (root), public access, and verifying key.
+	async fn verify_via_api(
+		&self,
+		base: &url::Url,
+		client: &ClientWithMiddleware,
+		params: &AuthParams,
+	) -> Result<AuthToken, AuthError> {
+		// A JWT's kid selects the verifying key; extract it (no kid -> the API
+		// returns no key -> we reject below).
+		let kid = match params.jwt.as_deref() {
+			Some(token) => {
+				jsonwebtoken::decode_header(token)
+					.map_err(|_| AuthError::DecodeFailed)?
+					.kid
+			}
+			None => None,
+		};
+
+		let resp = Self::fetch_auth_api(client, base, &params.path, kid.as_deref(), false).await?;
+		// Absent alias -> use the request path unchanged.
+		let root = resp.alias.unwrap_or_else(|| params.path.clone());
+
+		let claims = if let Some(token) = params.jwt.as_deref() {
+			let key = resp.key.ok_or(AuthError::KeyNotFound)?;
+			key.decode(token).map_err(|_| AuthError::DecodeFailed)?
+		} else {
+			let public = resp.public.unwrap_or_default();
+			if public.subscribe.is_empty() && public.publish.is_empty() {
+				return Err(AuthError::ExpectedToken);
+			}
+			// Public prefixes are relative to the connection root, so anchor the
+			// claims there (mirrors the standalone --auth-public-api path).
+			moq_token::Claims {
+				root: root.clone(),
+				subscribe: public.subscribe,
+				publish: public.publish,
+				..Default::default()
+			}
+		};
+
+		let mut token = Self::finalize(&root, claims)?;
+		// Non-mTLS connections default to external; the API may promote specific
+		// ones (e.g. a first-party dashboard token) to internal.
+		token.internal = resp.internal.unwrap_or(false);
+		Ok(token)
 	}
 
 	async fn fetch_public_response(client: &ClientWithMiddleware, url: &url::Url) -> Result<PublicResponse, AuthError> {
@@ -713,6 +923,11 @@ impl Auth {
 	/// If no token is provided, then the claims will use the public access configuration.
 	#[allow(deprecated)] // `claims.cluster` is deprecated but still accepted for backwards compat
 	pub async fn verify(&self, params: &AuthParams) -> Result<AuthToken, AuthError> {
+		// The unified API resolves key + public + alias in one call.
+		if let Some((base, client)) = &self.auth_api {
+			return self.verify_via_api(base, client, params).await;
+		}
+
 		let claims = if let Some(token) = params.jwt.as_deref() {
 			let Some(resolver) = &self.resolver else {
 				return Err(AuthError::UnexpectedToken);
@@ -758,8 +973,16 @@ impl Auth {
 			return Err(AuthError::ExpectedToken);
 		};
 
-		// Get the path from the URL, removing any leading or trailing slashes.
-		let root = Path::new(&params.path);
+		Self::finalize(&params.path, claims)
+	}
+
+	/// Reduce verified `claims` against the connection `root_str` into an
+	/// [`AuthToken`]. The connection path and the token root must overlap; the
+	/// permission prefixes are re-based onto the connection root and any that
+	/// fall outside it are dropped. Shared by the standalone and `--auth-api`
+	/// paths.
+	fn finalize(root_str: &str, claims: moq_token::Claims) -> Result<AuthToken, AuthError> {
+		let root = Path::new(root_str);
 		let claims_root = Path::new(&claims.root);
 
 		// The URL path and the token root must overlap:
@@ -1879,7 +2102,7 @@ api = "https://api.example.com/access"
 	// HTTP-based tests (URL key-dir + public API) using wiremock.
 	// ---------------------------------------------------------------------
 
-	use wiremock::matchers::{method, path as path_matcher};
+	use wiremock::matchers::{method, path as path_matcher, query_param};
 	use wiremock::{Mock, MockServer, ResponseTemplate};
 
 	/// Serialize a key as JSON for serving from a mock URL endpoint.
@@ -2528,5 +2751,268 @@ api = "https://api.example.com/access"
 		let token = AuthToken::unrestricted(Path::new("/").to_owned());
 		assert_eq!(token.root, "".as_path());
 		assert!(token.internal);
+	}
+
+	// ---------------------------------------------------------------------
+	// Unified --auth-api
+	// ---------------------------------------------------------------------
+
+	/// Build an Auth wired to a wiremock server's `/auth` unified endpoint.
+	async fn auth_with_api(server: &MockServer) -> Auth {
+		Auth::new(AuthConfig {
+			auth_api: Some(format!("{}/auth", server.uri())),
+			..Default::default()
+		})
+		.await
+		.unwrap()
+	}
+
+	#[tokio::test]
+	async fn auth_api_jwt_scopes_to_alias() -> anyhow::Result<()> {
+		// JWT connection: the unified call returns the verifying key plus the
+		// full resolved alias; the token scopes to that alias root.
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo/room"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.set_body_string(format!(r#"{{"alias":"x7k2qp/room","key":{}}}"#, jwk_body(&key))),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+
+		let claims = moq_token::Claims {
+			root: "x7k2qp/room".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/demo/room".into(),
+				jwt: Some(token),
+			})
+			.await?;
+		assert_eq!(verified.root, "x7k2qp/room".as_path());
+		assert_eq!(verified.subscribe, vec!["".as_path()]);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_full_root_passthrough() -> anyhow::Result<()> {
+		// The server returns the FULL resolved root (deep path preserved); the
+		// relay uses it verbatim — no client-side first-segment rewriting.
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo/room/cam"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.set_body_string(format!(r#"{{"alias":"x7k2qp/room/cam","key":{}}}"#, jwk_body(&key))),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let claims = moq_token::Claims {
+			root: "x7k2qp".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/demo/room/cam".into(),
+				jwt: Some(token),
+			})
+			.await?;
+		assert_eq!(verified.root, "x7k2qp/room/cam".as_path());
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_anonymous_uses_public() -> anyhow::Result<()> {
+		// No JWT: claims come from the `public` field, anchored at the alias root.
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo"))
+			.respond_with(
+				ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp","public":{"subscribe":["cam"]}}"#),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let verified = auth.verify(&AuthParams::new("/demo")).await?;
+		assert_eq!(verified.root, "x7k2qp".as_path());
+		assert_eq!(verified.subscribe, vec!["cam".as_path()]);
+		assert_eq!(verified.publish, vec![]);
+		assert!(!verified.internal);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_internal_flag_promotes_tier() -> anyhow::Result<()> {
+		// A non-mTLS connection can be marked internal by the API (e.g. a
+		// first-party dashboard token), defaulting to external otherwise.
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.set_body_string(r#"{"alias":"x7k2qp","public":{"subscribe":[""]},"internal":true}"#),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let verified = auth.verify(&AuthParams::new("/demo")).await?;
+		assert!(verified.internal);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_unknown_project_echoes_path() -> anyhow::Result<()> {
+		// Absent `alias` -> the relay falls back to the request path as the root.
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "unknown"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(format!(r#"{{"key":{}}}"#, jwk_body(&key))))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let claims = moq_token::Claims {
+			root: "unknown".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/unknown".into(),
+				jwt: Some(token),
+			})
+			.await?;
+		assert_eq!(verified.root, "unknown".as_path());
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_missing_key_rejects_jwt() -> anyhow::Result<()> {
+		// A JWT connection whose kid the API can't resolve (no `key`) is rejected.
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp"}"#))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let token = key.encode(&moq_token::Claims {
+			root: "x7k2qp".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		})?;
+		let result = auth
+			.verify(&AuthParams {
+				path: "/demo".into(),
+				jwt: Some(token),
+			})
+			.await;
+		assert!(matches!(result, Err(AuthError::KeyNotFound)));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_server_error_fails_closed() -> anyhow::Result<()> {
+		// Unlike the old alias step, the unified call fails CLOSED: the key comes
+		// from here, so a 5xx must reject rather than silently allow.
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(500))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let result = auth.verify(&AuthParams::new("/demo")).await;
+		assert!(result.is_err());
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_mtls_resolves_alias_and_tier() -> anyhow::Result<()> {
+		// mTLS peers get the canonical root + tier; absent `internal` defaults to
+		// internal (trusted peer).
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo/room"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp/room"}"#))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		assert_eq!(auth.resolve_mtls("/demo/room").await, ("x7k2qp/room".to_string(), true));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_mtls_tier_override_external() -> anyhow::Result<()> {
+		// The API can demote a cert-verified connection to the external tier.
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp","internal":false}"#))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		assert_eq!(auth.resolve_mtls("/demo").await, ("x7k2qp".to_string(), false));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_mtls_skips_api_for_root() -> anyhow::Result<()> {
+		// A root connection ("/") has no project segment, so cluster peers don't
+		// hit the API at all; they stay internal.
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(500))
+			.expect(0)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		assert_eq!(auth.resolve_mtls("/").await, ("/".to_string(), true));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_mutually_exclusive_with_key_dir() {
+		// --auth-api can't be combined with the standalone key/public sources.
+		let result = Auth::new(AuthConfig {
+			auth_api: Some("https://api.example.com/cluster/auth".into()),
+			key_dir: Some("https://api.example.com/cluster/keys".into()),
+			..Default::default()
+		})
+		.await;
+		assert!(result.is_err());
 	}
 }

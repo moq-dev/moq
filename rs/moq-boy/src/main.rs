@@ -446,9 +446,21 @@ async fn main() -> Result<()> {
 	#[cfg(not(feature = "jemalloc"))]
 	let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
-	tokio::select! {
+	let result = tokio::select! {
 		res = run(&config) => res,
 		Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
-		_ = tokio::signal::ctrl_c() => std::process::exit(0),
+		res = tokio::signal::ctrl_c() => res.context("failed to listen for ctrl-c"),
+	};
+
+	// run() owns a spawn_blocking emulator thread that loops forever. Returning from main
+	// drops the tokio runtime, whose drop blocks indefinitely joining that thread, so the
+	// process would hang instead of exiting (defeating systemd Restart=always when the
+	// reconnect loop gives up). Exit explicitly so a real exit code reaches the supervisor.
+	match result {
+		Ok(()) => std::process::exit(0),
+		Err(err) => {
+			tracing::error!(err = %format!("{err:#}"), "exiting");
+			std::process::exit(1);
+		}
 	}
 }
