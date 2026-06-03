@@ -82,11 +82,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(
-				broadcast
-					.consume_track(name)
-					.subscribe(moq_net::Subscription::default()),
-			),
+			state: SourceState::Subscribing(broadcast.consume_track(name).subscribe(None)),
 			media: Some(media),
 			latency,
 			transform,
@@ -108,11 +104,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(
-				broadcast
-					.consume_track(name)
-					.subscribe(moq_net::Subscription::default()),
-			),
+			state: SourceState::Subscribing(broadcast.consume_track(name).subscribe(None)),
 			media: Some(media),
 			latency,
 			transform: None,
@@ -132,11 +124,7 @@ impl ExportSource {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
 		Ok(Self {
-			state: SourceState::Subscribing(
-				broadcast
-					.consume_track(name)
-					.subscribe(moq_net::Subscription::default()),
-			),
+			state: SourceState::Subscribing(broadcast.consume_track(name).subscribe(None)),
 			media: Some(media),
 			latency,
 			transform: None,

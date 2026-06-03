@@ -448,10 +448,7 @@ async fn run_session(
 		};
 		let caps = video_caps(&config)?;
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
-		let track_consumer = broadcast
-			.consume_track(&track_name)
-			.subscribe(moq_net::Subscription::default())
-			.await?;
+		let track_consumer = broadcast.consume_track(&track_name).subscribe(None).await?;
 		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
 			.with_latency(Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
@@ -464,10 +461,7 @@ async fn run_session(
 		};
 		let caps = audio_caps(&config)?;
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
-		let track_consumer = broadcast
-			.consume_track(&track_name)
-			.subscribe(moq_net::Subscription::default())
-			.await?;
+		let track_consumer = broadcast.consume_track(&track_name).subscribe(None).await?;
 		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
 			.with_latency(Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));

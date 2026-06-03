@@ -612,9 +612,11 @@ impl TrackProducer {
 
 	/// Subscribe to the track in-process with the given subscriber preferences.
 	///
-	/// The preferences feed the producer's [`Self::subscription`] aggregate and
-	/// can be changed later via [`TrackSubscriber::update`].
-	pub fn subscribe(&self, mut subscription: Subscription) -> TrackSubscriber {
+	/// Pass `None` for [`Subscription::default`]. The preferences feed the
+	/// producer's [`Self::subscription`] aggregate and can be changed later via
+	/// [`TrackSubscriber::update`].
+	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> TrackSubscriber {
+		let mut subscription = subscription.into().unwrap_or_default();
 		subscription.stale = self.info.clamp_stale(subscription.stale);
 		let subscription = Arc::new(Mutex::new(subscription));
 		if let Ok(mut state) = self.state.write() {
@@ -629,11 +631,6 @@ impl TrackProducer {
 			next_sequence: 0,
 			end_sequence: None,
 		}
-	}
-
-	/// Subscribe to the track in-process with default ([`Subscription::default`]) preferences.
-	pub fn subscribe_default(&self) -> TrackSubscriber {
-		self.subscribe(Subscription::default())
 	}
 
 	/// The aggregate of every live subscriber's [`Subscription`] (most demanding
@@ -1106,7 +1103,7 @@ mod test {
 		let mut producer = Track::new("test").produce();
 		producer.append_group().unwrap(); // seq 0
 
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 
 		tokio::time::advance(DEFAULT_CACHE + Duration::from_secs(1)).await;
 		producer.append_group().unwrap(); // seq 1
@@ -1229,7 +1226,7 @@ mod test {
 		}
 
 		// Consumer should still be able to read through the hole.
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 		let group = consumer.assert_group();
 		// consume() starts at index 0, first non-tombstoned group is seq 5.
 		assert_eq!(group.sequence, 5);
@@ -1280,7 +1277,7 @@ mod test {
 		producer.create_group(Group { sequence: 1 }).unwrap();
 		producer.finish_at(1).unwrap();
 
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 		assert_eq!(consumer.assert_group().sequence, 1);
 
 		let done = consumer
@@ -1294,7 +1291,7 @@ mod test {
 	#[tokio::test]
 	async fn next_group_skips_late_arrivals() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 
 		// Seq 5 arrives first.
 		producer.create_group(Group { sequence: 5 }).unwrap();
@@ -1331,7 +1328,7 @@ mod test {
 	#[tokio::test]
 	async fn next_group_returns_arrivals_in_order() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 
 		// Seq 3 arrives first, then seq 5 — both should be returned in arrival order.
 		producer.create_group(Group { sequence: 3 }).unwrap();
@@ -1357,7 +1354,7 @@ mod test {
 	#[tokio::test]
 	async fn next_group_and_recv_group_use_independent_cursors() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 
 		// Out-of-order arrivals: seq 5 first, then seq 3.
 		producer.create_group(Group { sequence: 5 }).unwrap();
@@ -1381,7 +1378,7 @@ mod test {
 	#[tokio::test]
 	async fn end_at_caps_next_group() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 
 		for s in 0..6 {
 			producer.create_group(Group { sequence: s }).unwrap();
@@ -1413,7 +1410,7 @@ mod test {
 	#[tokio::test]
 	async fn end_at_release_drains_cached_groups() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 
 		for s in 0..6 {
 			producer.create_group(Group { sequence: s }).unwrap();
@@ -1458,7 +1455,7 @@ mod test {
 	#[tokio::test]
 	async fn end_at_lower_than_cursor_parks_consumer() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 
 		for s in 0..3 {
 			producer.create_group(Group { sequence: s }).unwrap();
@@ -1502,7 +1499,7 @@ mod test {
 	#[tokio::test]
 	async fn end_at_toggling_around_late_arrivals() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 
 		consumer.end_at(5);
 
@@ -1545,7 +1542,7 @@ mod test {
 	#[tokio::test]
 	async fn read_frame_returns_single_frame_per_group() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 
 		producer.write_frame(b"hello".as_slice()).unwrap();
 		producer.write_frame(b"world".as_slice()).unwrap();
@@ -1570,7 +1567,7 @@ mod test {
 	#[tokio::test]
 	async fn read_frame_skips_stalled_group_for_newer_ready_frame() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 
 		// Seq 3: group open, no frame yet (stalled).
 		let _stalled = producer.create_group(Group { sequence: 3 }).unwrap();
@@ -1592,7 +1589,7 @@ mod test {
 	#[tokio::test]
 	async fn read_frame_discards_rest_of_multi_frame_group() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 
 		// Group 0 has two frames; only the first is returned.
 		let mut g0 = producer.create_group(Group { sequence: 0 }).unwrap();
@@ -1626,7 +1623,7 @@ mod test {
 		// finish() sets final_sequence, but groups already created with lower sequences
 		// can still produce frames. read_frame must not return None prematurely.
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 
 		let mut g0 = producer.create_group(Group { sequence: 0 }).unwrap();
 		producer.finish().unwrap();
@@ -1653,7 +1650,7 @@ mod test {
 		// start_at sets min_sequence; read_frame must skip groups below it even though
 		// next_sequence is still 0.
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 		consumer.start_at(5);
 
 		// Seq 3 has a frame but is below min_sequence — must be skipped.
@@ -1677,7 +1674,7 @@ mod test {
 	#[tokio::test]
 	async fn read_frame_returns_none_when_finished() {
 		let mut producer = Track::new("test").produce();
-		let mut consumer = producer.subscribe_default();
+		let mut consumer = producer.subscribe(None);
 
 		producer.write_frame(b"only".as_slice()).unwrap();
 		producer.finish().unwrap();
@@ -1704,7 +1701,7 @@ mod test {
 		producer.create_group(Group { sequence: 1 }).unwrap();
 		producer.finish_at(1).unwrap();
 
-		let consumer = producer.subscribe_default();
+		let consumer = producer.subscribe(None);
 		// get_group(0) blocks because group 0 is below final_sequence and could still arrive.
 		assert!(
 			consumer.get_group(0).now_or_never().is_none(),

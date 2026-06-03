@@ -99,10 +99,7 @@ async fn handle_viewer_commands(
 	broadcast: moq_net::BroadcastConsumer,
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
-	let mut track = broadcast
-		.consume_track("command")
-		.subscribe(moq_net::Subscription::default())
-		.await?;
+	let mut track = broadcast.consume_track("command").subscribe(None).await?;
 
 	while let Some(mut group) = track.recv_group().await? {
 		while let Some(frame) = group.read_frame().await? {

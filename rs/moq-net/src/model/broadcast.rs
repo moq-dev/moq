@@ -239,7 +239,7 @@ impl BroadcastProducer {
 	}
 
 	pub fn assert_insert_track(&mut self, track: &TrackProducer) {
-		self.insert_track(track.subscribe_default())
+		self.insert_track(track.subscribe(None))
 			.expect("should not have errored")
 	}
 }
@@ -708,10 +708,12 @@ impl TrackConsumer {
 	/// groups; or drive it with [`TrackPending::poll_ok`] from a poll loop.
 	///
 	/// `subscription` is this subscriber's preferences and feeds the producer's
-	/// [`TrackProducer::subscription`] aggregate. Concurrent subscribers to the
-	/// same name coalesce onto one request.
-	pub fn subscribe(&self, subscription: Subscription) -> TrackPending {
-		self.broadcast.request_subscribe(&self.name, subscription)
+	/// [`TrackProducer::subscription`] aggregate; pass `None` for
+	/// [`Subscription::default`]. Concurrent subscribers to the same name coalesce
+	/// onto one request.
+	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> TrackPending {
+		self.broadcast
+			.request_subscribe(&self.name, subscription.into().unwrap_or_default())
 	}
 }
 
@@ -734,7 +736,7 @@ mod test {
 	/// a publisher accepts). Returns the [`TrackPending`] to resolve after accepting.
 	macro_rules! subscribe_pending {
 		($consumer:expr, $name:expr) => {{
-			let pending = $consumer.consume_track($name).subscribe(Subscription::default());
+			let pending = $consumer.consume_track($name).subscribe(None);
 			assert!(
 				pending.poll_ok(&kio::Waiter::noop()).is_pending(),
 				"consume_track should stay pending until the request is accepted"
@@ -755,22 +757,14 @@ mod test {
 		let consumer = producer.consume();
 
 		// The track already exists, so subscribe resolves immediately.
-		let mut track1_sub = consumer
-			.consume_track("track1")
-			.subscribe(Subscription::default())
-			.await
-			.unwrap();
+		let mut track1_sub = consumer.consume_track("track1").subscribe(None).await.unwrap();
 		track1_sub.assert_group();
 
 		let mut track2 = Track::new("track2").produce();
 		producer.assert_insert_track(&track2);
 
 		let consumer2 = producer.consume();
-		let mut track2_consumer = consumer2
-			.consume_track("track2")
-			.subscribe(Subscription::default())
-			.await
-			.unwrap();
+		let mut track2_consumer = consumer2.consume_track("track2").subscribe(None).await.unwrap();
 		track2_consumer.assert_no_group();
 
 		track2.append_group().unwrap();
@@ -788,11 +782,7 @@ mod test {
 
 		// Create a new track and insert it into the broadcast (resolves immediately).
 		let track1 = producer.assert_create_track(&Track::new("track1"));
-		let track1c = consumer
-			.consume_track("track1")
-			.subscribe(Subscription::default())
-			.await
-			.unwrap();
+		let track1c = consumer.consume_track("track1").subscribe(None).await.unwrap();
 
 		// A track nobody publishes stays pending until accepted.
 		let track2_fut = subscribe_pending!(consumer, "track2");
@@ -831,7 +821,7 @@ mod test {
 
 		track1.assert_not_closed();
 		track1.assert_is_clone(&track2);
-		track3.subscribe_default().assert_is_clone(&track1);
+		track3.subscribe(None).assert_is_clone(&track1);
 
 		// Append a group and make sure they all get it.
 		track3.append_group().unwrap();
@@ -844,10 +834,7 @@ mod test {
 		assert!(track4_fut.await.is_err());
 
 		// With no dynamic producer left, new subscribes fail outright.
-		let track5 = consumer2
-			.consume_track("track3")
-			.subscribe(Subscription::default())
-			.await;
+		let track5 = consumer2.consume_track("track3").subscribe(None).await;
 		assert!(track5.is_err(), "should have errored");
 	}
 
@@ -898,11 +885,7 @@ mod test {
 		);
 
 		// A second subscriber reuses the live producer (fast path / dedup).
-		let consumer2 = bc
-			.consume_track("unknown_track")
-			.subscribe(Subscription::default())
-			.await
-			.unwrap();
+		let consumer2 = bc.consume_track("unknown_track").subscribe(None).await.unwrap();
 		consumer2.assert_is_clone(&consumer1);
 
 		drop(consumer1);
@@ -920,12 +903,8 @@ mod test {
 		// While the producer is still alive, re-subscribing to the same name reuses
 		// it (no new request) — this is what lets the relay linger upstream
 		// subscriptions across transient consumer churn.
-		let consumer3 = bc
-			.consume_track("unknown_track")
-			.subscribe(Subscription::default())
-			.await
-			.unwrap();
-		consumer3.assert_is_clone(&producer1.subscribe_default());
+		let consumer3 = bc.consume_track("unknown_track").subscribe(None).await.unwrap();
+		consumer3.assert_is_clone(&producer1.subscribe(None));
 		broadcast.assert_no_request();
 		drop(consumer3);
 

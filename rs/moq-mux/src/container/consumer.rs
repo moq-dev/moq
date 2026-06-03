@@ -411,11 +411,6 @@ mod tests {
 		Timestamp::from_micros(micros).unwrap()
 	}
 
-	/// Subscribe to a track with default preferences (test helper).
-	fn subscribe_default(track: &moq_net::TrackProducer) -> moq_net::TrackSubscriber {
-		track.subscribe_default()
-	}
-
 	/// Test-only container that round-trips a per-sample duration on the wire, so the
 	/// duration-based skip can be exercised without building a real CMAF init segment.
 	/// Each frame is `[timestamp_us: u64 LE][duration_us: u64 LE][payload]`.
@@ -510,7 +505,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
@@ -530,7 +525,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0), ts(33_000), ts(66_000)]);
@@ -550,7 +545,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		// 5 groups, 20ms spacing. Total span = 80ms, well within 500ms latency.
@@ -571,7 +566,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
 		// Group 0: 5 frames, NOT finished (blocks consumer)
@@ -615,7 +610,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::ZERO);
 
 		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
@@ -654,7 +649,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
 		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
@@ -699,7 +694,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
@@ -737,7 +732,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
@@ -757,7 +752,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0), ts(66_000), ts(33_000)]);
@@ -778,7 +773,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		track.finish().unwrap();
@@ -798,7 +793,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
@@ -822,7 +817,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		assert!(
@@ -847,7 +842,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
 		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
@@ -867,7 +862,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(80));
 
 		write_group(&mut track, 5, &[ts(0), ts(20_000)]);
@@ -887,7 +882,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0), ts(33_333), ts(66_666)]);
@@ -909,7 +904,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		let payload_bytes = vec![0x01, 0x02, 0x03, 0x04, 0x05];
@@ -949,7 +944,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(10));
 
 		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
@@ -997,7 +992,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(3700));
 
 		let one_hour = 3_600_000_000u64;
@@ -1015,7 +1010,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_secs(10));
 
 		write_group(&mut track, 0, &[ts(0)]);
@@ -1035,7 +1030,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = track.subscribe_default();
+		let consumer_track = track.subscribe(None);
 		// latency must exceed (group1_max - group0_min) = 100ms - 0ms = 100ms
 		// to avoid the latency skip and test B-frame timestamp tracking.
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(110));
@@ -1089,7 +1084,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
 		write_group(&mut track, 3, &[ts(0)]);
@@ -1144,7 +1139,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		let _group5 = track.create_group(moq_net::Group { sequence: 5 }).unwrap();
@@ -1169,7 +1164,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 100, &[ts(3_000_000)]);
@@ -1185,7 +1180,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(50));
 
 		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
@@ -1223,7 +1218,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
 		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
@@ -1263,7 +1258,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
 		// Group 0: stalled at ts=0, NOT finished
@@ -1303,7 +1298,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(100));
 
 		// Group 0: finished normally
@@ -1321,7 +1316,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
@@ -1340,7 +1335,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
@@ -1371,7 +1366,7 @@ mod tests {
 		let mut track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		let mut group0 = track.create_group(moq_net::Group { sequence: 0 }).unwrap();
@@ -1393,7 +1388,7 @@ mod tests {
 		let mut track = moq_net::Track::new("video")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer_track = track.subscribe_default();
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
 
 		// Write frames using Container::Legacy encoding
@@ -1435,7 +1430,7 @@ mod tests {
 		// DurationWire is a test-only container that doesn't stamp moq_net frame
 		// timestamps; leave the track untimed so model-layer validation matches.
 		let mut track = moq_net::Track::new("test").produce();
-		let consumer_track = track.subscribe_default();
+		let consumer_track = track.subscribe(None);
 		// Latency dwarfs the gap, so only duration coverage can trigger the skip.
 		let mut consumer = Consumer::new(consumer_track, DurationWire).with_latency(Duration::from_secs(10));
 
@@ -1476,7 +1471,7 @@ mod tests {
 		tokio::time::pause();
 		// DurationWire is untimed at the moq_net frame layer.
 		let mut track = moq_net::Track::new("test").produce();
-		let consumer_track = track.subscribe_default();
+		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, DurationWire).with_latency(Duration::from_secs(10));
 
 		// Group 0: frame at ts=0 lasting only 10ms, far short of group 1 at 33ms.

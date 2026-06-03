@@ -932,7 +932,7 @@ fn advertised_path(prefix: &Path, node: Option<&str>) -> PathOwned {
 mod tests {
 	use std::{collections::BTreeMap, sync::atomic::Ordering::Relaxed};
 
-	use crate::{Origin, Path, Subscription};
+	use crate::{Origin, Path};
 
 	use super::*;
 
@@ -1161,7 +1161,7 @@ mod tests {
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
 			.consume_track("publisher.json")
-			.subscribe(Subscription::default())
+			.subscribe(None)
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1188,7 +1188,7 @@ mod tests {
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
 			.consume_track("publisher.json")
-			.subscribe(Subscription::default())
+			.subscribe(None)
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1220,7 +1220,7 @@ mod tests {
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
 			.consume_track("publisher.json")
-			.subscribe(Subscription::default())
+			.subscribe(None)
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1298,7 +1298,7 @@ mod tests {
 		// External publisher slot SHOULD include foo/bar.
 		let pub_track = broadcast
 			.consume_track("publisher.json")
-			.subscribe(Subscription::default())
+			.subscribe(None)
 			.await
 			.expect("subscribe");
 		assert!(
@@ -1309,11 +1309,7 @@ mod tests {
 		// The other three slots had zero activity. The first frame on
 		// each must be `{}`, not `{"foo/bar": {all zeros}}`.
 		for name in ["subscriber.json", "internal/publisher.json", "internal/subscriber.json"] {
-			let t = broadcast
-				.consume_track(name)
-				.subscribe(Subscription::default())
-				.await
-				.expect("subscribe");
+			let t = broadcast.consume_track(name).subscribe(None).await.expect("subscribe");
 			let frame = read_frame(t).await;
 			assert!(
 				frame.is_empty(),
