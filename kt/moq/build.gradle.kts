@@ -76,7 +76,7 @@ kotlin {
             dependsOn(commonMain)
             dependencies {
                 // compileOnly: each platform's runtime adds its own JNA artifact.
-                compileOnly("net.java.dev.jna:jna:5.15.0")
+                compileOnly("net.java.dev.jna:jna:5.18.1")
             }
         }
         val jvmAndAndroidTest by creating {
@@ -86,7 +86,7 @@ kotlin {
         val jvmMain by getting {
             dependsOn(jvmAndAndroidMain)
             dependencies {
-                implementation("net.java.dev.jna:jna:5.15.0")
+                implementation("net.java.dev.jna:jna:5.18.1")
             }
         }
         val jvmTest by getting {
@@ -97,7 +97,7 @@ kotlin {
             val androidMain by getting {
                 dependsOn(jvmAndAndroidMain)
                 dependencies {
-                    implementation("net.java.dev.jna:jna:5.15.0@aar")
+                    implementation("net.java.dev.jna:jna:5.18.1@aar")
                 }
             }
             val androidUnitTest by getting {
