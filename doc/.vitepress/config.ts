@@ -191,7 +191,7 @@ export default defineConfig({
 									link: "/lib/js/@moq",
 									items: [
 										{ text: "@moq/net", link: "/lib/js/@moq/net" },
-										{ text: "@moq/hang", link: "/lib/js/@moq/hang/" },
+										{ text: "@moq/hang", link: "/lib/js/@moq/hang" },
 										{ text: "@moq/watch", link: "/lib/js/@moq/watch" },
 										{ text: "@moq/publish", link: "/lib/js/@moq/publish" },
 										{ text: "@moq/token", link: "/lib/js/@moq/token" },
