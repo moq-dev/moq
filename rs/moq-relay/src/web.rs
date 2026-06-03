@@ -380,7 +380,13 @@ async fn serve_landing() -> Response {
 /// threshold. Unauthenticated so load-balancer probes don't need a JWT.
 async fn serve_health(State(state): State<Arc<WebState>>) -> Response {
 	let mut breaches = state.health.check();
-	if let Some(msg) = state.health.check_api().await {
+	// Only pay the external probe (up to 5s) when we're otherwise healthy; on an
+	// already-breached host the api line is just diagnostic and would delay the
+	// inevitable 503. `&&` short-circuits, so check_api isn't awaited when
+	// breaches are already present.
+	if breaches.is_empty()
+		&& let Some(msg) = state.health.check_api().await
+	{
 		breaches.push(msg);
 	}
 

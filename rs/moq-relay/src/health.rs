@@ -234,7 +234,12 @@ impl Health {
 		match api.client.get(api.url.clone()).send().await {
 			Ok(resp) if resp.status().is_success() => None,
 			Ok(resp) => Some(format!("health-api returned {}", resp.status().as_u16())),
-			Err(err) => Some(format!("health-api unreachable: {err}")),
+			Err(err) => {
+				// `reqwest::Error`'s Display includes the request URL; keep that
+				// out of the unauthenticated /health body and log it instead.
+				tracing::warn!(error = %err, "health-api probe failed");
+				Some("health-api unreachable".to_owned())
+			}
 		}
 	}
 
@@ -328,11 +333,10 @@ impl FromStr for MemLimit {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		let s = s.trim();
 		match s.strip_suffix('%') {
-			Some(pct) => pct
-				.trim()
-				.parse()
-				.map(MemLimit::Percent)
-				.map_err(|_| format!("invalid percentage: '{s}'")),
+			Some(pct) => {
+				let value: f32 = pct.trim().parse().map_err(|_| format!("invalid percentage: '{s}'"))?;
+				check_percent(value, s).map(MemLimit::Percent)
+			}
 			// Bits make no sense for memory, so only accept byte units.
 			None => parse_size(s, false).map(MemLimit::Bytes),
 		}
@@ -397,17 +401,18 @@ impl FromStr for LoadLimit {
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		let s = s.trim();
-		match s.strip_suffix('%') {
-			Some(pct) => pct
-				.trim()
-				.parse()
-				.map(LoadLimit::Percent)
-				.map_err(|_| format!("invalid percentage: '{s}'")),
-			None => s
-				.parse()
-				.map(LoadLimit::Absolute)
-				.map_err(|_| format!("invalid load value: '{s}'")),
+		// A load can exceed core count, so percentages aren't capped at 100
+		// (unlike CPU/RAM). Only reject negatives, which would make every real
+		// load average breach and pin the host at 503.
+		let (raw, build): (&str, fn(f64) -> LoadLimit) = match s.strip_suffix('%') {
+			Some(pct) => (pct.trim(), LoadLimit::Percent),
+			None => (s, LoadLimit::Absolute),
+		};
+		let value: f64 = raw.parse().map_err(|_| format!("invalid load value: '{s}'"))?;
+		if value < 0.0 {
+			return Err(format!("load limit cannot be negative: '{s}'"));
 		}
+		Ok(build(value))
 	}
 }
 
@@ -426,14 +431,21 @@ fn parse_load(s: &str) -> Result<LoadLimit, String> {
 	LoadLimit::from_str(s)
 }
 
-/// Parse a CPU/load percentage, accepting an optional trailing `%` (`75` or
-/// `75%`). The value is in percent units (0-100), not a 0-1 fraction.
+/// Parse a CPU/RAM percentage, accepting an optional trailing `%` (`75` or
+/// `75%`). The value is in percent units, not a 0-1 fraction, and must be in
+/// `0..=100` (a utilization gauge can't exceed 100%, so a typo'd `150` is a
+/// config error rather than a silently-disabled check).
 fn parse_percent(s: &str) -> Result<f32, String> {
 	let s = s.trim();
 	let digits = s.strip_suffix('%').unwrap_or(s).trim();
 	let value: f32 = digits.parse().map_err(|_| format!("invalid percentage: '{s}'"))?;
-	if value < 0.0 {
-		return Err(format!("percentage cannot be negative: '{s}'"));
+	check_percent(value, s)
+}
+
+/// Bounds a utilization percentage to `0..=100`.
+fn check_percent(value: f32, raw: &str) -> Result<f32, String> {
+	if !(0.0..=100.0).contains(&value) {
+		return Err(format!("percentage must be between 0 and 100: '{raw}'"));
 	}
 	Ok(value)
 }
@@ -521,8 +533,13 @@ mod tests {
 		assert_eq!(parse_percent("75"), Ok(75.0));
 		assert_eq!(parse_percent("75%"), Ok(75.0));
 		assert_eq!(parse_percent(" 80.5 % "), Ok(80.5));
+		assert_eq!(parse_percent("100"), Ok(100.0));
 		assert!(parse_percent("abc").is_err());
-		assert!(parse_percent("-5").is_err());
+		assert!(parse_percent("-5").is_err(), "negative rejected");
+		assert!(parse_percent("150").is_err(), "over 100 rejected");
+		// A utilization percent over 100 is a config error, not a disabled check.
+		assert!("150%".parse::<MemLimit>().is_err(), "ram over 100% rejected");
+		assert!("-1%".parse::<MemLimit>().is_err(), "negative ram rejected");
 	}
 
 	#[test]
@@ -647,10 +664,15 @@ mod tests {
 	fn load_limit_round_trips() {
 		assert_eq!("80%".parse::<LoadLimit>().unwrap(), LoadLimit::Percent(80.0));
 		assert_eq!("6".parse::<LoadLimit>().unwrap(), LoadLimit::Absolute(6.0));
+		// A load can exceed core count, so percentages over 100 are valid.
+		assert_eq!("200%".parse::<LoadLimit>().unwrap(), LoadLimit::Percent(200.0));
 		for s in ["80%", "6"] {
 			let parsed: LoadLimit = s.parse().unwrap();
 			assert_eq!(parsed.to_string().parse::<LoadLimit>().unwrap(), parsed);
 		}
+		// Negatives would pin the host at 503.
+		assert!("-1".parse::<LoadLimit>().is_err(), "negative load rejected");
+		assert!("-5%".parse::<LoadLimit>().is_err(), "negative load percent rejected");
 	}
 
 	#[test]
