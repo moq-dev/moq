@@ -261,6 +261,7 @@ impl GroupProducer {
 		GroupConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
+			timescale: self.timescale,
 			index: 0,
 		}
 	}
@@ -305,6 +306,10 @@ pub struct GroupConsumer {
 	// Immutable stream state.
 	info: Group,
 
+	// Parent track's negotiated timescale, copied from the producer. Lets the
+	// wire publisher decide whether to emit per-frame timestamps for a fetched group.
+	timescale: Option<Timescale>,
+
 	// The number of frames we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
 	index: usize,
@@ -319,6 +324,11 @@ impl std::ops::Deref for GroupConsumer {
 }
 
 impl GroupConsumer {
+	/// The parent track's negotiated timescale, or `None` for untimed tracks.
+	pub fn timescale(&self) -> Option<Timescale> {
+		self.timescale
+	}
+
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where

@@ -4,7 +4,10 @@ use std::{
 	task::{Poll, ready},
 };
 
-use crate::{Error, Subscription, TrackProducer, TrackSubscriber, model::track::TrackWeak};
+use crate::{
+	Error, Group, GroupConsumer, GroupProducer, Subscription, Timescale, TrackProducer, TrackSubscriber,
+	model::track::TrackWeak,
+};
 
 use super::{OriginList, Track};
 
@@ -61,6 +64,33 @@ fn fail_resolvers(resolvers: Vec<Resolver>, err: &Error) {
 	}
 }
 
+/// The slot a pending fetch resolves into: `None` until the dynamic handler
+/// accepts (delivering the group) or denies (delivering an error). One-shot
+/// analogue of [`PendingSlot`].
+type GroupSlot = Option<Result<GroupConsumer, Error>>;
+
+/// One waiting fetcher: its priority and the producer side of its resolver channel.
+type GroupResolver = (u8, kio::Producer<GroupSlot>);
+
+/// A group that has been fetched but not yet served by the dynamic handler.
+///
+/// Concurrent fetches for the same `(track, group)` coalesce into one pending
+/// request, each adding a resolver so they all receive a consumer for the same
+/// group once it is accepted.
+#[derive(Default)]
+struct GroupPendingRequest {
+	resolvers: Vec<GroupResolver>,
+}
+
+/// Resolve every waiting fetcher with `err`.
+fn fail_group_resolvers(resolvers: Vec<GroupResolver>, err: &Error) {
+	for (_, slot) in resolvers {
+		if let Ok(mut slot) = slot.write() {
+			*slot = Some(Err(err.clone()));
+		}
+	}
+}
+
 #[derive(Default)]
 struct State {
 	// Weak references for deduplication. Doesn't prevent track auto-close.
@@ -73,6 +103,13 @@ struct State {
 	// Requested names in FIFO order for the dynamic handler to drain. A name
 	// stays in `requests` (but not here) once handed out as a `TrackRequest`.
 	request_order: VecDeque<String>,
+
+	// Pending fetches keyed by (track name, group sequence), waiting for the
+	// dynamic handler to accept or deny them.
+	group_requests: HashMap<(String, u64), GroupPendingRequest>,
+
+	// Requested (track, group) pairs in FIFO order for the dynamic handler to drain.
+	group_request_order: VecDeque<(String, u64)>,
 
 	// The current number of dynamic producers.
 	// If this is 0, requests must be empty.
@@ -99,11 +136,15 @@ impl State {
 		Ok(())
 	}
 
-	/// Drop every pending request, notifying all waiting subscribers with `err`.
+	/// Drop every pending request, notifying all waiting subscribers and fetchers with `err`.
 	fn abort_requests(&mut self, err: &Error) {
 		self.request_order.clear();
 		for (_, pending) in self.requests.drain() {
 			fail_resolvers(pending.resolvers, err);
+		}
+		self.group_request_order.clear();
+		for (_, pending) in self.group_requests.drain() {
+			fail_group_resolvers(pending.resolvers, err);
 		}
 	}
 
@@ -112,6 +153,14 @@ impl State {
 		self.request_order.retain(|n| n != name);
 		if let Some(pending) = self.requests.remove(name) {
 			fail_resolvers(pending.resolvers, &err);
+		}
+	}
+
+	/// Drop a single pending fetch, notifying its fetchers with `err`.
+	fn deny_group_request(&mut self, key: &(String, u64), err: Error) {
+		self.group_request_order.retain(|k| k != key);
+		if let Some(pending) = self.group_requests.remove(key) {
+			fail_group_resolvers(pending.resolvers, &err);
 		}
 	}
 }
@@ -352,6 +401,96 @@ impl Drop for TrackRequest {
 	}
 }
 
+/// A fetch waiting to be served, handed out by [`BroadcastDynamic::requested_group`].
+///
+/// The publisher inspects the requested [`Self::name`] / [`Self::group`], then
+/// either [`Self::accept`]s it (creating a [`GroupProducer`] to fill, which
+/// resolves all waiting fetchers) or [`Self::deny`]s it. Dropping without doing
+/// either denies with [`Error::Cancel`].
+pub struct GroupRequest {
+	name: String,
+	group: u64,
+	priority: u8,
+	/// First frame the fetcher wants. Always 0 today; the field carries the wire
+	/// FETCH `frame_start` so the serving side honors it once partial fetches land.
+	frame_start: u64,
+	state: kio::Weak<State>,
+	/// Set once accepted or denied so [`Drop`] doesn't deny a second time.
+	completed: bool,
+}
+
+impl GroupRequest {
+	/// The requested track name.
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	/// The requested group sequence.
+	pub fn group(&self) -> u64 {
+		self.group
+	}
+
+	/// The first waiting fetcher's priority, as a hint for the serving stream.
+	pub fn priority(&self) -> u8 {
+		self.priority
+	}
+
+	/// The first frame to serve (0 returns the whole group).
+	pub fn frame_start(&self) -> u64 {
+		self.frame_start
+	}
+
+	/// Serve the request, returning a [`GroupProducer`] to fill and resolving
+	/// every waiting fetcher with a consumer for it.
+	///
+	/// `timescale` is the parent track's scale (from the wire FETCH_OK), so the
+	/// producer accepts the timestamped frames that follow. Returns [`Error::Cancel`]
+	/// if the fetch was cancelled or the broadcast closed while pending.
+	pub fn accept(mut self, timescale: impl Into<Option<Timescale>>) -> Result<GroupProducer, Error> {
+		self.completed = true;
+
+		let mut state = self
+			.state
+			.write()
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Cancel))?;
+
+		let key = (self.name.clone(), self.group);
+		let pending = state.group_requests.remove(&key).ok_or(Error::Cancel)?;
+		state.group_request_order.retain(|k| k != &key);
+
+		let producer = GroupProducer::new_with_timescale(Group { sequence: self.group }, timescale.into());
+
+		// Build each fetcher's consumer now (not when it polls) so it counts toward
+		// the producer immediately, mirroring TrackRequest::accept.
+		for (_, slot) in pending.resolvers {
+			if let Ok(mut slot) = slot.write() {
+				*slot = Some(Ok(producer.consume()));
+			}
+		}
+
+		drop(state);
+		Ok(producer)
+	}
+
+	/// Reject the fetch, waking all waiting fetchers with `err`.
+	pub fn deny(mut self, err: Error) {
+		self.completed = true;
+		if let Ok(mut state) = self.state.write() {
+			state.deny_group_request(&(self.name.clone(), self.group), err);
+		}
+	}
+}
+
+impl Drop for GroupRequest {
+	fn drop(&mut self) {
+		if !self.completed
+			&& let Ok(mut state) = self.state.write()
+		{
+			state.deny_group_request(&(self.name.clone(), self.group), Error::Cancel);
+		}
+	}
+}
+
 /// A pending subscription returned by [`TrackConsumer::subscribe`].
 ///
 /// The subscription isn't live until the publisher accepts it (for the wire,
@@ -414,6 +553,69 @@ impl std::future::Future for TrackPending {
 		let this = self.get_mut();
 		// Replacing drops the previous waiter, freeing its slot so poll_ok's
 		// register call can recycle it (see `kio::wait`).
+		this.waiter = Some(kio::Waiter::new(cx.waker().clone()));
+		this.poll_ok(this.waiter.as_ref().unwrap())
+	}
+}
+
+/// A pending fetch returned by [`TrackConsumer::fetch`].
+///
+/// One-shot analogue of [`TrackPending`]: resolves to the [`GroupConsumer`] once
+/// the group is available (already cached, or FETCH_OK on the wire), or an error.
+pub struct FetchPending {
+	inner: FetchPendingInner,
+	/// Kept alive between `Future::poll` calls so its registration in the resolver
+	/// channel stays valid until the next poll replaces it.
+	waiter: Option<kio::Waiter>,
+}
+
+enum FetchPendingInner {
+	/// Resolved synchronously: the group was cached, or it failed immediately.
+	Ready(Result<GroupConsumer, Error>),
+	/// Waiting for the dynamic handler to accept or deny via the wire.
+	Waiting(kio::Consumer<GroupSlot>),
+}
+
+impl FetchPending {
+	fn ready(result: Result<GroupConsumer, Error>) -> Self {
+		Self {
+			inner: FetchPendingInner::Ready(result),
+			waiter: None,
+		}
+	}
+
+	fn waiting(consumer: kio::Consumer<GroupSlot>) -> Self {
+		Self {
+			inner: FetchPendingInner::Waiting(consumer),
+			waiter: None,
+		}
+	}
+
+	/// Poll for the resolved [`GroupConsumer`], without blocking.
+	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<GroupConsumer, Error>> {
+		match &self.inner {
+			FetchPendingInner::Ready(result) => Poll::Ready(result.clone()),
+			FetchPendingInner::Waiting(consumer) => match consumer.poll(waiter, |slot| match &**slot {
+				Some(result) => Poll::Ready(result.clone()),
+				None => Poll::Pending,
+			}) {
+				Poll::Ready(Ok(result)) => Poll::Ready(result),
+				// Channel closed: the resolver may have left the final result behind.
+				Poll::Ready(Err(closed)) => Poll::Ready(match &*closed {
+					Some(result) => result.clone(),
+					None => Err(Error::Cancel),
+				}),
+				Poll::Pending => Poll::Pending,
+			},
+		}
+	}
+}
+
+impl std::future::Future for FetchPending {
+	type Output = Result<GroupConsumer, Error>;
+
+	fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+		let this = self.get_mut();
 		this.waiter = Some(kio::Waiter::new(cx.waker().clone()));
 		this.poll_ok(this.waiter.as_ref().unwrap())
 	}
@@ -505,6 +707,37 @@ impl BroadcastDynamic {
 		kio::wait(|waiter| self.poll_requested_track(waiter)).await
 	}
 
+	/// Poll for the next consumer-requested group (fetch), without blocking.
+	pub fn poll_requested_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<GroupRequest, Error>> {
+		let weak = self.state.weak();
+		self.poll(waiter, |state| {
+			let Some(key) = state.group_request_order.pop_front() else {
+				return Poll::Pending;
+			};
+			// The key stays in `group_requests` so concurrent fetchers can still
+			// coalesce onto it until the publisher accepts or denies.
+			let pending = state.group_requests.get(&key).expect("group_request_order out of sync");
+			let priority = pending.resolvers.first().map(|(p, _)| *p).unwrap_or(0);
+			Poll::Ready((key, priority))
+		})
+		.map(|res| {
+			res.map(|((name, group), priority)| GroupRequest {
+				name,
+				group,
+				priority,
+				// Always 0 today; partial-fetch resume would set this from the request.
+				frame_start: 0,
+				state: weak,
+				completed: false,
+			})
+		})
+	}
+
+	/// Block until a consumer fetches a group, returning a [`GroupRequest`] to serve.
+	pub async fn requested_group(&mut self) -> Result<GroupRequest, Error> {
+		kio::wait(|waiter| self.poll_requested_group(waiter)).await
+	}
+
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> BroadcastConsumer {
 		BroadcastConsumer {
@@ -571,6 +804,17 @@ impl BroadcastDynamic {
 
 	pub fn assert_no_request(&mut self) {
 		assert!(self.requested_track().now_or_never().is_none(), "should have blocked");
+	}
+
+	pub fn assert_group_request(&mut self) -> GroupRequest {
+		self.requested_group()
+			.now_or_never()
+			.expect("should not have blocked")
+			.expect("should not have errored")
+	}
+
+	pub fn assert_no_group_request(&mut self) {
+		assert!(self.requested_group().now_or_never().is_none(), "should have blocked");
 	}
 }
 
@@ -652,6 +896,70 @@ impl BroadcastConsumer {
 		TrackPending::waiting(consumer)
 	}
 
+	/// Register a one-shot fetch for `group` on `name` and return a [`FetchPending`]
+	/// that resolves once the group is available.
+	///
+	/// Returns a cached group directly if a live producer already holds it; bypasses
+	/// the cache and queues a wire request if the cached group is aborted or evicted.
+	/// Resolves to [`Error::NotFound`] if the group can never exist (past the track's
+	/// final sequence) or no dynamic producer exists to fetch it.
+	fn request_fetch(&self, name: &str, group: u64, fetch: Fetch) -> FetchPending {
+		// Upgrade to a temporary producer so we can modify the state.
+		let Some(producer) = self.state.produce() else {
+			let err = self.state.read().abort.clone().unwrap_or(Error::Dropped);
+			return FetchPending::ready(Err(err));
+		};
+		let mut state = match modify(&producer) {
+			Ok(state) => state,
+			Err(err) => return FetchPending::ready(Err(err)),
+		};
+
+		// Return a cached group if a live producer is publishing the track.
+		if let Some(weak) = state.tracks.get(name) {
+			if weak.is_closed() {
+				// Drop the stale entry and fall through to a fresh request.
+				state.tracks.remove(name);
+			} else {
+				let sub = weak.subscribe(Subscription::default());
+				match sub.poll_get_group(&kio::Waiter::noop(), group) {
+					Poll::Ready(Ok(Some(mut cached))) => {
+						// Bypass an aborted cached group with a fresh fetch; otherwise return it
+						// (complete, or in-progress with frames still streaming in).
+						if !matches!(cached.poll_finished(&kio::Waiter::noop()), Poll::Ready(Err(_))) {
+							return FetchPending::ready(Ok(cached));
+						}
+					}
+					// At or past the track's final sequence: the group can never exist.
+					Poll::Ready(Ok(None)) => return FetchPending::ready(Err(Error::NotFound)),
+					Poll::Ready(Err(err)) => return FetchPending::ready(Err(err)),
+					// Not cached (old / evicted): fall through to a wire request.
+					Poll::Pending => {}
+				}
+			}
+		}
+
+		let slot = kio::Producer::new(None);
+		let consumer = slot.consume();
+		let key = (name.to_string(), group);
+
+		if let Some(pending) = state.group_requests.get_mut(&key) {
+			// Coalesce onto an in-flight fetch for the same track + group.
+			pending.resolvers.push((fetch.priority, slot));
+		} else if state.dynamic == 0 {
+			return FetchPending::ready(Err(Error::NotFound));
+		} else {
+			state.group_requests.insert(
+				key.clone(),
+				GroupPendingRequest {
+					resolvers: vec![(fetch.priority, slot)],
+				},
+			);
+			state.group_request_order.push_back(key);
+		}
+
+		FetchPending::waiting(consumer)
+	}
+
 	/// Block until the broadcast is closed and return the cause.
 	///
 	/// Returns [`Error::Dropped`] if every producer was dropped without an
@@ -681,13 +989,27 @@ impl BroadcastConsumer {
 	}
 }
 
+/// Options for a one-shot [`TrackConsumer::fetch`] of a past group.
+#[derive(Clone, Debug, Default)]
+pub struct Fetch {
+	/// Delivery priority for the fetched group's stream. Defaults to 0.
+	pub priority: u8,
+}
+
+impl Fetch {
+	/// Set the delivery priority, returning `self` for chaining.
+	pub fn with_priority(mut self, priority: u8) -> Self {
+		self.priority = priority;
+		self
+	}
+}
+
 /// A handle to a single track within a broadcast.
 ///
 /// Obtained from [`BroadcastConsumer::consume_track`]. Holding it sends nothing
 /// to the publisher; it just names a track you can [`subscribe`](Self::subscribe)
-/// to (a live, ongoing stream of groups) later. The same handle can be subscribed
-/// to multiple times, and clones are cheap.
-// TODO: add `fetch` for one-shot retrieval of a past group range.
+/// to (a live, ongoing stream of groups) or [`fetch`](Self::fetch) a single past
+/// group from. The same handle can be reused, and clones are cheap.
 #[derive(Clone)]
 pub struct TrackConsumer {
 	broadcast: BroadcastConsumer,
@@ -712,6 +1034,20 @@ impl TrackConsumer {
 	/// same name coalesce onto one request.
 	pub fn subscribe(&self, subscription: Subscription) -> TrackPending {
 		self.broadcast.request_subscribe(&self.name, subscription)
+	}
+
+	/// Fetch a single past group, without holding a live subscription.
+	///
+	/// Returns the [`GroupConsumer`] once the group is available: immediately if a
+	/// live producer already has it cached, otherwise after a wire FETCH completes
+	/// (blocking on FETCH_OK, like [`subscribe`](Self::subscribe) blocks on
+	/// SUBSCRIBE_OK). `options` accepts `None`, a [`Fetch`], or `Fetch::default()`.
+	///
+	/// Errors with [`Error::NotFound`] if the group can never exist (past the
+	/// track's final sequence) or no publisher handles fetch.
+	pub async fn fetch(&self, group: u64, options: impl Into<Option<Fetch>>) -> Result<GroupConsumer, Error> {
+		let options = options.into().unwrap_or_default();
+		self.broadcast.request_fetch(&self.name, group, options).await
 	}
 }
 
@@ -738,6 +1074,19 @@ mod test {
 			assert!(
 				pending.poll_ok(&kio::Waiter::noop()).is_pending(),
 				"consume_track should stay pending until the request is accepted"
+			);
+			pending
+		}};
+	}
+
+	/// Fetch and assert the result hasn't resolved yet (it stays pending until a
+	/// publisher accepts). Returns the [`FetchPending`] to resolve after accepting.
+	macro_rules! fetch_pending {
+		($consumer:expr, $name:expr, $group:expr) => {{
+			let pending = $consumer.request_fetch($name, $group, Fetch::default());
+			assert!(
+				pending.poll_ok(&kio::Waiter::noop()).is_pending(),
+				"fetch should stay pending until the request is accepted"
 			);
 			pending
 		}};
@@ -960,5 +1309,155 @@ mod test {
 		// Original handle is still live, so the request registers (stays pending)
 		// instead of failing with NotFound.
 		let _fut = subscribe_pending!(consumer, "track1");
+	}
+
+	#[tokio::test]
+	async fn fetch_cache_hit() {
+		let mut producer = Broadcast::new().produce();
+		let mut track = Track::new("track1").produce();
+		producer.assert_insert_track(&track);
+
+		// Produce a cached group.
+		let mut group = track.append_group().unwrap(); // seq 0
+		group.write_frame(bytes::Bytes::from_static(b"hello")).unwrap();
+		group.finish().unwrap();
+
+		// A cached group is returned directly, no dynamic handler needed.
+		let consumer = producer.consume();
+		let mut g = consumer.consume_track("track1").fetch(0, None).await.unwrap();
+		assert_eq!(g.sequence, 0);
+		assert_eq!(&g.read_frame().await.unwrap().unwrap()[..], b"hello");
+	}
+
+	#[tokio::test]
+	async fn fetch_miss_queues_request() {
+		let mut broadcast = Broadcast::new().produce().dynamic();
+		let consumer = broadcast.consume();
+
+		// No live track has the group, so the fetch queues a dynamic request.
+		let fetch_fut = fetch_pending!(consumer, "track1", 5);
+
+		let request = broadcast.assert_group_request();
+		broadcast.assert_no_group_request();
+		assert_eq!(request.name(), "track1");
+		assert_eq!(request.group(), 5);
+		assert_eq!(request.frame_start(), 0);
+
+		let mut group = request.accept(None).unwrap();
+		let mut g = fetch_fut.await.unwrap();
+		assert_eq!(g.sequence, 5);
+
+		group.write_frame(bytes::Bytes::from_static(b"hi")).unwrap();
+		group.finish().unwrap();
+		assert_eq!(&g.read_frame().await.unwrap().unwrap()[..], b"hi");
+	}
+
+	#[tokio::test]
+	async fn fetch_past_final_not_found() {
+		let mut producer = Broadcast::new().produce();
+		let mut track = Track::new("track1").produce();
+		producer.assert_insert_track(&track);
+		track.append_group().unwrap(); // seq 0
+		track.finish().unwrap(); // final_sequence = 1
+
+		// A group at or past the final sequence can never exist.
+		let consumer = producer.consume();
+		assert!(matches!(
+			consumer.consume_track("track1").fetch(5, None).await,
+			Err(Error::NotFound)
+		));
+	}
+
+	#[tokio::test]
+	async fn fetch_errored_cache_bypass() {
+		let mut broadcast = Broadcast::new().produce();
+		let mut dynamic = broadcast.dynamic();
+		let mut track = Track::new("track1").produce();
+		broadcast.assert_insert_track(&track);
+
+		// A cached but aborted group must be bypassed, not returned.
+		let mut group = track.append_group().unwrap(); // seq 0
+		group.abort(Error::Cancel).unwrap();
+
+		let consumer = broadcast.consume();
+		let fetch_fut = fetch_pending!(consumer, "track1", 0);
+
+		// The aborted cache was skipped: a fresh dynamic request is queued instead.
+		let request = dynamic.assert_group_request();
+		assert_eq!(request.group(), 0);
+		let mut fresh = request.accept(None).unwrap();
+		let mut g = fetch_fut.await.unwrap();
+
+		fresh.write_frame(bytes::Bytes::from_static(b"ok")).unwrap();
+		fresh.finish().unwrap();
+		assert_eq!(&g.read_frame().await.unwrap().unwrap()[..], b"ok");
+	}
+
+	#[tokio::test]
+	async fn fetch_coalesces() {
+		let mut broadcast = Broadcast::new().produce().dynamic();
+		let consumer = broadcast.consume();
+
+		// Two fetches for the same track + group coalesce into one request.
+		let f1 = fetch_pending!(consumer, "track1", 3);
+		let f2 = fetch_pending!(consumer, "track1", 3);
+
+		let request = broadcast.assert_group_request();
+		broadcast.assert_no_group_request();
+
+		let mut group = request.accept(None).unwrap();
+		let mut g1 = f1.await.unwrap();
+		let mut g2 = f2.await.unwrap();
+		assert_eq!(g1.sequence, 3);
+		assert_eq!(g2.sequence, 3);
+
+		// Both resolve to consumers of the same group.
+		group.write_frame(bytes::Bytes::from_static(b"x")).unwrap();
+		group.finish().unwrap();
+		assert_eq!(&g1.read_frame().await.unwrap().unwrap()[..], b"x");
+		assert_eq!(&g2.read_frame().await.unwrap().unwrap()[..], b"x");
+	}
+
+	#[tokio::test]
+	async fn fetch_not_found_without_dynamic() {
+		// No dynamic handler and no cached track: the fetch fails outright.
+		let broadcast = Broadcast::new().produce();
+		let consumer = broadcast.consume();
+		assert!(matches!(
+			consumer.consume_track("track1").fetch(0, None).await,
+			Err(Error::NotFound)
+		));
+	}
+
+	#[tokio::test]
+	async fn fetch_request_deny() {
+		let mut broadcast = Broadcast::new().produce().dynamic();
+		let consumer = broadcast.consume();
+
+		let f = fetch_pending!(consumer, "track1", 0);
+		broadcast.assert_group_request().deny(Error::NotFound);
+		assert!(f.await.is_err());
+	}
+
+	#[tokio::test]
+	async fn fetch_request_drop_cancels() {
+		let mut broadcast = Broadcast::new().produce().dynamic();
+		let consumer = broadcast.consume();
+
+		let f = fetch_pending!(consumer, "track1", 0);
+		// Dropping the request without accepting/denying cancels the fetch.
+		drop(broadcast.assert_group_request());
+		assert!(f.await.is_err());
+	}
+
+	#[tokio::test]
+	async fn fetch_dynamic_drop_aborts() {
+		let broadcast = Broadcast::new().produce().dynamic();
+		let consumer = broadcast.consume();
+
+		let f = fetch_pending!(consumer, "track1", 0);
+		// No dynamic producer remains to serve the pending fetch.
+		drop(broadcast);
+		assert!(f.await.is_err());
 	}
 }

@@ -9,8 +9,8 @@ use futures::{StreamExt, stream::FuturesUnordered};
 
 use crate::{
 	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Compression, Error, Frame, FrameProducer, Group,
-	GroupProducer, MAX_FRAME_SIZE, OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack,
-	Timescale, Timestamp, Track, TrackProducer, TrackRequest,
+	GroupProducer, GroupRequest, MAX_FRAME_SIZE, OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats,
+	SubscriberTrack, Timescale, Timestamp, Track, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -446,27 +446,134 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_broadcast(self, path: PathOwned, mut broadcast: BroadcastDynamic) {
-		// Actually start serving subscriptions.
+		// A second handle (sharing the same state) so track and group requests can be
+		// awaited in the same select without borrowing `broadcast` mutably twice.
+		let mut fetches = broadcast.clone();
+
+		// Actually start serving subscriptions and fetches.
 		loop {
 			// Keep serving requests until there are no more consumers.
 			// This way we'll clean up the task when the broadcast is no longer needed.
-			let request = tokio::select! {
-				request = broadcast.requested_track() => match request {
-					Ok(request) => request,
-					Err(err) => {
-						tracing::debug!(%err, "broadcast closed");
-						break;
-					}
-				},
-				_ = self.session.closed() => break,
-			};
+			tokio::select! {
+				request = broadcast.requested_track() => {
+					let request = match request {
+						Ok(request) => request,
+						Err(err) => {
+							tracing::debug!(%err, "broadcast closed");
+							break;
+						}
+					};
 
-			let mut this = self.clone();
-			let path = path.clone();
-			let broadcast = broadcast.clone();
-			web_async::spawn(async move {
-				this.run_subscribe(path, broadcast, request).await;
-			});
+					let mut this = self.clone();
+					let path = path.clone();
+					let broadcast = broadcast.clone();
+					web_async::spawn(async move {
+						this.run_subscribe(path, broadcast, request).await;
+					});
+				}
+				request = fetches.requested_group() => {
+					let request = match request {
+						Ok(request) => request,
+						Err(err) => {
+							tracing::debug!(%err, "broadcast closed");
+							break;
+						}
+					};
+
+					// FETCH only exists upstream on lite-05+. Below that, fail the fetch
+					// fast rather than open a stream the peer would reject.
+					if !self.version.has_timestamps() {
+						request.deny(Error::UnexpectedStream);
+						continue;
+					}
+
+					let mut this = self.clone();
+					let path = path.clone();
+					web_async::spawn(async move {
+						this.run_fetch(path, request).await;
+					});
+				}
+				_ = self.session.closed() => break,
+			}
+		}
+	}
+
+	/// Serve one downstream fetch by issuing a wire FETCH upstream: open a bidi
+	/// stream, send FETCH, block on FETCH_OK, then route the group's frames into
+	/// the producer that resolves the waiting fetcher.
+	async fn run_fetch(&mut self, path: PathOwned, request: GroupRequest) {
+		let name = request.name().to_string();
+		let group = request.group();
+		let priority = request.priority();
+		let frame_start = request.frame_start();
+
+		let abs = self.origin.absolute(&path);
+		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&name));
+
+		tracing::info!(broadcast = %self.log_path(&path), track = %name, %group, "fetch started");
+
+		let mut stream = match Stream::open(&self.session, self.version).await {
+			Ok(stream) => stream,
+			Err(err) => {
+				request.deny(err);
+				return;
+			}
+		};
+
+		if let Err(err) = stream.writer.encode(&lite::ControlType::Fetch).await {
+			stream.writer.abort(&err);
+			request.deny(err);
+			return;
+		}
+
+		let msg = lite::Fetch {
+			broadcast: path.as_path(),
+			track: (&name).into(),
+			priority,
+			group,
+			frame_start,
+		};
+		if let Err(err) = stream.writer.encode(&msg).await {
+			stream.writer.abort(&err);
+			request.deny(err);
+			return;
+		}
+
+		// The first response MUST be a FETCH_OK; it carries the codec/timescale
+		// needed to decode the frames that follow on the same stream.
+		let info = match stream.reader.decode::<lite::FetchOk>().await {
+			Ok(info) => info,
+			Err(err) => {
+				stream.writer.abort(&err);
+				request.deny(err);
+				return;
+			}
+		};
+
+		// The publisher confirmed: build the producer (unblocking the fetcher) and
+		// fill it from the wire, reusing the live-subscription frame decode path.
+		let mut producer = match request.accept(info.timescale) {
+			Ok(producer) => producer,
+			Err(err) => {
+				stream.writer.abort(&err);
+				return;
+			}
+		};
+
+		let res = tokio::select! {
+			err = producer.closed() => Err(err),
+			res = self.run_group(&mut stream.reader, producer.clone(), track_stats, info.compression, info.timescale) => res,
+		};
+
+		match res {
+			Ok(()) => {
+				let _ = producer.finish();
+				tracing::info!(broadcast = %self.log_path(&path), track = %name, %group, "fetch complete");
+			}
+			Err(err) => {
+				let _ = producer.abort(err.clone());
+				tracing::warn!(broadcast = %self.log_path(&path), track = %name, %group, %err, "fetch error");
+			}
 		}
 	}
 
