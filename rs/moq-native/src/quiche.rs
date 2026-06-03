@@ -78,7 +78,10 @@ impl QuicheClient {
 				let conn = builder
 					.connect(&host, port)
 					.await
-					.context("failed to connect to quiche server")?;
+					.context("failed to connect to quiche server")?
+					.established()
+					.await
+					.context("failed to establish quiche connection")?;
 				let session = web_transport_quiche::Connection::connect(conn, request)
 					.await
 					.context("failed to connect to quiche server")?;
@@ -89,7 +92,10 @@ impl QuicheClient {
 				let conn = builder
 					.connect(&host, port)
 					.await
-					.context("failed to connect to quiche server")?;
+					.context("failed to connect to quiche server")?
+					.established()
+					.await
+					.context("failed to establish quiche connection")?;
 
 				let alpn = conn.alpn().context("missing ALPN")?;
 				let alpn = std::str::from_utf8(&alpn).context("failed to decode ALPN")?;
