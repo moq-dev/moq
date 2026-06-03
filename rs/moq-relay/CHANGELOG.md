@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.6...moq-relay-v0.13.0) - 2026-06-03
+
+### Other
+
+- add /health load-shedding endpoint ([#1604](https://github.com/moq-dev/moq/pull/1604))
+- *(deps)* bump the cargo group (with code fixes for rand/rubato/rcgen) ([#1603](https://github.com/moq-dev/moq/pull/1603))
+
 ## [0.12.6](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.5...moq-relay-v0.12.6) - 2026-06-02
 
 ### Other
