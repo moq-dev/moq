@@ -367,7 +367,7 @@ impl ServerIdGenerator {
 
 impl noq::ConnectionIdGenerator for ServerIdGenerator {
 	fn generate_cid(&mut self) -> noq::ConnectionId {
-		use rand::Rng;
+		use rand::RngExt;
 		let cid_len = self.cid_len();
 		let mut cid = Vec::with_capacity(cid_len);
 		// First byte has "self-encoded length" of server ID + nonce

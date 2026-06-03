@@ -5,7 +5,7 @@ use std::{
 	task::Poll,
 };
 
-use rand::Rng;
+use rand::RngExt;
 use web_async::Lock;
 
 use super::BroadcastConsumer;

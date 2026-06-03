@@ -667,13 +667,14 @@ mod tests {
 		ca_params.distinguished_name.push(rcgen::DnType::CommonName, "Test CA");
 		ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 		let ca_cert = ca_params.self_signed(&ca_kp).unwrap();
+		let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_kp);
 
 		let server_kp = KeyPair::generate().unwrap();
 		let mut server_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
 		server_params
 			.distinguished_name
 			.push(rcgen::DnType::CommonName, "test-server");
-		let server_cert = server_params.signed_by(&server_kp, &ca_cert, &ca_kp).unwrap();
+		let server_cert = server_params.signed_by(&server_kp, &ca_issuer).unwrap();
 
 		let ca_path = dir.path().join("ca.pem");
 		let cert_path = dir.path().join("server.cert.pem");

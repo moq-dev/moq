@@ -2482,6 +2482,7 @@ api = "https://api.example.com/access"
 		ca_params.distinguished_name.push(rcgen::DnType::CommonName, "Test CA");
 		ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 		let ca_cert = ca_params.self_signed(&ca_kp).unwrap();
+		let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_kp);
 
 		// 2. Server cert (SAN: 127.0.0.1) signed by the CA.
 		let server_kp = KeyPair::generate().unwrap();
@@ -2489,7 +2490,7 @@ api = "https://api.example.com/access"
 		server_params
 			.distinguished_name
 			.push(rcgen::DnType::CommonName, "test-server");
-		let server_cert = server_params.signed_by(&server_kp, &ca_cert, &ca_kp).unwrap();
+		let server_cert = server_params.signed_by(&server_kp, &ca_issuer).unwrap();
 
 		// 3. Client cert signed by the CA.
 		let client_kp = KeyPair::generate().unwrap();
@@ -2497,7 +2498,7 @@ api = "https://api.example.com/access"
 		client_params
 			.distinguished_name
 			.push(rcgen::DnType::CommonName, "test-client");
-		let client_cert = client_params.signed_by(&client_kp, &ca_cert, &ca_kp).unwrap();
+		let client_cert = client_params.signed_by(&client_kp, &ca_issuer).unwrap();
 
 		// 4. Write CA + client cert/key to temp files.
 		let dir = TempDir::new().unwrap();
