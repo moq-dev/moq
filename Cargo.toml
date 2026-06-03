@@ -45,7 +45,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 hang = { version = "0.18", path = "rs/hang" }
 kio = { version = "0.3", path = "rs/kio" }
-moq-audio = { version = "0.0.1", path = "rs/moq-audio" }
+moq-audio = { version = "0.0.2", path = "rs/moq-audio" }
 moq-loc = { version = "0.1", path = "rs/moq-loc" }
 moq-msf = { version = "0.2", path = "rs/moq-msf" }
 moq-mux = { version = "0.5", path = "rs/moq-mux" }
