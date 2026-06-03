@@ -66,20 +66,27 @@ pub struct HealthConfig {
 	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
 	pub tx: Option<Rate>,
 
-	/// Return 503 when the 1-minute load average exceeds this value. Unix only.
+	/// Return 503 when the 1-minute load average exceeds this limit. Accepts a
+	/// raw value (`6.0`) or a percentage of CPU cores (`80%`, i.e. a load of
+	/// `0.8 * cores`). Unix only.
 	#[cfg(unix)]
-	#[arg(long = "web-health-load1", id = "web-health-load1", env = "MOQ_WEB_HEALTH_LOAD1")]
-	pub load1: Option<f64>,
+	#[arg(long = "web-health-load1", id = "web-health-load1", env = "MOQ_WEB_HEALTH_LOAD1", value_parser = parse_load)]
+	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	pub load1: Option<LoadLimit>,
 
-	/// Return 503 when the 5-minute load average exceeds this value. Unix only.
+	/// Return 503 when the 5-minute load average exceeds this limit. Same syntax
+	/// as `--web-health-load1`. Unix only.
 	#[cfg(unix)]
-	#[arg(long = "web-health-load5", id = "web-health-load5", env = "MOQ_WEB_HEALTH_LOAD5")]
-	pub load5: Option<f64>,
+	#[arg(long = "web-health-load5", id = "web-health-load5", env = "MOQ_WEB_HEALTH_LOAD5", value_parser = parse_load)]
+	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	pub load5: Option<LoadLimit>,
 
-	/// Return 503 when the 15-minute load average exceeds this value. Unix only.
+	/// Return 503 when the 15-minute load average exceeds this limit. Same syntax
+	/// as `--web-health-load1`. Unix only.
 	#[cfg(unix)]
-	#[arg(long = "web-health-load15", id = "web-health-load15", env = "MOQ_WEB_HEALTH_LOAD15")]
-	pub load15: Option<f64>,
+	#[arg(long = "web-health-load15", id = "web-health-load15", env = "MOQ_WEB_HEALTH_LOAD15", value_parser = parse_load)]
+	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	pub load15: Option<LoadLimit>,
 
 	/// Defer the health decision to another service. On each request the relay
 	/// GETs this URL; a non-2xx response or an unreachable service counts as a
@@ -111,10 +118,17 @@ impl HealthConfig {
 			url,
 		});
 
+		// Logical CPU count, used to resolve percentage load-average limits.
+		// Respects cgroup/affinity limits where the platform exposes them.
+		let cores = std::thread::available_parallelism()
+			.map(|n| n.get() as f64)
+			.unwrap_or(1.0);
+
 		let inner = Arc::new(HealthInner {
 			config: self.clone(),
 			sample: Mutex::new(Sample::default()),
 			api,
+			cores,
 		});
 
 		let want_cpu = self.cpu.is_some();
@@ -185,6 +199,7 @@ struct HealthInner {
 	config: HealthConfig,
 	sample: Mutex<Sample>,
 	api: Option<HealthApi>,
+	cores: f64,
 }
 
 struct HealthApi {
@@ -209,7 +224,7 @@ impl Health {
 	/// (that's async, see [`Self::check_api`]).
 	pub fn check(&self) -> Vec<String> {
 		let sample = *self.inner.sample.lock().unwrap();
-		evaluate(&self.inner.config, &sample, self.read_load())
+		evaluate(&self.inner.config, &sample, self.read_load(), self.inner.cores)
 	}
 
 	/// Query the external `--web-health-api`, if configured. Returns a breach
@@ -242,7 +257,8 @@ impl Health {
 }
 
 /// Pure threshold evaluation, split out so it's testable without sysinfo/tokio.
-fn evaluate(cfg: &HealthConfig, sample: &Sample, load: (f64, f64, f64)) -> Vec<String> {
+/// `cores` is the logical CPU count, used to resolve percentage load limits.
+fn evaluate(cfg: &HealthConfig, sample: &Sample, load: (f64, f64, f64), cores: f64) -> Vec<String> {
 	let mut breaches = Vec::new();
 
 	if let (Some(limit), Some(cpu)) = (cfg.cpu, sample.cpu)
@@ -283,14 +299,18 @@ fn evaluate(cfg: &HealthConfig, sample: &Sample, load: (f64, f64, f64)) -> Vec<S
 			("load15", fifteen, cfg.load15),
 		] {
 			if let Some(limit) = limit
-				&& value > limit
+				&& value > limit.resolve(cores)
 			{
-				breaches.push(format!("{label} {value:.2} exceeds {limit:.2}"));
+				breaches.push(match limit {
+					// Report the breach in the same units the operator configured.
+					LoadLimit::Absolute(t) => format!("{label} {value:.2} exceeds {t:.2}"),
+					LoadLimit::Percent(p) => format!("{label} {:.1}% exceeds {p}%", value / cores * 100.0),
+				});
 			}
 		}
 	}
 	#[cfg(not(unix))]
-	let _ = load;
+	let _ = (load, cores);
 
 	breaches
 }
@@ -347,6 +367,63 @@ impl fmt::Display for Rate {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(f, "{}B", self.0)
 	}
+}
+
+/// A load-average threshold: a raw value, or a percentage of CPU cores.
+///
+/// `Percent(80.0)` resolves to a load of `0.8 * cores`, so `100%` is "one
+/// runnable task per core on average".
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LoadLimit {
+	Absolute(f64),
+	Percent(f64),
+}
+
+#[cfg(unix)]
+impl LoadLimit {
+	/// The raw load-average value this limit corresponds to, given `cores`.
+	fn resolve(&self, cores: f64) -> f64 {
+		match self {
+			LoadLimit::Absolute(v) => *v,
+			LoadLimit::Percent(p) => p / 100.0 * cores,
+		}
+	}
+}
+
+#[cfg(unix)]
+impl FromStr for LoadLimit {
+	type Err = String;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		let s = s.trim();
+		match s.strip_suffix('%') {
+			Some(pct) => pct
+				.trim()
+				.parse()
+				.map(LoadLimit::Percent)
+				.map_err(|_| format!("invalid percentage: '{s}'")),
+			None => s
+				.parse()
+				.map(LoadLimit::Absolute)
+				.map_err(|_| format!("invalid load value: '{s}'")),
+		}
+	}
+}
+
+#[cfg(unix)]
+impl fmt::Display for LoadLimit {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			LoadLimit::Absolute(v) => write!(f, "{v}"),
+			LoadLimit::Percent(p) => write!(f, "{p}%"),
+		}
+	}
+}
+
+#[cfg(unix)]
+fn parse_load(s: &str) -> Result<LoadLimit, String> {
+	LoadLimit::from_str(s)
 }
 
 /// Parse a CPU/load percentage, accepting an optional trailing `%` (`75` or
@@ -509,7 +586,7 @@ mod tests {
 			tx: Some(10_000_000),
 			..Default::default()
 		};
-		assert!(evaluate(&cfg, &ok, (0.0, 0.0, 0.0)).is_empty());
+		assert!(evaluate(&cfg, &ok, (0.0, 0.0, 0.0), 4.0).is_empty());
 
 		// CPU and RAM over, network under.
 		let hot = Sample {
@@ -519,7 +596,7 @@ mod tests {
 			tx: Some(10_000_000),
 			..Default::default()
 		};
-		let breaches = evaluate(&cfg, &hot, (0.0, 0.0, 0.0));
+		let breaches = evaluate(&cfg, &hot, (0.0, 0.0, 0.0), 4.0);
 		assert_eq!(breaches.len(), 2);
 		assert!(breaches.iter().any(|b| b.starts_with("cpu ")));
 		assert!(breaches.iter().any(|b| b.starts_with("ram ")));
@@ -532,21 +609,48 @@ mod tests {
 			cpu: Some(100.0),
 			..Default::default()
 		};
-		assert!(evaluate(&cfg, &sample, (99.0, 99.0, 99.0)).is_empty());
+		assert!(evaluate(&cfg, &sample, (99.0, 99.0, 99.0), 4.0).is_empty());
 	}
 
 	#[cfg(unix)]
 	#[test]
-	fn evaluate_loadavg() {
+	fn evaluate_loadavg_absolute() {
 		let cfg = HealthConfig {
-			load5: Some(1.0),
+			load5: Some(LoadLimit::Absolute(1.0)),
 			..Default::default()
 		};
 		let sample = Sample::default();
-		assert!(evaluate(&cfg, &sample, (0.5, 0.5, 0.5)).is_empty());
-		let breaches = evaluate(&cfg, &sample, (0.5, 2.0, 0.5));
+		assert!(evaluate(&cfg, &sample, (0.5, 0.5, 0.5), 4.0).is_empty());
+		let breaches = evaluate(&cfg, &sample, (0.5, 2.0, 0.5), 4.0);
 		assert_eq!(breaches.len(), 1);
-		assert!(breaches[0].starts_with("load5 "));
+		assert!(breaches[0].starts_with("load5 2.00 exceeds 1.00"), "{}", breaches[0]);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn evaluate_loadavg_percent() {
+		// 80% of 4 cores => breach when load5 > 3.2.
+		let cfg = HealthConfig {
+			load5: Some(LoadLimit::Percent(80.0)),
+			..Default::default()
+		};
+		let sample = Sample::default();
+		assert!(evaluate(&cfg, &sample, (0.0, 3.0, 0.0), 4.0).is_empty());
+		let breaches = evaluate(&cfg, &sample, (0.0, 3.6, 0.0), 4.0);
+		assert_eq!(breaches.len(), 1);
+		// 3.6 / 4 cores = 90%.
+		assert!(breaches[0].starts_with("load5 90.0% exceeds 80%"), "{}", breaches[0]);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn load_limit_round_trips() {
+		assert_eq!("80%".parse::<LoadLimit>().unwrap(), LoadLimit::Percent(80.0));
+		assert_eq!("6".parse::<LoadLimit>().unwrap(), LoadLimit::Absolute(6.0));
+		for s in ["80%", "6"] {
+			let parsed: LoadLimit = s.parse().unwrap();
+			assert_eq!(parsed.to_string().parse::<LoadLimit>().unwrap(), parsed);
+		}
 	}
 
 	#[test]

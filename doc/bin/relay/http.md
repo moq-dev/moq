@@ -114,11 +114,13 @@ ram = "80%"
 rx = "4Gb"
 tx = "500MB"
 
-# Return 503 when the load average exceeds these values. Unix only;
+# Return 503 when the load average exceeds these limits. Each accepts a raw
+# value (`6.0`) or a percentage of CPU cores (`80%`, i.e. a load of
+# `0.8 * cores` — so `100%` is one runnable task per core). Unix only;
 # these keys are rejected on Windows (which has no load average).
-load1 = 8.0
-load5 = 6.0
-load15 = 4.0
+load1 = "8.0"
+load5 = "80%"
+load15 = "4.0"
 
 # Seconds between metric samples. Defaults to 2, floored at 1.
 interval = 2
@@ -131,7 +133,7 @@ api = "http://localhost:9876/health"
 ```
 
 Every key also has a CLI flag (`--web-health-cpu 75`, `--web-health-ram 80%`,
-`--web-health-rx 4Gb`, `--web-health-tx 500MB`, `--web-health-load5 6`,
+`--web-health-rx 4Gb`, `--web-health-tx 500MB`, `--web-health-load5 80%`,
 `--web-health-interval 2`, `--web-health-api http://localhost:9876/health`) and
 a matching `MOQ_WEB_HEALTH_*` environment variable.
 

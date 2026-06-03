@@ -109,7 +109,7 @@ value syntax.
 cpu = 75       # percent; `75` or `75%`
 ram = "80%"    # percent of total, or absolute (`32GB`)
 tx = "500MB"   # bytes/s; `b` = bits, `B` = bytes (`4Gb`)
-load5 = 6.0    # load average, Unix only
+load5 = "80%"  # load average; raw (`6.0`) or percent of cores; Unix only
 ```
 
 ### \[auth]
