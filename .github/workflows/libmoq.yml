@@ -4,11 +4,6 @@ on:
   push:
     tags:
       - "libmoq-v*"
-  pull_request:
-    paths:
-      - ".github/workflows/libmoq.yml"
-      - ".github/scripts/release.sh"
-      - "rs/libmoq/build.sh"
 
 permissions:
   contents: read
@@ -66,16 +61,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            CARGO_VERSION=$(grep '^version' rs/libmoq/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
-          else
-            .github/scripts/release.sh parse-version libmoq
-          fi
+        run: .github/scripts/release.sh parse-version libmoq
 
       - name: Build and package
         shell: bash
@@ -95,7 +81,6 @@ jobs:
     name: Release
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
     permissions:
       contents: write
 

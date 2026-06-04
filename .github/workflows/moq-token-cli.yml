@@ -4,18 +4,10 @@ on:
   push:
     tags:
       - "moq-token-cli-v*"
-  pull_request:
-    paths:
-      - ".github/workflows/moq-token-cli.yml"
-      - ".github/scripts/release.sh"
-      - "rs/scripts/package-binary.sh"
-      - "rs/scripts/scrub-macho.sh"
-      - "packaging/moq-token-cli/**"
-      - ".github/actions/setup-packaging/**"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -51,16 +43,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            CARGO_VERSION=$(grep '^version' rs/moq-token-cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
-          else
-            .github/scripts/release.sh parse-version moq-token-cli
-          fi
+        run: .github/scripts/release.sh parse-version moq-token-cli
 
       - name: Set up packaging tools
         uses: ./.github/actions/setup-packaging
@@ -163,16 +146,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            CARGO_VERSION=$(grep '^version' rs/moq-token-cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
-          else
-            .github/scripts/release.sh parse-version moq-token-cli
-          fi
+        run: .github/scripts/release.sh parse-version moq-token-cli
 
       - name: Build and package tarball
         shell: bash
@@ -193,7 +167,6 @@ jobs:
     name: Release
     needs: [build, build-tarball-macos]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
     permissions:
       contents: write
       actions: write
