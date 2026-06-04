@@ -61,10 +61,34 @@ fn fail_resolvers(resolvers: Vec<Resolver>, err: &Error) {
 	}
 }
 
+/// The slot a pending info request resolves into: `None` until the dynamic
+/// handler resolves it with the track's immutable [`Track`] (or denies). The
+/// info-only analogue of [`PendingSlot`], it never creates a producer.
+type InfoSlot = Option<Result<Track, Error>>;
+
+/// One waiting info request: the producer side of its resolver channel.
+type InfoResolver = kio::Producer<InfoSlot>;
+
+/// Resolve every waiting info request with `err`.
+fn fail_info_resolvers(resolvers: Vec<InfoResolver>, err: &Error) {
+	for slot in resolvers {
+		if let Ok(mut slot) = slot.write() {
+			*slot = Some(Err(err.clone()));
+		}
+	}
+}
+
 #[derive(Default)]
 struct State {
 	// Weak references for deduplication. Doesn't prevent track auto-close.
 	tracks: HashMap<String, TrackWeak>,
+
+	// Resolved immutable track properties, cached so repeated info() lookups (and
+	// group-by-group fetches, which keep no track-level producer) reuse one
+	// resolution instead of re-fetching upstream. Keyed by track name; a
+	// re-announce replaces the whole broadcast (and this State), so the cache is
+	// implicitly invalidated then.
+	track_info: HashMap<String, Track>,
 
 	// Pending requests keyed by track name, waiting for the dynamic handler to
 	// accept or deny them.
@@ -73,6 +97,12 @@ struct State {
 	// Requested names in FIFO order for the dynamic handler to drain. A name
 	// stays in `requests` (but not here) once handed out as a `TrackRequest`.
 	request_order: VecDeque<String>,
+
+	// Pending info-only requests keyed by track name, plus FIFO order for the
+	// dynamic handler to drain. Mirrors `requests`/`request_order` but resolves a
+	// `Track` rather than a producer.
+	info_requests: HashMap<String, Vec<InfoResolver>>,
+	info_request_order: VecDeque<String>,
 
 	// The current number of dynamic producers.
 	// If this is 0, requests must be empty.
@@ -99,11 +129,16 @@ impl State {
 		Ok(())
 	}
 
-	/// Drop every pending request, notifying all waiting subscribers with `err`.
+	/// Drop every pending request, notifying all waiting subscribers and info
+	/// requests with `err`.
 	fn abort_requests(&mut self, err: &Error) {
 		self.request_order.clear();
 		for (_, pending) in self.requests.drain() {
 			fail_resolvers(pending.resolvers, err);
+		}
+		self.info_request_order.clear();
+		for (_, resolvers) in self.info_requests.drain() {
+			fail_info_resolvers(resolvers, err);
 		}
 	}
 
@@ -112,6 +147,29 @@ impl State {
 		self.request_order.retain(|n| n != name);
 		if let Some(pending) = self.requests.remove(name) {
 			fail_resolvers(pending.resolvers, &err);
+		}
+	}
+
+	/// Drop a single named pending info request, notifying its waiters with `err`.
+	fn deny_info_request(&mut self, name: &str, err: Error) {
+		self.info_request_order.retain(|n| n != name);
+		if let Some(resolvers) = self.info_requests.remove(name) {
+			fail_info_resolvers(resolvers, &err);
+		}
+	}
+
+	/// Cache a track's resolved info and wake any pending info requests for it.
+	/// Called both when a subscription is accepted (warming the cache) and when an
+	/// info-only request resolves.
+	fn resolve_info(&mut self, name: &str, info: Track) {
+		self.track_info.insert(name.to_string(), info.clone());
+		self.info_request_order.retain(|n| n != name);
+		if let Some(resolvers) = self.info_requests.remove(name) {
+			for slot in resolvers {
+				if let Ok(mut slot) = slot.write() {
+					*slot = Some(Ok(info.clone()));
+				}
+			}
 		}
 	}
 }
@@ -289,6 +347,10 @@ impl TrackRequest {
 		let pending = state.requests.remove(&self.name).ok_or(Error::Cancel)?;
 		state.request_order.retain(|n| n != &self.name);
 
+		// Warm the info cache and wake any info-only waiters: the props are now
+		// known, so a concurrent TRACK request needn't fetch them separately.
+		state.resolve_info(&self.name, track.clone());
+
 		let producer = TrackProducer::new(track);
 
 		// Insert a weak reference so future subscribers dedupe onto this producer.
@@ -349,6 +411,127 @@ impl Drop for TrackRequest {
 		{
 			state.deny_request(&self.name, Error::Cancel);
 		}
+	}
+}
+
+/// An info-only request waiting to be served, handed out by
+/// [`BroadcastDynamic::requested_info`].
+///
+/// The publisher inspects [`Self::name`], then either [`Self::resolve`]s it with
+/// the track's immutable [`Track`] (waking every waiting `info()` caller and
+/// caching the result) or [`Self::deny`]s it. Dropping without doing either
+/// denies with [`Error::Cancel`]. Unlike [`TrackRequest`], no producer or
+/// subscription is created.
+pub struct InfoRequest {
+	name: String,
+	state: kio::Weak<State>,
+	/// Set once resolved or denied so [`Drop`] doesn't deny a second time.
+	completed: bool,
+}
+
+impl InfoRequest {
+	/// The requested track name.
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	/// Resolve the request with the track's immutable info, caching it and waking
+	/// every waiting `info()` caller.
+	pub fn resolve(mut self, info: Track) {
+		self.completed = true;
+		if let Ok(mut state) = self.state.write() {
+			state.resolve_info(&self.name, info);
+		}
+	}
+
+	/// Reject the request, waking all waiting `info()` callers with `err`.
+	pub fn deny(mut self, err: Error) {
+		self.completed = true;
+		if let Ok(mut state) = self.state.write() {
+			state.deny_info_request(&self.name, err);
+		}
+	}
+}
+
+impl Drop for InfoRequest {
+	fn drop(&mut self) {
+		if !self.completed
+			&& let Ok(mut state) = self.state.write()
+		{
+			state.deny_info_request(&self.name, Error::Cancel);
+		}
+	}
+}
+
+/// A consumer request handed out by [`BroadcastDynamic::requested`]: either a full
+/// subscription or an info-only lookup.
+pub enum DynamicRequest {
+	Track(TrackRequest),
+	Info(InfoRequest),
+}
+
+/// A pending info lookup returned by [`TrackConsumer::info`].
+///
+/// Resolves once the track's immutable [`Track`] is known: synchronously if a
+/// producer already exists or the info is cached, otherwise once the dynamic
+/// handler serves it via [`BroadcastDynamic::requested_info`]. Implements
+/// [`Future`]; poll-based callers can use [`Self::poll_info`].
+pub struct InfoPending {
+	inner: InfoPendingInner,
+	/// Kept alive between `Future::poll` calls so its resolver-channel
+	/// registration stays valid until the next poll replaces it.
+	waiter: Option<kio::Waiter>,
+}
+
+enum InfoPendingInner {
+	/// Resolved synchronously: cached, a live producer existed, or it failed.
+	Ready(Result<Track, Error>),
+	/// Waiting for the dynamic handler to resolve or deny.
+	Waiting(kio::Consumer<InfoSlot>),
+}
+
+impl InfoPending {
+	fn ready(result: Result<Track, Error>) -> Self {
+		Self {
+			inner: InfoPendingInner::Ready(result),
+			waiter: None,
+		}
+	}
+
+	fn waiting(consumer: kio::Consumer<InfoSlot>) -> Self {
+		Self {
+			inner: InfoPendingInner::Waiting(consumer),
+			waiter: None,
+		}
+	}
+
+	/// Poll for the resolved [`Track`], without blocking.
+	pub fn poll_info(&self, waiter: &kio::Waiter) -> Poll<Result<Track, Error>> {
+		match &self.inner {
+			InfoPendingInner::Ready(result) => Poll::Ready(result.clone()),
+			InfoPendingInner::Waiting(consumer) => match consumer.poll(waiter, |slot| match &**slot {
+				Some(result) => Poll::Ready(result.clone()),
+				None => Poll::Pending,
+			}) {
+				Poll::Ready(Ok(result)) => Poll::Ready(result),
+				// Channel closed: the resolver may have left the final result behind.
+				Poll::Ready(Err(closed)) => Poll::Ready(match &*closed {
+					Some(result) => result.clone(),
+					None => Err(Error::Cancel),
+				}),
+				Poll::Pending => Poll::Pending,
+			},
+		}
+	}
+}
+
+impl std::future::Future for InfoPending {
+	type Output = Result<Track, Error>;
+
+	fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+		let this = self.get_mut();
+		this.waiter = Some(kio::Waiter::new(cx.waker().clone()));
+		this.poll_info(this.waiter.as_ref().unwrap())
 	}
 }
 
@@ -505,6 +688,46 @@ impl BroadcastDynamic {
 		kio::wait(|waiter| self.poll_requested_track(waiter)).await
 	}
 
+	/// Poll for the next consumer info-only request, without blocking.
+	pub fn poll_requested_info(&mut self, waiter: &kio::Waiter) -> Poll<Result<InfoRequest, Error>> {
+		let weak = self.state.weak();
+		self.poll(waiter, |state| match state.info_request_order.pop_front() {
+			// The name stays in `info_requests` so concurrent info() callers coalesce
+			// onto it until this resolves or denies.
+			Some(name) => Poll::Ready(name),
+			None => Poll::Pending,
+		})
+		.map(|res| {
+			res.map(|name| InfoRequest {
+				name,
+				state: weak,
+				completed: false,
+			})
+		})
+	}
+
+	/// Block until a consumer requests track info, returning an [`InfoRequest`] to serve.
+	pub async fn requested_info(&mut self) -> Result<InfoRequest, Error> {
+		kio::wait(|waiter| self.poll_requested_info(waiter)).await
+	}
+
+	/// Poll for the next consumer request of either kind, without blocking.
+	///
+	/// Info requests are preferred since they're a cheap one-shot lookup that
+	/// shouldn't queue behind a (potentially long-lived) subscription.
+	pub fn poll_requested(&mut self, waiter: &kio::Waiter) -> Poll<Result<DynamicRequest, Error>> {
+		if let Poll::Ready(res) = self.poll_requested_info(waiter) {
+			return Poll::Ready(res.map(DynamicRequest::Info));
+		}
+		self.poll_requested_track(waiter)
+			.map(|res| res.map(DynamicRequest::Track))
+	}
+
+	/// Block until a consumer requests a track or its info, returning the request to serve.
+	pub async fn requested(&mut self) -> Result<DynamicRequest, Error> {
+		kio::wait(|waiter| self.poll_requested(waiter)).await
+	}
+
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> BroadcastConsumer {
 		BroadcastConsumer {
@@ -571,6 +794,13 @@ impl BroadcastDynamic {
 
 	pub fn assert_no_request(&mut self) {
 		assert!(self.requested_track().now_or_never().is_none(), "should have blocked");
+	}
+
+	pub fn assert_info_request(&mut self) -> InfoRequest {
+		self.requested_info()
+			.now_or_never()
+			.expect("should not have blocked")
+			.expect("should not have errored")
 	}
 }
 
@@ -652,6 +882,54 @@ impl BroadcastConsumer {
 		TrackPending::waiting(consumer)
 	}
 
+	/// Resolve a track's immutable info, returning an [`InfoPending`].
+	///
+	/// Returns immediately when the info is cached or a live producer already
+	/// carries it (no round trip). Otherwise queues a dynamic info request served
+	/// via [`BroadcastDynamic::requested_info`] and [`InfoRequest::resolve`] (for
+	/// the wire this is a TRACK Stream / TRACK_INFO). Resolves to [`Error::NotFound`]
+	/// if no dynamic producer exists to handle it. Unlike [`Self::request_subscribe`],
+	/// this never opens a subscription.
+	fn request_info(&self, name: &str) -> InfoPending {
+		let Some(producer) = self.state.produce() else {
+			let err = self.state.read().abort.clone().unwrap_or(Error::Dropped);
+			return InfoPending::ready(Err(err));
+		};
+		let mut state = match modify(&producer) {
+			Ok(state) => state,
+			Err(err) => return InfoPending::ready(Err(err)),
+		};
+
+		// Already resolved for this track.
+		if let Some(info) = state.track_info.get(name) {
+			return InfoPending::ready(Ok(info.clone()));
+		}
+
+		// A live producer carries the info; cache and return it without a round trip.
+		if let Some(weak) = state.tracks.get(name)
+			&& !weak.is_closed()
+		{
+			let info = weak.info.clone();
+			state.track_info.insert(name.to_string(), info.clone());
+			return InfoPending::ready(Ok(info));
+		}
+
+		let slot = kio::Producer::new(None);
+		let consumer = slot.consume();
+
+		if let Some(resolvers) = state.info_requests.get_mut(name) {
+			// Coalesce onto an in-flight info request for the same name.
+			resolvers.push(slot);
+		} else if state.dynamic == 0 {
+			return InfoPending::ready(Err(Error::NotFound));
+		} else {
+			state.info_requests.insert(name.to_string(), vec![slot]);
+			state.info_request_order.push_back(name.to_string());
+		}
+
+		InfoPending::waiting(consumer)
+	}
+
 	/// Block until the broadcast is closed and return the cause.
 	///
 	/// Returns [`Error::Dropped`] if every producer was dropped without an
@@ -714,6 +992,16 @@ impl TrackConsumer {
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> TrackPending {
 		self.broadcast
 			.request_subscribe(&self.name, subscription.into().unwrap_or_default())
+	}
+
+	/// Resolve this track's immutable [`Track`] info without subscribing.
+	///
+	/// Returns an [`InfoPending`] that resolves to the publisher's properties
+	/// (timescale, compression, cache). Warm (cached or a live producer exists) it
+	/// resolves with no round trip; cold it triggers a single TRACK lookup. Reused
+	/// across every subscribe and fetch of the track.
+	pub fn info(&self) -> InfoPending {
+		self.broadcast.request_info(&self.name)
 	}
 }
 
@@ -939,5 +1227,87 @@ mod test {
 		// Original handle is still live, so the request registers (stays pending)
 		// instead of failing with NotFound.
 		let _fut = subscribe_pending!(consumer, "track1");
+	}
+
+	#[tokio::test]
+	async fn info_warm_from_live_producer() {
+		let mut producer = Broadcast::new().produce();
+		// Hold the track producer so the weak handle stays live.
+		let track = Track::new("video").with_timescale(crate::Timescale::MICRO).produce();
+		producer.assert_insert_track(&track);
+
+		let consumer = producer.consume();
+
+		// A live producer carries the info, so info() resolves with no round trip.
+		let got = consumer
+			.consume_track("video")
+			.info()
+			.now_or_never()
+			.expect("warm info should not block")
+			.unwrap();
+		assert_eq!(got.timescale, Some(crate::Timescale::MICRO));
+	}
+
+	#[tokio::test]
+	async fn info_cold_resolves_via_request() {
+		let mut producer = Broadcast::new().produce().dynamic();
+		let consumer = producer.consume();
+		let consumer2 = consumer.clone();
+
+		// No producer yet: two info() callers for the same track coalesce into one
+		// pending request.
+		let info1 = consumer.consume_track("video").info();
+		assert!(info1.poll_info(&kio::Waiter::noop()).is_pending());
+		let info2 = consumer2.consume_track("video").info();
+
+		// Exactly one info request to serve.
+		let request = producer.assert_info_request();
+		assert_eq!(request.name(), "video");
+
+		request.resolve(Track::new("video").with_timescale(crate::Timescale::MICRO));
+
+		assert_eq!(info1.await.unwrap().timescale, Some(crate::Timescale::MICRO));
+		// The second caller and any later lookup read the cached value, no new request.
+		assert_eq!(info2.await.unwrap().timescale, Some(crate::Timescale::MICRO));
+		producer.assert_no_request();
+		let cached = consumer
+			.consume_track("video")
+			.info()
+			.now_or_never()
+			.expect("cached info should not block")
+			.unwrap();
+		assert_eq!(cached.timescale, Some(crate::Timescale::MICRO));
+	}
+
+	#[tokio::test]
+	async fn info_cold_missing_without_dynamic() {
+		// No producer and no dynamic handler: info() resolves to NotFound rather
+		// than hanging.
+		let producer = Broadcast::new().produce();
+		let consumer = producer.consume();
+		let err = consumer.consume_track("video").info().await.unwrap_err();
+		assert!(matches!(err, Error::NotFound));
+	}
+
+	#[tokio::test]
+	async fn accept_warms_info_cache() {
+		let mut producer = Broadcast::new().produce().dynamic();
+		let consumer = producer.consume();
+
+		// A subscribe accept caches the info, so a later info() needs no request.
+		let _sub = subscribe_pending!(consumer, "video");
+		let request = producer.assert_request();
+		let _track = request
+			.accept(Track::new("video").with_timescale(crate::Timescale::MICRO))
+			.unwrap();
+
+		let got = consumer
+			.consume_track("video")
+			.info()
+			.now_or_never()
+			.expect("info should be cached by accept")
+			.unwrap();
+		assert_eq!(got.timescale, Some(crate::Timescale::MICRO));
+		producer.assert_no_request();
 	}
 }

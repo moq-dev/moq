@@ -463,12 +463,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_broadcast(self, path: PathOwned, mut broadcast: BroadcastDynamic) {
-		// Actually start serving subscriptions.
+		// Actually start serving subscriptions and info lookups.
 		loop {
 			// Keep serving requests until there are no more consumers.
 			// This way we'll clean up the task when the broadcast is no longer needed.
 			let request = tokio::select! {
-				request = broadcast.requested_track() => match request {
+				request = broadcast.requested() => match request {
 					Ok(request) => request,
 					Err(err) => {
 						tracing::debug!(%err, "broadcast closed");
@@ -478,12 +478,45 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				_ = self.session.closed() => break,
 			};
 
-			let mut this = self.clone();
 			let path = path.clone();
-			let broadcast = broadcast.clone();
-			web_async::spawn(async move {
-				this.run_subscribe(path, broadcast, request).await;
-			});
+			match request {
+				crate::DynamicRequest::Track(request) => {
+					let mut this = self.clone();
+					let broadcast = broadcast.clone();
+					web_async::spawn(async move {
+						this.run_subscribe(path, broadcast, request).await;
+					});
+				}
+				crate::DynamicRequest::Info(request) => {
+					let this = self.clone();
+					web_async::spawn(async move {
+						this.run_info(path, request).await;
+					});
+				}
+			}
+		}
+	}
+
+	/// Serve a downstream info-only request by fetching the track's immutable
+	/// properties from upstream over a TRACK stream, then caching them in the
+	/// model. Subsequent info()/subscribe/fetch reuse the cache (no round trip).
+	async fn run_info(&self, path: PathOwned, request: crate::InfoRequest) {
+		let name = request.name().to_string();
+		let upstream = path.as_path();
+		match self.fetch_track_info(&upstream, &name).await {
+			Ok(info) => {
+				let mut track = Track::new(&name);
+				track.timescale = info.timescale;
+				track.cache = info.cache;
+				// The model carries compression as a bool; the codec set is
+				// {none, deflate}, so the flag round-trips losslessly.
+				track.compress = info.compression != Compression::None;
+				request.resolve(track);
+			}
+			Err(err) => {
+				tracing::debug!(broadcast = %self.log_path(&path), track = %name, %err, "track info fetch failed");
+				request.deny(err);
+			}
 		}
 	}
 
@@ -570,7 +603,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let ordered = msg.ordered;
 		let max_latency = msg.max_latency;
 		let start_group = msg.start_group;
-		let broadcast_path = msg.broadcast.clone();
 
 		// SubscribeUpdate only exists on Lite03+; older versions take the
 		// immediate-FIN path with no linger.
@@ -609,24 +641,35 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		// Resolve the track's immutable properties (compression/timescale/cache).
-		// lite-05 fetches TRACK_INFO on its own stream (already racing the SUBSCRIBE
-		// above); older drafts take them from SUBSCRIBE_OK, which carries no such
-		// properties, so they fall back to the untimed/uncompressed defaults.
+		// lite-05 has no SUBSCRIBE_OK: resolve them via the model's info(), which is
+		// warm (cached) when a downstream TRACK or a prior lookup already fetched
+		// them, and otherwise coalesces with those into one upstream TRACK fetch.
+		// The SUBSCRIBE above is already in flight, so groups still arrive in one
+		// round trip and buffer on `resolved` until this lands. Older drafts take
+		// the props from SUBSCRIBE_OK, which carries none, so they fall back to the
+		// untimed/uncompressed defaults.
 		let (compression, timescale, cache) = if matches!(self.version, Version::Lite05Wip) {
-			tokio::select! {
+			let props = tokio::select! {
 				err = broadcast.closed() => {
 					request.deny(err.clone());
 					return SessionOutcome::BroadcastClosed(err);
 				}
-				res = self.fetch_track_info(&broadcast_path, name) => match res {
-					Ok(info) => (info.compression, info.timescale, info.cache),
+				res = broadcast.consume().consume_track(name).info() => match res {
+					Ok(props) => props,
 					Err(err) => {
 						stream.writer.abort(&err);
 						request.deny(err.clone());
 						return SessionOutcome::Error(err);
 					}
 				}
-			}
+			};
+			// Codec set is {none, deflate}, so the model's bool maps back losslessly.
+			let compression = if props.compress {
+				Compression::Deflate
+			} else {
+				Compression::None
+			};
+			(compression, props.timescale, props.cache)
 		} else {
 			let resp = tokio::select! {
 				err = broadcast.closed() => {

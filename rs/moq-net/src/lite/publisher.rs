@@ -564,6 +564,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let broadcast = self.origin.get_broadcast(&req.broadcast);
 		let version = self.version;
 
+		// Spawn rather than serve inline: resolving the info can be a cold upstream
+		// TRACK fetch (relay case), and the publisher's accept loop in `run` must
+		// stay free to handle other control streams meanwhile.
 		web_async::spawn(async move {
 			if let Err(err) = Self::run_track_info(&mut stream, &track, broadcast, version).await {
 				match &err {
@@ -587,15 +590,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	) -> Result<(), Error> {
 		let broadcast = consumer.ok_or(Error::NotFound)?;
 
-		// The immutable properties are delivered when the (possibly dynamic)
-		// producer is accepted, so resolving them means subscribing. We read them
-		// off the subscriber and drop it immediately; a SUBSCRIBE flighted in
-		// parallel coalesces onto the same upstream producer, which linger keeps
-		// alive across this brief gap.
-		let track = broadcast
-			.consume_track(track_name)
-			.subscribe(crate::Subscription::default())
-			.await?;
+		// Resolve the immutable properties without subscribing. Warm (a producer
+		// exists or the info is cached) this returns with no round trip; cold (a
+		// relay with no prior subscription) it triggers a single upstream TRACK
+		// fetch via the model's info-request channel.
+		let track = broadcast.consume_track(track_name).info().await?;
 
 		// Mirror the negotiation in `run_subscribe` so the subscriber decodes
 		// frames the same way it'll see them served.
