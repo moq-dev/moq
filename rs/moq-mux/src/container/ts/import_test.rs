@@ -45,6 +45,19 @@ fn import_bbb_catalog() {
 	assert!(audio.description.is_some(), "AAC track missing AudioSpecificConfig");
 }
 
+#[test]
+fn import_resyncs_after_byte_misalignment() {
+	let data = include_bytes!("test_data/bbb.ts");
+	// Prepend stray bytes so the stream no longer starts on a packet boundary. A
+	// byte-wise resync still finds the first sync byte and demuxes; a 188-stride
+	// resync would never re-align and the catalog would come back empty.
+	let mut misaligned = vec![0x00, 0x11, 0x22];
+	misaligned.extend_from_slice(data);
+	let catalog = import_ts(&misaligned);
+	assert_eq!(catalog.video.renditions.len(), 1, "resync failed: no video track");
+	assert_eq!(catalog.audio.renditions.len(), 1, "resync failed: no audio track");
+}
+
 #[tokio::test(start_paused = true)]
 async fn import_export_import_roundtrip() {
 	let data = include_bytes!("test_data/bbb.ts");

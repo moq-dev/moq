@@ -8,9 +8,11 @@
 mod adts;
 mod export;
 mod import;
+mod scte35_ext;
 
 pub use export::*;
 pub use import::*;
+pub use scte35_ext::{Scte35, Scte35Catalog, Scte35Config, Scte35Ext};
 
 #[cfg(test)]
 mod export_test;

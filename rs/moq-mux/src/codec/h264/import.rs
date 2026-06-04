@@ -12,6 +12,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::Sps;
+use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::{NalIterator, START_CODE};
 use crate::container::jitter::MinFrameDuration;
 
@@ -29,9 +30,9 @@ pub enum Mode {
 /// H.264 importer. Handles both avc1 (length-prefixed) and avc3 (Annex-B)
 /// input streams; the shape is detected from the first bytes the caller
 /// supplies, or forced explicitly via [`with_mode`](Self::with_mode).
-pub struct Import {
+pub struct Import<E: CatalogExt = ()> {
 	broadcast: moq_net::BroadcastProducer,
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<E>,
 	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
 	config: Option<hang::catalog::VideoConfig>,
 	state: State,
@@ -61,8 +62,8 @@ struct Avc3Frame {
 	contains_pps: bool,
 }
 
-impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+impl<E: CatalogExt> Import<E> {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -476,7 +477,7 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
+impl<E: CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.name, "ending H.264 track");
