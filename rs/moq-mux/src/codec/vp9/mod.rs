@@ -5,7 +5,7 @@
 //! config, and provides an [`Import`] that publishes a raw VP9 bitstream (one
 //! frame per buffer) to a moq broadcast.
 //!
-//! VP9 stores its codec config in a `vpcC` box, so [`vpcc`] builds that record
+//! VP9 stores its codec config in a `vpcC` box, so `vpcc` builds that record
 //! for the fMP4 exporter. It's the exact inverse of the `Vp09` import mapping.
 
 mod import;

@@ -320,6 +320,8 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 		}
 	}
 	let moov = moov.expect("init segment missing moov");
+	assert_eq!(moov.trak.len(), 1, "expected single track in moov");
+
 	let trak = &moov.trak[0];
 	let stsd = &trak.mdia.minf.stbl.stsd;
 	let vp09 = match &stsd.codecs[0] {

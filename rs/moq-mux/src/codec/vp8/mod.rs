@@ -4,7 +4,7 @@
 //! key frames and read the encoded dimensions, and provides an [`Import`] that
 //! publishes a raw VP8 bitstream (one frame per buffer) to a moq broadcast.
 //!
-//! VP8 carries no out-of-band configuration record, so [`vpcc`] synthesizes the
+//! VP8 carries no out-of-band configuration record, so `vpcc` synthesizes the
 //! informational `vpcC` box the fMP4 exporter needs.
 
 mod import;
