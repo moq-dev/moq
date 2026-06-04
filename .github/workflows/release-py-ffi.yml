@@ -82,8 +82,12 @@ jobs:
             manylinux: 2_28
             # The cross image sets TARGET_CC/CXX which leaks into host builds.
             before-script-linux: "unset TARGET_CC TARGET_CXX"
+          # Both Apple targets build on the Apple Silicon runner. maturin
+          # cross-compiles x86_64 natively via Apple's multi-arch clang (no
+          # external C libs in moq-ffi's tree), and uniffi 0.31 reads binding
+          # metadata from the cdylib statically, so no Rosetta is needed.
           - target: x86_64-apple-darwin
-            os: macos-15-intel
+            os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-pc-windows-msvc

@@ -195,6 +195,7 @@
             moq-cli-x86_64-apple-darwin
             moq-token-cli-x86_64-apple-darwin
             libmoq-x86_64-apple-darwin
+            moq-gst-plugin-x86_64-apple-darwin
             ;
         };
 

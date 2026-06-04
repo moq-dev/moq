@@ -21,8 +21,13 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+          # Both Apple targets build on the Apple Silicon runner. The
+          # Determinate Nix installer dropped Intel macOS, so x86_64 is
+          # cross-compiled against an x86_64 GStreamer (see nix/overlay.nix);
+          # its gst-inspect smoke test is skipped (an arm gst-inspect can't
+          # load an x86_64 plugin).
           - target: x86_64-apple-darwin
-            os: macos-15-intel
+            os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
 
@@ -58,7 +63,11 @@ jobs:
       # This is the customer-facing scenario: `nix build .#moq-gst` then
       # `gst-inspect-1.0 moq`. If dyld/ld.so can't resolve the plugin's deps
       # against the system GStreamer, this step fails.
+      # Skipped for the x86_64-darwin cross build: the arm runner's
+      # gst-inspect can't load an x86_64 plugin. Native builds (incl. the
+      # arm mac) still exercise the full load test.
       - name: Install system GStreamer
+        if: matrix.target != 'x86_64-apple-darwin'
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "Linux" ]]; then
@@ -72,6 +81,7 @@ jobs:
           fi
 
       - name: Smoke test (gst-inspect against system GStreamer)
+        if: matrix.target != 'x86_64-apple-darwin'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}

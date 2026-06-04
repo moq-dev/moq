@@ -113,6 +113,86 @@ let
       runHook postInstall
     '';
   };
+
+  # Native x86_64-darwin package set (matches cache.nixos.org's prebuilt
+  # binaries), used to link the cross moq-gst plugin against an x86_64
+  # GStreamer. pkgsCross would rebuild GStreamer from source under a cross
+  # stdenv; this fetches it. Lazy, so it's only instantiated when the cross
+  # plugin is actually built (aarch64-darwin only, see flake.nix).
+  pkgsX86Darwin = import final.path { system = "x86_64-darwin"; };
+
+  moqGstPluginArgs = crateInfo ../rs/moq-gst/Cargo.toml // {
+    src = craneLib.cleanCargoSource ../.;
+    cargoExtraArgs = "-p moq-gst";
+    doCheck = false;
+
+    nativeBuildInputs = with final; [ pkg-config ];
+    buildInputs = with final; [
+      gst_all_1.gstreamer
+      gst_all_1.gst-plugins-base
+    ];
+
+    # moq-gst is a cdylib GStreamer plugin. Install into lib/gstreamer-1.0
+    # so gst_all_1.gstreamer's nixpkgs setup-hook (which scans every input
+    # for that subdir) appends us to GST_PLUGIN_SYSTEM_PATH_1_0. Then
+    #   nix shell .#moq-gst .#gst_all_1.gstreamer --command gst-inspect-1.0 moq
+    # discovers moqsink/moqsrc without any env-var fiddling. Crane's
+    # default install phase only handles binaries, so we copy by hand.
+    installPhase = ''
+      runHook preInstall
+
+      # A cross --target build puts the cdylib under target/<triple>/.
+      tdir="target''${CARGO_BUILD_TARGET:+/$CARGO_BUILD_TARGET}"
+      mkdir -p $out/lib/gstreamer-1.0
+      if [ -f "$tdir/release/libgstmoq.dylib" ]; then
+        cp "$tdir/release/libgstmoq.dylib" $out/lib/gstreamer-1.0/
+      else
+        cp "$tdir/release/libgstmoq.so" $out/lib/gstreamer-1.0/
+      fi
+
+      runHook postInstall
+    '';
+
+    # The flake output is meant to load against nix's GStreamer (in a
+    # `nix shell .#moq-gst` / cachix-pulled context). `/nix/store` refs
+    # are correct there. The only thing we fix is the rustc-emitted
+    # self-reference to /nix/var/nix/builds/.../libgstmoq.dylib (the
+    # cargo build dir, gone post-build) which would break loading even
+    # inside nix. rs/moq-gst/scrub.sh handles tarball / homebrew
+    # portability separately. The `[ -f ]` guard skips crane's
+    # deps-only stage, whose $out has no plugin.
+    postFixup = final.lib.optionalString final.stdenv.isDarwin ''
+      dylib="$out/lib/gstreamer-1.0/libgstmoq.dylib"
+      if [ -f "$dylib" ]; then
+        install_name_tool -id "@rpath/libgstmoq.dylib" "$dylib"
+
+        # The rustc self-ref is the only LC_LOAD_DYLIB whose basename
+        # matches our own and isn't already @rpath-prefixed. Rewriting
+        # it to @rpath/libgstmoq.dylib matches LC_ID_DYLIB, so dyld
+        # dedupes the load against the already-mapped image.
+        otool -L "$dylib" \
+          | tail -n +2 \
+          | awk '{print $1}' \
+          | { grep -E '/libgstmoq\.dylib$' || true; } \
+          | { grep -v '^@' || true; } \
+          | while read -r self_ref; do
+              install_name_tool -change "$self_ref" "@rpath/libgstmoq.dylib" "$dylib"
+            done
+
+        # Assert no build-sandbox paths leaked. /nix/store refs are
+        # fine here, see top comment.
+        bad="$(otool -L "$dylib" \
+          | tail -n +2 \
+          | awk '{print $1}' \
+          | { grep '^/nix/var/' || true; })"
+        if [ -n "$bad" ]; then
+          echo "ERROR: $dylib has /nix/var build-sandbox LC_LOAD_DYLIB entries:" >&2
+          echo "$bad" >&2
+          exit 1
+        fi
+      fi
+    '';
+  };
 in
 {
   moq-relay = craneLib.buildPackage moqRelayArgs;
@@ -146,78 +226,23 @@ in
   libmoq = craneLib.buildPackage libmoqArgs;
   libmoq-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin libmoqArgs);
 
-  moq-gst-plugin = craneLib.buildPackage (
-    crateInfo ../rs/moq-gst/Cargo.toml
-    // {
-      src = craneLib.cleanCargoSource ../.;
-      cargoExtraArgs = "-p moq-gst";
-      doCheck = false;
+  moq-gst-plugin = craneLib.buildPackage moqGstPluginArgs;
 
-      nativeBuildInputs = with final; [ pkg-config ];
-      buildInputs = with final; [
-        gst_all_1.gstreamer
-        gst_all_1.gst-plugins-base
-      ];
-
-      # moq-gst is a cdylib GStreamer plugin. Install into lib/gstreamer-1.0
-      # so gst_all_1.gstreamer's nixpkgs setup-hook (which scans every input
-      # for that subdir) appends us to GST_PLUGIN_SYSTEM_PATH_1_0. Then
-      #   nix shell .#moq-gst .#gst_all_1.gstreamer --command gst-inspect-1.0 moq
-      # discovers moqsink/moqsrc without any env-var fiddling. Crane's
-      # default install phase only handles binaries, so we copy by hand.
-      installPhase = ''
-        runHook preInstall
-
-        mkdir -p $out/lib/gstreamer-1.0
-        if [ -f target/release/libgstmoq.dylib ]; then
-          cp target/release/libgstmoq.dylib $out/lib/gstreamer-1.0/
-        else
-          cp target/release/libgstmoq.so $out/lib/gstreamer-1.0/
-        fi
-
-        runHook postInstall
-      '';
-
-      # The flake output is meant to load against nix's GStreamer (in a
-      # `nix shell .#moq-gst` / cachix-pulled context). `/nix/store` refs
-      # are correct there. The only thing we fix is the rustc-emitted
-      # self-reference to /nix/var/nix/builds/.../libgstmoq.dylib (the
-      # cargo build dir, gone post-build) which would break loading even
-      # inside nix. rs/moq-gst/scrub.sh handles tarball / homebrew
-      # portability separately. The `[ -f ]` guard skips crane's
-      # deps-only stage, whose $out has no plugin.
-      postFixup = final.lib.optionalString final.stdenv.isDarwin ''
-        dylib="$out/lib/gstreamer-1.0/libgstmoq.dylib"
-        if [ -f "$dylib" ]; then
-          install_name_tool -id "@rpath/libgstmoq.dylib" "$dylib"
-
-          # The rustc self-ref is the only LC_LOAD_DYLIB whose basename
-          # matches our own and isn't already @rpath-prefixed. Rewriting
-          # it to @rpath/libgstmoq.dylib matches LC_ID_DYLIB, so dyld
-          # dedupes the load against the already-mapped image.
-          otool -L "$dylib" \
-            | tail -n +2 \
-            | awk '{print $1}' \
-            | { grep -E '/libgstmoq\.dylib$' || true; } \
-            | { grep -v '^@' || true; } \
-            | while read -r self_ref; do
-                install_name_tool -change "$self_ref" "@rpath/libgstmoq.dylib" "$dylib"
-              done
-
-          # Assert no build-sandbox paths leaked. /nix/store refs are
-          # fine here, see top comment.
-          bad="$(otool -L "$dylib" \
-            | tail -n +2 \
-            | awk '{print $1}' \
-            | { grep '^/nix/var/' || true; })"
-          if [ -n "$bad" ]; then
-            echo "ERROR: $dylib has /nix/var build-sandbox LC_LOAD_DYLIB entries:" >&2
-            echo "$bad" >&2
-            exit 1
-          fi
-        fi
-      '';
-    }
+  # Cross plugin links the x86_64 GStreamer so the cdylib's LC_LOAD_DYLIB
+  # entries point at x86_64 libs. The release build (rs/moq-gst/build.sh)
+  # scrubs those nix paths to the user's system GStreamer and skips the
+  # gst-inspect smoke test, which can't load an x86_64 plugin under the
+  # arm runner's arm gst-inspect.
+  moq-gst-plugin-x86_64-apple-darwin = craneLib.buildPackage (
+    crossX86Darwin (
+      moqGstPluginArgs
+      // {
+        buildInputs = [
+          pkgsX86Darwin.gst_all_1.gstreamer
+          pkgsX86Darwin.gst_all_1.gst-plugins-base
+        ];
+      }
+    )
   );
 
   # User-facing flake output. Bundles the plugin with wrapped gstreamer
