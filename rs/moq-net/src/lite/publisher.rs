@@ -57,47 +57,51 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 	}
 
-	pub async fn run(mut self) -> Result<(), Error> {
+	pub async fn run(self) -> Result<(), Error> {
+		// `OriginConsumer` and friends are cheap to clone (shared handles), so each control
+		// stream gets its own task and they all make progress independently.
+		let this = Arc::new(self);
+
 		loop {
-			let mut stream = Stream::accept(&self.session, self.version).await?;
+			let stream = Stream::accept(&this.session, this.version).await?;
 
-			// To avoid cloning the origin, we process each control stream in received order.
-			// This adds some head-of-line blocking but it delays an expensive clone.
-			let kind = stream.reader.decode().await?;
-
-			if let Err(err) = match kind {
-				lite::ControlType::Announce => self.recv_announce(stream).await,
-				lite::ControlType::Subscribe => self.recv_subscribe(stream).await,
-				lite::ControlType::Probe => {
-					self.recv_probe(stream);
-					Ok(())
+			let this = this.clone();
+			web_async::spawn(async move {
+				if let Err(err) = this.handle(stream).await {
+					tracing::warn!(%err, "control stream error");
 				}
-				lite::ControlType::Goaway => {
-					tracing::info!("received goaway stream");
-					Ok(())
-				}
-				lite::ControlType::Session | lite::ControlType::Fetch => Err(Error::UnexpectedStream),
-			} {
-				tracing::warn!(%err, "control stream error");
-			}
+			});
 		}
 	}
 
-	fn recv_probe(&self, mut stream: Stream<S, Version>) {
-		let session = self.session.clone();
-		let version = self.version;
+	async fn handle(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+		let kind = stream.reader.decode().await?;
 
-		web_async::spawn(async move {
-			match Self::run_probe(&session, &mut stream, version).await {
-				Ok(()) => {
-					tracing::debug!("probe stream closed");
-				}
-				Err(err) => {
-					tracing::warn!(%err, "probe stream error");
-					stream.writer.abort(&err);
-				}
+		match kind {
+			lite::ControlType::Announce => self.recv_announce(stream).await,
+			lite::ControlType::Subscribe => self.recv_subscribe(stream).await,
+			lite::ControlType::Probe => {
+				self.recv_probe(stream).await;
+				Ok(())
 			}
-		});
+			lite::ControlType::Goaway => {
+				tracing::info!("received goaway stream");
+				Ok(())
+			}
+			lite::ControlType::Session | lite::ControlType::Fetch => Err(Error::UnexpectedStream),
+		}
+	}
+
+	async fn recv_probe(&self, mut stream: Stream<S, Version>) {
+		match Self::run_probe(&self.session, &mut stream, self.version).await {
+			Ok(()) => {
+				tracing::debug!("probe stream closed");
+			}
+			Err(err) => {
+				tracing::warn!(%err, "probe stream error");
+				stream.writer.abort(&err);
+			}
+		}
 	}
 
 	async fn run_probe(session: &S, stream: &mut Stream<S, Version>, _version: Version) -> Result<(), Error> {
@@ -139,7 +143,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 	}
 
-	pub async fn recv_announce(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+	pub async fn recv_announce(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
 		let interest = stream.reader.decode::<lite::AnnounceInterest>().await?;
 		let prefix = interest.prefix.to_owned();
 		let exclude_hop = interest.exclude_hop;
@@ -147,34 +151,29 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
 		let mut announced = origin.announced();
 
-		let version = self.version;
-		let self_origin = self.self_origin;
-		let stats = self.stats.clone();
-		web_async::spawn(async move {
-			if let Err(err) = Self::run_announce(
-				&mut stream,
-				&origin,
-				&mut announced,
-				&prefix,
-				self_origin,
-				exclude_hop,
-				stats,
-				version,
-			)
-			.await
-			{
-				match &err {
-					Error::Cancel | Error::Transport(_) => {
-						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
-					}
-					err => {
-						tracing::warn!(%err, prefix = %origin.absolute(prefix), "announcing error");
-					}
+		if let Err(err) = Self::run_announce(
+			&mut stream,
+			&origin,
+			&mut announced,
+			&prefix,
+			self.self_origin,
+			exclude_hop,
+			self.stats.clone(),
+			self.version,
+		)
+		.await
+		{
+			match &err {
+				Error::Cancel | Error::Transport(_) => {
+					tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
 				}
-
-				stream.writer.abort(&err);
+				err => {
+					tracing::warn!(%err, prefix = %origin.absolute(prefix), "announcing error");
+				}
 			}
-		});
+
+			stream.writer.abort(&err);
+		}
 
 		Ok(())
 	}
@@ -387,7 +386,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Some(hops)
 	}
 
-	pub async fn recv_subscribe(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+	pub async fn recv_subscribe(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
 		let subscribe = stream.reader.decode::<lite::Subscribe>().await?;
 
 		let id = subscribe.id;
@@ -399,43 +398,37 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// We just received a subscribe for this exact path, so by definition the peer has
 		// already seen an announcement for it — synchronous lookup is appropriate here.
 		let broadcast = self.origin.get_broadcast(&subscribe.broadcast);
-		let priority = self.priority.clone();
-		let version = self.version;
 
 		// Per-track subscription guard (bumps `subscriptions`). The per-(session,
 		// broadcast) `broadcasts` sentinel that counts viewers is taken inside
 		// `run_subscribe`, only once the subscription is validated and active, so
 		// a stale/invalid SUBSCRIBE isn't counted as a viewer.
 		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
-		let broadcasts = self.broadcasts.clone();
 
-		let session = self.session.clone();
-		web_async::spawn(async move {
-			if let Err(err) = Self::run_subscribe(
-				session,
-				&mut stream,
-				&subscribe,
-				broadcast,
-				priority,
-				(track_stats, broadcasts, absolute.clone()),
-				version,
-			)
-			.await
-			{
-				match &err {
-					// TODO better classify WebTransport errors.
-					Error::Cancel | Error::Transport(_) => {
-						tracing::info!(%id, broadcast = %absolute, %track, "subscribed cancelled")
-					}
-					err => {
-						tracing::warn!(%id, broadcast = %absolute, %track, %err, "subscribed error")
-					}
+		if let Err(err) = Self::run_subscribe(
+			self.session.clone(),
+			&mut stream,
+			&subscribe,
+			broadcast,
+			self.priority.clone(),
+			(track_stats, self.broadcasts.clone(), absolute.clone()),
+			self.version,
+		)
+		.await
+		{
+			match &err {
+				// TODO better classify WebTransport errors.
+				Error::Cancel | Error::Transport(_) => {
+					tracing::info!(%id, broadcast = %absolute, %track, "subscribed cancelled")
 				}
-				stream.writer.abort(&err);
-			} else {
-				tracing::info!(%id, broadcast = %absolute, %track, "subscribed complete")
+				err => {
+					tracing::warn!(%id, broadcast = %absolute, %track, %err, "subscribed error")
+				}
 			}
-		});
+			stream.writer.abort(&err);
+		} else {
+			tracing::info!(%id, broadcast = %absolute, %track, "subscribed complete")
+		}
 
 		Ok(())
 	}
