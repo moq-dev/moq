@@ -1,9 +1,9 @@
 use crate::{
 	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, StatsHandle, coding::Stream,
-	lite::SessionInfo,
+	lite::SessionInfo, session::GoawaySignal,
 };
 
-use super::{Connecting, Publisher, PublisherConfig, Subscriber, SubscriberConfig, Version};
+use super::{Connecting, ControlType, Goaway, Publisher, PublisherConfig, Subscriber, SubscriberConfig, Version};
 
 /// Start a lite session.
 ///
@@ -24,6 +24,8 @@ pub fn start<S: web_transport_trait::Session>(
 	stats: StatsHandle,
 	// The version of the protocol to use.
 	version: Version,
+	// Fires when the session should send a GOAWAY and start draining.
+	goaway: GoawaySignal,
 ) -> Result<(Option<BandwidthConsumer>, Connecting), Error> {
 	let recv_bw = BandwidthProducer::new();
 
@@ -68,6 +70,23 @@ pub fn start<S: web_transport_trait::Session>(
 		version,
 	});
 
+	// GOAWAY is moq-lite-04+. On older drafts we simply never send it; the relay
+	// still drains by waiting for the peer to leave (or a forced shutdown).
+	if !matches!(version, Version::Lite01 | Version::Lite02 | Version::Lite03) {
+		let session = session.clone();
+		web_async::spawn(async move {
+			tokio::select! {
+				// Don't outlive the session: stop waiting once it's gone.
+				_ = session.closed() => {}
+				uri = goaway.triggered() => {
+					if let Err(err) = send_goaway(&session, &uri, version).await {
+						tracing::debug!(%err, "failed to send goaway");
+					}
+				}
+			}
+		});
+	}
+
 	web_async::spawn(async move {
 		let res = tokio::select! {
 			Err(res) = run_session(setup_stream) => Err(res),
@@ -92,6 +111,15 @@ pub fn start<S: web_transport_trait::Session>(
 	});
 
 	Ok((recv_bw_consumer, connecting))
+}
+
+/// Open a dedicated control stream and write a single GOAWAY message.
+async fn send_goaway<S: web_transport_trait::Session>(session: &S, uri: &str, version: Version) -> Result<(), Error> {
+	let mut stream = Stream::open(session, version).await?;
+	stream.writer.encode(&ControlType::Goaway).await?;
+	stream.writer.encode(&Goaway { uri: uri.into() }).await?;
+	stream.writer.finish()?;
+	stream.writer.closed().await
 }
 
 // TODO do something useful with this

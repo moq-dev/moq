@@ -21,8 +21,10 @@ async fn main() -> anyhow::Result<()> {
 
 	let mtls_enabled = !config.server.tls.root.is_empty();
 
+	// We drive shutdown ourselves (GOAWAY drain on the first Ctrl+C, force on the
+	// second), so opt out of moq-native's built-in Ctrl+C-closes-everything handler.
 	#[allow(unused_mut)]
-	let mut server = config.server.init()?;
+	let mut server = config.server.init()?.with_signal_handler(false);
 	let client = config.client.clone().init()?;
 
 	let addr = server.local_addr()?;
@@ -77,19 +79,82 @@ async fn main() -> anyhow::Result<()> {
 	#[cfg(not(feature = "jemalloc"))]
 	let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
+	// First signal (Ctrl+C / SIGTERM): GOAWAY all connections and stop accepting, then
+	// wait for them to drain. Second signal: force shutdown immediately.
+	let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+	let shutdown = async move {
+		shutdown_signal().await;
+		tracing::info!("shutting down: sending GOAWAY and draining connections (signal again to force)");
+		#[cfg(unix)]
+		let _ = sd_notify::notify(&[sd_notify::NotifyState::Stopping]);
+		let _ = drain_tx.send(true);
+		shutdown_signal().await;
+		tracing::warn!("forcing shutdown");
+	};
+
 	tokio::select! {
-		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
-		Err(err) = web.run() => return Err(err).context("web server failed"),
-		Err(err) = serve(server, cluster, auth) => return Err(err).context("server failed"),
-		Err(err) = jemalloc => return Err(err).context("jemalloc profiler failed"),
-		else => Ok(()),
+		Err(err) = cluster.clone().run() => Err(err).context("cluster failed"),
+		Err(err) = web.run() => Err(err).context("web server failed"),
+		res = serve(server, cluster, auth, drain_rx) => res.context("server failed"),
+		Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
+		// Forced shutdown: dropping `server` (and the connection tasks) closes everything.
+		_ = shutdown => Ok(()),
 	}
 }
 
-async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> anyhow::Result<()> {
+/// Resolve on the next shutdown signal: Ctrl+C (SIGINT) or, on Unix, SIGTERM
+/// (what `systemctl stop` sends). Never resolves if signal registration fails,
+/// so a broken handler can't masquerade as a shutdown request.
+async fn shutdown_signal() {
+	#[cfg(unix)]
+	{
+		use tokio::signal::unix::{SignalKind, signal};
+		let mut term = match signal(SignalKind::terminate()) {
+			Ok(term) => term,
+			Err(err) => {
+				tracing::warn!(%err, "failed to listen for SIGTERM");
+				// Diverges: a broken handler must never count as a shutdown request.
+				std::future::pending().await
+			}
+		};
+		tokio::select! {
+			res = tokio::signal::ctrl_c() => {
+				if res.is_err() {
+					std::future::pending::<()>().await;
+				}
+			}
+			_ = term.recv() => {}
+		}
+	}
+	#[cfg(not(unix))]
+	{
+		if tokio::signal::ctrl_c().await.is_err() {
+			std::future::pending::<()>().await;
+		}
+	}
+}
+
+async fn serve(
+	mut server: moq_native::Server,
+	cluster: Cluster,
+	auth: Auth,
+	mut drain: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
 	let mut conn_id = 0;
 
-	while let Some(request) = server.accept().await {
+	// Tracks in-flight connections: each task holds a clone of `active`, so
+	// `active_rx.recv()` resolves to `None` only once every task has finished.
+	let (active, mut active_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+	loop {
+		let request = tokio::select! {
+			request = server.accept() => request,
+			// Stop accepting once draining begins; existing connections keep running.
+			_ = drain.wait_for(|d| *d) => break,
+		};
+
+		let Some(request) = request else { break };
+
 		let conn = Connection {
 			id: conn_id,
 			request,
@@ -98,12 +163,20 @@ async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> 
 		};
 
 		conn_id += 1;
+		let drain = drain.clone();
+		let active = active.clone();
 		tokio::spawn(async move {
-			if let Err(err) = conn.run().await {
+			let _active = active;
+			if let Err(err) = conn.run(drain).await {
 				tracing::warn!(%err, "connection closed");
 			}
 		});
 	}
 
-	anyhow::bail!("stopped accepting connections")
+	// No longer accepting. Wait for every in-flight connection to drain.
+	drop(active);
+	tracing::info!("waiting for connections to drain");
+	let _ = active_rx.recv().await;
+	tracing::info!("all connections drained");
+	Ok(())
 }

@@ -81,6 +81,10 @@ impl Client {
 		let consume = consumer.clone();
 		let consumer_view = consumer.consume();
 
+		// Per-session GOAWAY channel: `goaway` lives on the returned `Session`, `signal`
+		// drives the protocol task. Exactly one negotiated branch consumes each below.
+		let (goaway, signal) = crate::session::goaway_channel();
+
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
@@ -100,10 +104,18 @@ impl Client {
 					consume,
 					self.stats.clone(),
 					ietf::Version::Draft18,
+					signal,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, publisher.clone(), consumer_view.clone()));
+				return Ok(Session::new(
+					session,
+					v,
+					None,
+					publisher.clone(),
+					consumer_view.clone(),
+					goaway,
+				));
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -121,10 +133,18 @@ impl Client {
 					consume,
 					self.stats.clone(),
 					ietf::Version::Draft17,
+					signal,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, publisher.clone(), consumer_view.clone()));
+				return Ok(Session::new(
+					session,
+					v,
+					None,
+					publisher.clone(),
+					consumer_view.clone(),
+					goaway,
+				));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -159,6 +179,7 @@ impl Client {
 					consume,
 					self.stats.clone(),
 					lite::Version::Lite05Wip,
+					signal,
 				)?;
 
 				// Block until the initial announce set has landed (Lite05 reports it
@@ -171,6 +192,7 @@ impl Client {
 					recv_bw,
 					publisher.clone(),
 					consumer_view.clone(),
+					goaway,
 				));
 			}
 			Some(ALPN_LITE_04) => {
@@ -185,6 +207,7 @@ impl Client {
 					consume,
 					self.stats.clone(),
 					lite::Version::Lite04,
+					signal,
 				)?;
 
 				// Lite04 has no initial-set boundary, so this resolves immediately.
@@ -196,6 +219,7 @@ impl Client {
 					recv_bw,
 					publisher.clone(),
 					consumer_view.clone(),
+					goaway,
 				));
 			}
 			Some(ALPN_LITE_03) => {
@@ -211,6 +235,7 @@ impl Client {
 					consume,
 					self.stats.clone(),
 					lite::Version::Lite03,
+					signal,
 				)?;
 
 				// Lite03 has no initial-set boundary, so this resolves immediately.
@@ -222,6 +247,7 @@ impl Client {
 					recv_bw,
 					publisher.clone(),
 					consumer_view.clone(),
+					goaway,
 				));
 			}
 			Some(ALPN_LITE) | None => {
@@ -259,8 +285,15 @@ impl Client {
 		let recv_bw = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
-				let (recv_bw, connecting) =
-					lite::start(session.clone(), Some(stream), publish, consume, self.stats.clone(), v)?;
+				let (recv_bw, connecting) = lite::start(
+					session.clone(),
+					Some(stream),
+					publish,
+					consume,
+					self.stats.clone(),
+					v,
+					signal,
+				)?;
 
 				// Block until the initial announce set has landed (for versions that
 				// report one); resolves immediately otherwise.
@@ -285,12 +318,20 @@ impl Client {
 					consume,
 					self.stats.clone(),
 					v,
+					signal,
 				)?;
 				None
 			}
 		};
 
-		Ok(Session::new(session, version, recv_bw, publisher, consumer_view))
+		Ok(Session::new(
+			session,
+			version,
+			recv_bw,
+			publisher,
+			consumer_view,
+			goaway,
+		))
 	}
 }
 
