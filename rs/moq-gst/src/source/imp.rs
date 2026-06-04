@@ -433,8 +433,29 @@ async fn run_session(
 	};
 
 	let catalog_track = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
-	let mut catalog = moq_mux::catalog::hang::Consumer::new(catalog_track);
-	let catalog = catalog.next().await?.context("catalog missing")?.clone();
+	let mut catalog_consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
+
+	// Wait for a catalog that actually advertises a track, instead of latching the
+	// very first frame. Reactive publishers (e.g. the browser via @moq/hang)
+	// announce an initial catalog *before* their encoder has configured, so the
+	// first frame can carry zero renditions; the populated catalog arrives a beat
+	// later as a new group. We only build pads once, below, so a rendition-less
+	// snapshot would leave us with no pads, producing nothing until the pipeline
+	// times out. Publishers that emit a fully-populated catalog up front (moq-cli,
+	// the Rust/Python clients) match on the first iteration.
+	// TODO: keep following catalog updates so renditions added/removed mid-stream
+	// are reflected, rather than freezing the first non-empty snapshot.
+	let catalog = loop {
+		let next = tokio::select! {
+			next = catalog_consumer.next() => next,
+			_ = shutdown.changed() => return Ok(()),
+		};
+		let catalog = next?.context("catalog track closed before announcing any tracks")?;
+		if !catalog.video.renditions.is_empty() || !catalog.audio.renditions.is_empty() {
+			break catalog;
+		}
+		tracing::debug!("ignoring catalog update with no renditions; waiting for tracks");
+	};
 
 	let mut tasks = Vec::new();
 
