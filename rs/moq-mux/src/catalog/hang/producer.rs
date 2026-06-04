@@ -250,7 +250,6 @@ mod test {
 			audio: Audio {
 				renditions: audio_renditions,
 			},
-			..Default::default()
 		};
 
 		let msf = to_msf(&catalog);
@@ -397,7 +396,6 @@ mod test {
 			audio: Audio {
 				renditions: audio_renditions,
 			},
-			..Default::default()
 		};
 
 		let msf = to_msf(&catalog);

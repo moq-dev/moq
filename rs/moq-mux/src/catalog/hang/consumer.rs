@@ -73,13 +73,13 @@ mod test {
 	use super::*;
 
 	fn catalog_payload(name: &str) -> (Catalog, String) {
-		let catalog = Catalog {
-			user: Some(hang::catalog::User {
-				name: Some(name.to_string()),
-				..Default::default()
-			}),
-			..Default::default()
-		};
+		use hang::catalog::{AudioCodec, AudioConfig};
+
+		let mut catalog = Catalog::default();
+		catalog
+			.audio
+			.insert(name, AudioConfig::new(AudioCodec::Opus, 48_000, 2))
+			.expect("audio rendition should insert");
 		let payload = catalog.to_string().expect("catalog should serialize");
 		(catalog, payload)
 	}
