@@ -1,6 +1,6 @@
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 
 /**
@@ -45,8 +45,6 @@ type SourceOutput = {
 	// The per-rendition jitter (ms) to add to the sync buffer. Wired into Sync by the parent.
 	jitter: Signal<Moq.Time.Milli | undefined>;
 };
-
-export type SourceProps = InputProps<SourceInput>;
 
 /**
  * A filter that returns matching renditions sorted by preference (most preferred first).
@@ -218,7 +216,7 @@ export class Source {
 
 	#signals = new Effect();
 
-	constructor(props?: SourceProps) {
+	constructor(props?: Inputs<SourceInput>) {
 		this.input = {
 			broadcast: getter(props?.broadcast),
 			target: getter(props?.target),

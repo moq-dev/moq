@@ -208,22 +208,26 @@ export function readonlys<T extends SignalMap>(signals: T): Readonlys<T> {
 	return signals as unknown as Readonlys<T>;
 }
 
+// A value or an existing readable for it: the argument form accepted by `getter()`
+// and, per-field, by `Inputs`. Mirrors the `T | Signal<T>` shape of `Signal.from`.
+export type GetterInit<T> = T | Getter<T>;
+
 // Build a read-only Getter from a value or an existing readable. The read-only
 // counterpart to `Signal.from`: a branded Signal (including the output of `readonlys`)
 // is reused as-is, so one component's output can be wired straight into another's
 // input; any other value is wrapped in a fresh Signal. The brand check means a
 // hand-rolled Getter that isn't backed by a Signal would be treated as a value.
-export function getter<T>(value: T | Getter<T>): Getter<T> {
+export function getter<T>(value: GetterInit<T>): Getter<T> {
 	if (typeof value === "object" && value !== null && SIGNAL_BRAND in value) {
 		return value as Getter<T>;
 	}
 	return new Signal(value as T);
 }
 
-// Derive a component's constructor props from its input map: every input becomes
+// Derive a component's constructor argument from its input map: every input becomes
 // optional and accepts a raw value, a Signal, or another component's output Getter
-// (the `getter()` contract). Removes the hand-written, drift-prone props interface.
-export type InputProps<I extends SignalMap> = { [K in keyof I]?: GetterType<I[K]> | I[K] };
+// (the `getter()` contract). Removes the hand-written, drift-prone argument interface.
+export type Inputs<I extends SignalMap> = { [K in keyof I]?: GetterInit<GetterType<I[K]>> };
 
 // Excludes common falsy values from a type
 type Falsy = false | 0 | "" | null | undefined;

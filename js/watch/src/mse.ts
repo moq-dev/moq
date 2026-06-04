@@ -1,5 +1,5 @@
 import { Time } from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Sync } from "./sync";
 
 type MuxerInput = {
@@ -10,8 +10,6 @@ type MuxerInput = {
 type MuxerOutput = {
 	mediaSource: Signal<MediaSource | undefined>;
 };
-
-export type MuxerProps = InputProps<MuxerInput>;
 
 /**
  * MSE-based video source for CMAF/fMP4 fragments.
@@ -28,7 +26,7 @@ export class Muxer {
 
 	#signals = new Effect();
 
-	constructor(sync: Sync, props?: MuxerProps) {
+	constructor(sync: Sync, props?: Inputs<MuxerInput>) {
 		this.input = {
 			element: getter(props?.element),
 			paused: getter(props?.paused ?? false),

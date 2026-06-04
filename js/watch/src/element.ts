@@ -91,9 +91,9 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.backend.close());
 
-		// Mute/volume coupling, relocated here from the audio emitter (the writable
-		// volume/muted Signals live on this element). Muting stashes and zeroes the
-		// volume; a zero volume reports as muted.
+		// Mute/volume coupling. The element owns the writable volume/muted Signals, so
+		// the policy lives here: muting stashes and zeroes the volume; a zero volume
+		// reports as muted.
 		this.signals.run((effect) => {
 			const muted = effect.get(this.controls.muted);
 			if (muted) {
@@ -109,7 +109,6 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		// Keep the volume control in sync with native <video> controls (MSE backend).
-		// Relocated here from the audio MSE backend, which now only reads volume/muted.
 		this.signals.run((effect) => {
 			const element = effect.get(this.#element);
 			if (!(element instanceof HTMLVideoElement)) return;

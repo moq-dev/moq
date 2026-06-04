@@ -1,9 +1,9 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import * as Zod from "@moq/net/zod";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
-type WindowInput = {
+export type WindowInput = {
 	broadcast: Getter<Moq.Broadcast | undefined>;
 	catalog: Getter<Catalog.Root | undefined>;
 	enabled: Getter<boolean>;
@@ -13,8 +13,6 @@ type WindowOutput = {
 	handle: Signal<string | undefined>;
 	position: Signal<Catalog.Position | undefined>;
 };
-
-export type WindowProps = InputProps<WindowInput>;
 
 export class Window {
 	readonly input: Readonlys<WindowInput>;
@@ -29,7 +27,7 @@ export class Window {
 
 	signals = new Effect();
 
-	constructor(props?: WindowProps) {
+	constructor(props?: Inputs<WindowInput>) {
 		this.input = {
 			broadcast: getter(props?.broadcast),
 			catalog: getter(props?.catalog),

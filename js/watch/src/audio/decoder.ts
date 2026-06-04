@@ -3,7 +3,7 @@ import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
 import { base64ToBytes } from "../base64";
 import type { Sync } from "../sync";
@@ -37,8 +37,6 @@ type DecoderOutput = {
 	buffered: Signal<BufferedRanges>;
 };
 
-export type DecoderProps = InputProps<DecoderInput>;
-
 export interface AudioStats {
 	bytesReceived: number;
 }
@@ -69,7 +67,7 @@ export class Decoder {
 
 	#signals = new Effect();
 
-	constructor(source: Source, sync: Sync, props?: DecoderProps) {
+	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
 		this.input = {
 			enabled: getter(props?.enabled ?? false),
 		};
@@ -418,9 +416,12 @@ export class Decoder {
 	close() {
 		this.#signals.close();
 	}
+
+	// Whether the WebCodecs audio decoder can play this config.
+	static supported = supported;
 }
 
-export async function decoderSupported(config: Catalog.AudioConfig): Promise<boolean> {
+async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	// Opus in CMAF uses raw packets; dOps is not a valid OGG Identification Header.
 	let description: Uint8Array | undefined;
 	if (config.codec !== "opus") {

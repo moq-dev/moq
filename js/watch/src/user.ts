@@ -1,5 +1,5 @@
 import type * as Catalog from "@moq/hang/catalog";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 type InfoInput = {
 	enabled: Getter<boolean>;
@@ -12,8 +12,6 @@ type InfoOutput = {
 	avatar: Signal<string | undefined>;
 	color: Signal<string | undefined>;
 };
-
-export type Props = InputProps<InfoInput>;
 
 export class Info {
 	readonly input: Readonlys<InfoInput>;
@@ -28,7 +26,7 @@ export class Info {
 
 	signals = new Effect();
 
-	constructor(props?: Props) {
+	constructor(props?: Inputs<InfoInput>) {
 		this.input = {
 			enabled: getter(props?.enabled ?? false),
 			catalog: getter(props?.catalog),

@@ -117,8 +117,8 @@ export class Game {
 		});
 		this.#signals.cleanup(() => this.broadcast.close());
 
-		// Sources no longer depend on Sync; they produce the per-rendition jitter that
-		// Sync consumes, so they're created first to avoid a construction cycle.
+		// Sources produce the per-rendition jitter that Sync reads, so they're created
+		// before Sync to avoid a construction cycle.
 		this.videoSource = new Watch.Video.Source({ broadcast: this.broadcast, target: this.#target });
 		this.#signals.cleanup(() => this.videoSource.close());
 

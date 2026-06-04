@@ -1,5 +1,5 @@
 import { Time } from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 
 type RendererInput = {
@@ -18,8 +18,6 @@ type RendererOutput = {
 	visible: Signal<boolean>;
 };
 
-export type RendererProps = InputProps<RendererInput>;
-
 // An component to render a video to a canvas.
 export class Renderer {
 	decoder: Decoder;
@@ -36,7 +34,7 @@ export class Renderer {
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
 	#signals = new Effect();
 
-	constructor(decoder: Decoder, props?: RendererProps) {
+	constructor(decoder: Decoder, props?: Inputs<RendererInput>) {
 		this.decoder = decoder;
 		this.input = {
 			canvas: getter(props?.canvas),

@@ -1,8 +1,8 @@
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
-import { Message, type MessageProps } from "./message";
-import { Typing, type TypingProps } from "./typing";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Message, type MessageInput } from "./message";
+import { Typing, type TypingInput } from "./typing";
 
 // Signals the component reads. Whoever owns the backing Signal does the writing.
 type ChatInput = {
@@ -12,11 +12,6 @@ type ChatInput = {
 
 type ChatOutput = {
 	catalog: Signal<Catalog.Chat | undefined>;
-};
-
-export type ChatProps = InputProps<ChatInput> & {
-	message?: MessageProps;
-	typing?: TypingProps;
 };
 
 export class Chat {
@@ -32,7 +27,7 @@ export class Chat {
 
 	#signals = new Effect();
 
-	constructor(props?: ChatProps) {
+	constructor(props?: Inputs<ChatInput> & { message?: Inputs<MessageInput>; typing?: Inputs<TypingInput> }) {
 		this.input = {
 			broadcast: getter(props?.broadcast),
 			catalog: getter(props?.catalog),

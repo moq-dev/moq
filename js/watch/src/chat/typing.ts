@@ -1,9 +1,9 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 // Signals the component reads. Whoever owns the backing Signal does the writing.
-type TypingInput = {
+export type TypingInput = {
 	broadcast: Getter<Moq.Broadcast | undefined>;
 
 	// The catalog to grab the chat section from.
@@ -20,8 +20,6 @@ type TypingOutput = {
 	catalog: Signal<Catalog.Track | undefined>;
 };
 
-export type TypingProps = InputProps<TypingInput>;
-
 export class Typing {
 	readonly input: Readonlys<TypingInput>;
 
@@ -33,7 +31,7 @@ export class Typing {
 
 	#signals = new Effect();
 
-	constructor(props?: TypingProps) {
+	constructor(props?: Inputs<TypingInput>) {
 		this.input = {
 			broadcast: getter(props?.broadcast),
 			catalog: getter(props?.catalog),

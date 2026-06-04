@@ -1,4 +1,4 @@
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 
 const MIN_GAIN = 0.001;
@@ -18,8 +18,6 @@ type EmitterOutput = {
 	enabled: Signal<boolean>;
 };
 
-export type EmitterProps = InputProps<EmitterInput>;
-
 // A helper that emits audio directly to the speakers.
 export class Emitter {
 	source: Decoder;
@@ -36,7 +34,7 @@ export class Emitter {
 	// The gain node used to adjust the volume.
 	#gain = new Signal<GainNode | undefined>(undefined);
 
-	constructor(source: Decoder, props?: EmitterProps) {
+	constructor(source: Decoder, props?: Inputs<EmitterInput>) {
 		this.source = source;
 		this.input = {
 			volume: getter(props?.volume ?? 0.5),

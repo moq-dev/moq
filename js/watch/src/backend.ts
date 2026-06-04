@@ -1,14 +1,10 @@
 import * as Moq from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import * as Audio from "./audio";
-import { decoderSupported as audioDecoderSupported } from "./audio/decoder";
-import { mseSupported as audioMseSupported } from "./audio/mse";
 import type { Broadcast } from "./broadcast";
 import { Muxer } from "./mse";
 import { type Latency, Sync } from "./sync";
 import * as Video from "./video";
-import { decoderSupported as videoDecoderSupported } from "./video/decoder";
-import { mseSupported as videoMseSupported } from "./video/mse";
 
 // Serializable representation of TimeRanges
 export interface BufferedRange {
@@ -85,8 +81,6 @@ type MultiBackendInput = {
 	target: Getter<Video.Target | undefined>;
 };
 
-export type MultiBackendProps = InputProps<MultiBackendInput>;
-
 /// A generic backend that supports either MSE or WebCodecs based on the provided element.
 ///
 /// This is primarily what backs the <moq-watch> web component, but it's useful as a standalone for other use cases.
@@ -127,7 +121,7 @@ export class MultiBackend {
 
 	signals = new Effect();
 
-	constructor(props?: MultiBackendProps) {
+	constructor(props?: Inputs<MultiBackendInput>) {
 		this.input = {
 			element: getter(props?.element),
 			broadcast: getter(props?.broadcast),
@@ -149,8 +143,8 @@ export class MultiBackend {
 			supported: this.#audioSupported,
 		});
 
-		// Sources produce their per-rendition jitter, which Sync consumes. Sources
-		// don't depend on Sync, so this ordering avoids a construction cycle.
+		// Sources produce the per-rendition jitter that Sync reads, so they're created
+		// before Sync to avoid a construction cycle.
 		this.sync = new Sync({
 			latency: this.input.latency,
 			connection: this.input.connection,
@@ -179,8 +173,8 @@ export class MultiBackend {
 
 	#runWebcodecs(effect: Effect, element: HTMLCanvasElement): void {
 		// This backend's support probes drive rendition selection.
-		effect.set(this.#videoSupported, videoDecoderSupported, undefined);
-		effect.set(this.#audioSupported, audioDecoderSupported, undefined);
+		effect.set(this.#videoSupported, Video.Decoder.supported, undefined);
+		effect.set(this.#audioSupported, Audio.Decoder.supported, undefined);
 
 		const videoDecoder = new Video.Decoder(this.#videoSource, this.sync, { enabled: this.#videoEnabled });
 		const audioDecoder = new Audio.Decoder(this.#audioSource, this.sync, { enabled: this.#audioEnabled });
@@ -205,8 +199,8 @@ export class MultiBackend {
 		// Audio download follows the emitter's enable policy (paused/muted).
 		effect.proxy(this.#audioEnabled, audioEmitter.output.enabled);
 
-		// Video download policy (relocated from the renderer): when playing, follow
-		// visibility; when paused, fetch a single preview frame then stop.
+		// Video download policy: when playing, follow visibility; when paused, fetch a
+		// single preview frame then stop.
 		effect.run((inner) => {
 			const paused = inner.get(this.input.paused);
 			const visible = inner.get(videoRenderer.output.visible);
@@ -235,8 +229,8 @@ export class MultiBackend {
 
 	#runMse(effect: Effect, element: HTMLVideoElement): void {
 		// This backend's support probes drive rendition selection.
-		effect.set(this.#videoSupported, videoMseSupported, undefined);
-		effect.set(this.#audioSupported, audioMseSupported, undefined);
+		effect.set(this.#videoSupported, Video.Mse.supported, undefined);
+		effect.set(this.#audioSupported, Audio.Mse.supported, undefined);
 
 		const muxer = new Muxer(this.sync, {
 			paused: this.input.paused,

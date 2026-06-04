@@ -3,7 +3,7 @@ import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
 import { base64ToBytes } from "../base64";
 import type { Sync } from "../sync";
@@ -35,8 +35,6 @@ type DecoderOutput = {
 	// Combined buffered ranges (network jitter + decode buffer)
 	buffered: Signal<BufferedRanges>;
 };
-
-export type DecoderProps = InputProps<DecoderInput>;
 
 // The types in VideoDecoderConfig that cause a hard reload.
 // ex. codedWidth/Height are optional and can be changed in-band, so we don't want to trigger a reload.
@@ -71,7 +69,7 @@ export class Decoder implements Backend {
 		this.#output.timestamp.set(undefined);
 	}
 
-	constructor(source: Source, sync: Sync, props?: DecoderProps) {
+	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
 		this.input = {
 			enabled: getter(props?.enabled ?? false),
 		};
@@ -210,6 +208,9 @@ export class Decoder implements Backend {
 
 		this.#signals.close();
 	}
+
+	// Whether the WebCodecs video decoder can play this config.
+	static supported = supported;
 }
 
 interface DecoderTrackProps {
@@ -511,7 +512,7 @@ class DecoderTrack {
 	}
 }
 
-export async function decoderSupported(config: Catalog.VideoConfig): Promise<boolean> {
+async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 	let description: Uint8Array | undefined;
 	if (config.description) {
 		description = Util.Hex.toBytes(config.description);

@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
 
@@ -53,11 +53,6 @@ type BroadcastOutput = {
 	catalog: Signal<Catalog.Root | undefined>;
 };
 
-export type BroadcastProps = InputProps<BroadcastInput> & {
-	// All actively announced broadcast paths from the connection.
-	announced?: Getter<Set<Moq.Path.Valid>>;
-};
-
 // A catalog source that (optionally) reloads automatically when live/offline.
 export class Broadcast {
 	readonly input: Readonlys<BroadcastInput>;
@@ -79,7 +74,7 @@ export class Broadcast {
 
 	signals = new Effect();
 
-	constructor(props?: BroadcastProps) {
+	constructor(props?: Inputs<BroadcastInput> & { announced?: Getter<Set<Moq.Path.Valid>> }) {
 		this.input = {
 			connection: getter(props?.connection),
 			name: getter(props?.name ?? Path.empty()),

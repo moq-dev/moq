@@ -1,7 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import * as Zod from "@moq/net/zod";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 type PreviewInput = {
 	enabled: Getter<boolean>;
@@ -12,8 +12,6 @@ type PreviewInput = {
 type PreviewOutput = {
 	preview: Signal<Catalog.Preview | undefined>;
 };
-
-export type PreviewProps = InputProps<PreviewInput>;
 
 export class Preview {
 	readonly input: Readonlys<PreviewInput>;
@@ -27,7 +25,7 @@ export class Preview {
 
 	#signals = new Effect();
 
-	constructor(props?: PreviewProps) {
+	constructor(props?: Inputs<PreviewInput>) {
 		this.input = {
 			enabled: getter(props?.enabled ?? false),
 			broadcast: getter(props?.broadcast),

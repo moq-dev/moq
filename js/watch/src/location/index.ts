@@ -1,17 +1,12 @@
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys } from "@moq/signals";
-import { Peers, type PeersProps } from "./peers";
-import { Window, type WindowProps } from "./window";
+import { Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
+import { Peers, type PeersInput } from "./peers";
+import { Window, type WindowInput } from "./window";
 
 type RootInput = {
 	broadcast: Getter<Moq.Broadcast | undefined>;
 	catalog: Getter<Catalog.Root | undefined>;
-};
-
-export type Props = InputProps<RootInput> & {
-	window?: WindowProps;
-	peers?: PeersProps;
 };
 
 export class Root {
@@ -22,7 +17,7 @@ export class Root {
 
 	signals = new Effect();
 
-	constructor(props?: Props) {
+	constructor(props?: Inputs<RootInput> & { window?: Inputs<WindowInput>; peers?: Inputs<PeersInput> }) {
 		this.input = {
 			broadcast: getter(props?.broadcast),
 			catalog: getter(props?.catalog),

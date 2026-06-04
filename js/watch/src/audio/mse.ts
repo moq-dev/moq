@@ -1,7 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
 import { base64ToBytes } from "../base64";
 import type { Muxer } from "../mse";
@@ -22,8 +22,6 @@ type MseOutput = {
 	context: Signal<AudioContext | undefined>;
 };
 
-export type MseProps = InputProps<MseInput>;
-
 export class Mse implements Backend {
 	muxer: Muxer;
 	sync: Sync;
@@ -40,7 +38,7 @@ export class Mse implements Backend {
 
 	#signals = new Effect();
 
-	constructor(muxer: Muxer, sync: Sync, source: Source, props?: MseProps) {
+	constructor(muxer: Muxer, sync: Sync, source: Source, props?: Inputs<MseInput>) {
 		this.muxer = muxer;
 		this.sync = sync;
 		this.source = source;
@@ -241,8 +239,11 @@ export class Mse implements Backend {
 	close(): void {
 		this.#signals.close();
 	}
+
+	// Whether MSE can play this config.
+	static supported = supported;
 }
 
-export async function mseSupported(config: Catalog.AudioConfig): Promise<boolean> {
+async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	return MediaSource.isTypeSupported(`audio/mp4; codecs="${config.codec}"`);
 }

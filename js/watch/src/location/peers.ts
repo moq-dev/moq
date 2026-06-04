@@ -1,9 +1,9 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import * as Zod from "@moq/net/zod";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
-type PeersInput = {
+export type PeersInput = {
 	broadcast: Getter<Moq.Broadcast | undefined>;
 	catalog: Getter<Catalog.Root | undefined>;
 	enabled: Getter<boolean>;
@@ -12,8 +12,6 @@ type PeersInput = {
 type PeersOutput = {
 	positions: Signal<Record<string, Catalog.Position> | undefined>;
 };
-
-export type PeersProps = InputProps<PeersInput>;
 
 export class Peers {
 	readonly input: Readonlys<PeersInput>;
@@ -27,7 +25,7 @@ export class Peers {
 
 	signals = new Effect();
 
-	constructor(props?: PeersProps) {
+	constructor(props?: Inputs<PeersInput>) {
 		this.input = {
 			broadcast: getter(props?.broadcast),
 			catalog: getter(props?.catalog),

@@ -1,6 +1,6 @@
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 /** Latency: `"real-time"` auto-computes jitter from RTT; a `Time.Milli` sets a fixed jitter. */
 export type Latency = "real-time" | Time.Milli;
@@ -37,8 +37,6 @@ type SyncOutput = {
 	timestamp: Signal<Time.Milli | undefined>;
 };
 
-export type SyncProps = InputProps<SyncInput>;
-
 export class Sync {
 	readonly input: Readonlys<SyncInput>;
 
@@ -63,7 +61,7 @@ export class Sync {
 
 	signals = new Effect();
 
-	constructor(props?: SyncProps) {
+	constructor(props?: Inputs<SyncInput>) {
 		this.input = {
 			latency: getter(props?.latency ?? ("real-time" as Latency)),
 			connection: getter(props?.connection),

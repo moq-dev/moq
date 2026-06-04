@@ -1,9 +1,9 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 // Signals the component reads. Whoever owns the backing Signal does the writing.
-type MessageInput = {
+export type MessageInput = {
 	broadcast: Getter<Moq.Broadcast | undefined>;
 
 	// The catalog to grab the chat section from.
@@ -21,8 +21,6 @@ type MessageOutput = {
 	catalog: Signal<Catalog.Track | undefined>;
 };
 
-export type MessageProps = InputProps<MessageInput>;
-
 export class Message {
 	readonly input: Readonlys<MessageInput>;
 
@@ -34,7 +32,7 @@ export class Message {
 
 	#signals = new Effect();
 
-	constructor(props?: MessageProps) {
+	constructor(props?: Inputs<MessageInput>) {
 		this.input = {
 			broadcast: getter(props?.broadcast),
 			catalog: getter(props?.catalog),

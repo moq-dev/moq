@@ -1,6 +1,6 @@
 import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
-import { Effect, type Getter, getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type GetterInit, Signal } from "@moq/signals";
 
 import type { Format } from "./format";
 import type { BufferedRanges, Frame } from "./types";
@@ -9,7 +9,7 @@ export interface ConsumerProps {
 	format: Format;
 	// Target latency in milliseconds (default: 0). Read-only: a Getter (e.g. another
 	// component's output) is accepted directly.
-	latency?: Getter<Time.Milli> | Time.Milli;
+	latency?: GetterInit<Time.Milli>;
 }
 
 interface Group {

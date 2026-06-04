@@ -268,8 +268,11 @@ export class Mse implements Backend {
 		// The source is owned by MultiBackend, not by this backend; don't close it here.
 		this.signals.close();
 	}
+
+	// Whether MSE can play this config.
+	static supported = supported;
 }
 
-export async function mseSupported(config: Catalog.VideoConfig): Promise<boolean> {
+async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 	return MediaSource.isTypeSupported(`video/mp4; codecs="${config.codec}"`);
 }

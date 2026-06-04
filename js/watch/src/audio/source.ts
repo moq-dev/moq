@@ -1,6 +1,6 @@
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
-import { Effect, type Getter, getter, type InputProps, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 
 // AudioWorklet always renders in 128-sample quanta.
@@ -37,8 +37,6 @@ type SourceOutput = {
 	jitter: Signal<Moq.Time.Milli | undefined>;
 };
 
-export type SourceProps = InputProps<SourceInput>;
-
 /**
  * Source handles catalog extraction, support checking, and rendition selection
  * for audio playback. It is used by both MSE and Decoder backends.
@@ -57,7 +55,7 @@ export class Source {
 
 	#signals = new Effect();
 
-	constructor(props?: SourceProps) {
+	constructor(props?: Inputs<SourceInput>) {
 		this.input = {
 			broadcast: getter(props?.broadcast),
 			target: getter(props?.target),
