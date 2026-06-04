@@ -6,10 +6,12 @@ const FADE_TIME = 0.2;
 
 type EmitterInput = {
 	volume: Getter<number>;
+
+	// Silences the audio and stops the download. Muted samples aren't worth the bandwidth,
+	// and the decoder keeps the AudioContext warm so unmuting is still instant.
 	muted: Getter<boolean>;
 
-	// Similar to muted, but controls whether we download audio at all.
-	// That way we can be "muted" but also download audio for visualizations.
+	// Pauses playback, which also stops the download.
 	paused: Getter<boolean>;
 };
 
@@ -39,9 +41,10 @@ export class Emitter {
 		this.input = {
 			volume: getter(props?.volume ?? 0.5),
 			muted: getter(props?.muted ?? false),
-			paused: getter(props?.paused ?? props?.muted ?? false),
+			paused: getter(props?.paused ?? false),
 		};
 
+		// Only download while playing audible audio. Pausing or muting stops it.
 		this.#signals.run((effect) => {
 			const enabled = !effect.get(this.input.paused) && !effect.get(this.input.muted);
 			this.#output.enabled.set(enabled);

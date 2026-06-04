@@ -94,9 +94,6 @@ export class Decoder {
 		const sampleRate = config.sampleRate;
 		const channelCount = config.numberOfChannels;
 
-		// NOTE: We still create an AudioContext even when muted.
-		// This way we can process the audio for visualizations.
-
 		const context = new AudioContext({
 			latencyHint: "interactive", // We don't use real-time because of the buffer.
 			sampleRate,
