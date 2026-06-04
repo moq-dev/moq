@@ -49,7 +49,7 @@ impl VideoTransform {
 /// A subscription that resolves on first poll, then the live consumer.
 enum SourceState {
 	/// Waiting for the subscription to resolve (blocks on the publisher's SUBSCRIBE_OK).
-	Subscribing(moq_net::TrackPending),
+	Subscribing(moq_net::SubscribePending),
 	/// The resolved consumer, reading frames.
 	Active(Consumer<HangContainer>),
 }

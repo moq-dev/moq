@@ -484,31 +484,31 @@ impl std::future::Future for InfoPending {
 /// SUBSCRIBE_OK). It implements [`Future`], so `.await` it to get the
 /// [`TrackSubscriber`] (or an error). Poll-based callers can instead drive it
 /// with [`Self::poll_ok`] inside a `kio` poll loop.
-pub struct TrackPending {
-	inner: TrackPendingInner,
+pub struct SubscribePending {
+	inner: SubscribePendingInner,
 	/// Kept alive between `Future::poll` calls so its registration in the
 	/// resolver channel stays valid until the next poll replaces it.
 	waiter: Option<kio::Waiter>,
 }
 
-enum TrackPendingInner {
+enum SubscribePendingInner {
 	/// Resolved synchronously: the track already existed, or it failed immediately.
 	Ready(Result<TrackSubscriber, Error>),
 	/// Waiting for the publisher to accept or deny via the dynamic handler.
 	Waiting(kio::Consumer<PendingSlot>),
 }
 
-impl TrackPending {
+impl SubscribePending {
 	fn ready(result: Result<TrackSubscriber, Error>) -> Self {
 		Self {
-			inner: TrackPendingInner::Ready(result),
+			inner: SubscribePendingInner::Ready(result),
 			waiter: None,
 		}
 	}
 
 	fn waiting(consumer: kio::Consumer<PendingSlot>) -> Self {
 		Self {
-			inner: TrackPendingInner::Waiting(consumer),
+			inner: SubscribePendingInner::Waiting(consumer),
 			waiter: None,
 		}
 	}
@@ -516,8 +516,8 @@ impl TrackPending {
 	/// Poll for the resolved [`TrackSubscriber`], without blocking.
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<TrackSubscriber, Error>> {
 		match &self.inner {
-			TrackPendingInner::Ready(result) => Poll::Ready(result.clone()),
-			TrackPendingInner::Waiting(consumer) => match consumer.poll(waiter, |slot| match &**slot {
+			SubscribePendingInner::Ready(result) => Poll::Ready(result.clone()),
+			SubscribePendingInner::Waiting(consumer) => match consumer.poll(waiter, |slot| match &**slot {
 				Some(result) => Poll::Ready(result.clone()),
 				None => Poll::Pending,
 			}) {
@@ -533,7 +533,7 @@ impl TrackPending {
 	}
 }
 
-impl std::future::Future for TrackPending {
+impl std::future::Future for SubscribePending {
 	type Output = Result<TrackSubscriber, Error>;
 
 	fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
@@ -727,16 +727,16 @@ impl BroadcastConsumer {
 	///
 	/// This is a cheap, synchronous lookup that returns a [`TrackConsumer`] bound
 	/// to `name`. Nothing is sent to the publisher yet: call
-	/// [`TrackConsumer::subscribe`] to open a live subscription (blocking on
-	/// SUBSCRIBE_OK), or hold the handle and subscribe later.
+	/// [`TrackConsumer::subscribe`] to open a live subscription, [`TrackConsumer::info`]
+	/// to resolve its properties, or hold the handle and act later.
 	pub fn consume_track(&self, name: &str) -> TrackConsumer {
 		TrackConsumer {
 			broadcast: self.clone(),
-			name: name.to_string(),
+			info: Track::new(name),
 		}
 	}
 
-	/// Register a subscription for `name` and return a [`TrackPending`] that
+	/// Register a subscription for `name` and return a [`SubscribePending`] that
 	/// resolves once the publisher accepts it.
 	///
 	/// Reuses a live producer if one is already publishing the track (the pending
@@ -744,21 +744,21 @@ impl BroadcastConsumer {
 	/// [`BroadcastDynamic::requested_track`] and [`TrackRequest::accept`] (for the
 	/// wire this is SUBSCRIBE_OK). Resolves to [`Error::NotFound`] if no dynamic
 	/// producer exists to handle the request.
-	fn request_subscribe(&self, name: &str, subscription: Subscription) -> TrackPending {
+	fn request_subscribe(&self, name: &str, subscription: Subscription) -> SubscribePending {
 		// Upgrade to a temporary producer so we can modify the state.
 		let Some(producer) = self.state.produce() else {
 			let err = self.state.read().abort.clone().unwrap_or(Error::Dropped);
-			return TrackPending::ready(Err(err));
+			return SubscribePending::ready(Err(err));
 		};
 		let mut state = match modify(&producer) {
 			Ok(state) => state,
-			Err(err) => return TrackPending::ready(Err(err)),
+			Err(err) => return SubscribePending::ready(Err(err)),
 		};
 
 		// Reuse a live producer if one is already publishing the track.
 		if let Some(weak) = state.tracks.get(name) {
 			if !weak.is_closed() {
-				return TrackPending::ready(Ok(weak.subscribe(subscription)));
+				return SubscribePending::ready(Ok(weak.subscribe(subscription)));
 			}
 			// Drop the stale entry and fall through to a fresh request.
 			state.tracks.remove(name);
@@ -771,7 +771,7 @@ impl BroadcastConsumer {
 			// Coalesce onto an in-flight request for the same name.
 			pending.resolvers.push((subscription, slot));
 		} else if state.dynamic == 0 {
-			return TrackPending::ready(Err(Error::NotFound));
+			return SubscribePending::ready(Err(Error::NotFound));
 		} else {
 			state.requests.insert(
 				name.to_string(),
@@ -783,7 +783,7 @@ impl BroadcastConsumer {
 			state.request_order.push_back(name.to_string());
 		}
 
-		TrackPending::waiting(consumer)
+		SubscribePending::waiting(consumer)
 	}
 
 	/// Resolve a track's immutable info, returning an [`InfoPending`].
@@ -872,47 +872,57 @@ impl BroadcastConsumer {
 
 /// A handle to a single track within a broadcast.
 ///
-/// Obtained from [`BroadcastConsumer::consume_track`]. Holding it sends nothing
-/// to the publisher; it just names a track you can [`subscribe`](Self::subscribe)
-/// to (a live, ongoing stream of groups) later. The same handle can be subscribed
-/// to multiple times, and clones are cheap.
+/// Obtained from [`BroadcastConsumer::consume_track`]. Holding it sends nothing to
+/// the publisher; it just names a track you can [`subscribe`](Self::subscribe) to
+/// (a live, ongoing stream of groups) or resolve [`info`](Self::info) for later.
+/// Clones are cheap and concurrent operations on the same name coalesce onto one
+/// request.
+///
+/// Only the track's `name` is known up front (available via `Deref`); every other
+/// property is resolved on demand via [`info`](Self::info), since for a relay it
+/// comes from upstream.
 // TODO: add `fetch` for one-shot retrieval of a past group range.
 #[derive(Clone)]
 pub struct TrackConsumer {
 	broadcast: BroadcastConsumer,
-	name: String,
+	/// Name-only [`Track`]: `Deref` exposes `name`; the other fields are
+	/// placeholders until [`Self::info`] resolves the real values.
+	info: Track,
+}
+
+impl Deref for TrackConsumer {
+	type Target = Track;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
 }
 
 impl TrackConsumer {
-	/// The track name this handle is bound to.
-	pub fn name(&self) -> &str {
-		&self.name
-	}
-
 	/// Open a live subscription.
 	///
-	/// Returns a [`TrackPending`] that resolves once the publisher accepts the
-	/// subscription (SUBSCRIBE_OK on the wire). `.await` it for the
-	/// [`TrackSubscriber`], which carries the publisher's [`Track`] and reads its
-	/// groups; or drive it with [`TrackPending::poll_ok`] from a poll loop.
+	/// Returns a [`SubscribePending`] that resolves once the publisher accepts the
+	/// subscription. `.await` it for the [`TrackSubscriber`], which carries the
+	/// publisher's [`Track`] and reads its groups; or drive it with
+	/// [`SubscribePending::poll_ok`] from a poll loop.
 	///
 	/// `subscription` is this subscriber's preferences and feeds the producer's
 	/// [`TrackProducer::subscription`] aggregate; pass `None` for
 	/// [`Subscription::default`]. Concurrent subscribers to the same name coalesce
 	/// onto one request.
-	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> TrackPending {
+	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> SubscribePending {
 		self.broadcast
-			.request_subscribe(&self.name, subscription.into().unwrap_or_default())
+			.request_subscribe(&self.info.name, subscription.into().unwrap_or_default())
 	}
 
-	/// Resolve this track's immutable [`Track`] info without subscribing.
+	/// Resolve this track's immutable [`Track`] info.
 	///
 	/// Returns an [`InfoPending`] that resolves to the publisher's properties
 	/// (timescale, compression, cache). Warm (cached or a live producer exists) it
 	/// resolves with no round trip; cold it triggers a single TRACK lookup. Reused
 	/// across every subscribe and fetch of the track.
 	pub fn info(&self) -> InfoPending {
-		self.broadcast.request_info(&self.name)
+		self.broadcast.request_info(&self.info.name)
 	}
 }
 
@@ -932,7 +942,7 @@ mod test {
 	use super::*;
 
 	/// Subscribe and assert the result hasn't resolved yet (it stays pending until
-	/// a publisher accepts). Returns the [`TrackPending`] to resolve after accepting.
+	/// a publisher accepts). Returns the [`SubscribePending`] to resolve after accepting.
 	macro_rules! subscribe_pending {
 		($consumer:expr, $name:expr) => {{
 			let pending = $consumer.consume_track($name).subscribe(None);

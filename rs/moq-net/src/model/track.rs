@@ -754,7 +754,7 @@ impl TrackWeak {
 
 /// A live subscription to a track, used to read its groups.
 ///
-/// Created via [`TrackConsumer::subscribe`](crate::TrackConsumer::subscribe), or
+/// Created via [`TrackPending::subscribe`](crate::TrackPending::subscribe), or
 /// directly from a [`TrackProducer`] for an in-process track. Carries this
 /// subscriber's [`Subscription`] preferences, which feed the producer's aggregate.
 #[derive(Clone)]
