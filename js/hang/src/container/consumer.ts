@@ -1,6 +1,6 @@
 import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
-import { Effect, type Getter, getter, type GetterInit, Signal } from "@moq/signals";
+import { Effect, type Getter, type GetterInit, getter, Signal } from "@moq/signals";
 
 import type { Format } from "./format";
 import type { BufferedRanges, Frame } from "./types";
