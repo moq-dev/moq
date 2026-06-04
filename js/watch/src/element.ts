@@ -5,6 +5,7 @@ import { Effect, Signal } from "@moq/signals";
 import { MultiBackend } from "./backend";
 import { Broadcast, type CatalogFormat, parseCatalogFormat } from "./broadcast";
 import type { Latency } from "./sync";
+import type * as Video from "./video";
 
 const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog-format"] as const;
 type Observed = (typeof OBSERVED)[number];
@@ -27,8 +28,32 @@ export default class MoqWatch extends HTMLElement {
 	// The backend that powers this element.
 	backend: MultiBackend;
 
+	// The mutable user controls. As the top of the tree, this element owns the
+	// writable Signals and wires read-only views into broadcast/backend. The UI and
+	// the attribute/property accessors read and write these directly.
+	readonly controls = {
+		paused: new Signal(false),
+		volume: new Signal(0.5),
+		muted: new Signal(false),
+		latency: new Signal<Latency>("real-time"),
+		// The desired video rendition (resolution/bitrate cap).
+		target: new Signal<Video.Target | undefined>(undefined),
+	};
+
+	// Broadcast configuration owned here and wired into `broadcast` as inputs.
+	#name = new Signal<Moq.Path.Valid>(Moq.Path.empty());
+	#reload = new Signal(false);
+	#catalogFormat = new Signal<CatalogFormat | undefined>(undefined);
+	#catalog = new Signal<Catalog.Root | undefined>(undefined);
+
+	// The canvas/video element to render into.
+	#element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
+
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
+
+	// Stashed volume to restore on unmute.
+	#unmuteVolume = 0.5;
 
 	// Expose the Effect class, so users can easily create effects scoped to this element.
 	signals = new Effect();
@@ -47,14 +72,50 @@ export default class MoqWatch extends HTMLElement {
 			connection: this.connection.established,
 			announced: this.connection.announced,
 			enabled: this.#enabled,
+			name: this.#name,
+			reload: this.#reload,
+			catalogFormat: this.#catalogFormat,
+			catalog: this.#catalog,
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
 		this.backend = new MultiBackend({
+			element: this.#element,
 			broadcast: this.broadcast,
 			connection: this.connection.established,
+			paused: this.controls.paused,
+			latency: this.controls.latency,
+			volume: this.controls.volume,
+			muted: this.controls.muted,
+			target: this.controls.target,
 		});
 		this.signals.cleanup(() => this.backend.close());
+
+		// Mute/volume coupling. The element owns the writable volume/muted Signals, so
+		// the policy lives here: muting stashes and zeroes the volume; a zero volume
+		// reports as muted.
+		this.signals.run((effect) => {
+			const muted = effect.get(this.controls.muted);
+			if (muted) {
+				this.#unmuteVolume = this.controls.volume.peek() || 0.5;
+				this.controls.volume.set(0);
+			} else {
+				this.controls.volume.set(this.#unmuteVolume);
+			}
+		});
+		this.signals.run((effect) => {
+			const volume = effect.get(this.controls.volume);
+			this.controls.muted.set(volume === 0);
+		});
+
+		// Keep the volume control in sync with native <video> controls (MSE backend).
+		this.signals.run((effect) => {
+			const element = effect.get(this.#element);
+			if (!(element instanceof HTMLVideoElement)) return;
+			effect.event(element, "volumechange", () => {
+				this.controls.volume.set(element.volume);
+			});
+		});
 
 		// Watch to see if the canvas element is added or removed.
 		const setElement = () => {
@@ -63,7 +124,7 @@ export default class MoqWatch extends HTMLElement {
 			if (canvas && video) {
 				throw new Error("Cannot have both canvas and video elements");
 			}
-			this.backend.element.set(canvas ?? video);
+			this.#element.set(canvas ?? video);
 		};
 
 		const observer = new MutationObserver(setElement);
@@ -85,12 +146,12 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
-			const name = effect.get(this.broadcast.name);
+			const name = effect.get(this.#name);
 			this.setAttribute("name", name.toString());
 		});
 
 		this.signals.run((effect) => {
-			const muted = effect.get(this.backend.audio.muted);
+			const muted = effect.get(this.controls.muted);
 			if (muted) {
 				this.setAttribute("muted", "");
 			} else {
@@ -99,7 +160,7 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
-			const paused = effect.get(this.backend.paused);
+			const paused = effect.get(this.controls.paused);
 			if (paused) {
 				this.setAttribute("paused", "true");
 			} else {
@@ -108,16 +169,16 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
-			const volume = effect.get(this.backend.audio.volume);
+			const volume = effect.get(this.controls.volume);
 			this.setAttribute("volume", volume.toString());
 		});
 
 		this.signals.run((effect) => {
-			const latency = effect.get(this.backend.latency);
+			const latency = effect.get(this.controls.latency);
 			if (latency === "real-time") {
 				this.setAttribute("latency", "real-time");
 			} else {
-				const jitter = Math.floor(effect.get(this.backend.jitter));
+				const jitter = Math.floor(effect.get(this.backend.output.jitter));
 				this.setAttribute("latency", jitter.toString());
 			}
 		});
@@ -127,7 +188,7 @@ export default class MoqWatch extends HTMLElement {
 		const updateDimensions = (width: number, height: number) => {
 			if (width <= 0 || height <= 0) return;
 			const dpr = window.devicePixelRatio || 1;
-			this.backend.video.source.target.update((prev) => ({
+			this.controls.target.update((prev) => ({
 				...prev,
 				width: Math.round(width * dpr),
 				height: Math.round(height * dpr),
@@ -163,7 +224,7 @@ export default class MoqWatch extends HTMLElement {
 
 	#setLatencyNumber(value: string | null) {
 		const parsed = value ? Number.parseFloat(value) : Number.NaN;
-		this.backend.latency.set((Number.isFinite(parsed) ? parsed : 100) as Time.Milli);
+		this.controls.latency.set((Number.isFinite(parsed) ? parsed : 100) as Time.Milli);
 	}
 
 	attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null) {
@@ -174,19 +235,19 @@ export default class MoqWatch extends HTMLElement {
 		if (name === "url") {
 			this.connection.url.set(newValue ? new URL(newValue) : undefined);
 		} else if (name === "name") {
-			this.broadcast.name.set(Moq.Path.from(newValue ?? ""));
+			this.#name.set(Moq.Path.from(newValue ?? ""));
 		} else if (name === "paused") {
-			this.backend.paused.set(newValue !== null);
+			this.controls.paused.set(newValue !== null);
 		} else if (name === "volume") {
 			const volume = newValue ? Number.parseFloat(newValue) : 0.5;
-			this.backend.audio.volume.set(volume);
+			this.controls.volume.set(volume);
 		} else if (name === "muted") {
-			this.backend.audio.muted.set(newValue !== null);
+			this.controls.muted.set(newValue !== null);
 		} else if (name === "reload") {
-			this.broadcast.reload.set(newValue !== null);
+			this.#reload.set(newValue !== null);
 		} else if (name === "latency") {
 			if (!newValue || newValue === "real-time") {
-				this.backend.latency.set("real-time");
+				this.controls.latency.set("real-time");
 			} else {
 				this.#setLatencyNumber(newValue);
 			}
@@ -194,7 +255,7 @@ export default class MoqWatch extends HTMLElement {
 			// Deprecated: use latency="<number>" instead.
 			this.#setLatencyNumber(newValue);
 		} else if (name === "catalog-format") {
-			this.broadcast.catalogFormat.set(parseCatalogFormat(newValue));
+			this.#catalogFormat.set(parseCatalogFormat(newValue));
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -210,69 +271,69 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	get name(): Moq.Path.Valid {
-		return this.broadcast.name.peek();
+		return this.#name.peek();
 	}
 
 	set name(value: string | Moq.Path.Valid) {
-		this.broadcast.name.set(Moq.Path.from(value));
+		this.#name.set(Moq.Path.from(value));
 	}
 
 	get paused(): boolean {
-		return this.backend.paused.peek();
+		return this.controls.paused.peek();
 	}
 
 	set paused(value: boolean) {
-		this.backend.paused.set(value);
+		this.controls.paused.set(value);
 	}
 
 	get volume(): number {
-		return this.backend.audio.volume.peek();
+		return this.controls.volume.peek();
 	}
 
 	set volume(value: number) {
-		this.backend.audio.volume.set(value);
+		this.controls.volume.set(value);
 	}
 
 	get muted(): boolean {
-		return this.backend.audio.muted.peek();
+		return this.controls.muted.peek();
 	}
 
 	set muted(value: boolean) {
-		this.backend.audio.muted.set(value);
+		this.controls.muted.set(value);
 	}
 
 	get reload(): boolean {
-		return this.broadcast.reload.peek();
+		return this.#reload.peek();
 	}
 
 	set reload(value: boolean) {
-		this.broadcast.reload.set(value);
+		this.#reload.set(value);
 	}
 
 	get latency(): Latency {
-		return this.backend.latency.peek();
+		return this.controls.latency.peek();
 	}
 
 	set latency(value: Latency) {
-		this.backend.latency.set(value);
+		this.controls.latency.set(value);
 	}
 
 	/** The jitter buffer in milliseconds. */
 	get jitter(): Time.Milli {
-		return this.backend.jitter.peek();
+		return this.backend.output.jitter.peek();
 	}
 
 	/** @deprecated Use `latency = <number>` instead. */
 	set jitter(value: number) {
-		this.backend.latency.set(value as Time.Milli);
+		this.controls.latency.set(value as Time.Milli);
 	}
 
 	get catalogFormat(): CatalogFormat | undefined {
-		return this.broadcast.catalogFormat.peek();
+		return this.#catalogFormat.peek();
 	}
 
 	set catalogFormat(value: CatalogFormat | undefined) {
-		this.broadcast.catalogFormat.set(value);
+		this.#catalogFormat.set(value);
 	}
 
 	/**
@@ -280,11 +341,11 @@ export default class MoqWatch extends HTMLElement {
 	 * for `"hang"` and `"msf"` this is overwritten by the fetch loop.
 	 */
 	get catalog(): Catalog.Root | undefined {
-		return this.broadcast.catalog.peek();
+		return this.broadcast.output.catalog.peek();
 	}
 
 	set catalog(value: Catalog.Root | undefined) {
-		this.broadcast.catalog.set(value);
+		this.#catalog.set(value);
 	}
 }
 

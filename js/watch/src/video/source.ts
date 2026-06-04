@@ -1,19 +1,12 @@
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import type { Sync } from "../sync";
 
 /**
  * A function that checks if a video configuration is supported by the backend.
  */
 export type Supported = (config: Catalog.VideoConfig) => Promise<boolean>;
-
-export type SourceProps = {
-	broadcast?: Broadcast | Signal<Broadcast | undefined>;
-	target?: Target | Signal<Target | undefined>;
-	supported?: Supported;
-};
 
 export type Target = {
 	// Optional manual override for the selected rendition name.
@@ -30,6 +23,27 @@ export type Target = {
 
 	// Maximum desired bitrate in bits per second.
 	bitrate?: number;
+};
+
+type SourceInput = {
+	broadcast: Getter<Broadcast | undefined>;
+	target: Getter<Target | undefined>;
+
+	// A function that checks if a video configuration is supported by the backend.
+	// Provided by whichever backend (WebCodecs or MSE) is active.
+	supported: Getter<Supported | undefined>;
+};
+
+type SourceOutput = {
+	catalog: Signal<Catalog.Video | undefined>;
+	available: Signal<Record<string, Catalog.VideoConfig>>;
+
+	// The name of the active rendition.
+	track: Signal<string | undefined>;
+	config: Signal<Catalog.VideoConfig | undefined>;
+
+	// The per-rendition jitter (ms) to add to the sync buffer. Wired into Sync by the parent.
+	jitter: Signal<Moq.Time.Milli | undefined>;
 };
 
 /**
@@ -189,32 +203,25 @@ function bestRendition(entries: [string, Catalog.VideoConfig][]): string {
  * for video playback. It is used by both MSE and Decoder backends.
  */
 export class Source {
-	broadcast: Signal<Broadcast | undefined>;
-	target: Signal<Target | undefined>;
+	readonly input: Readonlys<SourceInput>;
 
-	#catalog = new Signal<Catalog.Video | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Video | undefined> = this.#catalog;
-
-	#available = new Signal<Record<string, Catalog.VideoConfig>>({});
-	readonly available: Getter<Record<string, Catalog.VideoConfig>> = this.#available;
-
-	// The name of the active rendition.
-	#track = new Signal<string | undefined>(undefined);
-	readonly track: Getter<string | undefined> = this.#track;
-
-	#config = new Signal<Catalog.VideoConfig | undefined>(undefined);
-	readonly config: Getter<Catalog.VideoConfig | undefined> = this.#config;
-
-	sync: Sync;
-	supported: Signal<Supported | undefined>;
+	readonly #output: SourceOutput = {
+		catalog: new Signal<Catalog.Video | undefined>(undefined),
+		available: new Signal<Record<string, Catalog.VideoConfig>>({}),
+		track: new Signal<string | undefined>(undefined),
+		config: new Signal<Catalog.VideoConfig | undefined>(undefined),
+		jitter: new Signal<Moq.Time.Milli | undefined>(undefined),
+	};
+	readonly output = readonlys(this.#output);
 
 	#signals = new Effect();
 
-	constructor(sync: Sync, props?: SourceProps) {
-		this.broadcast = Signal.from(props?.broadcast);
-		this.target = Signal.from(props?.target);
-		this.sync = sync;
-		this.supported = Signal.from(props?.supported);
+	constructor(props?: Inputs<SourceInput>) {
+		this.input = {
+			broadcast: getter(props?.broadcast),
+			target: getter(props?.target),
+			supported: getter(props?.supported),
+		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
 		this.#signals.run(this.#runSupported.bind(this));
@@ -222,20 +229,20 @@ export class Source {
 	}
 
 	#runCatalog(effect: Effect): void {
-		const broadcast = effect.get(this.broadcast);
+		const broadcast = effect.get(this.input.broadcast);
 		if (!broadcast) return;
 
-		const catalog = effect.get(broadcast.catalog)?.video;
+		const catalog = effect.get(broadcast.output.catalog)?.video;
 		if (!catalog) return;
 
-		effect.set(this.#catalog, catalog);
+		effect.set(this.#output.catalog, catalog);
 	}
 
 	#runSupported(effect: Effect): void {
-		const supported = effect.get(this.supported);
+		const supported = effect.get(this.input.supported);
 		if (!supported) return;
 
-		const renditions = effect.get(this.#catalog)?.renditions ?? {};
+		const renditions = effect.get(this.#output.catalog)?.renditions ?? {};
 
 		effect.spawn(async () => {
 			const available: Record<string, Catalog.VideoConfig> = {};
@@ -249,30 +256,30 @@ export class Source {
 				console.warn("[Source] No supported video renditions found:", renditions);
 			}
 
-			this.#available.set(available);
+			this.#output.available.set(available);
 		});
 	}
 
 	#runSelected(effect: Effect): void {
-		const available = effect.get(this.#available);
+		const available = effect.get(this.#output.available);
 		if (Object.keys(available).length === 0) return;
 
-		const target = effect.get(this.target);
+		const target = effect.get(this.input.target);
 
 		// Manual selection by name — skip all ABR logic.
 		if (target?.name && target.name in available) {
 			const config = available[target.name];
-			effect.set(this.#track, target.name);
-			effect.set(this.#config, config);
-			effect.set(this.sync.video, config.jitter as Moq.Time.Milli | undefined);
+			effect.set(this.#output.track, target.name);
+			effect.set(this.#output.config, config);
+			effect.set(this.#output.jitter, config.jitter as Moq.Time.Milli | undefined);
 			return;
 		}
 
 		// Auto-select: use recv bandwidth if no explicit bitrate target.
 		let effectiveTarget = target;
 		if (!target?.bitrate) {
-			const broadcast = effect.get(this.broadcast);
-			const connection = broadcast ? effect.get(broadcast.connection) : undefined;
+			const broadcast = effect.get(this.input.broadcast);
+			const connection = broadcast ? effect.get(broadcast.input.connection) : undefined;
 			const recvBw = connection?.recvBandwidth;
 			if (recvBw) {
 				const estimate = effect.get(recvBw);
@@ -289,12 +296,12 @@ export class Source {
 
 		const config = available[selected];
 
-		effect.set(this.#track, selected);
-		effect.set(this.#config, config);
+		effect.set(this.#output.track, selected);
+		effect.set(this.#output.config, config);
 
 		// Use catalog jitter if available, otherwise estimate from framerate.
 		const jitter = config.jitter ?? (config.framerate ? Math.ceil(1000 / config.framerate) : undefined);
-		effect.set(this.sync.video, jitter as Moq.Time.Milli | undefined);
+		effect.set(this.#output.jitter, jitter as Moq.Time.Milli | undefined);
 	}
 
 	/**

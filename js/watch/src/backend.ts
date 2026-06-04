@@ -1,5 +1,5 @@
 import * as Moq from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
 import { Muxer } from "./mse";
@@ -26,127 +26,142 @@ export function timeRangesToArray(ranges: TimeRanges): BufferedRanges {
 	return result;
 }
 
-export interface Backend {
-	// Whether audio/video playback is paused.
-	paused: Signal<boolean>;
+type VideoBackendOutput = {
+	stats: Signal<Video.Stats | undefined>;
+	stalled: Signal<boolean>;
+	buffered: Signal<BufferedRanges>;
+	timestamp: Signal<Moq.Time.Milli>;
+};
 
-	// Video specific signals.
-	video?: Video.Backend;
-
-	// Audio specific signals.
-	audio?: Audio.Backend;
-
-	// The latency setting: "real-time" auto-computes jitter, a number sets a fixed jitter.
-	latency: Signal<Latency>;
-
-	// The jitter buffer in milliseconds.
-	jitter: Signal<Moq.Time.Milli>;
-}
-
-export interface MultiBackendProps {
-	element?: HTMLCanvasElement | HTMLVideoElement | Signal<HTMLCanvasElement | HTMLVideoElement | undefined>;
-	broadcast?: Broadcast | Signal<Broadcast | undefined>;
-
-	// Latency: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter in ms.
-	latency?: Latency | Signal<Latency>;
-
-	// Established connection, used by Sync to read RTT (PROBE) for dynamic jitter in "real-time" mode.
-	connection?: Signal<Moq.Connection.Established | undefined>;
-
-	paused?: boolean | Signal<boolean>;
-}
-
-// We have to proxy some of these signals because we support both the MSE and WebCodecs.
+// Unifies the video outputs across the MSE and WebCodecs backends.
 class VideoBackend implements Video.Backend {
-	// The source of the video.
 	source: Video.Source;
+	readonly output: Readonlys<VideoBackendOutput>;
 
-	// The stats of the video.
-	stats = new Signal<Video.Stats | undefined>(undefined);
-
-	// We're currently stalled waiting for the next frame
-	stalled = new Signal<boolean>(false);
-
-	// Buffered time ranges
-	buffered = new Signal<BufferedRanges>([]);
-
-	// The timestamp of the current frame
-	timestamp = new Signal<Moq.Time.Milli>(Moq.Time.Milli.zero);
-
-	constructor(source: Video.Source) {
+	constructor(source: Video.Source, output: VideoBackendOutput) {
 		this.source = source;
+		this.output = readonlys(output);
 	}
 }
 
-// Audio specific signals that work regardless of the backend source (mse vs webcodecs).
+type AudioBackendOutput = {
+	stats: Signal<Audio.Stats | undefined>;
+	buffered: Signal<BufferedRanges>;
+	context: Signal<AudioContext | undefined>;
+};
+
+// Unifies the audio outputs across the MSE and WebCodecs backends.
 class AudioBackend implements Audio.Backend {
 	source: Audio.Source;
+	readonly output: Readonlys<AudioBackendOutput>;
 
-	// The volume of the audio, between 0 and 1.
-	volume = new Signal<number>(0.5);
-
-	// Whether the audio is muted.
-	muted = new Signal<boolean>(false);
-
-	// The stats of the audio.
-	stats = new Signal<Audio.Stats | undefined>(undefined);
-
-	// Buffered time ranges
-	buffered = new Signal<BufferedRanges>([]);
-
-	// The AudioContext used for playback (set by the WebCodecs backend; undefined under MSE).
-	context = new Signal<AudioContext | undefined>(undefined);
-
-	constructor(source: Audio.Source) {
+	constructor(source: Audio.Source, output: AudioBackendOutput) {
 		this.source = source;
+		this.output = readonlys(output);
 	}
 }
+
+type MultiBackendInput = {
+	element: Getter<HTMLCanvasElement | HTMLVideoElement | undefined>;
+	broadcast: Getter<Broadcast | undefined>;
+
+	// Established connection, used by Sync to read RTT (PROBE) for dynamic jitter in "real-time" mode.
+	connection: Getter<Moq.Connection.Established | undefined>;
+
+	paused: Getter<boolean>;
+
+	// Latency: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter in ms.
+	latency: Getter<Latency>;
+
+	// Audio controls. The owner holds the writable Signals.
+	volume: Getter<number>;
+	muted: Getter<boolean>;
+
+	// The desired video rendition (resolution/bitrate cap).
+	target: Getter<Video.Target | undefined>;
+};
 
 /// A generic backend that supports either MSE or WebCodecs based on the provided element.
 ///
 /// This is primarily what backs the <moq-watch> web component, but it's useful as a standalone for other use cases.
-export class MultiBackend implements Backend {
-	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
-	broadcast: Signal<Broadcast | undefined>;
-	latency: Signal<Latency>;
-	jitter: Signal<Moq.Time.Milli>;
-	paused: Signal<boolean>;
+export class MultiBackend {
+	readonly input: Readonlys<MultiBackendInput>;
+
+	// The jitter buffer in milliseconds, computed by Sync.
+	readonly output: { readonly jitter: Getter<Moq.Time.Milli> };
+
+	#videoSource: Video.Source;
+	#audioSource: Audio.Source;
+
+	// The active backend supplies its support probe; the source filters renditions with it.
+	#videoSupported = new Signal<Video.Supported | undefined>(undefined);
+	#audioSupported = new Signal<Audio.Supported | undefined>(undefined);
+
+	// Whether to download. Driven by the renderer/emitter policy, read by the decoders.
+	#videoEnabled = new Signal(false);
+	#audioEnabled = new Signal(false);
+
+	#videoOutput: VideoBackendOutput = {
+		stats: new Signal<Video.Stats | undefined>(undefined),
+		stalled: new Signal<boolean>(false),
+		buffered: new Signal<BufferedRanges>([]),
+		timestamp: new Signal<Moq.Time.Milli>(Moq.Time.Milli.zero),
+	};
+	#audioOutput: AudioBackendOutput = {
+		stats: new Signal<Audio.Stats | undefined>(undefined),
+		buffered: new Signal<BufferedRanges>([]),
+		context: new Signal<AudioContext | undefined>(undefined),
+	};
 
 	video: VideoBackend;
-	#videoSource: Video.Source;
-
 	audio: AudioBackend;
-	#audioSource: Audio.Source;
 
 	// Used to sync audio and video playback at a target delay.
 	sync: Sync;
 
 	signals = new Effect();
 
-	constructor(props?: MultiBackendProps) {
-		this.element = Signal.from(props?.element);
-		this.broadcast = Signal.from(props?.broadcast);
-		this.sync = new Sync({ latency: props?.latency, connection: props?.connection });
-		this.latency = this.sync.latency;
-		this.jitter = this.sync.jitter;
+	constructor(props?: Inputs<MultiBackendInput>) {
+		this.input = {
+			element: getter(props?.element),
+			broadcast: getter(props?.broadcast),
+			connection: getter(props?.connection),
+			paused: getter(props?.paused ?? false),
+			latency: getter(props?.latency ?? ("real-time" as Latency)),
+			volume: getter(props?.volume ?? 0.5),
+			muted: getter(props?.muted ?? false),
+			target: getter(props?.target),
+		};
 
-		this.#videoSource = new Video.Source(this.sync, {
-			broadcast: this.broadcast,
+		this.#videoSource = new Video.Source({
+			broadcast: this.input.broadcast,
+			target: this.input.target,
+			supported: this.#videoSupported,
 		});
-		this.#audioSource = new Audio.Source(this.sync, {
-			broadcast: this.broadcast,
+		this.#audioSource = new Audio.Source({
+			broadcast: this.input.broadcast,
+			supported: this.#audioSupported,
 		});
 
-		this.video = new VideoBackend(this.#videoSource);
-		this.audio = new AudioBackend(this.#audioSource);
+		// Sources produce the per-rendition jitter that Sync reads, so they're created
+		// before Sync to avoid a construction cycle.
+		this.sync = new Sync({
+			latency: this.input.latency,
+			connection: this.input.connection,
+			video: this.#videoSource.output.jitter,
+			audio: this.#audioSource.output.jitter,
+		});
 
-		this.paused = Signal.from(props?.paused ?? false);
+		this.video = new VideoBackend(this.#videoSource, this.#videoOutput);
+		this.audio = new AudioBackend(this.#audioSource, this.#audioOutput);
+
+		this.output = { jitter: this.sync.output.jitter };
 
 		this.signals.run(this.#runElement.bind(this));
 	}
 
 	#runElement(effect: Effect): void {
-		const element = effect.get(this.element);
+		const element = effect.get(this.input.element);
 		if (!element) return;
 
 		if (element instanceof HTMLCanvasElement) {
@@ -157,65 +172,92 @@ export class MultiBackend implements Backend {
 	}
 
 	#runWebcodecs(effect: Effect, element: HTMLCanvasElement): void {
-		const videoSource = new Video.Decoder(this.#videoSource);
-		const audioSource = new Audio.Decoder(this.#audioSource);
+		// This backend's support probes drive rendition selection.
+		effect.set(this.#videoSupported, Video.Decoder.supported, undefined);
+		effect.set(this.#audioSupported, Audio.Decoder.supported, undefined);
 
-		const audioEmitter = new Audio.Emitter(audioSource, {
-			volume: this.audio.volume,
-			muted: this.audio.muted,
-			paused: this.paused,
+		const videoDecoder = new Video.Decoder(this.#videoSource, this.sync, { enabled: this.#videoEnabled });
+		const audioDecoder = new Audio.Decoder(this.#audioSource, this.sync, { enabled: this.#audioEnabled });
+
+		const audioEmitter = new Audio.Emitter(audioDecoder, {
+			volume: this.input.volume,
+			muted: this.input.muted,
+			paused: this.input.paused,
 		});
 
-		const videoRenderer = new Video.Renderer(videoSource, {
+		const videoRenderer = new Video.Renderer(videoDecoder, {
 			canvas: element,
-			paused: this.paused,
 		});
 
 		effect.cleanup(() => {
-			videoSource.close();
-			audioSource.close();
+			videoDecoder.close();
+			audioDecoder.close();
 			audioEmitter.close();
 			videoRenderer.close();
 		});
 
-		// Proxy the read only signals to the backend.
-		effect.proxy(this.video.stats, videoSource.stats);
-		effect.proxy(this.video.buffered, videoSource.buffered);
-		effect.proxy(this.video.stalled, videoSource.stalled);
-		effect.proxy(this.video.timestamp, videoSource.timestamp);
+		// Audio download follows the emitter's enable policy (paused/muted).
+		effect.proxy(this.#audioEnabled, audioEmitter.output.enabled);
 
-		effect.proxy(this.audio.stats, audioSource.stats);
-		effect.proxy(this.audio.buffered, audioSource.buffered);
-		effect.proxy(this.audio.context, audioSource.context);
+		// Video download policy: when playing, follow visibility; when paused, fetch a
+		// single preview frame then stop.
+		effect.run((inner) => {
+			const paused = inner.get(this.input.paused);
+			const visible = inner.get(videoRenderer.output.visible);
+			if (!paused) {
+				this.#videoEnabled.set(visible);
+				return;
+			}
+			const frame = inner.get(videoDecoder.output.frame);
+			this.#videoEnabled.set(!frame);
+		});
+		effect.cleanup(() => {
+			this.#videoEnabled.set(false);
+			this.#audioEnabled.set(false);
+		});
+
+		// Proxy the read only signals to the backend.
+		effect.proxy(this.#videoOutput.stats, videoDecoder.output.stats);
+		effect.proxy(this.#videoOutput.buffered, videoDecoder.output.buffered);
+		effect.proxy(this.#videoOutput.stalled, videoDecoder.output.stalled);
+		effect.proxy(this.#videoOutput.timestamp, videoDecoder.output.timestamp);
+
+		effect.proxy(this.#audioOutput.stats, audioDecoder.output.stats);
+		effect.proxy(this.#audioOutput.buffered, audioDecoder.output.buffered);
+		effect.proxy(this.#audioOutput.context, audioDecoder.output.context);
 	}
 
 	#runMse(effect: Effect, element: HTMLVideoElement): void {
-		const mse = new Muxer(this.sync, {
-			paused: this.paused,
+		// This backend's support probes drive rendition selection.
+		effect.set(this.#videoSupported, Video.Mse.supported, undefined);
+		effect.set(this.#audioSupported, Audio.Mse.supported, undefined);
+
+		const muxer = new Muxer(this.sync, {
+			paused: this.input.paused,
 			element,
 		});
 
-		const video = new Video.Mse(mse, this.#videoSource);
-		const audio = new Audio.Mse(mse, this.#audioSource, {
-			volume: this.audio.volume,
-			muted: this.audio.muted,
+		const video = new Video.Mse(muxer, this.sync, this.#videoSource);
+		const audio = new Audio.Mse(muxer, this.sync, this.#audioSource, {
+			volume: this.input.volume,
+			muted: this.input.muted,
 		});
 
 		effect.cleanup(() => {
 			video.close();
 			audio.close();
-			mse.close();
+			muxer.close();
 		});
 
 		// Proxy the read only signals to the backend.
-		effect.proxy(this.video.stats, video.stats);
-		effect.proxy(this.video.buffered, video.buffered);
-		effect.proxy(this.video.stalled, video.stalled);
-		effect.proxy(this.video.timestamp, video.timestamp);
+		effect.proxy(this.#videoOutput.stats, video.output.stats);
+		effect.proxy(this.#videoOutput.buffered, video.output.buffered);
+		effect.proxy(this.#videoOutput.stalled, video.output.stalled);
+		effect.proxy(this.#videoOutput.timestamp, video.output.timestamp);
 
-		effect.proxy(this.audio.stats, audio.stats);
-		effect.proxy(this.audio.buffered, audio.buffered);
-		effect.proxy(this.audio.context, audio.context);
+		effect.proxy(this.#audioOutput.stats, audio.output.stats);
+		effect.proxy(this.#audioOutput.buffered, audio.output.buffered);
+		effect.proxy(this.#audioOutput.context, audio.output.context);
 	}
 
 	close(): void {

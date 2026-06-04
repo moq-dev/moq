@@ -1,14 +1,15 @@
 import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, type GetterInit, getter, Signal } from "@moq/signals";
 
 import type { Format } from "./format";
 import type { BufferedRanges, Frame } from "./types";
 
 export interface ConsumerProps {
 	format: Format;
-	// Target latency in milliseconds (default: 0)
-	latency?: Signal<Time.Milli> | Time.Milli;
+	// Target latency in milliseconds (default: 0). Read-only: a Getter (e.g. another
+	// component's output) is accepted directly.
+	latency?: GetterInit<Time.Milli>;
 }
 
 interface Group {
@@ -22,7 +23,7 @@ interface Group {
 export class Consumer {
 	#track: Moq.Track;
 	#format: Format;
-	#latency: Signal<Time.Milli>;
+	#latency: Getter<Time.Milli>;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
 
@@ -37,7 +38,7 @@ export class Consumer {
 	constructor(track: Moq.Track, props: ConsumerProps) {
 		this.#track = track;
 		this.#format = props.format;
-		this.#latency = Signal.from(props.latency ?? Moq.Time.Milli.zero);
+		this.#latency = getter(props.latency ?? Moq.Time.Milli.zero);
 
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {

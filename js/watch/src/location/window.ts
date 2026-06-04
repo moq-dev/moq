@@ -1,50 +1,54 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import * as Zod from "@moq/net/zod";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
-export interface WindowProps {
-	enabled?: boolean | Signal<boolean>;
-}
+export type WindowInput = {
+	broadcast: Getter<Moq.Broadcast | undefined>;
+	catalog: Getter<Catalog.Root | undefined>;
+	enabled: Getter<boolean>;
+};
+
+type WindowOutput = {
+	handle: Signal<string | undefined>;
+	position: Signal<Catalog.Position | undefined>;
+};
 
 export class Window {
-	broadcast: Signal<Moq.Broadcast | undefined>;
+	readonly input: Readonlys<WindowInput>;
 
-	enabled: Signal<boolean>;
-
-	#handle = new Signal<string | undefined>(undefined);
-	readonly handle: Getter<string | undefined> = this.#handle;
+	readonly #output: WindowOutput = {
+		handle: new Signal<string | undefined>(undefined),
+		position: new Signal<Catalog.Position | undefined>(undefined),
+	};
+	readonly output = readonlys(this.#output);
 
 	#catalog = new Signal<Catalog.Location | undefined>(undefined);
 
-	#position = new Signal<Catalog.Position | undefined>(undefined);
-	readonly position: Getter<Catalog.Position | undefined> = this.#position;
-
 	signals = new Effect();
 
-	constructor(
-		broadcast: Signal<Moq.Broadcast | undefined>,
-		catalog: Signal<Catalog.Root | undefined>,
-		props?: WindowProps,
-	) {
-		this.broadcast = broadcast;
-		this.enabled = Signal.from(props?.enabled ?? false);
+	constructor(props?: Inputs<WindowInput>) {
+		this.input = {
+			broadcast: getter(props?.broadcast),
+			catalog: getter(props?.catalog),
+			enabled: getter(props?.enabled ?? false),
+		};
 
 		this.signals.run((effect) => {
-			this.#catalog.set(effect.get(catalog)?.location);
+			this.#catalog.set(effect.get(this.input.catalog)?.location);
 		});
 
 		this.signals.run((effect) => {
-			if (!effect.get(this.enabled)) return;
-			this.#position.set(effect.get(this.#catalog)?.initial);
+			if (!effect.get(this.input.enabled)) return;
+			this.#output.position.set(effect.get(this.#catalog)?.initial);
 		});
 
 		this.signals.run((effect) => {
-			this.#handle.set(effect.get(this.#catalog)?.handle);
+			this.#output.handle.set(effect.get(this.#catalog)?.handle);
 		});
 
 		this.signals.run((effect) => {
-			const broadcast = effect.get(this.broadcast);
+			const broadcast = effect.get(this.input.broadcast);
 			if (!broadcast) return;
 
 			const updates = effect.get(this.#catalog)?.track;
@@ -63,10 +67,10 @@ export class Window {
 				const position = await Zod.read(track, Catalog.PositionSchema);
 				if (!position) break;
 
-				this.#position.set(position);
+				this.#output.position.set(position);
 			}
 		} finally {
-			this.#position.set(undefined);
+			this.#output.position.set(undefined);
 			track.close();
 		}
 	}

@@ -1,10 +1,14 @@
 import { Time } from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Sync } from "./sync";
 
-export type MuxerProps = {
-	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
-	paused?: boolean | Signal<boolean>;
+type MuxerInput = {
+	element: Getter<HTMLMediaElement | undefined>;
+	paused: Getter<boolean>;
+};
+
+type MuxerOutput = {
+	mediaSource: Signal<MediaSource | undefined>;
 };
 
 /**
@@ -12,21 +16,22 @@ export type MuxerProps = {
  * Uses Media Source Extensions to handle complete moof+mdat fragments.
  */
 export class Muxer {
-	element: Signal<HTMLMediaElement | undefined>;
+	readonly input: Readonlys<MuxerInput>;
+	sync: Sync;
 
-	paused: Signal<boolean>;
-
-	#sync: Sync;
-
-	#mediaSource = new Signal<MediaSource | undefined>(undefined);
-	readonly mediaSource: Getter<MediaSource | undefined> = this.#mediaSource;
+	readonly #output: MuxerOutput = {
+		mediaSource: new Signal<MediaSource | undefined>(undefined),
+	};
+	readonly output = readonlys(this.#output);
 
 	#signals = new Effect();
 
-	constructor(sync: Sync, props?: MuxerProps) {
-		this.element = Signal.from(props?.element);
-		this.paused = Signal.from(props?.paused ?? false);
-		this.#sync = sync;
+	constructor(sync: Sync, props?: Inputs<MuxerInput>) {
+		this.input = {
+			element: getter(props?.element),
+			paused: getter(props?.paused ?? false),
+		};
+		this.sync = sync;
 
 		this.#signals.run(this.#runMediaSource.bind(this));
 		this.#signals.run(this.#runSkip.bind(this));
@@ -36,7 +41,7 @@ export class Muxer {
 	}
 
 	#runMediaSource(effect: Effect): void {
-		const element = effect.get(this.element);
+		const element = effect.get(this.input.element);
 		if (!element) return;
 
 		const mediaSource = new MediaSource();
@@ -48,7 +53,7 @@ export class Muxer {
 			mediaSource,
 			"sourceopen",
 			() => {
-				effect.set(this.#mediaSource, mediaSource);
+				effect.set(this.#output.mediaSource, mediaSource);
 			},
 			{ once: true },
 		);
@@ -59,16 +64,16 @@ export class Muxer {
 	}
 
 	#runSkip(effect: Effect): void {
-		const element = effect.get(this.element);
+		const element = effect.get(this.input.element);
 		if (!element) return;
 
 		// Don't skip when paused, otherwise we'll keep jerking forward.
-		const paused = effect.get(this.paused);
+		const paused = effect.get(this.input.paused);
 		if (paused) return;
 
 		// Use the computed latency (catalog jitter + user jitter)
 		// Convert to seconds since DOM APIs use seconds
-		const latency = Time.Milli.toSecond(effect.get(this.#sync.buffer));
+		const latency = Time.Milli.toSecond(effect.get(this.sync.output.buffer));
 
 		effect.interval(() => {
 			// Skip over gaps based on the effective latency.
@@ -88,10 +93,10 @@ export class Muxer {
 	}
 
 	#runTrim(effect: Effect): void {
-		const element = effect.get(this.element);
+		const element = effect.get(this.input.element);
 		if (!element) return;
 
-		const media = effect.get(this.mediaSource);
+		const media = effect.get(this.output.mediaSource);
 		if (!media) return;
 
 		// Periodically clean up old buffered data.
@@ -110,10 +115,10 @@ export class Muxer {
 	}
 
 	#runPaused(effect: Effect): void {
-		const element = effect.get(this.element);
+		const element = effect.get(this.input.element);
 		if (!element) return;
 
-		const paused = effect.get(this.paused);
+		const paused = effect.get(this.input.paused);
 		if (paused && !element.paused) {
 			element.pause();
 		} else if (!paused && element.paused) {
@@ -125,17 +130,17 @@ export class Muxer {
 
 	// Seek to the target position based on the reference and latency.
 	#runSync(effect: Effect): void {
-		const element = effect.get(this.element);
+		const element = effect.get(this.input.element);
 		if (!element) return;
 
 		// Don't seek when paused, otherwise we'll keep jerking around.
-		const paused = effect.get(this.paused);
+		const paused = effect.get(this.input.paused);
 		if (paused) return;
 
-		const reference = effect.get(this.#sync.reference);
+		const reference = effect.get(this.sync.output.reference);
 		if (reference === undefined) return;
 
-		const latency = effect.get(this.#sync.buffer);
+		const latency = effect.get(this.sync.output.buffer);
 
 		// Compute the target currentTime based on reference and latency.
 		// reference = performance.now() - frameTimestamp (in ms) when we received the earliest frame

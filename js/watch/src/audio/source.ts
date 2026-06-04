@@ -1,8 +1,7 @@
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import type { Sync } from "../sync";
 
 // AudioWorklet always renders in 128-sample quanta.
 const WORKLET_QUANTUM = 128;
@@ -17,14 +16,25 @@ export type Target = {
  */
 export type Supported = (config: Catalog.AudioConfig) => Promise<boolean>;
 
-export type SourceProps = {
-	broadcast?: Broadcast | Signal<Broadcast | undefined>;
+type SourceInput = {
+	broadcast: Getter<Broadcast | undefined>;
 
 	// The desired rendition/bitrate of the audio.
-	target?: Target | Signal<Target | undefined>;
+	target: Getter<Target | undefined>;
 
 	// A function that checks if an audio configuration is supported by the backend.
-	supported?: Supported;
+	// Provided by whichever backend (WebCodecs or MSE) is active.
+	supported: Getter<Supported | undefined>;
+};
+
+type SourceOutput = {
+	catalog: Signal<Catalog.Audio | undefined>;
+	available: Signal<Record<string, Catalog.AudioConfig>>;
+	track: Signal<string | undefined>;
+	config: Signal<Catalog.AudioConfig | undefined>;
+
+	// The per-rendition jitter (ms) to add to the sync buffer. Wired into Sync by the parent.
+	jitter: Signal<Moq.Time.Milli | undefined>;
 };
 
 /**
@@ -32,34 +42,25 @@ export type SourceProps = {
  * for audio playback. It is used by both MSE and Decoder backends.
  */
 export class Source {
-	broadcast: Signal<Broadcast | undefined>;
-	target: Signal<Target | undefined>;
+	readonly input: Readonlys<SourceInput>;
 
-	#catalog = new Signal<Catalog.Audio | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Audio | undefined> = this.#catalog;
-
-	#available = new Signal<Record<string, Catalog.AudioConfig>>({});
-	readonly available: Getter<Record<string, Catalog.AudioConfig>> = this.#available;
-
-	#track = new Signal<string | undefined>(undefined);
-	readonly track: Signal<string | undefined> = this.#track;
-
-	#config = new Signal<Catalog.AudioConfig | undefined>(undefined);
-	readonly config: Getter<Catalog.AudioConfig | undefined> = this.#config;
-
-	supported: Signal<Supported | undefined>;
-
-	// Used to target a latency and synchronize playback of video with audio.
-	sync: Sync;
+	readonly #output: SourceOutput = {
+		catalog: new Signal<Catalog.Audio | undefined>(undefined),
+		available: new Signal<Record<string, Catalog.AudioConfig>>({}),
+		track: new Signal<string | undefined>(undefined),
+		config: new Signal<Catalog.AudioConfig | undefined>(undefined),
+		jitter: new Signal<Moq.Time.Milli | undefined>(undefined),
+	};
+	readonly output = readonlys(this.#output);
 
 	#signals = new Effect();
 
-	constructor(sync: Sync, props?: SourceProps) {
-		this.sync = sync;
-
-		this.broadcast = Signal.from(props?.broadcast);
-		this.target = Signal.from(props?.target);
-		this.supported = Signal.from(props?.supported);
+	constructor(props?: Inputs<SourceInput>) {
+		this.input = {
+			broadcast: getter(props?.broadcast),
+			target: getter(props?.target),
+			supported: getter(props?.supported),
+		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
 		this.#signals.run(this.#runSupported.bind(this));
@@ -67,18 +68,18 @@ export class Source {
 	}
 
 	#runCatalog(effect: Effect): void {
-		const broadcast = effect.get(this.broadcast);
+		const broadcast = effect.get(this.input.broadcast);
 		if (!broadcast) return;
 
-		const catalog = effect.get(broadcast.catalog)?.audio;
+		const catalog = effect.get(broadcast.output.catalog)?.audio;
 		if (!catalog) return;
 
-		effect.set(this.#catalog, catalog);
+		effect.set(this.#output.catalog, catalog);
 	}
 
 	#runSupported(effect: Effect): void {
-		const renditions = effect.get(this.#catalog)?.renditions ?? {};
-		const supported = effect.get(this.supported);
+		const renditions = effect.get(this.#output.catalog)?.renditions ?? {};
+		const supported = effect.get(this.input.supported);
 		if (!supported) return;
 
 		effect.spawn(async () => {
@@ -93,15 +94,15 @@ export class Source {
 				console.warn("no supported audio renditions found:", renditions);
 			}
 
-			this.#available.set(available);
+			this.#output.available.set(available);
 		});
 	}
 
 	#runSelected(effect: Effect): void {
-		const available = effect.get(this.#available);
+		const available = effect.get(this.#output.available);
 		if (Object.keys(available).length === 0) return;
 
-		const target = effect.get(this.target);
+		const target = effect.get(this.input.target);
 
 		let selected: { track: string; config: Catalog.AudioConfig } | undefined;
 
@@ -114,15 +115,15 @@ export class Source {
 			if (!selected) return;
 		}
 
-		effect.set(this.#track, selected.track);
-		effect.set(this.#config, selected.config);
+		effect.set(this.#output.track, selected.track);
+		effect.set(this.#output.config, selected.config);
 
 		// Use catalog jitter if available, otherwise estimate from codec frame duration.
 		// Add the worklet render quantum so the ring buffer has margin between frame arrivals.
 		const codecJitter = selected.config.jitter ?? defaultAudioJitter(selected.config) ?? 0;
 		const overhead = Math.ceil((WORKLET_QUANTUM / selected.config.sampleRate) * 1000);
 		const jitter = codecJitter + overhead;
-		effect.set(this.sync.audio, jitter as Moq.Time.Milli);
+		effect.set(this.#output.jitter, jitter as Moq.Time.Milli);
 	}
 
 	/**

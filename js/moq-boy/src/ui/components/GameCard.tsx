@@ -22,9 +22,9 @@ function GameCardInner() {
 	let canvasRef!: HTMLCanvasElement;
 	const signals = new Signals.Effect();
 
-	// Set canvas on the video renderer once mounted.
+	// Set canvas on the game once mounted; it wires it into the renderer.
 	onMount(() => {
-		game.videoRenderer.canvas.set(canvasRef);
+		game.canvas.set(canvasRef);
 	});
 
 	// Keyboard input — preventDefault when expanded or hovered.

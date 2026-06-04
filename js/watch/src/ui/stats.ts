@@ -64,8 +64,8 @@ function videoRow(parent: Effect, watch: MoqWatch): HTMLElement {
 	let prevWhen = performance.now();
 
 	parent.interval(() => {
-		const catalog = watch.backend.video.source.catalog.peek();
-		const stats = watch.backend.video.stats.peek();
+		const catalog = watch.backend.video.source.output.catalog.peek();
+		const stats = watch.backend.video.output.stats.peek();
 		const now = performance.now();
 		const elapsedMs = now - prevWhen;
 
@@ -104,9 +104,9 @@ function audioRow(parent: Effect, watch: MoqWatch): HTMLElement {
 	let prevWhen = performance.now();
 
 	parent.interval(() => {
-		const track = watch.backend.audio.source.track.peek();
-		const config = watch.backend.audio.source.config.peek();
-		const stats = watch.backend.audio.stats.peek();
+		const track = watch.backend.audio.source.output.track.peek();
+		const config = watch.backend.audio.source.output.config.peek();
+		const stats = watch.backend.audio.output.stats.peek();
 
 		if (!track || !config) {
 			data.textContent = "N/A";
@@ -141,7 +141,7 @@ function bufferRow(parent: Effect, watch: MoqWatch): HTMLElement {
 	const { el, data } = row("buffer", "buffer", buffer);
 
 	parent.run((effect) => {
-		const jitter = effect.get(watch.backend.jitter);
+		const jitter = effect.get(watch.backend.output.jitter);
 		data.textContent = `${Math.round(jitter)}ms`;
 	});
 

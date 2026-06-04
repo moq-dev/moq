@@ -75,6 +75,13 @@ export class Game {
 	readonly status = new Moq.Signals.Signal<GameStatus | undefined>(undefined);
 	readonly viewerId = new Moq.Signals.Signal<string | undefined>(undefined);
 
+	// The canvas to render into, owned here and wired into the renderer (read-only there).
+	// The UI sets this once the <canvas> is mounted.
+	readonly canvas = new Moq.Signals.Signal<HTMLCanvasElement | undefined>(undefined);
+
+	// The video rendition target, owned here and wired into the video source as an input.
+	readonly #target = new Moq.Signals.Signal<Watch.Video.Target | undefined>(undefined);
+
 	// Watch API objects — exposed so UI can access canvas, etc.
 	readonly broadcast: Watch.Broadcast;
 	readonly sync: Watch.Sync;
@@ -110,11 +117,21 @@ export class Game {
 		});
 		this.#signals.cleanup(() => this.broadcast.close());
 
-		this.sync = new Watch.Sync({ latency: this.latency, connection: connection.established });
-		this.#signals.cleanup(() => this.sync.close());
-
-		this.videoSource = new Watch.Video.Source(this.sync, { broadcast: this.broadcast });
+		// Sources produce the per-rendition jitter that Sync reads, so they're created
+		// before Sync to avoid a construction cycle.
+		this.videoSource = new Watch.Video.Source({ broadcast: this.broadcast, target: this.#target });
 		this.#signals.cleanup(() => this.videoSource.close());
+
+		this.audioSource = new Watch.Audio.Source({ broadcast: this.broadcast });
+		this.#signals.cleanup(() => this.audioSource.close());
+
+		this.sync = new Watch.Sync({
+			latency: this.latency,
+			connection: connection.established,
+			video: this.videoSource.output.jitter,
+			audio: this.audioSource.output.jitter,
+		});
+		this.#signals.cleanup(() => this.sync.close());
 
 		this.#signals.run(this.#runPixelBudget.bind(this));
 
@@ -122,18 +139,15 @@ export class Game {
 		const videoEnabled = new Moq.Signals.Signal(true);
 		this.#signals.run(this.#runVideoEnabled.bind(this, videoEnabled));
 
-		this.videoDecoder = new Watch.Video.Decoder(this.videoSource, { enabled: videoEnabled });
+		this.videoDecoder = new Watch.Video.Decoder(this.videoSource, this.sync, { enabled: videoEnabled });
 		this.#signals.cleanup(() => this.videoDecoder.close());
 
-		// Renderer needs a canvas — created by the UI layer, set via setCanvas().
-		this.videoRenderer = new Watch.Video.Renderer(this.videoDecoder);
+		// Renderer needs a canvas — created by the UI layer, set via `canvas`.
+		this.videoRenderer = new Watch.Video.Renderer(this.videoDecoder, { canvas: this.canvas });
 		this.#signals.cleanup(() => this.videoRenderer.close());
 
 		// Audio pipeline — the emitter controls muted (volume) and paused (download).
-		this.audioSource = new Watch.Audio.Source(this.sync, { broadcast: this.broadcast });
-		this.#signals.cleanup(() => this.audioSource.close());
-
-		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource);
+		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, this.sync);
 		this.#signals.cleanup(() => this.audioDecoder.close());
 
 		const audioPaused = new Moq.Signals.Signal(true);
@@ -149,7 +163,7 @@ export class Game {
 		// Resume AudioContext on first user interaction (browser autoplay policy).
 		for (const event of ["click", "touchstart", "touchend", "mousedown", "keydown"]) {
 			this.#signals.event(document, event, () => {
-				const ctx = this.audioDecoder.context.peek();
+				const ctx = this.audioDecoder.output.context.peek();
 				if (ctx?.state === "suspended") ctx.resume();
 			});
 		}
@@ -179,11 +193,11 @@ export class Game {
 	/** Collect media timestamps at each pipeline stage for latency measurement. */
 	#timestamps(): { label: string; ts: number }[] {
 		const entries: { label: string; ts: number }[] = [];
-		const received = this.sync.timestamp.peek();
+		const received = this.sync.output.timestamp.peek();
 		if (received != null) entries.push({ label: "received", ts: received });
-		const decoded = this.videoDecoder.timestamp.peek();
+		const decoded = this.videoDecoder.output.timestamp.peek();
 		if (decoded != null) entries.push({ label: "decoded", ts: decoded });
-		const rendered = this.videoRenderer.timestamp.peek();
+		const rendered = this.videoRenderer.output.timestamp.peek();
 		if (rendered != null) entries.push({ label: "rendered", ts: rendered });
 		return entries;
 	}
@@ -205,7 +219,7 @@ export class Game {
 		const exp = effect.get(this.expanded);
 		// Native GB is 160x144 = 23040 pixels. When expanded, allow 4x for quality.
 		const pixels = exp === this.sessionId ? GB_PIXELS * 4 : GB_PIXELS;
-		this.videoSource.target.set({ pixels });
+		this.#target.set({ pixels });
 	}
 
 	#runVideoEnabled(videoEnabled: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
@@ -219,7 +233,7 @@ export class Game {
 	}
 
 	#runStatus(effect: Moq.Signals.Effect) {
-		const active = effect.get(this.broadcast.active);
+		const active = effect.get(this.broadcast.output.active);
 		if (!active) return;
 
 		const statusTrack = active.subscribe("status", 10);
