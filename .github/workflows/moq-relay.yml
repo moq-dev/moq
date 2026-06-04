@@ -136,8 +136,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both Apple targets build on the Apple Silicon runner. The
+          # Determinate Nix installer dropped Intel macOS, so x86_64 is
+          # cross-compiled (Apple clang is multi-arch) and its smoke test
+          # runs under Rosetta. See rs/scripts/package-binary.sh.
           - target: x86_64-apple-darwin
-            os: macos-15-intel
+            os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
 
@@ -151,6 +155,13 @@ jobs:
         with:
           determinate: false
       - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
+
+      # The cross build links system libs only, but its dyld smoke test must
+      # actually run the x86_64 binary on this arm host. Idempotent no-op when
+      # Rosetta is already present.
+      - name: Install Rosetta (x86_64 smoke test)
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: softwareupdate --install-rosetta --agree-to-license
 
       - name: Parse version
         id: parse

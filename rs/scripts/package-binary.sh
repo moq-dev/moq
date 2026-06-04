@@ -65,23 +65,30 @@ if [[ -z "$TARGET" ]]; then
     echo "Detected target: $TARGET"
 fi
 
-# This script builds the native nix output for the host. Cross-compilation
-# isn't wired up, so an explicit --target that disagrees with the host
-# would silently mislabel the archive. CI keeps target == host by matching
-# each matrix entry to a runner of the right arch.
+# Native builds use the bare flake output. The one supported cross is the
+# Intel mac release built on an Apple Silicon runner (the Determinate Nix
+# installer dropped Intel macOS): the flake exposes a per-target output for
+# it (nix/overlay.nix) and Apple's clang cross-compiles natively, so the only
+# emulation is the Rosetta smoke test below. Any other host/target mismatch
+# would silently mislabel the archive, so it's rejected.
 HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
+NIX_ATTR="$CRATE"
 if [[ "$TARGET" != "$HOST_TARGET" ]]; then
-    echo "Error: --target ($TARGET) does not match host target ($HOST_TARGET)." >&2
-    echo "This script builds native nix outputs; refusing to mislabel the archive." >&2
-    exit 1
+    if [[ "$HOST_TARGET" == "aarch64-apple-darwin" && "$TARGET" == "x86_64-apple-darwin" ]]; then
+        NIX_ATTR="$CRATE-$TARGET"
+    else
+        echo "Error: unsupported cross ($HOST_TARGET -> $TARGET)." >&2
+        echo "Only aarch64-apple-darwin -> x86_64-apple-darwin is wired up; refusing to mislabel the archive." >&2
+        exit 1
+    fi
 fi
 
-echo "Building $CRATE for $TARGET via nix..."
+echo "Building $CRATE for $TARGET via nix (output: $NIX_ATTR)..."
 
 BUILD_TMP="$(mktemp -d)"
 trap 'rm -rf "$BUILD_TMP"' EXIT
 RESULT_LINK="$BUILD_TMP/result"
-nix build "$WORKSPACE_DIR#$CRATE" --out-link "$RESULT_LINK"
+nix build "$WORKSPACE_DIR#$NIX_ATTR" --out-link "$RESULT_LINK"
 
 # Locate the built binary. Crane installs to result/bin/<binary>.
 # By convention each of our binaries shares its crate name.
@@ -115,11 +122,12 @@ if [[ "$(uname)" == "Darwin" ]]; then
     bin="$PACKAGE_DIR/bin/$CRATE"
     "$SCRIPT_DIR/scrub-macho.sh" "$bin"
 
-    # Prove dyld actually loads the scrubbed binary. host==target is enforced
-    # above, so it runs natively; --help triggers dyld's dependency load (the
-    # exact step that aborted on a clean Mac) before clap exits 0.
+    # Prove dyld actually loads the scrubbed binary. --help triggers dyld's
+    # dependency load (the exact step that aborted on a clean Mac) before clap
+    # exits 0. Native for the host arch; the x86_64 cross build runs under
+    # Rosetta 2, which the workflow installs before invoking this script.
     if ! "$bin" --help >/dev/null 2>&1; then
-        echo "Error: scrubbed $bin failed to launch (dyld load failure?)." >&2
+        echo "Error: scrubbed $bin failed to launch (dyld load failure, or missing Rosetta for a cross build?)." >&2
         otool -L "$bin" >&2
         exit 1
     fi

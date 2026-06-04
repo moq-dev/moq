@@ -6,42 +6,123 @@ let
   # toolchain as `nix develop`. Without this, crane falls back to
   # `final.rustc`/`final.cargo`, which nixpkgs resolves to its default Rust
   # (currently 1.94) while the devShell pulls 1.95 from rust-overlay.
-  craneLib = (crane.mkLib final).overrideToolchain final.rust-bin.stable.latest.default;
+  #
+  # Add both Apple targets so an aarch64-darwin host can cross-compile the
+  # x86_64-darwin release artifacts (Apple's clang is multi-arch, so no
+  # emulated x86_64 toolchain is needed). The default profile only ships
+  # std for the host triple, which is why the target list is explicit.
+  rustToolchain = final.rust-bin.stable.latest.default.override {
+    targets = final.lib.optionals final.stdenv.isDarwin [
+      "x86_64-apple-darwin"
+      "aarch64-apple-darwin"
+    ];
+  };
+  craneLib = (crane.mkLib final).overrideToolchain rustToolchain;
 
   # Helper function to get crate info from Cargo.toml
   crateInfo = cargoTomlPath: craneLib.crateNameFromCargoToml { cargoToml = cargoTomlPath; };
+
+  # Cross-compile a crate's release artifact to x86_64-darwin from an
+  # aarch64-darwin host. The Determinate Nix installer dropped Intel macOS
+  # runners, but Apple's clang is multi-arch, so pointing cargo at the
+  # target produces a native (non-emulated) x86_64 build. doCheck is off
+  # because the x86_64 test binaries can't run in the aarch64 build sandbox.
+  # Only valid for pure-Rust artifacts with no cross buildInputs; moq-gst's
+  # GStreamer link would need pkgsCross instead.
+  crossX86Darwin =
+    args:
+    args
+    // {
+      CARGO_BUILD_TARGET = "x86_64-apple-darwin";
+      doCheck = false;
+    };
+
+  moqRelayArgs = crateInfo ../rs/moq-relay/Cargo.toml // {
+    src = craneLib.cleanCargoSource ../.;
+    cargoExtraArgs = "-p moq-relay --features jemalloc";
+    # Enable frame pointers for profiling support (negligible overhead on x86_64).
+    # This also ensures the CDN build matches what Cachix caches.
+    RUSTFLAGS = "-C force-frame-pointers=yes";
+    # jemalloc's configure uses -O0 test builds, which conflict with
+    # Nix's _FORTIFY_SOURCE hardening (requires -O).
+    hardeningDisable = [ "fortify" ];
+  };
+
+  moqCliArgs = crateInfo ../rs/moq-cli/Cargo.toml // {
+    src = craneLib.cleanCargoSource ../.;
+    cargoExtraArgs = "-p moq-cli";
+  };
+
+  moqTokenCliArgs = crateInfo ../rs/moq-token-cli/Cargo.toml // {
+    src = craneLib.cleanCargoSource ../.;
+    cargoExtraArgs = "-p moq-token-cli";
+    meta.mainProgram = "moq-token-cli";
+  };
+
+  libmoqInfo = crateInfo ../rs/libmoq/Cargo.toml;
+  libmoqArgs = libmoqInfo // {
+    # libmoq's build.rs reads moq.pc.in at compile time to generate the
+    # pkgconfig file. craneLib.cleanCargoSource's default filter drops
+    # .pc.in files, which makes build.rs silently skip pkgconfig
+    # generation (see the `if let Ok(template)` in rs/libmoq/build.rs)
+    # and the installPhase's `cp .../moq.pc` then fails.
+    src = final.lib.cleanSourceWith {
+      src = ../.;
+      name = "source";
+      filter = path: type: (final.lib.hasSuffix ".pc.in" path) || (craneLib.filterCargoSources path type);
+    };
+    cargoExtraArgs = "-p libmoq";
+    doCheck = false;
+    nativeBuildInputs = with final; [ pkg-config ];
+
+    # libmoq.a carries moq-ffi's whole dep tree, so an unstripped build is
+    # ~75 MB+. Thin LTO with a single codegen unit dead-strips the unused
+    # monomorphizations Rust bakes into a staticlib, halving the artifact
+    # with no source or ABI change, which keeps the release tarball and
+    # brew download small. Mirrors rs/libmoq/build.sh's Windows cargo path.
+    CARGO_PROFILE_RELEASE_LTO = "thin";
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "1";
+
+    # libmoq is a staticlib; crane's default install phase only handles
+    # binaries. Lay out the artifact tree the way release tarballs and
+    # downstream `find_package(moq)` consumers already expect.
+    installPhase = ''
+      runHook preInstall
+
+      mkdir -p $out/lib/pkgconfig $out/include $out/lib/cmake/moq
+
+      # build.rs derives its output dir from OUT_DIR, so a cross --target
+      # build puts the staticlib, header and pkgconfig under target/<triple>/.
+      # Keep the prefix target-aware so the native and cross outputs share
+      # one installPhase.
+      tdir="target''${CARGO_BUILD_TARGET:+/$CARGO_BUILD_TARGET}"
+      cp "$tdir/release/libmoq.a" $out/lib/
+      cp "$tdir/include/moq.h" $out/include/
+      cp "$tdir/pkgconfig/moq.pc" $out/lib/pkgconfig/
+
+      major_version="$(echo "${libmoqInfo.version}" | cut -d. -f1)"
+      substitute ${../rs/libmoq/cmake/moq-config.cmake.in} \
+        $out/lib/cmake/moq/moq-config.cmake \
+        --subst-var-by LIB_FILE libmoq.a \
+        --subst-var-by VERSION "${libmoqInfo.version}"
+      substitute ${../rs/libmoq/cmake/moq-config-version.cmake.in} \
+        $out/lib/cmake/moq/moq-config-version.cmake \
+        --subst-var-by VERSION "${libmoqInfo.version}" \
+        --subst-var-by MAJOR_VERSION "$major_version"
+
+      runHook postInstall
+    '';
+  };
 in
 {
-  moq-relay = craneLib.buildPackage (
-    crateInfo ../rs/moq-relay/Cargo.toml
-    // {
-      src = craneLib.cleanCargoSource ../.;
-      cargoExtraArgs = "-p moq-relay --features jemalloc";
-      # Enable frame pointers for profiling support (negligible overhead on x86_64).
-      # This also ensures the CDN build matches what Cachix caches.
-      RUSTFLAGS = "-C force-frame-pointers=yes";
-      # jemalloc's configure uses -O0 test builds, which conflict with
-      # Nix's _FORTIFY_SOURCE hardening (requires -O).
-      hardeningDisable = [ "fortify" ];
-    }
-  );
+  moq-relay = craneLib.buildPackage moqRelayArgs;
+  moq-relay-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqRelayArgs);
 
-  moq-cli = craneLib.buildPackage (
-    crateInfo ../rs/moq-cli/Cargo.toml
-    // {
-      src = craneLib.cleanCargoSource ../.;
-      cargoExtraArgs = "-p moq-cli";
-    }
-  );
+  moq-cli = craneLib.buildPackage moqCliArgs;
+  moq-cli-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqCliArgs);
 
-  moq-token-cli = craneLib.buildPackage (
-    crateInfo ../rs/moq-token-cli/Cargo.toml
-    // {
-      src = craneLib.cleanCargoSource ../.;
-      cargoExtraArgs = "-p moq-token-cli";
-      meta.mainProgram = "moq-token-cli";
-    }
-  );
+  moq-token-cli = craneLib.buildPackage moqTokenCliArgs;
+  moq-token-cli-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqTokenCliArgs);
 
   moq-boy = craneLib.buildPackage (
     crateInfo ../rs/moq-boy/Cargo.toml
@@ -62,60 +143,8 @@ in
     }
   );
 
-  libmoq =
-    let
-      info = crateInfo ../rs/libmoq/Cargo.toml;
-    in
-    craneLib.buildPackage (
-      info
-      // {
-        # libmoq's build.rs reads moq.pc.in at compile time to generate the
-        # pkgconfig file. craneLib.cleanCargoSource's default filter drops
-        # .pc.in files, which makes build.rs silently skip pkgconfig
-        # generation (see the `if let Ok(template)` in rs/libmoq/build.rs)
-        # and the installPhase's `cp target/pkgconfig/moq.pc` then fails.
-        src = final.lib.cleanSourceWith {
-          src = ../.;
-          name = "source";
-          filter = path: type: (final.lib.hasSuffix ".pc.in" path) || (craneLib.filterCargoSources path type);
-        };
-        cargoExtraArgs = "-p libmoq";
-        doCheck = false;
-        nativeBuildInputs = with final; [ pkg-config ];
-
-        # libmoq.a carries moq-ffi's whole dep tree, so an unstripped build is
-        # ~75 MB+. Thin LTO with a single codegen unit dead-strips the unused
-        # monomorphizations Rust bakes into a staticlib, halving the artifact
-        # with no source or ABI change, which keeps the release tarball and
-        # brew download small. Mirrors rs/libmoq/build.sh's Windows cargo path.
-        CARGO_PROFILE_RELEASE_LTO = "thin";
-        CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "1";
-
-        # libmoq is a staticlib; crane's default install phase only handles
-        # binaries. Lay out the artifact tree the way release tarballs and
-        # downstream `find_package(moq)` consumers already expect.
-        installPhase = ''
-          runHook preInstall
-
-          mkdir -p $out/lib/pkgconfig $out/include $out/lib/cmake/moq
-          cp target/release/libmoq.a $out/lib/
-          cp target/include/moq.h $out/include/
-          cp target/pkgconfig/moq.pc $out/lib/pkgconfig/
-
-          major_version="$(echo "${info.version}" | cut -d. -f1)"
-          substitute ${../rs/libmoq/cmake/moq-config.cmake.in} \
-            $out/lib/cmake/moq/moq-config.cmake \
-            --subst-var-by LIB_FILE libmoq.a \
-            --subst-var-by VERSION "${info.version}"
-          substitute ${../rs/libmoq/cmake/moq-config-version.cmake.in} \
-            $out/lib/cmake/moq/moq-config-version.cmake \
-            --subst-var-by VERSION "${info.version}" \
-            --subst-var-by MAJOR_VERSION "$major_version"
-
-          runHook postInstall
-        '';
-      }
-    );
+  libmoq = craneLib.buildPackage libmoqArgs;
+  libmoq-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin libmoqArgs);
 
   moq-gst-plugin = craneLib.buildPackage (
     crateInfo ../rs/moq-gst/Cargo.toml

@@ -28,8 +28,12 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             use_nix: true
+          # Both Apple targets build on the Apple Silicon runner: the
+          # Determinate Nix installer dropped Intel macOS, so x86_64 is
+          # cross-compiled (Apple clang is multi-arch). libmoq.a needs no
+          # execution, so no Rosetta. See rs/libmoq/build.sh.
           - target: x86_64-apple-darwin
-            os: macos-15-intel
+            os: macos-latest
             use_nix: true
           - target: aarch64-apple-darwin
             os: macos-latest
