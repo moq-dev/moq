@@ -199,17 +199,18 @@ export class MultiBackend {
 		// Audio download follows the emitter's enable policy (paused/muted).
 		effect.proxy(this.#audioEnabled, audioEmitter.output.enabled);
 
-		// Video download policy: when playing, follow visibility; when paused, fetch a
-		// single preview frame then stop.
+		// Video downloads while playing and on-screen. When paused, keep downloading only
+		// until a frame is on the canvas, then stop: a cold paused start still shows a poster
+		// instead of black, without streaming while paused. Read the rendered frame only in
+		// the paused branch so playback doesn't re-run this every painted frame.
 		effect.run((inner) => {
-			const paused = inner.get(this.input.paused);
 			const visible = inner.get(videoRenderer.output.visible);
-			if (!paused) {
+			if (!inner.get(this.input.paused)) {
 				this.#videoEnabled.set(visible);
 				return;
 			}
-			const frame = inner.get(videoDecoder.output.frame);
-			this.#videoEnabled.set(!frame);
+			const frame = inner.get(videoRenderer.output.frame);
+			this.#videoEnabled.set(visible && !frame);
 		});
 		effect.cleanup(() => {
 			this.#videoEnabled.set(false);

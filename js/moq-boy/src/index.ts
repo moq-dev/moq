@@ -135,10 +135,7 @@ export class Game {
 
 		this.#signals.run(this.#runPixelBudget.bind(this));
 
-		// Video is enabled on the grid or when this game is expanded.
 		const videoEnabled = new Moq.Signals.Signal(true);
-		this.#signals.run(this.#runVideoEnabled.bind(this, videoEnabled));
-
 		this.videoDecoder = new Watch.Video.Decoder(this.videoSource, this.sync, { enabled: videoEnabled });
 		this.#signals.cleanup(() => this.videoDecoder.close());
 
@@ -146,7 +143,11 @@ export class Game {
 		this.videoRenderer = new Watch.Video.Renderer(this.videoDecoder, { canvas: this.canvas });
 		this.#signals.cleanup(() => this.videoRenderer.close());
 
-		// Audio pipeline — the emitter controls muted (volume) and paused (download).
+		// Download on the grid or when expanded, but only while the tile is on-screen.
+		// Reads the renderer's visibility, so it must run after the renderer exists.
+		this.#signals.run(this.#runVideoEnabled.bind(this, videoEnabled));
+
+		// Audio pipeline — the emitter stops the download when muted or paused.
 		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, this.sync);
 		this.#signals.cleanup(() => this.audioDecoder.close());
 
@@ -224,7 +225,9 @@ export class Game {
 
 	#runVideoEnabled(videoEnabled: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
 		const exp = effect.get(this.expanded);
-		videoEnabled.set(exp === undefined || exp === this.sessionId);
+		const visible = effect.get(this.videoRenderer.output.visible);
+		// On the grid or when expanded, but never download an off-screen tile.
+		videoEnabled.set((exp === undefined || exp === this.sessionId) && visible);
 	}
 
 	#runAudioPaused(audioPaused: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
