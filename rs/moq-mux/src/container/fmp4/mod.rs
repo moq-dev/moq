@@ -336,21 +336,11 @@ pub(crate) fn synthesize_video_trak(
 				})
 			}
 		}
-		VideoCodec::VP8 => {
-			// VP8 is always 8-bit 4:2:0; the catalog carries no parameters, so the
-			// vpcC is purely informational. Profile 0 / level 0 are the standard
-			// "unspecified" placeholders. See https://www.webmproject.org/vp9/mp4/.
-			mp4_atom::Codec::from(mp4_atom::Vp08 {
-				visual,
-				vpcc: mp4_atom::VpcC {
-					profile: 0,
-					level: 0,
-					bit_depth: 8,
-					..Default::default()
-				},
-				..Default::default()
-			})
-		}
+		VideoCodec::VP8 => mp4_atom::Codec::from(mp4_atom::Vp08 {
+			visual,
+			vpcc: crate::codec::vp8::vpcc(),
+			..Default::default()
+		}),
 		other => return Err(Error::UnsupportedSynthesis(format!("video codec {:?}", other))),
 	};
 
