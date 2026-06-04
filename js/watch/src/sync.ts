@@ -2,14 +2,22 @@ import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 
-/** Latency: `"real-time"` auto-computes jitter from RTT; a `Time.Milli` sets a fixed jitter. */
+/** Latency floor: `"real-time"` auto-computes jitter from RTT; a `Time.Milli` sets a fixed jitter. */
 export type Latency = "real-time" | Time.Milli;
 
 const MIN_JITTER = 20 as Time.Milli;
 const FALLBACK_JITTER = 100 as Time.Milli;
 
 export interface SyncProps {
-	latency?: Latency | Signal<Latency>;
+	// Latency floor: the jitter/startup buffer. Playback un-stalls once this much is buffered
+	// and never deliberately drops below it. `"real-time"` derives it from RTT.
+	latencyMin?: Latency | Signal<Latency>;
+
+	// Latency ceiling: "real-time" (default) caps at the RTT jitter (= minimize), a number caps
+	// at that many ms, and `undefined` is uncapped (buffer indefinitely). While the buffer stays
+	// under the ceiling we never skip ahead, so faster-than-real-time frames (e.g. TTS) build up.
+	latencyMax?: Latency | Signal<Latency | undefined>;
+
 	connection?: Signal<Moq.Connection.Established | undefined>;
 	audio?: Time.Milli | Signal<Time.Milli | undefined>;
 	video?: Time.Milli | Signal<Time.Milli | undefined>;
@@ -21,17 +29,32 @@ export class Sync {
 	#reference = new Signal<Time.Milli | undefined>(undefined);
 	readonly reference: Signal<Time.Milli | undefined> = this.#reference;
 
-	// The latency setting: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter.
-	latency: Signal<Latency>;
+	// The latency floor: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter.
+	latencyMin: Signal<Latency>;
+
+	// The latency ceiling: "real-time" (default) caps at the RTT-derived jitter (= minimize),
+	// a number caps at that many ms, and `undefined` means no cap (buffer indefinitely).
+	latencyMax: Signal<Latency | undefined>;
 
 	// The jitter buffer in milliseconds (always numeric).
 	// In "real-time" mode this is updated automatically from RTT.
-	// When latency is a number, jitter equals that number.
+	// When latencyMin is a number, jitter equals that number.
 	jitter: Signal<Time.Milli>;
 
 	// Any additional delay required for audio or video.
 	audio: Signal<Time.Milli | undefined>;
 	video: Signal<Time.Milli | undefined>;
+
+	// Derived: true when the ceiling sits above the floor (or is uncapped). Buffered playback
+	// lets the reference stay anchored so future-dated frames build up a buffer, re-anchoring
+	// (skipping ahead) only when latency would exceed the ceiling. See `reset()`.
+	#buffered = new Signal<boolean>(false);
+	readonly buffered: Signal<boolean> = this.#buffered;
+
+	// Derived cap on buffered audio, consumed by the audio ring. A number is the ceiling in ms;
+	// `undefined` means uncapped (the ring bounds memory itself and applies backpressure).
+	#maxBuffer = new Signal<Time.Milli | undefined>(undefined);
+	readonly maxBuffer: Signal<Time.Milli | undefined> = this.#maxBuffer;
 
 	// The total buffer required: jitter + max(audio, video).
 	#buffer = new Signal<Time.Milli>(Time.Milli.zero);
@@ -57,7 +80,9 @@ export class Sync {
 	signals = new Effect();
 
 	constructor(props?: SyncProps) {
-		this.latency = Signal.from(props?.latency ?? ("real-time" as Latency));
+		this.latencyMin = Signal.from(props?.latencyMin ?? ("real-time" as Latency));
+		// Default ceiling tracks the floor ("real-time"), i.e. minimize latency.
+		this.latencyMax = Signal.from(props?.latencyMax ?? ("real-time" as Latency));
 		this.jitter = new Signal<Time.Milli>(FALLBACK_JITTER);
 		this.#connection = props?.connection;
 		this.audio = Signal.from(props?.audio);
@@ -67,13 +92,44 @@ export class Sync {
 
 		this.signals.run(this.#runJitter.bind(this));
 		this.signals.run(this.#runBuffer.bind(this));
+		this.signals.run(this.#runRange.bind(this));
+	}
+
+	// Derive `buffered` / `maxBuffer` from the floor (`buffer`) and the ceiling (`latencyMax`).
+	#runRange(effect: Effect): void {
+		const max = effect.get(this.latencyMax);
+		const floor = effect.get(this.buffer);
+
+		if (max === undefined) {
+			// Uncapped: buffer indefinitely (the ring bounds memory and applies backpressure).
+			this.#buffered.set(true);
+			this.#maxBuffer.set(undefined);
+		} else if (max === "real-time") {
+			// Ceiling tracks the floor: minimize latency, the live default.
+			this.#buffered.set(false);
+			this.#maxBuffer.set(floor);
+		} else {
+			// Buffered only when the ceiling is above the floor; otherwise it collapses to minimize.
+			this.#buffered.set(max > floor);
+			this.#maxBuffer.set(Time.Milli.max(max, floor));
+		}
+	}
+
+	// The maximum total latency (lookahead + floor) we tolerate before re-anchoring, in ms.
+	// `Infinity` when uncapped. Used by `received()` to decide when to skip ahead.
+	#latencyCap(): number {
+		const max = this.latencyMax.peek();
+		const floor = this.#buffer.peek();
+		if (max === undefined) return Number.POSITIVE_INFINITY;
+		if (max === "real-time") return floor;
+		return Math.max(max, floor);
 	}
 
 	#runJitter(effect: Effect): void {
-		const latency = effect.get(this.latency);
+		const latency = effect.get(this.latencyMin);
 
 		if (typeof latency === "number") {
-			// Fixed mode: latency value is the jitter.
+			// Fixed mode: the floor value is the jitter.
 			this.#minRtt = undefined;
 			this.jitter.set(latency);
 			return;
@@ -110,43 +166,66 @@ export class Sync {
 		this.#update = Promise.withResolvers();
 	}
 
-	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
+	// Fold a newly received frame into the reference. The reference anchors playback to the
+	// wall clock; we lower it (skip ahead) only when keeping it would push latency past the cap.
 	received(timestamp: Time.Milli, label = ""): void {
 		this.timestamp.update((current) => (current === undefined || timestamp > current ? timestamp : current));
 		const now = Time.Milli.now();
 		const ref = Time.Milli.sub(now, timestamp);
 		const currentRef = this.#reference.peek();
 
-		if (currentRef !== undefined) {
-			// Check if `wait()` would not sleep at all.
-			// NOTE: We check here instead of in `wait()` so we can identify when frames are received late.
-			// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
-			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#buffer.peek());
-			if (sleep < 0) {
-				const entry = this.#late.get(label);
-				if (entry) {
-					entry.count++;
-					entry.maxMs = Math.max(entry.maxMs, -sleep);
-				} else {
-					this.#late.set(label, { count: 1, maxMs: -sleep });
-				}
-			} else {
-				const entry = this.#late.get(label);
-				if (entry) {
-					const prefix = label ? `sync[${label}]` : "sync";
-					const behind = Sync.#formatDuration(entry.maxMs);
-					console.debug(`${prefix}: ${entry.count} late frame(s), max ${behind} behind`);
-					this.#late.delete(label);
-				}
-			}
+		// First frame anchors the reference.
+		if (currentRef === undefined) {
+			this.#setReference(ref);
+			return;
+		}
 
-			if (ref >= currentRef) {
-				// Our frame was not relatively newer than any other frame.
-				return;
+		// Check if `wait()` would not sleep at all.
+		// NOTE: We check here instead of in `wait()` so we can identify when frames are received late.
+		// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
+		const floor = this.#buffer.peek();
+		const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), floor);
+		if (sleep < 0) {
+			const entry = this.#late.get(label);
+			if (entry) {
+				entry.count++;
+				entry.maxMs = Math.max(entry.maxMs, -sleep);
+			} else {
+				this.#late.set(label, { count: 1, maxMs: -sleep });
+			}
+		} else {
+			const entry = this.#late.get(label);
+			if (entry) {
+				const prefix = label ? `sync[${label}]` : "sync";
+				const behind = Sync.#formatDuration(entry.maxMs);
+				console.debug(`${prefix}: ${entry.count} late frame(s), max ${behind} behind`);
+				this.#late.delete(label);
 			}
 		}
 
+		// Frame isn't earlier than the anchor: it can't lower latency, so keep the reference.
+		if (ref >= currentRef) return;
+
+		// Frame is earlier (more lookahead). `sleep` is the latency keeping the anchor would impose.
+		const cap = this.#latencyCap();
+		if (sleep <= cap) return; // within budget: let the buffer grow instead of skipping ahead
+
+		// Over the cap: re-anchor down so the resulting latency is exactly the cap.
+		this.#setReference(Time.Milli.add(ref, (cap - floor) as Time.Milli));
+	}
+
+	#setReference(ref: Time.Milli): void {
 		this.#reference.set(ref);
+		this.#update.resolve();
+		this.#update = Promise.withResolvers();
+	}
+
+	// Re-anchor playback to the next frame received. Call this at an utterance boundary
+	// in buffered mode (typically alongside flushing the audio buffer) so the new content
+	// plays from its own first frame instead of inheriting the previous reference.
+	reset(): void {
+		this.#reference.set(undefined);
+		this.#late.clear();
 		this.#update.resolve();
 		this.#update = Promise.withResolvers();
 	}

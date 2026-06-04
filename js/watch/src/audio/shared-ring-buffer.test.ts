@@ -564,3 +564,69 @@ describe("SharedRingBuffer.resize", () => {
 		}
 	});
 });
+
+describe("buffered mode", () => {
+	function createBuffered(latency: number) {
+		// Capacity large enough to hold a whole utterance without overflow.
+		const init = allocSharedRingBuffer(1, 10000, 1000, true);
+		const buffer = new SharedRingBuffer(init);
+		buffer.setLatency(latency);
+		return buffer;
+	}
+
+	it("anchors to the first frame instead of index 0", () => {
+		const buffer = createBuffered(50);
+		// First frame at a future timestamp; READ should snap to it, not gap-fill from 0.
+		insert(buffer, 2000, 100, { channels: 1, value: 0.1 });
+		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(2000 as Time.Milli);
+		expect(buffer.stalled).toBe(false); // 100 buffered >= 50 latency
+	});
+
+	it("plays through the whole buffer without skipping ahead", () => {
+		const buffer = createBuffered(50);
+		// Dump a 1s utterance faster than real-time with consecutive future timestamps.
+		for (let i = 0; i < 10; i++) {
+			insert(buffer, 2000 + i * 100, 100, { channels: 1, value: (i + 1) / 10 });
+		}
+		expect(buffer.length).toBe(1000);
+
+		// Read the oldest frame first; a non-buffered ring would have skipped to write-latency.
+		const first = read(buffer, 100, 1);
+		expect(first[0][0]).toBeCloseTo(0.1, 5);
+		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(2100 as Time.Milli);
+
+		const second = read(buffer, 100, 1);
+		expect(second[0][0]).toBeCloseTo(0.2, 5);
+	});
+
+	it("reset re-stalls and re-anchors to the next utterance", () => {
+		const buffer = createBuffered(50);
+		insert(buffer, 2000, 100, { channels: 1, value: 0.1 });
+		read(buffer, 50, 1);
+
+		buffer.reset();
+		expect(buffer.stalled).toBe(true);
+
+		// A new utterance with its own timestamps anchors fresh.
+		insert(buffer, 500, 100, { channels: 1, value: 0.9 });
+		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(500 as Time.Milli);
+		const out = read(buffer, 100, 1);
+		expect(out[0][0]).toBeCloseTo(0.9, 5);
+	});
+
+	it("drops the oldest samples once the buffer exceeds the cap", () => {
+		// 200-sample capacity at 1000Hz = a 200ms cap.
+		const init = allocSharedRingBuffer(1, 200, 1000, true);
+		const buffer = new SharedRingBuffer(init);
+		buffer.setLatency(50);
+
+		insert(buffer, 0, 100, { channels: 1, value: 0.1 }); // [0, 100)
+		insert(buffer, 100, 100, { channels: 1, value: 0.2 }); // [100, 200)
+		insert(buffer, 200, 100, { channels: 1, value: 0.3 }); // exceeds cap; drops [0, 100)
+
+		// READ skipped forward to stay within the cap; oldest frame is gone.
+		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(100 as Time.Milli);
+		expect(read(buffer, 100, 1)[0][0]).toBeCloseTo(0.2, 5);
+		expect(read(buffer, 100, 1)[0][0]).toBeCloseTo(0.3, 5);
+	});
+});

@@ -6,7 +6,19 @@ import { MultiBackend } from "./backend";
 import { Broadcast, type CatalogFormat, parseCatalogFormat } from "./broadcast";
 import type { Latency } from "./sync";
 
-const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog-format"] as const;
+const OBSERVED = [
+	"url",
+	"name",
+	"paused",
+	"volume",
+	"muted",
+	"reload",
+	"latency",
+	"latency-min",
+	"latency-max",
+	"jitter",
+	"catalog-format",
+] as const;
 type Observed = (typeof OBSERVED)[number];
 
 // Close everything when this element is garbage collected.
@@ -113,8 +125,8 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
-			const latency = effect.get(this.backend.latency);
-			if (latency === "real-time") {
+			const min = effect.get(this.backend.latencyMin);
+			if (min === "real-time") {
 				this.setAttribute("latency", "real-time");
 			} else {
 				const jitter = Math.floor(effect.get(this.backend.jitter));
@@ -161,9 +173,18 @@ export default class MoqWatch extends HTMLElement {
 		this.#enabled.set(false);
 	}
 
-	#setLatencyNumber(value: string | null) {
-		const parsed = value ? Number.parseFloat(value) : Number.NaN;
-		this.backend.latency.set((Number.isFinite(parsed) ? parsed : 100) as Time.Milli);
+	#parseLatency(value: string | null): Latency {
+		if (!value || value === "real-time") return "real-time";
+		const parsed = Number.parseFloat(value);
+		return (Number.isFinite(parsed) ? parsed : 100) as Time.Milli;
+	}
+
+	#parseLatencyMax(value: string | null): Latency | undefined {
+		// Absent or "real-time" minimizes; "none"/"infinite" is uncapped; a number caps in ms.
+		if (value === null || value === "real-time") return "real-time";
+		if (value === "none" || value === "infinite") return undefined;
+		const parsed = Number.parseFloat(value);
+		return Number.isFinite(parsed) ? (parsed as Time.Milli) : "real-time";
 	}
 
 	attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null) {
@@ -185,14 +206,15 @@ export default class MoqWatch extends HTMLElement {
 		} else if (name === "reload") {
 			this.broadcast.reload.set(newValue !== null);
 		} else if (name === "latency") {
-			if (!newValue || newValue === "real-time") {
-				this.backend.latency.set("real-time");
-			} else {
-				this.#setLatencyNumber(newValue);
-			}
+			// Sugar: collapse the floor and ceiling to a single value.
+			this.latency = this.#parseLatency(newValue);
+		} else if (name === "latency-min") {
+			this.backend.latencyMin.set(this.#parseLatency(newValue));
+		} else if (name === "latency-max") {
+			this.backend.latencyMax.set(this.#parseLatencyMax(newValue));
 		} else if (name === "jitter") {
 			// Deprecated: use latency="<number>" instead.
-			this.#setLatencyNumber(newValue);
+			this.latency = this.#parseLatency(newValue);
 		} else if (name === "catalog-format") {
 			this.broadcast.catalogFormat.set(parseCatalogFormat(newValue));
 		} else {
@@ -249,12 +271,37 @@ export default class MoqWatch extends HTMLElement {
 		this.broadcast.reload.set(value);
 	}
 
+	/** The latency target. Setting it collapses the floor and ceiling to the same value (minimize). */
 	get latency(): Latency {
-		return this.backend.latency.peek();
+		return this.backend.latencyMin.peek();
 	}
 
 	set latency(value: Latency) {
-		this.backend.latency.set(value);
+		this.backend.latencyMin.set(value);
+		this.backend.latencyMax.set(value);
+	}
+
+	/** The latency floor (jitter buffer). Same as `latency` but leaves the ceiling untouched. */
+	get latencyMin(): Latency {
+		return this.backend.latencyMin.peek();
+	}
+
+	set latencyMin(value: Latency) {
+		this.backend.latencyMin.set(value);
+	}
+
+	/**
+	 * The latency ceiling: `"real-time"` (default) minimizes, a number caps at that many ms, and
+	 * `undefined` is uncapped. A ceiling above the floor enables buffered playback: build up a
+	 * buffer from future-dated frames (e.g. TTS written faster than real-time) instead of skipping
+	 * ahead. Beyond the ceiling playback skips ahead. Call `reset()` at each utterance boundary.
+	 */
+	get latencyMax(): Latency | undefined {
+		return this.backend.latencyMax.peek();
+	}
+
+	set latencyMax(value: Latency | undefined) {
+		this.backend.latencyMax.set(value);
 	}
 
 	/** The jitter buffer in milliseconds. */
@@ -264,7 +311,12 @@ export default class MoqWatch extends HTMLElement {
 
 	/** @deprecated Use `latency = <number>` instead. */
 	set jitter(value: number) {
-		this.backend.latency.set(value as Time.Milli);
+		this.latency = value as Time.Milli;
+	}
+
+	/** Re-anchor playback and flush the audio buffer at an utterance boundary (buffered mode). */
+	reset(): void {
+		this.backend.reset();
 	}
 
 	get catalogFormat(): CatalogFormat | undefined {

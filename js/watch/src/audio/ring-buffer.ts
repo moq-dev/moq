@@ -1,5 +1,10 @@
 import { Time } from "@moq/net";
 
+// Capacity for an uncapped buffered ring (postMessage path). The main thread can't see the
+// worklet's fill level here, so there's no backpressure; the worklet drops the oldest if full,
+// which bounds an uncapped buffer to this on the fallback path.
+const DEFAULT_MAX_BUFFER = 1_500 as Time.Milli;
+
 export class AudioRingBuffer {
 	#buffer: Float32Array[];
 	#writeIndex = 0;
@@ -9,20 +14,40 @@ export class AudioRingBuffer {
 	readonly channels: number;
 	#stalled = true;
 
-	constructor(props: { rate: number; channels: number; latency: Time.Milli }) {
+	// Buffered mode: anchor to the first sample, play through without skipping ahead.
+	readonly #buffered: boolean;
+	// Un-stall threshold in samples (how much to buffer before playback starts).
+	#latencySamples: number;
+	// Whether the read/write indices have been anchored to the first inserted sample.
+	#anchored = false;
+
+	constructor(props: {
+		rate: number;
+		channels: number;
+		latency: Time.Milli;
+		buffered?: boolean;
+		maxBuffer?: Time.Milli;
+	}) {
 		if (props.channels <= 0) throw new Error("invalid channels");
 		if (props.rate <= 0) throw new Error("invalid sample rate");
 		if (props.latency <= 0) throw new Error("invalid latency");
 
-		const samples = Math.ceil(props.rate * Time.Second.fromMilli(props.latency));
-		if (samples === 0) throw new Error("empty buffer");
+		this.#latencySamples = Math.ceil(props.rate * Time.Second.fromMilli(props.latency));
+		if (this.#latencySamples === 0) throw new Error("empty buffer");
 
 		this.rate = props.rate;
 		this.channels = props.channels;
+		this.#buffered = props.buffered ?? false;
+
+		// In buffered mode the capacity is the maxBuffer cap, not just the latency target.
+		const maxBuffer = props.maxBuffer ?? DEFAULT_MAX_BUFFER;
+		const capacity = this.#buffered
+			? Math.ceil(props.rate * Time.Second.fromMilli(maxBuffer))
+			: this.#latencySamples;
 
 		this.#buffer = [];
 		for (let i = 0; i < this.channels; i++) {
-			this.#buffer[i] = new Float32Array(samples);
+			this.#buffer[i] = new Float32Array(capacity);
 		}
 	}
 
@@ -43,6 +68,12 @@ export class AudioRingBuffer {
 	}
 
 	resize(latency: Time.Milli): void {
+		// In buffered mode the capacity is fixed; latency only moves the un-stall threshold.
+		if (this.#buffered) {
+			this.#latencySamples = Math.ceil(this.rate * Time.Second.fromMilli(latency));
+			return;
+		}
+
 		const newCapacity = Math.ceil(this.rate * Time.Second.fromMilli(latency));
 		if (newCapacity === this.capacity) return;
 		if (newCapacity === 0) throw new Error("empty buffer");
@@ -79,6 +110,14 @@ export class AudioRingBuffer {
 
 		let start = Math.round(Time.Second.fromMicro(timestamp) * this.rate);
 		let samples = data[0].length;
+
+		// Buffered mode: anchor both indices to the first sample so we play from its
+		// timestamp instead of gap-filling silence from index 0 to a large timestamp.
+		if (this.#buffered && !this.#anchored) {
+			this.#readIndex = start;
+			this.#writeIndex = start;
+			this.#anchored = true;
+		}
 
 		// Ignore samples that are too old (before the read index)
 		let offset = this.#readIndex - start;
@@ -137,6 +176,20 @@ export class AudioRingBuffer {
 		if (end > this.#writeIndex) {
 			this.#writeIndex = end;
 		}
+
+		// Start playback once we've buffered the latency target. In buffered mode the cap
+		// is large, so we usually un-stall here rather than via the overflow path above.
+		if (this.#buffered && this.length >= this.#latencySamples) {
+			this.#stalled = false;
+		}
+	}
+
+	// Flush all buffered samples and re-stall, ready to anchor the next utterance.
+	reset(): void {
+		this.#readIndex = 0;
+		this.#writeIndex = 0;
+		this.#stalled = true;
+		this.#anchored = false;
 	}
 
 	read(output: Float32Array[]): number {

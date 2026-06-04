@@ -116,9 +116,11 @@ export class Decoder {
 			// Initial target latency in samples.
 			const latency = this.source.sync.buffer.peek();
 			const latencySamples = Math.ceil(sampleRate * Time.Second.fromMilli(latency));
+			const buffered = this.source.sync.buffered.peek();
+			const maxBuffer = this.source.sync.maxBuffer.peek();
 
 			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
-			const ring = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples);
+			const ring = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples, buffered, maxBuffer);
 			this.#ring = ring;
 			effect.cleanup(() => {
 				ring.close();
@@ -254,6 +256,10 @@ export class Decoder {
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
 				}));
 
+				// Backpressure: in uncapped buffered mode this holds the encoded frame until the
+				// playhead nears it, so we keep the lookahead as Opus instead of decoded PCM.
+				await this.#ring?.wait(frame.timestamp as Time.Micro);
+
 				const chunk = new EncodedAudioChunk({
 					type: frame.keyframe ? "key" : "delta",
 					data: frame.data,
@@ -325,6 +331,10 @@ export class Decoder {
 				this.#stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
 				}));
+
+				// Backpressure: in uncapped buffered mode this holds the encoded frame until the
+				// playhead nears it, so we keep the lookahead as Opus instead of decoded PCM.
+				await this.#ring?.wait(frame.timestamp);
 
 				if (decoder.state === "closed") break;
 				decoder.decode(
@@ -402,6 +412,12 @@ export class Decoder {
 				current.shift();
 			}
 		});
+	}
+
+	// Flush the audio buffer and re-stall, re-anchoring playback to the next frame.
+	// Use in buffered mode at an utterance boundary (see Sync.reset).
+	reset(): void {
+		this.#ring?.reset();
 	}
 
 	close() {

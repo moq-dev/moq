@@ -36,19 +36,38 @@ export interface Backend {
 	// Audio specific signals.
 	audio?: Audio.Backend;
 
-	// The latency setting: "real-time" auto-computes jitter, a number sets a fixed jitter.
-	latency: Signal<Latency>;
+	// The latency floor: "real-time" auto-computes jitter, a number sets a fixed jitter.
+	latencyMin: Signal<Latency>;
+
+	// The latency ceiling: "real-time" (default) caps at the RTT jitter (minimize), a number
+	// caps at that many ms, `undefined` is uncapped. A ceiling above the floor enables buffered
+	// playback: build up a buffer from future-dated frames instead of skipping ahead.
+	latencyMax: Signal<Latency | undefined>;
 
 	// The jitter buffer in milliseconds.
 	jitter: Signal<Moq.Time.Milli>;
+
+	// Derived: whether buffered playback is active (ceiling above floor).
+	buffered: Signal<boolean>;
+
+	// Re-anchor playback (and flush the audio buffer) at an utterance boundary in buffered mode.
+	reset(): void;
 }
 
 export interface MultiBackendProps {
 	element?: HTMLCanvasElement | HTMLVideoElement | Signal<HTMLCanvasElement | HTMLVideoElement | undefined>;
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 
-	// Latency: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter in ms.
+	// Latency floor (the jitter buffer). "real-time" derives it from RTT, a number fixes it.
+	// `latency` is sugar that collapses the floor and ceiling to the same value.
 	latency?: Latency | Signal<Latency>;
+	latencyMin?: Latency | Signal<Latency>;
+
+	// Latency ceiling: "real-time" (default) minimizes, a number caps at that many ms, `undefined`
+	// is uncapped. A ceiling above the floor enables buffered playback: build up a buffer from
+	// future-dated frames (e.g. TTS) instead of minimizing latency. Call `reset()` at each
+	// utterance boundary to re-anchor.
+	latencyMax?: Latency | Signal<Latency | undefined>;
 
 	// Established connection, used by Sync to read RTT (PROBE) for dynamic jitter in "real-time" mode.
 	connection?: Signal<Moq.Connection.Established | undefined>;
@@ -108,8 +127,10 @@ class AudioBackend implements Audio.Backend {
 export class MultiBackend implements Backend {
 	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
 	broadcast: Signal<Broadcast | undefined>;
-	latency: Signal<Latency>;
+	latencyMin: Signal<Latency>;
+	latencyMax: Signal<Latency | undefined>;
 	jitter: Signal<Moq.Time.Milli>;
+	buffered: Signal<boolean>;
 	paused: Signal<boolean>;
 
 	video: VideoBackend;
@@ -117,6 +138,9 @@ export class MultiBackend implements Backend {
 
 	audio: AudioBackend;
 	#audioSource: Audio.Source;
+
+	// The active WebCodecs audio decoder, used to flush the buffer on `reset()`.
+	#audioDecoder?: Audio.Decoder;
 
 	// Used to sync audio and video playback at a target delay.
 	sync: Sync;
@@ -126,9 +150,15 @@ export class MultiBackend implements Backend {
 	constructor(props?: MultiBackendProps) {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
-		this.sync = new Sync({ latency: props?.latency, connection: props?.connection });
-		this.latency = this.sync.latency;
+		this.sync = new Sync({
+			latencyMin: props?.latencyMin ?? props?.latency,
+			latencyMax: props?.latencyMax,
+			connection: props?.connection,
+		});
+		this.latencyMin = this.sync.latencyMin;
+		this.latencyMax = this.sync.latencyMax;
 		this.jitter = this.sync.jitter;
+		this.buffered = this.sync.buffered;
 
 		this.#videoSource = new Video.Source(this.sync, {
 			broadcast: this.broadcast,
@@ -159,6 +189,7 @@ export class MultiBackend implements Backend {
 	#runWebcodecs(effect: Effect, element: HTMLCanvasElement): void {
 		const videoSource = new Video.Decoder(this.#videoSource);
 		const audioSource = new Audio.Decoder(this.#audioSource);
+		this.#audioDecoder = audioSource;
 
 		const audioEmitter = new Audio.Emitter(audioSource, {
 			volume: this.audio.volume,
@@ -176,6 +207,7 @@ export class MultiBackend implements Backend {
 			audioSource.close();
 			audioEmitter.close();
 			videoRenderer.close();
+			this.#audioDecoder = undefined;
 		});
 
 		// Proxy the read only signals to the backend.
@@ -216,6 +248,13 @@ export class MultiBackend implements Backend {
 		effect.proxy(this.audio.stats, audio.stats);
 		effect.proxy(this.audio.buffered, audio.buffered);
 		effect.proxy(this.audio.context, audio.context);
+	}
+
+	// Re-anchor playback at an utterance boundary in buffered mode: reset the sync reference
+	// and flush the audio buffer so the next utterance plays from its own first frame.
+	reset(): void {
+		this.sync.reset();
+		this.#audioDecoder?.reset();
 	}
 
 	close(): void {
