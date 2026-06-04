@@ -277,7 +277,7 @@ impl BroadcastProducer {
 /// denies with [`Error::Cancel`].
 pub struct PendingTrack {
 	name: String,
-	subscription: Subscription,
+	subscription: Option<Subscription>,
 	state: kio::Weak<State>,
 	/// Set once accepted or denied so [`Drop`] doesn't deny a second time.
 	completed: bool,
@@ -289,11 +289,12 @@ impl PendingTrack {
 		&self.name
 	}
 
-	/// The first waiting subscriber's preferences, as a hint for constructing the
-	/// [`Track`]. The full aggregate is available on the [`TrackProducer`] returned
-	/// by [`Self::accept`] via [`TrackProducer::subscription`].
-	pub fn subscription(&self) -> &Subscription {
-		&self.subscription
+	/// The first waiting subscriber's preferences, or `None` when only `info()`
+	/// callers are waiting (no group demand). A handler uses this to decide whether
+	/// to open an upstream subscription. The full aggregate is available on the
+	/// [`TrackProducer`] returned by [`Self::accept`].
+	pub fn subscription(&self) -> Option<Subscription> {
+		self.subscription.clone()
 	}
 
 	/// Serve the request with the given track, resolving every waiting subscriber.
@@ -581,10 +582,11 @@ impl BroadcastDynamic {
 			let Some(name) = state.request_order.pop_front() else {
 				return Poll::Pending;
 			};
-			// The name stays in `requests` so concurrent subscribers can still
-			// coalesce onto it until the publisher accepts or denies.
+			// The name stays in `requests` so concurrent subscribers (and info()
+			// callers) can still coalesce onto it until the publisher accepts or denies.
 			let pending = state.requests.get(&name).expect("request_order out of sync");
-			let subscription = pending.resolvers.first().map(|(s, _)| s.clone()).unwrap_or_default();
+			// `None` when only `info()` callers are waiting (no group demand yet).
+			let subscription = pending.resolvers.first().map(|(s, _)| s.clone());
 			Poll::Ready((name, subscription))
 		})
 		.map(|res| {
