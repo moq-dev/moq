@@ -129,30 +129,26 @@ describe("Effect", () => {
 });
 
 describe("Computed", () => {
-	test("computes lazily on first read; never undefined", () => {
+	test("is undefined until the first run completes, then resolves", async () => {
 		const a = new Signal(2);
 		const b = new Signal(3);
 		const sum = new Computed((e) => e.get(a) + e.get(b));
+
+		// Like any signal, the value isn't available synchronously.
+		expect(sum.peek()).toBeUndefined();
+		await settle();
 		expect(sum.peek()).toBe(5);
 		sum.close();
 	});
 
-	test("get() is an alias for peek()", () => {
-		const a = new Signal(10);
-		const doubled = new Computed((e) => e.get(a) * 2);
-		expect(doubled.get()).toBe(20);
-		doubled.close();
-	});
-
-	test("bare read after a dependency set is stale-but-defined, fresh next tick", async () => {
+	test("recomputes asynchronously when a dependency changes", async () => {
 		const a = new Signal(2);
 		const tenfold = new Computed((e) => e.get(a) * 10);
+		await settle();
 		expect(tenfold.peek()).toBe(20);
 
 		a.set(5);
-		// Consistent with the rest of the library: a set does not synchronously
-		// rerun readers, so the cached value lags by a microtask.
-		expect(tenfold.peek()).toBe(20);
+		expect(tenfold.peek()).toBe(20); // not yet: a set never reruns readers synchronously
 		await settle();
 		expect(tenfold.peek()).toBe(50);
 		tenfold.close();
@@ -161,16 +157,16 @@ describe("Computed", () => {
 	test("a downstream effect reruns when the computed value changes", async () => {
 		const a = new Signal(1);
 		const doubled = new Computed((e) => e.get(a) * 2);
-		const seen: number[] = [];
+		const seen: (number | undefined)[] = [];
 		const effect = new Effect((e) => {
 			seen.push(e.get(doubled));
 		});
 		await settle();
-		expect(seen).toEqual([2]);
+		expect(seen.at(-1)).toBe(2);
 
 		a.set(4);
 		await settle();
-		expect(seen).toEqual([2, 8]);
+		expect(seen.at(-1)).toBe(8);
 
 		effect.close();
 		doubled.close();
@@ -179,20 +175,21 @@ describe("Computed", () => {
 	test("equality filtering: no downstream rerun when the output is unchanged", async () => {
 		const a = new Signal(1);
 		const positive = new Computed((e) => e.get(a) > 0);
-		const seen: boolean[] = [];
+		const seen: (boolean | undefined)[] = [];
 		const effect = new Effect((e) => {
 			seen.push(e.get(positive));
 		});
 		await settle();
-		expect(seen).toEqual([true]);
+		const base = seen.length;
 
 		a.set(5); // still positive: computed output is unchanged
 		await settle();
-		expect(seen).toEqual([true]);
+		expect(seen.length).toBe(base);
 
 		a.set(-1); // now the output flips
 		await settle();
-		expect(seen).toEqual([true, false]);
+		expect(seen.length).toBe(base + 1);
+		expect(seen.at(-1)).toBe(false);
 
 		effect.close();
 		positive.close();
@@ -206,6 +203,7 @@ describe("Computed", () => {
 			computes++;
 			return e.get(a) + e.get(b);
 		});
+		await settle();
 		expect(sum.peek()).toBe(2);
 		expect(computes).toBe(1);
 
@@ -220,7 +218,8 @@ describe("Computed", () => {
 	test("computeds nest", async () => {
 		const a = new Signal(2);
 		const plusOne = new Computed((e) => e.get(a) + 1);
-		const timesTen = new Computed((e) => e.get(plusOne) * 10);
+		const timesTen = new Computed((e) => (e.get(plusOne) ?? 0) * 10);
+		await settle();
 		expect(timesTen.peek()).toBe(30);
 
 		a.set(9);
@@ -231,14 +230,14 @@ describe("Computed", () => {
 		timesTen.close();
 	});
 
-	test("close stops tracking dependencies", async () => {
+	test("close stops recomputing", async () => {
 		const a = new Signal(1);
 		let computes = 0;
 		const derived = new Computed((e) => {
 			computes++;
 			return e.get(a);
 		});
-		derived.peek();
+		await settle();
 		const before = computes;
 		derived.close();
 
@@ -246,89 +245,51 @@ describe("Computed", () => {
 		await settle();
 		expect(computes).toBe(before);
 	});
-
-	test("a constant computed (no dependencies) works", () => {
-		const k = new Computed(() => 42);
-		expect(k.peek()).toBe(42);
-		k.close();
-	});
-
-	test("detects a direct self-reference cycle", () => {
-		const c: Computed<number> = new Computed((e) => e.get(c) + 1);
-		expect(() => c.peek()).toThrow("Computed cycle detected");
-		c.close();
-	});
-
-	test("detects a transitive cycle (a -> b -> a)", () => {
-		const a: Computed<number> = new Computed((e) => e.get(b) + 1);
-		const b: Computed<number> = new Computed((e) => e.get(a) + 1);
-		expect(() => a.peek()).toThrow("Computed cycle detected");
-		a.close();
-		b.close();
-	});
-
-	test("a later cycle throws instead of returning the stale cached value", async () => {
-		const enabled = new Signal(false);
-		const c: Computed<number> = new Computed((e) => (e.get(enabled) ? e.get(c) + 1 : 1));
-
-		expect(c.peek()).toBe(1);
-
-		enabled.set(true); // flips the compute into a self-reference
-		await settle();
-
-		expect(() => c.peek()).toThrow("Computed cycle detected");
-
-		// Recovers once the dependency leaves the cyclic branch.
-		enabled.set(false);
-		await settle();
-		expect(c.peek()).toBe(1);
-		c.close();
-	});
-
-	test("a cycle does not poison unrelated computeds", () => {
-		const a: Computed<number> = new Computed((e) => e.get(a));
-		expect(() => a.peek()).toThrow();
-		const ok = new Computed(() => 7);
-		expect(ok.peek()).toBe(7);
-		a.close();
-		ok.close();
-	});
 });
 
 describe("effect.computed", () => {
-	test("derives a value tied to the effect", async () => {
+	// Create the computed once on a container effect, observe it from another effect.
+	// (Creating and observing it in the same rerunning body would loop: the async
+	// first value reschedules the body, which rebuilds the computed, and so on.)
+	test("derives a value tied to the container effect", async () => {
 		const a = new Signal(1);
 		const b = new Signal(2);
-		const seen: number[] = [];
-		const effect = new Effect((e) => {
-			const sum = e.computed((c) => c.get(a) + c.get(b));
+		const container = new Effect();
+		const sum = container.computed((e) => e.get(a) + e.get(b));
+
+		const seen: (number | undefined)[] = [];
+		const observer = new Effect((e) => {
 			seen.push(e.get(sum));
 		});
 		await settle();
-		expect(seen).toEqual([3]);
+		expect(seen.at(-1)).toBe(3);
 
 		a.set(10);
 		await settle();
 		expect(seen.at(-1)).toBe(12);
-		effect.close();
+
+		observer.close();
+		container.close();
 	});
 
-	test("is closed with its parent effect", async () => {
+	test("is closed with its container effect", async () => {
 		const a = new Signal(1);
 		let computes = 0;
-		const effect = new Effect((e) => {
-			const derived = e.computed((c) => {
-				computes++;
-				return c.get(a) * 2;
-			});
-			e.get(derived); // observe so it stays hot
+		const container = new Effect();
+		const derived = container.computed((e) => {
+			computes++;
+			return e.get(a) * 2;
+		});
+		const observer = new Effect((e) => {
+			e.get(derived);
 		});
 		await settle();
 		const before = computes;
 
-		effect.close();
+		container.close(); // closes derived
 		a.set(5);
 		await settle();
 		expect(computes).toBe(before);
+		observer.close();
 	});
 });

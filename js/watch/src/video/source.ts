@@ -216,9 +216,9 @@ export class Source {
 		this.supported = Signal.from(props?.supported);
 
 		// The video catalog, derived from the active broadcast.
-		this.catalog = this.#signals.computed((c) => {
-			const broadcast = c.get(this.broadcast);
-			return broadcast ? c.get(broadcast.catalog)?.video : undefined;
+		this.catalog = this.#signals.computed((effect) => {
+			const broadcast = effect.get(this.broadcast);
+			return broadcast ? effect.get(broadcast.catalog)?.video : undefined;
 		});
 
 		this.#signals.run(this.#runSupported.bind(this));

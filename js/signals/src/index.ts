@@ -460,7 +460,7 @@ export class Effect {
 
 	// Create a derived signal whose lifetime is tied to this effect.
 	// It's closed (unsubscribing from its dependencies) when the effect reruns or closes.
-	computed<T>(fn: (c: Computing) => T): Computed<T> {
+	computed<T>(fn: (effect: Effect) => T): Computed<T> {
 		const computed = new Computed(fn);
 		this.cleanup(() => computed.close());
 		return computed;
@@ -633,136 +633,42 @@ export class Effect {
 	}
 }
 
-// Reads a dependency and tracks it. Passed to a Computed's compute function;
-// `get` mirrors `Effect.get` so the same dependency-reading style works.
-export interface Computing {
-	get<T>(signal: Getter<T>): T;
-}
-
 // A read-only signal derived from other signals.
 //
-// The compute function reads its dependencies with `c.get(...)`, like an
-// effect, and returns a value that is cached and recomputed when a dependency
-// changes. Keep it pure: a derived value, not a side effect.
+// The compute function reads its dependencies with `effect.get(...)`, exactly
+// like an effect, and returns the derived value. It reruns whenever a
+// dependency changes. Keep it pure: derive a value, don't perform side effects.
 //
-// The first computation runs lazily on first read, so the value is never
-// undefined. Subsequent reads recompute synchronously if a dependency has
-// changed; downstream notification stays async and coalesced, like any signal.
-// Call close() to stop tracking dependencies (or use effect.computed, which
-// closes with its parent effect).
-export class Computed<T> implements Getter<T> {
-	#fn: (c: Computing) => T;
+// Like every signal, updates are asynchronous: the value is `undefined` until
+// the first run completes (and after close()), and recomputes propagate on a
+// microtask. Read it inside an effect and handle the `undefined` case, the same
+// way you would any other signal that starts empty.
+export class Computed<T> implements Getter<T | undefined> {
+	#signal = new Signal<T | undefined>(undefined);
+	#effect: Effect;
 
-	// Created on the first read so the value is never undefined. Reused for value
-	// storage, equality filtering, and downstream notification (it's a Signal, not
-	// an Effect, so it doesn't run anything on its own).
-	#signal?: Signal<T>;
-
-	// Subscriptions to our dependencies, torn down and rebuilt on each recompute.
-	#unwatch: Dispose[] = [];
-
-	#dirty = true;
-	#scheduled = false;
-	#closed = false;
-
-	// True while the compute function is running, so a self-referential read can be
-	// caught instead of recursing forever. Also catches transitive cycles (a -> b -> a).
-	#evaluating = false;
-
-	constructor(fn: (c: Computing) => T) {
-		this.#fn = fn;
-	}
-
-	#recompute(): void {
-		this.#scheduled = false;
-		this.#evaluating = true;
-
-		// Drop the previous dependencies; the run re-subscribes to whatever it reads.
-		for (const unwatch of this.#unwatch) unwatch();
-		this.#unwatch.length = 0;
-
-		const reader: Computing = {
-			get: <V>(signal: Getter<V>): V => {
-				// changed() is one-shot, like Effect.get: re-subscribed on each recompute.
-				this.#unwatch.push(signal.changed(() => this.#invalidate()));
-				return signal.peek();
-			},
-		};
-
-		try {
-			const value = this.#fn(reader);
-			if (this.#signal) {
-				this.#signal.set(value);
-			} else {
-				this.#signal = new Signal(value);
-			}
-
-			// Only mark clean after a successful compute. A throw (e.g. a cycle or a
-			// compute error) stays dirty so the failure resurfaces on the next read
-			// instead of leaving a stale cached value, and can recover later.
-			this.#dirty = false;
-		} finally {
-			this.#evaluating = false;
-		}
-	}
-
-	#assertNotEvaluating(): void {
-		if (this.#evaluating) {
-			throw new Error("Computed cycle detected: the compute function read its own value.");
-		}
-	}
-
-	#invalidate(): void {
-		if (this.#closed) return;
-
-		this.#dirty = true;
-		if (this.#scheduled) return;
-		this.#scheduled = true;
-
-		// Recompute on a microtask so multiple dependency changes in one tick coalesce,
-		// and so two computeds flipping each other dirty can't loop synchronously. A
-		// read beforehand recomputes synchronously (see peek).
-		queueMicrotask(() => {
-			if (!this.#dirty || this.#closed) return;
-			try {
-				this.#recompute();
-			} catch {
-				// The compute threw (e.g. a cycle). We stay dirty, so the error
-				// resurfaces synchronously on the next read rather than escaping here.
-			}
+	constructor(fn: (effect: Effect) => T) {
+		this.#effect = new Effect((effect) => {
+			this.#signal.set(fn(effect));
 		});
 	}
 
-	peek(): T {
-		this.#assertNotEvaluating();
-		if (!this.#signal || this.#dirty) this.#recompute();
-		return (this.#signal as Signal<T>).peek();
+	peek(): T | undefined {
+		return this.#signal.peek();
 	}
 
-	// Alias for peek(), matching Signal.get().
-	get(): T {
-		return this.peek();
+	changed(fn: Subscriber<T | undefined>): Dispose {
+		return this.#signal.changed(fn);
 	}
 
-	changed(fn: Subscriber<T>): Dispose {
-		this.#assertNotEvaluating();
-		if (!this.#signal) this.#recompute();
-		return (this.#signal as Signal<T>).changed(fn);
+	subscribe(fn: Subscriber<T | undefined>): Dispose {
+		return this.#signal.subscribe(fn);
 	}
 
-	subscribe(fn: Subscriber<T>): Dispose {
-		this.#assertNotEvaluating();
-		if (!this.#signal) this.#recompute();
-		return (this.#signal as Signal<T>).subscribe(fn);
-	}
-
-	// Stop tracking dependencies. Required for standalone computeds; an effect.computed()
-	// is closed automatically with its parent effect.
+	// Stop recomputing and tracking dependencies. Required for standalone computeds;
+	// an effect.computed() is closed automatically with its parent effect.
 	close(): void {
-		if (this.#closed) return;
-		this.#closed = true;
-		for (const unwatch of this.#unwatch) unwatch();
-		this.#unwatch.length = 0;
+		this.#effect.close();
 	}
 }
 

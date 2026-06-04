@@ -55,7 +55,7 @@ If you just want to read without tracking, use `signal.peek()` directly.
 ### Computed
 
 A `Computed` is a read-only signal derived from other signals.
-The compute function reads its dependencies with `c.get(...)`, the same way an effect does.
+The compute function reads its dependencies with `effect.get(...)`, exactly like an effect.
 
 ```ts
 import { Signal, Computed } from "@moq/signals";
@@ -63,35 +63,31 @@ import { Signal, Computed } from "@moq/signals";
 const first = new Signal("Ada");
 const last = new Signal("Lovelace");
 
-const full = new Computed((c) => `${c.get(first)} ${c.get(last)}`);
+const full = new Computed((effect) => `${effect.get(first)} ${effect.get(last)}`);
 
-full.peek(); // "Ada Lovelace"
-first.set("Grace");
-// reads inside an effect are always fresh; a bare peek() is fresh on the next microtask
+full.peek(); // undefined until the first run completes
 ```
 
-The value is computed lazily on first read, so it is never `undefined`.
-It recomputes when a dependency changes, caching the result, and downstream notifications are coalesced and equality-filtered like any signal.
+Like every signal, updates are **asynchronous**: the value is `undefined` until the first run completes (and after `close()`), and recomputes propagate on a microtask, coalesced and equality-filtered.
+Read a computed inside an effect and handle the `undefined` case, the same way you would any other signal that starts empty.
 
 Keep the compute function **pure**: it should derive a value, not perform side effects. Use an `Effect` for side effects.
 
-A computed that reads its own value (directly or through a cycle like `a` → `b` → `a`) throws instead of looping forever.
-
-A standalone `Computed` must be closed to stop tracking its dependencies:
+A standalone `Computed` must be closed to stop recomputing and tracking its dependencies:
 
 ```ts
-const sum = new Computed((c) => c.get(a) + c.get(b));
+const sum = new Computed((effect) => effect.get(a) + effect.get(b));
 // ...
 sum.close();
 ```
 
-More commonly, create one inside an effect with `effect.computed(...)`, which closes it automatically when the effect reruns or closes:
+More commonly, create one on a long-lived effect with `effect.computed(...)`, which closes it when that effect closes:
 
 ```ts
-const effect = new Effect((effect) => {
-  const total = effect.computed((c) => c.get(a) + c.get(b));
-  console.log(effect.get(total));
-});
+const signals = new Effect();
+const total = signals.computed((effect) => effect.get(a) + effect.get(b));
+// ... read `total` from other effects ...
+signals.close(); // also closes `total`
 ```
 
 ### effect.cleanup
