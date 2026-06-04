@@ -487,82 +487,27 @@ fn max_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 	}
 }
 
-/// A producer for a track, used to create new groups.
-pub struct TrackProducer {
-	info: Track,
+/// A track producer whose immutable [`Track`] properties aren't known yet.
+///
+/// Holds the shared state (subscriptions, demand, groups) but no `info`. This is
+/// the headless half of a [`TrackProducer`]: a relay can accept subscribers and
+/// observe demand ([`Self::subscription`]) on it before the properties are
+/// resolved, then [`Self::accept`] the resolved [`Track`] to upgrade it into a
+/// full producer that can create groups.
+#[derive(Default, Clone)]
+pub struct TrackRequest {
 	state: kio::Producer<State>,
 }
 
-impl std::ops::Deref for TrackProducer {
-	type Target = Track;
-
-	fn deref(&self) -> &Self::Target {
-		&self.info
-	}
-}
-
-impl TrackProducer {
-	/// Build a producer for the given track metadata. Prefer [`Track::produce`].
-	pub fn new(info: Track) -> Self {
-		Self {
-			info,
-			state: kio::Producer::default(),
-		}
+impl TrackRequest {
+	/// Build an empty request with no consumers yet.
+	pub fn new() -> Self {
+		Self::default()
 	}
 
-	/// Create a new group with the given sequence number.
-	pub fn create_group(&mut self, info: Group) -> Result<GroupProducer> {
-		let group = GroupProducer::new_with_timescale(info, self.info.timescale);
-
-		let mut state = self.modify()?;
-		if let Some(fin) = state.final_sequence
-			&& group.sequence >= fin
-		{
-			return Err(Error::Closed);
-		}
-
-		if !state.duplicates.insert(group.sequence) {
-			return Err(Error::Duplicate);
-		}
-
-		let now = tokio::time::Instant::now();
-		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.sequence));
-		state.groups.push_back(Some((group.clone(), now)));
-		state.evict_expired(now, self.info.cache);
-
-		Ok(group)
-	}
-
-	/// Create a new group with the next sequence number.
-	pub fn append_group(&mut self) -> Result<GroupProducer> {
-		let mut state = self.modify()?;
-		let sequence = match state.max_sequence {
-			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
-			None => 0,
-		};
-		if let Some(fin) = state.final_sequence
-			&& sequence >= fin
-		{
-			return Err(Error::Closed);
-		}
-
-		let group = GroupProducer::new_with_timescale(Group { sequence }, self.info.timescale);
-
-		let now = tokio::time::Instant::now();
-		state.duplicates.insert(sequence);
-		state.max_sequence = Some(sequence);
-		state.groups.push_back(Some((group.clone(), now)));
-		state.evict_expired(now, self.info.cache);
-
-		Ok(group)
-	}
-
-	/// Create a group with a single frame.
-	pub fn write_frame<B: Into<bytes::Bytes>>(&mut self, frame: B) -> Result<()> {
-		let mut group = self.append_group()?;
-		group.write_frame(frame.into())?;
-		group.finish()?;
-		Ok(())
+	/// Resolve the track's immutable properties, upgrading into a [`TrackProducer`].
+	pub fn accept(self, info: Track) -> TrackProducer {
+		TrackProducer { request: self, info }
 	}
 
 	/// Mark the track as finished after the last appended group.
@@ -608,29 +553,6 @@ impl TrackProducer {
 		guard.abort = Some(err);
 		guard.close();
 		Ok(())
-	}
-
-	/// Subscribe to the track in-process with the given subscriber preferences.
-	///
-	/// Pass `None` for [`Subscription::default`]. The preferences feed the
-	/// producer's [`Self::subscription`] aggregate and can be changed later via
-	/// [`TrackSubscriber::update`].
-	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> TrackSubscriber {
-		let mut subscription = subscription.into().unwrap_or_default();
-		subscription.stale = self.info.clamp_stale(subscription.stale);
-		let subscription = Arc::new(Mutex::new(subscription));
-		if let Ok(mut state) = self.state.write() {
-			state.subscriptions.push(Arc::downgrade(&subscription));
-		}
-		TrackSubscriber {
-			info: self.info.clone(),
-			state: self.state.consume(),
-			subscription,
-			index: 0,
-			min_sequence: 0,
-			next_sequence: 0,
-			end_sequence: None,
-		}
 	}
 
 	/// The aggregate of every live subscriber's [`Subscription`] (most demanding
@@ -679,11 +601,22 @@ impl TrackProducer {
 		self.state.same_channel(&other.state)
 	}
 
-	/// Create a weak reference that doesn't prevent auto-close.
-	pub(crate) fn weak(&self) -> TrackWeak {
-		TrackWeak {
-			info: self.info.clone(),
-			state: self.state.weak(),
+	/// Register a subscription `Arc` and build the consumer once `info` is known.
+	fn subscribe_with(&self, info: &Track, subscription: impl Into<Option<Subscription>>) -> TrackSubscriber {
+		let mut subscription = subscription.into().unwrap_or_default();
+		subscription.stale = info.clamp_stale(subscription.stale);
+		let subscription = Arc::new(Mutex::new(subscription));
+		if let Ok(mut state) = self.state.write() {
+			state.subscriptions.push(Arc::downgrade(&subscription));
+		}
+		TrackSubscriber {
+			info: info.clone(),
+			state: self.state.consume(),
+			subscription,
+			index: 0,
+			min_sequence: 0,
+			next_sequence: 0,
+			end_sequence: None,
 		}
 	}
 
@@ -694,11 +627,161 @@ impl TrackProducer {
 	}
 }
 
+/// A producer for a track, used to create new groups.
+///
+/// A [`TrackRequest`] plus the resolved immutable [`Track`] properties. Derefs to
+/// the [`Track`], so `producer.name` / `producer.timescale` etc. read the resolved
+/// values.
+pub struct TrackProducer {
+	request: TrackRequest,
+	info: Track,
+}
+
+impl std::ops::Deref for TrackProducer {
+	type Target = Track;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
+impl TrackProducer {
+	/// Build a producer for the given track metadata. Prefer [`Track::produce`].
+	pub fn new(info: Track) -> Self {
+		Self {
+			request: TrackRequest::new(),
+			info,
+		}
+	}
+
+	/// Create a new group with the given sequence number.
+	pub fn create_group(&mut self, info: Group) -> Result<GroupProducer> {
+		let group = GroupProducer::new_with_timescale(info, self.info.timescale);
+
+		let mut state = self.request.modify()?;
+		if let Some(fin) = state.final_sequence
+			&& group.sequence >= fin
+		{
+			return Err(Error::Closed);
+		}
+
+		if !state.duplicates.insert(group.sequence) {
+			return Err(Error::Duplicate);
+		}
+
+		let now = tokio::time::Instant::now();
+		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.sequence));
+		state.groups.push_back(Some((group.clone(), now)));
+		state.evict_expired(now, self.info.cache);
+
+		Ok(group)
+	}
+
+	/// Create a new group with the next sequence number.
+	pub fn append_group(&mut self) -> Result<GroupProducer> {
+		let mut state = self.request.modify()?;
+		let sequence = match state.max_sequence {
+			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
+			None => 0,
+		};
+		if let Some(fin) = state.final_sequence
+			&& sequence >= fin
+		{
+			return Err(Error::Closed);
+		}
+
+		let group = GroupProducer::new_with_timescale(Group { sequence }, self.info.timescale);
+
+		let now = tokio::time::Instant::now();
+		state.duplicates.insert(sequence);
+		state.max_sequence = Some(sequence);
+		state.groups.push_back(Some((group.clone(), now)));
+		state.evict_expired(now, self.info.cache);
+
+		Ok(group)
+	}
+
+	/// Create a group with a single frame.
+	pub fn write_frame<B: Into<bytes::Bytes>>(&mut self, frame: B) -> Result<()> {
+		let mut group = self.append_group()?;
+		group.write_frame(frame.into())?;
+		group.finish()?;
+		Ok(())
+	}
+
+	/// Subscribe to the track in-process with the given subscriber preferences.
+	///
+	/// Pass `None` for [`Subscription::default`]. The preferences feed the
+	/// producer's [`Self::subscription`] aggregate and can be changed later via
+	/// [`TrackSubscriber::update`].
+	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> TrackSubscriber {
+		self.request.subscribe_with(&self.info, subscription)
+	}
+
+	/// Create a weak reference that doesn't prevent auto-close.
+	pub(crate) fn weak(&self) -> TrackWeak {
+		TrackWeak {
+			info: self.info.clone(),
+			state: self.request.state.weak(),
+		}
+	}
+
+	/// Mark the track as finished after the last appended group. See [`TrackRequest::finish`].
+	pub fn finish(&mut self) -> Result<()> {
+		self.request.finish()
+	}
+
+	/// Mark the track as finished at an exact final sequence. See [`TrackRequest::finish_at`].
+	pub fn finish_at(&mut self, sequence: u64) -> Result<()> {
+		self.request.finish_at(sequence)
+	}
+
+	/// Abort the track with the given error. See [`TrackRequest::abort`].
+	pub fn abort(&mut self, err: Error) -> Result<()> {
+		self.request.abort(err)
+	}
+
+	/// The aggregate of every live subscriber's [`Subscription`]. See [`TrackRequest::subscription`].
+	pub fn subscription(&self) -> Option<Subscription> {
+		self.request.subscription()
+	}
+
+	/// Block until there are no active consumers.
+	pub async fn unused(&self) -> Result<()> {
+		self.request.unused().await
+	}
+
+	/// Block until there is at least one active consumer.
+	pub async fn used(&self) -> Result<()> {
+		self.request.used().await
+	}
+
+	/// Block until the track is closed or aborted, returning the cause.
+	pub async fn closed(&self) -> Error {
+		self.request.closed().await
+	}
+
+	/// Return true if the track has been closed.
+	pub fn is_closed(&self) -> bool {
+		self.request.is_closed()
+	}
+
+	/// Return the latest sequence number successfully appended to the track.
+	pub fn latest(&self) -> Option<u64> {
+		self.request.latest()
+	}
+
+	/// Return true if this is the same track.
+	pub fn is_clone(&self, other: &Self) -> bool {
+		self.request.is_clone(&other.request)
+	}
+}
+
 impl Clone for TrackProducer {
 	fn clone(&self) -> Self {
 		Self {
+			request: self.request.clone(),
 			info: self.info.clone(),
-			state: self.state.clone(),
 		}
 	}
 }
@@ -754,7 +837,7 @@ impl TrackWeak {
 
 /// A live subscription to a track, used to read its groups.
 ///
-/// Created via [`TrackPending::subscribe`](crate::TrackPending::subscribe), or
+/// Created via [`TrackConsumer::subscribe`](crate::TrackConsumer::subscribe), or
 /// directly from a [`TrackProducer`] for an in-process track. Carries this
 /// subscriber's [`Subscription`] preferences, which feed the producer's aggregate.
 #[derive(Clone)]
@@ -1034,7 +1117,7 @@ mod test {
 		producer.append_group().unwrap(); // seq 2
 
 		{
-			let state = producer.state.read();
+			let state = producer.request.state.read();
 			assert_eq!(live_groups(&state), 3);
 			assert_eq!(state.offset, 0);
 		}
@@ -1048,7 +1131,7 @@ mod test {
 		// Groups 0, 1, 2 are expired but seq 3 (max_sequence) is kept.
 		// Leading tombstones are trimmed, so only seq 3 remains.
 		{
-			let state = producer.state.read();
+			let state = producer.request.state.read();
 			assert_eq!(live_groups(&state), 1);
 			assert_eq!(first_live_sequence(&state), 3);
 			assert_eq!(state.offset, 3);
@@ -1073,7 +1156,7 @@ mod test {
 		producer.append_group().unwrap(); // seq 1
 
 		{
-			let state = producer.state.read();
+			let state = producer.request.state.read();
 			assert_eq!(live_groups(&state), 1);
 			assert_eq!(first_live_sequence(&state), 1);
 			assert_eq!(state.offset, 1);
@@ -1090,7 +1173,7 @@ mod test {
 		producer.append_group().unwrap(); // seq 2
 
 		{
-			let state = producer.state.read();
+			let state = producer.request.state.read();
 			assert_eq!(live_groups(&state), 3);
 			assert_eq!(state.offset, 0);
 		}
@@ -1126,7 +1209,7 @@ mod test {
 		producer.append_group().unwrap(); // seq 1
 
 		// Seq 0 is gone because the publisher only keeps groups for 1s.
-		let state = producer.state.read();
+		let state = producer.request.state.read();
 		assert_eq!(live_groups(&state), 1);
 		assert_eq!(first_live_sequence(&state), 1);
 	}
@@ -1161,7 +1244,7 @@ mod test {
 
 		// max_sequence = 5, which is at the front of the VecDeque.
 		{
-			let state = producer.state.read();
+			let state = producer.request.state.read();
 			assert_eq!(state.max_sequence, Some(5));
 		}
 
@@ -1174,7 +1257,7 @@ mod test {
 		// Seq 3, 4, 5 are all expired. Seq 5 was the old max_sequence but now 6 is.
 		// All old groups are evicted.
 		{
-			let state = producer.state.read();
+			let state = producer.request.state.read();
 			assert_eq!(live_groups(&state), 1);
 			assert_eq!(first_live_sequence(&state), 6);
 			assert!(!state.duplicates.contains(&3));
@@ -1201,7 +1284,7 @@ mod test {
 		// Seq 5 is max_sequence (protected). Seq 3 is not expired (just created).
 		// Nothing should be evicted.
 		{
-			let state = producer.state.read();
+			let state = producer.request.state.read();
 			assert_eq!(live_groups(&state), 2);
 			assert_eq!(state.offset, 0);
 		}
@@ -1217,7 +1300,7 @@ mod test {
 		// Seq 2 is fresh → kept.
 		// VecDeque: [Some(5), None, Some(2)]. Leading entry is Some, so offset stays.
 		{
-			let state = producer.state.read();
+			let state = producer.request.state.read();
 			assert_eq!(live_groups(&state), 2);
 			assert_eq!(state.offset, 0);
 			assert!(state.duplicates.contains(&5));
@@ -1262,7 +1345,7 @@ mod test {
 		assert!(producer.finish_at(5).is_ok());
 
 		{
-			let state = producer.state.read();
+			let state = producer.request.state.read();
 			assert_eq!(state.final_sequence, Some(6));
 		}
 
@@ -1722,7 +1805,7 @@ mod test {
 	fn append_group_returns_bounds_exceeded_on_sequence_overflow() {
 		let mut producer = Track::new("test").produce();
 		{
-			let mut state = producer.state.write().ok().unwrap();
+			let mut state = producer.request.state.write().ok().unwrap();
 			state.max_sequence = Some(u64::MAX);
 		}
 

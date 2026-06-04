@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::{
-	Path,
+	Compression, Path, Timescale,
 	coding::{Decode, DecodeError, Encode, EncodeError, Sizer},
 };
 
@@ -72,11 +72,6 @@ impl Message for Subscribe<'_> {
 	}
 }
 
-/// Sent by the publisher to accept a subscription (Lite01-04 only).
-///
-/// On Lite05+ a subscription is accepted implicitly (rejection is a stream
-/// reset) and the immutable publisher properties moved to [`TrackInfo`], fetched
-/// once over a [Track Stream](super::Track). This message is no longer sent.
 #[derive(Clone, Debug)]
 pub struct SubscribeOk {
 	pub priority: u8,
@@ -84,6 +79,21 @@ pub struct SubscribeOk {
 	pub max_latency: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
+	/// Codec the publisher will use for every frame on this track. Negotiated
+	/// here (not in SUBSCRIBE) so the subscriber blocks on this message before it
+	/// can decode any frame payload. Lite05+ only; older drafts always get
+	/// [`Compression::None`].
+	pub compression: Compression,
+	/// Per-frame timestamp scale advertised by the publisher. `None` means the
+	/// publisher doesn't carry per-frame timestamps on the wire (so frame
+	/// headers omit them). Lite05+ only; older drafts always decode as `None`.
+	/// On the wire `None` is `0` and `Some(n)` is `n`.
+	pub timescale: Option<Timescale>,
+	/// How long the publisher keeps old groups available before evicting them.
+	/// A relay re-serves with the same window and clamps each subscriber's stale
+	/// preference to it. Lite05+ only; older drafts always get
+	/// [`crate::DEFAULT_CACHE`].
+	pub cache: std::time::Duration,
 }
 
 impl Message for SubscribeOk {
@@ -93,14 +103,23 @@ impl Message for SubscribeOk {
 				self.priority.encode(w, version)?;
 			}
 			Version::Lite02 => {}
-			// Lite05+ no longer sends SUBSCRIBE_OK, but keep the Lite03/04 layout as
-			// the forward default so an accidental encode stays well-formed.
+			Version::Lite03 | Version::Lite04 => {
+				self.priority.encode(w, version)?;
+				(self.ordered as u8).encode(w, version)?;
+				self.max_latency.encode(w, version)?;
+				self.start_group.encode(w, version)?;
+				self.end_group.encode(w, version)?;
+			}
 			_ => {
 				self.priority.encode(w, version)?;
 				(self.ordered as u8).encode(w, version)?;
 				self.max_latency.encode(w, version)?;
 				self.start_group.encode(w, version)?;
 				self.end_group.encode(w, version)?;
+				// Order matches draft-lcurley-moq-lite-05 SUBSCRIBE_OK: Timescale, Cache, Compression.
+				self.timescale.map(u64::from).unwrap_or(0).encode(w, version)?;
+				self.cache.encode(w, version)?;
+				self.compression.to_code().encode(w, version)?;
 			}
 		}
 
@@ -115,6 +134,9 @@ impl Message for SubscribeOk {
 				max_latency: std::time::Duration::ZERO,
 				start_group: None,
 				end_group: None,
+				compression: Compression::None,
+				timescale: None,
+				cache: crate::DEFAULT_CACHE,
 			}),
 			Version::Lite02 => Ok(Self {
 				priority: 0,
@@ -122,14 +144,51 @@ impl Message for SubscribeOk {
 				max_latency: std::time::Duration::ZERO,
 				start_group: None,
 				end_group: None,
+				compression: Compression::None,
+				timescale: None,
+				cache: crate::DEFAULT_CACHE,
 			}),
-			_ => Ok(Self {
-				priority: u8::decode(r, version)?,
-				ordered: u8::decode(r, version)? != 0,
-				max_latency: std::time::Duration::decode(r, version)?,
-				start_group: Option::<u64>::decode(r, version)?,
-				end_group: Option::<u64>::decode(r, version)?,
-			}),
+			Version::Lite03 | Version::Lite04 => {
+				let priority = u8::decode(r, version)?;
+				let ordered = u8::decode(r, version)? != 0;
+				let max_latency = std::time::Duration::decode(r, version)?;
+				let start_group = Option::<u64>::decode(r, version)?;
+				let end_group = Option::<u64>::decode(r, version)?;
+
+				Ok(Self {
+					priority,
+					ordered,
+					max_latency,
+					start_group,
+					end_group,
+					compression: Compression::None,
+					timescale: None,
+					cache: crate::DEFAULT_CACHE,
+				})
+			}
+			_ => {
+				let priority = u8::decode(r, version)?;
+				let ordered = u8::decode(r, version)? != 0;
+				let max_latency = std::time::Duration::decode(r, version)?;
+				let start_group = Option::<u64>::decode(r, version)?;
+				let end_group = Option::<u64>::decode(r, version)?;
+				// Order matches draft-lcurley-moq-lite-05 SUBSCRIBE_OK: Timescale, Cache, Compression.
+				let timescale = Timescale::new(u64::decode(r, version)?).ok();
+				let cache = std::time::Duration::decode(r, version)?;
+				let compression =
+					Compression::from_code(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
+
+				Ok(Self {
+					priority,
+					ordered,
+					max_latency,
+					start_group,
+					end_group,
+					compression,
+					timescale,
+					cache,
+				})
+			}
 		}
 	}
 }
@@ -339,6 +398,9 @@ mod test {
 			max_latency: Duration::from_millis(250),
 			start_group: Some(3),
 			end_group: None,
+			compression: Compression::Deflate,
+			timescale: Some(Timescale::MICRO),
+			cache: Duration::from_secs(10),
 		}
 	}
 
@@ -350,12 +412,60 @@ mod test {
 	}
 
 	#[test]
-	fn fields_roundtrip_on_lite04() {
-		let got = roundtrip(Version::Lite04, &sample());
+	fn compression_roundtrips_on_lite05() {
+		let got = roundtrip(Version::Lite05Wip, &sample());
+		assert_eq!(got.compression, Compression::Deflate);
 		assert_eq!(got.priority, 7);
 		assert!(got.ordered);
-		assert_eq!(got.max_latency, Duration::from_millis(250));
 		assert_eq!(got.start_group, Some(3));
 		assert_eq!(got.end_group, None);
+	}
+
+	#[test]
+	fn compression_absent_before_lite05() {
+		let ok = sample();
+
+		// The compression varint only exists on lite-05+, so the older encoding is
+		// strictly shorter and always decodes back as None.
+		let mut buf04 = Vec::new();
+		ok.encode_msg(&mut buf04, Version::Lite04).unwrap();
+		let mut buf05 = Vec::new();
+		ok.encode_msg(&mut buf05, Version::Lite05Wip).unwrap();
+		assert!(
+			buf05.len() > buf04.len(),
+			"lite-05 carries extra compression + timescale varints"
+		);
+
+		assert_eq!(roundtrip(Version::Lite04, &ok).compression, Compression::None);
+	}
+
+	#[test]
+	fn timescale_roundtrips_on_lite05() {
+		let got = roundtrip(Version::Lite05Wip, &sample());
+		assert_eq!(got.timescale, Some(Timescale::MICRO));
+	}
+
+	#[test]
+	fn timescale_absent_before_lite05() {
+		// Lite04 doesn't carry the timescale varint, so it always decodes as None.
+		assert_eq!(roundtrip(Version::Lite04, &sample()).timescale, None);
+	}
+
+	#[test]
+	fn timescale_zero_on_wire_decodes_as_none() {
+		let mut ok = sample();
+		ok.timescale = None;
+		assert_eq!(roundtrip(Version::Lite05Wip, &ok).timescale, None);
+	}
+
+	#[test]
+	fn cache_roundtrips_on_lite05() {
+		assert_eq!(roundtrip(Version::Lite05Wip, &sample()).cache, Duration::from_secs(10));
+	}
+
+	#[test]
+	fn cache_absent_before_lite05() {
+		// Lite04 doesn't carry the cache varint, so it always decodes as the default.
+		assert_eq!(roundtrip(Version::Lite04, &sample()).cache, crate::DEFAULT_CACHE);
 	}
 }

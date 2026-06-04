@@ -13,9 +13,6 @@ pub enum ControlType {
 	Fetch = 3,
 	Probe = 4,
 	Goaway = 5,
-	/// Track Stream: a subscriber requests a track's immutable publisher
-	/// properties (TRACK_INFO) without subscribing or fetching. Lite05+ only.
-	Track = 6,
 }
 
 impl Decode<Version> for ControlType {

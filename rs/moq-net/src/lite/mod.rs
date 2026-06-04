@@ -19,7 +19,6 @@ mod session;
 mod stream;
 mod subscribe;
 mod subscriber;
-mod track;
 mod version;
 
 pub use announce::*;
@@ -38,6 +37,4 @@ pub(super) use session::*;
 pub use stream::*;
 pub use subscribe::*;
 use subscriber::*;
-#[allow(unused_imports)]
-pub use track::*;
 pub use version::Version;

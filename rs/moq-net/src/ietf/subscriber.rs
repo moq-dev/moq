@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::{
 	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, MAX_FRAME_SIZE, OriginProducer,
-	Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, Track, TrackProducer, TrackRequest,
+	Path, PathOwned, PendingTrack, StatsHandle, SubscriberStats, SubscriberTrack, Track, TrackProducer,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
@@ -536,7 +536,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, broadcast: BroadcastDynamic, request: TrackRequest) {
+	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, broadcast: BroadcastDynamic, request: PendingTrack) {
 		// Accept right away: IETF group data can arrive before SubscribeOk, so we
 		// need the producer in place to route it. This also unblocks the
 		// downstream subscriber's `consume_track`.
