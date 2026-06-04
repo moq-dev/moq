@@ -341,6 +341,11 @@ pub(crate) fn synthesize_video_trak(
 			vpcc: crate::codec::vp8::vpcc(),
 			..Default::default()
 		}),
+		VideoCodec::VP9(vp9) => mp4_atom::Codec::from(mp4_atom::Vp09 {
+			visual,
+			vpcc: crate::codec::vp9::vpcc(vp9),
+			..Default::default()
+		}),
 		other => return Err(Error::UnsupportedSynthesis(format!("video codec {:?}", other))),
 	};
 
