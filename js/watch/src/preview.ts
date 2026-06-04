@@ -1,34 +1,43 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import * as Zod from "@moq/net/zod";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
-export interface PreviewProps {
-	enabled?: boolean | Signal<boolean>;
-}
+type PreviewInput = {
+	enabled: Getter<boolean>;
+	broadcast: Getter<Moq.Broadcast | undefined>;
+	catalog: Getter<Catalog.Root | undefined>;
+};
+
+type PreviewOutput = {
+	preview: Signal<Catalog.Preview | undefined>;
+};
 
 export class Preview {
-	broadcast: Signal<Moq.Broadcast | undefined>;
-	enabled: Signal<boolean>;
-	preview = new Signal<Catalog.Preview | undefined>(undefined);
+	readonly input: Readonlys<PreviewInput>;
+
+	readonly #output: PreviewOutput = {
+		preview: new Signal<Catalog.Preview | undefined>(undefined),
+	};
+	readonly output = readonlys(this.#output);
+
 	#catalog = new Signal<Catalog.Track | undefined>(undefined);
 
 	#signals = new Effect();
 
-	constructor(
-		broadcast: Signal<Moq.Broadcast | undefined>,
-		catalog: Signal<Catalog.Root | undefined>,
-		props?: PreviewProps,
-	) {
-		this.broadcast = broadcast;
-		this.enabled = Signal.from(props?.enabled ?? false);
+	constructor(props?: Inputs<PreviewInput>) {
+		this.input = {
+			enabled: getter(props?.enabled ?? false),
+			broadcast: getter(props?.broadcast),
+			catalog: getter(props?.catalog),
+		};
 
 		this.#signals.run((effect) => {
-			this.#catalog.set(effect.get(catalog)?.preview);
+			this.#catalog.set(effect.get(this.input.catalog)?.preview);
 		});
 
 		this.#signals.run((effect) => {
-			const values = effect.getAll([this.enabled, this.broadcast, this.#catalog]);
+			const values = effect.getAll([this.input.enabled, this.input.broadcast, this.#catalog]);
 			if (!values) return;
 			const [_, broadcast, catalog] = values;
 
@@ -41,13 +50,13 @@ export class Preview {
 					const info = await Zod.read(track, Catalog.PreviewSchema);
 					if (!info) return;
 
-					this.preview.set(info);
+					this.#output.preview.set(info);
 				} catch (error) {
 					console.warn("Failed to parse preview JSON:", error);
 				}
 			});
 
-			effect.cleanup(() => this.preview.set(undefined));
+			effect.cleanup(() => this.#output.preview.set(undefined));
 		});
 	}
 

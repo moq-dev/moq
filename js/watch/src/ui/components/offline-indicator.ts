@@ -13,7 +13,7 @@ export function offlineIndicator(parent: Effect, watch: MoqWatch): HTMLElement {
 	container.appendChild(text);
 
 	parent.run((effect) => {
-		const offline = effect.get(watch.broadcast.status) === "offline";
+		const offline = effect.get(watch.broadcast.output.status) === "offline";
 		container.style.display = offline ? "" : "none";
 	});
 

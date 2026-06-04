@@ -1,47 +1,45 @@
 import type * as Catalog from "@moq/hang/catalog";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
-export interface Props {
-	enabled?: boolean | Signal<boolean>;
-}
+type InfoInput = {
+	enabled: Getter<boolean>;
+	catalog: Getter<Catalog.Root | undefined>;
+};
+
+type InfoOutput = {
+	id: Signal<string | undefined>;
+	name: Signal<string | undefined>;
+	avatar: Signal<string | undefined>;
+	color: Signal<string | undefined>;
+};
 
 export class Info {
-	enabled: Signal<boolean>;
+	readonly input: Readonlys<InfoInput>;
 
-	#id = new Signal<string | undefined>(undefined);
-	#name = new Signal<string | undefined>(undefined);
-	#avatar = new Signal<string | undefined>(undefined);
-	#color = new Signal<string | undefined>(undefined);
+	readonly #output: InfoOutput = {
+		id: new Signal<string | undefined>(undefined),
+		name: new Signal<string | undefined>(undefined),
+		avatar: new Signal<string | undefined>(undefined),
+		color: new Signal<string | undefined>(undefined),
+	};
+	readonly output = readonlys(this.#output);
 
 	signals = new Effect();
 
-	constructor(catalog: Signal<Catalog.Root | undefined>, props?: Props) {
-		this.enabled = Signal.from(props?.enabled ?? false);
+	constructor(props?: Inputs<InfoInput>) {
+		this.input = {
+			enabled: getter(props?.enabled ?? false),
+			catalog: getter(props?.catalog),
+		};
 
 		this.signals.run((effect) => {
-			if (!effect.get(this.enabled)) return;
+			if (!effect.get(this.input.enabled)) return;
 
-			this.#id.set(effect.get(catalog)?.user?.id);
-			this.#name.set(effect.get(catalog)?.user?.name);
-			this.#avatar.set(effect.get(catalog)?.user?.avatar);
-			this.#color.set(effect.get(catalog)?.user?.color);
+			this.#output.id.set(effect.get(this.input.catalog)?.user?.id);
+			this.#output.name.set(effect.get(this.input.catalog)?.user?.name);
+			this.#output.avatar.set(effect.get(this.input.catalog)?.user?.avatar);
+			this.#output.color.set(effect.get(this.input.catalog)?.user?.color);
 		});
-	}
-
-	get id(): Getter<string | undefined> {
-		return this.#id;
-	}
-
-	get name(): Getter<string | undefined> {
-		return this.#name;
-	}
-
-	get avatar(): Getter<string | undefined> {
-		return this.#avatar;
-	}
-
-	get color(): Getter<string | undefined> {
-		return this.#color;
 	}
 
 	close() {
