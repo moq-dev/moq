@@ -1,23 +1,23 @@
 ---
-title: moq-net (Python)
+title: moq-rs (Python)
 description: Python pub/sub for Media over QUIC
 ---
 
-# moq-net
+# moq-rs
 
-[![PyPI](https://img.shields.io/pypi/v/moq-net)](https://pypi.org/project/moq-net/)
+[![PyPI](https://img.shields.io/pypi/v/moq-rs)](https://pypi.org/project/moq-rs/)
 
 Async pub/sub for [Media over QUIC](/) in Python.
 
-The underlying transport is the Rust [`moq-net`](/lib/rs/crate/moq-net) crate, exposed through UniFFI and wrapped in a Pythonic API: no `Moq` prefixes on user-facing types, async iterators for streams, async context managers for sessions.
+The underlying transport is the Rust [`moq-net`](/lib/rs/crate/moq-net) crate, exposed through UniFFI (the [`moq-ffi`](https://pypi.org/project/moq-ffi/) package) and wrapped in a Pythonic API: no `Moq` prefixes on user-facing types, async iterators for streams, async context managers for sessions. `moq-rs` is versioned independently of `moq-ffi` and floats to the latest compatible patch.
 
 ## Install
 
 ```bash
-pip install moq-net
+pip install moq-rs
 ```
 
-Requires Python 3.10+.
+Requires Python 3.10+. The distribution is `moq-rs` (the `moq` name is taken on PyPI); the import name is `moq`. Installing it pulls in the `moq-ffi` native bindings automatically.
 
 ## Concepts
 
@@ -92,13 +92,14 @@ broadcast = await client.announced_broadcast("live/cam1")
 
 ## Examples
 
-The repo ships [example scripts](https://github.com/moq-dev/moq/tree/main/py/moq-net/examples) you can run end-to-end:
+The repo ships [example scripts](https://github.com/moq-dev/moq/tree/main/py/moq-rs/examples) you can run end-to-end:
 
 - `clock.py` — publishes / subscribes a clock track (one frame per second, one group per minute).
 - `announced.py` — lists broadcasts under a prefix as they're announced.
 
 ## See also
 
-- Source: [py/moq-net](https://github.com/moq-dev/moq/tree/main/py/moq-net)
-- README: [py/moq-net/README.md](https://github.com/moq-dev/moq/blob/main/py/moq-net/README.md)
+- Source: [py/moq-rs](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
+- README: [py/moq-rs/README.md](https://github.com/moq-dev/moq/blob/main/py/moq-rs/README.md)
+- Raw bindings: [moq-ffi](https://pypi.org/project/moq-ffi/)
 - The Rust crate this wraps: [moq-net](/lib/rs/crate/moq-net)

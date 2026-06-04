@@ -209,7 +209,9 @@ impl NoqServer {
 				nonce_len,
 				"using QUIC-LB compatible connection ID generation"
 			);
-			endpoint_config.cid_generator(move || Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len)));
+			endpoint_config.cid_generator(Arc::new(move || {
+				Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len))
+			}));
 		}
 
 		let socket = std::net::UdpSocket::bind(listen).context("failed to bind UDP socket")?;
@@ -272,14 +274,17 @@ impl NoqRequest {
 		let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
 		let host = handshake.server_name.unwrap_or_default();
 
-		tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepting");
+		// The established Connection no longer exposes a single peer address (noq 1.0
+		// supports multipath), so capture it from the Connecting before awaiting.
+		let remote = conn.remote_address();
+		tracing::debug!(%host, ip = %remote, %alpn, "accepting");
 
 		// Wait for the QUIC connection to be established.
 		let conn = conn.await.context("failed to establish QUIC connection")?;
 
 		let span = tracing::Span::current();
 		span.record("id", conn.stable_id());
-		tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepted");
+		tracing::debug!(%host, ip = %remote, %alpn, "accepted");
 
 		match alpn.as_str() {
 			web_transport_noq::ALPN => {
@@ -367,7 +372,7 @@ impl ServerIdGenerator {
 
 impl noq::ConnectionIdGenerator for ServerIdGenerator {
 	fn generate_cid(&mut self) -> noq::ConnectionId {
-		use rand::Rng;
+		use rand::RngExt;
 		let cid_len = self.cid_len();
 		let mut cid = Vec::with_capacity(cid_len);
 		// First byte has "self-encoded length" of server ID + nonce

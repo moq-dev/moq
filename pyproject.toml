@@ -1,13 +1,21 @@
+# Non-published workspace root: holds shared dev tooling + uv workspace config.
 [project]
 name = "moq"
 version = "0.0.0"
 requires-python = ">=3.10"
 
+# Listed explicitly (not `py/*`) so build output like py/dist isn't mistaken
+# for a workspace member.
 [tool.uv.workspace]
-members = ["py/*"]
+members = ["py/moq-ffi", "py/moq-rs"]
 
 [dependency-groups]
 dev = ["ruff", "maturin", "pyright", "pytest", "pytest-asyncio"]
+
+# Tests span both workspace members (py/moq-rs, py/moq-ffi). pytest resolves
+# its rootdir to this workspace root, so the shared asyncio config lives here.
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [tool.pyright]
 pythonVersion = "3.10"

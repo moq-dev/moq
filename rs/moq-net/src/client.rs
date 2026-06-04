@@ -98,6 +98,7 @@ impl Client {
 					true,
 					publish,
 					consume,
+					self.stats.clone(),
 					ietf::Version::Draft18,
 				)?;
 
@@ -118,6 +119,7 @@ impl Client {
 					true,
 					publish,
 					consume,
+					self.stats.clone(),
 					ietf::Version::Draft17,
 				)?;
 
@@ -274,7 +276,16 @@ impl Client {
 					.map(ietf::RequestId);
 
 				let stream = stream.with_version(v);
-				ietf::start(session.clone(), Some(stream), request_id_max, true, publish, consume, v)?;
+				ietf::start(
+					session.clone(),
+					Some(stream),
+					request_id_max,
+					true,
+					publish,
+					consume,
+					self.stats.clone(),
+					v,
+				)?;
 				None
 			}
 		};

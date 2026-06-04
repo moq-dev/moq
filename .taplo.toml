@@ -1,5 +1,5 @@
 # Skip vendored / build trees so `taplo format` doesn't recurse into them.
-exclude = ["**/node_modules/**", "**/target/**", "**/dist/**", "**/.venv/**"]
+exclude = ["**/node_modules/**", "**/target/**", "**/dist/**", "**/.venv/**", "**/.direnv/**"]
 
 # Match the existing repo style (4-space indent on Cargo.toml, lines up
 # to ~120 chars) so the initial format pass stays minimal.

@@ -105,6 +105,26 @@ mkdir -p "$PACKAGE_DIR/bin"
 cp -L "$BIN_FILE" "$PACKAGE_DIR/bin/$CRATE"
 chmod 0755 "$PACKAGE_DIR/bin/$CRATE"
 
+# On macOS the nix toolchain links the nix-store copy of libiconv, whose
+# absolute path doesn't exist on a user's Mac, so dyld aborts at startup
+# (the brew channel's "Library not loaded: /nix/store/.../libiconv.2.dylib").
+# Rewrite the leaked paths to load from the system dyld shared cache (via
+# /usr/lib), like a plain `cargo build` does. scrub-macho.sh also asserts no
+# /nix path survives, so this can't silently ship again.
+if [[ "$(uname)" == "Darwin" ]]; then
+    bin="$PACKAGE_DIR/bin/$CRATE"
+    "$SCRIPT_DIR/scrub-macho.sh" "$bin"
+
+    # Prove dyld actually loads the scrubbed binary. host==target is enforced
+    # above, so it runs natively; --help triggers dyld's dependency load (the
+    # exact step that aborted on a clean Mac) before clap exits 0.
+    if ! "$bin" --help >/dev/null 2>&1; then
+        echo "Error: scrubbed $bin failed to launch (dyld load failure?)." >&2
+        otool -L "$bin" >&2
+        exit 1
+    fi
+fi
+
 if [[ -f "$CRATE_DIR/README.md" ]]; then
     cp "$CRATE_DIR/README.md" "$PACKAGE_DIR/"
 fi

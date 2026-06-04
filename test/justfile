@@ -1,8 +1,10 @@
 #!/usr/bin/env just --justfile
 #
 # Tests that span more than one language. Per-language unit tests live in each
-# language's own justfile; this module aggregates them and hosts the
-# cross-language smoke test.
+# language's own justfile; this module aggregates them.
+#
+# The cross-language interop smoke test against the published packages now lives
+# in its own repo: https://github.com/moq-dev/smoke
 
 # Fall back to the root justfile so `just js test` (etc.) resolve from here.
 set fallback
@@ -13,7 +15,3 @@ default *args:
     just js test
     just rs test {{ args }}
     if command -v uv &> /dev/null; then just py test; fi
-
-# Cross-language media interop smoke test (see test/smoke.sh).
-smoke *args:
-    ./smoke.sh {{ args }}

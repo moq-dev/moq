@@ -14,6 +14,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKSPACE_DIR="$(cd "$RS_DIR/.." && pwd)"
 
+# Shrink the release staticlib. The Go mirror commits the native libs straight
+# into git, and GitHub's pre-receive hook hard-rejects any file over 100 MB
+# (GH001). An unstripped moq-ffi staticlib is ~110 MB on Linux, which silently
+# blocked every moq-go mirror push and pinned consumers to a stale release.
+# Thin LTO with a single codegen unit dead-strips the unused monomorphizations
+# Rust bakes into a staticlib, cutting it by ~60% (~110 MB to ~35 MB) with no
+# source or ABI changes. (Swift ships an XCFramework release asset and Kotlin a
+# Maven .so, so neither hits the git limit, but both still get smaller libs.)
+# Scoped here via env vars so a plain `cargo build --release` stays fast; a
+# caller can still override.
+export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-thin}"
+export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-1}"
+
 # Resolve cargo target directory (respects CARGO_TARGET_DIR, .cargo/config, etc.)
 TARGET_BASE_DIR=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps 2>/dev/null |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' ||

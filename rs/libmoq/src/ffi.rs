@@ -1,5 +1,6 @@
 use std::{
-	ffi::{c_char, c_void},
+	cell::RefCell,
+	ffi::{CString, c_char, c_void},
 	sync::{LazyLock, Mutex},
 };
 
@@ -36,8 +37,14 @@ pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
 	let _guard = handle.enter();
 
 	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-		Ok(ret) => ret.code(),
-		Err(_) => Error::Panic.code(),
+		Ok(ret) => {
+			record_error(&ret);
+			ret.code()
+		}
+		Err(_) => {
+			record_error(&Error::Panic);
+			Error::Panic.code()
+		}
 	}
 }
 
@@ -65,9 +72,14 @@ impl OnStatus {
 	}
 
 	/// Invoke the callback with a result code.
+	///
+	/// We record the reason before invoking the callback (on the same thread)
+	/// so a callback receiving a negative code can read `moq_error()` for it.
 	pub fn call<C: ReturnCode>(&self, ret: C) {
+		record_error(&ret);
+		let code = ret.code();
 		if let Some(on_status) = &self.on_status {
-			on_status(self.user_data, ret.code());
+			on_status(self.user_data, code);
 		}
 	}
 }
@@ -78,6 +90,12 @@ unsafe impl Send for OnStatus {}
 pub trait ReturnCode {
 	/// Convert to an i32 status code.
 	fn code(&self) -> i32;
+
+	/// The error this carries, if any, so the boundary can record its reason
+	/// for `moq_error`. Defaults to none for non-fallible return types.
+	fn error(&self) -> Option<&Error> {
+		None
+	}
 }
 
 impl ReturnCode for () {
@@ -100,6 +118,10 @@ impl ReturnCode for Result<i32, Error> {
 			Err(e) => e.code(),
 		}
 	}
+
+	fn error(&self) -> Option<&Error> {
+		self.as_ref().err()
+	}
 }
 
 impl ReturnCode for Result<usize, Error> {
@@ -108,6 +130,10 @@ impl ReturnCode for Result<usize, Error> {
 			Ok(code) => i32::try_from(*code).unwrap_or_else(|_| Error::InvalidCode.code()),
 			Err(e) => e.code(),
 		}
+	}
+
+	fn error(&self) -> Option<&Error> {
+		self.as_ref().err()
 	}
 }
 
@@ -118,6 +144,10 @@ impl ReturnCode for Result<Id, Error> {
 			Err(e) => e.code(),
 		}
 	}
+
+	fn error(&self) -> Option<&Error> {
+		self.as_ref().err()
+	}
 }
 
 impl ReturnCode for Result<(), Error> {
@@ -126,6 +156,10 @@ impl ReturnCode for Result<(), Error> {
 			Ok(()) => 0,
 			Err(e) => e.code(),
 		}
+	}
+
+	fn error(&self) -> Option<&Error> {
+		self.as_ref().err()
 	}
 }
 
@@ -139,6 +173,33 @@ impl ReturnCode for Id {
 	fn code(&self) -> i32 {
 		i32::from(*self)
 	}
+}
+
+thread_local! {
+	/// Reason for the most recent error returned on this thread. FFI functions
+	/// hand back only a numeric code, so we stash the human-readable message
+	/// here for `moq_error` to retrieve.
+	static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
+}
+
+/// Record the reason for an error return into this thread's `moq_error` slot.
+///
+/// Called at the FFI boundary (sync return and callback dispatch) right before
+/// the numeric code is produced, so the conversion in `code()` stays pure.
+fn record_error<C: ReturnCode>(ret: &C) {
+	let Some(err) = ret.error() else { return };
+	// CString::new fails only on an interior NUL, which our messages never
+	// contain; skip storing rather than truncating if it ever happens.
+	if let Ok(msg) = CString::new(err.to_string()) {
+		LAST_ERROR.with(|cell| *cell.borrow_mut() = Some(msg));
+	}
+}
+
+/// Pointer to this thread's last error message, or null if none was recorded.
+///
+/// The pointer is valid until the next libmoq call on the same thread.
+pub fn last_error_ptr() -> *const c_char {
+	LAST_ERROR.with(|cell| cell.borrow().as_ref().map_or(std::ptr::null(), |msg| msg.as_ptr()))
 }
 
 /// Parse an i32 handle into an Id.

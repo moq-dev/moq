@@ -89,6 +89,7 @@ impl Server {
 					false,
 					publish.clone(),
 					consume.clone(),
+					self.stats.clone(),
 					ietf::Version::Draft18,
 				)?;
 
@@ -109,11 +110,11 @@ impl Server {
 					false,
 					publish.clone(),
 					consume.clone(),
+					self.stats.clone(),
 					ietf::Version::Draft17,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				// TODO: ietf code path does not yet record stats.
 				return Ok(Session::new(session, v, None, publisher.clone(), consumer_view.clone()));
 			}
 			Some(ALPN_16) => {
@@ -269,6 +270,7 @@ impl Server {
 					false,
 					publish.clone(),
 					consume.clone(),
+					self.stats.clone(),
 					v,
 				)?;
 				None

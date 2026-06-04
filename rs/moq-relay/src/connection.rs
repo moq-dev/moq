@@ -2,7 +2,7 @@ use crate::{Auth, AuthError, AuthParams, AuthToken, Cluster};
 
 use axum::http;
 use moq_native::Request;
-use moq_net::{Path, PathOwned};
+use moq_net::Path;
 
 /// An error carrying the HTTP status to send when closing the request.
 ///
@@ -79,6 +79,12 @@ impl Connection {
 		};
 		let stats = self.cluster.stats.tier(tier);
 
+		// Count this session against its auth root for the whole connection,
+		// independent of any data flow, so presence-based billing sees a client
+		// that connects to e.g. `/acme` even while idle. Dropped when
+		// the connection closes below.
+		let _session_stats = stats.session(&token.root);
+
 		// Accept the connection.
 		// NOTE: subscribe and publish seem backwards because of how relays work.
 		// We publish the tracks the client is allowed to subscribe to.
@@ -111,21 +117,23 @@ impl Connection {
 	/// and full access is granted within the URL path's root. The cert's chain
 	/// to the configured CA is the only credential we require.
 	async fn authenticate(&self) -> Result<AuthToken, StatusError> {
-		if self.request.has_peer_certificate() {
-			tracing::debug!("mTLS peer authenticated");
-			// Scope the grant to the URL path, the same root a JWT would resolve
-			// to. Cluster peers dial "/" and so keep an empty (unscoped) root.
-			let root = match self.request.url() {
-				Some(url) => Path::new(&self.auth.params_from_url(url).path).to_owned(),
-				None => PathOwned::default(),
-			};
-			return Ok(AuthToken::unrestricted(root));
-		}
-
 		let params = match self.request.url() {
 			Some(url) => self.auth.params_from_url(url),
 			None => AuthParams::default(),
 		};
+
+		if self.request.has_peer_certificate() {
+			tracing::debug!("mTLS peer authenticated");
+			// Scope the grant to the canonical root. An mTLS publisher dialing a
+			// vanity alias lands on the same tree a JWT would; cluster peers dial
+			// "/", which resolves to an empty (unscoped) root. The API also returns
+			// the billing tier (defaulting to internal for trusted peers).
+			let (root, internal) = self.auth.resolve_mtls(&params.path).await;
+			let mut token = AuthToken::unrestricted(Path::new(&root).to_owned());
+			token.internal = internal;
+			return Ok(token);
+		}
+
 		Ok(self.auth.verify(&params).await?)
 	}
 }

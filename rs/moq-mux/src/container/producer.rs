@@ -185,7 +185,7 @@ impl<C: Container> Producer<C> {
 
 	/// Create a consumer for this track.
 	pub fn consume(&self) -> moq_net::TrackSubscriber {
-		self.inner.subscribe_default()
+		self.inner.subscribe(None)
 	}
 }
 
@@ -233,7 +233,7 @@ mod tests {
 		let track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer = track.subscribe_default();
+		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap(); // first frame must be a keyframe
@@ -251,7 +251,7 @@ mod tests {
 		let track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer = track.subscribe_default();
+		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
@@ -290,7 +290,7 @@ mod tests {
 		let track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer = track.subscribe_default();
+		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap(); // seq 0
@@ -307,7 +307,7 @@ mod tests {
 		let track = moq_net::Track::new("test")
 			.with_timescale(hang::container::TIMESCALE)
 			.produce();
-		let consumer = track.subscribe_default();
+		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.seek(5).unwrap();

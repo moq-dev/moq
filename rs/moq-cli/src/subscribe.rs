@@ -14,6 +14,8 @@ pub enum SubscribeFormat {
 	H264,
 	/// H.265 Annex-B elementary stream (no container).
 	H265,
+	/// MPEG-TS (transport stream) container.
+	Ts,
 }
 
 /// `clap` adapter for [`CatalogFormat`] (which is `#[non_exhaustive]` and so
@@ -149,7 +151,7 @@ impl SubscribeArgs {
 		match self.format {
 			SubscribeFormat::H264 => Some(VideoCodecKind::H264),
 			SubscribeFormat::H265 => Some(VideoCodecKind::H265),
-			SubscribeFormat::Fmp4 | SubscribeFormat::Mkv => None,
+			SubscribeFormat::Fmp4 | SubscribeFormat::Mkv | SubscribeFormat::Ts => None,
 		}
 	}
 
@@ -246,6 +248,7 @@ impl Subscribe {
 			SubscribeFormat::Mkv => self.run_mkv().await,
 			SubscribeFormat::H264 => self.run_h264().await,
 			SubscribeFormat::H265 => self.run_h265().await,
+			SubscribeFormat::Ts => self.run_ts().await,
 		}
 	}
 
@@ -304,6 +307,24 @@ impl Subscribe {
 			moq_mux::codec::h265::Export::new(self.broadcast.clone(), stream).with_latency(self.args.max_latency);
 
 		while let Some(chunk) = h265.next().await? {
+			stdout.write_all(&chunk).await?;
+			stdout.flush().await?;
+		}
+
+		Ok(())
+	}
+
+	async fn run_ts(self) -> anyhow::Result<()> {
+		let mut stdout = tokio::io::stdout();
+
+		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
+		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
+		// is re-framed as ADTS. `fragment_duration` does not apply to TS.
+		let mut ts = moq_mux::container::ts::Export::with_catalog_format(self.broadcast, self.catalog)
+			.await?
+			.with_latency(self.args.max_latency);
+
+		while let Some(chunk) = ts.next().await? {
 			stdout.write_all(&chunk).await?;
 			stdout.flush().await?;
 		}

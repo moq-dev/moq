@@ -76,8 +76,18 @@ If your distro doesn't have a native package on offer:
   `aarch64-unknown-linux-gnu` variants.
 - **Docker**: `docker pull docker.io/moqdev/moq-relay:latest`. Multi-arch
   images for `linux/amd64` and `linux/arm64`.
-- **Nix**: the project ships a flake. `nix profile install github:moq-dev/moq#moq-relay`,
-  or use the binary cache at `kixelated.cachix.org` to skip building from source.
+- **Nix**: the project ships a flake. The Cachix cache at `kixelated.cachix.org`
+  serves pre-built binaries, but only tagged releases are pushed, so pin the
+  ref to a recent tag and accept the flake's cache config to skip building from
+  source:
+
+  ```bash
+  nix run github:moq-dev/moq/moq-relay-v0.12.4#moq-relay --accept-flake-config
+  ```
+
+  An unpinned `github:moq-dev/moq#moq-relay` tracks the default branch, which
+  is not cached and compiles from source. To trust the cache permanently
+  instead of per-command, run `cachix use kixelated` once.
 - **Arch Linux**: a community-maintained PKGBUILD lives in the AUR
   (`moq-relay-bin`). The project doesn't maintain it directly; treat it as
   community supported.

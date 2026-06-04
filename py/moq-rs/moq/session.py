@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from ._uniffi import MoqSession
+from moq_ffi import MoqSession
+
 from .origin import OriginConsumer, OriginProducer
 
 

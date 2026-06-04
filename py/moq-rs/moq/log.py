@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._uniffi import moq_log_level
+from moq_ffi import moq_log_level
 
 
 def log_level(level: str = "info") -> None:

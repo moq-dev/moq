@@ -2,7 +2,7 @@ use std::num::NonZero;
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rand::Rng;
+use rand::RngExt;
 
 use crate::coding::VarInt;
 
@@ -128,6 +128,9 @@ pub struct Timestamp {
 }
 
 impl Timestamp {
+	/// The zero timestamp (0 at [`Timescale::SECOND`]); compares equal to zero at any scale.
+	pub const ZERO: Self = Self::from_secs_unchecked(0);
+
 	/// Construct a timestamp directly from a raw value at the given scale.
 	/// Returns [`TimeOverflow`] if `value` exceeds `2^62 - 1`.
 	pub const fn new(value: u64, scale: Timescale) -> Result<Self, TimeOverflow> {
@@ -135,6 +138,12 @@ impl Timestamp {
 			Some(value) => Ok(Self { value, scale }),
 			None => Err(TimeOverflow),
 		}
+	}
+
+	/// Construct a timestamp from a raw value and a `units_per_second` scale.
+	/// Returns [`TimeOverflow`] if the scale is zero or the value is out of range.
+	pub fn from_scale(value: u64, units_per_second: u64) -> Result<Self, TimeOverflow> {
+		Self::new(value, Timescale::new(units_per_second)?)
 	}
 
 	/// Convert a number of seconds to a timestamp at [`Timescale::SECOND`].

@@ -11,6 +11,7 @@ mod auth;
 mod cluster;
 mod config;
 mod connection;
+mod http_client;
 mod stats;
 mod web;
 #[cfg(feature = "websocket")]

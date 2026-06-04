@@ -149,6 +149,26 @@ The client's connection URL path does **not** need to match the token's `root` e
 
 The connection is also rejected if the resulting permissions are empty (no publish or subscribe paths remain after scoping).
 
+### Unified Auth API (`--auth-api`)
+
+Instead of wiring `--auth-key-dir` (URL form) and `--auth-public-api` separately, a relay can resolve **everything it needs to authorize a connection in one call** with `--auth-api <url>` (env `MOQ_AUTH_API`, or `auth_api` under `[auth]` in TOML). It is mutually exclusive with `--auth-key`, `--auth-key-dir`, `--auth-public`, and `--auth-public-api` (configuring both is a startup error); `--auth-domain` still applies.
+
+Per connection the relay issues `GET <base>?root=<path>&kid=<kid>&mtls=true` over the same cached, mTLS-gated HTTP client used by the other auth fetches. All three are query params (the base URL is used verbatim): `root` is the connection path (slashes preserved); `kid` is sent only when the connection carries a JWT (value taken from its header); `mtls=true` is sent only when the peer presented a verified client cert. The JSON response has four **optional** fields:
+
+- `alias` — the canonical full root to scope this connection to: the path with its first segment (a stable id, current vanity, or recently-changed vanity) resolved to the project's canonical id, the rest of the path preserved (e.g. `demo/room/cam` → `x7k2qp/room/cam`). The relay uses it verbatim, so the server owns the entire mapping. Absent → the request path is used unchanged.
+- `public` — `{ "subscribe": [...], "publish": [...] }` anonymous access prefixes (relative to the root), used when there is no JWT. Absent → no public access.
+- `key` — the verifying JWK (a JSON object, deserialized directly) for the requested `kid`. Absent → key-not-found, and the JWT is rejected.
+- `internal` — the billing tier. The relay forwards `mtls=true` and lets the API decide; absent defaults to internal for mTLS peers and external for JWT/public connections. So the API can promote a first-party token to internal or demote a cert-verified connection to external.
+
+This lets a project stay reachable by both its stable id and its current/old vanity path, all mapping to the same broadcast tree: with the API resolving `demo` → `x7k2qp`, both `cdn.moq.dev/demo/foo` and `cdn.moq.dev/x7k2qp/foo` scope to `/x7k2qp/foo`.
+
+```toml
+[auth]
+auth_api = "https://api.moq.dev/cluster/auth"
+```
+
+Unlike the standalone flags, the unified call **fails closed**: any network error, non-2xx status, or unparseable response rejects the connection. The verifying key itself comes from this call, so there is no safe fallback; the endpoint's `Cache-Control` softens transient failures. A root connection (`/`, e.g. a cluster peer) has no project segment, so mTLS peers skip the call entirely.
+
 ## Supported Algorithms
 
 ### Symmetric (HMAC)

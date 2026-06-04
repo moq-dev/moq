@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
 						Some(broadcast) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
 							let track = broadcast
-								.consume_track(&track).subscribe(moq_net::Subscription::default())
+								.consume_track(&track).subscribe(None)
 								.await?;
 							clock = Some(Subscriber::new(track));
 						}

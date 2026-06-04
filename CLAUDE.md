@@ -67,14 +67,19 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq-boy/           # MoQ Boy web viewer (published as @moq/boy)
 
 /py/                  # Python packages (uv workspace)
-  moq-rs/            # Maturin project: bundles rs/moq-ffi cdylib + uniffi
-                     # bindings as moq._uniffi. Distribution name is
-                     # moq-rs (PyPI); import name is `moq`. Version tracks
-                     # rs/moq-ffi (release-py.yml fires on moq-ffi-v*
-                     # tags). One umbrella wheel covers every crate
-                     # exposed via moq-ffi because uniffi-linked
-                     # libraries can't be split across separately
-                     # packaged Python wheels.
+  moq-ffi/           # Maturin project: rs/moq-ffi cdylib + uniffi bindings.
+                     # Distribution `moq-ffi` (PyPI); import `moq_ffi`. One
+                     # wheel covers every crate exposed via moq-ffi because
+                     # uniffi-linked libraries can't be split across separate
+                     # wheels. Version tracks rs/moq-ffi (release-py-ffi.yml
+                     # fires on moq-ffi-v* tags). Most callers want `moq-rs`.
+  moq-rs/            # Pure-python ergonomic wrapper. Distribution `moq-rs`
+                     # (PyPI, since `moq` is taken); import `moq`. Depends on
+                     # moq-ffi via a compatible-release pin (~=0.2.x) so it
+                     # floats to the latest moq-ffi patch. Versioned
+                     # independently: bump py/moq-rs/pyproject.toml by hand; on
+                     # merge to main release-py.yml publishes to PyPI if that
+                     # version isn't already there (registry is the gate).
 
 /swift/               # Swift over rs/moq-ffi (SwiftPM). Split like py: the
                       # ergonomic `Moq` wrapper (Sources/Moq) versions
@@ -116,6 +121,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 ## Dependencies
 
 - When adding new dependencies, always use the **newest stable version** available.
+- **Prefer a maintained third-party crate over hand-rolling non-core functionality** (standard container/codec parsers, compression, serialization, etc.). Reserve bespoke code for the wire/protocol layers where we need full control or no suitable crate exists.
 
 ## Development Tips
 
@@ -146,6 +152,7 @@ match version {
 - Use `anyhow::Context` (`.context("msg")`) instead of `.map_err(|_| anyhow::anyhow!("msg"))` for error conversion
 - **Config flags + TOML merge**: For any `#[arg]` field on a TOML-loadable config, use `Option<T>` (not bare `bool` / `String` / etc.). The TOML→CLI merge clobbers bare fields with their `Default` when the flag is absent, silently overwriting TOML values. See `rs/moq-relay/src/config.rs::tests` for the regression test; add one for any new flag.
 - **Optional args**: For a *public* function/builder parameter that's logically optional, take `impl Into<Option<T>>` rather than `Option<T>`. Callers pass `x` or `None` instead of wrapping every value in `Some(x)`. Convert once at the top with `let x = x.into();`. Skip it for private helpers, where the call sites are few and `Some`/`None` is clearer. See `with_fragment_duration` in `rs/moq-mux/src/container/fmp4/export.rs`.
+- **Prefer `if let` / `let ... else` over an unwrapping `match`**: a `match` whose only job is to unwrap (`Ok(v) => v` / `Some(v) => v`) reads cleaner as `if let Some(v) = x { ... }` or `let Some(v) = x else { ... };`. Matching on an `Option`/`Result` just to bind the inner value is the tell. Keep `match` when both arms do real work or you need the `Err` / `None` payload.
 
 ## Comment Conventions
 

@@ -130,6 +130,7 @@ pub(crate) async fn connect(
 		.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
 		.without_protocol()
 		.with_connector(connector)
+		.with_keep_alive(qmux::KeepAlive::default()) // 5s ping / 30s deadline — parity with QUIC
 		.connect(url.as_str())
 		.await
 		.context("failed to connect WebSocket")?;

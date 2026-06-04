@@ -18,6 +18,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 if [[ $# -ne 1 ]]; then
     echo "Usage: $0 <path-to-libgstmoq.{so,dylib}>" >&2
     exit 2
@@ -32,57 +34,17 @@ fi
 scrub_macos() {
     local dylib="$1"
 
-    # Rewrite every absolute LC_LOAD_DYLIB outside system dirs to
-    # @rpath/<basename>. Allowlist (not "grep nix") so we also catch
-    # any non-nix leakage we haven't predicted.
-    # `tail -n +2` skips line 1, the dylib's own LC_ID_DYLIB.
-    otool -L "$dylib" |
-        tail -n +2 |
-        awk '{print $1}' |
-        { grep -vE '^(@|/usr/lib/|/System/)' || true; } |
-        sort -u |
-        while read -r ref; do
-            install_name_tool -change "$ref" "@rpath/$(basename "$ref")" "$dylib"
-        done
-
-    # Strip LC_RPATH entries under /nix.
-    otool -l "$dylib" |
-        awk '/^ *cmd LC_RPATH$/{f=1; next} f && /^ *path /{print $2; f=0}' |
-        { grep '^/nix/' || true; } |
-        while read -r rp; do
-            install_name_tool -delete_rpath "$rp" "$dylib"
-        done
-
-    # /opt/homebrew + /usr/local cover homebrew on ARM and Intel; the
-    # Framework path covers the official .pkg installer; /usr/lib lets
-    # dyld resolve system libs (libiconv, libc++) via dyld_shared_cache
-    # at @rpath substitution time.
-    install_name_tool -add_rpath /opt/homebrew/lib "$dylib"
-    install_name_tool -add_rpath /usr/local/lib "$dylib"
-    install_name_tool -add_rpath /Library/Frameworks/GStreamer.framework/Libraries "$dylib"
-    install_name_tool -add_rpath /usr/lib "$dylib"
-
-    # Whitelist assertion: every LC_LOAD_DYLIB must resolve via @rpath,
-    # @loader_path, @executable_path, /usr/lib, or /System.
-    local bad
-    bad="$(otool -L "$dylib" |
-        tail -n +2 |
-        awk '{print $1}' |
-        { grep -vE '^(@|/usr/lib/|/System/)' || true; })"
-    if [[ -n "$bad" ]]; then
-        echo "Error: $dylib has non-portable LC_LOAD_DYLIB entries:" >&2
-        echo "$bad" >&2
-        exit 1
-    fi
-    local bad_rp
-    bad_rp="$(otool -l "$dylib" |
-        awk '/^ *cmd LC_RPATH$/{f=1; next} f && /^ *path /{print $2; f=0}' |
-        { grep '^/nix/' || true; })"
-    if [[ -n "$bad_rp" ]]; then
-        echo "Error: $dylib has /nix LC_RPATH entries:" >&2
-        echo "$bad_rp" >&2
-        exit 1
-    fi
+    # The shared Mach-O scrub does the LC_LOAD_DYLIB rewrite, /nix LC_RPATH
+    # strip, and the no-/nix assertion. We just pass the rpaths a GStreamer
+    # plugin needs: /opt/homebrew + /usr/local cover homebrew on ARM and
+    # Intel, the Framework path covers the official .pkg installer, and
+    # /usr/lib lets dyld resolve system libs (libiconv, libc++) via the
+    # dyld_shared_cache at @rpath substitution time.
+    "$SCRIPT_DIR/../scripts/scrub-macho.sh" "$dylib" \
+        /opt/homebrew/lib \
+        /usr/local/lib \
+        /Library/Frameworks/GStreamer.framework/Libraries \
+        /usr/lib
 }
 
 scrub_linux() {
