@@ -138,6 +138,15 @@ jobs:
         shell: bash
         # Pin glibc to 2.34 so one .so covers Debian 12+/Ubuntu 22.04+
         # (.deb) and AlmaLinux/RHEL/Rocky 9+ (.rpm).
+        #
+        # PKG_CONFIG_ALLOW_SYSTEM_LIBS keeps the `-L /usr/lib/<multiarch>` for
+        # glib in pkg-config's output. pkg-config strips system lib paths by
+        # default (the native linker searches them anyway), but zig's linker
+        # does not, and rustc fails the dylib lookup (strategy 'no_fallback')
+        # before linking. The explicit -L lets it resolve libglib-2.0.so /
+        # libgobject-2.0.so.
+        env:
+          PKG_CONFIG_ALLOW_SYSTEM_LIBS: "1"
         run: cargo zigbuild --release --target ${{ matrix.target }}.2.34 -p moq-gst
 
       - name: Package .deb
