@@ -79,16 +79,22 @@ async fn main() -> anyhow::Result<()> {
 	#[cfg(not(feature = "jemalloc"))]
 	let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
-	// First signal (Ctrl+C / SIGTERM): GOAWAY all connections and stop accepting, then
-	// wait for them to drain. Second signal: force shutdown immediately.
+	// Graceful-then-forceful shutdown. The first stop signal (SIGINT/Ctrl+C, or SIGTERM
+	// from `systemctl stop`) drains; a second one forces. There's no handler for a hard
+	// kill: SIGKILL is uncatchable, and that's the kernel-level backstop (systemd sends
+	// it after TimeoutStopSec).
 	let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
 	let shutdown = async move {
-		shutdown_signal().await;
+		// Open the streams once so the second signal can't slip through a re-registration gap.
+		let mut signals = ShutdownSignals::listen();
+
+		signals.recv().await;
 		tracing::info!("shutting down: sending GOAWAY and draining connections (signal again to force)");
 		#[cfg(unix)]
 		let _ = sd_notify::notify(&[sd_notify::NotifyState::Stopping]);
 		let _ = drain_tx.send(true);
-		shutdown_signal().await;
+
+		signals.recv().await;
 		tracing::warn!("forcing shutdown");
 	};
 
@@ -102,34 +108,43 @@ async fn main() -> anyhow::Result<()> {
 	}
 }
 
-/// Resolve on the next shutdown signal: Ctrl+C (SIGINT) or, on Unix, SIGTERM
-/// (what `systemctl stop` sends). Never resolves if signal registration fails,
-/// so a broken handler can't masquerade as a shutdown request.
-async fn shutdown_signal() {
+/// Listens for OS stop signals. On Unix that's SIGINT (Ctrl+C) and SIGTERM (what
+/// `systemctl stop` sends); elsewhere just Ctrl+C. Both streams are registered up
+/// front so repeated signals are delivered reliably.
+struct ShutdownSignals {
 	#[cfg(unix)]
-	{
-		use tokio::signal::unix::{SignalKind, signal};
-		let mut term = match signal(SignalKind::terminate()) {
-			Ok(term) => term,
-			Err(err) => {
-				tracing::warn!(%err, "failed to listen for SIGTERM");
-				// Diverges: a broken handler must never count as a shutdown request.
-				std::future::pending().await
+	sigint: tokio::signal::unix::Signal,
+	#[cfg(unix)]
+	sigterm: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignals {
+	fn listen() -> Self {
+		#[cfg(unix)]
+		{
+			use tokio::signal::unix::{SignalKind, signal};
+			Self {
+				sigint: signal(SignalKind::interrupt()).expect("failed to listen for SIGINT"),
+				sigterm: signal(SignalKind::terminate()).expect("failed to listen for SIGTERM"),
 			}
-		};
-		tokio::select! {
-			res = tokio::signal::ctrl_c() => {
-				if res.is_err() {
-					std::future::pending::<()>().await;
-				}
-			}
-			_ = term.recv() => {}
 		}
+		#[cfg(not(unix))]
+		Self {}
 	}
-	#[cfg(not(unix))]
-	{
-		if tokio::signal::ctrl_c().await.is_err() {
-			std::future::pending::<()>().await;
+
+	/// Resolve on the next stop signal.
+	async fn recv(&mut self) {
+		#[cfg(unix)]
+		tokio::select! {
+			_ = self.sigint.recv() => {}
+			_ = self.sigterm.recv() => {}
+		}
+		#[cfg(not(unix))]
+		{
+			// Windows: Ctrl+C only. A failed registration must not look like a signal.
+			if tokio::signal::ctrl_c().await.is_err() {
+				std::future::pending::<()>().await;
+			}
 		}
 	}
 }
