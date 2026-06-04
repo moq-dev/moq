@@ -23,10 +23,6 @@ pub enum Error {
 	#[error("mkv: {0}")]
 	Mkv(#[from] crate::container::mkv::Error),
 
-	/// Error during HLS ingest.
-	#[error("hls: {0}")]
-	Hls(#[from] crate::container::hls::Error),
-
 	/// Error decoding the MSF catalog.
 	#[error("msf: {0}")]
 	Msf(#[from] crate::catalog::msf::Error),

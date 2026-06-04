@@ -254,3 +254,108 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 	let mut buf = Vec::new();
 	moov.encode(&mut buf).expect("encode merged moov");
 }
+
+/// `next_fragment` reports the init flag, per-fragment sync-sample independence,
+/// and a positive duration. With a sub-GOP fragment cap, a part in the middle of
+/// a GOP is reported as non-independent while the GOP's leading part stays
+/// independent. This is the metadata an HLS/LL-HLS packager consumes.
+#[tokio::test(start_paused = true)]
+async fn next_fragment_reports_segment_metadata() {
+	use std::time::Duration;
+
+	use bytes::BytesMut;
+	use hang::catalog::{Container, H264, VideoConfig};
+	use moq_net::Timestamp;
+
+	let broadcast = moq_net::Broadcast::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let track = producer
+		.create_track(moq_net::Track::new(producer.unique_name(".avc3")).with_timescale(hang::container::TIMESCALE))
+		.unwrap();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: true,
+	});
+	config.coded_width = Some(320);
+	config.coded_height = Some(240);
+	config.framerate = Some(30.0);
+	config.container = Container::Legacy;
+	catalog.lock().video.renditions.insert(track.name.clone(), config);
+
+	const SC: &[u8] = &[0, 0, 0, 1];
+	let sps = &[0x67u8, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef][..];
+	let pps = &[0x68u8, 0xce, 0x3c, 0x80][..];
+	let idr = &[0x65u8, 0x88, 0x84, 0x21, 0x00, 0x11, 0x22, 0x33][..];
+	let slice = &[0x41u8, 0x9a, 0x00, 0x01][..];
+
+	let annexb = |nals: &[&[u8]]| {
+		let mut buf = BytesMut::new();
+		for nal in nals {
+			buf.extend_from_slice(SC);
+			buf.extend_from_slice(nal);
+		}
+		buf.freeze()
+	};
+
+	let frame = |timestamp_us: u64, payload, keyframe| crate::container::Frame {
+		timestamp: Timestamp::from_micros(timestamp_us).unwrap(),
+		payload,
+		keyframe,
+		duration: None,
+	};
+
+	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
+	// GOP 0: keyframe@0 (SPS+PPS+IDR), delta@33ms. GOP 1: keyframe@66ms.
+	track_producer.write(frame(0, annexb(&[sps, pps, idr]), true)).unwrap();
+	track_producer.write(frame(33_000, annexb(&[slice]), false)).unwrap();
+	track_producer
+		.write(frame(66_000, annexb(&[sps, pps, idr]), true))
+		.unwrap();
+	track_producer.finish().unwrap();
+
+	let catalog_stream = crate::catalog::Consumer::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.expect("catalog consumer");
+	// Sub-GOP cap so GOP 0 splits into two parts (the trailing part non-independent).
+	let mut exporter =
+		crate::container::fmp4::Export::new(consumer, catalog_stream).with_fragment_duration(Duration::from_millis(20));
+
+	// First emit is the init segment.
+	let init = tokio::time::timeout(Duration::from_secs(1), exporter.next_fragment())
+		.await
+		.expect("exporter timed out")
+		.expect("exporter result")
+		.expect("expected init fragment");
+	assert!(init.init, "first fragment must be the init segment");
+	assert!(!init.independent);
+	assert_eq!(init.duration, 0.0);
+
+	// The track is finished, so its three media fragments are all available. Keep
+	// the broadcast/catalog producers alive (dropping them aborts the consumer);
+	// the catalog stays open, so the exporter never reaches a clean end — read the
+	// known fragment count rather than looping to `None`.
+	let mut independents = Vec::new();
+	for _ in 0..3 {
+		let frag = tokio::time::timeout(Duration::from_secs(1), exporter.next_fragment())
+			.await
+			.expect("exporter timed out")
+			.expect("exporter result")
+			.expect("expected a media fragment");
+		assert!(!frag.init);
+		assert!(frag.duration > 0.0, "media fragment duration should be positive");
+		independents.push(frag.independent);
+	}
+
+	// GOP 0 leading part (independent), GOP 0 trailing part (dependent),
+	// GOP 1 leading part (independent).
+	assert_eq!(independents, vec![true, false, true]);
+
+	drop(track_producer);
+	drop(catalog);
+	drop(producer);
+}

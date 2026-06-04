@@ -3851,6 +3851,7 @@ dependencies = [
  "clap",
  "hang",
  "humantime",
+ "moq-hls",
  "moq-mux",
  "moq-native",
  "rustls",
@@ -3898,6 +3899,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-hls"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-server",
+ "bytes",
+ "clap",
+ "hang",
+ "kio",
+ "m3u8-rs",
+ "moq-mux",
+ "moq-native",
+ "moq-net",
+ "reqwest 0.12.28",
+ "rustls",
+ "sd-notify",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "moq-loc"
 version = "0.1.0"
 dependencies = [
@@ -3926,14 +3952,12 @@ dependencies = [
  "h264-parser",
  "hang",
  "kio",
- "m3u8-rs",
  "moq-loc",
  "moq-msf",
  "moq-net",
  "mp4-atom",
  "mpeg2ts",
  "num_enum",
- "reqwest 0.12.28",
  "scuffle-av1",
  "scuffle-h265",
  "thiserror 2.0.18",

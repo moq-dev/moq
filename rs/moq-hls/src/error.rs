@@ -1,17 +1,17 @@
-//! HLS playlist ingest.
-//!
-//! Watches an HLS master or media playlist, downloads each fMP4 segment
-//! as it appears, and feeds it through the fMP4 importer. Import-only;
-//! moq-mux doesn't emit HLS today.
+//! Errors for the HLS / LL-HLS gateway.
 
-mod import;
-
-pub use import::*;
-
-/// HLS ingest errors.
+/// Errors produced by the HLS <-> MoQ gateway (ingest and egress).
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// Error from the underlying moq-net transport.
+	#[error("moq: {0}")]
+	Moq(#[from] moq_net::Error),
+
+	/// Error from the moq-mux CMAF import/export layer.
+	#[error("mux: {0}")]
+	Mux(#[from] moq_mux::Error),
+
 	#[error("invalid playlist URL")]
 	InvalidPlaylistUrl,
 
@@ -50,6 +50,10 @@ pub enum Error {
 
 	#[error("io: {0}")]
 	Io(std::sync::Arc<std::io::Error>),
+
+	/// Catch-all for gateway logic that reports via `anyhow`.
+	#[error("{0}")]
+	Other(std::sync::Arc<anyhow::Error>),
 }
 
 impl From<reqwest::Error> for Error {
@@ -61,6 +65,12 @@ impl From<reqwest::Error> for Error {
 impl From<std::io::Error> for Error {
 	fn from(err: std::io::Error) -> Self {
 		Error::Io(std::sync::Arc::new(err))
+	}
+}
+
+impl From<anyhow::Error> for Error {
+	fn from(err: anyhow::Error) -> Self {
+		Error::Other(std::sync::Arc::new(err))
 	}
 }
 

@@ -27,6 +27,8 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }
 humantime = "2.3"
+# Ingest only (no HTTP egress server); the lib provides the relocated HLS importer.
+moq-hls = { path = "../moq-hls", default-features = false }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }

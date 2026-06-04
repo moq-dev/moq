@@ -1,7 +1,9 @@
-//! HLS (HTTP Live Streaming) ingest built on top of fMP4.
+//! HLS ingest: pull an HLS master/media playlist and publish it into MoQ.
 //!
-//! This module provides reusable logic to ingest HLS master/media playlists and
-//! feed their fMP4 segments into a `hang` broadcast.
+//! Watches an HLS master or media playlist, downloads each fMP4 segment as it
+//! appears, and feeds it through moq-mux's fMP4 importer (which publishes a
+//! `hang` broadcast + catalog). Classic HLS only for now (no LL-HLS partial
+//! segments on the ingest side).
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -12,13 +14,13 @@ use bytes::Bytes;
 use m3u8_rs::{
 	AlternativeMedia, AlternativeMediaType, Map, MasterPlaylist, MediaPlaylist, MediaSegment, Resolution, VariantStream,
 };
+use moq_mux::catalog::hang::Producer as CatalogProducer;
+use moq_mux::container::fmp4::Import as Fmp4;
 use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
 
-use crate::Result;
-use crate::container::fmp4::Import as Fmp4;
-use crate::container::hls::Error;
+use crate::{Error, Result};
 
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]
@@ -41,7 +43,7 @@ impl Config {
 	/// Otherwise, treat as a file path and convert to file:// URL.
 	fn parse_playlist(&self) -> Result<Url> {
 		if self.playlist.starts_with("http://") || self.playlist.starts_with("https://") {
-			Url::parse(&self.playlist).map_err(|_| Error::InvalidPlaylistUrl.into())
+			Url::parse(&self.playlist).map_err(|_| Error::InvalidPlaylistUrl)
 		} else {
 			let path = PathBuf::from(&self.playlist);
 			let absolute = if path.is_absolute() {
@@ -49,7 +51,7 @@ impl Config {
 			} else {
 				std::env::current_dir()?.join(path)
 			};
-			Url::from_file_path(&absolute).map_err(|_| Error::InvalidFilePath.into())
+			Url::from_file_path(&absolute).map_err(|_| Error::InvalidFilePath)
 		}
 	}
 }
@@ -64,14 +66,14 @@ struct StepOutcome {
 
 /// HLS ingest that pulls an HLS media playlist and feeds the bytes into the fMP4 ingest.
 ///
-/// Provides `init()` to prime the ingest with initial segments, and `service()`
+/// Provides `init()` to prime the ingest with initial segments, and `run()`
 /// to run the continuous ingest loop.
 pub struct Import {
 	/// Broadcast that all CMAF importers write into.
 	broadcast: moq_net::BroadcastProducer,
 
 	/// The catalog being produced.
-	catalog: crate::catalog::hang::Producer,
+	catalog: CatalogProducer,
 
 	/// fMP4 importers for each discovered video rendition.
 	/// Each importer feeds a separate MoQ track but shares the same catalog.
@@ -113,11 +115,7 @@ impl TrackState {
 
 impl Import {
 	/// Create a new HLS ingest that will write into the given broadcast.
-	pub fn new(
-		broadcast: moq_net::BroadcastProducer,
-		catalog: crate::catalog::hang::Producer,
-		cfg: Config,
-	) -> Result<Self> {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let base_url = cfg.parse_playlist()?;
 		let client = cfg.client.unwrap_or_else(|| {
 			Client::builder()
@@ -277,7 +275,7 @@ impl Import {
 		if let Ok((_, master)) = m3u8_rs::parse_master_playlist(&body) {
 			let variants = select_variants(&master);
 			if variants.is_empty() {
-				return Err(Error::NoVariants.into());
+				return Err(Error::NoVariants);
 			}
 
 			// Create a video track state for every usable variant.
@@ -402,10 +400,10 @@ impl Import {
 		importer.decode(&mut bytes)?;
 
 		if !bytes.is_empty() {
-			return Err(Error::InitNotConsumed.into());
+			return Err(Error::InitNotConsumed);
 		}
 		if !importer.is_initialized() {
-			return Err(Error::InitNotInitialized.into());
+			return Err(Error::InitNotInitialized);
 		}
 
 		track.init_ready = true;
@@ -421,7 +419,7 @@ impl Import {
 		sequence: u64,
 	) -> Result<()> {
 		if segment.uri.is_empty() {
-			return Err(Error::EmptySegmentUri.into());
+			return Err(Error::EmptySegmentUri);
 		}
 
 		let url = resolve_uri(&track.playlist, &segment.uri)?;
@@ -443,7 +441,7 @@ impl Import {
 
 		// Final check after ensuring init segment
 		if !importer.is_initialized() {
-			return Err(Error::ImporterNotInitialized(format!("{:?}", kind)).into());
+			return Err(Error::ImporterNotInitialized(format!("{:?}", kind)));
 		}
 
 		importer.decode(&mut bytes)?;
@@ -616,7 +614,7 @@ mod tests {
 	#[test]
 	fn hls_ingest_starts_without_importers() {
 		let mut broadcast = moq_net::Broadcast::new().produce();
-		let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = Config::new(url);
 		let hls = Import::new(broadcast, catalog, cfg).unwrap();
