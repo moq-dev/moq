@@ -12,14 +12,18 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use crate::{Error, Result, Timescale, coding};
+use crate::{Error, Result, Subscription, Timescale, coding};
 
 use super::{Group, GroupConsumer, GroupProducer};
 
 use std::{
 	collections::{HashSet, VecDeque},
-	sync::{Arc, Mutex, Weak},
-	task::{Poll, ready},
+	pin::Pin,
+	task::{
+		Context,
+		Poll::{self, Ready},
+		ready,
+	},
 	time::Duration,
 };
 
@@ -34,9 +38,7 @@ pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
 /// which returns the publisher's [`Track`] once the subscription is accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct Track {
-	/// Identifier within a broadcast. Unique per [`crate::Broadcast`].
-	pub name: String,
+pub struct TrackInfo {
 	/// Hint that this track's frames are worth compressing (e.g. a JSON catalog).
 	/// The publisher honors it by negotiating a codec in SUBSCRIBE_OK; codec-less
 	/// peers (older drafts) ignore it and send frames verbatim.
@@ -67,12 +69,6 @@ pub struct Track {
 	pub cache: Duration,
 }
 
-impl Default for Track {
-	fn default() -> Self {
-		Self::new(String::new())
-	}
-}
-
 #[cfg(feature = "serde")]
 fn default_cache() -> Duration {
 	DEFAULT_CACHE
@@ -98,18 +94,17 @@ mod cache_millis {
 		Ok(Duration::from_millis(ms))
 	}
 }
-
-impl Track {
-	/// Create a track with the given name.
-	pub fn new<T: Into<String>>(name: T) -> Self {
+impl Default for TrackInfo {
+	fn default() -> Self {
 		Self {
-			name: name.into(),
 			compress: false,
 			timescale: None,
 			cache: DEFAULT_CACHE,
 		}
 	}
+}
 
+impl TrackInfo {
 	/// Mark this track's frames as worth compressing, returning `self` for chaining.
 	pub fn with_compress(mut self, compress: bool) -> Self {
 		self.compress = compress;
@@ -136,108 +131,44 @@ impl Track {
 	fn clamp_stale(&self, stale: Duration) -> Duration {
 		stale.min(self.cache)
 	}
-
-	/// Consume this [`Track`] to create a producer that owns its metadata.
-	pub fn produce(self) -> TrackProducer {
-		TrackProducer::new(self)
-	}
-}
-
-impl From<&str> for Track {
-	fn from(name: &str) -> Self {
-		Track::new(name)
-	}
-}
-
-impl From<String> for Track {
-	fn from(name: String) -> Self {
-		Track::new(name)
-	}
-}
-
-/// Subscriber-side preferences for receiving a track.
-///
-/// Each subscriber holds its own [`Subscription`]; the publisher observes an
-/// aggregate across all live subscribers via [`TrackProducer::subscription`].
-/// A subscriber can change its preferences after the fact with
-/// [`TrackSubscriber::update`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Subscription {
-	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
-	pub priority: u8,
-	/// Whether groups should be delivered in sequence order.
-	pub ordered: bool,
-	/// How long to wait for a group before skipping it once a newer group has
-	/// arrived. `Duration::ZERO` skips immediately (e.g. group 8 arriving means
-	/// group 7 is skipped); a larger value tolerates that much reordering before
-	/// giving up on the older group.
-	pub stale: Duration,
-	/// First group to deliver, or `None` to start at the latest group.
-	pub group_start: Option<u64>,
-	/// Last group to deliver (inclusive), or `None` for no end.
-	pub group_end: Option<u64>,
-}
-
-impl Default for Subscription {
-	fn default() -> Self {
-		Self {
-			priority: 0,
-			ordered: true,
-			stale: Duration::ZERO,
-			group_start: None,
-			group_end: None,
-		}
-	}
-}
-
-impl Subscription {
-	/// Set the delivery priority, returning `self` for chaining.
-	pub fn with_priority(mut self, priority: u8) -> Self {
-		self.priority = priority;
-		self
-	}
-
-	/// Set whether groups are delivered in sequence order, returning `self` for chaining.
-	pub fn with_ordered(mut self, ordered: bool) -> Self {
-		self.ordered = ordered;
-		self
-	}
-
-	/// Set how long to wait for a group before skipping it, returning `self` for chaining.
-	pub fn with_stale(mut self, stale: Duration) -> Self {
-		self.stale = stale;
-		self
-	}
-
-	/// Set the first group to deliver, returning `self` for chaining.
-	pub fn with_group_start(mut self, group_start: impl Into<Option<u64>>) -> Self {
-		self.group_start = group_start.into();
-		self
-	}
-
-	/// Set the last group to deliver (inclusive), returning `self` for chaining.
-	pub fn with_group_end(mut self, group_end: impl Into<Option<u64>>) -> Self {
-		self.group_end = group_end.into();
-		self
-	}
 }
 
 #[derive(Default)]
-struct State {
-	/// Groups in arrival order. `None` entries are tombstones for evicted groups.
+struct TrackState {
+	// The info for the track; always Some for TrackSubscriber/TrackProducer.
+	info: Option<TrackInfo>,
+
+	// Groups in arrival order. `None` entries are tombstones for evicted groups.
 	groups: VecDeque<Option<(GroupProducer, tokio::time::Instant)>>,
+
+	// TODO Do we need this?
 	duplicates: HashSet<u64>,
+
+	// We've popped the front of this VecDeque this many times, used to map sequence -> index.
 	offset: usize,
+
+	// The highest sequence number successfully appended to the track.
 	max_sequence: Option<u64>,
+
+	// The sequence number at which the track was finalized.
 	final_sequence: Option<u64>,
+
+	// The error that caused the track to be aborted, if any.
 	abort: Option<Error>,
-	/// Live subscribers' preferences, aggregated by [`TrackProducer::subscription`].
-	/// Weak so dropped consumers don't leak across consumer churn while the
-	/// producer lingers.
-	subscriptions: Vec<Weak<Mutex<Subscription>>>,
+
+	// Active subscriptions.
+	subscriptions: Vec<kio::Consumer<Subscription>>,
 }
 
-impl State {
+impl TrackState {
+	fn poll_info(&self) -> Poll<Result<TrackInfo>> {
+		if let Some(info) = &self.info {
+			Poll::Ready(Ok(info.clone()))
+		} else {
+			Poll::Pending
+		}
+	}
+
 	/// Find the next non-tombstoned group at or after `index` in arrival order.
 	///
 	/// Returns the group and its absolute index so the consumer can advance past it.
@@ -431,33 +362,8 @@ impl State {
 		}
 	}
 
-	/// Aggregate every live subscriber's preferences into a single [`Subscription`]
-	/// describing the most demanding request, pruning entries for dropped consumers.
-	///
-	/// Returns `None` when there are no live subscribers. Otherwise the result is
-	/// what an upstream relay should forward: highest priority, ordered if anyone
-	/// wants it, the tightest stale deadline, the earliest group start, and the
-	/// latest group end (unbounded wins).
-	fn aggregate_subscription(&mut self) -> Option<Subscription> {
-		self.subscriptions.retain(|s| s.strong_count() > 0);
-
-		let mut agg: Option<Subscription> = None;
-		for weak in &self.subscriptions {
-			let Some(arc) = weak.upgrade() else { continue };
-			let sub = arc.lock().unwrap().clone();
-			agg = Some(match agg {
-				None => sub,
-				Some(acc) => Subscription {
-					priority: acc.priority.max(sub.priority),
-					ordered: acc.ordered || sub.ordered,
-					stale: tightest_stale(acc.stale, sub.stale),
-					group_start: min_option(acc.group_start, sub.group_start),
-					group_end: max_option(acc.group_end, sub.group_end),
-				},
-			});
-		}
-
-		agg
+	fn modify(producer: &kio::Producer<Self>) -> Result<kio::Mut<'_, Self>> {
+		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 }
 
@@ -488,39 +394,44 @@ fn max_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 }
 
 /// A producer for a track, used to create new groups.
+#[derive(Clone)]
 pub struct TrackProducer {
-	info: Track,
-	state: kio::Producer<State>,
-}
-
-impl std::ops::Deref for TrackProducer {
-	type Target = Track;
-
-	fn deref(&self) -> &Self::Target {
-		&self.info
-	}
+	name: String,
+	state: kio::Producer<TrackState>,
+	prev_subscription: Option<Subscription>,
 }
 
 impl TrackProducer {
-	/// Build a producer for the given track metadata. Prefer [`Track::produce`].
-	pub fn new(info: Track) -> Self {
+	/// Build a producer for the given track metadata.
+	pub fn new(name: impl Into<String>, info: impl Into<Option<TrackInfo>>) -> Self {
+		let info = info.into().unwrap_or_default();
 		Self {
-			info,
-			state: kio::Producer::default(),
+			name: name.into(),
+			state: kio::Producer::new(TrackState {
+				info: Some(info),
+				..Default::default()
+			}),
+			prev_subscription: None,
 		}
 	}
 
-	/// Create a new group with the given sequence number.
-	pub fn create_group(&mut self, info: Group) -> Result<GroupProducer> {
-		let group = GroupProducer::new_with_timescale(info, self.info.timescale);
+	pub fn name(&self) -> &str {
+		&self.name
+	}
 
+	/// Create a new group with the given sequence number.
+	pub fn create_group(&mut self, group: Group) -> Result<GroupProducer> {
 		let mut state = self.modify()?;
 		if let Some(fin) = state.final_sequence
 			&& group.sequence >= fin
 		{
 			return Err(Error::Closed);
 		}
+		let info = state.info.as_ref().unwrap();
+		let timescale = info.timescale;
+		let cache = info.cache;
 
+		let group = GroupProducer::new_with_timescale(group, timescale);
 		if !state.duplicates.insert(group.sequence) {
 			return Err(Error::Duplicate);
 		}
@@ -528,7 +439,7 @@ impl TrackProducer {
 		let now = tokio::time::Instant::now();
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.sequence));
 		state.groups.push_back(Some((group.clone(), now)));
-		state.evict_expired(now, self.info.cache);
+		state.evict_expired(now, cache);
 
 		Ok(group)
 	}
@@ -546,13 +457,17 @@ impl TrackProducer {
 			return Err(Error::Closed);
 		}
 
-		let group = GroupProducer::new_with_timescale(Group { sequence }, self.info.timescale);
+		let info = state.info.as_ref().unwrap();
+		let timescale = info.timescale;
+		let cache = info.cache;
+
+		let group = GroupProducer::new_with_timescale(Group { sequence }, timescale);
 
 		let now = tokio::time::Instant::now();
 		state.duplicates.insert(sequence);
 		state.max_sequence = Some(sequence);
 		state.groups.push_back(Some((group.clone(), now)));
-		state.evict_expired(now, self.info.cache);
+		state.evict_expired(now, cache);
 
 		Ok(group)
 	}
@@ -610,38 +525,6 @@ impl TrackProducer {
 		Ok(())
 	}
 
-	/// Subscribe to the track in-process with the given subscriber preferences.
-	///
-	/// Pass `None` for [`Subscription::default`]. The preferences feed the
-	/// producer's [`Self::subscription`] aggregate and can be changed later via
-	/// [`TrackSubscriber::update`].
-	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> TrackSubscriber {
-		let mut subscription = subscription.into().unwrap_or_default();
-		subscription.stale = self.info.clamp_stale(subscription.stale);
-		let subscription = Arc::new(Mutex::new(subscription));
-		if let Ok(mut state) = self.state.write() {
-			state.subscriptions.push(Arc::downgrade(&subscription));
-		}
-		TrackSubscriber {
-			info: self.info.clone(),
-			state: self.state.consume(),
-			subscription,
-			index: 0,
-			min_sequence: 0,
-			next_sequence: 0,
-			end_sequence: None,
-		}
-	}
-
-	/// The aggregate of every live subscriber's [`Subscription`] (most demanding
-	/// request across all consumers), or `None` when there are no live subscribers.
-	pub fn subscription(&self) -> Option<Subscription> {
-		self.state
-			.write()
-			.ok()
-			.and_then(|mut state| state.aggregate_subscription())
-	}
-
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
 		self.state
@@ -682,38 +565,48 @@ impl TrackProducer {
 	/// Create a weak reference that doesn't prevent auto-close.
 	pub(crate) fn weak(&self) -> TrackWeak {
 		TrackWeak {
-			info: self.info.clone(),
+			name: self.name.clone(),
 			state: self.state.weak(),
 		}
 	}
 
-	fn modify(&self) -> Result<kio::Mut<'_, State>> {
-		self.state
-			.write()
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	pub async fn subscription(&mut self) -> Option<Subscription> {
+		kio::wait(|waiter| self.poll_subscription(waiter)).await
 	}
-}
 
-impl Clone for TrackProducer {
-	fn clone(&self) -> Self {
-		Self {
-			info: self.info.clone(),
-			state: self.state.clone(),
+	fn poll_subscription(&mut self, waiter: &kio::Waiter) -> Poll<Option<Subscription>> {
+		let mut combined = None;
+
+		self.state.write().ok().unwrap().subscriptions.retain_mut(|sub| {
+			match sub.poll(waiter, |sub| sub.poll_combined(&combined)) {
+				Poll::Ready(Ok(sub)) => {
+					combined = Some(sub);
+					true
+				}
+				Poll::Ready(Err(_)) => false,
+				Poll::Pending => true,
+			}
+		});
+
+		if combined == self.prev_subscription {
+			return Poll::Pending;
 		}
-	}
-}
 
-impl From<Track> for TrackProducer {
-	fn from(info: Track) -> Self {
-		TrackProducer::new(info)
+		self.prev_subscription = combined.clone();
+
+		Poll::Ready(combined)
+	}
+
+	fn modify(&self) -> Result<kio::Mut<'_, TrackState>> {
+		TrackState::modify(&self.state)
 	}
 }
 
 /// A weak reference to a track that doesn't prevent auto-close.
 #[derive(Clone)]
 pub(crate) struct TrackWeak {
-	pub(crate) info: Track,
-	state: kio::Weak<State>,
+	name: String,
+	state: kio::Weak<TrackState>,
 }
 
 impl TrackWeak {
@@ -721,24 +614,10 @@ impl TrackWeak {
 		self.state.is_closed()
 	}
 
-	pub fn subscribe(&self, mut subscription: Subscription) -> TrackSubscriber {
-		subscription.stale = self.info.clamp_stale(subscription.stale);
-		let subscription = Arc::new(Mutex::new(subscription));
-		// Register the preference if the producer is still alive so it shows up
-		// in the aggregate; otherwise the consumer will just observe close.
-		if let Some(producer) = self.state.produce()
-			&& let Ok(mut state) = producer.write()
-		{
-			state.subscriptions.push(Arc::downgrade(&subscription));
-		}
-		TrackSubscriber {
-			info: self.info.clone(),
+	pub fn consume(&self) -> TrackConsumer {
+		TrackConsumer {
+			name: self.name.clone(),
 			state: self.state.consume(),
-			subscription,
-			index: 0,
-			min_sequence: 0,
-			next_sequence: 0,
-			end_sequence: None,
 		}
 	}
 
@@ -750,6 +629,127 @@ impl TrackWeak {
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
+
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+}
+
+/// A handle to a single track within a broadcast.
+///
+/// Obtained from [`BroadcastConsumer::consume_track`]. Holding it sends nothing
+/// to the publisher; it just names a track you can [`subscribe`](Self::subscribe)
+/// to (a live, ongoing stream of groups) later. The same handle can be subscribed
+/// to multiple times, and clones are cheap.
+// TODO: add `fetch` for one-shot retrieval of a past group range.
+#[derive(Clone)]
+pub struct TrackConsumer {
+	name: String,
+	state: kio::Consumer<TrackState>,
+}
+
+impl TrackConsumer {
+	/// The track name this handle is bound to.
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	pub fn weak(&self) -> TrackWeak {
+		TrackWeak {
+			name: self.name.clone(),
+			state: self.state.weak(),
+		}
+	}
+
+	/// Open a live subscription.
+	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Result<TrackSubscriberPending> {
+		let subscription = kio::Producer::new(subscription.into().unwrap_or_default());
+
+		match self.state.write() {
+			Ok(mut state) => state.subscriptions.push(subscription.consume()),
+			Err(state) => return Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		};
+
+		Ok(TrackSubscriberPending {
+			name: self.name.clone(),
+			state: self.state.clone(),
+			subscription,
+		})
+	}
+
+	//pub fn fetch(&self) -> TrackFetchPending {
+	// TODO
+	//}
+
+	pub fn info(&self) -> TrackInfoPending {
+		TrackInfoPending {
+			name: self.name.clone(),
+			state: self.state.clone(),
+		}
+	}
+}
+
+pub struct TrackSubscriberPending {
+	name: String,
+	state: kio::Consumer<TrackState>,
+	subscription: kio::Producer<Subscription>,
+}
+
+impl TrackSubscriberPending {
+	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<TrackSubscriber>> {
+		// Wait until the track info is available
+		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
+			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
+
+		Poll::Ready(Ok(TrackSubscriber {
+			name: self.name.clone(),
+			info,
+			state: self.state.clone(),
+			subscription: self.subscription.clone(),
+			index: 0,
+			min_sequence: 0,
+			next_sequence: 0,
+			end_sequence: None,
+		}))
+	}
+
+	pub fn update(&mut self, subscription: Subscription) {
+		if let Ok(mut state) = self.subscription.write() {
+			*state = subscription;
+		} else {
+			panic!("subscription is closed");
+		}
+	}
+}
+
+impl Future for TrackSubscriberPending {
+	type Output = Result<TrackSubscriber>;
+
+	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		self.poll_ok(&kio::Waiter::new(cx.waker().clone()))
+	}
+}
+
+pub struct TrackInfoPending {
+	name: String,
+	state: kio::Consumer<TrackState>,
+}
+
+impl TrackInfoPending {
+	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<TrackInfo>> {
+		// Wait until the track info is available
+		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
+			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
+		Poll::Ready(Ok(info))
+	}
+}
+
+impl Future for TrackInfoPending {
+	type Output = Result<TrackInfo>;
+
+	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+		self.poll_ok(&kio::Waiter::new(cx.waker().clone()))
+	}
 }
 
 /// A live subscription to a track, used to read its groups.
@@ -757,13 +757,12 @@ impl TrackWeak {
 /// Created via [`TrackConsumer::subscribe`](crate::TrackConsumer::subscribe), or
 /// directly from a [`TrackProducer`] for an in-process track. Carries this
 /// subscriber's [`Subscription`] preferences, which feed the producer's aggregate.
-#[derive(Clone)]
 pub struct TrackSubscriber {
-	info: Track,
-	state: kio::Consumer<State>,
-	/// This subscriber's preferences, shared with the producer's aggregate.
-	/// Cloning a subscriber shares the same preferences (one subscription, fanned out).
-	subscription: Arc<Mutex<Subscription>>,
+	name: String,
+	info: TrackInfo,
+	state: kio::Consumer<TrackState>,
+
+	subscription: kio::Producer<Subscription>,
 	/// Arrival-order cursor used by [`Self::recv_group`].
 	index: usize,
 	/// Minimum sequence to return from any `recv` method. Set by [`Self::start_at`].
@@ -778,19 +777,19 @@ pub struct TrackSubscriber {
 	end_sequence: Option<u64>,
 }
 
-impl std::ops::Deref for TrackSubscriber {
-	type Target = Track;
-
-	fn deref(&self) -> &Self::Target {
+impl TrackSubscriber {
+	pub fn info(&self) -> &TrackInfo {
 		&self.info
 	}
-}
 
-impl TrackSubscriber {
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
-		F: Fn(&kio::Ref<'_, State>) -> Poll<Result<R>>,
+		F: Fn(&kio::Ref<'_, TrackState>) -> Poll<Result<R>>,
 	{
 		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
 			Ok(res) => res,
@@ -938,26 +937,103 @@ impl TrackSubscriber {
 		self.end_sequence = sequence.into();
 	}
 
-	/// This subscriber's current preferences.
-	pub fn subscription(&self) -> Subscription {
-		self.subscription.lock().unwrap().clone()
-	}
-
 	/// Replace this subscriber's preferences, updating the producer's aggregate.
-	pub fn update(&self, mut subscription: Subscription) {
-		subscription.stale = self.info.clamp_stale(subscription.stale);
-		*self.subscription.lock().unwrap() = subscription;
+	pub fn update(&mut self, subscription: Subscription) {
+		if let Ok(mut state) = self.subscription.write() {
+			*state = subscription;
+		} else {
+			panic!("subscription is closed");
+		}
 	}
 
 	/// Return the latest sequence number in the track.
 	pub fn latest(&self) -> Option<u64> {
 		self.state.read().max_sequence
 	}
+}
 
-	/// Create a weak reference that doesn't prevent auto-close.
-	pub(crate) fn weak(&self) -> TrackWeak {
+pub struct TrackRequest {
+	name: String,
+	state: kio::Producer<TrackState>,
+
+	// The previous subscription that was combined, used to detect changes.
+	prev_subscription: Option<Subscription>,
+}
+
+impl TrackRequest {
+	pub fn new(name: impl Into<String>) -> Self {
+		Self {
+			name: name.into(),
+			state: Default::default(),
+			prev_subscription: None,
+		}
+	}
+
+	/// The requested track name.
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	pub fn consume(&self) -> TrackConsumer {
+		TrackConsumer {
+			name: self.name.clone(),
+			state: self.state.consume(),
+		}
+	}
+
+	//pub async fn requested(&self) -> TrackDynamic {
+	// TODO Used to return the next group requested for FETCH
+	//}
+
+	/// Serve the request with the given track, resolving every waiting subscriber.
+	///
+	/// The track's name must match [`Self::name`]. Returns [`Error::NotFound`] on
+	/// mismatch, or the broadcast's abort error if it closed while pending.
+	pub fn accept(self, info: impl Into<Option<TrackInfo>>) -> TrackProducer {
+		self.state.write().ok().unwrap().info = Some(info.into().unwrap_or_default());
+		TrackProducer {
+			name: self.name,
+			state: self.state,
+			prev_subscription: None,
+		}
+	}
+
+	/// Reject the request, waking all waiting subscribers with `err`.
+	pub fn reject(self, err: Error) {
+		if let Ok(mut state) = self.state.write() {
+			state.abort = Some(err);
+		}
+	}
+
+	pub async fn subscription(&mut self) -> Option<Subscription> {
+		kio::wait(|waiter| self.poll_subscription(waiter)).await
+	}
+
+	pub fn poll_subscription(&mut self, waiter: &kio::Waiter) -> Poll<Option<Subscription>> {
+		let mut combined = None;
+
+		self.state.write().ok().unwrap().subscriptions.retain_mut(|sub| {
+			match sub.poll(waiter, |sub| sub.poll_combined(&combined)) {
+				Poll::Ready(Ok(sub)) => {
+					combined = Some(sub);
+					true
+				}
+				Poll::Ready(Err(_)) => false,
+				Poll::Pending => true,
+			}
+		});
+
+		if combined == self.prev_subscription {
+			return Poll::Pending;
+		}
+
+		self.prev_subscription = combined.clone();
+		return Poll::Ready(combined);
+	}
+
+	pub(super) fn weak(&self) -> TrackWeak {
 		TrackWeak {
-			info: self.info.clone(),
+			name: self.name.clone(),
 			state: self.state.weak(),
 		}
 	}
@@ -1013,12 +1089,12 @@ mod test {
 	use super::*;
 
 	/// Helper: count non-tombstoned groups in state.
-	fn live_groups(state: &State) -> usize {
+	fn live_groups(state: &TrackState) -> usize {
 		state.groups.iter().flatten().count()
 	}
 
 	/// Helper: get the sequence number of the first live group.
-	fn first_live_sequence(state: &State) -> u64 {
+	fn first_live_sequence(state: &TrackState) -> u64 {
 		state.groups.iter().flatten().next().unwrap().0.sequence
 	}
 

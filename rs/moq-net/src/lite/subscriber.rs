@@ -563,33 +563,33 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut stream = match Stream::open(&self.session, self.version).await {
 			Ok(s) => s,
 			Err(err) => {
-				request.deny(err.clone());
+				request.reject(err.clone());
 				return SessionOutcome::Error(err);
 			}
 		};
 
 		if let Err(err) = stream.writer.encode(&lite::ControlType::Subscribe).await {
-			request.deny(err.clone());
+			request.reject(err.clone());
 			return SessionOutcome::Error(err);
 		}
 
 		if let Err(err) = stream.writer.encode(&msg).await {
 			stream.writer.abort(&err);
-			request.deny(err.clone());
+			request.reject(err.clone());
 			return SessionOutcome::Error(err);
 		}
 
 		// The first response MUST be a SUBSCRIBE_OK. Bail if the broadcast dies first.
 		let resp = tokio::select! {
 			err = broadcast.closed() => {
-				request.deny(err.clone());
+				request.reject(err.clone());
 				return SessionOutcome::BroadcastClosed(err);
 			}
 			resp = stream.reader.decode::<lite::SubscribeResponse>() => match resp {
 				Ok(r) => r,
 				Err(err) => {
 					stream.writer.abort(&err);
-					request.deny(err.clone());
+					request.reject(err.clone());
 					return SessionOutcome::Error(err);
 				}
 			}
@@ -597,7 +597,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let lite::SubscribeResponse::Ok(info) = resp else {
 			let err = Error::ProtocolViolation;
 			stream.writer.abort(&err);
-			request.deny(err.clone());
+			request.reject(err.clone());
 			return SessionOutcome::Error(err);
 		};
 

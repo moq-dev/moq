@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-	Counts, State, Weak,
+	Counts, Mut, State, Weak,
 	lock::*,
 	producer::{Producer, Ref},
 	waiter::*,
@@ -103,6 +103,19 @@ impl<T> Consumer<T> {
 	pub fn read(&self) -> Ref<'_, T> {
 		Ref {
 			state: self.state.lock(),
+		}
+	}
+
+	/// Acquire mutable access to the shared state.
+	///
+	/// Returns `Ok(Mut)` if the channel is open, or `Err(Ref)` with
+	/// read-only access if closed. Only locks once.
+	pub fn write(&self) -> Result<Mut<'_, T>, Ref<'_, T>> {
+		let state = self.state.lock();
+		if state.closed {
+			Err(Ref { state })
+		} else {
+			Ok(Mut::new(state))
 		}
 	}
 
