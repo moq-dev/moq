@@ -34,14 +34,14 @@ export class Chat {
 		};
 
 		this.message = new Message({
+			...props?.message,
 			broadcast: this.input.broadcast,
 			catalog: this.input.catalog,
-			...props?.message,
 		});
 		this.typing = new Typing({
+			...props?.typing,
 			broadcast: this.input.broadcast,
 			catalog: this.input.catalog,
-			...props?.typing,
 		});
 
 		// Grab the chat section from the catalog (if it's changed).
