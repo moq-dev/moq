@@ -1,38 +1,46 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import * as Zod from "@moq/net/zod";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
-export interface PeersProps {
-	enabled?: boolean | Signal<boolean>;
-}
+export type PeersInput = {
+	broadcast: Getter<Moq.Broadcast | undefined>;
+	catalog: Getter<Catalog.Root | undefined>;
+	enabled: Getter<boolean>;
+};
+
+type PeersOutput = {
+	positions: Signal<Record<string, Catalog.Position> | undefined>;
+};
 
 export class Peers {
-	enabled: Signal<boolean>;
-	broadcast: Signal<Moq.Broadcast | undefined>;
+	readonly input: Readonlys<PeersInput>;
+
+	readonly #output: PeersOutput = {
+		positions: new Signal<Record<string, Catalog.Position> | undefined>(undefined),
+	};
+	readonly output = readonlys(this.#output);
 
 	#catalog = new Signal<Catalog.Track | undefined>(undefined);
-	#positions = new Signal<Record<string, Catalog.Position> | undefined>(undefined);
 
 	signals = new Effect();
 
-	constructor(
-		broadcast: Signal<Moq.Broadcast | undefined>,
-		catalog: Signal<Catalog.Root | undefined>,
-		props?: PeersProps,
-	) {
-		this.broadcast = broadcast;
-		this.enabled = Signal.from(props?.enabled ?? false);
+	constructor(props?: Inputs<PeersInput>) {
+		this.input = {
+			broadcast: getter(props?.broadcast),
+			catalog: getter(props?.catalog),
+			enabled: getter(props?.enabled ?? false),
+		};
 
 		this.signals.run((effect) => {
-			this.#catalog.set(effect.get(catalog)?.location?.peers);
+			this.#catalog.set(effect.get(this.input.catalog)?.location?.peers);
 		});
 
 		this.signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect) {
-		const values = effect.getAll([this.enabled, this.#catalog, this.broadcast]);
+		const values = effect.getAll([this.input.enabled, this.#catalog, this.input.broadcast]);
 		if (!values) return;
 		const [_, catalog, broadcast] = values;
 
@@ -48,16 +56,12 @@ export class Peers {
 				const frame = await Zod.read(track, Catalog.PeersSchema);
 				if (!frame) break;
 
-				this.#positions.set(frame);
+				this.#output.positions.set(frame);
 			}
 		} finally {
-			this.#positions.set(undefined);
+			this.#output.positions.set(undefined);
 			track.close();
 		}
-	}
-
-	get positions(): Getter<Record<string, Catalog.Position> | undefined> {
-		return this.#positions;
 	}
 
 	close() {

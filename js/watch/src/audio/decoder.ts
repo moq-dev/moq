@@ -3,17 +3,38 @@ import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
 import { base64ToBytes } from "../base64";
+import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 
-export type DecoderProps = {
+type DecoderInput = {
 	// Enable to download the audio track.
-	enabled?: boolean | Signal<boolean>;
+	enabled: Getter<boolean>;
+};
+
+type DecoderOutput = {
+	context: Signal<AudioContext | undefined>;
+
+	// The root of the audio graph, which can be used for custom visualizations.
+	// Downcast to AudioNode so it matches Publish.Audio
+	root: Signal<AudioNode | undefined>;
+
+	sampleRate: Signal<number | undefined>;
+	stats: Signal<AudioStats | undefined>;
+
+	// Current playback timestamp from worklet
+	timestamp: Signal<Time.Milli | undefined>;
+
+	// Whether the audio buffer is stalled (waiting to fill)
+	stalled: Signal<boolean>;
+
+	// Combined buffered ranges (network jitter + decode buffer)
+	buffered: Signal<BufferedRanges>;
 };
 
 export interface AudioStats {
@@ -23,48 +44,36 @@ export interface AudioStats {
 // Downloads audio from a track and emits it to an AudioContext.
 // The user is responsible for hooking up audio to speakers, an analyzer, etc.
 export class Decoder {
+	readonly input: Readonlys<DecoderInput>;
 	source: Source;
-	enabled: Signal<boolean>;
+	sync: Sync;
 
-	#context = new Signal<AudioContext | undefined>(undefined);
-	readonly context: Getter<AudioContext | undefined> = this.#context;
-
-	// The root of the audio graph, which can be used for custom visualizations.
-	#worklet = new Signal<AudioWorkletNode | undefined>(undefined);
-	// Downcast to AudioNode so it matches Publish.Audio
-	readonly root = this.#worklet as Getter<AudioNode | undefined>;
-
-	#sampleRate = new Signal<number | undefined>(undefined);
-	readonly sampleRate: Getter<number | undefined> = this.#sampleRate;
-
-	#stats = new Signal<AudioStats | undefined>(undefined);
-	readonly stats: Getter<AudioStats | undefined> = this.#stats;
-
-	// Current playback timestamp from worklet
-	#timestamp = new Signal<Time.Milli | undefined>(undefined);
-	readonly timestamp: Getter<Time.Milli | undefined> = this.#timestamp;
-
-	// Whether the audio buffer is stalled (waiting to fill)
-	#stalled = new Signal<boolean>(true);
-	readonly stalled: Getter<boolean> = this.#stalled;
+	readonly #output: DecoderOutput = {
+		context: new Signal<AudioContext | undefined>(undefined),
+		root: new Signal<AudioNode | undefined>(undefined),
+		sampleRate: new Signal<number | undefined>(undefined),
+		stats: new Signal<AudioStats | undefined>(undefined),
+		timestamp: new Signal<Time.Milli | undefined>(undefined),
+		stalled: new Signal<boolean>(true),
+		buffered: new Signal<BufferedRanges>([]),
+	};
+	readonly output = readonlys(this.#output);
 
 	// Decode buffer: audio sent to worklet but not yet played
 	#decodeBuffered = new Signal<BufferedRanges>([]);
-
-	// Combined buffered ranges (network jitter + decode buffer)
-	#buffered = new Signal<BufferedRanges>([]);
-	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
 	// Audio ring bridging main thread and worklet (shared memory or postMessage transport).
 	#ring: AudioBuffer | undefined;
 
 	#signals = new Effect();
 
-	constructor(source: Source, props?: DecoderProps) {
-		this.source = source;
-		this.source.supported.set(supported); // super hacky
+	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
+		this.input = {
+			enabled: getter(props?.enabled ?? false),
+		};
 
-		this.enabled = Signal.from(props?.enabled ?? false);
+		this.source = source;
+		this.sync = sync;
 
 		this.#signals.run(this.#runWorklet.bind(this));
 		this.#signals.run(this.#runEnabled.bind(this));
@@ -79,20 +88,17 @@ export class Decoder {
 		//const enabled = effect.get(this.enabled);
 		//if (!enabled) return;
 
-		const config = effect.get(this.source.config);
+		const config = effect.get(this.source.output.config);
 		if (!config) return;
 
 		const sampleRate = config.sampleRate;
 		const channelCount = config.numberOfChannels;
 
-		// NOTE: We still create an AudioContext even when muted.
-		// This way we can process the audio for visualizations.
-
 		const context = new AudioContext({
 			latencyHint: "interactive", // We don't use real-time because of the buffer.
 			sampleRate,
 		});
-		effect.set(this.#context, context);
+		effect.set(this.#output.context, context);
 
 		effect.cleanup(() => context.close());
 
@@ -114,7 +120,7 @@ export class Decoder {
 			effect.cleanup(() => worklet.disconnect());
 
 			// Initial target latency in samples.
-			const latency = this.source.sync.buffer.peek();
+			const latency = this.sync.output.buffer.peek();
 			const latencySamples = Math.ceil(sampleRate * Time.Second.fromMilli(latency));
 
 			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
@@ -128,19 +134,19 @@ export class Decoder {
 			// Mirror ring state (timestamp/stalled) onto our public signals.
 			effect.run((inner) => {
 				const ts = Time.Milli.fromMicro(inner.get(ring.timestamp));
-				this.#timestamp.set(ts);
+				this.#output.timestamp.set(ts);
 				this.#trimDecodeBuffered(ts);
 			});
 			effect.run((inner) => {
-				this.#stalled.set(inner.get(ring.stalled));
+				this.#output.stalled.set(inner.get(ring.stalled));
 			});
 
-			effect.set(this.#worklet, worklet);
+			effect.set(this.#output.root, worklet);
 		});
 	}
 
 	#runEnabled(effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.#context]);
+		const values = effect.getAll([this.input.enabled, this.#output.context]);
 		if (!values) return;
 		const [_, context] = values;
 
@@ -151,31 +157,31 @@ export class Decoder {
 
 	#runLatency(effect: Effect): void {
 		// Gate on the worklet signal so this effect re-runs once the ring is created.
-		const worklet = effect.get(this.#worklet);
+		const worklet = effect.get(this.#output.root);
 		if (!worklet) return;
 
 		const ring = this.#ring;
 		if (!ring) return;
 
-		const latency = effect.get(this.source.sync.buffer);
+		const latency = effect.get(this.sync.output.buffer);
 		const latencySamples = Math.ceil(ring.rate * Time.Second.fromMilli(latency));
 		ring.setLatency(latencySamples);
 	}
 
 	#runDecoder(effect: Effect): void {
-		const enabled = effect.get(this.enabled);
+		const enabled = effect.get(this.input.enabled);
 		if (!enabled) return;
 
-		const broadcast = effect.get(this.source.broadcast);
+		const broadcast = effect.get(this.source.input.broadcast);
 		if (!broadcast) return;
 
-		const track = effect.get(this.source.track);
+		const track = effect.get(this.source.output.track);
 		if (!track) return;
 
-		const config = effect.get(this.source.config);
+		const config = effect.get(this.source.output.config);
 		if (!config) return;
 
-		const active = effect.get(broadcast.active);
+		const active = effect.get(broadcast.output.active);
 		if (!active) return;
 
 		const sub = active.subscribe(track, Catalog.PRIORITY.audio);
@@ -194,7 +200,7 @@ export class Decoder {
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Consumer(sub, {
 			format,
-			latency: this.source.sync.buffer,
+			latency: this.sync.output.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -202,7 +208,7 @@ export class Decoder {
 		effect.run((inner) => {
 			const network = inner.get(consumer.buffered);
 			const decode = inner.get(this.#decodeBuffered);
-			this.#buffered.update(() => Container.mergeBufferedRanges(network, decode));
+			this.#output.buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
 
 		effect.spawn(async () => {
@@ -248,9 +254,9 @@ export class Decoder {
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
-				this.source.sync.received(timestamp, "audio");
+				this.sync.received(timestamp, "audio");
 
-				this.#stats.update((stats) => ({
+				this.#output.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
 				}));
 
@@ -281,7 +287,7 @@ export class Decoder {
 
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
-			latency: this.source.sync.buffer,
+			latency: this.sync.output.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -289,7 +295,7 @@ export class Decoder {
 		effect.run((inner) => {
 			const network = inner.get(consumer.buffered);
 			const decode = inner.get(this.#decodeBuffered);
-			this.#buffered.update(() => Container.mergeBufferedRanges(network, decode));
+			this.#output.buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
 
 		effect.spawn(async () => {
@@ -320,9 +326,9 @@ export class Decoder {
 				if (!frame) continue;
 
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
-				this.source.sync.received(timestamp, "audio");
+				this.sync.received(timestamp, "audio");
 
-				this.#stats.update((stats) => ({
+				this.#output.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
 				}));
 
@@ -407,6 +413,9 @@ export class Decoder {
 	close() {
 		this.#signals.close();
 	}
+
+	// Whether the WebCodecs audio decoder can play this config.
+	static supported = supported;
 }
 
 async function supported(config: Catalog.AudioConfig): Promise<boolean> {

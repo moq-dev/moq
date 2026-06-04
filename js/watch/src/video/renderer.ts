@@ -1,50 +1,57 @@
 import { Time } from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 
-export type RendererProps = {
-	canvas?: HTMLCanvasElement | Signal<HTMLCanvasElement | undefined>;
-	paused?: boolean | Signal<boolean>;
+type RendererInput = {
+	canvas: Getter<HTMLCanvasElement | undefined>;
+};
+
+type RendererOutput = {
+	// The most recently rendered frame, updated after each rAF paint.
+	frame: Signal<VideoFrame | undefined>;
+
+	// The media timestamp of the most recently rendered frame.
+	timestamp: Signal<Time.Milli | undefined>;
+
+	// Whether the canvas is visible in the viewport and the tab is focused.
+	// The owner combines this with `paused` to drive the decoder's `enabled` input.
+	visible: Signal<boolean>;
 };
 
 // An component to render a video to a canvas.
 export class Renderer {
 	decoder: Decoder;
 
-	// The canvas to render the video to.
-	canvas: Signal<HTMLCanvasElement | undefined>;
+	readonly input: Readonlys<RendererInput>;
 
-	// Whether the video is paused.
-	paused: Signal<boolean>;
-
-	// The most recently rendered frame, updated after each rAF paint.
-	readonly frame = new Signal<VideoFrame | undefined>(undefined);
-
-	// The media timestamp of the most recently rendered frame.
-	readonly timestamp = new Signal<Time.Milli | undefined>(undefined);
+	readonly #output: RendererOutput = {
+		frame: new Signal<VideoFrame | undefined>(undefined),
+		timestamp: new Signal<Time.Milli | undefined>(undefined),
+		visible: new Signal(false),
+	};
+	readonly output = readonlys(this.#output);
 
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
-	#visible = new Signal(false);
 	#signals = new Effect();
 
-	constructor(decoder: Decoder, props?: RendererProps) {
+	constructor(decoder: Decoder, props?: Inputs<RendererInput>) {
 		this.decoder = decoder;
-		this.canvas = Signal.from(props?.canvas);
-		this.paused = Signal.from(props?.paused ?? false);
+		this.input = {
+			canvas: getter(props?.canvas),
+		};
 
 		this.#signals.run((effect) => {
-			const canvas = effect.get(this.canvas);
+			const canvas = effect.get(this.input.canvas);
 			this.#ctx.set(canvas?.getContext("2d") ?? undefined);
 		});
 
 		this.#signals.run(this.#runVisible.bind(this));
-		this.#signals.run(this.#runEnabled.bind(this));
 		this.#signals.run(this.#runRender.bind(this));
 		this.#signals.run(this.#runResize.bind(this));
 	}
 
 	#runResize(effect: Effect) {
-		const values = effect.getAll([this.canvas, this.decoder.display]);
+		const values = effect.getAll([this.input.canvas, this.decoder.output.display]);
 		if (!values) return; // Keep current canvas size until we have new dimensions
 		const [canvas, display] = values;
 
@@ -58,16 +65,16 @@ export class Renderer {
 
 	// Track whether the canvas is visible in the viewport and the tab is focused.
 	#runVisible(effect: Effect): void {
-		const canvas = effect.get(this.canvas);
+		const canvas = effect.get(this.input.canvas);
 		if (!canvas) {
-			this.#visible.set(false);
+			this.#output.visible.set(false);
 			return;
 		}
 
 		let intersecting = false;
 
 		const update = () => {
-			this.#visible.set(intersecting && !document.hidden);
+			this.#output.visible.set(intersecting && !document.hidden);
 		};
 
 		const observer = new IntersectionObserver(
@@ -84,31 +91,14 @@ export class Renderer {
 
 		observer.observe(canvas);
 		effect.cleanup(() => observer.disconnect());
-		effect.cleanup(() => this.#visible.set(false));
-	}
-
-	// Detect when video should be downloaded.
-	#runEnabled(effect: Effect): void {
-		const paused = effect.get(this.paused);
-		const visible = effect.get(this.#visible);
-
-		effect.cleanup(() => this.decoder.enabled.set(false));
-
-		if (!paused) {
-			this.decoder.enabled.set(visible);
-			return;
-		}
-
-		// When paused, fetch a single preview frame then disable.
-		const frame = effect.get(this.decoder.frame);
-		this.decoder.enabled.set(!frame);
+		effect.cleanup(() => this.#output.visible.set(false));
 	}
 
 	#runRender(effect: Effect) {
 		const ctx = effect.get(this.#ctx);
 		if (!ctx) return;
 
-		const frame = effect.get(this.decoder.frame);
+		const frame = effect.get(this.decoder.output.frame);
 
 		// Request a callback to render the frame based on the monitor's refresh rate.
 		// Always render, even when paused (to show last frame).
@@ -116,17 +106,17 @@ export class Renderer {
 			this.#render(ctx, frame);
 
 			if (frame) {
-				this.frame.update((current) => {
+				this.#output.frame.update((current) => {
 					current?.close();
 					return frame.clone();
 				});
-				this.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
+				this.#output.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
 			} else {
-				this.frame.update((current) => {
+				this.#output.frame.update((current) => {
 					current?.close();
 					return undefined;
 				});
-				this.timestamp.set(undefined);
+				this.#output.timestamp.set(undefined);
 			}
 
 			animate = undefined;
@@ -152,7 +142,7 @@ export class Renderer {
 		ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
 		// Apply horizontal flip if specified in the video config
-		const flip = this.decoder.source.catalog.peek()?.flip;
+		const flip = this.decoder.source.output.catalog.peek()?.flip;
 		if (flip) {
 			ctx.scale(-1, 1);
 			ctx.translate(-ctx.canvas.width, 0);
@@ -164,11 +154,11 @@ export class Renderer {
 
 	// Close the track and all associated resources.
 	close() {
-		this.frame.update((current) => {
+		this.#output.frame.update((current) => {
 			current?.close();
 			return undefined;
 		});
-		this.timestamp.set(undefined);
+		this.#output.timestamp.set(undefined);
 		this.#signals.close();
 	}
 }

@@ -9,8 +9,8 @@ export function bufferingIndicator(parent: Effect, watch: MoqWatch): HTMLElement
 	container.appendChild(spinner);
 
 	parent.run((effect) => {
-		const buffering = effect.get(watch.backend.video.stalled);
-		const offline = effect.get(watch.broadcast.status) === "offline";
+		const buffering = effect.get(watch.backend.video.output.stalled);
+		const offline = effect.get(watch.broadcast.output.status) === "offline";
 		container.style.display = buffering && !offline ? "" : "none";
 	});
 

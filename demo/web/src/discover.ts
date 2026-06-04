@@ -1,4 +1,4 @@
-import { Moq, Signals } from "@moq/hang";
+import { Signals } from "@moq/hang";
 import type MoqWatch from "@moq/watch/element";
 
 /**
@@ -31,7 +31,7 @@ export default class MoqDiscover extends HTMLElement {
 		// Reactively render suggestions when broadcasts or selected name changes.
 		this.#signals.run((effect) => {
 			const broadcasts = effect.get(watch.connection.announced);
-			const selected = effect.get(watch.broadcast.name).toString();
+			const selected = effect.get(watch.broadcast.input.name).toString();
 
 			this.#clearSuggestions();
 
@@ -69,7 +69,7 @@ export default class MoqDiscover extends HTMLElement {
 					});
 				}
 				tag.addEventListener("click", () => {
-					watch.broadcast.name.set(Moq.Path.from(name));
+					watch.name = name;
 				});
 				this.#suggestions.appendChild(tag);
 			}
