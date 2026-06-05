@@ -150,18 +150,19 @@ impl Import {
 			let suffix = ".m4s";
 
 			let track = self.broadcast.create_track(
-				moq_net::Track::new(self.broadcast.unique_name(suffix)).with_timescale(hang::container::TIMESCALE),
+				self.broadcast.unique_name(suffix),
+				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 			)?;
 
 			let kind = match handler.as_ref() {
 				b"vide" => {
 					let config = self.init_video(trak, &moov)?;
-					catalog.video.renditions.insert(track.name.clone(), config);
+					catalog.video.renditions.insert(track.name().to_string(), config);
 					TrackKind::Video
 				}
 				b"soun" => {
 					let config = self.init_audio(trak, &moov)?;
-					catalog.audio.renditions.insert(track.name.clone(), config);
+					catalog.audio.renditions.insert(track.name().to_string(), config);
 					TrackKind::Audio
 				}
 				b"sbtl" => return Err(Error::UnsupportedSubtitle.into()),
@@ -614,16 +615,16 @@ impl Import {
 							let config = catalog
 								.video
 								.renditions
-								.get_mut(&track.track.name)
-								.ok_or_else(|| Error::MissingVideoTrack(track.track.name.clone()))?;
+								.get_mut(track.track.name())
+								.ok_or_else(|| Error::MissingVideoTrack(track.track.name().to_string()))?;
 							config.jitter = Some(jitter.into());
 						}
 						TrackKind::Audio => {
 							let config = catalog
 								.audio
 								.renditions
-								.get_mut(&track.track.name)
-								.ok_or_else(|| Error::MissingAudioTrack(track.track.name.clone()))?;
+								.get_mut(track.track.name())
+								.ok_or_else(|| Error::MissingAudioTrack(track.track.name().to_string()))?;
 							config.jitter = Some(jitter.into());
 						}
 					}
@@ -669,10 +670,10 @@ impl Drop for Import {
 		for track in self.tracks.values() {
 			match track.kind {
 				TrackKind::Video => {
-					catalog.video.renditions.remove(&track.track.name);
+					catalog.video.renditions.remove(track.track.name());
 				}
 				TrackKind::Audio => {
-					catalog.audio.renditions.remove(&track.track.name);
+					catalog.audio.renditions.remove(track.track.name());
 				}
 			}
 		}

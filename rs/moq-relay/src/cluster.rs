@@ -312,7 +312,7 @@ pub struct ClusterConfig {
 ///
 /// Local sessions and remote cluster connections all publish into the same
 /// origin. Loop prevention and shortest-path preference come from the
-/// hop list carried on each broadcast (see [`moq_net::Broadcast::hops`]).
+/// hop list carried on each broadcast (see [`moq_net::BroadcastInfo::hops`]).
 ///
 /// Construct with [`Cluster::new`], then attach a QUIC client and (optionally)
 /// a [`Stats`] aggregator with the `with_*` builder methods. A cluster without

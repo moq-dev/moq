@@ -7,7 +7,7 @@ use bytes::BytesMut;
 
 /// Decode a whole TS buffer into a fresh broadcast and return the catalog.
 fn import_ts(data: &[u8]) -> hang::Catalog {
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -50,7 +50,7 @@ async fn import_export_import_roundtrip() {
 	let data = include_bytes!("test_data/bbb.ts");
 
 	// Import the fixture into a broadcast.
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -84,7 +84,7 @@ fn import_handles_unaligned_chunks() {
 	// exercising the partial-packet retention across calls.
 	let data = include_bytes!("test_data/bbb.ts");
 
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
 

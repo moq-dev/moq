@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
 			let publisher = moq_net::Origin::random().produce();
 			let reconnect = client.with_publisher(publisher.clone()).reconnect(relay.clone());
 
-			let mut producer = moq_net::Broadcast::new().produce();
+			let mut producer = moq_net::BroadcastInfo::new().produce();
 			let consumer = producer.consume();
 			if !publisher.publish_broadcast(&broadcast, consumer) {
 				anyhow::bail!("broadcast path conflict: {broadcast}");

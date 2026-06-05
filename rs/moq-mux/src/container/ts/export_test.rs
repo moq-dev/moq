@@ -73,14 +73,17 @@ fn assert_packet_aligned(ts: &[u8]) {
 
 #[tokio::test(start_paused = true)]
 async fn export_aac_roundtrip() {
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast
-		.create_track(moq_net::Track::new(broadcast.unique_name(".aac")).with_timescale(hang::container::TIMESCALE))
+		.create_track(
+			broadcast.unique_name(".aac"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)
 		.unwrap();
-	let name = track.name.clone();
+	let name = track.name().to_string();
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
 		cfg.container = Container::Legacy;
@@ -191,14 +194,17 @@ fn reassemble_video(ts: &[u8], expected_stream_type: StreamType) -> Vec<u8> {
 /// into a synthesized avcC, and the muxer re-injects them on the keyframe.
 #[tokio::test(start_paused = true)]
 async fn export_avc3_in_band_reassembles() {
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast
-		.create_track(moq_net::Track::new(broadcast.unique_name(".avc3")).with_timescale(hang::container::TIMESCALE))
+		.create_track(
+			broadcast.unique_name(".avc3"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)
 		.unwrap();
-	let name = track.name.clone();
+	let name = track.name().to_string();
 	{
 		let mut cfg = VideoConfig::new(H264 {
 			profile: 0x64,
@@ -240,16 +246,19 @@ async fn export_avc3_in_band_reassembles() {
 /// length prefixes to start codes.
 #[tokio::test(start_paused = true)]
 async fn export_avc1_out_of_band_reassembles() {
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(SPS, PPS).unwrap();
 
 	let track = broadcast
-		.create_track(moq_net::Track::new(broadcast.unique_name(".avc1")).with_timescale(hang::container::TIMESCALE))
+		.create_track(
+			broadcast.unique_name(".avc1"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)
 		.unwrap();
-	let name = track.name.clone();
+	let name = track.name().to_string();
 	{
 		let mut cfg = VideoConfig::new(H264 {
 			profile: 0x64,

@@ -1,6 +1,6 @@
 //! This module contains the structs and functions for the MoQ catalog format
 use crate::Result;
-use crate::catalog::{Audio, Chat, User, Video};
+use crate::catalog::{Audio, Video};
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
@@ -22,18 +22,6 @@ pub struct Catalog {
 	/// based on their preferences (codec, bitrate, language, etc).
 	#[serde(default)]
 	pub audio: Audio,
-
-	/// User metadata for the broadcaster
-	#[serde(default)]
-	pub user: Option<User>,
-
-	/// Chat track metadata
-	#[serde(default)]
-	pub chat: Option<Chat>,
-
-	/// Preview information about the broadcast
-	#[serde(default)]
-	pub preview: Option<moq_net::Track>,
 }
 
 impl Catalog {
@@ -76,9 +64,12 @@ impl Catalog {
 		Ok(serde_json::to_writer(writer, self)?)
 	}
 
-	pub fn default_track() -> moq_net::Track {
-		// The catalog is JSON and re-sent on every change, so it pays to compress.
-		moq_net::Track::new(Catalog::DEFAULT_NAME).with_compress(true)
+	/// Track properties for creating the catalog track via
+	/// [`create_track`](moq_net::BroadcastProducer::create_track) at
+	/// [`DEFAULT_NAME`](Self::DEFAULT_NAME). The catalog is JSON and re-sent on
+	/// every change, so it pays to compress.
+	pub fn default_track_info() -> moq_net::TrackInfo {
+		moq_net::TrackInfo::default().with_compress(true)
 	}
 
 	/// The subscription preferences used for the catalog track (high priority so
@@ -159,7 +150,6 @@ mod test {
 			audio: Audio {
 				renditions: audio_renditions,
 			},
-			..Default::default()
 		};
 
 		let output = Catalog::from_str(&encoded).expect("failed to decode");
@@ -247,7 +237,6 @@ mod test {
 			audio: Audio {
 				renditions: audio_renditions,
 			},
-			..Default::default()
 		};
 
 		let decoded = Catalog::from_str(&encoded).expect("failed to decode");

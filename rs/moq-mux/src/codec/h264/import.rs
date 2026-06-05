@@ -87,7 +87,8 @@ impl Import {
 			}
 			Mode::Avc3 => {
 				let track = self.broadcast.create_track(
-					moq_net::Track::new(self.broadcast.unique_name(".avc3")).with_timescale(hang::container::TIMESCALE),
+					self.broadcast.unique_name(".avc3"),
+					moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 				)?;
 				self.track = Some(crate::container::Producer::new(
 					track,
@@ -170,7 +171,8 @@ impl Import {
 			};
 			if self.track.is_none() {
 				let track = self.broadcast.create_track(
-					moq_net::Track::new(self.broadcast.unique_name(".avc3")).with_timescale(hang::container::TIMESCALE),
+					self.broadcast.unique_name(".avc3"),
+					moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 				)?;
 				self.track = Some(crate::container::Producer::new(
 					track,
@@ -249,7 +251,7 @@ impl Import {
 		})?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
+			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(track.name())
 		{
 			c.jitter = Some(jitter);
 		}
@@ -378,7 +380,12 @@ impl Import {
 
 		// The avc3 track was created eagerly in initialize_avc3; just publish
 		// (or republish) the catalog rendition with the latest config.
-		let track_name = self.track.as_ref().ok_or(Error::Avc3TrackNotCreated)?.name.clone();
+		let track_name = self
+			.track
+			.as_ref()
+			.ok_or(Error::Avc3TrackNotCreated)?
+			.name()
+			.to_string();
 		let mut catalog = self.catalog.lock();
 		catalog.video.renditions.insert(track_name, config.clone());
 		self.config = Some(config);
@@ -409,7 +416,7 @@ impl Import {
 		})?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
+			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(track.name())
 		{
 			c.jitter = Some(jitter);
 		}
@@ -427,14 +434,18 @@ impl Import {
 
 		let mut catalog = self.catalog.lock();
 		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name, "reinitializing H.264 track");
-			catalog.video.renditions.remove(&track.name);
+			tracing::debug!(name = ?track.name(), "reinitializing H.264 track");
+			catalog.video.renditions.remove(track.name());
 		}
 		let track = self.broadcast.create_track(
-			moq_net::Track::new(self.broadcast.unique_name(suffix)).with_timescale(hang::container::TIMESCALE),
+			self.broadcast.unique_name(suffix),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		)?;
-		tracing::debug!(name = ?track.name, ?config, "starting H.264 track");
-		catalog.video.renditions.insert(track.name.clone(), config.clone());
+		tracing::debug!(name = ?track.name(), ?config, "starting H.264 track");
+		catalog
+			.video
+			.renditions
+			.insert(track.name().to_string(), config.clone());
 
 		self.config = Some(config);
 		self.track = Some(crate::container::Producer::new(
@@ -476,8 +487,8 @@ impl Import {
 impl Drop for Import {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name, "ending H.264 track");
-			self.catalog.lock().video.renditions.remove(&track.name);
+			tracing::debug!(name = ?track.name(), "ending H.264 track");
+			self.catalog.lock().video.renditions.remove(track.name());
 		}
 	}
 }
@@ -556,7 +567,7 @@ mod tests {
 		avcc.extend_from_slice(&sps_nal);
 		avcc.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]); // num_pps + pps
 
-		let broadcast = moq_net::Broadcast::new();
+		let broadcast = moq_net::BroadcastInfo::new();
 		let mut producer = broadcast.produce();
 		let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
 
@@ -592,7 +603,7 @@ mod tests {
 		annexb.extend_from_slice(&[0, 0, 0, 1]);
 		annexb.extend_from_slice(pps);
 
-		let broadcast = moq_net::Broadcast::new();
+		let broadcast = moq_net::BroadcastInfo::new();
 		let mut producer = broadcast.produce();
 		let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
 

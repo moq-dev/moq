@@ -286,7 +286,8 @@ impl Import {
 		};
 
 		let track = self.broadcast.create_track(
-			moq_net::Track::new(self.broadcast.unique_name(suffix)).with_timescale(hang::container::TIMESCALE),
+			self.broadcast.unique_name(suffix),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		)?;
 		let mut catalog = self.catalog.clone();
 		let mut catalog = catalog.lock();
@@ -294,11 +295,11 @@ impl Import {
 		match kind {
 			TrackKind::Video => {
 				let config = build_video_config(&codec_id, codec_private.as_ref(), video_children.as_deref())?;
-				catalog.video.renditions.insert(track.name.clone(), config);
+				catalog.video.renditions.insert(track.name().to_string(), config);
 			}
 			TrackKind::Audio => {
 				let config = build_audio_config(&codec_id, codec_private.as_ref(), audio_children.as_deref())?;
-				catalog.audio.renditions.insert(track.name.clone(), config);
+				catalog.audio.renditions.insert(track.name().to_string(), config);
 			}
 		}
 
@@ -426,10 +427,10 @@ impl Drop for Import {
 		for track in self.tracks.values() {
 			match track.kind {
 				TrackKind::Video => {
-					catalog.video.renditions.remove(&track.track.name);
+					catalog.video.renditions.remove(track.track.name());
 				}
 				TrackKind::Audio => {
-					catalog.audio.renditions.remove(&track.track.name);
+					catalog.audio.renditions.remove(track.track.name());
 				}
 			}
 		}

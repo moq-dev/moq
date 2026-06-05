@@ -27,8 +27,8 @@ impl Producer {
 		broadcast: &mut moq_net::BroadcastProducer,
 		catalog: hang::Catalog,
 	) -> Result<Self, moq_net::Error> {
-		let hang_track = broadcast.create_track(hang::Catalog::default_track())?;
-		let msf_track = broadcast.create_track(moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
+		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
+		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, None)?;
 
 		Ok(Self {
 			hang_track,
@@ -250,7 +250,6 @@ mod test {
 			audio: Audio {
 				renditions: audio_renditions,
 			},
-			..Default::default()
 		};
 
 		let msf = to_msf(&catalog);
@@ -397,7 +396,6 @@ mod test {
 			audio: Audio {
 				renditions: audio_renditions,
 			},
-			..Default::default()
 		};
 
 		let msf = to_msf(&catalog);

@@ -14,7 +14,7 @@ fn drain_group_sequences(consumer: &mut moq_net::TrackSubscriber) -> Vec<u64> {
 }
 
 fn run_fmp4(data: &[u8]) -> hang::Catalog {
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
@@ -146,7 +146,7 @@ fn test_vp9_catalog() {
 async fn test_seek_sets_initial_sequence() {
 	use mp4_atom::{Any, DecodeMaybe};
 
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let broadcast_consumer = broadcast.consume();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
@@ -183,8 +183,10 @@ async fn test_seek_sets_initial_sequence() {
 	let snap = catalog.snapshot();
 	let video_name = snap.video.renditions.keys().next().expect("video track").clone();
 	let mut video_track = broadcast_consumer
-		.consume_track(&video_name)
+		.track(&video_name)
+		.unwrap()
 		.subscribe(None)
+		.unwrap()
 		.await
 		.expect("video track should exist");
 
@@ -210,8 +212,8 @@ async fn test_seek_sets_initial_sequence() {
 /// exercises the full unified pipeline (hang -> MSF JSON on the wire -> hang).
 #[tokio::test]
 async fn test_msf_catalog_roundtrip() {
-	let mut broadcast = moq_net::Broadcast::new().produce();
-	// Take the consumer before adding tracks; consume_track is called after the
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	// Take the consumer before adding tracks; track() is called after the
 	// MSF catalog track has been created by `catalog::Producer::new`.
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
@@ -223,8 +225,10 @@ async fn test_msf_catalog_roundtrip() {
 	let _ = fmp4.decode(&mut buf);
 
 	let track = consumer
-		.consume_track(moq_msf::DEFAULT_NAME)
+		.track(moq_msf::DEFAULT_NAME)
+		.unwrap()
 		.subscribe(None)
+		.unwrap()
 		.await
 		.expect("MSF catalog track should exist");
 	let mut msf = crate::catalog::msf::Consumer::new(track);

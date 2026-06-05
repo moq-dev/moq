@@ -40,7 +40,7 @@ pub struct StatusPublisher {
 
 impl StatusPublisher {
 	pub fn new(broadcast: &mut moq_net::BroadcastProducer) -> anyhow::Result<Self> {
-		let producer = broadcast.create_track(moq_net::Track::new("status"))?;
+		let producer = broadcast.create_track("status", None)?;
 
 		Ok(Self {
 			producer,
