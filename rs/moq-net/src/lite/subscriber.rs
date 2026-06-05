@@ -445,7 +445,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Serve track requests until every consumer of the broadcast is gone.
 		loop {
 			let request = tokio::select! {
-				request = broadcast.requested_track() => match request {
+				request = broadcast.track_request() => match request {
 					Ok(request) => request,
 					Err(err) => {
 						tracing::debug!(%err, "broadcast closed");
@@ -636,21 +636,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 }
 
 /// The producer side of one track, before and after the upstream SUBSCRIBE_OK
-/// promotes the pending request into a full producer. Both can pop fetches and
-/// observe subscription demand, so [`TrackServe`] drives them uniformly.
+/// promotes the pending request into a full producer. Both observe subscription
+/// demand, so [`TrackServe`] drives them uniformly. Fetches are served separately
+/// via the [`TrackDynamic`] handle.
 enum Track {
 	Pending(TrackRequest),
 	Active(TrackProducer),
 }
 
 impl Track {
-	fn poll_requested_fetch(&mut self, waiter: &kio::Waiter) -> Poll<Result<GroupRequest, Error>> {
-		match self {
-			Track::Pending(request) => request.poll_requested_fetch(waiter),
-			Track::Active(producer) => producer.poll_requested_fetch(waiter),
-		}
-	}
-
 	fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Subscription>, Error>> {
 		match self {
 			Track::Pending(request) => request.poll_subscription_changed(waiter).map(Ok),
@@ -743,6 +737,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// Older versions tear the upstream down as soon as the track goes idle.
 		let supports_linger = !matches!(self.subscriber.version, Version::Lite01 | Version::Lite02);
 
+		// Mark the track as fetch-capable up front (before accept), so a consumer's
+		// cache-miss fetch waits to be served rather than failing fast. Held for the
+		// whole task; dropping it stops fetch serving.
+		let dynamic = request.dynamic();
+
 		// `Option` so we can move the request out of `track` at accept time (and at
 		// teardown); it's always `Some` while the loop runs.
 		let mut track = Some(Track::Pending(request));
@@ -764,13 +763,13 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				biased;
 
 				// (1) Track demand: a fetch, a subscription change, or full idle. One
-				// poll_fn so a single `&mut track` borrow covers all three.
+				// poll_fn so the borrows of `dynamic` and `track` are held together.
 				event = std::future::poll_fn(|cx| {
 					let waiter = demand_waiter.insert(kio::Waiter::new(cx.waker().clone()));
 					let track = track.as_mut().expect("track present while serving");
 
 					// A fetch is cheap and one-shot, so serve it ahead of subscription churn.
-					match track.poll_requested_fetch(waiter) {
+					match dynamic.poll_group_request(waiter) {
 						Poll::Ready(Ok(req)) => return Poll::Ready(Event::Fetch(req)),
 						Poll::Ready(Err(err)) => return Poll::Ready(Event::BroadcastClosed(err)),
 						Poll::Pending => {}
@@ -1083,8 +1082,14 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			}
 		};
 
-		// Make the group available (resolving the downstream fetch) and fill it.
-		let mut producer = match request.accept(info.timescale) {
+		// Make the group available (resolving the downstream fetch) and fill it. The
+		// TrackInfo only takes effect if the track isn't accepted yet (a fetch with no
+		// live subscription); otherwise the group inherits the accepted timescale.
+		let group_info = TrackInfo {
+			timescale: info.timescale,
+			..Default::default()
+		};
+		let mut producer = match request.accept(group_info) {
 			Ok(producer) => producer,
 			Err(err) => {
 				// Already served (a concurrent fetch) or the track closed.

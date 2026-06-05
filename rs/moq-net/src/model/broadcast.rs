@@ -214,7 +214,7 @@ impl BroadcastProducer {
 /// Handles on-demand track creation for a broadcast.
 ///
 /// When a consumer requests a track that doesn't exist, the dynamic producer
-/// picks up the request via [`Self::requested_track`] and either
+/// picks up the request via [`Self::track_request`] and either
 /// [`TrackRequest::accept`]s it with a concrete [`TrackInfo`] or
 /// [`TrackRequest::reject`]s it. Dropped when no longer needed; pending requests
 /// are automatically aborted.
@@ -266,7 +266,7 @@ impl BroadcastDynamic {
 	}
 
 	/// Poll for the next consumer-requested track, without blocking.
-	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<TrackRequest, Error>> {
+	pub fn poll_track_request(&mut self, waiter: &kio::Waiter) -> Poll<Result<TrackRequest, Error>> {
 		self.poll(waiter, |state| {
 			let Some(name) = state.request_order.pop_front() else {
 				return Poll::Pending;
@@ -282,8 +282,8 @@ impl BroadcastDynamic {
 	}
 
 	/// Block until a consumer requests a track, returning a [`TrackRequest`] to serve.
-	pub async fn requested_track(&mut self) -> Result<TrackRequest, Error> {
-		kio::wait(|waiter| self.poll_requested_track(waiter)).await
+	pub async fn track_request(&mut self) -> Result<TrackRequest, Error> {
+		kio::wait(|waiter| self.poll_track_request(waiter)).await
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
@@ -336,14 +336,14 @@ use futures::FutureExt;
 #[cfg(test)]
 impl BroadcastDynamic {
 	pub fn assert_request(&mut self) -> TrackRequest {
-		self.requested_track()
+		self.track_request()
 			.now_or_never()
 			.expect("should not have blocked")
 			.expect("should not have errored")
 	}
 
 	pub fn assert_no_request(&mut self) {
-		assert!(self.requested_track().now_or_never().is_none(), "should have blocked");
+		assert!(self.track_request().now_or_never().is_none(), "should have blocked");
 	}
 }
 
