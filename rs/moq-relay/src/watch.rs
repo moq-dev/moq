@@ -27,16 +27,21 @@ pub(crate) struct FileWatcher {
 	mtimes: Vec<Option<SystemTime>>,
 	// Holds the OS watcher alive (dropping it stops events). `None` => polling.
 	_watcher: Option<notify::RecommendedWatcher>,
-	events: Option<mpsc::UnboundedReceiver<notify::Result<notify::Event>>>,
+	events: Option<mpsc::Receiver<()>>,
 }
 
 impl FileWatcher {
 	/// Begin watching `paths`. Records their current mtimes as the baseline so
 	/// [`changed`](Self::changed) only resolves on a subsequent change.
 	pub(crate) fn new(paths: Vec<PathBuf>) -> Self {
-		let (tx, rx) = mpsc::unbounded_channel();
-		let watcher = notify::recommended_watcher(move |event| {
-			let _ = tx.send(event);
+		// A capacity-1 channel of unit wakeups coalesces the flood of raw events
+		// notify emits (duplicates per change, plus unrelated sibling churn in the
+		// watched directory): when the buffer is already full there's a pending
+		// wakeup, so extra sends are simply dropped. The payload is irrelevant;
+		// `changed` rescans mtimes to decide what actually moved.
+		let (tx, rx) = mpsc::channel(1);
+		let watcher = notify::recommended_watcher(move |_event| {
+			let _ = tx.try_send(());
 		})
 		.ok()
 		.and_then(|mut watcher| {
@@ -49,6 +54,13 @@ impl FileWatcher {
 			}
 			Some(watcher)
 		});
+
+		if watcher.is_none() {
+			tracing::warn!(
+				?paths,
+				"no filesystem watcher available; falling back to {POLL_INTERVAL:?} polling"
+			);
+		}
 
 		// Snapshot mtimes after the watch is live so a change landing between the
 		// snapshot and watch registration can't slip through unobserved.

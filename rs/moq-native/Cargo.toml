@@ -69,5 +69,6 @@ tracing-android = { version = "0.2", optional = true }
 [dev-dependencies]
 bytes = "1"
 chrono = "0.4"
+tempfile = "3"
 toml = "1.1"
 tracing-test = "0.2"
