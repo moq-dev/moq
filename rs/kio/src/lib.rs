@@ -14,10 +14,12 @@ mod lock;
 mod waiter;
 
 mod consumer;
+mod future;
 mod producer;
 mod weak;
 
 pub use consumer::Consumer;
+pub use future::{Future, Pending};
 pub use producer::{Mut, Producer, Ref};
 pub use waiter::{Waiter, WaiterList, wait};
 pub use weak::Weak;
