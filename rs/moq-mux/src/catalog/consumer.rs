@@ -26,13 +26,13 @@ impl Consumer {
 		Ok(match format {
 			CatalogFormat::Hang => {
 				let track = broadcast
-					.consume_track(hang::Catalog::DEFAULT_NAME)
-					.subscribe(hang::Catalog::default_subscription())
+					.track(hang::Catalog::DEFAULT_NAME)?
+					.subscribe(hang::Catalog::default_subscription())?
 					.await?;
 				Self::Hang(super::hang::Consumer::new(track))
 			}
 			CatalogFormat::Msf => {
-				let track = broadcast.consume_track(moq_msf::DEFAULT_NAME).subscribe(None).await?;
+				let track = broadcast.track(moq_msf::DEFAULT_NAME)?.subscribe(None)?.await?;
 				Self::Msf(super::msf::Consumer::new(track))
 			}
 		})

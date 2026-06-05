@@ -8,9 +8,9 @@ use std::{
 use futures::{StreamExt, stream::FuturesUnordered};
 
 use crate::{
-	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Compression, Error, Frame, FrameProducer, Group,
+	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastInfo, Compression, Error, Frame, FrameProducer, Group,
 	GroupProducer, MAX_FRAME_SIZE, OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack,
-	Timescale, Timestamp, Track, TrackProducer, TrackRequest,
+	Timescale, Timestamp, TrackInfo, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -381,7 +381,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
 
-		let broadcast = Broadcast { hops }.produce();
+		let broadcast = BroadcastInfo { hops }.produce();
 
 		// Make sure the peer doesn't double announce.
 		match producers.entry(path.to_owned()) {
@@ -434,7 +434,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
 
-		let broadcast = Broadcast { hops }.produce();
+		let broadcast = BroadcastInfo { hops }.produce();
 		let dynamic = broadcast.dynamic();
 
 		// Publish the replacement first so the origin restarts atomically; the old broadcast is
@@ -485,7 +485,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// to uncap. The stream stays open across the whole lifecycle — only a timeout
 	/// or a publisher-side close ends it. This avoids the stream-churn / duplicate-fetch
 	/// race that an unsubscribe-and-reissue approach would have.
-	async fn run_subscribe(&mut self, path: PathOwned, broadcast: BroadcastDynamic, request: TrackRequest) {
+	async fn run_subscribe(&mut self, path: PathOwned, broadcast: BroadcastDynamic, mut request: TrackRequest) {
 		// Subscriber-side track stats; counters bump as frames/bytes/groups arrive.
 		// Drop on subscription end records `subscriber.subscriptions_closed`. We use
 		// subscriber_track to avoid double-counting broadcasts: the broadcast lifetime
@@ -500,7 +500,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let id = self.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 
 		// Forward the aggregate of every downstream subscriber's preferences upstream.
-		let subscription = request.subscription().clone();
+		// Blocks until the first downstream subscriber registers its preferences.
+		let subscription = request.subscription_changed().await.unwrap_or_default();
 		let msg = lite::Subscribe {
 			id,
 			broadcast: path.as_path(),
@@ -515,7 +516,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		tracing::info!(id, broadcast = %self.log_path(&path), track = %name, "subscribe started");
 
 		let result = self
-			.run_subscribe_session(id, &name, request, track_stats, &broadcast, msg)
+			.run_subscribe_session(id, request, track_stats, &broadcast, msg)
 			.await;
 
 		self.subscribes.lock().remove(&id);
@@ -543,7 +544,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_subscribe_session(
 		&self,
 		id: u64,
-		name: &str,
 		request: TrackRequest,
 		track_stats: Arc<SubscriberTrack>,
 		broadcast: &BroadcastDynamic,
@@ -617,18 +617,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Stamp the negotiated timescale onto the local Track so groups inherit
 		// it and downstream consumers (including this subscriber's frame decode
 		// path) can validate per-frame timestamps at the model layer.
-		let mut local_info = Track::new(name);
-		local_info.timescale = info.timescale;
-		// Carry the publisher's cache window so the local producer evicts (and
-		// clamps downstream stale windows) with the same bound when re-served.
-		local_info.cache = info.cache;
-		let mut track = match request.accept(local_info) {
-			Ok(track) => track,
-			Err(err) => {
-				stream.writer.abort(&err);
-				return SessionOutcome::Error(err);
-			}
+		let local_info = TrackInfo {
+			timescale: info.timescale,
+			// Carry the publisher's cache window so the local producer evicts (and
+			// clamps downstream stale windows) with the same bound when re-served.
+			cache: info.cache,
+			..Default::default()
 		};
+		let mut track = request.accept(local_info);
 		let subscribe_ok = kio::Producer::new(Some(info)).consume();
 		self.subscribes.lock().insert(
 			id,
@@ -697,7 +693,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				break 'lifecycle SessionOutcome::Error(err);
 			}
 
-			tracing::info!(track = %track.name, "subscribe resumed");
+			tracing::info!(track = %track.name(), "subscribe resumed");
 
 			let uncap = lite::SubscribeUpdate {
 				priority: original_priority,

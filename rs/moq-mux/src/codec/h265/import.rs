@@ -83,15 +83,19 @@ impl Import {
 		let mut catalog = self.catalog.lock();
 
 		if let Some(track) = &self.track.take() {
-			tracing::debug!(name = ?track.name, "reinitializing track");
-			catalog.video.renditions.remove(&track.name);
+			tracing::debug!(name = ?track.name(), "reinitializing track");
+			catalog.video.renditions.remove(track.name());
 		}
 
 		let track = self.broadcast.create_track(
-			moq_net::Track::new(self.broadcast.unique_name(".hev1")).with_timescale(hang::container::TIMESCALE),
+			self.broadcast.unique_name(".hev1"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		)?;
-		tracing::debug!(name = ?track.name, ?config, "starting track");
-		catalog.video.renditions.insert(track.name.clone(), config.clone());
+		tracing::debug!(name = ?track.name(), ?config, "starting track");
+		catalog
+			.video
+			.renditions
+			.insert(track.name().to_string(), config.clone());
 
 		self.config = Some(config);
 		self.track = Some(crate::container::Producer::new(
@@ -307,7 +311,7 @@ impl Import {
 		track.write(frame)?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
+			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(track.name())
 		{
 			c.jitter = Some(jitter);
 		}
@@ -356,8 +360,8 @@ impl Import {
 impl Drop for Import {
 	fn drop(&mut self) {
 		if let Some(track) = &self.track {
-			tracing::debug!(name = ?track.name, "ending track");
-			self.catalog.lock().video.renditions.remove(&track.name);
+			tracing::debug!(name = ?track.name(), "ending track");
+			self.catalog.lock().video.renditions.remove(track.name());
 		}
 	}
 }

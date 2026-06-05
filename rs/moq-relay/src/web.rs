@@ -528,9 +528,7 @@ async fn serve_fetch(
 			.announced_broadcast("")
 			.await
 			.ok_or(StatusCode::NOT_FOUND)?;
-		let mut track = broadcast
-			.consume_track(&track)
-			.subscribe(None)
+		let mut track = async { broadcast.track(&track)?.subscribe(None)?.await }
 			.await
 			.map_err(|err| match err {
 				moq_net::Error::NotFound => StatusCode::NOT_FOUND,
@@ -550,7 +548,7 @@ async fn serve_fetch(
 			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
 		};
 
-		tracing::info!(track = %track.name, group = %group.sequence, "serving group");
+		tracing::info!(track = %track.name(), group = %group.sequence, "serving group");
 
 		match params.frame {
 			FetchFrame::Num(index) => match group.get_frame(index).await {

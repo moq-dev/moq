@@ -19,13 +19,16 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	use hang::catalog::{Container, H264, VideoConfig};
 	use moq_net::Timestamp;
 
-	let broadcast = moq_net::Broadcast::new();
+	let broadcast = moq_net::BroadcastInfo::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(moq_net::Track::new(producer.unique_name(".avc3")).with_timescale(hang::container::TIMESCALE))
+		.create_track(
+			producer.unique_name(".avc3"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)
 		.unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x42,
@@ -36,7 +39,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	config.coded_width = Some(320);
 	config.coded_height = Some(240);
 	config.container = Container::Legacy;
-	catalog.lock().video.renditions.insert(track.name.clone(), config);
+	catalog.lock().video.renditions.insert(track.name().to_string(), config);
 
 	const SC: &[u8] = &[0, 0, 0, 1];
 	let sps = &[0x67u8, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef][..];
@@ -120,13 +123,16 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	use hang::catalog::{AAC, AudioConfig, Container};
 	use moq_net::Timestamp;
 
-	let broadcast = moq_net::Broadcast::new();
+	let broadcast = moq_net::BroadcastInfo::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(moq_net::Track::new(producer.unique_name(".aac")).with_timescale(hang::container::TIMESCALE))
+		.create_track(
+			producer.unique_name(".aac"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)
 		.unwrap();
 
 	// AAC-LC (profile 2), 44100 Hz, stereo. The TS importer sets `description`
@@ -140,7 +146,7 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
 	config.description = Some(description.clone());
 	config.container = Container::Legacy;
-	catalog.lock().audio.renditions.insert(track.name.clone(), config);
+	catalog.lock().audio.renditions.insert(track.name().to_string(), config);
 
 	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
 	track_producer
@@ -211,7 +217,7 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 async fn cmaf_source_to_cmaf_export_passthrough() {
 	let data = include_bytes!("test_data/bbb.mp4");
 
-	let broadcast = moq_net::Broadcast::new();
+	let broadcast = moq_net::BroadcastInfo::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 

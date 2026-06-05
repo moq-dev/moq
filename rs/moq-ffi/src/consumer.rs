@@ -84,8 +84,8 @@ impl MoqBroadcastConsumer {
 	pub async fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
 		let track = self
 			.inner
-			.consume_track(hang::catalog::Catalog::DEFAULT_NAME)
-			.subscribe(hang::catalog::Catalog::default_subscription())
+			.track(hang::catalog::Catalog::DEFAULT_NAME)?
+			.subscribe(hang::catalog::Catalog::default_subscription())?
 			.await?;
 		let consumer = moq_mux::catalog::hang::Consumer::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
@@ -97,7 +97,7 @@ impl MoqBroadcastConsumer {
 	///
 	/// Frames are returned as plain byte payloads with no codec or container parsing.
 	pub async fn subscribe_track(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
-		let track = self.inner.consume_track(&name).subscribe(None).await?;
+		let track = self.inner.track(&name)?.subscribe(None)?.await?;
 		Ok(Arc::new(MoqTrackConsumer::new(track)))
 	}
 
@@ -117,7 +117,7 @@ impl MoqBroadcastConsumer {
 		let media: moq_mux::catalog::hang::Container = (&container)
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
-		let track = self.inner.consume_track(&name).subscribe(None).await?;
+		let track = self.inner.track(&name)?.subscribe(None)?.await?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {

@@ -9,6 +9,7 @@ mod chat;
 mod container;
 mod preview;
 mod root;
+mod track;
 mod user;
 mod video;
 
@@ -17,5 +18,6 @@ pub use chat::*;
 pub use container::*;
 pub use preview::*;
 pub use root::*;
+pub use track::*;
 pub use user::*;
 pub use video::*;

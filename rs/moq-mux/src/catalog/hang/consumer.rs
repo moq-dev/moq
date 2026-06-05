@@ -8,7 +8,6 @@ use crate::Result;
 ///
 /// This wraps a `moq_net::TrackSubscriber` and automatically deserializes JSON
 /// catalog data to discover available audio and video tracks in a broadcast.
-#[derive(Clone)]
 pub struct Consumer {
 	/// Access to the underlying track consumer.
 	pub track: moq_net::TrackSubscriber,
@@ -93,7 +92,7 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload() {
-		let mut track = Catalog::default_track().produce();
+		let mut track = moq_net::TrackProducer::new(Catalog::DEFAULT_NAME, Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let mut group = track.append_group().expect("catalog group should append");
 
@@ -109,7 +108,7 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload_after_track_finish() {
-		let mut track = Catalog::default_track().produce();
+		let mut track = moq_net::TrackProducer::new(Catalog::DEFAULT_NAME, Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let mut group = track.append_group().expect("catalog group should append");
 
@@ -127,7 +126,7 @@ mod test {
 
 	#[test]
 	fn returns_latest_complete_catalog_group() {
-		let mut track = Catalog::default_track().produce();
+		let mut track = moq_net::TrackProducer::new(Catalog::DEFAULT_NAME, Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
@@ -153,7 +152,7 @@ mod test {
 
 	#[test]
 	fn waits_for_newer_pending_group_instead_of_returning_older_ready_group() {
-		let mut track = Catalog::default_track().produce();
+		let mut track = moq_net::TrackProducer::new(Catalog::DEFAULT_NAME, Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
@@ -180,7 +179,7 @@ mod test {
 
 	#[test]
 	fn retained_pending_group_is_superseded_by_newer_group() {
-		let mut track = Catalog::default_track().produce();
+		let mut track = moq_net::TrackProducer::new(Catalog::DEFAULT_NAME, Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
@@ -210,7 +209,7 @@ mod test {
 
 	#[test]
 	fn returns_none_when_empty_track_finishes() {
-		let mut track = Catalog::default_track().produce();
+		let mut track = moq_net::TrackProducer::new(Catalog::DEFAULT_NAME, Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 

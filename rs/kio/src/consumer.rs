@@ -119,6 +119,11 @@ impl<T> Consumer<T> {
 		}
 	}
 
+	/// Returns `true` if the channel has been closed by the producer.
+	pub fn is_closed(&self) -> bool {
+		self.state.lock().closed
+	}
+
 	/// Returns `true` if both consumers share the same underlying state.
 	pub fn same_channel(&self, other: &Self) -> bool {
 		self.state.is_clone(&other.state)

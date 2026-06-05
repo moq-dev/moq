@@ -1,6 +1,6 @@
 use std::{
 	collections::{HashMap, VecDeque, hash_map},
-	ops::Deref,
+	sync::Arc,
 	task::{Poll, ready},
 };
 
@@ -10,7 +10,7 @@ use super::{OriginList, TrackInfo};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
-/// Create via [`Broadcast::produce`] to obtain both [`BroadcastProducer`] and [`BroadcastConsumer`] pair.
+/// Create via [`BroadcastInfo::produce`] to obtain both [`BroadcastProducer`] and [`BroadcastConsumer`] pair.
 #[derive(Clone, Debug, Default)]
 pub struct BroadcastInfo {
 	/// The chain of origins the broadcast has traversed. Each relay appends its own
@@ -25,7 +25,7 @@ impl BroadcastInfo {
 		Self::default()
 	}
 
-	/// Consume this [Broadcast] to create a producer that carries its metadata
+	/// Consume this [BroadcastInfo] to create a producer that carries its metadata
 	/// (including the hop chain).
 	pub fn produce(self) -> BroadcastProducer {
 		BroadcastProducer::new(self)
@@ -35,15 +35,16 @@ impl BroadcastInfo {
 #[derive(Default)]
 struct BroadcastState {
 	// Weak references for deduplication. Doesn't prevent track auto-close.
-	tracks: HashMap<String, TrackWeak>,
+	// Keyed by the track's shared `Arc<str>` name (the same Arc the handle holds).
+	tracks: HashMap<Arc<str>, TrackWeak>,
 
 	// Pending requests keyed by track name, waiting for the dynamic handler to
 	// accept or deny them.
-	requests: HashMap<String, TrackRequest>,
+	requests: HashMap<Arc<str>, TrackRequest>,
 
 	// Requested names in FIFO order for the dynamic handler to drain. A name
 	// stays in `requests` (but not here) once handed out as a `TrackRequest`.
-	request_order: VecDeque<String>,
+	request_order: VecDeque<Arc<str>>,
 
 	// The current number of dynamic producers.
 	// If this is 0, requests must be empty.
@@ -63,7 +64,7 @@ impl BroadcastState {
 
 	/// Insert a track weak handle into the lookup, returning an error on duplicate.
 	fn insert_track(&mut self, weak: TrackWeak) -> Result<(), Error> {
-		let hash_map::Entry::Vacant(entry) = self.tracks.entry(weak.name().to_string()) else {
+		let hash_map::Entry::Vacant(entry) = self.tracks.entry(weak.name().clone()) else {
 			return Err(Error::Duplicate);
 		};
 		entry.insert(weak);
@@ -96,7 +97,7 @@ pub struct BroadcastProducer {
 }
 
 impl BroadcastProducer {
-	/// Create a producer for the given broadcast metadata. Prefer [`Broadcast::produce`].
+	/// Create a producer for the given broadcast metadata. Prefer [`BroadcastInfo::produce`].
 	pub fn new(info: BroadcastInfo) -> Self {
 		Self {
 			info,
@@ -128,11 +129,11 @@ impl BroadcastProducer {
 
 	/// Produce a new track and insert it into the broadcast.
 	///
-	/// Accepts anything that converts into a [`Track`], so a bare name works:
-	/// `create_track("video")`.
+	/// Pass a name and an optional [`TrackInfo`], so a bare name works:
+	/// `create_track("video", None)`.
 	pub fn create_track(
 		&mut self,
-		name: impl Into<String>,
+		name: impl Into<Arc<str>>,
 		info: impl Into<Option<TrackInfo>>,
 	) -> Result<TrackProducer, Error> {
 		let info = info.into().unwrap_or_default();
@@ -161,7 +162,7 @@ impl BroadcastProducer {
 		let state = self.state.read();
 		(0u16..)
 			.map(|i| format!("{i}{suffix}"))
-			.find(|name| !state.tracks.contains_key(name))
+			.find(|name| !state.tracks.contains_key(name.as_str()))
 			.expect("u16 namespace exhausted; wow")
 	}
 
@@ -199,7 +200,7 @@ impl BroadcastProducer {
 impl BroadcastProducer {
 	pub fn assert_create_track(
 		&mut self,
-		name: impl Into<String>,
+		name: impl Into<Arc<str>>,
 		info: impl Into<Option<TrackInfo>>,
 	) -> TrackProducer {
 		self.create_track(name, info).expect("should not have errored")
@@ -214,8 +215,8 @@ impl BroadcastProducer {
 ///
 /// When a consumer requests a track that doesn't exist, the dynamic producer
 /// picks up the request via [`Self::requested_track`] and either
-/// [`TrackRequest::accept`]s it with a concrete [`Track`] or
-/// [`TrackRequest::deny`]s it. Dropped when no longer needed; pending requests
+/// [`TrackRequest::accept`]s it with a concrete [`TrackInfo`] or
+/// [`TrackRequest::reject`]s it. Dropped when no longer needed; pending requests
 /// are automatically aborted.
 pub struct BroadcastDynamic {
 	info: BroadcastInfo,
@@ -227,7 +228,7 @@ impl Clone for BroadcastDynamic {
 		// Mirror `new`: bump `state.dynamic` so each live handle is counted.
 		// Without this, deriving Clone would let `Drop` decrement past `new`'s
 		// single increment and prematurely flip `dynamic` to zero, causing
-		// future `consume_track` calls to return `NotFound`.
+		// future `track` calls to return `NotFound`.
 		if let Ok(mut state) = self.state.write() {
 			state.dynamic += 1;
 		}
@@ -384,11 +385,14 @@ impl BroadcastConsumer {
 			return Err(Error::NotFound);
 		}
 
-		let request = TrackRequest::new(name);
+		// Allocate the name once and share the same Arc across the request, the
+		// requests map, and the FIFO order.
+		let name: Arc<str> = name.into();
+		let request = TrackRequest::new(name.clone());
 		let consumer = request.consume();
 
-		state.requests.insert(name.to_string(), request);
-		state.request_order.push_back(name.to_string());
+		state.requests.insert(name.clone(), request);
+		state.request_order.push_back(name);
 
 		Ok(consumer)
 	}
@@ -438,13 +442,13 @@ mod test {
 	use super::*;
 
 	/// Subscribe and assert the result hasn't resolved yet (it stays pending until
-	/// a publisher accepts). Returns the [`TrackPending`] to resolve after accepting.
+	/// a publisher accepts). Returns the [`TrackSubscriberPending`] to resolve after accepting.
 	macro_rules! subscribe_pending {
 		($consumer:expr, $name:expr) => {{
-			let pending = $consumer.consume_track($name).subscribe(None);
+			let pending = $consumer.track($name).unwrap().subscribe(None).unwrap();
 			assert!(
 				pending.poll_ok(&kio::Waiter::noop()).is_pending(),
-				"consume_track should stay pending until the request is accepted"
+				"subscribe should stay pending until the request is accepted"
 			);
 			pending
 		}};
@@ -452,24 +456,36 @@ mod test {
 
 	#[tokio::test]
 	async fn insert() {
-		let mut producer = Broadcast::new().produce();
-		let mut track1 = Track::new("track1").produce();
+		let mut producer = BroadcastInfo::new().produce();
+		let mut track1 = TrackProducer::new("track1", None);
 
 		// Make sure we can insert before a consumer is created.
-		producer.assert_insert_track(&track1);
+		producer.assert_insert_track(track1.consume());
 		track1.append_group().unwrap();
 
 		let consumer = producer.consume();
 
 		// The track already exists, so subscribe resolves immediately.
-		let mut track1_sub = consumer.consume_track("track1").subscribe(None).await.unwrap();
+		let mut track1_sub = consumer
+			.track("track1")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
+			.unwrap();
 		track1_sub.assert_group();
 
-		let mut track2 = Track::new("track2").produce();
-		producer.assert_insert_track(&track2);
+		let mut track2 = TrackProducer::new("track2", None);
+		producer.assert_insert_track(track2.consume());
 
 		let consumer2 = producer.consume();
-		let mut track2_consumer = consumer2.consume_track("track2").subscribe(None).await.unwrap();
+		let mut track2_consumer = consumer2
+			.track("track2")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
+			.unwrap();
 		track2_consumer.assert_no_group();
 
 		track2.append_group().unwrap();
@@ -479,15 +495,21 @@ mod test {
 
 	#[tokio::test]
 	async fn closed() {
-		let mut producer = Broadcast::new().produce();
+		let mut producer = BroadcastInfo::new().produce();
 		let _dynamic = producer.dynamic();
 
 		let consumer = producer.consume();
 		consumer.assert_not_closed();
 
 		// Create a new track and insert it into the broadcast (resolves immediately).
-		let track1 = producer.assert_create_track(&Track::new("track1"));
-		let track1c = consumer.consume_track("track1").subscribe(None).await.unwrap();
+		let track1 = producer.assert_create_track("track1", None);
+		let track1c = consumer
+			.track("track1")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
+			.unwrap();
 
 		// A track nobody publishes stays pending until accepted.
 		let track2_fut = subscribe_pending!(consumer, "track2");
@@ -505,7 +527,7 @@ mod test {
 
 	#[tokio::test]
 	async fn requests() {
-		let mut producer = Broadcast::new().produce().dynamic();
+		let mut producer = BroadcastInfo::new().produce().dynamic();
 
 		let consumer = producer.consume();
 		let consumer2 = consumer.clone();
@@ -520,7 +542,7 @@ mod test {
 		assert_eq!(request.name(), "track1");
 
 		// Accept it, which resolves both waiting subscribers.
-		let mut track3 = request.accept(Track::new("track1")).unwrap();
+		let mut track3 = request.accept(None);
 		let mut track1 = track1_fut.await.unwrap();
 		let mut track2 = track2_fut.await.unwrap();
 
@@ -538,19 +560,19 @@ mod test {
 		drop(producer);
 		assert!(track4_fut.await.is_err());
 
-		// With no dynamic producer left, new subscribes fail outright.
-		let track5 = consumer2.consume_track("track3").subscribe(None).await;
+		// With no dynamic producer left, requesting the handle fails outright.
+		let track5 = consumer2.track("track3");
 		assert!(track5.is_err(), "should have errored");
 	}
 
 	#[tokio::test]
 	async fn stale_producer() {
-		let mut broadcast = Broadcast::new().produce().dynamic();
+		let mut broadcast = BroadcastInfo::new().produce().dynamic();
 		let consumer = broadcast.consume();
 
 		// Subscribe to a track and serve it.
 		let track1_fut = subscribe_pending!(consumer, "track1");
-		let mut producer1 = broadcast.assert_request().accept(Track::new("track1")).unwrap();
+		let mut producer1 = broadcast.assert_request().accept(None);
 		let track1 = track1_fut.await.unwrap();
 
 		// Close the producer (simulating publisher disconnect).
@@ -563,7 +585,7 @@ mod test {
 
 		// Subscribe again to the same track: should get a NEW producer, not the stale one.
 		let track2_fut = subscribe_pending!(consumer, "track1");
-		let mut producer2 = broadcast.assert_request().accept(Track::new("track1")).unwrap();
+		let mut producer2 = broadcast.assert_request().accept(None);
 		let mut track2 = track2_fut.await.unwrap();
 		track2.assert_not_closed();
 		track2.assert_not_clone(&track1);
@@ -575,12 +597,12 @@ mod test {
 
 	#[tokio::test(start_paused = true)]
 	async fn requested_unused() {
-		let mut broadcast = Broadcast::new().produce().dynamic();
+		let mut broadcast = BroadcastInfo::new().produce().dynamic();
 		let bc = broadcast.consume();
 
 		// Subscribe to a track that doesn't exist yet, then serve it.
 		let c1_fut = subscribe_pending!(bc, "unknown_track");
-		let mut producer1 = broadcast.assert_request().accept(Track::new("unknown_track")).unwrap();
+		let mut producer1 = broadcast.assert_request().accept(None);
 		let consumer1 = c1_fut.await.unwrap();
 
 		// The producer should NOT be unused yet because there's a consumer.
@@ -590,7 +612,13 @@ mod test {
 		);
 
 		// A second subscriber reuses the live producer (fast path / dedup).
-		let consumer2 = bc.consume_track("unknown_track").subscribe(None).await.unwrap();
+		let consumer2 = bc
+			.track("unknown_track")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
+			.unwrap();
 		consumer2.assert_is_clone(&consumer1);
 
 		drop(consumer1);
@@ -608,18 +636,23 @@ mod test {
 		// While the producer is still alive, re-subscribing to the same name reuses
 		// it (no new request) — this is what lets the relay linger upstream
 		// subscriptions across transient consumer churn.
-		let consumer3 = bc.consume_track("unknown_track").subscribe(None).await.unwrap();
+		let consumer3 = bc
+			.track("unknown_track")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
+			.unwrap();
 		consumer3.assert_is_clone(&producer1.subscribe(None));
 		broadcast.assert_no_request();
 		drop(consumer3);
 
-		// Aborting the producer triggers cleanup; the next subscribe creates a fresh request.
+		// Aborting the producer closes its lookup entry; the next subscribe sees the
+		// stale weak, evicts it, and creates a fresh request.
 		producer1.abort(Error::Cancel).unwrap();
-		// Yield (paused time) so the spawned cleanup task evicts the lookup entry.
-		tokio::time::advance(std::time::Duration::from_millis(1)).await;
 
 		let c4_fut = subscribe_pending!(bc, "unknown_track");
-		let producer2 = broadcast.assert_request().accept(Track::new("unknown_track")).unwrap();
+		let producer2 = broadcast.assert_request().accept(None);
 		let consumer4 = c4_fut.await.unwrap();
 		drop(consumer4);
 		assert!(
@@ -632,10 +665,10 @@ mod test {
 	// `state.dynamic` to zero. The relay's lite subscriber clones the
 	// dynamic per spawned subscribe; if Clone skipped the increment, the
 	// first finished subscribe would tear down the broadcast and any
-	// follow-up `consume_track` would return `NotFound`.
+	// follow-up `track` would return `NotFound`.
 	#[tokio::test]
 	async fn dynamic_clone_keeps_alive() {
-		let broadcast = Broadcast::new().produce().dynamic();
+		let broadcast = BroadcastInfo::new().produce().dynamic();
 		let consumer = broadcast.consume();
 
 		let clone = broadcast.clone();

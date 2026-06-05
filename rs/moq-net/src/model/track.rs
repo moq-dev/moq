@@ -8,7 +8,8 @@
 //! A [TrackSubscriber] may not receive all streams in order or at all.
 //! These streams are meant to be transmitted over congested networks and the key to MoQ Transport is to not block on them.
 //! Streams will be cached for a potentially limited duration added to the unreliable nature.
-//! A cloned [TrackSubscriber] will receive a copy of all new streams going forward (fanout).
+//! A [TrackConsumer] is a cheap, cloneable handle; subscribing it multiple times fans the same
+//! cached streams out to each independent [TrackSubscriber].
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
@@ -19,23 +20,20 @@ use super::{Group, GroupConsumer, GroupProducer};
 use std::{
 	collections::{HashSet, VecDeque},
 	pin::Pin,
-	task::{
-		Context,
-		Poll::{self, Ready},
-		ready,
-	},
+	sync::Arc,
+	task::{Context, Poll, ready},
 	time::Duration,
 };
 
-/// Default [`Track::cache`] age when the publisher doesn't set one.
+/// Default [`TrackInfo::cache`] age when the publisher doesn't set one.
 pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
 
 /// Publisher-side properties of a track.
 ///
 /// These are fixed by the publisher when the track is created and don't change
 /// while the track is alive. A subscriber learns them via
-/// [`BroadcastConsumer::consume_track`](crate::BroadcastConsumer::consume_track),
-/// which returns the publisher's [`Track`] once the subscription is accepted.
+/// [`BroadcastConsumer::track`](crate::BroadcastConsumer::track),
+/// which returns the publisher's [`TrackInfo`] once the subscription is accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackInfo {
@@ -79,7 +77,7 @@ fn is_default_cache(cache: &Duration) -> bool {
 	*cache == DEFAULT_CACHE
 }
 
-/// Serialize [`Track::cache`] as a bare integer of milliseconds, matching the
+/// Serialize [`TrackInfo::cache`] as a bare integer of milliseconds, matching the
 /// catalog's other durations (and the wire), rather than serde's `{secs, nanos}`.
 #[cfg(feature = "serde")]
 mod cache_millis {
@@ -367,43 +365,17 @@ impl TrackState {
 	}
 }
 
-/// The tighter of two stale deadlines. `Duration::ZERO` skips immediately, so
-/// any real deadline beats it; otherwise the smaller (sooner) deadline wins.
-fn tightest_stale(a: Duration, b: Duration) -> Duration {
-	match (a.is_zero(), b.is_zero()) {
-		(true, _) => b,
-		(_, true) => a,
-		_ => a.min(b),
-	}
-}
-
-/// The smaller of two optional bounds, treating `None` as "no preference".
-fn min_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-	match (a, b) {
-		(Some(a), Some(b)) => Some(a.min(b)),
-		(a, b) => a.or(b),
-	}
-}
-
-/// The later group end. `None` means unbounded, which dominates any bound.
-fn max_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-	match (a, b) {
-		(Some(a), Some(b)) => Some(a.max(b)),
-		_ => None,
-	}
-}
-
 /// A producer for a track, used to create new groups.
 #[derive(Clone)]
 pub struct TrackProducer {
-	name: String,
+	name: Arc<str>,
 	state: kio::Producer<TrackState>,
 	prev_subscription: Option<Subscription>,
 }
 
 impl TrackProducer {
 	/// Build a producer for the given track metadata.
-	pub fn new(name: impl Into<String>, info: impl Into<Option<TrackInfo>>) -> Self {
+	pub fn new(name: impl Into<Arc<str>>, info: impl Into<Option<TrackInfo>>) -> Self {
 		let info = info.into().unwrap_or_default();
 		Self {
 			name: name.into(),
@@ -570,31 +542,79 @@ impl TrackProducer {
 		}
 	}
 
-	pub async fn subscription(&mut self) -> Option<Subscription> {
-		kio::wait(|waiter| self.poll_subscription(waiter)).await
+	/// Get a consumer handle for this in-process track.
+	///
+	/// Unlike a wire subscription, the info is already known, so a subscription
+	/// opened from this handle resolves immediately.
+	pub fn consume(&self) -> TrackConsumer {
+		TrackConsumer {
+			name: self.name.clone(),
+			state: self.state.consume(),
+		}
 	}
 
-	fn poll_subscription(&mut self, waiter: &kio::Waiter) -> Poll<Option<Subscription>> {
-		let mut combined = None;
+	/// Subscribe to this in-process track, resolving synchronously.
+	///
+	/// The info is fixed at creation, so there's nothing to wait for (no
+	/// SUBSCRIBE_OK round trip). The subscriber's stale window is clamped to the
+	/// track's cache. Pass `None` for [`Subscription::default`].
+	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> TrackSubscriber {
+		let mut preferences = subscription.into().unwrap_or_default();
 
-		self.state.write().ok().unwrap().subscriptions.retain_mut(|sub| {
-			match sub.poll(waiter, |sub| sub.poll_combined(&combined)) {
-				Poll::Ready(Ok(sub)) => {
-					combined = Some(sub);
-					true
-				}
-				Poll::Ready(Err(_)) => false,
-				Poll::Pending => true,
-			}
-		});
+		let mut state = self.modify().expect("track producer state is never closed");
+		let info = state.info.clone().expect("producer always has info");
+		preferences.stale = info.clamp_stale(preferences.stale);
+		let subscription = kio::Producer::new(preferences);
+		state.subscriptions.push(subscription.consume());
+		drop(state);
 
-		if combined == self.prev_subscription {
-			return Poll::Pending;
+		TrackSubscriber {
+			name: self.name.clone(),
+			info,
+			state: self.state.consume(),
+			subscription,
+			index: 0,
+			min_sequence: 0,
+			next_sequence: 0,
+			end_sequence: None,
 		}
+	}
 
+	/// Block until the aggregate subscription changes, then return the new value.
+	///
+	/// Yields the most demanding request across all live subscribers, or `None`
+	/// once the last one drops. Used by relays to forward downstream demand
+	/// upstream (e.g. SUBSCRIBE_UPDATE).
+	pub async fn subscription_changed(&mut self) -> Result<Option<Subscription>> {
+		kio::wait(|waiter| self.poll_subscription_changed(waiter)).await
+	}
+
+	/// A non-blocking snapshot of the current aggregate subscription, or `None`
+	/// when there are no live subscribers. Unlike [`Self::subscription`], this
+	/// doesn't wait for a change or advance the change cursor.
+	pub fn subscription(&self) -> Option<Subscription> {
+		let state = self.state.read();
+		let mut combined: Option<Subscription> = None;
+		for sub in &state.subscriptions {
+			if let Poll::Ready(merged) = sub.read().poll_combined(&combined) {
+				combined = Some(merged);
+			}
+		}
+		combined
+	}
+
+	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Subscription>>> {
+		let prev = &self.prev_subscription;
+		let combined = match self
+			.state
+			.poll(waiter, |state| poll_combined_subscriptions(state, waiter, prev))
+		{
+			Poll::Ready(Ok(combined)) => combined,
+			Poll::Ready(Err(state)) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
+			Poll::Pending => return Poll::Pending,
+		};
 		self.prev_subscription = combined.clone();
-
-		Poll::Ready(combined)
+		Poll::Ready(Ok(combined))
 	}
 
 	fn modify(&self) -> Result<kio::Mut<'_, TrackState>> {
@@ -602,10 +622,45 @@ impl TrackProducer {
 	}
 }
 
+/// Aggregate every live subscriber's preferences into the most demanding request,
+/// returning `Poll::Ready` only when the result differs from `prev`.
+///
+/// Iterates `subscriptions` immutably so it never flags the [`TrackState`] as
+/// modified on a no-op poll. Marking it modified would drain and wake unrelated
+/// waiters on the channel (e.g. a [`TrackSubscriberPending`] parked on track
+/// info), which races with [`TrackRequest::accept`] and can drop that wakeup.
+/// Closed subscribers are pruned only when one has actually closed, which is a
+/// real change that legitimately wakes other waiters.
+fn poll_combined_subscriptions(
+	state: &mut kio::Mut<'_, TrackState>,
+	waiter: &kio::Waiter,
+	prev: &Option<Subscription>,
+) -> Poll<Option<Subscription>> {
+	let mut combined = None;
+	let mut any_closed = false;
+	for sub in state.subscriptions.iter() {
+		match sub.poll(waiter, |sub| sub.poll_combined(&combined)) {
+			Poll::Ready(Ok(sub)) => combined = Some(sub),
+			Poll::Ready(Err(_)) => any_closed = true,
+			Poll::Pending => {}
+		}
+	}
+
+	if any_closed {
+		state.subscriptions.retain(|sub| !sub.is_closed());
+	}
+
+	if &combined == prev {
+		Poll::Pending
+	} else {
+		Poll::Ready(combined)
+	}
+}
+
 /// A weak reference to a track that doesn't prevent auto-close.
 #[derive(Clone)]
 pub(crate) struct TrackWeak {
-	name: String,
+	name: Arc<str>,
 	state: kio::Weak<TrackState>,
 }
 
@@ -621,30 +676,23 @@ impl TrackWeak {
 		}
 	}
 
-	/// Wait until the underlying track state closes (producer dropped or aborted).
-	pub async fn closed(&self) {
-		self.state.closed().await;
-	}
-
-	pub fn is_clone(&self, other: &Self) -> bool {
-		self.state.same_channel(&other.state)
-	}
-
-	pub fn name(&self) -> &str {
+	/// The shared name handle, for use as a broadcast lookup key (clone is a
+	/// refcount bump, and the same `Arc` is shared with the track's handles).
+	pub(crate) fn name(&self) -> &Arc<str> {
 		&self.name
 	}
 }
 
 /// A handle to a single track within a broadcast.
 ///
-/// Obtained from [`BroadcastConsumer::consume_track`]. Holding it sends nothing
+/// Obtained from [`BroadcastConsumer::track`]. Holding it sends nothing
 /// to the publisher; it just names a track you can [`subscribe`](Self::subscribe)
 /// to (a live, ongoing stream of groups) later. The same handle can be subscribed
 /// to multiple times, and clones are cheap.
 // TODO: add `fetch` for one-shot retrieval of a past group range.
 #[derive(Clone)]
 pub struct TrackConsumer {
-	name: String,
+	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
 }
 
@@ -654,7 +702,7 @@ impl TrackConsumer {
 		&self.name
 	}
 
-	pub fn weak(&self) -> TrackWeak {
+	pub(crate) fn weak(&self) -> TrackWeak {
 		TrackWeak {
 			name: self.name.clone(),
 			state: self.state.weak(),
@@ -674,6 +722,7 @@ impl TrackConsumer {
 			name: self.name.clone(),
 			state: self.state.clone(),
 			subscription,
+			waiter: None,
 		})
 	}
 
@@ -683,16 +732,20 @@ impl TrackConsumer {
 
 	pub fn info(&self) -> TrackInfoPending {
 		TrackInfoPending {
-			name: self.name.clone(),
 			state: self.state.clone(),
+			waiter: None,
 		}
 	}
 }
 
 pub struct TrackSubscriberPending {
-	name: String,
+	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
 	subscription: kio::Producer<Subscription>,
+	// Kept alive between `Future::poll` calls so the weak waker kio registered
+	// stays upgradeable until the next poll replaces it. A temporary would drop
+	// after poll returns, leaving a dead weak ref and a lost wakeup on accept.
+	waiter: Option<kio::Waiter>,
 }
 
 impl TrackSubscriberPending {
@@ -726,13 +779,19 @@ impl Future for TrackSubscriberPending {
 	type Output = Result<TrackSubscriber>;
 
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		self.poll_ok(&kio::Waiter::new(cx.waker().clone()))
+		let this = self.get_mut();
+		// Replacing drops the previous waiter, freeing its slot so the register
+		// call below can recycle it (see kio's weak-waker GC).
+		this.waiter = Some(kio::Waiter::new(cx.waker().clone()));
+		this.poll_ok(this.waiter.as_ref().unwrap())
 	}
 }
 
 pub struct TrackInfoPending {
-	name: String,
 	state: kio::Consumer<TrackState>,
+	// See [`TrackSubscriberPending::waiter`]: kept alive so the registered weak
+	// waker stays upgradeable between polls.
+	waiter: Option<kio::Waiter>,
 }
 
 impl TrackInfoPending {
@@ -748,7 +807,9 @@ impl Future for TrackInfoPending {
 	type Output = Result<TrackInfo>;
 
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		self.poll_ok(&kio::Waiter::new(cx.waker().clone()))
+		let this = self.get_mut();
+		this.waiter = Some(kio::Waiter::new(cx.waker().clone()));
+		this.poll_ok(this.waiter.as_ref().unwrap())
 	}
 }
 
@@ -758,7 +819,7 @@ impl Future for TrackInfoPending {
 /// directly from a [`TrackProducer`] for an in-process track. Carries this
 /// subscriber's [`Subscription`] preferences, which feed the producer's aggregate.
 pub struct TrackSubscriber {
-	name: String,
+	name: Arc<str>,
 	info: TrackInfo,
 	state: kio::Consumer<TrackState>,
 
@@ -937,6 +998,11 @@ impl TrackSubscriber {
 		self.end_sequence = sequence.into();
 	}
 
+	/// This subscriber's current preferences.
+	pub fn subscription(&self) -> Subscription {
+		self.subscription.read().clone()
+	}
+
 	/// Replace this subscriber's preferences, updating the producer's aggregate.
 	pub fn update(&mut self, subscription: Subscription) {
 		if let Ok(mut state) = self.subscription.write() {
@@ -953,7 +1019,7 @@ impl TrackSubscriber {
 }
 
 pub struct TrackRequest {
-	name: String,
+	name: Arc<str>,
 	state: kio::Producer<TrackState>,
 
 	// The previous subscription that was combined, used to detect changes.
@@ -961,7 +1027,7 @@ pub struct TrackRequest {
 }
 
 impl TrackRequest {
-	pub fn new(name: impl Into<String>) -> Self {
+	pub fn new(name: impl Into<Arc<str>>) -> Self {
 		Self {
 			name: name.into(),
 			state: Default::default(),
@@ -1005,30 +1071,33 @@ impl TrackRequest {
 		}
 	}
 
-	pub async fn subscription(&mut self) -> Option<Subscription> {
-		kio::wait(|waiter| self.poll_subscription(waiter)).await
+	pub fn subscription(&self) -> Option<Subscription> {
+		let state = self.state.read();
+		let mut combined: Option<Subscription> = None;
+		for sub in &state.subscriptions {
+			if let Poll::Ready(merged) = sub.read().poll_combined(&combined) {
+				combined = Some(merged);
+			}
+		}
+		combined
 	}
 
-	pub fn poll_subscription(&mut self, waiter: &kio::Waiter) -> Poll<Option<Subscription>> {
-		let mut combined = None;
+	pub async fn subscription_changed(&mut self) -> Option<Subscription> {
+		kio::wait(|waiter| self.poll_subscription_changed(waiter)).await
+	}
 
-		self.state.write().ok().unwrap().subscriptions.retain_mut(|sub| {
-			match sub.poll(waiter, |sub| sub.poll_combined(&combined)) {
-				Poll::Ready(Ok(sub)) => {
-					combined = Some(sub);
-					true
-				}
-				Poll::Ready(Err(_)) => false,
-				Poll::Pending => true,
-			}
-		});
-
-		if combined == self.prev_subscription {
-			return Poll::Pending;
-		}
-
+	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<Subscription>> {
+		let prev = &self.prev_subscription;
+		// The request owns the only producer, so the channel can't be closed here.
+		let combined = match ready!(
+			self.state
+				.poll(waiter, |state| poll_combined_subscriptions(state, waiter, prev))
+		) {
+			Ok(combined) => combined,
+			Err(_) => unreachable!("a TrackRequest holds the only producer"),
+		};
 		self.prev_subscription = combined.clone();
-		return Poll::Ready(combined);
+		Poll::Ready(combined)
 	}
 
 	pub(super) fn weak(&self) -> TrackWeak {
@@ -1102,7 +1171,7 @@ mod test {
 	async fn evict_expired_groups() {
 		tokio::time::pause();
 
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 
 		// Create 3 groups at time 0.
 		producer.append_group().unwrap(); // seq 0
@@ -1139,7 +1208,7 @@ mod test {
 	async fn evict_keeps_max_sequence() {
 		tokio::time::pause();
 
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		producer.append_group().unwrap(); // seq 0
 
 		// Advance time past threshold.
@@ -1160,7 +1229,7 @@ mod test {
 	async fn no_eviction_when_fresh() {
 		tokio::time::pause();
 
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		producer.append_group().unwrap(); // seq 0
 		producer.append_group().unwrap(); // seq 1
 		producer.append_group().unwrap(); // seq 2
@@ -1176,7 +1245,7 @@ mod test {
 	async fn consumer_skips_evicted_groups() {
 		tokio::time::pause();
 
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		producer.append_group().unwrap(); // seq 0
 
 		let mut consumer = producer.subscribe(None);
@@ -1194,7 +1263,7 @@ mod test {
 		tokio::time::pause();
 
 		// A shorter cache evicts sooner than the default.
-		let mut producer = Track::new("test").with_cache(Duration::from_secs(1)).produce();
+		let mut producer = TrackProducer::new("test", TrackInfo::default().with_cache(Duration::from_secs(1)));
 		producer.append_group().unwrap(); // seq 0
 
 		// Past the custom cache but well within DEFAULT_CACHE.
@@ -1209,11 +1278,11 @@ mod test {
 
 	#[test]
 	fn stale_clamped_to_cache() {
-		let producer = Track::new("test").with_cache(Duration::from_secs(2)).produce();
+		let producer = TrackProducer::new("test", TrackInfo::default().with_cache(Duration::from_secs(2)));
 
 		// A stale window beyond the cache is capped to the cache; a group can't be
 		// waited for longer than the publisher keeps it.
-		let subscriber = producer.subscribe(Subscription::default().with_stale(Duration::from_secs(10)));
+		let mut subscriber = producer.subscribe(Subscription::default().with_stale(Duration::from_secs(10)));
 		assert_eq!(subscriber.subscription().stale, Duration::from_secs(2));
 
 		// A window within the cache is left alone, and ZERO (skip immediately) stays ZERO.
@@ -1228,7 +1297,7 @@ mod test {
 	async fn out_of_order_max_sequence_at_front() {
 		tokio::time::pause();
 
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 
 		// Arrive out of order: seq 5 first, then 3, then 4.
 		producer.create_group(Group { sequence: 5 }).unwrap();
@@ -1264,7 +1333,7 @@ mod test {
 	async fn max_sequence_at_front_blocks_trim() {
 		tokio::time::pause();
 
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 
 		// Arrive: seq 5, then seq 3.
 		producer.create_group(Group { sequence: 5 }).unwrap();
@@ -1310,7 +1379,7 @@ mod test {
 
 	#[test]
 	fn append_finish_cannot_be_rewritten() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 
 		// Finishing an empty track is valid (fin = 0, total groups = 0).
 		assert!(producer.finish().is_ok());
@@ -1320,7 +1389,7 @@ mod test {
 
 	#[test]
 	fn finish_after_groups() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 
 		producer.append_group().unwrap();
 		assert!(producer.finish().is_ok());
@@ -1330,7 +1399,7 @@ mod test {
 
 	#[test]
 	fn insert_finish_validates_sequence_and_freezes_to_max() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		producer.create_group(Group { sequence: 5 }).unwrap();
 
 		assert!(producer.finish_at(4).is_err());
@@ -1349,7 +1418,7 @@ mod test {
 
 	#[tokio::test]
 	async fn recv_group_finishes_without_waiting_for_gaps() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		producer.create_group(Group { sequence: 1 }).unwrap();
 		producer.finish_at(1).unwrap();
 
@@ -1366,7 +1435,7 @@ mod test {
 
 	#[tokio::test]
 	async fn next_group_skips_late_arrivals() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		// Seq 5 arrives first.
@@ -1403,7 +1472,7 @@ mod test {
 
 	#[tokio::test]
 	async fn next_group_returns_arrivals_in_order() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		// Seq 3 arrives first, then seq 5 — both should be returned in arrival order.
@@ -1429,7 +1498,7 @@ mod test {
 
 	#[tokio::test]
 	async fn next_group_and_recv_group_use_independent_cursors() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		// Out-of-order arrivals: seq 5 first, then seq 3.
@@ -1453,7 +1522,7 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_caps_next_group() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		for s in 0..6 {
@@ -1485,7 +1554,7 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_release_drains_cached_groups() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		for s in 0..6 {
@@ -1530,7 +1599,7 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_lower_than_cursor_parks_consumer() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		for s in 0..3 {
@@ -1574,7 +1643,7 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_toggling_around_late_arrivals() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		consumer.end_at(5);
@@ -1617,7 +1686,7 @@ mod test {
 
 	#[tokio::test]
 	async fn read_frame_returns_single_frame_per_group() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		producer.write_frame(b"hello".as_slice()).unwrap();
@@ -1642,7 +1711,7 @@ mod test {
 
 	#[tokio::test]
 	async fn read_frame_skips_stalled_group_for_newer_ready_frame() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		// Seq 3: group open, no frame yet (stalled).
@@ -1664,7 +1733,7 @@ mod test {
 
 	#[tokio::test]
 	async fn read_frame_discards_rest_of_multi_frame_group() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		// Group 0 has two frames; only the first is returned.
@@ -1698,7 +1767,7 @@ mod test {
 	async fn read_frame_waits_for_pending_group_after_finish() {
 		// finish() sets final_sequence, but groups already created with lower sequences
 		// can still produce frames. read_frame must not return None prematurely.
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		let mut g0 = producer.create_group(Group { sequence: 0 }).unwrap();
@@ -1725,7 +1794,7 @@ mod test {
 	async fn read_frame_respects_start_at() {
 		// start_at sets min_sequence; read_frame must skip groups below it even though
 		// next_sequence is still 0.
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		let mut consumer = producer.subscribe(None);
 		consumer.start_at(5);
 
@@ -1749,7 +1818,7 @@ mod test {
 
 	#[tokio::test]
 	async fn read_frame_returns_none_when_finished() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		producer.write_frame(b"only".as_slice()).unwrap();
@@ -1773,7 +1842,7 @@ mod test {
 
 	#[tokio::test]
 	async fn get_group_finishes_without_waiting_for_gaps() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		producer.create_group(Group { sequence: 1 }).unwrap();
 		producer.finish_at(1).unwrap();
 
@@ -1796,7 +1865,7 @@ mod test {
 
 	#[test]
 	fn append_group_returns_bounds_exceeded_on_sequence_overflow() {
-		let mut producer = Track::new("test").produce();
+		let mut producer = TrackProducer::new("test", None);
 		{
 			let mut state = producer.state.write().ok().unwrap();
 			state.max_sequence = Some(u64::MAX);

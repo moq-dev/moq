@@ -249,7 +249,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					match event.broadcast() {
 						Some(broadcast) => {
-							let hops = &broadcast.hops;
+							let hops = &broadcast.info().hops;
 							// Apply the same exclude_hop and reflected-announce skips as the live
 							// loop so the count matches exactly what we send (minus the self push).
 							if exclude_hop != 0 && hops.iter().any(|h| h.id == exclude_hop) {
@@ -306,7 +306,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 						match event {
 							crate::Announced::Active(active) => {
-								let Some(hops) = Self::prepare_active_hops(&active.hops, self_origin, exclude_hop, version, &absolute) else {
+								let Some(hops) = Self::prepare_active_hops(&active.info().hops, self_origin, exclude_hop, version, &absolute) else {
 									continue;
 								};
 								tracing::debug!(broadcast = %absolute, "announce");
@@ -319,7 +319,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								// On lite-05+ a restart travels as a duplicate ANNOUNCE (a second
 								// `Active` for an already-announced path). Older versions never defined
 								// that, so split it into an unannounce followed by a fresh announce.
-								match Self::prepare_active_hops(&active.hops, self_origin, exclude_hop, version, &absolute) {
+								match Self::prepare_active_hops(&active.info().hops, self_origin, exclude_hop, version, &absolute) {
 									Some(hops) => {
 										tracing::debug!(broadcast = %absolute, "restart");
 										// Continuity: keep the existing stats guard (no close + reopen).
@@ -455,10 +455,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast
-			.consume_track(&subscribe.track)
-			.subscribe(subscription)
-			.await?;
+		let track = broadcast.track(&subscribe.track)?.subscribe(subscription)?.await?;
 
 		// Compress only when the producer marked the track worth it and the
 		// negotiated draft understands the SUBSCRIBE_OK codec field. Older drafts
@@ -467,7 +464,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			version,
 			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Lite04
 		);
-		let compression = if track.compress && supports_compression {
+		let compression = if track.info().compress && supports_compression {
 			Compression::Deflate
 		} else {
 			Compression::None
@@ -478,7 +475,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// (the field never lands on the wire) and stream untimed frames; Lite05+
 		// honors `Some(_)` and skips the timestamp byte for `None`.
 		let timescale = if version.has_timestamps() {
-			track.timescale
+			track.info().timescale
 		} else {
 			None
 		};
@@ -497,7 +494,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			timescale,
 			// Announce the publisher's cache window so the subscriber (a relay)
 			// re-serves with the same eviction window. Pre-lite-05 peers ignore it.
-			cache: track.cache,
+			cache: track.info().cache,
 		};
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
@@ -512,7 +509,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let sub = Subscription {
 			session,
 			id: subscribe.id,
-			track_name: Arc::from(track.name.as_str()),
+			track_name: Arc::from(track.name()),
 			track_stats: Arc::new(track_stats),
 			priority,
 			track_priority: track_priority_rx,

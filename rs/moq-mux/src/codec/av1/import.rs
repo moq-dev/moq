@@ -90,19 +90,20 @@ impl Import {
 		}
 
 		if let Some(track) = &self.track.take() {
-			tracing::debug!(name = ?track.name, "reinitializing track");
-			self.catalog.lock().video.renditions.remove(&track.name);
+			tracing::debug!(name = ?track.name(), "reinitializing track");
+			self.catalog.lock().video.renditions.remove(track.name());
 		}
 
 		let track = self.broadcast.create_track(
-			moq_net::Track::new(self.broadcast.unique_name(".av01")).with_timescale(hang::container::TIMESCALE),
+			self.broadcast.unique_name(".av01"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		)?;
-		tracing::debug!(name = ?track.name, ?config, "starting track");
+		tracing::debug!(name = ?track.name(), ?config, "starting track");
 		self.catalog
 			.lock()
 			.video
 			.renditions
-			.insert(track.name.clone(), config.clone());
+			.insert(track.name().to_string(), config.clone());
 
 		self.config = Some(config);
 		self.track = Some(crate::container::Producer::new(
@@ -132,14 +133,15 @@ impl Import {
 		config.container = hang::catalog::Container::Legacy;
 
 		let track = self.broadcast.create_track(
-			moq_net::Track::new(self.broadcast.unique_name(".av01")).with_timescale(hang::container::TIMESCALE),
+			self.broadcast.unique_name(".av01"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		)?;
-		tracing::debug!(name = ?track.name, "starting track with minimal config");
+		tracing::debug!(name = ?track.name(), "starting track with minimal config");
 		self.catalog
 			.lock()
 			.video
 			.renditions
-			.insert(track.name.clone(), config.clone());
+			.insert(track.name().to_string(), config.clone());
 
 		self.config = Some(config);
 		self.track = Some(crate::container::Producer::new(
@@ -207,17 +209,18 @@ impl Import {
 		}
 
 		if let Some(track) = &self.track.take() {
-			self.catalog.lock().video.renditions.remove(&track.name);
+			self.catalog.lock().video.renditions.remove(track.name());
 		}
 
 		let track = self.broadcast.create_track(
-			moq_net::Track::new(self.broadcast.unique_name(".av01")).with_timescale(hang::container::TIMESCALE),
+			self.broadcast.unique_name(".av01"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		)?;
 		self.catalog
 			.lock()
 			.video
 			.renditions
-			.insert(track.name.clone(), config.clone());
+			.insert(track.name().to_string(), config.clone());
 
 		self.config = Some(config);
 		self.track = Some(crate::container::Producer::new(
@@ -369,7 +372,7 @@ impl Import {
 		track.write(frame)?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
+			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(track.name())
 		{
 			c.jitter = Some(jitter);
 		}
@@ -415,8 +418,8 @@ impl Import {
 impl Drop for Import {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name, "ending track");
-			self.catalog.lock().video.renditions.remove(&track.name);
+			tracing::debug!(name = ?track.name(), "ending track");
+			self.catalog.lock().video.renditions.remove(track.name());
 		}
 	}
 }
