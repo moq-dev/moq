@@ -135,6 +135,16 @@ impl OriginList {
 		Ok(())
 	}
 
+	/// Insert an [`Origin`] at the front (oldest position). Returns
+	/// [`TooManyOrigins`] if the list is full.
+	pub fn push_front(&mut self, origin: Origin) -> Result<(), TooManyOrigins> {
+		if self.0.len() >= MAX_HOPS {
+			return Err(TooManyOrigins);
+		}
+		self.0.insert(0, origin);
+		Ok(())
+	}
+
 	/// Returns true if any entry matches `origin`.
 	pub fn contains(&self, origin: &Origin) -> bool {
 		self.0.contains(origin)
@@ -1052,6 +1062,20 @@ mod tests {
 		}
 		assert_eq!(list.len(), MAX_HOPS);
 		assert_eq!(list.push(Origin::random()), Err(TooManyOrigins));
+	}
+
+	#[test]
+	fn origin_list_push_front_orders_and_limits() {
+		let mut list = OriginList::new();
+		list.push(Origin::from(2)).unwrap();
+		list.push(Origin::from(3)).unwrap();
+		list.push_front(Origin::from(1)).unwrap();
+		assert_eq!(list.as_slice(), &[Origin::from(1), Origin::from(2), Origin::from(3)]);
+
+		while list.len() < MAX_HOPS {
+			list.push(Origin::random()).unwrap();
+		}
+		assert_eq!(list.push_front(Origin::random()), Err(TooManyOrigins));
 	}
 
 	#[test]

@@ -46,6 +46,12 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// to skip broadcasts whose hop chain already passed through us, and we
 	// double-check incoming announces against it as defense in depth.
 	self_origin: crate::Origin,
+	// A random per-connection origin prepended to the hop chain of broadcasts
+	// from versions that don't carry one on the wire (Lite01/02/03). It gives
+	// each upstream session a stable, unique identity in the hop list so two
+	// sessions publishing the same path resolve as distinct routes instead of
+	// colliding on an empty/placeholder chain.
+	session_origin: crate::Origin,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
@@ -73,6 +79,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			broadcasts,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
+			session_origin: crate::Origin::random(),
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version: config.version,
@@ -269,15 +276,27 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_announce(
 		&mut self,
 		path: PathOwned,
-		hops: crate::OriginList,
+		mut hops: crate::OriginList,
 		producers: &mut HashMap<PathOwned, BroadcastProducer>,
 	) -> Result<bool, Error> {
-		// Drop announces that already passed through us — this connection is
+		// Drop announces that already passed through us. This connection is
 		// a reflection, not a new path. Peers should be filtering via
 		// AnnounceInterest.exclude_hop, but Lite03 peers can't, so this is
 		// the authoritative cluster-loop check on the receiver.
 		if hops.contains(&self.self_origin) {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected announce");
+			return Ok(false);
+		}
+
+		// Versions before Lite04 don't carry a real hop list (Lite01/02 send
+		// none, Lite03 sends a count with placeholder ids), so every broadcast
+		// arrives with an empty or anonymous chain. Prepend this connection's
+		// origin so the route is attributable to the upstream session.
+		if self.version_lacks_hops() && hops.push_front(self.session_origin).is_err() {
+			tracing::warn!(
+				broadcast = %self.log_path(&path),
+				"dropping announce; hop chain at MAX_HOPS (possible loop)",
+			);
 			return Ok(false);
 		}
 
@@ -512,5 +531,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	fn log_path(&self, path: impl AsPath) -> Path<'_> {
 		self.origin.as_ref().unwrap().root().join(path)
+	}
+
+	/// True for versions that don't carry a real hop list on the wire, so the
+	/// received chain is empty (Lite01/02) or anonymous placeholders (Lite03).
+	fn version_lacks_hops(&self) -> bool {
+		matches!(self.version, Version::Lite01 | Version::Lite02 | Version::Lite03)
 	}
 }
