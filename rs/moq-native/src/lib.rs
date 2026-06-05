@@ -25,6 +25,7 @@ mod server;
 #[cfg(any(feature = "noq", feature = "quinn"))]
 mod tls;
 mod util;
+mod watch;
 #[cfg(feature = "websocket")]
 mod websocket;
 
@@ -32,6 +33,7 @@ pub use client::*;
 pub use log::*;
 pub use reconnect::*;
 pub use server::*;
+pub use watch::FileWatcher;
 #[cfg(feature = "websocket")]
 pub use websocket::*;
 

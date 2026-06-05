@@ -216,16 +216,22 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 	}
 }
 
-// ── reload_certs (unix) ─────────────────────────────────────────────
+// ── reload_certs ────────────────────────────────────────────────────
 
-#[cfg(unix)]
+/// Watch the on-disk cert/key files and reload them whenever they change.
+///
+/// Reacting to the filesystem means cert-manager, Kubernetes secret mounts, and
+/// `mv`-into-place rotate certs with no external signal. Returns immediately when
+/// only generated certs are configured: there's nothing on disk to watch.
 pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: ServerTlsConfig) {
-	use tokio::signal::unix::{SignalKind, signal};
+	let paths: Vec<PathBuf> = tls_config.cert.iter().chain(tls_config.key.iter()).cloned().collect();
+	if paths.is_empty() {
+		return;
+	}
 
-	// Dunno why we wouldn't be allowed to listen for signals, but just in case.
-	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
-
-	while listener.recv().await.is_some() {
+	let mut watcher = crate::FileWatcher::new(paths);
+	loop {
+		watcher.changed().await;
 		tracing::info!("reloading server certificates");
 
 		if let Err(err) = certs.load_certs(&tls_config) {

@@ -165,7 +165,6 @@ impl Web {
 			let config = build_https_config(&cert, &key, &root).await?;
 			let rustls_config = RustlsConfig::from_config(Arc::new(config));
 
-			#[cfg(unix)]
 			tokio::spawn(reload_https_config(rustls_config.clone(), cert, key, root));
 
 			// MtlsAcceptor surfaces a verified peer cert as a request extension.
@@ -256,18 +255,20 @@ async fn build_https_config(
 	Ok(config)
 }
 
-/// Reload the HTTPS cert/key on SIGUSR1.
+/// Reload the HTTPS cert/key/root whenever they change on disk.
 ///
 /// `RustlsConfig::reload_from_pem_file` would rebuild with `with_no_client_auth`
-/// — silently stripping mTLS when configured — so we always rebuild via the
-/// full [`build_https_config`] path.
-#[cfg(unix)]
+/// (silently stripping mTLS when configured), so we always rebuild via the full
+/// [`build_https_config`] path.
 async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, root: Vec<PathBuf>) {
-	use tokio::signal::unix::{SignalKind, signal};
+	let paths = std::iter::once(cert.clone())
+		.chain(std::iter::once(key.clone()))
+		.chain(root.iter().cloned())
+		.collect();
 
-	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
-
-	while listener.recv().await.is_some() {
+	let mut watcher = moq_native::FileWatcher::new(paths);
+	loop {
+		watcher.changed().await;
 		tracing::info!("reloading web certificate");
 
 		match build_https_config(&cert, &key, &root).await {
