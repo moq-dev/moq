@@ -266,7 +266,7 @@ async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, 
 		.chain(root.iter().cloned())
 		.collect();
 
-	let mut watcher = moq_native::FileWatcher::new(paths);
+	let mut watcher = crate::watch::FileWatcher::new(paths);
 	loop {
 		watcher.changed().await;
 		tracing::info!("reloading web certificate");

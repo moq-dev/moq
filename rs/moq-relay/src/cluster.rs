@@ -681,13 +681,13 @@ impl Cluster {
 	}
 
 	/// Watch a local peer-list file, reconciling whenever it changes. Backed by
-	/// [`moq_native::FileWatcher`] (OS notifications with a polling fallback).
+	/// [`crate::watch::FileWatcher`] (OS notifications with a polling fallback).
 	/// Fails static: a missing or malformed file keeps the current dials, and the
 	/// next change triggers a fresh attempt.
 	async fn run_connect_api_file(&self, path: PathBuf, node: Option<String>, token: String, dialed: DialMap) {
 		self.reload_connect_api_file(&path, &node, &token, &dialed);
 
-		let mut watcher = moq_native::FileWatcher::new(vec![path.clone()]);
+		let mut watcher = crate::watch::FileWatcher::new(vec![path.clone()]);
 		loop {
 			watcher.changed().await;
 			self.reload_connect_api_file(&path, &node, &token, &dialed);
@@ -695,8 +695,9 @@ impl Cluster {
 	}
 
 	/// Re-read the peer-list file and reconcile. Any read/parse error keeps the
-	/// current dials; the [`FileWatcher`](moq_native::FileWatcher) only re-invokes
-	/// this on a real change, so a malformed file isn't re-warned on a loop.
+	/// current dials; the [`FileWatcher`](crate::watch::FileWatcher) only
+	/// re-invokes this on a real change, so a malformed file isn't re-warned on a
+	/// loop.
 	fn reload_connect_api_file(&self, path: &std::path::Path, node: &Option<String>, token: &str, dialed: &DialMap) {
 		match std::fs::read_to_string(path) {
 			Ok(body) => match serde_json::from_str::<Vec<String>>(&body) {

@@ -17,8 +17,8 @@ doctest = false
 
 [features]
 default = ["quinn", "aws-lc-rs", "websocket"]
-quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki"]
-noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki"]
+quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:notify"]
+noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:notify"]
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto"]
@@ -38,7 +38,7 @@ humantime = "2.3"
 humantime-serde = "1.1"
 
 moq-net = { workspace = true, features = ["serde"] }
-notify = "8"
+notify = { version = "8", optional = true }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 qmux = { workspace = true, features = ["wss", "tls"], optional = true }
 quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "bloom"], optional = true }

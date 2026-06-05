@@ -229,7 +229,7 @@ pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: ServerTlsCo
 		return;
 	}
 
-	let mut watcher = crate::FileWatcher::new(paths);
+	let mut watcher = crate::watch::FileWatcher::new(paths);
 	loop {
 		watcher.changed().await;
 		tracing::info!("reloading server certificates");
