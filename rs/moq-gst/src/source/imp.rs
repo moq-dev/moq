@@ -459,9 +459,24 @@ async fn run_session(
 	// branch below can borrow `shutdown` mutably without conflicting with reconcile.
 	let pump_shutdown = shutdown.clone();
 
+	let mut catalog_closed = false;
+
 	loop {
+		// Done once the catalog is closed and every pump has drained on its own.
+		// Those pumps already emitted EOS downstream via their natural end path.
+		if catalog_closed && active.is_empty() {
+			break;
+		}
+
 		tokio::select! {
-			_ = shutdown.changed() => break,
+			// Full session shutdown: cancel any pumps still running. (They watch this
+			// same signal too, so this is belt-and-suspenders for a prompt teardown.)
+			_ = shutdown.changed() => {
+				for (_, track) in active.drain() {
+					let _ = track.cancel.send(true);
+				}
+				break;
+			}
 			// A pump ended on its own (track finished or errored). Forget it so a
 			// later catalog update can resubscribe if the rendition reappears -- but
 			// only if it's still the pump we have on file, since a replaced rendition
@@ -471,35 +486,37 @@ async fn run_session(
 					active.remove(&done.name);
 				}
 			}
-			next = catalog_consumer.next() => {
-				let catalog = match next? {
-					Some(catalog) => catalog,
-					None => break, // catalog track closed
-				};
-				reconcile(
-					&catalog,
-					&mut active,
-					&mut next_pad_id,
-					&broadcast,
-					&control_tx,
-					&done_tx,
-					&pump_shutdown,
-				)
-				.await?;
-				// Once the first real pads exist, tell downstream the initial set is
-				// in place so it can finish linking; we may still add or remove
-				// Sometimes pads afterwards as the catalog changes.
-				if !announced_no_more_pads && !active.is_empty() {
-					let _ = control_tx.send(ControlMessage::NoMorePads);
-					announced_no_more_pads = true;
+			// The guard stops us polling a closed catalog track (which would spin the
+			// loop returning None) while we wait for the pumps to drain.
+			next = catalog_consumer.next(), if !catalog_closed => {
+				match next? {
+					Some(catalog) => {
+						reconcile(
+							&catalog,
+							&mut active,
+							&mut next_pad_id,
+							&broadcast,
+							&control_tx,
+							&done_tx,
+							&pump_shutdown,
+						)
+						.await?;
+						// Once the first real pads exist, tell downstream the initial
+						// set is in place so it can finish linking; we may still add or
+						// remove Sometimes pads afterwards as the catalog changes.
+						if !announced_no_more_pads && !active.is_empty() {
+							let _ = control_tx.send(ControlMessage::NoMorePads);
+							announced_no_more_pads = true;
+						}
+					}
+					// Catalog track closed. Don't cancel the pumps -- let each reach
+					// its natural Ok(None) -> EOS end so downstream sees a clean EOS
+					// rather than a bare pad drop. We just stop reconciling and wait
+					// for the pumps to drain (or for a global shutdown).
+					None => catalog_closed = true,
 				}
 			}
 		}
-	}
-
-	// Tear down every pump; each drops its pad as it exits.
-	for (_, track) in active.drain() {
-		let _ = track.cancel.send(true);
 	}
 
 	Ok(())
