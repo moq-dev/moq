@@ -58,6 +58,12 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
 	/// distinct upstream sessions feeding each broadcast.
 	broadcasts: crate::SessionBroadcasts,
+	// A random per-connection origin stamped into the hop chain of every
+	// broadcast. moq-transport never carries hop ids on the wire, so each
+	// upstream session needs a stable, unique identity in the hop list for two
+	// sessions publishing the same path to resolve as distinct routes instead
+	// of colliding on an empty chain.
+	session_origin: crate::Origin,
 	state: Lock<State>,
 	version: Version,
 }
@@ -77,6 +83,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			control,
 			stats,
 			broadcasts,
+			session_origin: crate::Origin::random(),
 			state: Default::default(),
 			version,
 		}
@@ -447,7 +454,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Ok(entry.get().producer.clone());
 			}
 			Entry::Vacant(entry) => {
-				let broadcast = Broadcast::new().produce();
+				// Stamp this connection's origin as the sole hop so the route is
+				// attributable to the upstream session (moq-transport carries no
+				// hops on the wire, so the chain is otherwise empty).
+				let mut hops = crate::OriginList::new();
+				hops.push(self.session_origin)
+					.expect("an empty hop chain has room for one entry");
+				let broadcast = Broadcast { hops }.produce();
 				origin.publish_broadcast(path.clone(), broadcast.consume());
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),
