@@ -528,27 +528,29 @@ async fn serve_fetch(
 			.announced_broadcast("")
 			.await
 			.ok_or(StatusCode::NOT_FOUND)?;
-		let mut track = async { broadcast.track(&track)?.subscribe(None)?.await }
-			.await
-			.map_err(|err| match err {
-				moq_net::Error::NotFound => StatusCode::NOT_FOUND,
-				_ => StatusCode::INTERNAL_SERVER_ERROR,
-			})?;
 		let group = match params.group {
-			FetchGroup::Latest => match track.latest() {
-				Some(sequence) => track.get_group(sequence).await,
-				None => track.recv_group().await,
+			// "latest" needs a live subscription to learn the newest sequence;
+			// fetch only retrieves a specified past group.
+			FetchGroup::Latest => match async { broadcast.track(&track)?.subscribe(None)?.await }.await {
+				Ok(mut sub) => match sub.latest() {
+					Some(sequence) => sub.get_group(sequence).await,
+					None => sub.recv_group().await,
+				},
+				Err(err) => Err(err),
 			},
-			FetchGroup::Num(sequence) => track.get_group(sequence).await,
+			// A one-shot fetch, no subscription required.
+			FetchGroup::Num(sequence) => async { broadcast.track(&track)?.fetch(sequence, None)?.await }
+				.await
+				.map(Some),
 		};
 
 		let group = match group {
 			Ok(Some(group)) => group,
-			Ok(None) => return Err(StatusCode::NOT_FOUND),
+			Ok(None) | Err(moq_net::Error::NotFound) => return Err(StatusCode::NOT_FOUND),
 			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
 		};
 
-		tracing::info!(track = %track.name(), group = %group.sequence, "serving group");
+		tracing::info!(%track, group = %group.sequence, "serving group");
 
 		match params.frame {
 			FetchFrame::Num(index) => match group.get_frame(index).await {

@@ -19,9 +19,8 @@ use super::{Group, GroupConsumer, GroupProducer};
 
 use std::{
 	collections::{HashSet, VecDeque},
-	pin::Pin,
 	sync::Arc,
-	task::{Context, Poll, ready},
+	task::{Poll, ready},
 	time::Duration,
 };
 
@@ -156,6 +155,10 @@ struct TrackState {
 
 	// Active subscriptions.
 	subscriptions: Vec<kio::Consumer<Subscription>>,
+
+	// Specific groups requested via `fetch` that aren't cached yet, FIFO for the
+	// producer to serve (see `TrackProducer::requested_fetch`).
+	fetches: VecDeque<FetchRequest>,
 }
 
 impl TrackState {
@@ -362,6 +365,32 @@ impl TrackState {
 
 	fn modify(producer: &kio::Producer<Self>) -> Result<kio::Mut<'_, Self>> {
 		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	}
+
+	/// Insert a fetched group with an explicit timescale, independent of whether the
+	/// track has been accepted (info may be absent). Used to serve a one-shot FETCH
+	/// without a full subscription. The group lands in the cache so a waiting
+	/// [`TrackFetchPending`] resolves via [`Self::poll_get_group`].
+	fn insert_fetch_group(&mut self, sequence: u64, timescale: Option<Timescale>) -> Result<GroupProducer> {
+		if let Some(err) = &self.abort {
+			return Err(err.clone());
+		}
+		if let Some(fin) = self.final_sequence
+			&& sequence >= fin
+		{
+			return Err(Error::Closed);
+		}
+		if !self.duplicates.insert(sequence) {
+			return Err(Error::Duplicate);
+		}
+
+		let group = GroupProducer::new_with_timescale(Group { sequence }, timescale);
+		let now = tokio::time::Instant::now();
+		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
+		self.groups.push_back(Some((group.clone(), now)));
+		let cache = self.info.as_ref().map(|i| i.cache).unwrap_or(DEFAULT_CACHE);
+		self.evict_expired(now, cache);
+		Ok(group)
 	}
 }
 
@@ -617,6 +646,34 @@ impl TrackProducer {
 		Poll::Ready(Ok(combined))
 	}
 
+	/// Block until a consumer fetches a group that isn't cached, returning the request.
+	///
+	/// The producer serves it by making the group available (a relay issues a wire
+	/// FETCH then [`create_group`](Self::create_group); an origin already has it
+	/// cached, so the fetch resolves without ever reaching here). Errors once the
+	/// track is aborted.
+	pub async fn requested_fetch(&mut self) -> Result<FetchRequest> {
+		kio::wait(|waiter| self.poll_requested_fetch(waiter)).await
+	}
+
+	pub fn poll_requested_fetch(&mut self, waiter: &kio::Waiter) -> Poll<Result<FetchRequest>> {
+		match self.state.poll(waiter, |state| {
+			// Only take the `&mut` (which flags the state modified) once we actually
+			// have a request to pop, so idle polls don't wake unrelated waiters.
+			if !state.fetches.is_empty() {
+				return Poll::Ready(Ok(state.fetches.pop_front().unwrap()));
+			}
+			match &state.abort {
+				Some(err) => Poll::Ready(Err(err.clone())),
+				None => Poll::Pending,
+			}
+		}) {
+			Poll::Ready(Ok(res)) => Poll::Ready(res),
+			Poll::Ready(Err(state)) => Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
 	fn modify(&self) -> Result<kio::Mut<'_, TrackState>> {
 		TrackState::modify(&self.state)
 	}
@@ -718,37 +775,61 @@ impl TrackConsumer {
 			Err(state) => return Err(state.abort.clone().unwrap_or(Error::Dropped)),
 		};
 
-		Ok(TrackSubscriberPending {
+		Ok(kio::Pending::new(TrackSubscribe {
 			name: self.name.clone(),
 			state: self.state.clone(),
 			subscription,
-			waiter: None,
-		})
+		}))
 	}
 
-	//pub fn fetch(&self) -> TrackFetchPending {
-	// TODO
-	//}
+	/// Fetch a single past group, without holding a live subscription.
+	///
+	/// Returns a [`TrackFetchPending`] that resolves to the [`GroupConsumer`] once
+	/// the group is available: immediately if it's already cached, otherwise once
+	/// the producer serves the request (a wire FETCH for a relay). `options` accepts
+	/// `None`, a [`Fetch`], or `Fetch::default()`. The pending resolves to
+	/// [`Error::NotFound`] if the group can never exist (past the final sequence).
+	pub fn fetch(&self, sequence: u64, options: impl Into<Option<Fetch>>) -> Result<TrackFetchPending> {
+		let options = options.into().unwrap_or_default();
+
+		match self.state.write() {
+			Ok(mut state) => {
+				// Only signal the producer when the group isn't already determined by
+				// the cache (cached, evicted-past-final, or aborted); otherwise the
+				// pending resolves straight from `poll_get_group` with no wire fetch.
+				// TODO: This is a tiny bit racey
+				if state.poll_get_group(sequence).is_pending() {
+					state.fetches.push_back(FetchRequest {
+						sequence,
+						priority: options.priority,
+					});
+				}
+			}
+			Err(state) => return Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		};
+
+		Ok(kio::Pending::new(TrackFetch {
+			state: self.state.clone(),
+			sequence,
+		}))
+	}
 
 	pub fn info(&self) -> TrackInfoPending {
-		TrackInfoPending {
+		kio::Pending::new(TrackInfoQuery {
 			state: self.state.clone(),
-			waiter: None,
-		}
+		})
 	}
 }
 
-pub struct TrackSubscriberPending {
+/// The pollable state of a [`TrackConsumer::subscribe`]; awaited via the
+/// [`TrackSubscriberPending`] wrapper, whose `DerefMut` exposes [`Self::update`].
+pub struct TrackSubscribe {
 	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
 	subscription: kio::Producer<Subscription>,
-	// Kept alive between `Future::poll` calls so the weak waker kio registered
-	// stays upgradeable until the next poll replaces it. A temporary would drop
-	// after poll returns, leaving a dead weak ref and a lost wakeup on accept.
-	waiter: Option<kio::Waiter>,
 }
 
-impl TrackSubscriberPending {
+impl TrackSubscribe {
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<TrackSubscriber>> {
 		// Wait until the track info is available
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
@@ -766,6 +847,7 @@ impl TrackSubscriberPending {
 		}))
 	}
 
+	/// Change the subscription preferences before (or after) it resolves.
 	pub fn update(&mut self, subscription: Subscription) {
 		if let Ok(mut state) = self.subscription.write() {
 			*state = subscription;
@@ -775,26 +857,26 @@ impl TrackSubscriberPending {
 	}
 }
 
-impl Future for TrackSubscriberPending {
+impl kio::Future for TrackSubscribe {
 	type Output = Result<TrackSubscriber>;
 
-	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		let this = self.get_mut();
-		// Replacing drops the previous waiter, freeing its slot so the register
-		// call below can recycle it (see kio's weak-waker GC).
-		this.waiter = Some(kio::Waiter::new(cx.waker().clone()));
-		this.poll_ok(this.waiter.as_ref().unwrap())
+	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		self.poll_ok(waiter)
 	}
 }
 
-pub struct TrackInfoPending {
+/// A pending subscription returned by [`TrackConsumer::subscribe`]. `.await` it for
+/// the [`TrackSubscriber`], or call [`TrackSubscribe::update`] / [`TrackSubscribe::poll_ok`]
+/// through its `Deref`.
+pub type TrackSubscriberPending = kio::Pending<TrackSubscribe>;
+
+/// The pollable state of a [`TrackConsumer::info`]; awaited via the
+/// [`TrackInfoPending`] wrapper.
+pub struct TrackInfoQuery {
 	state: kio::Consumer<TrackState>,
-	// See [`TrackSubscriberPending::waiter`]: kept alive so the registered weak
-	// waker stays upgradeable between polls.
-	waiter: Option<kio::Waiter>,
 }
 
-impl TrackInfoPending {
+impl TrackInfoQuery {
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<TrackInfo>> {
 		// Wait until the track info is available
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
@@ -803,15 +885,68 @@ impl TrackInfoPending {
 	}
 }
 
-impl Future for TrackInfoPending {
+impl kio::Future for TrackInfoQuery {
 	type Output = Result<TrackInfo>;
 
-	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		let this = self.get_mut();
-		this.waiter = Some(kio::Waiter::new(cx.waker().clone()));
-		this.poll_ok(this.waiter.as_ref().unwrap())
+	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		self.poll_ok(waiter)
 	}
 }
+
+/// A pending [`TrackInfo`] lookup returned by [`TrackConsumer::info`]. `.await` it.
+pub type TrackInfoPending = kio::Pending<TrackInfoQuery>;
+
+/// Options for a one-shot [`TrackConsumer::fetch`] of a past group.
+#[derive(Clone, Debug, Default)]
+pub struct Fetch {
+	/// Delivery priority for the fetched group's stream. Defaults to 0.
+	pub priority: u8,
+}
+
+impl Fetch {
+	/// Set the delivery priority, returning `self` for chaining.
+	pub fn with_priority(mut self, priority: u8) -> Self {
+		self.priority = priority;
+		self
+	}
+}
+
+/// A specific group requested via [`TrackConsumer::fetch`], handed to the producer
+/// (or a relay) to serve via [`TrackProducer::requested_fetch`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FetchRequest {
+	/// The group sequence the consumer wants.
+	pub sequence: u64,
+	/// The requested delivery priority.
+	pub priority: u8,
+}
+
+/// The pollable state of a [`TrackConsumer::fetch`].
+///
+/// Awaited via the [`TrackFetchPending`] wrapper; resolves to the
+/// [`GroupConsumer`] once the group lands in the track's cache (already present,
+/// or produced after a wire FETCH), or [`Error::NotFound`] if it can never exist.
+pub struct TrackFetch {
+	state: kio::Consumer<TrackState>,
+	sequence: u64,
+}
+
+impl kio::Future for TrackFetch {
+	type Output = Result<GroupConsumer>;
+
+	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		let group = ready!(self.state.poll(waiter, |state| state.poll_get_group(self.sequence)))
+			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
+
+		// `poll_get_group` only returns `None` once the group is at/past the
+		// final sequence, so it can never be produced.
+		Poll::Ready(group.ok_or(Error::NotFound))
+	}
+}
+
+/// A pending fetch returned by [`TrackConsumer::fetch`]. `.await` it for the
+/// [`GroupConsumer`].
+pub type TrackFetchPending = kio::Pending<TrackFetch>;
 
 /// A live subscription to a track, used to read its groups.
 ///
@@ -1047,9 +1182,49 @@ impl TrackRequest {
 		}
 	}
 
-	//pub async fn requested(&self) -> TrackDynamic {
-	// TODO Used to return the next group requested for FETCH
-	//}
+	/// Block until a consumer fetches a group, returning the request to serve.
+	///
+	/// A relay serves it by opening a wire FETCH and calling [`Self::serve_fetch`].
+	/// Unlike [`Self::accept`], this doesn't consume the request, so the same track
+	/// can serve any number of fetches (and later a subscription). Errors once the
+	/// track is aborted.
+	pub async fn requested_fetch(&self) -> Result<FetchRequest> {
+		kio::wait(|waiter| self.poll_requested_fetch(waiter)).await
+	}
+
+	pub fn poll_requested_fetch(&self, waiter: &kio::Waiter) -> Poll<Result<FetchRequest>> {
+		match self.state.poll(waiter, |state| {
+			// Only take the `&mut` (which flags the state modified) once there's a
+			// request to pop, so idle polls don't wake unrelated waiters.
+			if !state.fetches.is_empty() {
+				return Poll::Ready(Ok(state.fetches.pop_front().unwrap()));
+			}
+			match &state.abort {
+				Some(err) => Poll::Ready(Err(err.clone())),
+				None => Poll::Pending,
+			}
+		}) {
+			Poll::Ready(Ok(res)) => Poll::Ready(res),
+			// A TrackRequest holds the only producer, so the channel can't close here.
+			Poll::Ready(Err(_)) => Poll::Pending,
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Make a fetched group available in the track's cache, resolving the matching
+	/// [`TrackConsumer::fetch`]. Returns a [`GroupProducer`] to fill from the wire.
+	///
+	/// `timescale` is the scale from the wire FETCH_OK, used for the group's frames.
+	/// Returns [`Error::Duplicate`] if the group is already present.
+	pub fn serve_fetch(&self, sequence: u64, timescale: impl Into<Option<Timescale>>) -> Result<GroupProducer> {
+		TrackState::modify(&self.state)?.insert_fetch_group(sequence, timescale.into())
+	}
+
+	/// Poll for the request becoming unused (every consumer dropped), so a relay can
+	/// stop serving and drop the request.
+	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state.poll_unused(waiter).map(|_| ())
+	}
 
 	/// Serve the request with the given track, resolving every waiting subscriber.
 	///
@@ -1872,5 +2047,83 @@ mod test {
 		}
 
 		assert!(matches!(producer.append_group(), Err(Error::BoundsExceeded(_))));
+	}
+
+	#[tokio::test]
+	async fn fetch_cache_hit() {
+		let mut producer = TrackProducer::new("test", None);
+
+		// Produce a cached group.
+		let mut group = producer.append_group().unwrap(); // seq 0
+		group.write_frame(bytes::Bytes::from_static(b"hello")).unwrap();
+		group.finish().unwrap();
+
+		// A cached group resolves immediately and never signals the producer.
+		let consumer = producer.consume();
+		let mut g = consumer.fetch(0, None).unwrap().await.unwrap();
+		assert_eq!(g.sequence, 0);
+		assert_eq!(&g.read_frame().await.unwrap().unwrap()[..], b"hello");
+
+		// Nothing was queued for the producer to serve.
+		assert!(producer.poll_requested_fetch(&kio::Waiter::noop()).is_pending());
+	}
+
+	#[tokio::test]
+	async fn fetch_miss_signals_producer() {
+		let mut producer = TrackProducer::new("test", None);
+		let consumer = producer.consume();
+
+		// The group isn't cached yet, so the fetch stays pending and queues a request.
+		// `*pending` derefs the wrapper to the inner `TrackFetch` (a `kio::Future`).
+		let pending = consumer.fetch(5, Fetch::default().with_priority(7)).unwrap();
+		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
+
+		let req = producer
+			.requested_fetch()
+			.now_or_never()
+			.expect("should not block")
+			.unwrap();
+		assert_eq!(
+			req,
+			FetchRequest {
+				sequence: 5,
+				priority: 7
+			}
+		);
+
+		// Serve it by producing the group; the fetch then resolves.
+		let mut group = producer.create_group(Group { sequence: 5 }).unwrap();
+		group.write_frame(bytes::Bytes::from_static(b"hi")).unwrap();
+		group.finish().unwrap();
+
+		let mut g = pending.await.unwrap();
+		assert_eq!(g.sequence, 5);
+		assert_eq!(&g.read_frame().await.unwrap().unwrap()[..], b"hi");
+	}
+
+	#[tokio::test]
+	async fn fetch_past_final_not_found() {
+		let mut producer = TrackProducer::new("test", None);
+		producer.append_group().unwrap(); // seq 0
+		producer.finish().unwrap(); // final_sequence = 1
+
+		// A group at or past the final sequence can never exist.
+		let consumer = producer.consume();
+		assert!(matches!(consumer.fetch(5, None).unwrap().await, Err(Error::NotFound)));
+
+		// And it doesn't signal the producer.
+		assert!(producer.poll_requested_fetch(&kio::Waiter::noop()).is_pending());
+	}
+
+	#[tokio::test]
+	async fn fetch_aborts_with_track() {
+		let mut producer = TrackProducer::new("test", None);
+		let consumer = producer.consume();
+
+		let pending = consumer.fetch(3, None).unwrap();
+		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
+
+		producer.abort(Error::Cancel).unwrap();
+		assert!(pending.await.is_err());
 	}
 }
