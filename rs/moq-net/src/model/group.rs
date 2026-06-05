@@ -417,7 +417,7 @@ impl GroupConsumer {
 	}
 }
 
-/// Options for a one-shot [`crate::TrackConsumer::fetch`] of a past group.
+/// Options for a one-shot [`crate::TrackConsumer::fetch_group`] of a past group.
 #[derive(Clone, Debug, Default)]
 pub struct Fetch {
 	/// Delivery priority for the fetched group's stream. Defaults to 0.
@@ -432,7 +432,7 @@ impl Fetch {
 	}
 }
 
-/// A specific group requested via [`crate::TrackConsumer::fetch`], queued on the
+/// A specific group requested via [`crate::TrackConsumer::fetch_group`], queued on the
 /// track for a [`crate::TrackDynamic`] to serve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct GroupRequested {
@@ -446,7 +446,7 @@ pub(crate) struct GroupRequested {
 /// [`crate::TrackDynamic::group_request`].
 ///
 /// The handler fulfills it by calling [`Self::accept`], which inserts the group
-/// into the track cache (resolving the matching [`crate::TrackConsumer::fetch`])
+/// into the track cache (resolving the matching [`crate::TrackConsumer::fetch_group`])
 /// and returns a [`GroupProducer`] to fill. A relay typically opens a wire FETCH,
 /// reads FETCH_OK, then accepts. The request carries its own producer handle, so it
 /// works the same whether or not the track has been accepted yet.
@@ -476,7 +476,7 @@ impl GroupRequest {
 	}
 
 	/// Insert the fetched group into the track cache, resolving the waiting
-	/// [`crate::TrackConsumer::fetch`], and return a [`GroupProducer`] to fill.
+	/// [`crate::TrackConsumer::fetch_group`], and return a [`GroupProducer`] to fill.
 	///
 	/// The group's timescale comes from the track's [`crate::TrackInfo`]. `info` sets
 	/// that info if the track hasn't been accepted yet (a fetch with no live

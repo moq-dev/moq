@@ -729,7 +729,7 @@ fn poll_group_request(state: &kio::Producer<TrackState>, waiter: &kio::Waiter) -
 /// handle rather than [`TrackProducer`]: a relay creates one (via
 /// [`TrackProducer::dynamic`] or [`TrackRequest::dynamic`]) to pull past groups
 /// from upstream. While at least one is alive the track will block a cache-miss
-/// [`TrackConsumer::fetch`] waiting to be served; with none, an accepted track's
+/// [`TrackConsumer::fetch_group`] waiting to be served; with none, an accepted track's
 /// miss fails fast with [`Error::NotFound`].
 pub struct TrackDynamic {
 	name: Arc<str>,
@@ -1030,7 +1030,7 @@ pub(crate) fn serve_group_request(
 	TrackState::modify(state)?.insert_group_request(sequence, info)
 }
 
-/// The pollable state of a [`TrackConsumer::fetch`].
+/// The pollable state of a [`TrackConsumer::fetch_group`].
 ///
 /// Awaited via the [`TrackFetchPending`] wrapper; resolves to the
 /// [`GroupConsumer`] once the group lands in the track's cache (already present,
