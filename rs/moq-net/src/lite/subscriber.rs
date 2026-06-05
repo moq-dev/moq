@@ -288,14 +288,22 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Ok(false);
 		}
 
-		// Versions before Lite04 don't carry real hop ids: Lite01/02 send an
-		// empty chain, Lite03 sends a count materialized as UNKNOWN
-		// placeholders. Stamp this connection's origin into the chain so the
-		// route is attributable to the upstream session. Rewrite a Lite03
-		// placeholder in place (preserving its hop count, so shortest-path
-		// selection and the MAX_HOPS limit are unaffected); for an empty chain
-		// add a single entry, which can never overflow.
-		if self.version_lacks_hops() && !hops.replace_first(crate::Origin::UNKNOWN, self.session_origin) {
+		// Lite03 carries its hop count as UNKNOWN placeholders rather than real
+		// ids. Rewrite the first placeholder with this connection's origin so
+		// the route is attributable to the upstream session, without changing
+		// the hop count (shortest-path selection and the MAX_HOPS limit stay
+		// accurate). Lite01/02 send no placeholders; they're covered below.
+		if self.version_lacks_hops() {
+			hops.replace_first(crate::Origin::UNKNOWN, self.session_origin);
+		}
+
+		// Guarantee at least one hop we control. A peer is meant to stamp its
+		// own origin (Lite04+) or have one filled in above, but we don't trust
+		// an empty chain: a peer that sends zero hops would otherwise be
+		// indistinguishable from any other, so two empty-chain routes to the
+		// same path would collide. Insert our session origin so every broadcast
+		// stays attributable. The list is empty here, so this can't overflow.
+		if hops.is_empty() {
 			hops.push(self.session_origin)
 				.expect("an empty hop chain always has room for one entry");
 		}
