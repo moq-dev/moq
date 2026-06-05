@@ -648,34 +648,52 @@ impl TrackProducer {
 
 	/// Block until a consumer fetches a group that isn't cached, returning the request.
 	///
-	/// The producer serves it by making the group available (a relay issues a wire
-	/// FETCH then [`create_group`](Self::create_group); an origin already has it
-	/// cached, so the fetch resolves without ever reaching here). Errors once the
-	/// track is aborted.
-	pub async fn requested_fetch(&mut self) -> Result<FetchRequest> {
+	/// The producer serves it via [`GroupRequest::accept`] (a relay issues a wire
+	/// FETCH first; an origin already has the group cached, so the fetch resolves
+	/// without ever reaching here). Errors once the track is aborted.
+	pub async fn requested_fetch(&mut self) -> Result<GroupRequest> {
 		kio::wait(|waiter| self.poll_requested_fetch(waiter)).await
 	}
 
-	pub fn poll_requested_fetch(&mut self, waiter: &kio::Waiter) -> Poll<Result<FetchRequest>> {
-		match self.state.poll(waiter, |state| {
-			// Only take the `&mut` (which flags the state modified) once we actually
-			// have a request to pop, so idle polls don't wake unrelated waiters.
-			if !state.fetches.is_empty() {
-				return Poll::Ready(Ok(state.fetches.pop_front().unwrap()));
-			}
-			match &state.abort {
-				Some(err) => Poll::Ready(Err(err.clone())),
-				None => Poll::Pending,
-			}
-		}) {
-			Poll::Ready(Ok(res)) => Poll::Ready(res),
-			Poll::Ready(Err(state)) => Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
-			Poll::Pending => Poll::Pending,
-		}
+	pub fn poll_requested_fetch(&mut self, waiter: &kio::Waiter) -> Poll<Result<GroupRequest>> {
+		poll_requested_fetch(&self.state, waiter)
+	}
+
+	/// Poll for the producer becoming unused (every consumer dropped).
+	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state.poll_unused(waiter).map(|_| ())
 	}
 
 	fn modify(&self) -> Result<kio::Mut<'_, TrackState>> {
 		TrackState::modify(&self.state)
+	}
+}
+
+/// Pop the next queued [`FetchRequest`] off the shared state and wrap it in a
+/// [`GroupRequest`] bound to a fresh producer handle. Shared by [`TrackProducer`]
+/// and [`TrackRequest`] so both serve fetches identically, before or after accept.
+fn poll_requested_fetch(state: &kio::Producer<TrackState>, waiter: &kio::Waiter) -> Poll<Result<GroupRequest>> {
+	let popped = state.poll(waiter, |state| {
+		// Only take the `&mut` (which flags the state modified) once we actually
+		// have a request to pop, so idle polls don't wake unrelated waiters.
+		if !state.fetches.is_empty() {
+			return Poll::Ready(Ok(state.fetches.pop_front().unwrap()));
+		}
+		match &state.abort {
+			Some(err) => Poll::Ready(Err(err.clone())),
+			None => Poll::Pending,
+		}
+	});
+
+	match popped {
+		Poll::Ready(Ok(Ok(req))) => Poll::Ready(Ok(GroupRequest {
+			state: state.clone(),
+			sequence: req.sequence,
+			priority: req.priority,
+		})),
+		Poll::Ready(Ok(Err(err))) => Poll::Ready(Err(err)),
+		Poll::Ready(Err(state)) => Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
+		Poll::Pending => Poll::Pending,
 	}
 }
 
@@ -746,7 +764,6 @@ impl TrackWeak {
 /// to the publisher; it just names a track you can [`subscribe`](Self::subscribe)
 /// to (a live, ongoing stream of groups) later. The same handle can be subscribed
 /// to multiple times, and clones are cheap.
-// TODO: add `fetch` for one-shot retrieval of a past group range.
 #[derive(Clone)]
 pub struct TrackConsumer {
 	name: Arc<str>,
@@ -911,14 +928,51 @@ impl Fetch {
 	}
 }
 
-/// A specific group requested via [`TrackConsumer::fetch`], handed to the producer
-/// (or a relay) to serve via [`TrackProducer::requested_fetch`].
+/// A specific group requested via [`TrackConsumer::fetch`], queued for the producer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FetchRequest {
+struct FetchRequest {
 	/// The group sequence the consumer wants.
-	pub sequence: u64,
+	sequence: u64,
 	/// The requested delivery priority.
-	pub priority: u8,
+	priority: u8,
+}
+
+/// A consumer's request for a single past group, handed to the producer via
+/// [`TrackProducer::requested_fetch`] (or [`TrackRequest::requested_fetch`]).
+///
+/// The producer fulfills it by calling [`Self::accept`] with the group's
+/// timescale, which inserts the group into the track cache (resolving the
+/// matching [`TrackConsumer::fetch`]) and returns a [`GroupProducer`] to fill.
+/// A relay typically opens a wire FETCH, reads FETCH_OK for the timescale, then
+/// accepts. The request carries its own producer handle, so it works the same
+/// whether or not the track has been [`accepted`](TrackRequest::accept) yet.
+pub struct GroupRequest {
+	state: kio::Producer<TrackState>,
+	sequence: u64,
+	priority: u8,
+}
+
+impl GroupRequest {
+	/// The group sequence the consumer wants.
+	pub fn sequence(&self) -> u64 {
+		self.sequence
+	}
+
+	/// The delivery priority the consumer requested for this group.
+	pub fn priority(&self) -> u8 {
+		self.priority
+	}
+
+	/// Insert the fetched group into the track cache with the given timescale,
+	/// resolving the waiting [`TrackConsumer::fetch`], and return a
+	/// [`GroupProducer`] to fill from the wire.
+	///
+	/// `timescale` comes from the wire FETCH_OK (or `None` for an untimed track).
+	/// Returns [`Error::Duplicate`] if the group is already present, or the track's
+	/// abort error if it closed while pending.
+	pub fn accept(self, timescale: impl Into<Option<Timescale>>) -> Result<GroupProducer> {
+		TrackState::modify(&self.state)?.insert_fetch_group(self.sequence, timescale.into())
+	}
 }
 
 /// The pollable state of a [`TrackConsumer::fetch`].
@@ -1182,42 +1236,18 @@ impl TrackRequest {
 		}
 	}
 
-	/// Block until a consumer fetches a group, returning the request to serve.
+	/// Block until a consumer fetches a group, returning a [`GroupRequest`] to serve.
 	///
-	/// A relay serves it by opening a wire FETCH and calling [`Self::serve_fetch`].
+	/// A relay serves it by opening a wire FETCH and calling [`GroupRequest::accept`].
 	/// Unlike [`Self::accept`], this doesn't consume the request, so the same track
 	/// can serve any number of fetches (and later a subscription). Errors once the
 	/// track is aborted.
-	pub async fn requested_fetch(&self) -> Result<FetchRequest> {
+	pub async fn requested_fetch(&self) -> Result<GroupRequest> {
 		kio::wait(|waiter| self.poll_requested_fetch(waiter)).await
 	}
 
-	pub fn poll_requested_fetch(&self, waiter: &kio::Waiter) -> Poll<Result<FetchRequest>> {
-		match self.state.poll(waiter, |state| {
-			// Only take the `&mut` (which flags the state modified) once there's a
-			// request to pop, so idle polls don't wake unrelated waiters.
-			if !state.fetches.is_empty() {
-				return Poll::Ready(Ok(state.fetches.pop_front().unwrap()));
-			}
-			match &state.abort {
-				Some(err) => Poll::Ready(Err(err.clone())),
-				None => Poll::Pending,
-			}
-		}) {
-			Poll::Ready(Ok(res)) => Poll::Ready(res),
-			// A TrackRequest holds the only producer, so the channel can't close here.
-			Poll::Ready(Err(_)) => Poll::Pending,
-			Poll::Pending => Poll::Pending,
-		}
-	}
-
-	/// Make a fetched group available in the track's cache, resolving the matching
-	/// [`TrackConsumer::fetch`]. Returns a [`GroupProducer`] to fill from the wire.
-	///
-	/// `timescale` is the scale from the wire FETCH_OK, used for the group's frames.
-	/// Returns [`Error::Duplicate`] if the group is already present.
-	pub fn serve_fetch(&self, sequence: u64, timescale: impl Into<Option<Timescale>>) -> Result<GroupProducer> {
-		TrackState::modify(&self.state)?.insert_fetch_group(sequence, timescale.into())
+	pub fn poll_requested_fetch(&self, waiter: &kio::Waiter) -> Poll<Result<GroupRequest>> {
+		poll_requested_fetch(&self.state, waiter)
 	}
 
 	/// Poll for the request becoming unused (every consumer dropped), so a relay can
@@ -2083,16 +2113,11 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
-		assert_eq!(
-			req,
-			FetchRequest {
-				sequence: 5,
-				priority: 7
-			}
-		);
+		assert_eq!(req.sequence(), 5);
+		assert_eq!(req.priority(), 7);
 
-		// Serve it by producing the group; the fetch then resolves.
-		let mut group = producer.create_group(Group { sequence: 5 }).unwrap();
+		// Serve it by accepting the request; the fetch then resolves.
+		let mut group = req.accept(None).unwrap();
 		group.write_frame(bytes::Bytes::from_static(b"hi")).unwrap();
 		group.finish().unwrap();
 
