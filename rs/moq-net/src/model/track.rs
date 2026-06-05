@@ -19,9 +19,8 @@ use super::{Group, GroupConsumer, GroupProducer};
 
 use std::{
 	collections::{HashSet, VecDeque},
-	pin::Pin,
 	sync::Arc,
-	task::{Context, Poll, ready},
+	task::{Poll, ready},
 	time::Duration,
 };
 
@@ -776,12 +775,11 @@ impl TrackConsumer {
 			Err(state) => return Err(state.abort.clone().unwrap_or(Error::Dropped)),
 		};
 
-		Ok(TrackSubscriberPending {
+		Ok(kio::Pending::new(TrackSubscribe {
 			name: self.name.clone(),
 			state: self.state.clone(),
 			subscription,
-			waiter: None,
-		})
+		}))
 	}
 
 	/// Fetch a single past group, without holding a live subscription.
@@ -817,24 +815,21 @@ impl TrackConsumer {
 	}
 
 	pub fn info(&self) -> TrackInfoPending {
-		TrackInfoPending {
+		kio::Pending::new(TrackInfoQuery {
 			state: self.state.clone(),
-			waiter: None,
-		}
+		})
 	}
 }
 
-pub struct TrackSubscriberPending {
+/// The pollable state of a [`TrackConsumer::subscribe`]; awaited via the
+/// [`TrackSubscriberPending`] wrapper, whose `DerefMut` exposes [`Self::update`].
+pub struct TrackSubscribe {
 	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
 	subscription: kio::Producer<Subscription>,
-	// Kept alive between `Future::poll` calls so the weak waker kio registered
-	// stays upgradeable until the next poll replaces it. A temporary would drop
-	// after poll returns, leaving a dead weak ref and a lost wakeup on accept.
-	waiter: Option<kio::Waiter>,
 }
 
-impl TrackSubscriberPending {
+impl TrackSubscribe {
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<TrackSubscriber>> {
 		// Wait until the track info is available
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
@@ -852,6 +847,7 @@ impl TrackSubscriberPending {
 		}))
 	}
 
+	/// Change the subscription preferences before (or after) it resolves.
 	pub fn update(&mut self, subscription: Subscription) {
 		if let Ok(mut state) = self.subscription.write() {
 			*state = subscription;
@@ -861,26 +857,26 @@ impl TrackSubscriberPending {
 	}
 }
 
-impl Future for TrackSubscriberPending {
+impl kio::Future for TrackSubscribe {
 	type Output = Result<TrackSubscriber>;
 
-	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		let this = self.get_mut();
-		// Replacing drops the previous waiter, freeing its slot so the register
-		// call below can recycle it (see kio's weak-waker GC).
-		this.waiter = Some(kio::Waiter::new(cx.waker().clone()));
-		this.poll_ok(this.waiter.as_ref().unwrap())
+	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		self.poll_ok(waiter)
 	}
 }
 
-pub struct TrackInfoPending {
+/// A pending subscription returned by [`TrackConsumer::subscribe`]. `.await` it for
+/// the [`TrackSubscriber`], or call [`TrackSubscribe::update`] / [`TrackSubscribe::poll_ok`]
+/// through its `Deref`.
+pub type TrackSubscriberPending = kio::Pending<TrackSubscribe>;
+
+/// The pollable state of a [`TrackConsumer::info`]; awaited via the
+/// [`TrackInfoPending`] wrapper.
+pub struct TrackInfoQuery {
 	state: kio::Consumer<TrackState>,
-	// See [`TrackSubscriberPending::waiter`]: kept alive so the registered weak
-	// waker stays upgradeable between polls.
-	waiter: Option<kio::Waiter>,
 }
 
-impl TrackInfoPending {
+impl TrackInfoQuery {
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<TrackInfo>> {
 		// Wait until the track info is available
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
@@ -889,15 +885,16 @@ impl TrackInfoPending {
 	}
 }
 
-impl Future for TrackInfoPending {
+impl kio::Future for TrackInfoQuery {
 	type Output = Result<TrackInfo>;
 
-	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		let this = self.get_mut();
-		this.waiter = Some(kio::Waiter::new(cx.waker().clone()));
-		this.poll_ok(this.waiter.as_ref().unwrap())
+	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		self.poll_ok(waiter)
 	}
 }
+
+/// A pending [`TrackInfo`] lookup returned by [`TrackConsumer::info`]. `.await` it.
+pub type TrackInfoPending = kio::Pending<TrackInfoQuery>;
 
 /// Options for a one-shot [`TrackConsumer::fetch`] of a past group.
 #[derive(Clone, Debug, Default)]
@@ -937,7 +934,7 @@ pub struct TrackFetch {
 impl kio::Future for TrackFetch {
 	type Output = Result<GroupConsumer>;
 
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		let group = ready!(self.state.poll(waiter, |state| state.poll_get_group(self.sequence)))
 			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
 
@@ -2078,8 +2075,8 @@ mod test {
 
 		// The group isn't cached yet, so the fetch stays pending and queues a request.
 		// `*pending` derefs the wrapper to the inner `TrackFetch` (a `kio::Future`).
-		let mut pending = consumer.fetch(5, Fetch::default().with_priority(7)).unwrap();
-		assert!(kio::Future::poll(&mut *pending, &kio::Waiter::noop()).is_pending());
+		let pending = consumer.fetch(5, Fetch::default().with_priority(7)).unwrap();
+		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
 
 		let req = producer
 			.requested_fetch()
@@ -2123,8 +2120,8 @@ mod test {
 		let mut producer = TrackProducer::new("test", None);
 		let consumer = producer.consume();
 
-		let mut pending = consumer.fetch(3, None).unwrap();
-		assert!(kio::Future::poll(&mut *pending, &kio::Waiter::noop()).is_pending());
+		let pending = consumer.fetch(3, None).unwrap();
+		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
 
 		producer.abort(Error::Cancel).unwrap();
 		assert!(pending.await.is_err());

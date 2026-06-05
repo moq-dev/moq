@@ -22,7 +22,11 @@ pub trait Future: Unpin {
 
 	/// Poll for the output, registering `waiter` with the relevant channels if not
 	/// yet ready.
-	fn poll(&mut self, waiter: &Waiter) -> Poll<Self::Output>;
+	///
+	/// Takes `&self`: kio channels poll immutably, so a pollable can be driven
+	/// through a shared borrow (e.g. while it lives inside an `&self`-borrowed enum).
+	/// Carry any per-poll mutable state in a kio channel or a [`std::cell`] type.
+	fn poll(&self, waiter: &Waiter) -> Poll<Self::Output>;
 }
 
 /// Adapts a kio [`Future`] into a [`std::future::Future`], retaining the strong
@@ -73,7 +77,7 @@ impl<F: Future> std::future::Future for Pending<F> {
 		// `Pending<F>` is `Unpin` (F is, via the trait bound), so this deref is sound.
 		let this = &mut *self;
 		this.waiter = Some(Waiter::new(cx.waker().clone()));
-		Future::poll(&mut this.inner, this.waiter.as_ref().unwrap())
+		Future::poll(&this.inner, this.waiter.as_ref().unwrap())
 	}
 }
 
@@ -98,7 +102,7 @@ mod test {
 	impl Future for AtLeast {
 		type Output = u64;
 
-		fn poll(&mut self, waiter: &Waiter) -> Poll<u64> {
+		fn poll(&self, waiter: &Waiter) -> Poll<u64> {
 			let threshold = self.threshold;
 			match self.consumer.poll(waiter, |v| {
 				let current = **v;
@@ -128,7 +132,7 @@ mod test {
 		pending.bump_threshold(); // threshold now 6
 
 		// The kio-level poll (reached through Deref) is pending until the value catches up.
-		assert!(Future::poll(&mut *pending, &Waiter::noop()).is_pending());
+		assert!(Future::poll(&*pending, &Waiter::noop()).is_pending());
 
 		if let Ok(mut v) = producer.write() {
 			*v = 6;
