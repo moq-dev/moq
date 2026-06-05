@@ -48,7 +48,7 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 	// Register the broadcast on the publish origin before negotiating, so a
 	// fast subscriber doesn't see a 404 in the gap between the SDP answer
 	// and the first RTP packet.
-	let broadcast = moq_net::Broadcast::new().produce();
+	let broadcast = moq_net::BroadcastInfo::new().produce();
 	let consumer = broadcast.consume();
 	if !server.publisher().publish_broadcast(path, consumer) {
 		return Err(Error::Other(anyhow::anyhow!("path conflict: {path}")));

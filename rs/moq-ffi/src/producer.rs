@@ -74,7 +74,7 @@ impl MoqBroadcastProducer {
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
 		Ok(Arc::new(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
@@ -143,7 +143,7 @@ impl MoqBroadcastProducer {
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
 		// Clone the broadcast handle (shared Arc internally) to get &mut access.
 		let mut broadcast = state.broadcast.clone();
-		let producer = broadcast.create_track(moq_net::Track::new(name))?;
+		let producer = broadcast.create_track(name, None)?;
 		Ok(Arc::new(MoqTrackProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
 		}))
@@ -173,7 +173,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(track.name.clone())
+		Ok(track.name().to_string())
 	}
 
 	/// Wait until this track has at least one active consumer.
@@ -286,7 +286,7 @@ impl MoqMediaProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
 		let media = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(media.track.name.clone())
+		Ok(media.track.name().to_string())
 	}
 
 	/// Wait until this media track has at least one active consumer.

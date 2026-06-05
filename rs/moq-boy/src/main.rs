@@ -209,7 +209,7 @@ async fn run(config: &Config) -> Result<()> {
 	let client = config.client.clone().init()?;
 
 	// Create the broadcast producer.
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 
 	// Publish origin: the game session broadcast.
 	let publish_origin = moq_net::Origin::random().produce();

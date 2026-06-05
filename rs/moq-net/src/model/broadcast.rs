@@ -1,115 +1,50 @@
 use std::{
 	collections::{HashMap, VecDeque, hash_map},
-	ops::Deref,
+	sync::Arc,
 	task::{Poll, ready},
 };
 
-use crate::{
-	Error, Group, GroupConsumer, GroupProducer, Subscription, Timescale, TrackProducer, TrackSubscriber,
-	model::track::TrackWeak,
-};
+use crate::{Error, TrackConsumer, TrackProducer, TrackRequest, TrackWeak};
 
-use super::{OriginList, Track};
+use super::{OriginList, TrackInfo};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
-/// Create via [`Broadcast::produce`] to obtain both [`BroadcastProducer`] and [`BroadcastConsumer`] pair.
+/// Create via [`BroadcastInfo::produce`] to obtain both [`BroadcastProducer`] and [`BroadcastConsumer`] pair.
 #[derive(Clone, Debug, Default)]
-pub struct Broadcast {
+pub struct BroadcastInfo {
 	/// The chain of origins the broadcast has traversed. Each relay appends its own
 	/// [`crate::Origin`] when forwarding, so the list is used for loop detection and
 	/// shortest-path preference.
 	pub hops: OriginList,
 }
 
-impl Broadcast {
+impl BroadcastInfo {
 	/// Create a new broadcast with an empty hop chain.
 	pub fn new() -> Self {
 		Self::default()
 	}
 
-	/// Consume this [Broadcast] to create a producer that carries its metadata
+	/// Consume this [BroadcastInfo] to create a producer that carries its metadata
 	/// (including the hop chain).
 	pub fn produce(self) -> BroadcastProducer {
 		BroadcastProducer::new(self)
 	}
 }
 
-/// The slot a pending subscription resolves into: `None` until the publisher
-/// accepts (delivering the consumer) or denies (delivering an error). Carried by
-/// a [`kio`] channel so subscribers can `poll_ok` it without tokio. The consumer
-/// is created at accept time so it counts toward the producer immediately, before
-/// the subscriber even polls.
-type PendingSlot = Option<Result<TrackSubscriber, Error>>;
-
-/// One waiting subscriber: its preferences and the producer side of its resolver channel.
-type Resolver = (Subscription, kio::Producer<PendingSlot>);
-
-/// A track that has been subscribed to but not yet served by the dynamic handler.
-///
-/// Multiple subscribers to the same name before it is accepted coalesce into one
-/// pending request, each adding a resolver channel so they all receive a consumer
-/// for the same producer once it is accepted.
 #[derive(Default)]
-struct PendingRequest {
-	resolvers: Vec<Resolver>,
-}
-
-/// Resolve every waiting subscriber with `err`.
-fn fail_resolvers(resolvers: Vec<Resolver>, err: &Error) {
-	for (_, slot) in resolvers {
-		if let Ok(mut slot) = slot.write() {
-			*slot = Some(Err(err.clone()));
-		}
-	}
-}
-
-/// The slot a pending fetch resolves into: `None` until the dynamic handler
-/// accepts (delivering the group) or denies (delivering an error). One-shot
-/// analogue of [`PendingSlot`].
-type GroupSlot = Option<Result<GroupConsumer, Error>>;
-
-/// One waiting fetcher: its priority and the producer side of its resolver channel.
-type GroupResolver = (u8, kio::Producer<GroupSlot>);
-
-/// A group that has been fetched but not yet served by the dynamic handler.
-///
-/// Concurrent fetches for the same `(track, group)` coalesce into one pending
-/// request, each adding a resolver so they all receive a consumer for the same
-/// group once it is accepted.
-#[derive(Default)]
-struct GroupPendingRequest {
-	resolvers: Vec<GroupResolver>,
-}
-
-/// Resolve every waiting fetcher with `err`.
-fn fail_group_resolvers(resolvers: Vec<GroupResolver>, err: &Error) {
-	for (_, slot) in resolvers {
-		if let Ok(mut slot) = slot.write() {
-			*slot = Some(Err(err.clone()));
-		}
-	}
-}
-
-#[derive(Default)]
-struct State {
+struct BroadcastState {
 	// Weak references for deduplication. Doesn't prevent track auto-close.
-	tracks: HashMap<String, TrackWeak>,
+	// Keyed by the track's shared `Arc<str>` name (the same Arc the handle holds).
+	tracks: HashMap<Arc<str>, TrackWeak>,
 
 	// Pending requests keyed by track name, waiting for the dynamic handler to
 	// accept or deny them.
-	requests: HashMap<String, PendingRequest>,
+	requests: HashMap<Arc<str>, TrackRequest>,
 
 	// Requested names in FIFO order for the dynamic handler to drain. A name
 	// stays in `requests` (but not here) once handed out as a `TrackRequest`.
-	request_order: VecDeque<String>,
-
-	// Pending fetches keyed by (track name, group sequence), waiting for the
-	// dynamic handler to accept or deny them.
-	group_requests: HashMap<(String, u64), GroupPendingRequest>,
-
-	// Requested (track, group) pairs in FIFO order for the dynamic handler to drain.
-	group_request_order: VecDeque<(String, u64)>,
+	request_order: VecDeque<Arc<str>>,
 
 	// The current number of dynamic producers.
 	// If this is 0, requests must be empty.
@@ -119,49 +54,35 @@ struct State {
 	abort: Option<Error>,
 }
 
-fn modify(state: &kio::Producer<State>) -> Result<kio::Mut<'_, State>, Error> {
-	match state.write() {
-		Ok(state) => Ok(state),
-		Err(r) => Err(r.abort.clone().unwrap_or(Error::Dropped)),
+impl BroadcastState {
+	fn modify(state: &kio::Producer<Self>) -> Result<kio::Mut<'_, Self>, Error> {
+		match state.write() {
+			Ok(state) => Ok(state),
+			Err(r) => Err(r.abort.clone().unwrap_or(Error::Dropped)),
+		}
 	}
-}
 
-impl State {
 	/// Insert a track weak handle into the lookup, returning an error on duplicate.
 	fn insert_track(&mut self, weak: TrackWeak) -> Result<(), Error> {
-		let hash_map::Entry::Vacant(entry) = self.tracks.entry(weak.info.name.clone()) else {
+		let hash_map::Entry::Vacant(entry) = self.tracks.entry(weak.name().clone()) else {
 			return Err(Error::Duplicate);
 		};
 		entry.insert(weak);
 		Ok(())
 	}
 
-	/// Drop every pending request, notifying all waiting subscribers and fetchers with `err`.
-	fn abort_requests(&mut self, err: &Error) {
+	fn abort(&mut self, err: Error) -> Result<(), Error> {
+		if let Some(abort) = self.abort.take() {
+			return Err(abort);
+		}
+
+		for (_, request) in self.requests.drain() {
+			request.reject(err.clone());
+		}
 		self.request_order.clear();
-		for (_, pending) in self.requests.drain() {
-			fail_resolvers(pending.resolvers, err);
-		}
-		self.group_request_order.clear();
-		for (_, pending) in self.group_requests.drain() {
-			fail_group_resolvers(pending.resolvers, err);
-		}
-	}
+		self.abort = Some(err);
 
-	/// Drop a single named pending request, notifying its subscribers with `err`.
-	fn deny_request(&mut self, name: &str, err: Error) {
-		self.request_order.retain(|n| n != name);
-		if let Some(pending) = self.requests.remove(name) {
-			fail_resolvers(pending.resolvers, &err);
-		}
-	}
-
-	/// Drop a single pending fetch, notifying its fetchers with `err`.
-	fn deny_group_request(&mut self, key: &(String, u64), err: Error) {
-		self.group_request_order.retain(|k| k != key);
-		if let Some(pending) = self.group_requests.remove(key) {
-			fail_group_resolvers(pending.resolvers, &err);
-		}
+		Ok(())
 	}
 }
 
@@ -171,25 +92,21 @@ impl State {
 /// or handle on-demand requests via [Self::dynamic].
 #[derive(Clone)]
 pub struct BroadcastProducer {
-	info: Broadcast,
-	state: kio::Producer<State>,
-}
-
-impl Deref for BroadcastProducer {
-	type Target = Broadcast;
-
-	fn deref(&self) -> &Self::Target {
-		&self.info
-	}
+	info: BroadcastInfo,
+	state: kio::Producer<BroadcastState>,
 }
 
 impl BroadcastProducer {
-	/// Create a producer for the given broadcast metadata. Prefer [`Broadcast::produce`].
-	pub fn new(info: Broadcast) -> Self {
+	/// Create a producer for the given broadcast metadata. Prefer [`BroadcastInfo::produce`].
+	pub fn new(info: BroadcastInfo) -> Self {
 		Self {
 			info,
 			state: Default::default(),
 		}
+	}
+
+	pub fn info(&self) -> &BroadcastInfo {
+		&self.info
 	}
 
 	/// Insert a track into the lookup, returning an error on duplicate.
@@ -198,25 +115,30 @@ impl BroadcastProducer {
 	/// track's [`TrackProducer`]) is responsible for keeping the track alive;
 	/// when all producers are dropped, the entry becomes closed and is
 	/// eventually evicted.
-	pub fn insert_track(&mut self, track: TrackSubscriber) -> Result<(), Error> {
-		let mut state = modify(&self.state)?;
+	pub fn insert_track(&mut self, track: TrackConsumer) -> Result<(), Error> {
+		let mut state = BroadcastState::modify(&self.state)?;
 		state.insert_track(track.weak())
 	}
 
 	/// Remove a track from the lookup.
 	pub fn remove_track(&mut self, name: &str) -> Result<(), Error> {
-		let mut state = modify(&self.state)?;
+		let mut state = BroadcastState::modify(&self.state)?;
 		state.tracks.remove(name).ok_or(Error::NotFound)?;
 		Ok(())
 	}
 
 	/// Produce a new track and insert it into the broadcast.
 	///
-	/// Accepts anything that converts into a [`Track`], so a bare name works:
-	/// `create_track("video")`.
-	pub fn create_track(&mut self, track: impl Into<Track>) -> Result<TrackProducer, Error> {
-		let track = TrackProducer::new(track.into());
-		let mut state = modify(&self.state)?;
+	/// Pass a name and an optional [`TrackInfo`], so a bare name works:
+	/// `create_track("video", None)`.
+	pub fn create_track(
+		&mut self,
+		name: impl Into<Arc<str>>,
+		info: impl Into<Option<TrackInfo>>,
+	) -> Result<TrackProducer, Error> {
+		let info = info.into().unwrap_or_default();
+		let track = TrackProducer::new(name, info);
+		let mut state = BroadcastState::modify(&self.state)?;
 		state.insert_track(track.weak())?;
 		drop(state);
 		Ok(track)
@@ -226,9 +148,9 @@ impl BroadcastProducer {
 	///
 	/// Generates names like `0{suffix}`, `1{suffix}`, etc. and picks the first
 	/// one not already used in this broadcast.
-	pub fn unique_track(&mut self, suffix: &str) -> Result<TrackProducer, Error> {
+	pub fn unique_track(&mut self, suffix: &str, info: impl Into<Option<TrackInfo>>) -> Result<TrackProducer, Error> {
 		let name = self.unique_name(suffix);
-		self.create_track(Track::new(name))
+		self.create_track(name, info)
 	}
 
 	/// Generate a unique track name from a suffix without creating the track.
@@ -238,10 +160,10 @@ impl BroadcastProducer {
 	/// `with_compress`) before handing the Track to [`Self::create_track`].
 	pub fn unique_name(&self, suffix: &str) -> String {
 		let state = self.state.read();
-		(0u32..)
+		(0u16..)
 			.map(|i| format!("{i}{suffix}"))
-			.find(|name| !state.tracks.contains_key(name))
-			.expect("u32 namespace exhausted")
+			.find(|name| !state.tracks.contains_key(name.as_str()))
+			.expect("u16 namespace exhausted; wow")
 	}
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
@@ -265,14 +187,7 @@ impl BroadcastProducer {
 	/// by the broadcast and have no other producer to fulfill them, so they are
 	/// aborted here.
 	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
-		let mut guard = modify(&self.state)?;
-
-		// Wake any pending subscribers; nothing will ever serve their requests.
-		guard.abort_requests(&err);
-
-		guard.abort = Some(err);
-		guard.close();
-		Ok(())
+		BroadcastState::modify(&self.state)?.abort(err)
 	}
 
 	/// Return true if this is the same broadcast instance.
@@ -283,341 +198,16 @@ impl BroadcastProducer {
 
 #[cfg(test)]
 impl BroadcastProducer {
-	pub fn assert_create_track(&mut self, track: &Track) -> TrackProducer {
-		self.create_track(track.clone()).expect("should not have errored")
+	pub fn assert_create_track(
+		&mut self,
+		name: impl Into<Arc<str>>,
+		info: impl Into<Option<TrackInfo>>,
+	) -> TrackProducer {
+		self.create_track(name, info).expect("should not have errored")
 	}
 
-	pub fn assert_insert_track(&mut self, track: &TrackProducer) {
-		self.insert_track(track.subscribe(None))
-			.expect("should not have errored")
-	}
-}
-
-/// A subscription waiting to be served, handed out by [`BroadcastDynamic::requested_track`].
-///
-/// The publisher inspects [`Self::name`] (and optionally [`Self::subscription`]),
-/// then either [`Self::accept`]s it with a concrete [`Track`], which resolves all
-/// waiting subscribers, or [`Self::deny`]s it. Dropping without doing either
-/// denies with [`Error::Cancel`].
-pub struct TrackRequest {
-	name: String,
-	subscription: Subscription,
-	state: kio::Weak<State>,
-	/// Set once accepted or denied so [`Drop`] doesn't deny a second time.
-	completed: bool,
-}
-
-impl TrackRequest {
-	/// The requested track name.
-	pub fn name(&self) -> &str {
-		&self.name
-	}
-
-	/// The first waiting subscriber's preferences, as a hint for constructing the
-	/// [`Track`]. The full aggregate is available on the [`TrackProducer`] returned
-	/// by [`Self::accept`] via [`TrackProducer::subscription`].
-	pub fn subscription(&self) -> &Subscription {
-		&self.subscription
-	}
-
-	/// Serve the request with the given track, resolving every waiting subscriber.
-	///
-	/// The track's name must match [`Self::name`]. Returns [`Error::NotFound`] on
-	/// mismatch, or the broadcast's abort error if it closed while pending.
-	pub fn accept(mut self, track: Track) -> Result<TrackProducer, Error> {
-		if track.name != self.name {
-			return Err(Error::NotFound);
-		}
-		self.completed = true;
-
-		let mut state = self
-			.state
-			.write()
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Cancel))?;
-
-		let pending = state.requests.remove(&self.name).ok_or(Error::Cancel)?;
-		state.request_order.retain(|n| n != &self.name);
-
-		let producer = TrackProducer::new(track);
-
-		// Insert a weak reference so future subscribers dedupe onto this producer.
-		state.tracks.insert(self.name.clone(), producer.weak());
-
-		// Hand each waiting subscriber a consumer carrying its own preferences.
-		// Building it here (not when the subscriber polls) means it counts toward
-		// the producer immediately, so a publisher checking `unused()` right after
-		// accept doesn't see zero consumers and tear the track down.
-		for (subscription, slot) in pending.resolvers {
-			if let Ok(mut slot) = slot.write() {
-				*slot = Some(Ok(producer.subscribe(subscription)));
-			}
-		}
-
-		drop(state);
-
-		// Evict the lookup entry once the producer closes. The producer owner is
-		// responsible for closing it (abort/finish/drop); waiting on close rather
-		// than unused lets a producer linger across transient consumer churn (relay
-		// subscription churn) without losing the lookup entry to an auto-cleanup race.
-		let weak = producer.weak();
-		let cleanup = self.state.clone();
-		web_async::spawn(async move {
-			weak.closed().await;
-
-			let Some(producer) = cleanup.produce() else {
-				return;
-			};
-			let Ok(mut state) = producer.write() else {
-				return;
-			};
-
-			// Remove the entry, but reinsert if it was replaced by a newer producer.
-			if let Some(current) = state.tracks.remove(&weak.info.name)
-				&& !current.is_clone(&weak)
-			{
-				state.tracks.insert(current.info.name.clone(), current);
-			}
-		});
-
-		Ok(producer)
-	}
-
-	/// Reject the request, waking all waiting subscribers with `err`.
-	pub fn deny(mut self, err: Error) {
-		self.completed = true;
-		if let Ok(mut state) = self.state.write() {
-			state.deny_request(&self.name, err);
-		}
-	}
-}
-
-impl Drop for TrackRequest {
-	fn drop(&mut self) {
-		if !self.completed
-			&& let Ok(mut state) = self.state.write()
-		{
-			state.deny_request(&self.name, Error::Cancel);
-		}
-	}
-}
-
-/// A fetch waiting to be served, handed out by [`BroadcastDynamic::requested_group`].
-///
-/// The publisher inspects the requested [`Self::name`] / [`Self::group`], then
-/// either [`Self::accept`]s it (creating a [`GroupProducer`] to fill, which
-/// resolves all waiting fetchers) or [`Self::deny`]s it. Dropping without doing
-/// either denies with [`Error::Cancel`].
-pub struct GroupRequest {
-	name: String,
-	group: u64,
-	priority: u8,
-	/// First frame the fetcher wants. Always 0 today; the field carries the wire
-	/// FETCH `frame_start` so the serving side honors it once partial fetches land.
-	frame_start: u64,
-	state: kio::Weak<State>,
-	/// Set once accepted or denied so [`Drop`] doesn't deny a second time.
-	completed: bool,
-}
-
-impl GroupRequest {
-	/// The requested track name.
-	pub fn name(&self) -> &str {
-		&self.name
-	}
-
-	/// The requested group sequence.
-	pub fn group(&self) -> u64 {
-		self.group
-	}
-
-	/// The first waiting fetcher's priority, as a hint for the serving stream.
-	pub fn priority(&self) -> u8 {
-		self.priority
-	}
-
-	/// The first frame to serve (0 returns the whole group).
-	pub fn frame_start(&self) -> u64 {
-		self.frame_start
-	}
-
-	/// Serve the request, returning a [`GroupProducer`] to fill and resolving
-	/// every waiting fetcher with a consumer for it.
-	///
-	/// `timescale` is the parent track's scale (from the wire FETCH_OK), so the
-	/// producer accepts the timestamped frames that follow. Returns [`Error::Cancel`]
-	/// if the fetch was cancelled or the broadcast closed while pending.
-	pub fn accept(mut self, timescale: impl Into<Option<Timescale>>) -> Result<GroupProducer, Error> {
-		self.completed = true;
-
-		let mut state = self
-			.state
-			.write()
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Cancel))?;
-
-		let key = (self.name.clone(), self.group);
-		let pending = state.group_requests.remove(&key).ok_or(Error::Cancel)?;
-		state.group_request_order.retain(|k| k != &key);
-
-		let producer = GroupProducer::new_with_timescale(Group { sequence: self.group }, timescale.into());
-
-		// Build each fetcher's consumer now (not when it polls) so it counts toward
-		// the producer immediately, mirroring TrackRequest::accept.
-		for (_, slot) in pending.resolvers {
-			if let Ok(mut slot) = slot.write() {
-				*slot = Some(Ok(producer.consume()));
-			}
-		}
-
-		drop(state);
-		Ok(producer)
-	}
-
-	/// Reject the fetch, waking all waiting fetchers with `err`.
-	pub fn deny(mut self, err: Error) {
-		self.completed = true;
-		if let Ok(mut state) = self.state.write() {
-			state.deny_group_request(&(self.name.clone(), self.group), err);
-		}
-	}
-}
-
-impl Drop for GroupRequest {
-	fn drop(&mut self) {
-		if !self.completed
-			&& let Ok(mut state) = self.state.write()
-		{
-			state.deny_group_request(&(self.name.clone(), self.group), Error::Cancel);
-		}
-	}
-}
-
-/// A pending subscription returned by [`TrackConsumer::subscribe`].
-///
-/// The subscription isn't live until the publisher accepts it (for the wire,
-/// SUBSCRIBE_OK). It implements [`Future`], so `.await` it to get the
-/// [`TrackSubscriber`] (or an error). Poll-based callers can instead drive it
-/// with [`Self::poll_ok`] inside a `kio` poll loop.
-pub struct TrackPending {
-	inner: TrackPendingInner,
-	/// Kept alive between `Future::poll` calls so its registration in the
-	/// resolver channel stays valid until the next poll replaces it.
-	waiter: Option<kio::Waiter>,
-}
-
-enum TrackPendingInner {
-	/// Resolved synchronously: the track already existed, or it failed immediately.
-	Ready(Result<TrackSubscriber, Error>),
-	/// Waiting for the publisher to accept or deny via the dynamic handler.
-	Waiting(kio::Consumer<PendingSlot>),
-}
-
-impl TrackPending {
-	fn ready(result: Result<TrackSubscriber, Error>) -> Self {
-		Self {
-			inner: TrackPendingInner::Ready(result),
-			waiter: None,
-		}
-	}
-
-	fn waiting(consumer: kio::Consumer<PendingSlot>) -> Self {
-		Self {
-			inner: TrackPendingInner::Waiting(consumer),
-			waiter: None,
-		}
-	}
-
-	/// Poll for the resolved [`TrackSubscriber`], without blocking.
-	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<TrackSubscriber, Error>> {
-		match &self.inner {
-			TrackPendingInner::Ready(result) => Poll::Ready(result.clone()),
-			TrackPendingInner::Waiting(consumer) => match consumer.poll(waiter, |slot| match &**slot {
-				Some(result) => Poll::Ready(result.clone()),
-				None => Poll::Pending,
-			}) {
-				Poll::Ready(Ok(result)) => Poll::Ready(result),
-				// Channel closed: the resolver may have left the final result behind.
-				Poll::Ready(Err(closed)) => Poll::Ready(match &*closed {
-					Some(result) => result.clone(),
-					None => Err(Error::Cancel),
-				}),
-				Poll::Pending => Poll::Pending,
-			},
-		}
-	}
-}
-
-impl std::future::Future for TrackPending {
-	type Output = Result<TrackSubscriber, Error>;
-
-	fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-		let this = self.get_mut();
-		// Replacing drops the previous waiter, freeing its slot so poll_ok's
-		// register call can recycle it (see `kio::wait`).
-		this.waiter = Some(kio::Waiter::new(cx.waker().clone()));
-		this.poll_ok(this.waiter.as_ref().unwrap())
-	}
-}
-
-/// A pending fetch returned by [`TrackConsumer::fetch`].
-///
-/// One-shot analogue of [`TrackPending`]: resolves to the [`GroupConsumer`] once
-/// the group is available (already cached, or FETCH_OK on the wire), or an error.
-pub struct FetchPending {
-	inner: FetchPendingInner,
-	/// Kept alive between `Future::poll` calls so its registration in the resolver
-	/// channel stays valid until the next poll replaces it.
-	waiter: Option<kio::Waiter>,
-}
-
-enum FetchPendingInner {
-	/// Resolved synchronously: the group was cached, or it failed immediately.
-	Ready(Result<GroupConsumer, Error>),
-	/// Waiting for the dynamic handler to accept or deny via the wire.
-	Waiting(kio::Consumer<GroupSlot>),
-}
-
-impl FetchPending {
-	fn ready(result: Result<GroupConsumer, Error>) -> Self {
-		Self {
-			inner: FetchPendingInner::Ready(result),
-			waiter: None,
-		}
-	}
-
-	fn waiting(consumer: kio::Consumer<GroupSlot>) -> Self {
-		Self {
-			inner: FetchPendingInner::Waiting(consumer),
-			waiter: None,
-		}
-	}
-
-	/// Poll for the resolved [`GroupConsumer`], without blocking.
-	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<GroupConsumer, Error>> {
-		match &self.inner {
-			FetchPendingInner::Ready(result) => Poll::Ready(result.clone()),
-			FetchPendingInner::Waiting(consumer) => match consumer.poll(waiter, |slot| match &**slot {
-				Some(result) => Poll::Ready(result.clone()),
-				None => Poll::Pending,
-			}) {
-				Poll::Ready(Ok(result)) => Poll::Ready(result),
-				// Channel closed: the resolver may have left the final result behind.
-				Poll::Ready(Err(closed)) => Poll::Ready(match &*closed {
-					Some(result) => result.clone(),
-					None => Err(Error::Cancel),
-				}),
-				Poll::Pending => Poll::Pending,
-			},
-		}
-	}
-}
-
-impl std::future::Future for FetchPending {
-	type Output = Result<GroupConsumer, Error>;
-
-	fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-		let this = self.get_mut();
-		this.waiter = Some(kio::Waiter::new(cx.waker().clone()));
-		this.poll_ok(this.waiter.as_ref().unwrap())
+	pub fn assert_insert_track(&mut self, track: TrackConsumer) {
+		self.insert_track(track).expect("should not have errored")
 	}
 }
 
@@ -625,12 +215,12 @@ impl std::future::Future for FetchPending {
 ///
 /// When a consumer requests a track that doesn't exist, the dynamic producer
 /// picks up the request via [`Self::requested_track`] and either
-/// [`TrackRequest::accept`]s it with a concrete [`Track`] or
-/// [`TrackRequest::deny`]s it. Dropped when no longer needed; pending requests
+/// [`TrackRequest::accept`]s it with a concrete [`TrackInfo`] or
+/// [`TrackRequest::reject`]s it. Dropped when no longer needed; pending requests
 /// are automatically aborted.
 pub struct BroadcastDynamic {
-	info: Broadcast,
-	state: kio::Producer<State>,
+	info: BroadcastInfo,
+	state: kio::Producer<BroadcastState>,
 }
 
 impl Clone for BroadcastDynamic {
@@ -638,7 +228,7 @@ impl Clone for BroadcastDynamic {
 		// Mirror `new`: bump `state.dynamic` so each live handle is counted.
 		// Without this, deriving Clone would let `Drop` decrement past `new`'s
 		// single increment and prematurely flip `dynamic` to zero, causing
-		// future `consume_track` calls to return `NotFound`.
+		// future `track` calls to return `NotFound`.
 		if let Ok(mut state) = self.state.write() {
 			state.dynamic += 1;
 		}
@@ -650,16 +240,8 @@ impl Clone for BroadcastDynamic {
 	}
 }
 
-impl Deref for BroadcastDynamic {
-	type Target = Broadcast;
-
-	fn deref(&self) -> &Self::Target {
-		&self.info
-	}
-}
-
 impl BroadcastDynamic {
-	fn new(info: Broadcast, state: kio::Producer<State>) -> Self {
+	fn new(info: BroadcastInfo, state: kio::Producer<BroadcastState>) -> Self {
 		if let Ok(mut state) = state.write() {
 			// If the broadcast is already closed, we can't handle any new requests.
 			state.dynamic += 1;
@@ -668,10 +250,14 @@ impl BroadcastDynamic {
 		Self { info, state }
 	}
 
+	pub fn info(&self) -> &BroadcastInfo {
+		&self.info
+	}
+
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R, Error>>
 	where
-		F: FnMut(&mut kio::Mut<'_, State>) -> Poll<R>,
+		F: FnMut(&mut kio::Mut<'_, BroadcastState>) -> Poll<R>,
 	{
 		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
 			Ok(r) => Ok(r),
@@ -681,61 +267,23 @@ impl BroadcastDynamic {
 
 	/// Poll for the next consumer-requested track, without blocking.
 	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<TrackRequest, Error>> {
-		let weak = self.state.weak();
 		self.poll(waiter, |state| {
 			let Some(name) = state.request_order.pop_front() else {
 				return Poll::Pending;
 			};
+
 			// The name stays in `requests` so concurrent subscribers can still
 			// coalesce onto it until the publisher accepts or denies.
-			let pending = state.requests.get(&name).expect("request_order out of sync");
-			let subscription = pending.resolvers.first().map(|(s, _)| s.clone()).unwrap_or_default();
-			Poll::Ready((name, subscription))
-		})
-		.map(|res| {
-			res.map(|(name, subscription)| TrackRequest {
-				name,
-				subscription,
-				state: weak,
-				completed: false,
-			})
+			let pending = state.requests.remove(&name).expect("request_order out of sync");
+			state.tracks.insert(name, pending.weak());
+
+			Poll::Ready(pending)
 		})
 	}
 
 	/// Block until a consumer requests a track, returning a [`TrackRequest`] to serve.
 	pub async fn requested_track(&mut self) -> Result<TrackRequest, Error> {
 		kio::wait(|waiter| self.poll_requested_track(waiter)).await
-	}
-
-	/// Poll for the next consumer-requested group (fetch), without blocking.
-	pub fn poll_requested_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<GroupRequest, Error>> {
-		let weak = self.state.weak();
-		self.poll(waiter, |state| {
-			let Some(key) = state.group_request_order.pop_front() else {
-				return Poll::Pending;
-			};
-			// The key stays in `group_requests` so concurrent fetchers can still
-			// coalesce onto it until the publisher accepts or denies.
-			let pending = state.group_requests.get(&key).expect("group_request_order out of sync");
-			let priority = pending.resolvers.first().map(|(p, _)| *p).unwrap_or(0);
-			Poll::Ready((key, priority))
-		})
-		.map(|res| {
-			res.map(|((name, group), priority)| GroupRequest {
-				name,
-				group,
-				priority,
-				// Always 0 today; partial-fetch resume would set this from the request.
-				frame_start: 0,
-				state: weak,
-				completed: false,
-			})
-		})
-	}
-
-	/// Block until a consumer fetches a group, returning a [`GroupRequest`] to serve.
-	pub async fn requested_group(&mut self) -> Result<GroupRequest, Error> {
-		kio::wait(|waiter| self.poll_requested_group(waiter)).await
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
@@ -759,14 +307,7 @@ impl BroadcastDynamic {
 	/// requests are owned by the broadcast and aborted here so consumers don't
 	/// stay stuck waiting on producers nobody will fulfill.
 	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
-		let mut guard = modify(&self.state)?;
-
-		// Wake any pending subscribers; nothing will ever serve their requests.
-		guard.abort_requests(&err);
-
-		guard.abort = Some(err);
-		guard.close();
-		Ok(())
+		BroadcastState::modify(&self.state)?.abort(err)
 	}
 
 	/// Return true if this is the same broadcast instance.
@@ -784,8 +325,7 @@ impl Drop for BroadcastDynamic {
 				return;
 			}
 
-			// No dynamic producer remains to serve pending requests.
-			state.abort_requests(&Error::Cancel);
+			state.abort(Error::Dropped).ok();
 		}
 	}
 }
@@ -805,159 +345,56 @@ impl BroadcastDynamic {
 	pub fn assert_no_request(&mut self) {
 		assert!(self.requested_track().now_or_never().is_none(), "should have blocked");
 	}
-
-	pub fn assert_group_request(&mut self) -> GroupRequest {
-		self.requested_group()
-			.now_or_never()
-			.expect("should not have blocked")
-			.expect("should not have errored")
-	}
-
-	pub fn assert_no_group_request(&mut self) {
-		assert!(self.requested_group().now_or_never().is_none(), "should have blocked");
-	}
 }
 
 /// Subscribe to arbitrary broadcast/tracks.
 #[derive(Clone)]
 pub struct BroadcastConsumer {
-	info: Broadcast,
-	state: kio::Consumer<State>,
-}
-
-impl Deref for BroadcastConsumer {
-	type Target = Broadcast;
-
-	fn deref(&self) -> &Self::Target {
-		&self.info
-	}
+	info: BroadcastInfo,
+	state: kio::Consumer<BroadcastState>,
 }
 
 impl BroadcastConsumer {
-	/// Get a handle to a track on this broadcast.
-	///
-	/// This is a cheap, synchronous lookup that returns a [`TrackConsumer`] bound
-	/// to `name`. Nothing is sent to the publisher yet: call
-	/// [`TrackConsumer::subscribe`] to open a live subscription (blocking on
-	/// SUBSCRIBE_OK), or hold the handle and subscribe later.
-	pub fn consume_track(&self, name: &str) -> TrackConsumer {
-		TrackConsumer {
-			broadcast: self.clone(),
-			name: name.to_string(),
-		}
+	pub fn info(&self) -> &BroadcastInfo {
+		&self.info
 	}
 
-	/// Register a subscription for `name` and return a [`TrackPending`] that
-	/// resolves once the publisher accepts it.
-	///
-	/// Reuses a live producer if one is already publishing the track (the pending
-	/// resolves right away), otherwise queues a dynamic request served via
-	/// [`BroadcastDynamic::requested_track`] and [`TrackRequest::accept`] (for the
-	/// wire this is SUBSCRIBE_OK). Resolves to [`Error::NotFound`] if no dynamic
-	/// producer exists to handle the request.
-	fn request_subscribe(&self, name: &str, subscription: Subscription) -> TrackPending {
+	/// Get a handle to a track on this broadcast.
+	pub fn track(&self, name: &str) -> Result<TrackConsumer, Error> {
 		// Upgrade to a temporary producer so we can modify the state.
-		let Some(producer) = self.state.produce() else {
-			let err = self.state.read().abort.clone().unwrap_or(Error::Dropped);
-			return TrackPending::ready(Err(err));
-		};
-		let mut state = match modify(&producer) {
+		let mut state = match self.state.write() {
 			Ok(state) => state,
-			Err(err) => return TrackPending::ready(Err(err)),
+			Err(state) => return Err(state.abort.clone().unwrap_or(Error::Dropped)),
 		};
 
 		// Reuse a live producer if one is already publishing the track.
 		if let Some(weak) = state.tracks.get(name) {
 			if !weak.is_closed() {
-				return TrackPending::ready(Ok(weak.subscribe(subscription)));
+				return Ok(weak.consume());
 			}
 			// Drop the stale entry and fall through to a fresh request.
 			state.tracks.remove(name);
 		}
 
-		let slot = kio::Producer::new(None);
-		let consumer = slot.consume();
-
 		if let Some(pending) = state.requests.get_mut(name) {
 			// Coalesce onto an in-flight request for the same name.
-			pending.resolvers.push((subscription, slot));
-		} else if state.dynamic == 0 {
-			return TrackPending::ready(Err(Error::NotFound));
-		} else {
-			state.requests.insert(
-				name.to_string(),
-				PendingRequest {
-					resolvers: vec![(subscription, slot)],
-				},
-			);
-			state.request_order.push_back(name.to_string());
+			return Ok(pending.consume());
 		}
 
-		TrackPending::waiting(consumer)
-	}
-
-	/// Register a one-shot fetch for `group` on `name` and return a [`FetchPending`]
-	/// that resolves once the group is available.
-	///
-	/// Returns a cached group directly if a live producer already holds it; bypasses
-	/// the cache and queues a wire request if the cached group is aborted or evicted.
-	/// Resolves to [`Error::NotFound`] if the group can never exist (past the track's
-	/// final sequence) or no dynamic producer exists to fetch it.
-	fn request_fetch(&self, name: &str, group: u64, fetch: Fetch) -> FetchPending {
-		// Upgrade to a temporary producer so we can modify the state.
-		let Some(producer) = self.state.produce() else {
-			let err = self.state.read().abort.clone().unwrap_or(Error::Dropped);
-			return FetchPending::ready(Err(err));
-		};
-		let mut state = match modify(&producer) {
-			Ok(state) => state,
-			Err(err) => return FetchPending::ready(Err(err)),
-		};
-
-		// Return a cached group if a live producer is publishing the track.
-		if let Some(weak) = state.tracks.get(name) {
-			if weak.is_closed() {
-				// Drop the stale entry and fall through to a fresh request.
-				state.tracks.remove(name);
-			} else {
-				let sub = weak.subscribe(Subscription::default());
-				match sub.poll_get_group(&kio::Waiter::noop(), group) {
-					Poll::Ready(Ok(Some(mut cached))) => {
-						// Bypass an aborted cached group with a fresh fetch; otherwise return it
-						// (complete, or in-progress with frames still streaming in).
-						if !matches!(cached.poll_finished(&kio::Waiter::noop()), Poll::Ready(Err(_))) {
-							return FetchPending::ready(Ok(cached));
-						}
-					}
-					// At or past the track's final sequence: the group can never exist.
-					Poll::Ready(Ok(None)) => return FetchPending::ready(Err(Error::NotFound)),
-					Poll::Ready(Err(err)) => return FetchPending::ready(Err(err)),
-					// Not cached (old / evicted): fall through to a wire request.
-					Poll::Pending => {}
-				}
-			}
+		if state.dynamic == 0 {
+			return Err(Error::NotFound);
 		}
 
-		let slot = kio::Producer::new(None);
-		let consumer = slot.consume();
-		let key = (name.to_string(), group);
+		// Allocate the name once and share the same Arc across the request, the
+		// requests map, and the FIFO order.
+		let name: Arc<str> = name.into();
+		let request = TrackRequest::new(name.clone());
+		let consumer = request.consume();
 
-		if let Some(pending) = state.group_requests.get_mut(&key) {
-			// Coalesce onto an in-flight fetch for the same track + group.
-			pending.resolvers.push((fetch.priority, slot));
-		} else if state.dynamic == 0 {
-			return FetchPending::ready(Err(Error::NotFound));
-		} else {
-			state.group_requests.insert(
-				key.clone(),
-				GroupPendingRequest {
-					resolvers: vec![(fetch.priority, slot)],
-				},
-			);
-			state.group_request_order.push_back(key);
-		}
+		state.requests.insert(name.clone(), request);
+		state.request_order.push_back(name);
 
-		FetchPending::waiting(consumer)
+		Ok(consumer)
 	}
 
 	/// Block until the broadcast is closed and return the cause.
@@ -989,70 +426,6 @@ impl BroadcastConsumer {
 	}
 }
 
-/// Options for a one-shot [`TrackConsumer::fetch`] of a past group.
-#[derive(Clone, Debug, Default)]
-pub struct Fetch {
-	/// Delivery priority for the fetched group's stream. Defaults to 0.
-	pub priority: u8,
-}
-
-impl Fetch {
-	/// Set the delivery priority, returning `self` for chaining.
-	pub fn with_priority(mut self, priority: u8) -> Self {
-		self.priority = priority;
-		self
-	}
-}
-
-/// A handle to a single track within a broadcast.
-///
-/// Obtained from [`BroadcastConsumer::consume_track`]. Holding it sends nothing
-/// to the publisher; it just names a track you can [`subscribe`](Self::subscribe)
-/// to (a live, ongoing stream of groups) or [`fetch`](Self::fetch) a single past
-/// group from. The same handle can be reused, and clones are cheap.
-#[derive(Clone)]
-pub struct TrackConsumer {
-	broadcast: BroadcastConsumer,
-	name: String,
-}
-
-impl TrackConsumer {
-	/// The track name this handle is bound to.
-	pub fn name(&self) -> &str {
-		&self.name
-	}
-
-	/// Open a live subscription.
-	///
-	/// Returns a [`TrackPending`] that resolves once the publisher accepts the
-	/// subscription (SUBSCRIBE_OK on the wire). `.await` it for the
-	/// [`TrackSubscriber`], which carries the publisher's [`Track`] and reads its
-	/// groups; or drive it with [`TrackPending::poll_ok`] from a poll loop.
-	///
-	/// `subscription` is this subscriber's preferences and feeds the producer's
-	/// [`TrackProducer::subscription`] aggregate; pass `None` for
-	/// [`Subscription::default`]. Concurrent subscribers to the same name coalesce
-	/// onto one request.
-	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> TrackPending {
-		self.broadcast
-			.request_subscribe(&self.name, subscription.into().unwrap_or_default())
-	}
-
-	/// Fetch a single past group, without holding a live subscription.
-	///
-	/// Returns the [`GroupConsumer`] once the group is available: immediately if a
-	/// live producer already has it cached, otherwise after a wire FETCH completes
-	/// (blocking on FETCH_OK, like [`subscribe`](Self::subscribe) blocks on
-	/// SUBSCRIBE_OK). `options` accepts `None`, a [`Fetch`], or `Fetch::default()`.
-	///
-	/// Errors with [`Error::NotFound`] if the group can never exist (past the
-	/// track's final sequence) or no publisher handles fetch.
-	pub async fn fetch(&self, group: u64, options: impl Into<Option<Fetch>>) -> Result<GroupConsumer, Error> {
-		let options = options.into().unwrap_or_default();
-		self.broadcast.request_fetch(&self.name, group, options).await
-	}
-}
-
 #[cfg(test)]
 impl BroadcastConsumer {
 	pub fn assert_not_closed(&self) {
@@ -1069,26 +442,13 @@ mod test {
 	use super::*;
 
 	/// Subscribe and assert the result hasn't resolved yet (it stays pending until
-	/// a publisher accepts). Returns the [`TrackPending`] to resolve after accepting.
+	/// a publisher accepts). Returns the [`TrackSubscriberPending`] to resolve after accepting.
 	macro_rules! subscribe_pending {
 		($consumer:expr, $name:expr) => {{
-			let pending = $consumer.consume_track($name).subscribe(None);
+			let pending = $consumer.track($name).unwrap().subscribe(None).unwrap();
 			assert!(
 				pending.poll_ok(&kio::Waiter::noop()).is_pending(),
-				"consume_track should stay pending until the request is accepted"
-			);
-			pending
-		}};
-	}
-
-	/// Fetch and assert the result hasn't resolved yet (it stays pending until a
-	/// publisher accepts). Returns the [`FetchPending`] to resolve after accepting.
-	macro_rules! fetch_pending {
-		($consumer:expr, $name:expr, $group:expr) => {{
-			let pending = $consumer.request_fetch($name, $group, Fetch::default());
-			assert!(
-				pending.poll_ok(&kio::Waiter::noop()).is_pending(),
-				"fetch should stay pending until the request is accepted"
+				"subscribe should stay pending until the request is accepted"
 			);
 			pending
 		}};
@@ -1096,24 +456,36 @@ mod test {
 
 	#[tokio::test]
 	async fn insert() {
-		let mut producer = Broadcast::new().produce();
-		let mut track1 = Track::new("track1").produce();
+		let mut producer = BroadcastInfo::new().produce();
+		let mut track1 = TrackProducer::new("track1", None);
 
 		// Make sure we can insert before a consumer is created.
-		producer.assert_insert_track(&track1);
+		producer.assert_insert_track(track1.consume());
 		track1.append_group().unwrap();
 
 		let consumer = producer.consume();
 
 		// The track already exists, so subscribe resolves immediately.
-		let mut track1_sub = consumer.consume_track("track1").subscribe(None).await.unwrap();
+		let mut track1_sub = consumer
+			.track("track1")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
+			.unwrap();
 		track1_sub.assert_group();
 
-		let mut track2 = Track::new("track2").produce();
-		producer.assert_insert_track(&track2);
+		let mut track2 = TrackProducer::new("track2", None);
+		producer.assert_insert_track(track2.consume());
 
 		let consumer2 = producer.consume();
-		let mut track2_consumer = consumer2.consume_track("track2").subscribe(None).await.unwrap();
+		let mut track2_consumer = consumer2
+			.track("track2")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
+			.unwrap();
 		track2_consumer.assert_no_group();
 
 		track2.append_group().unwrap();
@@ -1123,15 +495,21 @@ mod test {
 
 	#[tokio::test]
 	async fn closed() {
-		let mut producer = Broadcast::new().produce();
+		let mut producer = BroadcastInfo::new().produce();
 		let _dynamic = producer.dynamic();
 
 		let consumer = producer.consume();
 		consumer.assert_not_closed();
 
 		// Create a new track and insert it into the broadcast (resolves immediately).
-		let track1 = producer.assert_create_track(&Track::new("track1"));
-		let track1c = consumer.consume_track("track1").subscribe(None).await.unwrap();
+		let track1 = producer.assert_create_track("track1", None);
+		let track1c = consumer
+			.track("track1")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
+			.unwrap();
 
 		// A track nobody publishes stays pending until accepted.
 		let track2_fut = subscribe_pending!(consumer, "track2");
@@ -1149,7 +527,7 @@ mod test {
 
 	#[tokio::test]
 	async fn requests() {
-		let mut producer = Broadcast::new().produce().dynamic();
+		let mut producer = BroadcastInfo::new().produce().dynamic();
 
 		let consumer = producer.consume();
 		let consumer2 = consumer.clone();
@@ -1164,7 +542,7 @@ mod test {
 		assert_eq!(request.name(), "track1");
 
 		// Accept it, which resolves both waiting subscribers.
-		let mut track3 = request.accept(Track::new("track1")).unwrap();
+		let mut track3 = request.accept(None);
 		let mut track1 = track1_fut.await.unwrap();
 		let mut track2 = track2_fut.await.unwrap();
 
@@ -1182,19 +560,19 @@ mod test {
 		drop(producer);
 		assert!(track4_fut.await.is_err());
 
-		// With no dynamic producer left, new subscribes fail outright.
-		let track5 = consumer2.consume_track("track3").subscribe(None).await;
+		// With no dynamic producer left, requesting the handle fails outright.
+		let track5 = consumer2.track("track3");
 		assert!(track5.is_err(), "should have errored");
 	}
 
 	#[tokio::test]
 	async fn stale_producer() {
-		let mut broadcast = Broadcast::new().produce().dynamic();
+		let mut broadcast = BroadcastInfo::new().produce().dynamic();
 		let consumer = broadcast.consume();
 
 		// Subscribe to a track and serve it.
 		let track1_fut = subscribe_pending!(consumer, "track1");
-		let mut producer1 = broadcast.assert_request().accept(Track::new("track1")).unwrap();
+		let mut producer1 = broadcast.assert_request().accept(None);
 		let track1 = track1_fut.await.unwrap();
 
 		// Close the producer (simulating publisher disconnect).
@@ -1207,7 +585,7 @@ mod test {
 
 		// Subscribe again to the same track: should get a NEW producer, not the stale one.
 		let track2_fut = subscribe_pending!(consumer, "track1");
-		let mut producer2 = broadcast.assert_request().accept(Track::new("track1")).unwrap();
+		let mut producer2 = broadcast.assert_request().accept(None);
 		let mut track2 = track2_fut.await.unwrap();
 		track2.assert_not_closed();
 		track2.assert_not_clone(&track1);
@@ -1219,12 +597,12 @@ mod test {
 
 	#[tokio::test(start_paused = true)]
 	async fn requested_unused() {
-		let mut broadcast = Broadcast::new().produce().dynamic();
+		let mut broadcast = BroadcastInfo::new().produce().dynamic();
 		let bc = broadcast.consume();
 
 		// Subscribe to a track that doesn't exist yet, then serve it.
 		let c1_fut = subscribe_pending!(bc, "unknown_track");
-		let mut producer1 = broadcast.assert_request().accept(Track::new("unknown_track")).unwrap();
+		let mut producer1 = broadcast.assert_request().accept(None);
 		let consumer1 = c1_fut.await.unwrap();
 
 		// The producer should NOT be unused yet because there's a consumer.
@@ -1234,7 +612,13 @@ mod test {
 		);
 
 		// A second subscriber reuses the live producer (fast path / dedup).
-		let consumer2 = bc.consume_track("unknown_track").subscribe(None).await.unwrap();
+		let consumer2 = bc
+			.track("unknown_track")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
+			.unwrap();
 		consumer2.assert_is_clone(&consumer1);
 
 		drop(consumer1);
@@ -1252,18 +636,23 @@ mod test {
 		// While the producer is still alive, re-subscribing to the same name reuses
 		// it (no new request) — this is what lets the relay linger upstream
 		// subscriptions across transient consumer churn.
-		let consumer3 = bc.consume_track("unknown_track").subscribe(None).await.unwrap();
+		let consumer3 = bc
+			.track("unknown_track")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
+			.unwrap();
 		consumer3.assert_is_clone(&producer1.subscribe(None));
 		broadcast.assert_no_request();
 		drop(consumer3);
 
-		// Aborting the producer triggers cleanup; the next subscribe creates a fresh request.
+		// Aborting the producer closes its lookup entry; the next subscribe sees the
+		// stale weak, evicts it, and creates a fresh request.
 		producer1.abort(Error::Cancel).unwrap();
-		// Yield (paused time) so the spawned cleanup task evicts the lookup entry.
-		tokio::time::advance(std::time::Duration::from_millis(1)).await;
 
 		let c4_fut = subscribe_pending!(bc, "unknown_track");
-		let producer2 = broadcast.assert_request().accept(Track::new("unknown_track")).unwrap();
+		let producer2 = broadcast.assert_request().accept(None);
 		let consumer4 = c4_fut.await.unwrap();
 		drop(consumer4);
 		assert!(
@@ -1276,10 +665,10 @@ mod test {
 	// `state.dynamic` to zero. The relay's lite subscriber clones the
 	// dynamic per spawned subscribe; if Clone skipped the increment, the
 	// first finished subscribe would tear down the broadcast and any
-	// follow-up `consume_track` would return `NotFound`.
+	// follow-up `track` would return `NotFound`.
 	#[tokio::test]
 	async fn dynamic_clone_keeps_alive() {
-		let broadcast = Broadcast::new().produce().dynamic();
+		let broadcast = BroadcastInfo::new().produce().dynamic();
 		let consumer = broadcast.consume();
 
 		let clone = broadcast.clone();
@@ -1288,155 +677,5 @@ mod test {
 		// Original handle is still live, so the request registers (stays pending)
 		// instead of failing with NotFound.
 		let _fut = subscribe_pending!(consumer, "track1");
-	}
-
-	#[tokio::test]
-	async fn fetch_cache_hit() {
-		let mut producer = Broadcast::new().produce();
-		let mut track = Track::new("track1").produce();
-		producer.assert_insert_track(&track);
-
-		// Produce a cached group.
-		let mut group = track.append_group().unwrap(); // seq 0
-		group.write_frame(bytes::Bytes::from_static(b"hello")).unwrap();
-		group.finish().unwrap();
-
-		// A cached group is returned directly, no dynamic handler needed.
-		let consumer = producer.consume();
-		let mut g = consumer.consume_track("track1").fetch(0, None).await.unwrap();
-		assert_eq!(g.sequence, 0);
-		assert_eq!(&g.read_frame().await.unwrap().unwrap()[..], b"hello");
-	}
-
-	#[tokio::test]
-	async fn fetch_miss_queues_request() {
-		let mut broadcast = Broadcast::new().produce().dynamic();
-		let consumer = broadcast.consume();
-
-		// No live track has the group, so the fetch queues a dynamic request.
-		let fetch_fut = fetch_pending!(consumer, "track1", 5);
-
-		let request = broadcast.assert_group_request();
-		broadcast.assert_no_group_request();
-		assert_eq!(request.name(), "track1");
-		assert_eq!(request.group(), 5);
-		assert_eq!(request.frame_start(), 0);
-
-		let mut group = request.accept(None).unwrap();
-		let mut g = fetch_fut.await.unwrap();
-		assert_eq!(g.sequence, 5);
-
-		group.write_frame(bytes::Bytes::from_static(b"hi")).unwrap();
-		group.finish().unwrap();
-		assert_eq!(&g.read_frame().await.unwrap().unwrap()[..], b"hi");
-	}
-
-	#[tokio::test]
-	async fn fetch_past_final_not_found() {
-		let mut producer = Broadcast::new().produce();
-		let mut track = Track::new("track1").produce();
-		producer.assert_insert_track(&track);
-		track.append_group().unwrap(); // seq 0
-		track.finish().unwrap(); // final_sequence = 1
-
-		// A group at or past the final sequence can never exist.
-		let consumer = producer.consume();
-		assert!(matches!(
-			consumer.consume_track("track1").fetch(5, None).await,
-			Err(Error::NotFound)
-		));
-	}
-
-	#[tokio::test]
-	async fn fetch_errored_cache_bypass() {
-		let mut broadcast = Broadcast::new().produce();
-		let mut dynamic = broadcast.dynamic();
-		let mut track = Track::new("track1").produce();
-		broadcast.assert_insert_track(&track);
-
-		// A cached but aborted group must be bypassed, not returned.
-		let mut group = track.append_group().unwrap(); // seq 0
-		group.abort(Error::Cancel).unwrap();
-
-		let consumer = broadcast.consume();
-		let fetch_fut = fetch_pending!(consumer, "track1", 0);
-
-		// The aborted cache was skipped: a fresh dynamic request is queued instead.
-		let request = dynamic.assert_group_request();
-		assert_eq!(request.group(), 0);
-		let mut fresh = request.accept(None).unwrap();
-		let mut g = fetch_fut.await.unwrap();
-
-		fresh.write_frame(bytes::Bytes::from_static(b"ok")).unwrap();
-		fresh.finish().unwrap();
-		assert_eq!(&g.read_frame().await.unwrap().unwrap()[..], b"ok");
-	}
-
-	#[tokio::test]
-	async fn fetch_coalesces() {
-		let mut broadcast = Broadcast::new().produce().dynamic();
-		let consumer = broadcast.consume();
-
-		// Two fetches for the same track + group coalesce into one request.
-		let f1 = fetch_pending!(consumer, "track1", 3);
-		let f2 = fetch_pending!(consumer, "track1", 3);
-
-		let request = broadcast.assert_group_request();
-		broadcast.assert_no_group_request();
-
-		let mut group = request.accept(None).unwrap();
-		let mut g1 = f1.await.unwrap();
-		let mut g2 = f2.await.unwrap();
-		assert_eq!(g1.sequence, 3);
-		assert_eq!(g2.sequence, 3);
-
-		// Both resolve to consumers of the same group.
-		group.write_frame(bytes::Bytes::from_static(b"x")).unwrap();
-		group.finish().unwrap();
-		assert_eq!(&g1.read_frame().await.unwrap().unwrap()[..], b"x");
-		assert_eq!(&g2.read_frame().await.unwrap().unwrap()[..], b"x");
-	}
-
-	#[tokio::test]
-	async fn fetch_not_found_without_dynamic() {
-		// No dynamic handler and no cached track: the fetch fails outright.
-		let broadcast = Broadcast::new().produce();
-		let consumer = broadcast.consume();
-		assert!(matches!(
-			consumer.consume_track("track1").fetch(0, None).await,
-			Err(Error::NotFound)
-		));
-	}
-
-	#[tokio::test]
-	async fn fetch_request_deny() {
-		let mut broadcast = Broadcast::new().produce().dynamic();
-		let consumer = broadcast.consume();
-
-		let f = fetch_pending!(consumer, "track1", 0);
-		broadcast.assert_group_request().deny(Error::NotFound);
-		assert!(f.await.is_err());
-	}
-
-	#[tokio::test]
-	async fn fetch_request_drop_cancels() {
-		let mut broadcast = Broadcast::new().produce().dynamic();
-		let consumer = broadcast.consume();
-
-		let f = fetch_pending!(consumer, "track1", 0);
-		// Dropping the request without accepting/denying cancels the fetch.
-		drop(broadcast.assert_group_request());
-		assert!(f.await.is_err());
-	}
-
-	#[tokio::test]
-	async fn fetch_dynamic_drop_aborts() {
-		let broadcast = Broadcast::new().produce().dynamic();
-		let consumer = broadcast.consume();
-
-		let f = fetch_pending!(consumer, "track1", 0);
-		// No dynamic producer remains to serve the pending fetch.
-		drop(broadcast);
-		assert!(f.await.is_err());
 	}
 }

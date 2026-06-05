@@ -531,7 +531,7 @@ async fn serve_fetch(
 		let group = match params.group {
 			// "latest" needs a live subscription to learn the newest sequence;
 			// fetch only retrieves a specified past group.
-			FetchGroup::Latest => match broadcast.consume_track(&track).subscribe(None).await {
+			FetchGroup::Latest => match async { broadcast.track(&track)?.subscribe(None)?.await }.await {
 				Ok(mut sub) => match sub.latest() {
 					Some(sequence) => sub.get_group(sequence).await,
 					None => sub.recv_group().await,
@@ -539,7 +539,9 @@ async fn serve_fetch(
 				Err(err) => Err(err),
 			},
 			// A one-shot fetch, no subscription required.
-			FetchGroup::Num(sequence) => broadcast.consume_track(&track).fetch(sequence, None).await.map(Some),
+			FetchGroup::Num(sequence) => async { broadcast.track(&track)?.fetch(sequence, None)?.await }
+				.await
+				.map(Some),
 		};
 
 		let group = match group {

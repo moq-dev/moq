@@ -42,7 +42,7 @@ pub struct Publish {
 
 impl Publish {
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
 
 		let decoder = match format {

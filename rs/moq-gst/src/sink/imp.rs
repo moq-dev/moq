@@ -388,7 +388,7 @@ async fn run_session(
 	let client = client_config.init()?;
 
 	let origin = moq_net::Origin::random().produce();
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let broadcast_consumer = broadcast.consume();
 
 	let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;

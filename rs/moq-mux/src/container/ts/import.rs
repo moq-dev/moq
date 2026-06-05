@@ -358,7 +358,7 @@ impl AacStream {
 					// WebCodecs) can configure the decoder. TS itself carries it inline.
 					let description = config.encode();
 					let import = aac::Import::new(self.broadcast.clone(), self.catalog.clone(), config)?;
-					let name = import.track().name.clone();
+					let name = import.track().name().to_string();
 					if let Some(rendition) = self.catalog.lock().audio.renditions.get_mut(&name) {
 						rendition.description = Some(description);
 					}
@@ -421,7 +421,7 @@ impl AacStream {
 		self.jitter = Some(jitter);
 
 		if let Some(import) = &self.import {
-			let name = import.track().name.clone();
+			let name = import.track().name().to_string();
 			if let Some(rendition) = self.catalog.lock().audio.renditions.get_mut(&name) {
 				rendition.jitter = Some(jitter.into());
 			}

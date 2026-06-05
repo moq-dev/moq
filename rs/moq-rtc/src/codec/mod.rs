@@ -79,7 +79,7 @@ impl Track {
 	/// Audio track for an Opus rendition.
 	pub async fn opus(broadcast: &moq_net::BroadcastConsumer, name: &str) -> Result<Self> {
 		let container = moq_mux::catalog::hang::Container::Legacy;
-		let track = broadcast.consume_track(name).subscribe(None).await?;
+		let track = broadcast.track(name)?.subscribe(None)?.await?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
 		Ok(Self {
 			consumer,
@@ -92,7 +92,7 @@ impl Track {
 	/// inferred from `config.description` (avc1 vs avc3).
 	pub async fn video(broadcast: &moq_net::BroadcastConsumer, name: &str, config: &VideoConfig) -> Result<Self> {
 		let container: moq_mux::catalog::hang::Container = (&config.container).try_into()?;
-		let track = broadcast.consume_track(name).subscribe(None).await?;
+		let track = broadcast.track(name)?.subscribe(None)?.await?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
 
 		let (codec, convert) = match &config.codec {

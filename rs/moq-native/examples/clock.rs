@@ -66,8 +66,8 @@ async fn main() -> anyhow::Result<()> {
 
 	match config.role {
 		Command::Publish => {
-			let mut broadcast = moq_net::Broadcast::new().produce();
-			let track = broadcast.create_track(moq_net::Track::new(track))?;
+			let mut broadcast = moq_net::BroadcastInfo::new().produce();
+			let track = broadcast.create_track(track, None)?;
 			let clock = Publisher::new(track);
 
 			origin.publish_broadcast(&config.broadcast, broadcast.consume());
@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
 						Some(broadcast) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
 							let track = broadcast
-								.consume_track(&track).subscribe(None)
+								.track(&track)?.subscribe(None)?
 								.await?;
 							clock = Some(Subscriber::new(track));
 						}

@@ -53,7 +53,7 @@ impl AudioConsumer {
 		};
 
 		let name = name.into();
-		let track = broadcast.consume_track(&name).subscribe(None).await?;
+		let track = broadcast.track(&name)?.subscribe(None)?.await?;
 		let mut track = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
 		if let Some(latency) = output.latency_max {
 			track = track.with_latency(latency);

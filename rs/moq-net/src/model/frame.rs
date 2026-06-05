@@ -32,7 +32,7 @@ pub struct Frame {
 	/// `None` means no timestamp is attached to this frame, which is the case for
 	/// pre-Lite05 moq-lite streams and IETF moq-transport streams that haven't
 	/// negotiated a timescale. On Lite05+, producers must set `Some(ts)` whose
-	/// scale matches the track's [`crate::Track::timescale`]; the publisher
+	/// scale matches the track's [`crate::TrackInfo::timescale`]; the publisher
 	/// surfaces a `ProtocolViolation` otherwise.
 	pub timestamp: Option<Timestamp>,
 }
