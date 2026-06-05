@@ -32,7 +32,7 @@ pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
 ///
 /// These are fixed by the publisher when the track is created and don't change
 /// while the track is alive. A subscriber learns them via
-/// [`BroadcastConsumer::track`](crate::BroadcastConsumer::track),
+/// [`crate::BroadcastConsumer::track`](crate::BroadcastConsumer::track),
 /// which returns the publisher's [`TrackInfo`] once the subscription is accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -685,7 +685,7 @@ impl TrackWeak {
 
 /// A handle to a single track within a broadcast.
 ///
-/// Obtained from [`BroadcastConsumer::track`]. Holding it sends nothing
+/// Obtained from [`crate::BroadcastConsumer::track`]. Holding it sends nothing
 /// to the publisher; it just names a track you can [`subscribe`](Self::subscribe)
 /// to (a live, ongoing stream of groups) later. The same handle can be subscribed
 /// to multiple times, and clones are cheap.

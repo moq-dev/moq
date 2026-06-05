@@ -3,9 +3,9 @@ use std::{task::Poll, time::Duration};
 /// Subscriber-side preferences for receiving a track.
 ///
 /// Each subscriber holds its own [`Subscription`]; the publisher observes an
-/// aggregate across all live subscribers via [`TrackProducer::subscription`].
+/// aggregate across all live subscribers via [`crate::TrackProducer::subscription`].
 /// A subscriber can change its preferences after the fact with
-/// [`TrackSubscriber::update`].
+/// [`crate::TrackSubscriber::update`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subscription {
 	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
