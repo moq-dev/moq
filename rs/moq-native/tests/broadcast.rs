@@ -300,7 +300,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	// Fetch group 0 directly, without subscribing. No live producer holds the group
 	// on the client, so this issues a wire FETCH upstream.
 	let mut group_sub = tokio::time::timeout(TIMEOUT, async {
-		bc.track("video").unwrap().fetch(0, None).unwrap().await
+		bc.track("video").unwrap().fetch_group(0, None).unwrap().await
 	})
 	.await
 	.expect("fetch timed out")
@@ -444,7 +444,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	// relay doesn't have it cached (subscription started at the latest), so this
 	// must issue a wire FETCH concurrently with the live subscription.
 	let mut fetched = tokio::time::timeout(TIMEOUT, async {
-		bc.track("video").unwrap().fetch(0, None).unwrap().await
+		bc.track("video").unwrap().fetch_group(0, None).unwrap().await
 	})
 	.await
 	.expect("fetch timed out")

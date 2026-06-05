@@ -298,12 +298,18 @@ impl TrackState {
 		Poll::Pending
 	}
 
+	/// Find a cached group by sequence, skipping tombstones. Synchronous, never blocks.
+	fn cached_group(&self, sequence: u64) -> Option<GroupConsumer> {
+		self.groups
+			.iter()
+			.flatten()
+			.find(|(group, _)| group.sequence == sequence)
+			.map(|(group, _)| group.consume())
+	}
+
 	fn poll_get_group(&self, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
-		// Search for the group with the matching sequence, skipping tombstones.
-		for (group, _) in self.groups.iter().flatten() {
-			if group.sequence == sequence {
-				return Poll::Ready(Ok(Some(group.consume())));
-			}
+		if let Some(group) = self.cached_group(sequence) {
+			return Poll::Ready(Ok(Some(group)));
 		}
 
 		// Once final_sequence is set, groups at or past it can never exist.
@@ -320,34 +326,27 @@ impl TrackState {
 		Poll::Pending
 	}
 
-	/// Like [`Self::poll_get_group`], but resolves a one-shot [`TrackConsumer::fetch`]:
-	/// returns `Ok(None)` (which the pending maps to [`Error::NotFound`]) when the
-	/// group can never be served. That's the case once the track is accepted but has
-	/// no [`TrackDynamic`] to fetch old content, so a cache miss would otherwise block
-	/// forever.
-	fn poll_fetch(&self, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
-		for (group, _) in self.groups.iter().flatten() {
-			if group.sequence == sequence {
-				return Poll::Ready(Ok(Some(group.consume())));
-			}
+	/// Resolve a one-shot fetch: the cached group, or an [`Error`] once it can never
+	/// be served. Unlike [`Self::poll_get_group`] there's no `Ok(None)`, since a
+	/// missing group is a failure ([`Error::NotFound`]), not an end-of-stream.
+	///
+	/// A miss is unservable when the group is past the final sequence, or when no
+	/// [`TrackDynamic`] exists to fetch old content (`dynamic == 0`). On-demand tracks
+	/// (from a [`TrackRequest`]) are dynamic from creation, so a relay's fetch waits to
+	/// be served rather than racing the handler into existence.
+	fn poll_fetch(&self, sequence: u64) -> Poll<Result<GroupConsumer>> {
+		if let Some(group) = self.cached_group(sequence) {
+			return Poll::Ready(Ok(group));
 		}
 
 		if let Some(err) = &self.abort {
 			return Poll::Ready(Err(err.clone()));
 		}
 
-		// Past the final sequence: can never exist.
-		if let Some(fin) = self.final_sequence
-			&& sequence >= fin
-		{
-			return Poll::Ready(Ok(None));
-		}
-
-		// An accepted track with no dynamic handler won't serve uncached groups.
-		// Before acceptance (`info` is None) we still wait, since a handler may
-		// appear; `fetch` is racing the producer that creates it.
-		if self.info.is_some() && self.dynamic == 0 {
-			return Poll::Ready(Ok(None));
+		// Past the final sequence, or no handler to serve old content: unservable.
+		let past_final = self.final_sequence.is_some_and(|fin| sequence >= fin);
+		if past_final || self.dynamic == 0 {
+			return Poll::Ready(Err(Error::NotFound));
 		}
 
 		Poll::Pending
@@ -894,32 +893,42 @@ impl TrackConsumer {
 		}))
 	}
 
+	/// Return a cached group by sequence without blocking, or `None` if it isn't in
+	/// the cache. Use [`Self::fetch_group`] to wait for a group that a [`TrackDynamic`]
+	/// will serve on demand.
+	pub fn get_group(&self, sequence: u64) -> Option<GroupConsumer> {
+		self.state.read().cached_group(sequence)
+	}
+
 	/// Fetch a single past group, without holding a live subscription.
 	///
-	/// Returns a [`TrackFetchPending`] that resolves to the [`GroupConsumer`] once
-	/// the group is available: immediately if it's already cached, otherwise once a
-	/// [`TrackDynamic`] serves the request (a wire FETCH for a relay). `options`
-	/// accepts `None`, a [`Fetch`], or `Fetch::default()`. The pending resolves to
-	/// [`Error::NotFound`] if the group can never be served: past the final sequence,
-	/// or an accepted track with no [`TrackDynamic`].
-	pub fn fetch(&self, sequence: u64, options: impl Into<Option<Fetch>>) -> Result<TrackFetchPending> {
+	/// Returns a [`TrackFetchPending`] that resolves to the [`GroupConsumer`]:
+	/// immediately if the group is cached, otherwise once a [`TrackDynamic`] serves
+	/// the request (a wire FETCH for a relay). `options` accepts `None`, a [`Fetch`],
+	/// or `Fetch::default()`.
+	///
+	/// Fails synchronously with [`Error::NotFound`] when the group can never be served
+	/// (past the final sequence, or no [`TrackDynamic`] on the track), or the track's
+	/// abort error if it's already closed.
+	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<Fetch>>) -> Result<TrackFetchPending> {
 		let options = options.into().unwrap_or_default();
 
-		match self.state.write() {
-			Ok(mut state) => {
-				// Only queue a request when the group isn't already determined (cached,
-				// past-final, aborted, or a static-track miss); otherwise the pending
-				// resolves straight from `poll_fetch` with no `TrackDynamic` involvement.
-				// TODO: This is a tiny bit racey
-				if state.poll_fetch(sequence).is_pending() {
-					state.fetches.push_back(GroupRequested {
-						sequence,
-						priority: options.priority,
-					});
-				}
-			}
-			Err(state) => return Err(state.abort.clone().unwrap_or(Error::Dropped)),
-		};
+		let mut state = self
+			.state
+			.write()
+			.map_err(|s| s.abort.clone().unwrap_or(Error::Dropped))?;
+		match state.poll_fetch(sequence) {
+			// Cached: the pending resolves immediately, no handler needed.
+			Poll::Ready(Ok(_)) => {}
+			// Unservable (NotFound) or already aborted: report it synchronously.
+			Poll::Ready(Err(err)) => return Err(err),
+			// A handler exists but the group isn't cached yet: queue it.
+			Poll::Pending => state.fetches.push_back(GroupRequested {
+				sequence,
+				priority: options.priority,
+			}),
+		}
+		drop(state);
 
 		Ok(kio::Pending::new(TrackFetch {
 			state: self.state.clone(),
@@ -1035,16 +1044,18 @@ impl kio::Future for TrackFetch {
 	type Output = Result<GroupConsumer>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
-		let group = ready!(self.state.poll(waiter, |state| state.poll_fetch(self.sequence)))
-			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
-
-		// `poll_fetch` returns `None` only when the group can never be served (past
-		// the final sequence, or an accepted track with no dynamic handler).
-		Poll::Ready(group.ok_or(Error::NotFound))
+		// `poll_fetch` already yields a `Result<GroupConsumer>` (group, or NotFound /
+		// abort); the outer error is the channel closing without one.
+		Poll::Ready(
+			match ready!(self.state.poll(waiter, |state| state.poll_fetch(self.sequence))) {
+				Ok(res) => res,
+				Err(closed) => Err(closed.abort.clone().unwrap_or(Error::Dropped)),
+			},
+		)
 	}
 }
 
-/// A pending fetch returned by [`TrackConsumer::fetch`]. `.await` it for the
+/// A pending fetch returned by [`TrackConsumer::fetch_group`]. `.await` it for the
 /// [`GroupConsumer`].
 pub type TrackFetchPending = kio::Pending<TrackFetch>;
 
@@ -1259,14 +1270,24 @@ pub struct TrackRequest {
 
 	// The previous subscription that was combined, used to detect changes.
 	prev_subscription: Option<Subscription>,
+
+	// A requested track is served on demand, so it counts as fetch-capable from
+	// birth: a consumer's cache-miss `fetch_group` waits to be served instead of
+	// racing the producer (e.g. a relay) into creating its own handler. Released
+	// when the request is accepted or dropped; by then the relay holds its own.
+	_dynamic: TrackDynamic,
 }
 
 impl TrackRequest {
 	pub fn new(name: impl Into<Arc<str>>) -> Self {
+		let name = name.into();
+		let state = kio::Producer::<TrackState>::default();
+		let dynamic = TrackDynamic::new(name.clone(), state.clone());
 		Self {
-			name: name.into(),
-			state: Default::default(),
+			name,
+			state,
 			prev_subscription: None,
+			_dynamic: dynamic,
 		}
 	}
 
@@ -2127,10 +2148,12 @@ mod test {
 		group.write_frame(bytes::Bytes::from_static(b"hello")).unwrap();
 		group.finish().unwrap();
 
-		// A cached group resolves immediately and never queues a request.
+		// A cached group resolves immediately and never queues a request. `get_group`
+		// also returns it synchronously.
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
-		let mut g = consumer.fetch(0, None).unwrap().await.unwrap();
+		assert!(consumer.get_group(0).is_some());
+		let mut g = consumer.fetch_group(0, None).unwrap().await.unwrap();
 		assert_eq!(g.sequence, 0);
 		assert_eq!(&g.read_frame().await.unwrap().unwrap()[..], b"hello");
 
@@ -2144,9 +2167,11 @@ mod test {
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
-		// A dynamic handler exists, so the miss stays pending and queues a request.
-		// `*pending` derefs the wrapper to the inner `TrackFetch` (a `kio::Future`).
-		let pending = consumer.fetch(5, Fetch::default().with_priority(7)).unwrap();
+		// A cache miss isn't in `get_group`, but a dynamic handler exists, so
+		// `fetch_group` stays pending and queues a request. `*pending` derefs the
+		// wrapper to the inner `TrackFetch` (a `kio::Future`).
+		assert!(consumer.get_group(5).is_none());
+		let pending = consumer.fetch_group(5, Fetch::default().with_priority(7)).unwrap();
 		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
@@ -2169,12 +2194,12 @@ mod test {
 
 	#[tokio::test]
 	async fn fetch_miss_no_dynamic_not_found() {
-		// An accepted track with no `TrackDynamic` can't serve old content, so a
-		// cache miss fails fast instead of blocking forever.
+		// A track with no `TrackDynamic` can't serve old content, so a cache miss
+		// fails fast (synchronously) instead of blocking forever.
 		let mut producer = TrackProducer::new("test", None);
 		producer.append_group().unwrap(); // seq 0, but we miss on seq 5
 		let consumer = producer.consume();
-		assert!(matches!(consumer.fetch(5, None).unwrap().await, Err(Error::NotFound)));
+		assert!(matches!(consumer.fetch_group(5, None), Err(Error::NotFound)));
 	}
 
 	#[tokio::test]
@@ -2183,10 +2208,11 @@ mod test {
 		producer.append_group().unwrap(); // seq 0
 		producer.finish().unwrap(); // final_sequence = 1
 
-		// A group at or past the final sequence can never exist, even with a handler.
+		// A group at or past the final sequence can never exist, even with a handler,
+		// so it fails fast synchronously.
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
-		assert!(matches!(consumer.fetch(5, None).unwrap().await, Err(Error::NotFound)));
+		assert!(matches!(consumer.fetch_group(5, None), Err(Error::NotFound)));
 
 		// And it doesn't signal the dynamic handler.
 		assert!(dynamic.poll_group_request(&kio::Waiter::noop()).is_pending());
@@ -2198,7 +2224,7 @@ mod test {
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
-		let pending = consumer.fetch(3, None).unwrap();
+		let pending = consumer.fetch_group(3, None).unwrap();
 		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
 
 		producer.abort(Error::Cancel).unwrap();

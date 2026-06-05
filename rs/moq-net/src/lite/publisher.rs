@@ -582,7 +582,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let group = broadcast
 			.track(&fetch.track)?
-			.fetch(
+			.fetch_group(
 				fetch.group,
 				crate::Fetch {
 					priority: fetch.priority,
