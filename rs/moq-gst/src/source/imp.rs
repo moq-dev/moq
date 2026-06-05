@@ -93,7 +93,6 @@ enum ControlMessage {
 		caps: gst::Caps,
 		reply: oneshot::Sender<PadEndpoint>,
 	},
-	NoMorePads,
 	ReportError(anyhow::Error),
 }
 
@@ -332,9 +331,6 @@ impl MoqSrc {
 					gst::error!(CAT, obj = self.obj(), "failed to create pad: {err:?}");
 				}
 			}
-			ControlMessage::NoMorePads => {
-				self.obj().no_more_pads();
-			}
 			ControlMessage::ReportError(err) => {
 				gst::element_error!(self.obj(), gst::CoreError::Failed, ("session error"), ["{err:?}"]);
 			}
@@ -454,7 +450,6 @@ async fn run_session(
 	let mut active: HashMap<String, ActiveTrack> = HashMap::new();
 	let (done_tx, mut done_rx) = mpsc::unbounded_channel::<TrackDone>();
 	let mut next_pad_id: u64 = 0;
-	let mut announced_no_more_pads = false;
 	// A detached clone for the pumps, kept separate so the `shutdown.changed()`
 	// branch below can borrow `shutdown` mutably without conflicting with reconcile.
 	let pump_shutdown = shutdown.clone();
@@ -501,13 +496,11 @@ async fn run_session(
 							&pump_shutdown,
 						)
 						.await?;
-						// Once the first real pads exist, tell downstream the initial
-						// set is in place so it can finish linking; we may still add or
-						// remove Sometimes pads afterwards as the catalog changes.
-						if !announced_no_more_pads && !active.is_empty() {
-							let _ = control_tx.send(ControlMessage::NoMorePads);
-							announced_no_more_pads = true;
-						}
+						// We deliberately never emit `no_more_pads`: a later catalog can
+						// add renditions at any time, so we can't promise the pad set is
+						// complete. The `Sometimes` pads link on pad-added, and the one
+						// moment we'd truly know there are no more pads -- the catalog
+						// closing -- coincides with the streams ending (EOS) anyway.
 					}
 					// Catalog track closed. Don't cancel the pumps -- let each reach
 					// its natural Ok(None) -> EOS end so downstream sees a clean EOS
