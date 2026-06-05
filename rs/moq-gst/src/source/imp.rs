@@ -72,8 +72,8 @@ struct TrackDescriptor {
 	name: String,
 	/// A process-unique pad index. Pads are named `video_<id>` / `audio_<id>`
 	/// (matching the `%u` templates) rather than after the track name, so a
-	/// rendition can be torn down and recreated — when its codec/resolution
-	/// changes mid-stream — without two pads ever sharing a name.
+	/// rendition can be torn down and recreated (when its codec/resolution
+	/// changes mid-stream) without two pads ever sharing a name.
 	id: u64,
 }
 
@@ -550,37 +550,46 @@ async fn reconcile(
 	struct Desired {
 		kind: TrackKind,
 		caps: gst::Caps,
-		container: hang::catalog::Container,
+		/// The hang container descriptor, kept for change detection against an [`ActiveTrack`].
+		container_hint: hang::catalog::Container,
+		/// The resolved wire container, moved into the pump when we spawn it.
+		container: moq_mux::catalog::hang::Container,
 	}
 
-	// Build the desired set from the catalog, computing caps up front so a malformed
-	// config surfaces before we touch any pads.
+	// Resolve caps and the wire container up front. A rendition we can't handle (unsupported
+	// codec, malformed CMAF init) is logged and skipped rather than failing the whole session,
+	// so one bad rendition in a catalog update can't tear down the others we're already serving.
+	let resolve = |kind, caps: Result<gst::Caps>, hint: &hang::catalog::Container| -> Result<Desired> {
+		Ok(Desired {
+			kind,
+			caps: caps?,
+			container: moq_mux::catalog::hang::Container::try_from(hint)?,
+			container_hint: hint.clone(),
+		})
+	};
+
 	let mut desired: HashMap<String, Desired> = HashMap::new();
 	for (name, config) in &catalog.video.renditions {
-		desired.insert(
-			name.clone(),
-			Desired {
-				kind: TrackKind::Video,
-				caps: video_caps(config)?,
-				container: config.container.clone(),
-			},
-		);
+		match resolve(TrackKind::Video, video_caps(config), &config.container) {
+			Ok(d) => {
+				desired.insert(name.clone(), d);
+			}
+			Err(err) => gst::warning!(CAT, "ignoring video rendition {name}: {err:?}"),
+		}
 	}
 	for (name, config) in &catalog.audio.renditions {
-		desired.insert(
-			name.clone(),
-			Desired {
-				kind: TrackKind::Audio,
-				caps: audio_caps(config)?,
-				container: config.container.clone(),
-			},
-		);
+		match resolve(TrackKind::Audio, audio_caps(config), &config.container) {
+			Ok(d) => {
+				desired.insert(name.clone(), d);
+			}
+			Err(err) => gst::warning!(CAT, "ignoring audio rendition {name}: {err:?}"),
+		}
 	}
 
 	// Drop anything that disappeared or changed shape; survivors stay put, and the
 	// changed ones get re-added below under a fresh pad id.
 	active.retain(|name, track| match desired.get(name) {
-		Some(d) if d.caps == track.caps && d.container == track.container => true,
+		Some(d) if d.caps == track.caps && d.container_hint == track.container => true,
 		_ => {
 			let _ = track.cancel.send(true);
 			false
@@ -603,10 +612,8 @@ async fn reconcile(
 		};
 		let endpoint = request_pad(control_tx, descriptor.clone(), d.caps.clone()).await?;
 
-		let container = moq_mux::catalog::hang::Container::try_from(&d.container)
-			.with_context(|| format!("unsupported container for track {name}"))?;
 		let track_consumer = broadcast.subscribe_track(&moq_net::Track::new(&name))?;
-		let track = moq_mux::container::Consumer::new(track_consumer, container).with_latency(Duration::from_secs(1));
+		let track = moq_mux::container::Consumer::new(track_consumer, d.container).with_latency(Duration::from_secs(1));
 
 		let (cancel_tx, cancel_rx) = watch::channel(false);
 		spawn_track_pump(
@@ -623,7 +630,7 @@ async fn reconcile(
 			ActiveTrack {
 				id,
 				caps: d.caps,
-				container: d.container,
+				container: d.container_hint,
 				cancel: cancel_tx,
 			},
 		);
