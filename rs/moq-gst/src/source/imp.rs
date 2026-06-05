@@ -609,6 +609,10 @@ fn video_caps(config: &hang::catalog::VideoConfig) -> Result<gst::Caps> {
 			}
 			builder.build()
 		}
+		// VP8/VP9 are raw frame streams: gstreamer carries each frame as one buffer
+		// and the decoders read configuration inline, so no codec_data is attached.
+		VideoCodec::VP8 => gst::Caps::builder("video/x-vp8").build(),
+		VideoCodec::VP9(_) => gst::Caps::builder("video/x-vp9").build(),
 		other => bail!("unsupported video codec: {other:?}"),
 	};
 	Ok(caps)

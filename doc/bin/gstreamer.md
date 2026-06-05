@@ -194,6 +194,8 @@ gst-launch-1.0 -v -e \
 | Video | H.264 | `video/x-h264`        |
 | Video | H.265 | `video/x-h265`        |
 | Video | AV1   | `video/x-av1`         |
+| Video | VP8   | `video/x-vp8`         |
+| Video | VP9   | `video/x-vp9`         |
 | Audio | AAC   | `audio/mpeg` (v4)     |
 | Audio | Opus  | `audio/x-opus`        |
 

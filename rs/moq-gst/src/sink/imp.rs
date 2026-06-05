@@ -205,6 +205,8 @@ impl ElementImpl for MoqSink {
 					.build(),
 			);
 			caps.merge(gst::Caps::builder("video/x-av1").build());
+			caps.merge(gst::Caps::builder("video/x-vp8").build());
+			caps.merge(gst::Caps::builder("video/x-vp9").build());
 			caps.merge(
 				gst::Caps::builder("audio/mpeg")
 					.field("mpegversion", 4i32)
@@ -457,6 +459,14 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 		"video/x-av1" => {
 			let mut bytes = Bytes::new();
 			new_decoder(runtime, moq_mux::import::FramedFormat::Av01, &mut bytes)?
+		}
+		"video/x-vp8" => {
+			let mut bytes = Bytes::new();
+			new_decoder(runtime, moq_mux::import::FramedFormat::Vp8, &mut bytes)?
+		}
+		"video/x-vp9" => {
+			let mut bytes = Bytes::new();
+			new_decoder(runtime, moq_mux::import::FramedFormat::Vp9, &mut bytes)?
 		}
 		"audio/mpeg" => {
 			let codec_data = structure
