@@ -135,14 +135,16 @@ impl OriginList {
 		Ok(())
 	}
 
-	/// Insert an [`Origin`] at the front (oldest position). Returns
-	/// [`TooManyOrigins`] if the list is full.
-	pub fn push_front(&mut self, origin: Origin) -> Result<(), TooManyOrigins> {
-		if self.0.len() >= MAX_HOPS {
-			return Err(TooManyOrigins);
+	/// Replace the first entry equal to `target` with `replacement`, returning
+	/// true if a match was found. The length is unchanged.
+	pub fn replace_first(&mut self, target: Origin, replacement: Origin) -> bool {
+		for entry in &mut self.0 {
+			if *entry == target {
+				*entry = replacement;
+				return true;
+			}
 		}
-		self.0.insert(0, origin);
-		Ok(())
+		false
 	}
 
 	/// Returns true if any entry matches `origin`.
@@ -1065,17 +1067,19 @@ mod tests {
 	}
 
 	#[test]
-	fn origin_list_push_front_orders_and_limits() {
+	fn origin_list_replace_first() {
 		let mut list = OriginList::new();
-		list.push(Origin::from(2)).unwrap();
-		list.push(Origin::from(3)).unwrap();
-		list.push_front(Origin::from(1)).unwrap();
-		assert_eq!(list.as_slice(), &[Origin::from(1), Origin::from(2), Origin::from(3)]);
-
-		while list.len() < MAX_HOPS {
-			list.push(Origin::random()).unwrap();
+		for _ in 0..3 {
+			list.push(Origin::UNKNOWN).unwrap();
 		}
-		assert_eq!(list.push_front(Origin::random()), Err(TooManyOrigins));
+
+		// Rewrites only the first placeholder, keeping the length the same.
+		assert!(list.replace_first(Origin::UNKNOWN, Origin::from(7)));
+		assert_eq!(list.as_slice(), &[Origin::from(7), Origin::UNKNOWN, Origin::UNKNOWN]);
+
+		// No match leaves the list untouched.
+		assert!(!list.replace_first(Origin::from(99), Origin::from(8)));
+		assert_eq!(list.len(), 3);
 	}
 
 	#[test]

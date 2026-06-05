@@ -46,11 +46,11 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// to skip broadcasts whose hop chain already passed through us, and we
 	// double-check incoming announces against it as defense in depth.
 	self_origin: crate::Origin,
-	// A random per-connection origin prepended to the hop chain of broadcasts
-	// from versions that don't carry one on the wire (Lite01/02/03). It gives
-	// each upstream session a stable, unique identity in the hop list so two
-	// sessions publishing the same path resolve as distinct routes instead of
-	// colliding on an empty/placeholder chain.
+	// A random per-connection origin stamped into the hop chain of broadcasts
+	// from versions that don't carry real hop ids on the wire (Lite01/02/03).
+	// It gives each upstream session a stable, unique identity in the hop list
+	// so two sessions publishing the same path resolve as distinct routes
+	// instead of colliding on an empty/placeholder chain.
 	session_origin: crate::Origin,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	next_id: Arc<atomic::AtomicU64>,
@@ -288,16 +288,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Ok(false);
 		}
 
-		// Versions before Lite04 don't carry a real hop list (Lite01/02 send
-		// none, Lite03 sends a count with placeholder ids), so every broadcast
-		// arrives with an empty or anonymous chain. Prepend this connection's
-		// origin so the route is attributable to the upstream session.
-		if self.version_lacks_hops() && hops.push_front(self.session_origin).is_err() {
-			tracing::warn!(
-				broadcast = %self.log_path(&path),
-				"dropping announce; hop chain at MAX_HOPS (possible loop)",
-			);
-			return Ok(false);
+		// Versions before Lite04 don't carry real hop ids: Lite01/02 send an
+		// empty chain, Lite03 sends a count materialized as UNKNOWN
+		// placeholders. Stamp this connection's origin into the chain so the
+		// route is attributable to the upstream session. Rewrite a Lite03
+		// placeholder in place (preserving its hop count, so shortest-path
+		// selection and the MAX_HOPS limit are unaffected); for an empty chain
+		// add a single entry, which can never overflow.
+		if self.version_lacks_hops() && !hops.replace_first(crate::Origin::UNKNOWN, self.session_origin) {
+			hops.push(self.session_origin)
+				.expect("an empty hop chain always has room for one entry");
 		}
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
