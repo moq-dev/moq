@@ -1,13 +1,8 @@
-// Print the absolute path to the published @moq/token CLI entrypoint.
-//
-// token.sh runs this with BOTH node and bun so each runtime resolves the same
-// installed package and we drive the *published* bin (compiled dist), not the
-// in-tree TypeScript source. We read the installed package.json straight off
-// disk rather than via module resolution: @moq/token's `exports` map doesn't
-// expose ./package.json, which Node's strict ESM resolver refuses (bun allows
-// it), so require.resolve would work under bun but throw under node. Reading the
-// file keeps both runtimes on the same path, and the bin name is still taken
-// from the published manifest so a rename surfaces here.
+// Print the absolute path to the published @moq/token CLI bin, for both node
+// and bun. We read package.json off disk instead of via module resolution
+// because @moq/token's exports map doesn't expose ./package.json, which node's
+// strict ESM resolver refuses (bun allows it); reading the file keeps both
+// runtimes on the same path while still taking the bin name from the manifest.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 

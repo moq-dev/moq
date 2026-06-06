@@ -2,7 +2,7 @@
 
 Cross-language interop smoke test for the **published** [Media over QUIC](https://github.com/moq-dev/moq) packages.
 
-The per-language unit tests (`just test`) build every client from workspace source. That proves the code in the tree works; it does **not** prove a real user can install the published artifacts and have them talk to each other. A missing wheel, a stale Homebrew formula, a broken `.deb`, an export that didn't survive packaging, a Go module missing its header. none of that shows up until someone installs from a registry.
+The per-language unit tests (`just test`) build every client from workspace source. That proves the code in the tree works; it does **not** prove a real user can install the published artifacts and have them talk to each other. A missing wheel, a stale Homebrew formula, a broken `.deb`, an export that didn't survive packaging, a Go module missing its header. None of that shows up until someone installs from a registry.
 
 This harness installs each client straight from its public package registry, stands up a relay, and runs the interop matrix:
 
@@ -95,7 +95,7 @@ The poll budget is `SMOKE_POLL_TRIES` x `SMOKE_POLL_SLEEP` (default 60 x 5s = 5 
 
 ## Layout
 
-```
+```text
 justfile                 per-language slices (`just smoke <lang>`), wired into the root justfile
 smoke.sh                 orchestrator: relay + media interop matrix
 smoke.toml               relay config (anonymous, self-signed localhost)

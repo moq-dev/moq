@@ -39,6 +39,9 @@ if ((role !== "publish" && role !== "subscribe") || !url || !broadcast || !dir) 
 	process.exit(2);
 }
 const timeoutMs = Number.parseFloat(values.timeout ?? "20") * 1000;
+// If nothing has decoded by this fraction of the timeout, reload once to
+// re-subscribe (the publisher may have come up after the first subscribe).
+const RELOAD_AT_FRACTION = 0.5;
 
 // Serve the prebuilt page on localhost (a secure context, so WebTransport /
 // WebCodecs are enabled). A plain static server avoids running concurrent Vite
@@ -90,9 +93,9 @@ try {
 			});
 			if (frames > 0) break;
 			// The watch element gives up if it subscribes to the catalog before the
-			// publisher has announced it (RESET_STREAM). If nothing has decoded by the
-			// halfway mark, reload once to re-subscribe now that the publisher is up.
-			if (!reloaded && Date.now() - start > timeoutMs / 2) {
+			// publisher has announced it (RESET_STREAM). Reload once past the
+			// threshold to re-subscribe now that the publisher is up.
+			if (!reloaded && Date.now() - start > timeoutMs * RELOAD_AT_FRACTION) {
 				reloaded = true;
 				await page.reload({ waitUntil: "load" }).catch(() => {});
 			}
