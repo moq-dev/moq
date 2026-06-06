@@ -1087,10 +1087,12 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 		session_tracks.push(t);
 	}
 
-	if !shared.origin.publish_broadcast(&advertised, broadcast.consume()) {
+	// Hold the announcement guard for the lifetime of this task; dropping it (on return)
+	// unannounces the stats broadcast.
+	let Ok(_publish) = shared.origin.publish_broadcast(&advertised, broadcast.consume()) else {
 		tracing::warn!(advertised = %advertised, "stats: origin rejected stats broadcast");
 		return;
-	}
+	};
 	drop(shared);
 
 	// Per-path snapshot state owned by this task. Mirrors the global entries

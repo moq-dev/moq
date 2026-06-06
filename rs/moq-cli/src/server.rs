@@ -40,7 +40,9 @@ async fn run_serve_session(
 ) -> anyhow::Result<()> {
 	// Create an origin producer to publish to the broadcast.
 	let origin = moq_net::Origin::random().produce();
-	origin.publish_broadcast(&name, consumer);
+	let _publish = origin
+		.publish_broadcast(&name, consumer)
+		.expect("origin should allow publishing");
 
 	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.
 	let session = session.with_publisher(origin.clone()).ok().await?;

@@ -192,7 +192,20 @@ impl Origin {
 		broadcast: moq_net::BroadcastConsumer,
 	) -> Result<(), Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		origin.publish_broadcast(path, broadcast);
+
+		// Errors only if the origin rejects the publish (loop / out of scope). libmoq origins
+		// are full-scope and broadcasts carry empty hop chains, so this is unreachable; ignore
+		// it to match the prior fire-and-forget contract.
+		if let Ok(publish) = origin.publish_broadcast(path, broadcast.clone()) {
+			// Auto-unannounce when the broadcast closes (all producers dropped). This keeps the
+			// previous behavior now that the origin no longer watches closure itself; the spawn
+			// lives at the FFI boundary, which is inherently runtime-bound.
+			tokio::spawn(async move {
+				broadcast.closed().await;
+				drop(publish);
+			});
+		}
+
 		Ok(())
 	}
 

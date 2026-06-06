@@ -70,7 +70,9 @@ async fn main() -> anyhow::Result<()> {
 			let track = broadcast.create_track(track, None)?;
 			let clock = Publisher::new(track);
 
-			origin.publish_broadcast(&config.broadcast, broadcast.consume());
+			let _publish = origin
+				.publish_broadcast(&config.broadcast, broadcast.consume())
+				.expect("origin should allow publishing");
 
 			let reconnect = client.with_publisher(origin.clone()).reconnect(config.url);
 

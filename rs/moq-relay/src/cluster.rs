@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::Context;
-use moq_net::{BroadcastProducer, Origin, OriginProducer, Path, Stats, Tier};
+use moq_net::{BroadcastPublish, Origin, OriginProducer, Path, Stats, Tier};
 use notify::Watcher;
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::task::AbortHandle;
@@ -523,7 +523,7 @@ impl Cluster {
 		// Held in scope so the registration stays announced until `run` exits.
 		// Discovery is paired with it: a gossip-only relay (passive rendezvous) has
 		// nothing to discover, so we only run it when we also have an outbound peer.
-		let _self_registration: Option<BroadcastProducer> = if gossip {
+		let _self_registration: Option<BroadcastPublish> = if gossip {
 			// Checked above: gossip requires `node`.
 			let node = node.as_deref().expect("gossip requires --cluster-node");
 			let path = Path::new(MESH_PREFIX).join(node);

@@ -1,5 +1,5 @@
 use std::{
-	collections::{HashMap, hash_map::Entry},
+	collections::HashMap,
 	pin::Pin,
 	sync::{Arc, atomic},
 	task::Poll,
@@ -10,11 +10,10 @@ use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered}
 
 use crate::{
 	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastInfo, Compression, Error, Frame, FrameProducer, Group,
-	GroupProducer, GroupRequest, MAX_FRAME_SIZE, OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats,
-	SubscriberTrack, Subscription, Timescale, Timestamp, TrackInfo, TrackProducer, TrackRequest,
+	GroupProducer, GroupRequest, MAX_FRAME_SIZE, OriginProducer, OriginPublish, Path, PathOwned, StatsHandle,
+	SubscriberStats, SubscriberTrack, Subscription, Timescale, Timestamp, TrackInfo, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	lite,
-	model::BroadcastProducer,
 };
 
 use super::{ConnectingProducer, Version};
@@ -273,8 +272,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// The matching Active may have been silently dropped by
 					// start_announce as a reflected loop, in which case
 					// `producers` has no entry; that's expected, not an error.
-					if let Some(mut producer) = producers.remove(&path) {
-						producer.abort(Error::Cancel).ok();
+					// Dropping the entry drops its OriginPublish guard, which unannounces.
+					if producers.remove(&path).is_some() {
 						let abs = self.origin.absolute(&path).to_owned();
 						stats_guards.remove(&abs);
 					}
@@ -346,7 +345,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// the full `[src...sender]` chain Lite04 stored. None for older versions,
 		// where the sender already appended itself.
 		responder_origin: Option<crate::Origin>,
-		producers: &mut HashMap<PathOwned, BroadcastProducer>,
+		producers: &mut HashMap<PathOwned, OriginPublish>,
 	) -> Result<bool, Error> {
 		if let Some(responder) = responder_origin {
 			// If the chain is already full, drop the announce — the same decision
@@ -369,15 +368,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Ok(false);
 		}
 
+		// Make sure the peer doesn't double announce.
+		if producers.contains_key(&path) {
+			return Err(Error::Duplicate);
+		}
+
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
 
 		let broadcast = BroadcastInfo { hops }.produce();
-
-		// Make sure the peer doesn't double announce.
-		match producers.entry(path.to_owned()) {
-			Entry::Occupied(_) => return Err(Error::Duplicate),
-			Entry::Vacant(entry) => entry.insert(broadcast.clone()),
-		};
 
 		// Create the dynamic handler BEFORE publishing, so that consumers
 		// see dynamic >= 1 immediately when they receive the announcement.
@@ -385,9 +383,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// can call consume_track() before dynamic is incremented, getting NotFound.
 		let dynamic = broadcast.dynamic();
 
-		// Run the broadcast in the background until all consumers are dropped.
-		self.origin.publish_broadcast(path.clone(), broadcast.consume());
+		// Publish into the origin. An error means the origin rejected it (its own loop check or
+		// scope), so don't announce or spawn a server for it; we already pre-filter loops above.
+		let Ok(publish) = self.origin.publish_broadcast(path.clone(), broadcast.consume()) else {
+			return Ok(false);
+		};
 
+		producers.insert(path.clone(), publish);
+
+		// Run the broadcast in the background until all consumers are dropped.
 		web_async::spawn(self.clone().run_broadcast(path, dynamic));
 
 		Ok(true)
@@ -407,7 +411,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// rebuild the full chain since the sender no longer stamps itself. None for older
 		// versions. See `start_announce`.
 		responder_origin: Option<crate::Origin>,
-		producers: &mut HashMap<PathOwned, BroadcastProducer>,
+		producers: &mut HashMap<PathOwned, OriginPublish>,
 	) -> Result<bool, Error> {
 		// Reflected loop (or a full chain): the replacement can't be used here. Retire the broadcast.
 		let reflected = match responder_origin {
@@ -416,9 +420,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 		if reflected {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected restart");
-			if let Some(mut old) = producers.remove(&path) {
-				old.abort(Error::Cancel).ok();
-			}
+			// Dropping the entry drops its guard, unannouncing the broadcast.
+			producers.remove(&path);
 			return Ok(false);
 		}
 
@@ -428,15 +431,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let dynamic = broadcast.dynamic();
 
 		// Publish the replacement first so the origin restarts atomically; the old broadcast is
-		// demoted to a backup and dropped silently when we abort it below.
-		self.origin.publish_broadcast(path.clone(), broadcast.consume());
+		// demoted to a backup and removed silently when we drop its guard below.
+		let Ok(publish) = self.origin.publish_broadcast(path.clone(), broadcast.consume()) else {
+			// Origin rejected the replacement; retire the existing broadcast.
+			producers.remove(&path);
+			return Ok(false);
+		};
 
-		let old = producers.insert(path.clone(), broadcast.clone());
+		let old = producers.insert(path.clone(), publish);
 		web_async::spawn(self.clone().run_broadcast(path.clone(), dynamic));
 
-		if let Some(mut old) = old {
-			old.abort(Error::Cancel).ok();
-		}
+		// Drop the replaced broadcast's guard last, unannouncing it now that the replacement is live.
+		drop(old);
 
 		Ok(true)
 	}

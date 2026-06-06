@@ -94,7 +94,9 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
-	origin.publish_broadcast("", broadcast.consume());
+	let _publish = origin
+		.publish_broadcast("", broadcast.consume())
+		.expect("origin should allow publishing");
 
 	// Wrap in a Producer for keyframe-based group management.
 	let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
