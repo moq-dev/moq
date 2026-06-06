@@ -1,4 +1,5 @@
 import * as Catalog from "@moq/hang/catalog";
+import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
@@ -79,12 +80,20 @@ export class Broadcast {
 
 			effect.cleanup(() => request.track.close());
 
+			// Persistent JSON producer for the catalog track, so it survives reactive re-runs
+			// (and can emit deltas in the future). Deltas are disabled for now.
+			const catalogProducer =
+				request.track.name === Broadcast.CATALOG_TRACK
+					? new Json.Producer<Catalog.Root>(request.track)
+					: undefined;
+
 			effect.run((effect) => {
 				if (effect.get(request.track.state.closed)) return;
 
 				switch (request.track.name) {
 					case Broadcast.CATALOG_TRACK:
-						this.#serveCatalog(request.track, effect);
+						// biome-ignore lint/style/noNonNullAssertion: created above for this track name.
+						this.#serveCatalog(catalogProducer!, effect);
 						break;
 					case Location.Window.TRACK:
 						this.location.window.serve(request.track, effect);
@@ -119,10 +128,10 @@ export class Broadcast {
 		}
 	}
 
-	#serveCatalog(track: Moq.Track, effect: Effect): void {
+	#serveCatalog(producer: Json.Producer<Catalog.Root>, effect: Effect): void {
 		if (!effect.get(this.enabled)) {
 			// Clear the catalog.
-			track.writeFrame(Catalog.encode({}));
+			producer.update({});
 			return;
 		}
 
@@ -136,8 +145,7 @@ export class Broadcast {
 			preview: effect.get(this.preview.catalog),
 		};
 
-		const encoded = Catalog.encode(catalog);
-		track.writeFrame(encoded);
+		producer.update(catalog);
 	}
 
 	close() {

@@ -1,0 +1,64 @@
+[
+	{
+		"name": "changed_scalar",
+		"old": { "a": 1, "b": 2 },
+		"new": { "a": 1, "b": 3 },
+		"forced": false,
+		"patch": { "b": 3 }
+	},
+	{
+		"name": "added_key",
+		"old": { "a": 1 },
+		"new": { "a": 1, "b": 2 },
+		"forced": false,
+		"patch": { "b": 2 }
+	},
+	{
+		"name": "removed_key_is_null",
+		"old": { "a": 1, "b": 2 },
+		"new": { "a": 1 },
+		"forced": false,
+		"patch": { "b": null }
+	},
+	{
+		"name": "nested_object",
+		"old": { "o": { "x": 1, "y": 2 } },
+		"new": { "o": { "x": 1, "y": 9 } },
+		"forced": false,
+		"patch": { "o": { "y": 9 } }
+	},
+	{
+		"name": "replace_object_with_scalar",
+		"old": { "a": { "x": 1 } },
+		"new": { "a": 5 },
+		"forced": false,
+		"patch": { "a": 5 }
+	},
+	{
+		"name": "catalog_like_add_user",
+		"old": { "video": { "renditions": {} }, "audio": { "renditions": {} } },
+		"new": { "video": { "renditions": {} }, "audio": { "renditions": {} }, "user": { "name": "alice" } },
+		"forced": false,
+		"patch": { "user": { "name": "alice" } }
+	},
+	{
+		"name": "changed_array_is_wholesale_delta",
+		"old": { "a": [1, 2] },
+		"new": { "a": [1, 2, 3] },
+		"forced": false,
+		"patch": { "a": [1, 2, 3] }
+	},
+	{
+		"name": "added_array_is_delta",
+		"old": { "a": 1 },
+		"new": { "a": 1, "b": [1] },
+		"forced": false,
+		"patch": { "b": [1] }
+	},
+	{
+		"name": "set_to_null_forces_snapshot",
+		"old": { "a": 1 },
+		"new": { "a": null },
+		"forced": true
+	}
+]
