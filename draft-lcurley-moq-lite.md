@@ -87,7 +87,17 @@ When UDP is unavailable, moq-lite-05 MAY also run over reliable byte-stream tran
 Qmux provides a length-delimited polyfill for QUIC streams on top of TCP/TLS or WebSocket; see [Transports](#transports) for the specific bindings and ALPN negotiation.
 
 The session is active immediately after the QUIC/WebTransport connection is established.
-Extensions are negotiated via stream probing: an endpoint opens a stream with an unknown type and the peer resets it if unsupported.
+Both endpoints SHOULD begin sending and receiving streams right away to avoid an extra round-trip.
+
+Optional capabilities and extensions are negotiated via a SETUP message (see [SETUP](#setup)).
+Each endpoint MUST open a unidirectional Setup Stream at the start of the session, send a single SETUP message advertising what it supports, and immediately close the stream (FIN); an endpoint with no optional capabilities sends a SETUP with an empty parameter list.
+The two SETUP messages are independent; neither endpoint waits for the peer's SETUP before opening other streams.
+Because a SETUP is always sent, the buffering below is bounded: an endpoint knows the peer's full capability set has arrived once it receives that single SETUP.
+An endpoint SHOULD continue to send and process non-Setup streams until a negotiated extension would change the behavior or encoding of a stream, in which case it MUST buffer that stream until the peer's SETUP has been received.
+For example, if an extension adds a field to SUBSCRIBE_OK, the subscriber buffers SUBSCRIBE_OK until SETUP arrives so the new field can be parsed.
+
+As a fallback, an endpoint that opens an extension stream the peer does not support simply sees that stream reset (see [STREAM_TYPE](#stream_type)).
+A negotiated capability applies only to this hop; each session is negotiated independently and relays MUST NOT forward SETUP.
 
 While moq-lite is a point-to-point protocol, it's intended to work end-to-end via relays.
 Each client establishes a session with a CDN edge server, ideally the closest one.
@@ -303,14 +313,16 @@ The publisher FINs the stream after the last frame, or resets the stream on erro
 Fetch behaves like HTTP: a single request/response per stream.
 
 ### Probe
-A subscriber opens a Probe Stream (0x4) to measure the available bitrate of the connection.
+A subscriber opens a Probe Stream (0x4) to measure, and optionally increase, the available bitrate of the connection.
+The publisher advertises its Probe level in SETUP (see [Probe Parameter](#probe-parameter)): None, Report (measure only), or Increase (measure and actively probe).
 
 The subscriber sends a PROBE message with a target bitrate on the bidirectional stream.
 The subscriber MAY send additional PROBE messages on the same stream to update the target bitrate; the publisher MUST treat each PROBE as a new target to attempt.
-The publisher SHOULD pad the connection to achieve the most recent target bitrate.
-The publisher periodically replies with PROBE messages on the same bidirectional stream containing the current estimated bitrate and smoothed RTT.
+If the publisher advertised the Increase capability, it SHOULD pad the connection (or send redundant data) to achieve the most recent target bitrate, without exceeding the congestion window.
+A publisher that advertised Report but not Increase ignores the target and only reports; it MUST NOT pad above its current sending rate.
+In either case the publisher periodically replies with PROBE messages on the same bidirectional stream containing the current estimated bitrate and smoothed RTT.
 
-If the publisher does not support PROBE (e.g., congestion controller is not exposed), it MUST reset the stream.
+If the publisher advertised no Probe capability (e.g., the congestion controller is not exposed), it MUST reset the stream.
 
 ### Goaway
 Either endpoint can open a Goaway Stream (0x5) to initiate a graceful session shutdown.
@@ -420,6 +432,17 @@ Unidirectional streams are used for data transmission.
 |-------:|:---------|-------------|
 |    0x0 | Group    | Publisher   |
 | ------ | -------- | ----------- |
+|    0x1 | Setup    | Either      |
+| ------ | -------- | ----------- |
+
+### Setup {#setup-stream}
+Each endpoint MUST open a Setup Stream (0x1) at the start of the session to advertise the optional capabilities and extensions it supports.
+
+The opener sends a single SETUP message and immediately closes the stream (FIN).
+There is exactly one Setup Stream per direction; an endpoint that receives a second Setup Stream MUST close the session with a PROTOCOL_VIOLATION.
+An endpoint with no optional capabilities sends a SETUP with an empty parameter list rather than omitting the stream, giving the peer a deterministic signal that no capabilities are forthcoming.
+
+See the [Session](#session) section for how an endpoint avoids waiting on the peer's SETUP before exchanging other streams.
 
 ### Group
 A publisher creates Group Streams in response to a Subscribe Stream.
@@ -494,7 +517,7 @@ This length field does not include the length of the varint length itself.
 An implementation SHOULD close the connection with a PROTOCOL_VIOLATION if it receives a message with an unexpected length.
 The version and extensions should be used to support new fields, not the message length.
 
-## STREAM_TYPE
+## STREAM_TYPE {#stream_type}
 All streams start with a short header indicating the stream type.
 
 ~~~
@@ -505,7 +528,65 @@ STREAM_TYPE {
 
 The stream ID depends on if it's a bidirectional or unidirectional stream, as indicated in the Streams section.
 A receiver MUST reset the stream if it receives an unknown stream type.
-Unknown stream types MUST NOT be treated as fatal; this enables extension negotiation via stream probing.
+Unknown stream types MUST NOT be treated as fatal; this is the fallback when an extension stream is opened against a peer that did not negotiate it.
+
+
+## SETUP {#setup}
+A SETUP message advertises the optional capabilities and extensions the sender supports for this session.
+It is sent exactly once, as the only message on a [Setup Stream](#setup-stream).
+
+~~~
+SETUP Message {
+  Message Length (i)
+  Parameter Count (i)
+  Setup Parameter (..) ...
+}
+
+Setup Parameter {
+  Parameter ID (i)
+  Parameter Length (i)
+  Parameter Value (..)
+}
+~~~
+
+**Parameter Count**:
+The number of Setup Parameters that follow.
+
+**Parameter ID**:
+Identifies the capability or extension.
+A receiver MUST ignore unknown Parameter IDs, allowing new capabilities to be added without breaking older implementations.
+A Parameter ID MUST NOT appear more than once; a receiver MUST close the session with a PROTOCOL_VIOLATION if it does.
+
+**Parameter Length**:
+The length of Parameter Value in bytes.
+
+**Parameter Value**:
+The parameter-specific value, interpreted according to Parameter ID.
+
+A capability is available for the session only if the relevant endpoint advertises it; an absent parameter means the sender does not support that capability.
+The following Setup Parameters are defined:
+
+|------|----------|-------------|
+|  ID  | Name     | Value       |
+|-----:|:---------|:------------|
+| 0x1  | Probe    | Level (i)   |
+|------|----------|-------------|
+
+### Probe Parameter {#probe-parameter}
+The Probe Parameter advertises the sender's capability level when acting as a publisher on a [Probe Stream](#probe).
+The Parameter Value is a variable-length integer level, where each level includes the one below it:
+
+- `0` **None**: The publisher does not support probing. Equivalent to omitting the parameter.
+- `1` **Report**: The publisher can measure and periodically report its estimated bitrate.
+- `2` **Increase**: The publisher can additionally pad the connection (or send redundant data) to probe for bandwidth above its current sending rate, up to the subscriber's target.
+
+The levels are nested rather than independent: probing for more bandwidth is meaningless without measuring it, so Increase always includes Report. Reporting the current bitrate is far simpler to implement, so a publisher may support Report without Increase.
+
+A subscriber MUST consult the publisher's advertised level before relying on a Probe Stream:
+
+- At `None`, the subscriber SHOULD NOT open a Probe Stream; if it does, the publisher MUST reset it.
+- At `Report`, the subscriber MAY open a Probe Stream to monitor the estimated bitrate but MUST NOT expect the publisher to pad above its current sending rate. A subscriber that needs to probe for additional bandwidth MUST use an alternative (e.g. speculatively switching to a higher rendition).
+- At `Increase`, the subscriber MAY request a target bitrate and expect the publisher to actively probe up to it.
 
 
 ## ANNOUNCE_INTEREST
@@ -815,6 +896,7 @@ PROBE Message {
 
 **Bitrate**:
 When sent by the subscriber (stream opener): the target bitrate in bits per second that the publisher should pad up to.
+The publisher only honors a target above its current sending rate if it advertised the Increase capability (see [Probe Parameter](#probe-parameter)); otherwise the target is ignored and the publisher only reports.
 When sent by the publisher (responder): the current estimated bitrate in bits per second.
 A value of 0 means unknown.
 
@@ -907,6 +989,8 @@ A generic library or relay MUST NOT inspect or modify the decompressed contents 
 # Appendix A: Changelog
 
 ## moq-lite-05
+- Added a SETUP message, sent once on a unidirectional Setup Stream (0x1) at the start of the session and FIN'd immediately. It carries a list of Setup Parameters for negotiating optional capabilities and extensions per-hop, replacing the prior stream-probing approach (version is still negotiated via ALPN, not SETUP). Endpoints keep exchanging non-Setup streams without waiting for SETUP, buffering only a stream whose encoding a negotiated extension would change; unknown stream types are still reset as a fallback.
+- Added a SETUP `Probe` parameter advertising the publisher's capability level: `None`, `Report` (measure and report the estimated bitrate), or `Increase` (additionally pad to probe for bandwidth above the current sending rate). The levels are nested since probing without measuring is meaningless. A subscriber must not rely on a level the publisher did not advertise.
 - Added `Frame Start` to FETCH so a subscriber can begin partway through a group instead of always at frame `0`, allowing resumption of a partially-received group.
 - Renamed `Start Group`/`End Group` to `Group Start`/`Group End` in SUBSCRIBE, SUBSCRIBE_UPDATE, SUBSCRIBE_OK, and SUBSCRIBE_DROP for consistency with the entity-first naming used elsewhere (e.g. `Group Sequence`). Wire format unchanged.
 - Allowed a duplicate `active` ANNOUNCE to atomically replace the prior advertisement (equivalent to UNANNOUNCE+ANNOUNCE). Used when only the origin or hop path changes (e.g. relay failover) without interrupting the broadcast. No new wire enum value — the existing `active` status carries the new metadata.
@@ -956,7 +1040,7 @@ A quick comparison of moq-lite and moq-transport-14:
 - Streams instead of request IDs.
 - Pull only: No unsolicited publishing.
 - FETCH is HTTP-like (single request/response) vs MoqTransport FETCH (multiple groups).
-- Extensions negotiated via stream probing instead of parameters.
+- Capabilities negotiated via a SETUP message on a unidirectional stream that does not block other streams, instead of MoqTransport's blocking CLIENT_SETUP/SERVER_SETUP handshake on the control stream.
 - Both moq-lite and MoqTransport use ALPN for version identification.
 - Names use utf-8 strings instead of byte arrays.
 - Track Namespace is a string, not an array of any array of bytes.

@@ -25,7 +25,7 @@ informative:
 
 This document defines a PROBE extension for MoQ Transport {{moqt}}.
 A subscriber opens a bidirectional PROBE stream to request that the publisher pad the connection up to a target bitrate.
-The publisher sends padding as defined in {{moqt}} Section 7.7 and periodically responds with the measured bitrate and an elapsed timestamp, enabling the subscriber to estimate the available bandwidth.
+The publisher sends padding as defined in {{moqt}} Section 11.5 and periodically responds with the measured bitrate and an elapsed timestamp, enabling the subscriber to estimate the available bandwidth.
 
 --- middle
 
@@ -61,54 +61,68 @@ Using a wire-level extension ensures that PROBE measurements are scoped to a sin
 A relay terminates the PROBE stream and does not forward it upstream, avoiding incorrect measurements that reflect intermediate link capacity.
 
 ## This Extension
-{{moqt}} defines padding streams and datagrams (Section 7.7) for probing, but does not define a signaling mechanism for a subscriber to request padding or for a publisher to report measurements.
+{{moqt}} defines padding streams and datagrams (Section 11.5) for probing, but does not define a signaling mechanism for a subscriber to request padding or for a publisher to report measurements.
 This extension fills that gap: the subscriber opens a PROBE stream to request that the publisher pad the connection to a target bitrate using {{moqt}} padding.
 The publisher responds with periodic measurements, allowing the subscriber to adjust its subscriptions accordingly.
 
 
 # Setup Negotiation
-The PROBE extension is negotiated during the SETUP exchange as defined in {{moqt}} Section 9.4.
+The PROBE extension is negotiated during the SETUP exchange as defined in {{moqt}} Section 10.3.
+Each endpoint advertises the capabilities it supports when acting as a publisher (the responder on a PROBE stream).
 
-Both endpoints indicate support by including the following Setup Option:
+An endpoint indicates support by including the following Setup Option:
 
 ~~~
 PROBE Setup Option {
-  Option Key (vi64) = TBD1
-  Option Value Length (vi64) = 0
+  Option Key (vi64) = 0x950BE
+  Option Value Length (vi64)
+  Level (vi64)
 }
 ~~~
 
-If both endpoints include this option, the PROBE extension is available for the session.
-If a peer receives a PROBE stream without having negotiated the extension, it MUST close the session with a PROTOCOL_VIOLATION.
+**Level**:
+The publisher capability level the sender supports, where each level includes the one below it:
+
+- `1` **Report**: The publisher can measure and periodically report its estimated bitrate via PROBE_RESPONSE.
+- `2` **Increase**: The publisher can additionally send padding (or redundant data) to probe for bandwidth above its current sending rate, up to the subscriber's target.
+
+The levels are nested rather than independent: probing for more bandwidth is meaningless without measuring it, so Increase always includes Report. Reporting the current bitrate is far simpler to implement, so a publisher may support Report without Increase.
+
+A subscriber MUST consult the publisher's advertised Level before relying on a PROBE stream:
+
+- If the publisher omitted the option (or sent `0`), the PROBE extension is unavailable. A subscriber MUST NOT open a PROBE stream; if it does, the publisher MUST close the session with a PROTOCOL_VIOLATION.
+- At `Report`, the subscriber MAY open a PROBE stream to monitor the measured bitrate but MUST NOT expect padding above the current sending rate. It MUST set Target Bitrate to 0 and use an alternative if it needs to probe for additional bandwidth.
+- At `Increase`, the subscriber MAY request a non-zero Target Bitrate and expect the publisher to actively probe up to it.
 
 
 # PROBE Stream
-The PROBE extension uses a new bidirectional stream type.
+The PROBE extension defines two new MOQT messages, PROBE_REQUEST and PROBE_RESPONSE, exchanged on a bidirectional request stream.
+{{moqt}} no longer assigns dedicated bidirectional stream types; a request stream is identified by its first message type, and per {{moqt}} Section 3.3 a bidirectional stream MUST NOT begin with a message type the peer has not negotiated.
+The PROBE Setup Option (see [Setup Negotiation](#setup-negotiation)) performs this negotiation.
 
-~~~
-STREAM_TYPE = TBD2
-~~~
-
-The stream type is sent at the beginning of the stream, encoded as a variable-length integer, consistent with {{moqt}} stream type framing.
-
-A subscriber (stream opener) sends PROBE_REQUEST messages on the stream.
-The publisher (responder) sends PROBE_RESPONSE messages on the stream.
+A subscriber opens the stream with a PROBE_REQUEST message, which MUST be the first message on the stream.
+The subscriber (stream opener) sends PROBE_REQUEST messages and the publisher (responder) sends PROBE_RESPONSE messages on the same stream.
+An endpoint that receives a PROBE_REQUEST without having advertised the PROBE Setup Option MUST close the session with a PROTOCOL_VIOLATION.
 Either endpoint MAY close or reset the stream at any time.
+
+Both messages use the {{moqt}} Section 10 control-message framing: a `Type` identifying the message, a 16-bit `Length`, and the payload.
 
 
 ## PROBE_REQUEST
 A subscriber sends a PROBE_REQUEST to indicate the target the publisher should attempt to reach.
 
 ~~~
-PROBE_REQUEST {
-  Message Length (vi64)
+PROBE_REQUEST Message {
+  Type (vi64) = 0x950BE
+  Length (16)
   Target Bitrate (vi64)
 }
 ~~~
 
 **Target Bitrate**:
 The desired bitrate in kilobits per second.
-The publisher SHOULD send padding as defined in {{moqt}} Section 7.7 to attempt to reach this rate.
+The publisher SHOULD send padding as defined in {{moqt}} Section 11.5 to attempt to reach this rate, but only if it advertised the Increase capability (see [Setup Negotiation](#setup-negotiation)).
+A subscriber MUST set this to 0 unless the publisher advertised Increase.
 A value of 0 indicates no padding is needed; the publisher SHOULD only send media data but MUST continue sending PROBE_RESPONSE messages.
 This is useful for passively monitoring the current bitrate without actively probing for more bandwidth.
 Either endpoint MAY close or reset the stream to stop receiving updates entirely.
@@ -122,8 +136,9 @@ The publisher MUST use the most recently received target.
 The publisher periodically sends PROBE_RESPONSE messages containing the measured bitrate and the elapsed time since the last response.
 
 ~~~
-PROBE_RESPONSE {
-  Message Length (vi64)
+PROBE_RESPONSE Message {
+  Type (vi64) = 0x950BF
+  Length (16)
   Measured Bitrate (vi64)
   Elapsed (vi64)
 }
@@ -145,7 +160,7 @@ The interval is implementation-defined but a value between 100ms and 1000ms is R
 
 
 # Padding
-The publisher SHOULD send padding using the mechanisms defined in {{moqt}} Section 7.7 (padding streams and/or padding datagrams).
+The publisher SHOULD send padding using the mechanisms defined in {{moqt}} Section 11.5 (padding streams and/or padding datagrams).
 
 The publisher MUST NOT exceed the target with padding alone.
 If media traffic already meets or exceeds the target, no additional padding is necessary.
@@ -169,21 +184,27 @@ Implementations SHOULD enforce a minimum inter-request interval for PROBE_REQUES
 
 This document requests the following registrations:
 
-## MOQT Setup Option Type
+## MOQT Setup Options
 
-This document registers the following entry in the "MoQ Setup Option Types" registry:
+This document requests a registration in the "MOQT Setup Options" registry ({{moqt}} Section 15.4), whose policy is Specification Required.
+moq-transport defines no private-use range for Setup Options; extensions request a (provisional) codepoint.
+A high, distinctive value is chosen to avoid the low ranges reserved by {{moqt}} and to minimize collisions with provisional registrations by other extensions; it also avoids the greasing pattern (`0x7f * N + 0x9D`).
+This is the same value as the PROBE_REQUEST message type below; Setup Options and Message Types are independent registries, so the shared value is unambiguous.
 
-| Value | Name | Reference |
-|:------|:-----|:----------|
-| TBD1 | PROBE | This Document |
+| Value   | Name  | Reference     |
+|:--------|:------|:--------------|
+| 0x950BE | PROBE | This Document |
 
-## MOQT Stream Type
+## MOQT Message Types
 
-This document registers the following entry in the "MoQ Stream Types" registry:
+This document requests registrations in the "MOQT Message Types" registry ({{moqt}} Section 15).
+{{moqt}} replaced dedicated bidirectional stream types with request message types, so the PROBE stream is identified by its first message rather than a stream type.
+High, distinctive values are chosen to avoid the low ranges reserved by {{moqt}} and to minimize collisions with provisional registrations by other extensions; they also avoid the greasing pattern (`0x7f * N + 0x9D`).
 
-| Value | Name | Reference |
-|:------|:-----|:----------|
-| TBD2 | PROBE | This Document |
+| Value   | Name           | Stream         | Reference     |
+|:--------|:---------------|:---------------|:--------------|
+| 0x950BE | PROBE_REQUEST  | Request, First | This Document |
+| 0x950BF | PROBE_RESPONSE | Request        | This Document |
 
 
 --- back
