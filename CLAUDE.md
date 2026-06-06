@@ -95,6 +95,15 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   throttle/          # Network throttle script for testing
 
 /doc/                 # Documentation site (VitePress, deployed via Cloudflare)
+
+/test/                # Cross-language tests
+  smoke/             # Interop matrix against the PUBLISHED packages (not workspace
+                     # source): `just smoke <lang>` installs each client from its
+                     # registry and runs publish/subscribe. Latest mode (nightly
+                     # Linux) + pinned mode (per-release, via smoke-release.yml).
+                     # Clients live in test/smoke/clients and are deliberately
+                     # OUTSIDE the cargo/bun workspaces so they resolve published
+                     # artifacts, never workspace source.
 ```
 
 ## Dependencies
@@ -164,6 +173,7 @@ A function with 4+ args, or a call site passing the same 3+ values into multiple
 - Run `just fix` to automatically fix formating and easy things.
 - Rust tests are integrated within source files
 - Async tests that sleep should call `tokio::time::pause()` at the start to simulate time instantly
+- These tests build from workspace source. To verify the **published** packages interoperate (catch a packaging break a user would hit), run `just smoke <lang>` (see `test/smoke`). CI runs it nightly on Linux and per-release pinned to the version just cut.
 
 ## Cross-Package Sync
 
@@ -179,6 +189,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 | `rs/moq-cli` | `doc/bin/cli.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
+| A published client API the smoke harness drives (publish/subscribe CLIs, `@moq/*` element usage) | the matching `test/smoke/clients/*` |
 
 ## Branch Targeting
 

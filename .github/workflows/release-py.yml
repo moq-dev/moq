@@ -90,3 +90,13 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+
+  # Interop check against the version just published: install moq-rs from PyPI
+  # pinned to it and run the python<->rust matrix.
+  smoke:
+    name: Smoke
+    needs: [build, publish]
+    uses: ./.github/workflows/smoke-release.yml
+    with:
+      slice: python
+      version: ${{ needs.build.outputs.version }}

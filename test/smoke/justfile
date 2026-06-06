@@ -1,0 +1,122 @@
+#!/usr/bin/env just --justfile
+#
+# Cross-language interop smoke test against the PUBLIC moq packages. Unlike the
+# in-tree unit tests (which build from workspace source), every client here
+# installs from its public registry (PyPI / npm / Maven / the Go proxy / GitHub
+# release assets / Docker Hub), so a packaging break shows up as a red cell.
+#
+# Two ways to run:
+#   * latest mode (default): each client resolves the newest published version.
+#     This is what the nightly Linux job runs. `just smoke::freshness` guards the
+#     "nothing is pinned" policy.
+#   * pinned mode: set the matching MOQ_*_VERSION env (see smoke.sh) to force an
+#     exact version. Release workflows use this to test the version they just cut,
+#     instead of whatever the registry happens to serve. Pinned mode skips the
+#     freshness guard.
+#
+# You bring moq-relay + moq-cli on PATH (cargo/brew/apt/nix); the per-language
+# recipes pair each client with rust on the opposite axis as the reference impl.
+
+# Default: the rust<->rust baseline (no network installs).
+default *args:
+    ./smoke.sh --publishers rust --subscribers rust {{ args }}
+
+# ── per-language slices ──────────────────────────────────────────────────────
+# Each runs only the cells involving one implementation, paired with rust on the
+# other axis. A release workflow runs the slice for the package it just shipped.
+
+# Rust (moq-cli): publishes + subscribes. The reference implementation.
+rust *args:
+    ./smoke.sh --publishers rust --subscribers rust {{ args }}
+
+# Python (PyPI moq-rs): publishes + subscribes.
+python *args:
+    ./smoke.sh --publishers rust,python --subscribers rust,python --timeout 30 {{ args }}
+
+# Go (moq-dev/moq-go): publishes + subscribes.
+go *args:
+    ./smoke.sh --publishers rust,go --subscribers rust,go --timeout 30 {{ args }}
+
+# Swift (moq-dev/moq-swift, SPM): subscribe only (macOS, Xcode toolchain).
+swift *args:
+    ./smoke.sh --publishers rust --subscribers swift --timeout 30 {{ args }}
+
+# Kotlin (dev.moq:moq, Maven Central): subscribe only (JVM).
+kotlin *args:
+    ./smoke.sh --publishers rust --subscribers kotlin --timeout 30 {{ args }}
+
+# C (libmoq prebuilt release): subscribe only.
+c *args:
+    ./smoke.sh --publishers rust --subscribers c --timeout 30 {{ args }}
+
+# GStreamer (moq-gst prebuilt plugin): subscribe only, needs a system gstreamer.
+gst *args:
+    ./smoke.sh --publishers rust --subscribers gst --timeout 30 {{ args }}
+
+# Browser (@moq/watch + @moq/publish from npm), publish + subscribe. Variants: vite, esbuild, jsDelivr.
+js *args:
+    ./smoke.sh --publishers rust,js-vite,js-esbuild,js-jsdelivr --subscribers rust,js-vite,js-esbuild,js-jsdelivr --timeout 30 {{ args }}
+
+# Native JS (@moq/net + @moq/hang + @moq/web-transport polyfill) under node + bun, subscribe only.
+js-native *args:
+    ./smoke.sh --publishers rust --subscribers js-native-node,js-native-bun --timeout 30 {{ args }}
+
+# ── full matrix ──────────────────────────────────────────────────────────────
+
+# Every implementation, every supported direction (swift needs the macOS Xcode toolchain).
+full:
+    ./smoke.sh --publishers rust,python,js-vite,js-esbuild,js-jsdelivr --subscribers rust,python,go,swift,kotlin,c,gst,js-vite,js-esbuild,js-jsdelivr,js-native-node,js-native-bun --timeout 30
+
+# The nightly Linux matrix: same as `full`, minus swift.
+full-linux:
+    ./smoke.sh --publishers rust,python,js-vite,js-esbuild,js-jsdelivr --subscribers rust,python,go,kotlin,c,gst,js-vite,js-esbuild,js-jsdelivr,js-native-node,js-native-bun --timeout 30
+
+# Negative control: no publisher, every subscriber must time out (proves the harness can fail).
+negative *args:
+    ./smoke.sh --negative {{ args }}
+
+# ── token interop ────────────────────────────────────────────────────────────
+
+# Token interop: install moq-token in each published flavour and cross-verify. Default: rust only.
+token *args:
+    ./token.sh {{ args }}
+
+# Full token matrix: rust (binary + moqdev/moq-token-cli image) + @moq/token under node and bun.
+token-full:
+    ./token.sh --generators rust,js-node,js-bun,rust-docker --verifiers rust,js-node,js-bun,rust-docker
+
+# ── nix channel ──────────────────────────────────────────────────────────────
+# Get moq-relay + moq-cli from the moq flake (a public distribution channel,
+# `nix run github:moq-dev/moq#moq-cli`) instead of cargo/brew/apt. Referenced
+# ad-hoc with --refresh so the moq version is the latest default-branch build.
+# Override the source with MOQ_FLAKE (e.g. a fork or a pinned ref).
+MOQ_FLAKE := env_var_or_default("MOQ_FLAKE", "github:moq-dev/moq")
+CACHIX_SUB := "https://kixelated.cachix.org"
+CACHIX_KEY := "kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk="
+
+nix-channel *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "building moq-relay + moq-cli from {{ MOQ_FLAKE }} (latest)..."
+    nix_build() {
+        nix build --refresh --no-link --print-out-paths \
+            --extra-substituters "{{ CACHIX_SUB }}" \
+            --extra-trusted-public-keys "{{ CACHIX_KEY }}" "$1"
+    }
+    relay=$(nix_build '{{ MOQ_FLAKE }}#moq-relay')
+    cli=$(nix_build '{{ MOQ_FLAKE }}#moq-cli')
+    echo "relay: $relay"
+    echo "cli:   $cli"
+    RELAY_BIN="$relay/bin/moq-relay" MOQ_BIN="$cli/bin/moq-cli" ./smoke.sh {{ args }}
+
+# ── lint ─────────────────────────────────────────────────────────────────────
+
+# Assert latest-mode policy: no committed client lock files, nothing pinned (gates the nightly).
+freshness:
+    ./freshness.sh
+
+# Lint the harness. Each tool is guarded so it skips when not on PATH.
+check:
+    command -v shellcheck >/dev/null && shellcheck smoke.sh freshness.sh token.sh || echo "shellcheck: skipped"
+    command -v shfmt >/dev/null && shfmt -d -i 4 -ci smoke.sh freshness.sh token.sh || echo "shfmt: skipped"
+    just freshness

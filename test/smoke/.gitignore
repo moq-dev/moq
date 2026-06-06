@@ -1,0 +1,31 @@
+# Per-client build/install artifacts. Everything here is fetched from a public
+# package registry at test time, never committed.
+clients/js/node_modules/
+clients/js/dist-vite/
+clients/js/dist-esbuild/
+clients/js-native/node_modules/
+clients/token/js/node_modules/
+clients/go/bin/
+clients/swift/.build/
+clients/kotlin/.gradle/
+clients/kotlin/build/
+*.log
+
+# No committed PACKAGE lock files for the smoke clients: every latest-mode run
+# must re-resolve the moq packages under test to their LATEST published versions.
+# freshness.sh enforces this within this subtree only (the monorepo root commits
+# its own Cargo.lock / bun.lock / uv.lock, which are out of scope here).
+go.sum
+clients/js/bun.lock
+clients/js/bun.lockb
+clients/js-native/bun.lock
+clients/js-native/bun.lockb
+clients/token/js/bun.lock
+clients/token/js/bun.lockb
+Cargo.lock
+uv.lock
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+clients/swift/Package.resolved
+clients/kotlin/gradle.lockfile

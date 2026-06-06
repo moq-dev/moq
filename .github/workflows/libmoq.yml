@@ -81,6 +81,8 @@ jobs:
     name: Release
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
     permissions:
       contents: write
 
@@ -111,3 +113,13 @@ jobs:
           RELEASE_TITLE: "libmoq v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: .github/scripts/release.sh create artifacts
+
+  # Interop check against the version just published: download the libmoq release
+  # tarball pinned to it, build the C subscriber, and read a rust broadcast.
+  smoke:
+    name: Smoke
+    needs: [release]
+    uses: ./.github/workflows/smoke-release.yml
+    with:
+      slice: c
+      version: ${{ needs.release.outputs.version }}

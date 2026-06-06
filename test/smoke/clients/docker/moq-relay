@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Run the published moqdev/moq-relay Docker image as the relay-under-test, so the
+# media smoke exercises the Docker Hub channel alongside cargo/brew/apt/nix.
+#
+# smoke.sh points RELAY_BIN at this script and invokes it with the relay config
+# path. We bind-mount that file's directory and use host networking so the relay
+# binds the ports the orchestrator (curl on 127.0.0.1) and the moq-cli containers
+# reach -- the committed smoke.toml's 127.0.0.1 listeners work unchanged.
+#
+# Linux-only: --network host needs a native Docker daemon sharing the host's
+# network namespace, which GitHub's macOS runners (and Docker Desktop / podman
+# machine VMs) don't provide. Override the runtime with SMOKE_DOCKER=podman and
+# the image with MOQ_RELAY_IMAGE.
+set -euo pipefail
+
+runtime="${SMOKE_DOCKER:-docker}"
+image="${MOQ_RELAY_IMAGE:-moqdev/moq-relay}"
+
+# smoke.sh passes the config path as the final argument.
+cfg="${*: -1}"
+dir=$(cd "$(dirname "$cfg")" && pwd)
+
+exec "$runtime" run --rm -i --network host -v "$dir:$dir" "$image" "$@"

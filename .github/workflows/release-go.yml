@@ -225,3 +225,13 @@ jobs:
           GIT_AUTHOR_NAME: moq-bot
           GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
         run: ./go/scripts/publish.sh
+
+  # Interop check against the version just published: go get moq-dev/moq-go pinned
+  # to it and subscribe to a rust broadcast.
+  smoke:
+    name: Smoke
+    needs: [parse-version, publish]
+    uses: ./.github/workflows/smoke-release.yml
+    with:
+      slice: go
+      version: ${{ needs.parse-version.outputs.version }}

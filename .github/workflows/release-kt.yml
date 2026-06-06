@@ -198,3 +198,14 @@ jobs:
         with:
           name: kotlin-package
           path: release-out/*
+
+  # Interop check against the version just published: resolve dev.moq:moq from
+  # Maven Central pinned to it and subscribe to a rust broadcast. Central sync can
+  # lag, so the harness polls repo1 for the POM (longer budget; see smoke-release).
+  smoke:
+    name: Smoke
+    needs: [parse-version, package]
+    uses: ./.github/workflows/smoke-release.yml
+    with:
+      slice: kotlin
+      version: ${{ needs.parse-version.outputs.version }}

@@ -199,6 +199,8 @@ jobs:
     name: Release
     needs: [build, package]
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
     permissions:
       contents: write
       actions: write
@@ -236,3 +238,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: .github/scripts/trigger-repo-publish.sh
+
+  # Interop check against the version just published: download the moq-gst plugin
+  # tarball pinned to it and subscribe via moqsrc against a system GStreamer.
+  smoke:
+    name: Smoke
+    needs: [release]
+    uses: ./.github/workflows/smoke-release.yml
+    with:
+      slice: gst
+      version: ${{ needs.release.outputs.version }}

@@ -3,8 +3,8 @@
 # Tests that span more than one language. Per-language unit tests live in each
 # language's own justfile; this module aggregates them.
 #
-# The cross-language interop smoke test against the published packages now lives
-# in its own repo: https://github.com/moq-dev/smoke
+# These build from workspace source. The cross-language interop smoke test
+# against the PUBLISHED packages lives in `test/smoke` (`just smoke <lang>`).
 
 # Fall back to the root justfile so `just js test` (etc.) resolve from here.
 set fallback

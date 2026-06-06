@@ -14,6 +14,10 @@ mod go
 # Unit tests per language (`just test`).
 mod test
 
+# Cross-language interop smoke test against the published packages
+# (`just smoke <lang>`). Installs each client from its public registry.
+mod smoke 'test/smoke'
+
 # Demos and infra.
 mod demo
 mod infra
