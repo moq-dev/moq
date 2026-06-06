@@ -514,7 +514,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: BroadcastDynamic) -> Result<(), Error> {
 		loop {
 			let request = tokio::select! {
-				request = broadcast.track_request() => match request {
+				request = broadcast.requested_track() => match request {
 					Ok(request) => request,
 					Err(err) => {
 						tracing::debug!(%err, "broadcast closed");

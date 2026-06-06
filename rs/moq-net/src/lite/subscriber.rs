@@ -445,7 +445,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Serve track requests until every consumer of the broadcast is gone.
 		loop {
 			let request = tokio::select! {
-				request = broadcast.track_request() => match request {
+				request = broadcast.requested_track() => match request {
 					Ok(request) => request,
 					Err(err) => {
 						tracing::debug!(%err, "broadcast closed");
@@ -755,21 +755,16 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			// and yields `Idle` to start the linger countdown.
 			let idle_eligible = linger.is_none() && fetches.is_empty();
 
-			// Retained across re-polls within one select so the kio Waiter's weak
-			// registration stays live (see kio::Pending).
-			let mut demand_waiter: Option<kio::Waiter> = None;
-
 			let event = tokio::select! {
 				biased;
 
 				// (1) Track demand: a fetch, a subscription change, or full idle. One
-				// poll_fn so the borrows of `dynamic` and `track` are held together.
-				event = std::future::poll_fn(|cx| {
-					let waiter = demand_waiter.insert(kio::Waiter::new(cx.waker().clone()));
+				// `kio::wait` so the borrows of `dynamic` and `track` are held together.
+				event = kio::wait(|waiter| {
 					let track = track.as_mut().expect("track present while serving");
 
 					// A fetch is cheap and one-shot, so serve it ahead of subscription churn.
-					match dynamic.poll_group_request(waiter) {
+					match dynamic.poll_requested_group(waiter) {
 						Poll::Ready(Ok(req)) => return Poll::Ready(Event::Fetch(req)),
 						Poll::Ready(Err(err)) => return Poll::Ready(Event::BroadcastClosed(err)),
 						Poll::Pending => {}

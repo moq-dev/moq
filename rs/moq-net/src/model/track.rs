@@ -15,8 +15,7 @@
 
 use crate::{Error, Result, Subscription, Timescale, coding};
 
-use super::group::GroupRequested;
-use super::{Fetch, Group, GroupConsumer, GroupProducer, GroupRequest};
+use super::{Fetch, Group, GroupConsumer, GroupProducer};
 
 use std::{
 	collections::{HashSet, VecDeque},
@@ -132,7 +131,7 @@ impl TrackInfo {
 }
 
 #[derive(Default)]
-pub(crate) struct TrackState {
+struct TrackState {
 	// The info for the track; always Some for TrackSubscriber/TrackProducer.
 	info: Option<TrackInfo>,
 
@@ -158,7 +157,7 @@ pub(crate) struct TrackState {
 	subscriptions: Vec<kio::Consumer<Subscription>>,
 
 	// Specific groups requested via `fetch` that aren't cached yet, FIFO for a
-	// `TrackDynamic` to serve (see `TrackDynamic::group_request`).
+	// `TrackDynamic` to serve (see `TrackDynamic::requested_group`).
 	fetches: VecDeque<GroupRequested>,
 
 	// Number of live `TrackDynamic` handles. While zero, the track serves no
@@ -708,7 +707,7 @@ impl TrackProducer {
 /// Pop the next queued group fetch off the shared state and wrap it in a
 /// [`GroupRequest`] bound to a fresh producer handle. Shared by every
 /// [`TrackDynamic`] handle on the track.
-fn poll_group_request(state: &kio::Producer<TrackState>, waiter: &kio::Waiter) -> Poll<Result<GroupRequest>> {
+fn poll_requested_group(state: &kio::Producer<TrackState>, waiter: &kio::Waiter) -> Poll<Result<GroupRequest>> {
 	let req = ready!(state.poll(waiter, |state| {
 		// Read-only `is_empty` first: only take the `&mut` (which flags the state
 		// modified) once there's a request to pop, so idle polls don't wake waiters.
@@ -719,7 +718,11 @@ fn poll_group_request(state: &kio::Producer<TrackState>, waiter: &kio::Waiter) -
 	}))
 	.map_err(|state| state.abort.clone().unwrap_or(Error::Dropped))?;
 
-	Poll::Ready(req.map(|req| GroupRequest::new(state.clone(), req.sequence, req.priority)))
+	Poll::Ready(req.map(|req| GroupRequest {
+		state: state.clone(),
+		sequence: req.sequence,
+		priority: req.priority,
+	}))
 }
 
 /// Serves on-demand fetches of uncached (old) groups for a track, the group-level
@@ -753,12 +756,12 @@ impl TrackDynamic {
 	///
 	/// A relay issues a wire FETCH first; an origin already has the group cached, so
 	/// the fetch resolves without ever reaching here. Errors once the track is aborted.
-	pub async fn group_request(&self) -> Result<GroupRequest> {
-		kio::wait(|waiter| self.poll_group_request(waiter)).await
+	pub async fn requested_group(&self) -> Result<GroupRequest> {
+		kio::wait(|waiter| self.poll_requested_group(waiter)).await
 	}
 
-	pub fn poll_group_request(&self, waiter: &kio::Waiter) -> Poll<Result<GroupRequest>> {
-		poll_group_request(&self.state, waiter)
+	pub fn poll_requested_group(&self, waiter: &kio::Waiter) -> Poll<Result<GroupRequest>> {
+		poll_requested_group(&self.state, waiter)
 	}
 
 	/// Poll for the track becoming unused (every consumer dropped).
@@ -1018,16 +1021,51 @@ impl kio::Future for TrackInfoQuery {
 /// A pending [`TrackInfo`] lookup returned by [`TrackConsumer::info`]. `.await` it.
 pub type TrackInfoPending = kio::Pending<TrackInfoQuery>;
 
-/// Insert a group fetched for a [`GroupRequest`] into the track cache, setting the
-/// track's [`TrackInfo`] if it isn't accepted yet. Shared with [`super::group`],
-/// where [`GroupRequest::accept`] lives, since the insertion touches private
-/// [`TrackState`] internals that stay in this module.
-pub(crate) fn serve_group_request(
-	state: &kio::Producer<TrackState>,
+/// A specific group requested via [`TrackConsumer::fetch_group`], queued on the
+/// track for a [`TrackDynamic`] to serve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GroupRequested {
+	/// The group sequence the consumer wants.
 	sequence: u64,
-	info: Option<TrackInfo>,
-) -> Result<GroupProducer> {
-	TrackState::modify(state)?.insert_group_request(sequence, info)
+	/// The requested delivery priority.
+	priority: u8,
+}
+
+/// A consumer's request for a single past group, handed to a handler via
+/// [`TrackDynamic::requested_group`].
+///
+/// The handler fulfills it by calling [`Self::accept`], which inserts the group
+/// into the track cache (resolving the matching [`TrackConsumer::fetch_group`]) and
+/// returns a [`GroupProducer`] to fill. A relay typically opens a wire FETCH, reads
+/// FETCH_OK, then accepts. The request carries its own producer handle, so it works
+/// the same whether or not the track has been accepted yet.
+pub struct GroupRequest {
+	state: kio::Producer<TrackState>,
+	sequence: u64,
+	priority: u8,
+}
+
+impl GroupRequest {
+	/// The group sequence the consumer wants.
+	pub fn sequence(&self) -> u64 {
+		self.sequence
+	}
+
+	/// The delivery priority the consumer requested for this group.
+	pub fn priority(&self) -> u8 {
+		self.priority
+	}
+
+	/// Insert the fetched group into the track cache, resolving the waiting
+	/// [`TrackConsumer::fetch_group`], and return a [`GroupProducer`] to fill.
+	///
+	/// The group's timescale comes from the track's [`TrackInfo`]. `info` sets that
+	/// info if the track hasn't been accepted yet (a fetch with no live subscription),
+	/// and is ignored once accepted. Returns [`Error::Duplicate`] if the group is
+	/// already present, or the track's abort error if it closed while pending.
+	pub fn accept(self, info: impl Into<Option<TrackInfo>>) -> Result<GroupProducer> {
+		TrackState::modify(&self.state)?.insert_group_request(self.sequence, info.into())
+	}
 }
 
 /// The pollable state of a [`TrackConsumer::fetch_group`].
@@ -2158,7 +2196,7 @@ mod test {
 		assert_eq!(&g.read_frame().await.unwrap().unwrap()[..], b"hello");
 
 		// Nothing was queued for the dynamic handler to serve.
-		assert!(dynamic.poll_group_request(&kio::Waiter::noop()).is_pending());
+		assert!(dynamic.poll_requested_group(&kio::Waiter::noop()).is_pending());
 	}
 
 	#[tokio::test]
@@ -2175,7 +2213,7 @@ mod test {
 		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
-			.group_request()
+			.requested_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
@@ -2215,7 +2253,7 @@ mod test {
 		assert!(matches!(consumer.fetch_group(5, None), Err(Error::NotFound)));
 
 		// And it doesn't signal the dynamic handler.
-		assert!(dynamic.poll_group_request(&kio::Waiter::noop()).is_pending());
+		assert!(dynamic.poll_requested_group(&kio::Waiter::noop()).is_pending());
 	}
 
 	#[tokio::test]

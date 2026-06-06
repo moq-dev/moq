@@ -432,62 +432,6 @@ impl Fetch {
 	}
 }
 
-/// A specific group requested via [`crate::TrackConsumer::fetch_group`], queued on the
-/// track for a [`crate::TrackDynamic`] to serve.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct GroupRequested {
-	/// The group sequence the consumer wants.
-	pub(crate) sequence: u64,
-	/// The requested delivery priority.
-	pub(crate) priority: u8,
-}
-
-/// A consumer's request for a single past group, handed to a handler via
-/// [`crate::TrackDynamic::group_request`].
-///
-/// The handler fulfills it by calling [`Self::accept`], which inserts the group
-/// into the track cache (resolving the matching [`crate::TrackConsumer::fetch_group`])
-/// and returns a [`GroupProducer`] to fill. A relay typically opens a wire FETCH,
-/// reads FETCH_OK, then accepts. The request carries its own producer handle, so it
-/// works the same whether or not the track has been accepted yet.
-pub struct GroupRequest {
-	state: kio::Producer<super::track::TrackState>,
-	sequence: u64,
-	priority: u8,
-}
-
-impl GroupRequest {
-	pub(crate) fn new(state: kio::Producer<super::track::TrackState>, sequence: u64, priority: u8) -> Self {
-		Self {
-			state,
-			sequence,
-			priority,
-		}
-	}
-
-	/// The group sequence the consumer wants.
-	pub fn sequence(&self) -> u64 {
-		self.sequence
-	}
-
-	/// The delivery priority the consumer requested for this group.
-	pub fn priority(&self) -> u8 {
-		self.priority
-	}
-
-	/// Insert the fetched group into the track cache, resolving the waiting
-	/// [`crate::TrackConsumer::fetch_group`], and return a [`GroupProducer`] to fill.
-	///
-	/// The group's timescale comes from the track's [`crate::TrackInfo`]. `info` sets
-	/// that info if the track hasn't been accepted yet (a fetch with no live
-	/// subscription), and is ignored once accepted. Returns [`Error::Duplicate`] if
-	/// the group is already present, or the track's abort error if it closed while
-	/// pending.
-	pub fn accept(self, info: impl Into<Option<crate::TrackInfo>>) -> Result<GroupProducer> {
-		super::track::serve_group_request(&self.state, self.sequence, info.into())
-	}
-}
-
 #[cfg(test)]
 mod test {
 	use super::*;
