@@ -121,6 +121,40 @@ build:
     just rs build
     if command -v uv &> /dev/null; then just py build; fi
 
+# Delete build artifacts and caches across every language to reclaim disk
+# space, then recurse into any agent worktrees under .claude/worktrees/.
+# Each worktree now builds into its own target dir, so they're cleaned too.
+clean:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Rust workspace: wipes ./target.
+    cargo clean
+
+    # JS/TS dependency + build trees. Prune .claude (agent worktrees are
+    # handled by the recursion below) and stop find from descending into the
+    # node_modules trees it's about to delete.
+    find . -name .claude -prune -o \
+    	-type d \( -name node_modules -o -name dist -o -name out -o -name pkg \) \
+    	-prune -exec rm -rf {} +
+    find . -name .claude -prune -o -type f -name '*.tsbuildinfo' -exec rm -f {} +
+
+    # Python: virtualenv, bytecode caches, generated uniffi bindings.
+    rm -rf .venv py/moq-ffi/moq_ffi/_uniffi
+    find . -name .claude -prune -o -type d -name __pycache__ -prune -exec rm -rf {} +
+
+    # Misc: nix build result, direnv + wrangler caches.
+    rm -rf result .direnv .wrangler
+
+    # Agent worktrees each carry their own artifacts; clean them the same way.
+    # Worktrees don't nest, so this recurses exactly one level. Tolerate stale
+    # worktrees on branches that predate this recipe.
+    for wt in .claude/worktrees/*/; do
+    	[ -f "${wt}justfile" ] || continue
+    	echo "==> cleaning ${wt}"
+    	(cd "$wt" && just clean) || echo "    (skipped: no clean recipe in ${wt})"
+    done
+
 # Upgrade any tooling
 update:
     just js update
