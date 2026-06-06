@@ -196,8 +196,11 @@ cargo install moq-relay moq-cli moq-token-cli
 # Homebrew (macOS / Linux)
 brew install moq-dev/tap/moq-relay moq-dev/tap/moq-cli
 
-# Debian / Ubuntu / Fedora (see the Linux packages guide for repo setup)
+# Debian / Ubuntu (see the Linux packages guide for repo setup)
 sudo apt install moq-relay moq-cli
+
+# Fedora / RHEL (see the Linux packages guide for repo setup)
+sudo dnf install moq-relay moq-cli
 
 # Nix
 nix build github:moq-dev/moq#moq-relay

@@ -79,9 +79,10 @@ cd moq/rs/libmoq
 cargo build --release
 ```
 
-The library lands in `target/release/libmoq.a` (static) and
-`target/release/libmoq.{so,dylib,dll}` (dynamic), with the generated header at
-`target/release/moq.h`.
+`libmoq` is part of the Cargo workspace, so the build emits to the workspace
+root `target/` (two levels up from `rs/libmoq/`): `../../target/release/libmoq.a`
+(static) and `../../target/release/libmoq.{so,dylib,dll}` (dynamic), with the
+generated header at `../../target/release/moq.h`.
 
 ## Callback lifetime
 

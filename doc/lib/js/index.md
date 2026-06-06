@@ -81,10 +81,10 @@ bun add @moq/net
 bun add @moq/watch
 bun add @moq/publish
 
-# or with other package managers
-npm add @moq/net
-npm add @moq/watch
-npm add @moq/publish
+# or with npm
+npm install @moq/net
+npm install @moq/watch
+npm install @moq/publish
 ```
 
 Pick the channel that matches where your code runs:
