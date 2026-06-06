@@ -205,7 +205,15 @@ impl ElementImpl for MoqSrc {
 					gst::error!(CAT, obj = self.obj(), "failed to start session: {err:?}");
 					return Err(gst::StateChangeError);
 				}
-				let success = self.parent_change_state(transition)?;
+				// Roll back the session we just started if the parent transition fails,
+				// otherwise it would keep running while the element stays in READY.
+				let success = match self.parent_change_state(transition) {
+					Ok(success) => success,
+					Err(err) => {
+						self.stop_session();
+						return Err(err);
+					}
+				};
 				// A live source never prerolls.
 				Ok(match success {
 					gst::StateChangeSuccess::Async => gst::StateChangeSuccess::Async,
@@ -296,11 +304,19 @@ async fn run_session(
 		}
 
 		tokio::select! {
-			// Full session shutdown: cancel every pump and wait for it to drop its pad.
+			// Full session shutdown: cancel every pump, then wait for them all to drop
+			// their pads. Cancel all up front (pumps only exit on their own `cancel`), or
+			// awaiting one at a time would let the not-yet-cancelled pumps keep streaming.
 			_ = shutdown.changed() => {
-				for (_, track) in active.drain() {
-					let _ = track.cancel.send(true);
-					let _ = track.handle.await;
+				let handles: Vec<_> = active
+					.drain()
+					.map(|(_, track)| {
+						let _ = track.cancel.send(true);
+						track.handle
+					})
+					.collect();
+				for handle in handles {
+					let _ = handle.await;
 				}
 				break;
 			}
