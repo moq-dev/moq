@@ -38,8 +38,12 @@ pub struct Frame {
 }
 
 impl Frame {
-	/// Create a new producer for the frame.
-	pub fn produce(self) -> FrameProducer {
+	/// Create a producer for the frame.
+	///
+	/// Crate-private: frames are only constructed via
+	/// [`crate::GroupProducer::create_frame`], which validates the timestamp
+	/// against the parent track's timescale.
+	pub(crate) fn produce(self) -> FrameProducer {
 		FrameProducer::new(self)
 	}
 }
@@ -188,7 +192,7 @@ impl std::ops::Deref for FrameProducer {
 
 impl FrameProducer {
 	/// Create a new frame producer for the given frame header.
-	pub fn new(info: Frame) -> Self {
+	pub(crate) fn new(info: Frame) -> Self {
 		let buf = FrameBuf::new(info.size as usize);
 		Self {
 			info,
@@ -316,12 +320,6 @@ impl Clone for FrameProducer {
 			state: self.state.clone(),
 			buf: self.buf.clone(),
 		}
-	}
-}
-
-impl From<Frame> for FrameProducer {
-	fn from(info: Frame) -> Self {
-		FrameProducer::new(info)
 	}
 }
 

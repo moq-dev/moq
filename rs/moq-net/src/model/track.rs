@@ -425,7 +425,7 @@ impl TrackState {
 		// Adopt the supplied info only if the track hasn't been accepted yet.
 		let info = self.info.get_or_insert_with(|| info.unwrap_or_default());
 
-		let group = GroupProducer::new_with_timescale(Group { sequence }, info.timescale);
+		let group = GroupProducer::new(Group { sequence }, info.timescale);
 		let cache = info.cache;
 		let now = tokio::time::Instant::now();
 		self.max_sequence = Some(self.max_sequence.unwrap_or(0).max(sequence));
@@ -473,7 +473,7 @@ impl TrackProducer {
 		let timescale = info.timescale;
 		let cache = info.cache;
 
-		let group = GroupProducer::new_with_timescale(group, timescale);
+		let group = GroupProducer::new(group, timescale);
 		if !state.duplicates.insert(group.sequence) {
 			return Err(Error::Duplicate);
 		}
@@ -503,7 +503,7 @@ impl TrackProducer {
 		let timescale = info.timescale;
 		let cache = info.cache;
 
-		let group = GroupProducer::new_with_timescale(Group { sequence }, timescale);
+		let group = GroupProducer::new(Group { sequence }, timescale);
 
 		let now = tokio::time::Instant::now();
 		state.duplicates.insert(sequence);
