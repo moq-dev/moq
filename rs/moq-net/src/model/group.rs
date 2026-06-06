@@ -34,9 +34,14 @@ pub struct Group {
 }
 
 impl Group {
-	/// Consume this [`Group`] to create a producer that owns its sequence number.
-	pub fn produce(self) -> GroupProducer {
-		GroupProducer::new(self)
+	/// Create an untimed producer for this group.
+	///
+	/// Test-only: real groups are created via [`crate::TrackProducer`], which
+	/// supplies the track's negotiated timescale. This helper exists for in-crate
+	/// tests that don't exercise timestamps.
+	#[cfg(test)]
+	pub(crate) fn produce(self) -> GroupProducer {
+		GroupProducer::new(self, None)
 	}
 }
 
@@ -159,22 +164,13 @@ impl std::ops::Deref for GroupProducer {
 }
 
 impl GroupProducer {
-	/// Create a new group producer with no parent-track timescale. Frames added
-	/// to this group must have `timestamp = None`; use
-	/// [`Self::new_with_timescale`] to bind a timescale at construction.
-	pub fn new(info: Group) -> Self {
-		Self {
-			info,
-			state: kio::Producer::default(),
-			timescale: None,
-		}
-	}
-
-	/// Create a new group producer tied to a parent track's timescale. Frames
-	/// added to this group must have `timestamp = Some(ts)` with
-	/// `ts.scale() == timescale`. `None` means the parent track is untimed and
-	/// added frames must have `timestamp = None`.
-	pub fn new_with_timescale(info: Group, timescale: Option<Timescale>) -> Self {
+	/// Create a group producer bound to its parent track's timescale.
+	///
+	/// Crate-private: groups are only constructed via [`crate::TrackProducer`],
+	/// which supplies the negotiated timescale. `None` means the parent track is
+	/// untimed and added frames must have `timestamp = None`; `Some(scale)`
+	/// requires every frame's `timestamp` to be `Some(ts)` with `ts.scale() == scale`.
+	pub(crate) fn new(info: Group, timescale: Option<Timescale>) -> Self {
 		Self {
 			info,
 			state: kio::Producer::default(),
@@ -288,12 +284,6 @@ impl Clone for GroupProducer {
 			state: self.state.clone(),
 			timescale: self.timescale,
 		}
-	}
-}
-
-impl From<Group> for GroupProducer {
-	fn from(info: Group) -> Self {
-		GroupProducer::new(info)
 	}
 }
 
@@ -633,7 +623,7 @@ mod test {
 	fn append_frame_rejects_timestamp_on_untimed_group() {
 		use crate::Timestamp;
 
-		let mut producer = GroupProducer::new_with_timescale(Group { sequence: 0 }, None);
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, None);
 		let frame = Frame {
 			size: 3,
 			timestamp: Some(Timestamp::from_micros(42).unwrap()),
@@ -646,7 +636,7 @@ mod test {
 	fn append_frame_rejects_missing_timestamp_on_timed_group() {
 		use crate::Timescale;
 
-		let mut producer = GroupProducer::new_with_timescale(Group { sequence: 0 }, Some(Timescale::MICRO));
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO));
 		let frame = Frame {
 			size: 3,
 			timestamp: None,
@@ -659,7 +649,7 @@ mod test {
 	fn append_frame_rejects_scale_mismatch() {
 		use crate::{Timescale, Timestamp};
 
-		let mut producer = GroupProducer::new_with_timescale(Group { sequence: 0 }, Some(Timescale::MICRO));
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO));
 		let frame = Frame {
 			size: 3,
 			timestamp: Some(Timestamp::from_millis(1).unwrap()), // millis, not micros
@@ -672,7 +662,7 @@ mod test {
 	fn append_frame_accepts_matching_scale() {
 		use crate::{Timescale, Timestamp};
 
-		let mut producer = GroupProducer::new_with_timescale(Group { sequence: 0 }, Some(Timescale::MICRO));
+		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO));
 		let frame = Frame {
 			size: 1,
 			timestamp: Some(Timestamp::from_micros(7).unwrap()),
