@@ -1,3 +1,4 @@
+use anyhow::Context;
 use hang::moq_net;
 
 pub async fn run_server(
@@ -42,7 +43,7 @@ async fn run_serve_session(
 	let origin = moq_net::Origin::random().produce();
 	let _publish = origin
 		.publish_broadcast(&name, consumer)
-		.expect("origin should allow publishing");
+		.context("failed to publish broadcast")?;
 
 	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.
 	let session = session.with_publisher(origin.clone()).ok().await?;

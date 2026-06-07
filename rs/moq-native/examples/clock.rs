@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
 
 			let _publish = origin
 				.publish_broadcast(&config.broadcast, broadcast.consume())
-				.expect("origin should allow publishing");
+				.context("failed to publish broadcast")?;
 
 			let reconnect = client.with_publisher(origin.clone()).reconnect(config.url);
 

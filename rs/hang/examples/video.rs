@@ -1,4 +1,5 @@
 // cargo run --example video
+use anyhow::Context;
 use bytes::Bytes;
 
 #[tokio::main]
@@ -96,7 +97,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
 	let _publish = origin
 		.publish_broadcast("", broadcast.consume())
-		.expect("origin should allow publishing");
+		.context("failed to publish broadcast")?;
 
 	// Wrap in a Producer for keyframe-based group management.
 	let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);

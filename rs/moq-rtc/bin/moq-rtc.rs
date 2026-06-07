@@ -199,7 +199,7 @@ async fn run_client(
 			let consumer = broadcast.consume();
 			let _publish = publisher
 				.publish_broadcast(broadcast_name, consumer)
-				.map_err(|err| anyhow::anyhow!("cannot publish {}: {}", broadcast_name, err))?;
+				.context("failed to publish broadcast")?;
 			client.subscribe(url, broadcast).await?;
 		}
 		Direction::Publish => {

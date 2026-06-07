@@ -221,7 +221,7 @@ async fn run(config: &Config) -> Result<()> {
 	let broadcast_path = format!("{game_prefix}/{name}");
 	let _publish = publish_origin
 		.publish_broadcast(&broadcast_path, broadcast.consume())
-		.expect("origin should allow publishing");
+		.context("failed to publish broadcast")?;
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
 	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"

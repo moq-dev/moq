@@ -436,8 +436,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Entry::Vacant(entry) => {
 				let broadcast = BroadcastInfo::new().produce();
-				// Propagates Error::Unauthorized if out of scope; the broadcast carries an
-				// empty hop chain here, so the loop check can't trip.
+				// Propagates Error::Unauthorized if the path is out of scope.
 				let publish = self.origin.publish_broadcast(path.clone(), broadcast.consume())?;
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),

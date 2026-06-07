@@ -1,5 +1,7 @@
 // cargo run --example chat
 
+use anyhow::Context;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// Optional: Use moq_native to configure a logger.
@@ -48,7 +50,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// OPTIONAL: We publish after inserting the track just to avoid a nearly impossible race condition.
 	let _publish = origin
 		.publish_broadcast("", broadcast.consume())
-		.expect("origin should allow publishing");
+		.context("failed to publish broadcast")?;
 
 	// Create a group.
 	// Each group is independent and the newest group(s) will be prioritized.
