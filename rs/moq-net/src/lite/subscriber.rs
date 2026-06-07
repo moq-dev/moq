@@ -1,28 +1,29 @@
 use std::{
-	collections::{HashMap, hash_map::Entry},
+	collections::HashMap,
+	pin::Pin,
 	sync::{Arc, atomic},
 	task::Poll,
 	time::Duration,
 };
 
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 
 use crate::{
 	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastInfo, Compression, Error, Frame, FrameProducer, Group,
-	GroupProducer, MAX_FRAME_SIZE, OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack,
-	Timescale, Timestamp, TrackInfo, TrackProducer, TrackRequest,
+	GroupProducer, GroupRequest, MAX_FRAME_SIZE, OriginProducer, OriginPublish, Path, PathOwned, StatsHandle,
+	SubscriberStats, SubscriberTrack, Subscription, Timescale, Timestamp, TrackInfo, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	lite,
-	model::BroadcastProducer,
 };
 
 use super::{ConnectingProducer, Version};
 
 use web_async::Lock;
 
-/// Keep an upstream subscription alive briefly after the last consumer leaves,
-/// so a returning subscriber reuses the same TrackProducer instead of forcing a
-/// fresh fetch (and the publisher re-serving the latest cached group).
+/// Keep an upstream subscription alive briefly after the track goes idle (no
+/// subscriber, no fetch, no consumers), so a returning consumer reuses the same
+/// TrackProducer instead of forcing a fresh fetch (and the publisher re-serving
+/// the latest cached group).
 const LINGER_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
@@ -67,18 +68,6 @@ struct TrackEntry {
 	/// streams block on it before decoding any frame, since a group can race
 	/// ahead of SUBSCRIBE_OK on its own QUIC stream.
 	subscribe_ok: kio::Consumer<Option<lite::SubscribeOk>>,
-}
-
-/// Result of an upstream subscribe lifecycle.
-enum SessionOutcome {
-	/// The upstream cleanly FIN'd the subscribe stream — nothing more to deliver.
-	Complete,
-	/// Linger timeout expired without anyone returning, or Lite01/02 hit the no-linger path.
-	Cancelled,
-	/// The entire broadcast went away on the publisher side.
-	BroadcastClosed(Error),
-	/// Anything else (wire error, protocol violation, encode failure).
-	Error(Error),
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
@@ -283,8 +272,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// The matching Active may have been silently dropped by
 					// start_announce as a reflected loop, in which case
 					// `producers` has no entry; that's expected, not an error.
-					if let Some(mut producer) = producers.remove(&path) {
-						producer.abort(Error::Cancel).ok();
+					// Dropping the entry drops its OriginPublish guard, which unannounces.
+					if producers.remove(&path).is_some() {
 						let abs = self.origin.absolute(&path).to_owned();
 						stats_guards.remove(&abs);
 					}
@@ -356,7 +345,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// the full `[src...sender]` chain Lite04 stored. None for older versions,
 		// where the sender already appended itself.
 		responder_origin: Option<crate::Origin>,
-		producers: &mut HashMap<PathOwned, BroadcastProducer>,
+		producers: &mut HashMap<PathOwned, OriginPublish>,
 	) -> Result<bool, Error> {
 		if let Some(responder) = responder_origin {
 			// If the chain is already full, drop the announce — the same decision
@@ -379,15 +368,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Ok(false);
 		}
 
+		// Make sure the peer doesn't double announce.
+		if producers.contains_key(&path) {
+			return Err(Error::Duplicate);
+		}
+
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
 
 		let broadcast = BroadcastInfo { hops }.produce();
-
-		// Make sure the peer doesn't double announce.
-		match producers.entry(path.to_owned()) {
-			Entry::Occupied(_) => return Err(Error::Duplicate),
-			Entry::Vacant(entry) => entry.insert(broadcast.clone()),
-		};
 
 		// Create the dynamic handler BEFORE publishing, so that consumers
 		// see dynamic >= 1 immediately when they receive the announcement.
@@ -395,9 +383,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// can call consume_track() before dynamic is incremented, getting NotFound.
 		let dynamic = broadcast.dynamic();
 
-		// Run the broadcast in the background until all consumers are dropped.
-		self.origin.publish_broadcast(path.clone(), broadcast.consume());
+		// Publish into the origin. An error means the path is outside our scope, so don't announce
+		// or spawn a server for it. Reflections are already filtered above.
+		let Ok(publish) = self.origin.publish_broadcast(path.clone(), broadcast.consume()) else {
+			return Ok(false);
+		};
 
+		producers.insert(path.clone(), publish);
+
+		// Run the broadcast in the background until all consumers are dropped.
 		web_async::spawn(self.clone().run_broadcast(path, dynamic));
 
 		Ok(true)
@@ -417,7 +411,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// rebuild the full chain since the sender no longer stamps itself. None for older
 		// versions. See `start_announce`.
 		responder_origin: Option<crate::Origin>,
-		producers: &mut HashMap<PathOwned, BroadcastProducer>,
+		producers: &mut HashMap<PathOwned, OriginPublish>,
 	) -> Result<bool, Error> {
 		// Reflected loop (or a full chain): the replacement can't be used here. Retire the broadcast.
 		let reflected = match responder_origin {
@@ -426,9 +420,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 		if reflected {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected restart");
-			if let Some(mut old) = producers.remove(&path) {
-				old.abort(Error::Cancel).ok();
-			}
+			// Dropping the entry drops its guard, unannouncing the broadcast.
+			producers.remove(&path);
 			return Ok(false);
 		}
 
@@ -438,24 +431,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let dynamic = broadcast.dynamic();
 
 		// Publish the replacement first so the origin restarts atomically; the old broadcast is
-		// demoted to a backup and dropped silently when we abort it below.
-		self.origin.publish_broadcast(path.clone(), broadcast.consume());
+		// demoted to a backup and removed silently when we drop its guard below.
+		let Ok(publish) = self.origin.publish_broadcast(path.clone(), broadcast.consume()) else {
+			// Origin rejected the replacement; retire the existing broadcast.
+			producers.remove(&path);
+			return Ok(false);
+		};
 
-		let old = producers.insert(path.clone(), broadcast.clone());
+		let old = producers.insert(path.clone(), publish);
 		web_async::spawn(self.clone().run_broadcast(path.clone(), dynamic));
 
-		if let Some(mut old) = old {
-			old.abort(Error::Cancel).ok();
-		}
+		// Drop the replaced broadcast's guard last, unannouncing it now that the replacement is live.
+		drop(old);
 
 		Ok(true)
 	}
 
 	async fn run_broadcast(self, path: PathOwned, mut broadcast: BroadcastDynamic) {
-		// Actually start serving subscriptions.
+		// Serve track requests until every consumer of the broadcast is gone.
 		loop {
-			// Keep serving requests until there are no more consumers.
-			// This way we'll clean up the task when the broadcast is no longer needed.
 			let request = tokio::select! {
 				request = broadcast.requested_track() => match request {
 					Ok(request) => request,
@@ -467,262 +461,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				_ = self.session.closed() => break,
 			};
 
-			let mut this = self.clone();
-			let path = path.clone();
-			let broadcast = broadcast.clone();
-			web_async::spawn(async move {
-				this.run_subscribe(path, broadcast, request).await;
-			});
-		}
-	}
+			let name = request.name().to_string();
+			let abs = self.origin.absolute(&path);
+			// Subscriber-side track stats; counters bump as frames/bytes/groups arrive.
+			// subscriber_track avoids double-counting broadcasts: the broadcast lifetime
+			// is tracked separately by the announce loop's `stats_guards`.
+			let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&name));
 
-	/// Drive one upstream subscription end-to-end, including linger across consumer churn.
-	///
-	/// On linger entry (last consumer drops) we send `SubscribeUpdate(priority=0,
-	/// end_group=Some(latest))`. The publisher treats `end_group` as a serving cap,
-	/// not a terminator: it holds any groups beyond the cap and resumes when we
-	/// raise it. On resume (a new consumer arrives) we send `SubscribeUpdate(end_group=None)`
-	/// to uncap. The stream stays open across the whole lifecycle — only a timeout
-	/// or a publisher-side close ends it. This avoids the stream-churn / duplicate-fetch
-	/// race that an unsubscribe-and-reissue approach would have.
-	async fn run_subscribe(&mut self, path: PathOwned, broadcast: BroadcastDynamic, mut request: TrackRequest) {
-		// Subscriber-side track stats; counters bump as frames/bytes/groups arrive.
-		// Drop on subscription end records `subscriber.subscriptions_closed`. We use
-		// subscriber_track to avoid double-counting broadcasts: the broadcast lifetime
-		// is tracked separately by the announce loop's `stats_guards`.
-		let name = request.name().to_string();
-		let abs = self.origin.absolute(&path);
-		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&name));
-		// The per-(session, broadcast) `broadcasts` sentinel is taken later, once
-		// the upstream confirms with SUBSCRIBE_OK (see `run_subscribe_session`), so a
-		// sub cancelled before then isn't counted as a feeding session.
-
-		let id = self.next_id.fetch_add(1, atomic::Ordering::Relaxed);
-
-		// Forward the aggregate of every downstream subscriber's preferences upstream.
-		// Blocks until the first downstream subscriber registers its preferences.
-		let subscription = request.subscription_changed().await.unwrap_or_default();
-		let msg = lite::Subscribe {
-			id,
-			broadcast: path.as_path(),
-			track: (&name).into(),
-			priority: subscription.priority,
-			ordered: subscription.ordered,
-			max_latency: subscription.stale,
-			start_group: subscription.group_start,
-			end_group: subscription.group_end,
-		};
-
-		tracing::info!(id, broadcast = %self.log_path(&path), track = %name, "subscribe started");
-
-		let result = self
-			.run_subscribe_session(id, request, track_stats, &broadcast, msg)
-			.await;
-
-		self.subscribes.lock().remove(&id);
-
-		match result {
-			SessionOutcome::Complete => {
-				tracing::info!(broadcast = %self.log_path(&path), track = %name, "subscribe complete");
-			}
-			SessionOutcome::Cancelled => {
-				tracing::info!(broadcast = %self.log_path(&path), track = %name, "subscribe cancelled");
-			}
-			SessionOutcome::BroadcastClosed(err) => {
-				tracing::info!(broadcast = %self.log_path(&path), track = %name, %err, "broadcast closed");
-			}
-			SessionOutcome::Error(err) => {
-				tracing::warn!(broadcast = %self.log_path(&path), track = %name, %err, "subscribe error");
-			}
-		}
-	}
-
-	/// Open the upstream subscribe stream, wait for SUBSCRIBE_OK, then accept the
-	/// pending request (unblocking the downstream subscriber) and run the linger
-	/// lifecycle. The producer is created only after SUBSCRIBE_OK, so a downstream
-	/// a downstream `subscribe` resolves exactly when the upstream confirms.
-	async fn run_subscribe_session(
-		&self,
-		id: u64,
-		request: TrackRequest,
-		track_stats: Arc<SubscriberTrack>,
-		broadcast: &BroadcastDynamic,
-		msg: lite::Subscribe<'_>,
-	) -> SessionOutcome {
-		// Stash the original parameters so SubscribeUpdate messages can echo them
-		// while only varying the linger-related fields (priority, end_group).
-		let original_priority = msg.priority;
-		let ordered = msg.ordered;
-		let max_latency = msg.max_latency;
-		let start_group = msg.start_group;
-
-		// SubscribeUpdate only exists on Lite03+; older versions take the
-		// immediate-FIN path with no linger.
-		let supports_linger = !matches!(self.version, Version::Lite01 | Version::Lite02);
-
-		let mut stream = match Stream::open(&self.session, self.version).await {
-			Ok(s) => s,
-			Err(err) => {
-				request.reject(err.clone());
-				return SessionOutcome::Error(err);
-			}
-		};
-
-		if let Err(err) = stream.writer.encode(&lite::ControlType::Subscribe).await {
-			request.reject(err.clone());
-			return SessionOutcome::Error(err);
-		}
-
-		if let Err(err) = stream.writer.encode(&msg).await {
-			stream.writer.abort(&err);
-			request.reject(err.clone());
-			return SessionOutcome::Error(err);
-		}
-
-		// The first response MUST be a SUBSCRIBE_OK. Bail if the broadcast dies first.
-		let resp = tokio::select! {
-			err = broadcast.closed() => {
-				request.reject(err.clone());
-				return SessionOutcome::BroadcastClosed(err);
-			}
-			resp = stream.reader.decode::<lite::SubscribeResponse>() => match resp {
-				Ok(r) => r,
-				Err(err) => {
-					stream.writer.abort(&err);
-					request.reject(err.clone());
-					return SessionOutcome::Error(err);
-				}
-			}
-		};
-		let lite::SubscribeResponse::Ok(info) = resp else {
-			let err = Error::ProtocolViolation;
-			stream.writer.abort(&err);
-			request.reject(err.clone());
-			return SessionOutcome::Error(err);
-		};
-
-		// Upstream confirmed the subscription, so this session is now actively
-		// feeding the broadcast: take the per-(session, broadcast) sentinel. It
-		// drops when this fn returns (subscription end / cancel), releasing
-		// `broadcasts_closed`. Taken only after SUBSCRIBE_OK so a sub cancelled
-		// before confirmation isn't counted as a feeding session.
-		let abs = self.origin.absolute(&msg.broadcast);
-		let _broadcast_sub = self.broadcasts.subscribe(&abs);
-
-		// The publisher accepted: create the producer (unblocking the downstream
-		// subscriber) and start routing incoming groups to it. SUBSCRIBE_OK is known
-		// now, so the group streams never have to wait; they still read it through a
-		// kio channel (a group's QUIC stream can otherwise race ahead of SUBSCRIBE_OK).
-		//
-		// Stamp the negotiated timescale onto the local Track so groups inherit
-		// it and downstream consumers (including this subscriber's frame decode
-		// path) can validate per-frame timestamps at the model layer.
-		let local_info = TrackInfo {
-			timescale: info.timescale,
-			// Carry the publisher's cache window so the local producer evicts (and
-			// clamps downstream stale windows) with the same bound when re-served.
-			cache: info.cache,
-			..Default::default()
-		};
-		let mut track = request.accept(local_info);
-		let subscribe_ok = kio::Producer::new(Some(info)).consume();
-		self.subscribes.lock().insert(
-			id,
-			TrackEntry {
-				producer: track.clone(),
-				stats: track_stats,
-				subscribe_ok,
-			},
-		);
-
-		// Lifecycle loop: serve → linger → resume → serve → ... → FIN.
-		let outcome = 'lifecycle: loop {
-			// Phase 1 — serving. Wait for the last consumer to drop (enter linger),
-			// the broadcast to die, or the upstream to close the stream.
-			tokio::select! {
-				_ = track.unused() => {}
-				err = broadcast.closed() => break 'lifecycle SessionOutcome::BroadcastClosed(err),
-				res = stream.reader.closed() => match res {
-					Ok(()) => {
-						let _ = stream.writer.finish();
-						break 'lifecycle SessionOutcome::Complete;
-					}
-					Err(err) => break 'lifecycle SessionOutcome::Error(err),
-				},
-			}
-
-			// No linger on Lite01/02: FIN and report cancellation.
-			if !supports_linger {
-				let _ = stream.writer.finish();
-				break 'lifecycle SessionOutcome::Cancelled;
-			}
-
-			// Phase 2 — linger. Cap the publisher's serving cursor at the latest
-			// group we've cached and drop priority to 0; the publisher holds any
-			// group beyond the cap until we resume or FIN. `unwrap_or(0)` handles
-			// the corner case where we subscribed but haven't received a group yet.
-			let cap = track.latest().unwrap_or(0);
-			let pause = lite::SubscribeUpdate {
-				priority: 0,
-				ordered,
-				max_latency,
-				start_group,
-				end_group: Some(cap),
+			let serve = TrackServe {
+				subscriber: self.clone(),
+				path: path.clone(),
+				broadcast: broadcast.clone(),
+				track_stats,
+				name,
 			};
-			if let Err(err) = stream.writer.encode(&pause).await {
-				stream.writer.abort(&err);
-				break 'lifecycle SessionOutcome::Error(err);
-			}
 
-			// Race during the linger window: publisher closes (Complete), broadcast
-			// dies (BroadcastClosed), timeout (Cancelled), or a new consumer arrives
-			// (uncap and re-enter Phase 1).
-			let resume = tokio::select! {
-				err = broadcast.closed() => break 'lifecycle SessionOutcome::BroadcastClosed(err),
-				res = stream.reader.closed() => match res {
-					Ok(()) => break 'lifecycle SessionOutcome::Complete,
-					Err(err) => break 'lifecycle SessionOutcome::Error(err),
-				},
-				_ = tokio::time::sleep(LINGER_TIMEOUT) => {
-					let _ = stream.writer.finish();
-					break 'lifecycle SessionOutcome::Cancelled;
-				}
-				res = track.used() => res,
-			};
-			if let Err(err) = resume {
-				break 'lifecycle SessionOutcome::Error(err);
-			}
-
-			tracing::info!(track = %track.name(), "subscribe resumed");
-
-			let uncap = lite::SubscribeUpdate {
-				priority: original_priority,
-				ordered,
-				max_latency,
-				start_group,
-				end_group: None,
-			};
-			if let Err(err) = stream.writer.encode(&uncap).await {
-				stream.writer.abort(&err);
-				break 'lifecycle SessionOutcome::Error(err);
-			}
-			// Loop back to Phase 1.
-		};
-
-		// Apply the outcome to the producer that downstream consumers read from.
-		match &outcome {
-			SessionOutcome::Complete => {
-				let _ = track.finish();
-			}
-			SessionOutcome::Cancelled => {
-				let _ = track.abort(Error::Cancel);
-			}
-			SessionOutcome::BroadcastClosed(err) | SessionOutcome::Error(err) => {
-				let _ = track.abort(err.clone());
-			}
+			// One task per track serves its lone subscription and any number of
+			// fetches concurrently, then lingers before tearing the upstream down.
+			web_async::spawn(serve.run(request));
 		}
-
-		outcome
 	}
 
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
@@ -881,5 +638,501 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	fn log_path(&self, path: impl AsPath) -> Path<'_> {
 		self.origin.root().join(path)
+	}
+}
+
+/// The producer side of one track, before and after the upstream SUBSCRIBE_OK
+/// promotes the pending request into a full producer. Both observe subscription
+/// demand, so [`TrackServe`] drives them uniformly. Fetches are served separately
+/// via the [`TrackDynamic`] handle.
+enum Track {
+	Pending(TrackRequest),
+	Active(TrackProducer),
+}
+
+impl Track {
+	fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Subscription>, Error>> {
+		match self {
+			Track::Pending(request) => request.poll_subscription_changed(waiter).map(Ok),
+			Track::Active(producer) => producer.poll_subscription_changed(waiter),
+		}
+	}
+
+	fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		match self {
+			Track::Pending(request) => request.poll_unused(waiter),
+			Track::Active(producer) => producer.poll_unused(waiter),
+		}
+	}
+
+	/// Latest cached sequence, used to cap the upstream while pausing. Always `None`
+	/// before the producer exists (no group has arrived yet).
+	fn latest(&self) -> Option<u64> {
+		match self {
+			Track::Active(producer) => producer.latest(),
+			Track::Pending(_) => None,
+		}
+	}
+}
+
+/// The at-most-one live upstream subscription: its control stream plus the params
+/// echoed in every SUBSCRIBE_UPDATE.
+struct SubStream<S: web_transport_trait::Session> {
+	stream: Stream<S, Version>,
+	id: u64,
+	/// Capped at the latest group and dropped to priority 0 because the last
+	/// downstream subscriber left. The stream stays open during the linger window
+	/// so a returning consumer resumes without a fresh SUBSCRIBE.
+	paused: bool,
+	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
+	/// downstream aggregate changes.
+	ordered: bool,
+	max_latency: Duration,
+	start_group: Option<u64>,
+	priority: u8,
+	/// Per-(session, broadcast) viewer sentinel, held for the subscription's life.
+	_broadcast_sub: crate::BroadcastSubscription,
+}
+
+enum Sub<S: web_transport_trait::Session> {
+	None,
+	Active(SubStream<S>),
+}
+
+impl<S: web_transport_trait::Session> Sub<S> {
+	fn is_active(&self) -> bool {
+		matches!(self, Sub::Active(_))
+	}
+}
+
+/// One step for the [`TrackServe`] loop, produced by racing track demand, the
+/// upstream stream, the broadcast, and the linger timer.
+enum Event {
+	/// A consumer fetched a past group.
+	Fetch(GroupRequest),
+	/// The downstream aggregate subscription changed (`None` once the last subscriber leaves).
+	Subscription(Option<Subscription>),
+	/// Nothing left to serve (no subscription, no fetch, no consumers): start the linger countdown.
+	Idle,
+	/// An in-flight fetch finished.
+	FetchDone,
+	/// The upstream subscribe stream closed: `Ok` is a clean FIN, `Err` a transport error.
+	SubClosed(Result<(), Error>),
+	/// The whole broadcast went away.
+	BroadcastClosed(Error),
+	/// The linger window elapsed with nobody returning.
+	LingerExpired,
+}
+
+/// Serves one track for a relay: drives the single upstream subscription (opened
+/// lazily on the first downstream subscriber, paused/resumed across consumer churn)
+/// concurrently with any number of one-shot fetches, then lingers before tearing
+/// the upstream down so a returning consumer reuses the cache.
+#[derive(Clone)]
+struct TrackServe<S: web_transport_trait::Session> {
+	subscriber: Subscriber<S>,
+	path: PathOwned,
+	broadcast: BroadcastDynamic,
+	track_stats: Arc<SubscriberTrack>,
+	name: String,
+}
+
+impl<S: web_transport_trait::Session> TrackServe<S> {
+	async fn run(self, request: TrackRequest) {
+		// SUBSCRIBE_UPDATE (and thus pause/resume linger) only exists on Lite03+.
+		// Older versions tear the upstream down as soon as the track goes idle.
+		let supports_linger = !matches!(self.subscriber.version, Version::Lite01 | Version::Lite02);
+
+		// Mark the track as fetch-capable up front (before accept), so a consumer's
+		// cache-miss fetch waits to be served rather than failing fast. Held for the
+		// whole task; dropping it stops fetch serving.
+		let dynamic = request.dynamic();
+
+		// `Option` so we can move the request out of `track` at accept time (and at
+		// teardown); it's always `Some` while the loop runs.
+		let mut track = Some(Track::Pending(request));
+		let mut sub = Sub::None;
+		let mut fetches: FuturesUnordered<BoxFuture<'static, ()>> = FuturesUnordered::new();
+		let mut linger: Option<Pin<Box<tokio::time::Sleep>>> = None;
+
+		loop {
+			// Once nothing is in flight, the `poll_unused` check below confirms no
+			// consumers remain (it never fires while a subscriber or fetch holds one)
+			// and yields `Idle` to start the linger countdown.
+			let idle_eligible = linger.is_none() && fetches.is_empty();
+
+			let event = tokio::select! {
+				biased;
+
+				// (1) Track demand: a fetch, a subscription change, or full idle. One
+				// `kio::wait` so the borrows of `dynamic` and `track` are held together.
+				event = kio::wait(|waiter| {
+					let track = track.as_mut().expect("track present while serving");
+
+					// A fetch is cheap and one-shot, so serve it ahead of subscription churn.
+					match dynamic.poll_requested_group(waiter) {
+						Poll::Ready(Ok(req)) => return Poll::Ready(Event::Fetch(req)),
+						Poll::Ready(Err(err)) => return Poll::Ready(Event::BroadcastClosed(err)),
+						Poll::Pending => {}
+					}
+					match track.poll_subscription_changed(waiter) {
+						Poll::Ready(Ok(pref)) => return Poll::Ready(Event::Subscription(pref)),
+						Poll::Ready(Err(err)) => return Poll::Ready(Event::BroadcastClosed(err)),
+						Poll::Pending => {}
+					}
+					if idle_eligible && track.poll_unused(waiter).is_ready() {
+						return Poll::Ready(Event::Idle);
+					}
+					Poll::Pending
+				}) => event,
+
+				// (2) An in-flight fetch completed.
+				Some(()) = fetches.next(), if !fetches.is_empty() => Event::FetchDone,
+
+				// (3) The upstream subscribe stream closed (FIN or transport error).
+				res = async {
+					match &mut sub {
+						Sub::Active(active) => active.stream.reader.closed().await,
+						Sub::None => std::future::pending().await,
+					}
+				}, if sub.is_active() => Event::SubClosed(res),
+
+				// (4) The whole broadcast went away on the publisher side.
+				err = self.broadcast.closed() => Event::BroadcastClosed(err),
+
+				// (5) The linger window elapsed.
+				_ = async {
+					match linger.as_mut() {
+						Some(timer) => timer.as_mut().await,
+						None => std::future::pending::<()>().await,
+					}
+				}, if linger.is_some() => Event::LingerExpired,
+			};
+
+			match event {
+				Event::Fetch(req) => {
+					linger = None;
+					fetches.push(self.clone().serve_fetch(req).boxed());
+				}
+				Event::Subscription(pref) => {
+					linger = None;
+					if let Err(err) = self
+						.handle_subscription(&mut track, &mut sub, pref, supports_linger)
+						.await
+					{
+						return self.finish_track(track.take().unwrap(), sub, err);
+					}
+				}
+				Event::Idle => {
+					if supports_linger {
+						linger = Some(Box::pin(tokio::time::sleep(LINGER_TIMEOUT)));
+					} else {
+						// No SUBSCRIBE_UPDATE to pause with, so there's nothing to keep
+						// open: tear down as soon as the last consumer leaves.
+						tracing::info!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe cancelled");
+						return self.finish_track(track.take().unwrap(), sub, Error::Cancel);
+					}
+				}
+				Event::FetchDone => {}
+				Event::SubClosed(Ok(())) => {
+					tracing::info!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe complete");
+					// Upstream FIN'd the live subscription. Finish the producer (no more
+					// live groups), but keep the task alive: past groups can still be
+					// fetched, and the linger countdown eventually stops us.
+					if let Sub::Active(active) = &mut sub {
+						self.subscriber.subscribes.lock().remove(&active.id);
+						let _ = active.stream.writer.finish();
+					}
+					if let Some(Track::Active(producer)) = track.as_mut() {
+						let _ = producer.finish();
+					}
+					sub = Sub::None;
+				}
+				Event::SubClosed(Err(err)) => {
+					tracing::warn!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "subscribe error");
+					return self.finish_track(track.take().unwrap(), sub, err);
+				}
+				Event::BroadcastClosed(err) => {
+					tracing::info!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "broadcast closed");
+					return self.finish_track(track.take().unwrap(), sub, err);
+				}
+				Event::LingerExpired => {
+					tracing::info!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe cancelled");
+					return self.finish_track(track.take().unwrap(), sub, Error::Cancel);
+				}
+			}
+		}
+	}
+
+	/// Apply a subscription-demand change: open the upstream SUBSCRIBE on the first
+	/// subscriber, resume/update it while live, or pause it when the last leaves.
+	async fn handle_subscription(
+		&self,
+		track: &mut Option<Track>,
+		sub: &mut Sub<S>,
+		pref: Option<Subscription>,
+		supports_linger: bool,
+	) -> Result<(), Error> {
+		match pref {
+			Some(subscription) => match sub {
+				Sub::None => {
+					// Only the first subscriber, while still pending, opens an upstream
+					// SUBSCRIBE. If the track is already Active a prior subscription
+					// finished and there's nothing live left; the new subscriber just
+					// sees the finished track.
+					if matches!(track.as_ref(), Some(Track::Pending(_))) {
+						self.establish(track, sub, subscription).await?;
+					}
+				}
+				Sub::Active(active) if active.paused => {
+					// A consumer returned during linger: resume by uncapping.
+					active.paused = false;
+					active.priority = subscription.priority;
+					active.ordered = subscription.ordered;
+					active.max_latency = subscription.stale;
+					active.start_group = subscription.group_start;
+					self.send_update(active, subscription.group_end).await?;
+					tracing::info!(track = %self.name, "subscribe resumed");
+				}
+				Sub::Active(active) => {
+					// Downstream preferences changed: forward them upstream as a
+					// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
+					active.priority = subscription.priority;
+					active.ordered = subscription.ordered;
+					active.max_latency = subscription.stale;
+					active.start_group = subscription.group_start;
+					if supports_linger {
+						self.send_update(active, subscription.group_end).await?;
+					}
+				}
+			},
+			None => {
+				// Last subscriber left: pause the upstream (cap at the latest cached
+				// group, priority 0) but keep the stream open for the linger window.
+				// Older versions have no SUBSCRIBE_UPDATE, so they skip the pause and
+				// tear down on `Idle` instead.
+				if supports_linger {
+					if let Sub::Active(active) = sub {
+						if !active.paused {
+							active.paused = true;
+							active.start_group = None;
+							let cap = track.as_ref().and_then(Track::latest).unwrap_or(0);
+							let update = lite::SubscribeUpdate {
+								priority: 0,
+								ordered: active.ordered,
+								max_latency: active.max_latency,
+								start_group: active.start_group,
+								end_group: Some(cap),
+							};
+							active.stream.writer.encode(&update).await?;
+						}
+					}
+				}
+			}
+		}
+		Ok(())
+	}
+
+	/// Open the upstream SUBSCRIBE, wait for SUBSCRIBE_OK, accept the pending request
+	/// (unblocking downstream subscribers), and start routing groups into it.
+	async fn establish(
+		&self,
+		track: &mut Option<Track>,
+		sub: &mut Sub<S>,
+		subscription: Subscription,
+	) -> Result<(), Error> {
+		let id = self.subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
+
+		let msg = lite::Subscribe {
+			id,
+			broadcast: self.path.as_path(),
+			track: self.name.as_str().into(),
+			priority: subscription.priority,
+			ordered: subscription.ordered,
+			max_latency: subscription.stale,
+			start_group: subscription.group_start,
+			end_group: subscription.group_end,
+		};
+
+		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
+
+		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
+		stream.writer.encode(&lite::ControlType::Subscribe).await?;
+		stream.writer.encode(&msg).await?;
+
+		// SUBSCRIBE_OK must arrive first; bail if the broadcast dies meanwhile.
+		let resp = tokio::select! {
+			err = self.broadcast.closed() => return Err(err),
+			resp = stream.reader.decode::<lite::SubscribeResponse>() => resp?,
+		};
+		let lite::SubscribeResponse::Ok(info) = resp else {
+			return Err(Error::ProtocolViolation);
+		};
+
+		// Upstream confirmed: this session is now actively feeding the broadcast, so
+		// take the per-(session, broadcast) viewer sentinel for the subscription's life.
+		let abs = self.subscriber.origin.absolute(&self.path).to_owned();
+		let broadcast_sub = self.subscriber.broadcasts.subscribe(&abs);
+
+		// Stamp the negotiated timescale + cache window onto the local track so groups
+		// inherit them and downstream consumers validate per-frame timestamps and clamp
+		// their stale windows the same way.
+		let local_info = TrackInfo {
+			timescale: info.timescale,
+			cache: info.cache,
+			..Default::default()
+		};
+
+		// Accept the pending request → producer, unblocking downstream subscribers. No
+		// awaits between the take and the restore, so `track` is never left empty.
+		let Some(Track::Pending(request)) = track.take() else {
+			unreachable!("establish called without a pending track");
+		};
+		let mut producer = request.accept(local_info);
+
+		// The accepted producer starts with a fresh subscription cursor, so its first
+		// poll would re-report the subscription we just sent as a "change". Prime it
+		// now (the params are already on the wire) so only genuine later changes fire.
+		let _ = producer.poll_subscription_changed(&kio::Waiter::noop());
+
+		// SUBSCRIBE_OK is known now, so group streams never wait; they still read it
+		// through this channel (a group's QUIC stream can race ahead of SUBSCRIBE_OK).
+		let subscribe_ok = kio::Producer::new(Some(info)).consume();
+		self.subscriber.subscribes.lock().insert(
+			id,
+			TrackEntry {
+				producer: producer.clone(),
+				stats: self.track_stats.clone(),
+				subscribe_ok,
+			},
+		);
+
+		*track = Some(Track::Active(producer));
+		*sub = Sub::Active(SubStream {
+			stream,
+			id,
+			paused: false,
+			ordered: subscription.ordered,
+			max_latency: subscription.stale,
+			start_group: subscription.group_start,
+			priority: subscription.priority,
+			_broadcast_sub: broadcast_sub,
+		});
+
+		Ok(())
+	}
+
+	/// Echo the current params upstream as a SUBSCRIBE_UPDATE, varying only `end_group`.
+	async fn send_update(&self, active: &mut SubStream<S>, end_group: Option<u64>) -> Result<(), Error> {
+		let update = lite::SubscribeUpdate {
+			priority: active.priority,
+			ordered: active.ordered,
+			max_latency: active.max_latency,
+			start_group: active.start_group,
+			end_group,
+		};
+		active.stream.writer.encode(&update).await
+	}
+
+	/// Serve one downstream fetch end-to-end on its own bidi stream: send FETCH, read
+	/// FETCH_OK, accept the group request, then fill the group. Runs to completion as
+	/// an independent future in the serve loop's `FuturesUnordered`.
+	async fn serve_fetch(self, request: GroupRequest) {
+		let TrackServe {
+			mut subscriber,
+			path,
+			broadcast: _,
+			track_stats,
+			name,
+		} = self;
+		let group = request.sequence();
+
+		tracing::info!(broadcast = %subscriber.log_path(&path), track = %name, group, "fetch started");
+
+		let mut stream = match Stream::open(&subscriber.session, subscriber.version).await {
+			Ok(stream) => stream,
+			Err(err) => {
+				tracing::warn!(track = %name, %err, "fetch stream open failed");
+				return;
+			}
+		};
+
+		let send = async {
+			let msg = lite::Fetch {
+				broadcast: path.as_path(),
+				track: name.as_str().into(),
+				priority: request.priority(),
+				group,
+				frame_start: 0,
+			};
+			stream.writer.encode(&lite::ControlType::Fetch).await?;
+			stream.writer.encode(&msg).await
+		};
+		if let Err(err) = send.await {
+			stream.writer.abort(&err);
+			return;
+		}
+
+		// The first response MUST be a FETCH_OK; it carries the codec/timescale
+		// needed to decode the frames that follow on the same stream.
+		let info = match stream.reader.decode::<lite::FetchOk>().await {
+			Ok(info) => info,
+			Err(err) => {
+				stream.writer.abort(&err);
+				return;
+			}
+		};
+
+		// Make the group available (resolving the downstream fetch) and fill it. The
+		// TrackInfo only takes effect if the track isn't accepted yet (a fetch with no
+		// live subscription); otherwise the group inherits the accepted timescale.
+		let group_info = TrackInfo {
+			timescale: info.timescale,
+			..Default::default()
+		};
+		let mut producer = match request.accept(group_info) {
+			Ok(producer) => producer,
+			Err(err) => {
+				// Already served (a concurrent fetch) or the track closed.
+				tracing::debug!(track = %name, group, %err, "fetch not served");
+				stream.writer.abort(&err);
+				return;
+			}
+		};
+
+		let res = subscriber
+			.run_group(
+				&mut stream.reader,
+				producer.clone(),
+				track_stats,
+				info.compression,
+				info.timescale,
+			)
+			.await;
+		match res {
+			Ok(()) => {
+				let _ = producer.finish();
+			}
+			Err(err) => {
+				let _ = producer.abort(err);
+			}
+		}
+	}
+
+	/// Tear the track down: drop the subscribes-map entry, FIN the upstream if open,
+	/// and abort the producer (or reject the still-pending request) with `err`.
+	fn finish_track(&self, track: Track, mut sub: Sub<S>, err: Error) {
+		if let Sub::Active(active) = &mut sub {
+			self.subscriber.subscribes.lock().remove(&active.id);
+			let _ = active.stream.writer.finish();
+		}
+
+		match track {
+			Track::Active(mut producer) => {
+				let _ = producer.abort(err);
+			}
+			Track::Pending(request) => request.reject(err),
+		}
+		// Dropping `sub` releases the BroadcastSubscription viewer sentinel.
 	}
 }

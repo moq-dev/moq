@@ -49,17 +49,11 @@ struct BroadcastState {
 	// The current number of dynamic producers.
 	// If this is 0, requests must be empty.
 	dynamic: usize,
-
-	// The error that caused the broadcast to be aborted, if any.
-	abort: Option<Error>,
 }
 
 impl BroadcastState {
 	fn modify(state: &kio::Producer<Self>) -> Result<kio::Mut<'_, Self>, Error> {
-		match state.write() {
-			Ok(state) => Ok(state),
-			Err(r) => Err(r.abort.clone().unwrap_or(Error::Dropped)),
-		}
+		state.write().map_err(|_| Error::Dropped)
 	}
 
 	/// Insert a track weak handle into the lookup, returning an error on duplicate.
@@ -71,18 +65,13 @@ impl BroadcastState {
 		Ok(())
 	}
 
-	fn abort(&mut self, err: Error) -> Result<(), Error> {
-		if let Some(abort) = self.abort.take() {
-			return Err(abort);
-		}
-
+	/// Reject any pending dynamic track requests. Called when the last dynamic handler
+	/// goes away, so consumers don't block forever on requests nobody will fulfill.
+	fn reject_requests(&mut self, err: Error) {
 		for (_, request) in self.requests.drain() {
 			request.reject(err.clone());
 		}
 		self.request_order.clear();
-		self.abort = Some(err);
-
-		Ok(())
 	}
 }
 
@@ -179,17 +168,6 @@ impl BroadcastProducer {
 		}
 	}
 
-	/// Abort the broadcast with the given error.
-	///
-	/// Externally-owned tracks are independent and must be aborted separately;
-	/// inserted tracks are referenced via weak handles so that consumers can
-	/// finish reading them. Pending dynamic track requests, however, are owned
-	/// by the broadcast and have no other producer to fulfill them, so they are
-	/// aborted here.
-	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
-		BroadcastState::modify(&self.state)?.abort(err)
-	}
-
 	/// Return true if this is the same broadcast instance.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
@@ -254,14 +232,14 @@ impl BroadcastDynamic {
 		&self.info
 	}
 
-	// A helper to automatically apply Dropped if the state is closed without an error.
+	// A helper to automatically apply Dropped if the state is closed.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R, Error>>
 	where
 		F: FnMut(&mut kio::Mut<'_, BroadcastState>) -> Poll<R>,
 	{
 		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
 			Ok(r) => Ok(r),
-			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+			Err(_) => Err(Error::Dropped),
 		})
 	}
 
@@ -294,20 +272,10 @@ impl BroadcastDynamic {
 		}
 	}
 
-	/// Block until the broadcast is closed or aborted, returning the cause.
+	/// Block until the broadcast is closed (every producer dropped), returning the cause.
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
-	}
-
-	/// Abort the broadcast with the given error.
-	///
-	/// Externally-owned tracks are independent and must be aborted separately;
-	/// inserted tracks are referenced via weak handles. Pending dynamic track
-	/// requests are owned by the broadcast and aborted here so consumers don't
-	/// stay stuck waiting on producers nobody will fulfill.
-	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
-		BroadcastState::modify(&self.state)?.abort(err)
+		Error::Dropped
 	}
 
 	/// Return true if this is the same broadcast instance.
@@ -325,7 +293,8 @@ impl Drop for BroadcastDynamic {
 				return;
 			}
 
-			state.abort(Error::Dropped).ok();
+			// No dynamic handlers left to fulfill pending requests; reject them.
+			state.reject_requests(Error::Dropped);
 		}
 	}
 }
@@ -364,7 +333,7 @@ impl BroadcastConsumer {
 		// Upgrade to a temporary producer so we can modify the state.
 		let mut state = match self.state.write() {
 			Ok(state) => state,
-			Err(state) => return Err(state.abort.clone().unwrap_or(Error::Dropped)),
+			Err(_) => return Err(Error::Dropped),
 		};
 
 		// Reuse a live producer if one is already publishing the track.
@@ -397,13 +366,13 @@ impl BroadcastConsumer {
 		Ok(consumer)
 	}
 
-	/// Block until the broadcast is closed and return the cause.
+	/// Block until the broadcast is closed (every producer dropped) and return the cause.
 	///
-	/// Returns [`Error::Dropped`] if every producer was dropped without an
-	/// explicit abort, or the abort error supplied by [`BroadcastProducer::abort`].
+	/// Always returns [`Error::Dropped`]: a broadcast is just a collection of tracks, so it
+	/// only ends when every producer is gone. There is no way to abort it with a code.
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+		Error::Dropped
 	}
 
 	/// Returns true if every [`BroadcastProducer`] has been dropped.
@@ -496,7 +465,7 @@ mod test {
 	#[tokio::test]
 	async fn closed() {
 		let mut producer = BroadcastInfo::new().produce();
-		let _dynamic = producer.dynamic();
+		let dynamic = producer.dynamic();
 
 		let consumer = producer.consume();
 		consumer.assert_not_closed();
@@ -514,10 +483,11 @@ mod test {
 		// A track nobody publishes stays pending until accepted.
 		let track2_fut = subscribe_pending!(consumer, "track2");
 
-		// Aborting the broadcast must NOT cascade to externally-owned tracks.
-		producer.abort(Error::Cancel).unwrap();
+		// Dropping the last dynamic handler rejects pending requests, but must NOT
+		// cascade to externally-owned tracks.
+		drop(dynamic);
 
-		// track2 was a pending dynamic request, so its subscribe surfaces the abort.
+		// track2 was a pending dynamic request, so its subscribe surfaces the rejection.
 		assert!(track2_fut.await.is_err());
 
 		// track1's producer is held outside the broadcast, so it survives.

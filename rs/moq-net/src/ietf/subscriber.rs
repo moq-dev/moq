@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::{
 	BroadcastDynamic, BroadcastInfo, Error, Frame, FrameProducer, Group, GroupProducer, MAX_FRAME_SIZE, OriginProducer,
-	Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer, TrackRequest,
+	OriginPublish, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer, TrackRequest,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
@@ -42,6 +42,11 @@ struct BroadcastState {
 
 	// active number of PUBLISH or PUBLISH_NAMESPACE messages.
 	count: usize,
+
+	/// Announcement guard into our origin. Dropped when the entry is removed,
+	/// which unannounces the broadcast.
+	#[allow(dead_code)]
+	publish: OriginPublish,
 
 	/// Subscriber-side announce guard (bumps `announced` / `announced_closed`),
 	/// held for as long as the broadcast is announced into our origin.
@@ -431,10 +436,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Entry::Vacant(entry) => {
 				let broadcast = BroadcastInfo::new().produce();
-				self.origin.publish_broadcast(path.clone(), broadcast.consume());
+				// Propagates Error::Unauthorized if the path is out of scope.
+				let publish = self.origin.publish_broadcast(path.clone(), broadcast.consume())?;
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),
 					count: 1,
+					publish,
 					_stats: self.stats.broadcast(&abs).subscriber(),
 				});
 				broadcast

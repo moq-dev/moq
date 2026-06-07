@@ -50,9 +50,10 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 	// and the first RTP packet.
 	let broadcast = moq_net::BroadcastInfo::new().produce();
 	let consumer = broadcast.consume();
-	if !server.publisher().publish_broadcast(path, consumer) {
-		return Err(Error::Other(anyhow::anyhow!("path conflict: {path}")));
-	}
+	let publish = server
+		.publisher()
+		.publish_broadcast(path, consumer)
+		.map_err(|err| Error::Other(anyhow::anyhow!("failed to publish broadcast: {err}")))?;
 
 	let sink = Box::new(IngestSink::new(broadcast)?);
 
@@ -68,6 +69,8 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 	let session = session::Session::ingest(rtc, socket, sink);
 
 	tokio::spawn(async move {
+		// Hold the announcement guard for the session's lifetime; unannounces on exit.
+		let _publish = publish;
 		if let Err(err) = session.run().await {
 			tracing::warn!(%err, "whip session ended");
 		}

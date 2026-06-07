@@ -115,7 +115,7 @@ export class Track {
 	 * Receive the next group available on this track, in arrival order.
 	 *
 	 * Groups may arrive out of order or with gaps due to network conditions.
-	 * Use {@link nextGroupOrdered} if you need groups in sequence order,
+	 * Use {@link nextGroup} if you need groups in sequence order,
 	 * skipping those that arrive too late.
 	 */
 	async recvGroup(): Promise<Group | undefined> {
@@ -134,20 +134,12 @@ export class Track {
 	}
 
 	/**
-	 * @deprecated Use {@link recvGroup} for arrival order, or {@link nextGroupOrdered} for sequence order.
-	 */
-	async nextGroup(): Promise<Group | undefined> {
-		return this.recvGroup();
-	}
-
-	/**
 	 * Return the next group with a strictly-greater sequence number than the last returned.
 	 *
 	 * Late arrivals (with a sequence number at or below the last one returned) are silently skipped.
-	 *
-	 * NOTE: This will be renamed to `nextGroup` in the next major version.
+	 * Use {@link recvGroup} to see every group in arrival order instead.
 	 */
-	async nextGroupOrdered(): Promise<Group | undefined> {
+	async nextGroup(): Promise<Group | undefined> {
 		for (;;) {
 			const group = await this.recvGroup();
 			if (!group) return undefined;

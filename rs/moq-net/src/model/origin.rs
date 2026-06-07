@@ -10,7 +10,7 @@ use web_async::Lock;
 
 use super::BroadcastConsumer;
 use crate::{
-	AsPath, BroadcastInfo, BroadcastProducer, Path, PathOwned, PathPrefixes,
+	AsPath, BroadcastInfo, BroadcastProducer, Error, Path, PathOwned, PathPrefixes,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 };
 
@@ -748,50 +748,59 @@ impl OriginProducer {
 		}
 	}
 
-	/// Create and publish a new broadcast, returning the producer.
+	/// Create and publish a new broadcast.
 	///
 	/// This is a helper method when you only want to publish a broadcast to a single origin.
-	/// Returns [None] if the broadcast is not allowed to be published.
-	pub fn create_broadcast(&self, path: impl AsPath) -> Option<BroadcastProducer> {
-		let broadcast = BroadcastInfo::new().produce();
-		self.publish_broadcast(path, broadcast.consume()).then_some(broadcast)
+	/// The returned [`BroadcastPublish`] derefs to a [`BroadcastProducer`]; dropping it
+	/// unannounces the broadcast. See [`publish_broadcast`](Self::publish_broadcast) for the
+	/// error cases.
+	pub fn create_broadcast(&self, path: impl AsPath) -> Result<BroadcastPublish, Error> {
+		let producer = BroadcastInfo::new().produce();
+		let publish = self.publish_broadcast(path, producer.consume())?;
+		Ok(BroadcastPublish { producer, publish })
 	}
 
 	/// Publish a broadcast, announcing it to all consumers.
 	///
-	/// The broadcast will be unannounced when it is closed.
+	/// Returns an [`OriginPublish`] guard that keeps the broadcast announced. Drop it (or call
+	/// [`OriginPublish::unannounce`]) to remove the broadcast. The announcement is independent
+	/// of the broadcast's own lifetime, so dropping the guard unannounces even while the
+	/// [`BroadcastProducer`] keeps serving tracks.
+	///
+	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this producer may
+	/// publish under (after [`scope`](Self::scope) / [`with_root`](Self::with_root)). A full-scope
+	/// producer (the default from [`Origin::produce`]) never fails. Callers must not publish a
+	/// broadcast whose hop chain already contains this origin's id (it would form a routing loop);
+	/// relays filter such reflections before they reach here, checked by a `debug_assert`.
+	///
 	/// If there is already a broadcast with the same path, the new one replaces the active only
 	/// if it has a shorter hop path, or an equal-length path that wins a deterministic tie-break
 	/// (a hash of the broadcast name and hop chain); otherwise it is queued as a backup. The
 	/// tie-break is identical on every node, so a cluster converges on the same route.
-	/// When the active broadcast closes, the backup that wins the same ordering is promoted and
-	/// reannounced. Backups that close before being promoted are silently dropped.
-	///
-	/// Returns false if the broadcast is not allowed to be published.
-	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
+	/// When the active guard is dropped, the backup that wins the same ordering is promoted and
+	/// reannounced. Backups whose guards drop before being promoted are silently removed.
+	#[must_use = "the broadcast is unannounced as soon as the returned guard is dropped"]
+	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> Result<OriginPublish, Error> {
 		let path = path.as_path();
 
-		// Loop detection: refuse broadcasts whose hop chain already contains our id.
-		if broadcast.info().hops.contains(&self.info) {
-			return false;
-		}
+		// Callers must filter reflections (a hop chain already containing our id) before publishing;
+		// relays do this on the announce path. Re-announcing one here would form a routing loop.
+		debug_assert!(
+			!broadcast.info().hops.contains(&self.info),
+			"publish_broadcast called with a looping hop chain",
+		);
 
-		let (root, rest) = match self.nodes.get(&path) {
-			Some(root) => root,
-			None => return false,
-		};
+		let (node, rest) = self.nodes.get(&path).ok_or(Error::Unauthorized)?;
+		let full = self.root.join(&path).to_owned();
 
-		let full = self.root.join(&path);
+		node.lock().publish(&full, &broadcast, &rest);
 
-		root.lock().publish(&full, &broadcast, &rest);
-		let root = root.clone();
-
-		web_async::spawn(async move {
-			broadcast.closed().await;
-			root.lock().remove(&full, broadcast, &rest);
-		});
-
-		true
+		Ok(OriginPublish {
+			node,
+			full,
+			rest,
+			broadcast: Some(broadcast),
+		})
 	}
 
 	/// Returns a new OriginProducer restricted to publishing under one of `prefixes`.
@@ -853,6 +862,67 @@ impl OriginProducer {
 	/// Converts a relative path to an absolute path.
 	pub fn absolute(&self, path: impl AsPath) -> Path<'_> {
 		self.root.join(path)
+	}
+}
+
+/// Keeps a broadcast announced in the origin tree.
+///
+/// Returned by [`OriginProducer::publish_broadcast`]. While held, the broadcast stays
+/// announced to all consumers. Dropping it (or calling [`Self::unannounce`]) removes the
+/// broadcast from the tree: the origin promotes the best remaining backup route (emitting a
+/// restart) or, if none remain, unannounces the path. The guard is independent of the
+/// broadcast's own lifetime, so it can outlive or be dropped before the broadcast itself.
+#[must_use = "the broadcast is unannounced as soon as this guard is dropped"]
+pub struct OriginPublish {
+	node: Lock<OriginNode>,
+	full: PathOwned,
+	rest: PathOwned,
+	// `Option` so `Drop` can take ownership to hand the consumer to `remove`.
+	broadcast: Option<BroadcastConsumer>,
+}
+
+impl OriginPublish {
+	/// Unannounce the broadcast. Equivalent to dropping the guard, but spells out the intent.
+	pub fn unannounce(self) {}
+}
+
+impl Drop for OriginPublish {
+	fn drop(&mut self) {
+		if let Some(broadcast) = self.broadcast.take() {
+			self.node.lock().remove(&self.full, broadcast, &self.rest);
+		}
+	}
+}
+
+/// A [`BroadcastProducer`] paired with its [`OriginPublish`] announcement guard.
+///
+/// Returned by [`OriginProducer::create_broadcast`]. Derefs to the underlying
+/// [`BroadcastProducer`] so you can add tracks directly; dropping it unannounces the broadcast.
+pub struct BroadcastPublish {
+	producer: BroadcastProducer,
+	// Held only for its Drop, which unannounces the broadcast.
+	#[allow(dead_code)]
+	publish: OriginPublish,
+}
+
+impl BroadcastPublish {
+	/// Stop announcing the broadcast but keep producing into it, returning the bare producer.
+	pub fn unannounce(self) -> BroadcastProducer {
+		self.producer
+	}
+}
+
+impl std::ops::Deref for BroadcastPublish {
+	type Target = BroadcastProducer;
+
+	fn deref(&self) -> &Self::Target {
+		&self.producer
+	}
+}
+
+impl std::ops::DerefMut for BroadcastPublish {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.producer
 	}
 }
 
@@ -1174,6 +1244,26 @@ impl AnnounceConsumer {
 }
 
 #[cfg(test)]
+impl OriginProducer {
+	/// Test helper that reproduces the legacy fire-and-forget contract: publish, then
+	/// auto-unannounce when the broadcast closes (every producer dropped) via a spawned
+	/// watcher that drops the [`OriginPublish`] guard. Returns whether the publish was
+	/// accepted. Exercises [`OriginPublish`]'s `Drop` on the close path.
+	fn publish_broadcast_spawn(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
+		match self.publish_broadcast(path, broadcast.clone()) {
+			Ok(publish) => {
+				web_async::spawn(async move {
+					broadcast.closed().await;
+					drop(publish);
+				});
+				true
+			}
+			Err(_) => false,
+		}
+	}
+}
+
+#[cfg(test)]
 mod tests {
 	use crate::BroadcastInfo;
 
@@ -1211,7 +1301,7 @@ mod tests {
 		consumer1.assert_next_wait();
 
 		// Publish the first broadcast.
-		origin.publish_broadcast("test1", broadcast1.consume());
+		origin.publish_broadcast_spawn("test1", broadcast1.consume());
 
 		consumer1.assert_next("test1", &broadcast1.consume());
 		consumer1.assert_next_wait();
@@ -1221,7 +1311,7 @@ mod tests {
 		let mut consumer2 = origin.consume().announced();
 
 		// Publish the second broadcast.
-		origin.publish_broadcast("test2", broadcast2.consume());
+		origin.publish_broadcast_spawn("test2", broadcast2.consume());
 
 		consumer1.assert_next("test2", &broadcast2.consume());
 		consumer1.assert_next_wait();
@@ -1281,9 +1371,9 @@ mod tests {
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		origin.publish_broadcast("test", consumer1.clone());
-		origin.publish_broadcast("test", consumer2.clone());
-		origin.publish_broadcast("test", consumer3.clone());
+		origin.publish_broadcast_spawn("test", consumer1.clone());
+		origin.publish_broadcast_spawn("test", consumer2.clone());
+		origin.publish_broadcast_spawn("test", consumer3.clone());
 		assert!(consumer.get_broadcast("test").is_some());
 
 		// Identical (empty) hop chains tie on the deterministic key, so the first publish
@@ -1334,10 +1424,10 @@ mod tests {
 		let b = BroadcastInfo::new().produce();
 
 		let mut announced = origin.consume().announced();
-		origin.publish_broadcast("test", a.consume());
+		origin.publish_broadcast_spawn("test", a.consume());
 		announced.assert_next("test", &a.consume());
 
-		origin.publish_broadcast("test", b.consume());
+		origin.publish_broadcast_spawn("test", b.consume());
 		announced.assert_next_restart("test", &b.consume());
 		announced.assert_next_wait();
 	}
@@ -1355,8 +1445,8 @@ mod tests {
 		let b = BroadcastInfo::new().produce();
 
 		let mut announced = origin.consume().announced();
-		origin.publish_broadcast("test", a.consume());
-		origin.publish_broadcast("test", b.consume());
+		origin.publish_broadcast_spawn("test", a.consume());
+		origin.publish_broadcast_spawn("test", b.consume());
 
 		announced.assert_next("test", &b.consume());
 		announced.assert_next_wait();
@@ -1370,8 +1460,8 @@ mod tests {
 		let broadcast1 = BroadcastInfo::new().produce();
 		let broadcast2 = BroadcastInfo::new().produce();
 
-		origin.publish_broadcast("test", broadcast1.consume());
-		origin.publish_broadcast("test", broadcast2.consume());
+		origin.publish_broadcast_spawn("test", broadcast1.consume());
+		origin.publish_broadcast_spawn("test", broadcast2.consume());
 		assert!(origin.consume().get_broadcast("test").is_some());
 
 		// This is harder, dropping the new broadcast first.
@@ -1403,8 +1493,8 @@ mod tests {
 			let origin = Origin::random().produce();
 			let a = route(first);
 			let b = route(second);
-			origin.publish_broadcast("test", a.consume());
-			origin.publish_broadcast("test", b.consume());
+			origin.publish_broadcast_spawn("test", a.consume());
+			origin.publish_broadcast_spawn("test", b.consume());
 			let hops = origin.consume().get_broadcast("test").unwrap().info().hops.clone();
 			// Keep the producers alive until after we read the active route.
 			drop((a, b));
@@ -1430,8 +1520,8 @@ mod tests {
 		let broadcast = BroadcastInfo::new().produce();
 
 		// Ensure it doesn't crash.
-		origin.publish_broadcast("test", broadcast.consume());
-		origin.publish_broadcast("test", broadcast.consume());
+		origin.publish_broadcast_spawn("test", broadcast.consume());
+		origin.publish_broadcast_spawn("test", broadcast.consume());
 
 		assert!(origin.consume().get_broadcast("test").is_some());
 
@@ -1452,7 +1542,7 @@ mod tests {
 
 		let mut consumer = origin.consume().announced();
 		for i in 0..256 {
-			origin.publish_broadcast(format!("test{i:03}"), broadcast.consume());
+			origin.publish_broadcast_spawn(format!("test{i:03}"), broadcast.consume());
 		}
 
 		for i in 0..256 {
@@ -1468,7 +1558,7 @@ mod tests {
 
 		let mut consumer = origin.consume().announced();
 		for i in 0..256 {
-			origin.publish_broadcast(format!("test{i:03}"), broadcast.consume());
+			origin.publish_broadcast_spawn(format!("test{i:03}"), broadcast.consume());
 		}
 
 		for i in 0..256 {
@@ -1488,7 +1578,7 @@ mod tests {
 		let mut consumer = origin.consume().announced();
 
 		// When publishing to "bar/baz", it should actually publish to "foo/bar/baz"
-		assert!(foo_producer.publish_broadcast("bar/baz", broadcast.consume()));
+		assert!(foo_producer.publish_broadcast_spawn("bar/baz", broadcast.consume()));
 		// The original consumer should see the full path
 		consumer.assert_next("foo/bar/baz", &broadcast.consume());
 
@@ -1510,7 +1600,7 @@ mod tests {
 		let mut consumer = origin.consume().announced();
 
 		// Publishing to "baz" should actually publish to "foo/bar/baz"
-		assert!(foo_bar_producer.publish_broadcast("baz", broadcast.consume()));
+		assert!(foo_bar_producer.publish_broadcast_spawn("baz", broadcast.consume()));
 		// The original consumer sees the full path
 		consumer.assert_next("foo/bar/baz", &broadcast.consume());
 
@@ -1530,14 +1620,14 @@ mod tests {
 			.expect("should create limited producer");
 
 		// Should be able to publish to allowed paths
-		assert!(limited_producer.publish_broadcast("allowed/path1", broadcast.consume()));
-		assert!(limited_producer.publish_broadcast("allowed/path1/nested", broadcast.consume()));
-		assert!(limited_producer.publish_broadcast("allowed/path2", broadcast.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("allowed/path1", broadcast.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("allowed/path1/nested", broadcast.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("allowed/path2", broadcast.consume()));
 
 		// Should not be able to publish to disallowed paths
-		assert!(!limited_producer.publish_broadcast("notallowed", broadcast.consume()));
-		assert!(!limited_producer.publish_broadcast("allowed", broadcast.consume())); // Parent of allowed path
-		assert!(!limited_producer.publish_broadcast("other/path", broadcast.consume()));
+		assert!(!limited_producer.publish_broadcast_spawn("notallowed", broadcast.consume()));
+		assert!(!limited_producer.publish_broadcast_spawn("allowed", broadcast.consume())); // Parent of allowed path
+		assert!(!limited_producer.publish_broadcast_spawn("other/path", broadcast.consume()));
 	}
 
 	#[tokio::test]
@@ -1558,9 +1648,9 @@ mod tests {
 		let mut consumer = origin.consume().announced();
 
 		// Publish to different paths
-		origin.publish_broadcast("allowed", broadcast1.consume());
-		origin.publish_broadcast("allowed/nested", broadcast2.consume());
-		origin.publish_broadcast("notallowed", broadcast3.consume());
+		origin.publish_broadcast_spawn("allowed", broadcast1.consume());
+		origin.publish_broadcast_spawn("allowed/nested", broadcast2.consume());
+		origin.publish_broadcast_spawn("notallowed", broadcast3.consume());
 
 		// Create a consumer that only sees "allowed" paths
 		let mut limited_consumer = origin
@@ -1587,9 +1677,9 @@ mod tests {
 		let broadcast2 = BroadcastInfo::new().produce();
 		let broadcast3 = BroadcastInfo::new().produce();
 
-		origin.publish_broadcast("foo/test", broadcast1.consume());
-		origin.publish_broadcast("bar/test", broadcast2.consume());
-		origin.publish_broadcast("baz/test", broadcast3.consume());
+		origin.publish_broadcast_spawn("foo/test", broadcast1.consume());
+		origin.publish_broadcast_spawn("bar/test", broadcast2.consume());
+		origin.publish_broadcast_spawn("baz/test", broadcast3.consume());
 
 		// Consumer that only sees "foo" and "bar" paths
 		let mut limited_consumer = origin
@@ -1620,15 +1710,15 @@ mod tests {
 		let mut consumer = origin.consume().announced();
 
 		// Should be able to publish to foo/bar and foo/goop/pee (but user sees as bar and goop/pee)
-		assert!(limited_producer.publish_broadcast("bar", broadcast.consume()));
-		assert!(limited_producer.publish_broadcast("bar/nested", broadcast.consume()));
-		assert!(limited_producer.publish_broadcast("goop/pee", broadcast.consume()));
-		assert!(limited_producer.publish_broadcast("goop/pee/nested", broadcast.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("bar", broadcast.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("bar/nested", broadcast.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("goop/pee", broadcast.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("goop/pee/nested", broadcast.consume()));
 
 		// Should not be able to publish outside allowed paths
-		assert!(!limited_producer.publish_broadcast("baz", broadcast.consume()));
-		assert!(!limited_producer.publish_broadcast("goop", broadcast.consume())); // Parent of allowed
-		assert!(!limited_producer.publish_broadcast("goop/other", broadcast.consume()));
+		assert!(!limited_producer.publish_broadcast_spawn("baz", broadcast.consume()));
+		assert!(!limited_producer.publish_broadcast_spawn("goop", broadcast.consume())); // Parent of allowed
+		assert!(!limited_producer.publish_broadcast_spawn("goop/other", broadcast.consume()));
 
 		// Original consumer sees full paths
 		consumer.assert_next("foo/bar", &broadcast.consume());
@@ -1645,9 +1735,9 @@ mod tests {
 		let broadcast3 = BroadcastInfo::new().produce();
 
 		// Publish broadcasts
-		origin.publish_broadcast("foo/bar/test", broadcast1.consume());
-		origin.publish_broadcast("foo/goop/pee/test", broadcast2.consume());
-		origin.publish_broadcast("foo/other/test", broadcast3.consume());
+		origin.publish_broadcast_spawn("foo/bar/test", broadcast1.consume());
+		origin.publish_broadcast_spawn("foo/goop/pee/test", broadcast2.consume());
+		origin.publish_broadcast_spawn("foo/other/test", broadcast3.consume());
 
 		// User connects to /foo root
 		let foo_producer = origin.with_root("foo").expect("should create foo root");
@@ -1693,8 +1783,8 @@ mod tests {
 		let root_producer = origin.clone();
 
 		// Should be able to publish anywhere
-		assert!(root_producer.publish_broadcast("any/path", broadcast.consume()));
-		assert!(root_producer.publish_broadcast("other/path", broadcast.consume()));
+		assert!(root_producer.publish_broadcast_spawn("any/path", broadcast.consume()));
+		assert!(root_producer.publish_broadcast_spawn("other/path", broadcast.consume()));
 
 		// Can create any root
 		let foo_producer = root_producer.with_root("foo").expect("should create any root");
@@ -1707,8 +1797,8 @@ mod tests {
 		let broadcast1 = BroadcastInfo::new().produce();
 		let broadcast2 = BroadcastInfo::new().produce();
 
-		origin.publish_broadcast("allowed/test", broadcast1.consume());
-		origin.publish_broadcast("notallowed/test", broadcast2.consume());
+		origin.publish_broadcast_spawn("allowed/test", broadcast1.consume());
+		origin.publish_broadcast_spawn("notallowed/test", broadcast2.consume());
 
 		// Create limited consumer
 		let limited_consumer = origin
@@ -1739,14 +1829,14 @@ mod tests {
 		let limited_producer = origin.scope(&["a/b/c".into()]).expect("should create limited producer");
 
 		// Should be able to publish to exact path and nested paths
-		assert!(limited_producer.publish_broadcast("a/b/c", broadcast.consume()));
-		assert!(limited_producer.publish_broadcast("a/b/c/d", broadcast.consume()));
-		assert!(limited_producer.publish_broadcast("a/b/c/d/e", broadcast.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("a/b/c", broadcast.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("a/b/c/d", broadcast.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("a/b/c/d/e", broadcast.consume()));
 
 		// Should not be able to publish to parent or sibling paths
-		assert!(!limited_producer.publish_broadcast("a", broadcast.consume()));
-		assert!(!limited_producer.publish_broadcast("a/b", broadcast.consume()));
-		assert!(!limited_producer.publish_broadcast("a/b/other", broadcast.consume()));
+		assert!(!limited_producer.publish_broadcast_spawn("a", broadcast.consume()));
+		assert!(!limited_producer.publish_broadcast_spawn("a/b", broadcast.consume()));
+		assert!(!limited_producer.publish_broadcast_spawn("a/b/other", broadcast.consume()));
 	}
 
 	#[tokio::test]
@@ -1757,9 +1847,9 @@ mod tests {
 		let broadcast3 = BroadcastInfo::new().produce();
 
 		// Publish to different paths
-		origin.publish_broadcast("foo/test", broadcast1.consume());
-		origin.publish_broadcast("bar/test", broadcast2.consume());
-		origin.publish_broadcast("baz/test", broadcast3.consume());
+		origin.publish_broadcast_spawn("foo/test", broadcast1.consume());
+		origin.publish_broadcast_spawn("bar/test", broadcast2.consume());
+		origin.publish_broadcast_spawn("baz/test", broadcast3.consume());
 
 		// Create consumers with different permissions
 		let mut foo_consumer = origin
@@ -1805,8 +1895,8 @@ mod tests {
 			.expect("should create limited producer");
 
 		// Publish some broadcasts
-		assert!(limited_producer.publish_broadcast("worm-node/test", broadcast1.consume()));
-		assert!(limited_producer.publish_broadcast("foobar/test", broadcast2.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("worm-node/test", broadcast1.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("foobar/test", broadcast2.consume()));
 
 		// scope with empty prefix should keep the exact same "worm-node" and "foobar" nodes
 		let mut consumer = limited_producer
@@ -1839,9 +1929,9 @@ mod tests {
 			.expect("should create limited producer");
 
 		// Publish broadcasts at different levels
-		assert!(limited_producer.publish_broadcast("worm-node", broadcast1.consume()));
-		assert!(limited_producer.publish_broadcast("worm-node/foo", broadcast2.consume()));
-		assert!(limited_producer.publish_broadcast("foobar/bar", broadcast3.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("worm-node", broadcast1.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("worm-node/foo", broadcast2.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("foobar/bar", broadcast3.consume()));
 
 		// Test 1: scope("worm-node") should result in a single "" node with contents of "worm-node" ONLY
 		let mut worm_consumer = limited_producer
@@ -1879,9 +1969,9 @@ mod tests {
 			.expect("should create limited producer");
 
 		// Publish to each root
-		assert!(limited_producer.publish_broadcast("app1/data", broadcast1.consume()));
-		assert!(limited_producer.publish_broadcast("app2/config", broadcast2.consume()));
-		assert!(limited_producer.publish_broadcast("shared/resource", broadcast3.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("app1/data", broadcast1.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("app2/config", broadcast2.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("shared/resource", broadcast3.consume()));
 
 		// scope with empty prefix should maintain all roots
 		let mut consumer = limited_producer
@@ -1913,10 +2003,10 @@ mod tests {
 			.expect("should create producer with empty prefix");
 
 		// Should still have the same publishing restrictions
-		assert!(same_producer.publish_broadcast("services/api", broadcast.consume()));
-		assert!(same_producer.publish_broadcast("services/web", broadcast.consume()));
-		assert!(!same_producer.publish_broadcast("services/db", broadcast.consume()));
-		assert!(!same_producer.publish_broadcast("other", broadcast.consume()));
+		assert!(same_producer.publish_broadcast_spawn("services/api", broadcast.consume()));
+		assert!(same_producer.publish_broadcast_spawn("services/web", broadcast.consume()));
+		assert!(!same_producer.publish_broadcast_spawn("services/db", broadcast.consume()));
+		assert!(!same_producer.publish_broadcast_spawn("other", broadcast.consume()));
 	}
 
 	#[tokio::test]
@@ -1930,9 +2020,9 @@ mod tests {
 		let limited_producer = origin.scope(&["org".into()]).expect("should create limited producer");
 
 		// Publish at various depths
-		assert!(limited_producer.publish_broadcast("org/team1/project1", broadcast1.consume()));
-		assert!(limited_producer.publish_broadcast("org/team1/project2", broadcast2.consume()));
-		assert!(limited_producer.publish_broadcast("org/team2/project1", broadcast3.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("org/team1/project1", broadcast1.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("org/team1/project2", broadcast2.consume()));
+		assert!(limited_producer.publish_broadcast_spawn("org/team2/project1", broadcast3.consume()));
 
 		// Narrow down to team2 only
 		let mut team2_consumer = limited_producer
@@ -2035,8 +2125,8 @@ mod tests {
 			.expect("should create user producer");
 
 		// Publish some data
-		assert!(user_producer.publish_broadcast("worm-node/data", broadcast1.consume()));
-		assert!(user_producer.publish_broadcast("foobar", broadcast2.consume()));
+		assert!(user_producer.publish_broadcast_spawn("worm-node/data", broadcast1.consume()));
+		assert!(user_producer.publish_broadcast_spawn("foobar", broadcast2.consume()));
 
 		// Key test: scope with "" should maintain access to allowed roots
 		let mut consumer = user_producer
@@ -2075,7 +2165,7 @@ mod tests {
 			.scope(&["demo".into(), "demo".into()])
 			.expect("should create producer");
 
-		assert!(producer.publish_broadcast("demo/stream", broadcast.consume()));
+		assert!(producer.publish_broadcast_spawn("demo/stream", broadcast.consume()));
 
 		let mut consumer = producer.consume().announced();
 		consumer.assert_next("demo/stream", &broadcast.consume());
@@ -2093,7 +2183,7 @@ mod tests {
 			.expect("should create producer");
 
 		// Can still publish under "demo/bar" since "demo" covers everything
-		assert!(producer.publish_broadcast("demo/bar/stream", broadcast.consume()));
+		assert!(producer.publish_broadcast_spawn("demo/bar/stream", broadcast.consume()));
 
 		let mut consumer = producer.consume().announced();
 		consumer.assert_next("demo/bar/stream", &broadcast.consume());
@@ -2110,7 +2200,7 @@ mod tests {
 			.scope(&["demo".into(), "demo/foo".into()])
 			.expect("should create producer");
 
-		assert!(producer.publish_broadcast("demo/foo/stream", broadcast.consume()));
+		assert!(producer.publish_broadcast_spawn("demo/foo/stream", broadcast.consume()));
 
 		let mut consumer = producer.consume().announced();
 		// Should only get ONE announcement (not two from overlapping nodes)
@@ -2135,7 +2225,7 @@ mod tests {
 		let origin = Origin::random().produce();
 		let broadcast = BroadcastInfo::new().produce();
 
-		origin.publish_broadcast("test", broadcast.consume());
+		origin.publish_broadcast_spawn("test", broadcast.consume());
 
 		let consumer = origin.consume();
 		let result = consumer.announced_broadcast("test").await.expect("should find it");
@@ -2160,7 +2250,7 @@ mod tests {
 		// Give the spawned task a chance to subscribe.
 		tokio::task::yield_now().await;
 
-		origin.publish_broadcast("test", broadcast.consume());
+		origin.publish_broadcast_spawn("test", broadcast.consume());
 
 		let result = wait.await.unwrap().expect("should find it");
 		assert!(result.is_clone(&broadcast.consume()));
@@ -2184,11 +2274,11 @@ mod tests {
 		tokio::task::yield_now().await;
 
 		// Publish an unrelated broadcast first — announced_broadcast should skip it.
-		origin.publish_broadcast("other", other.consume());
+		origin.publish_broadcast_spawn("other", other.consume());
 		tokio::task::yield_now().await;
 		assert!(!wait.is_finished(), "must not resolve on unrelated path");
 
-		origin.publish_broadcast("target", target.consume());
+		origin.publish_broadcast_spawn("target", target.consume());
 		let result = wait.await.unwrap().expect("should find target");
 		assert!(result.is_clone(&target.consume()));
 	}
@@ -2211,11 +2301,11 @@ mod tests {
 		tokio::task::yield_now().await;
 
 		// "foo/bar" is under the prefix scope, but it's not the exact path — skip it.
-		origin.publish_broadcast("foo/bar", nested.consume());
+		origin.publish_broadcast_spawn("foo/bar", nested.consume());
 		tokio::task::yield_now().await;
 		assert!(!wait.is_finished(), "must not resolve on a nested path");
 
-		origin.publish_broadcast("foo", exact.consume());
+		origin.publish_broadcast_spawn("foo", exact.consume());
 		let result = wait.await.unwrap().expect("should find foo exactly");
 		assert!(result.is_clone(&exact.consume()));
 	}
@@ -2262,7 +2352,7 @@ mod tests {
 		let mut announced = origin.consume().announced();
 
 		let broadcast = BroadcastInfo::new().produce();
-		origin.publish_broadcast("test", broadcast.consume());
+		origin.publish_broadcast_spawn("test", broadcast.consume());
 		drop(broadcast);
 
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
@@ -2282,10 +2372,10 @@ mod tests {
 		let broadcast1 = BroadcastInfo::new().produce();
 		let broadcast2 = BroadcastInfo::new().produce();
 
-		origin.publish_broadcast("test", broadcast1.consume());
+		origin.publish_broadcast_spawn("test", broadcast1.consume());
 		drop(broadcast1);
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-		origin.publish_broadcast("test", broadcast2.consume());
+		origin.publish_broadcast_spawn("test", broadcast2.consume());
 
 		announced.assert_next("test", &broadcast2.consume());
 		announced.assert_next_wait();
@@ -2299,7 +2389,7 @@ mod tests {
 
 		let origin = Origin::random().produce();
 		let broadcast1 = BroadcastInfo::new().produce();
-		origin.publish_broadcast("test", broadcast1.consume());
+		origin.publish_broadcast_spawn("test", broadcast1.consume());
 
 		let mut announced = origin.consume().announced();
 		announced.assert_next("test", &broadcast1.consume());
@@ -2309,7 +2399,7 @@ mod tests {
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
 		let broadcast2 = BroadcastInfo::new().produce();
-		origin.publish_broadcast("test", broadcast2.consume());
+		origin.publish_broadcast_spawn("test", broadcast2.consume());
 
 		// The cursor must see the unannounce before the new announce.
 		announced.assert_next_none("test");
@@ -2325,7 +2415,7 @@ mod tests {
 
 		let origin = Origin::random().produce();
 		let broadcast1 = BroadcastInfo::new().produce();
-		origin.publish_broadcast("test", broadcast1.consume());
+		origin.publish_broadcast_spawn("test", broadcast1.consume());
 
 		let mut announced = origin.consume().announced();
 		announced.assert_next("test", &broadcast1.consume());
@@ -2334,7 +2424,7 @@ mod tests {
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
 		let broadcast2 = BroadcastInfo::new().produce();
-		origin.publish_broadcast("test", broadcast2.consume());
+		origin.publish_broadcast_spawn("test", broadcast2.consume());
 		drop(broadcast2);
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
@@ -2355,7 +2445,7 @@ mod tests {
 
 		for _ in 0..1000 {
 			let broadcast = BroadcastInfo::new().produce();
-			origin.publish_broadcast("test", broadcast.consume());
+			origin.publish_broadcast_spawn("test", broadcast.consume());
 			drop(broadcast);
 		}
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
@@ -2384,8 +2474,8 @@ mod tests {
 		let broadcast1 = BroadcastInfo::new().produce();
 		let broadcast2 = BroadcastInfo::new().produce();
 
-		origin.publish_broadcast("test1", broadcast1.consume());
-		origin.publish_broadcast("test2", broadcast2.consume());
+		origin.publish_broadcast_spawn("test1", broadcast1.consume());
+		origin.publish_broadcast_spawn("test2", broadcast2.consume());
 
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();

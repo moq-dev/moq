@@ -130,9 +130,9 @@ async fn main() -> anyhow::Result<()> {
 
 			let mut producer = moq_net::BroadcastInfo::new().produce();
 			let consumer = producer.consume();
-			if !publisher.publish_broadcast(&broadcast, consumer) {
-				anyhow::bail!("broadcast path conflict: {broadcast}");
-			}
+			let _publish = publisher
+				.publish_broadcast(&broadcast, consumer)
+				.context("failed to publish broadcast")?;
 
 			let catalog = moq_mux::catalog::hang::Producer::new(&mut producer).context("failed to create catalog")?;
 			let mut importer = moq_hls::ingest::Import::new(producer, catalog, moq_hls::ingest::Config::new(playlist))?;

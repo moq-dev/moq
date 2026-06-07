@@ -25,6 +25,10 @@ pub struct Origin {
 	/// Active origin producers for publishing and consuming broadcasts.
 	active: NonZeroSlab<moq_net::OriginProducer>,
 
+	/// Announcement guards from `publish`. Removing an entry (via `unpublish`) drops the
+	/// guard, which unannounces the broadcast.
+	published: NonZeroSlab<moq_net::OriginPublish>,
+
 	/// Broadcast announcement information (path, active status).
 	announced: NonZeroSlab<(String, bool)>,
 
@@ -185,14 +189,25 @@ impl Origin {
 		Ok(())
 	}
 
+	/// Announce `broadcast` under `path`, returning a publish handle. The announcement stays
+	/// live until [`Self::unpublish`] is called with that handle (independent of the broadcast's
+	/// own lifetime). Errors with [`Error::Moq`] if the path is outside the origin's scope.
 	pub fn publish<P: moq_net::AsPath>(
 		&mut self,
 		origin: Id,
 		path: P,
 		broadcast: moq_net::BroadcastConsumer,
-	) -> Result<(), Error> {
-		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		origin.publish_broadcast(path, broadcast);
+	) -> Result<Id, Error> {
+		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
+		let publish = origin.publish_broadcast(path, broadcast)?;
+		self.published.insert(publish)
+	}
+
+	/// Drop a publish handle from [`Self::publish`], unannouncing the broadcast.
+	pub fn unpublish(&mut self, publish: Id) -> Result<(), Error> {
+		// Dropping the removed guard is what unannounces the broadcast.
+		let publish = self.published.remove(publish).ok_or(Error::BroadcastNotFound)?;
+		drop(publish);
 		Ok(())
 	}
 

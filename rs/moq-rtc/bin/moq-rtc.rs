@@ -197,9 +197,9 @@ async fn run_client(
 			// WHEP client: receive remote RTP, publish it as `broadcast_name`.
 			let broadcast = moq_net::BroadcastInfo::new().produce();
 			let consumer = broadcast.consume();
-			if !publisher.publish_broadcast(broadcast_name, consumer) {
-				anyhow::bail!("broadcast path conflict: {}", broadcast_name);
-			}
+			let _publish = publisher
+				.publish_broadcast(broadcast_name, consumer)
+				.context("failed to publish broadcast")?;
 			client.subscribe(url, broadcast).await?;
 		}
 		Direction::Publish => {

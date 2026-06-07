@@ -80,6 +80,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		match kind {
 			lite::ControlType::Announce => self.recv_announce(stream).await,
 			lite::ControlType::Subscribe => self.recv_subscribe(stream).await,
+			lite::ControlType::Fetch => self.recv_fetch(stream).await,
 			lite::ControlType::Probe => {
 				self.recv_probe(stream).await;
 				Ok(())
@@ -88,7 +89,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				tracing::info!("received goaway stream");
 				Ok(())
 			}
-			lite::ControlType::Session | lite::ControlType::Fetch => Err(Error::UnexpectedStream),
+			lite::ControlType::Session => Err(Error::UnexpectedStream),
 		}
 	}
 
@@ -535,6 +536,148 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.writer.finish()?;
 		stream.writer.closed().await
 	}
+
+	pub async fn recv_fetch(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+		// FETCH is lite-05+ only; older drafts have no FETCH_OK / frame format.
+		if !self.version.has_timestamps() {
+			return Err(Error::UnexpectedStream);
+		}
+
+		let fetch = stream.reader.decode::<lite::Fetch>().await?;
+
+		let track = fetch.track.clone();
+		let group = fetch.group;
+		let absolute = self.origin.absolute(&fetch.broadcast).to_owned();
+
+		tracing::info!(broadcast = %absolute, %track, %group, "fetch started");
+
+		// The peer fetched this exact path, so it has already seen an announcement
+		// for it; a synchronous lookup is appropriate (as in recv_subscribe).
+		let broadcast = self.origin.get_broadcast(&fetch.broadcast);
+		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
+
+		if let Err(err) = Self::run_fetch(&mut stream, &fetch, broadcast, track_stats, self.version).await {
+			match &err {
+				Error::Cancel | Error::Transport(_) => {
+					tracing::info!(broadcast = %absolute, %track, %group, "fetch cancelled")
+				}
+				err => tracing::warn!(broadcast = %absolute, %track, %group, %err, "fetch error"),
+			}
+			stream.writer.abort(&err);
+		} else {
+			tracing::info!(broadcast = %absolute, %track, %group, "fetch complete");
+		}
+
+		Ok(())
+	}
+
+	async fn run_fetch(
+		stream: &mut Stream<S, Version>,
+		fetch: &lite::Fetch<'_>,
+		consumer: Option<BroadcastConsumer>,
+		track_stats: crate::PublisherTrack,
+		version: Version,
+	) -> Result<(), Error> {
+		let broadcast = consumer.ok_or(Error::NotFound)?;
+
+		let group = broadcast
+			.track(&fetch.track)?
+			.fetch_group(
+				fetch.group,
+				crate::Fetch {
+					priority: fetch.priority,
+				},
+			)?
+			.await?;
+
+		// FETCH is gated to lite-05+, which always carries timestamps when the track
+		// advertised a timescale; `None` means an untimed track (frames omit them).
+		let timescale = if version.has_timestamps() {
+			group.timescale()
+		} else {
+			None
+		};
+		// v1: fetched groups stream uncompressed (the model carries no per-track compress hint).
+		let compression = Compression::None;
+
+		stream
+			.writer
+			.encode(&lite::FetchOk {
+				group: fetch.group,
+				compression,
+				timescale,
+			})
+			.await?;
+		track_stats.group();
+
+		// Honor frame_start: skip earlier frames, then stream the rest in order. The
+		// delta-timestamp baseline resets to 0, so the first served frame's delta is
+		// its absolute timestamp (the subscriber decodes against the same baseline).
+		let mut index = fetch.frame_start as usize;
+		let mut prev_ts: u64 = 0;
+		while let Some(mut frame) = group.get_frame(index).await? {
+			write_fetch_frame(
+				&mut stream.writer,
+				&mut frame,
+				compression,
+				timescale,
+				&mut prev_ts,
+				&track_stats,
+			)
+			.await?;
+			index += 1;
+		}
+
+		stream.writer.finish()?;
+		stream.writer.closed().await
+	}
+}
+
+/// Write one frame to a fetch stream in the lite wire format: an optional
+/// zigzag-delta timestamp, the size, then the payload. Mirrors the per-frame
+/// encoding in [`Subscription::serve_frame`] without the priority machinery, since
+/// a one-shot fetch carries a single static priority set on the stream up front.
+async fn write_fetch_frame<W: web_transport_trait::SendStream>(
+	writer: &mut Writer<W, Version>,
+	frame: &mut FrameConsumer,
+	compression: Compression,
+	timescale: Option<crate::Timescale>,
+	prev_ts: &mut u64,
+	track_stats: &crate::PublisherTrack,
+) -> Result<(), Error> {
+	if timescale.is_some() {
+		let ts = frame.timestamp.expect("model layer validated timestamp presence");
+		let curr = ts.value();
+		let delta: i64 = (curr as i128 - *prev_ts as i128)
+			.try_into()
+			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		let zz = crate::coding::VarInt::from_zigzag(delta).map_err(crate::coding::EncodeError::from)?;
+		writer.encode(&zz).await?;
+		*prev_ts = curr;
+	}
+
+	match compression {
+		Compression::None => {
+			writer.encode(&frame.size).await?;
+			track_stats.frame();
+			while let Some(mut chunk) = frame.read_chunk().await? {
+				let n = chunk.len() as u64;
+				writer.write_all(&mut chunk).await?;
+				track_stats.bytes(n);
+			}
+		}
+		compression => {
+			let payload = frame.read_all().await?;
+			let mut chunk = bytes::Bytes::from(compression.compress(&payload));
+			let n = chunk.len() as u64;
+			writer.encode(&n).await?;
+			track_stats.frame();
+			writer.write_all(&mut chunk).await?;
+			track_stats.bytes(n);
+		}
+	}
+
+	Ok(())
 }
 
 /// Shared per-subscription state for the publisher side. Cloned (cheaply — every

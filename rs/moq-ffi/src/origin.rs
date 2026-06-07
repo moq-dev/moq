@@ -114,9 +114,16 @@ impl MoqOriginProducer {
 	pub fn announce(&self, path: String, broadcast: &MoqBroadcastProducer) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let consumer = broadcast.consume_inner()?;
-		if !self.inner.publish_broadcast(path.as_str(), consumer) {
-			return Err(MoqError::Unauthorized);
-		}
+		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
+		let publish = self.inner.publish_broadcast(path.as_str(), consumer.clone())?;
+
+		// Auto-unannounce when the broadcast closes (all producers dropped). The origin no longer
+		// watches closure itself, so the spawn lives here at the runtime-bound FFI boundary.
+		tokio::spawn(async move {
+			consumer.closed().await;
+			drop(publish);
+		});
+
 		Ok(())
 	}
 }
