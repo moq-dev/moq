@@ -27,7 +27,7 @@ export class Consumer<T> {
 		for (;;) {
 			if (!this.#group) {
 				// Advance to the next group with a higher sequence number (skipping late arrivals).
-				this.#group = await this.#track.nextGroupOrdered();
+				this.#group = await this.#track.nextGroup();
 				if (!this.#group) return undefined;
 				this.#current = undefined;
 				this.#framesRead = 0;

@@ -17,7 +17,7 @@ async function drain(track: Track): Promise<Value[]> {
 async function structure(track: Track): Promise<number[]> {
 	const counts: number[] = [];
 	for (;;) {
-		const group = await track.nextGroupOrdered();
+		const group = await track.nextGroup();
 		if (!group) break;
 
 		let frames = 0;
