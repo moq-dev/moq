@@ -17,7 +17,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
-		"@moq/qmux": "^0.0.6",
+		"@moq/qmux": "^0.1.1",
 		"@moq/signals": "workspace:*",
 		"async-mutex": "^0.5.0"
 	},
