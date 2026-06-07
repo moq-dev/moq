@@ -153,6 +153,57 @@
           nixfmt
         ];
 
+        # Client toolchains for the published-package smoke matrix (test/smoke),
+        # composed into per-slice devShells below. Kept SEPARATE from the default
+        # shell so day-to-day `nix develop` never pulls go/jdk/gradle/Chromium.
+        # Three clients deliberately use the system toolchain, not nix, so they
+        # appear in no group: GStreamer (the gst client loads the prebuilt plugin
+        # against a *system* GStreamer, the scenario it tests; a nix-store gst
+        # wouldn't satisfy the plugin's NEEDED libs), the C compiler (the c client
+        # links the prebuilt libmoq.a with the system cc), and Swift (system Xcode).
+        smoke = {
+          # orchestrator + harness, in every smoke shell.
+          base = with pkgs; [
+            just
+            git
+            ffmpeg
+            curl
+            jq
+            coreutils # GNU `timeout` (macOS lacks it)
+            procps # `pgrep`
+            gnutar
+            shellcheck # `just smoke check`
+            shfmt
+          ];
+          # `cargo install` of the reference binaries (only the nightly cargo
+          # channel; release slices get the reference relay via `nix build`).
+          rust = [ rust-toolchain ];
+          python = with pkgs; [
+            uv
+            python3
+          ];
+          go = [ pkgs.go ];
+          kotlin = with pkgs; [
+            jdk
+            gradle
+          ];
+          # browser + native-js, with a pinned Chromium so no `playwright install`
+          # download / `install-deps` apt step is needed.
+          js = with pkgs; [
+            bun
+            nodejs_24
+            playwright-driver.browsers
+          ];
+          # Point Playwright at the pinned nix Chromium; freshness.sh asserts
+          # clients/js pins this exact version. Only js shells get this (it pulls
+          # Chromium into the closure).
+          playwrightHook = ''
+            export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
+            export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
+            export PLAYWRIGHT_VERSION="${pkgs.playwright-driver.version}"
+          '';
+        };
+
         # Apply our overlay to get the package definitions
         overlayPkgs = pkgs.extend self.overlays.default;
       in
@@ -222,6 +273,25 @@
             export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
           '';
         };
+
+        # Toolchains for the published-package smoke matrix (test/smoke). The full
+        # `smoke` shell drives the nightly (every client + the cargo channel); the
+        # per-slice shells keep each release job lean (a release runs one slice, so
+        # the swift job on the pricey macOS runner shouldn't pull jdk/Chromium).
+        # CI runs `nix develop .#smoke[-<slice>] --command ./test/smoke/smoke.sh ...`.
+        devShells.smoke = pkgs.mkShell {
+          packages = smoke.base ++ smoke.rust ++ smoke.python ++ smoke.go ++ smoke.kotlin ++ smoke.js;
+          shellHook = smoke.playwrightHook;
+        };
+        devShells.smoke-python = pkgs.mkShell { packages = smoke.base ++ smoke.python; };
+        devShells.smoke-go = pkgs.mkShell { packages = smoke.base ++ smoke.go; };
+        devShells.smoke-kotlin = pkgs.mkShell { packages = smoke.base ++ smoke.kotlin; };
+        devShells.smoke-js = pkgs.mkShell {
+          packages = smoke.base ++ smoke.js;
+          shellHook = smoke.playwrightHook;
+        };
+        # c / gst / swift need only the harness; their toolchain is system-level.
+        devShells.smoke-min = pkgs.mkShell { packages = smoke.base; };
 
         formatter = pkgs.nixfmt-tree;
       }

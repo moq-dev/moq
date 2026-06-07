@@ -69,7 +69,7 @@ Or call the harness directly from this directory:
 RELAY_BIN=/path/to/moq-relay MOQ_BIN=/path/to/moq-cli ./smoke.sh
 ```
 
-The browser client needs a Chromium that matches the npm `playwright` pin in `clients/js/package.json`; set `PLAYWRIGHT_BROWSERS_PATH` to a nix `playwright-driver.browsers` (and `PLAYWRIGHT_VERSION` so `freshness.sh` can confirm the pin), or let `bunx playwright install chromium` fetch one. The monorepo `nix develop` shell does not currently carry Chromium, so `just smoke js` under it falls back to a Playwright download.
+The simplest way to get every toolchain (ffmpeg, uv, go, jdk/gradle, bun, node, and a pinned Chromium) is the `smoke` devShell: `nix develop .#smoke` (CI uses this, plus leaner per-slice `.#smoke-{python,go,kotlin,js,min}` shells). It sets `PLAYWRIGHT_BROWSERS_PATH`/`PLAYWRIGHT_VERSION` to the nix Chromium, so the browser client needs no `playwright install` download and `freshness.sh` can confirm the pin. The default `nix develop` stays lean and does not carry these. Without nix, install the toolchains yourself; the browser client falls back to `bunx playwright install chromium` (which must match the `playwright` pin in `clients/js/package.json`).
 
 ### Pinned mode
 

@@ -8,6 +8,12 @@ name: Smoke (release)
 # the artifact is downloadable). This is the immediate, per-release replacement
 # for the old daily cross-OS cron; the nightly smoke.yml stays as the Linux
 # cross-package backstop.
+#
+# Client toolchains come from a per-slice `nix develop .#smoke-<...>` shell, so a
+# release runs one lean shell (the swift job on the pricey macOS runner pulls only
+# the harness, never jdk/Chromium). The reference relay/cli are built from the
+# checkout with `nix build`. GStreamer (gst) and the C compiler (c) stay
+# system-level for the same reasons as the nightly.
 
 on:
   workflow_call:
@@ -29,10 +35,6 @@ on:
 permissions:
   contents: read
 
-defaults:
-  run:
-    working-directory: test/smoke
-
 jobs:
   smoke:
     name: ${{ inputs.slice }} @ ${{ inputs.version }}
@@ -50,28 +52,30 @@ jobs:
         with:
           persist-credentials: false
 
-      # Map the slice to its publish/subscribe axes and version env. Each client
-      # is paired with rust on the opposite axis as the reference implementation.
+      # Map the slice to its publish/subscribe axes, version env, and the lean
+      # devShell that carries its toolchain. Each client is paired with rust on
+      # the opposite axis as the reference implementation.
       - name: Resolve slice
         id: cfg
         env:
           SLICE: ${{ inputs.slice }}
         run: |
           case "$SLICE" in
-            python)    pub=rust,python; sub=rust,python; venv=MOQ_RS_VERSION ;;
-            swift)     pub=rust;        sub=swift;       venv=MOQ_SWIFT_VERSION ;;
-            kotlin)    pub=rust;        sub=kotlin;      venv=MOQ_KT_VERSION ;;
-            go)        pub=rust;        sub=go;          venv=MOQ_GO_VERSION ;;
-            c)         pub=rust;        sub=c;           venv=MOQ_LIBMOQ_VERSION ;;
-            gst)       pub=rust;        sub=gst;         venv=MOQ_GST_VERSION ;;
-            js)        pub=rust,js-vite,js-esbuild,js-jsdelivr; sub=rust,js-vite,js-esbuild,js-jsdelivr; venv=MOQ_NPM_VERSION ;;
-            js-native) pub=rust;        sub=js-native-node,js-native-bun; venv=MOQ_NPM_VERSION ;;
+            python)    pub=rust,python; sub=rust,python; venv=MOQ_RS_VERSION;     shell=smoke-python ;;
+            swift)     pub=rust;        sub=swift;       venv=MOQ_SWIFT_VERSION;  shell=smoke-min ;;
+            kotlin)    pub=rust;        sub=kotlin;      venv=MOQ_KT_VERSION;     shell=smoke-kotlin ;;
+            go)        pub=rust;        sub=go;          venv=MOQ_GO_VERSION;     shell=smoke-go ;;
+            c)         pub=rust;        sub=c;           venv=MOQ_LIBMOQ_VERSION; shell=smoke-min ;;
+            gst)       pub=rust;        sub=gst;         venv=MOQ_GST_VERSION;    shell=smoke-min ;;
+            js)        pub=rust,js-vite,js-esbuild,js-jsdelivr; sub=rust,js-vite,js-esbuild,js-jsdelivr; venv=MOQ_NPM_VERSION; shell=smoke-js ;;
+            js-native) pub=rust;        sub=js-native-node,js-native-bun; venv=MOQ_NPM_VERSION; shell=smoke-js ;;
             *) echo "unknown slice: $SLICE" >&2; exit 1 ;;
           esac
           {
             echo "pub=$pub"
             echo "sub=$sub"
             echo "venv=$venv"
+            echo "shell=$shell"
           } >> "$GITHUB_OUTPUT"
 
       - name: Pin version
@@ -80,69 +84,39 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: echo "$VENV=$VERSION" >> "$GITHUB_ENV"
 
-      # ── reference relay + cli (rust, from crates.io) ───────────────────
-      - name: System deps (Linux)
-        if: runner.os == 'Linux'
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+
+      # Reference relay + cli, built from the checkout (deps from cachix).
+      - name: Build reference relay + cli
+        run: |
+          relay=$(nix build --no-link --print-out-paths '.#moq-relay')
+          cli=$(nix build --no-link --print-out-paths '.#moq-cli')
+          {
+            echo "RELAY_BIN=$relay/bin/moq-relay"
+            echo "MOQ_BIN=$cli/bin/moq-cli"
+          } >> "$GITHUB_ENV"
+
+      # GStreamer is the system runtime the prebuilt moq-gst plugin links against.
+      - name: System GStreamer (gst)
+        if: inputs.slice == 'gst'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg curl procps coreutils jq
-      - name: System deps (gstreamer, Linux)
-        if: runner.os == 'Linux' && inputs.slice == 'gst'
-        run: sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
-      - name: System deps (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install ffmpeg coreutils jq
-          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+          sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: Install moq-relay + moq-cli (cargo)
-        run: cargo install moq-relay moq-cli
-
-      # ── per-slice client toolchain ─────────────────────────────────────
-      - name: Setup uv (python)
-        if: inputs.slice == 'python'
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-      - name: Setup Go (go)
-        if: inputs.slice == 'go'
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
-        with:
-          go-version: stable
-      - name: Setup Java (kotlin)
-        if: inputs.slice == 'kotlin'
-        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
-        with:
-          distribution: temurin
-          java-version: "21"
-      - name: Setup Gradle (kotlin)
-        if: inputs.slice == 'kotlin'
-        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
-        with:
-          gradle-version: "8.14.4"
-      - name: Setup Bun (js)
-        if: inputs.slice == 'js' || inputs.slice == 'js-native'
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-      - name: Setup Node (js)
-        if: inputs.slice == 'js' || inputs.slice == 'js-native'
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version: "22"
-      - name: Playwright system deps (js)
-        if: (inputs.slice == 'js' || inputs.slice == 'js-native') && runner.os == 'Linux'
-        run: |
-          cd clients/js
-          bun install
-          bunx playwright install-deps chromium
-
-      # ── run the pinned slice ───────────────────────────────────────────
+      # Run the pinned slice. CC=/usr/bin/cc builds the C client with the system
+      # compiler (unused by other slices). Maven Central can lag npm/PyPI/Go, so
+      # kotlin gets a longer propagation budget (20 min); others use the 5m default.
       - name: Smoke
         env:
+          SMOKE_SHELL: ${{ steps.cfg.outputs.shell }}
           PUB: ${{ steps.cfg.outputs.pub }}
           SUB: ${{ steps.cfg.outputs.sub }}
-          # Maven Central can take far longer than npm/PyPI/the Go proxy to sync a
-          # release to repo1, so kotlin gets a longer propagation budget (20 min).
           SMOKE_POLL_TRIES: ${{ inputs.slice == 'kotlin' && '240' || '60' }}
-        run: ./smoke.sh --publishers "$PUB" --subscribers "$SUB" --timeout 30
+        run: |
+          nix develop ".#$SMOKE_SHELL" --command env CC=/usr/bin/cc ./test/smoke/smoke.sh \
+            --publishers "$PUB" --subscribers "$SUB" --timeout 30

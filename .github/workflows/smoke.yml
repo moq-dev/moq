@@ -11,6 +11,12 @@ name: Smoke
 #
 # macOS is NOT run here (cost): the only macOS-specific artifacts (the Swift
 # package, brew bottles) are smoke-tested per-release in release-swift.yml.
+#
+# Client toolchains come from the `smoke` devShell (`nix develop .#smoke`), so
+# this carries no per-language setup actions. The two things that must stay
+# system-level: GStreamer (the gst client loads the prebuilt plugin against a
+# system GStreamer, the scenario it tests) and the C compiler (the C client links
+# the prebuilt libmoq.a with the system cc, via CC=/usr/bin/cc).
 
 on:
   # Manual on-demand runs.
@@ -21,6 +27,7 @@ on:
     paths:
       - "test/smoke/**"
       - ".github/workflows/smoke.yml"
+      - "flake.nix"
   # Nightly cross-package backstop.
   schedule:
     - cron: "0 8 * * *"
@@ -31,10 +38,6 @@ permissions:
 concurrency:
   group: smoke-${{ github.ref }}
   cancel-in-progress: true
-
-defaults:
-  run:
-    working-directory: test/smoke
 
 jobs:
   smoke:
@@ -67,39 +70,42 @@ jobs:
         with:
           persist-credentials: false
 
-      # ── client toolchains ──────────────────────────────────────────────
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      # Nix provides every client toolchain (ffmpeg, uv, go, jdk/gradle, bun,
+      # node, a pinned Chromium, ...) via the `smoke` devShell. The cachix
+      # substituter serves the moq packages; the toolchain comes from
+      # cache.nixos.org.
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
         with:
-          go-version: stable
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version: "22"
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
-        with:
-          distribution: temurin
-          java-version: "21"
-      - uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
-        with:
-          gradle-version: "8.14.4"
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
 
-      - name: System deps
+      # GStreamer is the system runtime the prebuilt moq-gst plugin links against,
+      # so it can't come from the devShell. Only the nightly/on-demand runs include
+      # the gst cell, so skip the install on PRs.
+      - name: System GStreamer
+        if: github.event_name != 'pull_request'
         run: |
           sudo apt-get update
-          # gcc (cc) for the C client is already on the runner. gstreamer1.0-*
-          # provides gst-launch/gst-inspect + the core elements (filesink) the
-          # moq-gst subscriber loads the prebuilt plugin against.
-          sudo apt-get install -y ffmpeg curl procps coreutils jq \
-            gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+          sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 
-      # ── Rust binaries, per channel (left on PATH / RELAY_BIN for smoke.sh) ──
+      # ── Rust binaries, per channel (RELAY_BIN/MOQ_BIN or PATH for smoke.sh) ──
       - name: Install moq-relay + moq-cli + moq-token-cli (cargo)
         if: matrix.channel == 'cargo'
-        run: cargo install moq-relay moq-cli moq-token-cli
+        # cargo from the devShell; install to a known root so smoke.sh can point at
+        # it without depending on ~/.cargo/bin being on PATH inside `nix develop`.
+        run: |
+          nix develop .#smoke --command cargo install --root "$PWD/.channel" moq-relay moq-cli moq-token-cli
+          {
+            echo "RELAY_BIN=$PWD/.channel/bin/moq-relay"
+            echo "MOQ_BIN=$PWD/.channel/bin/moq-cli"
+            echo "TOKEN_BIN=$PWD/.channel/bin/moq-token-cli"
+          } >> "$GITHUB_ENV"
 
       - name: Install moq-relay + moq-cli + moq-token-cli (apt)
         if: matrix.channel == 'apt'
+        # Left on /usr/bin, which stays on PATH inside `nix develop`.
         run: |
           curl -fsSL https://apt.moq.dev/moq-keyring.gpg \
             | sudo tee /usr/share/keyrings/moq-keyring.gpg > /dev/null
@@ -108,16 +114,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y moq-relay moq-cli moq-token-cli
 
-      - name: Install Nix (nix channel)
-        if: matrix.channel == 'nix'
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-        with:
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
-
       - name: Build moq from the flake (nix channel)
         if: matrix.channel == 'nix'
+        # The moq flake is itself a public channel (nix run github:moq-dev/moq).
         # --refresh so we always build the latest moq, never a cached eval.
         run: |
           relay=$(nix build --refresh --no-link --print-out-paths 'github:moq-dev/moq#moq-relay')
@@ -137,29 +136,24 @@ jobs:
           docker pull moqdev/moq-relay
           docker pull moqdev/moq-cli
           {
-            echo "RELAY_BIN=$PWD/clients/docker/moq-relay"
-            echo "MOQ_BIN=$PWD/clients/docker/moq-cli"
+            echo "RELAY_BIN=$PWD/test/smoke/clients/docker/moq-relay"
+            echo "MOQ_BIN=$PWD/test/smoke/clients/docker/moq-cli"
           } >> "$GITHUB_ENV"
 
-      # ── browser deps (Chromium runtime libs) ───────────────────────────
-      - name: Playwright system deps
-        run: |
-          cd clients/js
-          bun install
-          bunx playwright install-deps chromium
-
       # Fail loudly if we've drifted off "latest": a committed client lock file, a
-      # moq package that stopped being requested at latest, or a stale playwright pin.
+      # moq package that stopped being requested at latest, or (now that the
+      # devShell exports PLAYWRIGHT_VERSION) a stale playwright pin.
       - name: Freshness
-        run: ./freshness.sh
+        run: nix develop .#smoke --command ./test/smoke/freshness.sh
 
       # ── run the interop matrix (Linux: no swift) ──────────────────────
       # rust, python, and the three browser variants publish; go/kotlin/c/gst and
       # the native-JS runtimes subscribe. --timeout 30 gives headless Chromium
-      # cold-start headroom. The gst subscriber can't yet read browser-published
-      # broadcasts (a published-package interop gap in moqsrc, not the harness),
-      # so it's part of the nightly's full matrix but dropped from PR runs, which
-      # only need to prove the harness mechanics still work.
+      # cold-start headroom. CC=/usr/bin/cc builds the C client with the system
+      # compiler (it links the prebuilt libmoq.a, built for the system glibc). The
+      # gst subscriber can't yet read browser-published broadcasts (a
+      # published-package gap in moqsrc, not the harness), so it's in the nightly's
+      # full matrix but dropped from PR runs, which only prove harness mechanics.
       - name: Smoke
         env:
           EVENT: ${{ github.event_name }}
@@ -168,17 +162,17 @@ jobs:
           native="js-native-node,js-native-bun"
           subs="rust,python,go,kotlin,c,$browser,$native"
           if [ "$EVENT" != "pull_request" ]; then subs="$subs,gst"; fi
-          ./smoke.sh \
+          nix develop .#smoke --command env CC=/usr/bin/cc ./test/smoke/smoke.sh \
             --publishers "rust,python,$browser" \
             --subscribers "$subs" \
             --timeout 30
 
       # Quick proof the harness can actually report failure.
       - name: Negative control
-        run: ./smoke.sh --negative --subscribers rust,python
+        run: nix develop .#smoke --command ./test/smoke/smoke.sh --negative --subscribers rust,python
 
       # ── token interop ──────────────────────────────────────────────────
       # moq-token-cli rides the same channel as moq-relay/moq-cli; @moq/token
       # comes from npm under node + bun; rust-docker pulls the moqdev image.
       - name: Token interop
-        run: ./token.sh --generators rust,js-node,js-bun,rust-docker --verifiers rust,js-node,js-bun,rust-docker
+        run: nix develop .#smoke --command ./test/smoke/token.sh --generators rust,js-node,js-bun,rust-docker --verifiers rust,js-node,js-bun,rust-docker
