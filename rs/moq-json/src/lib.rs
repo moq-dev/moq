@@ -6,12 +6,13 @@
 //! order. A consumer jumps to the newest group, reads the snapshot, and applies the deltas, so
 //! a late joiner never needs older groups.
 //!
-//! Deltas are opt-in via [`JsonConfig::max_delta_ratio`]. With deltas disabled (the default)
+//! Deltas are opt-in via [`Config::delta_ratio`]. With deltas disabled (the default)
 //! every change is a fresh snapshot group, matching a plain "one JSON blob per group" track.
 
 mod diff;
 
 use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use serde::Serialize;
@@ -50,9 +51,9 @@ impl From<serde_json::Error> for Error {
 /// A [`Result`](std::result::Result) using this crate's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Configuration for a [`JsonProducer`].
+/// Configuration for a [`Producer`].
 #[derive(Debug, Clone, Default)]
-pub struct JsonConfig {
+pub struct Config {
 	/// Controls whether the producer emits deltas (merge patches) instead of full snapshots.
 	///
 	/// `None` disables deltas: every change is published as a new snapshot group.
@@ -60,37 +61,46 @@ pub struct JsonConfig {
 	/// `Some(ratio)` enables deltas. A delta is appended to the current group as long as the
 	/// group's total size stays within `ratio` times the size of a fresh snapshot; otherwise a
 	/// new snapshot group is started. A larger ratio tolerates bigger groups before snapshotting.
-	pub max_delta_ratio: Option<f64>,
+	pub delta_ratio: Option<f64>,
 }
 
 /// Publishes a JSON value over a track, choosing snapshots and deltas automatically.
-pub struct JsonProducer<T> {
-	track: moq_net::TrackProducer,
-	group: Option<moq_net::GroupProducer>,
-	last: Option<Value>,
-	group_bytes: u64,
-	group_frames: usize,
-	config: JsonConfig,
+///
+/// Cheaply clonable: clones share one underlying track and publishing state, like other MoQ
+/// producers.
+pub struct Producer<T> {
+	inner: Arc<Mutex<Inner>>,
 	_marker: PhantomData<fn(T)>,
 }
 
-impl<T> JsonProducer<T> {
-	/// Create a subscriber for the underlying track.
-	pub fn consume(&self) -> moq_net::TrackSubscriber {
-		self.track.subscribe(None)
+impl<T> Clone for Producer<T> {
+	fn clone(&self) -> Self {
+		Self {
+			inner: self.inner.clone(),
+			_marker: PhantomData,
+		}
 	}
 }
 
-impl<T: Serialize> JsonProducer<T> {
+impl<T> Producer<T> {
+	/// Create a subscriber for the underlying track.
+	pub fn consume(&self) -> moq_net::TrackSubscriber {
+		self.inner.lock().unwrap().track.subscribe(None)
+	}
+}
+
+impl<T: Serialize> Producer<T> {
 	/// Create a producer that publishes to the given track.
-	pub fn new(track: moq_net::TrackProducer, config: JsonConfig) -> Self {
+	pub fn new(track: moq_net::TrackProducer, config: Config) -> Self {
 		Self {
-			track,
-			group: None,
-			last: None,
-			group_bytes: 0,
-			group_frames: 0,
-			config,
+			inner: Arc::new(Mutex::new(Inner {
+				track,
+				group: None,
+				last: None,
+				group_bytes: 0,
+				group_frames: 0,
+				config,
+			})),
 			_marker: PhantomData,
 		}
 	}
@@ -100,13 +110,33 @@ impl<T: Serialize> JsonProducer<T> {
 	/// Does nothing if the value is unchanged from the previous publish.
 	pub fn update(&mut self, value: &T) -> Result<()> {
 		let json = serde_json::to_value(value)?;
-		if self.last.as_ref() == Some(&json) {
-			return Ok(());
-		}
-
 		// Serialize the value directly (not via `json`) so a snapshot preserves the type's own
 		// field order, keeping the wire bytes identical to serializing `T` straight to a frame.
 		let snapshot = serde_json::to_vec(value)?;
+		self.inner.lock().unwrap().update(json, snapshot)
+	}
+
+	/// Finish the track, closing any open group.
+	pub fn finish(&mut self) -> Result<()> {
+		self.inner.lock().unwrap().finish()
+	}
+}
+
+/// Shared publishing state behind [`Producer`]'s `Arc<Mutex>`.
+struct Inner {
+	track: moq_net::TrackProducer,
+	group: Option<moq_net::GroupProducer>,
+	last: Option<Value>,
+	group_bytes: u64,
+	group_frames: usize,
+	config: Config,
+}
+
+impl Inner {
+	fn update(&mut self, json: Value, snapshot: Vec<u8>) -> Result<()> {
+		if self.last.as_ref() == Some(&json) {
+			return Ok(());
+		}
 
 		match self.delta(&json, snapshot.len())? {
 			Some(delta) => {
@@ -123,19 +153,10 @@ impl<T: Serialize> JsonProducer<T> {
 		Ok(())
 	}
 
-	/// Finish the track, closing any open group.
-	pub fn finish(&mut self) -> Result<()> {
-		if let Some(mut group) = self.group.take() {
-			group.finish()?;
-		}
-		self.track.finish()?;
-		Ok(())
-	}
-
 	/// Serialize a delta if deltas are enabled and appending one keeps the group within budget;
 	/// otherwise `None`, signalling that a fresh snapshot should be published instead.
 	fn delta(&self, value: &Value, snapshot_len: usize) -> Result<Option<Vec<u8>>> {
-		let Some(ratio) = self.config.max_delta_ratio else {
+		let Some(ratio) = self.config.delta_ratio else {
 			return Ok(None);
 		};
 		let Some(last) = &self.last else {
@@ -174,7 +195,7 @@ impl<T: Serialize> JsonProducer<T> {
 		self.group_bytes = len;
 		self.group_frames = 1;
 
-		if self.config.max_delta_ratio.is_some() {
+		if self.config.delta_ratio.is_some() {
 			// Keep the group open so future deltas can be appended.
 			self.group = Some(group);
 		} else {
@@ -184,10 +205,18 @@ impl<T: Serialize> JsonProducer<T> {
 
 		Ok(())
 	}
+
+	fn finish(&mut self) -> Result<()> {
+		if let Some(mut group) = self.group.take() {
+			group.finish()?;
+		}
+		self.track.finish()?;
+		Ok(())
+	}
 }
 
 /// Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
-pub struct JsonConsumer<T> {
+pub struct Consumer<T> {
 	track: moq_net::TrackSubscriber,
 	group: Option<moq_net::GroupConsumer>,
 	current: Option<Value>,
@@ -195,7 +224,7 @@ pub struct JsonConsumer<T> {
 	_marker: PhantomData<fn() -> T>,
 }
 
-impl<T: DeserializeOwned> JsonConsumer<T> {
+impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
 	pub fn new(track: moq_net::TrackSubscriber) -> Self {
 		Self {
@@ -273,15 +302,15 @@ mod test {
 	use super::*;
 	use serde_json::json;
 
-	fn producer(config: JsonConfig) -> (JsonProducer<Value>, moq_net::TrackSubscriber) {
+	fn producer(config: Config) -> (Producer<Value>, moq_net::TrackSubscriber) {
 		let track = moq_net::TrackProducer::new("test", None);
 		let consumer = track.subscribe(None);
-		(JsonProducer::new(track, config), consumer)
+		(Producer::new(track, config), consumer)
 	}
 
 	/// Drain every value currently available from a consumer without blocking.
 	fn drain(track: moq_net::TrackSubscriber) -> Vec<Value> {
-		let mut consumer = JsonConsumer::<Value>::new(track);
+		let mut consumer = Consumer::<Value>::new(track);
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
@@ -292,7 +321,7 @@ mod test {
 
 	#[test]
 	fn deltas_off_snapshot_per_group() {
-		let (mut producer, track) = producer(JsonConfig::default());
+		let (mut producer, track) = producer(Config::default());
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.update(&json!({ "a": 2 })).unwrap();
 		producer.finish().unwrap();
@@ -305,8 +334,8 @@ mod test {
 
 	#[test]
 	fn live_consumer_sees_each_update() {
-		let (mut producer, track) = producer(JsonConfig::default());
-		let mut consumer = JsonConsumer::<Value>::new(track);
+		let (mut producer, track) = producer(Config::default());
+		let mut consumer = Consumer::<Value>::new(track);
 		let waiter = kio::Waiter::noop();
 
 		for n in 1..=3 {
@@ -320,7 +349,7 @@ mod test {
 
 	#[test]
 	fn unchanged_value_writes_nothing() {
-		let (mut producer, track) = producer(JsonConfig::default());
+		let (mut producer, track) = producer(Config::default());
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.finish().unwrap();
@@ -331,8 +360,8 @@ mod test {
 
 	#[test]
 	fn deltas_share_one_group() {
-		let config = JsonConfig {
-			max_delta_ratio: Some(100.0),
+		let config = Config {
+			delta_ratio: Some(100.0),
 		};
 		let (mut producer, track) = producer(config);
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
@@ -349,9 +378,7 @@ mod test {
 	#[test]
 	fn tight_ratio_rolls_snapshots() {
 		// A ratio of 1.0 leaves no room for any delta past the snapshot, so every change rolls.
-		let config = JsonConfig {
-			max_delta_ratio: Some(1.0),
-		};
+		let config = Config { delta_ratio: Some(1.0) };
 		let (mut producer, track) = producer(config);
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.update(&json!({ "a": 2 })).unwrap();
@@ -363,8 +390,8 @@ mod test {
 
 	#[test]
 	fn array_change_is_delta() {
-		let config = JsonConfig {
-			max_delta_ratio: Some(100.0),
+		let config = Config {
+			delta_ratio: Some(100.0),
 		};
 		let (mut producer, track) = producer(config);
 		producer.update(&json!({ "list": [1, 2] })).unwrap();
@@ -378,8 +405,8 @@ mod test {
 
 	#[test]
 	fn frame_cap_rolls_snapshot() {
-		let config = JsonConfig {
-			max_delta_ratio: Some(1_000_000.0),
+		let config = Config {
+			delta_ratio: Some(1_000_000.0),
 		};
 		let (mut producer, track) = producer(config);
 		// First update is the snapshot (frame 0); then MAX_DELTA_FRAMES - 1 deltas fill the group.
@@ -395,8 +422,8 @@ mod test {
 
 	#[test]
 	fn late_joiner_reconstructs_from_deltas() {
-		let config = JsonConfig {
-			max_delta_ratio: Some(100.0),
+		let config = Config {
+			delta_ratio: Some(100.0),
 		};
 		let (mut producer, track) = producer(config);
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
@@ -411,12 +438,10 @@ mod test {
 	#[test]
 	fn newer_group_supersedes_in_progress_reconstruction() {
 		// A tight ratio lets one delta fit, then forces the next update into a new snapshot group.
-		let config = JsonConfig {
-			max_delta_ratio: Some(2.0),
-		};
+		let config = Config { delta_ratio: Some(2.0) };
 		let (mut producer, track) = producer(config);
 		let observer = producer.consume();
-		let mut consumer = JsonConsumer::<Value>::new(track);
+		let mut consumer = Consumer::<Value>::new(track);
 		let waiter = kio::Waiter::noop();
 
 		producer.update(&json!({ "a": 1 })).unwrap(); // snapshot, group 0

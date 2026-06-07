@@ -1,4 +1,4 @@
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use hang::Catalog;
 
@@ -6,26 +6,24 @@ use crate::Result;
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
 ///
-/// This wraps a [`moq_json::JsonConsumer`], reconstructing the JSON catalog from the latest
+/// This wraps a [`moq_json::Consumer`], reconstructing the JSON catalog from the latest
 /// group's snapshot (plus any future deltas) to discover available audio and video tracks.
 pub struct Consumer {
-	inner: moq_json::JsonConsumer<Catalog>,
+	inner: moq_json::Consumer<Catalog>,
 }
 
 impl Consumer {
 	/// Create a new catalog consumer from a MoQ track subscriber.
 	pub fn new(track: moq_net::TrackSubscriber) -> Self {
 		Self {
-			inner: moq_json::JsonConsumer::new(track),
+			inner: moq_json::Consumer::new(track),
 		}
 	}
 
 	/// Poll for the next catalog update.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog>>> {
-		match self.inner.poll_next(waiter) {
-			Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
-			Poll::Pending => Poll::Pending,
-		}
+		let result = ready!(self.inner.poll_next(waiter));
+		Poll::Ready(result.map_err(Into::into))
 	}
 
 	/// Get the next catalog update.

@@ -160,17 +160,16 @@ export class Broadcast {
 
 		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json;
 		// MSF stays on its own one-blob-per-group fetch.
-		const catalogConsumer =
-			format === "hang" ? new Json.Consumer<Catalog.Root>(track, Catalog.RootSchema) : undefined;
-
-		const fetchNext =
-			format === "hang"
-				? // biome-ignore lint/style/noNonNullAssertion: defined whenever format is "hang".
-					async () => catalogConsumer!.next()
-				: async () => {
-						const update = await Msf.fetch(track);
-						return update ? toHang(update) : undefined;
-					};
+		let fetchNext: () => Promise<Catalog.Root | undefined>;
+		if (format === "hang") {
+			const consumer = new Json.Consumer<Catalog.Root>(track, { schema: Catalog.RootSchema });
+			fetchNext = () => consumer.next();
+		} else {
+			fetchNext = async () => {
+				const update = await Msf.fetch(track);
+				return update ? toHang(update) : undefined;
+			};
+		}
 
 		effect.spawn(async () => {
 			try {

@@ -14,7 +14,7 @@ use base64::Engine;
 /// so deltas can be enabled later without changing the wire format used today.
 #[derive(Clone)]
 pub struct Producer {
-	hang: Arc<Mutex<moq_json::JsonProducer<hang::Catalog>>>,
+	hang: moq_json::Producer<hang::Catalog>,
 	msf_track: moq_net::TrackProducer,
 
 	current: Arc<Mutex<hang::Catalog>>,
@@ -34,10 +34,10 @@ impl Producer {
 		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
 		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, None)?;
 
-		let hang = moq_json::JsonProducer::new(hang_track, moq_json::JsonConfig::default());
+		let hang = moq_json::Producer::new(hang_track, moq_json::Config::default());
 
 		Ok(Self {
-			hang: Arc::new(Mutex::new(hang)),
+			hang,
 			msf_track,
 			current: Arc::new(Mutex::new(catalog)),
 		})
@@ -47,7 +47,7 @@ impl Producer {
 	pub fn lock(&mut self) -> Guard<'_> {
 		Guard {
 			catalog: self.current.lock().unwrap(),
-			hang: &self.hang,
+			hang: &mut self.hang,
 			msf_track: &mut self.msf_track,
 			updated: false,
 		}
@@ -60,13 +60,12 @@ impl Producer {
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> Result<super::Consumer, moq_net::Error> {
-		let track = self.hang.lock().unwrap().consume();
-		Ok(super::Consumer::new(track))
+		Ok(super::Consumer::new(self.hang.consume()))
 	}
 
 	/// Finish publishing to this catalog.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		self.hang.lock().unwrap().finish()?;
+		self.hang.finish()?;
 		self.msf_track.finish()?;
 		Ok(())
 	}
@@ -79,7 +78,7 @@ impl Producer {
 /// On drop, both the hang and MSF catalog tracks are updated if the catalog was mutated.
 pub struct Guard<'a> {
 	catalog: MutexGuard<'a, hang::Catalog>,
-	hang: &'a Arc<Mutex<moq_json::JsonProducer<hang::Catalog>>>,
+	hang: &'a mut moq_json::Producer<hang::Catalog>,
 	msf_track: &'a mut moq_net::TrackProducer,
 	updated: bool,
 }
@@ -106,10 +105,8 @@ impl Drop for Guard<'_> {
 		}
 
 		// Publish the hang catalog (one snapshot per group while deltas are disabled).
-		if let Ok(mut hang) = self.hang.lock() {
-			let catalog: &hang::Catalog = &self.catalog;
-			let _ = hang.update(catalog);
-		}
+		let catalog: &hang::Catalog = &self.catalog;
+		let _ = self.hang.update(catalog);
 
 		// Publish MSF catalog
 		let msf = to_msf(&self.catalog);

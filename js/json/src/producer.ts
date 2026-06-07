@@ -7,37 +7,38 @@ import { deepEqual, diff } from "./diff.ts";
 // well below the per-group frame cap so a late joiner can always read the snapshot at frame 0.
 const MAX_DELTA_FRAMES = 256;
 
-export interface Config {
+export interface Config<T> {
 	// Controls whether the producer emits deltas (merge patches) instead of full snapshots.
 	//
 	// `undefined` disables deltas: every change is published as a new snapshot group.
 	//
 	// A number enables deltas: a delta is appended to the current group as long as the group's
-	// total size stays within `maxDeltaRatio` times the size of a fresh snapshot; otherwise a
-	// new snapshot group is started.
-	maxDeltaRatio?: number;
+	// total size stays within `deltaRatio` times the size of a fresh snapshot; otherwise a new
+	// snapshot group is started.
+	deltaRatio?: number;
+
+	// Optional zod schema used to validate each value before publishing.
+	schema?: z.ZodMiniType<T>;
 }
 
 /** Publishes a JSON value over a track, choosing snapshots and deltas automatically. */
 export class Producer<T> {
 	#track: Moq.Track;
-	#config: Config;
-	#schema?: z.ZodMiniType<T>;
+	#config: Config<T>;
 
 	#group?: Moq.Group;
 	#last?: unknown;
 	#groupBytes = 0;
 	#groupFrames = 0;
 
-	constructor(track: Moq.Track, config: Config = {}, schema?: z.ZodMiniType<T>) {
+	constructor(track: Moq.Track, config: Config<T> = {}) {
 		this.#track = track;
 		this.#config = config;
-		this.#schema = schema;
 	}
 
 	/** Publish a new value, emitting a snapshot or delta automatically. No-op if unchanged. */
 	update(value: T): void {
-		const valid = this.#schema ? this.#schema.parse(value) : value;
+		const valid = this.#config.schema ? this.#config.schema.parse(value) : value;
 
 		// Serialize once; parse it back to a normalized JSON value for diffing and comparison
 		// (dropping `undefined` fields, matching what lands on the wire).
@@ -47,10 +48,8 @@ export class Producer<T> {
 
 		const snapshot = new TextEncoder().encode(text);
 		const delta = this.#delta(json, snapshot.length);
-		if (delta) {
-			// biome-ignore lint/style/noNonNullAssertion: a delta is only produced with an open group.
-			const group = this.#group!;
-			group.writeFrame(delta);
+		if (delta && this.#group) {
+			this.#group.writeFrame(delta);
 			this.#groupBytes += delta.length;
 			this.#groupFrames += 1;
 		} else {
@@ -68,7 +67,7 @@ export class Producer<T> {
 	}
 
 	#delta(json: unknown, snapshotLen: number): Uint8Array | undefined {
-		const ratio = this.#config.maxDeltaRatio;
+		const ratio = this.#config.deltaRatio;
 		if (ratio === undefined) return undefined;
 		if (this.#last === undefined) return undefined;
 		if (!this.#group || this.#groupFrames >= MAX_DELTA_FRAMES) return undefined;
@@ -93,7 +92,7 @@ export class Producer<T> {
 		this.#groupBytes = snapshot.length;
 		this.#groupFrames = 1;
 
-		if (this.#config.maxDeltaRatio !== undefined) {
+		if (this.#config.deltaRatio !== undefined) {
 			// Keep the group open so future deltas can be appended.
 			this.#group = group;
 		} else {

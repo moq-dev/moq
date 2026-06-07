@@ -80,20 +80,12 @@ export class Broadcast {
 
 			effect.cleanup(() => request.track.close());
 
-			// Persistent JSON producer for the catalog track, so it survives reactive re-runs
-			// (and can emit deltas in the future). Deltas are disabled for now.
-			const catalogProducer =
-				request.track.name === Broadcast.CATALOG_TRACK
-					? new Json.Producer<Catalog.Root>(request.track)
-					: undefined;
-
 			effect.run((effect) => {
 				if (effect.get(request.track.state.closed)) return;
 
 				switch (request.track.name) {
 					case Broadcast.CATALOG_TRACK:
-						// biome-ignore lint/style/noNonNullAssertion: created above for this track name.
-						this.#serveCatalog(catalogProducer!, effect);
+						this.#serveCatalog(new Json.Producer<Catalog.Root>(request.track), effect);
 						break;
 					case Location.Window.TRACK:
 						this.location.window.serve(request.track, effect);
