@@ -254,7 +254,7 @@ class DecoderTrack {
 	}
 
 	#run(effect: Effect): void {
-		const sub = this.broadcast.subscribe(this.track, Catalog.PRIORITY.video);
+		const sub = this.broadcast.track(this.track).subscribe({ priority: Catalog.PRIORITY.video });
 		effect.cleanup(() => sub.close());
 
 		const decoder = new VideoDecoder({
@@ -312,7 +312,7 @@ class DecoderTrack {
 		}
 	}
 
-	#runLegacy(effect: Effect, sub: Moq.Track, decoder: VideoDecoder): void {
+	#runLegacy(effect: Effect, sub: Moq.TrackSubscriber, decoder: VideoDecoder): void {
 		const format =
 			this.config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer that reorders groups/frames up to the provided latency.
@@ -389,7 +389,7 @@ class DecoderTrack {
 		});
 	}
 
-	#runCmaf(effect: Effect, sub: Moq.Track, decoder: VideoDecoder): void {
+	#runCmaf(effect: Effect, sub: Moq.TrackSubscriber, decoder: VideoDecoder): void {
 		if (this.config.container.kind !== "cmaf") return;
 
 		const initSegment = base64ToBytes(this.config.container.init);

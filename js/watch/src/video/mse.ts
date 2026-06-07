@@ -110,7 +110,7 @@ export class Mse implements Backend {
 	): void {
 		if (config.container.kind !== "cmaf") throw new Error("unreachable");
 
-		const data = active.subscribe(track, Catalog.PRIORITY.video);
+		const data = active.track(track).subscribe({ priority: Catalog.PRIORITY.video });
 		effect.cleanup(() => data.close());
 
 		// Decode the catalog's authoritative init segment once and read the
@@ -150,7 +150,7 @@ export class Mse implements Backend {
 		sourceBuffer: SourceBuffer,
 		element: HTMLMediaElement,
 	): void {
-		const data = active.subscribe(track, Catalog.PRIORITY.video);
+		const data = active.track(track).subscribe({ priority: Catalog.PRIORITY.video });
 		effect.cleanup(() => data.close());
 
 		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();

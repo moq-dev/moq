@@ -52,7 +52,7 @@ export class Typing {
 		if (!values) return;
 		const [_, catalog, broadcast] = values;
 
-		const track = broadcast.subscribe(catalog.name, Catalog.PRIORITY.typing);
+		const track = broadcast.track(catalog.name).subscribe({ priority: Catalog.PRIORITY.typing });
 		effect.cleanup(() => track.close());
 
 		effect.spawn(async () => {

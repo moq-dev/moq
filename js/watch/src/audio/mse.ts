@@ -87,7 +87,7 @@ export class Mse implements Backend {
 			this.#output.buffered.set(timeRangesToArray(sourceBuffer.buffered));
 		});
 
-		const sub = active.subscribe(track, Catalog.PRIORITY.audio);
+		const sub = active.track(track).subscribe({ priority: Catalog.PRIORITY.audio });
 		effect.cleanup(() => sub.close());
 
 		if (config.container.kind === "cmaf") {
@@ -109,7 +109,7 @@ export class Mse implements Backend {
 
 	#runCmafMedia(
 		effect: Effect,
-		sub: Moq.Track,
+		sub: Moq.TrackSubscriber,
 		config: Catalog.AudioConfig,
 		sourceBuffer: SourceBuffer,
 		element: HTMLMediaElement,
@@ -144,7 +144,7 @@ export class Mse implements Backend {
 
 	#runLegacyMedia(
 		effect: Effect,
-		sub: Moq.Track,
+		sub: Moq.TrackSubscriber,
 		config: Catalog.AudioConfig,
 		sourceBuffer: SourceBuffer,
 		element: HTMLMediaElement,

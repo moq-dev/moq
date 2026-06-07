@@ -7,4 +7,5 @@ export * from "./probe.ts";
 export * from "./session.ts";
 export * from "./stream.ts";
 export * from "./subscribe.ts";
+export * from "./track.ts";
 export * from "./version.ts";

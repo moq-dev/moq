@@ -230,15 +230,22 @@ async fn broadcast_moq_lite_05_timestamps_webtransport() {
 }
 
 /// Lite05 FETCH round-trip: retrieve a past group by sequence without holding a
-/// subscription, exercising the FETCH / FETCH_OK control flow and per-frame
-/// timestamp decoding on the fetch stream.
+/// subscription, exercising the bare-FRAME fetch response and per-frame timestamp
+/// decoding on the fetch stream. The track is also `compress`-hinted, so the
+/// fetched frames are Deflate-compressed (matching TRACK_INFO) and inflated by the
+/// subscriber, exercising fetch/TRACK_INFO codec consistency.
 async fn lite05_fetch_roundtrip(scheme: &str) {
 	use moq_native::moq_net::{Timescale, Timestamp};
 
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
-		.create_track("video", moq_net::TrackInfo::default().with_timescale(Timescale::MICRO))
+		.create_track(
+			"video",
+			moq_net::TrackInfo::default()
+				.with_timescale(Timescale::MICRO)
+				.with_compress(true),
+		)
 		.expect("failed to create track");
 
 	// A group with a few timestamped frames (middle PTS goes backwards, so the

@@ -38,7 +38,7 @@ export function decode(raw: Uint8Array): Root {
 	}
 }
 
-export async function fetch(track: Moq.Track): Promise<Root | undefined> {
+export async function fetch(track: Moq.TrackSubscriber): Promise<Root | undefined> {
 	const frame = await track.readFrame();
 	if (!frame) return undefined;
 	return decode(frame);

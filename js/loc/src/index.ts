@@ -86,10 +86,10 @@ export interface Source {
  * bitstream payload.
  */
 export class Producer {
-	#track: Moq.Track;
+	#track: Moq.TrackProducer;
 	#group?: Moq.Group;
 
-	constructor(track: Moq.Track) {
+	constructor(track: Moq.TrackProducer) {
 		this.#track = track;
 	}
 

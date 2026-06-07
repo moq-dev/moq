@@ -155,7 +155,7 @@ export class Broadcast {
 		this.#output.status.set("loading");
 
 		const trackName = format === "hang" ? "catalog.json" : "catalog";
-		const track = broadcast.subscribe(trackName, Catalog.PRIORITY.catalog);
+		const track = broadcast.track(trackName).subscribe({ priority: Catalog.PRIORITY.catalog });
 		effect.cleanup(() => track.close());
 
 		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json;

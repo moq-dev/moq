@@ -4,21 +4,30 @@ import { Compression, compress } from "../compression.ts";
 import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
-import type { Track } from "../track.ts";
+import type { TrackSubscriber } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, type AnnounceInterest, AnnounceOk } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
-import { encodeSubscribeResponse, type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
+import {
+	encodeSubscribeResponse,
+	type Subscribe,
+	SubscribeEnd,
+	SubscribeOk,
+	SubscribeStart,
+	SubscribeUpdate,
+} from "./subscribe.ts";
+import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
 import { Version } from "./version.ts";
 
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
 const PROBE_MAX_DELTA = 0.25;
 
-// SUBSCRIBE_OK only carries a compression codec on lite-05+.
-function supportsCompression(version: Version): boolean {
+// The TRACK stream, implicit SUBSCRIBE acceptance, and SUBSCRIBE_START/END are
+// all lite-05+.
+function supportsTrackStream(version: Version): boolean {
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:
@@ -50,6 +59,12 @@ export class Publisher {
 	// Our published broadcasts.
 	// It's a signal so we can live update any announce streams.
 	#broadcasts = new Signal<Map<Path.Valid, Broadcast> | undefined>(new Map());
+
+	// TRACK_INFO is immutable per track, so resolve it from the application once
+	// (via a throwaway subscribe whose info() resolves when the app calls accept)
+	// and reuse it for every later TRACK request of the same track. Keyed by
+	// `broadcast\0track`. A rejected lookup is evicted so a retry can re-probe.
+	#trackInfo = new Map<string, Promise<TrackInfoMessage>>();
 
 	/**
 	 * Creates a new Publisher instance.
@@ -197,16 +212,25 @@ export class Publisher {
 		const track = broadcast.subscribe(msg.track, msg.priority);
 
 		try {
-			// Compress only when the producer marked the track worth it and the
-			// negotiated draft understands the SUBSCRIBE_OK codec field. Older
-			// drafts get None and the frames stream verbatim.
-			const compression =
-				track.compress && supportsCompression(this.version) ? Compression.Deflate : Compression.None;
+			let compression: Compression = Compression.None;
 
-			// Announce the publisher's cache window so a relay re-serves with the
-			// same eviction bound. Pre-lite-05 peers ignore it.
-			const info = new SubscribeOk({ priority: msg.priority, compression, cache: track.cache });
-			await encodeSubscribeResponse(stream.writer, { ok: info }, this.version);
+			if (supportsTrackStream(this.version)) {
+				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
+				// properties live in TRACK_INFO), and the resolved range arrives as
+				// SUBSCRIBE_START / SUBSCRIBE_END emitted from #runTrack.
+				//
+				// The frame codec is one of those immutable properties, so serving
+				// MUST use exactly what TRACK_INFO advertised. Both come from the
+				// producer's accept(), so they always agree. Awaiting info() also
+				// surfaces a rejected track (accept never called, track closed) as an
+				// error here, which resets the stream.
+				const info = await track.info();
+				compression = info.compress ? Compression.Deflate : Compression.None;
+			} else {
+				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
+				const ok = new SubscribeOk({ priority: msg.priority });
+				await encodeSubscribeResponse(stream.writer, { ok }, this.version);
+			}
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 
@@ -246,7 +270,19 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runTrack(sub: bigint, broadcast: Path.Valid, track: Track, stream: Writer, compression: Compression) {
+	async #runTrack(
+		sub: bigint,
+		broadcast: Path.Valid,
+		track: TrackSubscriber,
+		stream: Writer,
+		compression: Compression,
+	) {
+		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
+		// first group is known, SUBSCRIBE_END when the track finishes.
+		const emitRange = supportsTrackStream(this.version);
+		let startSent = false;
+		let lastSequence = 0;
+
 		try {
 			for (;;) {
 				const next = track.recvGroup();
@@ -256,7 +292,17 @@ export class Publisher {
 					break;
 				}
 
+				if (emitRange && !startSent) {
+					startSent = true;
+					await encodeSubscribeResponse(stream, { start: new SubscribeStart(group.sequence) }, this.version);
+				}
+				lastSequence = group.sequence;
+
 				void this.#runGroup(sub, group, compression);
+			}
+
+			if (emitRange) {
+				await encodeSubscribeResponse(stream, { end: new SubscribeEnd(lastSequence) }, this.version);
 			}
 
 			console.debug(`publish close: broadcast=${broadcast} track=${track.name}`);
@@ -268,6 +314,54 @@ export class Publisher {
 			track.close(e);
 			stream.reset(e);
 		}
+	}
+
+	/**
+	 * Answers a TRACK stream (0x6) with a single TRACK_INFO, then FINs.
+	 *
+	 * @internal
+	 */
+	async runTrackInfo(msg: TrackMessage, stream: Stream) {
+		try {
+			const info = await this.#resolveTrackInfo(msg.broadcast, msg.track);
+			await info.encode(stream.writer, this.version);
+			console.debug(`track info: broadcast=${msg.broadcast} track=${msg.track}`);
+			stream.close();
+		} catch (err) {
+			console.debug(`track unknown: broadcast=${msg.broadcast} track=${msg.track}`);
+			stream.writer.reset(error(err));
+		}
+	}
+
+	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.
+	// `broadcast.track(name).info()` triggers a TrackRequest the app answers with
+	// accept(TrackInfo); only the immutable properties are needed (not the groups).
+	// Cached because they're fixed for the track's lifetime. Rejects if the broadcast
+	// or track is unavailable.
+	#resolveTrackInfo(broadcast: Path.Valid, track: string): Promise<TrackInfoMessage> {
+		const key = `${broadcast}\0${track}`;
+		const cached = this.#trackInfo.get(key);
+		if (cached) return cached;
+
+		const pending = (async () => {
+			const published = this.#broadcasts.peek()?.get(broadcast);
+			if (!published) throw new Error("not found");
+
+			const info = await published.track(track).info();
+			return new TrackInfoMessage({
+				priority: info.priority,
+				ordered: info.ordered,
+				cache: info.cache,
+				// This implementation doesn't produce per-frame timestamps yet.
+				timescale: 0,
+				compression: info.compress ? Compression.Deflate : Compression.None,
+			});
+		})();
+
+		// Don't poison the cache on failure: a later request may succeed.
+		pending.catch(() => this.#trackInfo.delete(key));
+		this.#trackInfo.set(key, pending);
+		return pending;
 	}
 
 	/**

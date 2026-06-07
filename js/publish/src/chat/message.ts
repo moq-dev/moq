@@ -31,7 +31,7 @@ export class Message {
 		});
 	}
 
-	serve(track: Moq.Track, effect: Effect): void {
+	serve(track: Moq.TrackProducer, effect: Effect): void {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 

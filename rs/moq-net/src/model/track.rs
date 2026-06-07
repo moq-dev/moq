@@ -37,7 +37,7 @@ pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackInfo {
 	/// Hint that this track's frames are worth compressing (e.g. a JSON catalog).
-	/// The publisher honors it by negotiating a codec in SUBSCRIBE_OK; codec-less
+	/// The publisher honors it by negotiating a codec in TRACK_INFO; codec-less
 	/// peers (older drafts) ignore it and send frames verbatim.
 	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "std::ops::Not::not"))]
 	pub compress: bool,
@@ -45,7 +45,7 @@ pub struct TrackInfo {
 	///
 	/// `None` means the publisher hasn't advertised a timescale; subscribers
 	/// receive frames with `timestamp: None`. On Lite05+ a `Some(_)` value is
-	/// echoed in SUBSCRIBE_OK and the publisher zigzag-delta encodes
+	/// reported in TRACK_INFO and the publisher zigzag-delta encodes
 	/// per-frame timestamps at that scale on the wire; rejecting a frame at
 	/// the wrong scale prevents silent corruption.
 	#[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
@@ -53,7 +53,7 @@ pub struct TrackInfo {
 	/// How long the publisher keeps old groups available before evicting them
 	/// (the newest group is always retained). A subscriber's
 	/// [`Subscription::stale`] window is clamped to this, since a group can't be
-	/// waited for longer than it's kept around. Announced in SUBSCRIBE_OK so
+	/// waited for longer than it's kept around. Reported in TRACK_INFO so
 	/// relays re-serve with the same window. Defaults to [`DEFAULT_CACHE`].
 	#[cfg_attr(
 		feature = "serde",
@@ -64,6 +64,15 @@ pub struct TrackInfo {
 		)
 	)]
 	pub cache: Duration,
+	/// The publisher's priority for this track, used only to break ties between
+	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+);
+	/// kept out of the catalog (a transport property, not media metadata).
+	#[cfg_attr(feature = "serde", serde(skip))]
+	pub priority: u8,
+	/// The publisher's group ordering preference (newest-first when `false`), used
+	/// only to break ties. Reported in TRACK_INFO (Lite05+); kept out of the catalog.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	pub ordered: bool,
 }
 
 #[cfg(feature = "serde")]
@@ -97,6 +106,8 @@ impl Default for TrackInfo {
 			compress: false,
 			timescale: None,
 			cache: DEFAULT_CACHE,
+			priority: 0,
+			ordered: true,
 		}
 	}
 }
@@ -119,6 +130,18 @@ impl TrackInfo {
 	/// Set how long old groups stay available before eviction, returning `self` for chaining.
 	pub fn with_cache(mut self, cache: Duration) -> Self {
 		self.cache = cache;
+		self
+	}
+
+	/// Set the publisher's tie-break priority, returning `self` for chaining.
+	pub fn with_priority(mut self, priority: u8) -> Self {
+		self.priority = priority;
+		self
+	}
+
+	/// Set the publisher's group ordering preference, returning `self` for chaining.
+	pub fn with_ordered(mut self, ordered: bool) -> Self {
+		self.ordered = ordered;
 		self
 	}
 

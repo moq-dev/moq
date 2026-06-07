@@ -44,13 +44,13 @@ export class Peers {
 		if (!values) return;
 		const [_, catalog, broadcast] = values;
 
-		const track = broadcast.subscribe(catalog.name, Catalog.PRIORITY.location);
+		const track = broadcast.track(catalog.name).subscribe({ priority: Catalog.PRIORITY.location });
 		effect.cleanup(() => track.close());
 
 		effect.spawn(this.#runTrack.bind(this, track));
 	}
 
-	async #runTrack(track: Moq.Track) {
+	async #runTrack(track: Moq.TrackSubscriber) {
 		try {
 			for (;;) {
 				const frame = await Zod.read(track, Catalog.PeersSchema);

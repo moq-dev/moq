@@ -54,14 +54,14 @@ export class Window {
 			const updates = effect.get(this.#catalog)?.track;
 			if (!updates) return;
 
-			const track = broadcast.subscribe(updates.name, Catalog.PRIORITY.location);
+			const track = broadcast.track(updates.name).subscribe({ priority: Catalog.PRIORITY.location });
 			effect.cleanup(() => track.close());
 
 			effect.spawn(this.#runTrack.bind(this, track));
 		});
 	}
 
-	async #runTrack(track: Moq.Track) {
+	async #runTrack(track: Moq.TrackSubscriber) {
 		try {
 			for (;;) {
 				const position = await Zod.read(track, Catalog.PositionSchema);

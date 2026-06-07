@@ -70,10 +70,10 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 struct TrackEntry {
 	producer: TrackProducer,
 	stats: Arc<SubscriberTrack>,
-	/// The SUBSCRIBE_OK for this subscription. `None` until it arrives; group
-	/// streams block on it before decoding any frame, since a group can race
-	/// ahead of SUBSCRIBE_OK on its own QUIC stream.
-	subscribe_ok: kio::Consumer<Option<lite::SubscribeOk>>,
+	/// Codec + timestamp scale from this track's TRACK_INFO, known before the
+	/// SUBSCRIBE is even opened, so group streams decode frames without blocking.
+	compression: Compression,
+	timescale: Option<Timescale>,
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
@@ -513,7 +513,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let (mut group, track, track_stats, subscribe_ok) = {
+		let (mut group, track, track_stats, compression, timescale) = {
 			let mut subs = self.subscribes.lock();
 			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
@@ -523,33 +523,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				group,
 				entry.producer.clone(),
 				entry.stats.clone(),
-				entry.subscribe_ok.clone(),
+				entry.compression,
+				entry.timescale,
 			)
 		};
 
 		// Bump groups counter for this incoming group on the subscriber side.
 		track_stats.group();
 
-		// Block until SUBSCRIBE_OK arrives. The group's QUIC stream can arrive
-		// before SUBSCRIBE_OK lands on the subscribe stream, so we can't decode
-		// frames until this resolves. A closed channel means the subscription
-		// ended before SUBSCRIBE_OK, so treat it as cancelled.
-		//
-		// Map the closed `Ref` to `None` inside the poll closure (rather than using
-		// `Consumer::wait`) so the `!Send` guard never enters this spawned future.
-		let (compression, timescale) = kio::wait(|waiter| {
-			let poll = subscribe_ok.poll(waiter, |ok| match &**ok {
-				Some(ok) => Poll::Ready((ok.compression, ok.timescale)),
-				None => Poll::Pending,
-			});
-			match poll {
-				Poll::Ready(Ok(pair)) => Poll::Ready(Some(pair)),
-				Poll::Ready(Err(_closed)) => Poll::Ready(None),
-				Poll::Pending => Poll::Pending,
-			}
-		})
-		.await
-		.ok_or(Error::Cancel)?;
+		// The codec/timescale came from TRACK_INFO (read before this subscription was
+		// even registered), so frames decode immediately. No SUBSCRIBE_OK to wait on.
 
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
@@ -675,8 +658,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 }
 
-/// The producer side of one track, before and after the upstream SUBSCRIBE_OK
-/// promotes the pending request into a full producer. Both observe subscription
+/// The producer side of one track. On Lite05+ it's `Active` from the start (the
+/// TRACK stream resolves the properties up front); on older drafts it stays
+/// `Pending` until the first SUBSCRIBE_OK promotes it. Both observe subscription
 /// demand, so [`TrackServe`] drives them uniformly. Fetches are served separately
 /// via the [`TrackDynamic`] handle.
 enum Track {
@@ -699,8 +683,8 @@ impl Track {
 		}
 	}
 
-	/// Latest cached sequence, used to cap the upstream while pausing. Always `None`
-	/// before the producer exists (no group has arrived yet).
+	/// Latest cached sequence, used to cap the upstream while pausing. `None` before
+	/// any group has arrived.
 	fn latest(&self) -> Option<u64> {
 		match self {
 			Track::Active(producer) => producer.latest(),
@@ -782,10 +766,32 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// whole task; dropping it stops fetch serving.
 		let dynamic = request.dynamic();
 
-		// `Option` so we can move the request out of `track` at accept time (and at
-		// teardown); it's always `Some` while the loop runs.
-		let mut track = Some(Track::Pending(request));
+		// Lite05+ learns the track's immutable properties once, up front, via a TRACK
+		// stream, and accepts the request immediately so downstream subscribers resolve.
+		// The codec/timescale then flow into every SUBSCRIBE and FETCH without a per-
+		// response header. Older drafts have no TRACK stream: the request stays pending
+		// until the first SUBSCRIBE_OK supplies the properties (see `establish`).
+		let (mut track, compression, timescale) = if self.subscriber.version.has_timestamps() {
+			match self.track_info().await {
+				Ok((info, compression)) => {
+					let timescale = info.timescale;
+					(Some(Track::Active(request.accept(info))), compression, timescale)
+				}
+				Err(err) => {
+					tracing::warn!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "track info failed");
+					request.reject(err);
+					return;
+				}
+			}
+		} else {
+			(Some(Track::Pending(request)), Compression::None, None)
+		};
+
 		let mut sub = Sub::None;
+		// True once the upstream subscription FIN'd: a later subscriber must not reopen
+		// it (the track is finished). Replaces the old "is the track still Pending" gate,
+		// which no longer holds now that Lite05 accepts up front.
+		let mut completed = false;
 		let mut fetches: FuturesUnordered<BoxFuture<'static, ()>> = FuturesUnordered::new();
 		let mut linger: Option<Pin<Box<tokio::time::Sleep>>> = None;
 
@@ -823,13 +829,22 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				// (2) An in-flight fetch completed.
 				Some(()) = fetches.next(), if !fetches.is_empty() => Event::FetchDone,
 
-				// (3) The upstream subscribe stream closed (FIN or transport error).
+				// (3) The upstream subscribe stream closed, or carried a START/END/DROP.
 				res = async {
 					match &mut sub {
-						Sub::Active(active) => active.stream.reader.closed().await,
+						Sub::Active(active) => active.stream.reader.decode_maybe::<lite::SubscribeResponse>().await,
 						Sub::None => std::future::pending().await,
 					}
-				}, if sub.is_active() => Event::SubClosed(res),
+				}, if sub.is_active() => match res {
+					// START/END/DROP resolve the range; we don't drive delivery off them
+					// (the producer already orders groups), so log and keep reading.
+					Ok(Some(msg)) => {
+						tracing::debug!(track = %self.name, ?msg, "subscribe response");
+						continue;
+					}
+					Ok(None) => Event::SubClosed(Ok(())),
+					Err(err) => Event::SubClosed(Err(err)),
+				},
 
 				// (4) The whole broadcast went away on the publisher side.
 				err = self.broadcast.closed() => Event::BroadcastClosed(err),
@@ -846,12 +861,20 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			match event {
 				Event::Fetch(req) => {
 					linger = None;
-					fetches.push(self.clone().serve_fetch(req).boxed());
+					fetches.push(self.clone().serve_fetch(req, compression, timescale).boxed());
 				}
 				Event::Subscription(pref) => {
 					linger = None;
 					if let Err(err) = self
-						.handle_subscription(&mut track, &mut sub, pref, supports_linger)
+						.handle_subscription(
+							&mut track,
+							&mut sub,
+							pref,
+							supports_linger,
+							completed,
+							compression,
+							timescale,
+						)
 						.await
 					{
 						return self.finish_track(track.take().unwrap(), sub, err);
@@ -873,6 +896,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					// Upstream FIN'd the live subscription. Finish the producer (no more
 					// live groups), but keep the task alive: past groups can still be
 					// fetched, and the linger countdown eventually stops us.
+					completed = true;
 					if let Sub::Active(active) = &mut sub {
 						self.subscriber.subscribes.lock().remove(&active.id);
 						let _ = active.stream.writer.finish();
@@ -898,24 +922,64 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		}
 	}
 
+	/// Open a TRACK stream, read the single TRACK_INFO, and map it to the model's
+	/// [`crate::TrackInfo`] plus the wire [`Compression`] (needed verbatim to decode
+	/// frames). Lite05+ only. Bails if the broadcast dies meanwhile.
+	async fn track_info(&self) -> Result<(crate::TrackInfo, Compression), Error> {
+		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
+		stream.writer.encode(&lite::ControlType::Track).await?;
+		stream
+			.writer
+			.encode(&lite::Track {
+				broadcast: self.path.as_path(),
+				track: self.name.as_str().into(),
+			})
+			.await?;
+
+		let info = tokio::select! {
+			err = self.broadcast.closed() => return Err(err),
+			info = stream.reader.decode::<lite::TrackInfo>() => info?,
+		};
+		// The publisher FINs after TRACK_INFO; FIN our side too and let the stream drop.
+		let _ = stream.writer.finish();
+
+		let model = crate::TrackInfo {
+			compress: info.compression != Compression::None,
+			timescale: info.timescale,
+			cache: info.cache,
+			priority: info.priority,
+			ordered: info.ordered,
+		};
+		Ok((model, info.compression))
+	}
+
 	/// Apply a subscription-demand change: open the upstream SUBSCRIBE on the first
 	/// subscriber, resume/update it while live, or pause it when the last leaves.
+	#[allow(clippy::too_many_arguments)]
 	async fn handle_subscription(
 		&self,
 		track: &mut Option<Track>,
 		sub: &mut Sub<S>,
 		pref: Option<Subscription>,
 		supports_linger: bool,
+		completed: bool,
+		compression: Compression,
+		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		match pref {
 			Some(subscription) => match sub {
 				Sub::None => {
-					// Only the first subscriber, while still pending, opens an upstream
-					// SUBSCRIBE. If the track is already Active a prior subscription
-					// finished and there's nothing live left; the new subscriber just
-					// sees the finished track.
-					if matches!(track.as_ref(), Some(Track::Pending(_))) {
-						self.establish(track, sub, subscription).await?;
+					// Open an upstream SUBSCRIBE for the first subscriber, unless the
+					// track already finished. On Lite05 the producer is `Active` from
+					// the start, so gate on `completed`; on older drafts a `Pending`
+					// track means it was never subscribed.
+					let establish = match track.as_ref() {
+						Some(Track::Pending(_)) => true,
+						Some(Track::Active(_)) => self.subscriber.version.has_timestamps() && !completed,
+						None => false,
+					};
+					if establish {
+						self.establish(track, sub, subscription, compression, timescale).await?;
 					}
 				}
 				Sub::Active(active) if active.paused => {
@@ -967,13 +1031,18 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		Ok(())
 	}
 
-	/// Open the upstream SUBSCRIBE, wait for SUBSCRIBE_OK, accept the pending request
-	/// (unblocking downstream subscribers), and start routing groups into it.
+	/// Open the upstream SUBSCRIBE and start routing groups into the producer.
+	///
+	/// On Lite05+ the producer already exists (accepted from TRACK_INFO) and the
+	/// subscription is accepted implicitly. On older drafts this waits for the first
+	/// SUBSCRIBE_OK and promotes the pending request to a producer.
 	async fn establish(
 		&self,
 		track: &mut Option<Track>,
 		sub: &mut Sub<S>,
 		subscription: Subscription,
+		compression: Compression,
+		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		let id = self.subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 
@@ -994,54 +1063,52 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		stream.writer.encode(&lite::ControlType::Subscribe).await?;
 		stream.writer.encode(&msg).await?;
 
-		// SUBSCRIBE_OK must arrive first; bail if the broadcast dies meanwhile.
-		let resp = tokio::select! {
-			err = self.broadcast.closed() => return Err(err),
-			resp = stream.reader.decode::<lite::SubscribeResponse>() => resp?,
-		};
-		let lite::SubscribeResponse::Ok(info) = resp else {
-			return Err(Error::ProtocolViolation);
+		let producer = if self.subscriber.version.has_timestamps() {
+			// Lite05+: implicit acceptance, no SUBSCRIBE_OK. The producer already exists.
+			let Some(Track::Active(producer)) = track.as_ref() else {
+				unreachable!("lite05 track is active before establish");
+			};
+			producer.clone()
+		} else {
+			// Older drafts: the first SUBSCRIBE_OK promotes the pending request. Bail if
+			// the broadcast dies meanwhile.
+			let resp = tokio::select! {
+				err = self.broadcast.closed() => return Err(err),
+				resp = stream.reader.decode::<lite::SubscribeResponse>() => resp?,
+			};
+			if !matches!(resp, lite::SubscribeResponse::Ok(_)) {
+				return Err(Error::ProtocolViolation);
+			}
+
+			// Accept with defaults: pre-lite-05 carries no codec/timescale, and the
+			// cache window falls back to the model default.
+			let Some(Track::Pending(request)) = track.take() else {
+				unreachable!("establish called without a pending track");
+			};
+			let mut producer = request.accept(crate::TrackInfo::default());
+			// The accepted producer starts with a fresh subscription cursor, so its first
+			// poll would re-report the subscription we just sent as a "change". Prime it
+			// now (the params are already on the wire) so only genuine later changes fire.
+			let _ = producer.poll_subscription_changed(&kio::Waiter::noop());
+			*track = Some(Track::Active(producer.clone()));
+			producer
 		};
 
-		// Upstream confirmed: this session is now actively feeding the broadcast, so
-		// take the per-(session, broadcast) viewer sentinel for the subscription's life.
+		// This session is now actively feeding the broadcast, so take the per-(session,
+		// broadcast) viewer sentinel for the subscription's life.
 		let abs = self.subscriber.origin.absolute(&self.path).to_owned();
 		let broadcast_sub = self.subscriber.broadcasts.subscribe(&abs);
 
-		// Stamp the negotiated timescale + cache window onto the local track so groups
-		// inherit them and downstream consumers validate per-frame timestamps and clamp
-		// their stale windows the same way.
-		let local_info = TrackInfo {
-			timescale: info.timescale,
-			cache: info.cache,
-			..Default::default()
-		};
-
-		// Accept the pending request → producer, unblocking downstream subscribers. No
-		// awaits between the take and the restore, so `track` is never left empty.
-		let Some(Track::Pending(request)) = track.take() else {
-			unreachable!("establish called without a pending track");
-		};
-		let mut producer = request.accept(local_info);
-
-		// The accepted producer starts with a fresh subscription cursor, so its first
-		// poll would re-report the subscription we just sent as a "change". Prime it
-		// now (the params are already on the wire) so only genuine later changes fire.
-		let _ = producer.poll_subscription_changed(&kio::Waiter::noop());
-
-		// SUBSCRIBE_OK is known now, so group streams never wait; they still read it
-		// through this channel (a group's QUIC stream can race ahead of SUBSCRIBE_OK).
-		let subscribe_ok = kio::Producer::new(Some(info)).consume();
 		self.subscriber.subscribes.lock().insert(
 			id,
 			TrackEntry {
-				producer: producer.clone(),
+				producer,
 				stats: self.track_stats.clone(),
-				subscribe_ok,
+				compression,
+				timescale,
 			},
 		);
 
-		*track = Some(Track::Active(producer));
 		*sub = Sub::Active(SubStream {
 			stream,
 			id,
@@ -1068,10 +1135,12 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		active.stream.writer.encode(&update).await
 	}
 
-	/// Serve one downstream fetch end-to-end on its own bidi stream: send FETCH, read
-	/// FETCH_OK, accept the group request, then fill the group. Runs to completion as
-	/// an independent future in the serve loop's `FuturesUnordered`.
-	async fn serve_fetch(self, request: GroupRequest) {
+	/// Serve one downstream fetch end-to-end on its own bidi stream: send FETCH, then
+	/// fill the group from the bare FRAME messages that follow. The codec/timescale
+	/// come from this track's TRACK_INFO (already known), and the group sequence is
+	/// implicit from the request. Runs to completion as an independent future in the
+	/// serve loop's `FuturesUnordered`.
+	async fn serve_fetch(self, request: GroupRequest, compression: Compression, timescale: Option<Timescale>) {
 		let TrackServe {
 			mut subscriber,
 			path,
@@ -1107,21 +1176,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			return;
 		}
 
-		// The first response MUST be a FETCH_OK; it carries the codec/timescale
-		// needed to decode the frames that follow on the same stream.
-		let info = match stream.reader.decode::<lite::FetchOk>().await {
-			Ok(info) => info,
-			Err(err) => {
-				stream.writer.abort(&err);
-				return;
-			}
-		};
-
 		// Make the group available (resolving the downstream fetch) and fill it. The
 		// TrackInfo only takes effect if the track isn't accepted yet (a fetch with no
 		// live subscription); otherwise the group inherits the accepted timescale.
 		let group_info = TrackInfo {
-			timescale: info.timescale,
+			timescale,
 			..Default::default()
 		};
 		let mut producer = match request.accept(group_info) {
@@ -1139,8 +1198,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				&mut stream.reader,
 				producer.clone(),
 				track_stats,
-				info.compression,
-				info.timescale,
+				compression,
+				timescale,
 			)
 			.await;
 		match res {

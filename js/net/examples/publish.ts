@@ -17,16 +17,17 @@ async function main() {
 		if (!request) break;
 
 		// Accept the request for the "chat" track
-		if (request.track.name === "chat") {
-			publishTrack(request.track);
+		if (request.name === "chat") {
+			// accept() commits the track's immutable properties and returns the Track.
+			publishTrack(request.accept());
 		} else {
 			// Reject other tracks
-			request.track.close(new Error("track not found"));
+			request.reject(new Error("track not found"));
 		}
 	}
 }
 
-async function publishTrack(track: Moq.Track) {
+async function publishTrack(track: Moq.TrackProducer) {
 	console.log("Publishing to track:", track.name);
 
 	// Create a group (e.g., keyframe boundary)

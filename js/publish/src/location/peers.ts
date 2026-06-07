@@ -30,7 +30,7 @@ export class Peers {
 		});
 	}
 
-	serve(track: Moq.Track, effect: Effect): void {
+	serve(track: Moq.TrackProducer, effect: Effect): void {
 		const values = effect.getAll([this.enabled, this.positions]);
 		if (!values) return;
 		const [_, positions] = values;
