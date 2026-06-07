@@ -19,6 +19,11 @@ check:
 package *args:
     bash scripts/package.sh {{ args }}
 
+# Remove SwiftPM build output plus the XCFramework and generated bindings
+# that scripts/check.sh lays down (see swift/.gitignore).
+clean:
+    rm -rf .build .swiftpm Package.resolved Sources/MoqFFI/Generated.swift MoqFFI.xcframework
+
 # Full Swift CI: `check` already builds moq-ffi and runs swift test.
 # Takes a newline-separated list of changed files; skips if FILES is
 # non-empty and none match the Swift scope. Run `just swift ci` (no
