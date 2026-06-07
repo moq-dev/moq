@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -19,6 +20,10 @@ static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 		.build()
 		.expect("spawn tokio runtime")
 });
+
+/// Process-wide pad id counter. Kept global (not per-session) so a pad created by a
+/// restarted session can't collide with one still being torn down by the previous one.
+static NEXT_PAD_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Default)]
 struct Settings {
@@ -289,7 +294,6 @@ async fn run_session(
 	// disappearing, or changing codec/resolution mid-stream.
 	let mut active: HashMap<String, ActiveTrack> = HashMap::new();
 	let mut pumps: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
-	let mut next_pad_id: u64 = 0;
 	let mut catalog_closed = false;
 
 	loop {
@@ -319,7 +323,7 @@ async fn run_session(
 			// returning None) while we wait for the remaining pumps to drain.
 			next = catalog_consumer.next(), if !catalog_closed => {
 				match next? {
-					Some(catalog) => reconcile(&catalog, &mut active, &mut pumps, &mut next_pad_id, &broadcast, &element)?,
+					Some(catalog) => reconcile(&catalog, &mut active, &mut pumps, &broadcast, &element)?,
 					// Catalog track closed. Don't cancel the pumps: let each reach its
 					// natural Ok(None) -> EOS end so downstream sees a clean EOS rather than a
 					// bare pad drop. We just stop reconciling and wait for them to drain.
@@ -338,7 +342,6 @@ fn reconcile(
 	catalog: &hang::catalog::Catalog,
 	active: &mut HashMap<String, ActiveTrack>,
 	pumps: &mut tokio::task::JoinSet<()>,
-	next_pad_id: &mut u64,
 	broadcast: &moq_net::BroadcastConsumer,
 	element: &glib::WeakRef<super::MoqSrc>,
 ) -> Result<()> {
@@ -397,8 +400,7 @@ fn reconcile(
 			continue;
 		}
 
-		let id = *next_pad_id;
-		*next_pad_id += 1;
+		let id = NEXT_PAD_ID.fetch_add(1, Ordering::Relaxed);
 
 		let track_consumer = broadcast.subscribe_track(&moq_net::Track::new(&name))?;
 		let track = moq_mux::container::Consumer::new(track_consumer, d.container).with_latency(Duration::from_secs(1));
@@ -528,10 +530,13 @@ fn build_buffer(
 	let buffer_mut = buffer.get_mut().unwrap();
 
 	let pts = match *reference_ts {
-		Some(reference) => {
-			let delta: Duration = (frame.timestamp - reference).into();
-			gst::ClockTime::from_nseconds(delta.as_nanos() as u64)
-		}
+		// Frames arrive in decode order, so a B-frame's presentation timestamp can fall
+		// before the first frame's (our reference). `Timestamp` subtraction panics on
+		// underflow, so clamp to zero rather than crash the pump (which would leak its pad).
+		Some(reference) => match frame.timestamp.checked_sub(reference) {
+			Ok(delta) => gst::ClockTime::from_nseconds(Duration::from(delta).as_nanos() as u64),
+			Err(_) => gst::ClockTime::ZERO,
+		},
 		None => {
 			*reference_ts = Some(frame.timestamp);
 			gst::ClockTime::ZERO
