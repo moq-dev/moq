@@ -261,12 +261,19 @@ async fn build_https_config(
 /// (silently stripping mTLS when configured), so we always rebuild via the full
 /// [`build_https_config`] path.
 async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, root: Vec<PathBuf>) {
-	let paths = std::iter::once(cert.clone())
+	let paths: Vec<PathBuf> = std::iter::once(cert.clone())
 		.chain(std::iter::once(key.clone()))
 		.chain(root.iter().cloned())
 		.collect();
 
-	let mut watcher = crate::watch::FileWatcher::new(paths);
+	let mut watcher = match crate::watch::FileWatcher::new(&paths) {
+		Ok(watcher) => watcher,
+		Err(err) => {
+			tracing::error!(%err, "failed to watch web certificate files; hot reload disabled");
+			return;
+		}
+	};
+
 	loop {
 		watcher.changed().await;
 		tracing::info!("reloading web certificate");

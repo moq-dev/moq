@@ -687,7 +687,14 @@ impl Cluster {
 	async fn run_connect_api_file(&self, path: PathBuf, node: Option<String>, token: String, dialed: DialMap) {
 		self.reload_connect_api_file(&path, &node, &token, &dialed);
 
-		let mut watcher = crate::watch::FileWatcher::new(vec![path.clone()]);
+		let mut watcher = match crate::watch::FileWatcher::new(std::slice::from_ref(&path)) {
+			Ok(watcher) => watcher,
+			Err(err) => {
+				tracing::error!(%err, ?path, "failed to watch cluster.connect_api file; updates disabled");
+				return;
+			}
+		};
+
 		loop {
 			watcher.changed().await;
 			self.reload_connect_api_file(&path, &node, &token, &dialed);
