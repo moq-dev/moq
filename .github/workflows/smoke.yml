@@ -149,11 +149,12 @@ jobs:
       # ── run the interop matrix (Linux: no swift) ──────────────────────
       # rust, python, and the three browser variants publish; go/kotlin/c/gst and
       # the native-JS runtimes subscribe. --timeout 30 gives headless Chromium
-      # cold-start headroom. CC=/usr/bin/cc builds the C client with the system
-      # compiler (it links the prebuilt libmoq.a, built for the system glibc). The
-      # gst subscriber can't yet read browser-published broadcasts (a
-      # published-package gap in moqsrc, not the harness), so it's in the nightly's
-      # full matrix but dropped from PR runs, which only prove harness mechanics.
+      # cold-start headroom. The c and go clients link the prebuilt libmoq static
+      # lib and are built with the devShell's own cc, so the binary and its runtime
+      # share one (nix) libc; building with the system cc and running under
+      # `nix develop` mixes the two and segfaults. The gst subscriber can't yet
+      # read browser-published broadcasts (a published-package gap in moqsrc, not
+      # the harness), so it's in the nightly's full matrix but dropped from PR runs.
       - name: Smoke
         env:
           EVENT: ${{ github.event_name }}
@@ -162,7 +163,7 @@ jobs:
           native="js-native-node,js-native-bun"
           subs="rust,python,go,kotlin,c,$browser,$native"
           if [ "$EVENT" != "pull_request" ]; then subs="$subs,gst"; fi
-          nix develop .#smoke --command env CC=/usr/bin/cc ./test/smoke/smoke.sh \
+          nix develop .#smoke --command ./test/smoke/smoke.sh \
             --publishers "rust,python,$browser" \
             --subscribers "$subs" \
             --timeout 30

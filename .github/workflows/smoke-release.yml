@@ -108,9 +108,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 
-      # Run the pinned slice. CC=/usr/bin/cc builds the C client with the system
-      # compiler (unused by other slices). Maven Central can lag npm/PyPI/Go, so
-      # kotlin gets a longer propagation budget (20 min); others use the 5m default.
+      # Run the pinned slice. The c client builds with the devShell's own cc so its
+      # binary and runtime share one libc (see smoke.yml). Maven Central can lag
+      # npm/PyPI/Go, so kotlin gets a longer propagation budget (20 min); others
+      # use the 5m default.
       - name: Smoke
         env:
           SMOKE_SHELL: ${{ steps.cfg.outputs.shell }}
@@ -118,5 +119,5 @@ jobs:
           SUB: ${{ steps.cfg.outputs.sub }}
           SMOKE_POLL_TRIES: ${{ inputs.slice == 'kotlin' && '240' || '60' }}
         run: |
-          nix develop ".#$SMOKE_SHELL" --command env CC=/usr/bin/cc ./test/smoke/smoke.sh \
+          nix develop ".#$SMOKE_SHELL" --command ./test/smoke/smoke.sh \
             --publishers "$PUB" --subscribers "$SUB" --timeout 30

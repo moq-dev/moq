@@ -156,11 +156,13 @@
         # Client toolchains for the published-package smoke matrix (test/smoke),
         # composed into per-slice devShells below. Kept SEPARATE from the default
         # shell so day-to-day `nix develop` never pulls go/jdk/gradle/Chromium.
-        # Three clients deliberately use the system toolchain, not nix, so they
-        # appear in no group: GStreamer (the gst client loads the prebuilt plugin
-        # against a *system* GStreamer, the scenario it tests; a nix-store gst
-        # wouldn't satisfy the plugin's NEEDED libs), the C compiler (the c client
-        # links the prebuilt libmoq.a with the system cc), and Swift (system Xcode).
+        # The c client needs no group: it links the prebuilt libmoq.a with the
+        # devShell's own stdenv cc, so the binary and its runtime share one libc
+        # (linking with the system cc and running under `nix develop` mixes the two
+        # and segfaults). Two clients genuinely use the system toolchain, not nix:
+        # GStreamer (the gst client loads the prebuilt plugin against a *system*
+        # GStreamer, the scenario it tests; a nix-store gst wouldn't satisfy the
+        # plugin's NEEDED libs) and Swift (system Xcode).
         smoke = {
           # orchestrator + harness, in every smoke shell.
           base = with pkgs; [
