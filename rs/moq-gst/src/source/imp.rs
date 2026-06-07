@@ -530,13 +530,7 @@ fn build_buffer(
 	let buffer_mut = buffer.get_mut().unwrap();
 
 	let pts = match *reference_ts {
-		// Frames arrive in decode order, so a B-frame's presentation timestamp can fall
-		// before the first frame's (our reference). `Timestamp` subtraction panics on
-		// underflow, so clamp to zero rather than crash the pump (which would leak its pad).
-		Some(reference) => match frame.timestamp.checked_sub(reference) {
-			Ok(delta) => gst::ClockTime::from_nseconds(Duration::from(delta).as_nanos() as u64),
-			Err(_) => gst::ClockTime::ZERO,
-		},
+		Some(reference) => relative_pts(frame.timestamp, reference),
 		None => {
 			*reference_ts = Some(frame.timestamp);
 			gst::ClockTime::ZERO
@@ -554,6 +548,18 @@ fn build_buffer(
 	buffer_mut.set_flags(flags);
 
 	buffer
+}
+
+/// PTS of `timestamp` relative to the track's first frame (`reference`).
+///
+/// Frames arrive in decode order, so a B-frame's presentation timestamp can fall before
+/// the reference. `Timestamp` subtraction panics on underflow, so clamp to zero rather
+/// than crash the pump (which would leak its pad).
+fn relative_pts(timestamp: moq_mux::container::Timestamp, reference: moq_mux::container::Timestamp) -> gst::ClockTime {
+	match timestamp.checked_sub(reference) {
+		Ok(delta) => gst::ClockTime::from_nseconds(Duration::from(delta).as_nanos() as u64),
+		Err(_) => gst::ClockTime::ZERO,
+	}
 }
 
 fn video_caps(config: &hang::catalog::VideoConfig) -> Result<gst::Caps> {
@@ -633,4 +639,29 @@ fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
 		other => bail!("unsupported audio codec: {other:?}"),
 	};
 	Ok(caps)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::relative_pts;
+	use moq_mux::container::Timestamp;
+
+	#[test]
+	fn relative_pts_clamps_backwards_timestamps() {
+		let reference = Timestamp::from_millis(2000).unwrap();
+
+		// A frame presenting before the reference (a decode-order B-frame) must clamp to
+		// zero, not underflow and panic.
+		assert_eq!(
+			relative_pts(Timestamp::from_millis(1000).unwrap(), reference),
+			gst::ClockTime::ZERO
+		);
+		assert_eq!(relative_pts(reference, reference), gst::ClockTime::ZERO);
+
+		// A forward timestamp yields the delta.
+		assert_eq!(
+			relative_pts(Timestamp::from_millis(2500).unwrap(), reference),
+			gst::ClockTime::from_mseconds(500)
+		);
+	}
 }
