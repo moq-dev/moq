@@ -146,7 +146,7 @@ clean:
     for wt in .claude/worktrees/*/; do
     	[ -f "${wt}justfile" ] || continue
     	echo "==> cleaning ${wt}"
-    	(cd "$wt" && just clean) || echo "    (skipped: no clean recipe in ${wt})"
+    	(cd "$wt" && just clean) || echo "    (skipped: just clean failed in ${wt})"
     done
 
 # Upgrade any tooling

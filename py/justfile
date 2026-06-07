@@ -54,8 +54,8 @@ clean:
     set -euo pipefail
     rm -rf dist moq-ffi/moq_ffi/_uniffi
     rm -rf ../.venv .venv
-    find . -type d -name __pycache__ -prune -exec rm -rf {} +
-    find . -type f -name '*.pyc' -delete
+    find . -name .claude -prune -o -type d -name __pycache__ -prune -exec rm -rf {} +
+    find . -name .claude -prune -o -type f -name '*.pyc' -exec rm -f {} +
 
 # Build the pure-python moq-rs wrapper sdist + wheel into py/dist (for release).
 # moq-ffi is built separately by maturin (see release-py.yml); the wrapper is

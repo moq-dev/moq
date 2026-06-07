@@ -25,7 +25,7 @@ package *args:
 clean:
     #!/usr/bin/env bash
     set -euo pipefail
-    find . -type d \( -name build -o -name .gradle -o -name .kotlin \) -prune -exec rm -rf {} +
+    find . -name .claude -prune -o -type d \( -name build -o -name .gradle -o -name .kotlin \) -prune -exec rm -rf {} +
     rm -rf local.properties \
     	moq/src/jvmAndAndroidMain/kotlin/uniffi \
     	moq/src/jvmMain/resources \
