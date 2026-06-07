@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 
 use hang::moq_net;
 
@@ -207,12 +207,9 @@ impl ElementImpl for MoqSrc {
 				}
 				// Roll back the session we just started if the parent transition fails,
 				// otherwise it would keep running while the element stays in READY.
-				let success = match self.parent_change_state(transition) {
-					Ok(success) => success,
-					Err(err) => {
-						self.stop_session();
-						return Err(err);
-					}
+				let Ok(success) = self.parent_change_state(transition) else {
+					self.stop_session();
+					return Err(gst::StateChangeError);
 				};
 				// A live source never prerolls.
 				Ok(match success {
@@ -253,9 +250,10 @@ struct ActiveTrack {
 	/// Tells the pump to drop its pad and exit (set on shutdown or when reconcile
 	/// removes/replaces the rendition).
 	cancel: watch::Sender<bool>,
-	/// The pump task. `is_finished()` lets the session reap pumps that ended on
-	/// their own so a re-announced rendition can be resubscribed.
-	handle: tokio::task::JoinHandle<()>,
+	/// Handle to the pump task in the session's `JoinSet`. We only read
+	/// `is_finished()` to prune this entry once the pump ends (the `JoinSet` owns
+	/// the task and reaps it); teardown goes through `cancel`, never `abort()`.
+	task: tokio::task::AbortHandle,
 }
 
 async fn run_session(
@@ -290,43 +288,38 @@ async fn run_session(
 	// configures, then add renditions a beat later, as well as renditions appearing,
 	// disappearing, or changing codec/resolution mid-stream.
 	let mut active: HashMap<String, ActiveTrack> = HashMap::new();
-	let (done_tx, mut done_rx) = mpsc::unbounded_channel::<()>();
+	let mut pumps: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 	let mut next_pad_id: u64 = 0;
 	let mut catalog_closed = false;
 
 	loop {
-		// Reap pumps that ended on their own (track finished or errored). Once the catalog
-		// is closed and every pump has drained, we're done: each already emitted EOS (or a
-		// pad drop on error) downstream via its own end path.
-		active.retain(|_, track| !track.handle.is_finished());
-		if catalog_closed && active.is_empty() {
+		// Prune metadata for pumps that have ended (the JoinSet has already reaped the
+		// tasks). Once the catalog is closed and the last pump drains we're done: each
+		// emitted EOS (or a pad drop on error) downstream via its own end path.
+		active.retain(|_, track| !track.task.is_finished());
+		if catalog_closed && pumps.is_empty() {
 			break;
 		}
 
 		tokio::select! {
 			// Full session shutdown: cancel every pump, then wait for them all to drop
 			// their pads. Cancel all up front (pumps only exit on their own `cancel`), or
-			// awaiting one at a time would let the not-yet-cancelled pumps keep streaming.
+			// the not-yet-cancelled ones would keep streaming while we await the rest.
 			_ = shutdown.changed() => {
-				let handles: Vec<_> = active
-					.drain()
-					.map(|(_, track)| {
-						let _ = track.cancel.send(true);
-						track.handle
-					})
-					.collect();
-				for handle in handles {
-					let _ = handle.await;
+				for (_, track) in active.drain() {
+					let _ = track.cancel.send(true);
 				}
+				while pumps.join_next().await.is_some() {}
 				break;
 			}
-			// A pump exited; loop back so the `retain` above reaps it.
-			_ = done_rx.recv() => {}
+			// A pump finished; loop back so the `retain` above prunes its entry and the
+			// break condition sees the drained set.
+			_ = pumps.join_next(), if !pumps.is_empty() => {}
 			// The guard stops us polling a closed catalog track (which would spin the loop
 			// returning None) while we wait for the remaining pumps to drain.
 			next = catalog_consumer.next(), if !catalog_closed => {
 				match next? {
-					Some(catalog) => reconcile(&catalog, &mut active, &mut next_pad_id, &broadcast, &element, &done_tx)?,
+					Some(catalog) => reconcile(&catalog, &mut active, &mut pumps, &mut next_pad_id, &broadcast, &element)?,
 					// Catalog track closed. Don't cancel the pumps: let each reach its
 					// natural Ok(None) -> EOS end so downstream sees a clean EOS rather than a
 					// bare pad drop. We just stop reconciling and wait for them to drain.
@@ -344,10 +337,10 @@ async fn run_session(
 fn reconcile(
 	catalog: &hang::catalog::Catalog,
 	active: &mut HashMap<String, ActiveTrack>,
+	pumps: &mut tokio::task::JoinSet<()>,
 	next_pad_id: &mut u64,
 	broadcast: &moq_net::BroadcastConsumer,
 	element: &glib::WeakRef<super::MoqSrc>,
-	done_tx: &mpsc::UnboundedSender<()>,
 ) -> Result<()> {
 	struct Desired {
 		kind: TrackKind,
@@ -416,14 +409,10 @@ fn reconcile(
 			id,
 		};
 		let (cancel_tx, cancel_rx) = watch::channel(false);
-		let handle = RUNTIME.spawn(run_pump(
-			element.clone(),
-			descriptor,
-			d.caps.clone(),
-			track,
-			cancel_rx,
-			done_tx.clone(),
-		));
+		let task = pumps.spawn_on(
+			run_pump(element.clone(), descriptor, d.caps.clone(), track, cancel_rx),
+			RUNTIME.handle(),
+		);
 
 		active.insert(
 			name,
@@ -431,7 +420,7 @@ fn reconcile(
 				caps: d.caps,
 				container: d.container_hint,
 				cancel: cancel_tx,
-				handle,
+				task,
 			},
 		);
 	}
@@ -467,10 +456,8 @@ async fn run_pump(
 	caps: gst::Caps,
 	mut track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 	mut cancel: watch::Receiver<bool>,
-	done: mpsc::UnboundedSender<()>,
 ) {
 	let Some(pad) = create_pad(&element, &descriptor, &caps) else {
-		let _ = done.send(());
 		return;
 	};
 
@@ -502,10 +489,6 @@ async fn run_pump(
 	if let Some(obj) = element.upgrade() {
 		let _ = obj.remove_pad(&pad);
 	}
-
-	// Wake the session so it reaps us (and can resubscribe if the rendition reappears).
-	// Best-effort: the receiver is gone once the session itself is shutting down.
-	let _ = done.send(());
 }
 
 /// Create, activate, and add a src pad for the track, seeding it with the sticky
