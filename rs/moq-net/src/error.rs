@@ -58,6 +58,11 @@ pub enum Error {
 	#[error("unauthorized")]
 	Unauthorized,
 
+	/// Refused to publish a broadcast whose hop chain already contains this origin: doing so
+	/// would form a routing loop.
+	#[error("routing loop")]
+	Loop,
+
 	#[error("unexpected message")]
 	UnexpectedMessage,
 
@@ -116,6 +121,7 @@ impl Error {
 			Self::Transport(_) => 4,
 			Self::Decode(_) => 5,
 			Self::Unauthorized => 6,
+			Self::Loop => 30,
 			Self::Version => 9,
 			Self::UnexpectedStream => 10,
 			Self::BoundsExceeded(_) => 11,

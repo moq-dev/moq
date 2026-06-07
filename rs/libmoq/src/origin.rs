@@ -191,7 +191,7 @@ impl Origin {
 
 	/// Announce `broadcast` under `path`, returning a publish handle. The announcement stays
 	/// live until [`Self::unpublish`] is called with that handle (independent of the broadcast's
-	/// own lifetime). Errors with [`Error::Moq`] if the path is outside the origin's scope.
+	/// own lifetime). Errors with [`Error::Moq`] on a routing loop or out-of-scope path.
 	pub fn publish<P: moq_net::AsPath>(
 		&mut self,
 		origin: Id,

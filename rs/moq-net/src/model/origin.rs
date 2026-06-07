@@ -767,11 +767,12 @@ impl OriginProducer {
 	/// of the broadcast's own lifetime, so dropping the guard unannounces even while the
 	/// [`BroadcastProducer`] keeps serving tracks.
 	///
-	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this producer may
-	/// publish under (after [`scope`](Self::scope) / [`with_root`](Self::with_root)). A full-scope
-	/// producer (the default from [`Origin::produce`]) never fails. Callers must not publish a
-	/// broadcast whose hop chain already contains this origin's id (it would form a routing loop);
-	/// relays filter such reflections before they reach here, checked by a `debug_assert`.
+	/// Errors (both indicate a publish that should never have been attempted):
+	/// - [`Error::Loop`]: the broadcast's hop chain already contains this origin's id, so
+	///   re-announcing it would form a routing loop in a relay mesh.
+	/// - [`Error::Unauthorized`]: `path` is outside the prefixes this producer may publish under
+	///   (after [`scope`](Self::scope) / [`with_root`](Self::with_root)). A full-scope producer
+	///   (the default from [`Origin::produce`]) never hits this.
 	///
 	/// If there is already a broadcast with the same path, the new one replaces the active only
 	/// if it has a shorter hop path, or an equal-length path that wins a deterministic tie-break
@@ -783,12 +784,10 @@ impl OriginProducer {
 	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> Result<OriginPublish, Error> {
 		let path = path.as_path();
 
-		// Callers must filter reflections (a hop chain already containing our id) before publishing;
-		// relays do this on the announce path. Re-announcing one here would form a routing loop.
-		debug_assert!(
-			!broadcast.info().hops.contains(&self.info),
-			"publish_broadcast called with a looping hop chain",
-		);
+		// Loop detection: refuse broadcasts whose hop chain already contains our id.
+		if broadcast.info().hops.contains(&self.info) {
+			return Err(Error::Loop);
+		}
 
 		let (node, rest) = self.nodes.get(&path).ok_or(Error::Unauthorized)?;
 		let full = self.root.join(&path).to_owned();

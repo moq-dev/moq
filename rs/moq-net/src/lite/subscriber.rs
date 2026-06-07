@@ -383,8 +383,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// can call consume_track() before dynamic is incremented, getting NotFound.
 		let dynamic = broadcast.dynamic();
 
-		// Publish into the origin. An error means the path is outside our scope, so don't announce
-		// or spawn a server for it. Reflections are already filtered above.
+		// Publish into the origin. An error (out of scope, or a reflected loop) means don't
+		// announce or spawn a server for it; reflections are normally filtered above.
 		let Ok(publish) = self.origin.publish_broadcast(path.clone(), broadcast.consume()) else {
 			return Ok(false);
 		};
