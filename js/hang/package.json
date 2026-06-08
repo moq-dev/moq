@@ -29,7 +29,7 @@
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.100",
 		"@types/bun": "^1.3.14",
-		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
+		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
 		"fast-glob": "^3.3.3",
 		"rimraf": "^6.1.3",
 		"typescript": "^6.0.3"
