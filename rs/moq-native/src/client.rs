@@ -1,6 +1,5 @@
 use crate::crypto;
-use crate::{Backoff, QuicBackend, Reconnect};
-use anyhow::Context;
+use crate::{Backoff, Error, QuicBackend, Reconnect};
 use std::path::PathBuf;
 use std::{net, sync::Arc};
 use url::Url;
@@ -112,7 +111,7 @@ impl ClientTls {
 	/// Loads the configured roots (or the platform's native roots if none),
 	/// optionally attaches a client identity for mTLS, and disables server
 	/// certificate verification when `disable_verify` is set.
-	pub fn build(&self) -> anyhow::Result<rustls::ClientConfig> {
+	pub fn build(&self) -> crate::Result<rustls::ClientConfig> {
 		use rustls::pki_types::CertificateDer;
 		use rustls::pki_types::PrivateKeyDer;
 		use rustls::pki_types::pem::PemObject;
@@ -126,18 +125,20 @@ impl ClientTls {
 				tracing::warn!(%err, "failed to load root cert");
 			}
 			for cert in native.certs {
-				roots.add(cert).context("failed to add root cert")?;
+				roots.add(cert).map_err(Error::AddRoot)?;
 			}
 		} else {
 			for root in &self.root {
-				let file = std::fs::File::open(root).context("failed to open root cert file")?;
+				let file = std::fs::File::open(root).map_err(Error::OpenCert)?;
 				let mut reader = std::io::BufReader::new(file);
 				let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(&mut reader)
-					.collect::<Result<_, _>>()
-					.context("failed to read root cert")?;
-				anyhow::ensure!(!certs.is_empty(), "no roots found in {}", root.display());
+					.collect::<std::result::Result<_, _>>()
+					.map_err(Error::ReadCerts)?;
+				if certs.is_empty() {
+					return Err(Error::EmptyRoots(root.clone()));
+				}
 				for cert in certs {
-					roots.add(cert).context("failed to add root cert")?;
+					roots.add(cert).map_err(Error::AddRoot)?;
 				}
 			}
 		}
@@ -150,19 +151,19 @@ impl ClientTls {
 
 		let mut tls = match (&self.cert, &self.key) {
 			(Some(cert_path), Some(key_path)) => {
-				let cert_pem = std::fs::read(cert_path).context("failed to read client certificate")?;
+				let cert_pem = std::fs::read(cert_path).map_err(Error::ReadFile)?;
 				let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
-					.collect::<Result<_, _>>()
-					.context("failed to parse client certificate")?;
-				anyhow::ensure!(!chain.is_empty(), "no certificates found in client certificate");
-				let key_pem = std::fs::read(key_path).context("failed to read client key")?;
-				let key = PrivateKeyDer::from_pem_slice(&key_pem).context("failed to parse client key")?;
-				builder
-					.with_client_auth_cert(chain, key)
-					.context("failed to configure client certificate")?
+					.collect::<std::result::Result<_, _>>()
+					.map_err(Error::ReadCerts)?;
+				if chain.is_empty() {
+					return Err(Error::NoCerts);
+				}
+				let key_pem = std::fs::read(key_path).map_err(Error::ReadFile)?;
+				let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(Error::KeyPem)?;
+				builder.with_client_auth_cert(chain, key).map_err(Error::ClientAuth)?
 			}
 			(None, None) => builder.with_no_client_auth(),
-			_ => anyhow::bail!("both --client-tls-cert and --client-tls-key must be provided"),
+			_ => return Err(Error::IncompleteClientAuth),
 		};
 
 		if self.disable_verify.unwrap_or_default() {
@@ -176,7 +177,7 @@ impl ClientTls {
 }
 
 impl ClientConfig {
-	pub fn init(self) -> anyhow::Result<Client> {
+	pub fn init(self) -> crate::Result<Client> {
 		Client::new(self)
 	}
 
@@ -230,13 +231,15 @@ pub struct Client {
 
 impl Client {
 	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "websocket")))]
-	pub fn new(_config: ClientConfig) -> anyhow::Result<Self> {
-		anyhow::bail!("no QUIC or WebSocket backend compiled; enable noq, quinn, quiche, or websocket feature");
+	pub fn new(_config: ClientConfig) -> crate::Result<Self> {
+		Err(Error::NoBackend(
+			"no QUIC or WebSocket backend compiled; enable noq, quinn, quiche, or websocket feature",
+		))
 	}
 
 	/// Create a new client
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "websocket"))]
-	pub fn new(config: ClientConfig) -> anyhow::Result<Self> {
+	pub fn new(config: ClientConfig) -> crate::Result<Self> {
 		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 		let backend = config.backend.clone().unwrap_or({
 			#[cfg(feature = "quinn")]
@@ -345,8 +348,10 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	)))]
-	pub async fn connect(&self, _url: Url) -> anyhow::Result<moq_net::Session> {
-		anyhow::bail!("no backend compiled; enable noq, quinn, quiche, iroh, or websocket feature");
+	pub async fn connect(&self, _url: Url) -> crate::Result<moq_net::Session> {
+		Err(Error::NoBackend(
+			"no backend compiled; enable noq, quinn, quiche, iroh, or websocket feature",
+		))
 	}
 
 	#[cfg(any(
@@ -356,7 +361,7 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	))]
-	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_net::Session> {
+	pub async fn connect(&self, url: Url) -> crate::Result<moq_net::Session> {
 		let session = self.connect_inner(url).await?;
 		tracing::info!(version = %session.version(), "connected");
 		Ok(session)
@@ -369,10 +374,10 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	))]
-	async fn connect_inner(&self, url: Url) -> anyhow::Result<moq_net::Session> {
+	async fn connect_inner(&self, url: Url) -> crate::Result<moq_net::Session> {
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
-			let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
+			let endpoint = self.iroh.as_ref().ok_or(Error::IrohDisabled)?;
 			let session = crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied()).await?;
 			let session = self.moq.connect(session).await?;
 			return Ok(session);
@@ -398,7 +403,7 @@ impl Client {
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
 					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
-					else => anyhow::bail!("failed to connect to server"),
+					else => return Err(Error::ConnectFailed),
 				});
 			}
 
@@ -429,7 +434,7 @@ impl Client {
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
 					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
-					else => anyhow::bail!("failed to connect to server"),
+					else => return Err(Error::ConnectFailed),
 				});
 			}
 
@@ -459,7 +464,7 @@ impl Client {
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
 					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
-					else => anyhow::bail!("failed to connect to server"),
+					else => return Err(Error::ConnectFailed),
 				});
 			}
 
@@ -478,7 +483,7 @@ impl Client {
 		}
 
 		#[cfg(not(feature = "websocket"))]
-		anyhow::bail!("no QUIC backend matched; this should not happen");
+		return Err(Error::NoBackend("no QUIC backend matched; this should not happen"));
 	}
 }
 

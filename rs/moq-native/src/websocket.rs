@@ -1,4 +1,4 @@
-use anyhow::Context;
+use crate::Error;
 use qmux::tokio_tungstenite;
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -50,7 +50,7 @@ pub(crate) async fn race_handle(
 	tls: &rustls::ClientConfig,
 	url: Url,
 	alpns: &[&str],
-) -> Option<anyhow::Result<qmux::Session>> {
+) -> Option<crate::Result<qmux::Session>> {
 	if !config.enabled {
 		return None;
 	}
@@ -74,10 +74,12 @@ pub(crate) async fn connect(
 	tls: &rustls::ClientConfig,
 	mut url: Url,
 	alpns: &[&str],
-) -> anyhow::Result<qmux::Session> {
-	anyhow::ensure!(config.enabled, "WebSocket support is disabled");
+) -> crate::Result<qmux::Session> {
+	if !config.enabled {
+		return Err(Error::WebSocketDisabled);
+	}
 
-	let host = url.host_str().context("missing hostname")?.to_string();
+	let host = url.host_str().ok_or(Error::MissingHostname)?.to_string();
 	let port = url.port().unwrap_or_else(|| match url.scheme() {
 		"https" | "wss" | "moql" | "moqt" => 443,
 		"http" | "ws" => 80,
@@ -109,7 +111,7 @@ pub(crate) async fn connect(
 		}
 		"ws" => false,
 		"wss" => true,
-		_ => anyhow::bail!("unsupported URL scheme for WebSocket: {}", url.scheme()),
+		_ => return Err(Error::UnsupportedWebSocketScheme(url.scheme().to_string())),
 	};
 
 	tracing::debug!(%url, "connecting via WebSocket");
@@ -127,7 +129,7 @@ pub(crate) async fn connect(
 		.with_keep_alive(qmux::KeepAlive::default()) // 5s ping / 30s deadline — parity with QUIC
 		.connect(url.as_str())
 		.await
-		.context("failed to connect WebSocket")?;
+		.map_err(Error::WebSocketConnect)?;
 
 	tracing::warn!(%url, "using WebSocket fallback");
 	WEBSOCKET_WON.lock().unwrap().insert(key);
@@ -145,31 +147,26 @@ pub struct WebSocketListener {
 }
 
 impl WebSocketListener {
-	pub async fn bind(addr: net::SocketAddr) -> anyhow::Result<Self> {
+	pub async fn bind(addr: net::SocketAddr) -> crate::Result<Self> {
 		Self::bind_with_alpns(addr, moq_net::ALPNS).await
 	}
 
-	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> anyhow::Result<Self> {
+	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> crate::Result<Self> {
 		let listener = tokio::net::TcpListener::bind(addr).await?;
 		let server = qmux::Server::new().with_protocols(alpns);
 		Ok(Self { listener, server })
 	}
 
-	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {
+	pub fn local_addr(&self) -> crate::Result<net::SocketAddr> {
 		Ok(self.listener.local_addr()?)
 	}
 
-	pub async fn accept(&self) -> Option<anyhow::Result<qmux::Session>> {
+	pub async fn accept(&self) -> Option<crate::Result<qmux::Session>> {
 		match self.listener.accept().await {
 			Ok((stream, addr)) => {
 				tracing::debug!(%addr, "accepted WebSocket TCP connection");
 				let server = self.server.clone();
-				Some(
-					server
-						.accept(stream)
-						.await
-						.map_err(|e| anyhow::anyhow!("WebSocket accept failed: {e}")),
-				)
+				Some(server.accept(stream).await.map_err(Error::WebSocketAccept))
 			}
 			Err(e) => Some(Err(e.into())),
 		}

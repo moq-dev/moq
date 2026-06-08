@@ -1,6 +1,6 @@
+use crate::Error;
 use crate::crypto;
 use crate::server::{ServerTlsConfig, ServerTlsInfo};
-use anyhow::Context;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use std::fs;
@@ -81,12 +81,13 @@ impl ServeCerts {
 		}
 	}
 
-	pub fn load_certs(&self, config: &ServerTlsConfig) -> anyhow::Result<()> {
-		anyhow::ensure!(config.cert.len() == config.key.len(), "must provide both cert and key");
-		anyhow::ensure!(
-			!config.cert.is_empty() || !config.generate.is_empty(),
-			"must provide at least one cert/key pair or generate entry"
-		);
+	pub fn load_certs(&self, config: &ServerTlsConfig) -> crate::Result<()> {
+		if config.cert.len() != config.key.len() {
+			return Err(Error::CertKeyCountMismatch);
+		}
+		if config.cert.is_empty() && config.generate.is_empty() {
+			return Err(Error::NoCertSource);
+		}
 
 		let mut certs = Vec::new();
 
@@ -105,33 +106,35 @@ impl ServeCerts {
 	}
 
 	// Load a certificate and corresponding key from a file, but don't add it to the certs
-	fn load(&self, chain_path: &PathBuf, key_path: &PathBuf) -> anyhow::Result<rustls::sign::CertifiedKey> {
-		let chain = fs::File::open(chain_path).context("failed to open cert file")?;
+	fn load(&self, chain_path: &PathBuf, key_path: &PathBuf) -> crate::Result<rustls::sign::CertifiedKey> {
+		let chain = fs::File::open(chain_path).map_err(Error::OpenCert)?;
 		let mut chain = io::BufReader::new(chain);
 
 		let chain: Vec<CertificateDer> = CertificateDer::pem_reader_iter(&mut chain)
-			.collect::<Result<_, _>>()
-			.context("failed to read certs")?;
+			.collect::<std::result::Result<_, _>>()
+			.map_err(Error::ReadCerts)?;
 
-		anyhow::ensure!(!chain.is_empty(), "could not find certificate");
+		if chain.is_empty() {
+			return Err(Error::NoCerts);
+		}
 
 		// Read the PEM private key
-		let key = PrivateKeyDer::from_pem_file(key_path).context("missing private key")?;
+		let key = PrivateKeyDer::from_pem_file(key_path).map_err(Error::KeyPem)?;
 		let key = self.provider.key_provider.load_private_key(key)?;
 
 		let certified_key = rustls::sign::CertifiedKey::new(chain, key);
 
-		certified_key.keys_match().context(format!(
-			"private key {} doesn't match certificate {}",
-			key_path.display(),
-			chain_path.display()
-		))?;
+		certified_key.keys_match().map_err(|source| Error::KeyMismatch {
+			key: key_path.clone(),
+			cert: chain_path.clone(),
+			source,
+		})?;
 
 		Ok(certified_key)
 	}
 
 	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-	fn generate(&self, hostnames: &[String]) -> anyhow::Result<rustls::sign::CertifiedKey> {
+	fn generate(&self, hostnames: &[String]) -> crate::Result<rustls::sign::CertifiedKey> {
 		let key_pair = rcgen::KeyPair::generate()?;
 
 		let mut params = rcgen::CertificateParams::new(hostnames)?;
@@ -154,8 +157,8 @@ impl ServeCerts {
 	}
 
 	#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
-	fn generate(&self, _hostnames: &[String]) -> anyhow::Result<rustls::sign::CertifiedKey> {
-		anyhow::bail!("no crypto provider available; enable aws-lc-rs or ring feature");
+	fn generate(&self, _hostnames: &[String]) -> crate::Result<rustls::sign::CertifiedKey> {
+		Err(Error::NoCryptoProvider)
 	}
 
 	// Replace the certificates

@@ -278,7 +278,7 @@ async fn run(config: &Config) -> Result<()> {
 
 	tokio::select! {
 		res = emulator_handle => res?.context("emulator error"),
-		res = reconnect.closed() => res,
+		res = reconnect.closed() => res.map_err(Into::into),
 		res = input::handle_viewers(&mut viewer_consumer, &cmd_tx) => res,
 	}
 }

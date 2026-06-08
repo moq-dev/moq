@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
 			let reconnect = client.with_publish(origin.consume()).reconnect(config.url);
 
 			tokio::select! {
-				res = reconnect.closed() => res,
+				res = reconnect.closed() => res.map_err(Into::into),
 				_ = clock.run() => Ok(()),
 			}
 		}
@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
 							tracing::warn!(broadcast = %path, "broadcast is offline, waiting...");
 						}
 					},
-					res = reconnect.closed() => return res,
+					res = reconnect.closed() => return res.map_err(Into::into),
 					// Drops the previous subscriber on each new announce.
 					Some(res) = async { Some(clock.take()?.run().await) } => res.context("clock error")?,
 				}

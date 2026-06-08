@@ -29,7 +29,6 @@ tokio-console = ["dep:console-subscriber"]
 android-logcat = ["dep:tracing-android"]
 
 [dependencies]
-anyhow = { version = "1", features = ["backtrace"] }
 clap = { version = "4", features = ["derive", "env"] }
 console-subscriber = { version = "0.5", optional = true }
 futures = "0.3"
@@ -49,6 +48,7 @@ rustls-native-certs = "0.8"
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["hex"] }
+thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.6", optional = true }
 tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 time = "0.3"
@@ -66,6 +66,7 @@ web-transport-quinn = { workspace = true, optional = true }
 tracing-android = { version = "0.2", optional = true }
 
 [dev-dependencies]
+anyhow = "1"
 bytes = "1"
 chrono = "0.4"
 toml = "1.1"

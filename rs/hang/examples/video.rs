@@ -34,7 +34,7 @@ async fn run_session(origin: moq_net::OriginConsumer) -> anyhow::Result<()> {
 	let reconnect = client.with_publish(origin).reconnect(url);
 
 	// Wait until the reconnect loop stops (e.g. timeout exceeded).
-	reconnect.closed().await
+	reconnect.closed().await.map_err(Into::into)
 }
 
 // Create a video track with a catalog that describes it.

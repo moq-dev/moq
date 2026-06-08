@@ -1,14 +1,12 @@
 use std::net;
 use std::path::PathBuf;
 
-use crate::QuicBackend;
+use crate::{Error, QuicBackend};
 use moq_net::Session;
 use std::sync::{Arc, RwLock};
 use url::Url;
 #[cfg(feature = "iroh")]
 use web_transport_iroh::iroh;
-
-use anyhow::Context;
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -71,20 +69,22 @@ pub struct ServerTlsConfig {
 
 impl ServerTlsConfig {
 	/// Load all configured root CAs into a [`rustls::RootCertStore`].
-	pub fn load_roots(&self) -> anyhow::Result<rustls::RootCertStore> {
+	pub fn load_roots(&self) -> crate::Result<rustls::RootCertStore> {
 		use rustls::pki_types::CertificateDer;
 		use rustls::pki_types::pem::PemObject;
 
 		let mut roots = rustls::RootCertStore::empty();
 		for path in &self.root {
-			let file = std::fs::File::open(path).context("failed to open root CA")?;
+			let file = std::fs::File::open(path).map_err(Error::OpenCert)?;
 			let mut reader = std::io::BufReader::new(file);
 			let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(&mut reader)
-				.collect::<Result<_, _>>()
-				.context("failed to parse root CA PEM")?;
-			anyhow::ensure!(!certs.is_empty(), "no certificates found in root CA");
+				.collect::<std::result::Result<_, _>>()
+				.map_err(Error::ReadCerts)?;
+			if certs.is_empty() {
+				return Err(Error::NoCerts);
+			}
 			for cert in certs {
-				roots.add(cert).context("failed to add root CA")?;
+				roots.add(cert).map_err(Error::AddRoot)?;
 			}
 		}
 		Ok(roots)
@@ -181,7 +181,7 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-	pub fn init(self) -> anyhow::Result<Server> {
+	pub fn init(self) -> crate::Result<Server> {
 		Server::new(self)
 	}
 
@@ -204,7 +204,7 @@ pub(crate) const DEFAULT_BIND: &str = "[::]:443";
 pub struct Server {
 	moq: moq_net::Server,
 	versions: moq_net::Versions,
-	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
+	accept: FuturesUnordered<BoxFuture<'static, crate::Result<Request>>>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<iroh::Endpoint>,
 	#[cfg(feature = "noq")]
@@ -218,7 +218,7 @@ pub struct Server {
 }
 
 impl Server {
-	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
+	pub fn new(config: ServerConfig) -> crate::Result<Self> {
 		let backend = config.backend.clone().unwrap_or({
 			#[cfg(feature = "quinn")]
 			{
@@ -243,7 +243,9 @@ impl Server {
 			let quinn_backend = matches!(backend, QuicBackend::Quinn);
 			#[cfg(not(feature = "quinn"))]
 			let quinn_backend = false;
-			anyhow::ensure!(quinn_backend, "tls.root (mTLS) is only supported by the quinn backend");
+			if !quinn_backend {
+				return Err(Error::MtlsQuinnOnly);
+			}
 		}
 
 		#[cfg(feature = "noq")]
@@ -403,7 +405,7 @@ impl Server {
 				}
 			};
 			#[cfg(not(feature = "websocket"))]
-			let ws_accept = std::future::pending::<Option<anyhow::Result<()>>>();
+			let ws_accept = std::future::pending::<Option<crate::Result<()>>>();
 
 			let server = self.moq.clone();
 			let versions = self.versions.clone();
@@ -489,7 +491,7 @@ impl Server {
 		self.iroh.as_ref()
 	}
 
-	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {
+	pub fn local_addr(&self) -> crate::Result<net::SocketAddr> {
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_ref() {
 			return noq.local_addr();
@@ -564,32 +566,33 @@ pub struct Request {
 
 impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
-	pub async fn close(self, _code: u16) -> anyhow::Result<()> {
+	pub async fn close(self, _code: u16) -> crate::Result<()> {
 		match self.kind {
 			#[cfg(feature = "noq")]
 			RequestKind::Noq(request) => {
-				let status = web_transport_noq::http::StatusCode::from_u16(_code).context("invalid status code")?;
+				let status =
+					web_transport_noq::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
 				request.close(status).await?;
 				Ok(())
 			}
 			#[cfg(feature = "quinn")]
 			RequestKind::Quinn(request) => {
-				let status = web_transport_quinn::http::StatusCode::from_u16(_code).context("invalid status code")?;
+				let status =
+					web_transport_quinn::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
 				request.close(status).await?;
 				Ok(())
 			}
 			#[cfg(feature = "quiche")]
 			RequestKind::Quiche(request) => {
-				let status = web_transport_quiche::http::StatusCode::from_u16(_code).context("invalid status code")?;
-				request
-					.reject(status)
-					.await
-					.map_err(|e| anyhow::anyhow!("failed to close quiche WebTransport request: {e}"))?;
+				let status =
+					web_transport_quiche::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
+				request.reject(status).await.map_err(Error::QuicheReject)?;
 				Ok(())
 			}
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh(request) => {
-				let status = web_transport_iroh::http::StatusCode::from_u16(_code).context("invalid status code")?;
+				let status =
+					web_transport_iroh::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
 				request.close(status).await?;
 				Ok(())
 			}
@@ -620,7 +623,7 @@ impl Request {
 	}
 
 	/// Accept the session, performing rest of the MoQ handshake.
-	pub async fn ok(self) -> anyhow::Result<Session> {
+	pub async fn ok(self) -> crate::Result<Session> {
 		match self.kind {
 			#[cfg(feature = "noq")]
 			RequestKind::Noq(request) => Ok(self.server.accept(request.ok().await?).await?),
@@ -628,10 +631,7 @@ impl Request {
 			RequestKind::Quinn(request) => Ok(self.server.accept(request.ok().await?).await?),
 			#[cfg(feature = "quiche")]
 			RequestKind::Quiche(request) => {
-				let conn = request
-					.ok()
-					.await
-					.map_err(|e| anyhow::anyhow!("failed to accept quiche WebTransport: {e}"))?;
+				let conn = request.ok().await.map_err(Error::QuicheAccept)?;
 				Ok(self.server.accept(conn).await?)
 			}
 			#[cfg(feature = "iroh")]

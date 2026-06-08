@@ -1,4 +1,4 @@
-use anyhow::Context;
+use crate::Error;
 use std::net::{IpAddr, SocketAddr};
 
 /// Resolve a `host:port` string to a single [`std::net::SocketAddr`],
@@ -8,13 +8,13 @@ use std::net::{IpAddr, SocketAddr};
 /// paired with a port (e.g. `fly-global-services:443`). Only the first
 /// resolved address is returned; Quinn only supports a single IP when
 /// binding/connecting.
-pub(crate) fn resolve(addr: Option<&str>, default: &str) -> anyhow::Result<SocketAddr> {
+pub(crate) fn resolve(addr: Option<&str>, default: &str) -> crate::Result<SocketAddr> {
 	use std::net::ToSocketAddrs;
 	addr.unwrap_or(default)
 		.to_socket_addrs()
-		.context("invalid address")?
+		.map_err(Error::ResolveAddr)?
 		.next()
-		.context("no addresses resolved")
+		.ok_or(Error::NoAddresses)
 }
 
 /// Pick a single DNS entry from `addrs`, preferring one whose address family
