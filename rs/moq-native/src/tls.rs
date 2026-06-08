@@ -6,8 +6,6 @@ use std::sync::Arc;
 use std::{fs, io};
 
 #[cfg(any(feature = "quinn", feature = "noq"))]
-use crate::server::ServerTlsInfo;
-#[cfg(any(feature = "quinn", feature = "noq"))]
 use rustls::pki_types::PrivatePkcs8KeyDer;
 #[cfg(any(feature = "quinn", feature = "noq"))]
 use std::sync::RwLock;
@@ -269,6 +267,14 @@ impl Server {
 	}
 }
 
+/// TLS certificate information including fingerprints.
+#[derive(Debug)]
+pub struct Info {
+	#[cfg(any(feature = "noq", feature = "quinn"))]
+	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
+	pub fingerprints: Vec<String>,
+}
+
 // ── NoCertificateVerification ───────────────────────────────────────
 
 #[derive(Debug)]
@@ -371,7 +377,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 #[cfg(any(feature = "quinn", feature = "noq"))]
 #[derive(Debug)]
 pub(crate) struct ServeCerts {
-	pub info: Arc<RwLock<ServerTlsInfo>>,
+	pub info: Arc<RwLock<Info>>,
 	provider: crypto::Provider,
 }
 
@@ -379,7 +385,7 @@ pub(crate) struct ServeCerts {
 impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
-			info: Arc::new(RwLock::new(ServerTlsInfo {
+			info: Arc::new(RwLock::new(Info {
 				certs: Vec::new(),
 				fingerprints: Vec::new(),
 			})),

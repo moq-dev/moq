@@ -137,7 +137,7 @@ pub struct Server {
 	#[cfg(feature = "quiche")]
 	quiche: Option<crate::quiche::QuicheServer>,
 	#[cfg(feature = "websocket")]
-	websocket: Option<crate::websocket::WebSocketListener>,
+	websocket: Option<crate::websocket::Listener>,
 }
 
 impl Server {
@@ -214,7 +214,7 @@ impl Server {
 	/// For applications that need WebSocket on the same HTTP port (e.g. moq-relay),
 	/// use `qmux::Session::accept()` with your own HTTP framework instead.
 	#[cfg(feature = "websocket")]
-	pub fn with_websocket(mut self, websocket: Option<crate::websocket::WebSocketListener>) -> Self {
+	pub fn with_websocket(mut self, websocket: Option<crate::websocket::Listener>) -> Self {
 		self.websocket = websocket;
 		self
 	}
@@ -242,7 +242,7 @@ impl Server {
 	}
 
 	// Return the SHA256 fingerprints of all our certificates.
-	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
+	pub fn tls_info(&self) -> Arc<RwLock<crate::tls::Info>> {
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_ref() {
 			return noq.tls_info();
@@ -376,7 +376,7 @@ impl Server {
 				Some(_conn) = iroh_accept => {
 					#[cfg(feature = "iroh")]
 					self.accept.push(async move {
-						let iroh = super::iroh::IrohRequest::accept(_conn).await?;
+						let iroh = super::iroh::Request::accept(_conn).await?;
 						Ok(Request {
 							server,
 							kind: RequestKind::Iroh(iroh),
@@ -473,7 +473,7 @@ pub(crate) enum RequestKind {
 	#[cfg(feature = "quiche")]
 	Quiche(crate::quiche::QuicheRequest),
 	#[cfg(feature = "iroh")]
-	Iroh(crate::iroh::IrohRequest),
+	Iroh(crate::iroh::Request),
 	#[cfg(feature = "websocket")]
 	WebSocket(qmux::Session),
 }
@@ -634,14 +634,6 @@ impl Request {
 			_ => false,
 		}
 	}
-}
-
-/// TLS certificate information including fingerprints.
-#[derive(Debug)]
-pub struct ServerTlsInfo {
-	#[cfg(any(feature = "noq", feature = "quinn"))]
-	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
-	pub fingerprints: Vec<String>,
 }
 
 /// Server ID for QUIC-LB support.

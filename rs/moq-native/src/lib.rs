@@ -36,8 +36,6 @@ pub use error::{Error, Result};
 pub use log::*;
 pub use reconnect::*;
 pub use server::*;
-#[cfg(feature = "websocket")]
-pub use websocket::*;
 
 // Re-export these crates.
 pub use moq_net;
@@ -55,8 +53,6 @@ pub use web_transport_quiche;
 
 #[cfg(feature = "iroh")]
 pub mod iroh;
-#[cfg(feature = "iroh")]
-pub use iroh::{IrohEndpoint, IrohEndpointConfig, IrohRequest};
 
 /// The QUIC backend to use for connections.
 #[derive(Clone, Debug, clap::ValueEnum, serde::Serialize, serde::Deserialize)]

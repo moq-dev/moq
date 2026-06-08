@@ -1,5 +1,5 @@
 use crate::client::ClientConfig;
-use crate::server::{ServerConfig, ServerId, ServerTlsInfo};
+use crate::server::{ServerConfig, ServerId};
 use crate::tls::{FingerprintVerifier, ServeCerts};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -352,7 +352,7 @@ impl QuinnServer {
 		self.quic.accept()
 	}
 
-	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
+	pub fn tls_info(&self) -> Arc<RwLock<crate::tls::Info>> {
 		self.certs.info.clone()
 	}
 

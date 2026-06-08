@@ -52,7 +52,7 @@ pub struct ClientConfig {
 	#[cfg(feature = "websocket")]
 	#[command(flatten)]
 	#[serde(default)]
-	pub websocket: super::ClientWebSocket,
+	pub websocket: crate::websocket::Config,
 }
 
 impl ClientConfig {
@@ -80,7 +80,7 @@ impl Default for ClientConfig {
 			tls: crate::tls::Client::default(),
 			backoff: Backoff::default(),
 			#[cfg(feature = "websocket")]
-			websocket: super::ClientWebSocket::default(),
+			websocket: crate::websocket::Config::default(),
 		}
 	}
 }
@@ -94,7 +94,7 @@ pub struct Client {
 	versions: moq_net::Versions,
 	backoff: Backoff,
 	#[cfg(feature = "websocket")]
-	websocket: super::ClientWebSocket,
+	websocket: crate::websocket::Config,
 	tls: rustls::ClientConfig,
 	#[cfg(feature = "noq")]
 	noq: Option<crate::noq::NoqClient>,

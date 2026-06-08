@@ -1,6 +1,6 @@
 use crate::client::ClientConfig;
 use crate::crypto;
-use crate::server::{ServerConfig, ServerTlsInfo};
+use crate::server::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::net;
@@ -176,7 +176,7 @@ impl QuicheClient {
 
 pub(crate) struct QuicheServer {
 	pub server: web_transport_quiche::ez::Server,
-	pub fingerprints: Arc<RwLock<ServerTlsInfo>>,
+	pub fingerprints: Arc<RwLock<crate::tls::Info>>,
 }
 
 impl QuicheServer {
@@ -209,7 +209,7 @@ impl QuicheServer {
 			.map(|cert| hex::encode(crypto::sha256(&provider, cert.as_ref())))
 			.collect();
 
-		let info = Arc::new(RwLock::new(ServerTlsInfo {
+		let info = Arc::new(RwLock::new(crate::tls::Info {
 			#[cfg(any(feature = "noq", feature = "quinn"))]
 			certs: Vec::new(),
 			fingerprints,
@@ -247,7 +247,7 @@ impl QuicheServer {
 		self.server.accept()
 	}
 
-	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
+	pub fn tls_info(&self) -> Arc<RwLock<crate::tls::Info>> {
 		self.fingerprints.clone()
 	}
 

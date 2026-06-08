@@ -36,7 +36,7 @@ static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(||
 #[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-pub struct ClientWebSocket {
+pub struct Config {
 	/// Whether to enable WebSocket support.
 	#[arg(
 		id = "websocket-enabled",
@@ -60,7 +60,7 @@ pub struct ClientWebSocket {
 	pub delay: Option<time::Duration>,
 }
 
-impl Default for ClientWebSocket {
+impl Default for Config {
 	fn default() -> Self {
 		Self {
 			enabled: true,
@@ -70,7 +70,7 @@ impl Default for ClientWebSocket {
 }
 
 pub(crate) async fn race_handle(
-	config: &ClientWebSocket,
+	config: &Config,
 	tls: &rustls::ClientConfig,
 	url: Url,
 	alpns: &[&str],
@@ -94,7 +94,7 @@ pub(crate) async fn race_handle(
 }
 
 pub(crate) async fn connect(
-	config: &ClientWebSocket,
+	config: &Config,
 	tls: &rustls::ClientConfig,
 	mut url: Url,
 	alpns: &[&str],
@@ -165,12 +165,12 @@ pub(crate) async fn connect(
 ///
 /// Use with [`crate::Server::with_websocket`] to accept WebSocket connections
 /// alongside QUIC connections on a separate port.
-pub struct WebSocketListener {
+pub struct Listener {
 	listener: tokio::net::TcpListener,
 	server: qmux::Server,
 }
 
-impl WebSocketListener {
+impl Listener {
 	pub async fn bind(addr: net::SocketAddr) -> Result<Self> {
 		Self::bind_with_alpns(addr, moq_net::ALPNS).await
 	}
