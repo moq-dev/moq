@@ -52,6 +52,10 @@ export type EncoderProps = {
 	container?: Catalog.Container;
 };
 
+// The audio format observed from the capture worklet: the AudioContext sample rate and the actual
+// channel count (which can differ from the requested count on some platforms, e.g. Safari/macOS).
+type Captured = { sampleRate: number; channelCount: number };
+
 export class Encoder {
 	static readonly TRACK = "audio/data";
 	static readonly PRIORITY = Catalog.PRIORITY.audio;
@@ -68,6 +72,10 @@ export class Encoder {
 
 	#catalog = new Signal<Catalog.Audio | undefined>(undefined);
 	readonly catalog: Getter<Catalog.Audio | undefined> = this.#catalog;
+
+	// Observed capture format. #config (and thus #catalog) is derived from this plus the codec, so the
+	// worklet handlers only ever write here, never read-modify-write #config.
+	#captured = new Signal<Captured | undefined>(undefined);
 
 	#config = new Signal<Catalog.AudioConfig | undefined>(undefined);
 	readonly config: Getter<Catalog.AudioConfig | undefined> = this.#config;
@@ -148,7 +156,7 @@ export class Encoder {
 			effect.set(this.#worklet, worklet);
 
 			// The information about channels count can be unreliable on different platforms (Apple's Safari).
-			// Try to get the first audio frame and only then create the configuration.
+			// Try to get the first audio frame and only then record the captured format.
 			effect.event(
 				worklet.port,
 				"message",
@@ -157,13 +165,13 @@ export class Encoder {
 					const channelCount = data.channels.length;
 					if (!channelCount) return;
 
-					this.#config.set(this.#createConfig(worklet, channelCount));
+					this.#captured.set({ sampleRate: worklet.context.sampleRate, channelCount });
 				},
 				{ once: true },
 			);
 			worklet.port.start();
 			effect.cleanup(() => {
-				this.#config.set(undefined);
+				this.#captured.set(undefined);
 			});
 
 			gain.connect(worklet);
@@ -174,32 +182,29 @@ export class Encoder {
 		});
 	}
 
-	#createConfig(worklet: AudioWorkletNode, channelCount: number): Catalog.AudioConfig {
-		const opus = normalizeCodec(this.codec.peek());
+	#createConfig(captured: Captured, opus: OpusConfig): Catalog.AudioConfig {
 		return {
 			codec: "opus",
-			sampleRate: Catalog.u53(worklet.context.sampleRate),
-			numberOfChannels: Catalog.u53(channelCount),
-			bitrate: Catalog.u53(opus.bitrate ?? channelCount * OPUS_BITRATE_PER_CHANNEL),
+			sampleRate: Catalog.u53(captured.sampleRate),
+			numberOfChannels: Catalog.u53(captured.channelCount),
+			bitrate: Catalog.u53(opus.bitrate ?? captured.channelCount * OPUS_BITRATE_PER_CHANNEL),
 			container: { kind: "legacy" } as const,
 			// jitter doubles as the Opus frame duration; toEncoderConfig converts it to µs for WebCodecs.
 			jitter: Catalog.u53(opus.frameDuration ?? OPUS_FRAME_DURATION_MS),
 		};
 	}
 
-	// Reconcile the catalog-shaping codec settings (bitrate, frame duration) when the codec changes,
-	// without waiting for a channel-count change. The equality guard stops this from looping on its
-	// own #config write.
+	// Derive #config from the captured format and the codec. Re-runs whenever either changes, so a
+	// codec update (bitrate, frame duration) reconfigures without waiting for a channel-count change.
 	#runConfig(effect: Effect): void {
-		const config = effect.get(this.#config);
-		if (!config) return;
+		const captured = effect.get(this.#captured);
+		if (!captured) {
+			effect.set(this.#config, undefined);
+			return;
+		}
 
 		const opus = normalizeCodec(effect.get(this.codec));
-		const bitrate = Catalog.u53(opus.bitrate ?? config.numberOfChannels * OPUS_BITRATE_PER_CHANNEL);
-		const jitter = Catalog.u53(opus.frameDuration ?? OPUS_FRAME_DURATION_MS);
-		if (config.bitrate === bitrate && config.jitter === jitter) return;
-
-		this.#config.set({ ...config, bitrate, jitter });
+		effect.set(this.#config, this.#createConfig(captured, opus));
 	}
 
 	// Collect the encode-only Opus knobs that are set, reading the codec through the effect so the
@@ -280,7 +285,7 @@ export class Encoder {
 				if (!channelCount) return;
 
 				if (!config || channelCount !== config.numberOfChannels) {
-					this.#config.set(this.#createConfig(worklet, channelCount));
+					this.#captured.set({ sampleRate: worklet.context.sampleRate, channelCount });
 					return;
 				}
 
