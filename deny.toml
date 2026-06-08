@@ -29,6 +29,12 @@ ignore = [
     # http-cache (via http-cache-reqwest in moq-relay) still depends on
     # bincode 1.x. Awaits upstream bump to bincode 2.x.
     "RUSTSEC-2025-0141",
+
+    # proc-macro-error2 (itself a maintained fork of the unmaintained
+    # proc-macro-error) is now unmaintained too. Pulled transitively by the
+    # `getset` derive macro; build-time only, no runtime exposure. Drop when
+    # the dependent migrates off it.
+    "RUSTSEC-2026-0173",
 ]
 
 [licenses]
