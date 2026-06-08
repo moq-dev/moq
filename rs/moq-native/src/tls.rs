@@ -1,4 +1,3 @@
-use crate::client::ClientTls;
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
@@ -84,67 +83,117 @@ pub(crate) fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 		.map_err(Error::Read)
 }
 
-// ── Client config ───────────────────────────────────────────────────
+// ── Client ──────────────────────────────────────────────────────────
 
-/// Build a [`rustls::ClientConfig`] from the client TLS configuration.
-///
-/// Loads the configured roots (or the platform's native roots if none),
-/// optionally attaches a client identity for mTLS, and disables server
-/// certificate verification when `disable_verify` is set.
-pub(crate) fn client_config(config: &ClientTls) -> Result<rustls::ClientConfig> {
-	let provider = crypto::provider();
+/// TLS configuration for the client.
+#[serde_with::serde_as]
+#[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Client {
+	/// Use the TLS root at this path, encoded as PEM.
+	///
+	/// This value can be provided multiple times for multiple roots.
+	/// If this is empty, system roots will be used instead.
+	/// In config files, accepts either a single string or a TOML array.
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	#[arg(id = "tls-root", long = "tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub root: Vec<PathBuf>,
 
-	let mut roots = rustls::RootCertStore::empty();
-	if config.root.is_empty() {
-		let native = rustls_native_certs::load_native_certs();
-		for err in native.errors {
-			tracing::warn!(%err, "failed to load root cert");
-		}
-		for cert in native.certs {
-			roots.add(cert).map_err(Error::AddRoot)?;
-		}
-	} else {
-		for root in &config.root {
-			let certs = read_certs(root)?;
-			if certs.is_empty() {
-				return Err(Error::EmptyRoots(root.clone()));
+	/// PEM file containing the client certificate chain for mTLS.
+	///
+	/// Only certificates are extracted; any private keys in the file are ignored.
+	/// Must be paired with `--client-tls-key`.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(id = "client-tls-cert", long = "client-tls-cert", env = "MOQ_CLIENT_TLS_CERT")]
+	pub cert: Option<PathBuf>,
+
+	/// PEM file containing the private key for mTLS.
+	///
+	/// Only the private key is extracted; any certificates in the file are ignored.
+	/// Must be paired with `--client-tls-cert`.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(id = "client-tls-key", long = "client-tls-key", env = "MOQ_CLIENT_TLS_KEY")]
+	pub key: Option<PathBuf>,
+
+	/// Danger: Disable TLS certificate verification.
+	///
+	/// Fine for local development and between relays, but should be used in caution in production.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "tls-disable-verify",
+		long = "tls-disable-verify",
+		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	pub disable_verify: Option<bool>,
+}
+
+impl Client {
+	/// Build a [`rustls::ClientConfig`] from this configuration.
+	///
+	/// Loads the configured roots (or the platform's native roots if none),
+	/// optionally attaches a client identity for mTLS, and disables server
+	/// certificate verification when `disable_verify` is set.
+	pub fn build(&self) -> Result<rustls::ClientConfig> {
+		let provider = crypto::provider();
+
+		let mut roots = rustls::RootCertStore::empty();
+		if self.root.is_empty() {
+			let native = rustls_native_certs::load_native_certs();
+			for err in native.errors {
+				tracing::warn!(%err, "failed to load root cert");
 			}
-			for cert in certs {
+			for cert in native.certs {
 				roots.add(cert).map_err(Error::AddRoot)?;
 			}
-		}
-	}
-
-	// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
-	// QUIC always negotiates TLS 1.3 regardless of this setting.
-	let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
-		.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
-		.with_root_certificates(roots);
-
-	let mut tls = match (&config.cert, &config.key) {
-		(Some(cert_path), Some(key_path)) => {
-			let cert_pem = fs::read(cert_path).map_err(Error::ReadFile)?;
-			let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
-				.collect::<std::result::Result<_, _>>()
-				.map_err(Error::Read)?;
-			if chain.is_empty() {
-				return Err(Error::Empty);
+		} else {
+			for root in &self.root {
+				let certs = read_certs(root)?;
+				if certs.is_empty() {
+					return Err(Error::EmptyRoots(root.clone()));
+				}
+				for cert in certs {
+					roots.add(cert).map_err(Error::AddRoot)?;
+				}
 			}
-			let key_pem = fs::read(key_path).map_err(Error::ReadFile)?;
-			let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(Error::Key)?;
-			builder.with_client_auth_cert(chain, key).map_err(Error::ClientAuth)?
 		}
-		(None, None) => builder.with_no_client_auth(),
-		_ => return Err(Error::IncompleteClientAuth),
-	};
 
-	if config.disable_verify.unwrap_or_default() {
-		tracing::warn!("TLS server certificate verification is disabled; A man-in-the-middle attack is possible.");
-		let noop = NoCertificateVerification(provider);
-		tls.dangerous().set_certificate_verifier(Arc::new(noop));
+		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
+		// QUIC always negotiates TLS 1.3 regardless of this setting.
+		let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
+			.with_root_certificates(roots);
+
+		let mut tls = match (&self.cert, &self.key) {
+			(Some(cert_path), Some(key_path)) => {
+				let cert_pem = fs::read(cert_path).map_err(Error::ReadFile)?;
+				let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
+					.collect::<std::result::Result<_, _>>()
+					.map_err(Error::Read)?;
+				if chain.is_empty() {
+					return Err(Error::Empty);
+				}
+				let key_pem = fs::read(key_path).map_err(Error::ReadFile)?;
+				let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(Error::Key)?;
+				builder.with_client_auth_cert(chain, key).map_err(Error::ClientAuth)?
+			}
+			(None, None) => builder.with_no_client_auth(),
+			_ => return Err(Error::IncompleteClientAuth),
+		};
+
+		if self.disable_verify.unwrap_or_default() {
+			tracing::warn!("TLS server certificate verification is disabled; A man-in-the-middle attack is possible.");
+			let noop = NoCertificateVerification(provider);
+			tls.dangerous().set_certificate_verifier(Arc::new(noop));
+		}
+
+		Ok(tls)
 	}
-
-	Ok(tls)
 }
 
 // ── NoCertificateVerification ───────────────────────────────────────

@@ -166,7 +166,7 @@ impl axum::response::IntoResponse for AuthError {
 /// TLS configuration for HTTP requests made by the auth client (JWK fetches
 /// and public-API lookups).
 ///
-/// Mirrors [`moq_native::ClientTls`] so the auth client can be configured
+/// Mirrors [`moq_native::tls::Client`] so the auth client can be configured
 /// independently of the cluster client. Defaults to system roots with no
 /// client identity, which is what most external auth endpoints expect.
 #[serde_as]
@@ -206,16 +206,16 @@ pub struct AuthTls {
 }
 
 impl AuthTls {
-	/// Convert into a [`moq_native::ClientTls`] so we can reuse its
+	/// Convert into a [`moq_native::tls::Client`] so we can reuse its
 	/// rustls-building logic. The fields map one-to-one.
-	fn to_client_tls(&self) -> anyhow::Result<moq_native::ClientTls> {
+	fn to_client_tls(&self) -> anyhow::Result<moq_native::tls::Client> {
 		match (&self.cert, &self.key) {
 			(Some(_), None) => anyhow::bail!("--auth-tls-cert requires --auth-tls-key"),
 			(None, Some(_)) => anyhow::bail!("--auth-tls-key requires --auth-tls-cert"),
 			_ => {}
 		}
 
-		let mut tls = moq_native::ClientTls::default();
+		let mut tls = moq_native::tls::Client::default();
 		tls.root = self.root.clone();
 		tls.cert = self.cert.clone();
 		tls.key = self.key.clone();

@@ -1,55 +1,6 @@
 use crate::{Backoff, Error, QuicBackend, Reconnect};
 use std::net;
-use std::path::PathBuf;
 use url::Url;
-
-/// TLS configuration for the client.
-#[serde_with::serde_as]
-#[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-#[non_exhaustive]
-pub struct ClientTls {
-	/// Use the TLS root at this path, encoded as PEM.
-	///
-	/// This value can be provided multiple times for multiple roots.
-	/// If this is empty, system roots will be used instead.
-	/// In config files, accepts either a single string or a TOML array.
-	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "tls-root", long = "tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
-	#[serde_as(as = "serde_with::OneOrMany<_>")]
-	pub root: Vec<PathBuf>,
-
-	/// PEM file containing the client certificate chain for mTLS.
-	///
-	/// Only certificates are extracted; any private keys in the file are ignored.
-	/// Must be paired with `--client-tls-key`.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "client-tls-cert", long = "client-tls-cert", env = "MOQ_CLIENT_TLS_CERT")]
-	pub cert: Option<PathBuf>,
-
-	/// PEM file containing the private key for mTLS.
-	///
-	/// Only the private key is extracted; any certificates in the file are ignored.
-	/// Must be paired with `--client-tls-cert`.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "client-tls-key", long = "client-tls-key", env = "MOQ_CLIENT_TLS_KEY")]
-	pub key: Option<PathBuf>,
-
-	/// Danger: Disable TLS certificate verification.
-	///
-	/// Fine for local development and between relays, but should be used in caution in production.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "tls-disable-verify",
-		long = "tls-disable-verify",
-		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
-		default_missing_value = "true",
-		num_args = 0..=1,
-		require_equals = true,
-		value_parser = clap::value_parser!(bool),
-	)]
-	pub disable_verify: Option<bool>,
-}
 
 /// Configuration for the MoQ client.
 #[derive(Clone, Debug, clap::Parser, serde::Serialize, serde::Deserialize)]
@@ -92,7 +43,7 @@ pub struct ClientConfig {
 
 	#[command(flatten)]
 	#[serde(default)]
-	pub tls: ClientTls,
+	pub tls: crate::tls::Client,
 
 	#[command(flatten)]
 	#[serde(default)]
@@ -102,17 +53,6 @@ pub struct ClientConfig {
 	#[command(flatten)]
 	#[serde(default)]
 	pub websocket: super::ClientWebSocket,
-}
-
-impl ClientTls {
-	/// Build a [`rustls::ClientConfig`] from this configuration.
-	///
-	/// Loads the configured roots (or the platform's native roots if none),
-	/// optionally attaches a client identity for mTLS, and disables server
-	/// certificate verification when `disable_verify` is set.
-	pub fn build(&self) -> crate::tls::Result<rustls::ClientConfig> {
-		crate::tls::client_config(self)
-	}
 }
 
 impl ClientConfig {
@@ -137,7 +77,7 @@ impl Default for ClientConfig {
 			backend: None,
 			max_streams: None,
 			version: Vec::new(),
-			tls: ClientTls::default(),
+			tls: crate::tls::Client::default(),
 			backoff: Backoff::default(),
 			#[cfg(feature = "websocket")]
 			websocket: super::ClientWebSocket::default(),
