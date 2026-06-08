@@ -135,6 +135,18 @@ impl OriginList {
 		Ok(())
 	}
 
+	/// Replace the first entry equal to `target` with `replacement`, returning
+	/// true if a match was found. The length is unchanged.
+	pub fn replace_first(&mut self, target: Origin, replacement: Origin) -> bool {
+		for entry in &mut self.0 {
+			if *entry == target {
+				*entry = replacement;
+				return true;
+			}
+		}
+		false
+	}
+
 	/// Returns true if any entry matches `origin`.
 	pub fn contains(&self, origin: &Origin) -> bool {
 		self.0.contains(origin)
@@ -1277,6 +1289,22 @@ mod tests {
 		}
 		assert_eq!(list.len(), MAX_HOPS);
 		assert_eq!(list.push(Origin::random()), Err(TooManyOrigins));
+	}
+
+	#[test]
+	fn origin_list_replace_first() {
+		let mut list = OriginList::new();
+		for _ in 0..3 {
+			list.push(Origin::UNKNOWN).unwrap();
+		}
+
+		// Rewrites only the first placeholder, keeping the length the same.
+		assert!(list.replace_first(Origin::UNKNOWN, Origin::from(7)));
+		assert_eq!(list.as_slice(), &[Origin::from(7), Origin::UNKNOWN, Origin::UNKNOWN]);
+
+		// No match leaves the list untouched.
+		assert!(!list.replace_first(Origin::from(99), Origin::from(8)));
+		assert_eq!(list.len(), 3);
 	}
 
 	#[test]

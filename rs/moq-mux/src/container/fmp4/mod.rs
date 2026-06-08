@@ -96,8 +96,8 @@ pub enum Error {
 	#[error("missing tfdt")]
 	MissingTfdt,
 
-	#[error("missing video config for synthesized init")]
-	MissingVideoConfig,
+	#[error("video codec {0} needs a description (codec config record) to synthesize a CMAF init")]
+	MissingVideoDescription(String),
 
 	#[error("video track {0} missing in catalog")]
 	MissingVideoTrack(String),
@@ -371,15 +371,15 @@ pub(crate) fn encode_fragment(
 /// Synthesize a CMAF `Trak` for a video rendition that has no init segment.
 ///
 /// Used by the fMP4 exporter when its source is a `Container::Legacy` track
-/// (Avc3/Hev1/etc. importers that publish raw codec bitstreams). The codec's
-/// out-of-band configuration record (`description`) must be available, e.g.
-/// because the Avc1 / Hvc1 transform has finished building it from inline
-/// parameter sets.
+/// (Avc3/Hev1/etc. importers that publish raw codec bitstreams). H.264/H.265
+/// need their out-of-band configuration record (`description`), e.g. because the
+/// Avc1 / Hvc1 transform has finished building it from inline parameter sets.
+/// VP8 carries no out-of-band config, so `description` is `None` for it.
 pub(crate) fn synthesize_video_trak(
 	track_id: u32,
 	timescale: u64,
 	config: &VideoConfig,
-	description: &[u8],
+	description: Option<&[u8]>,
 ) -> Result<mp4_atom::Trak> {
 	let width = config.coded_width.unwrap_or(0) as u16;
 	let height = config.coded_height.unwrap_or(0) as u16;
@@ -390,9 +390,12 @@ pub(crate) fn synthesize_video_trak(
 		..Default::default()
 	};
 
+	// Codecs that carry an out-of-band config record require `description`.
+	let require_description = || description.ok_or_else(|| Error::MissingVideoDescription(config.codec.to_string()));
+
 	let sample_entry = match &config.codec {
 		VideoCodec::H264(_) => {
-			let mut cursor = std::io::Cursor::new(description);
+			let mut cursor = std::io::Cursor::new(require_description()?);
 			let avcc = mp4_atom::Avcc::decode_body(&mut cursor).map_err(Error::from)?;
 			mp4_atom::Codec::from(mp4_atom::Avc1 {
 				visual,
@@ -401,7 +404,7 @@ pub(crate) fn synthesize_video_trak(
 			})
 		}
 		VideoCodec::H265(h265) => {
-			let mut cursor = std::io::Cursor::new(description);
+			let mut cursor = std::io::Cursor::new(require_description()?);
 			let hvcc = mp4_atom::Hvcc::decode_body(&mut cursor).map_err(Error::from)?;
 			// `in_band` (catalog) ↔ hev1 sample entry; otherwise hvc1.
 			if h265.in_band {
@@ -418,6 +421,16 @@ pub(crate) fn synthesize_video_trak(
 				})
 			}
 		}
+		VideoCodec::VP8 => mp4_atom::Codec::from(mp4_atom::Vp08 {
+			visual,
+			vpcc: crate::codec::vp8::vpcc(),
+			..Default::default()
+		}),
+		VideoCodec::VP9(vp9) => mp4_atom::Codec::from(mp4_atom::Vp09 {
+			visual,
+			vpcc: crate::codec::vp9::vpcc(vp9),
+			..Default::default()
+		}),
 		other => return Err(Error::UnsupportedSynthesis(format!("video codec {:?}", other))),
 	};
 

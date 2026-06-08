@@ -256,4 +256,44 @@ auth_api = "https://api.moq.dev/cluster/auth"
 			"TOML's auth.auth_api must not be clobbered by the CLI re-parse",
 		);
 	}
+
+	/// Same clap+TOML clobber guard for the `[web.health]` thresholds. Each is
+	/// `Option<T>`, so an absent `--web-health-*` CLI flag must leave the
+	/// TOML-configured value untouched during the `update_from` re-parse.
+	static HEALTH_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	#[test]
+	fn cli_does_not_clobber_toml_health() {
+		let _guard = HEALTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: HEALTH_ENV_LOCK serializes this with any sibling test touching
+		// the same env vars.
+		unsafe {
+			std::env::remove_var("MOQ_WEB_HEALTH_CPU");
+			std::env::remove_var("MOQ_WEB_HEALTH_RAM");
+		}
+
+		let toml = r#"
+[web.health]
+cpu = 75.0
+ram = "80%"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("health-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.web.health.cpu,
+			Some(75.0),
+			"TOML's web.health.cpu must not be clobbered by the CLI re-parse"
+		);
+		assert_eq!(
+			config.web.health.ram,
+			Some(crate::MemLimit::Percent(80.0)),
+			"TOML's web.health.ram must not be clobbered by the CLI re-parse"
+		);
+	}
 }

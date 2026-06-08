@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.16.2"
+version = "0.16.3"
 edition = "2024"
 rust-version.workspace = true
 
@@ -17,8 +17,8 @@ doctest = false
 
 [features]
 default = ["quinn", "aws-lc-rs", "websocket"]
-quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki"]
-noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki"]
+quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:notify"]
+noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:notify"]
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto"]
@@ -38,6 +38,7 @@ humantime = "2.3"
 humantime-serde = "1.1"
 
 moq-net = { workspace = true, features = ["serde"] }
+notify = { version = "8", optional = true }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 qmux = { workspace = true, features = ["wss", "tls"], optional = true }
 quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "bloom"], optional = true }

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.8](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.7...moq-relay-v0.12.8) - 2026-06-03
+
+### Fixed
+
+- *(infra)* serve the apt keyring dearmored, rename to moq-keyring.gpg ([#1611](https://github.com/moq-dev/moq/pull/1611))
+
 ## [0.12.6](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.5...moq-relay-v0.12.6) - 2026-06-02
 
 ### Other

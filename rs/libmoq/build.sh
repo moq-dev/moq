@@ -92,11 +92,28 @@ if [[ "$TARGET" == *"-windows-"* ]]; then
         -e "s|@MAJOR_VERSION@|${MAJOR_VERSION}|g" \
         "$SCRIPT_DIR/cmake/moq-config-version.cmake.in" >"$PACKAGE_DIR/lib/cmake/moq/moq-config-version.cmake"
 else
-    echo "Building libmoq for $TARGET via nix..."
+    # Native builds use the bare flake output; the one supported cross is the
+    # Intel mac release built on an Apple Silicon runner (the Determinate Nix
+    # installer dropped Intel macOS). The flake exposes a per-target output for
+    # it; Apple's clang cross-compiles natively. libmoq.a needs no execution,
+    # so unlike the binary tarballs there's no Rosetta smoke test.
+    HOST_TARGET=$(rustc -vV | grep host | cut -d' ' -f2)
+    NIX_ATTR="libmoq"
+    if [[ "$TARGET" != "$HOST_TARGET" ]]; then
+        if [[ "$HOST_TARGET" == "aarch64-apple-darwin" && "$TARGET" == "x86_64-apple-darwin" ]]; then
+            NIX_ATTR="libmoq-$TARGET"
+        else
+            echo "Error: unsupported cross ($HOST_TARGET -> $TARGET)." >&2
+            echo "Only aarch64-apple-darwin -> x86_64-apple-darwin is wired up." >&2
+            exit 1
+        fi
+    fi
+
+    echo "Building libmoq for $TARGET via nix (output: $NIX_ATTR)..."
     BUILD_TMP="$(mktemp -d)"
     trap 'rm -rf "$BUILD_TMP"' EXIT
     RESULT_LINK="$BUILD_TMP/result"
-    nix build "$WORKSPACE_DIR#libmoq" --out-link "$RESULT_LINK"
+    nix build "$WORKSPACE_DIR#$NIX_ATTR" --out-link "$RESULT_LINK"
 
     # The derivation lays out everything under $out/{lib,include}; copy it
     # verbatim so the release tarball matches what nix produced.

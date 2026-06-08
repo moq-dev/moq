@@ -55,6 +55,12 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// to skip broadcasts whose hop chain already passed through us, and we
 	// double-check incoming announces against it as defense in depth.
 	self_origin: crate::Origin,
+	// A random per-connection origin stamped into the hop chain of broadcasts
+	// from versions that don't carry real hop ids on the wire (Lite01/02/03).
+	// It gives each upstream session a stable, unique identity in the hop list
+	// so two sessions publishing the same path resolve as distinct routes
+	// instead of colliding on an empty/placeholder chain.
+	session_origin: crate::Origin,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
@@ -85,6 +91,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			broadcasts,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
+			session_origin: crate::Origin::random(),
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version: config.version,
@@ -368,6 +375,27 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Ok(false);
 		}
 
+		// Lite03 carries its hop count as UNKNOWN placeholders rather than real
+		// ids. Rewrite the first placeholder with this connection's origin so
+		// the route is attributable to the upstream session, without changing
+		// the hop count (shortest-path selection and the MAX_HOPS limit stay
+		// accurate). Lite01/02 send no placeholders; they're covered below.
+		if self.version_lacks_hops() {
+			hops.replace_first(crate::Origin::UNKNOWN, self.session_origin);
+		}
+
+		// Guarantee at least one hop we control. A peer is meant to stamp its
+		// own origin (Lite04), be reconstructed from the responder above (Lite05+),
+		// or filled in above (Lite03), but we don't trust an empty chain: a peer
+		// that sends zero hops would otherwise be indistinguishable from any other,
+		// so two empty-chain routes to the same path would collide. Insert our
+		// session origin so every broadcast stays attributable. The list is empty
+		// here, so this can't overflow.
+		if hops.is_empty() {
+			hops.push(self.session_origin)
+				.expect("an empty hop chain always has room for one entry");
+		}
+
 		// Make sure the peer doesn't double announce.
 		if producers.contains_key(&path) {
 			return Err(Error::Duplicate);
@@ -638,6 +666,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	fn log_path(&self, path: impl AsPath) -> Path<'_> {
 		self.origin.root().join(path)
+	}
+
+	/// True for versions that don't carry a real hop list on the wire, so the
+	/// received chain is empty (Lite01/02) or anonymous placeholders (Lite03).
+	fn version_lacks_hops(&self) -> bool {
+		matches!(self.version, Version::Lite01 | Version::Lite02 | Version::Lite03)
 	}
 }
 

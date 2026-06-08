@@ -28,6 +28,10 @@ pub enum FramedFormat {
 	Hev1,
 	/// AV1 with inline sequence headers
 	Av01,
+	/// VP8 (one frame per buffer; not self-delimiting).
+	Vp8,
+	/// VP9 (one frame per buffer; not self-delimiting).
+	Vp9,
 	/// Raw AAC frames (not ADTS).
 	Aac,
 	/// Raw Opus frames (not Ogg).
@@ -48,6 +52,8 @@ impl FromStr for FramedFormat {
 			"hev1" => Ok(FramedFormat::Hev1),
 			"fmp4" | "cmaf" => Ok(FramedFormat::Fmp4),
 			"av01" | "av1" | "av1c" | "av1C" => Ok(FramedFormat::Av01),
+			"vp8" | "vp08" => Ok(FramedFormat::Vp8),
+			"vp9" | "vp09" => Ok(FramedFormat::Vp9),
 			"aac" => Ok(FramedFormat::Aac),
 			"opus" => Ok(FramedFormat::Opus),
 			"mkv" | "webm" | "matroska" => Ok(FramedFormat::Mkv),
@@ -65,6 +71,8 @@ impl fmt::Display for FramedFormat {
 			FramedFormat::Fmp4 => write!(f, "fmp4"),
 			FramedFormat::Hev1 => write!(f, "hev1"),
 			FramedFormat::Av01 => write!(f, "av01"),
+			FramedFormat::Vp8 => write!(f, "vp8"),
+			FramedFormat::Vp9 => write!(f, "vp9"),
 			FramedFormat::Aac => write!(f, "aac"),
 			FramedFormat::Opus => write!(f, "opus"),
 			FramedFormat::Mkv => write!(f, "mkv"),
@@ -94,6 +102,8 @@ enum FramedKind {
 	Fmp4(Box<crate::container::fmp4::Import>),
 	Hev1(crate::codec::h265::Import),
 	Av01(crate::codec::av1::Import),
+	Vp8(crate::codec::vp8::Import),
+	Vp9(crate::codec::vp9::Import),
 	Aac(crate::codec::aac::Import),
 	Opus(crate::codec::opus::Import),
 	// Boxed for the same reason as Fmp4.
@@ -146,6 +156,16 @@ impl Framed {
 				decoder.initialize(buf)?;
 				FramedKind::Av01(decoder)
 			}
+			FramedFormat::Vp8 => {
+				let mut decoder = crate::codec::vp8::Import::new(broadcast, catalog);
+				decoder.initialize(buf)?;
+				FramedKind::Vp8(decoder)
+			}
+			FramedFormat::Vp9 => {
+				let mut decoder = crate::codec::vp9::Import::new(broadcast, catalog);
+				decoder.initialize(buf)?;
+				FramedKind::Vp9(decoder)
+			}
 			FramedFormat::Aac => {
 				let config = crate::codec::aac::Config::parse(buf)?;
 				FramedKind::Aac(crate::codec::aac::Import::new(broadcast, catalog, config)?)
@@ -180,6 +200,8 @@ impl Framed {
 			FramedKind::Fmp4(ref mut decoder) => decoder.finish(),
 			FramedKind::Hev1(ref mut decoder) => decoder.finish(),
 			FramedKind::Av01(ref mut decoder) => decoder.finish(),
+			FramedKind::Vp8(ref mut decoder) => decoder.finish().map_err(Into::into),
+			FramedKind::Vp9(ref mut decoder) => decoder.finish().map_err(Into::into),
 			FramedKind::Aac(ref mut decoder) => decoder.finish(),
 			FramedKind::Opus(ref mut decoder) => decoder.finish(),
 			FramedKind::Mkv(ref mut decoder) => decoder.finish(),
@@ -194,6 +216,8 @@ impl Framed {
 			FramedKind::Fmp4(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Hev1(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Av01(ref mut decoder) => decoder.seek(sequence),
+			FramedKind::Vp8(ref mut decoder) => decoder.seek(sequence).map_err(Into::into),
+			FramedKind::Vp9(ref mut decoder) => decoder.seek(sequence).map_err(Into::into),
 			FramedKind::Aac(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Opus(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Mkv(ref mut decoder) => decoder.seek(sequence),
@@ -210,6 +234,8 @@ impl Framed {
 			FramedKind::Fmp4(_) => Err(crate::Error::MultipleTracks("fmp4")),
 			FramedKind::Hev1(ref decoder) => decoder.track(),
 			FramedKind::Av01(ref decoder) => decoder.track(),
+			FramedKind::Vp8(ref decoder) => decoder.track().map_err(Into::into),
+			FramedKind::Vp9(ref decoder) => decoder.track().map_err(Into::into),
 			FramedKind::Aac(ref decoder) => Ok(decoder.track()),
 			FramedKind::Opus(ref decoder) => Ok(decoder.track()),
 			FramedKind::Mkv(_) => Err(crate::Error::MultipleTracks("mkv")),
@@ -224,6 +250,8 @@ impl Framed {
 			FramedKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
 			FramedKind::Hev1(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			FramedKind::Av01(ref mut decoder) => decoder.decode_frame(buf, pts)?,
+			FramedKind::Vp8(ref mut decoder) => decoder.decode_frame(buf, pts)?,
+			FramedKind::Vp9(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			FramedKind::Aac(ref mut decoder) => decoder.decode(buf, pts)?,
 			FramedKind::Opus(ref mut decoder) => decoder.decode(buf, pts)?,
 			FramedKind::Mkv(ref mut decoder) => {

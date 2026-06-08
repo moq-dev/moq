@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.2...moq-mux-v0.5.3) - 2026-06-03
+
+### Other
+
+- add MPEG-TS (transport stream) import and export ([#1587](https://github.com/moq-dev/moq/pull/1587))
+- synthesize AAC esds in fMP4 export; guard MKV header race ([#1593](https://github.com/moq-dev/moq/pull/1593))
+
 ## [0.5.2](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.1...moq-mux-v0.5.2) - 2026-05-30
 
 ### Other

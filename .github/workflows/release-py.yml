@@ -20,19 +20,12 @@ on:
       - "py/moq-rs/**"
       - ".github/workflows/release-py.yml"
       - ".github/scripts/release.sh"
-  pull_request:
-    paths:
-      - "py/moq-rs/**"
-      - ".github/workflows/release-py.yml"
-      - ".github/scripts/release.sh"
 
 permissions:
   contents: read
 
-# Separate PR builds from mainline publishes so a PR run can't queue ahead of
-# (and delay) a release on main.
 concurrency:
-  group: release-py-${{ github.event_name }}-${{ github.ref }}
+  group: release-py-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -42,9 +35,8 @@ jobs:
     if: ${{ github.repository_owner == 'moq-dev' }}
     outputs:
       version: ${{ steps.version.outputs.version }}
-      # On PRs we always "publish" into the dry-run sense (build only). On main
-      # we publish only when the version isn't already on PyPI.
-      publish: ${{ github.event_name == 'push' && steps.pypi.outputs.exists == 'false' }}
+      # Publish only when the version isn't already on PyPI.
+      publish: ${{ steps.pypi.outputs.exists == 'false' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -57,7 +49,7 @@ jobs:
 
       # The release gate: skip publishing a version that's already on PyPI
       # (re-uploads are rejected anyway, but this keeps the run green and makes
-      # the no-op explicit). Runs on PRs too, as an informational dry-run.
+      # the no-op explicit).
       - name: Check PyPI
         id: pypi
         env:

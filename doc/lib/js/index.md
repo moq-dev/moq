@@ -81,11 +81,29 @@ bun add @moq/net
 bun add @moq/watch
 bun add @moq/publish
 
-# or with other package managers
-npm add @moq/net
-npm add @moq/watch
-npm add @moq/publish
+# or with npm
+npm install @moq/net
+npm install @moq/watch
+npm install @moq/publish
 ```
+
+Pick the channel that matches where your code runs:
+
+- **Browser with a bundler** (Vite, esbuild, webpack) - install the packages
+  above and import them. This is the standard path. See [Web Components](/lib/js/env/web).
+- **Browser, no build step** - load straight from a CDN, no install required:
+
+  ```html
+  <script type="module">
+      import "https://cdn.jsdelivr.net/npm/@moq/watch/element/+esm";
+      import "https://cdn.jsdelivr.net/npm/@moq/publish/element/+esm";
+  </script>
+  ```
+
+  [esm.sh](https://esm.sh) works the same way. Great for demos and embeds. See
+  [Loading from a CDN](/lib/js/env/web#loading-from-a-cdn-no-bundler).
+- **Server-side** (Node, Bun, Deno) - install `@moq/net` and set up a transport.
+  `@moq/hang` is browser-only. See [Server-side JS](/lib/js/env/native).
 
 ## Quick Start
 
