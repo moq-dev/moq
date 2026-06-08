@@ -4,6 +4,24 @@ use crate::catalog::{Audio, Video};
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
+///
+/// This is the base catalog: just the media tracks every hang broadcast carries. Applications
+/// layer their own sections on top by flattening it into their own type, e.g.
+///
+/// ```
+/// # use serde::{Serialize, Deserialize};
+/// #[derive(Serialize, Deserialize)]
+/// struct AppCatalog {
+///     #[serde(flatten)]
+///     base: hang::Catalog,
+///     scte35: Option<serde_json::Value>,
+/// }
+/// ```
+///
+/// and feeding that type to [`moq_json`](https://docs.rs/moq-json)'s producer/consumer to publish
+/// and subscribe with the same snapshot/delta semantics as the base catalog. The base catalog
+/// ignores unknown sections, so an extended catalog stays readable by a base consumer.
+/// App-specific sections (chat, user, location, ...) live in the application layer, not here.
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -244,5 +262,49 @@ mod test {
 
 		let output = catalog.to_string().expect("failed to encode");
 		assert_eq!(encoded, output, "encode mismatch");
+	}
+
+	/// Lock in the extension pattern: an application flattens the base catalog into its own type
+	/// and adds typed sections. The extension rides alongside the base fields in one JSON object,
+	/// and a base [`Catalog`] consumer still reads it, ignoring the unknown section.
+	#[test]
+	fn extension_roundtrip() {
+		use serde::{Deserialize, Serialize};
+
+		#[serde_with::skip_serializing_none]
+		#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+		#[serde(default, rename_all = "camelCase")]
+		struct Scte35 {
+			track: String,
+			splice_count: Option<u32>,
+		}
+
+		#[serde_with::skip_serializing_none]
+		#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+		#[serde(default, rename_all = "camelCase")]
+		struct AppCatalog {
+			#[serde(flatten)]
+			base: Catalog,
+			scte35: Option<Scte35>,
+		}
+
+		let app = AppCatalog {
+			base: Catalog::default(),
+			scte35: Some(Scte35 {
+				track: "splice.json".to_string(),
+				splice_count: Some(2),
+			}),
+		};
+
+		let encoded = serde_json::to_string(&app).expect("failed to encode");
+		assert!(encoded.contains(r#""scte35":{"track":"splice.json","spliceCount":2}"#));
+
+		// Round-trips through the application type.
+		let decoded: AppCatalog = serde_json::from_str(&encoded).expect("failed to decode");
+		assert_eq!(app, decoded);
+
+		// A base consumer reads the same bytes, ignoring the unknown section.
+		let base = Catalog::from_str(&encoded).expect("base failed to decode");
+		assert_eq!(base, Catalog::default());
 	}
 }

@@ -1,13 +1,14 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Audio from "./audio";
-import * as Chat from "./chat";
-import * as Location from "./location";
-import { Preview, type PreviewProps } from "./preview";
-import * as User from "./user";
 import * as Video from "./video";
+
+// Serves a single application-defined track when subscribed. Same shape as the built-in
+// `serve` methods, so an extension can route its own tracks (e.g. a chat message track)
+// through the broadcast's request loop.
+export type ServeTrack = (track: Moq.Track, effect: Effect) => void;
 
 export type BroadcastProps = {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
@@ -15,10 +16,15 @@ export type BroadcastProps = {
 	name?: Moq.Path.Valid | Signal<Moq.Path.Valid>;
 	audio?: Audio.EncoderProps;
 	video?: Video.Props;
-	location?: Location.Props;
-	user?: User.Props;
-	chat?: Chat.Props;
-	preview?: PreviewProps;
+
+	// Extra catalog sections merged into the published catalog alongside `video`/`audio`.
+	// This is how the application layer adds its own root sections (chat, location, scte35, ...)
+	// without hang knowing about them.
+	sections?: Record<string, unknown> | Signal<Record<string, unknown> | undefined>;
+
+	// Handlers for application-defined tracks, keyed by track name. Consulted when a
+	// subscription arrives for a track the base broadcast doesn't recognize.
+	tracks?: Record<string, ServeTrack>;
 };
 
 export class Broadcast {
@@ -31,10 +37,9 @@ export class Broadcast {
 	audio: Audio.Encoder;
 	video: Video.Root;
 
-	location: Location.Root;
-	chat: Chat.Root;
-	preview: Preview;
-	user: User.Info;
+	// Application-supplied extensions, see `BroadcastProps`.
+	sections: Getter<Record<string, unknown> | undefined>;
+	tracks: Record<string, ServeTrack>;
 
 	signals = new Effect();
 
@@ -45,10 +50,9 @@ export class Broadcast {
 
 		this.audio = new Audio.Encoder(props?.audio);
 		this.video = new Video.Root({ ...props?.video, connection: this.connection });
-		this.location = new Location.Root(props?.location);
-		this.chat = new Chat.Root(props?.chat);
-		this.preview = new Preview(props?.preview);
-		this.user = new User.Info(props?.user);
+
+		this.sections = Signal.from(props?.sections);
+		this.tracks = props?.tracks ?? {};
 
 		this.signals.run(this.#run.bind(this));
 	}
@@ -85,22 +89,7 @@ export class Broadcast {
 
 				switch (request.track.name) {
 					case Broadcast.CATALOG_TRACK:
-						this.#serveCatalog(new Json.Producer<Catalog.Root>(request.track), effect);
-						break;
-					case Location.Window.TRACK:
-						this.location.window.serve(request.track, effect);
-						break;
-					case Location.Peers.TRACK:
-						this.location.peers.serve(request.track, effect);
-						break;
-					case Preview.TRACK:
-						this.preview.serve(request.track, effect);
-						break;
-					case Chat.Typing.TRACK:
-						this.chat.typing.serve(request.track, effect);
-						break;
-					case Chat.Message.TRACK:
-						this.chat.message.serve(request.track, effect);
+						this.#serveCatalog(new Json.Producer<Record<string, unknown>>(request.track), effect);
 						break;
 					case Audio.Encoder.TRACK:
 						this.audio.serve(request.track, effect);
@@ -111,42 +100,40 @@ export class Broadcast {
 					case Video.Root.TRACK_SD:
 						this.video.sd.serve(request.track, effect);
 						break;
-					default:
+					default: {
+						const handler = this.tracks[request.track.name];
+						if (handler) {
+							handler(request.track, effect);
+							break;
+						}
 						console.error("received subscription for unknown track", request.track.name);
 						request.track.close(new Error(`Unknown track: ${request.track.name}`));
 						break;
+					}
 				}
 			});
 		}
 	}
 
-	#serveCatalog(producer: Json.Producer<Catalog.Root>, effect: Effect): void {
+	#serveCatalog(producer: Json.Producer<Record<string, unknown>>, effect: Effect): void {
 		if (!effect.get(this.enabled)) {
 			// Clear the catalog.
 			producer.update({});
 			return;
 		}
 
-		// Create the new catalog.
 		const catalog: Catalog.Root = {
 			video: effect.get(this.video.catalog),
 			audio: effect.get(this.audio.catalog),
-			location: effect.get(this.location.catalog),
-			user: effect.get(this.user.catalog),
-			chat: effect.get(this.chat.catalog),
-			preview: effect.get(this.preview.catalog),
 		};
 
-		producer.update(catalog);
+		// Merge any application-defined sections on top of the base catalog.
+		producer.update({ ...catalog, ...effect.get(this.sections) });
 	}
 
 	close() {
 		this.signals.close();
 		this.audio.close();
 		this.video.close();
-		this.location.close();
-		this.chat.close();
-		this.preview.close();
-		this.user.close();
 	}
 }

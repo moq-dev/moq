@@ -46,6 +46,39 @@ Here is Big Buck Bunny's `catalog.json` as of 2026-02-02:
 }
 ```
 
+### Extensions
+
+The base catalog only describes `video` and `audio`. Applications add their own root sections (for example `scte35` ad-splice signaling) without modifying hang: define a schema for the section and compose it onto the base catalog, then publish and subscribe through the same JSON snapshot/delta track helper.
+
+Because the base catalog ignores unknown sections, an extended catalog stays readable by a plain hang viewer; it just won't see the extra sections.
+
+In TypeScript, extend the schema and hand it to `@moq/json`:
+
+```ts
+import * as z from "zod/mini";
+import * as Catalog from "@moq/hang/catalog";
+import * as Json from "@moq/json";
+
+const Scte35Schema = z.object({ track: z.string() });
+const RootSchema = z.extend(Catalog.RootSchema, { scte35: z.optional(Scte35Schema) });
+type Root = z.infer<typeof RootSchema>;
+
+const consumer = new Json.Consumer<Root>(track, { schema: RootSchema });
+```
+
+In Rust, flatten the base catalog into your own type and use it with [`moq-json`](https://docs.rs/moq-json):
+
+```rust
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AppCatalog {
+    #[serde(flatten)]
+    base: hang::Catalog,
+    scte35: Option<Scte35>,
+}
+```
+
+On the publish side, `@moq/publish`'s `Broadcast` accepts a `sections` input that is merged into the published catalog, plus a `tracks` map for serving any extra tracks a section references.
+
 ### Audio
 
 [See the latest schema](https://github.com/moq-dev/moq/blob/main/js/hang/src/catalog/audio.ts).
