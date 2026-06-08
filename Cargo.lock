@@ -3887,6 +3887,7 @@ dependencies = [
  "reqwest 0.12.28",
  "scuffle-av1",
  "scuffle-h265",
+ "serde",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

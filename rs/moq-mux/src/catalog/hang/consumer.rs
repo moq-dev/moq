@@ -1,6 +1,7 @@
 use std::task::{Poll, ready};
 
 use hang::Catalog;
+use serde::de::DeserializeOwned;
 
 use crate::Result;
 
@@ -8,12 +9,23 @@ use crate::Result;
 ///
 /// This wraps a [`moq_json::Consumer`], reconstructing the JSON catalog from the latest
 /// group's snapshot (plus any future deltas) to discover available audio and video tracks.
-#[derive(Clone)]
-pub struct Consumer {
-	inner: moq_json::Consumer<Catalog>,
+///
+/// Generic over the catalog payload `T`, defaulting to [`hang::Catalog`]. An application reads an
+/// extended catalog with its own type that `#[serde(flatten)]`s [`hang::Catalog`].
+pub struct Consumer<T = Catalog> {
+	inner: moq_json::Consumer<T>,
 }
 
-impl Consumer {
+// Manual Clone so a consumer is cheaply clonable regardless of whether `T` is.
+impl<T> Clone for Consumer<T> {
+	fn clone(&self) -> Self {
+		Self {
+			inner: self.inner.clone(),
+		}
+	}
+}
+
+impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a new catalog consumer from a MoQ track consumer.
 	pub fn new(track: moq_net::TrackConsumer) -> Self {
 		Self {
@@ -22,7 +34,7 @@ impl Consumer {
 	}
 
 	/// Poll for the next catalog update.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<T>>> {
 		let result = ready!(self.inner.poll_next(waiter));
 		Poll::Ready(result.map_err(Into::into))
 	}
@@ -31,12 +43,15 @@ impl Consumer {
 	///
 	/// This method waits for the next catalog publication and returns the
 	/// catalog data. If there are no more updates, `None` is returned.
-	pub async fn next(&mut self) -> Result<Option<Catalog>> {
+	pub async fn next(&mut self) -> Result<Option<T>>
+	where
+		T: Unpin,
+	{
 		Ok(self.inner.next().await?)
 	}
 }
 
-impl From<moq_net::TrackConsumer> for Consumer {
+impl<T: DeserializeOwned> From<moq_net::TrackConsumer> for Consumer<T> {
 	fn from(inner: moq_net::TrackConsumer) -> Self {
 		Self::new(inner)
 	}
@@ -187,7 +202,7 @@ mod test {
 	#[test]
 	fn returns_none_when_empty_track_finishes() {
 		let mut track = Catalog::default_track().produce();
-		let mut consumer = Consumer::new(track.consume());
+		let mut consumer: Consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
 		track.finish().expect("catalog track should finish");

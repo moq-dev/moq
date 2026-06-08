@@ -2,8 +2,15 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use base64::Engine;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// Produces both a hang and MSF catalog track for a broadcast.
+///
+/// Generic over the catalog payload `T`, defaulting to [`hang::Catalog`]. An application publishes
+/// an extended catalog by using its own type that `#[serde(flatten)]`s [`hang::Catalog`] and adds
+/// its own root sections (e.g. `scte35`). The `T: AsRef<hang::Catalog>` bound lets the MSF track be
+/// derived from the base media sections regardless of any extension sections.
 ///
 /// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
 /// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
@@ -12,25 +19,39 @@ use base64::Engine;
 /// The hang track is published through [`moq_json`], which currently emits one snapshot per
 /// group (deltas disabled). This routes catalog publishing through the JSON merge-patch helper
 /// so deltas can be enabled later without changing the wire format used today.
-#[derive(Clone)]
-pub struct Producer {
-	hang: moq_json::Producer<hang::Catalog>,
+pub struct Producer<T = hang::Catalog> {
+	hang: moq_json::Producer<T>,
 	msf_track: moq_net::TrackProducer,
 
-	current: Arc<Mutex<hang::Catalog>>,
+	current: Arc<Mutex<T>>,
 }
 
-impl Producer {
-	/// Create a new catalog producer, inserting both catalog tracks into the broadcast.
+// Manual Clone so a producer is cheaply clonable regardless of whether `T` is.
+impl<T> Clone for Producer<T> {
+	fn clone(&self) -> Self {
+		Self {
+			hang: self.hang.clone(),
+			msf_track: self.msf_track.clone(),
+			current: self.current.clone(),
+		}
+	}
+}
+
+impl Producer<hang::Catalog> {
+	/// Create a new catalog producer with the default (empty) catalog.
+	///
+	/// To publish an extended catalog, use [`with_catalog`](Self::with_catalog) with your own type.
 	pub fn new(broadcast: &mut moq_net::BroadcastProducer) -> Result<Self, moq_net::Error> {
 		Self::with_catalog(broadcast, hang::Catalog::default())
 	}
+}
 
+impl<T> Producer<T>
+where
+	T: Serialize + DeserializeOwned + Clone + Default + AsRef<hang::Catalog> + Send + 'static,
+{
 	/// Create a new catalog producer with the given initial catalog.
-	pub fn with_catalog(
-		broadcast: &mut moq_net::BroadcastProducer,
-		catalog: hang::Catalog,
-	) -> Result<Self, moq_net::Error> {
+	pub fn with_catalog(broadcast: &mut moq_net::BroadcastProducer, catalog: T) -> Result<Self, moq_net::Error> {
 		let hang_track = broadcast.create_track(hang::Catalog::default_track())?;
 		let msf_track = broadcast.create_track(moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
 
@@ -44,7 +65,7 @@ impl Producer {
 	}
 
 	/// Get mutable access to the catalog, publishing it after any changes.
-	pub fn lock(&mut self) -> Guard<'_> {
+	pub fn lock(&mut self) -> Guard<'_, T> {
 		Guard {
 			catalog: self.current.lock().unwrap(),
 			hang: &mut self.hang,
@@ -54,12 +75,12 @@ impl Producer {
 	}
 
 	/// Get a snapshot of the current catalog.
-	pub fn snapshot(&self) -> hang::Catalog {
+	pub fn snapshot(&self) -> T {
 		self.current.lock().unwrap().clone()
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
-	pub fn consume(&self) -> Result<super::Consumer, moq_net::Error> {
+	pub fn consume(&self) -> Result<super::Consumer<T>, moq_net::Error> {
 		Ok(super::Consumer::new(self.hang.consume()))
 	}
 
@@ -76,40 +97,52 @@ impl Producer {
 /// Obtained via [`Producer::lock`].
 ///
 /// On drop, both the hang and MSF catalog tracks are updated if the catalog was mutated.
-pub struct Guard<'a> {
-	catalog: MutexGuard<'a, hang::Catalog>,
-	hang: &'a mut moq_json::Producer<hang::Catalog>,
+pub struct Guard<'a, T = hang::Catalog>
+where
+	T: Serialize + AsRef<hang::Catalog>,
+{
+	catalog: MutexGuard<'a, T>,
+	hang: &'a mut moq_json::Producer<T>,
 	msf_track: &'a mut moq_net::TrackProducer,
 	updated: bool,
 }
 
-impl<'a> Deref for Guard<'a> {
-	type Target = hang::Catalog;
+impl<T> Deref for Guard<'_, T>
+where
+	T: Serialize + AsRef<hang::Catalog>,
+{
+	type Target = T;
 
 	fn deref(&self) -> &Self::Target {
 		&self.catalog
 	}
 }
 
-impl<'a> DerefMut for Guard<'a> {
+impl<T> DerefMut for Guard<'_, T>
+where
+	T: Serialize + AsRef<hang::Catalog>,
+{
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		self.updated = true;
 		&mut self.catalog
 	}
 }
 
-impl Drop for Guard<'_> {
+impl<T> Drop for Guard<'_, T>
+where
+	T: Serialize + AsRef<hang::Catalog>,
+{
 	fn drop(&mut self) {
 		if !self.updated {
 			return;
 		}
 
 		// Publish the hang catalog (one snapshot per group while deltas are disabled).
-		let catalog: &hang::Catalog = &self.catalog;
+		let catalog: &T = &self.catalog;
 		let _ = self.hang.update(catalog);
 
-		// Publish MSF catalog
-		let msf = to_msf(&self.catalog);
+		// Publish the MSF catalog, derived from the base media sections.
+		let msf = to_msf(self.catalog.as_ref());
 		if let Ok(mut group) = self.msf_track.append_group() {
 			let _ = group.write_frame(msf.to_string().expect("invalid MSF catalog"));
 			let _ = group.finish();
@@ -481,5 +514,55 @@ mod test {
 		let video = &msf.tracks[0];
 		assert_eq!(video.max_grp_sap_starting_type, None);
 		assert_eq!(video.max_obj_sap_starting_type, None);
+	}
+
+	#[test]
+	fn extension_roundtrip() {
+		use std::task::Poll;
+
+		use serde::{Deserialize, Serialize};
+
+		// An application publishes an extended catalog: the base media sections plus its own.
+		#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+		struct AppCatalog {
+			#[serde(flatten)]
+			base: hang::Catalog,
+			#[serde(skip_serializing_if = "Option::is_none")]
+			scte35: Option<Scte35>,
+		}
+
+		#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+		struct Scte35 {
+			splice_id: u32,
+		}
+
+		// Lets the producer derive the MSF track from the base sections.
+		impl AsRef<hang::Catalog> for AppCatalog {
+			fn as_ref(&self) -> &hang::Catalog {
+				&self.base
+			}
+		}
+
+		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut producer = crate::catalog::hang::Producer::with_catalog(&mut broadcast, AppCatalog::default()).unwrap();
+		let mut consumer = producer.consume().unwrap();
+
+		// One owner sets a base section, another adds the extension. Sequential locks compose
+		// because each starts from the producer's retained catalog.
+		producer.lock().base.user = Some(hang::catalog::User {
+			name: Some("alice".to_string()),
+			..Default::default()
+		});
+		producer.lock().scte35 = Some(Scte35 { splice_id: 42 });
+
+		let waiter = kio::Waiter::noop();
+		let mut latest = None;
+		while let Poll::Ready(Ok(Some(catalog))) = consumer.poll_next(&waiter) {
+			latest = Some(catalog);
+		}
+
+		let catalog = latest.expect("catalog published");
+		assert_eq!(catalog.base.user.unwrap().name.as_deref(), Some("alice"));
+		assert_eq!(catalog.scte35, Some(Scte35 { splice_id: 42 }));
 	}
 }
