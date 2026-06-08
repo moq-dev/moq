@@ -16,17 +16,17 @@ const OPUS_FRAME_DURATION_MS = 20;
 import CaptureWorklet from "./capture-worklet.ts?worklet";
 
 // Selects the audio codec and its encoder settings. Either the bare codec name (all defaults) or an
-// object with the name plus tuning knobs. Only Opus is implemented today; AAC would slot in as
-// `| AacConfig` here and as another branch in normalizeCodec/#createConfig.
-export type Codec = OpusConfig;
+// object with the mime plus tuning knobs. Only Opus is implemented today; AAC would slot in as
+// `| Aac` here and as another branch in normalizeCodec/#createConfig.
+export type Codec = Opus;
 
-export type OpusConfig = "opus" | OpusOptions;
+export type Opus = "opus" | OpusConfig;
 
 // Opus encoder settings. bitrate and frameDuration also shape the catalog (decoders need them); the
 // rest are encode-only knobs that map directly to the matching OpusEncoderConfig fields:
 // https://developer.mozilla.org/en-US/docs/Web/API/AudioEncoder/configure#opus
-export type OpusOptions = {
-	name: "opus";
+export type OpusConfig = {
+	mime: "opus";
 
 	bitrate?: number; // bits/sec, defaults to channelCount * 32kbps
 	frameDuration?: number; // ms, Opus supports 2.5-60ms, defaults to 20ms (the real-time default)
@@ -338,9 +338,9 @@ function requestedChannelCount(track: MediaStreamTrack): number | undefined {
 	return constraint.exact ?? constraint.ideal ?? constraint.max ?? constraint.min;
 }
 
-// Resolve the bare "opus" shorthand to the full options object so callers can read fields uniformly.
-function normalizeCodec(codec: Codec): OpusOptions {
-	if (codec === "opus") return { name: "opus" };
+// Resolve the bare "opus" shorthand to the full config object so callers can read fields uniformly.
+function normalizeCodec(codec: Codec): OpusConfig {
+	if (codec === "opus") return { mime: "opus" };
 	return codec;
 }
 
