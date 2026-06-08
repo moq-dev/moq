@@ -10,7 +10,7 @@ import { type Kind, normalizeSource, type Source } from "./types";
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
 const OPUS_BITRATE_PER_CHANNEL = 32_000;
-const OPUS_FRAME_DURATION = 20;
+const OPUS_FRAME_DURATION_MS = 20;
 
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
@@ -25,6 +25,12 @@ export type EncoderProps = {
 	sampleRate?: number | Signal<number | undefined>;
 	channelCount?: number | Signal<number | undefined>;
 
+	// Opus bitrate in bits/sec. Defaults to channelCount * 32kbps when unset.
+	bitrate?: number | Signal<number | undefined>;
+
+	// Opus frame duration in milliseconds. Opus supports 2.5-60ms; defaults to 20ms (the real-time default).
+	frameDuration?: number | Signal<number | undefined>;
+
 	container?: Catalog.Container;
 };
 
@@ -38,6 +44,8 @@ export class Encoder {
 	volume: Signal<number>;
 	sampleRate: Signal<number | undefined>;
 	channelCount: Signal<number | undefined>;
+	bitrate: Signal<number | undefined>;
+	frameDuration: Signal<number | undefined>;
 
 	source: Signal<Source | undefined>;
 
@@ -63,9 +71,12 @@ export class Encoder {
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.sampleRate = Signal.from<number | undefined>(props?.sampleRate);
 		this.channelCount = Signal.from<number | undefined>(props?.channelCount);
+		this.bitrate = Signal.from<number | undefined>(props?.bitrate);
+		this.frameDuration = Signal.from<number | undefined>(props?.frameDuration);
 
 		this.#signals.run(this.#runSource.bind(this));
 		this.#signals.run(this.#runGain.bind(this));
+		this.#signals.run(this.#runConfig.bind(this));
 		this.#signals.run(this.#runCatalog.bind(this));
 	}
 
@@ -152,12 +163,24 @@ export class Encoder {
 			codec: "opus",
 			sampleRate: Catalog.u53(worklet.context.sampleRate),
 			numberOfChannels: Catalog.u53(channelCount),
-			bitrate: Catalog.u53(channelCount * OPUS_BITRATE_PER_CHANNEL),
+			bitrate: Catalog.u53(this.bitrate.peek() ?? channelCount * OPUS_BITRATE_PER_CHANNEL),
 			container: { kind: "legacy" } as const,
-			// TODO parse the actual frame duration instead of assuming 20ms.
-			// Opus supports 2.5–60ms but 20ms is the real-time default.
-			jitter: Catalog.u53(OPUS_FRAME_DURATION),
+			// jitter doubles as the Opus frame duration; toEncoderConfig converts it to µs for WebCodecs.
+			jitter: Catalog.u53(this.frameDuration.peek() ?? OPUS_FRAME_DURATION_MS),
 		};
+	}
+
+	// Reconcile the encoder knobs (bitrate, frame duration) when they change, without waiting for a
+	// channel-count change. The equality guard stops this from looping on its own #config write.
+	#runConfig(effect: Effect): void {
+		const config = effect.get(this.#config);
+		if (!config) return;
+
+		const bitrate = Catalog.u53(effect.get(this.bitrate) ?? config.numberOfChannels * OPUS_BITRATE_PER_CHANNEL);
+		const jitter = Catalog.u53(effect.get(this.frameDuration) ?? OPUS_FRAME_DURATION_MS);
+		if (config.bitrate === bitrate && config.jitter === jitter) return;
+
+		this.#config.set({ ...config, bitrate, jitter });
 	}
 
 	#runGain(effect: Effect): void {
@@ -299,12 +322,22 @@ function toEncoderConfig(config: Catalog.AudioConfig, kind: Kind): AudioEncoderC
 		bitrate: config.bitrate,
 	};
 
-	if (config.codec === "opus" && kind !== "auto") {
-		const opus: OpusEncoderConfigExt = {
-			application: kind === "voice" ? "voip" : "audio",
-			signal: kind,
-		};
-		encoderConfig.opus = opus;
+	if (config.codec === "opus") {
+		const opus: OpusEncoderConfigExt = {};
+
+		if (kind !== "auto") {
+			opus.application = kind === "voice" ? "voip" : "audio";
+			opus.signal = kind;
+		}
+
+		// jitter carries the frame duration in ms; WebCodecs wants µs.
+		if (config.jitter !== undefined) {
+			opus.frameDuration = config.jitter * 1000;
+		}
+
+		if (Object.keys(opus).length > 0) {
+			encoderConfig.opus = opus;
+		}
 	}
 
 	return encoderConfig;
