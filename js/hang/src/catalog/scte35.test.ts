@@ -12,7 +12,7 @@ type App = z.infer<typeof AppSchema>;
 
 test("scte35 section round-trips through export/import", async () => {
 	const track = new Track("catalog.json");
-	const producer = new Json.Producer<App>(track, { schema: AppSchema });
+	const producer = new Json.Producer<App>(track, { schema: AppSchema, initial: {} });
 	const consumer = new Json.Consumer<App>(track, { schema: AppSchema });
 
 	// Export: the base owner publishes the media section...
@@ -36,7 +36,7 @@ test("scte35 section round-trips through export/import", async () => {
 
 test("removing the scte35 section is observable on import", async () => {
 	const track = new Track("catalog.json");
-	const producer = new Json.Producer<App>(track, { schema: AppSchema });
+	const producer = new Json.Producer<App>(track, { schema: AppSchema, initial: {} });
 	const consumer = new Json.Consumer<App>(track, { schema: AppSchema });
 
 	{

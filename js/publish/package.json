@@ -20,6 +20,7 @@
 	"scripts": {
 		"build": "rimraf dist && vite build && tsc && bun ../common/package.ts",
 		"check": "tsc --noEmit",
+		"test": "bun test",
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
@@ -30,6 +31,7 @@
 	},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.100",
+		"@types/bun": "^1.3.14",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
 		"esbuild": "^0.28.0",
 		"rimraf": "^6.1.3",

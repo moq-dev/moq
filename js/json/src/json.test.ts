@@ -87,7 +87,7 @@ test("deltas reconstruct to the final value", async () => {
 // (e.g. an scte35 section) without a single owner having to rebuild the whole document.
 test("lock composes independent owners", async () => {
 	const track = new Track("test");
-	const producer = new Producer<Value>(track);
+	const producer = new Producer<Value>(track, { initial: {} });
 	const consumer = new Consumer<Value>(track);
 
 	{
@@ -104,9 +104,9 @@ test("lock composes independent owners", async () => {
 	expect(await consumer.next()).toEqual({ video: "v1", scte35: { id: 1 } });
 });
 
-test("lock starts from an empty object", async () => {
+test("lock starts from the configured initial value", async () => {
 	const track = new Track("test");
-	const producer = new Producer<Value>(track);
+	const producer = new Producer<Value>(track, { initial: {} });
 	const consumer = new Consumer<Value>(track);
 
 	{
@@ -116,11 +116,16 @@ test("lock starts from an empty object", async () => {
 	expect(await consumer.next()).toEqual({ a: 1 });
 });
 
+test("lock without a prior value or initial throws", () => {
+	const producer = new Producer<Value>(new Track("test"));
+	expect(() => producer.lock()).toThrow();
+});
+
 // Removing a section drops it from the reconstructed value, so a consumer detects the removal.
 // Exercised with deltas on to cover the merge-patch null-deletion path.
 test("lock removes a section", async () => {
 	const track = new Track("test");
-	const producer = new Producer<Value>(track, { deltaRatio: 100 });
+	const producer = new Producer<Value>(track, { deltaRatio: 100, initial: {} });
 	const consumer = new Consumer<Value>(track);
 
 	{

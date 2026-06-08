@@ -1,8 +1,8 @@
 import * as Catalog from "@moq/hang/catalog";
-import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
+import { CatalogProducer } from "./catalog";
 import * as Video from "./video";
 
 export type BroadcastProps = {
@@ -23,12 +23,10 @@ export class Broadcast {
 	audio: Audio.Encoder;
 	video: Video.Root;
 
-	// The live catalog producer, set while the `catalog.json` track is being served and cleared
-	// when it tears down. Applications can `mutate` it to add their own root sections (e.g.
-	// `scte35`) alongside the base `video`/`audio`. Because every owner mutates the same shared
-	// document, their sections compose instead of clobbering one another.
-	#catalog = new Signal<Json.Producer<Catalog.Root> | undefined>(undefined);
-	readonly catalog: Getter<Json.Producer<Catalog.Root> | undefined> = this.#catalog;
+	// The catalog, editable at any time regardless of whether anyone is subscribed. The base
+	// `video`/`audio` sections are kept in sync from the encoders; an application adds its own root
+	// sections (e.g. `scte35`) by locking it too.
+	readonly catalog = new CatalogProducer();
 
 	signals = new Effect();
 
@@ -40,7 +38,22 @@ export class Broadcast {
 		this.audio = new Audio.Encoder(props?.audio);
 		this.video = new Video.Root({ ...props?.video, connection: this.connection });
 
+		this.signals.run(this.#runCatalog.bind(this));
 		this.signals.run(this.#run.bind(this));
+	}
+
+	// Keep the base catalog sections in sync with the encoders, leaving extension sections alone.
+	#runCatalog(effect: Effect) {
+		const enabled = effect.get(this.enabled);
+		const video = enabled ? effect.get(this.video.catalog) : undefined;
+		const audio = enabled ? effect.get(this.audio.catalog) : undefined;
+
+		using catalog = this.catalog.lock();
+		if (video !== undefined) catalog.value.video = video;
+		else delete catalog.value.video;
+
+		if (audio !== undefined) catalog.value.audio = audio;
+		else delete catalog.value.audio;
 	}
 
 	#run(effect: Effect) {
@@ -75,7 +88,7 @@ export class Broadcast {
 
 				switch (request.track.name) {
 					case Broadcast.CATALOG_TRACK:
-						this.#serveCatalog(new Json.Producer<Catalog.Root>(request.track), effect);
+						this.catalog.serve(request.track, effect);
 						break;
 					case Audio.Encoder.TRACK:
 						this.audio.serve(request.track, effect);
@@ -93,24 +106,6 @@ export class Broadcast {
 				}
 			});
 		}
-	}
-
-	#serveCatalog(producer: Json.Producer<Catalog.Root>, effect: Effect): void {
-		// Expose the producer so extensions can add their own sections while it's live.
-		effect.set(this.#catalog, producer, undefined);
-
-		const enabled = effect.get(this.enabled);
-		const video = enabled ? effect.get(this.video.catalog) : undefined;
-		const audio = enabled ? effect.get(this.audio.catalog) : undefined;
-
-		// Edit only the base sections so any extension sections survive untouched. A missing
-		// section is deleted, which a consumer reads as the section being removed.
-		using catalog = producer.lock();
-		if (video !== undefined) catalog.value.video = video;
-		else delete catalog.value.video;
-
-		if (audio !== undefined) catalog.value.audio = audio;
-		else delete catalog.value.audio;
 	}
 
 	close() {
