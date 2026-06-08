@@ -13,7 +13,7 @@ mod diff;
 
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Poll;
 
 use serde::Serialize;
@@ -121,26 +121,25 @@ impl<T: Serialize> Producer<T> {
 	///
 	/// The returned [`Guard`] derefs to the last-published value (or `T::default()` if nothing has
 	/// been published yet). Editing it through [`DerefMut`] marks the guard dirty; when a dirty
-	/// guard drops it publishes the result via [`update`](Self::update), a no-op if unchanged.
+	/// guard drops it publishes the result, a no-op if unchanged.
 	///
-	/// This is the counterpart to a callback: hold the guard, mutate, drop. Independent owners can
-	/// each lock in turn and edit only their own fields. Every lock starts from the latest value,
-	/// so their changes compose instead of clobbering one another. Hold at most one guard at a time.
-	pub fn lock(&mut self) -> Guard<T>
+	/// This is the counterpart to a callback: hold the guard, mutate, drop. The guard holds the
+	/// producer's lock for its lifetime, so independent owners are serialized: each one starts from
+	/// the latest value and their changes compose instead of clobbering. Don't hold a guard across
+	/// an `.await`, since that keeps the lock held while suspended.
+	pub fn lock(&mut self) -> Guard<'_, T>
 	where
 		T: Default + DeserializeOwned,
 	{
-		let value = self
-			.inner
-			.lock()
-			.unwrap()
+		let inner = self.inner.lock().unwrap();
+		let value = inner
 			.last
 			.as_ref()
 			.and_then(|last| serde_json::from_value(last.clone()).ok())
 			.unwrap_or_default();
 
 		Guard {
-			inner: self.inner.clone(),
+			inner,
 			value,
 			dirty: false,
 		}
@@ -154,15 +153,15 @@ impl<T: Serialize> Producer<T> {
 
 /// An RAII editing guard returned by [`Producer::lock`].
 ///
-/// Derefs to the current value. Mutating it through [`DerefMut`] marks it dirty, and dropping a
-/// dirty guard publishes the edited value.
-pub struct Guard<T: Serialize> {
-	inner: Arc<Mutex<Inner>>,
+/// Holds the producer's lock for its lifetime and derefs to the current value. Mutating it through
+/// [`DerefMut`] marks it dirty, and dropping a dirty guard publishes the edited value.
+pub struct Guard<'a, T: Serialize> {
+	inner: MutexGuard<'a, Inner>,
 	value: T,
 	dirty: bool,
 }
 
-impl<T: Serialize> Deref for Guard<T> {
+impl<T: Serialize> Deref for Guard<'_, T> {
 	type Target = T;
 
 	fn deref(&self) -> &T {
@@ -170,20 +169,19 @@ impl<T: Serialize> Deref for Guard<T> {
 	}
 }
 
-impl<T: Serialize> DerefMut for Guard<T> {
+impl<T: Serialize> DerefMut for Guard<'_, T> {
 	fn deref_mut(&mut self) -> &mut T {
 		self.dirty = true;
 		&mut self.value
 	}
 }
 
-impl<T: Serialize> Drop for Guard<T> {
+impl<T: Serialize> Drop for Guard<'_, T> {
 	fn drop(&mut self) {
 		if !self.dirty {
 			return;
 		}
 
-		// Serialize before taking the lock so a failure can't poison the mutex mid-update.
 		let Ok(json) = serde_json::to_value(&self.value) else {
 			return;
 		};
@@ -191,7 +189,8 @@ impl<T: Serialize> Drop for Guard<T> {
 			return;
 		};
 
-		let _ = self.inner.lock().unwrap().update(json, snapshot);
+		// We already hold the lock, so publish through the held guard rather than re-locking.
+		let _ = self.inner.update(json, snapshot);
 	}
 }
 
