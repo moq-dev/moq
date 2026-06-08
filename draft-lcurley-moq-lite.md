@@ -151,7 +151,7 @@ A Frame is a payload of bytes within a Group.
 A frame is used to represent a chunk of data with an upfront size.
 The contents are opaque to the moq-lite layer.
 
-Each frame carries a presentation timestamp expressed in the parent Track's `Timescale` (units per second, negotiated in SUBSCRIBE_OK), and a duration in the same scale.
+Each frame carries a presentation timestamp expressed in the parent Track's `Timescale` (units per second, part of the [TRACK_INFO](#track-info)), and a duration in the same scale.
 The timestamp is the source-of-truth for media time and is used by the moq-lite layer for [expiration](#expiration) decisions instead of wall-clock arrival time.
 The duration is a hint for the application layer (e.g. presentation scheduling) and is not used by moq-lite itself; a duration of `0` means unknown and the frame is presented until the next frame begins.
 A Track with a `Timescale` of 0 (unspecified) carries no meaningful timestamps or durations and falls back to wall-clock arrival time for expiration.
@@ -261,6 +261,8 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 | ------- | ------------- | ----------- |
 |    0x5  | Goaway       | Either      |
 | ------- | ------------- | ----------- |
+|    0x6  | Track        | Subscriber  |
+| ------- | ------------- | ----------- |
 
 ### Announce
 A subscriber can open an Announce Stream to discover broadcasts matching a prefix.
@@ -295,22 +297,42 @@ There MAY be multiple Announce Streams, potentially containing overlapping prefi
 A subscriber opens Subscribe Streams to request a Track.
 
 The subscriber MUST start a Subscribe Stream with a SUBSCRIBE message followed by any number of SUBSCRIBE_UPDATE messages.
-The publisher replies with a SUBSCRIBE_OK message followed by any number of SUBSCRIBE_DROP and additional SUBSCRIBE_OK messages.
-The first message on the response stream MUST be a SUBSCRIBE_OK; it is not valid to send a SUBSCRIBE_DROP before SUBSCRIBE_OK.
+When a start group can be resolved, the publisher replies with a SUBSCRIBE_OK message (confirming the subscription and resolving its start group), followed by any number of SUBSCRIBE_END and SUBSCRIBE_DROP messages.
+When the accepted track has already ended with no matching groups there is no start group to resolve, so the publisher sends SUBSCRIBE_END with no preceding SUBSCRIBE_OK.
+A rejection is a stream reset: if the publisher cannot serve the subscription — the track does not exist, or it otherwise refuses — it MUST reset the stream rather than leave it pending, and SHOULD do so promptly (within roughly a round trip) so the subscriber is not left waiting.
+A subscription the publisher accepts but has no groups for yet is not a rejection: for a live track the publisher MAY withhold SUBSCRIBE_OK until the first matching group resolves the start. A subscriber therefore distinguishes "pending" from "refused" by the stream reset, not by a timeout.
+The Subscribe Stream does not carry the track's publisher properties — those are immutable and fetched once via a [Track Stream](#track-stream) (see [TRACK_INFO](#track-info)).
+The subscriber MUST have the track's TRACK_INFO before it can parse the FRAME messages that arrive on Group Streams, since the timescale and compression determine the frame wire format; it MAY open the Track and Subscribe streams concurrently and buffer frames until TRACK_INFO arrives.
 
-The publisher closes the stream (FIN) when every group from start to end has been accounted for, either via a GROUP stream (completed or reset) or a SUBSCRIBE_DROP message.
-Unbounded subscriptions (no end group) stay open until the publisher closes the stream to indicate the track has ended, or either endpoint resets.
+The publisher sends SUBSCRIBE_OK once the absolute start group is resolved, and SUBSCRIBE_END once no further groups will be produced (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
+The publisher closes the stream (FIN) only once every group from start to end has been accounted for, either via a GROUP stream (completed or reset) or a SUBSCRIBE_DROP message.
+This MAY occur after SUBSCRIBE_END, since stragglers within the range can still be dropped.
+Unbounded subscriptions (no end group) stay open until the publisher sends SUBSCRIBE_END (and accounts for the remaining groups) to indicate the track has ended, or either endpoint resets.
 Either endpoint MAY reset/cancel the stream at any time.
 
 ### Fetch
 A subscriber opens a Fetch Stream (0x3) to request a single Group from a Track.
 
 The subscriber sends a FETCH message containing the broadcast path, track name, priority, group sequence, and the frame index at which to start.
-Unlike Group Streams (which MUST start with a GROUP message), the publisher responds with FRAME messages directly on the same bidirectional stream — there is no preceding GROUP header.
+The publisher responds with FRAME messages directly on the same bidirectional stream — there is no response header.
 The Subscribe ID and Group Sequence for the returned FRAME messages are implicit, taken from the original FETCH request.
+As with a subscription, the subscriber MUST already have the track's [TRACK_INFO](#track-info) to parse the returned frames; because the properties are immutable, a single Track Stream lookup is reused across every FETCH of that track (group-by-group fetches do not re-fetch it).
 The publisher FINs the stream after the last frame, or resets the stream on error.
 
 Fetch behaves like HTTP: a single request/response per stream.
+
+### Track {#track-stream}
+A subscriber opens a Track Stream (0x6) to learn a Track's immutable publisher properties without subscribing or fetching.
+
+The subscriber sends a TRACK message containing the broadcast path and track name.
+The publisher replies with a single TRACK_INFO message and then FINs the stream, or resets the stream on error (e.g. the track does not exist).
+The returned properties are fixed for the lifetime of the track, so the subscriber SHOULD cache TRACK_INFO and reuse it across every SUBSCRIBE and FETCH for that track rather than requesting it again.
+When the track was discovered via an ANNOUNCE, the cached value is tied to that advertisement: if the broadcast is re-announced (a new `active` ANNOUNCE that atomically replaces the prior one), the subscriber MUST discard the cached TRACK_INFO and MUST re-request it before parsing any further FRAME messages, since the timescale or compression may have changed.
+If FRAME messages cannot be decoded against the cached TRACK_INFO (for example a malformed delta or payload after a missed re-announcement), the subscriber MUST reset the affected stream with a protocol violation and re-request TRACK_INFO.
+A subscriber that reached the track without an advertisement (e.g. a path known out of band) has no such invalidation signal; it MAY re-request TRACK_INFO whenever it needs to confirm freshness (for example on a new session). A stale cache only risks misparsing frames from a changed track, so the subscriber that cannot observe re-announcements SHOULD NOT cache TRACK_INFO beyond a single connection.
+
+Because a subscriber MAY open the Track stream concurrently with a SUBSCRIBE or FETCH (see [Subscribe](#subscribe) and [Fetch](#fetch)) and cannot parse any buffered group frames until TRACK_INFO arrives, the publisher SHOULD prioritize TRACK_INFO ahead of group data on the connection.
+Otherwise the concurrent case — intended to keep a cold subscribe or fetch to a single round trip — would stall behind queued group frames that the subscriber cannot yet decode.
 
 ### Probe
 A subscriber opens a Probe Stream (0x4) to measure, and optionally increase, the available bitrate of the connection.
@@ -351,40 +373,36 @@ A publisher SHOULD attempt to transmit streams based on these fields.
 This depends on the QUIC implementation and it may not be possible to get fine-grained control.
 
 ### Priority
-The `Subscriber Priority` is scoped to the connection.
-The `Publisher Priority` SHOULD be used to resolve conflicts or ties.
+The `Subscriber Priority` is scoped to the connection and MAY change over the life of the subscription via SUBSCRIBE_UPDATE.
+The `Publisher Priority` is fixed for the lifetime of the Track (see [TRACK_INFO](#track-info)) and SHOULD be used only to resolve conflicts or ties.
 
 A conflict can occur when a relay tries to serve multiple downstream subscriptions from a single upstream subscription.
-Any upstream subscription SHOULD use the publisher priority, not some combination of different subscriber priorities.
+The relay cannot pick any one subscriber's priority, so the upstream subscription SHOULD use the publisher priority instead of some combination of different subscriber priorities.
+Publisher priority is therefore mostly relevant on the upstream (origin-facing) leg of a relay; closer to the subscriber, the subscriber priority dominates.
 
 Rather than try to explain everything, here's an example:
 
 **Example:**
 There are two people in a conference call, Ali and Bob.
 
-We subscribe to both of their audio tracks with priority 2 and video tracks with priority 1.
-This will cause equal priority for `Ali` and `Bob` while prioritizing audio.
-```
+We subscribe to both of their audio tracks with subscriber priority 2 and video tracks with subscriber priority 1.
+Each publisher advertises a fixed publisher priority — here audio at 2 and video at 1 — used only to break ties.
+This results in equal priority for `Ali` and `Bob` while prioritizing audio.
+```text
 ali/audio + bob/audio: subscriber_priority=2 publisher_priority=2
 ali/video + bob/video: subscriber_priority=1 publisher_priority=1
 ```
 
-If Bob starts actively speaking, they can bump their publisher priority via a SUBSCRIBE_OK message.
-This would cause tracks be delivered in this order:
-```
-bob/audio: subscriber_priority=2 publisher_priority=3
+Because publisher priority cannot change, dynamic adaptation is the subscriber's job.
+If the subscriber detects that Bob is actively speaking, it raises the subscriber priority of Bob's tracks via SUBSCRIBE_UPDATE:
+```text
+bob/audio: subscriber_priority=4 publisher_priority=2
+bob/video: subscriber_priority=3 publisher_priority=1
 ali/audio: subscriber_priority=2 publisher_priority=2
-bob/video: subscriber_priority=1 publisher_priority=2
 ali/video: subscriber_priority=1 publisher_priority=1
 ```
 
-The subscriber priority takes precedence, so we could override it if we decided to full-screen Ali's window:
-```
-ali/audio subscriber_priority=4 publisher_priority=2
-ali/video subscriber_priority=3 publisher_priority=1
-bob/audio subscriber_priority=2 publisher_priority=3
-bob/video subscriber_priority=1 publisher_priority=2
-```
+The subscriber priority takes precedence, so the subscriber can likewise full-screen Ali's window by raising the subscriber priority of Ali's tracks above Bob's.
 
 ### Ordered
 The `Subscriber Ordered` field signals if older (0x1) or newer (0x0) groups should be transmitted first within a Track.
@@ -400,7 +418,7 @@ An application MUST support gaps and out-of-order delivery even when `ordered` i
 
 ## Expiration
 Expiration governs when an older group is dropped from a live subscription's Group Stream(s).
-It is distinct from the publisher's retention guarantee (see `Publisher Cache` in [SUBSCRIBE_OK](#subscribe-ok)), which controls whether older groups remain available for FETCH or future subscriptions.
+It is distinct from the publisher's retention guarantee (see `Publisher Cache` in [TRACK_INFO](#track-info)), which controls whether older groups remain available for FETCH or future subscriptions.
 
 It is not crucial to aggressively expire groups thanks to [prioritization](#prioritization).
 However, a lower priority group will still consume RAM, bandwidth, and potentially flow control.
@@ -478,7 +496,7 @@ DATAGRAM Body {
 }
 ~~~
 
-`Timestamp` and `Duration` are present only when the Track's `Publisher Timescale` (see [SUBSCRIBE_OK](#subscribe-ok)) is non-zero.
+`Timestamp` and `Duration` are present only when the Track's `Publisher Timescale` (see [TRACK_INFO](#track-info)) is non-zero.
 When `Publisher Timescale` is 0, both fields are omitted from the wire and the datagram body consists of just `Subscribe ID`, `Group Sequence`, and `Payload`.
 
 **Subscribe ID**:
@@ -499,7 +517,7 @@ A value of `0` means the duration is unknown; the frame is presented until the n
 
 **Payload**:
 The frame payload, extending to the end of the datagram.
-If the Track's `Publisher Compression` is non-zero, the payload is compressed using the negotiated algorithm (see [SUBSCRIBE_OK](#subscribe-ok)).
+If the Track's `Publisher Compression` is non-zero, the payload is compressed using the negotiated algorithm (see [TRACK_INFO](#track-info)).
 The total datagram body (including all header fields above and the compressed payload if applicable) MUST NOT exceed 1200 bytes.
 This limit ensures the datagram fits within the minimum QUIC path MTU without IP-layer fragmentation.
 Payloads that would not fit MUST be sent as a Group Stream instead.
@@ -713,7 +731,7 @@ The subscriber's preference, in milliseconds, for how long a non-latest group ma
 The publisher SHOULD reset (at the QUIC level) Group Streams for groups whose age relative to the latest group exceeds this duration.
 Applies only to non-latest groups; the latest group is never dropped on staleness grounds.
 A value of `0` means the subscriber wants only the latest group in live delivery (older groups are immediately stale once a newer group arrives).
-This is a delivery-time preference, not a retention rule: the publisher's cache (see `Publisher Cache` in [SUBSCRIBE_OK](#subscribe-ok)) may still hold these groups for FETCH or future subscriptions.
+This is a delivery-time preference, not a retention rule: the publisher's cache (see `Publisher Cache` in [TRACK_INFO](#track-info)) may still hold these groups for FETCH or future subscriptions.
 See the [Expiration](#expiration) section for more information.
 
 **Group Start**:
@@ -746,44 +764,51 @@ SUBSCRIBE_UPDATE Message {
 See [SUBSCRIBE](#subscribe) for information about each field.
 
 
-## SUBSCRIBE_OK {#subscribe-ok}
-A SUBSCRIBE_OK message is sent in response to a SUBSCRIBE.
-The publisher MAY send multiple SUBSCRIBE_OK messages to update the subscription.
-The first message on the response stream MUST be a SUBSCRIBE_OK; a SUBSCRIBE_DROP MUST NOT precede it.
+## TRACK
+TRACK is sent by a subscriber to request a Track's immutable publisher properties.
+It is the first message on a Track Stream (0x6).
 
 ~~~
-SUBSCRIBE_OK Message {
-  Type (i) = 0x0
+TRACK Message {
+  Message Length (i)
+  Broadcast Path (s)
+  Track Name (s)
+}
+~~~
+
+**Broadcast Path**:
+The broadcast path of the track.
+
+**Track Name**:
+The name of the track.
+
+## TRACK_INFO {#track-info}
+TRACK_INFO is sent by the publisher in response to a TRACK message.
+It is the sole message on the Track Stream; the publisher FINs immediately afterward, or resets the stream on error (e.g. the track does not exist).
+
+~~~
+TRACK_INFO Message {
   Message Length (i)
   Publisher Priority (8)
   Publisher Ordered (8)
   Publisher Cache (i)
-  Group Start (i)
-  Group End (i)
   Publisher Timescale (i)
   Publisher Compression (i)
 }
 ~~~
 
-**Type**:
-Set to 0x0 to indicate a SUBSCRIBE_OK message.
+Every field is **fixed for the lifetime of the Track** and MUST NOT change; a change requires a new Track (a re-announcement of the broadcast).
+This immutability is what lets the properties live on their own stream — fetched once and cached — instead of being echoed on every SUBSCRIBE and FETCH response.
+It is also deliberate for relays: a relay serving one upstream subscription to many downstream subscribers would otherwise have to fan a single publisher-side change out to every downstream (and invalidate any cached groups) — publisher changes fan *out*.
+Subscriber properties (see [SUBSCRIBE](#subscribe)) are the opposite: they fan *in* at the relay, which already merges them, so they MAY change freely via SUBSCRIBE_UPDATE.
 
-**Group Start**:
-The resolved absolute start group sequence.
-A value of 0 means the start group is not yet known; the publisher MUST send a subsequent SUBSCRIBE_OK with a resolved value.
-A non-zero value is the absolute group sequence + 1.
+**Publisher Priority**:
+The publisher's priority for this Track, represented as a u8, used only to resolve ties between subscriptions of equal subscriber priority.
+See the [Prioritization](#prioritization) section for more information.
 
-**Group End**:
-The resolved absolute end group sequence (inclusive).
-A value of 0 means unbounded.
-A non-zero value is the absolute group sequence + 1.
-
-**Publisher Timescale**:
-The number of timestamp units per second for frame timestamps on this Track.
-A value of 0 means unspecified; the subscriber MUST treat per-frame timestamps as opaque and fall back to wall-clock arrival time for [expiration](#expiration).
-When `Publisher Timescale` is 0, the per-frame `Timestamp Delta` and `Duration Delta` fields are omitted from FRAME messages and the `Timestamp` and `Duration` fields are omitted from datagram bodies (see [FRAME](#frame) and [Datagrams](#datagrams)).
-A non-zero value is fixed for the lifetime of the subscription and MUST NOT change in subsequent SUBSCRIBE_OK messages; a change in timescale requires a new subscription.
-Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (audio sample rate), and `90000` (RTP video clock).
+**Publisher Ordered**:
+The publisher's group ordering preference (ascending `0x1` or descending `0x0`), used only to resolve ties.
+See the [Prioritization](#prioritization) section for more information.
 
 **Publisher Cache**:
 The minimum age, in milliseconds, the publisher guarantees to retain a group past the arrival of a newer group.
@@ -795,7 +820,12 @@ Analogous to HTTP `Cache-Control: max-age` as a lower bound:
 
 A value of `0` means no retention guarantee beyond live delivery; older groups MAY still be available but the publisher makes no promise.
 The unit is milliseconds (independent of `Publisher Timescale`) so cache retention is decoupled from media time when timescale is unspecified.
-The value MAY change in subsequent SUBSCRIBE_OK messages to reflect changing publisher policy; the subscriber SHOULD use the most recent value.
+
+**Publisher Timescale**:
+The number of timestamp units per second for frame timestamps on this Track.
+A value of 0 means unspecified; the subscriber MUST treat per-frame timestamps as opaque and fall back to wall-clock arrival time for [expiration](#expiration).
+When `Publisher Timescale` is 0, the per-frame `Timestamp Delta` and `Duration Delta` fields are omitted from FRAME messages and the `Timestamp` and `Duration` fields are omitted from datagram bodies (see [FRAME](#frame) and [Datagrams](#datagrams)).
+Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (audio sample rate), and `90000` (RTP video clock).
 
 **Publisher Compression**:
 The compression algorithm applied to every Frame `Payload` on this Track.
@@ -810,20 +840,60 @@ An empty payload (size 0) MUST NOT be compressed and remains empty on the wire.
 
 The publisher SHOULD only enable compression for payload types that benefit from it (e.g. JSON, text, uncompressed binary structures).
 Already-compressed media (e.g. H.264, Opus, AV1) gains nothing and SHOULD use `none`.
-The value is fixed for the lifetime of the subscription and MUST NOT change in subsequent SUBSCRIBE_OK messages; a change in compression requires a new subscription.
-A subscriber that does not recognize the value MUST close the subscription with a protocol violation.
+A subscriber that does not recognize the value MUST NOT open a Subscribe or Fetch stream for the track; if it already opened one before receiving TRACK_INFO, it MUST reset that stream with a protocol violation. The Track Stream itself needs no reset — the publisher FINs it after TRACK_INFO.
 
 A relay MAY transcode payloads between compression algorithms (including bridging different protocol versions, e.g. a moq-lite-05 publisher to a moq-lite-04 subscriber) provided the decompressed bytes are identical to what the publisher produced.
 A relay SHOULD NOT compress an originally-uncompressed payload unless there is a strong content signal that compression is beneficial (e.g. the track name ends in `.json`), because the relay cannot otherwise predict whether compression will help or hurt.
 
-See [SUBSCRIBE](#subscribe) for information about the other fields.
+## SUBSCRIBE_OK {#subscribe-ok}
+A SUBSCRIBE_OK message confirms a subscription and resolves its absolute start group.
+It is the first message the publisher sends on the Subscribe Stream, once the start group is known.
+
+This is the trimmed-down counterpart of MoqTransport's SUBSCRIBE_OK: it retains the name and the role of the publisher's positive response, but carries only the resolved start group (all other per-track properties live in [TRACK_INFO](#track-info)).
+
+~~~
+SUBSCRIBE_OK Message {
+  Type (i) = 0x0
+  Message Length (i)
+  Group (i)
+}
+~~~
+
+**Type**:
+Set to 0x0 to indicate a SUBSCRIBE_OK message.
+
+**Group**:
+The absolute sequence number of the first group that will be delivered.
+This MUST be greater than or equal to the requested `Group Start` (see [SUBSCRIBE](#subscribe)).
+If it is strictly greater, the groups in between are unavailable and will not be delivered; SUBSCRIBE_OK thus also acts as an implicit drop of that leading range, and no separate SUBSCRIBE_DROP is required for it.
+A subscriber that requested the latest group (`Group Start` = 0) learns the resolved sequence here.
+
+## SUBSCRIBE_END {#subscribe-end}
+A SUBSCRIBE_END message is sent by the publisher to signal that no group after a given sequence will be produced.
+
+~~~
+SUBSCRIBE_END Message {
+  Type (i) = 0x1
+  Message Length (i)
+  Group (i)
+}
+~~~
+
+**Type**:
+Set to 0x1 to indicate a SUBSCRIBE_END message.
+
+**Group**:
+The absolute sequence number of the last group that may be delivered (inclusive).
+The subscriber MUST NOT wait for any group after this sequence.
+SUBSCRIBE_END bounds the range but does not by itself end the stream: the publisher MAY still send SUBSCRIBE_DROP for groups at or below this sequence that it cannot deliver, and FINs the stream only once every group up to this sequence has been accounted for.
 
 ## SUBSCRIBE_DROP
 A SUBSCRIBE_DROP message is sent by the publisher on the Subscribe Stream when groups cannot be served.
+It MAY arrive at any point after the subscription is opened, including after SUBSCRIBE_END for stragglers within the resolved range (a leading range is instead dropped implicitly by SUBSCRIBE_OK).
 
 ~~~
 SUBSCRIBE_DROP Message {
-  Type (i) = 0x1
+  Type (i) = 0x2
   Message Length (i)
   Group Start (i)
   Group End (i)
@@ -832,7 +902,7 @@ SUBSCRIBE_DROP Message {
 ~~~
 
 **Type**:
-Set to 0x1 to indicate a SUBSCRIBE_DROP message.
+Set to 0x2 to indicate a SUBSCRIBE_DROP message.
 
 **Group Start**:
 The first absolute group sequence in the dropped range.
@@ -880,8 +950,10 @@ Only once the group is complete is the out-of-range case resolved: if `Frame Sta
 
 The returned FRAME messages are otherwise unchanged: when the Track's `Publisher Timescale` is non-zero, the first returned frame's `Timestamp Delta` is delta-encoded from `0` (i.e. its absolute timestamp), not from the timestamp of the skipped frame (see [FRAME](#frame)).
 
-The publisher responds with FRAME messages on the same stream.
+The publisher responds with FRAME messages directly on the same stream — there is no response header.
+The subscriber parses them using the track's [TRACK_INFO](#track-info), which it MUST already have (see the [Track Stream](#track-stream)); the group sequence is implicit from the FETCH request.
 The publisher FINs the stream after the last frame, or resets on error.
+There is no FETCH_ERROR message — the publisher signals failure by resetting the stream.
 
 ## PROBE
 PROBE is used to measure the available bitrate of the connection.
@@ -955,7 +1027,7 @@ FRAME Message {
 }
 ~~~
 
-`Timestamp Delta` and `Duration Delta` are present only when the Track's `Publisher Timescale` (see [SUBSCRIBE_OK](#subscribe-ok)) is non-zero.
+`Timestamp Delta` and `Duration Delta` are present only when the Track's `Publisher Timescale` (see [TRACK_INFO](#track-info)) is non-zero.
 When `Publisher Timescale` is 0, both fields are omitted from the wire and the FRAME consists of just `Message Length` and `Payload`.
 
 **Timestamp Delta**:
@@ -982,8 +1054,8 @@ The duration is an application-level hint and is not used by the moq-lite layer 
 
 **Payload**:
 An application-specific payload.
-If the Track's `Publisher Compression` is non-zero, the payload is compressed using the negotiated algorithm (see [SUBSCRIBE_OK](#subscribe-ok)) and the `Message Length` describes the compressed size.
-A generic library or relay MUST NOT inspect or modify the decompressed contents unless otherwise negotiated; recompression that preserves the decompressed bytes exactly is allowed (see [SUBSCRIBE_OK](#subscribe-ok)).
+If the Track's `Publisher Compression` is non-zero, the payload is compressed using the negotiated algorithm (see [TRACK_INFO](#track-info)) and the `Message Length` describes the compressed size.
+A generic library or relay MUST NOT inspect or modify the decompressed contents unless otherwise negotiated; recompression that preserves the decompressed bytes exactly is allowed (see [TRACK_INFO](#track-info)).
 
 
 # Appendix A: Changelog
@@ -992,17 +1064,20 @@ A generic library or relay MUST NOT inspect or modify the decompressed contents 
 - Added a SETUP message, sent once on a unidirectional Setup Stream (0x1) at the start of the session and FIN'd immediately. It carries a list of Setup Parameters for negotiating optional capabilities and extensions per-hop, replacing the prior stream-probing approach (version is still negotiated via ALPN, not SETUP). Endpoints keep exchanging non-Setup streams without waiting for SETUP, buffering only a stream whose encoding a negotiated extension would change; unknown stream types are still reset as a fallback.
 - Added a SETUP `Probe` parameter advertising the publisher's capability level: `None`, `Report` (measure and report the estimated bitrate), or `Increase` (additionally pad to probe for bandwidth above the current sending rate). The levels are nested since probing without measuring is meaningless. A subscriber must not rely on a level the publisher did not advertise.
 - Added `Frame Start` to FETCH so a subscriber can begin partway through a group instead of always at frame `0`, allowing resumption of a partially-received group.
-- Renamed `Start Group`/`End Group` to `Group Start`/`Group End` in SUBSCRIBE, SUBSCRIBE_UPDATE, SUBSCRIBE_OK, and SUBSCRIBE_DROP for consistency with the entity-first naming used elsewhere (e.g. `Group Sequence`). Wire format unchanged.
+- Added a Track Stream (0x6): a TRACK request that the publisher answers with a single TRACK_INFO message and then FINs. TRACK_INFO carries the Track's immutable publisher properties (`Publisher Priority`, `Publisher Ordered`, `Publisher Cache`, `Publisher Timescale`, `Publisher Compression`). It is fetched once and cached, so the properties are no longer echoed on every response — notably, group-by-group FETCHes reuse one lookup.
+- Removed FETCH_OK and trimmed SUBSCRIBE_OK down to a single resolved start group. Publisher properties moved to TRACK_INFO; a FETCH returns bare FRAME messages. All publisher properties are immutable for the lifetime of the Track — a publisher-side change would otherwise have to fan *out* to every downstream of a relay, whereas subscriber properties fan *in* and may still change via SUBSCRIBE_UPDATE.
+- Split the resolved group range across SUBSCRIBE_OK and a new SUBSCRIBE_END. SUBSCRIBE_OK resolves the absolute start (`>=` the requested start; a larger value implicitly drops the leading range), and SUBSCRIBE_END signals that no group will follow a given sequence (stragglers within the range may still be dropped before FIN). SUBSCRIBE_OK keeps the MoqTransport name and its role as the publisher's positive response.
+- Renamed `Start Group`/`End Group` to `Group Start`/`Group End` in SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP for consistency with the entity-first naming used elsewhere (e.g. `Group Sequence`). Wire format unchanged.
 - Allowed a duplicate `active` ANNOUNCE to atomically replace the prior advertisement (equivalent to UNANNOUNCE+ANNOUNCE). Used when only the origin or hop path changes (e.g. relay failover) without interrupting the broadcast. No new wire enum value — the existing `active` status carries the new metadata.
 - Added ANNOUNCE_OK message, sent once at the head of the Announce Stream response. Carries the publisher's `Hop ID` (hoisted out of every ANNOUNCE's Hop ID list) and an `Active Count` so subscribers can batch the initial set instead of reporting each ANNOUNCE as it trickles in.
-- Added `Publisher Timescale` to SUBSCRIBE_OK for per-track timestamp negotiation. When `Publisher Timescale` is 0, the per-frame timestamp/duration fields are omitted entirely from FRAME and datagram bodies.
+- Added `Publisher Timescale` to TRACK_INFO for per-track timestamp negotiation. When `Publisher Timescale` is 0, the per-frame timestamp/duration fields are omitted entirely from FRAME and datagram bodies.
 - Added `Timestamp Delta` and `Duration Delta` to FRAME, both zigzag-encoded signed varints (present only when timescale is non-zero). `Duration Delta = 0` is the common "unchanged" case and fits in one byte; a resolved duration of `0` means "until the next frame".
 - Added `Timestamp` and `Duration` to the QUIC datagram body (absolute, present only when timescale is non-zero).
-- Renamed `Publisher Max Latency` to `Publisher Cache` in SUBSCRIBE_OK, now defined as a minimum retention guarantee (similar to HTTP `Cache-Control: max-age`). Groups may live longer than `Publisher Cache` and remain FETCH-able.
+- Renamed `Publisher Max Latency` to `Publisher Cache` (now in TRACK_INFO), defined as a minimum retention guarantee (similar to HTTP `Cache-Control: max-age`). Groups may live longer than `Publisher Cache` and remain FETCH-able.
 - Renamed `Subscriber Max Latency` to `Subscriber Stale` in SUBSCRIBE/SUBSCRIBE_UPDATE. It is the subscriber's delivery-time preference for dropping non-latest stale groups, separate from the publisher's retention guarantee.
 - Timestamp-based expiration replaces wall-clock arrival time when a Track timescale is negotiated.
 - Added QUIC datagram delivery for groups, sharing Subscribe IDs with existing subscriptions (no separate control stream).
-- Added `Publisher Compression` to SUBSCRIBE_OK for per-frame payload compression (`none` or `deflate`).
+- Added `Publisher Compression` to TRACK_INFO for per-frame payload compression (`none` or `deflate`).
 - Added Qmux [qmux] transport bindings for TCP/TLS and WebSocket, for environments where UDP is unavailable. The WebSocket binding uses the WebSocket message framing in place of the Qmux Record `Size` field.
 
 ## moq-lite-04
