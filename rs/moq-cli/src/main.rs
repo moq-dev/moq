@@ -230,7 +230,7 @@ async fn run_subscribe(
 
 	tokio::select! {
 		res = run_announced_subscribe(consumer, broadcast, args) => res,
-		res = reconnect.closed() => res.map_err(Into::into),
+		res = reconnect.closed() => Ok(res?),
 		_ = tokio::signal::ctrl_c() => Ok(()),
 	}
 }

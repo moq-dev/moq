@@ -18,16 +18,15 @@ mod error;
 pub mod jemalloc;
 mod log;
 #[cfg(feature = "noq")]
-mod noq;
+pub mod noq;
 #[cfg(feature = "quinn")]
-mod quinn;
+pub mod quinn;
 mod reconnect;
 mod server;
-#[cfg(any(feature = "noq", feature = "quinn"))]
-mod tls;
+pub mod tls;
 mod util;
 #[cfg(feature = "websocket")]
-mod websocket;
+pub mod websocket;
 
 pub use client::*;
 pub use error::{Error, Result};
@@ -47,14 +46,14 @@ pub use web_transport_noq;
 pub use web_transport_quinn;
 
 #[cfg(feature = "quiche")]
-mod quiche;
+pub mod quiche;
 #[cfg(feature = "quiche")]
 pub use web_transport_quiche;
 
 #[cfg(feature = "iroh")]
-mod iroh;
+pub mod iroh;
 #[cfg(feature = "iroh")]
-pub use iroh::*;
+pub use iroh::{IrohEndpoint, IrohEndpointConfig, IrohRequest};
 
 /// The QUIC backend to use for connections.
 #[derive(Clone, Debug, clap::ValueEnum, serde::Serialize, serde::Deserialize)]

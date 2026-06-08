@@ -111,7 +111,7 @@ impl ClientTls {
 	/// Loads the configured roots (or the platform's native roots if none),
 	/// optionally attaches a client identity for mTLS, and disables server
 	/// certificate verification when `disable_verify` is set.
-	pub fn build(&self) -> crate::Result<rustls::ClientConfig> {
+	pub fn build(&self) -> std::result::Result<rustls::ClientConfig, crate::tls::Error> {
 		use rustls::pki_types::CertificateDer;
 		use rustls::pki_types::PrivateKeyDer;
 		use rustls::pki_types::pem::PemObject;
@@ -125,20 +125,20 @@ impl ClientTls {
 				tracing::warn!(%err, "failed to load root cert");
 			}
 			for cert in native.certs {
-				roots.add(cert).map_err(Error::AddRoot)?;
+				roots.add(cert).map_err(crate::tls::Error::AddRoot)?;
 			}
 		} else {
 			for root in &self.root {
-				let file = std::fs::File::open(root).map_err(Error::OpenCert)?;
+				let file = std::fs::File::open(root).map_err(crate::tls::Error::Open)?;
 				let mut reader = std::io::BufReader::new(file);
 				let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(&mut reader)
 					.collect::<std::result::Result<_, _>>()
-					.map_err(Error::ReadCerts)?;
+					.map_err(crate::tls::Error::Read)?;
 				if certs.is_empty() {
-					return Err(Error::EmptyRoots(root.clone()));
+					return Err(crate::tls::Error::EmptyRoots(root.clone()));
 				}
 				for cert in certs {
-					roots.add(cert).map_err(Error::AddRoot)?;
+					roots.add(cert).map_err(crate::tls::Error::AddRoot)?;
 				}
 			}
 		}
@@ -146,24 +146,27 @@ impl ClientTls {
 		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
 		// QUIC always negotiates TLS 1.3 regardless of this setting.
 		let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
-			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
+			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+			.map_err(crate::tls::Error::from)?
 			.with_root_certificates(roots);
 
 		let mut tls = match (&self.cert, &self.key) {
 			(Some(cert_path), Some(key_path)) => {
-				let cert_pem = std::fs::read(cert_path).map_err(Error::ReadFile)?;
+				let cert_pem = std::fs::read(cert_path).map_err(crate::tls::Error::ReadFile)?;
 				let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
 					.collect::<std::result::Result<_, _>>()
-					.map_err(Error::ReadCerts)?;
+					.map_err(crate::tls::Error::Read)?;
 				if chain.is_empty() {
-					return Err(Error::NoCerts);
+					return Err(crate::tls::Error::Empty);
 				}
-				let key_pem = std::fs::read(key_path).map_err(Error::ReadFile)?;
-				let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(Error::KeyPem)?;
-				builder.with_client_auth_cert(chain, key).map_err(Error::ClientAuth)?
+				let key_pem = std::fs::read(key_path).map_err(crate::tls::Error::ReadFile)?;
+				let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(crate::tls::Error::Key)?;
+				builder
+					.with_client_auth_cert(chain, key)
+					.map_err(crate::tls::Error::ClientAuth)?
 			}
 			(None, None) => builder.with_no_client_auth(),
-			_ => return Err(Error::IncompleteClientAuth),
+			_ => return Err(crate::tls::Error::IncompleteClientAuth),
 		};
 
 		if self.disable_verify.unwrap_or_default() {

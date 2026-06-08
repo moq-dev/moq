@@ -1,27 +1,97 @@
-use crate::Error;
-use crate::crypto;
-use crate::server::{ServerTlsConfig, ServerTlsInfo};
-use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
-use std::fs;
-use std::io;
 use std::path::PathBuf;
+
+#[cfg(any(feature = "quinn", feature = "noq"))]
+use crate::crypto;
+#[cfg(any(feature = "quinn", feature = "noq"))]
+use crate::server::{ServerTlsConfig, ServerTlsInfo};
+#[cfg(any(feature = "quinn", feature = "noq"))]
+use rustls::pki_types::pem::PemObject;
+#[cfg(any(feature = "quinn", feature = "noq"))]
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+#[cfg(any(feature = "quinn", feature = "noq"))]
 use std::sync::{Arc, RwLock};
+#[cfg(any(feature = "quinn", feature = "noq"))]
+use std::{fs, io};
+
+/// Errors loading or generating TLS certificates and keys.
+///
+/// Shared by the client TLS config and the quinn/noq servers so each backend's
+/// error type can compose it via `#[from]`.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("failed to open certificate file")]
+	Open(#[source] std::io::Error),
+
+	#[error("failed to read file")]
+	ReadFile(#[source] std::io::Error),
+
+	#[error("failed to read certificates")]
+	Read(#[source] rustls::pki_types::pem::Error),
+
+	#[error("failed to parse private key")]
+	Key(#[source] rustls::pki_types::pem::Error),
+
+	#[error("no certificates found")]
+	Empty,
+
+	#[error("no roots found in {}", .0.display())]
+	EmptyRoots(PathBuf),
+
+	#[error("failed to add root certificate")]
+	AddRoot(#[source] rustls::Error),
+
+	#[error("failed to configure client certificate")]
+	ClientAuth(#[source] rustls::Error),
+
+	#[error("both --client-tls-cert and --client-tls-key must be provided")]
+	IncompleteClientAuth,
+
+	#[error("must provide both cert and key")]
+	CertKeyCountMismatch,
+
+	#[error("must provide at least one cert/key pair or generate entry")]
+	NoCertSource,
+
+	#[error("private key {} doesn't match certificate {}", key.display(), cert.display())]
+	KeyMismatch {
+		key: PathBuf,
+		cert: PathBuf,
+		#[source]
+		source: rustls::Error,
+	},
+
+	#[error(transparent)]
+	Rustls(#[from] rustls::Error),
+
+	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+	#[error(transparent)]
+	Rcgen(#[from] rcgen::Error),
+
+	#[error("no crypto provider available; enable aws-lc-rs or ring feature")]
+	NoCryptoProvider,
+}
+
+#[cfg(any(feature = "quinn", feature = "noq"))]
+type Result<T> = std::result::Result<T, Error>;
 
 // ── FingerprintVerifier ─────────────────────────────────────────────
 
+#[cfg(any(feature = "quinn", feature = "noq"))]
 #[derive(Debug)]
 pub(crate) struct FingerprintVerifier {
 	provider: crypto::Provider,
 	fingerprint: Vec<u8>,
 }
 
+#[cfg(any(feature = "quinn", feature = "noq"))]
 impl FingerprintVerifier {
 	pub fn new(provider: crypto::Provider, fingerprint: Vec<u8>) -> Self {
 		Self { provider, fingerprint }
 	}
 }
 
+#[cfg(any(feature = "quinn", feature = "noq"))]
 impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 	fn verify_server_cert(
 		&self,
@@ -30,7 +100,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 		_server_name: &ServerName<'_>,
 		_ocsp: &[u8],
 		_now: UnixTime,
-	) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+	) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
 		let fingerprint = crypto::sha256(&self.provider, end_entity);
 		if fingerprint.as_ref() == self.fingerprint.as_slice() {
 			Ok(rustls::client::danger::ServerCertVerified::assertion())
@@ -44,7 +114,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 		message: &[u8],
 		cert: &CertificateDer<'_>,
 		dss: &rustls::DigitallySignedStruct,
-	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
 		rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
 	}
 
@@ -53,7 +123,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 		message: &[u8],
 		cert: &CertificateDer<'_>,
 		dss: &rustls::DigitallySignedStruct,
-	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
 		rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
 	}
 
@@ -64,12 +134,14 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 
 // ── ServeCerts ──────────────────────────────────────────────────────
 
+#[cfg(any(feature = "quinn", feature = "noq"))]
 #[derive(Debug)]
 pub(crate) struct ServeCerts {
 	pub info: Arc<RwLock<ServerTlsInfo>>,
 	provider: crypto::Provider,
 }
 
+#[cfg(any(feature = "quinn", feature = "noq"))]
 impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
@@ -81,7 +153,7 @@ impl ServeCerts {
 		}
 	}
 
-	pub fn load_certs(&self, config: &ServerTlsConfig) -> crate::Result<()> {
+	pub fn load_certs(&self, config: &ServerTlsConfig) -> Result<()> {
 		if config.cert.len() != config.key.len() {
 			return Err(Error::CertKeyCountMismatch);
 		}
@@ -106,20 +178,20 @@ impl ServeCerts {
 	}
 
 	// Load a certificate and corresponding key from a file, but don't add it to the certs
-	fn load(&self, chain_path: &PathBuf, key_path: &PathBuf) -> crate::Result<rustls::sign::CertifiedKey> {
-		let chain = fs::File::open(chain_path).map_err(Error::OpenCert)?;
+	fn load(&self, chain_path: &PathBuf, key_path: &PathBuf) -> Result<rustls::sign::CertifiedKey> {
+		let chain = fs::File::open(chain_path).map_err(Error::Open)?;
 		let mut chain = io::BufReader::new(chain);
 
 		let chain: Vec<CertificateDer> = CertificateDer::pem_reader_iter(&mut chain)
 			.collect::<std::result::Result<_, _>>()
-			.map_err(Error::ReadCerts)?;
+			.map_err(Error::Read)?;
 
 		if chain.is_empty() {
-			return Err(Error::NoCerts);
+			return Err(Error::Empty);
 		}
 
 		// Read the PEM private key
-		let key = PrivateKeyDer::from_pem_file(key_path).map_err(Error::KeyPem)?;
+		let key = PrivateKeyDer::from_pem_file(key_path).map_err(Error::Key)?;
 		let key = self.provider.key_provider.load_private_key(key)?;
 
 		let certified_key = rustls::sign::CertifiedKey::new(chain, key);
@@ -134,7 +206,7 @@ impl ServeCerts {
 	}
 
 	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-	fn generate(&self, hostnames: &[String]) -> crate::Result<rustls::sign::CertifiedKey> {
+	fn generate(&self, hostnames: &[String]) -> Result<rustls::sign::CertifiedKey> {
 		let key_pair = rcgen::KeyPair::generate()?;
 
 		let mut params = rcgen::CertificateParams::new(hostnames)?;
@@ -157,7 +229,7 @@ impl ServeCerts {
 	}
 
 	#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
-	fn generate(&self, _hostnames: &[String]) -> crate::Result<rustls::sign::CertifiedKey> {
+	fn generate(&self, _hostnames: &[String]) -> Result<rustls::sign::CertifiedKey> {
 		Err(Error::NoCryptoProvider)
 	}
 
@@ -200,6 +272,7 @@ impl ServeCerts {
 	}
 }
 
+#[cfg(any(feature = "quinn", feature = "noq"))]
 impl rustls::server::ResolvesServerCert for ServeCerts {
 	fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
 		if let Some(cert) = self.best_certificate(&client_hello) {
@@ -221,7 +294,7 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 
 // ── reload_certs (unix) ─────────────────────────────────────────────
 
-#[cfg(unix)]
+#[cfg(all(unix, any(feature = "quinn", feature = "noq")))]
 pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: ServerTlsConfig) {
 	use tokio::signal::unix::{SignalKind, signal};
 

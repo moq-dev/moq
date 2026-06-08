@@ -1,4 +1,3 @@
-use crate::Error;
 use crate::client::ClientConfig;
 use crate::crypto;
 use crate::server::{ServerConfig, ServerTlsInfo};
@@ -12,6 +11,73 @@ use std::sync::{Arc, RwLock};
 use url::Url;
 use web_transport_quiche::proto::ConnectRequest;
 
+/// Errors specific to the quiche QUIC backend.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error(transparent)]
+	Io(#[from] std::io::Error),
+
+	#[error("invalid DNS name")]
+	InvalidDnsName,
+
+	#[error("fingerprint verification (http:// scheme) is not supported with the quiche backend")]
+	FingerprintUnsupported,
+
+	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
+	InvalidScheme,
+
+	#[error("missing ALPN")]
+	MissingAlpn,
+
+	#[error("failed to decode ALPN")]
+	DecodeAlpn(#[from] std::str::Utf8Error),
+
+	#[error("unsupported ALPN: {0}")]
+	UnsupportedAlpn(String),
+
+	#[error("failed to resolve bind address")]
+	ResolveBind(#[source] std::io::Error),
+
+	#[error("failed to get local address")]
+	NoLocalAddr,
+
+	#[error("--tls-cert and --tls-key are required with the quiche backend")]
+	CertRequired,
+
+	#[error("must provide matching --tls-cert and --tls-key pairs")]
+	CertPairMismatch,
+
+	#[error("failed to connect to quiche server")]
+	Connect(#[source] std::io::Error),
+
+	#[error(transparent)]
+	Connection(#[from] web_transport_quiche::ez::ConnectionError),
+
+	#[error("failed to establish quiche connection")]
+	Establish(#[source] web_transport_quiche::ez::ConnectionError),
+
+	#[error("failed to connect to quiche server")]
+	ClientConnect(#[source] web_transport_quiche::ClientError),
+
+	#[error("failed to create quiche server")]
+	ServerBuild(#[source] std::io::Error),
+
+	#[error("failed to accept WebTransport request")]
+	AcceptRequest(#[source] web_transport_quiche::ServerError),
+
+	#[error("failed to accept quiche WebTransport")]
+	Accept(#[source] web_transport_quiche::ServerError),
+
+	#[error("failed to close quiche WebTransport request")]
+	Reject(#[source] web_transport_quiche::ServerError),
+
+	#[error(transparent)]
+	Tls(#[from] crate::tls::Error),
+}
+
+type Result<T> = std::result::Result<T, Error>;
+
 // ── Client ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -23,7 +89,7 @@ pub(crate) struct QuicheClient {
 }
 
 impl QuicheClient {
-	pub fn new(config: &ClientConfig) -> crate::Result<Self> {
+	pub fn new(config: &ClientConfig) -> Result<Self> {
 		if !config.tls.root.is_empty() {
 			tracing::warn!("--tls-root is not supported with the quiche backend; system roots will be used");
 		}
@@ -36,12 +102,12 @@ impl QuicheClient {
 		})
 	}
 
-	pub async fn connect(&self, url: Url) -> crate::Result<web_transport_quiche::Connection> {
+	pub async fn connect(&self, url: Url) -> Result<web_transport_quiche::Connection> {
 		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
 		let port = url.port().unwrap_or(443);
 
 		if url.scheme() == "http" {
-			return Err(Error::QuicheFingerprintUnsupported);
+			return Err(Error::FingerprintUnsupported);
 		}
 
 		let alpns: Vec<Vec<u8>> = match url.scheme() {
@@ -78,13 +144,13 @@ impl QuicheClient {
 				let conn = builder
 					.connect(&host, port)
 					.await
-					.map_err(Error::QuicheConnect)?
+					.map_err(Error::Connect)?
 					.established()
 					.await
-					.map_err(Error::QuicheEstablish)?;
+					.map_err(Error::Establish)?;
 				let session = web_transport_quiche::Connection::connect(conn, request)
 					.await
-					.map_err(Error::QuicheClientConnect)?;
+					.map_err(Error::ClientConnect)?;
 				Ok(session)
 			}
 			"moqt" | "moql" => {
@@ -92,10 +158,10 @@ impl QuicheClient {
 				let conn = builder
 					.connect(&host, port)
 					.await
-					.map_err(Error::QuicheConnect)?
+					.map_err(Error::Connect)?
 					.established()
 					.await
-					.map_err(Error::QuicheEstablish)?;
+					.map_err(Error::Establish)?;
 
 				let alpn = conn.alpn().ok_or(Error::MissingAlpn)?;
 				let alpn = std::str::from_utf8(&alpn)?;
@@ -116,22 +182,22 @@ pub(crate) struct QuicheServer {
 }
 
 impl QuicheServer {
-	pub fn new(config: ServerConfig) -> crate::Result<Self> {
+	pub fn new(config: ServerConfig) -> Result<Self> {
 		if config.quic_lb_id.is_some() {
 			tracing::warn!("QUIC-LB is not supported with the quiche backend; ignoring server ID");
 		}
 
-		let listen = crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND)
-			.map_err(|e| Error::ResolveBind(Box::new(e)))?;
+		let listen =
+			crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND).map_err(Error::ResolveBind)?;
 
 		let (chain, key) = if !config.tls.generate.is_empty() {
 			generate_quiche_cert(&config.tls.generate)?
 		} else {
 			if config.tls.cert.is_empty() || config.tls.key.is_empty() {
-				return Err(Error::QuicheCertRequired);
+				return Err(Error::CertRequired);
 			}
 			if config.tls.cert.len() != config.tls.key.len() {
-				return Err(Error::QuicheCertPairMismatch);
+				return Err(Error::CertPairMismatch);
 			}
 
 			// Load certs in PEM format and convert to DER for quiche
@@ -171,7 +237,7 @@ impl QuicheServer {
 			.with_settings(settings)
 			.with_bind(listen)?
 			.with_single_cert(chain, key)
-			.map_err(Error::QuicheServerBuild)?;
+			.map_err(Error::ServerBuild)?;
 
 		Ok(Self {
 			server,
@@ -187,7 +253,7 @@ impl QuicheServer {
 		self.fingerprints.clone()
 	}
 
-	pub fn local_addr(&self) -> crate::Result<net::SocketAddr> {
+	pub fn local_addr(&self) -> Result<net::SocketAddr> {
 		self.server.local_addrs().first().copied().ok_or(Error::NoLocalAddr)
 	}
 
@@ -199,25 +265,27 @@ impl QuicheServer {
 fn load_quiche_cert(
 	cert_path: &PathBuf,
 	key_path: &PathBuf,
-) -> crate::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-	let chain_file = fs::File::open(cert_path).map_err(Error::OpenCert)?;
+) -> std::result::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), crate::tls::Error> {
+	let chain_file = fs::File::open(cert_path).map_err(crate::tls::Error::Open)?;
 	let mut chain_reader = io::BufReader::new(chain_file);
 
 	let chain: Vec<CertificateDer> = CertificateDer::pem_reader_iter(&mut chain_reader)
-		.collect::<Result<_, _>>()
-		.map_err(Error::ReadCerts)?;
+		.collect::<std::result::Result<_, _>>()
+		.map_err(crate::tls::Error::Read)?;
 
 	if chain.is_empty() {
-		return Err(Error::NoCerts);
+		return Err(crate::tls::Error::Empty);
 	}
 
-	let key = PrivateKeyDer::from_pem_file(key_path).map_err(Error::KeyPem)?;
+	let key = PrivateKeyDer::from_pem_file(key_path).map_err(crate::tls::Error::Key)?;
 
 	Ok((chain, key))
 }
 
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-fn generate_quiche_cert(hostnames: &[String]) -> crate::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+fn generate_quiche_cert(
+	hostnames: &[String],
+) -> std::result::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), crate::tls::Error> {
 	let key_pair = rcgen::KeyPair::generate()?;
 
 	let mut params = rcgen::CertificateParams::new(hostnames)?;
@@ -236,8 +304,10 @@ fn generate_quiche_cert(hostnames: &[String]) -> crate::Result<(Vec<CertificateD
 }
 
 #[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
-fn generate_quiche_cert(hostnames: &[String]) -> crate::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-	return Err(Error::NoCryptoProvider);
+fn generate_quiche_cert(
+	hostnames: &[String],
+) -> std::result::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), crate::tls::Error> {
+	return Err(crate::tls::Error::NoCryptoProvider);
 }
 
 // ── QuicheQuicRequest ───────────────────────────────────────────────
@@ -256,7 +326,7 @@ pub(crate) enum QuicheRequest {
 }
 
 impl QuicheRequest {
-	pub async fn accept(incoming: web_transport_quiche::ez::Incoming, alpns: Vec<&'static str>) -> crate::Result<Self> {
+	pub async fn accept(incoming: web_transport_quiche::ez::Incoming, alpns: Vec<&'static str>) -> Result<Self> {
 		tracing::debug!(ip = %incoming.peer_addr(), "accepting via quiche");
 
 		// Accept the connection and wait for it to be established
@@ -272,7 +342,7 @@ impl QuicheRequest {
 				// WebTransport over HTTP/3
 				let request = web_transport_quiche::h3::Request::accept(conn)
 					.await
-					.map_err(Error::QuicheAcceptRequest)?;
+					.map_err(Error::AcceptRequest)?;
 				Ok(Self::WebTransport { request, alpns })
 			}
 			alpn if moq_net::ALPNS.contains(&alpn) => Ok(Self::Raw {
@@ -284,7 +354,7 @@ impl QuicheRequest {
 		}
 	}
 	/// Accept the session, wrapping as a raw WebTransport-compatible connection.
-	pub async fn ok(self) -> Result<web_transport_quiche::Connection, web_transport_quiche::ServerError> {
+	pub async fn ok(self) -> std::result::Result<web_transport_quiche::Connection, web_transport_quiche::ServerError> {
 		match self {
 			QuicheRequest::Raw {
 				connection,
@@ -315,7 +385,7 @@ impl QuicheRequest {
 	pub async fn reject(
 		self,
 		status: web_transport_quiche::http::StatusCode,
-	) -> Result<(), web_transport_quiche::ServerError> {
+	) -> std::result::Result<(), web_transport_quiche::ServerError> {
 		match self {
 			QuicheRequest::Raw { connection, .. } => {
 				let _: () = connection.close(status.as_u16().into(), status.as_str());

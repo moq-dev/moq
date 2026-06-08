@@ -69,22 +69,22 @@ pub struct ServerTlsConfig {
 
 impl ServerTlsConfig {
 	/// Load all configured root CAs into a [`rustls::RootCertStore`].
-	pub fn load_roots(&self) -> crate::Result<rustls::RootCertStore> {
+	pub fn load_roots(&self) -> std::result::Result<rustls::RootCertStore, crate::tls::Error> {
 		use rustls::pki_types::CertificateDer;
 		use rustls::pki_types::pem::PemObject;
 
 		let mut roots = rustls::RootCertStore::empty();
 		for path in &self.root {
-			let file = std::fs::File::open(path).map_err(Error::OpenCert)?;
+			let file = std::fs::File::open(path).map_err(crate::tls::Error::Open)?;
 			let mut reader = std::io::BufReader::new(file);
 			let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(&mut reader)
 				.collect::<std::result::Result<_, _>>()
-				.map_err(Error::ReadCerts)?;
+				.map_err(crate::tls::Error::Read)?;
 			if certs.is_empty() {
-				return Err(Error::NoCerts);
+				return Err(crate::tls::Error::Empty);
 			}
 			for cert in certs {
-				roots.add(cert).map_err(Error::AddRoot)?;
+				roots.add(cert).map_err(crate::tls::Error::AddRoot)?;
 			}
 		}
 		Ok(roots)
@@ -494,15 +494,15 @@ impl Server {
 	pub fn local_addr(&self) -> crate::Result<net::SocketAddr> {
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_ref() {
-			return noq.local_addr();
+			return Ok(noq.local_addr()?);
 		}
 		#[cfg(feature = "quinn")]
 		if let Some(quinn) = self.quinn.as_ref() {
-			return quinn.local_addr();
+			return Ok(quinn.local_addr()?);
 		}
 		#[cfg(feature = "quiche")]
 		if let Some(quiche) = self.quiche.as_ref() {
-			return quiche.local_addr();
+			return Ok(quiche.local_addr()?);
 		}
 		unreachable!("no QUIC backend compiled");
 	}
@@ -572,28 +572,28 @@ impl Request {
 			RequestKind::Noq(request) => {
 				let status =
 					web_transport_noq::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
-				request.close(status).await?;
+				request.close(status).await.map_err(crate::noq::Error::Server)?;
 				Ok(())
 			}
 			#[cfg(feature = "quinn")]
 			RequestKind::Quinn(request) => {
 				let status =
 					web_transport_quinn::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
-				request.close(status).await?;
+				request.close(status).await.map_err(crate::quinn::Error::Server)?;
 				Ok(())
 			}
 			#[cfg(feature = "quiche")]
 			RequestKind::Quiche(request) => {
 				let status =
 					web_transport_quiche::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
-				request.reject(status).await.map_err(Error::QuicheReject)?;
+				request.reject(status).await.map_err(crate::quiche::Error::Reject)?;
 				Ok(())
 			}
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh(request) => {
 				let status =
 					web_transport_iroh::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
-				request.close(status).await?;
+				request.close(status).await.map_err(crate::iroh::Error::Server)?;
 				Ok(())
 			}
 			#[cfg(feature = "websocket")]
@@ -626,16 +626,25 @@ impl Request {
 	pub async fn ok(self) -> crate::Result<Session> {
 		match self.kind {
 			#[cfg(feature = "noq")]
-			RequestKind::Noq(request) => Ok(self.server.accept(request.ok().await?).await?),
+			RequestKind::Noq(request) => Ok(self
+				.server
+				.accept(request.ok().await.map_err(crate::noq::Error::Server)?)
+				.await?),
 			#[cfg(feature = "quinn")]
-			RequestKind::Quinn(request) => Ok(self.server.accept(request.ok().await?).await?),
+			RequestKind::Quinn(request) => Ok(self
+				.server
+				.accept(request.ok().await.map_err(crate::quinn::Error::Server)?)
+				.await?),
 			#[cfg(feature = "quiche")]
 			RequestKind::Quiche(request) => {
-				let conn = request.ok().await.map_err(Error::QuicheAccept)?;
+				let conn = request.ok().await.map_err(crate::quiche::Error::Accept)?;
 				Ok(self.server.accept(conn).await?)
 			}
 			#[cfg(feature = "iroh")]
-			RequestKind::Iroh(request) => Ok(self.server.accept(request.ok().await?).await?),
+			RequestKind::Iroh(request) => Ok(self
+				.server
+				.accept(request.ok().await.map_err(crate::iroh::Error::Server)?)
+				.await?),
 			#[cfg(feature = "websocket")]
 			RequestKind::WebSocket(session) => Ok(self.server.accept(session).await?),
 		}

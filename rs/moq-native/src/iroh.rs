@@ -1,6 +1,5 @@
 use std::{net, path::PathBuf, str::FromStr};
 
-use crate::Error;
 use url::Url;
 use web_transport_iroh::{
 	http,
@@ -10,6 +9,64 @@ use web_transport_iroh::{
 use web_transport_proto::{ConnectRequest, ConnectResponse};
 
 pub use iroh::Endpoint as IrohEndpoint;
+
+/// Errors specific to the iroh P2P backend.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error(transparent)]
+	Io(#[from] std::io::Error),
+
+	#[error("invalid iroh secret key")]
+	Secret(#[source] iroh::KeyParsingError),
+
+	#[error(transparent)]
+	Bind(#[from] iroh::endpoint::BindError),
+
+	#[error(transparent)]
+	BindAddr(#[from] iroh::endpoint::InvalidSocketAddr),
+
+	#[error(transparent)]
+	Connect(#[from] iroh::endpoint::ConnectWithOptsError),
+
+	#[error(transparent)]
+	Connecting(#[from] iroh::endpoint::ConnectingError),
+
+	#[error(transparent)]
+	Alpn(#[from] iroh::endpoint::AlpnError),
+
+	#[error(transparent)]
+	Connection(#[from] iroh::endpoint::ConnectionError),
+
+	#[error(transparent)]
+	Client(#[from] web_transport_iroh::ClientError),
+
+	#[error(transparent)]
+	Server(#[from] web_transport_iroh::ServerError),
+
+	#[error("failed to decode ALPN")]
+	DecodeAlpn(#[from] std::string::FromUtf8Error),
+
+	#[error("unsupported ALPN: {0}")]
+	UnsupportedAlpn(String),
+
+	#[error("Invalid URL: missing host")]
+	MissingHost,
+
+	#[error("Invalid URL: host is not an iroh endpoint id")]
+	InvalidEndpointId(#[source] iroh::KeyParsingError),
+
+	#[error("invalid URL")]
+	InvalidUrl,
+
+	#[error(transparent)]
+	Url(#[from] url::ParseError),
+
+	#[error("failed to receive WebTransport request")]
+	RecvRequest(#[source] web_transport_iroh::ServerError),
+}
+
+type Result<T> = std::result::Result<T, Error>;
 
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -56,7 +113,7 @@ pub struct IrohEndpointConfig {
 }
 
 impl IrohEndpointConfig {
-	pub async fn bind(self) -> crate::Result<Option<IrohEndpoint>> {
+	pub async fn bind(self) -> Result<Option<IrohEndpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
 		}
@@ -74,7 +131,7 @@ impl IrohEndpointConfig {
 			} else {
 				// Otherwise, read the secret from a file.
 				let key_str = tokio::fs::read_to_string(&path).await?;
-				SecretKey::from_str(&key_str).map_err(Error::IrohSecret)?
+				SecretKey::from_str(&key_str).map_err(Error::Secret)?
 			}
 		} else {
 			// Otherwise, generate a new random secret.
@@ -116,7 +173,7 @@ pub enum IrohRequest {
 }
 
 impl IrohRequest {
-	pub async fn accept(conn: iroh::endpoint::Incoming) -> crate::Result<Self> {
+	pub async fn accept(conn: iroh::endpoint::Incoming) -> Result<Self> {
 		let conn = conn.accept()?.await?;
 		let alpn = String::from_utf8(conn.alpn().to_vec())?;
 		tracing::Span::current().record("id", conn.stable_id());
@@ -125,7 +182,7 @@ impl IrohRequest {
 			web_transport_iroh::ALPN_H3 => {
 				let request = web_transport_iroh::H3Request::accept(conn)
 					.await
-					.map_err(Error::IrohRecvRequest)?;
+					.map_err(Error::RecvRequest)?;
 				Ok(Self::WebTransport {
 					request: Box::new(request),
 				})
@@ -138,7 +195,7 @@ impl IrohRequest {
 	}
 
 	/// Accept the session.
-	pub async fn ok(self) -> Result<web_transport_iroh::Session, web_transport_iroh::ServerError> {
+	pub async fn ok(self) -> std::result::Result<web_transport_iroh::Session, web_transport_iroh::ServerError> {
 		match self {
 			IrohRequest::Quic { request } => Ok(request.ok()),
 			IrohRequest::WebTransport { request } => {
@@ -152,7 +209,7 @@ impl IrohRequest {
 	}
 
 	/// Reject the session.
-	pub async fn close(self, status: http::StatusCode) -> Result<(), web_transport_iroh::ServerError> {
+	pub async fn close(self, status: http::StatusCode) -> std::result::Result<(), web_transport_iroh::ServerError> {
 		match self {
 			IrohRequest::Quic { request } => {
 				request.close(status);
@@ -174,7 +231,7 @@ pub(crate) async fn connect(
 	endpoint: &IrohEndpoint,
 	url: Url,
 	addrs: impl IntoIterator<Item = std::net::SocketAddr>,
-) -> crate::Result<web_transport_iroh::Session> {
+) -> Result<web_transport_iroh::Session> {
 	let host = url.host().ok_or(Error::MissingHost)?.to_string();
 	let endpoint_id: iroh::EndpointId = host.parse().map_err(Error::InvalidEndpointId)?;
 
@@ -226,7 +283,7 @@ pub(crate) async fn connect(
 /// [the URL specification's section on legal scheme state overrides](https://url.spec.whatwg.org/#scheme-state).
 ///
 /// This function allows all scheme changes, as long as the resulting URL is valid.
-fn url_set_scheme(url: Url, scheme: &str) -> crate::Result<Url> {
+fn url_set_scheme(url: Url, scheme: &str) -> Result<Url> {
 	let url = format!(
 		"{}:{}",
 		scheme,

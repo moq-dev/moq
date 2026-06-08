@@ -34,7 +34,7 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	let reconnect = client.with_consume(origin).reconnect(url);
 
 	// Wait until the reconnect loop stops (e.g. timeout exceeded).
-	reconnect.closed().await.map_err(Into::into)
+	Ok(reconnect.closed().await?)
 }
 
 // Subscribe to a broadcast and read media frames.

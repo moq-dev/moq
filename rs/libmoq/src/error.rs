@@ -19,6 +19,10 @@ pub enum Error {
 	#[error("moq error: {0}")]
 	Moq(#[from] moq_net::Error),
 
+	/// Error from the native helper layer (moq-native).
+	#[error("native error: {0}")]
+	Native(Arc<moq_native::Error>),
+
 	/// URL parsing error.
 	#[error("url error: {0}")]
 	Url(#[from] url::ParseError),
@@ -132,6 +136,12 @@ pub enum Error {
 	Audio(Arc<moq_audio::AudioError>),
 }
 
+impl From<moq_native::Error> for Error {
+	fn from(err: moq_native::Error) -> Self {
+		Error::Native(Arc::new(err))
+	}
+}
+
 impl From<moq_audio::AudioError> for Error {
 	fn from(err: moq_audio::AudioError) -> Self {
 		Error::Audio(Arc::new(err))
@@ -190,6 +200,7 @@ impl ffi::ReturnCode for Error {
 			Error::Mux(_) => -29,
 			Error::Audio(_) => -30,
 			Error::GroupNotFound => -31,
+			Error::Native(_) => -32,
 		}
 	}
 }
