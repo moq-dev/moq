@@ -54,7 +54,7 @@ impl Log {
 		#[cfg(all(target_os = "android", feature = "android-logcat"))]
 		let registry = {
 			let logcat_layer = tracing_android::layer("MoQNative")
-				.map_err(crate::Error::Logcat)?
+				.map_err(|e| crate::Error::Logcat(std::sync::Arc::new(e)))?
 				.with_filter(filter);
 			registry.with(logcat_layer)
 		};
@@ -70,7 +70,9 @@ impl Log {
 		#[cfg(feature = "tokio-console")]
 		let registry = registry.with(console_subscriber::spawn());
 
-		registry.try_init().map_err(crate::Error::SetSubscriber)?;
+		registry
+			.try_init()
+			.map_err(|e| crate::Error::SetSubscriber(std::sync::Arc::new(e)))?;
 
 		// Start deadlock detection thread (only in debug builds)
 		#[cfg(debug_assertions)]

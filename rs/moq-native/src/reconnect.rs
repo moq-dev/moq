@@ -78,10 +78,7 @@ struct State {
 	/// Current connection status, or `None` before the first connect.
 	status: Option<Status>,
 	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
-	///
-	/// Stored as a formatted string because [`Error`] is not `Clone`, and the
-	/// final state is read by reference from the closed channel.
-	error: Option<String>,
+	error: Option<Error>,
 }
 
 /// Handle to a background reconnect loop.
@@ -104,7 +101,7 @@ impl Reconnect {
 			if let Err(err) = Self::run(&producer, client, url, backoff).await {
 				tracing::error!(%err, "reconnect loop exited");
 				if let Ok(mut state) = producer.write() {
-					state.error = Some(err.to_string());
+					state.error = Some(err);
 				}
 			}
 			// Dropping the producer here closes the channel, signaling consumers.
@@ -192,7 +189,7 @@ impl Reconnect {
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
 		ready!(self.state.poll_closed(waiter));
 		Poll::Ready(match &self.state.read().error {
-			Some(err) => Err(Error::Reconnect(err.clone())),
+			Some(err) => Err(err.clone()),
 			None => Ok(()),
 		})
 	}
@@ -212,7 +209,7 @@ impl Drop for Reconnect {
 /// The terminal error read from a closed channel's final state.
 fn terminal(state: &State) -> Error {
 	match &state.error {
-		Some(err) => Error::Reconnect(err.clone()),
+		Some(err) => err.clone(),
 		None => Error::Reconnect("reconnect stopped".to_string()),
 	}
 }

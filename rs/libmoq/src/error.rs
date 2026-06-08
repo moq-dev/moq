@@ -21,7 +21,7 @@ pub enum Error {
 
 	/// Error from the native helper layer (moq-native).
 	#[error("native error: {0}")]
-	Native(Arc<moq_native::Error>),
+	Native(#[from] moq_native::Error),
 
 	/// URL parsing error.
 	#[error("url error: {0}")]
@@ -134,12 +134,6 @@ pub enum Error {
 	/// Error from the moq-audio codec layer.
 	#[error("audio error: {0}")]
 	Audio(Arc<moq_audio::AudioError>),
-}
-
-impl From<moq_native::Error> for Error {
-	fn from(err: moq_native::Error) -> Self {
-		Error::Native(Arc::new(err))
-	}
 }
 
 impl From<moq_audio::AudioError> for Error {
