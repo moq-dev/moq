@@ -82,53 +82,58 @@ test("deltas reconstruct to the final value", async () => {
 	expect((await drain(track)).at(-1)).toEqual({ a: 5, b: 2 });
 });
 
-// `mutate` is the shared-document "lock": multiple owners edit one producer, each touching its
-// own keys. This is how the catalog producer is extended (e.g. an scte35 section) without a
-// single owner having to rebuild the whole document.
-test("mutate composes independent owners", async () => {
+// `lock()` is the shared-document guard: multiple owners edit one producer, each touching its
+// own keys, and the edit publishes on dispose. This is how the catalog producer is extended
+// (e.g. an scte35 section) without a single owner having to rebuild the whole document.
+test("lock composes independent owners", async () => {
 	const track = new Track("test");
 	const producer = new Producer<Value>(track);
 	const consumer = new Consumer<Value>(track);
 
-	producer.mutate((v) => {
-		v.video = "v1";
-	});
+	{
+		using catalog = producer.lock();
+		catalog.value.video = "v1";
+	}
 	expect(await consumer.next()).toEqual({ video: "v1" });
 
-	// A second owner adds its own key without clobbering the first.
-	producer.mutate((v) => {
-		v.scte35 = { id: 1 };
-	});
+	// A second owner starts from the latest value and adds its own key without clobbering the first.
+	{
+		using catalog = producer.lock();
+		catalog.value.scte35 = { id: 1 };
+	}
 	expect(await consumer.next()).toEqual({ video: "v1", scte35: { id: 1 } });
 });
 
-test("mutate starts from an empty object", async () => {
+test("lock starts from an empty object", async () => {
 	const track = new Track("test");
 	const producer = new Producer<Value>(track);
 	const consumer = new Consumer<Value>(track);
 
-	producer.mutate((v) => {
-		v.a = 1;
-	});
+	{
+		using catalog = producer.lock();
+		catalog.value.a = 1;
+	}
 	expect(await consumer.next()).toEqual({ a: 1 });
 });
 
 // Removing a section drops it from the reconstructed value, so a consumer detects the removal.
 // Exercised with deltas on to cover the merge-patch null-deletion path.
-test("mutate removes a section", async () => {
+test("lock removes a section", async () => {
 	const track = new Track("test");
 	const producer = new Producer<Value>(track, { deltaRatio: 100 });
 	const consumer = new Consumer<Value>(track);
 
-	producer.mutate((v) => {
-		v.a = 1;
-		v.scte35 = { id: 1 };
-	});
+	{
+		using catalog = producer.lock();
+		catalog.value.a = 1;
+		catalog.value.scte35 = { id: 1 };
+	}
 	expect(await consumer.next()).toEqual({ a: 1, scte35: { id: 1 } });
 
-	producer.mutate((v) => {
-		delete v.scte35;
-	});
+	{
+		using catalog = producer.lock();
+		delete catalog.value.scte35;
+	}
 	expect(await consumer.next()).toEqual({ a: 1 });
 });
 

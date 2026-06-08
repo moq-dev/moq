@@ -76,8 +76,9 @@ The catalog is a JSON document published through the merge-patch helper (`@moq/j
 - **Reading**: the base schema is permissive, so unknown sections pass through validation untouched.
   A base consumer ignores them; an extension reads its own section and treats its absence as "not present".
   In TypeScript, build an extended schema with `z.extend(Catalog.RootSchema, { scte35: ... })`; in Rust, flatten the catalog into your own struct with `#[serde(flatten)]`.
-- **Writing**: the catalog producer holds one shared document.
-  Each owner mutates only its own keys (`producer.mutate(c => { c.scte35 = ... })`), so the base media sections and any extension sections compose instead of clobbering one another.
+- **Writing**: the catalog producer holds one shared document, edited through a lock guard.
+  Each owner locks, edits only its own keys, and the change publishes when the guard is released (`using c = producer.lock(); c.value.scte35 = ...` in TypeScript, or the `Deref`/`DerefMut` guard from `producer.lock()` in Rust).
+  Every lock starts from the latest value, so the base media sections and any extension sections compose instead of clobbering one another.
   Removing a key publishes a deletion, which a consumer reads as the section being removed.
 
 This keeps application-specific sections in the application layer while the base catalog stays generic.

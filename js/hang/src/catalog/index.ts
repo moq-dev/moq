@@ -4,5 +4,6 @@ export * from "./format";
 export * from "./integers";
 export * from "./priority";
 export * from "./root";
+export * from "./scte35";
 export * from "./track";
 export * from "./video";

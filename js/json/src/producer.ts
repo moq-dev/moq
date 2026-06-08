@@ -21,6 +21,11 @@ export interface Config<T> {
 	schema?: z.ZodMiniType<T>;
 }
 
+/** A disposable editing guard returned by {@link Producer.lock}, publishing its `value` on dispose. */
+export interface Guard<T> extends Disposable {
+	value: T;
+}
+
 /** Publishes a JSON value over a track, choosing snapshots and deltas automatically. */
 export class Producer<T> {
 	#track: Moq.Track;
@@ -60,18 +65,28 @@ export class Producer<T> {
 	}
 
 	/**
-	 * Mutate the current value and publish the result.
+	 * Lock the current value for in-place editing, publishing on dispose.
 	 *
-	 * The callback receives a mutable deep clone of the last-published value (or `{}` if nothing
-	 * has been published yet) and edits it in place. Independent owners can share a single Producer
-	 * and each touch their own keys: every mutate starts from the latest value, so sections compose
-	 * instead of clobbering one another. No-op if unchanged. Use {@link update} to replace the
-	 * whole value instead.
+	 * Returns a disposable guard whose `value` is a deep clone of the last-published value (or `{}`
+	 * if nothing has been published yet). Edit `value` in place; when the guard is disposed it
+	 * publishes the result via {@link update}, a no-op if unchanged. Use it with `using` so the
+	 * publish happens at the end of the block:
+	 *
+	 * ```ts
+	 * using catalog = producer.lock();
+	 * catalog.value.scte35 = { ... };
+	 * ```
+	 *
+	 * Independent owners can share a single Producer and each edit only their own keys: every lock
+	 * starts from the latest value, so sections compose instead of clobbering one another. Use
+	 * {@link update} to replace the whole value instead.
 	 */
-	mutate(fn: (value: T) => void): void {
-		const current = (this.#last === undefined ? {} : structuredClone(this.#last)) as T;
-		fn(current);
-		this.update(current);
+	lock(): Guard<T> {
+		const value = (this.#last === undefined ? {} : structuredClone(this.#last)) as T;
+		return {
+			value,
+			[Symbol.dispose]: () => this.update(value),
+		};
 	}
 
 	/** Finish the track, closing any open group. */

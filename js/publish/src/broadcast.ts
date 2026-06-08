@@ -103,15 +103,14 @@ export class Broadcast {
 		const video = enabled ? effect.get(this.video.catalog) : undefined;
 		const audio = enabled ? effect.get(this.audio.catalog) : undefined;
 
-		// Mutate only the base sections so any extension sections survive untouched. A missing
+		// Edit only the base sections so any extension sections survive untouched. A missing
 		// section is deleted, which a consumer reads as the section being removed.
-		producer.mutate((catalog) => {
-			if (video !== undefined) catalog.video = video;
-			else delete catalog.video;
+		using catalog = producer.lock();
+		if (video !== undefined) catalog.value.video = video;
+		else delete catalog.value.video;
 
-			if (audio !== undefined) catalog.audio = audio;
-			else delete catalog.audio;
-		});
+		if (audio !== undefined) catalog.value.audio = audio;
+		else delete catalog.value.audio;
 	}
 
 	close() {
