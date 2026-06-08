@@ -71,10 +71,10 @@ export class Producer<T> {
 	/**
 	 * Lock the current value for in-place editing, publishing on dispose.
 	 *
-	 * Returns a disposable guard whose `value` is a deep clone of the last-published value (or `{}`
-	 * if nothing has been published yet). Edit `value` in place; when the guard is disposed it
-	 * publishes the result via {@link update}, a no-op if unchanged. Use it with `using` so the
-	 * publish happens at the end of the block:
+	 * Returns a disposable guard whose `value` is a deep clone of the last-published value, falling
+	 * back to {@link Config.initial} if nothing has been published yet; throws if neither exists.
+	 * Edit `value` in place; when the guard is disposed it publishes the result via {@link update},
+	 * a no-op if unchanged. Use it with `using` so the publish happens at the end of the block:
 	 *
 	 * ```ts
 	 * using catalog = producer.lock();
