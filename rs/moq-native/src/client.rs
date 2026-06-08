@@ -504,7 +504,8 @@ mod tests {
 	async fn race_transport_connect_stops_on_quic_auth_error() {
 		let quic = async { Err::<usize, _>(crate::ConnectError::Unauthorized.into()) };
 		let websocket = async {
-			tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+			// This only needs to complete later than the immediately ready QUIC auth error.
+			tokio::task::yield_now().await;
 			Some(Ok(1usize))
 		};
 
