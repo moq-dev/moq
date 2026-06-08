@@ -353,7 +353,11 @@ interface OpusEncoderConfigExt extends OpusEncoderConfig {
 
 // Build the WebCodecs encoder config from the catalog (decoder) config, a Kind hint, and any
 // Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding.
-function toEncoderConfig(config: Catalog.AudioConfig, kind: Kind, opusOptions: OpusEncoderConfigExt): AudioEncoderConfig {
+function toEncoderConfig(
+	config: Catalog.AudioConfig,
+	kind: Kind,
+	opusOptions: OpusEncoderConfigExt,
+): AudioEncoderConfig {
 	const encoderConfig: AudioEncoderConfig = {
 		codec: config.codec,
 		sampleRate: config.sampleRate,
