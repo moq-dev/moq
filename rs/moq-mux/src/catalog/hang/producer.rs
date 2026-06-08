@@ -7,13 +7,12 @@ use serde::de::DeserializeOwned;
 
 /// Produces both a hang and MSF catalog track for a broadcast.
 ///
-/// Generic over the catalog payload `T`, defaulting to [`hang::Catalog`]. An application publishes
-/// an extended catalog by using its own type that `#[serde(flatten)]`s [`hang::Catalog`] and adds
-/// its own root sections (e.g. `scte35`). The `T: AsRef<hang::Catalog>` bound lets the MSF track be
-/// derived from the base media sections regardless of any extension sections.
-///
-/// Also implement [`Deref`]/[`DerefMut`] to [`hang::Catalog`] on that type to reach the base media
-/// fields directly through the guard (`catalog.video` instead of `catalog.base.video`).
+/// Generic over the catalog payload `T`, defaulting to [`hang::Catalog`]. To publish an extended
+/// catalog, use [`Catalog<E>`](super::Catalog) with your own [`CatalogExt`](super::CatalogExt): it
+/// serializes the base and extension sections as one flat union, derefs to the base so the media
+/// fields stay reachable directly through the guard (`catalog.video`), and exposes the extension
+/// under `catalog.ext`. The `T: AsRef<hang::Catalog>` bound lets the MSF track be derived from the
+/// base media sections regardless of any extension sections.
 ///
 /// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
 /// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
@@ -517,71 +516,5 @@ mod test {
 		let video = &msf.tracks[0];
 		assert_eq!(video.max_grp_sap_starting_type, None);
 		assert_eq!(video.max_obj_sap_starting_type, None);
-	}
-
-	#[test]
-	fn extension_roundtrip() {
-		use std::ops::{Deref, DerefMut};
-		use std::task::Poll;
-
-		use serde::{Deserialize, Serialize};
-
-		// An application publishes an extended catalog: the base media sections plus its own.
-		#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
-		struct AppCatalog {
-			#[serde(flatten)]
-			base: hang::Catalog,
-			#[serde(skip_serializing_if = "Option::is_none")]
-			scte35: Option<Scte35>,
-		}
-
-		#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
-		struct Scte35 {
-			splice_id: u32,
-		}
-
-		// `AsRef` lets the producer derive the MSF track from the base sections; `Deref`/`DerefMut`
-		// give flat access to the base media fields (`catalog.video`) through the guard.
-		impl AsRef<hang::Catalog> for AppCatalog {
-			fn as_ref(&self) -> &hang::Catalog {
-				&self.base
-			}
-		}
-
-		impl Deref for AppCatalog {
-			type Target = hang::Catalog;
-
-			fn deref(&self) -> &hang::Catalog {
-				&self.base
-			}
-		}
-
-		impl DerefMut for AppCatalog {
-			fn deref_mut(&mut self) -> &mut hang::Catalog {
-				&mut self.base
-			}
-		}
-
-		let mut broadcast = moq_net::Broadcast::new().produce();
-		let mut producer = crate::catalog::hang::Producer::with_catalog(&mut broadcast, AppCatalog::default()).unwrap();
-		let mut consumer = producer.consume().unwrap();
-
-		// One owner sets a base section (flat, via deref), another adds the extension. Sequential
-		// locks compose because each starts from the producer's retained catalog.
-		producer.lock().user = Some(hang::catalog::User {
-			name: Some("alice".to_string()),
-			..Default::default()
-		});
-		producer.lock().scte35 = Some(Scte35 { splice_id: 42 });
-
-		let waiter = kio::Waiter::noop();
-		let mut latest = None;
-		while let Poll::Ready(Ok(Some(catalog))) = consumer.poll_next(&waiter) {
-			latest = Some(catalog);
-		}
-
-		let catalog = latest.expect("catalog published");
-		assert_eq!(catalog.user.as_ref().unwrap().name.as_deref(), Some("alice"));
-		assert_eq!(catalog.scte35, Some(Scte35 { splice_id: 42 }));
 	}
 }

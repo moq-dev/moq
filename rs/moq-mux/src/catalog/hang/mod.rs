@@ -11,8 +11,10 @@
 
 mod consumer;
 mod container;
+mod ext;
 mod producer;
 
 pub use consumer::Consumer;
 pub use container::Container;
+pub use ext::{Catalog, CatalogExt, NoExt};
 pub use producer::{Guard, Producer};
