@@ -15,7 +15,7 @@ pub enum Error {
 	MoqNet(#[from] moq_net::Error),
 
 	#[error("invalid log directive")]
-	Directive(Arc<tracing_subscriber::filter::ParseError>),
+	Directive(#[source] Arc<tracing_subscriber::filter::ParseError>),
 
 	#[error("failed to set global tracing subscriber")]
 	SetSubscriber(#[source] Arc<tracing_subscriber::util::TryInitError>),
