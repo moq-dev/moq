@@ -116,6 +116,9 @@ export class Encoder {
 				// worklet sees it. The default "max" just follows the input, which is the unreliable
 				// path on macOS. Only force it when we actually have a requested count to honor.
 				channelCountMode: requestedChannels !== undefined ? "explicit" : "max",
+				// Stamp audio against the same wall clock as video (see video/polyfill.ts), so both
+				// tracks share an epoch and stay in sync.
+				processorOptions: { zero: performance.now() * 1000 },
 			});
 
 			effect.set(this.#worklet, worklet);
