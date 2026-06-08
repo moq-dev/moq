@@ -35,8 +35,9 @@ static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(||
 /// WebSocket configuration for the client.
 #[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[group(id = "websocket-config")]
 #[non_exhaustive]
-pub struct Config {
+pub struct Client {
 	/// Whether to enable WebSocket support.
 	#[arg(
 		id = "websocket-enabled",
@@ -60,7 +61,7 @@ pub struct Config {
 	pub delay: Option<time::Duration>,
 }
 
-impl Default for Config {
+impl Default for Client {
 	fn default() -> Self {
 		Self {
 			enabled: true,
@@ -70,7 +71,7 @@ impl Default for Config {
 }
 
 pub(crate) async fn race_handle(
-	config: &Config,
+	config: &Client,
 	tls: &rustls::ClientConfig,
 	url: Url,
 	alpns: &[&str],
@@ -94,7 +95,7 @@ pub(crate) async fn race_handle(
 }
 
 pub(crate) async fn connect(
-	config: &Config,
+	config: &Client,
 	tls: &rustls::ClientConfig,
 	mut url: Url,
 	alpns: &[&str],

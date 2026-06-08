@@ -87,6 +87,7 @@ pub(crate) fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 #[serde_with::serde_as]
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[group(id = "client-tls-config")]
 #[non_exhaustive]
 pub struct Client {
 	/// Use the TLS root at this path, encoded as PEM.
@@ -205,6 +206,7 @@ impl Client {
 #[serde_with::serde_as]
 #[derive(clap::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+#[group(id = "server-tls-config")]
 #[non_exhaustive]
 pub struct Server {
 	/// Load the given certificate from disk.
