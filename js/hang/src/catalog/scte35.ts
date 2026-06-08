@@ -3,13 +3,13 @@ import * as z from "zod/mini";
 // A single splice event (ad break) signalled via SCTE-35.
 export const SpliceSchema = z.object({
 	// splice_event_id from the SCTE-35 message.
-	id: z.number(),
+	id: z.number().check(z.int(), z.nonnegative()),
 
 	// Presentation time of the splice point, in seconds. Omitted for an immediate splice.
-	startTime: z.optional(z.number()),
+	startTime: z.optional(z.number().check(z.nonnegative())),
 
 	// Duration of the break in seconds, when known. Omitted for a cancel or open-ended break.
-	duration: z.optional(z.number()),
+	duration: z.optional(z.number().check(z.nonnegative())),
 
 	// True at the start of a break (out of network), false on return.
 	out: z.optional(z.boolean()),
