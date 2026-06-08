@@ -12,6 +12,9 @@ use serde::de::DeserializeOwned;
 /// its own root sections (e.g. `scte35`). The `T: AsRef<hang::Catalog>` bound lets the MSF track be
 /// derived from the base media sections regardless of any extension sections.
 ///
+/// Also implement [`Deref`]/[`DerefMut`] to [`hang::Catalog`] on that type to reach the base media
+/// fields directly through the guard (`catalog.video` instead of `catalog.base.video`).
+///
 /// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
 /// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
 /// Both the hang (`catalog.json`) and MSF (`catalog`) tracks are published on drop of the guard.
@@ -518,6 +521,7 @@ mod test {
 
 	#[test]
 	fn extension_roundtrip() {
+		use std::ops::{Deref, DerefMut};
 		use std::task::Poll;
 
 		use serde::{Deserialize, Serialize};
@@ -536,10 +540,25 @@ mod test {
 			splice_id: u32,
 		}
 
-		// Lets the producer derive the MSF track from the base sections.
+		// `AsRef` lets the producer derive the MSF track from the base sections; `Deref`/`DerefMut`
+		// give flat access to the base media fields (`catalog.video`) through the guard.
 		impl AsRef<hang::Catalog> for AppCatalog {
 			fn as_ref(&self) -> &hang::Catalog {
 				&self.base
+			}
+		}
+
+		impl Deref for AppCatalog {
+			type Target = hang::Catalog;
+
+			fn deref(&self) -> &hang::Catalog {
+				&self.base
+			}
+		}
+
+		impl DerefMut for AppCatalog {
+			fn deref_mut(&mut self) -> &mut hang::Catalog {
+				&mut self.base
 			}
 		}
 
@@ -547,9 +566,9 @@ mod test {
 		let mut producer = crate::catalog::hang::Producer::with_catalog(&mut broadcast, AppCatalog::default()).unwrap();
 		let mut consumer = producer.consume().unwrap();
 
-		// One owner sets a base section, another adds the extension. Sequential locks compose
-		// because each starts from the producer's retained catalog.
-		producer.lock().base.user = Some(hang::catalog::User {
+		// One owner sets a base section (flat, via deref), another adds the extension. Sequential
+		// locks compose because each starts from the producer's retained catalog.
+		producer.lock().user = Some(hang::catalog::User {
 			name: Some("alice".to_string()),
 			..Default::default()
 		});
@@ -562,7 +581,7 @@ mod test {
 		}
 
 		let catalog = latest.expect("catalog published");
-		assert_eq!(catalog.base.user.unwrap().name.as_deref(), Some("alice"));
+		assert_eq!(catalog.user.as_ref().unwrap().name.as_deref(), Some("alice"));
 		assert_eq!(catalog.scte35, Some(Scte35 { splice_id: 42 }));
 	}
 }
