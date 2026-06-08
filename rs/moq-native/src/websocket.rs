@@ -35,7 +35,7 @@ static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(||
 /// WebSocket configuration for the client.
 #[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
-#[group(id = "websocket-config")]
+#[group(id = "websocket-client")]
 #[non_exhaustive]
 pub struct Client {
 	/// Whether to enable WebSocket support.
