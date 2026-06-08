@@ -1,12 +1,8 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Audio from "./audio";
-import * as Chat from "./chat";
-import * as Location from "./location";
-import { Preview, type PreviewProps } from "./preview";
-import * as User from "./user";
 import * as Video from "./video";
 
 export type BroadcastProps = {
@@ -15,10 +11,6 @@ export type BroadcastProps = {
 	name?: Moq.Path.Valid | Signal<Moq.Path.Valid>;
 	audio?: Audio.EncoderProps;
 	video?: Video.Props;
-	location?: Location.Props;
-	user?: User.Props;
-	chat?: Chat.Props;
-	preview?: PreviewProps;
 };
 
 export class Broadcast {
@@ -31,10 +23,12 @@ export class Broadcast {
 	audio: Audio.Encoder;
 	video: Video.Root;
 
-	location: Location.Root;
-	chat: Chat.Root;
-	preview: Preview;
-	user: User.Info;
+	// The live catalog producer, set while the `catalog.json` track is being served and cleared
+	// when it tears down. Applications can `mutate` it to add their own root sections (e.g.
+	// `scte35`) alongside the base `video`/`audio`. Because every owner mutates the same shared
+	// document, their sections compose instead of clobbering one another.
+	#catalog = new Signal<Json.Producer<Catalog.Root> | undefined>(undefined);
+	readonly catalog: Getter<Json.Producer<Catalog.Root> | undefined> = this.#catalog;
 
 	signals = new Effect();
 
@@ -45,10 +39,6 @@ export class Broadcast {
 
 		this.audio = new Audio.Encoder(props?.audio);
 		this.video = new Video.Root({ ...props?.video, connection: this.connection });
-		this.location = new Location.Root(props?.location);
-		this.chat = new Chat.Root(props?.chat);
-		this.preview = new Preview(props?.preview);
-		this.user = new User.Info(props?.user);
 
 		this.signals.run(this.#run.bind(this));
 	}
@@ -87,21 +77,6 @@ export class Broadcast {
 					case Broadcast.CATALOG_TRACK:
 						this.#serveCatalog(new Json.Producer<Catalog.Root>(request.track), effect);
 						break;
-					case Location.Window.TRACK:
-						this.location.window.serve(request.track, effect);
-						break;
-					case Location.Peers.TRACK:
-						this.location.peers.serve(request.track, effect);
-						break;
-					case Preview.TRACK:
-						this.preview.serve(request.track, effect);
-						break;
-					case Chat.Typing.TRACK:
-						this.chat.typing.serve(request.track, effect);
-						break;
-					case Chat.Message.TRACK:
-						this.chat.message.serve(request.track, effect);
-						break;
 					case Audio.Encoder.TRACK:
 						this.audio.serve(request.track, effect);
 						break;
@@ -121,32 +96,27 @@ export class Broadcast {
 	}
 
 	#serveCatalog(producer: Json.Producer<Catalog.Root>, effect: Effect): void {
-		if (!effect.get(this.enabled)) {
-			// Clear the catalog.
-			producer.update({});
-			return;
-		}
+		// Expose the producer so extensions can add their own sections while it's live.
+		effect.set(this.#catalog, producer, undefined);
 
-		// Create the new catalog.
-		const catalog: Catalog.Root = {
-			video: effect.get(this.video.catalog),
-			audio: effect.get(this.audio.catalog),
-			location: effect.get(this.location.catalog),
-			user: effect.get(this.user.catalog),
-			chat: effect.get(this.chat.catalog),
-			preview: effect.get(this.preview.catalog),
-		};
+		const enabled = effect.get(this.enabled);
+		const video = enabled ? effect.get(this.video.catalog) : undefined;
+		const audio = enabled ? effect.get(this.audio.catalog) : undefined;
 
-		producer.update(catalog);
+		// Mutate only the base sections so any extension sections survive untouched. A missing
+		// section is deleted, which a consumer reads as the section being removed.
+		producer.mutate((catalog) => {
+			if (video !== undefined) catalog.video = video;
+			else delete catalog.video;
+
+			if (audio !== undefined) catalog.audio = audio;
+			else delete catalog.audio;
+		});
 	}
 
 	close() {
 		this.signals.close();
 		this.audio.close();
 		this.video.close();
-		this.location.close();
-		this.chat.close();
-		this.preview.close();
-		this.user.close();
 	}
 }

@@ -59,6 +59,21 @@ export class Producer<T> {
 		this.#last = json;
 	}
 
+	/**
+	 * Mutate the current value and publish the result.
+	 *
+	 * The callback receives a mutable deep clone of the last-published value (or `{}` if nothing
+	 * has been published yet) and edits it in place. Independent owners can share a single Producer
+	 * and each touch their own keys: every mutate starts from the latest value, so sections compose
+	 * instead of clobbering one another. No-op if unchanged. Use {@link update} to replace the
+	 * whole value instead.
+	 */
+	mutate(fn: (value: T) => void): void {
+		const current = (this.#last === undefined ? {} : structuredClone(this.#last)) as T;
+		fn(current);
+		this.update(current);
+	}
+
 	/** Finish the track, closing any open group. */
 	finish(): void {
 		this.#group?.close();
