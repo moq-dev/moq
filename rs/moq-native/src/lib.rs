@@ -25,6 +25,9 @@ mod reconnect;
 mod server;
 pub mod tls;
 mod util;
+// Only used by the cert-reload path, which is itself gated on a QUIC backend.
+#[cfg(any(feature = "noq", feature = "quinn"))]
+mod watch;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 

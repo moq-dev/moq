@@ -3872,6 +3872,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "moq-net",
+ "notify",
  "parking_lot",
  "qmux",
  "quinn",

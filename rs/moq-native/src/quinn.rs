@@ -341,9 +341,8 @@ impl QuinnServer {
 		// Create the generic QUIC endpoint.
 		let quic = quinn::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;
 
-		// Spawn cert reload listener only after endpoint creation succeeds,
-		// so we don't leave a dangling signal listener on failure.
-		#[cfg(unix)]
+		// Spawn the cert reload watcher only after endpoint creation succeeds,
+		// so we don't leave a dangling watcher on failure.
 		tokio::spawn(crate::tls::reload_certs(certs.clone(), config.tls.clone()));
 
 		Ok(Self { quic, certs })

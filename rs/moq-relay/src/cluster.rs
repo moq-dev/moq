@@ -7,7 +7,6 @@ use std::{
 
 use anyhow::Context;
 use moq_net::{BroadcastProducer, Origin, OriginConsumer, OriginProducer, Path, Stats, Tier};
-use notify::Watcher;
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::task::AbortHandle;
 use url::Url;
@@ -32,10 +31,6 @@ const STALE_AFTER: Duration = Duration::from_secs(60);
 /// on responsiveness, not on origin load: a tighter `max-age` means more of these
 /// ticks turn into real conditional GETs.
 const CONNECT_API_POLL_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Safety-net re-check interval for a local `--cluster-connect-api` file, backing
-/// up the OS filesystem watcher (and the sole mechanism if no watcher can be made).
-const CONNECT_API_FILE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Mesh tiebreaker for gossip-discovered peers. In a full mesh both peers
 /// discover each other and would each open a dial, leaving two redundant
@@ -685,72 +680,32 @@ impl Cluster {
 		}
 	}
 
-	/// Watch a local peer-list file, reconciling whenever it changes. Uses OS
-	/// filesystem notifications (inotify / FSEvents / kqueue via `notify`), falling
-	/// back to polling only if a watcher can't be created. Fails static: a missing
-	/// or malformed file keeps the current dials.
+	/// Watch a local peer-list file, reconciling whenever it changes. Backed by
+	/// [`crate::watch::FileWatcher`] (OS notifications with a polling fallback).
+	/// Fails static: a missing or malformed file keeps the current dials, and the
+	/// next change triggers a fresh attempt.
 	async fn run_connect_api_file(&self, path: PathBuf, node: Option<String>, token: String, dialed: DialMap) {
-		let mut last_seen_mtime = None;
-		self.reload_connect_api_file(&path, &mut last_seen_mtime, &node, &token, &dialed);
+		self.reload_connect_api_file(&path, &node, &token, &dialed);
 
-		// Watch the parent directory, not the file: editors and `mv` replace the
-		// file by atomic rename, which swaps its inode and would drop a watch set
-		// directly on it. The channel bridges notify's off-runtime callback to this
-		// async task, where reconciling can spawn dials on the tokio runtime.
-		let watch = path.parent().and_then(|dir| {
-			let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-			let mut watcher = notify::recommended_watcher(move |event| {
-				let _ = tx.send(event);
-			})
-			.ok()?;
-			watcher.watch(dir, notify::RecursiveMode::NonRecursive).ok()?;
-			Some((watcher, rx))
-		});
+		let mut watcher = match crate::watch::FileWatcher::new(std::slice::from_ref(&path)) {
+			Ok(watcher) => watcher,
+			Err(err) => {
+				tracing::error!(%err, ?path, "failed to watch cluster.connect_api file; updates disabled");
+				return;
+			}
+		};
 
-		match watch {
-			// The mtime check in reload coalesces the duplicate events notify emits
-			// per change and ignores activity on other files in the directory.
-			Some((_watcher, mut events)) => {
-				while let Some(event) = events.recv().await {
-					if let Err(err) = event {
-						tracing::warn!(%err, ?path, "cluster.connect_api file watcher error");
-						continue;
-					}
-					self.reload_connect_api_file(&path, &mut last_seen_mtime, &node, &token, &dialed);
-				}
-			}
-			None => {
-				let mut tick = tokio::time::interval(CONNECT_API_FILE_INTERVAL);
-				loop {
-					tick.tick().await;
-					self.reload_connect_api_file(&path, &mut last_seen_mtime, &node, &token, &dialed);
-				}
-			}
+		loop {
+			watcher.changed().await;
+			self.reload_connect_api_file(&path, &node, &token, &dialed);
 		}
 	}
 
-	/// Re-read the peer-list file and reconcile if its mtime changed since the last
-	/// attempt. `last_seen_mtime` advances as soon as a new mtime is observed (not
-	/// only on success), so a malformed file isn't reread and re-warned every tick.
-	/// Any read/parse error keeps the current dials; the next real edit bumps the
-	/// mtime and triggers a fresh attempt.
-	fn reload_connect_api_file(
-		&self,
-		path: &std::path::Path,
-		last_seen_mtime: &mut Option<std::time::SystemTime>,
-		node: &Option<String>,
-		token: &str,
-		dialed: &DialMap,
-	) {
-		let Ok(mtime) = std::fs::metadata(path).and_then(|m| m.modified()) else {
-			tracing::warn!(?path, "cluster.connect_api file unavailable; keeping current peers");
-			return;
-		};
-		if *last_seen_mtime == Some(mtime) {
-			return;
-		}
-		*last_seen_mtime = Some(mtime);
-
+	/// Re-read the peer-list file and reconcile. Any read/parse error keeps the
+	/// current dials; the [`FileWatcher`](crate::watch::FileWatcher) only
+	/// re-invokes this on a real change, so a malformed file isn't re-warned on a
+	/// loop.
+	fn reload_connect_api_file(&self, path: &std::path::Path, node: &Option<String>, token: &str, dialed: &DialMap) {
 		match std::fs::read_to_string(path) {
 			Ok(body) => match serde_json::from_str::<Vec<String>>(&body) {
 				Ok(list) => self.apply_peer_list(list, node, token, dialed),
