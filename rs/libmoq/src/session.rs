@@ -70,7 +70,7 @@ impl Session {
 	) -> Result<(), Error> {
 		let reconnect = moq_native::ClientConfig::default()
 			.init()
-			.map_err(|err| Error::Connect(Arc::new(err)))?
+			.map_err(|err| Error::Connect(Arc::new(err.into())))?
 			.with_publish(publish)
 			.with_consume(consume)
 			.reconnect(url);

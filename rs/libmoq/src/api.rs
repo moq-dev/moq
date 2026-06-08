@@ -98,7 +98,7 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 			level => moq_native::Log::new(Level::from_str(level)?),
 		}
 		.init()
-		.map_err(|err| Error::InitFailed(std::sync::Arc::new(err)))?;
+		.map_err(|err| Error::InitFailed(std::sync::Arc::new(err.into())))?;
 
 		Ok(())
 	})
