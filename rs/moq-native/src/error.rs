@@ -29,6 +29,13 @@ pub enum Error {
 	#[error("failed to connect to server")]
 	ConnectFailed,
 
+	#[error(transparent)]
+	Connect(#[from] crate::ConnectError),
+
+	#[cfg(feature = "websocket")]
+	#[error("failed to connect to server: QUIC failed: {quic}; WebSocket failed: {websocket}")]
+	TransportRace { quic: Arc<Error>, websocket: Arc<Error> },
+
 	#[cfg(feature = "iroh")]
 	#[error("Iroh support is not enabled")]
 	IrohDisabled,
@@ -66,6 +73,28 @@ pub enum Error {
 	WebSocket(Arc<crate::websocket::Error>),
 }
 
+impl Error {
+	pub fn connect_error(&self) -> Option<crate::ConnectError> {
+		match self {
+			Self::Connect(err) => Some(*err),
+			Self::MoqNet(moq_net::Error::Unauthorized) => Some(crate::ConnectError::Unauthorized),
+			#[cfg(feature = "quinn")]
+			Self::Quinn(err) => err.connect_error(),
+			#[cfg(feature = "noq")]
+			Self::Noq(err) => err.connect_error(),
+			#[cfg(feature = "quiche")]
+			Self::Quiche(err) => err.connect_error(),
+			#[cfg(feature = "websocket")]
+			Self::WebSocket(err) => err.connect_error(),
+			_ => None,
+		}
+	}
+
+	pub fn is_auth(&self) -> bool {
+		self.connect_error().is_some_and(|err| err.is_auth())
+	}
+}
+
 // The wrapped sources aren't `Clone`, so `#[from]` can't store them behind `Arc`
 // directly. These hand-written conversions keep `?` ergonomic at the call sites.
 impl From<std::io::Error> for Error {
@@ -89,6 +118,10 @@ impl From<crate::tls::Error> for Error {
 #[cfg(feature = "quinn")]
 impl From<crate::quinn::Error> for Error {
 	fn from(err: crate::quinn::Error) -> Self {
+		if let Some(err) = err.connect_error() {
+			return Self::Connect(err);
+		}
+
 		Self::Quinn(Arc::new(err))
 	}
 }
@@ -96,6 +129,10 @@ impl From<crate::quinn::Error> for Error {
 #[cfg(feature = "noq")]
 impl From<crate::noq::Error> for Error {
 	fn from(err: crate::noq::Error) -> Self {
+		if let Some(err) = err.connect_error() {
+			return Self::Connect(err);
+		}
+
 		Self::Noq(Arc::new(err))
 	}
 }
@@ -103,6 +140,10 @@ impl From<crate::noq::Error> for Error {
 #[cfg(feature = "quiche")]
 impl From<crate::quiche::Error> for Error {
 	fn from(err: crate::quiche::Error) -> Self {
+		if let Some(err) = err.connect_error() {
+			return Self::Connect(err);
+		}
+
 		Self::Quiche(Arc::new(err))
 	}
 }
@@ -117,6 +158,10 @@ impl From<crate::iroh::Error> for Error {
 #[cfg(feature = "websocket")]
 impl From<crate::websocket::Error> for Error {
 	fn from(err: crate::websocket::Error) -> Self {
+		if let Some(err) = err.connect_error() {
+			return Self::Connect(err);
+		}
+
 		Self::WebSocket(Arc::new(err))
 	}
 }

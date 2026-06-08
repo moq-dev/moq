@@ -1,4 +1,5 @@
 use qmux::tokio_tungstenite;
+use qmux::tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::{net, time};
@@ -22,6 +23,18 @@ pub enum Error {
 
 	#[error("failed to connect WebSocket")]
 	Connect(#[source] qmux::Error),
+
+	#[error("failed to build WebSocket request")]
+	BuildRequest(#[source] tungstenite::Error),
+
+	#[error("failed to build WebSocket protocols header")]
+	ProtocolHeader(#[source] http::header::InvalidHeaderValue),
+
+	#[error("failed to connect WebSocket")]
+	WebSocketConnect(#[source] tungstenite::Error),
+
+	#[error(transparent)]
+	ConnectRejected(#[from] crate::ConnectError),
 
 	#[error("WebSocket accept failed")]
 	Accept(#[source] qmux::Error),
@@ -141,25 +154,74 @@ pub(crate) async fn connect(
 
 	tracing::debug!(%url, "connecting via WebSocket");
 
-	// Use the existing TLS config (which respects tls-disable-verify) for secure connections
+	// Use the existing TLS config (which respects tls-disable-verify) for secure connections.
 	let connector = if needs_tls {
 		tokio_tungstenite::Connector::Rustls(Arc::new(tls.clone()))
 	} else {
 		tokio_tungstenite::Connector::Plain
 	};
 
-	let session = qmux::Client::new()
-		.with_protocols(alpns)
-		.with_connector(connector)
-		.with_keep_alive(qmux::KeepAlive::default()) // 5s ping / 30s deadline — parity with QUIC
-		.connect(url.as_str())
-		.await
-		.map_err(Error::Connect)?;
+	let mut request = url.as_str().into_client_request().map_err(Error::BuildRequest)?;
+	let protocols = websocket_subprotocols(alpns).join(", ");
+	request.headers_mut().insert(
+		http::header::SEC_WEBSOCKET_PROTOCOL,
+		http::HeaderValue::from_str(&protocols).map_err(Error::ProtocolHeader)?,
+	);
+
+	let (socket, response) = if needs_tls {
+		tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector))
+			.await
+			.map_err(map_websocket_error)?
+	} else {
+		tokio_tungstenite::connect_async_with_config(request, None, false)
+			.await
+			.map_err(map_websocket_error)?
+	};
+
+	let alpn = response
+		.headers()
+		.get(http::header::SEC_WEBSOCKET_PROTOCOL)
+		.and_then(|header| header.to_str().ok())
+		.map(str::to_owned);
+	let bare = qmux::ws::Bare::new(socket).with_keep_alive(qmux::KeepAlive::default());
+	let bare = match alpn.as_deref() {
+		Some(alpn) => bare.with_alpn(alpn),
+		None => bare,
+	};
+	let session = bare.connect();
 
 	tracing::warn!(%url, "using WebSocket fallback");
 	WEBSOCKET_WON.lock().unwrap().insert(key);
 
 	Ok(session)
+}
+
+fn websocket_subprotocols(alpns: &[&str]) -> Vec<String> {
+	let mut protocols = Vec::with_capacity(qmux::ALPNS.len() + qmux::PREFIXES.len() * alpns.len());
+	for (&bare, &prefix) in qmux::ALPNS.iter().zip(qmux::PREFIXES) {
+		protocols.push(bare.to_string());
+		protocols.extend(alpns.iter().map(|alpn| format!("{prefix}{alpn}")));
+	}
+	protocols
+}
+
+impl Error {
+	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
+		match self {
+			Self::ConnectRejected(err) => Some(*err),
+			_ => None,
+		}
+	}
+}
+
+fn map_websocket_error(err: tungstenite::Error) -> Error {
+	if let tungstenite::Error::Http(response) = &err
+		&& let Some(err) = crate::ConnectError::from_status_u16(response.status().as_u16())
+	{
+		return err.into();
+	}
+
+	Error::WebSocketConnect(err)
 }
 
 /// Listens for incoming WebSocket connections on a TCP port.

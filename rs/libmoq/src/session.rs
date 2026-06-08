@@ -74,25 +74,24 @@ impl Session {
 			.with_consume(consume)
 			.connect(url);
 
-		// report() runs until the reconnect loop gives up; map its terminal error to Connect.
-		Self::report(callback, reconnect)
-			.await
-			.map_err(|err| Error::Connect(Arc::new(err)))
+		Self::report(callback, reconnect).await
 	}
 
 	/// Forward connection epochs to the status callback until the reconnect loop stops.
 	///
 	/// Returns the terminal error via `?`. Disconnects aren't reported: status 0 is reserved for a
 	/// clean close (delivered as the terminal callback once the task ends).
-	async fn report(callback: ffi::OnStatus, mut reconnect: moq_native::Reconnect) -> anyhow::Result<()> {
+	async fn report(callback: ffi::OnStatus, mut reconnect: moq_native::Reconnect) -> Result<(), Error> {
 		let mut connects: u64 = 0;
 		loop {
-			if let moq_native::Status::Connected = reconnect.status().await? {
+			if let moq_native::Status::Connected = reconnect.status().await.map_err(map_connect_error)? {
 				connects += 1;
 				// Positive status carries the connection epoch, so callers can tell a
 				// reconnect (>1) from the first connect (1). No lock is held, so the C
 				// callback is free to re-enter libmoq.
-				let code = i32::try_from(connects).context("connection epoch exceeded i32::MAX")?;
+				let code = i32::try_from(connects)
+					.context("connection epoch exceeded i32::MAX")
+					.map_err(|err| Error::Connect(Arc::new(err)))?;
 				callback.call(code);
 			}
 		}
@@ -108,5 +107,37 @@ impl Session {
 			.take()
 			.ok_or(Error::SessionNotFound)?;
 		Ok(())
+	}
+}
+
+fn map_connect_error(err: moq_native::Error) -> Error {
+	match err.connect_error() {
+		Some(moq_native::ConnectError::Unauthorized) => Error::Unauthorized,
+		Some(moq_native::ConnectError::Forbidden) => Error::Forbidden,
+		_ => Error::Native(err),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::ffi::ReturnCode;
+
+	#[test]
+	fn maps_native_auth_connect_errors() {
+		assert!(matches!(
+			map_connect_error(moq_native::ConnectError::Unauthorized.into()),
+			Error::Unauthorized
+		));
+		assert!(matches!(
+			map_connect_error(moq_native::ConnectError::Forbidden.into()),
+			Error::Forbidden
+		));
+		assert!(matches!(
+			map_connect_error(moq_net::Error::Unauthorized.into()),
+			Error::Unauthorized
+		));
+		assert_eq!(Error::Unauthorized.code(), -32);
+		assert_eq!(Error::Forbidden.code(), -33);
 	}
 }

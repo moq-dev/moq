@@ -15,11 +15,7 @@ struct Client {
 
 impl Client {
 	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
-		let client = self
-			.config
-			.clone()
-			.init()
-			.map_err(|err| MoqError::Connect(format!("{err}")))?;
+		let client = self.config.clone().init().map_err(map_connect_error)?;
 
 		let publish = self.publish.as_ref().map(|o| o.inner().consume());
 		let consume = self.consume.as_ref().map(|o| o.inner().clone());
@@ -29,9 +25,34 @@ impl Client {
 			.with_consume(consume)
 			.connect_once(url)
 			.await
-			.map_err(|err| MoqError::Connect(format!("{err}")))?;
+			.map_err(map_connect_error)?;
 
 		Ok(Arc::new(MoqSession::new(session)))
+	}
+}
+
+fn map_connect_error(err: moq_native::Error) -> MoqError {
+	match err.connect_error() {
+		Some(moq_native::ConnectError::Unauthorized) => MoqError::Unauthorized,
+		Some(moq_native::ConnectError::Forbidden) => MoqError::Forbidden,
+		_ => MoqError::Connect(format!("{err}")),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn maps_native_auth_connect_errors() {
+		assert!(matches!(
+			map_connect_error(moq_native::ConnectError::Unauthorized.into()),
+			MoqError::Unauthorized
+		));
+		assert!(matches!(
+			map_connect_error(moq_native::ConnectError::Forbidden.into()),
+			MoqError::Forbidden
+		));
 	}
 }
 

@@ -115,6 +115,14 @@ pub enum Error {
 	#[error("offline")]
 	Offline,
 
+	/// Connection was rejected as unauthorized by the server.
+	#[error("unauthorized")]
+	Unauthorized,
+
+	/// Connection was forbidden by the server.
+	#[error("forbidden")]
+	Forbidden,
+
 	/// Error from the hang media layer.
 	#[error("hang error: {0}")]
 	Hang(#[from] hang::Error),
@@ -194,7 +202,9 @@ impl ffi::ReturnCode for Error {
 			Error::Mux(_) => -29,
 			Error::Audio(_) => -30,
 			Error::GroupNotFound => -31,
-			Error::Native(_) => -32,
+			Error::Unauthorized => -32,
+			Error::Forbidden => -33,
+			Error::Native(_) => -34,
 		}
 	}
 }
