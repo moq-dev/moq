@@ -228,7 +228,7 @@ async fn build_https_config(
 			.with_single_cert(cert_chain, key_der)
 			.context("invalid https cert/key pair")?
 	} else {
-		// Build the CA root store inline; `moq_native::ServerTlsConfig` is
+		// Build the CA root store inline; `moq_native::tls::Server` is
 		// `non_exhaustive`, so we can't construct one to call its `load_roots`.
 		let mut root_store = rustls::RootCertStore::empty();
 		for path in root {

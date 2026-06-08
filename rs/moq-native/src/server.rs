@@ -1,4 +1,5 @@
 use std::net;
+#[cfg(test)]
 use std::path::PathBuf;
 
 use crate::{Error, QuicBackend};
@@ -12,77 +13,6 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
-
-/// TLS configuration for the server.
-///
-/// Certificate and keys must currently be files on disk.
-/// Alternatively, you can generate a self-signed certificate given a list of hostnames.
-///
-/// In config files, each list field accepts either a single string or a TOML array.
-#[serde_with::serde_as]
-#[derive(clap::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct ServerTlsConfig {
-	/// Load the given certificate from disk.
-	#[arg(long = "tls-cert", id = "tls-cert", env = "MOQ_SERVER_TLS_CERT")]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_>")]
-	pub cert: Vec<PathBuf>,
-
-	/// Load the given key from disk.
-	#[arg(long = "tls-key", id = "tls-key", env = "MOQ_SERVER_TLS_KEY")]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_>")]
-	pub key: Vec<PathBuf>,
-
-	/// Or generate a new certificate and key with the given hostnames.
-	/// This won't be valid unless the client uses the fingerprint or disables verification.
-	#[arg(
-		long = "tls-generate",
-		id = "tls-generate",
-		value_delimiter = ',',
-		env = "MOQ_SERVER_TLS_GENERATE"
-	)]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_>")]
-	pub generate: Vec<String>,
-
-	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
-	///
-	/// When set, clients *may* present a certificate during the TLS handshake.
-	/// Valid presentations are reported via [`Request::has_peer_certificate`]
-	/// and can be used by the application to grant elevated access. Clients that
-	/// do not present a certificate are unaffected.
-	///
-	/// Only supported by the Quinn backend.
-	#[arg(
-		long = "server-tls-root",
-		id = "server-tls-root",
-		value_delimiter = ',',
-		env = "MOQ_SERVER_TLS_ROOT"
-	)]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_>")]
-	pub root: Vec<PathBuf>,
-}
-
-impl ServerTlsConfig {
-	/// Load all configured root CAs into a [`rustls::RootCertStore`].
-	pub fn load_roots(&self) -> crate::tls::Result<rustls::RootCertStore> {
-		let mut roots = rustls::RootCertStore::empty();
-		for path in &self.root {
-			let certs = crate::tls::read_certs(path)?;
-			if certs.is_empty() {
-				return Err(crate::tls::Error::Empty);
-			}
-			for cert in certs {
-				roots.add(cert).map_err(crate::tls::Error::AddRoot)?;
-			}
-		}
-		Ok(roots)
-	}
-}
 
 /// Configuration for the MoQ server.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -170,7 +100,7 @@ pub struct ServerConfig {
 
 	#[command(flatten)]
 	#[serde(default)]
-	pub tls: ServerTlsConfig,
+	pub tls: crate::tls::Server,
 }
 
 impl ServerConfig {
@@ -679,7 +609,7 @@ impl Request {
 	}
 
 	/// Whether the peer presented a client certificate during the handshake
-	/// that chained to a configured [`ServerTlsConfig::root`].
+	/// that chained to a configured [`crate::tls::Server::root`].
 	///
 	/// Only the Quinn backend supports mTLS; other backends always return `false`.
 	pub fn has_peer_certificate(&self) -> bool {
@@ -751,7 +681,7 @@ mod tests {
 			cert = "cert.pem"
 			key = "key.pem"
 		"#;
-		let config: ServerTlsConfig = toml::from_str(single).unwrap();
+		let config: crate::tls::Server = toml::from_str(single).unwrap();
 		assert_eq!(config.cert, vec![PathBuf::from("cert.pem")]);
 		assert_eq!(config.key, vec![PathBuf::from("key.pem")]);
 
@@ -762,7 +692,7 @@ mod tests {
 			generate = ["localhost"]
 			root = ["ca.pem"]
 		"#;
-		let config: ServerTlsConfig = toml::from_str(array).unwrap();
+		let config: crate::tls::Server = toml::from_str(array).unwrap();
 		assert_eq!(config.cert, vec![PathBuf::from("a.pem"), PathBuf::from("b.pem")]);
 		assert_eq!(config.key, vec![PathBuf::from("a.key"), PathBuf::from("b.key")]);
 		assert_eq!(config.generate, vec!["localhost".to_string()]);

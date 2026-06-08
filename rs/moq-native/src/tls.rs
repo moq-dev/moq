@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::{fs, io};
 
 #[cfg(any(feature = "quinn", feature = "noq"))]
-use crate::server::{ServerTlsConfig, ServerTlsInfo};
+use crate::server::ServerTlsInfo;
 #[cfg(any(feature = "quinn", feature = "noq"))]
 use rustls::pki_types::PrivatePkcs8KeyDer;
 #[cfg(any(feature = "quinn", feature = "noq"))]
@@ -196,6 +196,79 @@ impl Client {
 	}
 }
 
+// ── Server ──────────────────────────────────────────────────────────
+
+/// TLS configuration for the server.
+///
+/// Certificate and keys must currently be files on disk.
+/// Alternatively, you can generate a self-signed certificate given a list of hostnames.
+///
+/// In config files, each list field accepts either a single string or a TOML array.
+#[serde_with::serde_as]
+#[derive(clap::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Server {
+	/// Load the given certificate from disk.
+	#[arg(long = "tls-cert", id = "tls-cert", env = "MOQ_SERVER_TLS_CERT")]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub cert: Vec<PathBuf>,
+
+	/// Load the given key from disk.
+	#[arg(long = "tls-key", id = "tls-key", env = "MOQ_SERVER_TLS_KEY")]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub key: Vec<PathBuf>,
+
+	/// Or generate a new certificate and key with the given hostnames.
+	/// This won't be valid unless the client uses the fingerprint or disables verification.
+	#[arg(
+		long = "tls-generate",
+		id = "tls-generate",
+		value_delimiter = ',',
+		env = "MOQ_SERVER_TLS_GENERATE"
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub generate: Vec<String>,
+
+	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
+	///
+	/// When set, clients *may* present a certificate during the TLS handshake.
+	/// Valid presentations are reported via [`crate::Request::has_peer_certificate`]
+	/// and can be used by the application to grant elevated access. Clients that
+	/// do not present a certificate are unaffected.
+	///
+	/// Only supported by the Quinn backend.
+	#[arg(
+		long = "server-tls-root",
+		id = "server-tls-root",
+		value_delimiter = ',',
+		env = "MOQ_SERVER_TLS_ROOT"
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub root: Vec<PathBuf>,
+}
+
+impl Server {
+	/// Load all configured root CAs into a [`rustls::RootCertStore`].
+	pub fn load_roots(&self) -> Result<rustls::RootCertStore> {
+		let mut roots = rustls::RootCertStore::empty();
+		for path in &self.root {
+			let certs = read_certs(path)?;
+			if certs.is_empty() {
+				return Err(Error::Empty);
+			}
+			for cert in certs {
+				roots.add(cert).map_err(Error::AddRoot)?;
+			}
+		}
+		Ok(roots)
+	}
+}
+
 // ── NoCertificateVerification ───────────────────────────────────────
 
 #[derive(Debug)]
@@ -314,7 +387,7 @@ impl ServeCerts {
 		}
 	}
 
-	pub fn load_certs(&self, config: &ServerTlsConfig) -> Result<()> {
+	pub fn load_certs(&self, config: &Server) -> Result<()> {
 		if config.cert.len() != config.key.len() {
 			return Err(Error::CertKeyCountMismatch);
 		}
@@ -455,7 +528,7 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 /// `mv`-into-place rotate certs with no external signal. Returns immediately when
 /// only generated certs are configured: there's nothing on disk to watch.
 #[cfg(any(feature = "quinn", feature = "noq"))]
-pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: ServerTlsConfig) {
+pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Server) {
 	let paths: Vec<PathBuf> = tls_config.cert.iter().chain(tls_config.key.iter()).cloned().collect();
 	if paths.is_empty() {
 		return;
