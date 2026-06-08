@@ -3877,6 +3877,7 @@ dependencies = [
  "hang",
  "kio",
  "m3u8-rs",
+ "moq-json",
  "moq-loc",
  "moq-msf",
  "moq-net",

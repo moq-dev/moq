@@ -1,4 +1,5 @@
 import * as Catalog from "@moq/hang/catalog";
+import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
@@ -156,13 +157,18 @@ export class Broadcast {
 		const track = broadcast.subscribe(trackName, Catalog.PRIORITY.catalog);
 		effect.cleanup(() => track.close());
 
-		const fetchNext =
-			format === "hang"
-				? async () => Catalog.fetch(track)
-				: async () => {
-						const update = await Msf.fetch(track);
-						return update ? toHang(update) : undefined;
-					};
+		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json;
+		// MSF stays on its own one-blob-per-group fetch.
+		let fetchNext: () => Promise<Catalog.Root | undefined>;
+		if (format === "hang") {
+			const consumer = new Json.Consumer<Catalog.Root>(track, { schema: Catalog.RootSchema });
+			fetchNext = () => consumer.next();
+		} else {
+			fetchNext = async () => {
+				const update = await Msf.fetch(track);
+				return update ? toHang(update) : undefined;
+			};
+		}
 
 		effect.spawn(async () => {
 			try {

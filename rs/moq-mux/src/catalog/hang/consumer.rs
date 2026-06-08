@@ -1,4 +1,4 @@
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use hang::Catalog;
 
@@ -6,49 +6,24 @@ use crate::Result;
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
 ///
-/// This wraps a `moq_net::TrackConsumer` and automatically deserializes JSON
-/// catalog data to discover available audio and video tracks in a broadcast.
-#[derive(Clone)]
+/// This wraps a [`moq_json::Consumer`], reconstructing the JSON catalog from the latest
+/// group's snapshot (plus any future deltas) to discover available audio and video tracks.
 pub struct Consumer {
-	/// Access to the underlying track consumer.
-	pub track: moq_net::TrackConsumer,
-	group: Option<moq_net::GroupConsumer>,
+	inner: moq_json::Consumer<Catalog>,
 }
 
 impl Consumer {
 	/// Create a new catalog consumer from a MoQ track consumer.
 	pub fn new(track: moq_net::TrackConsumer) -> Self {
-		Self { track, group: None }
+		Self {
+			inner: moq_json::Consumer::new(track),
+		}
 	}
 
 	/// Poll for the next catalog update.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog>>> {
-		// Drain pending groups, keeping only the newest. Remember whether the track is done
-		// so we can distinguish "more groups may arrive" from "no more groups, ever".
-		let track_finished = loop {
-			match self.track.poll_next_group(waiter)? {
-				Poll::Ready(Some(group)) => self.group = Some(group),
-				Poll::Ready(None) => break true,
-				Poll::Pending => break false,
-			}
-		};
-
-		if let Some(group) = &mut self.group {
-			match group.poll_read_frame(waiter)? {
-				Poll::Ready(Some(frame)) => {
-					self.group = None;
-					return Poll::Ready(Ok(Some(Catalog::from_slice(&frame)?)));
-				}
-				Poll::Ready(None) => self.group = None,
-				Poll::Pending => return Poll::Pending,
-			}
-		}
-
-		if track_finished {
-			Poll::Ready(Ok(None))
-		} else {
-			Poll::Pending
-		}
+		let result = ready!(self.inner.poll_next(waiter));
+		Poll::Ready(result.map_err(Into::into))
 	}
 
 	/// Get the next catalog update.
@@ -56,7 +31,7 @@ impl Consumer {
 	/// This method waits for the next catalog publication and returns the
 	/// catalog data. If there are no more updates, `None` is returned.
 	pub async fn next(&mut self) -> Result<Option<Catalog>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
+		Ok(self.inner.next().await?)
 	}
 }
 

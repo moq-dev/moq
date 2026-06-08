@@ -8,9 +8,13 @@ use base64::Engine;
 /// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
 /// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
 /// Both the hang (`catalog.json`) and MSF (`catalog`) tracks are published on drop of the guard.
+///
+/// The hang track is published through [`moq_json`], which currently emits one snapshot per
+/// group (deltas disabled). This routes catalog publishing through the JSON merge-patch helper
+/// so deltas can be enabled later without changing the wire format used today.
 #[derive(Clone)]
 pub struct Producer {
-	hang_track: moq_net::TrackProducer,
+	hang: moq_json::Producer<hang::Catalog>,
 	msf_track: moq_net::TrackProducer,
 
 	current: Arc<Mutex<hang::Catalog>>,
@@ -30,8 +34,10 @@ impl Producer {
 		let hang_track = broadcast.create_track(hang::Catalog::default_track())?;
 		let msf_track = broadcast.create_track(moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
 
+		let hang = moq_json::Producer::new(hang_track, moq_json::Config::default());
+
 		Ok(Self {
-			hang_track,
+			hang,
 			msf_track,
 			current: Arc::new(Mutex::new(catalog)),
 		})
@@ -41,7 +47,7 @@ impl Producer {
 	pub fn lock(&mut self) -> Guard<'_> {
 		Guard {
 			catalog: self.current.lock().unwrap(),
-			hang_track: &mut self.hang_track,
+			hang: &mut self.hang,
 			msf_track: &mut self.msf_track,
 			updated: false,
 		}
@@ -54,14 +60,12 @@ impl Producer {
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> Result<super::Consumer, moq_net::Error> {
-		let track = self.hang_track.consume();
-		let subscriber = track;
-		Ok(super::Consumer::new(subscriber))
+		Ok(super::Consumer::new(self.hang.consume()))
 	}
 
 	/// Finish publishing to this catalog.
-	pub fn finish(&mut self) -> Result<(), moq_net::Error> {
-		self.hang_track.finish()?;
+	pub fn finish(&mut self) -> crate::Result<()> {
+		self.hang.finish()?;
 		self.msf_track.finish()?;
 		Ok(())
 	}
@@ -74,7 +78,7 @@ impl Producer {
 /// On drop, both the hang and MSF catalog tracks are updated if the catalog was mutated.
 pub struct Guard<'a> {
 	catalog: MutexGuard<'a, hang::Catalog>,
-	hang_track: &'a mut moq_net::TrackProducer,
+	hang: &'a mut moq_json::Producer<hang::Catalog>,
 	msf_track: &'a mut moq_net::TrackProducer,
 	updated: bool,
 }
@@ -100,12 +104,9 @@ impl Drop for Guard<'_> {
 			return;
 		}
 
-		// Publish hang catalog
-		if let Ok(mut group) = self.hang_track.append_group() {
-			let frame = self.catalog.to_string().expect("invalid catalog");
-			let _ = group.write_frame(frame);
-			let _ = group.finish();
-		}
+		// Publish the hang catalog (one snapshot per group while deltas are disabled).
+		let catalog: &hang::Catalog = &self.catalog;
+		let _ = self.hang.update(catalog);
 
 		// Publish MSF catalog
 		let msf = to_msf(&self.catalog);
