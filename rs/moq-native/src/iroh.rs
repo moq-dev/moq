@@ -9,6 +9,7 @@ use web_transport_iroh::{
 use web_transport_proto::{ConnectRequest, ConnectResponse};
 
 pub use iroh::Endpoint;
+pub use web_transport_iroh;
 
 /// Errors specific to the iroh P2P backend.
 #[derive(Debug, thiserror::Error)]

@@ -6,6 +6,8 @@ use std::time::Duration;
 use std::{net, time};
 use url::Url;
 
+pub use web_transport_quinn;
+
 /// Errors specific to the quinn QUIC backend.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

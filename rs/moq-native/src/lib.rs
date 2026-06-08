@@ -41,15 +41,8 @@ pub use server::*;
 pub use moq_net;
 pub use rustls;
 
-#[cfg(feature = "noq")]
-pub use web_transport_noq;
-#[cfg(feature = "quinn")]
-pub use web_transport_quinn;
-
 #[cfg(feature = "quiche")]
 pub mod quiche;
-#[cfg(feature = "quiche")]
-pub use web_transport_quiche;
 
 #[cfg(feature = "iroh")]
 pub mod iroh;

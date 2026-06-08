@@ -9,6 +9,8 @@ use std::sync::{Arc, RwLock};
 use url::Url;
 use web_transport_quiche::proto::ConnectRequest;
 
+pub use web_transport_quiche;
+
 /// Errors specific to the quiche QUIC backend.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

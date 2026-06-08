@@ -8,6 +8,8 @@ use url::Url;
 
 use web_transport_noq::noq;
 
+pub use web_transport_noq;
+
 /// Errors specific to the noq QUIC backend.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
