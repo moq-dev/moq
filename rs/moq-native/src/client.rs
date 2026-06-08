@@ -1,7 +1,6 @@
-use crate::crypto;
 use crate::{Backoff, Error, QuicBackend, Reconnect};
+use std::net;
 use std::path::PathBuf;
-use std::{net, sync::Arc};
 use url::Url;
 
 /// TLS configuration for the client.
@@ -111,71 +110,8 @@ impl ClientTls {
 	/// Loads the configured roots (or the platform's native roots if none),
 	/// optionally attaches a client identity for mTLS, and disables server
 	/// certificate verification when `disable_verify` is set.
-	pub fn build(&self) -> std::result::Result<rustls::ClientConfig, crate::tls::Error> {
-		use rustls::pki_types::CertificateDer;
-		use rustls::pki_types::PrivateKeyDer;
-		use rustls::pki_types::pem::PemObject;
-
-		let provider = crypto::provider();
-
-		let mut roots = rustls::RootCertStore::empty();
-		if self.root.is_empty() {
-			let native = rustls_native_certs::load_native_certs();
-			for err in native.errors {
-				tracing::warn!(%err, "failed to load root cert");
-			}
-			for cert in native.certs {
-				roots.add(cert).map_err(crate::tls::Error::AddRoot)?;
-			}
-		} else {
-			for root in &self.root {
-				let file = std::fs::File::open(root).map_err(crate::tls::Error::Open)?;
-				let mut reader = std::io::BufReader::new(file);
-				let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(&mut reader)
-					.collect::<std::result::Result<_, _>>()
-					.map_err(crate::tls::Error::Read)?;
-				if certs.is_empty() {
-					return Err(crate::tls::Error::EmptyRoots(root.clone()));
-				}
-				for cert in certs {
-					roots.add(cert).map_err(crate::tls::Error::AddRoot)?;
-				}
-			}
-		}
-
-		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
-		// QUIC always negotiates TLS 1.3 regardless of this setting.
-		let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
-			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
-			.map_err(crate::tls::Error::from)?
-			.with_root_certificates(roots);
-
-		let mut tls = match (&self.cert, &self.key) {
-			(Some(cert_path), Some(key_path)) => {
-				let cert_pem = std::fs::read(cert_path).map_err(crate::tls::Error::ReadFile)?;
-				let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
-					.collect::<std::result::Result<_, _>>()
-					.map_err(crate::tls::Error::Read)?;
-				if chain.is_empty() {
-					return Err(crate::tls::Error::Empty);
-				}
-				let key_pem = std::fs::read(key_path).map_err(crate::tls::Error::ReadFile)?;
-				let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(crate::tls::Error::Key)?;
-				builder
-					.with_client_auth_cert(chain, key)
-					.map_err(crate::tls::Error::ClientAuth)?
-			}
-			(None, None) => builder.with_no_client_auth(),
-			_ => return Err(crate::tls::Error::IncompleteClientAuth),
-		};
-
-		if self.disable_verify.unwrap_or_default() {
-			tracing::warn!("TLS server certificate verification is disabled; A man-in-the-middle attack is possible.");
-			let noop = NoCertificateVerification(provider);
-			tls.dangerous().set_certificate_verifier(Arc::new(noop));
-		}
-
-		Ok(tls)
+	pub fn build(&self) -> crate::tls::Result<rustls::ClientConfig> {
+		crate::tls::client_config(self)
 	}
 }
 
@@ -487,46 +423,6 @@ impl Client {
 
 		#[cfg(not(feature = "websocket"))]
 		return Err(Error::NoBackend("no QUIC backend matched; this should not happen"));
-	}
-}
-
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-
-#[derive(Debug)]
-struct NoCertificateVerification(crypto::Provider);
-
-impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
-	fn verify_server_cert(
-		&self,
-		_end_entity: &CertificateDer<'_>,
-		_intermediates: &[CertificateDer<'_>],
-		_server_name: &ServerName<'_>,
-		_ocsp: &[u8],
-		_now: UnixTime,
-	) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-		Ok(rustls::client::danger::ServerCertVerified::assertion())
-	}
-
-	fn verify_tls12_signature(
-		&self,
-		message: &[u8],
-		cert: &CertificateDer<'_>,
-		dss: &rustls::DigitallySignedStruct,
-	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-		rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
-	}
-
-	fn verify_tls13_signature(
-		&self,
-		message: &[u8],
-		cert: &CertificateDer<'_>,
-		dss: &rustls::DigitallySignedStruct,
-	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-		rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
-	}
-
-	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-		self.0.signature_verification_algorithms.supported_schemes()
 	}
 }
 

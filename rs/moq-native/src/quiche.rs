@@ -3,10 +3,8 @@ use crate::crypto;
 use crate::server::{ServerConfig, ServerTlsInfo};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use std::fs;
-use std::io;
 use std::net;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use url::Url;
 use web_transport_quiche::proto::ConnectRequest;
@@ -263,16 +261,10 @@ impl QuicheServer {
 }
 
 fn load_quiche_cert(
-	cert_path: &PathBuf,
-	key_path: &PathBuf,
-) -> std::result::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), crate::tls::Error> {
-	let chain_file = fs::File::open(cert_path).map_err(crate::tls::Error::Open)?;
-	let mut chain_reader = io::BufReader::new(chain_file);
-
-	let chain: Vec<CertificateDer> = CertificateDer::pem_reader_iter(&mut chain_reader)
-		.collect::<std::result::Result<_, _>>()
-		.map_err(crate::tls::Error::Read)?;
-
+	cert_path: &Path,
+	key_path: &Path,
+) -> crate::tls::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+	let chain = crate::tls::read_certs(cert_path)?;
 	if chain.is_empty() {
 		return Err(crate::tls::Error::Empty);
 	}
@@ -285,7 +277,7 @@ fn load_quiche_cert(
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 fn generate_quiche_cert(
 	hostnames: &[String],
-) -> std::result::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), crate::tls::Error> {
+) -> crate::tls::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
 	let key_pair = rcgen::KeyPair::generate()?;
 
 	let mut params = rcgen::CertificateParams::new(hostnames)?;
@@ -306,8 +298,8 @@ fn generate_quiche_cert(
 #[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
 fn generate_quiche_cert(
 	hostnames: &[String],
-) -> std::result::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), crate::tls::Error> {
-	return Err(crate::tls::Error::NoCryptoProvider);
+) -> crate::tls::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+	Err(crate::tls::Error::NoCryptoProvider)
 }
 
 // ── QuicheQuicRequest ───────────────────────────────────────────────

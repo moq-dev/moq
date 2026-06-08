@@ -69,17 +69,10 @@ pub struct ServerTlsConfig {
 
 impl ServerTlsConfig {
 	/// Load all configured root CAs into a [`rustls::RootCertStore`].
-	pub fn load_roots(&self) -> std::result::Result<rustls::RootCertStore, crate::tls::Error> {
-		use rustls::pki_types::CertificateDer;
-		use rustls::pki_types::pem::PemObject;
-
+	pub fn load_roots(&self) -> crate::tls::Result<rustls::RootCertStore> {
 		let mut roots = rustls::RootCertStore::empty();
 		for path in &self.root {
-			let file = std::fs::File::open(path).map_err(crate::tls::Error::Open)?;
-			let mut reader = std::io::BufReader::new(file);
-			let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(&mut reader)
-				.collect::<std::result::Result<_, _>>()
-				.map_err(crate::tls::Error::Read)?;
+			let certs = crate::tls::read_certs(path)?;
 			if certs.is_empty() {
 				return Err(crate::tls::Error::Empty);
 			}
