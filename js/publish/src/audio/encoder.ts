@@ -31,6 +31,14 @@ export type EncoderProps = {
 	// Opus frame duration in milliseconds. Opus supports 2.5-60ms; defaults to 20ms (the real-time default).
 	frameDuration?: number | Signal<number | undefined>;
 
+	// Opus-only encoder knobs that don't affect decoding, so they're not in the catalog.
+	// They map directly to the matching OpusEncoderConfig fields:
+	// https://developer.mozilla.org/en-US/docs/Web/API/AudioEncoder/configure#opus
+	complexity?: number | Signal<number | undefined>; // 0-10, higher is better quality but more CPU
+	packetlossperc?: number | Signal<number | undefined>; // 0-100, expected loss the encoder optimizes for
+	useinbandfec?: boolean | Signal<boolean | undefined>; // in-band forward error correction
+	usedtx?: boolean | Signal<boolean | undefined>; // discontinuous transmission (silence suppression)
+
 	container?: Catalog.Container;
 };
 
@@ -46,6 +54,10 @@ export class Encoder {
 	channelCount: Signal<number | undefined>;
 	bitrate: Signal<number | undefined>;
 	frameDuration: Signal<number | undefined>;
+	complexity: Signal<number | undefined>;
+	packetlossperc: Signal<number | undefined>;
+	useinbandfec: Signal<boolean | undefined>;
+	usedtx: Signal<boolean | undefined>;
 
 	source: Signal<Source | undefined>;
 
@@ -73,6 +85,10 @@ export class Encoder {
 		this.channelCount = Signal.from<number | undefined>(props?.channelCount);
 		this.bitrate = Signal.from<number | undefined>(props?.bitrate);
 		this.frameDuration = Signal.from<number | undefined>(props?.frameDuration);
+		this.complexity = Signal.from<number | undefined>(props?.complexity);
+		this.packetlossperc = Signal.from<number | undefined>(props?.packetlossperc);
+		this.useinbandfec = Signal.from<boolean | undefined>(props?.useinbandfec);
+		this.usedtx = Signal.from<boolean | undefined>(props?.usedtx);
 
 		this.#signals.run(this.#runSource.bind(this));
 		this.#signals.run(this.#runGain.bind(this));
@@ -183,6 +199,26 @@ export class Encoder {
 		this.#config.set({ ...config, bitrate, jitter });
 	}
 
+	// Collect the Opus encoder knobs that are set, reading them through the effect so the encoder
+	// reconfigures when any change. Undefined values are omitted so the browser keeps its defaults.
+	#opusOptions(effect: Effect): OpusEncoderConfigExt {
+		const opus: OpusEncoderConfigExt = {};
+
+		const complexity = effect.get(this.complexity);
+		if (complexity !== undefined) opus.complexity = complexity;
+
+		const packetlossperc = effect.get(this.packetlossperc);
+		if (packetlossperc !== undefined) opus.packetlossperc = packetlossperc;
+
+		const useinbandfec = effect.get(this.useinbandfec);
+		if (useinbandfec !== undefined) opus.useinbandfec = useinbandfec;
+
+		const usedtx = effect.get(this.usedtx);
+		if (usedtx !== undefined) opus.usedtx = usedtx;
+
+		return opus;
+	}
+
 	#runGain(effect: Effect): void {
 		const gain = effect.get(this.#gain);
 		if (!gain) return;
@@ -235,7 +271,7 @@ export class Encoder {
 
 				const source = effect.get(this.source);
 				const kind: Kind = source ? normalizeSource(source).kind : "auto";
-				const encoderConfig = toEncoderConfig(config, kind);
+				const encoderConfig = toEncoderConfig(config, kind, this.#opusOptions(effect));
 
 				console.debug("encoding audio", encoderConfig);
 				encoder.configure(encoderConfig);
@@ -312,9 +348,9 @@ interface OpusEncoderConfigExt extends OpusEncoderConfig {
 	signal?: "auto" | "voice" | "music";
 }
 
-// Build the WebCodecs encoder config from the catalog (decoder) config plus a Kind hint.
-// Opus-only knobs are kept out of the catalog since they only affect encoding.
-function toEncoderConfig(config: Catalog.AudioConfig, kind: Kind): AudioEncoderConfig {
+// Build the WebCodecs encoder config from the catalog (decoder) config, a Kind hint, and any
+// Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding.
+function toEncoderConfig(config: Catalog.AudioConfig, kind: Kind, opusOptions: OpusEncoderConfigExt): AudioEncoderConfig {
 	const encoderConfig: AudioEncoderConfig = {
 		codec: config.codec,
 		sampleRate: config.sampleRate,
@@ -323,7 +359,7 @@ function toEncoderConfig(config: Catalog.AudioConfig, kind: Kind): AudioEncoderC
 	};
 
 	if (config.codec === "opus") {
-		const opus: OpusEncoderConfigExt = {};
+		const opus: OpusEncoderConfigExt = { ...opusOptions };
 
 		if (kind !== "auto") {
 			opus.application = kind === "voice" ? "voip" : "audio";
