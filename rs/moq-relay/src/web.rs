@@ -110,7 +110,7 @@ pub struct WebState {
 	/// The cluster state for resolving origins.
 	pub cluster: Cluster,
 	/// TLS certificate information served at `/certificate.sha256`.
-	pub tls_info: Arc<std::sync::RwLock<moq_native::ServerTlsInfo>>,
+	pub tls_info: Arc<std::sync::RwLock<moq_native::tls::Info>>,
 	/// Monotonically increasing connection counter for WebSocket sessions.
 	pub conn_id: AtomicU64,
 	/// Host overload monitor backing the `/health` endpoint.
@@ -165,7 +165,6 @@ impl Web {
 			let config = build_https_config(&cert, &key, &root).await?;
 			let rustls_config = RustlsConfig::from_config(Arc::new(config));
 
-			#[cfg(unix)]
 			tokio::spawn(reload_https_config(rustls_config.clone(), cert, key, root));
 
 			// MtlsAcceptor surfaces a verified peer cert as a request extension.
@@ -229,7 +228,7 @@ async fn build_https_config(
 			.with_single_cert(cert_chain, key_der)
 			.context("invalid https cert/key pair")?
 	} else {
-		// Build the CA root store inline; `moq_native::ServerTlsConfig` is
+		// Build the CA root store inline; `moq_native::tls::Server` is
 		// `non_exhaustive`, so we can't construct one to call its `load_roots`.
 		let mut root_store = rustls::RootCertStore::empty();
 		for path in root {
@@ -256,18 +255,27 @@ async fn build_https_config(
 	Ok(config)
 }
 
-/// Reload the HTTPS cert/key on SIGUSR1.
+/// Reload the HTTPS cert/key/root whenever they change on disk.
 ///
 /// `RustlsConfig::reload_from_pem_file` would rebuild with `with_no_client_auth`
-/// — silently stripping mTLS when configured — so we always rebuild via the
-/// full [`build_https_config`] path.
-#[cfg(unix)]
+/// (silently stripping mTLS when configured), so we always rebuild via the full
+/// [`build_https_config`] path.
 async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, root: Vec<PathBuf>) {
-	use tokio::signal::unix::{SignalKind, signal};
+	let paths: Vec<PathBuf> = std::iter::once(cert.clone())
+		.chain(std::iter::once(key.clone()))
+		.chain(root.iter().cloned())
+		.collect();
 
-	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
+	let mut watcher = match crate::watch::FileWatcher::new(&paths) {
+		Ok(watcher) => watcher,
+		Err(err) => {
+			tracing::error!(%err, "failed to watch web certificate files; hot reload disabled");
+			return;
+		}
+	};
 
-	while listener.recv().await.is_some() {
+	loop {
+		watcher.changed().await;
 		tracing::info!("reloading web certificate");
 
 		match build_https_config(&cert, &key, &root).await {

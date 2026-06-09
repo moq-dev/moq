@@ -402,7 +402,7 @@ async fn run_session(
 	);
 
 	let client = client.with_publish(origin.consume());
-	let session = client.connect(settings.url.clone()).await?;
+	let session = client.connect_once(settings.url.clone()).await?;
 
 	let mut runtime = RuntimeState {
 		session,

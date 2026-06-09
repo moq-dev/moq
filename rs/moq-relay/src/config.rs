@@ -53,7 +53,7 @@ pub struct Config {
 	#[command(flatten)]
 	#[serde(default)]
 	#[cfg(feature = "iroh")]
-	pub iroh: moq_native::IrohEndpointConfig,
+	pub iroh: moq_native::iroh::EndpointConfig,
 }
 
 impl Config {

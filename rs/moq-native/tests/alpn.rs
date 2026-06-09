@@ -43,7 +43,7 @@ async fn connect_with_version(version: &str) {
 	});
 
 	let client = client.with_publish(origin.consume());
-	let client_result = client.connect(url).await;
+	let client_result = client.connect_once(url).await;
 
 	let server_result = server_handle.await.expect("server task panicked");
 
@@ -94,7 +94,7 @@ async fn connect_with_webtransport(version: Option<&str>) {
 	});
 
 	let client = client.with_publish(origin.consume());
-	let client_result = client.connect(url).await;
+	let client_result = client.connect_once(url).await;
 
 	let server_result = server_handle.await.expect("server task panicked");
 

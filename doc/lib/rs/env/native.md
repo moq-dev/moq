@@ -23,10 +23,12 @@ Create a [`ClientConfig`](https://docs.rs/moq-native/latest/moq_native/struct.Cl
 ```rust
 let client = moq_native::ClientConfig::default().init()?;
 let url = url::Url::parse("https://cdn.moq.dev/anon/my-broadcast")?;
-let session = client.connect(url).await?;
+let session = client.connect_once(url).await?;
 ```
 
 The default configuration uses system TLS roots, enables WebSocket fallback, and gives QUIC a 200ms head-start.
+
+`connect_once` makes a single attempt and resolves to a session. For most apps prefer `client.connect(url)`, which stays connected and reconnects with exponential backoff whenever the session drops, returning a [`Reconnect`](https://docs.rs/moq-native/latest/moq_native/struct.Reconnect.html) handle.
 
 ### URL Schemes
 
@@ -39,7 +41,7 @@ The client supports several URL schemes:
 
 ### Transport Racing
 
-`client.connect()` automatically races QUIC and WebSocket connections.
+`client.connect()` and `client.connect_once()` automatically race QUIC and WebSocket connections.
 QUIC gets a configurable head-start (default 200ms); if it fails, WebSocket takes over.
 Once WebSocket wins for a given server, future connections skip the delay.
 This is transparent to your application.
@@ -52,7 +54,7 @@ Pass JWT tokens via URL query parameters:
 let url = Url::parse(&format!(
     "https://relay.example.com/room/123?jwt={}", token
 ))?;
-let session = client.connect(url).await?;
+let session = client.connect_once(url).await?;
 ```
 
 See the [Authentication guide](/bin/relay/auth) for how to generate tokens.

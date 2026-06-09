@@ -24,7 +24,7 @@ pub struct Cli {
 	/// Iroh configuration
 	#[command(flatten)]
 	#[cfg(feature = "iroh")]
-	iroh: moq_native::IrohEndpointConfig,
+	iroh: moq_native::iroh::EndpointConfig,
 
 	#[command(subcommand)]
 	command: Command,
@@ -223,14 +223,14 @@ async fn run_subscribe(
 
 	tracing::info!(%url, %broadcast, "connecting");
 
-	let reconnect = client.with_consume(origin).reconnect(url);
+	let reconnect = client.with_consume(origin).connect(url);
 
 	#[cfg(unix)]
 	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 	tokio::select! {
 		res = run_announced_subscribe(consumer, broadcast, args) => res,
-		res = reconnect.closed() => res,
+		res = reconnect.closed() => Ok(res?),
 		_ = tokio::signal::ctrl_c() => Ok(()),
 	}
 }

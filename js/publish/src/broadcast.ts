@@ -1,4 +1,5 @@
 import * as Catalog from "@moq/hang/catalog";
+import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
@@ -84,7 +85,7 @@ export class Broadcast {
 
 				switch (request.track.name) {
 					case Broadcast.CATALOG_TRACK:
-						this.#serveCatalog(request.track, effect);
+						this.#serveCatalog(new Json.Producer<Catalog.Root>(request.track), effect);
 						break;
 					case Location.Window.TRACK:
 						this.location.window.serve(request.track, effect);
@@ -119,10 +120,10 @@ export class Broadcast {
 		}
 	}
 
-	#serveCatalog(track: Moq.Track, effect: Effect): void {
+	#serveCatalog(producer: Json.Producer<Catalog.Root>, effect: Effect): void {
 		if (!effect.get(this.enabled)) {
 			// Clear the catalog.
-			track.writeFrame(Catalog.encode({}));
+			producer.update({});
 			return;
 		}
 
@@ -136,8 +137,7 @@ export class Broadcast {
 			preview: effect.get(this.preview.catalog),
 		};
 
-		const encoded = Catalog.encode(catalog);
-		track.writeFrame(encoded);
+		producer.update(catalog);
 	}
 
 	close() {

@@ -235,7 +235,7 @@ async fn run(config: &Config) -> Result<()> {
 	let reconnect = client
 		.with_publish(publish_origin.consume())
 		.with_consume(consume_origin)
-		.reconnect(config.url.clone());
+		.connect(config.url.clone());
 
 	// Set up catalog and encoders.
 	let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
@@ -278,7 +278,7 @@ async fn run(config: &Config) -> Result<()> {
 
 	tokio::select! {
 		res = emulator_handle => res?.context("emulator error"),
-		res = reconnect.closed() => res,
+		res = reconnect.closed() => Ok(res?),
 		res = input::handle_viewers(&mut viewer_consumer, &cmd_tx) => res,
 	}
 }

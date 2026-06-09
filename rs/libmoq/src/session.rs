@@ -69,11 +69,10 @@ impl Session {
 		consume: Option<moq_net::OriginProducer>,
 	) -> Result<(), Error> {
 		let reconnect = moq_native::ClientConfig::default()
-			.init()
-			.map_err(|err| Error::Connect(Arc::new(err)))?
+			.init()?
 			.with_publish(publish)
 			.with_consume(consume)
-			.reconnect(url);
+			.connect(url);
 
 		// report() runs until the reconnect loop gives up; map its terminal error to Connect.
 		Self::report(callback, reconnect)

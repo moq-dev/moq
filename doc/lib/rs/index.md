@@ -231,8 +231,11 @@ a relay with a few lines:
 ```rust
 let client = moq_native::ClientConfig::default().init()?;
 let url = url::Url::parse("https://relay.moq.dev/anon")?;
-let session = client.connect(url).await?;
+let session = client.connect_once(url).await?;
 ```
+
+`connect_once` makes a single attempt; `client.connect(url)` instead stays connected
+and reconnects with exponential backoff whenever the session drops.
 
 To publish or consume, wire an [`Origin`](https://docs.rs/moq-net/latest/moq_net/struct.Origin.html)
 into the session before connecting:
@@ -241,7 +244,7 @@ into the session before connecting:
 // Subscribe: wait for broadcasts to be announced.
 let origin = moq_net::Origin::new().produce();
 let mut consumer = origin.consume();
-let session = client.with_consume(origin).connect(url).await?;
+let session = client.with_consume(origin).connect_once(url).await?;
 
 while let Some((path, broadcast)) = consumer.announced().await {
     // ... subscribe to tracks on each broadcast ...

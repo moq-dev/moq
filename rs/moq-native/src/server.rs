@@ -1,95 +1,18 @@
 use std::net;
+#[cfg(test)]
 use std::path::PathBuf;
 
-use crate::QuicBackend;
+use crate::{Error, QuicBackend};
 use moq_net::Session;
 use std::sync::{Arc, RwLock};
 use url::Url;
 #[cfg(feature = "iroh")]
 use web_transport_iroh::iroh;
 
-use anyhow::Context;
-
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
-
-/// TLS configuration for the server.
-///
-/// Certificate and keys must currently be files on disk.
-/// Alternatively, you can generate a self-signed certificate given a list of hostnames.
-///
-/// In config files, each list field accepts either a single string or a TOML array.
-#[serde_with::serde_as]
-#[derive(clap::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct ServerTlsConfig {
-	/// Load the given certificate from disk.
-	#[arg(long = "tls-cert", id = "tls-cert", env = "MOQ_SERVER_TLS_CERT")]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_>")]
-	pub cert: Vec<PathBuf>,
-
-	/// Load the given key from disk.
-	#[arg(long = "tls-key", id = "tls-key", env = "MOQ_SERVER_TLS_KEY")]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_>")]
-	pub key: Vec<PathBuf>,
-
-	/// Or generate a new certificate and key with the given hostnames.
-	/// This won't be valid unless the client uses the fingerprint or disables verification.
-	#[arg(
-		long = "tls-generate",
-		id = "tls-generate",
-		value_delimiter = ',',
-		env = "MOQ_SERVER_TLS_GENERATE"
-	)]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_>")]
-	pub generate: Vec<String>,
-
-	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
-	///
-	/// When set, clients *may* present a certificate during the TLS handshake.
-	/// Valid presentations are reported via [`Request::has_peer_certificate`]
-	/// and can be used by the application to grant elevated access. Clients that
-	/// do not present a certificate are unaffected.
-	///
-	/// Only supported by the Quinn backend.
-	#[arg(
-		long = "server-tls-root",
-		id = "server-tls-root",
-		value_delimiter = ',',
-		env = "MOQ_SERVER_TLS_ROOT"
-	)]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_>")]
-	pub root: Vec<PathBuf>,
-}
-
-impl ServerTlsConfig {
-	/// Load all configured root CAs into a [`rustls::RootCertStore`].
-	pub fn load_roots(&self) -> anyhow::Result<rustls::RootCertStore> {
-		use rustls::pki_types::CertificateDer;
-		use rustls::pki_types::pem::PemObject;
-
-		let mut roots = rustls::RootCertStore::empty();
-		for path in &self.root {
-			let file = std::fs::File::open(path).context("failed to open root CA")?;
-			let mut reader = std::io::BufReader::new(file);
-			let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(&mut reader)
-				.collect::<Result<_, _>>()
-				.context("failed to parse root CA PEM")?;
-			anyhow::ensure!(!certs.is_empty(), "no certificates found in root CA");
-			for cert in certs {
-				roots.add(cert).context("failed to add root CA")?;
-			}
-		}
-		Ok(roots)
-	}
-}
 
 /// Configuration for the MoQ server.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -177,11 +100,11 @@ pub struct ServerConfig {
 
 	#[command(flatten)]
 	#[serde(default)]
-	pub tls: ServerTlsConfig,
+	pub tls: crate::tls::Server,
 }
 
 impl ServerConfig {
-	pub fn init(self) -> anyhow::Result<Server> {
+	pub fn init(self) -> crate::Result<Server> {
 		Server::new(self)
 	}
 
@@ -204,7 +127,7 @@ pub(crate) const DEFAULT_BIND: &str = "[::]:443";
 pub struct Server {
 	moq: moq_net::Server,
 	versions: moq_net::Versions,
-	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
+	accept: FuturesUnordered<BoxFuture<'static, crate::Result<Request>>>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<iroh::Endpoint>,
 	#[cfg(feature = "noq")]
@@ -214,11 +137,11 @@ pub struct Server {
 	#[cfg(feature = "quiche")]
 	quiche: Option<crate::quiche::QuicheServer>,
 	#[cfg(feature = "websocket")]
-	websocket: Option<crate::websocket::WebSocketListener>,
+	websocket: Option<crate::websocket::Listener>,
 }
 
 impl Server {
-	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
+	pub fn new(config: ServerConfig) -> crate::Result<Self> {
 		let backend = config.backend.clone().unwrap_or({
 			#[cfg(feature = "quinn")]
 			{
@@ -243,7 +166,9 @@ impl Server {
 			let quinn_backend = matches!(backend, QuicBackend::Quinn);
 			#[cfg(not(feature = "quinn"))]
 			let quinn_backend = false;
-			anyhow::ensure!(quinn_backend, "tls.root (mTLS) is only supported by the quinn backend");
+			if !quinn_backend {
+				return Err(Error::MtlsQuinnOnly);
+			}
 		}
 
 		#[cfg(feature = "noq")]
@@ -289,7 +214,7 @@ impl Server {
 	/// For applications that need WebSocket on the same HTTP port (e.g. moq-relay),
 	/// use `qmux::Session::accept()` with your own HTTP framework instead.
 	#[cfg(feature = "websocket")]
-	pub fn with_websocket(mut self, websocket: Option<crate::websocket::WebSocketListener>) -> Self {
+	pub fn with_websocket(mut self, websocket: Option<crate::websocket::Listener>) -> Self {
 		self.websocket = websocket;
 		self
 	}
@@ -317,7 +242,7 @@ impl Server {
 	}
 
 	// Return the SHA256 fingerprints of all our certificates.
-	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
+	pub fn tls_info(&self) -> Arc<RwLock<crate::tls::Info>> {
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_ref() {
 			return noq.tls_info();
@@ -403,7 +328,7 @@ impl Server {
 				}
 			};
 			#[cfg(not(feature = "websocket"))]
-			let ws_accept = std::future::pending::<Option<anyhow::Result<()>>>();
+			let ws_accept = std::future::pending::<Option<crate::Result<()>>>();
 
 			let server = self.moq.clone();
 			let versions = self.versions.clone();
@@ -451,7 +376,7 @@ impl Server {
 				Some(_conn) = iroh_accept => {
 					#[cfg(feature = "iroh")]
 					self.accept.push(async move {
-						let iroh = super::iroh::IrohRequest::accept(_conn).await?;
+						let iroh = super::iroh::Request::accept(_conn).await?;
 						Ok(Request {
 							server,
 							kind: RequestKind::Iroh(iroh),
@@ -489,18 +414,18 @@ impl Server {
 		self.iroh.as_ref()
 	}
 
-	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {
+	pub fn local_addr(&self) -> crate::Result<net::SocketAddr> {
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_ref() {
-			return noq.local_addr();
+			return Ok(noq.local_addr()?);
 		}
 		#[cfg(feature = "quinn")]
 		if let Some(quinn) = self.quinn.as_ref() {
-			return quinn.local_addr();
+			return Ok(quinn.local_addr()?);
 		}
 		#[cfg(feature = "quiche")]
 		if let Some(quiche) = self.quiche.as_ref() {
-			return quiche.local_addr();
+			return Ok(quiche.local_addr()?);
 		}
 		unreachable!("no QUIC backend compiled");
 	}
@@ -548,7 +473,7 @@ pub(crate) enum RequestKind {
 	#[cfg(feature = "quiche")]
 	Quiche(crate::quiche::QuicheRequest),
 	#[cfg(feature = "iroh")]
-	Iroh(crate::iroh::IrohRequest),
+	Iroh(crate::iroh::Request),
 	#[cfg(feature = "websocket")]
 	WebSocket(qmux::Session),
 }
@@ -564,33 +489,34 @@ pub struct Request {
 
 impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
-	pub async fn close(self, _code: u16) -> anyhow::Result<()> {
+	pub async fn close(self, _code: u16) -> crate::Result<()> {
 		match self.kind {
 			#[cfg(feature = "noq")]
 			RequestKind::Noq(request) => {
-				let status = web_transport_noq::http::StatusCode::from_u16(_code).context("invalid status code")?;
-				request.close(status).await?;
+				let status =
+					web_transport_noq::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
+				request.close(status).await.map_err(crate::noq::Error::Server)?;
 				Ok(())
 			}
 			#[cfg(feature = "quinn")]
 			RequestKind::Quinn(request) => {
-				let status = web_transport_quinn::http::StatusCode::from_u16(_code).context("invalid status code")?;
-				request.close(status).await?;
+				let status =
+					web_transport_quinn::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
+				request.close(status).await.map_err(crate::quinn::Error::Server)?;
 				Ok(())
 			}
 			#[cfg(feature = "quiche")]
 			RequestKind::Quiche(request) => {
-				let status = web_transport_quiche::http::StatusCode::from_u16(_code).context("invalid status code")?;
-				request
-					.reject(status)
-					.await
-					.map_err(|e| anyhow::anyhow!("failed to close quiche WebTransport request: {e}"))?;
+				let status =
+					web_transport_quiche::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
+				request.reject(status).await.map_err(crate::quiche::Error::Reject)?;
 				Ok(())
 			}
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh(request) => {
-				let status = web_transport_iroh::http::StatusCode::from_u16(_code).context("invalid status code")?;
-				request.close(status).await?;
+				let status =
+					web_transport_iroh::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
+				request.close(status).await.map_err(crate::iroh::Error::Server)?;
 				Ok(())
 			}
 			#[cfg(feature = "websocket")]
@@ -620,22 +546,28 @@ impl Request {
 	}
 
 	/// Accept the session, performing rest of the MoQ handshake.
-	pub async fn ok(self) -> anyhow::Result<Session> {
+	pub async fn ok(self) -> crate::Result<Session> {
 		match self.kind {
 			#[cfg(feature = "noq")]
-			RequestKind::Noq(request) => Ok(self.server.accept(request.ok().await?).await?),
+			RequestKind::Noq(request) => Ok(self
+				.server
+				.accept(request.ok().await.map_err(crate::noq::Error::Server)?)
+				.await?),
 			#[cfg(feature = "quinn")]
-			RequestKind::Quinn(request) => Ok(self.server.accept(request.ok().await?).await?),
+			RequestKind::Quinn(request) => Ok(self
+				.server
+				.accept(request.ok().await.map_err(crate::quinn::Error::Server)?)
+				.await?),
 			#[cfg(feature = "quiche")]
 			RequestKind::Quiche(request) => {
-				let conn = request
-					.ok()
-					.await
-					.map_err(|e| anyhow::anyhow!("failed to accept quiche WebTransport: {e}"))?;
+				let conn = request.ok().await.map_err(crate::quiche::Error::Accept)?;
 				Ok(self.server.accept(conn).await?)
 			}
 			#[cfg(feature = "iroh")]
-			RequestKind::Iroh(request) => Ok(self.server.accept(request.ok().await?).await?),
+			RequestKind::Iroh(request) => Ok(self
+				.server
+				.accept(request.ok().await.map_err(crate::iroh::Error::Server)?)
+				.await?),
 			#[cfg(feature = "websocket")]
 			RequestKind::WebSocket(session) => Ok(self.server.accept(session).await?),
 		}
@@ -677,7 +609,7 @@ impl Request {
 	}
 
 	/// Whether the peer presented a client certificate during the handshake
-	/// that chained to a configured [`ServerTlsConfig::root`].
+	/// that chained to a configured [`crate::tls::Server::root`].
 	///
 	/// Only the Quinn backend supports mTLS; other backends always return `false`.
 	pub fn has_peer_certificate(&self) -> bool {
@@ -702,14 +634,6 @@ impl Request {
 			_ => false,
 		}
 	}
-}
-
-/// TLS certificate information including fingerprints.
-#[derive(Debug)]
-pub struct ServerTlsInfo {
-	#[cfg(any(feature = "noq", feature = "quinn"))]
-	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
-	pub fingerprints: Vec<String>,
 }
 
 /// Server ID for QUIC-LB support.
@@ -749,7 +673,7 @@ mod tests {
 			cert = "cert.pem"
 			key = "key.pem"
 		"#;
-		let config: ServerTlsConfig = toml::from_str(single).unwrap();
+		let config: crate::tls::Server = toml::from_str(single).unwrap();
 		assert_eq!(config.cert, vec![PathBuf::from("cert.pem")]);
 		assert_eq!(config.key, vec![PathBuf::from("key.pem")]);
 
@@ -760,7 +684,7 @@ mod tests {
 			generate = ["localhost"]
 			root = ["ca.pem"]
 		"#;
-		let config: ServerTlsConfig = toml::from_str(array).unwrap();
+		let config: crate::tls::Server = toml::from_str(array).unwrap();
 		assert_eq!(config.cert, vec![PathBuf::from("a.pem"), PathBuf::from("b.pem")]);
 		assert_eq!(config.key, vec![PathBuf::from("a.key"), PathBuf::from("b.key")]);
 		assert_eq!(config.generate, vec!["localhost".to_string()]);

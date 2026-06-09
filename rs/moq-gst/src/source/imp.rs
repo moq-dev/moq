@@ -273,7 +273,7 @@ async fn run_session(
 	let origin_consumer = origin.consume();
 	let client = config.init()?.with_consume(origin);
 
-	let _session = client.connect(settings.url.clone()).await?;
+	let _session = client.connect_once(settings.url.clone()).await?;
 
 	// Wait for the broadcast to be announced. Synchronous lookup would race the gossip of
 	// announcements that happens after the session is established.
