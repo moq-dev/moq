@@ -79,13 +79,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				});
 			}
 			// Draft-18 SUBSCRIBE_NAMESPACE (0x50) and the legacy 0x11 message decode
-			// to the same request_id + namespace; the legacy Subscribe Options field
-			// is ignored (moq-lite never subscribes to tracks).
+			// to the same request_id + namespace. The legacy decoder already rejects
+			// the wrong draft version (0x11 is draft-14..17 only).
 			ietf::SubscribeNamespace::ID | ietf::SubscribeNamespaceLegacy::ID => {
 				let msg = if id == ietf::SubscribeNamespace::ID {
 					ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?
 				} else {
 					let legacy = ietf::SubscribeNamespaceLegacy::decode_msg(&mut data, this.version)?;
+					// Subscribe Options other than 0x01 (NAMESPACE) request a TRACKS
+					// subscription, the draft-16/17 equivalent of SUBSCRIBE_TRACKS
+					// (0x51). moq-lite can't honor it, so reject rather than silently
+					// downgrading it to a namespace subscription.
+					if legacy.subscribe_options != 0x01 {
+						return Err(Error::Unsupported);
+					}
 					ietf::SubscribeNamespace {
 						request_id: legacy.request_id,
 						namespace: legacy.namespace,

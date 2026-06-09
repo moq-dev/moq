@@ -174,7 +174,8 @@ export class Connection implements Established {
 
 		switch (typeId) {
 			// Draft-18 SUBSCRIBE_NAMESPACE (0x50) and the legacy 0x11 message decode
-			// to the same request_id + namespace; the legacy options field is ignored.
+			// to the same request_id + namespace. The legacy decoder already rejects
+			// the wrong draft version (0x11 is draft-14..17 only).
 			case SubscribeNamespace.id: {
 				const msg = await SubscribeNamespace.decode(stream.reader, this.#session.version);
 				await this.#publisher.runSubscribeNamespace(msg, stream);
@@ -182,6 +183,12 @@ export class Connection implements Established {
 			}
 			case SubscribeNamespaceLegacy.id: {
 				const legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
+				// Subscribe Options other than 0x01 (NAMESPACE) request a TRACKS
+				// subscription, the draft-16/17 equivalent of SUBSCRIBE_TRACKS (0x51).
+				// moq-lite can't honor it, so reject rather than silently downgrading.
+				if (legacy.subscribeOptions !== 0x01) {
+					throw new Error("legacy SUBSCRIBE_NAMESPACE track subscriptions are not supported");
+				}
 				const msg = new SubscribeNamespace({ requestId: legacy.requestId, namespace: legacy.namespace });
 				await this.#publisher.runSubscribeNamespace(msg, stream);
 				break;
