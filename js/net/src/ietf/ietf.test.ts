@@ -4,6 +4,7 @@ import { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import * as GoAway from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
+import { Group } from "./object.ts";
 import { SetupOptions } from "./parameters.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
@@ -1051,4 +1052,38 @@ test("SubscribeNamespace: draft-18 omits subscribe options", async () => {
 		expect(decoded.requestId).toBe(4n);
 		expect(decoded.namespace).toBe("example/meeting" as Path.Valid);
 	}
+});
+
+test("Group: draft-18 sets FIRST_OBJECT bit, draft-17 does not", async () => {
+	const makeGroup = () =>
+		new Group({
+			trackAlias: 7n,
+			groupId: 3,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: {
+				hasExtensions: false,
+				hasSubgroup: false,
+				hasSubgroupObject: false,
+				hasEnd: true,
+				hasPriority: true,
+			},
+		});
+
+	// Round-trips on each version.
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18]) {
+		const encoded = await encodeVersioned(makeGroup(), version);
+		const decoded = await decodeVersioned(encoded, Group.decode, version);
+		expect(decoded.groupId).toBe(3);
+		expect(decoded.trackAlias).toBe(7n);
+		expect(decoded.flags.hasEnd).toBe(true);
+		expect(decoded.flags.hasPriority).toBe(true);
+	}
+
+	// The draft-18 header carries the 0x40 FIRST_OBJECT bit (type 0x18 -> 0x58),
+	// so the same bytes are not a valid draft-17 subgroup header.
+	const v18 = await encodeVersioned(makeGroup(), Version.DRAFT_18);
+	const v17 = await encodeVersioned(makeGroup(), Version.DRAFT_17);
+	expect(Array.from(v18)).not.toEqual(Array.from(v17));
+	await expect(decodeVersioned(v18, Group.decode, Version.DRAFT_17)).rejects.toThrow(/Unsupported group type/);
 });

@@ -238,7 +238,7 @@ export class Connection implements Established {
 	}
 
 	async #runUni(stream: Reader) {
-		const header = await Group.decode(stream);
+		const header = await Group.decode(stream, this.#session.version);
 		await this.#subscriber.handleGroup(header, stream);
 	}
 

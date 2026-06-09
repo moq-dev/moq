@@ -1,6 +1,24 @@
 import type { Reader, Writer } from "../stream.ts";
+import { type IetfVersion, Version } from "./version.ts";
 
 const GROUP_END = 0x03;
+
+// draft-18 adds bit 0x40 (FIRST_OBJECT) to the subgroup header type per spec
+// 11.4.2. moq-lite always starts subgroups at object 0, so the bit carries no
+// extra information for us: set it on emit, strip it on parse.
+const FIRST_OBJECT_BIT = 0x40;
+
+function hasFirstObjectBit(version: IetfVersion): boolean {
+	switch (version) {
+		case Version.DRAFT_14:
+		case Version.DRAFT_15:
+		case Version.DRAFT_16:
+		case Version.DRAFT_17:
+			return false;
+		default:
+			return true;
+	}
+}
 
 export interface GroupFlags {
 	hasExtensions: boolean;
@@ -43,7 +61,7 @@ export class Group {
 		this.publisherPriority = publisherPriority;
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
 		if (!this.flags.hasSubgroup && this.subGroupId !== 0) {
 			throw new Error(`Subgroup ID must be 0 if hasSubgroup is false: ${this.subGroupId}`);
 		}
@@ -62,6 +80,9 @@ export class Group {
 		if (this.flags.hasEnd) {
 			id |= 0x08;
 		}
+		if (hasFirstObjectBit(version)) {
+			id |= FIRST_OBJECT_BIT;
+		}
 		await w.u53(id);
 		await w.u62(this.trackAlias);
 		await w.u53(this.groupId);
@@ -73,8 +94,10 @@ export class Group {
 		}
 	}
 
-	static async decode(r: Reader): Promise<Group> {
-		const id = await r.u53();
+	static async decode(r: Reader, version: IetfVersion): Promise<Group> {
+		const raw = await r.u53();
+		// Strip the draft-18 FIRST_OBJECT bit before the range check.
+		const id = hasFirstObjectBit(version) ? raw & ~FIRST_OBJECT_BIT : raw;
 
 		let hasPriority: boolean;
 		let baseId: number;
