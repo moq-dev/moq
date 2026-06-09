@@ -6,7 +6,7 @@
 use bytes::BytesMut;
 
 /// Decode a whole TS buffer into a fresh broadcast and return the catalog.
-fn import_ts(data: &[u8]) -> hang::Catalog {
+fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 

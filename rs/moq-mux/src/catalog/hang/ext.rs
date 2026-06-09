@@ -1,13 +1,10 @@
-use std::borrow::Cow;
 use std::ops::{Deref, DerefMut};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::Media;
-
 /// An application's catalog extension: a plain serde struct of extra root sections that are
-/// serialized as a flat union with the base [`hang::Catalog`].
+/// serialized as a flat union with the base media sections.
 ///
 /// Implement it (no methods) on a struct of your own sections, then publish/consume a
 /// [`Catalog<YourExt>`]:
@@ -28,23 +25,22 @@ use super::Media;
 ///
 /// impl moq_mux::catalog::hang::CatalogExt for Scte35Ext {}
 /// ```
+///
+/// The unit type `()` is the no-extension case, so [`Catalog<()>`] is just the base media catalog.
 pub trait CatalogExt: Serialize + DeserializeOwned + Default + Clone + Send + 'static {}
 
-/// The empty extension: a [`Catalog<NoExt>`] is just the base media catalog.
-#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq, Eq)]
-pub struct NoExt {}
+impl CatalogExt for () {}
 
-impl CatalogExt for NoExt {}
-
-/// The base media sections plus an application extension `E`, serialized as a flat union (the
-/// `video`/`audio` sections and the extension's sections share one JSON object on the wire).
+/// The base media sections plus an application extension `E` (defaulting to `()` for none),
+/// serialized as a flat union: the `video`/`audio` sections and the extension's sections share one
+/// JSON object on the wire.
 ///
-/// `video` and `audio` are direct fields (`catalog.video`), and the catalog derefs to the
-/// extension so its sections are reachable directly too (`catalog.scte35`, or `catalog.ext.scte35`
-/// explicitly). A base consumer that reads a plain [`hang::Catalog`] simply ignores the extension.
+/// `video` and `audio` are direct fields (`catalog.video`), and the catalog derefs to the extension
+/// so its sections are reachable directly too (`catalog.scte35`, or `catalog.ext.scte35`
+/// explicitly). A consumer reading a different extension (or none) ignores sections it doesn't know.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 #[serde(bound(serialize = "E: Serialize", deserialize = "E: DeserializeOwned"))]
-pub struct Catalog<E: CatalogExt = NoExt> {
+pub struct Catalog<E: CatalogExt = ()> {
 	#[serde(default)]
 	pub video: hang::catalog::Video,
 
@@ -53,6 +49,17 @@ pub struct Catalog<E: CatalogExt = NoExt> {
 
 	#[serde(flatten)]
 	pub ext: E,
+}
+
+impl<E: CatalogExt> Catalog<E> {
+	/// The base catalog carrying just the media sections, used to derive the MSF track.
+	pub(crate) fn media(&self) -> hang::Catalog {
+		hang::Catalog {
+			video: self.video.clone(),
+			audio: self.audio.clone(),
+			..Default::default()
+		}
+	}
 }
 
 // Deref to the extension so its sections are reachable directly (the base media sections are
@@ -68,17 +75,6 @@ impl<E: CatalogExt> Deref for Catalog<E> {
 impl<E: CatalogExt> DerefMut for Catalog<E> {
 	fn deref_mut(&mut self) -> &mut E {
 		&mut self.ext
-	}
-}
-
-// Lets the producer derive the MSF track from the media sections.
-impl<E: CatalogExt> Media for Catalog<E> {
-	fn media(&self) -> Cow<'_, hang::Catalog> {
-		Cow::Owned(hang::Catalog {
-			video: self.video.clone(),
-			audio: self.audio.clone(),
-			..Default::default()
-		})
 	}
 }
 

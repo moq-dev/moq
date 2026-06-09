@@ -7,7 +7,7 @@ use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_vide
 struct ConsumeCatalog {
 	broadcast: moq_net::BroadcastConsumer,
 
-	catalog: hang::catalog::Catalog,
+	catalog: moq_mux::catalog::hang::Catalog,
 
 	/// We need to store the codec information on the heap unfortunately.
 	audio_codec: Vec<String>,

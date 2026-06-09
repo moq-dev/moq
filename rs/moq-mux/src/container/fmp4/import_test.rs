@@ -13,7 +13,7 @@ fn drain_group_sequences(consumer: &mut moq_net::TrackConsumer) -> Vec<u64> {
 	sequences
 }
 
-fn run_fmp4(data: &[u8]) -> hang::Catalog {
+fn run_fmp4(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
 

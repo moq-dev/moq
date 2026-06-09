@@ -339,7 +339,7 @@ async fn run_session(
 /// Bring the live set of pumps in line with `catalog`: spawn pumps for newly announced
 /// renditions, tear down ones that vanished, and recreate any whose caps or container changed.
 fn reconcile(
-	catalog: &hang::catalog::Catalog,
+	catalog: &moq_mux::catalog::hang::Catalog,
 	active: &mut HashMap<String, ActiveTrack>,
 	pumps: &mut tokio::task::JoinSet<()>,
 	broadcast: &moq_net::BroadcastConsumer,

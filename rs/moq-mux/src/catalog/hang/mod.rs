@@ -16,5 +16,5 @@ mod producer;
 
 pub use consumer::Consumer;
 pub use container::Container;
-pub use ext::{Catalog, CatalogExt, NoExt};
-pub use producer::{Guard, Media, Producer};
+pub use ext::{Catalog, CatalogExt};
+pub use producer::{Guard, Producer};
