@@ -6,7 +6,18 @@ import { MultiBackend } from "./backend";
 import { Broadcast, type CatalogFormat, parseCatalogFormat } from "./broadcast";
 import type { Latency } from "./sync";
 
-const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog-format"] as const;
+const OBSERVED = [
+	"url",
+	"name",
+	"paused",
+	"volume",
+	"muted",
+	"no-suspend-when-hidden",
+	"reload",
+	"latency",
+	"jitter",
+	"catalog-format",
+] as const;
 type Observed = (typeof OBSERVED)[number];
 
 // Close everything when this element is garbage collected.
@@ -108,6 +119,15 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
+			const noSuspendWhenHidden = effect.get(this.backend.noSuspendWhenHidden);
+			if (noSuspendWhenHidden) {
+				this.setAttribute("no-suspend-when-hidden", "true");
+			} else {
+				this.removeAttribute("no-suspend-when-hidden");
+			}
+		});
+
+		this.signals.run((effect) => {
 			const volume = effect.get(this.backend.audio.volume);
 			this.setAttribute("volume", volume.toString());
 		});
@@ -182,6 +202,8 @@ export default class MoqWatch extends HTMLElement {
 			this.backend.audio.volume.set(volume);
 		} else if (name === "muted") {
 			this.backend.audio.muted.set(newValue !== null);
+		} else if (name === "no-suspend-when-hidden") {
+			this.backend.noSuspendWhenHidden.set(newValue !== null);
 		} else if (name === "reload") {
 			this.broadcast.reload.set(newValue !== null);
 		} else if (name === "latency") {
@@ -239,6 +261,14 @@ export default class MoqWatch extends HTMLElement {
 
 	set muted(value: boolean) {
 		this.backend.audio.muted.set(value);
+	}
+
+	get noSuspendWhenHidden(): boolean {
+		return this.backend.noSuspendWhenHidden.peek();
+	}
+
+	set noSuspendWhenHidden(value: boolean) {
+		this.backend.noSuspendWhenHidden.set(value);
 	}
 
 	get reload(): boolean {

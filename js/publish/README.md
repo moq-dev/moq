@@ -73,6 +73,9 @@ The simplest way to publish a stream:
 | `video`    | boolean | false    | Enable video capture            |
 | `controls` | boolean | false    | Show simple publishing controls |
 
+Capture tracks are not stopped when the browser tab is hidden. They are stopped
+when the selected source is disabled, changed, or closed.
+
 ## JavaScript API
 
 For more control:

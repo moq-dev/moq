@@ -54,6 +54,7 @@ export interface MultiBackendProps {
 	connection?: Signal<Moq.Connection.Established | undefined>;
 
 	paused?: boolean | Signal<boolean>;
+	noSuspendWhenHidden?: boolean | Signal<boolean>;
 }
 
 // We have to proxy some of these signals because we support both the MSE and WebCodecs.
@@ -111,6 +112,7 @@ export class MultiBackend implements Backend {
 	latency: Signal<Latency>;
 	jitter: Signal<Moq.Time.Milli>;
 	paused: Signal<boolean>;
+	noSuspendWhenHidden: Signal<boolean>;
 
 	video: VideoBackend;
 	#videoSource: Video.Source;
@@ -141,6 +143,7 @@ export class MultiBackend implements Backend {
 		this.audio = new AudioBackend(this.#audioSource);
 
 		this.paused = Signal.from(props?.paused ?? false);
+		this.noSuspendWhenHidden = Signal.from(props?.noSuspendWhenHidden ?? false);
 
 		this.signals.run(this.#runElement.bind(this));
 	}
@@ -169,6 +172,7 @@ export class MultiBackend implements Backend {
 		const videoRenderer = new Video.Renderer(videoSource, {
 			canvas: element,
 			paused: this.paused,
+			noSuspendWhenHidden: this.noSuspendWhenHidden,
 		});
 
 		effect.cleanup(() => {

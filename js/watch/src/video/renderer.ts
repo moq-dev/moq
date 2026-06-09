@@ -5,6 +5,7 @@ import type { Decoder } from "./decoder";
 export type RendererProps = {
 	canvas?: HTMLCanvasElement | Signal<HTMLCanvasElement | undefined>;
 	paused?: boolean | Signal<boolean>;
+	noSuspendWhenHidden?: boolean | Signal<boolean>;
 };
 
 // An component to render a video to a canvas.
@@ -17,6 +18,9 @@ export class Renderer {
 	// Whether the video is paused.
 	paused: Signal<boolean>;
 
+	// Whether video keeps downloading while the tab is hidden.
+	noSuspendWhenHidden: Signal<boolean>;
+
 	// The most recently rendered frame, updated after each rAF paint.
 	readonly frame = new Signal<VideoFrame | undefined>(undefined);
 
@@ -24,13 +28,15 @@ export class Renderer {
 	readonly timestamp = new Signal<Time.Milli | undefined>(undefined);
 
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
-	#visible = new Signal(false);
+	#foreground = new Signal(!document.hidden);
+	#onscreen = new Signal(false);
 	#signals = new Effect();
 
 	constructor(decoder: Decoder, props?: RendererProps) {
 		this.decoder = decoder;
 		this.canvas = Signal.from(props?.canvas);
 		this.paused = Signal.from(props?.paused ?? false);
+		this.noSuspendWhenHidden = Signal.from(props?.noSuspendWhenHidden ?? false);
 
 		this.#signals.run((effect) => {
 			const canvas = effect.get(this.canvas);
@@ -56,41 +62,42 @@ export class Renderer {
 		}
 	}
 
-	// Track whether the canvas is visible in the viewport and the tab is focused.
+	// Track whether the canvas is visible in the viewport and the tab is visible.
 	#runVisible(effect: Effect): void {
 		const canvas = effect.get(this.canvas);
 		if (!canvas) {
-			this.#visible.set(false);
+			this.#onscreen.set(false);
 			return;
 		}
 
-		let intersecting = false;
-
-		const update = () => {
-			this.#visible.set(intersecting && !document.hidden);
+		const updateForeground = () => {
+			this.#foreground.set(!document.hidden);
 		};
 
 		const observer = new IntersectionObserver(
 			(entries) => {
 				for (const entry of entries) {
-					intersecting = entry.isIntersecting;
-					update();
+					this.#onscreen.set(entry.isIntersecting);
 				}
 			},
 			{ threshold: 0.01 },
 		);
 
-		effect.event(document, "visibilitychange", update);
+		updateForeground();
+		effect.event(document, "visibilitychange", updateForeground);
 
 		observer.observe(canvas);
 		effect.cleanup(() => observer.disconnect());
-		effect.cleanup(() => this.#visible.set(false));
+		effect.cleanup(() => this.#onscreen.set(false));
 	}
 
 	// Detect when video should be downloaded.
 	#runEnabled(effect: Effect): void {
 		const paused = effect.get(this.paused);
-		const visible = effect.get(this.#visible);
+		const onscreen = effect.get(this.#onscreen);
+		const foreground = effect.get(this.#foreground);
+		const noSuspendWhenHidden = effect.get(this.noSuspendWhenHidden);
+		const visible = onscreen && (foreground || noSuspendWhenHidden);
 
 		effect.cleanup(() => this.decoder.enabled.set(false));
 

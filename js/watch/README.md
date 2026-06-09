@@ -64,13 +64,14 @@ The simplest way to watch a stream:
 
 ### Attributes
 
-| Attribute | Type    | Default  | Description           |
-|-----------|---------|----------|-----------------------|
-| `url`     | string  | required | Relay server URL      |
-| `path`    | string  | required | Broadcast path        |
-| `paused`  | boolean | false    | Pause playback        |
-| `muted`   | boolean | false    | Mute audio            |
-| `volume`  | number  | 1        | Audio volume (0-1)    |
+| Attribute                 | Type    | Default  | Description                              |
+|---------------------------|---------|----------|------------------------------------------|
+| `url`                     | string  | required | Relay server URL                         |
+| `path`                    | string  | required | Broadcast path                           |
+| `paused`                  | boolean | false    | Pause playback                           |
+| `muted`                   | boolean | false    | Mute audio                               |
+| `no-suspend-when-hidden`  | boolean | false    | Keep canvas video active in hidden tabs  |
+| `volume`                  | number  | 1        | Audio volume (0-1)                       |
 
 ## JavaScript API
 
