@@ -1,7 +1,7 @@
 //! Native video capture, encoding, and publishing for Media over QUIC.
 //!
 //! Counterpart to [`moq-audio`](https://crates.io/crates/moq-audio) for
-//! video tracks. Sits on top of [`moq_mux`] and [`hang`] and adds the
+//! video tracks. Sits on top of [`moq_mux`] (and the `hang` catalog) and adds the
 //! native pieces a desktop/CLI publisher needs:
 //!
 //! - [`Camera`] captures a webcam via libavdevice (avfoundation / v4l2 /

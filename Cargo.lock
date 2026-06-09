@@ -4035,7 +4035,6 @@ dependencies = [
  "anyhow",
  "bytes",
  "ffmpeg-next",
- "hang",
  "moq-mux",
  "moq-net",
  "thiserror 2.0.18",

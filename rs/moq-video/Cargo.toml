@@ -18,15 +18,14 @@ doctest = false
 [dependencies]
 anyhow = "1"
 bytes = "1"
-hang = { workspace = true }
-moq-mux = { workspace = true }
-moq-net = { workspace = true }
-thiserror = "2"
-tokio = { workspace = true, features = ["rt", "macros"] }
-tracing = "0.1"
 # H.264 encode plus webcam capture (libavdevice). One system dependency
 # covers both, and unlike a pure-Rust encoder it exposes the platform
 # hardware encoders (h264_videotoolbox / h264_nvenc / h264_vaapi) we want
 # for real-time capture. The `device` feature pulls in libavdevice for
 # avfoundation / v4l2 / dshow camera input.
 ffmpeg-next = { version = "8", features = ["device"] }
+moq-mux = { workspace = true }
+moq-net = { workspace = true }
+thiserror = "2"
+tokio = { workspace = true, features = ["rt", "macros"] }
+tracing = "0.1"
