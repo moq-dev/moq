@@ -20,6 +20,7 @@ normative:
   moqt: I-D.ietf-moq-transport
   qmux: I-D.ietf-quic-qmux
   RFC1951:
+  RFC3986:
   RFC6455:
   RFC9002:
 
@@ -82,6 +83,9 @@ There is currently no P2P support within QUIC so it's out of scope for moq-lite.
 The moq-lite version identifier is `moq-lite-xx` where `xx` is the two-digit draft version.
 For bare QUIC, this is negotiated as an ALPN token during the QUIC handshake.
 For WebTransport over HTTP/3, the QUIC ALPN remains `h3` and the moq-lite version is advertised via the `WT-Available-Protocols` and `WT-Protocol` CONNECT headers.
+
+The bindings negotiated solely via ALPN (bare QUIC and Qmux over TCP/TLS) have no request URI, so a client conveys the request path it wishes to reach via the [Path Parameter](#path-parameter) in SETUP.
+The remaining bindings carry the path in their own handshake and do not use this parameter; see [Path Parameter](#path-parameter).
 
 When UDP is unavailable, moq-lite-05 MAY also run over reliable byte-stream transports via Qmux [qmux].
 Qmux provides a length-delimited polyfill for QUIC streams on top of TCP/TLS or WebSocket; see [Transports](#transports) for the specific bindings and ALPN negotiation.
@@ -589,6 +593,8 @@ The following Setup Parameters are defined:
 |-----:|:---------|:------------|
 | 0x1  | Probe    | Level (i)   |
 |------|----------|-------------|
+| 0x2  | Path     | Path (s)    |
+|------|----------|-------------|
 
 ### Probe Parameter {#probe-parameter}
 The Probe Parameter advertises the sender's capability level when acting as a publisher on a [Probe Stream](#probe).
@@ -605,6 +611,23 @@ A subscriber MUST consult the publisher's advertised level before relying on a P
 - At `None`, the subscriber SHOULD NOT open a Probe Stream; if it does, the publisher MUST reset it.
 - At `Report`, the subscriber MAY open a Probe Stream to monitor the estimated bitrate but MUST NOT expect the publisher to pad above its current sending rate. A subscriber that needs to probe for additional bandwidth MUST use an alternative (e.g. speculatively switching to a higher rendition).
 - At `Increase`, the subscriber MAY request a target bitrate and expect the publisher to actively probe up to it.
+
+### Path Parameter {#path-parameter}
+The Path Parameter carries the request path the client wishes to reach, equivalent to the path component of a moq-lite URI.
+A server uses it to route the session to the correct origin, relay, or virtual host before any broadcasts are exchanged; its interpretation is otherwise application-defined and opaque to moq-lite.
+Unlike the other Setup Parameters it is not a capability — it is connection metadata that rides along in SETUP because that is the first client-to-server message of the session.
+
+The Parameter Value is a non-empty UTF-8 string that begins with `/` and uses the path syntax of a URI [RFC3986].
+
+This parameter exists for bindings that have no request URI of their own: the native QUIC binding (binding 1 in [Transports](#transports)) and the Qmux-over-TCP/TLS binding (binding 3), both of which negotiate only an ALPN token.
+The remaining bindings convey the path in their own handshake.
+
+- A client using a binding without a request URI (binding 1 or 3) MUST send exactly one Path Parameter in its SETUP.
+- The Path Parameter MUST NOT be sent on a binding that carries a request URI. The WebTransport (binding 2) and Qmux-over-WebSocket (binding 4) bindings convey the path in their handshake URI (the CONNECT request path and the WebSocket request URI, respectively). A server that receives a Path Parameter on either of these bindings MUST close the session with a PROTOCOL_VIOLATION.
+- A server MUST NOT send a Path Parameter. SETUP is bidirectional, but the path is meaningful only from client to server; a client that receives a Path Parameter MUST close the session with a PROTOCOL_VIOLATION.
+- A server that receives a Path that is empty or is not a valid URI path MUST close the session with a PROTOCOL_VIOLATION. A server that does not recognize or support the requested path MUST close the session.
+
+A relay MUST NOT forward the Path Parameter; like every other negotiated capability it applies only to this hop (see [Session](#session)).
 
 
 ## ANNOUNCE_INTEREST
