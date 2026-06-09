@@ -1,7 +1,9 @@
-use std::ops::{Deref, DerefMut};
+use std::borrow::Cow;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+use super::Media;
 
 /// An application's catalog extension: a plain serde struct of extra root sections that are
 /// serialized as a flat union with the base [`hang::Catalog`].
@@ -33,40 +35,33 @@ pub struct NoExt {}
 
 impl CatalogExt for NoExt {}
 
-/// The base [`hang::Catalog`] plus an application extension `E`, serialized as a flat union of both
-/// (the base media sections and the extension's sections share one JSON object on the wire).
+/// The base media sections plus an application extension `E`, serialized as a flat union (the
+/// `video`/`audio` sections and the extension's sections share one JSON object on the wire).
 ///
-/// Derefs to the base catalog, so the media fields are reachable directly (`catalog.video`); the
-/// extension sections live under [`ext`](Self::ext) (`catalog.ext.scte35`). A base consumer that
-/// reads a plain [`hang::Catalog`] simply ignores the extension sections.
+/// `video` and `audio` are direct fields (`catalog.video`); the extension sections live under
+/// [`ext`](Self::ext) (`catalog.ext.scte35`). A base consumer that reads a plain [`hang::Catalog`]
+/// simply ignores the extension sections.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 #[serde(bound(serialize = "E: Serialize", deserialize = "E: DeserializeOwned"))]
 pub struct Catalog<E: CatalogExt = NoExt> {
-	#[serde(flatten)]
-	pub base: hang::Catalog,
+	#[serde(default)]
+	pub video: hang::catalog::Video,
+
+	#[serde(default)]
+	pub audio: hang::catalog::Audio,
 
 	#[serde(flatten)]
 	pub ext: E,
 }
 
-impl<E: CatalogExt> Deref for Catalog<E> {
-	type Target = hang::Catalog;
-
-	fn deref(&self) -> &hang::Catalog {
-		&self.base
-	}
-}
-
-impl<E: CatalogExt> DerefMut for Catalog<E> {
-	fn deref_mut(&mut self) -> &mut hang::Catalog {
-		&mut self.base
-	}
-}
-
-// Lets the producer derive the MSF track from the base sections.
-impl<E: CatalogExt> AsRef<hang::Catalog> for Catalog<E> {
-	fn as_ref(&self) -> &hang::Catalog {
-		&self.base
+// Lets the producer derive the MSF track from the media sections.
+impl<E: CatalogExt> Media for Catalog<E> {
+	fn media(&self) -> Cow<'_, hang::Catalog> {
+		Cow::Owned(hang::Catalog {
+			video: self.video.clone(),
+			audio: self.audio.clone(),
+			..Default::default()
+		})
 	}
 }
 
@@ -98,12 +93,12 @@ mod test {
 			crate::catalog::hang::Producer::with_catalog(&mut broadcast, Catalog::<Scte35Ext>::default()).unwrap();
 		let mut consumer = producer.consume().unwrap();
 
-		// The media pipeline sets a base section (flat, via deref); the app adds its own extension.
+		// The media pipeline sets a base section (flat field); the app adds its own extension.
 		// Sequential locks compose because each starts from the producer's retained catalog.
-		producer.lock().user = Some(hang::catalog::User {
-			name: Some("alice".to_string()),
-			..Default::default()
-		});
+		producer.lock().audio.renditions.insert(
+			"audio0".to_string(),
+			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+		);
 		producer.lock().ext.scte35 = Some(Scte35 { splice_id: 42 });
 
 		let waiter = kio::Waiter::noop();
@@ -113,7 +108,7 @@ mod test {
 		}
 
 		let catalog = latest.expect("catalog published");
-		assert_eq!(catalog.user.as_ref().unwrap().name.as_deref(), Some("alice"));
+		assert!(catalog.audio.renditions.contains_key("audio0"));
 		assert_eq!(catalog.ext.scte35, Some(Scte35 { splice_id: 42 }));
 	}
 }

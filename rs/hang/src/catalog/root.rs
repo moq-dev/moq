@@ -89,14 +89,6 @@ impl Catalog {
 	}
 }
 
-/// Lets a producer/consumer that is generic over the catalog payload recover the base catalog,
-/// e.g. an application type that flattens [`Catalog`] still yields the media sections for MSF.
-impl AsRef<Catalog> for Catalog {
-	fn as_ref(&self) -> &Catalog {
-		self
-	}
-}
-
 #[cfg(test)]
 mod test {
 	use std::collections::BTreeMap;
