@@ -8,6 +8,7 @@ use crate::Result;
 ///
 /// This wraps a [`moq_json::Consumer`], reconstructing the JSON catalog from the latest
 /// group's snapshot (plus any future deltas) to discover available audio and video tracks.
+#[derive(Clone)]
 pub struct Consumer {
 	inner: moq_json::Consumer<Catalog>,
 }

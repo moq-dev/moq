@@ -224,6 +224,20 @@ pub struct Consumer<T> {
 	_marker: PhantomData<fn() -> T>,
 }
 
+// Manual impl so cloning doesn't require `T: Clone`; `T` only lives in PhantomData.
+// Cloned readers inherit the current reconstruction state, then advance in parallel.
+impl<T> Clone for Consumer<T> {
+	fn clone(&self) -> Self {
+		Self {
+			track: self.track.clone(),
+			group: self.group.clone(),
+			current: self.current.clone(),
+			frames_read: self.frames_read,
+			_marker: PhantomData,
+		}
+	}
+}
+
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
 	pub fn new(track: moq_net::TrackConsumer) -> Self {
