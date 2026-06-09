@@ -5,6 +5,20 @@ import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
+// True for the drafts that use the legacy 0x11 SUBSCRIBE_NAMESPACE message.
+// Draft-18+ uses the renumbered 0x50 message instead.
+function isLegacyVersion(version: IetfVersion): boolean {
+	switch (version) {
+		case Version.DRAFT_14:
+		case Version.DRAFT_15:
+		case Version.DRAFT_16:
+		case Version.DRAFT_17:
+			return true;
+		default:
+			return false;
+	}
+}
+
 // SUBSCRIBE_NAMESPACE message (draft-18+, type 0x50).
 //
 // Draft-18 renumbered the message from 0x11 to 0x50 and dropped the Subscribe
@@ -22,6 +36,9 @@ export class SubscribeNamespace {
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		if (isLegacyVersion(version)) {
+			throw new Error(`SUBSCRIBE_NAMESPACE (0x50) is draft-18+ only, not ${version}`);
+		}
 		await w.u62(this.requestId);
 		await Namespace.encode(w, this.namespace);
 		await new Parameters().encode(w, version);
@@ -36,6 +53,9 @@ export class SubscribeNamespace {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespace> {
+		if (isLegacyVersion(version)) {
+			throw new Error(`SUBSCRIBE_NAMESPACE (0x50) is draft-18+ only, not ${version}`);
+		}
 		const requestId = await r.u62();
 		const namespace = await Namespace.decode(r);
 		await Parameters.decode(r, version);
@@ -72,6 +92,9 @@ export class SubscribeNamespaceLegacy {
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		if (!isLegacyVersion(version)) {
+			throw new Error(`legacy SUBSCRIBE_NAMESPACE (0x11) is draft-14..17 only, not ${version}`);
+		}
 		await w.u62(this.requestId);
 		if (version === Version.DRAFT_17) {
 			await w.u62(0n); // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
@@ -92,6 +115,9 @@ export class SubscribeNamespaceLegacy {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespaceLegacy> {
+		if (!isLegacyVersion(version)) {
+			throw new Error(`legacy SUBSCRIBE_NAMESPACE (0x11) is draft-14..17 only, not ${version}`);
+		}
 		const requestId = await r.u62();
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)

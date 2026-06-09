@@ -1032,6 +1032,26 @@ test("SubscribeNamespace: message IDs", () => {
 	expect(SubscribeNamespace.SubscribeNamespace.id).toBe(0x50);
 });
 
+test("SubscribeNamespace: decode rejects the wrong draft version", async () => {
+	// Modern 0x50 is draft-18+ only.
+	const modern = await encodeVersioned(
+		new SubscribeNamespace.SubscribeNamespace({ namespace: Path.empty(), requestId: 0n }),
+		Version.DRAFT_18,
+	);
+	await expect(
+		decodeVersioned(modern, SubscribeNamespace.SubscribeNamespace.decode, Version.DRAFT_17),
+	).rejects.toThrow(/draft-18\+ only/);
+
+	// Legacy 0x11 is draft-14..17 only.
+	const legacy = await encodeVersioned(
+		new SubscribeNamespace.SubscribeNamespaceLegacy({ namespace: Path.empty(), requestId: 0n }),
+		Version.DRAFT_17,
+	);
+	await expect(
+		decodeVersioned(legacy, SubscribeNamespace.SubscribeNamespaceLegacy.decode, Version.DRAFT_18),
+	).rejects.toThrow(/draft-14\.\.17 only/);
+});
+
 test("SubscribeNamespace: draft-18 omits subscribe options", async () => {
 	// The legacy draft-17 body carries the Subscribe Options field, so it is
 	// longer than the modern draft-18 body.

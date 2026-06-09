@@ -18,6 +18,15 @@ use super::Version;
 /// for a REQUEST_OK.
 pub const SUBSCRIBE_TRACKS_ID: u64 = 0x51;
 
+/// True for the drafts that use the legacy 0x11 SUBSCRIBE_NAMESPACE message.
+/// Draft-18+ uses the renumbered 0x50 message instead.
+fn is_legacy_version(version: Version) -> bool {
+	matches!(
+		version,
+		Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
+	)
+}
+
 /// SUBSCRIBE_NAMESPACE message (draft-18+, type 0x50).
 ///
 /// Draft-18 renumbered the message from 0x11 to 0x50 and dropped the Subscribe
@@ -33,6 +42,9 @@ impl Message for SubscribeNamespace<'_> {
 	const ID: u64 = 0x50;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		if is_legacy_version(version) {
+			return Err(EncodeError::Version);
+		}
 		self.request_id.encode(w, version)?;
 		encode_namespace(w, &self.namespace, version)?;
 		encode_params!(w, version,);
@@ -40,6 +52,9 @@ impl Message for SubscribeNamespace<'_> {
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		if is_legacy_version(version) {
+			return Err(DecodeError::Version);
+		}
 		let request_id = RequestId::decode(r, version)?;
 		let namespace = decode_namespace(r, version)?;
 		decode_params!(r, version,);
@@ -66,6 +81,9 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 	const ID: u64 = 0x11;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		if !is_legacy_version(version) {
+			return Err(EncodeError::Version);
+		}
 		self.request_id.encode(w, version)?;
 		if version == Version::Draft17 {
 			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
@@ -79,6 +97,9 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		if !is_legacy_version(version) {
+			return Err(DecodeError::Version);
+		}
 		let request_id = RequestId::decode(r, version)?;
 		if version == Version::Draft17 {
 			let _required_request_id_delta = u64::decode(r, version)?;
@@ -307,5 +328,24 @@ mod tests {
 			assert_eq!(decoded.namespace.as_str(), "example/meeting");
 			assert_eq!(decoded.subscribe_options, 0x01);
 		}
+	}
+
+	#[test]
+	fn rejects_wrong_version() {
+		// The modern 0x50 message only exists in draft-18+.
+		for version in [Version::Draft14, Version::Draft16, Version::Draft17] {
+			let mut buf = bytes::Bytes::from(vec![0x00, 0x00, 0x00]);
+			assert!(matches!(
+				SubscribeNamespace::decode_msg(&mut buf, version),
+				Err(DecodeError::Version)
+			));
+		}
+
+		// The legacy 0x11 message only exists in draft-14..17.
+		let mut buf = bytes::Bytes::from(vec![0x00, 0x00, 0x00]);
+		assert!(matches!(
+			SubscribeNamespaceLegacy::decode_msg(&mut buf, Version::Draft18),
+			Err(DecodeError::Version)
+		));
 	}
 }
