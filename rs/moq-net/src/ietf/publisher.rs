@@ -78,9 +78,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					}
 				});
 			}
-			// SubscribeNamespace ID is version-dependent (0x11 pre-18, 0x50 in draft-18).
-			id if id == ietf::SubscribeNamespace::wire_id(this.version) => {
-				let msg = ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?;
+			// Draft-18 SUBSCRIBE_NAMESPACE (0x50) and the legacy 0x11 message decode
+			// to the same request_id + namespace; the legacy Subscribe Options field
+			// is ignored (moq-lite never subscribes to tracks).
+			ietf::SubscribeNamespace::ID | ietf::SubscribeNamespaceLegacy::ID => {
+				let msg = if id == ietf::SubscribeNamespace::ID {
+					ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?
+				} else {
+					let legacy = ietf::SubscribeNamespaceLegacy::decode_msg(&mut data, this.version)?;
+					ietf::SubscribeNamespace {
+						request_id: legacy.request_id,
+						namespace: legacy.namespace,
+					}
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}

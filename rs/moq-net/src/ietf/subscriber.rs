@@ -103,18 +103,27 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let prefix = self.origin.as_ref().ok_or(Error::InvalidRole)?.root().to_owned();
 		let request_id = self.control.next_request_id().await?;
 
-		// Write SubscribeNamespace
-		let msg = ietf::SubscribeNamespace {
-			request_id,
-			namespace: prefix.clone(),
-			subscribe_options: 0x01, // NAMESPACE only
-		};
-
-		stream
-			.writer
-			.encode(&ietf::SubscribeNamespace::wire_id(self.version))
-			.await?;
-		stream.writer.encode(&msg).await?;
+		// Draft-18+ uses SUBSCRIBE_NAMESPACE (0x50); earlier drafts use the legacy
+		// 0x11 message with a Subscribe Options field.
+		match self.version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				let msg = ietf::SubscribeNamespaceLegacy {
+					request_id,
+					namespace: prefix.clone(),
+					subscribe_options: 0x01, // NAMESPACE only
+				};
+				stream.writer.encode(&ietf::SubscribeNamespaceLegacy::ID).await?;
+				stream.writer.encode(&msg).await?;
+			}
+			_ => {
+				let msg = ietf::SubscribeNamespace {
+					request_id,
+					namespace: prefix.clone(),
+				};
+				stream.writer.encode(&ietf::SubscribeNamespace::ID).await?;
+				stream.writer.encode(&msg).await?;
+			}
+		}
 
 		tracing::debug!(%prefix, "subscribe_namespace sent");
 
@@ -483,10 +492,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 				let this = self.clone();
 				web_async::spawn(async move {
-					if let Err(err) = this.run_broadcast(path.clone(), dynamic).await {
+					// stop_announce is the authoritative remover: it drops the entry (and
+					// its producer) once the announce refcount hits zero, which is what
+					// makes run_broadcast exit. Removing here too would let a stale task
+					// delete a freshly re-announced entry for the same path.
+					if let Err(err) = this.run_broadcast(path, dynamic).await {
 						tracing::debug!(%err, "error running broadcast");
 					}
-					this.state.lock().broadcasts.remove(&path);
 				});
 
 				Ok(broadcast)

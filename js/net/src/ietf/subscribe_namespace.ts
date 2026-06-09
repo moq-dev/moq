@@ -5,29 +5,57 @@ import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-// In draft-14, SUBSCRIBE_ANNOUNCES is renamed to SUBSCRIBE_NAMESPACE
-// In draft-16, this moves from the control stream to its own bidi stream
+// SUBSCRIBE_NAMESPACE message (draft-18+, type 0x50).
+//
+// Draft-18 renumbered the message from 0x11 to 0x50 and dropped the Subscribe
+// Options field when it split SUBSCRIBE_TRACKS (0x51) off into its own message
+// type (#1542). Draft-14 through draft-17 use SubscribeNamespaceLegacy.
 export class SubscribeNamespace {
-	static id = 0x11;
-
-	// Draft-18 renumbered SUBSCRIBE_NAMESPACE from 0x11 to 0x50 when it split
-	// SUBSCRIBE_TRACKS (0x51) off into its own message type (#1542). Earlier
-	// drafts keep 0x11.
-	static wireId(version: IetfVersion): number {
-		switch (version) {
-			case Version.DRAFT_14:
-			case Version.DRAFT_15:
-			case Version.DRAFT_16:
-			case Version.DRAFT_17:
-				return SubscribeNamespace.id;
-			default:
-				return 0x50;
-		}
-	}
+	static id = 0x50;
 
 	namespace: Path.Valid;
 	requestId: bigint;
-	subscribeOptions: number; // v16: default 0x01 (NAMESPACE only)
+
+	constructor({ namespace, requestId }: { namespace: Path.Valid; requestId: bigint }) {
+		this.namespace = namespace;
+		this.requestId = requestId;
+	}
+
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		await w.u62(this.requestId);
+		await Namespace.encode(w, this.namespace);
+		await new Parameters().encode(w, version);
+	}
+
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (wr) => this.#encode(wr, version));
+	}
+
+	static async decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespace> {
+		return Message.decode(r, (rd) => SubscribeNamespace.#decode(rd, version));
+	}
+
+	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespace> {
+		const requestId = await r.u62();
+		const namespace = await Namespace.decode(r);
+		await Parameters.decode(r, version);
+
+		return new SubscribeNamespace({ namespace, requestId });
+	}
+}
+
+// SUBSCRIBE_NAMESPACE message for draft-14 through draft-17 (type 0x11).
+//
+// In v16 this moves from the control stream to its own bidi stream. Draft-16/17
+// carry a Subscribe Options field (NAMESPACE vs TRACKS); draft-17 additionally
+// prefixes a Required Request ID delta (removed in draft-18 per #1615).
+// Draft-18+ uses SubscribeNamespace.
+export class SubscribeNamespaceLegacy {
+	static id = 0x11;
+
+	namespace: Path.Valid;
+	requestId: bigint;
+	subscribeOptions: number; // v16/v17: default 0x01 (NAMESPACE only)
 
 	constructor({
 		namespace,
@@ -49,9 +77,6 @@ export class SubscribeNamespace {
 			await w.u62(0n); // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 		await Namespace.encode(w, this.namespace);
-		// Draft-16/17 carried a Subscribe Options field to pick NAMESPACE vs TRACKS.
-		// Draft-18 dropped it, splitting the cases into SUBSCRIBE_NAMESPACE (0x50)
-		// and SUBSCRIBE_TRACKS (0x51) message types instead (#1542).
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			await w.u53(this.subscribeOptions);
 		}
@@ -62,24 +87,23 @@ export class SubscribeNamespace {
 		return Message.encode(w, (wr) => this.#encode(wr, version));
 	}
 
-	static async decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespace> {
-		return Message.decode(r, (rd) => SubscribeNamespace.#decode(rd, version));
+	static async decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespaceLegacy> {
+		return Message.decode(r, (rd) => SubscribeNamespaceLegacy.#decode(rd, version));
 	}
 
-	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespace> {
+	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespaceLegacy> {
 		const requestId = await r.u62();
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
 		const namespace = await Namespace.decode(r);
-		// Subscribe Options exists only in draft-16/17 (see #encode).
 		let subscribeOptions = 1;
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			subscribeOptions = await r.u53();
 		}
 		await Parameters.decode(r, version);
 
-		return new SubscribeNamespace({ namespace, requestId, subscribeOptions });
+		return new SubscribeNamespaceLegacy({ namespace, requestId, subscribeOptions });
 	}
 }
 

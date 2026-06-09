@@ -1026,29 +1026,37 @@ test("Parameters v18 wire is identical to v17 (no count prefix, delta encoded ke
 	expect(Array.from(await v18)).toEqual(Array.from(await v17));
 });
 
-test("SubscribeNamespace: wireId is version-dependent", () => {
-	// 0x11 through draft-17, renumbered to 0x50 in draft-18 (#1542).
-	expect(SubscribeNamespace.SubscribeNamespace.wireId(Version.DRAFT_16)).toBe(0x11);
-	expect(SubscribeNamespace.SubscribeNamespace.wireId(Version.DRAFT_17)).toBe(0x11);
-	expect(SubscribeNamespace.SubscribeNamespace.wireId(Version.DRAFT_18)).toBe(0x50);
+test("SubscribeNamespace: message IDs", () => {
+	// 0x11 through draft-17 (legacy), renumbered to 0x50 in draft-18 (#1542).
+	expect(SubscribeNamespace.SubscribeNamespaceLegacy.id).toBe(0x11);
+	expect(SubscribeNamespace.SubscribeNamespace.id).toBe(0x50);
 });
 
 test("SubscribeNamespace: draft-18 omits subscribe options", async () => {
-	const msg = new SubscribeNamespace.SubscribeNamespace({ namespace: Path.empty(), requestId: 0n });
-
-	const v18 = await encodeVersioned(msg, Version.DRAFT_18);
-	const v17 = await encodeVersioned(msg, Version.DRAFT_17);
-
-	// Draft-18 dropped the Subscribe Options field, so its body is shorter.
+	// The legacy draft-17 body carries the Subscribe Options field, so it is
+	// longer than the modern draft-18 body.
+	const modern = new SubscribeNamespace.SubscribeNamespace({ namespace: Path.empty(), requestId: 0n });
+	const legacy = new SubscribeNamespace.SubscribeNamespaceLegacy({ namespace: Path.empty(), requestId: 0n });
+	const v18 = await encodeVersioned(modern, Version.DRAFT_18);
+	const v17 = await encodeVersioned(legacy, Version.DRAFT_17);
 	expect(v18.byteLength).toBeLessThan(v17.byteLength);
 
-	// Round-trips cleanly for both versions.
-	for (const version of [Version.DRAFT_16, Version.DRAFT_17, Version.DRAFT_18]) {
+	// Modern round-trips on draft-18.
+	const m = await encodeVersioned(
+		new SubscribeNamespace.SubscribeNamespace({ namespace: Path.from("example/meeting"), requestId: 4n }),
+		Version.DRAFT_18,
+	);
+	const dm = await decodeVersioned(m, SubscribeNamespace.SubscribeNamespace.decode, Version.DRAFT_18);
+	expect(dm.requestId).toBe(4n);
+	expect(dm.namespace).toBe("example/meeting" as Path.Valid);
+
+	// Legacy round-trips on draft-16/17.
+	for (const version of [Version.DRAFT_16, Version.DRAFT_17]) {
 		const encoded = await encodeVersioned(
-			new SubscribeNamespace.SubscribeNamespace({ namespace: Path.from("example/meeting"), requestId: 4n }),
+			new SubscribeNamespace.SubscribeNamespaceLegacy({ namespace: Path.from("example/meeting"), requestId: 4n }),
 			version,
 		);
-		const decoded = await decodeVersioned(encoded, SubscribeNamespace.SubscribeNamespace.decode, version);
+		const decoded = await decodeVersioned(encoded, SubscribeNamespace.SubscribeNamespaceLegacy.decode, version);
 		expect(decoded.requestId).toBe(4n);
 		expect(decoded.namespace).toBe("example/meeting" as Path.Valid);
 	}

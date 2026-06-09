@@ -18,29 +18,51 @@ use super::Version;
 /// for a REQUEST_OK.
 pub const SUBSCRIBE_TRACKS_ID: u64 = 0x51;
 
-/// SubscribeNamespace message.
-/// In v16, this moves from the control stream to its own bidirectional stream.
+/// SUBSCRIBE_NAMESPACE message (draft-18+, type 0x50).
+///
+/// Draft-18 renumbered the message from 0x11 to 0x50 and dropped the Subscribe
+/// Options field when it split SUBSCRIBE_TRACKS (0x51) off into its own message
+/// type (#1542). Draft-14 through draft-17 use [`SubscribeNamespaceLegacy`].
 #[derive(Clone, Debug)]
 pub struct SubscribeNamespace<'a> {
 	pub request_id: RequestId,
 	pub namespace: Path<'a>,
-	/// v16: Subscribe Options (default 0x01 = NAMESPACE only)
-	pub subscribe_options: u64,
-}
-
-impl SubscribeNamespace<'_> {
-	/// Wire message type ID. Draft-18 renumbered SUBSCRIBE_NAMESPACE from 0x11
-	/// to 0x50 when it split SUBSCRIBE_TRACKS (0x51) off into its own message
-	/// (#1542). Earlier drafts keep 0x11.
-	pub fn wire_id(version: Version) -> u64 {
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => Self::ID,
-			_ => 0x50,
-		}
-	}
 }
 
 impl Message for SubscribeNamespace<'_> {
+	const ID: u64 = 0x50;
+
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		encode_namespace(w, &self.namespace, version)?;
+		encode_params!(w, version,);
+		Ok(())
+	}
+
+	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let request_id = RequestId::decode(r, version)?;
+		let namespace = decode_namespace(r, version)?;
+		decode_params!(r, version,);
+
+		Ok(Self { request_id, namespace })
+	}
+}
+
+/// SUBSCRIBE_NAMESPACE message for draft-14 through draft-17 (type 0x11).
+///
+/// In v16 this moves from the control stream to its own bidirectional stream.
+/// Draft-16/17 carry a Subscribe Options field (NAMESPACE vs TRACKS); draft-17
+/// additionally prefixes a Required Request ID delta (removed in draft-18 per
+/// #1615). Draft-18+ uses [`SubscribeNamespace`].
+#[derive(Clone, Debug)]
+pub struct SubscribeNamespaceLegacy<'a> {
+	pub request_id: RequestId,
+	pub namespace: Path<'a>,
+	/// v16/v17: Subscribe Options (default 0x01 = NAMESPACE only).
+	pub subscribe_options: u64,
+}
+
+impl Message for SubscribeNamespaceLegacy<'_> {
 	const ID: u64 = 0x11;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
@@ -49,9 +71,6 @@ impl Message for SubscribeNamespace<'_> {
 			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 		encode_namespace(w, &self.namespace, version)?;
-		// Draft-16/17 carried a Subscribe Options field to pick NAMESPACE vs TRACKS.
-		// Draft-18 dropped it, splitting the two cases into SUBSCRIBE_NAMESPACE (0x50)
-		// and SUBSCRIBE_TRACKS (0x51) message types instead (#1542).
 		if matches!(version, Version::Draft16 | Version::Draft17) {
 			self.subscribe_options.encode(w, version)?;
 		}
@@ -65,7 +84,6 @@ impl Message for SubscribeNamespace<'_> {
 			let _required_request_id_delta = u64::decode(r, version)?;
 		}
 		let namespace = decode_namespace(r, version)?;
-		// Subscribe Options exists only in draft-16/17 (see encode_msg).
 		let subscribe_options = match version {
 			Version::Draft16 | Version::Draft17 => u64::decode(r, version)?,
 			_ => 0x01,
@@ -75,8 +93,8 @@ impl Message for SubscribeNamespace<'_> {
 		decode_params!(r, version,);
 
 		Ok(Self {
-			namespace,
 			request_id,
+			namespace,
 			subscribe_options,
 		})
 	}
@@ -236,42 +254,58 @@ mod tests {
 	}
 
 	#[test]
-	fn wire_id_is_version_dependent() {
-		// 0x11 through draft-17, renumbered to 0x50 in draft-18 (#1542).
-		assert_eq!(SubscribeNamespace::wire_id(Version::Draft16), 0x11);
-		assert_eq!(SubscribeNamespace::wire_id(Version::Draft17), 0x11);
-		assert_eq!(SubscribeNamespace::wire_id(Version::Draft18), 0x50);
+	fn message_ids() {
+		// 0x11 through draft-17 (legacy), renumbered to 0x50 in draft-18 (#1542).
+		assert_eq!(SubscribeNamespaceLegacy::ID, 0x11);
+		assert_eq!(SubscribeNamespace::ID, 0x50);
 	}
 
 	#[test]
 	fn draft18_omits_subscribe_options() {
-		let msg = SubscribeNamespace {
+		// Draft-18 modern body: Request ID (0x00), empty namespace field-count
+		// (0x00), Number of Parameters (0x00). No Subscribe Options field.
+		let modern = SubscribeNamespace {
+			request_id: RequestId(0),
+			namespace: Path::default(),
+		};
+		assert_eq!(body(&modern, Version::Draft18), vec![0x00, 0x00, 0x00]);
+
+		// The legacy draft-17 body keeps the options field, so it is one byte longer.
+		let legacy = SubscribeNamespaceLegacy {
 			request_id: RequestId(0),
 			namespace: Path::default(),
 			subscribe_options: 0x01,
 		};
-
-		// Draft-18 body: Request ID (0x00), empty namespace field-count (0x00),
-		// Number of Parameters (0x00). No Subscribe Options field in between.
-		assert_eq!(body(&msg, Version::Draft18), vec![0x00, 0x00, 0x00]);
-
-		// Draft-17 keeps the options field, so the same message is one byte longer.
-		assert!(body(&msg, Version::Draft17).len() > body(&msg, Version::Draft18).len());
+		assert!(body(&legacy, Version::Draft17).len() > body(&modern, Version::Draft18).len());
 	}
 
 	#[test]
-	fn round_trips_each_version() {
-		for version in [Version::Draft16, Version::Draft17, Version::Draft18] {
-			let msg = SubscribeNamespace {
+	fn modern_round_trips() {
+		let msg = SubscribeNamespace {
+			request_id: RequestId(4),
+			namespace: Path::new("example/meeting"),
+		};
+		let mut buf = bytes::Bytes::from(body(&msg, Version::Draft18));
+		let decoded = SubscribeNamespace::decode_msg(&mut buf, Version::Draft18).unwrap();
+		assert!(buf.is_empty());
+		assert_eq!(decoded.request_id, RequestId(4));
+		assert_eq!(decoded.namespace.as_str(), "example/meeting");
+	}
+
+	#[test]
+	fn legacy_round_trips() {
+		for version in [Version::Draft16, Version::Draft17] {
+			let msg = SubscribeNamespaceLegacy {
 				request_id: RequestId(4),
 				namespace: Path::new("example/meeting"),
 				subscribe_options: 0x01,
 			};
 			let mut buf = bytes::Bytes::from(body(&msg, version));
-			let decoded = SubscribeNamespace::decode_msg(&mut buf, version).unwrap();
+			let decoded = SubscribeNamespaceLegacy::decode_msg(&mut buf, version).unwrap();
 			assert!(buf.is_empty(), "trailing bytes for {version:?}");
 			assert_eq!(decoded.request_id, RequestId(4));
 			assert_eq!(decoded.namespace.as_str(), "example/meeting");
+			assert_eq!(decoded.subscribe_options, 0x01);
 		}
 	}
 }
