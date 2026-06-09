@@ -615,7 +615,7 @@ A subscriber MUST consult the publisher's advertised level before relying on a P
 ### Path Parameter {#path-parameter}
 The Path Parameter carries the request path the client wishes to reach, equivalent to the path component of a moq-lite URI.
 A server uses it to route the session to the correct origin, relay, or virtual host before any broadcasts are exchanged; its interpretation is otherwise application-defined and opaque to moq-lite.
-Unlike the other Setup Parameters it is not a capability — it is connection metadata that rides along in SETUP because that is the first client-to-server message of the session.
+Unlike the capability-style Setup Parameters, it is per-hop setup metadata that rides along in SETUP because that is the first client-to-server message of the session.
 
 The Parameter Value is a non-empty UTF-8 string that begins with `/` and uses the path syntax of a URI [RFC3986].
 
@@ -627,7 +627,7 @@ The remaining bindings convey the path in their own handshake.
 - A server MUST NOT send a Path Parameter. SETUP is bidirectional, but the path is meaningful only from client to server; a client that receives a Path Parameter MUST close the session with a PROTOCOL_VIOLATION.
 - A server that receives a Path that is empty or is not a valid URI path MUST close the session with a PROTOCOL_VIOLATION. A server that does not recognize or support the requested path MUST close the session.
 
-A relay MUST NOT forward the Path Parameter; like every other negotiated capability it applies only to this hop (see [Session](#session)).
+A relay MUST NOT forward the Path Parameter; like other per-hop setup metadata it applies only to this hop (see [Session](#session)).
 
 
 ## ANNOUNCE_INTEREST
