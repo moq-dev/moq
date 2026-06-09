@@ -127,7 +127,7 @@ impl Framed {
 	/// The buffer will be fully consumed, or an error will be returned.
 	pub fn new<T: Buf + AsRef<[u8]>>(
 		broadcast: moq_net::BroadcastProducer,
-		catalog: crate::catalog::hang::Producer,
+		catalog: crate::catalog::Producer,
 		format: FramedFormat,
 		buf: &mut T,
 	) -> anyhow::Result<Self> {
@@ -365,7 +365,7 @@ impl Stream {
 	/// Create a new stream importer with the given format.
 	pub fn new(
 		broadcast: moq_net::BroadcastProducer,
-		catalog: crate::catalog::hang::Producer,
+		catalog: crate::catalog::Producer,
 		format: StreamFormat,
 	) -> anyhow::Result<Self> {
 		use crate::codec::h264::Mode as H264Mode;

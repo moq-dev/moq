@@ -9,7 +9,7 @@ use super::Config;
 /// without waiting for a group boundary. Opus' packet loss concealment handles drops.
 /// Ogg framing is not supported, feed raw Opus packets.
 pub struct Import {
-	catalog: crate::catalog::hang::Producer,
+	catalog: crate::catalog::Producer,
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	zero: Option<tokio::time::Instant>,
 }
@@ -17,7 +17,7 @@ pub struct Import {
 impl Import {
 	pub fn new(
 		mut broadcast: moq_net::BroadcastProducer,
-		mut catalog: crate::catalog::hang::Producer,
+		mut catalog: crate::catalog::Producer,
 		config: Config,
 	) -> anyhow::Result<Self> {
 		let track = broadcast.unique_track(".opus")?;

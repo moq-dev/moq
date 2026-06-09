@@ -16,7 +16,7 @@ pub struct Import {
 	broadcast: moq_net::BroadcastProducer,
 
 	// The catalog being produced.
-	catalog: crate::catalog::hang::Producer,
+	catalog: crate::catalog::Producer,
 
 	// The track being produced, created on the first key frame.
 	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
@@ -32,7 +32,7 @@ pub struct Import {
 }
 
 impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::hang::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -181,7 +181,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn imports_keyframe_then_interframe() {
 		let mut broadcast = moq_net::Broadcast::new().produce();
-		let mut catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut import = super::Import::new(broadcast.clone(), catalog.clone());
 
 		import.initialize(&mut Bytes::new()).unwrap();
@@ -215,7 +215,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn rejects_interframe_first() {
 		let mut broadcast = moq_net::Broadcast::new().produce();
-		let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut import = super::Import::new(broadcast.clone(), catalog);
 
 		let mut interframe = Bytes::from_static(&[0x84, 0x00, 0x00]);

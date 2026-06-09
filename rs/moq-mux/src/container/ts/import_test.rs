@@ -8,7 +8,7 @@ use bytes::BytesMut;
 /// Decode a whole TS buffer into a fresh broadcast and return the catalog.
 fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut broadcast = moq_net::Broadcast::new().produce();
-	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
 	let mut buf = BytesMut::from(data);
@@ -52,7 +52,7 @@ async fn import_export_import_roundtrip() {
 	// Import the fixture into a broadcast.
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
 	let mut buf = BytesMut::from(&data[..]);
 	import.decode(&mut buf).unwrap();
@@ -85,7 +85,7 @@ fn import_handles_unaligned_chunks() {
 	let data = include_bytes!("test_data/bbb.ts");
 
 	let mut broadcast = moq_net::Broadcast::new().produce();
-	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
 
 	for chunk in data.chunks(100) {

@@ -57,7 +57,7 @@ const OPUS_BITRATE: usize = 64000;
 impl AudioEncoder {
 	pub fn new(
 		broadcast: moq_net::BroadcastProducer,
-		catalog: moq_mux::catalog::hang::Producer,
+		catalog: moq_mux::catalog::Producer,
 		input_sample_rate: u32,
 	) -> Result<Self> {
 		let opus = moq_mux::codec::opus::Import::new(

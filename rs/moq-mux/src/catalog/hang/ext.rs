@@ -57,7 +57,6 @@ impl<E: CatalogExt> Catalog<E> {
 		hang::Catalog {
 			video: self.video.clone(),
 			audio: self.audio.clone(),
-			..Default::default()
 		}
 	}
 }
@@ -103,7 +102,7 @@ mod test {
 	fn extension_roundtrip() {
 		let mut broadcast = moq_net::Broadcast::new().produce();
 		let mut producer =
-			crate::catalog::hang::Producer::with_catalog(&mut broadcast, Catalog::<Scte35Ext>::default()).unwrap();
+			crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Scte35Ext>::default()).unwrap();
 		let mut consumer = producer.consume().unwrap();
 
 		// The media pipeline sets a base section (flat field); the app adds its own extension.

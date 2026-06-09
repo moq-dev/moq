@@ -31,7 +31,7 @@ pub enum Mode {
 /// supplies, or forced explicitly via [`with_mode`](Self::with_mode).
 pub struct Import {
 	broadcast: moq_net::BroadcastProducer,
-	catalog: crate::catalog::hang::Producer,
+	catalog: crate::catalog::Producer,
 	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
 	config: Option<hang::catalog::VideoConfig>,
 	state: State,
@@ -62,7 +62,7 @@ struct Avc3Frame {
 }
 
 impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::hang::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -561,7 +561,7 @@ mod tests {
 
 		let broadcast = moq_net::Broadcast::new();
 		let mut producer = broadcast.produce();
-		let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 		let mut importer = Import::new(producer, catalog.clone());
 		let mut buf = bytes::BytesMut::from(avcc.as_slice());
@@ -597,7 +597,7 @@ mod tests {
 
 		let broadcast = moq_net::Broadcast::new();
 		let mut producer = broadcast.produce();
-		let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 		let mut importer = Import::new(producer, catalog.clone());
 		importer.initialize(&mut annexb).expect("initialize avc3");

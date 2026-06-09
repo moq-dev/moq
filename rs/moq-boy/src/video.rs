@@ -34,7 +34,7 @@ struct EncoderMsg {
 }
 
 impl VideoEncoder {
-	pub fn spawn(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::hang::Producer) -> Self {
+	pub fn spawn(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
 		let avc3 = moq_mux::codec::h264::Import::new(broadcast, catalog)
 			.with_mode(moq_mux::codec::h264::Mode::Avc3)

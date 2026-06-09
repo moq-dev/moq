@@ -131,6 +131,7 @@ match version {
 - Use `anyhow::Context` (`.context("msg")`) instead of `.map_err(|_| anyhow::anyhow!("msg"))` for error conversion
 - **Config flags + TOML merge**: For any `#[arg]` field on a TOML-loadable config, use `Option<T>` (not bare `bool` / `String` / etc.). The TOML→CLI merge clobbers bare fields with their `Default` when the flag is absent, silently overwriting TOML values. See `rs/moq-relay/src/config.rs::tests` for the regression test; add one for any new flag.
 - **Prefer `if let` / `let ... else` over an unwrapping `match`**: a `match` whose only job is to unwrap (`Ok(v) => v` / `Some(v) => v`) reads cleaner as `if let Some(v) = x { ... }` or `let Some(v) = x else { ... };`. Matching on an `Option`/`Result` just to bind the inner value is the tell. Keep `match` when both arms do real work or you need the `Err` / `None` payload.
+- **`poll_*` plumbing**: a `Poll::Pending => Poll::Pending` arm usually means `ready!(...)` will collapse the match. And `.map_err(Into::into)` on a fallible result is usually better as `Ok(x?)` (the `?` does the `From` conversion). These compose: `let v = ready!(inner.poll_next(cx))?;` in a `fn -> Poll<Result<...>>` both unwraps the `Poll` and converts the error.
 
 ## Comment Conventions
 

@@ -3,14 +3,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use base64::Engine;
 
-use super::{Catalog, CatalogExt};
+use super::hang::{Catalog, CatalogExt, Consumer};
 
 /// Produces both a hang and MSF catalog track for a broadcast.
 ///
 /// Generic over the application extension `E` (defaulting to `()` for none). The catalog is a
-/// [`Catalog<E>`](super::Catalog): `video`/`audio` are direct fields (`catalog.video`) and the
+/// [`Catalog<E>`](super::hang::Catalog): `video`/`audio` are direct fields (`catalog.video`) and the
 /// extension is reachable directly via deref (`catalog.scte35`) or as `catalog.ext`. Define an
-/// extension with [`CatalogExt`](super::CatalogExt). The MSF track is always derived from the base
+/// extension with [`CatalogExt`](super::hang::CatalogExt). The MSF track is always derived from the base
 /// media sections, regardless of any extension.
 ///
 /// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
@@ -81,8 +81,8 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
-	pub fn consume(&self) -> Result<super::Consumer<E>, moq_net::Error> {
-		Ok(super::Consumer::new(self.hang.consume()))
+	pub fn consume(&self) -> Result<Consumer<E>, moq_net::Error> {
+		Ok(Consumer::new(self.hang.consume()))
 	}
 
 	/// Finish publishing to this catalog.
@@ -95,7 +95,7 @@ impl<E: CatalogExt> Producer<E> {
 
 /// RAII guard for modifying a catalog with automatic publishing on drop.
 ///
-/// Obtained via [`Producer::lock`]. Derefs to the [`Catalog<E>`](super::Catalog), so `video`/`audio`
+/// Obtained via [`Producer::lock`]. Derefs to the [`Catalog<E>`](super::hang::Catalog), so `video`/`audio`
 /// and (through the catalog's own deref) the extension sections are editable directly.
 ///
 /// On drop, both the hang and MSF catalog tracks are updated if the catalog was mutated.
@@ -274,7 +274,6 @@ mod test {
 			audio: Audio {
 				renditions: audio_renditions,
 			},
-			..Default::default()
 		};
 
 		let msf = to_msf(&catalog);
@@ -421,7 +420,6 @@ mod test {
 			audio: Audio {
 				renditions: audio_renditions,
 			},
-			..Default::default()
 		};
 
 		let msf = to_msf(&catalog);

@@ -24,7 +24,7 @@ pub struct AudioProducer {
 	resampler: Option<Resampler>,
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
 	track_name: String,
-	catalog: moq_mux::catalog::hang::Producer,
+	catalog: moq_mux::catalog::Producer,
 	pending: Vec<f32>,
 	frames_produced: u64,
 }
@@ -34,7 +34,7 @@ impl AudioProducer {
 	/// rendition in `catalog` immediately.
 	pub fn new(
 		broadcast: &mut moq_net::BroadcastProducer,
-		catalog: moq_mux::catalog::hang::Producer,
+		catalog: moq_mux::catalog::Producer,
 		name: impl Into<String>,
 		input: EncoderInput,
 		output: EncoderOutput,

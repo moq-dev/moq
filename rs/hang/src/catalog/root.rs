@@ -1,14 +1,14 @@
 //! This module contains the structs and functions for the MoQ catalog format
 use crate::Result;
-use crate::catalog::{Audio, Chat, User, Video};
+use crate::catalog::{Audio, Video};
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 ///
-/// Applications extend the catalog with their own root sections (e.g. `scte35`) by flattening
-/// this struct into their own with `#[serde(flatten)]` and serving it through `moq-json`. The
-/// catalog does not deny unknown fields, so a base consumer ignores the extra sections and an
-/// extended catalog stays wire-compatible. See the `extension_roundtrip` test for an example.
+/// The base catalog carries only the media sections (`video`, `audio`). Applications extend it with
+/// their own root sections (e.g. `scte35`) by flattening this struct into their own with
+/// `#[serde(flatten)]`. The catalog does not deny unknown fields, so a base consumer ignores the
+/// extra sections and an extended catalog stays wire-compatible. See the `extension_roundtrip` test.
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -27,18 +27,6 @@ pub struct Catalog {
 	/// based on their preferences (codec, bitrate, language, etc).
 	#[serde(default)]
 	pub audio: Audio,
-
-	/// User metadata for the broadcaster
-	#[serde(default)]
-	pub user: Option<User>,
-
-	/// Chat track metadata
-	#[serde(default)]
-	pub chat: Option<Chat>,
-
-	/// Preview information about the broadcast
-	#[serde(default)]
-	pub preview: Option<moq_net::Track>,
 }
 
 impl Catalog {
@@ -160,7 +148,6 @@ mod test {
 			audio: Audio {
 				renditions: audio_renditions,
 			},
-			..Default::default()
 		};
 
 		let output = Catalog::from_str(&encoded).expect("failed to decode");

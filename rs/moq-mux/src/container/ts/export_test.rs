@@ -74,7 +74,7 @@ fn assert_packet_aligned(ts: &[u8]) {
 async fn export_aac_roundtrip() {
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast.unique_track(".aac").unwrap();
 	let name = track.name.clone();
@@ -189,7 +189,7 @@ fn reassemble_video(ts: &[u8], expected_stream_type: StreamType) -> Vec<u8> {
 async fn export_avc3_in_band_reassembles() {
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast.unique_track(".avc3").unwrap();
 	let name = track.name.clone();
@@ -235,7 +235,7 @@ async fn export_avc3_in_band_reassembles() {
 async fn export_avc1_out_of_band_reassembles() {
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(SPS, PPS).unwrap();
 

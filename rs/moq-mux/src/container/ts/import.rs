@@ -28,7 +28,7 @@ use crate::container::Timestamp;
 /// manages the track, catalog config, and keyframe-based group boundaries.
 pub struct Import {
 	broadcast: moq_net::BroadcastProducer,
-	catalog: crate::catalog::hang::Producer,
+	catalog: crate::catalog::Producer,
 
 	/// Shared, refillable byte source the persistent reader pulls whole packets
 	/// from. Kept beside the reader so [`decode`](Self::decode) can append bytes
@@ -49,7 +49,7 @@ pub struct Import {
 }
 
 impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::hang::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		let feed = Feed::default();
 		Self {
 			broadcast,
@@ -324,7 +324,7 @@ impl Stream {
 struct AacStream {
 	import: Option<aac::Import>,
 	broadcast: moq_net::BroadcastProducer,
-	catalog: crate::catalog::hang::Producer,
+	catalog: crate::catalog::Producer,
 	unwrap: PtsUnwrap,
 	/// Largest audio burst span seen, published as the catalog jitter.
 	jitter: Option<Timestamp>,

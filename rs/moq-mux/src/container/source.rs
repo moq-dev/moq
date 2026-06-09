@@ -13,7 +13,7 @@
 //! existing `description` (for already-out-of-band sources) or the synthesized
 //! avcC/hvcC (for Annex-B sources).
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -54,12 +54,10 @@ impl CatalogSource {
 		match self {
 			// The hang consumer yields a `Catalog<()>`; the import path only needs the base media
 			// sections, so reduce it to a plain `hang::Catalog`.
-			Self::Hang(c) => match c.poll_next(waiter) {
-				Poll::Ready(result) => {
-					Poll::Ready(result.map(|opt| opt.map(|catalog| catalog.media())).map_err(Into::into))
-				}
-				Poll::Pending => Poll::Pending,
-			},
+			Self::Hang(c) => {
+				let catalog = ready!(c.poll_next(waiter))?;
+				Poll::Ready(Ok(catalog.map(|catalog| catalog.media())))
+			}
 			Self::Msf(c) => c.poll_next(waiter),
 		}
 	}

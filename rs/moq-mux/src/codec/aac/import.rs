@@ -9,7 +9,7 @@ use super::Config;
 /// one hang frame in its own group, so the relay can forward each frame without waiting for
 /// a group boundary. The codec's packet loss concealment handles drops.
 pub struct Import {
-	catalog: crate::catalog::hang::Producer,
+	catalog: crate::catalog::Producer,
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	zero: Option<tokio::time::Instant>,
 }
@@ -17,7 +17,7 @@ pub struct Import {
 impl Import {
 	pub fn new(
 		mut broadcast: moq_net::BroadcastProducer,
-		mut catalog: crate::catalog::hang::Producer,
+		mut catalog: crate::catalog::Producer,
 		config: Config,
 	) -> anyhow::Result<Self> {
 		let track = broadcast.unique_track(".aac")?;
