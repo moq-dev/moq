@@ -261,6 +261,52 @@ async fn relay_telescopes_downstream_viewer_count() {
 	relay_handle.abort();
 }
 
+/// The relay must space upstream control messages by at least `SUBSCRIBE_THROTTLE`
+/// (1s) to damp flapping. After the first viewer's SUBSCRIBE arms the window, a
+/// second viewer's count update is held until it elapses, so the publisher can't
+/// observe the bump to 2 near-instantly.
+#[tokio::test]
+async fn relay_throttles_subscribe_updates() {
+	let (port, relay_handle) = spawn_quic_relay().await;
+	let url: url::Url = format!("https://localhost:{port}/room").parse().expect("parse url");
+
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let track = broadcast.create_track("video", None).expect("create track");
+
+	let pub_session = tokio::time::timeout(
+		TIMEOUT,
+		client_lite05().with_publisher(pub_origin.clone()).connect(url.clone()),
+	)
+	.await
+	.expect("publisher connect timeout")
+	.expect("publisher connect failed");
+
+	// First viewer: its SUBSCRIBE arms the throttle window at the relay.
+	let (sub1, _track1) = subscribe_through_relay(url.clone(), "test", "video").await;
+	await_downstream(&track, 1).await;
+
+	// Second viewer immediately after: the count update to 2 must wait out the
+	// throttle window. Timing the whole connect+observe still gives a clean lower
+	// bound: without the throttle this lands in well under 400ms; with it the
+	// update is held ~1s. The bound is deliberately lenient to stay robust on CI.
+	let start = Instant::now();
+	let (sub2, _track2) = subscribe_through_relay(url.clone(), "test", "video").await;
+	await_downstream(&track, 2).await;
+	let elapsed = start.elapsed();
+	assert!(
+		elapsed >= Duration::from_millis(400),
+		"second viewer's update was not throttled (took {elapsed:?})"
+	);
+
+	drop(track);
+	drop(broadcast);
+	drop(sub1);
+	drop(sub2);
+	drop(pub_session);
+	relay_handle.abort();
+}
+
 /// Connect a publisher and a subscriber to a real relay over `ws://`, push
 /// one frame end-to-end, and assert both sides see the newest moq-lite ALPN.
 /// Regression for the `serve_ws` downgrade to Lite02.

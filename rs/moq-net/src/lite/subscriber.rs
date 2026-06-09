@@ -26,6 +26,14 @@ use web_async::Lock;
 /// the latest cached group).
 const LINGER_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Minimum spacing between control messages (SUBSCRIBE / SUBSCRIBE_UPDATE) sent
+/// upstream for one subscription. After sending one, further subscription changes
+/// are coalesced until this elapses, then the latest aggregate is sent. Damps
+/// flapping when consumers (and thus the viewer count) churn rapidly. Because the
+/// aggregate is level-triggered, a change that reverts within the window produces
+/// no message at all.
+const SUBSCRIBE_THROTTLE: Duration = Duration::from_secs(1);
+
 pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	pub session: S,
 	/// The origin into which remote broadcasts are inserted.
@@ -743,6 +751,8 @@ enum Event {
 	BroadcastClosed(Error),
 	/// The linger window elapsed with nobody returning.
 	LingerExpired,
+	/// The control-message throttle window elapsed; resume forwarding subscription changes.
+	ThrottleElapsed,
 }
 
 /// Serves one track for a relay: drives the single upstream subscription (opened
@@ -797,12 +807,19 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		let mut completed = false;
 		let mut fetches: FuturesUnordered<BoxFuture<'static, ()>> = FuturesUnordered::new();
 		let mut linger: Option<Pin<Box<tokio::time::Sleep>>> = None;
+		// While `Some`, a control message was sent recently; subscription changes are
+		// held (not polled) until it elapses, then the latest aggregate is forwarded.
+		let mut cooldown: Option<Pin<Box<tokio::time::Sleep>>> = None;
 
 		loop {
 			// Once nothing is in flight, the `poll_unused` check below confirms no
 			// consumers remain (it never fires while a subscriber or fetch holds one)
 			// and yields `Idle` to start the linger countdown.
 			let idle_eligible = linger.is_none() && fetches.is_empty();
+			// Suppress subscription polling during the throttle window. The aggregate is
+			// level-triggered, so the latest value (pruned and re-summed) is read once the
+			// window's timer fires below.
+			let throttled = cooldown.is_some();
 
 			let event = tokio::select! {
 				biased;
@@ -818,10 +835,12 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						Poll::Ready(Err(err)) => return Poll::Ready(Event::BroadcastClosed(err)),
 						Poll::Pending => {}
 					}
-					match track.poll_subscription_changed(waiter) {
-						Poll::Ready(Ok(pref)) => return Poll::Ready(Event::Subscription(pref)),
-						Poll::Ready(Err(err)) => return Poll::Ready(Event::BroadcastClosed(err)),
-						Poll::Pending => {}
+					if !throttled {
+						match track.poll_subscription_changed(waiter) {
+							Poll::Ready(Ok(pref)) => return Poll::Ready(Event::Subscription(pref)),
+							Poll::Ready(Err(err)) => return Poll::Ready(Event::BroadcastClosed(err)),
+							Poll::Pending => {}
+						}
 					}
 					if idle_eligible && track.poll_unused(waiter).is_ready() {
 						return Poll::Ready(Event::Idle);
@@ -859,6 +878,14 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						None => std::future::pending::<()>().await,
 					}
 				}, if linger.is_some() => Event::LingerExpired,
+
+				// (6) The control-message throttle window elapsed.
+				_ = async {
+					match cooldown.as_mut() {
+						Some(timer) => timer.as_mut().await,
+						None => std::future::pending::<()>().await,
+					}
+				}, if cooldown.is_some() => Event::ThrottleElapsed,
 			};
 
 			match event {
@@ -868,7 +895,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				}
 				Event::Subscription(pref) => {
 					linger = None;
-					if let Err(err) = self
+					match self
 						.handle_subscription(
 							&mut track,
 							&mut sub,
@@ -880,7 +907,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						)
 						.await
 					{
-						return self.finish_track(track.take().unwrap(), sub, err);
+						// A control message went out: start the throttle window so the next
+						// subscription change waits at least SUBSCRIBE_THROTTLE before sending.
+						Ok(true) => cooldown = Some(Box::pin(tokio::time::sleep(SUBSCRIBE_THROTTLE))),
+						Ok(false) => {}
+						Err(err) => return self.finish_track(track.take().unwrap(), sub, err),
 					}
 				}
 				Event::Idle => {
@@ -921,6 +952,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					tracing::info!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe cancelled");
 					return self.finish_track(track.take().unwrap(), sub, Error::Cancel);
 				}
+				// Throttle window done: clear it so the next loop re-polls the (coalesced)
+				// aggregate and forwards it if it still differs from what was last sent.
+				Event::ThrottleElapsed => cooldown = None,
 			}
 		}
 	}
@@ -958,6 +992,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 
 	/// Apply a subscription-demand change: open the upstream SUBSCRIBE on the first
 	/// subscriber, resume/update it while live, or pause it when the last leaves.
+	///
+	/// Returns `true` if a control message (SUBSCRIBE / SUBSCRIBE_UPDATE) went out, so
+	/// the caller can start the throttle window.
 	#[allow(clippy::too_many_arguments)]
 	async fn handle_subscription(
 		&self,
@@ -968,7 +1005,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		completed: bool,
 		compression: Compression,
 		timescale: Option<Timescale>,
-	) -> Result<(), Error> {
+	) -> Result<bool, Error> {
 		match pref {
 			Some(subscription) => match sub {
 				Sub::None => {
@@ -983,7 +1020,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					};
 					if establish {
 						self.establish(track, sub, subscription, compression, timescale).await?;
+						return Ok(true);
 					}
+					Ok(false)
 				}
 				Sub::Active(active) if active.paused => {
 					// A consumer returned during linger: resume by uncapping.
@@ -995,6 +1034,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					active.downstream = subscription.downstream;
 					self.send_update(active, subscription.group_end).await?;
 					tracing::info!(track = %self.name, "subscribe resumed");
+					Ok(true)
 				}
 				Sub::Active(active) => {
 					// Downstream preferences changed: forward them upstream as a
@@ -1006,7 +1046,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					active.downstream = subscription.downstream;
 					if supports_linger {
 						self.send_update(active, subscription.group_end).await?;
+						return Ok(true);
 					}
+					Ok(false)
 				}
 			},
 			None => {
@@ -1031,12 +1073,13 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 								downstream: active.downstream,
 							};
 							active.stream.writer.encode(&update).await?;
+							return Ok(true);
 						}
 					}
 				}
+				Ok(false)
 			}
 		}
-		Ok(())
 	}
 
 	/// Open the upstream SUBSCRIBE and start routing groups into the producer.
