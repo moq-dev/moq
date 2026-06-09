@@ -1,6 +1,7 @@
 mod client;
 mod publish;
 mod server;
+mod stats;
 mod subscribe;
 mod web;
 
@@ -8,6 +9,7 @@ use client::*;
 use hang::moq_net;
 use publish::*;
 use server::*;
+use stats::*;
 use subscribe::*;
 use web::*;
 
@@ -45,6 +47,9 @@ pub enum Command {
 		#[arg(long)]
 		dir: Option<PathBuf>,
 
+		#[command(flatten)]
+		stats: StatsArgs,
+
 		/// The format of the input media.
 		#[command(subcommand)]
 		format: PublishFormat,
@@ -61,6 +66,9 @@ pub enum Command {
 		/// Optionally serve static files from the given directory.
 		#[arg(long)]
 		dir: Option<PathBuf>,
+
+		#[command(flatten)]
+		stats: StatsArgs,
 
 		#[command(flatten)]
 		args: SubscribeArgs,
@@ -88,6 +96,9 @@ pub enum Command {
 		#[arg(long, alias = "name")]
 		broadcast: String,
 
+		#[command(flatten)]
+		stats: StatsArgs,
+
 		/// The format of the input media.
 		#[command(subcommand)]
 		format: PublishFormat,
@@ -105,6 +116,9 @@ pub enum Command {
 		/// The name of the broadcast to subscribe to.
 		#[arg(long, alias = "name")]
 		broadcast: String,
+
+		#[command(flatten)]
+		stats: StatsArgs,
 
 		#[command(flatten)]
 		args: SubscribeArgs,
@@ -130,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
 			config,
 			dir,
 			broadcast,
+			stats,
 			format,
 		} => {
 			warn_if_missing_format(&broadcast);
@@ -140,18 +155,26 @@ async fn main() -> anyhow::Result<()> {
 			#[cfg(feature = "iroh")]
 			let server = server.with_iroh(iroh);
 
+			let stats_agg = stats.build();
+			let server = match &stats_agg {
+				Some(agg) => server.with_stats(agg.tier(moq_net::Tier::External)),
+				None => server,
+			};
+
 			let web_tls = server.tls_info();
 
 			tokio::select! {
 				res = run_server(server, broadcast, publish.consume()) => res,
 				res = run_web(&web_bind, web_tls, dir) => res,
 				res = publish.run() => res,
+				res = run_stats(stats_agg, stats.interval) => res,
 			}
 		}
 		Command::Accept {
 			config,
 			broadcast,
 			dir,
+			stats,
 			args,
 		} => {
 			let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
@@ -159,6 +182,12 @@ async fn main() -> anyhow::Result<()> {
 			let server = config.init()?;
 			#[cfg(feature = "iroh")]
 			let server = server.with_iroh(iroh);
+
+			let stats_agg = stats.build();
+			let server = match &stats_agg {
+				Some(agg) => server.with_stats(agg.tier(moq_net::Tier::External)),
+				None => server,
+			};
 
 			let web_tls = server.tls_info();
 
@@ -169,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
 				res = run_accept(server, origin) => res,
 				res = run_web(&web_bind, web_tls, dir) => res,
 				res = run_announced_subscribe(consumer, broadcast, args) => res,
+				res = run_stats(stats_agg, stats.interval) => res,
 				_ = tokio::signal::ctrl_c() => Ok(()),
 			}
 		}
@@ -176,6 +206,7 @@ async fn main() -> anyhow::Result<()> {
 			config,
 			url,
 			broadcast,
+			stats,
 			format,
 		} => {
 			warn_if_missing_format(&broadcast);
@@ -185,12 +216,13 @@ async fn main() -> anyhow::Result<()> {
 			#[cfg(feature = "iroh")]
 			let client = client.with_iroh(iroh);
 
-			run_client(client, url, broadcast, publish).await
+			run_client(client, url, broadcast, publish, stats).await
 		}
 		Command::Subscribe {
 			config,
 			url,
 			broadcast,
+			stats,
 			args,
 		} => {
 			let client = config.init()?;
@@ -198,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
 			#[cfg(feature = "iroh")]
 			let client = client.with_iroh(iroh);
 
-			run_subscribe(client, url, broadcast, args).await
+			run_subscribe(client, url, broadcast, args, stats).await
 		}
 	}
 }
@@ -217,9 +249,16 @@ async fn run_subscribe(
 	url: Url,
 	broadcast: String,
 	args: SubscribeArgs,
+	stats: StatsArgs,
 ) -> anyhow::Result<()> {
 	let origin = moq_net::Origin::random().produce();
 	let consumer = origin.consume();
+
+	let stats_agg = stats.build();
+	let client = match &stats_agg {
+		Some(agg) => client.with_stats(agg.tier(moq_net::Tier::External)),
+		None => client,
+	};
 
 	tracing::info!(%url, %broadcast, "connecting");
 
@@ -231,6 +270,7 @@ async fn run_subscribe(
 	tokio::select! {
 		res = run_announced_subscribe(consumer, broadcast, args) => res,
 		res = reconnect.closed() => res,
+		res = run_stats(stats_agg, stats.interval) => res,
 		_ = tokio::signal::ctrl_c() => Ok(()),
 	}
 }

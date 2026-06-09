@@ -220,13 +220,20 @@ counterpart no traffic can flow, so the entry is dropped:
     "announced": 1, "announced_closed": 0,
     "broadcasts": 1, "broadcasts_closed": 0,
     "subscriptions": 5, "subscriptions_closed": 2,
-    "bytes": 12345, "frames": 678, "groups": 9
+    "bytes": 12345, "frames": 678, "groups": 9,
+    "tracks": {
+      "video": { "bytes": 12000, "frames": 600, "groups": 8 },
+      "audio": { "bytes": 345, "frames": 78, "groups": 1 }
+    }
   },
   "anon/foo": {
     "announced": 1, "announced_closed": 0,
     "broadcasts": 1, "broadcasts_closed": 0,
     "subscriptions": 2, "subscriptions_closed": 0,
-    "bytes": 234, "frames": 12, "groups": 1
+    "bytes": 234, "frames": 12, "groups": 1,
+    "tracks": {
+      "catalog.json": { "bytes": 234, "frames": 12, "groups": 1 }
+    }
   }
 }
 ```
@@ -246,7 +253,13 @@ Field semantics:
 - `subscriptions` / `subscriptions_closed`: cumulative count of
   track-level subscription guards opened and dropped.
 - `bytes` / `frames` / `groups`: cumulative payload counters from the
-  session loops (both the `moq-lite` and IETF `moq-transport` paths).
+  session loops (both the `moq-lite` and IETF `moq-transport` paths). These
+  are the broadcast-level rollup: the sum across every track, maintained
+  incrementally so reading a total never iterates the per-track map.
+- `tracks`: per-track breakdown of the `bytes` / `frames` / `groups` rollup,
+  keyed by track name. A track appears while it has an open subscription and
+  is dropped once it stops flowing; its payload stays counted in the rollup
+  totals above. Use this to see which tracks within a broadcast are active.
 
 The session tracks (`sessions.json`, `internal/sessions.json`) instead map
 each auth root to a `{ sessions, sessions_closed }` snapshot. `sessions`

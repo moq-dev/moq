@@ -147,6 +147,29 @@ TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
 sources work: the parameter sets are read from the bitstream or the catalog
 `description` and re-injected as Annex-B on each keyframe.
 
+## Usage Stats
+
+Pass `--stats` to `publish`, `subscribe`, `serve`, or `accept` to print a
+live, self-refreshing table of per-track upload/download usage to stderr.
+It tracks each track being produced or consumed and rewrites the rates and
+totals in place every second (`--stats-interval` to change the cadence):
+
+```bash
+moq-cli subscribe --url https://relay.example.com --broadcast my-stream --format ts --stats > /dev/null
+```
+
+```
+track                rate        total    frames    groups
+my-stream        21.7 KB/s     156.2 KB       211         8
+  video          21.5 KB/s     156.0 KB       210         7
+  catalog.json       0 B/s        162 B         1         1
+```
+
+Each broadcast row is the rollup (its total upload when publishing, or download
+when subscribing); the indented rows are its individual tracks. The table goes
+to stderr, so stdout stays clean for piped media. Lower the log level (e.g.
+`RUST_LOG=error`) to keep logs from interleaving with the table.
+
 ## Authentication
 
 Pass a JWT token via the URL:
