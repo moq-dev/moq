@@ -568,10 +568,11 @@ impl AuthToken {
 	/// (verified against the configured CA) is the only credential we require;
 	/// nothing else in the cert is inspected.
 	///
-	/// `root` is taken from the connection URL path, the same scoping a JWT
-	/// gets. An mTLS publisher dialing `/demo` therefore announces under
-	/// `demo/`, not the cluster root. Cluster peers dial `/`, so they resolve
-	/// to an empty root and keep unscoped access.
+	/// `root` is the API-resolved canonical root for the connection URL path, the
+	/// same scoping a JWT gets. An mTLS publisher dialing `/demo` therefore
+	/// announces under its canonical root, not the cluster root. Cluster peers
+	/// dial `/`, which typically resolves to an empty root and keeps unscoped
+	/// access.
 	pub fn unrestricted(root: PathOwned) -> Self {
 		Self {
 			root,
@@ -812,23 +813,20 @@ impl Auth {
 	/// unified `--auth-api`. mTLS peers are already trusted (the cert is the
 	/// credential), so this only fetches the alias + tier.
 	///
-	/// Fails OPEN only when there is nothing to resolve: no auth API configured,
-	/// or a root (`/`) connection. A non-root path needs an alias, so an actual
-	/// API error FAILS CLOSED (returns `Err`) rather than accepting the
-	/// connection with the path unresolved. Accepting it would route the
-	/// broadcast to the literal vanity path (e.g. `demo`) instead of its canonical
-	/// root (e.g. `x7k2qp`), producing a zombie session: the publisher believes it
-	/// is connected and never reconnects, but nothing is ever served. Failing
-	/// closed lets the client retry and self-heal once the API recovers.
+	/// Fails OPEN only when there is no auth API configured: the cert is the
+	/// credential and there is nothing to resolve, so the path is used unchanged
+	/// at the internal tier. Otherwise the API is the source of truth for every
+	/// connection, including the root (`/`), so it can alias and tier root peers
+	/// too. An API error therefore FAILS CLOSED (returns `Err`) rather than
+	/// accepting the connection with the path unresolved. Accepting it would route
+	/// the broadcast to the literal vanity path (e.g. `demo`) instead of its
+	/// canonical root (e.g. `x7k2qp`), producing a zombie session: the publisher
+	/// believes it is connected and never reconnects, but nothing is ever served.
+	/// Failing closed lets the client retry and self-heal once the API recovers.
 	pub(crate) async fn resolve_mtls(&self, path: &str) -> Result<(String, bool), AuthError> {
 		let Some((base, client)) = &self.auth_api else {
 			return Ok((path.to_string(), true));
 		};
-
-		// Root connection ("/" or ""): nothing to resolve, skip the call.
-		if path.trim_matches('/').is_empty() {
-			return Ok((path.to_string(), true));
-		}
 
 		let resp = Self::fetch_auth_api(client, base, path, None, true).await?;
 		Ok((
@@ -3004,17 +3002,33 @@ api = "https://api.example.com/access"
 	}
 
 	#[tokio::test]
-	async fn auth_api_mtls_skips_api_for_root() -> anyhow::Result<()> {
-		// A root connection ("/") has no project segment, so cluster peers don't
-		// hit the API at all; they stay internal.
+	async fn auth_api_mtls_resolves_root_via_api() -> anyhow::Result<()> {
+		// Root connections go through the API too, so it owns the alias + tier for
+		// every mTLS peer. Here the API aliases the root and demotes it to external.
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
-			.respond_with(ResponseTemplate::new(500))
-			.expect(0)
+			.and(path_matcher("/auth"))
+			.and(query_param("root", ""))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp","internal":false}"#))
 			.mount(&server)
 			.await;
 
 		let auth = auth_with_api(&server).await;
+		assert_eq!(auth.resolve_mtls("/").await?, ("x7k2qp".to_string(), false));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_mtls_no_api_fails_open() -> anyhow::Result<()> {
+		// With no auth API configured the cert is the only credential: use the path
+		// unchanged at the internal tier. This is the sole fail-open case. (A public
+		// path just makes the config valid; mTLS resolution ignores it.)
+		let auth = Auth::new(AuthConfig {
+			public: simple_public("anon"),
+			..Default::default()
+		})
+		.await?;
+		assert_eq!(auth.resolve_mtls("/demo").await?, ("/demo".to_string(), true));
 		assert_eq!(auth.resolve_mtls("/").await?, ("/".to_string(), true));
 		Ok(())
 	}
