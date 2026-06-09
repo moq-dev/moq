@@ -28,10 +28,6 @@ pub enum FramedFormat {
 	Hev1,
 	/// AV1 with inline sequence headers
 	Av01,
-	/// VP8 (one frame per buffer; not self-delimiting).
-	Vp8,
-	/// VP9 (one frame per buffer; not self-delimiting).
-	Vp9,
 	/// Raw AAC frames (not ADTS).
 	Aac,
 	/// Raw Opus frames (not Ogg).
@@ -40,6 +36,12 @@ pub enum FramedFormat {
 	Mkv,
 	/// MPEG-TS (transport stream) container.
 	Ts,
+	// New variants go at the end: this enum has no repr, so inserting in the
+	// middle would shift the implicit discriminants of everything after it.
+	/// VP8 (one frame per buffer; not self-delimiting).
+	Vp8,
+	/// VP9 (one frame per buffer; not self-delimiting).
+	Vp9,
 }
 
 impl FromStr for FramedFormat {
@@ -52,12 +54,12 @@ impl FromStr for FramedFormat {
 			"hev1" => Ok(FramedFormat::Hev1),
 			"fmp4" | "cmaf" => Ok(FramedFormat::Fmp4),
 			"av01" | "av1" | "av1c" | "av1C" => Ok(FramedFormat::Av01),
-			"vp8" | "vp08" => Ok(FramedFormat::Vp8),
-			"vp9" | "vp09" => Ok(FramedFormat::Vp9),
 			"aac" => Ok(FramedFormat::Aac),
 			"opus" => Ok(FramedFormat::Opus),
 			"mkv" | "webm" | "matroska" => Ok(FramedFormat::Mkv),
 			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => Ok(FramedFormat::Ts),
+			"vp8" | "vp08" => Ok(FramedFormat::Vp8),
+			"vp9" | "vp09" => Ok(FramedFormat::Vp9),
 			_ => Err(Error::UnknownFormat(s.to_string())),
 		}
 	}
@@ -71,12 +73,12 @@ impl fmt::Display for FramedFormat {
 			FramedFormat::Fmp4 => write!(f, "fmp4"),
 			FramedFormat::Hev1 => write!(f, "hev1"),
 			FramedFormat::Av01 => write!(f, "av01"),
-			FramedFormat::Vp8 => write!(f, "vp8"),
-			FramedFormat::Vp9 => write!(f, "vp9"),
 			FramedFormat::Aac => write!(f, "aac"),
 			FramedFormat::Opus => write!(f, "opus"),
 			FramedFormat::Mkv => write!(f, "mkv"),
 			FramedFormat::Ts => write!(f, "ts"),
+			FramedFormat::Vp8 => write!(f, "vp8"),
+			FramedFormat::Vp9 => write!(f, "vp9"),
 		}
 	}
 }
