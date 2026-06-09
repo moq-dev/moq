@@ -62,6 +62,28 @@ ffmpeg -i input.mp4 -f mpegts - | moq-cli publish - https://relay.example.com/an
 
 ### Publish a Webcam
 
+The `webcam` subcommand captures and encodes a camera directly, no external
+FFmpeg process required. It is gated behind the `webcam` feature, which pulls
+in a system FFmpeg (libav\*) build dependency:
+
+```bash
+cargo build --release -p moq-cli --features webcam
+
+# Default camera, hardware-encoded H.264 when available:
+moq-cli publish --url https://relay.example.com --broadcast webcam.hang webcam
+
+# Pick a device, resolution, and bitrate:
+moq-cli publish --url https://relay.example.com --broadcast webcam.hang \
+    webcam --device 0 --width 1280 --height 720 --fps 30 --bitrate 3000000
+```
+
+Capture uses the platform backend (avfoundation on macOS, v4l2 on Linux, dshow
+on Windows). It picks a hardware encoder (`h264_videotoolbox` / `h264_nvenc` /
+`h264_vaapi`) when one is present, falling back to software (`libx264`); force
+either with `--hardware` / `--software`.
+
+Alternatively, pipe an external FFmpeg process as MPEG-TS:
+
 ```bash
 # macOS
 ffmpeg -f avfoundation -i "0:0" -f mpegts - | moq-cli publish - https://relay.example.com/anon/webcam
@@ -122,6 +144,7 @@ Publish (read from stdin unless noted):
 - `fmp4` - fragmented MP4 / CMAF
 - `ts` - MPEG-TS (H.264 / H.265 video, AAC audio)
 - `hls --playlist <url>` - HLS playlist ingest
+- `webcam` - capture a camera directly (requires the `webcam` build feature; does not read stdin)
 
 Subscribe (`--format`):
 

@@ -1,0 +1,305 @@
+//! H.264 encoder over ffmpeg, hardware-preferred.
+//!
+//! Accepts decoded [`ffmpeg::frame::Video`] frames in any pixel format
+//! (whatever the camera hands us), scales/converts them to YUV420P, and
+//! emits Annex-B H.264 packets ready for `moq_mux::codec::h264::Import`.
+
+use bytes::Bytes;
+use ffmpeg_next as ffmpeg;
+
+use crate::Error;
+
+/// Which encoder implementation to use.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum EncoderKind {
+	/// Prefer a platform hardware encoder, fall back to software.
+	#[default]
+	Auto,
+	/// Hardware only; error if none is available.
+	Hardware,
+	/// Software (libx264 / built-in) only.
+	Software,
+	/// A specific ffmpeg encoder by name, e.g. `"h264_videotoolbox"`.
+	Named(String),
+}
+
+/// Encoder configuration. `width` / `height` / `framerate` must match the
+/// stream the [`Encoder`] will publish; pixel conversion from the camera's
+/// native format is handled internally.
+#[derive(Clone, Debug)]
+pub struct EncoderConfig {
+	pub width: u32,
+	pub height: u32,
+	pub framerate: u32,
+	/// Target bitrate in bits per second. `None` derives a sane default
+	/// from resolution and framerate (~0.07 bits per pixel per second).
+	pub bitrate: Option<u64>,
+	/// Keyframe interval in frames. Subscribers joining mid-stream wait at
+	/// most this many frames before they can start decoding.
+	pub gop: u32,
+	pub kind: EncoderKind,
+}
+
+impl EncoderConfig {
+	pub fn new(width: u32, height: u32, framerate: u32) -> Self {
+		Self {
+			width,
+			height,
+			framerate,
+			bitrate: None,
+			// ~2 seconds at the configured framerate.
+			gop: framerate.saturating_mul(2).max(1),
+			kind: EncoderKind::Auto,
+		}
+	}
+
+	/// Resolved bitrate: explicit override, or a pixels-per-second estimate.
+	fn resolved_bitrate(&self) -> u64 {
+		self.bitrate.unwrap_or_else(|| {
+			let pixels = self.width as u64 * self.height as u64;
+			// 0.07 bits per pixel per second matches the JS publisher's
+			// default and lands ~4.4 Mbps for 1080p30.
+			((pixels * self.framerate as u64) as f64 * 0.07) as u64
+		})
+	}
+}
+
+/// Hardware H.264 encoder names to try first, in priority order. The deps
+/// are declared under platform-specific cfgs in ffmpeg, but probing a name
+/// that isn't compiled in just returns `None`, so listing all of them is
+/// harmless on any platform.
+const HARDWARE_ENCODERS: &[&str] = &[
+	"h264_videotoolbox", // macOS / iOS
+	"h264_nvenc",        // NVIDIA
+	"h264_qsv",          // Intel QuickSync
+	"h264_vaapi",        // Linux VA-API
+	"h264_amf",          // AMD (Windows)
+	"h264_v4l2m2m",      // Linux stateful (e.g. Raspberry Pi)
+];
+
+/// Software fallbacks, in priority order.
+const SOFTWARE_ENCODERS: &[&str] = &["libx264", "h264"];
+
+pub struct Encoder {
+	encoder: ffmpeg::encoder::video::Encoder,
+	/// Lazily built once we see the first frame's pixel format/size.
+	scaler: Option<Scaler>,
+	width: u32,
+	height: u32,
+	frame_count: i64,
+	/// The ffmpeg encoder name that opened successfully (for logging).
+	name: String,
+}
+
+struct Scaler {
+	ctx: ffmpeg::software::scaling::Context,
+	src_format: ffmpeg::format::Pixel,
+	src_width: u32,
+	src_height: u32,
+}
+
+impl Encoder {
+	pub fn new(config: &EncoderConfig) -> Result<Self, Error> {
+		let candidates = encoder_candidates(&config.kind);
+
+		let mut tried = Vec::new();
+		for name in &candidates {
+			tried.push(name.clone());
+			match open_encoder(name, config) {
+				Ok(encoder) => {
+					tracing::info!(encoder = %name, width = config.width, height = config.height, "opened H.264 encoder");
+					return Ok(Self {
+						encoder,
+						scaler: None,
+						width: config.width,
+						height: config.height,
+						frame_count: 0,
+						name: name.clone(),
+					});
+				}
+				Err(e) => {
+					tracing::debug!(encoder = %name, error = %e, "encoder unavailable, trying next");
+				}
+			}
+		}
+
+		Err(Error::NoEncoder(tried.join(", ")))
+	}
+
+	/// The ffmpeg encoder name in use, e.g. `"h264_videotoolbox"`.
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	/// Encode one decoded frame, returning zero or more Annex-B H.264
+	/// packets. With B-frames disabled (the low-latency default) the
+	/// encoder emits one packet per input frame.
+	pub fn encode(&mut self, frame: &ffmpeg::frame::Video) -> Result<Vec<Bytes>, Error> {
+		let yuv = self.convert(frame)?;
+		self.encoder.send_frame(&yuv)?;
+		self.drain()
+	}
+
+	/// Flush the encoder, returning any buffered packets.
+	pub fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
+		self.encoder.send_eof()?;
+		self.drain()
+	}
+
+	fn drain(&mut self) -> Result<Vec<Bytes>, Error> {
+		let mut out = Vec::new();
+		let mut packet = ffmpeg::Packet::empty();
+		loop {
+			match self.encoder.receive_packet(&mut packet) {
+				Ok(()) => {
+					if let Some(data) = packet.data() {
+						out.push(Bytes::copy_from_slice(data));
+					}
+				}
+				Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => break,
+				Err(ffmpeg::Error::Eof) => break,
+				Err(e) => return Err(e.into()),
+			}
+		}
+		Ok(out)
+	}
+
+	/// Scale/convert an arbitrary input frame to the encoder's YUV420P
+	/// surface, rebuilding the scaler if the input geometry changed.
+	fn convert(&mut self, frame: &ffmpeg::frame::Video) -> Result<ffmpeg::frame::Video, Error> {
+		let (src_format, src_w, src_h) = (frame.format(), frame.width(), frame.height());
+
+		let needs_rebuild = match &self.scaler {
+			Some(s) => s.src_format != src_format || s.src_width != src_w || s.src_height != src_h,
+			None => true,
+		};
+		if needs_rebuild {
+			let ctx = ffmpeg::software::scaling::Context::get(
+				src_format,
+				src_w,
+				src_h,
+				ffmpeg::format::Pixel::YUV420P,
+				self.width,
+				self.height,
+				ffmpeg::software::scaling::Flags::BILINEAR,
+			)?;
+			self.scaler = Some(Scaler {
+				ctx,
+				src_format,
+				src_width: src_w,
+				src_height: src_h,
+			});
+		}
+
+		let scaler = self.scaler.as_mut().expect("scaler built above");
+		let mut yuv = ffmpeg::frame::Video::empty();
+		scaler.ctx.run(frame, &mut yuv)?;
+
+		// The encoder times frames off a monotonic count, not the camera
+		// clock; the moq presentation timestamp is attached downstream.
+		yuv.set_pts(Some(self.frame_count));
+		self.frame_count += 1;
+		Ok(yuv)
+	}
+}
+
+fn encoder_candidates(kind: &EncoderKind) -> Vec<String> {
+	match kind {
+		EncoderKind::Named(name) => vec![name.clone()],
+		EncoderKind::Hardware => HARDWARE_ENCODERS.iter().map(|s| s.to_string()).collect(),
+		EncoderKind::Software => SOFTWARE_ENCODERS.iter().map(|s| s.to_string()).collect(),
+		EncoderKind::Auto => HARDWARE_ENCODERS
+			.iter()
+			.chain(SOFTWARE_ENCODERS)
+			.map(|s| s.to_string())
+			.collect(),
+	}
+}
+
+fn open_encoder(name: &str, config: &EncoderConfig) -> Result<ffmpeg::encoder::video::Encoder, Error> {
+	let codec = ffmpeg::encoder::find_by_name(name).ok_or_else(|| Error::NoEncoder(name.to_string()))?;
+
+	let ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
+	let mut enc = ctx.encoder().video()?;
+	enc.set_width(config.width);
+	enc.set_height(config.height);
+	enc.set_format(ffmpeg::format::Pixel::YUV420P);
+	enc.set_time_base(ffmpeg::Rational::new(1, config.framerate as i32));
+	enc.set_frame_rate(Some(ffmpeg::Rational::new(config.framerate as i32, 1)));
+	enc.set_gop(config.gop);
+	enc.set_max_b_frames(0); // Low latency: no reordering.
+	enc.set_bit_rate(config.resolved_bitrate() as usize);
+
+	let mut opts = ffmpeg::Dictionary::new();
+	if name == "libx264" {
+		opts.set("preset", "ultrafast");
+		opts.set("tune", "zerolatency");
+	} else if name == "h264_videotoolbox" {
+		opts.set("realtime", "1");
+		// Fall back to the software VideoToolbox path if no GPU encoder.
+		opts.set("allow_sw", "1");
+	}
+
+	Ok(enc.open_with(opts)?)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A mid-gray YUV420P frame: encodable without a camera.
+	fn gray_frame(width: u32, height: u32) -> ffmpeg::frame::Video {
+		let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, width, height);
+		// Plane 0 is luma (gray = 128); planes 1/2 are chroma (neutral = 128).
+		for plane in 0..frame.planes() {
+			frame.data_mut(plane).fill(128);
+		}
+		frame
+	}
+
+	#[test]
+	fn software_encoder_emits_annexb() {
+		let config = EncoderConfig {
+			kind: EncoderKind::Software,
+			..EncoderConfig::new(320, 240, 30)
+		};
+		let mut encoder = Encoder::new(&config).expect("libx264 should be available under nix ffmpeg");
+		assert_eq!(encoder.name(), "libx264");
+
+		let frame = gray_frame(320, 240);
+		let mut packets = Vec::new();
+		for _ in 0..30 {
+			packets.extend(encoder.encode(&frame).unwrap());
+		}
+		packets.extend(encoder.finish().unwrap());
+
+		assert!(!packets.is_empty(), "encoder produced no packets");
+
+		// The first packet must start with an Annex-B start code so the avc3
+		// importer can find the inline SPS/PPS.
+		let first = &packets[0];
+		let has_start_code = first.starts_with(&[0, 0, 0, 1]) || first.starts_with(&[0, 0, 1]);
+		assert!(
+			has_start_code,
+			"first packet is not Annex-B: {:02x?}",
+			&first[..first.len().min(8)]
+		);
+	}
+
+	#[test]
+	fn unknown_named_encoder_errors() {
+		let config = EncoderConfig {
+			kind: EncoderKind::Named("definitely_not_a_codec".into()),
+			..EncoderConfig::new(320, 240, 30)
+		};
+		assert!(matches!(Encoder::new(&config), Err(Error::NoEncoder(_))));
+	}
+
+	#[test]
+	fn default_bitrate_scales_with_resolution() {
+		let small = EncoderConfig::new(320, 240, 30).resolved_bitrate();
+		let large = EncoderConfig::new(1920, 1080, 30).resolved_bitrate();
+		assert!(large > small);
+		assert!(small > 0);
+	}
+}

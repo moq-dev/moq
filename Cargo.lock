@@ -3791,6 +3791,7 @@ dependencies = [
  "humantime",
  "moq-mux",
  "moq-native",
+ "moq-video",
  "rustls",
  "sd-notify",
  "tokio",
@@ -4030,6 +4031,16 @@ dependencies = [
 [[package]]
 name = "moq-video"
 version = "0.0.2"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "ffmpeg-next",
+ "hang",
+ "moq-mux",
+ "moq-net",
+ "thiserror 2.0.18",
+ "tracing",
+]
 
 [[package]]
 name = "mp4-atom"
