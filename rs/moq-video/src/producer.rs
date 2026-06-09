@@ -220,6 +220,10 @@ impl Gate {
 
 	fn close(&self) {
 		let mut state = self.state.lock().unwrap();
+		// Clear active too: otherwise a shutdown that races an
+		// still-subscribed track leaves the worker in the capture path,
+		// where it never checks `closed` until the next publish fails.
+		state.active = false;
 		state.closed = true;
 		self.cond.notify_all();
 	}
