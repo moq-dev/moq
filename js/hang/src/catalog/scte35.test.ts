@@ -16,17 +16,15 @@ test("scte35 section round-trips through export/import", async () => {
 	const consumer = new Json.Consumer<App>(track, { schema: AppSchema });
 
 	// Export: the base owner publishes the media section...
-	{
-		using catalog = producer.lock();
-		catalog.value.video = { renditions: {} };
-	}
+	producer.mutate((catalog) => {
+		catalog.video = { renditions: {} };
+	});
 	expect((await consumer.next())?.video).toEqual({ renditions: {} });
 
-	// ...and the scte35 owner adds its own section via the shared lock, without clobbering video.
-	{
-		using catalog = producer.lock();
-		catalog.value.scte35 = { splices: [{ id: 1, out: true, startTime: 10 }] };
-	}
+	// ...and the scte35 owner adds its own section via the shared producer, without clobbering video.
+	producer.mutate((catalog) => {
+		catalog.scte35 = { splices: [{ id: 1, out: true, startTime: 10 }] };
+	});
 
 	// Import: the consumer reconstructs the full catalog, validated against the extended schema.
 	const imported = await consumer.next();
@@ -39,23 +37,20 @@ test("removing the scte35 section is observable on import", async () => {
 	const producer = new Json.Producer<App>(track, { schema: AppSchema, initial: {} });
 	const consumer = new Json.Consumer<App>(track, { schema: AppSchema });
 
-	{
-		using catalog = producer.lock();
-		catalog.value.video = { renditions: {} };
-	}
+	producer.mutate((catalog) => {
+		catalog.video = { renditions: {} };
+	});
 	expect((await consumer.next())?.video).toEqual({ renditions: {} });
 
-	{
-		using catalog = producer.lock();
-		catalog.value.scte35 = { splices: [] };
-	}
+	producer.mutate((catalog) => {
+		catalog.scte35 = { splices: [] };
+	});
 	expect((await consumer.next())?.scte35).toEqual({ splices: [] });
 
 	// Clearing the section drops it from the catalog; the media section is untouched.
-	{
-		using catalog = producer.lock();
-		delete catalog.value.scte35;
-	}
+	producer.mutate((catalog) => {
+		delete catalog.scte35;
+	});
 	const after = await consumer.next();
 	expect(after?.scte35).toBeUndefined();
 	expect(after?.video).toEqual({ renditions: {} });

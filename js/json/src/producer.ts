@@ -20,14 +20,9 @@ export interface Config<T> {
 	// Optional zod schema used to validate each value before publishing.
 	schema?: z.ZodMiniType<T>;
 
-	// Starting value for {@link Producer.lock} before anything has been published. Required to lock
-	// a producer that hasn't published yet (e.g. a fresh catalog); ignored once a value exists.
+	// Starting value for {@link Producer.mutate} before anything has been published. Required to
+	// mutate a producer that hasn't published yet (e.g. a fresh catalog); ignored once a value exists.
 	initial?: T;
-}
-
-/** A disposable editing guard returned by {@link Producer.lock}, publishing its `value` on dispose. */
-export interface Guard<T> extends Disposable {
-	value: T;
 }
 
 /** Publishes a JSON value over a track, choosing snapshots and deltas automatically. */
@@ -69,35 +64,33 @@ export class Producer<T> {
 	}
 
 	/**
-	 * Lock the current value for in-place editing, publishing on dispose.
+	 * Mutate the current value in place and publish the result.
 	 *
-	 * Returns a disposable guard whose `value` is a deep clone of the last-published value, falling
-	 * back to {@link Config.initial} if nothing has been published yet; throws if neither exists.
-	 * Edit `value` in place; when the guard is disposed it publishes the result via {@link update},
-	 * a no-op if unchanged. Use it with `using` so the publish happens at the end of the block:
+	 * The callback receives a deep clone of the last-published value, falling back to
+	 * {@link Config.initial} if nothing has been published yet (throws if neither exists). Edit it in
+	 * place; on return the result is published via {@link update}, a no-op if unchanged:
 	 *
 	 * ```ts
-	 * using catalog = producer.lock();
-	 * catalog.value.scte35 = { ... };
+	 * producer.mutate((catalog) => {
+	 * 	catalog.scte35 = { ... };
+	 * });
 	 * ```
 	 *
-	 * Independent owners can share a single Producer and each edit only their own keys: every lock
-	 * starts from the latest value, so sections compose instead of clobbering one another. Hold at
-	 * most one guard at a time. Use {@link update} to replace the whole value instead.
+	 * Independent owners can share a single Producer and each edit only their own keys: every call
+	 * starts from the latest value, so sections compose instead of clobbering one another. Use
+	 * {@link update} to replace the whole value instead.
 	 */
-	lock(): Guard<T> {
+	mutate(fn: (value: T) => void): void {
 		// Start from the last-published value, falling back to the configured initial value. We
-		// don't invent an empty object: locking with nothing to start from is a usage error.
+		// don't invent an empty object: mutating with nothing to start from is a usage error.
 		const base = this.#last ?? this.#config.initial;
 		if (base === undefined) {
-			throw new Error("lock() requires a prior update() or `initial` in the config");
+			throw new Error("mutate() requires a prior update() or `initial` in the config");
 		}
 
 		const value = structuredClone(base) as T;
-		return {
-			value,
-			[Symbol.dispose]: () => this.update(value),
-		};
+		fn(value);
+		this.update(value);
 	}
 
 	/** Finish the track, closing any open group. */

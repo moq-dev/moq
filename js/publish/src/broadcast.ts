@@ -48,12 +48,13 @@ export class Broadcast {
 		const video = enabled ? effect.get(this.video.catalog) : undefined;
 		const audio = enabled ? effect.get(this.audio.catalog) : undefined;
 
-		using catalog = this.catalog.lock();
-		if (video !== undefined) catalog.value.video = video;
-		else delete catalog.value.video;
+		this.catalog.mutate((catalog) => {
+			if (video !== undefined) catalog.video = video;
+			else delete catalog.video;
 
-		if (audio !== undefined) catalog.value.audio = audio;
-		else delete catalog.value.audio;
+			if (audio !== undefined) catalog.audio = audio;
+			else delete catalog.audio;
+		});
 	}
 
 	#run(effect: Effect) {

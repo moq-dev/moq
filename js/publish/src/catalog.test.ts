@@ -9,10 +9,9 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	const catalog = new CatalogProducer();
 
 	// Edit before anyone subscribes: the value is retained, not lost.
-	{
-		using c = catalog.lock();
-		c.value.video = { renditions: {} };
-	}
+	catalog.mutate((c) => {
+		c.video = { renditions: {} };
+	});
 
 	const effect = new Effect();
 	const track = new Track("catalog.json");
@@ -23,10 +22,9 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	expect((await consumer.next())?.video).toEqual({ renditions: {} });
 
 	// An extension owner adds its own section; the subscriber sees the update, video untouched.
-	{
-		using c = catalog.lock();
-		c.value.scte35 = { splices: [] };
-	}
+	catalog.mutate((c) => {
+		c.scte35 = { splices: [] };
+	});
 	const update = await consumer.next();
 	expect(update?.video).toEqual({ renditions: {} });
 	expect(update?.scte35).toEqual({ splices: [] });
@@ -36,11 +34,10 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 
 test("a reconnecting subscriber is seeded with the full current catalog", async () => {
 	const catalog = new CatalogProducer();
-	{
-		using c = catalog.lock();
-		c.value.video = { renditions: {} };
-		c.value.scte35 = { splices: [] };
-	}
+	catalog.mutate((c) => {
+		c.video = { renditions: {} };
+		c.scte35 = { splices: [] };
+	});
 
 	// The first subscription drains and ends...
 	const first = new Effect();
