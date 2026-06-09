@@ -342,9 +342,8 @@ impl Client {
 	/// Spawns a background task and returns a [`Connection`] handle immediately; drop the handle to
 	/// stop the loop. Wire publish/consume origins with [`with_publisher`](Self::with_publisher) and
 	/// [`with_consumer`](Self::with_consumer) before calling, and they are re-attached on every
-	/// reconnect. Observe lifecycle changes with [`Connection::status`] and [`Connection::closed`].
-	///
-	/// For a single attempt that hands you the session directly, use [`connect_once`](Self::connect_once).
+	/// reconnect. Observe lifecycle changes with [`Connection::status`] and [`Connection::closed`],
+	/// or await [`Connection::established`] to drive the session directly.
 	pub fn connect(&self, url: Url) -> Connection {
 		Connection::new(self.clone(), url, self.backoff.clone())
 	}
@@ -353,17 +352,6 @@ impl Client {
 	#[deprecated(note = "use `connect`, which now reconnects with backoff by default")]
 	pub fn reconnect(&self, url: Url) -> Connection {
 		self.connect(url)
-	}
-
-	/// Connect to the given URL exactly once, returning the established session.
-	///
-	/// This makes a single attempt and does not reconnect if the session later drops. The returned
-	/// session is self-contained: you own it and drive it directly. For automatic reconnection, use
-	/// [`connect`](Self::connect).
-	pub async fn connect_once(&self, url: Url) -> anyhow::Result<moq_net::Session> {
-		let session = self.connect_inner(url).await?;
-		tracing::info!(version = %session.version(), "connected");
-		Ok(session)
 	}
 
 	#[cfg(not(any(

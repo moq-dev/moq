@@ -106,8 +106,8 @@ struct State {
 /// [`closed`](Self::closed) waits for the loop to stop. Dropping the handle (or calling
 /// [`close`](Self::close)) stops the loop.
 ///
-/// For a single attempt that hands you the session directly, use
-/// [`Client::connect_once`](crate::Client::connect_once) instead.
+/// To drive the established session directly, await [`established`](Self::established) and keep this
+/// handle alive while you use it.
 pub struct Connection {
 	abort: tokio::task::AbortHandle,
 	state: kio::Consumer<State>,
@@ -198,6 +198,30 @@ impl Connection {
 			session.close(error);
 		}
 		self.abort.abort();
+	}
+
+	/// Poll for the established session.
+	///
+	/// `Ready(Ok(session))` once connected, `Ready(Err)` if the loop stopped before connecting,
+	/// `Pending` while still connecting.
+	pub fn poll_established(&self, waiter: &kio::Waiter) -> Poll<anyhow::Result<moq_net::Session>> {
+		match ready!(self.state.poll(waiter, |state| match &state.session {
+			Some(session) => Poll::Ready(session.clone()),
+			None => Poll::Pending,
+		})) {
+			Ok(session) => Poll::Ready(Ok(session)),
+			Err(state) => Poll::Ready(Err(terminal(&state))),
+		}
+	}
+
+	/// Wait for the established session.
+	///
+	/// Resolves once connected, returning the current [`moq_net::Session`]. With reconnection on (the
+	/// default), this is the first session; it goes stale once it drops and the loop establishes a
+	/// new one. Keep this `Connection` alive while you use the session: dropping the handle aborts
+	/// the loop and tears the session down.
+	pub async fn established(&self) -> anyhow::Result<moq_net::Session> {
+		kio::wait(|waiter| self.poll_established(waiter)).await
 	}
 
 	/// Poll for the next connection status change since this handle last reported one.

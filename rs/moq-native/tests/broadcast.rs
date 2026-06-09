@@ -70,7 +70,8 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let connection = client.connect(url);
+	let _session = tokio::time::timeout(TIMEOUT, connection.established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -110,7 +111,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	assert_eq!(&*frame, b"hello");
 
 	// Tear down: dropping the session closes the QUIC connection.
-	drop(session);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -175,7 +176,8 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let connection = client.connect(url);
+	let _session = tokio::time::timeout(TIMEOUT, connection.established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -216,7 +218,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		let _ = frame_sub.read_all().await;
 	}
 
-	drop(session);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -292,7 +294,8 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let connection = client.connect(url);
+	let _session = tokio::time::timeout(TIMEOUT, connection.established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -338,7 +341,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		.expect("next_frame failed");
 	assert!(end.is_none(), "group should finish after its frames");
 
-	drop(session);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -414,7 +417,8 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let connection = client.connect(url);
+	let _session = tokio::time::timeout(TIMEOUT, connection.established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -465,7 +469,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	assert_eq!(&*frame, b"old");
 
 	// The live subscription is unaffected: a freshly published group still arrives.
-	drop(session);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -518,7 +522,8 @@ async fn broadcast_moq_lite_05_without_timescale() {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let connection = client.connect(url);
+	let _session = tokio::time::timeout(TIMEOUT, connection.established())
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
@@ -554,7 +559,7 @@ async fn broadcast_moq_lite_05_without_timescale() {
 		"no timescale negotiated, no per-frame timestamp"
 	);
 
-	drop(session);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -928,7 +933,8 @@ async fn broadcast_websocket() {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let connection = client.connect(url);
+	let _session = tokio::time::timeout(TIMEOUT, connection.established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -967,7 +973,7 @@ async fn broadcast_websocket() {
 
 	assert_eq!(&*frame, b"hello");
 
-	drop(session);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -1037,7 +1043,8 @@ async fn broadcast_websocket_fallback() {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let connection = client.connect(url);
+	let _session = tokio::time::timeout(TIMEOUT, connection.established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -1074,7 +1081,7 @@ async fn broadcast_websocket_fallback() {
 
 	assert_eq!(&*frame, b"hello");
 
-	drop(session);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -1139,14 +1146,15 @@ async fn broadcast_websocket_uses_newest_version() {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let cs = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let connection = client.connect(url);
+	let cs = tokio::time::timeout(TIMEOUT, connection.established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
 	assert_eq!(cs.version(), expected_version, "client negotiated stale version");
 
-	drop(cs);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -1213,14 +1221,15 @@ async fn broadcast_race_quic_wins() {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let cs = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let connection = client.connect(url);
+	let cs = tokio::time::timeout(TIMEOUT, connection.established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
 	assert_eq!(cs.version(), expected_version, "client negotiated stale version");
 
-	drop(cs);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -1280,7 +1289,8 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let connection = client.connect(url);
+	let _session = tokio::time::timeout(TIMEOUT, connection.established())
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
@@ -1360,7 +1370,7 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 		"expected group 1 to be delivered to the resubscribed consumer"
 	);
 
-	drop(session);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")

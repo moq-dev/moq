@@ -86,6 +86,8 @@ struct PadState {
 }
 
 struct RuntimeState {
+	// Held so the reconnecting connection (and its origins) stays alive for the run loop.
+	_connection: moq_native::Connection,
 	#[allow(dead_code)]
 	session: moq_net::Session,
 	broadcast: moq_net::BroadcastProducer,
@@ -401,9 +403,12 @@ async fn run_session(
 		.context("failed to publish broadcast")?;
 
 	let client = client.with_publisher(origin.clone());
-	let session = client.connect_once(settings.url.clone()).await?;
+	// Hold the connection for the lifetime of the loop; dropping it tears the session down.
+	let connection = client.connect(settings.url.clone());
+	let session = connection.established().await?;
 
 	let mut runtime = RuntimeState {
+		_connection: connection,
 		session,
 		broadcast,
 		catalog,

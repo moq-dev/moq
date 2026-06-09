@@ -54,7 +54,8 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let connection = client.connect(url);
+	let _session = tokio::time::timeout(TIMEOUT, connection.established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -89,7 +90,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 
 	assert_eq!(&*frame, b"hello");
 
-	drop(session);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -208,7 +209,8 @@ async fn iroh_connect() {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let connection = client.connect(url);
+	let _session = tokio::time::timeout(TIMEOUT, connection.established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -243,7 +245,7 @@ async fn iroh_connect() {
 
 	assert_eq!(&*frame, b"hello");
 
-	drop(session);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")

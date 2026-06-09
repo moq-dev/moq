@@ -23,13 +23,18 @@ Create a [`ClientConfig`](https://docs.rs/moq-native/latest/moq_native/struct.Cl
 ```rust
 let client = moq_native::ClientConfig::default().init()?;
 let url = url::Url::parse("https://cdn.moq.dev/anon/my-broadcast")?;
-let session = client.connect_once(url).await?;
+
+// Stays connected, reconnecting with exponential backoff if the session drops.
+let connection = client.connect(url);
+let session = connection.established().await?;
 ```
 
-`connect_once` makes a single attempt and hands you the session. For a resilient client, prefer
-`client.connect(url)`, which stays connected and reconnects with exponential backoff whenever the
-session drops, returning a [`Connection`](https://docs.rs/moq-native/latest/moq_native/struct.Connection.html)
-handle (wire origins with `with_publisher`/`with_consumer` first; drop the handle to stop).
+`connect` returns a [`Connection`](https://docs.rs/moq-native/latest/moq_native/struct.Connection.html)
+handle that stays connected and reconnects with backoff whenever the session drops. Wire origins with
+`with_publisher`/`with_consumer` before connecting; they're re-attached on every reconnect. Await
+[`established()`](https://docs.rs/moq-native/latest/moq_native/struct.Connection.html#method.established)
+to drive the session directly, and keep the handle alive while you use it (dropping it stops the loop
+and tears the session down).
 
 The default configuration uses system TLS roots, enables WebSocket fallback, and gives QUIC a 200ms head-start.
 
@@ -57,7 +62,8 @@ Pass JWT tokens via URL query parameters:
 let url = Url::parse(&format!(
     "https://relay.example.com/room/123?jwt={}", token
 ))?;
-let session = client.connect_once(url).await?;
+let connection = client.connect(url);
+let session = connection.established().await?;
 ```
 
 See the [Authentication guide](/bin/relay/auth) for how to generate tokens.
@@ -69,7 +75,8 @@ The [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/vi
 The connected [`Session`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html) exposes a [`publisher()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.publisher) [`OriginProducer`](https://docs.rs/moq-net/latest/moq_net/struct.OriginProducer.html) you publish broadcasts into:
 
 ```rust
-let session = client.connect_once(url).await?;
+let connection = client.connect(url);
+let session = connection.established().await?; // keep `connection` alive while you use `session`
 
 let mut broadcast = moq_net::Broadcast::new().produce();
 // ... add catalog and tracks to the broadcast ...
@@ -85,7 +92,8 @@ The [subscribe example](https://github.com/moq-dev/moq/blob/main/rs/hang/example
 The session also exposes a [`consumer()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.consumer) [`OriginConsumer`](https://docs.rs/moq-net/latest/moq_net/struct.OriginConsumer.html) for receiving announcements:
 
 ```rust
-let session = client.connect_once(url).await?;
+let connection = client.connect(url);
+let session = connection.established().await?; // keep `connection` alive while you use `session`
 let mut announced = session.consumer().announced();
 
 // Wait for broadcasts to be announced.

@@ -28,11 +28,11 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// The "anon" path is usually configured to bypass authentication; be careful!
 	let url = url::Url::parse("https://cdn.moq.dev/anon/chat-example").unwrap();
 
-	// Establish a WebTransport/QUIC connection and MoQ handshake.
-	let cs = client.with_publisher(origin).connect_once(url).await?;
+	// Connect and stay connected, reconnecting with backoff if the session drops.
+	let connection = client.with_publisher(origin).connect(url);
 
-	// Wait until the session is closed.
-	cs.closed().await.map_err(Into::into)
+	// Wait until the connection permanently stops.
+	connection.closed().await
 }
 
 // Produce a broadcast and publish it to the origin.
