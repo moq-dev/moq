@@ -11,9 +11,9 @@ use serde::de::DeserializeOwned;
 /// Generic over the catalog payload `T`, defaulting to [`hang::Catalog`]. To publish an extended
 /// catalog, use [`Catalog<E>`](super::Catalog) with your own [`CatalogExt`](super::CatalogExt): it
 /// serializes the base media sections and the extension sections as one flat union, with `video`
-/// and `audio` as direct fields (`catalog.video`) and the extension under `catalog.ext`. The
-/// `T: Media` bound lets the MSF track be derived from the base media sections regardless of any
-/// extension sections.
+/// and `audio` as direct fields (`catalog.video`) and the extension reachable directly too
+/// (`catalog.scte35`, via deref). The `T: Media` bound lets the MSF track be derived from the base
+/// media sections regardless of any extension sections.
 ///
 /// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
 /// You'll have to call [`lock`](Self::lock) to update and publish the catalog.

@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::ops::{Deref, DerefMut};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -38,9 +39,9 @@ impl CatalogExt for NoExt {}
 /// The base media sections plus an application extension `E`, serialized as a flat union (the
 /// `video`/`audio` sections and the extension's sections share one JSON object on the wire).
 ///
-/// `video` and `audio` are direct fields (`catalog.video`); the extension sections live under
-/// [`ext`](Self::ext) (`catalog.ext.scte35`). A base consumer that reads a plain [`hang::Catalog`]
-/// simply ignores the extension sections.
+/// `video` and `audio` are direct fields (`catalog.video`), and the catalog derefs to the
+/// extension so its sections are reachable directly too (`catalog.scte35`, or `catalog.ext.scte35`
+/// explicitly). A base consumer that reads a plain [`hang::Catalog`] simply ignores the extension.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 #[serde(bound(serialize = "E: Serialize", deserialize = "E: DeserializeOwned"))]
 pub struct Catalog<E: CatalogExt = NoExt> {
@@ -52,6 +53,22 @@ pub struct Catalog<E: CatalogExt = NoExt> {
 
 	#[serde(flatten)]
 	pub ext: E,
+}
+
+// Deref to the extension so its sections are reachable directly (the base media sections are
+// already real fields, so they shadow this and stay accessible as `catalog.video`/`catalog.audio`).
+impl<E: CatalogExt> Deref for Catalog<E> {
+	type Target = E;
+
+	fn deref(&self) -> &E {
+		&self.ext
+	}
+}
+
+impl<E: CatalogExt> DerefMut for Catalog<E> {
+	fn deref_mut(&mut self) -> &mut E {
+		&mut self.ext
+	}
 }
 
 // Lets the producer derive the MSF track from the media sections.
@@ -99,7 +116,7 @@ mod test {
 			"audio0".to_string(),
 			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
 		);
-		producer.lock().ext.scte35 = Some(Scte35 { splice_id: 42 });
+		producer.lock().scte35 = Some(Scte35 { splice_id: 42 }); // flat, via deref to the extension
 
 		let waiter = kio::Waiter::noop();
 		let mut latest = None;
@@ -109,6 +126,6 @@ mod test {
 
 		let catalog = latest.expect("catalog published");
 		assert!(catalog.audio.renditions.contains_key("audio0"));
-		assert_eq!(catalog.ext.scte35, Some(Scte35 { splice_id: 42 }));
+		assert_eq!(catalog.scte35, Some(Scte35 { splice_id: 42 }));
 	}
 }
