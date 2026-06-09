@@ -47,6 +47,19 @@ pub struct Backoff {
 	)]
 	#[serde(with = "humantime_serde")]
 	pub timeout: Duration,
+
+	/// Minimum session uptime to count as healthy. A session that closes sooner is treated as
+	/// churn: the backoff keeps escalating instead of resetting, so a peer that accepts then
+	/// immediately drops us can't become a tight reconnect loop. Set to 0 to disable.
+	#[arg(
+		id = "backoff-stable",
+		long,
+		default_value = "10s",
+		env = "MOQ_BACKOFF_STABLE",
+		value_parser = humantime::parse_duration,
+	)]
+	#[serde(with = "humantime_serde")]
+	pub stable: Duration,
 }
 
 impl Default for Backoff {
@@ -56,11 +69,12 @@ impl Default for Backoff {
 			multiplier: 2,
 			max: Duration::from_secs(30),
 			timeout: Duration::from_secs(300),
+			stable: Duration::from_secs(10),
 		}
 	}
 }
 
-/// A connection lifecycle transition reported by [`Reconnect::status`].
+/// A connection lifecycle transition reported by [`Connection::status`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
 	/// A session connected (the first connect, or a reconnect after a drop).
@@ -69,7 +83,7 @@ pub enum Status {
 	Disconnected,
 }
 
-/// Shared reconnect state, observed by consumers through a [`kio`] channel.
+/// Shared connection state, observed by consumers through a [`kio`] channel.
 ///
 /// The channel closing (all producers dropped) is the terminal signal; `error`
 /// distinguishes a permanent give-up from a graceful close.
@@ -77,29 +91,37 @@ pub enum Status {
 struct State {
 	/// Current connection status, or `None` before the first connect.
 	status: Option<Status>,
+	/// The currently-established session, if any. Kept so [`Connection::close`] can close it with a
+	/// specific error code. Not exposed directly: handing it out would let callers outlive the loop.
+	session: Option<moq_net::Session>,
 	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
 	error: Option<anyhow::Error>,
 }
 
-/// Handle to a background reconnect loop.
+/// Handle to a background connection that reconnects with exponential backoff.
 ///
-/// Spawns a tokio task that connects, waits for session close, then reconnects with exponential
-/// backoff. [`status`](Self::status) reports connection changes; [`closed`](Self::closed) waits for
-/// the loop to stop. Dropping the handle aborts the background task.
-pub struct Reconnect {
+/// [`Client::connect`](crate::Client::connect) spawns a tokio task that connects, waits for the
+/// session to close, then reconnects. Wire publish/consume origins on the client first; they are
+/// re-attached on every reconnect. [`status`](Self::status) reports connection changes and
+/// [`closed`](Self::closed) waits for the loop to stop. Dropping the handle (or calling
+/// [`close`](Self::close)) stops the loop.
+///
+/// For a single attempt that hands you the session directly, use
+/// [`Client::connect_once`](crate::Client::connect_once) instead.
+pub struct Connection {
 	abort: tokio::task::AbortHandle,
 	state: kio::Consumer<State>,
 	/// The last status returned by [`status`](Self::status), for change detection.
 	last_reported: Option<Status>,
 }
 
-impl Reconnect {
+impl Connection {
 	pub(crate) fn new(client: Client, url: Url, backoff: Backoff) -> Self {
 		let producer = kio::Producer::<State>::default();
 		let state = producer.consume();
 		let task = tokio::spawn(async move {
 			if let Err(err) = Self::run(&producer, client, url, backoff).await {
-				tracing::error!(err = %format!("{err:#}"), "reconnect loop exited");
+				tracing::error!(err = %format!("{err:#}"), "connection loop exited");
 				if let Ok(mut state) = producer.write() {
 					state.error = Some(err);
 				}
@@ -128,20 +150,34 @@ impl Reconnect {
 
 			tracing::info!(%url, "connecting");
 
-			match client.connect(url.clone()).await {
-				Ok(cs) => {
-					tracing::info!(%url, "connected");
-					delay = backoff.initial;
+			match client.connect_inner(url.clone()).await {
+				Ok(session) => {
+					tracing::info!(%url, version = %session.version(), "connected");
 					last_error = None;
 					if let Ok(mut state) = state.write() {
+						state.session = Some(session.clone());
 						state.status = Some(Status::Connected);
 					}
-					let _ = cs.closed().await;
-					tracing::warn!(%url, "session closed, reconnecting");
+
+					let started = tokio::time::Instant::now();
+					let _ = session.closed().await;
+
 					if let Ok(mut state) = state.write() {
+						state.session = None;
 						state.status = Some(Status::Disconnected);
 					}
-					retry_start = tokio::time::Instant::now();
+
+					if started.elapsed() >= backoff.stable {
+						// Healthy session: reset backoff and reconnect promptly.
+						tracing::warn!(%url, "session closed, reconnecting");
+						delay = backoff.initial;
+						retry_start = tokio::time::Instant::now();
+					} else {
+						// Churn: a session this short means the peer is flapping; keep backing off.
+						tracing::warn!(%url, ?delay, "session closed quickly, backing off");
+						tokio::time::sleep(delay).await;
+						delay = std::cmp::min(delay * backoff.multiplier, backoff.max);
+					}
 				}
 				Err(err) => {
 					tracing::warn!(%url, %err, ?delay, "connection failed, retrying");
@@ -151,6 +187,17 @@ impl Reconnect {
 				}
 			}
 		}
+	}
+
+	/// Stop the connection: close the current session (if any) with `error`, then end the loop.
+	///
+	/// After this, [`closed`](Self::closed) resolves and no further reconnects happen. Idempotent;
+	/// dropping the handle does the same, minus the graceful close.
+	pub fn close(&self, error: moq_net::Error) {
+		if let Some(mut session) = self.state.read().session.clone() {
+			session.close(error);
+		}
+		self.abort.abort();
 	}
 
 	/// Poll for the next connection status change since this handle last reported one.
@@ -180,10 +227,10 @@ impl Reconnect {
 		kio::wait(|waiter| self.poll_status(waiter)).await
 	}
 
-	/// Poll whether the reconnect loop has stopped.
+	/// Poll whether the connection loop has stopped.
 	///
 	/// `Ready(Err)` if it permanently gave up (reconnect timeout exceeded), `Ready(Ok(()))` if
-	/// stopped by dropping the handle, `Pending` while it's still running.
+	/// stopped by dropping the handle or calling [`close`](Self::close), `Pending` while running.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<anyhow::Result<()>> {
 		ready!(self.state.poll_closed(waiter));
 		Poll::Ready(match &self.state.read().error {
@@ -192,13 +239,13 @@ impl Reconnect {
 		})
 	}
 
-	/// Wait until the reconnect loop stops.
+	/// Wait until the connection loop stops.
 	pub async fn closed(&self) -> anyhow::Result<()> {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 }
 
-impl Drop for Reconnect {
+impl Drop for Connection {
 	fn drop(&mut self) {
 		self.abort.abort();
 	}
@@ -223,5 +270,6 @@ mod tests {
 		assert_eq!(backoff.multiplier, 2);
 		assert_eq!(backoff.max, Duration::from_secs(30));
 		assert_eq!(backoff.timeout, Duration::from_secs(300));
+		assert_eq!(backoff.stable, Duration::from_secs(10));
 	}
 }

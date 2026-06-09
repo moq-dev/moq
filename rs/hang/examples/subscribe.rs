@@ -33,7 +33,7 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// Establish a connection with automatic reconnection.
 	// with_consumer() registers an OriginProducer for incoming data.
 	// Use with_publisher() if you also want to publish from the session.
-	let reconnect = client.with_consumer(origin).reconnect(url);
+	let reconnect = client.with_consumer(origin).connect(url);
 
 	// Wait until the reconnect loop stops (e.g. timeout exceeded).
 	reconnect.closed().await

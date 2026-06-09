@@ -70,7 +70,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -175,7 +175,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -292,7 +292,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -414,7 +414,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -518,7 +518,7 @@ async fn broadcast_moq_lite_05_without_timescale() {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
@@ -928,7 +928,7 @@ async fn broadcast_websocket() {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -1037,7 +1037,7 @@ async fn broadcast_websocket_fallback() {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -1139,7 +1139,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let cs = tokio::time::timeout(TIMEOUT, client.connect_once(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -1213,7 +1213,7 @@ async fn broadcast_race_quic_wins() {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let cs = tokio::time::timeout(TIMEOUT, client.connect_once(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -1280,7 +1280,7 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	});
 
 	let client = client.with_consumer(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");

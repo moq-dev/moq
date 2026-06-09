@@ -33,7 +33,7 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// with_publisher() registers an OriginProducer. moq-net reads from its
 	// consumer view internally. Pair with with_consumer() if you also want
 	// to subscribe to remote announcements.
-	let reconnect = client.with_publisher(origin).reconnect(url);
+	let reconnect = client.with_publisher(origin).connect(url);
 
 	// Wait until the reconnect loop stops (e.g. timeout exceeded).
 	reconnect.closed().await

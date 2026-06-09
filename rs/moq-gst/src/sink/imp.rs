@@ -401,7 +401,7 @@ async fn run_session(
 		.context("failed to publish broadcast")?;
 
 	let client = client.with_publisher(origin.clone());
-	let session = client.connect(settings.url.clone()).await?;
+	let session = client.connect_once(settings.url.clone()).await?;
 
 	let mut runtime = RuntimeState {
 		session,

@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
 	let reconnect = moq_client
 		.with_publisher(publisher.clone())
 		.with_consumer(subscriber)
-		.reconnect(relay.clone());
+		.connect(relay.clone());
 
 	tracing::info!(%relay, %broadcast, "starting moq-rtc");
 

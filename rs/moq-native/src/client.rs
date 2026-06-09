@@ -1,5 +1,5 @@
 use crate::crypto;
-use crate::{Backoff, QuicBackend, Reconnect};
+use crate::{Backoff, Connection, QuicBackend};
 use anyhow::Context;
 use std::path::PathBuf;
 use std::{net, sync::Arc};
@@ -330,12 +330,40 @@ impl Client {
 		self
 	}
 
-	/// Start a background reconnect loop that connects to the given URL,
-	/// waits for the session to close, then reconnects with exponential backoff.
+	/// Override the reconnection [`Backoff`] used by [`connect`](Self::connect).
+	pub fn with_backoff(mut self, backoff: Backoff) -> Self {
+		self.backoff = backoff;
+		self
+	}
+
+	/// Connect to the given URL and stay connected, reconnecting with exponential backoff
+	/// whenever the session drops.
 	///
-	/// Returns a [`Reconnect`] handle; drop the last handle to stop the loop.
-	pub fn reconnect(&self, url: Url) -> Reconnect {
-		Reconnect::new(self.clone(), url, self.backoff.clone())
+	/// Spawns a background task and returns a [`Connection`] handle immediately; drop the handle to
+	/// stop the loop. Wire publish/consume origins with [`with_publisher`](Self::with_publisher) and
+	/// [`with_consumer`](Self::with_consumer) before calling, and they are re-attached on every
+	/// reconnect. Observe lifecycle changes with [`Connection::status`] and [`Connection::closed`].
+	///
+	/// For a single attempt that hands you the session directly, use [`connect_once`](Self::connect_once).
+	pub fn connect(&self, url: Url) -> Connection {
+		Connection::new(self.clone(), url, self.backoff.clone())
+	}
+
+	/// Deprecated alias for [`connect`](Self::connect), which now reconnects by default.
+	#[deprecated(note = "use `connect`, which now reconnects with backoff by default")]
+	pub fn reconnect(&self, url: Url) -> Connection {
+		self.connect(url)
+	}
+
+	/// Connect to the given URL exactly once, returning the established session.
+	///
+	/// This makes a single attempt and does not reconnect if the session later drops. The returned
+	/// session is self-contained: you own it and drive it directly. For automatic reconnection, use
+	/// [`connect`](Self::connect).
+	pub async fn connect_once(&self, url: Url) -> anyhow::Result<moq_net::Session> {
+		let session = self.connect_inner(url).await?;
+		tracing::info!(version = %session.version(), "connected");
+		Ok(session)
 	}
 
 	#[cfg(not(any(
@@ -345,7 +373,7 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	)))]
-	pub async fn connect(&self, _url: Url) -> anyhow::Result<moq_net::Session> {
+	pub(crate) async fn connect_inner(&self, _url: Url) -> anyhow::Result<moq_net::Session> {
 		anyhow::bail!("no backend compiled; enable noq, quinn, quiche, iroh, or websocket feature");
 	}
 
@@ -356,20 +384,7 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	))]
-	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_net::Session> {
-		let cs = self.connect_inner(url).await?;
-		tracing::info!(version = %cs.version(), "connected");
-		Ok(cs)
-	}
-
-	#[cfg(any(
-		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
-		feature = "iroh",
-		feature = "websocket"
-	))]
-	async fn connect_inner(&self, url: Url) -> anyhow::Result<moq_net::Session> {
+	pub(crate) async fn connect_inner(&self, url: Url) -> anyhow::Result<moq_net::Session> {
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;

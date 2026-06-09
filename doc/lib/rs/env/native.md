@@ -23,8 +23,13 @@ Create a [`ClientConfig`](https://docs.rs/moq-native/latest/moq_native/struct.Cl
 ```rust
 let client = moq_native::ClientConfig::default().init()?;
 let url = url::Url::parse("https://cdn.moq.dev/anon/my-broadcast")?;
-let session = client.connect(url).await?;
+let session = client.connect_once(url).await?;
 ```
+
+`connect_once` makes a single attempt and hands you the session. For a resilient client, prefer
+`client.connect(url)`, which stays connected and reconnects with exponential backoff whenever the
+session drops, returning a [`Connection`](https://docs.rs/moq-native/latest/moq_native/struct.Connection.html)
+handle (wire origins with `with_publisher`/`with_consumer` first; drop the handle to stop).
 
 The default configuration uses system TLS roots, enables WebSocket fallback, and gives QUIC a 200ms head-start.
 
@@ -52,7 +57,7 @@ Pass JWT tokens via URL query parameters:
 let url = Url::parse(&format!(
     "https://relay.example.com/room/123?jwt={}", token
 ))?;
-let session = client.connect(url).await?;
+let session = client.connect_once(url).await?;
 ```
 
 See the [Authentication guide](/bin/relay/auth) for how to generate tokens.
@@ -64,7 +69,7 @@ The [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/vi
 The connected [`Session`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html) exposes a [`publisher()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.publisher) [`OriginProducer`](https://docs.rs/moq-net/latest/moq_net/struct.OriginProducer.html) you publish broadcasts into:
 
 ```rust
-let session = client.connect(url).await?;
+let session = client.connect_once(url).await?;
 
 let mut broadcast = moq_net::Broadcast::new().produce();
 // ... add catalog and tracks to the broadcast ...
@@ -80,7 +85,7 @@ The [subscribe example](https://github.com/moq-dev/moq/blob/main/rs/hang/example
 The session also exposes a [`consumer()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.consumer) [`OriginConsumer`](https://docs.rs/moq-net/latest/moq_net/struct.OriginConsumer.html) for receiving announcements:
 
 ```rust
-let session = client.connect(url).await?;
+let session = client.connect_once(url).await?;
 let mut announced = session.consumer().announced();
 
 // Wait for broadcasts to be announced.

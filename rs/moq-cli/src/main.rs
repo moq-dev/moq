@@ -223,7 +223,7 @@ async fn run_subscribe(
 
 	tracing::info!(%url, %broadcast, "connecting");
 
-	let reconnect = client.with_consumer(origin).reconnect(url);
+	let reconnect = client.with_consumer(origin).connect(url);
 
 	#[cfg(unix)]
 	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);

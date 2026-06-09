@@ -39,6 +39,8 @@ let client = Client()
 let session = try await client.connect(to: "https://relay.example.com")
 ```
 
+`connect` resolves once the first session is established, then keeps it alive: if the session later drops it reconnects with exponential backoff. Call `shutdown()` (or `cancel()`) on the session to stop.
+
 `session.publisher` and `session.consumer` are always populated: by whatever origin you wired via `setPublish` / `setConsume` before connecting, or by a fresh auto-created one for any side you left unset. The duplex no-config path (the typical client) shares one origin between both.
 
 For development against a relay with a self-signed certificate:

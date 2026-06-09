@@ -769,37 +769,6 @@ impl Cluster {
 			url.query_pairs_mut().append_pair("jwt", &token);
 		}
 
-		let base_backoff = tokio::time::Duration::from_secs(1);
-		let max_backoff = tokio::time::Duration::from_secs(300);
-		// Sessions shorter than this are treated as churn: we keep backing off
-		// instead of resetting, otherwise a peer that rejects us instantly would
-		// turn into a tight reconnect loop.
-		let stable_threshold = tokio::time::Duration::from_secs(10);
-
-		let mut backoff = base_backoff;
-
-		loop {
-			let started = tokio::time::Instant::now();
-			let result = self.run_remote_once(&url).await;
-			let elapsed = started.elapsed();
-
-			match result {
-				Ok(()) if elapsed >= stable_threshold => backoff = base_backoff,
-				Ok(()) => {
-					tracing::warn!(?elapsed, "cluster peer session closed cleanly but quickly; backing off");
-					backoff = (backoff * 2).min(max_backoff);
-				}
-				Err(err) => {
-					tracing::warn!(%err, "cluster peer error; will retry");
-					backoff = (backoff * 2).min(max_backoff);
-				}
-			}
-
-			tokio::time::sleep(backoff).await;
-		}
-	}
-
-	async fn run_remote_once(&self, url: &Url) -> anyhow::Result<()> {
 		let mut log_url = url.clone();
 		log_url.set_query(None);
 		tracing::info!(url = %log_url, "dialing cluster peer");
@@ -810,16 +779,30 @@ impl Cluster {
 			.clone()
 			.context("internal: cluster peer dial without an attached QUIC client")?;
 
-		// Cluster-to-cluster traffic is internal by definition.
-		let cs = client
+		// Cluster-to-cluster traffic is internal by definition. The connection reconnects with
+		// backoff internally (churn-protected); unlimited retries keep the dial alive until this
+		// task is aborted, which happens when the peer is abandoned.
+		let connection = client
+			.with_backoff(Self::dial_backoff())
 			.with_publisher(self.origin.clone())
 			.with_consumer(self.origin.clone())
 			.with_stats(self.stats.tier(Tier::Internal))
-			.connect(url.clone())
-			.await
-			.context("failed to connect to cluster peer")?;
+			.connect(url);
 
-		cs.closed().await.map_err(Into::into)
+		// With unlimited retries this only resolves on abort, but propagate the error just in case.
+		connection.closed().await.context("cluster peer connection gave up")
+	}
+
+	/// Backoff for cluster dials: never give up (the dial is torn down by aborting the task when the
+	/// peer is abandoned), and cap retries at 5 minutes apart.
+	fn dial_backoff() -> moq_native::Backoff {
+		moq_native::Backoff {
+			initial: Duration::from_secs(1),
+			multiplier: 2,
+			max: Duration::from_secs(300),
+			timeout: Duration::ZERO,
+			stable: Duration::from_secs(10),
+		}
 	}
 }
 

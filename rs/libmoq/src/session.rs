@@ -79,7 +79,7 @@ impl Session {
 			client = client.with_consumer(consume);
 		}
 
-		let reconnect = client.reconnect(url);
+		let reconnect = client.connect(url);
 
 		// report() runs until the reconnect loop gives up; map its terminal error to Connect.
 		Self::report(callback, reconnect)
@@ -91,7 +91,7 @@ impl Session {
 	///
 	/// Returns the terminal error via `?`. Disconnects aren't reported: status 0 is reserved for a
 	/// clean close (delivered as the terminal callback once the task ends).
-	async fn report(callback: ffi::OnStatus, mut reconnect: moq_native::Reconnect) -> anyhow::Result<()> {
+	async fn report(callback: ffi::OnStatus, mut reconnect: moq_native::Connection) -> anyhow::Result<()> {
 		let mut connects: u64 = 0;
 		loop {
 			if let moq_native::Status::Connected = reconnect.status().await? {

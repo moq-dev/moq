@@ -21,22 +21,34 @@ impl Client {
 			.init()
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
-		// moq-net defaults both sides if unset; only override when the
-		// FFI caller wired their own.
-		let mut client = client;
-		if let Some(publish) = self.publish.as_ref() {
-			client = client.with_publisher(publish.inner().clone());
-		}
-		if let Some(consume) = self.consume.as_ref() {
-			client = client.with_consumer(consume.inner().clone());
-		}
+		// Wire stable publish/consume origins so they survive reconnects: the caller's if set,
+		// otherwise a shared origin (matching moq-net's default of wiring one origin as both sides).
+		let (publish, consume) = self.origins();
 
-		let session = client
-			.connect(url)
+		// Reconnect with backoff by default; wait for the first established session before returning.
+		let mut connection = client
+			.with_publisher(publish.clone())
+			.with_consumer(consume.clone())
+			.connect(url);
+		connection
+			.status()
 			.await
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
-		Ok(Arc::new(MoqSession::new(session)))
+		Ok(Arc::new(MoqSession::reconnecting(connection, publish, consume)))
+	}
+
+	/// The publish/consume origins to wire, held so they stay stable across reconnects.
+	fn origins(&self) -> (moq_net::OriginProducer, moq_net::OriginProducer) {
+		match (self.publish.as_ref(), self.consume.as_ref()) {
+			(Some(publish), Some(consume)) => (publish.inner().clone(), consume.inner().clone()),
+			(Some(publish), None) => (publish.inner().clone(), moq_net::Origin::random().produce()),
+			(None, Some(consume)) => (moq_net::Origin::random().produce(), consume.inner().clone()),
+			(None, None) => {
+				let shared = moq_net::Origin::random().produce();
+				(shared.clone(), shared)
+			}
+		}
 	}
 }
 
@@ -96,12 +108,14 @@ impl MoqClient {
 
 	/// Connect to a MoQ server and wait for the session to be established.
 	///
+	/// The returned session reconnects with exponential backoff if it later drops; call
+	/// `shutdown()` (or `cancel()`) on it to stop.
+	///
 	/// If neither [`set_publish`](Self::set_publish) nor
-	/// [`set_consume`](Self::set_consume) was called on this client, the
-	/// underlying moq-net layer auto-creates a fresh origin and wires it
-	/// as both sides. The producer and consumer sides are then accessible
-	/// via [`MoqSession::publisher`] and [`MoqSession::consumer`] so the
-	/// caller never has to construct a [`MoqOriginProducer`] themselves.
+	/// [`set_consume`](Self::set_consume) was called on this client, a fresh origin is created and
+	/// wired as both sides. The producer and consumer sides are then accessible via
+	/// [`MoqSession::publisher`] and [`MoqSession::consumer`] so the caller never has to construct a
+	/// [`MoqOriginProducer`] themselves.
 	///
 	/// Can be cancelled by calling `cancel()`.
 	pub async fn connect(&self, url: String) -> Result<Arc<MoqSession>, MoqError> {
@@ -118,21 +132,51 @@ impl MoqClient {
 
 #[derive(uniffi::Object)]
 pub struct MoqSession {
-	inner: Option<moq_net::Session>,
-	closed: Task<Session>,
+	kind: Kind,
 	publisher: Arc<MoqOriginProducer>,
 	consumer: Arc<MoqOriginConsumer>,
 }
 
+// `MoqSession` is always handed out behind an `Arc`, so the size gap between variants is moot.
+#[allow(clippy::large_enum_variant)]
+enum Kind {
+	/// Client side: a reconnecting connection. `closed` resolves only when it permanently stops.
+	Connection(Arc<moq_native::Connection>),
+	/// Server side: a single accepted session, with no client connection to reconnect.
+	Session {
+		inner: Option<moq_net::Session>,
+		closed: Task<Session>,
+	},
+}
+
 impl MoqSession {
+	/// Wrap a single server-accepted session (no reconnection).
 	pub(crate) fn new(session: moq_net::Session) -> Self {
 		// Eagerly wrap the always-set origin sides so each
 		// publisher()/consumer() call hands back the same Arc.
 		let publisher = Arc::new(MoqOriginProducer::from_inner(session.publisher().clone()));
 		let consumer = Arc::new(MoqOriginConsumer::from_inner(session.consumer().clone()));
 		Self {
-			inner: Some(session.clone()),
-			closed: Task::new(session),
+			kind: Kind::Session {
+				inner: Some(session.clone()),
+				closed: Task::new(session),
+			},
+			publisher,
+			consumer,
+		}
+	}
+
+	/// Wrap a client connection that reconnects with backoff. `publish`/`consume` are the wired
+	/// origins, stable across reconnects, so the publisher/consumer handles stay valid.
+	pub(crate) fn reconnecting(
+		connection: moq_native::Connection,
+		publish: moq_net::OriginProducer,
+		consume: moq_net::OriginProducer,
+	) -> Self {
+		let publisher = Arc::new(MoqOriginProducer::from_inner(publish));
+		let consumer = Arc::new(MoqOriginConsumer::from_inner(consume.consume()));
+		Self {
+			kind: Kind::Connection(Arc::new(connection)),
 			publisher,
 			consumer,
 		}
@@ -142,28 +186,49 @@ impl MoqSession {
 impl Drop for MoqSession {
 	fn drop(&mut self) {
 		let _guard = crate::ffi::RUNTIME.enter();
-		self.inner.take();
+		// Server: drop the held session. Client: the last `Arc<Connection>` drop aborts the loop.
+		if let Kind::Session { inner, .. } = &mut self.kind {
+			inner.take();
+		}
 	}
 }
 
 #[uniffi::export]
 impl MoqSession {
-	/// Wait until the session is closed.
+	/// Wait until the session is closed. For a reconnecting client, this only resolves once the
+	/// connection permanently stops (gives up, or `cancel`/`shutdown` is called).
 	pub async fn closed(&self) -> Result<(), MoqError> {
-		// We have a task to run all of the closed calls juuuuust so they use the same tokio runtime.
-		self.closed
-			.run(|session| async move { session.closed().await.map_err(Into::into) })
-			.await
+		match &self.kind {
+			// Drive on the shared runtime so the C callback keeps its thread affinity.
+			Kind::Connection(connection) => {
+				let connection = connection.clone();
+				match crate::ffi::RUNTIME
+					.spawn(async move { connection.closed().await })
+					.await
+				{
+					Ok(res) => res.map_err(|err| MoqError::Connect(format!("{err:#}"))),
+					Err(err) => Err(MoqError::Task(err)),
+				}
+			}
+			Kind::Session { closed, .. } => {
+				closed
+					.run(|session| async move { session.closed().await.map_err(Into::into) })
+					.await
+			}
+		}
 	}
 
-	/// Close the session with the given error code.
+	/// Stop the connection and close the current session with the given error code.
 	pub fn cancel(&self, code: u32) {
 		let _guard = crate::ffi::RUNTIME.enter();
-		if let Some(inner) = &self.inner {
-			inner.clone().close(moq_net::Error::Remote(code));
+		match &self.kind {
+			Kind::Connection(connection) => connection.close(moq_net::Error::Remote(code)),
+			Kind::Session { inner, .. } => {
+				if let Some(inner) = inner {
+					inner.clone().close(moq_net::Error::Remote(code));
+				}
+			}
 		}
-		// NOTE: we don't abort the closed Task because it will be aborted via above ^
-		// We'll get a slightly better error message instead of Cancelled.
 	}
 
 	/// Graceful shutdown. Equivalent to `cancel(0)`. Documents the
