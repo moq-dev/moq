@@ -110,7 +110,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			subscribe_options: 0x01, // NAMESPACE only
 		};
 
-		stream.writer.encode(&ietf::SubscribeNamespace::ID).await?;
+		stream
+			.writer
+			.encode(&ietf::SubscribeNamespace::wire_id(self.version))
+			.await?;
 		stream.writer.encode(&msg).await?;
 
 		tracing::debug!(%prefix, "subscribe_namespace sent");
@@ -448,10 +451,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let abs = origin.absolute(&path).to_owned();
 
 		let mut state = self.state.lock();
-		let broadcast = match state.broadcasts.entry(path.clone()) {
+		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
 				entry.get_mut().count += 1;
-				return Ok(entry.get().producer.clone());
+				Ok(entry.get().producer.clone())
 			}
 			Entry::Vacant(entry) => {
 				// Stamp this connection's origin as the sole hop so the route is
@@ -461,29 +464,34 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				hops.push(self.session_origin)
 					.expect("an empty hop chain has room for one entry");
 				let broadcast = Broadcast { hops }.produce();
+
+				// Create the dynamic handler BEFORE publishing so consumers see
+				// dynamic >= 1 the moment they receive the announce. Otherwise a
+				// consumer can call subscribe_track() before the spawned
+				// run_broadcast bumps the counter and get NotFound (mirrors the
+				// note in lite::Subscriber).
+				let dynamic = broadcast.dynamic();
+
 				origin.publish_broadcast(path.clone(), broadcast.consume());
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),
 					count: 1,
 					_stats: self.stats.broadcast(&abs).subscriber(),
 				});
-				broadcast
+
+				tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+
+				let this = self.clone();
+				web_async::spawn(async move {
+					if let Err(err) = this.run_broadcast(path.clone(), dynamic).await {
+						tracing::debug!(%err, "error running broadcast");
+					}
+					this.state.lock().broadcasts.remove(&path);
+				});
+
+				Ok(broadcast)
 			}
-		};
-
-		tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-
-		let this = self.clone();
-		let producer = broadcast.clone();
-
-		web_async::spawn(async move {
-			if let Err(err) = this.run_broadcast(path.clone(), producer.dynamic()).await {
-				tracing::debug!(%err, "error running broadcast");
-			}
-			this.state.lock().broadcasts.remove(&path);
-		});
-
-		Ok(broadcast)
+		}
 	}
 
 	fn stop_announce(&mut self, path: PathOwned) -> Result<(), Error> {

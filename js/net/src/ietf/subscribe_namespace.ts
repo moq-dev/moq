@@ -10,6 +10,21 @@ import { type IetfVersion, Version } from "./version.ts";
 export class SubscribeNamespace {
 	static id = 0x11;
 
+	// Draft-18 renumbered SUBSCRIBE_NAMESPACE from 0x11 to 0x50 when it split
+	// SUBSCRIBE_TRACKS (0x51) off into its own message type (#1542). Earlier
+	// drafts keep 0x11.
+	static wireId(version: IetfVersion): number {
+		switch (version) {
+			case Version.DRAFT_14:
+			case Version.DRAFT_15:
+			case Version.DRAFT_16:
+			case Version.DRAFT_17:
+				return SubscribeNamespace.id;
+			default:
+				return 0x50;
+		}
+	}
+
 	namespace: Path.Valid;
 	requestId: bigint;
 	subscribeOptions: number; // v16: default 0x01 (NAMESPACE only)
@@ -34,7 +49,10 @@ export class SubscribeNamespace {
 			await w.u62(0n); // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 		await Namespace.encode(w, this.namespace);
-		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15) {
+		// Draft-16/17 carried a Subscribe Options field to pick NAMESPACE vs TRACKS.
+		// Draft-18 dropped it, splitting the cases into SUBSCRIBE_NAMESPACE (0x50)
+		// and SUBSCRIBE_TRACKS (0x51) message types instead (#1542).
+		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			await w.u53(this.subscribeOptions);
 		}
 		await new Parameters().encode(w, version);
@@ -54,8 +72,9 @@ export class SubscribeNamespace {
 			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
 		const namespace = await Namespace.decode(r);
+		// Subscribe Options exists only in draft-16/17 (see #encode).
 		let subscribeOptions = 1;
-		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15) {
+		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			subscribeOptions = await r.u53();
 		}
 		await Parameters.decode(r, version);

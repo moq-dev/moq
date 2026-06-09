@@ -78,7 +78,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					}
 				});
 			}
-			ietf::SubscribeNamespace::ID => {
+			// SubscribeNamespace ID is version-dependent (0x11 pre-18, 0x50 in draft-18).
+			id if id == ietf::SubscribeNamespace::wire_id(this.version) => {
 				let msg = ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?;
 				if !data.is_empty() {
 					return Err(Error::WrongSize);

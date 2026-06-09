@@ -224,7 +224,11 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 
 		match id {
 			// Publisher handles: Subscribe, Fetch, SubscribeNamespace, TrackStatus
-			ietf::Subscribe::ID | ietf::Fetch::ID | ietf::SubscribeNamespace::ID | ietf::TrackStatus::ID => {
+			ietf::Subscribe::ID | ietf::Fetch::ID | ietf::TrackStatus::ID => {
+				publisher.handle_stream(id, data, stream)?;
+			}
+			// SubscribeNamespace ID is version-dependent (0x11 pre-18, 0x50 in draft-18).
+			id if id == ietf::SubscribeNamespace::wire_id(version) => {
 				publisher.handle_stream(id, data, stream)?;
 			}
 			// Subscriber handles: Publish, PublishNamespace

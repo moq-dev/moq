@@ -85,8 +85,8 @@ export class Subscriber {
 					: await this.#session.openBi();
 
 			try {
-				// Write SubscribeNamespace
-				await stream.writer.u53(SubscribeNamespace.id);
+				// Write SubscribeNamespace (type ID is version-dependent: 0x11 pre-18, 0x50 in draft-18).
+				await stream.writer.u53(SubscribeNamespace.wireId(version));
 				const msg = new SubscribeNamespace({ namespace: prefix, requestId });
 				await msg.encode(stream.writer, version);
 				console.debug(`subscribe_namespace written: requestId=${requestId}`);

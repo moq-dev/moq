@@ -172,6 +172,14 @@ export class Connection implements Established {
 	async #runBidi(stream: Stream) {
 		const typeId = await stream.reader.u53();
 
+		// SubscribeNamespace's type ID is version-dependent (0x11 pre-18, 0x50 in
+		// draft-18), so it can't be a static switch case.
+		if (typeId === SubscribeNamespace.wireId(this.#session.version)) {
+			const msg = await SubscribeNamespace.decode(stream.reader, this.#session.version);
+			await this.#publisher.runSubscribeNamespace(msg, stream);
+			return;
+		}
+
 		switch (typeId) {
 			case SubscribeUpdate.id: {
 				// REQUEST_UPDATE (0x02) is a follow-up, not a valid initial message
@@ -182,11 +190,6 @@ export class Connection implements Established {
 			case Subscribe.id: {
 				const msg = await Subscribe.decode(stream.reader, this.#session.version);
 				await this.#publisher.runSubscribe(msg, stream);
-				break;
-			}
-			case SubscribeNamespace.id: {
-				const msg = await SubscribeNamespace.decode(stream.reader, this.#session.version);
-				await this.#publisher.runSubscribeNamespace(msg, stream);
 				break;
 			}
 			case TrackStatusRequest.id: {
