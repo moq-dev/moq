@@ -7,10 +7,14 @@
 //! "axum-only-advertises-bare-`webtransport`" bug that silently downgraded
 //! relay clients to moq-lite-02.
 
-use std::{net::TcpListener, sync::atomic::AtomicU64, time::Duration};
+use std::{
+	net::TcpListener,
+	sync::atomic::AtomicU64,
+	time::{Duration, Instant},
+};
 
 use moq_native::moq_net::{self, Origin};
-use moq_relay::{AuthConfig, Cluster, ClusterConfig, PublicConfig, Web, WebConfig, WebState};
+use moq_relay::{Auth, AuthConfig, Cluster, ClusterConfig, Connection, PublicConfig, Web, WebConfig, WebState};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -106,6 +110,155 @@ fn client() -> moq_native::Client {
 	// Zero head start so the WebSocket path runs immediately.
 	config.websocket.delay = None;
 	config.init().expect("client init")
+}
+
+/// A public [`Auth`] that lets any path through, matching [`spawn_relay`].
+async fn public_auth() -> Auth {
+	#[allow(deprecated)]
+	let public = PublicConfig::Simple(vec![String::new()]);
+	let mut auth_config = AuthConfig::default();
+	auth_config.public = Some(public);
+	auth_config.init().await.expect("auth init")
+}
+
+/// Stand up a real relay over WebTransport (QUIC) pinned to moq-lite-05-wip and
+/// run its accept loop. Returns the `https://localhost:<port>` base URL and the
+/// accept-loop handle. Lite-05 is required because the viewer count only rides
+/// the wire on lite-05+, and (like the other lite-05 tests) lite-05-wip can only
+/// be negotiated over WebTransport, not raw QUIC ALPN or WebSocket.
+async fn spawn_quic_relay() -> (u16, tokio::task::JoinHandle<()>) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let auth = public_auth().await;
+	let cluster = Cluster::new(ClusterConfig::default());
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-lite-05-wip".parse().unwrap()];
+	let mut server = server_config.init().expect("server init");
+	let port = server.local_addr().expect("local addr").port();
+
+	let handle = tokio::spawn(async move {
+		let mut conn_id = 0;
+		while let Some(request) = server.accept().await {
+			let conn = Connection {
+				id: conn_id,
+				request,
+				cluster: cluster.clone(),
+				auth: auth.clone(),
+			};
+			conn_id += 1;
+			tokio::spawn(async move {
+				let _ = conn.run().await;
+			});
+		}
+	});
+
+	(port, handle)
+}
+
+/// A lite-05-wip WebTransport client.
+fn client_lite05() -> moq_native::Client {
+	let mut config = moq_native::ClientConfig::default();
+	config.tls.disable_verify = Some(true);
+	config.version = vec!["moq-lite-05-wip".parse().unwrap()];
+	config.init().expect("client init")
+}
+
+/// Subscribe to `broadcast`/`track` through the relay at `url`, returning the
+/// session (keep it alive to hold the subscription) and the resolved subscriber.
+async fn subscribe_through_relay(
+	url: url::Url,
+	broadcast: &str,
+	track: &str,
+) -> (moq_net::Session, moq_net::TrackSubscriber) {
+	let origin = Origin::random().produce();
+	let mut announced = origin.consume().announced();
+
+	let session = tokio::time::timeout(TIMEOUT, client_lite05().with_consumer(origin).connect(url))
+		.await
+		.expect("subscriber connect timeout")
+		.expect("subscriber connect failed");
+
+	// Wait for the broadcast to be announced (relayed from the publisher).
+	let bc = loop {
+		let (path, bc) = tokio::time::timeout(TIMEOUT, announced.next())
+			.await
+			.expect("announce timeout")
+			.expect("origin closed");
+		if path.as_str() == broadcast {
+			break bc.broadcast().expect("expected announce, got unannounce");
+		}
+	};
+
+	let track_sub = tokio::time::timeout(TIMEOUT, bc.track(track).unwrap().subscribe(None).unwrap())
+		.await
+		.expect("subscribe timeout")
+		.expect("subscribe failed");
+
+	(session, track_sub)
+}
+
+/// Poll the producer's aggregate viewer count until it reaches `expected`.
+async fn await_downstream(track: &moq_net::TrackProducer, expected: u64) {
+	let deadline = Instant::now() + TIMEOUT;
+	loop {
+		let count = track.subscription().map_or(0, |s| s.downstream);
+		if count == expected {
+			return;
+		}
+		assert!(
+			Instant::now() < deadline,
+			"viewer count never reached {expected}; last saw {count}"
+		);
+		tokio::time::sleep(Duration::from_millis(20)).await;
+	}
+}
+
+/// Two subscribers behind one relay must telescope to a single upstream count of
+/// `2` at the publisher, not be counted per-hop. Dropping one returns it to `1`.
+#[tokio::test]
+async fn relay_telescopes_downstream_viewer_count() {
+	let (port, relay_handle) = spawn_quic_relay().await;
+	let url: url::Url = format!("https://localhost:{port}/room").parse().expect("parse url");
+
+	// ── publisher (a client serving a broadcast through the relay) ──────
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	// Hold the track producer in scope so we can read its aggregate subscription.
+	let track = broadcast.create_track("video", None).expect("create track");
+
+	let pub_session = tokio::time::timeout(
+		TIMEOUT,
+		client_lite05().with_publisher(pub_origin.clone()).connect(url.clone()),
+	)
+	.await
+	.expect("publisher connect timeout")
+	.expect("publisher connect failed");
+
+	// No subscribers yet.
+	assert_eq!(track.subscription().map_or(0, |s| s.downstream), 0);
+
+	// ── first viewer ───────────────────────────────────────────────────
+	let (sub1, _track1) = subscribe_through_relay(url.clone(), "test", "video").await;
+	await_downstream(&track, 1).await;
+
+	// ── second viewer: the relay dedups to one upstream subscription, so
+	//    the publisher sees a single count of 2 (telescoped), not 2 hops. ─
+	let (sub2, track2) = subscribe_through_relay(url.clone(), "test", "video").await;
+	await_downstream(&track, 2).await;
+
+	// ── one viewer leaves: count telescopes back down to 1. ─────────────
+	drop(track2);
+	drop(sub2);
+	await_downstream(&track, 1).await;
+
+	drop(track);
+	drop(broadcast);
+	drop(sub1);
+	drop(pub_session);
+	relay_handle.abort();
 }
 
 /// Connect a publisher and a subscriber to a real relay over `ws://`, push

@@ -28,6 +28,18 @@ impl Version {
 			_ => true,
 		}
 	}
+
+	/// Whether SUBSCRIBE / SUBSCRIBE_UPDATE carry a downstream viewer count (lite-05+).
+	/// Each subscriber reports how many consumers it represents so the count sums up
+	/// the fan-out tree; older drafts omit the field and every subscription counts as 1.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_viewer_count(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 => false,
+			_ => true,
+		}
+	}
 }
 
 impl fmt::Display for Version {

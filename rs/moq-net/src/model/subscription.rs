@@ -1,4 +1,4 @@
-use std::{task::Poll, time::Duration};
+use std::time::Duration;
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -21,6 +21,12 @@ pub struct Subscription {
 	pub group_start: Option<u64>,
 	/// Last group to deliver (inclusive), or `None` for no end.
 	pub group_end: Option<u64>,
+	/// How many downstream consumers this subscription represents. A leaf
+	/// subscriber is `1`; a relay reports the sum of its own downstream
+	/// subscribers so the count telescopes up the fan-out tree. The publisher
+	/// reads the aggregate via [`crate::TrackProducer::subscription`] to learn
+	/// the total viewer count across every hop.
+	pub downstream: u64,
 }
 
 impl Default for Subscription {
@@ -31,6 +37,7 @@ impl Default for Subscription {
 			stale: Duration::ZERO,
 			group_start: None,
 			group_end: None,
+			downstream: 1,
 		}
 	}
 }
@@ -66,25 +73,73 @@ impl Subscription {
 		self
 	}
 
-	// Returns Ready with the new combined subscription, unless this subscription is a subset.
-	// TODO I don't know if we need to return Pending at all? I'm kind of confused.
-	pub(super) fn poll_combined(&self, combined: &Option<Subscription>) -> Poll<Subscription> {
-		let Some(combined) = combined else {
-			return Poll::Ready(self.clone());
-		};
+	/// Set how many downstream consumers this subscription represents, returning
+	/// `self` for chaining. Defaults to `1`; relays override it with their summed
+	/// downstream count.
+	pub fn with_downstream(mut self, downstream: u64) -> Self {
+		self.downstream = downstream;
+		self
+	}
 
-		let merged = Subscription {
-			priority: self.priority.max(combined.priority),
-			ordered: !self.ordered || !combined.ordered,
-			stale: self.stale.max(combined.stale),
-			group_start: self.group_start.min(combined.group_start),
-			group_end: self.group_end.max(combined.group_end),
-		};
-
-		if &merged != combined {
-			return Poll::Ready(merged);
+	/// Combine two subscribers' preferences into the most demanding request. The
+	/// operation is commutative and associative, so the producer can fold it across
+	/// every live subscriber in any order.
+	///
+	/// Most fields take the most permissive value (highest priority, longest stale
+	/// window, widest group range); `downstream` instead **sums**, so each subscriber
+	/// contributes its viewer count and the aggregate is the total across every
+	/// fan-out branch.
+	pub(super) fn merge(&self, other: &Subscription) -> Subscription {
+		Subscription {
+			priority: self.priority.max(other.priority),
+			ordered: !self.ordered || !other.ordered,
+			stale: self.stale.max(other.stale),
+			group_start: self.group_start.min(other.group_start),
+			group_end: self.group_end.max(other.group_end),
+			downstream: self.downstream.saturating_add(other.downstream),
 		}
+	}
+}
 
-		Poll::Pending
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Fold a set of subscriptions the same way [`crate::TrackProducer::subscription`]
+	/// does: start from `None` and merge each in turn.
+	fn combine(subs: &[Subscription]) -> Option<Subscription> {
+		let mut combined: Option<Subscription> = None;
+		for sub in subs {
+			combined = Some(match combined {
+				Some(c) => sub.merge(&c),
+				None => sub.clone(),
+			});
+		}
+		combined
+	}
+
+	#[test]
+	fn downstream_sums_across_subscribers() {
+		// Three leaf viewers aggregate to 3.
+		let leaves = [
+			Subscription::default(),
+			Subscription::default(),
+			Subscription::default(),
+		];
+		assert_eq!(combine(&leaves).unwrap().downstream, 3);
+
+		// A relay reporting 50 plus two direct viewers telescopes to 52.
+		let mixed = [
+			Subscription::default().with_downstream(50),
+			Subscription::default(),
+			Subscription::default(),
+		];
+		assert_eq!(combine(&mixed).unwrap().downstream, 52);
+	}
+
+	#[test]
+	fn downstream_default_is_one() {
+		assert_eq!(Subscription::default().downstream, 1);
+		assert_eq!(combine(&[Subscription::default()]).unwrap().downstream, 1);
 	}
 }

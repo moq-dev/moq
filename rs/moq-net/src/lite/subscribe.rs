@@ -20,6 +20,13 @@ pub struct Subscribe<'a> {
 	pub max_latency: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
+	/// How many consumers this subscription represents, including the subscriber
+	/// itself, so the minimum is `1` (lite-05+). The subscription is the implicit
+	/// `1`, so the wire carries `downstream - 1`: a leaf encodes `0` (nothing
+	/// downstream of it), and a relay encodes its summed total minus one. The
+	/// count telescopes up the fan-out tree. Older drafts omit it and it decodes
+	/// as `1`.
+	pub downstream: u64,
 }
 
 impl Message for Subscribe<'_> {
@@ -40,6 +47,14 @@ impl Message for Subscribe<'_> {
 			}
 		};
 
+		// The wire carries `downstream - 1` (the subscriber itself is the implicit
+		// 1), so add it back. Older drafts omit the field, leaving a weight of 1.
+		let downstream = if version.has_viewer_count() {
+			u64::decode(r, version)?.saturating_add(1)
+		} else {
+			1
+		};
+
 		Ok(Self {
 			id,
 			broadcast,
@@ -49,6 +64,7 @@ impl Message for Subscribe<'_> {
 			max_latency,
 			start_group,
 			end_group,
+			downstream,
 		})
 	}
 
@@ -66,6 +82,13 @@ impl Message for Subscribe<'_> {
 				self.start_group.encode(w, version)?;
 				self.end_group.encode(w, version)?;
 			}
+		}
+
+		// Send `downstream - 1`: the subscriber itself is the implicit 1, so a leaf
+		// sends 0. A paused relay (0 viewers) saturates to 0 and reads back as 1
+		// upstream, since a held subscription can't represent fewer than itself.
+		if version.has_viewer_count() {
+			self.downstream.saturating_sub(1).encode(w, version)?;
 		}
 
 		Ok(())
@@ -205,6 +228,12 @@ pub struct SubscribeUpdate {
 	pub max_latency: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
+	/// Updated count of consumers this subscription represents, including the
+	/// subscriber itself (lite-05+). Encoded as `downstream - 1` like
+	/// [`Subscribe::downstream`], so a relay can refresh its summed total as
+	/// consumers join and leave without tearing down the upstream subscription.
+	/// Older drafts omit it (decodes as `1`).
+	pub downstream: u64,
 }
 
 impl Message for SubscribeUpdate {
@@ -228,12 +257,21 @@ impl Message for SubscribeUpdate {
 			group => Some(group - 1),
 		};
 
+		// The wire carries `downstream - 1` (the subscriber itself is the implicit
+		// 1), so add it back. Older drafts omit the field, leaving a weight of 1.
+		let downstream = if version.has_viewer_count() {
+			u64::decode(r, version)?.saturating_add(1)
+		} else {
+			1
+		};
+
 		Ok(Self {
 			priority,
 			ordered,
 			max_latency,
 			start_group,
 			end_group,
+			downstream,
 		})
 	}
 
@@ -263,6 +301,12 @@ impl Message for SubscribeUpdate {
 				.ok_or(EncodeError::TooLarge)?
 				.encode(w, version)?,
 			None => 0u64.encode(w, version)?,
+		}
+
+		// Send `downstream - 1` (subscriber is the implicit 1); a paused relay's 0
+		// saturates to 0 and reads back as 1 upstream.
+		if version.has_viewer_count() {
+			self.downstream.saturating_sub(1).encode(w, version)?;
 		}
 
 		Ok(())
@@ -474,5 +518,95 @@ mod test {
 		});
 		let mut buf = Vec::new();
 		assert!(resp.encode(&mut buf, Version::Lite05Wip).is_err());
+	}
+
+	fn sample_subscribe(downstream: u64) -> Subscribe<'static> {
+		Subscribe {
+			id: 1,
+			broadcast: Path::new("room"),
+			track: "video".into(),
+			priority: 3,
+			ordered: true,
+			max_latency: std::time::Duration::ZERO,
+			start_group: None,
+			end_group: None,
+			downstream,
+		}
+	}
+
+	#[test]
+	fn subscribe_downstream_roundtrips_on_lite05() {
+		let msg = sample_subscribe(52);
+		let mut buf = Vec::new();
+		msg.encode(&mut buf, Version::Lite05Wip).unwrap();
+		let decoded = Subscribe::decode(&mut buf.as_slice(), Version::Lite05Wip).unwrap();
+		assert_eq!(decoded.downstream, 52);
+	}
+
+	#[test]
+	fn subscribe_downstream_defaults_to_one_on_lite04() {
+		// Lite04 can't carry the count; it's dropped on encode and decodes back as 1.
+		let msg = sample_subscribe(52);
+		let mut buf = Vec::new();
+		msg.encode(&mut buf, Version::Lite04).unwrap();
+		let decoded = Subscribe::decode(&mut buf.as_slice(), Version::Lite04).unwrap();
+		assert_eq!(decoded.downstream, 1);
+	}
+
+	#[test]
+	fn subscribe_leaf_encodes_downstream_zero_on_wire() {
+		// A leaf (downstream = 1) sends 0 on the wire: it has nothing downstream.
+		let msg = sample_subscribe(1);
+		let mut buf = Vec::new();
+		msg.encode(&mut buf, Version::Lite05Wip).unwrap();
+		// The downstream varint is the last byte of the message.
+		assert_eq!(*buf.last().unwrap(), 0);
+		let decoded = Subscribe::decode(&mut buf.as_slice(), Version::Lite05Wip).unwrap();
+		assert_eq!(decoded.downstream, 1);
+	}
+
+	#[test]
+	fn subscribe_paused_zero_reads_back_as_one() {
+		// A held subscription can't represent fewer viewers than itself: 0 saturates
+		// to wire 0 and decodes to 1 upstream.
+		let msg = sample_subscribe(0);
+		let mut buf = Vec::new();
+		msg.encode(&mut buf, Version::Lite05Wip).unwrap();
+		assert_eq!(*buf.last().unwrap(), 0);
+		let decoded = Subscribe::decode(&mut buf.as_slice(), Version::Lite05Wip).unwrap();
+		assert_eq!(decoded.downstream, 1);
+	}
+
+	#[test]
+	fn subscribe_update_downstream_roundtrips_on_lite05() {
+		let msg = SubscribeUpdate {
+			priority: 0,
+			ordered: true,
+			max_latency: std::time::Duration::ZERO,
+			start_group: None,
+			end_group: Some(9),
+			downstream: 7,
+		};
+		let mut buf = Vec::new();
+		msg.encode(&mut buf, Version::Lite05Wip).unwrap();
+		let decoded = SubscribeUpdate::decode(&mut buf.as_slice(), Version::Lite05Wip).unwrap();
+		assert_eq!(decoded.downstream, 7);
+		assert_eq!(decoded.end_group, Some(9));
+	}
+
+	#[test]
+	fn subscribe_update_downstream_defaults_to_one_on_lite04() {
+		let msg = SubscribeUpdate {
+			priority: 0,
+			ordered: true,
+			max_latency: std::time::Duration::ZERO,
+			start_group: None,
+			end_group: None,
+			downstream: 7,
+		};
+		let mut buf = Vec::new();
+		msg.encode(&mut buf, Version::Lite04).unwrap();
+		let decoded = SubscribeUpdate::decode(&mut buf.as_slice(), Version::Lite04).unwrap();
+		assert_eq!(decoded.downstream, 1);
 	}
 }

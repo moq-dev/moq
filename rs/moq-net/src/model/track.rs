@@ -689,9 +689,16 @@ impl TrackProducer {
 		let state = self.state.read();
 		let mut combined: Option<Subscription> = None;
 		for sub in &state.subscriptions {
-			if let Poll::Ready(merged) = sub.read().poll_combined(&combined) {
-				combined = Some(merged);
+			// Skip closed-but-not-yet-pruned subscribers so a dropped consumer
+			// doesn't keep inflating the aggregate (e.g. its viewer count).
+			if sub.is_closed() {
+				continue;
 			}
+			let value = sub.read().clone();
+			combined = Some(match combined {
+				Some(c) => value.merge(&c),
+				None => value,
+			});
 		}
 		combined
 	}
@@ -820,6 +827,14 @@ impl Drop for TrackDynamic {
 /// Aggregate every live subscriber's preferences into the most demanding request,
 /// returning `Poll::Ready` only when the result differs from `prev`.
 ///
+/// Registration and the value merge are deliberately separate. The merge sums
+/// `downstream`, so every subscriber always contributes; we can't piggyback waiter
+/// registration on a "did this change the combined value" check the way a pure
+/// max/min fold could. Instead each live subscriber is polled with a `Pending`
+/// closure purely to register the waiter (and detect closure), then its value is
+/// read and merged. This wakes the producer on any subscriber's value change or
+/// drop, including a deep relay's telescoped viewer-count update.
+///
 /// Iterates `subscriptions` immutably so it never flags the [`TrackState`] as
 /// modified on a no-op poll. Marking it modified would drain and wake unrelated
 /// waiters on the channel (e.g. a [`TrackSubscriberPending`] parked on track
@@ -831,14 +846,20 @@ fn poll_combined_subscriptions(
 	waiter: &kio::Waiter,
 	prev: &Option<Subscription>,
 ) -> Poll<Option<Subscription>> {
-	let mut combined = None;
+	let mut combined: Option<Subscription> = None;
 	let mut any_closed = false;
 	for sub in state.subscriptions.iter() {
-		match sub.poll(waiter, |sub| sub.poll_combined(&combined)) {
-			Poll::Ready(Ok(sub)) => combined = Some(sub),
-			Poll::Ready(Err(_)) => any_closed = true,
-			Poll::Pending => {}
+		// The closure stays Pending so this only registers the waiter (for value
+		// changes) and reports closure; the value fold happens below.
+		if let Poll::Ready(Err(_)) = sub.poll(waiter, |_| Poll::Pending::<()>) {
+			any_closed = true;
+			continue;
 		}
+		let value = sub.read().clone();
+		combined = Some(match combined {
+			Some(c) => value.merge(&c),
+			None => value,
+		});
 	}
 
 	if any_closed {
@@ -1401,9 +1422,16 @@ impl TrackRequest {
 		let state = self.state.read();
 		let mut combined: Option<Subscription> = None;
 		for sub in &state.subscriptions {
-			if let Poll::Ready(merged) = sub.read().poll_combined(&combined) {
-				combined = Some(merged);
+			// Skip closed-but-not-yet-pruned subscribers so a dropped consumer
+			// doesn't keep inflating the aggregate (e.g. its viewer count).
+			if sub.is_closed() {
+				continue;
 			}
+			let value = sub.read().clone();
+			combined = Some(match combined {
+				Some(c) => value.merge(&c),
+				None => value,
+			});
 		}
 		combined
 	}
@@ -1617,6 +1645,28 @@ mod test {
 
 		subscriber.update(Subscription::default().with_stale(Duration::ZERO));
 		assert_eq!(subscriber.subscription().stale, Duration::ZERO);
+	}
+
+	#[test]
+	fn aggregate_downstream_sums_subscribers() {
+		let mut producer = TrackProducer::new("test", None);
+
+		// A direct viewer (1) plus a relay representing 50 telescopes to 51. The
+		// snapshot recomputes from scratch, so it reflects both immediately.
+		let viewer = producer.subscribe(Subscription::default());
+		let relay = producer.subscribe(Subscription::default().with_downstream(50));
+		assert_eq!(producer.subscription().unwrap().downstream, 51);
+
+		// Dropping a subscriber only prunes on the poll path (what a relay's upstream
+		// forwarder uses), so drive that to observe the count drop.
+		drop(relay);
+		let _ = producer.poll_subscription_changed(&kio::Waiter::noop());
+		assert_eq!(producer.subscription().unwrap().downstream, 1);
+
+		// Dropping the last subscriber clears the aggregate entirely.
+		drop(viewer);
+		let _ = producer.poll_subscription_changed(&kio::Waiter::noop());
+		assert!(producer.subscription().is_none());
 	}
 
 	#[tokio::test]

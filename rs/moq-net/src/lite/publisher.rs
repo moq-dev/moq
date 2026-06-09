@@ -514,6 +514,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			stale: subscribe.max_latency,
 			group_start: subscribe.start_group,
 			group_end: subscribe.end_group,
+			// The peer reports how many downstream viewers it represents; the producer
+			// sums this across subscribers so the count telescopes up the fan-out tree.
+			downstream: subscribe.downstream,
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
@@ -837,6 +840,15 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					};
 					let _ = track_priority_tx.send(upd.priority);
 					track.end_at(upd.end_group);
+
+					// Refresh the viewer count so the producer's aggregate (and any
+					// upstream relay reading it) reflects consumers joining or leaving
+					// below this peer.
+					let mut subscription = track.subscription();
+					if subscription.downstream != upd.downstream {
+						subscription.downstream = upd.downstream;
+						track.update(subscription);
+					}
 				}
 			}
 		}

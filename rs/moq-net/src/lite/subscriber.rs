@@ -708,6 +708,9 @@ struct SubStream<S: web_transport_trait::Session> {
 	max_latency: Duration,
 	start_group: Option<u64>,
 	priority: u8,
+	/// Summed downstream viewer count, echoed in every SUBSCRIBE_UPDATE so the
+	/// count telescopes upstream. Reset to 0 while paused (no live consumers).
+	downstream: u64,
 	/// Per-(session, broadcast) viewer sentinel, held for the subscription's life.
 	_broadcast_sub: crate::BroadcastSubscription,
 }
@@ -989,6 +992,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					active.ordered = subscription.ordered;
 					active.max_latency = subscription.stale;
 					active.start_group = subscription.group_start;
+					active.downstream = subscription.downstream;
 					self.send_update(active, subscription.group_end).await?;
 					tracing::info!(track = %self.name, "subscribe resumed");
 				}
@@ -999,6 +1003,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					active.ordered = subscription.ordered;
 					active.max_latency = subscription.stale;
 					active.start_group = subscription.group_start;
+					active.downstream = subscription.downstream;
 					if supports_linger {
 						self.send_update(active, subscription.group_end).await?;
 					}
@@ -1014,6 +1019,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						if !active.paused {
 							active.paused = true;
 							active.start_group = None;
+							// No live consumers while paused, so report zero viewers upstream.
+							active.downstream = 0;
 							let cap = track.as_ref().and_then(Track::latest).unwrap_or(0);
 							let update = lite::SubscribeUpdate {
 								priority: 0,
@@ -1021,6 +1028,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 								max_latency: active.max_latency,
 								start_group: active.start_group,
 								end_group: Some(cap),
+								downstream: active.downstream,
 							};
 							active.stream.writer.encode(&update).await?;
 						}
@@ -1055,6 +1063,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			max_latency: subscription.stale,
 			start_group: subscription.group_start,
 			end_group: subscription.group_end,
+			// Forward the aggregate downstream count so it telescopes upstream.
+			downstream: subscription.downstream,
 		};
 
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
@@ -1117,6 +1127,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			max_latency: subscription.stale,
 			start_group: subscription.group_start,
 			priority: subscription.priority,
+			downstream: subscription.downstream,
 			_broadcast_sub: broadcast_sub,
 		});
 
@@ -1131,6 +1142,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			max_latency: active.max_latency,
 			start_group: active.start_group,
 			end_group,
+			downstream: active.downstream,
 		};
 		active.stream.writer.encode(&update).await
 	}
