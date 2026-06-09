@@ -123,6 +123,9 @@ pub enum AuthError {
 	#[error("auth API request failed: {0}")]
 	ApiUnavailable(#[from] reqwest_middleware::Error),
 
+	#[error("auth API response was invalid: {0}")]
+	ApiInvalidResponse(#[from] serde_json::Error),
+
 	#[error("invalid URL: {0}")]
 	InvalidUrl(#[from] url::ParseError),
 
@@ -144,7 +147,7 @@ impl From<&AuthError> for http::StatusCode {
 		match err {
 			// Upstream auth API unreachable or misconfigured — this is a server-side
 			// problem, not a credential problem.
-			AuthError::ApiUnavailable(_) => http::StatusCode::BAD_GATEWAY,
+			AuthError::ApiUnavailable(_) | AuthError::ApiInvalidResponse(_) => http::StatusCode::BAD_GATEWAY,
 			AuthError::InvalidUrl(_) => http::StatusCode::INTERNAL_SERVER_ERROR,
 			_ => http::StatusCode::UNAUTHORIZED,
 		}
@@ -865,7 +868,7 @@ impl Auth {
 	) -> Result<AuthApiResponse, AuthError> {
 		let url = Self::auth_api_url(base, path, kid, mtls);
 		let body = client.get(url).send().await?.error_for_status()?.text().await?;
-		serde_json::from_str(&body).map_err(|_| AuthError::DecodeFailed)
+		serde_json::from_str(&body).map_err(AuthError::from)
 	}
 
 	/// Verify a connection via the unified `--auth-api`: one call returns the
@@ -918,7 +921,7 @@ impl Auth {
 
 	async fn fetch_public_response(client: &ClientWithMiddleware, url: &url::Url) -> Result<PublicResponse, AuthError> {
 		let body = client.get(url.clone()).send().await?.error_for_status()?.text().await?;
-		serde_json::from_str(&body).map_err(|_| AuthError::DecodeFailed)
+		serde_json::from_str(&body).map_err(AuthError::from)
 	}
 
 	/// Parse the token from the user provided URL, returning the claims if successful.
@@ -2439,7 +2442,9 @@ api = "https://api.example.com/access"
 	}
 
 	#[tokio::test]
-	async fn test_public_api_invalid_json_returns_decode_failed() -> anyhow::Result<()> {
+	async fn test_public_api_invalid_json_returns_invalid_response() -> anyhow::Result<()> {
+		// Malformed upstream JSON is an upstream failure (502), not a bad-credential
+		// (401): the auth API answered, but with garbage.
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
 			.respond_with(ResponseTemplate::new(200).set_body_string("not json"))
@@ -2448,7 +2453,11 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_public_api(&server, &[], &[]).await;
 		let result = auth.verify(&AuthParams::new("/demo")).await;
-		assert!(matches!(result, Err(AuthError::DecodeFailed)));
+		assert!(matches!(result, Err(AuthError::ApiInvalidResponse(_))));
+		assert_eq!(
+			http::StatusCode::from(result.unwrap_err()),
+			http::StatusCode::BAD_GATEWAY
+		);
 		Ok(())
 	}
 
@@ -2971,7 +2980,10 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		assert_eq!(auth.resolve_mtls("/demo/room").await?, ("x7k2qp/room".to_string(), true));
+		assert_eq!(
+			auth.resolve_mtls("/demo/room").await?,
+			("x7k2qp/room".to_string(), true)
+		);
 		Ok(())
 	}
 
@@ -3023,6 +3035,26 @@ api = "https://api.example.com/access"
 		let auth = auth_with_api(&server).await;
 		let err = auth.resolve_mtls("/demo").await.unwrap_err();
 		assert!(matches!(err, AuthError::ApiUnavailable(_)));
+		assert_eq!(http::StatusCode::from(err), http::StatusCode::BAD_GATEWAY);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_mtls_fails_closed_on_invalid_json() -> anyhow::Result<()> {
+		// A 2xx with an unparseable body is still an upstream failure: classify it
+		// as 502 (not a credential 401) so the mTLS peer reconnects and self-heals.
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo"))
+			.respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let err = auth.resolve_mtls("/demo").await.unwrap_err();
+		assert!(matches!(err, AuthError::ApiInvalidResponse(_)));
+		assert_eq!(http::StatusCode::from(err), http::StatusCode::BAD_GATEWAY);
 		Ok(())
 	}
 
