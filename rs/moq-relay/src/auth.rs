@@ -807,29 +807,31 @@ impl Auth {
 
 	/// Resolve the canonical root and billing tier for an mTLS peer via the
 	/// unified `--auth-api`. mTLS peers are already trusted (the cert is the
-	/// credential), so this only fetches the alias + tier and FAILS OPEN: with no
-	/// auth API, a root (`/`) connection, or any error, the path is used unchanged
-	/// and the tier defaults to internal (trusted peer).
-	pub(crate) async fn resolve_mtls(&self, path: &str) -> (String, bool) {
+	/// credential), so this only fetches the alias + tier.
+	///
+	/// Fails OPEN only when there is nothing to resolve: no auth API configured,
+	/// or a root (`/`) connection. A non-root path needs an alias, so an actual
+	/// API error FAILS CLOSED (returns `Err`) rather than accepting the
+	/// connection with the path unresolved. Accepting it would route the
+	/// broadcast to the literal vanity path (e.g. `demo`) instead of its canonical
+	/// root (e.g. `x7k2qp`), producing a zombie session: the publisher believes it
+	/// is connected and never reconnects, but nothing is ever served. Failing
+	/// closed lets the client retry and self-heal once the API recovers.
+	pub(crate) async fn resolve_mtls(&self, path: &str) -> Result<(String, bool), AuthError> {
 		let Some((base, client)) = &self.auth_api else {
-			return (path.to_string(), true);
+			return Ok((path.to_string(), true));
 		};
 
 		// Root connection ("/" or ""): nothing to resolve, skip the call.
 		if path.trim_matches('/').is_empty() {
-			return (path.to_string(), true);
+			return Ok((path.to_string(), true));
 		}
 
-		match Self::fetch_auth_api(client, base, path, None, true).await {
-			Ok(resp) => (
-				resp.alias.unwrap_or_else(|| path.to_string()),
-				resp.internal.unwrap_or(true),
-			),
-			Err(err) => {
-				tracing::warn!(%err, %path, "auth-api mTLS resolution failed; using path unchanged, internal tier");
-				(path.to_string(), true)
-			}
-		}
+		let resp = Self::fetch_auth_api(client, base, path, None, true).await?;
+		Ok((
+			resp.alias.unwrap_or_else(|| path.to_string()),
+			resp.internal.unwrap_or(true),
+		))
 	}
 
 	/// Build the unified auth-API request URL. The connection path (`root`), the
@@ -2969,7 +2971,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		assert_eq!(auth.resolve_mtls("/demo/room").await, ("x7k2qp/room".to_string(), true));
+		assert_eq!(auth.resolve_mtls("/demo/room").await?, ("x7k2qp/room".to_string(), true));
 		Ok(())
 	}
 
@@ -2985,7 +2987,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		assert_eq!(auth.resolve_mtls("/demo").await, ("x7k2qp".to_string(), false));
+		assert_eq!(auth.resolve_mtls("/demo").await?, ("x7k2qp".to_string(), false));
 		Ok(())
 	}
 
@@ -3001,7 +3003,26 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		assert_eq!(auth.resolve_mtls("/").await, ("/".to_string(), true));
+		assert_eq!(auth.resolve_mtls("/").await?, ("/".to_string(), true));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_mtls_fails_closed_on_api_error() -> anyhow::Result<()> {
+		// A non-root mTLS path needs an alias. If the API can't answer, reject the
+		// connection instead of accepting it with the path unresolved (which would
+		// route the broadcast to the literal vanity path and strand the publisher).
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo"))
+			.respond_with(ResponseTemplate::new(404))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let err = auth.resolve_mtls("/demo").await.unwrap_err();
+		assert!(matches!(err, AuthError::ApiUnavailable(_)));
 		Ok(())
 	}
 

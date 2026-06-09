@@ -123,7 +123,7 @@ impl Connection {
 			// vanity alias lands on the same tree a JWT would; cluster peers dial
 			// "/", which resolves to an empty (unscoped) root. The API also returns
 			// the billing tier (defaulting to internal for trusted peers).
-			let (root, internal) = self.auth.resolve_mtls(&params.path).await;
+			let (root, internal) = self.auth.resolve_mtls(&params.path).await?;
 			let mut token = AuthToken::unrestricted(Path::new(&root).to_owned());
 			token.internal = internal;
 			return Ok(token);
