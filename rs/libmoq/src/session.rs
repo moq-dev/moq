@@ -114,7 +114,7 @@ fn map_connect_error(err: moq_native::Error) -> Error {
 	match err.connect_error() {
 		Some(moq_native::ConnectError::Unauthorized) => Error::Unauthorized,
 		Some(moq_native::ConnectError::Forbidden) => Error::Forbidden,
-		_ => Error::Native(err),
+		_ => Error::Connect(Arc::new(err.into())),
 	}
 }
 
@@ -137,7 +137,12 @@ mod tests {
 			map_connect_error(moq_net::Error::Unauthorized.into()),
 			Error::Unauthorized
 		));
+		assert!(matches!(
+			map_connect_error(moq_native::Error::ConnectFailed),
+			Error::Connect(_)
+		));
 		assert_eq!(Error::Unauthorized.code(), -32);
 		assert_eq!(Error::Forbidden.code(), -33);
+		assert_eq!(map_connect_error(moq_native::Error::ConnectFailed).code(), -5);
 	}
 }

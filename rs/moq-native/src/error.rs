@@ -85,6 +85,8 @@ impl Error {
 			#[cfg(feature = "quiche")]
 			Self::Quiche(err) => err.connect_error(),
 			#[cfg(feature = "websocket")]
+			Self::TransportRace { quic, websocket } => quic.connect_error().or_else(|| websocket.connect_error()),
+			#[cfg(feature = "websocket")]
 			Self::WebSocket(err) => err.connect_error(),
 			_ => None,
 		}
@@ -168,3 +170,23 @@ impl From<crate::websocket::Error> for Error {
 
 /// Convenience alias for results produced by this crate.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(all(test, feature = "websocket"))]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn transport_race_propagates_nested_connect_errors() {
+		let quic = Error::TransportRace {
+			quic: Arc::new(crate::ConnectError::Unauthorized.into()),
+			websocket: Arc::new(crate::ConnectError::Forbidden.into()),
+		};
+		assert_eq!(quic.connect_error(), Some(crate::ConnectError::Unauthorized));
+
+		let websocket = Error::TransportRace {
+			quic: Arc::new(Error::ConnectFailed),
+			websocket: Arc::new(crate::ConnectError::Forbidden.into()),
+		};
+		assert_eq!(websocket.connect_error(), Some(crate::ConnectError::Forbidden));
+	}
+}
