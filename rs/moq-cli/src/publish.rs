@@ -147,9 +147,9 @@ impl Publish {
 			}
 			#[cfg(feature = "webcam")]
 			Source::Webcam { catalog, config } => {
-				let broadcast = self.broadcast.clone();
-				// Capture + encode block; keep them off the async runtime.
-				tokio::task::spawn_blocking(move || moq_video::publish_camera(broadcast, catalog, config)).await??;
+				// Encodes on demand: the camera opens only while subscribed.
+				// publish_camera drives the blocking capture loop internally.
+				moq_video::publish_camera(self.broadcast.clone(), catalog, config).await?;
 				Ok(())
 			}
 		}

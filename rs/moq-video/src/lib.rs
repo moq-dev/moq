@@ -12,8 +12,10 @@
 //! - [`VideoProducer`] wires the encoder into
 //!   [`moq_mux::codec::h264::Import`], which handles catalog registration
 //!   and frame publishing.
-//! - [`publish_camera`] is the one-call capture-encode-publish loop the CLI
-//!   uses; run it on a blocking thread.
+//! - [`publish_camera`] is the one-call capture-encode-publish entry the CLI
+//!   uses. It encodes strictly on demand: the track and catalog are
+//!   advertised up front, but the camera opens only while a subscriber is
+//!   watching and is released when the last one leaves.
 //!
 //! Decode/consume (the mirror of `moq-audio`'s `AudioConsumer`) is not
 //! implemented yet; native subscribers can keep using `moq_mux` directly.

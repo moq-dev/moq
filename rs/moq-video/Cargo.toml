@@ -22,6 +22,7 @@ hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 thiserror = "2"
+tokio = { workspace = true, features = ["rt", "macros"] }
 tracing = "0.1"
 # H.264 encode plus webcam capture (libavdevice). One system dependency
 # covers both, and unlike a pure-Rust encoder it exposes the platform
