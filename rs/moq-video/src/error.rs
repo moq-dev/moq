@@ -20,6 +20,11 @@ pub enum Error {
 	#[error("no video stream on capture device {0:?}")]
 	NoVideoStream(String),
 
+	/// The configured framerate was zero (would divide by zero / produce a
+	/// degenerate codec time base).
+	#[error("invalid framerate: {0} (must be non-zero)")]
+	InvalidFramerate(u32),
+
 	/// moq-mux codec/transport error (H.264 import, catalog).
 	#[error(transparent)]
 	Codec(#[from] anyhow::Error),

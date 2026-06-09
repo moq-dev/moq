@@ -133,7 +133,11 @@ impl Camera {
 					self.decoder.send_eof()?;
 					return match self.decoder.receive_frame(&mut frame) {
 						Ok(()) => Ok(Some(frame)),
-						_ => Ok(None),
+						// Drained: no more frames after EOF.
+						Err(ffmpeg::Error::Eof) => Ok(None),
+						Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => Ok(None),
+						// A real decode failure must not masquerade as end-of-stream.
+						Err(e) => Err(e.into()),
 					};
 				}
 			}

@@ -79,6 +79,9 @@ pub async fn publish_camera(
 	config: CameraPublishConfig,
 ) -> Result<(), Error> {
 	let framerate = config.camera.framerate.unwrap_or(DEFAULT_FRAMERATE);
+	if framerate == 0 {
+		return Err(Error::InvalidFramerate(framerate));
+	}
 
 	let producer = VideoProducer::new(broadcast, catalog)?;
 	let track = producer
