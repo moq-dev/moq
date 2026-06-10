@@ -11,7 +11,7 @@
 //!   hardware encoder) and publishes them through
 //!   [`moq_mux::codec::h264::Import`], which handles catalog registration
 //!   and framing.
-//! - [`encode::publish_camera`] is the one-call capture-encode-publish entry
+//! - [`encode::publish_capture`] is the one-call capture-encode-publish entry
 //!   the CLI uses. It encodes strictly on demand: the track and catalog are
 //!   advertised up front, but the camera opens only while a subscriber is
 //!   watching and is released when the last one leaves.

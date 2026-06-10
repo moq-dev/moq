@@ -11,7 +11,7 @@ Counterpart to [`moq-audio`](https://crates.io/crates/moq-audio). Built on
   hardware encoder (`h264_videotoolbox` / `h264_nvenc` / `h264_vaapi`) and
   falling back to software (`libx264`).
 - `encode::VideoProducer` publishes encoded frames through `moq_mux::codec::h264::Import`.
-- `encode::publish_camera` is a one-call capture-encode-publish loop. It encodes
+- `encode::publish_capture` is a one-call capture-encode-publish loop. It encodes
   on demand: the camera opens only while a subscriber is watching.
 
 Used by `moq-cli`'s `webcam` subcommand. Requires a system FFmpeg (libav\*).

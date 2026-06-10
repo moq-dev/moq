@@ -7,4 +7,4 @@ mod encoder;
 mod producer;
 
 pub use encoder::{Encoder, EncoderConfig, EncoderKind};
-pub use producer::{Options, VideoProducer, publish_camera};
+pub use producer::{Options, VideoProducer, publish_capture};

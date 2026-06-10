@@ -74,7 +74,7 @@ pub struct Options {
 /// or the capture loop fails. The camera is opened only while at least one
 /// subscriber is watching; presentation timestamps track real elapsed time,
 /// so the timeline stays continuous across idle gaps.
-pub async fn publish_camera(
+pub async fn publish_capture(
 	broadcast: moq_net::BroadcastProducer,
 	catalog: moq_mux::catalog::Producer,
 	capture: capture::Config,

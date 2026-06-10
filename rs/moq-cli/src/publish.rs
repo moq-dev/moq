@@ -154,8 +154,8 @@ impl Publish {
 				encode,
 			} => {
 				// Encodes on demand: the camera opens only while subscribed.
-				// publish_camera drives the blocking capture loop internally.
-				moq_video::encode::publish_camera(self.broadcast.clone(), catalog, capture, encode).await?;
+				// publish_capture drives the blocking capture loop internally.
+				moq_video::encode::publish_capture(self.broadcast.clone(), catalog, capture, encode).await?;
 				Ok(())
 			}
 		}
