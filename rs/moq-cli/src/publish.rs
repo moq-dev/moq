@@ -177,11 +177,11 @@ impl WebcamArgs {
 		let mut options = moq_video::encode::Options::default();
 		options.bitrate = self.bitrate;
 		options.kind = if self.software {
-			moq_video::encode::encoder::Kind::Software
+			moq_video::encode::Kind::Software
 		} else if self.hardware {
-			moq_video::encode::encoder::Kind::Hardware
+			moq_video::encode::Kind::Hardware
 		} else {
-			moq_video::encode::encoder::Kind::Auto
+			moq_video::encode::Kind::Auto
 		};
 		options
 	}

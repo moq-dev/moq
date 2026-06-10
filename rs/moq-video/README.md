@@ -3,16 +3,19 @@
 Native video capture, encoding, and publishing for [Media over QUIC](https://github.com/moq-dev/moq).
 
 Counterpart to [`moq-audio`](https://crates.io/crates/moq-audio). Built on
-[`ffmpeg-next`](https://crates.io/crates/ffmpeg-next):
+[`ffmpeg-next`](https://crates.io/crates/ffmpeg-next), but the public API is
+ffmpeg-free at the signature level (capture/encode internals that traffic in
+ffmpeg frames are private), so an `ffmpeg-next` bump isn't a breaking change.
 
-- `capture::Camera` captures a webcam via libavdevice (avfoundation / v4l2 / dshow);
-  screen capture would slot into the same `capture` module.
-- `encode::encoder::Encoder` encodes decoded frames to Annex-B H.264, preferring a
-  platform hardware encoder (`h264_videotoolbox` / `h264_nvenc` / `h264_vaapi`) and
-  falling back to software (`libx264`).
-- `encode::Producer` publishes encoded frames through `moq_mux::codec::h264::Import`.
-- `encode::publish_capture` is a one-call capture-encode-publish loop. It encodes
-  on demand: the camera opens only while a subscriber is watching.
+Two public entry points:
+
+- `encode::publish_capture(broadcast, catalog, capture::Config, encode::Options)`
+  captures a webcam (libavdevice: avfoundation / v4l2 / dshow), H.264-encodes it
+  (preferring a hardware encoder, falling back to `libx264`), and publishes on
+  demand: the camera opens only while a subscriber is watching. Screen capture
+  would slot into the same `capture` module.
+- `encode::Producer` publishes H.264 you encoded yourself, handling the catalog
+  and framing via `moq_mux::codec::h264::Import`.
 
 Used by `moq-cli`'s `webcam` subcommand. Requires a system FFmpeg (libav\*).
 

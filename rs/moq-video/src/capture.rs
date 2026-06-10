@@ -1,12 +1,15 @@
 //! Frame capture via libavdevice.
 //!
-//! Today this is webcam capture ([`Camera`]): it opens the platform camera
-//! backend (avfoundation on macOS, v4l2 on Linux, dshow on Windows) and
-//! yields decoded [`ffmpeg::frame::Video`] frames in the source's native
-//! pixel format. Screen capture is the same libavdevice pipeline with a
-//! different input format (avfoundation screen, x11grab/gdigrab, ...), so it
-//! would live here too. The [`Encoder`](crate::encode::encoder::Encoder) handles
-//! conversion to YUV420P, so callers don't have to care what the source delivers.
+//! Today this is webcam capture (the internal `Camera`): it opens the platform
+//! camera backend (avfoundation on macOS, v4l2 on Linux, dshow on Windows) and
+//! yields decoded `ffmpeg::frame::Video` frames in the source's native pixel
+//! format. Screen capture is the same libavdevice pipeline with a different
+//! input format (avfoundation screen, x11grab/gdigrab, ...), so it would live
+//! here too. The encoder handles conversion to YUV420P, so callers don't have
+//! to care what the source delivers.
+//!
+//! The public type here is [`Config`], which describes the source;
+//! [`encode::publish_capture`](crate::encode::publish_capture) consumes it.
 
 use std::ffi::CString;
 
@@ -34,7 +37,12 @@ pub struct Config {
 }
 
 /// An open camera, read frame-by-frame via [`read`](Self::read).
-pub struct Camera {
+///
+/// Internal for now: it exposes [`ffmpeg`](crate::ffmpeg) frame types, so
+/// keeping it private leaves the public API free of that version coupling.
+/// Promote to `pub` (a non-breaking change) once a bring-your-own-frames
+/// consumer needs it.
+pub(crate) struct Camera {
 	input: ffmpeg::format::context::Input,
 	decoder: ffmpeg::decoder::Video,
 	stream_index: usize,
@@ -96,11 +104,6 @@ impl Camera {
 			url,
 			framerate,
 		})
-	}
-
-	/// Native pixel format the camera decodes to.
-	pub fn format(&self) -> ffmpeg::format::Pixel {
-		self.decoder.format()
 	}
 
 	pub fn width(&self) -> u32 {

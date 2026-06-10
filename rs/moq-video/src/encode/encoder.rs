@@ -28,11 +28,8 @@ pub enum Kind {
 /// Encoder configuration. `width` / `height` / `framerate` must match the
 /// stream the [`Encoder`] will publish; pixel conversion from the camera's
 /// native format is handled internally.
-/// `#[non_exhaustive]`: build via [`Config::new`] and set the optional
-/// fields, so future knobs (codec, keyframe policy, ...) don't break callers.
 #[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct Config {
+pub(crate) struct Config {
 	pub width: u32,
 	pub height: u32,
 	pub framerate: u32,
@@ -85,7 +82,7 @@ const HARDWARE_ENCODERS: &[&str] = &[
 /// Software fallbacks, in priority order.
 const SOFTWARE_ENCODERS: &[&str] = &["libx264", "h264"];
 
-pub struct Encoder {
+pub(crate) struct Encoder {
 	encoder: ffmpeg::encoder::video::Encoder,
 	/// Lazily built once we see the first frame's pixel format/size.
 	scaler: Option<Scaler>,
