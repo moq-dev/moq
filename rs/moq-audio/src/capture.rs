@@ -6,6 +6,8 @@
 //! Encoding stays on `unsafe-libopus`, so audio never touches ffmpeg.
 
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -37,29 +39,16 @@ pub struct Microphone {
 }
 
 impl Microphone {
-	/// Open the microphone described by `config`.
-	pub fn open(config: &Config) -> Result<Self, AudioError> {
-		let host = cpal::default_host();
-		let device = match &config.device {
-			Some(name) => host
-				.input_devices()
-				.map_err(cpal_err)?
-				.find(|d| d.to_string() == *name)
-				.ok_or_else(|| AudioError::Unsupported(format!("input device {name:?} not found")))?,
-			None => host
-				.default_input_device()
-				.ok_or_else(|| AudioError::Unsupported("no default input device".into()))?,
-		};
+	/// The device's negotiated format `(sample_rate, channels)` without opening
+	/// a stream, so the catalog can be populated before the mic is turned on.
+	pub fn format(config: &Config) -> Result<(u32, u32), AudioError> {
+		let (_, _, stream_config) = resolve(config)?;
+		Ok((stream_config.sample_rate, stream_config.channels as u32))
+	}
 
-		let supported = device.default_input_config().map_err(cpal_err)?;
-		let sample_format = supported.sample_format();
-		let mut stream_config = supported.config();
-		if let Some(rate) = config.sample_rate {
-			stream_config.sample_rate = rate;
-		}
-		if let Some(channels) = config.channels {
-			stream_config.channels = channels as u16;
-		}
+	/// Open (and start) the microphone described by `config`.
+	pub fn open(config: &Config) -> Result<Self, AudioError> {
+		let (device, sample_format, stream_config) = resolve(config)?;
 		let sample_rate = stream_config.sample_rate;
 		let channels = stream_config.channels as u32;
 
@@ -138,46 +127,182 @@ impl Microphone {
 	}
 }
 
-/// Capture the microphone, encode Opus, and publish it as a moq audio track
-/// named `track_name` until the broadcast is dropped (or the device stops).
+/// Capture the microphone on demand and publish it as an Opus moq track named
+/// `track_name`.
+///
+/// The catalog rendition is registered up front from the device's reported
+/// format (no capture needed), but the mic only opens while a subscriber is
+/// listening and is released when the last one leaves. On resume the timeline
+/// re-anchors (via [`AudioProducer::reset_epoch`]) so the idle gap lands in the
+/// PTS, keeping audio aligned with a wall-clock video track.
 ///
 /// The capture-side settings come from [`Config`]; the encode-side settings
-/// (codec, bitrate, frame duration) from [`EncoderOutput`] (use
-/// `EncoderOutput::default()` for stock Opus and set `bitrate`). The mic's
-/// native sample rate / channels become the encoder input; [`AudioProducer`]
-/// resamples to the codec rate.
-///
-/// Blocking: run it on a dedicated thread (e.g. `tokio::task::spawn_blocking`).
-/// Unlike the video path this does not yet release the device on-demand; the
-/// mic stays open while publishing.
-pub fn publish_microphone(
+/// (codec, bitrate, frame duration) from [`EncoderOutput`]. Returns when the
+/// broadcast is dropped or the capture loop fails.
+pub async fn publish_microphone(
 	mut broadcast: moq_net::BroadcastProducer,
 	catalog: moq_mux::catalog::Producer,
 	config: Config,
 	track_name: impl Into<String>,
 	output: EncoderOutput,
 ) -> Result<(), AudioError> {
-	let mut mic = Microphone::open(&config)?;
+	let (sample_rate, channels) = Microphone::format(&config)?;
 	let input = EncoderInput {
 		format: AudioFormat::F32,
-		sample_rate: mic.sample_rate(),
-		channels: mic.channels(),
+		sample_rate,
+		channels,
 	};
 
-	let mut producer = AudioProducer::new(&mut broadcast, catalog, track_name, input, output)?;
-	tracing::info!("publishing microphone");
+	let producer = AudioProducer::new(&mut broadcast, catalog, track_name, input, output)?;
+	let track = producer.track().clone();
 
-	while let Some(frame) = mic.read()? {
+	let gate = Gate::new();
+	let worker_gate = gate.clone();
+	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, config, worker_gate));
+
+	tokio::select! {
+		res = &mut worker => res.map_err(task_err)?,
+		() = monitor_demand(&track, &gate) => {
+			gate.close();
+			worker.await.map_err(task_err)?
+		}
+	}
+}
+
+/// Toggle the gate as listeners subscribe and unsubscribe. Returns once the
+/// track stops being announced (broadcast dropped / aborted).
+async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
+	loop {
+		match track.used().await {
+			Ok(()) => gate.set_active(true),
+			Err(_) => return,
+		}
+		match track.unused().await {
+			Ok(()) => gate.set_active(false),
+			Err(_) => return,
+		}
+	}
+}
+
+/// Blocking capture/encode loop. Opens the mic only while watched, releases it
+/// when idle, and stamps frames with wall-clock time so a release/reopen gap
+/// shows up in the PTS.
+fn capture_loop(mut producer: AudioProducer, config: Config, gate: Arc<Gate>) -> Result<(), AudioError> {
+	let mut mic: Option<Microphone> = None;
+	let mut start: Option<Instant> = None;
+
+	loop {
+		if !gate.is_active() {
+			if mic.take().is_some() {
+				// Re-anchor so the next frame after resume reflects the gap.
+				producer.reset_epoch();
+				tracing::info!("no listeners: released microphone");
+			}
+			if !gate.wait_active() {
+				break; // closed
+			}
+			continue;
+		}
+
+		if mic.is_none() {
+			mic = Some(Microphone::open(&config)?);
+		}
+
+		let Some(mut frame) = mic.as_mut().expect("mic open above").read()? else {
+			break; // device stopped producing samples
+		};
+
+		let now = Instant::now();
+		frame.timestamp_us = now.duration_since(*start.get_or_insert(now)).as_micros() as u64;
 		producer.write(&frame)?;
 	}
+
 	producer.finish()?;
 	Ok(())
+}
+
+fn task_err(err: tokio::task::JoinError) -> AudioError {
+	AudioError::Unsupported(format!("capture task: {err}"))
+}
+
+/// Bridges the async demand monitor to the blocking capture thread: the monitor
+/// flips `active`, the capture loop waits on it.
+struct Gate {
+	state: Mutex<GateState>,
+	cond: Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+	active: bool,
+	closed: bool,
+}
+
+impl Gate {
+	fn new() -> Arc<Self> {
+		Arc::new(Self {
+			state: Mutex::new(GateState::default()),
+			cond: Condvar::new(),
+		})
+	}
+
+	fn set_active(&self, active: bool) {
+		let mut state = self.state.lock().unwrap();
+		state.active = active;
+		self.cond.notify_all();
+	}
+
+	fn close(&self) {
+		let mut state = self.state.lock().unwrap();
+		state.active = false;
+		state.closed = true;
+		self.cond.notify_all();
+	}
+
+	fn is_active(&self) -> bool {
+		self.state.lock().unwrap().active
+	}
+
+	/// Block until active or closed. Returns `false` if closed.
+	fn wait_active(&self) -> bool {
+		let mut state = self.state.lock().unwrap();
+		while !state.active && !state.closed {
+			state = self.cond.wait(state).unwrap();
+		}
+		!state.closed
+	}
 }
 
 /// Forward a buffer to the reader, ignoring send errors (receiver dropped means
 /// capture is shutting down).
 fn forward(tx: &Sender<Vec<f32>>, samples: Vec<f32>) {
 	let _ = tx.send(samples);
+}
+
+/// Resolve the input device and its negotiated stream config from `config`.
+fn resolve(config: &Config) -> Result<(cpal::Device, cpal::SampleFormat, cpal::StreamConfig), AudioError> {
+	let host = cpal::default_host();
+	let device = match &config.device {
+		Some(name) => host
+			.input_devices()
+			.map_err(cpal_err)?
+			.find(|d| d.to_string() == *name)
+			.ok_or_else(|| AudioError::Unsupported(format!("input device {name:?} not found")))?,
+		None => host
+			.default_input_device()
+			.ok_or_else(|| AudioError::Unsupported("no default input device".into()))?,
+	};
+
+	let supported = device.default_input_config().map_err(cpal_err)?;
+	let sample_format = supported.sample_format();
+	let mut stream_config = supported.config();
+	if let Some(rate) = config.sample_rate {
+		stream_config.sample_rate = rate;
+	}
+	if let Some(channels) = config.channels {
+		stream_config.channels = channels as u16;
+	}
+	Ok((device, sample_format, stream_config))
 }
 
 fn stream_err(err: cpal::Error) {

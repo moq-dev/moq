@@ -195,12 +195,11 @@ impl Publish {
 					let broadcast = self.broadcast.clone();
 					async move {
 						match audio {
-							Some((config, output)) => tokio::task::spawn_blocking(move || {
+							Some((config, output)) => {
 								moq_audio::capture::publish_microphone(broadcast, catalog, config, "audio", output)
-							})
-							.await
-							.map_err(anyhow::Error::from)?
-							.map_err(anyhow::Error::from),
+									.await
+									.map_err(anyhow::Error::from)
+							}
 							None => Ok(()),
 						}
 					}

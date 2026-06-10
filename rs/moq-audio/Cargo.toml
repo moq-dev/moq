@@ -19,7 +19,7 @@ doctest = false
 # Microphone capture via cpal (pure-Rust: CoreAudio / WASAPI / ALSA). Off by
 # default so audio-only consumers (e.g. moq-ffi) don't pull cpal and, on Linux,
 # the ALSA build dependency.
-capture = ["dep:cpal", "dep:tracing"]
+capture = ["dep:cpal", "dep:tokio", "dep:tracing"]
 
 [dependencies]
 bytes = "1"
@@ -34,6 +34,9 @@ moq-net = { workspace = true }
 # fft_resampler feature and its RustFFT/realfft dependencies.
 rubato = { version = "3.0", default-features = false }
 thiserror = "2"
+# Only the `capture` feature needs an async runtime (spawn_blocking + select for
+# the on-demand gate).
+tokio = { workspace = true, optional = true, features = ["rt", "macros"] }
 # Only used by the `capture` feature for stream-error logging.
 tracing = { version = "0.1", optional = true }
 # Pure-Rust transpilation of libopus 1.3.1. No CMake toolchain, no C
