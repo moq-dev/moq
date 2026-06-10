@@ -82,7 +82,7 @@ fn encoder_thread(
 	force_keyframe: Arc<AtomicBool>,
 	encode_duration: Arc<AtomicU64>,
 ) {
-	let mut encoder: Option<moq_video::encode::encoder::Encoder> = None;
+	let mut encoder: Option<moq_video::encode::Encoder> = None;
 
 	while let Some(msg) = rx.blocking_recv() {
 		let enc = match encoder.as_mut() {
@@ -90,9 +90,9 @@ fn encoder_thread(
 			None => {
 				// Game Boy is 160x144; force software (libx264) since hardware
 				// encoders can reject such tiny resolutions.
-				let mut config = moq_video::encode::encoder::Config::new(WIDTH, HEIGHT, 60);
+				let mut config = moq_video::encode::Config::new(WIDTH, HEIGHT, 60);
 				config.kind = moq_video::encode::Kind::Software;
-				match moq_video::encode::encoder::Encoder::new(&config) {
+				match moq_video::encode::Encoder::new(&config) {
 					Ok(enc) => encoder.insert(enc),
 					Err(e) => {
 						tracing::error!(error = %e, "H.264 encoder init failed");
