@@ -60,7 +60,11 @@ impl VideoProducer {
 
 /// Source-agnostic encode knobs. Width / height / framerate aren't here:
 /// those come from the capture source, not the caller.
+///
+/// `#[non_exhaustive]`: construct via [`Options::default`] and set fields, so
+/// new knobs can be added without breaking callers.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Options {
 	/// Target bitrate in bits per second; `None` derives from resolution.
 	pub bitrate: Option<u64>,

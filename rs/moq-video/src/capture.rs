@@ -16,7 +16,11 @@ use crate::Error;
 
 /// Webcam capture configuration. All fields are hints; the backend picks
 /// the closest supported mode.
+///
+/// `#[non_exhaustive]`: construct via [`Config::default`] and set fields, so
+/// new options can be added without breaking callers.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Config {
 	/// Platform device identifier. `None` opens the default camera.
 	///

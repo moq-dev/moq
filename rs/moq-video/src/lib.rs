@@ -18,6 +18,16 @@
 //!
 //! The decode/consume side (the mirror of `moq-audio`'s `AudioConsumer`) is
 //! not implemented yet; native subscribers can keep using `moq_mux` directly.
+//!
+//! ## API stability
+//!
+//! [`encode::publish_capture`] is the insulated, recommended entry point: its
+//! signature is pure moq + plain config structs, so it survives an
+//! `ffmpeg-next` bump. The lower-level building blocks ([`capture::Camera`],
+//! [`encode::Encoder`]) expose [`ffmpeg`] frame/pixel types directly, so a
+//! major `ffmpeg-next` version bump is a breaking change for code that uses
+//! them. Config structs are `#[non_exhaustive]`: build them via `default()`
+//! (or their constructor) and set fields, so new options stay additive.
 
 pub mod capture;
 pub mod encode;

@@ -9,8 +9,10 @@ use ffmpeg_next as ffmpeg;
 
 use crate::Error;
 
-/// Which encoder implementation to use.
+/// Which encoder implementation to use. `#[non_exhaustive]` so new selection
+/// strategies can be added without breaking external `match`es.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EncoderKind {
 	/// Prefer a platform hardware encoder, fall back to software.
 	#[default]
@@ -26,7 +28,10 @@ pub enum EncoderKind {
 /// Encoder configuration. `width` / `height` / `framerate` must match the
 /// stream the [`Encoder`] will publish; pixel conversion from the camera's
 /// native format is handled internally.
+/// `#[non_exhaustive]`: build via [`EncoderConfig::new`] and set the optional
+/// fields, so future knobs (codec, keyframe policy, ...) don't break callers.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct EncoderConfig {
 	pub width: u32,
 	pub height: u32,

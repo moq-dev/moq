@@ -165,26 +165,24 @@ impl Publish {
 #[cfg(feature = "webcam")]
 impl WebcamArgs {
 	fn capture_config(&self) -> moq_video::capture::Config {
-		moq_video::capture::Config {
-			device: self.device.clone(),
-			width: self.width,
-			height: self.height,
-			framerate: self.fps,
-		}
+		let mut config = moq_video::capture::Config::default();
+		config.device = self.device.clone();
+		config.width = self.width;
+		config.height = self.height;
+		config.framerate = self.fps;
+		config
 	}
 
 	fn encode_options(&self) -> moq_video::encode::Options {
-		let kind = if self.software {
+		let mut options = moq_video::encode::Options::default();
+		options.bitrate = self.bitrate;
+		options.kind = if self.software {
 			moq_video::encode::EncoderKind::Software
 		} else if self.hardware {
 			moq_video::encode::EncoderKind::Hardware
 		} else {
 			moq_video::encode::EncoderKind::Auto
 		};
-
-		moq_video::encode::Options {
-			bitrate: self.bitrate,
-			kind,
-		}
+		options
 	}
 }
