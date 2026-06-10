@@ -3848,6 +3848,7 @@ dependencies = [
  "clap",
  "ffmpeg-next",
  "hang",
+ "moq-audio",
  "moq-mux",
  "moq-native",
  "moq-net",

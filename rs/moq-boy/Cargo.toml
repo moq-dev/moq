@@ -24,6 +24,7 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 ffmpeg-next = "8"
 hang = { workspace = true }
+moq-audio = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 moq-net = { workspace = true }
