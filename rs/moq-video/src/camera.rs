@@ -2,9 +2,9 @@
 //!
 //! Opens the platform camera backend (avfoundation on macOS, v4l2 on
 //! Linux, dshow on Windows) and yields decoded [`ffmpeg::frame::Video`]
-//! frames in the camera's native pixel format. The [`Encoder`](crate::Encoder)
-//! handles conversion to YUV420P, so callers don't have to care what the
-//! camera delivers.
+//! frames in the camera's native pixel format. The
+//! [`Encoder`](crate::encode::Encoder) handles conversion to YUV420P, so
+//! callers don't have to care what the camera delivers.
 
 use std::ffi::CString;
 
@@ -15,7 +15,7 @@ use crate::Error;
 /// Webcam capture configuration. All fields are hints; the backend picks
 /// the closest supported mode.
 #[derive(Clone, Debug, Default)]
-pub struct CameraConfig {
+pub struct Config {
 	/// Platform device identifier. `None` opens the default camera.
 	///
 	/// - macOS (avfoundation): device index (`"0"`) or name (`"FaceTime HD Camera"`).
@@ -37,7 +37,7 @@ pub struct Camera {
 
 impl Camera {
 	/// Open the camera described by `config`.
-	pub fn open(config: &CameraConfig) -> Result<Self, Error> {
+	pub fn open(config: &Config) -> Result<Self, Error> {
 		ffmpeg::init()?;
 		ffmpeg::device::register_all();
 

@@ -37,9 +37,9 @@ pub struct WebcamArgs {
 	#[arg(long)]
 	pub height: Option<u32>,
 
-	/// Capture/encode framerate.
-	#[arg(long, default_value_t = 30)]
-	pub fps: u32,
+	/// Capture/encode framerate. Omit to use moq-video's default (30).
+	#[arg(long)]
+	pub fps: Option<u32>,
 
 	/// Target bitrate in bits per second. Omit to derive one from the resolution.
 	#[arg(long)]
@@ -81,7 +81,7 @@ enum Source {
 	#[cfg(feature = "webcam")]
 	Webcam {
 		catalog: moq_mux::catalog::Producer,
-		config: moq_video::CameraPublishConfig,
+		config: moq_video::encode::CameraConfig,
 	},
 }
 
@@ -149,7 +149,7 @@ impl Publish {
 			Source::Webcam { catalog, config } => {
 				// Encodes on demand: the camera opens only while subscribed.
 				// publish_camera drives the blocking capture loop internally.
-				moq_video::publish_camera(self.broadcast.clone(), catalog, config).await?;
+				moq_video::encode::publish_camera(self.broadcast.clone(), catalog, config).await?;
 				Ok(())
 			}
 		}
@@ -157,22 +157,22 @@ impl Publish {
 }
 
 #[cfg(feature = "webcam")]
-impl From<WebcamArgs> for moq_video::CameraPublishConfig {
+impl From<WebcamArgs> for moq_video::encode::CameraConfig {
 	fn from(args: WebcamArgs) -> Self {
 		let kind = if args.software {
-			moq_video::EncoderKind::Software
+			moq_video::encode::EncoderKind::Software
 		} else if args.hardware {
-			moq_video::EncoderKind::Hardware
+			moq_video::encode::EncoderKind::Hardware
 		} else {
-			moq_video::EncoderKind::Auto
+			moq_video::encode::EncoderKind::Auto
 		};
 
-		moq_video::CameraPublishConfig {
-			camera: moq_video::CameraConfig {
+		moq_video::encode::CameraConfig {
+			camera: moq_video::camera::Config {
 				device: args.device,
 				width: args.width,
 				height: args.height,
-				framerate: Some(args.fps),
+				framerate: args.fps,
 			},
 			bitrate: args.bitrate,
 			kind,

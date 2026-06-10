@@ -12,8 +12,9 @@ use std::time::Instant;
 use moq_mux::container::Timestamp;
 
 use crate::Error;
-use crate::capture::{Camera, CameraConfig};
-use crate::encoder::{Encoder, EncoderConfig, EncoderKind};
+use crate::camera::{self, Camera};
+
+use super::encoder::{Encoder, EncoderConfig, EncoderKind};
 
 /// Default capture/encode framerate when the camera config doesn't pin one.
 const DEFAULT_FRAMERATE: u32 = 30;
@@ -57,10 +58,11 @@ impl VideoProducer {
 	}
 }
 
-/// High-level webcam publish configuration.
+/// High-level webcam encode-and-publish configuration.
 #[derive(Clone, Debug, Default)]
-pub struct CameraPublishConfig {
-	pub camera: CameraConfig,
+pub struct CameraConfig {
+	/// Capture-side settings (device, resolution, framerate).
+	pub camera: camera::Config,
 	/// Target bitrate in bits per second; `None` derives from resolution.
 	pub bitrate: Option<u64>,
 	/// Encoder implementation preference.
@@ -76,7 +78,7 @@ pub struct CameraPublishConfig {
 pub async fn publish_camera(
 	broadcast: moq_net::BroadcastProducer,
 	catalog: moq_mux::catalog::Producer,
-	config: CameraPublishConfig,
+	config: CameraConfig,
 ) -> Result<(), Error> {
 	let framerate = config.camera.framerate.unwrap_or(DEFAULT_FRAMERATE);
 	if framerate == 0 {
@@ -127,7 +129,7 @@ async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
 /// watched frame and releases it whenever the gate goes idle.
 fn capture_loop(
 	mut producer: VideoProducer,
-	config: CameraPublishConfig,
+	config: CameraConfig,
 	framerate: u32,
 	gate: Arc<Gate>,
 ) -> Result<(), Error> {

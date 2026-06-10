@@ -66,8 +66,12 @@ The `webcam` subcommand captures and encodes a camera directly, no external
 FFmpeg process required. It is gated behind the `webcam` feature, which pulls
 in a system FFmpeg (libav\*) build dependency:
 
+Build (or run) with the feature enabled:
+
 ```bash
 cargo build --release -p moq-cli --features webcam
+# or run straight from a checkout:
+cargo run -p moq-cli --features webcam -- publish --url https://relay.example.com --broadcast webcam.hang webcam
 
 # Default camera, hardware-encoded H.264 when available:
 moq-cli publish --url https://relay.example.com --broadcast webcam.hang webcam
