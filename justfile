@@ -121,6 +121,49 @@ build:
     just js build
     just rs build
     if command -v uv &> /dev/null; then just py build; fi
+    if command -v wasm-bindgen &> /dev/null; then just wasm; fi
+
+# Build the browser/WASM bindings (rs/moq-wasm) into the @moq/wasm package.
+# wasm-bindgen comes from the Nix dev shell (its version must match the pinned
+# wasm-bindgen crate); the wasm32 target, the size-optimized `wasm-release`
+# profile, and cfg flags (getrandom, web-sys unstable) live in Cargo.toml and
+# .cargo/config.toml. The profile already optimizes for size; wasm-opt is
+# skipped since it didn't improve the gzipped (over-the-wire) size here.
+wasm:
+    cargo build -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
+    wasm-bindgen --target web --out-name moq \
+    	--out-dir js/wasm/dist target/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm
+
+# Delete build artifacts and caches to reclaim disk space. Each language
+# owns its own `clean` (see js/rs/py/kt/swift/go justfiles); this
+# orchestrates them, sweeps the caches no language owns, then recurses into
+# any agent worktrees under .claude/worktrees/.
+clean:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    just rs clean
+    just js clean
+    just py clean
+    just kt clean
+    just swift clean
+    just go clean
+
+    # Caches not owned by any one language: nix build result, direnv, wrangler.
+    rm -rf result .direnv
+    find . -name .claude -prune -o -type d -name .wrangler -prune -exec rm -rf {} +
+
+    # Reclaim Nix store space too, if Nix is installed.
+    if command -v nix-collect-garbage &> /dev/null; then nix-collect-garbage -d; fi
+
+    # Agent worktrees each carry their own artifacts now that the shared
+    # target dir is gone. Worktrees don't nest, so this recurses exactly one
+    # level. Tolerate stale worktrees on branches that predate this recipe.
+    for wt in .claude/worktrees/*/; do
+    	[ -f "${wt}justfile" ] || continue
+    	echo "==> cleaning ${wt}"
+    	(cd "$wt" && just clean) || echo "    (skipped: just clean failed in ${wt})"
+    done
 
 # Upgrade any tooling
 update:

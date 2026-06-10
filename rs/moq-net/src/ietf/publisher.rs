@@ -132,7 +132,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			..Default::default()
 		};
 
-		let track = match broadcast.consume_track(&msg.track_name).subscribe(subscription).await {
+		let track = match async { broadcast.track(&msg.track_name)?.subscribe(subscription)?.await }.await {
 			Ok(track) => track,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())
@@ -255,7 +255,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}?;
 
 			let sequence = group.sequence;
-			tracing::debug!(subscribe = %request_id, track = %track.name, sequence, "serving group");
+			tracing::debug!(subscribe = %request_id, track = %track.name(), sequence, "serving group");
 
 			let msg = ietf::GroupHeader {
 				track_alias: request_id.0,

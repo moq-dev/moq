@@ -22,7 +22,7 @@ pub struct Publish {
 
 impl Publish {
 	pub fn create(&mut self) -> Result<Id, Error> {
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
 
 		let id = self.broadcasts.insert((broadcast, catalog))?;
@@ -128,7 +128,7 @@ impl Publish {
 	/// if you want to describe the track in the catalog as well.
 	pub fn track(&mut self, broadcast: Id, name: &str) -> Result<Id, Error> {
 		let (broadcast, _) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		let track = broadcast.create_track(moq_net::Track::new(name))?;
+		let track = broadcast.create_track(name, None)?;
 		self.tracks.insert(track)
 	}
 

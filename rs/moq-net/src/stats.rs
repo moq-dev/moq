@@ -129,7 +129,7 @@ use std::{
 use serde::Serialize;
 use web_async::{Lock, spawn};
 
-use crate::{AsPath, Broadcast, OriginProducer, Path, PathOwned, Track, TrackProducer};
+use crate::{AsPath, BroadcastInfo, OriginProducer, Path, PathOwned, TrackProducer};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
@@ -1061,10 +1061,10 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 		return;
 	};
 
-	let mut broadcast = Broadcast::new().produce();
+	let mut broadcast = BroadcastInfo::new().produce();
 
 	// Create the four per-broadcast tracks and the two session tracks up front.
-	let create = |broadcast: &mut crate::BroadcastProducer, name: &str| match broadcast.create_track(Track::new(name)) {
+	let create = |broadcast: &mut crate::BroadcastProducer, name: &str| match broadcast.create_track(name, None) {
 		Ok(t) => Some(t),
 		Err(err) => {
 			tracing::warn!(?err, name, "stats: failed to create track");
@@ -1087,10 +1087,12 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 		session_tracks.push(t);
 	}
 
-	if !shared.origin.publish_broadcast(&advertised, broadcast.consume()) {
+	// Hold the announcement guard for the lifetime of this task; dropping it (on return)
+	// unannounces the stats broadcast.
+	let Ok(_publish) = shared.origin.publish_broadcast(&advertised, broadcast.consume()) else {
 		tracing::warn!(advertised = %advertised, "stats: origin rejected stats broadcast");
 		return;
-	}
+	};
 	drop(shared);
 
 	// Per-path snapshot state owned by this task. Mirrors the global entries
@@ -1101,8 +1103,8 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 	let mut session_local: [HashMap<PathOwned, SessionSlotState>; 2] = Default::default();
 	let mut session_last_payload: [Vec<u8>; 2] = Default::default();
 
-	let mut ticker = tokio::time::interval(interval);
-	ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+	let mut ticker = web_async::time::interval(interval);
+	ticker.set_missed_tick_behavior(web_async::time::MissedTickBehavior::Delay);
 
 	loop {
 		ticker.tick().await;
@@ -1451,8 +1453,10 @@ mod tests {
 		let (_path, event) = consumer.next().await.expect("expected announce");
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
-			.consume_track("publisher.json")
+			.track("publisher.json")
+			.unwrap()
 			.subscribe(None)
+			.unwrap()
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1478,8 +1482,10 @@ mod tests {
 		let (_path, event) = consumer.next().await.expect("announce");
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
-			.consume_track("publisher.json")
+			.track("publisher.json")
+			.unwrap()
 			.subscribe(None)
+			.unwrap()
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1513,8 +1519,10 @@ mod tests {
 		let (_path, event) = consumer.next().await.expect("announce");
 		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
-			.consume_track("publisher.json")
+			.track("publisher.json")
+			.unwrap()
 			.subscribe(None)
+			.unwrap()
 			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
@@ -1640,8 +1648,10 @@ mod tests {
 		let broadcast = event.broadcast().expect("active");
 
 		let track = broadcast
-			.consume_track("sessions.json")
+			.track("sessions.json")
+			.unwrap()
 			.subscribe(None)
+			.unwrap()
 			.await
 			.expect("subscribe");
 		let frame = read_session_frame(track).await;
@@ -1654,8 +1664,10 @@ mod tests {
 		);
 
 		let int_track = broadcast
-			.consume_track("internal/sessions.json")
+			.track("internal/sessions.json")
+			.unwrap()
 			.subscribe(None)
+			.unwrap()
 			.await
 			.expect("subscribe");
 		let snap = *read_session_frame(int_track).await.get("peer").expect("internal entry");
@@ -1704,8 +1716,10 @@ mod tests {
 
 		// External publisher slot SHOULD include foo/bar.
 		let pub_track = broadcast
-			.consume_track("publisher.json")
+			.track("publisher.json")
+			.unwrap()
 			.subscribe(None)
+			.unwrap()
 			.await
 			.expect("subscribe");
 		assert!(
@@ -1716,7 +1730,13 @@ mod tests {
 		// The other three slots had zero activity. The first frame on
 		// each must be `{}`, not `{"foo/bar": {all zeros}}`.
 		for name in ["subscriber.json", "internal/publisher.json", "internal/subscriber.json"] {
-			let t = broadcast.consume_track(name).subscribe(None).await.expect("subscribe");
+			let t = broadcast
+				.track(name)
+				.unwrap()
+				.subscribe(None)
+				.unwrap()
+				.await
+				.expect("subscribe");
 			let frame = read_frame(t).await;
 			assert!(
 				frame.is_empty(),

@@ -24,19 +24,10 @@ on:
       - main
     tags:
       - "moq-ffi-v*"
-  pull_request:
-    paths:
-      - "go/wrapper/**"
-      - "go/scripts/package-wrapper.sh"
-      - "go/scripts/publish-wrapper.sh"
-      - ".github/workflows/release-go.yml"
-      - ".github/scripts/release.sh"
 
 permissions:
   contents: read
 
-# Separate PR builds from mainline publishes so a PR run can't queue ahead of a
-# release on main/tag.
 concurrency:
   group: release-go-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
@@ -68,7 +59,7 @@ jobs:
           echo "wrapper line: $LINE"
 
       # The ffi version the wrapper should require: the triggering tag's version,
-      # or (on main push / PR) the current crate version.
+      # or (on main push) the current crate version.
       - name: Resolve ffi version
         id: ffi
         run: |
@@ -83,9 +74,7 @@ jobs:
       # On a moq-ffi-v* tag the ffi mirror is published concurrently by
       # release-go-ffi.yml; the wrapper can't resolve moq-go-ffi@vX.Y.Z (for
       # go mod tidy) until that tag lands. Poll briefly before packaging.
-      # Skipped on PR dry-runs, which don't tidy.
       - name: Wait for moq-go-ffi tag
-        if: github.event_name == 'push'
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
         run: |
@@ -104,14 +93,8 @@ jobs:
         env:
           LINE: ${{ steps.line.outputs.line }}
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
-          # PR dry-runs can't tidy against a (possibly) unpublished ffi tag.
-          SKIP_TIDY: ${{ github.event_name == 'pull_request' }}
         run: |
-          args=(--line "$LINE" --ffi-version "$FFI_VERSION" --output release-out)
-          if [[ "$SKIP_TIDY" == "true" ]]; then
-            args+=(--skip-tidy)
-          fi
-          ./go/scripts/package-wrapper.sh "${args[@]}"
+          ./go/scripts/package-wrapper.sh --line "$LINE" --ffi-version "$FFI_VERSION" --output release-out
 
       - name: Upload wrapper module
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -123,7 +106,6 @@ jobs:
     name: Publish to Go module mirror
     needs: [build]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -154,23 +136,3 @@ jobs:
           GIT_AUTHOR_NAME: moq-bot
           GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
         run: ./go/scripts/publish-wrapper.sh
-
-  publish-dry-run:
-    name: Publish dry-run
-    needs: [build]
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-
-      - name: Download package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: go-wrapper-package
-          path: go-out
-
-      - name: Dry-run publish to mirror
-        run: ./go/scripts/publish-wrapper.sh --dry-run

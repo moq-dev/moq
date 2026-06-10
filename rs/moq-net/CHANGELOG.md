@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9](https://github.com/moq-dev/moq/compare/moq-net-v0.1.8...moq-net-v0.1.9) - 2026-06-03
+
+### Other
+
+- *(deps)* bump the cargo group (with code fixes for rand/rubato/rcgen) ([#1603](https://github.com/moq-dev/moq/pull/1603))
+
 ## [0.1.8](https://github.com/moq-dev/moq/compare/moq-net-v0.1.7...moq-net-v0.1.8) - 2026-06-01
 
 ### Other

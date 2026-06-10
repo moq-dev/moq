@@ -1,4 +1,5 @@
 // cargo run --example video
+use anyhow::Context;
 use bytes::Bytes;
 
 #[tokio::main]
@@ -42,7 +43,7 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 // The catalog can contain multiple tracks, used by the viewer to choose the best track.
 fn create_track(broadcast: &mut moq_net::BroadcastProducer) -> anyhow::Result<moq_net::TrackProducer> {
 	// Basic information about the video track.
-	let video_track = moq_net::Track::new("video");
+	let video_track = "video";
 
 	// Example video configuration
 	// In a real application, you would get this from the encoder
@@ -61,7 +62,7 @@ fn create_track(broadcast: &mut moq_net::BroadcastProducer) -> anyhow::Result<mo
 	// Create a map of video renditions
 	// Multiple renditions allow the viewer to choose based on their capabilities
 	let mut renditions = std::collections::BTreeMap::new();
-	renditions.insert(video_track.name.clone(), video_config);
+	renditions.insert(video_track.to_string(), video_config);
 
 	// Create the catalog describing our video track.
 	let catalog = hang::catalog::Catalog {
@@ -75,13 +76,13 @@ fn create_track(broadcast: &mut moq_net::BroadcastProducer) -> anyhow::Result<mo
 	};
 
 	// Publish the catalog as a "catalog.json" track in the broadcast.
-	let mut catalog_track = broadcast.create_track(hang::Catalog::default_track())?;
+	let mut catalog_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
 	let mut group = catalog_track.append_group()?;
 	group.write_frame(catalog.to_string()?)?;
 	group.finish()?;
 
 	// Actually create the media track now.
-	let track = broadcast.create_track(video_track)?;
+	let track = broadcast.create_track(video_track, None)?;
 
 	Ok(track)
 }
@@ -89,12 +90,14 @@ fn create_track(broadcast: &mut moq_net::BroadcastProducer) -> anyhow::Result<mo
 // Produce a broadcast and publish it to the origin.
 async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin.
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let track = create_track(&mut broadcast)?;
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
-	origin.publish_broadcast("", broadcast.consume());
+	let _publish = origin
+		.publish_broadcast("", broadcast.consume())
+		.context("failed to publish broadcast")?;
 
 	// Wrap in a Producer for keyframe-based group management.
 	let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);

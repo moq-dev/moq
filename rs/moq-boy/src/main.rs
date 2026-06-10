@@ -209,7 +209,7 @@ async fn run(config: &Config) -> Result<()> {
 	let client = config.client.clone().init()?;
 
 	// Create the broadcast producer.
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 
 	// Publish origin: the game session broadcast.
 	let publish_origin = moq_net::Origin::random().produce();
@@ -219,7 +219,9 @@ async fn run(config: &Config) -> Result<()> {
 	let viewer_prefix = config.prefix_viewer.as_deref().unwrap_or(&default_viewer_prefix);
 
 	let broadcast_path = format!("{game_prefix}/{name}");
-	publish_origin.publish_broadcast(&broadcast_path, broadcast.consume());
+	let _publish = publish_origin
+		.publish_broadcast(&broadcast_path, broadcast.consume())
+		.context("failed to publish broadcast")?;
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
 	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"

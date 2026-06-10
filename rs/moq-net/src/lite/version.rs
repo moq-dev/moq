@@ -7,19 +7,19 @@ pub enum Version {
 	Lite02,
 	Lite03,
 	Lite04,
-	/// Work-in-progress placeholder for lite-05. Adds per-track timescale to
-	/// SUBSCRIBE_OK and zigzag-delta timestamps to per-frame headers. Not
-	/// advertised over ALPN or included in default version sets; callers must
-	/// opt in explicitly.
+	/// Work-in-progress placeholder for lite-05. Adds the TRACK stream (immutable
+	/// per-track properties incl. timescale), zigzag-delta timestamps in per-frame
+	/// headers, and drops SUBSCRIBE_OK/FETCH_OK. Not advertised over ALPN or
+	/// included in default version sets; callers must opt in explicitly.
 	Lite05Wip,
 }
 
 impl Version {
-	/// Whether SUBSCRIBE_OK can carry a per-track timescale. When the publisher
-	/// advertises one, the publisher and subscriber agree to prefix every frame
-	/// with a zigzag-delta timestamp varint; with `None` the wire skips the
-	/// byte entirely, so this method only governs whether the negotiation field
-	/// exists, not whether timestamps are always present.
+	/// Whether the track can carry a per-track timescale (reported in TRACK_INFO on
+	/// lite-05+). When the publisher advertises one, the publisher and subscriber
+	/// agree to prefix every frame with a zigzag-delta timestamp varint; with `None`
+	/// the wire skips the byte entirely, so this method only governs whether the
+	/// negotiation field exists, not whether timestamps are always present.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_timestamps(self) -> bool {
 		// Match form so future versions default forward (CLAUDE.md convention).

@@ -14,7 +14,8 @@ pub struct Bridge {
 impl Bridge {
 	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::hang::Producer) -> Result<Self> {
 		let track = broadcast.create_track(
-			moq_net::Track::new(broadcast.unique_name(".vp9")).with_timescale(hang::container::TIMESCALE),
+			broadcast.unique_name(".vp9"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		)?;
 		let producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
 		Ok(Self {
@@ -34,7 +35,7 @@ impl Bridge {
 			.lock()
 			.video
 			.renditions
-			.insert(self.track.track().name.clone(), config);
+			.insert(self.track.track().name().to_string(), config);
 		self.announced = true;
 	}
 }
@@ -60,6 +61,6 @@ impl codec::Bridge for Bridge {
 
 impl Drop for Bridge {
 	fn drop(&mut self) {
-		self.catalog.lock().video.renditions.remove(&self.track.track().name);
+		self.catalog.lock().video.renditions.remove(self.track.track().name());
 	}
 }

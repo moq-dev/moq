@@ -288,14 +288,15 @@ export class Game {
 				const req = await Promise.race([effect.cancel, viewerBroadcast.requested()]);
 				if (!req) break;
 
-				if (req.track.name === "command") {
-					effect.run(this.#runCommandTrack.bind(this, req.track));
+				if (req.name === "command") {
+					// accept() commits the track's immutable properties and returns the Track.
+					effect.run(this.#runCommandTrack.bind(this, req.accept()));
 				}
 			}
 		});
 	}
 
-	#runCommandTrack(track: Moq.Track, effect: Moq.Signals.Effect) {
+	#runCommandTrack(track: Moq.TrackProducer, effect: Moq.Signals.Effect) {
 		if (effect.get(track.state.closed)) return;
 
 		const command = effect.get(this.#command);

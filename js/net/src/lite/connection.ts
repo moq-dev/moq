@@ -15,6 +15,7 @@ import { SessionInfo } from "./session.ts";
 import { StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
+import { Track as TrackMessage } from "./track.ts";
 import { Version, versionName } from "./version.ts";
 
 const SEND_BW_POLL_INTERVAL = 100; // ms
@@ -184,6 +185,9 @@ export class Connection implements Established {
 		} else if (typ === StreamId.Subscribe) {
 			const msg = await Subscribe.decode(stream.reader, this.#version);
 			await this.#publisher.runSubscribe(msg, stream);
+		} else if (typ === StreamId.Track) {
+			const msg = await TrackMessage.decode(stream.reader, this.#version);
+			await this.#publisher.runTrackInfo(msg, stream);
 		} else if (typ === StreamId.Probe) {
 			await this.#publisher.runProbe(stream);
 		} else if (typ === StreamId.Goaway) {

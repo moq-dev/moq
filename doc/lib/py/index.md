@@ -29,6 +29,10 @@ The raw UniFFI bindings (the `Moq`-prefixed classes), tracking the [`moq-ffi`](h
 
 ```bash
 pip install moq-rs
+
+# or with uv
+uv add moq-rs        # into a project
+uv pip install moq-rs # into the active environment
 ```
 
 This pulls in `moq-ffi`, for which prebuilt wheels are published for:

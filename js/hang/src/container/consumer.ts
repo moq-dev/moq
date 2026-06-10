@@ -21,7 +21,7 @@ interface Group {
 }
 
 export class Consumer {
-	#track: Moq.Track;
+	#track: Moq.TrackSubscriber;
 	#format: Format;
 	#latency: Getter<Time.Milli>;
 	#groups: Group[] = [];
@@ -35,7 +35,7 @@ export class Consumer {
 
 	#signals = new Effect();
 
-	constructor(track: Moq.Track, props: ConsumerProps) {
+	constructor(track: Moq.TrackSubscriber, props: ConsumerProps) {
 		this.#track = track;
 		this.#format = props.format;
 		this.#latency = getter(props.latency ?? Moq.Time.Milli.zero);

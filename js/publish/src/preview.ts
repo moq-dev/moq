@@ -28,7 +28,7 @@ export class Preview {
 		});
 	}
 
-	serve(track: Moq.Track, effect: Effect): void {
+	serve(track: Moq.TrackProducer, effect: Effect): void {
 		const values = effect.getAll([this.enabled, this.info]);
 		if (!values) return;
 		const [_, info] = values;

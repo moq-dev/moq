@@ -48,6 +48,11 @@ pub struct WebConfig {
 	#[arg(long = "web-ws", env = "MOQ_WEB_WS", default_value = "true")]
 	#[serde(default = "default_true")]
 	pub ws: bool,
+
+	/// Health endpoint (`/health`) thresholds for load shedding.
+	#[command(flatten)]
+	#[serde(default)]
+	pub health: crate::HealthConfig,
 }
 
 /// Plain HTTP listener configuration.
@@ -108,6 +113,8 @@ pub struct WebState {
 	pub tls_info: Arc<std::sync::RwLock<moq_native::ServerTlsInfo>>,
 	/// Monotonically increasing connection counter for WebSocket sessions.
 	pub conn_id: AtomicU64,
+	/// Host overload monitor backing the `/health` endpoint.
+	pub health: crate::Health,
 }
 
 /// Run a HTTP server using Axum
@@ -124,6 +131,7 @@ impl Web {
 	/// Runs the HTTP and/or HTTPS listeners until they shut down.
 	pub async fn run(self) -> anyhow::Result<()> {
 		let app = Router::new()
+			.route("/health", get(serve_health))
 			.route("/certificate.sha256", get(serve_fingerprint))
 			.route("/announced", get(serve_announced))
 			.route("/announced/{*prefix}", get(serve_announced))
@@ -157,7 +165,6 @@ impl Web {
 			let config = build_https_config(&cert, &key, &root).await?;
 			let rustls_config = RustlsConfig::from_config(Arc::new(config));
 
-			#[cfg(unix)]
 			tokio::spawn(reload_https_config(rustls_config.clone(), cert, key, root));
 
 			// MtlsAcceptor surfaces a verified peer cert as a request extension.
@@ -248,18 +255,27 @@ async fn build_https_config(
 	Ok(config)
 }
 
-/// Reload the HTTPS cert/key on SIGUSR1.
+/// Reload the HTTPS cert/key/root whenever they change on disk.
 ///
 /// `RustlsConfig::reload_from_pem_file` would rebuild with `with_no_client_auth`
-/// — silently stripping mTLS when configured — so we always rebuild via the
-/// full [`build_https_config`] path.
-#[cfg(unix)]
+/// (silently stripping mTLS when configured), so we always rebuild via the full
+/// [`build_https_config`] path.
 async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, root: Vec<PathBuf>) {
-	use tokio::signal::unix::{SignalKind, signal};
+	let paths: Vec<PathBuf> = std::iter::once(cert.clone())
+		.chain(std::iter::once(key.clone()))
+		.chain(root.iter().cloned())
+		.collect();
 
-	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
+	let mut watcher = match crate::watch::FileWatcher::new(&paths) {
+		Ok(watcher) => watcher,
+		Err(err) => {
+			tracing::error!(%err, "failed to watch web certificate files; hot reload disabled");
+			return;
+		}
+	};
 
-	while listener.recv().await.is_some() {
+	loop {
+		watcher.changed().await;
 		tracing::info!("reloading web certificate");
 
 		match build_https_config(&cert, &key, &root).await {
@@ -363,6 +379,35 @@ pub(crate) fn landing_response() -> Response {
 /// Axum fallback handler for any unmatched route.
 async fn serve_landing() -> Response {
 	landing_response()
+}
+
+/// Liveness/load-shedding probe.
+///
+/// Returns `200 ok` when every configured threshold passes, or `503` with a
+/// plain-text `overloaded` header line followed by one line per breached
+/// threshold. Unauthenticated so load-balancer probes don't need a JWT.
+async fn serve_health(State(state): State<Arc<WebState>>) -> Response {
+	let mut breaches = state.health.check();
+	// Only pay the external probe (up to 5s) when we're otherwise healthy; on an
+	// already-breached host the api line is just diagnostic and would delay the
+	// inevitable 503. `&&` short-circuits, so check_api isn't awaited when
+	// breaches are already present.
+	if breaches.is_empty()
+		&& let Some(msg) = state.health.check_api().await
+	{
+		breaches.push(msg);
+	}
+
+	if breaches.is_empty() {
+		return (StatusCode::OK, "ok\n").into_response();
+	}
+
+	let mut body = String::from("overloaded\n");
+	for breach in &breaches {
+		body.push_str(breach);
+		body.push('\n');
+	}
+	(StatusCode::SERVICE_UNAVAILABLE, body).into_response()
 }
 
 async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
@@ -528,29 +573,29 @@ async fn serve_fetch(
 			.announced_broadcast("")
 			.await
 			.ok_or(StatusCode::NOT_FOUND)?;
-		let mut track = broadcast
-			.consume_track(&track)
-			.subscribe(None)
-			.await
-			.map_err(|err| match err {
-				moq_net::Error::NotFound => StatusCode::NOT_FOUND,
-				_ => StatusCode::INTERNAL_SERVER_ERROR,
-			})?;
 		let group = match params.group {
-			FetchGroup::Latest => match track.latest() {
-				Some(sequence) => track.get_group(sequence).await,
-				None => track.recv_group().await,
+			// "latest" needs a live subscription to learn the newest sequence;
+			// fetch only retrieves a specified past group.
+			FetchGroup::Latest => match async { broadcast.track(&track)?.subscribe(None)?.await }.await {
+				Ok(mut sub) => match sub.latest() {
+					Some(sequence) => sub.get_group(sequence).await,
+					None => sub.recv_group().await,
+				},
+				Err(err) => Err(err),
 			},
-			FetchGroup::Num(sequence) => track.get_group(sequence).await,
+			// A one-shot fetch, no subscription required.
+			FetchGroup::Num(sequence) => async { broadcast.track(&track)?.fetch_group(sequence, None)?.await }
+				.await
+				.map(Some),
 		};
 
 		let group = match group {
 			Ok(Some(group)) => group,
-			Ok(None) => return Err(StatusCode::NOT_FOUND),
+			Ok(None) | Err(moq_net::Error::NotFound) => return Err(StatusCode::NOT_FOUND),
 			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
 		};
 
-		tracing::info!(track = %track.name, group = %group.sequence, "serving group");
+		tracing::info!(%track, group = %group.sequence, "serving group");
 
 		match params.frame {
 			FetchFrame::Num(index) => match group.get_frame(index).await {

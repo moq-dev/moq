@@ -7,9 +7,9 @@
 //!
 //! ## API
 //! The API is built around Producer/Consumer pairs, with the hierarchy:
-//! - [Origin]: A collection of [Broadcast]s, produced by one or more [Session]s.
-//! - [Broadcast]: A collection of [Track]s, produced by a single publisher.
-//! - [Track]: A collection of [Group]s, delivered out-of-order until expired.
+//! - [Origin]: A collection of [BroadcastConsumer]s, produced by one or more [Session]s.
+//! - [BroadcastConsumer]: A collection of [TrackConsumer]s, produced by a single publisher.
+//! - [TrackConsumer]: A collection of [Group]s, delivered out-of-order until expired.
 //! - [Group]: A collection of [Frame]s, delivered in order until cancelled.
 //! - [Frame]: Chunks of data with an upfront size.
 //!
@@ -59,6 +59,7 @@ mod server;
 mod session;
 mod setup;
 mod stats;
+mod util;
 mod version;
 
 pub use client::*;

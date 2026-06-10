@@ -205,6 +205,8 @@ impl ElementImpl for MoqSink {
 					.build(),
 			);
 			caps.merge(gst::Caps::builder("video/x-av1").build());
+			caps.merge(gst::Caps::builder("video/x-vp8").build());
+			caps.merge(gst::Caps::builder("video/x-vp9").build());
 			caps.merge(
 				gst::Caps::builder("audio/mpeg")
 					.field("mpegversion", 4i32)
@@ -388,16 +390,15 @@ async fn run_session(
 	let client = client_config.init()?;
 
 	let origin = moq_net::Origin::random().produce();
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let broadcast_consumer = broadcast.consume();
 
 	let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
 
-	anyhow::ensure!(
-		origin.publish_broadcast(&settings.broadcast, broadcast_consumer),
-		"failed to publish broadcast {}",
-		settings.broadcast
-	);
+	// Held for the lifetime of this task; dropping it (on return) unannounces the broadcast.
+	let _publish = origin
+		.publish_broadcast(&settings.broadcast, broadcast_consumer)
+		.context("failed to publish broadcast")?;
 
 	let client = client.with_publisher(origin.clone());
 	let session = client.connect(settings.url.clone()).await?;
@@ -457,6 +458,14 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 		"video/x-av1" => {
 			let mut bytes = Bytes::new();
 			new_decoder(runtime, moq_mux::import::FramedFormat::Av01, &mut bytes)?
+		}
+		"video/x-vp8" => {
+			let mut bytes = Bytes::new();
+			new_decoder(runtime, moq_mux::import::FramedFormat::Vp8, &mut bytes)?
+		}
+		"video/x-vp9" => {
+			let mut bytes = Bytes::new();
+			new_decoder(runtime, moq_mux::import::FramedFormat::Vp9, &mut bytes)?
 		}
 		"audio/mpeg" => {
 			let codec_data = structure

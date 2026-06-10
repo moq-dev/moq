@@ -1,12 +1,15 @@
 use crate::Publish;
 
+use anyhow::Context;
 use hang::moq_net;
 use url::Url;
 
 pub async fn run_client(client: moq_native::Client, url: Url, name: String, publish: Publish) -> anyhow::Result<()> {
 	// Create an origin producer to publish to the broadcast.
 	let origin = moq_net::Origin::random().produce();
-	origin.publish_broadcast(&name, publish.consume());
+	let _publish = origin
+		.publish_broadcast(&name, publish.consume())
+		.context("failed to publish broadcast")?;
 
 	tracing::info!(%url, %name, "connecting");
 

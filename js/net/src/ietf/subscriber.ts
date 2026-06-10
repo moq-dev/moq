@@ -3,7 +3,7 @@ import { Broadcast, type TrackRequest } from "../broadcast.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
-import type { Track } from "../track.ts";
+import type { TrackProducer } from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
@@ -45,7 +45,8 @@ export class Subscriber {
 	#session: Session;
 
 	// Our subscribed tracks — keyed by trackAlias for group routing
-	#subscribes = new Map<bigint, Track>();
+	// trackAlias -> the write side; incoming object streams are routed here.
+	#subscribes = new Map<bigint, TrackProducer>();
 
 	// Any currently active announcements.
 	#announced = new Set<Path.Valid>();
@@ -201,17 +202,24 @@ export class Subscriber {
 		const version = this.#session.version;
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) {
-			request.track.close(new Error("session closed"));
+			request.reject(new Error("session closed"));
 			return;
 		}
 
-		console.debug(`subscribe start: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
+		console.debug(`subscribe start: id=${requestId} broadcast=${broadcast} track=${request.name}`);
+
+		// IETF negotiates group order in SUBSCRIBE_OK; this implementation only
+		// supports descending (newest-first), so commit ordered: false. (There's no
+		// per-frame compression/timescale, so the rest stay at their defaults.) This
+		// resolves the consumer's track.info() and gives us the write side that
+		// incoming object streams are routed into.
+		const producer = request.accept({ ordered: false });
 
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
 		// flows back via `state` so the timeout path can clean up the stream
 		// and any registration if setup eventually finishes.
 		const state: SubscribeSetupState = {};
-		const setup = this.#openSubscribe(state, broadcast, request, requestId);
+		const setup = this.#openSubscribe(state, broadcast, request, producer, requestId);
 
 		let stream: Stream;
 		let trackAlias: bigint;
@@ -223,12 +231,12 @@ export class Subscriber {
 			);
 			stream = result.stream;
 			trackAlias = result.alias;
-			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
+			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			const e = error(err);
-			request.track.close(e);
+			producer.close(e);
 			console.warn(
-				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
+				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${e.message}`,
 			);
 			// If setup eventually settles after the timeout, abort the stream
 			// and drop any registration so we don't leak. Cover both branches:
@@ -244,7 +252,7 @@ export class Subscriber {
 
 		try {
 			// Wait for stream close (= PublishDone) or track close (= local unsubscribe)
-			await Promise.race([stream.reader.closed, request.track.closed]);
+			await Promise.race([stream.reader.closed, producer.closed]);
 
 			// For v14-v16: send Unsubscribe before closing (removed in v17+)
 			if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
@@ -257,15 +265,15 @@ export class Subscriber {
 				}
 			}
 
-			request.track.close();
+			producer.close();
 			stream.close();
-			console.debug(`subscribe close: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
+			console.debug(`subscribe close: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			const e = error(err);
-			request.track.close(e);
+			producer.close(e);
 			stream.abort(e);
 			console.warn(
-				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
+				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${e.message}`,
 			);
 		} finally {
 			this.#subscribes.delete(trackAlias);
@@ -280,6 +288,7 @@ export class Subscriber {
 		state: SubscribeSetupState,
 		broadcast: Path.Valid,
 		request: TrackRequest,
+		producer: TrackProducer,
 		requestId: bigint,
 	): Promise<{ stream: Stream; alias: bigint }> {
 		const version = this.#session.version;
@@ -290,15 +299,15 @@ export class Subscriber {
 		const msg = new Subscribe({
 			requestId,
 			trackNamespace: broadcast,
-			trackName: request.track.name,
+			trackName: request.name,
 			subscriberPriority: request.priority,
 		});
 		await msg.encode(state.stream.writer, version);
-		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
+		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
 		// Pre-register with requestId so early group uni streams aren't dropped.
 		// The publisher typically uses requestId as the trackAlias.
-		this.#subscribes.set(requestId, request.track);
+		this.#subscribes.set(requestId, producer);
 		state.registeredAlias = requestId;
 
 		const respTypeId = await state.stream.reader.u53();
@@ -321,7 +330,7 @@ export class Subscriber {
 		const ok = await SubscribeOk.decode(state.stream.reader, version);
 		if (ok.trackAlias !== requestId) {
 			this.#subscribes.delete(requestId);
-			this.#subscribes.set(ok.trackAlias, request.track);
+			this.#subscribes.set(ok.trackAlias, producer);
 			state.registeredAlias = ok.trackAlias;
 		}
 		return { stream: state.stream, alias: ok.trackAlias };

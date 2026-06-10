@@ -8,6 +8,7 @@ members = [
     "rs/moq-cli",
     "rs/moq-ffi",
     "rs/moq-gst",
+    "rs/moq-json",
     "rs/moq-loc",
     "rs/moq-msf",
     "rs/moq-mux",
@@ -18,6 +19,7 @@ members = [
     "rs/moq-token",
     "rs/moq-token-cli",
     "rs/moq-video",
+    "rs/moq-wasm",
 ]
 default-members = [
     "rs/kio",
@@ -28,6 +30,7 @@ default-members = [
     "rs/moq-cli",
     # "rs/moq-ffi",   # requires Python/maturin
     # "rs/moq-gst",   # requires GStreamer
+    "rs/moq-json",
     "rs/moq-loc",
     "rs/moq-msf",
     "rs/moq-net",
@@ -38,6 +41,7 @@ default-members = [
     "rs/moq-token",
     "rs/moq-token-cli",
     "rs/moq-video",
+    # "rs/moq-wasm",  # wasm32-unknown-unknown target only
 ]
 resolver = "2"
 
@@ -48,7 +52,8 @@ rust-version = "1.85"
 flate2 = "1.1"
 hang = { version = "0.18", path = "rs/hang" }
 kio = { version = "0.3", path = "rs/kio" }
-moq-audio = { version = "0.0.1", path = "rs/moq-audio" }
+moq-audio = { version = "0.0.2", path = "rs/moq-audio" }
+moq-json = { version = "0.0.1", path = "rs/moq-json" }
 moq-loc = { version = "0.1", path = "rs/moq-loc" }
 moq-msf = { version = "0.2", path = "rs/moq-msf" }
 moq-mux = { version = "0.5", path = "rs/moq-mux" }
@@ -58,7 +63,7 @@ moq-token = { version = "0.6", path = "rs/moq-token" }
 qmux = { version = "0.1.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
-web-async = { version = "0.1.3", features = ["tracing"] }
+web-async = { version = "0.1.4", features = ["tracing"] }
 web-transport-iroh = "0.5"
 web-transport-noq = "0.1.1"
 web-transport-proto = "0.6"
@@ -80,3 +85,13 @@ debug = "line-tables-only"
 [profile.release-with-debug]
 inherits = "release"
 debug = true
+
+# Size-optimized build for the browser/WASM bindings (rs/moq-wasm). Shipping over
+# the wire, so optimize for size, not speed (~579KB -> ~471KB gzipped vs the
+# default release profile). `just wasm` builds with `--profile wasm-release`.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true

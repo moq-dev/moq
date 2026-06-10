@@ -52,6 +52,44 @@ effect.close(); // cleanup
 The key difference from other libraries: **`effect.get(signal)` is what subscribes**.
 If you just want to read without tracking, use `signal.peek()` directly.
 
+### Computed
+
+A `Computed` is a read-only signal derived from other signals.
+The compute function reads its dependencies with `effect.get(...)`, exactly like an effect.
+
+```ts
+import { Signal, Computed } from "@moq/signals";
+
+const first = new Signal("Ada");
+const last = new Signal("Lovelace");
+
+const full = new Computed((effect) => `${effect.get(first)} ${effect.get(last)}`);
+
+full.peek(); // undefined until the first run completes
+```
+
+Like every signal, updates are **asynchronous**: the value is `undefined` until the first run completes (and after `close()`), and recomputes propagate on a microtask, coalesced and equality-filtered.
+Read a computed inside an effect and handle the `undefined` case, the same way you would any other signal that starts empty.
+
+Keep the compute function **pure**: it should derive a value, not perform side effects. Use an `Effect` for side effects.
+
+A standalone `Computed` must be closed to stop recomputing and tracking its dependencies:
+
+```ts
+const sum = new Computed((effect) => effect.get(a) + effect.get(b));
+// ...
+sum.close();
+```
+
+More commonly, create one on a long-lived effect with `effect.computed(...)`, which closes it when that effect closes:
+
+```ts
+const signals = new Effect();
+const total = signals.computed((effect) => effect.get(a) + effect.get(b));
+// ... read `total` from other effects ...
+signals.close(); // also closes `total`
+```
+
 ### effect.cleanup
 
 Run a cleanup function when the effect reruns or closes.

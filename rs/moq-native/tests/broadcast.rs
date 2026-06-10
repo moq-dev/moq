@@ -8,7 +8,7 @@
 //! This covers raw QUIC (moqt://) and WebTransport (https://) transports,
 //! exercising every protocol version the library supports.
 
-use moq_native::moq_net::{self, Origin, Track};
+use moq_native::moq_net::{self, Origin};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -25,9 +25,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
-	let mut track = broadcast
-		.create_track(Track::new("video"))
-		.expect("failed to create track");
+	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	// Write a group containing a single frame.
 	let mut group = track.append_group().expect("failed to append group");
@@ -88,8 +86,10 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.consume_track("video")
+		.track("video")
+		.unwrap()
 		.subscribe(None)
+		.unwrap()
 		.await
 		.expect("consume_track failed");
 
@@ -117,7 +117,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("server task failed");
 }
 
-/// `Session::goaway` must actually deliver a GOAWAY to the peer. We use
+/// `Session::drain` must actually deliver a GOAWAY to the peer. We use
 /// moq-transport-14, where receiving a GOAWAY closes the session, so the drain is
 /// observable end-to-end: the server fires GOAWAY and both sides see the session close.
 #[tokio::test]
@@ -177,7 +177,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	// Track with an advertised microsecond timescale. Without it, Lite05 publish
 	// fails with ProtocolViolation.
 	let mut track = broadcast
-		.create_track(Track::new("video").with_timescale(Timescale::MICRO))
+		.create_track("video", moq_net::TrackInfo::default().with_timescale(Timescale::MICRO))
 		.expect("failed to create track");
 
 	// Three frames where the middle PTS goes backwards (B-frame decode order)
@@ -237,8 +237,10 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
 	let mut track_sub = bc
-		.consume_track("video")
+		.track("video")
+		.unwrap()
 		.subscribe(None)
+		.unwrap()
 		.await
 		.expect("consume_track failed");
 
@@ -276,6 +278,255 @@ async fn broadcast_moq_lite_05_timestamps_webtransport() {
 	lite05_timestamp_roundtrip("https").await;
 }
 
+/// Lite05 FETCH round-trip: retrieve a past group by sequence without holding a
+/// subscription, exercising the bare-FRAME fetch response and per-frame timestamp
+/// decoding on the fetch stream. The track is also `compress`-hinted, so the
+/// fetched frames are Deflate-compressed (matching TRACK_INFO) and inflated by the
+/// subscriber, exercising fetch/TRACK_INFO codec consistency.
+async fn lite05_fetch_roundtrip(scheme: &str) {
+	use moq_native::moq_net::{Timescale, Timestamp};
+
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut track = broadcast
+		.create_track(
+			"video",
+			moq_net::TrackInfo::default()
+				.with_timescale(Timescale::MICRO)
+				.with_compress(true),
+		)
+		.expect("failed to create track");
+
+	// A group with a few timestamped frames (middle PTS goes backwards, so the
+	// fetch stream carries a negative zigzag delta too).
+	let timestamps_us = [10_000u64, 30_000, 20_000];
+	let mut group = track.append_group().expect("failed to append group"); // seq 0
+	for &us in &timestamps_us {
+		let payload = format!("frame@{us}").into_bytes();
+		let frame = moq_native::moq_net::Frame {
+			size: payload.len() as u64,
+			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
+		};
+		let mut writer = group.create_frame(frame).expect("failed to create frame");
+		writer
+			.write(bytes::Bytes::from(payload))
+			.expect("failed to write frame");
+		writer.finish().expect("failed to finish frame");
+	}
+	group.finish().expect("failed to finish group");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-lite-05-wip".parse().unwrap()];
+	let mut server = server_config.init().expect("failed to init server");
+	let addr = server.local_addr().expect("failed to get local addr");
+
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.version = vec!["moq-lite-05-wip".parse().unwrap()];
+	let client = client_config.init().expect("failed to init client");
+	let url: url::Url = format!("{scheme}://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.with_publisher(pub_origin.clone()).ok().await?;
+		let _broadcast = broadcast;
+		let _track = track;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_consumer(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+	assert_eq!(path.as_str(), "test");
+	let bc = bc.broadcast().expect("expected announce, got unannounce");
+
+	// Fetch group 0 directly, without subscribing. No live producer holds the group
+	// on the client, so this issues a wire FETCH upstream.
+	let mut group_sub = tokio::time::timeout(TIMEOUT, async {
+		bc.track("video").unwrap().fetch_group(0, None).unwrap().await
+	})
+	.await
+	.expect("fetch timed out")
+	.expect("fetch failed");
+	assert_eq!(group_sub.sequence, 0);
+
+	for &expected_us in &timestamps_us {
+		let mut frame_sub = tokio::time::timeout(TIMEOUT, group_sub.next_frame())
+			.await
+			.expect("next_frame timed out")
+			.expect("next_frame failed")
+			.expect("group closed prematurely");
+
+		let ts = frame_sub
+			.timestamp
+			.expect("Lite05 fetch must carry per-frame timestamps");
+		assert_eq!(ts.scale(), Timescale::MICRO);
+		assert_eq!(ts.value(), expected_us);
+
+		let payload = frame_sub.read_all().await.expect("failed to read frame");
+		assert_eq!(payload, bytes::Bytes::from(format!("frame@{expected_us}")));
+	}
+
+	// The fetched group ends cleanly (stream FIN → no more frames).
+	let end = tokio::time::timeout(TIMEOUT, group_sub.next_frame())
+		.await
+		.expect("next_frame timed out")
+		.expect("next_frame failed");
+	assert!(end.is_none(), "group should finish after its frames");
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_lite_05_fetch_webtransport() {
+	// WebTransport only: Lite05Wip isn't advertised over ALPN, so raw QUIC (moqt://)
+	// can't negotiate it (same reason the other Lite05 tests are https-only).
+	lite05_fetch_roundtrip("https").await;
+}
+
+/// A fetch must be served while a live subscription is active on the same track.
+/// The relay subscribes starting at the latest group, so an older group isn't
+/// cached and the fetch has to issue a wire FETCH concurrently with the
+/// subscription. Older relays served a subscription OR a fetch, never both, so
+/// this fetch would have hung.
+async fn lite05_fetch_during_subscribe(scheme: &str) {
+	use moq_native::moq_net::{Timescale, Timestamp};
+
+	fn timestamped_frame(us: u64, payload: &str) -> moq_net::Frame {
+		moq_net::Frame {
+			size: payload.len() as u64,
+			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
+		}
+	}
+
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut track = broadcast
+		.create_track("video", moq_net::TrackInfo::default().with_timescale(Timescale::MICRO))
+		.expect("failed to create track");
+
+	// Group 0 is the "past" group only reachable via FETCH; group 1 is the latest,
+	// delivered live over the subscription.
+	let mut group0 = track.append_group().expect("append group 0"); // seq 0
+	let mut w = group0.create_frame(timestamped_frame(10_000, "old")).expect("frame 0");
+	w.write(bytes::Bytes::from_static(b"old")).expect("write 0");
+	w.finish().expect("finish frame 0");
+	group0.finish().expect("finish group 0");
+
+	let mut group1 = track.append_group().expect("append group 1"); // seq 1
+	let mut w = group1.create_frame(timestamped_frame(20_000, "new")).expect("frame 1");
+	w.write(bytes::Bytes::from_static(b"new")).expect("write 1");
+	w.finish().expect("finish frame 1");
+	group1.finish().expect("finish group 1");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-lite-05-wip".parse().unwrap()];
+	let mut server = server_config.init().expect("failed to init server");
+	let addr = server.local_addr().expect("failed to get local addr");
+
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.version = vec!["moq-lite-05-wip".parse().unwrap()];
+	let client = client_config.init().expect("failed to init client");
+	let url: url::Url = format!("{scheme}://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.with_publisher(pub_origin.clone()).ok().await?;
+		let _broadcast = broadcast;
+		let _track = track;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_consumer(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+	assert_eq!(path.as_str(), "test");
+	let bc = bc.broadcast().expect("expected announce, got unannounce");
+
+	// Subscribe (starts at the latest group) and read the live group, which
+	// establishes the upstream subscription and leaves it active.
+	let mut track_sub = tokio::time::timeout(TIMEOUT, async {
+		bc.track("video").unwrap().subscribe(None).unwrap().await
+	})
+	.await
+	.expect("subscribe timed out")
+	.expect("subscribe failed");
+	let mut live = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+		.await
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
+		.expect("track closed prematurely");
+	assert_eq!(live.sequence, 1);
+	let frame = tokio::time::timeout(TIMEOUT, live.read_frame())
+		.await
+		.expect("read_frame timed out")
+		.expect("read_frame failed")
+		.expect("group closed prematurely");
+	assert_eq!(&*frame, b"new");
+
+	// While the subscription is still held and active, fetch the older group. The
+	// relay doesn't have it cached (subscription started at the latest), so this
+	// must issue a wire FETCH concurrently with the live subscription.
+	let mut fetched = tokio::time::timeout(TIMEOUT, async {
+		bc.track("video").unwrap().fetch_group(0, None).unwrap().await
+	})
+	.await
+	.expect("fetch timed out")
+	.expect("fetch failed");
+	assert_eq!(fetched.sequence, 0);
+	let frame = tokio::time::timeout(TIMEOUT, fetched.read_frame())
+		.await
+		.expect("fetch read_frame timed out")
+		.expect("fetch read_frame failed")
+		.expect("fetched group closed prematurely");
+	assert_eq!(&*frame, b"old");
+
+	// The live subscription is unaffected: a freshly published group still arrives.
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_lite_05_fetch_during_subscribe_webtransport() {
+	lite05_fetch_during_subscribe("https").await;
+}
+
 /// On Lite05 a publisher that doesn't advertise a timescale still works:
 /// SUBSCRIBE_OK carries `timescale = 0` and neither side encodes a
 /// per-frame timestamp byte. Subscribers receive `frame.timestamp = None`.
@@ -284,7 +535,7 @@ async fn broadcast_moq_lite_05_timestamps_webtransport() {
 async fn broadcast_moq_lite_05_without_timescale() {
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	let mut track = broadcast.create_track(Track::new("video")).expect("create track");
+	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	let mut group = track.append_group().expect("append group");
 	group.write_frame(b"hello".as_ref()).expect("write frame");
@@ -328,8 +579,10 @@ async fn broadcast_moq_lite_05_without_timescale() {
 	let bc = bc.broadcast().expect("expected announce");
 
 	let mut track_sub = bc
-		.consume_track("video")
+		.track("video")
+		.unwrap()
 		.subscribe(None)
+		.unwrap()
 		.await
 		.expect("consume_track failed");
 
@@ -672,14 +925,12 @@ async fn broadcast_webtransport_negotiate_client_all_server_transport_18() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_websocket() {
-	use moq_native::moq_net::{Origin, Track};
+	use moq_native::moq_net::Origin;
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
-	let mut track = broadcast
-		.create_track(Track::new("video"))
-		.expect("failed to create track");
+	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
 	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
@@ -742,8 +993,10 @@ async fn broadcast_websocket() {
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.consume_track("video")
+		.track("video")
+		.unwrap()
 		.subscribe(None)
+		.unwrap()
 		.await
 		.expect("consume_track failed");
 
@@ -778,14 +1031,12 @@ async fn broadcast_websocket() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_websocket_fallback() {
-	use moq_native::moq_net::{Origin, Track};
+	use moq_native::moq_net::Origin;
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
-	let mut track = broadcast
-		.create_track(Track::new("video"))
-		.expect("failed to create track");
+	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
 	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
@@ -851,8 +1102,10 @@ async fn broadcast_websocket_fallback() {
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.consume_track("video")
+		.track("video")
+		.unwrap()
 		.subscribe(None)
+		.unwrap()
 		.await
 		.expect("consume_track failed");
 
@@ -894,9 +1147,7 @@ const NEWEST_LITE: &str = "moq-lite-04";
 async fn broadcast_websocket_uses_newest_version() {
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
-	let mut track = broadcast
-		.create_track(Track::new("video"))
-		.expect("failed to create track");
+	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
 	group.finish().expect("failed to finish group");
@@ -962,9 +1213,7 @@ async fn broadcast_websocket_uses_newest_version() {
 async fn broadcast_race_quic_wins() {
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
-	let mut track = broadcast
-		.create_track(Track::new("video"))
-		.expect("failed to create track");
+	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
 	group.finish().expect("failed to finish group");
@@ -1050,7 +1299,7 @@ async fn broadcast_race_quic_wins() {
 async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	let mut track = broadcast.create_track(Track::new("video")).expect("create track");
+	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	let mut group0 = track.append_group().expect("append group 0");
 	group0.write_frame(b"a".as_ref()).expect("write frame 0");
@@ -1093,7 +1342,13 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	let bc = bc.broadcast().expect("expected announce");
 
 	// First subscription: receive group 0.
-	let mut sub1 = bc.consume_track("video").subscribe(None).await.expect("subscribe1");
+	let mut sub1 = bc
+		.track("video")
+		.unwrap()
+		.subscribe(None)
+		.unwrap()
+		.await
+		.expect("subscribe1");
 	let mut g = tokio::time::timeout(TIMEOUT, sub1.recv_group())
 		.await
 		.expect("recv group 0 timeout")
@@ -1117,7 +1372,13 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	tokio::time::sleep(Duration::from_millis(20)).await;
 
 	// Resubscribe well inside the 5s linger window.
-	let mut sub2 = bc.consume_track("video").subscribe(None).await.expect("subscribe2");
+	let mut sub2 = bc
+		.track("video")
+		.unwrap()
+		.subscribe(None)
+		.unwrap()
+		.await
+		.expect("subscribe2");
 
 	// A new group published after the resubscribe must reach the consumer
 	// regardless of which linger branch fired.

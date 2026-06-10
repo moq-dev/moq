@@ -10,7 +10,6 @@ use super::{Message, Version};
 /// Sent by the subscriber to fetch a specific group from a track.
 ///
 /// Lite03+ only.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Fetch<'a> {
 	pub broadcast: Path<'a>,
@@ -36,7 +35,6 @@ impl Message for Fetch<'_> {
 		let track = Cow::<str>::decode(r, version)?;
 		let priority = u8::decode(r, version)?;
 		let group = u64::decode(r, version)?;
-
 		let frame_start = match version {
 			Version::Lite03 | Version::Lite04 => 0,
 			_ => u64::decode(r, version)?,
@@ -63,56 +61,55 @@ impl Message for Fetch<'_> {
 		self.track.encode(w, version)?;
 		self.priority.encode(w, version)?;
 		self.group.encode(w, version)?;
-
 		match version {
 			Version::Lite03 | Version::Lite04 => {}
 			_ => self.frame_start.encode(w, version)?,
 		}
-
 		Ok(())
 	}
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
 	use super::*;
 
-	fn sample() -> Fetch<'static> {
+	fn fetch_sample() -> Fetch<'static> {
 		Fetch {
-			broadcast: Path::new("room/1"),
+			broadcast: Path::new("room").to_owned(),
 			track: Cow::Borrowed("video"),
 			priority: 3,
-			group: 42,
-			frame_start: 7,
+			group: 7,
+			frame_start: 5,
 		}
 	}
 
-	fn roundtrip(version: Version, fetch: &Fetch<'_>) -> Fetch<'static> {
+	fn fetch_roundtrip(version: Version, msg: &Fetch<'_>) -> Fetch<'static> {
 		let mut buf = Vec::new();
-		fetch.encode_msg(&mut buf, version).unwrap();
-		let mut r = buf.as_slice();
-		Fetch::decode_msg(&mut r, version).unwrap()
+		msg.encode_msg(&mut buf, version).unwrap();
+		let mut slice = buf.as_slice();
+		Fetch::decode_msg(&mut slice, version).unwrap()
 	}
 
 	#[test]
-	fn frame_start_roundtrips_on_lite05() {
-		let got = roundtrip(Version::Lite05Wip, &sample());
-		assert_eq!(got.group, 42);
-		assert_eq!(got.frame_start, 7);
+	fn fetch_frame_start_roundtrips_on_lite05() {
+		assert_eq!(fetch_roundtrip(Version::Lite05Wip, &fetch_sample()).frame_start, 5);
 	}
 
 	#[test]
-	fn frame_start_absent_before_lite05() {
-		// Lite03/Lite04 don't carry the frame start varint, so it always decodes as 0.
-		let got = roundtrip(Version::Lite04, &sample());
-		assert_eq!(got.group, 42);
-		assert_eq!(got.frame_start, 0);
+	fn fetch_frame_start_absent_before_lite05() {
+		let msg = fetch_sample();
 
-		// The lite-04 encoding is strictly shorter (no trailing frame start varint).
+		// The frame_start varint only exists on lite-05+, so the older encoding is
+		// strictly shorter and always decodes back as 0.
 		let mut buf04 = Vec::new();
-		sample().encode_msg(&mut buf04, Version::Lite04).unwrap();
+		msg.encode_msg(&mut buf04, Version::Lite04).unwrap();
 		let mut buf05 = Vec::new();
-		sample().encode_msg(&mut buf05, Version::Lite05Wip).unwrap();
-		assert!(buf05.len() > buf04.len(), "lite-05 carries an extra frame start varint");
+		msg.encode_msg(&mut buf05, Version::Lite05Wip).unwrap();
+		assert!(
+			buf05.len() > buf04.len(),
+			"lite-05 carries the extra frame_start varint"
+		);
+
+		assert_eq!(fetch_roundtrip(Version::Lite04, &msg).frame_start, 0);
 	}
 }

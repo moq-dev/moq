@@ -53,7 +53,7 @@ export class Message {
 		if (!values) return;
 		const [_, catalog, broadcast] = values;
 
-		const track = broadcast.subscribe(catalog.name, Catalog.PRIORITY.chat);
+		const track = broadcast.track(catalog.name).subscribe({ priority: Catalog.PRIORITY.chat });
 		effect.cleanup(() => track.close());
 
 		// Undefined is only when we're not subscribed to the track.

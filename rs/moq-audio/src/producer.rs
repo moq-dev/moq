@@ -61,8 +61,10 @@ impl AudioProducer {
 		// Audio hang frames carry microsecond timestamps; advertise that on the
 		// track so Lite05 subscribers know what scale to expect and the model
 		// layer accepts Frame::timestamp on append.
-		let track =
-			broadcast.create_track(moq_net::Track::new(name.clone()).with_timescale(hang::container::TIMESCALE))?;
+		let track = broadcast.create_track(
+			name.clone(),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)?;
 		let track = moq_mux::container::Producer::new(track, moq_mux::container::legacy::Wire);
 
 		let mut catalog_mut = catalog.clone();

@@ -69,8 +69,8 @@ impl Consume {
 		tokio::spawn(async move {
 			let res = async move {
 				let catalog = broadcast
-					.consume_track(hang::catalog::Catalog::DEFAULT_NAME)
-					.subscribe(hang::catalog::Catalog::default_subscription())
+					.track(hang::catalog::Catalog::DEFAULT_NAME)?
+					.subscribe(hang::catalog::Catalog::default_subscription())?
 					.await?;
 				Self::run_catalog(on_catalog, broadcast.clone(), catalog.into(), channel.1).await
 			}
@@ -250,11 +250,11 @@ impl Consume {
 		tokio::spawn(async move {
 			let res = async move {
 				let track = broadcast
-					.consume_track(&name)
+					.track(&name)?
 					.subscribe(moq_net::Subscription {
 						priority: 1,
 						..Default::default()
-					})
+					})?
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy)
 					.with_latency(latency);
@@ -302,11 +302,11 @@ impl Consume {
 		tokio::spawn(async move {
 			let res = async move {
 				let track = broadcast
-					.consume_track(&name)
+					.track(&name)?
 					.subscribe(moq_net::Subscription {
 						priority: 2,
 						..Default::default()
-					})
+					})?
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy)
 					.with_latency(latency);
@@ -407,7 +407,7 @@ impl Consume {
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = async move {
-				let track = broadcast.consume_track(&name).subscribe(None).await?;
+				let track = broadcast.track(&name)?.subscribe(None)?.await?;
 				Self::run_raw(on_frame, track, channel.1).await
 			}
 			.await;

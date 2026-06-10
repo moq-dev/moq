@@ -55,7 +55,10 @@
             "rust-src"
             "rust-analyzer"
           ];
-          targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          targets = [
+            "wasm32-unknown-unknown"
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             "x86_64-apple-darwin"
             "aarch64-apple-darwin"
           ];
@@ -89,6 +92,10 @@
             cargo-sweep
             cargo-semver-checks
             cargo-deny
+            # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just wasm`).
+            # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
+            # crate is pinned to nixpkgs' CLI version); bump both together.
+            wasm-bindgen-cli
           ]
           ++ gstreamerDeps
           ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
@@ -157,7 +164,7 @@
         overlayPkgs = pkgs.extend self.overlays.default;
       in
       {
-        packages = rec {
+        packages = (rec {
           default = pkgs.symlinkJoin {
             name = "moq-all";
             paths = [
@@ -184,6 +191,19 @@
             name = "moq-packaging-tools";
             paths = packagingDeps ++ publishDeps;
           };
+        })
+        # x86_64-darwin release artifacts are cross-compiled from the
+        # aarch64-darwin runner (see nix/overlay.nix). The cross outputs only
+        # evaluate on an aarch64-darwin host, so gate them on the system to
+        # keep `nix flake check` working on Linux and Intel macs.
+        // pkgs.lib.optionalAttrs (system == "aarch64-darwin") {
+          inherit (overlayPkgs)
+            moq-relay-x86_64-apple-darwin
+            moq-cli-x86_64-apple-darwin
+            moq-token-cli-x86_64-apple-darwin
+            libmoq-x86_64-apple-darwin
+            moq-gst-plugin-x86_64-apple-darwin
+            ;
         };
 
         # Re-export gst_all_1 so users can pair the plugin with a matching

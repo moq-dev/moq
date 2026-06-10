@@ -7,7 +7,7 @@ import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import type * as Time from "../time.ts";
-import type { Track } from "../track.ts";
+import type { TrackProducer } from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { Announce, AnnounceInit, AnnounceInterest, AnnounceOk } from "./announce.ts";
@@ -15,13 +15,28 @@ import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
-import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
+import { decodeSubscribeResponse, decodeSubscribeResponseMaybe, Subscribe, SubscribeUpdate } from "./subscribe.ts";
+import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { Version } from "./version.ts";
 
-// Bound on how long stream-open plus SUBSCRIBE_OK may take. Browsers cap
-// concurrent QUIC streams (Chrome ~100); past the cap createBidirectionalStream
-// silently blocks. The timeout turns that into a clear error.
-const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
+// Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
+// drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC
+// streams (Chrome ~100); past the cap createBidirectionalStream silently blocks.
+// The timeout turns that into a clear error.
+const SUBSCRIBE_SETUP_TIMEOUT_MS = 10_000;
+
+// The TRACK stream and implicit SUBSCRIBE acceptance are lite-05+.
+function supportsTrackStream(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+			return false;
+		default:
+			return true;
+	}
+}
 
 /**
  * Options accepted by {@link Subscriber.announced}.
@@ -38,12 +53,15 @@ export interface AnnouncedOptions {
 }
 
 interface SubscribeEntry {
-	track: Track;
-	// undefined until SUBSCRIBE_OK arrives and tells us the negotiated codec.
+	// The write side: incoming GROUP streams are routed here. The application reads
+	// the matching TrackSubscriber it got from Broadcast.subscribe.
+	track: TrackProducer;
+	// undefined until the negotiated codec is known (from TRACK_INFO on lite-05+,
+	// or SUBSCRIBE_OK on older drafts).
 	compression: Signal<Compression | undefined>;
-	// Per-frame timestamp scale (0 = none). undefined until SUBSCRIBE_OK arrives.
-	// A non-zero value means each frame on the group stream is prefixed with a
-	// zigzag-delta timestamp varint that runGroup must consume to stay in sync.
+	// Per-frame timestamp scale (0 = none). undefined until it's known. A non-zero
+	// value means each frame on the group stream is prefixed with a zigzag-delta
+	// timestamp varint that runGroup must consume to stay in sync.
 	timescale: Signal<number | undefined>;
 }
 
@@ -62,9 +80,9 @@ export class Subscriber {
 	// own announcements on a per-call basis (see {@link AnnouncedOptions}).
 	readonly origin: Origin;
 
-	// Our subscribed tracks. `compression` resolves once SUBSCRIBE_OK arrives;
-	// group streams block on it before decoding any frame, since a group's QUIC
-	// stream can race ahead of SUBSCRIBE_OK on its own stream.
+	// Our subscribed tracks. `compression` resolves once the codec is known (from
+	// TRACK_INFO on lite-05+, or SUBSCRIBE_OK on older drafts); group streams block
+	// on it before decoding any frame, since a group's QUIC stream can race ahead.
 	#subscribes = new Map<bigint, SubscribeEntry>();
 	#subscribeNext = 0n;
 
@@ -190,6 +208,21 @@ export class Subscriber {
 	consume(path: Path.Valid): Broadcast {
 		const broadcast = new Broadcast();
 
+		// Resolve TrackConsumer.info() via a TRACK stream (lite-05+). On older drafts
+		// there's no TRACK stream, so info() rejects rather than fabricating defaults.
+		broadcast.onTrackInfo(async (name) => {
+			if (!supportsTrackStream(this.version)) {
+				throw new Error("track info requires moq-lite-05 or newer");
+			}
+			const info = await this.#trackInfo(path, name);
+			return {
+				compress: info.compression !== Compression.None,
+				cache: info.cache,
+				priority: info.priority,
+				ordered: info.ordered,
+			};
+		});
+
 		(async () => {
 			for (;;) {
 				const request = await broadcast.requested();
@@ -204,43 +237,33 @@ export class Subscriber {
 	async #runSubscribe(broadcast: Path.Valid, request: TrackRequest) {
 		const id = this.#subscribeNext++;
 
-		// Save the writer so we can append groups to it. `compression` stays
-		// undefined until SUBSCRIBE_OK resolves it; runGroup blocks on it.
+		// `compression` stays undefined until TRACK_INFO (or, on older drafts,
+		// implicit defaults) resolves it; runGroup blocks on it before decoding.
 		const compression = new Signal<Compression | undefined>(undefined);
 		const timescale = new Signal<number | undefined>(undefined);
-		this.#subscribes.set(id, { track: request.track, compression, timescale });
 
-		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.track.name}`);
+		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
 
-		const msg = new Subscribe({ id, broadcast, track: request.track.name, priority: request.priority });
+		const msg = new Subscribe({ id, broadcast, track: request.name, priority: request.priority });
 
-		// Open the stream and wait for SUBSCRIBE_OK under a timeout. The stream
-		// handle flows back via `state` so the timeout path can abort it if it
-		// finishes opening after the deadline.
+		// Open the stream under a timeout. The stream handle flows back via `state`
+		// so the timeout path can abort it if it finishes opening after the deadline.
 		const state: { stream?: Stream } = {};
-		const setup = this.#openSubscribe(state, msg);
+		const setup = this.#openSubscribe(state, msg, request, id, compression, timescale);
 
-		let stream: Stream;
+		let opened: { stream: Stream; producer: TrackProducer };
 		try {
-			const ok = await withTimeout(
+			opened = await withTimeout(
 				setup,
-				SUBSCRIBE_OK_TIMEOUT_MS,
-				`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
+				SUBSCRIBE_SETUP_TIMEOUT_MS,
+				`subscribe timed out after ${SUBSCRIBE_SETUP_TIMEOUT_MS}ms waiting for the first response (browser stream limit reached?)`,
 			);
-			stream = ok.stream;
-			// Unblock any group streams waiting to learn how to decode frames.
-			compression.set(ok.compression);
-			timescale.set(ok.timescale);
-			// Learn the publisher's cache window so a re-serving relay matches it.
-			request.track.cache = ok.cache;
-			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
+			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			const e = error(err);
-			request.track.close(e);
+			request.reject(e);
 			this.#subscribes.delete(id);
-			console.warn(
-				`subscribe error: id=${id} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
-			);
+			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${e.message}`);
 			// If the stream eventually opens after the timeout, abort it so we
 			// don't leak it. Cover both branches: setup may resolve late, or it
 			// may reject (e.g. encode/decode failure) after the stream is open.
@@ -251,59 +274,127 @@ export class Subscriber {
 			return;
 		}
 
+		const { stream, producer } = opened;
 		try {
 			// Watch for priority changes and send SUBSCRIBE_UPDATE. Lite01/Lite02
 			// don't carry SUBSCRIBE_UPDATE on the wire, so skip the watcher there
 			// and just wait on the stream/track like before.
-			const waits: Promise<unknown>[] = [stream.reader.closed, request.track.closed];
+			//
+			// On lite-05+ the publisher sends SUBSCRIBE_START/END/DROP on this stream;
+			// drain them (we don't drive delivery off the resolved range) so the FIN is
+			// observed. Older drafts just wait for the stream to close.
+			const closed = supportsTrackStream(this.version) ? this.#drainResponses(stream) : stream.reader.closed;
+			const waits: Promise<unknown>[] = [closed, producer.closed];
 			switch (this.version) {
 				case Version.DRAFT_01:
 				case Version.DRAFT_02:
 					break;
 				default:
-					waits.push(this.#runPriorityUpdates(id, broadcast, request.track, msg, stream));
+					waits.push(this.#runPriorityUpdates(id, broadcast, producer, msg, stream));
 					break;
 			}
 
 			await Promise.race(waits);
 
-			request.track.close();
+			producer.close();
 			stream.close();
-			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${request.track.name}`);
+			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			const e = error(err);
-			request.track.close(e);
-			console.warn(
-				`subscribe error: id=${id} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
-			);
+			producer.close(e);
+			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${e.message}`);
 			stream.abort(e);
 		} finally {
 			this.#subscribes.delete(id);
 		}
 	}
 
-	// Opens the subscribe stream, sends SUBSCRIBE, and reads SUBSCRIBE_OK.
-	// `state.stream` is populated as soon as the stream opens so the caller
-	// can clean it up on timeout even before this promise settles.
+	// Determine the track's immutable properties, accept the request (so the
+	// application's TrackSubscriber resolves and incoming groups have a producer to
+	// write into), register it, then open the subscribe stream. `state.stream` is
+	// populated as soon as the subscribe stream opens so the caller can clean it up
+	// on timeout even before this promise settles.
+	//
+	// On lite-05+ the properties come from a TRACK stream opened first, and the
+	// SUBSCRIBE is accepted implicitly (no SUBSCRIBE_OK). Older drafts carry no
+	// per-track properties, so they resolve to defaults and just drain SUBSCRIBE_OK.
 	async #openSubscribe(
 		state: { stream?: Stream },
 		msg: Subscribe,
-	): Promise<{ stream: Stream; compression: Compression; cache: number; timescale: number }> {
+		request: TrackRequest,
+		id: bigint,
+		compression: Signal<Compression | undefined>,
+		timescale: Signal<number | undefined>,
+	): Promise<{ stream: Stream; producer: TrackProducer }> {
+		let producer: TrackProducer;
+		let drainOk = false;
+
+		if (supportsTrackStream(this.version)) {
+			// Fetch the immutable properties once via the TRACK stream.
+			const info = await this.#trackInfo(msg.broadcast, msg.track);
+			producer = request.accept({
+				compress: info.compression !== Compression.None,
+				cache: info.cache,
+				priority: info.priority,
+				ordered: info.ordered,
+			});
+			compression.set(info.compression);
+			timescale.set(info.timescale);
+		} else {
+			// Older drafts negotiate nothing per-track: verbatim frames, no timescale.
+			producer = request.accept();
+			compression.set(Compression.None);
+			timescale.set(0);
+			drainOk = true;
+		}
+
+		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
+		this.#subscribes.set(id, { track: producer, compression, timescale });
+
 		state.stream = await Stream.open(this.#quic);
 		await state.stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(state.stream.writer, this.version);
 
-		// The first response MUST be a SUBSCRIBE_OK.
-		const resp = await decodeSubscribeResponse(state.stream.reader, this.version);
-		if (!("ok" in resp)) {
-			throw new Error("first subscribe response must be SUBSCRIBE_OK");
+		if (drainOk) {
+			// The first response MUST be a SUBSCRIBE_OK (older drafts only).
+			const resp = await decodeSubscribeResponse(state.stream.reader, this.version);
+			if (!("ok" in resp)) {
+				throw new Error("first subscribe response must be SUBSCRIBE_OK");
+			}
 		}
-		return {
-			stream: state.stream,
-			compression: resp.ok.compression,
-			cache: resp.ok.cache,
-			timescale: resp.ok.timescale,
-		};
+
+		return { stream: state.stream, producer };
+	}
+
+	// Opens a TRACK stream, reads the single TRACK_INFO, and FINs. Lite-05+ only.
+	async #trackInfo(broadcast: Path.Valid, track: string): Promise<TrackInfo> {
+		const stream = await Stream.open(this.#quic);
+		try {
+			await stream.writer.u53(StreamId.Track);
+			await new TrackMessage(broadcast, track).encode(stream.writer, this.version);
+			const info = await TrackInfo.decode(stream.reader, this.version);
+			// The publisher FINs after TRACK_INFO; FIN our side too.
+			stream.close();
+			return info;
+		} catch (err) {
+			stream.abort(error(err));
+			throw err;
+		}
+	}
+
+	// Drains SUBSCRIBE_START/END/DROP on the subscribe stream until FIN (lite-05+).
+	// The resolved range is informational here; the producer already orders groups.
+	// Resolves (never rejects) on FIN or on the stream being reset out from under it,
+	// so it's safe to drop from a Promise.race without an unhandled rejection.
+	async #drainResponses(stream: Stream): Promise<void> {
+		try {
+			for (;;) {
+				const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
+				if (!resp) return;
+			}
+		} catch {
+			// Stream closed or reset; nothing more to drain.
+		}
 	}
 
 	/**
@@ -320,7 +411,7 @@ export class Subscriber {
 	async #runPriorityUpdates(
 		id: bigint,
 		broadcast: Path.Valid,
-		track: Track,
+		track: TrackProducer,
 		msg: Subscribe,
 		stream: Stream,
 	): Promise<void> {
@@ -373,12 +464,12 @@ export class Subscriber {
 		track.writeGroup(producer);
 
 		try {
-			// Block until SUBSCRIBE_OK tells us the codec; the group's stream can
-			// arrive before SUBSCRIBE_OK lands on the subscribe stream.
+			// Block until the codec is known; the group's stream can arrive before
+			// TRACK_INFO (or SUBSCRIBE_OK) resolves it on the subscribe stream.
 			let codec = compression.peek();
 			while (codec === undefined) {
 				if (track.state.closed.peek()) {
-					// Subscription ended before SUBSCRIBE_OK; nothing to decode.
+					// Subscription ended before the codec resolved; nothing to decode.
 					producer.close();
 					stream.stop(new Error("cancel"));
 					return;
@@ -387,7 +478,7 @@ export class Subscriber {
 				codec = compression.peek();
 			}
 
-			// timescale resolves together with compression at SUBSCRIBE_OK. A
+			// timescale resolves together with compression (from TRACK_INFO). A
 			// non-zero scale means every frame is prefixed with a zigzag-delta
 			// timestamp varint (see the lite-05 FRAME format). We don't surface
 			// per-frame timestamps to the application yet, but we must still read

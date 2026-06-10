@@ -1,4 +1,5 @@
 import * as Catalog from "@moq/hang/catalog";
+import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
@@ -22,6 +23,19 @@ export type BroadcastProps = {
 
 export class Broadcast {
 	static readonly CATALOG_TRACK = "catalog.json";
+
+	// Track names this broadcast knows how to serve; any other request is rejected.
+	static readonly #TRACKS: ReadonlySet<string> = new Set([
+		Broadcast.CATALOG_TRACK,
+		Location.Window.TRACK,
+		Location.Peers.TRACK,
+		Preview.TRACK,
+		Chat.Typing.TRACK,
+		Chat.Message.TRACK,
+		Audio.Encoder.TRACK,
+		Video.Root.TRACK_HD,
+		Video.Root.TRACK_SD,
+	]);
 
 	connection: Signal<Moq.Connection.Established | undefined>;
 	enabled: Signal<boolean>;
@@ -77,52 +91,59 @@ export class Broadcast {
 			const request = await broadcast.requested();
 			if (!request) break;
 
-			effect.cleanup(() => request.track.close());
+			// Accept the request to commit the track's immutable publisher properties up
+			// front (so the wire layer can answer a TRACK request on lite-05+ and pick the
+			// frame codec) and obtain the TrackProducer to serve. An unknown track is
+			// rejected instead, without accepting, so its TRACK / SUBSCRIBE resets.
+			if (!Broadcast.#TRACKS.has(request.name)) {
+				console.error("received subscription for unknown track", request.name);
+				request.reject(new Error(`Unknown track: ${request.name}`));
+				continue;
+			}
+
+			const track = request.accept();
+			effect.cleanup(() => track.close());
 
 			effect.run((effect) => {
-				if (effect.get(request.track.state.closed)) return;
+				if (effect.get(track.state.closed)) return;
 
-				switch (request.track.name) {
+				switch (request.name) {
 					case Broadcast.CATALOG_TRACK:
-						this.#serveCatalog(request.track, effect);
+						this.#serveCatalog(new Json.Producer<Catalog.Root>(track), effect);
 						break;
 					case Location.Window.TRACK:
-						this.location.window.serve(request.track, effect);
+						this.location.window.serve(track, effect);
 						break;
 					case Location.Peers.TRACK:
-						this.location.peers.serve(request.track, effect);
+						this.location.peers.serve(track, effect);
 						break;
 					case Preview.TRACK:
-						this.preview.serve(request.track, effect);
+						this.preview.serve(track, effect);
 						break;
 					case Chat.Typing.TRACK:
-						this.chat.typing.serve(request.track, effect);
+						this.chat.typing.serve(track, effect);
 						break;
 					case Chat.Message.TRACK:
-						this.chat.message.serve(request.track, effect);
+						this.chat.message.serve(track, effect);
 						break;
 					case Audio.Encoder.TRACK:
-						this.audio.serve(request.track, effect);
+						this.audio.serve(track, effect);
 						break;
 					case Video.Root.TRACK_HD:
-						this.video.hd.serve(request.track, effect);
+						this.video.hd.serve(track, effect);
 						break;
 					case Video.Root.TRACK_SD:
-						this.video.sd.serve(request.track, effect);
-						break;
-					default:
-						console.error("received subscription for unknown track", request.track.name);
-						request.track.close(new Error(`Unknown track: ${request.track.name}`));
+						this.video.sd.serve(track, effect);
 						break;
 				}
 			});
 		}
 	}
 
-	#serveCatalog(track: Moq.Track, effect: Effect): void {
+	#serveCatalog(producer: Json.Producer<Catalog.Root>, effect: Effect): void {
 		if (!effect.get(this.enabled)) {
 			// Clear the catalog.
-			track.writeFrame(Catalog.encode({}));
+			producer.update({});
 			return;
 		}
 
@@ -136,8 +157,7 @@ export class Broadcast {
 			preview: effect.get(this.preview.catalog),
 		};
 
-		const encoded = Catalog.encode(catalog);
-		track.writeFrame(encoded);
+		producer.update(catalog);
 	}
 
 	close() {

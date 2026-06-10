@@ -1,5 +1,7 @@
 // cargo run --example chat
 
+use anyhow::Context;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// Optional: Use moq_native to configure a logger.
@@ -37,16 +39,18 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin..
 	// A broadcast is a collection of tracks, but in this example we'll only create one.
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 
 	// Create a track that we'll insert into the broadcast.
 	// A track is a series of groups representing a live stream.
-	let mut track = broadcast.create_track(moq_net::Track::new("chat"))?;
+	let mut track = broadcast.create_track("chat", None)?;
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// If you put "alice" here, it would be published as "anon/chat-example/alice".
 	// OPTIONAL: We publish after inserting the track just to avoid a nearly impossible race condition.
-	origin.publish_broadcast("", broadcast.consume());
+	let _publish = origin
+		.publish_broadcast("", broadcast.consume())
+		.context("failed to publish broadcast")?;
 
 	// Create a group.
 	// Each group is independent and the newest group(s) will be prioritized.

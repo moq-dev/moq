@@ -1,41 +1,55 @@
 import { Signal } from "@moq/signals";
 import { Group } from "./group.ts";
 
-/** Default {@link Track.cache} window (milliseconds) when the publisher doesn't set one. */
+/** Default {@link TrackInfo.cache} window (milliseconds) when the publisher doesn't set one. */
 export const DEFAULT_CACHE_MS = 5000;
 
+/**
+ * A track's immutable publisher properties, fixed for the lifetime of the track.
+ *
+ * A producer declares these once (via `TrackRequest.accept` or
+ * {@link TrackProducer.accept}); a consumer awaits them via {@link TrackSubscriber.info}
+ * (resolved from the wire TRACK_INFO on lite-05+). They map 1:1 onto TRACK_INFO.
+ */
+export interface TrackInfo {
+	/** Hint that frames are worth compressing (e.g. a JSON catalog). */
+	compress: boolean;
+	/** How long (milliseconds) old groups stay available before eviction. */
+	cache: number;
+	/** Tie-break priority between subscriptions of equal subscriber priority. */
+	priority: number;
+	/** Group ordering preference (newest-first when `false`). */
+	ordered: boolean;
+}
+
+/** Fill in any unset {@link TrackInfo} fields with their defaults. */
+export function trackInfoDefaults(info: Partial<TrackInfo> = {}): TrackInfo {
+	return {
+		compress: info.compress ?? false,
+		cache: info.cache ?? DEFAULT_CACHE_MS,
+		priority: info.priority ?? 0,
+		ordered: info.ordered ?? true,
+	};
+}
+
+/** The shared state behind a {@link TrackProducer} / {@link TrackSubscriber} pair. */
 export class TrackState {
 	groups = new Signal<Group[]>([]);
 	closed = new Signal<boolean | Error>(false);
 	priority = new Signal<number | undefined>(undefined);
+	/** Resolved once the producer commits the immutable properties. */
+	info = new Signal<TrackInfo | undefined>(undefined);
 }
 
-export class Track {
+/** Shared base for the two ends of a track: name, state, close, and info. */
+abstract class TrackHandle {
 	readonly name: string;
-
-	/**
-	 * Hint that this track's frames are worth compressing (e.g. a JSON catalog).
-	 * The publisher honors it by negotiating a codec in SUBSCRIBE_OK; codec-less
-	 * peers (older drafts) ignore it and send frames verbatim. Set it before the
-	 * track is served so the negotiated codec is known when SUBSCRIBE_OK is sent.
-	 */
-	compress = false;
-
-	/**
-	 * How long (milliseconds) the publisher keeps old groups available before
-	 * evicting them. Announced in SUBSCRIBE_OK so relays re-serve with the same
-	 * window. Lite05+ only; older drafts assume {@link DEFAULT_CACHE_MS}.
-	 */
-	cache = DEFAULT_CACHE_MS;
-
-	state = new TrackState();
-	#next?: number;
-	#nextSequence = 0;
-
+	readonly state: TrackState;
 	readonly closed: Promise<Error | undefined>;
 
-	constructor(name: string) {
+	constructor(name: string, state: TrackState) {
 		this.name = name;
+		this.state = state;
 
 		this.closed = new Promise((resolve) => {
 			const dispose = this.state.closed.subscribe((closed) => {
@@ -47,9 +61,61 @@ export class Track {
 	}
 
 	/**
-	 * Appends a new group to the track.
-	 * @returns A GroupProducer for the new group
+	 * Resolve this track's immutable publisher properties.
+	 *
+	 * On a producer this resolves once the info is committed (at accept time); on a
+	 * consumer once the wire layer commits the TRACK_INFO it received (lite-05+) or
+	 * defaults (older drafts), so awaiting it never yields a placeholder. Rejects if
+	 * the track is closed before the properties are known (e.g. a rejected subscription).
 	 */
+	async info(): Promise<TrackInfo> {
+		for (;;) {
+			const info = this.state.info.peek();
+			if (info) return info;
+
+			const closed = this.state.closed.peek();
+			if (closed instanceof Error) throw closed;
+			if (closed) throw new Error("track closed before info was known");
+
+			await Signal.race(this.state.info, this.state.closed);
+		}
+	}
+
+	/** Close the track (optionally with an error), closing any pending groups. */
+	close(abort?: Error) {
+		this.state.closed.set(abort ?? true);
+		for (const group of this.state.groups.peek()) {
+			group.close(abort);
+		}
+	}
+}
+
+/**
+ * The write side of a track, mirroring the Rust `TrackProducer`.
+ *
+ * Obtained from `TrackRequest.accept` (the wire asks the application for a track to
+ * serve) or constructed directly for an in-process track. Writes groups that a
+ * {@link TrackSubscriber} on the same {@link TrackState} reads.
+ */
+export class TrackProducer extends TrackHandle {
+	#next?: number;
+
+	constructor(name: string, state: TrackState = new TrackState()) {
+		super(name, state);
+	}
+
+	/** Commit the immutable publisher properties, resolving {@link info}. Returns `this`. */
+	accept(info: Partial<TrackInfo> = {}): this {
+		this.state.info.set(trackInfoDefaults(info));
+		return this;
+	}
+
+	/** A {@link TrackSubscriber} reading this in-process track's groups. */
+	subscribe(): TrackSubscriber {
+		return new TrackSubscriber(this.name, this.state);
+	}
+
+	/** Append a new group with the next sequence number. */
 	appendGroup(): Group {
 		if (this.state.closed.peek()) throw new Error("track is closed");
 
@@ -64,10 +130,7 @@ export class Track {
 		return group;
 	}
 
-	/**
-	 * Inserts an existing group into the track.
-	 * @param group - The group to insert
-	 */
+	/** Insert an existing group into the track. */
 	writeGroup(group: Group) {
 		if (this.state.closed.peek()) throw new Error("track is closed");
 
@@ -82,11 +145,7 @@ export class Track {
 		});
 	}
 
-	/**
-	 * Appends a frame to the track in its own group.
-	 *
-	 * @param frame - The frame to append
-	 */
+	/** Append a frame as its own single-frame group. */
 	writeFrame(frame: Uint8Array) {
 		const group = this.appendGroup();
 		group.writeFrame(frame);
@@ -110,13 +169,23 @@ export class Track {
 		group.writeBool(bool);
 		group.close();
 	}
+}
+
+/**
+ * The read side of a live track subscription, mirroring the Rust `TrackSubscriber`.
+ *
+ * Obtained from `Broadcast.subscribe` / `TrackConsumer.subscribe`, or from
+ * {@link TrackProducer.subscribe} for an in-process track. Reads the groups a
+ * {@link TrackProducer} on the same {@link TrackState} writes.
+ */
+export class TrackSubscriber extends TrackHandle {
+	#nextSequence = 0;
 
 	/**
 	 * Receive the next group available on this track, in arrival order.
 	 *
 	 * Groups may arrive out of order or with gaps due to network conditions.
-	 * Use {@link nextGroupOrdered} if you need groups in sequence order,
-	 * skipping those that arrive too late.
+	 * Use {@link nextGroup} for sequence order, skipping those that arrive too late.
 	 */
 	async recvGroup(): Promise<Group | undefined> {
 		for (;;) {
@@ -134,20 +203,12 @@ export class Track {
 	}
 
 	/**
-	 * @deprecated Use {@link recvGroup} for arrival order, or {@link nextGroupOrdered} for sequence order.
-	 */
-	async nextGroup(): Promise<Group | undefined> {
-		return this.recvGroup();
-	}
-
-	/**
 	 * Return the next group with a strictly-greater sequence number than the last returned.
 	 *
-	 * Late arrivals (with a sequence number at or below the last one returned) are silently skipped.
-	 *
-	 * NOTE: This will be renamed to `nextGroup` in the next major version.
+	 * Late arrivals (sequence at or below the last returned) are silently skipped.
+	 * Use {@link recvGroup} to see every group in arrival order instead.
 	 */
-	async nextGroupOrdered(): Promise<Group | undefined> {
+	async nextGroup(): Promise<Group | undefined> {
 		for (;;) {
 			const group = await this.recvGroup();
 			if (!group) return undefined;
@@ -231,21 +292,9 @@ export class Track {
 	}
 
 	/**
-	 * Update the subscription priority. Triggers a SUBSCRIBE_UPDATE
-	 * to the publisher when used on a subscribed track.
+	 * Update this subscription's priority, triggering a SUBSCRIBE_UPDATE to the publisher.
 	 */
 	updatePriority(priority: number) {
 		this.state.priority.set(priority, true);
-	}
-
-	/**
-	 * Closes the publisher and all associated groups.
-	 */
-	close(abort?: Error) {
-		this.state.closed.set(abort ?? true);
-
-		for (const group of this.state.groups.peek()) {
-			group.close(abort);
-		}
 	}
 }

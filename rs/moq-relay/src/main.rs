@@ -57,6 +57,9 @@ async fn main() -> anyhow::Result<()> {
 	let stats = config.stats.build(cluster.origin.clone());
 	let cluster = cluster.with_stats(stats);
 
+	// Spawn the health monitor before `config.web` is moved into the server.
+	let health = config.web.health.build();
+
 	// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
 	let web = Web::new(
 		WebState {
@@ -64,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
 			cluster: cluster.clone(),
 			tls_info: server.tls_info(),
 			conn_id: Default::default(),
+			health,
 		},
 		config.web,
 	);

@@ -21,7 +21,8 @@ impl Import {
 		config: Config,
 	) -> crate::Result<Self> {
 		let track = broadcast.create_track(
-			moq_net::Track::new(broadcast.unique_name(".aac")).with_timescale(hang::container::TIMESCALE),
+			broadcast.unique_name(".aac"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 		)?;
 
 		let mut audio_config = hang::catalog::AudioConfig::new(
@@ -33,8 +34,12 @@ impl Import {
 		);
 		audio_config.container = hang::catalog::Container::Legacy;
 
-		tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
-		catalog.lock().audio.renditions.insert(track.name.clone(), audio_config);
+		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
+		catalog
+			.lock()
+			.audio
+			.renditions
+			.insert(track.name().to_string(), audio_config);
 
 		Ok(Self {
 			catalog,
@@ -99,7 +104,7 @@ impl Import {
 
 impl Drop for Import {
 	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.name, "ending track");
-		self.catalog.lock().audio.renditions.remove(&self.track.name);
+		tracing::debug!(name = ?self.track.name(), "ending track");
+		self.catalog.lock().audio.renditions.remove(self.track.name());
 	}
 }
