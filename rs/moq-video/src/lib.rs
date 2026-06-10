@@ -22,12 +22,12 @@
 //! ## API stability
 //!
 //! The public API is deliberately ffmpeg-free: no public type, signature, or
-//! error variant names an `ffmpeg-next` type (the raw capture/encode types and
-//! the underlying error are internal; [`Error::Ffmpeg`] carries a plain
-//! message). So a major `ffmpeg-next` bump is not a breaking change for
-//! consumers, and we don't re-export `ffmpeg-next`. Config structs are
-//! `#[non_exhaustive]`: build them via `default()` and set fields, so new
-//! options stay additive.
+//! error variant names an `ffmpeg-next` type. [`encode::encoder::Encoder`]
+//! takes raw RGBA bytes (not an ffmpeg frame), the camera capture/encode path
+//! stays internal, and [`Error::Ffmpeg`] carries a plain message.
+//! So a major `ffmpeg-next` bump is not a breaking change for consumers, and
+//! we don't re-export `ffmpeg-next`. Config structs are `#[non_exhaustive]`:
+//! build them via `default()`/`new()` and set fields, so new options stay additive.
 
 pub mod capture;
 pub mod encode;

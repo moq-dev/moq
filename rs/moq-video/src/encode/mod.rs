@@ -1,16 +1,16 @@
 //! Encode captured video and publish it as a moq H.264 track.
 //!
-//! Two public entry points:
+//! Entry points, high to low level:
 //! - [`publish_capture`] captures and publishes a webcam (turnkey).
-//! - [`Producer`] publishes H.264 you already encoded yourself (bring your
-//!   own packets).
+//! - [`encoder::Encoder`] H.264-encodes raw RGBA frames you supply, and
+//!   [`Producer`] publishes the resulting packets (bring your own frames).
+//! - [`Producer`] alone publishes H.264 you already encoded.
 //!
-//! [`Options`] / [`Kind`] configure them. The raw ffmpeg encoder is kept
-//! internal so the public surface stays ffmpeg-free; the decode/consume
-//! counterpart (mirror of `moq-audio`'s consumer) will land in a sibling
-//! `decode` module.
+//! [`Options`] / [`Kind`] / [`encoder::Config`] configure them. The decode/
+//! consume counterpart (mirror of `moq-audio`'s consumer) will land in a
+//! sibling `decode` module.
 
-mod encoder;
+pub mod encoder;
 mod producer;
 
 pub use encoder::Kind;

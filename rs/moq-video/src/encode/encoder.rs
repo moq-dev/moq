@@ -25,11 +25,14 @@ pub enum Kind {
 	Named(String),
 }
 
-/// Encoder configuration. `width` / `height` / `framerate` must match the
-/// stream the [`Encoder`] will publish; pixel conversion from the camera's
-/// native format is handled internally.
+/// Encoder configuration. `width` / `height` / `framerate` are the encoded
+/// output; input frames are scaled/converted to match.
+///
+/// `#[non_exhaustive]`: build via [`Config::new`] and set the optional fields,
+/// so future knobs don't break callers.
 #[derive(Clone, Debug)]
-pub(crate) struct Config {
+#[non_exhaustive]
+pub struct Config {
 	pub width: u32,
 	pub height: u32,
 	pub framerate: u32,
@@ -82,7 +85,10 @@ const HARDWARE_ENCODERS: &[&str] = &[
 /// Software fallbacks, in priority order.
 const SOFTWARE_ENCODERS: &[&str] = &["libx264", "h264"];
 
-pub(crate) struct Encoder {
+/// H.264 encoder. Build one with [`Encoder::new`], feed it raw RGBA frames
+/// via [`encode_rgba`](Self::encode_rgba), and publish the resulting Annex-B
+/// packets through [`Producer`](super::Producer).
+pub struct Encoder {
 	encoder: ffmpeg::encoder::video::Encoder,
 	/// Lazily built once we see the first frame's pixel format/size.
 	scaler: Option<Scaler>,
@@ -133,11 +139,26 @@ impl Encoder {
 		&self.name
 	}
 
-	/// Encode one decoded frame, returning zero or more Annex-B H.264
-	/// packets. With B-frames disabled (the low-latency default) the
-	/// encoder emits one packet per input frame.
-	pub fn encode(&mut self, frame: &ffmpeg::frame::Video) -> Result<Vec<Bytes>, Error> {
-		let yuv = self.convert(frame)?;
+	/// Encode one tightly-packed RGBA frame (`width * height * 4` bytes),
+	/// returning zero or more Annex-B H.264 packets. Set `keyframe` to force an
+	/// IDR (e.g. on resume so a re-subscribing viewer can start decoding at
+	/// once). The frame is scaled/converted to the encoder's resolution.
+	pub fn encode_rgba(&mut self, rgba: &[u8], width: u32, height: u32, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+		let frame = rgba_frame(rgba, width, height)?;
+		self.encode_frame(&frame, keyframe)
+	}
+
+	/// Encode a decoded frame (camera path). With B-frames disabled (the
+	/// low-latency default) the encoder emits one packet per input frame.
+	pub(crate) fn encode(&mut self, frame: &ffmpeg::frame::Video) -> Result<Vec<Bytes>, Error> {
+		self.encode_frame(frame, false)
+	}
+
+	fn encode_frame(&mut self, frame: &ffmpeg::frame::Video, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+		let mut yuv = self.convert(frame)?;
+		if keyframe {
+			yuv.set_kind(ffmpeg::picture::Type::I);
+		}
 		self.encoder.send_frame(&yuv)?;
 		self.drain()
 	}
@@ -203,6 +224,28 @@ impl Encoder {
 		self.frame_count += 1;
 		Ok(yuv)
 	}
+}
+
+/// Wrap tightly-packed RGBA bytes in an ffmpeg frame, copying row-by-row to
+/// honor ffmpeg's stride (which may exceed `width * 4`).
+fn rgba_frame(rgba: &[u8], width: u32, height: u32) -> Result<ffmpeg::frame::Video, Error> {
+	let row_bytes = width as usize * 4;
+	let expected = row_bytes * height as usize;
+	if rgba.len() < expected {
+		return Err(Error::Codec(anyhow::anyhow!(
+			"RGBA buffer too small: {} < {expected} for {width}x{height}",
+			rgba.len()
+		)));
+	}
+
+	let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGBA, width, height);
+	let stride = frame.stride(0);
+	for y in 0..height as usize {
+		let src = y * row_bytes;
+		let dst = y * stride;
+		frame.data_mut(0)[dst..dst + row_bytes].copy_from_slice(&rgba[src..src + row_bytes]);
+	}
+	Ok(frame)
 }
 
 fn encoder_candidates(kind: &Kind) -> Vec<String> {
