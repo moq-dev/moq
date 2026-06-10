@@ -14,7 +14,7 @@ use moq_mux::container::Timestamp;
 use crate::Error;
 use crate::capture::{self, Camera};
 
-use super::encoder::{Encoder, EncoderConfig, EncoderKind};
+use super::encoder::{self, Encoder};
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 const DEFAULT_FRAMERATE: u32 = 30;
@@ -25,11 +25,11 @@ const DEFAULT_FRAMERATE: u32 = 30;
 /// registered) before the camera opens; this is what lets a subscriber
 /// trigger capture on demand. `moq_mux::codec::h264::Import` handles
 /// catalog registration and framing.
-pub struct VideoProducer {
+pub struct Producer {
 	import: moq_mux::codec::h264::Import,
 }
 
-impl VideoProducer {
+impl Producer {
 	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self, Error> {
 		let import =
 			moq_mux::codec::h264::Import::new(broadcast, catalog).with_mode(moq_mux::codec::h264::Mode::Avc3)?;
@@ -69,7 +69,7 @@ pub struct Options {
 	/// Target bitrate in bits per second; `None` derives from resolution.
 	pub bitrate: Option<u64>,
 	/// Encoder implementation preference.
-	pub kind: EncoderKind,
+	pub kind: encoder::Kind,
 }
 
 /// Capture a webcam and publish it as on-demand H.264.
@@ -90,7 +90,7 @@ pub async fn publish_capture(
 		return Err(Error::InvalidFramerate(0));
 	}
 
-	let producer = VideoProducer::new(broadcast, catalog)?;
+	let producer = Producer::new(broadcast, catalog)?;
 	let track = producer
 		.track()
 		.cloned()
@@ -133,7 +133,7 @@ async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
 /// Blocking capture/encode loop. Opens the camera lazily on the first
 /// watched frame and releases it whenever the gate goes idle.
 fn capture_loop(
-	mut producer: VideoProducer,
+	mut producer: Producer,
 	capture: capture::Config,
 	encode: Options,
 	gate: Arc<Gate>,
@@ -167,7 +167,7 @@ fn capture_loop(
 				.framerate
 				.or_else(|| cam.framerate())
 				.unwrap_or(DEFAULT_FRAMERATE);
-			let mut encoder_config = EncoderConfig::new(cam.width(), cam.height(), framerate);
+			let mut encoder_config = encoder::Config::new(cam.width(), cam.height(), framerate);
 			encoder_config.bitrate = encode.bitrate;
 			encoder_config.kind = encode.kind.clone();
 			let enc = Encoder::new(&encoder_config)?;

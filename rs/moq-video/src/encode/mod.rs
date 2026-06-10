@@ -1,10 +1,11 @@
 //! Encode captured video and publish it as a moq H.264 track.
 //!
-//! The decode/consume counterpart (mirror of `moq-audio`'s consumer) will
-//! land in a sibling `decode` module.
+//! High-level entry: [`publish_capture`] (and the [`Producer`] / [`Options`]
+//! it builds on). The raw codec building blocks live in [`encoder`]. The
+//! decode/consume counterpart (mirror of `moq-audio`'s consumer) will land in
+//! a sibling `decode` module.
 
-mod encoder;
+pub mod encoder;
 mod producer;
 
-pub use encoder::{Encoder, EncoderConfig, EncoderKind};
-pub use producer::{Options, VideoProducer, publish_capture};
+pub use producer::{Options, Producer, publish_capture};

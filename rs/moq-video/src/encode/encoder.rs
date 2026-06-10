@@ -13,7 +13,7 @@ use crate::Error;
 /// strategies can be added without breaking external `match`es.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum EncoderKind {
+pub enum Kind {
 	/// Prefer a platform hardware encoder, fall back to software.
 	#[default]
 	Auto,
@@ -28,11 +28,11 @@ pub enum EncoderKind {
 /// Encoder configuration. `width` / `height` / `framerate` must match the
 /// stream the [`Encoder`] will publish; pixel conversion from the camera's
 /// native format is handled internally.
-/// `#[non_exhaustive]`: build via [`EncoderConfig::new`] and set the optional
+/// `#[non_exhaustive]`: build via [`Config::new`] and set the optional
 /// fields, so future knobs (codec, keyframe policy, ...) don't break callers.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub struct EncoderConfig {
+pub struct Config {
 	pub width: u32,
 	pub height: u32,
 	pub framerate: u32,
@@ -42,10 +42,10 @@ pub struct EncoderConfig {
 	/// Keyframe interval in frames. Subscribers joining mid-stream wait at
 	/// most this many frames before they can start decoding.
 	pub gop: u32,
-	pub kind: EncoderKind,
+	pub kind: Kind,
 }
 
-impl EncoderConfig {
+impl Config {
 	pub fn new(width: u32, height: u32, framerate: u32) -> Self {
 		Self {
 			width,
@@ -54,7 +54,7 @@ impl EncoderConfig {
 			bitrate: None,
 			// ~2 seconds at the configured framerate.
 			gop: framerate.saturating_mul(2).max(1),
-			kind: EncoderKind::Auto,
+			kind: Kind::Auto,
 		}
 	}
 
@@ -104,7 +104,7 @@ struct Scaler {
 }
 
 impl Encoder {
-	pub fn new(config: &EncoderConfig) -> Result<Self, Error> {
+	pub fn new(config: &Config) -> Result<Self, Error> {
 		let candidates = encoder_candidates(&config.kind);
 
 		let mut tried = Vec::new();
@@ -208,12 +208,12 @@ impl Encoder {
 	}
 }
 
-fn encoder_candidates(kind: &EncoderKind) -> Vec<String> {
+fn encoder_candidates(kind: &Kind) -> Vec<String> {
 	match kind {
-		EncoderKind::Named(name) => vec![name.clone()],
-		EncoderKind::Hardware => HARDWARE_ENCODERS.iter().map(|s| s.to_string()).collect(),
-		EncoderKind::Software => SOFTWARE_ENCODERS.iter().map(|s| s.to_string()).collect(),
-		EncoderKind::Auto => HARDWARE_ENCODERS
+		Kind::Named(name) => vec![name.clone()],
+		Kind::Hardware => HARDWARE_ENCODERS.iter().map(|s| s.to_string()).collect(),
+		Kind::Software => SOFTWARE_ENCODERS.iter().map(|s| s.to_string()).collect(),
+		Kind::Auto => HARDWARE_ENCODERS
 			.iter()
 			.chain(SOFTWARE_ENCODERS)
 			.map(|s| s.to_string())
@@ -221,7 +221,7 @@ fn encoder_candidates(kind: &EncoderKind) -> Vec<String> {
 	}
 }
 
-fn open_encoder(name: &str, config: &EncoderConfig) -> Result<ffmpeg::encoder::video::Encoder, Error> {
+fn open_encoder(name: &str, config: &Config) -> Result<ffmpeg::encoder::video::Encoder, Error> {
 	let codec = ffmpeg::encoder::find_by_name(name).ok_or_else(|| Error::NoEncoder(name.to_string()))?;
 
 	let ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
@@ -264,9 +264,9 @@ mod tests {
 
 	#[test]
 	fn software_encoder_emits_annexb() {
-		let config = EncoderConfig {
-			kind: EncoderKind::Software,
-			..EncoderConfig::new(320, 240, 30)
+		let config = Config {
+			kind: Kind::Software,
+			..Config::new(320, 240, 30)
 		};
 		let mut encoder = Encoder::new(&config).expect("libx264 should be available under nix ffmpeg");
 		assert_eq!(encoder.name(), "libx264");
@@ -293,17 +293,17 @@ mod tests {
 
 	#[test]
 	fn unknown_named_encoder_errors() {
-		let config = EncoderConfig {
-			kind: EncoderKind::Named("definitely_not_a_codec".into()),
-			..EncoderConfig::new(320, 240, 30)
+		let config = Config {
+			kind: Kind::Named("definitely_not_a_codec".into()),
+			..Config::new(320, 240, 30)
 		};
 		assert!(matches!(Encoder::new(&config), Err(Error::NoEncoder(_))));
 	}
 
 	#[test]
 	fn default_bitrate_scales_with_resolution() {
-		let small = EncoderConfig::new(320, 240, 30).resolved_bitrate();
-		let large = EncoderConfig::new(1920, 1080, 30).resolved_bitrate();
+		let small = Config::new(320, 240, 30).resolved_bitrate();
+		let large = Config::new(1920, 1080, 30).resolved_bitrate();
 		assert!(large > small);
 		assert!(small > 0);
 	}

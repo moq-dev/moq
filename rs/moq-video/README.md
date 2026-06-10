@@ -7,10 +7,10 @@ Counterpart to [`moq-audio`](https://crates.io/crates/moq-audio). Built on
 
 - `capture::Camera` captures a webcam via libavdevice (avfoundation / v4l2 / dshow);
   screen capture would slot into the same `capture` module.
-- `encode::Encoder` encodes decoded frames to Annex-B H.264, preferring a platform
-  hardware encoder (`h264_videotoolbox` / `h264_nvenc` / `h264_vaapi`) and
+- `encode::encoder::Encoder` encodes decoded frames to Annex-B H.264, preferring a
+  platform hardware encoder (`h264_videotoolbox` / `h264_nvenc` / `h264_vaapi`) and
   falling back to software (`libx264`).
-- `encode::VideoProducer` publishes encoded frames through `moq_mux::codec::h264::Import`.
+- `encode::Producer` publishes encoded frames through `moq_mux::codec::h264::Import`.
 - `encode::publish_capture` is a one-call capture-encode-publish loop. It encodes
   on demand: the camera opens only while a subscriber is watching.
 
