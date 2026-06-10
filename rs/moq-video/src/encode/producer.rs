@@ -58,11 +58,10 @@ impl VideoProducer {
 	}
 }
 
-/// High-level webcam encode-and-publish configuration.
+/// Source-agnostic encode knobs. Width / height / framerate aren't here:
+/// those come from the capture source, not the caller.
 #[derive(Clone, Debug, Default)]
-pub struct CameraConfig {
-	/// Capture-side settings (device, resolution, framerate).
-	pub camera: capture::Config,
+pub struct Options {
 	/// Target bitrate in bits per second; `None` derives from resolution.
 	pub bitrate: Option<u64>,
 	/// Encoder implementation preference.
@@ -78,11 +77,12 @@ pub struct CameraConfig {
 pub async fn publish_camera(
 	broadcast: moq_net::BroadcastProducer,
 	catalog: moq_mux::catalog::Producer,
-	config: CameraConfig,
+	capture: capture::Config,
+	encode: Options,
 ) -> Result<(), Error> {
 	// A caller asking for exactly zero is an error; omitting it (None) is
 	// fine and resolves to the camera's reported rate once it's open.
-	if config.camera.framerate == Some(0) {
+	if capture.framerate == Some(0) {
 		return Err(Error::InvalidFramerate(0));
 	}
 
@@ -96,7 +96,7 @@ pub async fn publish_camera(
 
 	// ffmpeg capture + encode is blocking; keep it off the async runtime.
 	let worker_gate = gate.clone();
-	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, config, worker_gate));
+	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, capture, encode, worker_gate));
 
 	tokio::select! {
 		// Surface a capture/encode failure (e.g. camera open) promptly.
@@ -128,7 +128,12 @@ async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
 
 /// Blocking capture/encode loop. Opens the camera lazily on the first
 /// watched frame and releases it whenever the gate goes idle.
-fn capture_loop(mut producer: VideoProducer, config: CameraConfig, gate: Arc<Gate>) -> Result<(), Error> {
+fn capture_loop(
+	mut producer: VideoProducer,
+	capture: capture::Config,
+	encode: Options,
+	gate: Arc<Gate>,
+) -> Result<(), Error> {
 	let mut camera: Option<Camera> = None;
 	let mut encoder: Option<Encoder> = None;
 	let mut start: Option<Instant> = None;
@@ -151,17 +156,16 @@ fn capture_loop(mut producer: VideoProducer, config: CameraConfig, gate: Arc<Gat
 		// Open the camera (and an encoder sized to its negotiated mode) the
 		// first time we're watched after being idle.
 		if camera.is_none() {
-			let cam = Camera::open(&config.camera)?;
+			let cam = Camera::open(&capture)?;
 			// Prefer an explicit --fps, otherwise use the camera's reported
 			// rate, falling back only if the backend doesn't expose one.
-			let framerate = config
-				.camera
+			let framerate = capture
 				.framerate
 				.or_else(|| cam.framerate())
 				.unwrap_or(DEFAULT_FRAMERATE);
 			let mut encoder_config = EncoderConfig::new(cam.width(), cam.height(), framerate);
-			encoder_config.bitrate = config.bitrate;
-			encoder_config.kind = config.kind.clone();
+			encoder_config.bitrate = encode.bitrate;
+			encoder_config.kind = encode.kind.clone();
 			let enc = Encoder::new(&encoder_config)?;
 			tracing::info!(
 				encoder = enc.name(),

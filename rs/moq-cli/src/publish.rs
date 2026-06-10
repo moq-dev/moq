@@ -81,7 +81,8 @@ enum Source {
 	#[cfg(feature = "webcam")]
 	Webcam {
 		catalog: moq_mux::catalog::Producer,
-		config: moq_video::encode::CameraConfig,
+		capture: moq_video::capture::Config,
+		encode: moq_video::encode::Options,
 	},
 }
 
@@ -116,7 +117,8 @@ impl Publish {
 			#[cfg(feature = "webcam")]
 			PublishFormat::Webcam(args) => Source::Webcam {
 				catalog,
-				config: args.clone().into(),
+				capture: args.capture_config(),
+				encode: args.encode_options(),
 			},
 		};
 
@@ -146,10 +148,14 @@ impl Publish {
 				}
 			}
 			#[cfg(feature = "webcam")]
-			Source::Webcam { catalog, config } => {
+			Source::Webcam {
+				catalog,
+				capture,
+				encode,
+			} => {
 				// Encodes on demand: the camera opens only while subscribed.
 				// publish_camera drives the blocking capture loop internally.
-				moq_video::encode::publish_camera(self.broadcast.clone(), catalog, config).await?;
+				moq_video::encode::publish_camera(self.broadcast.clone(), catalog, capture, encode).await?;
 				Ok(())
 			}
 		}
@@ -157,24 +163,27 @@ impl Publish {
 }
 
 #[cfg(feature = "webcam")]
-impl From<WebcamArgs> for moq_video::encode::CameraConfig {
-	fn from(args: WebcamArgs) -> Self {
-		let kind = if args.software {
+impl WebcamArgs {
+	fn capture_config(&self) -> moq_video::capture::Config {
+		moq_video::capture::Config {
+			device: self.device.clone(),
+			width: self.width,
+			height: self.height,
+			framerate: self.fps,
+		}
+	}
+
+	fn encode_options(&self) -> moq_video::encode::Options {
+		let kind = if self.software {
 			moq_video::encode::EncoderKind::Software
-		} else if args.hardware {
+		} else if self.hardware {
 			moq_video::encode::EncoderKind::Hardware
 		} else {
 			moq_video::encode::EncoderKind::Auto
 		};
 
-		moq_video::encode::CameraConfig {
-			camera: moq_video::capture::Config {
-				device: args.device,
-				width: args.width,
-				height: args.height,
-				framerate: args.fps,
-			},
-			bitrate: args.bitrate,
+		moq_video::encode::Options {
+			bitrate: self.bitrate,
 			kind,
 		}
 	}
