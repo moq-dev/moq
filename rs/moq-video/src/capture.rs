@@ -38,10 +38,9 @@ pub struct Config {
 
 /// An open camera, read frame-by-frame via [`read`](Self::read).
 ///
-/// Internal for now: it exposes [`ffmpeg`](crate::ffmpeg) frame types, so
-/// keeping it private leaves the public API free of that version coupling.
-/// Promote to `pub` (a non-breaking change) once a bring-your-own-frames
-/// consumer needs it.
+/// Internal for now: it traffics in `ffmpeg` frame types, so keeping it
+/// private leaves the public API free of that version coupling. Promote to
+/// `pub` (a non-breaking change) once a bring-your-own-frames consumer needs it.
 pub(crate) struct Camera {
 	input: ffmpeg::format::context::Input,
 	decoder: ffmpeg::decoder::Video,

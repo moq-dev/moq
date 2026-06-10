@@ -21,20 +21,17 @@
 //!
 //! ## API stability
 //!
-//! The public API is deliberately ffmpeg-free at the signature level: the raw
-//! capture/encode types that traffic in [`ffmpeg`] frames are internal, so a
-//! major `ffmpeg-next` bump is not a breaking change for consumers. (The one
-//! exception is [`Error::Ffmpeg`], which carries a typed `ffmpeg_next::Error`.)
-//! Config structs are `#[non_exhaustive]`: build them via `default()` and set
-//! fields, so new options stay additive.
+//! The public API is deliberately ffmpeg-free: no public type, signature, or
+//! error variant names an `ffmpeg-next` type (the raw capture/encode types and
+//! the underlying error are internal; [`Error::Ffmpeg`] carries a plain
+//! message). So a major `ffmpeg-next` bump is not a breaking change for
+//! consumers, and we don't re-export `ffmpeg-next`. Config structs are
+//! `#[non_exhaustive]`: build them via `default()` and set fields, so new
+//! options stay additive.
 
 pub mod capture;
 pub mod encode;
 
 mod error;
-
-/// Re-exported so callers can name the inner type of [`Error::Ffmpeg`]
-/// without taking their own (possibly version-mismatched) ffmpeg dependency.
-pub use ffmpeg_next as ffmpeg;
 
 pub use error::Error;

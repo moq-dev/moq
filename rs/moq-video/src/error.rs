@@ -3,8 +3,12 @@
 #[non_exhaustive]
 pub enum Error {
 	/// libav* (capture, scaling, or codec) failure.
+	///
+	/// Carries the formatted message rather than the typed `ffmpeg_next::Error`
+	/// on purpose: keeping ffmpeg out of the public surface means an
+	/// `ffmpeg-next` major bump isn't a breaking change for consumers.
 	#[error("ffmpeg: {0}")]
-	Ffmpeg(#[from] ffmpeg_next::Error),
+	Ffmpeg(String),
 
 	/// No encoder matching the requested codec / hardware preference was
 	/// compiled into the linked ffmpeg.
@@ -36,4 +40,12 @@ pub enum Error {
 	/// Timestamp overflow converting to the moq microsecond timescale.
 	#[error(transparent)]
 	TimeOverflow(#[from] moq_net::TimeOverflow),
+}
+
+// Manual (not `#[from]`) so the typed ffmpeg error stays out of the public
+// variant while `?` on ffmpeg results still converts automatically.
+impl From<ffmpeg_next::Error> for Error {
+	fn from(err: ffmpeg_next::Error) -> Self {
+		Self::Ffmpeg(err.to_string())
+	}
 }
