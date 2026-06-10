@@ -63,10 +63,10 @@ ffmpeg -i input.mp4 -f mpegts - | moq-cli publish - https://relay.example.com/an
 ### Capture a Webcam
 
 The `capture` subcommand captures and encodes from local devices directly, no
-external FFmpeg process required. Today it captures the camera; microphone
-audio is planned (it will publish a second Opus track on the same broadcast).
-It is gated behind the `capture` feature, whose video path pulls in a system
-FFmpeg (libav\*) build dependency:
+external FFmpeg process required. It publishes the camera as an H.264 video
+track and the microphone as an Opus audio track on the same broadcast. It is
+gated behind the `capture` feature, whose video path pulls in a system FFmpeg
+(libav\*) build dependency (audio is pure-Rust via cpal):
 
 Build (or run) with the feature enabled:
 
@@ -75,18 +75,24 @@ cargo build --release -p moq-cli --features capture
 # or run straight from a checkout:
 cargo run -p moq-cli --features capture -- publish --url https://relay.example.com --broadcast cam.hang capture
 
-# Default camera, hardware-encoded H.264 when available:
+# Default camera + microphone, hardware-encoded H.264 when available:
 moq-cli publish --url https://relay.example.com --broadcast cam.hang capture
 
-# Pick a camera, resolution, and bitrate:
+# Pick devices, resolution, and bitrates:
 moq-cli publish --url https://relay.example.com --broadcast cam.hang \
-    capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000
+    capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 \
+            --microphone "MacBook Pro Microphone" --audio-bitrate 64000
+
+# One medium only:
+moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --no-audio
+moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --no-video
 ```
 
-Capture uses the platform backend (avfoundation on macOS, v4l2 on Linux, dshow
-on Windows). It picks a hardware encoder (`h264_videotoolbox` / `h264_nvenc` /
-`h264_vaapi`) when one is present, falling back to software (`libx264`); force
-either with `--hardware` / `--software`.
+Video capture uses the platform backend (avfoundation on macOS, v4l2 on Linux,
+dshow on Windows) and picks a hardware encoder (`h264_videotoolbox` /
+`h264_nvenc` / `h264_vaapi`) when one is present, falling back to software
+(`libx264`); force either with `--hardware` / `--software`. Audio capture uses
+cpal (CoreAudio / WASAPI / ALSA) and encodes Opus.
 
 Alternatively, pipe an external FFmpeg process as MPEG-TS:
 
@@ -150,7 +156,7 @@ Publish (read from stdin unless noted):
 - `fmp4` - fragmented MP4 / CMAF
 - `ts` - MPEG-TS (H.264 / H.265 video, AAC audio)
 - `hls --playlist <url>` - HLS playlist ingest
-- `capture` - capture local devices directly (camera now, microphone planned; requires the `capture` build feature; does not read stdin)
+- `capture` - capture local devices directly (camera H.264 + microphone Opus; requires the `capture` build feature; does not read stdin)
 
 Subscribe (`--format`):
 

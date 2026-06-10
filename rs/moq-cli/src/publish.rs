@@ -14,13 +14,14 @@ pub enum PublishFormat {
 		#[arg(long)]
 		playlist: String,
 	},
-	/// Capture and publish from local devices (camera now; microphone planned).
+	/// Capture and publish the camera (H.264) and microphone (Opus).
 	#[cfg(feature = "capture")]
 	Capture(CaptureArgs),
 }
 
-/// Device capture options. Video flags map to `moq-video`; audio capture
-/// (microphone -> Opus via `moq-audio`) will add `--microphone` etc. here.
+/// Device capture options. Video (camera -> H.264) maps to `moq-video`; audio
+/// (microphone -> Opus) to `moq-audio`. Both are captured by default; use
+/// `--no-video` / `--no-audio` to publish only one.
 #[cfg(feature = "capture")]
 #[derive(clap::Args, Clone)]
 pub struct CaptureArgs {
@@ -53,6 +54,22 @@ pub struct CaptureArgs {
 	/// Force the software encoder (libx264).
 	#[arg(long)]
 	pub software: bool,
+
+	/// Microphone device name. Omit to use the default input.
+	#[arg(long)]
+	pub microphone: Option<String>,
+
+	/// Target audio bitrate in bits per second (Opus). Omit for the codec default.
+	#[arg(long)]
+	pub audio_bitrate: Option<u32>,
+
+	/// Capture audio only (no camera).
+	#[arg(long, conflicts_with = "no_audio")]
+	pub no_video: bool,
+
+	/// Capture video only (no microphone).
+	#[arg(long)]
+	pub no_audio: bool,
 }
 
 enum PublishDecoder {
@@ -74,20 +91,21 @@ impl PublishDecoder {
 	}
 }
 
+// Exactly one Source exists per process, so the size gap between the small
+// Stream variant and the larger Capture config is irrelevant.
+#[allow(clippy::large_enum_variant)]
 enum Source {
 	/// Decode a container read from stdin (or an HLS playlist).
 	Stream(PublishDecoder),
 	/// Capture from local devices. The per-medium producers are built on their
-	/// own capture threads, so we just carry the shared catalog and the configs.
-	///
-	/// Audio (microphone -> Opus via `moq-audio`) plugs in as sibling fields
-	/// here plus a second concurrent producer in [`Publish::run`]; the
-	/// broadcast and catalog are already shared, so it's purely additive.
+	/// own capture threads (camera via ffmpeg, microphone via cpal), publishing
+	/// onto the shared broadcast + catalog; [`Publish::run`] drives them
+	/// concurrently.
 	#[cfg(feature = "capture")]
 	Capture {
 		catalog: moq_mux::catalog::Producer,
-		video: moq_video::capture::Config,
-		video_encode: moq_video::encode::Options,
+		video: Option<(moq_video::capture::Config, moq_video::encode::Options)>,
+		audio: Option<(moq_audio::capture::Config, moq_audio::EncoderOutput)>,
 	},
 }
 
@@ -120,11 +138,12 @@ impl Publish {
 				Source::Stream(PublishDecoder::Hls(Box::new(hls)))
 			}
 			#[cfg(feature = "capture")]
-			PublishFormat::Capture(args) => Source::Capture {
-				catalog,
-				video: args.capture_config(),
-				video_encode: args.encode_options(),
-			},
+			PublishFormat::Capture(args) => {
+				let video = (!args.no_video).then(|| (args.video_config(), args.video_encode()));
+				let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode()));
+				anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
+				Source::Capture { catalog, video, audio }
+			}
 		};
 
 		Ok(Self { source, broadcast })
@@ -153,16 +172,41 @@ impl Publish {
 				}
 			}
 			#[cfg(feature = "capture")]
-			Source::Capture {
-				catalog,
-				video,
-				video_encode,
-			} => {
-				// Encodes on demand: the camera opens only while subscribed.
-				// publish_capture drives the blocking capture loop internally.
-				// When audio lands, run the mic producer concurrently here
-				// (e.g. tokio::try_join!) on the same broadcast + catalog.
-				moq_video::encode::publish_capture(self.broadcast.clone(), catalog, video, video_encode).await?;
+			Source::Capture { catalog, video, audio } => {
+				// Each enabled medium publishes its own track onto the shared
+				// broadcast + catalog. Video encodes on demand (camera opens only
+				// while subscribed); audio (cpal) is blocking, so it runs on a
+				// dedicated thread.
+				let video_fut = {
+					let broadcast = self.broadcast.clone();
+					let catalog = catalog.clone();
+					async move {
+						match video {
+							Some((config, encode)) => {
+								moq_video::encode::publish_capture(broadcast, catalog, config, encode)
+									.await
+									.map_err(anyhow::Error::from)
+							}
+							None => Ok(()),
+						}
+					}
+				};
+				let audio_fut = {
+					let broadcast = self.broadcast.clone();
+					async move {
+						match audio {
+							Some((config, output)) => tokio::task::spawn_blocking(move || {
+								moq_audio::capture::publish_microphone(broadcast, catalog, config, "audio", output)
+							})
+							.await
+							.map_err(anyhow::Error::from)?
+							.map_err(anyhow::Error::from),
+							None => Ok(()),
+						}
+					}
+				};
+
+				tokio::try_join!(video_fut, audio_fut)?;
 				Ok(())
 			}
 		}
@@ -171,7 +215,7 @@ impl Publish {
 
 #[cfg(feature = "capture")]
 impl CaptureArgs {
-	fn capture_config(&self) -> moq_video::capture::Config {
+	fn video_config(&self) -> moq_video::capture::Config {
 		let mut config = moq_video::capture::Config::default();
 		config.device = self.camera.clone();
 		config.width = self.width;
@@ -180,7 +224,7 @@ impl CaptureArgs {
 		config
 	}
 
-	fn encode_options(&self) -> moq_video::encode::Options {
+	fn video_encode(&self) -> moq_video::encode::Options {
 		let mut options = moq_video::encode::Options::default();
 		options.bitrate = self.bitrate;
 		options.kind = if self.software {
@@ -191,5 +235,18 @@ impl CaptureArgs {
 			moq_video::encode::Kind::Auto
 		};
 		options
+	}
+
+	fn audio_config(&self) -> moq_audio::capture::Config {
+		let mut config = moq_audio::capture::Config::default();
+		config.device = self.microphone.clone();
+		config
+	}
+
+	fn audio_encode(&self) -> moq_audio::EncoderOutput {
+		moq_audio::EncoderOutput {
+			bitrate: self.audio_bitrate,
+			..Default::default()
+		}
 	}
 }

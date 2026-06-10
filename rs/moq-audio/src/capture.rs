@@ -1,18 +1,18 @@
 //! Microphone capture via [`cpal`] (pure-Rust: CoreAudio / WASAPI / ALSA).
 //!
 //! [`Microphone`] opens an input device and yields interleaved-`f32` PCM
-//! [`Frame`]s, ready to feed an [`AudioProducer`](crate::AudioProducer) with
-//! an [`EncoderInput`](crate::EncoderInput) of `format = AudioFormat::F32`.
+//! [`Frame`]s, ready to feed an [`AudioProducer`] with
+//! an [`EncoderInput`] of `format = AudioFormat::F32`.
 //! Encoding stays on `unsafe-libopus`, so audio never touches ffmpeg.
 
 use std::sync::mpsc::{Receiver, Sender};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::{AudioError, Frame};
+use crate::{AudioError, AudioFormat, AudioProducer, EncoderInput, EncoderOutput, Frame};
 
 /// Microphone capture configuration. All fields are hints; the backend picks
-/// the closest supported mode and the [`AudioProducer`](crate::AudioProducer)
+/// the closest supported mode and the [`AudioProducer`]
 /// resamples to the codec rate anyway.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
@@ -136,6 +136,42 @@ impl Microphone {
 			data: bytes.into(),
 		}))
 	}
+}
+
+/// Capture the microphone, encode Opus, and publish it as a moq audio track
+/// named `track_name` until the broadcast is dropped (or the device stops).
+///
+/// The capture-side settings come from [`Config`]; the encode-side settings
+/// (codec, bitrate, frame duration) from [`EncoderOutput`] (use
+/// `EncoderOutput::default()` for stock Opus and set `bitrate`). The mic's
+/// native sample rate / channels become the encoder input; [`AudioProducer`]
+/// resamples to the codec rate.
+///
+/// Blocking: run it on a dedicated thread (e.g. `tokio::task::spawn_blocking`).
+/// Unlike the video path this does not yet release the device on-demand; the
+/// mic stays open while publishing.
+pub fn publish_microphone(
+	mut broadcast: moq_net::BroadcastProducer,
+	catalog: moq_mux::catalog::Producer,
+	config: Config,
+	track_name: impl Into<String>,
+	output: EncoderOutput,
+) -> Result<(), AudioError> {
+	let mut mic = Microphone::open(&config)?;
+	let input = EncoderInput {
+		format: AudioFormat::F32,
+		sample_rate: mic.sample_rate(),
+		channels: mic.channels(),
+	};
+
+	let mut producer = AudioProducer::new(&mut broadcast, catalog, track_name, input, output)?;
+	tracing::info!("publishing microphone");
+
+	while let Some(frame) = mic.read()? {
+		producer.write(&frame)?;
+	}
+	producer.finish()?;
+	Ok(())
 }
 
 /// Forward a buffer to the reader, ignoring send errors (receiver dropped means
