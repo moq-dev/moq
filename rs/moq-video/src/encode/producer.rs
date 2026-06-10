@@ -7,7 +7,6 @@
 //! `TrackProducer::used()` / `unused()`.
 
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
 
 use moq_mux::container::Timestamp;
 
@@ -76,13 +75,15 @@ pub struct Options {
 ///
 /// Returns when the broadcast is dropped (the track stops being announced)
 /// or the capture loop fails. The camera is opened only while at least one
-/// subscriber is watching; presentation timestamps track real elapsed time,
-/// so the timeline stays continuous across idle gaps.
+/// subscriber is watching; frames are stamped from `clock`, so passing the
+/// same [`Clock`](moq_mux::Clock) to a concurrent audio publish keeps the two
+/// tracks aligned.
 pub async fn publish_capture(
 	broadcast: moq_net::BroadcastProducer,
 	catalog: moq_mux::catalog::Producer,
 	capture: capture::Config,
 	encode: Options,
+	clock: moq_mux::Clock,
 ) -> Result<(), Error> {
 	// A caller asking for exactly zero is an error; omitting it (None) is
 	// fine and resolves to the camera's reported rate once it's open.
@@ -100,7 +101,7 @@ pub async fn publish_capture(
 
 	// ffmpeg capture + encode is blocking; keep it off the async runtime.
 	let worker_gate = gate.clone();
-	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, capture, encode, worker_gate));
+	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, capture, encode, worker_gate, clock));
 
 	tokio::select! {
 		// Surface a capture/encode failure (e.g. camera open) promptly.
@@ -138,10 +139,10 @@ fn capture_loop(
 	capture: capture::Config,
 	encode: Options,
 	gate: Arc<Gate>,
+	clock: moq_mux::Clock,
 ) -> Result<(), Error> {
 	let mut camera: Option<Camera> = None;
 	let mut encoder: Option<Encoder> = None;
-	let mut start: Option<Instant> = None;
 	let mut last_ts = Timestamp::from_micros(0)?;
 	// The catalog video rendition only appears once a frame has been encoded
 	// (the importer reads the SPS). Until then we keep capturing regardless of
@@ -191,9 +192,7 @@ fn capture_loop(
 			None => break, // device stopped producing frames
 		};
 
-		let now = Instant::now();
-		let elapsed = now.duration_since(*start.get_or_insert(now));
-		let ts = Timestamp::from_micros(elapsed.as_micros() as u64)?;
+		let ts = Timestamp::from_micros(clock.micros())?;
 		last_ts = ts;
 
 		let packets = encoder.as_mut().expect("encoder built above").encode(&frame)?;

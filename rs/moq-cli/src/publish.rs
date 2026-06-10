@@ -174,16 +174,19 @@ impl Publish {
 			#[cfg(feature = "capture")]
 			Source::Capture { catalog, video, audio } => {
 				// Each enabled medium publishes its own track onto the shared
-				// broadcast + catalog. Video encodes on demand (camera opens only
+				// broadcast + catalog. A single shared clock keeps the audio and
+				// video timelines aligned even though the devices open at
+				// different times. Video encodes on demand (camera opens only
 				// while subscribed); audio (cpal) is blocking, so it runs on a
 				// dedicated thread.
+				let clock = moq_mux::Clock::new();
 				let video_fut = {
 					let broadcast = self.broadcast.clone();
 					let catalog = catalog.clone();
 					async move {
 						match video {
 							Some((config, encode)) => {
-								moq_video::encode::publish_capture(broadcast, catalog, config, encode)
+								moq_video::encode::publish_capture(broadcast, catalog, config, encode, clock)
 									.await
 									.map_err(anyhow::Error::from)
 							}
@@ -195,11 +198,11 @@ impl Publish {
 					let broadcast = self.broadcast.clone();
 					async move {
 						match audio {
-							Some((config, output)) => {
-								moq_audio::capture::publish_microphone(broadcast, catalog, config, "audio", output)
-									.await
-									.map_err(anyhow::Error::from)
-							}
+							Some((config, output)) => moq_audio::capture::publish_microphone(
+								broadcast, catalog, config, "audio", output, clock,
+							)
+							.await
+							.map_err(anyhow::Error::from),
 							None => Ok(()),
 						}
 					}

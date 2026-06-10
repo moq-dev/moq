@@ -7,7 +7,6 @@
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -145,6 +144,7 @@ pub async fn publish_microphone(
 	config: Config,
 	track_name: impl Into<String>,
 	output: EncoderOutput,
+	clock: moq_mux::Clock,
 ) -> Result<(), AudioError> {
 	let (sample_rate, channels) = Microphone::format(&config)?;
 	let input = EncoderInput {
@@ -158,7 +158,7 @@ pub async fn publish_microphone(
 
 	let gate = Gate::new();
 	let worker_gate = gate.clone();
-	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, config, worker_gate));
+	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, config, worker_gate, clock));
 
 	tokio::select! {
 		res = &mut worker => res.map_err(task_err)?,
@@ -187,9 +187,13 @@ async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
 /// Blocking capture/encode loop. Opens the mic only while watched, releases it
 /// when idle, and stamps frames with wall-clock time so a release/reopen gap
 /// shows up in the PTS.
-fn capture_loop(mut producer: AudioProducer, config: Config, gate: Arc<Gate>) -> Result<(), AudioError> {
+fn capture_loop(
+	mut producer: AudioProducer,
+	config: Config,
+	gate: Arc<Gate>,
+	clock: moq_mux::Clock,
+) -> Result<(), AudioError> {
 	let mut mic: Option<Microphone> = None;
-	let mut start: Option<Instant> = None;
 
 	loop {
 		if !gate.is_active() {
@@ -212,8 +216,9 @@ fn capture_loop(mut producer: AudioProducer, config: Config, gate: Arc<Gate>) ->
 			break; // device stopped producing samples
 		};
 
-		let now = Instant::now();
-		frame.timestamp_us = now.duration_since(*start.get_or_insert(now)).as_micros() as u64;
+		// Stamp from the shared clock (including any idle gap) so the producer's
+		// epoch re-anchors and audio stays aligned with the video track.
+		frame.timestamp_us = clock.micros();
 		producer.write(&frame)?;
 	}
 
