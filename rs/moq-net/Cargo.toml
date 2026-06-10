@@ -26,7 +26,12 @@ rand = "0.10.1"
 serde = { workspace = true, features = ["rc"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util", "time"] }
+tokio = { workspace = true, features = ["macros", "io-util", "sync", "time"] }
 tracing = "0.1"
 web-async = { workspace = true }
 web-transport-trait = { workspace = true }
+
+[dev-dependencies]
+# test-util (tokio::time::pause/advance) is test-only and is NOT supported on
+# wasm, so it must not leak into the normal dependency feature set.
+tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util", "time", "rt"] }

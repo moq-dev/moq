@@ -6,7 +6,9 @@ use std::{
 	time::Duration,
 };
 
-use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use futures::{StreamExt, stream::FuturesUnordered};
+
+use crate::util::{MaybeBoxedExt, MaybeSendBox};
 
 use crate::{
 	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastInfo, Compression, Error, Frame, FrameProducer, Group,
@@ -805,11 +807,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// it (the track is finished). Replaces the old "is the track still Pending" gate,
 		// which no longer holds now that Lite05 accepts up front.
 		let mut completed = false;
-		let mut fetches: FuturesUnordered<BoxFuture<'static, ()>> = FuturesUnordered::new();
-		let mut linger: Option<Pin<Box<tokio::time::Sleep>>> = None;
+		let mut fetches: FuturesUnordered<MaybeSendBox<'static, ()>> = FuturesUnordered::new();
+		let mut linger: Option<Pin<Box<web_async::time::Sleep>>> = None;
 		// While `Some`, a control message was sent recently; subscription changes are
 		// held (not polled) until it elapses, then the latest aggregate is forwarded.
-		let mut cooldown: Option<Pin<Box<tokio::time::Sleep>>> = None;
+		let mut cooldown: Option<Pin<Box<web_async::time::Sleep>>> = None;
 
 		loop {
 			// Once nothing is in flight, the `poll_unused` check below confirms no
@@ -891,7 +893,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			match event {
 				Event::Fetch(req) => {
 					linger = None;
-					fetches.push(self.clone().serve_fetch(req, compression, timescale).boxed());
+					fetches.push(self.clone().serve_fetch(req, compression, timescale).maybe_boxed());
 				}
 				Event::Subscription(pref) => {
 					linger = None;
@@ -909,14 +911,14 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					{
 						// A control message went out: start the throttle window so the next
 						// subscription change waits at least SUBSCRIBE_THROTTLE before sending.
-						Ok(true) => cooldown = Some(Box::pin(tokio::time::sleep(SUBSCRIBE_THROTTLE))),
+						Ok(true) => cooldown = Some(Box::pin(web_async::time::sleep(SUBSCRIBE_THROTTLE))),
 						Ok(false) => {}
 						Err(err) => return self.finish_track(track.take().unwrap(), sub, err),
 					}
 				}
 				Event::Idle => {
 					if supports_linger {
-						linger = Some(Box::pin(tokio::time::sleep(LINGER_TIMEOUT)));
+						linger = Some(Box::pin(web_async::time::sleep(LINGER_TIMEOUT)));
 					} else {
 						// No SUBSCRIBE_UPDATE to pause with, so there's nothing to keep
 						// open: tear down as soon as the last consumer leaves.

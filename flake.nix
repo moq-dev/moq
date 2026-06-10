@@ -55,7 +55,10 @@
             "rust-src"
             "rust-analyzer"
           ];
-          targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          targets = [
+            "wasm32-unknown-unknown"
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             "x86_64-apple-darwin"
             "aarch64-apple-darwin"
           ];
@@ -89,6 +92,10 @@
             cargo-sweep
             cargo-semver-checks
             cargo-deny
+            # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just wasm`).
+            # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
+            # crate is pinned to nixpkgs' CLI version); bump both together.
+            wasm-bindgen-cli
           ]
           ++ gstreamerDeps
           ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
