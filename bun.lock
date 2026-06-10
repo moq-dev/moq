@@ -255,6 +255,10 @@
         "typescript": "7.0.1-rc",
       },
     },
+    "js/wasm": {
+      "name": "@moq/wasm",
+      "version": "0.0.0",
+    },
     "js/watch": {
       "name": "@moq/watch",
       "version": "0.2.17",
@@ -587,6 +591,8 @@
     "@moq/smoke-native": ["@moq/smoke-native@workspace:test/smoke/clients/js-native"],
 
     "@moq/token": ["@moq/token@workspace:js/token"],
+
+    "@moq/wasm": ["@moq/wasm@workspace:js/wasm"],
 
     "@moq/watch": ["@moq/watch@workspace:js/watch"],
 
