@@ -1103,8 +1103,8 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 	let mut session_local: [HashMap<PathOwned, SessionSlotState>; 2] = Default::default();
 	let mut session_last_payload: [Vec<u8>; 2] = Default::default();
 
-	let mut ticker = tokio::time::interval(interval);
-	ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+	let mut ticker = web_async::time::interval(interval);
+	ticker.set_missed_tick_behavior(web_async::time::MissedTickBehavior::Delay);
 
 	loop {
 		ticker.tick().await;

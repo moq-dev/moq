@@ -35,7 +35,7 @@ impl Control {
 
 	/// Allocate the next request_id, blocking until MAX_REQUEST_ID allows it.
 	pub async fn next_request_id(&self) -> Result<RequestId, Error> {
-		let timeout = tokio::time::sleep(std::time::Duration::from_secs(10));
+		let timeout = web_async::time::sleep(std::time::Duration::from_secs(10));
 		tokio::pin!(timeout);
 
 		loop {

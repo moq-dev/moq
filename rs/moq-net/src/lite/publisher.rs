@@ -12,6 +12,7 @@ use crate::{
 		priority::{Priority, PriorityHandle, PriorityQueue},
 	},
 	model::{FrameConsumer, GroupConsumer},
+	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
 use super::Version;
@@ -111,8 +112,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
 		const PROBE_MAX_DELTA: f64 = 0.25;
 
-		let mut last_sent: Option<(u64, tokio::time::Instant)> = None;
-		let mut interval = tokio::time::interval(PROBE_INTERVAL);
+		let mut last_sent: Option<(u64, web_async::time::Instant)> = None;
+		let mut interval = web_async::time::interval(PROBE_INTERVAL);
 
 		loop {
 			tokio::select! {
@@ -140,7 +141,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			if should_send {
 				let rtt = session.stats().rtt().map(|d| d.as_millis() as u64);
 				stream.writer.encode(&lite::Probe { bitrate, rtt }).await?;
-				last_sent = Some((bitrate, tokio::time::Instant::now()));
+				last_sent = Some((bitrate, web_async::time::Instant::now()));
 			}
 		}
 	}
@@ -772,7 +773,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		writer: &mut Writer<S::SendStream, Version>,
 		track_priority_tx: &tokio::sync::watch::Sender<u8>,
 	) -> Result<(), Error> {
-		let mut tasks: FuturesUnordered<futures::future::BoxFuture<'static, ()>> = FuturesUnordered::new();
+		let mut tasks: FuturesUnordered<MaybeSendBox<'static, ()>> = FuturesUnordered::new();
 
 		// Start the consumer at the specified sequence, otherwise start at the latest group.
 		if let Some(start_group) = start_group.or_else(|| track.latest()) {
@@ -842,11 +843,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		}
 	}
 
-	fn spawn_serve(
-		&mut self,
-		group: GroupConsumer,
-		tasks: &mut FuturesUnordered<futures::future::BoxFuture<'static, ()>>,
-	) {
+	fn spawn_serve(&mut self, group: GroupConsumer, tasks: &mut FuturesUnordered<MaybeSendBox<'static, ()>>) {
 		let sequence = group.sequence;
 		tracing::debug!(subscribe = self.id, track = %self.track_name, sequence, "serving group");
 
@@ -854,7 +851,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		let current_priority = *self.track_priority.borrow_and_update();
 		let handle = self.priority.insert(Priority::new(current_priority, sequence));
 		let fut = self.clone().serve_group(sequence, handle, group);
-		tasks.push(fut.map(|_| ()).boxed());
+		tasks.push(fut.map(|_| ()).maybe_boxed());
 	}
 
 	async fn serve_group(

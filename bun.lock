@@ -235,6 +235,10 @@
         "typescript": "^6.0.3",
       },
     },
+    "js/wasm": {
+      "name": "@moq/wasm",
+      "version": "0.0.0",
+    },
     "js/watch": {
       "name": "@moq/watch",
       "version": "0.2.14",
@@ -537,6 +541,8 @@
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 
     "@moq/token": ["@moq/token@workspace:js/token"],
+
+    "@moq/wasm": ["@moq/wasm@workspace:js/wasm"],
 
     "@moq/watch": ["@moq/watch@workspace:js/watch"],
 

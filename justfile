@@ -121,6 +121,16 @@ build:
     just js build
     just rs build
     if command -v uv &> /dev/null; then just py build; fi
+    if command -v wasm-bindgen &> /dev/null; then just wasm; fi
+
+# Build the browser/WASM bindings (rs/moq-wasm) into the @moq/wasm package.
+# wasm-bindgen + binaryen come from the Nix dev shell; the wasm32 target and
+# cfg flags (getrandom, web-sys unstable) are wired in .cargo/config.toml.
+wasm:
+    cargo build -p moq-wasm --target wasm32-unknown-unknown --release
+    wasm-bindgen --target web --out-name moq \
+    	--out-dir js/wasm/dist target/wasm32-unknown-unknown/release/moq_wasm.wasm
+    wasm-opt -Oz -o js/wasm/dist/moq_bg.wasm js/wasm/dist/moq_bg.wasm
 
 # Delete build artifacts and caches to reclaim disk space. Each language
 # owns its own `clean` (see js/rs/py/kt/swift/go justfiles); this
