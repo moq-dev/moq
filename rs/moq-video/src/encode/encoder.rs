@@ -108,6 +108,20 @@ struct Scaler {
 
 impl Encoder {
 	pub fn new(config: &Config) -> Result<Self, Error> {
+		// Validate at the construction boundary so both entry points (the
+		// capture loop and a bring-your-own-frames caller) reject a zero
+		// framerate, which would produce a degenerate `1/0` codec time base.
+		if config.framerate == 0 {
+			return Err(Error::InvalidFramerate(0));
+		}
+		if config.width == 0 || config.height == 0 {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"encoder dimensions must be non-zero (got {}x{})",
+				config.width,
+				config.height
+			)));
+		}
+
 		// Idempotent; ensures codecs are registered even when no Camera opened.
 		ffmpeg::init()?;
 		let candidates = encoder_candidates(&config.kind);
@@ -331,6 +345,46 @@ mod tests {
 			"first packet is not Annex-B: {:02x?}",
 			&first[..first.len().min(8)]
 		);
+	}
+
+	#[test]
+	fn encode_rgba_emits_annexb() {
+		let config = Config {
+			kind: Kind::Software,
+			..Config::new(320, 240, 30)
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+
+		// Tightly-packed RGBA (width*height*4); the row-by-row copy must honor
+		// ffmpeg's stride for this to decode.
+		let rgba = vec![0x40u8; 320 * 240 * 4];
+		let mut packets = encoder.encode_rgba(&rgba, 320, 240, true).unwrap();
+		packets.extend(encoder.finish().unwrap());
+		assert!(!packets.is_empty());
+		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
+	}
+
+	#[test]
+	fn encode_rgba_rejects_short_buffer() {
+		let config = Config {
+			kind: Kind::Software,
+			..Config::new(320, 240, 30)
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+		// Far smaller than 320*240*4: must error, not panic on the row copy.
+		assert!(matches!(
+			encoder.encode_rgba(&[0u8; 16], 320, 240, false),
+			Err(Error::Codec(_))
+		));
+	}
+
+	#[test]
+	fn new_rejects_zero_framerate() {
+		let config = Config {
+			kind: Kind::Software,
+			..Config::new(320, 240, 0)
+		};
+		assert!(matches!(Encoder::new(&config), Err(Error::InvalidFramerate(0))));
 	}
 
 	#[test]

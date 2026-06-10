@@ -57,8 +57,10 @@ impl Producer {
 	}
 }
 
-/// Source-agnostic encode knobs. Width / height / framerate aren't here:
-/// those come from the capture source, not the caller.
+/// Source-agnostic encode knobs for [`publish_capture`], where the geometry
+/// (width / height / framerate) comes from the capture source, not the caller.
+/// For the bring-your-own-frames [`Encoder`](super::Encoder) path, where you
+/// must specify geometry, use [`Config`](super::Config) instead.
 ///
 /// `#[non_exhaustive]`: construct via [`Options::default`] and set fields, so
 /// new knobs can be added without breaking callers.
@@ -122,12 +124,23 @@ async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
 	loop {
 		match track.used().await {
 			Ok(()) => gate.set_active(true),
-			Err(_) => return,
+			Err(err) => return log_track_ended(err),
 		}
 		match track.unused().await {
 			Ok(()) => gate.set_active(false),
-			Err(_) => return,
+			Err(err) => return log_track_ended(err),
 		}
+	}
+}
+
+/// A dropped or closed track is the normal end of a publish; any other cause is
+/// a real abort (e.g. a transport reset) worth surfacing rather than treating as
+/// a clean exit.
+fn log_track_ended(err: moq_net::Error) {
+	if matches!(err, moq_net::Error::Dropped | moq_net::Error::Closed) {
+		tracing::debug!("video track no longer announced; stopping capture");
+	} else {
+		tracing::warn!(error = %err, "video track aborted; stopping capture");
 	}
 }
 
@@ -202,11 +215,18 @@ fn capture_loop(
 		producer.publish(packets, ts)?;
 	}
 
-	// Flush whatever the encoder still holds, then close the track.
-	if let Some(enc) = encoder.as_mut()
-		&& let Ok(packets) = enc.finish()
-	{
-		let _ = producer.publish(packets, last_ts);
+	// Flush whatever the encoder still holds, then close the track. Log
+	// (don't discard) flush/publish errors at shutdown; they're not worth
+	// aborting the close over, but silently dropping them hides real failures.
+	if let Some(enc) = encoder.as_mut() {
+		match enc.finish() {
+			Ok(packets) => {
+				if let Err(err) = producer.publish(packets, last_ts) {
+					tracing::warn!(error = %err, "failed to publish final video packets");
+				}
+			}
+			Err(err) => tracing::warn!(error = %err, "failed to flush video encoder"),
+		}
 	}
 	producer.finish()?;
 	Ok(())

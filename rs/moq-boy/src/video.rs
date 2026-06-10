@@ -107,9 +107,13 @@ fn encoder_thread(
 		match enc.encode_rgba(&msg.rgba, WIDTH, HEIGHT, keyframe) {
 			Ok(packets) => {
 				if let Err(e) = producer.publish(packets, msg.ts) {
-					tracing::error!(error = %e, "video publish error");
+					// Publish only fails once the track/broadcast is gone, which
+					// is terminal -- stop rather than flooding logs every frame.
+					tracing::error!(error = %e, "video publish failed; stopping encoder");
+					return;
 				}
 			}
+			// A single bad frame is tolerable; keep going.
 			Err(e) => tracing::error!(error = %e, "H.264 encode error"),
 		}
 		encode_duration.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);

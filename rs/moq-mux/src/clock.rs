@@ -23,6 +23,7 @@ impl Clock {
 
 	/// Microseconds elapsed since the clock's epoch.
 	pub fn micros(&self) -> u64 {
+		// u128 -> u64 truncation is unreachable: u64 microseconds is ~584,000 years.
 		self.epoch.elapsed().as_micros() as u64
 	}
 }

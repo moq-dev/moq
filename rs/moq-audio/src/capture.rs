@@ -175,12 +175,23 @@ async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
 	loop {
 		match track.used().await {
 			Ok(()) => gate.set_active(true),
-			Err(_) => return,
+			Err(err) => return log_track_ended(err),
 		}
 		match track.unused().await {
 			Ok(()) => gate.set_active(false),
-			Err(_) => return,
+			Err(err) => return log_track_ended(err),
 		}
+	}
+}
+
+/// A dropped or closed track is the normal end of a publish; any other cause is
+/// a real abort (e.g. a transport reset) worth surfacing rather than treating as
+/// a clean exit.
+fn log_track_ended(err: moq_net::Error) {
+	if matches!(err, moq_net::Error::Dropped | moq_net::Error::Closed) {
+		tracing::debug!("audio track no longer announced; stopping capture");
+	} else {
+		tracing::warn!(error = %err, "audio track aborted; stopping capture");
 	}
 }
 

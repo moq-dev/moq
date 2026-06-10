@@ -111,10 +111,12 @@ impl AudioProducer {
 	/// next call.
 	///
 	/// The first frame after construction (or [`reset_epoch`](Self::reset_epoch))
-	/// anchors the timeline: `frame.timestamp_us` becomes the epoch, and
-	/// emitted PTS advances from there by the running sample count. So as long
-	/// as the caller stamps frames with a wall clock, idle gaps (a released
-	/// microphone) land in the PTS and stay aligned with a video track.
+	/// anchors the timeline: its `timestamp_us` becomes the epoch, and emitted
+	/// PTS then advances purely by the running sample count -- subsequent
+	/// frames' timestamps are ignored. So an idle gap is only reflected in the
+	/// PTS if you call [`reset_epoch`](Self::reset_epoch) on resume (which
+	/// re-anchors from the next frame's wall-clock stamp); writing straight
+	/// across a gap without resetting compresses it out.
 	pub fn write(&mut self, frame: &Frame) -> Result<(), AudioError> {
 		let epoch_us = *self.epoch_us.get_or_insert(frame.timestamp_us);
 
@@ -178,5 +180,86 @@ impl AudioProducer {
 impl Drop for AudioProducer {
 	fn drop(&mut self) {
 		self.catalog.lock().audio.remove(&self.track_name);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::{AudioFormat, EncoderInput, EncoderOutput};
+
+	// One 20 ms Opus frame at 48 kHz mono is exactly 960 f32 samples, so each
+	// `write` of this drains precisely one packet (no resampler, no leftover).
+	fn full_frame(timestamp_us: u64) -> Frame {
+		let mut data = Vec::with_capacity(960 * 4);
+		for _ in 0..960 {
+			data.extend_from_slice(&0.1f32.to_le_bytes());
+		}
+		Frame {
+			timestamp_us,
+			data: data.into(),
+		}
+	}
+
+	/// Publish each frame and read back the resulting packet PTS (microseconds).
+	/// If `reset_before` contains an index, `reset_epoch()` is called before that
+	/// frame's `write`.
+	async fn published_pts(frames: &[Frame], reset_before: Option<usize>) -> Vec<u128> {
+		let mut broadcast = moq_net::Broadcast::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let consumer = broadcast.consume();
+
+		// Input rate == Opus codec rate, so there's no resampler and sample
+		// counts stay exact, making the PTS assertions deterministic.
+		let input = EncoderInput {
+			format: AudioFormat::F32,
+			sample_rate: 48_000,
+			channels: 1,
+		};
+		let mut producer =
+			AudioProducer::new(&mut broadcast, catalog, "audio", input, EncoderOutput::default()).unwrap();
+
+		let track = consumer
+			.subscribe_track(&moq_net::Track {
+				name: "audio".into(),
+				priority: 0,
+			})
+			.unwrap();
+		let mut reader = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
+
+		let mut pts = Vec::new();
+		for (i, frame) in frames.iter().enumerate() {
+			if reset_before == Some(i) {
+				producer.reset_epoch();
+			}
+			producer.write(frame).unwrap();
+			let read = reader.read().await.unwrap().expect("a packet per full frame");
+			pts.push(read.timestamp.as_micros());
+		}
+		pts
+	}
+
+	#[tokio::test]
+	async fn epoch_anchors_to_first_frame_timestamp() {
+		// The first frame's timestamp becomes the epoch (regression guard: the
+		// old code derived PTS purely from the sample count, always near 0).
+		let pts = published_pts(&[full_frame(1_000_000)], None).await;
+		assert_eq!(pts, vec![1_000_000]);
+	}
+
+	#[tokio::test]
+	async fn pts_advances_by_frame_duration_ignoring_later_timestamps() {
+		// Second frame's own timestamp (way ahead) is ignored; PTS advances by
+		// exactly one 20 ms frame from the epoch.
+		let pts = published_pts(&[full_frame(1_000), full_frame(999_999)], None).await;
+		assert_eq!(pts, vec![1_000, 1_000 + 20_000]);
+	}
+
+	#[tokio::test]
+	async fn reset_epoch_reanchors_so_the_gap_lands_in_pts() {
+		// Frame at t=0, then reset_epoch + a frame at t=5s: the 5 s idle gap must
+		// appear in the PTS (otherwise audio drifts behind a wall-clock video track).
+		let pts = published_pts(&[full_frame(0), full_frame(5_000_000)], Some(1)).await;
+		assert_eq!(pts, vec![0, 5_000_000]);
 	}
 }
