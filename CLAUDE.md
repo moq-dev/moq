@@ -12,9 +12,23 @@ This is an IETF Internet-Draft repository for Media over QUIC (MOQ) protocol spe
 
 ## Build Commands
 
+Run `make` to build/validate drafts. **`make` self-bootstraps its toolchain** —
+on first run it clones the i-d-template submodule into `lib/`, creates a Python
+venv (`lib/.venv`, for xml2rfc), and bundler-installs kramdown-rfc into
+`lib/.gems`. No manual install of kramdown-rfc/xml2rfc is needed; you only need
+system `python3` (with venv+pip), `ruby` (with `bundle`), a C compiler, and
+network access on the first build. Do not claim the drafts can't be built — run
+`make`. (A successful kramdown-rfc step also validates a draft's syntax.)
+
+There is no separate format step: prettier is disabled (`.prettierignore` is
+`**`), so editing the markdown is the whole workflow.
+
 ```bash
 # Build all drafts (generates HTML and text versions)
 make
+
+# Build/validate a single draft (fast feedback while editing)
+make draft-lcurley-moq-lite.txt
 
 # Clean build artifacts
 make clean
