@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/moq-dev/moq/compare/moq-native-v0.16.3...moq-native-v0.17.0) - 2026-06-10
+
+### Added
+
+- *(moq-relay)* reload TLS certs on filesystem change instead of SIGUSR1 ([#1630](https://github.com/moq-dev/moq/pull/1630))
+
+### Fixed
+
+- *(moq-relay)* classify malformed auth-API JSON as an upstream 502
+
+### Other
+
+- Revert accidental commit 24d25604 (moq-native connect/reconnect refactor)
+- *(moq-native)* migrate from anyhow to thiserror ([#1651](https://github.com/moq-dev/moq/pull/1651))
+
 ## [0.16.3](https://github.com/moq-dev/moq/compare/moq-native-v0.16.2...moq-native-v0.16.3) - 2026-06-03
 
 ### Other

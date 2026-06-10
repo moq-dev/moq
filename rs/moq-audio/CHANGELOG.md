@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.2...moq-audio-v0.0.3) - 2026-06-10
+
+### Added
+
+- *(moq-video,moq-cli)* webcam capture and publish ([#1669](https://github.com/moq-dev/moq/pull/1669))
+- *(hang,json,moq-mux)* generic catalog with application extensions ([#1658](https://github.com/moq-dev/moq/pull/1658))
+
 ### Added
 
 - `capture` feature: `capture::Microphone` captures an input device via cpal

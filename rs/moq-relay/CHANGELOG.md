@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.9](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.8...moq-relay-v0.12.9) - 2026-06-10
+
+### Added
+
+- *(moq-relay)* reload TLS certs on filesystem change instead of SIGUSR1 ([#1630](https://github.com/moq-dev/moq/pull/1630))
+
+### Fixed
+
+- *(moq-relay)* fail closed when mTLS alias resolution hits an API error ([#1663](https://github.com/moq-dev/moq/pull/1663))
+- *(moq-relay)* classify malformed auth-API JSON as an upstream 502
+
+### Other
+
+- Revert accidental commit 24d25604 (moq-native connect/reconnect refactor)
+- *(moq-native)* migrate from anyhow to thiserror ([#1651](https://github.com/moq-dev/moq/pull/1651))
+
 ## [0.12.8](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.7...moq-relay-v0.12.8) - 2026-06-03
 
 ### Fixed
