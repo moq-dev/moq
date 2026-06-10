@@ -12,7 +12,7 @@ use std::time::Instant;
 use moq_mux::container::Timestamp;
 
 use crate::Error;
-use crate::camera::{self, Camera};
+use crate::capture::{self, Camera};
 
 use super::encoder::{Encoder, EncoderConfig, EncoderKind};
 
@@ -62,7 +62,7 @@ impl VideoProducer {
 #[derive(Clone, Debug, Default)]
 pub struct CameraConfig {
 	/// Capture-side settings (device, resolution, framerate).
-	pub camera: camera::Config,
+	pub camera: capture::Config,
 	/// Target bitrate in bits per second; `None` derives from resolution.
 	pub bitrate: Option<u64>,
 	/// Encoder implementation preference.

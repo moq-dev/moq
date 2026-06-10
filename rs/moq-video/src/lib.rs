@@ -4,8 +4,9 @@
 //! video tracks. Sits on top of [`moq_mux`] (and the `hang` catalog) and
 //! adds the native pieces a desktop/CLI publisher needs:
 //!
-//! - [`camera`] captures a webcam via libavdevice (avfoundation / v4l2 /
-//!   dshow) and yields decoded frames.
+//! - [`capture`] grabs frames via libavdevice. Today that's a webcam
+//!   ([`capture::Camera`], avfoundation / v4l2 / dshow); screen capture would
+//!   slot in here too.
 //! - [`encode`] turns those frames into Annex-B H.264 (preferring a platform
 //!   hardware encoder) and publishes them through
 //!   [`moq_mux::codec::h264::Import`], which handles catalog registration
@@ -18,7 +19,7 @@
 //! The decode/consume side (the mirror of `moq-audio`'s `AudioConsumer`) is
 //! not implemented yet; native subscribers can keep using `moq_mux` directly.
 
-pub mod camera;
+pub mod capture;
 pub mod encode;
 
 mod error;

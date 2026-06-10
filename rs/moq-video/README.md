@@ -5,7 +5,8 @@ Native video capture, encoding, and publishing for [Media over QUIC](https://git
 Counterpart to [`moq-audio`](https://crates.io/crates/moq-audio). Built on
 [`ffmpeg-next`](https://crates.io/crates/ffmpeg-next):
 
-- `camera::Camera` captures a webcam via libavdevice (avfoundation / v4l2 / dshow).
+- `capture::Camera` captures a webcam via libavdevice (avfoundation / v4l2 / dshow);
+  screen capture would slot into the same `capture` module.
 - `encode::Encoder` encodes decoded frames to Annex-B H.264, preferring a platform
   hardware encoder (`h264_videotoolbox` / `h264_nvenc` / `h264_vaapi`) and
   falling back to software (`libx264`).

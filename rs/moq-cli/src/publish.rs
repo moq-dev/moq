@@ -168,7 +168,7 @@ impl From<WebcamArgs> for moq_video::encode::CameraConfig {
 		};
 
 		moq_video::encode::CameraConfig {
-			camera: moq_video::camera::Config {
+			camera: moq_video::capture::Config {
 				device: args.device,
 				width: args.width,
 				height: args.height,

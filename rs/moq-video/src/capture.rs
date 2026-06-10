@@ -1,10 +1,12 @@
-//! Webcam capture via libavdevice.
+//! Frame capture via libavdevice.
 //!
-//! Opens the platform camera backend (avfoundation on macOS, v4l2 on
-//! Linux, dshow on Windows) and yields decoded [`ffmpeg::frame::Video`]
-//! frames in the camera's native pixel format. The
-//! [`Encoder`](crate::encode::Encoder) handles conversion to YUV420P, so
-//! callers don't have to care what the camera delivers.
+//! Today this is webcam capture ([`Camera`]): it opens the platform camera
+//! backend (avfoundation on macOS, v4l2 on Linux, dshow on Windows) and
+//! yields decoded [`ffmpeg::frame::Video`] frames in the source's native
+//! pixel format. Screen capture is the same libavdevice pipeline with a
+//! different input format (avfoundation screen, x11grab/gdigrab, ...), so it
+//! would live here too. The [`Encoder`](crate::encode::Encoder) handles
+//! conversion to YUV420P, so callers don't have to care what the source delivers.
 
 use std::ffi::CString;
 
