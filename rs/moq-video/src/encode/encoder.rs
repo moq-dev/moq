@@ -108,6 +108,8 @@ struct Scaler {
 
 impl Encoder {
 	pub fn new(config: &Config) -> Result<Self, Error> {
+		// Idempotent; ensures codecs are registered even when no Camera opened.
+		ffmpeg::init()?;
 		let candidates = encoder_candidates(&config.kind);
 
 		let mut tried = Vec::new();
