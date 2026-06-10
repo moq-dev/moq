@@ -85,3 +85,13 @@ debug = "line-tables-only"
 [profile.release-with-debug]
 inherits = "release"
 debug = true
+
+# Size-optimized build for the browser/WASM bindings (rs/moq-wasm). Shipping over
+# the wire, so optimize for size, not speed (~579KB -> ~471KB gzipped vs the
+# default release profile). `just wasm` builds with `--profile wasm-release`.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true

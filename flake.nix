@@ -92,10 +92,9 @@
             cargo-semver-checks
             cargo-deny
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just wasm`).
-            # wasm-bindgen-cli must match the `wasm-bindgen` crate version; if a
-            # build fails with a schema-version mismatch, pin one to the other.
+            # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
+            # crate is pinned to nixpkgs' CLI version); bump both together.
             wasm-bindgen-cli
-            binaryen
           ]
           ++ gstreamerDeps
           ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [

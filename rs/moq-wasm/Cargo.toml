@@ -33,7 +33,9 @@ moq-net = { workspace = true, features = ["serde"] }
 thiserror = "2"
 tracing-wasm = "0.2"
 url = "2"
-wasm-bindgen = "0.2"
+# Pinned to the wasm-bindgen-cli version in the Nix dev shell: the bindgen
+# schema must match exactly between crate and CLI. Bump both together.
+wasm-bindgen = "=0.2.121"
 wasm-bindgen-futures = "0.4"
 web-async = { workspace = true }
 web-transport-trait = { workspace = true }
