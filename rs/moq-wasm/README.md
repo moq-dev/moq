@@ -25,9 +25,10 @@ What works today:
   `web-transport-trait` abstraction `moq-net` consumes. The orphan rule forces
   the newtypes; the shapes line up almost 1:1.
 - **It compiles to `wasm32-unknown-unknown` and produces `@moq/wasm`**: `just
-  wasm` emits a typed, importable package (`MoqSession` / `MoqBroadcast` /
-  `MoqTrack` / `MoqGroup`, `Promise`-returning methods, `.d.ts`). Verified: it
-  bundles under esbuild and a strict-mode TS consumer type-checks against it.
+  wasm` emits a typed, importable package (`Session` / `Broadcast` / `Track` /
+  `Group`, used as `Moq.Session` etc. via `import * as Moq`, `Promise`-returning
+  methods, `.d.ts`). Verified: it bundles under esbuild and a strict-mode TS
+  consumer type-checks against it.
 - Scope is the consume path (connect -> broadcast -> track -> group -> frame),
   the `@moq/watch` use case. The publish path follows the same shape.
 

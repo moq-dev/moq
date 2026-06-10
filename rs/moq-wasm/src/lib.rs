@@ -41,14 +41,14 @@ pub fn setup() {
 
 /// A connected MoQ session.
 #[wasm_bindgen]
-pub struct MoqSession {
+pub struct Session {
 	inner: moq_net::Session,
 }
 
 #[wasm_bindgen]
-impl MoqSession {
+impl Session {
 	/// Connect to a relay over the browser's WebTransport, using the system roots.
-	pub async fn connect(url: String) -> Result<MoqSession, JsValue> {
+	pub async fn connect(url: String) -> Result<Session, JsValue> {
 		let url = url::Url::parse(&url).map_err(js_err)?;
 		let transport = transport::connect(url).await.map_err(js_err)?;
 		Self::handshake(transport).await
@@ -56,17 +56,17 @@ impl MoqSession {
 
 	/// Connect trusting only the given sha-256 certificate hashes (serverless dev).
 	#[wasm_bindgen(js_name = connectWithHashes)]
-	pub async fn connect_with_hashes(url: String, hashes: Vec<Uint8Array>) -> Result<MoqSession, JsValue> {
+	pub async fn connect_with_hashes(url: String, hashes: Vec<Uint8Array>) -> Result<Session, JsValue> {
 		let url = url::Url::parse(&url).map_err(js_err)?;
 		let hashes = hashes.iter().map(|h| h.to_vec()).collect();
 		let transport = transport::connect_with_hashes(url, hashes).await.map_err(js_err)?;
 		Self::handshake(transport).await
 	}
 
-	async fn handshake(transport: transport::Session) -> Result<MoqSession, JsValue> {
+	async fn handshake(transport: transport::Session) -> Result<Session, JsValue> {
 		let client = moq_net::Client::new();
 		let inner = client.connect(transport).await.map_err(js_err)?;
-		Ok(MoqSession { inner })
+		Ok(Session { inner })
 	}
 
 	/// The negotiated protocol version (e.g. "lite-05" or an IETF draft).
@@ -80,25 +80,25 @@ impl MoqSession {
 	}
 
 	/// Subscribe to a broadcast by path, waiting until it is announced.
-	pub async fn consume(&self, path: String) -> Result<Option<MoqBroadcast>, JsValue> {
+	pub async fn consume(&self, path: String) -> Result<Option<Broadcast>, JsValue> {
 		let broadcast = self.inner.consumer().announced_broadcast(path.as_str()).await;
-		Ok(broadcast.map(|inner| MoqBroadcast { inner }))
+		Ok(broadcast.map(|inner| Broadcast { inner }))
 	}
 }
 
 /// A consumer handle for a single broadcast.
 #[wasm_bindgen]
-pub struct MoqBroadcast {
+pub struct Broadcast {
 	inner: moq_net::BroadcastConsumer,
 }
 
 #[wasm_bindgen]
-impl MoqBroadcast {
+impl Broadcast {
 	/// Subscribe to a track by name, resolving once the publisher accepts.
-	pub async fn subscribe(&self, name: String) -> Result<MoqTrack, JsValue> {
+	pub async fn subscribe(&self, name: String) -> Result<Track, JsValue> {
 		let track = self.inner.track(&name).map_err(js_err)?;
 		let subscriber = track.subscribe(None).map_err(js_err)?.await.map_err(js_err)?;
-		Ok(MoqTrack {
+		Ok(Track {
 			inner: Rc::new(RefCell::new(Some(subscriber))),
 		})
 	}
@@ -106,7 +106,7 @@ impl MoqBroadcast {
 
 /// A subscriber to a single track, yielding groups.
 #[wasm_bindgen]
-pub struct MoqTrack {
+pub struct Track {
 	// Rc<RefCell<Option<..>>> for interior mutability: wasm-bindgen async methods
 	// take `&self` and must produce 'static futures, so we move the value out of
 	// the cell for the duration of the await rather than holding a borrow across
@@ -116,10 +116,10 @@ pub struct MoqTrack {
 }
 
 #[wasm_bindgen]
-impl MoqTrack {
+impl Track {
 	/// Receive the next group in arrival order, or `null` when the track ends.
 	#[wasm_bindgen(js_name = recvGroup)]
-	pub async fn recv_group(&self) -> Result<Option<MoqGroup>, JsValue> {
+	pub async fn recv_group(&self) -> Result<Option<Group>, JsValue> {
 		let cell = self.inner.clone();
 		let mut sub = cell
 			.borrow_mut()
@@ -129,7 +129,7 @@ impl MoqTrack {
 		*cell.borrow_mut() = Some(sub);
 
 		let group = result.map_err(js_err)?;
-		Ok(group.map(|g| MoqGroup {
+		Ok(group.map(|g| Group {
 			sequence: g.sequence,
 			inner: Rc::new(RefCell::new(Some(g))),
 		}))
@@ -138,13 +138,13 @@ impl MoqTrack {
 
 /// A consumer for a single group, yielding frames.
 #[wasm_bindgen]
-pub struct MoqGroup {
+pub struct Group {
 	sequence: u64,
 	inner: Rc<RefCell<Option<moq_net::GroupConsumer>>>,
 }
 
 #[wasm_bindgen]
-impl MoqGroup {
+impl Group {
 	#[wasm_bindgen(getter)]
 	pub fn sequence(&self) -> u64 {
 		self.sequence
