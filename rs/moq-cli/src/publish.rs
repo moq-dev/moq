@@ -37,7 +37,7 @@ pub struct WebcamArgs {
 	#[arg(long)]
 	pub height: Option<u32>,
 
-	/// Capture/encode framerate. Omit to use moq-video's default (30).
+	/// Capture/encode framerate. Omit to use the camera's reported rate.
 	#[arg(long)]
 	pub fps: Option<u32>,
 

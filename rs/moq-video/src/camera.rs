@@ -33,6 +33,7 @@ pub struct Camera {
 	decoder: ffmpeg::decoder::Video,
 	stream_index: usize,
 	url: String,
+	framerate: Option<u32>,
 }
 
 impl Camera {
@@ -67,6 +68,7 @@ impl Camera {
 			.best(ffmpeg::media::Type::Video)
 			.ok_or_else(|| Error::NoVideoStream(url.clone()))?;
 		let stream_index = stream.index();
+		let framerate = stream_framerate(&stream);
 
 		let decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?
 			.decoder()
@@ -77,6 +79,7 @@ impl Camera {
 			backend = backend.format_name,
 			width = decoder.width(),
 			height = decoder.height(),
+			framerate,
 			"opened camera"
 		);
 
@@ -85,6 +88,7 @@ impl Camera {
 			decoder,
 			stream_index,
 			url,
+			framerate,
 		})
 	}
 
@@ -99,6 +103,12 @@ impl Camera {
 
 	pub fn height(&self) -> u32 {
 		self.decoder.height()
+	}
+
+	/// The camera's negotiated frame rate (rounded), or `None` if the
+	/// backend didn't report one.
+	pub fn framerate(&self) -> Option<u32> {
+		self.framerate
 	}
 
 	/// Block until the next decoded frame is available, or `None` once the
@@ -197,6 +207,22 @@ impl Backend {
 			_ => device.unwrap_or("default").to_string(),
 		}
 	}
+}
+
+/// The stream's negotiated frame rate, rounded to whole fps. Prefers the
+/// average rate and falls back to the base (`r_frame_rate`) guess; returns
+/// `None` when neither is populated (some backends leave them at 0).
+fn stream_framerate(stream: &ffmpeg::format::stream::Stream) -> Option<u32> {
+	for rate in [stream.avg_frame_rate(), stream.rate()] {
+		let (num, den) = (rate.numerator(), rate.denominator());
+		if num > 0 && den > 0 {
+			let fps = (num as f64 / den as f64).round();
+			if fps >= 1.0 {
+				return Some(fps as u32);
+			}
+		}
+	}
+	None
 }
 
 /// Look up a libavdevice input format by name. The safe `format::list()`

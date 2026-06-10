@@ -16,7 +16,7 @@ use crate::camera::{self, Camera};
 
 use super::encoder::{Encoder, EncoderConfig, EncoderKind};
 
-/// Default capture/encode framerate when the camera config doesn't pin one.
+/// Last-resort framerate when neither the caller nor the camera reports one.
 const DEFAULT_FRAMERATE: u32 = 30;
 
 /// Publishes encoded H.264 frames as an avc3 moq track.
@@ -80,9 +80,10 @@ pub async fn publish_camera(
 	catalog: moq_mux::catalog::Producer,
 	config: CameraConfig,
 ) -> Result<(), Error> {
-	let framerate = config.camera.framerate.unwrap_or(DEFAULT_FRAMERATE);
-	if framerate == 0 {
-		return Err(Error::InvalidFramerate(framerate));
+	// A caller asking for exactly zero is an error; omitting it (None) is
+	// fine and resolves to the camera's reported rate once it's open.
+	if config.camera.framerate == Some(0) {
+		return Err(Error::InvalidFramerate(0));
 	}
 
 	let producer = VideoProducer::new(broadcast, catalog)?;
@@ -95,7 +96,7 @@ pub async fn publish_camera(
 
 	// ffmpeg capture + encode is blocking; keep it off the async runtime.
 	let worker_gate = gate.clone();
-	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, config, framerate, worker_gate));
+	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, config, worker_gate));
 
 	tokio::select! {
 		// Surface a capture/encode failure (e.g. camera open) promptly.
@@ -127,12 +128,7 @@ async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
 
 /// Blocking capture/encode loop. Opens the camera lazily on the first
 /// watched frame and releases it whenever the gate goes idle.
-fn capture_loop(
-	mut producer: VideoProducer,
-	config: CameraConfig,
-	framerate: u32,
-	gate: Arc<Gate>,
-) -> Result<(), Error> {
+fn capture_loop(mut producer: VideoProducer, config: CameraConfig, gate: Arc<Gate>) -> Result<(), Error> {
 	let mut camera: Option<Camera> = None;
 	let mut encoder: Option<Encoder> = None;
 	let mut start: Option<Instant> = None;
@@ -156,6 +152,13 @@ fn capture_loop(
 		// first time we're watched after being idle.
 		if camera.is_none() {
 			let cam = Camera::open(&config.camera)?;
+			// Prefer an explicit --fps, otherwise use the camera's reported
+			// rate, falling back only if the backend doesn't expose one.
+			let framerate = config
+				.camera
+				.framerate
+				.or_else(|| cam.framerate())
+				.unwrap_or(DEFAULT_FRAMERATE);
 			let mut encoder_config = EncoderConfig::new(cam.width(), cam.height(), framerate);
 			encoder_config.bitrate = config.bitrate;
 			encoder_config.kind = config.kind.clone();
