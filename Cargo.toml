@@ -4,6 +4,7 @@ members = [
     "rs/kio",
     "rs/libmoq",
     "rs/moq-audio",
+    "rs/moq-bench",
     "rs/moq-boy",
     "rs/moq-cli",
     "rs/moq-ffi",
@@ -25,6 +26,7 @@ default-members = [
     # "rs/libmoq",    # requires C toolchain
     "rs/moq-boy",
     "rs/moq-audio",
+    "rs/moq-bench",
     "rs/moq-cli",
     # "rs/moq-ffi",   # requires Python/maturin
     # "rs/moq-gst",   # requires GStreamer

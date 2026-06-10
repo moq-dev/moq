@@ -3759,6 +3759,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-bench"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "humantime",
+ "humantime-serde",
+ "moq-native",
+ "moq-net",
+ "rand 0.10.1",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "moq-boy"
 version = "0.2.17"
 dependencies = [
