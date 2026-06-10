@@ -27,7 +27,7 @@ crate-type = ["cdylib", "rlib"]
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 bytes = "1"
 console_error_panic_hook = "0.1"
-getrandom = { version = "0.4", features = ["wasm_js"] }     # wasm_js backend for rand-via-moq-net; cfg flag in .cargo/config.toml
+getrandom = { version = "0.4", features = ["wasm_js"] } # wasm_js backend for rand-via-moq-net; cfg flag in .cargo/config.toml
 js-sys = "0.3"
 moq-net = { workspace = true, features = ["serde"] }
 thiserror = "2"

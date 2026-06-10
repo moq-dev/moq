@@ -5,8 +5,4 @@ rustflags = ["--cfg", "tokio_unstable"]
 # merging, so tokio_unstable is repeated here. getrandom needs its wasm_js
 # backend, and web-sys's WebTransport bindings are behind the unstable cfg.
 [target.wasm32-unknown-unknown]
-rustflags = [
-    "--cfg", "tokio_unstable",
-    "--cfg", "getrandom_backend=\"wasm_js\"",
-    "--cfg=web_sys_unstable_apis",
-]
+rustflags = ["--cfg", "tokio_unstable", "--cfg", "getrandom_backend=\"wasm_js\"", "--cfg=web_sys_unstable_apis"]
