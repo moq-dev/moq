@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
 	// We drive shutdown ourselves (GOAWAY drain on the first Ctrl+C, force on the
 	// second), so opt out of moq-native's built-in Ctrl+C-closes-everything handler.
 	#[allow(unused_mut)]
-	let mut server = config.server.init()?.with_signal_handler(false);
+	let mut server = config.server.init()?.with_ctrl_c_handler(false);
 	let client = config.client.clone().init()?;
 
 	let addr = server.local_addr()?;

@@ -1,6 +1,8 @@
 use crate::{
-	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, StatsHandle, coding::Stream,
-	lite::SessionInfo, session::GoawaySignal,
+	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, StatsHandle,
+	coding::Stream,
+	lite::SessionInfo,
+	session::{GoawaySignal, goaway_triggered},
 };
 
 use super::{Connecting, ControlType, Goaway, Publisher, PublisherConfig, Subscriber, SubscriberConfig, Version};
@@ -78,8 +80,10 @@ pub fn start<S: web_transport_trait::Session>(
 			tokio::select! {
 				// Don't outlive the session: stop waiting once it's gone.
 				_ = session.closed() => {}
-				uri = goaway.triggered() => {
-					if let Err(err) = send_goaway(&session, &uri, version).await {
+				uri = goaway_triggered(goaway) => {
+					if let Some(uri) = uri
+						&& let Err(err) = send_goaway(&session, &uri, version).await
+					{
 						tracing::debug!(%err, "failed to send goaway");
 					}
 				}

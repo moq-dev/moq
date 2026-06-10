@@ -141,11 +141,11 @@ async fn goaway_drains_peer_moq_transport_14() {
 		let session = request.ok().await?;
 
 		// Send GOAWAY, then confirm the peer actually leaves (the session closes).
-		session.goaway("");
-		tokio::time::timeout(TIMEOUT, session.closed())
+		let drain = session.drain();
+		drain.start(None);
+		tokio::time::timeout(TIMEOUT, drain.complete())
 			.await
-			.expect("server session did not drain after goaway")
-			.ok();
+			.expect("server session did not drain after goaway");
 		Ok::<_, anyhow::Error>(())
 	});
 

@@ -206,7 +206,7 @@ pub struct Server {
 	versions: moq_net::Versions,
 	/// When true (default), [`accept`](Self::accept) returns `None` on Ctrl+C after
 	/// closing the endpoints. Callers wanting a graceful shutdown disable this via
-	/// [`with_signal_handler`](Self::with_signal_handler) and drive signals themselves.
+	/// [`with_ctrl_c_handler`](Self::with_ctrl_c_handler) and drive signals themselves.
 	handle_ctrl_c: bool,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
 	#[cfg(feature = "iroh")]
@@ -310,7 +310,7 @@ impl Server {
 	/// Enabled by default: Ctrl+C closes the endpoints and makes `accept` return `None`.
 	/// Disable it to handle shutdown yourself (e.g. a GOAWAY drain), then drive signals
 	/// from the caller.
-	pub fn with_signal_handler(mut self, enabled: bool) -> Self {
+	pub fn with_ctrl_c_handler(mut self, enabled: bool) -> Self {
 		self.handle_ctrl_c = enabled;
 		self
 	}
@@ -362,10 +362,17 @@ impl Server {
 	/// Call [Request::ok] or [Request::close] to complete the handshake.
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh"))]
 	pub async fn accept(&mut self) -> Option<Request> {
-		// Copied out so the select! arm's `if` guard doesn't borrow `self` (the arm body
-		// needs `&mut self` to close).
 		let handle_ctrl_c = self.handle_ctrl_c;
 		loop {
+			// Either wait for Ctrl+C, or never resolve when the handler is disabled. Built
+			// as an explicit future (rather than a `select!` `if` guard) so the behavior
+			// doesn't hinge on guard-evaluation timing.
+			let ctrl_c = async {
+				match handle_ctrl_c {
+					true => drop(tokio::signal::ctrl_c().await),
+					false => std::future::pending().await,
+				}
+			};
 			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
 			#[cfg(feature = "noq")]
 			let noq_accept = async {
@@ -494,7 +501,7 @@ impl Server {
 						Err(err) => tracing::debug!(%err, "failed to accept session"),
 					}
 				}
-				_ = tokio::signal::ctrl_c(), if handle_ctrl_c => {
+				_ = ctrl_c => {
 					self.close().await;
 					return None;
 				}

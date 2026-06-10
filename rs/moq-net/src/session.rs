@@ -1,6 +1,6 @@
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{future::Future, pin::Pin, sync::Arc, task::Poll, time::Duration};
 
-use tokio::sync::watch;
+use kio::{Consumer, Producer};
 use web_transport_trait::Stats;
 
 use crate::{BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, Version};
@@ -106,14 +106,16 @@ impl Session {
 		&self.consumer
 	}
 
-	/// Ask the peer to migrate away by sending a GOAWAY, without closing the session.
+	/// Begin a graceful drain of this session.
 	///
-	/// The session stays open so in-flight groups can finish; await
-	/// [`closed`](Self::closed) to learn when the peer actually leaves. `uri` is an
-	/// optional redirect target (pass `""` to just drain). Calling more than once,
-	/// or on a protocol version that predates GOAWAY, is harmless.
-	pub fn goaway(&self, uri: &str) {
-		self.goaway.send(uri);
+	/// Returns a [`Drain`] handle: [`Drain::start`] sends a GOAWAY asking the peer to
+	/// migrate away (without closing the session), and [`Drain::complete`] awaits its
+	/// departure.
+	pub fn drain(&self) -> Drain {
+		Drain {
+			goaway: self.goaway.clone(),
+			session: self.session.clone(),
+		}
 	}
 
 	/// Close the underlying transport session.
@@ -140,55 +142,67 @@ impl Drop for Session {
 	}
 }
 
-/// Create a linked [`GoawayTrigger`] / [`GoawaySignal`] pair for one session.
+/// A handle to gracefully drain a [`Session`], obtained via [`Session::drain`].
 ///
-/// The trigger lives on the [`Session`]; the signal is handed to the per-protocol
-/// task spawned by `lite::start` / `ietf::start`, which writes the actual GOAWAY
-/// frame when fired.
-pub(crate) fn goaway_channel() -> (GoawayTrigger, GoawaySignal) {
-	let (tx, rx) = watch::channel(None);
-	(GoawayTrigger { tx }, GoawaySignal { rx })
-}
-
-/// Sender half of a session's GOAWAY signal, held by [`Session`].
+/// `start` asks the peer to migrate away (GOAWAY) without closing the session;
+/// `complete` waits until it actually leaves. Cheaply clonable.
 #[derive(Clone)]
-pub(crate) struct GoawayTrigger {
-	tx: watch::Sender<Option<Arc<str>>>,
+pub struct Drain {
+	goaway: GoawayTrigger,
+	session: Arc<dyn SessionInner>,
 }
 
-impl GoawayTrigger {
-	fn send(&self, uri: &str) {
-		// Ignore send errors: the receiver task may have already exited (session
-		// closed), in which case there's no one left to GOAWAY.
-		let _ = self.tx.send(Some(Arc::from(uri)));
-	}
-}
-
-/// Receiver half handed to the per-protocol session task.
-#[derive(Clone)]
-pub(crate) struct GoawaySignal {
-	rx: watch::Receiver<Option<Arc<str>>>,
-}
-
-impl GoawaySignal {
-	/// Resolve once a GOAWAY is requested, yielding the (possibly empty) redirect URI.
-	///
-	/// Never resolves if the trigger is dropped without firing, so it's safe to
-	/// `select!` this against the session closing.
-	pub(crate) async fn triggered(mut self) -> Arc<str> {
-		// Clone the value out so the watch `Ref` guard is dropped before any further
-		// await (the guard is not `Send`, which would taint the spawned task).
-		let uri = self
-			.rx
-			.wait_for(|uri| uri.is_some())
-			.await
-			.ok()
-			.and_then(|uri| uri.clone());
-		match uri {
-			Some(uri) => uri,
-			None => std::future::pending().await,
+impl Drain {
+	/// Send a GOAWAY asking the peer to migrate away, optionally to `uri` (`None`
+	/// just asks them to leave). The session stays open so in-flight groups can
+	/// finish; call [`complete`](Self::complete) to await departure. Calling more
+	/// than once, or on a protocol version that predates GOAWAY, is harmless.
+	pub fn start<'a>(&self, uri: impl Into<Option<&'a str>>) {
+		let uri: Option<&str> = uri.into();
+		// A closed channel means the protocol task already exited (session gone),
+		// so there's nothing left to GOAWAY.
+		if let Ok(mut value) = self.goaway.write() {
+			*value = Some(Arc::from(uri.unwrap_or("")));
 		}
 	}
+
+	/// Wait until the session has fully closed: the peer left, or it was forced.
+	pub async fn complete(&self) {
+		self.session.closed().await;
+	}
+}
+
+/// Trigger half of a session's GOAWAY signal, held by [`Session`] / [`Drain`].
+/// `None` means "not yet requested"; `Some(uri)` carries the (possibly empty) URI.
+pub(crate) type GoawayTrigger = Producer<Option<Arc<str>>>;
+
+/// Signal half handed to the per-protocol session task spawned by `lite::start` /
+/// `ietf::start`, which writes the actual GOAWAY frame when fired.
+pub(crate) type GoawaySignal = Consumer<Option<Arc<str>>>;
+
+/// Create a linked [`GoawayTrigger`] / [`GoawaySignal`] pair for one session.
+pub(crate) fn goaway_channel() -> (GoawayTrigger, GoawaySignal) {
+	let trigger = Producer::new(None);
+	let signal = trigger.consume();
+	(trigger, signal)
+}
+
+/// Resolve once a GOAWAY is requested, yielding the (possibly empty) redirect URI,
+/// or `None` if the trigger was dropped without firing (the session is going away).
+pub(crate) async fn goaway_triggered(signal: GoawaySignal) -> Option<Arc<str>> {
+	// Map inside the closure so the `Ref` lock guard (not `Send`) never lands in the
+	// returned future, keeping it spawnable.
+	kio::wait(|waiter| {
+		match signal.poll(waiter, |uri| match &**uri {
+			Some(uri) => Poll::Ready(uri.clone()),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(uri)) => Poll::Ready(Some(uri)),
+			Poll::Ready(Err(_closed)) => Poll::Ready(None),
+			Poll::Pending => Poll::Pending,
+		}
+	})
+	.await
 }
 
 /// Polls the QUIC congestion controller for estimated send rate.

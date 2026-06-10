@@ -2,7 +2,7 @@ use crate::{
 	Error, OriginConsumer, OriginProducer, StatsHandle,
 	coding::{Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
-	session::GoawaySignal,
+	session::{GoawaySignal, goaway_triggered},
 	setup,
 };
 
@@ -41,8 +41,10 @@ pub fn start<S: web_transport_trait::Session>(
 					async move {
 						tokio::select! {
 							_ = session.closed() => {}
-							uri = goaway.triggered() => {
-								if let Err(err) = adapter.send_goaway(&uri) {
+							uri = goaway_triggered(goaway) => {
+								if let Some(uri) = uri
+									&& let Err(err) = adapter.send_goaway(&uri)
+								{
 									tracing::debug!(%err, "failed to send goaway");
 								}
 							}
@@ -155,12 +157,14 @@ async fn run_setup<S: web_transport_trait::Session>(
 	// Hold the stream open until the session closes, sending a GOAWAY first if asked.
 	tokio::select! {
 		_ = session.closed() => {}
-		uri = goaway.triggered() => {
-			let msg = ietf::GoAway { new_session_uri: uri.as_ref().into(), timeout: 0 };
-			if let Err(err) = writer.encode_message(&msg).await {
-				tracing::debug!(%err, "failed to send goaway");
+		uri = goaway_triggered(goaway) => {
+			if let Some(uri) = uri {
+				let msg = ietf::GoAway { new_session_uri: uri.as_ref().into(), timeout: 0 };
+				if let Err(err) = writer.encode_message(&msg).await {
+					tracing::debug!(%err, "failed to send goaway");
+				}
+				session.closed().await;
 			}
-			session.closed().await;
 		}
 	}
 	writer.finish().ok();

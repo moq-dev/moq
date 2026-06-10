@@ -41,10 +41,10 @@ pub struct Connection {
 impl Connection {
 	/// Authenticates and serves this connection until it closes.
 	///
-	/// `drain` flips to `true` during a graceful shutdown: we send a GOAWAY and then
-	/// keep serving until the peer actually leaves.
+	/// `shutdown` flips to `true` during a graceful shutdown: we drain the session
+	/// (GOAWAY) and keep serving until the peer actually leaves.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
-	pub async fn run(self, mut drain: watch::Receiver<bool>) -> anyhow::Result<()> {
+	pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
 		let token = match self.authenticate().await {
 			Ok(token) => token,
 			Err(err) => {
@@ -108,15 +108,16 @@ impl Connection {
 
 		tracing::info!(version = %session.version(), transport, "negotiated");
 
-		// Serve until the peer leaves. On a graceful shutdown, send a GOAWAY first and
-		// keep serving so in-flight groups can finish before the peer migrates away.
+		// Serve until the peer leaves. On a graceful shutdown, drain the session (send a
+		// GOAWAY) and keep serving so in-flight groups can finish before it migrates away.
 		tokio::select! {
 			res = session.closed() => res?,
 			// Drop the watch `Ref` guard (not `Send`) before the awaits in the body.
-			_ = async { let _ = drain.wait_for(|d| *d).await; } => {
+			_ = async { let _ = shutdown.wait_for(|d| *d).await; } => {
 				tracing::info!("draining; sending goaway");
-				session.goaway("");
-				session.closed().await?;
+				let drain = session.drain();
+				drain.start(None);
+				drain.complete().await;
 			}
 		}
 		Ok(())
