@@ -116,7 +116,11 @@ mod tests {
 			let v = range.sample(&mut rng);
 			assert!((5..=10).contains(&v));
 		}
-		// Inverted bounds still behave.
+		// Inverted bounds (min > max) are normalized, not panicked on.
+		for _ in 0..100 {
+			let v = Range::new(10, 5).sample(&mut rng);
+			assert!((5..=10).contains(&v));
+		}
 		assert_eq!(Range::new(7, 7).sample(&mut rng), 7);
 	}
 }

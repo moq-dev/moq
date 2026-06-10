@@ -40,18 +40,32 @@ struct GroupHeader<'a> {
 	timestamp_ms: u128,
 }
 
-/// Run a single benchmark connection: publish `broadcasts` tracks and subscribe
-/// to `subscribe` peer broadcasts discovered via announcements.
+/// Everything one benchmark connection needs to run: its identity, the rolled
+/// parameters, and the shared client/stats handles. Bundled into a struct so
+/// `run` and its call site aren't drowning in positional arguments.
+pub struct Connection {
+	pub index: u64,
+	pub run_id: u64,
+	pub rolled: Rolled,
+	pub config: Arc<crate::Config>,
+	pub client: moq_native::Client,
+	pub stats: Arc<Stats>,
+}
+
+/// Publish `broadcasts` tracks and subscribe to `subscribe` peer broadcasts
+/// discovered via announcements.
 ///
 /// Returns only when the underlying reconnect loop permanently gives up.
-pub async fn run(
-	connection: u64,
-	run_id: u64,
-	rolled: Rolled,
-	config: Arc<crate::Config>,
-	client: moq_native::Client,
-	stats: Arc<Stats>,
-) {
+pub async fn run(ctx: Connection) {
+	let Connection {
+		index: connection,
+		run_id,
+		rolled,
+		config,
+		client,
+		stats,
+	} = ctx;
+
 	let url = config.url.clone().expect("url required");
 
 	// Publish side: an origin we fill with our broadcasts and hand to the session.
@@ -106,13 +120,18 @@ pub async fn run(
 	loop {
 		tokio::select! {
 			status = reconnect.status() => match status {
+				// Edge-triggered so repeated same-state events can't drift the gauge.
 				Ok(Status::Connected) => {
-					connected = true;
-					stats.connections.fetch_add(1, Ordering::Relaxed);
+					if !connected {
+						connected = true;
+						stats.connections.fetch_add(1, Ordering::Relaxed);
+					}
 				}
 				Ok(Status::Disconnected) => {
-					connected = false;
-					stats.connections.fetch_sub(1, Ordering::Relaxed);
+					if connected {
+						connected = false;
+						stats.connections.fetch_sub(1, Ordering::Relaxed);
+					}
 				}
 				Err(err) => {
 					tracing::warn!(connection, %err, "connection gave up");

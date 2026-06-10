@@ -114,6 +114,9 @@ impl Config {
 			config = toml::from_str(&std::fs::read_to_string(file)?)?;
 			config.update_from(&args);
 		}
+		// `Stats::report` feeds this into `tokio::time::interval`, which panics on a
+		// zero period. Reject it up front with a clear message.
+		anyhow::ensure!(!config.report().is_zero(), "--report must be greater than 0s");
 		Ok(config)
 	}
 
@@ -196,6 +199,13 @@ tls.disable_verify = true
 		assert_eq!(config.connections(), Range::new(5, 10));
 		// Untouched TOML field is still intact.
 		assert_eq!(config.fps(), Range::new(24, 60));
+	}
+
+	#[test]
+	fn zero_report_is_rejected() {
+		// A zero report interval would panic `tokio::time::interval`; reject it early.
+		let err = Config::parse_and_merge(["moq-bench", "--report", "0s"]).unwrap_err();
+		assert!(err.to_string().contains("report"), "unexpected error: {err}");
 	}
 
 	#[test]

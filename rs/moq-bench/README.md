@@ -63,7 +63,7 @@ Client TLS/QUIC flags (`--tls-disable-verify`, `--client-bind`, ...) come from
 
 The `config/` directory has a few starting points:
 
-- `hd.toml` — high-bitrate HD video (24-60fps, several Mbps per track).
-- `sd.toml` — standard-definition video with more viewers per publisher.
-- `audio.toml` — small, frequent frames with short groups (Opus-like).
-- `announce.toml` — many broadcasts, near-zero media, to stress announcements.
+- `hd.toml`: high-bitrate HD video (24-60fps, several Mbps per track).
+- `sd.toml`: standard-definition video with more viewers per publisher.
+- `audio.toml`: small, frequent frames with short groups (Opus-like).
+- `announce.toml`: many broadcasts, near-zero media, to stress announcements.

@@ -61,12 +61,17 @@ async fn main() -> anyhow::Result<()> {
 			Duration::ZERO
 		};
 
-		let config = config.clone();
-		let client = client.clone();
-		let stats = stats.clone();
+		let ctx = connection::Connection {
+			index: i,
+			run_id,
+			rolled,
+			config: config.clone(),
+			client: client.clone(),
+			stats: stats.clone(),
+		};
 		tasks.spawn(async move {
 			tokio::time::sleep(delay).await;
-			connection::run(i, run_id, rolled, config, client, stats).await;
+			connection::run(ctx).await;
 		});
 	}
 

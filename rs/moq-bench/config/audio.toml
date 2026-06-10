@@ -8,9 +8,15 @@
 startup = "20s"
 report = "5s"
 
-connections = "200:1000" # A
-broadcasts = 1           # B
-subscribe = "2:10"       # C
-fps = 50                 # D: 20ms frames
-frame_size = "200:600"   # E
-group_size = "4:9"       # F: short groups, frequent stream churn
+# A: number of connections
+connections = "200:1000"
+# B: broadcasts (tracks) per connection
+broadcasts = 1
+# C: peer broadcasts each connection watches
+subscribe = "2:10"
+# D: frames per second (20ms frames)
+fps = 50
+# E: bytes per frame
+frame_size = "200:600"
+# F: zeroed frames per group (short groups, frequent stream churn)
+group_size = "4:9"

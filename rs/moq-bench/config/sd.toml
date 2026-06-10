@@ -8,9 +8,15 @@
 startup = "30s"
 report = "5s"
 
-connections = "100:500"  # A
-broadcasts = 1           # B
-subscribe = "5:20"       # C
-fps = 30                 # D
-frame_size = "4000:12000" # E (~1-3 Mbps)
-group_size = 59          # F: 2s GOP at 30fps
+# A: number of connections
+connections = "100:500"
+# B: broadcasts (tracks) per connection
+broadcasts = 1
+# C: peer broadcasts each connection watches
+subscribe = "5:20"
+# D: frames per second
+fps = 30
+# E: bytes per frame (~1-3 Mbps)
+frame_size = "4000:12000"
+# F: zeroed frames per group (2s GOP at 30fps)
+group_size = 59
