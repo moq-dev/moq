@@ -57,7 +57,8 @@
           ];
           targets = [
             "wasm32-unknown-unknown"
-          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             "x86_64-apple-darwin"
             "aarch64-apple-darwin"
           ];
