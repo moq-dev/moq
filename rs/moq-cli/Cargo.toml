@@ -18,10 +18,11 @@ iroh = ["moq-native/iroh"]
 quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
 websocket = ["moq-native/websocket"]
-# Webcam capture + H.264 encode via moq-video. Off by default because it
-# pulls in a system ffmpeg (libav*) build dependency. Enable with
-# `cargo build -p moq-cli --features webcam` (the nix dev shell provides ffmpeg).
-webcam = ["dep:moq-video"]
+# Device capture (camera now, microphone planned) + encode/publish. Off by
+# default because the video path pulls in a system ffmpeg (libav*) build
+# dependency. Enable with `cargo build -p moq-cli --features capture` (the nix
+# dev shell provides ffmpeg).
+capture = ["dep:moq-video"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }

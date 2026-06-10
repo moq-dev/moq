@@ -14,20 +14,21 @@ pub enum PublishFormat {
 		#[arg(long)]
 		playlist: String,
 	},
-	/// Capture and publish a webcam (H.264, hardware-encoded when available).
-	#[cfg(feature = "webcam")]
-	Webcam(WebcamArgs),
+	/// Capture and publish from local devices (camera now; microphone planned).
+	#[cfg(feature = "capture")]
+	Capture(CaptureArgs),
 }
 
-/// Webcam capture options. See `moq-video` for the capture/encode details.
-#[cfg(feature = "webcam")]
+/// Device capture options. Video flags map to `moq-video`; audio capture
+/// (microphone -> Opus via `moq-audio`) will add `--microphone` etc. here.
+#[cfg(feature = "capture")]
 #[derive(clap::Args, Clone)]
-pub struct WebcamArgs {
+pub struct CaptureArgs {
 	/// Camera device. Platform-specific: an avfoundation index/name on macOS,
 	/// a `/dev/videoN` path on Linux, or a dshow device name on Windows.
 	/// Omit to use the default camera.
 	#[arg(long)]
-	pub device: Option<String>,
+	pub camera: Option<String>,
 
 	/// Requested capture width. The camera snaps to its nearest supported mode.
 	#[arg(long)]
@@ -41,7 +42,7 @@ pub struct WebcamArgs {
 	#[arg(long)]
 	pub fps: Option<u32>,
 
-	/// Target bitrate in bits per second. Omit to derive one from the resolution.
+	/// Target video bitrate in bits per second. Omit to derive one from the resolution.
 	#[arg(long)]
 	pub bitrate: Option<u64>,
 
@@ -76,13 +77,17 @@ impl PublishDecoder {
 enum Source {
 	/// Decode a container read from stdin (or an HLS playlist).
 	Stream(PublishDecoder),
-	/// Capture a webcam. The producer is built on the blocking capture thread,
-	/// so we just carry the catalog and config here.
-	#[cfg(feature = "webcam")]
-	Webcam {
+	/// Capture from local devices. The per-medium producers are built on their
+	/// own capture threads, so we just carry the shared catalog and the configs.
+	///
+	/// Audio (microphone -> Opus via `moq-audio`) plugs in as sibling fields
+	/// here plus a second concurrent producer in [`Publish::run`]; the
+	/// broadcast and catalog are already shared, so it's purely additive.
+	#[cfg(feature = "capture")]
+	Capture {
 		catalog: moq_mux::catalog::Producer,
-		capture: moq_video::capture::Config,
-		encode: moq_video::encode::Options,
+		video: moq_video::capture::Config,
+		video_encode: moq_video::encode::Options,
 	},
 }
 
@@ -114,11 +119,11 @@ impl Publish {
 				let hls = hls::Import::new(broadcast.clone(), catalog.clone(), hls::Config::new(playlist.clone()))?;
 				Source::Stream(PublishDecoder::Hls(Box::new(hls)))
 			}
-			#[cfg(feature = "webcam")]
-			PublishFormat::Webcam(args) => Source::Webcam {
+			#[cfg(feature = "capture")]
+			PublishFormat::Capture(args) => Source::Capture {
 				catalog,
-				capture: args.capture_config(),
-				encode: args.encode_options(),
+				video: args.capture_config(),
+				video_encode: args.encode_options(),
 			},
 		};
 
@@ -147,26 +152,28 @@ impl Publish {
 					decoder.decode_buf(&mut buffer)?;
 				}
 			}
-			#[cfg(feature = "webcam")]
-			Source::Webcam {
+			#[cfg(feature = "capture")]
+			Source::Capture {
 				catalog,
-				capture,
-				encode,
+				video,
+				video_encode,
 			} => {
 				// Encodes on demand: the camera opens only while subscribed.
 				// publish_capture drives the blocking capture loop internally.
-				moq_video::encode::publish_capture(self.broadcast.clone(), catalog, capture, encode).await?;
+				// When audio lands, run the mic producer concurrently here
+				// (e.g. tokio::try_join!) on the same broadcast + catalog.
+				moq_video::encode::publish_capture(self.broadcast.clone(), catalog, video, video_encode).await?;
 				Ok(())
 			}
 		}
 	}
 }
 
-#[cfg(feature = "webcam")]
-impl WebcamArgs {
+#[cfg(feature = "capture")]
+impl CaptureArgs {
 	fn capture_config(&self) -> moq_video::capture::Config {
 		let mut config = moq_video::capture::Config::default();
-		config.device = self.device.clone();
+		config.device = self.camera.clone();
 		config.width = self.width;
 		config.height = self.height;
 		config.framerate = self.fps;

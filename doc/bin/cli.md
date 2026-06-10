@@ -60,25 +60,27 @@ Pipe FFmpeg output directly to moq-cli:
 ffmpeg -i input.mp4 -f mpegts - | moq-cli publish - https://relay.example.com/anon/my-stream
 ```
 
-### Publish a Webcam
+### Capture a Webcam
 
-The `webcam` subcommand captures and encodes a camera directly, no external
-FFmpeg process required. It is gated behind the `webcam` feature, which pulls
-in a system FFmpeg (libav\*) build dependency:
+The `capture` subcommand captures and encodes from local devices directly, no
+external FFmpeg process required. Today it captures the camera; microphone
+audio is planned (it will publish a second Opus track on the same broadcast).
+It is gated behind the `capture` feature, whose video path pulls in a system
+FFmpeg (libav\*) build dependency:
 
 Build (or run) with the feature enabled:
 
 ```bash
-cargo build --release -p moq-cli --features webcam
+cargo build --release -p moq-cli --features capture
 # or run straight from a checkout:
-cargo run -p moq-cli --features webcam -- publish --url https://relay.example.com --broadcast webcam.hang webcam
+cargo run -p moq-cli --features capture -- publish --url https://relay.example.com --broadcast cam.hang capture
 
 # Default camera, hardware-encoded H.264 when available:
-moq-cli publish --url https://relay.example.com --broadcast webcam.hang webcam
+moq-cli publish --url https://relay.example.com --broadcast cam.hang capture
 
-# Pick a device, resolution, and bitrate:
-moq-cli publish --url https://relay.example.com --broadcast webcam.hang \
-    webcam --device 0 --width 1280 --height 720 --fps 30 --bitrate 3000000
+# Pick a camera, resolution, and bitrate:
+moq-cli publish --url https://relay.example.com --broadcast cam.hang \
+    capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000
 ```
 
 Capture uses the platform backend (avfoundation on macOS, v4l2 on Linux, dshow
@@ -148,7 +150,7 @@ Publish (read from stdin unless noted):
 - `fmp4` - fragmented MP4 / CMAF
 - `ts` - MPEG-TS (H.264 / H.265 video, AAC audio)
 - `hls --playlist <url>` - HLS playlist ingest
-- `webcam` - capture a camera directly (requires the `webcam` build feature; does not read stdin)
+- `capture` - capture local devices directly (camera now, microphone planned; requires the `capture` build feature; does not read stdin)
 
 Subscribe (`--format`):
 
