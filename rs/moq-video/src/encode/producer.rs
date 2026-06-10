@@ -130,8 +130,9 @@ async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
 	}
 }
 
-/// Blocking capture/encode loop. Opens the camera lazily on the first
-/// watched frame and releases it whenever the gate goes idle.
+/// Blocking capture/encode loop. Captures one frame up front to populate the
+/// catalog (the codec/resolution only exist once the encoder has produced an
+/// SPS), then releases the camera whenever the gate goes idle.
 fn capture_loop(
 	mut producer: Producer,
 	capture: capture::Config,
@@ -142,9 +143,14 @@ fn capture_loop(
 	let mut encoder: Option<Encoder> = None;
 	let mut start: Option<Instant> = None;
 	let mut last_ts = Timestamp::from_micros(0)?;
+	// The catalog video rendition only appears once a frame has been encoded
+	// (the importer reads the SPS). Until then we keep capturing regardless of
+	// the gate, so a catalog-driven subscriber can discover the track and
+	// trigger `used()`. After that we release the camera while unwatched.
+	let mut catalog_ready = false;
 
 	loop {
-		if !gate.is_active() {
+		if catalog_ready && !gate.is_active() {
 			// No viewers: drop the camera so its LED turns off and it stops
 			// consuming CPU, then block until someone subscribes.
 			if camera.take().is_some() {
@@ -191,6 +197,9 @@ fn capture_loop(
 		last_ts = ts;
 
 		let packets = encoder.as_mut().expect("encoder built above").encode(&frame)?;
+		// Once the encoder has emitted a frame, the importer has parsed the SPS
+		// and the catalog rendition exists, so the gate can take over.
+		catalog_ready |= !packets.is_empty();
 		producer.publish(packets, ts)?;
 	}
 
