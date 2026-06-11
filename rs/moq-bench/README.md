@@ -38,9 +38,11 @@ and `send_fps`/`recv_fps`) plus delivery accounting for the subscribe side:
 Subscribers read groups in arrival order (out-of-order included) and track each
 subscription's sequence span. A span wider than the count received means groups
 in between were skipped, so loss reflects dropped groups rather than QUIC packet
-loss (which the transport already repairs). The JSON keyframe at the start of
-each group is parsed back to recover the publisher's shape, so a subscriber works
-against peers it didn't publish itself.
+loss (which the transport already repairs). The newest group is the live frontier
+and is excluded from the count: groups just behind it may still be in flight, so a
+gap is only blamed once a higher group confirms it was truly skipped. The JSON
+keyframe at the start of each group is parsed back to recover the publisher's
+shape, so a subscriber works against peers it didn't publish itself.
 
 ## Usage
 

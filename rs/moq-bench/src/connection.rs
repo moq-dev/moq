@@ -301,17 +301,31 @@ async fn drain(broadcast: BroadcastConsumer, stats: &Stats) -> anyhow::Result<()
 }
 
 /// Tracks group-sequence continuity for one subscription so we can report skipped
-/// groups. Groups can arrive out of order, so rather than diffing consecutive
-/// sequences we measure the span `[min, max]` against the count received: a span
-/// wider than the count means groups in between never showed up.
+/// groups. Groups arrive out of order, so rather than diffing consecutive sequences
+/// we measure how many sequences the received groups span against how many actually
+/// landed: a span wider than the count means groups in between never showed up.
 ///
-/// Each observation feeds the shared [`Stats`] incrementally so the periodic
-/// reporter sees losses live, and so spans from many subscriptions sum correctly
-/// (`groups_expected - groups_recv` is the total skipped across all of them).
+/// The highest sequence (`max`) is the live frontier and is left out of the
+/// accounting: groups just below it may still be in flight (reordered behind the
+/// newest stream), so blaming them the instant `max` jumps would be a false
+/// positive. We only count up to `cap`, the second-highest sequence seen, which is
+/// settled once a higher group has confirmed it. A truly skipped group is counted
+/// once the frontier moves past it.
+///
+/// Each observation feeds the shared [`Stats`] incrementally so the reporter sees
+/// losses live and many subscriptions sum correctly: `groups_expected` is the size
+/// of every settled span, `groups_present` is how many of those groups arrived, and
+/// `groups_expected - groups_present` is the total skipped.
 struct GapTracker<'a> {
 	stats: &'a Stats,
 	min: u64,
 	max: u64,
+	/// Second-highest sequence seen: the settled frontier we count up to. `None`
+	/// until a second group arrives.
+	cap: Option<u64>,
+	/// This subscription's current contribution to `groups_expected` (`cap - min + 1`),
+	/// remembered so each update pushes only the delta.
+	expected: u64,
 	started: bool,
 }
 
@@ -321,6 +335,8 @@ impl<'a> GapTracker<'a> {
 			stats,
 			min: 0,
 			max: 0,
+			cap: None,
+			expected: 0,
 			started: false,
 		}
 	}
@@ -328,26 +344,33 @@ impl<'a> GapTracker<'a> {
 	fn observe(&mut self, sequence: u64) {
 		self.stats.groups_recv.fetch_add(1, Ordering::Relaxed);
 
+		// The first group is the lone frontier: nothing settled yet, so it doesn't count.
 		if !self.started {
 			self.started = true;
 			self.min = sequence;
 			self.max = sequence;
-			self.stats.groups_expected.fetch_add(1, Ordering::Relaxed);
 			return;
 		}
 
-		// Widen the span on either end, crediting the newly covered sequences as expected.
+		// Every later group sits at or below the settled frontier, so it's a present group.
+		self.stats.groups_present.fetch_add(1, Ordering::Relaxed);
+
+		self.min = self.min.min(sequence);
 		if sequence > self.max {
-			self.stats
-				.groups_expected
-				.fetch_add(sequence - self.max, Ordering::Relaxed);
+			// New frontier: the old `max` is now settled and becomes the cap.
+			self.cap = Some(self.max);
 			self.max = sequence;
-		} else if sequence < self.min {
-			self.stats
-				.groups_expected
-				.fetch_add(self.min - sequence, Ordering::Relaxed);
-			self.min = sequence;
+		} else if self.cap.is_none_or(|cap| sequence > cap) {
+			self.cap = Some(sequence);
 		}
+
+		// `cap` is always set here: either the branch above set it, or a prior group did.
+		let cap = self.cap.expect("cap set once a second group arrives");
+		let expected = cap - self.min + 1;
+		self.stats
+			.groups_expected
+			.fetch_add(expected - self.expected, Ordering::Relaxed);
+		self.expected = expected;
 	}
 }
 
@@ -444,7 +467,14 @@ mod tests {
 		task.abort();
 	}
 
-	/// A hole in the sequence (group 2 never arrives) shows up as one skipped group.
+	fn lost(stats: &Stats) -> u64 {
+		stats
+			.groups_expected
+			.load(Ordering::Relaxed)
+			.saturating_sub(stats.groups_present.load(Ordering::Relaxed))
+	}
+
+	/// A hole below the frontier (group 2 never arrives, but 3 and 4 do) is one skip.
 	#[test]
 	fn gap_tracker_counts_skips() {
 		let stats = Stats::default();
@@ -452,9 +482,8 @@ mod tests {
 		for seq in [0, 1, 3, 4] {
 			gaps.observe(seq);
 		}
-		// Span 0..=4 is 5 groups, 4 received, so 1 skipped.
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 4);
-		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 5);
+		assert_eq!(lost(&stats), 1);
 	}
 
 	/// Out-of-order arrivals that fill the whole span count as zero loss.
@@ -466,6 +495,24 @@ mod tests {
 			gaps.observe(seq);
 		}
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 4);
-		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 4);
+		assert_eq!(lost(&stats), 0);
+	}
+
+	/// The newest group is the live frontier: a hole directly behind it isn't blamed
+	/// yet (it may still be in flight), but once the frontier moves past, it counts.
+	#[test]
+	fn gap_tracker_excludes_live_frontier() {
+		let stats = Stats::default();
+		let mut gaps = GapTracker::new(&stats);
+
+		// 3 is missing, 4 is the live frontier: nothing is settled past 2 yet.
+		for seq in [0, 1, 2, 4] {
+			gaps.observe(seq);
+		}
+		assert_eq!(lost(&stats), 0);
+
+		// 5 advances the frontier, settling 4 and confirming 3 was skipped.
+		gaps.observe(5);
+		assert_eq!(lost(&stats), 1);
 	}
 }

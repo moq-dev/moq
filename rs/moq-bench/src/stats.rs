@@ -11,12 +11,13 @@ pub struct Stats {
 	pub bytes_sent: AtomicU64,
 	pub frames_recv: AtomicU64,
 	pub bytes_recv: AtomicU64,
-	/// Distinct groups received across all subscriptions.
+	/// Distinct groups received across all subscriptions (the displayed total).
 	pub groups_recv: AtomicU64,
-	/// Sum of each subscription's observed sequence span (`max - min + 1`). A group
-	/// that never arrives leaves a hole in the span, so `groups_expected - groups_recv`
-	/// is the number of skipped groups. See `connection::GapTracker`.
+	/// Size of every subscription's settled sequence span, excluding the live frontier.
 	pub groups_expected: AtomicU64,
+	/// How many groups within those settled spans actually arrived. The shortfall
+	/// `groups_expected - groups_present` is the number skipped. See `connection::GapTracker`.
+	pub groups_present: AtomicU64,
 }
 
 impl Stats {
@@ -48,7 +49,7 @@ impl Stats {
 			let recv_fps = now.frames_recv.saturating_sub(prev.frames_recv) as f64 / secs;
 
 			// Group loss is cumulative (a correctness signal), not a per-interval rate.
-			let lost_groups = now.groups_expected.saturating_sub(now.groups_recv);
+			let lost_groups = now.groups_expected.saturating_sub(now.groups_present);
 			let loss = if now.groups_expected > 0 {
 				lost_groups as f64 / now.groups_expected as f64 * 100.0
 			} else {
@@ -84,6 +85,7 @@ struct Snapshot {
 	bytes_recv: u64,
 	groups_recv: u64,
 	groups_expected: u64,
+	groups_present: u64,
 }
 
 impl Snapshot {
@@ -98,6 +100,7 @@ impl Snapshot {
 			bytes_recv: stats.bytes_recv.load(Ordering::Relaxed),
 			groups_recv: stats.groups_recv.load(Ordering::Relaxed),
 			groups_expected: stats.groups_expected.load(Ordering::Relaxed),
+			groups_present: stats.groups_present.load(Ordering::Relaxed),
 		}
 	}
 }
