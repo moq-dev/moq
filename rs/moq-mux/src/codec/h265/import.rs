@@ -91,10 +91,8 @@ impl<E: CatalogExt> Import<E> {
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::catalog::hang::Container::Legacy,
-		));
+		self.track =
+			Some(crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start());
 
 		Ok(())
 	}

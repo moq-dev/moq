@@ -8,7 +8,7 @@
 //! discovery, PES reassembly, the SCTE-35 section path, and the 90 kHz ->
 //! microsecond PTS conversion.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
@@ -43,6 +43,9 @@ pub struct Import<E: Scte35Catalog = ()> {
 	feed: Feed,
 	reader: TsPacketReader<Feed>,
 
+	/// PMT PIDs announced by the PAT. With `streams` (the ES PIDs a PMT registers)
+	/// these are the only PIDs the reader can route; see [`Self::decode`].
+	pmt_pids: HashSet<Pid>,
 	/// Per elementary-stream-PID codec routing.
 	streams: HashMap<Pid, Stream<E>>,
 	/// In-progress PES reassembly, keyed by elementary PID.
@@ -85,6 +88,7 @@ impl<E: Scte35Catalog> Import<E> {
 			catalog,
 			reader: TsPacketReader::new(feed.clone()),
 			feed,
+			pmt_pids: HashSet::new(),
 			streams: HashMap::new(),
 			pending: HashMap::new(),
 			initialized: false,
@@ -157,6 +161,16 @@ impl<E: Scte35Catalog> Import<E> {
 			{
 				continue;
 			}
+			// Feed the reader only PIDs it can route: the PAT, the PMT PIDs it
+			// announces, and the ES PIDs a PMT registers. A live capture joins
+			// mid-stream, so PES arrive before their PSI; feeding those would make
+			// the reader abort on an unknown PID. Drop them until the layout is
+			// learned (PSI repeats), then normal demux resumes.
+			if pid != Pid::PAT
+				&& !Pid::new(pid).is_ok_and(|p| self.pmt_pids.contains(&p) || self.streams.contains_key(&p))
+			{
+				continue;
+			}
 			{
 				let mut state = self.feed.lock();
 				state.data.clear();
@@ -194,7 +208,11 @@ impl<E: Scte35Catalog> Import<E> {
 			}
 			Some(TsPayload::PesStart(pes)) => self.handle_pes_start(pid, pes)?,
 			Some(TsPayload::PesContinuation(bytes)) => self.handle_pes_continuation(pid, &bytes)?,
-			// PAT routing is handled inside the reader; everything else is ignored.
+			// Learn the PMT PIDs so the routing gate in `decode` lets them through.
+			Some(TsPayload::Pat(pat)) => {
+				self.pmt_pids
+					.extend(pat.table.iter().map(|entry| entry.program_map_pid));
+			}
 			_ => {}
 		}
 		Ok(())

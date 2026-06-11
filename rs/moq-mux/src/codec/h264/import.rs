@@ -88,10 +88,10 @@ impl<E: CatalogExt> Import<E> {
 			}
 			Mode::Avc3 => {
 				let track = self.broadcast.unique_track(".avc3")?;
-				self.track = Some(crate::container::Producer::new(
-					track,
-					crate::catalog::hang::Container::Legacy,
-				));
+				self.track = Some(
+					crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
+						.with_lenient_start(),
+				);
 				self.state = State::Avc3 {
 					current: Avc3Frame::default(),
 					sps: None,
@@ -169,10 +169,10 @@ impl<E: CatalogExt> Import<E> {
 			};
 			if self.track.is_none() {
 				let track = self.broadcast.unique_track(".avc3")?;
-				self.track = Some(crate::container::Producer::new(
-					track,
-					crate::catalog::hang::Container::Legacy,
-				));
+				self.track = Some(
+					crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
+						.with_lenient_start(),
+				);
 			}
 		}
 
@@ -445,10 +445,8 @@ impl<E: CatalogExt> Import<E> {
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::catalog::hang::Container::Legacy,
-		));
+		self.track =
+			Some(crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start());
 		Ok(())
 	}
 
