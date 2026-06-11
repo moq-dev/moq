@@ -428,3 +428,155 @@ async fn scte35_without_video_export_is_rejected() {
 		"expected a video-required rejection, got: {err}"
 	);
 }
+
+/// Subscribe to a cue track and read every retained `splice_info_section` it holds.
+async fn read_cues(consumer: &moq_net::BroadcastConsumer, name: &str) -> Vec<(Vec<u8>, Timestamp)> {
+	let track = consumer
+		.subscribe_track(&moq_net::Track::new(name.to_string()))
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
+	let mut cues = Vec::new();
+	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
+		match res.unwrap() {
+			Some(frame) => cues.push((frame.payload.to_vec(), frame.timestamp)),
+			None => break,
+		}
+	}
+	cues
+}
+
+/// Full TS -> MoQ -> TS over fixtures carrying SCTE-35 cues; each section must survive the seam
+/// byte-for-byte. Most are real-video clips with injected cues (regenerate via the `scte35_inject`
+/// example); tsduck.ts is TSDuck-authored and kyrion_dirtystart.ts is a real-encoder capture. Add
+/// a source by dropping a `.ts` in `test_data/scte35/` and listing it here.
+///
+/// The cues are independently valid SCTE-35: TSDuck (the authoritative toolkit) decodes every
+/// section in every fixture with CRC32 OK. That decode is checked in next to each clip as
+/// `<fixture>_tsduck.txt`; regenerate it via the `moq-tsduck` image (cue PID 0x21 for the injected
+/// fixtures, 0x14d for the Kyrion capture):
+/// `tsp -I file test_data/scte35/<fixture>.ts -P tables --pid <pid> -O drop > <fixture>_tsduck.txt`.
+#[tokio::test(start_paused = true)]
+async fn scte35_fixtures_survive_roundtrip() {
+	// The corpus proves byte-exact survival across sources that each cover an axis no other does;
+	// cue counts vary per fixture (five for the injected clips, ten on the wire for tsduck, six for
+	// the Kyrion capture). For every cue we assert survival, a known splice_command_type, and that
+	// the per-fixture distinct count holds (so a clip that lost variety to duplicates fails). Only
+	// tsduck, whose cues we author, pins the exact command-type set.
+	// (source, total cues, distinct cues, expected command-type set or empty, fixture bytes.)
+	type Fixture = (&'static str, usize, usize, &'static [u8], &'static [u8]);
+	let fixtures: &[Fixture] = &[
+		// ffmpeg mpegts muxer, H.264 320x240 progressive, no audio: the baseline.
+		("ffmpeg", 5, 5, &[], include_bytes!("test_data/scte35/ffmpeg.ts")),
+		// GStreamer mpegtsmux, H.264 720x480 interlaced (480i) + AAC: a second muxer, SD
+		// interlaced framing, and an audio track.
+		("gst480i", 5, 5, &[], include_bytes!("test_data/scte35/gst480i.ts")),
+		// Real BigBuckBunny frames, H.265 320x240 + Opus: a second video codec, real content,
+		// and the WebCodec-friendly Opus path.
+		("bbb5s", 5, 5, &[], include_bytes!("test_data/scte35/bbb5s.ts")),
+		// TSDuck-authored: splice_null, splice_insert, time_signal, and a private_command (custom),
+		// each re-sent with an advancing CC so the importer emits 5 distinct x2 = 10. The only
+		// fixture covering section repetition, distinct from the byte-identical same-CC transport
+		// duplicate the reassembler drops.
+		(
+			"tsduck",
+			10,
+			5,
+			&[0x00, 0x05, 0x06, 0xff],
+			include_bytes!("test_data/scte35/tsduck.ts"),
+		),
+		// Real Ateme Kyrion broadcast (H.264 1080i + dropped MP2), captured mid-stream: a real
+		// encoder's cues surviving the full round-trip, not a synthetic clip. Cues are external,
+		// so the command-type set stays unpinned.
+		(
+			"kyrion_dirtystart",
+			6,
+			6,
+			&[],
+			include_bytes!("test_data/scte35/kyrion_dirtystart.ts"),
+		),
+	];
+
+	// SCTE-35 splice_command_type lives at byte 13 of the splice_info_section.
+	const KNOWN_SPLICE_COMMANDS: [u8; 6] = [0x00, 0x04, 0x05, 0x06, 0x07, 0xff];
+
+	for (source, total, distinct, command_types, data) in fixtures {
+		// Ingest the fixture.
+		let mut broadcast = moq_net::Broadcast::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::with_catalog(
+			&mut broadcast,
+			crate::catalog::hang::Catalog::<scte35::Ext>::default(),
+		)
+		.unwrap();
+		let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+		import.decode(&mut BytesMut::from(&data[..])).unwrap();
+		import.finish().unwrap();
+
+		let snap = catalog.snapshot();
+		assert!(!snap.video.renditions.is_empty(), "{source}: video track from the clip");
+		let name = snap.scte35.renditions.keys().next().expect("a scte35 track").clone();
+		let ingested = read_cues(&consumer, &name).await;
+		assert_eq!(ingested.len(), *total, "{source}: {total} cues on ingest");
+		assert!(
+			ingested.iter().all(|(b, _)| b.first() == Some(&0xfc)),
+			"{source}: every cue is a splice_info_section (table_id 0xFC)"
+		);
+		let unique: std::collections::HashSet<&Vec<u8>> = ingested.iter().map(|(b, _)| b).collect();
+		assert_eq!(
+			unique.len(),
+			*distinct,
+			"{source}: {distinct} distinct cue sections, not dups"
+		);
+		// Structural validity: every cue's splice_command_type is a known SCTE-35 command.
+		assert!(
+			ingested
+				.iter()
+				.all(|(b, _)| b.get(13).is_some_and(|t| KNOWN_SPLICE_COMMANDS.contains(t))),
+			"{source}: every cue carries a known splice_command_type"
+		);
+		// For fixtures we author (tsduck), pin the exact set of command types present.
+		if !command_types.is_empty() {
+			let mut got: Vec<u8> = ingested.iter().filter_map(|(b, _)| b.get(13).copied()).collect();
+			got.sort_unstable();
+			got.dedup();
+			assert_eq!(got.as_slice(), *command_types, "{source}: splice_command_type set");
+		}
+		assert!(
+			ingested.iter().all(|(_, ts)| *ts != Timestamp::ZERO),
+			"{source}: cues stamped with the video PTS, not zero"
+		);
+
+		// Export and re-ingest.
+		let ts =
+			drain_with(Export::<scte35::Ext>::with_extension(consumer, crate::catalog::CatalogFormat::Hang).unwrap())
+				.await;
+		assert_packet_aligned(&ts);
+
+		let mut broadcast2 = moq_net::Broadcast::new().produce();
+		let consumer2 = broadcast2.consume();
+		let catalog2 = crate::catalog::Producer::with_catalog(
+			&mut broadcast2,
+			crate::catalog::hang::Catalog::<scte35::Ext>::default(),
+		)
+		.unwrap();
+		let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
+		import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
+		import2.finish().unwrap();
+		let name2 = catalog2
+			.snapshot()
+			.scte35
+			.renditions
+			.keys()
+			.next()
+			.expect("a scte35 track")
+			.clone();
+		let roundtripped = read_cues(&consumer2, &name2).await;
+
+		let before: Vec<&Vec<u8>> = ingested.iter().map(|(b, _)| b).collect();
+		let after: Vec<&Vec<u8>> = roundtripped.iter().map(|(b, _)| b).collect();
+		assert_eq!(
+			after, before,
+			"{source}: every section survived TS -> MoQ -> TS byte-for-byte"
+		);
+	}
+}
