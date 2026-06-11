@@ -20,7 +20,7 @@ use mpeg2ts::ts::{Pid, ReadTsPacket, TsPacket, TsPacketReader, TsPayload};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::adts;
-use super::scte35_ext::{Scte35Catalog, Scte35Config};
+use super::scte35;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::{aac, h264, h265};
 use crate::container::Timestamp;
@@ -33,7 +33,7 @@ use crate::container::Timestamp;
 /// reader and reassembled. Other elementary streams are logged and dropped. Each
 /// codec stream is fed to its importer, which manages the track, catalog config,
 /// and keyframe-based group boundaries.
-pub struct Import<E: Scte35Catalog = ()> {
+pub struct Import<E: scte35::Catalog = ()> {
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::Producer<E>,
 
@@ -76,7 +76,7 @@ pub struct Import<E: Scte35Catalog = ()> {
 	media_unwrap: PtsUnwrap,
 }
 
-impl<E: Scte35Catalog> Import<E> {
+impl<E: scte35::Catalog> Import<E> {
 	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		let feed = Feed::default();
 		// Sample the real catalog once at construction, not E::default(): an extension
@@ -416,13 +416,13 @@ struct Pending {
 /// intercepted before the mpeg2ts reader (which would PES-parse it and abort).
 /// The byte-level reassembly lives in [`ScteReassembler`]; this type owns the
 /// track and catalog entry and stamps each section with the media clock.
-struct ScteStream<E: Scte35Catalog> {
+struct ScteStream<E: scte35::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	catalog: crate::catalog::Producer<E>,
 	reassembler: ScteReassembler,
 }
 
-impl<E: Scte35Catalog> ScteStream<E> {
+impl<E: scte35::Catalog> ScteStream<E> {
 	fn new(
 		mut broadcast: moq_net::BroadcastProducer,
 		mut catalog: crate::catalog::Producer<E>,
@@ -435,7 +435,7 @@ impl<E: Scte35Catalog> ScteStream<E> {
 		};
 
 		let track = broadcast.unique_track(".scte35")?;
-		let mut config = Scte35Config::new();
+		let mut config = scte35::Config::new();
 		config.container = hang::catalog::Container::Legacy;
 		scte35.renditions.insert(track.name.clone(), config);
 		drop(guard);
@@ -482,7 +482,7 @@ impl<E: Scte35Catalog> ScteStream<E> {
 	}
 }
 
-impl<E: Scte35Catalog> Drop for ScteStream<E> {
+impl<E: scte35::Catalog> Drop for ScteStream<E> {
 	fn drop(&mut self) {
 		if let Some(scte35) = self.catalog.lock().scte35_mut() {
 			scte35.renditions.remove(&self.track.name);
@@ -1123,14 +1123,15 @@ mod test {
 	}
 
 	// An extended catalog detects the CUEI PID, advertises a cue track, and the
-	// section is published (a `Catalog<Scte35Ext>` carries the rendition).
+	// section is published (a `Catalog<scte35::Ext>` carries the rendition).
 	#[test]
 	fn scte35_extension_catalogs_the_cue_track() {
 		use crate::catalog::hang::Catalog;
-		use crate::container::ts::Scte35Ext;
+		use crate::container::ts::scte35;
 
 		let mut broadcast = moq_net::Broadcast::new().produce();
-		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Scte35Ext>::default()).unwrap();
+		let catalog =
+			crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<scte35::Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
 
 		let mut bytes = bytes::BytesMut::new();
@@ -1187,14 +1188,15 @@ mod test {
 	async fn pmt_without_cuei_then_with_cuei_upgrades() {
 		use crate::catalog::hang::{Catalog, Container};
 		use crate::container::Consumer;
-		use crate::container::ts::Scte35Ext;
+		use crate::container::ts::scte35;
 
 		const SECTION_PID: u16 = 0x0021;
 		let pid = mpeg2ts::ts::Pid::new(SECTION_PID).unwrap();
 
 		let mut broadcast = moq_net::Broadcast::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Scte35Ext>::default()).unwrap();
+		let catalog =
+			crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<scte35::Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
 
 		// First PMT lacks CUEI: the 0x86 PID is ambiguous and routes to Ignored.
@@ -1311,14 +1313,15 @@ mod test {
 	#[tokio::test(start_paused = true)]
 	async fn scte35_cue_stamped_with_video_pts() {
 		use crate::catalog::hang::{Catalog, Container};
-		use crate::container::ts::Scte35Ext;
+		use crate::container::ts::scte35;
 		use crate::container::{Consumer, Timestamp};
 
 		const VIDEO_PID: u16 = 0x0050;
 
 		let mut broadcast = moq_net::Broadcast::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Scte35Ext>::default()).unwrap();
+		let catalog =
+			crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<scte35::Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
 
 		let mut bytes = bytes::BytesMut::new();
@@ -1355,15 +1358,16 @@ mod test {
 	#[test]
 	fn section_pid_without_cuei_is_dropped_not_cataloged() {
 		use crate::catalog::hang::Catalog;
-		use crate::container::ts::Scte35Ext;
+		use crate::container::ts::scte35;
 
 		const VIDEO_PID: u16 = 0x0050;
 		const SECTION_PID: u16 = 0x0021;
 
 		let mut broadcast = moq_net::Broadcast::new().produce();
-		// Scte35Ext (not the base catalog) makes a wrong ensure_scte() observable: it
+		// scte35::Ext (not the base catalog) makes a wrong ensure_scte() observable: it
 		// would create a rendition, which the base catalog silently drops.
-		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Scte35Ext>::default()).unwrap();
+		let catalog =
+			crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<scte35::Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
 
 		let mut bytes = bytes::BytesMut::new();

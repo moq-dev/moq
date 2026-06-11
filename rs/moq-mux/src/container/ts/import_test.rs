@@ -149,7 +149,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::with_catalog(
 		&mut broadcast,
-		crate::catalog::hang::Catalog::<crate::container::ts::Scte35Ext>::default(),
+		crate::catalog::hang::Catalog::<crate::container::ts::scte35::Ext>::default(),
 	)
 	.unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
