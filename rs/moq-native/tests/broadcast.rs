@@ -348,8 +348,8 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_05_fetch_webtransport() {
-	// WebTransport only: Lite05Wip isn't advertised over ALPN, so raw QUIC (moqt://)
-	// can't negotiate it (same reason the other Lite05 tests are https-only).
+	// Exercises the WebTransport path; lite-05 is forced via config on both ends.
+	// The raw-QUIC ALPN path is covered by broadcast_race_quic_wins.
 	lite05_fetch_roundtrip("https").await;
 }
 
@@ -1087,7 +1087,7 @@ async fn broadcast_websocket_fallback() {
 ///
 /// Bump this whenever [`moq_net::Versions::all`] gains a newer Lite variant
 /// so the regression tests below keep tracking "the newest", not a frozen value.
-const NEWEST_LITE: &str = "moq-lite-04";
+const NEWEST_LITE: &str = "moq-lite-05-wip";
 
 /// Regression guard for the WebSocket ALPN path. Lite02 over WebSocket means
 /// the qmux subprotocol negotiation produced a bare `moql` (or no match)

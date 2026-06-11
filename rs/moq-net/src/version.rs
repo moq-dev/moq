@@ -14,12 +14,14 @@ pub(crate) const NEGOTIATED: [Version; 3] = [
 	Version::Ietf(ietf::Version::Draft14),
 ];
 
-/// ALPN strings for supported versions.
+/// ALPN strings for supported versions, most-preferred first. `ALPNS[0]` is the
+/// newest moq-lite ALPN that both sides converge on.
 ///
-/// Intentionally excludes `ALPN_LITE_05_WIP`: lite-05 is still work-in-progress
-/// and must not be advertised by default. Callers can opt in by including
-/// `Version::Lite(lite::Version::Lite05Wip)` in their [`Versions`] explicitly.
+/// Includes `ALPN_LITE_05_WIP` so the demo and end-to-end tests negotiate lite-05
+/// by default. lite-05 is still work-in-progress; revisit this default before
+/// promoting the branch to `main`.
 pub const ALPNS: &[&str] = &[
+	ALPN_LITE_05_WIP,
 	ALPN_LITE_04,
 	ALPN_LITE_03,
 	ALPN_LITE,
@@ -228,6 +230,7 @@ impl Versions {
 	/// All supported versions exposed by default.
 	pub fn all() -> Self {
 		Self(vec![
+			Version::Lite(lite::Version::Lite05Wip),
 			Version::Lite(lite::Version::Lite04),
 			Version::Lite(lite::Version::Lite03),
 			Version::Lite(lite::Version::Lite02),

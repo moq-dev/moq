@@ -7,10 +7,11 @@ pub enum Version {
 	Lite02,
 	Lite03,
 	Lite04,
-	/// Work-in-progress placeholder for lite-05. Adds the TRACK stream (immutable
-	/// per-track properties incl. timescale), zigzag-delta timestamps in per-frame
-	/// headers, and drops SUBSCRIBE_OK/FETCH_OK. Not advertised over ALPN or
-	/// included in default version sets; callers must opt in explicitly.
+	/// Work-in-progress lite-05. Adds the TRACK stream (immutable per-track
+	/// properties incl. timescale), zigzag-delta timestamps in per-frame headers,
+	/// and drops SUBSCRIBE_OK/FETCH_OK. Advertised over ALPN and included in the
+	/// default version sets as the preferred version; still WIP, revisit before
+	/// promoting the branch to `main`.
 	Lite05Wip,
 }
 

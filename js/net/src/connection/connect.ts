@@ -279,6 +279,7 @@ async function connectWebTransport(
 		allowPooling: false,
 		congestionControl: "low-latency",
 		protocols: [
+			Lite.ALPN_05_WIP,
 			Lite.ALPN_04,
 			Lite.ALPN_03,
 			Lite.ALPN,
@@ -346,6 +347,7 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 	// advertises every QMux draft it knows about and the server picks one.
 	// Insertion order is the negotiation preference on the wire.
 	const versions = {
+		[Lite.ALPN_05_WIP]: null,
 		[Lite.ALPN_04]: null,
 		[Lite.ALPN_03]: null,
 		[Lite.ALPN]: null,
