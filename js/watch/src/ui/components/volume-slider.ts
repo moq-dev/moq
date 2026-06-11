@@ -36,6 +36,7 @@ export function volumeSlider(parent: Effect, watch: MoqWatch): HTMLElement {
 		slider.style.setProperty("--fill", `${shown}%`);
 		button.title = muted ? "Unmute" : "Mute";
 		button.setAttribute("aria-label", button.title);
+		button.classList.toggle("control--muted", muted);
 		button.replaceChildren(icon(volumeIcon(pct, muted)));
 	});
 
