@@ -85,13 +85,15 @@ Import `@moq/publish/ui` for a Web Component overlay with device selection and p
     <moq-publish
         url="https://relay.example.com/anon"
         name="room/alice.hang"
-        source="camera">
+        source="camera"
+        simulcast>
         <video muted autoplay></video>
     </moq-publish>
 </moq-publish-ui>
 ```
 
 The `<moq-publish-ui>` element automatically discovers the nested `<moq-publish>` and wires up reactive controls.
+The overlay has no `simulcast` control; enable it via the attribute on the nested `<moq-publish>` as shown.
 
 ## JavaScript API
 

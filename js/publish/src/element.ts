@@ -271,6 +271,10 @@ export default class MoqPublish extends HTMLElement {
 		this.state.invisible.set(value);
 	}
 
+	/**
+	 * When enabled, publish an additional 480p `video/sd` rendition alongside `video/hd`.
+	 * Mirrors the `simulcast` attribute and has no effect while `invisible` is set.
+	 */
 	get simulcast(): boolean {
 		return this.state.simulcast.peek();
 	}

@@ -14,3 +14,9 @@ test("an explicit sd config overrides the default", () => {
 	expect(root.sd.config.peek()?.maxPixels).toBe(1234);
 	root.close();
 });
+
+test("an explicit empty sd config opts out of the default cap", () => {
+	const root = new Root({ sd: { enabled: true, config: {} } });
+	expect(root.sd.config.peek()?.maxPixels).toBeUndefined();
+	root.close();
+});
