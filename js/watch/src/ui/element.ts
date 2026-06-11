@@ -73,7 +73,10 @@ export default class MoqWatchUi extends HTMLElement {
 
 		// Bottom chrome: gradient scrim + the control bar.
 		const chrome = DOM.create("div", { className: "chrome" });
-		chrome.append(DOM.create("div", { className: "scrim scrim--bottom" }), controlBar(effect, watch, state));
+		chrome.append(
+			DOM.create("div", { className: "scrim scrim--bottom" }),
+			controlBar(effect, watch, state, player),
+		);
 
 		const panel = settingsPanel(effect, watch, state);
 

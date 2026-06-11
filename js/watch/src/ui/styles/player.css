@@ -23,6 +23,35 @@
 	cursor: none;
 }
 
+/*
+ * Fullscreen: fill the screen and center the video. We fullscreen this shadow
+ * container (not the bare <moq-watch>) so the overlay chrome stays visible.
+ * `.player--pseudo-fullscreen` is the iPhone fallback where the fullscreen API
+ * is unavailable; it pins the player to the viewport via fixed positioning.
+ */
+.player:fullscreen,
+.player:-webkit-full-screen,
+.player--pseudo-fullscreen {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 0;
+}
+
+.player--pseudo-fullscreen {
+	position: fixed;
+	inset: 0;
+	width: 100vw;
+	height: 100vh;
+	z-index: 2147483647;
+}
+
+.player:fullscreen ::slotted(moq-watch),
+.player:-webkit-full-screen ::slotted(moq-watch),
+.player--pseudo-fullscreen ::slotted(moq-watch) {
+	max-height: 100%;
+}
+
 /* Gradient scrims keep the chrome legible over bright video. */
 .scrim {
 	position: absolute;
