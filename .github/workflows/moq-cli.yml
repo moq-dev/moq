@@ -65,15 +65,15 @@ jobs:
             echo "version=0.0.0-dryrun" >> "$GITHUB_OUTPUT"
           fi
 
-      # libav* dev headers for ffmpeg-sys-next (linked dynamically), pkg-config
-      # to locate them, and clang for bindgen. The runner's rustup honors
-      # rust-toolchain.toml.
+      # libav* dev headers for ffmpeg-sys-next (linked dynamically), ALSA for
+      # cpal's microphone capture, pkg-config to locate them, and clang for
+      # bindgen. The runner's rustup honors rust-toolchain.toml.
       - name: Install build dependencies
         shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config clang libclang-dev \
+            pkg-config clang libclang-dev libasound2-dev \
             libavcodec-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libavutil-dev libswscale-dev libswresample-dev
 
