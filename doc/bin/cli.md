@@ -67,16 +67,26 @@ external FFmpeg process required. It publishes the camera as an H.264 video
 track and the microphone as an Opus audio track on the same broadcast.
 
 The prebuilt binaries (releases, Homebrew, `.deb`/`.rpm`) ship with capture
-enabled and FFmpeg statically linked, so there's no separate FFmpeg install to
-manage. Their FFmpeg is LGPL: it encodes with a platform **hardware** encoder
-only (`h264_videotoolbox` on macOS, `h264_v4l2m2m` on Linux) and omits the GPL
-software encoder (libx264). On a machine without a supported hardware H.264
-encoder, use a source build with `--features capture` against a full FFmpeg
-(see below) to get the libx264 software fallback.
+enabled and link the system FFmpeg dynamically, so **FFmpeg is a runtime
+dependency**. The package managers install it for you: `brew install moq-cli`
+pulls FFmpeg, and the `.deb`/`.rpm` declare it as a dependency (on Fedora/RHEL,
+enable [RPM Fusion](https://rpmfusion.org/) first since FFmpeg lives there).
+Because the binary uses whatever FFmpeg the platform provides, every encoder
+that build includes is available: the hardware encoders `h264_videotoolbox`
+(macOS), `h264_nvenc` (NVIDIA), `h264_vaapi` (Intel/AMD), and `h264_v4l2m2m`
+(Linux/embedded), plus the `libx264` software encoder. NVENC and VA-API only
+need the matching GPU driver present at runtime; without it they report as
+unavailable and capture falls back to another encoder.
+
+The Linux packages are built on Ubuntu 22.04 (glibc 2.35), which is the support
+floor; older distros need a source build. They link the distro's libav\* ABI,
+so install the package matching your distro release.
 
 From source, capture is gated behind the `capture` feature (off by default so
 plain builds don't pull the FFmpeg/libav\* build dependency; audio is pure-Rust
-via cpal). Build (or run) with the feature enabled:
+via cpal). It links the system FFmpeg both at build and run time, so install
+FFmpeg's dev headers first (`apt install libavcodec-dev ...`, `brew install
+ffmpeg`, or use the Nix dev shell). Build (or run) with the feature enabled:
 
 ```bash
 cargo build --release -p moq-cli --features capture
@@ -99,14 +109,9 @@ moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --n
 Video capture uses the platform backend (avfoundation on macOS, v4l2 on Linux,
 dshow on Windows) and picks a hardware encoder (`h264_videotoolbox` /
 `h264_nvenc` / `h264_vaapi`) when one is present, falling back to software
-(`libx264`); force either with `--hardware` / `--software`. Audio capture uses
-cpal (CoreAudio / WASAPI / ALSA) and encodes Opus.
-
-The prebuilt binaries' static FFmpeg includes only the hardware encoders
-`h264_videotoolbox` (macOS) and `h264_v4l2m2m` (Linux); `--software` (libx264)
-needs a source build against a full FFmpeg. VA-API / NVENC are also omitted
-(they dlopen system driver libraries at runtime, which a static binary
-can't rely on); build from source against a full FFmpeg to use them.
+(`libx264`); force either with `--hardware` / `--software`. Which encoders are
+actually available depends on how your FFmpeg was built; the encoders listed
+above are present in the FFmpeg that the package managers install.
 
 Alternatively, pipe an external FFmpeg process as MPEG-TS:
 

@@ -23,9 +23,13 @@ contents:
     file_info:
       mode: 0755
 
-# The binary is a fully-static musl build (no glibc / libc6 dependency), so
-# there are no runtime package dependencies to declare. It installs and runs
-# on any Linux regardless of libc flavor or version.
+# Built natively against the target distro's ffmpeg and links libav*
+# dynamically (the `capture` feature). Depend on ffmpeg so the package manager
+# installs the matching libav* shared libraries; ffmpeg also carries the
+# hardware encoders (nvenc / vaapi / v4l2m2m). On Fedora/RHEL the ffmpeg package
+# lives in RPM Fusion, which the user must enable.
+depends:
+  - ffmpeg
 
 deb:
   fields:

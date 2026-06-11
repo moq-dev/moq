@@ -61,9 +61,7 @@
           ];
         };
 
-        # Apply our overlay to get the package definitions. Defined here (rather
-        # than just before `in`) so the dev shell can pull the static-capable
-        # ffmpeg the package builds use.
+        # Apply our overlay to get the package definitions.
         overlayPkgs = pkgs.extend self.overlays.default;
 
         # GStreamer dependencies (for moq-gst plugin)
@@ -86,12 +84,10 @@
             pkg-config
             glib
             libressl
-            # Static-capable ffmpeg (+ static x264) so a dev `cargo build
-            # --features capture` links dynamically while `just rs ci`'s
-            # `--all-features` run, which enables moq-video's `static` feature,
-            # finds the libav*.a / libx264.a archives. See nix/overlay.nix.
-            overlayPkgs.moqFfmpeg
-            overlayPkgs.moqX264
+            # Full ffmpeg (all hardware encoders + libx264) so a dev
+            # `cargo build --features capture` links the system libav*
+            # dynamically. See nix/overlay.nix.
+            pkgs.ffmpeg-full
             curl
             cargo-sort
             cargo-shear
@@ -202,17 +198,10 @@
         // pkgs.lib.optionalAttrs (system == "aarch64-darwin") {
           inherit (overlayPkgs)
             moq-relay-x86_64-apple-darwin
-            moq-cli-x86_64-apple-darwin
             moq-token-cli-x86_64-apple-darwin
             libmoq-x86_64-apple-darwin
             moq-gst-plugin-x86_64-apple-darwin
             ;
-        }
-        # Fully-static musl moq-cli for the portable Linux release artifacts.
-        # pkgsStatic only makes sense on Linux (darwin has no static libc), so
-        # gate it to keep `nix flake check` evaluating elsewhere.
-        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
-          inherit (overlayPkgs) moq-cli-static;
         };
 
         # Re-export gst_all_1 so users can pair the plugin with a matching

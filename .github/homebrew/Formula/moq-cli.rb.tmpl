@@ -4,6 +4,11 @@ class MoqCli < Formula
   version "__VERSION__"
   license any_of: ["MIT", "Apache-2.0"]
 
+  # Capture links libav* dynamically; ffmpeg also provides the hardware
+  # encoders (videotoolbox / vaapi). A major ffmpeg bump needs a formula
+  # rebuild so the binary resolves the new libav* soname.
+  depends_on "ffmpeg"
+
   on_macos do
     on_arm do
       url "https://github.com/moq-dev/moq/releases/download/moq-cli-v#{version}/moq-cli-#{version}-aarch64-apple-darwin.tar.gz"

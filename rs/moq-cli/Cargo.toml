@@ -19,9 +19,10 @@ quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
 websocket = ["moq-native/websocket"]
 # Device capture (camera + microphone) + encode/publish. Off by default because
-# the video path pulls in a system ffmpeg (libav*) build dependency (audio is
-# pure-Rust via cpal). Enable with `cargo build -p moq-cli --features capture`
-# (the nix dev shell provides ffmpeg).
+# the video path links the system ffmpeg (libav*), both at build time and at
+# runtime (audio is pure-Rust via cpal). Enable with
+# `cargo build -p moq-cli --features capture` (the nix dev shell provides
+# ffmpeg). The released packages compile this in and depend on ffmpeg.
 capture = ["dep:moq-video", "dep:moq-audio", "moq-audio/capture"]
 
 [dependencies]
