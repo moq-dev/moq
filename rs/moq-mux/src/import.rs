@@ -193,6 +193,68 @@ impl Framed {
 		Ok(Self { decoder })
 	}
 
+	/// Create a new framed importer that publishes on an existing track.
+	///
+	/// Only single-track formats are supported. Container formats that may
+	/// create multiple MoQ tracks need an explicit track mapping API.
+	pub fn new_with_track<T: Buf + AsRef<[u8]>>(
+		track: moq_net::TrackProducer,
+		catalog: crate::catalog::Producer,
+		format: FramedFormat,
+		buf: &mut T,
+	) -> anyhow::Result<Self> {
+		use crate::codec::h264::Mode as H264Mode;
+		let decoder = match format {
+			FramedFormat::Avc1 => {
+				let mut decoder =
+					crate::codec::h264::Import::new_with_track(track, catalog).with_mode(H264Mode::Avc1)?;
+				decoder.initialize(buf)?;
+				FramedKind::H264(decoder)
+			}
+			FramedFormat::Avc3 => {
+				let mut decoder =
+					crate::codec::h264::Import::new_with_track(track, catalog).with_mode(H264Mode::Avc3)?;
+				decoder.initialize(buf)?;
+				FramedKind::H264(decoder)
+			}
+			FramedFormat::Hev1 => {
+				let mut decoder = crate::codec::h265::Import::new_with_track(track, catalog);
+				decoder.initialize(buf)?;
+				FramedKind::Hev1(decoder)
+			}
+			FramedFormat::Av01 => {
+				let mut decoder = crate::codec::av1::Import::new_with_track(track, catalog);
+				decoder.initialize(buf)?;
+				FramedKind::Av01(decoder)
+			}
+			FramedFormat::Vp8 => {
+				let mut decoder = crate::codec::vp8::Import::new_with_track(track, catalog);
+				decoder.initialize(buf)?;
+				FramedKind::Vp8(decoder)
+			}
+			FramedFormat::Vp9 => {
+				let mut decoder = crate::codec::vp9::Import::new_with_track(track, catalog);
+				decoder.initialize(buf)?;
+				FramedKind::Vp9(decoder)
+			}
+			FramedFormat::Aac => {
+				let config = crate::codec::aac::Config::parse(buf)?;
+				FramedKind::Aac(crate::codec::aac::Import::new_with_track(track, catalog, config)?)
+			}
+			FramedFormat::Opus => {
+				let config = crate::codec::opus::Config::parse(buf)?;
+				FramedKind::Opus(crate::codec::opus::Import::new_with_track(track, catalog, config)?)
+			}
+			FramedFormat::Fmp4 | FramedFormat::Mkv | FramedFormat::Ts => {
+				anyhow::bail!("{format} can publish multiple tracks")
+			}
+		};
+
+		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
+
+		Ok(Self { decoder })
+	}
+
 	/// Finish the decoder, flushing any buffered data.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		match self.decoder {
@@ -288,6 +350,130 @@ impl From<crate::codec::aac::Import> for Framed {
 		Self {
 			decoder: FramedKind::Aac(aac),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use bytes::Bytes;
+
+	use super::*;
+	use crate::container::Timestamp;
+
+	fn opus_head() -> Vec<u8> {
+		let mut head = Vec::with_capacity(19);
+		head.extend_from_slice(b"OpusHead");
+		head.push(1);
+		head.push(2);
+		head.extend_from_slice(&0u16.to_le_bytes());
+		head.extend_from_slice(&48000u32.to_le_bytes());
+		head.extend_from_slice(&0u16.to_le_bytes());
+		head.push(0);
+		head
+	}
+
+	fn h264_init() -> Vec<u8> {
+		let mut init = Vec::new();
+		init.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+		init.extend_from_slice(&[
+			0x67, 0x64, 0x00, 0x1f, 0xac, 0x24, 0x84, 0x01, 0x40, 0x16, 0xec, 0x04, 0x40, 0x00, 0x00, 0x03, 0x00, 0x40,
+			0x00, 0x00, 0x0c, 0x23, 0xc6, 0x0c, 0x92,
+		]);
+		init.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+		init.extend_from_slice(&[0x68, 0xee, 0x32, 0xc8, 0xb0]);
+		init
+	}
+
+	fn new_broadcast() -> (moq_net::BroadcastProducer, crate::catalog::Producer) {
+		let mut broadcast = moq_net::Broadcast::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		(broadcast, catalog)
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn fixed_track_opus_uses_existing_name_and_delivers_frames() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let track = broadcast.create_track(moq_net::Track::new("requested-audio")).unwrap();
+		let consumer = track.consume();
+		let init = opus_head();
+		let mut init = init.as_slice();
+
+		let mut framed = Framed::new_with_track(track, catalog.clone(), FramedFormat::Opus, &mut init).unwrap();
+
+		assert_eq!(framed.track().unwrap().name, "requested-audio");
+		let snapshot = catalog.snapshot();
+		assert!(snapshot.audio.renditions.contains_key("requested-audio"));
+		assert!(!snapshot.audio.renditions.contains_key("0.opus"));
+
+		let mut media = crate::container::Consumer::new(consumer, crate::catalog::hang::Container::Legacy);
+		let payload = b"opus payload".to_vec();
+		let mut frame = payload.as_slice();
+		framed
+			.decode_frame(&mut frame, Some(Timestamp::from_micros(1_000).unwrap()))
+			.unwrap();
+
+		let frame = tokio::time::timeout(Duration::from_secs(1), media.read())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.payload, payload);
+		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
+
+		framed.finish().unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn fixed_track_h264_uses_existing_name_in_catalog() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let track = broadcast.create_track(moq_net::Track::new("camera")).unwrap();
+		let init = h264_init();
+		let mut init = init.as_slice();
+
+		let framed = Framed::new_with_track(track, catalog.clone(), FramedFormat::Avc3, &mut init).unwrap();
+
+		assert_eq!(framed.track().unwrap().name, "camera");
+		let snapshot = catalog.snapshot();
+		let video = snapshot.video.renditions.get("camera").unwrap();
+		assert_eq!(video.coded_width, Some(1280));
+		assert_eq!(video.coded_height, Some(720));
+		assert!(!snapshot.video.renditions.contains_key("0.avc3"));
+	}
+
+	#[test]
+	fn fixed_track_rejects_multi_track_formats() {
+		for format in [FramedFormat::Fmp4, FramedFormat::Mkv, FramedFormat::Ts] {
+			let (mut broadcast, catalog) = new_broadcast();
+			let track = broadcast.create_track(moq_net::Track::new("media")).unwrap();
+			let mut init = Bytes::new();
+
+			let err = match Framed::new_with_track(track, catalog, format, &mut init) {
+				Ok(_) => panic!("multi-track format should be rejected"),
+				Err(err) => err,
+			};
+			assert!(err.to_string().contains("multiple tracks"));
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn fixed_track_reconfiguration_errors() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let track = broadcast.create_track(moq_net::Track::new("video")).unwrap();
+		let mut init = Bytes::new();
+		let mut framed = Framed::new_with_track(track, catalog, FramedFormat::Vp8, &mut init).unwrap();
+
+		let mut first = Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00]);
+		framed
+			.decode_frame(&mut first, Some(Timestamp::from_micros(0).unwrap()))
+			.unwrap();
+
+		let mut second = Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01]);
+		let err = framed
+			.decode_frame(&mut second, Some(Timestamp::from_micros(33_000).unwrap()))
+			.unwrap_err();
+		assert!(err.to_string().contains("fixed track cannot be reconfigured"));
 	}
 }
 
