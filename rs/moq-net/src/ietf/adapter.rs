@@ -365,6 +365,24 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 		}
 	}
 
+	/// Queue a GOAWAY on the shared control stream (draft-14-16; v17+ uses the SETUP stream).
+	pub fn send_goaway(&self, uri: &str) -> Result<(), crate::Error> {
+		let msg = ietf::GoAway {
+			new_session_uri: uri.into(),
+			timeout: 0,
+		};
+
+		// Control-stream framing is [type_id][size][body], matching `run_read`.
+		let mut raw = BytesMut::new();
+		ietf::GoAway::ID.encode(&mut raw, self.version)?;
+		msg.encode(&mut raw, self.version)?;
+
+		self.shared
+			.control_tx
+			.send(raw.freeze())
+			.map_err(|_| crate::Error::Closed)
+	}
+
 	/// Open a real (non-virtual) bidi stream, bypassing control stream multiplexing.
 	/// Used for v16 SubscribeNamespace which moved to its own bidi stream.
 	pub async fn open_native_bi(&self) -> Result<(AdapterSend<S>, AdapterRecv<S>), crate::Error> {

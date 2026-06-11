@@ -117,6 +117,55 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("server task failed");
 }
 
+/// `Session::drain` must actually deliver a GOAWAY to the peer. We use
+/// moq-transport-14, where receiving a GOAWAY closes the session, so the drain is
+/// observable end-to-end: the server fires GOAWAY and both sides see the session close.
+#[tokio::test]
+async fn goaway_drains_peer_moq_transport_14() {
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-transport-14".parse().unwrap()];
+
+	let mut server = server_config.init().expect("failed to init server");
+	let addr = server.local_addr().expect("failed to get local addr");
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.version = vec!["moq-transport-14".parse().unwrap()];
+	let client = client_config.init().expect("failed to init client");
+	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.ok().await?;
+
+		// Send GOAWAY, then confirm the peer actually leaves (the session closes).
+		let drain = session.drain();
+		drain.start(None);
+		tokio::time::timeout(TIMEOUT, drain.complete())
+			.await
+			.expect("server session did not drain after goaway");
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	// The client should observe the session closing once the GOAWAY arrives.
+	tokio::time::timeout(TIMEOUT, session.closed())
+		.await
+		.expect("client session did not close after goaway")
+		.ok();
+
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
 /// Lite05 publisher↔subscriber round-trip exercising the per-frame timestamp
 /// delta encoding, including negative deltas (B-frame ordering).
 async fn lite05_timestamp_roundtrip(scheme: &str) {

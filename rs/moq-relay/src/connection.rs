@@ -3,6 +3,7 @@ use crate::{Auth, AuthError, AuthParams, AuthToken, Cluster};
 use axum::http;
 use moq_native::Request;
 use moq_net::Path;
+use tokio::sync::watch;
 
 /// An error carrying the HTTP status to send when closing the request.
 ///
@@ -39,8 +40,11 @@ pub struct Connection {
 
 impl Connection {
 	/// Authenticates and serves this connection until it closes.
+	///
+	/// `shutdown` flips to `true` during a graceful shutdown: we drain the session
+	/// (GOAWAY) and keep serving until the peer actually leaves.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
-	pub async fn run(self) -> anyhow::Result<()> {
+	pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
 		let token = match self.authenticate().await {
 			Ok(token) => token,
 			Err(err) => {
@@ -104,8 +108,18 @@ impl Connection {
 
 		tracing::info!(version = %session.version(), transport, "negotiated");
 
-		// Wait until the session is closed.
-		session.closed().await?;
+		// Serve until the peer leaves. On a graceful shutdown, drain the session (send a
+		// GOAWAY) and keep serving so in-flight groups can finish before it migrates away.
+		tokio::select! {
+			res = session.closed() => res?,
+			// Drop the watch `Ref` guard (not `Send`) before the awaits in the body.
+			_ = async { let _ = shutdown.wait_for(|d| *d).await; } => {
+				tracing::info!("draining; sending goaway");
+				let drain = session.drain();
+				drain.start(None);
+				drain.complete().await;
+			}
+		}
 		Ok(())
 	}
 

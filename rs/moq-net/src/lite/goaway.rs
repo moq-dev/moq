@@ -7,7 +7,6 @@ use super::{Message, Version};
 /// Sent to gracefully shut down a session and optionally redirect to a new URI.
 ///
 /// Lite04+ only.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Goaway<'a> {
 	pub uri: Cow<'a, str>,
@@ -36,5 +35,42 @@ impl Message for Goaway<'_> {
 
 		self.uri.encode(w, version)?;
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use bytes::BytesMut;
+
+	fn roundtrip(uri: &str) {
+		let msg = Goaway { uri: uri.into() };
+
+		let mut buf = BytesMut::new();
+		msg.encode_msg(&mut buf, Version::Lite04).unwrap();
+
+		let mut bytes = bytes::Bytes::from(buf.to_vec());
+		let decoded = Goaway::decode_msg(&mut bytes, Version::Lite04).unwrap();
+
+		assert_eq!(decoded.uri, uri);
+	}
+
+	#[test]
+	fn roundtrip_with_uri() {
+		roundtrip("https://example.com/new");
+	}
+
+	#[test]
+	fn roundtrip_empty() {
+		roundtrip("");
+	}
+
+	#[test]
+	fn rejected_before_lite04() {
+		let msg = Goaway {
+			uri: "https://example.com/new".into(),
+		};
+		let mut buf = BytesMut::new();
+		assert!(msg.encode_msg(&mut buf, Version::Lite03).is_err());
 	}
 }

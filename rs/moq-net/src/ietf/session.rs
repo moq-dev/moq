@@ -2,6 +2,7 @@ use crate::{
 	Error, OriginConsumer, OriginProducer, StatsHandle,
 	coding::{Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
+	session::{GoawaySignal, goaway_triggered},
 	setup,
 };
 
@@ -20,6 +21,8 @@ pub fn start<S: web_transport_trait::Session>(
 	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
 	stats: StatsHandle,
 	version: Version,
+	// Fires when the session should send a GOAWAY and start draining.
+	goaway: GoawaySignal,
 ) -> Result<(), Error> {
 	web_async::spawn(async move {
 		let res = match version {
@@ -30,6 +33,24 @@ pub fn start<S: web_transport_trait::Session>(
 				let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 				let control = Control::new(request_id_max, client);
 				let adapter = ControlStreamAdapter::new(session.clone(), tx, control.clone(), version);
+
+				// GOAWAY rides the shared control stream for draft-14-16.
+				web_async::spawn({
+					let adapter = adapter.clone();
+					let session = session.clone();
+					async move {
+						tokio::select! {
+							_ = session.closed() => {}
+							uri = goaway_triggered(goaway) => {
+								if let Some(uri) = uri
+									&& let Err(err) = adapter.send_goaway(&uri)
+								{
+									tracing::debug!(%err, "failed to send goaway");
+								}
+							}
+						}
+					}
+				});
 
 				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), stats.clone(), version);
 				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, stats, version);
@@ -62,11 +83,11 @@ pub fn start<S: web_transport_trait::Session>(
 								}
 			}
 			_ => {
-				// Spawn SETUP sender (keeps stream alive for GOAWAY).
+				// Spawn SETUP sender, which also writes GOAWAY on that same uni stream.
 				web_async::spawn({
 					let session = session.clone();
 					async move {
-						if let Err(err) = run_setup(session, version).await {
+						if let Err(err) = run_setup(session, version, goaway).await {
 							tracing::warn!(%err, "setup send error");
 						}
 					}
@@ -113,8 +134,12 @@ pub fn start<S: web_transport_trait::Session>(
 	Ok(())
 }
 
-/// Send our SETUP on a uni stream and keep it alive for potential GOAWAY.
-async fn run_setup<S: web_transport_trait::Session>(session: S, version: Version) -> Result<(), Error> {
+/// Send our SETUP on a uni stream, then keep it alive to carry a GOAWAY.
+async fn run_setup<S: web_transport_trait::Session>(
+	session: S,
+	version: Version,
+	goaway: GoawaySignal,
+) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
 	let send = session.open_uni().await.map_err(Error::from_transport)?;
@@ -126,8 +151,22 @@ async fn run_setup<S: web_transport_trait::Session>(session: S, version: Version
 
 	writer.encode(&setup::Setup { parameters }).await?;
 
-	// Hold the writer alive until the session closes.
-	session.closed().await;
+	// GOAWAY frames use the inner IETF framing ([type][size][body]).
+	let mut writer = writer.with_version(version);
+
+	// Hold the stream open until the session closes, sending a GOAWAY first if asked.
+	tokio::select! {
+		_ = session.closed() => {}
+		uri = goaway_triggered(goaway) => {
+			if let Some(uri) = uri {
+				let msg = ietf::GoAway { new_session_uri: uri.as_ref().into(), timeout: 0 };
+				if let Err(err) = writer.encode_message(&msg).await {
+					tracing::debug!(%err, "failed to send goaway");
+				}
+				session.closed().await;
+			}
+		}
+	}
 	writer.finish().ok();
 
 	Ok(())

@@ -74,6 +74,10 @@ impl Server {
 		let consume = consumer.clone();
 		let consumer_view = consumer.consume();
 
+		// Per-session GOAWAY channel: `goaway` lives on the returned `Session`, `signal`
+		// drives the protocol task. Exactly one negotiated branch consumes each below.
+		let (goaway, signal) = crate::session::goaway_channel();
+
 		let (encoding, supported) = match session.protocol() {
 			Some(ALPN_18) => {
 				let v = self
@@ -91,10 +95,18 @@ impl Server {
 					consume.clone(),
 					self.stats.clone(),
 					ietf::Version::Draft18,
+					signal,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, publisher.clone(), consumer_view.clone()));
+				return Ok(Session::new(
+					session,
+					v,
+					None,
+					publisher.clone(),
+					consumer_view.clone(),
+					goaway,
+				));
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -112,10 +124,18 @@ impl Server {
 					consume.clone(),
 					self.stats.clone(),
 					ietf::Version::Draft17,
+					signal,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, publisher.clone(), consumer_view.clone()));
+				return Ok(Session::new(
+					session,
+					v,
+					None,
+					publisher.clone(),
+					consumer_view.clone(),
+					goaway,
+				));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -151,6 +171,7 @@ impl Server {
 					consume.clone(),
 					self.stats.clone(),
 					lite::Version::Lite05Wip,
+					signal,
 				)?;
 
 				return Ok(Session::new(
@@ -159,6 +180,7 @@ impl Server {
 					recv_bw,
 					publisher.clone(),
 					consumer_view.clone(),
+					goaway,
 				));
 			}
 			Some(ALPN_LITE_04) => {
@@ -173,6 +195,7 @@ impl Server {
 					consume.clone(),
 					self.stats.clone(),
 					lite::Version::Lite04,
+					signal,
 				)?;
 
 				return Ok(Session::new(
@@ -181,6 +204,7 @@ impl Server {
 					recv_bw,
 					publisher.clone(),
 					consumer_view.clone(),
+					goaway,
 				));
 			}
 			Some(ALPN_LITE_03) => {
@@ -196,6 +220,7 @@ impl Server {
 					consume.clone(),
 					self.stats.clone(),
 					lite::Version::Lite03,
+					signal,
 				)?;
 
 				return Ok(Session::new(
@@ -204,6 +229,7 @@ impl Server {
 					recv_bw,
 					publisher.clone(),
 					consumer_view.clone(),
+					goaway,
 				));
 			}
 			Some(ALPN_LITE) | None => {
@@ -252,6 +278,7 @@ impl Server {
 					consume.clone(),
 					self.stats.clone(),
 					v,
+					signal,
 				)?;
 				recv_bw
 			}
@@ -272,11 +299,19 @@ impl Server {
 					consume.clone(),
 					self.stats.clone(),
 					v,
+					signal,
 				)?;
 				None
 			}
 		};
 
-		Ok(Session::new(session, version, recv_bw, publisher, consumer_view))
+		Ok(Session::new(
+			session,
+			version,
+			recv_bw,
+			publisher,
+			consumer_view,
+			goaway,
+		))
 	}
 }

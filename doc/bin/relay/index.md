@@ -87,6 +87,22 @@ Or with the config path as the only argument:
 moq-relay relay.toml
 ```
 
+## Graceful Shutdown
+
+The relay drains connections on the first shutdown signal (`SIGINT` from Ctrl+C, or
+`SIGTERM` from `systemctl stop`):
+
+1. **First signal** stops accepting new connections and sends a `GOAWAY` to every
+   active session, asking clients to migrate elsewhere. The relay keeps serving so
+   in-flight groups can finish, and waits for all sessions to close on their own. On
+   systemd it also reports `STOPPING=1`.
+2. **Second signal** forces an immediate shutdown, closing every connection. (Under
+   systemd this is normally `SIGKILL` after `TimeoutStopSec`.)
+
+A client that honors `GOAWAY` reconnects to another relay (or re-resolves DNS in a
+load-balanced deployment), so draining lets you roll a node with no dropped media.
+Clients that ignore `GOAWAY` stay connected until the second signal.
+
 ## HTTP Endpoints
 
 The relay exposes HTTP/HTTPS endpoints for debugging, health checks, and late-join. See [HTTP](/bin/relay/http) for details.
