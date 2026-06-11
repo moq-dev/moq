@@ -344,15 +344,18 @@ impl<E: scte35::Catalog> Export<E> {
 		let mut tracks: Vec<&Track> = self.tracks.values().collect();
 		tracks.sort_by_key(|t| t.pid);
 
-		// SCTE-35 has no PTS, so it can't carry the PCR; require a media track.
-		let pcr_pid = tracks
-			.iter()
-			.find(|t| matches!(t.kind, Kind::Video(_)))
+		// SCTE-35 cues are stamped on the video clock (and SCTE carries no PTS for the PCR),
+		// so a cue program needs a video track; audio alone would leave the cues pinned to zero.
+		let has_scte = tracks.iter().any(|t| matches!(t.kind, Kind::Scte35));
+		let video = tracks.iter().find(|t| matches!(t.kind, Kind::Video(_)));
+		anyhow::ensure!(
+			!has_scte || video.is_some(),
+			"TS export of SCTE-35 requires a video track for the program clock"
+		);
+		let pcr_pid = video
 			.or_else(|| tracks.iter().find(|t| matches!(t.kind, Kind::Aac { .. })))
 			.map(|t| t.pid)
-			.context(
-				"TS export requires a video or audio track for the PCR; SCTE-35-only broadcasts are not supported",
-			)?;
+			.context("TS export requires a video or audio track for the PCR")?;
 
 		let es_info = tracks
 			.iter()

@@ -384,3 +384,47 @@ async fn export_scte35_roundtrip() {
 		"SCTE-35 section did not round-trip byte-for-byte"
 	);
 }
+
+// SCTE-35 cues are clocked on video, so the exporter rejects a cue program with no video
+// track rather than emitting cues pinned to zero.
+#[tokio::test(start_paused = true)]
+async fn scte35_without_video_export_is_rejected() {
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<scte35::Ext>::default())
+			.unwrap();
+
+	// A scte35 cue track and nothing else.
+	let scte = broadcast.unique_track(".scte35").unwrap();
+	let scte_name = scte.name.clone();
+	{
+		let mut cfg = scte35::Config::new();
+		cfg.container = Container::Legacy;
+		catalog.lock().scte35.renditions.insert(scte_name, cfg);
+	}
+	let mut producer = Producer::new(scte, HangContainer::Legacy);
+	producer
+		.write(Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			payload: Bytes::from_static(CUE),
+			keyframe: true,
+		})
+		.unwrap();
+	producer.finish_group().unwrap();
+	producer.finish().unwrap();
+
+	let mut exporter = Export::<scte35::Ext>::with_extension(consumer, crate::catalog::CatalogFormat::Hang).unwrap();
+	let err = loop {
+		match tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
+			Ok(Ok(Some(_))) => continue,
+			Ok(Ok(None)) => panic!("export completed; a cue program without video must be rejected"),
+			Ok(Err(e)) => break e,
+			Err(_) => panic!("export neither errored nor completed"),
+		}
+	};
+	assert!(
+		err.to_string().contains("requires a video track"),
+		"expected a video-required rejection, got: {err}"
+	);
+}
