@@ -4,6 +4,7 @@
 // overlay chrome stays visible. Safari needs webkit-prefixed methods, and iPhone
 // has no element fullscreen API at all: there we fall back to a CSS pseudo-fullscreen
 // that pins the player to the viewport.
+import type { Effect } from "@moq/signals";
 
 type WebkitDocument = Document & {
 	webkitFullscreenElement?: Element | null;
@@ -22,12 +23,16 @@ export interface Fullscreen {
 	onChange(fn: () => void): () => void;
 }
 
-export function createFullscreen(player: HTMLElement): Fullscreen {
+export function createFullscreen(parent: Effect, player: HTMLElement): Fullscreen {
 	const doc = document as WebkitDocument;
 	const listeners = new Set<() => void>();
 	const notify = () => {
 		for (const fn of listeners) fn();
 	};
+
+	// Real fullscreen changes (incl. Esc / browser chrome) flow through notify too.
+	parent.event(document, "fullscreenchange", notify);
+	parent.event(document, "webkitfullscreenchange", notify);
 
 	const realActive = () => !!(document.fullscreenElement || doc.webkitFullscreenElement);
 	const pseudoActive = () => player.classList.contains(PSEUDO_CLASS);
@@ -71,13 +76,7 @@ export function createFullscreen(player: HTMLElement): Fullscreen {
 
 	const onChange = (fn: () => void): (() => void) => {
 		listeners.add(fn);
-		document.addEventListener("fullscreenchange", fn);
-		document.addEventListener("webkitfullscreenchange", fn);
-		return () => {
-			listeners.delete(fn);
-			document.removeEventListener("fullscreenchange", fn);
-			document.removeEventListener("webkitfullscreenchange", fn);
-		};
+		return () => listeners.delete(fn);
 	};
 
 	return { active, toggle, onChange };

@@ -37,6 +37,7 @@ function rate(prev: { bytes: number; when: number }, bytes: number, now: number)
 	const elapsed = now - prev.when;
 	const delta = bytes - prev.bytes;
 	if (delta <= 0 || elapsed <= 0) return undefined;
+	// bytes → bits (*8); elapsed is ms, so *1000/elapsed gives a per-second rate.
 	return delta * 8 * (1000 / elapsed);
 }
 
@@ -46,7 +47,7 @@ function hasRenditions(catalog: { renditions?: Record<string, unknown> } | undef
 
 interface TrackOptions {
 	// Hide the card entirely when this catalog has no renditions.
-	catalog: Getter<unknown>;
+	catalog: Getter<{ renditions?: Record<string, unknown> } | undefined>;
 	// Show the status pill when this is true (e.g. muted / paused).
 	flag: Getter<boolean>;
 	label: string;
@@ -56,7 +57,7 @@ interface TrackOptions {
 function track(parent: Effect, card: { el: HTMLElement; status: HTMLElement }, opts: TrackOptions) {
 	card.status.textContent = opts.label;
 	parent.run((effect) => {
-		const present = hasRenditions(effect.get(opts.catalog) as { renditions?: Record<string, unknown> });
+		const present = hasRenditions(effect.get(opts.catalog));
 		card.el.style.display = present ? "" : "none";
 		card.status.style.display = present && effect.get(opts.flag) ? "" : "none";
 	});

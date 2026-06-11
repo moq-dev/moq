@@ -30,27 +30,35 @@ export function settingsPanel(parent: Effect, watch: MoqWatch, state: UiState): 
 	parent.event(closeBtn, "click", () => state.panel.set(false));
 	header.append(titleWrap, closeBtn);
 
-	// Tab strip.
+	// Tab strip (ARIA tablist). IDs are scoped to this shadow root.
+	const PANEL_ID = "panel-body";
 	const strip = DOM.create("div", { className: "panel-tabs" });
+	strip.setAttribute("role", "tablist");
 	const tabButtons = TABS.map((tab) => {
-		const btn = DOM.create("button", { className: "panel-tab", type: "button" });
+		const btn = DOM.create("button", { className: "panel-tab", type: "button", id: `tab-${tab.id}` });
+		btn.setAttribute("role", "tab");
+		btn.setAttribute("aria-controls", PANEL_ID);
 		btn.append(icon(tab.svg), DOM.create("span", {}, tab.label));
 		parent.event(btn, "click", () => state.tab.set(tab.id));
 		strip.appendChild(btn);
 		return { tab, btn };
 	});
 
-	parent.run((effect) => {
-		const active = effect.get(state.tab);
-		for (const { tab, btn } of tabButtons) {
-			btn.classList.toggle("panel-tab--active", tab.id === active);
-			btn.setAttribute("aria-selected", String(tab.id === active));
-		}
-	});
-
 	// Body: mount only the active tab while the panel is open so hidden tabs
 	// stop polling and animating.
-	const body = DOM.create("div", { className: "panel-body" });
+	const body = DOM.create("div", { className: "panel-body", id: PANEL_ID });
+	body.setAttribute("role", "tabpanel");
+
+	parent.run((effect) => {
+		const active = effect.get(state.tab);
+		body.setAttribute("aria-labelledby", `tab-${active}`);
+		for (const { tab, btn } of tabButtons) {
+			const selected = tab.id === active;
+			btn.classList.toggle("panel-tab--active", selected);
+			btn.setAttribute("aria-selected", String(selected));
+			btn.tabIndex = selected ? 0 : -1;
+		}
+	});
 	parent.run((effect) => {
 		const open = effect.get(state.panel);
 		if (!open) return;

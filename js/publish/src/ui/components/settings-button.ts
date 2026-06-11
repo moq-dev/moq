@@ -3,6 +3,7 @@ import { settings } from "../icons";
 import type { UiState } from "../state";
 import { controlButton } from "./button";
 
+/** Gear button that toggles the settings panel open/closed. */
 export function settingsButton(parent: Effect, state: UiState): HTMLElement {
 	const button = controlButton(settings, "Settings");
 

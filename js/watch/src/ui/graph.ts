@@ -21,12 +21,15 @@ const DEFAULT_SAMPLES = 120;
 
 /**
  * A rolling time-series sparkline. Samples scroll right-to-left and the area
- * under the line is filled with a fading gradient. Redraws on the animation
- * loop so it stays smooth without re-pushing.
+ * under the line is filled with a fading gradient. Redraws are event-driven:
+ * each `push` and any canvas resize triggers a repaint (no animation loop).
  */
 export function graph(parent: Effect, title: string, opts?: GraphOptions): Graph {
 	const color = opts?.color ?? "#4ade80";
-	const capacity = opts?.samples ?? DEFAULT_SAMPLES;
+	// Clamp to a sane positive integer so a bad `samples` can't wedge the trim loop.
+	const capacity = Number.isFinite(opts?.samples)
+		? Math.max(1, Math.floor(opts?.samples as number))
+		: DEFAULT_SAMPLES;
 
 	const el = document.createElement("div");
 	el.className = "graph";

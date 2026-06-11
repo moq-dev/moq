@@ -5,6 +5,7 @@
 // has no element fullscreen API at all: there we fall back to the native <video>
 // fullscreen if an MSE element exists, otherwise a CSS pseudo-fullscreen that
 // pins the player to the viewport (the only option for the canvas backend).
+import type { Effect } from "@moq/signals";
 
 type WebkitDocument = Document & {
 	webkitFullscreenElement?: Element | null;
@@ -33,15 +34,24 @@ export interface Fullscreen {
 }
 
 /**
+ * @param parent Effect that owns the document listeners (auto-removed on cleanup).
  * @param player The shadow container to maximize.
  * @param media Resolves the current <canvas>/<video>, used for the iOS path.
  */
-export function createFullscreen(player: HTMLElement, media: () => HTMLElement | undefined): Fullscreen {
+export function createFullscreen(
+	parent: Effect,
+	player: HTMLElement,
+	media: () => HTMLElement | undefined,
+): Fullscreen {
 	const doc = document as WebkitDocument;
 	const listeners = new Set<() => void>();
 	const notify = () => {
 		for (const fn of listeners) fn();
 	};
+
+	// Real fullscreen changes (incl. Esc / browser chrome) flow through notify too.
+	parent.event(document, "fullscreenchange", notify);
+	parent.event(document, "webkitfullscreenchange", notify);
 
 	const realActive = () => !!(document.fullscreenElement || doc.webkitFullscreenElement);
 	const pseudoActive = () => player.classList.contains(PSEUDO_CLASS);
@@ -94,13 +104,7 @@ export function createFullscreen(player: HTMLElement, media: () => HTMLElement |
 
 	const onChange = (fn: () => void): (() => void) => {
 		listeners.add(fn);
-		document.addEventListener("fullscreenchange", fn);
-		document.addEventListener("webkitfullscreenchange", fn);
-		return () => {
-			listeners.delete(fn);
-			document.removeEventListener("fullscreenchange", fn);
-			document.removeEventListener("webkitfullscreenchange", fn);
-		};
+		return () => listeners.delete(fn);
 	};
 
 	return { active, toggle, onChange };

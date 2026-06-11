@@ -9,6 +9,7 @@ function volumeIcon(volumePct: number, muted: boolean): string {
 	return volumeHigh;
 }
 
+/** Volume control with a mute toggle; the slider expands on hover and the icon goes red when muted. */
 export function volumeSlider(parent: Effect, watch: MoqWatch): HTMLElement {
 	const wrapper = document.createElement("div");
 	wrapper.className = "volume flex-align-center";

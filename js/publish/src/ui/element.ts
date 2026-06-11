@@ -100,37 +100,29 @@ export default class MoqPublishUi extends HTMLElement {
 	// Show the chrome on activity, auto-hide while previewing once the pointer
 	// settles. Stays pinned while idle (no source) or with the panel open.
 	#wireChrome(effect: Effect, publish: MoqPublish, state: UiState, player: HTMLElement) {
-		let hideTimer: ReturnType<typeof setTimeout> | undefined;
-		const clearHide = () => {
-			if (hideTimer !== undefined) {
-				clearTimeout(hideTimer);
-				hideTimer = undefined;
-			}
-		};
-		effect.cleanup(clearHide);
+		// Bump on any pointer/focus activity to re-arm the auto-hide.
+		const activity = new Signal(0);
+		const bump = () => activity.update((n) => n + 1);
+		effect.event(this, "pointermove", bump);
+		effect.event(this, "pointerdown", bump);
+		effect.event(this, "focusin", bump);
 
 		const pinned = () => state.panel.peek() || publish.state.source.peek() === undefined;
 
-		const show = () => {
+		// Reveal on activity and reschedule the hide timer. Reruns when pinned
+		// state changes too, so leaving pinned re-arms the auto-hide.
+		// effect.timer auto-clears on rerun.
+		effect.run((e) => {
+			const isPinned = e.get(state.panel) || e.get(publish.state.source) === undefined;
+			e.get(activity);
 			state.chrome.set(true);
-			clearHide();
-			if (!pinned()) hideTimer = setTimeout(() => state.chrome.set(false), HIDE_MS);
-		};
-
-		effect.event(this, "pointermove", show);
-		effect.event(this, "pointerdown", show);
-		effect.event(this, "focusin", show);
-		effect.event(this, "pointerleave", () => {
-			if (pinned()) return;
-			clearHide();
-			state.chrome.set(false);
+			if (isPinned) return;
+			e.timer(() => state.chrome.set(false), HIDE_MS);
 		});
 
-		effect.run((e) => {
-			if (e.get(state.panel) || e.get(publish.state.source) === undefined) {
-				state.chrome.set(true);
-				clearHide();
-			}
+		effect.event(this, "pointerleave", () => {
+			if (pinned()) return;
+			state.chrome.set(false);
 		});
 
 		effect.run((e) => {

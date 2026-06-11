@@ -30,6 +30,7 @@
  * is unavailable; it pins the player to the viewport via fixed positioning.
  */
 .player:fullscreen,
+/* stylelint-disable-next-line selector-no-vendor-prefix -- Safari/iPadOS fallback */
 .player:-webkit-full-screen,
 .player--pseudo-fullscreen {
 	display: flex;
@@ -47,6 +48,7 @@
 }
 
 .player:fullscreen ::slotted(moq-watch),
+/* stylelint-disable-next-line selector-no-vendor-prefix -- Safari/iPadOS fallback */
 .player:-webkit-full-screen ::slotted(moq-watch),
 .player--pseudo-fullscreen ::slotted(moq-watch) {
 	max-height: 100%;
