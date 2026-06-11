@@ -154,11 +154,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Each Apple arch builds natively on its own runner (macos-13 is the
-          # last Intel image; macos-latest is Apple Silicon) so capture links a
+          # Each Apple arch builds natively on its own runner (macos-15-intel is
+          # the Intel image; macos-latest is Apple Silicon) so capture links a
           # matching-arch Homebrew ffmpeg. No cross-compile or Rosetta needed.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-intel
           - target: aarch64-apple-darwin
             os: macos-latest
 
@@ -190,7 +190,8 @@ jobs:
       - name: Build (native, dynamic ffmpeg)
         shell: bash
         run: |
-          export PKG_CONFIG_PATH="$(brew --prefix ffmpeg)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          PKG_CONFIG_PATH="$(brew --prefix ffmpeg)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          export PKG_CONFIG_PATH
           cargo build --release -p moq-cli --features capture
           install -m0755 target/release/moq-cli moq
 
