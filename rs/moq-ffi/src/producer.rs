@@ -41,14 +41,11 @@ struct DynamicProducer {
 }
 
 impl DynamicProducer {
-	async fn requested_track(&mut self) -> Result<Option<Arc<MoqTrackProducer>>, MoqError> {
-		match self.inner.requested_track().await {
-			Ok(track) => Ok(Some(Arc::new(MoqTrackProducer {
-				inner: std::sync::Mutex::new(Some(track)),
-			}))),
-			Err(moq_net::Error::Closed | moq_net::Error::Dropped) => Ok(None),
-			Err(err) => Err(err.into()),
-		}
+	async fn requested_track(&mut self) -> Result<Arc<MoqTrackProducer>, MoqError> {
+		let track = self.inner.requested_track().await?;
+		Ok(Arc::new(MoqTrackProducer {
+			inner: std::sync::Mutex::new(Some(track)),
+		}))
 	}
 }
 
@@ -203,8 +200,8 @@ impl MoqBroadcastProducer {
 impl MoqBroadcastDynamic {
 	/// Wait for the next subscriber-requested track.
 	///
-	/// Returns `None` once the broadcast is closed.
-	pub async fn requested_track(&self) -> Result<Option<Arc<MoqTrackProducer>>, MoqError> {
+	/// Returns an error once the broadcast is closed or aborted.
+	pub async fn requested_track(&self) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		self.task
 			.run(|mut state| async move { state.requested_track().await })
 			.await
@@ -282,6 +279,16 @@ impl MoqTrackProducer {
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
 		track.write_frame(payload)?;
+		Ok(())
+	}
+
+	/// Abort this track with an application error code.
+	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
+		let mut guard = self.inner.lock().unwrap();
+		let mut track = guard.take().ok_or_else(|| MoqError::Closed)?;
+		track.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}
 

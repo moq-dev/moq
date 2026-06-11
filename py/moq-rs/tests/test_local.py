@@ -246,7 +246,6 @@ async def test_dynamic_track_request():
     track_consumer = consumer.subscribe_track("events")
 
     track = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
-    assert track is not None
     assert track.name == "events"
 
     payload = b"hello dynamic track"

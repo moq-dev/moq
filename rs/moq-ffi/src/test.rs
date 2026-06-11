@@ -2,6 +2,7 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
+use crate::error::MoqError;
 
 use std::time::Duration;
 
@@ -80,8 +81,7 @@ async fn dynamic_track_request() {
 	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
 		.await
 		.expect("timed out waiting for requested track")
-		.unwrap()
-		.expect("expected a requested track");
+		.unwrap();
 
 	assert_eq!(track.name().unwrap(), "events");
 
@@ -96,6 +96,22 @@ async fn dynamic_track_request() {
 
 	assert_eq!(frame, payload);
 	track.finish().unwrap();
+}
+
+#[tokio::test]
+async fn dynamic_track_request_can_abort() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let _track_consumer = consumer.subscribe_track("unknown".into()).unwrap();
+
+	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for requested track")
+		.unwrap();
+
+	track.abort(404).unwrap();
+	assert!(matches!(track.name(), Err(MoqError::Closed)));
 }
 
 #[tokio::test]

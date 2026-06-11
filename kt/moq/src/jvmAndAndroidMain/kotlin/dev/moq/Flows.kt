@@ -82,7 +82,7 @@ fun MoqTrackConsumer.groupsAsArrived(): Flow<MoqGroupConsumer> = flow {
 fun MoqBroadcastDynamic.requestedTracks(): Flow<MoqTrackProducer> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
-        emit(requestedTrack() ?: break)
+        emit(requestedTrack())
     }
 }.onCompletion { cause ->
     if (cause is CancellationException) cancel()

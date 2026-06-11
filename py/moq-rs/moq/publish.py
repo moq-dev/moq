@@ -126,6 +126,10 @@ class TrackProducer:
 
         return TrackConsumer(self._inner.consume())
 
+    def abort(self, error_code: int) -> None:
+        """Abort this track with an application error code."""
+        self._inner.abort(error_code)
+
     def finish(self) -> None:
         self._inner.finish()
 
@@ -164,16 +168,10 @@ class BroadcastDynamic:
         return self
 
     async def __anext__(self) -> TrackProducer:
-        track = await self.requested_track()
-        if track is None:
-            raise StopAsyncIteration
-        return track
+        return await self.requested_track()
 
-    async def requested_track(self) -> TrackProducer | None:
-        track = await self._inner.requested_track()
-        if track is None:
-            return None
-        return TrackProducer(track)
+    async def requested_track(self) -> TrackProducer:
+        return TrackProducer(await self._inner.requested_track())
 
     def cancel(self) -> None:
         self._inner.cancel()

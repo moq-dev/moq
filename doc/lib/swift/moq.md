@@ -103,6 +103,8 @@ for try await track in dynamic.requestedTracks {
     if try track.name() == "alerts" {
         try track.writeFrame(payload: Data("ready".utf8))
         try track.finish()
+    } else {
+        try track.abort(errorCode: 404)
     }
 }
 ```

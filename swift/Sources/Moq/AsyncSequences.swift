@@ -116,16 +116,16 @@ extension MoqTrackConsumer {
 }
 
 extension MoqBroadcastDynamic {
-    /// Stream of tracks requested by subscribers. Terminates when the broadcast closes.
+    /// Stream of tracks requested by subscribers.
     public var requestedTracks: AsyncThrowingStream<MoqTrackProducer, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    while let track = try await self.requestedTrack() {
+                    while true {
+                        let track = try await self.requestedTrack()
                         try Task.checkCancellation()
                         continuation.yield(track)
                     }
-                    continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
                 }

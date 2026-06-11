@@ -111,6 +111,8 @@ dynamic.requestedTracks().collect { track ->
     if (track.name() == "alerts") {
         track.writeFrame("ready".encodeToByteArray())
         track.finish()
+    } else {
+        track.abort(404)
     }
 }
 ```

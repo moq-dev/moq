@@ -118,7 +118,7 @@ client = moq.Client(
   - `.publish_media(format, init) → MediaProducer`
   - `.finish()`
 - **`BroadcastDynamic`**. Async source of tracks requested by subscribers.
-  - `await .requested_track() → TrackProducer | None`
+  - `await .requested_track() → TrackProducer`
   - Async iterator yielding `TrackProducer`
 - **`MediaProducer`**. Write frames to a track.
   - `.write_frame(payload, timestamp_us)`
