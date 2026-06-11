@@ -15,6 +15,14 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 [lib]
 doctest = false
 
+[features]
+# Statically link the libav* libraries instead of the system's shared
+# ffmpeg. Requires static archives (.a) plus their .pc files on the
+# pkg-config path; release builds point this at a Nix-built static ffmpeg
+# so the shipped CLI has no runtime ffmpeg dependency. Plain dev builds
+# leave it off and link the dynamic system ffmpeg (the Nix dev shell's).
+static = ["ffmpeg-next/static"]
+
 [dependencies]
 anyhow = "1"
 bytes = "1"

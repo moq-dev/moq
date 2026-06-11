@@ -19,6 +19,106 @@ let
   };
   craneLib = (crane.mkLib final).overrideToolchain rustToolchain;
 
+  # ffmpeg for the moq-cli `capture` feature (camera + H.264 encode), built so
+  # we can statically link it: the shipped CLI then has no runtime ffmpeg
+  # dependency. We disable nixpkgs' dependency presets and re-enable only the
+  # libav* libraries ffmpeg-next links (codec/format/filter/device plus
+  # swscale/swresample). v4l2 covers Linux camera capture and the v4l2m2m
+  # hardware encoder; videotoolbox is auto-detected on darwin; both are
+  # link-dep-free. Everything else (x265/aom/dav1d/gnutls/bzip2/...) stays off,
+  # which keeps the static link closure small and avoids dragging in libraries
+  # that have no static archive on the link path.
+  #
+  # `gpl` adds libx264, the software H.264 encoder, which is GPL. The shipped
+  # binary keeps it OFF so the distributed artifact stays LGPL (the hardware
+  # encoders h264_videotoolbox / h264_v4l2m2m are LGPL ffmpeg built-ins, as are
+  # the mjpeg/rawvideo decoders the camera input needs). The dev shell turns it
+  # ON: that ffmpeg is a local build tool, never distributed, and the test
+  # suite and `demo/pub` recipes both want a software H.264 encoder.
+  #
+  # `withStatic` adds the .a archives; we leave `withShared` at its default
+  # (on, except under pkgsStatic) so the same package also serves plain dynamic
+  # dev builds (`cargo build --features capture`, without `moq-video/static`)
+  # and the `ffmpeg` CLI the demo recipes use.
+  moqFfmpegFor =
+    {
+      pkgs,
+      gpl ? false,
+    }:
+    (pkgs.ffmpeg.override (
+      {
+        withHeadlessDeps = false;
+        withSmallDeps = false;
+        withFullDeps = false;
+        buildAvcodec = true;
+        buildAvformat = true;
+        buildAvutil = true;
+        buildAvdevice = true;
+        buildAvfilter = true;
+        buildSwscale = true;
+        buildSwresample = true;
+        buildFfmpeg = true;
+        buildFfprobe = true;
+        withV4l2 = pkgs.stdenv.hostPlatform.isLinux;
+        withZlib = true;
+        withStatic = true;
+        withGPL = gpl;
+        withX264 = gpl;
+      }
+      // final.lib.optionalAttrs gpl { x264 = moqX264For pkgs; }
+    )).overrideAttrs
+      (_: {
+        # ffmpeg's bundled tests (e.g. libavutil/tests/pixelutils.c) miss a
+        # <string.h> include and fail under darwin's strict clang, which only
+        # treats the implicit-declaration as a warning for GNU cc. We only need
+        # the libraries, so skip the self-test build.
+        doCheck = false;
+      });
+
+  # nixpkgs' x264 hardcodes the `install-lib-shared` make target and declares a
+  # separate `lib` output; with `enableShared = false` it builds only libx264.a
+  # and the `lib` output comes up empty, which nix rejects. Install the static
+  # lib instead and collapse to one output so the .a / .pc / header land where
+  # pkg-config and the static ffmpeg link can find them. Only the dev-shell
+  # (GPL) ffmpeg references it.
+  moqX264For =
+    pkgs:
+    (pkgs.x264.override { enableShared = false; }).overrideAttrs (_: {
+      outputs = [ "out" ];
+      makeFlags = [ "install-lib-static" ];
+    });
+
+  # The dev shell links this (with libx264) so `just rs ci`'s `--all-features`
+  # test and the demo recipes have a software H.264 encoder; it is never
+  # distributed. The shipped builds use the LGPL variant via captureBuildArgs.
+  moqFfmpeg = moqFfmpegFor {
+    pkgs = final;
+    gpl = true;
+  };
+  moqX264 = moqX264For final;
+
+  # Build inputs that let ffmpeg-sys-next find and statically link the libav*
+  # archives (pkg-config + bindgen's clang). LGPL (no libx264): the shipped
+  # binary encodes with the platform hardware encoder only.
+  captureBuildArgs =
+    pkgs:
+    {
+      nativeBuildInputs = with final; [
+        pkg-config
+        clang
+      ];
+      buildInputs = [ (moqFfmpegFor { inherit pkgs; }) ];
+      LIBCLANG_PATH = "${final.libclang.lib}/lib";
+    }
+    // final.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+      # ffmpeg-sys-next's static-macos path hardcodes -framework QTKit (and other
+      # legacy frameworks) into the link line. QTKit was removed from macOS, so
+      # the binary links against the SDK stub but dyld aborts at runtime ("no
+      # such file"). ffmpeg references no QTKit symbols, so -dead_strip_dylibs
+      # drops the load commands for frameworks nothing actually uses.
+      RUSTFLAGS = "-C link-arg=-Wl,-dead_strip_dylibs";
+    };
+
   # Helper function to get crate info from Cargo.toml
   crateInfo = cargoTomlPath: craneLib.crateNameFromCargoToml { cargoToml = cargoTomlPath; };
 
@@ -48,10 +148,17 @@ let
     hardeningDisable = [ "fortify" ];
   };
 
-  moqCliArgs = crateInfo ../rs/moq-cli/Cargo.toml // {
-    src = craneLib.cleanCargoSource ../.;
-    cargoExtraArgs = "-p moq-cli";
-  };
+  # Capture is on so the released CLI can publish a webcam out of the box.
+  # `moq-video/static` statically links ffmpeg (see moqFfmpeg) so there's no
+  # runtime libav* dependency. On macOS the cross x86_64 output below swaps in
+  # an x86_64 ffmpeg; the Linux release uses the fully-static moq-cli-static.
+  moqCliArgs =
+    crateInfo ../rs/moq-cli/Cargo.toml
+    // captureBuildArgs final
+    // {
+      src = craneLib.cleanCargoSource ../.;
+      cargoExtraArgs = "-p moq-cli --features capture,moq-video/static";
+    };
 
   moqTokenCliArgs = crateInfo ../rs/moq-token-cli/Cargo.toml // {
     src = craneLib.cleanCargoSource ../.;
@@ -198,8 +305,44 @@ in
   moq-relay = craneLib.buildPackage moqRelayArgs;
   moq-relay-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqRelayArgs);
 
+  # Exposed so flake.nix's dev shell links the same static-capable ffmpeg the
+  # package builds use (so `just rs ci`'s `--all-features` test can statically
+  # link without a second ffmpeg on the pkg-config path).
+  inherit moqFfmpeg moqX264;
+
   moq-cli = craneLib.buildPackage moqCliArgs;
-  moq-cli-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqCliArgs);
+  # The cross build links an x86_64 ffmpeg (built natively by pkgsX86Darwin,
+  # like the moq-gst cross plugin) so capture's static link resolves x86_64
+  # archives. crossX86Darwin's arg merge keeps captureBuildArgs' nativeBuildInputs.
+  moq-cli-x86_64-apple-darwin = craneLib.buildPackage (
+    crossX86Darwin (moqCliArgs // { buildInputs = (captureBuildArgs pkgsX86Darwin).buildInputs; })
+  );
+
+  # Fully static musl build for the portable Linux release artifacts. Under
+  # pkgsStatic everything (ffmpeg, x264, libc -> musl) links static by default,
+  # so the binary has zero dynamic dependencies and runs on any Linux
+  # regardless of glibc version. This replaces the old cargo-zigbuild glibc-2.34
+  # pin: a static binary is strictly more portable. Linux-only (see flake.nix);
+  # darwin can't fully static link.
+  moq-cli-static =
+    let
+      staticPkgs = final.pkgsStatic;
+      muslTarget = staticPkgs.stdenv.hostPlatform.rust.rustcTarget;
+      craneLibStatic = (crane.mkLib staticPkgs).overrideToolchain (
+        final.rust-bin.stable.latest.default.override { targets = [ muslTarget ]; }
+      );
+    in
+    craneLibStatic.buildPackage (
+      crateInfo ../rs/moq-cli/Cargo.toml
+      // captureBuildArgs staticPkgs
+      // {
+        src = craneLib.cleanCargoSource ../.;
+        cargoExtraArgs = "-p moq-cli --features capture,moq-video/static";
+        CARGO_BUILD_TARGET = muslTarget;
+        # Cross-target test binaries can't run in the build sandbox.
+        doCheck = false;
+      }
+    );
 
   moq-token-cli = craneLib.buildPackage moqTokenCliArgs;
   moq-token-cli-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqTokenCliArgs);

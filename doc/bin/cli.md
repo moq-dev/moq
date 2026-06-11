@@ -64,11 +64,19 @@ ffmpeg -i input.mp4 -f mpegts - | moq-cli publish - https://relay.example.com/an
 
 The `capture` subcommand captures and encodes from local devices directly, no
 external FFmpeg process required. It publishes the camera as an H.264 video
-track and the microphone as an Opus audio track on the same broadcast. It is
-gated behind the `capture` feature, whose video path pulls in a system FFmpeg
-(libav\*) build dependency (audio is pure-Rust via cpal):
+track and the microphone as an Opus audio track on the same broadcast.
 
-Build (or run) with the feature enabled:
+The prebuilt binaries (releases, Homebrew, `.deb`/`.rpm`) ship with capture
+enabled and FFmpeg statically linked, so there's no separate FFmpeg install to
+manage. Their FFmpeg is LGPL: it encodes with a platform **hardware** encoder
+only (`h264_videotoolbox` on macOS, `h264_v4l2m2m` on Linux) and omits the GPL
+software encoder (libx264). On a machine without a supported hardware H.264
+encoder, use a source build with `--features capture` against a full FFmpeg
+(see below) to get the libx264 software fallback.
+
+From source, capture is gated behind the `capture` feature (off by default so
+plain builds don't pull the FFmpeg/libav\* build dependency; audio is pure-Rust
+via cpal). Build (or run) with the feature enabled:
 
 ```bash
 cargo build --release -p moq-cli --features capture
@@ -93,6 +101,12 @@ dshow on Windows) and picks a hardware encoder (`h264_videotoolbox` /
 `h264_nvenc` / `h264_vaapi`) when one is present, falling back to software
 (`libx264`); force either with `--hardware` / `--software`. Audio capture uses
 cpal (CoreAudio / WASAPI / ALSA) and encodes Opus.
+
+The prebuilt binaries' static FFmpeg includes only the hardware encoders
+`h264_videotoolbox` (macOS) and `h264_v4l2m2m` (Linux); `--software` (libx264)
+needs a source build against a full FFmpeg. VA-API / NVENC are also omitted
+(they dlopen system driver libraries at runtime, which a static binary
+can't rely on); build from source against a full FFmpeg to use them.
 
 Alternatively, pipe an external FFmpeg process as MPEG-TS:
 

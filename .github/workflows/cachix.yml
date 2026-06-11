@@ -5,7 +5,9 @@ on:
     tags:
       - 'moq-relay-v*'
       - 'moq-token-cli-v*'
-      - 'moq-cli-v*'
+      # moq-cli caches itself in its own release workflow (moq-cli.yml) so the
+      # expensive static-ffmpeg compile runs once there instead of racing a
+      # second build here. See the cachix steps in moq-cli.yml.
       - 'moq-boy-v*'
       - 'libmoq-v*'
       - 'moq-gst-v*'

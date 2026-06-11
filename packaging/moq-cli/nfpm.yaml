@@ -23,13 +23,9 @@ contents:
     file_info:
       mode: 0755
 
-overrides:
-  deb:
-    depends:
-      - libc6 (>= 2.34)
-  rpm:
-    depends:
-      - glibc >= 2.34
+# The binary is a fully-static musl build (no glibc / libc6 dependency), so
+# there are no runtime package dependencies to declare. It installs and runs
+# on any Linux regardless of libc flavor or version.
 
 deb:
   fields:

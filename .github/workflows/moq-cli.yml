@@ -21,6 +21,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The target triple is just the asset label (Homebrew / apt / rpm
+          # expect these names). The binary itself is a fully-static musl build
+          # (nix .#moq-cli-static), so it has no glibc dependency and runs on
+          # any Linux. Each arch builds natively on its own runner.
           - target: x86_64-unknown-linux-gnu
             runs-on: ubuntu-22.04
             deb-arch: amd64
@@ -35,11 +39,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: ${{ matrix.target }}
-
       - name: Parse version
         id: parse
         shell: bash
@@ -48,23 +47,30 @@ jobs:
       - name: Set up packaging tools
         uses: ./.github/actions/setup-packaging
 
-      - name: Build (release, glibc 2.34)
-        shell: bash
-        # Pin to glibc 2.34 so one binary covers Ubuntu 22.04+ (.deb)
-        # and AlmaLinux/RHEL/Rocky 9+ (.rpm).
-        run: cargo zigbuild --release --target ${{ matrix.target }}.2.34 -p moq-cli
+      # Adds kixelated as a substituter (so the build pulls cached deps) and
+      # authenticates the push below.
+      - uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        with:
+          name: kixelated
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      - name: Rename binary
+      - name: Build (static, musl)
         shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
+        # Fully-static musl build with capture (camera + H.264) compiled in and
+        # ffmpeg statically linked, so the shipped binary has zero dynamic
+        # dependencies. Replaces the old cargo-zigbuild glibc-2.34 pin. The
+        # ffmpeg compile is expensive, so push the result to Cachix here (this
+        # is now the only place moq-cli is cached; see cachix.yml) so re-runs
+        # and `nix run` consumers get a hit instead of rebuilding.
         run: |
-          # The crate is named moq-cli but the .deb / .rpm and Homebrew
-          # formula present the binary as `moq`. Cargo produces
-          # target/release/moq-cli by default (no [[bin]] override),
-          # so make a sibling copy that the downstream packaging steps
-          # can point at without each one needing to know the rename.
-          cp "target/${TARGET}/release/moq-cli" "target/${TARGET}/release/moq"
+          nix build .#moq-cli-static --out-link result --accept-flake-config --print-build-logs
+          cachix push kixelated ./result
+          # Pin so the released path is exempt from GC (see cachix.yml).
+          cachix pin kixelated "moq-cli-static-${{ matrix.target }}" ./result --keep-revisions 10
+          # crane installs to result/bin/<crate>. The .deb / .rpm and Homebrew
+          # formula present the binary as `moq`; copy it out of the read-only
+          # nix store under that name for the packaging steps below.
+          install -m0755 result/bin/moq-cli moq
 
       - name: Package bare binary
         shell: bash
@@ -73,7 +79,7 @@ jobs:
           target="${{ matrix.target }}"
           name="moq-cli-v${version}-${target}"
           mkdir -p dist
-          cp "target/${target}/release/moq" "dist/${name}"
+          cp moq "dist/${name}"
 
       - name: Package tarball (Homebrew)
         shell: bash
@@ -83,19 +89,19 @@ jobs:
         run: |
           name="moq-cli-${VERSION}-${TARGET}"
           mkdir -p "dist/${name}/bin"
-          cp "target/${TARGET}/release/moq-cli" "dist/${name}/bin/moq-cli"
+          cp moq "dist/${name}/bin/moq-cli"
           cp LICENSE-MIT LICENSE-APACHE "dist/${name}/"
           if [[ -f rs/moq-cli/README.md ]]; then
             cp rs/moq-cli/README.md "dist/${name}/"
           fi
           (cd dist && tar -czvf "${name}.tar.gz" "${name}" && rm -rf "${name}")
 
-      - name: Package .deb (Ubuntu 22.04 toolchain)
+      - name: Package .deb
         shell: bash
         env:
           VERSION: ${{ steps.parse.outputs.version }}
           ARCH: ${{ matrix.deb-arch }}
-          BINARY_PATH: target/${{ matrix.target }}/release/moq
+          BINARY_PATH: moq
         run: |
           # nfpm doesn't expand ${VAR} in contents[].src or templating
           # there either, so render the env vars in ourselves.
@@ -109,7 +115,7 @@ jobs:
         env:
           VERSION: ${{ steps.parse.outputs.version }}
           ARCH: ${{ matrix.rpm-arch }}
-          BINARY_PATH: target/${{ matrix.target }}/release/moq
+          BINARY_PATH: moq
         run: |
           # shellcheck disable=SC2016  # envsubst varlist must be single-quoted
           envsubst '$VERSION $ARCH $BINARY_PATH' \
@@ -150,9 +156,8 @@ jobs:
           determinate: false
       - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
 
-      # The cross build links system libs only, but its dyld smoke test must
-      # actually run the x86_64 binary on this arm host. Idempotent no-op when
-      # Rosetta is already present.
+      # The cross build's dyld smoke test must run the x86_64 binary on this arm
+      # host. Idempotent no-op when Rosetta is already present.
       - name: Install Rosetta (x86_64 smoke test)
         if: matrix.target == 'x86_64-apple-darwin'
         run: softwareupdate --install-rosetta --agree-to-license
@@ -161,6 +166,27 @@ jobs:
         id: parse
         shell: bash
         run: .github/scripts/release.sh parse-version moq-cli
+
+      - uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        with:
+          name: kixelated
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      # Build the nix output and push it to Cachix before packaging. The
+      # capture build statically links ffmpeg (an expensive compile), so this
+      # is the only place moq-cli is cached now (see cachix.yml). package-binary.sh
+      # below then re-resolves the same derivation from the local store (a hit)
+      # before scrubbing and tarring.
+      - name: Build and cache (nix)
+        shell: bash
+        run: |
+          attr=moq-cli
+          if [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]]; then
+            attr=moq-cli-x86_64-apple-darwin
+          fi
+          nix build ".#${attr}" --out-link result --accept-flake-config --print-build-logs
+          cachix push kixelated ./result
+          cachix pin kixelated "${attr}" ./result --keep-revisions 10
 
       - name: Build and package tarball
         shell: bash
