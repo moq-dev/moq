@@ -39,9 +39,11 @@ If it plays, you interop. That's the whole test.
 
 ## Notes
 
+- **`SUBSCRIBE_NAMESPACE` is required.** The subscriber discovers broadcasts by
+  sending `SUBSCRIBE_NAMESPACE` and waiting for a matching announce, so your
+  relay must support it. The publisher announces with `PUBLISH_NAMESPACE`.
 - **Self-signed or expired cert?** Add `--tls-disable-verify`.
-- **Subscriber sees nothing?** The subscriber discovers broadcasts via
-  `SUBSCRIBE_NAMESPACE` and waits for a matching announce. If your relay doesn't
-  replay existing announcements, start the subscriber before the publisher.
+- **Subscriber sees nothing?** If your relay doesn't replay existing
+  announcements, start the subscriber before the publisher.
 - **Verbose logs:** prefix with `RUST_LOG=info,moq_net=debug`. It prints the
   negotiated version (e.g. `connected version=moq-transport-18`).
