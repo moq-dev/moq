@@ -115,6 +115,55 @@ async fn dynamic_track_request_can_abort() {
 }
 
 #[tokio::test]
+async fn dynamic_track_request_can_publish_media() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = consumer.subscribe_catalog().unwrap();
+	let media_consumer = consumer
+		.subscribe_media("requested-audio".into(), crate::media::Container::Legacy, 10_000)
+		.unwrap();
+
+	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for requested track")
+		.unwrap();
+	assert_eq!(track.name().unwrap(), "requested-audio");
+
+	let media = broadcast
+		.publish_media_on_track(&track, "opus".into(), opus_head())
+		.unwrap();
+	assert_eq!(media.name().unwrap(), "requested-audio");
+	assert!(matches!(track.name(), Err(MoqError::Closed)));
+
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out waiting for catalog")
+		.unwrap()
+		.expect("expected a catalog");
+	let audio = catalog
+		.audio
+		.get("requested-audio")
+		.expect("requested track should be in catalog");
+	assert_eq!(audio.codec, "opus");
+	assert_eq!(audio.sample_rate, 48000);
+	assert_eq!(audio.channel_count, 2);
+
+	let payload = b"dynamic opus frame".to_vec();
+	media.write_frame(payload.clone(), 20_000).unwrap();
+
+	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
+		.await
+		.expect("timed out waiting for media frame")
+		.unwrap()
+		.expect("expected a frame");
+	assert_eq!(frame.payload, payload);
+	assert_eq!(frame.timestamp_us, 20_000);
+
+	media.finish().unwrap();
+}
+
+#[tokio::test]
 async fn media_track_activity_and_name() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
