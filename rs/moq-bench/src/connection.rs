@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use moq_native::Status;
 use moq_native::moq_net::{self, Broadcast, BroadcastConsumer, Origin, Track, TrackProducer, bytes::Bytes};
 use rand::RngExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
 use crate::Stats;
@@ -38,6 +38,15 @@ struct GroupHeader<'a> {
 	subscribe: u64,
 	/// Wall-clock milliseconds, handy for rough one-way latency when clocks agree.
 	timestamp_ms: u128,
+}
+
+/// The subset of [`GroupHeader`] a subscriber reads back to learn the shape of a
+/// broadcast it didn't publish. Extra fields on the wire are ignored.
+#[derive(Deserialize)]
+struct RecvHeader {
+	fps: u64,
+	frame_size: u64,
+	group_size: u64,
 }
 
 /// Everything one benchmark connection needs to run: its identity, the rolled
@@ -255,17 +264,91 @@ async fn subscribe(
 	Ok(())
 }
 
-/// Subscribe to the broadcast's track and count every frame received.
+/// Subscribe to the broadcast's track, counting every frame received and tracking
+/// group-sequence gaps to report skipped groups.
 async fn drain(broadcast: BroadcastConsumer, stats: &Stats) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.subscriptions);
 
 	let mut track = broadcast.subscribe_track(&Track::new(TRACK))?;
-	while let Some(mut group) = track.next_group().await? {
+	let mut gaps = GapTracker::new(stats);
+	let mut learned_shape = false;
+
+	// `recv_group` yields groups in arrival order, including out of sequence, so we
+	// can spot holes. `next_group` would silently drop late arrivals and hide them.
+	while let Some(mut group) = track.recv_group().await? {
+		gaps.observe(group.sequence);
+
+		let mut first = true;
 		while let Some(frame) = group.read_frame().await? {
+			// The first frame of every group is the JSON keyframe. Parse it once to
+			// learn the publisher's shape (we may be watching a peer, not ourselves).
+			if first && !learned_shape {
+				if let Ok(header) = serde_json::from_slice::<RecvHeader>(&frame) {
+					tracing::debug!(
+						fps = header.fps,
+						frame_size = header.frame_size,
+						group_size = header.group_size,
+						"subscribed broadcast shape"
+					);
+					learned_shape = true;
+				}
+			}
+			first = false;
 			stats.frame_recv(frame.len());
 		}
 	}
 	Ok(())
+}
+
+/// Tracks group-sequence continuity for one subscription so we can report skipped
+/// groups. Groups can arrive out of order, so rather than diffing consecutive
+/// sequences we measure the span `[min, max]` against the count received: a span
+/// wider than the count means groups in between never showed up.
+///
+/// Each observation feeds the shared [`Stats`] incrementally so the periodic
+/// reporter sees losses live, and so spans from many subscriptions sum correctly
+/// (`groups_expected - groups_recv` is the total skipped across all of them).
+struct GapTracker<'a> {
+	stats: &'a Stats,
+	min: u64,
+	max: u64,
+	started: bool,
+}
+
+impl<'a> GapTracker<'a> {
+	fn new(stats: &'a Stats) -> Self {
+		Self {
+			stats,
+			min: 0,
+			max: 0,
+			started: false,
+		}
+	}
+
+	fn observe(&mut self, sequence: u64) {
+		self.stats.groups_recv.fetch_add(1, Ordering::Relaxed);
+
+		if !self.started {
+			self.started = true;
+			self.min = sequence;
+			self.max = sequence;
+			self.stats.groups_expected.fetch_add(1, Ordering::Relaxed);
+			return;
+		}
+
+		// Widen the span on either end, crediting the newly covered sequences as expected.
+		if sequence > self.max {
+			self.stats
+				.groups_expected
+				.fetch_add(sequence - self.max, Ordering::Relaxed);
+			self.max = sequence;
+		} else if sequence < self.min {
+			self.stats
+				.groups_expected
+				.fetch_add(self.min - sequence, Ordering::Relaxed);
+			self.min = sequence;
+		}
+	}
 }
 
 /// RAII counter: bumps a gauge on creation and restores it on drop, so a gauge
@@ -359,5 +442,30 @@ mod tests {
 		assert!(group.read_frame().await.unwrap().is_none(), "no payload frames");
 
 		task.abort();
+	}
+
+	/// A hole in the sequence (group 2 never arrives) shows up as one skipped group.
+	#[test]
+	fn gap_tracker_counts_skips() {
+		let stats = Stats::default();
+		let mut gaps = GapTracker::new(&stats);
+		for seq in [0, 1, 3, 4] {
+			gaps.observe(seq);
+		}
+		// Span 0..=4 is 5 groups, 4 received, so 1 skipped.
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 4);
+		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 5);
+	}
+
+	/// Out-of-order arrivals that fill the whole span count as zero loss.
+	#[test]
+	fn gap_tracker_handles_out_of_order() {
+		let stats = Stats::default();
+		let mut gaps = GapTracker::new(&stats);
+		for seq in [2, 0, 1, 3] {
+			gaps.observe(seq);
+		}
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 4);
+		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 4);
 	}
 }

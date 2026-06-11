@@ -26,6 +26,22 @@ the data path.
 To avoid a thundering herd at startup, connections and subscriptions are
 staggered over a `--startup` ramp window instead of all firing at once.
 
+## Stats
+
+Every `--report` interval, `moq-bench` logs throughput (`send_mbps`/`recv_mbps`
+and `send_fps`/`recv_fps`) plus delivery accounting for the subscribe side:
+
+- `recv_groups`: cumulative groups received across all subscriptions.
+- `lost_groups`: cumulative groups that never arrived.
+- `loss`: `lost_groups` as a percentage.
+
+Subscribers read groups in arrival order (out-of-order included) and track each
+subscription's sequence span. A span wider than the count received means groups
+in between were skipped, so loss reflects dropped groups rather than QUIC packet
+loss (which the transport already repairs). The JSON keyframe at the start of
+each group is parsed back to recover the publisher's shape, so a subscriber works
+against peers it didn't publish itself.
+
 ## Usage
 
 ```bash
