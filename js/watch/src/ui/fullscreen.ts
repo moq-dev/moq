@@ -16,10 +16,12 @@ type WebkitElement = HTMLElement & {
 	webkitRequestFullscreen?: () => void;
 };
 
-// iOS exposes fullscreen only on the media element itself.
+// iOS exposes fullscreen only on the media element itself, with its own
+// begin/end events and a `webkitDisplayingFullscreen` state flag.
 type IosVideo = HTMLVideoElement & {
 	webkitEnterFullscreen?: () => void;
 	webkitSupportsFullscreen?: boolean;
+	webkitDisplayingFullscreen?: boolean;
 };
 
 const PSEUDO_CLASS = "player--pseudo-fullscreen";
@@ -53,7 +55,12 @@ export function createFullscreen(
 	parent.event(document, "fullscreenchange", notify);
 	parent.event(document, "webkitfullscreenchange", notify);
 
-	const realActive = () => !!(document.fullscreenElement || doc.webkitFullscreenElement);
+	// iPhone native <video> fullscreen doesn't fire document events, so we track
+	// the element directly via its begin/end events + webkitDisplayingFullscreen.
+	let iosVideo: IosVideo | undefined;
+
+	const realActive = () =>
+		!!(document.fullscreenElement || doc.webkitFullscreenElement || iosVideo?.webkitDisplayingFullscreen);
 	const pseudoActive = () => player.classList.contains(PSEUDO_CLASS);
 	const active = () => realActive() || pseudoActive();
 
@@ -72,6 +79,12 @@ export function createFullscreen(
 		// iPhone: no element fullscreen. Use native video fullscreen if available.
 		const video = media() as IosVideo | undefined;
 		if (video?.webkitEnterFullscreen && video.webkitSupportsFullscreen !== false) {
+			// Bind the element's fullscreen events once so active()/icon stay in sync.
+			if (iosVideo !== video) {
+				iosVideo = video;
+				parent.event(video, "webkitbeginfullscreen", notify);
+				parent.event(video, "webkitendfullscreen", notify);
+			}
 			video.webkitEnterFullscreen();
 			return;
 		}

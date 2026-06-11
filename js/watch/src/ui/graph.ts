@@ -19,6 +19,21 @@ export interface Graph {
 
 const DEFAULT_SAMPLES = 120;
 
+/** Normalize any CSS color and apply an alpha, so the gradient works for named/rgb/hsl inputs too. */
+function withAlpha(color: string, alpha: number): string {
+	const ctx = document.createElement("canvas").getContext("2d");
+	if (!ctx) return color;
+	ctx.fillStyle = color;
+	const normalized = ctx.fillStyle; // canvas returns "#rrggbb" or "rgba(...)"
+	if (normalized.startsWith("#")) {
+		const n = Number.parseInt(normalized.slice(1), 16);
+		return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+	}
+	const parts = normalized.match(/[\d.]+/g);
+	if (parts && parts.length >= 3) return `rgba(${parts[0]}, ${parts[1]}, ${parts[2]}, ${alpha})`;
+	return color;
+}
+
 /**
  * A rolling time-series sparkline. Samples scroll right-to-left and the area
  * under the line is filled with a fading gradient. Redraws are event-driven:
@@ -26,6 +41,9 @@ const DEFAULT_SAMPLES = 120;
  */
 export function graph(parent: Effect, title: string, opts?: GraphOptions): Graph {
 	const color = opts?.color ?? "#4ade80";
+	// Precompute the gradient stops once (the color is fixed) instead of per frame.
+	const fillTop = withAlpha(color, 0.33);
+	const fillBottom = withAlpha(color, 0);
 	// Clamp to a sane positive integer so a bad `samples` can't wedge the trim loop.
 	const capacity = Number.isFinite(opts?.samples)
 		? Math.max(1, Math.floor(opts?.samples as number))
@@ -92,8 +110,8 @@ export function graph(parent: Effect, title: string, opts?: GraphOptions): Graph
 
 					// Fill under the curve.
 					const grad = ctx.createLinearGradient(0, 0, 0, h);
-					grad.addColorStop(0, `${color}55`);
-					grad.addColorStop(1, `${color}00`);
+					grad.addColorStop(0, fillTop);
+					grad.addColorStop(1, fillBottom);
 					ctx.save();
 					ctx.lineTo(x(offset + samples.length - 1), h);
 					ctx.lineTo(x(offset), h);
