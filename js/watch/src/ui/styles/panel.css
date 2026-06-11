@@ -283,6 +283,18 @@
 	letter-spacing: 0.05em;
 }
 
+.stat-status {
+	margin-left: auto;
+	font-size: 0.5625rem;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--color-gray-100);
+	background: var(--color-white-alpha-10);
+	padding: 0.05rem var(--spacing-8);
+	border-radius: var(--border-radius-sm);
+}
+
 .stat-card--video .stat-icon {
 	background: var(--color-purple-900);
 	color: var(--color-purple-400);

@@ -1,4 +1,4 @@
-import type { Effect } from "@moq/signals";
+import type { Effect, Getter } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../element";
 import { formatBandwidth, formatBitrate, formatFps, formatHz, formatMillis } from "./format";
@@ -9,17 +9,18 @@ const POLL_MS = 250;
 
 type Kind = "network" | "video" | "audio";
 
-function card(kind: Kind, label: string, svg: string): { el: HTMLElement; grid: HTMLElement } {
+function card(kind: Kind, label: string, svg: string): { el: HTMLElement; grid: HTMLElement; status: HTMLElement } {
 	const el = DOM.create("div", { className: `stat-card stat-card--${kind}` });
 
 	const head = DOM.create("div", { className: "stat-head" });
 	const iconWrap = DOM.create("div", { className: "stat-icon" });
 	iconWrap.appendChild(icon(svg));
-	head.append(iconWrap, DOM.create("span", { className: "stat-title" }, label));
+	const status = DOM.create("span", { className: "stat-status", style: { display: "none" } });
+	head.append(iconWrap, DOM.create("span", { className: "stat-title" }, label), status);
 
 	const grid = DOM.create("div", { className: "stat-grid" });
 	el.append(head, grid);
-	return { el, grid };
+	return { el, grid, status };
 }
 
 function line(grid: HTMLElement, label: string): HTMLSpanElement {
@@ -39,6 +40,28 @@ function rate(prev: { bytes: number; when: number }, bytes: number, now: number)
 	return delta * 8 * (1000 / elapsed);
 }
 
+function hasRenditions(catalog: { renditions?: Record<string, unknown> } | undefined): boolean {
+	return Object.keys(catalog?.renditions ?? {}).length > 0;
+}
+
+interface TrackOptions {
+	// Hide the card entirely when this catalog has no renditions.
+	catalog: Getter<unknown>;
+	// Show the status pill when this is true (e.g. muted / paused).
+	flag: Getter<boolean>;
+	label: string;
+}
+
+/** Hide a card when its media isn't in the catalog; show a status pill otherwise. */
+function track(parent: Effect, card: { el: HTMLElement; status: HTMLElement }, opts: TrackOptions) {
+	card.status.textContent = opts.label;
+	parent.run((effect) => {
+		const present = hasRenditions(effect.get(opts.catalog) as { renditions?: Record<string, unknown> });
+		card.el.style.display = present ? "" : "none";
+		card.status.style.display = present && effect.get(opts.flag) ? "" : "none";
+	});
+}
+
 /** The Stats tab: live codec/network detail plus rolling graphs. */
 export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const container = DOM.create("div", { className: "tab-body stats" });
@@ -52,6 +75,11 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const vBitrateGraph = graph(parent, "Bitrate", { color: "#a855f7", format: formatBitrate });
 	const vFpsGraph = graph(parent, "Frame rate", { color: "#facc15", format: formatFps });
 	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
+	track(parent, videoCard, {
+		catalog: watch.backend.video.source.catalog,
+		flag: watch.backend.paused,
+		label: "paused",
+	});
 
 	// Audio card.
 	const audioCard = card("audio", "Audio", audioIcon);
@@ -59,11 +87,15 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const aRate2 = line(audioCard.grid, "Sample rate");
 	const aChannels = line(audioCard.grid, "Channels");
 	const aBitrate = line(audioCard.grid, "Bitrate");
+	track(parent, audioCard, {
+		catalog: watch.backend.audio.source.catalog,
+		flag: watch.backend.audio.muted,
+		label: "muted",
+	});
 
 	// Network card.
 	const netCard = card("network", "Network", networkIcon);
 	const nDown = line(netCard.grid, "Download");
-	const nUp = line(netCard.grid, "Upload");
 	const nRtt = line(netCard.grid, "Round trip");
 	const nRttGraph = graph(parent, "RTT", { color: "#00dfff", format: (v) => formatMillis(v) });
 	netCard.el.append(nRttGraph.el);
@@ -110,7 +142,6 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		// Network.
 		const conn = watch.connection.established.peek();
 		nDown.textContent = formatBandwidth(conn?.recvBandwidth?.peek(), "down")?.replace("↓ ", "") ?? "—";
-		nUp.textContent = formatBandwidth(conn?.sendBandwidth?.peek(), "up")?.replace("↑ ", "") ?? "—";
 		const rtt = conn?.rtt?.peek();
 		nRtt.textContent = rtt !== undefined && rtt > 0 ? formatMillis(rtt) : "—";
 		nRttGraph.push(rtt !== undefined && rtt > 0 ? rtt : undefined);

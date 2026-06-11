@@ -44,14 +44,18 @@ export function liveBadge(parent: Effect, watch: MoqWatch, state: UiState): HTML
 		const broadcast = effect.get(watch.broadcast.status);
 		const { variant, text: label } = deriveStatus(url, conn, broadcast);
 
+		// The center overlay already shows a prominent OFFLINE notice; don't
+		// duplicate it in the bar.
+		button.style.display = broadcast === "offline" ? "none" : "";
 		button.dataset.variant = variant;
 		text.textContent = label.toUpperCase();
 	});
 
 	parent.run((effect) => {
-		const mode = effect.get(watch.backend.latency);
-		const jitter = effect.get(watch.backend.jitter);
-		latency.textContent = mode === "real-time" ? `auto ${formatMillis(jitter)}` : formatMillis(jitter);
+		// Show the total added latency (jitter buffer + codec frame overhead),
+		// which is what the viewer actually experiences.
+		const total = effect.get(watch.backend.sync.buffer);
+		latency.textContent = `+${formatMillis(total)} latency`;
 	});
 
 	parent.event(button, "click", () => {
