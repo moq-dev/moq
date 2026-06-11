@@ -1,29 +1,32 @@
 import type { Effect } from "@moq/signals";
 import type MoqPublish from "../../element";
 
-type StatusConfig = { variant: string; text: string };
+type Variant = "live" | "audio-only" | "video-only" | "warning" | "connecting" | "error";
 
 function deriveStatus(
 	url: URL | undefined,
 	status: "connecting" | "connected" | "disconnected",
 	hasAudio: boolean,
 	hasVideo: boolean,
-): StatusConfig {
+): { variant: Variant; text: string } {
 	if (!url) return { variant: "error", text: "No URL" };
 	if (status === "disconnected") return { variant: "error", text: "Disconnected" };
-	if (status === "connecting") return { variant: "connecting", text: "Connecting..." };
-	if (!hasAudio && !hasVideo) return { variant: "warning", text: "Select Source" };
-	if (!hasAudio && hasVideo) return { variant: "video-only", text: "Video Only" };
-	if (hasAudio && !hasVideo) return { variant: "audio-only", text: "Audio Only" };
+	if (status === "connecting") return { variant: "connecting", text: "Connecting" };
+	if (!hasAudio && !hasVideo) return { variant: "warning", text: "No source" };
+	if (!hasAudio && hasVideo) return { variant: "video-only", text: "Video only" };
+	if (hasAudio && !hasVideo) return { variant: "audio-only", text: "Audio only" };
 	return { variant: "live", text: "Live" };
 }
 
-export function publishStatusIndicator(parent: Effect, publish: MoqPublish): HTMLElement {
+/** Publishing status pill: Live / Audio only / Video only / Connecting / etc. */
+export function statusBadge(parent: Effect, publish: MoqPublish): HTMLElement {
 	const wrapper = document.createElement("div");
-	wrapper.className = "status-indicator flex-center";
+	wrapper.className = "badge";
 
 	const dot = document.createElement("span");
+	dot.className = "badge-dot";
 	const text = document.createElement("span");
+	text.className = "badge-text";
 	wrapper.append(dot, text);
 
 	parent.run((effect) => {
@@ -40,9 +43,8 @@ export function publishStatusIndicator(parent: Effect, publish: MoqPublish): HTM
 			!!audioSource && !muted,
 			!!videoSource && !invisible,
 		);
-		dot.className = `status-indicator-dot status-indicator-dot--${variant}`;
-		text.className = `status-indicator-text status-indicator-text--${variant}`;
-		text.textContent = label;
+		wrapper.dataset.variant = variant;
+		text.textContent = label.toUpperCase();
 	});
 
 	return wrapper;
