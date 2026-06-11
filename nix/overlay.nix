@@ -66,6 +66,13 @@ let
         withX264 = gpl;
       }
       // final.lib.optionalAttrs gpl { x264 = moqX264For pkgs; }
+      // final.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        # withV4l2 pulls libv4l (v4l-utils), whose BPF keytable support drags in
+        # libbpf -> elfutils. elfutils declares badPlatforms = isStatic, so the
+        # pkgsStatic closure refuses to evaluate. We only need V4L2 capture and
+        # the v4l2m2m encoder, not IR keytable decoding, so drop BPF.
+        libv4l = pkgs.libv4l.override { withBPF = false; };
+      }
     )).overrideAttrs
       (_: {
         # ffmpeg's bundled tests (e.g. libavutil/tests/pixelutils.c) miss a
