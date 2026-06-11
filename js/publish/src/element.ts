@@ -3,7 +3,7 @@ import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast";
 import * as Source from "./source";
 
-const OBSERVED = ["url", "name", "muted", "invisible", "source"] as const;
+const OBSERVED = ["url", "name", "muted", "invisible", "source", "simulcast"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 type SourceType = "camera" | "screen" | "file";
@@ -22,6 +22,7 @@ export default class MoqPublish extends HTMLElement {
 		source: new Signal<SourceType | File | undefined>(undefined),
 		muted: new Signal(false),
 		invisible: new Signal(false),
+		simulcast: new Signal(false),
 	};
 
 	connection: Moq.Connection.Reload;
@@ -37,6 +38,9 @@ export default class MoqPublish extends HTMLElement {
 	#videoEnabled: Signal<boolean>;
 	#audioEnabled: Signal<boolean>;
 	#eitherEnabled: Signal<boolean>;
+
+	// Set when `simulcast` is enabled and video is not `invisible`.
+	#sdEnabled: Signal<boolean>;
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
@@ -58,13 +62,16 @@ export default class MoqPublish extends HTMLElement {
 		this.#videoEnabled = new Signal(false);
 		this.#audioEnabled = new Signal(false);
 		this.#eitherEnabled = new Signal(false);
+		this.#sdEnabled = new Signal(false);
 
 		this.signals.run((effect) => {
 			const muted = effect.get(this.state.muted);
 			const invisible = effect.get(this.state.invisible);
+			const simulcast = effect.get(this.state.simulcast);
 			this.#videoEnabled.set(!invisible);
 			this.#audioEnabled.set(!muted);
 			this.#eitherEnabled.set(!muted || !invisible);
+			this.#sdEnabled.set(simulcast && !invisible);
 		});
 
 		this.broadcast = new Broadcast({
@@ -77,6 +84,9 @@ export default class MoqPublish extends HTMLElement {
 			video: {
 				hd: {
 					enabled: this.#videoEnabled,
+				},
+				sd: {
+					enabled: this.#sdEnabled,
 				},
 			},
 		});
@@ -137,6 +147,8 @@ export default class MoqPublish extends HTMLElement {
 			this.state.muted.set(newValue !== null);
 		} else if (name === "invisible") {
 			this.state.invisible.set(newValue !== null);
+		} else if (name === "simulcast") {
+			this.state.simulcast.set(newValue !== null);
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -257,6 +269,14 @@ export default class MoqPublish extends HTMLElement {
 
 	set invisible(value: boolean) {
 		this.state.invisible.set(value);
+	}
+
+	get simulcast(): boolean {
+		return this.state.simulcast.peek();
+	}
+
+	set simulcast(value: boolean) {
+		this.state.simulcast.set(value);
 	}
 }
 

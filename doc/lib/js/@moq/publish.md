@@ -57,19 +57,19 @@ a real bundler (the examples below).
 <moq-publish
     url="https://relay.example.com/anon"
     name="room/alice.hang"
-    audio video controls>
+    source="camera" simulcast>
     <video muted autoplay></video>
 </moq-publish>
 ```
 
 **Attributes:**
 
-- `url` (required) — Relay server URL
-- `name` (required) — Broadcast name
-- `device` — "camera" or "screen" (default: "camera")
-- `audio` — Enable audio capture (boolean)
-- `video` — Enable video capture (boolean)
-- `controls` — Show publishing controls (boolean)
+- `url` (required) - Relay server URL
+- `name` (required) - Broadcast name
+- `source` - "camera", "screen", or "file"
+- `muted` - Disable audio capture (boolean)
+- `invisible` - Disable video capture (boolean)
+- `simulcast` - Also publish a 480p `video/sd` rendition alongside `video/hd` (boolean)
 
 ## UI Overlay
 
@@ -85,7 +85,7 @@ Import `@moq/publish/ui` for a Web Component overlay with device selection and p
     <moq-publish
         url="https://relay.example.com/anon"
         name="room/alice.hang"
-        audio video>
+        source="camera">
         <video muted autoplay></video>
     </moq-publish>
 </moq-publish-ui>
@@ -102,12 +102,12 @@ const broadcast = new Publish.Broadcast({
     connection,
     enabled: true,
     name: "alice.hang",
-    video: { enabled: true, device: "camera" },
+    // Publish two video renditions: video/hd plus a 480p video/sd.
+    video: { hd: { enabled: true }, sd: { enabled: true } },
     audio: { enabled: true },
 });
 
 // Reactive controls
-broadcast.video.device.set("screen");
 broadcast.name.set("bob.hang");
 ```
 

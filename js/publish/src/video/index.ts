@@ -1,7 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import { Encoder, type EncoderProps } from "./encoder";
+import { Encoder, type EncoderConfig, type EncoderProps } from "./encoder";
 import { TrackProcessor } from "./polyfill";
 import type { Source } from "./types";
 
@@ -21,6 +21,12 @@ export class Root {
 	static readonly TRACK_SD = "video/sd";
 	static readonly PRIORITY = Catalog.PRIORITY.video;
 
+	// The default cap for the sd rendition: 480p, the baseline of the encoder's bitrate table.
+	// Without a cap the sd encoder would run at the full source resolution, duplicating hd.
+	// Only applied when no sd config is provided; passing any config (even an empty object
+	// or a Signal) takes full ownership, so `config: {}` removes the cap entirely.
+	static readonly SD_DEFAULT_CONFIG: EncoderConfig = { maxPixels: 854 * 480 };
+
 	source: Signal<Source | undefined>;
 	hd: Encoder;
 	sd: Encoder;
@@ -38,7 +44,10 @@ export class Root {
 
 		const connection = props?.connection ?? new Signal<Moq.Connection.Established | undefined>(undefined);
 		this.hd = new Encoder(this.frame, this.source, connection, props?.hd);
-		this.sd = new Encoder(this.frame, this.source, connection, props?.sd);
+		this.sd = new Encoder(this.frame, this.source, connection, {
+			...props?.sd,
+			config: props?.sd?.config ?? Root.SD_DEFAULT_CONFIG,
+		});
 
 		this.flip = Signal.from(props?.flip ?? false);
 
