@@ -4,9 +4,10 @@ on:
   push:
     tags:
       - "moq-cli-v*"
-  # Dry-run the release build/packaging (everything except publishing) when the
-  # moq-cli build or packaging inputs change, so regressions surface on the PR
-  # instead of only when a tag is cut. The `release` job is gated to tag pushes.
+  # Dry-run the Linux release build/packaging (everything except publishing)
+  # when the moq-cli build or packaging inputs change, so regressions surface on
+  # the PR instead of only when a tag is cut. macOS is excluded (cost) and the
+  # `release` job is gated to tag pushes; see their `if:` conditions.
   pull_request:
     paths:
       - "rs/moq-cli/**"
@@ -148,6 +149,9 @@ jobs:
 
   build-tarball-macos:
     name: Build macOS tarball (${{ matrix.target }})
+    # macOS runners are ~10x the cost, so skip them on the PR dry-run. They
+    # still run on release tags and on a manual workflow_dispatch.
+    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
 
     strategy:
