@@ -1,17 +1,16 @@
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../element";
-import { bufferControl } from "./components/buffer-control";
 import { bufferingIndicator } from "./components/buffering-indicator";
-import { fullscreenButton } from "./components/fullscreen-button";
+import { centerPlay } from "./components/center-play";
+import { controlBar } from "./components/control-bar";
 import { offlineIndicator } from "./components/offline-indicator";
-import { playPauseButton } from "./components/play-pause";
-import { qualitySelector } from "./components/quality-selector";
-import { statsButton } from "./components/stats-button";
-import { volumeSlider } from "./components/volume-slider";
-import { watchStatusIndicator } from "./components/watch-status-indicator";
-import { statsPanel } from "./stats";
+import { settingsPanel } from "./components/settings-panel";
+import type { Tab, UiState } from "./state";
 import styles from "./styles/index.css?inline";
+
+// How long the chrome lingers after the pointer stops moving (while playing).
+const HIDE_MS = 2800;
 
 export default class MoqWatchUi extends HTMLElement {
 	#signals?: Effect;
@@ -54,34 +53,76 @@ export default class MoqWatchUi extends HTMLElement {
 		const watch = effect.get(this.#watch);
 		if (!watch) return;
 
-		const visible = new Signal(false);
+		const state: UiState = {
+			chrome: new Signal(true),
+			panel: new Signal(false),
+			tab: new Signal<Tab>("quality"),
+		};
 
-		const videoContainer = DOM.create("div", { className: "video-container" });
-		videoContainer.append(
-			DOM.create("slot"),
-			statsPanel(effect, watch, visible),
-			bufferingIndicator(effect, watch),
-			offlineIndicator(effect, watch),
-		);
+		const player = DOM.create("div", { className: "player" });
 
-		const controls = DOM.create("div", { className: "controls" });
+		// The slotted <moq-watch> (canvas/video) sits at the base of the stack.
+		player.appendChild(DOM.create("slot"));
 
-		const playback = DOM.create("div", { className: "playback-controls flex-align-center" });
-		playback.append(
-			playPauseButton(effect, watch),
-			volumeSlider(effect, watch),
-			watchStatusIndicator(effect, watch),
-			statsButton(effect, visible),
-			fullscreenButton(effect, watch),
-		);
+		// Center affordances: play prompt + buffering spinner + offline notice.
+		const center = DOM.create("div", { className: "center" });
+		center.append(centerPlay(effect, watch), bufferingIndicator(effect, watch), offlineIndicator(effect, watch));
 
-		const latency = DOM.create("div", { className: "latency-controls" });
-		latency.append(bufferControl(effect, watch), qualitySelector(effect, watch));
+		// Top scrim keeps the bottom bar legible and hosts ambient gradient.
+		const scrimTop = DOM.create("div", { className: "scrim scrim--top" });
 
-		controls.append(playback, latency);
+		// Bottom chrome: gradient scrim + the control bar.
+		const chrome = DOM.create("div", { className: "chrome" });
+		chrome.append(DOM.create("div", { className: "scrim scrim--bottom" }), controlBar(effect, watch, state));
 
-		DOM.render(effect, this.#root, videoContainer);
-		DOM.render(effect, this.#root, controls);
+		const panel = settingsPanel(effect, watch, state);
+
+		player.append(scrimTop, center, chrome, panel);
+		DOM.render(effect, this.#root, player);
+
+		this.#wireChrome(effect, watch, state, player);
+	}
+
+	// Show the chrome on activity, auto-hide while playing once the pointer
+	// settles. Stays pinned while paused or when the settings panel is open.
+	#wireChrome(effect: Effect, watch: MoqWatch, state: UiState, player: HTMLElement) {
+		let hideTimer: ReturnType<typeof setTimeout> | undefined;
+		const clearHide = () => {
+			if (hideTimer !== undefined) {
+				clearTimeout(hideTimer);
+				hideTimer = undefined;
+			}
+		};
+		effect.cleanup(clearHide);
+
+		const pinned = () => watch.backend.paused.peek() || state.panel.peek();
+
+		const show = () => {
+			state.chrome.set(true);
+			clearHide();
+			if (!pinned()) hideTimer = setTimeout(() => state.chrome.set(false), HIDE_MS);
+		};
+
+		effect.event(this, "pointermove", show);
+		effect.event(this, "pointerdown", show);
+		effect.event(this, "focusin", show);
+		effect.event(this, "pointerleave", () => {
+			if (pinned()) return;
+			clearHide();
+			state.chrome.set(false);
+		});
+
+		// Becoming pinned immediately reveals (and locks) the chrome.
+		effect.run((e) => {
+			if (e.get(watch.backend.paused) || e.get(state.panel)) {
+				state.chrome.set(true);
+				clearHide();
+			}
+		});
+
+		effect.run((e) => {
+			player.classList.toggle("player--chrome", e.get(state.chrome));
+		});
 	}
 }
 
