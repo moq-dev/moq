@@ -791,6 +791,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let mut frame = producer.create_frame(Frame {
 						size: 0,
 						timestamp: None,
+						duration: None,
 					})?;
 					track_stats.frame();
 					frame.finish()?;
@@ -803,7 +804,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				if size > MAX_FRAME_SIZE {
 					return Err(Error::FrameTooLarge);
 				}
-				let mut frame = producer.create_frame(Frame { size, timestamp: None })?;
+				let mut frame = producer.create_frame(Frame {
+					size,
+					timestamp: None,
+					duration: None,
+				})?;
 				track_stats.frame();
 
 				if let Err(err) = self.run_frame(stream, frame.clone(), &track_stats).await {
