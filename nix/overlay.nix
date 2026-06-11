@@ -319,11 +319,11 @@ in
   );
 
   # Fully static musl build for the portable Linux release artifacts. Under
-  # pkgsStatic everything (ffmpeg, x264, libc -> musl) links static by default,
-  # so the binary has zero dynamic dependencies and runs on any Linux
-  # regardless of glibc version. This replaces the old cargo-zigbuild glibc-2.34
-  # pin: a static binary is strictly more portable. Linux-only (see flake.nix);
-  # darwin can't fully static link.
+  # pkgsStatic everything (ffmpeg, libc -> musl) links static by default, so the
+  # binary has zero dynamic dependencies and runs on any Linux regardless of
+  # glibc version. This replaces the old cargo-zigbuild glibc-2.34 pin: a static
+  # binary is strictly more portable. Linux-only (see flake.nix); darwin can't
+  # fully static link.
   moq-cli-static =
     let
       staticPkgs = final.pkgsStatic;
@@ -336,7 +336,7 @@ in
       crateInfo ../rs/moq-cli/Cargo.toml
       // captureBuildArgs staticPkgs
       // {
-        src = craneLib.cleanCargoSource ../.;
+        src = craneLibStatic.cleanCargoSource ../.;
         cargoExtraArgs = "-p moq-cli --features capture,moq-video/static";
         CARGO_BUILD_TARGET = muslTarget;
         # Cross-target test binaries can't run in the build sandbox.
