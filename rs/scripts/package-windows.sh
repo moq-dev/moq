@@ -59,6 +59,10 @@ fi
 
 if [[ -z "$VERSION" ]]; then
     VERSION=$(grep '^version' "$CRATE_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+    if [[ -z "$VERSION" ]]; then
+        echo "Error: could not detect version from $CRATE_DIR/Cargo.toml" >&2
+        exit 1
+    fi
     echo "Detected version: $VERSION"
 fi
 
