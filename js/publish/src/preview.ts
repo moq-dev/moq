@@ -3,10 +3,11 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Video from "./video";
 
 // What the canvas preview renders.
+// - `none`: nothing, an easy way to toggle the preview off without removing the element.
 // - `source`: the raw captured frames, drawn directly (cheap, no extra codec work).
 // - `encoded`: a decoded copy of the encoded video, so the preview shows the same codec
 //   artifacts a viewer would receive. This costs a full extra encode + decode pass.
-export type Mode = "source" | "encoded";
+export type Mode = "none" | "source" | "encoded";
 
 export type RendererProps = {
 	canvas: HTMLCanvasElement | Signal<HTMLCanvasElement | undefined>;
@@ -47,12 +48,13 @@ export class Renderer {
 
 	// Pick the frame source based on the mode, spinning up a transcoder for `encoded`.
 	#runSelect(effect: Effect): void {
-		if (!effect.get(this.enabled)) {
+		const mode = effect.get(this.mode);
+		if (mode === "none" || !effect.get(this.enabled)) {
 			effect.set(this.#frame, undefined);
 			return;
 		}
 
-		if (effect.get(this.mode) === "encoded") {
+		if (mode === "encoded") {
 			const transcode = new Transcode({
 				source: this.#video.frame,
 				config: this.#video.hd.resolved,

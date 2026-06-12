@@ -70,7 +70,7 @@ a real bundler (the examples below).
 - `audio` — Enable audio capture (boolean)
 - `video` — Enable video capture (boolean)
 - `controls` — Show publishing controls (boolean)
-- `preview` — What a `<canvas>` preview renders: `"source"` (default) or `"encoded"` (see [Preview element](#preview-element))
+- `preview` — What the preview renders: `"source"` (default), `"encoded"`, or `"none"` to disable it (see [Preview element](#preview-element))
 
 ## Preview element
 
@@ -79,7 +79,7 @@ a real bundler (the examples below).
 - `<video>` attaches the raw capture stream via `srcObject`. This is the cheapest preview and the default.
 - `<canvas>` draws the frames itself. With `preview="source"` (default) it draws the raw capture; with `preview="encoded"` it draws a decoded copy of the encoded video, so the preview shows exactly what a viewer receives over the network, codec artifacts and all.
 
-The `encoded` mode costs a full extra encode + decode pass (it re-encodes with the same settings as the published rendition), so reach for it when you want to monitor the transmitted quality, not as the default preview.
+The `encoded` mode costs a full extra encode + decode pass (it re-encodes with the same settings as the published rendition), so reach for it when you want to monitor the transmitted quality, not as the default preview. Set `preview="none"` to disable the preview without removing the element.
 
 ```html
 <moq-publish url="https://relay.example.com/anon" name="room/alice.hang" source="camera" preview="encoded">

@@ -111,6 +111,12 @@ export default class MoqPublish extends HTMLElement {
 				return;
 			}
 
+			// preview="none" disables the preview entirely.
+			if (effect.get(this.state.preview) === "none") {
+				preview.style.display = "none";
+				return;
+			}
+
 			const source = effect.get(this.broadcast.video.source);
 			if (!source) {
 				preview.style.display = "none";
@@ -162,7 +168,7 @@ export default class MoqPublish extends HTMLElement {
 		} else if (name === "invisible") {
 			this.state.invisible.set(newValue !== null);
 		} else if (name === "preview") {
-			if (newValue === "encoded" || newValue === "source") {
+			if (newValue === "encoded" || newValue === "source" || newValue === "none") {
 				this.state.preview.set(newValue);
 			} else if (newValue === null) {
 				this.state.preview.set("source");
