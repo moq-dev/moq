@@ -7,12 +7,40 @@ mod sub
 mod web
 
 # Run the web demo (default).
+#
+# Picks the first free port at/after 4443 (both UDP for QUIC and TCP for HTTP)
+# so multiple worktrees can run `just dev` without colliding. The relay reads
+# the port from MOQ_SERVER_BIND/MOQ_WEB_HTTP_LISTEN, overriding localhost.toml.
 default:
+    #!/usr/bin/env bash
+    set -euo pipefail
     bun install
+
+    port=$(just port)
+    if [ "$port" != "4443" ]; then
+    	echo ">>> Port 4443 is busy, using $port instead" >&2
+    fi
+
+    export MOQ_SERVER_BIND="[::]:$port"
+    export MOQ_WEB_HTTP_LISTEN="[::]:$port"
+    base="http://localhost:$port"
+
     bun run concurrently --kill-others --names srv,bbb,web --prefix-colors auto \
     	"just relay" \
-    	"just wait && just pub bbb" \
-    	"just wait && just web"
+    	"just wait $base/certificate.sha256 && just pub bbb $base/anon" \
+    	"just wait $base/certificate.sha256 && just web $base/anon"
+
+# Find the first free port at/after `start` (checked on both TCP and UDP).
+[private]
+port start="4443":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    port={{ start }}
+    while lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1 \
+    	|| lsof -nP -iUDP:"$port" -t >/dev/null 2>&1; do
+    	port=$((port + 1))
+    done
+    echo "$port"
 
 # Wait for the localhost relay to be ready by repeatedly requesting the cert
 [private]
