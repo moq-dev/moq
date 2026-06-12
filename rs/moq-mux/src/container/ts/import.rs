@@ -61,6 +61,12 @@ pub struct Import<E: scte35::Catalog = ()> {
 	/// PIDs diverted, the rest fed to the reader); a trailing partial packet is
 	/// kept here for the next call.
 	scratch: Vec<u8>,
+	/// Sync lock. 0x47 is the packet sync byte but also occurs freely in payload (TS
+	/// has no byte stuffing), so a lone 0x47 isn't a boundary. False until a candidate
+	/// is confirmed by the next packet's sync byte; once true we stride 188 at a time
+	/// and trust the per-packet check. Persists across `decode` calls so a candidate
+	/// pending confirmation at a buffer tail is re-confirmed, not trusted blindly.
+	synced: bool,
 	/// SCTE-35 PIDs, intercepted before the reader. SCTE-35 is carried as private
 	/// sections (table_id 0xFC), not PES, so the reader would `Pes::read_from` and
 	/// abort. Keyed by PID. Detected via the PMT 'CUEI' registration descriptor.
@@ -94,6 +100,7 @@ impl<E: scte35::Catalog> Import<E> {
 			initialized: false,
 			audio_burst: None,
 			scratch: Vec::new(),
+			synced: false,
 			scte: HashMap::new(),
 			supports_scte35,
 			last_pts: None,
@@ -137,12 +144,13 @@ impl<E: scte35::Catalog> Import<E> {
 		// registered) before the packets that follow it in the same chunk route.
 		let mut off = 0;
 		while off + TsPacket::SIZE <= self.scratch.len() {
-			// A TS packet starts with the 0x47 sync byte. While aligned we trust it and
-			// stride 188 at a time; a miss means we lost sync and must re-acquire it.
-			if self.scratch[off] != 0x47 {
+			// A TS packet starts with the 0x47 sync byte. Once synced we trust it and stride
+			// 188 at a time; until then (or after a miss) we must (re)acquire the lock.
+			if !self.synced || self.scratch[off] != 0x47 {
+				self.synced = false;
 				// 0x47 also occurs freely in payload (TS has no byte stuffing), so a lone one
 				// isn't a boundary. Scan (SIMD via memchr) for a candidate whose next packet
-				// also begins with 0x47, confirming the 188 stride before trusting it.
+				// also begins with 0x47, confirming the 188 stride before locking onto it.
 				// Striding past a false candidate would route one bogus packet; jumping a flat
 				// 188 instead would only re-align on exact multiples and could desync forever.
 				loop {
@@ -154,13 +162,21 @@ impl<E: scte35::Catalog> Import<E> {
 					off += rel;
 					match self.scratch.get(off + TsPacket::SIZE) {
 						// Next packet also starts with a sync byte: lock onto this candidate.
-						Some(&0x47) => break,
+						Some(&0x47) => {
+							self.synced = true;
+							break;
+						}
 						// The byte 188 ahead isn't a sync byte: this 0x47 was payload, keep scanning.
 						Some(_) => off += 1,
-						// Can't confirm yet (candidate is near the buffer tail); the outer loop
-						// either processes it (a full packet fits) or retains it for the next call.
+						// Can't confirm yet (candidate is near the buffer tail). Stay unsynced so
+						// it's re-confirmed next call (with the trailing bytes) instead of trusted.
 						None => break,
 					}
+				}
+				// Unsynced means the buffer had no confirmable sync byte, or the candidate is
+				// pending confirmation; either way there's nothing to route until more arrives.
+				if !self.synced {
+					break;
 				}
 				continue;
 			}

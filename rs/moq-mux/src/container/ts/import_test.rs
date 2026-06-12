@@ -72,6 +72,28 @@ fn resyncs_past_false_sync_byte() {
 	assert_eq!(catalog.audio.renditions.len(), 1, "false sync derailed demux: no audio");
 }
 
+#[test]
+fn resyncs_across_chunk_boundaries() {
+	// Misaligned start fed in small chunks, so a resync candidate often lands at a buffer
+	// tail and is carried, pending confirmation, into the next decode call. The sync lock
+	// must re-confirm it there (with the trailing bytes) rather than trust it blindly.
+	let data = include_bytes!("test_data/bbb.ts");
+	let mut misaligned = vec![0x00, 0x11, 0x22];
+	misaligned.extend_from_slice(data);
+
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	for chunk in misaligned.chunks(100) {
+		import.decode(&mut BytesMut::from(chunk)).unwrap();
+	}
+	import.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.video.renditions.len(), 1);
+	assert_eq!(snapshot.audio.renditions.len(), 1);
+}
+
 #[tokio::test(start_paused = true)]
 async fn import_export_import_roundtrip() {
 	let data = include_bytes!("test_data/bbb.ts");
