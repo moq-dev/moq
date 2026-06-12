@@ -255,6 +255,26 @@
 	letter-spacing: 0.05em;
 }
 
+.stat-status {
+	margin-left: auto;
+	font-size: 0.5625rem;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	padding: 0.05rem var(--spacing-8);
+	border-radius: var(--border-radius-sm);
+}
+
+.stat-status--active {
+	color: var(--color-green-500);
+	background: var(--color-green-900);
+}
+
+.stat-status--idle {
+	color: var(--color-gray-100);
+	background: var(--color-white-alpha-10);
+}
+
 .stat-card--video .stat-icon {
 	background: var(--color-purple-900);
 	color: var(--color-purple-400);
