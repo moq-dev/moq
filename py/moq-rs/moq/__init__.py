@@ -3,7 +3,7 @@
 Real-time pub/sub with built-in caching, fan-out, and prioritization.
 """
 
-from moq_ffi import Container
+from moq_ffi import Container, MoqError
 from moq_ffi import MoqSession as Session
 
 from .client import Client
@@ -58,6 +58,7 @@ __all__ = [
     "GroupProducer",
     "MediaConsumer",
     "MediaProducer",
+    "MoqError",
     "OriginConsumer",
     "OriginProducer",
     "Request",

@@ -60,6 +60,20 @@ When you're done, signal graceful shutdown to the peer:
 session.shutdown()  // alias for cancel(0u)
 ```
 
+A server can reject the connection on auth grounds: `MoqException.Unauthorized` (HTTP 401) or `MoqException.Forbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. Use the `isAuth` helper to catch both:
+
+```kotlin
+import dev.moq.isAuth
+
+try {
+    val session = client.connect("https://relay.example.com")
+} catch (e: MoqException) {
+    if (e.isAuth) {
+        // Prompt for credentials; don't reconnect.
+    }
+}
+```
+
 ## Subscribe
 
 ```kotlin
