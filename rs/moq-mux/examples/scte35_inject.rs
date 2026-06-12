@@ -90,10 +90,14 @@ fn main() -> anyhow::Result<()> {
 		match pkt.payload {
 			Some(TsPayload::Pat(pat)) => pmt_pid = pat.table.first().map(|p| p.program_map_pid),
 			Some(TsPayload::Pmt(pmt)) => {
+				// Fall back to the carrying PID if the PAT hasn't been seen yet (PAT-late streams).
+				pmt_pid.get_or_insert(pkt.header.pid);
 				orig = Some(pmt);
-				break;
 			}
 			_ => {}
+		}
+		if pmt_pid.is_some() && orig.is_some() {
+			break;
 		}
 	}
 	let pmt_pid = pmt_pid.context("input has no PAT/PMT PID")?;
@@ -179,13 +183,15 @@ fn main() -> anyhow::Result<()> {
 		.collect();
 	// Force strictly increasing positions so two cues never collapse onto one packet; the
 	// per-packet `position()` lookup below would otherwise emit only the first and drop the
-	// rest. Clamp to the last packet so we never index past the end.
-	let last = packets.len().saturating_sub(1);
+	// rest. Don't clamp: a collision at the tail must error rather than silently drop a cue.
 	for i in 1..cue_at.len() {
-		if cue_at[i] <= cue_at[i - 1] {
-			cue_at[i] = (cue_at[i - 1] + 1).min(last);
-		}
+		cue_at[i] = cue_at[i].max(cue_at[i - 1] + 1);
 	}
+	anyhow::ensure!(
+		cue_at.last().is_none_or(|&pos| pos < packets.len()),
+		"input too short to place {} cues after the PMT without collisions",
+		cue_at.len()
+	);
 
 	let mut out = Vec::new();
 	for (i, p) in packets.iter().enumerate() {
