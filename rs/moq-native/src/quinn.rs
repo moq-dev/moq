@@ -187,7 +187,7 @@ impl QuinnClient {
 			let fingerprint = resp.text().await.map_err(Error::ReadFingerprint)?;
 			let fingerprint = hex::decode(fingerprint.trim())?;
 
-			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), fingerprint);
+			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), vec![fingerprint]);
 			config.dangerous().set_certificate_verifier(Arc::new(verifier));
 
 			url.set_scheme("https").expect("failed to set scheme");

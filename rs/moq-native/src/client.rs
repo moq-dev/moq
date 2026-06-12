@@ -460,6 +460,36 @@ mod tests {
 	}
 
 	#[test]
+	fn test_toml_fingerprint_survives_update_from() {
+		let toml = r#"
+			tls.fingerprint = ["abcd1234", "ef567890"]
+		"#;
+
+		let mut config: ClientConfig = toml::from_str(toml).unwrap();
+		assert_eq!(config.tls.fingerprint, vec!["abcd1234", "ef567890"]);
+
+		// Simulate: TOML loaded, then CLI args re-applied (no --tls-fingerprint flag).
+		config.update_from(["test"]);
+		assert_eq!(config.tls.fingerprint, vec!["abcd1234", "ef567890"]);
+	}
+
+	#[test]
+	fn test_toml_fingerprint_accepts_single_string() {
+		let toml = r#"
+			tls.fingerprint = "abcd1234"
+		"#;
+
+		let config: ClientConfig = toml::from_str(toml).unwrap();
+		assert_eq!(config.tls.fingerprint, vec!["abcd1234"]);
+	}
+
+	#[test]
+	fn test_cli_fingerprint() {
+		let config = ClientConfig::parse_from(["test", "--tls-fingerprint", "abcd1234"]);
+		assert_eq!(config.tls.fingerprint, vec!["abcd1234"]);
+	}
+
+	#[test]
 	fn test_toml_version_survives_update_from() {
 		let toml = r#"
 			version = ["moq-lite-02"]

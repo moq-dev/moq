@@ -83,6 +83,28 @@ impl MoqClient {
 		}
 	}
 
+	/// Trust these PEM root certificate file(s) instead of the system roots.
+	///
+	/// Pass the paths to PEM-encoded CA certificates. An empty list restores the
+	/// default behavior of using the platform's native root store.
+	pub fn set_tls_roots(&self, paths: Vec<String>) {
+		if let Some(mut state) = self.task.lock() {
+			state.config.tls.root = paths.into_iter().map(Into::into).collect();
+		}
+	}
+
+	/// Pin the peer to a certificate with one of these SHA-256 fingerprints, encoded as hex.
+	///
+	/// This is the native equivalent of the browser's WebTransport `serverCertificateHashes`
+	/// and accepts the same values a server reports (see `MoqServer.cert_fingerprints`). Use it
+	/// to trust a self-signed certificate without disabling verification. An empty list clears
+	/// any pinned fingerprints.
+	pub fn set_tls_fingerprints(&self, fingerprints: Vec<String>) {
+		if let Some(mut state) = self.task.lock() {
+			state.config.tls.fingerprint = fingerprints;
+		}
+	}
+
 	/// Set the local UDP socket bind address. Defaults to `[::]:0`.
 	///
 	/// Returns an error if the address cannot be parsed.
