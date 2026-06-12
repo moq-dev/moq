@@ -1,12 +1,33 @@
-//! Compares the memchr-based `find_start_code` against the original
-//! byte-at-a-time scalar scanner it replaced.
+//! Benchmarks several `find_start_code` implementations against each other:
+//!
+//! - `naive`:  check every byte triplet for `00 00 01`.
+//! - `scalar`: the original branch-per-byte scanner that skips up to 4 bytes.
+//! - `memmem`: the production `find_start_code`, a SIMD substring search for `00 00 01`.
+//! - `memchr`: SIMD scan for the sparse `0x01` byte, then a cheap `00 00` head check.
+//!
+//! All four must agree on every input (asserted before timing), so the only
+//! difference measured is speed.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use moq_mux::codec::annexb::find_start_code;
 use std::hint::black_box;
 
-/// The original scalar scanner, kept here as a baseline to benchmark against.
-/// The production code now uses `find_start_code` (memchr substring search).
+/// Truly naive baseline: walk one byte at a time looking for `00 00 01`.
+fn find_start_code_naive(b: &[u8]) -> Option<(usize, usize)> {
+	let mut i = 0;
+	while i + 3 <= b.len() {
+		if b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 1 {
+			if i > 0 && b[i - 1] == 0 {
+				return Some((i - 1, 4));
+			}
+			return Some((i, 3));
+		}
+		i += 1;
+	}
+	None
+}
+
+/// The original scalar scanner that this PR replaced, kept here as a baseline.
 fn find_start_code_scalar(mut b: &[u8]) -> Option<(usize, usize)> {
 	let size = b.len();
 
@@ -36,6 +57,26 @@ fn find_start_code_scalar(mut b: &[u8]) -> Option<(usize, usize)> {
 	}
 
 	None
+}
+
+/// memchr variant: a start code's `01` byte sits at index >= 2, and `0x01` is
+/// sparse (~1/256) in random data, so scan for it with a single-byte SIMD search
+/// and confirm the two preceding bytes are `00 00` (a cheap 16-bit compare).
+fn find_start_code_memchr(b: &[u8]) -> Option<(usize, usize)> {
+	if b.len() < 3 {
+		return None;
+	}
+
+	let one = memchr::memchr_iter(0x01, &b[2..])
+		.map(|idx| idx + 2)
+		.find(|&idx| b[idx - 2..idx] == [0, 0])?;
+
+	let start = one - 2;
+	if start > 0 && b[start - 1] == 0 {
+		Some((start - 1, 4))
+	} else {
+		Some((start, 3))
+	}
 }
 
 /// Deterministic xorshift so the benchmark inputs are stable across runs.
@@ -97,23 +138,66 @@ fn sparse_with_near_misses() -> Vec<u8> {
 	out
 }
 
+/// Walk the whole buffer NAL by NAL, returning how many start codes were found.
+/// Mimics real iterator usage: many `find` calls on a shrinking buffer, where
+/// per-call setup cost (e.g. memmem's) is paid once per NAL instead of amortized.
+fn split_all(mut b: &[u8], find: fn(&[u8]) -> Option<(usize, usize)>) -> usize {
+	let mut count = 0;
+	while let Some((pos, size)) = find(b) {
+		let next = pos + size;
+		if next >= b.len() {
+			break;
+		}
+		b = &b[next..];
+		count += 1;
+	}
+	count
+}
+
+const IMPLS: &[(&str, fn(&[u8]) -> Option<(usize, usize)>)] = &[
+	("naive", find_start_code_naive),
+	("scalar", find_start_code_scalar),
+	("memmem", find_start_code),
+	("memchr", find_start_code_memchr),
+];
+
 fn bench(c: &mut Criterion) {
 	let inputs = [
 		("typical_2kb_nals", typical_stream()),
 		("sparse_1mb_near_misses", sparse_with_near_misses()),
 	];
 
+	// All implementations must agree before we trust the timings.
 	for (name, data) in &inputs {
-		let mut group = c.benchmark_group(*name);
+		let want = find_start_code_naive(data);
+		for (label, f) in IMPLS {
+			assert_eq!(f(data), want, "{label} disagrees on single-find for {name}");
+		}
+	}
+
+	// Single find: locate the next start code in one buffer.
+	for (name, data) in &inputs {
+		let mut group = c.benchmark_group(format!("find/{name}"));
 		group.throughput(Throughput::Bytes(data.len() as u64));
-
-		group.bench_function("memchr", |b| b.iter(|| black_box(find_start_code(black_box(data)))));
-		group.bench_function("scalar", |b| {
-			b.iter(|| black_box(find_start_code_scalar(black_box(data))))
-		});
-
+		for (label, f) in IMPLS {
+			group.bench_function(*label, |b| b.iter(|| black_box(f(black_box(data)))));
+		}
 		group.finish();
 	}
+
+	// Split-all: repeated finds across the whole stream, NAL by NAL.
+	let (name, data) = &inputs[0];
+	let want = split_all(data, find_start_code_naive);
+	for (label, f) in IMPLS {
+		assert_eq!(split_all(data, *f), want, "{label} disagrees on split count");
+	}
+
+	let mut group = c.benchmark_group(format!("split_all/{name}"));
+	group.throughput(Throughput::Bytes(data.len() as u64));
+	for (label, f) in IMPLS {
+		group.bench_function(*label, |b| b.iter(|| black_box(split_all(black_box(data), *f))));
+	}
+	group.finish();
 }
 
 criterion_group!(benches, bench);
