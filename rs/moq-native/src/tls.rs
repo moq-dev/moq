@@ -38,6 +38,9 @@ pub enum Error {
 	#[error("invalid TLS fingerprint (expected hex-encoded SHA-256)")]
 	Fingerprint(#[source] hex::FromHexError),
 
+	#[error("invalid TLS fingerprint length: expected 32 bytes (SHA-256), got {0}")]
+	FingerprintLength(usize),
+
 	#[error("failed to add root certificate")]
 	AddRoot(#[source] rustls::Error),
 
@@ -211,7 +214,13 @@ impl Client {
 			let fingerprints = self
 				.fingerprint
 				.iter()
-				.map(|fp| hex::decode(fp.trim()).map_err(Error::Fingerprint))
+				.map(|fp| {
+					let bytes = hex::decode(fp.trim()).map_err(Error::Fingerprint)?;
+					match bytes.len() {
+						32 => Ok(bytes),
+						len => Err(Error::FingerprintLength(len)),
+					}
+				})
 				.collect::<Result<Vec<_>>>()?;
 
 			let verifier = FingerprintVerifier::new(provider, fingerprints);
@@ -448,6 +457,16 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(config.build(), Err(Error::Fingerprint(_))));
+	}
+
+	#[test]
+	fn build_rejects_wrong_length_fingerprint() {
+		// Valid hex, but only 2 bytes instead of 32.
+		let config = Client {
+			fingerprint: vec!["abcd".to_string()],
+			..Default::default()
+		};
+		assert!(matches!(config.build(), Err(Error::FingerprintLength(2))));
 	}
 }
 
