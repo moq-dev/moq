@@ -43,11 +43,6 @@ url = "2"
 webm-iterable = "0.6"
 
 [dev-dependencies]
-criterion = "0.7"
 futures = "0.3"
 serde_json = "1"
 tokio = { workspace = true, features = ["test-util"] }
-
-[[bench]]
-name = "annexb"
-harness = false
