@@ -1,7 +1,7 @@
 import type { Effect, Getter } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../element";
-import { formatBandwidth, formatBitrate, formatFps, formatHz, formatMillis } from "./format";
+import { formatBitrate, formatFps, formatHz, formatMillis } from "./format";
 import { graph } from "./graph";
 import { audio as audioIcon, icon, network as networkIcon, video as videoIcon } from "./icons";
 
@@ -67,12 +67,10 @@ function track(parent: Effect, card: { el: HTMLElement; status: HTMLElement }, o
 export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const container = DOM.create("div", { className: "tab-body stats" });
 
-	// Video card.
+	// Video card: static detail as rows, live bitrate/fps as graphs (no duplicate rows).
 	const videoCard = card("video", "Video", videoIcon);
 	const vRes = line(videoCard.grid, "Resolution");
 	const vCodec = line(videoCard.grid, "Codec");
-	const vFps = line(videoCard.grid, "Frame rate");
-	const vRate = line(videoCard.grid, "Bitrate");
 	const vBitrateGraph = graph(parent, "Bitrate", { color: "#a855f7", format: formatBitrate });
 	const vFpsGraph = graph(parent, "Frame rate", { color: "#facc15", format: formatFps });
 	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
@@ -94,11 +92,11 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		label: "muted",
 	});
 
-	// Network card.
+	// Network card: congestion-control estimate vs. the bitrate we actually pull.
 	const netCard = card("network", "Network", networkIcon);
-	const nDown = line(netCard.grid, "Download");
-	const nRtt = line(netCard.grid, "Round trip");
-	const nRttGraph = graph(parent, "RTT", { color: "#00dfff", format: (v) => formatMillis(v) });
+	const nMax = line(netCard.grid, "Estimated max");
+	const nActual = line(netCard.grid, "Actual");
+	const nRttGraph = graph(parent, "Round trip", { color: "#00dfff", format: (v) => formatMillis(v) });
 	netCard.el.append(nRttGraph.el);
 
 	container.append(videoCard.el, audioCard.el, netCard.el);
@@ -109,12 +107,13 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	parent.interval(() => {
 		const now = performance.now();
 
-		// Video.
-		const vCat = watch.backend.video.source.catalog.peek();
+		// Video. Resolution comes from the active rendition (catalog.display is optional).
 		const vConf = watch.backend.video.source.config.peek();
+		const vCat = watch.backend.video.source.catalog.peek();
 		const vStats = watch.backend.video.stats.peek();
-		const { width, height } = vCat?.display ?? {};
-		vRes.textContent = width && height ? `${width}×${height}` : "—";
+		const w = vConf?.codedWidth ?? vCat?.display?.width;
+		const h = vConf?.codedHeight ?? vCat?.display?.height;
+		vRes.textContent = w && h ? `${w}×${h}` : "—";
 		vCodec.textContent = vConf?.codec ?? "—";
 
 		let fps: number | undefined;
@@ -124,8 +123,6 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 			if (delta > 0 && elapsed > 0) fps = delta / (elapsed / 1000);
 		}
 		const vBitrate = vStats ? rate(vPrev, vStats.bytesReceived, now) : undefined;
-		vFps.textContent = fps !== undefined ? formatFps(fps) : "—";
-		vRate.textContent = vBitrate !== undefined ? formatBitrate(vBitrate) : "—";
 		vBitrateGraph.push(vBitrate);
 		vFpsGraph.push(fps);
 		if (vStats) vPrev = { frames: vStats.frameCount, bytes: vStats.bytesReceived, when: now };
@@ -136,15 +133,19 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		aCodec.textContent = aConf?.codec ?? "—";
 		aRate2.textContent = aConf?.sampleRate ? formatHz(aConf.sampleRate) : "—";
 		aChannels.textContent = aConf?.numberOfChannels ? `${aConf.numberOfChannels}` : "—";
-		const aBitrateVal = aStats ? rate(aPrev, aStats.bytesReceived, now) : undefined;
-		aBitrate.textContent = aBitrateVal !== undefined ? formatBitrate(aBitrateVal) : "—";
+		const aBitrate2 = aStats ? rate(aPrev, aStats.bytesReceived, now) : undefined;
+		aBitrate.textContent = aBitrate2 !== undefined ? formatBitrate(aBitrate2) : "—";
 		if (aStats) aPrev = { bytes: aStats.bytesReceived, when: now };
 
-		// Network.
+		// Network. "Estimated max" is the congestion controller / PROBE estimate;
+		// "Actual" is the goodput we measure from the video + audio byte counters.
 		const conn = watch.connection.established.peek();
-		nDown.textContent = formatBandwidth(conn?.recvBandwidth?.peek(), "down")?.replace("↓ ", "") ?? "—";
+		const estimate = conn?.recvBandwidth?.peek();
+		nMax.textContent = estimate ? formatBitrate(estimate) : "—";
+		const actual =
+			vBitrate !== undefined || aBitrate2 !== undefined ? (vBitrate ?? 0) + (aBitrate2 ?? 0) : undefined;
+		nActual.textContent = actual !== undefined ? formatBitrate(actual) : "—";
 		const rtt = conn?.rtt?.peek();
-		nRtt.textContent = rtt !== undefined && rtt > 0 ? formatMillis(rtt) : "—";
 		nRttGraph.push(rtt !== undefined && rtt > 0 ? rtt : undefined);
 	}, POLL_MS);
 

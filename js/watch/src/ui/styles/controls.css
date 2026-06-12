@@ -103,9 +103,26 @@
 	letter-spacing: 0.04em;
 }
 
+/* Latency is secondary: reveal it only on hover/focus of the badge. */
 .badge-latency {
+	max-width: 0;
+	margin-left: calc(-1 * var(--spacing-8));
+	opacity: 0;
+	overflow: hidden;
+	white-space: nowrap;
 	font-variant-numeric: tabular-nums;
 	color: var(--color-white-alpha-60);
+	transition:
+		max-width 160ms var(--ease),
+		margin-left 160ms var(--ease),
+		opacity 160ms var(--ease);
+}
+
+.badge:hover .badge-latency,
+.badge:focus-visible .badge-latency {
+	max-width: 9rem;
+	margin-left: 0;
+	opacity: 1;
 }
 
 .badge[data-variant="live"] .badge-dot {

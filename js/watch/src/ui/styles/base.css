@@ -110,10 +110,6 @@
 	color: var(--accent);
 }
 
-.control--muted {
-	color: var(--color-red-400);
-}
-
 .control:disabled {
 	opacity: 0.4;
 	cursor: default;
