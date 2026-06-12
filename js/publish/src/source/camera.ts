@@ -32,8 +32,11 @@ export class Camera {
 		const device = effect.get(this.device.requested);
 		const constraints = effect.get(this.constraints) ?? {};
 
-		// Build final constraints with device selection
+		// Build final constraints with device selection. Default to 720p (browsers
+		// otherwise tend to pick 480p); explicit constraints override these.
 		const finalConstraints: MediaTrackConstraints = {
+			width: { ideal: 1280 },
+			height: { ideal: 720 },
 			...constraints,
 			deviceId: device ? { exact: device } : undefined,
 		};

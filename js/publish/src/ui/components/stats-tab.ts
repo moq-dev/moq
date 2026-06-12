@@ -2,8 +2,11 @@ import type { Catalog } from "@moq/hang";
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqPublish from "../../element";
-import { formatBitrate, formatHz } from "../format";
+import { formatBitrate, formatFps, formatHz } from "../format";
+import { graph } from "../graph";
 import { audio as audioIcon, icon, video as videoIcon, wifi as wifiIcon } from "../icons";
+
+const POLL_MS = 250;
 
 type Kind = "network" | "video" | "audio";
 
@@ -30,15 +33,17 @@ function firstRendition<T>(catalog: { renditions?: Record<string, T> } | undefin
 	return catalog ? Object.values(catalog.renditions ?? {})[0] : undefined;
 }
 
-/** The Stats tab: what we're currently publishing. */
+/** The Stats tab: what we're capturing and publishing. */
 export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	const container = DOM.create("div", { className: "tab-body" });
 
+	// Video card: static detail as rows, live capture fps + upload bitrate as graphs.
 	const videoCard = card("video", "Video", videoIcon);
 	const vRes = line(videoCard.grid, "Resolution");
 	const vCodec = line(videoCard.grid, "Codec");
-	const vFps = line(videoCard.grid, "Frame rate");
-	const vRate = line(videoCard.grid, "Bitrate");
+	const vBitrateGraph = graph(parent, "Bitrate", { color: "#a855f7", format: formatBitrate });
+	const vFpsGraph = graph(parent, "Frame rate", { color: "#facc15", format: formatFps });
+	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
 
 	const audioCard = card("audio", "Audio", audioIcon);
 	const aCodec = line(audioCard.grid, "Codec");
@@ -53,24 +58,17 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 
 	container.append(videoCard.el, audioCard.el, netCard.el);
 
+	// Resolution/codec from the live capture (display) + catalog; card hides when not capturing video.
 	parent.run((effect) => {
-		const catalog = effect.get(publish.broadcast.video.catalog) as Catalog.Video | undefined;
-		const cfg = firstRendition<Catalog.VideoConfig>(catalog);
-		const display = catalog?.display;
-		const present = !!cfg;
-		videoCard.el.style.display = present ? "" : "none";
-		if (!cfg) return;
-		const w = display?.width ?? cfg.codedWidth;
-		const h = display?.height ?? cfg.codedHeight;
-		vRes.textContent = w && h ? `${w}×${h}` : "—";
-		vCodec.textContent = cfg.codec ?? "—";
-		vFps.textContent = cfg.framerate ? `${Math.round(cfg.framerate)} fps` : "—";
-		vRate.textContent = cfg.bitrate ? formatBitrate(cfg.bitrate) : "—";
+		const display = effect.get(publish.broadcast.video.display);
+		const cfg = firstRendition<Catalog.VideoConfig>(effect.get(publish.broadcast.video.catalog) as Catalog.Video);
+		videoCard.el.style.display = display ? "" : "none";
+		vRes.textContent = display ? `${display.width}×${display.height}` : "—";
+		vCodec.textContent = cfg?.codec ?? "—";
 	});
 
 	parent.run((effect) => {
-		const catalog = effect.get(publish.broadcast.audio.catalog) as Catalog.Audio | undefined;
-		const cfg = firstRendition<Catalog.AudioConfig>(catalog);
+		const cfg = firstRendition<Catalog.AudioConfig>(effect.get(publish.broadcast.audio.catalog) as Catalog.Audio);
 		audioCard.el.style.display = cfg ? "" : "none";
 		if (!cfg) return;
 		aCodec.textContent = cfg.codec ?? "—";
@@ -87,6 +85,27 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		nServer.textContent = url?.host ?? "—";
 		nName.textContent = name?.toString() || "—";
 	});
+
+	// Live graphs: frame rate from captured frames, bitrate from the upload estimate.
+	let frames = 0;
+	parent.subscribe(publish.broadcast.video.frame, () => {
+		frames++;
+	});
+	let prevFrames = 0;
+	let prevWhen = performance.now();
+
+	parent.interval(() => {
+		const now = performance.now();
+		const elapsed = now - prevWhen;
+		const delta = frames - prevFrames;
+		const fps = elapsed > 0 && delta > 0 ? delta / (elapsed / 1000) : undefined;
+		prevFrames = frames;
+		prevWhen = now;
+		vFpsGraph.push(fps);
+
+		const upload = publish.connection.established.peek()?.sendBandwidth?.peek();
+		vBitrateGraph.push(upload && upload > 0 ? upload : undefined);
+	}, POLL_MS);
 
 	return container;
 }

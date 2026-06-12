@@ -303,3 +303,36 @@
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
+
+/* Sparkline graph (shared shape with the watch stats panel). */
+.graph {
+	display: flex;
+	flex-direction: column;
+	gap: var(--spacing-2);
+	margin-top: var(--spacing-4);
+}
+
+.graph-header {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+}
+
+.graph-label {
+	font-size: 0.625rem;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--color-white-alpha-40);
+}
+
+.graph-value {
+	font-size: 0.6875rem;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+
+.graph-canvas {
+	width: 100%;
+	height: 2.5rem;
+	display: block;
+}

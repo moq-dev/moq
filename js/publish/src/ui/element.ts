@@ -88,10 +88,28 @@ export default class MoqPublishUi extends HTMLElement {
 		player.append(scrimTop, center(effect, publish), chrome, panel);
 		DOM.render(effect, this.#root, player);
 
-		// Reserve a 16:9 box (and show a backdrop) when there's no live preview.
+		// Keep the player box from jumping when video toggles off: reserve the
+		// last live preview's aspect ratio (defaults to 16:9) instead of snapping.
+		let lastAspect = 16 / 9;
 		effect.run((e) => {
-			const hasPreview = !!e.get(publish.broadcast.video.source);
-			player.classList.toggle("player--empty", !hasPreview);
+			const src = e.get(publish.broadcast.video.source);
+			if (src) {
+				player.classList.remove("player--empty");
+				player.style.aspectRatio = "";
+				const video = this.querySelector("video") as HTMLVideoElement | null;
+				if (video) {
+					const measure = () => {
+						if (video.videoWidth > 0 && video.videoHeight > 0)
+							lastAspect = video.videoWidth / video.videoHeight;
+					};
+					measure();
+					e.event(video, "loadedmetadata", measure);
+					e.event(video, "resize", measure);
+				}
+			} else {
+				player.style.aspectRatio = String(lastAspect);
+				player.classList.add("player--empty");
+			}
 		});
 
 		this.#wireChrome(effect, publish, state, player);

@@ -5,6 +5,27 @@ import { type Codec, type Full, isSupported, type Partial } from "./";
 // https://bugzilla.mozilla.org/show_bug.cgi?id=1967793
 const isFirefox = navigator.userAgent.toLowerCase().includes("firefox");
 
+// Themed pill button matching the player UI, with a hover highlight.
+function stylePill(effect: Effect, button: HTMLButtonElement) {
+	Object.assign(button.style, {
+		fontSize: "0.75rem",
+		fontWeight: "500",
+		color: "#ffffff",
+		background: "rgba(255, 255, 255, 0.1)",
+		border: "none",
+		borderRadius: "0.375rem",
+		padding: "0.35rem 0.75rem",
+		cursor: "pointer",
+		transition: "background-color 120ms",
+	});
+	effect.event(button, "mouseenter", () => {
+		button.style.background = "rgba(255, 255, 255, 0.2)";
+	});
+	effect.event(button, "mouseleave", () => {
+		button.style.background = "rgba(255, 255, 255, 0.1)";
+	});
+}
+
 const OBSERVED = ["show", "details"] as const;
 type Observed = (typeof OBSERVED)[number];
 
@@ -112,9 +133,16 @@ export default class MoqPublishSupport extends HTMLElement {
 
 		const container = DOM.create("div", {
 			style: {
-				margin: "0 auto",
+				margin: "1rem auto",
 				maxWidth: "28rem",
 				padding: "1rem",
+				background: "rgba(18, 18, 20, 0.92)",
+				border: "1px solid rgba(255, 255, 255, 0.15)",
+				borderRadius: "0.75rem",
+				boxShadow: "0 0.5rem 2rem rgba(0, 0, 0, 0.6)",
+				color: "#ffffff",
+				fontFamily: "system-ui, sans-serif",
+				fontSize: "0.875rem",
 			},
 		});
 
@@ -152,10 +180,8 @@ export default class MoqPublishSupport extends HTMLElement {
 			statusDiv.textContent = "🔴 No Browser Support";
 		}
 
-		const detailsButton = DOM.create("button", {
-			type: "button",
-			style: { fontSize: "14px" },
-		});
+		const detailsButton = DOM.create("button", { type: "button" });
+		stylePill(effect, detailsButton);
 
 		effect.event(detailsButton, "click", () => {
 			this.#details.update((prev) => !prev);
@@ -165,14 +191,8 @@ export default class MoqPublishSupport extends HTMLElement {
 			detailsButton.textContent = effect.get(this.#details) ? "Details ➖" : "Details ➕";
 		});
 
-		const closeButton = DOM.create(
-			"button",
-			{
-				type: "button",
-				style: { fontSize: "14px" },
-			},
-			"Close ❌",
-		);
+		const closeButton = DOM.create("button", { type: "button" }, "Close ❌");
+		stylePill(effect, closeButton);
 
 		effect.event(closeButton, "click", () => {
 			this.#close.set(true);
@@ -192,11 +212,12 @@ export default class MoqPublishSupport extends HTMLElement {
 				display: "grid",
 				gridTemplateColumns: "1fr 1fr 1fr",
 				columnGap: "0.5rem",
-				rowGap: "0.2rem",
-				backgroundColor: "rgba(0, 0, 0, 0.6)",
+				rowGap: "0.25rem",
+				backgroundColor: "rgba(255, 255, 255, 0.05)",
 				borderRadius: "0.5rem",
-				padding: "1rem",
-				fontSize: "0.875rem",
+				padding: "0.75rem 1rem",
+				marginTop: "0.75rem",
+				fontSize: "0.8125rem",
 			},
 		});
 
