@@ -5,68 +5,6 @@ import { type Codec, type Full, isSupported, type Partial } from "./";
 // https://bugzilla.mozilla.org/show_bug.cgi?id=1967793
 const isFirefox = navigator.userAgent.toLowerCase().includes("firefox");
 
-// Themed pill button matching the player UI, with a hover highlight.
-function stylePill(effect: Effect, button: HTMLButtonElement) {
-	Object.assign(button.style, {
-		display: "inline-flex",
-		alignItems: "center",
-		gap: "0.35rem",
-		fontSize: "0.75rem",
-		fontWeight: "500",
-		color: "#ffffff",
-		background: "rgba(255, 255, 255, 0.1)",
-		border: "none",
-		borderRadius: "0.375rem",
-		padding: "0.35rem 0.75rem",
-		cursor: "pointer",
-		transition: "background-color 120ms",
-	});
-	effect.event(button, "mouseenter", () => {
-		button.style.background = "rgba(255, 255, 255, 0.2)";
-	});
-	effect.event(button, "mouseleave", () => {
-		button.style.background = "rgba(255, 255, 255, 0.1)";
-	});
-}
-
-type Level = "ok" | "warn" | "no";
-const LEVEL_COLOR: Record<Level, string> = { ok: "#22c55e", warn: "#facc15", no: "#f87171" };
-
-function svg(paths: string, color: string, size = 14, width = 2.5): string {
-	return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
-}
-
-// Status glyphs: check (ok) / dash (warn) / cross (no), tinted by level.
-const LEVEL_PATHS: Record<Level, string> = {
-	ok: '<path d="M20 6 9 17l-5-5"/>',
-	warn: '<path d="M5 12h14"/>',
-	no: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
-};
-const ICON_CHEVRON_DOWN = '<path d="m6 9 6 6 6-6"/>';
-const ICON_CHEVRON_UP = '<path d="m18 15-6-6-6 6"/>';
-const ICON_CLOSE = '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>';
-
-function glyph(raw: string): HTMLElement {
-	const span = DOM.create("span", { style: { display: "inline-flex", flexShrink: "0" } });
-	span.innerHTML = raw;
-	return span;
-}
-
-// A right-aligned "<icon> label" status cell.
-function statusCell(level: Level, label: string): HTMLElement {
-	const cell = DOM.create("div", {
-		style: {
-			display: "flex",
-			alignItems: "center",
-			gap: "0.35rem",
-			justifyContent: "flex-end",
-			whiteSpace: "nowrap",
-		},
-	});
-	cell.append(glyph(svg(LEVEL_PATHS[level], LEVEL_COLOR[level])), DOM.create("span", {}, label));
-	return cell;
-}
-
 const OBSERVED = ["show", "details"] as const;
 type Observed = (typeof OBSERVED)[number];
 
@@ -173,16 +111,9 @@ export default class MoqWatchSupport extends HTMLElement {
 
 		const container = DOM.create("div", {
 			style: {
-				margin: "1rem auto",
+				margin: "0 auto",
 				maxWidth: "28rem",
 				padding: "1rem",
-				background: "rgba(18, 18, 20, 0.92)",
-				border: "1px solid rgba(255, 255, 255, 0.15)",
-				borderRadius: "0.75rem",
-				boxShadow: "0 0.5rem 2rem rgba(0, 0, 0, 0.6)",
-				color: "#ffffff",
-				fontFamily: "system-ui, sans-serif",
-				fontSize: "0.875rem",
 			},
 		});
 
@@ -209,38 +140,38 @@ export default class MoqWatchSupport extends HTMLElement {
 		});
 
 		const statusDiv = DOM.create("div", {
-			style: { display: "flex", alignItems: "center", gap: "0.4rem", fontWeight: "bold" },
+			style: { fontWeight: "bold" },
 		});
-		const statusLevel: Level = summary === "full" ? "ok" : summary === "partial" ? "warn" : "no";
-		const statusText =
-			summary === "full"
-				? "Full Browser Support"
-				: summary === "partial"
-					? "Partial Browser Support"
-					: "No Browser Support";
-		statusDiv.append(
-			glyph(svg(LEVEL_PATHS[statusLevel], LEVEL_COLOR[statusLevel], 16)),
-			DOM.create("span", {}, statusText),
-		);
 
-		const detailsButton = DOM.create("button", { type: "button" });
-		stylePill(effect, detailsButton);
+		if (summary === "full") {
+			statusDiv.textContent = "🟢 Full Browser Support";
+		} else if (summary === "partial") {
+			statusDiv.textContent = "🟡 Partial Browser Support";
+		} else if (summary === "none") {
+			statusDiv.textContent = "🔴 No Browser Support";
+		}
+
+		const detailsButton = DOM.create("button", {
+			type: "button",
+			style: { fontSize: "14px" },
+		});
 
 		effect.event(detailsButton, "click", () => {
 			this.#details.update((prev) => !prev);
 		});
 
 		effect.run((effect) => {
-			const open = effect.get(this.#details);
-			detailsButton.replaceChildren(
-				glyph(svg(open ? ICON_CHEVRON_UP : ICON_CHEVRON_DOWN, "currentColor", 14, 2)),
-				DOM.create("span", {}, "Details"),
-			);
+			detailsButton.textContent = effect.get(this.#details) ? "Details ➖" : "Details ➕";
 		});
 
-		const closeButton = DOM.create("button", { type: "button" });
-		closeButton.append(glyph(svg(ICON_CLOSE, "currentColor", 14, 2)), DOM.create("span", {}, "Close"));
-		stylePill(effect, closeButton);
+		const closeButton = DOM.create(
+			"button",
+			{
+				type: "button",
+				style: { fontSize: "14px" },
+			},
+			"Close ❌",
+		);
 
 		effect.event(closeButton, "click", () => {
 			this.#close.set(true);
@@ -258,60 +189,88 @@ export default class MoqWatchSupport extends HTMLElement {
 		const container = DOM.create("div", {
 			style: {
 				display: "grid",
-				gridTemplateColumns: "1fr auto",
-				alignItems: "center",
-				columnGap: "1rem",
-				rowGap: "0.4rem",
-				backgroundColor: "rgba(255, 255, 255, 0.05)",
+				gridTemplateColumns: "1fr 1fr 1fr",
+				columnGap: "0.5rem",
+				rowGap: "0.2rem",
+				backgroundColor: "rgba(0, 0, 0, 0.6)",
 				borderRadius: "0.5rem",
-				padding: "0.75rem",
-				marginTop: "0.75rem",
-				fontSize: "0.8125rem",
+				padding: "1rem",
+				fontSize: "0.875rem",
 			},
 		});
 
-		const binary = (value: boolean | undefined): [Level, string] => (value ? ["ok", "Yes"] : ["no", "No"]);
-		const hardware = (codec: Codec | undefined): [Level, string] =>
-			codec?.hardware
-				? ["ok", "Hardware"]
-				: codec?.software
-					? ["warn", `Software${isFirefox ? "*" : ""}`]
-					: ["no", "No"];
-		const partial = (value: Partial | undefined): [Level, string] =>
-			value === "full" ? ["ok", "Full"] : value === "partial" ? ["warn", "Polyfill"] : ["no", "None"];
+		const binary = (value: boolean | undefined) => (value ? "🟢 Yes" : "🔴 No");
+		const hardware = (codec: Codec | undefined) =>
+			codec?.hardware ? "🟢 Hardware" : codec?.software ? `🟡 Software${isFirefox ? "*" : ""}` : "🔴 No";
+		const partial = (value: Partial | undefined) =>
+			value === "full" ? "🟢 Full" : value === "partial" ? "🟡 Polyfill" : "🔴 None";
 
-		const addRow = (label: string, [level, text]: [Level, string]) => {
-			container.appendChild(DOM.create("div", { style: { color: "rgba(255, 255, 255, 0.7)" } }, label));
-			container.appendChild(statusCell(level, text));
+		const addRow = (label: string, col2: string, col3: string) => {
+			const labelDiv = DOM.create(
+				"div",
+				{
+					style: {
+						gridColumnStart: "1",
+						fontWeight: "bold",
+						textAlign: "right",
+					},
+				},
+				label,
+			);
+
+			const col2Div = DOM.create(
+				"div",
+				{
+					style: {
+						gridColumnStart: "2",
+						textAlign: "center",
+					},
+				},
+				col2,
+			);
+
+			const col3Div = DOM.create(
+				"div",
+				{
+					style: { gridColumnStart: "3" },
+				},
+				col3,
+			);
+
+			container.appendChild(labelDiv);
+			container.appendChild(col2Div);
+			container.appendChild(col3Div);
 		};
 
-		addRow("WebTransport", partial(support.webtransport));
-		addRow("Audio render", binary(support.audio.render));
-		addRow("Video render", binary(support.video.render));
-		addRow("Opus decode", partial(support.audio.decoding.opus));
-		addRow("AAC decode", binary(support.audio.decoding.aac));
-		addRow("AV1 decode", hardware(support.video.decoding?.av1));
-		addRow("H.265 decode", hardware(support.video.decoding?.h265));
-		addRow("H.264 decode", hardware(support.video.decoding?.h264));
-		addRow("VP9 decode", hardware(support.video.decoding?.vp9));
-		addRow("VP8 decode", hardware(support.video.decoding?.vp8));
+		addRow("WebTransport", "", partial(support.webtransport));
+		addRow("Rendering", "Audio", binary(support.audio.render));
+		addRow("", "Video", binary(support.video.render));
+		addRow("Decoding", "Opus", partial(support.audio.decoding.opus));
+		addRow("", "AAC", binary(support.audio.decoding.aac));
+		addRow("", "AV1", hardware(support.video.decoding?.av1));
+		addRow("", "H.265", hardware(support.video.decoding?.h265));
+		addRow("", "H.264", hardware(support.video.decoding?.h264));
+		addRow("", "VP9", hardware(support.video.decoding?.vp9));
+		addRow("", "VP8", hardware(support.video.decoding?.vp8));
 
 		if (isFirefox) {
 			const noteDiv = DOM.create(
 				"div",
 				{
 					style: {
-						gridColumn: "1 / -1",
-						marginTop: "0.25rem",
-						fontSize: "0.75rem",
+						gridColumnStart: "1",
+						gridColumnEnd: "4",
+						textAlign: "center",
+						fontSize: "0.875rem",
 						fontStyle: "italic",
-						color: "rgba(255, 255, 255, 0.6)",
 					},
 				},
 				"Hardware acceleration is ",
 				DOM.create(
 					"a",
-					{ href: "https://github.com/w3c/webcodecs/issues/896", style: { color: "#ff9900" } },
+					{
+						href: "https://github.com/w3c/webcodecs/issues/896",
+					},
 					"undetectable",
 				),
 				" on Firefox.",
