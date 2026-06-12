@@ -142,11 +142,7 @@ impl<E: scte35::Catalog> Import<E> {
 			// (which only re-aligns on exact multiples of 188, so a sub-packet
 			// misalignment would desync permanently).
 			if self.scratch[off] != 0x47 {
-				if let Some(rel) = memchr::memchr(0x47, &self.scratch[off..]) {
-					off += rel;
-				} else {
-					off = self.scratch.len();
-				}
+				off = memchr::memchr(0x47, &self.scratch[off..]).map_or(self.scratch.len(), |rel| off + rel);
 				continue;
 			}
 			let pkt: [u8; TsPacket::SIZE] = self.scratch[off..off + TsPacket::SIZE].try_into().unwrap();
