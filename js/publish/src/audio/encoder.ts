@@ -393,12 +393,6 @@ interface OpusEncoderConfigExt extends OpusEncoderConfig {
 	signal?: "auto" | "voice" | "music";
 }
 
-// The AAC bitstream format is in the WebCodecs spec but missing from lib.dom.d.ts.
-// https://www.w3.org/TR/webcodecs-aac-codec-registration/#dom-aacencoderconfig
-interface AudioEncoderConfigExt extends AudioEncoderConfig {
-	aac?: { format?: "aac" | "adts" };
-}
-
 // Build the WebCodecs encoder config from the catalog (decoder) config, a Kind hint, and any
 // Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding. AAC has
 // no such knobs, so it just uses the shared base fields (codec/sampleRate/channels/bitrate).
@@ -407,7 +401,7 @@ function toEncoderConfig(
 	kind: Kind,
 	opusOptions: OpusEncoderConfigExt,
 ): AudioEncoderConfig {
-	const encoderConfig: AudioEncoderConfigExt = {
+	const encoderConfig: AudioEncoderConfig = {
 		codec: config.codec,
 		sampleRate: config.sampleRate,
 		numberOfChannels: config.numberOfChannels,
