@@ -51,7 +51,14 @@
 //! * `subscriptions` / `subscriptions_closed`: cumulative count of
 //!   track-level subscription guards opened/dropped.
 //! * `bytes` / `frames` / `groups`: cumulative payload counters bumped from
-//!   the session loops (both lite and IETF).
+//!   the session loops (both lite and IETF). These are the broadcast-level
+//!   rollup: the sum across every track, kept in sync on each bump so a
+//!   broadcast total is a single load, never an iteration over tracks.
+//! * `tracks`: per-track breakdown of the payload rollup, keyed by track name.
+//!   Each bump lands in both the rollup above and the track's own counters; a
+//!   track is forgotten once its last subscription closes (its bytes stay in
+//!   the rollup). [`Stats::snapshot`] exposes the same data in-process for a
+//!   local consumer (e.g. a CLI usage display) without subscribing here.
 //! * `sessions` / `sessions_closed` (session tracks only): cumulative count
 //!   of sessions connected/disconnected under an auth root on this tier.
 //!   Driven by [`StatsHandle::session`].
@@ -186,6 +193,31 @@ impl Counters {
 	}
 }
 
+/// Per-track payload counters within one `(side, tier)` slot of a broadcast.
+///
+/// Bumped from the track guard *alongside* the broadcast-level rollup in
+/// [`Counters`], so reading a broadcast total stays a single atomic load (no
+/// iteration over tracks) while the per-track breakdown is available for
+/// callers that want it (e.g. a CLI usage display). Shared via `Arc` between
+/// the guard and the entry's track map; the map drops its entry once the last
+/// guard releases (see the GC pass in `run_publisher`).
+#[derive(Default, Debug)]
+struct TrackCounters {
+	bytes: AtomicU64,
+	frames: AtomicU64,
+	groups: AtomicU64,
+}
+
+impl TrackCounters {
+	fn snapshot(&self) -> TrackCounts {
+		TrackCounts {
+			bytes: self.bytes.load(Ordering::Relaxed),
+			frames: self.frames.load(Ordering::Relaxed),
+			groups: self.groups.load(Ordering::Relaxed),
+		}
+	}
+}
+
 /// Per-(tier, root) session gauge. One of these is shared (via `Arc`) by every
 /// [`SessionStats`] guard for the same auth root on the same tier: `sessions`
 /// bumps on connect, `sessions_closed` on disconnect.
@@ -231,12 +263,85 @@ pub enum Tier {
 }
 
 impl Tier {
-	fn idx(self) -> usize {
+	/// Index of this tier in the per-tier arrays exposed on [`StatsSnapshot`]
+	/// and [`BroadcastSnapshot`] (external first, internal second).
+	pub fn idx(self) -> usize {
 		match self {
 			Tier::External => 0,
 			Tier::Internal => 1,
 		}
 	}
+}
+
+/// An immutable readout of every tracked counter at one instant, returned by
+/// [`Stats::snapshot`].
+///
+/// This is the in-process counterpart to the published stats broadcast: a
+/// caller (a CLI usage display, a test) gets the numbers directly instead of
+/// subscribing to `<prefix>/node/...` and parsing JSON frames. Counters are
+/// cumulative; compute rates by diffing successive snapshots. See the
+/// module-level docs for the meaning of each field.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StatsSnapshot {
+	/// Per-broadcast counters, keyed by broadcast path.
+	pub broadcasts: BTreeMap<PathOwned, BroadcastSnapshot>,
+	/// Live session gauges keyed by auth root, indexed by [`Tier::idx`]
+	/// (external first, internal second).
+	pub sessions: [BTreeMap<PathOwned, SessionCounts>; 2],
+}
+
+/// One broadcast's counters, split by side then tier (indexed by
+/// [`Tier::idx`]).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BroadcastSnapshot {
+	/// Egress (this node serving the broadcast to a peer), per tier.
+	pub publisher: [SideSnapshot; 2],
+	/// Ingress (this node receiving the broadcast from a peer), per tier.
+	pub subscriber: [SideSnapshot; 2],
+}
+
+/// Counters for one `(broadcast, side, tier)` slot: the broadcast-level rollup
+/// scalars plus a per-track payload breakdown. `bytes` / `frames` / `groups`
+/// are the rollup totals (the sum across every track, maintained incrementally
+/// so reading them never iterates `tracks`).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(serde::Deserialize))]
+#[non_exhaustive]
+pub struct SideSnapshot {
+	pub announced: u64,
+	pub announced_closed: u64,
+	pub broadcasts: u64,
+	pub broadcasts_closed: u64,
+	pub subscriptions: u64,
+	pub subscriptions_closed: u64,
+	pub bytes: u64,
+	pub frames: u64,
+	pub groups: u64,
+	/// Per-track payload, keyed by track name. A track appears while it has an
+	/// open subscription and is dropped once it stops flowing; its bytes remain
+	/// counted in the rollup totals above.
+	pub tracks: BTreeMap<String, TrackCounts>,
+}
+
+/// Cumulative payload counters for a single track.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(serde::Deserialize))]
+#[non_exhaustive]
+pub struct TrackCounts {
+	pub bytes: u64,
+	pub frames: u64,
+	pub groups: u64,
+}
+
+/// Live session gauge for one auth root: `sessions - sessions_closed` is the
+/// current connected count.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionCounts {
+	pub sessions: u64,
+	pub sessions_closed: u64,
 }
 
 /// Settings for a [`Stats`] aggregator. Construct with [`StatsConfig::new`]
@@ -346,6 +451,13 @@ struct StatsShared {
 struct BroadcastEntry {
 	publisher: [Counters; 2],
 	subscriber: [Counters; 2],
+	/// Per-track payload breakdown for each `(side, tier)` slot, indexed by
+	/// tier the same way as `publisher` / `subscriber`. The rollup totals in
+	/// `Counters` are kept in sync on every bump, so these maps are only read
+	/// when a caller wants the per-track view; a broadcast total never iterates
+	/// them.
+	publisher_tracks: [Lock<HashMap<String, Arc<TrackCounters>>>; 2],
+	subscriber_tracks: [Lock<HashMap<String, Arc<TrackCounters>>>; 2],
 }
 
 impl BroadcastEntry {
@@ -353,6 +465,58 @@ impl BroadcastEntry {
 		Self {
 			publisher: Default::default(),
 			subscriber: Default::default(),
+			publisher_tracks: Default::default(),
+			subscriber_tracks: Default::default(),
+		}
+	}
+
+	/// Get-or-create the shared [`TrackCounters`] for `name` on one slot.
+	fn track(&self, side: Side, tier: Tier, name: &str) -> Arc<TrackCounters> {
+		let map = match side {
+			Side::Publisher => &self.publisher_tracks[tier.idx()],
+			Side::Subscriber => &self.subscriber_tracks[tier.idx()],
+		};
+		map.lock().entry(name.to_owned()).or_default().clone()
+	}
+
+	/// Drop track entries whose last guard has released (`strong_count == 1` is
+	/// just the map's own `Arc`). Their payload already rolled up into
+	/// `Counters`, so the broadcast total is unaffected; only the per-track
+	/// view forgets a track once it stops flowing. Called from the snapshot
+	/// task after each tick's readout so a just-closed track surfaces once more
+	/// before disappearing.
+	fn gc_tracks(&self) {
+		for map in [&self.publisher_tracks, &self.subscriber_tracks] {
+			for slot in map {
+				slot.lock().retain(|_, t| Arc::strong_count(t) > 1);
+			}
+		}
+	}
+
+	/// Read one `(side, tier)` slot into a [`SideSnapshot`]: the rollup scalars
+	/// plus the per-track payload breakdown.
+	fn side_snapshot(&self, side: Side, tier: Tier) -> SideSnapshot {
+		let (counters, map) = match side {
+			Side::Publisher => (&self.publisher[tier.idx()], &self.publisher_tracks[tier.idx()]),
+			Side::Subscriber => (&self.subscriber[tier.idx()], &self.subscriber_tracks[tier.idx()]),
+		};
+		let raw = counters.snapshot();
+		let tracks = map
+			.lock()
+			.iter()
+			.map(|(name, t)| (name.clone(), t.snapshot()))
+			.collect();
+		SideSnapshot {
+			announced: raw.announced,
+			announced_closed: raw.announced_closed,
+			broadcasts: raw.broadcasts,
+			broadcasts_closed: raw.broadcasts_closed,
+			subscriptions: raw.subscriptions,
+			subscriptions_closed: raw.subscriptions_closed,
+			bytes: raw.bytes,
+			frames: raw.frames,
+			groups: raw.groups,
+			tracks,
 		}
 	}
 }
@@ -363,9 +527,9 @@ impl BroadcastEntry {
 /// [`BroadcastEntry`].
 #[derive(Default)]
 struct SlotState {
-	/// Last `Snapshot` we wrote to the frame for this slot, used to detect
+	/// Last snapshot we wrote to the frame for this slot, used to detect
 	/// changes that warrant re-emission.
-	prev_emitted: Option<Snapshot>,
+	prev_emitted: Option<SideSnapshot>,
 }
 
 /// Snapshot-task-local mirror of [`BroadcastEntry`]: per-side, per-tier
@@ -378,26 +542,25 @@ struct EntrySnapState {
 }
 
 impl EntrySnapState {
-	/// Iterate the four `(track_name, counters, slot_state)` slots in the
-	/// fixed order matching `TRACK_ORDER`.
-	fn zip_slots<'a>(&'a mut self, entry: &'a BroadcastEntry) -> [(&'static str, &'a Counters, &'a mut SlotState); 4] {
+	/// Iterate the four `(track_name, side, tier, slot_state)` slots in the
+	/// fixed order matching `TRACK_ORDER`. The caller reads the counters off
+	/// `entry` via [`BroadcastEntry::side_snapshot`].
+	fn zip_slots(&mut self) -> [(&'static str, Side, Tier, &mut SlotState); 4] {
 		let [pub_ext_state, pub_int_state] = &mut self.publisher;
 		let [sub_ext_state, sub_int_state] = &mut self.subscriber;
 		[
-			("publisher.json", &entry.publisher[Tier::External.idx()], pub_ext_state),
-			(
-				"subscriber.json",
-				&entry.subscriber[Tier::External.idx()],
-				sub_ext_state,
-			),
+			("publisher.json", Side::Publisher, Tier::External, pub_ext_state),
+			("subscriber.json", Side::Subscriber, Tier::External, sub_ext_state),
 			(
 				"internal/publisher.json",
-				&entry.publisher[Tier::Internal.idx()],
+				Side::Publisher,
+				Tier::Internal,
 				pub_int_state,
 			),
 			(
 				"internal/subscriber.json",
-				&entry.subscriber[Tier::Internal.idx()],
+				Side::Subscriber,
+				Tier::Internal,
 				sub_int_state,
 			),
 		]
@@ -475,6 +638,68 @@ impl Stats {
 			stats: self.clone(),
 			tier,
 		}
+	}
+
+	/// Read every tracked counter into a [`StatsSnapshot`] right now.
+	///
+	/// This is the in-process alternative to subscribing to the published stats
+	/// broadcast: a local consumer (e.g. a CLI usage display) calls this on an
+	/// interval and diffs successive snapshots to derive rates. Counters are
+	/// cumulative and the read is lock-per-map, not a global stop-the-world, so
+	/// a snapshot can straddle concurrent bumps (the same `open >= closed`
+	/// guarantee as the published path applies).
+	///
+	/// Returns an empty snapshot for a no-op aggregator (one built without an
+	/// origin). To collect stats from a tool that doesn't otherwise publish
+	/// them, build a [`Stats`] with a throwaway origin: the published broadcast
+	/// simply goes unconsumed while `snapshot` reads the same counters directly.
+	pub fn snapshot(&self) -> StatsSnapshot {
+		let mut out = StatsSnapshot::default();
+		let Some(shared) = &self.shared else {
+			return out;
+		};
+
+		let entries: Vec<(PathOwned, Arc<BroadcastEntry>)> = shared
+			.entries
+			.lock()
+			.iter()
+			.map(|(k, v)| (k.clone(), v.clone()))
+			.collect();
+		for (path, entry) in entries {
+			out.broadcasts.insert(
+				path,
+				BroadcastSnapshot {
+					publisher: [
+						entry.side_snapshot(Side::Publisher, Tier::External),
+						entry.side_snapshot(Side::Publisher, Tier::Internal),
+					],
+					subscriber: [
+						entry.side_snapshot(Side::Subscriber, Tier::External),
+						entry.side_snapshot(Side::Subscriber, Tier::Internal),
+					],
+				},
+			);
+		}
+
+		for tier_idx in 0..2 {
+			let roots: Vec<(PathOwned, Arc<SessionCounters>)> = shared.sessions[tier_idx]
+				.lock()
+				.iter()
+				.map(|(k, v)| (k.clone(), v.clone()))
+				.collect();
+			for (root, counters) in roots {
+				let (sessions, sessions_closed) = counters.snapshot();
+				out.sessions[tier_idx].insert(
+					root,
+					SessionCounts {
+						sessions,
+						sessions_closed,
+					},
+				);
+			}
+		}
+
+		out
 	}
 
 	fn entry(&self, path: impl AsPath) -> Option<Arc<BroadcastEntry>> {
@@ -628,32 +853,37 @@ impl BroadcastStats {
 		}
 	}
 
-	/// Open a publisher-track guard.
+	/// Open a publisher-track guard for `name`.
 	///
-	/// `_name` is unused; counters are per-broadcast only. The track name
-	/// parameter is kept for symmetry with the rest of moq-net so callers
-	/// don't have to thread an `Option<&str>` through subscribe sites.
-	pub fn publisher_track(&self, _name: &str) -> PublisherTrack {
-		if let Some(entry) = &self.entry {
+	/// Bumps the broadcast-level `subscriptions` rollup and resolves (or
+	/// creates) the per-track payload counters so the guard's `bytes` / `frame`
+	/// / `group` bumps land in both the broadcast rollup and this track's own
+	/// breakdown.
+	pub fn publisher_track(&self, name: &str) -> PublisherTrack {
+		let track = self.entry.as_ref().map(|entry| {
 			entry.publisher[self.tier.idx()]
 				.subscriptions
 				.fetch_add(1, Ordering::Relaxed);
-		}
+			entry.track(Side::Publisher, self.tier, name)
+		});
 		PublisherTrack {
 			entry: self.entry.clone(),
+			track,
 			tier: self.tier,
 		}
 	}
 
 	/// Subscriber-side counterpart to [`Self::publisher_track`].
-	pub fn subscriber_track(&self, _name: &str) -> SubscriberTrack {
-		if let Some(entry) = &self.entry {
+	pub fn subscriber_track(&self, name: &str) -> SubscriberTrack {
+		let track = self.entry.as_ref().map(|entry| {
 			entry.subscriber[self.tier.idx()]
 				.subscriptions
 				.fetch_add(1, Ordering::Relaxed);
-		}
+			entry.track(Side::Subscriber, self.tier, name)
+		});
 		SubscriberTrack {
 			entry: self.entry.clone(),
+			track,
 			tier: self.tier,
 		}
 	}
@@ -870,9 +1100,14 @@ impl Drop for SubscriberStats {
 }
 
 /// RAII subscription guard for the publisher role.
+///
+/// Each bump lands in two places: the broadcast-level rollup in [`Counters`]
+/// (so a broadcast total is a single load) and `track`'s own payload counters
+/// (the per-track breakdown). Both are `None` together for a no-op aggregator.
 #[must_use = "drop the guard to record the subscription as closed"]
 pub struct PublisherTrack {
 	entry: Option<Arc<BroadcastEntry>>,
+	track: Option<Arc<TrackCounters>>,
 	tier: Tier,
 }
 
@@ -882,6 +1117,9 @@ impl PublisherTrack {
 		if let Some(entry) = &self.entry {
 			entry.publisher[self.tier.idx()].frames.fetch_add(1, Ordering::Relaxed);
 		}
+		if let Some(track) = &self.track {
+			track.frames.fetch_add(1, Ordering::Relaxed);
+		}
 	}
 
 	/// Bumps `bytes` by `n`.
@@ -889,12 +1127,18 @@ impl PublisherTrack {
 		if let Some(entry) = &self.entry {
 			entry.publisher[self.tier.idx()].bytes.fetch_add(n, Ordering::Relaxed);
 		}
+		if let Some(track) = &self.track {
+			track.bytes.fetch_add(n, Ordering::Relaxed);
+		}
 	}
 
 	/// Bumps `groups` once.
 	pub fn group(&self) {
 		if let Some(entry) = &self.entry {
 			entry.publisher[self.tier.idx()].groups.fetch_add(1, Ordering::Relaxed);
+		}
+		if let Some(track) = &self.track {
+			track.groups.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 }
@@ -910,10 +1154,12 @@ impl Drop for PublisherTrack {
 	}
 }
 
-/// RAII subscription guard for the subscriber role.
+/// RAII subscription guard for the subscriber role. See [`PublisherTrack`] for
+/// the dual rollup/per-track bump behavior.
 #[must_use = "drop the guard to record the subscription as closed"]
 pub struct SubscriberTrack {
 	entry: Option<Arc<BroadcastEntry>>,
+	track: Option<Arc<TrackCounters>>,
 	tier: Tier,
 }
 
@@ -923,6 +1169,9 @@ impl SubscriberTrack {
 		if let Some(entry) = &self.entry {
 			entry.subscriber[self.tier.idx()].frames.fetch_add(1, Ordering::Relaxed);
 		}
+		if let Some(track) = &self.track {
+			track.frames.fetch_add(1, Ordering::Relaxed);
+		}
 	}
 
 	/// Bumps `bytes` by `n`.
@@ -930,12 +1179,18 @@ impl SubscriberTrack {
 		if let Some(entry) = &self.entry {
 			entry.subscriber[self.tier.idx()].bytes.fetch_add(n, Ordering::Relaxed);
 		}
+		if let Some(track) = &self.track {
+			track.bytes.fetch_add(n, Ordering::Relaxed);
+		}
 	}
 
 	/// Bumps `groups` once.
 	pub fn group(&self) {
 		if let Some(entry) = &self.entry {
 			entry.subscriber[self.tier.idx()].groups.fetch_add(1, Ordering::Relaxed);
+		}
+		if let Some(track) = &self.track {
+			track.groups.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 }
@@ -951,23 +1206,18 @@ impl Drop for SubscriberTrack {
 	}
 }
 
-/// Per-tick work for a single `(side, tier)` slot: build the emitted
-/// `Snapshot` from the raw counters, update the slot's `prev_emitted`, and
-/// hand the snap to `emit` iff the slot is live or changed this tick.
-fn process_slot(counters: &Counters, slot_state: &mut SlotState, mut emit: impl FnMut(Snapshot)) {
-	let raw = counters.snapshot();
-
-	let snap = Snapshot {
-		announced: raw.announced,
-		announced_closed: raw.announced_closed,
-		broadcasts: raw.broadcasts,
-		broadcasts_closed: raw.broadcasts_closed,
-		subscriptions: raw.subscriptions,
-		subscriptions_closed: raw.subscriptions_closed,
-		bytes: raw.bytes,
-		frames: raw.frames,
-		groups: raw.groups,
-	};
+/// Per-tick work for a single `(side, tier)` slot: read the slot into a
+/// [`SideSnapshot`] (rollup scalars plus the per-track breakdown), update the
+/// slot's `prev_emitted`, and hand the snap to `emit` iff the slot is live or
+/// changed this tick.
+fn process_slot(
+	entry: &BroadcastEntry,
+	side: Side,
+	tier: Tier,
+	slot_state: &mut SlotState,
+	mut emit: impl FnMut(SideSnapshot),
+) {
+	let snap = entry.side_snapshot(side, tier);
 
 	// A slot is live while any open counter still exceeds its `*_closed`
 	// counterpart: a guard is held, so a subscription could begin at any
@@ -984,15 +1234,18 @@ fn process_slot(counters: &Counters, slot_state: &mut SlotState, mut emit: impl 
 	// (incl. sub-tick flickers) and emits the final close snapshot on the
 	// tick a slot transitions to fully closed.
 	//
-	// `None` (slot never emitted) is treated as the default Snapshot so a
+	// `None` (slot never emitted) is treated as the default snapshot so a
 	// first-tick all-zeros snap on an unused tier-side slot doesn't count
 	// as a "change". Without this, every entry would surface in all four
 	// tracks with zeros on the tick after creation even if only one slot
 	// is actually in use.
-	let prev_snap = slot_state.prev_emitted.unwrap_or_default();
-	let changed = snap != prev_snap;
+	let changed = slot_state
+		.prev_emitted
+		.as_ref()
+		.map(|p| p != &snap)
+		.unwrap_or(snap != SideSnapshot::default());
 	if changed {
-		slot_state.prev_emitted = Some(snap);
+		slot_state.prev_emitted = Some(snap.clone());
 	}
 	if live || changed {
 		emit(snap);
@@ -1120,14 +1373,18 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 			map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 		};
 
-		let mut frames: [BTreeMap<String, Snapshot>; NUM_SLOTS] = Default::default();
+		let mut frames: [BTreeMap<String, SideSnapshot>; NUM_SLOTS] = Default::default();
 		for (path, entry) in &entries {
 			let snap_state = local.entry(path.clone()).or_default();
-			for (i, (_track_name, counters, slot_state)) in snap_state.zip_slots(entry).into_iter().enumerate() {
-				process_slot(counters, slot_state, |snap| {
+			for (i, (_track_name, side, tier, slot_state)) in snap_state.zip_slots().into_iter().enumerate() {
+				process_slot(entry, side, tier, slot_state, |snap| {
 					frames[i].insert(path.as_str().to_string(), snap);
 				});
 			}
+			// Drop track entries whose last guard released this tick. We just
+			// read them above, so a closed track still appears in this frame
+			// before the per-track view forgets it.
+			entry.gc_tracks();
 		}
 		drop(entries);
 
@@ -1179,24 +1436,6 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 
 		drop(shared);
 	}
-}
-
-/// What we emit for one entry on one tier-role track. Every field comes
-/// straight from [`RawCounts`]; `broadcasts` / `broadcasts_closed` are the
-/// per-(broadcast, session) subscription sentinel maintained by
-/// [`SessionBroadcasts`].
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(test, derive(serde::Deserialize))]
-struct Snapshot {
-	announced: u64,
-	announced_closed: u64,
-	broadcasts: u64,
-	broadcasts_closed: u64,
-	subscriptions: u64,
-	subscriptions_closed: u64,
-	bytes: u64,
-	frames: u64,
-	groups: u64,
 }
 
 /// What we emit for one root on a session track. `sessions - sessions_closed`
@@ -1286,6 +1525,73 @@ mod tests {
 		let e2 = entries.get(&PathOwned::from("demo/ccc")).expect("entry");
 		assert_eq!(e1.publisher[Tier::External.idx()].bytes.load(Relaxed), 100);
 		assert_eq!(e2.publisher[Tier::External.idx()].bytes.load(Relaxed), 7);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn per_track_breakdown_rolls_up_to_broadcast() {
+		// Two tracks on the same broadcast: the rollup is the sum (read with a
+		// single load, no iteration), and `snapshot` exposes each track.
+		let (stats, _origin) = test_stats(Some("sjc"));
+		let pubr = stats.tier(Tier::External).broadcast("demo/bbb").publisher();
+		let video = pubr.track("video");
+		let audio = pubr.track("audio");
+		video.bytes(100);
+		video.frame();
+		audio.bytes(7);
+
+		// Broadcast rollup is O(1): one atomic, already the sum across tracks.
+		{
+			let entries = stats.shared().entries.lock();
+			let entry = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
+			assert_eq!(entry.publisher[Tier::External.idx()].bytes.load(Relaxed), 107);
+		}
+
+		// Per-track breakdown via the public snapshot API.
+		let snap = stats.snapshot();
+		let bc = snap.broadcasts.get(&PathOwned::from("demo/bbb")).expect("broadcast");
+		let side = &bc.publisher[Tier::External.idx()];
+		assert_eq!(side.bytes, 107, "rollup total");
+		assert_eq!(side.tracks.get("video").expect("video").bytes, 100);
+		assert_eq!(side.tracks.get("video").expect("video").frames, 1);
+		assert_eq!(side.tracks.get("audio").expect("audio").bytes, 7);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn snapshot_drops_closed_track_but_keeps_rollup() {
+		// A track disappears from the per-track view once its guard drops, but
+		// its bytes stay counted in the broadcast rollup.
+		let (stats, _origin) = test_stats(Some("sjc"));
+		let pubr = stats.tier(Tier::External).broadcast("demo/bbb").publisher();
+		{
+			let video = pubr.track("video");
+			video.bytes(100);
+		} // guard dropped
+
+		// Let the snapshot task run a tick so its GC pass prunes the dead track.
+		tokio::time::advance(Duration::from_secs(2)).await;
+		tokio::task::yield_now().await;
+
+		let snap = stats.snapshot();
+		let bc = snap.broadcasts.get(&PathOwned::from("demo/bbb")).expect("broadcast");
+		let side = &bc.publisher[Tier::External.idx()];
+		assert_eq!(side.bytes, 100, "rollup retains closed-track bytes");
+		assert!(
+			!side.tracks.contains_key("video"),
+			"closed track pruned from per-track view"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn snapshot_empty_for_noop_aggregator() {
+		let stats = Stats::default();
+		let track = stats
+			.tier(Tier::External)
+			.broadcast("demo/bbb")
+			.publisher()
+			.track("video");
+		track.bytes(100);
+		let snap = stats.snapshot();
+		assert!(snap.broadcasts.is_empty());
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1798,7 +2104,7 @@ mod tests {
 		assert!(closed_pos < open_pos, "sessions_closed must be loaded before sessions",);
 	}
 
-	async fn read_frame(mut track: crate::TrackSubscriber) -> BTreeMap<String, Snapshot> {
+	async fn read_frame(mut track: crate::TrackSubscriber) -> BTreeMap<String, SideSnapshot> {
 		let bytes = track.read_frame().await.expect("ok").expect("frame");
 		serde_json::from_slice(&bytes).expect("json parse")
 	}
