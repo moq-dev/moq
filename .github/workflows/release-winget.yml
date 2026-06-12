@@ -1,0 +1,90 @@
+name: release-winget
+
+# Submits/updates the winget manifest for a CLI after its release workflow
+# publishes the GitHub Release (with the Windows .zip assets). The release is
+# created by the default GITHUB_TOKEN, which can't trigger a `release` event,
+# so this triggers on workflow_run like release-brew.yml.
+#
+# One-time bootstrap (winget-pkgs only lets you UPDATE an existing package):
+#   1. A maintainer lands the first manifest once via `wingetcreate new` (or a
+#      manual PR) for each PackageIdentifier below.
+#   2. Set the WINGET_TOKEN repo secret: a classic PAT with `public_repo`
+#      scope, owned by an account that has forked microsoft/winget-pkgs. By
+#      default the fork is looked up under the token owner.
+# After that every release is hands-off. Until the secret exists this is a
+# clean no-op.
+
+on:
+  workflow_run:
+    workflows:
+      - moq-cli
+      - moq-relay
+      - moq-token-cli
+    types:
+      - completed
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Submit winget manifest
+    if: ${{ github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'moq-') }}
+    runs-on: windows-latest
+
+    steps:
+      - name: Check for WINGET_TOKEN
+        id: gate
+        shell: bash
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [[ -z "${WINGET_TOKEN}" ]]; then
+            echo "WINGET_TOKEN not configured; skipping winget submission." >&2
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Parse crate and version
+        if: steps.gate.outputs.enabled == 'true'
+        id: parse
+        shell: bash
+        env:
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [[ ! "$TAG" =~ ^(.+)-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "Tag format not recognized: $TAG" >&2
+            exit 1
+          fi
+          crate="${BASH_REMATCH[1]}"
+          version="${BASH_REMATCH[2]}"
+          case "$crate" in
+            moq-cli)       identifier="moq-dev.moq-cli" ;;
+            moq-relay)     identifier="moq-dev.moq-relay" ;;
+            moq-token-cli) identifier="moq-dev.moq-token-cli" ;;
+            *)
+              echo "No winget identifier mapped for crate: $crate" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "version=$version"
+            echo "tag=$TAG"
+            echo "identifier=$identifier"
+          } >> "$GITHUB_OUTPUT"
+          echo "Submitting $identifier $version (tag $TAG)"
+
+      - name: Submit to winget-pkgs
+        if: steps.gate.outputs.enabled == 'true'
+        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          identifier: ${{ steps.parse.outputs.identifier }}
+          version: ${{ steps.parse.outputs.version }}
+          release-tag: ${{ steps.parse.outputs.tag }}
+          installers-regex: '-x86_64-pc-windows-msvc\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}

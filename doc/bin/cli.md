@@ -15,6 +15,12 @@ description: Command-line tools for MoQ media
 cargo install moq-cli
 ```
 
+### Using winget (Windows)
+
+```powershell
+winget install moq-dev.moq-cli
+```
+
 ### Using Nix
 
 ```bash
