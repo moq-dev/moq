@@ -25,12 +25,10 @@ iroh = ["dep:web-transport-iroh", "dep:web-transport-proto"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["dep:qmux"]
 ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring"]
-tokio-console = ["dep:console-subscriber"]
 android-logcat = ["dep:tracing-android"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-console-subscriber = { version = "0.5", optional = true }
 futures = "0.3"
 hex = "0.4"
 humantime = "2.3"
