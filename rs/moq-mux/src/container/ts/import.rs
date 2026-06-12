@@ -137,12 +137,15 @@ impl<E: scte35::Catalog> Import<E> {
 		// registered) before the packets that follow it in the same chunk route.
 		let mut off = 0;
 		while off + TsPacket::SIZE <= self.scratch.len() {
-			// TS packets start with 0x47. On a lost sync byte, scan forward one byte
-			// at a time for the next one instead of skipping a whole 188-byte stride
+			// TS packets start with 0x47. On a lost sync byte, jump to the next one
+			// (SIMD-accelerated via memchr) instead of skipping a whole 188-byte stride
 			// (which only re-aligns on exact multiples of 188, so a sub-packet
 			// misalignment would desync permanently).
 			if self.scratch[off] != 0x47 {
-				off += 1;
+				off = match memchr::memchr(0x47, &self.scratch[off..]) {
+					Some(rel) => off + rel,
+					None => self.scratch.len(),
+				};
 				continue;
 			}
 			let pkt: [u8; TsPacket::SIZE] = self.scratch[off..off + TsPacket::SIZE].try_into().unwrap();
