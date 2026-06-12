@@ -18,12 +18,12 @@ use std::time::Duration;
 
 use axum::Router;
 
-use crate::egress::{Broadcaster, Config};
+use crate::export::{Broadcaster, Config};
 
 /// How long to wait for a requested broadcast to be announced by the relay.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// HLS egress HTTP server. Cheap to clone (shared inner).
+/// HLS export HTTP server. Cheap to clone (shared inner).
 #[derive(Clone)]
 pub struct Server {
 	inner: Arc<Inner>,

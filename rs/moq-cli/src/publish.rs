@@ -1,6 +1,6 @@
 use clap::Subcommand;
 use hang::moq_net;
-use moq_hls::ingest as hls;
+use moq_hls::import as hls;
 use moq_mux::container::{fmp4, ts};
 
 #[derive(Subcommand, Clone)]

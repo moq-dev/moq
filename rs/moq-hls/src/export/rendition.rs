@@ -39,7 +39,7 @@ impl Rendition {
 			true,
 			cfg.part_target.as_secs_f64(),
 			cfg.audio_segment_target.as_secs_f64(),
-			cfg.window,
+			cfg.window.as_secs_f64(),
 		));
 		spawn_pump(broadcast, name.clone(), Kind::Video, store.clone(), cfg.clone());
 		Self {
@@ -58,7 +58,7 @@ impl Rendition {
 			false,
 			cfg.part_target.as_secs_f64(),
 			cfg.audio_segment_target.as_secs_f64(),
-			cfg.window,
+			cfg.window.as_secs_f64(),
 		));
 		spawn_pump(broadcast, name.clone(), Kind::Audio, store.clone(), cfg.clone());
 		Self {

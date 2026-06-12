@@ -83,12 +83,13 @@ pub struct SegmentStore {
 	part_target: f64,
 	/// Target segment duration for audio (video rolls on GOP boundaries instead).
 	audio_segment_target: f64,
-	/// Maximum number of segments retained in the sliding window.
-	window: usize,
+	/// Minimum duration (seconds) of media kept in the sliding window. The oldest
+	/// segment is evicted only while the remaining ones still cover this span.
+	window: f64,
 }
 
 impl SegmentStore {
-	pub fn new(is_video: bool, part_target: f64, audio_segment_target: f64, window: usize) -> Self {
+	pub fn new(is_video: bool, part_target: f64, audio_segment_target: f64, window: f64) -> Self {
 		let (notify, _) = watch::channel(Version::default());
 		Self {
 			inner: Mutex::new(Inner {
@@ -152,9 +153,16 @@ impl SegmentStore {
 				independent: fragment.independent,
 			});
 
-			// Evict from the front to keep the window bounded.
-			while inner.segments.len() > self.window {
-				inner.segments.pop_front();
+			// Evict from the front while the newer segments still cover the window.
+			// Always keep the in-progress segment, so never drop below one.
+			while inner.segments.len() > 1 {
+				let total: f64 = inner.segments.iter().map(|s| s.duration).sum();
+				let oldest = inner.segments.front().expect("segments non-empty").duration;
+				if total - oldest >= self.window {
+					inner.segments.pop_front();
+				} else {
+					break;
+				}
 			}
 		}
 

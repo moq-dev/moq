@@ -1,4 +1,4 @@
-//! Egress: subscribe to a MoQ broadcast and turn it into HLS / LL-HLS.
+//! Export: subscribe to a MoQ broadcast and turn it into HLS / LL-HLS.
 //!
 //! A [`Broadcaster`] watches one broadcast's catalog and, per rendition, runs a
 //! [`moq_mux::container::fmp4::Export`] narrowed to that single track (via
@@ -22,13 +22,14 @@ use tokio::sync::watch;
 pub use playlist::render_media;
 pub use rendition::{Kind, Rendition};
 
-/// Egress tuning shared across renditions.
+/// Export tuning shared across renditions.
 #[derive(Clone, Debug)]
 pub struct Config {
 	/// LL-HLS part target duration (also the exporter's fragment cap).
 	pub part_target: Duration,
-	/// Number of segments retained in each rendition's sliding window.
-	pub window: usize,
+	/// Minimum duration of media retained in each rendition's sliding window.
+	/// Older segments are evicted once the remaining ones still cover this span.
+	pub window: Duration,
 	/// Exporter latency budget. Generous so live GOPs aren't skipped; see the
 	/// group-skip note in the crate plan.
 	pub latency: Duration,
@@ -40,7 +41,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			part_target: Duration::from_millis(500),
-			window: 8,
+			window: Duration::from_secs(16),
 			latency: Duration::from_secs(10),
 			audio_segment_target: Duration::from_secs(2),
 		}

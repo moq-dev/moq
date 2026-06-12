@@ -89,6 +89,18 @@ impl ServerTlsConfig {
 		}
 		Ok(roots)
 	}
+
+	/// Build a [`rustls::ServerConfig`] for a TCP/TLS listener (e.g. an HTTP
+	/// server fronting the QUIC endpoint), reusing the QUIC backend's certificate
+	/// handling: on-disk `cert`/`key` pairs, `generate` self-signed certs, and
+	/// optional mTLS `root` client CAs.
+	///
+	/// `alpn` sets the advertised ALPN protocols, e.g.
+	/// `vec![b"h2".to_vec(), b"http/1.1".to_vec()]`.
+	#[cfg(any(feature = "noq", feature = "quinn"))]
+	pub fn server_config(&self, alpn: Vec<Vec<u8>>) -> anyhow::Result<Arc<rustls::ServerConfig>> {
+		crate::tls::server_config(self, alpn)
+	}
 }
 
 /// Configuration for the MoQ server.

@@ -3930,6 +3930,7 @@ dependencies = [
  "bytes",
  "clap",
  "hang",
+ "humantime",
  "kio",
  "m3u8-rs",
  "moq-mux",

@@ -2,7 +2,7 @@
 //!
 //! `m3u8-rs` can parse classic playlists but cannot emit the LL-HLS tags
 //! (`EXT-X-PART`, `EXT-X-PART-INF`, `EXT-X-SERVER-CONTROL`,
-//! `EXT-X-PRELOAD-HINT`), so the egress playlists are written by hand. URIs are
+//! `EXT-X-PRELOAD-HINT`), so the export playlists are written by hand. URIs are
 //! relative to the media playlist (`/<broadcast>/<rendition>/media.m3u8`), so
 //! they resolve against the rendition directory.
 
@@ -73,7 +73,7 @@ pub fn render_media(snapshot: &Snapshot) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::egress::store::{PartMeta, SegmentMeta};
+	use crate::export::store::{PartMeta, SegmentMeta};
 
 	fn part(duration: f64, independent: bool) -> PartMeta {
 		PartMeta { duration, independent }

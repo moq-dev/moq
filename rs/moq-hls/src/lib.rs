@@ -3,7 +3,7 @@
 //! Bridges HLS (and Low-Latency HLS) and [`moq_net`] broadcasts in both
 //! directions, mirroring the WHIP/WHEP split in `moq-rtc`:
 //!
-//! - [`ingest`] pulls a remote HLS master/media playlist and publishes its CMAF
+//! - [`import`] pulls a remote HLS master/media playlist and publishes its CMAF
 //!   segments into MoQ (an HTTP *client* that *publishes*).
 //! - [`server`] subscribes to a MoQ broadcast and serves HLS + LL-HLS playlists
 //!   and CMAF segments over HTTP (an HTTP *server* that *subscribes*).
@@ -13,9 +13,9 @@
 //! crate owns the HLS manifest generation, segment/part windowing, and the HTTP
 //! surface.
 
-pub mod egress;
 mod error;
-pub mod ingest;
+pub mod export;
+pub mod import;
 #[cfg(feature = "server")]
 pub mod server;
 

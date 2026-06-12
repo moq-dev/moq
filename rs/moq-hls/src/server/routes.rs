@@ -10,7 +10,7 @@ use axum::routing::get;
 use bytes::Bytes;
 
 use super::Server;
-use crate::egress::store::SegmentStore;
+use crate::export::store::SegmentStore;
 
 const M3U8: &str = "application/vnd.apple.mpegurl";
 const MP4: &str = "video/mp4";
@@ -55,7 +55,7 @@ async fn media(
 		block_until(&store, msn, part).await;
 	}
 
-	m3u8(crate::egress::render_media(&store.snapshot()))
+	m3u8(crate::export::render_media(&store.snapshot()))
 }
 
 async fn init(State(server): State<Server>, Path((broadcast, rendition)): Path<(String, String)>) -> Response {

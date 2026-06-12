@@ -8,17 +8,17 @@ description: HLS / LL-HLS <-> MoQ gateway
 `moq-hls` bridges [HLS](https://datatracker.ietf.org/doc/html/rfc8216) (and
 Low-Latency HLS) and Media over QUIC, in both directions:
 
-- **serve**: subscribe to a MoQ broadcast and serve HLS + LL-HLS over HTTP.
-- **ingest**: pull a remote HLS master/media playlist and publish it into MoQ.
+- **export**: subscribe to a MoQ broadcast and serve HLS + LL-HLS over HTTP.
+- **import**: pull a remote HLS master/media playlist and publish it into MoQ.
 
 All CMAF byte handling lives in `moq-mux` (import via its fMP4 importer, export
 via its fMP4 exporter). `moq-hls` owns the HLS manifest generation, the
 segment/part windowing, and the HTTP surface. HLS isn't a symmetric push/pull
-protocol like WHIP/WHEP, so `moq-hls` uses explicit `serve` / `ingest`
+protocol like WHIP/WHEP, so `moq-hls` uses explicit `export` / `import`
 subcommands rather than the `server`/`client` x `publish`/`subscribe` matrix of
 `moq-rtc`.
 
-## How egress works
+## How export works
 
 Each rendition in the broadcast's catalog gets its own
 [`moq-mux` fMP4 exporter](/lib/rs/), narrowed to that single track. The exporter
@@ -45,45 +45,48 @@ each new part.
 ## CLI shape
 
 ```bash
-# serve: expose MoQ broadcasts as HLS / LL-HLS over HTTP
+# export: expose MoQ broadcasts as HLS / LL-HLS over HTTP
 moq-hls --relay https://relay.example.com \
-        serve --listen 0.0.0.0:8089 --part-target-ms 500
+        export --listen 0.0.0.0:8089 --part-target 500ms
 
 # then point a player at a broadcast:
 #   http://localhost:8089/my-stream/master.m3u8
 
-# ingest: pull a remote HLS playlist into MoQ as "cam0"
+# import: pull a remote HLS playlist into MoQ as "cam0"
 moq-hls --relay https://relay.example.com \
-        ingest --broadcast cam0 --playlist https://example.com/cam0/master.m3u8
+        import --broadcast cam0 --playlist https://example.com/cam0/master.m3u8
 ```
 
 ### Global flags
 
-- `--relay`: upstream MoQ relay to publish into (ingest) or read from (serve).
+- `--relay`: upstream MoQ relay to publish into (import) or read from (export).
 
-### `serve` flags
+### `export` flags
 
 - `--listen`: HTTP bind address (default `[::]:8089`).
-- `--tls-cert` / `--tls-key`: serve HTTPS instead. Most players require it.
-- `--part-target-ms`: LL-HLS part target duration in milliseconds (default 500).
-  This also caps the exporter's fragment duration.
-- `--window`: number of segments kept per rendition (default 8).
+- `--tls-cert` / `--tls-key`: serve HTTPS from a cert/key pair on disk. Most
+  players require HTTPS. `--tls-generate <hostname>` instead generates a
+  self-signed cert, and `--server-tls-root` enables optional mTLS client auth.
+- `--part-target`: LL-HLS part target duration (default `500ms`, humantime
+  syntax). This also caps the exporter's fragment duration.
+- `--window`: minimum duration of media kept per rendition (default `16s`,
+  humantime syntax). Older segments are evicted once the rest still cover it.
 
-### `ingest` flags
+### `import` flags
 
 - `--broadcast`: broadcast name to publish on the relay.
 - `--playlist`: remote HLS playlist URL (`http`/`https`) or a local file path.
 
 ## Notes and limitations
 
-- **Group skipping.** Egress reads through `moq-mux`'s latency-bounded consumer,
+- **Group skipping.** Export reads through `moq-mux`'s latency-bounded consumer,
   which can skip stalled GOPs under its budget. `moq-hls` uses a generous budget
   so live GOPs aren't dropped; a lost GOP simply becomes a gap.
 - **Codecs.** Video renditions are exported as CMAF; H.264/H.265 Annex-B sources
   are converted to length-prefixed (avc1/hvc1) by the exporter. Audio renditions
   (AAC, Opus) get their own media playlist in an `AUDIO` group.
-- **Ingest** currently handles classic HLS (no LL-HLS partial segments on the
-  ingest side) and prefers H.264 renditions.
+- **Import** currently handles classic HLS (no LL-HLS partial segments on the
+  import side) and prefers H.264 renditions.
 - **DASH** is not implemented yet; the segment store is format-agnostic, so an
   MPD generator can be added over the same parts later.
 

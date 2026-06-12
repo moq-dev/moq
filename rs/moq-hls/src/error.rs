@@ -1,6 +1,6 @@
 //! Errors for the HLS / LL-HLS gateway.
 
-/// Errors produced by the HLS <-> MoQ gateway (ingest and egress).
+/// Errors produced by the HLS <-> MoQ gateway (import and export).
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {

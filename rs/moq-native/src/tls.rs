@@ -216,6 +216,37 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 	}
 }
 
+// ── server_config ───────────────────────────────────────────────────
+
+/// Build a rustls server config for a TCP/TLS listener, sharing the QUIC
+/// backend's cert loading (on-disk pairs, generated self-signed, mTLS roots).
+pub(crate) fn server_config(config: &ServerTlsConfig, alpn: Vec<Vec<u8>>) -> anyhow::Result<Arc<rustls::ServerConfig>> {
+	let provider = crate::crypto::provider();
+
+	let certs = ServeCerts::new(provider.clone());
+	certs.load_certs(config)?;
+	let certs = Arc::new(certs);
+
+	// TCP can negotiate TLS 1.2 as well as 1.3, unlike QUIC which is 1.3-only.
+	let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
+		.with_safe_default_protocol_versions()
+		.context("failed to set TLS protocol versions")?;
+
+	let mut tls = if config.root.is_empty() {
+		builder.with_no_client_auth().with_cert_resolver(certs)
+	} else {
+		let roots = config.load_roots()?;
+		let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+			.allow_unauthenticated()
+			.build()
+			.context("failed to build client certificate verifier")?;
+		builder.with_client_cert_verifier(verifier).with_cert_resolver(certs)
+	};
+
+	tls.alpn_protocols = alpn;
+	Ok(Arc::new(tls))
+}
+
 // ── reload_certs ────────────────────────────────────────────────────
 
 /// Watch the on-disk cert/key files and reload them whenever they change.

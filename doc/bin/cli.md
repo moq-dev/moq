@@ -121,7 +121,7 @@ Publish (read from stdin unless noted):
 - `avc3` - raw H.264 Annex-B
 - `fmp4` - fragmented MP4 / CMAF
 - `ts` - MPEG-TS (H.264 / H.265 video, AAC audio)
-- `hls --playlist <url>` - HLS playlist ingest
+- `hls --playlist <url>` - HLS playlist import
 
 Subscribe (`--format`):
 

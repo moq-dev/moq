@@ -2,9 +2,9 @@
 //!
 //! Two subcommands under shared relay/client globals:
 //!
-//! - `serve` -- subscribe to MoQ broadcasts and serve HLS + LL-HLS over HTTP
+//! - `export` -- subscribe to MoQ broadcasts and serve HLS + LL-HLS over HTTP
 //!   (an HTTP *server* that *subscribes*; the WHEP-server analogue in `moq-rtc`).
-//! - `ingest` -- pull a remote HLS playlist and publish it into MoQ (an HTTP
+//! - `import` -- pull a remote HLS playlist and publish it into MoQ (an HTTP
 //!   *client* that *publishes*; the WHEP-client analogue in `moq-rtc`).
 //!
 //! HLS isn't a symmetric push/pull protocol like WHIP/WHEP, so these are
@@ -12,7 +12,7 @@
 //! matrix.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -32,7 +32,7 @@ struct Cli {
 	#[command(flatten)]
 	moq_client: moq_native::ClientConfig,
 
-	/// URL of the upstream MoQ relay to publish into (ingest) or read from (serve).
+	/// URL of the upstream MoQ relay to publish into (import) or read from (export).
 	#[arg(long, env = "MOQ_HLS_RELAY")]
 	relay: Url,
 
@@ -43,28 +43,27 @@ struct Cli {
 #[derive(Subcommand, Clone)]
 enum Command {
 	/// Serve HLS / LL-HLS over HTTP from MoQ broadcasts (path-based, multi-broadcast).
-	Serve {
+	Export {
 		/// HTTP listener for the HLS endpoints.
 		#[arg(long, env = "MOQ_HLS_LISTEN", default_value = "[::]:8089")]
 		listen: SocketAddr,
 
-		/// Optional TLS cert (PEM). Requires `--tls-key`.
-		#[arg(long, env = "MOQ_HLS_TLS_CERT", requires = "tls_key")]
-		tls_cert: Option<PathBuf>,
+		/// TLS certificates, keys, self-signed generation, and optional mTLS roots.
+		/// Serve HTTPS by setting `--tls-cert`/`--tls-key` or `--tls-generate`.
+		/// Most players require HTTPS.
+		#[command(flatten)]
+		tls: moq_native::ServerTlsConfig,
 
-		#[arg(long, env = "MOQ_HLS_TLS_KEY", requires = "tls_cert")]
-		tls_key: Option<PathBuf>,
+		/// LL-HLS part target duration (also caps the exporter's fragment duration).
+		#[arg(long, env = "MOQ_HLS_PART_TARGET", default_value = "500ms", value_parser = humantime::parse_duration)]
+		part_target: Duration,
 
-		/// LL-HLS part target duration, in milliseconds.
-		#[arg(long, env = "MOQ_HLS_PART_TARGET_MS", default_value = "500")]
-		part_target_ms: u64,
-
-		/// Number of segments kept in each rendition's sliding window.
-		#[arg(long, env = "MOQ_HLS_WINDOW", default_value = "8")]
-		window: usize,
+		/// Minimum duration of media kept in each rendition's sliding window.
+		#[arg(long, env = "MOQ_HLS_WINDOW", default_value = "16s", value_parser = humantime::parse_duration)]
+		window: Duration,
 	},
 	/// Pull a remote HLS master/media playlist and publish it into MoQ.
-	Ingest {
+	Import {
 		/// Broadcast name to publish on the relay.
 		#[arg(long, alias = "name", env = "MOQ_HLS_BROADCAST")]
 		broadcast: String,
@@ -92,19 +91,18 @@ async fn main() -> anyhow::Result<()> {
 	let client = moq_client.init().context("failed to init moq client")?;
 
 	match command {
-		Command::Serve {
+		Command::Export {
 			listen,
-			tls_cert,
-			tls_key,
-			part_target_ms,
+			tls,
+			part_target,
 			window,
 		} => {
 			let subscriber = moq_net::Origin::random().produce();
 			let subscriber_consumer = subscriber.consume();
 			let reconnect = client.with_consumer(subscriber).reconnect(relay.clone());
 
-			let config = moq_hls::egress::Config {
-				part_target: Duration::from_millis(part_target_ms),
+			let config = moq_hls::export::Config {
+				part_target,
 				window,
 				..Default::default()
 			};
@@ -113,18 +111,26 @@ async fn main() -> anyhow::Result<()> {
 				.router()
 				.layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any));
 
+			// Serve HTTPS only when a cert/key pair or self-signed generation is configured.
+			let tls = if tls.cert.is_empty() && tls.generate.is_empty() {
+				None
+			} else {
+				let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+				Some(tls.server_config(alpn).context("failed to build TLS config")?)
+			};
+
 			tracing::info!(%relay, %listen, "moq-hls serving HLS");
 
 			#[cfg(unix)]
 			let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 			tokio::select! {
-				res = serve(app, listen, tls_cert, tls_key) => res,
+				res = serve(app, listen, tls) => res,
 				res = reconnect.closed() => res,
 				_ = tokio::signal::ctrl_c() => Ok(()),
 			}
 		}
-		Command::Ingest { broadcast, playlist } => {
+		Command::Import { broadcast, playlist } => {
 			let publisher = moq_net::Origin::random().produce();
 			let reconnect = client.with_publisher(publisher.clone()).reconnect(relay.clone());
 
@@ -135,9 +141,9 @@ async fn main() -> anyhow::Result<()> {
 				.context("failed to publish broadcast")?;
 
 			let catalog = moq_mux::catalog::hang::Producer::new(&mut producer).context("failed to create catalog")?;
-			let mut importer = moq_hls::ingest::Import::new(producer, catalog, moq_hls::ingest::Config::new(playlist))?;
+			let mut importer = moq_hls::import::Import::new(producer, catalog, moq_hls::import::Config::new(playlist))?;
 
-			tracing::info!(%relay, %broadcast, "moq-hls ingesting HLS");
+			tracing::info!(%relay, %broadcast, "moq-hls importing HLS");
 
 			#[cfg(unix)]
 			let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
@@ -154,20 +160,16 @@ async fn main() -> anyhow::Result<()> {
 	}
 }
 
-async fn serve(app: Router, bind: SocketAddr, cert: Option<PathBuf>, key: Option<PathBuf>) -> anyhow::Result<()> {
+async fn serve(app: Router, bind: SocketAddr, tls: Option<Arc<rustls::ServerConfig>>) -> anyhow::Result<()> {
 	let service = app.into_make_service();
-	match (cert, key) {
-		(Some(cert), Some(key)) => {
-			let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
-				.await
-				.context("failed to load TLS cert/key")?;
+	match tls {
+		Some(config) => {
+			let config = axum_server::tls_rustls::RustlsConfig::from_config(config);
 			axum_server::bind_rustls(bind, config).serve(service).await?;
 		}
-		(None, None) => {
+		None => {
 			axum_server::bind(bind).serve(service).await?;
 		}
-		// clap's `requires` already gates this; explicit arm in case the attr is stripped.
-		(Some(_), None) | (None, Some(_)) => anyhow::bail!("--tls-cert and --tls-key must be set together"),
 	}
 	Ok(())
 }

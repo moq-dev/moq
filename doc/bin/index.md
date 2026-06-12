@@ -38,7 +38,7 @@ WHEP egress is in progress.
 ## [moq-hls](/bin/hls)
 
 An HLS / LL-HLS <-> MoQ gateway. Serves a MoQ broadcast as HLS and
-Low-Latency HLS over HTTP, or ingests a remote HLS playlist into MoQ.
+Low-Latency HLS over HTTP, or imports a remote HLS playlist into MoQ.
 
 ## [OBS Plugin](/bin/obs)
 
