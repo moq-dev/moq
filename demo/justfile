@@ -28,7 +28,7 @@ default:
     bun run concurrently --kill-others --names srv,bbb,web --prefix-colors auto \
     	"just relay" \
     	"just wait $base/certificate.sha256 && just pub bbb $base/anon" \
-    	"just wait $base/certificate.sha256 && just web $base/anon"
+    	"just wait $base/certificate.sha256 && just web serve $base/anon"
 
 # Find the first free port at/after `start` (checked on both TCP and UDP).
 [private]
