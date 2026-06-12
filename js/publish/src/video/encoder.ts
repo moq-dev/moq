@@ -55,6 +55,10 @@ export class Encoder {
 	// The video encoder config.
 	#config = new Signal<VideoEncoderConfig | undefined>(undefined);
 
+	// The resolved encoder config (codec, bitrate, dimensions), available even with no subscriber.
+	// Exposed so a local preview can re-encode with identical settings to mirror the wire output.
+	readonly resolved: Getter<VideoEncoderConfig | undefined> = this.#config;
+
 	// True when the encoder is actively serving a track.
 	active = new Signal<boolean>(false);
 
