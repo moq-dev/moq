@@ -90,8 +90,8 @@ fn resyncs_across_chunk_boundaries() {
 	import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
-	assert_eq!(snapshot.video.renditions.len(), 1);
-	assert_eq!(snapshot.audio.renditions.len(), 1);
+	assert_eq!(snapshot.video.renditions.len(), 1, "chunked resync failed: no video track");
+	assert_eq!(snapshot.audio.renditions.len(), 1, "chunked resync failed: no audio track");
 }
 
 #[tokio::test(start_paused = true)]
