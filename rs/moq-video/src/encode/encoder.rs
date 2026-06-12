@@ -121,7 +121,20 @@ impl Encoder {
 	/// IDR (e.g. on resume so a re-subscribing viewer can start decoding at
 	/// once). The frame must already be at the encoder's resolution.
 	pub fn encode_rgba(&mut self, rgba: &[u8], width: u32, height: u32, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		let expected = width as usize * height as usize * 4;
+		// Validate geometry up front: the encoder resolution is even (checked in
+		// `new`), so a matching frame is even too, and the conversion can't fail
+		// on odd dimensions.
+		if width != self.width || height != self.height {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"frame {width}x{height} does not match encoder {}x{}",
+				self.width,
+				self.height
+			)));
+		}
+		let expected = (width as usize)
+			.checked_mul(height as usize)
+			.and_then(|pixels| pixels.checked_mul(4))
+			.ok_or_else(|| Error::Codec(anyhow::anyhow!("RGBA size overflow for {width}x{height}")))?;
 		if rgba.len() < expected {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"RGBA buffer too small: {} < {expected} for {width}x{height}",
@@ -129,7 +142,7 @@ impl Encoder {
 			)));
 		}
 
-		let frame = Frame::I420(I420::from_rgba(rgba, width, height));
+		let frame = Frame::I420(I420::from_rgba(rgba, width, height)?);
 		self.encode(&frame, keyframe)
 	}
 

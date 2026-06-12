@@ -103,7 +103,7 @@ enum Source {
 	/// Decode a container read from stdin (or an HLS playlist).
 	Stream(PublishDecoder),
 	/// Capture from local devices. The per-medium producers are built on their
-	/// own capture threads (camera via ffmpeg, microphone via cpal), publishing
+	/// own capture threads (native camera/screen capture, microphone via cpal), publishing
 	/// onto the shared broadcast + catalog; [`Publish::run`] drives them
 	/// concurrently.
 	#[cfg(feature = "capture")]

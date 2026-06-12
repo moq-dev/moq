@@ -92,7 +92,7 @@ pub(crate) trait Backend: Send {
 
 Module layout under `src/encode/`:
 
-```
+```text
 encode/
   encoder.rs        # public Encoder: picks a Backend via Kind, owns the color
                     # converter, exposes the unchanged encode_rgba / encode API
@@ -282,8 +282,9 @@ A backend "fails to open" (driver missing, no device) the same way an ffmpeg
 6. **VAAPI backend** (cros-codecs) last, behind its feature -- the GBM/DMA-buf
    plumbing is isolated and non-blocking once openh264 covers the fallback.
 
-Phases 1-2 are safe on `main`. The capture swap and ffmpeg removal are a
-behavior/dependency change; per Branch Targeting this likely wants `dev`.
+This work (including the capture swap and ffmpeg removal) ships to `dev`, since
+it's a breaking change to `moq-video`'s public API and a dependency overhaul.
+It reaches `main` on the next `dev` -> `main` merge.
 
 ## Risks / open questions
 

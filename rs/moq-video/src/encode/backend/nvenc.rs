@@ -44,11 +44,13 @@ impl Nvenc {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 		if config.width % 64 != 0 {
 			// Flat writes assume pitch == width; NVENC aligns pitch, so a
-			// non-64-aligned width risks corrupting the encoded chroma.
-			tracing::warn!(
-				width = config.width,
-				"nvenc: width is not a multiple of 64; encoded output may be corrupt"
-			);
+			// non-64-aligned width risks corrupting the encoded chroma. Fail so
+			// `Kind::Auto` falls back to the next backend instead of producing
+			// garbage.
+			return Err(Error::Codec(anyhow::anyhow!(
+				"nvenc requires a width that is a multiple of 64 (got {})",
+				config.width
+			)));
 		}
 
 		let cuda = CudaContext::new(0).map_err(|e| Error::Codec(anyhow::anyhow!("CUDA init: {e}")))?;

@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use objc2_core_foundation::CFRetained;
 use objc2_core_media::CMSampleBuffer;
@@ -69,6 +69,7 @@ impl FrameQueue {
 
 	/// Block up to `timeout` for the next available frame.
 	pub(super) fn pop_timeout(&self, timeout: Duration) -> Option<Frame> {
+		let deadline = Instant::now() + timeout;
 		let mut state = self.state.lock().unwrap();
 		loop {
 			if let Some(frame) = state.frames.pop_front() {
@@ -77,7 +78,9 @@ impl FrameQueue {
 			if state.closed {
 				return None;
 			}
-			let (next, wait) = self.cond.wait_timeout(state, timeout).unwrap();
+			// Honor the overall budget across spurious wakeups.
+			let remaining = deadline.checked_duration_since(Instant::now())?;
+			let (next, wait) = self.cond.wait_timeout(state, remaining).unwrap();
 			state = next;
 			if wait.timed_out() {
 				return state.frames.pop_front().map(|f| f.0);

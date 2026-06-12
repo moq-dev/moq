@@ -42,6 +42,12 @@ impl Camera {
 
 		let resolution = camera.resolution();
 		let (width, height) = (resolution.width(), resolution.height());
+		// The encoder needs even dimensions (I420 chroma is 2x2 subsampled).
+		if width % 2 != 0 || height % 2 != 0 {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"camera resolution {width}x{height} must be even for H.264 encoding"
+			)));
+		}
 		let framerate = match camera.frame_rate() {
 			0 => None,
 			fps => Some(fps),
@@ -74,7 +80,7 @@ impl FrameSource for Camera {
 			.map_err(|e| Error::Codec(anyhow::anyhow!("decode frame: {e}")))?;
 
 		let (width, height) = (image.width(), image.height());
-		Ok(Some(Frame::I420(I420::from_rgba(&image.into_raw(), width, height))))
+		Ok(Some(Frame::I420(I420::from_rgba(&image.into_raw(), width, height)?)))
 	}
 
 	fn width(&self) -> u32 {

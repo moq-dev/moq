@@ -81,7 +81,7 @@ impl I420 {
 
 	/// Convert tightly-packed RGBA (`width * height * 4` bytes) to I420, BT.601
 	/// limited range (studio swing, what H.264 decoders expect by default).
-	pub(crate) fn from_rgba(rgba: &[u8], width: u32, height: u32) -> Self {
+	pub(crate) fn from_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Self, Error> {
 		let mut planar = YuvPlanarImageMut::alloc(width, height, YuvChromaSubsampling::Yuv420);
 		rgba_to_yuv420(
 			&mut planar,
@@ -91,14 +91,14 @@ impl I420 {
 			YuvStandardMatrix::Bt601,
 			YuvConversionMode::Balanced,
 		)
-		.expect("rgba_to_yuv420 with validated dimensions");
+		.map_err(|e| Error::Codec(anyhow::anyhow!("rgba_to_yuv420 failed for {width}x{height}: {e}")))?;
 
 		let mut data = Vec::with_capacity(Self::len(width, height));
 		data.extend_from_slice(planar.y_plane.borrow());
 		data.extend_from_slice(planar.u_plane.borrow());
 		data.extend_from_slice(planar.v_plane.borrow());
 
-		Self { width, height, data }
+		Ok(Self { width, height, data })
 	}
 
 	fn luma_len(&self) -> usize {

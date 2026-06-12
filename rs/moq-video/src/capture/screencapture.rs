@@ -49,11 +49,16 @@ impl Screen {
 	pub(super) fn open(config: &Config) -> Result<Self, Error> {
 		let content = shareable_content()?;
 		let displays = unsafe { content.displays() };
-		let index = config
-			.device
-			.as_deref()
-			.and_then(|d| d.parse::<usize>().ok())
-			.unwrap_or(0);
+		// Accept a bare index or the `display:{index}` form that `device()`
+		// reports, and reject anything else rather than silently using display 0.
+		let index = match config.device.as_deref() {
+			None => 0,
+			Some(spec) => spec
+				.strip_prefix("display:")
+				.unwrap_or(spec)
+				.parse::<usize>()
+				.map_err(|_| Error::Codec(anyhow::anyhow!("invalid display selector {spec:?}")))?,
+		};
 		if index >= displays.count() {
 			return Err(Error::Codec(anyhow::anyhow!("no display at index {index}")));
 		}
@@ -111,7 +116,7 @@ impl Screen {
 			_dispatch: dispatch,
 			width,
 			height,
-			device: format!("display:{display_id}"),
+			device: format!("display:{index}"),
 			pending: Some(first),
 		})
 	}
