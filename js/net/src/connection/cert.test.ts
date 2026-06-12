@@ -19,6 +19,11 @@ test("certificateHash decodes PEM armor before hashing", async () => {
 	expect(Hex.fromBytes(hash)).toBe(ABC_SHA256);
 });
 
+test("certificateHash rejects a PEM string without armor", async () => {
+	// Valid base64, but no -----BEGIN CERTIFICATE----- wrapper.
+	await expect(certificateHash("YWJj")).rejects.toThrow(/armor/);
+});
+
 test("hex round-trips through fromBytes/toBytes", () => {
 	expect(Hex.fromBytes(Hex.toBytes(ABC_SHA256))).toBe(ABC_SHA256);
 });

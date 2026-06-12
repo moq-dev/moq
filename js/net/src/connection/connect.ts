@@ -288,11 +288,12 @@ type WebTransportHash = NonNullable<WebTransportOptions["serverCertificateHashes
 
 // Strip PEM armor and base64-decode to the raw DER bytes.
 function pemToDer(pem: string): Uint8Array<ArrayBuffer> {
-	const body = pem
-		.replace(/-----BEGIN CERTIFICATE-----/g, "")
-		.replace(/-----END CERTIFICATE-----/g, "")
-		.replace(/\s+/g, "");
-	const binary = atob(body);
+	const match = pem.match(/-----BEGIN CERTIFICATE-----([\s\S]+?)-----END CERTIFICATE-----/);
+	if (!match) {
+		throw new Error("invalid PEM certificate: missing -----BEGIN/END CERTIFICATE----- armor");
+	}
+
+	const binary = atob(match[1].replace(/\s+/g, ""));
 	const der = new Uint8Array(binary.length);
 	for (let i = 0; i < binary.length; i++) {
 		der[i] = binary.charCodeAt(i);
@@ -352,10 +353,9 @@ async function connectWebTransport(
 		...webtransport,
 	};
 
-	const hashes = await resolveCertificateHashes(options);
-	if (hashes) {
-		finalOptions.serverCertificateHashes = hashes;
-	}
+	// Accumulate caller-provided pins first, then append anything we fetch below,
+	// so a fetched fingerprint never clobbers hashes passed in via options.
+	const hashes = (await resolveCertificateHashes(options)) ?? [];
 
 	// Only perform certificate fetch and URL rewrite when polyfill is not needed
 	// This is needed because WebTransport is a butt to work with in local development.
@@ -373,15 +373,14 @@ async function connectWebTransport(
 		const fingerprintText = await Promise.race([fingerprint.text(), cancel]);
 		if (fingerprintText === undefined) return undefined;
 
-		finalOptions.serverCertificateHashes = (finalOptions.serverCertificateHashes || []).concat([
-			{
-				algorithm: "sha-256",
-				value: Hex.toBytes(fingerprintText),
-			},
-		]);
+		hashes.push({ algorithm: "sha-256", value: Hex.toBytes(fingerprintText) });
 
 		finalUrl = new URL(url);
 		finalUrl.protocol = "https:";
+	}
+
+	if (hashes.length > 0) {
+		finalOptions.serverCertificateHashes = hashes;
 	}
 
 	const quic = new WebTransport(finalUrl, finalOptions);
