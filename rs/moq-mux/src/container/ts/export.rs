@@ -80,6 +80,13 @@ enum Kind {
 		sample_rate: u32,
 		channel_count: u32,
 	},
+	/// MP2, carried verbatim. The sample rate picks the stream type on the way
+	/// out (0x03 vs 0x04).
+	Mp2 { sample_rate: u32 },
+	/// AC-3 (ATSC stream_type 0x81), carried verbatim.
+	Ac3,
+	/// E-AC-3 (ATSC stream_type 0x87), carried verbatim.
+	Eac3,
 	/// SCTE-35: private sections (stream_type 0x86), carried verbatim.
 	Scte35,
 }
@@ -363,7 +370,11 @@ impl<E: scte35::Catalog> Export<E> {
 			"TS export of SCTE-35 requires a video track for the program clock"
 		);
 		let pcr_pid = video
-			.or_else(|| tracks.iter().find(|t| matches!(t.kind, Kind::Aac { .. })))
+			.or_else(|| {
+				tracks
+					.iter()
+					.find(|t| matches!(t.kind, Kind::Aac { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3))
+			})
 			.map(|t| t.pid)
 			.context("TS export requires a video or audio track for the PCR")?;
 
@@ -374,10 +385,28 @@ impl<E: scte35::Catalog> Export<E> {
 					stream_type: match t.kind {
 						Kind::Video(stream_type) => stream_type,
 						Kind::Aac { .. } => StreamType::AdtsAac,
+						// Half-rate MPEG-2 BC audio (< 32 kHz) re-announces as 0x04;
+						// the full rates are MPEG-1 (0x03). The catalog sample rate
+						// came from the frame header, so the mapping is faithful.
+						Kind::Mp2 { sample_rate } if sample_rate < 32000 => StreamType::Mpeg2HalvedSampleRateAudio,
+						Kind::Mp2 { .. } => StreamType::Mpeg1Audio,
+						Kind::Ac3 => StreamType::DolbyDigitalUpToSixChannelAudio,
+						Kind::Eac3 => StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc,
 						Kind::Scte35 => StreamType::Dts8ChannelLosslessAudio,
 					},
 					elementary_pid: Pid::new(t.pid)?,
-					descriptors: Vec::new(),
+					// ATSC pairs the Dolby stream types with a registration descriptor.
+					descriptors: match t.kind {
+						Kind::Ac3 => vec![Descriptor {
+							tag: 0x05,
+							data: b"AC-3".to_vec(),
+						}],
+						Kind::Eac3 => vec![Descriptor {
+							tag: 0x05,
+							data: b"EAC3".to_vec(),
+						}],
+						_ => Vec::new(),
+					},
 				})
 			})
 			.collect::<anyhow::Result<Vec<_>>>()?;
@@ -458,6 +487,9 @@ impl<E: scte35::Catalog> Export<E> {
 				framed.extend_from_slice(&frame.payload);
 				Some(framed)
 			}
+			// Legacy audio frames were ingested whole (framing header included), so
+			// they pass through untouched.
+			Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => Some(frame.payload.to_vec()),
 			Kind::Scte35 => None,
 		};
 
@@ -704,6 +736,11 @@ fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 			sample_rate: config.sample_rate,
 			channel_count: config.channel_count,
 		}),
+		AudioCodec::Mp2 => Ok(Kind::Mp2 {
+			sample_rate: config.sample_rate,
+		}),
+		AudioCodec::Ac3 => Ok(Kind::Ac3),
+		AudioCodec::Ec3 => Ok(Kind::Eac3),
 		other => anyhow::bail!("TS export does not support audio codec {other:?} (track '{name}')"),
 	}
 }

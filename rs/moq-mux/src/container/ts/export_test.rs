@@ -1,6 +1,7 @@
 //! Tests for the MPEG-TS exporter.
 //!
-//! Audio is framed as ADTS; video is normalized to length-prefixed NALU by
+//! AAC audio is framed as ADTS (MP2/AC-3 pass through as whole frames); video
+//! is normalized to length-prefixed NALU by
 //! `ExportSource` and rewritten to Annex-B by the muxer (re-injecting the
 //! parameter sets on keyframes). These build a synthetic broadcast, export to
 //! TS, and re-parse with the `mpeg2ts` reader.
@@ -428,6 +429,306 @@ async fn scte35_without_video_export_is_rejected() {
 	);
 }
 
+/// Subscribe to a track and read every retained frame payload it holds.
+async fn read_frames(consumer: &moq_net::BroadcastConsumer, name: &str) -> Vec<Vec<u8>> {
+	let track = consumer
+		.subscribe_track(&moq_net::Track::new(name.to_string()))
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
+	let mut frames = Vec::new();
+	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
+		let Some(frame) = res.unwrap() else { break };
+		frames.push(frame.payload.to_vec());
+	}
+	frames
+}
+
+/// Both real Kyrion MP2 programs must survive TS -> MoQ -> TS byte-for-byte, and
+/// the PMT must re-announce them as MPEG-1 audio (0x03): the capture is 48 kHz,
+/// so the half-rate type (0x04) would be unfaithful.
+#[tokio::test(start_paused = true)]
+async fn mp2_kyrion_roundtrip_byte_exact() {
+	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
+
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	import.decode(&mut BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+
+	let names: Vec<String> = catalog.snapshot().audio.renditions.keys().cloned().collect();
+	assert_eq!(names.len(), 2, "both Kyrion MP2 programs");
+	let mut ingested = Vec::new();
+	for name in &names {
+		let frames = read_frames(&consumer, name).await;
+		assert!(!frames.is_empty(), "{name}: no MP2 frames");
+		assert!(
+			frames.iter().all(|f| f[0] == 0xFF && f[1] & 0xE0 == 0xE0),
+			"{name}: whole-frame carriage starts at the Layer II sync word"
+		);
+		ingested.push(frames);
+	}
+
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			let mp2 = pmt
+				.es_info
+				.iter()
+				.filter(|e| e.stream_type == StreamType::Mpeg1Audio)
+				.count();
+			assert_eq!(mp2, 2, "PMT must re-announce both MP2 streams as 0x03");
+			break;
+		}
+	}
+
+	let mut broadcast2 = moq_net::Broadcast::new().produce();
+	let consumer2 = broadcast2.consume();
+	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
+	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
+	import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
+	import2.finish().unwrap();
+
+	let names2: Vec<String> = catalog2.snapshot().audio.renditions.keys().cloned().collect();
+	assert_eq!(names2.len(), 2, "round-trip lost an MP2 track");
+	let mut roundtripped = Vec::new();
+	for name in &names2 {
+		roundtripped.push(read_frames(&consumer2, name).await);
+	}
+
+	// Track discovery order is not stable across imports; compare as sorted sets.
+	ingested.sort();
+	roundtripped.sort();
+	assert_eq!(roundtripped, ingested, "MP2 frames must survive byte-for-byte");
+}
+
+/// The ffmpeg AC-3 fixture must survive TS -> MoQ -> TS byte-for-byte in an
+/// audio-only program: the PCR falls to the audio track and the PMT re-announces
+/// ATSC 0x81 with the 'AC-3' registration descriptor.
+#[tokio::test(start_paused = true)]
+async fn ac3_roundtrip_byte_exact() {
+	let data = include_bytes!("test_data/ac3.ts");
+
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	import.decode(&mut BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+
+	let name = catalog
+		.snapshot()
+		.audio
+		.renditions
+		.keys()
+		.next()
+		.expect("an AC-3 track")
+		.clone();
+	let ingested = read_frames(&consumer, &name).await;
+	assert!(!ingested.is_empty(), "no AC-3 frames");
+	assert!(
+		ingested.iter().all(|f| f[0] == 0x0B && f[1] == 0x77),
+		"whole-frame carriage starts at the AC-3 sync word"
+	);
+
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut checked_pmt = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			assert_eq!(pmt.es_info.len(), 1);
+			assert_eq!(pmt.es_info[0].stream_type, StreamType::DolbyDigitalUpToSixChannelAudio);
+			assert!(
+				pmt.es_info[0]
+					.descriptors
+					.iter()
+					.any(|d| d.tag == 0x05 && d.data.as_slice() == b"AC-3"),
+				"PMT missing the ES-level 'AC-3' registration descriptor"
+			);
+			checked_pmt = true;
+			break;
+		}
+	}
+	assert!(checked_pmt, "missing PMT");
+
+	let mut broadcast2 = moq_net::Broadcast::new().produce();
+	let consumer2 = broadcast2.consume();
+	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
+	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
+	import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
+	import2.finish().unwrap();
+
+	let name2 = catalog2
+		.snapshot()
+		.audio
+		.renditions
+		.keys()
+		.next()
+		.expect("round-trip lost the AC-3 track")
+		.clone();
+	let roundtripped = read_frames(&consumer2, &name2).await;
+	assert_eq!(roundtripped, ingested, "AC-3 frames must survive byte-for-byte");
+}
+
+/// The ffmpeg E-AC-3 fixture must survive TS -> MoQ -> TS byte-for-byte in an
+/// audio-only program; the PMT re-announces ATSC 0x87 with the 'EAC3'
+/// registration descriptor.
+#[tokio::test(start_paused = true)]
+async fn eac3_roundtrip_byte_exact() {
+	let data = include_bytes!("test_data/eac3.ts");
+
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	import.decode(&mut BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+
+	let name = catalog
+		.snapshot()
+		.audio
+		.renditions
+		.keys()
+		.next()
+		.expect("an E-AC-3 track")
+		.clone();
+	let ingested = read_frames(&consumer, &name).await;
+	assert!(!ingested.is_empty(), "no E-AC-3 frames");
+	assert!(
+		ingested.iter().all(|f| f[0] == 0x0B && f[1] == 0x77),
+		"whole-frame carriage starts at the E-AC-3 sync word"
+	);
+
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut checked_pmt = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			assert_eq!(pmt.es_info.len(), 1);
+			assert_eq!(
+				pmt.es_info[0].stream_type,
+				StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc
+			);
+			assert!(
+				pmt.es_info[0]
+					.descriptors
+					.iter()
+					.any(|d| d.tag == 0x05 && d.data.as_slice() == b"EAC3"),
+				"PMT missing the ES-level 'EAC3' registration descriptor"
+			);
+			checked_pmt = true;
+			break;
+		}
+	}
+	assert!(checked_pmt, "missing PMT");
+
+	let mut broadcast2 = moq_net::Broadcast::new().produce();
+	let consumer2 = broadcast2.consume();
+	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
+	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
+	import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
+	import2.finish().unwrap();
+
+	let name2 = catalog2
+		.snapshot()
+		.audio
+		.renditions
+		.keys()
+		.next()
+		.expect("round-trip lost the E-AC-3 track")
+		.clone();
+	let roundtripped = read_frames(&consumer2, &name2).await;
+	assert_eq!(roundtripped, ingested, "E-AC-3 frames must survive byte-for-byte");
+}
+
+/// Read every audio rendition's retained frames, keyed by codec string.
+async fn read_audio_by_codec(
+	consumer: &moq_net::BroadcastConsumer,
+	catalog: &crate::catalog::Producer,
+) -> std::collections::BTreeMap<String, Vec<Vec<u8>>> {
+	let mut out = std::collections::BTreeMap::new();
+	for (name, config) in &catalog.snapshot().audio.renditions {
+		out.insert(config.codec.to_string(), read_frames(consumer, name).await);
+	}
+	out
+}
+
+/// The ATSC-compliance Kyrion capture (MPEG-2 video + AC-3 + MP2) must round-trip
+/// both real audio streams byte-for-byte. The video is clock-only, so the
+/// re-exported program is audio-only with the PCR on an audio PID, and the PMT
+/// re-announces 0x81 (with the 'AC-3' registration descriptor, which the Kyrion
+/// itself also emits) and 0x03.
+#[tokio::test(start_paused = true)]
+async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
+	let data = include_bytes!("test_data/kyrion_mpeg2av_ac3.ts");
+
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	import.decode(&mut BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+
+	let ingested = read_audio_by_codec(&consumer, &catalog).await;
+	assert_eq!(
+		ingested.keys().cloned().collect::<Vec<_>>(),
+		["ac-3", "mp2"],
+		"both real audio codecs cataloged"
+	);
+	assert!(
+		ingested["ac-3"].iter().all(|f| f[0] == 0x0B && f[1] == 0x77),
+		"AC-3 whole-frame carriage"
+	);
+	assert!(
+		ingested["mp2"].iter().all(|f| f[0] == 0xFF && f[1] & 0xE0 == 0xE0),
+		"MP2 whole-frame carriage"
+	);
+
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			assert_eq!(pmt.es_info.len(), 2, "audio-only program: AC-3 + MP2");
+			let ac3 = pmt
+				.es_info
+				.iter()
+				.find(|e| e.stream_type == StreamType::DolbyDigitalUpToSixChannelAudio)
+				.expect("AC-3 ES re-announced as 0x81");
+			assert!(
+				ac3.descriptors
+					.iter()
+					.any(|d| d.tag == 0x05 && d.data.as_slice() == b"AC-3"),
+				"AC-3 registration descriptor"
+			);
+			assert!(
+				pmt.es_info.iter().any(|e| e.stream_type == StreamType::Mpeg1Audio),
+				"MP2 re-announced as 0x03 (48 kHz is an MPEG-1 rate)"
+			);
+			break;
+		}
+	}
+
+	let mut broadcast2 = moq_net::Broadcast::new().produce();
+	let consumer2 = broadcast2.consume();
+	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
+	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
+	import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
+	import2.finish().unwrap();
+
+	let roundtripped = read_audio_by_codec(&consumer2, &catalog2).await;
+	assert_eq!(roundtripped, ingested, "both audio streams survive byte-for-byte");
+}
+
 /// Subscribe to a cue track and read every retained `splice_info_section` it holds.
 async fn read_cues(consumer: &moq_net::BroadcastConsumer, name: &str) -> Vec<(Vec<u8>, Timestamp)> {
 	let track = consumer
@@ -481,7 +782,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 			&[0x00, 0x05, 0x06, 0xff],
 			include_bytes!("test_data/scte35/tsduck.ts"),
 		),
-		// Real Ateme Kyrion broadcast (H.264 1080i + dropped MP2), captured mid-stream: a real
+		// Real Ateme Kyrion broadcast (H.264 1080i + MP2), captured mid-stream: a real
 		// encoder's cues surviving the full round-trip, not a synthetic clip. Cues are external,
 		// so the command-type set stays unpinned.
 		(

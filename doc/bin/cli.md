@@ -154,7 +154,7 @@ Publish (read from stdin unless noted):
 
 - `avc3` - raw H.264 Annex-B
 - `fmp4` - fragmented MP4 / CMAF
-- `ts` - MPEG-TS (H.264 / H.265 video, AAC audio)
+- `ts` - MPEG-TS (H.264 / H.265 video; AAC, MP2, AC-3, or E-AC-3 audio)
 - `hls --playlist <url>` - HLS playlist ingest
 - `capture` - capture local devices directly (camera H.264 + microphone Opus; requires the `capture` build feature; does not read stdin)
 
@@ -181,6 +181,12 @@ TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
 (avc3 / hev1) and out-of-band (avc1 / hvc1, e.g. from an fMP4 import) video
 sources work: the parameter sets are read from the bitstream or the catalog
 `description` and re-injected as Annex-B on each keyframe.
+
+Broadcast audio (MP2, AC-3, E-AC-3) is carried verbatim: complete, well-formed
+frames pass through byte-exact, never transcoded; malformed input is rejected
+rather than mis-described. The catalog describes the codec honestly so a
+subscriber that can decode it (typically TS gear) picks it up; browsers cannot
+play these codecs and should skip the rendition.
 
 ## Authentication
 

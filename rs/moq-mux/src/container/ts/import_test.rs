@@ -45,6 +45,97 @@ fn import_bbb_catalog() {
 	assert!(audio.description.is_some(), "AAC track missing AudioSpecificConfig");
 }
 
+/// The Kyrion capture carries two real MP2 programs (stream_type 0x03, 48 kHz
+/// stereo, 192 kbps). Both must surface as catalog renditions with the
+/// header-derived config and no description (verbatim carriage).
+#[test]
+fn import_kyrion_mp2_catalog() {
+	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
+	let catalog = import_ts(data);
+
+	assert_eq!(catalog.audio.renditions.len(), 2, "expected both MP2 tracks");
+	for (name, audio) in &catalog.audio.renditions {
+		assert_eq!(audio.codec.to_string(), "mp2", "track {name}");
+		assert_eq!(audio.sample_rate, 48_000, "track {name}");
+		assert_eq!(audio.channel_count, 2, "track {name}");
+		assert!(
+			audio.description.is_none(),
+			"verbatim MP2 needs no description (track {name})"
+		);
+	}
+}
+
+/// `ac3.ts` is an ffmpeg-authored audio-only ATSC AC-3 program (stream_type
+/// 0x81 plus the 'AC-3' registration descriptor), regenerated with:
+/// `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.5
+/// -ac 6 -c:a ac3 -b:a 384k -f mpegts ac3.ts`. The 5.1 layout exercises the
+/// lfeon bit: 5 full-bandwidth channels (acmod 3/2) plus the LFE = 6.
+#[test]
+fn import_ac3_catalog() {
+	let data = include_bytes!("test_data/ac3.ts");
+	let catalog = import_ts(data);
+
+	assert_eq!(catalog.video.renditions.len(), 0);
+	assert_eq!(catalog.audio.renditions.len(), 1, "expected one AC-3 track");
+	let audio = catalog.audio.renditions.values().next().unwrap();
+	assert_eq!(audio.codec.to_string(), "ac-3");
+	assert_eq!(audio.sample_rate, 48_000);
+	assert_eq!(audio.channel_count, 6, "5 full-bandwidth channels + LFE");
+	assert!(audio.description.is_none(), "verbatim AC-3 needs no description");
+}
+
+/// `eac3.ts` is an ffmpeg-authored audio-only ATSC E-AC-3 program (stream_type
+/// 0x87 plus the 'EAC3' registration descriptor), regenerated with:
+/// `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.5
+/// -ac 6 -c:a eac3 -b:a 256k -f mpegts eac3.ts`. 5.1 exercises lfeon, like
+/// the AC-3 fixture.
+#[test]
+fn import_eac3_catalog() {
+	let data = include_bytes!("test_data/eac3.ts");
+	let catalog = import_ts(data);
+
+	assert_eq!(catalog.video.renditions.len(), 0);
+	assert_eq!(catalog.audio.renditions.len(), 1, "expected one E-AC-3 track");
+	let audio = catalog.audio.renditions.values().next().unwrap();
+	assert_eq!(audio.codec.to_string(), "ec-3");
+	assert_eq!(audio.sample_rate, 48_000);
+	assert_eq!(audio.channel_count, 6, "5 full-bandwidth channels + LFE");
+	assert!(audio.description.is_none(), "verbatim E-AC-3 needs no description");
+}
+
+/// A second real Ateme Kyrion capture, this time in ATSC TS-compliance mode:
+/// MPEG-2 video (Main, 1080i CBR), AC-3 (0x81 + 'AC-3' registration descriptor,
+/// bsid 6, stereo) and MP2 (0x03, stereo) at 48 kHz, SCTE-35 cues, a dedicated
+/// PCR PID, ATSC PSIP tables, and a dirty mid-stream start. Audio surfaces as
+/// two typed renditions; MPEG-2 video is clock-only, so no video rendition.
+///
+/// `kyrion_mpeg2av_ac3_tsduck.txt` holds two TSDuck dumps of the capture, with
+/// the regen command above each: the three splice_inserts (CRC32 OK; cues only
+/// document the capture, the audio path is what's under test) and the PMT,
+/// which evidences that the Kyrion itself pairs stream_type 0x81 with the
+/// 'AC-3' registration descriptor, the same announcement our export writes.
+#[test]
+fn import_kyrion_ac3_mp2_catalog() {
+	let data = include_bytes!("test_data/kyrion_mpeg2av_ac3.ts");
+	let catalog = import_ts(data);
+
+	assert_eq!(catalog.video.renditions.len(), 0, "MPEG-2 video is clock-only");
+	assert_eq!(catalog.audio.renditions.len(), 2, "expected AC-3 + MP2 tracks");
+	for (name, audio) in &catalog.audio.renditions {
+		assert!(
+			matches!(audio.codec.to_string().as_str(), "ac-3" | "mp2"),
+			"unexpected codec {} (track {name})",
+			audio.codec
+		);
+		assert_eq!(audio.sample_rate, 48_000, "track {name}");
+		assert_eq!(audio.channel_count, 2, "track {name}");
+		assert!(audio.description.is_none(), "track {name}");
+	}
+	let codecs: std::collections::HashSet<String> =
+		catalog.audio.renditions.values().map(|a| a.codec.to_string()).collect();
+	assert_eq!(codecs.len(), 2, "one rendition per codec");
+}
+
 #[test]
 fn import_resyncs_after_byte_misalignment() {
 	let data = include_bytes!("test_data/bbb.ts");
