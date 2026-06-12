@@ -26,7 +26,7 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 
-	// For local development, use: http://localhost:4443/anon/video-example
+	// For local development, use: http://localhost:4443/video-example
 	// The "anon" path is usually configured to bypass authentication; be careful!
 	let url = url::Url::parse("https://cdn.moq.dev/anon/video-example").unwrap();
 
@@ -36,7 +36,7 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	let reconnect = client.with_consumer(origin).reconnect(url);
 
 	// Wait until the reconnect loop stops (e.g. timeout exceeded).
-	reconnect.closed().await
+	Ok(reconnect.closed().await?)
 }
 
 // Subscribe to a broadcast and read media frames.
@@ -55,7 +55,7 @@ async fn run_subscribe(consumer: moq_net::OriginConsumer) -> anyhow::Result<()> 
 		.track(hang::Catalog::DEFAULT_NAME)?
 		.subscribe(hang::Catalog::default_subscription())?
 		.await?;
-	let mut catalog = moq_mux::catalog::hang::Consumer::new(catalog_track);
+	let mut catalog = moq_mux::catalog::hang::Consumer::<()>::new(catalog_track);
 
 	let info = catalog.next().await?.ok_or_else(|| anyhow::anyhow!("no catalog"))?;
 

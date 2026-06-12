@@ -1,13 +1,111 @@
 use crate::client::ClientConfig;
-use crate::server::{ServerConfig, ServerId, ServerTlsInfo};
+use crate::server::{ServerConfig, ServerId};
 use crate::tls::{FingerprintVerifier, ServeCerts};
-use anyhow::Context;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::{net, time};
 use url::Url;
 
 use web_transport_noq::noq;
+
+pub use web_transport_noq;
+
+/// Errors specific to the noq QUIC backend.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("failed to bind UDP socket")]
+	BindSocket(#[source] std::io::Error),
+
+	#[error("failed to create QUIC endpoint")]
+	CreateEndpoint(#[source] std::io::Error),
+
+	#[error("no async runtime")]
+	NoRuntime,
+
+	#[error("failed to get local address")]
+	LocalAddr(#[source] std::io::Error),
+
+	#[error("failed to resolve bind address")]
+	ResolveBind(#[source] std::io::Error),
+
+	#[error("invalid DNS name")]
+	InvalidDnsName,
+
+	#[error("failed DNS lookup")]
+	DnsLookup(#[source] std::io::Error),
+
+	#[error("no DNS entries")]
+	NoDnsEntries,
+
+	#[error("failed to fetch fingerprint")]
+	FetchFingerprint(#[source] reqwest::Error),
+
+	#[error("fingerprint request failed")]
+	FingerprintStatus(#[source] reqwest::Error),
+
+	#[error("failed to read fingerprint")]
+	ReadFingerprint(#[source] reqwest::Error),
+
+	#[error("invalid fingerprint")]
+	InvalidFingerprint(#[from] hex::FromHexError),
+
+	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
+	InvalidScheme,
+
+	#[error("unsupported URL scheme: {0}")]
+	UnsupportedScheme(String),
+
+	#[error("missing handshake data")]
+	MissingHandshake,
+
+	#[error("missing ALPN")]
+	MissingAlpn,
+
+	#[error("failed to decode ALPN")]
+	DecodeAlpn(#[from] std::string::FromUtf8Error),
+
+	#[error("unsupported ALPN: {0}")]
+	UnsupportedAlpn(String),
+
+	#[error("missing server name for raw QUIC connection")]
+	MissingServerName,
+
+	#[error("failed to construct URL from server name")]
+	BuildUrl(#[source] url::ParseError),
+
+	#[error("quic_lb_nonce must be at least 4")]
+	QuicLbNonceTooSmall,
+
+	#[error("connection ID length ({0}) exceeds maximum of 20")]
+	QuicLbCidTooLong(usize),
+
+	#[error(transparent)]
+	NoInitialCipherSuite(#[from] noq::crypto::rustls::NoInitialCipherSuite),
+
+	#[error(transparent)]
+	Connect(#[from] noq::ConnectError),
+
+	#[error(transparent)]
+	Connection(#[from] noq::ConnectionError),
+
+	#[error(transparent)]
+	Client(#[from] web_transport_noq::ClientError),
+
+	#[error(transparent)]
+	Server(#[from] web_transport_noq::ServerError),
+
+	#[error("failed to establish QUIC connection")]
+	Establish(#[source] noq::ConnectionError),
+
+	#[error("failed to receive WebTransport request")]
+	RecvRequest(#[source] web_transport_noq::ServerError),
+
+	#[error(transparent)]
+	Tls(#[from] crate::tls::Error),
+}
+
+type Result<T> = std::result::Result<T, Error>;
 
 // ── Client ──────────────────────────────────────────────────────────
 
@@ -19,8 +117,8 @@ pub(crate) struct NoqClient {
 }
 
 impl NoqClient {
-	pub fn new(config: &ClientConfig) -> anyhow::Result<Self> {
-		let socket = std::net::UdpSocket::bind(config.bind).context("failed to bind UDP socket")?;
+	pub fn new(config: &ClientConfig) -> Result<Self> {
+		let socket = std::net::UdpSocket::bind(config.bind).map_err(Error::BindSocket)?;
 
 		let mut transport = noq::TransportConfig::default();
 		transport.max_idle_timeout(Some(time::Duration::from_secs(30).try_into().unwrap()));
@@ -35,12 +133,11 @@ impl NoqClient {
 		let transport = Arc::new(transport);
 
 		// There's a bit more boilerplate to make a generic endpoint.
-		let runtime = noq::default_runtime().context("no async runtime")?;
+		let runtime = noq::default_runtime().ok_or(Error::NoRuntime)?;
 		let endpoint_config = noq::EndpointConfig::default();
 
 		// Create the generic QUIC endpoint.
-		let quic =
-			noq::Endpoint::new(endpoint_config, None, socket, runtime).context("failed to create QUIC endpoint")?;
+		let quic = noq::Endpoint::new(endpoint_config, None, socket, runtime).map_err(Error::CreateEndpoint)?;
 
 		Ok(Self {
 			quic,
@@ -49,11 +146,11 @@ impl NoqClient {
 		})
 	}
 
-	pub async fn connect(&self, tls: &rustls::ClientConfig, url: Url) -> anyhow::Result<web_transport_noq::Session> {
+	pub async fn connect(&self, tls: &rustls::ClientConfig, url: Url) -> Result<web_transport_noq::Session> {
 		let mut url = url;
 		let mut config = tls.clone();
 
-		let host = url.host().context("invalid DNS name")?.to_string();
+		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
 		let port = url.port().unwrap_or(443);
 
 		// Look up the DNS entry.
@@ -61,11 +158,11 @@ impl NoqClient {
 		// preferring one whose family matches the local socket so the OS
 		// doesn't reject it (notably on Windows, where IPv6 sockets aren't
 		// dual-stack by default).
-		let local = self.quic.local_addr().context("failed to get local address")?;
+		let local = self.quic.local_addr().map_err(Error::LocalAddr)?;
 		let addrs = tokio::net::lookup_host((host.clone(), port))
 			.await
-			.context("failed DNS lookup")?;
-		let ip = crate::util::pick_addr(addrs, local).context("no DNS entries")?;
+			.map_err(Error::DnsLookup)?;
+		let ip = crate::util::pick_addr(addrs, local).ok_or(Error::NoDnsEntries)?;
 
 		if url.scheme() == "http" {
 			// Perform a HTTP request to fetch the certificate fingerprint.
@@ -78,12 +175,12 @@ impl NoqClient {
 
 			let resp = reqwest::get(fingerprint.as_str())
 				.await
-				.context("failed to fetch fingerprint")?
+				.map_err(Error::FetchFingerprint)?
 				.error_for_status()
-				.context("fingerprint request failed")?;
+				.map_err(Error::FingerprintStatus)?;
 
-			let fingerprint = resp.text().await.context("failed to read fingerprint")?;
-			let fingerprint = hex::decode(fingerprint.trim()).context("invalid fingerprint")?;
+			let fingerprint = resp.text().await.map_err(Error::ReadFingerprint)?;
+			let fingerprint = hex::decode(fingerprint.trim())?;
 
 			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), fingerprint);
 			config.dangerous().set_certificate_verifier(Arc::new(verifier));
@@ -99,7 +196,7 @@ impl NoqClient {
 				.iter()
 				.map(|alpn| alpn.as_bytes().to_vec())
 				.collect(),
-			_ => anyhow::bail!("url scheme must be 'https', 'moqt', or 'moql'"),
+			_ => return Err(Error::InvalidScheme),
 		};
 
 		config.alpn_protocols = alpns;
@@ -124,17 +221,17 @@ impl NoqClient {
 			"moqt" | "moql" => {
 				let handshake = connection
 					.handshake_data()
-					.context("missing handshake data")?
+					.ok_or(Error::MissingHandshake)?
 					.downcast::<noq::crypto::rustls::HandshakeData>()
 					.unwrap();
 
-				let alpn = handshake.protocol.context("missing ALPN")?;
-				let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
+				let alpn = handshake.protocol.ok_or(Error::MissingAlpn)?;
+				let alpn = String::from_utf8(alpn)?;
 
 				let response = web_transport_noq::proto::ConnectResponse::OK.with_protocol(alpn);
 				web_transport_noq::Session::raw(connection, request, response)
 			}
-			_ => anyhow::bail!("unsupported URL scheme: {}", url.scheme()),
+			_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
 		};
 
 		Ok(session)
@@ -149,7 +246,7 @@ pub(crate) struct NoqServer {
 }
 
 impl NoqServer {
-	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
+	pub fn new(config: ServerConfig) -> Result<Self> {
 		let mut transport = noq::TransportConfig::default();
 		transport.max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()));
 		transport.keep_alive_interval(Some(Duration::from_secs(5)));
@@ -169,7 +266,8 @@ impl NoqServer {
 		let certs = Arc::new(certs);
 
 		let mut tls = rustls::ServerConfig::builder_with_provider(provider)
-			.with_protocol_versions(&[&rustls::version::TLS13])?
+			.with_protocol_versions(&[&rustls::version::TLS13])
+			.map_err(crate::tls::Error::from)?
 			.with_no_client_auth()
 			.with_cert_resolver(certs.clone());
 
@@ -190,19 +288,23 @@ impl NoqServer {
 		tls.transport_config(transport);
 
 		// There's a bit more boilerplate to make a generic endpoint.
-		let runtime = noq::default_runtime().context("no async runtime")?;
+		let runtime = noq::default_runtime().ok_or(Error::NoRuntime)?;
 
-		let listen = crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND)
-			.context("failed to resolve bind address")?;
+		let listen =
+			crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND).map_err(Error::ResolveBind)?;
 
 		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = noq::EndpointConfig::default();
 		if let Some(server_id) = config.quic_lb_id {
 			let nonce_len = config.quic_lb_nonce.unwrap_or(8);
-			anyhow::ensure!(nonce_len >= 4, "quic_lb_nonce must be at least 4");
+			if nonce_len < 4 {
+				return Err(Error::QuicLbNonceTooSmall);
+			}
 
 			let cid_len = 1 + server_id.len() + nonce_len;
-			anyhow::ensure!(cid_len <= 20, "connection ID length ({cid_len}) exceeds maximum of 20");
+			if cid_len > 20 {
+				return Err(Error::QuicLbCidTooLong(cid_len));
+			}
 
 			tracing::info!(
 				?server_id,
@@ -214,11 +316,10 @@ impl NoqServer {
 			}));
 		}
 
-		let socket = std::net::UdpSocket::bind(listen).context("failed to bind UDP socket")?;
+		let socket = std::net::UdpSocket::bind(listen).map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
-		let quic = noq::Endpoint::new(endpoint_config, Some(tls), socket, runtime)
-			.context("failed to create QUIC endpoint")?;
+		let quic = noq::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;
 
 		// Spawn the cert reload watcher only after endpoint creation succeeds,
 		// so we don't leave a dangling watcher on failure.
@@ -231,12 +332,12 @@ impl NoqServer {
 		self.quic.accept()
 	}
 
-	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
+	pub fn tls_info(&self) -> Arc<RwLock<crate::tls::Info>> {
 		self.certs.info.clone()
 	}
 
-	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {
-		self.quic.local_addr().context("failed to get local address")
+	pub fn local_addr(&self) -> Result<net::SocketAddr> {
+		self.quic.local_addr().map_err(Error::LocalAddr)
 	}
 
 	pub fn close(&self) {
@@ -260,7 +361,7 @@ pub(crate) enum NoqRequest {
 }
 
 impl NoqRequest {
-	pub async fn accept(conn: noq::Incoming, alpns: Vec<&'static str>) -> anyhow::Result<Self> {
+	pub async fn accept(conn: noq::Incoming, alpns: Vec<&'static str>) -> Result<Self> {
 		let mut conn = conn.accept()?;
 
 		let handshake = conn
@@ -269,8 +370,8 @@ impl NoqRequest {
 			.downcast::<noq::crypto::rustls::HandshakeData>()
 			.unwrap();
 
-		let alpn = handshake.protocol.context("missing ALPN")?;
-		let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
+		let alpn = handshake.protocol.ok_or(Error::MissingAlpn)?;
+		let alpn = String::from_utf8(alpn)?;
 		let host = handshake.server_name.unwrap_or_default();
 
 		// The established Connection no longer exposes a single peer address (noq 1.0
@@ -279,7 +380,7 @@ impl NoqRequest {
 		tracing::debug!(%host, ip = %remote, %alpn, "accepting");
 
 		// Wait for the QUIC connection to be established.
-		let conn = conn.await.context("failed to establish QUIC connection")?;
+		let conn = conn.await.map_err(Error::Establish)?;
 
 		let span = tracing::Span::current();
 		span.record("id", conn.stable_id());
@@ -290,19 +391,19 @@ impl NoqRequest {
 				// Wait for the CONNECT request.
 				let request = web_transport_noq::Request::accept(conn)
 					.await
-					.context("failed to receive WebTransport request")?;
+					.map_err(Error::RecvRequest)?;
 				Ok(Self::WebTransport { request, alpns })
 			}
 			alpn if moq_net::ALPNS.contains(&alpn) => {
-				anyhow::ensure!(!host.is_empty(), "missing server name for raw QUIC connection");
+				if host.is_empty() {
+					return Err(Error::MissingServerName);
+				}
 				let host_str = if host.contains(':') {
 					format!("[{}]", host)
 				} else {
 					host.clone()
 				};
-				let url = format!("moqt://{}", host_str)
-					.parse::<Url>()
-					.context("failed to construct URL from server name")?;
+				let url = format!("moqt://{}", host_str).parse::<Url>().map_err(Error::BuildUrl)?;
 				let request = web_transport_noq::proto::ConnectRequest::new(url);
 				let response = web_transport_noq::proto::ConnectResponse::OK.with_protocol(alpn);
 				Ok(Self::Raw {
@@ -311,12 +412,12 @@ impl NoqRequest {
 					response,
 				})
 			}
-			_ => anyhow::bail!("unsupported ALPN: {alpn}"),
+			_ => Err(Error::UnsupportedAlpn(alpn)),
 		}
 	}
 
 	/// Accept the session, returning a 200 OK if using WebTransport.
-	pub async fn ok(self) -> Result<web_transport_noq::Session, web_transport_noq::ServerError> {
+	pub async fn ok(self) -> std::result::Result<web_transport_noq::Session, web_transport_noq::ServerError> {
 		match self {
 			NoqRequest::Raw {
 				connection,
@@ -345,7 +446,7 @@ impl NoqRequest {
 	pub async fn close(
 		self,
 		status: web_transport_noq::http::StatusCode,
-	) -> Result<(), web_transport_noq::ServerError> {
+	) -> std::result::Result<(), web_transport_noq::ServerError> {
 		match self {
 			NoqRequest::Raw { connection, .. } => {
 				connection.close(status.as_u16().into(), status.as_str().as_bytes());

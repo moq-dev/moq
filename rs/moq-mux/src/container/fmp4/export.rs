@@ -26,6 +26,13 @@ use crate::container::fmp4::Error;
 /// keyframes); [`with_fragment_duration`](Self::with_fragment_duration) caps the
 /// fragment duration for downstream consumers that throttle by fragment rate.
 /// Returns `None` when the broadcast ends.
+///
+/// [`next_fragment`](Self::next_fragment) returns the same bytes wrapped in a
+/// [`Fragment`] that also carries whether the chunk is the init segment, whether
+/// a media fragment begins at a sync sample, and its presentation duration. A
+/// segmenting consumer (e.g. an HLS/LL-HLS packager) needs that to map fragments
+/// onto segments and parts; narrow the catalog to a single rendition with
+/// [`catalog::Filter`](crate::catalog::Filter) so the fragments belong to one track.
 pub struct Export<S: Stream> {
 	broadcast: moq_net::BroadcastConsumer,
 	catalog: Option<S>,
@@ -43,6 +50,25 @@ pub struct Export<S: Stream> {
 	init_emitted: bool,
 }
 
+/// One emitted CMAF chunk: either the init segment or a moof+mdat fragment,
+/// with the metadata a segmenting consumer needs.
+#[derive(Clone, Debug)]
+pub struct Fragment {
+	/// The encoded bytes: ftyp+moov for the init, otherwise one moof+mdat.
+	pub data: Bytes,
+
+	/// True only for the first emit (the init segment).
+	pub init: bool,
+
+	/// A media fragment that begins at a sync sample, so it can start a segment.
+	/// Video fragments are independent only at a GOP boundary (keyframe); audio
+	/// fragments are always independent. Always false for the init segment.
+	pub independent: bool,
+
+	/// Presentation duration of the fragment in seconds (0 for the init segment).
+	pub duration: f64,
+}
+
 struct Fmp4Track {
 	source: ExportSource,
 
@@ -53,8 +79,16 @@ struct Fmp4Track {
 	/// moof+mdat on the next keyframe (video) or duration cap.
 	buffer: Vec<Frame>,
 
+	/// Whether the first frame of the current `buffer` was a keyframe, i.e. the
+	/// fragment it produces can start an HLS segment. Meaningless for audio.
+	buffer_independent: bool,
+
 	/// True if this track is video. Video tracks roll fragments on keyframes.
 	is_video: bool,
+
+	/// Fallback duration for a trailing frame that carries no per-sample duration
+	/// (Legacy / LOC sources). Derived from the catalog framerate / sample rate.
+	default_frame: Duration,
 
 	/// Whether the source has signalled end-of-track.
 	finished: bool,
@@ -116,15 +150,26 @@ impl<S: Stream> Export<S> {
 	/// timestamp order across tracks. Returns `None` when the catalog and every track
 	/// have ended.
 	pub async fn next(&mut self) -> Result<Option<Bytes>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
+		Ok(self.next_fragment().await?.map(|f| f.data))
 	}
 
 	/// Poll-based variant of [`Self::next`].
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+		Poll::Ready(Ok(std::task::ready!(self.poll_next_fragment(waiter)?).map(|f| f.data)))
+	}
+
+	/// Like [`next`](Self::next) but returns a [`Fragment`] carrying segment metadata
+	/// (init flag, sync-sample independence, presentation duration).
+	pub async fn next_fragment(&mut self) -> Result<Option<Fragment>> {
+		kio::wait(|waiter| self.poll_next_fragment(waiter)).await
+	}
+
+	/// Poll-based variant of [`Self::next_fragment`].
+	pub fn poll_next_fragment(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Fragment>>> {
 		// 1. Drain catalog updates and (un)subscribe tracks accordingly.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
-				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot)?,
+				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot.media())?,
 				Poll::Ready(None) => {
 					self.catalog = None;
 					break;
@@ -171,7 +216,12 @@ impl<S: Stream> Export<S> {
 			if self.init_ready() {
 				let init = self.build_init()?;
 				self.init_emitted = true;
-				return Poll::Ready(Ok(Some(init)));
+				return Poll::Ready(Ok(Some(Fragment {
+					data: init,
+					init: true,
+					independent: false,
+					duration: 0.0,
+				})));
 			}
 			// Still waiting for codec configs. If every track is finished and
 			// the init still isn't buildable, the source ended before producing
@@ -199,13 +249,18 @@ impl<S: Stream> Export<S> {
 			let flush_before = should_flush(track, &frame, frag, has_video_track);
 			if flush_before {
 				let frames = std::mem::take(&mut track.buffer);
-				let emit = encode_fragment(track, frames)?;
+				let fragment = emit_fragment(track, frames)?;
+				// The flushed run is done; the incoming frame opens the next buffer.
+				track.buffer_independent = frame.keyframe;
 				track.buffer.push(frame);
-				return Poll::Ready(Ok(Some(emit)));
+				return Poll::Ready(Ok(Some(fragment)));
+			}
+			if track.buffer.is_empty() {
+				track.buffer_independent = frame.keyframe;
 			}
 			track.buffer.push(frame);
 			// Frame appended to buffer; loop again to look for more work or a flush.
-			return self.poll_next(waiter);
+			return self.poll_next_fragment(waiter);
 		}
 
 		// 5. No pending frames. Flush any finished tracks' remaining buffers,
@@ -226,8 +281,8 @@ impl<S: Stream> Export<S> {
 		if let Some(name) = flushable {
 			let track = self.tracks.get_mut(&name).unwrap();
 			let frames = std::mem::take(&mut track.buffer);
-			let emit = encode_fragment(track, frames)?;
-			return Poll::Ready(Ok(Some(emit)));
+			let fragment = emit_fragment(track, frames)?;
+			return Poll::Ready(Ok(Some(fragment)));
 		}
 
 		// 6. If catalog is closed and every track is finished and drained, we're done.
@@ -267,7 +322,9 @@ impl<S: Stream> Export<S> {
 					source,
 					pending: None,
 					buffer: Vec::new(),
+					buffer_independent: false,
 					is_video: true,
+					default_frame: Duration::from_secs_f64(1.0 / config.framerate.unwrap_or(30.0)),
 					finished: false,
 					track_id: next_track_id,
 					timescale,
@@ -289,7 +346,10 @@ impl<S: Stream> Export<S> {
 					source,
 					pending: None,
 					buffer: Vec::new(),
+					buffer_independent: false,
 					is_video: false,
+					// Fallback for a duration-less trailing sample (~1024 samples/frame).
+					default_frame: Duration::from_secs_f64(1024.0 / config.sample_rate.max(1) as f64),
 					finished: false,
 					track_id: next_track_id,
 					timescale,
@@ -488,6 +548,48 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Bytes> {
 		seq,
 		&frames,
 	)?)
+}
+
+/// Encode a buffered run and wrap it with the metadata a segmenting consumer needs.
+fn emit_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Fragment> {
+	// Audio has no keyframes, so every audio fragment is independent; video is
+	// independent only when its buffer opened on a keyframe (a GOP boundary).
+	let independent = !track.is_video || track.buffer_independent;
+	let duration = fragment_seconds(&frames, track.default_frame);
+	let data = encode_fragment(track, frames)?;
+	Ok(Fragment {
+		data,
+		init: false,
+		independent,
+		duration,
+	})
+}
+
+/// Presentation duration of a fragment, in seconds.
+///
+/// When every sample carries a duration (the CMAF case) the per-sample durations
+/// tile the timeline, so their sum is exact. Legacy / LOC sources carry none, so
+/// fall back to the presentation span plus one `default_frame` for the trailing
+/// sample (which has no successor to bound it).
+fn fragment_seconds(frames: &[Frame], default_frame: Duration) -> f64 {
+	if frames.is_empty() {
+		return 0.0;
+	}
+	if frames.iter().all(|f| f.duration.is_some()) {
+		return frames
+			.iter()
+			.map(|f| Duration::from(f.duration.unwrap()))
+			.sum::<Duration>()
+			.as_secs_f64();
+	}
+	let mut min = Duration::MAX;
+	let mut max = Duration::ZERO;
+	for f in frames {
+		let pts = Duration::from(f.timestamp);
+		min = min.min(pts);
+		max = max.max(pts);
+	}
+	((max - min) + default_frame).as_secs_f64()
 }
 
 fn catalog_timescale_video(config: &VideoConfig) -> u64 {

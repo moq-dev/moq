@@ -68,9 +68,7 @@ impl Session {
 		publish: Option<moq_net::OriginProducer>,
 		consume: Option<moq_net::OriginProducer>,
 	) -> Result<(), Error> {
-		let mut client = moq_native::ClientConfig::default()
-			.init()
-			.map_err(|err| Error::Connect(Arc::new(err)))?;
+		let mut client = moq_native::ClientConfig::default().init()?;
 
 		if let Some(publish) = publish {
 			client = client.with_publisher(publish);

@@ -59,6 +59,7 @@ mod server;
 mod session;
 mod setup;
 mod stats;
+mod util;
 mod version;
 
 pub use client::*;

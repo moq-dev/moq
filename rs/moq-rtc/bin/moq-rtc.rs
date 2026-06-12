@@ -130,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
 
 	tokio::select! {
 		res = driver => res,
-		res = reconnect.closed() => res,
+		res = reconnect.closed() => res.map_err(Into::into),
 		_ = tokio::signal::ctrl_c() => Ok(()),
 	}
 }

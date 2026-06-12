@@ -13,9 +13,9 @@ fn drain_group_sequences(consumer: &mut moq_net::TrackSubscriber) -> Vec<u64> {
 	sequences
 }
 
-fn run_fmp4(data: &[u8]) -> hang::Catalog {
+fn run_fmp4(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut broadcast = moq_net::BroadcastInfo::new().produce();
-	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
 
@@ -148,7 +148,7 @@ async fn test_seek_sets_initial_sequence() {
 
 	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let broadcast_consumer = broadcast.consume();
-	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
 
 	let data = include_bytes!("test_data/bbb.mp4");
@@ -216,7 +216,7 @@ async fn test_msf_catalog_roundtrip() {
 	// Take the consumer before adding tracks; track() is called after the
 	// MSF catalog track has been created by `catalog::Producer::new`.
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::hang::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog);
 
 	let data = include_bytes!("test_data/bbb.mp4");

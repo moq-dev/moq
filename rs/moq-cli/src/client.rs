@@ -33,7 +33,7 @@ pub async fn run_client(
 
 	tokio::select! {
 		res = publish.run() => res,
-		res = reconnect.closed() => res,
+		res = reconnect.closed() => Ok(res?),
 		res = run_stats(stats_agg, stats.interval) => res,
 		_ = tokio::signal::ctrl_c() => Ok(()),
 	}

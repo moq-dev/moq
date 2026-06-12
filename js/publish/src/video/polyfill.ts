@@ -7,13 +7,17 @@ import type { StreamTrack } from "./types";
 export function TrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 	// @ts-expect-error No typescript types yet.
 	if (self.MediaStreamTrackProcessor) {
-		// Rewrite timestamps so they use our wall clock time instead of starting at 0.
-		// TODO verify all browsers actually start at 0.
-		const zero = performance.now() * 1000;
+		// Rewrite timestamps onto our wall clock so audio and video share one epoch.
+		let base: number | undefined;
+		let zero = 0;
 
 		const rewrite = new TransformStream<VideoFrame>({
 			transform(frame, controller) {
-				const rewrite = new VideoFrame(frame, { timestamp: frame.timestamp + zero });
+				if (base === undefined) {
+					base = frame.timestamp;
+					zero = performance.now() * 1000;
+				}
+				const rewrite = new VideoFrame(frame, { timestamp: frame.timestamp - base + zero });
 				frame.close();
 				controller.enqueue(rewrite);
 			},

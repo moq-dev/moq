@@ -1,9 +1,33 @@
-use anyhow::Context;
 use qmux::tokio_tungstenite;
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::{net, time};
 use url::Url;
+
+/// Errors specific to the WebSocket fallback backend.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error(transparent)]
+	Io(#[from] std::io::Error),
+
+	#[error("WebSocket support is disabled")]
+	Disabled,
+
+	#[error("missing hostname")]
+	MissingHostname,
+
+	#[error("unsupported URL scheme for WebSocket: {0}")]
+	UnsupportedScheme(String),
+
+	#[error("failed to connect WebSocket")]
+	Connect(#[source] qmux::Error),
+
+	#[error("WebSocket accept failed")]
+	Accept(#[source] qmux::Error),
+}
+
+type Result<T> = std::result::Result<T, Error>;
 
 // Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time
 static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -11,8 +35,9 @@ static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(||
 /// WebSocket configuration for the client.
 #[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[group(id = "websocket-client")]
 #[non_exhaustive]
-pub struct ClientWebSocket {
+pub struct Client {
 	/// Whether to enable WebSocket support.
 	#[arg(
 		id = "websocket-enabled",
@@ -36,7 +61,7 @@ pub struct ClientWebSocket {
 	pub delay: Option<time::Duration>,
 }
 
-impl Default for ClientWebSocket {
+impl Default for Client {
 	fn default() -> Self {
 		Self {
 			enabled: true,
@@ -46,11 +71,11 @@ impl Default for ClientWebSocket {
 }
 
 pub(crate) async fn race_handle(
-	config: &ClientWebSocket,
+	config: &Client,
 	tls: &rustls::ClientConfig,
 	url: Url,
 	alpns: &[&str],
-) -> Option<anyhow::Result<qmux::Session>> {
+) -> Option<Result<qmux::Session>> {
 	if !config.enabled {
 		return None;
 	}
@@ -70,14 +95,16 @@ pub(crate) async fn race_handle(
 }
 
 pub(crate) async fn connect(
-	config: &ClientWebSocket,
+	config: &Client,
 	tls: &rustls::ClientConfig,
 	mut url: Url,
 	alpns: &[&str],
-) -> anyhow::Result<qmux::Session> {
-	anyhow::ensure!(config.enabled, "WebSocket support is disabled");
+) -> Result<qmux::Session> {
+	if !config.enabled {
+		return Err(Error::Disabled);
+	}
 
-	let host = url.host_str().context("missing hostname")?.to_string();
+	let host = url.host_str().ok_or(Error::MissingHostname)?.to_string();
 	let port = url.port().unwrap_or_else(|| match url.scheme() {
 		"https" | "wss" | "moql" | "moqt" => 443,
 		"http" | "ws" => 80,
@@ -109,7 +136,7 @@ pub(crate) async fn connect(
 		}
 		"ws" => false,
 		"wss" => true,
-		_ => anyhow::bail!("unsupported URL scheme for WebSocket: {}", url.scheme()),
+		_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
 	};
 
 	tracing::debug!(%url, "connecting via WebSocket");
@@ -123,17 +150,16 @@ pub(crate) async fn connect(
 
 	// Most moq ALPNs can ride on any QMux draft (`&[]` lets the polyfill expand
 	// to every version it knows). `qmux_versions_for` pins the few that the spec
-	// restricts. `without_protocol` also offers the bare ALPNs (`qmux-01`,
-	// `qmux-00`, `webtransport`) so we still interop with relays that only know a
+	// restricts. qmux also offers the bare ALPNs (`qmux-01`, `qmux-00`,
+	// `webtransport`) by default so we still interop with relays that only know a
 	// wire-format version.
 	let session = qmux::Client::new()
 		.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
-		.without_protocol()
 		.with_connector(connector)
 		.with_keep_alive(qmux::KeepAlive::default()) // 5s ping / 30s deadline — parity with QUIC
 		.connect(url.as_str())
 		.await
-		.context("failed to connect WebSocket")?;
+		.map_err(Error::Connect)?;
 
 	tracing::warn!(%url, "using WebSocket fallback");
 	WEBSOCKET_WON.lock().unwrap().insert(key);
@@ -157,42 +183,35 @@ fn qmux_versions_for(alpn: &str) -> &'static [qmux::Version] {
 ///
 /// Use with [`crate::Server::with_websocket`] to accept WebSocket connections
 /// alongside QUIC connections on a separate port.
-pub struct WebSocketListener {
+pub struct Listener {
 	listener: tokio::net::TcpListener,
 	server: qmux::Server,
 }
 
-impl WebSocketListener {
-	pub async fn bind(addr: net::SocketAddr) -> anyhow::Result<Self> {
+impl Listener {
+	pub async fn bind(addr: net::SocketAddr) -> Result<Self> {
 		Self::bind_with_alpns(addr, moq_net::ALPNS).await
 	}
 
-	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> anyhow::Result<Self> {
+	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> Result<Self> {
 		let listener = tokio::net::TcpListener::bind(addr).await?;
 		// `qmux_versions_for` returns `&[]` (every QMux draft) for ALPNs the spec
-		// doesn't restrict; `without_protocol` also accepts legacy clients that
+		// doesn't restrict; qmux by default also accepts legacy clients that
 		// only offer a bare wire-format ALPN (today's moq-net clients still do).
-		let server = qmux::Server::new()
-			.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
-			.without_protocol();
+		let server = qmux::Server::new().with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))));
 		Ok(Self { listener, server })
 	}
 
-	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {
+	pub fn local_addr(&self) -> Result<net::SocketAddr> {
 		Ok(self.listener.local_addr()?)
 	}
 
-	pub async fn accept(&self) -> Option<anyhow::Result<qmux::Session>> {
+	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
 		match self.listener.accept().await {
 			Ok((stream, addr)) => {
 				tracing::debug!(%addr, "accepted WebSocket TCP connection");
 				let server = self.server.clone();
-				Some(
-					server
-						.accept(stream)
-						.await
-						.map_err(|e| anyhow::anyhow!("WebSocket accept failed: {e}")),
-				)
+				Some(server.accept(stream).await.map_err(Error::Accept))
 			}
 			Err(e) => Some(Err(e.into())),
 		}

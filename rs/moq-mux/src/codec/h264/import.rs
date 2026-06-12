@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::{Error, Sps};
 use crate::Result;
+use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::{NalIterator, START_CODE};
 use crate::container::jitter::MinFrameDuration;
 
@@ -29,9 +30,9 @@ pub enum Mode {
 /// H.264 importer. Handles both avc1 (length-prefixed) and avc3 (Annex-B)
 /// input streams; the shape is detected from the first bytes the caller
 /// supplies, or forced explicitly via [`with_mode`](Self::with_mode).
-pub struct Import {
+pub struct Import<E: CatalogExt = ()> {
 	broadcast: moq_net::BroadcastProducer,
-	catalog: crate::catalog::hang::Producer,
+	catalog: crate::catalog::Producer<E>,
 	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
 	config: Option<hang::catalog::VideoConfig>,
 	state: State,
@@ -61,8 +62,8 @@ struct Avc3Frame {
 	contains_pps: bool,
 }
 
-impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::hang::Producer) -> Self {
+impl<E: CatalogExt> Import<E> {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -90,10 +91,10 @@ impl Import {
 					self.broadcast.unique_name(".avc3"),
 					moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 				)?;
-				self.track = Some(crate::container::Producer::new(
-					track,
-					crate::catalog::hang::Container::Legacy,
-				));
+				self.track = Some(
+					crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
+						.with_lenient_start(),
+				);
 				self.state = State::Avc3 {
 					current: Avc3Frame::default(),
 					sps: None,
@@ -174,10 +175,10 @@ impl Import {
 					self.broadcast.unique_name(".avc3"),
 					moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 				)?;
-				self.track = Some(crate::container::Producer::new(
-					track,
-					crate::catalog::hang::Container::Legacy,
-				));
+				self.track = Some(
+					crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
+						.with_lenient_start(),
+				);
 			}
 		}
 
@@ -448,10 +449,8 @@ impl Import {
 			.insert(track.name().to_string(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::catalog::hang::Container::Legacy,
-		));
+		self.track =
+			Some(crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start());
 		Ok(())
 	}
 
@@ -484,7 +483,7 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
+impl<E: CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.name(), "ending H.264 track");
@@ -569,7 +568,7 @@ mod tests {
 
 		let broadcast = moq_net::BroadcastInfo::new();
 		let mut producer = broadcast.produce();
-		let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 		let mut importer = Import::new(producer, catalog.clone());
 		let mut buf = bytes::BytesMut::from(avcc.as_slice());
@@ -605,7 +604,7 @@ mod tests {
 
 		let broadcast = moq_net::BroadcastInfo::new();
 		let mut producer = broadcast.produce();
-		let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 		let mut importer = Import::new(producer, catalog.clone());
 		importer.initialize(&mut annexb).expect("initialize avc3");

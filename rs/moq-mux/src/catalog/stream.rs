@@ -1,15 +1,18 @@
 //! Catalog stream trait.
 //!
-//! [`Stream`] yields a sequence of [`hang::Catalog`] snapshots. Both the
+//! [`Stream`] yields a sequence of [`Catalog<E>`](super::hang::Catalog) snapshots. Both the
 //! raw [`Consumer`](super::Consumer) and the rendition-selecting
 //! [`Filter`](super::Filter) / [`Target`](super::Target) wrappers implement
 //! it, so exporters can be written against the trait and the caller picks
 //! the selection policy.
+//!
+//! The yielded catalog carries the application extension `E` (defaulting to
+//! `()` for media-only catalogs) via the [`Ext`](Stream::Ext) associated type,
+//! so an exporter that only touches `video`/`audio` works for any extension.
 
 use std::task::Poll;
 
-use hang::Catalog;
-
+use super::hang::{Catalog, CatalogExt};
 use super::{Filter, Target};
 
 /// A stream of catalog snapshots.
@@ -21,10 +24,13 @@ use super::{Filter, Target};
 /// Stream types are required to be `Send + 'static` so they can be moved
 /// across threads and held inside exporters without per-call bounds.
 pub trait Stream: Send + 'static {
-	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>>;
+	/// The application extension carried by the yielded catalog (`()` for media-only).
+	type Ext: CatalogExt;
+
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<Self::Ext>>>>;
 
 	/// Wait for the next snapshot.
-	fn next(&mut self) -> impl std::future::Future<Output = crate::Result<Option<Catalog>>> + Send
+	fn next(&mut self) -> impl std::future::Future<Output = crate::Result<Option<Catalog<Self::Ext>>>> + Send
 	where
 		Self: Sized,
 	{

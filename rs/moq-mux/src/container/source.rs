@@ -22,6 +22,7 @@ use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
 use crate::catalog::hang::Container as HangContainer;
 use crate::codec::h264::Avc1;
 use crate::codec::h265::Hvc1;
+use crate::container::ts::scte35;
 use crate::container::{Consumer, Frame};
 
 /// Per-track video transform that bridges between codec shapes.
@@ -129,6 +130,26 @@ impl ExportSource {
 			latency,
 			transform: None,
 			description,
+		})
+	}
+
+	/// Subscribe to a SCTE-35 cue rendition. No codec-shape transform and no
+	/// description: the frames carry the verbatim `splice_info_section` bytes that
+	/// the muxer writes back out as private sections.
+	pub fn for_scte35(
+		broadcast: &moq_net::BroadcastConsumer,
+		name: &str,
+		config: &scte35::Config,
+		latency: Duration,
+	) -> Result<Self, crate::Error> {
+		let media: HangContainer = (&config.container).try_into()?;
+
+		Ok(Self {
+			state: SourceState::Subscribing(broadcast.track(name)?.subscribe(None)?),
+			media: Some(media),
+			latency,
+			transform: None,
+			description: None,
 		})
 	}
 

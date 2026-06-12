@@ -14,8 +14,8 @@
 use std::time::Instant;
 
 use bytes::Bytes;
-use hang::Catalog;
 use hang::catalog::{AudioCodec, VideoCodecKind};
+use moq_mux::catalog::hang::Catalog;
 use str0m::format::Codec;
 use str0m::media::{Frequency, MediaTime, Mid, Pt};
 use tokio::sync::mpsc;

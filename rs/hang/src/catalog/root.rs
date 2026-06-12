@@ -4,6 +4,11 @@ use crate::catalog::{Audio, Video};
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
+///
+/// The base catalog carries only the media sections (`video`, `audio`). Applications extend it with
+/// their own root sections (e.g. `scte35`) by flattening this struct into their own with
+/// `#[serde(flatten)]`. The catalog does not deny unknown fields, so a base consumer ignores the
+/// extra sections and an extended catalog stays wire-compatible. See the `extension_roundtrip` test.
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -244,5 +249,37 @@ mod test {
 
 		let output = catalog.to_string().expect("failed to encode");
 		assert_eq!(encoded, output, "encode mismatch");
+	}
+
+	#[test]
+	fn extension_roundtrip() {
+		// An application extends the catalog with its own root section by flattening Catalog.
+		#[derive(Serialize, Deserialize, PartialEq, Debug)]
+		struct AppCatalog {
+			#[serde(flatten)]
+			base: Catalog,
+			#[serde(skip_serializing_if = "Option::is_none")]
+			scte35: Option<Scte35>,
+		}
+
+		#[derive(Serialize, Deserialize, PartialEq, Debug)]
+		struct Scte35 {
+			splice_id: u32,
+		}
+
+		let app = AppCatalog {
+			base: Catalog::default(),
+			scte35: Some(Scte35 { splice_id: 42 }),
+		};
+
+		let json = serde_json::to_string(&app).expect("failed to encode");
+
+		// A base consumer ignores the unknown section.
+		let base = Catalog::from_str(&json).expect("failed to decode base");
+		assert_eq!(base, Catalog::default());
+
+		// The extended consumer round-trips its own section.
+		let decoded: AppCatalog = serde_json::from_str(&json).expect("failed to decode app");
+		assert_eq!(decoded, app);
 	}
 }

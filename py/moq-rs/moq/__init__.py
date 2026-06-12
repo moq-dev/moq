@@ -10,6 +10,7 @@ from .log import log_level
 from .origin import Announced, AnnouncedBroadcast, Announcement, OriginConsumer, OriginProducer
 from .publish import (
     AudioProducer,
+    BroadcastDynamic,
     BroadcastProducer,
     GroupProducer,
     MediaProducer,
@@ -55,6 +56,7 @@ __all__ = [
     "AudioFrame",
     "AudioProducer",
     "BroadcastConsumer",
+    "BroadcastDynamic",
     "BroadcastProducer",
     "Catalog",
     "CatalogConsumer",

@@ -1,4 +1,4 @@
-"""Producer wrappers — publish broadcasts and media tracks."""
+"""Producer wrappers: publish broadcasts and media tracks."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from moq_ffi import (
     MoqAudioProducer,
+    MoqBroadcastDynamic,
     MoqBroadcastProducer,
     MoqGroupProducer,
     MoqMediaProducer,
@@ -46,7 +47,7 @@ class MediaProducer:
 
 
 class MediaStreamProducer:
-    """Wraps MoqMediaStreamProducer — feed a raw byte stream (e.g. Annex-B
+    """Wraps MoqMediaStreamProducer: feed a raw byte stream (e.g. Annex-B
     H.264) and let the importer infer frame boundaries.
 
     Built via :meth:`BroadcastProducer.publish_media_stream`. Unlike
@@ -90,7 +91,7 @@ class GroupProducer:
 
 
 class TrackProducer:
-    """Track producer — write arbitrary byte payloads with no codec required.
+    """Track producer: write arbitrary byte payloads with no codec required.
 
     Same pattern as moq-boy's status/command tracks.
     """
@@ -125,6 +126,10 @@ class TrackProducer:
 
         return TrackConsumer(self._inner.consume())
 
+    def abort(self, error_code: int) -> None:
+        """Abort this track with an application error code."""
+        self._inner.abort(error_code)
+
     def finish(self) -> None:
         self._inner.finish()
 
@@ -150,11 +155,37 @@ class AudioProducer:
         self._inner.finish()
 
 
+class BroadcastDynamic:
+    """Async source of tracks requested by subscribers.
+
+    Hold this object while subscriptions to unknown tracks should be accepted.
+    """
+
+    def __init__(self, inner: MoqBroadcastDynamic) -> None:
+        self._inner = inner
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> TrackProducer:
+        return await self.requested_track()
+
+    async def requested_track(self) -> TrackProducer:
+        return TrackProducer(await self._inner.requested_track())
+
+    def cancel(self) -> None:
+        self._inner.cancel()
+
+
 class BroadcastProducer:
     """Wraps MoqBroadcastProducer with a cleaner interface."""
 
     def __init__(self) -> None:
         self._inner = MoqBroadcastProducer()
+
+    def dynamic(self) -> BroadcastDynamic:
+        """Accept subscriptions to tracks that are not published yet."""
+        return BroadcastDynamic(self._inner.dynamic())
 
     def publish_media(self, format: str, init: bytes) -> MediaProducer:
         return MediaProducer(self._inner.publish_media(format, init))
@@ -174,7 +205,7 @@ class BroadcastProducer:
         return AudioProducer(self._inner.publish_audio(name, input, output))
 
     def publish_track(self, name: str) -> TrackProducer:
-        """Create a track — send any bytes, no codec validation."""
+        """Create a track. Send any bytes, no codec validation."""
         return TrackProducer(self._inner.publish_track(name))
 
     def consume(self) -> BroadcastConsumer:

@@ -35,6 +35,16 @@ pub struct Frame {
 	/// scale matches the track's [`crate::TrackInfo::timescale`]; the publisher
 	/// surfaces a `ProtocolViolation` otherwise.
 	pub timestamp: Option<Timestamp>,
+
+	/// How long this frame occupies the presentation timeline, in the parent
+	/// track's timescale.
+	///
+	/// `None` means the duration is unknown (the frame is presented until the next
+	/// frame in the group begins); it encodes as a resolved value of 0 on the wire.
+	/// Only meaningful on timed tracks: when the track timescale is `Some`, a
+	/// `Some(d)` here must share that scale, and lite-05+ carries it as a
+	/// zigzag-delta after the timestamp. Untimed tracks must leave this `None`.
+	pub duration: Option<Timestamp>,
 }
 
 impl Frame {
@@ -53,13 +63,18 @@ impl From<usize> for Frame {
 		Self {
 			size: size as u64,
 			timestamp: None,
+			duration: None,
 		}
 	}
 }
 
 impl From<u64> for Frame {
 	fn from(size: u64) -> Self {
-		Self { size, timestamp: None }
+		Self {
+			size,
+			timestamp: None,
+			duration: None,
+		}
 	}
 }
 
@@ -68,6 +83,7 @@ impl From<u32> for Frame {
 		Self {
 			size: size as u64,
 			timestamp: None,
+			duration: None,
 		}
 	}
 }
@@ -77,6 +93,7 @@ impl From<u16> for Frame {
 		Self {
 			size: size as u64,
 			timestamp: None,
+			duration: None,
 		}
 	}
 }
@@ -466,6 +483,7 @@ mod test {
 		let mut producer = Frame {
 			size: 5,
 			timestamp: None,
+			duration: None,
 		}
 		.produce();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
@@ -481,6 +499,7 @@ mod test {
 		let mut producer = Frame {
 			size: 10,
 			timestamp: None,
+			duration: None,
 		}
 		.produce();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
@@ -497,6 +516,7 @@ mod test {
 		let mut producer = Frame {
 			size: 10,
 			timestamp: None,
+			duration: None,
 		}
 		.produce();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
@@ -520,6 +540,7 @@ mod test {
 		let mut producer = Frame {
 			size: 10,
 			timestamp: None,
+			duration: None,
 		}
 		.produce();
 		producer.write(Bytes::from_static(b"hello")).unwrap();
@@ -537,6 +558,7 @@ mod test {
 		let mut producer = Frame {
 			size: 5,
 			timestamp: None,
+			duration: None,
 		}
 		.produce();
 		producer.write(Bytes::from_static(b"hi")).unwrap();
@@ -549,6 +571,7 @@ mod test {
 		let mut producer = Frame {
 			size: 3,
 			timestamp: None,
+			duration: None,
 		}
 		.produce();
 		let err = producer.write(Bytes::from_static(b"toolong")).unwrap_err();
@@ -560,6 +583,7 @@ mod test {
 		let mut producer = Frame {
 			size: 5,
 			timestamp: None,
+			duration: None,
 		}
 		.produce();
 		let mut consumer = producer.consume();
@@ -574,6 +598,7 @@ mod test {
 		let mut producer = Frame {
 			size: 0,
 			timestamp: None,
+			duration: None,
 		}
 		.produce();
 		producer.finish().unwrap();
@@ -588,6 +613,7 @@ mod test {
 		let mut producer = Frame {
 			size: 5,
 			timestamp: None,
+			duration: None,
 		}
 		.produce();
 		let mut consumer = producer.consume();
@@ -608,6 +634,7 @@ mod test {
 		let mut producer = Frame {
 			size: 12,
 			timestamp: None,
+			duration: None,
 		}
 		.produce();
 		assert_eq!(producer.remaining_mut(), 12);
@@ -628,6 +655,7 @@ mod test {
 		let mut producer = Frame {
 			size: 4,
 			timestamp: None,
+			duration: None,
 		}
 		.produce();
 		// Safety violation on purpose: cnt > remaining_mut().
@@ -639,6 +667,7 @@ mod test {
 		let mut producer = Frame {
 			size: 6,
 			timestamp: None,
+			duration: None,
 		}
 		.produce();
 		let mut consumer = producer.consume();
@@ -663,6 +692,7 @@ mod test {
 		let mut producer = Frame {
 			size: 10,
 			timestamp: None,
+			duration: None,
 		}
 		.produce();
 		let mut c1 = producer.consume();

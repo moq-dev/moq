@@ -12,6 +12,7 @@ use crate::{
 		priority::{Priority, PriorityHandle, PriorityQueue},
 	},
 	model::{FrameConsumer, GroupConsumer},
+	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
 use super::Version;
@@ -111,8 +112,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
 		const PROBE_MAX_DELTA: f64 = 0.25;
 
-		let mut last_sent: Option<(u64, tokio::time::Instant)> = None;
-		let mut interval = tokio::time::interval(PROBE_INTERVAL);
+		let mut last_sent: Option<(u64, web_async::time::Instant)> = None;
+		let mut interval = web_async::time::interval(PROBE_INTERVAL);
 
 		loop {
 			tokio::select! {
@@ -140,7 +141,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			if should_send {
 				let rtt = session.stats().rtt().map(|d| d.as_millis() as u64);
 				stream.writer.encode(&lite::Probe { bitrate, rtt }).await?;
-				last_sent = Some((bitrate, tokio::time::Instant::now()));
+				last_sent = Some((bitrate, web_async::time::Instant::now()));
 			}
 		}
 	}
@@ -675,6 +676,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// its absolute timestamp (the subscriber decodes against the same baseline).
 		let mut index = fetch.frame_start as usize;
 		let mut prev_ts: u64 = 0;
+		let mut prev_dur: u64 = 0;
 		while let Some(mut frame) = group.get_frame(index).await? {
 			write_fetch_frame(
 				&mut stream.writer,
@@ -682,6 +684,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				compression,
 				timescale,
 				&mut prev_ts,
+				&mut prev_dur,
 				&track_stats,
 			)
 			.await?;
@@ -693,28 +696,70 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 }
 
-/// Write one frame to a fetch stream in the lite wire format: an optional
-/// zigzag-delta timestamp, the size, then the payload. Mirrors the per-frame
-/// encoding in [`Subscription::serve_frame`] without the priority machinery, since
-/// a one-shot fetch carries a single static priority set on the stream up front.
+/// Encode the per-frame timing prefix when the track advertises a timescale:
+/// `[zigzag-delta timestamp][zigzag-delta duration]` (the lite-05 FRAME format).
+/// With `None` both fields are omitted entirely, saving the bytes on tracks where
+/// timing isn't meaningful (catalogs, control channels, IETF transport).
+///
+/// `prev_ts`/`prev_dur` carry the running baselines, so the first frame deltas
+/// against 0. A `None` duration resolves to 0 on the wire ("unknown"). The model
+/// layer (`GroupProducer::append_frame`) already validated the timestamp/duration
+/// against the track timescale, so the `expect` below is infallible. Mirrors the
+/// decode in the subscriber's `run_group`.
+async fn encode_frame_timing<W: web_transport_trait::SendStream>(
+	writer: &mut Writer<W, Version>,
+	frame: &FrameConsumer,
+	timescale: Option<crate::Timescale>,
+	prev_ts: &mut u64,
+	prev_dur: &mut u64,
+) -> Result<(), Error> {
+	if timescale.is_none() {
+		return Ok(());
+	}
+
+	let ts = frame
+		.timestamp
+		.expect("model layer validated timestamp presence")
+		.value();
+	encode_zigzag_delta(writer, ts, prev_ts).await?;
+
+	let dur = frame.duration.map_or(0, |d| d.value());
+	encode_zigzag_delta(writer, dur, prev_dur).await?;
+
+	Ok(())
+}
+
+/// Encode `curr` as a zigzag-mapped varint delta against `*prev`, then advance
+/// `*prev` to `curr`.
+async fn encode_zigzag_delta<W: web_transport_trait::SendStream>(
+	writer: &mut Writer<W, Version>,
+	curr: u64,
+	prev: &mut u64,
+) -> Result<(), Error> {
+	let delta: i64 = (curr as i128 - *prev as i128)
+		.try_into()
+		.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+	let zz = crate::coding::VarInt::from_zigzag(delta).map_err(crate::coding::EncodeError::from)?;
+	writer.encode(&zz).await?;
+	*prev = curr;
+	Ok(())
+}
+
+/// Write one frame to a fetch stream in the lite wire format: the optional timing
+/// prefix (see [`encode_frame_timing`]), the size, then the payload. Mirrors the
+/// per-frame encoding in [`Subscription::serve_frame`] without the priority
+/// machinery, since a one-shot fetch carries a single static priority set on the
+/// stream up front.
 async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	writer: &mut Writer<W, Version>,
 	frame: &mut FrameConsumer,
 	compression: Compression,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
+	prev_dur: &mut u64,
 	track_stats: &crate::PublisherTrack,
 ) -> Result<(), Error> {
-	if timescale.is_some() {
-		let ts = frame.timestamp.expect("model layer validated timestamp presence");
-		let curr = ts.value();
-		let delta: i64 = (curr as i128 - *prev_ts as i128)
-			.try_into()
-			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-		let zz = crate::coding::VarInt::from_zigzag(delta).map_err(crate::coding::EncodeError::from)?;
-		writer.encode(&zz).await?;
-		*prev_ts = curr;
-	}
+	encode_frame_timing(writer, frame, timescale, prev_ts, prev_dur).await?;
 
 	match compression {
 		Compression::None => {
@@ -772,7 +817,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		writer: &mut Writer<S::SendStream, Version>,
 		track_priority_tx: &tokio::sync::watch::Sender<u8>,
 	) -> Result<(), Error> {
-		let mut tasks: FuturesUnordered<futures::future::BoxFuture<'static, ()>> = FuturesUnordered::new();
+		let mut tasks: FuturesUnordered<MaybeSendBox<'static, ()>> = FuturesUnordered::new();
 
 		// Start the consumer at the specified sequence, otherwise start at the latest group.
 		if let Some(start_group) = start_group.or_else(|| track.latest()) {
@@ -842,11 +887,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		}
 	}
 
-	fn spawn_serve(
-		&mut self,
-		group: GroupConsumer,
-		tasks: &mut FuturesUnordered<futures::future::BoxFuture<'static, ()>>,
-	) {
+	fn spawn_serve(&mut self, group: GroupConsumer, tasks: &mut FuturesUnordered<MaybeSendBox<'static, ()>>) {
 		let sequence = group.sequence;
 		tracing::debug!(subscribe = self.id, track = %self.track_name, sequence, "serving group");
 
@@ -854,7 +895,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		let current_priority = *self.track_priority.borrow_and_update();
 		let handle = self.priority.insert(Priority::new(current_priority, sequence));
 		let fut = self.clone().serve_group(sequence, handle, group);
-		tasks.push(fut.map(|_| ()).boxed());
+		tasks.push(fut.map(|_| ()).maybe_boxed());
 	}
 
 	async fn serve_group(
@@ -875,12 +916,13 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		stream.encode(&msg).await?;
 		self.track_stats.group();
 
-		// Lite05+ delta-encodes per-frame timestamps within the group. The first
-		// frame's delta is its absolute value (against an implicit prev_ts of 0),
+		// Lite05+ delta-encodes per-frame timestamps and durations within the group.
+		// The first frame's deltas are absolute (against implicit prev values of 0),
 		// every subsequent delta is signed against the previous frame.
 		let mut prev_ts: u64 = 0;
+		let mut prev_dur: u64 = 0;
 		while let Some(frame) = self.next_frame(&mut stream, &mut priority, &mut group).await? {
-			self.serve_frame(&mut stream, &mut priority, frame, &mut prev_ts)
+			self.serve_frame(&mut stream, &mut priority, frame, &mut prev_ts, &mut prev_dur)
 				.await?;
 		}
 
@@ -902,25 +944,9 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		priority: &mut PriorityHandle,
 		mut frame: FrameConsumer,
 		prev_ts: &mut u64,
+		prev_dur: &mut u64,
 	) -> Result<(), Error> {
-		// Per-frame wire layout when `self.timescale` is Some:
-		// `[zigzag-delta timestamp][size][payload]`. With `None`, the timestamp
-		// is omitted entirely — saves a byte per frame on tracks where timing
-		// isn't meaningful (catalogs, control channels, IETF transport).
-		//
-		// The model layer (`GroupProducer::append_frame`) already enforced that
-		// `frame.timestamp` matches the track timescale, so the unwraps below
-		// are infallible at this point.
-		if self.timescale.is_some() {
-			let ts = frame.timestamp.expect("model layer validated timestamp presence");
-			let curr = ts.value();
-			let delta: i64 = (curr as i128 - *prev_ts as i128)
-				.try_into()
-				.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-			let zz = crate::coding::VarInt::from_zigzag(delta).map_err(crate::coding::EncodeError::from)?;
-			stream.encode(&zz).await?;
-			*prev_ts = curr;
-		}
+		encode_frame_timing(stream, &frame, self.timescale, prev_ts, prev_dur).await?;
 
 		match self.compression {
 			Compression::None => {

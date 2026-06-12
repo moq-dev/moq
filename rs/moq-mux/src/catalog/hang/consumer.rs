@@ -1,18 +1,20 @@
 use std::task::{Poll, ready};
 
-use hang::Catalog;
-
+use super::{Catalog, CatalogExt};
 use crate::Result;
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
 ///
 /// This wraps a [`moq_json::Consumer`], reconstructing the JSON catalog from the latest
 /// group's snapshot (plus any future deltas) to discover available audio and video tracks.
-pub struct Consumer {
-	inner: moq_json::Consumer<Catalog>,
+///
+/// Generic over the application extension `E` (defaulting to `()`); yields a
+/// [`Catalog<E>`](super::Catalog).
+pub struct Consumer<E: CatalogExt = ()> {
+	inner: moq_json::Consumer<Catalog<E>>,
 }
 
-impl Consumer {
+impl<E: CatalogExt> Consumer<E> {
 	/// Create a new catalog consumer from a MoQ track subscriber.
 	pub fn new(track: moq_net::TrackSubscriber) -> Self {
 		Self {
@@ -21,7 +23,7 @@ impl Consumer {
 	}
 
 	/// Poll for the next catalog update.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
 		let result = ready!(self.inner.poll_next(waiter));
 		Poll::Ready(result.map_err(Into::into))
 	}
@@ -30,12 +32,15 @@ impl Consumer {
 	///
 	/// This method waits for the next catalog publication and returns the
 	/// catalog data. If there are no more updates, `None` is returned.
-	pub async fn next(&mut self) -> Result<Option<Catalog>> {
+	pub async fn next(&mut self) -> Result<Option<Catalog<E>>>
+	where
+		Catalog<E>: Unpin,
+	{
 		Ok(self.inner.next().await?)
 	}
 }
 
-impl From<moq_net::TrackSubscriber> for Consumer {
+impl<E: CatalogExt> From<moq_net::TrackSubscriber> for Consumer<E> {
 	fn from(inner: moq_net::TrackSubscriber) -> Self {
 		Self::new(inner)
 	}
@@ -47,15 +52,14 @@ mod test {
 
 	use super::*;
 
+	// Build a base catalog distinguished by an audio rendition named `name`, plus its JSON payload.
 	fn catalog_payload(name: &str) -> (Catalog, String) {
-		use hang::catalog::{AudioCodec, AudioConfig};
-
 		let mut catalog = Catalog::default();
-		catalog
-			.audio
-			.insert(name, AudioConfig::new(AudioCodec::Opus, 48_000, 2))
-			.expect("audio rendition should insert");
-		let payload = catalog.to_string().expect("catalog should serialize");
+		catalog.audio.renditions.insert(
+			name.to_string(),
+			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+		);
+		let payload = serde_json::to_string(&catalog).expect("catalog should serialize");
 		(catalog, payload)
 	}
 
@@ -68,7 +72,7 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload() {
-		let mut track = moq_net::TrackProducer::new(Catalog::DEFAULT_NAME, Catalog::default_track_info());
+		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let mut group = track.append_group().expect("catalog group should append");
 
@@ -84,7 +88,7 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload_after_track_finish() {
-		let mut track = moq_net::TrackProducer::new(Catalog::DEFAULT_NAME, Catalog::default_track_info());
+		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let mut group = track.append_group().expect("catalog group should append");
 
@@ -102,7 +106,7 @@ mod test {
 
 	#[test]
 	fn returns_latest_complete_catalog_group() {
-		let mut track = moq_net::TrackProducer::new(Catalog::DEFAULT_NAME, Catalog::default_track_info());
+		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
@@ -128,7 +132,7 @@ mod test {
 
 	#[test]
 	fn waits_for_newer_pending_group_instead_of_returning_older_ready_group() {
-		let mut track = moq_net::TrackProducer::new(Catalog::DEFAULT_NAME, Catalog::default_track_info());
+		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
@@ -155,7 +159,7 @@ mod test {
 
 	#[test]
 	fn retained_pending_group_is_superseded_by_newer_group() {
-		let mut track = moq_net::TrackProducer::new(Catalog::DEFAULT_NAME, Catalog::default_track_info());
+		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
@@ -185,8 +189,8 @@ mod test {
 
 	#[test]
 	fn returns_none_when_empty_track_finishes() {
-		let mut track = moq_net::TrackProducer::new(Catalog::DEFAULT_NAME, Catalog::default_track_info());
-		let mut consumer = Consumer::new(track.subscribe(None));
+		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut consumer: Consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
 		track.finish().expect("catalog track should finish");

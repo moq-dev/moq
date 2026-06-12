@@ -1,0 +1,23 @@
+# Announcement / control-plane stress: many broadcasts, almost no media.
+#
+# Each connection publishes a large fan of broadcasts but produces only the JSON
+# keyframe per group (group_size = 0) at a slow rate. This hammers the relay's
+# announce/subscribe machinery rather than its data path.
+
+# url = "https://relay.example.com"
+
+startup = "30s"
+report = "5s"
+
+# A: number of connections
+connections = "10:50"
+# B: a wide announcement fan of broadcasts per connection
+broadcasts = "20:100"
+# C: peer broadcasts each connection watches
+subscribe = "10:50"
+# D: frames per second (one group per second)
+fps = 1
+# E: bytes per frame (keyframe only, no payload bytes)
+frame_size = 0
+# F: zeroed frames per group (each group is a lone JSON keyframe)
+group_size = 0

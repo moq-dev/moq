@@ -145,7 +145,7 @@ impl Audio {
 	pub fn publish(
 		&mut self,
 		broadcast: &mut moq_net::BroadcastProducer,
-		catalog: moq_mux::catalog::hang::Producer,
+		catalog: moq_mux::catalog::Producer,
 		name: &str,
 		input: moq_audio::EncoderInput,
 		output: moq_audio::EncoderOutput,

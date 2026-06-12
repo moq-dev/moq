@@ -6,7 +6,9 @@ use std::{
 	time::Duration,
 };
 
-use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use futures::{StreamExt, stream::FuturesUnordered};
+
+use crate::util::{MaybeBoxedExt, MaybeSendBox};
 
 use crate::{
 	AsPath, BandwidthProducer, BroadcastDynamic, BroadcastInfo, Compression, Error, Frame, FrameProducer, Group,
@@ -564,26 +566,48 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		compression: Compression,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
-		// Previous frame's raw timestamp value (in `timescale` units), for the
-		// zigzag-delta decode when timestamps are negotiated. The first frame's
-		// delta is its absolute value (prev_ts = 0 implicitly).
+		// Previous frame's raw timestamp and duration values (in `timescale` units),
+		// for the zigzag-delta decode when timestamps are negotiated. The first
+		// frame's deltas are absolute (prev = 0 implicitly).
 		let mut prev_ts: u64 = 0;
+		let mut prev_dur: u64 = 0;
 
 		loop {
-			let timestamp = if let Some(scale) = timescale {
-				// Publisher advertised a timescale, so every frame on this stream
-				// is prefixed with a zigzag-delta timestamp varint.
+			let (timestamp, duration) = if let Some(scale) = timescale {
+				// Publisher advertised a timescale, so every frame on this stream is
+				// prefixed with a zigzag-delta timestamp followed by a zigzag-delta
+				// duration. The timestamp delta doubles as the per-frame sentinel:
+				// stream end here means the group has no more frames.
 				let Some(zz) = stream.decode_maybe::<crate::coding::VarInt>().await? else {
 					break;
 				};
-				let delta = zz.to_zigzag();
-				let next: u64 = (prev_ts as i128 + delta as i128)
+				let next: u64 = (prev_ts as i128 + zz.to_zigzag() as i128)
 					.try_into()
 					.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 				prev_ts = next;
-				Some(Timestamp::new(next, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?)
+				let timestamp = Some(
+					Timestamp::new(next, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?,
+				);
+
+				// The duration delta always follows on a timed track; a resolved
+				// value of 0 means "unknown" (model `None`).
+				let zzd = stream.decode::<crate::coding::VarInt>().await?;
+				let next_dur: u64 = (prev_dur as i128 + zzd.to_zigzag() as i128)
+					.try_into()
+					.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+				prev_dur = next_dur;
+				let duration = if next_dur == 0 {
+					None
+				} else {
+					Some(
+						Timestamp::new(next_dur, scale)
+							.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?,
+					)
+				};
+
+				(timestamp, duration)
 			} else {
-				None
+				(None, None)
 			};
 
 			let Some(size) = stream.decode_maybe::<u64>().await? else {
@@ -595,7 +619,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			match compression {
 				Compression::None => {
-					let mut frame = group.create_frame(Frame { size, timestamp })?;
+					let mut frame = group.create_frame(Frame {
+						size,
+						timestamp,
+						duration,
+					})?;
 					track_stats.frame();
 
 					if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
@@ -616,6 +644,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let mut frame = group.create_frame(Frame {
 						size: payload.len() as u64,
 						timestamp,
+						duration,
 					})?;
 					frame.write(bytes::Bytes::from(payload))?;
 					frame.finish()?;
@@ -792,8 +821,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// it (the track is finished). Replaces the old "is the track still Pending" gate,
 		// which no longer holds now that Lite05 accepts up front.
 		let mut completed = false;
-		let mut fetches: FuturesUnordered<BoxFuture<'static, ()>> = FuturesUnordered::new();
-		let mut linger: Option<Pin<Box<tokio::time::Sleep>>> = None;
+		let mut fetches: FuturesUnordered<MaybeSendBox<'static, ()>> = FuturesUnordered::new();
+		let mut linger: Option<Pin<Box<web_async::time::Sleep>>> = None;
 
 		loop {
 			// Once nothing is in flight, the `poll_unused` check below confirms no
@@ -861,7 +890,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			match event {
 				Event::Fetch(req) => {
 					linger = None;
-					fetches.push(self.clone().serve_fetch(req, compression, timescale).boxed());
+					fetches.push(self.clone().serve_fetch(req, compression, timescale).maybe_boxed());
 				}
 				Event::Subscription(pref) => {
 					linger = None;
@@ -882,7 +911,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				}
 				Event::Idle => {
 					if supports_linger {
-						linger = Some(Box::pin(tokio::time::sleep(LINGER_TIMEOUT)));
+						linger = Some(Box::pin(web_async::time::sleep(LINGER_TIMEOUT)));
 					} else {
 						// No SUBSCRIBE_UPDATE to pause with, so there's nothing to keep
 						// open: tear down as soon as the last consumer leaves.

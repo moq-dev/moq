@@ -1,26 +1,26 @@
 //! Unified catalog consumer.
 //!
 //! Subscribes to whichever catalog track ([`hang`] or [`msf`]) the broadcast
-//! advertises and yields [`hang::Catalog`] snapshots so callers and exporters
-//! only deal with one shape.
+//! advertises and yields [`Catalog<E>`](super::hang::Catalog) snapshots so callers
+//! and exporters only deal with one shape.
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 
-use hang::Catalog;
-
+use super::hang::{Catalog, CatalogExt};
 use super::{CatalogFormat, Stream};
 
 /// A catalog stream sourced from a [`moq_net::BroadcastConsumer`].
 ///
-/// Both variants emit [`hang::Catalog`]; the MSF variant converts each snapshot
-/// on the fly. Wrap with [`Filter`](super::Filter) / [`Target`](super::Target)
-/// to narrow the rendition set before handing the stream to an exporter.
-pub enum Consumer {
-	Hang(super::hang::Consumer),
+/// Both variants emit [`Catalog<E>`](super::hang::Catalog); the MSF variant is
+/// media-only, so its extension is always the default. Wrap with
+/// [`Filter`](super::Filter) / [`Target`](super::Target) to narrow the
+/// rendition set before handing the stream to an exporter.
+pub enum Consumer<E: CatalogExt = ()> {
+	Hang(super::hang::Consumer<E>),
 	Msf(super::msf::Consumer),
 }
 
-impl Consumer {
+impl<E: CatalogExt> Consumer<E> {
 	/// Subscribe to the catalog track advertised by `format`.
 	pub async fn new(broadcast: &moq_net::BroadcastConsumer, format: CatalogFormat) -> Result<Self, crate::Error> {
 		Ok(match format {
@@ -39,11 +39,24 @@ impl Consumer {
 	}
 }
 
-impl Stream for Consumer {
-	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+impl<E: CatalogExt> Stream for Consumer<E> {
+	type Ext = E;
+
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<E>>>> {
 		match self {
 			Self::Hang(c) => c.poll_next(waiter),
-			Self::Msf(c) => c.poll_next(waiter).map_err(Into::into),
+			Self::Msf(c) => {
+				// MSF carries only the media sections, so the extension defaults.
+				let media = match ready!(c.poll_next(waiter)) {
+					Ok(media) => media,
+					Err(err) => return Poll::Ready(Err(err.into())),
+				};
+				Poll::Ready(Ok(media.map(|m| Catalog::<E> {
+					video: m.video,
+					audio: m.audio,
+					ext: E::default(),
+				})))
+			}
 		}
 	}
 }

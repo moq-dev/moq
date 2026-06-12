@@ -8,10 +8,10 @@
 use std::collections::BTreeMap;
 use std::task::Poll;
 
-use hang::Catalog;
 use hang::catalog::{AudioConfig, VideoConfig};
 
 use super::Stream;
+use super::hang::{Catalog, CatalogExt};
 
 /// Soft-match constraints for the video rendition.
 ///
@@ -57,7 +57,7 @@ pub struct Target<S: Stream> {
 	state_consumer: kio::Consumer<TargetState>,
 	/// Last raw snapshot from `inner`, retained so a target change between
 	/// snapshots can be re-applied without polling upstream.
-	last_input: Option<Catalog>,
+	last_input: Option<Catalog<S::Ext>>,
 	/// Epoch we already emitted against. If `state.epoch` advances past this
 	/// while `last_input` is `Some`, the next poll re-emits.
 	last_epoch: u64,
@@ -102,7 +102,9 @@ impl<S: Stream> Target<S> {
 }
 
 impl<S: Stream> Stream for Target<S> {
-	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+	type Ext = S::Ext;
+
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<S::Ext>>>> {
 		// Drain inner: the latest snapshot wins. `poll_next` registers the
 		// waiter on its own Pending branch.
 		let inner_eof = loop {
@@ -160,7 +162,7 @@ impl<S: Stream> Stream for Target<S> {
 
 /// Apply the active video / audio targets to a raw snapshot, narrowing each
 /// axis to at most one rendition. Axes with no target pass through unchanged.
-fn apply(mut catalog: Catalog, video: Option<&TargetVideo>, audio: Option<&TargetAudio>) -> Catalog {
+fn apply<E: CatalogExt>(mut catalog: Catalog<E>, video: Option<&TargetVideo>, audio: Option<&TargetAudio>) -> Catalog<E> {
 	if let Some(target) = video {
 		if let Some(name) = select_video(&catalog.video.renditions, target) {
 			let mut kept = BTreeMap::new();

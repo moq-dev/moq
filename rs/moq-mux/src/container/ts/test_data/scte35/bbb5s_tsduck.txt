@@ -1,0 +1,146 @@
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x0021 (33)
+  Short section, total size: 50 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0xFF (255), tier: 0xFFF (4095)
+    Command type: 0x06 (TimeSignal), size: 5 bytes
+    Time: 0x0746290A0 (1,952,616,608, 21,695,740 ms)
+    - Descriptor 0: SCTE 35 Segmentation (0x02, 2), 23 bytes
+      Identifier: 0x43554549 ("CUEI")
+      Segmentation event id: 0x4800008E, cancel: 0
+      Program segmentation: 1, has duration: 0, not restricted: 0
+      Web delivery allowed: 1, no regional blackout: 1
+      Archive allowed: 1, device restrictions: 3
+      Segmentation upid type: 0x08 (TI)
+      Upid data (8 bytes): 00 00 00 00 2C A0 A1 8A
+      Segmentation type id: 0x35 (Provider Placement Opportunity End)
+      Segment number: 2, expected segments: 0
+    CRC32: 0xA9CC6758 (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x0021 (33)
+  Short section, total size: 92 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0xFF (255), tier: 0xFFF (4095)
+    Command type: 0x06 (TimeSignal), size: 5 bytes
+    Time: 0x000000000
+    - Descriptor 0: SCTE 35 Segmentation (0x02, 2), 65 bytes
+      Identifier: 0x43554549 ("CUEI")
+      Segmentation event id: 0x0000000A, cancel: 0
+      Program segmentation: 1, has duration: 1, not restricted: 1
+      Segment duration: 2700000
+      Segmentation upid type: 0x0F (URI)
+      Upid data (45 bytes):
+        0000:  75 72 6E 3A 75 75 69 64 3A 61 61 38 35 62 62 62  urn:uuid:aa85bbb
+        0010:  36 2D 35 63 34 33 2D 34 62 36 61 2D 62 65 62 62  6-5c43-4b6a-bebb
+        0020:  2D 65 65 33 62 31 33 65 62 37 39 39 39           -ee3b13eb7999
+      Segmentation type id: 0x10 (Program Start)
+      Segment number: 0, expected segments: 0
+    CRC32: 0x5CFB5100 (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x0021 (33)
+  Short section, total size: 100 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0xFF (255), tier: 0xFFF (4095)
+    Command type: 0x06 (TimeSignal), size: 5 bytes
+    Time: 0x0A8CD44ED (2,832,024,813, 31,466,942 ms)
+    - Descriptor 0: SCTE 35 Segmentation (0x02, 2), 23 bytes
+      Identifier: 0x43554549 ("CUEI")
+      Segmentation event id: 0x480000AD, cancel: 0
+      Program segmentation: 1, has duration: 0, not restricted: 0
+      Web delivery allowed: 1, no regional blackout: 1
+      Archive allowed: 1, device restrictions: 3
+      Segmentation upid type: 0x08 (TI)
+      Upid data (8 bytes): 00 00 00 00 2C B2 D7 9D
+      Segmentation type id: 0x35 (Provider Placement Opportunity End)
+      Segment number: 2, expected segments: 0
+    - Descriptor 1: SCTE 35 Segmentation (0x02, 2), 23 bytes
+      Identifier: 0x43554549 ("CUEI")
+      Segmentation event id: 0x48000026, cancel: 0
+      Program segmentation: 1, has duration: 0, not restricted: 0
+      Web delivery allowed: 1, no regional blackout: 1
+      Archive allowed: 1, device restrictions: 3
+      Segmentation upid type: 0x08 (TI)
+      Upid data (8 bytes): 00 00 00 00 2C B2 D7 9D
+      Segmentation type id: 0x11 (Program End)
+      Segment number: 0, expected segments: 0
+    - Descriptor 2: SCTE 35 Segmentation (0x02, 2), 23 bytes
+      Identifier: 0x43554549 ("CUEI")
+      Segmentation event id: 0x48000027, cancel: 0
+      Program segmentation: 1, has duration: 0, not restricted: 0
+      Web delivery allowed: 1, no regional blackout: 1
+      Archive allowed: 1, device restrictions: 3
+      Segmentation upid type: 0x08 (TI)
+      Upid data (8 bytes): 00 00 00 00 2C B2 D7 B3
+      Segmentation type id: 0x10 (Program Start)
+      Segment number: 0, expected segments: 0
+    CRC32: 0x8A18869F (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x0021 (33)
+  Short section, total size: 149 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x06 (TimeSignal), size: 5 bytes
+    Time: 0x146079552 (5,469,869,394, 60,776,326 ms)
+    - Descriptor 0: SCTE 35 Segmentation (0x02, 2), 23 bytes
+      Identifier: 0x43554549 ("CUEI")
+      Segmentation event id: 0x6ECEBE55, cancel: 0
+      Program segmentation: 1, has duration: 0, not restricted: 1
+      Segmentation upid type: 0x08 (TI)
+      Upid data (8 bytes): 00 00 00 00 07 2D 08 C7
+      Segmentation type id: 0x31 (Provider Advertisement End)
+      Segment number: 11, expected segments: 25
+    - Descriptor 1: SCTE 35 Segmentation (0x02, 2), 23 bytes
+      Identifier: 0x43554549 ("CUEI")
+      Segmentation event id: 0x6ECC9888, cancel: 0
+      Program segmentation: 1, has duration: 0, not restricted: 1
+      Segmentation upid type: 0x08 (TI)
+      Upid data (8 bytes): 00 00 01 18 36 B2 16 11
+      Segmentation type id: 0x37 (Distributor Placement Opportunity End)
+      Segment number: 1, expected segments: 1
+    - Descriptor 2: SCTE 35 Segmentation (0x02, 2), 28 bytes
+      Identifier: 0x43554549 ("CUEI")
+      Segmentation event id: 0x6ECF0D08, cancel: 0
+      Program segmentation: 1, has duration: 1, not restricted: 1
+      Segment duration: 1821600
+      Segmentation upid type: 0x08 (TI)
+      Upid data (8 bytes): 00 00 00 00 07 2D 56 12
+      Segmentation type id: 0x30 (Provider Advertisement Start)
+      Segment number: 12, expected segments: 25
+    - Descriptor 3: SCTE 35 Segmentation (0x02, 2), 42 bytes
+      Identifier: 0x43554549 ("CUEI")
+      Segmentation event id: 0x6ECF0D36, cancel: 0
+      Program segmentation: 1, has duration: 0, not restricted: 1
+      Segmentation upid type: 0x0C (MPU())
+      Upid data (27 bytes):
+        0000:  52 54 4C 4E 31 48 01 00 00 00 00 31 33 37 36 39  RTLN1H.....13769
+        0010:  32 30 32 35 34 34 39 35 48 31 00                 20254495H1.
+      Segmentation type id: 0x01 (Content Identification)
+      Segment number: 0, expected segments: 0
+    CRC32: 0x69DBB978 (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x0021 (33)
+  Short section, total size: 35 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x06 (TimeSignal), size: 5 bytes
+    Time: 0x123456789 (4,886,718,345, 54,296,870 ms)
+    - Descriptor 0: SCTE 35 Avail (0x00, 0), 8 bytes
+      Identifier: 0x43554549 ("CUEI")
+      Provider id: 0x45444953 ("EDIS")
+    CRC32: 0x6B17FDAC (OK)
+

@@ -15,8 +15,8 @@ import * as Setup from "./setup.ts";
 import { Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import {
 	SUBSCRIBE_TRACKS_ID,
-	SubscribeNamespace,
 	SubscribeNamespaceError,
+	SubscribeNamespaceLegacy,
 	SubscribeNamespaceOk,
 	UnsubscribeNamespace,
 } from "./subscribe_namespace.ts";
@@ -45,7 +45,7 @@ const MessagesV14 = {
 	[FetchCancel.id]: FetchCancel,
 	[FetchOk.id]: FetchOk,
 	[FetchError.id]: FetchError,
-	[SubscribeNamespace.id]: SubscribeNamespace,
+	[SubscribeNamespaceLegacy.id]: SubscribeNamespaceLegacy,
 	[SubscribeNamespaceOk.id]: SubscribeNamespaceOk,
 	[SubscribeNamespaceError.id]: SubscribeNamespaceError,
 	[UnsubscribeNamespace.id]: UnsubscribeNamespace,
@@ -76,7 +76,7 @@ const MessagesV15 = {
 	[Fetch.id]: Fetch,
 	[FetchCancel.id]: FetchCancel,
 	[FetchOk.id]: FetchOk,
-	[SubscribeNamespace.id]: SubscribeNamespace,
+	[SubscribeNamespaceLegacy.id]: SubscribeNamespaceLegacy,
 	[UnsubscribeNamespace.id]: UnsubscribeNamespace,
 	[Publish.id]: Publish,
 	[MaxRequestId.id]: MaxRequestId,
@@ -130,7 +130,7 @@ const MessagesV17 = {
 	[Fetch.id]: Fetch,
 	// FetchCancel (0x17) removed in d17
 	[FetchOk.id]: FetchOk,
-	[SubscribeNamespace.id]: SubscribeNamespace,
+	[SubscribeNamespaceLegacy.id]: SubscribeNamespaceLegacy,
 	[Publish.id]: Publish,
 	// MaxRequestId (0x15) removed in d17
 	// RequestsBlocked (0x1a) removed in d17

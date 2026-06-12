@@ -16,9 +16,11 @@
 //!   a format string. It picks the right concrete importer for you.
 
 pub mod catalog;
+mod clock;
 pub mod codec;
 pub mod container;
 mod error;
 pub mod import;
 
+pub use clock::Clock;
 pub use error::*;

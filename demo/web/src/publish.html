@@ -25,6 +25,14 @@
 	<moq-publish-ui>
 		<moq-publish url="%VITE_RELAY_URL%" name="me.hang">
 			<video style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;" muted autoplay></video>
+
+			<!--
+				Alternatively, preview a decoded copy of the encoded video, i.e. what a viewer actually
+				receives over the network (codec artifacts and all), at the cost of an extra encode +
+				decode. Add preview="encoded" to <moq-publish> above and use this <canvas> instead of the
+				<video>:
+			-->
+			<!-- <canvas style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;"></canvas> -->
 		</moq-publish>
 	</moq-publish-ui>
 

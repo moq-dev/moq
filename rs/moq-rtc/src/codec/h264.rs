@@ -14,7 +14,7 @@ pub struct Bridge {
 }
 
 impl Bridge {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::hang::Producer) -> Result<Self> {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
 		let import =
 			moq_mux::codec::h264::Import::new(broadcast, catalog).with_mode(moq_mux::codec::h264::Mode::Avc3)?;
 		Ok(Self { import })

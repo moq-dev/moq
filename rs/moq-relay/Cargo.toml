@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.12.8"
+version = "0.12.9"
 edition = "2024"
 # Higher than the workspace MSRV: sysinfo 0.39 uses std's `cfg_select!`, stabilized in Rust 1.95.
 # Fine here because moq-relay is a binary, not a published library.

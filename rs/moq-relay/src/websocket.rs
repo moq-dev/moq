@@ -41,7 +41,7 @@ pub(crate) async fn serve_ws(
 	let params = AuthParams { path, jwt: query.jwt };
 	let token = if mtls.is_some() {
 		// mTLS peers: the API returns the canonical root and the billing tier.
-		let (root, internal) = state.auth.resolve_mtls(&params.path).await;
+		let (root, internal) = state.auth.resolve_mtls(&params.path).await?;
 		let mut token = AuthToken::unrestricted(moq_net::Path::new(&root).to_owned());
 		token.internal = internal;
 		token
@@ -402,17 +402,29 @@ mod tests {
 			drop(session);
 		}
 
-		// The illegal pair is advertised by nobody. A client offering only
-		// `qmux-00.moqt-18` finds no match, and qmux surfaces the empty
-		// subprotocol selection as a failed handshake rather than a silent
-		// downgrade to a different version.
-		let result = qmux::Client::new()
+		// The illegal pair is advertised by nobody (moqt-18 requires qmux-01). A client
+		// offering only `qmux-00.moqt-18` still carries qmux's default bare fallbacks
+		// (`webtransport`, etc.), so the server gracefully downgrades to a bare ALPN
+		// rather than failing: we always accept a bare web-transport connection, and
+		// there's no other qmux version worth negotiating for moqt-18. It just never
+		// lands on `moqt-18`.
+		let session = qmux::Client::new()
 			.with_protocol("moqt-18", &[qmux::Version::QMux00])
 			.connect(&url)
-			.await;
-		assert!(
-			result.is_err(),
-			"server must reject the illegal qmux-00.moqt-18 pair, but the handshake succeeded",
+			.await
+			.expect("qmux-00.moqt-18 should downgrade to a bare fallback, not fail");
+
+		let observed = next_observed(&mut rx).await;
+		assert_eq!(
+			observed.app, None,
+			"qmux-00.moqt-18 must never be selected; expected a bare downgrade, got {:?}",
+			observed.app,
 		);
+		assert!(
+			observed.wire.as_deref().is_none_or(|wire| split_pair(wire).is_none()),
+			"the illegal pair must downgrade to a bare fallback, got {:?}",
+			observed.wire,
+		);
+		drop(session);
 	}
 }

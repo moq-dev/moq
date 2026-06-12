@@ -48,7 +48,7 @@ audio.finish()
 broadcast.finish()
 ```
 
-Supported codec formats include `opus`, `avc3`, `hev1`, `av01`, `vp09`, and others — see [`hang`](/lib/rs/crate/hang) for the full list.
+Supported codec formats include `opus`, `avc3`, `hev1`, `av01`, `vp09`, and others. See [`hang`](/lib/rs/crate/hang) for the full list.
 
 ### Subscribing to media
 
@@ -79,6 +79,23 @@ async for group in broadcast_consumer.subscribe_track("events"):
 
 `write_frame` on a track creates a one-frame group by default. Use `append_group()` for multi-frame groups (e.g., a video GOP).
 
+### On-demand raw tracks
+
+Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:
+
+```python
+broadcast = moq.BroadcastProducer()
+dynamic = broadcast.dynamic()
+client.publish("events", broadcast)
+
+async for track in dynamic:
+    if track.name == "alerts":
+        track.write_frame(b"ready")
+        track.finish()
+```
+
+Missing track subscriptions are accepted while the `BroadcastDynamic` object is alive. Each requested track is returned as a `TrackProducer`.
+
 ### Discovering broadcasts
 
 ```python
@@ -94,8 +111,8 @@ broadcast = await client.announced_broadcast("live/cam1")
 
 The repo ships [example scripts](https://github.com/moq-dev/moq/tree/main/py/moq-rs/examples) you can run end-to-end:
 
-- `clock.py` — publishes / subscribes a clock track (one frame per second, one group per minute).
-- `announced.py` — lists broadcasts under a prefix as they're announced.
+- `clock.py`: publishes / subscribes a clock track (one frame per second, one group per minute).
+- `announced.py`: lists broadcasts under a prefix as they're announced.
 
 ## See also
 

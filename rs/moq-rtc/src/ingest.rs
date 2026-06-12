@@ -10,13 +10,13 @@ use crate::{Error, Result, codec, session};
 
 pub struct IngestSink {
 	broadcast: moq_net::BroadcastProducer,
-	catalog: moq_mux::catalog::hang::Producer,
+	catalog: moq_mux::catalog::Producer,
 	bridges: session::Bridges,
 }
 
 impl IngestSink {
 	pub fn new(mut broadcast: moq_net::BroadcastProducer) -> Result<Self> {
-		let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		Ok(Self {
 			broadcast,
 			catalog,

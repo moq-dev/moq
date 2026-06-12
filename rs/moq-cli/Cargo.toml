@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.7.30"
+version = "0.7.31"
 edition = "2024"
 rust-version.workspace = true
 
@@ -18,6 +18,11 @@ iroh = ["moq-native/iroh"]
 quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
 websocket = ["moq-native/websocket"]
+# Device capture (camera + microphone) + encode/publish. Off by default because
+# the video path pulls in a system ffmpeg (libav*) build dependency (audio is
+# pure-Rust via cpal). Enable with `cargo build -p moq-cli --features capture`
+# (the nix dev shell provides ffmpeg).
+capture = ["dep:moq-video", "dep:moq-audio", "moq-audio/capture"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
@@ -27,8 +32,12 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }
 humantime = "2.3"
+moq-audio = { workspace = true, optional = true }
+# Ingest only (no HTTP egress server); the lib provides the relocated HLS importer.
+moq-hls = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+moq-video = { workspace = true, optional = true }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 tokio = { workspace = true, features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }

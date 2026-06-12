@@ -7,10 +7,10 @@
 
 use std::task::Poll;
 
-use hang::Catalog;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
 
 use super::Stream;
+use super::hang::{Catalog, CatalogExt};
 
 /// Hard-match criteria for video renditions.
 #[derive(Debug, Default, Clone)]
@@ -53,7 +53,7 @@ pub struct Filter<S: Stream> {
 	state_consumer: kio::Consumer<FilterState>,
 	/// Last raw snapshot from `inner`, retained so a setter between snapshots
 	/// can re-apply without polling upstream.
-	last_input: Option<Catalog>,
+	last_input: Option<Catalog<S::Ext>>,
 	/// Epoch we already emitted against.
 	last_epoch: u64,
 	/// True once `inner` has handed us a snapshot we haven't emitted yet.
@@ -97,7 +97,9 @@ impl<S: Stream> Filter<S> {
 }
 
 impl<S: Stream> Stream for Filter<S> {
-	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
+	type Ext = S::Ext;
+
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<S::Ext>>>> {
 		let inner_eof = loop {
 			match self.inner.poll_next(waiter)? {
 				Poll::Ready(Some(snapshot)) => {
@@ -145,7 +147,7 @@ impl<S: Stream> Stream for Filter<S> {
 
 /// Apply the active video / audio filters to a raw snapshot, dropping
 /// renditions that don't match. Axes with no filter pass through unchanged.
-fn apply(mut catalog: Catalog, video: Option<&FilterVideo>, audio: Option<&FilterAudio>) -> Catalog {
+fn apply<E: CatalogExt>(mut catalog: Catalog<E>, video: Option<&FilterVideo>, audio: Option<&FilterAudio>) -> Catalog<E> {
 	if let Some(filter) = video {
 		catalog.video.renditions.retain(|name, config| {
 			if let Some(want) = &filter.name
@@ -190,6 +192,8 @@ mod test {
 	struct Once(Option<Catalog>);
 
 	impl Stream for Once {
+		type Ext = ();
+
 		fn poll_next(&mut self, _: &kio::Waiter) -> Poll<crate::Result<Option<Catalog>>> {
 			Poll::Ready(Ok(self.0.take()))
 		}

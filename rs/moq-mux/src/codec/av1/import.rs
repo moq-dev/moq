@@ -13,7 +13,7 @@ pub struct Import {
 	broadcast: moq_net::BroadcastProducer,
 
 	// The catalog being produced.
-	catalog: crate::catalog::hang::Producer,
+	catalog: crate::catalog::Producer,
 
 	// The track being produced.
 	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
@@ -39,7 +39,7 @@ struct Frame {
 }
 
 impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::hang::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
 			broadcast,
 			catalog,

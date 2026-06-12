@@ -131,15 +131,18 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		.create_track("video", moq_net::TrackInfo::default().with_timescale(Timescale::MICRO))
 		.expect("failed to create track");
 
-	// Three frames where the middle PTS goes backwards (B-frame decode order)
-	// so the zigzag encoding has to carry a negative delta.
-	let timestamps_us = [10_000u64, 30_000, 20_000];
+	// Three frames where the middle PTS goes backwards (B-frame decode order) so the
+	// zigzag timestamp delta carries a negative value. Durations exercise the
+	// duration delta too: a known span, then unknown (None -> resolved 0, a negative
+	// delta), then known again (a positive delta back up from 0).
+	let frames = [(10_000u64, Some(33_000u64)), (30_000, None), (20_000, Some(20_000))];
 	let mut group = track.append_group().expect("failed to append group");
-	for &us in &timestamps_us {
+	for &(us, dur_us) in &frames {
 		let payload = format!("frame@{us}").into_bytes();
 		let frame = moq_native::moq_net::Frame {
 			size: payload.len() as u64,
 			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
+			duration: dur_us.map(|d| Timestamp::new(d, Timescale::MICRO).unwrap()),
 		};
 		let mut writer = group.create_frame(frame).expect("failed to create frame");
 		writer
@@ -201,7 +204,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
 
-	for &expected_us in &timestamps_us {
+	for &(expected_us, expected_dur_us) in &frames {
 		let mut frame_sub = tokio::time::timeout(TIMEOUT, group_sub.next_frame())
 			.await
 			.expect("next_frame timed out")
@@ -211,6 +214,15 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		let ts = frame_sub.timestamp.expect("Lite05 must carry per-frame timestamps");
 		assert_eq!(ts.scale(), Timescale::MICRO);
 		assert_eq!(ts.value(), expected_us);
+
+		match expected_dur_us {
+			Some(d) => {
+				let dur = frame_sub.duration.expect("expected a per-frame duration");
+				assert_eq!(dur.scale(), Timescale::MICRO);
+				assert_eq!(dur.value(), d);
+			}
+			None => assert!(frame_sub.duration.is_none(), "unknown duration must decode to None"),
+		}
 
 		// Drain the payload so the stream advances to the next frame.
 		let _ = frame_sub.read_all().await;
@@ -248,15 +260,17 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		)
 		.expect("failed to create track");
 
-	// A group with a few timestamped frames (middle PTS goes backwards, so the
-	// fetch stream carries a negative zigzag delta too).
-	let timestamps_us = [10_000u64, 30_000, 20_000];
+	// A group with a few timestamped frames (middle PTS goes backwards, so the fetch
+	// stream carries a negative zigzag delta too). Durations also exercise the
+	// duration delta on the fetch path, including an unknown (None) span.
+	let frames = [(10_000u64, Some(33_000u64)), (30_000, None), (20_000, Some(20_000))];
 	let mut group = track.append_group().expect("failed to append group"); // seq 0
-	for &us in &timestamps_us {
+	for &(us, dur_us) in &frames {
 		let payload = format!("frame@{us}").into_bytes();
 		let frame = moq_native::moq_net::Frame {
 			size: payload.len() as u64,
 			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
+			duration: dur_us.map(|d| Timestamp::new(d, Timescale::MICRO).unwrap()),
 		};
 		let mut writer = group.create_frame(frame).expect("failed to create frame");
 		writer
@@ -314,7 +328,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	.expect("fetch failed");
 	assert_eq!(group_sub.sequence, 0);
 
-	for &expected_us in &timestamps_us {
+	for &(expected_us, expected_dur_us) in &frames {
 		let mut frame_sub = tokio::time::timeout(TIMEOUT, group_sub.next_frame())
 			.await
 			.expect("next_frame timed out")
@@ -326,6 +340,15 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 			.expect("Lite05 fetch must carry per-frame timestamps");
 		assert_eq!(ts.scale(), Timescale::MICRO);
 		assert_eq!(ts.value(), expected_us);
+
+		match expected_dur_us {
+			Some(d) => {
+				let dur = frame_sub.duration.expect("expected a per-frame duration");
+				assert_eq!(dur.scale(), Timescale::MICRO);
+				assert_eq!(dur.value(), d);
+			}
+			None => assert!(frame_sub.duration.is_none(), "unknown duration must decode to None"),
+		}
 
 		let payload = frame_sub.read_all().await.expect("failed to read frame");
 		assert_eq!(payload, bytes::Bytes::from(format!("frame@{expected_us}")));
@@ -348,8 +371,8 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_05_fetch_webtransport() {
-	// WebTransport only: Lite05Wip isn't advertised over ALPN, so raw QUIC (moqt://)
-	// can't negotiate it (same reason the other Lite05 tests are https-only).
+	// Exercises the WebTransport path; lite-05 is forced via config on both ends.
+	// The raw-QUIC ALPN path is covered by broadcast_race_quic_wins.
 	lite05_fetch_roundtrip("https").await;
 }
 
@@ -365,6 +388,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 		moq_net::Frame {
 			size: payload.len() as u64,
 			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
+			duration: None,
 		}
 	}
 
@@ -892,7 +916,7 @@ async fn broadcast_websocket() {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+	let ws_listener = moq_native::websocket::Listener::bind("[::]:0".parse().unwrap())
 		.await
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
@@ -998,7 +1022,7 @@ async fn broadcast_websocket_fallback() {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+	let ws_listener = moq_native::websocket::Listener::bind("[::]:0".parse().unwrap())
 		.await
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
@@ -1087,7 +1111,7 @@ async fn broadcast_websocket_fallback() {
 ///
 /// Bump this whenever [`moq_net::Versions::all`] gains a newer Lite variant
 /// so the regression tests below keep tracking "the newest", not a frozen value.
-const NEWEST_LITE: &str = "moq-lite-04";
+const NEWEST_LITE: &str = "moq-lite-05-wip";
 
 /// Regression guard for the WebSocket ALPN path. Lite02 over WebSocket means
 /// the qmux subprotocol negotiation produced a bare `moql` (or no match)
@@ -1107,7 +1131,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+	let ws_listener = moq_native::websocket::Listener::bind("[::]:0".parse().unwrap())
 		.await
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
@@ -1172,7 +1196,7 @@ async fn broadcast_race_quic_wins() {
 	// Bind WebSocket TCP first to pick a random port, then bind QUIC UDP to
 	// the same port. UDP and TCP live in separate kernel namespaces, so this
 	// works on every supported platform.
-	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+	let ws_listener = moq_native::websocket::Listener::bind("[::]:0".parse().unwrap())
 		.await
 		.expect("failed to bind WebSocket listener");
 	let port = ws_listener.local_addr().expect("failed to get ws addr").port();

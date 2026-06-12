@@ -6,13 +6,13 @@
 use crate::{Result, codec};
 
 pub struct Bridge {
-	catalog: moq_mux::catalog::hang::Producer,
+	catalog: moq_mux::catalog::Producer,
 	track: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
 	announced: bool,
 }
 
 impl Bridge {
-	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::hang::Producer) -> Result<Self> {
+	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
 		let track = broadcast.create_track(
 			broadcast.unique_name(".vp9"),
 			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),

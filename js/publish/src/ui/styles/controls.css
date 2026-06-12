@@ -1,18 +1,153 @@
 .controls {
-	gap: var(--spacing-16);
-	margin: var(--spacing-8) 0;
-	border-radius: var(--border-radius-lg);
-	border: var(--spacing-1) solid var(--color-white-alpha-10);
-	padding: var(--spacing-16);
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: var(--spacing-4);
+	padding: var(--spacing-8) var(--spacing-12) var(--spacing-12);
 }
 
-.source-label {
-	font-size: 1rem;
+.controls-group {
+	display: flex;
+	align-items: center;
+	gap: var(--spacing-4);
+}
+
+.controls-spacer {
+	flex: 1;
+}
+
+/* Status pill. */
+.badge {
+	display: flex;
+	align-items: center;
+	gap: var(--spacing-8);
+	height: 2.25rem;
+	padding: 0 var(--spacing-12);
+	margin-left: var(--spacing-4);
+	font-size: 0.8125rem;
+	color: var(--color-white);
+}
+
+.badge-dot {
+	width: 0.5rem;
+	height: 0.5rem;
+	border-radius: 50%;
+	flex-shrink: 0;
+	background: var(--color-gray-400);
+}
+
+.badge-text {
 	font-weight: 600;
-	letter-spacing: 0.1rem;
-	color: var(--color-white-alpha-90);
+	letter-spacing: 0.04em;
 }
 
-.source-selector {
+.badge[data-variant="live"] .badge-dot {
+	background: var(--color-red-400);
+	animation: badge-pulse 2s var(--ease) infinite;
+}
+.badge[data-variant="live"] .badge-text {
+	color: var(--color-red-400);
+}
+
+.badge[data-variant="audio-only"] .badge-dot,
+.badge[data-variant="video-only"] .badge-dot,
+.badge[data-variant="warning"] .badge-dot,
+.badge[data-variant="connecting"] .badge-dot {
+	background: var(--color-yellow-400);
+}
+.badge[data-variant="audio-only"] .badge-text,
+.badge[data-variant="video-only"] .badge-text,
+.badge[data-variant="warning"] .badge-text {
+	color: var(--color-yellow-400);
+}
+
+.badge[data-variant="error"] .badge-text {
+	color: var(--color-gray-100);
+}
+
+@keyframes badge-pulse {
+	0% {
+		box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.6);
+	}
+	70% {
+		box-shadow: 0 0 0 0.4rem rgba(248, 113, 113, 0);
+	}
+	100% {
+		box-shadow: 0 0 0 0 rgba(248, 113, 113, 0);
+	}
+}
+
+/* Center source picker (shown when no source is selected). */
+.picker {
+	pointer-events: auto;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
 	gap: var(--spacing-16);
+	padding: var(--spacing-24);
+	text-align: center;
+}
+
+.picker-title {
+	font-size: 0.9375rem;
+	font-weight: 600;
+	color: var(--color-white);
+}
+
+.picker-options {
+	display: flex;
+	gap: var(--spacing-12);
+	flex-wrap: wrap;
+	justify-content: center;
+}
+
+.picker-option {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: var(--spacing-8);
+	width: 5rem;
+	padding: var(--spacing-16) var(--spacing-8);
+	color: var(--color-white);
+	background: var(--color-white-alpha-10);
+	border: var(--spacing-1) solid var(--color-white-alpha-15);
+	border-radius: var(--border-radius-md);
+	cursor: pointer;
+	transition:
+		background-color 120ms var(--ease),
+		transform 120ms var(--ease);
+}
+
+.picker-option:hover {
+	background: var(--color-white-alpha-20);
+	transform: translateY(-2px);
+}
+
+.picker-option svg {
+	width: 1.5rem;
+	height: 1.5rem;
+}
+
+.picker-option span {
+	font-size: 0.75rem;
+	font-weight: 500;
+}
+
+/* "Video off" placeholder shown when a source is active but video is hidden. */
+.placeholder {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: var(--spacing-12);
+	color: var(--color-white-alpha-40);
+}
+
+.placeholder svg {
+	width: 2.5rem;
+	height: 2.5rem;
+}
+
+.placeholder span {
+	font-size: 0.8125rem;
+	font-weight: 500;
 }

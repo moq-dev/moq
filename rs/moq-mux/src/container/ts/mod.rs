@@ -8,6 +8,7 @@
 mod adts;
 mod export;
 mod import;
+pub mod scte35;
 
 pub use export::*;
 pub use import::*;

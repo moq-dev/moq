@@ -1,0 +1,26 @@
+{
+	"name": "@moq/wasm",
+	"type": "module",
+	"version": "0.0.0",
+	"description": "Browser bindings for moq-net, compiled to WebAssembly via wasm-bindgen (experiment).",
+	"license": "(MIT OR Apache-2.0)",
+	"repository": "github:moq-dev/moq",
+	"private": true,
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"main": "./dist/moq.js",
+	"module": "./dist/moq.js",
+	"types": "./dist/moq.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/moq.d.ts",
+			"default": "./dist/moq.js"
+		}
+	},
+	"sideEffects": [
+		"./dist/moq.js",
+		"./dist/moq_bg.js"
+	]
+}

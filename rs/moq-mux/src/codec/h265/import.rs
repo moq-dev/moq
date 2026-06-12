@@ -1,3 +1,4 @@
+use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::{NalIterator, START_CODE};
 use crate::container::jitter::MinFrameDuration;
 
@@ -9,12 +10,12 @@ use crate::Result;
 
 /// A decoder for H.265 with inline SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
-pub struct Import {
+pub struct Import<E: CatalogExt = ()> {
 	// The broadcast being produced.
 	broadcast: moq_net::BroadcastProducer,
 
 	// The catalog being produced.
-	catalog: crate::catalog::hang::Producer,
+	catalog: crate::catalog::Producer<E>,
 
 	// The track being produced.
 	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
@@ -38,8 +39,8 @@ pub struct Import {
 	jitter: MinFrameDuration,
 }
 
-impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::hang::Producer) -> Self {
+impl<E: CatalogExt> Import<E> {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -98,10 +99,8 @@ impl Import {
 			.insert(track.name().to_string(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::catalog::hang::Container::Legacy,
-		));
+		self.track =
+			Some(crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start());
 
 		Ok(())
 	}
@@ -357,7 +356,7 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
+impl<E: CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
 		if let Some(track) = &self.track {
 			tracing::debug!(name = ?track.name(), "ending track");

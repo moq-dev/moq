@@ -20,7 +20,6 @@ mod producer;
 mod source;
 
 pub mod fmp4;
-pub mod hls;
 pub mod legacy;
 pub mod loc;
 pub mod mkv;
