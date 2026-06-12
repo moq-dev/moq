@@ -54,6 +54,31 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for NalIterator<'a, T> {
 	}
 }
 
+/// Rewrite a length-prefixed NALU buffer (avc1/hvc1 sample, each NAL preceded
+/// by a `length_size`-byte big-endian length) into Annex-B by replacing every
+/// length prefix with a 4-byte start code. This is the inverse of the
+/// length-prefixing done by [`crate::codec::h264::Avc1`] / [`crate::codec::h265::Hvc1`].
+pub fn length_prefixed_to_annexb(mut data: &[u8], length_size: usize, out: &mut Vec<u8>) -> anyhow::Result<()> {
+	anyhow::ensure!((1..=4).contains(&length_size), "invalid NALU length size {length_size}");
+	while !data.is_empty() {
+		anyhow::ensure!(data.len() >= length_size, "truncated NALU length prefix");
+		let mut len = 0usize;
+		for &b in &data[..length_size] {
+			len = (len << 8) | b as usize;
+		}
+		data = &data[length_size..];
+		anyhow::ensure!(
+			data.len() >= len,
+			"NALU length {len} exceeds {} remaining bytes",
+			data.len()
+		);
+		out.extend_from_slice(&START_CODE);
+		out.extend_from_slice(&data[..len]);
+		data = &data[len..];
+	}
+	Ok(())
+}
+
 // Return the size of the start code at the start of the buffer.
 pub fn after_start_code(b: &[u8]) -> anyhow::Result<Option<usize>> {
 	if b.len() < 3 {
@@ -139,6 +164,23 @@ pub fn find_start_code(mut b: &[u8]) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn length_prefixed_to_annexb_rewrites_prefixes() {
+		// Two 4-byte-length-prefixed NALs -> two start-code-delimited NALs.
+		let input = [0, 0, 0, 2, 0x67, 0x42, 0, 0, 0, 3, 0x68, 0xce, 0x3c];
+		let mut out = Vec::new();
+		length_prefixed_to_annexb(&input, 4, &mut out).unwrap();
+		assert_eq!(out, vec![0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce, 0x3c]);
+	}
+
+	#[test]
+	fn length_prefixed_to_annexb_rejects_truncated() {
+		// Declared length (5) overruns the buffer.
+		let input = [0, 0, 0, 5, 0x67];
+		let mut out = Vec::new();
+		assert!(length_prefixed_to_annexb(&input, 4, &mut out).is_err());
+	}
 
 	// Tests for after_start_code - validates and measures start code at buffer beginning
 

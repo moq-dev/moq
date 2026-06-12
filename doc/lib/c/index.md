@@ -26,7 +26,52 @@ A C-callable shared and static library exposing the MoQ pub/sub API. Header file
 
 ## Installation
 
+### From prebuilt releases
+
+Each [`libmoq-v*` release](https://github.com/moq-dev/moq/releases) ships a
+`moq-<version>-<target>.tar.gz` bundle with the static library, the dynamic
+library, and the generated header. Supported targets:
+
+- `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
+- `x86_64-apple-darwin`, `aarch64-apple-darwin`
+
+Download and extract a bundle (here `0.2.0` on Linux x86_64):
+
+```bash
+ver=0.2.0
+target=x86_64-unknown-linux-gnu
+curl -fsSL "https://github.com/moq-dev/moq/releases/download/libmoq-v$ver/moq-$ver-$target.tar.gz" \
+  | tar xz
+```
+
+That gives you a `moq-$ver-$target/` directory containing `include/moq.h`
+and `lib/` (`libmoq.a` plus the dynamic library).
+
+### Compile against it
+
+Point your compiler at the extracted `include/` and `lib/` directories and link
+`-lmoq`, plus the platform system libraries `libmoq` needs:
+
+```bash
+root=moq-$ver-$target
+
+# Linux
+cc subscribe.c -I"$root/include" -L"$root/lib" -lmoq -lpthread -ldl -lm -o subscribe
+
+# macOS
+cc subscribe.c -I"$root/include" -L"$root/lib" -lmoq \
+  -framework CoreFoundation -framework Security -o subscribe
+```
+
+The static library (`libmoq.a`) links the whole Rust runtime in, so the result
+has no libmoq runtime dependency. To link the dynamic library instead, keep
+`lib/` on your loader path (`LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on
+macOS) at runtime.
+
 ### From source
+
+If there's no prebuilt bundle for your target, build it yourself. You'll need a
+[Rust toolchain](https://rustup.rs/):
 
 ```bash
 git clone https://github.com/moq-dev/moq
@@ -34,11 +79,10 @@ cd moq/rs/libmoq
 cargo build --release
 ```
 
-The library will be in `target/release/libmoq.a` (static) and `target/release/libmoq.{so,dylib,dll}` (dynamic). The C header is emitted as `target/release/moq.h`.
-
-### From prebuilt releases
-
-Prebuilt binaries are attached to each [`libmoq-v*` release](https://github.com/moq-dev/moq/releases) for the major Tier 1 targets.
+`libmoq` is part of the Cargo workspace, so the build emits to the workspace
+root `target/` (two levels up from `rs/libmoq/`): `../../target/release/libmoq.a`
+(static) and `../../target/release/libmoq.{so,dylib,dll}` (dynamic), with the
+generated header at `../../target/release/moq.h`.
 
 ## Callback lifetime
 
@@ -53,6 +97,21 @@ Once a callback fires with any non-positive (`<= 0`) code, libmoq will never inv
 The matching `*_close` function only *requests* shutdown: it returns immediately, does **not** free `user_data`, and does **not** cancel the final callback. The terminal callback still fires (on libmoq's internal thread) once the background task stops, and that is the one safe point to free `user_data`. This means you never have to guess whether an in-flight callback is still running after `close`, and you don't need an external weak-reference or refcount around `user_data`.
 
 Because the terminal callback runs on libmoq's thread, bindings that own thread-affine objects (e.g. a Qt `QObject`) should hop to the owning thread to perform the actual destruction; the `user_data` lifetime contract holds regardless of which thread tears the object down.
+
+## Error handling
+
+Functions return a negative code on failure (`0` or a positive handle on success). The code identifies the kind of failure, but the human-readable reason is available separately via `moq_error()`:
+
+```c
+int rc = moq_consume_catalog_close(catalog);
+if (rc < 0) {
+    fprintf(stderr, "close failed: %s\n", moq_error());
+}
+```
+
+`moq_error()` returns the reason for the most recent failed call **on the calling thread**, including detail the numeric code can't carry (which URL failed to parse, why a decode failed, etc.). The returned pointer is valid until the next libmoq call on that thread, so copy it if you need to keep it. It is only meaningful after a call returned a negative code; check the code first. Errors delivered through status callbacks carry their code directly, so read `moq_error()` from inside the callback if you want the matching reason.
+
+Failed calls are reported only through the return code and `moq_error()`, not logged. To surface libmoq's internal logs (moq-net / QUIC activity), call `moq_log_level("debug")` (or `"trace"`, `"info"`, etc.) to install a tracing subscriber.
 
 ## Use cases
 

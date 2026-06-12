@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.3...moq-mux-v0.5.4) - 2026-06-10
+
+### Added
+
+- *(moq-video,moq-cli)* webcam capture and publish ([#1669](https://github.com/moq-dev/moq/pull/1669))
+- *(hang,json,moq-mux)* generic catalog with application extensions ([#1658](https://github.com/moq-dev/moq/pull/1658))
+- *(moq-json)* JSON Merge Patch snapshot/delta helper, route hang catalog through it ([#1655](https://github.com/moq-dev/moq/pull/1655))
+- *(moq-mux)* add VP8 and VP9 codec modules (import + fMP4 export) ([#1625](https://github.com/moq-dev/moq/pull/1625))
+
+### Fixed
+
+- *(moq-mux)* keep catalog Consumer Clone + stable FramedFormat discriminants ([#1661](https://github.com/moq-dev/moq/pull/1661))
+
+## [0.5.3](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.2...moq-mux-v0.5.3) - 2026-06-03
+
+### Other
+
+- add MPEG-TS (transport stream) import and export ([#1587](https://github.com/moq-dev/moq/pull/1587))
+- synthesize AAC esds in fMP4 export; guard MKV header race ([#1593](https://github.com/moq-dev/moq/pull/1593))
+
 ## [0.5.2](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.1...moq-mux-v0.5.2) - 2026-05-30
 
 ### Other

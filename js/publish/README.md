@@ -19,15 +19,15 @@ npm add @moq/publish
 
 ### No-build CDN usage
 
-For quick demos or embeds where a bundler is overkill, jsDelivr's `+esm`
-endpoint will transform the published npm package into a browser-ready ESM
-module — bare imports like `@moq/hang` are automatically rewritten to
-other `+esm` URLs. No build step or import map required:
+For quick demos or embeds where a bundler is overkill, esm.sh serves the
+published npm package as a browser-ready ESM module. Bare imports like
+`@moq/hang` are automatically rewritten to other esm.sh URLs. No build step or
+import map required:
 
 ```html
 <script type="module">
-    import "https://cdn.jsdelivr.net/npm/@moq/publish/element.js/+esm";
-    import "https://cdn.jsdelivr.net/npm/@moq/publish/ui/element.js/+esm";
+    import "https://esm.sh/@moq/publish/element";
+    import "https://esm.sh/@moq/publish/ui";
 </script>
 
 <moq-publish-ui>
@@ -37,9 +37,10 @@ other `+esm` URLs. No build step or import map required:
 </moq-publish-ui>
 ```
 
-Pin a version range in the URL for production — e.g.
-`https://cdn.jsdelivr.net/npm/@moq/publish@0.2/element.js/+esm`. esm.sh
-(`https://esm.sh/@moq/publish/element`) works the same way if you prefer it.
+Pin a version range in the URL for production, e.g.
+`https://esm.sh/@moq/publish@0.2/element`. jsDelivr's `+esm` endpoint
+(`https://cdn.jsdelivr.net/npm/@moq/publish/element.js/+esm`) works the same way
+if you prefer it.
 
 For anything beyond embedding on a static page you should install the
 package and use a real bundler (the examples below).

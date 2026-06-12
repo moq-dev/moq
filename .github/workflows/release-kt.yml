@@ -4,12 +4,6 @@ on:
   push:
     tags:
       - "moq-ffi-v*"
-  pull_request:
-    paths:
-      - ".github/workflows/release-kt.yml"
-      - ".github/scripts/release.sh"
-      - "kt/**"
-      - "rs/moq-ffi/build.sh"
 
 permissions:
   contents: read
@@ -32,16 +26,7 @@ jobs:
 
       - name: Parse version
         id: parse
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            CARGO_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
-          else
-            .github/scripts/release.sh parse-version moq-ffi
-          fi
+        run: .github/scripts/release.sh parse-version moq-ffi
 
   build:
     name: Build moq-ffi (${{ matrix.target }})
@@ -200,7 +185,6 @@ jobs:
             --output release-out
 
       - name: Publish to Maven Central
-        if: github.event_name == 'push'
         env:
           MOQFFI_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
@@ -208,16 +192,6 @@ jobs:
             -Pmoqffi.version="$MOQFFI_VERSION" \
             -Pandroid.enabled=true \
             :moq:publishAndReleaseToMavenCentral --no-configuration-cache
-
-      - name: Publish to Maven Local (PR dry-run)
-        if: github.event_name == 'pull_request'
-        env:
-          MOQFFI_VERSION: ${{ needs.parse-version.outputs.version }}
-        run: |
-          gradle -p kt \
-            -Pmoqffi.version="$MOQFFI_VERSION" \
-            -Pandroid.enabled=true \
-            :moq:publishToMavenLocal --no-configuration-cache
 
       - name: Upload local maven layout
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

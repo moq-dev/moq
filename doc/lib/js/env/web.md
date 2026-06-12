@@ -17,15 +17,15 @@ description: Web Components API reference
 ## Loading From a CDN (No Bundler)
 
 For quick demos or embeds on a static page, both `@moq/watch` and
-`@moq/publish` can be loaded straight from jsDelivr with no build step.
-Appending `/+esm` to the URL tells jsDelivr to transform the file and
-rewrite bare imports (like `@moq/hang`, `@moq/net`) to other `+esm`
-URLs, so it loads in the browser without an import map:
+`@moq/publish` can be loaded straight from [esm.sh](https://esm.sh) with no
+build step. esm.sh serves each package as a browser-ready ESM module and
+rewrites bare imports (like `@moq/hang`, `@moq/net`) to other esm.sh URLs, so
+it loads in the browser without an import map:
 
 ```html
 <script type="module">
-    import "https://cdn.jsdelivr.net/npm/@moq/watch/element.js/+esm";
-    import "https://cdn.jsdelivr.net/npm/@moq/publish/element.js/+esm";
+    import "https://esm.sh/@moq/watch/element";
+    import "https://esm.sh/@moq/publish/element";
 </script>
 
 <moq-watch url="https://relay.example.com/anon" name="room/alice.hang">
@@ -33,13 +33,14 @@ URLs, so it loads in the browser without an import map:
 </moq-watch>
 ```
 
-Pin a version range in the URL for production — e.g.
-`https://cdn.jsdelivr.net/npm/@moq/watch@0.2/element.js/+esm`. [esm.sh](https://esm.sh)
-(`https://esm.sh/@moq/watch/element`) works the same way if you prefer it.
+Pin a version range in the URL for production, e.g.
+`https://esm.sh/@moq/watch@0.2/element`. jsDelivr's `+esm` endpoint
+(`https://cdn.jsdelivr.net/npm/@moq/watch/element.js/+esm`) works the same way
+if you prefer it.
 
 This is the fastest way to try MoQ in a blog post or demo page, but for
 real apps you should [install the packages](#available-components) and
-use a bundler — you'll get tree-shaking, offline dev, and no dependency
+use a bundler. You'll get tree-shaking, offline dev, and no dependency
 on a third-party CDN's availability.
 
 ## Available Components

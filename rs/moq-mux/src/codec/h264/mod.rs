@@ -145,6 +145,39 @@ pub(crate) fn build_avcc(sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes
 	Ok(out.freeze())
 }
 
+/// Extract the parameter-set NALs (SPS then PPS) and the NALU length size from
+/// an AVCDecoderConfigurationRecord. The inverse of [`build_avcc`]; used to
+/// re-emit out-of-band avc1 parameter sets as inline Annex-B (e.g. for MPEG-TS).
+pub(crate) fn avcc_params(avcc: &[u8]) -> anyhow::Result<(usize, Vec<Bytes>)> {
+	anyhow::ensure!(avcc.len() >= 6, "AVCDecoderConfigurationRecord too short");
+	let length_size = (avcc[4] & 0x03) as usize + 1;
+
+	let mut params = Vec::new();
+	let num_sps = avcc[5] & 0x1f;
+	let mut pos = read_param_set_array(avcc, 6, num_sps as usize, &mut params)?;
+
+	anyhow::ensure!(avcc.len() > pos, "avcC missing PPS count");
+	let num_pps = avcc[pos];
+	pos += 1;
+	read_param_set_array(avcc, pos, num_pps as usize, &mut params)?;
+
+	Ok((length_size, params))
+}
+
+/// Read `count` u16-length-prefixed NALs starting at `pos`, appending each to
+/// `params`. Returns the offset just past the last NAL read.
+fn read_param_set_array(buf: &[u8], mut pos: usize, count: usize, params: &mut Vec<Bytes>) -> anyhow::Result<usize> {
+	for _ in 0..count {
+		anyhow::ensure!(buf.len() >= pos + 2, "truncated parameter-set length");
+		let len = u16::from_be_bytes([buf[pos], buf[pos + 1]]) as usize;
+		pos += 2;
+		anyhow::ensure!(buf.len() >= pos + len, "parameter-set NAL exceeds buffer");
+		params.push(Bytes::copy_from_slice(&buf[pos..pos + len]));
+		pos += len;
+	}
+	Ok(pos)
+}
+
 /// Transform H.264 frames from Annex-B (inline SPS/PPS, "avc3") to
 /// length-prefixed NALU (out-of-band AVCDecoderConfigurationRecord, "avc1").
 ///
@@ -304,6 +337,20 @@ mod tests {
 		expected.extend_from_slice(&(idr.len() as u32).to_be_bytes());
 		expected.extend_from_slice(idr);
 		assert_eq!(out.as_ref(), expected.as_ref());
+	}
+
+	#[test]
+	fn avcc_params_roundtrips_build_avcc() {
+		let sps = &[0x67, 0x42, 0xc0, 0x1f, 0xde][..];
+		let pps = &[0x68, 0xce, 0x3c, 0x80][..];
+
+		let avcc = build_avcc(sps, pps).unwrap();
+		let (length_size, params) = avcc_params(&avcc).unwrap();
+
+		assert_eq!(length_size, 4);
+		assert_eq!(params.len(), 2);
+		assert_eq!(params[0].as_ref(), sps);
+		assert_eq!(params[1].as_ref(), pps);
 	}
 
 	#[test]

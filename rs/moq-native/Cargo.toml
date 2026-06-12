@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.16.1"
+version = "0.17.0"
 edition = "2024"
 rust-version.workspace = true
 
@@ -17,8 +17,8 @@ doctest = false
 
 [features]
 default = ["quinn", "aws-lc-rs", "websocket"]
-quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki"]
-noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki"]
+quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:notify"]
+noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:notify"]
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto"]
@@ -29,7 +29,6 @@ tokio-console = ["dep:console-subscriber"]
 android-logcat = ["dep:tracing-android"]
 
 [dependencies]
-anyhow = { version = "1", features = ["backtrace"] }
 clap = { version = "4", features = ["derive", "env"] }
 console-subscriber = { version = "0.5", optional = true }
 futures = "0.3"
@@ -38,10 +37,11 @@ humantime = "2.3"
 humantime-serde = "1.1"
 
 moq-net = { workspace = true, features = ["serde"] }
+notify = { version = "8", optional = true }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 qmux = { workspace = true, features = ["wss", "tls"], optional = true }
 quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "bloom"], optional = true }
-rand = "0.9.2"
+rand = "0.10.1"
 rcgen = { version = "0.14", default-features = false, optional = true }
 reqwest = { version = "0.12", default-features = false, optional = true }
 rustls = "0.23"
@@ -49,6 +49,7 @@ rustls-native-certs = "0.8"
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["hex"] }
+thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.6", optional = true }
 tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 time = "0.3"
@@ -66,7 +67,8 @@ web-transport-quinn = { workspace = true, optional = true }
 tracing-android = { version = "0.2", optional = true }
 
 [dev-dependencies]
+anyhow = "1"
 bytes = "1"
 chrono = "0.4"
-toml = "0.9"
+toml = "1.1"
 tracing-test = "0.2"

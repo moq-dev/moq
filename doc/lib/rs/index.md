@@ -172,9 +172,9 @@ C bindings for `moq-net` via FFI.
 
 ## Installation
 
-### From crates.io
+### Libraries (crates.io)
 
-Add to your `Cargo.toml`:
+Add the crates you need to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -182,7 +182,39 @@ moq-net = "0.1"
 hang = "0.1"
 ```
 
-### From Source
+All crates are published to [crates.io](https://crates.io/search?q=moq) with API
+docs on [docs.rs](https://docs.rs).
+
+### Binaries
+
+The relay and CLI ship through several channels. Pick whichever fits:
+
+```bash
+# crates.io (any platform with a Rust toolchain)
+cargo install moq-relay moq-cli moq-token-cli
+
+# Homebrew (macOS / Linux)
+brew install moq-dev/tap/moq-relay moq-dev/tap/moq-cli
+
+# Debian / Ubuntu (see the Linux packages guide for repo setup)
+sudo apt install moq-relay moq-cli
+
+# Fedora / RHEL (see the Linux packages guide for repo setup)
+sudo dnf install moq-relay moq-cli
+
+# Nix
+nix build github:moq-dev/moq#moq-relay
+nix build github:moq-dev/moq#moq-cli
+
+# Docker
+docker run moqdev/moq-relay
+docker run moqdev/moq-cli
+```
+
+See [Linux packages](/setup/linux) for apt/dnf repository setup and the
+[Applications](/bin/) docs for usage.
+
+### From source
 
 ```bash
 git clone https://github.com/moq-dev/moq
@@ -190,74 +222,37 @@ cd moq/rs
 cargo build --release
 ```
 
-### Using Nix
-
-```bash
-# Build moq-relay
-nix build github:moq-dev/moq#moq-relay
-
-# Build moq-cli
-nix build github:moq-dev/moq#moq-cli
-```
-
 ## Quick Start
 
-### Publishing (Rust)
+[`moq-native`](/lib/rs/crate/moq-native) configures the QUIC endpoint and TLS for
+you, then [`moq-net`](/lib/rs/crate/moq-net) handles the MoQ handshake. Connect to
+a relay with a few lines:
 
 ```rust
-use moq_net::*;
-use tokio;
+let client = moq_native::ClientConfig::default().init()?;
+let url = url::Url::parse("https://relay.moq.dev/anon")?;
+let session = client.connect(url).await?;
+```
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Connect to relay
-    let connection = Connection::connect("https://relay.example.com/demo").await?;
+To publish or consume, wire an [`Origin`](https://docs.rs/moq-net/latest/moq_net/struct.Origin.html)
+into the session before connecting:
 
-    // Create a broadcast
-    let mut broadcast = BroadcastProducer::new("my-broadcast");
+```rust
+// Subscribe: wait for broadcasts to be announced.
+let origin = moq_net::Origin::new().produce();
+let mut consumer = origin.consume();
+let session = client.with_consume(origin).connect(url).await?;
 
-    // Create a track
-    let mut track = broadcast.create_track("chat");
-
-    // Publish a group with a frame
-    let mut group = track.append_group();
-    group.write(b"Hello, MoQ!")?;
-    group.close()?;
-
-    // Publish to connection
-    connection.publish(&mut broadcast).await?;
-
-    Ok(())
+while let Some((path, broadcast)) = consumer.announced().await {
+    // ... subscribe to tracks on each broadcast ...
 }
 ```
 
-### Subscribing (Rust)
-
-```rust
-use moq_net::*;
-use tokio;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Connect to relay
-    let connection = Connection::connect("https://relay.example.com/demo").await?;
-
-    // Subscribe to a broadcast
-    let broadcast = connection.consume("my-broadcast").await?;
-
-    // Subscribe to a track
-    let mut track = broadcast.subscribe("chat").await?;
-
-    // Read groups and frames
-    while let Some(group) = track.recv_group().await? {
-        while let Some(frame) = group.read().await? {
-            println!("Received: {:?}", frame);
-        }
-    }
-
-    Ok(())
-}
-```
+The [Native guide](/lib/rs/env/native) walks through publishing, subscribing,
+reading the catalog, and decoding frames end to end. For runnable code see the
+[`hang/examples`](https://github.com/moq-dev/moq/tree/main/rs/hang/examples)
+directory: [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs)
+(publish) and [subscribe.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs).
 
 ## API Documentation
 

@@ -60,7 +60,41 @@ Pipe FFmpeg output directly to moq-cli:
 ffmpeg -i input.mp4 -f mpegts - | moq-cli publish - https://relay.example.com/anon/my-stream
 ```
 
-### Publish a Webcam
+### Capture a Webcam
+
+The `capture` subcommand captures and encodes from local devices directly, no
+external FFmpeg process required. It publishes the camera as an H.264 video
+track and the microphone as an Opus audio track on the same broadcast. It is
+gated behind the `capture` feature, whose video path pulls in a system FFmpeg
+(libav\*) build dependency (audio is pure-Rust via cpal):
+
+Build (or run) with the feature enabled:
+
+```bash
+cargo build --release -p moq-cli --features capture
+# or run straight from a checkout:
+cargo run -p moq-cli --features capture -- publish --url https://relay.example.com --broadcast cam.hang capture
+
+# Default camera + microphone, hardware-encoded H.264 when available:
+moq-cli publish --url https://relay.example.com --broadcast cam.hang capture
+
+# Pick devices, resolution, and bitrates:
+moq-cli publish --url https://relay.example.com --broadcast cam.hang \
+    capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 \
+            --microphone "MacBook Pro Microphone" --audio-bitrate 64000
+
+# One medium only:
+moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --no-audio
+moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --no-video
+```
+
+Video capture uses the platform backend (avfoundation on macOS, v4l2 on Linux,
+dshow on Windows) and picks a hardware encoder (`h264_videotoolbox` /
+`h264_nvenc` / `h264_vaapi`) when one is present, falling back to software
+(`libx264`); force either with `--hardware` / `--software`. Audio capture uses
+cpal (CoreAudio / WASAPI / ALSA) and encodes Opus.
+
+Alternatively, pipe an external FFmpeg process as MPEG-TS:
 
 ```bash
 # macOS
@@ -110,6 +144,43 @@ ffmpeg -i input.mp4 \
     -c:a aac \
     -f mpegts - | moq-cli publish - https://relay.example.com/anon/stream
 ```
+
+## Container Formats
+
+`publish` selects its input container with a subcommand; `subscribe` selects its
+output container with `--format`.
+
+Publish (read from stdin unless noted):
+
+- `avc3` - raw H.264 Annex-B
+- `fmp4` - fragmented MP4 / CMAF
+- `ts` - MPEG-TS (H.264 / H.265 video, AAC audio)
+- `hls --playlist <url>` - HLS playlist ingest
+- `capture` - capture local devices directly (camera H.264 + microphone Opus; requires the `capture` build feature; does not read stdin)
+
+Subscribe (`--format`):
+
+- `fmp4` - fragmented MP4 / CMAF
+- `mkv` - Matroska / WebM
+- `ts` - MPEG-TS
+
+### MPEG-TS
+
+Ingest an MPEG-TS stream from FFmpeg and play one back out:
+
+```bash
+# Publish: remux a file to MPEG-TS and pipe it in
+ffmpeg -i input.mp4 -c copy -f mpegts - | \
+    moq-cli publish --url https://relay.example.com --broadcast my-stream ts
+
+# Subscribe: pull MPEG-TS back out and play it
+moq-cli subscribe --url https://relay.example.com --broadcast my-stream --format ts | ffplay -
+```
+
+TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
+(avc3 / hev1) and out-of-band (avc1 / hvc1, e.g. from an fMP4 import) video
+sources work: the parameter sets are read from the bitstream or the catalog
+`description` and re-injected as Annex-B on each keyframe.
 
 ## Authentication
 

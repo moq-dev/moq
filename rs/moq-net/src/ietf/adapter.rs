@@ -481,7 +481,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 				Ok(Route::NewRequest(id))
 			}
 			// SubscribeNamespace on control stream (v14/v15 only)
-			ietf::SubscribeNamespace::ID => match self.version {
+			ietf::SubscribeNamespaceLegacy::ID => match self.version {
 				Version::Draft14 | Version::Draft15 => {
 					let id = decode_request_id(body, self.version)?;
 					Ok(Route::NewRequest(id))
@@ -845,7 +845,7 @@ mod tests {
 				let id = decode_request_id(body, version)?;
 				Ok(Route::NewRequest(id))
 			}
-			ietf::SubscribeNamespace::ID => match version {
+			ietf::SubscribeNamespaceLegacy::ID => match version {
 				Version::Draft14 | Version::Draft15 => {
 					let id = decode_request_id(body, version)?;
 					Ok(Route::NewRequest(id))
@@ -1053,14 +1053,14 @@ mod tests {
 	#[test]
 	fn test_classify_subscribe_namespace_v14_new_request() {
 		let body = make_body_with_request_id(20, Version::Draft14);
-		let route = classify_msg(Version::Draft14, ietf::SubscribeNamespace::ID, &body).unwrap();
+		let route = classify_msg(Version::Draft14, ietf::SubscribeNamespaceLegacy::ID, &body).unwrap();
 		assert!(matches!(route, Route::NewRequest(RequestId(20))));
 	}
 
 	#[test]
 	fn test_classify_subscribe_namespace_v16_errors() {
 		let body = make_body_with_request_id(20, Version::Draft16);
-		let result = classify_msg(Version::Draft16, ietf::SubscribeNamespace::ID, &body);
+		let result = classify_msg(Version::Draft16, ietf::SubscribeNamespaceLegacy::ID, &body);
 		assert!(result.is_err());
 	}
 

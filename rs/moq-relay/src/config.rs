@@ -53,7 +53,7 @@ pub struct Config {
 	#[command(flatten)]
 	#[serde(default)]
 	#[cfg(feature = "iroh")]
-	pub iroh: moq_native::IrohEndpointConfig,
+	pub iroh: moq_native::iroh::EndpointConfig,
 }
 
 impl Config {
@@ -224,5 +224,76 @@ preferred_v6 = "[2001:db8::1]:443"
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.stats.enabled, Some(false));
+	}
+
+	/// Same clap+TOML clobber guard applied to `auth.auth_api`. It's typed as
+	/// `Option<String>` so an absent `--auth-api` CLI flag must not wipe a
+	/// TOML-configured value during the `update_from` re-parse.
+	static AUTH_API_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	#[test]
+	fn cli_does_not_clobber_toml_auth_api() {
+		let _guard = AUTH_API_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: AUTH_API_ENV_LOCK serializes this with any sibling test touching
+		// the same env var.
+		unsafe { std::env::remove_var("MOQ_AUTH_API") };
+
+		let toml = r#"
+[auth]
+auth_api = "https://api.moq.dev/cluster/auth"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("auth-api-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.auth.auth_api.as_deref(),
+			Some("https://api.moq.dev/cluster/auth"),
+			"TOML's auth.auth_api must not be clobbered by the CLI re-parse",
+		);
+	}
+
+	/// Same clap+TOML clobber guard for the `[web.health]` thresholds. Each is
+	/// `Option<T>`, so an absent `--web-health-*` CLI flag must leave the
+	/// TOML-configured value untouched during the `update_from` re-parse.
+	static HEALTH_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	#[test]
+	fn cli_does_not_clobber_toml_health() {
+		let _guard = HEALTH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: HEALTH_ENV_LOCK serializes this with any sibling test touching
+		// the same env vars.
+		unsafe {
+			std::env::remove_var("MOQ_WEB_HEALTH_CPU");
+			std::env::remove_var("MOQ_WEB_HEALTH_RAM");
+		}
+
+		let toml = r#"
+[web.health]
+cpu = 75.0
+ram = "80%"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("health-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.web.health.cpu,
+			Some(75.0),
+			"TOML's web.health.cpu must not be clobbered by the CLI re-parse"
+		);
+		assert_eq!(
+			config.web.health.ram,
+			Some(crate::MemLimit::Percent(80.0)),
+			"TOML's web.health.ram must not be clobbered by the CLI re-parse"
+		);
 	}
 }

@@ -24,6 +24,7 @@ pub mod hls;
 pub mod legacy;
 pub mod loc;
 pub mod mkv;
+pub mod ts;
 
 pub use consumer::Consumer;
 pub use producer::Producer;

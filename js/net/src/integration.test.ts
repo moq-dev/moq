@@ -80,6 +80,10 @@ test("integration: ietf draft-17", async () => {
 	await runPublishSubscribeFlow(Ietf.ALPN.DRAFT_17);
 });
 
+test("integration: ietf draft-18", async () => {
+	await runPublishSubscribeFlow(Ietf.ALPN.DRAFT_18);
+});
+
 test("integration: subscribe to non-existent broadcast", async () => {
 	const pair = createMockTransportPair("");
 

@@ -1,7 +1,7 @@
 {
 	"name": "@moq/signals",
 	"type": "module",
-	"version": "0.1.7",
+	"version": "0.1.8",
 	"description": "Reactive and safe signals",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
@@ -15,18 +15,20 @@
 	"scripts": {
 		"build": "rimraf dist && tsc -b && bun ../common/package.ts",
 		"check": "tsc --noEmit",
+		"test": "bun test --only-failures",
 		"release": "bun ../common/release.ts"
 	},
 	"devDependencies": {
-		"typescript": "^6.0.0",
-		"rimraf": "^6.0.1",
-		"@types/react": "^19.1.8",
-		"solid-js": "^1.9.7"
+		"typescript": "^6.0.3",
+		"rimraf": "^6.1.3",
+		"@types/bun": "^1.3.11",
+		"@types/react": "^19.2.15",
+		"solid-js": "^1.9.13"
 	},
 	"peerDependencies": {
-		"@types/react": "^19.1.8",
+		"@types/react": "^19.2.15",
 		"react": "^19.0.0",
-		"solid-js": "^1.9.7"
+		"solid-js": "^1.9.13"
 	},
 	"peerDependenciesMeta": {
 		"@types/react": {

@@ -192,8 +192,7 @@ export class Source {
 	broadcast: Signal<Broadcast | undefined>;
 	target: Signal<Target | undefined>;
 
-	#catalog = new Signal<Catalog.Video | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Video | undefined> = this.#catalog;
+	readonly catalog: Getter<Catalog.Video | undefined>;
 
 	#available = new Signal<Record<string, Catalog.VideoConfig>>({});
 	readonly available: Getter<Record<string, Catalog.VideoConfig>> = this.#available;
@@ -216,26 +215,21 @@ export class Source {
 		this.sync = sync;
 		this.supported = Signal.from(props?.supported);
 
-		this.#signals.run(this.#runCatalog.bind(this));
+		// The video catalog, derived from the active broadcast.
+		this.catalog = this.#signals.computed((effect) => {
+			const broadcast = effect.get(this.broadcast);
+			return broadcast ? effect.get(broadcast.catalog)?.video : undefined;
+		});
+
 		this.#signals.run(this.#runSupported.bind(this));
 		this.#signals.run(this.#runSelected.bind(this));
-	}
-
-	#runCatalog(effect: Effect): void {
-		const broadcast = effect.get(this.broadcast);
-		if (!broadcast) return;
-
-		const catalog = effect.get(broadcast.catalog)?.video;
-		if (!catalog) return;
-
-		effect.set(this.#catalog, catalog);
 	}
 
 	#runSupported(effect: Effect): void {
 		const supported = effect.get(this.supported);
 		if (!supported) return;
 
-		const renditions = effect.get(this.#catalog)?.renditions ?? {};
+		const renditions = effect.get(this.catalog)?.renditions ?? {};
 
 		effect.spawn(async () => {
 			const available: Record<string, Catalog.VideoConfig> = {};

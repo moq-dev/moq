@@ -2,6 +2,7 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
+use crate::error::MoqError;
 
 use std::time::Duration;
 
@@ -68,6 +69,49 @@ async fn raw_track_activity() {
 		.await
 		.expect("timed out waiting for raw track to become unused")
 		.unwrap();
+}
+
+#[tokio::test]
+async fn dynamic_track_request() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let track_consumer = consumer.subscribe_track("events".into()).unwrap();
+
+	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for requested track")
+		.unwrap();
+
+	assert_eq!(track.name().unwrap(), "events");
+
+	let payload = b"hello dynamic track".to_vec();
+	track.write_frame(payload.clone()).unwrap();
+
+	let frame = tokio::time::timeout(TIMEOUT, track_consumer.read_frame())
+		.await
+		.expect("timed out waiting for dynamic track frame")
+		.unwrap()
+		.expect("expected a frame");
+
+	assert_eq!(frame, payload);
+	track.finish().unwrap();
+}
+
+#[tokio::test]
+async fn dynamic_track_request_can_abort() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let _track_consumer = consumer.subscribe_track("unknown".into()).unwrap();
+
+	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for requested track")
+		.unwrap();
+
+	track.abort(404).unwrap();
+	assert!(matches!(track.name(), Err(MoqError::Closed)));
 }
 
 #[tokio::test]
@@ -368,7 +412,7 @@ fn without_runtime() {
 		drop(announced);
 	})
 	.join()
-	.expect("client thread panicked — FFI method missing runtime guard");
+	.expect("client thread panicked, FFI method missing runtime guard");
 }
 
 #[tokio::test]
@@ -515,7 +559,7 @@ async fn request_double_respond_returns_already_responded() {
 			.expect("accept errored")
 			.expect("accept returned None");
 
-		// Accept once, then try a second response — must error.
+		// Accept once, then try a second response. It must error.
 		let session = request.ok().await.expect("first ok succeeds");
 		let second_ok = request.ok().await;
 		assert!(

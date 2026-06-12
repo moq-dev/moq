@@ -8,7 +8,7 @@ pub use tikv_jemallocator;
 /// (and typically `prof_active:true` plus a `prof_prefix`). jemalloc
 /// only initializes the profiling backend when `opt.prof` is set at
 /// init; toggling `prof.active` later returns EINVAL.
-pub async fn run() -> anyhow::Result<()> {
+pub async fn run() -> crate::Result<()> {
 	match unsafe { raw::read::<bool>(b"prof.active\0") } {
 		Ok(true) => tracing::info!("jemalloc heap profiling is active"),
 		Ok(false) => {

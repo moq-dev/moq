@@ -56,6 +56,10 @@ test *args:
 build:
     cargo build
 
+# Remove the Rust target directory.
+clean:
+    cargo clean
+
 # Check semver compatibility against crates.io (default-members only).
 semver:
     cargo semver-checks check-release

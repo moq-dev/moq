@@ -1,57 +1,6 @@
-use crate::crypto;
-use crate::{Backoff, QuicBackend, Reconnect};
-use anyhow::Context;
-use std::path::PathBuf;
-use std::{net, sync::Arc};
+use crate::{Backoff, Error, QuicBackend, Reconnect};
+use std::net;
 use url::Url;
-
-/// TLS configuration for the client.
-#[serde_with::serde_as]
-#[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-#[non_exhaustive]
-pub struct ClientTls {
-	/// Use the TLS root at this path, encoded as PEM.
-	///
-	/// This value can be provided multiple times for multiple roots.
-	/// If this is empty, system roots will be used instead.
-	/// In config files, accepts either a single string or a TOML array.
-	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "tls-root", long = "tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
-	#[serde_as(as = "serde_with::OneOrMany<_>")]
-	pub root: Vec<PathBuf>,
-
-	/// PEM file containing the client certificate chain for mTLS.
-	///
-	/// Only certificates are extracted; any private keys in the file are ignored.
-	/// Must be paired with `--client-tls-key`.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "client-tls-cert", long = "client-tls-cert", env = "MOQ_CLIENT_TLS_CERT")]
-	pub cert: Option<PathBuf>,
-
-	/// PEM file containing the private key for mTLS.
-	///
-	/// Only the private key is extracted; any certificates in the file are ignored.
-	/// Must be paired with `--client-tls-cert`.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "client-tls-key", long = "client-tls-key", env = "MOQ_CLIENT_TLS_KEY")]
-	pub key: Option<PathBuf>,
-
-	/// Danger: Disable TLS certificate verification.
-	///
-	/// Fine for local development and between relays, but should be used in caution in production.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "tls-disable-verify",
-		long = "tls-disable-verify",
-		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
-		default_missing_value = "true",
-		num_args = 0..=1,
-		require_equals = true,
-		value_parser = clap::value_parser!(bool),
-	)]
-	pub disable_verify: Option<bool>,
-}
 
 /// Configuration for the MoQ client.
 #[derive(Clone, Debug, clap::Parser, serde::Serialize, serde::Deserialize)]
@@ -94,7 +43,7 @@ pub struct ClientConfig {
 
 	#[command(flatten)]
 	#[serde(default)]
-	pub tls: ClientTls,
+	pub tls: crate::tls::Client,
 
 	#[command(flatten)]
 	#[serde(default)]
@@ -103,80 +52,11 @@ pub struct ClientConfig {
 	#[cfg(feature = "websocket")]
 	#[command(flatten)]
 	#[serde(default)]
-	pub websocket: super::ClientWebSocket,
-}
-
-impl ClientTls {
-	/// Build a [`rustls::ClientConfig`] from this configuration.
-	///
-	/// Loads the configured roots (or the platform's native roots if none),
-	/// optionally attaches a client identity for mTLS, and disables server
-	/// certificate verification when `disable_verify` is set.
-	pub fn build(&self) -> anyhow::Result<rustls::ClientConfig> {
-		use rustls::pki_types::CertificateDer;
-		use rustls::pki_types::PrivateKeyDer;
-		use rustls::pki_types::pem::PemObject;
-
-		let provider = crypto::provider();
-
-		let mut roots = rustls::RootCertStore::empty();
-		if self.root.is_empty() {
-			let native = rustls_native_certs::load_native_certs();
-			for err in native.errors {
-				tracing::warn!(%err, "failed to load root cert");
-			}
-			for cert in native.certs {
-				roots.add(cert).context("failed to add root cert")?;
-			}
-		} else {
-			for root in &self.root {
-				let file = std::fs::File::open(root).context("failed to open root cert file")?;
-				let mut reader = std::io::BufReader::new(file);
-				let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(&mut reader)
-					.collect::<Result<_, _>>()
-					.context("failed to read root cert")?;
-				anyhow::ensure!(!certs.is_empty(), "no roots found in {}", root.display());
-				for cert in certs {
-					roots.add(cert).context("failed to add root cert")?;
-				}
-			}
-		}
-
-		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
-		// QUIC always negotiates TLS 1.3 regardless of this setting.
-		let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
-			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
-			.with_root_certificates(roots);
-
-		let mut tls = match (&self.cert, &self.key) {
-			(Some(cert_path), Some(key_path)) => {
-				let cert_pem = std::fs::read(cert_path).context("failed to read client certificate")?;
-				let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
-					.collect::<Result<_, _>>()
-					.context("failed to parse client certificate")?;
-				anyhow::ensure!(!chain.is_empty(), "no certificates found in client certificate");
-				let key_pem = std::fs::read(key_path).context("failed to read client key")?;
-				let key = PrivateKeyDer::from_pem_slice(&key_pem).context("failed to parse client key")?;
-				builder
-					.with_client_auth_cert(chain, key)
-					.context("failed to configure client certificate")?
-			}
-			(None, None) => builder.with_no_client_auth(),
-			_ => anyhow::bail!("both --client-tls-cert and --client-tls-key must be provided"),
-		};
-
-		if self.disable_verify.unwrap_or_default() {
-			tracing::warn!("TLS server certificate verification is disabled; A man-in-the-middle attack is possible.");
-			let noop = NoCertificateVerification(provider);
-			tls.dangerous().set_certificate_verifier(Arc::new(noop));
-		}
-
-		Ok(tls)
-	}
+	pub websocket: crate::websocket::Client,
 }
 
 impl ClientConfig {
-	pub fn init(self) -> anyhow::Result<Client> {
+	pub fn init(self) -> crate::Result<Client> {
 		Client::new(self)
 	}
 
@@ -197,10 +77,10 @@ impl Default for ClientConfig {
 			backend: None,
 			max_streams: None,
 			version: Vec::new(),
-			tls: ClientTls::default(),
+			tls: crate::tls::Client::default(),
 			backoff: Backoff::default(),
 			#[cfg(feature = "websocket")]
-			websocket: super::ClientWebSocket::default(),
+			websocket: crate::websocket::Client::default(),
 		}
 	}
 }
@@ -214,7 +94,7 @@ pub struct Client {
 	versions: moq_net::Versions,
 	backoff: Backoff,
 	#[cfg(feature = "websocket")]
-	websocket: super::ClientWebSocket,
+	websocket: crate::websocket::Client,
 	tls: rustls::ClientConfig,
 	#[cfg(feature = "noq")]
 	noq: Option<crate::noq::NoqClient>,
@@ -230,13 +110,15 @@ pub struct Client {
 
 impl Client {
 	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "websocket")))]
-	pub fn new(_config: ClientConfig) -> anyhow::Result<Self> {
-		anyhow::bail!("no QUIC or WebSocket backend compiled; enable noq, quinn, quiche, or websocket feature");
+	pub fn new(_config: ClientConfig) -> crate::Result<Self> {
+		Err(Error::NoBackend(
+			"no QUIC or WebSocket backend compiled; enable noq, quinn, quiche, or websocket feature",
+		))
 	}
 
 	/// Create a new client
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "websocket"))]
-	pub fn new(config: ClientConfig) -> anyhow::Result<Self> {
+	pub fn new(config: ClientConfig) -> crate::Result<Self> {
 		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 		let backend = config.backend.clone().unwrap_or({
 			#[cfg(feature = "quinn")]
@@ -345,8 +227,10 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	)))]
-	pub async fn connect(&self, _url: Url) -> anyhow::Result<moq_net::Session> {
-		anyhow::bail!("no backend compiled; enable noq, quinn, quiche, iroh, or websocket feature");
+	pub async fn connect(&self, _url: Url) -> crate::Result<moq_net::Session> {
+		Err(Error::NoBackend(
+			"no backend compiled; enable noq, quinn, quiche, iroh, or websocket feature",
+		))
 	}
 
 	#[cfg(any(
@@ -356,7 +240,7 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	))]
-	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_net::Session> {
+	pub async fn connect(&self, url: Url) -> crate::Result<moq_net::Session> {
 		let session = self.connect_inner(url).await?;
 		tracing::info!(version = %session.version(), "connected");
 		Ok(session)
@@ -369,10 +253,10 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	))]
-	async fn connect_inner(&self, url: Url) -> anyhow::Result<moq_net::Session> {
+	async fn connect_inner(&self, url: Url) -> crate::Result<moq_net::Session> {
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
-			let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
+			let endpoint = self.iroh.as_ref().ok_or(Error::IrohDisabled)?;
 			let session = crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied()).await?;
 			let session = self.moq.connect(session).await?;
 			return Ok(session);
@@ -398,7 +282,7 @@ impl Client {
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
 					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
-					else => anyhow::bail!("failed to connect to server"),
+					else => return Err(Error::ConnectFailed),
 				});
 			}
 
@@ -429,7 +313,7 @@ impl Client {
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
 					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
-					else => anyhow::bail!("failed to connect to server"),
+					else => return Err(Error::ConnectFailed),
 				});
 			}
 
@@ -459,7 +343,7 @@ impl Client {
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
 					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
-					else => anyhow::bail!("failed to connect to server"),
+					else => return Err(Error::ConnectFailed),
 				});
 			}
 
@@ -478,47 +362,7 @@ impl Client {
 		}
 
 		#[cfg(not(feature = "websocket"))]
-		anyhow::bail!("no QUIC backend matched; this should not happen");
-	}
-}
-
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-
-#[derive(Debug)]
-struct NoCertificateVerification(crypto::Provider);
-
-impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
-	fn verify_server_cert(
-		&self,
-		_end_entity: &CertificateDer<'_>,
-		_intermediates: &[CertificateDer<'_>],
-		_server_name: &ServerName<'_>,
-		_ocsp: &[u8],
-		_now: UnixTime,
-	) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-		Ok(rustls::client::danger::ServerCertVerified::assertion())
-	}
-
-	fn verify_tls12_signature(
-		&self,
-		message: &[u8],
-		cert: &CertificateDer<'_>,
-		dss: &rustls::DigitallySignedStruct,
-	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-		rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
-	}
-
-	fn verify_tls13_signature(
-		&self,
-		message: &[u8],
-		cert: &CertificateDer<'_>,
-		dss: &rustls::DigitallySignedStruct,
-	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-		rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
-	}
-
-	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-		self.0.signature_verification_algorithms.supported_schemes()
+		return Err(Error::NoBackend("no QUIC backend matched; this should not happen"));
 	}
 }
 

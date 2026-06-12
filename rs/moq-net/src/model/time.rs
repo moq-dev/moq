@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 
 use crate::Error;
 use crate::coding::{Decode, DecodeError, Encode, EncodeError, VarInt};

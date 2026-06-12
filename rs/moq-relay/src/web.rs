@@ -48,6 +48,11 @@ pub struct WebConfig {
 	#[arg(long = "web-ws", env = "MOQ_WEB_WS", default_value = "true")]
 	#[serde(default = "default_true")]
 	pub ws: bool,
+
+	/// Health endpoint (`/health`) thresholds for load shedding.
+	#[command(flatten)]
+	#[serde(default)]
+	pub health: crate::HealthConfig,
 }
 
 /// Plain HTTP listener configuration.
@@ -105,9 +110,11 @@ pub struct WebState {
 	/// The cluster state for resolving origins.
 	pub cluster: Cluster,
 	/// TLS certificate information served at `/certificate.sha256`.
-	pub tls_info: Arc<std::sync::RwLock<moq_native::ServerTlsInfo>>,
+	pub tls_info: Arc<std::sync::RwLock<moq_native::tls::Info>>,
 	/// Monotonically increasing connection counter for WebSocket sessions.
 	pub conn_id: AtomicU64,
+	/// Host overload monitor backing the `/health` endpoint.
+	pub health: crate::Health,
 }
 
 /// Run a HTTP server using Axum
@@ -124,6 +131,7 @@ impl Web {
 	/// Runs the HTTP and/or HTTPS listeners until they shut down.
 	pub async fn run(self) -> anyhow::Result<()> {
 		let app = Router::new()
+			.route("/health", get(serve_health))
 			.route("/certificate.sha256", get(serve_fingerprint))
 			.route("/announced", get(serve_announced))
 			.route("/announced/{*prefix}", get(serve_announced))
@@ -157,7 +165,6 @@ impl Web {
 			let config = build_https_config(&cert, &key, &root).await?;
 			let rustls_config = RustlsConfig::from_config(Arc::new(config));
 
-			#[cfg(unix)]
 			tokio::spawn(reload_https_config(rustls_config.clone(), cert, key, root));
 
 			// MtlsAcceptor surfaces a verified peer cert as a request extension.
@@ -221,7 +228,7 @@ async fn build_https_config(
 			.with_single_cert(cert_chain, key_der)
 			.context("invalid https cert/key pair")?
 	} else {
-		// Build the CA root store inline; `moq_native::ServerTlsConfig` is
+		// Build the CA root store inline; `moq_native::tls::Server` is
 		// `non_exhaustive`, so we can't construct one to call its `load_roots`.
 		let mut root_store = rustls::RootCertStore::empty();
 		for path in root {
@@ -248,18 +255,27 @@ async fn build_https_config(
 	Ok(config)
 }
 
-/// Reload the HTTPS cert/key on SIGUSR1.
+/// Reload the HTTPS cert/key/root whenever they change on disk.
 ///
 /// `RustlsConfig::reload_from_pem_file` would rebuild with `with_no_client_auth`
-/// — silently stripping mTLS when configured — so we always rebuild via the
-/// full [`build_https_config`] path.
-#[cfg(unix)]
+/// (silently stripping mTLS when configured), so we always rebuild via the full
+/// [`build_https_config`] path.
 async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, root: Vec<PathBuf>) {
-	use tokio::signal::unix::{SignalKind, signal};
+	let paths: Vec<PathBuf> = std::iter::once(cert.clone())
+		.chain(std::iter::once(key.clone()))
+		.chain(root.iter().cloned())
+		.collect();
 
-	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
+	let mut watcher = match crate::watch::FileWatcher::new(&paths) {
+		Ok(watcher) => watcher,
+		Err(err) => {
+			tracing::error!(%err, "failed to watch web certificate files; hot reload disabled");
+			return;
+		}
+	};
 
-	while listener.recv().await.is_some() {
+	loop {
+		watcher.changed().await;
 		tracing::info!("reloading web certificate");
 
 		match build_https_config(&cert, &key, &root).await {
@@ -365,6 +381,35 @@ async fn serve_landing() -> Response {
 	landing_response()
 }
 
+/// Liveness/load-shedding probe.
+///
+/// Returns `200 ok` when every configured threshold passes, or `503` with a
+/// plain-text `overloaded` header line followed by one line per breached
+/// threshold. Unauthenticated so load-balancer probes don't need a JWT.
+async fn serve_health(State(state): State<Arc<WebState>>) -> Response {
+	let mut breaches = state.health.check();
+	// Only pay the external probe (up to 5s) when we're otherwise healthy; on an
+	// already-breached host the api line is just diagnostic and would delay the
+	// inevitable 503. `&&` short-circuits, so check_api isn't awaited when
+	// breaches are already present.
+	if breaches.is_empty()
+		&& let Some(msg) = state.health.check_api().await
+	{
+		breaches.push(msg);
+	}
+
+	if breaches.is_empty() {
+		return (StatusCode::OK, "ok\n").into_response();
+	}
+
+	let mut body = String::from("overloaded\n");
+	for breach in &breaches {
+		body.push_str(breach);
+		body.push('\n');
+	}
+	(StatusCode::SERVICE_UNAVAILABLE, body).into_response()
+}
+
 async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
 	// Get the first certificate's fingerprint.
 	// TODO serve all of them so we can support multiple signature algorithms.
@@ -455,7 +500,11 @@ async fn serve_announced(
 		jwt: query.jwt,
 	};
 	let token = if mtls.is_some() {
-		AuthToken::unrestricted(moq_net::Path::new(&params.path).to_owned())
+		// mTLS peers: the API returns the canonical root and the billing tier.
+		let (root, internal) = state.auth.resolve_mtls(&params.path).await?;
+		let mut token = AuthToken::unrestricted(moq_net::Path::new(&root).to_owned());
+		token.internal = internal;
+		token
 	} else {
 		state.auth.verify(&params).await?
 	};
@@ -490,16 +539,21 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let broadcast = path.join("/");
 	let auth = AuthParams {
-		path: broadcast.clone(),
+		path: path.join("/"),
 		jwt: params.auth.jwt,
 	};
 	let token = if mtls.is_some() {
-		AuthToken::unrestricted(moq_net::Path::new(&auth.path).to_owned())
+		// mTLS peers: the API returns the canonical root and the billing tier.
+		let (root, internal) = state.auth.resolve_mtls(&auth.path).await?;
+		let mut token = AuthToken::unrestricted(moq_net::Path::new(&root).to_owned());
+		token.internal = internal;
+		token
 	} else {
 		state.auth.verify(&auth).await?
 	};
+	// The token's root is the canonical (alias-resolved) broadcast path.
+	let broadcast = token.root.to_string();
 
 	let Some(origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
@@ -658,13 +712,14 @@ mod tests {
 		ca_params.distinguished_name.push(rcgen::DnType::CommonName, "Test CA");
 		ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 		let ca_cert = ca_params.self_signed(&ca_kp).unwrap();
+		let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_kp);
 
 		let server_kp = KeyPair::generate().unwrap();
 		let mut server_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
 		server_params
 			.distinguished_name
 			.push(rcgen::DnType::CommonName, "test-server");
-		let server_cert = server_params.signed_by(&server_kp, &ca_cert, &ca_kp).unwrap();
+		let server_cert = server_params.signed_by(&server_kp, &ca_issuer).unwrap();
 
 		let ca_path = dir.path().join("ca.pem");
 		let cert_path = dir.path().join("server.cert.pem");

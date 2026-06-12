@@ -66,6 +66,23 @@ For example, it's not possible to have a different `flip` or `rotation` value fo
 Each rendition is an extension of [VideoDecoderConfig](https://www.w3.org/TR/webcodecs/#video-decoder-config).
 This is the minimum amount of information required to initialize a video decoder.
 
+### Extensions
+
+The base catalog carries only the media sections (`video` and `audio`).
+Applications add their own root sections (for example `scte35`) without modifying hang.
+
+The catalog is a JSON document published through the merge-patch helper (`@moq/json` / `moq-json`), and an extension is just an extra top-level key:
+
+- **Reading**: the base schema is permissive, so unknown sections pass through validation untouched.
+  A base consumer ignores them; an extension reads its own section and treats its absence as "not present".
+  In TypeScript, build an extended schema with `z.extend(Catalog.RootSchema, { scte35: ... })`; in Rust, flatten the catalog into your own struct with `#[serde(flatten)]`.
+- **Writing**: the catalog producer holds one shared document.
+  Each owner edits only its own keys and publishes (`producer.mutate(c => { c.scte35 = ... })` in TypeScript, or the `Deref`/`DerefMut` lock guard from `producer.lock()` in Rust).
+  Every edit starts from the latest value, so the base media sections and any extension sections compose instead of clobbering one another.
+  Removing a key publishes a deletion, which a consumer reads as the section being removed.
+
+This keeps application-specific sections in the application layer while the base catalog stays generic.
+
 ## Container
 
 The catalog also contains a `container` field for each rendition used to denote the encoding of each track.

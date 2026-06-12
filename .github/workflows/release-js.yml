@@ -10,10 +10,6 @@ on:
     paths:
       - 'js/**'
       - '.github/workflows/release-js.yml'
-  pull_request:
-    paths:
-      - '.github/workflows/release-js.yml'
-      - 'js/common/release.ts'
 
 concurrency:
   group: release-js
@@ -30,7 +26,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
       - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
@@ -44,6 +40,4 @@ jobs:
         run: nix develop --command bun install --frozen-lockfile
 
       - name: Release packages
-        env:
-          DRY_RUN: ${{ github.event_name == 'pull_request' && 'true' || 'false' }}
         run: nix develop --command bun --filter '*' release

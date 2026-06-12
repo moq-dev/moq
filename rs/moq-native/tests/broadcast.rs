@@ -448,7 +448,7 @@ async fn broadcast_websocket() {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+	let ws_listener = moq_native::websocket::Listener::bind("[::]:0".parse().unwrap())
 		.await
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
@@ -552,7 +552,7 @@ async fn broadcast_websocket_fallback() {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+	let ws_listener = moq_native::websocket::Listener::bind("[::]:0".parse().unwrap())
 		.await
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
@@ -659,7 +659,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+	let ws_listener = moq_native::websocket::Listener::bind("[::]:0".parse().unwrap())
 		.await
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
@@ -726,7 +726,7 @@ async fn broadcast_race_quic_wins() {
 	// Bind WebSocket TCP first to pick a random port, then bind QUIC UDP to
 	// the same port. UDP and TCP live in separate kernel namespaces, so this
 	// works on every supported platform.
-	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+	let ws_listener = moq_native::websocket::Listener::bind("[::]:0".parse().unwrap())
 		.await
 		.expect("failed to bind WebSocket listener");
 	let port = ws_listener.local_addr().expect("failed to get ws addr").port();

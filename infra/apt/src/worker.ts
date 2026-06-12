@@ -1,7 +1,7 @@
 // Cloudflare Worker for apt.moq.dev. Serves a flat-ish apt repository out of
 // the apt-moq-dev R2 bucket. Layout written by infra/apt/publish.sh:
 //
-//   /moq-archive-keyring.gpg                          public signing key
+//   /moq-keyring.gpg                                  public signing key (binary/dearmored)
 //   /dists/stable/InRelease                           signed metadata
 //   /dists/stable/Release                             metadata
 //   /dists/stable/Release.gpg                         detached signature
@@ -30,12 +30,19 @@ const CONTENT_TYPE_BY_NAME: Record<string, string> = {
 	Sources: "text/plain; charset=utf-8",
 };
 
-// Cache long for the content-addressed package blobs and the static archive
-// keyring (versioned filename or pinned, immutable). Cache short for repo
-// metadata signatures like Release.gpg, which get rewritten every release.
+// Cache long for the content-addressed package blobs: a given .deb under a
+// given pool path never changes. Cache short for repo metadata signatures like
+// Release.gpg, which get rewritten every release. The keyring sits in between:
+// it's a fixed filename whose *contents* change if the signing key is ever
+// rotated, so it must NOT be immutable -- a stale immutable copy would keep
+// breaking `apt-get update` (NO_PUBKEY) for the whole cache lifetime. It's tiny
+// and only fetched at first-time setup, so a modest TTL is plenty.
 function cacheControl(key: string): string {
-	if (key.endsWith(".deb") || key.includes("/pool/") || key === "moq-archive-keyring.gpg") {
+	if (key.endsWith(".deb") || key.includes("/pool/")) {
 		return "public, max-age=2592000, immutable";
+	}
+	if (key === "moq-keyring.gpg") {
+		return "public, max-age=3600";
 	}
 	return "public, max-age=300";
 }

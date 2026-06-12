@@ -1,27 +1,339 @@
 use crate::crypto;
-use crate::server::{ServerTlsConfig, ServerTlsInfo};
-use anyhow::Context;
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
-use std::fs;
-use std::io;
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::{fs, io};
+
+#[cfg(any(feature = "quinn", feature = "noq"))]
+use rustls::pki_types::PrivatePkcs8KeyDer;
+#[cfg(any(feature = "quinn", feature = "noq"))]
+use std::sync::RwLock;
+
+/// Errors loading or generating TLS certificates and keys.
+///
+/// Shared by the client TLS config and the quinn/noq servers so each backend's
+/// error type can compose it via `#[from]`.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("failed to open certificate file")]
+	Open(#[source] std::io::Error),
+
+	#[error("failed to read file")]
+	ReadFile(#[source] std::io::Error),
+
+	#[error("failed to read certificates")]
+	Read(#[source] rustls::pki_types::pem::Error),
+
+	#[error("failed to parse private key")]
+	Key(#[source] rustls::pki_types::pem::Error),
+
+	#[error("no certificates found")]
+	Empty,
+
+	#[error("no roots found in {}", .0.display())]
+	EmptyRoots(PathBuf),
+
+	#[error("failed to add root certificate")]
+	AddRoot(#[source] rustls::Error),
+
+	#[error("failed to configure client certificate")]
+	ClientAuth(#[source] rustls::Error),
+
+	#[error("both --client-tls-cert and --client-tls-key must be provided")]
+	IncompleteClientAuth,
+
+	#[error("must provide both cert and key")]
+	CertKeyCountMismatch,
+
+	#[error("must provide at least one cert/key pair or generate entry")]
+	NoCertSource,
+
+	#[error("private key {} doesn't match certificate {}", key.display(), cert.display())]
+	KeyMismatch {
+		key: PathBuf,
+		cert: PathBuf,
+		#[source]
+		source: rustls::Error,
+	},
+
+	#[error(transparent)]
+	Rustls(#[from] rustls::Error),
+
+	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+	#[error(transparent)]
+	Rcgen(#[from] rcgen::Error),
+
+	#[error("no crypto provider available; enable aws-lc-rs or ring feature")]
+	NoCryptoProvider,
+}
+
+/// Convenience alias for results produced by this module.
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Read a PEM file into its list of certificates.
+pub(crate) fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
+	let file = fs::File::open(path).map_err(Error::Open)?;
+	let mut reader = io::BufReader::new(file);
+	CertificateDer::pem_reader_iter(&mut reader)
+		.collect::<std::result::Result<_, _>>()
+		.map_err(Error::Read)
+}
+
+// ── Client ──────────────────────────────────────────────────────────
+
+/// TLS configuration for the client.
+#[serde_with::serde_as]
+#[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[group(id = "tls-client")]
+#[non_exhaustive]
+pub struct Client {
+	/// Use the TLS root at this path, encoded as PEM.
+	///
+	/// This value can be provided multiple times for multiple roots.
+	/// If this is empty, system roots will be used instead.
+	/// In config files, accepts either a single string or a TOML array.
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	#[arg(id = "tls-root", long = "tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub root: Vec<PathBuf>,
+
+	/// PEM file containing the client certificate chain for mTLS.
+	///
+	/// Only certificates are extracted; any private keys in the file are ignored.
+	/// Must be paired with `--client-tls-key`.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(id = "client-tls-cert", long = "client-tls-cert", env = "MOQ_CLIENT_TLS_CERT")]
+	pub cert: Option<PathBuf>,
+
+	/// PEM file containing the private key for mTLS.
+	///
+	/// Only the private key is extracted; any certificates in the file are ignored.
+	/// Must be paired with `--client-tls-cert`.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(id = "client-tls-key", long = "client-tls-key", env = "MOQ_CLIENT_TLS_KEY")]
+	pub key: Option<PathBuf>,
+
+	/// Danger: Disable TLS certificate verification.
+	///
+	/// Fine for local development and between relays, but should be used in caution in production.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "tls-disable-verify",
+		long = "tls-disable-verify",
+		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	pub disable_verify: Option<bool>,
+}
+
+impl Client {
+	/// Build a [`rustls::ClientConfig`] from this configuration.
+	///
+	/// Loads the configured roots (or the platform's native roots if none),
+	/// optionally attaches a client identity for mTLS, and disables server
+	/// certificate verification when `disable_verify` is set.
+	pub fn build(&self) -> Result<rustls::ClientConfig> {
+		let provider = crypto::provider();
+
+		let mut roots = rustls::RootCertStore::empty();
+		if self.root.is_empty() {
+			let native = rustls_native_certs::load_native_certs();
+			for err in native.errors {
+				tracing::warn!(%err, "failed to load root cert");
+			}
+			for cert in native.certs {
+				roots.add(cert).map_err(Error::AddRoot)?;
+			}
+		} else {
+			for root in &self.root {
+				let certs = read_certs(root)?;
+				if certs.is_empty() {
+					return Err(Error::EmptyRoots(root.clone()));
+				}
+				for cert in certs {
+					roots.add(cert).map_err(Error::AddRoot)?;
+				}
+			}
+		}
+
+		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
+		// QUIC always negotiates TLS 1.3 regardless of this setting.
+		let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
+			.with_root_certificates(roots);
+
+		let mut tls = match (&self.cert, &self.key) {
+			(Some(cert_path), Some(key_path)) => {
+				let cert_pem = fs::read(cert_path).map_err(Error::ReadFile)?;
+				let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
+					.collect::<std::result::Result<_, _>>()
+					.map_err(Error::Read)?;
+				if chain.is_empty() {
+					return Err(Error::Empty);
+				}
+				let key_pem = fs::read(key_path).map_err(Error::ReadFile)?;
+				let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(Error::Key)?;
+				builder.with_client_auth_cert(chain, key).map_err(Error::ClientAuth)?
+			}
+			(None, None) => builder.with_no_client_auth(),
+			_ => return Err(Error::IncompleteClientAuth),
+		};
+
+		if self.disable_verify.unwrap_or_default() {
+			tracing::warn!("TLS server certificate verification is disabled; A man-in-the-middle attack is possible.");
+			let noop = NoCertificateVerification(provider);
+			tls.dangerous().set_certificate_verifier(Arc::new(noop));
+		}
+
+		Ok(tls)
+	}
+}
+
+// ── Server ──────────────────────────────────────────────────────────
+
+/// TLS configuration for the server.
+///
+/// Certificate and keys must currently be files on disk.
+/// Alternatively, you can generate a self-signed certificate given a list of hostnames.
+///
+/// In config files, each list field accepts either a single string or a TOML array.
+#[serde_with::serde_as]
+#[derive(clap::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[group(id = "tls-server")]
+#[non_exhaustive]
+pub struct Server {
+	/// Load the given certificate from disk.
+	#[arg(long = "tls-cert", id = "tls-cert", env = "MOQ_SERVER_TLS_CERT")]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub cert: Vec<PathBuf>,
+
+	/// Load the given key from disk.
+	#[arg(long = "tls-key", id = "tls-key", env = "MOQ_SERVER_TLS_KEY")]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub key: Vec<PathBuf>,
+
+	/// Or generate a new certificate and key with the given hostnames.
+	/// This won't be valid unless the client uses the fingerprint or disables verification.
+	#[arg(
+		long = "tls-generate",
+		id = "tls-generate",
+		value_delimiter = ',',
+		env = "MOQ_SERVER_TLS_GENERATE"
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub generate: Vec<String>,
+
+	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
+	///
+	/// When set, clients *may* present a certificate during the TLS handshake.
+	/// Valid presentations are reported via [`crate::Request::has_peer_certificate`]
+	/// and can be used by the application to grant elevated access. Clients that
+	/// do not present a certificate are unaffected.
+	///
+	/// Only supported by the Quinn backend.
+	#[arg(
+		long = "server-tls-root",
+		id = "server-tls-root",
+		value_delimiter = ',',
+		env = "MOQ_SERVER_TLS_ROOT"
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub root: Vec<PathBuf>,
+}
+
+impl Server {
+	/// Load all configured root CAs into a [`rustls::RootCertStore`].
+	pub fn load_roots(&self) -> Result<rustls::RootCertStore> {
+		let mut roots = rustls::RootCertStore::empty();
+		for path in &self.root {
+			let certs = read_certs(path)?;
+			if certs.is_empty() {
+				return Err(Error::Empty);
+			}
+			for cert in certs {
+				roots.add(cert).map_err(Error::AddRoot)?;
+			}
+		}
+		Ok(roots)
+	}
+}
+
+/// TLS certificate information including fingerprints.
+#[derive(Debug)]
+pub struct Info {
+	#[cfg(any(feature = "noq", feature = "quinn"))]
+	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
+	pub fingerprints: Vec<String>,
+}
+
+// ── NoCertificateVerification ───────────────────────────────────────
+
+#[derive(Debug)]
+struct NoCertificateVerification(crypto::Provider);
+
+impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
+	fn verify_server_cert(
+		&self,
+		_end_entity: &CertificateDer<'_>,
+		_intermediates: &[CertificateDer<'_>],
+		_server_name: &ServerName<'_>,
+		_ocsp: &[u8],
+		_now: UnixTime,
+	) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+		Ok(rustls::client::danger::ServerCertVerified::assertion())
+	}
+
+	fn verify_tls12_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+	}
+
+	fn verify_tls13_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+	}
+
+	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+		self.0.signature_verification_algorithms.supported_schemes()
+	}
+}
 
 // ── FingerprintVerifier ─────────────────────────────────────────────
 
+#[cfg(any(feature = "quinn", feature = "noq"))]
 #[derive(Debug)]
 pub(crate) struct FingerprintVerifier {
 	provider: crypto::Provider,
 	fingerprint: Vec<u8>,
 }
 
+#[cfg(any(feature = "quinn", feature = "noq"))]
 impl FingerprintVerifier {
 	pub fn new(provider: crypto::Provider, fingerprint: Vec<u8>) -> Self {
 		Self { provider, fingerprint }
 	}
 }
 
+#[cfg(any(feature = "quinn", feature = "noq"))]
 impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 	fn verify_server_cert(
 		&self,
@@ -30,7 +342,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 		_server_name: &ServerName<'_>,
 		_ocsp: &[u8],
 		_now: UnixTime,
-	) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+	) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
 		let fingerprint = crypto::sha256(&self.provider, end_entity);
 		if fingerprint.as_ref() == self.fingerprint.as_slice() {
 			Ok(rustls::client::danger::ServerCertVerified::assertion())
@@ -44,7 +356,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 		message: &[u8],
 		cert: &CertificateDer<'_>,
 		dss: &rustls::DigitallySignedStruct,
-	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
 		rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
 	}
 
@@ -53,7 +365,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 		message: &[u8],
 		cert: &CertificateDer<'_>,
 		dss: &rustls::DigitallySignedStruct,
-	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
 		rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
 	}
 
@@ -64,16 +376,18 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 
 // ── ServeCerts ──────────────────────────────────────────────────────
 
+#[cfg(any(feature = "quinn", feature = "noq"))]
 #[derive(Debug)]
 pub(crate) struct ServeCerts {
-	pub info: Arc<RwLock<ServerTlsInfo>>,
+	pub info: Arc<RwLock<Info>>,
 	provider: crypto::Provider,
 }
 
+#[cfg(any(feature = "quinn", feature = "noq"))]
 impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
-			info: Arc::new(RwLock::new(ServerTlsInfo {
+			info: Arc::new(RwLock::new(Info {
 				certs: Vec::new(),
 				fingerprints: Vec::new(),
 			})),
@@ -81,12 +395,13 @@ impl ServeCerts {
 		}
 	}
 
-	pub fn load_certs(&self, config: &ServerTlsConfig) -> anyhow::Result<()> {
-		anyhow::ensure!(config.cert.len() == config.key.len(), "must provide both cert and key");
-		anyhow::ensure!(
-			!config.cert.is_empty() || !config.generate.is_empty(),
-			"must provide at least one cert/key pair or generate entry"
-		);
+	pub fn load_certs(&self, config: &Server) -> Result<()> {
+		if config.cert.len() != config.key.len() {
+			return Err(Error::CertKeyCountMismatch);
+		}
+		if config.cert.is_empty() && config.generate.is_empty() {
+			return Err(Error::NoCertSource);
+		}
 
 		let mut certs = Vec::new();
 
@@ -105,33 +420,29 @@ impl ServeCerts {
 	}
 
 	// Load a certificate and corresponding key from a file, but don't add it to the certs
-	fn load(&self, chain_path: &PathBuf, key_path: &PathBuf) -> anyhow::Result<rustls::sign::CertifiedKey> {
-		let chain = fs::File::open(chain_path).context("failed to open cert file")?;
-		let mut chain = io::BufReader::new(chain);
-
-		let chain: Vec<CertificateDer> = CertificateDer::pem_reader_iter(&mut chain)
-			.collect::<Result<_, _>>()
-			.context("failed to read certs")?;
-
-		anyhow::ensure!(!chain.is_empty(), "could not find certificate");
+	fn load(&self, chain_path: &Path, key_path: &Path) -> Result<rustls::sign::CertifiedKey> {
+		let chain = read_certs(chain_path)?;
+		if chain.is_empty() {
+			return Err(Error::Empty);
+		}
 
 		// Read the PEM private key
-		let key = PrivateKeyDer::from_pem_file(key_path).context("missing private key")?;
+		let key = PrivateKeyDer::from_pem_file(key_path).map_err(Error::Key)?;
 		let key = self.provider.key_provider.load_private_key(key)?;
 
 		let certified_key = rustls::sign::CertifiedKey::new(chain, key);
 
-		certified_key.keys_match().context(format!(
-			"private key {} doesn't match certificate {}",
-			key_path.display(),
-			chain_path.display()
-		))?;
+		certified_key.keys_match().map_err(|source| Error::KeyMismatch {
+			key: key_path.to_path_buf(),
+			cert: chain_path.to_path_buf(),
+			source,
+		})?;
 
 		Ok(certified_key)
 	}
 
 	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-	fn generate(&self, hostnames: &[String]) -> anyhow::Result<rustls::sign::CertifiedKey> {
+	fn generate(&self, hostnames: &[String]) -> Result<rustls::sign::CertifiedKey> {
 		let key_pair = rcgen::KeyPair::generate()?;
 
 		let mut params = rcgen::CertificateParams::new(hostnames)?;
@@ -154,8 +465,8 @@ impl ServeCerts {
 	}
 
 	#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
-	fn generate(&self, _hostnames: &[String]) -> anyhow::Result<rustls::sign::CertifiedKey> {
-		anyhow::bail!("no crypto provider available; enable aws-lc-rs or ring feature");
+	fn generate(&self, _hostnames: &[String]) -> Result<rustls::sign::CertifiedKey> {
+		Err(Error::NoCryptoProvider)
 	}
 
 	// Replace the certificates
@@ -197,6 +508,7 @@ impl ServeCerts {
 	}
 }
 
+#[cfg(any(feature = "quinn", feature = "noq"))]
 impl rustls::server::ResolvesServerCert for ServeCerts {
 	fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
 		if let Some(cert) = self.best_certificate(&client_hello) {
@@ -216,16 +528,30 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 	}
 }
 
-// ── reload_certs (unix) ─────────────────────────────────────────────
+// ── reload_certs ────────────────────────────────────────────────────
 
-#[cfg(unix)]
-pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: ServerTlsConfig) {
-	use tokio::signal::unix::{SignalKind, signal};
+/// Watch the on-disk cert/key files and reload them whenever they change.
+///
+/// Reacting to the filesystem means cert-manager, Kubernetes secret mounts, and
+/// `mv`-into-place rotate certs with no external signal. Returns immediately when
+/// only generated certs are configured: there's nothing on disk to watch.
+#[cfg(any(feature = "quinn", feature = "noq"))]
+pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Server) {
+	let paths: Vec<PathBuf> = tls_config.cert.iter().chain(tls_config.key.iter()).cloned().collect();
+	if paths.is_empty() {
+		return;
+	}
 
-	// Dunno why we wouldn't be allowed to listen for signals, but just in case.
-	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
+	let mut watcher = match crate::watch::FileWatcher::new(&paths) {
+		Ok(watcher) => watcher,
+		Err(err) => {
+			tracing::error!(%err, "failed to watch certificate files; hot reload disabled");
+			return;
+		}
+	};
 
-	while listener.recv().await.is_some() {
+	loop {
+		watcher.changed().await;
 		tracing::info!("reloading server certificates");
 
 		if let Err(err) = certs.load_certs(&tls_config) {

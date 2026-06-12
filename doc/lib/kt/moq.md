@@ -94,6 +94,29 @@ audio.finish()
 broadcast.finish()
 ```
 
+### On-demand raw tracks
+
+Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:
+
+```kotlin
+import dev.moq.*
+import uniffi.moq.MoqBroadcastProducer
+
+val broadcast = MoqBroadcastProducer()
+val dynamic = broadcast.dynamic()
+
+origin.publish("events", broadcast)
+
+dynamic.requestedTracks().collect { track ->
+    if (track.name() == "alerts") {
+        track.writeFrame("ready".encodeToByteArray())
+        track.finish()
+    } else {
+        track.abort(404)
+    }
+}
+```
+
 ## Cancellation
 
 The wrapper exposes consumers as Kotlin `Flow`s. Cancelling the collector's coroutine scope calls `cancel()` on the native side via the wrapper's `onCompletion` hook, releasing resources promptly:

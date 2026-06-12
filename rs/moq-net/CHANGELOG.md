@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.10](https://github.com/moq-dev/moq/compare/moq-net-v0.1.9...moq-net-v0.1.10) - 2026-06-10
+
+### Added
+
+- *(moq-net)* tag broadcasts with a per-connection origin hop when the wire carries none ([#1635](https://github.com/moq-dev/moq/pull/1635))
+
+### Fixed
+
+- *(moq-net,js/net)* draft-18 SUBSCRIBE_NAMESPACE, subgroup headers, and announce race ([#1668](https://github.com/moq-dev/moq/pull/1668))
+
+## [0.1.9](https://github.com/moq-dev/moq/compare/moq-net-v0.1.8...moq-net-v0.1.9) - 2026-06-03
+
+### Other
+
+- *(deps)* bump the cargo group (with code fixes for rand/rubato/rcgen) ([#1603](https://github.com/moq-dev/moq/pull/1603))
+
 ## [0.1.8](https://github.com/moq-dev/moq/compare/moq-net-v0.1.7...moq-net-v0.1.8) - 2026-06-01
 
 ### Other

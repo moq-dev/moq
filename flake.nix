@@ -94,6 +94,9 @@
           ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
             # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
             pkgs.release-plz
+            # cpal's `alsa-sys` (moq-audio `capture` feature) links libasound on
+            # Linux via pkg-config; macOS uses CoreAudio, so no dep there.
+            pkgs.alsa-lib
           ];
 
         # JavaScript dependencies
@@ -157,7 +160,7 @@
         overlayPkgs = pkgs.extend self.overlays.default;
       in
       {
-        packages = rec {
+        packages = (rec {
           default = pkgs.symlinkJoin {
             name = "moq-all";
             paths = [
@@ -184,6 +187,19 @@
             name = "moq-packaging-tools";
             paths = packagingDeps ++ publishDeps;
           };
+        })
+        # x86_64-darwin release artifacts are cross-compiled from the
+        # aarch64-darwin runner (see nix/overlay.nix). The cross outputs only
+        # evaluate on an aarch64-darwin host, so gate them on the system to
+        # keep `nix flake check` working on Linux and Intel macs.
+        // pkgs.lib.optionalAttrs (system == "aarch64-darwin") {
+          inherit (overlayPkgs)
+            moq-relay-x86_64-apple-darwin
+            moq-cli-x86_64-apple-darwin
+            moq-token-cli-x86_64-apple-darwin
+            libmoq-x86_64-apple-darwin
+            moq-gst-plugin-x86_64-apple-darwin
+            ;
         };
 
         # Re-export gst_all_1 so users can pair the plugin with a matching

@@ -31,7 +31,7 @@ fn f32_bytes(samples: &[f32]) -> Bytes {
 #[tokio::test]
 async fn opus_round_trip_48k_stereo() {
 	let mut broadcast = moq_net::Broadcast::new().produce();
-	let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast).unwrap();
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut catalog_consumer = catalog.consume().unwrap();
 	let broadcast_consumer = broadcast.consume();
 
@@ -110,7 +110,7 @@ async fn opus_round_trip_48k_stereo() {
 #[tokio::test]
 async fn opus_round_trip_44100_s16_resampled() {
 	let mut broadcast = moq_net::Broadcast::new().produce();
-	let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast).unwrap();
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut catalog_consumer = catalog.consume().unwrap();
 	let broadcast_consumer = broadcast.consume();
 

@@ -22,6 +22,8 @@ mod format;
 mod frame;
 mod resample;
 
+#[cfg(feature = "capture")]
+pub mod capture;
 pub mod consumer;
 pub mod producer;
 

@@ -46,6 +46,17 @@ build:
     uv sync --no-install-workspace
     just _develop
 
+# Remove the virtualenv, release dist, bytecode caches, and the uniffi
+# bindings maturin drops in during editable installs. The uv workspace venv
+# lives at the repo root, so reach up for it.
+clean:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -rf dist moq-ffi/moq_ffi/_uniffi
+    rm -rf ../.venv .venv
+    find . -name .claude -prune -o -type d -name __pycache__ -prune -exec rm -rf {} +
+    find . -name .claude -prune -o -type f -name '*.pyc' -exec rm -f {} +
+
 # Build the pure-python moq-rs wrapper sdist + wheel into py/dist (for release).
 # moq-ffi is built separately by maturin (see release-py.yml); the wrapper is
 # pure python so it needs no compilation, just a metadata-correct wheel.

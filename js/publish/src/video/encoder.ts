@@ -31,7 +31,8 @@ export interface EncoderConfig {
 	// NOTE: This is multiplied by the codecScale (1.0 for h264) to get the final scale.
 	bitrateScale?: number;
 
-	// TODO actually enforce this
+	// Cap the encoded frame rate. If set below the captured rate, frames are dropped to hit this target.
+	// Also feeds the bitrate calculation and the encoder config. If unset, the captured track's rate is used.
 	frameRate?: number;
 }
 
@@ -53,6 +54,10 @@ export class Encoder {
 
 	// The video encoder config.
 	#config = new Signal<VideoEncoderConfig | undefined>(undefined);
+
+	// The resolved encoder config (codec, bitrate, dimensions), available even with no subscriber.
+	// Exposed so a local preview can re-encode with identical settings to mirror the wire output.
+	readonly resolved: Getter<VideoEncoderConfig | undefined> = this.#config;
 
 	// True when the encoder is actively serving a track.
 	active = new Signal<boolean>(false);
@@ -84,6 +89,7 @@ export class Encoder {
 		effect.cleanup(() => producer.close());
 
 		let lastKeyframe: Time.Micro | undefined;
+		let lastEncoded: Time.Micro | undefined;
 
 		effect.set(this.active, true, false);
 
@@ -117,7 +123,19 @@ export class Encoder {
 				if (encoder.state !== "configured") return;
 
 				// This doesn't need to be reactive.
-				const interval = this.config.peek()?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
+				const config = this.config.peek();
+
+				// Pace to the target frame rate by dropping frames that arrive too soon.
+				// Allow half an interval of slack so jittery capture timestamps don't drop a frame we meant to keep.
+				// The shared frame Signal owner closes frames, so we just skip encoding here.
+				const targetFrameRate = config?.frameRate;
+				if (targetFrameRate && lastEncoded !== undefined) {
+					const minGap = Time.Micro.fromSecond((1 / targetFrameRate) as Time.Second);
+					if (frame.timestamp - lastEncoded < minGap - minGap / 2) return;
+				}
+				lastEncoded = frame.timestamp as Time.Micro;
+
+				const interval = config?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
 
 				// Force a keyframe if this is the first frame (no group yet), or GOP elapsed.
 				const keyFrame = !lastKeyframe || lastKeyframe + Time.Micro.fromMilli(interval) <= frame.timestamp;
@@ -159,10 +177,12 @@ export class Encoder {
 		const [_, source, dimensions] = values;
 
 		const settings = source.getSettings();
-		const framerate = settings.frameRate ?? 30;
 
 		// Get the user provided config.
 		const user = effect.get(this.config) ?? {};
+
+		// Prefer the explicitly requested rate; the encode loop drops frames to enforce it.
+		const framerate = user.frameRate ?? settings.frameRate ?? 30;
 
 		const maxPixels = user.maxPixels ?? dimensions.width * dimensions.height;
 		const bitrateScale = user.bitrateScale ?? 0.07;

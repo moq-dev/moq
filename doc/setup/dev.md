@@ -45,7 +45,7 @@ Want more? See the [justfile](https://github.com/moq-dev/moq/blob/main/justfile)
 
 ### The Internet
 
-Most of the commands default to `http://localhost:4443/anon`.
+Most of the commands default to `http://localhost:4443`.
 That's pretty lame.
 
 If you want to do a real test of how MoQ works over the internet, you're going to need a remote server.

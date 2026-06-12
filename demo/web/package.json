@@ -19,14 +19,14 @@
 	"//devDependencies": "These are only needed for local development with workspace packages. They are NOT needed when using the published npm packages.",
 	"devDependencies": {
 		"@tailwindcss/typography": "^0.5.16",
-		"@tailwindcss/vite": "^4.1.13",
-		"esbuild": "^0.27.0",
+		"@tailwindcss/vite": "^4.3.0",
+		"esbuild": "^0.28.0",
 		"highlight.js": "^11.11.1",
 		"solid-element": "^1.9.1",
-		"solid-js": "^1.9.10",
+		"solid-js": "^1.9.13",
 		"tailwindcss": "^4.1.13",
-		"typescript": "^6.0.0",
-		"vite": "^7.3.1",
-		"vite-plugin-solid": "^2.11.10"
+		"typescript": "^6.0.3",
+		"vite": "^8.0.14",
+		"vite-plugin-solid": "^2.11.12"
 	}
 }

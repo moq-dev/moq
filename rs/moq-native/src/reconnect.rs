@@ -4,7 +4,7 @@ use std::time::Duration;
 use moq_net::kio;
 use url::Url;
 
-use crate::Client;
+use crate::{Client, Error};
 
 /// Exponential backoff configuration for reconnection attempts.
 #[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
@@ -78,7 +78,7 @@ struct State {
 	/// Current connection status, or `None` before the first connect.
 	status: Option<Status>,
 	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
-	error: Option<anyhow::Error>,
+	error: Option<Error>,
 }
 
 /// Handle to a background reconnect loop.
@@ -99,7 +99,7 @@ impl Reconnect {
 		let state = producer.consume();
 		let task = tokio::spawn(async move {
 			if let Err(err) = Self::run(&producer, client, url, backoff).await {
-				tracing::error!(err = %format!("{err:#}"), "reconnect loop exited");
+				tracing::error!(%err, "reconnect loop exited");
 				if let Ok(mut state) = producer.write() {
 					state.error = Some(err);
 				}
@@ -113,17 +113,19 @@ impl Reconnect {
 		}
 	}
 
-	async fn run(state: &kio::Producer<State>, client: Client, url: Url, backoff: Backoff) -> anyhow::Result<()> {
+	async fn run(state: &kio::Producer<State>, client: Client, url: Url, backoff: Backoff) -> crate::Result<()> {
 		let mut delay = backoff.initial;
 		let mut retry_start = tokio::time::Instant::now();
-		let mut last_error: Option<anyhow::Error> = None;
+		let mut last_error: Option<Error> = None;
 
 		loop {
 			if !backoff.timeout.is_zero() && retry_start.elapsed() > backoff.timeout {
 				let timeout = backoff.timeout;
-				return Err(last_error
-					.map(|e| e.context(format!("reconnect timed out after {timeout:?}")))
-					.unwrap_or_else(|| anyhow::anyhow!("reconnect timed out after {timeout:?}")));
+				let msg = match last_error {
+					Some(err) => format!("reconnect timed out after {timeout:?}: {err}"),
+					None => format!("reconnect timed out after {timeout:?}"),
+				};
+				return Err(Error::Reconnect(msg));
 			}
 
 			tracing::info!(%url, "connecting");
@@ -157,7 +159,7 @@ impl Reconnect {
 	///
 	/// `Ready(Ok(status))` on a change, `Ready(Err)` once the loop has stopped (the give-up error,
 	/// or a generic one when the handle is dropped), `Pending` otherwise.
-	pub fn poll_status(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Status>> {
+	pub fn poll_status(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Status>> {
 		let last = self.last_reported;
 		let status = match ready!(self.state.poll(waiter, |state| match state.status {
 			Some(status) if Some(status) != last => Poll::Ready(status),
@@ -176,7 +178,7 @@ impl Reconnect {
 	/// Returns the current [`Status`]. The loop alternates `Connected`/`Disconnected`, so successive
 	/// calls alternate too; but a status that flips and flips back before the caller polls is
 	/// reported once. This tracks the *current* state, not every edge.
-	pub async fn status(&mut self) -> anyhow::Result<Status> {
+	pub async fn status(&mut self) -> crate::Result<Status> {
 		kio::wait(|waiter| self.poll_status(waiter)).await
 	}
 
@@ -184,16 +186,16 @@ impl Reconnect {
 	///
 	/// `Ready(Err)` if it permanently gave up (reconnect timeout exceeded), `Ready(Ok(()))` if
 	/// stopped by dropping the handle, `Pending` while it's still running.
-	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<anyhow::Result<()>> {
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
 		ready!(self.state.poll_closed(waiter));
 		Poll::Ready(match &self.state.read().error {
-			Some(err) => Err(anyhow::anyhow!("{err:#}")),
+			Some(err) => Err(err.clone()),
 			None => Ok(()),
 		})
 	}
 
 	/// Wait until the reconnect loop stops.
-	pub async fn closed(&self) -> anyhow::Result<()> {
+	pub async fn closed(&self) -> crate::Result<()> {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 }
@@ -205,10 +207,10 @@ impl Drop for Reconnect {
 }
 
 /// The terminal error read from a closed channel's final state.
-fn terminal(state: &State) -> anyhow::Error {
+fn terminal(state: &State) -> Error {
 	match &state.error {
-		Some(err) => anyhow::anyhow!("{err:#}"),
-		None => anyhow::anyhow!("reconnect stopped"),
+		Some(err) => err.clone(),
+		None => Error::Reconnect("reconnect stopped".to_string()),
 	}
 }
 

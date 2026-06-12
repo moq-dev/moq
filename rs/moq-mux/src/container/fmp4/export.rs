@@ -137,7 +137,7 @@ impl Export {
 		// 1. Drain catalog updates and (un)subscribe tracks accordingly.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
-				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot)?,
+				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot.media())?,
 				Poll::Ready(None) => {
 					self.catalog = None;
 					break;
@@ -342,15 +342,13 @@ impl Export {
 					extract_init(init, &mut ftyp_data, &mut traks, &mut trexs)?;
 				}
 				Container::Legacy | Container::Loc => {
-					let description = track
-						.source
-						.description()
-						.context("video track missing codec config for synthesized init")?;
+					// H.264/H.265 need a synthesized config record here; VP8 has none.
+					let description = track.source.description();
 					let trak = crate::container::fmp4::synthesize_video_trak(
 						track.track_id,
 						track.timescale,
 						config,
-						description.as_ref(),
+						description.map(|d| d.as_ref()),
 					)?;
 					trexs.push(mp4_atom::Trex {
 						track_id: trak.tkhd.track_id,

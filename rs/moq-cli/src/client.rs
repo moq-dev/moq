@@ -18,7 +18,7 @@ pub async fn run_client(client: moq_native::Client, url: Url, name: String, publ
 
 	tokio::select! {
 		res = publish.run() => res,
-		res = reconnect.closed() => res,
+		res = reconnect.closed() => Ok(res?),
 		_ = tokio::signal::ctrl_c() => Ok(()),
 	}
 }

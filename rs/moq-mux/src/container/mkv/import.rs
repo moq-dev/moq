@@ -37,7 +37,7 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// Unsupported codecs (e.g. Vorbis, AC3, MP3, subtitles) are logged and dropped.
 pub struct Import {
 	broadcast: moq_net::BroadcastProducer,
-	catalog: crate::catalog::hang::Producer,
+	catalog: crate::catalog::Producer,
 
 	/// Accumulated unparsed input.
 	buffer: BytesMut,
@@ -69,7 +69,7 @@ struct MkvTrack {
 }
 
 impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::hang::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
 			broadcast,
 			catalog,

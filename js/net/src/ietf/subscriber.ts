@@ -16,6 +16,7 @@ import {
 	SubscribeNamespace,
 	SubscribeNamespaceEntry,
 	SubscribeNamespaceEntryDone,
+	SubscribeNamespaceLegacy,
 	SubscribeNamespaceOk,
 	UnsubscribeNamespace,
 } from "./subscribe_namespace.ts";
@@ -85,10 +86,20 @@ export class Subscriber {
 					: await this.#session.openBi();
 
 			try {
-				// Write SubscribeNamespace
-				await stream.writer.u53(SubscribeNamespace.id);
-				const msg = new SubscribeNamespace({ namespace: prefix, requestId });
-				await msg.encode(stream.writer, version);
+				// Draft-18+ uses SUBSCRIBE_NAMESPACE (0x50); earlier drafts use the
+				// legacy 0x11 message with a Subscribe Options field.
+				if (
+					version === Version.DRAFT_14 ||
+					version === Version.DRAFT_15 ||
+					version === Version.DRAFT_16 ||
+					version === Version.DRAFT_17
+				) {
+					await stream.writer.u53(SubscribeNamespaceLegacy.id);
+					await new SubscribeNamespaceLegacy({ namespace: prefix, requestId }).encode(stream.writer, version);
+				} else {
+					await stream.writer.u53(SubscribeNamespace.id);
+					await new SubscribeNamespace({ namespace: prefix, requestId }).encode(stream.writer, version);
+				}
 				console.debug(`subscribe_namespace written: requestId=${requestId}`);
 
 				// Read response

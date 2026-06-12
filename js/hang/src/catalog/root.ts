@@ -1,45 +1,19 @@
-import type * as Moq from "@moq/net";
 import * as z from "zod/mini";
 
 import { AudioSchema } from "./audio";
-import { CapabilitiesSchema } from "./capabilities";
-import { ChatSchema } from "./chat";
-import { LocationSchema } from "./location";
-import { TrackSchema } from "./track";
-import { UserSchema } from "./user";
 import { VideoSchema } from "./video";
 
-export const RootSchema = z.object({
+/**
+ * The root catalog: the base media sections every hang broadcast carries.
+ *
+ * This is a *loose* object: unknown root sections pass through validation untouched, so an
+ * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer
+ * ignores the extra sections; an extended consumer validates them with its own schema, typically
+ * built via `z.extend(RootSchema, { ... })`.
+ */
+export const RootSchema = z.looseObject({
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
-	location: z.optional(LocationSchema),
-	user: z.optional(UserSchema),
-	chat: z.optional(ChatSchema),
-	capabilities: z.optional(CapabilitiesSchema),
-	preview: z.optional(TrackSchema),
 });
 
 export type Root = z.infer<typeof RootSchema>;
-
-export function encode(root: Root): Uint8Array {
-	const encoder = new TextEncoder();
-	return encoder.encode(JSON.stringify(root));
-}
-
-export function decode(raw: Uint8Array): Root {
-	const decoder = new TextDecoder();
-	const str = decoder.decode(raw);
-	try {
-		const json = JSON.parse(str);
-		return RootSchema.parse(json);
-	} catch (error) {
-		console.warn("invalid catalog", str);
-		throw error;
-	}
-}
-
-export async function fetch(track: Moq.Track): Promise<Root | undefined> {
-	const frame = await track.readFrame();
-	if (!frame) return undefined;
-	return decode(frame);
-}

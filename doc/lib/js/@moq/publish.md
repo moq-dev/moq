@@ -21,15 +21,15 @@ npm add @moq/publish
 ### No-build CDN usage
 
 For quick demos or single-page embeds where a bundler is overkill, load the
-package straight from jsDelivr with the `+esm` endpoint. jsDelivr transforms
-the published file and rewrites bare imports (like `@moq/hang`, `@moq/net`)
-to other `+esm` URLs, so it loads in the browser with no import map or local
-build step:
+package straight from [esm.sh](https://esm.sh). esm.sh serves the package as a
+browser-ready ESM module and rewrites bare imports (like `@moq/hang`,
+`@moq/net`) to other esm.sh URLs, so it loads in the browser with no import map
+or local build step:
 
 ```html
 <script type="module">
-    import "https://cdn.jsdelivr.net/npm/@moq/publish/element.js/+esm";
-    import "https://cdn.jsdelivr.net/npm/@moq/publish/ui/index.js/+esm";
+    import "https://esm.sh/@moq/publish/element";
+    import "https://esm.sh/@moq/publish/ui";
 </script>
 
 <moq-publish-ui>
@@ -39,9 +39,10 @@ build step:
 </moq-publish-ui>
 ```
 
-Pin a version range in the URL for production — e.g.
-`https://cdn.jsdelivr.net/npm/@moq/publish@0.2/element.js/+esm`. [esm.sh](https://esm.sh)
-(`https://esm.sh/@moq/publish/element`) works the same way if you prefer it.
+Pin a version range in the URL for production, e.g.
+`https://esm.sh/@moq/publish@0.2/element`. jsDelivr's `+esm` endpoint
+(`https://cdn.jsdelivr.net/npm/@moq/publish/element.js/+esm`) works the same way
+if you prefer it.
 
 For anything beyond embedding on a static page, install the package and use
 a real bundler (the examples below).
@@ -69,6 +70,22 @@ a real bundler (the examples below).
 - `audio` — Enable audio capture (boolean)
 - `video` — Enable video capture (boolean)
 - `controls` — Show publishing controls (boolean)
+- `preview` — What the preview renders: `"source"` (default), `"encoded"`, or `"none"` to disable it (see [Preview element](#preview-element))
+
+## Preview element
+
+`<moq-publish>` discovers a nested `<video>` or `<canvas>` and uses it for a local preview.
+
+- `<video>` attaches the raw capture stream via `srcObject`. This is the cheapest preview and the default.
+- `<canvas>` draws the frames itself. With `preview="source"` (default) it draws the raw capture; with `preview="encoded"` it draws a decoded copy of the encoded video, so the preview shows exactly what a viewer receives over the network, codec artifacts and all.
+
+The `encoded` mode costs a full extra encode + decode pass (it re-encodes with the same settings as the published rendition), so reach for it when you want to monitor the transmitted quality, not as the default preview. Set `preview="none"` to disable the preview without removing the element.
+
+```html
+<moq-publish url="https://relay.example.com/anon" name="room/alice.hang" source="camera" preview="encoded">
+    <canvas></canvas>
+</moq-publish>
+```
 
 ## UI Overlay
 

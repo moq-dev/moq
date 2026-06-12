@@ -238,10 +238,9 @@ async fn run(config: &Config) -> Result<()> {
 		.reconnect(config.url.clone());
 
 	// Set up catalog and encoders.
-	let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone());
 
-	ffmpeg_next::init().context("failed to init ffmpeg")?;
 	let audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
 
 	let video_track = video_encoder.track.clone();
@@ -278,7 +277,7 @@ async fn run(config: &Config) -> Result<()> {
 
 	tokio::select! {
 		res = emulator_handle => res?.context("emulator error"),
-		res = reconnect.closed() => res,
+		res = reconnect.closed() => Ok(res?),
 		res = input::handle_viewers(&mut viewer_consumer, &cmd_tx) => res,
 	}
 }
@@ -446,9 +445,21 @@ async fn main() -> Result<()> {
 	#[cfg(not(feature = "jemalloc"))]
 	let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
-	tokio::select! {
+	let result = tokio::select! {
 		res = run(&config) => res,
 		Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
-		_ = tokio::signal::ctrl_c() => std::process::exit(0),
+		res = tokio::signal::ctrl_c() => res.context("failed to listen for ctrl-c"),
+	};
+
+	// run() owns a spawn_blocking emulator thread that loops forever. Returning from main
+	// drops the tokio runtime, whose drop blocks indefinitely joining that thread, so the
+	// process would hang instead of exiting (defeating systemd Restart=always when the
+	// reconnect loop gives up). Exit explicitly so a real exit code reaches the supervisor.
+	match result {
+		Ok(()) => std::process::exit(0),
+		Err(err) => {
+			tracing::error!(err = %format!("{err:#}"), "exiting");
+			std::process::exit(1);
+		}
 	}
 }

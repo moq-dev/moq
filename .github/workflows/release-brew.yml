@@ -23,80 +23,18 @@ on:
       - moq-gst
     types:
       - completed
-  pull_request:
-    paths:
-      - ".github/workflows/release-brew.yml"
-      - ".github/scripts/render-formula.sh"
-      - ".github/homebrew/Formula/**"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  dry-run:
-    name: Dry-run render all templates
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-
-      - name: Render every template against synthetic tarballs
-        run: |
-          set -euo pipefail
-          mkdir -p fake-assets rendered
-
-          shopt -s nullglob
-          templates=(.github/homebrew/Formula/*.rb.tmpl)
-          if (( ${#templates[@]} == 0 )); then
-            echo "No templates found under .github/homebrew/Formula/" >&2
-            exit 1
-          fi
-
-          # Use a stable dummy version so any baked-in version assertions in
-          # the templates render deterministically. The sha256s differ per
-          # crate because the fake tarball content includes the crate name.
-          VERSION="0.0.0-dryrun"
-
-          for tmpl in "${templates[@]}"; do
-            crate=$(basename "$tmpl" .rb.tmpl)
-            echo "::group::Render $crate"
-            rm -f fake-assets/*
-            for target in \
-              aarch64-apple-darwin \
-              x86_64-apple-darwin \
-              aarch64-unknown-linux-gnu \
-              x86_64-unknown-linux-gnu
-            do
-              printf 'fake %s %s\n' "$crate" "$target" \
-                > "fake-assets/${crate}-${VERSION}-${target}.tar.gz"
-            done
-
-            ./.github/scripts/render-formula.sh \
-              --template "$tmpl" \
-              --version "$VERSION" \
-              --release-dir fake-assets \
-              --crate "$crate" \
-              --output "rendered/${crate}.rb"
-
-            if grep -E '__[A-Z0-9_]+__' "rendered/${crate}.rb"; then
-              echo "Error: unsubstituted placeholders in rendered/${crate}.rb" >&2
-              exit 1
-            fi
-
-            ruby -c "rendered/${crate}.rb"
-            echo "::endgroup::"
-          done
-
   publish:
     name: Publish formula to homebrew-tap
-    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'moq-') }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'moq-') }}
     runs-on: ubuntu-latest
 
     steps:

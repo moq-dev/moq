@@ -109,7 +109,7 @@ baseurl=https://rpm.moq.dev/${DIST}/\$basearch
 enabled=1
 gpgcheck=1
 repo_gpgcheck=1
-gpgkey=https://rpm.moq.dev/moq-archive-keyring.gpg
+gpgkey=https://rpm.moq.dev/moq-keyring.gpg
 EOF
 
 # GNUPGHOME is removed by the EXIT trap; no need for an explicit `rm -rf`.

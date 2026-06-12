@@ -89,6 +89,26 @@ try audio.finish()
 try broadcast.finish()
 ```
 
+### On-demand raw tracks
+
+Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:
+
+```swift
+let broadcast = try MoqBroadcastProducer()
+let dynamic = try broadcast.dynamic()
+
+try origin.publish(path: "events", broadcast: broadcast)
+
+for try await track in dynamic.requestedTracks {
+    if try track.name() == "alerts" {
+        try track.writeFrame(payload: Data("ready".utf8))
+        try track.finish()
+    } else {
+        try track.abort(errorCode: 404)
+    }
+}
+```
+
 ## Cancellation
 
 All async sequences cooperate with structured concurrency. Cancelling the surrounding `Task` propagates to the underlying `cancel()` call on the consumer:

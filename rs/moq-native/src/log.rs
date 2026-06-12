@@ -1,4 +1,3 @@
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
 use tracing::Level;
@@ -35,7 +34,7 @@ impl Log {
 		LevelFilter::from_level(self.level)
 	}
 
-	pub fn init(&self) -> anyhow::Result<()> {
+	pub fn init(&self) -> crate::Result<()> {
 		let filter = EnvFilter::builder()
 			.with_default_directive(self.level().into()) // Default to our -q/-v args
 			.from_env_lossy() // Allow overriding with RUST_LOG
@@ -55,7 +54,7 @@ impl Log {
 		#[cfg(all(target_os = "android", feature = "android-logcat"))]
 		let registry = {
 			let logcat_layer = tracing_android::layer("MoQNative")
-				.context("failed to initialize Android logcat layer")?
+				.map_err(|e| crate::Error::Logcat(std::sync::Arc::new(e)))?
 				.with_filter(filter);
 			registry.with(logcat_layer)
 		};
@@ -71,7 +70,9 @@ impl Log {
 		#[cfg(feature = "tokio-console")]
 		let registry = registry.with(console_subscriber::spawn());
 
-		registry.try_init().context("failed to set global tracing subscriber")?;
+		registry
+			.try_init()
+			.map_err(|e| crate::Error::SetSubscriber(std::sync::Arc::new(e)))?;
 
 		// Start deadlock detection thread (only in debug builds)
 		#[cfg(debug_assertions)]

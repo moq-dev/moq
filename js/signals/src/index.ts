@@ -458,6 +458,14 @@ export class Effect {
 		return this.run(fn);
 	}
 
+	// Create a derived signal whose lifetime is tied to this effect.
+	// It's closed (unsubscribing from its dependencies) when the effect reruns or closes.
+	computed<T>(fn: (effect: Effect) => T): Computed<T> {
+		const computed = new Computed(fn);
+		this.cleanup(() => computed.close());
+		return computed;
+	}
+
 	// Get the values of multiple signals, returning undefined if any are falsy.
 	getAll<S extends readonly Getter<unknown>[]>(
 		signals: [...S],
@@ -622,6 +630,45 @@ export class Effect {
 
 	proxy<T>(dst: Setter<T>, src: Getter<T>): void {
 		this.subscribe(src, (value) => dst.update(() => value));
+	}
+}
+
+// A read-only signal derived from other signals.
+//
+// The compute function reads its dependencies with `effect.get(...)`, exactly
+// like an effect, and returns the derived value. It reruns whenever a
+// dependency changes. Keep it pure: derive a value, don't perform side effects.
+//
+// Like every signal, updates are asynchronous: the value is `undefined` until
+// the first run completes (and after close()), and recomputes propagate on a
+// microtask. Read it inside an effect and handle the `undefined` case, the same
+// way you would any other signal that starts empty.
+export class Computed<T> implements Getter<T | undefined> {
+	#signal = new Signal<T | undefined>(undefined);
+	#effect: Effect;
+
+	constructor(fn: (effect: Effect) => T) {
+		this.#effect = new Effect((effect) => {
+			this.#signal.set(fn(effect));
+		});
+	}
+
+	peek(): T | undefined {
+		return this.#signal.peek();
+	}
+
+	changed(fn: Subscriber<T | undefined>): Dispose {
+		return this.#signal.changed(fn);
+	}
+
+	subscribe(fn: Subscriber<T | undefined>): Dispose {
+		return this.#signal.subscribe(fn);
+	}
+
+	// Stop recomputing and tracking dependencies. Required for standalone computeds;
+	// an effect.computed() is closed automatically with its parent effect.
+	close(): void {
+		this.#effect.close();
 	}
 }
 

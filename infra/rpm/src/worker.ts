@@ -1,7 +1,7 @@
 // Cloudflare Worker for rpm.moq.dev. Serves a yum/dnf repository out of the
 // rpm-moq-dev R2 bucket. Layout written by infra/rpm/publish.sh:
 //
-//   /moq-archive-keyring.gpg                        public signing key
+//   /moq-keyring.gpg                                public signing key (ASCII-armored)
 //   /moq.repo                                       .repo file users drop into /etc/yum.repos.d/
 //   /el9/x86_64/repodata/repomd.xml{,.asc}          signed metadata
 //   /el9/x86_64/repodata/<hash>-primary.xml.gz      indices
@@ -27,9 +27,15 @@ const CONTENT_TYPE_BY_NAME: Record<string, string> = {
 };
 
 // Repo metadata changes per release; .rpm blobs are versioned and immutable.
+// The keyring is a fixed-name trust anchor whose contents change on key
+// rotation, so it gets a bounded TTL rather than immutable -- otherwise a
+// rotated key can't propagate until the long cache expires.
 function cacheControl(key: string): string {
-	if (key.endsWith(".rpm") || key.endsWith(".gpg")) {
+	if (key.endsWith(".rpm")) {
 		return "public, max-age=2592000, immutable";
+	}
+	if (key === "moq-keyring.gpg") {
+		return "public, max-age=3600";
 	}
 	return "public, max-age=300";
 }
