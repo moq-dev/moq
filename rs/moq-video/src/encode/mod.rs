@@ -10,6 +10,7 @@
 //! counterpart (mirror of `moq-audio`'s consumer) will land in a sibling
 //! `decode` module.
 
+mod backend;
 mod encoder;
 mod producer;
 

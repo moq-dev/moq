@@ -1,0 +1,360 @@
+# Native H.264 codecs for moq-video (drop ffmpeg)
+
+Status: **phases 2-5 implemented** (openh264, VideoToolbox, NVENC, capture swap +
+ffmpeg removal). VAAPI (phase 6) is a separate follow-up PR. See "As built"
+at the bottom for where the implementation diverged from this plan.
+
+## Goal
+
+Remove `ffmpeg-next` from `moq-video` entirely and drive H.264 capture + encode
+through native, per-platform crates instead. The point is **packaging**: a single
+statically self-contained binary that still reaches the GPU at runtime, so we can
+ship one `.deb` / `.rpm` / brew bottle per arch instead of one per distro release.
+
+### Why ffmpeg blocks this today
+
+`moq-video` links ffmpeg in two spots, both of which have to go:
+
+- Encode: [`encode/encoder.rs`](src/encode/encoder.rs) probes `h264_videotoolbox` /
+  `h264_nvenc` / `h264_vaapi` / `libx264` by name.
+- Capture + color convert: [`capture.rs`](src/capture.rs) uses `libavdevice`
+  (avfoundation / v4l2 / dshow) and `swscale` for the camera frame -> YUV420P step.
+
+Static-linking ffmpeg drops hardware support (the `h264_*` encoders themselves
+`dlopen` vendor driver libs, and bundling that is painful). Dynamic-linking
+ffmpeg forces a package per distro release because of `libav*` soname churn.
+Native crates sidestep both: the hardware paths `dlopen` the vendor driver
+at runtime, so we link nothing heavy at build time.
+
+**Key constraint:** swapping only the encoder gains nothing for packaging while
+capture still pulls in `libav*`. This proposal replaces encode **and** capture.
+
+### Scope (agreed)
+
+- Platforms: macOS (VideoToolbox), Linux NVIDIA (NVENC), Linux Intel/AMD (VAAPI).
+- Out of scope: Windows (AMF/QSV), iOS, HEVC/AV1. H.264 only.
+
+## Crate selection
+
+| Backend | Crate | Role | Linking model |
+|---|---|---|---|
+| VideoToolbox (macOS) | [`objc2-video-toolbox`](https://docs.rs/objc2-video-toolbox/) + `objc2-core-media` / `objc2-core-video` | Raw FFI. We hand-write the `VTCompressionSession` glue. | System frameworks, always present. Zero external runtime deps. |
+| NVENC (NVIDIA) | [`nvidia-video-codec-sdk`](https://crates.io/crates/nvidia-video-codec-sdk) (0.4) | Safe `Encoder` wrapper. | NVENC API lives in the driver (`libnvidia-encode.so`), loaded at runtime. No build-time SDK linking. |
+| VAAPI (Intel/AMD) | [`cros-codecs`](https://github.com/chromeos/cros-codecs) (0.0.x) | VAAPI H.264 encoder (Google/ChromeOS, ships in crosvm). | Links thin, stable `libva`; libva `dlopen`s the GPU driver. |
+| Software fallback | [`openh264`](https://crates.io/crates/openh264) | Pure fallback when no GPU. | Vendored build -> static, zero runtime deps. |
+
+Decisions and rationale:
+
+- **NVENC: buy.** `nvidia-video-codec-sdk` is an independently-maintained safe
+  wrapper. Don't roll our own.
+- **VAAPI: buy `cros-codecs`, but expect the heaviest integration.** It is the
+  only credible non-ffmpeg VAAPI encode crate, and the H.264 VAAPI encoder is
+  real and shipped in the published **0.0.6** (June 2025), not just `main`. See
+  the dedicated notes below -- the catch is ergonomics, not capability.
+- **VideoToolbox: build the session glue.** No trustworthy high-level crate exists.
+  `objc2-video-toolbox` gives us safe, maintained bindings to
+  `VTCompressionSession` and the property keys (`kVTCompressionPropertyKey_*` for
+  bitrate / realtime / max-keyframe-interval / profile). We write ~300 lines of
+  lifecycle + callback + format-description handling on top. This is glue, not a
+  codec reimplementation.
+- **Software fallback: `openh264`**, vendored so it links static. This guarantees
+  a working binary on a machine with no usable GPU, with no runtime dependency.
+  Tradeoff vs `libx264`: openh264 is constrained-baseline-ish and lower quality,
+  but it is BSD-licensed and trivially static.
+
+## Target architecture
+
+Today `Encoder` is a monolith wrapping one ffmpeg encoder. Replace it with a
+small trait and one impl per backend, keeping the existing `Kind`-driven
+selection + linear fallback chain (which is already the right shape, see
+[`encoder_candidates`](src/encode/encoder.rs)).
+
+```rust
+// encode/backend/mod.rs
+pub(crate) trait Backend: Send {
+    /// Encode one NV12 frame. `force_keyframe` requests an IDR. Returns zero or
+    /// more H.264 packets in this backend's native framing (see `wire_mode`):
+    /// Annex-B for Avc3 backends, length-prefixed NALs for Avc1.
+    fn encode(&mut self, frame: &Nv12, force_keyframe: bool) -> Result<Vec<Bytes>, Error>;
+    fn finish(&mut self) -> Result<Vec<Bytes>, Error>;
+
+    /// Which `moq_mux::h264::Mode` the producer should run for this backend.
+    /// Avc3 (Annex-B, in-band SPS/PPS) for openh264/nvenc/vaapi; Avc1 for VT.
+    fn wire_mode(&self) -> Mode;
+    /// For Avc1 only: the avcC (AVCDecoderConfigurationRecord) to hand
+    /// `Import::initialize`, available once the first frame has been encoded.
+    /// `None` for Avc3 backends.
+    fn description(&self) -> Option<Bytes>;
+
+    fn name(&self) -> &'static str;
+}
+```
+
+Module layout under `src/encode/`:
+
+```
+encode/
+  encoder.rs        # public Encoder: picks a Backend via Kind, owns the color
+                    # converter, exposes the unchanged encode_rgba / encode API
+  backend/
+    mod.rs          # Backend trait + open_backend(kind, config) fallback chain
+    videotoolbox.rs # cfg(target_os = "macos")
+    nvenc.rs        # cfg(all(target_os = "linux", feature = "nvenc"))
+    vaapi.rs        # cfg(all(target_os = "linux", feature = "vaapi"))
+    openh264.rs     # software fallback, all platforms
+```
+
+The public surface (`Encoder`, `Config`, `Kind`, `Producer`, `Options`,
+`publish_capture`) stays **identical**, so `moq-cli` and the catalog/producer
+path don't change. `Kind::Named(String)` keeps working but its meaning shifts
+from "ffmpeg encoder name" to "backend id" (`"videotoolbox"`, `"nvenc"`,
+`"vaapi"`, `"openh264"`); document the change.
+
+### Framing: Import takes both Avc3 and Avc1, so no normalization
+
+`moq_mux::codec::h264::Import` supports **both** wire formats via its `Mode`
+([`import.rs:18`](../moq-mux/src/codec/h264/import.rs)):
+
+- `Mode::Avc3` -> Annex-B (start-code framed), SPS/PPS **in-band**. Catalog
+  `H264 { inline: true }`, no `description`.
+- `Mode::Avc1` -> length-prefixed NALs (AVCC), SPS/PPS **out-of-band** supplied
+  once as the `AVCDecoderConfigurationRecord` to `initialize()`. Catalog
+  `H264 { inline: false }`, `description = avcC`.
+
+This means each backend feeds the format it **already** produces, no transcoding
+between framings:
+
+- **NVENC**: Annex-B with `repeatSPSPPS` on IDRs -> `Avc3`. Passthrough.
+- **VAAPI (cros-codecs)**: emits an Annex-B elementary stream with in-band
+  SPS/PPS (VAAPI packed headers) -> `Avc3`. Passthrough. (Confirmed from source,
+  see cros-codecs notes below.)
+- **VideoToolbox**: emits **AVCC** (length-prefixed) with SPS/PPS out-of-band in
+  the `CMFormatDescription` -> maps **directly onto `Avc1`**. On the first
+  keyframe we read SPS/PPS from the format description, build the avcC, and call
+  `initialize()` with it; thereafter we pass the length-prefixed sample data
+  straight through. **No AVCC->Annex-B conversion, no per-frame SPS/PPS
+  splicing** -- this removes what I'd previously flagged as the bulk of the
+  VideoToolbox work.
+
+Consequence for wiring: the producer's `Mode` is backend-dependent (Avc1 for
+VideoToolbox, Avc3 for the rest). Today `Producer::new` hardcodes `Avc3`
+([`producer.rs:34`](src/encode/producer.rs)) and is created *before* the encoder
+opens. Two options:
+
+1. **Backend declares its mode.** Add `fn wire_mode(&self) -> Mode` and
+   `fn description(&self) -> Option<Bytes>` (the avcC for Avc1) to the trait, and
+   create the `Import` once the backend is open. The capture loop already defers
+   the catalog rendition until the first encoded frame
+   ([`producer.rs:163`](src/encode/producer.rs)), so this reorder is natural.
+2. **Normalize VideoToolbox to Annex-B** in its glue and keep everything `Avc3`.
+   Simpler wiring, but adds the AVCC->Annex-B + SPS/PPS work back. Prefer (1).
+
+### cros-codecs (VAAPI) notes
+
+From reading the 0.0.6 source (`src/encoder/`, `examples/ccenc/`):
+
+- **It works and fits our framing.** `EncoderConfig { resolution, profile
+  (default Baseline), level, pred_structure: LowDelay { .. } (no B-frames -- good
+  for real-time), initial_tunings }`. `Tunings { framerate, bitrate }` via
+  `RateControl::{ConstantBitrate, ConstantQuality}`, changeable mid-stream with
+  `tune()`. Output is `CodedBitstreamBuffer { bitstream: Vec<u8>, .. }`, an
+  **Annex-B elementary stream with in-band SPS/PPS** -> `Avc3` passthrough.
+  Input is **NV12**. The `simple_encode_loop` / `poll()` API matches our
+  send-frame/drain shape.
+- **The catch: it's ChromeOS-shaped, built around GBM / DMA-buf frames.** The
+  ergonomic high-level path (`c2_wrapper::C2VaapiEncoder`) consumes `VideoFrame`s
+  backed by a `GbmDevice` and `GenericDmaVideoFrame` (DMA-buf). Feeding a
+  malloc'd NV12 buffer from a webcam means either allocating a GBM frame and
+  `memcpy`-ing into its mapped planes (what `ccenc` does), or driving the
+  lower-level `StatelessEncoder` and uploading to VA surfaces ourselves. Both are
+  more plumbing than ffmpeg's "hand me a byte slice," and the stateless API is
+  heavily generic (`StatelessEncoder<Codec, Backend, ..>`).
+- **Runtime deps:** `libva` + a usable VA driver, and (for the GBM path) a DRM
+  render node (`/dev/dri/renderD128`). Fine on a desktop/server with a GPU;
+  worth noting for headless/container deploys.
+
+Implication for sequencing: VAAPI is the **highest-effort, highest-risk**
+backend. openh264 already covers non-NVIDIA Linux functionally (just not
+GPU-accelerated), so VAAPI can land **last** and stay behind its feature flag
+without blocking the ffmpeg removal.
+
+### Pixel format pipeline
+
+All three encoders want **NV12** (VideoToolbox also takes I420; NVENC/VAAPI
+prefer NV12). The trait input is `Nv12`. The `Encoder` owns the converter that
+turns whatever capture hands us into NV12, replacing ffmpeg's `swscale`:
+
+- Converter crate: [`dcv-color-primitives`](https://crates.io/crates/dcv-color-primitives)
+  (AWS, SIMD, maintained) or [`yuv`](https://crates.io/crates/yuv) (libyuv-like).
+  Lean `dcv-color-primitives` for maintenance pedigree.
+- `encode_rgba` (the bring-your-own-frames path) becomes RGBA -> NV12 via the
+  same converter; the row-stride care in
+  [`rgba_frame`](src/encode/encoder.rs) carries over.
+
+### Capture replacement
+
+Replace `libavdevice` with [`nokhwa`](https://crates.io/crates/nokhwa)
+(avfoundation / v4l2 / msmf). `Camera::open/read/width/height/framerate` keep
+their signatures so [`capture_loop`](src/encode/producer.rs) is untouched.
+
+Wrinkles to handle:
+
+- Linux UVC cameras commonly deliver **YUYV (4:2:2)** or **MJPEG** only. nokhwa
+  decodes MJPEG behind a feature flag; enable it. Both get converted to NV12 by
+  the same converter.
+- macOS AVFoundation gives NV12/YUYV directly.
+- Device-string semantics (index vs `/dev/videoN` vs name) differ from ffmpeg;
+  re-document the `--camera` flag accordingly and keep the `Config` shape.
+
+## Cargo features and target defaults
+
+```toml
+[features]
+default = []                       # capture pulled in by moq-cli's `capture` feature
+nvenc  = ["dep:nvidia-video-codec-sdk"]   # linux only, opt-in
+vaapi  = ["dep:cros-codecs"]              # linux only, opt-in
+# videotoolbox + openh264 need no feature: gated by cfg(target_os) / always-on
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-video-toolbox = "..."
+objc2-core-media = "..."
+objc2-core-video = "..."
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nvidia-video-codec-sdk = { version = "0.4", optional = true }
+cros-codecs = { version = "=0.0.6", optional = true }   # pin: pre-1.0, churns
+
+[dependencies]
+openh264 = "..."   # software fallback, all targets
+nokhwa = { version = "...", features = ["input-avfoundation", "input-v4l", "input-msmf", "decoding-mjpeg"] }
+dcv-color-primitives = "..."
+```
+
+Release builds for Linux enable both `nvenc` and `vaapi`; the runtime fallback
+chain skips whichever driver is absent. Neither is a build-time hard dep on the
+driver, so the binary still builds and runs on a box with neither GPU (it falls
+to openh264).
+
+### Selection / fallback (`Kind` mapping)
+
+`open_backend(kind, config)` builds an ordered candidate list and returns the
+first that opens, mirroring today's `open_encoder` loop:
+
+- `Auto`   -> [videotoolbox | nvenc | vaapi] (cfg-filtered) then openh264.
+- `Hardware` -> hardware-only; `NoEncoder` if none opens.
+- `Software` -> openh264 only.
+- `Named(id)` -> that backend only.
+
+A backend "fails to open" (driver missing, no device) the same way an ffmpeg
+`find_by_name` miss does today, so the existing fallback semantics and
+`Error::NoEncoder(tried)` carry over unchanged.
+
+## Packaging payoff
+
+- **macOS**: VideoToolbox + openh264 link only system frameworks + a vendored
+  static lib. One brew bottle per arch, no `Depends`.
+- **Linux**: one binary that
+  - `dlopen`s `libnvidia-encode.so` if an NVIDIA driver is present (no build dep),
+  - links `libva` (tiny, stable soname across releases) for Intel/AMD; package
+    `Depends: libva2`, `Recommends: intel-media-va-driver | mesa-va-drivers`,
+  - statically carries openh264 as the always-works fallback.
+
+  That single artifact runs across Ubuntu 20.04 -> 24.04, Debian, Fedora, etc.,
+  which is the whole reason for the change.
+
+## Migration phases
+
+1. **Trait refactor, ffmpeg still under it.** Introduce `Backend` + `open_backend`,
+   move the current ffmpeg encoder behind an `ffmpeg` backend impl. No behavior
+   change; pure restructure with the existing tests green. (Keeps the diff
+   reviewable and proves the seam.)
+2. **openh264 backend** + the NV12 converter, with unit tests (gray-frame ->
+   Annex-B, the existing assertions still apply). Backend emits `Avc3`.
+3. **VideoToolbox backend** on macOS via `Mode::Avc1` (read SPS/PPS from the
+   format description once, pass length-prefixed samples through; test on real
+   hardware).
+4. **NVENC backend** on Linux behind its feature.
+5. **Capture swap to nokhwa; drop `ffmpeg-next`.** Delete the ffmpeg capture +
+   scaler, remove the dep from `Cargo.toml`, update [CLAUDE.md cross-package
+   notes], `doc/bin/cli.md`, the `capture` feature wiring in `moq-cli`, and the
+   packaging recipes. After this ffmpeg is gone and the binary is GPU-accelerated
+   on macOS/NVIDIA, software (openh264) elsewhere.
+6. **VAAPI backend** (cros-codecs) last, behind its feature -- the GBM/DMA-buf
+   plumbing is isolated and non-blocking once openh264 covers the fallback.
+
+Phases 1-2 are safe on `main`. The capture swap and ffmpeg removal are a
+behavior/dependency change; per Branch Targeting this likely wants `dev`.
+
+## Risks / open questions
+
+- **cros-codecs is the biggest integration cost.** Capability is confirmed
+  (H.264 VAAPI encoder in published 0.0.6, NV12 in, Annex-B out), but its
+  GBM/DMA-buf frame substrate + heavily-generic stateless API make it the
+  hardest backend to wire to CPU webcam frames. Pre-1.0, thin docs. Pin exact,
+  wrap tight, land it last behind its feature flag.
+- **VideoToolbox glue is smaller than first thought.** Mapping its native AVCC +
+  out-of-band SPS/PPS onto `Mode::Avc1` removes the AVCC->Annex-B conversion.
+  Remaining work: session lifecycle, the property dict, callback handling, and
+  reading SPS/PPS from the `CMFormatDescription` to build the avcC once. Still
+  the main *new* code, but well-trodden; budget for on-device debugging.
+- **nokhwa format coverage**: verify MJPEG + YUYV paths on a real Linux UVC cam;
+  confirm on-demand open/close (LED off when unwatched) still works, since the
+  gate logic in `capture_loop` depends on it.
+- **Quality/latency parity**: openh264 < libx264 quality; verify hardware presets
+  match today's `realtime=1` / `zerolatency` low-latency behavior.
+- **Coverage gaps vs today**: no Intel QSV-specific path (Intel goes through
+  VAAPI), no Windows, no Raspberry Pi `v4l2m2m`. Note in docs; cros-codecs'
+  stateful V4L2 encoder could cover the Pi later.
+
+## As built (phases 2-5)
+
+Where the implementation differs from the plan above:
+
+- **Single wire format: Avc3 everywhere (not Avc1 for VideoToolbox).** Routing VT
+  through `Avc1` would have needed the avcC up front, which breaks the
+  advertise-track-before-camera-opens on-demand model. Instead every backend
+  emits Annex-B and the producer stays `Avc3`. The VideoToolbox backend converts
+  its native AVCC + out-of-band SPS/PPS to Annex-B in its output callback
+  (length-prefix -> start code, SPS/PPS from the format description spliced in on
+  IDRs). The `Backend` trait gained no `wire_mode`/`description`.
+- **Boundary is I420, not NV12.** openh264 wants I420; VideoToolbox takes a planar
+  `420YpCbCr8Planar` CVPixelBuffer; NVENC takes `IYUV`. So I420 needs no
+  per-backend pixel conversion. `backend::Frame` is tightly-packed I420.
+- **Converter is the `yuv` crate, not `dcv-color-primitives`.** dcv 0.7 has no
+  RGBA -> I420 path (only BGRA/ARGB/BGR), and dcv 1.0 needs rustc 1.87 > our
+  pinned 1.85. `yuv::rgba_to_yuv420` does it directly (BT.601, limited range).
+- **No scaler.** The camera is opened first and the encoder is sized to its
+  negotiated resolution, so capture frames already match the encoder; `encode_rgba`
+  now requires input dims == encoder dims (it errors otherwise) instead of
+  rescaling. This dropped swscale entirely.
+- **Capture (nokhwa) yields RGBA.** `Camera::read` decodes each frame to RGBA via
+  `decode_image::<RgbAFormat>`, uniformly handling MJPEG/YUYV/NV12 sources. Device
+  string is now "bare integer = index, else path/name" (the avfoundation `:none` /
+  dshow `video=` specifics are gone).
+- **`Error` slimmed.** The ffmpeg-specific variants (`Ffmpeg`, `NoCaptureBackend`,
+  `NoVideoStream`) and the `From<ffmpeg_next::Error>` impl are removed; capture and
+  encode failures now flow through `Error::Codec(anyhow)`.
+
+### Verified vs unverified
+
+- **Verified on macOS** (real hardware, `just check`): openh264 and VideoToolbox
+  encode synthetic frames; a VideoToolbox test asserts the AVCC -> Annex-B IDR
+  carries SPS+PPS+slice. moq-cli `--features capture` and moq-boy still build.
+- **NVENC is UNVERIFIED.** Linux + CUDA only, so it doesn't compile on the dev Mac.
+  Written against the real `nvidia-video-codec-sdk` 0.4 API with field/enum names
+  checked against the crate's bindgen output, but needs a Linux+GPU (or CI) pass to
+  confirm: (1) it compiles with the chosen cudarc feature set
+  (`dynamic-loading` + `cuda-12020`) given the SDK's own `cuda-version-from-build-system`
+  default - feature unification here may need tweaking; (2) the flat input-buffer
+  `write` matches NVENC's pitch (safe only for 64-aligned widths; we warn otherwise);
+  (3) forced-IDR via `picture_type` with picture-type-decision enabled.
+
+### Follow-ups
+
+- VAAPI backend (phase 6) in a separate PR, behind a `vaapi` feature.
+- NVENC hardware validation on Linux+GPU / CI.
+- Live camera run (capture needs camera permission; only synthetic-frame encode is
+  tested here).
+- `doc/bin/cli.md`: the `capture` device-string semantics changed (index-or-path).
+- Consider reusing NVENC input/output buffers across frames (currently allocated
+  per frame to sidestep the self-referential Session borrow).

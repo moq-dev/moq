@@ -5,9 +5,10 @@
 //! adds the native pieces a desktop/CLI publisher needs:
 //!
 //! - [`capture`] describes a frame source ([`capture::Config`]) and grabs
-//!   frames via libavdevice. Today that's a webcam (avfoundation / v4l2 /
-//!   dshow); screen capture would slot in here too.
-//! - [`encode`] H.264-encodes frames and publishes them through
+//!   frames via [`nokhwa`](https://crates.io/crates/nokhwa) (avfoundation /
+//!   v4l2 / msmf). Today that's a webcam.
+//! - [`encode`] H.264-encodes frames with a native backend (openh264 /
+//!   VideoToolbox / NVENC) and publishes them through
 //!   [`moq_mux::codec::h264::Import`], which handles catalog registration
 //!   and framing. Two entry points:
 //!   - [`encode::publish_capture`] captures a webcam and publishes it (turnkey).
@@ -21,17 +22,17 @@
 //!
 //! ## API stability
 //!
-//! The public API is deliberately ffmpeg-free: no public type, signature, or
-//! error variant names an `ffmpeg-next` type. [`encode::Encoder`] takes raw
-//! RGBA bytes (not an ffmpeg frame), the camera capture/encode path stays
-//! internal, and [`Error::Ffmpeg`] carries a plain message.
-//! So a major `ffmpeg-next` bump is not a breaking change for consumers, and
-//! we don't re-export `ffmpeg-next`. Config structs are `#[non_exhaustive]`:
+//! The public API is codec-agnostic: no public type, signature, or error
+//! variant names a backend (openh264 / VideoToolbox / NVENC) or capture
+//! (`nokhwa`) type. [`encode::Encoder`] takes raw RGBA bytes, and the camera
+//! capture path stays internal. So swapping or bumping any backend crate is not
+//! a breaking change for consumers. Config structs are `#[non_exhaustive]`:
 //! build them via `default()`/`new()` and set fields, so new options stay additive.
 
 pub mod capture;
 pub mod encode;
 
 mod error;
+mod frame;
 
 pub use error::Error;

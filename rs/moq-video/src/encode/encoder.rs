@@ -1,13 +1,14 @@
-//! H.264 encoder over ffmpeg, hardware-preferred.
+//! H.264 encoder front end.
 //!
-//! Accepts decoded [`ffmpeg::frame::Video`] frames in any pixel format
-//! (whatever the camera hands us), scales/converts them to YUV420P, and
-//! emits Annex-B H.264 packets ready for `moq_mux::codec::h264::Import`.
+//! Accepts raw RGBA frames, converts them to I420, and delegates the actual
+//! encode to a [`Backend`](super::backend::Backend). The resulting Annex-B
+//! H.264 packets are ready for `moq_mux::codec::h264::Import`.
 
 use bytes::Bytes;
-use ffmpeg_next as ffmpeg;
 
+use super::backend::{self, Backend};
 use crate::Error;
+use crate::frame::{Frame, I420};
 
 /// Which encoder implementation to use. `#[non_exhaustive]` so new selection
 /// strategies can be added without breaking external `match`es.
@@ -19,14 +20,14 @@ pub enum Kind {
 	Auto,
 	/// Hardware only; error if none is available.
 	Hardware,
-	/// Software (libx264 / built-in) only.
+	/// Software (openh264) only.
 	Software,
-	/// A specific ffmpeg encoder by name, e.g. `"h264_videotoolbox"`.
+	/// A specific backend by name, e.g. `"videotoolbox"`, `"nvenc"`, `"openh264"`.
 	Named(String),
 }
 
 /// Encoder configuration. `width` / `height` / `framerate` are the encoded
-/// output; input frames are scaled/converted to match.
+/// output; input frames must already be at this resolution.
 ///
 /// `#[non_exhaustive]`: build via [`Config::new`] and set the optional fields,
 /// so future knobs don't break callers.
@@ -59,7 +60,7 @@ impl Config {
 	}
 
 	/// Resolved bitrate: explicit override, or a pixels-per-second estimate.
-	fn resolved_bitrate(&self) -> u64 {
+	pub(crate) fn resolved_bitrate(&self) -> u64 {
 		self.bitrate.unwrap_or_else(|| {
 			let pixels = self.width as u64 * self.height as u64;
 			// 0.07 bits per pixel per second matches the JS publisher's
@@ -69,48 +70,20 @@ impl Config {
 	}
 }
 
-/// Hardware H.264 encoder names to try first, in priority order. The deps
-/// are declared under platform-specific cfgs in ffmpeg, but probing a name
-/// that isn't compiled in just returns `None`, so listing all of them is
-/// harmless on any platform.
-const HARDWARE_ENCODERS: &[&str] = &[
-	"h264_videotoolbox", // macOS / iOS
-	"h264_nvenc",        // NVIDIA
-	"h264_qsv",          // Intel QuickSync
-	"h264_vaapi",        // Linux VA-API
-	"h264_amf",          // AMD (Windows)
-	"h264_v4l2m2m",      // Linux stateful (e.g. Raspberry Pi)
-];
-
-/// Software fallbacks, in priority order.
-const SOFTWARE_ENCODERS: &[&str] = &["libx264", "h264"];
-
 /// H.264 encoder. Build one with [`Encoder::new`], feed it raw RGBA frames
 /// via [`encode_rgba`](Self::encode_rgba), and publish the resulting Annex-B
 /// packets through [`Producer`](super::Producer).
 pub struct Encoder {
-	encoder: ffmpeg::encoder::video::Encoder,
-	/// Lazily built once we see the first frame's pixel format/size.
-	scaler: Option<Scaler>,
+	backend: Box<dyn Backend>,
 	width: u32,
 	height: u32,
-	frame_count: i64,
-	/// The ffmpeg encoder name that opened successfully (for logging).
-	name: String,
-}
-
-struct Scaler {
-	ctx: ffmpeg::software::scaling::Context,
-	src_format: ffmpeg::format::Pixel,
-	src_width: u32,
-	src_height: u32,
 }
 
 impl Encoder {
 	pub fn new(config: &Config) -> Result<Self, Error> {
 		// Validate at the construction boundary so both entry points (the
 		// capture loop and a bring-your-own-frames caller) reject a zero
-		// framerate, which would produce a degenerate `1/0` codec time base.
+		// framerate, which would produce a degenerate codec time base.
 		if config.framerate == 0 {
 			return Err(Error::InvalidFramerate(0));
 		}
@@ -121,201 +94,73 @@ impl Encoder {
 				config.height
 			)));
 		}
-
-		// Idempotent; ensures codecs are registered even when no Camera opened.
-		ffmpeg::init()?;
-		let candidates = encoder_candidates(&config.kind);
-
-		let mut tried = Vec::new();
-		for name in &candidates {
-			tried.push(name.clone());
-			match open_encoder(name, config) {
-				Ok(encoder) => {
-					tracing::info!(encoder = %name, width = config.width, height = config.height, "opened H.264 encoder");
-					return Ok(Self {
-						encoder,
-						scaler: None,
-						width: config.width,
-						height: config.height,
-						frame_count: 0,
-						name: name.clone(),
-					});
-				}
-				Err(e) => {
-					tracing::debug!(encoder = %name, error = %e, "encoder unavailable, trying next");
-				}
-			}
+		// I420 chroma is subsampled 2x2, so the encoded resolution must be even.
+		if config.width % 2 != 0 || config.height % 2 != 0 {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"encoder dimensions must be even (got {}x{})",
+				config.width,
+				config.height
+			)));
 		}
 
-		Err(Error::NoEncoder(tried.join(", ")))
+		let backend = backend::open(config)?;
+		Ok(Self {
+			backend,
+			width: config.width,
+			height: config.height,
+		})
 	}
 
-	/// The ffmpeg encoder name in use, e.g. `"h264_videotoolbox"`.
+	/// The encoder name in use, e.g. `"videotoolbox"`.
 	pub fn name(&self) -> &str {
-		&self.name
+		self.backend.name()
 	}
 
 	/// Encode one tightly-packed RGBA frame (`width * height * 4` bytes),
 	/// returning zero or more Annex-B H.264 packets. Set `keyframe` to force an
 	/// IDR (e.g. on resume so a re-subscribing viewer can start decoding at
-	/// once). The frame is scaled/converted to the encoder's resolution.
+	/// once). The frame must already be at the encoder's resolution.
 	pub fn encode_rgba(&mut self, rgba: &[u8], width: u32, height: u32, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		let frame = rgba_frame(rgba, width, height)?;
-		self.encode_frame(&frame, keyframe)
-	}
-
-	/// Encode a decoded frame (camera path). With B-frames disabled (the
-	/// low-latency default) the encoder emits one packet per input frame.
-	pub(crate) fn encode(&mut self, frame: &ffmpeg::frame::Video) -> Result<Vec<Bytes>, Error> {
-		self.encode_frame(frame, false)
-	}
-
-	fn encode_frame(&mut self, frame: &ffmpeg::frame::Video, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		let mut yuv = self.convert(frame)?;
-		if keyframe {
-			yuv.set_kind(ffmpeg::picture::Type::I);
+		let expected = width as usize * height as usize * 4;
+		if rgba.len() < expected {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"RGBA buffer too small: {} < {expected} for {width}x{height}",
+				rgba.len()
+			)));
 		}
-		self.encoder.send_frame(&yuv)?;
-		self.drain()
+
+		let frame = Frame::I420(I420::from_rgba(rgba, width, height));
+		self.encode(&frame, keyframe)
+	}
+
+	/// Encode a captured [`Frame`] (a GPU surface or CPU I420). The frame must
+	/// already be at the encoder's resolution.
+	pub(crate) fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+		if frame.width() != self.width || frame.height() != self.height {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"frame {}x{} does not match encoder {}x{}",
+				frame.width(),
+				frame.height(),
+				self.width,
+				self.height
+			)));
+		}
+		self.backend.encode(frame, keyframe)
 	}
 
 	/// Flush the encoder, returning any buffered packets.
 	pub fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
-		self.encoder.send_eof()?;
-		self.drain()
+		self.backend.finish()
 	}
-
-	fn drain(&mut self) -> Result<Vec<Bytes>, Error> {
-		let mut out = Vec::new();
-		let mut packet = ffmpeg::Packet::empty();
-		loop {
-			match self.encoder.receive_packet(&mut packet) {
-				Ok(()) => {
-					if let Some(data) = packet.data() {
-						out.push(Bytes::copy_from_slice(data));
-					}
-				}
-				Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => break,
-				Err(ffmpeg::Error::Eof) => break,
-				Err(e) => return Err(e.into()),
-			}
-		}
-		Ok(out)
-	}
-
-	/// Scale/convert an arbitrary input frame to the encoder's YUV420P
-	/// surface, rebuilding the scaler if the input geometry changed.
-	fn convert(&mut self, frame: &ffmpeg::frame::Video) -> Result<ffmpeg::frame::Video, Error> {
-		let (src_format, src_w, src_h) = (frame.format(), frame.width(), frame.height());
-
-		let needs_rebuild = match &self.scaler {
-			Some(s) => s.src_format != src_format || s.src_width != src_w || s.src_height != src_h,
-			None => true,
-		};
-		if needs_rebuild {
-			let ctx = ffmpeg::software::scaling::Context::get(
-				src_format,
-				src_w,
-				src_h,
-				ffmpeg::format::Pixel::YUV420P,
-				self.width,
-				self.height,
-				ffmpeg::software::scaling::Flags::BILINEAR,
-			)?;
-			self.scaler = Some(Scaler {
-				ctx,
-				src_format,
-				src_width: src_w,
-				src_height: src_h,
-			});
-		}
-
-		let scaler = self.scaler.as_mut().expect("scaler built above");
-		let mut yuv = ffmpeg::frame::Video::empty();
-		scaler.ctx.run(frame, &mut yuv)?;
-
-		// The encoder times frames off a monotonic count, not the camera
-		// clock; the moq presentation timestamp is attached downstream.
-		yuv.set_pts(Some(self.frame_count));
-		self.frame_count += 1;
-		Ok(yuv)
-	}
-}
-
-/// Wrap tightly-packed RGBA bytes in an ffmpeg frame, copying row-by-row to
-/// honor ffmpeg's stride (which may exceed `width * 4`).
-fn rgba_frame(rgba: &[u8], width: u32, height: u32) -> Result<ffmpeg::frame::Video, Error> {
-	let row_bytes = width as usize * 4;
-	let expected = row_bytes * height as usize;
-	if rgba.len() < expected {
-		return Err(Error::Codec(anyhow::anyhow!(
-			"RGBA buffer too small: {} < {expected} for {width}x{height}",
-			rgba.len()
-		)));
-	}
-
-	let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGBA, width, height);
-	let stride = frame.stride(0);
-	for y in 0..height as usize {
-		let src = y * row_bytes;
-		let dst = y * stride;
-		frame.data_mut(0)[dst..dst + row_bytes].copy_from_slice(&rgba[src..src + row_bytes]);
-	}
-	Ok(frame)
-}
-
-fn encoder_candidates(kind: &Kind) -> Vec<String> {
-	match kind {
-		Kind::Named(name) => vec![name.clone()],
-		Kind::Hardware => HARDWARE_ENCODERS.iter().map(|s| s.to_string()).collect(),
-		Kind::Software => SOFTWARE_ENCODERS.iter().map(|s| s.to_string()).collect(),
-		Kind::Auto => HARDWARE_ENCODERS
-			.iter()
-			.chain(SOFTWARE_ENCODERS)
-			.map(|s| s.to_string())
-			.collect(),
-	}
-}
-
-fn open_encoder(name: &str, config: &Config) -> Result<ffmpeg::encoder::video::Encoder, Error> {
-	let codec = ffmpeg::encoder::find_by_name(name).ok_or_else(|| Error::NoEncoder(name.to_string()))?;
-
-	let ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
-	let mut enc = ctx.encoder().video()?;
-	enc.set_width(config.width);
-	enc.set_height(config.height);
-	enc.set_format(ffmpeg::format::Pixel::YUV420P);
-	enc.set_time_base(ffmpeg::Rational::new(1, config.framerate as i32));
-	enc.set_frame_rate(Some(ffmpeg::Rational::new(config.framerate as i32, 1)));
-	enc.set_gop(config.gop);
-	enc.set_max_b_frames(0); // Low latency: no reordering.
-	enc.set_bit_rate(config.resolved_bitrate() as usize);
-
-	let mut opts = ffmpeg::Dictionary::new();
-	if name == "libx264" {
-		opts.set("preset", "ultrafast");
-		opts.set("tune", "zerolatency");
-	} else if name == "h264_videotoolbox" {
-		opts.set("realtime", "1");
-		// Fall back to the software VideoToolbox path if no GPU encoder.
-		opts.set("allow_sw", "1");
-	}
-
-	Ok(enc.open_with(opts)?)
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 
-	/// A mid-gray YUV420P frame: encodable without a camera.
-	fn gray_frame(width: u32, height: u32) -> ffmpeg::frame::Video {
-		let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, width, height);
-		// Plane 0 is luma (gray = 128); planes 1/2 are chroma (neutral = 128).
-		for plane in 0..frame.planes() {
-			frame.data_mut(plane).fill(128);
-		}
-		frame
+	/// A mid-gray RGBA frame: encodable without a camera.
+	fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
+		vec![0x80u8; width as usize * height as usize * 4]
 	}
 
 	#[test]
@@ -324,13 +169,13 @@ mod tests {
 			kind: Kind::Software,
 			..Config::new(320, 240, 30)
 		};
-		let mut encoder = Encoder::new(&config).expect("libx264 should be available under nix ffmpeg");
-		assert_eq!(encoder.name(), "libx264");
+		let mut encoder = Encoder::new(&config).expect("openh264 is vendored, always available");
+		assert_eq!(encoder.name(), "openh264");
 
-		let frame = gray_frame(320, 240);
+		let frame = gray_rgba(320, 240);
 		let mut packets = Vec::new();
-		for _ in 0..30 {
-			packets.extend(encoder.encode(&frame).unwrap());
+		for i in 0..30 {
+			packets.extend(encoder.encode_rgba(&frame, 320, 240, i == 0).unwrap());
 		}
 		packets.extend(encoder.finish().unwrap());
 
@@ -355,9 +200,7 @@ mod tests {
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
 
-		// Tightly-packed RGBA (width*height*4); the row-by-row copy must honor
-		// ffmpeg's stride for this to decode.
-		let rgba = vec![0x40u8; 320 * 240 * 4];
+		let rgba = gray_rgba(320, 240);
 		let mut packets = encoder.encode_rgba(&rgba, 320, 240, true).unwrap();
 		packets.extend(encoder.finish().unwrap());
 		assert!(!packets.is_empty());
@@ -371,9 +214,23 @@ mod tests {
 			..Config::new(320, 240, 30)
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
-		// Far smaller than 320*240*4: must error, not panic on the row copy.
+		// Far smaller than 320*240*4: must error, not panic on conversion.
 		assert!(matches!(
 			encoder.encode_rgba(&[0u8; 16], 320, 240, false),
+			Err(Error::Codec(_))
+		));
+	}
+
+	#[test]
+	fn encode_rgba_rejects_dimension_mismatch() {
+		let config = Config {
+			kind: Kind::Software,
+			..Config::new(320, 240, 30)
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+		let rgba = gray_rgba(640, 480);
+		assert!(matches!(
+			encoder.encode_rgba(&rgba, 640, 480, false),
 			Err(Error::Codec(_))
 		));
 	}
@@ -394,6 +251,141 @@ mod tests {
 			..Config::new(320, 240, 30)
 		};
 		assert!(matches!(Encoder::new(&config), Err(Error::NoEncoder(_))));
+	}
+
+	/// Exercises the hand-rolled VideoToolbox backend end to end on macOS:
+	/// synthetic frames through the real `VTCompressionSession`, asserting the
+	/// AVCC -> Annex-B conversion produces a self-contained IDR (SPS+PPS+slice).
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn videotoolbox_emits_annexb_keyframe() {
+		let config = Config {
+			kind: Kind::Named("videotoolbox".into()),
+			..Config::new(320, 240, 30)
+		};
+		let mut encoder = Encoder::new(&config).expect("videotoolbox is available on macOS");
+		assert_eq!(encoder.name(), "videotoolbox");
+
+		let frame = gray_rgba(320, 240);
+		let mut packets = Vec::new();
+		for i in 0..10 {
+			packets.extend(encoder.encode_rgba(&frame, 320, 240, i == 0).unwrap());
+		}
+		packets.extend(encoder.finish().unwrap());
+
+		assert!(!packets.is_empty(), "encoder produced no packets");
+		let first = &packets[0];
+		assert!(
+			first.starts_with(&[0, 0, 0, 1]) || first.starts_with(&[0, 0, 1]),
+			"first packet is not Annex-B"
+		);
+
+		// The first access unit must be a self-contained IDR: SPS (7), PPS (8),
+		// IDR slice (5), all spliced in-band by the AVCC -> Annex-B conversion.
+		let types = nal_types(first);
+		assert!(types.contains(&7), "no SPS in first packet: {types:?}");
+		assert!(types.contains(&8), "no PPS in first packet: {types:?}");
+		assert!(types.contains(&5), "first packet is not an IDR: {types:?}");
+	}
+
+	/// Feed a GPU surface (NV12 `CVPixelBuffer`) straight into VideoToolbox:
+	/// the zero-copy capture -> encode path, no I420 round-trip.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn videotoolbox_encodes_surface_zero_copy() {
+		let config = Config {
+			kind: Kind::Named("videotoolbox".into()),
+			..Config::new(320, 240, 30)
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+
+		let mut packets = Vec::new();
+		for i in 0..10 {
+			let frame = Frame::Surface(nv12_surface(320, 240));
+			packets.extend(encoder.encode(&frame, i == 0).unwrap());
+		}
+		packets.extend(encoder.finish().unwrap());
+
+		assert!(!packets.is_empty());
+		let types = nal_types(&packets[0]);
+		assert!(
+			types.contains(&7) && types.contains(&8) && types.contains(&5),
+			"no IDR: {types:?}"
+		);
+	}
+
+	/// A software encoder must download a GPU surface to I420 first. Exercises
+	/// the NV12 -> I420 fallback path.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn openh264_downloads_surface() {
+		let config = Config {
+			kind: Kind::Software,
+			..Config::new(320, 240, 30)
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+
+		let frame = Frame::Surface(nv12_surface(320, 240));
+		let mut packets = encoder.encode(&frame, true).unwrap();
+		packets.extend(encoder.finish().unwrap());
+
+		assert!(!packets.is_empty());
+		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
+	}
+
+	/// A mid-gray NV12 `CVPixelBuffer`, the format AVFoundation/ScreenCaptureKit
+	/// hand us. Y and interleaved UV planes filled with 128.
+	#[cfg(target_os = "macos")]
+	fn nv12_surface(width: u32, height: u32) -> crate::frame::macos::Surface {
+		use std::ptr::{self, NonNull};
+
+		use objc2_core_foundation::CFRetained;
+		use objc2_core_video::{
+			CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+			CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+			kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+		};
+
+		let mut raw: *mut CVPixelBuffer = ptr::null_mut();
+		let status = unsafe {
+			CVPixelBufferCreate(
+				None,
+				width as usize,
+				height as usize,
+				kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+				None,
+				NonNull::new(&mut raw).unwrap(),
+			)
+		};
+		assert_eq!(status, 0, "CVPixelBufferCreate failed");
+		let buffer = unsafe { CFRetained::from_raw(NonNull::new(raw).unwrap()) };
+
+		let flags = CVPixelBufferLockFlags(0);
+		assert_eq!(unsafe { CVPixelBufferLockBaseAddress(&buffer, flags) }, 0);
+		for (plane, rows) in [(0usize, height as usize), (1usize, height as usize / 2)] {
+			let base = CVPixelBufferGetBaseAddressOfPlane(&buffer, plane) as *mut u8;
+			let stride = CVPixelBufferGetBytesPerRowOfPlane(&buffer, plane);
+			unsafe { ptr::write_bytes(base, 128, stride * rows) };
+		}
+		unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
+
+		crate::frame::macos::Surface::new(buffer, width, height)
+	}
+
+	/// NAL unit types in an Annex-B buffer, found via 3-byte start codes.
+	#[cfg(target_os = "macos")]
+	fn nal_types(annexb: &[u8]) -> Vec<u8> {
+		let mut types = Vec::new();
+		let mut i = 0;
+		while i + 3 < annexb.len() {
+			if annexb[i..i + 3] == [0, 0, 1] {
+				types.push(annexb[i + 3] & 0x1f);
+				i += 3;
+			} else {
+				i += 1;
+			}
+		}
+		types
 	}
 
 	#[test]
