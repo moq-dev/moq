@@ -393,6 +393,12 @@ interface OpusEncoderConfigExt extends OpusEncoderConfig {
 	signal?: "auto" | "voice" | "music";
 }
 
+// The AAC bitstream format is in the WebCodecs spec but missing from lib.dom.d.ts.
+// https://www.w3.org/TR/webcodecs-aac-codec-registration/#dom-aacencoderconfig
+interface AudioEncoderConfigExt extends AudioEncoderConfig {
+	aac?: { format?: "aac" | "adts" };
+}
+
 // Build the WebCodecs encoder config from the catalog (decoder) config, a Kind hint, and any
 // Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding. AAC has
 // no such knobs, so it just uses the shared base fields (codec/sampleRate/channels/bitrate).
@@ -401,12 +407,18 @@ function toEncoderConfig(
 	kind: Kind,
 	opusOptions: OpusEncoderConfigExt,
 ): AudioEncoderConfig {
-	const encoderConfig: AudioEncoderConfig = {
+	const encoderConfig: AudioEncoderConfigExt = {
 		codec: config.codec,
 		sampleRate: config.sampleRate,
 		numberOfChannels: config.numberOfChannels,
 		bitrate: config.bitrate,
 	};
+
+	if (config.codec.startsWith("mp4a")) {
+		// Pin raw AAC: the catalog carries a synthesized AudioSpecificConfig, which is only valid for
+		// raw frames. An ADTS default would make the frames self-describing and that description wrong.
+		encoderConfig.aac = { format: "aac" };
+	}
 
 	if (config.codec === "opus") {
 		const opus: OpusEncoderConfigExt = { ...opusOptions };
