@@ -106,22 +106,32 @@ impl Export {
 		Self::with_catalog_format(broadcast, CatalogFormat::default())
 	}
 
-	/// Subscribe to `broadcast`, selecting an explicit catalog format.
+	/// Subscribe to `broadcast`, selecting an explicit catalog format. Media only;
+	/// any catalog extension (e.g. `.scte35` cues) is ignored.
 	pub fn with_catalog_format(
 		broadcast: moq_net::BroadcastConsumer,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
-		Self::with_extension(broadcast, catalog_format)
+		Self::build(broadcast, catalog_format)
+	}
+}
+
+impl Export<scte35::Ext> {
+	/// Subscribe to `broadcast`, exporting its `.scte35` cue tracks back to MPEG-TS
+	/// alongside the media. The `Self` type pins the extension, so callers write
+	/// `Export::with_scte35(..)` with no turbofish (the plain constructors are media-only).
+	pub fn with_scte35(
+		broadcast: moq_net::BroadcastConsumer,
+		catalog_format: CatalogFormat,
+	) -> Result<Self, crate::Error> {
+		Self::build(broadcast, catalog_format)
 	}
 }
 
 impl<E: scte35::Catalog> Export<E> {
-	/// Subscribe with a catalog extension (e.g. `scte35::Ext`), exporting its scte35
-	/// cue tracks alongside the media; the plain constructors are media-only (`()`).
-	pub fn with_extension(
-		broadcast: moq_net::BroadcastConsumer,
-		catalog_format: CatalogFormat,
-	) -> Result<Self, crate::Error> {
+	/// Shared constructor. The public entry points each live on a concrete
+	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
+	fn build(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
 		let catalog = CatalogSource::new(&broadcast, catalog_format)?;
 		Ok(Self {
 			broadcast,
