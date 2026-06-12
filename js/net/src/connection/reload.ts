@@ -1,7 +1,7 @@
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
-import { type ConnectProps, connect, type WebSocketOptions } from "./connect.ts";
+import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
 
 export type ReloadDelay = {
@@ -49,7 +49,7 @@ export class Reload {
 	readonly announced: Getter<Set<Path.Valid>> = this.#announced;
 
 	// WebTransport options (not reactive).
-	webtransport?: WebTransportOptions;
+	webtransport?: WebTransportProps;
 
 	// WebSocket (fallback) options (not reactive).
 	websocket: WebSocketOptions | undefined;
