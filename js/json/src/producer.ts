@@ -19,6 +19,10 @@ export interface Config<T> {
 
 	// Optional zod schema used to validate each value before publishing.
 	schema?: z.ZodMiniType<T>;
+
+	// Starting value for {@link Producer.mutate} before anything has been published. Required to
+	// mutate a producer that hasn't published yet (e.g. a fresh catalog); ignored once a value exists.
+	initial?: T;
 }
 
 /** Publishes a JSON value over a track, choosing snapshots and deltas automatically. */
@@ -57,6 +61,36 @@ export class Producer<T> {
 		}
 
 		this.#last = json;
+	}
+
+	/**
+	 * Mutate the current value in place and publish the result.
+	 *
+	 * The callback receives a deep clone of the last-published value, falling back to
+	 * {@link Config.initial} if nothing has been published yet (throws if neither exists). Edit it in
+	 * place; on return the result is published via {@link update}, a no-op if unchanged:
+	 *
+	 * ```ts
+	 * producer.mutate((catalog) => {
+	 * 	catalog.scte35 = { ... };
+	 * });
+	 * ```
+	 *
+	 * Independent owners can share a single Producer and each edit only their own keys: every call
+	 * starts from the latest value, so sections compose instead of clobbering one another. Use
+	 * {@link update} to replace the whole value instead.
+	 */
+	mutate(fn: (value: T) => void): void {
+		// Start from the last-published value, falling back to the configured initial value. We
+		// don't invent an empty object: mutating with nothing to start from is a usage error.
+		const base = this.#last ?? this.#config.initial;
+		if (base === undefined) {
+			throw new Error("mutate() requires a prior update() or `initial` in the config");
+		}
+
+		const value = structuredClone(base) as T;
+		fn(value);
+		this.update(value);
 	}
 
 	/** Finish the track, closing any open group. */

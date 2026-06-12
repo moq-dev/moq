@@ -4,7 +4,7 @@
 		"rootDir": "./src",
 		"outDir": "dist",
 		"emitDeclarationOnly": true,
-		"types": ["audioworklet"]
+		"types": ["audioworklet", "bun"]
 	},
 	"include": ["src", "../common/worklet.d.ts"]
 }

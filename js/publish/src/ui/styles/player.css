@@ -1,0 +1,116 @@
+:host {
+	display: block;
+	position: relative;
+}
+
+.player {
+	position: relative;
+	width: 100%;
+	overflow: hidden;
+	border-radius: var(--spacing-8);
+	background: #000;
+	line-height: 0;
+}
+
+/* The slotted <moq-publish> (its <video> preview) defines the player's height. */
+.player ::slotted(moq-publish) {
+	display: block;
+	width: 100%;
+}
+
+/* With no visible preview there is nothing to size the box, so reserve 16:9. */
+.player--empty {
+	aspect-ratio: 16 / 9;
+	background: radial-gradient(circle at 50% 35%, #1b1b1f, #0c0c0e 70%);
+}
+
+.player:not(.player--chrome) {
+	cursor: none;
+}
+
+/* Gradient scrims keep the chrome legible. */
+.scrim {
+	position: absolute;
+	left: 0;
+	right: 0;
+	pointer-events: none;
+	opacity: 0;
+	transition: opacity 200ms var(--ease);
+}
+
+.scrim--top {
+	top: 0;
+	height: 25%;
+	background: linear-gradient(to bottom, var(--color-black-alpha-40), transparent);
+}
+
+.scrim--bottom {
+	bottom: 0;
+	height: 100%;
+	background: linear-gradient(to top, var(--color-black-alpha-60), transparent 60%);
+}
+
+.player--chrome .scrim {
+	opacity: 1;
+}
+
+/* Center affordances: source picker / "video off" placeholder. */
+.center {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	pointer-events: none;
+	line-height: 1.4;
+}
+
+/* Bottom chrome. */
+.chrome {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	display: flex;
+	flex-direction: column;
+	justify-content: flex-end;
+	opacity: 0;
+	transform: translateY(0.5rem);
+	pointer-events: none;
+	transition:
+		opacity 200ms var(--ease),
+		transform 200ms var(--ease);
+	line-height: 1.4;
+}
+
+.player--chrome .chrome {
+	opacity: 1;
+	transform: translateY(0);
+	pointer-events: auto;
+}
+
+/* Fullscreen. */
+.player:fullscreen,
+/* stylelint-disable-next-line selector-no-vendor-prefix -- Safari/iPadOS fallback */
+.player:-webkit-full-screen,
+.player--pseudo-fullscreen {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 0;
+}
+
+.player--pseudo-fullscreen {
+	position: fixed;
+	inset: 0;
+	width: 100vw;
+	height: 100vh;
+	z-index: 2147483647;
+}
+
+.player:fullscreen ::slotted(moq-publish),
+/* stylelint-disable-next-line selector-no-vendor-prefix -- Safari/iPadOS fallback */
+.player:-webkit-full-screen ::slotted(moq-publish),
+.player--pseudo-fullscreen ::slotted(moq-publish) {
+	max-height: 100%;
+}

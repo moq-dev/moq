@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
 
 			origin.publish_broadcast(&config.broadcast, broadcast.consume());
 
-			let reconnect = client.with_publish(origin.consume()).connect(config.url);
+			let reconnect = client.with_publish(origin.consume()).reconnect(config.url);
 
 			tokio::select! {
 				res = reconnect.closed() => Ok(res?),
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
 			}
 		}
 		Command::Subscribe => {
-			let reconnect = client.with_consume(origin.clone()).connect(config.url);
+			let reconnect = client.with_consume(origin.clone()).reconnect(config.url);
 
 			// IETF MoQ + the current OriginConsumer API don't let us call
 			// `session.consume_broadcast(&path)` directly, so loop on announces

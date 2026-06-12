@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["moq", "gameboy", "streaming", "emulator", "live"]
 categories = ["multimedia::video", "emulators", "network-programming"]
 
-version = "0.2.17"
+version = "0.2.18"
 edition = "2024"
 rust-version.workspace = true
 
@@ -22,11 +22,12 @@ anyhow = { version = "1", features = ["backtrace"] }
 boytacean = { version = "0.11", features = ["gen-mock"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
-ffmpeg-next = "8"
 hang = { workspace = true }
+moq-audio = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 moq-net = { workspace = true }
+moq-video = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"
 tokio = { workspace = true, features = ["full"] }

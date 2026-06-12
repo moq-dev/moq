@@ -94,6 +94,9 @@
           ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
             # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
             pkgs.release-plz
+            # cpal's `alsa-sys` (moq-audio `capture` feature) links libasound on
+            # Linux via pkg-config; macOS uses CoreAudio, so no dep there.
+            pkgs.alsa-lib
           ];
 
         # JavaScript dependencies

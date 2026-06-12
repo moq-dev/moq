@@ -75,7 +75,7 @@ pub struct MoqFrame {
 	pub keyframe: bool,
 }
 
-pub fn convert_catalog(catalog: &hang::catalog::Catalog) -> MoqCatalog {
+pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog) -> MoqCatalog {
 	let video = catalog
 		.video
 		.renditions

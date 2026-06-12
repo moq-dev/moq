@@ -811,7 +811,7 @@ impl Cluster {
 			.with_publish(self.origin.consume())
 			.with_consume(self.origin.clone())
 			.with_stats(self.stats.tier(Tier::Internal))
-			.connect_once(url.clone())
+			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;
 

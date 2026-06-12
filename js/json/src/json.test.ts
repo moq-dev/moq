@@ -82,6 +82,61 @@ test("deltas reconstruct to the final value", async () => {
 	expect((await drain(track)).at(-1)).toEqual({ a: 5, b: 2 });
 });
 
+// `mutate()` edits the shared document: multiple owners edit one producer, each touching its own
+// keys, and each call publishes. This is how the catalog producer is extended (e.g. an scte35
+// section) without a single owner having to rebuild the whole document.
+test("mutate composes independent owners", async () => {
+	const track = new Track("test");
+	const producer = new Producer<Value>(track, { initial: {} });
+	const consumer = new Consumer<Value>(track);
+
+	producer.mutate((v) => {
+		v.video = "v1";
+	});
+	expect(await consumer.next()).toEqual({ video: "v1" });
+
+	// A second owner starts from the latest value and adds its own key without clobbering the first.
+	producer.mutate((v) => {
+		v.scte35 = { id: 1 };
+	});
+	expect(await consumer.next()).toEqual({ video: "v1", scte35: { id: 1 } });
+});
+
+test("mutate starts from the configured initial value", async () => {
+	const track = new Track("test");
+	const producer = new Producer<Value>(track, { initial: {} });
+	const consumer = new Consumer<Value>(track);
+
+	producer.mutate((v) => {
+		v.a = 1;
+	});
+	expect(await consumer.next()).toEqual({ a: 1 });
+});
+
+test("mutate without a prior value or initial throws", () => {
+	const producer = new Producer<Value>(new Track("test"));
+	expect(() => producer.mutate(() => {})).toThrow();
+});
+
+// Removing a section drops it from the reconstructed value, so a consumer detects the removal.
+// Exercised with deltas on to cover the merge-patch null-deletion path.
+test("mutate removes a section", async () => {
+	const track = new Track("test");
+	const producer = new Producer<Value>(track, { deltaRatio: 100, initial: {} });
+	const consumer = new Consumer<Value>(track);
+
+	producer.mutate((v) => {
+		v.a = 1;
+		v.scte35 = { id: 1 };
+	});
+	expect(await consumer.next()).toEqual({ a: 1, scte35: { id: 1 } });
+
+	producer.mutate((v) => {
+		delete v.scte35;
+	});
+	expect(await consumer.next()).toEqual({ a: 1 });
+});
+
 test("tight ratio rolls snapshots", async () => {
 	const track = new Track("test");
 	// A ratio of 1.0 leaves no room for any delta past the snapshot, so every change rolls.

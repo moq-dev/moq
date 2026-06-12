@@ -123,6 +123,9 @@ pub enum AuthError {
 	#[error("auth API request failed: {0}")]
 	ApiUnavailable(#[from] reqwest_middleware::Error),
 
+	#[error("auth API response was invalid: {0}")]
+	ApiInvalidResponse(#[from] serde_json::Error),
+
 	#[error("invalid URL: {0}")]
 	InvalidUrl(#[from] url::ParseError),
 
@@ -144,7 +147,7 @@ impl From<&AuthError> for http::StatusCode {
 		match err {
 			// Upstream auth API unreachable or misconfigured — this is a server-side
 			// problem, not a credential problem.
-			AuthError::ApiUnavailable(_) => http::StatusCode::BAD_GATEWAY,
+			AuthError::ApiUnavailable(_) | AuthError::ApiInvalidResponse(_) => http::StatusCode::BAD_GATEWAY,
 			AuthError::InvalidUrl(_) => http::StatusCode::INTERNAL_SERVER_ERROR,
 			_ => http::StatusCode::UNAUTHORIZED,
 		}
@@ -565,10 +568,11 @@ impl AuthToken {
 	/// (verified against the configured CA) is the only credential we require;
 	/// nothing else in the cert is inspected.
 	///
-	/// `root` is taken from the connection URL path, the same scoping a JWT
-	/// gets. An mTLS publisher dialing `/demo` therefore announces under
-	/// `demo/`, not the cluster root. Cluster peers dial `/`, so they resolve
-	/// to an empty root and keep unscoped access.
+	/// `root` is the API-resolved canonical root for the connection URL path, the
+	/// same scoping a JWT gets. An mTLS publisher dialing `/demo` therefore
+	/// announces under its canonical root, not the cluster root. Cluster peers
+	/// dial `/`, which typically resolves to an empty root and keeps unscoped
+	/// access.
 	pub fn unrestricted(root: PathOwned) -> Self {
 		Self {
 			root,
@@ -807,29 +811,28 @@ impl Auth {
 
 	/// Resolve the canonical root and billing tier for an mTLS peer via the
 	/// unified `--auth-api`. mTLS peers are already trusted (the cert is the
-	/// credential), so this only fetches the alias + tier and FAILS OPEN: with no
-	/// auth API, a root (`/`) connection, or any error, the path is used unchanged
-	/// and the tier defaults to internal (trusted peer).
-	pub(crate) async fn resolve_mtls(&self, path: &str) -> (String, bool) {
+	/// credential), so this only fetches the alias + tier.
+	///
+	/// Fails OPEN only when there is no auth API configured: the cert is the
+	/// credential and there is nothing to resolve, so the path is used unchanged
+	/// at the internal tier. Otherwise the API is the source of truth for every
+	/// connection, including the root (`/`), so it can alias and tier root peers
+	/// too. An API error therefore FAILS CLOSED (returns `Err`) rather than
+	/// accepting the connection with the path unresolved. Accepting it would route
+	/// the broadcast to the literal vanity path (e.g. `demo`) instead of its
+	/// canonical root (e.g. `x7k2qp`), producing a zombie session: the publisher
+	/// believes it is connected and never reconnects, but nothing is ever served.
+	/// Failing closed lets the client retry and self-heal once the API recovers.
+	pub(crate) async fn resolve_mtls(&self, path: &str) -> Result<(String, bool), AuthError> {
 		let Some((base, client)) = &self.auth_api else {
-			return (path.to_string(), true);
+			return Ok((path.to_string(), true));
 		};
 
-		// Root connection ("/" or ""): nothing to resolve, skip the call.
-		if path.trim_matches('/').is_empty() {
-			return (path.to_string(), true);
-		}
-
-		match Self::fetch_auth_api(client, base, path, None, true).await {
-			Ok(resp) => (
-				resp.alias.unwrap_or_else(|| path.to_string()),
-				resp.internal.unwrap_or(true),
-			),
-			Err(err) => {
-				tracing::warn!(%err, %path, "auth-api mTLS resolution failed; using path unchanged, internal tier");
-				(path.to_string(), true)
-			}
-		}
+		let resp = Self::fetch_auth_api(client, base, path, None, true).await?;
+		Ok((
+			resp.alias.unwrap_or_else(|| path.to_string()),
+			resp.internal.unwrap_or(true),
+		))
 	}
 
 	/// Build the unified auth-API request URL. The connection path (`root`), the
@@ -863,7 +866,7 @@ impl Auth {
 	) -> Result<AuthApiResponse, AuthError> {
 		let url = Self::auth_api_url(base, path, kid, mtls);
 		let body = client.get(url).send().await?.error_for_status()?.text().await?;
-		serde_json::from_str(&body).map_err(|_| AuthError::DecodeFailed)
+		serde_json::from_str(&body).map_err(AuthError::from)
 	}
 
 	/// Verify a connection via the unified `--auth-api`: one call returns the
@@ -916,7 +919,7 @@ impl Auth {
 
 	async fn fetch_public_response(client: &ClientWithMiddleware, url: &url::Url) -> Result<PublicResponse, AuthError> {
 		let body = client.get(url.clone()).send().await?.error_for_status()?.text().await?;
-		serde_json::from_str(&body).map_err(|_| AuthError::DecodeFailed)
+		serde_json::from_str(&body).map_err(AuthError::from)
 	}
 
 	/// Parse the token from the user provided URL, returning the claims if successful.
@@ -2437,7 +2440,9 @@ api = "https://api.example.com/access"
 	}
 
 	#[tokio::test]
-	async fn test_public_api_invalid_json_returns_decode_failed() -> anyhow::Result<()> {
+	async fn test_public_api_invalid_json_returns_invalid_response() -> anyhow::Result<()> {
+		// Malformed upstream JSON is an upstream failure (502), not a bad-credential
+		// (401): the auth API answered, but with garbage.
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
 			.respond_with(ResponseTemplate::new(200).set_body_string("not json"))
@@ -2446,7 +2451,11 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_public_api(&server, &[], &[]).await;
 		let result = auth.verify(&AuthParams::new("/demo")).await;
-		assert!(matches!(result, Err(AuthError::DecodeFailed)));
+		assert!(matches!(result, Err(AuthError::ApiInvalidResponse(_))));
+		assert_eq!(
+			http::StatusCode::from(result.unwrap_err()),
+			http::StatusCode::BAD_GATEWAY
+		);
 		Ok(())
 	}
 
@@ -2969,7 +2978,10 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		assert_eq!(auth.resolve_mtls("/demo/room").await, ("x7k2qp/room".to_string(), true));
+		assert_eq!(
+			auth.resolve_mtls("/demo/room").await?,
+			("x7k2qp/room".to_string(), true)
+		);
 		Ok(())
 	}
 
@@ -2985,23 +2997,78 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		assert_eq!(auth.resolve_mtls("/demo").await, ("x7k2qp".to_string(), false));
+		assert_eq!(auth.resolve_mtls("/demo").await?, ("x7k2qp".to_string(), false));
 		Ok(())
 	}
 
 	#[tokio::test]
-	async fn auth_api_mtls_skips_api_for_root() -> anyhow::Result<()> {
-		// A root connection ("/") has no project segment, so cluster peers don't
-		// hit the API at all; they stay internal.
+	async fn auth_api_mtls_resolves_root_via_api() -> anyhow::Result<()> {
+		// Root connections go through the API too, so it owns the alias + tier for
+		// every mTLS peer. Here the API aliases the root and demotes it to external.
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
-			.respond_with(ResponseTemplate::new(500))
-			.expect(0)
+			.and(path_matcher("/auth"))
+			.and(query_param("root", ""))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp","internal":false}"#))
 			.mount(&server)
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		assert_eq!(auth.resolve_mtls("/").await, ("/".to_string(), true));
+		assert_eq!(auth.resolve_mtls("/").await?, ("x7k2qp".to_string(), false));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_mtls_no_api_fails_open() -> anyhow::Result<()> {
+		// With no auth API configured the cert is the only credential: use the path
+		// unchanged at the internal tier. This is the sole fail-open case. (A public
+		// path just makes the config valid; mTLS resolution ignores it.)
+		let auth = Auth::new(AuthConfig {
+			public: simple_public("anon"),
+			..Default::default()
+		})
+		.await?;
+		assert_eq!(auth.resolve_mtls("/demo").await?, ("/demo".to_string(), true));
+		assert_eq!(auth.resolve_mtls("/").await?, ("/".to_string(), true));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_mtls_fails_closed_on_api_error() -> anyhow::Result<()> {
+		// A non-root mTLS path needs an alias. If the API can't answer, reject the
+		// connection instead of accepting it with the path unresolved (which would
+		// route the broadcast to the literal vanity path and strand the publisher).
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo"))
+			.respond_with(ResponseTemplate::new(404))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let err = auth.resolve_mtls("/demo").await.unwrap_err();
+		assert!(matches!(err, AuthError::ApiUnavailable(_)));
+		assert_eq!(http::StatusCode::from(err), http::StatusCode::BAD_GATEWAY);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_mtls_fails_closed_on_invalid_json() -> anyhow::Result<()> {
+		// A 2xx with an unparseable body is still an upstream failure: classify it
+		// as 502 (not a credential 401) so the mTLS peer reconnects and self-heals.
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("root", "demo"))
+			.respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let err = auth.resolve_mtls("/demo").await.unwrap_err();
+		assert!(matches!(err, AuthError::ApiInvalidResponse(_)));
+		assert_eq!(http::StatusCode::from(err), http::StatusCode::BAD_GATEWAY);
 		Ok(())
 	}
 

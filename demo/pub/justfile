@@ -41,24 +41,24 @@ list:
 # --- Publishing ---
 
 # Publish Big Buck Bunny to a relay server.
-bbb url='http://localhost:4443/anon' *args:
+bbb url='http://localhost:4443' *args:
     just download bbb
     just cmaf bbb "{{ url }}" {{ args }}
 
 # Publish Tears of Steel to a relay server.
-tos url='http://localhost:4443/anon' *args:
+tos url='http://localhost:4443' *args:
     just download tos
     just cmaf tos "{{ url }}" {{ args }}
 
 # Publish a video using ffmpeg (CMAF / fMP4) to a relay server.
-cmaf name url='http://localhost:4443/anon' *args:
+cmaf name url='http://localhost:4443' *args:
     cargo build --bin moq-cli
     just ffmpeg-cmaf "media/{{ name }}.mp4" |\
     cargo run --bin moq-cli -- \
     	{{ args }} publish --url "{{ url }}" --name "{{ name }}.hang" fmp4
 
 # Publish a video using ffmpeg (MPEG-TS) to a relay server.
-ts name url='http://localhost:4443/anon' *args:
+ts name url='http://localhost:4443' *args:
     cargo build --bin moq-cli
     just ffmpeg-ts "media/{{ name }}.mp4" |\
     cargo run --bin moq-cli -- \
@@ -73,7 +73,7 @@ iroh name url prefix="":
     	--iroh-enabled publish --url "{{ url }}" --name "{{ prefix }}{{ name }}.hang" fmp4
 
 # Generate and ingest an HLS stream from a video file.
-hls name relay="http://localhost:4443/anon":
+hls name relay="http://localhost:4443":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -149,7 +149,7 @@ hls name relay="http://localhost:4443/anon":
     exit $EXIT_CODE
 
 # Publish a video using H.264 Annex B format.
-h264 name url="http://localhost:4443/anon" *args:
+h264 name url="http://localhost:4443" *args:
     just download "{{ name }}"
     cargo build --bin moq-cli
 
@@ -213,7 +213,7 @@ serve-hls name port="8000":
     cd "$OUT_DIR" && python3 -m http.server {{ port }}
 
 # Publish the clock broadcast.
-clock action url="http://localhost:4443/anon" *args:
+clock action url="http://localhost:4443" *args:
     @if [ "{{ action }}" != "publish" ] && [ "{{ action }}" != "subscribe" ]; then \
     	echo "Error: action must be 'publish' or 'subscribe', got '{{ action }}'" >&2; \
     	exit 1; \
@@ -228,7 +228,7 @@ console:
 # --- GStreamer ---
 
 # Publish a video using GStreamer to a relay server.
-gst name url='http://localhost:4443/anon' *args:
+gst name url='http://localhost:4443' *args:
     just download "{{ name }}"
     cargo build -p moq-gst
 

@@ -24,14 +24,14 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 
-	// For local development, use: http://localhost:4443/anon/video-example
+	// For local development, use: http://localhost:4443/video-example
 	// The "anon" path is usually configured to bypass authentication; be careful!
 	let url = url::Url::parse("https://cdn.moq.dev/anon/video-example").unwrap();
 
 	// Establish a connection with automatic reconnection.
 	// with_consume() registers an OriginProducer for incoming data.
 	// Use with_publish() if you also want to publish from the session.
-	let reconnect = client.with_consume(origin).connect(url);
+	let reconnect = client.with_consume(origin).reconnect(url);
 
 	// Wait until the reconnect loop stops (e.g. timeout exceeded).
 	Ok(reconnect.closed().await?)
@@ -51,7 +51,7 @@ async fn run_subscribe(mut consumer: moq_net::OriginConsumer) -> anyhow::Result<
 
 	// Read the catalog to discover available tracks.
 	let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
-	let mut catalog = moq_mux::catalog::hang::Consumer::new(catalog_track);
+	let mut catalog: moq_mux::catalog::hang::Consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
 
 	let info = catalog.next().await?.ok_or_else(|| anyhow::anyhow!("no catalog"))?;
 

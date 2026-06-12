@@ -103,15 +103,27 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let prefix = self.origin.as_ref().ok_or(Error::InvalidRole)?.root().to_owned();
 		let request_id = self.control.next_request_id().await?;
 
-		// Write SubscribeNamespace
-		let msg = ietf::SubscribeNamespace {
-			request_id,
-			namespace: prefix.clone(),
-			subscribe_options: 0x01, // NAMESPACE only
-		};
-
-		stream.writer.encode(&ietf::SubscribeNamespace::ID).await?;
-		stream.writer.encode(&msg).await?;
+		// Draft-18+ uses SUBSCRIBE_NAMESPACE (0x50); earlier drafts use the legacy
+		// 0x11 message with a Subscribe Options field.
+		match self.version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				let msg = ietf::SubscribeNamespaceLegacy {
+					request_id,
+					namespace: prefix.clone(),
+					subscribe_options: 0x01, // NAMESPACE only
+				};
+				stream.writer.encode(&ietf::SubscribeNamespaceLegacy::ID).await?;
+				stream.writer.encode(&msg).await?;
+			}
+			_ => {
+				let msg = ietf::SubscribeNamespace {
+					request_id,
+					namespace: prefix.clone(),
+				};
+				stream.writer.encode(&ietf::SubscribeNamespace::ID).await?;
+				stream.writer.encode(&msg).await?;
+			}
+		}
 
 		tracing::debug!(%prefix, "subscribe_namespace sent");
 
@@ -448,10 +460,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let abs = origin.absolute(&path).to_owned();
 
 		let mut state = self.state.lock();
-		let broadcast = match state.broadcasts.entry(path.clone()) {
+		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
 				entry.get_mut().count += 1;
-				return Ok(entry.get().producer.clone());
+				Ok(entry.get().producer.clone())
 			}
 			Entry::Vacant(entry) => {
 				// Stamp this connection's origin as the sole hop so the route is
@@ -461,29 +473,37 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				hops.push(self.session_origin)
 					.expect("an empty hop chain has room for one entry");
 				let broadcast = Broadcast { hops }.produce();
+
+				// Create the dynamic handler BEFORE publishing so consumers see
+				// dynamic >= 1 the moment they receive the announce. Otherwise a
+				// consumer can call subscribe_track() before the spawned
+				// run_broadcast bumps the counter and get NotFound (mirrors the
+				// note in lite::Subscriber).
+				let dynamic = broadcast.dynamic();
+
 				origin.publish_broadcast(path.clone(), broadcast.consume());
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),
 					count: 1,
 					_stats: self.stats.broadcast(&abs).subscriber(),
 				});
-				broadcast
+
+				tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+
+				let this = self.clone();
+				web_async::spawn(async move {
+					// stop_announce is the authoritative remover: it drops the entry (and
+					// its producer) once the announce refcount hits zero, which is what
+					// makes run_broadcast exit. Removing here too would let a stale task
+					// delete a freshly re-announced entry for the same path.
+					if let Err(err) = this.run_broadcast(path, dynamic).await {
+						tracing::debug!(%err, "error running broadcast");
+					}
+				});
+
+				Ok(broadcast)
 			}
-		};
-
-		tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-
-		let this = self.clone();
-		let producer = broadcast.clone();
-
-		web_async::spawn(async move {
-			if let Err(err) = this.run_broadcast(path.clone(), producer.dynamic()).await {
-				tracing::debug!(%err, "error running broadcast");
-			}
-			this.state.lock().broadcasts.remove(&path);
-		});
-
-		Ok(broadcast)
+		}
 	}
 
 	fn stop_announce(&mut self, path: PathOwned) -> Result<(), Error> {

@@ -130,7 +130,7 @@ impl Reconnect {
 
 			tracing::info!(%url, "connecting");
 
-			match client.connect_once(url.clone()).await {
+			match client.connect(url.clone()).await {
 				Ok(session) => {
 					tracing::info!(%url, "connected");
 					delay = backoff.initial;

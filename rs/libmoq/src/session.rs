@@ -72,7 +72,7 @@ impl Session {
 			.init()?
 			.with_publish(publish)
 			.with_consume(consume)
-			.connect(url);
+			.reconnect(url);
 
 		Self::report(callback, reconnect).await
 	}

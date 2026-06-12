@@ -1,17 +1,16 @@
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../element";
-import { bufferControl } from "./components/buffer-control";
 import { bufferingIndicator } from "./components/buffering-indicator";
-import { fullscreenButton } from "./components/fullscreen-button";
+import { centerPlay } from "./components/center-play";
+import { controlBar } from "./components/control-bar";
 import { offlineIndicator } from "./components/offline-indicator";
-import { playPauseButton } from "./components/play-pause";
-import { qualitySelector } from "./components/quality-selector";
-import { statsButton } from "./components/stats-button";
-import { volumeSlider } from "./components/volume-slider";
-import { watchStatusIndicator } from "./components/watch-status-indicator";
-import { statsPanel } from "./stats";
+import { settingsPanel } from "./components/settings-panel";
+import type { Tab, UiState } from "./state";
 import styles from "./styles/index.css?inline";
+
+// How long the chrome lingers after the pointer stops moving (while playing).
+const HIDE_MS = 2800;
 
 export default class MoqWatchUi extends HTMLElement {
 	#signals?: Effect;
@@ -54,34 +53,70 @@ export default class MoqWatchUi extends HTMLElement {
 		const watch = effect.get(this.#watch);
 		if (!watch) return;
 
-		const visible = new Signal(false);
+		const state: UiState = {
+			chrome: new Signal(true),
+			panel: new Signal(false),
+			tab: new Signal<Tab>("quality"),
+		};
 
-		const videoContainer = DOM.create("div", { className: "video-container" });
-		videoContainer.append(
-			DOM.create("slot"),
-			statsPanel(effect, watch, visible),
-			bufferingIndicator(effect, watch),
-			offlineIndicator(effect, watch),
+		const player = DOM.create("div", { className: "player" });
+
+		// The slotted <moq-watch> (canvas/video) sits at the base of the stack.
+		player.appendChild(DOM.create("slot"));
+
+		// Center affordances: play prompt + buffering spinner + offline notice.
+		const center = DOM.create("div", { className: "center" });
+		center.append(centerPlay(effect, watch), bufferingIndicator(effect, watch), offlineIndicator(effect, watch));
+
+		// Top scrim keeps the bottom bar legible and hosts ambient gradient.
+		const scrimTop = DOM.create("div", { className: "scrim scrim--top" });
+
+		// Bottom chrome: gradient scrim + the control bar.
+		const chrome = DOM.create("div", { className: "chrome" });
+		chrome.append(
+			DOM.create("div", { className: "scrim scrim--bottom" }),
+			controlBar(effect, watch, state, player),
 		);
 
-		const controls = DOM.create("div", { className: "controls" });
+		const panel = settingsPanel(effect, watch, state);
 
-		const playback = DOM.create("div", { className: "playback-controls flex-align-center" });
-		playback.append(
-			playPauseButton(effect, watch),
-			volumeSlider(effect, watch),
-			watchStatusIndicator(effect, watch),
-			statsButton(effect, visible),
-			fullscreenButton(effect, watch),
-		);
+		player.append(scrimTop, center, chrome, panel);
+		DOM.render(effect, this.#root, player);
 
-		const latency = DOM.create("div", { className: "latency-controls" });
-		latency.append(bufferControl(effect, watch), qualitySelector(effect, watch));
+		this.#wireChrome(effect, watch, state, player);
+	}
 
-		controls.append(playback, latency);
+	// Show the chrome on activity, auto-hide while playing once the pointer
+	// settles. Stays pinned while paused or when the settings panel is open.
+	#wireChrome(effect: Effect, watch: MoqWatch, state: UiState, player: HTMLElement) {
+		// Bump on any pointer/focus activity to re-arm the auto-hide.
+		const activity = new Signal(0);
+		const bump = () => activity.update((n) => n + 1);
+		effect.event(this, "pointermove", bump);
+		effect.event(this, "pointerdown", bump);
+		effect.event(this, "focusin", bump);
 
-		DOM.render(effect, this.#root, videoContainer);
-		DOM.render(effect, this.#root, controls);
+		const pinned = () => watch.backend.paused.peek() || state.panel.peek();
+
+		// Reveal on activity and reschedule the hide timer. Reruns when pinned
+		// state changes too, so leaving pinned (e.g. closing settings while
+		// playing) re-arms the auto-hide. effect.timer auto-clears on rerun.
+		effect.run((e) => {
+			const isPinned = e.get(watch.backend.paused) || e.get(state.panel);
+			e.get(activity);
+			state.chrome.set(true);
+			if (isPinned) return;
+			e.timer(() => state.chrome.set(false), HIDE_MS);
+		});
+
+		effect.event(this, "pointerleave", () => {
+			if (pinned()) return;
+			state.chrome.set(false);
+		});
+
+		effect.run((e) => {
+			player.classList.toggle("player--chrome", e.get(state.chrome));
+		});
 	}
 }
 

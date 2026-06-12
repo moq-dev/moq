@@ -1,9 +1,10 @@
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast";
+import * as Preview from "./preview";
 import * as Source from "./source";
 
-const OBSERVED = ["url", "name", "muted", "invisible", "source"] as const;
+const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 type SourceType = "camera" | "screen" | "file";
@@ -22,12 +23,15 @@ export default class MoqPublish extends HTMLElement {
 		source: new Signal<SourceType | File | undefined>(undefined),
 		muted: new Signal(false),
 		invisible: new Signal(false),
+		// What a <canvas> preview renders: the raw capture, or a decoded copy of the encoded video.
+		preview: new Signal<Preview.Mode>("source"),
 	};
 
 	connection: Moq.Connection.Reload;
 	broadcast: Broadcast;
 
-	#preview = new Signal<HTMLVideoElement | undefined>(undefined);
+	// The preview element, either a <video> (raw source via srcObject) or a <canvas> (rendered frames).
+	#preview = new Signal<HTMLVideoElement | HTMLCanvasElement | undefined>(undefined);
 
 	video = new Signal<Source.Camera | Source.Screen | undefined>(undefined);
 	audio = new Signal<Source.Microphone | Source.Screen | undefined>(undefined);
@@ -84,7 +88,7 @@ export default class MoqPublish extends HTMLElement {
 
 		// Watch to see if the preview element is added or removed.
 		const setPreview = () => {
-			this.#preview.set(this.querySelector("video") as HTMLVideoElement | undefined);
+			this.#preview.set(this.querySelector("video, canvas") as HTMLVideoElement | HTMLCanvasElement | undefined);
 		};
 		const observer = new MutationObserver(setPreview);
 		observer.observe(this, { childList: true, subtree: true });
@@ -94,6 +98,24 @@ export default class MoqPublish extends HTMLElement {
 		this.signals.run((effect) => {
 			const preview = effect.get(this.#preview);
 			if (!preview) return;
+
+			// A <canvas> renders the decoded frames; a <video> shows the raw source via srcObject.
+			if (preview instanceof HTMLCanvasElement) {
+				const renderer = new Preview.Renderer({
+					canvas: preview,
+					video: this.broadcast.video,
+					mode: this.state.preview,
+					enabled: this.#videoEnabled,
+				});
+				effect.cleanup(() => renderer.close());
+				return;
+			}
+
+			// preview="none" disables the preview entirely.
+			if (effect.get(this.state.preview) === "none") {
+				preview.style.display = "none";
+				return;
+			}
 
 			const source = effect.get(this.broadcast.video.source);
 			if (!source) {
@@ -107,6 +129,14 @@ export default class MoqPublish extends HTMLElement {
 			effect.cleanup(() => {
 				preview.srcObject = null;
 			});
+		});
+
+		// `encoded` decodes the wire output to a <canvas>; a <video> can only show the raw source.
+		// Warn once per state change rather than on every source/frame update.
+		this.signals.run((effect) => {
+			if (!(effect.get(this.#preview) instanceof HTMLVideoElement)) return;
+			if (effect.get(this.state.preview) !== "encoded") return;
+			console.warn('moq-publish: preview="encoded" requires a <canvas> element; showing the raw source.');
 		});
 
 		this.signals.run(this.#runSource.bind(this));
@@ -137,6 +167,14 @@ export default class MoqPublish extends HTMLElement {
 			this.state.muted.set(newValue !== null);
 		} else if (name === "invisible") {
 			this.state.invisible.set(newValue !== null);
+		} else if (name === "preview") {
+			if (newValue === "encoded" || newValue === "source" || newValue === "none") {
+				this.state.preview.set(newValue);
+			} else if (newValue === null) {
+				this.state.preview.set("source");
+			} else {
+				throw new Error(`Invalid preview: ${newValue}`);
+			}
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -257,6 +295,14 @@ export default class MoqPublish extends HTMLElement {
 
 	set invisible(value: boolean) {
 		this.state.invisible.set(value);
+	}
+
+	get preview(): Preview.Mode {
+		return this.state.preview.peek();
+	}
+
+	set preview(value: Preview.Mode) {
+		this.state.preview.set(value);
 	}
 }
 

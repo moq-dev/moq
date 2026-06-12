@@ -18,21 +18,23 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bytes::Bytes;
-use hang::catalog::{AudioCodec, AudioConfig, Catalog, Container, VideoCodec, VideoConfig};
+use hang::catalog::{AudioCodec, AudioConfig, Container, VideoCodec, VideoConfig};
 use mpeg2ts::es::StreamId;
 use mpeg2ts::es::StreamType;
 use mpeg2ts::time::Timestamp as TsTimestamp;
-use mpeg2ts::ts::payload::{Bytes as TsBytes, Pat, Pes, Pmt};
+use mpeg2ts::ts::payload::{Bytes as TsBytes, Pat, Pes, Pmt, Section};
 use mpeg2ts::ts::{
-	AdaptationField, ContinuityCounter, EsInfo, Pid, ProgramAssociation, TransportScramblingControl, TsHeader,
-	TsPacket, TsPacketWriter, TsPayload, VersionNumber, WriteTsPacket,
+	AdaptationField, ContinuityCounter, Descriptor, EsInfo, Pid, ProgramAssociation, TransportScramblingControl,
+	TsHeader, TsPacket, TsPacketWriter, TsPayload, VersionNumber, WriteTsPacket,
 };
 
 use crate::catalog::CatalogFormat;
+use crate::catalog::hang::Catalog;
 use crate::codec::annexb;
 use crate::container::{CatalogSource, ExportSource, Frame};
 
 use super::adts;
+use super::scte35;
 
 /// PID of the single program's PMT.
 const PMT_PID: u16 = 0x1000;
@@ -46,9 +48,9 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// Use [`next`](Self::next) to pull byte chunks: the first chunk is PAT+PMT, then
 /// each subsequent chunk is the TS packets for one media frame (preceded by a
 /// fresh PAT+PMT at video keyframes). Returns `None` when the broadcast ends.
-pub struct Export {
+pub struct Export<E: scte35::Catalog = ()> {
 	broadcast: moq_net::BroadcastConsumer,
-	catalog: Option<CatalogSource>,
+	catalog: Option<CatalogSource<E>>,
 	latency: Duration,
 
 	tracks: HashMap<String, Track>,
@@ -78,6 +80,8 @@ enum Kind {
 		sample_rate: u32,
 		channel_count: u32,
 	},
+	/// SCTE-35: private sections (stream_type 0x86), carried verbatim.
+	Scte35,
 }
 
 /// The program tables plus the resolved PID layout.
@@ -102,11 +106,32 @@ impl Export {
 		Self::with_catalog_format(broadcast, CatalogFormat::default())
 	}
 
-	/// Subscribe to `broadcast`, selecting an explicit catalog format.
+	/// Subscribe to `broadcast`, selecting an explicit catalog format. Media only;
+	/// any catalog extension (e.g. `.scte35` cues) is ignored.
 	pub fn with_catalog_format(
 		broadcast: moq_net::BroadcastConsumer,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
+		Self::build(broadcast, catalog_format)
+	}
+}
+
+impl Export<scte35::Ext> {
+	/// Subscribe to `broadcast`, exporting its `.scte35` cue tracks back to MPEG-TS
+	/// alongside the media. The `Self` type pins the extension, so callers write
+	/// `Export::with_scte35(..)` with no turbofish (the plain constructors are media-only).
+	pub fn with_scte35(
+		broadcast: moq_net::BroadcastConsumer,
+		catalog_format: CatalogFormat,
+	) -> Result<Self, crate::Error> {
+		Self::build(broadcast, catalog_format)
+	}
+}
+
+impl<E: scte35::Catalog> Export<E> {
+	/// Shared constructor. The public entry points each live on a concrete
+	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
+	fn build(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
 		let catalog = CatalogSource::new(&broadcast, catalog_format)?;
 		Ok(Self {
 			broadcast,
@@ -214,12 +239,20 @@ impl Export {
 		Poll::Pending
 	}
 
-	fn update_catalog(&mut self, catalog: Catalog) -> anyhow::Result<()> {
+	fn update_catalog(&mut self, mut catalog: Catalog<E>) -> anyhow::Result<()> {
+		// The cue tracks live in the extension. The trait only exposes `scte35_mut`,
+		// and this snapshot is owned, so clone the section out (`()` yields the
+		// empty default: zero cue tracks).
+		let scte35 = catalog.scte35_mut().cloned().unwrap_or_default();
+
 		let mut active: HashMap<String, ()> = HashMap::new();
 		for name in catalog.video.renditions.keys() {
 			active.insert(name.clone(), ());
 		}
 		for name in catalog.audio.renditions.keys() {
+			active.insert(name.clone(), ());
+		}
+		for name in scte35.renditions.keys() {
 			active.insert(name.clone(), ());
 		}
 
@@ -286,6 +319,25 @@ impl Export {
 			next_pid += 1;
 		}
 
+		for (name, config) in scte35.renditions.iter() {
+			if self.tracks.contains_key(name) {
+				continue;
+			}
+			let kind = scte35_kind(config, name)?;
+			let source = ExportSource::for_scte35(&self.broadcast, name, config, self.latency)?;
+			self.tracks.insert(
+				name.clone(),
+				Track {
+					source,
+					pending: None,
+					finished: false,
+					pid: next_pid,
+					kind,
+				},
+			);
+			next_pid += 1;
+		}
+
 		self.tracks.retain(|name, _| active.contains_key(name));
 		Ok(())
 	}
@@ -302,12 +354,18 @@ impl Export {
 		let mut tracks: Vec<&Track> = self.tracks.values().collect();
 		tracks.sort_by_key(|t| t.pid);
 
-		let pcr_pid = tracks
-			.iter()
-			.find(|t| matches!(t.kind, Kind::Video(_)))
-			.or_else(|| tracks.first())
+		// SCTE-35 cues are stamped on the video clock (and SCTE carries no PTS for the PCR),
+		// so a cue program needs a video track; audio alone would leave the cues pinned to zero.
+		let has_scte = tracks.iter().any(|t| matches!(t.kind, Kind::Scte35));
+		let video = tracks.iter().find(|t| matches!(t.kind, Kind::Video(_)));
+		anyhow::ensure!(
+			!has_scte || video.is_some(),
+			"TS export of SCTE-35 requires a video track for the program clock"
+		);
+		let pcr_pid = video
+			.or_else(|| tracks.iter().find(|t| matches!(t.kind, Kind::Aac { .. })))
 			.map(|t| t.pid)
-			.context("no tracks to build PMT")?;
+			.context("TS export requires a video or audio track for the PCR")?;
 
 		let es_info = tracks
 			.iter()
@@ -316,12 +374,24 @@ impl Export {
 					stream_type: match t.kind {
 						Kind::Video(stream_type) => stream_type,
 						Kind::Aac { .. } => StreamType::AdtsAac,
+						Kind::Scte35 => StreamType::Dts8ChannelLosslessAudio,
 					},
 					elementary_pid: Pid::new(t.pid)?,
 					descriptors: Vec::new(),
 				})
 			})
 			.collect::<anyhow::Result<Vec<_>>>()?;
+
+		// SCTE-35 is announced by a program-level 'CUEI' registration descriptor;
+		// the import keys detection off it (stream_type 0x86 alone is ambiguous).
+		let program_info = if tracks.iter().any(|t| matches!(t.kind, Kind::Scte35)) {
+			vec![Descriptor {
+				tag: 0x05,
+				data: b"CUEI".to_vec(),
+			}]
+		} else {
+			Vec::new()
+		};
 
 		let pat = Pat {
 			transport_stream_id: 1,
@@ -335,7 +405,7 @@ impl Export {
 			program_num: 1,
 			pcr_pid: Some(Pid::new(pcr_pid)?),
 			version_number: VersionNumber::default(),
-			program_info: Vec::new(),
+			program_info,
 			es_info,
 		};
 
@@ -373,9 +443,10 @@ impl Export {
 		let is_video = matches!(kind, Kind::Video(_));
 
 		// Build the elementary-stream payload for this frame. Video needs the
-		// resolved avcC/hvcC to rewrite length-prefixed NALs as Annex-B.
+		// resolved avcC/hvcC to rewrite length-prefixed NALs as Annex-B. SCTE-35
+		// carries no PES payload; the section is written separately below.
 		let es_payload = match &kind {
-			Kind::Video(stream_type) => video_es_payload(*stream_type, track.source.description(), &frame)?,
+			Kind::Video(stream_type) => Some(video_es_payload(*stream_type, track.source.description(), &frame)?),
 			Kind::Aac {
 				object_type,
 				sample_rate,
@@ -385,8 +456,9 @@ impl Export {
 				let mut framed = Vec::with_capacity(7 + frame.payload.len());
 				framed.extend_from_slice(&header);
 				framed.extend_from_slice(&frame.payload);
-				framed
+				Some(framed)
 			}
+			Kind::Scte35 => None,
 		};
 
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
@@ -405,14 +477,20 @@ impl Export {
 			self.last_psi = Some(frame.timestamp);
 		}
 
-		let unit = PesUnit {
-			pid,
-			is_pcr,
-			is_video,
-			keyframe: frame.keyframe,
-			timestamp: frame.timestamp,
-		};
-		self.write_pes(&mut out, &unit, &es_payload)?;
+		match es_payload {
+			// SCTE-35 rides in private sections, not PES; carry the bytes verbatim.
+			None => self.write_section(&mut out, pid, &frame.payload)?,
+			Some(es_payload) => {
+				let unit = PesUnit {
+					pid,
+					is_pcr,
+					is_video,
+					keyframe: frame.keyframe,
+					timestamp: frame.timestamp,
+				};
+				self.write_pes(&mut out, &unit, &es_payload)?;
+			}
+		}
 		Ok(Bytes::from(out))
 	}
 
@@ -483,6 +561,48 @@ impl Export {
 			offset += take;
 			first = false;
 			if offset >= payload.len() {
+				break;
+			}
+		}
+		Ok(())
+	}
+
+	/// Packetize a private section (SCTE-35) verbatim. The first packet carries the
+	/// pointer_field plus the section start as a `Section` payload (sets the unit-
+	/// start bit so the receiver finds the pointer_field); continuations are `Raw`.
+	/// The section bytes are opaque, so this round-trips byte-for-byte.
+	fn write_section(&mut self, out: &mut Vec<u8>, pid: u16, section: &[u8]) -> anyhow::Result<()> {
+		// The .scte35 track is public; a non-importer producer could publish a frame
+		// that isn't a complete splice_info_section. Drop it (with a warning) rather
+		// than emit a malformed section a downstream demuxer would choke on. One bad
+		// cue must not abort a live export, so this skips instead of erroring.
+		if !is_complete_scte35_section(section) {
+			tracing::warn!(pid, len = section.len(), "dropping malformed SCTE-35 section on export");
+			return Ok(());
+		}
+
+		let mut offset = 0;
+		let mut first = true;
+		loop {
+			let payload = if first {
+				// pointer_field (1 byte, written by `Section`) eats one payload byte.
+				let take = (TsBytes::MAX_SIZE - 1).min(section.len());
+				let chunk = &section[..take];
+				offset = take;
+				TsPayload::Section(Section {
+					pointer_field: 0,
+					data: TsBytes::new(chunk).map_err(anyhow::Error::msg)?,
+				})
+			} else {
+				let take = TsBytes::MAX_SIZE.min(section.len() - offset);
+				let chunk = &section[offset..offset + take];
+				offset += take;
+				TsPayload::Raw(TsBytes::new(chunk).map_err(anyhow::Error::msg)?)
+			};
+
+			self.write_packet(out, pid, None, payload)?;
+			first = false;
+			if offset >= section.len() {
 				break;
 			}
 		}
@@ -588,10 +708,46 @@ fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 	}
 }
 
+fn scte35_kind(config: &scte35::Config, name: &str) -> anyhow::Result<Kind> {
+	ensure_raw(&config.container, "scte35", name)?;
+	Ok(Kind::Scte35)
+}
+
+/// One SCTE-35 frame must be exactly one splice_info_section: table_id 0xFC and a
+/// total length matching the declared section_length. Structural only (no splice
+/// semantics); the bytes are still carried verbatim.
+fn is_complete_scte35_section(section: &[u8]) -> bool {
+	section.len() >= 3
+		&& section[0] == 0xfc
+		&& section.len() == 3 + ((((section[1] & 0x0f) as usize) << 8) | section[2] as usize)
+}
+
 fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<()> {
 	match container {
 		// TS carries raw codec payloads, like the Legacy varint and LOC formats.
 		Container::Legacy | Container::Loc => Ok(()),
 		Container::Cmaf { .. } => anyhow::bail!("TS export does not support CMAF {kind} track '{name}'"),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::is_complete_scte35_section;
+
+	#[test]
+	fn scte35_section_validation() {
+		// table_id 0xFC, section_length 27 (0x1b) -> 30 bytes total.
+		let mut ok = vec![0xfc, 0x30, 0x1b];
+		ok.resize(30, 0x00);
+		assert!(is_complete_scte35_section(&ok));
+		// minimal: section_length 0 -> exactly the 3-byte header.
+		assert!(is_complete_scte35_section(&[0xfc, 0x00, 0x00]));
+
+		// shorter than the 3-byte header.
+		assert!(!is_complete_scte35_section(&[0xfc, 0x00]));
+		// wrong table_id (not a splice_info_section).
+		assert!(!is_complete_scte35_section(&[0x00, 0x00, 0x00]));
+		// declared section_length (27) does not match the actual length (3).
+		assert!(!is_complete_scte35_section(&[0xfc, 0x30, 0x1b]));
 	}
 }

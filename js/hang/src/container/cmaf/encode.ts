@@ -53,6 +53,7 @@ import {
 } from "@svta/cml-iso-bmff";
 
 import type * as Catalog from "../../catalog";
+import * as Aac from "../../util/aac";
 import * as Hex from "../../util/hex";
 
 // Identity matrix for tkhd/mvhd (stored as 16.16 fixed point)
@@ -762,42 +763,6 @@ function createOpusBox(sampleRate: number, channelCount: number, description?: s
 }
 
 /**
- * Generate an AudioSpecificConfig for AAC-LC.
- * Format: 5 bits audioObjectType + 4 bits samplingFrequencyIndex + 4 bits channelConfiguration + 3 bits (zeros)
- */
-function generateAudioSpecificConfig(sampleRate: number, channelCount: number): Uint8Array {
-	// Sampling frequency index lookup
-	const sampleRateIndex: Record<number, number> = {
-		96000: 0,
-		88200: 1,
-		64000: 2,
-		48000: 3,
-		44100: 4,
-		32000: 5,
-		24000: 6,
-		22050: 7,
-		16000: 8,
-		12000: 9,
-		11025: 10,
-		8000: 11,
-		7350: 12,
-	};
-
-	const freqIndex = sampleRateIndex[sampleRate] ?? 4; // Default to 44100 if not found
-	const audioObjectType = 2; // AAC-LC
-
-	// AudioSpecificConfig is 2 bytes for AAC-LC:
-	// 5 bits: audioObjectType (2 for AAC-LC)
-	// 4 bits: samplingFrequencyIndex
-	// 4 bits: channelConfiguration
-	// 3 bits: GASpecificConfig (frameLengthFlag=0, dependsOnCoreCoder=0, extensionFlag=0)
-	const byte0 = (audioObjectType << 3) | (freqIndex >> 1);
-	const byte1 = ((freqIndex & 1) << 7) | (channelCount << 3);
-
-	return new Uint8Array([byte0, byte1]);
-}
-
-/**
  * Creates an esds (Elementary Stream Descriptor) box for AAC.
  * The description from WebCodecs is the AudioSpecificConfig.
  * If no description is provided, generates one from sampleRate and channelCount.
@@ -805,7 +770,7 @@ function generateAudioSpecificConfig(sampleRate: number, channelCount: number): 
 function createEsdsBox(sampleRate: number, channelCount: number, description?: string): Uint8Array {
 	const audioSpecificConfig = description
 		? Hex.toBytes(description)
-		: generateAudioSpecificConfig(sampleRate, channelCount);
+		: Aac.audioSpecificConfig(sampleRate, channelCount);
 
 	// ES_Descriptor structure:
 	// - tag (0x03) + size + ES_ID (2) + flags (1)

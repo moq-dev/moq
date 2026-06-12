@@ -21,7 +21,7 @@ async fn export_header_roundtrip_vp9_opus() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = crate::container::mkv::Import::new(producer, catalog.clone());
 	let mut buf = bytes::BytesMut::from(import_bytes.as_slice());
 	importer.decode(&mut buf).unwrap();
@@ -121,7 +121,7 @@ async fn export_header_roundtrip_vp9_opus() {
 	// Verify the round-trip by re-importing the header (a header alone is enough
 	// to populate the catalog).
 	let mut broadcast2 = moq_net::Broadcast::new().produce();
-	let catalog2 = crate::catalog::hang::Producer::new(&mut broadcast2).unwrap();
+	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
 	let mut importer2 = crate::container::mkv::Import::new(broadcast2, catalog2.clone());
 	let mut hbuf = bytes::BytesMut::from(header.as_ref());
 	importer2.decode(&mut hbuf).unwrap();
@@ -148,7 +148,7 @@ async fn export_waits_for_catalog_before_header() {
 
 	// The catalog track exists (so the subscriber can attach) but no renditions
 	// have been published yet: `tracks` stays empty on the first polls.
-	let _catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let _catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut exporter = crate::container::mkv::Export::new(consumer).unwrap();
 
@@ -174,7 +174,7 @@ async fn export_emits_blocks_for_each_frame() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = crate::container::mkv::Import::new(producer, catalog.clone());
 	let mut buf = bytes::BytesMut::from(import_bytes.as_slice());
 	importer.decode(&mut buf).unwrap();
@@ -221,7 +221,7 @@ async fn export_emits_blocks_for_each_frame() {
 	// Round-trip verification: feed the exported bytes back through the importer
 	// and check the catalog repopulates with the same codecs.
 	let mut bcast2 = moq_net::Broadcast::new().produce();
-	let cat2 = crate::catalog::hang::Producer::new(&mut bcast2).unwrap();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
 	let mut imp2 = crate::container::mkv::Import::new(bcast2, cat2.clone());
 	let mut rt = bytes::BytesMut::from(exported.as_slice());
 	imp2.decode(&mut rt).unwrap();
@@ -249,7 +249,7 @@ async fn export_rejects_cmaf_track() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer.unique_track(".avc1").unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x64,
@@ -289,7 +289,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer.unique_track(".avc3").unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x42,
@@ -443,7 +443,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	// mistakes in the avcC layout that the slot-by-slot check above might
 	// pass even when the record as a whole is malformed.
 	let mut bcast2 = moq_net::Broadcast::new().produce();
-	let cat2 = crate::catalog::hang::Producer::new(&mut bcast2).unwrap();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
 	let mut imp2 = crate::container::mkv::Import::new(bcast2, cat2.clone());
 	let mut rt = bytes::BytesMut::from(exported.as_slice());
 	imp2.decode(&mut rt).unwrap();
@@ -469,7 +469,7 @@ async fn export_fragment_duration_batches_blocks() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = crate::container::mkv::Import::new(producer, catalog.clone());
 	let mut buf = bytes::BytesMut::from(import_bytes.as_slice());
 	importer.decode(&mut buf).unwrap();

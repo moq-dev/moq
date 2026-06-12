@@ -10,7 +10,7 @@ import { Publish } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
-import { SubscribeNamespace } from "./subscribe_namespace.ts";
+import { SubscribeNamespace, SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
@@ -173,6 +173,19 @@ export class Connection implements Established {
 		const typeId = await stream.reader.u53();
 
 		switch (typeId) {
+			// Draft-18 SUBSCRIBE_NAMESPACE (0x50) and the legacy 0x11 message decode
+			// to the same request_id + namespace; the legacy options field is ignored.
+			case SubscribeNamespace.id: {
+				const msg = await SubscribeNamespace.decode(stream.reader, this.#session.version);
+				await this.#publisher.runSubscribeNamespace(msg, stream);
+				break;
+			}
+			case SubscribeNamespaceLegacy.id: {
+				const legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
+				const msg = new SubscribeNamespace({ requestId: legacy.requestId, namespace: legacy.namespace });
+				await this.#publisher.runSubscribeNamespace(msg, stream);
+				break;
+			}
 			case SubscribeUpdate.id: {
 				// REQUEST_UPDATE (0x02) is a follow-up, not a valid initial message
 				stream.abort(new Error("unexpected REQUEST_UPDATE as initial message"));
@@ -182,11 +195,6 @@ export class Connection implements Established {
 			case Subscribe.id: {
 				const msg = await Subscribe.decode(stream.reader, this.#session.version);
 				await this.#publisher.runSubscribe(msg, stream);
-				break;
-			}
-			case SubscribeNamespace.id: {
-				const msg = await SubscribeNamespace.decode(stream.reader, this.#session.version);
-				await this.#publisher.runSubscribeNamespace(msg, stream);
 				break;
 			}
 			case TrackStatusRequest.id: {
@@ -235,7 +243,7 @@ export class Connection implements Established {
 	}
 
 	async #runUni(stream: Reader) {
-		const header = await Group.decode(stream);
+		const header = await Group.decode(stream, this.#session.version);
 		await this.#subscriber.handleGroup(header, stream);
 	}
 

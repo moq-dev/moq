@@ -1,76 +1,161 @@
-.video-container {
-	display: block;
-	position: relative;
-	width: 100%;
-	height: auto;
-	border-radius: var(--spacing-4);
-	margin: 0 auto;
-	pointer-events: none;
-}
-
 .controls {
-	display: flex;
-	flex-direction: column;
-	gap: var(--spacing-24);
-}
-
-.button.button--playback {
-	width: 3rem;
-	height: 3rem;
-	background: linear-gradient(
-		to bottom right,
-		var(--color-orange-400),
-		var(--color-orange-500),
-		var(--color-amber-600)
-	);
-	box-shadow: 0 0 var(--spacing-16) var(--color-orange-500-alpha-60);
-	transition: box-shadow 150ms cubic-bezier(0.4, 0, 0.2, 1);
 	position: relative;
-	overflow: hidden;
+	display: flex;
+	align-items: center;
+	gap: var(--spacing-4);
+	padding: var(--spacing-8) var(--spacing-12) var(--spacing-12);
 }
 
-.button.button--playback:hover:not(:disabled) {
-	box-shadow: 0 0 var(--spacing-24) var(--color-orange-500-alpha-80);
-	transform: scale(1.02);
+.controls-group {
+	display: flex;
+	align-items: center;
+	gap: var(--spacing-4);
 }
 
-.button.button--playback:active:not(:disabled) {
-	transform: scale(0.98);
+.controls-spacer {
+	flex: 1;
 }
 
-.button.button--playback::before {
-	content: "";
-	position: absolute;
-	inset: 0;
-	background: linear-gradient(to bottom right, var(--color-white-alpha-30), transparent);
+/* Volume: the slider expands on hover/focus to stay compact by default. */
+.volume {
+	gap: var(--spacing-4);
+}
+
+.volume-track {
+	-webkit-appearance: none;
+	appearance: none;
+	width: 0;
+	max-width: 0;
+	height: 0.25rem;
+	margin: 0;
+	border-radius: 999px;
+	background: linear-gradient(
+		to right,
+		var(--color-white) 0%,
+		var(--color-white) var(--fill, 50%),
+		var(--color-white-alpha-30) var(--fill, 50%)
+	);
+	outline: none;
+	cursor: pointer;
 	opacity: 0;
-	transition: opacity 150ms cubic-bezier(0.4, 0, 0.2, 1);
-	pointer-events: none;
+	transition:
+		width 160ms var(--ease),
+		max-width 160ms var(--ease),
+		opacity 160ms var(--ease);
 }
 
-.button.button--playback:hover::before {
+.volume:hover .volume-track,
+.volume:focus-within .volume-track {
+	width: 4.5rem;
+	max-width: 4.5rem;
 	opacity: 1;
 }
 
-.button.button--playback::after {
-	content: "";
-	position: absolute;
-	inset: 0;
-	background-color: var(--color-white-alpha-20);
+.volume-track::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	appearance: none;
+	width: 0.75rem;
+	height: 0.75rem;
 	border-radius: 50%;
-	filter: blur(var(--spacing-24));
-	pointer-events: none;
+	background: var(--color-white);
+	border: none;
+	cursor: pointer;
 }
 
-.playback-controls {
-	display: flex;
-	place-content: center space-around;
+.volume-track::-moz-range-thumb {
+	width: 0.75rem;
+	height: 0.75rem;
+	border-radius: 50%;
+	background: var(--color-white);
+	border: none;
+	cursor: pointer;
+}
+
+/* Status / latency pill. */
+.badge {
 	gap: var(--spacing-8);
-	padding: var(--spacing-8) 0;
+	height: 2.25rem;
+	padding: 0 var(--spacing-12);
+	margin-left: var(--spacing-4);
+	font-size: 0.8125rem;
+	color: var(--color-white);
+	background: transparent;
+	border: none;
+	border-radius: var(--border-radius-sm);
+	cursor: pointer;
+	transition: background-color 120ms var(--ease);
 }
 
-.latency-controls {
-	display: flex;
-	flex-direction: column;
-	gap: var(--spacing-16);
+.badge:hover {
+	background-color: var(--color-white-alpha-10);
+}
+
+.badge-dot {
+	width: 0.5rem;
+	height: 0.5rem;
+	border-radius: 50%;
+	flex-shrink: 0;
+	background: var(--color-gray-400);
+}
+
+.badge-text {
+	font-weight: 600;
+	letter-spacing: 0.04em;
+}
+
+/* Latency is secondary: reveal it only on hover/focus of the badge. */
+.badge-latency {
+	max-width: 0;
+	margin-left: calc(-1 * var(--spacing-8));
+	opacity: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+	color: var(--color-white-alpha-60);
+	transition:
+		max-width 160ms var(--ease),
+		margin-left 160ms var(--ease),
+		opacity 160ms var(--ease);
+}
+
+.badge:hover .badge-latency,
+.badge:focus-visible .badge-latency {
+	max-width: 9rem;
+	margin-left: 0;
+	opacity: 1;
+}
+
+.badge[data-variant="live"] .badge-dot {
+	background: var(--color-red-400);
+	box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.7);
+	animation: badge-pulse 2s var(--ease) infinite;
+}
+
+.badge[data-variant="live"] .badge-text {
+	color: var(--color-red-400);
+}
+
+.badge[data-variant="loading"] .badge-dot,
+.badge[data-variant="connecting"] .badge-dot {
+	background: var(--color-yellow-400);
+}
+
+.badge[data-variant="error"] .badge-dot {
+	background: var(--color-gray-400);
+}
+
+.badge[data-variant="error"] .badge-text {
+	color: var(--color-gray-100);
+}
+
+@keyframes badge-pulse {
+	0% {
+		box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.6);
+	}
+	70% {
+		box-shadow: 0 0 0 0.4rem rgba(248, 113, 113, 0);
+	}
+	100% {
+		box-shadow: 0 0 0 0 rgba(248, 113, 113, 0);
+	}
 }

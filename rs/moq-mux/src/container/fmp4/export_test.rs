@@ -23,7 +23,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer.unique_track(".avc3").unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x42,
@@ -118,7 +118,7 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer.unique_track(".aac").unwrap();
 
 	// AAC-LC (profile 2), 44100 Hz, stereo. The TS importer sets `description`
@@ -204,7 +204,7 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer.unique_track(".vp8").unwrap();
 	let mut config = VideoConfig::new(VideoCodec::VP8);
 	config.coded_width = Some(320);
@@ -273,7 +273,7 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer.unique_track(".vp9").unwrap();
 	let mut config = VideoConfig::new(VP9 {
 		profile: 0,
@@ -351,7 +351,7 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = crate::container::fmp4::Import::new(producer, catalog);
 	let mut buf = BytesMut::from(data.as_slice());
 	let _ = importer.decode(&mut buf);

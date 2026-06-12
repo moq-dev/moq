@@ -12,7 +12,8 @@
 mod diff;
 
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Poll;
 
 use serde::Serialize;
@@ -116,9 +117,80 @@ impl<T: Serialize> Producer<T> {
 		self.inner.lock().unwrap().update(json, snapshot)
 	}
 
+	/// Lock the current value for in-place editing, publishing on drop.
+	///
+	/// The returned [`Guard`] derefs to the last-published value (or `T::default()` if nothing has
+	/// been published yet). Editing it through [`DerefMut`] marks the guard dirty; when a dirty
+	/// guard drops it publishes the result, a no-op if unchanged.
+	///
+	/// This is the counterpart to a callback: hold the guard, mutate, drop. The guard holds the
+	/// producer's lock for its lifetime, so independent owners are serialized: each one starts from
+	/// the latest value and their changes compose instead of clobbering. Don't hold a guard across
+	/// an `.await`, since that keeps the lock held while suspended.
+	pub fn lock(&mut self) -> Guard<'_, T>
+	where
+		T: Default + DeserializeOwned,
+	{
+		let inner = self.inner.lock().unwrap();
+		let value = inner
+			.last
+			.as_ref()
+			.and_then(|last| serde_json::from_value(last.clone()).ok())
+			.unwrap_or_default();
+
+		Guard {
+			inner,
+			value,
+			dirty: false,
+		}
+	}
+
 	/// Finish the track, closing any open group.
 	pub fn finish(&mut self) -> Result<()> {
 		self.inner.lock().unwrap().finish()
+	}
+}
+
+/// An RAII editing guard returned by [`Producer::lock`].
+///
+/// Holds the producer's lock for its lifetime and derefs to the current value. Mutating it through
+/// [`DerefMut`] marks it dirty, and dropping a dirty guard publishes the edited value.
+pub struct Guard<'a, T: Serialize> {
+	inner: MutexGuard<'a, Inner>,
+	value: T,
+	dirty: bool,
+}
+
+impl<T: Serialize> Deref for Guard<'_, T> {
+	type Target = T;
+
+	fn deref(&self) -> &T {
+		&self.value
+	}
+}
+
+impl<T: Serialize> DerefMut for Guard<'_, T> {
+	fn deref_mut(&mut self) -> &mut T {
+		self.dirty = true;
+		&mut self.value
+	}
+}
+
+impl<T: Serialize> Drop for Guard<'_, T> {
+	fn drop(&mut self) {
+		if !self.dirty {
+			return;
+		}
+
+		let Ok(json) = serde_json::to_value(&self.value) else {
+			return;
+		};
+		let Ok(snapshot) = serde_json::to_vec(&self.value) else {
+			return;
+		};
+
+		// We already hold the lock, so publish through the held guard rather than re-locking.
+		let _ = self.inner.update(json, snapshot);
 	}
 }
 
@@ -447,6 +519,47 @@ mod test {
 
 		// A consumer created only now still rebuilds the final value from snapshot + deltas.
 		assert_eq!(drain(track).last().unwrap(), &json!({ "a": 5, "b": 2 }));
+	}
+
+	#[test]
+	fn lock_composes_independent_owners() {
+		// Mirrors the catalog use case: separate owners each edit their own field through the guard.
+		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
+		struct Doc {
+			#[serde(skip_serializing_if = "Option::is_none")]
+			video: Option<String>,
+			#[serde(skip_serializing_if = "Option::is_none")]
+			scte35: Option<u32>,
+		}
+
+		let track = moq_net::Track::new("test").produce();
+		let consumer = track.consume();
+		let mut producer = Producer::<Doc>::new(track, Config::default());
+
+		// First owner sets its field.
+		producer.lock().video = Some("v1".to_string());
+
+		// Second owner starts from the latest value and adds its own field without clobbering.
+		producer.lock().scte35 = Some(42);
+
+		// Locking without mutating publishes nothing (the guard stays clean).
+		let _ = producer.lock();
+
+		producer.finish().unwrap();
+
+		let mut consumer = Consumer::<Doc>::new(consumer);
+		let waiter = kio::Waiter::noop();
+		let mut last = None;
+		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
+			last = Some(value);
+		}
+		assert_eq!(
+			last.unwrap(),
+			Doc {
+				video: Some("v1".to_string()),
+				scte35: Some(42),
+			}
+		);
 	}
 
 	#[test]

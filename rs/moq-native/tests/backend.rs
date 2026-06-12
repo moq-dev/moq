@@ -56,7 +56,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	});
 
 	let client = client.with_consume(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -208,7 +208,7 @@ async fn iroh_connect() {
 	});
 
 	let client = client.with_consume(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");

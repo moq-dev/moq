@@ -4,6 +4,7 @@ import { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import * as GoAway from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
+import { Group } from "./object.ts";
 import { SetupOptions } from "./parameters.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
@@ -1023,4 +1024,94 @@ test("Parameters v18 wire is identical to v17 (no count prefix, delta encoded ke
 	})();
 
 	expect(Array.from(await v18)).toEqual(Array.from(await v17));
+});
+
+test("SubscribeNamespace: message IDs", () => {
+	// 0x11 through draft-17 (legacy), renumbered to 0x50 in draft-18 (#1542).
+	expect(SubscribeNamespace.SubscribeNamespaceLegacy.id).toBe(0x11);
+	expect(SubscribeNamespace.SubscribeNamespace.id).toBe(0x50);
+});
+
+test("SubscribeNamespace: decode rejects the wrong draft version", async () => {
+	// Modern 0x50 is draft-18+ only.
+	const modern = await encodeVersioned(
+		new SubscribeNamespace.SubscribeNamespace({ namespace: Path.empty(), requestId: 0n }),
+		Version.DRAFT_18,
+	);
+	await expect(
+		decodeVersioned(modern, SubscribeNamespace.SubscribeNamespace.decode, Version.DRAFT_17),
+	).rejects.toThrow(/draft-18\+ only/);
+
+	// Legacy 0x11 is draft-14..17 only.
+	const legacy = await encodeVersioned(
+		new SubscribeNamespace.SubscribeNamespaceLegacy({ namespace: Path.empty(), requestId: 0n }),
+		Version.DRAFT_17,
+	);
+	await expect(
+		decodeVersioned(legacy, SubscribeNamespace.SubscribeNamespaceLegacy.decode, Version.DRAFT_18),
+	).rejects.toThrow(/draft-14\.\.17 only/);
+});
+
+test("SubscribeNamespace: draft-18 omits subscribe options", async () => {
+	// The legacy draft-17 body carries the Subscribe Options field, so it is
+	// longer than the modern draft-18 body.
+	const modern = new SubscribeNamespace.SubscribeNamespace({ namespace: Path.empty(), requestId: 0n });
+	const legacy = new SubscribeNamespace.SubscribeNamespaceLegacy({ namespace: Path.empty(), requestId: 0n });
+	const v18 = await encodeVersioned(modern, Version.DRAFT_18);
+	const v17 = await encodeVersioned(legacy, Version.DRAFT_17);
+	expect(v18.byteLength).toBeLessThan(v17.byteLength);
+
+	// Modern round-trips on draft-18.
+	const m = await encodeVersioned(
+		new SubscribeNamespace.SubscribeNamespace({ namespace: Path.from("example/meeting"), requestId: 4n }),
+		Version.DRAFT_18,
+	);
+	const dm = await decodeVersioned(m, SubscribeNamespace.SubscribeNamespace.decode, Version.DRAFT_18);
+	expect(dm.requestId).toBe(4n);
+	expect(dm.namespace).toBe("example/meeting" as Path.Valid);
+
+	// Legacy round-trips on draft-16/17.
+	for (const version of [Version.DRAFT_16, Version.DRAFT_17]) {
+		const encoded = await encodeVersioned(
+			new SubscribeNamespace.SubscribeNamespaceLegacy({ namespace: Path.from("example/meeting"), requestId: 4n }),
+			version,
+		);
+		const decoded = await decodeVersioned(encoded, SubscribeNamespace.SubscribeNamespaceLegacy.decode, version);
+		expect(decoded.requestId).toBe(4n);
+		expect(decoded.namespace).toBe("example/meeting" as Path.Valid);
+	}
+});
+
+test("Group: draft-18 sets FIRST_OBJECT bit, draft-17 does not", async () => {
+	const makeGroup = () =>
+		new Group({
+			trackAlias: 7n,
+			groupId: 3,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: {
+				hasExtensions: false,
+				hasSubgroup: false,
+				hasSubgroupObject: false,
+				hasEnd: true,
+				hasPriority: true,
+			},
+		});
+
+	// Round-trips on each version.
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18]) {
+		const encoded = await encodeVersioned(makeGroup(), version);
+		const decoded = await decodeVersioned(encoded, Group.decode, version);
+		expect(decoded.groupId).toBe(3);
+		expect(decoded.trackAlias).toBe(7n);
+		expect(decoded.flags.hasEnd).toBe(true);
+		expect(decoded.flags.hasPriority).toBe(true);
+	}
+
+	// The draft-18 header carries the 0x40 FIRST_OBJECT bit (type 0x18 -> 0x58),
+	// so the same bytes are not a valid draft-17 subgroup header.
+	const v18 = await encodeVersioned(makeGroup(), Version.DRAFT_18);
+	const v17 = await encodeVersioned(makeGroup(), Version.DRAFT_17);
+	expect(Array.from(v18)).not.toEqual(Array.from(v17));
+	await expect(decodeVersioned(v18, Group.decode, Version.DRAFT_17)).rejects.toThrow(/Unsupported group type/);
 });
