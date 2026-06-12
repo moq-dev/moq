@@ -56,6 +56,7 @@ export class Renderer {
 			const transcode = new Transcode({
 				source: this.#video.frame,
 				config: this.#video.hd.resolved,
+				settings: this.#video.hd.config,
 			});
 			effect.cleanup(() => transcode.close());
 			effect.proxy(this.#frame, transcode.frame);
@@ -73,10 +74,16 @@ export class Renderer {
 		const display = effect.get(this.#video.display);
 		const flip = effect.get(this.#video.flip);
 
+		// Size the canvas to the frame we're drawing so `encoded` mode shows the true transmitted
+		// resolution (which can be smaller than the capture). Fall back to the capture dimensions
+		// until the first frame arrives.
+		const width = frame?.displayWidth ?? display?.width;
+		const height = frame?.displayHeight ?? display?.height;
+
 		// Setting width/height clears the canvas, so only resize when the dimensions actually change.
-		if (display && (ctx.canvas.width !== display.width || ctx.canvas.height !== display.height)) {
-			ctx.canvas.width = display.width;
-			ctx.canvas.height = display.height;
+		if (width && height && (ctx.canvas.width !== width || ctx.canvas.height !== height)) {
+			ctx.canvas.width = width;
+			ctx.canvas.height = height;
 		}
 
 		ctx.fillStyle = "#000";
@@ -101,6 +108,8 @@ export class Renderer {
 type TranscodeProps = {
 	source: Getter<VideoFrame | undefined>;
 	config: Getter<VideoEncoderConfig | undefined>;
+	// The rendition's encoder settings, read for keyframe cadence so the preview's GOP matches the wire.
+	settings?: Getter<Video.EncoderConfig | undefined>;
 };
 
 // Encodes the captured frames with the live rendition settings and decodes the result, so the
@@ -111,11 +120,13 @@ export class Transcode {
 
 	#source: Getter<VideoFrame | undefined>;
 	#config: Getter<VideoEncoderConfig | undefined>;
+	#settings?: Getter<Video.EncoderConfig | undefined>;
 	#signals = new Effect();
 
 	constructor(props: TranscodeProps) {
 		this.#source = props.source;
 		this.#config = props.config;
+		this.#settings = props.settings;
 		this.#signals.run(this.#run.bind(this));
 	}
 
@@ -158,7 +169,6 @@ export class Transcode {
 		decoder.configure({ codec: config.codec, optimizeForLatency: true });
 
 		// Re-key on the same cadence as the real encoder so the decoder can start and recover.
-		const interval = Time.Micro.fromSecond(2 as Time.Second);
 		let lastKeyframe: Time.Micro | undefined;
 
 		effect.run((inner) => {
@@ -166,8 +176,12 @@ export class Transcode {
 			if (!frame) return;
 			if (encoder.state !== "configured") return;
 
+			// Mirror Encoder.serve: default to a 2s GOP unless the rendition overrides it.
+			const settings = this.#settings ? inner.get(this.#settings) : undefined;
+			const interval = settings?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
+
 			const timestamp = frame.timestamp as Time.Micro;
-			const keyFrame = lastKeyframe === undefined || lastKeyframe + interval <= timestamp;
+			const keyFrame = lastKeyframe === undefined || lastKeyframe + Time.Micro.fromMilli(interval) <= timestamp;
 			if (keyFrame) lastKeyframe = timestamp;
 
 			// The capture pipeline owns and closes the frame, so we just read it here.
