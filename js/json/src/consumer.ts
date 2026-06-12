@@ -10,14 +10,14 @@ import type { Config } from "./producer.ts";
  * yielding the reconstructed value after each one.
  */
 export class Consumer<T> {
-	#track: Moq.Track;
+	#track: Moq.TrackSubscriber;
 	#schema?: z.ZodMiniType<T>;
 
 	#group?: Moq.Group;
 	#current?: unknown;
 	#framesRead = 0;
 
-	constructor(track: Moq.Track, config: Config<T> = {}) {
+	constructor(track: Moq.TrackSubscriber, config: Config<T> = {}) {
 		this.#track = track;
 		this.#schema = config.schema;
 	}
@@ -27,7 +27,7 @@ export class Consumer<T> {
 		for (;;) {
 			if (!this.#group) {
 				// Advance to the next group with a higher sequence number (skipping late arrivals).
-				this.#group = await this.#track.nextGroupOrdered();
+				this.#group = await this.#track.nextGroup();
 				if (!this.#group) return undefined;
 				this.#current = undefined;
 				this.#framesRead = 0;

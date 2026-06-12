@@ -1,27 +1,29 @@
 import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, type GetterInit, getter, Signal } from "@moq/signals";
 
 import type { Format } from "./format";
 import type { BufferedRanges, Frame } from "./types";
 
 export interface ConsumerProps {
 	format: Format;
-	// Target latency in milliseconds (default: 0)
-	latency?: Signal<Time.Milli> | Time.Milli;
+	// Target latency in milliseconds (default: 0). Read-only: a Getter (e.g. another
+	// component's output) is accepted directly.
+	latency?: GetterInit<Time.Milli>;
 }
 
 interface Group {
 	consumer: Moq.Group;
 	frames: Frame[]; // decode order
 	latest?: Time.Micro; // The timestamp of the latest known frame
+	end?: Time.Micro; // The furthest presentation point so far, i.e. max(timestamp + duration)
 	done?: boolean; // Set when #runGroup finishes reading all frames
 }
 
 export class Consumer {
-	#track: Moq.Track;
+	#track: Moq.TrackSubscriber;
 	#format: Format;
-	#latency: Signal<Time.Milli>;
+	#latency: Getter<Time.Milli>;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
 
@@ -33,10 +35,10 @@ export class Consumer {
 
 	#signals = new Effect();
 
-	constructor(track: Moq.Track, props: ConsumerProps) {
+	constructor(track: Moq.TrackSubscriber, props: ConsumerProps) {
 		this.#track = track;
 		this.#format = props.format;
-		this.#latency = Signal.from(props.latency ?? Moq.Time.Milli.zero);
+		this.#latency = getter(props.latency ?? Moq.Time.Milli.zero);
 
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
@@ -110,6 +112,11 @@ export class Consumer {
 						group.latest = frame.timestamp;
 					}
 
+					const end = (frame.timestamp + (frame.duration ?? 0)) as Time.Micro;
+					if (group.end === undefined || end > group.end) {
+						group.end = end;
+					}
+
 					this.#updateBuffered();
 
 					if (group.consumer.sequence === this.#active) {
@@ -118,6 +125,13 @@ export class Consumer {
 					} else {
 						// Check for latency violations if this is a newer group.
 						this.#checkLatency();
+
+						// A newer group reaching back to where the stalled active group has
+						// already presented means we can advance now instead of waiting.
+						if (this.#tryDurationSkip()) {
+							this.#notify?.();
+							this.#notify = undefined;
+						}
 					}
 				}
 			}
@@ -193,6 +207,31 @@ export class Consumer {
 		}
 	}
 
+	// Skip the stalled active group once it has presented up to where the next group
+	// begins (its furthest frame end reaches the next group's first timestamp). Only
+	// fires when the active group is fully consumed and still open, so we never drop
+	// frames the consumer hasn't seen. Returns true if a group was skipped.
+	#tryDurationSkip(): boolean {
+		if (this.#active === undefined) return false;
+
+		const active = this.#groups[0];
+		if (!active || active.consumer.sequence !== this.#active) return false;
+		if (active.done || active.frames.length > 0 || active.end === undefined) return false;
+
+		const next = this.#groups[1];
+		const nextStart = next?.frames.at(0)?.timestamp;
+		if (!next || nextStart === undefined || active.end < nextStart) return false;
+
+		this.#groups.shift();
+		console.warn(`skipping covered group: ${active.consumer.sequence} -> ${next.consumer.sequence}`);
+		this.#active = next.consumer.sequence;
+
+		active.consumer.close();
+		active.frames.length = 0;
+		this.#updateBuffered();
+		return true;
+	}
+
 	// Returns the next frame in order, along with the group number.
 	// If frame is undefined, the group is done.
 	async next(): Promise<{ frame: Frame | undefined; group: number } | undefined> {
@@ -224,6 +263,11 @@ export class Consumer {
 						return { frame: undefined, group: group.consumer.sequence };
 					}
 				}
+
+				// The active group is stalled with nothing buffered. If a later group
+				// has already been reached by this group's duration, skip ahead now
+				// rather than waiting for the stalled group to resume.
+				if (this.#tryDurationSkip()) continue;
 			}
 
 			if (this.#notify) {

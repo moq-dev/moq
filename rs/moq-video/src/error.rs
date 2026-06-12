@@ -16,6 +16,10 @@ pub enum Error {
 	#[error(transparent)]
 	Codec(#[from] anyhow::Error),
 
+	/// moq-mux muxer/catalog error.
+	#[error(transparent)]
+	Mux(#[from] moq_mux::Error),
+
 	/// moq-net transport error.
 	#[error(transparent)]
 	Moq(#[from] moq_net::Error),

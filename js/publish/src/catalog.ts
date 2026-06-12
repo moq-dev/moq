@@ -25,7 +25,7 @@ export class CatalogProducer {
 	}
 
 	/** Serve a subscription request: seed it with the current catalog, then forward updates. */
-	serve(track: Moq.Track, effect: Effect): void {
+	serve(track: Moq.TrackProducer, effect: Effect): void {
 		const output = new Json.Producer<Catalog.Root>(track);
 		output.update(this.#value);
 

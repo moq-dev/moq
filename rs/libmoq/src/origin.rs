@@ -25,6 +25,10 @@ pub struct Origin {
 	/// Active origin producers for publishing and consuming broadcasts.
 	active: NonZeroSlab<moq_net::OriginProducer>,
 
+	/// Announcement guards from `publish`. Removing an entry (via `unpublish`) drops the
+	/// guard, which unannounces the broadcast.
+	published: NonZeroSlab<moq_net::OriginPublish>,
+
 	/// Broadcast announcement information (path, active status).
 	announced: NonZeroSlab<(String, bool)>,
 
@@ -46,7 +50,7 @@ impl Origin {
 
 	pub fn announced(&mut self, origin: Id, on_announce: OnStatus) -> Result<Id, Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		let consumer = origin.consume();
+		let consumer = origin.consume().announced();
 		let channel = oneshot::channel();
 
 		let entry = TaskEntry {
@@ -71,25 +75,26 @@ impl Origin {
 
 	async fn run_announced(
 		callback: OnStatus,
-		mut consumer: moq_net::OriginConsumer,
+		mut consumer: moq_net::AnnounceConsumer,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		loop {
 			// `biased` so a pending close always wins over a ready announcement.
-			let (path, broadcast) = tokio::select! {
+			let (path, event) = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				next = consumer.announced() => match next {
+				next = consumer.next() => match next {
 					Some(announced) => announced,
 					None => return Ok(()),
 				},
 			};
 
 			// Hold the lock only to buffer the announcement; release it before the callback.
+			// Active and Restart both carry a broadcast; Ended does not.
 			let announced_id = State::lock()
 				.origin
 				.announced
-				.insert((path.to_string(), broadcast.is_some()))?;
+				.insert((path.to_string(), event.broadcast().is_some()))?;
 			callback.call(announced_id);
 		}
 	}
@@ -118,10 +123,9 @@ impl Origin {
 
 	pub fn consume<P: moq_net::AsPath>(&mut self, origin: Id, path: P) -> Result<moq_net::BroadcastConsumer, Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		// Synchronous lookup races announcement gossip. Use `consume_announced` to wait instead.
-		// Uses the deprecated direct lookup to avoid the per-call cost of OriginProducer::consume().
-		#[allow(deprecated)]
-		origin.get_broadcast(path).ok_or(Error::BroadcastNotFound)
+		// Synchronous lookup races announcement gossip; consume() is a cheap handle over this
+		// origin's tree. Use `consume_announced` to wait for the announcement instead.
+		origin.consume().get_broadcast(path).ok_or(Error::BroadcastNotFound)
 	}
 
 	/// Wait until the broadcast at `path` is announced, then deliver its handle via the callback.
@@ -185,14 +189,25 @@ impl Origin {
 		Ok(())
 	}
 
+	/// Announce `broadcast` under `path`, returning a publish handle. The announcement stays
+	/// live until [`Self::unpublish`] is called with that handle (independent of the broadcast's
+	/// own lifetime). Errors with [`Error::Moq`] if the path is outside the origin's scope.
 	pub fn publish<P: moq_net::AsPath>(
 		&mut self,
 		origin: Id,
 		path: P,
 		broadcast: moq_net::BroadcastConsumer,
-	) -> Result<(), Error> {
-		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		origin.publish_broadcast(path, broadcast);
+	) -> Result<Id, Error> {
+		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
+		let publish = origin.publish_broadcast(path, broadcast)?;
+		self.published.insert(publish)
+	}
+
+	/// Drop a publish handle from [`Self::publish`], unannouncing the broadcast.
+	pub fn unpublish(&mut self, publish: Id) -> Result<(), Error> {
+		// Dropping the removed guard is what unannounces the broadcast.
+		let publish = self.published.remove(publish).ok_or(Error::BroadcastNotFound)?;
+		drop(publish);
 		Ok(())
 	}
 

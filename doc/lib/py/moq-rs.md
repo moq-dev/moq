@@ -55,8 +55,8 @@ Supported codec formats include `opus`, `avc3`, `hev1`, `av01`, `vp09`, and othe
 ```python
 async for announcement in client.announced("prefix/"):
     catalog = await announcement.broadcast.catalog()
-    track_name = next(iter(catalog.audio))
-    consumer = announcement.broadcast.subscribe_media(track_name, catalog.audio[track_name].container, max_latency_ms=10_000)
+    track_name, track = next(iter(catalog.audio.items()))
+    consumer = announcement.broadcast.subscribe_media(track_name, track)
 
     async for frame in consumer:
         ...

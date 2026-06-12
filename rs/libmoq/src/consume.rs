@@ -56,7 +56,6 @@ impl Consume {
 
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
-		let catalog = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -65,8 +64,17 @@ impl Consume {
 		};
 		let id = self.catalog_task.insert(Some(entry))?;
 
+		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task
+		// to keep this entrypoint non-blocking.
 		tokio::spawn(async move {
-			let res = Self::run_catalog(on_catalog, broadcast, catalog.into(), channel.1).await;
+			let res = async move {
+				let catalog = broadcast
+					.track(hang::catalog::Catalog::DEFAULT_NAME)?
+					.subscribe(hang::catalog::Catalog::default_subscription())?
+					.await?;
+				Self::run_catalog(on_catalog, broadcast.clone(), catalog.into(), channel.1).await
+			}
+			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -221,20 +229,15 @@ impl Consume {
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let rendition = consume
+		let name = consume
 			.catalog
 			.video
 			.renditions
 			.keys()
 			.nth(index)
-			.ok_or(Error::NoIndex)?;
-
-		let track = consume.broadcast.subscribe_track(&moq_net::Track {
-			name: rendition.clone(),
-			priority: 1, // TODO: Remove priority
-		})?;
-		let track =
-			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
+			.ok_or(Error::NoIndex)?
+			.clone();
+		let broadcast = consume.broadcast.clone();
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -243,8 +246,21 @@ impl Consume {
 		};
 		let id = self.track_task.insert(Some(entry))?;
 
+		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
-			let res = Self::run_track(on_frame, track, channel.1).await;
+			let res = async move {
+				let track = broadcast
+					.track(&name)?
+					.subscribe(moq_net::Subscription {
+						priority: 1,
+						..Default::default()
+					})?
+					.await?;
+				let track = moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy)
+					.with_latency(latency);
+				Self::run_track(on_frame, track, channel.1).await
+			}
+			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -265,20 +281,15 @@ impl Consume {
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let rendition = consume
+		let name = consume
 			.catalog
 			.audio
 			.renditions
 			.keys()
 			.nth(index)
-			.ok_or(Error::NoIndex)?;
-
-		let track = consume.broadcast.subscribe_track(&moq_net::Track {
-			name: rendition.clone(),
-			priority: 2, // TODO: Remove priority
-		})?;
-		let track =
-			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy).with_latency(latency);
+			.ok_or(Error::NoIndex)?
+			.clone();
+		let broadcast = consume.broadcast.clone();
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -287,8 +298,21 @@ impl Consume {
 		};
 		let id = self.track_task.insert(Some(entry))?;
 
+		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
-			let res = Self::run_track(on_frame, track, channel.1).await;
+			let res = async move {
+				let track = broadcast
+					.track(&name)?
+					.subscribe(moq_net::Subscription {
+						priority: 2,
+						..Default::default()
+					})?
+					.await?;
+				let track = moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::Legacy)
+					.with_latency(latency);
+				Self::run_track(on_frame, track, channel.1).await
+			}
+			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -370,11 +394,8 @@ impl Consume {
 	/// non-media tracks. `on_frame` is called with a raw frame ID for each frame,
 	/// in arrival order. Frames must be released with [`Self::raw_frame_close`].
 	pub fn raw_track(&mut self, broadcast: Id, name: &str, on_frame: OnStatus) -> Result<Id, Error> {
-		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
-		let track = broadcast.subscribe_track(&moq_net::Track {
-			name: name.to_string(),
-			priority: 0,
-		})?;
+		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
+		let name = name.to_string();
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -383,8 +404,13 @@ impl Consume {
 		};
 		let id = self.raw_task.insert(Some(entry))?;
 
+		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
-			let res = Self::run_raw(on_frame, track, channel.1).await;
+			let res = async move {
+				let track = broadcast.track(&name)?.subscribe(None)?.await?;
+				Self::run_raw(on_frame, track, channel.1).await
+			}
+			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -399,7 +425,7 @@ impl Consume {
 
 	async fn run_raw(
 		callback: OnStatus,
-		mut track: moq_net::TrackConsumer,
+		mut track: moq_net::TrackSubscriber,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// Deliver every frame in sequence order, reading all frames within each

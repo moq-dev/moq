@@ -63,7 +63,7 @@ export function decode(raw: Uint8Array): Catalog {
 	}
 }
 
-export async function fetch(track: Moq.Track): Promise<Catalog | undefined> {
+export async function fetch(track: Moq.TrackSubscriber): Promise<Catalog | undefined> {
 	const frame = await track.readFrame();
 	if (!frame) return undefined;
 	return decode(frame);

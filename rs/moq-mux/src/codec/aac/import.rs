@@ -20,8 +20,11 @@ impl<E: CatalogExt> Import<E> {
 		mut broadcast: moq_net::BroadcastProducer,
 		mut catalog: crate::catalog::Producer<E>,
 		config: Config,
-	) -> anyhow::Result<Self> {
-		let track = broadcast.unique_track(".aac")?;
+	) -> crate::Result<Self> {
+		let track = broadcast.create_track(
+			broadcast.unique_name(".aac"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)?;
 
 		let mut audio_config = hang::catalog::AudioConfig::new(
 			hang::catalog::AAC {
@@ -32,8 +35,12 @@ impl<E: CatalogExt> Import<E> {
 		);
 		audio_config.container = hang::catalog::Container::Legacy;
 
-		tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
-		catalog.lock().audio.renditions.insert(track.name.clone(), audio_config);
+		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
+		catalog
+			.lock()
+			.audio
+			.renditions
+			.insert(track.name().to_string(), audio_config);
 
 		Ok(Self {
 			catalog,
@@ -48,18 +55,18 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		self.track.seek(sequence)?;
 		Ok(())
 	}
 
-	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
+	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		let pts = self.pts(pts)?;
 
 		// Collect the input into a contiguous Bytes payload.
@@ -77,6 +84,7 @@ impl<E: CatalogExt> Import<E> {
 			timestamp: pts,
 			payload: payload.freeze(),
 			keyframe: true,
+			duration: None,
 		};
 
 		self.track.write(frame)?;
@@ -85,21 +93,19 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
+	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(crate::container::Timestamp::from_micros(
-			zero.elapsed().as_micros() as u64
-		)?)
+		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
 
 impl<E: CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.name, "ending track");
-		self.catalog.lock().audio.renditions.remove(&self.track.name);
+		tracing::debug!(name = ?self.track.name(), "ending track");
+		self.catalog.lock().audio.renditions.remove(self.track.name());
 	}
 }

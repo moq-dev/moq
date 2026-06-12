@@ -30,7 +30,7 @@ fn f32_bytes(samples: &[f32]) -> Bytes {
 
 #[tokio::test]
 async fn opus_round_trip_48k_stereo() {
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut catalog_consumer = catalog.consume().unwrap();
 	let broadcast_consumer = broadcast.consume();
@@ -74,6 +74,7 @@ async fn opus_round_trip_48k_stereo() {
 			..DecoderOutput::default()
 		},
 	)
+	.await
 	.unwrap();
 
 	producer.finish().unwrap();
@@ -109,7 +110,7 @@ async fn opus_round_trip_48k_stereo() {
 
 #[tokio::test]
 async fn opus_round_trip_44100_s16_resampled() {
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut catalog_consumer = catalog.consume().unwrap();
 	let broadcast_consumer = broadcast.consume();
@@ -160,6 +161,7 @@ async fn opus_round_trip_44100_s16_resampled() {
 			latency_max: Some(Duration::from_millis(500)),
 		},
 	)
+	.await
 	.unwrap();
 	assert_eq!(consumer.sample_rate(), 44_100);
 	assert_eq!(consumer.channels(), 1);

@@ -163,6 +163,12 @@ export class Subscribe {
 	}
 }
 
+/**
+ * Publisher's acknowledgement on the Subscribe Stream for drafts 01-04.
+ *
+ * Draft-05+ replaced this with implicit acceptance plus {@link SubscribeStart} /
+ * {@link SubscribeEnd}; the immutable codec/timescale/cache moved to TRACK_INFO.
+ */
 export class SubscribeOk {
 	priority: number;
 	ordered: boolean;
@@ -198,6 +204,8 @@ export class SubscribeOk {
 			case Version.DRAFT_01:
 				await w.u8(this.priority ?? 0);
 				break;
+			// Draft-05+ never sends SUBSCRIBE_OK, but keep the field layout matching
+			// Draft-03/04 so a stray future use stays well-formed.
 			default:
 				await w.u8(this.priority);
 				await w.bool(this.ordered);
@@ -249,6 +257,51 @@ export class SubscribeOk {
 	}
 }
 
+/**
+ * Resolves the absolute start group of a Draft-05+ subscription. The first message
+ * the publisher sends, once the start group is known. A value greater than the
+ * requested start implicitly drops the leading range.
+ */
+export class SubscribeStart {
+	group: number;
+
+	constructor(group: number) {
+		this.group = group;
+	}
+
+	async encode(w: Writer): Promise<void> {
+		return Message.encode(w, async (w) => {
+			await w.u53(this.group);
+		});
+	}
+
+	static async decode(r: Reader): Promise<SubscribeStart> {
+		return Message.decode(r, async (r) => new SubscribeStart(await r.u53()));
+	}
+}
+
+/**
+ * Signals that no group after `group` (inclusive upper bound) will be produced on
+ * a Draft-05+ subscription.
+ */
+export class SubscribeEnd {
+	group: number;
+
+	constructor(group: number) {
+		this.group = group;
+	}
+
+	async encode(w: Writer): Promise<void> {
+		return Message.encode(w, async (w) => {
+			await w.u53(this.group);
+		});
+	}
+
+	static async decode(r: Reader): Promise<SubscribeEnd> {
+		return Message.decode(r, async (r) => new SubscribeEnd(await r.u53()));
+	}
+}
+
 /// Indicates that one or more groups have been dropped.
 ///
 /// Draft03+ only.
@@ -283,15 +336,19 @@ export class SubscribeDrop {
 }
 
 /**
- * A response message on the subscribe stream.
+ * A response message on the subscribe stream, prefixed with a type discriminator
+ * on Draft-03+.
  *
- * In Draft03+, each response is prefixed with a type discriminator:
- * - 0x0 for SUBSCRIBE_OK
- * - 0x1 for SUBSCRIBE_DROP
- *
- * SUBSCRIBE_OK must be the first message on the response stream.
+ * The discriminator is version-dependent:
+ * - Draft-03/04: `0x0` SUBSCRIBE_OK, `0x1` SUBSCRIBE_DROP.
+ * - Draft-05+: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP
+ *   (SUBSCRIBE_OK was removed; acceptance is implicit).
  */
-export type SubscribeResponse = { ok: SubscribeOk } | { drop: SubscribeDrop };
+export type SubscribeResponse =
+	| { ok: SubscribeOk }
+	| { start: SubscribeStart }
+	| { end: SubscribeEnd }
+	| { drop: SubscribeDrop };
 
 export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse, version: Version): Promise<void> {
 	switch (version) {
@@ -300,16 +357,34 @@ export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse
 			if ("ok" in resp) {
 				await resp.ok.encode(w, version);
 			} else {
-				throw new Error("subscribe drop not supported for this version");
+				throw new Error("only SUBSCRIBE_OK is supported for this version");
 			}
 			break;
-		default:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
 			if ("ok" in resp) {
 				await w.u53(0x0);
 				await resp.ok.encode(w, version);
-			} else {
+			} else if ("drop" in resp) {
 				await w.u53(0x1);
 				await resp.drop.encode(w);
+			} else {
+				throw new Error("SUBSCRIBE_START/END not supported for this version");
+			}
+			break;
+		default:
+			// Draft-05+: SUBSCRIBE_OK is gone; START/END/DROP carry the resolved range.
+			if ("start" in resp) {
+				await w.u53(0x0);
+				await resp.start.encode(w);
+			} else if ("end" in resp) {
+				await w.u53(0x1);
+				await resp.end.encode(w);
+			} else if ("drop" in resp) {
+				await w.u53(0x2);
+				await resp.drop.encode(w);
+			} else {
+				throw new Error("SUBSCRIBE_OK not supported for this version");
 			}
 			break;
 	}
@@ -320,7 +395,8 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:
 			return { ok: await SubscribeOk.decode(r, version) };
-		default: {
+		case Version.DRAFT_03:
+		case Version.DRAFT_04: {
 			const typ = await r.u53();
 			switch (typ) {
 				case 0x0:
@@ -331,5 +407,27 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 					throw new Error(`unknown subscribe response type: ${typ}`);
 			}
 		}
+		default: {
+			const typ = await r.u53();
+			switch (typ) {
+				case 0x0:
+					return { start: await SubscribeStart.decode(r) };
+				case 0x1:
+					return { end: await SubscribeEnd.decode(r) };
+				case 0x2:
+					return { drop: await SubscribeDrop.decode(r) };
+				default:
+					throw new Error(`unknown subscribe response type: ${typ}`);
+			}
+		}
 	}
+}
+
+/** Like {@link decodeSubscribeResponse} but resolves `undefined` on a clean FIN. */
+export async function decodeSubscribeResponseMaybe(
+	r: Reader,
+	version: Version,
+): Promise<SubscribeResponse | undefined> {
+	if (await r.done()) return undefined;
+	return decodeSubscribeResponse(r, version);
 }

@@ -21,13 +21,14 @@ import asyncio
 import moq
 
 async def main():
-    async with moq.Client("https://relay.quic.video") as client:
+    async with moq.connect("https://relay.quic.video") as client:
         async for announcement in client.announced():
             catalog = await announcement.broadcast.catalog()
 
-            for name in catalog.audio:
-                async for frame in announcement.broadcast.subscribe_media(name):
-                    print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp_us}")
+            for name, track in catalog.audio.items():
+                async with announcement.broadcast.subscribe_media(name, track) as frames:
+                    async for frame in frames:
+                        print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp_us}")
 
 asyncio.run(main())
 ```
@@ -99,9 +100,9 @@ client = moq.Client(
 
 ### Connection
 
-- **`Client(url, *, tls_verify=True, tls_roots=None, tls_fingerprints=None, bind=None, publish=None, subscribe=None)`**. Async context manager for connecting to a relay.
-  - `tls_roots`. PEM root certificate file path(s) to trust instead of the system roots.
-  - `tls_fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `tls_verify=False`.
+- **`connect(url, *, tls_verify=True, bind=None, publish=None, subscribe=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
+- **`Client(url, *, tls_verify=True, bind=None, publish=None, subscribe=None)`**. Async context manager for connecting to a relay.
+  - `.session`. The established `Session` (or `None` before connecting / after exit).
 - **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), publish=None, subscribe=None)`**. Async context manager + async iterator of incoming `Request`s.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
@@ -109,9 +110,13 @@ client = moq.Client(
 - **`Request`**. An incoming session, yielded by `async for request in server`.
   - `.url`, `.transport`. Properties.
   - `.set_publish(origin)`, `.set_consume(origin)`. Per-request overrides.
-  - `await .ok()`. Complete the handshake, returns a session (hold it to keep the connection alive).
+  - `await .ok() → Session`. Complete the handshake (hold the result to keep the connection alive).
   - `await .close(code)`. Reject with an HTTP status code.
   - `.cancel()`. Cancel an in-flight `ok()`/`close()` call.
+- **`Session`**. An established connection. Holding it keeps the connection alive; it is also an `async with` context manager that shuts down on exit.
+  - `await .closed()`. Wait until the session closes.
+  - `.cancel(code)`, `.shutdown()`. Close with an error code, or gracefully (code 0).
+  - `.publisher() → OriginProducer`, `.consumer() → OriginConsumer`. The wired origin sides.
 
 ### Publishing
 
@@ -130,10 +135,12 @@ client = moq.Client(
 
 - **`BroadcastConsumer`**. Subscribe to tracks within a broadcast.
   - `.subscribe_catalog() → CatalogConsumer`
-  - `.subscribe_media(name, max_latency_ms=10000) → MediaConsumer`
+  - `.subscribe_media(name, track, max_latency_ms=10000) → MediaConsumer`. `track` is the catalog record (e.g. `catalog.video[name]`); its container tells the decoder how to parse the bitstream.
   - `await .catalog() → Catalog` (convenience)
 - **`CatalogConsumer`**. Async iterator of `Catalog`.
 - **`MediaConsumer`**. Async iterator of `Frame`.
+
+All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`) are async context managers; exiting `async with` cancels the subscription.
 
 ### Origin (advanced)
 
@@ -151,6 +158,12 @@ client = moq.Client(
 - **`Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
 - **`Video`**. `.codec`, `.coded: Dimensions`, `.display_ratio`, `.bitrate`, `.framerate`, `.description`.
 - **`Dimensions`**. `.width: int`, `.height: int`.
+- **`Container`**. The catalog container enum, carried on each `Video`/`Audio` record.
+
+### Logging and errors
+
+- **`log_level(level="info")`**. Initialize logging for the underlying Rust layer (`"error"`, `"warn"`, `"info"`, `"debug"`, `"trace"`). Call once per process.
+- **`Error`**. The exception raised by all operations. Catch a specific case via its variants, e.g. `except moq.Error.AlreadyResponded:` or `except moq.Error.Cancelled:`.
 
 ## See Also
 

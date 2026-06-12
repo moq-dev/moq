@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Track } from "@moq/net";
+import { TrackProducer } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { CatalogProducer } from "./catalog.ts";
 
@@ -14,9 +14,9 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	});
 
 	const effect = new Effect();
-	const track = new Track("catalog.json");
+	const track = new TrackProducer("catalog.json");
 	catalog.serve(track, effect);
-	const consumer = new Json.Consumer<Catalog.Root>(track);
+	const consumer = new Json.Consumer<Catalog.Root>(track.subscribe());
 
 	// A new subscriber is seeded with the current catalog.
 	expect((await consumer.next())?.video).toEqual({ renditions: {} });
@@ -41,14 +41,14 @@ test("a reconnecting subscriber is seeded with the full current catalog", async 
 
 	// The first subscription drains and ends...
 	const first = new Effect();
-	catalog.serve(new Track("catalog.json"), first);
+	catalog.serve(new TrackProducer("catalog.json"), first);
 	first.close();
 
 	// ...and a fresh subscription still gets the current catalog, not nothing.
 	const effect = new Effect();
-	const track = new Track("catalog.json");
+	const track = new TrackProducer("catalog.json");
 	catalog.serve(track, effect);
-	const seeded = await new Json.Consumer<Catalog.Root>(track).next();
+	const seeded = await new Json.Consumer<Catalog.Root>(track.subscribe()).next();
 	expect(seeded?.video).toEqual({ renditions: {} });
 	expect(seeded?.scte35).toEqual({ splices: [] });
 

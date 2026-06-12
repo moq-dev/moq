@@ -64,6 +64,9 @@ This is extremely useful for conference rooms, as you can live discover when par
 It's also useful for individual broadcasts as you can get notifications it comes online or goes offline (no spamming F5).
 The [moq-relay clustering](/bin/relay/cluster) feature actually uses this to discover other nodes in the cluster AND what broadcasts are available on each node.
 
+The peer first replies with the set of broadcasts that are currently live, then streams updates as they change.
+This initial set is a discrete batch: the latest draft reports how many entries to expect up front, so a freshly connected session can wait until that snapshot has fully arrived before listing what's available, rather than racing the gossip.
+
 ### Subscriptions
 
 All data transfers are initiated by subscriptions.
@@ -98,6 +101,9 @@ Each Subscription consists of a few properties:
 - **Track Priority**: A value between 0 and 255. Tracks with higher priority will be delivered first.
 - **Group Order**: The order in which groups are delivered. Defaults to descending; higher IDs are delivered first.
 - **Group Timeout**: The maximum duration to keep old groups in cache/transit. Defaults to 30 seconds.
+
+The publisher also caps how long it retains old groups via a per-track **cache** age, announced in `SUBSCRIBE_OK` so relays re-serve with the same window.
+A subscriber's Group Timeout can only be smaller than this cache age, since a group can't be waited for longer than it's kept around.
 
 By utilizing these properties, you can choose how your application behaves during congestion.
 For example, consider a conference room with Alice and Bob:

@@ -1,8 +1,7 @@
 #!/usr/bin/env just --justfile
-
 # Using Just: https://github.com/casey/just?tab=readme-ov-file#installation
-
 # Per-language modules. Anything that's specific to one language lives in
+
 # its own justfile; the recipes below orchestrate across them.
 mod js
 mod rs
@@ -17,10 +16,8 @@ mod test
 # Demos and infra.
 mod demo
 mod infra
-
 # GitHub Actions workflow linting.
 mod gh '.github'
-
 # Shortcuts to avoid `demo::` prefix.
 mod boy 'demo/boy'
 mod pub 'demo/pub'
@@ -37,6 +34,7 @@ dev:
     just demo
 
 # Install repo-wide tooling. Per-language deps install on first invocation
+
 # of `just <lang> check`.
 install:
     bun install
@@ -45,19 +43,21 @@ install:
 # Fast inner-loop checks. Runs JS, Rust, and Markdown lints.
 # Shell + workflow + TOML + Nix + justfile lints skip silently if their
 # binaries aren't on $PATH; `nix develop` provides them, and `just ci`
+
 # requires them.
 check *args:
     just js check
     just rs check {{ args }}
     bun remark . --quiet --frail
-    @if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then shfmt --diff $(shfmt -f .) && shellcheck $(shfmt -f .); fi
+    @if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then shfmt --diff $(shfmt -f . | grep -v '\.direnv/') && shellcheck $(shfmt -f . | grep -v '\.direnv/'); fi
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format --check; fi
-    @if command -v nixfmt >/dev/null 2>&1; then nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); fi
-    @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); do just --fmt --unstable --check --justfile "$f"; done
+    @if command -v nixfmt >/dev/null 2>&1; then nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
+    @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --unstable --check --justfile "$f"; done
     just gh check
 
 # Run every per-language `ci` with the diff vs BASE; each greps for its
 # own scope and skips when nothing relevant changed. Pass BASE="" to
+
 # default to $GITHUB_BASE_REF (CI) or origin/main (local).
 ci BASE="":
     #!/usr/bin/env bash
@@ -96,30 +96,43 @@ ci BASE="":
     nix flake check
     bun install --frozen-lockfile
     bun remark . --quiet --frail
-    shfmt --diff $(shfmt -f .)
-    shellcheck $(shfmt -f .)
+    shfmt --diff $(shfmt -f . | grep -v '\.direnv/')
+    shellcheck $(shfmt -f . | grep -v '\.direnv/')
     RUST_LOG=error taplo format --check
-    nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*')
-    for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); do just --fmt --unstable --check --justfile "$f"; done
+    nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*')
+    for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --unstable --check --justfile "$f"; done
     just gh ci
 
 # Auto-fix linting/formatting issues across all languages.
+
 # shfmt / taplo / nixfmt / just --fmt skipped silently if missing locally.
 fix:
     just js fix
     just rs fix
     just py fix
     bun remark . --quiet --output
-    @if command -v shfmt >/dev/null 2>&1; then shfmt --write $(shfmt -f .); fi
+    @if command -v shfmt >/dev/null 2>&1; then shfmt --write $(shfmt -f . | grep -v '\.direnv/'); fi
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format; fi
-    @if command -v nixfmt >/dev/null 2>&1; then nixfmt $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); fi
-    @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*'); do just --fmt --unstable --justfile "$f"; done
+    @if command -v nixfmt >/dev/null 2>&1; then nixfmt $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
+    @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --unstable --justfile "$f"; done
 
 # Build the packages.
 build:
     just js build
     just rs build
     if command -v uv &> /dev/null; then just py build; fi
+    if command -v wasm-bindgen &> /dev/null; then just wasm; fi
+
+# Build the browser/WASM bindings (rs/moq-wasm) into the @moq/wasm package.
+# wasm-bindgen comes from the Nix dev shell (its version must match the pinned
+# wasm-bindgen crate); the wasm32 target, the size-optimized `wasm-release`
+# profile, and cfg flags (getrandom, web-sys unstable) live in Cargo.toml and
+# .cargo/config.toml. The profile already optimizes for size; wasm-opt is
+# skipped since it didn't improve the gzipped (over-the-wire) size here.
+wasm:
+    cargo build -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
+    wasm-bindgen --target web --out-name moq \
+    	--out-dir js/wasm/dist target/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm
 
 # Delete build artifacts and caches to reclaim disk space. Each language
 # owns its own `clean` (see js/rs/py/kt/swift/go justfiles); this

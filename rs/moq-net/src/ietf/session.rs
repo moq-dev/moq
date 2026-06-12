@@ -15,8 +15,8 @@ pub fn start<S: web_transport_trait::Session>(
 	setup: Option<Stream<S, Version>>,
 	request_id_max: Option<RequestId>,
 	client: bool,
-	publish: Option<OriginConsumer>,
-	subscribe: Option<OriginProducer>,
+	publish: OriginConsumer,
+	subscribe: OriginProducer,
 	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
 	stats: StatsHandle,
 	version: Version,
@@ -39,30 +39,27 @@ pub fn start<S: web_transport_trait::Session>(
 				let sub_ns_adapter = adapter.clone();
 
 				tokio::select! {
-					Err(err) = adapter.run(setup.reader, setup.writer, rx) => Err::<(), Error>(err),
-					Err(err) = run_unis(adapter.clone(), subscriber.clone(), version) => Err(err),
-					Err(err) = run_dispatch(dispatch_session, publisher.clone(), subscriber.clone(), version) => Err(err),
-					Err(err) = publisher.run() => Err(err),
-					Err(err) = async {
-						if !sub_ns.has_origin() {
-							return Ok(());
-						}
-						let stream = match version {
-							Version::Draft16 => {
-								let (send, recv) = sub_ns_adapter.open_native_bi().await?;
-								Stream {
-									writer: crate::coding::Writer::new(send, version),
-									reader: crate::coding::Reader::new(recv, version),
+									Err(err) = adapter.run(setup.reader, setup.writer, rx) => Err::<(), Error>(err),
+									Err(err) = run_unis(adapter.clone(), subscriber.clone(), version) => Err(err),
+									Err(err) = run_dispatch(dispatch_session, publisher.clone(), subscriber.clone(), version) => Err(err),
+									Err(err) = publisher.run() => Err(err),
+									Err(err) = async {
+				let stream = match version {
+											Version::Draft16 => {
+												let (send, recv) = sub_ns_adapter.open_native_bi().await?;
+												Stream {
+													writer: crate::coding::Writer::new(send, version),
+													reader: crate::coding::Reader::new(recv, version),
+												}
+											}
+											_ => Stream::open(&sub_ns_adapter, version).await?,
+										};
+										if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
+										tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+									}
+									Ok(())
+									} => Err(err),
 								}
-							}
-							_ => Stream::open(&sub_ns_adapter, version).await?,
-						};
-						if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
-						tracing::warn!(%err, "subscribe_namespace failed, continuing without");
-					}
-					Ok(())
-					} => Err(err),
-				}
 			}
 			_ => {
 				// Spawn SETUP sender (keeps stream alive for GOAWAY).
@@ -83,20 +80,17 @@ pub fn start<S: web_transport_trait::Session>(
 				let mut sub_ns = subscriber.clone();
 
 				tokio::select! {
-					Err(err) = run_unis(session.clone(), subscriber.clone(), version) => Err(err),
-					Err(err) = run_dispatch(session.clone(), publisher.clone(), subscriber.clone(), version) => Err(err),
-					Err(err) = publisher.run() => Err(err),
-					Err(err) = async {
-						if !sub_ns.has_origin() {
-							return Ok(());
-						}
-						let stream = Stream::open(&sub_ns_session, version).await?;
-						if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
-							tracing::warn!(%err, "subscribe_namespace failed, continuing without");
-						}
-						Ok(())
-					} => Err(err),
-				}
+									Err(err) = run_unis(session.clone(), subscriber.clone(), version) => Err(err),
+									Err(err) = run_dispatch(session.clone(), publisher.clone(), subscriber.clone(), version) => Err(err),
+									Err(err) = publisher.run() => Err(err),
+									Err(err) = async {
+				let stream = Stream::open(&sub_ns_session, version).await?;
+										if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
+											tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+										}
+										Ok(())
+									} => Err(err),
+								}
 			}
 		};
 

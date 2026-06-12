@@ -28,10 +28,12 @@ use mpeg2ts::ts::{
 	TsHeader, TsPacket, TsPacketWriter, TsPayload, VersionNumber, WriteTsPacket,
 };
 
-use crate::catalog::CatalogFormat;
+use moq_net::Timestamp;
+
 use crate::catalog::hang::Catalog;
+use crate::catalog::{CatalogFormat, Stream};
 use crate::codec::annexb;
-use crate::container::{CatalogSource, ExportSource, Frame};
+use crate::container::{ExportSource, Frame};
 
 use super::adts;
 use super::scte35;
@@ -50,7 +52,7 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// fresh PAT+PMT at video keyframes). Returns `None` when the broadcast ends.
 pub struct Export<E: scte35::Catalog = ()> {
 	broadcast: moq_net::BroadcastConsumer,
-	catalog: Option<CatalogSource<E>>,
+	catalog: Option<crate::catalog::Consumer<E>>,
 	latency: Duration,
 
 	tracks: HashMap<String, Track>,
@@ -60,7 +62,7 @@ pub struct Export<E: scte35::Catalog = ()> {
 	/// Program tables, built once the track layout is known.
 	psi: Option<Psi>,
 	/// Media timestamp of the last PAT/PMT emission.
-	last_psi: Option<crate::container::Timestamp>,
+	last_psi: Option<Timestamp>,
 }
 
 struct Track {
@@ -97,22 +99,22 @@ struct PesUnit {
 	is_pcr: bool,
 	is_video: bool,
 	keyframe: bool,
-	timestamp: crate::container::Timestamp,
+	timestamp: Timestamp,
 }
 
 impl Export {
 	/// Subscribe to `broadcast`, using the default catalog format.
-	pub fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
-		Self::with_catalog_format(broadcast, CatalogFormat::default())
+	pub async fn new(broadcast: moq_net::BroadcastConsumer) -> Result<Self, crate::Error> {
+		Self::with_catalog_format(broadcast, CatalogFormat::default()).await
 	}
 
 	/// Subscribe to `broadcast`, selecting an explicit catalog format. Media only;
 	/// any catalog extension (e.g. `.scte35` cues) is ignored.
-	pub fn with_catalog_format(
+	pub async fn with_catalog_format(
 		broadcast: moq_net::BroadcastConsumer,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
-		Self::build(broadcast, catalog_format)
+		Self::build(broadcast, catalog_format).await
 	}
 }
 
@@ -120,19 +122,19 @@ impl Export<scte35::Ext> {
 	/// Subscribe to `broadcast`, exporting its `.scte35` cue tracks back to MPEG-TS
 	/// alongside the media. The `Self` type pins the extension, so callers write
 	/// `Export::with_scte35(..)` with no turbofish (the plain constructors are media-only).
-	pub fn with_scte35(
+	pub async fn with_scte35(
 		broadcast: moq_net::BroadcastConsumer,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
-		Self::build(broadcast, catalog_format)
+		Self::build(broadcast, catalog_format).await
 	}
 }
 
 impl<E: scte35::Catalog> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
-	fn build(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
-		let catalog = CatalogSource::new(&broadcast, catalog_format)?;
+	async fn build(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
+		let catalog = crate::catalog::Consumer::<E>::new(&broadcast, catalog_format).await?;
 		Ok(Self {
 			broadcast,
 			catalog: Some(catalog),
@@ -192,7 +194,7 @@ impl<E: scte35::Catalog> Export<E> {
 						track.finished = true;
 						break;
 					}
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+					Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
 					Poll::Pending => break,
 				}
 			}
@@ -644,8 +646,8 @@ const PES_OPTIONAL_LEN: usize = 3 + 5;
 /// Full on-wire PES header for the first packet: 6-byte fixed prefix + optional region.
 const PES_HEADER_LEN: usize = 6 + PES_OPTIONAL_LEN;
 
-fn psi_interval() -> crate::container::Timestamp {
-	crate::container::Timestamp::try_from(PSI_INTERVAL).unwrap_or(crate::container::Timestamp::ZERO)
+fn psi_interval() -> Timestamp {
+	Timestamp::try_from(PSI_INTERVAL).unwrap_or(Timestamp::ZERO)
 }
 
 /// External byte size of an adaptation field (manual mirror of the crate's
@@ -654,7 +656,7 @@ fn adaptation_size(af: &AdaptationField) -> usize {
 	2 + if af.pcr.is_some() { 6 } else { 0 }
 }
 
-fn to_ts_timestamp(timestamp: crate::container::Timestamp) -> anyhow::Result<TsTimestamp> {
+fn to_ts_timestamp(timestamp: Timestamp) -> anyhow::Result<TsTimestamp> {
 	// micros -> 90 kHz, wrapped into the 33-bit field.
 	let micros = timestamp.as_micros();
 	let ticks = (micros * 90_000 / 1_000_000) as u64 & ((1 << 33) - 1);

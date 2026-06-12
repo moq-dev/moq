@@ -3,8 +3,9 @@ import { Broadcast, type TrackRequest } from "../broadcast.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
-import type { Track } from "../track.ts";
+import type { TrackProducer } from "../track.ts";
 import { error } from "../util/error.ts";
+import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { type Publish, PublishError } from "./publish.ts";
@@ -22,6 +23,19 @@ import {
 } from "./subscribe_namespace.ts";
 import { Version } from "./version.ts";
 
+// Bound on how long stream-open plus SUBSCRIBE_OK may take. Browsers cap
+// concurrent QUIC streams (Chrome ~100); past the cap openBi() silently
+// blocks. The timeout turns that into a clear error.
+const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
+
+// Out-parameter for #openSubscribe: lets the caller observe partial progress
+// (stream opened, trackAlias registered) so it can clean up on timeout even
+// before the setup promise settles.
+type SubscribeSetupState = {
+	stream?: Stream;
+	registeredAlias?: bigint;
+};
+
 /**
  * Handles subscribing to broadcasts using moq-transport protocol.
  * Uses the stream-per-request pattern (real bidi streams for v17, virtual for v14-v16).
@@ -32,7 +46,8 @@ export class Subscriber {
 	#session: Session;
 
 	// Our subscribed tracks — keyed by trackAlias for group routing
-	#subscribes = new Map<bigint, Track>();
+	// trackAlias -> the write side; incoming object streams are routed here.
+	#subscribes = new Map<bigint, TrackProducer>();
 
 	// Any currently active announcements.
 	#announced = new Set<Path.Valid>();
@@ -198,104 +213,138 @@ export class Subscriber {
 		const version = this.#session.version;
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) {
-			request.track.close(new Error("session closed"));
+			request.reject(new Error("session closed"));
 			return;
 		}
 
-		console.debug(`subscribe start: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
+		console.debug(`subscribe start: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
+		// IETF negotiates group order in SUBSCRIBE_OK; this implementation only
+		// supports descending (newest-first), so commit ordered: false. (There's no
+		// per-frame compression/timescale, so the rest stay at their defaults.) This
+		// resolves the consumer's track.info() and gives us the write side that
+		// incoming object streams are routed into.
+		const producer = request.accept({ ordered: false });
+
+		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
+		// flows back via `state` so the timeout path can clean up the stream
+		// and any registration if setup eventually finishes.
+		const state: SubscribeSetupState = {};
+		const setup = this.#openSubscribe(state, broadcast, request, producer, requestId);
+
+		let stream: Stream;
+		let trackAlias: bigint;
 		try {
-			const stream = await this.#session.openBi();
-
-			try {
-				// Write Subscribe
-				await stream.writer.u53(Subscribe.id);
-				const msg = new Subscribe({
-					requestId,
-					trackNamespace: broadcast,
-					trackName: request.track.name,
-					subscriberPriority: request.priority,
-				});
-				await msg.encode(stream.writer, version);
-				console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
-
-				// Pre-register with requestId so early group uni streams aren't dropped.
-				// The publisher typically uses requestId as the trackAlias.
-				this.#subscribes.set(requestId, request.track);
-
-				// Read response (SubscribeOk or error)
-				const respTypeId = await stream.reader.u53();
-				if (respTypeId === SubscribeOk.id) {
-					const ok = await SubscribeOk.decode(stream.reader, version);
-					// Update registration to use the actual trackAlias from SubscribeOk
-					if (ok.trackAlias !== requestId) {
-						this.#subscribes.delete(requestId);
-						this.#subscribes.set(ok.trackAlias, request.track);
-					}
-					console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
-
-					try {
-						// Wait for stream close (= PublishDone) or track close (= local unsubscribe)
-						await Promise.race([stream.reader.closed, request.track.closed]);
-
-						// For v14-v16: send Unsubscribe before closing (removed in v17+)
-						if (
-							version === Version.DRAFT_14 ||
-							version === Version.DRAFT_15 ||
-							version === Version.DRAFT_16
-						) {
-							try {
-								await stream.writer.u53(Unsubscribe.id);
-								const unsub = new Unsubscribe({ requestId });
-								await unsub.encode(stream.writer, version);
-							} catch {
-								// Stream might already be closed
-							}
-						}
-
-						request.track.close();
-						stream.close();
-						console.debug(
-							`subscribe close: id=${requestId} broadcast=${broadcast} track=${request.track.name}`,
-						);
-					} finally {
-						this.#subscribes.delete(ok.trackAlias);
-					}
-				} else {
-					// Clean up pre-registered entry on error
-					this.#subscribes.delete(requestId);
-
-					// Error response
-					let reasonPhrase = "unknown error";
-					try {
-						if (respTypeId === RequestError.id) {
-							// SubscribeError (v14) or RequestError (v15+)
-							const err =
-								version === Version.DRAFT_14
-									? await (await import("./subscribe.ts")).SubscribeError.decode(
-											stream.reader,
-											version,
-										)
-									: await RequestError.decode(stream.reader, version);
-							reasonPhrase = `code=${err.errorCode} reason=${err.reasonPhrase}`;
-						}
-					} catch {
-						// Decoding error response failed, use default message
-					}
-					throw new Error(`SUBSCRIBE error: ${reasonPhrase}`);
-				}
-			} catch (err) {
-				this.#subscribes.delete(requestId);
-				stream.abort(error(err));
-				throw err;
-			}
+			const result = await withTimeout(
+				setup,
+				SUBSCRIBE_OK_TIMEOUT_MS,
+				`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
+			);
+			stream = result.stream;
+			trackAlias = result.alias;
+			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			const e = error(err);
-			request.track.close(e);
+			producer.close(e);
 			console.warn(
-				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
+				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${e.message}`,
 			);
+			// If setup eventually settles after the timeout, abort the stream
+			// and drop any registration so we don't leak. Cover both branches:
+			// setup may resolve late, or reject (e.g. SUBSCRIBE error) after the
+			// stream is already open.
+			const cleanup = () => {
+				if (state.registeredAlias !== undefined) this.#subscribes.delete(state.registeredAlias);
+				state.stream?.abort(e);
+			};
+			setup.then(cleanup, cleanup);
+			return;
 		}
+
+		try {
+			// Wait for stream close (= PublishDone) or track close (= local unsubscribe)
+			await Promise.race([stream.reader.closed, producer.closed]);
+
+			// For v14-v16: send Unsubscribe before closing (removed in v17+)
+			if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+				try {
+					await stream.writer.u53(Unsubscribe.id);
+					const unsub = new Unsubscribe({ requestId });
+					await unsub.encode(stream.writer, version);
+				} catch {
+					// Stream might already be closed
+				}
+			}
+
+			producer.close();
+			stream.close();
+			console.debug(`subscribe close: id=${requestId} broadcast=${broadcast} track=${request.name}`);
+		} catch (err) {
+			const e = error(err);
+			producer.close(e);
+			stream.abort(e);
+			console.warn(
+				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${e.message}`,
+			);
+		} finally {
+			this.#subscribes.delete(trackAlias);
+		}
+	}
+
+	// Opens the subscribe stream, sends SUBSCRIBE, and reads the response.
+	// `state` is populated as soon as the stream opens and again when the
+	// trackAlias is registered, so the caller can clean both up on timeout
+	// even before this promise settles.
+	async #openSubscribe(
+		state: SubscribeSetupState,
+		broadcast: Path.Valid,
+		request: TrackRequest,
+		producer: TrackProducer,
+		requestId: bigint,
+	): Promise<{ stream: Stream; alias: bigint }> {
+		const version = this.#session.version;
+
+		state.stream = await this.#session.openBi();
+
+		await state.stream.writer.u53(Subscribe.id);
+		const msg = new Subscribe({
+			requestId,
+			trackNamespace: broadcast,
+			trackName: request.name,
+			subscriberPriority: request.priority,
+		});
+		await msg.encode(state.stream.writer, version);
+		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
+
+		// Pre-register with requestId so early group uni streams aren't dropped.
+		// The publisher typically uses requestId as the trackAlias.
+		this.#subscribes.set(requestId, producer);
+		state.registeredAlias = requestId;
+
+		const respTypeId = await state.stream.reader.u53();
+		if (respTypeId !== SubscribeOk.id) {
+			let reasonPhrase = "unknown error";
+			try {
+				if (respTypeId === RequestError.id) {
+					const err =
+						version === Version.DRAFT_14
+							? await (await import("./subscribe.ts")).SubscribeError.decode(state.stream.reader, version)
+							: await RequestError.decode(state.stream.reader, version);
+					reasonPhrase = `code=${err.errorCode} reason=${err.reasonPhrase}`;
+				}
+			} catch {
+				// Decoding error response failed, use default message
+			}
+			throw new Error(`SUBSCRIBE error: ${reasonPhrase}`);
+		}
+
+		const ok = await SubscribeOk.decode(state.stream.reader, version);
+		if (ok.trackAlias !== requestId) {
+			this.#subscribes.delete(requestId);
+			this.#subscribes.set(ok.trackAlias, producer);
+			state.registeredAlias = ok.trackAlias;
+		}
+		return { stream: state.stream, alias: ok.trackAlias };
 	}
 
 	/**

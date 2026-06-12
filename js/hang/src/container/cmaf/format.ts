@@ -15,6 +15,7 @@ export class Format implements ContainerFormat {
 			data: s.data,
 			timestamp: s.timestamp as Time.Micro,
 			keyframe: s.keyframe,
+			duration: s.duration as Time.Micro,
 		}));
 	}
 }

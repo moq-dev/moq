@@ -29,6 +29,17 @@ Another tool does the encoding (ex. ffmpeg), making it easy to pipe any media in
 ffmpeg -f avfoundation -i "0" -f mp4 - | moq-cli publish https://relay.example.com my-stream
 ```
 
+## [moq-rtc](/bin/rtc)
+
+A WebRTC <-> MoQ gateway. Accepts WHIP from any conformant publisher
+(OBS, browsers) and republishes to a MoQ relay.
+WHEP egress is in progress.
+
+## [moq-hls](/bin/hls)
+
+An HLS / LL-HLS <-> MoQ gateway. Serves a MoQ broadcast as HLS and
+Low-Latency HLS over HTTP, or imports a remote HLS playlist into MoQ.
+
 ## [OBS Plugin](/bin/obs)
 
 Real-time latency with the familiar OBS interface.

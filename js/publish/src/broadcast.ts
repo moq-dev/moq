@@ -82,29 +82,33 @@ export class Broadcast {
 			const request = await broadcast.requested();
 			if (!request) break;
 
-			effect.cleanup(() => request.track.close());
+			// dev's reshape hands back a TrackRequest: switch on its name, reject unknown
+			// tracks, and accept the rest into a producer to serve.
+			let serve: ((track: Moq.TrackProducer, effect: Effect) => void) | undefined;
+			switch (request.name) {
+				case Broadcast.CATALOG_TRACK:
+					serve = (track, effect) => this.catalog.serve(track, effect);
+					break;
+				case Audio.Encoder.TRACK:
+					serve = (track, effect) => this.audio.serve(track, effect);
+					break;
+				case Video.Root.TRACK_HD:
+					serve = (track, effect) => this.video.hd.serve(track, effect);
+					break;
+				case Video.Root.TRACK_SD:
+					serve = (track, effect) => this.video.sd.serve(track, effect);
+					break;
+				default:
+					console.error("received subscription for unknown track", request.name);
+					request.reject(new Error(`Unknown track: ${request.name}`));
+					continue;
+			}
 
+			const track = request.accept();
+			effect.cleanup(() => track.close());
 			effect.run((effect) => {
-				if (effect.get(request.track.state.closed)) return;
-
-				switch (request.track.name) {
-					case Broadcast.CATALOG_TRACK:
-						this.catalog.serve(request.track, effect);
-						break;
-					case Audio.Encoder.TRACK:
-						this.audio.serve(request.track, effect);
-						break;
-					case Video.Root.TRACK_HD:
-						this.video.hd.serve(request.track, effect);
-						break;
-					case Video.Root.TRACK_SD:
-						this.video.sd.serve(request.track, effect);
-						break;
-					default:
-						console.error("received subscription for unknown track", request.track.name);
-						request.track.close(new Error(`Unknown track: ${request.track.name}`));
-						break;
-				}
+				if (effect.get(track.state.closed)) return;
+				serve(track, effect);
 			});
 		}
 	}

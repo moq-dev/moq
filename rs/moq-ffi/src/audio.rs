@@ -233,14 +233,12 @@ impl MoqBroadcastConsumer {
 	/// the catalog (see
 	/// [`MoqCatalogConsumer::next`](crate::consumer::MoqCatalogConsumer::next));
 	/// the codec is inferred from it.
-	pub fn subscribe_audio(
+	pub async fn subscribe_audio(
 		&self,
 		name: String,
 		catalog_audio: crate::media::MoqAudio,
 		output: MoqAudioDecoderOutput,
 	) -> Result<Arc<MoqAudioConsumer>, MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
-
 		let mut cfg = hang::catalog::AudioConfig::new(
 			hang::catalog::AudioCodec::Opus,
 			catalog_audio.sample_rate,
@@ -260,7 +258,8 @@ impl MoqBroadcastConsumer {
 				channels: output.channels,
 				latency_max: output.latency_max_ms.map(Duration::from_millis),
 			},
-		)?;
+		)
+		.await?;
 
 		Ok(Arc::new(MoqAudioConsumer {
 			task: Task::new(ConsumerInner { consumer }),

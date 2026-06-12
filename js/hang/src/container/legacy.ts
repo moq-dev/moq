@@ -35,10 +35,10 @@ export function encodeFrame(source: Uint8Array | Source, timestamp: Time.Micro):
 
 // A Helper class to encode frames into a track.
 export class Producer {
-	#track: Moq.Track;
+	#track: Moq.TrackProducer;
 	#group?: Moq.Group;
 
-	constructor(track: Moq.Track) {
+	constructor(track: Moq.TrackProducer) {
 		this.#track = track;
 	}
 

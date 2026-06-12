@@ -8,7 +8,7 @@ export function playPauseButton(parent: Effect, watch: MoqWatch): HTMLElement {
 	const button = controlButton(play, "Play");
 
 	parent.run((effect) => {
-		const paused = effect.get(watch.backend.paused);
+		const paused = effect.get(watch.controls.paused);
 		button.title = paused ? "Play" : "Pause";
 		button.setAttribute("aria-label", button.title);
 		button.replaceChildren(icon(paused ? play : pause));

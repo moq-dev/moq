@@ -1348,7 +1348,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_claims_reduction_with_publish_restrictions() -> anyhow::Result<()> {
+	async fn test_claims_reduction_with_publisher_restrictions() -> anyhow::Result<()> {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 

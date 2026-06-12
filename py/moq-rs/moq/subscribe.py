@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from moq_ffi import (
-    Container,
     MoqAudioConsumer,
     MoqBroadcastConsumer,
     MoqCatalogConsumer,
@@ -12,7 +11,7 @@ from moq_ffi import (
     MoqTrackConsumer,
 )
 
-from .types import Audio, AudioDecoderOutput, AudioFrame, Catalog, Frame
+from .types import Audio, AudioDecoderOutput, AudioFrame, Catalog, Frame, Video
 
 
 class MediaConsumer:
@@ -20,6 +19,12 @@ class MediaConsumer:
 
     def __init__(self, inner: MoqMediaConsumer) -> None:
         self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
 
     def __aiter__(self):
         return self
@@ -45,6 +50,12 @@ class GroupConsumer:
         """The sequence number of this group within the track."""
         return self._inner.sequence()
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
+
     def __aiter__(self):
         return self
 
@@ -68,6 +79,12 @@ class TrackConsumer:
 
     def __init__(self, inner: MoqTrackConsumer) -> None:
         self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
 
     def __aiter__(self):
         return self
@@ -123,6 +140,12 @@ class AudioConsumer:
     def __init__(self, inner: MoqAudioConsumer) -> None:
         self._inner = inner
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
+
     def __aiter__(self):
         return self
 
@@ -141,6 +164,12 @@ class CatalogConsumer:
 
     def __init__(self, inner: MoqCatalogConsumer) -> None:
         self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
 
     def __aiter__(self):
         return self
@@ -161,17 +190,24 @@ class BroadcastConsumer:
     def __init__(self, inner: MoqBroadcastConsumer) -> None:
         self._inner = inner
 
-    def subscribe_catalog(self) -> CatalogConsumer:
-        return CatalogConsumer(self._inner.subscribe_catalog())
+    async def subscribe_catalog(self) -> CatalogConsumer:
+        return CatalogConsumer(await self._inner.subscribe_catalog())
 
-    def subscribe_track(self, name: str) -> TrackConsumer:
+    async def subscribe_track(self, name: str) -> TrackConsumer:
         """Subscribe to a track — receive arbitrary byte payloads."""
-        return TrackConsumer(self._inner.subscribe_track(name))
+        return TrackConsumer(await self._inner.subscribe_track(name))
 
-    def subscribe_media(self, name: str, container: Container, max_latency_ms: int) -> MediaConsumer:
-        return MediaConsumer(self._inner.subscribe_media(name, container, max_latency_ms))
+    async def subscribe_media(self, name: str, track: Video | Audio, max_latency_ms: int = 10000) -> MediaConsumer:
+        """Subscribe to a media track, delivering frames in decode order.
 
-    def subscribe_audio(
+        ``track`` is the catalog entry for this track (e.g.
+        ``catalog.video[name]``); its ``container`` describes how to parse the
+        bitstream, so the caller doesn't construct a :class:`Container` by hand.
+        ``max_latency_ms`` bounds buffering before a stalled GoP is skipped.
+        """
+        return MediaConsumer(await self._inner.subscribe_media(name, track.container, max_latency_ms))
+
+    async def subscribe_audio(
         self,
         name: str,
         catalog_audio: Audio,
@@ -187,9 +223,9 @@ class BroadcastConsumer:
         the congestion-control knob. (Named ``_max`` to leave room for
         a future ``latency_min_ms`` jitter-buffer floor.)
         """
-        return AudioConsumer(self._inner.subscribe_audio(name, catalog_audio, output))
+        return AudioConsumer(await self._inner.subscribe_audio(name, catalog_audio, output))
 
     async def catalog(self) -> Catalog:
         """Convenience: subscribe and return the first catalog."""
-        consumer = self.subscribe_catalog()
+        consumer = await self.subscribe_catalog()
         return await anext(consumer)

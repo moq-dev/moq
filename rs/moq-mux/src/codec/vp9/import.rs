@@ -67,17 +67,20 @@ impl Import {
 		}
 
 		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name, "reinitializing track");
-			self.catalog.lock().video.renditions.remove(&track.name);
+			tracing::debug!(name = ?track.name(), "reinitializing track");
+			self.catalog.lock().video.renditions.remove(track.name());
 		}
 
-		let track = self.broadcast.unique_track(".vp09")?;
-		tracing::debug!(name = ?track.name, ?config, "starting track");
+		let track = self.broadcast.unique_track(
+			".vp09",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)?;
+		tracing::debug!(name = ?track.name(), ?config, "starting track");
 		self.catalog
 			.lock()
 			.video
 			.renditions
-			.insert(track.name.clone(), config.clone());
+			.insert(track.name().to_string(), config.clone());
 
 		self.config = Some(config);
 		self.track = Some(crate::container::Producer::new(
@@ -92,7 +95,7 @@ impl Import {
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
+		pts: Option<moq_net::Timestamp>,
 	) -> anyhow::Result<()> {
 		let payload = buf.copy_to_bytes(buf.remaining());
 		anyhow::ensure!(!payload.is_empty(), "empty VP9 frame");
@@ -114,10 +117,11 @@ impl Import {
 			timestamp: pts,
 			payload,
 			keyframe: header.keyframe,
+			duration: None,
 		})?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
+			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(track.name())
 		{
 			c.jitter = Some(jitter);
 		}
@@ -148,23 +152,21 @@ impl Import {
 		self.track.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
+	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> anyhow::Result<moq_net::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(crate::container::Timestamp::from_micros(
-			zero.elapsed().as_micros() as u64
-		)?)
+		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
 
 impl Drop for Import {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name, "ending track");
-			self.catalog.lock().video.renditions.remove(&track.name);
+			tracing::debug!(name = ?track.name(), "ending track");
+			self.catalog.lock().video.renditions.remove(track.name());
 		}
 	}
 }
@@ -173,14 +175,14 @@ impl Drop for Import {
 mod tests {
 	use bytes::Bytes;
 
-	use crate::container::Timestamp;
+	use moq_net::Timestamp;
 
 	// profile 0, 8-bit, CS_BT_601, studio range, 4:2:0, 320x240.
 	const KEYFRAME: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
 
 	#[tokio::test(start_paused = true)]
 	async fn imports_keyframe_then_interframe() {
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut import = super::Import::new(broadcast.clone(), catalog.clone());
 
@@ -195,7 +197,7 @@ mod tests {
 			.unwrap();
 
 		assert!(import.is_initialized());
-		let name = import.track().unwrap().name.clone();
+		let name = import.track().unwrap().name().to_string();
 		let config = catalog.lock().video.renditions.get(&name).cloned().unwrap();
 		assert!(matches!(config.codec, hang::catalog::VideoCodec::VP9(_)));
 		assert_eq!(config.coded_width, Some(320));
@@ -214,7 +216,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn rejects_interframe_first() {
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut import = super::Import::new(broadcast.clone(), catalog);
 

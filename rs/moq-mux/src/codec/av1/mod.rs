@@ -10,6 +10,37 @@ pub use import::*;
 
 use hang::catalog::AV1;
 
+/// AV1 parsing errors.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("OBU is too short")]
+	ObuTooShort,
+
+	#[error("OBU size too large")]
+	ObuSizeTooLarge,
+
+	#[error("not initialized")]
+	NotInitialized,
+
+	#[error("expected sequence header before any frames")]
+	MissingSequenceHeader,
+
+	#[error("missing timestamp")]
+	MissingTimestamp,
+
+	#[error("OBU header parse: {0}")]
+	ObuHeaderParse(std::sync::Arc<std::io::Error>),
+}
+
+impl From<std::io::Error> for Error {
+	fn from(err: std::io::Error) -> Self {
+		Error::ObuHeaderParse(std::sync::Arc::new(err))
+	}
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
 /// Map a parsed `mp4_atom::Av1c` (AV1CodecConfigurationRecord) to the
 /// hang catalog's AV1 codec struct.
 ///

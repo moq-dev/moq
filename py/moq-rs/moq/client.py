@@ -6,6 +6,7 @@ from moq_ffi import MoqClient
 
 from .origin import Announced, AnnouncedBroadcast, OriginConsumer, OriginProducer
 from .publish import BroadcastProducer
+from .session import Session
 
 
 class Client:
@@ -28,16 +29,12 @@ class Client:
         url: str,
         *,
         tls_verify: bool = True,
-        tls_roots: list[str] | None = None,
-        tls_fingerprints: list[str] | None = None,
         bind: str | None = None,
         publish: OriginProducer | None = None,
         subscribe: OriginProducer | None = None,
     ) -> None:
         self._url = url
         self._tls_verify = tls_verify
-        self._tls_roots = tls_roots
-        self._tls_fingerprints = tls_fingerprints
         self._bind = bind
 
         # If neither origin is provided, create a shared internal one.
@@ -52,17 +49,13 @@ class Client:
 
         self._consumer: OriginConsumer | None = None
         self._inner: MoqClient | None = None
-        self._session = None
+        self._session: Session | None = None
 
     async def __aenter__(self):
         self._inner = MoqClient()
 
         if not self._tls_verify:
             self._inner.set_tls_disable_verify(True)
-        if self._tls_roots:
-            self._inner.set_tls_roots(self._tls_roots)
-        if self._tls_fingerprints:
-            self._inner.set_tls_fingerprints(self._tls_fingerprints)
         if self._bind is not None:
             self._inner.set_bind(self._bind)
 
@@ -71,7 +64,7 @@ class Client:
         if self._consume_origin is not None:
             self._inner.set_consume(self._consume_origin._inner)
 
-        self._session = await self._inner.connect(self._url)
+        self._session = Session(await self._inner.connect(self._url))
 
         # Create consumer from whichever origin handles consuming.
         origin = self._consume_origin or self._publish_origin
@@ -104,5 +97,24 @@ class Client:
         return self._consumer.announced_broadcast(path)
 
     @property
-    def session(self):
+    def session(self) -> Session | None:
+        """The established session, or `None` before connecting / after exit."""
         return self._session
+
+
+def connect(
+    url: str,
+    *,
+    tls_verify: bool = True,
+    bind: str | None = None,
+    publish: OriginProducer | None = None,
+    subscribe: OriginProducer | None = None,
+) -> Client:
+    """Shorthand for constructing a :class:`Client`.
+
+    Use it directly as an async context manager:
+
+        async with moq.connect("https://relay.example.com") as client:
+            ...
+    """
+    return Client(url, tls_verify=tls_verify, bind=bind, publish=publish, subscribe=subscribe)

@@ -135,7 +135,7 @@ fn track_entry_video_vp9(number: u64, width: u64, height: u64) -> MatroskaSpec {
 }
 
 fn run(data: &[u8]) -> crate::catalog::hang::Catalog {
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.clone());
 	let mut buf = bytes::BytesMut::from(data);
@@ -222,7 +222,7 @@ fn test_chunked_decode_dedup() {
 		.segment_end()
 		.build();
 
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.clone());
 

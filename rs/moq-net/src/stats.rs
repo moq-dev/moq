@@ -129,7 +129,7 @@ use std::{
 use serde::Serialize;
 use web_async::{Lock, spawn};
 
-use crate::{AsPath, Broadcast, OriginProducer, Path, PathOwned, Track, TrackProducer};
+use crate::{AsPath, BroadcastInfo, OriginProducer, Path, PathOwned, TrackProducer};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
@@ -1061,13 +1061,10 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 		return;
 	};
 
-	let mut broadcast = Broadcast::new().produce();
+	let mut broadcast = BroadcastInfo::new().produce();
 
 	// Create the four per-broadcast tracks and the two session tracks up front.
-	let create = |broadcast: &mut crate::BroadcastProducer, name: &str| match broadcast.create_track(Track {
-		name: name.into(),
-		priority: 0,
-	}) {
+	let create = |broadcast: &mut crate::BroadcastProducer, name: &str| match broadcast.create_track(name, None) {
 		Ok(t) => Some(t),
 		Err(err) => {
 			tracing::warn!(?err, name, "stats: failed to create track");
@@ -1090,10 +1087,12 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 		session_tracks.push(t);
 	}
 
-	if !shared.origin.publish_broadcast(&advertised, broadcast.consume()) {
+	// Hold the announcement guard for the lifetime of this task; dropping it (on return)
+	// unannounces the stats broadcast.
+	let Ok(_publish) = shared.origin.publish_broadcast(&advertised, broadcast.consume()) else {
 		tracing::warn!(advertised = %advertised, "stats: origin rejected stats broadcast");
 		return;
-	}
+	};
 	drop(shared);
 
 	// Per-path snapshot state owned by this task. Mirrors the global entries
@@ -1104,8 +1103,8 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 	let mut session_local: [HashMap<PathOwned, SessionSlotState>; 2] = Default::default();
 	let mut session_last_payload: [Vec<u8>; 2] = Default::default();
 
-	let mut ticker = tokio::time::interval(interval);
-	ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+	let mut ticker = web_async::time::interval(interval);
+	ticker.set_missed_tick_behavior(web_async::time::MissedTickBehavior::Delay);
 
 	loop {
 		ticker.tick().await;
@@ -1259,9 +1258,9 @@ mod tests {
 				.with_origin(origin.clone())
 				.with_node(PathOwned::from(node.to_string())),
 		);
-		let mut consumer = origin.consume();
+		let mut consumer = origin.consume().announced();
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let (path, _broadcast) = consumer.announced().await.expect("expected announce");
+		let (path, _broadcast) = consumer.next().await.expect("expected announce");
 		path.as_str().to_string()
 	}
 
@@ -1343,7 +1342,7 @@ mod tests {
 		// No matter how many broadcasts get bumped, exactly one stats
 		// broadcast is announced (the per-node aggregate).
 		let (stats, origin) = test_stats(Some("sjc/1"));
-		let mut consumer = origin.consume();
+		let mut consumer = origin.consume().announced();
 
 		let bs1 = stats.tier(Tier::External).broadcast("foo/bar");
 		let _t1 = bs1.publisher().track("video");
@@ -1351,8 +1350,8 @@ mod tests {
 		let _t2 = bs2.publisher().track("video");
 
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let (path, broadcast) = consumer.announced().await.expect("expected announce");
-		assert!(broadcast.is_some());
+		let (path, event) = consumer.next().await.expect("expected announce");
+		assert!(event.broadcast().is_some());
 		assert_eq!(path.as_str(), ".stats/node/sjc/1");
 	}
 
@@ -1360,14 +1359,14 @@ mod tests {
 	async fn task_announces_without_node_suffix() {
 		let origin = Origin::random().produce();
 		let stats = Stats::new(StatsConfig::new().with_origin(origin.clone()));
-		let mut consumer = origin.consume();
+		let mut consumer = origin.consume().announced();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let _t = bs.publisher().track("video");
 
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let (path, broadcast) = consumer.announced().await.expect("expected announce");
-		assert!(broadcast.is_some());
+		let (path, event) = consumer.next().await.expect("expected announce");
+		assert!(event.broadcast().is_some());
 		assert_eq!(path.as_str(), ".stats/node");
 	}
 
@@ -1441,7 +1440,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn frame_emits_expected_counters() {
 		let (stats, origin) = test_stats(Some("sjc"));
-		let mut consumer = origin.consume();
+		let mut consumer = origin.consume().announced();
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let track = bs.publisher().track("video");
 		track.bytes(42);
@@ -1451,13 +1450,14 @@ mod tests {
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
-		let (_path, broadcast) = consumer.announced().await.expect("expected announce");
-		let broadcast = broadcast.expect("active");
+		let (_path, event) = consumer.next().await.expect("expected announce");
+		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
-			.subscribe_track(&Track {
-				name: "publisher.json".into(),
-				priority: 0,
-			})
+			.track("publisher.json")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
@@ -1473,19 +1473,20 @@ mod tests {
 		// publisher() (announce) with no subscription should bump announced but
 		// NOT broadcasts (which only counts sessions with an active sub).
 		let (stats, origin) = test_stats(Some("sjc"));
-		let mut consumer = origin.consume();
+		let mut consumer = origin.consume().announced();
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let _guard = bs.publisher();
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
-		let (_path, broadcast) = consumer.announced().await.expect("announce");
-		let broadcast = broadcast.expect("active");
+		let (_path, event) = consumer.next().await.expect("announce");
+		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
-			.subscribe_track(&Track {
-				name: "publisher.json".into(),
-				priority: 0,
-			})
+			.track("publisher.json")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
@@ -1502,7 +1503,7 @@ mod tests {
 		// change-driven inclusion surfaces the entry even though it's net-idle
 		// by snapshot time.
 		let (stats, origin) = test_stats(Some("sjc"));
-		let mut consumer = origin.consume();
+		let mut consumer = origin.consume().announced();
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let sessions = stats.tier(Tier::External).publisher_broadcasts();
 		{
@@ -1515,13 +1516,14 @@ mod tests {
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
-		let (_path, broadcast) = consumer.announced().await.expect("announce");
-		let broadcast = broadcast.expect("active");
+		let (_path, event) = consumer.next().await.expect("announce");
+		let broadcast = event.broadcast().expect("active");
 		let track = broadcast
-			.subscribe_track(&Track {
-				name: "publisher.json".into(),
-				priority: 0,
-			})
+			.track("publisher.json")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
 			.expect("subscribe");
 		let frame = read_frame(track).await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
@@ -1635,21 +1637,22 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn session_track_surfaces_by_root() {
 		let (stats, origin) = test_stats(Some("sjc"));
-		let mut consumer = origin.consume();
+		let mut consumer = origin.consume().announced();
 		let _a = stats.tier(Tier::External).session("acme");
 		let _b = stats.tier(Tier::External).session("acme");
 		let _c = stats.tier(Tier::Internal).session("peer");
 
 		tokio::time::advance(Duration::from_millis(1100)).await;
 
-		let (_path, broadcast) = consumer.announced().await.expect("announce");
-		let broadcast = broadcast.expect("active");
+		let (_path, event) = consumer.next().await.expect("announce");
+		let broadcast = event.broadcast().expect("active");
 
 		let track = broadcast
-			.subscribe_track(&Track {
-				name: "sessions.json".into(),
-				priority: 0,
-			})
+			.track("sessions.json")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
 			.expect("subscribe");
 		let frame = read_session_frame(track).await;
 		let snap = frame.get("acme").expect("root entry");
@@ -1661,10 +1664,11 @@ mod tests {
 		);
 
 		let int_track = broadcast
-			.subscribe_track(&Track {
-				name: "internal/sessions.json".into(),
-				priority: 0,
-			})
+			.track("internal/sessions.json")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
 			.expect("subscribe");
 		let snap = *read_session_frame(int_track).await.get("peer").expect("internal entry");
 		assert_eq!(snap.sessions, 1);
@@ -1700,22 +1704,23 @@ mod tests {
 		// without the unwrap_or_default fix, every entry would surface
 		// once in every track even when only one slot had real activity.
 		let (stats, origin) = test_stats(Some("sjc"));
-		let mut consumer = origin.consume();
+		let mut consumer = origin.consume().announced();
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let track = bs.publisher().track("video");
 		track.frame();
 
 		drive_ticks(2).await;
 
-		let (_path, broadcast) = consumer.announced().await.expect("announce");
-		let broadcast = broadcast.expect("active");
+		let (_path, event) = consumer.next().await.expect("announce");
+		let broadcast = event.broadcast().expect("active");
 
 		// External publisher slot SHOULD include foo/bar.
 		let pub_track = broadcast
-			.subscribe_track(&Track {
-				name: "publisher.json".into(),
-				priority: 0,
-			})
+			.track("publisher.json")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
 			.expect("subscribe");
 		assert!(
 			read_frame(pub_track).await.contains_key("foo/bar"),
@@ -1726,10 +1731,11 @@ mod tests {
 		// each must be `{}`, not `{"foo/bar": {all zeros}}`.
 		for name in ["subscriber.json", "internal/publisher.json", "internal/subscriber.json"] {
 			let t = broadcast
-				.subscribe_track(&Track {
-					name: name.into(),
-					priority: 0,
-				})
+				.track(name)
+				.unwrap()
+				.subscribe(None)
+				.unwrap()
+				.await
 				.expect("subscribe");
 			let frame = read_frame(t).await;
 			assert!(
@@ -1792,12 +1798,12 @@ mod tests {
 		assert!(closed_pos < open_pos, "sessions_closed must be loaded before sessions",);
 	}
 
-	async fn read_frame(mut track: crate::TrackConsumer) -> BTreeMap<String, Snapshot> {
+	async fn read_frame(mut track: crate::TrackSubscriber) -> BTreeMap<String, Snapshot> {
 		let bytes = track.read_frame().await.expect("ok").expect("frame");
 		serde_json::from_slice(&bytes).expect("json parse")
 	}
 
-	async fn read_session_frame(mut track: crate::TrackConsumer) -> BTreeMap<String, SessionSnapshot> {
+	async fn read_session_frame(mut track: crate::TrackSubscriber) -> BTreeMap<String, SessionSnapshot> {
 		let bytes = track.read_frame().await.expect("ok").expect("frame");
 		serde_json::from_slice(&bytes).expect("json parse")
 	}

@@ -24,7 +24,6 @@ async fn connect_with_version(version: &str) {
 
 	// Provide a dummy origin so the MoQ handshake has something to negotiate.
 	let origin = moq_native::moq_net::Origin::random().produce();
-	let consumer = origin.consume();
 
 	// ── client ──────────────────────────────────────────────────────
 	let mut client_config = moq_native::ClientConfig::default();
@@ -37,12 +36,13 @@ async fn connect_with_version(version: &str) {
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
 
 	// Run server accept and client connect concurrently.
+	let server_origin = origin.clone();
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		request.with_publish(consumer).ok().await
+		request.with_publisher(server_origin.clone()).ok().await
 	});
 
-	let client = client.with_publish(origin.consume());
+	let client = client.with_publisher(origin.clone());
 	let client_result = client.connect(url).await;
 
 	let server_result = server_handle.await.expect("server task panicked");
@@ -74,7 +74,6 @@ async fn connect_with_webtransport(version: Option<&str>) {
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	let origin = moq_native::moq_net::Origin::random().produce();
-	let consumer = origin.consume();
 
 	// ── client ──────────────────────────────────────────────────────
 	let mut client_config = moq_native::ClientConfig::default();
@@ -88,12 +87,13 @@ async fn connect_with_webtransport(version: Option<&str>) {
 	// Use https:// URL to trigger the WebTransport path.
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
+	let server_origin = origin.clone();
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		request.with_publish(consumer).ok().await
+		request.with_publisher(server_origin.clone()).ok().await
 	});
 
-	let client = client.with_publish(origin.consume());
+	let client = client.with_publisher(origin.clone());
 	let client_result = client.connect(url).await;
 
 	let server_result = server_handle.await.expect("server task panicked");

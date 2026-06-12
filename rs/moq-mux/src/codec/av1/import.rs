@@ -1,9 +1,11 @@
 use crate::container::jitter::MinFrameDuration;
 
-use anyhow::Context;
 use bytes::BytesMut;
 use bytes::{Buf, Bytes};
 use scuffle_av1::seq::SequenceHeaderObu;
+
+use super::Error;
+use crate::Result;
 
 /// A decoder for AV1 with inline sequence headers.
 pub struct Import {
@@ -49,7 +51,7 @@ impl Import {
 		}
 	}
 
-	fn init(&mut self, seq_header: &SequenceHeaderObu) -> anyhow::Result<()> {
+	fn init(&mut self, seq_header: &SequenceHeaderObu) -> Result<()> {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
 			profile: seq_header.seq_profile,
 			level: seq_header
@@ -88,17 +90,20 @@ impl Import {
 		}
 
 		if let Some(track) = &self.track.take() {
-			tracing::debug!(name = ?track.name, "reinitializing track");
-			self.catalog.lock().video.renditions.remove(&track.name);
+			tracing::debug!(name = ?track.name(), "reinitializing track");
+			self.catalog.lock().video.renditions.remove(track.name());
 		}
 
-		let track = self.broadcast.unique_track(".av01")?;
-		tracing::debug!(name = ?track.name, ?config, "starting track");
+		let track = self.broadcast.create_track(
+			self.broadcast.unique_name(".av01"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)?;
+		tracing::debug!(name = ?track.name(), ?config, "starting track");
 		self.catalog
 			.lock()
 			.video
 			.renditions
-			.insert(track.name.clone(), config.clone());
+			.insert(track.name().to_string(), config.clone());
 
 		self.config = Some(config);
 		self.track = Some(crate::container::Producer::new(
@@ -110,7 +115,7 @@ impl Import {
 	}
 
 	/// Initialize with minimal config if sequence header parsing fails
-	fn init_minimal(&mut self) -> anyhow::Result<()> {
+	fn init_minimal(&mut self) -> Result<()> {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
 			profile: 0,  // Main profile
 			level: 0,    // Unknown
@@ -127,13 +132,16 @@ impl Import {
 		});
 		config.container = hang::catalog::Container::Legacy;
 
-		let track = self.broadcast.unique_track(".av01")?;
-		tracing::debug!(name = ?track.name, "starting track with minimal config");
+		let track = self.broadcast.create_track(
+			self.broadcast.unique_name(".av01"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)?;
+		tracing::debug!(name = ?track.name(), "starting track with minimal config");
 		self.catalog
 			.lock()
 			.video
 			.renditions
-			.insert(track.name.clone(), config.clone());
+			.insert(track.name().to_string(), config.clone());
 
 		self.config = Some(config);
 		self.track = Some(crate::container::Producer::new(
@@ -145,7 +153,7 @@ impl Import {
 	}
 
 	/// Initialize the decoder with sequence header and other metadata OBUs.
-	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		let data = buf.as_ref();
 
 		// Handle av1C format (MP4/container initialization)
@@ -169,7 +177,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn init_from_av1c(&mut self, data: &[u8]) -> anyhow::Result<()> {
+	fn init_from_av1c(&mut self, data: &[u8]) -> Result<()> {
 		// Parse av1C box structure
 		let seq_profile = (data[1] >> 5) & 0x07;
 		let seq_level_idx = data[1] & 0x1F;
@@ -201,15 +209,18 @@ impl Import {
 		}
 
 		if let Some(track) = &self.track.take() {
-			self.catalog.lock().video.renditions.remove(&track.name);
+			self.catalog.lock().video.renditions.remove(track.name());
 		}
 
-		let track = self.broadcast.unique_track(".av01")?;
+		let track = self.broadcast.create_track(
+			self.broadcast.unique_name(".av01"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)?;
 		self.catalog
 			.lock()
 			.video
 			.renditions
-			.insert(track.name.clone(), config.clone());
+			.insert(track.name().to_string(), config.clone());
 
 		self.config = Some(config);
 		self.track = Some(crate::container::Producer::new(
@@ -221,16 +232,12 @@ impl Import {
 	}
 
 	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
-		Ok(self.track.as_ref().context("not initialized")?.track())
+	pub fn track(&self) -> Result<&moq_net::TrackProducer> {
+		Ok(self.track.as_ref().ok_or(Error::NotInitialized)?.track())
 	}
 
 	/// Decode as much data as possible from the given buffer.
-	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> anyhow::Result<()> {
+	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		let obus = ObuIterator::new(buf);
 
 		for obu in obus {
@@ -243,11 +250,7 @@ impl Import {
 	}
 
 	/// Decode all data in the buffer, assuming the buffer contains (the rest of) a frame.
-	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> anyhow::Result<()> {
+	pub fn decode_frame<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		let pts = self.pts(pts)?;
 		let mut obus = ObuIterator::new(buf);
 
@@ -264,8 +267,10 @@ impl Import {
 		Ok(())
 	}
 
-	fn decode_obu(&mut self, obu_data: Bytes, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
-		anyhow::ensure!(!obu_data.is_empty(), "OBU is too short");
+	fn decode_obu(&mut self, obu_data: Bytes, pts: Option<moq_net::Timestamp>) -> Result<()> {
+		if obu_data.is_empty() {
+			return Err(Error::ObuTooShort.into());
+		}
 
 		// Parse OBU header - this consumes header + extension + LEB128 size
 		let mut reader = &obu_data[..];
@@ -347,16 +352,13 @@ impl Import {
 		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		if !self.current.contains_frame {
 			return Ok(());
 		}
 
-		let track = self
-			.track
-			.as_mut()
-			.context("expected sequence header before any frames")?;
-		let pts = pts.context("missing timestamp")?;
+		let track = self.track.as_mut().ok_or(Error::MissingSequenceHeader)?;
+		let pts = pts.ok_or(Error::MissingTimestamp)?;
 
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
 
@@ -364,12 +366,13 @@ impl Import {
 			timestamp: pts,
 			payload,
 			keyframe: self.current.contains_keyframe,
+			duration: None,
 		};
 
 		track.write(frame)?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
+			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(track.name())
 		{
 			c.jitter = Some(jitter);
 		}
@@ -381,15 +384,19 @@ impl Import {
 	}
 
 	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
+	pub fn finish(&mut self) -> Result<()> {
+		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
 		track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
+	///
+	/// Any in-flight access unit is dropped. Pre-seek OBUs would otherwise leak
+	/// into the post-seek group with the wrong timestamp.
+	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		self.current = Frame::default();
+		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
 		track.seek(sequence)?;
 		Ok(())
 	}
@@ -398,23 +405,21 @@ impl Import {
 		self.track.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
+	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(crate::container::Timestamp::from_micros(
-			zero.elapsed().as_micros() as u64
-		)?)
+		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
 
 impl Drop for Import {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name, "ending track");
-			self.catalog.lock().video.renditions.remove(&track.name);
+			tracing::debug!(name = ?track.name(), "ending track");
+			self.catalog.lock().video.renditions.remove(track.name());
 		}
 	}
 }
@@ -429,7 +434,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> ObuIterator<'a, T> {
 		Self { buf }
 	}
 
-	pub fn flush(self) -> anyhow::Result<Option<Bytes>> {
+	pub fn flush(self) -> Result<Option<Bytes>> {
 		let remaining = self.buf.remaining();
 		if remaining == 0 {
 			return Ok(None);
@@ -441,7 +446,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> ObuIterator<'a, T> {
 }
 
 impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for ObuIterator<'a, T> {
-	type Item = anyhow::Result<Bytes>;
+	type Item = Result<Bytes>;
 
 	fn next(&mut self) -> Option<Self::Item> {
 		if self.buf.remaining() == 0 {
@@ -492,7 +497,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for ObuIterator<'a, T> {
 			}
 
 			if shift >= 56 {
-				return Some(Err(anyhow::anyhow!("OBU size too large")));
+				return Some(Err(Error::ObuSizeTooLarge.into()));
 			}
 		}
 

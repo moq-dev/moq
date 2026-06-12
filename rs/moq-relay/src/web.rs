@@ -508,14 +508,15 @@ async fn serve_announced(
 	} else {
 		state.auth.verify(&params).await?
 	};
-	let Some(mut origin) = state.cluster.subscriber(&token) else {
+	let Some(origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
+	let mut announced = origin.consume().announced();
 	let mut broadcasts = Vec::new();
 
-	while let Some((suffix, active)) = origin.try_announced() {
-		if active.is_some() {
+	while let Some((suffix, event)) = announced.try_next() {
+		if event.broadcast().is_some() {
 			broadcasts.push(suffix);
 		}
 	}
@@ -561,37 +562,40 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let track = moq_net::Track {
-		name: track,
-		priority: 0,
-	};
-
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 
 	let result = tokio::time::timeout_at(deadline, async {
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until the broadcast has been announced (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before gossip arrives.
-		let broadcast = origin.announced_broadcast("").await.ok_or(StatusCode::NOT_FOUND)?;
-		let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
-			moq_net::Error::NotFound => StatusCode::NOT_FOUND,
-			_ => StatusCode::INTERNAL_SERVER_ERROR,
-		})?;
+		let broadcast = origin
+			.consume()
+			.announced_broadcast("")
+			.await
+			.ok_or(StatusCode::NOT_FOUND)?;
 		let group = match params.group {
-			FetchGroup::Latest => match track.latest() {
-				Some(sequence) => track.get_group(sequence).await,
-				None => track.recv_group().await,
+			// "latest" needs a live subscription to learn the newest sequence;
+			// fetch only retrieves a specified past group.
+			FetchGroup::Latest => match async { broadcast.track(&track)?.subscribe(None)?.await }.await {
+				Ok(mut sub) => match sub.latest() {
+					Some(sequence) => sub.get_group(sequence).await,
+					None => sub.recv_group().await,
+				},
+				Err(err) => Err(err),
 			},
-			FetchGroup::Num(sequence) => track.get_group(sequence).await,
+			// A one-shot fetch, no subscription required.
+			FetchGroup::Num(sequence) => async { broadcast.track(&track)?.fetch_group(sequence, None)?.await }
+				.await
+				.map(Some),
 		};
 
 		let group = match group {
 			Ok(Some(group)) => group,
-			Ok(None) => return Err(StatusCode::NOT_FOUND),
+			Ok(None) | Err(moq_net::Error::NotFound) => return Err(StatusCode::NOT_FOUND),
 			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
 		};
 
-		tracing::info!(track = %track.name, group = %group.sequence, "serving group");
+		tracing::info!(%track, group = %group.sequence, "serving group");
 
 		match params.frame {
 			FetchFrame::Num(index) => match group.get_frame(index).await {

@@ -2,7 +2,8 @@
 
 use bytes::Bytes;
 
-use moq_mux::container::{Frame as MuxFrame, Timestamp};
+use moq_mux::container::Frame as MuxFrame;
+use moq_net::Timestamp;
 
 use crate::codec::{Encoder, EncoderInput, EncoderOutput};
 use crate::resample::Resampler;
@@ -62,10 +63,13 @@ impl AudioProducer {
 		};
 
 		let name = name.into();
-		let track = broadcast.create_track(moq_net::Track {
-			name: name.clone(),
-			priority: 0,
-		})?;
+		// Audio hang frames carry microsecond timestamps; advertise that on the
+		// track so Lite05 subscribers know what scale to expect and the model
+		// layer accepts Frame::timestamp on append.
+		let track = broadcast.create_track(
+			name.clone(),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)?;
 		let track = moq_mux::container::Producer::new(track, moq_mux::container::legacy::Wire);
 
 		let mut catalog_mut = catalog.clone();
@@ -155,6 +159,7 @@ impl AudioProducer {
 			timestamp,
 			payload,
 			keyframe: true,
+			duration: None,
 		};
 		self.track.write(mux_frame)?;
 		self.track.finish_group()?;
@@ -205,7 +210,7 @@ mod tests {
 	/// If `reset_before` contains an index, `reset_epoch()` is called before that
 	/// frame's `write`.
 	async fn published_pts(frames: &[Frame], reset_before: Option<usize>) -> Vec<u128> {
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let consumer = broadcast.consume();
 
@@ -219,12 +224,7 @@ mod tests {
 		let mut producer =
 			AudioProducer::new(&mut broadcast, catalog, "audio", input, EncoderOutput::default()).unwrap();
 
-		let track = consumer
-			.subscribe_track(&moq_net::Track {
-				name: "audio".into(),
-				priority: 0,
-			})
-			.unwrap();
+		let track = consumer.track("audio").unwrap().subscribe(None).unwrap().await.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
 
 		let mut pts = Vec::new();

@@ -2,9 +2,11 @@ use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::{NalIterator, START_CODE};
 use crate::container::jitter::MinFrameDuration;
 
-use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
+
+use super::Error;
+use crate::Result;
 
 /// A decoder for H.265 with inline SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
@@ -53,7 +55,7 @@ impl<E: CatalogExt> Import<E> {
 		}
 	}
 
-	fn init(&mut self, sps: &SpsNALUnit) -> anyhow::Result<()> {
+	fn init(&mut self, sps: &SpsNALUnit) -> Result<()> {
 		let profile = &sps.rbsp.profile_tier_level.general_profile;
 		let vui_data = sps.rbsp.vui_parameters.as_ref().map(VuiData::new).unwrap_or_default();
 
@@ -63,7 +65,7 @@ impl<E: CatalogExt> Import<E> {
 			profile_idc: profile.profile_idc,
 			profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
 			tier_flag: profile.tier_flag,
-			level_idc: profile.level_idc.context("missing level_idc in SPS")?,
+			level_idc: profile.level_idc.ok_or(Error::MissingLevelIdc)?,
 			constraint_flags: crate::codec::h265::pack_constraint_flags(profile),
 		});
 		config.coded_width = Some(sps.rbsp.cropped_width() as u32);
@@ -82,13 +84,19 @@ impl<E: CatalogExt> Import<E> {
 		let mut catalog = self.catalog.lock();
 
 		if let Some(track) = &self.track.take() {
-			tracing::debug!(name = ?track.name, "reinitializing track");
-			catalog.video.renditions.remove(&track.name);
+			tracing::debug!(name = ?track.name(), "reinitializing track");
+			catalog.video.renditions.remove(track.name());
 		}
 
-		let track = self.broadcast.unique_track(".hev1")?;
-		tracing::debug!(name = ?track.name, ?config, "starting track");
-		catalog.video.renditions.insert(track.name.clone(), config.clone());
+		let track = self.broadcast.create_track(
+			self.broadcast.unique_name(".hev1"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)?;
+		tracing::debug!(name = ?track.name(), ?config, "starting track");
+		catalog
+			.video
+			.renditions
+			.insert(track.name().to_string(), config.clone());
 
 		self.config = Some(config);
 		self.track =
@@ -98,7 +106,7 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Initialize the decoder with SPS/PPS and other non-slice NALs.
-	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		let mut nals = NalIterator::new(buf);
 
 		while let Some(nal) = nals.next().transpose()? {
@@ -113,8 +121,8 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
-		Ok(self.track.as_ref().context("not initialized")?.track())
+	pub fn track(&self) -> Result<&moq_net::TrackProducer> {
+		Ok(self.track.as_ref().ok_or(Error::NotInitialized)?.track())
 	}
 
 	/// Decode as much data as possible from the given buffer.
@@ -123,11 +131,7 @@ impl<E: CatalogExt> Import<E> {
 	/// This means it works for streaming media (ex. stdin) but adds a frame of latency.
 	///
 	/// TODO: This currently associates PTS with the *previous* frame, as part of `maybe_start_frame`.
-	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> anyhow::Result<()> {
+	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		let pts = self.pts(pts)?;
 
 		// Iterate over the NAL units in the buffer based on start codes.
@@ -147,11 +151,7 @@ impl<E: CatalogExt> Import<E> {
 	/// This can also be used when EOF is detected to flush the final frame.
 	///
 	/// NOTE: The next decode will fail if it doesn't begin with a start code.
-	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> anyhow::Result<()> {
+	pub fn decode_frame<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		let pts = self.pts(pts)?;
 		// Iterate over the NAL units in the buffer based on start codes.
 		let mut nals = NalIterator::new(buf);
@@ -174,13 +174,17 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Decode a single NAL unit. Only reads the first header byte to extract nal_unit_type,
 	/// Ignores nuh_layer_id and nuh_temporal_id_plus1.
-	fn decode_nal(&mut self, nal: Bytes, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
-		anyhow::ensure!(nal.len() >= 2, "NAL unit is too short");
+	fn decode_nal(&mut self, nal: Bytes, pts: Option<moq_net::Timestamp>) -> Result<()> {
+		if nal.len() < 2 {
+			return Err(Error::NalTooShort.into());
+		}
 		// u16 header: [forbidden_zero_bit(1) | nal_unit_type(6) | nuh_layer_id(6) | nuh_temporal_id_plus1(3)]
-		let header = nal.first().context("NAL unit is too short")?;
+		let header = nal.first().ok_or(Error::NalTooShort)?;
 
 		let forbidden_zero_bit = (header >> 7) & 1;
-		anyhow::ensure!(forbidden_zero_bit == 0, "forbidden zero bit is not zero");
+		if forbidden_zero_bit != 0 {
+			return Err(Error::ForbiddenZeroBit.into());
+		}
 
 		// Bits 1-6: nal_unit_type
 		let nal_unit_type = (header >> 1) & 0b111111;
@@ -197,7 +201,7 @@ impl<E: CatalogExt> Import<E> {
 				self.maybe_start_frame(pts)?;
 
 				// Try to reinitialize the track if the SPS has changed.
-				let sps = SpsNALUnit::parse(&mut &nal[..]).context("failed to parse SPS NAL unit")?;
+				let sps = SpsNALUnit::parse(&mut &nal[..]).map_err(|_| Error::SpsParse)?;
 				self.init(&sps)?;
 
 				// SPS changed mid-AU. Cached VPS/PPS are tied to the old SPS
@@ -269,7 +273,7 @@ impl<E: CatalogExt> Import<E> {
 			| NALUnitType::RaslN
 			| NALUnitType::RaslR => {
 				// Check first_slice_segment_in_pic_flag (bit 7 of third byte, after 2-byte header)
-				if nal.get(2).context("NAL unit is too short")? & 0x80 != 0 {
+				if nal.get(2).ok_or(Error::NalTooShort)? & 0x80 != 0 {
 					self.maybe_start_frame(pts)?;
 				}
 				self.current.contains_slice = true;
@@ -285,14 +289,14 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		// If we haven't seen any slices, we shouldn't flush yet.
 		if !self.current.contains_slice {
 			return Ok(());
 		}
 
-		let track = self.track.as_mut().context("expected SPS before any frames")?;
-		let pts = pts.context("missing timestamp")?;
+		let track = self.track.as_mut().ok_or(Error::MissingSps)?;
+		let pts = pts.ok_or(Error::MissingTimestamp)?;
 
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
 
@@ -300,12 +304,13 @@ impl<E: CatalogExt> Import<E> {
 			timestamp: pts,
 			payload,
 			keyframe: self.current.contains_idr,
+			duration: None,
 		};
 
 		track.write(frame)?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
+			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(track.name())
 		{
 			c.jitter = Some(jitter);
 		}
@@ -320,15 +325,19 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
+	pub fn finish(&mut self) -> Result<()> {
+		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
 		track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
+	///
+	/// Any in-flight access unit is dropped. Pre-seek NALs would otherwise leak
+	/// into the post-seek group with the wrong timestamp.
+	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		self.current = Frame::default();
+		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
 		track.seek(sequence)?;
 		Ok(())
 	}
@@ -337,23 +346,21 @@ impl<E: CatalogExt> Import<E> {
 		self.track.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> anyhow::Result<crate::container::Timestamp> {
+	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(crate::container::Timestamp::from_micros(
-			zero.elapsed().as_micros() as u64
-		)?)
+		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
 
 impl<E: CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
 		if let Some(track) = &self.track {
-			tracing::debug!(name = ?track.name, "ending track");
-			self.catalog.lock().video.renditions.remove(&track.name);
+			tracing::debug!(name = ?track.name(), "ending track");
+			self.catalog.lock().video.renditions.remove(track.name());
 		}
 	}
 }

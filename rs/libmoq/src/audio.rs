@@ -174,7 +174,9 @@ impl Audio {
 		output: moq_audio::DecoderOutput,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let consumer = moq_audio::AudioConsumer::new(broadcast, catalog, name, output)?;
+		let broadcast = broadcast.clone();
+		let catalog = catalog.clone();
+		let name = name.to_string();
 
 		let channel = oneshot::channel();
 		let entry = AudioTaskEntry {
@@ -183,8 +185,14 @@ impl Audio {
 		};
 		let id = self.consumer_tasks.insert(Some(entry))?;
 
+		// `AudioConsumer::new` subscribes (blocking on SUBSCRIBE_OK), so run it
+		// inside the task to keep this entrypoint non-blocking.
 		tokio::spawn(async move {
-			let res = Self::run(on_frame, consumer, channel.1).await;
+			let res = async move {
+				let consumer = moq_audio::AudioConsumer::new(&broadcast, &catalog, name, output).await?;
+				Self::run(on_frame, consumer, channel.1).await
+			}
+			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.

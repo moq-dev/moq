@@ -4,6 +4,18 @@ use crate::{Origin, OriginList, Path, coding::*};
 
 use super::{Message, Version};
 
+/// Whether the negotiated version carries restart (REANNOUNCE) semantics: a duplicate ANNOUNCE
+/// (and the draft's explicit `restart` status) for an already-announced path. Older versions never
+/// defined this, so we neither send nor interpret it there; a restart is sent as an unannounce
+/// followed by a fresh announce instead.
+pub fn restart_supported(version: Version) -> bool {
+	// Explicitly list older versions so future versions default to supported.
+	!matches!(
+		version,
+		Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Lite04
+	)
+}
+
 /// Sent by the publisher to announce the availability of a track.
 /// The payload contains the contents of the wildcard.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +55,13 @@ impl Message for Announce<'_> {
 		Ok(match status {
 			AnnounceStatus::Active => Self::Active { suffix, hops },
 			AnnounceStatus::Ended => Self::Ended { suffix, hops },
+			// We encode a restart as a duplicate ANNOUNCE (a second `Active`), but on versions that
+			// support restart we also accept the draft's explicit `restart` status and treat it the
+			// same. For an already-announced path the subscriber turns it into a restart; for an
+			// unknown path it's a fresh announce. Older versions never defined this status, so it's
+			// an invalid value there.
+			AnnounceStatus::Restart if restart_supported(version) => Self::Active { suffix, hops },
+			AnnounceStatus::Restart => return Err(DecodeError::InvalidValue),
 		})
 	}
 
@@ -110,6 +129,9 @@ impl Message for AnnounceInterest<'_> {
 enum AnnounceStatus {
 	Ended = 0,
 	Active = 1,
+	/// The draft's explicit restart status. We never encode it (a restart goes out as a duplicate
+	/// `Active`), but we accept it on decode for forward/cross-compatibility.
+	Restart = 2,
 }
 
 impl Decode<Version> for AnnounceStatus {
@@ -171,5 +193,162 @@ impl Message for AnnounceInit<'_> {
 		}
 
 		Ok(())
+	}
+}
+
+/// Sent by the publisher as the first message on an announce stream, before any
+/// individual Announce messages. Lite05+ only; the successor to [`AnnounceInit`].
+///
+/// `origin` is the responder's session origin id. In Lite05 the publisher no
+/// longer stamps it onto each Announce's hop chain; the subscriber appends it on
+/// receipt instead. `active` is the number of currently-active broadcasts the
+/// publisher sends as the initial set immediately after this message, letting the
+/// receiver block until the initial set has arrived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AnnounceOk {
+	pub origin: Origin,
+	pub active: u64,
+}
+
+impl Message for AnnounceOk {
+	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		match version {
+			Version::Lite05Wip => {}
+			_ => return Err(DecodeError::Version),
+		}
+
+		let origin = Origin::decode(r, version)?;
+		if origin.id == 0 {
+			// A zero responder id is never legitimate; it would stamp UNKNOWN onto chains.
+			return Err(DecodeError::InvalidValue);
+		}
+		let active = u64::decode(r, version)?;
+		Ok(Self { origin, active })
+	}
+
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		match version {
+			Version::Lite05Wip => {}
+			_ => return Err(EncodeError::Version),
+		}
+
+		self.origin.encode(w, version)?;
+		self.active.encode(w, version)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use bytes::Buf;
+
+	// Forge an ANNOUNCE with the draft's explicit `restart` status (2) for the given version.
+	fn encode_forged_restart(version: Version) -> bytes::Bytes {
+		// Encode a normal Active, then flip its status byte (1 -> 2).
+		let mut buf = bytes::BytesMut::new();
+		Announce::Active {
+			suffix: Path::new("foo/bar"),
+			hops: OriginList::new(),
+		}
+		.encode(&mut buf, version)
+		.expect("encode");
+
+		// Layout: <size varint><status u8><...>. The message is small, so the size is one byte and
+		// the status byte sits at index 1.
+		assert_eq!(
+			buf[1],
+			u8::from(AnnounceStatus::Active),
+			"expected an Active status byte"
+		);
+		buf[1] = u8::from(AnnounceStatus::Restart);
+		buf.freeze()
+	}
+
+	// On lite-05+ the explicit `restart` status is accepted and surfaced as an `Active` (the
+	// subscriber turns it into a restart for an already-announced path).
+	#[test]
+	fn decodes_explicit_restart_status_as_active_on_lite05() {
+		let version = Version::Lite05Wip;
+		let mut slice = encode_forged_restart(version);
+		let decoded = Announce::decode(&mut slice, version).expect("explicit restart must decode");
+		assert!(!slice.has_remaining(), "trailing bytes after decode");
+		assert!(
+			matches!(decoded, Announce::Active { .. }),
+			"restart should decode as Active"
+		);
+	}
+
+	// Older versions never defined the restart status, so it's an invalid value there.
+	#[test]
+	fn rejects_explicit_restart_status_before_lite05() {
+		let version = Version::Lite04;
+		let mut slice = encode_forged_restart(version);
+		assert!(
+			matches!(Announce::decode(&mut slice, version), Err(DecodeError::InvalidValue)),
+			"restart status must be rejected before lite-05"
+		);
+	}
+
+	fn round_trip(msg: &AnnounceOk) -> AnnounceOk {
+		let mut buf = bytes::BytesMut::new();
+		msg.encode(&mut buf, Version::Lite05Wip).unwrap();
+		let mut slice = &buf[..];
+		let got = AnnounceOk::decode(&mut slice, Version::Lite05Wip).unwrap();
+		assert!(slice.is_empty(), "trailing bytes after decode");
+		got
+	}
+
+	#[test]
+	fn announce_ok_round_trip() {
+		let msg = AnnounceOk {
+			origin: Origin { id: 42 },
+			active: 3,
+		};
+		assert_eq!(round_trip(&msg), msg);
+	}
+
+	#[test]
+	fn announce_ok_zero_active() {
+		let msg = AnnounceOk {
+			origin: Origin { id: 7 },
+			active: 0,
+		};
+		assert_eq!(round_trip(&msg), msg);
+	}
+
+	#[test]
+	fn announce_ok_rejects_old_versions() {
+		let msg = AnnounceOk {
+			origin: Origin { id: 1 },
+			active: 0,
+		};
+		let mut buf = bytes::BytesMut::new();
+		assert!(matches!(
+			msg.encode(&mut buf, Version::Lite04),
+			Err(EncodeError::Version)
+		));
+	}
+
+	#[test]
+	fn announce_ok_rejects_zero_origin() {
+		// Encode a well-formed message then patch the origin to 0 on the wire.
+		let mut buf = bytes::BytesMut::new();
+		AnnounceOk {
+			origin: Origin { id: 1 },
+			active: 0,
+		}
+		.encode(&mut buf, Version::Lite05Wip)
+		.unwrap();
+		// origin id 1 sits right after the size prefix; rewrite it to 0.
+		let bytes = &buf[..];
+		let mut patched = bytes.to_vec();
+		// size(1 byte) | origin varint(1 byte = 0x01) | active varint(1 byte)
+		patched[1] = 0x00;
+		let mut slice = &patched[..];
+		assert!(matches!(
+			AnnounceOk::decode(&mut slice, Version::Lite05Wip),
+			Err(DecodeError::InvalidValue)
+		));
 	}
 }

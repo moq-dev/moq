@@ -44,6 +44,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq-net/           # Core networking layer (published as moq-net; negotiates moq-lite or moq-transport)
   moq-native/        # QUIC/WebTransport connection helpers for native apps; clock example lives in examples/clock.rs
   moq-relay/         # Clusterable relay server (binary: moq-relay)
+  moq-rtc/           # WebRTC <-> MoQ gateway (WHIP/WHEP; binary: moq-rtc)
   moq-token/         # JWT authentication library
   moq-token-cli/     # JWT token CLI tool (binary: moq-token-cli)
   moq-cli/           # CLI tool for media operations (binary: moq)
@@ -81,12 +82,32 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
                      # merge to main release-py.yml publishes to PyPI if that
                      # version isn't already there (registry is the gate).
 
-/swift/               # Swift wrapper over rs/moq-ffi (SwiftPM)
+/swift/               # Swift over rs/moq-ffi (SwiftPM). Split like py: the
+                      # ergonomic `Moq` wrapper (Sources/Moq) versions
+                      # independently via swift/VERSION and mirrors to
+                      # moq-dev/moq-swift on a VERSION bump (release-swift-lib.yml,
+                      # registry-gated like release-plz); the raw `MoqFFI`
+                      # bindings + XCFramework mirror to moq-dev/moq-swift-ffi
+                      # lockstep with the crate on each moq-ffi-v* tag
+                      # (release-swift-ffi.yml). The wrapper pins MoqFFI at
+                      # .upToNextMinor so a crate patch needs no wrapper release.
+                      # Local dev uses one monolithic swift/Package.swift; the
+                      # two-package split exists only in released artifacts
+                      # (Package.swift.template + ffi/Package.swift.template).
 /kt/                  # Kotlin wrapper over rs/moq-ffi (Gradle, KMP)
-/go/                  # Go wrapper over rs/moq-ffi (uniffi-bindgen-go)
-                      # swift/kt/go are in-tree source skeletons.
-                      # CI mirrors them to moq-dev/moq-{swift,kotlin,go}
-                      # on each moq-ffi-v* tag.
+/go/                  # Go bindings, split like py/ into two modules:
+  ffi/               # Raw uniffi-bindgen-go bindings + native libs.
+                     # Module github.com/moq-dev/moq-go-ffi; mirrored to
+                     # moq-dev/moq-go-ffi by release-go-ffi.yml on each
+                     # moq-ffi-v* tag, lockstep with the moq-ffi crate.
+  wrapper/           # Ergonomic wrapper (package moq, full re-wrap with
+                     # context.Context + iter.Seq2). Module
+                     # github.com/moq-dev/moq-go; mirrored to moq-dev/moq-go
+                     # by release-go.yml, versioned independently. VERSION
+                     # holds the MAJOR.MINOR line; CI derives the patch from
+                     # mirror tags and auto-bumps the moq-go-ffi require on
+                     # each ffi release so moq-go@latest pulls the newest ffi.
+                     # Needs go 1.23.
 
 /demo/                # Demos and test media
   boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)
@@ -131,6 +152,7 @@ match version {
 - **Error handling**: Use `thiserror` with `#[from]` for library crates, `anyhow` for binaries. Always add `#[non_exhaustive]` to public `thiserror` enums.
 - Use `anyhow::Context` (`.context("msg")`) instead of `.map_err(|_| anyhow::anyhow!("msg"))` for error conversion
 - **Config flags + TOML merge**: For any `#[arg]` field on a TOML-loadable config, use `Option<T>` (not bare `bool` / `String` / etc.). The TOML→CLI merge clobbers bare fields with their `Default` when the flag is absent, silently overwriting TOML values. See `rs/moq-relay/src/config.rs::tests` for the regression test; add one for any new flag.
+- **Optional args**: For a *public* function/builder parameter that's logically optional, take `impl Into<Option<T>>` rather than `Option<T>`. Callers pass `x` or `None` instead of wrapping every value in `Some(x)`. Convert once at the top with `let x = x.into();`. Skip it for private helpers, where the call sites are few and `Some`/`None` is clearer. See `with_fragment_duration` in `rs/moq-mux/src/container/fmp4/export.rs`.
 - **Prefer `if let` / `let ... else` over an unwrapping `match`**: a `match` whose only job is to unwrap (`Ok(v) => v` / `Some(v) => v`) reads cleaner as `if let Some(v) = x { ... }` or `let Some(v) = x else { ... };`. Matching on an `Option`/`Result` just to bind the inner value is the tell. Keep `match` when both arms do real work or you need the `Err` / `None` payload.
 - **`poll_*` plumbing**: a `Poll::Pending => Poll::Pending` arm usually means `ready!(...)` will collapse the match. And `.map_err(Into::into)` on a fallible result is usually better as `Ok(x?)` (the `?` does the `From` conversion). These compose: `let v = ready!(inner.poll_next(cx))?;` in a `fn -> Poll<Result<...>>` both unwraps the `Poll` and converts the error.
 
@@ -178,6 +200,7 @@ This applies whenever you add or widen a `pub` item, especially in library crate
 - Run `just fix` to automatically fix formating and easy things.
 - Rust tests are integrated within source files
 - Async tests that sleep should call `tokio::time::pause()` at the start to simulate time instantly
+- For UI / web changes (`js/watch`, `js/publish`, `demo/web`, anything touching playback or the `<moq-watch>`/`<moq-publish>` components), don't stop at unit tests: run `just dev` and exercise the change in a real browser via the Claude-in-Chrome plugin (if installed), since WebTransport + WebCodecs playback only surfaces at runtime. The Chrome plugin drives a real visible tab, so it avoids the headless-preview gotcha where `<moq-watch>` gates video download on a `hidden` tab.
 
 ## Cross-Package Sync
 
@@ -185,7 +208,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt,go}/`, `doc/lib/{py,swift,kt,go,c}` |
+| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt}/`, `go/wrapper/moq/*.go` (the `go/ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs`), `doc/lib/{py,swift,kt,go,c}` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept` |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept` |
 | `rs/moq-token` | `js/token` |
@@ -193,6 +216,8 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 | `rs/moq-cli` | `doc/bin/cli.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
+
+For `swift/`, the wrapper re-exports `moq-ffi` records/enums via typealias, so new catalog/audio *fields* flow through automatically. Only a new FFI *method* (or a renamed/removed one) needs a matching change in the de-prefixed `Sources/Moq` wrapper.
 
 ## Branch Targeting
 

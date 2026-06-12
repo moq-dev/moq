@@ -20,6 +20,23 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	const broadcast = new Broadcast();
 	server.publish(Path.from("test"), broadcast);
 
+	// Serve every requested "video" track. On lite-05+ a subscribe is preceded by
+	// a TRACK info lookup, which the publisher answers by requesting the track too,
+	// so more than one request can arrive; the publisher must accept() each.
+	let served = 0;
+	const serving = (async () => {
+		for (;;) {
+			const req = await broadcast.requested();
+			if (!req) break;
+			if (req.name !== "video") {
+				req.reject(new Error(`unexpected track: ${req.name}`));
+				continue;
+			}
+			served++;
+			req.accept().writeString("hello");
+		}
+	})();
+
 	// Client discovers announced broadcast
 	const announced = client.announced();
 	const entry = await announced.next();
@@ -29,23 +46,16 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 
 	// Client consumes the broadcast and subscribes to a track
 	const remote = client.consume(Path.from("test"));
-	const track = remote.subscribe("video", 0);
-
-	// Server handles the subscription request
-	const req = await broadcast.requested();
-	if (!req) throw new Error("expected req");
-	expect(req.track.name).toBe("video");
-
-	// Server writes data
-	req.track.writeString("hello");
+	const track = remote.track("video").subscribe();
 
 	// Client reads data
 	const data = await track.readString();
 	expect(data).toBe("hello");
+	expect(served).toBeGreaterThan(0);
 
 	// Cleanup
-	req.track.close();
 	broadcast.close();
+	await serving;
 	announced.close();
 	remote.close();
 	client.close();
@@ -62,6 +72,12 @@ test("integration: lite draft-02", async () => {
 
 test("integration: lite draft-03", async () => {
 	await runPublishSubscribeFlow(Lite.ALPN_03);
+});
+
+test("integration: lite draft-05-wip", async () => {
+	// Exercises AnnounceOk: the announce flow only completes if the subscriber
+	// reads the publisher's AnnounceOk before the initial Announce messages.
+	await runPublishSubscribeFlow(Lite.ALPN_05_WIP);
 });
 
 test("integration: ietf draft-14", async () => {

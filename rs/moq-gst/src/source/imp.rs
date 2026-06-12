@@ -278,7 +278,7 @@ async fn run_session(
 
 	let origin = moq_net::Origin::random().produce();
 	let origin_consumer = origin.consume();
-	let client = config.init()?.with_consume(origin);
+	let client = config.init()?.with_consumer(origin);
 
 	let _session = client.connect(settings.url.clone()).await?;
 
@@ -291,7 +291,10 @@ async fn run_session(
 		_ = shutdown.changed() => return Ok(()),
 	};
 
-	let catalog_track = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
+	let catalog_track = broadcast
+		.track(hang::catalog::Catalog::DEFAULT_NAME)?
+		.subscribe(hang::catalog::Catalog::default_subscription())?
+		.await?;
 	let mut catalog_consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
 
 	// Follow the catalog for the whole session and reconcile our pumps against every update,
@@ -330,7 +333,7 @@ async fn run_session(
 			// returning None) while we wait for the remaining pumps to drain.
 			next = catalog_consumer.next(), if !catalog_closed => {
 				match next? {
-					Some(catalog) => reconcile(&catalog, &mut active, &mut pumps, &broadcast, &element)?,
+					Some(catalog) => reconcile(&catalog, &mut active, &mut pumps, &broadcast, &element).await?,
 					// Catalog track closed. Don't cancel the pumps: let each reach its
 					// natural Ok(None) -> EOS end so downstream sees a clean EOS rather than a
 					// bare pad drop. We just stop reconciling and wait for them to drain.
@@ -345,7 +348,7 @@ async fn run_session(
 
 /// Bring the live set of pumps in line with `catalog`: spawn pumps for newly announced
 /// renditions, tear down ones that vanished, and recreate any whose caps or container changed.
-fn reconcile(
+async fn reconcile(
 	catalog: &moq_mux::catalog::hang::Catalog,
 	active: &mut HashMap<String, ActiveTrack>,
 	pumps: &mut tokio::task::JoinSet<()>,
@@ -413,8 +416,9 @@ fn reconcile(
 
 		let id = NEXT_PAD_ID.fetch_add(1, Ordering::Relaxed);
 
-		let track_consumer = broadcast.subscribe_track(&moq_net::Track::new(&name))?;
-		let track = moq_mux::container::Consumer::new(track_consumer, container).with_latency(Duration::from_secs(1));
+		let track_subscriber = broadcast.track(&name)?.subscribe(None)?.await?;
+		let track =
+			moq_mux::container::Consumer::new(track_subscriber, container).with_latency(Duration::from_secs(1));
 
 		let descriptor = TrackDescriptor {
 			kind: d.kind,
@@ -559,7 +563,7 @@ fn create_pad(
 /// Wrap a decoded frame in a gst buffer, assigning a pts relative to the track's first frame.
 fn build_buffer(
 	frame: moq_mux::container::Frame,
-	reference_ts: &mut Option<moq_mux::container::Timestamp>,
+	reference_ts: &mut Option<moq_net::Timestamp>,
 	kind: TrackKind,
 ) -> gst::Buffer {
 	let mut buffer = gst::Buffer::from_slice(frame.payload);
@@ -591,7 +595,7 @@ fn build_buffer(
 /// Frames arrive in decode order, so a B-frame's presentation timestamp can fall before
 /// the reference. `Timestamp` subtraction panics on underflow, so clamp to zero rather
 /// than crash the pump (which would leak its pad).
-fn relative_pts(timestamp: moq_mux::container::Timestamp, reference: moq_mux::container::Timestamp) -> gst::ClockTime {
+fn relative_pts(timestamp: moq_net::Timestamp, reference: moq_net::Timestamp) -> gst::ClockTime {
 	match timestamp.checked_sub(reference) {
 		Ok(delta) => gst::ClockTime::from_nseconds(Duration::from(delta).as_nanos() as u64),
 		Err(_) => gst::ClockTime::ZERO,
@@ -680,7 +684,7 @@ fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
 #[cfg(test)]
 mod tests {
 	use super::{plan_reconcile, relative_pts};
-	use moq_mux::container::Timestamp;
+	use moq_net::Timestamp;
 	use std::collections::HashMap;
 
 	// The shape type is generic, so the set math can be exercised with a plain integer standing

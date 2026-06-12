@@ -42,7 +42,9 @@ struct DynamicProducer {
 
 impl DynamicProducer {
 	async fn requested_track(&mut self) -> Result<Arc<MoqTrackProducer>, MoqError> {
-		let track = self.inner.requested_track().await?;
+		// dev's reshape yields a TrackRequest the producer must accept; accept with default
+		// info (the caller then produces frames onto the returned track).
+		let track = self.inner.requested_track().await?.accept(None);
 		Ok(Arc::new(MoqTrackProducer {
 			inner: std::sync::Mutex::new(Some(track)),
 		}))
@@ -108,7 +110,7 @@ impl MoqBroadcastProducer {
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		Ok(Arc::new(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
@@ -175,10 +177,9 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		let track = moq_net::Track { name, priority: 0 };
 		// Clone the broadcast handle (shared Arc internally) to get &mut access.
 		let mut broadcast = state.broadcast.clone();
-		let producer = broadcast.create_track(track)?;
+		let producer = broadcast.create_track(name, None)?;
 		Ok(Arc::new(MoqTrackProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
 		}))
@@ -227,7 +228,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(track.name.clone())
+		Ok(track.name().to_string())
 	}
 
 	/// Wait until this track has at least one active consumer.
@@ -257,7 +258,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(Arc::new(MoqTrackConsumer::new(track.consume())))
+		Ok(Arc::new(MoqTrackConsumer::new(track.subscribe(None))))
 	}
 
 	/// Append a new group to the track, returning a producer for writing frames into it.
@@ -350,7 +351,7 @@ impl MoqMediaProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
 		let media = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(media.track.name.clone())
+		Ok(media.track.name().to_string())
 	}
 
 	/// Wait until this media track has at least one active consumer.

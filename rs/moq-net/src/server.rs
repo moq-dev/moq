@@ -1,17 +1,29 @@
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Error,
-	NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
+	NEGOTIATED, OriginProducer, Session, StatsHandle, Version, Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup,
 };
 
 /// A MoQ server session builder.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct Server {
-	publish: Option<OriginConsumer>,
-	consume: Option<OriginProducer>,
+	publish: OriginProducer,
+	consume: OriginProducer,
 	stats: StatsHandle,
 	versions: Versions,
+}
+
+impl Default for Server {
+	fn default() -> Self {
+		let shared = crate::Origin::random().produce();
+		Self {
+			publish: shared.clone(),
+			consume: shared,
+			stats: StatsHandle::default(),
+			versions: Versions::default(),
+		}
+	}
 }
 
 impl Server {
@@ -19,13 +31,20 @@ impl Server {
 		Default::default()
 	}
 
-	pub fn with_publish(mut self, publish: impl Into<Option<OriginConsumer>>) -> Self {
-		self.publish = publish.into();
+	/// Override the publish-side origin: the [`OriginProducer`] the
+	/// server reads from when forwarding broadcasts to the connected
+	/// client. Surfaced as [`Session::publisher`]. Pre-scoped via
+	/// [`OriginProducer::scope`] for token-gated relays.
+	pub fn with_publisher(mut self, publish: OriginProducer) -> Self {
+		self.publish = publish;
 		self
 	}
 
-	pub fn with_consume(mut self, consume: impl Into<Option<OriginProducer>>) -> Self {
-		self.consume = consume.into();
+	/// Override the consume-side origin: the [`OriginProducer`] the
+	/// server writes into as the client announces broadcasts. A consumer
+	/// view is surfaced as [`Session::consumer`].
+	pub fn with_consumer(mut self, consume: OriginProducer) -> Self {
+		self.consume = consume;
 		self
 	}
 
@@ -37,12 +56,9 @@ impl Server {
 		self
 	}
 
-	/// Set both publish and consume from an `OriginProducer`.
-	///
-	/// This is equivalent to calling `with_publish(origin.consume())` and `with_consume(origin)`.
+	/// Set both publish and consume from one shared [`OriginProducer`].
 	pub fn with_origin(self, origin: OriginProducer) -> Self {
-		let consumer = origin.consume();
-		self.with_publish(consumer).with_consume(origin)
+		self.with_publisher(origin.clone()).with_consumer(origin)
 	}
 
 	pub fn with_versions(mut self, versions: Versions) -> Self {
@@ -52,9 +68,11 @@ impl Server {
 
 	/// Perform the MoQ handshake as a server for the given session.
 	pub async fn accept<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
-		if self.publish.is_none() && self.consume.is_none() {
-			tracing::warn!("not publishing or consuming anything");
-		}
+		let publisher = self.publish.clone();
+		let consumer = self.consume.clone();
+		let publish = publisher.consume();
+		let consume = consumer.clone();
+		let consumer_view = consumer.consume();
 
 		let (encoding, supported) = match session.protocol() {
 			Some(ALPN_18) => {
@@ -69,14 +87,14 @@ impl Server {
 					None,
 					None,
 					false,
-					self.publish.clone(),
-					self.consume.clone(),
+					publish.clone(),
+					consume.clone(),
 					self.stats.clone(),
 					ietf::Version::Draft18,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None));
+				return Ok(Session::new(session, v, None, publisher.clone(), consumer_view.clone()));
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -90,14 +108,14 @@ impl Server {
 					None,
 					None,
 					false,
-					self.publish.clone(),
-					self.consume.clone(),
+					publish.clone(),
+					consume.clone(),
 					self.stats.clone(),
 					ietf::Version::Draft17,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None));
+				return Ok(Session::new(session, v, None, publisher.clone(), consumer_view.clone()));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -125,32 +143,45 @@ impl Server {
 					.select(Version::Lite(lite::Version::Lite05Wip))
 					.ok_or(Error::Version)?;
 
-				let recv_bw = lite::start(
+				// Server side never blocks on the initial set; discard the synced receiver.
+				let (recv_bw, _connecting) = lite::start(
 					session.clone(),
 					None,
-					self.publish.clone(),
-					self.consume.clone(),
+					publish.clone(),
+					consume.clone(),
 					self.stats.clone(),
 					lite::Version::Lite05Wip,
 				)?;
 
-				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw));
+				return Ok(Session::new(
+					session,
+					lite::Version::Lite05Wip.into(),
+					recv_bw,
+					publisher.clone(),
+					consumer_view.clone(),
+				));
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
 					.select(Version::Lite(lite::Version::Lite04))
 					.ok_or(Error::Version)?;
 
-				let recv_bw = lite::start(
+				let (recv_bw, _connecting) = lite::start(
 					session.clone(),
 					None,
-					self.publish.clone(),
-					self.consume.clone(),
+					publish.clone(),
+					consume.clone(),
 					self.stats.clone(),
 					lite::Version::Lite04,
 				)?;
 
-				return Ok(Session::new(session, lite::Version::Lite04.into(), recv_bw));
+				return Ok(Session::new(
+					session,
+					lite::Version::Lite04.into(),
+					recv_bw,
+					publisher.clone(),
+					consumer_view.clone(),
+				));
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
@@ -158,16 +189,22 @@ impl Server {
 					.ok_or(Error::Version)?;
 
 				// Starting with draft-03, there's no more SETUP control stream.
-				let recv_bw = lite::start(
+				let (recv_bw, _connecting) = lite::start(
 					session.clone(),
 					None,
-					self.publish.clone(),
-					self.consume.clone(),
+					publish.clone(),
+					consume.clone(),
 					self.stats.clone(),
 					lite::Version::Lite03,
 				)?;
 
-				return Ok(Session::new(session, lite::Version::Lite03.into(), recv_bw));
+				return Ok(Session::new(
+					session,
+					lite::Version::Lite03.into(),
+					recv_bw,
+					publisher.clone(),
+					consumer_view.clone(),
+				));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -208,14 +245,15 @@ impl Server {
 		let recv_bw = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
-				lite::start(
+				let (recv_bw, _connecting) = lite::start(
 					session.clone(),
 					Some(stream),
-					self.publish.clone(),
-					self.consume.clone(),
+					publish.clone(),
+					consume.clone(),
 					self.stats.clone(),
 					v,
-				)?
+				)?;
+				recv_bw
 			}
 			Version::Ietf(v) => {
 				// Decode the client's parameters to get their max request ID.
@@ -230,8 +268,8 @@ impl Server {
 					Some(stream),
 					request_id_max,
 					false,
-					self.publish.clone(),
-					self.consume.clone(),
+					publish.clone(),
+					consume.clone(),
 					self.stats.clone(),
 					v,
 				)?;
@@ -239,6 +277,6 @@ impl Server {
 			}
 		};
 
-		Ok(Session::new(session, version, recv_bw))
+		Ok(Session::new(session, version, recv_bw, publisher, consumer_view))
 	}
 }

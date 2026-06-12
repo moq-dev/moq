@@ -1,10 +1,9 @@
-import Foundation
-@_exported import MoqFFI
+import MoqFFI
 
 extension MoqError {
     /// True for `Cancelled` and `Closed`, which arise from graceful shutdown
     /// rather than actual failures. Useful for swallowing the expected error
-    /// that an `AsyncSequence` produces when its consumer cancels.
+    /// an `AsyncSequence` produces when its consuming task is cancelled.
     public var isShutdown: Bool {
         switch self {
         case .Cancelled, .Closed: return true

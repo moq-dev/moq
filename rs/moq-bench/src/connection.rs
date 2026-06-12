@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use moq_native::Status;
-use moq_native::moq_net::{self, Broadcast, BroadcastConsumer, Origin, Track, TrackProducer, bytes::Bytes};
+use moq_native::moq_net::{self, BroadcastConsumer, BroadcastInfo, Origin, TrackProducer, bytes::Bytes};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -81,7 +81,7 @@ pub async fn run(ctx: Connection) {
 	let publish = Origin::random().produce();
 	// Consume side: the session fills this with peer announcements.
 	let consume = Origin::random().produce();
-	let announced = consume.consume();
+	let announced = consume.consume().announced();
 
 	let name = config.name();
 	let mut broadcasts = Vec::new();
@@ -91,8 +91,8 @@ pub async fn run(ctx: Connection) {
 	for index in 0..rolled.broadcasts {
 		let path = format!("{name}/{run_id:08x}/{connection}/{index}");
 
-		let mut broadcast = Broadcast::new().produce();
-		let track = match broadcast.create_track(Track::new(TRACK)) {
+		let mut broadcast = BroadcastInfo::new().produce();
+		let track = match broadcast.create_track(TRACK, None) {
 			Ok(track) => track,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to create track");
@@ -100,16 +100,22 @@ pub async fn run(ctx: Connection) {
 			}
 		};
 
-		publish.publish_broadcast(&path, broadcast.consume());
+		let publish_handle = match publish.publish_broadcast(&path, broadcast.consume()) {
+			Ok(handle) => handle,
+			Err(err) => {
+				tracing::error!(connection, %err, "failed to publish broadcast");
+				continue;
+			}
+		};
 		own.insert(path.clone());
-		// Hold the broadcast producer for the connection's lifetime so it stays announced.
-		broadcasts.push(broadcast);
+		// Hold the broadcast producer and publish handle for the connection's lifetime so it stays announced.
+		broadcasts.push((broadcast, publish_handle));
 
 		let stats = stats.clone();
 		tasks.spawn(produce(connection, path, rolled, track, stats));
 	}
 
-	let client = client.with_publish(publish.consume()).with_consume(consume);
+	let client = client.with_publisher(publish).with_consumer(consume);
 	let mut reconnect = client.reconnect(url);
 
 	// Subscriber: drain up to `subscribe` peer broadcasts.
@@ -222,7 +228,7 @@ async fn produce(
 /// Watch announcements and drain up to `want` peer broadcasts (excluding our own),
 /// spreading each subscription's start over `startup` to avoid a thundering herd.
 async fn subscribe(
-	mut announced: moq_net::OriginConsumer,
+	mut announced: moq_net::AnnounceConsumer,
 	own: HashSet<String>,
 	want: u64,
 	startup: Duration,
@@ -232,10 +238,10 @@ async fn subscribe(
 	let mut seen: HashSet<String> = HashSet::new();
 
 	while (seen.len() as u64) < want {
-		let Some((path, broadcast)) = announced.announced().await else {
+		let Some((path, event)) = announced.next().await else {
 			break;
 		};
-		let Some(broadcast) = broadcast else {
+		let Some(broadcast) = event.broadcast() else {
 			continue;
 		};
 
@@ -269,7 +275,7 @@ async fn subscribe(
 async fn drain(broadcast: BroadcastConsumer, stats: &Stats) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.subscriptions);
 
-	let mut track = broadcast.subscribe_track(&Track::new(TRACK))?;
+	let mut track = broadcast.track(TRACK)?.subscribe(None)?.await?;
 	let mut gaps = GapTracker::new(stats);
 	let mut learned_shape = false;
 
@@ -412,8 +418,8 @@ mod tests {
 		tokio::time::pause();
 
 		let stats = Arc::new(Stats::default());
-		let mut broadcast = Broadcast::new().produce();
-		let track = broadcast.create_track(Track::new(TRACK)).unwrap();
+		let mut broadcast = BroadcastInfo::new().produce();
+		let track = broadcast.create_track(TRACK, None).unwrap();
 		let consumer = broadcast.consume();
 
 		// 10fps (100ms/frame), 8-byte frames, 2 payload frames per group.
@@ -422,7 +428,7 @@ mod tests {
 		// Advance past one full group (keyframe + 2 payload) into the next.
 		tokio::time::advance(Duration::from_millis(350)).await;
 
-		let mut sub = consumer.subscribe_track(&Track::new(TRACK)).unwrap();
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).unwrap().await.unwrap();
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe");
@@ -450,14 +456,14 @@ mod tests {
 		tokio::time::pause();
 
 		let stats = Arc::new(Stats::default());
-		let mut broadcast = Broadcast::new().produce();
-		let track = broadcast.create_track(Track::new(TRACK)).unwrap();
+		let mut broadcast = BroadcastInfo::new().produce();
+		let track = broadcast.create_track(TRACK, None).unwrap();
 		let consumer = broadcast.consume();
 
 		let task = tokio::spawn(produce(0, "bench/test".into(), rolled(10, 4, 0), track, stats.clone()));
 		tokio::time::advance(Duration::from_millis(250)).await;
 
-		let mut sub = consumer.subscribe_track(&Track::new(TRACK)).unwrap();
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).unwrap().await.unwrap();
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		// Just the keyframe, then the group ends.

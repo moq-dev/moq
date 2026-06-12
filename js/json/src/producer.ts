@@ -27,7 +27,7 @@ export interface Config<T> {
 
 /** Publishes a JSON value over a track, choosing snapshots and deltas automatically. */
 export class Producer<T> {
-	#track: Moq.Track;
+	#track: Moq.TrackProducer;
 	#config: Config<T>;
 
 	#group?: Moq.Group;
@@ -35,7 +35,7 @@ export class Producer<T> {
 	#groupBytes = 0;
 	#groupFrames = 0;
 
-	constructor(track: Moq.Track, config: Config<T> = {}) {
+	constructor(track: Moq.TrackProducer, config: Config<T> = {}) {
 		this.#track = track;
 		this.#config = config;
 	}

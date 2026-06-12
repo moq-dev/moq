@@ -6,6 +6,7 @@ deploy:
     bun wrangler deploy
 
 # Regenerate rpm repo metadata and upload to the rpm-moq-dev R2 bucket.
+
 # Reads .rpm files from $ARTIFACTS_DIR (defaults to ./artifacts).
 publish artifacts="artifacts":
     ARTIFACTS_DIR="{{ artifacts }}" ./publish.sh

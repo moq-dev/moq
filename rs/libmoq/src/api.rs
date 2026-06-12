@@ -168,7 +168,7 @@ pub unsafe extern "C" fn moq_session_connect(
 		let publish = ffi::parse_id_optional(origin_publish)?
 			.map(|id| state.origin.get(id))
 			.transpose()?
-			.map(|origin: &moq_net::OriginProducer| origin.consume());
+			.cloned();
 		let consume = ffi::parse_id_optional(origin_consume)?
 			.map(|id| state.origin.get(id))
 			.transpose()?
@@ -213,7 +213,9 @@ pub extern "C" fn moq_origin_create() -> i32 {
 ///
 /// The broadcast will be announced to any origin consumers, such as over the network.
 ///
-/// Returns a zero on success, or a negative code on failure.
+/// Returns a positive publish handle on success, or a negative code on failure. The broadcast
+/// stays announced until the handle is passed to [moq_origin_unpublish]; closing the broadcast
+/// itself does not unannounce it.
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
@@ -227,6 +229,18 @@ pub unsafe extern "C" fn moq_origin_publish(origin: u32, path: *const c_char, pa
 		let mut state = State::lock();
 		let broadcast = state.publish.get(broadcast)?.consume();
 		state.origin.publish(origin, path, broadcast)
+	})
+}
+
+/// Unannounce a broadcast previously published with [moq_origin_publish].
+///
+/// Takes the publish handle returned by [moq_origin_publish]. Returns zero on success, or a
+/// negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_origin_unpublish(publish: u32) -> i32 {
+	ffi::enter(move || {
+		let publish = ffi::parse_id(publish)?;
+		State::lock().origin.unpublish(publish)
 	})
 }
 

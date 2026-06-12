@@ -91,9 +91,10 @@ impl<C: Container> Producer<C> {
 	/// the current group; if no group is open it's a protocol violation, unless
 	/// [`with_lenient_start`](Self::with_lenient_start) was set (then it's dropped).
 	pub fn write(&mut self, frame: Frame) -> Result<(), C::Error> {
-		// Close the current group on an explicit keyframe.
+		// Close the current group on an explicit keyframe, passing its timestamp so
+		// the previous group's last frame can borrow it as a duration boundary.
 		if frame.keyframe {
-			self.finish_group()?;
+			self.finish_group_at(Some(frame.timestamp))?;
 		}
 
 		// Start a new group if needed; the first frame of a group must be a keyframe.
@@ -119,13 +120,17 @@ impl<C: Container> Producer<C> {
 		} else {
 			self.buffer.push(frame);
 
-			// Check if buffered duration exceeds latency.
+			// Flush if the buffered span has reached the latency budget. Compute
+			// min/max across the buffer rather than first/last: frames within a track
+			// are in *decode* order, and B-frames have non-monotonic PTS, so
+			// `last - first` can shrink as a B-frame lands between two earlier-PTS
+			// frames. The min/max pair captures the actual presentation span.
 			if self.buffer.len() >= 2 {
-				let first_ts: std::time::Duration = self.buffer.first().unwrap().timestamp.into();
-				let last_ts: std::time::Duration = self.buffer.last().unwrap().timestamp.into();
-
-				if last_ts.saturating_sub(first_ts) >= self.latency {
-					self.flush()?;
+				let mut iter = self.buffer.iter().map(|f| std::time::Duration::from(f.timestamp));
+				let first = iter.next().unwrap();
+				let (min, max) = iter.fold((first, first), |(min, max), d| (min.min(d), max.max(d)));
+				if max.saturating_sub(min) >= self.latency {
+					self.flush(None)?;
 				}
 			}
 		}
@@ -137,7 +142,14 @@ impl<C: Container> Producer<C> {
 	///
 	/// The next [`write`](Self::write) must be a keyframe.
 	pub fn finish_group(&mut self) -> Result<(), C::Error> {
-		self.flush()?;
+		self.finish_group_at(None)
+	}
+
+	/// Like [`finish_group`](Self::finish_group), but uses `next` (the timestamp of the
+	/// keyframe that rolled the group over) as the duration boundary for the group's
+	/// last frame. See [`flush`](Self::flush).
+	fn finish_group_at(&mut self, next: Option<moq_net::Timestamp>) -> Result<(), C::Error> {
+		self.flush(next)?;
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
@@ -155,9 +167,23 @@ impl<C: Container> Producer<C> {
 	}
 
 	/// Flush any buffered frames into the current group without closing it.
-	fn flush(&mut self) -> Result<(), C::Error> {
+	///
+	/// `next`, when given, is the timestamp of the frame that rolled the group over
+	/// (the next keyframe). The buffer's last frame is the only sample whose successor
+	/// wasn't visible when it arrived, so we backfill its duration from `next` here.
+	/// This adds no latency: that frame is already in hand. Containers that don't use
+	/// per-frame durations (Legacy, LOC) ignore it.
+	fn flush(&mut self, next: Option<moq_net::Timestamp>) -> Result<(), C::Error> {
 		if self.buffer.is_empty() {
 			return Ok(());
+		}
+
+		if let Some(next) = next
+			&& let Some(last) = self.buffer.last_mut()
+			&& last.duration.is_none()
+			&& let Ok(duration) = next.checked_sub(last.timestamp)
+		{
+			last.duration = Some(duration);
 		}
 
 		let group = match &mut self.group {
@@ -179,8 +205,8 @@ impl<C: Container> Producer<C> {
 	}
 
 	/// Create a consumer for this track.
-	pub fn consume(&self) -> moq_net::TrackConsumer {
-		self.inner.consume()
+	pub fn consume(&self) -> moq_net::TrackSubscriber {
+		self.inner.subscribe(None)
 	}
 }
 
@@ -198,18 +224,19 @@ mod tests {
 
 	use super::*;
 	use crate::catalog::hang::Container;
-	use crate::container::Timestamp;
+	use moq_net::Timestamp;
 
 	fn frame(timestamp_us: u64, keyframe: bool) -> Frame {
 		Frame {
 			timestamp: Timestamp::from_micros(timestamp_us).unwrap(),
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe,
+			duration: None,
 		}
 	}
 
 	/// Drain all groups from a finished track, returning their frame counts.
-	async fn collect_groups(mut consumer: moq_net::TrackConsumer) -> Vec<usize> {
+	async fn collect_groups(mut consumer: moq_net::TrackSubscriber) -> Vec<usize> {
 		let mut groups = Vec::new();
 		while let Some(mut group) = consumer.recv_group().await.unwrap() {
 			let mut count = 0;
@@ -224,8 +251,11 @@ mod tests {
 	/// Explicit keyframe closes the current group and starts a new one.
 	#[tokio::test]
 	async fn keyframe_closes_group_immediately() {
-		let track = moq_net::Track::new("test").produce();
-		let consumer = track.consume();
+		let track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
+		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap(); // first frame must be a keyframe
@@ -240,8 +270,11 @@ mod tests {
 	/// `finish_group()` flushes the current group immediately; the next write must be a keyframe.
 	#[tokio::test]
 	async fn finish_group_closes_immediately() {
-		let track = moq_net::Track::new("test").produce();
-		let consumer = track.consume();
+		let track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
+		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
@@ -256,7 +289,10 @@ mod tests {
 	/// Writing a non-keyframe with no open group is a protocol violation.
 	#[test]
 	fn first_frame_must_be_keyframe() {
-		let track = moq_net::Track::new("test").produce();
+		let track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		let err = producer.write(frame(0, false)).unwrap_err();
@@ -264,7 +300,7 @@ mod tests {
 	}
 
 	/// Drain all groups from a finished track, returning their sequence numbers.
-	async fn collect_sequences(mut consumer: moq_net::TrackConsumer) -> Vec<u64> {
+	async fn collect_sequences(mut consumer: moq_net::TrackSubscriber) -> Vec<u64> {
 		let mut sequences = Vec::new();
 		while let Some(group) = consumer.recv_group().await.unwrap() {
 			sequences.push(group.sequence);
@@ -275,8 +311,11 @@ mod tests {
 	/// `seek(n)` opens the next group at sequence `n`.
 	#[tokio::test]
 	async fn seek_uses_explicit_sequence() {
-		let track = moq_net::Track::new("test").produce();
-		let consumer = track.consume();
+		let track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
+		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap(); // seq 0
@@ -290,8 +329,11 @@ mod tests {
 	/// `seek` is consumed on the next group creation; subsequent groups auto-increment from there.
 	#[tokio::test]
 	async fn seek_clears_pending_after_use() {
-		let track = moq_net::Track::new("test").produce();
-		let consumer = track.consume();
+		let track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
+		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.seek(5).unwrap();
@@ -300,5 +342,52 @@ mod tests {
 		producer.finish().unwrap();
 
 		assert_eq!(collect_sequences(consumer).await, vec![5, 6]);
+	}
+
+	/// Records the frames handed to each `write`, so tests can inspect the
+	/// durations the producer backfilled. Write-only.
+	#[derive(Clone, Default)]
+	struct Recording(std::rc::Rc<std::cell::RefCell<Vec<Vec<Frame>>>>);
+
+	impl super::Container for Recording {
+		type Error = crate::Error;
+
+		fn write(&self, _group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+			self.0.borrow_mut().push(frames.to_vec());
+			Ok(())
+		}
+
+		fn poll_read(
+			&self,
+			_group: &mut moq_net::GroupConsumer,
+			_waiter: &kio::Waiter,
+		) -> std::task::Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+			unreachable!("Recording is write-only")
+		}
+	}
+
+	/// The keyframe that rolls a group over backfills the duration of the previous
+	/// group's last frame, without buffering an extra frame.
+	#[tokio::test]
+	async fn keyframe_backfills_last_frame_duration() {
+		let track = moq_net::TrackProducer::new(
+			"test",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		);
+		let recording = Recording::default();
+		let mut producer = Producer::new(track, recording.clone()).with_latency(std::time::Duration::from_secs(10));
+
+		producer.write(frame(0, true)).unwrap(); // group 0 opens
+		producer.write(frame(33_000, false)).unwrap(); // buffered
+		producer.write(frame(66_000, true)).unwrap(); // rolls group 0 over -> flush with next = 66ms
+		producer.finish().unwrap();
+
+		let writes = recording.0.borrow();
+		let group0 = &writes[0];
+		assert_eq!(group0.len(), 2);
+		// Last frame's duration backfilled from the next keyframe: 66ms - 33ms.
+		assert_eq!(group0[1].duration, Some(Timestamp::from_micros(33_000).unwrap()));
+		// The earlier frame keeps None; only the trailing sample needs the boundary.
+		assert_eq!(group0[0].duration, None);
 	}
 }

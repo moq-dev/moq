@@ -10,8 +10,10 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde_with::DurationMilliSeconds;
 
 /// The default track name for the MSF catalog.
 pub const DEFAULT_NAME: &str = "catalog";
@@ -35,6 +37,7 @@ pub struct Catalog {
 /// then assign whichever optional fields they need; struct-literal
 /// construction (with or without `..base`) is not available outside this
 /// crate.
+#[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -94,8 +97,12 @@ pub struct Track {
 	#[serde(rename = "maxObjSapStartingType")]
 	pub max_obj_sap_starting_type: Option<u8>,
 
-	/// Jitter in milliseconds (non-standard extension, matches JS implementation).
-	pub jitter: Option<f64>,
+	/// Jitter (non-standard extension; not in the MSF/CMSF drafts).
+	///
+	/// Serialized as a JSON integer number of milliseconds, matching the hang
+	/// catalog. Sub-ms precision isn't meaningful for jitter.
+	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
+	pub jitter: Option<Duration>,
 }
 
 impl Catalog {
@@ -438,7 +445,7 @@ mod test {
 			alt_group: None,
 			max_grp_sap_starting_type: Some(1),
 			max_obj_sap_starting_type: Some(2),
-			jitter: Some(15.5),
+			jitter: Some(Duration::from_millis(15)),
 		}
 	}
 
@@ -457,7 +464,7 @@ mod test {
 		let track = &value["tracks"][0];
 		assert_eq!(track.get("maxGrpSapStartingType"), Some(&serde_json::json!(1)));
 		assert_eq!(track.get("maxObjSapStartingType"), Some(&serde_json::json!(2)));
-		assert_eq!(track.get("jitter"), Some(&serde_json::json!(15.5)));
+		assert_eq!(track.get("jitter"), Some(&serde_json::json!(15)));
 
 		// Snake-case names must NOT appear on the wire.
 		assert!(track.get("max_grp_sap_starting_type").is_none());
@@ -503,6 +510,6 @@ mod test {
 		assert_eq!(original, parsed);
 		assert_eq!(parsed.tracks[0].max_grp_sap_starting_type, Some(1));
 		assert_eq!(parsed.tracks[0].max_obj_sap_starting_type, Some(2));
-		assert_eq!(parsed.tracks[0].jitter, Some(15.5));
+		assert_eq!(parsed.tracks[0].jitter, Some(Duration::from_millis(15)));
 	}
 }

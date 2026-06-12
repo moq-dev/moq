@@ -1,4 +1,4 @@
-import Session from "@moq/qmux";
+import Session, { type Version as QmuxVersion } from "@moq/qmux";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { Stream } from "../stream.ts";
@@ -22,29 +22,9 @@ export interface WebSocketOptions {
 	delay?: DOMHighResTimeStamp;
 }
 
-// One entry of `serverCertificateHashes`, used to pin a self-signed server.
-// Unlike the DOM type, `value` also accepts a hex string (the format moq
-// servers report via their certificate fingerprints), decoded automatically.
-export interface CertificateHash {
-	algorithm?: "sha-256";
-	value: BufferSource | string;
-}
-
-// WebTransport options, extended with friendlier certificate pinning.
-export interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes"> {
-	// Pin the server to one or more certificate hashes. Each `value` may be raw
-	// bytes or a hex string; the algorithm defaults to `sha-256`.
-	serverCertificateHashes?: CertificateHash[];
-
-	// Pin the server by supplying its certificate directly; the SHA-256 hash is
-	// computed for you. Accepts a PEM string or raw DER bytes. Use this when you
-	// have the certificate but not its precomputed fingerprint.
-	serverCertificate?: string | BufferSource;
-}
-
 export interface ConnectProps {
 	// WebTransport options.
-	webtransport?: WebTransportProps;
+	webtransport?: WebTransportOptions;
 
 	// WebSocket (fallback) options.
 	websocket?: WebSocketOptions;
@@ -131,6 +111,9 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
+	} else if (protocol === Lite.ALPN_05_WIP) {
+		// moq-lite draft-05 (WIP) doesn't use a session stream, so we return immediately.
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_05_WIP, undefined);
 	} else if (protocol === Lite.ALPN_04) {
 		// moq-lite draft-04 doesn't use a session stream, so we return immediately.
 		return new Lite.Connection(url, session, Lite.Version.DRAFT_04, undefined);
@@ -213,6 +196,8 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
+	} else if (protocol === Lite.ALPN_05_WIP) {
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_05_WIP, undefined);
 	} else if (protocol === Lite.ALPN_04) {
 		return new Lite.Connection(url, session, Lite.Version.DRAFT_04, undefined);
 	} else if (protocol === Lite.ALPN_03) {
@@ -283,65 +268,18 @@ async function handshakeAlpn(url: URL, session: WebTransport, version: Ietf.Ietf
 	});
 }
 
-// One entry of the DOM `serverCertificateHashes`, derived without naming the lib type.
-type WebTransportHash = NonNullable<WebTransportOptions["serverCertificateHashes"]>[number];
-
-// Strip PEM armor and base64-decode to the raw DER bytes.
-function pemToDer(pem: string): Uint8Array<ArrayBuffer> {
-	const match = pem.match(/-----BEGIN CERTIFICATE-----([\s\S]+?)-----END CERTIFICATE-----/);
-	if (!match) {
-		throw new Error("invalid PEM certificate: missing -----BEGIN/END CERTIFICATE----- armor");
-	}
-
-	const binary = atob(match[1].replace(/\s+/g, ""));
-	const der = new Uint8Array(binary.length);
-	for (let i = 0; i < binary.length; i++) {
-		der[i] = binary.charCodeAt(i);
-	}
-	return der;
-}
-
-/**
- * Compute the SHA-256 hash of a certificate, the value `serverCertificateHashes`
- * pins. Accepts a PEM string or raw DER bytes. Matches the hex fingerprints a moq
- * server reports, so `Hex.fromBytes(await certificateHash(pem))` round-trips.
- */
-export async function certificateHash(cert: string | BufferSource): Promise<Uint8Array<ArrayBuffer>> {
-	const der = typeof cert === "string" ? pemToDer(cert) : cert;
-	const digest = await crypto.subtle.digest("SHA-256", der);
-	return new Uint8Array(digest);
-}
-
-// Normalize our friendlier pinning options into the DOM `serverCertificateHashes`.
-async function resolveCertificateHashes(options?: WebTransportProps): Promise<WebTransportHash[] | undefined> {
-	const hashes: WebTransportHash[] = [];
-
-	for (const hash of options?.serverCertificateHashes ?? []) {
-		const value = typeof hash.value === "string" ? Hex.toBytes(hash.value) : hash.value;
-		hashes.push({ algorithm: hash.algorithm ?? "sha-256", value });
-	}
-
-	if (options?.serverCertificate !== undefined) {
-		hashes.push({ algorithm: "sha-256", value: await certificateHash(options.serverCertificate) });
-	}
-
-	return hashes.length > 0 ? hashes : undefined;
-}
-
 async function connectWebTransport(
 	url: URL,
 	cancel: Promise<void>,
-	options?: WebTransportProps,
+	options?: WebTransportOptions,
 ): Promise<WebTransport | undefined> {
 	let finalUrl = url;
-
-	// Our custom pinning fields are normalized separately; the rest are DOM options.
-	const { serverCertificate: _cert, serverCertificateHashes: _hashes, ...webtransport } = options ?? {};
 
 	const finalOptions: WebTransportOptions = {
 		allowPooling: false,
 		congestionControl: "low-latency",
 		protocols: [
+			Lite.ALPN_05_WIP,
 			Lite.ALPN_04,
 			Lite.ALPN_03,
 			Lite.ALPN,
@@ -350,12 +288,8 @@ async function connectWebTransport(
 			Ietf.ALPN.DRAFT_16,
 			Ietf.ALPN.DRAFT_15,
 		],
-		...webtransport,
+		...options,
 	};
-
-	// Accumulate caller-provided pins first, then append anything we fetch below,
-	// so a fetched fingerprint never clobbers hashes passed in via options.
-	const hashes = (await resolveCertificateHashes(options)) ?? [];
 
 	// Only perform certificate fetch and URL rewrite when polyfill is not needed
 	// This is needed because WebTransport is a butt to work with in local development.
@@ -373,14 +307,15 @@ async function connectWebTransport(
 		const fingerprintText = await Promise.race([fingerprint.text(), cancel]);
 		if (fingerprintText === undefined) return undefined;
 
-		hashes.push({ algorithm: "sha-256", value: Hex.toBytes(fingerprintText) });
+		finalOptions.serverCertificateHashes = (finalOptions.serverCertificateHashes || []).concat([
+			{
+				algorithm: "sha-256",
+				value: Hex.toBytes(fingerprintText),
+			},
+		]);
 
 		finalUrl = new URL(url);
 		finalUrl.protocol = "https:";
-	}
-
-	if (hashes.length > 0) {
-		finalOptions.serverCertificateHashes = hashes;
 	}
 
 	const quic = new WebTransport(finalUrl, finalOptions);
@@ -406,7 +341,30 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;
 
-	const quic = new Session(url);
+	// Only moq-transport-18 is pinned to qmux-01 today. Every other ALPN we
+	// support is currently negotiated as `qmux-00.{alpn}` on the wire, but we
+	// don't want to lock that in: set the value to `null` so the polyfill
+	// advertises every QMux draft it knows about and the server picks one.
+	// Insertion order is the negotiation preference on the wire.
+	const versions = {
+		[Lite.ALPN_05_WIP]: null,
+		[Lite.ALPN_04]: null,
+		[Lite.ALPN_03]: null,
+		[Lite.ALPN]: null,
+		[Ietf.ALPN.DRAFT_18]: "qmux-01",
+		[Ietf.ALPN.DRAFT_17]: null,
+		[Ietf.ALPN.DRAFT_16]: null,
+		[Ietf.ALPN.DRAFT_15]: null,
+	} as const satisfies Record<string, QmuxVersion | QmuxVersion[] | null>;
+
+	// `withoutProtocol` also advertises bare `qmux-01`, `qmux-00`, and
+	// `webtransport` so we still interop with relays that only know a
+	// wire-format version (today's moq-relay only accepts bare `webtransport`).
+	const quic = new Session(url, {
+		protocols: Object.keys(versions),
+		versions,
+		withoutProtocol: true,
+	});
 
 	// Wait for the WebSocket to connect, or for the cancel promise to resolve.
 	// Close the connection if we lost the race.

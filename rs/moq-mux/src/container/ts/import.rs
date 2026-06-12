@@ -23,7 +23,7 @@ use super::adts;
 use super::scte35;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::{aac, h264, h265};
-use crate::container::Timestamp;
+use moq_net::Timestamp;
 
 /// Demuxes an MPEG-TS byte stream into a MoQ broadcast.
 ///
@@ -137,12 +137,12 @@ impl<E: scte35::Catalog> Import<E> {
 		// registered) before the packets that follow it in the same chunk route.
 		let mut off = 0;
 		while off + TsPacket::SIZE <= self.scratch.len() {
-			// TS packets start with 0x47. On a lost sync byte, jump to the next one
-			// (SIMD-accelerated via memchr) instead of skipping a whole 188-byte stride
+			// TS packets start with 0x47. On a lost sync byte, scan forward one byte
+			// at a time for the next one instead of skipping a whole 188-byte stride
 			// (which only re-aligns on exact multiples of 188, so a sub-packet
 			// misalignment would desync permanently).
 			if self.scratch[off] != 0x47 {
-				off = memchr::memchr(0x47, &self.scratch[off..]).map_or(self.scratch.len(), |rel| off + rel);
+				off += 1;
 				continue;
 			}
 			let pkt: [u8; TsPacket::SIZE] = self.scratch[off..off + TsPacket::SIZE].try_into().unwrap();
@@ -434,10 +434,14 @@ impl<E: scte35::Catalog> ScteStream<E> {
 			anyhow::bail!("catalog extension no longer carries a scte35 section");
 		};
 
-		let track = broadcast.unique_track(".scte35")?;
+		// Cues ride the legacy container, which normalizes the per-frame timestamp to
+		// microseconds on the wire (see `hang::container::Frame::encode`), so the track
+		// declares that timescale to match.
+		let track = broadcast
+			.unique_track(".scte35", moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE))?;
 		let mut config = scte35::Config::new();
 		config.container = hang::catalog::Container::Legacy;
-		scte35.renditions.insert(track.name.clone(), config);
+		scte35.renditions.insert(track.name().to_string(), config);
 		drop(guard);
 
 		Ok(Self {
@@ -463,6 +467,7 @@ impl<E: scte35::Catalog> ScteStream<E> {
 	fn emit(&mut self, section: Vec<u8>, pts: Timestamp) -> anyhow::Result<()> {
 		let frame = crate::container::Frame {
 			timestamp: pts,
+			duration: None,
 			payload: bytes::Bytes::from(section),
 			keyframe: true,
 		};
@@ -485,7 +490,7 @@ impl<E: scte35::Catalog> ScteStream<E> {
 impl<E: scte35::Catalog> Drop for ScteStream<E> {
 	fn drop(&mut self) {
 		if let Some(scte35) = self.catalog.lock().scte35_mut() {
-			scte35.renditions.remove(&self.track.name);
+			scte35.renditions.remove(self.track.name());
 		}
 	}
 }
@@ -667,11 +672,11 @@ impl<E: CatalogExt> Stream<E> {
 		match self {
 			Stream::H264 { import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				import.decode_frame(&mut pending.data.as_slice(), pts)
+				Ok(import.decode_frame(&mut pending.data.as_slice(), pts)?)
 			}
 			Stream::H265 { import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				import.decode_frame(&mut pending.data.as_slice(), pts)
+				Ok(import.decode_frame(&mut pending.data.as_slice(), pts)?)
 			}
 			Stream::Aac(stream) => stream.write(pending, burst),
 			Stream::Clock | Stream::Ignored => Ok(()),
@@ -680,8 +685,8 @@ impl<E: CatalogExt> Stream<E> {
 
 	fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
 		match self {
-			Stream::H264 { import, .. } => import.seek(sequence),
-			Stream::H265 { import, .. } => import.seek(sequence),
+			Stream::H264 { import, .. } => Ok(import.seek(sequence)?),
+			Stream::H265 { import, .. } => Ok(import.seek(sequence)?),
 			Stream::Aac(stream) => stream.seek(sequence),
 			Stream::Clock | Stream::Ignored => Ok(()),
 		}
@@ -689,8 +694,8 @@ impl<E: CatalogExt> Stream<E> {
 
 	fn finish(&mut self) -> anyhow::Result<()> {
 		match self {
-			Stream::H264 { import, .. } => import.finish(),
-			Stream::H265 { import, .. } => import.finish(),
+			Stream::H264 { import, .. } => Ok(import.finish()?),
+			Stream::H265 { import, .. } => Ok(import.finish()?),
 			Stream::Aac(stream) => stream.finish(),
 			Stream::Clock | Stream::Ignored => Ok(()),
 		}
@@ -737,7 +742,7 @@ impl<E: CatalogExt> AacStream<E> {
 					// WebCodecs) can configure the decoder. TS itself carries it inline.
 					let description = config.encode();
 					let import = aac::Import::new(self.broadcast.clone(), self.catalog.clone(), config)?;
-					let name = import.track().name.clone();
+					let name = import.track().name().to_string();
 					if let Some(rendition) = self.catalog.lock().audio.renditions.get_mut(&name) {
 						rendition.description = Some(description);
 					}
@@ -749,7 +754,9 @@ impl<E: CatalogExt> AacStream<E> {
 			let pts = match base {
 				Some(base) if index > 0 => {
 					let advance = Timestamp::from_scale(index * 1024, header.sample_rate as u64)?;
-					Some(base + advance)
+					// `base` is a 90 kHz PTS; rescale the sample-rate advance to match
+					// before adding (the scale-aware Timestamp rejects mixed scales).
+					Some(base + advance.convert(base.scale())?)
 				}
 				other => other,
 			};
@@ -798,9 +805,9 @@ impl<E: CatalogExt> AacStream<E> {
 		self.jitter = Some(jitter);
 
 		if let Some(import) = &self.import {
-			let name = import.track().name.clone();
+			let name = import.track().name().to_string();
 			if let Some(rendition) = self.catalog.lock().audio.renditions.get_mut(&name) {
-				rendition.jitter = Some(jitter.convert()?);
+				rendition.jitter = Some(jitter.into());
 			}
 		}
 		Ok(())
@@ -1129,7 +1136,7 @@ mod test {
 		use crate::catalog::hang::Catalog;
 		use crate::container::ts::scte35;
 
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog =
 			crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<scte35::Ext>::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
@@ -1152,7 +1159,7 @@ mod test {
 	// the publishing lock is never taken and the catalog is never republished empty.
 	#[tokio::test(start_paused = true)]
 	async fn base_catalog_routes_cue_pid_to_ignored() {
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.clone());
@@ -1193,7 +1200,7 @@ mod test {
 		const SECTION_PID: u16 = 0x0021;
 		let pid = mpeg2ts::ts::Pid::new(SECTION_PID).unwrap();
 
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let consumer = broadcast.consume();
 		let catalog =
 			crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<scte35::Ext>::default()).unwrap();
@@ -1229,7 +1236,7 @@ mod test {
 		);
 
 		let name = catalog.snapshot().scte35.renditions.keys().next().unwrap().clone();
-		let track = consumer.subscribe_track(&moq_net::Track::new(name)).unwrap();
+		let track = consumer.track(&name).unwrap().subscribe(None).unwrap().await.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
@@ -1277,7 +1284,7 @@ mod test {
 		const VIDEO_PID: u16 = 0x0050;
 		const PRIVATE_PID: u16 = 0x0051;
 
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut import = super::Import::new(broadcast, catalog);
 
@@ -1314,11 +1321,12 @@ mod test {
 	async fn scte35_cue_stamped_with_video_pts() {
 		use crate::catalog::hang::{Catalog, Container};
 		use crate::container::ts::scte35;
-		use crate::container::{Consumer, Timestamp};
+		use crate::container::Consumer;
+		use moq_net::Timestamp;
 
 		const VIDEO_PID: u16 = 0x0050;
 
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let consumer = broadcast.consume();
 		let catalog =
 			crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<scte35::Ext>::default()).unwrap();
@@ -1339,7 +1347,7 @@ mod test {
 		import.finish().unwrap();
 
 		let name = catalog.snapshot().scte35.renditions.keys().next().unwrap().clone();
-		let track = consumer.subscribe_track(&moq_net::Track::new(name)).unwrap();
+		let track = consumer.track(&name).unwrap().subscribe(None).unwrap().await.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
@@ -1349,7 +1357,13 @@ mod test {
 
 		assert_eq!(&frame.payload[..], &CUE[..], "verbatim splice_info_section");
 		assert_ne!(frame.timestamp, Timestamp::ZERO, "cue must not stamp zero");
-		assert_eq!(frame.timestamp, clock, "cue stamped with the video media clock");
+		// The legacy container normalizes the wire timestamp to microseconds, so compare the
+		// instant (not the raw scale) against the 90 kHz media clock the cue was stamped with.
+		assert_eq!(
+			std::time::Duration::from(frame.timestamp),
+			std::time::Duration::from(clock),
+			"cue stamped with the video media clock"
+		);
 	}
 
 	// A 0x86 PID without CUEI is ambiguous (DTS audio or a non-conformant SCTE mux):
@@ -1363,7 +1377,7 @@ mod test {
 		const VIDEO_PID: u16 = 0x0050;
 		const SECTION_PID: u16 = 0x0021;
 
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		// scte35::Ext (not the base catalog) makes a wrong ensure_scte() observable: it
 		// would create a rendition, which the base catalog silently drops.
 		let catalog =

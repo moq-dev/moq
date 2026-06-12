@@ -8,7 +8,7 @@ async function main() {
 	const broadcast = connection.consume(Moq.Path.from("my-broadcast"));
 
 	// Subscribe to a specific track (with priority 0)
-	const track = broadcast.subscribe("chat", 0);
+	const track = broadcast.track("chat").subscribe({ priority: 0 });
 
 	// Read data as it arrives
 	for (;;) {

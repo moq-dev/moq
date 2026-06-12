@@ -10,9 +10,9 @@
 
 use std::{fmt, str::FromStr};
 
-use anyhow::Context;
 use bytes::Buf;
-use hang::Error;
+
+use crate::Result;
 
 /// The supported framed formats (known frame boundaries).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,9 +45,9 @@ pub enum FramedFormat {
 }
 
 impl FromStr for FramedFormat {
-	type Err = Error;
+	type Err = crate::Error;
 
-	fn from_str(s: &str) -> Result<Self, Self::Err> {
+	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
 		match s {
 			"avc1" | "avcc" => Ok(FramedFormat::Avc1),
 			"avc3" | "h264" => Ok(FramedFormat::Avc3),
@@ -60,7 +60,7 @@ impl FromStr for FramedFormat {
 			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => Ok(FramedFormat::Ts),
 			"vp8" | "vp08" => Ok(FramedFormat::Vp8),
 			"vp9" | "vp09" => Ok(FramedFormat::Vp9),
-			_ => Err(Error::UnknownFormat(s.to_string())),
+			_ => Err(crate::Error::UnknownFormat(s.to_string())),
 		}
 	}
 }
@@ -130,7 +130,7 @@ impl Framed {
 		catalog: crate::catalog::Producer,
 		format: FramedFormat,
 		buf: &mut T,
-	) -> anyhow::Result<Self> {
+	) -> Result<Self> {
 		use crate::codec::h264::Mode as H264Mode;
 		let decoder = match format {
 			FramedFormat::Avc1 => {
@@ -188,65 +188,65 @@ impl Framed {
 			}
 		};
 
-		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
+		if buf.has_remaining() {
+			return Err(crate::Error::BufferNotConsumed);
+		}
 
 		Ok(Self { decoder })
 	}
 
 	/// Finish the decoder, flushing any buffered data.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	pub fn finish(&mut self) -> Result<()> {
 		match self.decoder {
 			FramedKind::H264(ref mut decoder) => decoder.finish(),
 			FramedKind::Fmp4(ref mut decoder) => decoder.finish(),
 			FramedKind::Hev1(ref mut decoder) => decoder.finish(),
 			FramedKind::Av01(ref mut decoder) => decoder.finish(),
-			FramedKind::Vp8(ref mut decoder) => decoder.finish(),
-			FramedKind::Vp9(ref mut decoder) => decoder.finish(),
+			FramedKind::Vp8(ref mut decoder) => decoder.finish().map_err(Into::into),
+			FramedKind::Vp9(ref mut decoder) => decoder.finish().map_err(Into::into),
 			FramedKind::Aac(ref mut decoder) => decoder.finish(),
 			FramedKind::Opus(ref mut decoder) => decoder.finish(),
 			FramedKind::Mkv(ref mut decoder) => decoder.finish(),
-			FramedKind::Ts(ref mut decoder) => decoder.finish(),
+			FramedKind::Ts(ref mut decoder) => decoder.finish().map_err(Into::into),
 		}
 	}
 
 	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		match self.decoder {
 			FramedKind::H264(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Fmp4(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Hev1(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Av01(ref mut decoder) => decoder.seek(sequence),
-			FramedKind::Vp8(ref mut decoder) => decoder.seek(sequence),
-			FramedKind::Vp9(ref mut decoder) => decoder.seek(sequence),
+			FramedKind::Vp8(ref mut decoder) => decoder.seek(sequence).map_err(Into::into),
+			FramedKind::Vp9(ref mut decoder) => decoder.seek(sequence).map_err(Into::into),
 			FramedKind::Aac(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Opus(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Mkv(ref mut decoder) => decoder.seek(sequence),
-			FramedKind::Ts(ref mut decoder) => decoder.seek(sequence),
+			FramedKind::Ts(ref mut decoder) => decoder.seek(sequence).map_err(Into::into),
 		}
 	}
 
 	/// Return the single track produced by this importer.
-	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
+	pub fn track(&self) -> Result<&moq_net::TrackProducer> {
 		match self.decoder {
-			FramedKind::H264(ref decoder) => decoder.track().context("H.264 track not yet created"),
-			FramedKind::Fmp4(_) => anyhow::bail!("fmp4 can contain multiple tracks"),
+			FramedKind::H264(ref decoder) => decoder
+				.track()
+				.ok_or_else(|| crate::codec::h264::Error::Avc3TrackNotCreated.into()),
+			FramedKind::Fmp4(_) => Err(crate::Error::MultipleTracks("fmp4")),
 			FramedKind::Hev1(ref decoder) => decoder.track(),
 			FramedKind::Av01(ref decoder) => decoder.track(),
-			FramedKind::Vp8(ref decoder) => decoder.track(),
-			FramedKind::Vp9(ref decoder) => decoder.track(),
+			FramedKind::Vp8(ref decoder) => decoder.track().map_err(Into::into),
+			FramedKind::Vp9(ref decoder) => decoder.track().map_err(Into::into),
 			FramedKind::Aac(ref decoder) => Ok(decoder.track()),
 			FramedKind::Opus(ref decoder) => Ok(decoder.track()),
-			FramedKind::Mkv(_) => anyhow::bail!("mkv can contain multiple tracks"),
-			FramedKind::Ts(_) => anyhow::bail!("ts can contain multiple tracks"),
+			FramedKind::Mkv(_) => Err(crate::Error::MultipleTracks("mkv")),
+			FramedKind::Ts(_) => Err(crate::Error::MultipleTracks("ts")),
 		}
 	}
 
 	/// Decode a frame from the given buffer.
-	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> anyhow::Result<()> {
+	pub fn decode_frame<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		match self.decoder {
 			FramedKind::H264(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			FramedKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
@@ -266,7 +266,9 @@ impl Framed {
 			}
 		}
 
-		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
+		if buf.has_remaining() {
+			return Err(crate::Error::BufferNotConsumed);
+		}
 
 		Ok(())
 	}
@@ -312,9 +314,9 @@ pub enum StreamFormat {
 }
 
 impl FromStr for StreamFormat {
-	type Err = Error;
+	type Err = crate::Error;
 
-	fn from_str(s: &str) -> Result<Self, Self::Err> {
+	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
 		match s {
 			"avc3" | "h264" => Ok(StreamFormat::Avc3),
 			"hev1" => Ok(StreamFormat::Hev1),
@@ -322,7 +324,7 @@ impl FromStr for StreamFormat {
 			"av01" | "av1" | "av1c" | "av1C" => Ok(StreamFormat::Av01),
 			"mkv" | "webm" | "matroska" => Ok(StreamFormat::Mkv),
 			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => Ok(StreamFormat::Ts),
-			_ => Err(Error::UnknownFormat(s.to_string())),
+			_ => Err(crate::Error::UnknownFormat(s.to_string())),
 		}
 	}
 }
@@ -367,7 +369,7 @@ impl Stream {
 		broadcast: moq_net::BroadcastProducer,
 		catalog: crate::catalog::Producer,
 		format: StreamFormat,
-	) -> anyhow::Result<Self> {
+	) -> Result<Self> {
 		use crate::codec::h264::Mode as H264Mode;
 		let decoder = match format {
 			StreamFormat::Avc3 => {
@@ -388,7 +390,7 @@ impl Stream {
 	/// This is not required for self-describing formats like fMP4 or AVC3.
 	///
 	/// The buffer will be fully consumed, or an error will be returned.
-	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		match self.decoder {
 			StreamKind::Avc3(ref mut decoder) => decoder.initialize(buf)?,
 			StreamKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
@@ -398,44 +400,46 @@ impl Stream {
 			StreamKind::Ts(ref mut decoder) => decoder.decode(buf)?,
 		}
 
-		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
+		if buf.has_remaining() {
+			return Err(crate::Error::BufferNotConsumed);
+		}
 
 		Ok(())
 	}
 
 	/// Decode a stream of data from the given buffer.
-	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		match self.decoder {
 			StreamKind::Avc3(ref mut decoder) => decoder.decode_stream(buf, None),
 			StreamKind::Fmp4(ref mut decoder) => decoder.decode(buf),
 			StreamKind::Hev1(ref mut decoder) => decoder.decode_stream(buf, None),
 			StreamKind::Av01(ref mut decoder) => decoder.decode_stream(buf, None),
 			StreamKind::Mkv(ref mut decoder) => decoder.decode(buf),
-			StreamKind::Ts(ref mut decoder) => decoder.decode(buf),
+			StreamKind::Ts(ref mut decoder) => decoder.decode(buf).map_err(Into::into),
 		}
 	}
 
 	/// Finish the decoder, flushing any buffered data.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	pub fn finish(&mut self) -> Result<()> {
 		match self.decoder {
 			StreamKind::Avc3(ref mut decoder) => decoder.finish(),
 			StreamKind::Fmp4(ref mut decoder) => decoder.finish(),
 			StreamKind::Hev1(ref mut decoder) => decoder.finish(),
 			StreamKind::Av01(ref mut decoder) => decoder.finish(),
 			StreamKind::Mkv(ref mut decoder) => decoder.finish(),
-			StreamKind::Ts(ref mut decoder) => decoder.finish(),
+			StreamKind::Ts(ref mut decoder) => decoder.finish().map_err(Into::into),
 		}
 	}
 
 	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		match self.decoder {
 			StreamKind::Avc3(ref mut decoder) => decoder.seek(sequence),
 			StreamKind::Fmp4(ref mut decoder) => decoder.seek(sequence),
 			StreamKind::Hev1(ref mut decoder) => decoder.seek(sequence),
 			StreamKind::Av01(ref mut decoder) => decoder.seek(sequence),
 			StreamKind::Mkv(ref mut decoder) => decoder.seek(sequence),
-			StreamKind::Ts(ref mut decoder) => decoder.seek(sequence),
+			StreamKind::Ts(ref mut decoder) => decoder.seek(sequence).map_err(Into::into),
 		}
 	}
 

@@ -5,7 +5,7 @@ use url::Url;
 
 use crate::error::MoqError;
 use crate::ffi::Task;
-use crate::origin::MoqOriginProducer;
+use crate::origin::{MoqOriginConsumer, MoqOriginProducer};
 
 struct Client {
 	config: moq_native::ClientConfig,
@@ -15,44 +15,28 @@ struct Client {
 
 impl Client {
 	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
-		let client = self.config.clone().init().map_err(map_connect_error)?;
+		let client = self
+			.config
+			.clone()
+			.init()
+			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
-		let publish = self.publish.as_ref().map(|o| o.inner().consume());
-		let consume = self.consume.as_ref().map(|o| o.inner().clone());
+		// moq-net defaults both sides if unset; only override when the
+		// FFI caller wired their own.
+		let mut client = client;
+		if let Some(publish) = self.publish.as_ref() {
+			client = client.with_publisher(publish.inner().clone());
+		}
+		if let Some(consume) = self.consume.as_ref() {
+			client = client.with_consumer(consume.inner().clone());
+		}
 
 		let session = client
-			.with_publish(publish)
-			.with_consume(consume)
 			.connect(url)
 			.await
-			.map_err(map_connect_error)?;
+			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
 		Ok(Arc::new(MoqSession::new(session)))
-	}
-}
-
-fn map_connect_error(err: moq_native::Error) -> MoqError {
-	match err.connect_error() {
-		Some(moq_native::ConnectError::Unauthorized) => MoqError::Unauthorized,
-		Some(moq_native::ConnectError::Forbidden) => MoqError::Forbidden,
-		_ => MoqError::Connect(format!("{err}")),
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn maps_native_auth_connect_errors() {
-		assert!(matches!(
-			map_connect_error(moq_native::ConnectError::Unauthorized.into()),
-			MoqError::Unauthorized
-		));
-		assert!(matches!(
-			map_connect_error(moq_native::ConnectError::Forbidden.into()),
-			MoqError::Forbidden
-		));
 	}
 }
 
@@ -80,28 +64,6 @@ impl MoqClient {
 	pub fn set_tls_disable_verify(&self, disable: bool) {
 		if let Some(mut state) = self.task.lock() {
 			state.config.tls.disable_verify = Some(disable);
-		}
-	}
-
-	/// Trust these PEM root certificate file(s) instead of the system roots.
-	///
-	/// Pass the paths to PEM-encoded CA certificates. An empty list restores the
-	/// default behavior of using the platform's native root store.
-	pub fn set_tls_roots(&self, paths: Vec<String>) {
-		if let Some(mut state) = self.task.lock() {
-			state.config.tls.root = paths.into_iter().map(Into::into).collect();
-		}
-	}
-
-	/// Pin the peer to a certificate with one of these SHA-256 fingerprints, encoded as hex.
-	///
-	/// This is the native equivalent of the browser's WebTransport `serverCertificateHashes`
-	/// and accepts the same values a server reports (see `MoqServer.cert_fingerprints`). Use it
-	/// to trust a self-signed certificate without disabling verification. An empty list clears
-	/// any pinned fingerprints.
-	pub fn set_tls_fingerprints(&self, fingerprints: Vec<String>) {
-		if let Some(mut state) = self.task.lock() {
-			state.config.tls.fingerprint = fingerprints;
 		}
 	}
 
@@ -134,6 +96,13 @@ impl MoqClient {
 
 	/// Connect to a MoQ server and wait for the session to be established.
 	///
+	/// If neither [`set_publish`](Self::set_publish) nor
+	/// [`set_consume`](Self::set_consume) was called on this client, the
+	/// underlying moq-net layer auto-creates a fresh origin and wires it
+	/// as both sides. The producer and consumer sides are then accessible
+	/// via [`MoqSession::publisher`] and [`MoqSession::consumer`] so the
+	/// caller never has to construct a [`MoqOriginProducer`] themselves.
+	///
 	/// Can be cancelled by calling `cancel()`.
 	pub async fn connect(&self, url: String) -> Result<Arc<MoqSession>, MoqError> {
 		let url = Url::parse(&url)?;
@@ -151,13 +120,21 @@ impl MoqClient {
 pub struct MoqSession {
 	inner: Option<moq_net::Session>,
 	closed: Task<Session>,
+	publisher: Arc<MoqOriginProducer>,
+	consumer: Arc<MoqOriginConsumer>,
 }
 
 impl MoqSession {
 	pub(crate) fn new(session: moq_net::Session) -> Self {
+		// Eagerly wrap the always-set origin sides so each
+		// publisher()/consumer() call hands back the same Arc.
+		let publisher = Arc::new(MoqOriginProducer::from_inner(session.publisher().clone()));
+		let consumer = Arc::new(MoqOriginConsumer::from_inner(session.consumer().clone()));
 		Self {
 			inner: Some(session.clone()),
 			closed: Task::new(session),
+			publisher,
+			consumer,
 		}
 	}
 }
@@ -197,5 +174,21 @@ impl MoqSession {
 	/// thing per binding.
 	pub fn shutdown(&self) {
 		self.cancel(0);
+	}
+
+	/// The publish-side origin: where local broadcasts get advertised
+	/// to the remote. Either the producer the caller wired via
+	/// `set_publish` / `set_consume` before connect/accept, or one
+	/// auto-created if neither was set.
+	pub fn publisher(&self) -> Arc<MoqOriginProducer> {
+		self.publisher.clone()
+	}
+
+	/// The subscribe-side origin: a read handle for receiving
+	/// announcements pushed by the remote. Either derived from the
+	/// origin the caller wired via `set_consume`, or auto-created if
+	/// neither was set.
+	pub fn consumer(&self) -> Arc<MoqOriginConsumer> {
+		self.consumer.clone()
 	}
 }

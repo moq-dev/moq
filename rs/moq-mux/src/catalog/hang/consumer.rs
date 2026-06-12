@@ -14,18 +14,9 @@ pub struct Consumer<E: CatalogExt = ()> {
 	inner: moq_json::Consumer<Catalog<E>>,
 }
 
-// Manual Clone so a consumer is cheaply clonable regardless of whether `E` is.
-impl<E: CatalogExt> Clone for Consumer<E> {
-	fn clone(&self) -> Self {
-		Self {
-			inner: self.inner.clone(),
-		}
-	}
-}
-
 impl<E: CatalogExt> Consumer<E> {
-	/// Create a new catalog consumer from a MoQ track consumer.
-	pub fn new(track: moq_net::TrackConsumer) -> Self {
+	/// Create a new catalog consumer from a MoQ track subscriber.
+	pub fn new(track: moq_net::TrackSubscriber) -> Self {
 		Self {
 			inner: moq_json::Consumer::new(track),
 		}
@@ -49,8 +40,8 @@ impl<E: CatalogExt> Consumer<E> {
 	}
 }
 
-impl<E: CatalogExt> From<moq_net::TrackConsumer> for Consumer<E> {
-	fn from(inner: moq_net::TrackConsumer) -> Self {
+impl<E: CatalogExt> From<moq_net::TrackSubscriber> for Consumer<E> {
+	fn from(inner: moq_net::TrackSubscriber) -> Self {
 		Self::new(inner)
 	}
 }
@@ -81,8 +72,8 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload() {
-		let mut track = hang::Catalog::default_track().produce();
-		let mut consumer = Consumer::new(track.consume());
+		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut consumer = Consumer::new(track.subscribe(None));
 		let mut group = track.append_group().expect("catalog group should append");
 
 		let waiter = kio::Waiter::noop();
@@ -97,8 +88,8 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload_after_track_finish() {
-		let mut track = hang::Catalog::default_track().produce();
-		let mut consumer = Consumer::new(track.consume());
+		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut consumer = Consumer::new(track.subscribe(None));
 		let mut group = track.append_group().expect("catalog group should append");
 
 		track.finish().expect("catalog track should finish");
@@ -115,8 +106,8 @@ mod test {
 
 	#[test]
 	fn returns_latest_complete_catalog_group() {
-		let mut track = hang::Catalog::default_track().produce();
-		let mut consumer = Consumer::new(track.consume());
+		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
 		let (_old, old_payload) = catalog_payload("old");
@@ -141,8 +132,8 @@ mod test {
 
 	#[test]
 	fn waits_for_newer_pending_group_instead_of_returning_older_ready_group() {
-		let mut track = hang::Catalog::default_track().produce();
-		let mut consumer = Consumer::new(track.consume());
+		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
 		let (_old, old_payload) = catalog_payload("old");
@@ -168,8 +159,8 @@ mod test {
 
 	#[test]
 	fn retained_pending_group_is_superseded_by_newer_group() {
-		let mut track = hang::Catalog::default_track().produce();
-		let mut consumer = Consumer::new(track.consume());
+		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
 		let (_old, old_payload) = catalog_payload("old");
@@ -198,8 +189,8 @@ mod test {
 
 	#[test]
 	fn returns_none_when_empty_track_finishes() {
-		let mut track = hang::Catalog::default_track().produce();
-		let mut consumer: Consumer = Consumer::new(track.consume());
+		let mut track = moq_net::TrackProducer::new(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut consumer: Consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
 		track.finish().expect("catalog track should finish");

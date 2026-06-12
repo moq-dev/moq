@@ -1,6 +1,7 @@
 use clap::Subcommand;
 use hang::moq_net;
-use moq_mux::container::{fmp4, hls, ts};
+use moq_hls::import as hls;
+use moq_mux::container::{fmp4, ts};
 
 #[derive(Subcommand, Clone)]
 pub enum PublishFormat {
@@ -87,9 +88,9 @@ impl PublishDecoder {
 	/// Decode a chunk of bytes from stdin (Avc3, Fmp4, or Ts).
 	fn decode_buf(&mut self, buffer: &mut bytes::BytesMut) -> anyhow::Result<()> {
 		match self {
-			Self::Avc3(d) => d.decode_stream(buffer, None),
-			Self::Fmp4(d) => d.decode(buffer),
-			Self::Ts(d) => d.decode(buffer),
+			Self::Avc3(d) => Ok(d.decode_stream(buffer, None)?),
+			Self::Fmp4(d) => Ok(d.decode(buffer)?),
+			Self::Ts(d) => Ok(d.decode(buffer)?),
 			Self::Hls(_) => unreachable!(),
 		}
 	}
@@ -120,7 +121,7 @@ pub struct Publish {
 
 impl Publish {
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let source = match format {
@@ -161,7 +162,7 @@ impl Publish {
 		match self.source {
 			Source::Stream(PublishDecoder::Hls(mut decoder)) => {
 				decoder.init().await?;
-				decoder.run().await
+				Ok(decoder.run().await?)
 			}
 			Source::Stream(mut decoder) => {
 				let mut stdin = tokio::io::stdin();

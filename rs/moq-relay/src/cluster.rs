@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::Context;
-use moq_net::{BroadcastProducer, Origin, OriginConsumer, OriginProducer, Path, Stats, Tier};
+use moq_net::{BroadcastPublish, Origin, OriginProducer, Path, Stats, Tier};
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::task::AbortHandle;
 use url::Url;
@@ -21,7 +21,7 @@ const MESH_PREFIX: &str = ".internal/origins";
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long a peer must stay unannounced before we abort the dial. Must clear the
-/// "prefer shorter hop" reannounce flap (which arrives as unannounce-then-announce
+/// "prefer shorter hop" restart flap (which arrives as unannounce-then-announce
 /// within sub-milliseconds) plus reasonable churn from a peer restart.
 const STALE_AFTER: Duration = Duration::from_secs(60);
 
@@ -307,7 +307,7 @@ pub struct ClusterConfig {
 ///
 /// Local sessions and remote cluster connections all publish into the same
 /// origin. Loop prevention and shortest-path preference come from the
-/// hop list carried on each broadcast (see [`moq_net::Broadcast::hops`]).
+/// hop list carried on each broadcast (see [`moq_net::BroadcastInfo::hops`]).
 ///
 /// Construct with [`Cluster::new`], then attach a QUIC client and (optionally)
 /// a [`Stats`] aggregator with the `with_*` builder methods. A cluster without
@@ -380,9 +380,12 @@ impl Cluster {
 		self
 	}
 
-	/// Returns an [`OriginConsumer`] scoped to this session's subscribe permissions.
-	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginConsumer> {
-		Some(self.origin.with_root(&token.root)?.scope(&token.subscribe)?.consume())
+	/// Returns an [`OriginProducer`] scoped to this session's subscribe permissions.
+	///
+	/// Pass straight to [`moq_net::Server::with_publisher`] (or the
+	/// equivalent per-request setter). moq-net derives the read handle.
+	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginProducer> {
+		self.origin.with_root(&token.root)?.scope(&token.subscribe)
 	}
 
 	/// Returns an [`OriginProducer`] scoped to this session's publish permissions.
@@ -515,7 +518,7 @@ impl Cluster {
 		// Held in scope so the registration stays announced until `run` exits.
 		// Discovery is paired with it: a gossip-only relay (passive rendezvous) has
 		// nothing to discover, so we only run it when we also have an outbound peer.
-		let _self_registration: Option<BroadcastProducer> = if gossip {
+		let _self_registration: Option<BroadcastPublish> = if gossip {
 			// Checked above: gossip requires `node`.
 			let node = node.as_deref().expect("gossip requires --cluster-node");
 			let path = Path::new(MESH_PREFIX).join(node);
@@ -556,14 +559,15 @@ impl Cluster {
 	/// instead of two. Unannounces don't abort immediately. They just mark the
 	/// entry as "pending cleanup" with a timestamp. A periodic sweep evicts
 	/// entries whose unannounce has stuck for [`STALE_AFTER`]. The "prefer
-	/// shorter hop" path in OriginProducer delivers reannouncements as
+	/// shorter hop" path in OriginProducer delivers restartments as
 	/// unannounce-then-announce within sub-milliseconds, which clears the
 	/// pending-cleanup timestamp long before the sweep fires.
 	async fn run_discovery(self, self_url: String, token: String, dialed: DialMap) {
-		let Some(mut consumer) = self.origin.consume().with_root(MESH_PREFIX) else {
+		let Some(consumer) = self.origin.consume().with_root(MESH_PREFIX) else {
 			tracing::warn!("could not scope cluster origin to {MESH_PREFIX}; discovery disabled");
 			return;
 		};
+		let mut announced = consumer.announced();
 
 		let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
 		sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -572,8 +576,8 @@ impl Cluster {
 
 		loop {
 			tokio::select! {
-				ann = consumer.announced() => {
-					let Some((relative, announced)) = ann else { return; };
+				ann = announced.next() => {
+					let Some((relative, event)) = ann else { return; };
 					let peer = relative.as_str();
 					// Skip self and any peer we lose the tiebreaker to; that side
 					// dials us instead, so each pair forms a single session.
@@ -581,7 +585,7 @@ impl Cluster {
 						continue;
 					}
 					let peer = peer.to_owned();
-					match announced {
+					match event.broadcast() {
 						Some(_) => {
 							if dialed.contains(&peer) {
 								// Already dialed (possibly via another source). Mark gossip as
@@ -807,15 +811,15 @@ impl Cluster {
 			.context("internal: cluster peer dial without an attached QUIC client")?;
 
 		// Cluster-to-cluster traffic is internal by definition.
-		let session = client
-			.with_publish(self.origin.consume())
-			.with_consume(self.origin.clone())
+		let cs = client
+			.with_publisher(self.origin.clone())
+			.with_consumer(self.origin.clone())
 			.with_stats(self.stats.tier(Tier::Internal))
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;
 
-		session.closed().await.map_err(Into::into)
+		cs.closed().await.map_err(Into::into)
 	}
 }
 
@@ -915,7 +919,7 @@ mod tests {
 		assert!(dialed.contains("healthy:4443"));
 	}
 
-	/// A reannounce after an unannounce clears the pending-sweep timestamp, so
+	/// A restart after an unannounce clears the pending-sweep timestamp, so
 	/// the entry survives even if the original unannounce was old enough to
 	/// otherwise trigger eviction.
 	#[tokio::test]
@@ -1098,7 +1102,7 @@ mod tests {
 
 		// Snapshot a consumer on the cluster origin before run() takes ownership of
 		// `cluster` so we can later check that the registration was published.
-		let mut watcher = cluster.origin.consume();
+		let mut watcher = cluster.origin.consume().announced();
 
 		let cluster_run = cluster.clone();
 		let mut handle = tokio::spawn(async move { cluster_run.run().await });
@@ -1107,9 +1111,9 @@ mod tests {
 		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
 		// The self-registration broadcast must be visible on the origin.
-		let (path, broadcast) = watcher.try_announced().expect("self-registration must be published");
+		let (path, event) = watcher.try_next().expect("self-registration must be published");
 		assert_eq!(path.as_str(), ".internal/origins/rendezvous.example.com:4443");
-		assert!(broadcast.is_some());
+		assert!(event.broadcast().is_some());
 
 		// run() must NOT have returned: dropping the broadcast (via run returning)
 		// would unannounce the registration immediately. Use a short timeout to

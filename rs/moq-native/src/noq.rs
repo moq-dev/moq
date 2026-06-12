@@ -93,9 +93,6 @@ pub enum Error {
 	Client(#[from] web_transport_noq::ClientError),
 
 	#[error(transparent)]
-	ConnectRejected(#[from] crate::ConnectError),
-
-	#[error(transparent)]
 	Server(#[from] web_transport_noq::ServerError),
 
 	#[error("failed to establish QUIC connection")]
@@ -185,7 +182,7 @@ impl NoqClient {
 			let fingerprint = resp.text().await.map_err(Error::ReadFingerprint)?;
 			let fingerprint = hex::decode(fingerprint.trim())?;
 
-			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), vec![fingerprint]);
+			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), fingerprint);
 			config.dangerous().set_certificate_verifier(Arc::new(verifier));
 
 			url.set_scheme("https").expect("failed to set scheme");
@@ -220,9 +217,7 @@ impl NoqClient {
 		}
 
 		let session = match url.scheme() {
-			"https" => web_transport_noq::Session::connect(connection, request)
-				.await
-				.map_err(map_client_error)?,
+			"https" => web_transport_noq::Session::connect(connection, request).await?,
 			"moqt" | "moql" => {
 				let handshake = connection
 					.handshake_data()
@@ -240,49 +235,6 @@ impl NoqClient {
 		};
 
 		Ok(session)
-	}
-}
-
-impl Error {
-	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
-		match self {
-			Self::ConnectRejected(err) => Some(*err),
-			Self::Client(err) => classify_client_error(err),
-			_ => None,
-		}
-	}
-}
-
-fn map_client_error(err: web_transport_noq::ClientError) -> Error {
-	if let Some(err) = classify_client_error(&err) {
-		return err.into();
-	}
-
-	err.into()
-}
-
-fn classify_client_error(err: &web_transport_noq::ClientError) -> Option<crate::ConnectError> {
-	match err {
-		web_transport_noq::ClientError::HttpError(err) => classify_connect_error(err),
-		_ => None,
-	}
-}
-
-fn classify_connect_error(err: &web_transport_noq::ConnectError) -> Option<crate::ConnectError> {
-	match err {
-		web_transport_noq::ConnectError::ErrorStatus(status) => crate::ConnectError::from_status_u16(status.as_u16()),
-		web_transport_noq::ConnectError::ProtoError(err) => classify_proto_error(err),
-		_ => None,
-	}
-}
-
-fn classify_proto_error(err: &web_transport_noq::proto::ConnectError) -> Option<crate::ConnectError> {
-	match err {
-		web_transport_noq::proto::ConnectError::ErrorStatus(status)
-		| web_transport_noq::proto::ConnectError::WrongStatus(Some(status)) => {
-			crate::ConnectError::from_status_u16(status.as_u16())
-		}
-		_ => None,
 	}
 }
 

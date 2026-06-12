@@ -272,7 +272,7 @@ export class Encoder {
 		}
 	}
 
-	serve(track: Moq.Track, effect: Effect): void {
+	serve(track: Moq.TrackProducer, effect: Effect): void {
 		const values = effect.getAll([this.enabled, this.#worklet]);
 		if (!values) return;
 		const [_, worklet] = values;

@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 /// ```
 ///
 /// The unit type `()` is the no-extension case, so [`Catalog<()>`] is just the base media catalog.
-pub trait CatalogExt: Serialize + DeserializeOwned + Default + Clone + Send + 'static {}
+pub trait CatalogExt: Serialize + DeserializeOwned + Default + Clone + Send + Unpin + 'static {}
 
 impl CatalogExt for () {}
 
@@ -100,7 +100,7 @@ mod test {
 
 	#[test]
 	fn extension_roundtrip() {
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let mut producer =
 			crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Scte35Ext>::default()).unwrap();
 		let mut consumer = producer.consume().unwrap();

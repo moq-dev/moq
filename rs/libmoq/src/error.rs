@@ -87,13 +87,13 @@ pub enum Error {
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
 
-	/// Media decoder initialization failed.
+	/// Initialization failed (e.g. logging setup).
 	#[error("init failed: {0}")]
 	InitFailed(Arc<anyhow::Error>),
 
-	/// Media frame decode failed.
-	#[error("decode failed: {0}")]
-	DecodeFailed(Arc<anyhow::Error>),
+	/// Buffer was not fully consumed.
+	#[error("buffer was not fully consumed")]
+	BufferNotConsumed,
 
 	/// Timestamp value overflow.
 	#[error("timestamp overflow")]
@@ -115,21 +115,13 @@ pub enum Error {
 	#[error("offline")]
 	Offline,
 
-	/// Connection was rejected as unauthorized by the server.
-	#[error("unauthorized")]
-	Unauthorized,
-
-	/// Connection was forbidden by the server.
-	#[error("forbidden")]
-	Forbidden,
-
 	/// Error from the hang media layer.
 	#[error("hang error: {0}")]
 	Hang(#[from] hang::Error),
 
 	/// Error from the moq-mux consumer layer.
 	#[error("mux error: {0}")]
-	Mux(Arc<moq_mux::Error>),
+	Mux(#[from] moq_mux::Error),
 
 	/// Index out of bounds.
 	#[error("no index")]
@@ -156,16 +148,6 @@ impl From<tracing::metadata::ParseLevelError> for Error {
 	}
 }
 
-impl From<moq_mux::Error> for Error {
-	fn from(err: moq_mux::Error) -> Self {
-		match err {
-			moq_mux::Error::Moq(e) => Error::Moq(e),
-			moq_mux::Error::Hang(e) => Error::Hang(e),
-			e => Error::Mux(Arc::new(e)),
-		}
-	}
-}
-
 impl ffi::ReturnCode for Error {
 	fn error(&self) -> Option<&Error> {
 		Some(self)
@@ -182,7 +164,6 @@ impl ffi::ReturnCode for Error {
 			Error::NotFound => -8,
 			Error::UnknownFormat(_) => -9,
 			Error::InitFailed(_) => -10,
-			Error::DecodeFailed(_) => -11,
 			Error::TimestampOverflow(_) => -13,
 			Error::Level(_) => -14,
 			Error::InvalidCode => -15,
@@ -201,10 +182,9 @@ impl ffi::ReturnCode for Error {
 			Error::FrameNotFound => -28,
 			Error::Mux(_) => -29,
 			Error::Audio(_) => -30,
-			Error::GroupNotFound => -31,
-			Error::Native(_) => -32,
-			Error::Unauthorized => -33,
-			Error::Forbidden => -34,
+			Error::BufferNotConsumed => -31,
+			Error::GroupNotFound => -32,
+			Error::Native(_) => -33,
 		}
 	}
 }

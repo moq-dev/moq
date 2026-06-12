@@ -9,7 +9,7 @@
 
 use std::{net::TcpListener, sync::atomic::AtomicU64, time::Duration};
 
-use moq_native::moq_net::{self, Origin, Track};
+use moq_native::moq_net::{self, Origin};
 use moq_relay::{AuthConfig, Cluster, ClusterConfig, PublicConfig, Web, WebConfig, WebState};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -120,14 +120,14 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
-	let mut track = broadcast.create_track(Track::new("video")).expect("create track");
+	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group.write_frame(b"hello".as_ref()).expect("write frame");
 	group.finish().expect("finish group");
 
 	let pub_session = tokio::time::timeout(
 		TIMEOUT,
-		client().with_publish(pub_origin.consume()).connect(url.clone()),
+		client().with_publisher(pub_origin.clone()).connect(url.clone()),
 	)
 	.await
 	.expect("publisher connect timeout")
@@ -140,9 +140,9 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 	// ── subscriber ──────────────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
-	let mut announcements = sub_origin.consume();
+	let mut announcements = sub_origin.consume().announced();
 
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_consume(sub_origin).connect(url))
+	let sub_session = tokio::time::timeout(TIMEOUT, client().with_consumer(sub_origin).connect(url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
@@ -153,15 +153,21 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	);
 
 	// ── data path ───────────────────────────────────────────────────
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	// Auth root for `/smoke` is "smoke"; the broadcast "test" announces underneath.
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = bc.broadcast().expect("expected announce, got unannounce");
 
-	let mut track_sub = bc.subscribe_track(&Track::new("video")).expect("subscribe_track");
+	let mut track_sub = bc
+		.track("video")
+		.unwrap()
+		.subscribe(None)
+		.unwrap()
+		.await
+		.expect("consume_track");
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timeout")

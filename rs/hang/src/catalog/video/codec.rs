@@ -29,6 +29,32 @@ pub enum VideoCodec {
 	Unknown(String),
 }
 
+/// Coarse video codec family, used for tag-only matching.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum VideoCodecKind {
+	H264,
+	H265,
+	VP8,
+	VP9,
+	AV1,
+	Unknown,
+}
+
+impl VideoCodec {
+	/// Return the coarse codec family for tag-only matching.
+	pub fn kind(&self) -> VideoCodecKind {
+		match self {
+			Self::H264(_) => VideoCodecKind::H264,
+			Self::H265(_) => VideoCodecKind::H265,
+			Self::VP9(_) => VideoCodecKind::VP9,
+			Self::AV1(_) => VideoCodecKind::AV1,
+			Self::VP8 => VideoCodecKind::VP8,
+			Self::Unknown(_) => VideoCodecKind::Unknown,
+		}
+	}
+}
+
 impl FromStr for VideoCodec {
 	type Err = Error;
 

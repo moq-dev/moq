@@ -21,21 +21,23 @@ pub struct MoqAnnounced {
 }
 
 struct Announced {
-	inner: moq_net::OriginConsumer,
+	inner: moq_net::AnnounceConsumer,
 }
 
 impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnouncement>>, MoqError> {
 		loop {
-			match self.inner.announced().await {
-				Some((path, Some(broadcast))) => {
+			match self.inner.next().await {
+				// Active and Restart both carry a broadcast; skip unannounce events.
+				Some((path, event)) => {
+					let Some(broadcast) = event.broadcast() else {
+						continue;
+					};
 					return Ok(Some(Arc::new(MoqAnnouncement {
 						path: path.to_string(),
 						broadcast: Arc::new(MoqBroadcastConsumer::new(broadcast)),
 					})));
 				}
-				// TODO moq-lite will change to not emit None (unannounce) events here.
-				Some((_path, None)) => continue,
 				None => return Ok(None),
 			}
 		}
@@ -43,12 +45,12 @@ impl Announced {
 
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		loop {
-			match self.inner.announced().await {
-				Some((_path, Some(broadcast))) => {
-					return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)));
-				}
-				// TODO moq-lite will change to not emit None (unannounce) events here.
-				Some((_path, None)) => continue,
+			match self.inner.next().await {
+				// Active and Restart both carry a broadcast; skip unannounce events.
+				Some((_path, event)) => match event.broadcast() {
+					Some(broadcast) => return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast))),
+					None => continue,
+				},
 				None => return Err(MoqError::Closed),
 			}
 		}
@@ -72,6 +74,18 @@ impl MoqOriginProducer {
 	pub(crate) fn inner(&self) -> &moq_net::OriginProducer {
 		&self.inner
 	}
+
+	/// Wrap an existing `moq_net::OriginProducer` (e.g. one auto-created
+	/// during `MoqClient::connect`) so it can cross the FFI boundary.
+	pub(crate) fn from_inner(inner: moq_net::OriginProducer) -> Self {
+		Self { inner }
+	}
+}
+
+impl MoqOriginConsumer {
+	pub(crate) fn from_inner(inner: moq_net::OriginConsumer) -> Self {
+		Self { inner }
+	}
 }
 
 #[uniffi::export]
@@ -93,13 +107,23 @@ impl MoqOriginProducer {
 		})
 	}
 
-	/// Publish a broadcast to this origin under the given path.
-	pub fn publish(&self, path: String, broadcast: &MoqBroadcastProducer) -> Result<(), MoqError> {
+	/// Announce a broadcast to this origin under the given path so
+	/// subscribers can discover it. Named `announce` (not `publish`) so
+	/// the `MoqSession::publisher().announce(...)` chain doesn't stutter
+	/// "publisher.publish".
+	pub fn announce(&self, path: String, broadcast: &MoqBroadcastProducer) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let consumer = broadcast.consume_inner()?;
-		if !self.inner.publish_broadcast(path.as_str(), consumer) {
-			return Err(MoqError::Unauthorized);
-		}
+		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
+		let publish = self.inner.publish_broadcast(path.as_str(), consumer.clone())?;
+
+		// Auto-unannounce when the broadcast closes (all producers dropped). The origin no longer
+		// watches closure itself, so the spawn lives here at the runtime-bound FFI boundary.
+		tokio::spawn(async move {
+			consumer.closed().await;
+			drop(publish);
+		});
+
 		Ok(())
 	}
 }
@@ -109,18 +133,22 @@ impl MoqOriginConsumer {
 	/// Subscribe to all broadcast announcements under a prefix.
 	pub fn announced(&self, prefix: String) -> Result<Arc<MoqAnnounced>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let origin = self.inner.clone().with_root(prefix).ok_or(MoqError::Unauthorized)?;
+		let origin = self.inner.with_root(prefix).ok_or(MoqError::Unauthorized)?;
 		Ok(Arc::new(MoqAnnounced {
-			task: Task::new(Announced { inner: origin }),
+			task: Task::new(Announced {
+				inner: origin.announced(),
+			}),
 		}))
 	}
 
 	/// Wait for a specific broadcast to be announced by path.
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let origin = self.inner.clone().with_root(path).ok_or(MoqError::Unauthorized)?;
+		let origin = self.inner.with_root(path).ok_or(MoqError::Unauthorized)?;
 		Ok(Arc::new(MoqAnnouncedBroadcast {
-			task: Task::new(Announced { inner: origin }),
+			task: Task::new(Announced {
+				inner: origin.announced(),
+			}),
 		}))
 	}
 }

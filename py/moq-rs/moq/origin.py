@@ -89,8 +89,15 @@ class OriginProducer:
     def __init__(self) -> None:
         self._inner = MoqOriginProducer()
 
+    @classmethod
+    def _from_inner(cls, inner: MoqOriginProducer) -> OriginProducer:
+        """Wrap an existing FFI producer (e.g. the one a `Session` owns)."""
+        self = cls.__new__(cls)
+        self._inner = inner
+        return self
+
     def consume(self) -> OriginConsumer:
         return OriginConsumer(self._inner.consume())
 
     def publish(self, path: str, broadcast: BroadcastProducer) -> None:
-        self._inner.publish(path, broadcast._inner)
+        self._inner.announce(path, broadcast._inner)

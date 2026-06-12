@@ -17,7 +17,7 @@ async fn export_header_roundtrip_vp9_opus() {
 	let import_bytes = synth_webm();
 
 	// Ingest into a broadcast.
-	let broadcast = moq_net::Broadcast::new();
+	let broadcast = moq_net::BroadcastInfo::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
@@ -28,7 +28,10 @@ async fn export_header_roundtrip_vp9_opus() {
 	importer.finish().unwrap();
 
 	// Now subscribe via the exporter and pull bytes.
-	let mut exporter = crate::container::mkv::Export::new(consumer).unwrap();
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.expect("catalog consumer");
+	let mut exporter = crate::container::mkv::Export::new(consumer, catalog_stream);
 
 	// First `next()` should give us the header (EBML + Segment-start + Info + Tracks).
 	let header = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
@@ -120,7 +123,7 @@ async fn export_header_roundtrip_vp9_opus() {
 
 	// Verify the round-trip by re-importing the header (a header alone is enough
 	// to populate the catalog).
-	let mut broadcast2 = moq_net::Broadcast::new().produce();
+	let mut broadcast2 = moq_net::BroadcastInfo::new().produce();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
 	let mut importer2 = crate::container::mkv::Import::new(broadcast2, catalog2.clone());
 	let mut hbuf = bytes::BytesMut::from(header.as_ref());
@@ -142,7 +145,7 @@ async fn export_header_roundtrip_vp9_opus() {
 /// pending until the catalog lands.
 #[tokio::test(start_paused = true)]
 async fn export_waits_for_catalog_before_header() {
-	let broadcast = moq_net::Broadcast::new();
+	let broadcast = moq_net::BroadcastInfo::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
@@ -150,7 +153,10 @@ async fn export_waits_for_catalog_before_header() {
 	// have been published yet: `tracks` stays empty on the first polls.
 	let _catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
-	let mut exporter = crate::container::mkv::Export::new(consumer).unwrap();
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap();
+	let mut exporter = crate::container::mkv::Export::new(consumer, catalog_stream);
 
 	// next() must remain pending (timing out), not surface a "no catalog
 	// snapshot" error from a vacuously-ready empty track set.
@@ -170,7 +176,7 @@ async fn export_emits_blocks_for_each_frame() {
 	// of SimpleBlock elements with the right track assignments.
 	let import_bytes = synth_webm_with_frames();
 
-	let broadcast = moq_net::Broadcast::new();
+	let broadcast = moq_net::BroadcastInfo::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
@@ -180,8 +186,10 @@ async fn export_emits_blocks_for_each_frame() {
 	importer.decode(&mut buf).unwrap();
 	importer.finish().unwrap();
 
-	let mut exporter = crate::container::mkv::Export::new(consumer)
-		.unwrap()
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.expect("catalog consumer");
+	let mut exporter = crate::container::mkv::Export::new(consumer, catalog_stream)
 		// Use per-frame clustering so each frame is observable as its own
 		// Cluster chunk; batching is exercised in a dedicated test below.
 		.with_fragment_duration(std::time::Duration::ZERO);
@@ -220,7 +228,7 @@ async fn export_emits_blocks_for_each_frame() {
 
 	// Round-trip verification: feed the exported bytes back through the importer
 	// and check the catalog repopulates with the same codecs.
-	let mut bcast2 = moq_net::Broadcast::new().produce();
+	let mut bcast2 = moq_net::BroadcastInfo::new().produce();
 	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
 	let mut imp2 = crate::container::mkv::Import::new(bcast2, cat2.clone());
 	let mut rt = bytes::BytesMut::from(exported.as_slice());
@@ -245,12 +253,17 @@ async fn export_rejects_cmaf_track() {
 	// video track. The exporter should bail.
 	use hang::catalog::{Container, H264, VideoConfig};
 
-	let broadcast = moq_net::Broadcast::new();
+	let broadcast = moq_net::BroadcastInfo::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let track = producer.unique_track(".avc1").unwrap();
+	let track = producer
+		.create_track(
+			producer.unique_name(".avc1"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)
+		.unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x64,
 		constraints: 0,
@@ -265,9 +278,12 @@ async fn export_rejects_cmaf_track() {
 		timescale: None,
 		track_id: None,
 	};
-	catalog.lock().video.renditions.insert(track.name.clone(), config);
+	catalog.lock().video.renditions.insert(track.name().to_string(), config);
 
-	let mut exporter = crate::container::mkv::Export::new(consumer).unwrap();
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.expect("catalog consumer");
+	let mut exporter = crate::container::mkv::Export::new(consumer, catalog_stream);
 	let result = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out");
@@ -282,15 +298,20 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	// Annex-B with inline SPS+PPS before keyframes. The exporter must
 	// (a) defer the header until SPS+PPS arrive, (b) emit avcC in CodecPrivate,
 	// (c) length-prefix the sample bytes in each SimpleBlock.
-	use crate::container::Timestamp;
 	use hang::catalog::{Container, H264, VideoConfig};
+	use moq_net::Timestamp;
 
-	let broadcast = moq_net::Broadcast::new();
+	let broadcast = moq_net::BroadcastInfo::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let track = producer.unique_track(".avc3").unwrap();
+	let track = producer
+		.create_track(
+			producer.unique_name(".avc3"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)
+		.unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x42,
 		constraints: 0xc0,
@@ -300,7 +321,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	config.coded_width = Some(320);
 	config.coded_height = Some(240);
 	config.container = Container::Legacy;
-	catalog.lock().video.renditions.insert(track.name.clone(), config);
+	catalog.lock().video.renditions.insert(track.name().to_string(), config);
 
 	// Annex-B start code.
 	const SC: &[u8] = &[0, 0, 0, 1];
@@ -328,6 +349,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 			timestamp: Timestamp::from_micros(0).unwrap(),
 			payload: keyframe_payload,
 			keyframe: true,
+			duration: None,
 		})
 		.unwrap();
 	track_producer
@@ -335,15 +357,18 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 			timestamp: Timestamp::from_micros(33_000).unwrap(),
 			payload: pslice_payload,
 			keyframe: false,
+			duration: None,
 		})
 		.unwrap();
 	track_producer.finish().unwrap();
 	let mut catalog = catalog;
 	catalog.finish().unwrap();
 
-	let mut exporter = crate::container::mkv::Export::new(consumer)
-		.unwrap()
-		.with_fragment_duration(std::time::Duration::ZERO);
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.expect("catalog consumer");
+	let mut exporter =
+		crate::container::mkv::Export::new(consumer, catalog_stream).with_fragment_duration(std::time::Duration::ZERO);
 	let mut exported: Vec<u8> = Vec::new();
 
 	let mut held_producer = Some(producer);
@@ -442,7 +467,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	// avcC carried through as `description`. This catches subtle structural
 	// mistakes in the avcC layout that the slot-by-slot check above might
 	// pass even when the record as a whole is malformed.
-	let mut bcast2 = moq_net::Broadcast::new().produce();
+	let mut bcast2 = moq_net::BroadcastInfo::new().produce();
 	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
 	let mut imp2 = crate::container::mkv::Import::new(bcast2, cat2.clone());
 	let mut rt = bytes::BytesMut::from(exported.as_slice());
@@ -465,7 +490,7 @@ async fn export_fragment_duration_batches_blocks() {
 	// should land in ONE Cluster (vs 5 separate Clusters in per-frame mode).
 	let import_bytes = synth_webm_with_frames();
 
-	let broadcast = moq_net::Broadcast::new();
+	let broadcast = moq_net::BroadcastInfo::new();
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
@@ -476,8 +501,10 @@ async fn export_fragment_duration_batches_blocks() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let mut exporter = crate::container::mkv::Export::new(consumer)
-		.unwrap()
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.expect("catalog consumer");
+	let mut exporter = crate::container::mkv::Export::new(consumer, catalog_stream)
 		.with_fragment_duration(std::time::Duration::from_secs(2));
 	let mut exported: Vec<u8> = Vec::new();
 

@@ -85,8 +85,8 @@ impl<T> Clone for Producer<T> {
 
 impl<T> Producer<T> {
 	/// Create a subscriber for the underlying track.
-	pub fn consume(&self) -> moq_net::TrackConsumer {
-		self.inner.lock().unwrap().track.consume()
+	pub fn consume(&self) -> moq_net::TrackSubscriber {
+		self.inner.lock().unwrap().track.subscribe(None)
 	}
 }
 
@@ -289,30 +289,16 @@ impl Inner {
 
 /// Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
 pub struct Consumer<T> {
-	track: moq_net::TrackConsumer,
+	track: moq_net::TrackSubscriber,
 	group: Option<moq_net::GroupConsumer>,
 	current: Option<Value>,
 	frames_read: usize,
 	_marker: PhantomData<fn() -> T>,
 }
 
-// Manual impl so cloning doesn't require `T: Clone`; `T` only lives in PhantomData.
-// Cloned readers inherit the current reconstruction state, then advance in parallel.
-impl<T> Clone for Consumer<T> {
-	fn clone(&self) -> Self {
-		Self {
-			track: self.track.clone(),
-			group: self.group.clone(),
-			current: self.current.clone(),
-			frames_read: self.frames_read,
-			_marker: PhantomData,
-		}
-	}
-}
-
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
-	pub fn new(track: moq_net::TrackConsumer) -> Self {
+	pub fn new(track: moq_net::TrackSubscriber) -> Self {
 		Self {
 			track,
 			group: None,
@@ -388,14 +374,14 @@ mod test {
 	use super::*;
 	use serde_json::json;
 
-	fn producer(config: Config) -> (Producer<Value>, moq_net::TrackConsumer) {
-		let track = moq_net::Track::new("test").produce();
-		let consumer = track.consume();
+	fn producer(config: Config) -> (Producer<Value>, moq_net::TrackSubscriber) {
+		let track = moq_net::TrackProducer::new("test", None);
+		let consumer = track.subscribe(None);
 		(Producer::new(track, config), consumer)
 	}
 
 	/// Drain every value currently available from a consumer without blocking.
-	fn drain(track: moq_net::TrackConsumer) -> Vec<Value> {
+	fn drain(track: moq_net::TrackSubscriber) -> Vec<Value> {
 		let mut consumer = Consumer::<Value>::new(track);
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
@@ -532,8 +518,8 @@ mod test {
 			scte35: Option<u32>,
 		}
 
-		let track = moq_net::Track::new("test").produce();
-		let consumer = track.consume();
+		let track = moq_net::TrackProducer::new("test", None);
+		let consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, Config::default());
 
 		// First owner sets its field.
@@ -588,37 +574,5 @@ mod test {
 			last = Some(value);
 		}
 		assert_eq!(last.unwrap(), json!({ "a": 3 }));
-	}
-
-	#[test]
-	fn cloned_consumer_reconstructs_independently() {
-		// Deltas share one group, so a clone taken mid-group carries in-progress reconstruction state.
-		let config = Config {
-			delta_ratio: Some(100.0),
-		};
-		let (mut producer, track) = producer(config);
-		let mut consumer = Consumer::<Value>::new(track);
-		let waiter = kio::Waiter::noop();
-
-		producer.update(&json!({ "a": 1, "b": 1 })).unwrap(); // snapshot, group 0
-		match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(value))) => assert_eq!(value, json!({ "a": 1, "b": 1 })),
-			other => panic!("expected snapshot, got {other:?}"),
-		}
-
-		// Clone after the snapshot: the copy inherits `current`/`frames_read` and an independent cursor.
-		let mut clone = consumer.clone();
-
-		producer.update(&json!({ "a": 1, "b": 2 })).unwrap(); // delta in group 0
-		producer.finish().unwrap();
-
-		// Each consumer applies the delta on top of its own reconstruction state.
-		let expected = json!({ "a": 1, "b": 2 });
-		for consumer in [&mut consumer, &mut clone] {
-			match consumer.poll_next(&waiter) {
-				Poll::Ready(Ok(Some(value))) => assert_eq!(value, expected),
-				other => panic!("expected delta, got {other:?}"),
-			}
-		}
 	}
 }

@@ -1,0 +1,42 @@
+[package]
+name = "moq-wasm"
+description = "Media over QUIC, browser/WASM bindings (wasm-bindgen)"
+authors = ["Luke Curley <kixelated@gmail.com>"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata.cargo-shear]
+# Required indirectly (getrandom: feature enabler; wasm-bindgen-futures: async
+# codegen) with no `use`, so cargo-shear can't see them.
+ignored = ["getrandom", "wasm-bindgen-futures"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# All dependencies are wasm-only: web-transport-wasm, web-sys's unstable
+# WebTransport bindings, and wasm-bindgen don't build for native targets. On
+# non-wasm targets this crate is empty (see the `cfg(target_arch = "wasm32")`
+# gate in lib.rs), so `cargo check --workspace` stays green.
+#
+# moq-mux is intentionally absent: hang + moq-mux enable tokio's `fs` feature
+# (native filesystem), unsupported on wasm32. Gating `fs` behind a native-only
+# cfg in those crates is a prerequisite for browser media muxing.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bytes = "1"
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.4", features = ["wasm_js"] } # wasm_js backend for rand-via-moq-net; cfg flag in .cargo/config.toml
+js-sys = "0.3"
+moq-net = { workspace = true, features = ["serde"] }
+thiserror = "2"
+tracing-wasm = "0.2"
+url = "2"
+# Pinned to the wasm-bindgen-cli version in the Nix dev shell: the bindgen
+# schema must match exactly between crate and CLI. Bump both together.
+wasm-bindgen = "=0.2.121"
+wasm-bindgen-futures = "0.4"
+web-async = { workspace = true }
+web-transport-trait = { workspace = true }
+web-transport-wasm = "0.5"

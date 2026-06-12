@@ -52,9 +52,9 @@ export function qualityTab(parent: Effect, watch: MoqWatch): HTMLElement {
 
 	parent.run((effect) => {
 		const source = watch.backend.video.source;
-		const catalog = effect.get(source.catalog);
-		const target = effect.get(source.target);
-		const active = effect.get(source.track);
+		const catalog = effect.get(source.output.catalog);
+		const target = effect.get(watch.controls.target);
+		const active = effect.get(source.output.track);
 		const renditions = catalog?.renditions ?? {};
 		const entries = Object.entries(renditions);
 
@@ -71,7 +71,7 @@ export function qualityTab(parent: Effect, watch: MoqWatch): HTMLElement {
 		const autoSub = active && !manual ? `auto · currently ${active}` : "adapts to bandwidth";
 		container.appendChild(
 			qualityRow(effect, "Auto", autoSub, !manual, false, () => {
-				source.target.update((prev) => ({ ...prev, name: undefined }));
+				watch.controls.target.update((prev) => ({ ...prev, name: undefined }));
 			}),
 		);
 
@@ -86,7 +86,7 @@ export function qualityTab(parent: Effect, watch: MoqWatch): HTMLElement {
 			const title = resolution(config) ?? name;
 			container.appendChild(
 				qualityRow(effect, title, detail(config), manual === name, active === name, () => {
-					source.target.update((prev) => ({ ...prev, name }));
+					watch.controls.target.update((prev) => ({ ...prev, name }));
 				}),
 			);
 		}

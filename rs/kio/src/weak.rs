@@ -123,6 +123,21 @@ impl<T> Weak<T> {
 		self.state.lock().closed
 	}
 
+	/// Wait until the channel is closed.
+	pub async fn closed(&self) {
+		crate::wait(move |waiter| self.poll_closed(waiter)).await
+	}
+
+	fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
+		let mut state = self.state.lock();
+		if state.closed {
+			return Poll::Ready(());
+		}
+
+		waiter.register(&mut state.waiters);
+		Poll::Pending
+	}
+
 	/// Wait until all consumers have been dropped.
 	///
 	/// Returns `Ok(())` when no consumers remain, or `Err(Ref)` if the channel closes first.

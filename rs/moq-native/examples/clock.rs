@@ -60,22 +60,21 @@ async fn main() -> anyhow::Result<()> {
 
 	tracing::info!(url = ?config.url, "connecting to server");
 
-	let track = Track {
-		name: config.track,
-		priority: 0,
-	};
+	let track = config.track;
 
 	let origin = moq_net::Origin::random().produce();
 
 	match config.role {
 		Command::Publish => {
-			let mut broadcast = moq_net::Broadcast::new().produce();
-			let track = broadcast.create_track(track)?;
+			let mut broadcast = moq_net::BroadcastInfo::new().produce();
+			let track = broadcast.create_track(track, None)?;
 			let clock = Publisher::new(track);
 
-			origin.publish_broadcast(&config.broadcast, broadcast.consume());
+			let _publish = origin
+				.publish_broadcast(&config.broadcast, broadcast.consume())
+				.context("failed to publish broadcast")?;
 
-			let reconnect = client.with_publish(origin.consume()).reconnect(config.url);
+			let reconnect = client.with_publisher(origin.clone()).reconnect(config.url);
 
 			tokio::select! {
 				res = reconnect.closed() => Ok(res?),
@@ -83,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
 			}
 		}
 		Command::Subscribe => {
-			let reconnect = client.with_consume(origin.clone()).reconnect(config.url);
+			let reconnect = client.with_consumer(origin.clone()).reconnect(config.url);
 
 			// IETF MoQ + the current OriginConsumer API don't let us call
 			// `session.consume_broadcast(&path)` directly, so loop on announces
@@ -94,19 +93,22 @@ async fn main() -> anyhow::Result<()> {
 			let mut origin = origin
 				.scope(&[path])
 				.context("not allowed to consume broadcast")?
-				.consume();
+				.consume()
+				.announced();
 
 			let mut clock: Option<Subscriber> = None;
 
 			loop {
 				tokio::select! {
-					Some(announce) = origin.announced() => match announce {
-						(path, Some(broadcast)) => {
+					Some((path, event)) = origin.next() => match event.broadcast() {
+						Some(broadcast) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
-							let track = broadcast.subscribe_track(&track)?;
+							let track = broadcast
+								.track(&track)?.subscribe(None)?
+								.await?;
 							clock = Some(Subscriber::new(track));
 						}
-						(path, None) => {
+						None => {
 							tracing::warn!(broadcast = %path, "broadcast is offline, waiting...");
 						}
 					},
@@ -188,11 +190,11 @@ impl Publisher {
 }
 
 struct Subscriber {
-	track: TrackConsumer,
+	track: TrackSubscriber,
 }
 
 impl Subscriber {
-	fn new(track: TrackConsumer) -> Self {
+	fn new(track: TrackSubscriber) -> Self {
 		Self { track }
 	}
 

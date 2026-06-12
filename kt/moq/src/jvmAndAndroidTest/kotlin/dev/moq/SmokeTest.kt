@@ -1,36 +1,36 @@
 package dev.moq
 
 import kotlinx.coroutines.test.runTest
-import uniffi.moq.MoqClient
 import uniffi.moq.MoqException
-import uniffi.moq.MoqOriginProducer
 import kotlin.test.Test
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class SmokeTest {
     /**
-     * Verifies the native lib loads and the wrapper extension `frames()`
-     * exists on the right type. No network needed: we just instantiate
-     * a few types and exercise the cancel path on a fresh client.
+     * Exercises the [Moq.connect] facade end to end without a network: a bogus
+     * URL fails fast, and the failure surfaces as a [MoqException]. Also proves
+     * the native lib loads through the transitive `moq-ffi` dependency.
      */
     @Test
-    fun `client constructs and cancels`() = runTest {
-        MoqClient().use { client ->
-            client.cancel()
-            val ex = assertFailsWith<MoqException> {
-                client.connect("https://localhost:0/test")
-            }
-            assertTrue(
-                ex.isShutdown || ex is MoqException.Connect || ex is MoqException.Url,
-                "expected shutdown/connect/url error, got: $ex"
-            )
+    fun `connect fails fast and surfaces a MoqException`() = runTest {
+        val ex = assertFailsWith<MoqException> {
+            Moq.connect("https://localhost:0/test", tlsVerify = false)
         }
+        assertTrue(
+            ex.isShutdown || ex is MoqException.Connect || ex is MoqException.Url,
+            "expected shutdown/connect/url error, got: $ex",
+        )
     }
 
+    /**
+     * The `dev.moq` typealiases resolve to the FFI objects, and the wrapper
+     * extensions apply to them. Constructing through an alias is enough to
+     * confirm both at compile time + lib load at runtime.
+     */
     @Test
-    fun `origin producer is constructible`() = runTest {
-        MoqOriginProducer().use { origin ->
+    fun `origin alias constructs and consumes`() = runTest {
+        OriginProducer().use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
         }
     }

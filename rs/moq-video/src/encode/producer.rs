@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Condvar, Mutex};
 
-use moq_mux::container::Timestamp;
+use moq_net::Timestamp;
 
 use crate::Error;
 use crate::capture::{self, FrameSource};

@@ -61,17 +61,17 @@ pub enum Command {
 
 /// Handles discovered viewers: subscribes to their command tracks.
 pub async fn handle_viewers(
-	viewer_origin: &mut moq_net::OriginConsumer,
+	viewer_origin: &mut moq_net::AnnounceConsumer,
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
 	loop {
-		let Some((path, broadcast)) = viewer_origin.announced().await else {
+		let Some((path, broadcast)) = viewer_origin.next().await else {
 			break;
 		};
 
 		let viewer_id = path.to_string();
 
-		if let Some(broadcast) = broadcast {
+		if let Some(broadcast) = broadcast.broadcast() {
 			tracing::info!(%viewer_id, "viewer connected");
 			let cmd_tx = cmd_tx.clone();
 			let vid = viewer_id.clone();
@@ -99,12 +99,7 @@ async fn handle_viewer_commands(
 	broadcast: moq_net::BroadcastConsumer,
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
-	let command_track = moq_net::Track {
-		name: "command".to_string(),
-		priority: 0,
-	};
-
-	let mut track = broadcast.subscribe_track(&command_track)?;
+	let mut track = broadcast.track("command")?.subscribe(None)?.await?;
 
 	while let Some(mut group) = track.recv_group().await? {
 		while let Some(frame) = group.read_frame().await? {

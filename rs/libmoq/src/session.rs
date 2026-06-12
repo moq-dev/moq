@@ -26,7 +26,7 @@ impl Session {
 	pub fn connect(
 		&mut self,
 		url: Url,
-		publish: Option<moq_net::OriginConsumer>,
+		publish: Option<moq_net::OriginProducer>,
 		consume: Option<moq_net::OriginProducer>,
 		callback: ffi::OnStatus,
 	) -> Result<Id, Error> {
@@ -65,33 +65,39 @@ impl Session {
 	async fn connect_run(
 		callback: ffi::OnStatus,
 		url: Url,
-		publish: Option<moq_net::OriginConsumer>,
+		publish: Option<moq_net::OriginProducer>,
 		consume: Option<moq_net::OriginProducer>,
 	) -> Result<(), Error> {
-		let reconnect = moq_native::ClientConfig::default()
-			.init()?
-			.with_publish(publish)
-			.with_consume(consume)
-			.reconnect(url);
+		let mut client = moq_native::ClientConfig::default().init()?;
 
-		Self::report(callback, reconnect).await
+		if let Some(publish) = publish {
+			client = client.with_publisher(publish);
+		}
+		if let Some(consume) = consume {
+			client = client.with_consumer(consume);
+		}
+
+		let reconnect = client.reconnect(url);
+
+		// report() runs until the reconnect loop gives up; map its terminal error to Connect.
+		Self::report(callback, reconnect)
+			.await
+			.map_err(|err| Error::Connect(Arc::new(err)))
 	}
 
 	/// Forward connection epochs to the status callback until the reconnect loop stops.
 	///
 	/// Returns the terminal error via `?`. Disconnects aren't reported: status 0 is reserved for a
 	/// clean close (delivered as the terminal callback once the task ends).
-	async fn report(callback: ffi::OnStatus, mut reconnect: moq_native::Reconnect) -> Result<(), Error> {
+	async fn report(callback: ffi::OnStatus, mut reconnect: moq_native::Reconnect) -> anyhow::Result<()> {
 		let mut connects: u64 = 0;
 		loop {
-			if let moq_native::Status::Connected = reconnect.status().await.map_err(map_connect_error)? {
+			if let moq_native::Status::Connected = reconnect.status().await? {
 				connects += 1;
 				// Positive status carries the connection epoch, so callers can tell a
 				// reconnect (>1) from the first connect (1). No lock is held, so the C
 				// callback is free to re-enter libmoq.
-				let code = i32::try_from(connects)
-					.context("connection epoch exceeded i32::MAX")
-					.map_err(|err| Error::Connect(Arc::new(err)))?;
+				let code = i32::try_from(connects).context("connection epoch exceeded i32::MAX")?;
 				callback.call(code);
 			}
 		}
@@ -107,42 +113,5 @@ impl Session {
 			.take()
 			.ok_or(Error::SessionNotFound)?;
 		Ok(())
-	}
-}
-
-fn map_connect_error(err: moq_native::Error) -> Error {
-	match err.connect_error() {
-		Some(moq_native::ConnectError::Unauthorized) => Error::Unauthorized,
-		Some(moq_native::ConnectError::Forbidden) => Error::Forbidden,
-		_ => Error::Connect(Arc::new(err.into())),
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use crate::ffi::ReturnCode;
-
-	#[test]
-	fn maps_native_auth_connect_errors() {
-		assert!(matches!(
-			map_connect_error(moq_native::ConnectError::Unauthorized.into()),
-			Error::Unauthorized
-		));
-		assert!(matches!(
-			map_connect_error(moq_native::ConnectError::Forbidden.into()),
-			Error::Forbidden
-		));
-		assert!(matches!(
-			map_connect_error(moq_net::Error::Unauthorized.into()),
-			Error::Unauthorized
-		));
-		assert!(matches!(
-			map_connect_error(moq_native::Error::ConnectFailed),
-			Error::Connect(_)
-		));
-		assert_eq!(Error::Unauthorized.code(), -33);
-		assert_eq!(Error::Forbidden.code(), -34);
-		assert_eq!(map_connect_error(moq_native::Error::ConnectFailed).code(), -5);
 	}
 }

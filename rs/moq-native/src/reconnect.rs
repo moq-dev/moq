@@ -131,14 +131,14 @@ impl Reconnect {
 			tracing::info!(%url, "connecting");
 
 			match client.connect(url.clone()).await {
-				Ok(session) => {
+				Ok(cs) => {
 					tracing::info!(%url, "connected");
 					delay = backoff.initial;
 					last_error = None;
 					if let Ok(mut state) = state.write() {
 						state.status = Some(Status::Connected);
 					}
-					let _ = session.closed().await;
+					let _ = cs.closed().await;
 					tracing::warn!(%url, "session closed, reconnecting");
 					if let Ok(mut state) = state.write() {
 						state.status = Some(Status::Disconnected);
@@ -146,9 +146,6 @@ impl Reconnect {
 					retry_start = tokio::time::Instant::now();
 				}
 				Err(err) => {
-					if err.is_auth() {
-						return Err(err);
-					}
 					tracing::warn!(%url, %err, ?delay, "connection failed, retrying");
 					last_error = Some(err);
 					tokio::time::sleep(delay).await;

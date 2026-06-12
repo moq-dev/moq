@@ -390,18 +390,17 @@ async fn run_session(
 	let client = client_config.init()?;
 
 	let origin = moq_net::Origin::random().produce();
-	let mut broadcast = moq_net::Broadcast::new().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let broadcast_consumer = broadcast.consume();
 
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
-	anyhow::ensure!(
-		origin.publish_broadcast(&settings.broadcast, broadcast_consumer),
-		"failed to publish broadcast {}",
-		settings.broadcast
-	);
+	// Held for the lifetime of this task; dropping it (on return) unannounces the broadcast.
+	let _publish = origin
+		.publish_broadcast(&settings.broadcast, broadcast_consumer)
+		.context("failed to publish broadcast")?;
 
-	let client = client.with_publish(origin.consume());
+	let client = client.with_publisher(origin.clone());
 	let session = client.connect(settings.url.clone()).await?;
 
 	let mut runtime = RuntimeState {

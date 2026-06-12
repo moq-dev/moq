@@ -1,26 +1,22 @@
-import type { Getter, Signal } from "@moq/signals";
+import type { Getter } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
 import type { Source } from "./source";
 
-// Audio specific signals that work regardless of the backend source (mse vs webcodecs).
+// Audio specific outputs that work regardless of the backend source (mse vs webcodecs).
 export interface Backend {
 	// The source of the audio.
 	source: Source;
 
-	// The volume of the audio, between 0 and 1.
-	volume: Signal<number>;
+	readonly output: {
+		// The stats of the audio.
+		readonly stats: Getter<Stats | undefined>;
 
-	// Whether the audio is muted.
-	muted: Signal<boolean>;
+		// Buffered time ranges (for MSE backend).
+		readonly buffered: Getter<BufferedRanges>;
 
-	// The stats of the audio.
-	stats: Getter<Stats | undefined>;
-
-	// Buffered time ranges (for MSE backend).
-	buffered: Getter<BufferedRanges>;
-
-	// The AudioContext used for playback (WebCodecs backend only).
-	context: Getter<AudioContext | undefined>;
+		// The AudioContext used for playback (WebCodecs backend only).
+		readonly context: Getter<AudioContext | undefined>;
+	};
 }
 
 export interface Stats {

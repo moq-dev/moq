@@ -6,16 +6,18 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onCompletion
-import uniffi.moq.MoqAnnounced
 import uniffi.moq.MoqAnnouncement
 import uniffi.moq.MoqAudioConsumer
 import uniffi.moq.MoqAudioFrame
+import uniffi.moq.MoqBroadcastConsumer
 import uniffi.moq.MoqBroadcastDynamic
 import uniffi.moq.MoqCatalog
 import uniffi.moq.MoqCatalogConsumer
+import uniffi.moq.MoqException
 import uniffi.moq.MoqFrame
 import uniffi.moq.MoqGroupConsumer
 import uniffi.moq.MoqMediaConsumer
+import uniffi.moq.MoqOriginConsumer
 import uniffi.moq.MoqTrackConsumer
 import uniffi.moq.MoqTrackProducer
 
@@ -33,6 +35,20 @@ fun MoqCatalogConsumer.updates(): Flow<MoqCatalog> = flow {
     }
 }.onCompletion { cause ->
     if (cause is CancellationException) cancel()
+}
+
+/**
+ * Subscribe to the catalog track and return the first catalog, cancelling the
+ * subscription before returning. Convenience for callers that only need the
+ * current catalog rather than a stream of updates (use [updates] for that).
+ */
+suspend fun MoqBroadcastConsumer.catalog(): MoqCatalog {
+    val consumer = subscribeCatalog()
+    try {
+        return consumer.next() ?: throw MoqException.Closed("broadcast closed before a catalog was published")
+    } finally {
+        consumer.cancel()
+    }
 }
 
 /** Stream of decoded media frames in decode order. */
@@ -98,12 +114,24 @@ fun MoqGroupConsumer.frames(): Flow<ByteArray> = flow {
     if (cause is CancellationException) cancel()
 }
 
-/** Stream of broadcast announcements from an origin. */
-fun MoqAnnounced.announcements(): Flow<MoqAnnouncement> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
+/**
+ * Stream of broadcast announcements under a prefix.
+ *
+ * Acquires the subscription on first collection and cancels it when collection
+ * ends, so callers never touch the underlying handle. Use the raw
+ * `announced(prefix)` if you need to hold and cancel the handle yourself.
+ */
+fun MoqOriginConsumer.announcements(prefix: String): Flow<MoqAnnouncement> {
+    val consumer = this
+    return flow {
+        val announced = consumer.announced(prefix)
+        try {
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                emit(announced.next() ?: break)
+            }
+        } finally {
+            announced.cancel()
+        }
     }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
 }

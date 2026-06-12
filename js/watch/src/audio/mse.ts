@@ -1,65 +1,74 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
 import { base64ToBytes } from "../base64";
 import type { Muxer } from "../mse";
+import type { Sync } from "../sync";
 import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
 
-export type MseProps = {
-	volume?: number | Signal<number>;
-	muted?: boolean | Signal<boolean>;
+type MseInput = {
+	volume: Getter<number>;
+	muted: Getter<boolean>;
+};
+
+type MseOutput = {
+	stats: Signal<Stats | undefined>;
+	buffered: Signal<BufferedRanges>;
+
+	// MSE plays through the <video> element, not WebAudio.
+	context: Signal<AudioContext | undefined>;
 };
 
 export class Mse implements Backend {
 	muxer: Muxer;
+	sync: Sync;
 	source: Source;
 
-	volume: Signal<number>;
-	muted: Signal<boolean>;
+	readonly input: Readonlys<MseInput>;
 
-	#stats = new Signal<Stats | undefined>(undefined);
-	readonly stats: Getter<Stats | undefined> = this.#stats;
-
-	#buffered = new Signal<BufferedRanges>([]);
-	readonly buffered: Getter<BufferedRanges> = this.#buffered;
-
-	// MSE plays through the <video> element, not WebAudio.
-	readonly context: Getter<AudioContext | undefined> = new Signal<AudioContext | undefined>(undefined);
+	readonly #output: MseOutput = {
+		stats: new Signal<Stats | undefined>(undefined),
+		buffered: new Signal<BufferedRanges>([]),
+		context: new Signal<AudioContext | undefined>(undefined),
+	};
+	readonly output = readonlys(this.#output);
 
 	#signals = new Effect();
 
-	constructor(muxer: Muxer, source: Source, props?: MseProps) {
+	constructor(muxer: Muxer, sync: Sync, source: Source, props?: Inputs<MseInput>) {
 		this.muxer = muxer;
+		this.sync = sync;
 		this.source = source;
-		this.source.supported.set(supported); // super hacky
 
-		this.volume = Signal.from(props?.volume ?? 0.5);
-		this.muted = Signal.from(props?.muted ?? false);
+		this.input = {
+			volume: getter(props?.volume ?? 0.5),
+			muted: getter(props?.muted ?? false),
+		};
 
 		this.#signals.run(this.#runMedia.bind(this));
 		this.#signals.run(this.#runVolume.bind(this));
 	}
 
 	#runMedia(effect: Effect): void {
-		const element = effect.get(this.muxer.element);
+		const element = effect.get(this.muxer.input.element);
 		if (!element) return;
 
-		const mediaSource = effect.get(this.muxer.mediaSource);
+		const mediaSource = effect.get(this.muxer.output.mediaSource);
 		if (!mediaSource) return;
 
-		const broadcast = effect.get(this.source.broadcast);
+		const broadcast = effect.get(this.source.input.broadcast);
 		if (!broadcast) return;
 
-		const active = effect.get(broadcast.active);
+		const active = effect.get(broadcast.output.active);
 		if (!active) return;
 
-		const track = effect.get(this.source.track);
+		const track = effect.get(this.source.output.track);
 		if (!track) return;
 
-		const config = effect.get(this.source.config);
+		const config = effect.get(this.source.output.config);
 		if (!config) return;
 
 		const mime = `audio/mp4; codecs="${config.codec}"`;
@@ -75,10 +84,10 @@ export class Mse implements Backend {
 		});
 
 		effect.event(sourceBuffer, "updateend", () => {
-			this.#buffered.set(timeRangesToArray(sourceBuffer.buffered));
+			this.#output.buffered.set(timeRangesToArray(sourceBuffer.buffered));
 		});
 
-		const sub = active.subscribe(track, Catalog.PRIORITY.audio);
+		const sub = active.track(track).subscribe({ priority: Catalog.PRIORITY.audio });
 		effect.cleanup(() => sub.close());
 
 		if (config.container.kind === "cmaf") {
@@ -100,7 +109,7 @@ export class Mse implements Backend {
 
 	#runCmafMedia(
 		effect: Effect,
-		sub: Moq.Track,
+		sub: Moq.TrackSubscriber,
 		config: Catalog.AudioConfig,
 		sourceBuffer: SourceBuffer,
 		element: HTMLMediaElement,
@@ -121,7 +130,7 @@ export class Mse implements Backend {
 
 				// Extract the timestamp from the CMAF segment and mark when we received it.
 				const timestamp = Container.Cmaf.decodeTimestamp(frame, init);
-				this.source.sync.received(Moq.Time.Milli.fromMicro(timestamp), "audio");
+				this.sync.received(Moq.Time.Milli.fromMicro(timestamp), "audio");
 
 				await this.#appendBuffer(sourceBuffer, frame);
 
@@ -135,7 +144,7 @@ export class Mse implements Backend {
 
 	#runLegacyMedia(
 		effect: Effect,
-		sub: Moq.Track,
+		sub: Moq.TrackSubscriber,
 		config: Catalog.AudioConfig,
 		sourceBuffer: SourceBuffer,
 		element: HTMLMediaElement,
@@ -144,7 +153,7 @@ export class Mse implements Backend {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Container.Consumer(sub, {
 			format,
-			latency: this.source.sync.buffer,
+			latency: this.sync.output.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -167,7 +176,7 @@ export class Mse implements Backend {
 
 				// Mark that we received this frame for latency calculation.
 				const timestamp = Moq.Time.Milli.fromMicro(pending.timestamp as Moq.Time.Micro);
-				this.source.sync.received(timestamp, "audio");
+				this.sync.received(timestamp, "audio");
 
 				break;
 			}
@@ -184,7 +193,7 @@ export class Mse implements Backend {
 
 					// Mark that we received this frame for latency calculation.
 					const timestamp = Moq.Time.Milli.fromMicro(frame.timestamp as Moq.Time.Micro);
-					this.source.sync.received(timestamp, "audio");
+					this.sync.received(timestamp, "audio");
 				}
 
 				// Wrap raw frame in moof+mdat
@@ -210,11 +219,11 @@ export class Mse implements Backend {
 	}
 
 	#runVolume(effect: Effect): void {
-		const element = effect.get(this.muxer.element);
+		const element = effect.get(this.muxer.input.element);
 		if (!element) return;
 
-		const volume = effect.get(this.volume);
-		const muted = effect.get(this.muted);
+		const volume = effect.get(this.input.volume);
+		const muted = effect.get(this.input.muted);
 
 		if (muted && !element.muted) {
 			element.muted = true;
@@ -225,15 +234,14 @@ export class Mse implements Backend {
 		if (volume !== element.volume) {
 			element.volume = volume;
 		}
-
-		effect.event(element, "volumechange", () => {
-			this.volume.set(element.volume);
-		});
 	}
 
 	close(): void {
 		this.#signals.close();
 	}
+
+	// Whether MSE can play this config.
+	static supported = supported;
 }
 
 async function supported(config: Catalog.AudioConfig): Promise<boolean> {

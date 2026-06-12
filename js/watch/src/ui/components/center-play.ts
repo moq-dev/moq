@@ -12,7 +12,7 @@ export function centerPlay(parent: Effect, watch: MoqWatch): HTMLElement {
 	button.replaceChildren(icon(play));
 
 	parent.run((effect) => {
-		const paused = effect.get(watch.backend.paused);
+		const paused = effect.get(watch.controls.paused);
 		button.style.display = paused ? "" : "none";
 	});
 

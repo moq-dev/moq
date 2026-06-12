@@ -6,10 +6,11 @@ import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Literal
 
-from moq_ffi import MoqRequest, MoqServer, MoqSession
+from moq_ffi import MoqRequest, MoqServer
 
 from .origin import OriginProducer
 from .publish import BroadcastProducer
+from .session import Session
 
 Transport = Literal["quic", "iroh", "websocket"]
 
@@ -45,19 +46,19 @@ class Request:
         server's configured consume origin if unset."""
         self._inner.set_consume(origin._inner if origin is not None else None)
 
-    async def ok(self) -> MoqSession:
+    async def ok(self) -> Session:
         """Complete the MoQ handshake and return the established session.
 
         The caller must hold the returned session to keep the connection
-        alive; dropping it closes the session. Raises `MoqError.AlreadyResponded`
+        alive; dropping it closes the session. Raises `Error.AlreadyResponded`
         if `ok()` or `close()` has already been called.
         """
-        return await self._inner.ok()
+        return Session(await self._inner.ok())
 
     async def close(self, code: int = 404) -> None:
         """Reject the session with the given HTTP status code.
 
-        Raises `MoqError.AlreadyResponded` if `ok()` or `close()` has already
+        Raises `Error.AlreadyResponded` if `ok()` or `close()` has already
         been called.
         """
         await self._inner.close(code)

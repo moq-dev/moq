@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::str::FromStr;
 
 use bytes::Buf;
 use moq_mux::import;
@@ -22,7 +22,7 @@ pub struct Publish {
 
 impl Publish {
 	pub fn create(&mut self) -> Result<Id, Error> {
-		let mut broadcast = moq_net::Broadcast::new().produce();
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let id = self.broadcasts.insert((broadcast, catalog))?;
@@ -56,8 +56,7 @@ impl Publish {
 		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 
 		let format = import::FramedFormat::from_str(format).map_err(|_| Error::UnknownFormat(format.to_string()))?;
-		let decoder = import::Framed::new(broadcast.clone(), catalog.clone(), format, &mut init)
-			.map_err(|err| Error::InitFailed(Arc::new(err)))?;
+		let decoder = import::Framed::new(broadcast.clone(), catalog.clone(), format, &mut init)?;
 
 		let id = self.media.insert(decoder)?;
 		Ok(id)
@@ -71,14 +70,10 @@ impl Publish {
 	) -> Result<(), Error> {
 		let media = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
 
-		media
-			.decode_frame(&mut data, Some(timestamp))
-			.map_err(|err| Error::DecodeFailed(Arc::new(err)))?;
+		media.decode_frame(&mut data, Some(timestamp))?;
 
 		if data.has_remaining() {
-			return Err(Error::DecodeFailed(Arc::new(anyhow::anyhow!(
-				"buffer was not fully consumed"
-			))));
+			return Err(Error::BufferNotConsumed);
 		}
 
 		Ok(())
@@ -86,7 +81,7 @@ impl Publish {
 
 	pub fn media_close(&mut self, media: Id) -> Result<(), Error> {
 		let mut decoder = self.media.remove(media).ok_or(Error::MediaNotFound)?;
-		decoder.finish().map_err(|err| Error::DecodeFailed(Arc::new(err)))?;
+		decoder.finish()?;
 		Ok(())
 	}
 
@@ -133,10 +128,7 @@ impl Publish {
 	/// if you want to describe the track in the catalog as well.
 	pub fn track(&mut self, broadcast: Id, name: &str) -> Result<Id, Error> {
 		let (broadcast, _) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		let track = broadcast.create_track(moq_net::Track {
-			name: name.to_string(),
-			priority: 0,
-		})?;
+		let track = broadcast.create_track(name, None)?;
 		self.tracks.insert(track)
 	}
 

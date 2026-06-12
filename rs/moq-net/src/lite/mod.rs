@@ -5,6 +5,7 @@
 //! Specification: [<https://github.com/moq-dev/drafts>]
 
 mod announce;
+mod connecting;
 mod fetch;
 mod goaway;
 mod group;
@@ -18,9 +19,11 @@ mod session;
 mod stream;
 mod subscribe;
 mod subscriber;
+mod track;
 mod version;
 
 pub use announce::*;
+pub(crate) use connecting::*;
 #[allow(unused_imports)]
 pub use fetch::*;
 #[allow(unused_imports)]
@@ -35,4 +38,6 @@ pub(super) use session::*;
 pub use stream::*;
 pub use subscribe::*;
 use subscriber::*;
+#[allow(unused_imports)]
+pub use track::*;
 pub use version::Version;

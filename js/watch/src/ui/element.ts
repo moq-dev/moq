@@ -96,13 +96,13 @@ export default class MoqWatchUi extends HTMLElement {
 		effect.event(this, "pointerdown", bump);
 		effect.event(this, "focusin", bump);
 
-		const pinned = () => watch.backend.paused.peek() || state.panel.peek();
+		const pinned = () => watch.controls.paused.peek() || state.panel.peek();
 
 		// Reveal on activity and reschedule the hide timer. Reruns when pinned
 		// state changes too, so leaving pinned (e.g. closing settings while
 		// playing) re-arms the auto-hide. effect.timer auto-clears on rerun.
 		effect.run((e) => {
-			const isPinned = e.get(watch.backend.paused) || e.get(state.panel);
+			const isPinned = e.get(watch.controls.paused) || e.get(state.panel);
 			e.get(activity);
 			state.chrome.set(true);
 			if (isPinned) return;

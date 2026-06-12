@@ -138,6 +138,7 @@ export default defineConfig({
 						{ text: "CLI", link: "/bin/cli" },
 						{ text: "OBS", link: "/bin/obs" },
 						{ text: "GStreamer", link: "/bin/gstreamer" },
+						{ text: "HLS", link: "/bin/hls" },
 						{ text: "Web", link: "/bin/web" },
 					],
 				},
@@ -223,7 +224,10 @@ export default defineConfig({
 						{
 							text: "Go",
 							link: "/lib/go/",
-							items: [{ text: "moq", link: "/lib/go/moq" }],
+							items: [
+								{ text: "moq", link: "/lib/go/moq" },
+								{ text: "moq-ffi", link: "/lib/go/moq-ffi" },
+							],
 						},
 					],
 				},

@@ -127,7 +127,7 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Mil
 	let hasInteracted = false;
 
 	parent.run((effect) => {
-		const jitter = effect.get(watch.backend.jitter);
+		const jitter = effect.get(watch.backend.output.jitter);
 		const pct = (jitter / max) * 100;
 		targetLine.style.left = `${pct}%`;
 		targetLabel.textContent = `${Math.round(jitter)}ms`;
@@ -141,7 +141,7 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Mil
 		const ms = (x / trackWidth) * max;
 		const snapped = (Math.round(ms / RANGE_STEP) * RANGE_STEP) as Moq.Time.Milli;
 		const clamped = Math.max(MIN_RANGE, Math.min(max, snapped)) as Moq.Time.Milli;
-		watch.backend.latency.set(clamped);
+		watch.controls.latency.set(clamped);
 	};
 
 	const interact = () => {
@@ -179,16 +179,16 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Mil
 		}
 		e.preventDefault();
 		interact();
-		const current = watch.backend.jitter.peek();
+		const current = watch.backend.output.jitter.peek();
 		const value = Math.max(MIN_RANGE, Math.min(max, current + delta)) as Moq.Time.Milli;
-		watch.backend.latency.set(value);
+		watch.controls.latency.set(value);
 	});
 
 	const draw = () => {
 		const timestamp = watch.backend.sync.now();
-		const isBuffering = watch.backend.video.stalled.peek();
-		drawRanges(videoCanvas, watch.backend.video.buffered.peek(), timestamp, max, isBuffering);
-		drawRanges(audioCanvas, watch.backend.audio.buffered.peek(), timestamp, max, isBuffering);
+		const isBuffering = watch.backend.video.output.stalled.peek();
+		drawRanges(videoCanvas, watch.backend.video.output.buffered.peek(), timestamp, max, isBuffering);
+		drawRanges(audioCanvas, watch.backend.audio.output.buffered.peek(), timestamp, max, isBuffering);
 		parent.animate(draw);
 	};
 	parent.animate(draw);

@@ -1,0 +1,154 @@
+name: Release Kotlin lib
+
+# Publishes the ergonomic `dev.moq:moq` wrapper. Unlike release-kt-ffi.yml (which
+# tracks the crate via `moq-ffi-v*` tags), the wrapper is versioned by hand:
+# `moq.version` in kt/gradle.properties is the source of truth. This workflow
+# checks whether that version is already on Maven Central and publishes only
+# when it isn't, so merging a `moq.version` bump ships a new release while any
+# other push is a no-op.
+#
+# The wrapper is pure Kotlin layered on `dev.moq:moq-ffi`; its POM depends on
+# moq-ffi via a floating range so consumers float to the newest bindings patch
+# without the wrapper being re-cut. We still generate the UniFFI bindings here
+# so the sibling `:moq-ffi` project compiles (the wrapper resolves it via the
+# project substitution in kt/moq/build.gradle.kts); native libs aren't needed
+# because JNA is compileOnly.
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - "kt/moq/**"
+      - "kt/gradle.properties"
+      - "kt/build.gradle.kts"
+      - "kt/settings.gradle.kts"
+      - ".github/workflows/release-kt-lib.yml"
+  pull_request:
+    paths:
+      - "kt/moq/**"
+      - "kt/gradle.properties"
+      - "kt/build.gradle.kts"
+      - "kt/settings.gradle.kts"
+      - ".github/workflows/release-kt-lib.yml"
+      - "rs/moq-ffi/build.sh"
+  # Manual trigger so a wrapper bump can be published once the bindings it
+  # depends on land on Maven Central (the guard below skips otherwise).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-kt-lib
+  cancel-in-progress: false
+
+jobs:
+  check-version:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.probe.outputs.version }}
+      should_publish: ${{ steps.probe.outputs.should_publish }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Read moq.version and probe Maven Central
+        id: probe
+        run: |
+          VERSION=$(sed -n 's/^moq\.version=//p' kt/gradle.properties | head -1)
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::moq.version not found in kt/gradle.properties"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Already published? HEAD the POM; 200 means this version exists.
+          POM_URL="https://repo1.maven.org/maven2/dev/moq/moq/${VERSION}/moq-${VERSION}.pom"
+          if curl -sfI "$POM_URL" >/dev/null 2>&1; then
+            echo "dev.moq:moq:${VERSION} already on Maven Central; nothing to publish."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Bindings guard: the wrapper POM declares dev.moq:moq-ffi:[0.2,0.3),
+          # so don't publish a wrapper that consumers can't resolve. Require a
+          # 0.2.x bindings release to exist first (it's published separately by
+          # release-kt-ffi.yml on a moq-ffi-v* tag). Re-run via workflow_dispatch
+          # once it lands.
+          FFI_META="https://repo1.maven.org/maven2/dev/moq/moq-ffi/maven-metadata.xml"
+          if curl -sf "$FFI_META" 2>/dev/null | grep -q "<version>0\.2\."; then
+            echo "dev.moq:moq:${VERSION} not published yet; bindings available; will publish."
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::dev.moq:moq-ffi has no 0.2.x release on Maven Central yet; skipping wrapper publish until the bindings land (then re-run this workflow)."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    name: Publish wrapper
+    needs: [check-version]
+    # PRs always run (dry-run). Pushes publish only when the version is new.
+    if: github.event_name == 'pull_request' || needs.check-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # Picked up by com.vanniktech.maven.publish via Gradle project properties.
+      ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+      ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+      ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+      ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # Generate the UniFFI Kotlin so the sibling :moq-ffi project compiles.
+      - name: Generate bindings
+        env:
+          BUILD_VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          ./rs/moq-ffi/build.sh --bindings-only --version "$BUILD_VERSION" --output dist
+          mkdir -p kt/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq
+          cp dist/bindings/kotlin/uniffi/moq/moq.kt \
+            kt/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt
+
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+
+      - uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
+
+      - name: Publish to Maven Central
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        env:
+          MOQ_VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          gradle -p kt \
+            -Pmoq.version="$MOQ_VERSION" \
+            -Pandroid.enabled=true \
+            :moq:publishAndReleaseToMavenCentral --no-configuration-cache
+
+      - name: Publish to Maven Local (PR dry-run)
+        if: github.event_name == 'pull_request'
+        env:
+          MOQ_VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          gradle -p kt \
+            -Pmoq.version="$MOQ_VERSION" \
+            -Pandroid.enabled=true \
+            :moq:publishToMavenLocal --no-configuration-cache

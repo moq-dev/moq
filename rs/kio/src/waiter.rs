@@ -42,6 +42,12 @@ impl Waiter {
 	pub fn register(&self, list: &mut WaiterList) {
 		list.register(self);
 	}
+
+	/// The underlying [`Waker`]. Useful for bridging into other async machinery
+	/// (e.g. `futures::task::AtomicWaker`) that needs a `Waker` directly.
+	pub fn waker(&self) -> &Waker {
+		&self.waker
+	}
 }
 
 /// A list of weak wakers waiting for notification.
