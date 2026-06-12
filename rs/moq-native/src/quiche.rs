@@ -58,7 +58,10 @@ pub enum Error {
 	Establish(#[source] web_transport_quiche::ez::ConnectionError),
 
 	#[error("failed to connect to quiche server")]
-	ClientConnect(#[source] web_transport_quiche::ClientError),
+	ClientConnect(#[from] web_transport_quiche::ClientError),
+
+	#[error(transparent)]
+	ConnectRejected(#[from] crate::ConnectError),
 
 	#[error("failed to create quiche server")]
 	ServerBuild(#[source] std::io::Error),
@@ -150,7 +153,7 @@ impl QuicheClient {
 					.map_err(Error::Establish)?;
 				let session = web_transport_quiche::Connection::connect(conn, request)
 					.await
-					.map_err(Error::ClientConnect)?;
+					.map_err(map_client_error)?;
 				Ok(session)
 			}
 			"moqt" | "moql" => {
@@ -171,6 +174,49 @@ impl QuicheClient {
 			}
 			_ => unreachable!("unsupported URL scheme: {}", url.scheme()),
 		}
+	}
+}
+
+impl Error {
+	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
+		match self {
+			Self::ConnectRejected(err) => Some(*err),
+			Self::ClientConnect(err) => classify_client_error(err),
+			_ => None,
+		}
+	}
+}
+
+fn map_client_error(err: web_transport_quiche::ClientError) -> Error {
+	if let Some(err) = classify_client_error(&err) {
+		return err.into();
+	}
+
+	err.into()
+}
+
+fn classify_client_error(err: &web_transport_quiche::ClientError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_quiche::ClientError::Connect(err) => classify_connect_error(err),
+		_ => None,
+	}
+}
+
+fn classify_connect_error(err: &web_transport_quiche::h3::ConnectError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_quiche::h3::ConnectError::Status(status) => crate::ConnectError::from_status_u16(status.as_u16()),
+		web_transport_quiche::h3::ConnectError::Proto(err) => classify_proto_error(err),
+		_ => None,
+	}
+}
+
+fn classify_proto_error(err: &web_transport_quiche::proto::ConnectError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_quiche::proto::ConnectError::ErrorStatus(status)
+		| web_transport_quiche::proto::ConnectError::WrongStatus(Some(status)) => {
+			crate::ConnectError::from_status_u16(status.as_u16())
+		}
+		_ => None,
 	}
 }
 

@@ -21,22 +21,24 @@ use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
 
 use crate::catalog::CatalogFormat;
 use crate::catalog::hang::Container as HangContainer;
+use crate::catalog::hang::{Catalog, CatalogExt};
 use crate::codec::h264::Avc1;
 use crate::codec::h265::Hvc1;
+use crate::container::ts::scte35;
 use crate::container::{Consumer, Frame};
 
 /// Source for the catalog stream backing an exporter.
 ///
-/// Both variants expose the same [`hang::Catalog`] shape; the MSF variant
-/// converts on the fly so the rest of the pipeline only deals with hang types.
-pub(crate) enum CatalogSource {
+/// Both variants yield [`Catalog<E>`]; MSF is media-only, so its extension is
+/// always the empty default.
+pub(crate) enum CatalogSource<E: CatalogExt = ()> {
 	/// The hang catalog track (track name `catalog.json`, JSON payload).
-	Hang(crate::catalog::hang::Consumer),
+	Hang(crate::catalog::hang::Consumer<E>),
 	/// The MSF catalog track (track name `catalog`, MSF JSON payload converted to hang).
 	Msf(crate::catalog::msf::Consumer),
 }
 
-impl CatalogSource {
+impl<E: CatalogExt> CatalogSource<E> {
 	pub(crate) fn new(broadcast: &moq_net::BroadcastConsumer, format: CatalogFormat) -> Result<Self, crate::Error> {
 		Ok(match format {
 			CatalogFormat::Hang => {
@@ -50,15 +52,20 @@ impl CatalogSource {
 		})
 	}
 
-	pub(crate) fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<hang::Catalog>>> {
+	pub(crate) fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Catalog<E>>>> {
 		match self {
-			// The hang consumer yields a `Catalog<()>`; the import path only needs the base media
-			// sections, so reduce it to a plain `hang::Catalog`.
 			Self::Hang(c) => {
 				let catalog = ready!(c.poll_next(waiter))?;
-				Poll::Ready(Ok(catalog.map(|catalog| catalog.media())))
+				Poll::Ready(Ok(catalog))
 			}
-			Self::Msf(c) => c.poll_next(waiter),
+			Self::Msf(c) => {
+				let catalog = ready!(c.poll_next(waiter))?;
+				Poll::Ready(Ok(catalog.map(|media| Catalog {
+					video: media.video,
+					audio: media.audio,
+					ext: E::default(),
+				})))
+			}
 		}
 	}
 }
@@ -136,6 +143,26 @@ impl ExportSource {
 			consumer,
 			transform: None,
 			description,
+		})
+	}
+
+	/// Subscribe to a SCTE-35 cue rendition. No codec-shape transform and no
+	/// description: the frames carry the verbatim `splice_info_section` bytes that
+	/// the muxer writes back out as private sections.
+	pub fn for_scte35(
+		broadcast: &moq_net::BroadcastConsumer,
+		name: &str,
+		config: &scte35::Config,
+		latency: Duration,
+	) -> Result<Self, crate::Error> {
+		let media: HangContainer = (&config.container).try_into()?;
+		let track = broadcast.subscribe_track(&moq_net::Track::new(name.to_string()))?;
+		let consumer = Consumer::new(track, media).with_latency(latency);
+
+		Ok(Self {
+			consumer,
+			transform: None,
+			description: None,
 		})
 	}
 

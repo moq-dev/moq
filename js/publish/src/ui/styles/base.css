@@ -1,37 +1,43 @@
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
 :host {
 	--color-white: #ffffff;
 	--color-white-alpha-05: rgba(255, 255, 255, 0.05);
 	--color-white-alpha-10: rgba(255, 255, 255, 0.1);
+	--color-white-alpha-15: rgba(255, 255, 255, 0.15);
 	--color-white-alpha-20: rgba(255, 255, 255, 0.2);
-	--color-white-alpha-50: rgba(255, 255, 255, 0.5);
+	--color-white-alpha-25: rgba(255, 255, 255, 0.25);
+	--color-white-alpha-30: rgba(255, 255, 255, 0.3);
+	--color-white-alpha-40: rgba(255, 255, 255, 0.4);
+	--color-white-alpha-60: rgba(255, 255, 255, 0.6);
 	--color-white-alpha-70: rgba(255, 255, 255, 0.7);
 	--color-white-alpha-90: rgba(255, 255, 255, 0.9);
 	--color-gray-100: #9ca3af;
-	--color-blue-500: #52a1ff;
-	--color-purple-500: #c27bff;
+	--color-gray-400: #6b7280;
+	--color-gray-950: #1a1a1a;
+	--color-blue-400: #00dfff;
+	--color-blue-900: #1b3243;
+	--color-purple-400: #a855f7;
+	--color-purple-900: #31144a;
 	--color-green-400: #65ee2e;
+	--color-green-500: #22c55e;
+	--color-green-900: #3d4928;
 	--color-yellow-400: #facc15;
-	--color-orange-300: rgb(253, 186, 116);
 	--color-orange-400: #ff9900;
 	--color-orange-500: #f97316;
+	--color-orange-900: #4d301b;
+	--color-red-400: #f87171;
 	--color-amber-600: #d97706;
-	--color-amber-600-alpha-20: rgba(217, 119, 6, 0.2);
-	--color-amber-600-alpha-30: rgba(217, 119, 6, 0.3);
-	--color-orange-400-alpha-20: rgba(255, 153, 0, 0.2);
-	--color-orange-500-alpha-30: rgba(249, 115, 22, 0.3);
-	--color-orange-500-alpha-40: rgba(249, 115, 22, 0.4);
-	--color-orange-500-alpha-50: rgba(249, 115, 22, 0.5);
-	--color-red-300: rgb(252, 165, 165);
-	--color-red-400-alpha-25: rgba(248, 113, 113, 0.25);
-	--color-red-500-alpha-25: rgba(239, 68, 68, 0.25);
-	--color-red-500-alpha-45: rgba(239, 68, 68, 0.45);
-	--color-red-500-alpha-60: rgba(239, 68, 68, 0.6);
-	--color-red-600-alpha-25: rgba(220, 38, 38, 0.25);
-	--color-red-900-alpha-35: rgba(127, 29, 29, 0.35);
-	--color-black-alpha-08: rgba(0, 0, 0, 0.08);
+	--color-orange-500-alpha-60: rgba(249, 115, 22, 0.6);
 	--color-black-alpha-10: rgba(0, 0, 0, 0.1);
+	--color-black-alpha-40: rgba(0, 0, 0, 0.4);
 	--color-black-alpha-60: rgba(0, 0, 0, 0.6);
-	--color-black-alpha-85: rgba(0, 0, 0, 0.85);
+	--color-panel: rgba(18, 18, 20, 0.92);
+
 	--spacing-1: 0.0625rem;
 	--spacing-2: 0.125rem;
 	--spacing-4: 0.25rem;
@@ -41,9 +47,14 @@
 	--spacing-24: 1.5rem;
 	--spacing-32: 2rem;
 	--spacing-48: 3rem;
-	--border-radius-sm: 0.5rem;
-	--border-radius-md: 0.75rem;
-	--border-radius-lg: 1rem;
+	--border-radius-sm: 0.375rem;
+	--border-radius-md: 0.5rem;
+	--border-radius-lg: 0.75rem;
+
+	--accent: var(--color-orange-400);
+	--ease: cubic-bezier(0.4, 0, 0.2, 1);
+
+	font-family: system-ui, "Segoe UI", Roboto, sans-serif;
 }
 
 .flex-center {
@@ -52,35 +63,53 @@
 	align-items: center;
 }
 
-.flex-space-between {
-	justify-content: space-between;
+.flex-align-center {
+	display: flex;
+	align-items: center;
 }
 
-.button {
-	color: var(--color-white);
-	cursor: pointer;
-	background-color: var(--color-white-alpha-10);
-	border: var(--spacing-1) solid var(--color-white-alpha-20);
-	border-radius: 50%;
+/* Round overlay control button. */
+.control {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
 	width: 2.25rem;
 	height: 2.25rem;
-	transform-origin: center;
-	transition: transform 100ms cubic-bezier(0.4, 0, 0.2, 1);
+	padding: 0;
+	color: var(--color-white);
+	background: transparent;
+	border: none;
+	border-radius: 50%;
+	cursor: pointer;
+	transition:
+		background-color 120ms var(--ease),
+		transform 120ms var(--ease),
+		color 120ms var(--ease);
 }
 
-.button:hover:not(:disabled) {
-	transform: scale(1.02);
-	background-color: var(--color-white-alpha-20);
-	box-shadow: 0 var(--spacing-2) var(--spacing-8) var(--color-black-alpha-10);
+.control svg {
+	width: 1.25rem;
+	height: 1.25rem;
 }
 
-.button:active:not(:disabled) {
-	transform: scale(0.98);
-	box-shadow: 0 var(--spacing-1) var(--spacing-4) var(--color-black-alpha-08);
+.control:hover:not(:disabled) {
+	background-color: var(--color-white-alpha-15);
 }
 
-.button:disabled {
-	opacity: 0.5;
+.control:active:not(:disabled) {
+	transform: scale(0.92);
+}
+
+.control--active {
+	color: var(--accent);
+}
+
+.control--off {
+	color: var(--color-red-400);
+}
+
+.control:disabled {
+	opacity: 0.4;
 	cursor: default;
-	color: var(--color-gray-100);
 }

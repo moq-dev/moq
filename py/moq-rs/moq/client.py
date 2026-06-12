@@ -28,12 +28,16 @@ class Client:
         url: str,
         *,
         tls_verify: bool = True,
+        tls_roots: list[str] | None = None,
+        tls_fingerprints: list[str] | None = None,
         bind: str | None = None,
         publish: OriginProducer | None = None,
         subscribe: OriginProducer | None = None,
     ) -> None:
         self._url = url
         self._tls_verify = tls_verify
+        self._tls_roots = tls_roots
+        self._tls_fingerprints = tls_fingerprints
         self._bind = bind
 
         # If neither origin is provided, create a shared internal one.
@@ -55,6 +59,10 @@ class Client:
 
         if not self._tls_verify:
             self._inner.set_tls_disable_verify(True)
+        if self._tls_roots:
+            self._inner.set_tls_roots(self._tls_roots)
+        if self._tls_fingerprints:
+            self._inner.set_tls_fingerprints(self._tls_fingerprints)
         if self._bind is not None:
             self._inner.set_bind(self._bind)
 

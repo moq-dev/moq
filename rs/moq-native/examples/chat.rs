@@ -22,7 +22,7 @@ async fn run_session(origin: moq_net::OriginConsumer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 
-	// For local development, use: http://localhost:4443/anon
+	// For local development, use: http://localhost:4443
 	// The "anon" path is usually configured to bypass authentication; be careful!
 	let url = url::Url::parse("https://cdn.moq.dev/anon/chat-example").unwrap();
 

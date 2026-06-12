@@ -568,7 +568,7 @@ async fn broadcast_websocket_fallback() {
 
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
-	// No delay — race QUIC and WebSocket simultaneously.
+	// No delay. Race QUIC and WebSocket simultaneously.
 	client_config.websocket.delay = None;
 
 	let client = client_config.init().expect("failed to init client");
@@ -779,4 +779,90 @@ async fn broadcast_race_quic_wins() {
 		.await
 		.expect("server task panicked")
 		.expect("server task failed");
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn websocket_unauthorized_handshake_is_explicit() {
+	use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+		.await
+		.expect("failed to bind TCP listener");
+	let addr = listener.local_addr().expect("failed to get local addr");
+
+	let server_handle = tokio::spawn(async move {
+		let (mut stream, _) = listener.accept().await?;
+		let mut buf = [0; 1024];
+		let _ = stream.read(&mut buf).await?;
+		stream
+			.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+			.await?;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.websocket.delay = None;
+	let client = client_config.init().expect("failed to init client");
+	let url: url::Url = format!("ws://{addr}").parse().unwrap();
+
+	let err = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out");
+	let err = expect_connect_err(err);
+	assert_connect_error(&err, moq_native::ConnectError::Unauthorized);
+
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn reconnect_stops_on_websocket_unauthorized() {
+	use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+		.await
+		.expect("failed to bind TCP listener");
+	let addr = listener.local_addr().expect("failed to get local addr");
+
+	let server_handle = tokio::spawn(async move {
+		let (mut stream, _) = listener.accept().await?;
+		let mut buf = [0; 1024];
+		let _ = stream.read(&mut buf).await?;
+		stream
+			.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+			.await?;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.websocket.delay = None;
+	let client = client_config.init().expect("failed to init client");
+	let url: url::Url = format!("ws://{addr}").parse().unwrap();
+
+	let reconnect = client.reconnect(url);
+	let err = tokio::time::timeout(TIMEOUT, reconnect.closed())
+		.await
+		.expect("reconnect close timed out")
+		.expect_err("reconnect unexpectedly succeeded");
+	assert_connect_error(&err, moq_native::ConnectError::Unauthorized);
+
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
+fn assert_connect_error(err: &moq_native::Error, expected: moq_native::ConnectError) {
+	assert_eq!(err.connect_error(), Some(expected), "unexpected error: {err}",);
+}
+
+fn expect_connect_err(result: moq_native::Result<moq_net::Session>) -> moq_native::Error {
+	match result {
+		Ok(_) => panic!("client connect unexpectedly succeeded"),
+		Err(err) => err,
+	}
 }

@@ -1,7 +1,7 @@
 import "@moq/boy/element";
 import { Effect } from "@moq/signals";
 
-const url = import.meta.env.VITE_RELAY_URL || "http://localhost:4443/anon";
+const url = import.meta.env.VITE_RELAY_URL || "http://localhost:4443";
 
 const boy = document.querySelector("moq-boy");
 if (boy) boy.url = url;

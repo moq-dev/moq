@@ -1,0 +1,126 @@
+import type { Catalog } from "@moq/hang";
+import type { Effect, Getter } from "@moq/signals";
+import * as DOM from "@moq/signals/dom";
+import type MoqPublish from "../../element";
+import { formatBitrate, formatFps, formatHz } from "../format";
+import { graph } from "../graph";
+import { audio as audioIcon, icon, video as videoIcon, wifi as wifiIcon } from "../icons";
+
+const POLL_MS = 250;
+
+type Kind = "network" | "video" | "audio";
+
+function card(kind: Kind, label: string, svg: string): { el: HTMLElement; grid: HTMLElement; status: HTMLElement } {
+	const el = DOM.create("div", { className: `stat-card stat-card--${kind}` });
+	const head = DOM.create("div", { className: "stat-head" });
+	const iconWrap = DOM.create("div", { className: "stat-icon" });
+	iconWrap.appendChild(icon(svg));
+	const status = DOM.create("span", { className: "stat-status", style: { display: "none" } });
+	head.append(iconWrap, DOM.create("span", { className: "stat-title" }, label), status);
+	const grid = DOM.create("div", { className: "stat-grid" });
+	el.append(head, grid);
+	return { el, grid, status };
+}
+
+/** Show an active/idle pill: an encoder only runs (and uses bandwidth) while a viewer is subscribed. */
+function trackActive(parent: Effect, status: HTMLElement, active: Getter<boolean>) {
+	parent.run((effect) => {
+		const on = effect.get(active);
+		status.style.display = "";
+		status.textContent = on ? "active" : "idle";
+		status.className = `stat-status stat-status--${on ? "active" : "idle"}`;
+	});
+}
+
+function line(grid: HTMLElement, label: string): HTMLSpanElement {
+	const row = DOM.create("div", { className: "stat-line" });
+	const value = DOM.create("span", { className: "stat-value" }, "—");
+	row.append(DOM.create("span", { className: "stat-key" }, label), value);
+	grid.appendChild(row);
+	return value;
+}
+
+function firstRendition<T>(catalog: { renditions?: Record<string, T> } | undefined): T | undefined {
+	return catalog ? Object.values(catalog.renditions ?? {})[0] : undefined;
+}
+
+/** The Stats tab: what we're capturing and publishing. */
+export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
+	const container = DOM.create("div", { className: "tab-body" });
+
+	// Video card: static detail as rows, live capture fps + upload bitrate as graphs.
+	const videoCard = card("video", "Video", videoIcon);
+	const vRes = line(videoCard.grid, "Resolution");
+	const vCodec = line(videoCard.grid, "Codec");
+	const vBitrateGraph = graph(parent, "Bitrate", { color: "#a855f7", format: formatBitrate });
+	const vFpsGraph = graph(parent, "Frame rate", { color: "#facc15", format: formatFps });
+	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
+
+	// active = a viewer is subscribed and we're actually encoding/sending.
+	trackActive(parent, videoCard.status, publish.broadcast.video.hd.active);
+
+	const audioCard = card("audio", "Audio", audioIcon);
+	const aCodec = line(audioCard.grid, "Codec");
+	const aRate = line(audioCard.grid, "Sample rate");
+	const aChannels = line(audioCard.grid, "Channels");
+	const aBitrate = line(audioCard.grid, "Bitrate");
+	trackActive(parent, audioCard.status, publish.broadcast.audio.active);
+
+	const netCard = card("network", "Connection", wifiIcon);
+	const nStatus = line(netCard.grid, "Status");
+	const nServer = line(netCard.grid, "Server");
+	const nName = line(netCard.grid, "Broadcast");
+
+	container.append(videoCard.el, audioCard.el, netCard.el);
+
+	// Resolution/codec from the live capture (display) + catalog; card hides when not capturing video.
+	parent.run((effect) => {
+		const display = effect.get(publish.broadcast.video.display);
+		const cfg = firstRendition<Catalog.VideoConfig>(effect.get(publish.broadcast.video.catalog) as Catalog.Video);
+		videoCard.el.style.display = display ? "" : "none";
+		vRes.textContent = display ? `${display.width}×${display.height}` : "—";
+		vCodec.textContent = cfg?.codec ?? "—";
+	});
+
+	parent.run((effect) => {
+		const cfg = firstRendition<Catalog.AudioConfig>(effect.get(publish.broadcast.audio.catalog) as Catalog.Audio);
+		audioCard.el.style.display = cfg ? "" : "none";
+		if (!cfg) return;
+		aCodec.textContent = cfg.codec ?? "—";
+		aRate.textContent = cfg.sampleRate ? formatHz(cfg.sampleRate) : "—";
+		aChannels.textContent = cfg.numberOfChannels ? `${cfg.numberOfChannels}` : "—";
+		aBitrate.textContent = cfg.bitrate ? formatBitrate(cfg.bitrate) : "—";
+	});
+
+	parent.run((effect) => {
+		const url = effect.get(publish.connection.url);
+		const status = effect.get(publish.connection.status);
+		const name = effect.get(publish.broadcast.name);
+		nStatus.textContent = status;
+		nServer.textContent = url?.host ?? "—";
+		nName.textContent = name?.toString() || "—";
+	});
+
+	// Live graphs: frame rate from captured frames, bitrate from the upload estimate.
+	let frames = 0;
+	parent.subscribe(publish.broadcast.video.frame, () => {
+		frames++;
+	});
+	let prevFrames = 0;
+	let prevWhen = performance.now();
+
+	parent.interval(() => {
+		const now = performance.now();
+		const elapsed = now - prevWhen;
+		const delta = frames - prevFrames;
+		const fps = elapsed > 0 && delta > 0 ? delta / (elapsed / 1000) : undefined;
+		prevFrames = frames;
+		prevWhen = now;
+		vFpsGraph.push(fps);
+
+		const upload = publish.connection.established.peek()?.sendBandwidth?.peek();
+		vBitrateGraph.push(upload && upload > 0 ? upload : undefined);
+	}, POLL_MS);
+
+	return container;
+}

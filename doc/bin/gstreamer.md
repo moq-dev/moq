@@ -100,11 +100,11 @@ nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
   multifilesrc location=bbb.mp4 loop=true ! parsebin name=parse \
     parse. ! queue ! identity sync=true ! mux.sink_0 \
     parse. ! queue ! identity sync=true ! mux.sink_1 \
-    moqsink name=mux url=http://localhost:4443/anon broadcast=bbb.hang
+    moqsink name=mux url=http://localhost:4443 broadcast=bbb.hang
 
 # Terminal 3: subscribe.
 nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
-  moqsrc url=http://localhost:4443/anon broadcast=bbb.hang \
+  moqsrc url=http://localhost:4443 broadcast=bbb.hang \
   ! decodebin3 ! videoconvert ! autovideosink
 ```
 
@@ -151,7 +151,7 @@ gst-launch-1.0 -v -e \
   multifilesrc location=demo/pub/media/bbb.mp4 loop=true ! parsebin name=parse \
     parse. ! queue ! identity sync=true ! mux.sink_0 \
     parse. ! queue ! identity sync=true ! mux.sink_1 \
-    moqsink name=mux url="http://localhost:4443/anon" broadcast="bbb"
+    moqsink name=mux url="http://localhost:4443" broadcast="bbb"
 ```
 
 ::: tip
@@ -181,7 +181,7 @@ Or directly:
 export GST_PLUGIN_PATH_1_0="$PWD/target/debug${GST_PLUGIN_PATH_1_0:+:$GST_PLUGIN_PATH_1_0}"
 
 gst-launch-1.0 -v -e \
-  moqsrc url="http://localhost:4443/anon" broadcast="bbb" \
+  moqsrc url="http://localhost:4443" broadcast="bbb" \
     ! decodebin3 ! videoconvert ! autovideosink
 ```
 

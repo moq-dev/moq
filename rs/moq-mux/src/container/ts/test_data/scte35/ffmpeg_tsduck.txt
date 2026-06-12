@@ -1,0 +1,67 @@
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x0021 (33)
+  Short section, total size: 20 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x00 (SpliceNull), size: 0 bytes
+    CRC32: 0x7A4FBFFF (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x0021 (33)
+  Short section, total size: 25 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x06 (TimeSignal), size: 5 bytes
+    Time: 0x07B629FC7 (2,070,060,999, 23,000,677 ms)
+    CRC32: 0x37A9D3AF (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x0021 (33)
+  Short section, total size: 50 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x06 (TimeSignal), size: 5 bytes
+    Time: 0x0069F6BC6 (111,111,110, 1,234,567 ms)
+    - Descriptor 0: Auxiliary Video Stream (0x2F, 47), 23 bytes
+      Auxiliary video coded stream type: 0x66
+      SI Message, type: 0x00000075, size: 102
+       Reserved SI message (20 bytes):
+        0000:  75 74 68 72 65 65 66 69 76 65 20 6B 69 63 6B 73  uthreefive kicks
+        0010:  20 61 73 73                                       ass
+    CRC32: 0x59BE12C5 (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x0021 (33)
+  Short section, total size: 35 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x06 (TimeSignal), size: 5 bytes
+    Time: 0x0423A35BD (1,111,111,101, 12,345,678 ms)
+    - Descriptor 0: SCTE 35 Avail (0x00, 0), 8 bytes
+      Identifier: 0x43554549 ("CUEI")
+      Provider id: 0x000004D2
+    CRC32: 0x256E5AF0 (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x0021 (33)
+  Short section, total size: 32 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x00 (SpliceNull), size: 0 bytes
+    - Descriptor 0: SCTE 35 DTMF (0x01, 1), 10 bytes
+      Identifier: 0x43554549 ("CUEI")
+      Pre-roll: 80 x 1/10 second
+      DTMF: "159#"
+    CRC32: 0xE163F3BB (OK)
+

@@ -35,6 +35,12 @@ pub enum Error {
 	#[error("no roots found in {}", .0.display())]
 	EmptyRoots(PathBuf),
 
+	#[error("invalid TLS fingerprint (expected hex-encoded SHA-256)")]
+	Fingerprint(#[source] hex::FromHexError),
+
+	#[error("invalid TLS fingerprint length: expected 32 bytes (SHA-256), got {0}")]
+	FingerprintLength(usize),
+
 	#[error("failed to add root certificate")]
 	AddRoot(#[source] rustls::Error),
 
@@ -99,6 +105,21 @@ pub struct Client {
 	#[arg(id = "tls-root", long = "tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
+
+	/// Pin the peer to a certificate with one of these SHA-256 fingerprints, encoded as hex.
+	///
+	/// This is the native equivalent of the browser's WebTransport `serverCertificateHashes`,
+	/// and accepts the same values a server reports via its certificate fingerprints. Use it to
+	/// trust a self-signed certificate without disabling verification or fetching the hash over
+	/// an insecure `http://` request. When set, the normal CA/root chain is bypassed: only the
+	/// leaf certificate's fingerprint is checked.
+	///
+	/// This value can be provided multiple times to accept any of several fingerprints (e.g.
+	/// across a certificate rotation). In config files, accepts either a single string or a TOML array.
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	#[arg(id = "tls-fingerprint", long = "tls-fingerprint", env = "MOQ_CLIENT_TLS_FINGERPRINT")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub fingerprint: Vec<String>,
 
 	/// PEM file containing the client certificate chain for mTLS.
 	///
@@ -189,6 +210,21 @@ impl Client {
 			tracing::warn!("TLS server certificate verification is disabled; A man-in-the-middle attack is possible.");
 			let noop = NoCertificateVerification(provider);
 			tls.dangerous().set_certificate_verifier(Arc::new(noop));
+		} else if !self.fingerprint.is_empty() {
+			let fingerprints = self
+				.fingerprint
+				.iter()
+				.map(|fp| {
+					let bytes = hex::decode(fp.trim()).map_err(Error::Fingerprint)?;
+					match bytes.len() {
+						32 => Ok(bytes),
+						len => Err(Error::FingerprintLength(len)),
+					}
+				})
+				.collect::<Result<Vec<_>>>()?;
+
+			let verifier = FingerprintVerifier::new(provider, fingerprints);
+			tls.dangerous().set_certificate_verifier(Arc::new(verifier));
 		}
 
 		Ok(tls)
@@ -319,21 +355,18 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 
 // ── FingerprintVerifier ─────────────────────────────────────────────
 
-#[cfg(any(feature = "quinn", feature = "noq"))]
 #[derive(Debug)]
 pub(crate) struct FingerprintVerifier {
 	provider: crypto::Provider,
-	fingerprint: Vec<u8>,
+	fingerprints: Vec<Vec<u8>>,
 }
 
-#[cfg(any(feature = "quinn", feature = "noq"))]
 impl FingerprintVerifier {
-	pub fn new(provider: crypto::Provider, fingerprint: Vec<u8>) -> Self {
-		Self { provider, fingerprint }
+	pub fn new(provider: crypto::Provider, fingerprints: Vec<Vec<u8>>) -> Self {
+		Self { provider, fingerprints }
 	}
 }
 
-#[cfg(any(feature = "quinn", feature = "noq"))]
 impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 	fn verify_server_cert(
 		&self,
@@ -344,7 +377,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 		_now: UnixTime,
 	) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
 		let fingerprint = crypto::sha256(&self.provider, end_entity);
-		if fingerprint.as_ref() == self.fingerprint.as_slice() {
+		if self.fingerprints.iter().any(|fp| fingerprint.as_ref() == fp.as_slice()) {
 			Ok(rustls::client::danger::ServerCertVerified::assertion())
 		} else {
 			Err(rustls::Error::General("fingerprint mismatch".into()))
@@ -371,6 +404,69 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 
 	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
 		self.provider.signature_verification_algorithms.supported_schemes()
+	}
+}
+
+#[cfg(test)]
+#[cfg(all(any(feature = "quinn", feature = "noq", feature = "quiche"), feature = "aws-lc-rs"))]
+mod tests {
+	use super::*;
+	use rustls::client::danger::ServerCertVerifier;
+	use rustls::pki_types::ServerName;
+
+	fn self_signed() -> CertificateDer<'static> {
+		let key = rcgen::KeyPair::generate().unwrap();
+		let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+		params.self_signed(&key).unwrap().into()
+	}
+
+	#[test]
+	fn fingerprint_verifier_matches_and_rejects() {
+		let provider = crypto::provider();
+		let cert = self_signed();
+		let fingerprint = crypto::sha256(&provider, cert.as_ref()).as_ref().to_vec();
+
+		let name = ServerName::try_from("localhost").unwrap();
+		let now = UnixTime::now();
+
+		let verifier = FingerprintVerifier::new(provider.clone(), vec![fingerprint]);
+		assert!(verifier.verify_server_cert(&cert, &[], &name, &[], now).is_ok());
+
+		// A different leaf certificate must not satisfy the pin.
+		let other = self_signed();
+		assert!(verifier.verify_server_cert(&other, &[], &name, &[], now).is_err());
+	}
+
+	#[test]
+	fn build_installs_fingerprint_verifier() {
+		let cert = self_signed();
+		let fingerprint = hex::encode(crypto::sha256(&crypto::provider(), cert.as_ref()));
+
+		// A bogus hash still builds; verification happens at handshake time.
+		let config = Client {
+			fingerprint: vec![fingerprint],
+			..Default::default()
+		};
+		assert!(config.build().is_ok());
+	}
+
+	#[test]
+	fn build_rejects_invalid_fingerprint_hex() {
+		let config = Client {
+			fingerprint: vec!["not-hex".to_string()],
+			..Default::default()
+		};
+		assert!(matches!(config.build(), Err(Error::Fingerprint(_))));
+	}
+
+	#[test]
+	fn build_rejects_wrong_length_fingerprint() {
+		// Valid hex, but only 2 bytes instead of 32.
+		let config = Client {
+			fingerprint: vec!["abcd".to_string()],
+			..Default::default()
+		};
+		assert!(matches!(config.build(), Err(Error::FingerprintLength(2))));
 	}
 }
 
