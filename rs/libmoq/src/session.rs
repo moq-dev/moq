@@ -141,8 +141,8 @@ mod tests {
 			map_connect_error(moq_native::Error::ConnectFailed),
 			Error::Connect(_)
 		));
-		assert_eq!(Error::Unauthorized.code(), -32);
-		assert_eq!(Error::Forbidden.code(), -33);
+		assert_eq!(Error::Unauthorized.code(), -33);
+		assert_eq!(Error::Forbidden.code(), -34);
 		assert_eq!(map_connect_error(moq_native::Error::ConnectFailed).code(), -5);
 	}
 }

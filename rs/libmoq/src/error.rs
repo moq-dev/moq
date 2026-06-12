@@ -202,9 +202,9 @@ impl ffi::ReturnCode for Error {
 			Error::Mux(_) => -29,
 			Error::Audio(_) => -30,
 			Error::GroupNotFound => -31,
-			Error::Unauthorized => -32,
-			Error::Forbidden => -33,
-			Error::Native(_) => -34,
+			Error::Native(_) => -32,
+			Error::Unauthorized => -33,
+			Error::Forbidden => -34,
 		}
 	}
 }
