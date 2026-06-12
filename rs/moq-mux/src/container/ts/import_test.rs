@@ -61,12 +61,11 @@ fn import_resyncs_after_byte_misalignment() {
 #[test]
 fn resyncs_past_false_sync_byte() {
 	let data = include_bytes!("test_data/bbb.ts");
-	// Prepend a stray 0x47 (a payload-like sync byte) that is NOT a real boundary:
-	// the byte 188 ahead is 0x00, so the sync-lock confirmation rejects it and keeps
-	// scanning to the real stream. Without the +188 check this 0x47 would be trusted
-	// and the all-zero "packet" routed as a bogus PAT before resync.
-	let mut misaligned = vec![0u8; 189];
-	misaligned[0] = 0x47;
+	// Lead with a non-sync byte so demux enters resync, then a stray 0x47 (payload-like)
+	// whose byte 188 ahead is not a sync byte. The confirmation must reject that candidate
+	// and scan on to the real stream rather than locking onto it and routing a bogus packet.
+	let mut misaligned = vec![0x00, 0x47];
+	misaligned.resize(202, 0x00);
 	misaligned.extend_from_slice(data);
 	let catalog = import_ts(&misaligned);
 	assert_eq!(catalog.video.renditions.len(), 1, "false sync derailed demux: no video");

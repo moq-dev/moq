@@ -61,12 +61,6 @@ pub struct Import<E: scte35::Catalog = ()> {
 	/// PIDs diverted, the rest fed to the reader); a trailing partial packet is
 	/// kept here for the next call.
 	scratch: Vec<u8>,
-	/// Sync lock. 0x47 is the packet sync byte but also occurs freely in payload
-	/// (TS has no byte stuffing), so a lone 0x47 isn't a boundary. While false we
-	/// confirm a candidate against the next packet's sync byte before trusting it;
-	/// once locked we stride 188 at a time, dropping the lock the instant a stride
-	/// misses. Persists across `decode` calls so a retained partial stays locked.
-	aligned: bool,
 	/// SCTE-35 PIDs, intercepted before the reader. SCTE-35 is carried as private
 	/// sections (table_id 0xFC), not PES, so the reader would `Pes::read_from` and
 	/// abort. Keyed by PID. Detected via the PMT 'CUEI' registration descriptor.
@@ -100,7 +94,6 @@ impl<E: scte35::Catalog> Import<E> {
 			initialized: false,
 			audio_burst: None,
 			scratch: Vec::new(),
-			aligned: false,
 			scte: HashMap::new(),
 			supports_scte35,
 			last_pts: None,
@@ -144,30 +137,32 @@ impl<E: scte35::Catalog> Import<E> {
 		// registered) before the packets that follow it in the same chunk route.
 		let mut off = 0;
 		while off + TsPacket::SIZE <= self.scratch.len() {
-			// TS packets start with 0x47. On a missed sync byte we lost alignment: jump
-			// to the next 0x47 (SIMD-accelerated via memchr) instead of skipping a whole
-			// 188-byte stride (which only re-aligns on exact multiples of 188, so a
-			// sub-packet misalignment would desync permanently).
+			// A TS packet starts with the 0x47 sync byte. While aligned we trust it and
+			// stride 188 at a time; a miss means we lost sync and must re-acquire it.
 			if self.scratch[off] != 0x47 {
-				self.aligned = false;
-				off = memchr::memchr(0x47, &self.scratch[off..]).map_or(self.scratch.len(), |rel| off + rel);
-				continue;
-			}
-			// 0x47 also occurs in payload, so while unlocked confirm the candidate against
-			// the next packet's sync byte before trusting it; otherwise a stray payload
-			// 0x47 emits one bogus packet. Once locked we stride freely (the check above is
-			// the tripwire that drops the lock), so the final packet of a buffer still emits.
-			if !self.aligned {
-				match self.scratch.get(off + TsPacket::SIZE) {
-					Some(&0x47) => self.aligned = true,
-					// The byte 188 ahead isn't a sync byte: this 0x47 was payload. Keep scanning.
-					Some(_) => {
-						off += 1;
-						continue;
+				// 0x47 also occurs freely in payload (TS has no byte stuffing), so a lone one
+				// isn't a boundary. Scan (SIMD via memchr) for a candidate whose next packet
+				// also begins with 0x47, confirming the 188 stride before trusting it.
+				// Striding past a false candidate would route one bogus packet; jumping a flat
+				// 188 instead would only re-align on exact multiples and could desync forever.
+				loop {
+					let Some(rel) = memchr::memchr(0x47, &self.scratch[off..]) else {
+						// No sync byte left: the buffer is junk, drop it.
+						off = self.scratch.len();
+						break;
+					};
+					off += rel;
+					match self.scratch.get(off + TsPacket::SIZE) {
+						// Next packet also starts with a sync byte: lock onto this candidate.
+						Some(&0x47) => break,
+						// The byte 188 ahead isn't a sync byte: this 0x47 was payload, keep scanning.
+						Some(_) => off += 1,
+						// Can't confirm yet (candidate is near the buffer tail); the outer loop
+						// either processes it (a full packet fits) or retains it for the next call.
+						None => break,
 					}
-					// Not enough buffered to confirm yet; retain the candidate and retry next call.
-					None => break,
 				}
+				continue;
 			}
 			let pkt: [u8; TsPacket::SIZE] = self.scratch[off..off + TsPacket::SIZE].try_into().unwrap();
 			off += TsPacket::SIZE;
