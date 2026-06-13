@@ -93,26 +93,100 @@ abstract class TrackHandle {
 /**
  * The write side of a track, mirroring the Rust `TrackProducer`.
  *
+ * A producer is a fan-out source: every {@link subscribe} (including each wire
+ * subscription the publisher serves from it) gets an independent
+ * {@link TrackSubscriber} that receives a full copy of the groups, each with its own
+ * read cursor. Groups are mirrored into every live subscriber and retained for the
+ * track's `cache` window so a late subscriber replays the recent groups.
+ *
  * Obtained from `TrackRequest.accept` (the wire asks the application for a track to
- * serve) or constructed directly for an in-process track. Writes groups that a
- * {@link TrackSubscriber} on the same {@link TrackState} reads.
+ * serve) or constructed directly for an in-process track.
  */
 export class TrackProducer extends TrackHandle {
 	#next?: number;
 
-	constructor(name: string, state: TrackState = new TrackState()) {
-		super(name, state);
+	// Recently written source groups, retained for replay to late subscribers and
+	// pruned once closed and older than the cache window. Each subscriber reads its
+	// own mirror, so these are never drained by a consumer.
+	#cache: { group: Group; time: number }[] = [];
+
+	// One independent downstream state per live subscriber.
+	#sinks = new Set<TrackState>();
+
+	constructor(name: string, sink?: TrackState) {
+		// The producer's own state is the source of truth (info/closed); subscribers
+		// read mirrored sinks, never this state directly. `sink`, when given, is an
+		// already-handed-out subscriber state (the on-demand accept path) adopted as
+		// the first sink.
+		super(name, new TrackState());
+		if (sink) this.#addSink(sink);
 	}
 
 	/** Commit the immutable publisher properties, resolving {@link info}. Returns `this`. */
 	accept(info: Partial<TrackInfo> = {}): this {
-		this.state.info.set(trackInfoDefaults(info));
+		const resolved = trackInfoDefaults(info);
+		this.state.info.set(resolved);
+		// Propagate to any sink handed out before accept (the on-demand path).
+		for (const sink of this.#sinks) sink.info.set(resolved);
 		return this;
 	}
 
-	/** A {@link TrackSubscriber} reading this in-process track's groups. */
+	/** An independent {@link TrackSubscriber} receiving a full copy of this track's groups. */
 	subscribe(): TrackSubscriber {
-		return new TrackSubscriber(this.name, this.state);
+		const sink = new TrackState();
+		this.#addSink(sink);
+		return new TrackSubscriber(this.name, sink);
+	}
+
+	// Register a downstream sink: seed its info, replay the retained window, and (while
+	// the track is open) mirror future groups into it. A late subscriber to a closed
+	// track still drains the buffered groups before seeing the end.
+	#addSink(sink: TrackState): void {
+		const info = this.state.info.peek();
+		if (info) sink.info.set(info);
+
+		const closed = this.state.closed.peek();
+		if (!closed) {
+			this.#sinks.add(sink);
+
+			// Drop the sink once its consumer goes away, closing its mirrors so source
+			// groups stop teeing into them, so a long-lived producer doesn't leak.
+			const dispose = sink.closed.subscribe((c) => {
+				if (!c) return;
+				this.#sinks.delete(sink);
+				for (const group of sink.groups.peek()) group.close(c instanceof Error ? c : undefined);
+				dispose();
+			});
+		}
+
+		this.#prune();
+		for (const { group } of this.#cache) this.#mirror(group, sink);
+
+		if (closed) sink.closed.set(closed);
+	}
+
+	// Mirror a source group into a sink. The mirror fills synchronously as the source
+	// is written and keeps its own read cursor; frame bytes are shared by reference.
+	#mirror(src: Group, sink: TrackState): void {
+		const dst = src.mirror();
+		sink.groups.mutate((groups) => {
+			groups.push(dst);
+			groups.sort((a, b) => a.sequence - b.sequence);
+		});
+	}
+
+	// Evict cached groups that are closed and older than the cache window.
+	#prune(): void {
+		const cacheMs = this.state.info.peek()?.cache ?? DEFAULT_CACHE_MS;
+		const cutoff = Date.now() - cacheMs;
+		this.#cache = this.#cache.filter(({ group, time }) => time > cutoff || !group.state.closed.peek());
+	}
+
+	// Retain a source group and fan it out to every live sink.
+	#publish(group: Group): void {
+		this.#cache.push({ group, time: Date.now() });
+		this.#prune();
+		for (const sink of this.#sinks) this.#mirror(group, sink);
 	}
 
 	/** Append a new group with the next sequence number. */
@@ -120,12 +194,8 @@ export class TrackProducer extends TrackHandle {
 		if (this.state.closed.peek()) throw new Error("track is closed");
 
 		const group = new Group(this.#next ?? 0);
-
 		this.#next = group.sequence + 1;
-		this.state.groups.mutate((groups) => {
-			groups.push(group);
-			groups.sort((a, b) => a.sequence - b.sequence);
-		});
+		this.#publish(group);
 
 		return group;
 	}
@@ -139,10 +209,18 @@ export class TrackProducer extends TrackHandle {
 			this.#next = group.sequence + 1;
 		}
 
-		this.state.groups.mutate((groups) => {
-			groups.push(group);
-			groups.sort((a, b) => a.sequence - b.sequence);
-		});
+		this.#publish(group);
+	}
+
+	/** Close the track and every subscriber, mirroring the abort to their groups. */
+	override close(abort?: Error) {
+		this.state.closed.set(abort ?? true);
+		for (const { group } of this.#cache) group.close(abort);
+		for (const sink of this.#sinks) {
+			for (const group of sink.groups.peek()) group.close(abort);
+			sink.closed.set(abort ?? true);
+		}
+		this.#sinks.clear();
 	}
 
 	/** Append a frame as its own single-frame group. */

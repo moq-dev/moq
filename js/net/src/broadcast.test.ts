@@ -25,6 +25,37 @@ test("subscribe serves a statically inserted track without a request", async () 
 	expect((await sub2.nextGroup())?.sequence).toBe(0);
 });
 
+test("two subscribers to one inserted track each get a full copy", async () => {
+	const broadcast = new Broadcast();
+	const producer = broadcast.createTrack("video");
+
+	const a = broadcast.track("video").subscribe();
+	const b = broadcast.track("video").subscribe();
+
+	producer.writeString("hello");
+	producer.writeString("world");
+
+	// Neither subscriber steals from the other: both see every frame in order.
+	expect(await a.readString()).toBe("hello");
+	expect(await b.readString()).toBe("hello");
+	expect(await a.readString()).toBe("world");
+	expect(await b.readString()).toBe("world");
+});
+
+test("a late subscriber replays the cached window", async () => {
+	const broadcast = new Broadcast();
+	const producer = broadcast.createTrack("video");
+
+	// Written before anyone subscribes; retained in the cache for replay.
+	producer.writeString("early");
+
+	const late = broadcast.track("video").subscribe();
+	expect(await late.readString()).toBe("early");
+
+	producer.writeString("later");
+	expect(await late.readString()).toBe("later");
+});
+
 test("createTrack commits info up front", async () => {
 	const broadcast = new Broadcast();
 

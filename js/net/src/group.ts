@@ -12,6 +12,10 @@ export class Group {
 	state = new GroupState();
 	readonly closed: Promise<Error | undefined>;
 
+	// Downstream copies that receive every frame written here, synchronously. Used by
+	// TrackProducer to fan one source group out to per-subscriber groups.
+	#mirrors?: Set<Group>;
+
 	constructor(sequence: number) {
 		this.sequence = sequence;
 
@@ -37,6 +41,36 @@ export class Group {
 		});
 
 		this.state.total.update((total) => total + 1);
+
+		// Tee into live mirrors, dropping any the consumer has already closed.
+		if (this.#mirrors) {
+			for (const mirror of this.#mirrors) {
+				if (mirror.state.closed.peek()) this.#mirrors.delete(mirror);
+				else mirror.writeFrame(frame);
+			}
+		}
+	}
+
+	/**
+	 * Create an independent copy that receives every frame written to this group.
+	 *
+	 * Frames written so far are replayed synchronously; later writes (and the close)
+	 * are teed in as they happen. The copy has its own read cursor, so consumers never
+	 * steal frames from each other. Internal to {@link TrackProducer} fan-out.
+	 */
+	mirror(): Group {
+		const dst = new Group(this.sequence);
+		for (const frame of this.state.frames.peek()) dst.writeFrame(frame);
+
+		const closed = this.state.closed.peek();
+		if (closed) {
+			dst.close(closed instanceof Error ? closed : undefined);
+			return dst;
+		}
+
+		this.#mirrors ??= new Set();
+		this.#mirrors.add(dst);
+		return dst;
 	}
 
 	writeString(str: string) {
@@ -100,5 +134,10 @@ export class Group {
 
 	close(abort?: Error) {
 		this.state.closed.set(abort ?? true);
+
+		if (this.#mirrors) {
+			for (const mirror of this.#mirrors) mirror.close(abort);
+			this.#mirrors.clear();
+		}
 	}
 }

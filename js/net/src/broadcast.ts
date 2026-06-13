@@ -1,5 +1,5 @@
 import { Signal } from "@moq/signals";
-import { type TrackInfo, TrackProducer, TrackState, TrackSubscriber, trackInfoDefaults } from "./track.ts";
+import { type TrackInfo, TrackProducer, TrackState, TrackSubscriber } from "./track.ts";
 
 /**
  * A request for a track the peer wants, yielded by {@link Broadcast.requested}.
@@ -13,8 +13,8 @@ import { type TrackInfo, TrackProducer, TrackState, TrackSubscriber, trackInfoDe
 export class TrackRequest {
 	readonly name: string;
 	readonly priority: number;
-	// The shared state behind the matching TrackSubscriber handed to the caller of
-	// Broadcast.subscribe; accepting wraps it in a producer the two ends share.
+	// The state behind the TrackSubscriber handed to the caller of Broadcast.subscribe;
+	// accepting adopts it as the producer's first sink, which the producer fans into.
 	#state: TrackState;
 
 	constructor(name: string, state: TrackState, priority: number) {
@@ -29,8 +29,9 @@ export class TrackRequest {
 	 * keeps its default. Mirrors the Rust `TrackRequest::accept`.
 	 */
 	accept(info: Partial<TrackInfo> = {}): TrackProducer {
-		this.#state.info.set(trackInfoDefaults(info));
-		return new TrackProducer(this.name, this.#state);
+		// The producer adopts the already-handed-out subscriber state as its first
+		// sink, then commits the info (which propagates to that sink).
+		return new TrackProducer(this.name, this.#state).accept(info);
 	}
 
 	/** Reject the request, closing the track (optionally with an error). */
@@ -75,9 +76,9 @@ export class TrackConsumer {
 export class BroadcastState {
 	requested = new Signal<TrackRequest[]>([]);
 	closed = new Signal<boolean | Error>(false);
-	// Statically inserted tracks, keyed by name. A subscribe for one of these is
-	// served directly from the shared TrackState, skipping the on-demand request path.
-	tracks = new Map<string, TrackState>();
+	// Statically inserted tracks, keyed by name. A subscribe for one of these fans out
+	// from the producer directly, skipping the on-demand request path.
+	tracks = new Map<string, TrackProducer>();
 }
 
 /**
@@ -136,11 +137,11 @@ export class Broadcast {
 	 * Insert a track that is served directly, without an on-demand {@link requested}
 	 * round-trip.
 	 *
-	 * A {@link subscribe} for this name returns a subscriber sharing the track's state
-	 * immediately, so a publisher can push tracks proactively instead of waiting to be
-	 * asked. The caller owns the {@link TrackProducer} and writes its groups; when that
-	 * producer closes, the entry is removed automatically. Throws on a duplicate live
-	 * name. Mirrors the Rust `BroadcastProducer::insert_track`.
+	 * Each {@link subscribe} for this name fans out from the producer, so a publisher
+	 * can push tracks proactively instead of waiting to be asked. The caller owns the
+	 * {@link TrackProducer} and writes its groups; when that producer closes, the entry
+	 * is removed automatically. Throws on a duplicate live name. Mirrors the Rust
+	 * `BroadcastProducer::insert_track`.
 	 */
 	insertTrack(track: TrackProducer): void {
 		if (this.state.closed.peek()) {
@@ -148,16 +149,16 @@ export class Broadcast {
 		}
 
 		const existing = this.state.tracks.get(track.name);
-		if (existing && !existing.closed.peek()) {
+		if (existing && !existing.state.closed.peek()) {
 			throw new Error(`duplicate track: ${track.name}`);
 		}
 
-		this.state.tracks.set(track.name, track.state);
+		this.state.tracks.set(track.name, track);
 
 		// Evict the entry once the track closes, unless it has since been replaced.
 		const dispose = track.state.closed.subscribe((closed) => {
 			if (!closed) return;
-			if (this.state.tracks.get(track.name) === track.state) {
+			if (this.state.tracks.get(track.name) === track) {
 				this.state.tracks.delete(track.name);
 			}
 			dispose();
@@ -193,11 +194,11 @@ export class Broadcast {
 			throw new Error(`broadcast is closed: ${this.state.closed.peek()}`);
 		}
 
-		// Fast path: a statically inserted track is served directly, no request. A
-		// stale (closed) entry is evicted and falls through to the on-demand path.
+		// Fast path: a statically inserted track fans out a fresh subscriber, no
+		// request. A stale (closed) entry is evicted and falls through to on-demand.
 		const existing = this.state.tracks.get(name);
 		if (existing) {
-			if (!existing.closed.peek()) return new TrackSubscriber(name, existing);
+			if (!existing.state.closed.peek()) return existing.subscribe();
 			this.state.tracks.delete(name);
 		}
 
@@ -230,8 +231,8 @@ export class Broadcast {
 
 		// A statically inserted track already committed its info; serve it directly.
 		const existing = this.state.tracks.get(name);
-		if (existing && !existing.closed.peek()) {
-			return new TrackSubscriber(name, existing).info();
+		if (existing && !existing.state.closed.peek()) {
+			return existing.info();
 		}
 
 		// Publish side: ask the application by triggering a TrackRequest it answers
