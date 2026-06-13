@@ -431,7 +431,7 @@ impl TrackState {
 	/// if it isn't accepted yet. The group's timescale comes from that info, so a
 	/// fetch can serve an as-yet-unaccepted track (e.g. a relay with no live
 	/// subscription). The group lands in the cache so a waiting
-	/// [`TrackFetchPending`] resolves via [`Self::poll_fetch`].
+	/// [`TrackFetch`] resolves via [`Self::poll_fetch`].
 	fn insert_group_request(&mut self, sequence: u64, info: Option<TrackInfo>) -> Result<GroupProducer> {
 		if let Some(err) = &self.abort {
 			return Err(err.clone());
@@ -822,7 +822,7 @@ impl Drop for TrackDynamic {
 ///
 /// Iterates `subscriptions` immutably so it never flags the [`TrackState`] as
 /// modified on a no-op poll. Marking it modified would drain and wake unrelated
-/// waiters on the channel (e.g. a [`TrackSubscriberPending`] parked on track
+/// waiters on the channel (e.g. a [`TrackSubscribe`] parked on track
 /// info), which races with [`TrackRequest::accept`] and can drop that wakeup.
 /// Closed subscribers are pruned only when one has actually closed, which is a
 /// real change that legitimately wakes other waiters.
@@ -904,7 +904,7 @@ impl TrackConsumer {
 	}
 
 	/// Open a live subscription.
-	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Result<TrackSubscriberPending> {
+	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Result<kio::Pending<TrackSubscribe>> {
 		let subscription = kio::Producer::new(subscription.into().unwrap_or_default());
 
 		match self.state.write() {
@@ -928,7 +928,7 @@ impl TrackConsumer {
 
 	/// Fetch a single past group, without holding a live subscription.
 	///
-	/// Returns a [`TrackFetchPending`] that resolves to the [`GroupConsumer`]:
+	/// Returns a [`kio::Pending`] that resolves to the [`GroupConsumer`]:
 	/// immediately if the group is cached, otherwise once a [`TrackDynamic`] serves
 	/// the request (a wire FETCH for a relay). `options` accepts `None`, a [`Fetch`],
 	/// or `Fetch::default()`.
@@ -936,7 +936,7 @@ impl TrackConsumer {
 	/// Fails synchronously with [`Error::NotFound`] when the group can never be served
 	/// (past the final sequence, or no [`TrackDynamic`] on the track), or the track's
 	/// abort error if it's already closed.
-	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<Fetch>>) -> Result<TrackFetchPending> {
+	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<Fetch>>) -> Result<kio::Pending<TrackFetch>> {
 		let options = options.into().unwrap_or_default();
 
 		let mut state = self
@@ -962,7 +962,7 @@ impl TrackConsumer {
 		}))
 	}
 
-	pub fn info(&self) -> TrackInfoPending {
+	pub fn info(&self) -> kio::Pending<TrackInfoQuery> {
 		kio::Pending::new(TrackInfoQuery {
 			state: self.state.clone(),
 		})
@@ -970,7 +970,7 @@ impl TrackConsumer {
 }
 
 /// The pollable state of a [`TrackConsumer::subscribe`]; awaited via the
-/// [`TrackSubscriberPending`] wrapper, whose `DerefMut` exposes [`Self::update`].
+/// [`kio::Pending`] wrapper, whose `DerefMut` exposes [`Self::update`].
 pub struct TrackSubscribe {
 	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
@@ -1013,13 +1013,8 @@ impl kio::Future for TrackSubscribe {
 	}
 }
 
-/// A pending subscription returned by [`TrackConsumer::subscribe`]. `.await` it for
-/// the [`TrackSubscriber`], or call [`TrackSubscribe::update`] / [`TrackSubscribe::poll_ok`]
-/// through its `Deref`.
-pub type TrackSubscriberPending = kio::Pending<TrackSubscribe>;
-
 /// The pollable state of a [`TrackConsumer::info`]; awaited via the
-/// [`TrackInfoPending`] wrapper.
+/// [`kio::Pending`] wrapper.
 pub struct TrackInfoQuery {
 	state: kio::Consumer<TrackState>,
 }
@@ -1040,9 +1035,6 @@ impl kio::Future for TrackInfoQuery {
 		self.poll_ok(waiter)
 	}
 }
-
-/// A pending [`TrackInfo`] lookup returned by [`TrackConsumer::info`]. `.await` it.
-pub type TrackInfoPending = kio::Pending<TrackInfoQuery>;
 
 /// A specific group requested via [`TrackConsumer::fetch_group`], queued on the
 /// track for a [`TrackDynamic`] to serve.
@@ -1093,7 +1085,7 @@ impl GroupRequest {
 
 /// The pollable state of a [`TrackConsumer::fetch_group`].
 ///
-/// Awaited via the [`TrackFetchPending`] wrapper; resolves to the
+/// Awaited via the [`kio::Pending`] wrapper; resolves to the
 /// [`GroupConsumer`] once the group lands in the track's cache (already present,
 /// or produced after a wire FETCH), or [`Error::NotFound`] if it can never exist.
 pub struct TrackFetch {
@@ -1115,10 +1107,6 @@ impl kio::Future for TrackFetch {
 		)
 	}
 }
-
-/// A pending fetch returned by [`TrackConsumer::fetch_group`]. `.await` it for the
-/// [`GroupConsumer`].
-pub type TrackFetchPending = kio::Pending<TrackFetch>;
 
 /// A live subscription to a track, used to read its groups.
 ///

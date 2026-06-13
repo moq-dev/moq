@@ -411,7 +411,7 @@ mod test {
 	use super::*;
 
 	/// Subscribe and assert the result hasn't resolved yet (it stays pending until
-	/// a publisher accepts). Returns the [`TrackSubscriberPending`] to resolve after accepting.
+	/// a publisher accepts). Returns the pending subscription to resolve after accepting.
 	macro_rules! subscribe_pending {
 		($consumer:expr, $name:expr) => {{
 			let pending = $consumer.track($name).unwrap().subscribe(None).unwrap();
