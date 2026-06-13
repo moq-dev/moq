@@ -49,7 +49,7 @@ impl<E: CatalogExt> Stream for Consumer<E> {
 				// MSF carries only the media sections, so the extension defaults.
 				let media = match ready!(c.poll_next(waiter)) {
 					Ok(media) => media,
-					Err(err) => return Poll::Ready(Err(err.into())),
+					Err(err) => return Poll::Ready(Err(err)),
 				};
 				Poll::Ready(Ok(media.map(|m| Catalog::<E> {
 					video: m.video,

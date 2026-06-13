@@ -437,8 +437,10 @@ impl<E: scte35::Catalog> ScteStream<E> {
 		// Cues ride the legacy container, which normalizes the per-frame timestamp to
 		// microseconds on the wire (see `hang::container::Frame::encode`), so the track
 		// declares that timescale to match.
-		let track = broadcast
-			.unique_track(".scte35", moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE))?;
+		let track = broadcast.unique_track(
+			".scte35",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)?;
 		let mut config = scte35::Config::new();
 		config.container = hang::catalog::Container::Legacy;
 		scte35.renditions.insert(track.name().to_string(), config);
@@ -1320,8 +1322,8 @@ mod test {
 	#[tokio::test(start_paused = true)]
 	async fn scte35_cue_stamped_with_video_pts() {
 		use crate::catalog::hang::{Catalog, Container};
-		use crate::container::ts::scte35;
 		use crate::container::Consumer;
+		use crate::container::ts::scte35;
 		use moq_net::Timestamp;
 
 		const VIDEO_PID: u16 = 0x0050;
