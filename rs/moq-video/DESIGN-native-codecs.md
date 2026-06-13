@@ -351,12 +351,63 @@ Where the implementation differs from the plan above:
   `write` matches NVENC's pitch (safe only for 64-aligned widths; we warn otherwise);
   (3) forced-IDR via `picture_type` with picture-type-decision enabled.
 
+### VAAPI removed (cros-codecs is not buildable on modern libva)
+
+The VAAPI backend (added behind the `vaapi` feature in #1691) and the V4L2 dmabuf
+capture written to feed it have been **removed**. `cros-codecs 0.0.6` (the latest)
+caret-pins `cros-libva 0.0.12`, which does not compile against libva >= 2.23: the
+newer headers add `seg_id_block_size` / `va_reserved8` to
+`VAEncPictureParameterBufferVP9`, and `cros-libva 0.0.12`'s struct literal omits
+them (`cros-libva 0.0.13` fixes it, but `cros-codecs 0.0.6` won't accept it). Since
+modern distros and the nix toolchain ship libva 2.23+, the feature could not build
+or ship, and CI's `--all-features` could not be made green while it existed.
+`cros-codecs` is the only pure-Rust VAAPI H.264 encoder, and reintroducing ffmpeg
+for VAAPI defeats the purpose of this effort, so VAAPI is parked until `cros-codecs`
+releases against `cros-libva >= 0.0.13` (or a better VAAPI path appears). Intel/AMD
+Linux falls back to the openh264 software encoder meanwhile; NVIDIA uses NVENC.
+
+When it returns: re-add `backend/vaapi.rs`, `capture/v4l2.rs`, the `vaapi` feature
+(+ `cros-codecs`/`v4l`/`libc` deps), `Frame::DmaBuf`, the `requires_dmabuf` capture
+coupling, and `libva` in the nix devShell. See this PR's history for the prior
+implementation; the V4L2 capture (REQBUFS/EXPBUF/QBUF/DQBUF) was compile-verified
+but never runtime-tested.
+
+### NVENC ships via dlopen (no driver dependency at build or load)
+
+For the "single binary reaches the GPU at runtime" goal, NVENC must not hard-link
+the driver. The stock `nvidia-video-codec-sdk` emits
+`cargo:rustc-link-lib=nvidia-encode` / `nvcuvid`, which would make an
+`--features nvenc` binary (a) impossible to link on a GPU-less builder and (b)
+fail to even load on a machine without the NVIDIA driver (`DT_NEEDED
+libnvidia-encode.so.1`), before `backend::open`'s software fallback could run.
+
+So `nvenc` dlopens everything at runtime, like `cudarc` does for CUDA:
+
+- `cudarc/fallback-dynamic-loading` dlopens `libcuda`; `cudarc/cuda-12020` pins the
+  CUDA API version so the build needs no CUDA toolkit.
+- `nvidia-video-codec-sdk/dynamic-loading` dlopens `libnvidia-encode`. This is a
+  small fork feature (see the root `[patch.crates-io]`): the SDK already routes
+  every call through a function table built from two entry points
+  (`NvEncodeAPICreateInstance` / `GetMaxSupportedVersion`); `dynamic-loading`
+  resolves those two via `dlopen` instead of linking them, and `build.rs` skips the
+  link directives.
+
+Result, verified on a GPU-less Linux box: `--features nvenc` builds, links, and the
+test suite runs and passes (NVENC unavailable -> falls back to openh264), and the
+binary has no `libnvidia-encode` / `libcuda` `DT_NEEDED`. So one portable `moq-cli`
+can carry NVENC and use it only where the driver is present. Upstream the
+`dynamic-loading` feature and drop the patch once merged.
+
 ### Follow-ups
 
-- VAAPI backend (phase 6) in a separate PR, behind a `vaapi` feature.
-- NVENC hardware validation on Linux+GPU / CI.
-- Live camera run (capture needs camera permission; only synthetic-frame encode is
-  tested here).
+- CI builds + tests NVENC normally on Linux (`cargo {check,test} -p moq-video
+  --all-features`); the dlopen feature means no GPU/driver and no special flags are
+  needed. moq-video stays excluded from the *workspace* `--all-features` runs only
+  because its SDK crate has no macOS bindings (see `rs/justfile`'s `ci` recipe).
+- Still needed on real hardware: NVENC encode validation on a Linux+GPU box (pitch
+  alignment, forced-IDR); only synthetic-frame software encode is tested here.
+- Live camera run (capture needs camera/screen TCC permission, which a headless or
+  agent-spawned process can't obtain; run `moq-cli ... capture` from a user terminal).
 - `doc/bin/cli.md`: the `capture` device-string semantics changed (index-or-path).
 - Consider reusing NVENC input/output buffers across frames (currently allocated
   per frame to sidestep the self-referential Session borrow).
