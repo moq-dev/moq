@@ -21,14 +21,7 @@ doctest = false
 # the ALSA build dependency. On macOS it also pulls AVFoundation for the TCC
 # permission pre-check (the objc deps below are target-gated, so this is a no-op
 # elsewhere).
-capture = [
-	"dep:cpal",
-	"dep:tokio",
-	"dep:tracing",
-	"dep:block2",
-	"dep:objc2",
-	"dep:objc2-av-foundation",
-]
+capture = ["dep:cpal", "dep:tokio", "dep:tracing", "dep:block2", "dep:objc2", "dep:objc2-av-foundation"]
 
 [dependencies]
 bytes = "1"

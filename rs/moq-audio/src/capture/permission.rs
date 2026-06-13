@@ -39,6 +39,14 @@ pub(super) fn ensure_microphone_access() -> Result<(), AudioError> {
 	Ok(())
 }
 
+/// How long to wait for the user to answer the permission prompt before giving
+/// up. Generous, since the dialog blocks on a human, but bounded so a callback
+/// that never fires can't hang capture forever (the unbundled-CLI path answers
+/// near-instantly). On expiry we fall through to the stream open, where the
+/// first-buffer timeout becomes the final backstop.
+#[cfg(target_os = "macos")]
+const PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Trigger the system prompt and block (on this `spawn_blocking` thread) until
 /// the user answers. Unbundled CLIs usually get auto-denied without UI, which we
 /// surface as the same clear error.
@@ -47,17 +55,20 @@ fn request_access(media: &objc2_av_foundation::AVMediaType) -> Result<(), AudioE
 	use objc2_av_foundation::AVCaptureDevice;
 
 	let (tx, rx) = std::sync::mpsc::channel::<bool>();
+	// `handler` owns `tx` and stays alive until this function returns, so the
+	// channel never reports `Disconnected`; a never-firing callback surfaces as
+	// `Timeout` instead of hanging.
 	let handler = block2::RcBlock::new(move |granted: objc2::runtime::Bool| {
 		let _ = tx.send(granted.as_bool());
 	});
 
 	unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &handler) };
 
-	match rx.recv() {
+	match rx.recv_timeout(PROMPT_TIMEOUT) {
 		Ok(true) => Ok(()),
 		Ok(false) => Err(denied()),
-		// The completion handler was dropped without firing; fall through to the
-		// stream + timeout rather than hard-failing.
+		// Callback never fired within the window: don't hard-fail, fall through to
+		// the stream open and let the first-buffer timeout catch a real hang.
 		Err(_) => Ok(()),
 	}
 }
