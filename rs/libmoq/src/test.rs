@@ -240,10 +240,7 @@ fn publish_catalog_roundtrip() {
 
 	// Publish and consume the broadcast to verify the catalog round-trips.
 	let path = b"catalog-producer";
-	assert_eq!(
-		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
-		0
-	);
+	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
 	let catalog_cb = Callback::new();
@@ -330,10 +327,7 @@ fn raw_track_publish_consume() {
 	let track = id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len()) });
 
 	let path = b"raw-track";
-	assert_eq!(
-		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
-		0
-	);
+	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
 
@@ -452,10 +446,7 @@ fn double_close_all_resource_types() {
 		)
 	});
 	let path = b"double-close-test";
-	assert_eq!(
-		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
-		0
-	);
+	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
 	let catalog_cb = Callback::new();
@@ -522,11 +513,7 @@ fn local_announce() {
 
 	let broadcast = id(moq_publish_create());
 	let path = b"test/broadcast";
-	assert_eq!(
-		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
-		0,
-		"moq_origin_publish should succeed"
-	);
+	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let announced_id = id(cb.recv());
 
@@ -556,10 +543,7 @@ fn announced_deactivation() {
 
 	let broadcast = id(moq_publish_create());
 	let path = b"deactivate/test";
-	assert_eq!(
-		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
-		0
-	);
+	let publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let announced_id = id(cb.recv());
 	let mut info = moq_announced {
@@ -570,14 +554,17 @@ fn announced_deactivation() {
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
 	assert!(info.active);
 
-	assert_eq!(moq_publish_close(broadcast), 0);
+	// Dropping the publish guard is what unannounces the broadcast; closing the
+	// broadcast producer itself no longer deactivates the announcement.
+	assert_eq!(moq_origin_unpublish(publish), 0);
 
 	let deactivated_id = id(cb.recv());
 	assert_eq!(unsafe { moq_origin_announced_info(deactivated_id, &mut info) }, 0);
-	assert!(!info.active, "broadcast should be inactive after publisher closes");
+	assert!(!info.active, "broadcast should be inactive after unpublish");
 
 	assert_eq!(moq_origin_announced_close(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -599,10 +586,7 @@ fn local_publish_consume() {
 	});
 
 	let path = b"live";
-	assert_eq!(
-		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
-		0
-	);
+	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
 	let catalog_cb = Callback::new();
@@ -714,10 +698,7 @@ fn consume_announced_local() {
 			init.len(),
 		)
 	});
-	assert_eq!(
-		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
-		0
-	);
+	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	// First the broadcast handle, then a terminal 0 once the wait finishes.
 	let consume = id(cb.recv());
@@ -793,10 +774,7 @@ fn video_publish_consume() {
 	});
 
 	let path = b"video-test";
-	assert_eq!(
-		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
-		0
-	);
+	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
 	let catalog_cb = Callback::new();
@@ -904,10 +882,7 @@ fn multiple_frames_ordering() {
 	});
 
 	let path = b"ordering-test";
-	assert_eq!(
-		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
-		0
-	);
+	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
 	let catalog_cb = Callback::new();
@@ -973,10 +948,7 @@ fn catalog_update_on_new_track() {
 	});
 
 	let path = b"catalog-update";
-	assert_eq!(
-		unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) },
-		0
-	);
+	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
 	let catalog_cb = Callback::new();
