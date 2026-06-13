@@ -1,5 +1,6 @@
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
+import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 
@@ -271,7 +272,7 @@ export class Source {
 			const config = available[target.name];
 			effect.set(this.#output.track, target.name);
 			effect.set(this.#output.config, config);
-			effect.set(this.#output.jitter, config.jitter as Moq.Time.Milli | undefined);
+			effect.set(this.#output.jitter, config.jitter !== undefined ? Time.Milli(config.jitter) : undefined);
 			return;
 		}
 
@@ -301,7 +302,7 @@ export class Source {
 
 		// Use catalog jitter if available, otherwise estimate from framerate.
 		const jitter = config.jitter ?? (config.framerate ? Math.ceil(1000 / config.framerate) : undefined);
-		effect.set(this.#output.jitter, jitter as Moq.Time.Milli | undefined);
+		effect.set(this.#output.jitter, jitter !== undefined ? Time.Milli(jitter) : undefined);
 	}
 
 	/**

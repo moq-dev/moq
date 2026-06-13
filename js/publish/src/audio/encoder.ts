@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
-import type { Time } from "@moq/net";
+import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Capture from "./capture";
 import { type Kind, normalizeSource, type Source } from "./types";
@@ -10,7 +10,7 @@ import { type Kind, normalizeSource, type Source } from "./types";
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
 const OPUS_BITRATE_PER_CHANNEL = 32_000;
-const OPUS_FRAME_DURATION_MS = 20;
+const OPUS_FRAME_DURATION = Time.Milli(20);
 const AAC_BITRATE_PER_CHANNEL = 64_000;
 const AAC_FRAME_SAMPLES = 1024; // AAC-LC encodes a fixed 1024 samples per frame.
 
@@ -42,7 +42,8 @@ export type OpusConfig = {
 	mime: "opus";
 
 	bitrate?: number; // bits/sec, defaults to channelCount * 32kbps
-	frameDuration?: number; // ms, Opus supports 2.5-60ms, defaults to 20ms (the real-time default)
+	// The type carries the unit (ms): build with Time.Milli(20). Opus supports 2.5-60ms, defaults to 20ms.
+	frameDuration?: Time.Milli;
 	complexity?: number; // 0-10, higher is better quality but more CPU
 	packetlossperc?: number; // 0-100, expected loss the encoder optimizes for
 	useinbandfec?: boolean; // in-band forward error correction
@@ -225,7 +226,7 @@ export class Encoder {
 			bitrate: Catalog.u53(codec.bitrate ?? captured.channelCount * OPUS_BITRATE_PER_CHANNEL),
 			container: { kind: "legacy" } as const,
 			// jitter doubles as the Opus frame duration; toEncoderConfig converts it to µs for WebCodecs.
-			jitter: Catalog.u53(codec.frameDuration ?? OPUS_FRAME_DURATION_MS),
+			jitter: Catalog.u53(codec.frameDuration ?? OPUS_FRAME_DURATION),
 		};
 	}
 
@@ -424,7 +425,7 @@ function toEncoderConfig(
 
 		// jitter carries the frame duration in ms; WebCodecs wants µs.
 		if (config.jitter !== undefined) {
-			opus.frameDuration = config.jitter * 1000;
+			opus.frameDuration = Time.Micro.fromMilli(Time.Milli(config.jitter));
 		}
 
 		if (Object.keys(opus).length > 0) {

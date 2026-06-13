@@ -5,8 +5,8 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 /** Latency: `"real-time"` auto-computes jitter from RTT; a `Time.Milli` sets a fixed jitter. */
 export type Latency = "real-time" | Time.Milli;
 
-const MIN_JITTER = 20 as Time.Milli;
-const FALLBACK_JITTER = 100 as Time.Milli;
+const MIN_JITTER = Time.Milli(20);
+const FALLBACK_JITTER = Time.Milli(100);
 
 type SyncInput = {
 	// The latency setting: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter.
@@ -94,7 +94,7 @@ export class Sync {
 			this.#minRtt = this.#minRtt !== undefined ? Math.min(this.#minRtt, rtt) : rtt;
 
 			// Buffer enough for a retransmit (1 RTT for ACK + retransmit).
-			const jitter = Math.max(MIN_JITTER, this.#minRtt * 1.25) as Time.Milli;
+			const jitter = Time.Milli(Math.max(MIN_JITTER, this.#minRtt * 1.25));
 			this.#output.jitter.set(jitter);
 			return;
 		}

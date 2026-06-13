@@ -11,8 +11,8 @@ import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
 
 // The amount of time to wait before considering the video to be buffering.
-const BUFFERING = 500 as Time.Milli;
-const SWITCH = 100 as Time.Milli;
+const BUFFERING = Time.Milli(500);
+const SWITCH = Time.Milli(100);
 
 type DecoderInput = {
 	// Whether to download the video track. Wired from the renderer's output by the parent.

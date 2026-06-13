@@ -6,7 +6,7 @@ import { Compression, decompress } from "../compression.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
-import type * as Time from "../time.ts";
+import * as Time from "../time.ts";
 import type { TrackProducer } from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
@@ -540,7 +540,7 @@ export class Subscriber {
 				if (!probe) break;
 				this.#recvBandwidth.set(probe.bitrate ?? undefined);
 				if (this.#rtt && probe.rtt !== undefined) {
-					this.#rtt.set(probe.rtt as Time.Milli);
+					this.#rtt.set(Time.Milli(probe.rtt));
 				}
 			}
 		} catch (err: unknown) {

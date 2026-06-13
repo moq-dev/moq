@@ -224,7 +224,7 @@ export default class MoqWatch extends HTMLElement {
 
 	#setLatencyNumber(value: string | null) {
 		const parsed = value ? Number.parseFloat(value) : Number.NaN;
-		this.controls.latency.set((Number.isFinite(parsed) ? parsed : 100) as Time.Milli);
+		this.controls.latency.set(Moq.Time.Milli(Number.isFinite(parsed) ? parsed : 100));
 	}
 
 	attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null) {
@@ -325,7 +325,7 @@ export default class MoqWatch extends HTMLElement {
 
 	/** @deprecated Use `latency = <number>` instead. */
 	set jitter(value: number) {
-		this.controls.latency.set(value as Time.Milli);
+		this.controls.latency.set(Moq.Time.Milli(value));
 	}
 
 	get catalogFormat(): CatalogFormat | undefined {

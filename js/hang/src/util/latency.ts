@@ -21,7 +21,7 @@ export class Latency {
 
 	signals = new Effect();
 
-	#combined = new Signal<Moq.Time.Milli>(0 as Moq.Time.Milli);
+	#combined = new Signal<Moq.Time.Milli>(Time.Milli(0));
 	readonly combined: Signal<Moq.Time.Milli> = this.#combined;
 
 	constructor(props: LatencyProps) {
@@ -45,7 +45,7 @@ export class Latency {
 		}
 		jitter ??= 0;
 
-		const latency = Time.Milli.add(jitter as Moq.Time.Milli, buffer);
+		const latency = Time.Milli.add(Time.Milli(jitter), buffer);
 		this.#combined.set(latency);
 	}
 

@@ -57,7 +57,7 @@ export function TrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 		async pull(controller) {
 			while (true) {
 				const now = Time.Milli.now();
-				if (Time.Milli.sub(now, last) < ((1000 / frameRate) as Time.Milli)) {
+				if (Time.Milli.sub(now, last) < Time.Milli(1000 / frameRate)) {
 					await new Promise((r) => requestAnimationFrame(r));
 					continue;
 				}

@@ -1,5 +1,6 @@
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
+import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 
@@ -123,7 +124,7 @@ export class Source {
 		const codecJitter = selected.config.jitter ?? defaultAudioJitter(selected.config) ?? 0;
 		const overhead = Math.ceil((WORKLET_QUANTUM / selected.config.sampleRate) * 1000);
 		const jitter = codecJitter + overhead;
-		effect.set(this.#output.jitter, jitter as Moq.Time.Milli);
+		effect.set(this.#output.jitter, Time.Milli(jitter));
 	}
 
 	/**
