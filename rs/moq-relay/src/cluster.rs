@@ -237,8 +237,10 @@ impl DialMap {
 #[non_exhaustive]
 #[group(id = "cluster-config")]
 pub struct ClusterConfig {
-	/// Connect to one or more other cluster nodes. Accepts a comma-separated list on the CLI
-	/// or repeat the flag; in config files use a TOML array.
+	/// Connect to one or more other cluster nodes. Each peer is a full URL, e.g.
+	/// `https://host/?jwt=TOKEN`; a bare host or `host:port` is deprecated but
+	/// still accepted (wrapped in `https://.../`). Accepts a comma-separated list
+	/// on the CLI or repeat the flag; in config files use a TOML array.
 	#[serde(alias = "connect")]
 	#[arg(
 		id = "cluster-connect",
@@ -294,7 +296,10 @@ pub struct ClusterConfig {
 	#[serde(default, deserialize_with = "deserialize_bool_or_string")]
 	pub mesh: Option<String>,
 
-	/// Use the token in this file when connecting to other nodes.
+	/// JWT presented on outbound cluster dials, read from this file. Applied to
+	/// any peer whose URL doesn't already carry a `?jwt=` (so it authenticates
+	/// gossip- and `connect_api`-discovered peers, whose addresses can't embed a
+	/// token). For static `--cluster-connect` peers, prefer an inline `?jwt=`.
 	#[arg(id = "cluster-token", long = "cluster-token", env = "MOQ_CLUSTER_TOKEN")]
 	pub token: Option<PathBuf>,
 
@@ -463,6 +468,10 @@ impl Cluster {
 			);
 		}
 
+		// Token presented on outbound dials whose URL doesn't already carry a
+		// `?jwt=`. This is how gossip- and connect_api-discovered peers (whose
+		// addresses can't carry an inline token) authenticate, so it isn't
+		// deprecated; for static `connect` peers, an inline `?jwt=` is preferred.
 		let token = match &self.config.token {
 			Some(path) => std::fs::read_to_string(path)
 				.context("failed to read cluster token")?
@@ -484,6 +493,13 @@ impl Cluster {
 		for peer in &self.config.connect {
 			if dialed.contains(peer) {
 				continue;
+			}
+			if is_legacy_peer(peer) {
+				tracing::warn!(
+					%peer,
+					"DEPRECATED: pass --cluster-connect as a full URL like \"https://<host>/?jwt=TOKEN\"; \
+					 a bare host or \"host:port\" is deprecated and will be removed in a future release"
+				);
 			}
 			let this = self.clone();
 			let token = token.clone();
@@ -760,8 +776,11 @@ impl Cluster {
 
 	#[tracing::instrument("remote", skip_all, err, fields(%remote))]
 	async fn run_remote(self, remote: &str, token: String) -> anyhow::Result<()> {
-		let mut url = Url::parse(&format!("https://{remote}/"))?;
-		if !token.is_empty() {
+		let mut url = peer_url(remote)?;
+		// Apply the shared cluster token unless the URL already carries its own
+		// `?jwt=` (an inline token on a static `connect` peer wins; the shared
+		// token still covers discovered peers that have none).
+		if !token.is_empty() && !url.query_pairs().any(|(key, _)| key == "jwt") {
 			url.query_pairs_mut().append_pair("jwt", &token);
 		}
 
@@ -823,6 +842,28 @@ impl Cluster {
 /// treated as a local file path, which needs no TLS client).
 fn connect_api_is_http(source: &str) -> bool {
 	Url::parse(source).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+/// Resolve a cluster peer to the URL we dial.
+///
+/// The modern form is a full URL, e.g. `https://host/?jwt=TOKEN`, which is used
+/// verbatim. A bare host or `host:port` is still accepted for backwards
+/// compatibility and wrapped in `https://.../` (callers warn about this legacy
+/// form for user-supplied `--cluster-connect` entries).
+fn peer_url(peer: &str) -> anyhow::Result<Url> {
+	// A full URL has a scheme separator; a bare host or `host:port` does not
+	// (and `Url::parse` would otherwise mis-read `host:port` as scheme `host`).
+	if peer.contains("://") {
+		return Url::parse(peer).with_context(|| format!("invalid cluster peer URL: {peer}"));
+	}
+
+	Url::parse(&format!("https://{peer}/")).with_context(|| format!("invalid cluster peer host: {peer}"))
+}
+
+/// Whether a peer string uses the deprecated bare-host / `host:port` form rather
+/// than a full URL. Used to warn on legacy `--cluster-connect` entries.
+fn is_legacy_peer(peer: &str) -> bool {
+	!peer.contains("://")
 }
 
 /// Deserialize a field that accepts either a TOML boolean or string into an
@@ -1153,6 +1194,25 @@ mod tests {
 		let (gossip, node) = cluster.resolve_mesh().expect("legacy mesh url resolves");
 		assert!(gossip);
 		assert_eq!(node.as_deref(), Some("rendezvous.example.com:4443"));
+	}
+
+	/// `--cluster-connect` accepts a full URL verbatim (preserving its `?jwt=`)
+	/// and falls back to wrapping a bare host / `host:port` in `https://.../`.
+	#[test]
+	fn peer_url_full_url_and_legacy_host() {
+		// Full URL used verbatim, including its jwt query.
+		assert_eq!(
+			peer_url("https://cdn.example.com/?jwt=abc").unwrap().as_str(),
+			"https://cdn.example.com/?jwt=abc"
+		);
+		// Bare host (legacy) wrapped in https://.../.
+		assert_eq!(peer_url("cdn.example.com").unwrap().as_str(), "https://cdn.example.com/");
+		// `host:port` (legacy) is NOT mis-parsed as scheme `host`.
+		assert_eq!(peer_url("localhost:4443").unwrap().as_str(), "https://localhost:4443/");
+
+		assert!(is_legacy_peer("cdn.example.com"));
+		assert!(is_legacy_peer("localhost:4443"));
+		assert!(!is_legacy_peer("https://cdn.example.com/?jwt=abc"));
 	}
 
 	/// A legacy mesh URL that disagrees with an explicit `--cluster-node` is a
