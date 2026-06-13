@@ -38,21 +38,19 @@ ci FILES="":
     fi
     just check --workspace
     cargo check --workspace --no-default-features
-    # moq-video's hardware-encoder features link vendor SDK libs (NVENC's
-    # libnvidia-encode) that a GPU-less CI runner can't provide, so blanket
-    # --all-features can't build or link it. Exclude it from the workspace-wide
-    # runs and cover it explicitly: a check-only pass for the NVENC backend
-    # (the `ci-check` feature skips the link step), then tests on its default
-    # features. See rs/moq-video/Cargo.toml for the `nvenc` / `nvenc-ci` split.
+    # NVENC's SDK crate has no macOS bindings, so moq-video can't be part of the
+    # blanket --all-features runs on a Mac. Exclude it and cover it on Linux only,
+    # where the `nvenc` feature dlopens libnvidia-encode (so it builds, links, and
+    # falls back to software without a GPU/driver).
     cargo check --workspace --all-features --exclude moq-video
-    # NVENC is Linux-only and its SDK crate has no macOS bindings, so only
-    # compile-check it on Linux (where release builds enable the feature).
-    if [[ "$(uname)" == "Linux" ]]; then
-    	cargo check -p moq-video --all-targets --features nvenc-ci
-    fi
     cargo deny check --show-stats
     cargo test --workspace --all-targets --all-features --exclude moq-video
-    cargo test -p moq-video --all-targets
+    if [[ "$(uname)" == "Linux" ]]; then
+    	cargo check -p moq-video --all-targets --all-features
+    	cargo test -p moq-video --all-targets --all-features
+    else
+    	cargo test -p moq-video --all-targets
+    fi
     just build
 
 # Auto-fix clippy/format/shear/sort, then sweep stale target/.

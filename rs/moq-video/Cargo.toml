@@ -16,21 +16,24 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 doctest = false
 
 [features]
-# NVIDIA NVENC hardware encoder (Linux only). Off by default; release builds
-# for Linux enable it. cudarc loads CUDA dynamically (no build-time CUDA), and
-# the NVENC API lives in the driver, so this is not a build dependency.
-nvenc = ["dep:nvidia-video-codec-sdk", "cudarc/dynamic-loading", "cudarc/cuda-12020"]
-# Compile-check NVENC without the SDK present. `nvidia-video-codec-sdk`'s
-# build.rs panics if it can't find `libnvidia-encode.so`; its `ci-check` feature
-# skips that link step so CI (and `--all-features`) can type-check the backend on
-# a machine with no NVIDIA driver. Don't use for real builds: it produces a
-# binary that won't link against NVENC.
-nvenc-ci = ["nvenc", "nvidia-video-codec-sdk/ci-check"]
+# NVIDIA NVENC hardware encoder (Linux). Off by default; enable for a build that
+# should use NVENC where present. Everything is dlopen'd at runtime: cudarc loads
+# CUDA, and nvidia-video-codec-sdk's `dynamic-loading` (a fork feature, see the
+# root [patch.crates-io]) loads libnvidia-encode. So an nvenc-enabled binary still
+# links on a GPU-less builder and still starts on machines without the NVIDIA
+# driver, falling back to software (see backend::open). `cuda-12020` pins the CUDA
+# API version so the build needs no CUDA toolkit.
+nvenc = [
+    "dep:nvidia-video-codec-sdk",
+    "nvidia-video-codec-sdk/dynamic-loading",
+    "cudarc/fallback-dynamic-loading",
+    "cudarc/cuda-12020",
+]
 
 [dependencies]
 anyhow = "1"
 bytes = "1"
-cudarc = { version = "0.16", optional = true, default-features = false, features = ["driver"] }
+cudarc = { version = "0.19", optional = true, default-features = false, features = ["driver"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # NVENC backend, gated behind the `nvenc` feature + a linux cfg. Listed here

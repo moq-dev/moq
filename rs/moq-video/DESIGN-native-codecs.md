@@ -372,11 +372,38 @@ coupling, and `libva` in the nix devShell. See this PR's history for the prior
 implementation; the V4L2 capture (REQBUFS/EXPBUF/QBUF/DQBUF) was compile-verified
 but never runtime-tested.
 
+### NVENC ships via dlopen (no driver dependency at build or load)
+
+For the "single binary reaches the GPU at runtime" goal, NVENC must not hard-link
+the driver. The stock `nvidia-video-codec-sdk` emits
+`cargo:rustc-link-lib=nvidia-encode` / `nvcuvid`, which would make an
+`--features nvenc` binary (a) impossible to link on a GPU-less builder and (b)
+fail to even load on a machine without the NVIDIA driver (`DT_NEEDED
+libnvidia-encode.so.1`), before `backend::open`'s software fallback could run.
+
+So `nvenc` dlopens everything at runtime, like `cudarc` does for CUDA:
+
+- `cudarc/fallback-dynamic-loading` dlopens `libcuda`; `cudarc/cuda-12020` pins the
+  CUDA API version so the build needs no CUDA toolkit.
+- `nvidia-video-codec-sdk/dynamic-loading` dlopens `libnvidia-encode`. This is a
+  small fork feature (see the root `[patch.crates-io]`): the SDK already routes
+  every call through a function table built from two entry points
+  (`NvEncodeAPICreateInstance` / `GetMaxSupportedVersion`); `dynamic-loading`
+  resolves those two via `dlopen` instead of linking them, and `build.rs` skips the
+  link directives.
+
+Result, verified on a GPU-less Linux box: `--features nvenc` builds, links, and the
+test suite runs and passes (NVENC unavailable -> falls back to openh264), and the
+binary has no `libnvidia-encode` / `libcuda` `DT_NEEDED`. So one portable `moq-cli`
+can carry NVENC and use it only where the driver is present. Upstream the
+`dynamic-loading` feature and drop the patch once merged.
+
 ### Follow-ups
 
-- CI compile-checks NVENC on Linux via the `nvenc-ci` feature, which enables
-  `nvidia-video-codec-sdk/ci-check` (skips the `libnvidia-encode.so` link panic) so
-  `--all-features` type-checks the backend without an NVIDIA driver.
+- CI builds + tests NVENC normally on Linux (`cargo {check,test} -p moq-video
+  --all-features`); the dlopen feature means no GPU/driver and no special flags are
+  needed. moq-video stays excluded from the *workspace* `--all-features` runs only
+  because its SDK crate has no macOS bindings (see `rs/justfile`'s `ci` recipe).
 - Still needed on real hardware: NVENC encode validation on a Linux+GPU box (pitch
   alignment, forced-IDR); only synthetic-frame software encode is tested here.
 - Live camera run (capture needs camera/screen TCC permission, which a headless or
