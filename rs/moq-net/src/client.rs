@@ -33,6 +33,12 @@ impl Client {
 		self
 	}
 
+	/// Deprecated alias for [`with_subscribe`](Self::with_subscribe).
+	#[deprecated(note = "renamed to `with_subscribe`")]
+	pub fn with_consume(self, subscribe: OriginProducer) -> Self {
+		self.with_subscribe(subscribe)
+	}
+
 	/// Attach a tier-scoped [`StatsHandle`]. Per-broadcast and per-subscription
 	/// counters will be bumped through this handle for the lifetime of the session.
 	/// Pass [`StatsHandle::default`] (a no-op handle) to opt out.

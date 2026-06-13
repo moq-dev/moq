@@ -235,6 +235,12 @@ impl Server {
 		self
 	}
 
+	/// Deprecated alias for [`with_subscribe`](Self::with_subscribe).
+	#[deprecated(note = "renamed to `with_subscribe`")]
+	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
+		self.with_subscribe(subscribe)
+	}
+
 	/// Attach a tier-scoped [`moq_net::StatsHandle`] to all sessions accepted by this server.
 	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
 		self.moq = self.moq.with_stats(stats);
@@ -537,6 +543,12 @@ impl Request {
 	pub fn with_subscribe(mut self, subscribe: moq_net::OriginProducer) -> Self {
 		self.server = self.server.with_subscribe(subscribe);
 		self
+	}
+
+	/// Deprecated alias for [`with_subscribe`](Self::with_subscribe).
+	#[deprecated(note = "renamed to `with_subscribe`")]
+	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
+		self.with_subscribe(subscribe)
 	}
 
 	/// Attach a tier-scoped [`moq_net::StatsHandle`] to this session.

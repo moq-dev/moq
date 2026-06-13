@@ -206,6 +206,12 @@ impl Client {
 		self
 	}
 
+	/// Deprecated alias for [`with_subscribe`](Self::with_subscribe).
+	#[deprecated(note = "renamed to `with_subscribe`")]
+	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
+		self.with_subscribe(subscribe)
+	}
+
 	/// Attach a tier-scoped [`moq_net::StatsHandle`] to all sessions opened by this client.
 	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
 		self.moq = self.moq.with_stats(stats);
