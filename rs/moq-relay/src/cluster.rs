@@ -491,7 +491,8 @@ impl Cluster {
 		let mut tasks = tokio::task::JoinSet::new();
 
 		for peer in &self.config.connect {
-			if dialed.contains(peer) {
+			let key = canonicalize_peer_key(peer);
+			if dialed.contains(&key) {
 				continue;
 			}
 			if is_legacy_peer(peer) {
@@ -503,14 +504,13 @@ impl Cluster {
 			}
 			let this = self.clone();
 			let token = token.clone();
-			let peer = peer.clone();
 			let peer_for_task = peer.clone();
 			let handle = tasks.spawn(async move {
 				if let Err(err) = this.run_remote(&peer_for_task, token).await {
 					tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
 				}
 			});
-			dialed.insert(peer, handle, DialSource::Static);
+			dialed.insert(key, handle, DialSource::Static);
 		}
 
 		if let Some(source) = self.config.connect_api.clone() {
@@ -597,12 +597,13 @@ impl Cluster {
 						continue;
 					}
 					let peer = peer.to_owned();
+					let key = canonicalize_peer_key(&peer);
 					match announced {
 						Some(_) => {
-							if dialed.contains(&peer) {
+							if dialed.contains(&key) {
 								// Already dialed (possibly via another source). Mark gossip as
 								// a wanter and cancel any pending stale-sweep.
-								if dialed.add_source(&peer, DialSource::Gossip) {
+								if dialed.add_source(&key, DialSource::Gossip) {
 									tracing::debug!(%peer, "reannounce within sweep window; keeping dial");
 								}
 								continue;
@@ -616,10 +617,10 @@ impl Cluster {
 									tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
 								}
 							});
-							dialed.insert(peer, handle.abort_handle(), DialSource::Gossip);
+							dialed.insert(key, handle.abort_handle(), DialSource::Gossip);
 						}
 						None => {
-							dialed.mark_unannounced(&peer, Instant::now());
+							dialed.mark_unannounced(&key, Instant::now());
 						}
 					}
 				}
@@ -755,9 +756,14 @@ impl Cluster {
 	/// are new and drop API peers that disappeared. The relay's own [`node`] URL
 	/// is filtered out so it never dials itself.
 	fn apply_peer_list(&self, list: Vec<String>, node: &Option<String>, token: &str, dialed: &DialMap) {
+		// Dedupe against the shared dial map (and filter out self) on the canonical
+		// key, so an API entry matches the same peer reached via `connect`/gossip
+		// regardless of how each spells it. reconcile_api then yields canonical keys.
+		let self_key = node.as_deref().map(canonicalize_peer_key);
 		let desired: HashSet<String> = list
 			.into_iter()
-			.filter(|peer| Some(peer.as_str()) != node.as_deref())
+			.map(|peer| canonicalize_peer_key(&peer))
+			.filter(|key| Some(key) != self_key.as_ref())
 			.collect();
 
 		for peer in dialed.reconcile_api(&desired) {
@@ -778,9 +784,10 @@ impl Cluster {
 	async fn run_remote(self, remote: &str, token: String) -> anyhow::Result<()> {
 		let mut url = peer_url(remote)?;
 		// Apply the shared cluster token unless the URL already carries its own
-		// `?jwt=` (an inline token on a static `connect` peer wins; the shared
-		// token still covers discovered peers that have none).
-		if !token.is_empty() && !url.query_pairs().any(|(key, _)| key == "jwt") {
+		// non-empty `?jwt=` (an inline token on a static `connect` peer wins; the
+		// shared token still covers discovered peers that have none). An empty
+		// `?jwt=` counts as absent, matching `AuthParams::from_url`.
+		if !token.is_empty() && !url.query_pairs().any(|(key, value)| key == "jwt" && !value.is_empty()) {
 			url.query_pairs_mut().append_pair("jwt", &token);
 		}
 
@@ -864,6 +871,22 @@ fn peer_url(peer: &str) -> anyhow::Result<Url> {
 /// than a full URL. Used to warn on legacy `--cluster-connect` entries.
 fn is_legacy_peer(peer: &str) -> bool {
 	!peer.contains("://")
+}
+
+/// Canonical dedupe key for a cluster peer, so the same relay reached via
+/// different spellings (a full URL vs a bare `host:port`, with or without an
+/// inline `?jwt=`) shares one [`DialMap`] entry instead of opening a duplicate
+/// session. Drops the query (the jwt isn't part of a peer's identity) and lets
+/// `Url` normalize the scheme, host case, and default port. Falls back to the
+/// raw string if the peer can't be parsed.
+fn canonicalize_peer_key(peer: &str) -> String {
+	match peer_url(peer) {
+		Ok(mut url) => {
+			url.set_query(None);
+			url.into()
+		}
+		Err(_) => peer.to_string(),
+	}
 }
 
 /// Deserialize a field that accepts either a TOML boolean or string into an
@@ -1213,6 +1236,28 @@ mod tests {
 		assert!(is_legacy_peer("cdn.example.com"));
 		assert!(is_legacy_peer("localhost:4443"));
 		assert!(!is_legacy_peer("https://cdn.example.com/?jwt=abc"));
+	}
+
+	/// The same relay spelled as a bare `host:port`, a full URL, or a URL with an
+	/// inline jwt all canonicalize to one key, so they share a single dial entry.
+	#[tokio::test]
+	async fn canonicalize_peer_key_dedupes_spellings() {
+		let key = canonicalize_peer_key("host:4443");
+		assert_eq!(key, "https://host:4443/");
+		assert_eq!(canonicalize_peer_key("https://host:4443/"), key);
+		assert_eq!(canonicalize_peer_key("https://host:4443/?jwt=abc"), key);
+
+		// A URL form and the legacy host:port form dedupe against each other.
+		let dialed = DialMap::default();
+		dialed.insert(
+			canonicalize_peer_key("https://host:4443/?jwt=abc"),
+			placeholder_handle(),
+			DialSource::Static,
+		);
+		assert!(dialed.contains(&canonicalize_peer_key("host:4443")));
+
+		// Different ports stay distinct.
+		assert_ne!(canonicalize_peer_key("host:4443"), canonicalize_peer_key("host:5555"));
 	}
 
 	/// A legacy mesh URL that disagrees with an explicit `--cluster-node` is a
