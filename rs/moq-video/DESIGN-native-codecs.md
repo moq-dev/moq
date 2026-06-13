@@ -240,7 +240,7 @@ to openh264).
 `open_backend(kind, config)` builds an ordered candidate list and returns the
 first that opens, mirroring today's `open_encoder` loop:
 
-- `Auto`   -> [videotoolbox | nvenc | vaapi] (cfg-filtered) then openh264.
+- `Auto`   -> \[videotoolbox | nvenc | vaapi] (cfg-filtered) then openh264.
 - `Hardware` -> hardware-only; `NoEncoder` if none opens.
 - `Software` -> openh264 only.
 - `Named(id)` -> that backend only.
@@ -254,6 +254,7 @@ A backend "fails to open" (driver missing, no device) the same way an ffmpeg
 - **macOS**: VideoToolbox + openh264 link only system frameworks + a vendored
   static lib. One brew bottle per arch, no `Depends`.
 - **Linux**: one binary that
+
   - `dlopen`s `libnvidia-encode.so` if an NVIDIA driver is present (no build dep),
   - links `libva` (tiny, stable soname across releases) for Intel/AMD; package
     `Depends: libva2`, `Recommends: intel-media-va-driver | mesa-va-drivers`,
@@ -275,7 +276,7 @@ A backend "fails to open" (driver missing, no device) the same way an ffmpeg
    hardware).
 4. **NVENC backend** on Linux behind its feature.
 5. **Capture swap to nokhwa; drop `ffmpeg-next`.** Delete the ffmpeg capture +
-   scaler, remove the dep from `Cargo.toml`, update [CLAUDE.md cross-package
+   scaler, remove the dep from `Cargo.toml`, update \[CLAUDE.md cross-package
    notes], `doc/bin/cli.md`, the `capture` feature wiring in `moq-cli`, and the
    packaging recipes. After this ffmpeg is gone and the binary is GPU-accelerated
    on macOS/NVIDIA, software (openh264) elsewhere.
