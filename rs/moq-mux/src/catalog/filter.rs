@@ -147,7 +147,11 @@ impl<S: Stream> Stream for Filter<S> {
 
 /// Apply the active video / audio filters to a raw snapshot, dropping
 /// renditions that don't match. Axes with no filter pass through unchanged.
-fn apply<E: CatalogExt>(mut catalog: Catalog<E>, video: Option<&FilterVideo>, audio: Option<&FilterAudio>) -> Catalog<E> {
+fn apply<E: CatalogExt>(
+	mut catalog: Catalog<E>,
+	video: Option<&FilterVideo>,
+	audio: Option<&FilterAudio>,
+) -> Catalog<E> {
 	if let Some(filter) = video {
 		catalog.video.renditions.retain(|name, config| {
 			if let Some(want) = &filter.name

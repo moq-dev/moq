@@ -556,7 +556,8 @@ pub(crate) fn server_config(config: &Server, alpn: Vec<Vec<u8>>) -> Result<Arc<r
 	let certs = Arc::new(certs);
 
 	// TCP can negotiate TLS 1.2 as well as 1.3, unlike QUIC which is 1.3-only.
-	let builder = rustls::ServerConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
+	let builder =
+		rustls::ServerConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
 
 	let mut tls = if config.root.is_empty() {
 		builder.with_no_client_auth().with_cert_resolver(certs)

@@ -76,7 +76,7 @@ async fn dynamic_track_request() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let track_consumer = consumer.subscribe_track("events".into()).unwrap();
+	let track_consumer = consumer.subscribe_track("events".into()).await.unwrap();
 
 	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
 		.await
@@ -103,7 +103,7 @@ async fn dynamic_track_request_can_abort() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let _track_consumer = consumer.subscribe_track("unknown".into()).unwrap();
+	let _track_consumer = consumer.subscribe_track("unknown".into()).await.unwrap();
 
 	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
 		.await

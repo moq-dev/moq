@@ -243,7 +243,7 @@ async def test_dynamic_track_request():
     broadcast = moq.BroadcastProducer()
     dynamic = broadcast.dynamic()
     consumer = broadcast.consume()
-    track_consumer = consumer.subscribe_track("events")
+    track_consumer = await consumer.subscribe_track("events")
 
     track = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
     assert track.name == "events"

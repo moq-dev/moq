@@ -162,7 +162,11 @@ impl<S: Stream> Stream for Target<S> {
 
 /// Apply the active video / audio targets to a raw snapshot, narrowing each
 /// axis to at most one rendition. Axes with no target pass through unchanged.
-fn apply<E: CatalogExt>(mut catalog: Catalog<E>, video: Option<&TargetVideo>, audio: Option<&TargetAudio>) -> Catalog<E> {
+fn apply<E: CatalogExt>(
+	mut catalog: Catalog<E>,
+	video: Option<&TargetVideo>,
+	audio: Option<&TargetAudio>,
+) -> Catalog<E> {
 	if let Some(target) = video {
 		if let Some(name) = select_video(&catalog.video.renditions, target) {
 			let mut kept = BTreeMap::new();

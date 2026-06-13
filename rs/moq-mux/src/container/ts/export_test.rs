@@ -323,7 +323,12 @@ async fn export_scte35_roundtrip() {
 	// Create and write the .scte35 cue track BEFORE moving `broadcast` into
 	// `Import` (which consumes it); the producer stays alive so the exporter can
 	// subscribe to the retained track.
-	let scte = broadcast.unique_track(".scte35", moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE)).unwrap();
+	let scte = broadcast
+		.unique_track(
+			".scte35",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)
+		.unwrap();
 	let scte_name = scte.name().to_string();
 	{
 		let mut cfg = scte35::Config::new();
@@ -349,7 +354,12 @@ async fn export_scte35_roundtrip() {
 
 	// `import`, `catalog`, and `scte_producer` stay alive: retained tracks. The
 	// exporter must carry the extension to see the scte35 section.
-	let ts = drain_with(Export::with_scte35(consumer, crate::catalog::CatalogFormat::Hang).await.unwrap()).await;
+	let ts = drain_with(
+		Export::with_scte35(consumer, crate::catalog::CatalogFormat::Hang)
+			.await
+			.unwrap(),
+	)
+	.await;
 	assert_packet_aligned(&ts);
 
 	// The first PMT advertises the SCTE-35 ES (0x86) and the CUEI descriptor.
@@ -390,7 +400,7 @@ async fn export_scte35_roundtrip() {
 	assert_eq!(snapshot.scte35.renditions.len(), 1, "round-trip lost the SCTE-35 track");
 	let name = snapshot.scte35.renditions.keys().next().unwrap();
 
-	let track = consumer2.track(&name).unwrap().subscribe(None).unwrap().await.unwrap();
+	let track = consumer2.track(name).unwrap().subscribe(None).unwrap().await.unwrap();
 	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy);
 	let frame = scte_reader
 		.read()
@@ -415,7 +425,12 @@ async fn scte35_without_video_export_is_rejected() {
 			.unwrap();
 
 	// A scte35 cue track and nothing else.
-	let scte = broadcast.unique_track(".scte35", moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE)).unwrap();
+	let scte = broadcast
+		.unique_track(
+			".scte35",
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)
+		.unwrap();
 	let scte_name = scte.name().to_string();
 	{
 		let mut cfg = scte35::Config::new();
@@ -434,7 +449,9 @@ async fn scte35_without_video_export_is_rejected() {
 	producer.finish_group().unwrap();
 	producer.finish().unwrap();
 
-	let mut exporter = Export::with_scte35(consumer, crate::catalog::CatalogFormat::Hang).await.unwrap();
+	let mut exporter = Export::with_scte35(consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap();
 	let err = loop {
 		match tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
 			Ok(Ok(Some(_))) => continue,
@@ -563,7 +580,12 @@ async fn scte35_fixtures_survive_roundtrip() {
 		);
 
 		// Export and re-ingest.
-		let ts = drain_with(Export::with_scte35(consumer, crate::catalog::CatalogFormat::Hang).await.unwrap()).await;
+		let ts = drain_with(
+			Export::with_scte35(consumer, crate::catalog::CatalogFormat::Hang)
+				.await
+				.unwrap(),
+		)
+		.await;
 		assert_packet_aligned(&ts);
 
 		let mut broadcast2 = moq_net::BroadcastInfo::new().produce();
