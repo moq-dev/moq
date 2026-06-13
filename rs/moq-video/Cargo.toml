@@ -28,26 +28,29 @@ vaapi = ["dep:cros-codecs"]
 [dependencies]
 anyhow = "1"
 bytes = "1"
+# VAAPI H.264 encoder + dmabuf import. Gated behind `vaapi` + a linux cfg; pinned
+# (pre-1.0 churns). Pulls libva (cros-libva) when the feature is on.
+cros-codecs = { version = "=0.0.6", optional = true, default-features = false, features = ["vaapi"] }
+cudarc = { version = "0.16", optional = true, default-features = false, features = ["driver"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Pure-Rust webcam capture (avfoundation / v4l2 / msmf), decoding MJPEG/YUYV to
 # RGBA. Platform input backends are enabled per-target below.
 nokhwa = { version = "0.10.11", default-features = false, features = ["decoding"] }
-# Vendored, statically-linked software H.264 fallback (no system dependency).
-openh264 = "0.9.3"
 # NVENC backend, gated behind the `nvenc` feature + a linux cfg. Listed here
 # (not under a target table) so the feature can reference it on any host; the
 # code that uses it is `cfg(target_os = "linux")`.
 nvidia-video-codec-sdk = { version = "0.4", optional = true }
-cudarc = { version = "0.16", optional = true, default-features = false, features = ["driver"] }
-# VAAPI H.264 encoder + dmabuf import. Gated behind `vaapi` + a linux cfg; pinned
-# (pre-1.0 churns). Pulls libva (cros-libva) when the feature is on.
-cros-codecs = { version = "=0.0.6", optional = true, default-features = false, features = ["vaapi"] }
+# Vendored, statically-linked software H.264 fallback (no system dependency).
+openh264 = "0.9.3"
 thiserror = "2"
 tokio = { workspace = true, features = ["rt", "macros"] }
 tracing = "0.1"
 # RGBA -> I420 color conversion (replaces ffmpeg swscale).
 yuv = "0.8.14"
+
+[target.'cfg(target_os="linux")'.dependencies]
+nokhwa = { version = "0.10.11", features = ["input-v4l"] }
 
 [target.'cfg(target_os="macos")'.dependencies]
 block2 = "0.6.2"
@@ -61,9 +64,6 @@ objc2-core-video = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-screen-capture-kit = "0.3.2"
 objc2-video-toolbox = "0.3.2"
-
-[target.'cfg(target_os="linux")'.dependencies]
-nokhwa = { version = "0.10.11", features = ["input-v4l"] }
 
 [target.'cfg(target_os="windows")'.dependencies]
 nokhwa = { version = "0.10.11", features = ["input-msmf"] }
