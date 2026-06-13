@@ -24,9 +24,6 @@ mod videotoolbox;
 #[cfg(all(target_os = "linux", feature = "nvenc"))]
 mod nvenc;
 
-#[cfg(all(target_os = "linux", feature = "vaapi"))]
-mod vaapi;
-
 /// An opened H.264 encoder. Feed it frames at the configured resolution;
 /// get back zero or more Annex-B H.264 packets.
 pub(crate) trait Backend: Send {
@@ -45,24 +42,6 @@ pub(crate) trait Backend: Send {
 struct Candidate {
 	name: &'static str,
 	open: fn(&Config) -> Result<Box<dyn Backend>, Error>,
-	/// Needs a dmabuf-backed [`Frame`] (VAAPI). Such backends are excluded from
-	/// `Auto`/`Hardware` selection and reachable only by name: a box compiled
-	/// with `vaapi` but lacking a VAAPI device must still fall back to the CPU
-	/// webcam + software/NVENC path rather than capture dmabuf no encoder here
-	/// can use. When chosen by name, the caller opens the matching V4L2 dmabuf
-	/// capture (see [`requires_dmabuf`] and `capture::open`'s `want_dmabuf`).
-	requires_dmabuf: bool,
-}
-
-/// Whether selecting `kind` will require dmabuf-backed frames, so the caller can
-/// open the zero-copy V4L2 capture to match. Only an explicit by-name choice of
-/// a dmabuf backend qualifies; `Auto`/`Hardware`/`Software` stay on CPU frames.
-pub(crate) fn requires_dmabuf(kind: &Kind) -> bool {
-	let Kind::Named(name) = kind else { return false };
-	HARDWARE
-		.iter()
-		.chain(std::iter::once(&SOFTWARE))
-		.any(|c| c.name == name && c.requires_dmabuf)
 }
 
 /// Hardware backends, in priority order. Platform-gated so only the ones that
@@ -72,41 +51,25 @@ const HARDWARE: &[Candidate] = &[
 	Candidate {
 		name: videotoolbox::NAME,
 		open: videotoolbox::VideoToolbox::open,
-		requires_dmabuf: false,
 	},
 	#[cfg(all(target_os = "linux", feature = "nvenc"))]
 	Candidate {
 		name: nvenc::NAME,
 		open: nvenc::Nvenc::open,
-		requires_dmabuf: false,
-	},
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	Candidate {
-		name: vaapi::NAME,
-		open: vaapi::Vaapi::open,
-		requires_dmabuf: true,
 	},
 ];
 
 const SOFTWARE: Candidate = Candidate {
 	name: openh264::NAME,
 	open: openh264::Openh264::open,
-	requires_dmabuf: false,
 };
 
 /// Open the best encoder for `config.kind`, trying candidates in priority order
 /// and falling back until one succeeds.
 pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
-	// Automatic selection only considers backends whose input we can currently
-	// produce; `Kind::Named` opts in explicitly and skips the filter.
-	let usable = |c: &&Candidate| !c.requires_dmabuf;
 	let candidates: Vec<&Candidate> = match &config.kind {
-		Kind::Auto => HARDWARE
-			.iter()
-			.filter(usable)
-			.chain(std::iter::once(&SOFTWARE))
-			.collect(),
-		Kind::Hardware => HARDWARE.iter().filter(usable).collect(),
+		Kind::Auto => HARDWARE.iter().chain(std::iter::once(&SOFTWARE)).collect(),
+		Kind::Hardware => HARDWARE.iter().collect(),
 		Kind::Software => vec![&SOFTWARE],
 		Kind::Named(name) => {
 			let all = HARDWARE.iter().chain(std::iter::once(&SOFTWARE));

@@ -26,21 +26,11 @@ nvenc = ["dep:nvidia-video-codec-sdk", "cudarc/dynamic-loading", "cudarc/cuda-12
 # a machine with no NVIDIA driver. Don't use for real builds: it produces a
 # binary that won't link against NVENC.
 nvenc-ci = ["nvenc", "nvidia-video-codec-sdk/ci-check"]
-# Intel/AMD VAAPI hardware encoder (Linux only). Off by default; release builds
-# for Linux enable it. Links libva (stable soname) and pairs the VAAPI encoder
-# with a V4L2 dmabuf capture (`v4l`/`libc`) for a fully zero-copy path.
-vaapi = ["dep:cros-codecs", "dep:v4l", "dep:libc"]
 
 [dependencies]
 anyhow = "1"
 bytes = "1"
-# VAAPI H.264 encoder + dmabuf import. Gated behind `vaapi` + a linux cfg; pinned
-# (pre-1.0 churns). Pulls libva (cros-libva) when the feature is on.
-cros-codecs = { version = "=0.0.6", optional = true, default-features = false, features = ["vaapi"] }
 cudarc = { version = "0.16", optional = true, default-features = false, features = ["driver"] }
-# Raw V4L2 ioctls (VIDIOC_EXPBUF/QBUF/DQBUF) for the zero-copy dmabuf capture
-# that feeds VAAPI. Gated behind `vaapi` + a linux cfg, like cros-codecs above.
-libc = { version = "0.2", optional = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Pure-Rust webcam capture (avfoundation / v4l2 / msmf), decoding MJPEG/YUYV to
@@ -55,9 +45,6 @@ openh264 = "0.9.3"
 thiserror = "2"
 tokio = { workspace = true, features = ["rt", "macros"] }
 tracing = "0.1"
-# V4L2 device open + format negotiation; the raw streaming ioctls go through its
-# public `v4l2` module. Gated behind `vaapi` + a linux cfg (see the feature).
-v4l = { version = "0.14", optional = true }
 # RGBA -> I420 color conversion (replaces ffmpeg swscale).
 yuv = "0.8.14"
 

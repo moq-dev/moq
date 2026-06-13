@@ -20,10 +20,6 @@ pub(crate) enum Frame {
 	/// Zero-copy GPU surface (macOS `CVPixelBuffer`).
 	#[cfg(target_os = "macos")]
 	Surface(macos::Surface),
-	/// Zero-copy Linux dmabuf, produced by the V4L2 capture and imported as a VA
-	/// surface (DrmPrime2) by the VAAPI backend.
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	DmaBuf(linux::DmaSurface),
 	/// CPU-resident planar I420.
 	I420(I420),
 }
@@ -33,8 +29,6 @@ impl Frame {
 		match self {
 			#[cfg(target_os = "macos")]
 			Frame::Surface(s) => s.width,
-			#[cfg(all(target_os = "linux", feature = "vaapi"))]
-			Frame::DmaBuf(s) => s.width,
 			Frame::I420(i) => i.width,
 		}
 	}
@@ -43,8 +37,6 @@ impl Frame {
 		match self {
 			#[cfg(target_os = "macos")]
 			Frame::Surface(s) => s.height,
-			#[cfg(all(target_os = "linux", feature = "vaapi"))]
-			Frame::DmaBuf(s) => s.height,
 			Frame::I420(i) => i.height,
 		}
 	}
@@ -54,10 +46,6 @@ impl Frame {
 		match self {
 			#[cfg(target_os = "macos")]
 			Frame::Surface(s) => Ok(Cow::Owned(s.download_i420()?)),
-			#[cfg(all(target_os = "linux", feature = "vaapi"))]
-			Frame::DmaBuf(_) => Err(Error::Codec(anyhow::anyhow!(
-				"software encoding from a dmabuf is not supported; use VAAPI or a CPU capture"
-			))),
 			Frame::I420(i) => Ok(Cow::Borrowed(i)),
 		}
 	}
@@ -122,34 +110,6 @@ impl I420 {
 	pub(crate) fn v(&self) -> &[u8] {
 		let start = self.luma_len() + self.chroma_len();
 		&self.data[start..start + self.chroma_len()]
-	}
-}
-
-#[cfg(all(target_os = "linux", feature = "vaapi"))]
-pub(crate) mod linux {
-	use std::fs::File;
-
-	/// A captured Linux dmabuf, sized to the encoder resolution. The VAAPI
-	/// backend imports the fd(s) as a VA surface (DrmPrime2), so capture -> encode
-	/// stays zero-copy. Owns its fd(s); a V4L2 capture hands over dup'd handles so
-	/// the underlying buffer can be re-queued independently.
-	pub(crate) struct DmaSurface {
-		/// One fd for a single-buffer (packed) layout, or one per plane.
-		pub(crate) fds: Vec<File>,
-		pub(crate) width: u32,
-		pub(crate) height: u32,
-		/// DRM fourcc of the surface, e.g. `*b"NV12"`.
-		pub(crate) fourcc: [u8; 4],
-		/// DRM format modifier (0 == `DRM_FORMAT_MOD_LINEAR`).
-		pub(crate) modifier: u64,
-		pub(crate) planes: Vec<DmaPlane>,
-	}
-
-	/// One plane's position within the dmabuf(s).
-	pub(crate) struct DmaPlane {
-		pub(crate) buffer_index: usize,
-		pub(crate) offset: usize,
-		pub(crate) stride: usize,
 	}
 }
 

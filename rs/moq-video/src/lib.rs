@@ -8,7 +8,7 @@
 //!   frames via [`nokhwa`](https://crates.io/crates/nokhwa) (avfoundation /
 //!   v4l2 / msmf). Today that's a webcam.
 //! - [`encode`] H.264-encodes frames with a native backend (openh264 /
-//!   VideoToolbox / NVENC / VAAPI) and publishes them through
+//!   VideoToolbox / NVENC) and publishes them through
 //!   [`moq_mux::codec::h264::Import`], which handles catalog registration
 //!   and framing. Two entry points:
 //!   - [`encode::publish_capture`] captures a webcam and publishes it (turnkey).

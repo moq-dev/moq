@@ -351,27 +351,36 @@ Where the implementation differs from the plan above:
   `write` matches NVENC's pitch (safe only for 64-aligned widths; we warn otherwise);
   (3) forced-IDR via `picture_type` with picture-type-decision enabled.
 
+### VAAPI removed (cros-codecs is not buildable on modern libva)
+
+The VAAPI backend (added behind the `vaapi` feature in #1691) and the V4L2 dmabuf
+capture written to feed it have been **removed**. `cros-codecs 0.0.6` (the latest)
+caret-pins `cros-libva 0.0.12`, which does not compile against libva >= 2.23: the
+newer headers add `seg_id_block_size` / `va_reserved8` to
+`VAEncPictureParameterBufferVP9`, and `cros-libva 0.0.12`'s struct literal omits
+them (`cros-libva 0.0.13` fixes it, but `cros-codecs 0.0.6` won't accept it). Since
+modern distros and the nix toolchain ship libva 2.23+, the feature could not build
+or ship, and CI's `--all-features` could not be made green while it existed.
+`cros-codecs` is the only pure-Rust VAAPI H.264 encoder, and reintroducing ffmpeg
+for VAAPI defeats the purpose of this effort, so VAAPI is parked until `cros-codecs`
+releases against `cros-libva >= 0.0.13` (or a better VAAPI path appears). Intel/AMD
+Linux falls back to the openh264 software encoder meanwhile; NVIDIA uses NVENC.
+
+When it returns: re-add `backend/vaapi.rs`, `capture/v4l2.rs`, the `vaapi` feature
+(+ `cros-codecs`/`v4l`/`libc` deps), `Frame::DmaBuf`, the `requires_dmabuf` capture
+coupling, and `libva` in the nix devShell. See this PR's history for the prior
+implementation; the V4L2 capture (REQBUFS/EXPBUF/QBUF/DQBUF) was compile-verified
+but never runtime-tested.
+
 ### Follow-ups
 
-- VAAPI backend (phase 6) shipped behind the `vaapi` feature (#1691).
-- V4L2 dmabuf capture (`src/capture/v4l2.rs`) written to feed the VAAPI encoder
-  zero-copy: REQBUFS(MMAP) -> EXPBUF per index -> QBUF/STREAMON -> DQBUF, handing
-  out a dup of the buffer's exported dmabuf and re-queuing one frame late. It is
-  **opt-in**, used only when VAAPI is selected by name (`capture::open`'s
-  `want_dmabuf`, set from `backend::requires_dmabuf`), so a `vaapi`-enabled box
-  without a VAAPI device still falls back to the CPU webcam + software/NVENC path.
-  Compile-verified on Linux (clippy `-D warnings`) but NOT runtime-tested: the
-  EXPBUF flags (`O_RDONLY | O_CLOEXEC`), NV12 plane offsets, and re-queue timing
-  need a real `/dev/video*` + VAAPI box to confirm.
-- CI now compile-checks both hardware backends on Linux: the `nvenc-ci` feature
-  enables `nvidia-video-codec-sdk/ci-check` (skips the `libnvidia-encode.so` link
-  panic) so `--all-features` type-checks NVENC without a driver, and `libva` is in
-  the nix devShell so `cros-libva` builds for the VAAPI type-check.
-- Still needed on real hardware: NVENC validation on Linux+GPU; the VAAPI encode
-  + V4L2 dmabuf path end to end; `Kind::Auto` selecting VAAPI once a runtime
-  device probe (not just feature-gating) can decide capture format safely.
-- Live camera run (capture needs camera permission; only synthetic-frame encode is
-  tested here).
+- CI compile-checks NVENC on Linux via the `nvenc-ci` feature, which enables
+  `nvidia-video-codec-sdk/ci-check` (skips the `libnvidia-encode.so` link panic) so
+  `--all-features` type-checks the backend without an NVIDIA driver.
+- Still needed on real hardware: NVENC encode validation on a Linux+GPU box (pitch
+  alignment, forced-IDR); only synthetic-frame software encode is tested here.
+- Live camera run (capture needs camera/screen TCC permission, which a headless or
+  agent-spawned process can't obtain; run `moq-cli ... capture` from a user terminal).
 - `doc/bin/cli.md`: the `capture` device-string semantics changed (index-or-path).
 - Consider reusing NVENC input/output buffers across frames (currently allocated
   per frame to sidestep the self-referential Session borrow).
