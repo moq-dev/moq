@@ -382,8 +382,8 @@ impl Cluster {
 
 	/// Returns an [`OriginProducer`] scoped to this session's subscribe permissions.
 	///
-	/// Pass straight to [`moq_net::Server::with_publisher`] (or the
-	/// equivalent per-request setter). moq-net derives the read handle.
+	/// Its [`consume`](OriginProducer::consume) view is passed to
+	/// [`moq_net::Server::with_publish`] (or the equivalent per-request setter).
 	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginProducer> {
 		self.origin.with_root(&token.root)?.scope(&token.subscribe)
 	}
