@@ -76,12 +76,15 @@ async fn dynamic_track_request() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let track_consumer = consumer.subscribe_track("events".into()).await.unwrap();
 
-	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
-		.await
-		.expect("timed out waiting for requested track")
-		.unwrap();
+	// subscribe_track stays pending until the dynamic producer accepts the request
+	// via requested_track(), so drive both sides concurrently to avoid a deadlock.
+	let (track_consumer, track) = tokio::join!(
+		consumer.subscribe_track("events".into()),
+		tokio::time::timeout(TIMEOUT, dynamic.requested_track()),
+	);
+	let track_consumer = track_consumer.unwrap();
+	let track = track.expect("timed out waiting for requested track").unwrap();
 
 	assert_eq!(track.name().unwrap(), "events");
 
@@ -103,12 +106,15 @@ async fn dynamic_track_request_can_abort() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let _track_consumer = consumer.subscribe_track("unknown".into()).await.unwrap();
 
-	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
-		.await
-		.expect("timed out waiting for requested track")
-		.unwrap();
+	// subscribe_track stays pending until the dynamic producer accepts the request
+	// via requested_track(), so drive both sides concurrently to avoid a deadlock.
+	let (track_consumer, track) = tokio::join!(
+		consumer.subscribe_track("unknown".into()),
+		tokio::time::timeout(TIMEOUT, dynamic.requested_track()),
+	);
+	let _track_consumer = track_consumer.unwrap();
+	let track = track.expect("timed out waiting for requested track").unwrap();
 
 	track.abort(404).unwrap();
 	assert!(matches!(track.name(), Err(MoqError::Closed)));
