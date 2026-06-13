@@ -170,8 +170,14 @@ Client settings used when connecting to other relays (clustering).
 # Disable TLS verification (development only!)
 tls.disable_verify = true
 
-# Or provide trusted root certificates
+# Or provide trusted root certificates. By default these replace the system
+# roots, so the relay trusts only these CAs.
 # tls.root = ["/path/to/root.pem"]
+
+# Set this to also trust the platform's system roots alongside any custom root,
+# e.g. to dial a local relay with a private CA and a remote one with a public CA.
+# Defaults to true only when no custom root is set.
+# tls.system_roots = true
 ```
 
 ### \[stats]

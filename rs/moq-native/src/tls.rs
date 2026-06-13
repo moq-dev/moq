@@ -35,6 +35,11 @@ pub enum Error {
 	#[error("no roots found in {}", .0.display())]
 	EmptyRoots(PathBuf),
 
+	#[error(
+		"no trusted roots: provide --tls-root, enable --tls-system-roots, or use --tls-fingerprint / --tls-disable-verify"
+	)]
+	NoRoots,
+
 	#[error("invalid TLS fingerprint (expected hex-encoded SHA-256)")]
 	Fingerprint(#[source] hex::FromHexError),
 
@@ -96,15 +101,37 @@ pub(crate) fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 #[group(id = "tls-client")]
 #[non_exhaustive]
 pub struct Client {
-	/// Use the TLS root at this path, encoded as PEM.
+	/// Trust the TLS root at this path, encoded as PEM.
 	///
 	/// This value can be provided multiple times for multiple roots.
-	/// If this is empty, system roots will be used instead.
 	/// In config files, accepts either a single string or a TOML array.
+	///
+	/// These roots are added on top of the system roots. By default the system
+	/// roots are only loaded when no custom root is given, so passing a root
+	/// replaces them; set `--tls-system-roots` to trust both (e.g. to reach a
+	/// local relay with a private CA and a remote one with a public CA).
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[arg(id = "tls-root", long = "tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
+
+	/// Also trust the platform's native root certificates.
+	///
+	/// Defaults to enabled only when no `--tls-root` is given. Set it explicitly
+	/// to trust the system roots alongside any custom roots, or set it to false
+	/// to trust only the custom roots. Trusting neither (no custom root and
+	/// system roots disabled) is rejected, since verification could never pass.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "tls-system-roots",
+		long = "tls-system-roots",
+		env = "MOQ_CLIENT_TLS_SYSTEM_ROOTS",
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	pub system_roots: Option<bool>,
 
 	/// Pin the peer to a certificate with one of these SHA-256 fingerprints, encoded as hex.
 	///
@@ -156,14 +183,27 @@ pub struct Client {
 impl Client {
 	/// Build a [`rustls::ClientConfig`] from this configuration.
 	///
-	/// Loads the configured roots (or the platform's native roots if none),
-	/// optionally attaches a client identity for mTLS, and disables server
-	/// certificate verification when `disable_verify` is set.
+	/// Trusts the configured roots plus the platform's native roots (the latter
+	/// gated by `system_roots`), optionally attaches a client identity for mTLS,
+	/// and swaps in fingerprint pinning or disabled verification when requested.
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
 		let provider = crypto::provider();
 
+		// Default to system roots only when no custom root is given, so passing a
+		// root replaces them unless the system roots are explicitly re-enabled.
+		let system_roots = self.system_roots.unwrap_or(self.root.is_empty());
+
+		// fingerprint pinning and disable_verify swap in their own verifier below,
+		// so an empty root store is fine in those cases. Otherwise WebPKI needs at
+		// least one trusted root to ever succeed, so fail fast instead of producing
+		// confusing handshake errors later.
+		let custom_verifier = self.disable_verify.unwrap_or_default() || !self.fingerprint.is_empty();
+		if !system_roots && self.root.is_empty() && !custom_verifier {
+			return Err(Error::NoRoots);
+		}
+
 		let mut roots = rustls::RootCertStore::empty();
-		if self.root.is_empty() {
+		if system_roots {
 			let native = rustls_native_certs::load_native_certs();
 			for err in native.errors {
 				tracing::warn!(%err, "failed to load root cert");
@@ -171,15 +211,14 @@ impl Client {
 			for cert in native.certs {
 				roots.add(cert).map_err(Error::AddRoot)?;
 			}
-		} else {
-			for root in &self.root {
-				let certs = read_certs(root)?;
-				if certs.is_empty() {
-					return Err(Error::EmptyRoots(root.clone()));
-				}
-				for cert in certs {
-					roots.add(cert).map_err(Error::AddRoot)?;
-				}
+		}
+		for root in &self.root {
+			let certs = read_certs(root)?;
+			if certs.is_empty() {
+				return Err(Error::EmptyRoots(root.clone()));
+			}
+			for cert in certs {
+				roots.add(cert).map_err(Error::AddRoot)?;
 			}
 		}
 
@@ -467,6 +506,38 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(config.build(), Err(Error::FingerprintLength(2))));
+	}
+
+	#[test]
+	fn build_rejects_no_roots() {
+		// System roots disabled with no custom root and no alternate verifier:
+		// nothing could ever verify, so reject up front.
+		let config = Client {
+			system_roots: Some(false),
+			..Default::default()
+		};
+		assert!(matches!(config.build(), Err(Error::NoRoots)));
+	}
+
+	#[test]
+	fn build_allows_no_roots_when_verification_overridden() {
+		// disable_verify swaps in its own verifier, so an empty store is fine.
+		let config = Client {
+			system_roots: Some(false),
+			disable_verify: Some(true),
+			..Default::default()
+		};
+		assert!(config.build().is_ok());
+
+		// Same for fingerprint pinning.
+		let cert = self_signed();
+		let fingerprint = hex::encode(crypto::sha256(&crypto::provider(), cert.as_ref()));
+		let config = Client {
+			system_roots: Some(false),
+			fingerprint: vec![fingerprint],
+			..Default::default()
+		};
+		assert!(config.build().is_ok());
 	}
 }
 
