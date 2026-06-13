@@ -21,7 +21,10 @@ pub(crate) enum Frame {
 	#[cfg(target_os = "macos")]
 	Surface(macos::Surface),
 	/// Zero-copy Linux dmabuf (imported as a VA surface by the VAAPI backend).
-	#[cfg(target_os = "linux")]
+	/// Constructed by the V4L2 dmabuf capture, which isn't wired up yet, so the
+	/// variant is allowed to be unconstructed until then.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[allow(dead_code)]
 	DmaBuf(linux::DmaSurface),
 	/// CPU-resident planar I420.
 	I420(I420),
@@ -32,7 +35,7 @@ impl Frame {
 		match self {
 			#[cfg(target_os = "macos")]
 			Frame::Surface(s) => s.width,
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
 			Frame::DmaBuf(s) => s.width,
 			Frame::I420(i) => i.width,
 		}
@@ -42,7 +45,7 @@ impl Frame {
 		match self {
 			#[cfg(target_os = "macos")]
 			Frame::Surface(s) => s.height,
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
 			Frame::DmaBuf(s) => s.height,
 			Frame::I420(i) => i.height,
 		}
@@ -53,7 +56,7 @@ impl Frame {
 		match self {
 			#[cfg(target_os = "macos")]
 			Frame::Surface(s) => Ok(Cow::Owned(s.download_i420()?)),
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
 			Frame::DmaBuf(_) => Err(Error::Codec(anyhow::anyhow!(
 				"software encoding from a dmabuf is not supported; use VAAPI or a CPU capture"
 			))),
@@ -124,7 +127,7 @@ impl I420 {
 	}
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
 pub(crate) mod linux {
 	use std::fs::File;
 
