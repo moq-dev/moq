@@ -56,8 +56,8 @@ The simplest way to publish a stream:
 
 <moq-publish
     url="https://relay.example.com/anon"
-    path="room/alice.hang"
-    audio video controls>
+    name="room/alice.hang"
+    source="camera">
     <video muted autoplay></video>
 </moq-publish>
 ```
@@ -103,7 +103,7 @@ publish.source.camera.enabled.set(true);
 </script>
 
 <moq-publish-ui>
-    <moq-publish url="https://relay.example.com/anon" path="room/alice.hang" audio video>
+    <moq-publish url="https://relay.example.com/anon" name="room/alice.hang" source="camera">
         <video muted autoplay></video>
     </moq-publish>
 </moq-publish-ui>

@@ -57,7 +57,7 @@ a real bundler (the examples below).
 <moq-publish
     url="https://relay.example.com/anon"
     name="room/alice.hang"
-    audio video controls>
+    source="camera">
     <video muted autoplay></video>
 </moq-publish>
 ```
@@ -101,7 +101,7 @@ Import `@moq/publish/ui` for a Web Component overlay with device selection and p
     <moq-publish
         url="https://relay.example.com/anon"
         name="room/alice.hang"
-        audio video>
+        source="camera">
         <video muted autoplay></video>
     </moq-publish>
 </moq-publish-ui>
