@@ -86,7 +86,6 @@
             cargo-sort
             cargo-shear
             cargo-edit
-            cargo-sweep
             cargo-semver-checks
             cargo-deny
           ]
