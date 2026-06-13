@@ -1,0 +1,67 @@
+import { expect, test } from "bun:test";
+import { Broadcast } from "./broadcast.ts";
+import { TrackProducer } from "./track.ts";
+
+test("subscribe serves a statically inserted track without a request", async () => {
+	const broadcast = new Broadcast();
+
+	const track1 = new TrackProducer("track1").accept();
+	broadcast.insertTrack(track1);
+	track1.appendGroup().close();
+
+	// The track already exists, so subscribe resolves immediately (no requested()).
+	const sub1 = broadcast.track("track1").subscribe();
+	expect((await sub1.nextGroup())?.sequence).toBe(0);
+
+	// No on-demand request was emitted for it.
+	expect(broadcast.state.requested.peek().length).toBe(0);
+
+	// A second static track behaves the same.
+	const track2 = new TrackProducer("track2").accept();
+	broadcast.insertTrack(track2);
+
+	const sub2 = broadcast.track("track2").subscribe();
+	track2.appendGroup().close();
+	expect((await sub2.nextGroup())?.sequence).toBe(0);
+});
+
+test("createTrack commits info up front", async () => {
+	const broadcast = new Broadcast();
+
+	const producer = broadcast.createTrack("video", { compress: true, priority: 3 });
+	expect(producer.name).toBe("video");
+
+	const info = await broadcast.track("video").info();
+	expect(info.compress).toBe(true);
+	expect(info.priority).toBe(3);
+});
+
+test("insertTrack rejects a duplicate live name", () => {
+	const broadcast = new Broadcast();
+	broadcast.createTrack("dup");
+	expect(() => broadcast.insertTrack(new TrackProducer("dup").accept())).toThrow();
+});
+
+test("a closed track is evicted and re-subscribing falls through to a request", async () => {
+	const broadcast = new Broadcast();
+
+	const track1 = broadcast.createTrack("track1");
+	track1.close();
+
+	// The stale entry is gone, so subscribe creates an on-demand request instead.
+	const pending = broadcast.track("track1").subscribe();
+	expect(pending).toBeDefined();
+	expect(broadcast.state.requested.peek().length).toBe(1);
+
+	const request = await broadcast.requested();
+	expect(request?.name).toBe("track1");
+});
+
+test("removeTrack drops the static entry", () => {
+	const broadcast = new Broadcast();
+	broadcast.createTrack("track1");
+	expect(broadcast.state.tracks.has("track1")).toBe(true);
+
+	broadcast.removeTrack("track1");
+	expect(broadcast.state.tracks.has("track1")).toBe(false);
+});
