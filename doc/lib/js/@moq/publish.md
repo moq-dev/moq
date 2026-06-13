@@ -70,6 +70,7 @@ a real bundler (the examples below).
 - `audio` — Enable audio capture (boolean)
 - `video` — Enable video capture (boolean)
 - `controls` — Show publishing controls (boolean)
+- `announce` — When to publish the broadcast: `"true"` (default, announce as soon as the element connects), `"false"` (never announce), or `"source"` (hold off until a `source` is selected). The JS property takes a real boolean or `"source"` (`el.announce = false`)
 - `preview` — What the preview renders: `"source"` (default), `"encoded"`, or `"none"` to disable it (see [Preview element](#preview-element))
 
 ## Preview element

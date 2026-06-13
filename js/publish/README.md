@@ -69,6 +69,7 @@ The simplest way to publish a stream:
 | `url`      | string  | required | Relay server URL                |
 | `path`     | string  | required | Broadcast path                  |
 | `source`   | string  | —        | `"camera"`, `"screen"`, `"file"` |
+| `announce` | string  | `"true"` | When to publish: `"true"` (always), `"false"` (never), `"source"` (once a source is selected) |
 | `audio`    | boolean | false    | Enable audio capture            |
 | `video`    | boolean | false    | Enable video capture            |
 | `controls` | boolean | false    | Show simple publishing controls |
