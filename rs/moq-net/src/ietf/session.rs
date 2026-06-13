@@ -1,5 +1,5 @@
 use crate::{
-	Error, OriginConsumer, OriginProducer, StatsHandle,
+	Error, Origin, OriginConsumer, OriginProducer, StatsHandle,
 	coding::{Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
@@ -15,13 +15,18 @@ pub fn start<S: web_transport_trait::Session>(
 	setup: Option<Stream<S, Version>>,
 	request_id_max: Option<RequestId>,
 	client: bool,
-	publish: OriginConsumer,
-	subscribe: OriginProducer,
+	publish: Option<OriginConsumer>,
+	subscribe: Option<OriginProducer>,
 	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
 	stats: StatsHandle,
 	version: Version,
 ) -> Result<(), Error> {
 	web_async::spawn(async move {
+		// moq-transport threads concrete origins through the publisher/subscriber.
+		// Substitute a fresh origin for an unset half; an empty publish consumer
+		// announces nothing.
+		let publish = publish.unwrap_or_else(|| Origin::random().produce().consume());
+		let subscribe = subscribe.unwrap_or_else(|| Origin::random().produce());
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 				let Some(setup) = setup else {

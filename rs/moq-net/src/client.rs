@@ -1,31 +1,17 @@
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Error,
-	NEGOTIATED, Origin, OriginProducer, Session, StatsHandle, Version, Versions,
+	NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
 };
 
 /// A MoQ client session builder.
-#[derive(Clone)]
+#[derive(Default, Clone)]
 pub struct Client {
-	publish: OriginProducer,
-	consume: OriginProducer,
+	publish: Option<OriginConsumer>,
+	subscribe: Option<OriginProducer>,
 	stats: StatsHandle,
 	versions: Versions,
-}
-
-impl Default for Client {
-	fn default() -> Self {
-		// Default to one shared fresh origin so the typical duplex
-		// client just works without any setup.
-		let shared = Origin::random().produce();
-		Self {
-			publish: shared.clone(),
-			consume: shared,
-			stats: StatsHandle::default(),
-			versions: Versions::default(),
-		}
-	}
 }
 
 impl Client {
@@ -33,22 +19,17 @@ impl Client {
 		Default::default()
 	}
 
-	/// Override the publish-side origin: the [`OriginProducer`] this
-	/// client reads from when forwarding local broadcasts to the remote.
-	/// Surfaced as [`Session::publisher`] so callers can keep
-	/// `.publish_broadcast(path, broadcast)`-ing after connect.
-	///
-	/// Pre-scoped via [`OriginProducer::scope`] for token-gated relays.
-	pub fn with_publisher(mut self, publish: OriginProducer) -> Self {
-		self.publish = publish;
+	/// Publish local broadcasts to the remote: the session reads from this
+	/// [`OriginConsumer`] and forwards its announcements. Omit to publish nothing.
+	pub fn with_publish(mut self, publish: OriginConsumer) -> Self {
+		self.publish = Some(publish);
 		self
 	}
 
-	/// Override the consume-side origin: the [`OriginProducer`] this
-	/// client writes into as the remote announces broadcasts. A consumer
-	/// view is surfaced as [`Session::consumer`].
-	pub fn with_consumer(mut self, consume: OriginProducer) -> Self {
-		self.consume = consume;
+	/// Subscribe to remote broadcasts: the session writes the broadcasts the
+	/// remote announces into this [`OriginProducer`]. Omit to subscribe to nothing.
+	pub fn with_subscribe(mut self, subscribe: OriginProducer) -> Self {
+		self.subscribe = Some(subscribe);
 		self
 	}
 
@@ -60,12 +41,12 @@ impl Client {
 		self
 	}
 
-	/// Set both publish and consume from one shared [`OriginProducer`].
+	/// Set both publish and subscribe from one shared [`OriginProducer`].
 	///
-	/// Equivalent to calling [`with_publisher`](Self::with_publisher) and
-	/// [`with_consumer`](Self::with_consumer) with the same origin.
+	/// Equivalent to calling [`with_publish`](Self::with_publish) with
+	/// `origin.consume()` and [`with_subscribe`](Self::with_subscribe) with `origin`.
 	pub fn with_origin(self, origin: OriginProducer) -> Self {
-		self.with_publisher(origin.clone()).with_consumer(origin)
+		self.with_publish(origin.consume()).with_subscribe(origin)
 	}
 
 	pub fn with_versions(mut self, versions: Versions) -> Self {
@@ -75,11 +56,9 @@ impl Client {
 
 	/// Perform the MoQ handshake as a client negotiating the version.
 	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
-		let publisher = self.publish.clone();
-		let consumer = self.consume.clone();
-		let publish = publisher.consume();
-		let consume = consumer.clone();
-		let consumer_view = consumer.consume();
+		if self.publish.is_none() && self.subscribe.is_none() {
+			tracing::warn!("not publishing or consuming anything");
+		}
 
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
@@ -96,14 +75,14 @@ impl Client {
 					None,
 					None,
 					true,
-					publish,
-					consume,
+					self.publish.clone(),
+					self.subscribe.clone(),
 					self.stats.clone(),
 					ietf::Version::Draft18,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, publisher.clone(), consumer_view.clone()));
+				return Ok(Session::new(session, v, None));
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -117,14 +96,14 @@ impl Client {
 					None,
 					None,
 					true,
-					publish,
-					consume,
+					self.publish.clone(),
+					self.subscribe.clone(),
 					self.stats.clone(),
 					ietf::Version::Draft17,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, publisher.clone(), consumer_view.clone()));
+				return Ok(Session::new(session, v, None));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -155,8 +134,8 @@ impl Client {
 				let (recv_bw, connecting) = lite::start(
 					session.clone(),
 					None,
-					publish,
-					consume,
+					self.publish.clone(),
+					self.subscribe.clone(),
 					self.stats.clone(),
 					lite::Version::Lite05Wip,
 				)?;
@@ -165,13 +144,7 @@ impl Client {
 				// via AnnounceOk + N), so a synchronous get_broadcast() won't race it.
 				connecting.ready().await;
 
-				return Ok(Session::new(
-					session,
-					lite::Version::Lite05Wip.into(),
-					recv_bw,
-					publisher.clone(),
-					consumer_view.clone(),
-				));
+				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw));
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
@@ -181,8 +154,8 @@ impl Client {
 				let (recv_bw, connecting) = lite::start(
 					session.clone(),
 					None,
-					publish,
-					consume,
+					self.publish.clone(),
+					self.subscribe.clone(),
 					self.stats.clone(),
 					lite::Version::Lite04,
 				)?;
@@ -190,13 +163,7 @@ impl Client {
 				// Lite04 has no initial-set boundary, so this resolves immediately.
 				connecting.ready().await;
 
-				return Ok(Session::new(
-					session,
-					lite::Version::Lite04.into(),
-					recv_bw,
-					publisher.clone(),
-					consumer_view.clone(),
-				));
+				return Ok(Session::new(session, lite::Version::Lite04.into(), recv_bw));
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
@@ -207,8 +174,8 @@ impl Client {
 				let (recv_bw, connecting) = lite::start(
 					session.clone(),
 					None,
-					publish,
-					consume,
+					self.publish.clone(),
+					self.subscribe.clone(),
 					self.stats.clone(),
 					lite::Version::Lite03,
 				)?;
@@ -216,13 +183,7 @@ impl Client {
 				// Lite03 has no initial-set boundary, so this resolves immediately.
 				connecting.ready().await;
 
-				return Ok(Session::new(
-					session,
-					lite::Version::Lite03.into(),
-					recv_bw,
-					publisher.clone(),
-					consumer_view.clone(),
-				));
+				return Ok(Session::new(session, lite::Version::Lite03.into(), recv_bw));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -259,8 +220,14 @@ impl Client {
 		let recv_bw = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
-				let (recv_bw, connecting) =
-					lite::start(session.clone(), Some(stream), publish, consume, self.stats.clone(), v)?;
+				let (recv_bw, connecting) = lite::start(
+					session.clone(),
+					Some(stream),
+					self.publish.clone(),
+					self.subscribe.clone(),
+					self.stats.clone(),
+					v,
+				)?;
 
 				// Block until the initial announce set has landed (for versions that
 				// report one); resolves immediately otherwise.
@@ -281,8 +248,8 @@ impl Client {
 					Some(stream),
 					request_id_max,
 					true,
-					publish,
-					consume,
+					self.publish.clone(),
+					self.subscribe.clone(),
 					self.stats.clone(),
 					v,
 				)?;
@@ -290,7 +257,7 @@ impl Client {
 			}
 		};
 
-		Ok(Session::new(session, version, recv_bw, publisher, consumer_view))
+		Ok(Session::new(session, version, recv_bw))
 	}
 }
 

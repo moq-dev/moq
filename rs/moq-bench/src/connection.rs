@@ -115,7 +115,7 @@ pub async fn run(ctx: Connection) {
 		tasks.spawn(produce(connection, path, rolled, track, stats));
 	}
 
-	let client = client.with_publisher(publish).with_consumer(consume);
+	let client = client.with_publish(publish.consume()).with_subscribe(consume);
 	let mut reconnect = client.reconnect(url);
 
 	// Subscriber: drain up to `subscribe` peer broadcasts.

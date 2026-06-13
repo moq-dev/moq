@@ -70,11 +70,13 @@ impl Session {
 	) -> Result<(), Error> {
 		let mut client = moq_native::ClientConfig::default().init()?;
 
-		if let Some(publish) = publish {
-			client = client.with_publisher(publish);
+		// Borrow so the producers outlive the reconnect loop below: the session
+		// reads from the publish consumer and writes into the subscribe producer.
+		if let Some(publish) = &publish {
+			client = client.with_publish(publish.consume());
 		}
-		if let Some(consume) = consume {
-			client = client.with_consumer(consume);
+		if let Some(consume) = &consume {
+			client = client.with_subscribe(consume.clone());
 		}
 
 		let reconnect = client.reconnect(url);

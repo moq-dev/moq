@@ -43,6 +43,8 @@ pub fn setup() {
 #[wasm_bindgen]
 pub struct Session {
 	inner: moq_net::Session,
+	// The origin remote broadcasts are announced into; read via `consume`.
+	consumer: moq_net::OriginConsumer,
 }
 
 #[wasm_bindgen]
@@ -64,9 +66,13 @@ impl Session {
 	}
 
 	async fn handshake(transport: transport::Session) -> Result<Session, JsValue> {
-		let client = moq_net::Client::new();
+		// Wire a subscribe origin so the session has somewhere to insert the
+		// broadcasts the remote announces; keep a consumer to read them.
+		let origin = moq_net::Origin::random().produce();
+		let consumer = origin.consume();
+		let client = moq_net::Client::new().with_subscribe(origin);
 		let inner = client.connect(transport).await.map_err(js_err)?;
-		Ok(Session { inner })
+		Ok(Session { inner, consumer })
 	}
 
 	/// The negotiated protocol version (e.g. "lite-05" or an IETF draft).
@@ -81,7 +87,7 @@ impl Session {
 
 	/// Subscribe to a broadcast by path, waiting until it is announced.
 	pub async fn consume(&self, path: String) -> Result<Option<Broadcast>, JsValue> {
-		let broadcast = self.inner.consumer().announced_broadcast(path.as_str()).await;
+		let broadcast = self.consumer.announced_broadcast(path.as_str()).await;
 		Ok(broadcast.map(|inner| Broadcast { inner }))
 	}
 }

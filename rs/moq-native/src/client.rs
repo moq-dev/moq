@@ -196,13 +196,13 @@ impl Client {
 		self
 	}
 
-	pub fn with_publisher(mut self, publish: moq_net::OriginProducer) -> Self {
-		self.moq = self.moq.with_publisher(publish);
+	pub fn with_publish(mut self, publish: moq_net::OriginConsumer) -> Self {
+		self.moq = self.moq.with_publish(publish);
 		self
 	}
 
-	pub fn with_consumer(mut self, consume: moq_net::OriginProducer) -> Self {
-		self.moq = self.moq.with_consumer(consume);
+	pub fn with_subscribe(mut self, subscribe: moq_net::OriginProducer) -> Self {
+		self.moq = self.moq.with_subscribe(subscribe);
 		self
 	}
 

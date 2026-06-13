@@ -16,10 +16,10 @@ pub fn start<S: web_transport_trait::Session>(
 	// The stream used to set up the session, after exchanging setup messages.
 	// NOTE: No longer used in draft-03.
 	setup_stream: Option<Stream<S, Version>>,
-	// We will publish any local broadcasts from this origin.
-	publish: OriginConsumer,
-	// We will consume any remote broadcasts, inserting them into this origin.
-	subscribe: OriginProducer,
+	// We will publish any local broadcasts from this origin, when set.
+	publish: Option<OriginConsumer>,
+	// We will consume any remote broadcasts, inserting them into this origin, when set.
+	subscribe: Option<OriginProducer>,
 	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
 	stats: StatsHandle,
 	// The version of the protocol to use.
@@ -54,25 +54,49 @@ pub fn start<S: web_transport_trait::Session>(
 	// stamped onto outbound hops and checked against incoming hops, so it
 	// must be stable across every session that shares the local origin.
 	// Required for cross-session cluster loop detection.
-	let publisher = Publisher::new(PublisherConfig {
-		session: session.clone(),
-		origin: publish,
-		stats: stats.clone(),
-		version,
+	//
+	// A `None` half is left idle: an unset publish origin announces nothing,
+	// and an unset subscribe origin never issues ANNOUNCE_PLEASE.
+	let publisher = publish.map(|origin| {
+		Publisher::new(PublisherConfig {
+			session: session.clone(),
+			origin,
+			stats: stats.clone(),
+			version,
+		})
 	});
-	let subscriber = Subscriber::new(SubscriberConfig {
-		session: session.clone(),
-		origin: subscribe,
-		recv_bandwidth: recv_bw_for_sub,
-		stats,
-		version,
+	let subscriber = subscribe.map(|origin| {
+		Subscriber::new(SubscriberConfig {
+			session: session.clone(),
+			origin,
+			recv_bandwidth: recv_bw_for_sub,
+			stats,
+			version,
+		})
 	});
 
 	web_async::spawn(async move {
+		let run_publisher = async {
+			match publisher {
+				Some(p) => p.run().await,
+				None => std::future::pending::<Result<(), Error>>().await,
+			}
+		};
+		let run_subscriber = async {
+			match subscriber {
+				Some(s) => s.run(sub_connecting).await,
+				// Drop the connecting producer so `Connecting::ready` unblocks `connect()`.
+				None => {
+					drop(sub_connecting);
+					std::future::pending::<Result<(), Error>>().await
+				}
+			}
+		};
+
 		let res = tokio::select! {
 			Err(res) = run_session(setup_stream) => Err(res),
-			res = publisher.run() => res,
-			res = subscriber.run(sub_connecting) => res,
+			res = run_publisher => res,
+			res = run_subscriber => res,
 		};
 
 		match res {

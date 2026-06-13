@@ -225,13 +225,13 @@ impl Server {
 		self
 	}
 
-	pub fn with_publisher(mut self, publish: moq_net::OriginProducer) -> Self {
-		self.moq = self.moq.with_publisher(publish);
+	pub fn with_publish(mut self, publish: moq_net::OriginConsumer) -> Self {
+		self.moq = self.moq.with_publish(publish);
 		self
 	}
 
-	pub fn with_consumer(mut self, consume: moq_net::OriginProducer) -> Self {
-		self.moq = self.moq.with_consumer(consume);
+	pub fn with_subscribe(mut self, subscribe: moq_net::OriginProducer) -> Self {
+		self.moq = self.moq.with_subscribe(subscribe);
 		self
 	}
 
@@ -480,7 +480,7 @@ pub(crate) enum RequestKind {
 
 /// An incoming MoQ session that can be accepted or rejected.
 ///
-/// [Self::with_publisher] and [Self::with_consumer] will configure what will be published and consumed from the session respectively.
+/// [Self::with_publish] and [Self::with_subscribe] will configure what is published and subscribed to on the session respectively.
 /// Otherwise, the Server's configuration is used by default.
 pub struct Request {
 	server: moq_net::Server,
@@ -528,14 +528,14 @@ impl Request {
 	}
 
 	/// Publish the given origin to the session.
-	pub fn with_publisher(mut self, publish: moq_net::OriginProducer) -> Self {
-		self.server = self.server.with_publisher(publish);
+	pub fn with_publish(mut self, publish: moq_net::OriginConsumer) -> Self {
+		self.server = self.server.with_publish(publish);
 		self
 	}
 
-	/// Consume the given origin from the session.
-	pub fn with_consumer(mut self, consume: moq_net::OriginProducer) -> Self {
-		self.server = self.server.with_consumer(consume);
+	/// Subscribe to the given origin from the session.
+	pub fn with_subscribe(mut self, subscribe: moq_net::OriginProducer) -> Self {
+		self.server = self.server.with_subscribe(subscribe);
 		self
 	}
 

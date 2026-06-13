@@ -234,15 +234,26 @@ impl MoqRequest {
 	pub async fn ok(&self) -> Result<Arc<MoqSession>, MoqError> {
 		self.task
 			.run(|mut state| async move {
-				let mut request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
-				if let Some(publish) = state.publish.as_ref() {
-					request = request.with_publisher(publish.inner().clone());
-				}
-				if let Some(consume) = state.consume.as_ref() {
-					request = request.with_consumer(consume.inner().clone());
-				}
-				let session = request.ok().await.map_err(|err| MoqError::Connect(format!("{err}")))?;
-				Ok(Arc::new(MoqSession::new(session)))
+				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
+				// Materialize both origin sides (reusing the caller's if wired) so the
+				// session can publish/subscribe and the FFI can hand back a publisher/consumer.
+				let publish = state
+					.publish
+					.as_ref()
+					.map(|p| p.inner().clone())
+					.unwrap_or_else(|| moq_net::Origin::random().produce());
+				let subscribe = state
+					.consume
+					.as_ref()
+					.map(|p| p.inner().clone())
+					.unwrap_or_else(|| moq_net::Origin::random().produce());
+				let session = request
+					.with_publish(publish.consume())
+					.with_subscribe(subscribe.clone())
+					.ok()
+					.await
+					.map_err(|err| MoqError::Connect(format!("{err}")))?;
+				Ok(Arc::new(MoqSession::new(session, publish, subscribe)))
 			})
 			.await
 	}

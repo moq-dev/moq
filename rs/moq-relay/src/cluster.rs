@@ -812,8 +812,8 @@ impl Cluster {
 
 		// Cluster-to-cluster traffic is internal by definition.
 		let cs = client
-			.with_publisher(self.origin.clone())
-			.with_consumer(self.origin.clone())
+			.with_publish(self.origin.consume())
+			.with_subscribe(self.origin.clone())
 			.with_stats(self.stats.tier(Tier::Internal))
 			.connect(url.clone())
 			.await
