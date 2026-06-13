@@ -1229,7 +1229,10 @@ mod tests {
 			"https://cdn.example.com/?jwt=abc"
 		);
 		// Bare host (legacy) wrapped in https://.../.
-		assert_eq!(peer_url("cdn.example.com").unwrap().as_str(), "https://cdn.example.com/");
+		assert_eq!(
+			peer_url("cdn.example.com").unwrap().as_str(),
+			"https://cdn.example.com/"
+		);
 		// `host:port` (legacy) is NOT mis-parsed as scheme `host`.
 		assert_eq!(peer_url("localhost:4443").unwrap().as_str(), "https://localhost:4443/");
 
