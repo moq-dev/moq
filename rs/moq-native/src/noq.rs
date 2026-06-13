@@ -127,6 +127,7 @@ impl NoqClient {
 		transport.max_idle_timeout(Some(time::Duration::from_secs(30).try_into().unwrap()));
 		transport.keep_alive_interval(Some(time::Duration::from_secs(5)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
+		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
 
 		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
 		let max_streams = noq::VarInt::from_u64(max_streams).unwrap_or(noq::VarInt::MAX);
@@ -299,6 +300,7 @@ impl NoqServer {
 		transport.max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()));
 		transport.keep_alive_interval(Some(Duration::from_secs(5)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
+		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
 
 		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
 		let max_streams = noq::VarInt::from_u64(max_streams).unwrap_or(noq::VarInt::MAX);
