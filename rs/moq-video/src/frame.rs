@@ -20,11 +20,9 @@ pub(crate) enum Frame {
 	/// Zero-copy GPU surface (macOS `CVPixelBuffer`).
 	#[cfg(target_os = "macos")]
 	Surface(macos::Surface),
-	/// Zero-copy Linux dmabuf (imported as a VA surface by the VAAPI backend).
-	/// Constructed by the V4L2 dmabuf capture, which isn't wired up yet, so the
-	/// variant is allowed to be unconstructed until then.
+	/// Zero-copy Linux dmabuf, produced by the V4L2 capture and imported as a VA
+	/// surface (DrmPrime2) by the VAAPI backend.
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	#[allow(dead_code)]
 	DmaBuf(linux::DmaSurface),
 	/// CPU-resident planar I420.
 	I420(I420),

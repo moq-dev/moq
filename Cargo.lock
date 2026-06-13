@@ -4633,6 +4633,7 @@ dependencies = [
  "cros-codecs",
  "cudarc",
  "dispatch2",
+ "libc",
  "moq-mux",
  "moq-net",
  "nokhwa",
@@ -4649,6 +4650,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "v4l",
  "yuv",
 ]
 

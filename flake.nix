@@ -104,6 +104,10 @@
             # cpal's `alsa-sys` (moq-audio `capture` feature) links libasound on
             # Linux via pkg-config; macOS uses CoreAudio, so no dep there.
             pkgs.alsa-lib
+            # cros-libva (moq-video `vaapi` feature) probes libva via pkg-config.
+            # Linux-only, so the `--all-features` build can type-check the VAAPI
+            # backend in CI. macOS uses VideoToolbox instead.
+            pkgs.libva
           ];
 
         # JavaScript dependencies

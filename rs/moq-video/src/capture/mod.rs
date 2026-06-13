@@ -2,9 +2,10 @@
 //! per-source:
 //! - macOS camera -> AVFoundation, screen -> ScreenCaptureKit, both yielding
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
-//! - other platforms -> [`nokhwa`](https://crates.io/crates/nokhwa) camera
-//!   (CPU RGBA -> I420) until a native zero-copy path (V4L2 dmabuf / PipeWire)
-//!   lands.
+//! - Linux camera with the `vaapi` feature -> V4L2 dmabuf, exported straight to
+//!   the VAAPI encoder with no CPU copy.
+//! - other platforms (and Linux without `vaapi`) ->
+//!   [`nokhwa`](https://crates.io/crates/nokhwa) camera (CPU RGBA -> I420).
 //!
 //! [`encode::publish_capture`](crate::encode::publish_capture) consumes [`Config`].
 
@@ -18,6 +19,14 @@ mod queue;
 #[cfg(target_os = "macos")]
 mod screencapture;
 
+// Zero-copy V4L2 dmabuf capture for the VAAPI encoder. Opt-in: only used when
+// the caller explicitly selects VAAPI (see `open`'s `want_dmabuf`), never for
+// `Auto`, so a Linux box without a VAAPI device still falls back to the CPU
+// webcam + software/NVENC path.
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
+mod v4l2;
+
+// nokhwa CPU webcam: the default camera on every non-macOS target.
 #[cfg(not(target_os = "macos"))]
 mod webcam;
 
@@ -65,7 +74,12 @@ pub(crate) trait FrameSource {
 }
 
 /// Open the capture source described by `config`.
-pub(crate) fn open(config: &Config) -> Result<Box<dyn FrameSource>, Error> {
+///
+/// `want_dmabuf` requests the zero-copy V4L2 dmabuf path (Linux + `vaapi` only),
+/// which the caller sets when it has chosen the VAAPI encoder. Everywhere else
+/// it's ignored and the platform default camera is used.
+pub(crate) fn open(config: &Config, want_dmabuf: bool) -> Result<Box<dyn FrameSource>, Error> {
+	let _ = want_dmabuf; // only consulted on Linux + vaapi; see below.
 	match config.source {
 		Source::Camera => {
 			#[cfg(target_os = "macos")]
@@ -74,6 +88,10 @@ pub(crate) fn open(config: &Config) -> Result<Box<dyn FrameSource>, Error> {
 			}
 			#[cfg(not(target_os = "macos"))]
 			{
+				#[cfg(all(target_os = "linux", feature = "vaapi"))]
+				if want_dmabuf {
+					return Ok(Box::new(v4l2::Camera::open(config)?));
+				}
 				Ok(Box::new(webcam::Camera::open(config)?))
 			}
 		}

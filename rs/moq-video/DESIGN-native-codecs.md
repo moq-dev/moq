@@ -353,8 +353,23 @@ Where the implementation differs from the plan above:
 
 ### Follow-ups
 
-- VAAPI backend (phase 6) in a separate PR, behind a `vaapi` feature.
-- NVENC hardware validation on Linux+GPU / CI.
+- VAAPI backend (phase 6) shipped behind the `vaapi` feature (#1691).
+- V4L2 dmabuf capture (`src/capture/v4l2.rs`) written to feed the VAAPI encoder
+  zero-copy: REQBUFS(MMAP) -> EXPBUF per index -> QBUF/STREAMON -> DQBUF, handing
+  out a dup of the buffer's exported dmabuf and re-queuing one frame late. It is
+  **opt-in**, used only when VAAPI is selected by name (`capture::open`'s
+  `want_dmabuf`, set from `backend::requires_dmabuf`), so a `vaapi`-enabled box
+  without a VAAPI device still falls back to the CPU webcam + software/NVENC path.
+  Compile-verified on Linux (clippy `-D warnings`) but NOT runtime-tested: the
+  EXPBUF flags (`O_RDONLY | O_CLOEXEC`), NV12 plane offsets, and re-queue timing
+  need a real `/dev/video*` + VAAPI box to confirm.
+- CI now compile-checks both hardware backends on Linux: the `nvenc-ci` feature
+  enables `nvidia-video-codec-sdk/ci-check` (skips the `libnvidia-encode.so` link
+  panic) so `--all-features` type-checks NVENC without a driver, and `libva` is in
+  the nix devShell so `cros-libva` builds for the VAAPI type-check.
+- Still needed on real hardware: NVENC validation on Linux+GPU; the VAAPI encode
+  + V4L2 dmabuf path end to end; `Kind::Auto` selecting VAAPI once a runtime
+  device probe (not just feature-gating) can decide capture format safely.
 - Live camera run (capture needs camera permission; only synthetic-frame encode is
   tested here).
 - `doc/bin/cli.md`: the `capture` device-string semantics changed (index-or-path).

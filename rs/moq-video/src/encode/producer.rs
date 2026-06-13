@@ -13,6 +13,7 @@ use moq_net::Timestamp;
 use crate::Error;
 use crate::capture::{self, FrameSource};
 
+use super::backend;
 use super::encoder::{self, Encoder};
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
@@ -156,6 +157,9 @@ fn capture_loop(
 ) -> Result<(), Error> {
 	let mut camera: Option<Box<dyn FrameSource>> = None;
 	let mut encoder: Option<Encoder> = None;
+	// Selecting VAAPI by name means the zero-copy V4L2 dmabuf capture; every
+	// other encoder takes CPU frames from the default camera.
+	let want_dmabuf = backend::requires_dmabuf(&encode.kind);
 	// Force an IDR on the first frame of each (re)open so a viewer subscribing
 	// after an idle gap can start decoding immediately, rather than waiting for
 	// the next GOP boundary.
@@ -184,7 +188,7 @@ fn capture_loop(
 		// Open the camera (and an encoder sized to its negotiated mode) the
 		// first time we're watched after being idle.
 		if camera.is_none() {
-			let cam = capture::open(&capture)?;
+			let cam = capture::open(&capture, want_dmabuf)?;
 			// Prefer an explicit --fps, otherwise use the camera's reported
 			// rate, falling back only if the backend doesn't expose one.
 			let framerate = capture

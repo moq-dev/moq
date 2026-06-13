@@ -45,12 +45,24 @@ pub(crate) trait Backend: Send {
 struct Candidate {
 	name: &'static str,
 	open: fn(&Config) -> Result<Box<dyn Backend>, Error>,
-	/// Needs a dmabuf-backed [`Frame`]; no capture produces one yet, so these
-	/// are excluded from automatic selection (only reachable via `Kind::Named`)
-	/// until the V4L2 dmabuf capture lands. Without this, `Kind::Auto` would pick
-	/// VAAPI, which then rejects the I420 frames the current captures produce and
-	/// aborts the publish loop instead of falling back to software.
+	/// Needs a dmabuf-backed [`Frame`] (VAAPI). Such backends are excluded from
+	/// `Auto`/`Hardware` selection and reachable only by name: a box compiled
+	/// with `vaapi` but lacking a VAAPI device must still fall back to the CPU
+	/// webcam + software/NVENC path rather than capture dmabuf no encoder here
+	/// can use. When chosen by name, the caller opens the matching V4L2 dmabuf
+	/// capture (see [`requires_dmabuf`] and `capture::open`'s `want_dmabuf`).
 	requires_dmabuf: bool,
+}
+
+/// Whether selecting `kind` will require dmabuf-backed frames, so the caller can
+/// open the zero-copy V4L2 capture to match. Only an explicit by-name choice of
+/// a dmabuf backend qualifies; `Auto`/`Hardware`/`Software` stay on CPU frames.
+pub(crate) fn requires_dmabuf(kind: &Kind) -> bool {
+	let Kind::Named(name) = kind else { return false };
+	HARDWARE
+		.iter()
+		.chain(std::iter::once(&SOFTWARE))
+		.any(|c| c.name == name && c.requires_dmabuf)
 }
 
 /// Hardware backends, in priority order. Platform-gated so only the ones that
