@@ -69,7 +69,8 @@ impl I420 {
 	}
 
 	/// Convert tightly-packed RGBA (`width * height * 4` bytes) to I420, BT.601
-	/// limited range (studio swing, what H.264 decoders expect by default).
+	/// limited range (studio swing, what H.264 decoders expect by default). Used
+	/// by [`Encoder::encode_rgba`](crate::encode::Encoder) and the Windows capture.
 	pub(crate) fn from_rgba(rgba: &[u8], width: u32, height: u32) -> Result<Self, Error> {
 		let mut planar = YuvPlanarImageMut::alloc(width, height, YuvChromaSubsampling::Yuv420);
 		rgba_to_yuv420(
@@ -81,13 +82,55 @@ impl I420 {
 			YuvConversionMode::Balanced,
 		)
 		.map_err(|e| Error::Codec(anyhow::anyhow!("rgba_to_yuv420 failed for {width}x{height}: {e}")))?;
+		Ok(Self::pack(&planar, width, height))
+	}
 
+	/// Convert tightly-packed RGB (`width * height * 3` bytes) to I420, BT.601
+	/// limited range. Used for MJPEG capture (Linux V4L2), which decodes to RGB.
+	#[cfg(target_os = "linux")]
+	pub(crate) fn from_rgb(rgb: &[u8], width: u32, height: u32) -> Result<Self, Error> {
+		use yuv::rgb_to_yuv420;
+
+		let mut planar = YuvPlanarImageMut::alloc(width, height, YuvChromaSubsampling::Yuv420);
+		rgb_to_yuv420(
+			&mut planar,
+			rgb,
+			width * 3,
+			YuvRange::Limited,
+			YuvStandardMatrix::Bt601,
+			YuvConversionMode::Balanced,
+		)
+		.map_err(|e| Error::Codec(anyhow::anyhow!("rgb_to_yuv420 failed for {width}x{height}: {e}")))?;
+		Ok(Self::pack(&planar, width, height))
+	}
+
+	/// Convert packed YUYV (YUV 4:2:2, `stride` bytes per row) to I420. A chroma
+	/// resample (4:2:2 -> 4:2:0), no color-space conversion. Used for the raw
+	/// V4L2 capture path (Linux).
+	#[cfg(target_os = "linux")]
+	pub(crate) fn from_yuyv(yuyv: &[u8], stride: u32, width: u32, height: u32) -> Result<Self, Error> {
+		use yuv::{YuvPackedImage, yuyv422_to_yuv420};
+
+		let mut planar = YuvPlanarImageMut::alloc(width, height, YuvChromaSubsampling::Yuv420);
+		let packed = YuvPackedImage {
+			yuy: yuyv,
+			yuy_stride: stride,
+			width,
+			height,
+		};
+		yuyv422_to_yuv420(&mut planar, &packed)
+			.map_err(|e| Error::Codec(anyhow::anyhow!("yuyv422_to_yuv420 failed for {width}x{height}: {e}")))?;
+		Ok(Self::pack(&planar, width, height))
+	}
+
+	/// Flatten the three planes of a freshly-converted image into one tightly
+	/// packed I420 buffer (Y, then U, then V).
+	fn pack(planar: &YuvPlanarImageMut<u8>, width: u32, height: u32) -> Self {
 		let mut data = Vec::with_capacity(Self::len(width, height));
 		data.extend_from_slice(planar.y_plane.borrow());
 		data.extend_from_slice(planar.u_plane.borrow());
 		data.extend_from_slice(planar.v_plane.borrow());
-
-		Ok(Self { width, height, data })
+		Self { width, height, data }
 	}
 
 	fn luma_len(&self) -> usize {

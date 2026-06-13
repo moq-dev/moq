@@ -5,8 +5,9 @@
 //! adds the native pieces a desktop/CLI publisher needs:
 //!
 //! - [`capture`] describes a frame source ([`capture::Config`]) and grabs
-//!   frames via [`nokhwa`](https://crates.io/crates/nokhwa) (avfoundation /
-//!   v4l2 / msmf). Today that's a webcam.
+//!   frames per platform: AVFoundation/ScreenCaptureKit on macOS, native V4L2
+//!   on Linux, nokhwa (Media Foundation) on Windows. Today that's a webcam or
+//!   the screen.
 //! - [`encode`] H.264-encodes frames with a native backend (openh264 /
 //!   VideoToolbox / NVENC) and publishes them through
 //!   [`moq_mux::codec::h264::Import`], which handles catalog registration

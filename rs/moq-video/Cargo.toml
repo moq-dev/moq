@@ -33,9 +33,6 @@ bytes = "1"
 cudarc = { version = "0.16", optional = true, default-features = false, features = ["driver"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-# Pure-Rust webcam capture (avfoundation / v4l2 / msmf), decoding MJPEG/YUYV to
-# RGBA. Platform input backends are enabled per-target below.
-nokhwa = { version = "0.10.11", default-features = false, features = ["decoding"] }
 # NVENC backend, gated behind the `nvenc` feature + a linux cfg. Listed here
 # (not under a target table) so the feature can reference it on any host; the
 # code that uses it is `cfg(target_os = "linux")`.
@@ -49,12 +46,14 @@ tracing = "0.1"
 yuv = "0.8.14"
 
 [target.'cfg(target_os="linux")'.dependencies]
-nokhwa = { version = "0.10.11", features = ["input-v4l"] }
+# Native V4L2 webcam capture (replaces nokhwa). `v4l` streams MMAP buffers;
+# MJPEG cameras are decoded with the pure-Rust `zune-jpeg` (no libjpeg/IJG).
+v4l = "0.14"
+zune-jpeg = "0.5"
 
 [target.'cfg(target_os="macos")'.dependencies]
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
-nokhwa = { version = "0.10.11", features = ["input-avfoundation"] }
 objc2 = "0.6.4"
 objc2-av-foundation = "0.3.2"
 objc2-core-foundation = "0.3.2"
@@ -65,4 +64,6 @@ objc2-screen-capture-kit = "0.3.2"
 objc2-video-toolbox = "0.3.2"
 
 [target.'cfg(target_os="windows")'.dependencies]
-nokhwa = { version = "0.10.11", features = ["input-msmf"] }
+# Windows still uses nokhwa (Media Foundation) until a native MF capture lands;
+# `decoding` handles its MJPEG/YUYV -> RGBA conversion.
+nokhwa = { version = "0.10.11", default-features = false, features = ["input-msmf", "decoding"] }
