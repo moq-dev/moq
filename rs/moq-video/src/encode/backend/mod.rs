@@ -24,6 +24,9 @@ mod videotoolbox;
 #[cfg(all(target_os = "linux", feature = "nvenc"))]
 mod nvenc;
 
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
+mod vaapi;
+
 /// An opened H.264 encoder. Feed it frames at the configured resolution;
 /// get back zero or more Annex-B H.264 packets.
 pub(crate) trait Backend: Send {
@@ -56,6 +59,11 @@ const HARDWARE: &[Candidate] = &[
 	Candidate {
 		name: nvenc::NAME,
 		open: nvenc::Nvenc::open,
+	},
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	Candidate {
+		name: vaapi::NAME,
+		open: vaapi::Vaapi::open,
 	},
 ];
 

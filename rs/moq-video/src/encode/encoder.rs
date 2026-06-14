@@ -22,7 +22,8 @@ pub enum Kind {
 	Hardware,
 	/// Software (openh264) only.
 	Software,
-	/// A specific backend by name, e.g. `"videotoolbox"`, `"nvenc"`, `"openh264"`.
+	/// A specific backend by name, e.g. `"videotoolbox"`, `"nvenc"`, `"vaapi"`,
+	/// `"openh264"`.
 	Named(String),
 }
 

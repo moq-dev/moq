@@ -24,10 +24,24 @@ doctest = false
 # driver, falling back to software (see backend::open). `cuda-12020` pins the CUDA
 # API version so the build needs no CUDA toolkit.
 nvenc = ["dep:nvidia-video-codec-sdk", "nvidia-video-codec-sdk/dynamic-loading", "cudarc/fallback-dynamic-loading", "cudarc/cuda-12020"]
+# Intel/AMD VAAPI hardware encoder (Linux). Off by default; enable for a build
+# that should use VAAPI where present. Everything is dlopen'd at runtime:
+# discord/cros-codecs's `vaapi_dlopen` resolves libva through the cros-libva
+# `dlopen` feature (a fork feature, see the root [patch.crates-io]). So a
+# vaapi-enabled binary still links on a libva-less builder and still loads on
+# machines without libva, falling back to software (see backend::open). The
+# build still needs libva *headers* for bindgen (provided by the nix devShell).
+vaapi = ["dep:cros-codecs"]
 
 [dependencies]
 anyhow = "1"
 bytes = "1"
+# VAAPI H.264 encoder + zero-copy dmabuf import, gated behind `vaapi` + a linux
+# cfg. discord's fork is the maintained one: cros-libva 0.0.13 so it builds
+# against libva >= 2.23 (published cros-codecs pins the broken 0.0.12), plus a
+# hardened H.264 encoder (packed SPS/PPS + slice headers, frame_num, rate
+# control). `vaapi_dlopen` loads libva at runtime.
+cros-codecs = { git = "https://github.com/discord/cros-codecs.git", branch = "discord-0.0.5", optional = true, default-features = false, features = ["vaapi_dlopen"] }
 cudarc = { version = "0.19", optional = true, default-features = false, features = ["driver"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }

@@ -1,11 +1,11 @@
 # Native H.264 codecs for moq-video (drop ffmpeg)
 
-Status: **phases 2-5 implemented** (openh264, VideoToolbox, NVENC, capture swap +
-ffmpeg removal). Capture is now native on all three platforms (AVFoundation /
-ScreenCaptureKit on macOS, V4L2 on Linux, Media Foundation on Windows), so
-**nokhwa is fully removed**. VAAPI (phase 6) stays parked until cros-codecs
-builds against modern libva. See "As built" at the bottom for where the
-implementation diverged from this plan.
+Status: **phases 2-6 implemented** (openh264, VideoToolbox, NVENC, VAAPI, capture
+swap + ffmpeg removal). Capture is now native on all three platforms (AVFoundation
+/ ScreenCaptureKit on macOS, V4L2 on Linux, Media Foundation on Windows), so
+**nokhwa is fully removed**. VAAPI is back via discord/cros-codecs with an NV12
+surface-upload input path; the zero-copy dmabuf capture is a follow-up. See "As
+built" at the bottom for where the implementation diverged from this plan.
 
 ## Goal
 
@@ -368,26 +368,50 @@ Where the implementation differs from the plan above:
   unpadded NV12 so the I420 deinterleave is correct; (3) the on-demand
   open/`source.Shutdown()` cycle releases the camera (LED off) and reopens cleanly.
 
-### VAAPI removed (cros-codecs is not buildable on modern libva)
+### VAAPI reintroduced via discord/cros-codecs + NV12 surface upload
 
-The VAAPI backend (added behind the `vaapi` feature in #1691) and the V4L2 dmabuf
-capture written to feed it have been **removed**. `cros-codecs 0.0.6` (the latest)
+VAAPI was dropped in #1704 because `cros-codecs 0.0.6` (still the latest release)
 caret-pins `cros-libva 0.0.12`, which does not compile against libva >= 2.23: the
 newer headers add `seg_id_block_size` / `va_reserved8` to
 `VAEncPictureParameterBufferVP9`, and `cros-libva 0.0.12`'s struct literal omits
-them (`cros-libva 0.0.13` fixes it, but `cros-codecs 0.0.6` won't accept it). Since
-modern distros and the nix toolchain ship libva 2.23+, the feature could not build
-or ship, and CI's `--all-features` could not be made green while it existed.
-`cros-codecs` is the only pure-Rust VAAPI H.264 encoder, and reintroducing ffmpeg
-for VAAPI defeats the purpose of this effort, so VAAPI is parked until `cros-codecs`
-releases against `cros-libva >= 0.0.13` (or a better VAAPI path appears). Intel/AMD
-Linux falls back to the openh264 software encoder meanwhile; NVIDIA uses NVENC.
+them. `cros-libva 0.0.13` fixes it, but `cros-codecs 0.0.6`'s `^0.0.12` pin won't
+accept it, and upstream cros-codecs is unmaintained (no release since June 2025).
 
-When it returns: re-add `backend/vaapi.rs`, `capture/v4l2.rs`, the `vaapi` feature
-(+ `cros-codecs`/`v4l`/`libc` deps), `Frame::DmaBuf`, the `requires_dmabuf` capture
-coupling, and `libva` in the nix devShell. See this PR's history for the prior
-implementation; the V4L2 capture (REQBUFS/EXPBUF/QBUF/DQBUF) was compile-verified
-but never runtime-tested.
+The unblock is [discord/cros-codecs](https://github.com/discord/cros-codecs), an
+actively-maintained fork (Discord ships it for Go Live) that bumps to cros-libva
+0.0.13 *and* hardens the H.264 VAAPI encoder (packed SPS/PPS + slice headers,
+`frame_num`, rate control). We consume it as a git dependency, no fork of our own:
+
+- `cros-codecs = { git = discord/cros-codecs, branch = "discord-0.0.5", features = ["vaapi_dlopen"] }`.
+- `vaapi_dlopen` pulls the cros-libva `dlopen` feature, which lives on
+  discord/cros-libva's `discord-0.0.13` branch, so the root `[patch.crates-io]`
+  points `cros-libva` there. Both git URLs are in `deny.toml`'s `allow-git`.
+
+**dlopen, like NVENC.** `dlopen` makes cros-libva load libva at runtime (no
+`cargo:rustc-link-lib`, no `DT_NEEDED libva.so.2`), so a `--features vaapi` binary
+links on a libva-less builder and loads on a libva-less machine, falling back to
+software (see `backend::open`). The build still needs libva *headers* for
+cros-libva's bindgen, so `libva` is in the nix devShell.
+
+**Input is an NV12 surface upload, not zero-copy dmabuf.** The encoder wants an
+NV12 VA surface, but UVC webcams deliver YUYV/MJPEG (decoded to CPU I420); they
+rarely expose NV12 to import zero-copy. So `backend/vaapi.rs` drives
+`new_native_vaapi` with a `VaSurfacePool`: each frame uploads I420 into a pooled
+surface as NV12 (`libva::Image`, honoring plane pitches) and encodes the surface.
+This works with the existing CPU V4L2 capture, no new capture code.
+
+Follow-up (not in this PR): the **zero-copy dmabuf path** for the rare NV12-capable
+V4L2 source. Re-add `Frame::DmaBuf`, a V4L2 `VIDIOC_EXPBUF` capture (the `v4l`
+crate exposes the raw ioctl but no dmabuf stream), and a `requires_dmabuf` capture
+coupling, then import the dmabuf into a VA surface (`MemoryType::DrmPrime2`).
+
+**NOT YET VALIDATED ON HARDWARE.** Compiles on Linux with libva headers; written
+against discord/cros-codecs `discord-0.0.5` with type/field names checked against
+source. Needs a Linux + Intel/AMD GPU to confirm: (1) the `low_power` entrypoint
+(recent Intel iHD often requires the low-power encode entrypoint, AMD the full
+one; we request full and let `Kind::Auto` fall back); (2) the NV12 upload
+pitch/offset handling round-trips; (3) `cargo deny` accepts the new transitive
+licenses (drm, drm-fourcc, etc.) once the vaapi graph resolves.
 
 ### NVENC ships via dlopen (no driver dependency at build or load)
 

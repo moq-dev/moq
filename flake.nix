@@ -104,6 +104,10 @@
             # cpal's `alsa-sys` (moq-audio `capture` feature) links libasound on
             # Linux via pkg-config; macOS uses CoreAudio, so no dep there.
             pkgs.alsa-lib
+            # moq-video `vaapi` feature: cros-libva runs bindgen against the libva
+            # headers at build time (found via pkg-config), even though libva is
+            # dlopen'd at runtime (`vaapi_dlopen`). macOS has no VAAPI.
+            pkgs.libva
           ];
 
         # JavaScript dependencies

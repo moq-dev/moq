@@ -70,4 +70,12 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # moq-video patches nvidia-video-codec-sdk to a fork that adds dlopen
 # (`dynamic-loading`); see the root Cargo.toml [patch.crates-io]. Drop this once
 # the feature is upstreamed and the patch is removed.
-allow-git = ["https://github.com/kixelated/nvidia-video-codec-sdk"]
+#
+# The `vaapi` feature pulls discord/cros-codecs (the maintained fork: cros-libva
+# 0.0.13 + a hardened H.264 VAAPI encoder) and patches cros-libva to discord's
+# fork for the `dlopen` feature. Drop these once `dlopen` is upstreamed.
+allow-git = [
+    "https://github.com/kixelated/nvidia-video-codec-sdk",
+    "https://github.com/discord/cros-codecs",
+    "https://github.com/discord/cros-libva",
+]
