@@ -121,7 +121,7 @@ pub(crate) struct NoqClient {
 
 impl NoqClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
-		let socket = std::net::UdpSocket::bind(config.bind).map_err(Error::BindSocket)?;
+		let socket = crate::util::bind_udp(config.bind).map_err(Error::BindSocket)?;
 
 		let mut transport = noq::TransportConfig::default();
 		transport.max_idle_timeout(Some(time::Duration::from_secs(30).try_into().unwrap()));
@@ -366,7 +366,7 @@ impl NoqServer {
 			}));
 		}
 
-		let socket = std::net::UdpSocket::bind(listen).map_err(Error::BindSocket)?;
+		let socket = crate::util::bind_udp(listen).map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
 		let quic = noq::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;

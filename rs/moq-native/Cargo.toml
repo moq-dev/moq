@@ -47,6 +47,7 @@ rustls-native-certs = "0.8"
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["hex"] }
+socket2 = "0.6"
 thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.6", optional = true }
 tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }

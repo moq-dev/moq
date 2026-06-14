@@ -3968,6 +3968,7 @@ dependencies = [
  "rustls-webpki",
  "serde",
  "serde_with",
+ "socket2",
  "thiserror 2.0.18",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
