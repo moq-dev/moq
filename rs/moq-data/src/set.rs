@@ -62,13 +62,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// reproduce `item`. Two items are the same set member iff they're equal under [`Eq`]/[`Hash`], so
 /// distinct items must encode to distinct bytes.
 pub trait Item: Clone + Eq + Hash {
-	/// The number of bytes [`encode`](Item::encode) writes.
-	///
-	/// Read up front to length-prefix the item in a snapshot, so it must equal the number of bytes
-	/// `encode` goes on to write.
-	fn size(&self) -> usize;
-
-	/// Encode the item's bytes directly into `buf`, writing exactly [`size`](Item::size) bytes.
+	/// Encode the item's bytes directly into `buf`.
 	///
 	/// Writing into the frame buffer (rather than returning a fresh `Bytes`) keeps a string or byte
 	/// vector to a single copy.
@@ -81,13 +75,19 @@ pub trait Item: Clone + Eq + Hash {
 	fn decode<B: Buf>(buf: &mut B) -> Result<Self>
 	where
 		Self: Sized;
+
+	/// The number of bytes [`encode`](Item::encode) writes, used to size a frame up front.
+	///
+	/// The default runs `encode` against a counting [`Sizer`](moq_net::Sizer) (no allocation, no
+	/// copy). Override it when the length is known directly, e.g. `self.len()`.
+	fn encode_size(&self) -> usize {
+		let mut sizer = moq_net::Sizer::default();
+		self.encode(&mut sizer);
+		sizer.size
+	}
 }
 
 impl Item for String {
-	fn size(&self) -> usize {
-		self.len()
-	}
-
 	fn encode<B: BufMut>(&self, buf: &mut B) {
 		buf.put_slice(self.as_bytes());
 	}
@@ -96,13 +96,13 @@ impl Item for String {
 		let bytes = buf.copy_to_bytes(buf.remaining());
 		String::from_utf8(bytes.into()).map_err(|err| Error::Item(err.to_string()))
 	}
+
+	fn encode_size(&self) -> usize {
+		self.len()
+	}
 }
 
 impl Item for Vec<u8> {
-	fn size(&self) -> usize {
-		self.len()
-	}
-
 	fn encode<B: BufMut>(&self, buf: &mut B) {
 		buf.put_slice(self);
 	}
@@ -110,19 +110,23 @@ impl Item for Vec<u8> {
 	fn decode<B: Buf>(buf: &mut B) -> Result<Self> {
 		Ok(buf.copy_to_bytes(buf.remaining()).into())
 	}
+
+	fn encode_size(&self) -> usize {
+		self.len()
+	}
 }
 
 impl Item for Bytes {
-	fn size(&self) -> usize {
-		self.len()
-	}
-
 	fn encode<B: BufMut>(&self, buf: &mut B) {
 		buf.put_slice(self);
 	}
 
 	fn decode<B: Buf>(buf: &mut B) -> Result<Self> {
 		Ok(buf.copy_to_bytes(buf.remaining()))
+	}
+
+	fn encode_size(&self) -> usize {
+		self.len()
 	}
 }
 
@@ -179,9 +183,9 @@ impl<T: Item> Producer<T> {
 			return Ok(false);
 		}
 
-		let delta_size = 1 + item.size() as u64;
+		let delta_size = 1 + item.encode_size() as u64;
 		// The snapshot size once `item` is included, computed without inserting so we keep `&item`.
-		let snapshot_size = self.snapshot_size() + 4 + item.size() as u64;
+		let snapshot_size = self.snapshot_size() + 4 + item.encode_size() as u64;
 
 		if self.should_snapshot(delta_size, snapshot_size) {
 			self.current.insert(item);
@@ -205,7 +209,7 @@ impl<T: Item> Producer<T> {
 			return Ok(false);
 		};
 
-		let delta_size = 1 + removed.size() as u64;
+		let delta_size = 1 + removed.encode_size() as u64;
 		// `current` already reflects the removal.
 		let snapshot_size = self.snapshot_size();
 
@@ -258,7 +262,11 @@ impl<T: Item> Producer<T> {
 	/// The byte size of a full snapshot of the current set: a `u32` count plus each item
 	/// length-prefixed. Computed from [`Item::size`] so we can size a frame without a scratch buffer.
 	fn snapshot_size(&self) -> u64 {
-		4 + self.current.iter().map(|item| 4 + item.size() as u64).sum::<u64>()
+		4 + self
+			.current
+			.iter()
+			.map(|item| 4 + item.encode_size() as u64)
+			.sum::<u64>()
 	}
 
 	fn should_snapshot(&self, delta_size: u64, snapshot_size: u64) -> bool {
@@ -274,7 +282,7 @@ impl<T: Item> Producer<T> {
 
 	/// Append a `+`/`-` delta frame for one item to the open group, encoding straight into the frame.
 	fn write_delta(&mut self, op: u8, item: &T) -> Result<()> {
-		let size = 1 + item.size() as u64;
+		let size = 1 + item.encode_size() as u64;
 		let group = self.group.as_mut().expect("delta requires an open group");
 
 		let mut frame = group.create_frame(size.into())?;
@@ -301,7 +309,7 @@ impl<T: Item> Producer<T> {
 		let mut frame = group.create_frame(self.snapshot_size().into())?;
 		frame.put_u32(count);
 		for item in &self.current {
-			let len = u32::try_from(item.size()).map_err(|_| Error::Malformed("item is too large".into()))?;
+			let len = u32::try_from(item.encode_size()).map_err(|_| Error::Malformed("item is too large".into()))?;
 			frame.put_u32(len);
 			item.encode(&mut frame);
 		}
@@ -630,11 +638,8 @@ mod test {
 			y: u16,
 		}
 
+		// No `encode_size` override: the default counts the bytes via a `Sizer`.
 		impl Item for Point {
-			fn size(&self) -> usize {
-				4
-			}
-
 			fn encode<B: BufMut>(&self, buf: &mut B) {
 				buf.put_u16(self.x);
 				buf.put_u16(self.y);
