@@ -760,6 +760,18 @@ impl OriginProducer {
 		}
 	}
 
+	/// A producer with *no* allowed prefixes: it can't publish anything and
+	/// advertises no subscribe interest (its `allowed()` is empty, so the
+	/// subscriber issues no ANNOUNCE_PLEASE). Used to fill an unset session half
+	/// so both the publisher and subscriber loops still run.
+	pub(crate) fn empty(info: Origin) -> Self {
+		Self {
+			info,
+			nodes: OriginNodes { nodes: Vec::new() },
+			root: PathOwned::default(),
+		}
+	}
+
 	/// Create and publish a new broadcast.
 	///
 	/// This is a helper method when you only want to publish a broadcast to a single origin.

@@ -1,5 +1,5 @@
 use crate::{
-	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, StatsHandle, coding::Stream,
+	BandwidthConsumer, BandwidthProducer, Error, Origin, OriginConsumer, OriginProducer, StatsHandle, coding::Stream,
 	lite::SessionInfo,
 };
 
@@ -49,54 +49,40 @@ pub fn start<S: web_transport_trait::Session>(
 		None
 	};
 
+	// Always run both loops so inbound control (Subscribe/Announce/Probe/Goaway)
+	// and GROUP streams are accepted regardless of which halves the caller wired.
+	// An unset publish side gets a full-scope origin so it still answers the peer's
+	// announce-interest queries (it just has no broadcasts to announce). An unset
+	// subscribe side gets an empty origin: zero prefixes means the subscriber issues
+	// no ANNOUNCE_PLEASE (and `run_announce` drops `connecting` at once, so `connect()`
+	// still unblocks).
+	let publish = publish.unwrap_or_else(|| Origin::random().produce().consume());
+	let subscribe = subscribe.unwrap_or_else(|| OriginProducer::empty(Origin::random()));
+
 	// Publisher and Subscriber each derive their identity from their own
 	// attached origin (publish.info / subscribe.info). This is what gets
 	// stamped onto outbound hops and checked against incoming hops, so it
 	// must be stable across every session that shares the local origin.
 	// Required for cross-session cluster loop detection.
-	//
-	// A `None` half is left idle: an unset publish origin announces nothing,
-	// and an unset subscribe origin never issues ANNOUNCE_PLEASE.
-	let publisher = publish.map(|origin| {
-		Publisher::new(PublisherConfig {
-			session: session.clone(),
-			origin,
-			stats: stats.clone(),
-			version,
-		})
+	let publisher = Publisher::new(PublisherConfig {
+		session: session.clone(),
+		origin: publish,
+		stats: stats.clone(),
+		version,
 	});
-	let subscriber = subscribe.map(|origin| {
-		Subscriber::new(SubscriberConfig {
-			session: session.clone(),
-			origin,
-			recv_bandwidth: recv_bw_for_sub,
-			stats,
-			version,
-		})
+	let subscriber = Subscriber::new(SubscriberConfig {
+		session: session.clone(),
+		origin: subscribe,
+		recv_bandwidth: recv_bw_for_sub,
+		stats,
+		version,
 	});
 
 	web_async::spawn(async move {
-		let run_publisher = async {
-			match publisher {
-				Some(p) => p.run().await,
-				None => std::future::pending::<Result<(), Error>>().await,
-			}
-		};
-		let run_subscriber = async {
-			match subscriber {
-				Some(s) => s.run(sub_connecting).await,
-				// Drop the connecting producer so `Connecting::ready` unblocks `connect()`.
-				None => {
-					drop(sub_connecting);
-					std::future::pending::<Result<(), Error>>().await
-				}
-			}
-		};
-
 		let res = tokio::select! {
 			Err(res) = run_session(setup_stream) => Err(res),
-			res = run_publisher => res,
-			res = run_subscriber => res,
+			res = publisher.run() => res,
+			res = subscriber.run(sub_connecting) => res,
 		};
 
 		match res {
