@@ -21,6 +21,9 @@ mod openh264;
 #[cfg(target_os = "macos")]
 mod videotoolbox;
 
+#[cfg(target_os = "windows")]
+mod mediafoundation;
+
 #[cfg(all(target_os = "linux", feature = "nvenc"))]
 mod nvenc;
 
@@ -54,6 +57,11 @@ const HARDWARE: &[Candidate] = &[
 	Candidate {
 		name: videotoolbox::NAME,
 		open: videotoolbox::VideoToolbox::open,
+	},
+	#[cfg(target_os = "windows")]
+	Candidate {
+		name: mediafoundation::NAME,
+		open: mediafoundation::MediaFoundation::open,
 	},
 	#[cfg(all(target_os = "linux", feature = "nvenc"))]
 	Candidate {

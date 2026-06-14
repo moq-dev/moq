@@ -402,6 +402,63 @@ mod tests {
 		types
 	}
 
+	/// Exercises the Media Foundation hardware encoder backend end to end on
+	/// Windows: synthetic frames through the real encoder MFT, asserting Annex-B
+	/// output with an in-band IDR (SPS+PPS+slice). Ignored by default: it needs a
+	/// GPU with a hardware H.264 encoder, which CI runners may lack.
+	#[cfg(target_os = "windows")]
+	#[test]
+	#[ignore]
+	fn mediafoundation_emits_annexb_keyframe() {
+		let config = Config {
+			kind: Kind::Named("mediafoundation".into()),
+			..Config::new(640, 480, 30)
+		};
+		let mut encoder = Encoder::new(&config).expect("hardware H.264 encoder available");
+		assert_eq!(encoder.name(), "mediafoundation");
+
+		let frame = gray_rgba(640, 480);
+		let mut packets = Vec::new();
+		for i in 0..30 {
+			packets.extend(encoder.encode_rgba(&frame, 640, 480, i == 0).unwrap());
+		}
+		packets.extend(encoder.finish().unwrap());
+		eprintln!("encoded {} packets", packets.len());
+
+		assert!(!packets.is_empty(), "encoder produced no packets");
+		let first = &packets[0];
+		assert!(
+			first.starts_with(&[0, 0, 0, 1]) || first.starts_with(&[0, 0, 1]),
+			"first packet is not Annex-B: {:02x?}",
+			&first[..first.len().min(8)]
+		);
+
+		// The first access unit must be a self-contained IDR: SPS (7), PPS (8),
+		// and an IDR slice (5), so an avc3 subscriber can start decoding cold.
+		let types = nal_types(first);
+		eprintln!("first packet NAL types: {types:?}");
+		assert!(types.contains(&7), "no SPS in first packet: {types:?}");
+		assert!(types.contains(&8), "no PPS in first packet: {types:?}");
+		assert!(types.contains(&5), "first packet is not an IDR: {types:?}");
+	}
+
+	/// NAL unit types in an Annex-B buffer, found via 3-byte start codes (a
+	/// 4-byte `00 00 00 01` code contains `00 00 01` too, so this catches both).
+	#[cfg(target_os = "windows")]
+	fn nal_types(annexb: &[u8]) -> Vec<u8> {
+		let mut types = Vec::new();
+		let mut i = 0;
+		while i + 3 < annexb.len() {
+			if annexb[i..i + 3] == [0, 0, 1] {
+				types.push(annexb[i + 3] & 0x1f);
+				i += 3;
+			} else {
+				i += 1;
+			}
+		}
+		types
+	}
+
 	#[test]
 	fn default_bitrate_scales_with_resolution() {
 		let small = Config::new(320, 240, 30).resolved_bitrate();

@@ -15,20 +15,16 @@ use windows::Win32::Media::MediaFoundation::{
 	MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
 	MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
 	MF_MT_SUBTYPE, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-	MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFCreateAttributes, MFCreateMediaType,
-	MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup,
-	MFVideoFormat_NV12,
+	MF_SOURCE_READERF_ENDOFSTREAM, MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromMediaSource,
+	MFEnumDeviceSources, MFMediaType_Video, MFVideoFormat_NV12,
 };
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::core::{Interface, PWSTR};
 
 use super::{Config, FrameSource};
 use crate::Error;
 use crate::frame::{Frame, I420};
-
-fn mf_err(ctx: &str, e: windows::core::Error) -> Error {
-	Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
-}
+use crate::win::{ComGuard, mf_err};
 
 /// Pack two 32-bit values into the high/low halves of a u64, the layout Media
 /// Foundation uses for `MF_MT_FRAME_SIZE` (width/height) and `MF_MT_FRAME_RATE`
@@ -39,34 +35,6 @@ fn pack_2x32(hi: u32, lo: u32) -> u64 {
 
 fn unpack_2x32(v: u64) -> (u32, u32) {
 	((v >> 32) as u32, v as u32)
-}
-
-/// Initialize COM (MTA) + Media Foundation for the calling thread, balanced by
-/// `MFShutdown` + `CoUninitialize` on drop. The capture loop runs on one blocking
-/// thread, so each open/close pair stays on the same thread.
-struct ComGuard;
-
-impl ComGuard {
-	fn new() -> Result<Self, Error> {
-		unsafe {
-			// MTA: the blocking capture thread has no message pump. `S_FALSE`
-			// (already initialized on this thread) is success, which `.ok()` keeps.
-			CoInitializeEx(None, COINIT_MULTITHREADED)
-				.ok()
-				.map_err(|e| mf_err("CoInitializeEx", e))?;
-			MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(|e| mf_err("MFStartup", e))?;
-		}
-		Ok(Self)
-	}
-}
-
-impl Drop for ComGuard {
-	fn drop(&mut self) {
-		unsafe {
-			let _ = MFShutdown();
-			CoUninitialize();
-		}
-	}
 }
 
 /// An open camera, read frame-by-frame via [`read`](FrameSource::read).
