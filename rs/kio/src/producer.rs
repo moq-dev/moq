@@ -82,7 +82,7 @@ impl<T> Producer<T> {
 	/// while pending.
 	///
 	/// Returns `Poll::Ready(Err(`[`Ref`]`))` if the channel is closed.
-	pub fn poll_write_when<F>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
+	pub fn poll_write<F>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<()>,
 	{
