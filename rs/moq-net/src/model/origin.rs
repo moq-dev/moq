@@ -879,7 +879,7 @@ impl OriginConsumer {
 	/// consumer is closed, or `Poll::Pending` after registering `waiter` to be
 	/// notified when the next update arrives.
 	pub fn poll_announced(&mut self, waiter: &kio::Waiter) -> Poll<Option<OriginAnnounce>> {
-		match self.state.poll(waiter, |state| match state.take() {
+		match self.state.poll_drain(waiter, |state| match state.take() {
 			Some(item) => Poll::Ready(item),
 			None => Poll::Pending,
 		}) {

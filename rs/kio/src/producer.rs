@@ -71,56 +71,31 @@ impl<T> Producer<T> {
 		}
 	}
 
-	/// Poll-based mutable access with waker registration.
+	/// Poll for a condition with mutable access to the value, registering
+	/// `waiter` when `f` returns [`Poll::Pending`].
 	///
-	/// Calls `f` with a [`Mut`] guard. If `f` returns [`Poll::Pending`],
-	/// registers the [`Waiter`] for notification when the state next changes.
+	/// Mutations made through the `&mut T` here do NOT notify consumers, unlike a
+	/// write through [`write`](Self::write). This is meant for a producer draining
+	/// its own queued work: notifying here would wake this producer's own waiter,
+	/// a self-triggering footgun that can spin into an infinite loop. Notify
+	/// consumers explicitly with [`write`](Self::write) when you need to.
+	///
 	/// Returns `Poll::Ready(Err(`[`Ref`]`))` if the channel is closed.
-	pub fn poll<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Ref<'_, T>>>
+	pub fn poll_drain<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
-		F: FnMut(&mut Mut<'_, T>) -> Poll<R>,
+		F: FnMut(&mut T) -> Poll<R>,
 	{
-		let mut state = self.write()?;
+		let mut state = self.state.lock();
+		if state.closed {
+			return Poll::Ready(Err(Ref { state }));
+		}
 
-		if let Poll::Ready(res) = f(&mut state) {
+		if let Poll::Ready(res) = f(&mut state.value) {
 			return Poll::Ready(Ok(res));
 		}
 
-		let inner = state.state.as_mut().unwrap();
-
-		// Take existing waiters if f modified the state, so we can notify consumers.
-		let waiters = if state.modified {
-			Some(inner.waiters.take())
-		} else {
-			None
-		};
-
-		// Register ourselves for future notifications.
-		waiter.register(&mut inner.waiters);
-
-		// Prevent Drop from re-waking the waiter we just registered.
-		state.modified = false;
-
-		// Release the lock before waking consumers.
-		drop(state);
-
-		if let Some(mut waiters) = waiters {
-			waiters.wake();
-		}
-
+		waiter.register(&mut state.waiters);
 		Poll::Pending
-	}
-
-	/// Wait for the closure to return [`Poll::Ready`], re-polling on each state change.
-	///
-	/// Returns `Ok(R)` when the closure returns [`Poll::Ready`], or `Err(Ref)` with
-	/// read-only access to the final state if the channel closes first.
-	pub async fn wait<F, R>(&self, mut f: F) -> Result<R, Ref<'_, T>>
-	where
-		F: FnMut(&mut Mut<'_, T>) -> Poll<R> + Unpin,
-		R: Unpin,
-	{
-		crate::wait(move |waiter| self.poll(waiter, &mut f)).await
 	}
 
 	/// Wait until the channel is closed.

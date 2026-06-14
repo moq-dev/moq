@@ -256,9 +256,9 @@ impl BroadcastDynamic {
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R, Error>>
 	where
-		F: FnMut(&mut kio::Mut<'_, State>) -> Poll<R>,
+		F: FnMut(&mut State) -> Poll<R>,
 	{
-		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
+		Poll::Ready(match ready!(self.state.poll_drain(waiter, f)) {
 			Ok(r) => Ok(r),
 			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
 		})
