@@ -3,7 +3,7 @@
 // Split from release.ts to allow building packages without publishing
 
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { publint } from "publint";
 import { formatMessage } from "publint/utils";
 
@@ -195,7 +195,7 @@ function injectSelfTypes() {
 		if (!existsSync(dts)) continue;
 		const body = readFileSync(js, "utf8");
 		if (body.includes("@ts-self-types")) continue;
-		const sibling = rel.split("/").pop()!.replace(/\.js$/, ".d.ts");
-		writeFileSync(js, `/* @ts-self-types="./${sibling}" */\n${body}`);
+		// Sibling .d.ts (same directory), so just its basename.
+		writeFileSync(js, `/* @ts-self-types="./${basename(dts)}" */\n${body}`);
 	}
 }
