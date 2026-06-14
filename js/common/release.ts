@@ -5,8 +5,10 @@ const dryRun = process.argv.includes("--dry-run") || process.env.DRY_RUN === "tr
 // Read package.json to get name, version, and whether to also publish to JSR.
 const pkg = JSON.parse(await Bun.file("package.json").text());
 const { name, version } = pkg;
-// Anything that publishes to npm (has a release script) also publishes to JSR.
-const publishJsr = Boolean(pkg.scripts?.release);
+// Anything that publishes to npm (this script runs) also publishes to JSR,
+// unless it opts out with "jsr": false (the web-component packages do, since JSR
+// forbids the global type augmentation custom elements need).
+const publishJsr = pkg.jsr !== false;
 
 // Whether this exact version already exists on each registry. The two are
 // checked independently so a package can be onboarded onto JSR even when its
@@ -79,9 +81,9 @@ if (publishJsr) {
 		"--no-check",
 		"--allow-dirty",
 	];
-	// The libs ship explicit .d.ts and have no slow types. The web-component
-	// packages use global type augmentations that fast-check rejects, so opt out
-	// when that env is set (the release workflow sets it).
+	// Only libs publish to JSR now (web components opt out), and their built
+	// .d.ts has explicit types, so slow types shouldn't appear. Keep this as a
+	// safety valve the release workflow can toggle without a code change.
 	if (process.env.JSR_ALLOW_SLOW_TYPES === "true") args.push("--allow-slow-types");
 	if (dryRun) {
 		console.log(`🧪 Publishing ${name}@${version} to JSR (dry-run)...`);

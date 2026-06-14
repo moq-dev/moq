@@ -14,9 +14,11 @@ const pkg = JSON.parse(readFileSync("package.json", "utf8"));
 // JSR config can map them to the built (.js) entrypoints.
 const srcExports: Record<string, unknown> = structuredClone(pkg.exports ?? {});
 
-// Publish to JSR alongside npm for every package that publishes at all, i.e. one
-// with a release script. Captured before pkg.scripts is cleared below.
-const publishJsr = Boolean(pkg.scripts?.release);
+// Publish to JSR alongside npm for every package that publishes at all (has a
+// release script), unless it opts out with "jsr": false. The web-component
+// packages opt out: JSR forbids the HTMLElementTagNameMap global augmentation
+// every custom element needs. Captured before pkg.scripts/jsr are cleared below.
+const publishJsr = Boolean(pkg.scripts?.release) && pkg.jsr !== false;
 
 function rewritePath(p: string, ext: string): string {
 	return p.replace(/^\.\/src/, ".").replace(/\.ts(x)?$/, `.${ext}`);
@@ -90,6 +92,7 @@ rewriteWorkspaceDependency(pkg.peerDependencies);
 
 pkg.devDependencies = undefined;
 pkg.scripts = undefined;
+pkg.jsr = undefined; // JSR opt-out flag, not part of the npm package
 
 // Write the rewritten package.json
 writeFileSync("dist/package.json", JSON.stringify(pkg, null, 2));
@@ -153,6 +156,7 @@ function writeJsrConfig() {
 	}
 
 	injectSelfTypes();
+	rewriteDtsImports();
 
 	// JSR validates the license field as a single recognized SPDX identifier, not
 	// an expression: it rejects "(MIT OR Apache-2.0)". Take the first identifier
@@ -178,6 +182,22 @@ function writeJsrConfig() {
 
 	writeFileSync("jsr.json", JSON.stringify(jsr, null, 2));
 	console.log("📦 jsr.json written");
+}
+
+function rewriteDtsImports() {
+	// JSR's doc generator resolves the .d.ts import graph and can't handle a
+	// ".ts" extension (the dist ships .js/.d.ts, not .ts) or a bare "." specifier.
+	// Normalize those in the declarations so doc generation resolves. Only the
+	// .d.ts needs this; the .js keeps its own specifiers for npm consumers.
+	const glob = new Bun.Glob("**/*.d.ts");
+	for (const rel of glob.scanSync("dist")) {
+		const file = join("dist", rel);
+		const body = readFileSync(file, "utf8");
+		const next = body
+			.replace(/(from\s+"\.[^"]*?)\.ts"/g, '$1"') // "./x.ts" -> "./x"
+			.replace(/(from\s+")\.(")/g, "$1./index$2"); // "." -> "./index"
+		if (next !== body) writeFileSync(file, next);
+	}
 }
 
 function injectSelfTypes() {
