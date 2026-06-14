@@ -23,7 +23,7 @@ use std::collections::HashSet;
 use std::hash::Hash;
 use std::task::Poll;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
 
 /// One-byte op prefixing an insert delta frame.
 const INSERT: u8 = b'+';
@@ -58,9 +58,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// An item that can be stored in a [`Set`](Producer).
 ///
-/// Encoding must be deterministic and round-trip: `Item::decode(item.encode())` must equal `item`.
-/// Two items are the same set member iff they're equal under [`Eq`]/[`Hash`], so distinct items must
-/// encode to distinct bytes.
+/// Encoding must be deterministic and round-trip: decoding what [`encode`](Item::encode) wrote must
+/// reproduce `item`. Two items are the same set member iff they're equal under [`Eq`]/[`Hash`], so
+/// distinct items must encode to distinct bytes.
 pub trait Item: Clone + Eq + Hash {
 	/// The number of bytes [`encode`](Item::encode) writes.
 	///
@@ -179,10 +179,18 @@ impl<T: Item> Producer<T> {
 			return Ok(false);
 		}
 
-		// Build the delta from a reference, then move the item into the set so a snapshot reflects it.
-		let delta = encode_delta(INSERT, &item);
-		self.current.insert(item);
-		self.publish(delta)?;
+		let delta_size = 1 + item.size() as u64;
+		// The snapshot size once `item` is included, computed without inserting so we keep `&item`.
+		let snapshot_size = self.snapshot_size() + 4 + item.size() as u64;
+
+		if self.should_snapshot(delta_size, snapshot_size) {
+			self.current.insert(item);
+			self.write_snapshot()?;
+		} else {
+			// Write the delta straight from the reference, then move the item into the set.
+			self.write_delta(INSERT, &item)?;
+			self.current.insert(item);
+		}
 		Ok(true)
 	}
 
@@ -196,8 +204,16 @@ impl<T: Item> Producer<T> {
 		let Some(removed) = self.current.take(item) else {
 			return Ok(false);
 		};
-		let delta = encode_delta(REMOVE, &removed);
-		self.publish(delta)?;
+
+		let delta_size = 1 + removed.size() as u64;
+		// `current` already reflects the removal.
+		let snapshot_size = self.snapshot_size();
+
+		if self.should_snapshot(delta_size, snapshot_size) {
+			self.write_snapshot()?;
+		} else {
+			self.write_delta(REMOVE, &removed)?;
+		}
 		Ok(true)
 	}
 
@@ -239,25 +255,13 @@ impl<T: Item> Producer<T> {
 		Ok(())
 	}
 
-	/// Publish a single change, either as the prebuilt `delta` frame on the open group or a fresh
-	/// snapshot group. The change is already reflected in `self.current`, so a snapshot captures it
-	/// and the `delta` is discarded.
-	fn publish(&mut self, delta: Bytes) -> Result<()> {
-		let snapshot = encode_snapshot(&self.current)?;
-		let delta_len = delta.len() as u64;
-
-		if self.should_snapshot(delta_len, snapshot.len() as u64) {
-			self.write_snapshot(snapshot)
-		} else {
-			let group = self.group.as_mut().expect("delta requires an open group");
-			group.write_frame(delta)?;
-			self.group_frames += 1;
-			self.group_delta_bytes += delta_len;
-			Ok(())
-		}
+	/// The byte size of a full snapshot of the current set: a `u32` count plus each item
+	/// length-prefixed. Computed from [`Item::size`] so we can size a frame without a scratch buffer.
+	fn snapshot_size(&self) -> u64 {
+		4 + self.current.iter().map(|item| 4 + item.size() as u64).sum::<u64>()
 	}
 
-	fn should_snapshot(&self, delta_len: u64, snapshot_len: u64) -> bool {
+	fn should_snapshot(&self, delta_size: u64, snapshot_size: u64) -> bool {
 		let Some(ratio) = self.config.delta_ratio else {
 			return true;
 		};
@@ -265,17 +269,44 @@ impl<T: Item> Producer<T> {
 			return true;
 		}
 		// Roll a snapshot once the replayed deltas would outgrow the budget relative to a snapshot.
-		(self.group_delta_bytes + delta_len) as f64 > ratio * snapshot_len as f64
+		(self.group_delta_bytes + delta_size) as f64 > ratio * snapshot_size as f64
 	}
 
-	fn write_snapshot(&mut self, snapshot: Bytes) -> Result<()> {
+	/// Append a `+`/`-` delta frame for one item to the open group, encoding straight into the frame.
+	fn write_delta(&mut self, op: u8, item: &T) -> Result<()> {
+		let size = 1 + item.size() as u64;
+		let group = self.group.as_mut().expect("delta requires an open group");
+
+		let mut frame = group.create_frame(size.into())?;
+		frame.put_u8(op);
+		item.encode(&mut frame);
+		frame.finish()?;
+
+		self.group_frames += 1;
+		self.group_delta_bytes += size;
+		Ok(())
+	}
+
+	/// Start a new group whose first frame is a full snapshot of the current set, encoding straight
+	/// into the frame so each item is copied just once.
+	fn write_snapshot(&mut self) -> Result<()> {
 		// The previous group is complete; no more frames will be appended to it.
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
 
+		let count = u32::try_from(self.current.len()).map_err(|_| Error::Malformed("set has too many items".into()))?;
 		let mut group = self.track.append_group()?;
-		group.write_frame(snapshot)?;
+
+		let mut frame = group.create_frame(self.snapshot_size().into())?;
+		frame.put_u32(count);
+		for item in &self.current {
+			let len = u32::try_from(item.size()).map_err(|_| Error::Malformed("item is too large".into()))?;
+			frame.put_u32(len);
+			item.encode(&mut frame);
+		}
+		frame.finish()?;
+
 		self.group_frames = 1;
 		self.group_delta_bytes = 0;
 
@@ -377,23 +408,10 @@ impl<T: Item> Consumer<T> {
 	}
 }
 
-/// Encode the full set as a snapshot frame: a `u32` count then each item `u32`-length-prefixed.
+/// Decode a snapshot frame: a `u32` count then each item `u32`-length-prefixed.
 ///
 /// Lengths are big-endian `u32` rather than QUIC varints so the format stays self-contained and
 /// trivially matches the JS implementation (`@moq/data`).
-fn encode_snapshot<T: Item>(set: &HashSet<T>) -> Result<Bytes> {
-	let count = u32::try_from(set.len()).map_err(|_| Error::Malformed("set has too many items".into()))?;
-
-	let mut buf = BytesMut::new();
-	buf.put_u32(count);
-	for item in set {
-		let len = u32::try_from(item.size()).map_err(|_| Error::Malformed("item is too large".into()))?;
-		buf.put_u32(len);
-		item.encode(&mut buf);
-	}
-	Ok(buf.freeze())
-}
-
 fn decode_snapshot<T: Item>(mut frame: Bytes) -> Result<HashSet<T>> {
 	if frame.remaining() < 4 {
 		return Err(Error::Malformed("snapshot is missing its count".into()));
@@ -426,14 +444,7 @@ fn decode_snapshot<T: Item>(mut frame: Bytes) -> Result<HashSet<T>> {
 	Ok(set)
 }
 
-/// Encode a delta frame: one op byte followed by the item bytes.
-fn encode_delta<T: Item>(op: u8, item: &T) -> Bytes {
-	let mut buf = BytesMut::with_capacity(1 + item.size());
-	buf.put_u8(op);
-	item.encode(&mut buf);
-	buf.freeze()
-}
-
+/// Decode a delta frame: one op byte followed by the item bytes.
 fn decode_delta(mut frame: Bytes) -> Result<(u8, Bytes)> {
 	if !frame.has_remaining() {
 		return Err(Error::Malformed("empty delta frame".into()));
@@ -467,17 +478,31 @@ mod test {
 		out
 	}
 
+	/// Build a snapshot frame for a set of strings, independent of the producer's encoder, as a
+	/// decode oracle.
+	fn snapshot_bytes(items: &[&str]) -> Vec<u8> {
+		let mut buf = Vec::new();
+		buf.extend_from_slice(&(items.len() as u32).to_be_bytes());
+		for item in items {
+			buf.extend_from_slice(&(item.len() as u32).to_be_bytes());
+			buf.extend_from_slice(item.as_bytes());
+		}
+		buf
+	}
+
 	#[test]
 	fn snapshot_roundtrip() {
-		let original = set(&["video", "audio", "captions"]);
-		let frame = encode_snapshot(&original).unwrap();
-		assert_eq!(decode_snapshot::<String>(frame).unwrap(), original);
+		let frame = Bytes::from(snapshot_bytes(&["video", "audio", "captions"]));
+		assert_eq!(
+			decode_snapshot::<String>(frame).unwrap(),
+			set(&["video", "audio", "captions"])
+		);
 	}
 
 	#[test]
 	fn malformed_snapshot_is_rejected() {
 		// Trailing bytes past the declared items.
-		let mut frame = encode_snapshot(&set(&["video"])).unwrap().to_vec();
+		let mut frame = snapshot_bytes(&["video"]);
 		frame.push(0xff);
 		assert!(decode_snapshot::<String>(Bytes::from(frame)).is_err());
 
