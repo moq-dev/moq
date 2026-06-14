@@ -200,10 +200,13 @@ impl Backend for Vaapi {
 			.ok_or_else(|| Error::Codec(anyhow::anyhow!("VAAPI surface pool exhausted")))?;
 		self.upload(surface.borrow(), &i420)?;
 
+		// Force an IDR (not just any keyframe) so a re-subscribing viewer gets a
+		// clean random-access point: references cleared and in-band SPS/PPS.
 		let meta = FrameMetadata {
 			timestamp: self.timestamp,
 			layout: self.layout.clone(),
 			force_keyframe: keyframe,
+			force_idr: keyframe,
 		};
 		self.timestamp += 1;
 
