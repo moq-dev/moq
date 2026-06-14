@@ -123,6 +123,34 @@ impl I420 {
 		Ok(Self::pack(&planar, width, height))
 	}
 
+	/// Split tightly-packed NV12 (Y plane `width * height`, then interleaved UV
+	/// `width/2 * height/2` pairs) into planar I420. A chroma deinterleave, no
+	/// color-space conversion. Used for the Windows Media Foundation capture path,
+	/// whose source reader hands us NV12.
+	#[cfg(target_os = "windows")]
+	pub(crate) fn from_nv12(nv12: &[u8], width: u32, height: u32) -> Result<Self, Error> {
+		let (w, h) = (width as usize, height as usize);
+		let luma = w * h;
+		let chroma = luma / 4;
+		let need = luma + 2 * chroma;
+		if nv12.len() < need {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"NV12 buffer too small: {} < {need} for {width}x{height}",
+				nv12.len()
+			)));
+		}
+
+		let mut data = vec![0u8; Self::len(width, height)];
+		data[..luma].copy_from_slice(&nv12[..luma]);
+		let uv = &nv12[luma..need];
+		let (u_dst, v_dst) = data[luma..].split_at_mut(chroma);
+		for i in 0..chroma {
+			u_dst[i] = uv[i * 2];
+			v_dst[i] = uv[i * 2 + 1];
+		}
+		Ok(Self { width, height, data })
+	}
+
 	/// Flatten the three planes of a freshly-converted image into one tightly
 	/// packed I420 buffer (Y, then U, then V).
 	fn pack(planar: &YuvPlanarImageMut<u8>, width: u32, height: u32) -> Self {

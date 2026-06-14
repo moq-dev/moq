@@ -1,8 +1,11 @@
 # Native H.264 codecs for moq-video (drop ffmpeg)
 
 Status: **phases 2-5 implemented** (openh264, VideoToolbox, NVENC, capture swap +
-ffmpeg removal). VAAPI (phase 6) is a separate follow-up PR. See "As built"
-at the bottom for where the implementation diverged from this plan.
+ffmpeg removal). Capture is now native on all three platforms (AVFoundation /
+ScreenCaptureKit on macOS, V4L2 on Linux, Media Foundation on Windows), so
+**nokhwa is fully removed**. VAAPI (phase 6) stays parked until cros-codecs
+builds against modern libva. See "As built" at the bottom for where the
+implementation diverged from this plan.
 
 ## Goal
 
@@ -329,10 +332,15 @@ Where the implementation differs from the plan above:
   negotiated resolution, so capture frames already match the encoder; `encode_rgba`
   now requires input dims == encoder dims (it errors otherwise) instead of
   rescaling. This dropped swscale entirely.
-- **Capture (nokhwa) yields RGBA.** `Camera::read` decodes each frame to RGBA via
-  `decode_image::<RgbAFormat>`, uniformly handling MJPEG/YUYV/NV12 sources. Device
-  string is now "bare integer = index, else path/name" (the avfoundation `:none` /
-  dshow `video=` specifics are gone).
+- **Capture is per-platform native (nokhwa fully removed).** Each platform's
+  `Camera::read` yields a `Frame` the encoder can take: macOS hands VideoToolbox a
+  zero-copy `CVPixelBuffer` surface, Linux V4L2 and Windows Media Foundation hand
+  the software/NVENC path a CPU `I420`. macOS AVFoundation/ScreenCaptureKit and
+  Linux V4L2 (YUYV resampled, MJPEG via `zune-jpeg`) landed first; Windows uses an
+  `IMFSourceReader` with its video processor enabled to coerce the camera's native
+  format to NV12, which we deinterleave to I420 (`I420::from_nv12`). The device
+  string is uniform: "bare integer = index, else path/name" (a friendly-name
+  substring on Windows).
 - **`Error` slimmed.** The ffmpeg-specific variants (`Ffmpeg`, `NoCaptureBackend`,
   `NoVideoStream`) and the `From<ffmpeg_next::Error>` impl are removed; capture and
   encode failures now flow through `Error::Codec(anyhow)`.
@@ -350,6 +358,15 @@ Where the implementation differs from the plan above:
   default - feature unification here may need tweaking; (2) the flat input-buffer
   `write` matches NVENC's pitch (safe only for 64-aligned widths; we warn otherwise);
   (3) forced-IDR via `picture_type` with picture-type-decision enabled.
+- **Windows Media Foundation capture is UNVERIFIED on hardware.** The `windows`
+  0.62 FFI is fully type-checked against the `x86_64-pc-windows-msvc` target (the
+  whole crate can't cross-compile from the dev Mac because openh264's vendored C++
+  build needs MSVC, but a scratch crate confirms every Media Foundation call), and
+  the COM/refcount lifecycle is reviewed. Still needs a real Windows + webcam run
+  to confirm: (1) the source reader's video processor actually delivers NV12 for
+  common cameras (MJPEG/YUY2 sources); (2) `IMF2DBuffer::ContiguousCopyTo` yields
+  unpadded NV12 so the I420 deinterleave is correct; (3) the on-demand
+  open/`source.Shutdown()` cycle releases the camera (LED off) and reopens cleanly.
 
 ### VAAPI removed (cros-codecs is not buildable on modern libva)
 
@@ -406,8 +423,9 @@ can carry NVENC and use it only where the driver is present. Upstream the
   because its SDK crate has no macOS bindings (see `rs/justfile`'s `ci` recipe).
 - Still needed on real hardware: NVENC encode validation on a Linux+GPU box (pitch
   alignment, forced-IDR); only synthetic-frame software encode is tested here.
-- Live camera run (capture needs camera/screen TCC permission, which a headless or
-  agent-spawned process can't obtain; run `moq-cli ... capture` from a user terminal).
-- `doc/bin/cli.md`: the `capture` device-string semantics changed (index-or-path).
+- Live camera run (capture needs camera/screen permission, which a headless or
+  agent-spawned process can't obtain; run `moq-cli ... capture` from a user
+  terminal). On Windows this is also where the Media Foundation path gets its
+  first real exercise (see the unverified note above).
 - Consider reusing NVENC input/output buffers across frames (currently allocated
   per frame to sidestep the self-referential Session borrow).
