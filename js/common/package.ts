@@ -156,7 +156,11 @@ function writeJsrConfig(mode: "src" | "dist") {
 	for (const [name, range] of Object.entries(deps) as [string, string][]) {
 		if (name.startsWith("@types/")) continue; // type-only, never imported at runtime
 		imports[name] = `npm:${name}@${range}`;
-		imports[`${name}/`] = `npm:/${name}@${range}/`; // subpath imports, e.g. @moq/signals/dom
+		// Trailing-slash subpath mapping (e.g. @moq/signals/dom). The leading slash
+		// in "npm:/" is required: jsr.json's imports is a standalone import map, so
+		// the value must parse as a base URL for relative resolution. The
+		// "npm:name@range/" form (no slash) fails to URL-parse the appended subpath.
+		imports[`${name}/`] = `npm:/${name}@${range}/`;
 	}
 
 	if (mode === "dist") injectSelfTypes();

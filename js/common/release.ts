@@ -5,7 +5,10 @@ const dryRun = process.argv.includes("--dry-run") || process.env.DRY_RUN === "tr
 // Read package.json to get name, version, and the optional JSR mode.
 const pkg = JSON.parse(await Bun.file("package.json").text());
 const { name, version } = pkg;
-const jsrMode: "src" | "dist" | undefined = pkg.jsr;
+// Validate rather than trust the annotation: a typo'd "jsr" field should skip
+// JSR here (the build's package.ts still fails loudly on the bad value).
+const jsrMode: "src" | "dist" | undefined =
+	pkg.jsr === "src" || pkg.jsr === "dist" ? pkg.jsr : undefined;
 
 // Whether this exact version already exists on each registry. The two are
 // checked independently so a package can be onboarded onto JSR even when its
