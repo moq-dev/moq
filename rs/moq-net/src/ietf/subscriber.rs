@@ -470,7 +470,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let dynamic = broadcast.dynamic();
 
 				// Propagates Error::Unauthorized if the path is out of scope.
-				let publish = self.origin.publish_broadcast(path.clone(), broadcast.consume())?;
+				let publish = self.origin.publish_broadcast(path.clone(), &broadcast)?;
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),
 					count: 1,
@@ -546,7 +546,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		drop(state);
 
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
-		broadcast.insert_track(track.consume())?;
+		broadcast.insert_track(&track)?;
 
 		Ok(())
 	}

@@ -96,7 +96,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
 	let _publish = origin
-		.publish_broadcast("", broadcast.consume())
+		.publish_broadcast("", &broadcast)
 		.context("failed to publish broadcast")?;
 
 	// Wrap in a Producer for keyframe-based group management.

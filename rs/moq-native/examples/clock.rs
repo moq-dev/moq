@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
 			let clock = Publisher::new(track);
 
 			let _publish = origin
-				.publish_broadcast(&config.broadcast, broadcast.consume())
+				.publish_broadcast(&config.broadcast, &broadcast)
 				.context("failed to publish broadcast")?;
 
 			let reconnect = client.with_publisher(&origin).reconnect(config.url);

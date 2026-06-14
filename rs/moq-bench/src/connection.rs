@@ -100,7 +100,7 @@ pub async fn run(ctx: Connection) {
 			}
 		};
 
-		let publish_handle = match publish.publish_broadcast(&path, broadcast.consume()) {
+		let publish_handle = match publish.publish_broadcast(&path, &broadcast) {
 			Ok(handle) => handle,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to publish broadcast");

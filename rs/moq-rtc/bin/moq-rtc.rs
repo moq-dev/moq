@@ -198,7 +198,7 @@ async fn run_client(
 			let broadcast = moq_net::BroadcastInfo::new().produce();
 			let consumer = broadcast.consume();
 			let _publish = publisher
-				.publish_broadcast(broadcast_name, consumer)
+				.publish_broadcast(broadcast_name, &consumer)
 				.context("failed to publish broadcast")?;
 			client.subscribe(url, broadcast).await?;
 		}

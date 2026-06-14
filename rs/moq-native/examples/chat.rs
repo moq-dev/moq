@@ -49,7 +49,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// If you put "alice" here, it would be published as "anon/chat-example/alice".
 	// OPTIONAL: We publish after inserting the track just to avoid a nearly impossible race condition.
 	let _publish = origin
-		.publish_broadcast("", broadcast.consume())
+		.publish_broadcast("", &broadcast)
 		.context("failed to publish broadcast")?;
 
 	// Create a group.

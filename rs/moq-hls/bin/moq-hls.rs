@@ -137,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
 			let mut producer = moq_net::BroadcastInfo::new().produce();
 			let consumer = producer.consume();
 			let _publish = publisher
-				.publish_broadcast(&broadcast, consumer)
+				.publish_broadcast(&broadcast, &consumer)
 				.context("failed to publish broadcast")?;
 
 			let catalog = moq_mux::catalog::Producer::new(&mut producer).context("failed to create catalog")?;

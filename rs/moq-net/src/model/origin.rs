@@ -768,7 +768,7 @@ impl OriginProducer {
 	/// error cases.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<BroadcastPublish, Error> {
 		let producer = BroadcastInfo::new().produce();
-		let publish = self.publish_broadcast(path, producer.consume())?;
+		let publish = self.publish_broadcast(path, &producer)?;
 		Ok(BroadcastPublish { producer, publish })
 	}
 
@@ -792,7 +792,12 @@ impl OriginProducer {
 	/// When the active guard is dropped, the backup that wins the same ordering is promoted and
 	/// reannounced. Backups whose guards drop before being promoted are silently removed.
 	#[must_use = "the broadcast is unannounced as soon as the returned guard is dropped"]
-	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> Result<OriginPublish, Error> {
+	pub fn publish_broadcast(
+		&self,
+		path: impl AsPath,
+		broadcast: &impl Consume<BroadcastConsumer>,
+	) -> Result<OriginPublish, Error> {
+		let broadcast = broadcast.consume();
 		let path = path.as_path();
 
 		// Callers must filter reflections (a hop chain already containing our id) before publishing;
@@ -960,6 +965,31 @@ impl Consume<OriginConsumer> for OriginProducer {
 
 impl Consume<OriginConsumer> for OriginConsumer {
 	fn consume(&self) -> OriginConsumer {
+		self.clone()
+	}
+}
+
+impl Consume<crate::BroadcastConsumer> for crate::BroadcastProducer {
+	fn consume(&self) -> crate::BroadcastConsumer {
+		// The inherent `consume` shadows this trait method, so this delegates.
+		self.consume()
+	}
+}
+
+impl Consume<crate::BroadcastConsumer> for crate::BroadcastConsumer {
+	fn consume(&self) -> crate::BroadcastConsumer {
+		self.clone()
+	}
+}
+
+impl Consume<crate::TrackConsumer> for crate::TrackProducer {
+	fn consume(&self) -> crate::TrackConsumer {
+		self.consume()
+	}
+}
+
+impl Consume<crate::TrackConsumer> for crate::TrackConsumer {
+	fn consume(&self) -> crate::TrackConsumer {
 		self.clone()
 	}
 }
@@ -1286,7 +1316,7 @@ impl OriginProducer {
 	/// watcher that drops the [`OriginPublish`] guard. Returns whether the publish was
 	/// accepted. Exercises [`OriginPublish`]'s `Drop` on the close path.
 	fn publish_broadcast_spawn(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
-		match self.publish_broadcast(path, broadcast.clone()) {
+		match self.publish_broadcast(path, &broadcast) {
 			Ok(publish) => {
 				web_async::spawn(async move {
 					broadcast.closed().await;

@@ -415,7 +415,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// Publish into the origin. An error means the path is outside our scope, so don't announce
 		// or spawn a server for it. Reflections are already filtered above.
-		let Ok(publish) = self.origin.publish_broadcast(path.clone(), broadcast.consume()) else {
+		let Ok(publish) = self.origin.publish_broadcast(path.clone(), &broadcast) else {
 			return Ok(false);
 		};
 
@@ -462,7 +462,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// Publish the replacement first so the origin restarts atomically; the old broadcast is
 		// demoted to a backup and removed silently when we drop its guard below.
-		let Ok(publish) = self.origin.publish_broadcast(path.clone(), broadcast.consume()) else {
+		let Ok(publish) = self.origin.publish_broadcast(path.clone(), &broadcast) else {
 			// Origin rejected the replacement; retire the existing broadcast.
 			producers.remove(&path);
 			return Ok(false);

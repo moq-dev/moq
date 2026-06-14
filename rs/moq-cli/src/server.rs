@@ -42,7 +42,7 @@ async fn run_serve_session(
 	// Create an origin producer to publish to the broadcast.
 	let origin = moq_net::Origin::random().produce();
 	let _publish = origin
-		.publish_broadcast(&name, consumer)
+		.publish_broadcast(&name, &consumer)
 		.context("failed to publish broadcast")?;
 
 	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.
