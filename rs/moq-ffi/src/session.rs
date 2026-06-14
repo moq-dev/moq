@@ -15,11 +15,7 @@ struct Client {
 
 impl Client {
 	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
-		let client = self
-			.config
-			.clone()
-			.init()
-			.map_err(|err| MoqError::Connect(format!("{err}")))?;
+		let client = self.config.clone().init().map_err(map_connect_error)?;
 
 		// Materialize both origin sides (reusing the caller's if wired, else a
 		// fresh one) so the session can publish/subscribe and the FFI can always
@@ -40,9 +36,34 @@ impl Client {
 			.with_subscriber(subscribe.clone())
 			.connect(url)
 			.await
-			.map_err(|err| MoqError::Connect(format!("{err}")))?;
+			.map_err(map_connect_error)?;
 
 		Ok(Arc::new(MoqSession::new(session, publish, subscribe)))
+	}
+}
+
+fn map_connect_error(err: moq_native::Error) -> MoqError {
+	match err.connect_error() {
+		Some(moq_native::ConnectError::Unauthorized) => MoqError::Unauthorized,
+		Some(moq_native::ConnectError::Forbidden) => MoqError::Forbidden,
+		_ => MoqError::Connect(format!("{err}")),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn maps_native_auth_connect_errors() {
+		assert!(matches!(
+			map_connect_error(moq_native::ConnectError::Unauthorized.into()),
+			MoqError::Unauthorized
+		));
+		assert!(matches!(
+			map_connect_error(moq_native::ConnectError::Forbidden.into()),
+			MoqError::Forbidden
+		));
 	}
 }
 
@@ -70,6 +91,28 @@ impl MoqClient {
 	pub fn set_tls_disable_verify(&self, disable: bool) {
 		if let Some(mut state) = self.task.lock() {
 			state.config.tls.disable_verify = Some(disable);
+		}
+	}
+
+	/// Trust these PEM root certificate file(s) instead of the system roots.
+	///
+	/// Pass the paths to PEM-encoded CA certificates. An empty list restores the
+	/// default behavior of using the platform's native root store.
+	pub fn set_tls_roots(&self, paths: Vec<String>) {
+		if let Some(mut state) = self.task.lock() {
+			state.config.tls.root = paths.into_iter().map(Into::into).collect();
+		}
+	}
+
+	/// Pin the peer to a certificate with one of these SHA-256 fingerprints, encoded as hex.
+	///
+	/// This is the native equivalent of the browser's WebTransport `serverCertificateHashes`
+	/// and accepts the same values a server reports (see `MoqServer.cert_fingerprints`). Use it
+	/// to trust a self-signed certificate without disabling verification. An empty list clears
+	/// any pinned fingerprints.
+	pub fn set_tls_fingerprints(&self, fingerprints: Vec<String>) {
+		if let Some(mut state) = self.task.lock() {
+			state.config.tls.fingerprint = fingerprints;
 		}
 	}
 

@@ -1,4 +1,6 @@
 use crate::{Backoff, Error, QuicBackend, Reconnect};
+#[cfg(feature = "websocket")]
+use std::future::Future;
 use std::net;
 use url::Url;
 
@@ -278,24 +280,11 @@ impl Client {
 		if let Some(noq) = self.noq.as_ref() {
 			let tls = self.tls.clone();
 			let quic_url = url.clone();
-			let quic_handle = async {
-				let res = noq.connect(&tls, quic_url).await;
-				if let Err(err) = &res {
-					tracing::warn!(%err, "QUIC connection failed");
-				}
-				res
-			};
+			let quic_handle = async { noq.connect(&tls, quic_url).await.map_err(Error::from) };
 
 			#[cfg(feature = "websocket")]
 			{
-				let alpns = self.versions.alpns();
-				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
-
-				return Ok(tokio::select! {
-					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
-					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
-					else => return Err(Error::ConnectFailed),
-				});
+				return self.race_moq_connect(url, quic_handle).await;
 			}
 
 			#[cfg(not(feature = "websocket"))]
@@ -309,24 +298,11 @@ impl Client {
 		if let Some(quinn) = self.quinn.as_ref() {
 			let tls = self.tls.clone();
 			let quic_url = url.clone();
-			let quic_handle = async {
-				let res = quinn.connect(&tls, quic_url).await;
-				if let Err(err) = &res {
-					tracing::warn!(%err, "QUIC connection failed");
-				}
-				res
-			};
+			let quic_handle = async { quinn.connect(&tls, quic_url).await.map_err(Error::from) };
 
 			#[cfg(feature = "websocket")]
 			{
-				let alpns = self.versions.alpns();
-				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
-
-				return Ok(tokio::select! {
-					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
-					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
-					else => return Err(Error::ConnectFailed),
-				});
+				return self.race_moq_connect(url, quic_handle).await;
 			}
 
 			#[cfg(not(feature = "websocket"))]
@@ -339,24 +315,11 @@ impl Client {
 		#[cfg(feature = "quiche")]
 		if let Some(quiche) = self.quiche.as_ref() {
 			let quic_url = url.clone();
-			let quic_handle = async {
-				let res = quiche.connect(quic_url).await;
-				if let Err(err) = &res {
-					tracing::warn!(%err, "QUIC connection failed");
-				}
-				res
-			};
+			let quic_handle = async { quiche.connect(quic_url).await.map_err(Error::from) };
 
 			#[cfg(feature = "websocket")]
 			{
-				let alpns = self.versions.alpns();
-				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
-
-				return Ok(tokio::select! {
-					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
-					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
-					else => return Err(Error::ConnectFailed),
-				});
+				return self.race_moq_connect(url, quic_handle).await;
 			}
 
 			#[cfg(not(feature = "websocket"))]
@@ -375,6 +338,93 @@ impl Client {
 
 		#[cfg(not(feature = "websocket"))]
 		return Err(Error::NoBackend("no QUIC backend matched; this should not happen"));
+	}
+
+	#[cfg(feature = "websocket")]
+	async fn race_moq_connect<Q, S>(&self, url: Url, quic: Q) -> crate::Result<moq_net::Session>
+	where
+		Q: Future<Output = crate::Result<S>>,
+		S: web_transport_trait::Session,
+	{
+		let alpns = self.versions.alpns();
+		let ws_config = self.websocket.clone();
+		let ws_tls = self.tls.clone();
+		let websocket = async move {
+			crate::websocket::race_handle(&ws_config, &ws_tls, url, &alpns)
+				.await
+				.map(|res| res.map_err(Error::from))
+		};
+
+		match race_transport_connect(quic, websocket).await? {
+			TransportRace::Quic(quic) => Ok(self.moq.connect(quic).await?),
+			TransportRace::WebSocket(websocket) => Ok(self.moq.connect(websocket).await?),
+		}
+	}
+}
+
+#[cfg(feature = "websocket")]
+#[derive(Debug, PartialEq, Eq)]
+enum TransportRace<Q, W> {
+	Quic(Q),
+	WebSocket(W),
+}
+
+#[cfg(feature = "websocket")]
+async fn race_transport_connect<Q, W, QT, WT>(quic: Q, websocket: W) -> crate::Result<TransportRace<QT, WT>>
+where
+	Q: Future<Output = crate::Result<QT>>,
+	W: Future<Output = Option<crate::Result<WT>>>,
+{
+	tokio::pin!(quic);
+	tokio::pin!(websocket);
+
+	let mut quic_err = None;
+	let mut websocket_err = None;
+	let mut quic_done = false;
+	let mut websocket_done = false;
+
+	loop {
+		tokio::select! {
+			res = &mut quic, if !quic_done => {
+				match res {
+					Ok(session) => return Ok(TransportRace::Quic(session)),
+					Err(err) if err.is_auth() => return Err(err),
+					Err(err) => {
+						tracing::warn!(%err, "QUIC connection failed");
+						quic_err = Some(err);
+						quic_done = true;
+					}
+				}
+			}
+			res = &mut websocket, if !websocket_done => {
+				match res {
+					Some(Ok(session)) => return Ok(TransportRace::WebSocket(session)),
+					Some(Err(err)) if err.is_auth() => return Err(err),
+					Some(Err(err)) => {
+						tracing::warn!(%err, "WebSocket connection failed");
+						websocket_err = Some(err);
+						websocket_done = true;
+					}
+					None => {
+						websocket_done = true;
+					}
+				}
+			}
+			else => break,
+		}
+
+		if quic_done && websocket_done {
+			break;
+		}
+	}
+
+	match (quic_err, websocket_err) {
+		(Some(quic), Some(websocket)) => Err(Error::TransportRace {
+			quic: std::sync::Arc::new(quic),
+			websocket: std::sync::Arc::new(websocket),
+		}),
+		(Some(err), None) | (None, Some(err)) => Err(err),
+		(None, None) => Err(Error::ConnectFailed),
 	}
 }
 
@@ -422,6 +472,36 @@ mod tests {
 	}
 
 	#[test]
+	fn test_toml_fingerprint_survives_update_from() {
+		let toml = r#"
+			tls.fingerprint = ["abcd1234", "ef567890"]
+		"#;
+
+		let mut config: ClientConfig = toml::from_str(toml).unwrap();
+		assert_eq!(config.tls.fingerprint, vec!["abcd1234", "ef567890"]);
+
+		// Simulate: TOML loaded, then CLI args re-applied (no --tls-fingerprint flag).
+		config.update_from(["test"]);
+		assert_eq!(config.tls.fingerprint, vec!["abcd1234", "ef567890"]);
+	}
+
+	#[test]
+	fn test_toml_fingerprint_accepts_single_string() {
+		let toml = r#"
+			tls.fingerprint = "abcd1234"
+		"#;
+
+		let config: ClientConfig = toml::from_str(toml).unwrap();
+		assert_eq!(config.tls.fingerprint, vec!["abcd1234"]);
+	}
+
+	#[test]
+	fn test_cli_fingerprint() {
+		let config = ClientConfig::parse_from(["test", "--tls-fingerprint", "abcd1234"]);
+		assert_eq!(config.tls.fingerprint, vec!["abcd1234"]);
+	}
+
+	#[test]
 	fn test_toml_version_survives_update_from() {
 		let toml = r#"
 			version = ["moq-lite-02"]
@@ -447,5 +527,45 @@ mod tests {
 		assert!(config.version.is_empty());
 		// versions() helper returns all when none specified
 		assert_eq!(config.versions().alpns().len(), moq_net::ALPNS.len());
+	}
+
+	#[cfg(feature = "websocket")]
+	#[tokio::test]
+	async fn race_transport_connect_stops_on_quic_auth_error() {
+		let quic = async { Err::<usize, _>(crate::ConnectError::Unauthorized.into()) };
+		let websocket = async {
+			// This only needs to complete later than the immediately ready QUIC auth error.
+			tokio::task::yield_now().await;
+			Some(Ok(1usize))
+		};
+
+		let err = super::race_transport_connect(quic, websocket).await.unwrap_err();
+		assert_eq!(err.connect_error(), Some(crate::ConnectError::Unauthorized));
+	}
+
+	#[cfg(feature = "websocket")]
+	#[tokio::test]
+	async fn race_transport_connect_keeps_websocket_after_quic_non_auth_error() {
+		let quic = async { Err::<usize, _>(Error::ConnectFailed) };
+		let websocket = async { Some(Ok(7usize)) };
+
+		let value = super::race_transport_connect(quic, websocket).await.unwrap();
+		assert_eq!(value, super::TransportRace::WebSocket(7));
+	}
+
+	#[cfg(feature = "websocket")]
+	#[tokio::test]
+	async fn race_transport_connect_returns_when_quic_transport_connects() {
+		let quic = async { Ok("quic") };
+		let websocket = std::future::pending::<Option<crate::Result<&str>>>();
+
+		let value = tokio::time::timeout(
+			std::time::Duration::from_secs(1),
+			super::race_transport_connect(quic, websocket),
+		)
+		.await
+		.expect("race waited for WebSocket after QUIC transport connected")
+		.unwrap();
+		assert_eq!(value, super::TransportRace::Quic("quic"));
 	}
 }

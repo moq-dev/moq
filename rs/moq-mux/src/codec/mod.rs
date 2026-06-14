@@ -7,10 +7,14 @@
 //! broadcast.
 
 pub mod aac;
+pub(crate) mod ac3;
 pub mod annexb;
 pub mod av1;
+pub(crate) mod eac3;
 pub mod h264;
 pub mod h265;
+pub(crate) mod legacy;
+pub(crate) mod mp2;
 pub mod opus;
 pub mod vp8;
 pub mod vp9;

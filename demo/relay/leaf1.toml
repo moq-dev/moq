@@ -37,7 +37,7 @@ listen = "[::]:4445"
 [cluster]
 # Connect to both the root and leaf0, forming a loop to exercise cluster loop detection.
 # ex. imagine us-east connects to us-central AND directly to us-west.
-connect = ["localhost:4443", "localhost:4444"]
+connect = ["https://localhost:4443/", "https://localhost:4444/"]
 
 [auth]
 # Allow JWT tokens that are signed by this root key.

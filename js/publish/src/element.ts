@@ -4,10 +4,13 @@ import { Broadcast } from "./broadcast";
 import * as Preview from "./preview";
 import * as Source from "./source";
 
-const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview"] as const;
+const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "announce"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 type SourceType = "camera" | "screen" | "file";
+
+// `true` announces immediately, `false` never announces, "source" waits until a source is selected.
+type AnnounceMode = boolean | "source";
 
 // Close everything when this element is garbage collected.
 // This is primarily to avoid a console.warn that we didn't close() before GC.
@@ -25,6 +28,8 @@ export default class MoqPublish extends HTMLElement {
 		invisible: new Signal(false),
 		// What a <canvas> preview renders: the raw capture, or a decoded copy of the encoded video.
 		preview: new Signal<Preview.Mode>("source"),
+		// When to announce/publish the broadcast: always, never, or only once a source is selected.
+		announce: new Signal<AnnounceMode>(true),
 	};
 
 	connection: Moq.Connection.Reload;
@@ -44,6 +49,9 @@ export default class MoqPublish extends HTMLElement {
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
+
+	// Whether to actually publish the broadcast: connected to the DOM and allowed by the `announce` mode.
+	#publishEnabled = new Signal(false);
 
 	signals = new Effect();
 
@@ -71,9 +79,17 @@ export default class MoqPublish extends HTMLElement {
 			this.#eitherEnabled.set(!muted || !invisible);
 		});
 
+		this.signals.run((effect) => {
+			const enabled = effect.get(this.#enabled);
+			const announce = effect.get(this.state.announce);
+			const hasSource = effect.get(this.state.source) !== undefined;
+			const announcing = announce === true || (announce === "source" && hasSource);
+			this.#publishEnabled.set(enabled && announcing);
+		});
+
 		this.broadcast = new Broadcast({
 			connection: this.connection.established,
-			enabled: this.#enabled,
+			enabled: this.#publishEnabled,
 
 			audio: {
 				enabled: this.#audioEnabled,
@@ -162,6 +178,16 @@ export default class MoqPublish extends HTMLElement {
 				this.state.source.set(newValue as SourceType | undefined);
 			} else {
 				throw new Error(`Invalid source: ${newValue}`);
+			}
+		} else if (name === "announce") {
+			if (newValue === "true" || newValue === null) {
+				this.state.announce.set(true);
+			} else if (newValue === "false") {
+				this.state.announce.set(false);
+			} else if (newValue === "source") {
+				this.state.announce.set("source");
+			} else {
+				throw new Error(`Invalid announce: ${newValue}`);
 			}
 		} else if (name === "muted") {
 			this.state.muted.set(newValue !== null);
@@ -303,6 +329,14 @@ export default class MoqPublish extends HTMLElement {
 
 	set preview(value: Preview.Mode) {
 		this.state.preview.set(value);
+	}
+
+	get announce(): AnnounceMode {
+		return this.state.announce.peek();
+	}
+
+	set announce(value: AnnounceMode) {
+		this.state.announce.set(value);
 	}
 }
 

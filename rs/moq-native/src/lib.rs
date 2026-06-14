@@ -12,6 +12,7 @@
 pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
 
 mod client;
+mod connect;
 mod crypto;
 mod error;
 #[cfg(feature = "jemalloc")]
@@ -32,6 +33,7 @@ mod watch;
 pub mod websocket;
 
 pub use client::*;
+pub use connect::ConnectError;
 pub use error::{Error, Result};
 pub use log::*;
 pub use reconnect::*;

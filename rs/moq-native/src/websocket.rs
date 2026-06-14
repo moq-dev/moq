@@ -1,4 +1,5 @@
 use qmux::tokio_tungstenite;
+use qmux::tokio_tungstenite::tungstenite::{self, http};
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::{net, time};
@@ -22,6 +23,18 @@ pub enum Error {
 
 	#[error("failed to connect WebSocket")]
 	Connect(#[source] qmux::Error),
+
+	#[error("failed to build WebSocket request")]
+	BuildRequest(#[source] tungstenite::Error),
+
+	#[error("failed to build WebSocket protocols header")]
+	ProtocolHeader(#[source] http::header::InvalidHeaderValue),
+
+	#[error("failed to connect WebSocket")]
+	WebSocketConnect(#[source] tungstenite::Error),
+
+	#[error(transparent)]
+	ConnectRejected(#[from] crate::ConnectError),
 
 	#[error("WebSocket accept failed")]
 	Accept(#[source] qmux::Error),
@@ -141,7 +154,7 @@ pub(crate) async fn connect(
 
 	tracing::debug!(%url, "connecting via WebSocket");
 
-	// Use the existing TLS config (which respects tls-disable-verify) for secure connections
+	// Use the existing TLS config (which respects tls-disable-verify) for secure connections.
 	let connector = if needs_tls {
 		tokio_tungstenite::Connector::Rustls(Arc::new(tls.clone()))
 	} else {
@@ -156,7 +169,7 @@ pub(crate) async fn connect(
 	let session = qmux::Client::new()
 		.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
 		.with_connector(connector)
-		.with_keep_alive(qmux::KeepAlive::default()) // 5s ping / 30s deadline — parity with QUIC
+		.with_keep_alive(qmux::KeepAlive::default()) // 5s ping / 30s deadline, parity with QUIC
 		.connect(url.as_str())
 		.await
 		.map_err(Error::Connect)?;
@@ -176,6 +189,15 @@ fn qmux_versions_for(alpn: &str) -> &'static [qmux::Version] {
 	match alpn {
 		"moqt-18" => &[qmux::Version::QMux01],
 		_ => &[],
+	}
+}
+
+impl Error {
+	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
+		match self {
+			Self::ConnectRejected(err) => Some(*err),
+			_ => None,
+		}
 	}
 }
 

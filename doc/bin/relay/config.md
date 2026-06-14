@@ -136,8 +136,10 @@ Clustering configuration for multi-relay deployments.
 
 ```toml
 [cluster]
-# Peers this relay dials. The topology is whatever you draw with these links.
-connect = ["us-east.example.com:4443"]
+# Peers this relay dials, as full URLs. The topology is whatever you draw with
+# these links. A JWT may be supplied inline as a ?jwt= query parameter. A bare
+# host or "host:port" is deprecated but still accepted (wrapped in https://.../).
+connect = ["https://us-east.example.com/?jwt=..."]
 
 # Optional. This relay's own externally-reachable URL (identity). Advertised to
 # peers when gossip is on, and sent to connect_api as ?node=.
@@ -151,7 +153,9 @@ mesh = true
 # array of hostnames) and reconcile it at runtime, no restart needed.
 connect_api = "https://api.example.com/cluster/connect"
 
-# JWT used for outbound cluster dials (alternative to mTLS).
+# JWT for outbound cluster dials (alternative to mTLS), applied to any peer
+# whose URL has no inline ?jwt=. Required to authenticate gossip / connect_api
+# discovered peers; for static `connect` peers, prefer an inline ?jwt=.
 token = "cluster.jwt"
 ```
 
@@ -166,8 +170,14 @@ Client settings used when connecting to other relays (clustering).
 # Disable TLS verification (development only!)
 tls.disable_verify = true
 
-# Or provide trusted root certificates
+# Or provide trusted root certificates. By default these replace the system
+# roots, so the relay trusts only these CAs.
 # tls.root = ["/path/to/root.pem"]
+
+# Set this to also trust the platform's system roots alongside any custom root,
+# e.g. to dial a local relay with a private CA and a remote one with a public CA.
+# Defaults to true only when no custom root is set.
+# tls.system_roots = true
 ```
 
 ### \[stats]

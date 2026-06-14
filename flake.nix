@@ -89,7 +89,6 @@
             cargo-sort
             cargo-shear
             cargo-edit
-            cargo-sweep
             cargo-semver-checks
             cargo-deny
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just wasm`).
@@ -115,6 +114,9 @@
           bun
           # Only for NPM publishing
           nodejs_24
+          # JSR publishing. We call `deno publish` directly instead of `bunx jsr`
+          # so the release doesn't race on a runtime binary download.
+          deno
         ];
 
         # Python dependencies

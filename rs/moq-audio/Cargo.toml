@@ -18,8 +18,10 @@ doctest = false
 [features]
 # Microphone capture via cpal (pure-Rust: CoreAudio / WASAPI / ALSA). Off by
 # default so audio-only consumers (e.g. moq-ffi) don't pull cpal and, on Linux,
-# the ALSA build dependency.
-capture = ["dep:cpal", "dep:tokio", "dep:tracing"]
+# the ALSA build dependency. On macOS it also pulls AVFoundation for the TCC
+# permission pre-check (the objc deps below are target-gated, so this is a no-op
+# elsewhere).
+capture = ["dep:cpal", "dep:tokio", "dep:tracing", "dep:block2", "dep:objc2", "dep:objc2-av-foundation"]
 
 [dependencies]
 bytes = "1"
@@ -47,6 +49,14 @@ tracing = { version = "0.1", optional = true }
 # 20 ms Opus frames moq-audio publishes that's still well under any
 # real-time budget.
 unsafe-libopus = "0.2"
+
+# macOS-only: query/request the microphone TCC permission so a denied mic fails
+# fast with a clear error instead of feeding silence into the capture loop. Only
+# pulled in by the `capture` feature (see above); a no-op on other platforms.
+[target.'cfg(target_os="macos")'.dependencies]
+block2 = { version = "0.6.2", optional = true }
+objc2 = { version = "0.6.4", optional = true }
+objc2-av-foundation = { version = "0.3.2", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
