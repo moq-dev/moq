@@ -337,7 +337,12 @@ export class TrackSubscriber extends TrackHandle {
 
 			// Discard old groups.
 			while (groups.length > 1) {
-				if (groups[0].state.offset > 0) throw new CacheFull();
+				if (groups[0].state.offset > 0) {
+					// The reader fell behind this group's eviction window. Drop it and
+					// signal the gap; the next read resyncs from the following group.
+					groups.shift()?.close();
+					throw new CacheFull();
+				}
 
 				const frames = groups[0].state.frames.peek();
 				const next = frames.shift();
@@ -362,7 +367,12 @@ export class TrackSubscriber extends TrackHandle {
 
 			// If there's a group, wait for a frame.
 			const group = groups[0];
-			if (group.state.offset > 0) throw new CacheFull();
+			if (group.state.offset > 0) {
+				// Fell behind this group's eviction window. Drop it and signal the gap;
+				// the next read resyncs from the following group.
+				groups.shift()?.close();
+				throw new CacheFull();
+			}
 
 			const frames = group.state.frames.peek();
 			const next = frames.shift();
