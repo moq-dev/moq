@@ -8,6 +8,11 @@ license = "MIT OR Apache-2.0"
 version = "0.0.3"
 edition = "2024"
 rust-version.workspace = true
+# Not publishable to crates.io while the `vaapi` feature pulls cros-codecs from
+# git; flip back once that fork is published (tracked separately). This also lets
+# cargo-deny's allow-wildcard-paths exempt the git dep, which it only does for
+# unpublished crates.
+publish = false
 
 keywords = ["quic", "http3", "webtransport", "media", "video"]
 categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
