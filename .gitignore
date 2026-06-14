@@ -52,3 +52,4 @@ __pycache__/
 
 # Generated JSR manifest (derived from package.json by js/common/package.ts)
 jsr.json
+.claude/launch.json
