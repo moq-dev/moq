@@ -23,6 +23,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_sys::{Object, Reflect, Uint8Array};
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::prelude::*;
 use wasm_bindgen::prelude::*;
 
 mod transport;
@@ -78,15 +80,30 @@ fn track_info_to_js(info: &moq_net::TrackInfo) -> JsValue {
 /// Install panic + tracing hooks for readable errors. Call once after the wasm
 /// module's default `init()` loader resolves. (Named `setup` to avoid colliding
 /// with wasm-bindgen's default `init` export, which loads the module itself.)
+///
+/// `filter` is a RUST_LOG-style directive routed to the browser console, e.g.
+/// `"warn"`, `"moq_net=debug"`, or `"warn,moq_net::lite=trace,wasm=trace"`.
+/// Defaults to `"warn"`: moq_net logs every wire message at TRACE, which floods
+/// the console under announce churn, so crank a specific target up only when
+/// debugging. `@moq/wasm`'s `init` reads `localStorage.moq_log` for this.
 #[wasm_bindgen]
-pub fn setup() {
+pub fn setup(filter: Option<String>) {
 	console_error_panic_hook::set_once();
 
-	// Cap tracing at WARN. The default is TRACE, which logs every wire message;
-	// under heavy announce churn that floods the console and can freeze the page.
-	let mut config = tracing_wasm::WASMLayerConfigBuilder::new();
-	config.set_max_level(tracing::Level::WARN);
-	tracing_wasm::set_as_global_default_with_config(config.build());
+	let directive = filter.as_deref().unwrap_or("warn");
+	let targets = directive
+		.parse::<Targets>()
+		.unwrap_or_else(|_| Targets::new().with_default(tracing::Level::WARN));
+
+	let fmt = tracing_subscriber::fmt::layer()
+		.with_ansi(false)
+		.without_time() // wasm has no SystemTime; the default fmt timer panics.
+		.with_writer(tracing_web::MakeWebConsoleWriter::new())
+		.with_filter(targets);
+
+	// try_init (not init): setup() is memoized in JS, but tolerate a double call
+	// under HMR rather than panicking on the second global-default registration.
+	let _ = tracing_subscriber::registry().with(fmt).try_init();
 }
 
 /// A connected MoQ session: the wasm counterpart of `@moq/net`'s `Connection.Established`.

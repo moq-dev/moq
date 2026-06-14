@@ -1710,7 +1710,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4663,7 +4663,8 @@ dependencies = [
  "moq-net",
  "thiserror 2.0.18",
  "tracing",
- "tracing-wasm",
+ "tracing-subscriber",
+ "tracing-web",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -8562,14 +8563,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-wasm"
-version = "0.2.1"
+name = "tracing-web"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4575c663a174420fa2d78f4108ff68f65bf2fbb7dd89f33749b6e826b3626e07"
+checksum = "b9e6a141feebd51f8d91ebfd785af50fca223c570b86852166caa3b141defe7c"
 dependencies = [
- "tracing",
+ "js-sys",
+ "tracing-core",
  "tracing-subscriber",
  "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

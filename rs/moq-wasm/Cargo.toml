@@ -32,7 +32,10 @@ js-sys = "0.3"
 moq-net = { workspace = true, features = ["serde"] }
 thiserror = "2"
 tracing = "0.1"
-tracing-wasm = "0.2"
+# tracing-web routes spans/events to the browser console; tracing-subscriber's
+# `Targets` filter parses a RUST_LOG-style directive (no env-filter/regex bloat).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt"] }
+tracing-web = "0.1"
 url = "2"
 # Pinned to the wasm-bindgen-cli version in the Nix dev shell: the bindgen
 # schema must match exactly between crate and CLI. Bump both together.

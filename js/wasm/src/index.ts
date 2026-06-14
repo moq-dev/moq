@@ -28,13 +28,33 @@ export { Path, Time };
 // Load the wasm module once. `--target web` fetches `moq_bg.wasm` relative to
 // the JS via `import.meta.url`, which bundlers (vite/esbuild) resolve as an asset.
 let loaded: Promise<void> | undefined;
-export function init(): Promise<void> {
+
+/**
+ * Load the wasm module and install the panic/tracing hooks.
+ *
+ * `filter` is a RUST_LOG-style tracing directive (e.g. `"moq_net=debug"`,
+ * `"warn,moq_net::lite=trace,wasm=trace"`). When omitted it falls back to
+ * `localStorage.moq_log`, so you can crank up logging from the browser console
+ * (`localStorage.moq_log = "moq_net::lite=trace"`) and reload without a rebuild.
+ * Defaults to `"warn"` inside the wasm if neither is set.
+ */
+export function init(filter?: string): Promise<void> {
 	if (!loaded) {
+		const directive = filter ?? logDirective();
 		loaded = initWasm().then(() => {
-			Wasm.setup();
+			Wasm.setup(directive);
 		});
 	}
 	return loaded;
+}
+
+function logDirective(): string | undefined {
+	try {
+		return globalThis.localStorage?.getItem("moq_log") ?? undefined;
+	} catch {
+		// localStorage can throw (private mode, no DOM); fall back to the default.
+		return undefined;
+	}
 }
 
 const textEncoder = new TextEncoder();
