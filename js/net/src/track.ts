@@ -41,6 +41,10 @@ export class TrackState {
 	info = new Signal<TrackInfo | undefined>(undefined);
 }
 
+// A source group retained in the producer cache, with the mirror handed to each sink
+// so eviction can drop them together.
+type CachedGroup = { group: Group; time: number; mirrors: Map<TrackState, Group> };
+
 /** Shared base for the two ends of a track: name, state, close, and info. */
 abstract class TrackHandle {
 	readonly name: string;
@@ -106,9 +110,10 @@ export class TrackProducer extends TrackHandle {
 	#next?: number;
 
 	// Recently written source groups, retained for replay to late subscribers and
-	// pruned once closed and older than the cache window. Each subscriber reads its
-	// own mirror, so these are never drained by a consumer.
-	#cache: { group: Group; time: number }[] = [];
+	// pruned once closed and older than the cache window. Each entry tracks the mirror
+	// it handed to every sink so eviction can drop them too: otherwise a slow consumer
+	// that never reads would pin old groups (and their frame bytes) forever.
+	#cache: CachedGroup[] = [];
 
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
@@ -149,44 +154,66 @@ export class TrackProducer extends TrackHandle {
 		if (!closed) {
 			this.#sinks.add(sink);
 
-			// Drop the sink once its consumer goes away, closing its mirrors so source
+			// Drop the sink once its consumer goes away, releasing its mirrors so source
 			// groups stop teeing into them, so a long-lived producer doesn't leak.
 			const dispose = sink.closed.subscribe((c) => {
 				if (!c) return;
 				this.#sinks.delete(sink);
+				for (const entry of this.#cache) entry.mirrors.delete(sink);
 				for (const group of sink.groups.peek()) group.close(c instanceof Error ? c : undefined);
 				dispose();
 			});
 		}
 
 		this.#prune();
-		for (const { group } of this.#cache) this.#mirror(group, sink);
+		for (const entry of this.#cache) this.#mirror(entry, sink);
 
 		if (closed) sink.closed.set(closed);
 	}
 
-	// Mirror a source group into a sink. The mirror fills synchronously as the source
-	// is written and keeps its own read cursor; frame bytes are shared by reference.
-	#mirror(src: Group, sink: TrackState): void {
-		const dst = src.mirror();
+	// Mirror a cached source group into a sink. The mirror fills synchronously as the
+	// source is written and keeps its own read cursor; frame bytes are shared by
+	// reference. Tracked on the entry so eviction can drop it from the sink.
+	#mirror(entry: CachedGroup, sink: TrackState): void {
+		const dst = entry.group.mirror();
+		entry.mirrors.set(sink, dst);
 		sink.groups.mutate((groups) => {
 			groups.push(dst);
 			groups.sort((a, b) => a.sequence - b.sequence);
 		});
 	}
 
-	// Evict cached groups that are closed and older than the cache window.
+	// Evict cached groups that are closed and older than the cache window, dropping
+	// each evicted group's mirror from every sink so no consumer can pin it.
 	#prune(): void {
 		const cacheMs = this.state.info.peek()?.cache ?? DEFAULT_CACHE_MS;
 		const cutoff = Date.now() - cacheMs;
-		this.#cache = this.#cache.filter(({ group, time }) => time > cutoff || !group.state.closed.peek());
+
+		const retained: CachedGroup[] = [];
+		for (const entry of this.#cache) {
+			if (entry.time > cutoff || !entry.group.state.closed.peek()) {
+				retained.push(entry);
+				continue;
+			}
+
+			for (const [sink, mirror] of entry.mirrors) {
+				sink.groups.mutate((groups) => {
+					const i = groups.indexOf(mirror);
+					if (i >= 0) groups.splice(i, 1);
+				});
+				mirror.close();
+			}
+			entry.mirrors.clear();
+		}
+		this.#cache = retained;
 	}
 
 	// Retain a source group and fan it out to every live sink.
 	#publish(group: Group): void {
-		this.#cache.push({ group, time: Date.now() });
+		const entry = { group, time: Date.now(), mirrors: new Map<TrackState, Group>() };
+		this.#cache.push(entry);
 		this.#prune();
-		for (const sink of this.#sinks) this.#mirror(group, sink);
+		for (const sink of this.#sinks) this.#mirror(entry, sink);
 	}
 
 	/** Append a new group with the next sequence number. */

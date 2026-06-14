@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setSystemTime, test } from "bun:test";
 import { Broadcast } from "./broadcast.ts";
 import { TrackProducer } from "./track.ts";
 
@@ -54,6 +54,32 @@ test("a late subscriber replays the cached window", async () => {
 
 	producer.writeString("later");
 	expect(await late.readString()).toBe("later");
+});
+
+test("a stalled consumer does not pin evicted groups", () => {
+	try {
+		setSystemTime(new Date(10_000));
+
+		const broadcast = new Broadcast();
+		const producer = broadcast.createTrack("video", { cache: 1000 });
+
+		// A subscriber that never reads. Its sink must not grow without bound.
+		const stalled = broadcast.track("video").subscribe();
+
+		producer.writeString("old");
+		expect(stalled.state.groups.peek().length).toBe(1);
+
+		// Advance past the cache window and write again to trigger a prune. The old
+		// (closed, aged-out) group is dropped from the stalled sink, not retained.
+		setSystemTime(new Date(12_000));
+		producer.writeString("fresh");
+
+		const groups = stalled.state.groups.peek();
+		expect(groups.length).toBe(1);
+		expect(groups[0].sequence).toBe(1);
+	} finally {
+		setSystemTime();
+	}
 });
 
 test("createTrack commits info up front", async () => {
