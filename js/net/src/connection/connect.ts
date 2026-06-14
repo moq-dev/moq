@@ -366,7 +366,10 @@ async function connectWebTransport(
 		// Dev-only path: http:// can't be a real WebTransport origin, so we fetch the
 		// self-signed cert's hash over plain HTTP and pin it. Production uses https://
 		// and never reaches here. Keep this at debug so it doesn't read as a problem.
-		console.debug(fingerprintUrl.toString(), "performing an insecure fingerprint fetch; use https:// in production");
+		console.debug(
+			fingerprintUrl.toString(),
+			"performing an insecure fingerprint fetch; use https:// in production",
+		);
 
 		// Fetch the fingerprint from the server.
 		// TODO cancel the request if the effect is cancelled.
