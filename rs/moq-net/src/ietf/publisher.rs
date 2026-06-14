@@ -611,7 +611,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::debug!(prefix = %self.origin.absolute(&prefix), "subscribe_namespace stream");
 
-		let mut origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
+		// A peer may subscribe to a namespace this session can't serve (e.g. a publish-only
+		// token). Hand back an empty consumer that never announces rather than erroring,
+		// which would tear down the whole session.
+		let mut origin = self.origin.scope_or_empty(&[prefix.as_path()]);
 
 		// Send OK response
 		match self.version {

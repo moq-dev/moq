@@ -148,7 +148,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let prefix = interest.prefix.to_owned();
 		let exclude_hop = interest.exclude_hop;
 
-		let mut origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
+		// A peer may announce-interest in a prefix this session can't serve (e.g. a
+		// publish-only token). Hand back an empty consumer that never announces rather
+		// than erroring, which would tear down the whole session.
+		let mut origin = self.origin.scope_or_empty(&[prefix.as_path()]);
 
 		let version = self.version;
 		let self_origin = self.self_origin;
