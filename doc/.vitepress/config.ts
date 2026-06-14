@@ -263,6 +263,6 @@ export default defineConfig({
 	ignoreDeadLinks: [
 		// Localhost URLs are intentional for development examples and aren't
 		// reachable at build time (e.g. the relay on :4443, the dev server on :5173).
-		/^https?:\/\/localhost(:\d+)?(\/|$)/,
+		/^https?:\/\/localhost(:\d+)?(\/|\?|#|$)/,
 	],
 });
