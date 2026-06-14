@@ -53,7 +53,7 @@ pub async fn run_web(
 
 	// Dual-stack so the cert endpoint answers over IPv4 too, even on Windows
 	// where `[::]` is IPv6-only by default.
-	let listener = moq_native::bind_tcp(listen).context("failed to bind web listener")?;
+	let listener = moq_native::bind::tcp(listen).context("failed to bind web listener")?;
 	let server = axum_server::from_tcp(listener)?;
 	server.serve(app.into_make_service()).await?;
 

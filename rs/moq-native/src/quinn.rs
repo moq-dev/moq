@@ -122,7 +122,7 @@ pub(crate) struct QuinnClient {
 
 impl QuinnClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
-		let socket = crate::util::bind_udp(config.bind).map_err(Error::BindSocket)?;
+		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
 
 		// TODO Validate the BBR implementation before enabling it
 		let mut transport = quinn::TransportConfig::default();
@@ -386,7 +386,7 @@ impl QuinnServer {
 			endpoint_config.cid_generator(move || Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len)));
 		}
 
-		let socket = crate::util::bind_udp(listen).map_err(Error::BindSocket)?;
+		let socket = crate::bind::udp(listen).map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
 		let quic = quinn::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;

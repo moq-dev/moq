@@ -11,6 +11,7 @@
 /// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
 pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
 
+pub mod bind;
 mod client;
 mod connect;
 mod crypto;
@@ -38,7 +39,6 @@ pub use error::{Error, Result};
 pub use log::*;
 pub use reconnect::*;
 pub use server::*;
-pub use util::bind_tcp;
 
 // Re-export these crates.
 pub use moq_net;

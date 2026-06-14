@@ -1,57 +1,4 @@
-use std::net::{IpAddr, SocketAddr, TcpListener, UdpSocket};
-
-/// Clear `IPV6_V6ONLY` on an IPv6 socket so it also serves IPv4.
-///
-/// On Linux an `[::]` socket accepts IPv4 too, but Windows defaults this option
-/// to on, so an IPv6 socket silently drops every IPv4 packet. Best-effort: a
-/// platform that rejects the option keeps its default rather than failing the
-/// bind. No-op for IPv4 sockets. See <https://github.com/moq-dev/moq/issues/1375>.
-fn make_dual_stack(socket: &socket2::Socket, addr: SocketAddr) {
-	if addr.is_ipv6()
-		&& let Err(err) = socket.set_only_v6(false)
-	{
-		tracing::warn!(%err, "failed to enable dual-stack IPv6 socket; IPv4 clients may be unreachable");
-	}
-}
-
-/// Bind a UDP socket, making IPv6 sockets dual-stack so they also serve IPv4.
-///
-/// Quinn uses a single socket and relies on the OS to route both address
-/// families, so a relay on `[::]` is reachable over IPv4 and a client on `[::]`
-/// can dial IPv4 servers (via IPv4-mapped addresses; see [`pick_addr`]). See
-/// [`make_dual_stack`] for the Windows rationale.
-pub(crate) fn bind_udp(addr: SocketAddr) -> std::io::Result<UdpSocket> {
-	use socket2::{Domain, Protocol, Socket, Type};
-
-	let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
-	let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-	make_dual_stack(&socket, addr);
-	socket.bind(&addr.into())?;
-	Ok(socket.into())
-}
-
-/// Bind a TCP listener, making IPv6 sockets dual-stack so they also serve IPv4.
-///
-/// Mirrors [`bind_udp`] for the relay's HTTP/HTTPS listeners (cert fingerprint
-/// and WebSocket fallback), which `axum_server` otherwise binds single-stack and
-/// would leave unreachable over IPv4 on Windows. The returned listener is
-/// non-blocking, ready for [`axum_server::from_tcp`](https://docs.rs/axum-server).
-pub fn bind_tcp(addr: SocketAddr) -> std::io::Result<TcpListener> {
-	use socket2::{Domain, Protocol, Socket, Type};
-
-	let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
-	let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-	make_dual_stack(&socket, addr);
-	// Match std's TcpListener, which sets SO_REUSEADDR on Unix (not Windows) so a
-	// restarted relay can rebind a port still in TIME_WAIT.
-	#[cfg(not(windows))]
-	socket.set_reuse_address(true)?;
-	socket.bind(&addr.into())?;
-	socket.listen(1024)?;
-	let listener: TcpListener = socket.into();
-	listener.set_nonblocking(true)?;
-	Ok(listener)
-}
+use std::net::{IpAddr, SocketAddr};
 
 /// Resolve a `host:port` string to a single [`std::net::SocketAddr`],
 /// falling back to `default` when `addr` is `None`.
@@ -114,21 +61,6 @@ fn normalize_family(addr: SocketAddr, local: SocketAddr) -> SocketAddr {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn bind_udp_ipv6_is_dual_stack() {
-		// An IPv6 wildcard bind should come back dual-stack so IPv4 traffic
-		// reaches it. socket2 lets us read the option back to confirm.
-		let socket = bind_udp("[::]:0".parse().unwrap()).unwrap();
-		let socket = socket2::Socket::from(socket);
-		assert!(!socket.only_v6().unwrap(), "IPv6 socket should be dual-stack");
-	}
-
-	#[test]
-	fn bind_udp_ipv4_still_binds() {
-		let socket = bind_udp("127.0.0.1:0".parse().unwrap()).unwrap();
-		assert!(socket.local_addr().unwrap().is_ipv4());
-	}
 
 	#[test]
 	fn resolves_socket_literal() {

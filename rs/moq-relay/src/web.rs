@@ -154,7 +154,7 @@ impl Web {
 		let http = if let Some(listen) = self.config.http.listen {
 			// Dual-stack so the cert endpoint + WebSocket fallback answer over IPv4
 			// too, even on Windows where `[::]` is IPv6-only by default.
-			let listener = moq_native::bind_tcp(listen).context("failed to bind HTTP listener")?;
+			let listener = moq_native::bind::tcp(listen).context("failed to bind HTTP listener")?;
 			let server = axum_server::from_tcp(listener)?;
 			Some(server.serve(app.clone()))
 		} else {
@@ -178,7 +178,7 @@ impl Web {
 			let acceptor = MtlsAcceptor {
 				inner: RustlsAcceptor::new(rustls_config),
 			};
-			let listener = moq_native::bind_tcp(listen).context("failed to bind HTTPS listener")?;
+			let listener = moq_native::bind::tcp(listen).context("failed to bind HTTPS listener")?;
 			let server = axum_server::from_tcp(listener)?.acceptor(acceptor);
 			Some(server.serve(app))
 		} else {
