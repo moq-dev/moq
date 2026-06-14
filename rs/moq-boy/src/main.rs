@@ -236,8 +236,8 @@ async fn run(config: &Config) -> Result<()> {
 	tracing::info!(url = %config.url, %name, broadcast = %broadcast_path, "connecting to relay");
 
 	let reconnect = client
-		.with_publish(publish_origin.consume())
-		.with_subscribe(consume_origin)
+		.with_publisher(&publish_origin)
+		.with_subscriber(consume_origin)
 		.reconnect(config.url.clone());
 
 	// Set up catalog and encoders.

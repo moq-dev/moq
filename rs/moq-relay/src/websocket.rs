@@ -113,10 +113,10 @@ where
 	// publish-only or subscribe-only token.
 	let mut server = moq_net::Server::new().with_stats(stats);
 	if let Some(subscribe) = subscribe {
-		server = server.with_publish(subscribe.consume());
+		server = server.with_publisher(&subscribe);
 	}
 	if let Some(publish) = publish {
-		server = server.with_subscribe(publish);
+		server = server.with_subscriber(publish);
 	}
 	let session = server.accept(ws).await?;
 	session.closed().await.map_err(Into::into)

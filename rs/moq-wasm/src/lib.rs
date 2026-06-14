@@ -70,7 +70,7 @@ impl Session {
 		// broadcasts the remote announces; keep a consumer to read them.
 		let origin = moq_net::Origin::random().produce();
 		let consumer = origin.consume();
-		let client = moq_net::Client::new().with_subscribe(origin);
+		let client = moq_net::Client::new().with_subscriber(origin);
 		let inner = client.connect(transport).await.map_err(js_err)?;
 		Ok(Session { inner, consumer })
 	}

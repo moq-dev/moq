@@ -940,6 +940,30 @@ impl std::ops::DerefMut for BroadcastPublish {
 
 /// Cheap read handle over an origin's broadcast tree.
 ///
+/// Borrow a handle to derive a read view from it.
+///
+/// Lets builders accept either an [`OriginProducer`] or an [`OriginConsumer`] by
+/// reference (e.g. [`Client::with_publisher`](crate::Client::with_publisher)), so
+/// callers don't have to spell out `.consume()` and keep ownership of whatever
+/// they pass.
+pub trait Consume<T> {
+	fn consume(&self) -> T;
+}
+
+impl Consume<OriginConsumer> for OriginProducer {
+	fn consume(&self) -> OriginConsumer {
+		// Mirrors the inherent `OriginProducer::consume`; inlined to avoid the
+		// inherent-vs-trait `consume` ambiguity.
+		OriginConsumer::new(self.info, self.root.clone(), self.nodes.clone())
+	}
+}
+
+impl Consume<OriginConsumer> for OriginConsumer {
+	fn consume(&self) -> OriginConsumer {
+		self.clone()
+	}
+}
+
 /// Clones share the underlying tree state without allocating any per-cursor
 /// resources. To actually receive announce / unannounce events, call
 /// [`Self::announced`] to obtain an [`AnnounceConsumer`].

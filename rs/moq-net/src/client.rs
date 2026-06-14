@@ -1,6 +1,6 @@
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Error,
-	NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05_WIP, Consume,
+	Error, NEGOTIATED, OriginConsumer, OriginProducer, Session, StatsHandle, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -19,24 +19,31 @@ impl Client {
 		Default::default()
 	}
 
-	/// Publish local broadcasts to the remote: the session reads from this
-	/// [`OriginConsumer`] and forwards its announcements. Omit to publish nothing.
-	pub fn with_publish(mut self, publish: OriginConsumer) -> Self {
-		self.publish = Some(publish);
+	/// Publish local broadcasts to the remote: the session reads from the given
+	/// origin (pass an [`OriginProducer`] or [`OriginConsumer`] by reference) and
+	/// forwards its announcements. Omit to publish nothing.
+	pub fn with_publisher(mut self, publish: &impl Consume<OriginConsumer>) -> Self {
+		self.publish = Some(publish.consume());
 		self
 	}
 
 	/// Subscribe to remote broadcasts: the session writes the broadcasts the
 	/// remote announces into this [`OriginProducer`]. Omit to subscribe to nothing.
-	pub fn with_subscribe(mut self, subscribe: OriginProducer) -> Self {
+	pub fn with_subscriber(mut self, subscribe: OriginProducer) -> Self {
 		self.subscribe = Some(subscribe);
 		self
 	}
 
-	/// Deprecated alias for [`with_subscribe`](Self::with_subscribe).
-	#[deprecated(note = "renamed to `with_subscribe`")]
+	/// Deprecated alias for [`with_publisher`](Self::with_publisher).
+	#[deprecated(note = "renamed to `with_publisher`")]
+	pub fn with_publish(self, publish: OriginConsumer) -> Self {
+		self.with_publisher(&publish)
+	}
+
+	/// Deprecated alias for [`with_subscriber`](Self::with_subscriber).
+	#[deprecated(note = "renamed to `with_subscriber`")]
 	pub fn with_consume(self, subscribe: OriginProducer) -> Self {
-		self.with_subscribe(subscribe)
+		self.with_subscriber(subscribe)
 	}
 
 	/// Attach a tier-scoped [`StatsHandle`]. Per-broadcast and per-subscription
@@ -49,10 +56,10 @@ impl Client {
 
 	/// Set both publish and subscribe from one shared [`OriginProducer`].
 	///
-	/// Equivalent to calling [`with_publish`](Self::with_publish) with
-	/// `origin.consume()` and [`with_subscribe`](Self::with_subscribe) with `origin`.
+	/// Equivalent to [`with_publisher`](Self::with_publisher) and
+	/// [`with_subscriber`](Self::with_subscriber) with the same origin.
 	pub fn with_origin(self, origin: OriginProducer) -> Self {
-		self.with_publish(origin.consume()).with_subscribe(origin)
+		self.with_publisher(&origin).with_subscriber(origin)
 	}
 
 	pub fn with_versions(mut self, versions: Versions) -> Self {

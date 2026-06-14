@@ -36,8 +36,8 @@ impl Client {
 			.unwrap_or_else(|| moq_net::Origin::random().produce());
 
 		let session = client
-			.with_publish(publish.consume())
-			.with_subscribe(subscribe.clone())
+			.with_publisher(&publish)
+			.with_subscriber(subscribe.clone())
 			.connect(url)
 			.await
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;

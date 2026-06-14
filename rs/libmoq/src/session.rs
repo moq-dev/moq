@@ -73,10 +73,10 @@ impl Session {
 		// Borrow so the producers outlive the reconnect loop below: the session
 		// reads from the publish consumer and writes into the subscribe producer.
 		if let Some(publish) = &publish {
-			client = client.with_publish(publish.consume());
+			client = client.with_publisher(publish);
 		}
 		if let Some(consume) = &consume {
-			client = client.with_subscribe(consume.clone());
+			client = client.with_subscriber(consume.clone());
 		}
 
 		let reconnect = client.reconnect(url);

@@ -46,7 +46,7 @@ async fn run_serve_session(
 		.context("failed to publish broadcast")?;
 
 	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.
-	let session = session.with_publish(origin.consume()).ok().await?;
+	let session = session.with_publisher(&origin).ok().await?;
 
 	tracing::info!(id, "accepted session");
 
@@ -83,7 +83,7 @@ async fn run_accept_session(
 	session: moq_native::Request,
 	origin: moq_net::OriginProducer,
 ) -> anyhow::Result<()> {
-	let session = session.with_subscribe(origin).ok().await?;
+	let session = session.with_subscriber(origin).ok().await?;
 
 	tracing::info!(id, "accepted session");
 
