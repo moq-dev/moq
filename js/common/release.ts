@@ -5,10 +5,12 @@ const dryRun = process.argv.includes("--dry-run") || process.env.DRY_RUN === "tr
 // Read package.json to get name, version, and whether to also publish to JSR.
 const pkg = JSON.parse(await Bun.file("package.json").text());
 const { name, version } = pkg;
-// Anything that publishes to npm (this script runs) also publishes to JSR,
-// unless it opts out with "jsr": false (the web-component packages do, since JSR
-// forbids the global type augmentation custom elements need).
-const publishJsr = pkg.jsr !== false;
+// Publish to JSR alongside npm, unless the package opts out with "jsr": false
+// (the web-component packages do, since JSR forbids the global type augmentation
+// custom elements need). Same predicate as package.ts so the manifest it
+// generates and the publish here stay in lockstep; the release-script clause is
+// always true here (this file is the release script).
+const publishJsr = Boolean(pkg.scripts?.release) && pkg.jsr !== false;
 
 // Whether this exact version already exists on each registry. The two are
 // checked independently so a package can be onboarded onto JSR even when its
