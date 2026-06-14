@@ -46,34 +46,34 @@ pub use usage_hint::*;
 /// A frame resolution in pixels. (Vendored from discord/cros-codecs, BSD-3-Clause.)
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Resolution {
-    pub width: u32,
-    pub height: u32,
+	pub width: u32,
+	pub height: u32,
 }
 
 impl Resolution {
-    /// Whether `self` can contain `other`.
-    pub fn can_contain(&self, other: Self) -> bool {
-        self.width >= other.width && self.height >= other.height
-    }
+	/// Whether `self` can contain `other`.
+	pub fn can_contain(&self, other: Self) -> bool {
+		self.width >= other.width && self.height >= other.height
+	}
 
-    pub fn get_area(&self) -> usize {
-        (self.width as usize) * (self.height as usize)
-    }
+	pub fn get_area(&self) -> usize {
+		(self.width as usize) * (self.height as usize)
+	}
 }
 
 impl From<(u32, u32)> for Resolution {
-    fn from(value: (u32, u32)) -> Self {
-        Self {
-            width: value.0,
-            height: value.1,
-        }
-    }
+	fn from(value: (u32, u32)) -> Self {
+		Self {
+			width: value.0,
+			height: value.1,
+		}
+	}
 }
 
 impl From<Resolution> for (u32, u32) {
-    fn from(value: Resolution) -> Self {
-        (value.width, value.height)
-    }
+	fn from(value: Resolution) -> Self {
+		(value.width, value.height)
+	}
 }
 
 use std::num::NonZeroI32;
@@ -83,23 +83,23 @@ use std::num::NonZeroI32;
 pub struct VaError(NonZeroI32);
 
 impl VaError {
-    /// Returns the `VAStatus` of this error.
-    pub fn va_status(&self) -> VAStatus {
-        self.0.get() as VAStatus
-    }
+	/// Returns the `VAStatus` of this error.
+	pub fn va_status(&self) -> VAStatus {
+		self.0.get() as VAStatus
+	}
 }
 
 impl std::fmt::Display for VaError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use std::ffi::CStr;
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		use std::ffi::CStr;
 
-        // Safe because `vaErrorStr` will return a pointer to a statically allocated, null
-        // terminated C string. The pointer is guaranteed to never be null.
-        let err_str = unsafe { CStr::from_ptr(bindings::vaErrorStr(self.0.get())) }
-            .to_str()
-            .unwrap();
-        f.write_str(err_str)
-    }
+		// Safe because `vaErrorStr` will return a pointer to a statically allocated, null
+		// terminated C string. The pointer is guaranteed to never be null.
+		let err_str = unsafe { CStr::from_ptr(bindings::vaErrorStr(self.0.get())) }
+			.to_str()
+			.unwrap();
+		f.write_str(err_str)
+	}
 }
 
 impl std::error::Error for VaError {}
@@ -109,9 +109,8 @@ impl std::error::Error for VaError {}
 /// This can be used on the return value of any VA function returning `VAStatus` in order to
 /// convert it to a proper Rust `Result`.
 fn va_check(code: VAStatus) -> Result<(), VaError> {
-    match code as u32 {
-        bindings::VA_STATUS_SUCCESS => Ok(()),
-        _ => Err(VaError(unsafe { NonZeroI32::new_unchecked(code) })),
-    }
+	match code as u32 {
+		bindings::VA_STATUS_SUCCESS => Ok(()),
+		_ => Err(VaError(unsafe { NonZeroI32::new_unchecked(code) })),
+	}
 }
-

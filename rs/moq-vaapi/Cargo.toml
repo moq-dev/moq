@@ -2,11 +2,7 @@
 name = "moq-vaapi"
 version = "0.0.1"
 description = "VA-API H.264 hardware encoder for Media over QUIC, vendored and trimmed from cros-libva + discord/cros-codecs"
-authors = [
-    "The ChromiumOS Authors",
-    "Discord",
-    "Luke Curley <kixelated@gmail.com>",
-]
+authors = ["The ChromiumOS Authors", "Discord", "Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "BSD-3-Clause"
 edition = "2021"
