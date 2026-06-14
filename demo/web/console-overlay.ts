@@ -39,7 +39,9 @@ const COLORS = {
 
 // Buffer messages from the moment this module loads, before any element exists,
 // so an inline <moq-console> added later still shows earlier messages. We patch
-// every level and let each element filter by its own threshold.
+// every level and let each element filter by its own threshold. The buffer is
+// capped so a noisy long-running demo can't grow it without bound.
+const BUFFER_MAX = 1000;
 const buffer = [];
 const sinks = new Set();
 
@@ -48,8 +50,9 @@ function format(args) {
 		.map((a) => {
 			if (a instanceof Error) return a.stack || a.message;
 			if (typeof a === "string") return a;
+			if (a === undefined) return "undefined";
 			try {
-				return JSON.stringify(a);
+				return JSON.stringify(a) ?? String(a);
 			} catch {
 				return String(a);
 			}
@@ -60,7 +63,14 @@ function format(args) {
 function emit(level, args) {
 	const entry = { level, text: format(args) };
 	buffer.push(entry);
-	for (const sink of sinks) sink(entry);
+	if (buffer.length > BUFFER_MAX) buffer.shift();
+	// Never let a misbehaving sink throw out of the patched console method and
+	// break the app's own logging call site.
+	for (const sink of sinks) {
+		try {
+			sink(entry);
+		} catch {}
+	}
 }
 
 for (const level of LEVELS) {
