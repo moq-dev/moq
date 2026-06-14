@@ -46,9 +46,9 @@ impl<T> Weak<T> {
 	pub fn consume(&self) -> Consumer<T> {
 		let prev = self.counts.consumers.fetch_add(1, Ordering::AcqRel);
 
-		// Wake waiters (e.g. `used()`) when the first consumer appears.
+		// Wake `used()` waiters when the first consumer appears.
 		if prev == 0 {
-			let mut waiters = self.state.lock().waiters.take();
+			let mut waiters = self.state.lock().waiters_consumer.take();
 			waiters.wake();
 		}
 
@@ -103,7 +103,7 @@ impl<T> Weak<T> {
 			return Poll::Ready(None);
 		}
 
-		waiter.register(&mut state.waiters);
+		waiter.register(&mut state.waiters_consumer);
 
 		// Re-check after registration to avoid TOCTOU race where the last
 		// consumer drops between the initial check and waiter registration.
@@ -134,7 +134,7 @@ impl<T> Weak<T> {
 			return Poll::Ready(None);
 		}
 
-		waiter.register(&mut state.waiters);
+		waiter.register(&mut state.waiters_consumer);
 
 		// Re-check after registration to avoid TOCTOU race.
 		if self.counts.consumers.load(Ordering::Relaxed) > 0 {

@@ -40,9 +40,9 @@ impl<T> Producer<T> {
 	pub fn consume(&self) -> Consumer<T> {
 		let prev = self.counts.consumers.fetch_add(1, Ordering::AcqRel);
 
-		// Wake waiters (e.g. `used()`) when the first consumer appears.
+		// Wake `used()` waiters when the first consumer appears.
 		if prev == 0 {
-			let mut waiters = self.state.lock().waiters.take();
+			let mut waiters = self.state.lock().waiters_consumer.take();
 			waiters.wake();
 		}
 
@@ -98,7 +98,7 @@ impl<T> Producer<T> {
 			// Upgrade the Ref to a Mut, keeping the same lock guard.
 			Poll::Ready(()) => Poll::Ready(Ok(Mut::new(guard.state))),
 			Poll::Pending => {
-				waiter.register(&mut guard.state.waiters);
+				waiter.register(&mut guard.state.waiters_value);
 				Poll::Pending
 			}
 		}
@@ -126,7 +126,7 @@ impl<T> Producer<T> {
 			return Poll::Ready(());
 		}
 
-		waiter.register(&mut state.waiters);
+		waiter.register(&mut state.waiters_closed);
 		Poll::Pending
 	}
 
@@ -150,7 +150,7 @@ impl<T> Producer<T> {
 			return Poll::Ready(Some(()));
 		}
 
-		waiter.register(&mut state.waiters);
+		waiter.register(&mut state.waiters_consumer);
 
 		// Re-check after registration to avoid TOCTOU race where the last
 		// consumer drops between the initial check and waiter registration.
@@ -181,7 +181,7 @@ impl<T> Producer<T> {
 			return Poll::Ready(Some(()));
 		}
 
-		waiter.register(&mut state.waiters);
+		waiter.register(&mut state.waiters_consumer);
 
 		// Re-check after registration to avoid TOCTOU race where a consumer
 		// is created between the initial check and waiter registration.
@@ -242,7 +242,9 @@ impl<T> Drop for Producer<T> {
 			return;
 		}
 
-		// We were the last producer, need to close
+		// We were the last producer, need to close. Every waiter reacts to
+		// closure (value/closed resolve, `used`/`unused` resolve to `None`),
+		// so wake all the lists.
 		let mut waiters = {
 			let mut state = self.state.lock();
 			if state.closed {
@@ -250,10 +252,12 @@ impl<T> Drop for Producer<T> {
 			}
 
 			state.closed = true;
-			state.waiters.take()
+			state.take_close_waiters()
 		};
 
-		waiters.wake();
+		for list in &mut waiters {
+			list.wake();
+		}
 	}
 }
 
@@ -309,11 +313,22 @@ impl<T> Drop for Mut<'_, T> {
 			return;
 		}
 
-		// Drain wakers while holding lock, then wake after releasing
-		let mut waiters = state.waiters.take();
+		// Drain wakers while holding lock, then wake after releasing.
+		// A modification that also closed the channel (e.g. `close()`) must
+		// wake the closed and consumer-count waiters too, since they resolve
+		// on closure. A plain modification touches only the value waiters.
+		let mut waiters_value = state.waiters_value.take();
+		let extra = state
+			.closed
+			.then(|| [state.waiters_closed.take(), state.waiters_consumer.take()]);
 		drop(state); // Release Mutex BEFORE waking
 
-		waiters.wake();
+		waiters_value.wake();
+		if let Some(mut extra) = extra {
+			for list in &mut extra {
+				list.wake();
+			}
+		}
 	}
 }
 
