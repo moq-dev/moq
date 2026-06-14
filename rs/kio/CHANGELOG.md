@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Split the internal waiter list into separate value / closed / consumer lists,
+  so an event only wakes the waiters that care about it. Previously every value
+  modification (the hot path) also woke parked `closed()` and `used`/`unused`
+  waiters, which re-registered and ping-ponged. No public API change.
+
 ### Changed
 
 - Reworked `Producer::poll` / `Producer::wait`. They previously handed the
