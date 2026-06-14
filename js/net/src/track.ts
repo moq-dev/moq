@@ -154,13 +154,22 @@ export class TrackProducer extends TrackHandle {
 		if (!closed) {
 			this.#sinks.add(sink);
 
-			// Drop the sink once its consumer goes away, releasing its mirrors so source
-			// groups stop teeing into them, so a long-lived producer doesn't leak.
+			// Drop the sink once its consumer goes away, closing its mirrors so source
+			// groups stop teeing into them, so a long-lived producer doesn't leak. This
+			// covers mirrors already handed out via recvGroup (no longer in sink.groups)
+			// by closing them through the cache's per-sink tracking.
 			const dispose = sink.closed.subscribe((c) => {
 				if (!c) return;
+				const abort = c instanceof Error ? c : undefined;
 				this.#sinks.delete(sink);
-				for (const entry of this.#cache) entry.mirrors.delete(sink);
-				for (const group of sink.groups.peek()) group.close(c instanceof Error ? c : undefined);
+				for (const entry of this.#cache) {
+					const mirror = entry.mirrors.get(sink);
+					if (mirror) {
+						mirror.close(abort);
+						entry.mirrors.delete(sink);
+					}
+				}
+				for (const group of sink.groups.peek()) group.close(abort);
 				dispose();
 			});
 		}

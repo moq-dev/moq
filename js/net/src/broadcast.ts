@@ -142,6 +142,10 @@ export class Broadcast {
 	 * {@link TrackProducer} and writes its groups; when that producer closes, the entry
 	 * is removed automatically. Throws on a duplicate live name. Mirrors the Rust
 	 * `BroadcastProducer::insert_track`.
+	 *
+	 * The producer must commit its {@link TrackInfo} via `accept()` (or use
+	 * {@link createTrack}, which does it for you); otherwise a subscriber's
+	 * `info()` never resolves and the wire layer stalls before serving.
 	 */
 	insertTrack(track: TrackProducer): void {
 		if (this.state.closed.peek()) {
