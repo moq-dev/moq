@@ -13,8 +13,8 @@
 //!
 //! Every frame within a group is one of:
 //!
-//! - **snapshot** (frame 0): `varint(count)` followed by `count` repetitions of
-//!   `varint(len)` then `len` item bytes.
+//! - **snapshot** (frame 0): big-endian `u32(count)` followed by `count` repetitions of
+//!   big-endian `u32(len)` then `len` item bytes.
 //! - **delta** (frame 1+): a one-byte op (`+` = `0x2B` insert, `-` = `0x2D` remove) followed by the
 //!   item bytes, which run to the end of the frame.
 
@@ -373,9 +373,16 @@ fn decode_snapshot<T: Item>(mut frame: Bytes) -> Result<HashSet<T>> {
 	if frame.remaining() < 4 {
 		return Err(Error::Malformed("snapshot is missing its count".into()));
 	}
-	let count = frame.get_u32();
+	let count = frame.get_u32() as usize;
 
-	let mut set = HashSet::with_capacity(count as usize);
+	// Every item costs at least its 4-byte length prefix, so a count larger than the remaining
+	// bytes allow can't be real. Reject it before allocating so a malformed frame can't ask for a
+	// huge capacity.
+	if count > frame.remaining() / 4 {
+		return Err(Error::Malformed("snapshot count exceeds frame bounds".into()));
+	}
+
+	let mut set = HashSet::with_capacity(count);
 	for _ in 0..count {
 		if frame.remaining() < 4 {
 			return Err(Error::Malformed("snapshot is missing an item length".into()));
@@ -386,6 +393,11 @@ fn decode_snapshot<T: Item>(mut frame: Bytes) -> Result<HashSet<T>> {
 		}
 		set.insert(T::decode(frame.split_to(len))?);
 	}
+
+	if frame.has_remaining() {
+		return Err(Error::Malformed("snapshot has trailing bytes".into()));
+	}
+
 	Ok(set)
 }
 
@@ -435,6 +447,18 @@ mod test {
 		let original = set(&["video", "audio", "captions"]);
 		let frame = encode_snapshot(&original).unwrap();
 		assert_eq!(decode_snapshot::<String>(frame).unwrap(), original);
+	}
+
+	#[test]
+	fn malformed_snapshot_is_rejected() {
+		// Trailing bytes past the declared items.
+		let mut frame = encode_snapshot(&set(&["video"])).unwrap().to_vec();
+		frame.push(0xff);
+		assert!(decode_snapshot::<String>(Bytes::from(frame)).is_err());
+
+		// A count far larger than the frame can hold must not allocate; it's rejected up front.
+		let huge = Bytes::from(vec![0xff, 0xff, 0xff, 0xff]);
+		assert!(decode_snapshot::<String>(huge).is_err());
 	}
 
 	#[test]

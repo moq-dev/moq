@@ -40,7 +40,8 @@ test("deltas off: a snapshot group per change", async () => {
 	producer.insert("audio");
 	producer.finish();
 
-	expect((await drain(track)).at(-1)).toEqual(set("video", "audio"));
+	// Each change is its own single-frame snapshot group. (Reconstruction is covered elsewhere.)
+	expect(await structure(track)).toEqual([1, 1]);
 });
 
 test("deltas share one group", async () => {
@@ -79,6 +80,8 @@ test("live consumer sees each change", async () => {
 
 	producer.remove("video");
 	expect(await consumer.next()).toEqual(set("audio"));
+
+	producer.finish();
 });
 
 test("late joiner reconstructs from deltas", async () => {

@@ -1,5 +1,6 @@
 import type * as Moq from "@moq/net";
 
+import type { Codec } from "./codec.ts";
 import type { Config } from "./producer.ts";
 import { decodeDelta, decodeSnapshot, INSERT, keyOf, REMOVE } from "./wire.ts";
 
@@ -11,7 +12,7 @@ import { decodeDelta, decodeSnapshot, INSERT, keyOf, REMOVE } from "./wire.ts";
  */
 export class Consumer<T> {
 	#track: Moq.Track;
-	#codec: Config<T>["codec"];
+	#codec: Codec<T>;
 
 	#group?: Moq.Group;
 	// Keyed by encoded bytes so items dedupe by value, not reference.

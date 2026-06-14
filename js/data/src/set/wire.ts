@@ -51,6 +51,8 @@ export function decodeSnapshot(frame: Uint8Array): Uint8Array[] {
 		items.push(frame.subarray(offset, offset + len));
 		offset += len;
 	}
+
+	if (offset !== frame.length) throw new Error("snapshot has trailing bytes");
 	return items;
 }
 

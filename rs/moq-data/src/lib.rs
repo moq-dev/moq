@@ -6,7 +6,6 @@
 //! - [`set`] syncs a [`HashSet`](std::collections::HashSet)-like collection of arbitrary binary
 //!   items, encoding changes as `+`/`-` deltas.
 //! - [`json`] re-exports [`moq-json`](https://docs.rs/moq-json) for snapshot/delta JSON publishing.
-//!   It lives in its own crate today and will migrate here over time.
 
 /// Snapshot/delta JSON publishing, re-exported from [`moq-json`](https://docs.rs/moq-json).
 #[cfg(feature = "json")]
