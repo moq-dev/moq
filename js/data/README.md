@@ -25,14 +25,16 @@ producer.insert("video");
 producer.insert("audio");
 producer.remove("audio");
 
-// Consume: yields the full set after each change.
-const consumer = new Consumer(track.subscribe(), { codec: stringCodec });
-for await (const names of consumer) {
-	console.log(names); // Set<string>
+// Consume: each change is the items added and removed; `current()` is the full set.
+const consumer = new Consumer(track, { codec: stringCodec });
+for await (const update of consumer) {
+	for (const name of update.added) console.log("track appeared:", name);
+	for (const name of update.removed) console.log("track left:", name);
+	console.log("now:", consumer.current()); // Set<string>
 }
 ```
 
-Each group is self-contained: its first frame is a full snapshot of every item and any following frames are single `+` (insert) or `-` (remove) deltas applied in order. A consumer jumps to the newest group, reads the snapshot, and replays the deltas.
+Each group is self-contained: its first frame is a full snapshot of every item and any following frames are single `+` (insert) or `-` (remove) deltas applied in order. A consumer jumps to the newest group, reads the snapshot, and replays the deltas. Each change is reported as the items it added and removed (a snapshot is diffed against the current set), so a watcher reacts to individual tracks appearing and leaving without comparing whole sets.
 
 Items are arbitrary binary data via a `Codec<T>` (`encode`/`decode` to `Uint8Array`). `stringCodec` and `bytesCodec` are provided; supply your own for richer types. Items dedupe by their encoded bytes, so two values with the same encoding are the same member.
 

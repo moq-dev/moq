@@ -5,10 +5,15 @@ import { stringCodec } from "./codec.ts";
 import { Consumer } from "./consumer.ts";
 import { Producer } from "./producer.ts";
 
-// Reconstruct every set a consumer yields, in order. Consumes the track's groups.
+// Collect the full set after each change a consumer yields, in order. Consumes the track's groups.
 async function drain(track: Track): Promise<Set<string>[]> {
 	const out: Set<string>[] = [];
-	for await (const value of new Consumer(track, { codec: stringCodec })) out.push(value);
+	const consumer = new Consumer(track, { codec: stringCodec });
+	for (;;) {
+		const update = await consumer.next();
+		if (update === undefined) break;
+		out.push(consumer.current());
+	}
 	return out;
 }
 
@@ -67,19 +72,42 @@ test("redundant insert and remove write nothing", async () => {
 	expect(await structure(track)).toEqual([1]);
 });
 
-test("live consumer sees each change", async () => {
+test("live consumer sees each change as added/removed", async () => {
 	const track = new Track("test");
 	const producer = new Producer(track, { codec: stringCodec });
 	const consumer = new Consumer(track, { codec: stringCodec });
 
 	producer.insert("video");
-	expect(await consumer.next()).toEqual(set("video"));
+	expect(await consumer.next()).toEqual({ added: ["video"], removed: [] });
 
 	producer.insert("audio");
-	expect(await consumer.next()).toEqual(set("video", "audio"));
+	expect(await consumer.next()).toEqual({ added: ["audio"], removed: [] });
 
 	producer.remove("video");
-	expect(await consumer.next()).toEqual(set("audio"));
+	expect(await consumer.next()).toEqual({ added: [], removed: ["video"] });
+
+	// The reconstructed set tracks the net result alongside the per-change deltas.
+	expect(consumer.current()).toEqual(set("audio"));
+
+	producer.finish();
+});
+
+test("snapshot-only stream still reports incremental changes", async () => {
+	const track = new Track("test");
+	// A zero ratio rolls a fresh snapshot group on every change, so the consumer only sees
+	// snapshots, yet must still report each change as a single add or remove (diffed vs current).
+	const producer = new Producer(track, { codec: stringCodec, deltaRatio: 0 });
+	const consumer = new Consumer(track, { codec: stringCodec });
+
+	producer.insert("a");
+	expect(await consumer.next()).toEqual({ added: ["a"], removed: [] });
+
+	producer.insert("b");
+	expect(await consumer.next()).toEqual({ added: ["b"], removed: [] });
+
+	producer.remove("a");
+	expect(await consumer.next()).toEqual({ added: [], removed: ["a"] });
+	expect(consumer.current()).toEqual(set("b"));
 
 	producer.finish();
 });

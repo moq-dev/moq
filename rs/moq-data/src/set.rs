@@ -341,6 +341,36 @@ impl<T: Item> Producer<T> {
 	}
 }
 
+/// The items added and removed by a single change, returned by [`Consumer::next`].
+///
+/// A delta carries one item in exactly one of the fields. A snapshot (the first frame of a group,
+/// or a late joiner's first read) carries its difference from the previous state, so several items
+/// may be added and removed at once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Update<T> {
+	/// Items that joined the set.
+	pub added: Vec<T>,
+	/// Items that left the set.
+	pub removed: Vec<T>,
+}
+
+// Manual impl so `T` needn't be `Default` (the derive would wrongly require it).
+impl<T> Default for Update<T> {
+	fn default() -> Self {
+		Self {
+			added: Vec::new(),
+			removed: Vec::new(),
+		}
+	}
+}
+
+impl<T> Update<T> {
+	/// Whether nothing changed.
+	pub fn is_empty(&self) -> bool {
+		self.added.is_empty() && self.removed.is_empty()
+	}
+}
+
 /// Consumes a set from a track, reconstructing it from snapshots and deltas.
 pub struct Consumer<T> {
 	track: moq_net::TrackConsumer,
@@ -360,70 +390,96 @@ impl<T: Item> Consumer<T> {
 		}
 	}
 
-	/// Get the set after the next change, or `None` once the track ends.
-	pub async fn next(&mut self) -> Result<Option<HashSet<T>>>
+	/// The full set as currently reconstructed. Updated by each [`next`](Self::next).
+	pub fn current(&self) -> &HashSet<T> {
+		&self.current
+	}
+
+	/// Get the next change as added/removed items, or `None` once the track ends.
+	///
+	/// Use [`current`](Self::current) afterward for the full set.
+	pub async fn next(&mut self) -> Result<Option<Update<T>>>
 	where
 		T: Unpin,
 	{
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
-	/// Poll for the set after the next change, without blocking.
+	/// Poll for the next change, without blocking.
 	///
-	/// Jumps to the newest group, decodes its snapshot, and applies deltas in order, yielding the
-	/// reconstructed set after each frame. Switching to a newer group discards the older one.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<HashSet<T>>>> {
-		// Drain to the newest group, resetting reconstruction state whenever we switch.
-		let track_finished = loop {
-			match self.track.poll_next_group(waiter)? {
-				Poll::Ready(Some(group)) => {
-					self.group = Some(group);
-					self.current.clear();
-					self.frames_read = 0;
+	/// Jumps to the newest group, decodes its snapshot, and applies deltas in order. Each frame is
+	/// reduced to the items it added and removed; frames that change nothing are skipped, so a
+	/// returned [`Update`] is never empty. Switching to a newer group diffs its snapshot against the
+	/// current set, so no change is missed or duplicated.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Update<T>>>> {
+		loop {
+			// Drain to the newest group. We keep `current` across the switch so the next group's
+			// snapshot diffs against it, rather than re-reporting the whole set.
+			let track_finished = loop {
+				match self.track.poll_next_group(waiter)? {
+					Poll::Ready(Some(group)) => {
+						self.group = Some(group);
+						self.frames_read = 0;
+					}
+					Poll::Ready(None) => break true,
+					Poll::Pending => break false,
 				}
-				Poll::Ready(None) => break true,
-				Poll::Pending => break false,
-			}
-		};
+			};
 
-		if let Some(group) = &mut self.group {
-			match group.poll_read_frame(waiter)? {
-				Poll::Ready(Some(frame)) => {
-					self.apply(frame)?;
-					return Poll::Ready(Ok(Some(self.current.clone())));
+			if let Some(group) = &mut self.group {
+				match group.poll_read_frame(waiter)? {
+					Poll::Ready(Some(frame)) => {
+						let update = self.apply(frame)?;
+						if !update.is_empty() {
+							return Poll::Ready(Ok(Some(update)));
+						}
+						// A no-op frame (redundant snapshot or delta); read the next one.
+						continue;
+					}
+					// The current group is exhausted; look for a newer one.
+					Poll::Ready(None) => {
+						self.group = None;
+						continue;
+					}
+					Poll::Pending => return Poll::Pending,
 				}
-				// The current group is exhausted; wait for a newer one.
-				Poll::Ready(None) => self.group = None,
-				Poll::Pending => return Poll::Pending,
 			}
-		}
 
-		if track_finished {
-			Poll::Ready(Ok(None))
-		} else {
-			Poll::Pending
+			return if track_finished {
+				Poll::Ready(Ok(None))
+			} else {
+				Poll::Pending
+			};
 		}
 	}
 
-	/// Apply one frame: frame 0 of a group is a snapshot, the rest are `+`/`-` deltas.
-	fn apply(&mut self, frame: Bytes) -> Result<()> {
-		if self.frames_read == 0 {
-			self.current = decode_snapshot(frame)?;
-		} else {
-			let (op, mut item) = decode_delta(frame)?;
-			let item = T::decode(&mut item)?;
-			match op {
-				INSERT => {
-					self.current.insert(item);
-				}
-				REMOVE => {
-					self.current.remove(&item);
-				}
-				other => return Err(Error::Malformed(format!("unknown op byte: {other:#04x}"))),
-			}
-		}
+	/// Apply one frame, returning what it changed: frame 0 of a group is a snapshot (diffed against
+	/// the current set), the rest are `+`/`-` deltas.
+	fn apply(&mut self, frame: Bytes) -> Result<Update<T>> {
 		self.frames_read += 1;
-		Ok(())
+
+		if self.frames_read == 1 {
+			let snapshot = decode_snapshot(frame)?;
+			let removed = self.current.difference(&snapshot).cloned().collect();
+			let added = snapshot.difference(&self.current).cloned().collect();
+			self.current = snapshot;
+			return Ok(Update { added, removed });
+		}
+
+		let (op, mut item) = decode_delta(frame)?;
+		let item = T::decode(&mut item)?;
+		Ok(match op {
+			INSERT if self.current.insert(item.clone()) => Update {
+				added: vec![item],
+				removed: Vec::new(),
+			},
+			REMOVE if self.current.remove(&item) => Update {
+				added: Vec::new(),
+				removed: vec![item],
+			},
+			INSERT | REMOVE => Update::default(),
+			other => return Err(Error::Malformed(format!("unknown op byte: {other:#04x}"))),
+		})
 	}
 }
 
@@ -486,15 +542,23 @@ mod test {
 		items.iter().map(|s| s.to_string()).collect()
 	}
 
-	/// Reconstruct every set a consumer yields, in order.
+	/// Collect the full set after each change a consumer yields, in order.
 	fn drain(track: moq_net::TrackConsumer) -> Vec<HashSet<String>> {
 		let mut consumer = Consumer::<String>::new(track);
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
-		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
-			out.push(value);
+		while let Poll::Ready(Ok(Some(_))) = consumer.poll_next(&waiter) {
+			out.push(consumer.current().clone());
 		}
 		out
+	}
+
+	/// The next non-empty update, panicking if one isn't ready.
+	fn next_update(consumer: &mut Consumer<String>) -> Update<String> {
+		match consumer.poll_next(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(update))) => update,
+			other => panic!("expected an update, got {other:?}"),
+		}
 	}
 
 	/// Build a snapshot frame for a set of strings, independent of the producer's encoder, as a
@@ -572,21 +636,42 @@ mod test {
 	fn live_consumer_sees_each_change() {
 		let (mut producer, track) = producer(Config::default());
 		let mut consumer = Consumer::<String>::new(track);
-		let waiter = kio::Waiter::noop();
-
-		let next = |consumer: &mut Consumer<String>| match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(value))) => value,
-			other => panic!("expected a set, got {other:?}"),
-		};
 
 		producer.insert("video".into()).unwrap();
-		assert_eq!(next(&mut consumer), set(&["video"]));
+		let update = next_update(&mut consumer);
+		assert_eq!(update.added, vec!["video".to_string()]);
+		assert!(update.removed.is_empty());
 
 		producer.insert("audio".into()).unwrap();
-		assert_eq!(next(&mut consumer), set(&["video", "audio"]));
+		assert_eq!(next_update(&mut consumer).added, vec!["audio".to_string()]);
 
 		producer.remove("video").unwrap();
-		assert_eq!(next(&mut consumer), set(&["audio"]));
+		assert_eq!(next_update(&mut consumer).removed, vec!["video".to_string()]);
+
+		// The reconstructed set tracks the net result alongside the per-change deltas.
+		assert_eq!(consumer.current(), &set(&["audio"]));
+	}
+
+	#[test]
+	fn snapshot_diff_reports_incremental_changes() {
+		// A zero ratio rolls a fresh snapshot group on every change, so the consumer only ever sees
+		// snapshots, yet must still report each change as a single add or remove (diffed vs current).
+		let (mut producer, track) = producer(Config { delta_ratio: Some(0.0) });
+		let mut consumer = Consumer::<String>::new(track);
+
+		producer.insert("a".into()).unwrap();
+		assert_eq!(next_update(&mut consumer).added, vec!["a".to_string()]);
+
+		producer.insert("b".into()).unwrap();
+		let update = next_update(&mut consumer);
+		assert_eq!(update.added, vec!["b".to_string()]);
+		assert!(update.removed.is_empty());
+
+		producer.remove("a").unwrap();
+		let update = next_update(&mut consumer);
+		assert_eq!(update.removed, vec!["a".to_string()]);
+		assert!(update.added.is_empty());
+		assert_eq!(consumer.current(), &set(&["b"]));
 	}
 
 	#[test]
@@ -647,13 +732,10 @@ mod test {
 
 		let mut consumer = Consumer::<Vec<u8>>::new(sub);
 		let waiter = kio::Waiter::noop();
-		let mut last = None;
-		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
-			last = Some(value);
-		}
+		while let Poll::Ready(Ok(Some(_))) = consumer.poll_next(&waiter) {}
 
 		let expected: HashSet<Vec<u8>> = [vec![0x00, 0xff, 0x42], vec![0x01]].into_iter().collect();
-		assert_eq!(last.unwrap(), expected);
+		assert_eq!(consumer.current(), &expected);
 	}
 
 	#[test]
@@ -693,10 +775,9 @@ mod test {
 
 		let mut consumer = Consumer::<Point>::new(sub);
 		let waiter = kio::Waiter::noop();
-		let mut last = None;
-		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
-			last = Some(value);
-		}
-		assert_eq!(last.unwrap(), [Point { x: 3, y: 4 }].into_iter().collect());
+		while let Poll::Ready(Ok(Some(_))) = consumer.poll_next(&waiter) {}
+
+		let expected: HashSet<Point> = [Point { x: 3, y: 4 }].into_iter().collect();
+		assert_eq!(consumer.current(), &expected);
 	}
 }

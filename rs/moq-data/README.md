@@ -25,14 +25,20 @@ tracks.insert("video".to_string())?;
 tracks.insert("audio".to_string())?;
 tracks.remove("audio")?;
 
-// Consume: yields the full set after each change.
-let mut consumer = set::Consumer::<String>::new(track.subscribe(None));
-while let Some(names) = consumer.next().await? {
-	println!("{names:?}");
+// Consume: each change is the items added and removed; `current()` is the full set.
+let mut consumer = set::Consumer::<String>::new(tracks.consume());
+while let Some(update) = consumer.next().await? {
+	for name in &update.added {
+		println!("track appeared: {name}");
+	}
+	for name in &update.removed {
+		println!("track left: {name}");
+	}
+	println!("now: {:?}", consumer.current());
 }
 ```
 
-Each group is self-contained: its first frame is a full snapshot of every item and any following frames are single `+` (insert) or `-` (remove) deltas applied in order. A consumer jumps to the newest group, reads the snapshot, and replays the deltas.
+Each group is self-contained: its first frame is a full snapshot of every item and any following frames are single `+` (insert) or `-` (remove) deltas applied in order. A consumer jumps to the newest group, reads the snapshot, and replays the deltas. Each change is reported as the items it added and removed (a snapshot is diffed against the current set), so a watcher reacts to individual tracks appearing and leaving without comparing whole sets.
 
 Items are arbitrary binary data: implement the `set::Item` trait for any type. It encodes straight into the frame's `bytes::BufMut` and decodes from a `bytes::Buf`, both zero-copy (`copy_to_bytes` hands back a slice of the frame). `String`, `Vec<u8>`, and `bytes::Bytes` are supported out of the box.
 
