@@ -31,15 +31,20 @@ default:
     	"just wait $base/certificate.sha256 && just web serve $base/anon"
 
 # Find the first free port at/after `start` (checked on both TCP and UDP).
+# `lsof` isn't available everywhere (e.g. Git Bash on Windows); without it we
+# can't probe, so fall back to `start` and let the relay surface a bind error if
+# it's actually taken.
 [private]
 port start="4443":
     #!/usr/bin/env bash
     set -euo pipefail
     port={{ start }}
-    while lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1 \
-    	|| lsof -nP -iUDP:"$port" -t >/dev/null 2>&1; do
-    	port=$((port + 1))
-    done
+    if command -v lsof >/dev/null 2>&1; then
+    	while lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1 \
+    		|| lsof -nP -iUDP:"$port" -t >/dev/null 2>&1; do
+    		port=$((port + 1))
+    	done
+    fi
     echo "$port"
 
 # Wait for the localhost relay to be ready by repeatedly requesting the cert

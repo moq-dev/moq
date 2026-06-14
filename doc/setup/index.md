@@ -44,6 +44,10 @@ just
 
 ## Option 2: Manual Installation
 
+::: tip On Windows?
+See [Windows Setup](/setup/windows) for a `winget`-based `setup.bat` and the `just` PATH caveats.
+:::
+
 If you don't like Nix or enjoy suffering with Windows, then you can manually install the dependencies:
 
 - [Just](https://github.com/casey/just)
