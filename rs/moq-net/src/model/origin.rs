@@ -2,7 +2,7 @@ use std::{
 	collections::{BTreeMap, HashMap, VecDeque},
 	fmt,
 	sync::atomic::{AtomicU64, Ordering},
-	task::Poll,
+	task::{Poll, ready},
 };
 
 use rand::RngExt;
@@ -879,19 +879,18 @@ impl OriginConsumer {
 	/// consumer is closed, or `Poll::Pending` after registering `waiter` to be
 	/// notified when the next update arrives.
 	pub fn poll_announced(&mut self, waiter: &kio::Waiter) -> Poll<Option<OriginAnnounce>> {
-		let res = self.state.poll_write_when(waiter, |state| {
+		let mut state = match ready!(self.state.poll(waiter, |state| {
 			if state.pending.is_empty() {
 				Poll::Pending
 			} else {
 				Poll::Ready(())
 			}
-		});
-		match res {
-			Poll::Ready(Ok(mut state)) => Poll::Ready(Some(state.take().expect("predicate guaranteed an update"))),
+		})) {
+			Ok(state) => state,
 			// Closed: discard the Ref so its MutexGuard doesn't escape this call.
-			Poll::Ready(Err(_)) => Poll::Ready(None),
-			Poll::Pending => Poll::Pending,
-		}
+			Err(_) => return Poll::Ready(None),
+		};
+		Poll::Ready(Some(state.take().expect("predicate guaranteed an update")))
 	}
 
 	/// Returns the next (un)announced broadcast and the absolute path without blocking.

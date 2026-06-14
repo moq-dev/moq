@@ -74,7 +74,9 @@ impl<T> Producer<T> {
 	/// Poll a read-only predicate; on [`Poll::Ready`] hand back a [`Mut`] with the
 	/// lock still held, so the caller can inspect and mutate atomically.
 	///
-	/// The predicate only sees a [`Ref`], so it can't accidentally flag the state
+	/// Unlike [`Consumer::poll`], the predicate returns `Poll<()>` (it just gates
+	/// readiness) and a satisfied poll yields write access via [`Mut`]. The
+	/// predicate only sees a [`Ref`], so it can't accidentally flag the state
 	/// modified (e.g. via a `&mut`-taking method like `Vec::pop`). That sidesteps
 	/// the footgun where a no-op mutation during a *pending* poll would wake this
 	/// producer's own waiter and spin into an infinite loop. Decide readiness in
@@ -82,7 +84,7 @@ impl<T> Producer<T> {
 	/// while pending.
 	///
 	/// Returns `Poll::Ready(Err(`[`Ref`]`))` if the channel is closed.
-	pub fn poll_write_when<F>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
+	pub fn poll<F>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<()>,
 	{
@@ -104,14 +106,13 @@ impl<T> Producer<T> {
 
 	/// Wait until the read-only predicate holds, then acquire write access.
 	///
-	/// The async sibling of [`poll_write_when`](Self::poll_write_when): returns
-	/// `Ok(Mut)` once `f` returns [`Poll::Ready`], or `Err(Ref)` if the channel
-	/// closes first.
-	pub async fn write_when<F>(&self, mut f: F) -> Result<Mut<'_, T>, Ref<'_, T>>
+	/// The async sibling of [`poll`](Self::poll): returns `Ok(Mut)` once `f`
+	/// returns [`Poll::Ready`], or `Err(Ref)` if the channel closes first.
+	pub async fn wait<F>(&self, mut f: F) -> Result<Mut<'_, T>, Ref<'_, T>>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<()> + Unpin,
 	{
-		crate::wait(move |waiter| self.poll_write_when(waiter, &mut f)).await
+		crate::wait(move |waiter| self.poll(waiter, &mut f)).await
 	}
 
 	/// Wait until the channel is closed.
@@ -358,5 +359,40 @@ mod test {
 		let _consumer = producer.consume();
 		let _weak = producer.weak();
 		assert!(producer.is_last());
+	}
+
+	#[test]
+	fn poll_gates_on_predicate_then_writes() {
+		let producer = Producer::<Vec<u32>>::default();
+		let waiter = Waiter::noop();
+
+		let predicate = |state: &Ref<'_, Vec<u32>>| {
+			if state.is_empty() {
+				Poll::Pending
+			} else {
+				Poll::Ready(())
+			}
+		};
+
+		// Empty queue: the read-only predicate is pending, so no Mut is handed out
+		// (and crucially nothing flags the state modified to wake our own waiter).
+		assert!(matches!(producer.poll(&waiter, predicate), Poll::Pending));
+
+		let Ok(mut write) = producer.write() else {
+			panic!("channel should be open");
+		};
+		write.push(1);
+		drop(write);
+
+		// Now satisfied: poll upgrades to a Mut with the lock still held.
+		let Poll::Ready(Ok(mut state)) = producer.poll(&waiter, predicate) else {
+			panic!("expected a writable guard");
+		};
+		assert_eq!(state.pop(), Some(1));
+		drop(state);
+
+		// Closed channel reports back through Err.
+		assert!(producer.close().is_ok());
+		assert!(matches!(producer.poll(&waiter, predicate), Poll::Ready(Err(_))));
 	}
 }

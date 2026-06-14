@@ -254,11 +254,11 @@ impl BroadcastDynamic {
 	}
 
 	// A helper to automatically apply Dropped if the state is closed without an error.
-	fn poll_write_when<F>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<kio::Mut<'_, State>, Error>>
+	fn poll<F>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<kio::Mut<'_, State>, Error>>
 	where
 		F: FnMut(&kio::Ref<'_, State>) -> Poll<()>,
 	{
-		Poll::Ready(match ready!(self.state.poll_write_when(waiter, f)) {
+		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
 			Ok(state) => Ok(state),
 			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
 		})
@@ -267,7 +267,7 @@ impl BroadcastDynamic {
 	/// Poll for the next consumer-requested track, without blocking. The returned producer
 	/// is preconfigured with the requested track's name and priority.
 	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<TrackProducer, Error>> {
-		let mut state = ready!(self.poll_write_when(waiter, |state| {
+		let mut state = ready!(self.poll(waiter, |state| {
 			if state.requests.is_empty() {
 				Poll::Pending
 			} else {

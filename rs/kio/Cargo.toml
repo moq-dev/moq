@@ -13,7 +13,6 @@ keywords = ["async", "producer", "consumer", "state", "sync"]
 categories = ["asynchronous", "concurrency"]
 
 [lib]
-test = false
 doctest = false
 
 [dependencies]
