@@ -1,6 +1,6 @@
-import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import type * as Moq from "@moq/wasm";
+import { Time } from "@moq/wasm";
 
 /** Latency: `"real-time"` auto-computes jitter from RTT; a `Time.Milli` sets a fixed jitter. */
 export type Latency = "real-time" | Time.Milli;

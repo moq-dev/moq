@@ -1,6 +1,6 @@
-import { Moq } from "@moq/hang";
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
+import { Time } from "@moq/wasm";
 import type MoqWatch from "../../element";
 import { formatMillis } from "../format";
 import { bufferControl } from "./buffer-control";
@@ -25,7 +25,7 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const buttons = PRESETS.map((preset) => {
 		const chip = DOM.create("button", { className: "chip", type: "button" }, preset.label);
 		parent.event(chip, "click", () => {
-			watch.controls.latency.set(preset.value === "real-time" ? "real-time" : Moq.Time.Milli(preset.value));
+			watch.controls.latency.set(preset.value === "real-time" ? "real-time" : Time.Milli(preset.value));
 		});
 		chips.appendChild(chip);
 		return { preset, chip };

@@ -1,5 +1,5 @@
 import type { Time } from "@moq/net";
-import * as Moq from "@moq/net";
+import { Varint } from "@moq/net";
 
 export type { BufferedRange, BufferedRanges, Frame } from "./types";
 
@@ -8,7 +8,7 @@ import type { Frame } from "./types";
 
 export class Format implements ContainerFormat {
 	decode(frame: Uint8Array): Frame[] {
-		const [timestamp, data] = Moq.Varint.decode(frame);
+		const [timestamp, data] = Varint.decode(frame);
 		return [{ data, timestamp: timestamp as Time.Micro, keyframe: false }];
 	}
 }
@@ -20,7 +20,7 @@ export interface Source {
 
 // Encode a frame as a timestamp varint followed by the payload bytes.
 export function encodeFrame(source: Uint8Array | Source, timestamp: Time.Micro): Uint8Array {
-	const timestampBytes = Moq.Varint.encode(timestamp);
+	const timestampBytes = Varint.encode(timestamp);
 	const data = new Uint8Array(timestampBytes.byteLength + source.byteLength);
 	data.set(timestampBytes, 0);
 
@@ -31,30 +31,4 @@ export function encodeFrame(source: Uint8Array | Source, timestamp: Time.Micro):
 	}
 
 	return data;
-}
-
-// A Helper class to encode frames into a track.
-export class Producer {
-	#track: Moq.TrackProducer;
-	#group?: Moq.Group;
-
-	constructor(track: Moq.TrackProducer) {
-		this.#track = track;
-	}
-
-	encode(data: Uint8Array | Source, timestamp: Time.Micro, keyframe: boolean) {
-		if (keyframe) {
-			this.#group?.close();
-			this.#group = this.#track.appendGroup();
-		} else if (!this.#group) {
-			throw new Error("must start with a keyframe");
-		}
-
-		this.#group?.writeFrame(encodeFrame(data, timestamp));
-	}
-
-	close(err?: Error) {
-		this.#track.close(err);
-		this.#group?.close();
-	}
 }

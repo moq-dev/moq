@@ -1,7 +1,15 @@
-import type * as Moq from "@moq/net";
 import type * as z from "zod/mini";
 import { merge } from "./diff.ts";
 import type { Config } from "./producer.ts";
+
+// Minimal structural track surface @moq/json reads from, so the package stays
+// networking-model-agnostic (works with @moq/net, @moq/wasm, or a test double).
+interface Group {
+	readFrame(): Promise<Uint8Array | undefined>;
+}
+export interface TrackSubscriber {
+	nextGroup(): Promise<Group | undefined>;
+}
 
 /**
  * Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
@@ -10,14 +18,14 @@ import type { Config } from "./producer.ts";
  * yielding the reconstructed value after each one.
  */
 export class Consumer<T> {
-	#track: Moq.TrackSubscriber;
+	#track: TrackSubscriber;
 	#schema?: z.ZodMiniType<T>;
 
-	#group?: Moq.Group;
+	#group?: Group;
 	#current?: unknown;
 	#framesRead = 0;
 
-	constructor(track: Moq.TrackSubscriber, config: Config<T> = {}) {
+	constructor(track: TrackSubscriber, config: Config<T> = {}) {
 		this.#track = track;
 		this.#schema = config.schema;
 	}

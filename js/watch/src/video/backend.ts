@@ -1,5 +1,5 @@
-import type * as Moq from "@moq/net";
 import type { Getter } from "@moq/signals";
+import type * as Moq from "@moq/wasm";
 import type { BufferedRanges } from "../backend";
 import type { Source } from "./source";
 

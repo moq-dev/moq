@@ -1,3 +1,3 @@
-export { Consumer } from "./consumer.ts";
+export { Consumer, type TrackSubscriber } from "./consumer.ts";
 export { type Diff, deepEqual, diff, merge } from "./diff.ts";
-export { type Config, Producer } from "./producer.ts";
+export { type Config, type Group, Producer, type TrackProducer } from "./producer.ts";

@@ -1,5 +1,9 @@
-import type * as Moq from "@moq/net";
 import * as z from "zod/mini";
+
+// Minimal structural track surface, so @moq/msf stays networking-model-agnostic.
+interface TrackSubscriber {
+	readFrame(): Promise<Uint8Array | undefined>;
+}
 
 export const PackagingSchema = z.union([
 	z.enum(["loc", "cmaf", "legacy", "mediatimeline", "eventtimeline"]),
@@ -63,7 +67,7 @@ export function decode(raw: Uint8Array): Catalog {
 	}
 }
 
-export async function fetch(track: Moq.TrackSubscriber): Promise<Catalog | undefined> {
+export async function fetch(track: TrackSubscriber): Promise<Catalog | undefined> {
 	const frame = await track.readFrame();
 	if (!frame) return undefined;
 	return decode(frame);

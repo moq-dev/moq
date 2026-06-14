@@ -1,5 +1,5 @@
-import { Signals } from "@moq/net";
 import { createAccessor } from "@moq/signals/solid";
+import { Signals } from "@moq/wasm";
 import type { JSX } from "solid-js";
 import { createContext, onCleanup } from "solid-js";
 import type MoqBoy from "../element";

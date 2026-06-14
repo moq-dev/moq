@@ -1,9 +1,10 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import * as Moq from "@moq/net";
 import { Effect, readonlys, Signal } from "@moq/signals";
+import * as Moq from "@moq/wasm";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
 import { base64ToBytes } from "../base64";
+import { Consumer } from "../container.ts";
 import type { Muxer } from "../mse";
 import type { Sync } from "../sync";
 import type { Backend, Stats } from "./backend";
@@ -155,7 +156,7 @@ export class Mse implements Backend {
 
 		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer that reorders groups/frames up to the provided latency.
-		const consumer = new Container.Consumer(data, {
+		const consumer = new Consumer(data, {
 			format,
 			latency: this.sync.output.buffer,
 		});

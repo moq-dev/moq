@@ -1710,7 +1710,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -4662,6 +4662,7 @@ dependencies = [
  "js-sys",
  "moq-net",
  "thiserror 2.0.18",
+ "tracing",
  "tracing-wasm",
  "url",
  "wasm-bindgen",
@@ -9250,9 +9251,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-wasm"
-version = "0.5.7"
+version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ee22c228309b45651038d975a9f3c041525e9f2cc0f6c3bd8753a110804df11"
+checksum = "304af61705cf9212d1686fc6b2eb10110bea706a1ccaa475065947bc8562f553"
 dependencies = [
  "bytes",
  "js-sys",

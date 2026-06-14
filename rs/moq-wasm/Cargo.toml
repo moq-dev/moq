@@ -31,6 +31,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] } # wasm_js backend for ra
 js-sys = "0.3"
 moq-net = { workspace = true, features = ["serde"] }
 thiserror = "2"
+tracing = "0.1"
 tracing-wasm = "0.2"
 url = "2"
 # Pinned to the wasm-bindgen-cli version in the Nix dev shell: the bindgen
@@ -39,4 +40,4 @@ wasm-bindgen = "=0.2.121"
 wasm-bindgen-futures = "0.4"
 web-async = { workspace = true }
 web-transport-trait = { workspace = true }
-web-transport-wasm = "0.5"
+web-transport-wasm = "0.5.8" # 0.5.8+ for ClientBuilder::with_protocols (ALPN)

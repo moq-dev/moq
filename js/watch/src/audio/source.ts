@@ -1,7 +1,7 @@
 import type * as Catalog from "@moq/hang/catalog";
-import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import type * as Moq from "@moq/wasm";
+import { Time } from "@moq/wasm";
 import type { Broadcast } from "../broadcast";
 
 // AudioWorklet always renders in 128-sample quanta.

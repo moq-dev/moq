@@ -1,11 +1,12 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
-import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import type * as Moq from "@moq/wasm";
+import { Time } from "@moq/wasm";
 import type { BufferedRanges } from "../backend";
 import { base64ToBytes } from "../base64";
+import { Consumer } from "../container.ts";
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
@@ -198,7 +199,7 @@ export class Decoder {
 		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
-		const consumer = new Container.Consumer(sub, {
+		const consumer = new Consumer(sub, {
 			format,
 			latency: this.sync.output.buffer,
 		});
@@ -285,7 +286,7 @@ export class Decoder {
 					? Util.Hex.toBytes(config.description)
 					: init.description;
 
-		const consumer = new Container.Consumer(sub, {
+		const consumer = new Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
 			latency: this.sync.output.buffer,
 		});

@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Time } from "@moq/wasm";
 import type { StreamTrack } from "./types";
 
 // Firefox doesn't support MediaStreamTrackProcessor so we need to use a polyfill.

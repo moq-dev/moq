@@ -1,4 +1,4 @@
-import * as Moq from "@moq/net";
+import * as Moq from "@moq/wasm";
 import * as Watch from "@moq/watch";
 
 export type { default as MoqBoy } from "./element.tsx";

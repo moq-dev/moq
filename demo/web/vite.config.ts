@@ -2,12 +2,13 @@ import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "path";
 import { defineConfig } from "vite";
 import solidPlugin from "vite-plugin-solid";
+import { moqWasm } from "../../js/common/vite-plugin-wasm";
 import { workletInline } from "../../js/common/vite-plugin-worklet";
 
 export default defineConfig({
 	root: "src",
 	envDir: resolve(__dirname),
-	plugins: [tailwindcss(), solidPlugin(), workletInline()],
+	plugins: [moqWasm(), tailwindcss(), solidPlugin(), workletInline()],
 	build: {
 		target: "esnext",
 		sourcemap: process.env.NODE_ENV === "production" ? false : "inline",

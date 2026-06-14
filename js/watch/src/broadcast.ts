@@ -1,9 +1,9 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
-import type * as Moq from "@moq/net";
-import { Path } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import type * as Moq from "@moq/wasm";
+import { Path } from "@moq/wasm";
 
 import { toHang } from "./msf";
 

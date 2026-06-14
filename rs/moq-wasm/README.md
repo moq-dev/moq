@@ -13,7 +13,7 @@ Go). Browsers need `wasm-bindgen`, so this is a separate sibling crate. (For
 *React Native* JS, `uniffi-bindgen-react-native` can reuse `moq-ffi` directly;
 that path is unrelated to this crate.)
 
-## Status: compiles and ships a typed JS package; one runtime blocker left
+## Status: full consume + publish surface, drop-in for `@moq/net` at the type level
 
 What works today:
 
@@ -24,13 +24,25 @@ What works today:
   bridge from `web-transport-wasm` (browser WebTransport) to the
   `web-transport-trait` abstraction `moq-net` consumes. The orphan rule forces
   the newtypes; the shapes line up almost 1:1.
-- **It compiles to `wasm32-unknown-unknown` and produces `@moq/wasm`**: `just
-  wasm` emits a typed, importable package (`Session` / `Broadcast` / `Track` /
-  `Group`, used as `Moq.Session` etc. via `import * as Moq`, `Promise`-returning
-  methods, `.d.ts`). Verified: it bundles under esbuild and a strict-mode TS
-  consumer type-checks against it.
-- Scope is the consume path (connect -> broadcast -> track -> group -> frame),
-  the `@moq/watch` use case. The publish path follows the same shape.
+- **Both the consume and publish paths are bound.** `lib.rs` exposes the full
+  producer/consumer model: `Session` (connect / consume / publish), a dual-use
+  `Broadcast` (with `requested`), `TrackRequest`, `TrackProducer`,
+  `TrackConsumer`, `TrackSubscriber`, and a dual-use `Group`. The bindings stay
+  primitive (frames are `Uint8Array`, options positional, `sequence` a `bigint`).
+- **A hand-written TS shim (`js/wasm/src`) presents the `@moq/net` surface** on
+  top of those primitives: the `Connection` / `Path` / `Time` namespaces, the
+  string/json/bool conveniences, options-object signatures, a reactive
+  `state.closed` signal, lazy synchronous `consume`, and `number` sequences. It
+  type-checks against the exact call sites in `@moq/watch` / `@moq/publish`, so
+  it is a drop-in for the surface they use.
+
+Announce discovery is real: `Session::consumer` exposes a wasm `OriginConsumer`
+with `announced()` (a live `{ path, active }` stream) and `consume()`, mirroring
+`moq-net`. `@moq/watch` and `@moq/publish` import `@moq/wasm` directly today.
+
+Still pending: a real browser-against-relay run, bandwidth/RTT telemetry
+(`Established.sendBandwidth`/`rtt` are declared but undefined), and `moq-mux`
+media muxing (see below).
 
 ### Three moq-net changes this required (all landed here)
 

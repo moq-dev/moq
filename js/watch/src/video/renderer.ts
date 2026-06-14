@@ -1,5 +1,5 @@
-import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Time } from "@moq/wasm";
 import type { Decoder } from "./decoder";
 
 type RendererInput = {

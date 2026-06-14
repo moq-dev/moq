@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Time } from "@moq/wasm";
 import type { AudioFrame } from "./capture";
 
 class Capture extends AudioWorkletProcessor {

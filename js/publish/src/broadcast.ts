@@ -1,6 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
-import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import * as Moq from "@moq/wasm";
 import * as Audio from "./audio";
 import { CatalogProducer } from "./catalog";
 import * as Video from "./video";

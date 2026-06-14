@@ -1,5 +1,5 @@
-import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import * as Moq from "@moq/wasm";
 import { Broadcast } from "./broadcast";
 import * as Preview from "./preview";
 import * as Source from "./source";

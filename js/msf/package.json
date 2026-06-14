@@ -15,10 +15,10 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
-		"@moq/net": "workspace:^",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
+		"@moq/net": "workspace:^",
 		"rimraf": "^6.1.3",
 		"typescript": "^6.0.3"
 	}
