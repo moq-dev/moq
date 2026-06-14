@@ -172,6 +172,9 @@ function writeJsrConfig() {
 	const jsr = {
 		name: pkg.name,
 		version: pkg.version,
+		// JSR reads this for the package description and the "has a description"
+		// score check; it isn't pulled from the npm package.json automatically.
+		...(pkg.description ? { description: pkg.description } : {}),
 		...(license ? { license } : {}),
 		exports,
 		...(Object.keys(imports).length ? { imports } : {}),

@@ -1,3 +1,9 @@
+/**
+ * SolidJS adapters that bridge signals to Solid accessors and setters.
+ *
+ * @module
+ */
+
 import {
 	createSignal,
 	onCleanup,
@@ -7,7 +13,7 @@ import {
 } from "solid-js";
 import type { Getter, Signal } from "./index";
 
-// A helper to create a Solid accessor from a signal.
+/** Creates a Solid accessor that tracks the given signal, unsubscribing on cleanup. */
 export function createAccessor<T>(signal: Getter<T>): SolidAccessor<T> {
 	// Disable the equals check because we do it ourselves.
 	const [get, set] = createSignal(signal.peek(), { equals: false });
@@ -16,7 +22,7 @@ export function createAccessor<T>(signal: Getter<T>): SolidAccessor<T> {
 	return get;
 }
 
-// A helper to create a Solid setter that writes to a signal.
+/** Creates a Solid setter that writes through to the given signal. */
 export function createSetter<T>(signal: Signal<T>): SolidSetter<T> {
 	const setter = (value: T | ((prev: T) => T)) => {
 		if (typeof value === "function") {
@@ -29,7 +35,7 @@ export function createSetter<T>(signal: Signal<T>): SolidSetter<T> {
 	return setter as SolidSetter<T>;
 }
 
-// A helper to create a Solid [get, set] pair from a signal.
+/** Creates a Solid `[accessor, setter]` pair backed by the given signal. */
 export function createPair<T>(signal: Signal<T>): SolidSignal<T> {
 	return [createAccessor(signal), createSetter(signal)];
 }

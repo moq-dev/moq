@@ -1,6 +1,6 @@
 let loading: Promise<boolean> | undefined;
 
-// Returns true when the polyfill is loaded.
+/** Load the libav WebCodecs polyfill (Opus) if AudioEncoder/AudioDecoder are missing. Resolves true once available. */
 export async function polyfill(): Promise<boolean> {
 	if (globalThis.AudioEncoder && globalThis.AudioDecoder) {
 		return true;

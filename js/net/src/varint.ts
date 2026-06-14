@@ -1,9 +1,13 @@
 // QUIC variable-length integer encoding/decoding
 // https://www.rfc-editor.org/rfc/rfc9000#section-16
 
+/** Largest value that fits in a 1-byte varint (6 bits). */
 export const MAX_U6 = 2 ** 6 - 1;
+/** Largest value that fits in a 2-byte varint (14 bits). */
 export const MAX_U14 = 2 ** 14 - 1;
+/** Largest value that fits in a 4-byte varint (30 bits). */
 export const MAX_U30 = 2 ** 30 - 1;
+/** Largest value representable without precision loss (`Number.MAX_SAFE_INTEGER`, 53 bits). */
 export const MAX_U53 = Number.MAX_SAFE_INTEGER;
 
 // Leading-ones varint encoding/decoding (draft-17 Section 1.4.1)
@@ -20,6 +24,7 @@ export const MAX_U53 = Number.MAX_SAFE_INTEGER;
 
 const MAX_U64 = (1n << 64n) - 1n;
 
+/** Number of bytes needed to encode a value in the leading-ones varint format. */
 export function sizeLeadingOnes(v: number | bigint): number {
 	const b = BigInt(v);
 	if (b < 0n) throw new RangeError(`value is negative: ${v}`);
@@ -34,6 +39,7 @@ export function sizeLeadingOnes(v: number | bigint): number {
 	return 9;
 }
 
+/** Encode a value in leading-ones varint format into the provided buffer, returning the written subarray. */
 export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8Array {
 	const x = BigInt(v);
 	if (x < 0n) throw new RangeError(`underflow, value is negative: ${v}`);
@@ -86,10 +92,12 @@ export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8
 	return new Uint8Array(dst, 0, 9);
 }
 
+/** Encode a value in leading-ones varint format into a freshly allocated buffer. */
 export function encodeLeadingOnes(v: number | bigint): Uint8Array {
 	return encodeLeadingOnesTo(new ArrayBuffer(9), v);
 }
 
+/** Decode a leading-ones varint, returning the value and the remaining buffer. */
 export function decodeLeadingOnes(buf: Uint8Array): [bigint, Uint8Array] {
 	if (buf.length === 0) throw new Error("buffer is empty");
 

@@ -26,10 +26,12 @@ function channelConfig(channelCount: number): number {
 	return 2;
 }
 
-// Build the AudioSpecificConfig for AAC-LC, which decoders need to initialize when frames are raw (no
-// ADTS header). Standard sample rates produce the 2-byte form; non-table rates fall back to the
-// 5-byte form with an explicit 24-bit frequency. This mirrors Config::encode() in the Rust muxer so
-// the JS and Rust sides agree on the bytes.
+/**
+ * Build the AAC-LC AudioSpecificConfig that decoders need when frames are raw (no ADTS header).
+ *
+ * Standard sample rates produce the 2-byte form; non-table rates fall back to the 5-byte form
+ * with an explicit 24-bit frequency. Mirrors the Rust muxer so JS and Rust agree on the bytes.
+ */
 export function audioSpecificConfig(sampleRate: number, channelCount: number): Uint8Array {
 	const config = channelConfig(channelCount);
 	const freqIndex = SAMPLE_RATE_INDEX[sampleRate];
