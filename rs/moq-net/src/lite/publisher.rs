@@ -196,7 +196,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	// an empty one before finishing; Lite03+ has no init.
 	async fn finish_empty_announce(stream: &mut Stream<S, Version>, version: Version) -> Result<(), Error> {
 		if let Version::Lite01 | Version::Lite02 = version {
-			stream.writer.encode(&lite::AnnounceInit { suffixes: Vec::new() }).await?;
+			stream
+				.writer
+				.encode(&lite::AnnounceInit { suffixes: Vec::new() })
+				.await?;
 		}
 		stream.writer.finish()?;
 		stream.writer.closed().await

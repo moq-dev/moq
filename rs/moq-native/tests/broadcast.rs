@@ -866,7 +866,9 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 
 	// ── publisher (server): only allowed to announce under "allowed" ──
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("allowed/test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("allowed/test")
+		.expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
@@ -967,7 +969,9 @@ async fn publish_only_client_to_subscribe_only_server() {
 		assert_eq!(path.as_str(), "allowed/test");
 		let bc = bc.expect("expected announce, got unannounce");
 
-		let mut track_sub = bc.subscribe_track(&Track::new("video")).expect("subscribe_track failed");
+		let mut track_sub = bc
+			.subscribe_track(&Track::new("video"))
+			.expect("subscribe_track failed");
 		let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 			.await
 			.expect("recv_group timed out")
@@ -993,7 +997,9 @@ async fn publish_only_client_to_subscribe_only_server() {
 
 	// ── publisher (client): only allowed to serve under "allowed" ──
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("allowed/test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("allowed/test")
+		.expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
