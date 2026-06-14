@@ -963,25 +963,6 @@ impl OriginConsumer {
 		))
 	}
 
-	/// Like [`Self::scope`], but returns an already-closed empty consumer instead of `None`
-	/// when the prefixes are disjoint from this consumer's scope.
-	///
-	/// The empty consumer has no broadcasts and is closed, so `announced()` resolves to
-	/// `None` immediately. Use this on the publisher's announce path so a peer that
-	/// subscribes to a prefix we can't serve (e.g. a publish-only token) gets a clean FIN
-	/// on the announce stream rather than an error that tears down the whole session, or
-	/// silence that leaves it waiting forever for announcements that can never come.
-	pub fn scope_or_empty(&self, prefixes: &[Path]) -> OriginConsumer {
-		match self.scope(prefixes) {
-			Some(scoped) => scoped,
-			None => {
-				let empty = OriginConsumer::new(self.info, self.root.clone(), OriginNodes { nodes: Vec::new() });
-				empty.state.close().ok();
-				empty
-			}
-		}
-	}
-
 	/// Returns a new OriginConsumer that automatically strips out the provided prefix.
 	///
 	/// Returns None if the provided root is not authorized; when [`Self::scope`] was
@@ -2086,33 +2067,6 @@ mod tests {
 
 		// Path is outside allowed prefixes — should return None immediately.
 		assert!(limited.announced_broadcast("notallowed").await.is_none());
-	}
-
-	#[tokio::test]
-	async fn test_scope_or_empty_disjoint_is_closed() {
-		let origin = Origin::random().produce();
-		let limited = origin
-			.consume()
-			.scope(&["allowed".into()])
-			.expect("should create limited");
-
-		// Disjoint prefix: scope() bails, but scope_or_empty() hands back a closed consumer.
-		assert!(limited.scope(&["other".into()]).is_none());
-		let mut empty = limited.scope_or_empty(&["other".into()]);
-
-		// Publishing anything (even under the original allowed prefix) is never announced.
-		let broadcast = Broadcast::new().produce();
-		origin.publish_broadcast("allowed/thing", broadcast.consume());
-		origin.publish_broadcast("other/thing", broadcast.consume());
-		tokio::task::yield_now().await;
-
-		assert!(empty.try_announced().is_none(), "empty consumer must never announce");
-
-		// Already closed: announced() resolves to None immediately (rather than pending) so
-		// the announce loop FINs the stream instead of leaving the peer waiting forever.
-		let resolved = empty.announced().now_or_never();
-		assert!(resolved.is_some(), "must resolve immediately, not pend");
-		assert!(resolved.unwrap().is_none(), "must resolve to None (closed)");
 	}
 
 	#[tokio::test]

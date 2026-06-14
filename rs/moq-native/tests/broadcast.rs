@@ -856,6 +856,86 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 		.expect("server task failed");
 }
 
+/// A peer that expresses announce-interest in a prefix the publisher can't serve (e.g. a
+/// subscribe-restricted token) must not tear down the whole session. The publisher FINs that
+/// announce stream cleanly; the connection and other announce streams keep working.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn announce_interest_unauthorized_keeps_session_alive() {
+	use moq_native::moq_net::{Origin, Track};
+
+	// ── publisher (server): only allowed to announce under "allowed" ──
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("allowed/test").expect("failed to create broadcast");
+	let mut track = broadcast
+		.create_track(Track::new("video"))
+		.expect("failed to create track");
+	let mut group = track.append_group().expect("failed to append group");
+	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.finish().expect("failed to finish group");
+
+	let publish = pub_origin
+		.consume()
+		.scope(&["allowed".into()])
+		.expect("failed to scope publish origin");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	let mut server = server_config.init().expect("failed to init server");
+	let addr = server.local_addr().expect("failed to get local addr");
+
+	// ── subscriber (client): interested in both "allowed" and "denied" ──
+	// "denied" is disjoint from the publisher's scope, so its announce stream is FINed.
+	let sub_origin = Origin::random().produce();
+	let consume = sub_origin
+		.scope(&["allowed".into(), "denied".into()])
+		.expect("failed to scope consume origin");
+	let mut announcements = consume.consume();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	let client = client_config.init().expect("failed to init client");
+	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.with_publish(publish).ok().await?;
+		let _broadcast = broadcast;
+		let _track = track;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_consume(consume);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	// The "allowed" announce stream still delivers even though "denied" was FINed.
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+	assert_eq!(path.as_str(), "allowed/test");
+	assert!(bc.is_some(), "expected announce, got unannounce");
+
+	// The unauthorized "denied" interest must not have torn down the session.
+	assert!(
+		tokio::time::timeout(Duration::from_millis(200), session.closed())
+			.await
+			.is_err(),
+		"session closed after unauthorized announce interest",
+	);
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
 fn assert_connect_error(err: &moq_native::Error, expected: moq_native::ConnectError) {
 	assert_eq!(err.connect_error(), Some(expected), "unexpected error: {err}",);
 }
