@@ -1,0 +1,32 @@
+{
+	"name": "@moq/data",
+	"type": "module",
+	"version": "0.0.1",
+	"description": "Helpers for sending metadata (sets, JSON) over MoQ tracks.",
+	"license": "(MIT OR Apache-2.0)",
+	"repository": "github:moq-dev/moq",
+	"sideEffects": false,
+	"exports": {
+		".": "./src/index.ts",
+		"./set": "./src/set/index.ts",
+		"./json": "./src/json.ts"
+	},
+	"scripts": {
+		"build": "rimraf dist && tsc -b && bun ../common/package.ts",
+		"check": "tsc --noEmit",
+		"test": "bun test --only-failures",
+		"release": "bun ../common/release.ts"
+	},
+	"dependencies": {
+		"@moq/json": "workspace:^",
+		"@moq/net": "workspace:^"
+	},
+	"peerDependencies": {
+		"zod": "^4.0.0"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.3.14",
+		"rimraf": "^6.1.3",
+		"typescript": "^6.0.3"
+	}
+}

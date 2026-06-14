@@ -189,6 +189,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 | `rs/moq-net` wire/API | `js/net`, `doc/concept` |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept` |
 | `rs/moq-token` | `js/token` |
+| `rs/moq-data` set wire/API | `js/data` (shared wire format, must stay byte-compatible) |
 | `rs/moq-relay` config/behavior | `doc/bin/relay/` |
 | `rs/moq-cli` | `doc/bin/cli.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |

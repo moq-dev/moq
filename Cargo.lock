@@ -3846,6 +3846,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-data"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "kio",
+ "moq-json",
+ "moq-net",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "moq-ffi"
 version = "0.2.20"
 dependencies = [

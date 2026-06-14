@@ -77,9 +77,25 @@
         "typescript": "^6.0.3",
       },
     },
+    "js/data": {
+      "name": "@moq/data",
+      "version": "0.0.1",
+      "dependencies": {
+        "@moq/json": "workspace:^",
+        "@moq/net": "workspace:^",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.14",
+        "rimraf": "^6.1.3",
+        "typescript": "^6.0.3",
+      },
+      "peerDependencies": {
+        "zod": "^4.0.0",
+      },
+    },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.2.7",
+      "version": "0.2.9",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.8.8",
@@ -100,7 +116,7 @@
     },
     "js/json": {
       "name": "@moq/json",
-      "version": "0.0.1",
+      "version": "0.0.2",
       "dependencies": {
         "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
@@ -159,7 +175,7 @@
     },
     "js/net": {
       "name": "@moq/net",
-      "version": "0.1.2",
+      "version": "0.1.4",
       "dependencies": {
         "@moq/qmux": "^0.0.6",
         "@moq/signals": "workspace:*",
@@ -179,7 +195,7 @@
     },
     "js/publish": {
       "name": "@moq/publish",
-      "version": "0.2.10",
+      "version": "0.2.14",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",
@@ -198,7 +214,7 @@
     },
     "js/signals": {
       "name": "@moq/signals",
-      "version": "0.1.7",
+      "version": "0.1.8",
       "devDependencies": {
         "@types/bun": "^1.3.11",
         "@types/react": "^19.2.15",
@@ -238,7 +254,7 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.2.14",
+      "version": "0.2.16",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",
@@ -516,6 +532,8 @@
     "@moq/boy": ["@moq/boy@workspace:js/moq-boy"],
 
     "@moq/clock": ["@moq/clock@workspace:js/clock"],
+
+    "@moq/data": ["@moq/data@workspace:js/data"],
 
     "@moq/demo": ["@moq/demo@workspace:demo/web"],
 

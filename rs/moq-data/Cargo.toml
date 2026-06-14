@@ -1,0 +1,30 @@
+[package]
+name = "moq-data"
+description = "Helpers for sending metadata (sets, JSON) over MoQ tracks."
+authors = ["Luke Curley <kixelated@gmail.com>"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+version = "0.0.1"
+edition = "2024"
+rust-version.workspace = true
+
+keywords = ["quic", "http3", "webtransport", "metadata", "live"]
+categories = ["multimedia", "network-programming", "web-programming"]
+
+[lib]
+doctest = false
+
+[features]
+default = ["json", "set"]
+# Re-export `moq-json` as `moq_data::json`. JSON will migrate into this crate eventually.
+json = ["dep:moq-json"]
+# A `HashSet`-like collection synced over a track via add/remove deltas.
+set = ["dep:moq-net", "dep:bytes", "dep:kio", "dep:thiserror"]
+
+[dependencies]
+bytes = { version = "1", optional = true }
+kio = { workspace = true, optional = true }
+moq-json = { workspace = true, optional = true }
+moq-net = { workspace = true, optional = true }
+thiserror = { version = "2", optional = true }
