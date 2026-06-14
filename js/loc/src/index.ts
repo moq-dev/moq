@@ -1,3 +1,9 @@
+/**
+ * Low Overhead Container (LOC): encode and decode codec bitstreams framed with
+ * per-frame timestamp and timescale metadata for MoQ.
+ *
+ * @module
+ */
 import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
 

@@ -376,8 +376,7 @@ export class Effect {
 	}
 
 	/**
-	 * Runs an async task that blocks the effect from rerunning until it resolves.
-	 * Await `cancel` inside the task to detect a pending rerun and bail out early.
+	 * Runs an async task. The effect will not rerun until the task's promise settles.
 	 */
 	// TODO: Add effect for another layer of nesting
 	spawn(fn: () => Promise<void>) {
