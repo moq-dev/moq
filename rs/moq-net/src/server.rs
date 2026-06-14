@@ -23,7 +23,7 @@ impl Server {
 	/// (pass an [`OriginProducer`] or [`OriginConsumer`] by reference) and forwards
 	/// its announcements. Omit to publish nothing. Pre-scoped via
 	/// [`OriginProducer::scope`] for token-gated relays.
-	pub fn with_publisher(mut self, publish: &impl Consume<OriginConsumer>) -> Self {
+	pub fn with_publisher(mut self, publish: impl Consume<OriginConsumer>) -> Self {
 		self.publish = Some(publish.consume());
 		self
 	}
@@ -38,7 +38,7 @@ impl Server {
 	/// Deprecated alias for [`with_publisher`](Self::with_publisher).
 	#[deprecated(note = "renamed to `with_publisher`")]
 	pub fn with_publish(self, publish: OriginConsumer) -> Self {
-		self.with_publisher(&publish)
+		self.with_publisher(publish)
 	}
 
 	/// Deprecated alias for [`with_subscriber`](Self::with_subscriber).

@@ -8,7 +8,7 @@ pub async fn run_client(client: moq_native::Client, url: Url, name: String, publ
 	// Create an origin producer to publish to the broadcast.
 	let origin = moq_net::Origin::random().produce();
 	let _publish = origin
-		.publish_broadcast(&name, &publish.consume())
+		.publish_broadcast(&name, publish.consume())
 		.context("failed to publish broadcast")?;
 
 	tracing::info!(%url, %name, "connecting");

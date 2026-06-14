@@ -104,7 +104,7 @@ impl BroadcastProducer {
 	/// track's [`TrackProducer`]) is responsible for keeping the track alive;
 	/// when all producers are dropped, the entry becomes closed and is
 	/// eventually evicted.
-	pub fn insert_track(&mut self, track: &impl crate::Consume<TrackConsumer>) -> Result<(), Error> {
+	pub fn insert_track(&mut self, track: impl crate::Consume<TrackConsumer>) -> Result<(), Error> {
 		let track = track.consume();
 		let mut state = BroadcastState::modify(&self.state)?;
 		state.insert_track(track.weak())
@@ -185,7 +185,7 @@ impl BroadcastProducer {
 		self.create_track(name, info).expect("should not have errored")
 	}
 
-	pub fn assert_insert_track(&mut self, track: &impl crate::Consume<TrackConsumer>) {
+	pub fn assert_insert_track(&mut self, track: impl crate::Consume<TrackConsumer>) {
 		self.insert_track(track).expect("should not have errored")
 	}
 }

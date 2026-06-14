@@ -795,7 +795,7 @@ impl OriginProducer {
 	pub fn publish_broadcast(
 		&self,
 		path: impl AsPath,
-		broadcast: &impl Consume<BroadcastConsumer>,
+		broadcast: impl Consume<BroadcastConsumer>,
 	) -> Result<OriginPublish, Error> {
 		let broadcast = broadcast.consume();
 		let path = path.as_path();
@@ -945,14 +945,21 @@ impl std::ops::DerefMut for BroadcastPublish {
 
 /// Cheap read handle over an origin's broadcast tree.
 ///
-/// Borrow a handle to derive a read view from it.
+/// Derive a read view from a handle.
 ///
-/// Lets builders accept either an [`OriginProducer`] or an [`OriginConsumer`] by
-/// reference (e.g. [`Client::with_publisher`](crate::Client::with_publisher)), so
-/// callers don't have to spell out `.consume()` and keep ownership of whatever
-/// they pass.
+/// Lets APIs accept either a producer or a consumer (e.g.
+/// [`Client::with_publisher`](crate::Client::with_publisher),
+/// [`OriginProducer::publish_broadcast`]). The blanket `&T` impl means you can
+/// pass by value (`foo(x)`) to hand off ownership, or by reference (`foo(&x)`)
+/// to keep it, without spelling out `.consume()`.
 pub trait Consume<T> {
 	fn consume(&self) -> T;
+}
+
+impl<T, U: Consume<T>> Consume<T> for &U {
+	fn consume(&self) -> T {
+		(**self).consume()
+	}
 }
 
 impl Consume<OriginConsumer> for OriginProducer {
