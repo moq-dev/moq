@@ -74,10 +74,11 @@ pub trait Item: Clone + Eq + Hash {
 	/// vector to a single copy.
 	fn encode<B: BufMut>(&self, buf: &mut B);
 
-	/// Decode an item from its wire bytes.
+	/// Decode an item from `buf`, which holds exactly this item's bytes.
 	///
-	/// Takes [`Bytes`] so an implementation can keep a zero-copy slice of the frame if it wants one.
-	fn decode(bytes: Bytes) -> Result<Self>
+	/// Read straight from the [`Buf`]: scalar getters (`get_u16`, ...) read in place, and
+	/// `buf.copy_to_bytes(buf.remaining())` hands back a zero-copy [`Bytes`] slice of the frame.
+	fn decode<B: Buf>(buf: &mut B) -> Result<Self>
 	where
 		Self: Sized;
 }
@@ -91,7 +92,8 @@ impl Item for String {
 		buf.put_slice(self.as_bytes());
 	}
 
-	fn decode(bytes: Bytes) -> Result<Self> {
+	fn decode<B: Buf>(buf: &mut B) -> Result<Self> {
+		let bytes = buf.copy_to_bytes(buf.remaining());
 		String::from_utf8(bytes.into()).map_err(|err| Error::Item(err.to_string()))
 	}
 }
@@ -105,8 +107,8 @@ impl Item for Vec<u8> {
 		buf.put_slice(self);
 	}
 
-	fn decode(bytes: Bytes) -> Result<Self> {
-		Ok(bytes.into())
+	fn decode<B: Buf>(buf: &mut B) -> Result<Self> {
+		Ok(buf.copy_to_bytes(buf.remaining()).into())
 	}
 }
 
@@ -119,8 +121,8 @@ impl Item for Bytes {
 		buf.put_slice(self);
 	}
 
-	fn decode(bytes: Bytes) -> Result<Self> {
-		Ok(bytes)
+	fn decode<B: Buf>(buf: &mut B) -> Result<Self> {
+		Ok(buf.copy_to_bytes(buf.remaining()))
 	}
 }
 
@@ -358,8 +360,8 @@ impl<T: Item> Consumer<T> {
 		if self.frames_read == 0 {
 			self.current = decode_snapshot(frame)?;
 		} else {
-			let (op, item) = decode_delta(frame)?;
-			let item = T::decode(item)?;
+			let (op, mut item) = decode_delta(frame)?;
+			let item = T::decode(&mut item)?;
 			match op {
 				INSERT => {
 					self.current.insert(item);
@@ -414,7 +416,7 @@ fn decode_snapshot<T: Item>(mut frame: Bytes) -> Result<HashSet<T>> {
 		if frame.remaining() < len {
 			return Err(Error::Malformed("snapshot item runs past end of frame".into()));
 		}
-		set.insert(T::decode(frame.split_to(len))?);
+		set.insert(T::decode(&mut frame.split_to(len))?);
 	}
 
 	if frame.has_remaining() {
@@ -613,13 +615,13 @@ mod test {
 				buf.put_u16(self.y);
 			}
 
-			fn decode(mut bytes: Bytes) -> Result<Self> {
-				if bytes.remaining() != 4 {
+			fn decode<B: Buf>(buf: &mut B) -> Result<Self> {
+				if buf.remaining() != 4 {
 					return Err(Error::Item("point must be 4 bytes".into()));
 				}
 				Ok(Point {
-					x: bytes.get_u16(),
-					y: bytes.get_u16(),
+					x: buf.get_u16(),
+					y: buf.get_u16(),
 				})
 			}
 		}
