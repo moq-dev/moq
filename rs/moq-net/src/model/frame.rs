@@ -232,6 +232,35 @@ impl FrameProducer {
 		}
 	}
 
+	/// Poll for the frame's full payload, resolving once it's finished.
+	///
+	/// Reads from the producer side (via `kio::Producer::poll_ref`) so a polling
+	/// reader doesn't mint a transient [`FrameConsumer`] per poll: that would churn
+	/// the consumer count and wake the value waiters, spinning the poll. Always
+	/// returns the whole payload (offset 0), so it's safe to call from any number
+	/// of readers in parallel.
+	pub(crate) fn poll_read_all(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
+		let res = ready!(self.state.poll_ref(waiter, |state| {
+			if state.fin {
+				Poll::Ready(Ok(()))
+			} else if let Some(err) = &state.abort {
+				Poll::Ready(Err(err.clone()))
+			} else {
+				Poll::Pending
+			}
+		}));
+
+		match res {
+			Ok(Ok(())) => {
+				// `fin` implies written == capacity (the producer fills the whole buffer).
+				let written = self.buf.written(Ordering::Acquire);
+				Poll::Ready(Ok(Bytes::from_owner(self.buf.clone()).slice(0..written)))
+			}
+			Ok(Err(err)) => Poll::Ready(Err(err)),
+			Err(state) => Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
+		}
+	}
+
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
 		self.state

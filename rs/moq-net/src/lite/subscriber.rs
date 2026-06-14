@@ -532,11 +532,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		track_stats: Arc<SubscriberTrack>,
 	) -> Result<(), Error> {
 		loop {
-			// Browser wasm runs on one thread. Yield per frame so a cache backlog
-			// cannot starve rendering and timers while reads resolve synchronously.
-			#[cfg(target_arch = "wasm32")]
-			web_async::time::sleep(std::time::Duration::ZERO).await;
-
 			let size = if self.version.has_track_stream() {
 				// moq-lite-05+: each frame is prefixed with a zigzag timestamp delta. We
 				// decode it to stay aligned with the wire, but don't surface it yet.
