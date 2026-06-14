@@ -756,12 +756,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
-name = "byteorder-lite"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
-
-[[package]]
 name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2059,18 +2053,6 @@ dependencies = [
 
 [[package]]
 name = "flume"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
-dependencies = [
- "futures-core",
- "futures-sink",
- "nanorand",
- "spin 0.9.8",
-]
-
-[[package]]
-name = "flume"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
@@ -3232,18 +3214,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "image"
-version = "0.25.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
-dependencies = [
- "bytemuck",
- "byteorder-lite",
- "moxcms",
- "num-traits",
-]
-
-[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4360,7 +4330,6 @@ dependencies = [
  "dispatch2",
  "moq-mux",
  "moq-net",
- "nokhwa",
  "nvidia-video-codec-sdk",
  "objc2",
  "objc2-av-foundation",
@@ -4375,6 +4344,7 @@ dependencies = [
  "tokio",
  "tracing",
  "v4l",
+ "windows",
  "yuv",
  "zune-jpeg",
 ]
@@ -4396,41 +4366,6 @@ dependencies = [
  "web-async",
  "web-transport-trait",
  "web-transport-wasm",
-]
-
-[[package]]
-name = "moxcms"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
-dependencies = [
- "num-traits",
- "pxfm",
-]
-
-[[package]]
-name = "mozjpeg"
-version = "0.10.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7891b80aaa86097d38d276eb98b3805d6280708c4e0a1e6f6aed9380c51fec9"
-dependencies = [
- "arrayvec",
- "bytemuck",
- "libc",
- "mozjpeg-sys",
- "rgb",
-]
-
-[[package]]
-name = "mozjpeg-sys"
-version = "2.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f0dc668bf9bf888c88e2fb1ab16a406d2c380f1d082b20d51dd540ab2aa70c1"
-dependencies = [
- "cc",
- "dunce",
- "libc",
- "nasm-rs",
 ]
 
 [[package]]
@@ -4515,21 +4450,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "nanorand"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a51313c5820b0b02bd422f4b44776fbf47961755c74ce64afc73bfad10226c3"
-dependencies = [
- "getrandom 0.2.17",
-]
-
-[[package]]
 name = "nasm-rs"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "706bf8a5e8c8ddb99128c3291d31bd21f4bcde17f0f4c20ec678d85c74faa149"
 dependencies = [
- "jobserver",
  "log",
 ]
 
@@ -4722,43 +4647,6 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
-]
-
-[[package]]
-name = "nokhwa"
-version = "0.10.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d63f10b450319a0ace7aa8e0e25477d1fdb345313a97e220e886175539a1dbb"
-dependencies = [
- "flume 0.11.1",
- "image",
- "nokhwa-bindings-windows",
- "nokhwa-core",
- "paste",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "nokhwa-bindings-windows"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5be28886bad8abcec3655c1f24b965b4cb596a72b23164c910c54439ce55d2a4"
-dependencies = [
- "nokhwa-core",
- "once_cell",
- "windows",
-]
-
-[[package]]
-name = "nokhwa-core"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1cba20bebd3bd9ae22f9273ade5bbe49da3e047c8512b53fbaf8b4b9c80d496"
-dependencies = [
- "bytes",
- "image",
- "mozjpeg",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -6027,12 +5915,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pxfm"
-version = "0.1.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
-
-[[package]]
 name = "qlog"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6473,15 +6355,6 @@ checksum = "f8dd2a808d456c4a54e300a23e9f5a67e122c3024119acbfd73e3bf664491cb2"
 dependencies = [
  "hmac",
  "subtle",
-]
-
-[[package]]
-name = "rgb"
-version = "0.8.53"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
-dependencies = [
- "bytemuck",
 ]
 
 [[package]]
@@ -8873,7 +8746,7 @@ checksum = "ac4f79670e02d23e233f96f53a05d5cbaeb0dfcc37ee4175c93f10a8a5389ee4"
 dependencies = [
  "boring",
  "bytes",
- "flume 0.12.0",
+ "flume",
  "futures",
  "http",
  "rustls-pki-types",

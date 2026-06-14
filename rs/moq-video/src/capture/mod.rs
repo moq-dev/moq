@@ -3,8 +3,7 @@
 //! - macOS camera -> AVFoundation, screen -> ScreenCaptureKit, both yielding
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
 //! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420).
-//! - Windows camera -> [`nokhwa`](https://crates.io/crates/nokhwa) (Media
-//!   Foundation), CPU RGBA -> I420, until a native MF capture lands.
+//! - Windows camera -> native Media Foundation (`IMFSourceReader` -> CPU I420).
 //!
 //! [`encode::publish_capture`](crate::encode::publish_capture) consumes [`Config`].
 
@@ -22,9 +21,9 @@ mod screencapture;
 #[cfg(target_os = "linux")]
 mod v4l2;
 
-// nokhwa CPU webcam: Windows only, until a native Media Foundation capture lands.
+// Native Media Foundation camera capture on Windows.
 #[cfg(target_os = "windows")]
-mod webcam;
+mod mediafoundation;
 
 /// What to capture.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -83,7 +82,7 @@ pub(crate) fn open(config: &Config) -> Result<Box<dyn FrameSource>, Error> {
 			}
 			#[cfg(target_os = "windows")]
 			{
-				Ok(Box::new(webcam::Camera::open(config)?))
+				Ok(Box::new(mediafoundation::Camera::open(config)?))
 			}
 			#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 			{
