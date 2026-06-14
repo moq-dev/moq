@@ -36,6 +36,8 @@ const COLORS = {
 	warn: "#ffd480",
 	error: "#ff8080",
 };
+// Max int32: keep the floating overlay above everything else on the page.
+const MAX_Z_INDEX = 2147483647;
 
 // Buffer messages from the moment this module loads, before any element exists,
 // so an inline <moq-console> added later still shows earlier messages. We patch
@@ -109,7 +111,7 @@ class MoqConsole extends HTMLElement {
 				borderLeftWidth: "0",
 				borderRightWidth: "0",
 				borderBottomWidth: "0",
-				zIndex: "2147483647",
+				zIndex: String(MAX_Z_INDEX),
 			});
 		}
 
