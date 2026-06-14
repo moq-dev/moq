@@ -573,6 +573,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut prev_dur: u64 = 0;
 
 		loop {
+			// On wasm this runs on the browser's single thread. A relay sends its
+			// whole cache backlog on subscribe, and over a local WebTransport every
+			// read resolves synchronously (a microtask), so draining frames back to
+			// back would starve the event loop (no render, no timers). Yield to a
+			// macrotask each frame so the page stays responsive. No-op on native,
+			// where this is a background task with nothing to starve.
+			#[cfg(target_arch = "wasm32")]
+			web_async::time::sleep(std::time::Duration::ZERO).await;
+
 			let (timestamp, duration) = if let Some(scale) = timescale {
 				// Publisher advertised a timescale, so every frame on this stream is
 				// prefixed with a zigzag-delta timestamp followed by a zigzag-delta
