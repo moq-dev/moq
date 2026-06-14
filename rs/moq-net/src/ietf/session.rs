@@ -23,10 +23,9 @@ pub fn start<S: web_transport_trait::Session>(
 ) -> Result<(), Error> {
 	web_async::spawn(async move {
 		// moq-transport threads concrete origins through the publisher/subscriber.
-		// An unset publish side gets a full-scope origin so it still answers the
-		// peer's namespace queries (it has nothing to announce). An unset subscribe
-		// side gets an empty origin so it issues no SUBSCRIBE_NAMESPACE.
-		let publish = publish.unwrap_or_else(|| Origin::random().produce().consume());
+		// An unset half gets an empty origin: an empty publish origin announces
+		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
+		let publish = publish.unwrap_or_else(|| OriginProducer::empty(Origin::random()).consume());
 		let subscribe = subscribe.unwrap_or_else(|| OriginProducer::empty(Origin::random()));
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {

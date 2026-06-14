@@ -1039,6 +1039,18 @@ impl OriginConsumer {
 		Self { info, nodes, root }
 	}
 
+	/// A view with this consumer's identity and root but no broadcasts:
+	/// [`announced`](Self::announced) yields nothing. Used to answer a peer's
+	/// announce-interest for a prefix outside our scope by announcing nothing,
+	/// rather than tearing the stream down.
+	pub(crate) fn empty(&self) -> Self {
+		Self {
+			info: self.info,
+			nodes: OriginNodes { nodes: Vec::new() },
+			root: self.root.clone(),
+		}
+	}
+
 	/// Subscribe to announce / unannounce events for this consumer's subtree.
 	///
 	/// Allocates a per-cursor coalescing buffer, registers it with each root

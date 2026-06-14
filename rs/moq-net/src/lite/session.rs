@@ -51,12 +51,11 @@ pub fn start<S: web_transport_trait::Session>(
 
 	// Always run both loops so inbound control (Subscribe/Announce/Probe/Goaway)
 	// and GROUP streams are accepted regardless of which halves the caller wired.
-	// An unset publish side gets a full-scope origin so it still answers the peer's
-	// announce-interest queries (it just has no broadcasts to announce). An unset
-	// subscribe side gets an empty origin: zero prefixes means the subscriber issues
-	// no ANNOUNCE_PLEASE (and `run_announce` drops `connecting` at once, so `connect()`
-	// still unblocks).
-	let publish = publish.unwrap_or_else(|| Origin::random().produce().consume());
+	// An unset half gets an empty origin: an empty publish origin announces nothing
+	// (and answers the peer's announce-interest with an empty set), and an empty
+	// subscribe origin issues no ANNOUNCE_PLEASE (zero prefixes, so `run_announce`
+	// drops `connecting` at once and `connect()` still unblocks).
+	let publish = publish.unwrap_or_else(|| OriginProducer::empty(Origin::random()).consume());
 	let subscribe = subscribe.unwrap_or_else(|| OriginProducer::empty(Origin::random()));
 
 	// Publisher and Subscriber each derive their identity from their own
