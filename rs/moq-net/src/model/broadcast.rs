@@ -157,7 +157,8 @@ impl BroadcastProducer {
 	/// inserted tracks are referenced via weak handles so that consumers can
 	/// finish reading them. Pending dynamic track requests, however, are owned
 	/// by the broadcast and have no other producer to fulfill them, so they are
-	/// aborted here.
+	/// aborted here. The track lookup is also cleared so a stale
+	/// [`BroadcastConsumer`] can't pin it in memory forever.
 	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
 		let mut guard = modify(&self.state)?;
 
@@ -167,6 +168,7 @@ impl BroadcastProducer {
 			request.abort(err.clone()).ok();
 		}
 
+		guard.tracks.clear();
 		guard.abort = Some(err);
 		guard.close();
 		Ok(())
@@ -278,7 +280,8 @@ impl BroadcastDynamic {
 	/// Externally-owned tracks are independent and must be aborted separately;
 	/// inserted tracks are referenced via weak handles. Pending dynamic track
 	/// requests are owned by the broadcast and aborted here so consumers don't
-	/// stay stuck waiting on producers nobody will fulfill.
+	/// stay stuck waiting on producers nobody will fulfill. The track lookup is
+	/// also cleared so a stale [`BroadcastConsumer`] can't pin it in memory forever.
 	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
 		let mut guard = modify(&self.state)?;
 
@@ -288,6 +291,7 @@ impl BroadcastDynamic {
 			request.abort(err.clone()).ok();
 		}
 
+		guard.tracks.clear();
 		guard.abort = Some(err);
 		guard.close();
 		Ok(())
@@ -504,6 +508,24 @@ mod test {
 		// track1's producer is held outside the broadcast, so it survives.
 		assert!(!track1.is_closed());
 		track1c.assert_not_closed();
+	}
+
+	#[tokio::test]
+	async fn abort_clears_track_lookup() {
+		let mut producer = Broadcast::new().produce();
+		let track = producer.assert_create_track(&Track::new("track1"));
+
+		// A stale consumer that never drops must not pin the lookup entries.
+		let _consumer = producer.consume();
+		assert_eq!(producer.state.read().tracks.len(), 1);
+
+		producer.abort(Error::Cancel).unwrap();
+		assert!(
+			producer.state.read().tracks.is_empty(),
+			"track lookup should be cleared on abort"
+		);
+
+		drop(track);
 	}
 
 	#[tokio::test]
