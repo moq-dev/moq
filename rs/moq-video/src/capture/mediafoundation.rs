@@ -1,29 +1,39 @@
 //! Native Windows webcam capture via Media Foundation.
 //!
-//! Drives an [`IMFSourceReader`] over the selected capture device with the source
-//! reader's video processor enabled, so whatever the camera emits (MJPEG / YUY2 /
-//! NV12) is converted to NV12 for us. Each sample is copied to a tightly packed
-//! CPU [`I420`] for the encoder. This is the CPU path feeding openh264 / NVENC;
-//! there's no GPU surface here.
+//! Drives an [`IMFSourceReader`] over the selected capture device. When a
+//! Direct3D11 device is available the reader runs with that device's DXGI
+//! manager and the advanced video processor, so each sample arrives as a
+//! GPU-resident NV12 texture ([`Frame::Texture`]) that the hardware encoder MFT
+//! consumes zero-copy. Without a GPU (e.g. a headless VM) it falls back to the
+//! source reader's software video processor, copying each sample to a packed CPU
+//! [`I420`] ([`Frame::I420`]) for openh264.
 
 use std::ffi::c_void;
 use std::ptr;
 use std::slice;
 
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+use windows::Win32::Graphics::Direct3D10::ID3D10Multithread;
+use windows::Win32::Graphics::Direct3D11::{
+	D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
+	ID3D11Device, ID3D11Texture2D,
+};
 use windows::Win32::Media::MediaFoundation::{
-	IMF2DBuffer, IMFActivate, IMFAttributes, IMFMediaSource, IMFSample, IMFSourceReader,
-	MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+	IMF2DBuffer, IMFActivate, IMFAttributes, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaSource, IMFSample,
+	IMFSourceReader, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
 	MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
-	MF_MT_SUBTYPE, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-	MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFCreateAttributes, MFCreateMediaType,
-	MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup,
-	MFVideoFormat_NV12,
+	MF_MT_SUBTYPE, MF_SOURCE_READER_D3D_MANAGER, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
+	MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM,
+	MF_VERSION, MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateSourceReaderFromMediaSource,
+	MFEnumDeviceSources, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoFormat_NV12,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
 use windows::core::{Interface, PWSTR};
 
 use super::{Config, FrameSource};
 use crate::Error;
+use crate::frame::d3d11::Texture;
 use crate::frame::{Frame, I420};
 
 fn mf_err(ctx: &str, e: windows::core::Error) -> Error {
@@ -73,10 +83,16 @@ impl Drop for ComGuard {
 pub(crate) struct Camera {
 	source: IMFMediaSource,
 	reader: IMFSourceReader,
+	/// The shared Direct3D11 device when capturing on the GPU; `None` on the CPU
+	/// fallback. Its presence is what selects the texture vs I420 read path.
+	device: Option<ID3D11Device>,
 	width: u32,
 	height: u32,
 	framerate: Option<u32>,
-	device: String,
+	device_name: String,
+	// Keep the DXGI manager alive for the reader's lifetime (the reader holds its
+	// own ref, but we own the pairing). Drops before `_com`.
+	_manager: Option<IMFDXGIDeviceManager>,
 	// Drop last: tear down Media Foundation only after the reader/source release.
 	_com: ComGuard,
 }
@@ -84,16 +100,41 @@ pub(crate) struct Camera {
 impl Camera {
 	pub(crate) fn open(config: &Config) -> Result<Self, Error> {
 		let com = ComGuard::new()?;
-		let (source, device) = open_source(config)?;
+		let (source, device_name) = open_source(config)?;
 
-		let reader_attrs = create_attributes(1)?;
+		// Try for a GPU device; fall back to the CPU video processor if it (or any
+		// of its setup) fails, e.g. on a headless VM with no D3D11 hardware.
+		let gpu = match create_d3d_device() {
+			Ok(gpu) => Some(gpu),
+			Err(e) => {
+				tracing::debug!(error = %e, "no D3D11 device; using CPU capture path");
+				None
+			}
+		};
+
+		let reader_attrs = create_attributes(2)?;
 		unsafe {
-			// Insert the video processor so it converts the camera's native
-			// format (MJPEG / YUY2 / ...) to the NV12 we request below.
-			reader_attrs
-				.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
-				.map_err(|e| mf_err("enable video processing", e))?;
+			match &gpu {
+				Some((_, manager)) => {
+					// Bind the reader to our device and enable the advanced
+					// (D3D-capable) video processor, so output stays a GPU texture.
+					reader_attrs
+						.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, manager)
+						.map_err(|e| mf_err("set D3D manager", e))?;
+					reader_attrs
+						.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)
+						.map_err(|e| mf_err("enable advanced video processing", e))?;
+				}
+				None => {
+					// Software video processor: converts the camera's native format
+					// (MJPEG / YUY2 / ...) to NV12 in system memory.
+					reader_attrs
+						.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
+						.map_err(|e| mf_err("enable video processing", e))?;
+				}
+			}
 		}
+
 		let reader = unsafe {
 			MFCreateSourceReaderFromMediaSource(&source, &reader_attrs)
 				.map_err(|e| mf_err("create source reader", e))?
@@ -143,19 +184,60 @@ impl Camera {
 			(den != 0).then(|| (num / den).max(1))
 		});
 
-		tracing::info!(device = %device, width, height, framerate, "opened Media Foundation capture");
-		Ok(Self {
-			source,
-			reader,
+		let (device, manager) = match gpu {
+			Some((device, manager)) => (Some(device), Some(manager)),
+			None => (None, None),
+		};
+		tracing::info!(
+			device = %device_name,
 			width,
 			height,
 			framerate,
+			gpu = device.is_some(),
+			"opened Media Foundation capture"
+		);
+		Ok(Self {
+			source,
+			reader,
 			device,
+			width,
+			height,
+			framerate,
+			device_name,
+			_manager: manager,
 			_com: com,
 		})
 	}
 
-	fn sample_to_i420(&self, sample: &IMFSample) -> Result<I420, Error> {
+	/// Wrap a GPU sample's DXGI texture as a zero-copy [`Frame::Texture`].
+	fn sample_to_texture(&self, device: &ID3D11Device, sample: &IMFSample) -> Result<Frame, Error> {
+		let buffer = unsafe { sample.GetBufferByIndex(0).map_err(|e| mf_err("get buffer", e))? };
+		let dxgi = buffer
+			.cast::<IMFDXGIBuffer>()
+			.map_err(|e| mf_err("buffer is not a DXGI surface", e))?;
+		// GetResource returns a fresh ref (`AddRef`) we take ownership of.
+		let mut raw: *mut c_void = ptr::null_mut();
+		unsafe {
+			dxgi.GetResource(&ID3D11Texture2D::IID, &mut raw)
+				.map_err(|e| mf_err("get DXGI resource", e))?;
+		}
+		let texture = unsafe { ID3D11Texture2D::from_raw(raw) };
+		let subresource = unsafe {
+			dxgi.GetSubresourceIndex()
+				.map_err(|e| mf_err("get subresource index", e))?
+		};
+
+		Ok(Frame::Texture(Texture::new(
+			device.clone(),
+			texture,
+			subresource,
+			self.width,
+			self.height,
+		)))
+	}
+
+	/// Copy a CPU sample's NV12 to a packed [`Frame::I420`] (the fallback path).
+	fn sample_to_i420(&self, sample: &IMFSample) -> Result<Frame, Error> {
 		let buffer = unsafe {
 			sample
 				.ConvertToContiguousBuffer()
@@ -193,7 +275,7 @@ impl Camera {
 			data
 		};
 
-		I420::from_nv12(&nv12, self.width, self.height)
+		Ok(Frame::I420(I420::from_nv12(&nv12, self.width, self.height)?))
 	}
 }
 
@@ -223,7 +305,11 @@ impl FrameSource for Camera {
 			let Some(sample) = sample else {
 				continue;
 			};
-			return Ok(Some(Frame::I420(self.sample_to_i420(&sample)?)));
+			let frame = match &self.device {
+				Some(device) => self.sample_to_texture(device, &sample)?,
+				None => self.sample_to_i420(&sample)?,
+			};
+			return Ok(Some(frame));
 		}
 	}
 
@@ -240,7 +326,7 @@ impl FrameSource for Camera {
 	}
 
 	fn device(&self) -> &str {
-		&self.device
+		&self.device_name
 	}
 }
 
@@ -252,6 +338,49 @@ impl Drop for Camera {
 			let _ = self.source.Shutdown();
 		}
 	}
+}
+
+/// Create a hardware Direct3D11 device plus a DXGI device manager wrapping it.
+/// The device is marked multithread-protected: the source reader's internal
+/// threads and our capture thread both touch it.
+fn create_d3d_device() -> Result<(ID3D11Device, IMFDXGIDeviceManager), Error> {
+	let mut device: Option<ID3D11Device> = None;
+	unsafe {
+		D3D11CreateDevice(
+			None,
+			D3D_DRIVER_TYPE_HARDWARE,
+			HMODULE::default(),
+			D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+			None,
+			D3D11_SDK_VERSION,
+			Some(&mut device),
+			None,
+			None,
+		)
+		.map_err(|e| mf_err("D3D11CreateDevice", e))?;
+	}
+	let device = device.ok_or_else(|| Error::Codec(anyhow::anyhow!("D3D11CreateDevice returned null")))?;
+
+	let multithread = device
+		.cast::<ID3D10Multithread>()
+		.map_err(|e| mf_err("query ID3D10Multithread", e))?;
+	unsafe {
+		let _ = multithread.SetMultithreadProtected(true);
+	}
+
+	let mut token: u32 = 0;
+	let mut manager: Option<IMFDXGIDeviceManager> = None;
+	unsafe {
+		MFCreateDXGIDeviceManager(&mut token, &mut manager).map_err(|e| mf_err("MFCreateDXGIDeviceManager", e))?;
+	}
+	let manager = manager.ok_or_else(|| Error::Codec(anyhow::anyhow!("MFCreateDXGIDeviceManager returned null")))?;
+	unsafe {
+		manager
+			.ResetDevice(&device, token)
+			.map_err(|e| mf_err("ResetDevice", e))?;
+	}
+
+	Ok((device, manager))
 }
 
 fn create_attributes(capacity: u32) -> Result<IMFAttributes, Error> {
