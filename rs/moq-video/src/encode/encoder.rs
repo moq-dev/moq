@@ -386,8 +386,9 @@ mod tests {
 		crate::frame::macos::Surface::new(buffer, width, height)
 	}
 
-	/// NAL unit types in an Annex-B buffer, found via 3-byte start codes.
-	#[cfg(target_os = "macos")]
+	/// NAL unit types in an Annex-B buffer, found via 3-byte start codes (a
+	/// 4-byte `00 00 00 01` code contains `00 00 01` too, so this catches both).
+	#[cfg(any(target_os = "macos", target_os = "windows"))]
 	fn nal_types(annexb: &[u8]) -> Vec<u8> {
 		let mut types = Vec::new();
 		let mut i = 0;
@@ -400,6 +401,72 @@ mod tests {
 			}
 		}
 		types
+	}
+
+	/// CPU path: synthetic RGBA through the Media Foundation hardware encoder
+	/// (I420 -> system-memory NV12 upload). Ignored: needs a hardware encoder MFT,
+	/// which GPU-less CI runners lack. Run with `--ignored`.
+	#[cfg(target_os = "windows")]
+	#[test]
+	#[ignore]
+	fn mediafoundation_cpu_rgba() {
+		let config = Config {
+			kind: Kind::Named("mediafoundation".into()),
+			..Config::new(640, 480, 30)
+		};
+		let mut encoder = Encoder::new(&config).expect("hardware H.264 encoder available");
+		assert_eq!(encoder.name(), "mediafoundation");
+
+		let frame = gray_rgba(640, 480);
+		let mut packets = Vec::new();
+		for i in 0..30 {
+			packets.extend(encoder.encode_rgba(&frame, 640, 480, i == 0).unwrap());
+		}
+		packets.extend(encoder.finish().unwrap());
+
+		assert!(!packets.is_empty(), "encoder produced no packets");
+		let types = nal_types(&packets[0]);
+		assert!(types.contains(&7), "no SPS in first packet: {types:?}");
+		assert!(types.contains(&8), "no PPS in first packet: {types:?}");
+		assert!(types.contains(&5), "first packet is not an IDR: {types:?}");
+	}
+
+	/// Full zero-copy path: real camera -> D3D11 NV12 texture -> hardware encoder
+	/// via the DXGI device manager, no CPU round-trip. Ignored: needs a camera and
+	/// a GPU. Run with `--ignored`.
+	#[cfg(target_os = "windows")]
+	#[test]
+	#[ignore]
+	fn mediafoundation_camera_texture() {
+		let mut camera = crate::capture::open(&crate::capture::Config::default()).expect("open default camera");
+		let (w, h) = (camera.width(), camera.height());
+
+		let config = Config {
+			kind: Kind::Named("mediafoundation".into()),
+			..Config::new(w, h, camera.framerate().unwrap_or(30))
+		};
+		let mut encoder = Encoder::new(&config).expect("hardware H.264 encoder available");
+
+		let mut packets = Vec::new();
+		let mut textures = 0;
+		for i in 0..30 {
+			let frame = camera.read().expect("read frame").expect("frame, not end of stream");
+			if matches!(frame, Frame::Texture(_)) {
+				textures += 1;
+			}
+			packets.extend(encoder.encode(&frame, i == 0).unwrap());
+		}
+		packets.extend(encoder.finish().unwrap());
+
+		// On a GPU this exercises the zero-copy texture path; the assert guards
+		// against silently testing only the CPU fallback.
+		assert!(textures > 0, "capture never produced a GPU texture");
+		assert!(!packets.is_empty(), "encoder produced no packets");
+		let types = nal_types(&packets[0]);
+		assert!(
+			types.contains(&7) && types.contains(&8) && types.contains(&5),
+			"no IDR: {types:?}"
+		);
 	}
 
 	#[test]
