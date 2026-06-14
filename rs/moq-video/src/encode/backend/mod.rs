@@ -21,6 +21,9 @@ mod openh264;
 #[cfg(target_os = "macos")]
 mod videotoolbox;
 
+#[cfg(target_os = "windows")]
+mod mediafoundation;
+
 #[cfg(all(target_os = "linux", feature = "nvenc"))]
 mod nvenc;
 
@@ -45,12 +48,6 @@ pub(crate) trait Backend: Send {
 struct Candidate {
 	name: &'static str,
 	open: fn(&Config) -> Result<Box<dyn Backend>, Error>,
-	/// Needs a dmabuf-backed [`Frame`]; no capture produces one yet, so these
-	/// are excluded from automatic selection (only reachable via `Kind::Named`)
-	/// until the V4L2 dmabuf capture lands. Without this, `Kind::Auto` would pick
-	/// VAAPI, which then rejects the I420 frames the current captures produce and
-	/// aborts the publish loop instead of falling back to software.
-	requires_dmabuf: bool,
 }
 
 /// Hardware backends, in priority order. Platform-gated so only the ones that
@@ -60,41 +57,35 @@ const HARDWARE: &[Candidate] = &[
 	Candidate {
 		name: videotoolbox::NAME,
 		open: videotoolbox::VideoToolbox::open,
-		requires_dmabuf: false,
+	},
+	#[cfg(target_os = "windows")]
+	Candidate {
+		name: mediafoundation::NAME,
+		open: mediafoundation::MediaFoundation::open,
 	},
 	#[cfg(all(target_os = "linux", feature = "nvenc"))]
 	Candidate {
 		name: nvenc::NAME,
 		open: nvenc::Nvenc::open,
-		requires_dmabuf: false,
 	},
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	Candidate {
 		name: vaapi::NAME,
 		open: vaapi::Vaapi::open,
-		requires_dmabuf: true,
 	},
 ];
 
 const SOFTWARE: Candidate = Candidate {
 	name: openh264::NAME,
 	open: openh264::Openh264::open,
-	requires_dmabuf: false,
 };
 
 /// Open the best encoder for `config.kind`, trying candidates in priority order
 /// and falling back until one succeeds.
 pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
-	// Automatic selection only considers backends whose input we can currently
-	// produce; `Kind::Named` opts in explicitly and skips the filter.
-	let usable = |c: &&Candidate| !c.requires_dmabuf;
 	let candidates: Vec<&Candidate> = match &config.kind {
-		Kind::Auto => HARDWARE
-			.iter()
-			.filter(usable)
-			.chain(std::iter::once(&SOFTWARE))
-			.collect(),
-		Kind::Hardware => HARDWARE.iter().filter(usable).collect(),
+		Kind::Auto => HARDWARE.iter().chain(std::iter::once(&SOFTWARE)).collect(),
+		Kind::Hardware => HARDWARE.iter().collect(),
 		Kind::Software => vec![&SOFTWARE],
 		Kind::Named(name) => {
 			let all = HARDWARE.iter().chain(std::iter::once(&SOFTWARE));

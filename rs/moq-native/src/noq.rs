@@ -93,6 +93,9 @@ pub enum Error {
 	Client(#[from] web_transport_noq::ClientError),
 
 	#[error(transparent)]
+	ConnectRejected(#[from] crate::ConnectError),
+
+	#[error(transparent)]
 	Server(#[from] web_transport_noq::ServerError),
 
 	#[error("failed to establish QUIC connection")]
@@ -118,12 +121,13 @@ pub(crate) struct NoqClient {
 
 impl NoqClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
-		let socket = std::net::UdpSocket::bind(config.bind).map_err(Error::BindSocket)?;
+		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
 
 		let mut transport = noq::TransportConfig::default();
 		transport.max_idle_timeout(Some(time::Duration::from_secs(30).try_into().unwrap()));
 		transport.keep_alive_interval(Some(time::Duration::from_secs(5)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
+		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
 
 		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
 		let max_streams = noq::VarInt::from_u64(max_streams).unwrap_or(noq::VarInt::MAX);
@@ -182,7 +186,7 @@ impl NoqClient {
 			let fingerprint = resp.text().await.map_err(Error::ReadFingerprint)?;
 			let fingerprint = hex::decode(fingerprint.trim())?;
 
-			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), fingerprint);
+			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), vec![fingerprint]);
 			config.dangerous().set_certificate_verifier(Arc::new(verifier));
 
 			url.set_scheme("https").expect("failed to set scheme");
@@ -217,7 +221,9 @@ impl NoqClient {
 		}
 
 		let session = match url.scheme() {
-			"https" => web_transport_noq::Session::connect(connection, request).await?,
+			"https" => web_transport_noq::Session::connect(connection, request)
+				.await
+				.map_err(map_client_error)?,
 			"moqt" | "moql" => {
 				let handshake = connection
 					.handshake_data()
@@ -238,6 +244,49 @@ impl NoqClient {
 	}
 }
 
+impl Error {
+	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
+		match self {
+			Self::ConnectRejected(err) => Some(*err),
+			Self::Client(err) => classify_client_error(err),
+			_ => None,
+		}
+	}
+}
+
+fn map_client_error(err: web_transport_noq::ClientError) -> Error {
+	if let Some(err) = classify_client_error(&err) {
+		return err.into();
+	}
+
+	err.into()
+}
+
+fn classify_client_error(err: &web_transport_noq::ClientError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_noq::ClientError::HttpError(err) => classify_connect_error(err),
+		_ => None,
+	}
+}
+
+fn classify_connect_error(err: &web_transport_noq::ConnectError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_noq::ConnectError::ErrorStatus(status) => crate::ConnectError::from_status_u16(status.as_u16()),
+		web_transport_noq::ConnectError::ProtoError(err) => classify_proto_error(err),
+		_ => None,
+	}
+}
+
+fn classify_proto_error(err: &web_transport_noq::proto::ConnectError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_noq::proto::ConnectError::ErrorStatus(status)
+		| web_transport_noq::proto::ConnectError::WrongStatus(Some(status)) => {
+			crate::ConnectError::from_status_u16(status.as_u16())
+		}
+		_ => None,
+	}
+}
+
 // ── Server ──────────────────────────────────────────────────────────
 
 pub(crate) struct NoqServer {
@@ -251,6 +300,7 @@ impl NoqServer {
 		transport.max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()));
 		transport.keep_alive_interval(Some(Duration::from_secs(5)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
+		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
 
 		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
 		let max_streams = noq::VarInt::from_u64(max_streams).unwrap_or(noq::VarInt::MAX);
@@ -316,7 +366,7 @@ impl NoqServer {
 			}));
 		}
 
-		let socket = std::net::UdpSocket::bind(listen).map_err(Error::BindSocket)?;
+		let socket = crate::bind::udp(listen).map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
 		let quic = noq::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;

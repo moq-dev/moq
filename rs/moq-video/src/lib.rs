@@ -5,10 +5,11 @@
 //! adds the native pieces a desktop/CLI publisher needs:
 //!
 //! - [`capture`] describes a frame source ([`capture::Config`]) and grabs
-//!   frames via [`nokhwa`](https://crates.io/crates/nokhwa) (avfoundation /
-//!   v4l2 / msmf). Today that's a webcam.
+//!   frames per platform: AVFoundation/ScreenCaptureKit on macOS, native V4L2
+//!   on Linux, native Media Foundation on Windows. Today that's a webcam or
+//!   the screen.
 //! - [`encode`] H.264-encodes frames with a native backend (openh264 /
-//!   VideoToolbox / NVENC / VAAPI) and publishes them through
+//!   VideoToolbox / NVENC) and publishes them through
 //!   [`moq_mux::codec::h264::Import`], which handles catalog registration
 //!   and framing. Two entry points:
 //!   - [`encode::publish_capture`] captures a webcam and publishes it (turnkey).
@@ -23,8 +24,8 @@
 //! ## API stability
 //!
 //! The public API is codec-agnostic: no public type, signature, or error
-//! variant names a backend (openh264 / VideoToolbox / NVENC) or capture
-//! (`nokhwa`) type. [`encode::Encoder`] takes raw RGBA bytes, and the camera
+//! variant names a backend (openh264 / VideoToolbox / NVENC) or a capture
+//! implementation. [`encode::Encoder`] takes raw RGBA bytes, and the camera
 //! capture path stays internal. So swapping or bumping any backend crate is not
 //! a breaking change for consumers. Config structs are `#[non_exhaustive]`:
 //! build them via `default()`/`new()` and set fields, so new options stay additive.
@@ -34,5 +35,8 @@ pub mod encode;
 
 mod error;
 mod frame;
+
+#[cfg(target_os = "windows")]
+mod mf;
 
 pub use error::Error;

@@ -290,9 +290,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		}
 
-		// Close the stream when there's nothing more to announce.
-		stream.writer.finish()?;
-		stream.writer.closed().await
+		// The read loop ended because the publisher FINed: it has nothing (more) to announce
+		// for this prefix (e.g. a publish-only peer). That's a clean completion of this
+		// announce stream, not a session error, so finish our side and return Ok. Tearing
+		// down only the announce stream is correct since no further progress can be made,
+		// but we must not propagate an error that would kill the whole connection.
+		stream.writer.finish().ok();
+		Ok(())
 	}
 
 	/// Opens a PROBE stream on demand while a consumer is interested.
@@ -415,7 +419,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// Publish into the origin. An error means the path is outside our scope, so don't announce
 		// or spawn a server for it. Reflections are already filtered above.
-		let Ok(publish) = self.origin.publish_broadcast(path.clone(), broadcast.consume()) else {
+		let Ok(publish) = self.origin.publish_broadcast(path.clone(), &broadcast) else {
 			return Ok(false);
 		};
 
@@ -462,7 +466,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// Publish the replacement first so the origin restarts atomically; the old broadcast is
 		// demoted to a backup and removed silently when we drop its guard below.
-		let Ok(publish) = self.origin.publish_broadcast(path.clone(), broadcast.consume()) else {
+		let Ok(publish) = self.origin.publish_broadcast(path.clone(), &broadcast) else {
 			// Origin rejected the replacement; retire the existing broadcast.
 			producers.remove(&path);
 			return Ok(false);

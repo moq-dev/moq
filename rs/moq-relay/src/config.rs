@@ -296,4 +296,37 @@ ram = "80%"
 			"TOML's web.health.ram must not be clobbered by the CLI re-parse"
 		);
 	}
+
+	/// Same clap+TOML clobber guard for `client.system_roots`. It's typed as
+	/// `Option<bool>` so an absent `--tls-system-roots` CLI flag must not wipe a
+	/// TOML-configured value during the `update_from` re-parse. A bare `bool`
+	/// would reset it to `false`, silently dropping the system roots for a
+	/// cluster client that opted into trusting both system and custom roots.
+	static SYSTEM_ROOTS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	#[test]
+	fn cli_does_not_clobber_toml_system_roots() {
+		let _guard = SYSTEM_ROOTS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: SYSTEM_ROOTS_ENV_LOCK serializes this with any sibling test
+		// touching the same env var.
+		unsafe { std::env::remove_var("MOQ_CLIENT_TLS_SYSTEM_ROOTS") };
+
+		let toml = r#"
+[client.tls]
+system_roots = true
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("system-roots-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.client.tls.system_roots,
+			Some(true),
+			"TOML's client.tls.system_roots must not be clobbered by the CLI re-parse"
+		);
+	}
 }

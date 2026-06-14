@@ -66,11 +66,11 @@ a real bundler (the examples below).
 
 - `url` (required) — Relay server URL
 - `name` (required) — Broadcast name
-- `device` — "camera" or "screen" (default: "camera")
-- `audio` — Enable audio capture (boolean)
-- `video` — Enable video capture (boolean)
-- `controls` — Show publishing controls (boolean)
+- `source` — Input to capture: `"camera"`, `"screen"`, or `"file"`
+- `muted` — Mute audio capture (boolean)
+- `invisible` — Disable video capture (boolean)
 - `preview` — What the preview renders: `"source"` (default), `"encoded"`, or `"none"` to disable it (see [Preview element](#preview-element))
+- `announce` — When to publish the broadcast: `"true"` (default, announce as soon as the element connects), `"false"` (never announce), or `"source"` (hold off until a `source` is selected). The JS property takes a real boolean or `"source"` (`el.announce = false`)
 
 ## Preview element
 

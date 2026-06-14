@@ -580,12 +580,16 @@ impl TrackProducer {
 
 	/// Abort the track with the given error.
 	///
-	/// Child groups are independent and must be aborted separately if desired;
-	/// existing group consumers can still finish reading any groups that were
-	/// already created.
+	/// Drops the cached groups so a stale [`TrackConsumer`] can't pin them (and
+	/// their frame buffers) in memory forever. Consumers that haven't drained yet
+	/// surface the abort error instead of the leftover cache. Child groups are
+	/// independent: a consumer that already pulled a [`GroupConsumer`] keeps its
+	/// own handle and can finish reading it.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut guard = self.modify()?;
 		guard.abort = Some(err);
+		guard.groups.clear();
+		guard.duplicates.clear();
 		guard.close();
 		Ok(())
 	}
@@ -698,14 +702,23 @@ impl TrackProducer {
 
 	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Subscription>>> {
 		let prev = &self.prev_subscription;
-		let combined = match self
-			.state
-			.poll(waiter, |state| poll_combined_subscriptions(state, waiter, prev))
-		{
-			Poll::Ready(Ok(combined)) => combined,
+		let mut combined = None;
+		let mut state = match self.state.poll(waiter, |state| {
+			let next = combined_subscription(state, waiter);
+			if &next == prev {
+				Poll::Pending
+			} else {
+				combined = next;
+				Poll::Ready(())
+			}
+		}) {
+			Poll::Ready(Ok(state)) => state,
 			Poll::Ready(Err(state)) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
 			Poll::Pending => return Poll::Pending,
 		};
+		// The aggregate changed: prune any closed subscribers now that we hold the lock.
+		state.subscriptions.retain(|sub| !sub.is_closed());
+		drop(state);
 		self.prev_subscription = combined.clone();
 		Poll::Ready(Ok(combined))
 	}
@@ -731,17 +744,23 @@ impl TrackProducer {
 /// [`GroupRequest`] bound to a fresh producer handle. Shared by every
 /// [`TrackDynamic`] handle on the track.
 fn poll_requested_group(state: &kio::Producer<TrackState>, waiter: &kio::Waiter) -> Poll<Result<GroupRequest>> {
-	let req = ready!(state.poll(waiter, |state| {
-		// Read-only `is_empty` first: only take the `&mut` (which flags the state
-		// modified) once there's a request to pop, so idle polls don't wake waiters.
-		if state.fetches.is_empty() {
-			return state.abort.clone().map_or(Poll::Pending, |err| Poll::Ready(Err(err)));
+	// Read-only predicate: ready once there's a request to pop, or the track aborted.
+	let mut guard = ready!(state.poll(waiter, |state| {
+		if state.fetches.is_empty() && state.abort.is_none() {
+			Poll::Pending
+		} else {
+			Poll::Ready(())
 		}
-		Poll::Ready(Ok(state.fetches.pop_front().unwrap()))
 	}))
 	.map_err(|state| state.abort.clone().unwrap_or(Error::Dropped))?;
 
-	Poll::Ready(req.map(|req| GroupRequest {
+	let req = match guard.fetches.pop_front() {
+		Some(req) => req,
+		// Woke because the track aborted while the fetch queue was empty.
+		None => return Poll::Ready(Err(guard.abort.clone().unwrap_or(Error::Dropped))),
+	};
+
+	Poll::Ready(Ok(GroupRequest {
 		state: state.clone(),
 		sequence: req.sequence,
 		priority: req.priority,
@@ -817,39 +836,39 @@ impl Drop for TrackDynamic {
 	}
 }
 
-/// Aggregate every live subscriber's preferences into the most demanding request,
-/// returning `Poll::Ready` only when the result differs from `prev`.
-///
-/// Iterates `subscriptions` immutably so it never flags the [`TrackState`] as
-/// modified on a no-op poll. Marking it modified would drain and wake unrelated
-/// waiters on the channel (e.g. a [`TrackSubscribe`] parked on track
-/// info), which races with [`TrackRequest::accept`] and can drop that wakeup.
-/// Closed subscribers are pruned only when one has actually closed, which is a
-/// real change that legitimately wakes other waiters.
-fn poll_combined_subscriptions(
-	state: &mut kio::Mut<'_, TrackState>,
-	waiter: &kio::Waiter,
-	prev: &Option<Subscription>,
-) -> Poll<Option<Subscription>> {
-	let mut combined = None;
-	let mut any_closed = false;
-	for sub in state.subscriptions.iter() {
-		match sub.poll(waiter, |sub| sub.poll_combined(&combined)) {
-			Poll::Ready(Ok(sub)) => combined = Some(sub),
-			Poll::Ready(Err(_)) => any_closed = true,
-			Poll::Pending => {}
+impl Drop for TrackProducer {
+	fn drop(&mut self) {
+		// The last producer going away without finishing is an abrupt teardown:
+		// release the cached groups so a stale consumer can't pin them (and their
+		// frame buffers) forever, the same as an explicit abort. A cleanly
+		// finished track keeps its cache so consumers can still drain it.
+		if !self.state.is_last() {
+			return;
+		}
+		if let Ok(mut state) = self.state.write()
+			&& state.final_sequence.is_none()
+		{
+			state.groups.clear();
+			state.duplicates.clear();
 		}
 	}
+}
 
-	if any_closed {
-		state.subscriptions.retain(|sub| !sub.is_closed());
+/// Aggregate every live subscriber's preferences into the most demanding request.
+///
+/// Read-only: iterates `subscriptions` immutably and registers `waiter` on each, so it
+/// never flags the [`TrackState`] as modified. Marking it modified would drain and wake
+/// unrelated waiters on the channel (e.g. a [`TrackSubscribe`] parked on track info),
+/// which races with [`TrackRequest::accept`] and can drop that wakeup. Callers decide
+/// readiness from the returned value, then prune closed subscribers through the `Mut`.
+fn combined_subscription(state: &TrackState, waiter: &kio::Waiter) -> Option<Subscription> {
+	let mut combined = None;
+	for sub in state.subscriptions.iter() {
+		if let Poll::Ready(Ok(sub)) = sub.poll(waiter, |sub| sub.poll_combined(&combined)) {
+			combined = Some(sub);
+		}
 	}
-
-	if &combined == prev {
-		Poll::Pending
-	} else {
-		Poll::Ready(combined)
-	}
+	combined
 }
 
 /// A weak reference to a track that doesn't prevent auto-close.
@@ -1402,14 +1421,23 @@ impl TrackRequest {
 
 	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<Subscription>> {
 		let prev = &self.prev_subscription;
+		let mut combined = None;
 		// The request owns the only producer, so the channel can't be closed here.
-		let combined = match ready!(
-			self.state
-				.poll(waiter, |state| poll_combined_subscriptions(state, waiter, prev))
-		) {
-			Ok(combined) => combined,
+		let mut state = match ready!(self.state.poll(waiter, |state| {
+			let next = combined_subscription(state, waiter);
+			if &next == prev {
+				Poll::Pending
+			} else {
+				combined = next;
+				Poll::Ready(())
+			}
+		})) {
+			Ok(state) => state,
 			Err(_) => unreachable!("a TrackRequest holds the only producer"),
 		};
+		// The aggregate changed: prune any closed subscribers now that we hold the lock.
+		state.subscriptions.retain(|sub| !sub.is_closed());
+		drop(state);
 		self.prev_subscription = combined.clone();
 		Poll::Ready(combined)
 	}
@@ -1689,6 +1717,62 @@ mod test {
 		let group = consumer.assert_group();
 		// consume() starts at index 0, first non-tombstoned group is seq 5.
 		assert_eq!(group.sequence, 5);
+	}
+
+	#[tokio::test]
+	async fn abort_clears_cached_groups() {
+		let mut producer = TrackProducer::new("test", None);
+		producer.append_group().unwrap();
+		producer.append_group().unwrap();
+
+		// A stale consumer that never drains must not pin the cached groups.
+		let mut consumer = producer.subscribe(None);
+		assert_eq!(live_groups(&producer.state.read()), 2);
+
+		producer.abort(Error::Cancel).unwrap();
+
+		{
+			let state = producer.state.read();
+			assert!(state.groups.is_empty(), "cached groups should be dropped on abort");
+			assert!(state.duplicates.is_empty());
+		}
+
+		// The consumer now surfaces the abort error rather than the leftover cache.
+		let result = consumer.recv_group().now_or_never().expect("should not block");
+		assert!(matches!(result, Err(Error::Cancel)));
+	}
+
+	#[tokio::test]
+	async fn drop_unfinished_clears_cached_groups() {
+		let producer = TrackProducer::new("test", None);
+		let mut writer = producer.clone();
+		writer.append_group().unwrap();
+
+		// A stale consumer keeps the channel (and thus the cache) alive.
+		let mut consumer = producer.subscribe(None);
+		assert_eq!(live_groups(&producer.state.read()), 1);
+
+		// Drop every producer without finishing: the cache is released.
+		drop(writer);
+		drop(producer);
+
+		let result = consumer.recv_group().now_or_never().expect("should not block");
+		assert!(matches!(result, Err(Error::Dropped)));
+	}
+
+	#[tokio::test]
+	async fn drop_finished_keeps_cached_groups() {
+		let mut producer = TrackProducer::new("test", None);
+		producer.append_group().unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.subscribe(None);
+		drop(producer);
+
+		// A cleanly finished track keeps its cache so the consumer can still drain.
+		assert_eq!(consumer.assert_group().sequence, 0);
+		let done = consumer.recv_group().now_or_never().expect("should not block").unwrap();
+		assert!(done.is_none(), "consumer should drain then see clean finish");
 	}
 
 	#[test]

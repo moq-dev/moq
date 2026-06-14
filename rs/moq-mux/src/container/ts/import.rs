@@ -1,7 +1,8 @@
 //! MPEG-TS demuxer.
 //!
 //! [`Import`] reads a TS byte stream, reassembles PES packets per PID, and
-//! routes their payloads to the existing codec importers (H.264/H.265/AAC),
+//! routes their payloads to the codec importers (H.264/H.265/AAC, plus the
+//! legacy MP2/AC-3/E-AC-3 verbatim path),
 //! which own their broadcast tracks and catalog entries. SCTE-35 rides in private
 //! sections (not PES), so those PIDs are intercepted before the mpeg2ts reader
 //! and reassembled onto a typed scte35 catalog section. TS adds PAT/PMT
@@ -22,13 +23,14 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use super::adts;
 use super::scte35;
 use crate::catalog::hang::CatalogExt;
-use crate::codec::{aac, h264, h265};
+use crate::codec::{aac, ac3, eac3, h264, h265, legacy, mp2};
 use moq_net::Timestamp;
 
 /// Demuxes an MPEG-TS byte stream into a MoQ broadcast.
 ///
-/// Supports H.264 (stream type 0x1B), H.265 (0x24), and ADTS AAC (0x0F). LATM/LOAS
-/// AAC (0x11) is not ADTS-framed and is dropped. SCTE-35 (private sections marked
+/// Supports H.264 (stream type 0x1B), H.265 (0x24), ADTS AAC (0x0F), MP2
+/// (0x03/0x04), AC-3 (0x81), and E-AC-3 (0x87). LATM/LOAS AAC (0x11) is not
+/// ADTS-framed and is dropped. SCTE-35 (private sections marked
 /// by a program-level 'CUEI' registration descriptor) is intercepted before the
 /// reader and reassembled. Other elementary streams are logged and dropped. Each
 /// codec stream is fed to its importer, which manages the track, catalog config,
@@ -61,6 +63,12 @@ pub struct Import<E: scte35::Catalog = ()> {
 	/// PIDs diverted, the rest fed to the reader); a trailing partial packet is
 	/// kept here for the next call.
 	scratch: Vec<u8>,
+	/// Sync lock. 0x47 is the packet sync byte but also occurs freely in payload (TS
+	/// has no byte stuffing), so a lone 0x47 isn't a boundary. False until a candidate
+	/// is confirmed by the next packet's sync byte; once true we stride 188 at a time
+	/// and trust the per-packet check. Persists across `decode` calls so a candidate
+	/// pending confirmation at a buffer tail is re-confirmed, not trusted blindly.
+	synced: bool,
 	/// SCTE-35 PIDs, intercepted before the reader. SCTE-35 is carried as private
 	/// sections (table_id 0xFC), not PES, so the reader would `Pes::read_from` and
 	/// abort. Keyed by PID. Detected via the PMT 'CUEI' registration descriptor.
@@ -94,6 +102,7 @@ impl<E: scte35::Catalog> Import<E> {
 			initialized: false,
 			audio_burst: None,
 			scratch: Vec::new(),
+			synced: false,
 			scte: HashMap::new(),
 			supports_scte35,
 			last_pts: None,
@@ -137,12 +146,40 @@ impl<E: scte35::Catalog> Import<E> {
 		// registered) before the packets that follow it in the same chunk route.
 		let mut off = 0;
 		while off + TsPacket::SIZE <= self.scratch.len() {
-			// TS packets start with 0x47. On a lost sync byte, scan forward one byte
-			// at a time for the next one instead of skipping a whole 188-byte stride
-			// (which only re-aligns on exact multiples of 188, so a sub-packet
-			// misalignment would desync permanently).
-			if self.scratch[off] != 0x47 {
-				off += 1;
+			// A TS packet starts with the 0x47 sync byte. Once synced we trust it and stride
+			// 188 at a time; until then (or after a miss) we must (re)acquire the lock.
+			if !self.synced || self.scratch[off] != 0x47 {
+				self.synced = false;
+				// 0x47 also occurs freely in payload (TS has no byte stuffing), so a lone one
+				// isn't a boundary. Scan (SIMD via memchr) for a candidate whose next packet
+				// also begins with 0x47, confirming the 188 stride before locking onto it.
+				// Striding past a false candidate would route one bogus packet; jumping a flat
+				// 188 instead would only re-align on exact multiples and could desync forever.
+				loop {
+					let Some(rel) = memchr::memchr(0x47, &self.scratch[off..]) else {
+						// No sync byte left: the buffer is junk, drop it.
+						off = self.scratch.len();
+						break;
+					};
+					off += rel;
+					match self.scratch.get(off + TsPacket::SIZE) {
+						// Next packet also starts with a sync byte: lock onto this candidate.
+						Some(&0x47) => {
+							self.synced = true;
+							break;
+						}
+						// The byte 188 ahead isn't a sync byte: this 0x47 was payload, keep scanning.
+						Some(_) => off += 1,
+						// Can't confirm yet (candidate is near the buffer tail). Stay unsynced so
+						// it's re-confirmed next call (with the trailing bytes) instead of trusted.
+						None => break,
+					}
+				}
+				// Unsynced means the buffer had no confirmable sync byte, or the candidate is
+				// pending confirmation; either way there's nothing to route until more arrives.
+				if !self.synced {
+					break;
+				}
 				continue;
 			}
 			let pkt: [u8; TsPacket::SIZE] = self.scratch[off..off + TsPacket::SIZE].try_into().unwrap();
@@ -245,6 +282,12 @@ impl<E: scte35::Catalog> Import<E> {
 				unwrap: PtsUnwrap::default(),
 				jitter: None,
 			})),
+			// Legacy broadcast audio, carried verbatim. Both MP2 stream types
+			// (0x03 MPEG-1, 0x04 MPEG-2 half rate) share one parser; sample rate and
+			// channels always come from the frame header, not the PMT.
+			StreamType::Mpeg1Audio | StreamType::Mpeg2HalvedSampleRateAudio => self.legacy_stream(&mp2::DESCRIPTOR),
+			StreamType::DolbyDigitalUpToSixChannelAudio => self.legacy_stream(&ac3::DESCRIPTOR),
+			StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc => self.legacy_stream(&eac3::DESCRIPTOR),
 			StreamType::Mpeg1Video | StreamType::Mpeg2Video => Stream::Clock,
 			other => {
 				tracing::warn!(?other, pid = pid.as_u16(), "unsupported TS stream type, dropping");
@@ -258,6 +301,18 @@ impl<E: scte35::Catalog> Import<E> {
 		}
 		self.streams.insert(pid, stream);
 		Ok(())
+	}
+
+	fn legacy_stream(&self, descriptor: &'static legacy::Descriptor) -> Stream<E> {
+		Stream::Legacy(Box::new(LegacyStream {
+			descriptor,
+			import: None,
+			broadcast: self.broadcast.clone(),
+			catalog: self.catalog.clone(),
+			unwrap: PtsUnwrap::default(),
+			tail: Vec::new(),
+			tail_pts: None,
+		}))
 	}
 
 	/// Register a SCTE-35 PID: intercepted (see [`Self::decode`]) with a cue track when
@@ -357,12 +412,15 @@ impl<E: scte35::Catalog> Import<E> {
 
 		// Track the start of the current consecutive audio run (audio PTS since the
 		// last video frame), so the audio stream can size its jitter to the burst.
+		// Only AAC consumes the jitter hint, so only AAC anchors the run: a legacy
+		// audio stream opening it would re-anchor AAC's span on a foreign PTS,
+		// inflating the published jitter by the inter-PID PTS offset.
 		let is_video = matches!(self.streams.get(&pid), Some(Stream::H264 { .. } | Stream::H265 { .. }));
 		let run_start = if is_video {
 			self.audio_burst = None;
 			None
-		} else if let Some(audio) = pending.pts {
-			Some(*self.audio_burst.get_or_insert(audio))
+		} else if matches!(self.streams.get(&pid), Some(Stream::Aac(_))) {
+			pending.pts.map(|audio| *self.audio_burst.get_or_insert(audio))
 		} else {
 			None
 		};
@@ -663,6 +721,7 @@ enum Stream<E: CatalogExt = ()> {
 		unwrap: PtsUnwrap,
 	},
 	Aac(Box<AacStream<E>>),
+	Legacy(Box<LegacyStream<E>>),
 	/// MPEG-1/2 video we don't decode, kept only to advance the SCTE-35 media clock.
 	/// `is_video` counts it, so never reuse this variant for audio or data.
 	Clock,
@@ -681,6 +740,7 @@ impl<E: CatalogExt> Stream<E> {
 				Ok(import.decode_frame(&mut pending.data.as_slice(), pts)?)
 			}
 			Stream::Aac(stream) => stream.write(pending, burst),
+			Stream::Legacy(stream) => stream.write(pending),
 			Stream::Clock | Stream::Ignored => Ok(()),
 		}
 	}
@@ -690,6 +750,7 @@ impl<E: CatalogExt> Stream<E> {
 			Stream::H264 { import, .. } => Ok(import.seek(sequence)?),
 			Stream::H265 { import, .. } => Ok(import.seek(sequence)?),
 			Stream::Aac(stream) => stream.seek(sequence),
+			Stream::Legacy(stream) => stream.seek(sequence),
 			Stream::Clock | Stream::Ignored => Ok(()),
 		}
 	}
@@ -699,6 +760,7 @@ impl<E: CatalogExt> Stream<E> {
 			Stream::H264 { import, .. } => Ok(import.finish()?),
 			Stream::H265 { import, .. } => Ok(import.finish()?),
 			Stream::Aac(stream) => stream.finish(),
+			Stream::Legacy(stream) => stream.finish(),
 			Stream::Clock | Stream::Ignored => Ok(()),
 		}
 	}
@@ -830,6 +892,133 @@ impl<E: CatalogExt> AacStream<E> {
 	}
 }
 
+/// One stream of legacy broadcast audio (MP2, AC-3, E-AC-3), carried verbatim:
+/// whole self-describing frames, split out of the PES by the codec's header
+/// parser. Like AAC, import creation is deferred until the first frame header
+/// (the config isn't in the PMT). No jitter hint: it only matters to browser
+/// players, which cannot decode these codecs.
+struct LegacyStream<E: CatalogExt = ()> {
+	descriptor: &'static legacy::Descriptor,
+	import: Option<legacy::Import<E>>,
+	broadcast: moq_net::BroadcastProducer,
+	catalog: crate::catalog::Producer<E>,
+	unwrap: PtsUnwrap,
+	/// Partial frame left at the end of the previous PES. ISO 13818-1 doesn't
+	/// require audio frames to align with PES boundaries, so a legitimate mux can
+	/// split one; it's reassembled here. A lost PES between the cut and its
+	/// continuation still fails the next header parse (no frame-level resync).
+	tail: Vec<u8>,
+	/// PTS for the frame the tail begins, computed when it was cut. The PES PTS
+	/// only covers frames that begin in that PES.
+	tail_pts: Option<Timestamp>,
+}
+
+impl<E: CatalogExt> LegacyStream<E> {
+	fn write(&mut self, pending: Pending) -> anyhow::Result<()> {
+		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+
+		// Prepend the partial frame left by the previous PES, if any.
+		let carried = self.tail.len();
+		let joined;
+		let data: &[u8] = if carried == 0 {
+			&pending.data
+		} else {
+			let mut j = std::mem::take(&mut self.tail);
+			j.extend_from_slice(&pending.data);
+			joined = j;
+			&joined
+		};
+
+		// PTS for the next frame to emit. The tail frame keeps the PTS computed at
+		// its cut; the first frame that BEGINS in this PES takes the PES PTS (per
+		// ISO 13818-1, a PES PTS refers to the first access unit starting in it).
+		// After each frame it advances by that frame's duration (per frame, not
+		// `index * constant`: E-AC-3 varies the samples per frame).
+		let mut pts = if carried > 0 { self.tail_pts.take() } else { pes_base };
+		let mut in_tail = carried > 0;
+
+		let mut offset = 0;
+		while offset + self.descriptor.min_header_len <= data.len() {
+			if in_tail && offset >= carried {
+				pts = pes_base;
+				in_tail = false;
+			}
+
+			let header = (self.descriptor.parse)(&data[offset..])?;
+			let end = offset + header.len;
+			if end > data.len() {
+				// The frame continues in the next PES; finish it there.
+				break;
+			}
+
+			let import = match &mut self.import {
+				Some(import) => import,
+				None => {
+					let config = legacy::Config {
+						sample_rate: header.sample_rate,
+						channel_count: header.channel_count,
+					};
+					let import =
+						legacy::Import::new(self.descriptor, self.broadcast.clone(), self.catalog.clone(), config)?;
+					self.import.insert(import)
+				}
+			};
+
+			let mut frame = &data[offset..end];
+			import.decode(&mut frame, pts)?;
+
+			pts = match pts {
+				// `pts` is a 90 kHz PES PTS; rescale the sample-rate advance to match
+				// before adding (the scale-aware Timestamp rejects mixed scales).
+				Some(pts) => {
+					let advance = Timestamp::from_scale(header.samples, header.sample_rate as u64)?;
+					Some(pts + advance.convert(pts.scale())?)
+				}
+				None => None,
+			};
+			offset = end;
+		}
+
+		// Keep any partial frame (cut mid-frame, or even mid-header) for the next
+		// PES, with the PTS it should carry.
+		if offset < data.len() {
+			if in_tail && offset >= carried {
+				pts = pes_base;
+			}
+			self.tail = data[offset..].to_vec();
+			self.tail_pts = pts;
+		}
+
+		Ok(())
+	}
+
+	fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+		// A seek is a discontinuity; the partial frame will never see its end.
+		self.tail.clear();
+		self.tail_pts = None;
+		if let Some(import) = &mut self.import {
+			import.seek(sequence)?;
+		}
+		Ok(())
+	}
+
+	fn finish(&mut self) -> anyhow::Result<()> {
+		// A partial frame at end of stream isn't emissible verbatim; drop it, but
+		// leave a trace for diagnosing truncated captures.
+		if !self.tail.is_empty() {
+			tracing::debug!(
+				suffix = self.descriptor.track_suffix,
+				bytes = self.tail.len(),
+				"dropping partial frame at end of stream"
+			);
+		}
+		if let Some(import) = &mut self.import {
+			import.finish()?;
+		}
+		Ok(())
+	}
+}
+
 /// Replicates [`PesHeader::optional_header_len`] (which is crate-private) to
 /// compute the declared PES payload length for bounded packets.
 fn pes_data_len(header: &PesHeader, pes_packet_len: u16) -> Option<usize> {
@@ -914,6 +1103,7 @@ mod test {
 	use mpeg2ts::es::StreamType;
 
 	use super::ScteReassembler;
+	use moq_net::Timestamp;
 
 	// libklvanc public-sample cue: table_id 0xFC, section_length 0x1b (27), 30 bytes total.
 	const CUE: [u8; 30] = [
@@ -1315,6 +1505,202 @@ mod test {
 			import.last_pts, after_video,
 			"a later private PES must not overwrite the clock"
 		);
+	}
+
+	/// A PUSI TS packet on `pid`: a bounded audio PES (stream_id 0xC0) carrying
+	/// `payload` (whole codec frames or a fragment of one), sized exactly via
+	/// adaptation-field stuffing so the PES completes (and flushes) on this packet.
+	fn audio_pes_packet(pid: u16, cc: u8, pts: u64, payload: &[u8]) -> Vec<u8> {
+		let pts_field = [
+			0x21 | (((pts >> 30) & 0x07) << 1) as u8,
+			((pts >> 22) & 0xff) as u8,
+			0x01 | (((pts >> 15) & 0x7f) << 1) as u8,
+			((pts >> 7) & 0xff) as u8,
+			0x01 | ((pts & 0x7f) << 1) as u8,
+		];
+		let mut pes = vec![0x00, 0x00, 0x01, 0xc0];
+		let pes_len = 3 + 5 + payload.len();
+		pes.push((pes_len >> 8) as u8);
+		pes.push((pes_len & 0xff) as u8);
+		pes.extend_from_slice(&[0x80, 0x80, 0x05]); // marker bits, PTS only, header len
+		pes.extend_from_slice(&pts_field);
+		pes.extend_from_slice(payload);
+
+		let af_len = 184 - 1 - pes.len();
+		let mut p = vec![
+			0x47,
+			0x40 | ((pid >> 8) as u8 & 0x1f),
+			(pid & 0xff) as u8,
+			0x30 | (cc & 0x0f),
+		];
+		p.push(af_len as u8);
+		if af_len > 0 {
+			p.push(0x00); // no AF flags; the rest is stuffing
+			p.extend(std::iter::repeat_n(0xff, af_len - 1));
+		}
+		p.extend_from_slice(&pes);
+		assert_eq!(p.len(), 188, "audio PES packet must fill exactly one TS packet");
+		p
+	}
+
+	// MP2/AC-3 flush like any audio PES but don't consume the jitter hint; if one
+	// anchored the audio run, an AAC PID in the same TS would publish a jitter
+	// inflated by the inter-PID PTS offset.
+	#[test]
+	fn verbatim_audio_does_not_anchor_aac_jitter() {
+		const AAC_PID: u16 = 0x0060;
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.clone());
+
+		let mut bytes = bytes::BytesMut::new();
+		bytes.extend_from_slice(&synth_pmt(
+			&[(StreamType::AdtsAac, AAC_PID), (StreamType::Mpeg1Audio, MP2_PID)],
+			false,
+		));
+		// A whole MP2 frame (MPEG-1 Layer II, 32 kbps, 48 kHz, stereo = 96 bytes),
+		// 2 s ahead of the AAC PES that follows in the same audio run.
+		let mut mp2 = vec![0xFF, 0xFD, 0x14, 0x00];
+		mp2.resize(96, 0xAA);
+		bytes.extend_from_slice(&audio_pes_packet(MP2_PID, 0, 90_000, &mp2));
+
+		let mut aac = super::adts::write_header(2, 48_000, 2, 8).unwrap().to_vec();
+		aac.extend_from_slice(&[0u8; 8]);
+		bytes.extend_from_slice(&audio_pes_packet(AAC_PID, 0, 270_000, &aac));
+
+		import.decode(&mut bytes).unwrap();
+		import.finish().unwrap();
+
+		let snap = catalog.snapshot();
+		assert_eq!(snap.audio.renditions.len(), 2, "AAC and MP2 renditions");
+		let aac_rendition = snap
+			.audio
+			.renditions
+			.values()
+			.find(|a| a.codec.to_string().starts_with("mp4a"))
+			.expect("AAC rendition");
+		let jitter = aac_rendition.jitter.expect("AAC publishes a jitter");
+		// Anchored on its own PES: one 1024-sample frame at 48 kHz (~21 ms).
+		// Anchored on the MP2 PES it would be ~2 s.
+		assert!(
+			jitter <= std::time::Duration::from_millis(100),
+			"AAC jitter anchored on a foreign PID: {jitter:?}"
+		);
+	}
+
+	/// Read every retained frame of the single audio rendition in `catalog`.
+	async fn read_audio_frames(
+		consumer: &moq_net::BroadcastConsumer,
+		catalog: &crate::catalog::Producer,
+	) -> Vec<crate::container::Frame> {
+		let name = catalog
+			.snapshot()
+			.audio
+			.renditions
+			.keys()
+			.next()
+			.expect("an audio track")
+			.clone();
+		let track = consumer.track(&name).unwrap().subscribe(None).unwrap().await.unwrap();
+		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+		let mut frames = Vec::new();
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
+		{
+			frames.push(frame);
+		}
+		frames
+	}
+
+	// ISO 13818-1 doesn't require audio frames to align with PES boundaries: a
+	// frame split across two PES must be reassembled byte-exact, stamped with the
+	// PTS of the PES it began in, and the next whole frame takes the new PES's PTS.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_frame_split_across_pes_reassembles() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.clone());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&mut bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// Two 96-byte MP2 frames with distinct payloads; frame A is cut at byte 50.
+		let mut frame_a = vec![0xFF, 0xFD, 0x14, 0x00];
+		frame_a.extend((4..96).map(|i| i as u8));
+		let mut frame_b = vec![0xFF, 0xFD, 0x14, 0x00];
+		frame_b.extend((4..96).rev().map(|i| i as u8));
+
+		let mut second = frame_a[50..].to_vec();
+		second.extend_from_slice(&frame_b);
+		import
+			.decode(&mut audio_pes_packet(MP2_PID, 0, 90_000, &frame_a[..50]).as_slice())
+			.unwrap();
+		import
+			.decode(&mut audio_pes_packet(MP2_PID, 1, 270_000, &second).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(frames.len(), 2, "both frames must survive the split");
+		assert_eq!(
+			frames[0].payload.as_ref(),
+			&frame_a[..],
+			"frame A reassembled byte-exact"
+		);
+		assert_eq!(frames[1].payload.as_ref(), &frame_b[..], "frame B intact");
+		// Frame A began in PES 1 (PTS 90000 ticks = 1 s); frame B begins in PES 2
+		// (270000 ticks = 3 s). The legacy container normalizes to microseconds on the wire.
+		assert_eq!(frames[0].timestamp, Timestamp::from_micros(1_000_000).unwrap());
+		assert_eq!(frames[1].timestamp, Timestamp::from_micros(3_000_000).unwrap());
+	}
+
+	// A cut inside the next frame's header (fewer bytes left than a parseable
+	// header) must also reassemble, and the carried frame keeps the PTS derived
+	// from the PES it began in, NOT the next PES's (whose PTS only covers frames
+	// that begin in it).
+	#[tokio::test(start_paused = true)]
+	async fn legacy_header_split_keeps_origin_pts() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.clone());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&mut bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		let mut frame_a = vec![0xFF, 0xFD, 0x14, 0x00];
+		frame_a.resize(96, 0x55);
+		let mut frame_b = vec![0xFF, 0xFD, 0x14, 0x00];
+		frame_b.resize(96, 0x66);
+
+		// PES 1: frame A whole plus only 2 bytes of frame B (not even a header).
+		let mut first = frame_a.clone();
+		first.extend_from_slice(&frame_b[..2]);
+		import
+			.decode(&mut audio_pes_packet(MP2_PID, 0, 90_000, &first).as_slice())
+			.unwrap();
+		// PES 2: the rest of frame B, under a far-off PTS that must NOT apply to it.
+		import
+			.decode(&mut audio_pes_packet(MP2_PID, 1, 900_000, &frame_b[2..]).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(frames.len(), 2, "both frames must survive the header split");
+		assert_eq!(
+			frames[1].payload.as_ref(),
+			&frame_b[..],
+			"frame B reassembled byte-exact"
+		);
+		// Frame B began in PES 1: its PTS is frame A's plus one frame duration
+		// (1152 samples at 48 kHz = 24 ms), not PES 2's 10 s.
+		assert_eq!(frames[1].timestamp, Timestamp::from_micros(1_024_000).unwrap());
 	}
 
 	// End-to-end: a real SCTE-35 PID is detected, and its section is published as a frame

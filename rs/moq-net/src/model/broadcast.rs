@@ -104,7 +104,8 @@ impl BroadcastProducer {
 	/// track's [`TrackProducer`]) is responsible for keeping the track alive;
 	/// when all producers are dropped, the entry becomes closed and is
 	/// eventually evicted.
-	pub fn insert_track(&mut self, track: TrackConsumer) -> Result<(), Error> {
+	pub fn insert_track(&mut self, track: impl crate::Consume<TrackConsumer>) -> Result<(), Error> {
+		let track = track.consume();
 		let mut state = BroadcastState::modify(&self.state)?;
 		state.insert_track(track.weak())
 	}
@@ -184,7 +185,7 @@ impl BroadcastProducer {
 		self.create_track(name, info).expect("should not have errored")
 	}
 
-	pub fn assert_insert_track(&mut self, track: TrackConsumer) {
+	pub fn assert_insert_track(&mut self, track: impl crate::Consume<TrackConsumer>) {
 		self.insert_track(track).expect("should not have errored")
 	}
 }
@@ -232,31 +233,32 @@ impl BroadcastDynamic {
 		&self.info
 	}
 
-	// A helper to automatically apply Dropped if the state is closed.
-	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R, Error>>
+	// A helper to automatically apply Dropped if the state is closed. The predicate is
+	// read-only and just gates readiness; mutate through the returned `Mut`.
+	fn poll<F>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<kio::Mut<'_, BroadcastState>, Error>>
 	where
-		F: FnMut(&mut kio::Mut<'_, BroadcastState>) -> Poll<R>,
+		F: FnMut(&kio::Ref<'_, BroadcastState>) -> Poll<()>,
 	{
 		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
-			Ok(r) => Ok(r),
+			Ok(state) => Ok(state),
 			Err(_) => Err(Error::Dropped),
 		})
 	}
 
 	/// Poll for the next consumer-requested track, without blocking.
 	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<TrackRequest, Error>> {
-		self.poll(waiter, |state| {
-			let Some(name) = state.request_order.pop_front() else {
-				return Poll::Pending;
-			};
+		let mut state = ready!(self.poll(waiter, |state| {
+			if state.request_order.is_empty() {
+				Poll::Pending
+			} else {
+				Poll::Ready(())
+			}
+		}))?;
 
-			// The name stays in `requests` so concurrent subscribers can still
-			// coalesce onto it until the publisher accepts or denies.
-			let pending = state.requests.remove(&name).expect("request_order out of sync");
-			state.tracks.insert(name, pending.weak());
-
-			Poll::Ready(pending)
-		})
+		let name = state.request_order.pop_front().expect("predicate guaranteed a request");
+		let pending = state.requests.remove(&name).expect("request_order out of sync");
+		state.tracks.insert(name, pending.weak());
+		Poll::Ready(Ok(pending))
 	}
 
 	/// Block until a consumer requests a track, returning a [`TrackRequest`] to serve.
@@ -429,7 +431,7 @@ mod test {
 		let mut track1 = TrackProducer::new("track1", None);
 
 		// Make sure we can insert before a consumer is created.
-		producer.assert_insert_track(track1.consume());
+		producer.assert_insert_track(&track1);
 		track1.append_group().unwrap();
 
 		let consumer = producer.consume();
@@ -445,7 +447,7 @@ mod test {
 		track1_sub.assert_group();
 
 		let mut track2 = TrackProducer::new("track2", None);
-		producer.assert_insert_track(track2.consume());
+		producer.assert_insert_track(&track2);
 
 		let consumer2 = producer.consume();
 		let mut track2_consumer = consumer2

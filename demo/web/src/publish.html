@@ -36,6 +36,11 @@
 		</moq-publish>
 	</moq-publish-ui>
 
+	<!-- Dev-only: renders console output inline here. Set `level` to lower the
+	     threshold (debug | log | info | warn | error; defaults to warn). Defined
+	     by the console-overlay Vite plugin; absent from production builds. -->
+	<moq-console></moq-console>
+
 	<h3>Other demos:</h3>
 	<ul>
 		<li><a href="index.html?broadcast=me.hang" target="_blank" rel="noreferrer" id="watch">Watch your broadcast: <span

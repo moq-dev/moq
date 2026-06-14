@@ -29,7 +29,7 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	let url = url::Url::parse("https://cdn.moq.dev/anon/chat-example").unwrap();
 
 	// Establish a WebTransport/QUIC connection and MoQ handshake.
-	let cs = client.with_publisher(origin).connect(url).await?;
+	let cs = client.with_publisher(&origin).connect(url).await?;
 
 	// Wait until the session is closed.
 	cs.closed().await.map_err(Into::into)
@@ -49,7 +49,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// If you put "alice" here, it would be published as "anon/chat-example/alice".
 	// OPTIONAL: We publish after inserting the track just to avoid a nearly impossible race condition.
 	let _publish = origin
-		.publish_broadcast("", broadcast.consume())
+		.publish_broadcast("", &broadcast)
 		.context("failed to publish broadcast")?;
 
 	// Create a group.

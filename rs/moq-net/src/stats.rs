@@ -1089,7 +1089,7 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 
 	// Hold the announcement guard for the lifetime of this task; dropping it (on return)
 	// unannounces the stats broadcast.
-	let Ok(_publish) = shared.origin.publish_broadcast(&advertised, broadcast.consume()) else {
+	let Ok(_publish) = shared.origin.publish_broadcast(&advertised, &broadcast) else {
 		tracing::warn!(advertised = %advertised, "stats: origin rejected stats broadcast");
 		return;
 	};

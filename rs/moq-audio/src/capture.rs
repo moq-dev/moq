@@ -5,12 +5,21 @@
 //! an [`EncoderInput`] of `format = AudioFormat::F32`.
 //! Encoding stays on `unsafe-libopus`, so audio never touches ffmpeg.
 
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::{AudioError, AudioFormat, AudioProducer, EncoderInput, EncoderOutput, Frame};
+
+mod permission;
+
+/// How long `open` waits for the first buffer before assuming the mic never
+/// started (e.g. permission denied), mirroring the camera path's first-frame
+/// timeout. Without this the capture loop hangs silently forever when macOS TCC
+/// denies microphone access.
+const FIRST_BUFFER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Microphone capture configuration. All fields are hints; the backend picks
 /// the closest supported mode and the [`AudioProducer`]
@@ -35,6 +44,9 @@ pub struct Microphone {
 	sample_rate: u32,
 	channels: u32,
 	frames_read: u64,
+	/// The first buffer, captured during `open` to surface a permission failure
+	/// as an error rather than a silent hang.
+	pending: Option<Vec<f32>>,
 }
 
 impl Microphone {
@@ -47,6 +59,10 @@ impl Microphone {
 
 	/// Open (and start) the microphone described by `config`.
 	pub fn open(config: &Config) -> Result<Self, AudioError> {
+		// Fail fast on a denied/restricted mic (macOS TCC) instead of opening a
+		// stream that silently delivers nothing. A no-op on other platforms.
+		permission::ensure_microphone_access()?;
+
 		let (device, sample_format, stream_config) = resolve(config)?;
 		let sample_rate = stream_config.sample_rate;
 		let channels = stream_config.channels as u32;
@@ -84,6 +100,22 @@ impl Microphone {
 
 		stream.play().map_err(cpal_err)?;
 
+		// Block for the first buffer to surface a permission failure (or dead
+		// device) as an error rather than a silent hang in the capture loop.
+		let pending = match rx.recv_timeout(FIRST_BUFFER_TIMEOUT) {
+			Ok(samples) => samples,
+			Err(RecvTimeoutError::Timeout) => {
+				return Err(AudioError::Unsupported(format!(
+					"no samples from microphone {device} within {FIRST_BUFFER_TIMEOUT:?} (permission denied?)"
+				)));
+			}
+			Err(RecvTimeoutError::Disconnected) => {
+				return Err(AudioError::Unsupported(format!(
+					"microphone {device} stopped before any samples"
+				)));
+			}
+		};
+
 		tracing::info!(device = %device, sample_rate, channels, "opened microphone");
 
 		Ok(Self {
@@ -92,6 +124,7 @@ impl Microphone {
 			sample_rate,
 			channels,
 			frames_read: 0,
+			pending: Some(pending),
 		})
 	}
 
@@ -107,8 +140,14 @@ impl Microphone {
 	/// stream stops. The returned [`Frame`] holds interleaved little-endian
 	/// `f32` samples (i.e. `AudioFormat::F32`).
 	pub fn read(&mut self) -> Result<Option<Frame>, AudioError> {
-		let Ok(samples) = self.rx.recv() else {
-			return Ok(None); // stream dropped / device gone
+		let samples = match self.pending.take() {
+			Some(samples) => samples,
+			None => {
+				let Ok(samples) = self.rx.recv() else {
+					return Ok(None); // stream dropped / device gone
+				};
+				samples
+			}
 		};
 
 		let timestamp_us = self.frames_read * 1_000_000 / self.sample_rate as u64;

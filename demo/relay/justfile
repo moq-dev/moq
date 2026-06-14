@@ -2,7 +2,7 @@ set fallback
 
 # Run a localhost relay server without authentication.
 default:
-    TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- localhost.toml
+    cargo run --bin moq-relay -- localhost.toml
 
 # Run a cluster of relay servers.
 cluster: token
@@ -87,7 +87,3 @@ token: key
     		--root demo --publish "" \
     		> demo-cli.jwt
     fi
-
-# Connect tokio-console to the relay server (port 6680).
-console:
-    tokio-console http://127.0.0.1:6680

@@ -146,6 +146,9 @@ impl Reconnect {
 					retry_start = tokio::time::Instant::now();
 				}
 				Err(err) => {
+					if err.is_auth() {
+						return Err(err);
+					}
 					tracing::warn!(%url, %err, ?delay, "connection failed, retrying");
 					last_error = Some(err);
 					tokio::time::sleep(delay).await;

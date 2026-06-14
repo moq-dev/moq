@@ -7,23 +7,22 @@ async function main() {
 	// Create a broadcast (a collection of tracks)
 	const broadcast = new Moq.Broadcast();
 
+	// Insert the "chat" track up front. A subscriber is served directly from this
+	// track, no requested() round-trip needed. Mirrors the Rust createTrack/insertTrack.
+	publishTrack(broadcast.createTrack("chat"));
+
 	// Publish the broadcast to the connection
 	connection.publish(Moq.Path.from("my-broadcast"), broadcast);
 	console.log("Published broadcast: my-broadcast");
 
-	// Wait for subscription requests
+	// Tracks created on demand (instead of up front) are still supported: handle any
+	// subscribe for a track that wasn't statically inserted.
 	for (;;) {
 		const request = await broadcast.requested();
 		if (!request) break;
 
-		// Accept the request for the "chat" track
-		if (request.name === "chat") {
-			// accept() commits the track's immutable properties and returns the Track.
-			publishTrack(request.accept());
-		} else {
-			// Reject other tracks
-			request.reject(new Error("track not found"));
-		}
+		// Reject anything we didn't insert above.
+		request.reject(new Error("track not found"));
 	}
 }
 

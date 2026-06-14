@@ -7,6 +7,7 @@ use std::{
 	task::{Context, Poll, ready},
 };
 
+use anyhow::Context as _;
 use axum::{
 	Router,
 	body::Body,
@@ -151,7 +152,10 @@ impl Web {
 			.into_make_service();
 
 		let http = if let Some(listen) = self.config.http.listen {
-			let server = axum_server::bind(listen);
+			// Dual-stack so the cert endpoint + WebSocket fallback answer over IPv4
+			// too, even on Windows where `[::]` is IPv6-only by default.
+			let listener = moq_native::bind::tcp(listen).context("failed to bind HTTP listener")?;
+			let server = axum_server::from_tcp(listener)?;
 			Some(server.serve(app.clone()))
 		} else {
 			None
@@ -174,7 +178,8 @@ impl Web {
 			let acceptor = MtlsAcceptor {
 				inner: RustlsAcceptor::new(rustls_config),
 			};
-			let server = axum_server::bind(listen).acceptor(acceptor);
+			let listener = moq_native::bind::tcp(listen).context("failed to bind HTTPS listener")?;
+			let server = axum_server::from_tcp(listener)?.acceptor(acceptor);
 			Some(server.serve(app))
 		} else {
 			None
@@ -205,7 +210,6 @@ async fn build_https_config(
 	key: &std::path::Path,
 	root: &[PathBuf],
 ) -> anyhow::Result<rustls::ServerConfig> {
-	use anyhow::Context;
 	use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 	use rustls::server::WebPkiClientVerifier;
 

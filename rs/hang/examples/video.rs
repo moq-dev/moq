@@ -31,9 +31,9 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 
 	// Establish a connection with automatic reconnection.
 	// with_publisher() registers an OriginProducer. moq-net reads from its
-	// consumer view internally. Pair with with_consumer() if you also want
+	// consumer view internally. Pair with with_subscriber() if you also want
 	// to subscribe to remote announcements.
-	let reconnect = client.with_publisher(origin).reconnect(url);
+	let reconnect = client.with_publisher(&origin).reconnect(url);
 
 	// Wait until the reconnect loop stops (e.g. timeout exceeded).
 	Ok(reconnect.closed().await?)
@@ -96,7 +96,7 @@ async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
 	let _publish = origin
-		.publish_broadcast("", broadcast.consume())
+		.publish_broadcast("", &broadcast)
 		.context("failed to publish broadcast")?;
 
 	// Wrap in a Producer for keyframe-based group management.

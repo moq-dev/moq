@@ -64,14 +64,15 @@ The simplest way to publish a stream:
 
 ### Attributes
 
-| Attribute  | Type    | Default  | Description                     |
-|------------|---------|----------|---------------------------------|
-| `url`      | string  | required | Relay server URL                |
-| `path`     | string  | required | Broadcast path                  |
-| `source`   | string  | —        | `"camera"`, `"screen"`, `"file"` |
-| `audio`    | boolean | false    | Enable audio capture            |
-| `video`    | boolean | false    | Enable video capture            |
-| `controls` | boolean | false    | Show simple publishing controls |
+| Attribute   | Type    | Default  | Description                     |
+|-------------|---------|----------|---------------------------------|
+| `url`       | string  | required | Relay server URL                |
+| `name`      | string  | required | Broadcast name                  |
+| `source`    | string  | —        | `"camera"`, `"screen"`, `"file"` |
+| `muted`     | boolean | false    | Mute audio capture              |
+| `invisible` | boolean | false    | Disable video capture           |
+| `preview`   | string  | `"source"` | What the preview renders: `"source"`, `"encoded"`, `"none"` |
+| `announce`  | string  | `"true"` | When to publish: `"true"` (always), `"false"` (never), `"source"` (once a source is selected) |
 
 ## JavaScript API
 

@@ -1,5 +1,7 @@
+/** A duration in nanoseconds, branded so it can't be mixed with other units. */
 export type Nano = number & { readonly _brand: "nano" };
 
+/** Constructors, conversions, and arithmetic for {@link Nano} values. */
 // Calling `Nano(x)` brands a raw number as nanoseconds. The unit is the caller's assertion: no
 // conversion happens, so reach for `fromMicro`/`fromMilli`/`fromSecond` when the source has a unit.
 export const Nano = Object.assign((value: number): Nano => value as Nano, {
@@ -19,8 +21,10 @@ export const Nano = Object.assign((value: number): Nano => value as Nano, {
 	min: (a: Nano, b: Nano): Nano => Math.min(a, b) as Nano,
 });
 
+/** A duration in microseconds, branded so it can't be mixed with other units. */
 export type Micro = number & { readonly _brand: "micro" };
 
+/** Constructors, conversions, and arithmetic for {@link Micro} values. */
 // Calling `Micro(x)` brands a raw number as microseconds. See the `Nano` note: this asserts the unit
 // rather than converting, so use `fromNano`/`fromMilli`/`fromSecond` to convert from another unit.
 export const Micro = Object.assign((value: number): Micro => value as Micro, {
@@ -40,8 +44,10 @@ export const Micro = Object.assign((value: number): Micro => value as Micro, {
 	min: (a: Micro, b: Micro): Micro => Math.min(a, b) as Micro,
 });
 
+/** A duration in milliseconds, branded so it can't be mixed with other units. */
 export type Milli = number & { readonly _brand: "milli" };
 
+/** Constructors, conversions, and arithmetic for {@link Milli} values. */
 // Calling `Milli(x)` brands a raw number as milliseconds. See the `Nano` note: this asserts the unit
 // rather than converting, so use `fromNano`/`fromMicro`/`fromSecond` to convert from another unit.
 export const Milli = Object.assign((value: number): Milli => value as Milli, {
@@ -61,8 +67,10 @@ export const Milli = Object.assign((value: number): Milli => value as Milli, {
 	min: (a: Milli, b: Milli): Milli => Math.min(a, b) as Milli,
 });
 
+/** A duration in seconds, branded so it can't be mixed with other units. */
 export type Second = number & { readonly _brand: "second" };
 
+/** Constructors, conversions, and arithmetic for {@link Second} values. */
 // Calling `Second(x)` brands a raw number as seconds. See the `Nano` note: this asserts the unit
 // rather than converting, so use `fromNano`/`fromMicro`/`fromMilli` to convert from another unit.
 export const Second = Object.assign((value: number): Second => value as Second, {

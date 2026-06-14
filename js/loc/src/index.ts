@@ -1,9 +1,19 @@
+/**
+ * Low Overhead Container (LOC): encode and decode codec bitstreams framed with
+ * per-frame timestamp and timescale metadata for MoQ.
+ *
+ * @module
+ */
 import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
 
+/** A decoded LOC frame: the codec bitstream plus its timing metadata. */
 export interface Frame {
+	/** The codec bitstream payload, with the LOC property block stripped. */
 	data: Uint8Array;
+	/** Presentation timestamp in microseconds. */
 	timestamp: Time.Micro;
+	/** True if this frame can be decoded without any preceding frames. */
 	keyframe: boolean;
 }
 
@@ -21,6 +31,7 @@ const DEFAULT_TIMESCALE = 1_000_000;
  * timescale property are interpreted as microseconds.
  */
 export class Format {
+	/** Decode one moq-net frame into its LOC frames. Throws on malformed input. */
 	decode(frame: Uint8Array): Frame[] {
 		const [propsLen, afterLen] = Moq.Varint.decode(frame);
 		if (afterLen.byteLength < propsLen) {
@@ -73,8 +84,11 @@ export class Format {
 	}
 }
 
+/** A payload that can be copied into a buffer without first materializing a Uint8Array. */
 export interface Source {
+	/** Size in bytes of the payload. */
 	byteLength: number;
+	/** Copy the payload into the provided buffer. */
 	copyTo(buffer: Uint8Array): void;
 }
 
@@ -93,6 +107,7 @@ export class Producer {
 		this.#track = track;
 	}
 
+	/** Encode one frame and write it to the track. Keyframes start a new group. */
 	encode(data: Uint8Array | Source, timestamp: Time.Micro, keyframe: boolean) {
 		if (keyframe) {
 			this.#group?.close();
@@ -133,6 +148,7 @@ export class Producer {
 		return out;
 	}
 
+	/** Close the current group and the underlying track, optionally with an error. */
 	close(err?: Error) {
 		this.#group?.close();
 		this.#track.close(err);

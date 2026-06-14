@@ -94,6 +94,9 @@ pub enum Error {
 	Client(#[from] web_transport_quinn::ClientError),
 
 	#[error(transparent)]
+	ConnectRejected(#[from] crate::ConnectError),
+
+	#[error(transparent)]
 	Server(#[from] web_transport_quinn::ServerError),
 
 	#[error("failed to establish QUIC connection")]
@@ -119,7 +122,7 @@ pub(crate) struct QuinnClient {
 
 impl QuinnClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
-		let socket = std::net::UdpSocket::bind(config.bind).map_err(Error::BindSocket)?;
+		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
 
 		// TODO Validate the BBR implementation before enabling it
 		let mut transport = quinn::TransportConfig::default();
@@ -184,7 +187,7 @@ impl QuinnClient {
 			let fingerprint = resp.text().await.map_err(Error::ReadFingerprint)?;
 			let fingerprint = hex::decode(fingerprint.trim())?;
 
-			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), fingerprint);
+			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), vec![fingerprint]);
 			config.dangerous().set_certificate_verifier(Arc::new(verifier));
 
 			url.set_scheme("https").expect("failed to set scheme");
@@ -219,7 +222,9 @@ impl QuinnClient {
 		}
 
 		let session = match url.scheme() {
-			"https" => web_transport_quinn::Session::connect(connection, request).await?,
+			"https" => web_transport_quinn::Session::connect(connection, request)
+				.await
+				.map_err(map_client_error)?,
 			"moqt" | "moql" => {
 				let handshake = connection
 					.handshake_data()
@@ -237,6 +242,49 @@ impl QuinnClient {
 		};
 
 		Ok(session)
+	}
+}
+
+impl Error {
+	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
+		match self {
+			Self::ConnectRejected(err) => Some(*err),
+			Self::Client(err) => classify_client_error(err),
+			_ => None,
+		}
+	}
+}
+
+fn map_client_error(err: web_transport_quinn::ClientError) -> Error {
+	if let Some(err) = classify_client_error(&err) {
+		return err.into();
+	}
+
+	err.into()
+}
+
+fn classify_client_error(err: &web_transport_quinn::ClientError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_quinn::ClientError::HttpError(err) => classify_connect_error(err),
+		_ => None,
+	}
+}
+
+fn classify_connect_error(err: &web_transport_quinn::ConnectError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_quinn::ConnectError::ErrorStatus(status) => crate::ConnectError::from_status_u16(status.as_u16()),
+		web_transport_quinn::ConnectError::ProtoError(err) => classify_proto_error(err),
+		_ => None,
+	}
+}
+
+fn classify_proto_error(err: &web_transport_quinn::proto::ConnectError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_quinn::proto::ConnectError::ErrorStatus(status)
+		| web_transport_quinn::proto::ConnectError::WrongStatus(Some(status)) => {
+			crate::ConnectError::from_status_u16(status.as_u16())
+		}
+		_ => None,
 	}
 }
 
@@ -338,7 +386,7 @@ impl QuinnServer {
 			endpoint_config.cid_generator(move || Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len)));
 		}
 
-		let socket = std::net::UdpSocket::bind(listen).map_err(Error::BindSocket)?;
+		let socket = crate::bind::udp(listen).map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
 		let quic = quinn::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;

@@ -622,7 +622,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::debug!(prefix = %self.origin.absolute(&prefix), "subscribe_namespace stream");
 
-		let origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
+		// A prefix outside our scope (empty origin, or a token that doesn't grant it)
+		// just means we have nothing to announce; respond with an empty set rather than
+		// erroring, which would look fatal to the peer.
+		let origin = self
+			.origin
+			.scope(&[prefix.as_path()])
+			.unwrap_or_else(|| self.origin.empty());
 
 		// Send OK response
 		match self.version {

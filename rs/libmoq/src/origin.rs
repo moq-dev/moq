@@ -199,7 +199,7 @@ impl Origin {
 		broadcast: moq_net::BroadcastConsumer,
 	) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
-		let publish = origin.publish_broadcast(path, broadcast)?;
+		let publish = origin.publish_broadcast(path, &broadcast)?;
 		self.published.insert(publish)
 	}
 

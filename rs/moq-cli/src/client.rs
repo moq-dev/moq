@@ -13,7 +13,7 @@ pub async fn run_client(client: moq_native::Client, url: Url, name: String, publ
 
 	tracing::info!(%url, %name, "connecting");
 
-	let reconnect = client.with_publisher(origin.clone()).reconnect(url);
+	let reconnect = client.with_publisher(&origin).reconnect(url);
 
 	#[cfg(unix)]
 	// Notify systemd that we're ready.

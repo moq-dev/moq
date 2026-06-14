@@ -25,6 +25,27 @@ export * as Connection from "./connection.ts";
 export type { TrackInfo };
 export { Path, Time };
 
+/**
+ * Thrown by a read when the group's frames were evicted before being read
+ * (the consumer fell behind the group cache window). Mirrors `@moq/net`'s
+ * `CacheFull` and the Rust `Error::CacheFull` ("cache full"); callers resync to
+ * the next group rather than stopping. The wasm boundary surfaces it as a plain
+ * `Error` with this message, which the read wrappers re-throw as this type.
+ */
+export class CacheFull extends Error {
+	constructor() {
+		super("group cache full: frames were evicted before being read");
+		this.name = "CacheFull";
+	}
+}
+
+// Re-throw the wasm boundary's "cache full" error as a `CacheFull` instance so
+// `err instanceof CacheFull` works downstream; pass everything else through.
+function rethrow(err: unknown): never {
+	if (err instanceof Error && err.message === "cache full") throw new CacheFull();
+	throw err;
+}
+
 // Load the wasm module once. `--target web` fetches `moq_bg.wasm` relative to
 // the JS via `import.meta.url`, which bundlers (vite/esbuild) resolve as an asset.
 let loaded: Promise<void> | undefined;
@@ -193,7 +214,7 @@ export class TrackSubscriber {
 
 	/** Receive the next group in arrival order, or `undefined` when the track ends. */
 	async recvGroup(): Promise<Group | undefined> {
-		const group = await (await this.#inner).recvGroup();
+		const group = await (await this.#inner).recvGroup().catch(rethrow);
 		return group ? Group.fromWasm(group) : undefined;
 	}
 
@@ -201,7 +222,7 @@ export class TrackSubscriber {
 	async nextGroup(): Promise<Group | undefined> {
 		const inner = await this.#inner;
 		for (;;) {
-			const group = await inner.nextGroup();
+			const group = await inner.nextGroup().catch(rethrow);
 			if (!group) return undefined;
 			const wrapped = Group.fromWasm(group);
 			if (wrapped.sequence < this.#nextSequence) {
@@ -277,7 +298,7 @@ export class Group {
 	}
 
 	async readFrame(): Promise<Uint8Array | undefined> {
-		return (await this.#inner.readFrame()) ?? undefined;
+		return (await this.#inner.readFrame().catch(rethrow)) ?? undefined;
 	}
 
 	async readString(): Promise<string | undefined> {

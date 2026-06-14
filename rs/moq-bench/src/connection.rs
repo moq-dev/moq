@@ -100,7 +100,7 @@ pub async fn run(ctx: Connection) {
 			}
 		};
 
-		let publish_handle = match publish.publish_broadcast(&path, broadcast.consume()) {
+		let publish_handle = match publish.publish_broadcast(&path, &broadcast) {
 			Ok(handle) => handle,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to publish broadcast");
@@ -115,7 +115,7 @@ pub async fn run(ctx: Connection) {
 		tasks.spawn(produce(connection, path, rolled, track, stats));
 	}
 
-	let client = client.with_publisher(publish).with_consumer(consume);
+	let client = client.with_publisher(&publish).with_subscriber(consume);
 	let mut reconnect = client.reconnect(url);
 
 	// Subscriber: drain up to `subscribe` peer broadcasts.

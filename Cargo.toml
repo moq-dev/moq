@@ -101,3 +101,17 @@ opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# moq-video's `nvenc` feature needs a `dynamic-loading` mode on
+# nvidia-video-codec-sdk so libnvidia-encode is dlopen'd at runtime instead of
+# linked: that lets a portable moq-cli build (and load) on machines without the
+# NVIDIA driver, and lets a GPU-less CI/release builder compile it. Upstream
+# doesn't have that feature yet, so consume a fork branch until it's merged.
+[patch.crates-io]
+nvidia-video-codec-sdk = { git = "https://github.com/kixelated/nvidia-video-codec-sdk.git", branch = "dynamic-loading" }
+# moq-video's `vaapi` feature uses discord/cros-codecs (`vaapi_dlopen`), which
+# pulls cros-libva 0.0.13. The `dlopen` feature it needs (load libva at runtime
+# so a vaapi-enabled binary still links without libva-dev and still loads on a
+# libva-less machine, falling back to software) lives only on discord's fork, so
+# point the published 0.0.13 at it. Drop once `dlopen` is upstreamed.
+cros-libva = { git = "https://github.com/discord/cros-libva.git", branch = "discord-0.0.13" }

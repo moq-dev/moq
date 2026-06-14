@@ -110,6 +110,10 @@ pub fn setup(filter: Option<String>) {
 #[wasm_bindgen]
 pub struct Session {
 	inner: moq_net::Session,
+	// Remote broadcasts the session announces are inserted here; we read them via
+	// `consumer`. Local broadcasts to publish are inserted into `publisher`.
+	consumer: moq_net::OriginConsumer,
+	publisher: moq_net::OriginProducer,
 }
 
 #[wasm_bindgen]
@@ -131,10 +135,25 @@ impl Session {
 	}
 
 	async fn handshake(transport: transport::Session) -> Result<Session, JsValue> {
-		// The default client shares one duplex origin for publish + consume,
-		// surfaced after connect as `Session::publisher` / `Session::consumer`.
-		let inner = moq_net::Client::new().connect(transport).await.map_err(js_err)?;
-		Ok(Session { inner })
+		// Wire a subscribe origin (the session inserts announced remote broadcasts
+		// into it; we hold a consumer to read them) and a publish origin (we insert
+		// local broadcasts into it; the session reads its consumer to serve them).
+		let subscribe = moq_net::Origin::random().produce();
+		let consumer = subscribe.consume();
+		let publisher = moq_net::Origin::random().produce();
+
+		let inner = moq_net::Client::new()
+			.with_subscriber(subscribe)
+			.with_publish(publisher.consume())
+			.connect(transport)
+			.await
+			.map_err(js_err)?;
+
+		Ok(Session {
+			inner,
+			consumer,
+			publisher,
+		})
 	}
 
 	/// The negotiated protocol version (e.g. "lite-05" or an IETF draft).
@@ -155,7 +174,7 @@ impl Session {
 	/// The read handle over remote broadcasts: announce discovery + consume.
 	pub fn consumer(&self) -> OriginConsumer {
 		OriginConsumer {
-			inner: self.inner.consumer().clone(),
+			inner: self.consumer.clone(),
 		}
 	}
 
@@ -164,7 +183,7 @@ impl Session {
 	/// The broadcast must have been created with `new Broadcast()`. The announce
 	/// stays live until the broadcast is closed (dropped).
 	pub fn publish(&self, path: String, broadcast: &Broadcast) -> Result<(), JsValue> {
-		broadcast.publish_to(self.inner.publisher(), &path)
+		broadcast.publish_to(&self.publisher, &path)
 	}
 }
 

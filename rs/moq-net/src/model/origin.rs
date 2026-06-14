@@ -2,7 +2,7 @@ use std::{
 	collections::{BTreeMap, HashMap, VecDeque},
 	fmt,
 	sync::atomic::{AtomicU64, Ordering},
-	task::Poll,
+	task::{Poll, ready},
 };
 
 use rand::RngExt;
@@ -760,6 +760,18 @@ impl OriginProducer {
 		}
 	}
 
+	/// A producer with *no* allowed prefixes: it can't publish anything and
+	/// advertises no subscribe interest (its `allowed()` is empty, so the
+	/// subscriber issues no ANNOUNCE_PLEASE). Used to fill an unset session half
+	/// so both the publisher and subscriber loops still run.
+	pub(crate) fn empty(info: Origin) -> Self {
+		Self {
+			info,
+			nodes: OriginNodes { nodes: Vec::new() },
+			root: PathOwned::default(),
+		}
+	}
+
 	/// Create and publish a new broadcast.
 	///
 	/// This is a helper method when you only want to publish a broadcast to a single origin.
@@ -768,7 +780,7 @@ impl OriginProducer {
 	/// error cases.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<BroadcastPublish, Error> {
 		let producer = BroadcastInfo::new().produce();
-		let publish = self.publish_broadcast(path, producer.consume())?;
+		let publish = self.publish_broadcast(path, &producer)?;
 		Ok(BroadcastPublish { producer, publish })
 	}
 
@@ -792,7 +804,12 @@ impl OriginProducer {
 	/// When the active guard is dropped, the backup that wins the same ordering is promoted and
 	/// reannounced. Backups whose guards drop before being promoted are silently removed.
 	#[must_use = "the broadcast is unannounced as soon as the returned guard is dropped"]
-	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> Result<OriginPublish, Error> {
+	pub fn publish_broadcast(
+		&self,
+		path: impl AsPath,
+		broadcast: impl Consume<BroadcastConsumer>,
+	) -> Result<OriginPublish, Error> {
+		let broadcast = broadcast.consume();
 		let path = path.as_path();
 
 		// Callers must filter reflections (a hop chain already containing our id) before publishing;
@@ -940,6 +957,62 @@ impl std::ops::DerefMut for BroadcastPublish {
 
 /// Cheap read handle over an origin's broadcast tree.
 ///
+/// Derive a read view from a handle.
+///
+/// Lets APIs accept either a producer or a consumer (e.g.
+/// [`Client::with_publisher`](crate::Client::with_publisher),
+/// [`OriginProducer::publish_broadcast`]). The blanket `&T` impl means you can
+/// pass by value (`foo(x)`) to hand off ownership, or by reference (`foo(&x)`)
+/// to keep it, without spelling out `.consume()`.
+pub trait Consume<T> {
+	fn consume(&self) -> T;
+}
+
+impl<T, U: Consume<T>> Consume<T> for &U {
+	fn consume(&self) -> T {
+		(**self).consume()
+	}
+}
+
+impl Consume<OriginConsumer> for OriginProducer {
+	fn consume(&self) -> OriginConsumer {
+		// Mirrors the inherent `OriginProducer::consume`; inlined to avoid the
+		// inherent-vs-trait `consume` ambiguity.
+		OriginConsumer::new(self.info, self.root.clone(), self.nodes.clone())
+	}
+}
+
+impl Consume<OriginConsumer> for OriginConsumer {
+	fn consume(&self) -> OriginConsumer {
+		self.clone()
+	}
+}
+
+impl Consume<crate::BroadcastConsumer> for crate::BroadcastProducer {
+	fn consume(&self) -> crate::BroadcastConsumer {
+		// The inherent `consume` shadows this trait method, so this delegates.
+		self.consume()
+	}
+}
+
+impl Consume<crate::BroadcastConsumer> for crate::BroadcastConsumer {
+	fn consume(&self) -> crate::BroadcastConsumer {
+		self.clone()
+	}
+}
+
+impl Consume<crate::TrackConsumer> for crate::TrackProducer {
+	fn consume(&self) -> crate::TrackConsumer {
+		self.consume()
+	}
+}
+
+impl Consume<crate::TrackConsumer> for crate::TrackConsumer {
+	fn consume(&self) -> crate::TrackConsumer {
+		self.clone()
+	}
+}
+
 /// Clones share the underlying tree state without allocating any per-cursor
 /// resources. To actually receive announce / unannounce events, call
 /// [`Self::announced`] to obtain an [`AnnounceConsumer`].
@@ -964,6 +1037,18 @@ impl std::ops::Deref for OriginConsumer {
 impl OriginConsumer {
 	fn new(info: Origin, root: PathOwned, nodes: OriginNodes) -> Self {
 		Self { info, nodes, root }
+	}
+
+	/// A view with this consumer's identity and root but no broadcasts:
+	/// [`announced`](Self::announced) yields nothing. Used to answer a peer's
+	/// announce-interest for a prefix outside our scope by announcing nothing,
+	/// rather than tearing the stream down.
+	pub(crate) fn empty(&self) -> Self {
+		Self {
+			info: self.info,
+			nodes: OriginNodes { nodes: Vec::new() },
+			root: self.root.clone(),
+		}
 	}
 
 	/// Subscribe to announce / unannounce events for this consumer's subtree.
@@ -1152,15 +1237,18 @@ impl AnnounceConsumer {
 	/// cursor is closed, or `Poll::Pending` after registering `waiter` to be
 	/// notified when the next update arrives.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<OriginAnnounce>> {
-		match self.state.poll(waiter, |state| match state.take() {
-			Some(item) => Poll::Ready(item),
-			None => Poll::Pending,
-		}) {
-			Poll::Ready(Ok(item)) => Poll::Ready(Some(item)),
+		let mut state = match ready!(self.state.poll(waiter, |state| {
+			if state.pending.is_empty() {
+				Poll::Pending
+			} else {
+				Poll::Ready(())
+			}
+		})) {
+			Ok(state) => state,
 			// Closed: discard the Ref so its MutexGuard doesn't escape this call.
-			Poll::Ready(Err(_)) => Poll::Ready(None),
-			Poll::Pending => Poll::Pending,
-		}
+			Err(_) => return Poll::Ready(None),
+		};
+		Poll::Ready(Some(state.take().expect("predicate guaranteed an update")))
 	}
 
 	/// Returns the next (un)announced broadcast without blocking.
@@ -1262,7 +1350,7 @@ impl OriginProducer {
 	/// watcher that drops the [`OriginPublish`] guard. Returns whether the publish was
 	/// accepted. Exercises [`OriginPublish`]'s `Drop` on the close path.
 	fn publish_broadcast_spawn(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
-		match self.publish_broadcast(path, broadcast.clone()) {
+		match self.publish_broadcast(path, &broadcast) {
 			Ok(publish) => {
 				web_async::spawn(async move {
 					broadcast.closed().await;

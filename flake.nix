@@ -89,7 +89,6 @@
             cargo-sort
             cargo-shear
             cargo-edit
-            cargo-sweep
             cargo-semver-checks
             cargo-deny
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just wasm`).
@@ -104,6 +103,10 @@
             # cpal's `alsa-sys` (moq-audio `capture` feature) links libasound on
             # Linux via pkg-config; macOS uses CoreAudio, so no dep there.
             pkgs.alsa-lib
+            # moq-video `vaapi` feature: cros-libva runs bindgen against the libva
+            # headers at build time (found via pkg-config), even though libva is
+            # dlopen'd at runtime (`vaapi_dlopen`). macOS has no VAAPI.
+            pkgs.libva
           ];
 
         # JavaScript dependencies
@@ -111,6 +114,9 @@
           bun
           # Only for NPM publishing
           nodejs_24
+          # JSR publishing. We call `deno publish` directly instead of `bunx jsr`
+          # so the release doesn't race on a runtime binary download.
+          deno
         ];
 
         # Python dependencies

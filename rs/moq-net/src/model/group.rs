@@ -109,26 +109,6 @@ impl GroupState {
 		}
 	}
 
-	/// Poll for the full payload of the frame at `index`, reading it in place.
-	///
-	/// Unlike [`Self::poll_get_frame`] this never mints a [`FrameConsumer`] (which
-	/// would churn the frame's consumer count and wake its waiters every poll); it
-	/// reads the cached [`FrameProducer`] directly. `waiter` is registered on the
-	/// frame's state so the reader wakes when it finishes.
-	fn poll_frame_read_all(&self, index: usize, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
-		if index < self.offset {
-			return Poll::Ready(Err(Error::CacheFull));
-		}
-		match self.frames.get(index - self.offset) {
-			Some(frame) => Poll::Ready(Ok(Some(ready!(frame.poll_read_all(waiter))?))),
-			None if self.fin => Poll::Ready(Ok(None)),
-			None => match &self.abort {
-				Some(err) => Poll::Ready(Err(err.clone())),
-				None => Poll::Pending,
-			},
-		}
-	}
-
 	fn poll_finished(&self) -> Poll<Result<u64>> {
 		if self.fin {
 			Poll::Ready(Ok((self.offset + self.frames.len()) as u64))
@@ -271,12 +251,16 @@ impl GroupProducer {
 
 	/// Abort the group with the given error.
 	///
-	/// No updates can be made after this point. Child frames are independent and
-	/// must be aborted separately if desired; existing frame consumers can still
-	/// finish reading any frames that were already created.
+	/// No updates can be made after this point. Drops the cached frames so a stale
+	/// [`GroupConsumer`] can't pin their buffers in memory forever; consumers that
+	/// haven't drained yet surface the abort error instead of the leftover cache.
+	/// Child frames are independent: a consumer that already pulled a
+	/// [`FrameConsumer`] keeps its own handle and can finish reading it.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut guard = modify(&self.state)?;
 		guard.abort = Some(err);
+		guard.frames.clear();
+		guard.cache = 0;
 		guard.close();
 		Ok(())
 	}
@@ -312,6 +296,23 @@ impl Clone for GroupProducer {
 			info: self.info.clone(),
 			state: self.state.clone(),
 			timescale: self.timescale,
+		}
+	}
+}
+
+impl Drop for GroupProducer {
+	fn drop(&mut self) {
+		// See TrackProducer::drop: the last producer dropping without a clean
+		// finish releases the cached frames so a stale consumer can't pin their
+		// buffers forever. A finished group keeps its cache so consumers can drain.
+		if !self.state.is_last() {
+			return;
+		}
+		if let Ok(mut state) = modify(&self.state)
+			&& !state.fin
+		{
+			state.frames.clear();
+			state.cache = 0;
 		}
 	}
 }
@@ -393,12 +394,13 @@ impl GroupConsumer {
 
 	/// Read the next frame's data all at once, without blocking.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
-		let index = self.index;
-		let Some(data) = ready!(self.poll(waiter, |state| state.poll_frame_read_all(index, waiter))?) else {
+		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
 			return Poll::Ready(Ok(None));
 		};
 
+		let data = ready!(frame.poll_read_all(waiter))?;
 		self.index += 1;
+
 		Poll::Ready(Ok(Some(data)))
 	}
 
@@ -409,15 +411,14 @@ impl GroupConsumer {
 
 	/// Read all of the chunks of the next frame, without blocking.
 	pub fn poll_read_frame_chunks(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Vec<Bytes>>>> {
-		let index = self.index;
-		let Some(data) = ready!(self.poll(waiter, |state| state.poll_frame_read_all(index, waiter))?) else {
+		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
 			return Poll::Ready(Ok(None));
 		};
 
+		let data = ready!(frame.poll_read_all_chunks(waiter))?;
 		self.index += 1;
-		// In-place reads return the whole frame as one slice; keep the chunked API
-		// shape (empty payload -> no chunks).
-		Poll::Ready(Ok(Some(if data.is_empty() { Vec::new() } else { vec![data] })))
+
+		Poll::Ready(Ok(Some(data)))
 	}
 
 	/// Read all of the chunks of the next frame.
@@ -534,6 +535,54 @@ mod test {
 
 		let result = consumer.next_frame().now_or_never().unwrap();
 		assert!(matches!(result, Err(crate::Error::Cancel)));
+	}
+
+	#[test]
+	fn abort_clears_cached_frames() {
+		let mut producer = Group { sequence: 0 }.produce();
+		producer.write_frame(Bytes::from_static(b"data")).unwrap();
+
+		// A stale consumer that never reads must not pin the cached frames.
+		let _consumer = producer.consume();
+		assert_eq!(producer.state.read().frames.len(), 1);
+
+		producer.abort(crate::Error::Cancel).unwrap();
+
+		let state = producer.state.read();
+		assert!(state.frames.is_empty(), "cached frames should be dropped on abort");
+		assert_eq!(state.cache, 0);
+	}
+
+	#[test]
+	fn drop_unfinished_clears_cached_frames() {
+		let producer = Group { sequence: 0 }.produce();
+		let mut writer = producer.clone();
+		writer.write_frame(Bytes::from_static(b"data")).unwrap();
+
+		// A stale consumer keeps the channel (and thus the cache) alive.
+		let mut consumer = producer.consume();
+		assert_eq!(producer.state.read().frames.len(), 1);
+
+		// Drop every producer without finishing: the cache is released.
+		drop(writer);
+		drop(producer);
+
+		let result = consumer.next_frame().now_or_never().unwrap();
+		assert!(matches!(result, Err(crate::Error::Dropped)));
+	}
+
+	#[test]
+	fn drop_finished_keeps_cached_frames() {
+		let mut producer = Group { sequence: 0 }.produce();
+		producer.write_frame(Bytes::from_static(b"data")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		drop(producer);
+
+		// A cleanly finished group keeps its cache so the consumer can still drain.
+		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame, Bytes::from_static(b"data"));
 	}
 
 	#[tokio::test]

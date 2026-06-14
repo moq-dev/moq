@@ -15,6 +15,12 @@ description: Command-line tools for MoQ media
 cargo install moq-cli
 ```
 
+### Using winget (Windows)
+
+```powershell
+winget install moq-dev.moq-cli
+```
+
 ### Using Nix
 
 ```bash
@@ -65,8 +71,7 @@ ffmpeg -i input.mp4 -f mpegts - | moq-cli publish - https://relay.example.com/an
 The `capture` subcommand captures and encodes from local devices directly, no
 external FFmpeg process required. It publishes the camera as an H.264 video
 track and the microphone as an Opus audio track on the same broadcast. It is
-gated behind the `capture` feature, whose video path pulls in a system FFmpeg
-(libav\*) build dependency (audio is pure-Rust via cpal):
+gated behind the `capture` feature:
 
 Build (or run) with the feature enabled:
 
@@ -88,11 +93,14 @@ moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --n
 moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --no-video
 ```
 
-Video capture uses the platform backend (avfoundation on macOS, v4l2 on Linux,
-dshow on Windows) and picks a hardware encoder (`h264_videotoolbox` /
-`h264_nvenc` / `h264_vaapi`) when one is present, falling back to software
-(`libx264`); force either with `--hardware` / `--software`. Audio capture uses
-cpal (CoreAudio / WASAPI / ALSA) and encodes Opus.
+Video capture uses a native per-platform backend (AVFoundation on macOS, V4L2 on
+Linux, Media Foundation on Windows) and picks a hardware H.264 encoder
+(VideoToolbox on macOS, NVENC on Linux NVIDIA, VAAPI on Linux Intel/AMD) when one
+is present, falling back to the built-in software encoder (openh264); force either
+with `--hardware` / `--software`. `--camera` takes a bare integer as a device index, otherwise a
+device path (Linux) or name (a friendly-name substring on Windows, the
+AVFoundation `uniqueID` on macOS). Audio capture uses cpal (CoreAudio / WASAPI /
+ALSA) and encodes Opus.
 
 Alternatively, pipe an external FFmpeg process as MPEG-TS:
 
@@ -154,7 +162,7 @@ Publish (read from stdin unless noted):
 
 - `avc3` - raw H.264 Annex-B
 - `fmp4` - fragmented MP4 / CMAF
-- `ts` - MPEG-TS (H.264 / H.265 video, AAC audio)
+- `ts` - MPEG-TS (H.264 / H.265 video; AAC, MP2, AC-3, or E-AC-3 audio)
 - `hls --playlist <url>` - HLS playlist ingest
 - `capture` - capture local devices directly (camera H.264 + microphone Opus; requires the `capture` build feature; does not read stdin)
 
@@ -181,6 +189,12 @@ TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
 (avc3 / hev1) and out-of-band (avc1 / hvc1, e.g. from an fMP4 import) video
 sources work: the parameter sets are read from the bitstream or the catalog
 `description` and re-injected as Annex-B on each keyframe.
+
+Broadcast audio (MP2, AC-3, E-AC-3) is carried verbatim: complete, well-formed
+frames pass through byte-exact, never transcoded; malformed input is rejected
+rather than mis-described. The catalog describes the codec honestly so a
+subscriber that can decode it (typically TS gear) picks it up; browsers cannot
+play these codecs and should skip the rendition.
 
 ## Authentication
 

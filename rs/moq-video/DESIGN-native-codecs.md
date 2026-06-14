@@ -1,8 +1,11 @@
 # Native H.264 codecs for moq-video (drop ffmpeg)
 
-Status: **phases 2-5 implemented** (openh264, VideoToolbox, NVENC, capture swap +
-ffmpeg removal). VAAPI (phase 6) is a separate follow-up PR. See "As built"
-at the bottom for where the implementation diverged from this plan.
+Status: **phases 2-6 implemented** (openh264, VideoToolbox, NVENC, VAAPI, capture
+swap + ffmpeg removal). Capture is now native on all three platforms (AVFoundation
+/ ScreenCaptureKit on macOS, V4L2 on Linux, Media Foundation on Windows), so
+**nokhwa is fully removed**. VAAPI is back via discord/cros-codecs with an NV12
+surface-upload input path; the zero-copy dmabuf capture is a follow-up. See "As
+built" at the bottom for where the implementation diverged from this plan.
 
 ## Goal
 
@@ -329,10 +332,15 @@ Where the implementation differs from the plan above:
   negotiated resolution, so capture frames already match the encoder; `encode_rgba`
   now requires input dims == encoder dims (it errors otherwise) instead of
   rescaling. This dropped swscale entirely.
-- **Capture (nokhwa) yields RGBA.** `Camera::read` decodes each frame to RGBA via
-  `decode_image::<RgbAFormat>`, uniformly handling MJPEG/YUYV/NV12 sources. Device
-  string is now "bare integer = index, else path/name" (the avfoundation `:none` /
-  dshow `video=` specifics are gone).
+- **Capture is per-platform native (nokhwa fully removed).** Each platform's
+  `Camera::read` yields a `Frame` the encoder can take: macOS hands VideoToolbox a
+  zero-copy `CVPixelBuffer` surface, Linux V4L2 and Windows Media Foundation hand
+  the software/NVENC path a CPU `I420`. macOS AVFoundation/ScreenCaptureKit and
+  Linux V4L2 (YUYV resampled, MJPEG via `zune-jpeg`) landed first; Windows uses an
+  `IMFSourceReader` with its video processor enabled to coerce the camera's native
+  format to NV12, which we deinterleave to I420 (`I420::from_nv12`). The device
+  string is uniform: "bare integer = index, else path/name" (a friendly-name
+  substring on Windows).
 - **`Error` slimmed.** The ffmpeg-specific variants (`Ffmpeg`, `NoCaptureBackend`,
   `NoVideoStream`) and the `From<ffmpeg_next::Error>` impl are removed; capture and
   encode failures now flow through `Error::Codec(anyhow)`.
@@ -350,13 +358,98 @@ Where the implementation differs from the plan above:
   default - feature unification here may need tweaking; (2) the flat input-buffer
   `write` matches NVENC's pitch (safe only for 64-aligned widths; we warn otherwise);
   (3) forced-IDR via `picture_type` with picture-type-decision enabled.
+- **Windows Media Foundation capture is UNVERIFIED on hardware.** The `windows`
+  0.62 FFI is fully type-checked against the `x86_64-pc-windows-msvc` target (the
+  whole crate can't cross-compile from the dev Mac because openh264's vendored C++
+  build needs MSVC, but a scratch crate confirms every Media Foundation call), and
+  the COM/refcount lifecycle is reviewed. Still needs a real Windows + webcam run
+  to confirm: (1) the source reader's video processor actually delivers NV12 for
+  common cameras (MJPEG/YUY2 sources); (2) `IMF2DBuffer::ContiguousCopyTo` yields
+  unpadded NV12 so the I420 deinterleave is correct; (3) the on-demand
+  open/`source.Shutdown()` cycle releases the camera (LED off) and reopens cleanly.
+
+### VAAPI reintroduced via discord/cros-codecs + NV12 surface upload
+
+VAAPI was dropped in #1704 because `cros-codecs 0.0.6` (still the latest release)
+caret-pins `cros-libva 0.0.12`, which does not compile against libva >= 2.23: the
+newer headers add `seg_id_block_size` / `va_reserved8` to
+`VAEncPictureParameterBufferVP9`, and `cros-libva 0.0.12`'s struct literal omits
+them. `cros-libva 0.0.13` fixes it, but `cros-codecs 0.0.6`'s `^0.0.12` pin won't
+accept it, and upstream cros-codecs is unmaintained (no release since June 2025).
+
+The unblock is [discord/cros-codecs](https://github.com/discord/cros-codecs), an
+actively-maintained fork (Discord ships it for Go Live) that bumps to cros-libva
+0.0.13 *and* hardens the H.264 VAAPI encoder (packed SPS/PPS + slice headers,
+`frame_num`, rate control). We consume it as a git dependency, no fork of our own:
+
+- `cros-codecs = { git = discord/cros-codecs, branch = "discord-0.0.5", features = ["vaapi_dlopen"] }`.
+- `vaapi_dlopen` pulls the cros-libva `dlopen` feature, which lives on
+  discord/cros-libva's `discord-0.0.13` branch, so the root `[patch.crates-io]`
+  points `cros-libva` there. Both git URLs are in `deny.toml`'s `allow-git`.
+
+**dlopen, like NVENC.** `dlopen` makes cros-libva load libva at runtime (no
+`cargo:rustc-link-lib`, no `DT_NEEDED libva.so.2`), so a `--features vaapi` binary
+links on a libva-less builder and loads on a libva-less machine, falling back to
+software (see `backend::open`). The build still needs libva *headers* for
+cros-libva's bindgen, so `libva` is in the nix devShell.
+
+**Input is an NV12 surface upload, not zero-copy dmabuf.** The encoder wants an
+NV12 VA surface, but UVC webcams deliver YUYV/MJPEG (decoded to CPU I420); they
+rarely expose NV12 to import zero-copy. So `backend/vaapi.rs` drives
+`new_native_vaapi` with a `VaSurfacePool`: each frame uploads I420 into a pooled
+surface as NV12 (`libva::Image`, honoring plane pitches) and encodes the surface.
+This works with the existing CPU V4L2 capture, no new capture code.
+
+Follow-up (not in this PR): the **zero-copy dmabuf path** for the rare NV12-capable
+V4L2 source. Re-add `Frame::DmaBuf`, a V4L2 `VIDIOC_EXPBUF` capture (the `v4l`
+crate exposes the raw ioctl but no dmabuf stream), and a `requires_dmabuf` capture
+coupling, then import the dmabuf into a VA surface (`MemoryType::DrmPrime2`).
+
+**NOT YET VALIDATED ON HARDWARE.** Compiles on Linux with libva headers; written
+against discord/cros-codecs `discord-0.0.5` with type/field names checked against
+source. Needs a Linux + Intel/AMD GPU to confirm: (1) the `low_power` entrypoint
+(recent Intel iHD often requires the low-power encode entrypoint, AMD the full
+one; we request full and let `Kind::Auto` fall back); (2) the NV12 upload
+pitch/offset handling round-trips; (3) `cargo deny` accepts the new transitive
+licenses (drm, drm-fourcc, etc.) once the vaapi graph resolves.
+
+### NVENC ships via dlopen (no driver dependency at build or load)
+
+For the "single binary reaches the GPU at runtime" goal, NVENC must not hard-link
+the driver. The stock `nvidia-video-codec-sdk` emits
+`cargo:rustc-link-lib=nvidia-encode` / `nvcuvid`, which would make an
+`--features nvenc` binary (a) impossible to link on a GPU-less builder and (b)
+fail to even load on a machine without the NVIDIA driver (`DT_NEEDED
+libnvidia-encode.so.1`), before `backend::open`'s software fallback could run.
+
+So `nvenc` dlopens everything at runtime, like `cudarc` does for CUDA:
+
+- `cudarc/fallback-dynamic-loading` dlopens `libcuda`; `cudarc/cuda-12020` pins the
+  CUDA API version so the build needs no CUDA toolkit.
+- `nvidia-video-codec-sdk/dynamic-loading` dlopens `libnvidia-encode`. This is a
+  small fork feature (see the root `[patch.crates-io]`): the SDK already routes
+  every call through a function table built from two entry points
+  (`NvEncodeAPICreateInstance` / `GetMaxSupportedVersion`); `dynamic-loading`
+  resolves those two via `dlopen` instead of linking them, and `build.rs` skips the
+  link directives.
+
+Result, verified on a GPU-less Linux box: `--features nvenc` builds, links, and the
+test suite runs and passes (NVENC unavailable -> falls back to openh264), and the
+binary has no `libnvidia-encode` / `libcuda` `DT_NEEDED`. So one portable `moq-cli`
+can carry NVENC and use it only where the driver is present. Upstream the
+`dynamic-loading` feature and drop the patch once merged.
 
 ### Follow-ups
 
-- VAAPI backend (phase 6) in a separate PR, behind a `vaapi` feature.
-- NVENC hardware validation on Linux+GPU / CI.
-- Live camera run (capture needs camera permission; only synthetic-frame encode is
-  tested here).
-- `doc/bin/cli.md`: the `capture` device-string semantics changed (index-or-path).
+- CI builds + tests NVENC normally on Linux (`cargo {check,test} -p moq-video
+  --all-features`); the dlopen feature means no GPU/driver and no special flags are
+  needed. moq-video stays excluded from the *workspace* `--all-features` runs only
+  because its SDK crate has no macOS bindings (see `rs/justfile`'s `ci` recipe).
+- Still needed on real hardware: NVENC encode validation on a Linux+GPU box (pitch
+  alignment, forced-IDR); only synthetic-frame software encode is tested here.
+- Live camera run (capture needs camera/screen permission, which a headless or
+  agent-spawned process can't obtain; run `moq-cli ... capture` from a user
+  terminal). On Windows this is also where the Media Foundation path gets its
+  first real exercise (see the unverified note above).
 - Consider reusing NVENC input/output buffers across frames (currently allocated
   per frame to sidestep the self-referential Session borrow).
