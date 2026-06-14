@@ -1,5 +1,11 @@
 import { Signal } from "@moq/signals";
 
+/** Maximum bytes of frames cached in a group before old frames are evicted from the front. */
+export const MAX_GROUP_CACHE_BYTES = 32 * 1024 * 1024;
+
+/** Maximum number of frames cached in a group before old frames are evicted from the front. */
+export const MAX_GROUP_FRAMES = 1024;
+
 export class GroupState {
 	frames = new Signal<Uint8Array[]>([]);
 	closed = new Signal<boolean | Error>(false);
@@ -15,6 +21,9 @@ export class Group {
 	// Downstream copies that receive every frame written here, synchronously. Used by
 	// TrackProducer to fan one source group out to per-subscriber groups.
 	#mirrors?: Set<Group>;
+
+	// Running byte total of the frames currently cached, for the eviction cap.
+	#cacheBytes = 0;
 
 	constructor(sequence: number) {
 		this.sequence = sequence;
@@ -36,8 +45,17 @@ export class Group {
 	writeFrame(frame: Uint8Array) {
 		if (this.state.closed.peek()) throw new Error("group is closed");
 
+		this.#cacheBytes += frame.byteLength;
 		this.state.frames.mutate((frames) => {
 			frames.push(frame);
+
+			// Bound an unbounded (e.g. never-closed) group: drop the oldest frames once
+			// over either cap. A consumer too far behind silently skips them.
+			while (frames.length > MAX_GROUP_FRAMES || this.#cacheBytes > MAX_GROUP_CACHE_BYTES) {
+				const evicted = frames.shift();
+				if (!evicted) break;
+				this.#cacheBytes -= evicted.byteLength;
+			}
 		});
 
 		this.state.total.update((total) => total + 1);
