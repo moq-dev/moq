@@ -612,8 +612,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		tracing::debug!(prefix = %self.origin.absolute(&prefix), "subscribe_namespace stream");
 
 		// A peer may subscribe to a namespace this session can't serve (e.g. a publish-only
-		// token). Hand back an empty consumer that never announces rather than erroring,
-		// which would tear down the whole session.
+		// token). Hand back a closed empty consumer so the stream is FINed (telling the peer
+		// no namespaces will ever come) rather than erroring, which would tear down the
+		// whole session.
 		let mut origin = self.origin.scope_or_empty(&[prefix.as_path()]);
 
 		// Send OK response

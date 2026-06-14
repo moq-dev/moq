@@ -149,8 +149,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let exclude_hop = interest.exclude_hop;
 
 		// A peer may announce-interest in a prefix this session can't serve (e.g. a
-		// publish-only token). Hand back an empty consumer that never announces rather
-		// than erroring, which would tear down the whole session.
+		// publish-only token). Hand back a closed empty consumer so run_announce FINs the
+		// stream (telling the peer no announcements will ever come) rather than erroring,
+		// which would tear down the whole session.
 		let mut origin = self.origin.scope_or_empty(&[prefix.as_path()]);
 
 		let version = self.version;

@@ -963,17 +963,22 @@ impl OriginConsumer {
 		))
 	}
 
-	/// Like [`Self::scope`], but returns an empty consumer instead of `None` when the
-	/// prefixes are disjoint from this consumer's scope.
+	/// Like [`Self::scope`], but returns an already-closed empty consumer instead of `None`
+	/// when the prefixes are disjoint from this consumer's scope.
 	///
-	/// The empty consumer never announces anything: `announced()` stays pending forever.
-	/// Use this on the publisher's announce path so a peer that subscribes to a prefix we
-	/// can't serve gets silence rather than an error that tears down the whole session. A
-	/// publish-only token can then coexist with subscribe interest from the same peer.
+	/// The empty consumer has no broadcasts and is closed, so `announced()` resolves to
+	/// `None` immediately. Use this on the publisher's announce path so a peer that
+	/// subscribes to a prefix we can't serve (e.g. a publish-only token) gets a clean FIN
+	/// on the announce stream rather than an error that tears down the whole session, or
+	/// silence that leaves it waiting forever for announcements that can never come.
 	pub fn scope_or_empty(&self, prefixes: &[Path]) -> OriginConsumer {
 		match self.scope(prefixes) {
 			Some(scoped) => scoped,
-			None => OriginConsumer::new(self.info, self.root.clone(), OriginNodes { nodes: Vec::new() }),
+			None => {
+				let empty = OriginConsumer::new(self.info, self.root.clone(), OriginNodes { nodes: Vec::new() });
+				empty.state.close().ok();
+				empty
+			}
 		}
 	}
 
@@ -2084,14 +2089,14 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_scope_or_empty_disjoint_is_noop() {
+	async fn test_scope_or_empty_disjoint_is_closed() {
 		let origin = Origin::random().produce();
 		let limited = origin
 			.consume()
 			.scope(&["allowed".into()])
 			.expect("should create limited");
 
-		// Disjoint prefix: scope() bails, but scope_or_empty() hands back a live consumer.
+		// Disjoint prefix: scope() bails, but scope_or_empty() hands back a closed consumer.
 		assert!(limited.scope(&["other".into()]).is_none());
 		let mut empty = limited.scope_or_empty(&["other".into()]);
 
@@ -2102,10 +2107,12 @@ mod tests {
 		tokio::task::yield_now().await;
 
 		assert!(empty.try_announced().is_none(), "empty consumer must never announce");
-		assert!(
-			empty.announced().now_or_never().is_none(),
-			"empty consumer must pend, not close"
-		);
+
+		// Already closed: announced() resolves to None immediately (rather than pending) so
+		// the announce loop FINs the stream instead of leaving the peer waiting forever.
+		let resolved = empty.announced().now_or_never();
+		assert!(resolved.is_some(), "must resolve immediately, not pend");
+		assert!(resolved.unwrap().is_none(), "must resolve to None (closed)");
 	}
 
 	#[tokio::test]
