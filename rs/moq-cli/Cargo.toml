@@ -19,9 +19,11 @@ quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
 websocket = ["moq-native/websocket"]
 # Device capture (camera + microphone) + encode/publish. Off by default because
-# the video path pulls in a system ffmpeg (libav*) build dependency (audio is
-# pure-Rust via cpal). Enable with `cargo build -p moq-cli --features capture`
-# (the nix dev shell provides ffmpeg).
+# it pulls in moq-video + moq-audio capture, which add system build deps on Linux
+# (camera: `v4l`/v4l2-sys-mit needs libclang + V4L2 headers via bindgen; mic: cpal
+# needs ALSA/libasound), plus binary size. macOS/Windows use OS frameworks, no
+# extra install. H.264 is vendored static (openh264), so no system ffmpeg/libav.
+# Enable with `cargo build -p moq-cli --features capture`.
 capture = ["dep:moq-video", "dep:moq-audio", "moq-audio/capture"]
 
 [dependencies]
