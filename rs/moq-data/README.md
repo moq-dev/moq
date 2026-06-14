@@ -34,7 +34,7 @@ while let Some(names) = consumer.next().await? {
 
 Each group is self-contained: its first frame is a full snapshot of every item and any following frames are single `+` (insert) or `-` (remove) deltas applied in order. A consumer jumps to the newest group, reads the snapshot, and replays the deltas.
 
-Items are arbitrary binary data: implement the `set::Item` trait (encode to bytes, decode back) for any type. `String`, `Vec<u8>`, and `bytes::Bytes` are supported out of the box.
+Items are arbitrary binary data: implement the `set::Item` trait for any type. It encodes straight into the frame's `bytes::BufMut` (one copy, no intermediate buffer) and decodes from a `bytes::Bytes` slice. `String`, `Vec<u8>`, and `bytes::Bytes` are supported out of the box.
 
 Deltas are on by default (`Config { delta_ratio: Some(2.0) }`); a delta is appended while the group stays within `delta_ratio` times the size of a fresh snapshot, otherwise a new snapshot group is started. Set `delta_ratio: None` to publish a full snapshot per change.
 

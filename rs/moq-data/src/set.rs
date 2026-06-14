@@ -62,18 +62,33 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Two items are the same set member iff they're equal under [`Eq`]/[`Hash`], so distinct items must
 /// encode to distinct bytes.
 pub trait Item: Clone + Eq + Hash {
-	/// Encode the item to its wire bytes.
-	fn encode(&self) -> Bytes;
+	/// The number of bytes [`encode`](Item::encode) writes.
+	///
+	/// Read up front to length-prefix the item in a snapshot, so it must equal the number of bytes
+	/// `encode` goes on to write.
+	fn size(&self) -> usize;
 
-	/// Decode an item from wire bytes.
+	/// Encode the item's bytes directly into `buf`, writing exactly [`size`](Item::size) bytes.
+	///
+	/// Writing into the frame buffer (rather than returning a fresh `Bytes`) keeps a string or byte
+	/// vector to a single copy.
+	fn encode<B: BufMut>(&self, buf: &mut B);
+
+	/// Decode an item from its wire bytes.
+	///
+	/// Takes [`Bytes`] so an implementation can keep a zero-copy slice of the frame if it wants one.
 	fn decode(bytes: Bytes) -> Result<Self>
 	where
 		Self: Sized;
 }
 
 impl Item for String {
-	fn encode(&self) -> Bytes {
-		Bytes::copy_from_slice(self.as_bytes())
+	fn size(&self) -> usize {
+		self.len()
+	}
+
+	fn encode<B: BufMut>(&self, buf: &mut B) {
+		buf.put_slice(self.as_bytes());
 	}
 
 	fn decode(bytes: Bytes) -> Result<Self> {
@@ -82,8 +97,12 @@ impl Item for String {
 }
 
 impl Item for Vec<u8> {
-	fn encode(&self) -> Bytes {
-		Bytes::copy_from_slice(self)
+	fn size(&self) -> usize {
+		self.len()
+	}
+
+	fn encode<B: BufMut>(&self, buf: &mut B) {
+		buf.put_slice(self);
 	}
 
 	fn decode(bytes: Bytes) -> Result<Self> {
@@ -92,8 +111,12 @@ impl Item for Vec<u8> {
 }
 
 impl Item for Bytes {
-	fn encode(&self) -> Bytes {
-		self.clone()
+	fn size(&self) -> usize {
+		self.len()
+	}
+
+	fn encode<B: BufMut>(&self, buf: &mut B) {
+		buf.put_slice(self);
 	}
 
 	fn decode(bytes: Bytes) -> Result<Self> {
@@ -154,10 +177,10 @@ impl<T: Item> Producer<T> {
 			return Ok(false);
 		}
 
-		// Encode while we still own the item, then move it into the set so the snapshot reflects it.
-		let bytes = item.encode();
+		// Build the delta from a reference, then move the item into the set so a snapshot reflects it.
+		let delta = encode_delta(INSERT, &item);
 		self.current.insert(item);
-		self.publish(INSERT, bytes)?;
+		self.publish(delta)?;
 		Ok(true)
 	}
 
@@ -171,8 +194,8 @@ impl<T: Item> Producer<T> {
 		let Some(removed) = self.current.take(item) else {
 			return Ok(false);
 		};
-		let bytes = removed.encode();
-		self.publish(REMOVE, bytes)?;
+		let delta = encode_delta(REMOVE, &removed);
+		self.publish(delta)?;
 		Ok(true)
 	}
 
@@ -214,17 +237,18 @@ impl<T: Item> Producer<T> {
 		Ok(())
 	}
 
-	/// Publish a single change, either as a delta on the open group or a fresh snapshot group. The
-	/// change is already reflected in `self.current`, so a snapshot here captures it.
-	fn publish(&mut self, op: u8, item: Bytes) -> Result<()> {
+	/// Publish a single change, either as the prebuilt `delta` frame on the open group or a fresh
+	/// snapshot group. The change is already reflected in `self.current`, so a snapshot captures it
+	/// and the `delta` is discarded.
+	fn publish(&mut self, delta: Bytes) -> Result<()> {
 		let snapshot = encode_snapshot(&self.current)?;
-		let delta_len = 1 + item.len() as u64;
+		let delta_len = delta.len() as u64;
 
 		if self.should_snapshot(delta_len, snapshot.len() as u64) {
 			self.write_snapshot(snapshot)
 		} else {
 			let group = self.group.as_mut().expect("delta requires an open group");
-			group.write_frame(encode_delta(op, &item))?;
+			group.write_frame(delta)?;
 			self.group_frames += 1;
 			self.group_delta_bytes += delta_len;
 			Ok(())
@@ -361,10 +385,9 @@ fn encode_snapshot<T: Item>(set: &HashSet<T>) -> Result<Bytes> {
 	let mut buf = BytesMut::new();
 	buf.put_u32(count);
 	for item in set {
-		let bytes = item.encode();
-		let len = u32::try_from(bytes.len()).map_err(|_| Error::Malformed("item is too large".into()))?;
+		let len = u32::try_from(item.size()).map_err(|_| Error::Malformed("item is too large".into()))?;
 		buf.put_u32(len);
-		buf.put_slice(&bytes);
+		item.encode(&mut buf);
 	}
 	Ok(buf.freeze())
 }
@@ -402,10 +425,10 @@ fn decode_snapshot<T: Item>(mut frame: Bytes) -> Result<HashSet<T>> {
 }
 
 /// Encode a delta frame: one op byte followed by the item bytes.
-fn encode_delta(op: u8, item: &Bytes) -> Bytes {
-	let mut buf = BytesMut::with_capacity(1 + item.len());
+fn encode_delta<T: Item>(op: u8, item: &T) -> Bytes {
+	let mut buf = BytesMut::with_capacity(1 + item.size());
 	buf.put_u8(op);
-	buf.put_slice(item);
+	item.encode(&mut buf);
 	buf.freeze()
 }
 
@@ -569,5 +592,52 @@ mod test {
 
 		let expected: HashSet<Vec<u8>> = [vec![0x00, 0xff, 0x42], vec![0x01]].into_iter().collect();
 		assert_eq!(last.unwrap(), expected);
+	}
+
+	#[test]
+	fn custom_item_roundtrips() {
+		// A user type that encodes itself directly into the frame buffer, no intermediate `Bytes`.
+		#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+		struct Point {
+			x: u16,
+			y: u16,
+		}
+
+		impl Item for Point {
+			fn size(&self) -> usize {
+				4
+			}
+
+			fn encode<B: BufMut>(&self, buf: &mut B) {
+				buf.put_u16(self.x);
+				buf.put_u16(self.y);
+			}
+
+			fn decode(mut bytes: Bytes) -> Result<Self> {
+				if bytes.remaining() != 4 {
+					return Err(Error::Item("point must be 4 bytes".into()));
+				}
+				Ok(Point {
+					x: bytes.get_u16(),
+					y: bytes.get_u16(),
+				})
+			}
+		}
+
+		let track = moq_net::Track::new("test").produce();
+		let sub = track.consume();
+		let mut producer = Producer::<Point>::new(track, Config::default());
+		producer.insert(Point { x: 1, y: 2 }).unwrap();
+		producer.insert(Point { x: 3, y: 4 }).unwrap();
+		producer.remove(&Point { x: 1, y: 2 }).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = Consumer::<Point>::new(sub);
+		let waiter = kio::Waiter::noop();
+		let mut last = None;
+		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
+			last = Some(value);
+		}
+		assert_eq!(last.unwrap(), [Point { x: 3, y: 4 }].into_iter().collect());
 	}
 }
