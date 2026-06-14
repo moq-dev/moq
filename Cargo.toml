@@ -20,6 +20,7 @@ members = [
     "rs/moq-rtc",
     "rs/moq-token",
     "rs/moq-token-cli",
+    "rs/moq-vaapi",
     "rs/moq-video",
     "rs/moq-wasm",
 ]
@@ -65,6 +66,7 @@ moq-mux = { version = "0.5", path = "rs/moq-mux" }
 moq-native = { version = "0.17", path = "rs/moq-native", default-features = false }
 moq-net = { version = "0.1", path = "rs/moq-net" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
+moq-vaapi = { version = "0.0.1", path = "rs/moq-vaapi" }
 moq-video = { version = "0.0.3", path = "rs/moq-video" }
 qmux = { version = "0.1.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
