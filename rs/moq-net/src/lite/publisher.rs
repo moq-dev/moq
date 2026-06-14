@@ -153,8 +153,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// If the requested prefix is outside our scope (an empty origin, or a token
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
-		// empty set rather than erroring, which would reset the stream and look fatal
-		// to the peer.
+		// empty set and keep the stream open (the subscriber treats a FIN here as a
+		// fatal stream close), rather than erroring, which would reset the stream.
 		let origin = self
 			.origin
 			.scope(&[prefix.as_path()])
