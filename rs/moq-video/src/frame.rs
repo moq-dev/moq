@@ -154,12 +154,8 @@ impl I420 {
 
 		let mut data = vec![0u8; Self::len(width, height)];
 		data[..luma].copy_from_slice(&nv12[..luma]);
-		let uv = &nv12[luma..need];
 		let (u_dst, v_dst) = data[luma..].split_at_mut(chroma);
-		for i in 0..chroma {
-			u_dst[i] = uv[i * 2];
-			v_dst[i] = uv[i * 2 + 1];
-		}
+		deinterleave_uv(&nv12[luma..need], u_dst, v_dst);
 		Ok(Self { width, height, data })
 	}
 
@@ -193,6 +189,26 @@ impl I420 {
 	pub(crate) fn v(&self) -> &[u8] {
 		let start = self.luma_len() + self.chroma_len();
 		&self.data[start..start + self.chroma_len()]
+	}
+}
+
+/// Interleave separate U and V planes into a packed NV12 chroma plane
+/// (`u[i], v[i]` -> `uv[2i], uv[2i+1]`). `uv` must be twice the length of `u`.
+#[cfg(target_os = "windows")]
+pub(crate) fn interleave_uv(u: &[u8], v: &[u8], uv: &mut [u8]) {
+	for (pair, (u, v)) in uv.chunks_exact_mut(2).zip(u.iter().zip(v)) {
+		pair[0] = *u;
+		pair[1] = *v;
+	}
+}
+
+/// Split a packed NV12 chroma plane into separate U and V planes, the inverse of
+/// [`interleave_uv`].
+#[cfg(target_os = "windows")]
+pub(crate) fn deinterleave_uv(uv: &[u8], u: &mut [u8], v: &mut [u8]) {
+	for (pair, (u, v)) in uv.chunks_exact(2).zip(u.iter_mut().zip(v)) {
+		*u = pair[0];
+		*v = pair[1];
 	}
 }
 

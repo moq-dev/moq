@@ -21,24 +21,25 @@ use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
 	CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVGOPSize,
 	CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI, IMFDXGIDeviceManager, IMFMediaBuffer,
-	IMFMediaEventGenerator, IMFSample, IMFTransform, MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT,
-	MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT, MF_EVENT_FLAG_NONE, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
-	MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
-	MF_TRANSFORM_ASYNC_UNLOCK, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
-	MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
-	MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-	MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER,
-	MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264,
-	MFVideoFormat_NV12, MFVideoInterlace_Progressive, eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_High,
+	IMFMediaEvent, IMFMediaEventGenerator, IMFSample, IMFTransform, METransformHaveOutput, METransformNeedInput,
+	MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT,
+	MF_EVENT_FLAG_NONE, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
+	MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK, MFCreateDXGIDeviceManager,
+	MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video,
+	MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_DRAIN,
+	MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+	MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
+	MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive, eAVEncCommonRateControlMode_CBR,
+	eAVEncH264VProfile_High,
 };
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::Interface;
 
 use super::super::encoder::Config;
 use super::Backend;
 use crate::Error;
-use crate::frame::Frame;
+use crate::frame::{Frame, interleave_uv};
+use crate::mf::{ComGuard, mf_err, pack_2x32};
 
 pub(crate) const NAME: &str = "mediafoundation";
 
@@ -46,40 +47,6 @@ pub(crate) const NAME: &str = "mediafoundation";
 /// base). Timestamps only need to increase; the moq timestamp is applied
 /// downstream, so a monotonic index over the framerate is enough.
 const HNS_PER_SEC: i64 = 10_000_000;
-
-fn mf_err(ctx: &str, e: windows::core::Error) -> Error {
-	Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
-}
-
-/// COM (MTA) + Media Foundation lifetime for the encode thread, balanced on
-/// drop. Refcounted, so it nests fine with the capture source's own guard when
-/// both run on the same blocking thread.
-struct ComGuard;
-
-impl ComGuard {
-	fn new() -> Result<Self, Error> {
-		unsafe {
-			CoInitializeEx(None, COINIT_MULTITHREADED)
-				.ok()
-				.map_err(|e| mf_err("CoInitializeEx", e))?;
-			windows::Win32::Media::MediaFoundation::MFStartup(
-				windows::Win32::Media::MediaFoundation::MF_VERSION,
-				windows::Win32::Media::MediaFoundation::MFSTARTUP_FULL,
-			)
-			.map_err(|e| mf_err("MFStartup", e))?;
-		}
-		Ok(Self)
-	}
-}
-
-impl Drop for ComGuard {
-	fn drop(&mut self) {
-		unsafe {
-			let _ = windows::Win32::Media::MediaFoundation::MFShutdown();
-			CoUninitialize();
-		}
-	}
-}
 
 pub(crate) struct MediaFoundation {
 	transform: IMFTransform,
@@ -95,6 +62,9 @@ pub(crate) struct MediaFoundation {
 	started: bool,
 	/// The MFT allocates its own output samples (true for hardware encoders).
 	provides_samples: bool,
+	/// Output buffer size we must allocate when `provides_samples` is false.
+	/// Cached from `GetOutputStreamInfo` so the output hot path doesn't re-query.
+	output_size: u32,
 	/// True once the MFT has asked for input and we haven't fed it since.
 	needs_input: bool,
 	sample_index: i64,
@@ -144,6 +114,7 @@ impl MediaFoundation {
 			gop: config.gop,
 			started: false,
 			provides_samples: false,
+			output_size: 0,
 			needs_input: false,
 			sample_index: 0,
 			_manager: None,
@@ -170,13 +141,7 @@ impl MediaFoundation {
 		self.configure_codec_api()?;
 		self.set_output_type()?;
 		self.set_input_type()?;
-
-		let info = unsafe {
-			self.transform
-				.GetOutputStreamInfo(0)
-				.map_err(|e| mf_err("GetOutputStreamInfo", e))?
-		};
-		self.provides_samples = info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
+		self.read_output_info()?;
 
 		unsafe {
 			self.transform
@@ -187,6 +152,19 @@ impl MediaFoundation {
 				.map_err(|e| mf_err("start of stream", e))?;
 		}
 		self.started = true;
+		Ok(())
+	}
+
+	/// Cache whether the MFT provides its own output samples and, if not, how
+	/// big a buffer we must allocate. Re-read after a format renegotiation.
+	fn read_output_info(&mut self) -> Result<(), Error> {
+		let info = unsafe {
+			self.transform
+				.GetOutputStreamInfo(0)
+				.map_err(|e| mf_err("GetOutputStreamInfo", e))?
+		};
+		self.provides_samples = info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
+		self.output_size = info.cbSize;
 		Ok(())
 	}
 
@@ -323,15 +301,14 @@ impl MediaFoundation {
 				.Lock(&mut ptr_out, None, None)
 				.map_err(|e| mf_err("lock NV12 buffer", e))?;
 		}
+		// SAFETY: we wrote `len` bytes' worth via the slice below and hold the lock
+		// until `Unlock`.
+		let nv12 = unsafe { std::slice::from_raw_parts_mut(ptr_out, len) };
 		// Y plane verbatim, then interleave U/V into the NV12 chroma plane.
-		let (u, v) = (i420.u(), i420.v());
+		let (y_dst, uv_dst) = nv12.split_at_mut(w * h);
+		y_dst.copy_from_slice(i420.y());
+		interleave_uv(i420.u(), i420.v(), uv_dst);
 		unsafe {
-			ptr::copy_nonoverlapping(i420.y().as_ptr(), ptr_out, w * h);
-			let uv = ptr_out.add(w * h);
-			for i in 0..cw * ch {
-				*uv.add(i * 2) = u[i];
-				*uv.add(i * 2 + 1) = v[i];
-			}
 			let _ = buffer.Unlock();
 			buffer
 				.SetCurrentLength(len as u32)
@@ -365,17 +342,18 @@ impl MediaFoundation {
 		}
 	}
 
-	fn handle_event(
-		&mut self,
-		event: &windows::Win32::Media::MediaFoundation::IMFMediaEvent,
-		out: &mut Vec<Bytes>,
-	) -> Result<(), Error> {
-		let kind = unsafe { event.GetType().map_err(|e| mf_err("event GetType", e))? };
-		// METransformNeedInput / METransformHaveOutput aren't exposed as named
-		// constants in this binding; their numeric values are part of the ABI.
-		const NEED_INPUT: u32 = 601;
-		const HAVE_OUTPUT: u32 = 602;
-		match kind {
+	fn handle_event(&mut self, event: &IMFMediaEvent, out: &mut Vec<Bytes>) -> Result<(), Error> {
+		// Surface an async failure (e.g. an MEError event) instead of looping in
+		// `wait_for_input` forever for an input request that will never come.
+		unsafe { event.GetStatus() }
+			.map_err(|e| mf_err("event GetStatus", e))?
+			.ok()
+			.map_err(|e| mf_err("encoder reported a failed event", e))?;
+
+		// `GetType` returns the raw `MF_EVENT_TYPE` value as a u32.
+		const NEED_INPUT: u32 = METransformNeedInput.0 as u32;
+		const HAVE_OUTPUT: u32 = METransformHaveOutput.0 as u32;
+		match unsafe { event.GetType().map_err(|e| mf_err("event GetType", e))? } {
 			NEED_INPUT => self.needs_input = true,
 			HAVE_OUTPUT => {
 				if let Some(packet) = self.process_output()? {
@@ -393,12 +371,7 @@ impl MediaFoundation {
 		let provided = if self.provides_samples {
 			None
 		} else {
-			let info = unsafe {
-				self.transform
-					.GetOutputStreamInfo(0)
-					.map_err(|e| mf_err("GetOutputStreamInfo", e))?
-			};
-			let buffer = unsafe { MFCreateMemoryBuffer(info.cbSize).map_err(|e| mf_err("output buffer", e))? };
+			let buffer = unsafe { MFCreateMemoryBuffer(self.output_size).map_err(|e| mf_err("output buffer", e))? };
 			let sample = unsafe { MFCreateSample().map_err(|e| mf_err("output sample", e))? };
 			unsafe { sample.AddBuffer(&buffer).map_err(|e| mf_err("output AddBuffer", e))? };
 			Some(sample)
@@ -422,9 +395,10 @@ impl MediaFoundation {
 			Ok(()) => {}
 			Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
 			Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
-				// The encoder revised its output format; re-apply ours and retry
-				// on the next event.
+				// The encoder revised its output format; re-apply ours, refresh the
+				// cached output-buffer info, and retry on the next event.
 				self.set_output_type()?;
+				self.read_output_info()?;
 				return Ok(None);
 			}
 			Err(e) => return Err(mf_err("ProcessOutput", e)),
@@ -562,10 +536,6 @@ fn sample_to_bytes(sample: &IMFSample) -> Result<Bytes, Error> {
 		let _ = buffer.Unlock();
 	}
 	Ok(bytes)
-}
-
-fn pack_2x32(hi: u32, lo: u32) -> u64 {
-	((hi as u64) << 32) | lo as u64
 }
 
 fn clamp_u32(value: u64) -> u32 {

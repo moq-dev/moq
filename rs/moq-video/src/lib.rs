@@ -36,4 +36,7 @@ pub mod encode;
 mod error;
 mod frame;
 
+#[cfg(target_os = "windows")]
+mod mf;
+
 pub use error::Error;
