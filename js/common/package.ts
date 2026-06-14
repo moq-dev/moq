@@ -154,10 +154,21 @@ function writeJsrConfig() {
 
 	injectSelfTypes();
 
+	// JSR validates the license field as a single recognized SPDX identifier, not
+	// an expression: it rejects "(MIT OR Apache-2.0)". Take the first identifier
+	// from a dual-license expression so the package keeps a valid license field.
+	const license =
+		typeof pkg.license === "string"
+			? pkg.license
+					.replace(/[()]/g, "")
+					.split(/\s+(?:OR|AND)\s+/i)[0]
+					.trim()
+			: undefined;
+
 	const jsr = {
 		name: pkg.name,
 		version: pkg.version,
-		...(pkg.license ? { license: pkg.license } : {}),
+		...(license ? { license } : {}),
 		exports,
 		...(Object.keys(imports).length ? { imports } : {}),
 		// dist is gitignored, so un-ignore it with a "!" negation; JSR honors
@@ -180,6 +191,14 @@ function injectSelfTypes() {
 		const body = readFileSync(js, "utf8");
 		if (body.includes("@ts-self-types")) continue;
 		// Sibling .d.ts (same directory), so just its basename.
-		writeFileSync(js, `/* @ts-self-types="./${basename(dts)}" */\n${body}`);
+		const directive = `/* @ts-self-types="./${basename(dts)}" */\n`;
+		// A shebang (bin entrypoints) must stay on line 1, so insert after it;
+		// otherwise the directive goes first.
+		if (body.startsWith("#!")) {
+			const nl = body.indexOf("\n") + 1;
+			writeFileSync(js, body.slice(0, nl) + directive + body.slice(nl));
+		} else {
+			writeFileSync(js, directive + body);
+		}
 	}
 }
