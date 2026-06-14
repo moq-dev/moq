@@ -68,39 +68,7 @@ ffmpeg -i input.mp4 -f mpegts - | moq-cli publish - https://relay.example.com/an
 
 ### Capture a Webcam
 
-The `capture` subcommand captures and encodes from local devices directly, no
-external FFmpeg process required. It publishes the camera as an H.264 video
-track and the microphone as an Opus audio track on the same broadcast. It is
-gated behind the `capture` feature, whose video path pulls in a system FFmpeg
-(libav\*) build dependency (audio is pure-Rust via cpal):
-
-Build (or run) with the feature enabled:
-
-```bash
-cargo build --release -p moq-cli --features capture
-# or run straight from a checkout:
-cargo run -p moq-cli --features capture -- publish --url https://relay.example.com --broadcast cam.hang capture
-
-# Default camera + microphone, hardware-encoded H.264 when available:
-moq-cli publish --url https://relay.example.com --broadcast cam.hang capture
-
-# Pick devices, resolution, and bitrates:
-moq-cli publish --url https://relay.example.com --broadcast cam.hang \
-    capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 \
-            --microphone "MacBook Pro Microphone" --audio-bitrate 64000
-
-# One medium only:
-moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --no-audio
-moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --no-video
-```
-
-Video capture uses the platform backend (avfoundation on macOS, v4l2 on Linux,
-dshow on Windows) and picks a hardware encoder (`h264_videotoolbox` /
-`h264_nvenc` / `h264_vaapi`) when one is present, falling back to software
-(`libx264`); force either with `--hardware` / `--software`. Audio capture uses
-cpal (CoreAudio / WASAPI / ALSA) and encodes Opus.
-
-Alternatively, pipe an external FFmpeg process as MPEG-TS:
+Pipe an external FFmpeg process as MPEG-TS:
 
 ```bash
 # macOS
