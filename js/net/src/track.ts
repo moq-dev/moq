@@ -1,5 +1,5 @@
 import { Signal } from "@moq/signals";
-import { Group } from "./group.ts";
+import { CacheFull, Group } from "./group.ts";
 
 /** Default {@link TrackInfo.cache} window (milliseconds) when the publisher doesn't set one. */
 export const DEFAULT_CACHE_MS = 5000;
@@ -337,6 +337,8 @@ export class TrackSubscriber extends TrackHandle {
 
 			// Discard old groups.
 			while (groups.length > 1) {
+				if (groups[0].state.offset > 0) throw new CacheFull();
+
 				const frames = groups[0].state.frames.peek();
 				const next = frames.shift();
 				if (next) {
@@ -360,6 +362,8 @@ export class TrackSubscriber extends TrackHandle {
 
 			// If there's a group, wait for a frame.
 			const group = groups[0];
+			if (group.state.offset > 0) throw new CacheFull();
+
 			const frames = group.state.frames.peek();
 			const next = frames.shift();
 			if (next) {
