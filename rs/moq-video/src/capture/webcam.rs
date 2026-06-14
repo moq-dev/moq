@@ -1,6 +1,7 @@
-//! Webcam capture via [`nokhwa`] (non-macOS): decodes MJPEG/YUYV/NV12 to RGBA,
-//! which the encoder converts to I420. The CPU path, used until a native
-//! zero-copy capture lands on these platforms.
+//! Webcam capture via [`nokhwa`] (Windows / Media Foundation): decodes
+//! MJPEG/YUYV/NV12 to RGBA, which the encoder converts to I420. Used until a
+//! native Media Foundation capture replaces it (Linux and macOS already have
+//! native paths).
 
 use nokhwa::Camera as NokhwaCamera;
 use nokhwa::pixel_format::RgbAFormat;

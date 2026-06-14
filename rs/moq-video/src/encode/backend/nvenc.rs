@@ -53,7 +53,8 @@ impl Nvenc {
 			)));
 		}
 
-		let cuda = CudaContext::new(0).map_err(|e| Error::Codec(anyhow::anyhow!("CUDA init: {e}")))?;
+		// cudarc 0.19's DriverError is Debug-only (no Display), so format with `{e:?}`.
+		let cuda = CudaContext::new(0).map_err(|e| Error::Codec(anyhow::anyhow!("CUDA init: {e:?}")))?;
 		let encoder = Encoder::initialize_with_cuda(cuda.clone())
 			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC init: {e}")))?;
 
