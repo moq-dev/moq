@@ -212,6 +212,16 @@ impl<T> Producer<T> {
 		self.state.is_clone(&other.state)
 	}
 
+	/// Returns `true` if this is the only remaining producer.
+	///
+	/// Inherently racy if other handles may clone this producer or upgrade a
+	/// [`Weak`] / [`Consumer`] concurrently. Intended for a producer's own
+	/// `Drop`, where this handle has not yet been counted out, to gate
+	/// last-producer cleanup.
+	pub fn is_last(&self) -> bool {
+		self.counts.producers.load(Ordering::Acquire) == 1
+	}
+
 	/// Create a [`Weak`] reference that doesn't affect the producer/consumer ref counts.
 	pub fn weak(&self) -> Weak<T> {
 		Weak {
@@ -334,5 +344,28 @@ impl<T> Deref for Ref<'_, T> {
 
 	fn deref(&self) -> &Self::Target {
 		&self.state.value
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	#[test]
+	fn is_last_tracks_producer_count() {
+		let producer = Producer::new(0u8);
+		assert!(producer.is_last());
+
+		let clone = producer.clone();
+		assert!(!producer.is_last());
+		assert!(!clone.is_last());
+
+		drop(clone);
+		assert!(producer.is_last());
+
+		// Consumers and weak handles don't count as producers.
+		let _consumer = producer.consume();
+		let _weak = producer.weak();
+		assert!(producer.is_last());
 	}
 }

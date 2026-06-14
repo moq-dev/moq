@@ -396,6 +396,24 @@ impl Clone for TrackProducer {
 	}
 }
 
+impl Drop for TrackProducer {
+	fn drop(&mut self) {
+		// The last producer going away without finishing is an abrupt teardown:
+		// release the cached groups so a stale consumer can't pin them (and their
+		// frame buffers) forever, the same as an explicit abort. A cleanly
+		// finished track keeps its cache so consumers can still drain it.
+		if !self.state.is_last() {
+			return;
+		}
+		if let Ok(mut state) = self.state.write()
+			&& state.final_sequence.is_none()
+		{
+			state.groups.clear();
+			state.duplicates.clear();
+		}
+	}
+}
+
 impl From<Track> for TrackProducer {
 	fn from(info: Track) -> Self {
 		TrackProducer::new(info)
@@ -869,6 +887,39 @@ mod test {
 		// The consumer now surfaces the abort error rather than the leftover cache.
 		let result = consumer.recv_group().now_or_never().expect("should not block");
 		assert!(matches!(result, Err(Error::Cancel)));
+	}
+
+	#[tokio::test]
+	async fn drop_unfinished_clears_cached_groups() {
+		let producer = Track::new("test").produce();
+		let mut writer = producer.clone();
+		writer.append_group().unwrap();
+
+		// A stale consumer keeps the channel (and thus the cache) alive.
+		let mut consumer = producer.consume();
+		assert_eq!(live_groups(&producer.state.read()), 1);
+
+		// Drop every producer without finishing: the cache is released.
+		drop(writer);
+		drop(producer);
+
+		let result = consumer.recv_group().now_or_never().expect("should not block");
+		assert!(matches!(result, Err(Error::Dropped)));
+	}
+
+	#[tokio::test]
+	async fn drop_finished_keeps_cached_groups() {
+		let mut producer = Track::new("test").produce();
+		producer.append_group().unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		drop(producer);
+
+		// A cleanly finished track keeps its cache so the consumer can still drain.
+		assert_eq!(consumer.assert_group().sequence, 0);
+		let done = consumer.recv_group().now_or_never().expect("should not block").unwrap();
+		assert!(done.is_none(), "consumer should drain then see clean finish");
 	}
 
 	#[test]

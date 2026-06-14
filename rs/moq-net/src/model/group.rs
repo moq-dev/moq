@@ -256,6 +256,23 @@ impl Clone for GroupProducer {
 	}
 }
 
+impl Drop for GroupProducer {
+	fn drop(&mut self) {
+		// See TrackProducer::drop: the last producer dropping without a clean
+		// finish releases the cached frames so a stale consumer can't pin their
+		// buffers forever. A finished group keeps its cache so consumers can drain.
+		if !self.state.is_last() {
+			return;
+		}
+		if let Ok(mut state) = modify(&self.state)
+			&& !state.fin
+		{
+			state.frames.clear();
+			state.cache = 0;
+		}
+	}
+}
+
 impl From<Group> for GroupProducer {
 	fn from(info: Group) -> Self {
 		GroupProducer::new(info)
@@ -472,6 +489,38 @@ mod test {
 		let state = producer.state.read();
 		assert!(state.frames.is_empty(), "cached frames should be dropped on abort");
 		assert_eq!(state.cache, 0);
+	}
+
+	#[test]
+	fn drop_unfinished_clears_cached_frames() {
+		let producer = Group { sequence: 0 }.produce();
+		let mut writer = producer.clone();
+		writer.write_frame(Bytes::from_static(b"data")).unwrap();
+
+		// A stale consumer keeps the channel (and thus the cache) alive.
+		let mut consumer = producer.consume();
+		assert_eq!(producer.state.read().frames.len(), 1);
+
+		// Drop every producer without finishing: the cache is released.
+		drop(writer);
+		drop(producer);
+
+		let result = consumer.next_frame().now_or_never().unwrap();
+		assert!(matches!(result, Err(crate::Error::Dropped)));
+	}
+
+	#[test]
+	fn drop_finished_keeps_cached_frames() {
+		let mut producer = Group { sequence: 0 }.produce();
+		producer.write_frame(Bytes::from_static(b"data")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		drop(producer);
+
+		// A cleanly finished group keeps its cache so the consumer can still drain.
+		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame, Bytes::from_static(b"data"));
 	}
 
 	#[tokio::test]

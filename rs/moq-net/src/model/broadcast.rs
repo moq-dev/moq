@@ -191,6 +191,23 @@ impl BroadcastProducer {
 	}
 }
 
+impl Drop for BroadcastProducer {
+	fn drop(&mut self) {
+		// The last producer dropping releases the track lookup so a stale
+		// consumer can't pin it (and the track state it weakly references)
+		// forever, the same as an explicit abort.
+		if !self.state.is_last() {
+			return;
+		}
+		if let Ok(mut state) = modify(&self.state) {
+			state.tracks.clear();
+			for mut request in state.requests.drain(..) {
+				request.abort(Error::Cancel).ok();
+			}
+		}
+	}
+}
+
 /// Handles on-demand track creation for a broadcast.
 ///
 /// When a consumer requests a track that doesn't exist, a [TrackProducer] is created
@@ -305,7 +322,14 @@ impl BroadcastDynamic {
 
 impl Drop for BroadcastDynamic {
 	fn drop(&mut self) {
+		// Release the track lookup if we're the last producer overall, matching
+		// BroadcastProducer::drop and an explicit abort.
+		let last = self.state.is_last();
 		if let Ok(mut state) = self.state.write() {
+			if last {
+				state.tracks.clear();
+			}
+
 			// We do a saturating sub so Producer::dynamic() can avoid returning an error.
 			state.dynamic = state.dynamic.saturating_sub(1);
 			if state.dynamic != 0 {
@@ -526,6 +550,23 @@ mod test {
 		);
 
 		drop(track);
+	}
+
+	#[tokio::test]
+	async fn drop_clears_track_lookup() {
+		let mut producer = Broadcast::new().produce();
+		let _track = producer.assert_create_track(&Track::new("track1"));
+
+		// A stale consumer keeps the channel (and thus the lookup) alive.
+		let consumer = producer.consume();
+		assert_eq!(consumer.state.read().tracks.len(), 1);
+
+		// Dropping the last producer releases the lookup, same as an abort.
+		drop(producer);
+		assert!(
+			consumer.state.read().tracks.is_empty(),
+			"track lookup should be cleared when the last producer drops"
+		);
 	}
 
 	#[tokio::test]
