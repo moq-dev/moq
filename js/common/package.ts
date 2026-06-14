@@ -11,12 +11,12 @@ console.log("✍️  Rewriting package.json...");
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
 
 // Capture the source exports before the npm rewrite below mutates them, so the
-// JSR config can choose between source (.ts) and built (.js) entrypoints.
+// JSR config can map them to the built (.js) entrypoints.
 const srcExports: Record<string, unknown> = structuredClone(pkg.exports ?? {});
 
-// Per-package JSR mode lives in package.json ("jsr": "src" | "dist"); a --jsr
-// flag overrides it. Captured here because we strip it from the npm package.json.
-const jsrField: unknown = pkg.jsr;
+// Opt in to JSR publishing with "jsr": true in package.json. Captured here
+// because we strip it from the npm package.json.
+const publishJsr = pkg.jsr === true;
 
 function rewritePath(p: string, ext: string): string {
 	return p.replace(/^\.\/src/, ".").replace(/\.ts(x)?$/, `.${ext}`);
@@ -116,27 +116,17 @@ if (messages.length > 0) {
 
 console.log("📦 Package built successfully in dist/");
 
-// Optionally emit a jsr.json alongside package.json so the package can also
-// publish to JSR (jsr.io). Generated from package.json so version/exports never
-// drift. Mode comes from the package.json "jsr" field, overridable with --jsr:
-//   "src"   publish the TypeScript source; JSR transpiles it and builds the
-//           API reference from the source itself.
-//   "dist"  publish the built dist, for packages that need Vite to inline
-//           worklets/CSS/SVG which JSR cannot resolve from source.
-const jsrFlag = process.argv.indexOf("--jsr");
-const jsrMode = jsrFlag === -1 ? jsrField : process.argv[jsrFlag + 1];
-
-if (jsrMode && jsrMode !== "src" && jsrMode !== "dist") {
-	console.error(`❌ unknown --jsr mode "${jsrMode}" (expected "src" or "dist")`);
-	process.exit(1);
+// Optionally emit a jsr.json so the package can also publish to JSR (jsr.io).
+// Generated from package.json so version/exports never drift. We publish the
+// built dist (.js + .d.ts) rather than source: tsc emits explicit types into
+// the .d.ts, which sidesteps JSR's "slow types" and ships real declarations,
+// while JSR still builds the API docs from the .d.ts (JSDoc is preserved).
+if (publishJsr) {
+	writeJsrConfig();
 }
 
-if (jsrMode) {
-	writeJsrConfig(jsrMode as "src" | "dist");
-}
-
-function writeJsrConfig(mode: "src" | "dist") {
-	console.log(`✍️  Generating jsr.json (${mode})...`);
+function writeJsrConfig() {
+	console.log("✍️  Generating jsr.json...");
 
 	const exports: Record<string, string> = {};
 	for (const [key, val] of Object.entries(srcExports)) {
@@ -144,7 +134,7 @@ function writeJsrConfig(mode: "src" | "dist") {
 		// CSS exports are dev-only and not published, same as the npm package.
 		if (val.endsWith(".css")) continue;
 		// rewritePath turns "./src/index.ts" into "./index.js".
-		exports[key] = mode === "src" ? val : `./dist/${rewritePath(val, "js").slice(2)}`;
+		exports[key] = `./dist/${rewritePath(val, "js").slice(2)}`;
 	}
 
 	// Self-contained import map so we don't rely on JSR's package.json merge
@@ -163,14 +153,7 @@ function writeJsrConfig(mode: "src" | "dist") {
 		imports[`${name}/`] = `npm:/${name}@${range}/`;
 	}
 
-	if (mode === "dist") injectSelfTypes();
-
-	// dist is gitignored, so dist mode un-ignores it with a "!" negation; JSR
-	// honors .gitignore otherwise and would drop the whole build from the graph.
-	const publish =
-		mode === "src"
-			? { include: ["src", "README.md", "LICENSE*"], exclude: ["**/*.test.ts"] }
-			: { include: ["dist", "README.md", "LICENSE*"], exclude: ["!dist"] };
+	injectSelfTypes();
 
 	const jsr = {
 		name: pkg.name,
@@ -178,7 +161,9 @@ function writeJsrConfig(mode: "src" | "dist") {
 		...(pkg.license ? { license: pkg.license } : {}),
 		exports,
 		...(Object.keys(imports).length ? { imports } : {}),
-		publish,
+		// dist is gitignored, so un-ignore it with a "!" negation; JSR honors
+		// .gitignore otherwise and would drop the whole build from the graph.
+		publish: { include: ["dist", "README.md", "LICENSE*"], exclude: ["!dist"] },
 	};
 
 	writeFileSync("jsr.json", JSON.stringify(jsr, null, 2));
