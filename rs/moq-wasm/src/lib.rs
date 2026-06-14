@@ -169,7 +169,9 @@ impl OriginConsumer {
 
 	/// Subscribe to a broadcast by path, waiting until it is announced.
 	pub async fn consume(&self, path: String) -> Result<Option<Broadcast>, JsValue> {
+		tracing::warn!(target: "wasm", "consume({path}) await announced_broadcast...");
 		let broadcast = self.inner.announced_broadcast(path.as_str()).await;
+		tracing::warn!(target: "wasm", "consume({path}) -> {}", if broadcast.is_some() { "found" } else { "none" });
 		Ok(broadcast.map(Broadcast::from_consumer))
 	}
 }
@@ -193,7 +195,9 @@ impl Announced {
 			.borrow_mut()
 			.take()
 			.ok_or_else(|| js_err("announced.next already in progress"))?;
+		tracing::warn!(target: "wasm", "announced.next await...");
 		let result = consumer.next().await;
+		tracing::warn!(target: "wasm", "announced.next -> {:?}", result.as_ref().map(|(p, _)| p.as_str().to_string()));
 		*cell.borrow_mut() = Some(consumer);
 
 		Ok(result.map(|(path, status)| {
@@ -370,6 +374,8 @@ impl TrackConsumer {
 
 	/// Open a live subscription at the given priority (default 0).
 	pub async fn subscribe(&self, priority: Option<u8>) -> Result<TrackSubscriber, JsValue> {
+		let name = self.inner.name().to_string();
+		tracing::warn!(target: "wasm", "subscribe({name}) await SUBSCRIBE_OK...");
 		let subscription = moq_net::Subscription::default().with_priority(priority.unwrap_or(0));
 		let subscriber = self
 			.inner
@@ -377,6 +383,7 @@ impl TrackConsumer {
 			.map_err(js_err)?
 			.await
 			.map_err(js_err)?;
+		tracing::warn!(target: "wasm", "subscribe({name}) -> ok");
 		Ok(TrackSubscriber::new(subscriber))
 	}
 
@@ -489,10 +496,13 @@ impl TrackSubscriber {
 			.borrow_mut()
 			.take()
 			.ok_or_else(|| js_err("recvGroup already in progress"))?;
+		let name = sub.name().to_string();
+		tracing::warn!(target: "wasm", "recvGroup({name}) await...");
 		let result = sub.recv_group().await;
 		*cell.borrow_mut() = Some(sub);
 
 		let group = result.map_err(js_err)?;
+		tracing::warn!(target: "wasm", "recvGroup({name}) -> {:?}", group.as_ref().map(|g| g.sequence));
 		Ok(group.map(Group::from_consumer))
 	}
 
@@ -505,10 +515,13 @@ impl TrackSubscriber {
 			.borrow_mut()
 			.take()
 			.ok_or_else(|| js_err("nextGroup already in progress"))?;
+		let name = sub.name().to_string();
+		tracing::warn!(target: "wasm", "nextGroup({name}) await...");
 		let result = sub.next_group().await;
 		*cell.borrow_mut() = Some(sub);
 
 		let group = result.map_err(js_err)?;
+		tracing::warn!(target: "wasm", "nextGroup({name}) -> {:?}", group.as_ref().map(|g| g.sequence));
 		Ok(group.map(Group::from_consumer))
 	}
 
@@ -584,10 +597,13 @@ impl Group {
 			.borrow_mut()
 			.take()
 			.ok_or_else(|| js_err("readFrame already in progress"))?;
+		let seq = group.sequence;
+		tracing::warn!(target: "wasm", "readFrame(group={seq}) await...");
 		let result = group.read_frame().await;
 		*cell.borrow_mut() = Some(group);
 
 		let frame = result.map_err(js_err)?;
+		tracing::warn!(target: "wasm", "readFrame(group={seq}) -> {:?} bytes", frame.as_ref().map(|b| b.len()));
 		Ok(frame.map(|bytes| Uint8Array::from(bytes.as_ref())))
 	}
 
