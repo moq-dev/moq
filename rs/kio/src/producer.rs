@@ -71,31 +71,35 @@ impl<T> Producer<T> {
 		}
 	}
 
-	/// Poll for a condition with mutable access to the value, registering
-	/// `waiter` when `f` returns [`Poll::Pending`].
+	/// Poll a read-only predicate; on [`Poll::Ready`] hand back a [`Mut`] with the
+	/// lock still held, so the caller can inspect and mutate atomically.
 	///
-	/// Mutations made through the `&mut T` here do NOT notify consumers, unlike a
-	/// write through [`write`](Self::write). This is meant for a producer draining
-	/// its own queued work: notifying here would wake this producer's own waiter,
-	/// a self-triggering footgun that can spin into an infinite loop. Notify
-	/// consumers explicitly with [`write`](Self::write) when you need to.
+	/// The predicate only sees a [`Ref`], so it can't accidentally flag the state
+	/// modified (e.g. via a `&mut`-taking method like `Vec::pop`). That sidesteps
+	/// the footgun where a no-op mutation during a *pending* poll would wake this
+	/// producer's own waiter and spin into an infinite loop. Decide readiness in
+	/// the predicate, then mutate through the returned `Mut`. Registers `waiter`
+	/// while pending.
 	///
 	/// Returns `Poll::Ready(Err(`[`Ref`]`))` if the channel is closed.
-	pub fn poll_drain<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Ref<'_, T>>>
+	pub fn poll_write_when<F>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
 	where
-		F: FnMut(&mut T) -> Poll<R>,
+		F: FnMut(&Ref<'_, T>) -> Poll<()>,
 	{
-		let mut state = self.state.lock();
+		let state = self.state.lock();
 		if state.closed {
 			return Poll::Ready(Err(Ref { state }));
 		}
 
-		if let Poll::Ready(res) = f(&mut state.value) {
-			return Poll::Ready(Ok(res));
+		let mut guard = Ref { state };
+		match f(&guard) {
+			// Upgrade the Ref to a Mut, keeping the same lock guard.
+			Poll::Ready(()) => Poll::Ready(Ok(Mut::new(guard.state))),
+			Poll::Pending => {
+				waiter.register(&mut guard.state.waiters);
+				Poll::Pending
+			}
 		}
-
-		waiter.register(&mut state.waiters);
-		Poll::Pending
 	}
 
 	/// Wait until the channel is closed.

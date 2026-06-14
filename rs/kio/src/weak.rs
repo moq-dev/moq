@@ -78,33 +78,6 @@ impl<T> Weak<T> {
 		}
 	}
 
-	/// Poll for a condition with mutable access to the value, registering
-	/// `waiter` when `f` returns [`Poll::Pending`].
-	///
-	/// Mutations made through the `&mut T` here do NOT notify consumers, unlike a
-	/// write through [`write`](Self::write). This is meant for a producer draining
-	/// its own queued work, where notifying would wake this handle's own waiter,
-	/// a self-triggering footgun that can spin into an infinite loop. Notify
-	/// consumers explicitly with [`write`](Self::write) when you need to.
-	///
-	/// Returns `Poll::Ready(None)` if the channel is closed.
-	pub fn poll_drain<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Option<R>>
-	where
-		F: FnMut(&mut T) -> Poll<R>,
-	{
-		let mut state = self.state.lock();
-		if state.closed {
-			return Poll::Ready(None);
-		}
-
-		if let Poll::Ready(res) = f(&mut state.value) {
-			return Poll::Ready(Some(res));
-		}
-
-		waiter.register(&mut state.waiters);
-		Poll::Pending
-	}
-
 	/// Returns `true` if the channel has been closed.
 	pub fn is_closed(&self) -> bool {
 		self.state.lock().closed
