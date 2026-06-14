@@ -82,7 +82,7 @@ impl<T> Producer<T> {
 	/// while pending.
 	///
 	/// Returns `Poll::Ready(Err(`[`Ref`]`))` if the channel is closed.
-	pub fn poll_write<F>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
+	pub fn poll_write_when<F>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<()>,
 	{
@@ -100,6 +100,18 @@ impl<T> Producer<T> {
 				Poll::Pending
 			}
 		}
+	}
+
+	/// Wait until the read-only predicate holds, then acquire write access.
+	///
+	/// The async sibling of [`poll_write_when`](Self::poll_write_when): returns
+	/// `Ok(Mut)` once `f` returns [`Poll::Ready`], or `Err(Ref)` if the channel
+	/// closes first.
+	pub async fn write_when<F>(&self, mut f: F) -> Result<Mut<'_, T>, Ref<'_, T>>
+	where
+		F: FnMut(&Ref<'_, T>) -> Poll<()> + Unpin,
+	{
+		crate::wait(move |waiter| self.poll_write_when(waiter, &mut f)).await
 	}
 
 	/// Wait until the channel is closed.
