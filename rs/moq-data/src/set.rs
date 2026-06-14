@@ -188,8 +188,13 @@ impl<T: Item> Producer<T> {
 		let snapshot_size = self.snapshot_size() + 4 + item.encode_size() as u64;
 
 		if self.should_snapshot(delta_size, snapshot_size) {
-			self.current.insert(item);
-			self.write_snapshot()?;
+			// A snapshot encodes the full set, so insert first; undo if the write fails so our view
+			// stays consistent with what the track actually saw.
+			self.current.insert(item.clone());
+			if let Err(err) = self.write_snapshot() {
+				self.current.remove(&item);
+				return Err(err);
+			}
 		} else {
 			// Write the delta straight from the reference, then move the item into the set.
 			self.write_delta(INSERT, &item)?;
@@ -213,10 +218,15 @@ impl<T: Item> Producer<T> {
 		// `current` already reflects the removal.
 		let snapshot_size = self.snapshot_size();
 
-		if self.should_snapshot(delta_size, snapshot_size) {
-			self.write_snapshot()?;
+		let published = if self.should_snapshot(delta_size, snapshot_size) {
+			self.write_snapshot()
 		} else {
-			self.write_delta(REMOVE, &removed)?;
+			self.write_delta(REMOVE, &removed)
+		};
+		if let Err(err) = published {
+			// Restore the item so our view stays consistent with what the track actually saw.
+			self.current.insert(removed);
+			return Err(err);
 		}
 		Ok(true)
 	}
@@ -260,7 +270,8 @@ impl<T: Item> Producer<T> {
 	}
 
 	/// The byte size of a full snapshot of the current set: a `u32` count plus each item
-	/// length-prefixed. Computed from [`Item::size`] so we can size a frame without a scratch buffer.
+	/// length-prefixed. Computed from [`Item::encode_size`] so we can size a frame without a scratch
+	/// buffer.
 	fn snapshot_size(&self) -> u64 {
 		4 + self
 			.current
@@ -606,6 +617,22 @@ mod test {
 
 		assert_eq!(track.latest(), Some(1));
 		assert_eq!(drain(track).last().unwrap().len(), MAX_DELTA_FRAMES + 1);
+	}
+
+	#[test]
+	fn failed_publish_preserves_view() {
+		let track = moq_net::Track::new("test").produce();
+		let mut producer = Producer::<String>::new(track, Config::default());
+		producer.insert("video".into()).unwrap();
+		producer.finish().unwrap();
+
+		// The track is finished, so publishing fails. The local view must not record the change,
+		// otherwise it would disagree with what the track actually saw.
+		assert!(producer.insert("audio".into()).is_err());
+		assert!(!producer.contains("audio"));
+
+		assert!(producer.remove("video").is_err());
+		assert!(producer.contains("video"));
 	}
 
 	#[test]
