@@ -2,6 +2,7 @@
 	"name": "@moq/msf",
 	"type": "module",
 	"version": "0.1.1",
+	"jsr": "src",
 	"description": "MSF (MOQT Streaming Format) catalog types for MoQ",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",

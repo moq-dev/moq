@@ -2,13 +2,21 @@
 // This creates a dist/ folder with the correct paths and dependencies for publishing
 // Split from release.ts to allow building packages without publishing
 
-import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { publint } from "publint";
 import { formatMessage } from "publint/utils";
 
 console.log("✍️  Rewriting package.json...");
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+
+// Capture the source exports before the npm rewrite below mutates them, so the
+// JSR config can choose between source (.ts) and built (.js) entrypoints.
+const srcExports: Record<string, unknown> = structuredClone(pkg.exports ?? {});
+
+// Per-package JSR mode lives in package.json ("jsr": "src" | "dist"); a --jsr
+// flag overrides it. Captured here because we strip it from the npm package.json.
+const jsrField: unknown = pkg.jsr;
 
 function rewritePath(p: string, ext: string): string {
 	return p.replace(/^\.\/src/, ".").replace(/\.ts(x)?$/, `.${ext}`);
@@ -82,6 +90,7 @@ rewriteWorkspaceDependency(pkg.peerDependencies);
 
 pkg.devDependencies = undefined;
 pkg.scripts = undefined;
+pkg.jsr = undefined; // JSR-only field, not part of the npm package
 
 // Write the rewritten package.json
 writeFileSync("dist/package.json", JSON.stringify(pkg, null, 2));
@@ -106,3 +115,83 @@ if (messages.length > 0) {
 }
 
 console.log("📦 Package built successfully in dist/");
+
+// Optionally emit a jsr.json alongside package.json so the package can also
+// publish to JSR (jsr.io). Generated from package.json so version/exports never
+// drift. Mode comes from the package.json "jsr" field, overridable with --jsr:
+//   "src"   publish the TypeScript source; JSR transpiles it and builds the
+//           API reference from the source itself.
+//   "dist"  publish the built dist, for packages that need Vite to inline
+//           worklets/CSS/SVG which JSR cannot resolve from source.
+const jsrFlag = process.argv.indexOf("--jsr");
+const jsrMode = jsrFlag === -1 ? jsrField : process.argv[jsrFlag + 1];
+
+if (jsrMode && jsrMode !== "src" && jsrMode !== "dist") {
+	console.error(`❌ unknown --jsr mode "${jsrMode}" (expected "src" or "dist")`);
+	process.exit(1);
+}
+
+if (jsrMode) {
+	writeJsrConfig(jsrMode as "src" | "dist");
+}
+
+function writeJsrConfig(mode: "src" | "dist") {
+	console.log(`✍️  Generating jsr.json (${mode})...`);
+
+	const exports: Record<string, string> = {};
+	for (const [key, val] of Object.entries(srcExports)) {
+		if (typeof val !== "string") continue;
+		// CSS exports are dev-only and not published, same as the npm package.
+		if (val.endsWith(".css")) continue;
+		// rewritePath turns "./src/index.ts" into "./index.js".
+		exports[key] = mode === "src" ? val : `./dist/${rewritePath(val, "js").slice(2)}`;
+	}
+
+	// Self-contained import map so we don't rely on JSR's package.json merge
+	// behavior. Deps resolve via npm, so packages can publish to JSR in any
+	// order. Flip @moq/* entries to "jsr:" once the whole graph is on JSR if you
+	// want JSR-native cross-links between the docs.
+	const imports: Record<string, string> = {};
+	const deps = { ...(pkg.dependencies ?? {}), ...(pkg.peerDependencies ?? {}) };
+	for (const [name, range] of Object.entries(deps) as [string, string][]) {
+		if (name.startsWith("@types/")) continue; // type-only, never imported at runtime
+		imports[name] = `npm:${name}@${range}`;
+		imports[`${name}/`] = `npm:/${name}@${range}/`; // subpath imports, e.g. @moq/signals/dom
+	}
+
+	if (mode === "dist") injectSelfTypes();
+
+	// dist is gitignored, so dist mode un-ignores it with a "!" negation; JSR
+	// honors .gitignore otherwise and would drop the whole build from the graph.
+	const publish =
+		mode === "src"
+			? { include: ["src", "README.md", "LICENSE*"], exclude: ["**/*.test.ts"] }
+			: { include: ["dist", "README.md", "LICENSE*"], exclude: ["!dist"] };
+
+	const jsr = {
+		name: pkg.name,
+		version: pkg.version,
+		...(pkg.license ? { license: pkg.license } : {}),
+		exports,
+		...(Object.keys(imports).length ? { imports } : {}),
+		publish,
+	};
+
+	writeFileSync("jsr.json", JSON.stringify(jsr, null, 2));
+	console.log("📦 jsr.json written");
+}
+
+function injectSelfTypes() {
+	// JSR ignores a sibling .d.ts unless the .js references it explicitly;
+	// without this it infers types from the JS and reports "slow type" warnings.
+	const glob = new Bun.Glob("**/*.js");
+	for (const rel of glob.scanSync("dist")) {
+		const js = join("dist", rel);
+		const dts = js.replace(/\.js$/, ".d.ts");
+		if (!existsSync(dts)) continue;
+		const body = readFileSync(js, "utf8");
+		if (body.includes("@ts-self-types")) continue;
+		const sibling = rel.split("/").pop()!.replace(/\.js$/, ".d.ts");
+		writeFileSync(js, `/* @ts-self-types="./${sibling}" */\n${body}`);
+	}
+}

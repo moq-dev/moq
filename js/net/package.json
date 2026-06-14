@@ -2,6 +2,7 @@
 	"name": "@moq/net",
 	"type": "module",
 	"version": "0.1.4",
+	"jsr": "src",
 	"description": "The networking layer for Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization.",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",

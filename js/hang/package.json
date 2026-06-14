@@ -2,6 +2,7 @@
 	"name": "@moq/hang",
 	"type": "module",
 	"version": "0.2.9",
+	"jsr": "src",
 	"description": "WebCodecs-based media format for MoQ",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",

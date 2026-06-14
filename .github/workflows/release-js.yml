@@ -40,4 +40,9 @@ jobs:
         run: nix develop --command bun install --frozen-lockfile
 
       - name: Release packages
+        # Web-component packages register custom elements via global type
+        # augmentations, which JSR's fast-type check rejects. Allow slow types so
+        # the JSR publish succeeds; npm still ships full .d.ts files.
+        env:
+          JSR_ALLOW_SLOW_TYPES: "true"
         run: nix develop --command bun --filter '*' release
