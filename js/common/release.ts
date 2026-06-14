@@ -5,7 +5,8 @@ const dryRun = process.argv.includes("--dry-run") || process.env.DRY_RUN === "tr
 // Read package.json to get name, version, and whether to also publish to JSR.
 const pkg = JSON.parse(await Bun.file("package.json").text());
 const { name, version } = pkg;
-const publishJsr = pkg.jsr === true;
+// Anything that publishes to npm (has a release script) also publishes to JSR.
+const publishJsr = Boolean(pkg.scripts?.release);
 
 // Whether this exact version already exists on each registry. The two are
 // checked independently so a package can be onboarded onto JSR even when its

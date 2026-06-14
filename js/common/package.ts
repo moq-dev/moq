@@ -14,9 +14,9 @@ const pkg = JSON.parse(readFileSync("package.json", "utf8"));
 // JSR config can map them to the built (.js) entrypoints.
 const srcExports: Record<string, unknown> = structuredClone(pkg.exports ?? {});
 
-// Opt in to JSR publishing with "jsr": true in package.json. Captured here
-// because we strip it from the npm package.json.
-const publishJsr = pkg.jsr === true;
+// Publish to JSR alongside npm for every package that publishes at all, i.e. one
+// with a release script. Captured before pkg.scripts is cleared below.
+const publishJsr = Boolean(pkg.scripts?.release);
 
 function rewritePath(p: string, ext: string): string {
 	return p.replace(/^\.\/src/, ".").replace(/\.ts(x)?$/, `.${ext}`);
@@ -90,7 +90,6 @@ rewriteWorkspaceDependency(pkg.peerDependencies);
 
 pkg.devDependencies = undefined;
 pkg.scripts = undefined;
-pkg.jsr = undefined; // JSR-only field, not part of the npm package
 
 // Write the rewritten package.json
 writeFileSync("dist/package.json", JSON.stringify(pkg, null, 2));

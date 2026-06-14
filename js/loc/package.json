@@ -2,7 +2,6 @@
 	"name": "@moq/loc",
 	"type": "module",
 	"version": "0.1.0",
-	"jsr": true,
 	"description": "Low Overhead Container (LOC) frame encoding for MoQ",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
