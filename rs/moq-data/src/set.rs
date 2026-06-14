@@ -78,10 +78,10 @@ pub trait Item: Clone + Eq + Hash {
 
 	/// The number of bytes [`encode`](Item::encode) writes, used to size a frame up front.
 	///
-	/// The default runs `encode` against a counting [`Sizer`](moq_net::Sizer) (no allocation, no
-	/// copy). Override it when the length is known directly, e.g. `self.len()`.
+	/// The default runs `encode` against a counting `BufMut` (no allocation, no copy). Override it
+	/// when the length is known directly, e.g. `self.len()`.
 	fn encode_size(&self) -> usize {
-		let mut sizer = moq_net::Sizer::default();
+		let mut sizer = crate::sizer::Sizer::default();
 		self.encode(&mut sizer);
 		sizer.size
 	}

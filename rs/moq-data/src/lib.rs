@@ -13,3 +13,6 @@ pub use moq_json as json;
 
 #[cfg(feature = "set")]
 pub mod set;
+
+#[cfg(feature = "set")]
+mod sizer;
