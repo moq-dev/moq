@@ -278,7 +278,7 @@ async fn run_session(
 
 	let origin = moq_net::Origin::random().produce();
 	let origin_consumer = origin.consume();
-	let client = config.init()?.with_consumer(origin);
+	let client = config.init()?.with_subscriber(origin);
 
 	let _session = client.connect(settings.url.clone()).await?;
 

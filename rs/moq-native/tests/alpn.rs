@@ -39,10 +39,10 @@ async fn connect_with_version(version: &str) {
 	let server_origin = origin.clone();
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		request.with_publisher(server_origin.clone()).ok().await
+		request.with_publisher(&server_origin).ok().await
 	});
 
-	let client = client.with_publisher(origin.clone());
+	let client = client.with_publisher(&origin);
 	let client_result = client.connect(url).await;
 
 	let server_result = server_handle.await.expect("server task panicked");
@@ -90,10 +90,10 @@ async fn connect_with_webtransport(version: Option<&str>) {
 	let server_origin = origin.clone();
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		request.with_publisher(server_origin.clone()).ok().await
+		request.with_publisher(&server_origin).ok().await
 	});
 
-	let client = client.with_publisher(origin.clone());
+	let client = client.with_publisher(&origin);
 	let client_result = client.connect(url).await;
 
 	let server_result = server_handle.await.expect("server task panicked");

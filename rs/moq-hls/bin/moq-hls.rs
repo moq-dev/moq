@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
 		} => {
 			let subscriber = moq_net::Origin::random().produce();
 			let subscriber_consumer = subscriber.consume();
-			let reconnect = client.with_consumer(subscriber).reconnect(relay.clone());
+			let reconnect = client.with_subscriber(subscriber).reconnect(relay.clone());
 
 			let config = moq_hls::export::Config {
 				part_target,
@@ -132,12 +132,12 @@ async fn main() -> anyhow::Result<()> {
 		}
 		Command::Import { broadcast, playlist } => {
 			let publisher = moq_net::Origin::random().produce();
-			let reconnect = client.with_publisher(publisher.clone()).reconnect(relay.clone());
+			let reconnect = client.with_publisher(&publisher).reconnect(relay.clone());
 
 			let mut producer = moq_net::BroadcastInfo::new().produce();
 			let consumer = producer.consume();
 			let _publish = publisher
-				.publish_broadcast(&broadcast, consumer)
+				.publish_broadcast(&broadcast, &consumer)
 				.context("failed to publish broadcast")?;
 
 			let catalog = moq_mux::catalog::Producer::new(&mut producer).context("failed to create catalog")?;

@@ -225,14 +225,26 @@ impl Server {
 		self
 	}
 
-	pub fn with_publisher(mut self, publish: moq_net::OriginProducer) -> Self {
+	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::OriginConsumer>) -> Self {
 		self.moq = self.moq.with_publisher(publish);
 		self
 	}
 
-	pub fn with_consumer(mut self, consume: moq_net::OriginProducer) -> Self {
-		self.moq = self.moq.with_consumer(consume);
+	pub fn with_subscriber(mut self, subscribe: moq_net::OriginProducer) -> Self {
+		self.moq = self.moq.with_subscriber(subscribe);
 		self
+	}
+
+	/// Deprecated alias for [`with_publisher`](Self::with_publisher).
+	#[deprecated(note = "renamed to `with_publisher`")]
+	pub fn with_publish(self, publish: moq_net::OriginConsumer) -> Self {
+		self.with_publisher(publish)
+	}
+
+	/// Deprecated alias for [`with_subscriber`](Self::with_subscriber).
+	#[deprecated(note = "renamed to `with_subscriber`")]
+	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
+		self.with_subscriber(subscribe)
 	}
 
 	/// Attach a tier-scoped [`moq_net::StatsHandle`] to all sessions accepted by this server.
@@ -480,7 +492,7 @@ pub(crate) enum RequestKind {
 
 /// An incoming MoQ session that can be accepted or rejected.
 ///
-/// [Self::with_publisher] and [Self::with_consumer] will configure what will be published and consumed from the session respectively.
+/// [Self::with_publisher] and [Self::with_subscriber] will configure what is published and subscribed to on the session respectively.
 /// Otherwise, the Server's configuration is used by default.
 pub struct Request {
 	server: moq_net::Server,
@@ -528,15 +540,27 @@ impl Request {
 	}
 
 	/// Publish the given origin to the session.
-	pub fn with_publisher(mut self, publish: moq_net::OriginProducer) -> Self {
+	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::OriginConsumer>) -> Self {
 		self.server = self.server.with_publisher(publish);
 		self
 	}
 
-	/// Consume the given origin from the session.
-	pub fn with_consumer(mut self, consume: moq_net::OriginProducer) -> Self {
-		self.server = self.server.with_consumer(consume);
+	/// Subscribe to the given origin from the session.
+	pub fn with_subscriber(mut self, subscribe: moq_net::OriginProducer) -> Self {
+		self.server = self.server.with_subscriber(subscribe);
 		self
+	}
+
+	/// Deprecated alias for [`with_publisher`](Self::with_publisher).
+	#[deprecated(note = "renamed to `with_publisher`")]
+	pub fn with_publish(self, publish: moq_net::OriginConsumer) -> Self {
+		self.with_publisher(publish)
+	}
+
+	/// Deprecated alias for [`with_subscriber`](Self::with_subscriber).
+	#[deprecated(note = "renamed to `with_subscriber`")]
+	pub fn with_consume(self, subscribe: moq_net::OriginProducer) -> Self {
+		self.with_subscriber(subscribe)
 	}
 
 	/// Attach a tier-scoped [`moq_net::StatsHandle`] to this session.

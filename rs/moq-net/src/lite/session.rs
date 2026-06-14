@@ -1,5 +1,5 @@
 use crate::{
-	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, StatsHandle, coding::Stream,
+	BandwidthConsumer, BandwidthProducer, Error, Origin, OriginConsumer, OriginProducer, StatsHandle, coding::Stream,
 	lite::SessionInfo,
 };
 
@@ -16,10 +16,10 @@ pub fn start<S: web_transport_trait::Session>(
 	// The stream used to set up the session, after exchanging setup messages.
 	// NOTE: No longer used in draft-03.
 	setup_stream: Option<Stream<S, Version>>,
-	// We will publish any local broadcasts from this origin.
-	publish: OriginConsumer,
-	// We will consume any remote broadcasts, inserting them into this origin.
-	subscribe: OriginProducer,
+	// We will publish any local broadcasts from this origin, when set.
+	publish: Option<OriginConsumer>,
+	// We will consume any remote broadcasts, inserting them into this origin, when set.
+	subscribe: Option<OriginProducer>,
 	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
 	stats: StatsHandle,
 	// The version of the protocol to use.
@@ -48,6 +48,15 @@ pub fn start<S: web_transport_trait::Session>(
 	} else {
 		None
 	};
+
+	// Always run both loops so inbound control (Subscribe/Announce/Probe/Goaway)
+	// and GROUP streams are accepted regardless of which halves the caller wired.
+	// An unset half gets an empty origin: an empty publish origin announces nothing
+	// (and answers the peer's announce-interest with an empty set), and an empty
+	// subscribe origin issues no ANNOUNCE_PLEASE (zero prefixes, so `run_announce`
+	// drops `connecting` at once and `connect()` still unblocks).
+	let publish = publish.unwrap_or_else(|| OriginProducer::empty(Origin::random()).consume());
+	let subscribe = subscribe.unwrap_or_else(|| OriginProducer::empty(Origin::random()));
 
 	// Publisher and Subscriber each derive their identity from their own
 	// attached origin (publish.info / subscribe.info). This is what gets

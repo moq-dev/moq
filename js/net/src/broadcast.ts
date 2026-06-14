@@ -1,5 +1,5 @@
 import { Signal } from "@moq/signals";
-import { type TrackInfo, TrackProducer, TrackState, TrackSubscriber, trackInfoDefaults } from "./track.ts";
+import { type TrackInfo, TrackProducer, TrackState, TrackSubscriber } from "./track.ts";
 
 /**
  * A request for a track the peer wants, yielded by {@link Broadcast.requested}.
@@ -13,8 +13,8 @@ import { type TrackInfo, TrackProducer, TrackState, TrackSubscriber, trackInfoDe
 export class TrackRequest {
 	readonly name: string;
 	readonly priority: number;
-	// The shared state behind the matching TrackSubscriber handed to the caller of
-	// Broadcast.subscribe; accepting wraps it in a producer the two ends share.
+	// The state behind the TrackSubscriber handed to the caller of Broadcast.subscribe;
+	// accepting adopts it as the producer's first sink, which the producer fans into.
 	#state: TrackState;
 
 	constructor(name: string, state: TrackState, priority: number) {
@@ -29,8 +29,9 @@ export class TrackRequest {
 	 * keeps its default. Mirrors the Rust `TrackRequest::accept`.
 	 */
 	accept(info: Partial<TrackInfo> = {}): TrackProducer {
-		this.#state.info.set(trackInfoDefaults(info));
-		return new TrackProducer(this.name, this.#state);
+		// The producer adopts the already-handed-out subscriber state as its first
+		// sink, then commits the info (which propagates to that sink).
+		return new TrackProducer(this.name, this.#state).accept(info);
 	}
 
 	/** Reject the request, closing the track (optionally with an error). */
@@ -75,6 +76,9 @@ export class TrackConsumer {
 export class BroadcastState {
 	requested = new Signal<TrackRequest[]>([]);
 	closed = new Signal<boolean | Error>(false);
+	// Statically inserted tracks, keyed by name. A subscribe for one of these fans out
+	// from the producer directly, skipping the on-demand request path.
+	tracks = new Map<string, TrackProducer>();
 }
 
 /**
@@ -130,6 +134,60 @@ export class Broadcast {
 	}
 
 	/**
+	 * Insert a track that is served directly, without an on-demand {@link requested}
+	 * round-trip.
+	 *
+	 * Each {@link subscribe} for this name fans out from the producer, so a publisher
+	 * can push tracks proactively instead of waiting to be asked. The caller owns the
+	 * {@link TrackProducer} and writes its groups; when that producer closes, the entry
+	 * is removed automatically. Throws on a duplicate live name. Mirrors the Rust
+	 * `BroadcastProducer::insert_track`.
+	 *
+	 * The producer must commit its {@link TrackInfo} via `accept()` (or use
+	 * {@link createTrack}, which does it for you); otherwise a subscriber's
+	 * `info()` never resolves and the wire layer stalls before serving.
+	 */
+	insertTrack(track: TrackProducer): void {
+		if (this.state.closed.peek()) {
+			throw new Error(`broadcast is closed: ${this.state.closed.peek()}`);
+		}
+
+		const existing = this.state.tracks.get(track.name);
+		if (existing && !existing.state.closed.peek()) {
+			throw new Error(`duplicate track: ${track.name}`);
+		}
+
+		this.state.tracks.set(track.name, track);
+
+		// Evict the entry once the track closes, unless it has since been replaced.
+		const dispose = track.state.closed.subscribe((closed) => {
+			if (!closed) return;
+			if (this.state.tracks.get(track.name) === track) {
+				this.state.tracks.delete(track.name);
+			}
+			dispose();
+		});
+	}
+
+	/**
+	 * Create a track, insert it into the broadcast, and return its {@link TrackProducer}.
+	 *
+	 * Commits the immutable {@link TrackInfo} up front, so a subscriber resolves
+	 * {@link TrackConsumer.info} without an on-demand round-trip. Mirrors the Rust
+	 * `BroadcastProducer::create_track`.
+	 */
+	createTrack(name: string, info: Partial<TrackInfo> = {}): TrackProducer {
+		const track = new TrackProducer(name).accept(info);
+		this.insertTrack(track);
+		return track;
+	}
+
+	/** Remove a statically inserted track by name. Mirrors the Rust `BroadcastProducer::remove_track`. */
+	removeTrack(name: string): void {
+		this.state.tracks.delete(name);
+	}
+
+	/**
 	 * Open a live subscription to a track, returning the {@link TrackSubscriber} the
 	 * groups stream into. Called by the consuming application (usually via
 	 * {@link TrackConsumer.subscribe}) and by the publishing wire layer to ask the
@@ -138,6 +196,14 @@ export class Broadcast {
 	subscribe(name: string, priority: number): TrackSubscriber {
 		if (this.state.closed.peek()) {
 			throw new Error(`broadcast is closed: ${this.state.closed.peek()}`);
+		}
+
+		// Fast path: a statically inserted track fans out a fresh subscriber, no
+		// request. A stale (closed) entry is evicted and falls through to on-demand.
+		const existing = this.state.tracks.get(name);
+		if (existing) {
+			if (!existing.state.closed.peek()) return existing.subscribe();
+			this.state.tracks.delete(name);
 		}
 
 		// The subscriber (caller, reads) and the request's producer (other side,
@@ -165,6 +231,12 @@ export class Broadcast {
 		// Consume side: a TRACK stream (lite-05+) answers it.
 		if (this.#infoResolver) {
 			return this.#infoResolver(name);
+		}
+
+		// A statically inserted track already committed its info; serve it directly.
+		const existing = this.state.tracks.get(name);
+		if (existing && !existing.state.closed.peek()) {
+			return existing.info();
 		}
 
 		// Publish side: ask the application by triggering a TrackRequest it answers

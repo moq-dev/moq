@@ -151,7 +151,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let prefix = interest.prefix.to_owned();
 		let exclude_hop = interest.exclude_hop;
 
-		let origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
+		// If the requested prefix is outside our scope (an empty origin, or a token
+		// that doesn't grant it), we simply have nothing to announce. Respond with an
+		// empty set and keep the stream open (the subscriber treats a FIN here as a
+		// fatal stream close), rather than erroring, which would reset the stream.
+		let origin = self
+			.origin
+			.scope(&[prefix.as_path()])
+			.unwrap_or_else(|| self.origin.empty());
 		let mut announced = origin.announced();
 
 		if let Err(err) = Self::run_announce(

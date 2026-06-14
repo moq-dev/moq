@@ -33,7 +33,17 @@ export class Consumer<T> {
 				this.#framesRead = 0;
 			}
 
-			const frame = await this.#group.readFrame();
+			let frame: Uint8Array | undefined;
+			try {
+				frame = await this.#group.readFrame();
+			} catch {
+				// The group was reset or we fell behind its eviction window. Resync from
+				// the next group, which begins with a fresh snapshot (frame 0), so no
+				// partial state is presented.
+				this.#group = undefined;
+				continue;
+			}
+
 			if (frame === undefined) {
 				// The group is exhausted; advance to the next one.
 				this.#group = undefined;

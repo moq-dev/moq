@@ -397,10 +397,10 @@ async fn run_session(
 
 	// Held for the lifetime of this task; dropping it (on return) unannounces the broadcast.
 	let _publish = origin
-		.publish_broadcast(&settings.broadcast, broadcast_consumer)
+		.publish_broadcast(&settings.broadcast, &broadcast_consumer)
 		.context("failed to publish broadcast")?;
 
-	let client = client.with_publisher(origin.clone());
+	let client = client.with_publisher(&origin);
 	let session = client.connect(settings.url.clone()).await?;
 
 	let mut runtime = RuntimeState {

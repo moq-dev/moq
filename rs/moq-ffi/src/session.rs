@@ -21,22 +21,28 @@ impl Client {
 			.init()
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
-		// moq-net defaults both sides if unset; only override when the
-		// FFI caller wired their own.
-		let mut client = client;
-		if let Some(publish) = self.publish.as_ref() {
-			client = client.with_publisher(publish.inner().clone());
-		}
-		if let Some(consume) = self.consume.as_ref() {
-			client = client.with_consumer(consume.inner().clone());
-		}
+		// Materialize both origin sides (reusing the caller's if wired, else a
+		// fresh one) so the session can publish/subscribe and the FFI can always
+		// hand back a publisher/consumer.
+		let publish = self
+			.publish
+			.as_ref()
+			.map(|p| p.inner().clone())
+			.unwrap_or_else(|| moq_net::Origin::random().produce());
+		let subscribe = self
+			.consume
+			.as_ref()
+			.map(|p| p.inner().clone())
+			.unwrap_or_else(|| moq_net::Origin::random().produce());
 
 		let session = client
+			.with_publisher(&publish)
+			.with_subscriber(subscribe.clone())
 			.connect(url)
 			.await
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
-		Ok(Arc::new(MoqSession::new(session)))
+		Ok(Arc::new(MoqSession::new(session, publish, subscribe)))
 	}
 }
 
@@ -96,12 +102,11 @@ impl MoqClient {
 
 	/// Connect to a MoQ server and wait for the session to be established.
 	///
-	/// If neither [`set_publish`](Self::set_publish) nor
-	/// [`set_consume`](Self::set_consume) was called on this client, the
-	/// underlying moq-net layer auto-creates a fresh origin and wires it
-	/// as both sides. The producer and consumer sides are then accessible
-	/// via [`MoqSession::publisher`] and [`MoqSession::consumer`] so the
-	/// caller never has to construct a [`MoqOriginProducer`] themselves.
+	/// Any side not wired via [`set_publish`](Self::set_publish) /
+	/// [`set_consume`](Self::set_consume) gets a fresh origin, so the producer
+	/// and consumer sides are always accessible via [`MoqSession::publisher`]
+	/// and [`MoqSession::consumer`] without the caller constructing a
+	/// [`MoqOriginProducer`] themselves.
 	///
 	/// Can be cancelled by calling `cancel()`.
 	pub async fn connect(&self, url: String) -> Result<Arc<MoqSession>, MoqError> {
@@ -125,11 +130,16 @@ pub struct MoqSession {
 }
 
 impl MoqSession {
-	pub(crate) fn new(session: moq_net::Session) -> Self {
-		// Eagerly wrap the always-set origin sides so each
-		// publisher()/consumer() call hands back the same Arc.
-		let publisher = Arc::new(MoqOriginProducer::from_inner(session.publisher().clone()));
-		let consumer = Arc::new(MoqOriginConsumer::from_inner(session.consumer().clone()));
+	pub(crate) fn new(
+		session: moq_net::Session,
+		publish: moq_net::OriginProducer,
+		subscribe: moq_net::OriginProducer,
+	) -> Self {
+		// Eagerly wrap the wired origin sides so each publisher()/consumer()
+		// call hands back the same Arc. `publish` is published into; `subscribe`
+		// is where the remote's broadcasts land (read via its consumer view).
+		let publisher = Arc::new(MoqOriginProducer::from_inner(publish));
+		let consumer = Arc::new(MoqOriginConsumer::from_inner(subscribe.consume()));
 		Self {
 			inner: Some(session.clone()),
 			closed: Task::new(session),

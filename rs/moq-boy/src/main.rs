@@ -220,7 +220,7 @@ async fn run(config: &Config) -> Result<()> {
 
 	let broadcast_path = format!("{game_prefix}/{name}");
 	let _publish = publish_origin
-		.publish_broadcast(&broadcast_path, broadcast.consume())
+		.publish_broadcast(&broadcast_path, &broadcast)
 		.context("failed to publish broadcast")?;
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
@@ -236,8 +236,8 @@ async fn run(config: &Config) -> Result<()> {
 	tracing::info!(url = %config.url, %name, broadcast = %broadcast_path, "connecting to relay");
 
 	let reconnect = client
-		.with_publisher(publish_origin.clone())
-		.with_consumer(consume_origin)
+		.with_publisher(&publish_origin)
+		.with_subscriber(consume_origin)
 		.reconnect(config.url.clone());
 
 	// Set up catalog and encoders.

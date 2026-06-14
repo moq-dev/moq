@@ -52,7 +52,7 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 	let consumer = broadcast.consume();
 	let publish = server
 		.publisher()
-		.publish_broadcast(path, consumer)
+		.publish_broadcast(path, &consumer)
 		.map_err(|err| Error::Other(anyhow::anyhow!("failed to publish broadcast: {err}")))?;
 
 	let sink = Box::new(IngestSink::new(broadcast)?);

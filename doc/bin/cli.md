@@ -90,9 +90,9 @@ moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --n
 
 Video capture uses a native per-platform backend (AVFoundation on macOS, V4L2 on
 Linux, Media Foundation on Windows) and picks a hardware H.264 encoder
-(VideoToolbox on macOS, NVENC on Linux NVIDIA) when one is present, falling back
-to the built-in software encoder (openh264); force either with `--hardware` /
-`--software`. `--camera` takes a bare integer as a device index, otherwise a
+(VideoToolbox on macOS, NVENC on Linux NVIDIA, VAAPI on Linux Intel/AMD) when one
+is present, falling back to the built-in software encoder (openh264); force either
+with `--hardware` / `--software`. `--camera` takes a bare integer as a device index, otherwise a
 device path (Linux) or name (a friendly-name substring on Windows, the
 AVFoundation `uniqueID` on macOS). Audio capture uses cpal (CoreAudio / WASAPI /
 ALSA) and encodes Opus.

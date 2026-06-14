@@ -95,10 +95,10 @@ impl Connection {
 		// or subscribe-only token.
 		let mut request = self.request.with_stats(stats);
 		if let Some(subscribe) = subscribe {
-			request = request.with_publisher(subscribe);
+			request = request.with_publisher(&subscribe);
 		}
 		if let Some(publish) = publish {
-			request = request.with_consumer(publish);
+			request = request.with_subscriber(publish);
 		}
 		let session = request.ok().await?;
 

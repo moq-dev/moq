@@ -125,7 +125,15 @@ export class Mse implements Backend {
 			for (;;) {
 				// TODO: Use Frame.Consumer for CMAF so we can support higher latencies.
 				// It requires extracting the timestamp from the frame payload.
-				const frame = await data.readFrame();
+				let frame: Uint8Array | undefined;
+				try {
+					frame = await data.readFrame();
+				} catch (err) {
+					// Falling behind a group's eviction window drops frames; resync from
+					// the next group (a keyframe segment) rather than stopping playback.
+					if (err instanceof Moq.CacheFull) continue;
+					throw err;
+				}
 				if (!frame) return;
 
 				// Extract the timestamp from the CMAF segment and mark when we received it.

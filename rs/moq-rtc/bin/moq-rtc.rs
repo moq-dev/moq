@@ -117,8 +117,8 @@ async fn main() -> anyhow::Result<()> {
 	let subscriber_consumer = subscriber.consume();
 
 	let reconnect = moq_client
-		.with_publisher(publisher.clone())
-		.with_consumer(subscriber)
+		.with_publisher(&publisher)
+		.with_subscriber(subscriber)
 		.reconnect(relay.clone());
 
 	tracing::info!(%relay, %broadcast, "starting moq-rtc");
@@ -198,7 +198,7 @@ async fn run_client(
 			let broadcast = moq_net::BroadcastInfo::new().produce();
 			let consumer = broadcast.consume();
 			let _publish = publisher
-				.publish_broadcast(broadcast_name, consumer)
+				.publish_broadcast(broadcast_name, &consumer)
 				.context("failed to publish broadcast")?;
 			client.subscribe(url, broadcast).await?;
 		}
