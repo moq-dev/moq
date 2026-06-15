@@ -2,6 +2,7 @@
 	"name": "@moq/publish",
 	"type": "module",
 	"version": "0.2.14",
+	"jsr": false,
 	"description": "Publish Media over QUIC broadcasts",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",

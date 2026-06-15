@@ -1,5 +1,7 @@
 /**
- * CMAF (fMP4) container utilities for encoding and decoding segments.
+ * CMAF (fMP4) container utilities for encoding and decoding init and media segments.
+ *
+ * @module
  */
 
 export * from "./decode";

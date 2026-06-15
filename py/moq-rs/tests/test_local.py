@@ -2,6 +2,7 @@
 
 import asyncio
 import struct
+from typing import cast
 
 import moq
 import pytest
@@ -255,6 +256,42 @@ async def test_dynamic_track_request():
     assert frame == payload
 
     track.finish()
+
+
+async def test_dynamic_track_request_can_publish_media():
+    broadcast = moq.BroadcastProducer()
+    dynamic = broadcast.dynamic()
+    consumer = broadcast.consume()
+    catalog_consumer = consumer.subscribe_catalog()
+    media_consumer = consumer.subscribe_media(
+        "requested-audio",
+        cast(moq.Container, moq.Container.LEGACY()),
+        10_000,
+    )
+
+    track = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert track.name == "requested-audio"
+
+    media = broadcast.publish_media_on_track(track, "opus", opus_head())
+    assert media.name == "requested-audio"
+    with pytest.raises(Exception):
+        _ = track.name
+
+    catalog = await asyncio.wait_for(anext(catalog_consumer), timeout=5.0)
+    audio = catalog.audio["requested-audio"]
+    assert audio.codec == "opus"
+    assert audio.sample_rate == 48000
+    assert audio.channel_count == 2
+
+    payload = b"dynamic opus frame"
+    media.write_frame(payload, 20_000)
+
+    async for frame in media_consumer:
+        assert frame.payload == payload
+        assert frame.timestamp_us == 20_000
+        break
+
+    media.finish()
 
 
 def test_raw_append_group_sequence_increments():

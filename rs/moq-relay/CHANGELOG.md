@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- *(moq-relay)* reduce `/health` to a plain liveness probe; drop the `--web-health-*` host overload thresholds and the `sysinfo` dependency ([#1746](https://github.com/moq-dev/moq/pull/1746))
+
 ## [0.12.9](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.8...moq-relay-v0.12.9) - 2026-06-10
 
 ### Added

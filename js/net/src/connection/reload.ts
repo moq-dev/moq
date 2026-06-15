@@ -4,6 +4,7 @@ import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
 
+/** Exponential backoff settings for {@link Reload}'s reconnect loop. */
 export type ReloadDelay = {
 	// The delay in milliseconds before reconnecting.
 	// default: 1000
@@ -23,6 +24,7 @@ export type ReloadDelay = {
 	timeout?: DOMHighResTimeStamp;
 };
 
+/** Options for {@link Reload}: connect options plus reactive URL/enabled signals and backoff tuning. */
 export type ReloadProps = ConnectProps & {
 	// Whether to reload the connection when it disconnects.
 	// default: true
@@ -35,31 +37,42 @@ export type ReloadProps = ConnectProps & {
 	delay?: ReloadDelay;
 };
 
+/** Current state of a {@link Reload} connection. */
 export type ReloadStatus = "connecting" | "connected" | "disconnected";
 
+/** Maintains a MoQ connection, reconnecting with exponential backoff when it drops. */
 export class Reload {
+	/** Relay URL to connect to; updating it triggers a reconnect. */
 	url: Signal<URL | undefined>;
+
+	/** Whether reconnecting is active. */
 	enabled: Signal<boolean>;
 
+	/** Current connection status. */
 	status = new Signal<ReloadStatus>("disconnected");
+
+	/** The currently established session, or undefined while disconnected. */
 	established = new Signal<Established | undefined>(undefined);
 
 	// All actively announced broadcast paths, updated reactively.
 	#announced = new Signal<Set<Path.Valid>>(new Set());
+
+	/** The set of broadcast paths currently announced by the server, updated reactively. */
 	readonly announced: Getter<Set<Path.Valid>> = this.#announced;
 
-	// WebTransport options (not reactive).
+	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
 
-	// WebSocket (fallback) options (not reactive).
+	/** WebSocket fallback options applied to each connection attempt (not reactive). */
 	websocket: WebSocketOptions | undefined;
 
-	// Not reactive, but can be updated.
+	/** Backoff settings for the reconnect loop. */
 	delay: ReloadDelay;
 
+	/** The reactive effect scope driving the connect loop; closed by {@link Reload.close}. */
 	signals = new Effect();
 
-	// Resolves when the reconnect loop stops (close() or timeout).
+	/** Resolves when the reconnect loop stops via {@link Reload.close} or the retry timeout. */
 	closed: Promise<void>;
 	#closedResolve!: () => void;
 	#closedReject!: (err: Error) => void;
@@ -185,6 +198,7 @@ export class Reload {
 		});
 	}
 
+	/** Stop reconnecting, close the current connection, and resolve {@link Reload.closed}. */
 	close() {
 		this.signals.close();
 		this.#closedResolve();

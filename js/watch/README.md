@@ -56,7 +56,7 @@ The simplest way to watch a stream:
 
 <moq-watch
     url="https://relay.example.com/anon"
-    path="room/alice.hang"
+    name="room/alice.hang"
     controls>
     <canvas></canvas>
 </moq-watch>
@@ -64,13 +64,25 @@ The simplest way to watch a stream:
 
 ### Attributes
 
-| Attribute | Type    | Default  | Description           |
-|-----------|---------|----------|-----------------------|
-| `url`     | string  | required | Relay server URL      |
-| `path`    | string  | required | Broadcast path        |
-| `paused`  | boolean | false    | Pause playback        |
-| `muted`   | boolean | false    | Mute audio            |
-| `volume`  | number  | 1        | Audio volume (0-1)    |
+| Attribute | Type                                | Default  | Description                              |
+|-----------|-------------------------------------|----------|------------------------------------------|
+| `url`     | string                              | required | Relay server URL                         |
+| `name`    | string                              | required | Broadcast name/path                      |
+| `paused`  | boolean                             | false    | Pause playback                           |
+| `muted`   | boolean                             | false    | Mute audio                               |
+| `visible` | `never` \| distance \| `always`     | `0px`    | When to download video (see below)       |
+| `volume`  | number                              | 0.5      | Audio volume (0-1)                       |
+
+The `visible` attribute controls when the video track is downloaded, based on the canvas
+position relative to the viewport:
+
+- `never`: never download video.
+- a distance (`0px`, `200px`, `100%`, ...): download while the canvas is within that distance
+  of the viewport **and** the tab is visible. `0px` (the default) means strictly on screen; a
+  larger distance pre-warms the video before it scrolls into view.
+- `always`: always download video, regardless of the canvas position or tab visibility.
+
+Only the distance mode suspends video while the tab is hidden; `always` keeps downloading.
 
 ## JavaScript API
 
@@ -105,7 +117,7 @@ watch.video.media.subscribe((stream) => {
 </script>
 
 <moq-watch-ui>
-    <moq-watch url="https://relay.example.com/anon" path="room/alice.hang">
+    <moq-watch url="https://relay.example.com/anon" name="room/alice.hang">
         <canvas></canvas>
     </moq-watch>
 </moq-watch-ui>

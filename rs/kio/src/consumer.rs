@@ -14,8 +14,8 @@ use crate::{
 ///
 /// Consumers have read-only access to the shared value and are notified when
 /// a producer modifies it. Cloning a consumer increments the consumer reference
-/// count. When the last consumer is dropped, all waiters (e.g. [`Producer::unused`])
-/// are notified.
+/// count. When the last consumer is dropped, the consumer-count waiters
+/// (e.g. [`Producer::unused`]) are notified.
 #[derive(Debug)]
 pub struct Consumer<T> {
 	pub(crate) state: Lock<State<T>>,
@@ -46,7 +46,7 @@ impl<T> Consumer<T> {
 
 		// Re-extract state from consumer_state to register
 		let mut state = consumer_state.state;
-		waiter.register(&mut state.waiters);
+		waiter.register(&mut state.waiters_value);
 
 		Poll::Pending
 	}
@@ -58,7 +58,7 @@ impl<T> Consumer<T> {
 			return Poll::Ready(());
 		}
 
-		waiter.register(&mut state.waiters);
+		waiter.register(&mut state.waiters_closed);
 		Poll::Pending
 	}
 
@@ -131,10 +131,12 @@ impl<T> Drop for Consumer<T> {
 			return;
 		}
 
-		// We were the last consumer, need to wake waiters
+		// We were the last consumer, so wake the `unused()` waiters. The value
+		// and closed waiters don't care about the consumer count, so leave
+		// them alone.
 		let mut waiters = {
 			let mut state = self.state.lock();
-			state.waiters.take()
+			state.waiters_consumer.take()
 		};
 
 		waiters.wake();

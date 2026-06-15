@@ -63,7 +63,7 @@ generate = ["localhost", "127.0.0.1"]
 # Optional: root CAs to accept for mTLS peer authentication.
 # Clients that present a cert signed by one of these CAs are granted
 # full access (publish/subscribe/cluster). Intended for relay clustering.
-# Quinn backend only.
+# Supported by the quinn and noq backends.
 root = ["/path/to/peer-ca.pem"]
 ```
 
@@ -94,22 +94,6 @@ listen = "0.0.0.0:443"
 # TLS certificates (can be the same as server.tls)
 cert = "cert.pem"
 key = "key.pem"
-```
-
-### \[web.health]
-
-Thresholds for the `/health` load-shedding probe (CPU, RAM, network, load
-average), or an external `api` to defer the decision to. All keys are optional;
-an unset threshold is not enforced, and with none set `/health` is a pure
-liveness probe. See [HTTP Endpoints](/bin/relay/http) for the full reference and
-value syntax.
-
-```toml
-[web.health]
-cpu = 75       # percent; `75` or `75%`
-ram = "80%"    # percent of total, or absolute (`32GB`)
-tx = "500MB"   # bytes/s; `b` = bits, `B` = bytes (`4Gb`)
-load5 = "80%"  # load average; raw (`6.0`) or percent of cores; Unix only
 ```
 
 ### \[auth]
