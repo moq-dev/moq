@@ -139,6 +139,27 @@ el.catalog = myCatalog;
 > `"msf"`) tears down the previous fetch loop, which clears `catalog`. Set the
 > catalog *after* switching to `"manual"`, not before.
 
+### Custom data tracks
+
+A broadcast can carry arbitrary application tracks (for example a `meta.json`
+metadata track) alongside the media, listed in the catalog
+[`data` section](/concept/layer/hang#data-tracks). Use `subscribeJson` to read
+one: it follows the active broadcast across reconnects and exposes the latest
+value as a signal. Call `close()` when done (it's also closed when the broadcast
+closes).
+
+```typescript
+const meta = broadcast.subscribeJson<{ title: string }>("meta.json");
+meta.value.subscribe((value) => console.log("meta", value));
+```
+
+The component exposes the same method via its `broadcast` property:
+
+```typescript
+const el = document.querySelector("moq-watch")!;
+const meta = el.broadcast.subscribeJson("meta.json");
+```
+
 ## UI Overlay
 
 Import `@moq/watch/ui` for a Web Component overlay with buffering indicator, stats panel, and playback controls:

@@ -6,10 +6,12 @@
 
 mod audio;
 mod container;
+mod data;
 mod root;
 mod video;
 
 pub use audio::*;
 pub use container::*;
+pub use data::*;
 pub use root::*;
 pub use video::*;

@@ -5,6 +5,7 @@ import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 
+import { JsonConsumer, type SubscribeJsonOptions } from "./json";
 import { toHang } from "./msf";
 
 // Watch supports the two on-the-wire catalog formats from @moq/hang plus a
@@ -188,6 +189,25 @@ export class Broadcast {
 				this.status.set("offline");
 			}
 		});
+	}
+
+	/**
+	 * Subscribe to a custom JSON track within this broadcast (e.g. a `meta.json` track listed in the
+	 * catalog `data` section).
+	 *
+	 * Follows the active broadcast across reconnects and exposes the latest reconstructed value as a
+	 * Signal on the returned consumer. The consumer is closed when this broadcast closes; close it
+	 * sooner via its `close()` to stop subscribing.
+	 *
+	 * ```ts
+	 * const meta = broadcast.subscribeJson<{ title: string }>("meta.json");
+	 * meta.value.subscribe((v) => console.log("meta", v));
+	 * ```
+	 */
+	subscribeJson<T>(name: string, options?: SubscribeJsonOptions<T>): JsonConsumer<T> {
+		const consumer = new JsonConsumer<T>(this.active, name, options);
+		this.signals.cleanup(() => consumer.close());
+		return consumer;
 	}
 
 	close() {

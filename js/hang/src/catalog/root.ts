@@ -1,6 +1,7 @@
 import * as z from "zod/mini";
 
 import { AudioSchema } from "./audio";
+import { DataSchema } from "./data";
 import { VideoSchema } from "./video";
 
 /**
@@ -10,10 +11,14 @@ import { VideoSchema } from "./video";
  * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer
  * ignores the extra sections; an extended consumer validates them with its own schema, typically
  * built via `z.extend(RootSchema, { ... })`.
+ *
+ * The `data` section lists arbitrary application-defined tracks (e.g. a `meta.json` track) carried
+ * alongside the media within the same broadcast.
  */
 export const RootSchema = z.looseObject({
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
+	data: z.optional(DataSchema),
 });
 
 /** The root catalog object, with optional video and audio sections plus any app extensions. */

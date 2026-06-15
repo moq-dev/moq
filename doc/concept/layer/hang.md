@@ -83,6 +83,20 @@ The catalog is a JSON document published through the merge-patch helper (`@moq/j
 
 This keeps application-specific sections in the application layer while the base catalog stays generic.
 
+### Data tracks
+
+Beyond `audio`/`video`, the catalog has an optional `data` section: a flat map of track name to a small descriptor (`mime`, `description`). It advertises arbitrary application-defined tracks (for example a `meta.json` metadata track) carried within the same broadcast, so a consumer can discover and subscribe to them without a separate broadcast. The catalog says nothing about how to decode a data track; the descriptor fields are hints for the consumer.
+
+```json
+{
+  "data": {
+    "meta.json": { "mime": "application/json", "description": "broadcast metadata" }
+  }
+}
+```
+
+The web components expose this directly: on the publish side, `broadcast.publishJson("meta.json")` serves a JSON track (seeding late joiners with the latest value) and adds the `data` entry; on the watch side, `broadcast.subscribeJson("meta.json")` follows the active broadcast and exposes the latest value as a signal. The section is omitted from the wire when empty, so existing catalogs are unaffected.
+
 ## Container
 
 The catalog also contains a `container` field for each rendition used to denote the encoding of each track.

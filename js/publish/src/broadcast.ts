@@ -1,8 +1,10 @@
 import * as Catalog from "@moq/hang/catalog";
+import type * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import { CatalogProducer } from "./catalog";
+import { JsonProducer } from "./json";
 import * as Video from "./video";
 
 export type BroadcastProps = {
@@ -11,6 +13,17 @@ export type BroadcastProps = {
 	name?: Moq.Path.Valid | Signal<Moq.Path.Valid>;
 	audio?: Audio.EncoderProps;
 	video?: Video.Props;
+};
+
+/** Serves a custom track when a subscriber requests it, scoped to the subscription's lifetime. */
+export type ServeTrack = (track: Moq.Track, effect: Effect) => void;
+
+/** Options for {@link Broadcast.publishJson}, extending the {@link Json.Config} for the value. */
+export type PublishJsonOptions<T> = Json.Config<T> & {
+	/** MIME type recorded in the catalog `data` entry. Defaults to `"application/json"`. */
+	mime?: string;
+	/** Human-readable description recorded in the catalog `data` entry. */
+	description?: string;
 };
 
 export class Broadcast {
@@ -27,6 +40,10 @@ export class Broadcast {
 	// `video`/`audio` sections are kept in sync from the encoders; an application adds its own root
 	// sections (e.g. `scte35`) by locking it too.
 	readonly catalog = new CatalogProducer();
+
+	// Handlers for custom tracks registered via `publishTrack`, keyed by track name. Persists across
+	// reconnects so a new `Moq.Broadcast` still serves them.
+	#tracks = new Map<string, ServeTrack>();
 
 	signals = new Effect();
 
@@ -100,13 +117,62 @@ export class Broadcast {
 					case Video.Root.TRACK_SD:
 						this.video.sd.serve(request.track, effect);
 						break;
-					default:
+					default: {
+						const serve = this.#tracks.get(request.track.name);
+						if (serve) {
+							serve(request.track, effect);
+							break;
+						}
 						console.error("received subscription for unknown track", request.track.name);
 						request.track.close(new Error(`Unknown track: ${request.track.name}`));
 						break;
+					}
 				}
 			});
 		}
+	}
+
+	/**
+	 * Serve a custom track within this broadcast, identified by name.
+	 *
+	 * When a subscriber requests a track with this name, `serve` runs with the track and an effect
+	 * scoped to that subscription (cleaned up when the subscriber goes away). The handler persists
+	 * across reconnects. This is the low-level escape hatch for arbitrary payloads; see
+	 * {@link publishJson} for a JSON track that also advertises itself in the catalog.
+	 *
+	 * Returns a function that unregisters the handler. Note this does not close already-served
+	 * subscriptions, nor touch the catalog.
+	 */
+	publishTrack(name: string, serve: ServeTrack): () => void {
+		this.#tracks.set(name, serve);
+		return () => {
+			if (this.#tracks.get(name) === serve) this.#tracks.delete(name);
+		};
+	}
+
+	/**
+	 * Publish a custom JSON track within this broadcast and advertise it in the catalog `data`
+	 * section.
+	 *
+	 * Returns a {@link JsonProducer}: call `update`/`mutate` to set the value, which is served to
+	 * every subscriber (seeding late joiners with the latest value). The track lives for the
+	 * lifetime of the broadcast.
+	 *
+	 * ```ts
+	 * const meta = broadcast.publishJson("meta.json");
+	 * meta.update({ title: "Live from the moon" });
+	 * ```
+	 */
+	publishJson<T>(name: string, options?: PublishJsonOptions<T>): JsonProducer<T> {
+		const producer = new JsonProducer<T>(options);
+		this.publishTrack(name, (track, effect) => producer.serve(track, effect));
+
+		this.catalog.mutate((catalog) => {
+			catalog.data ??= {};
+			catalog.data[name] = { mime: options?.mime ?? "application/json", description: options?.description };
+		});
+
+		return producer;
 	}
 
 	close() {

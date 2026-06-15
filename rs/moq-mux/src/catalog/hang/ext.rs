@@ -57,6 +57,7 @@ impl<E: CatalogExt> Catalog<E> {
 		hang::Catalog {
 			video: self.video.clone(),
 			audio: self.audio.clone(),
+			data: Default::default(),
 		}
 	}
 }

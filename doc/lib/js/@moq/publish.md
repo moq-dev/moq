@@ -127,6 +127,22 @@ broadcast.video.device.set("screen");
 broadcast.name.set("bob.hang");
 ```
 
+### Custom data tracks
+
+Beyond audio and video, you can publish arbitrary application tracks within the
+same broadcast (no separate broadcast needed). `publishJson` serves a JSON track
+(seeding late joiners with the latest value) and advertises it in the catalog
+[`data` section](/concept/layer/hang#data-tracks):
+
+```typescript
+const meta = broadcast.publishJson<{ title: string }>("meta.json");
+meta.update({ title: "Live from the moon" });
+```
+
+For non-JSON payloads, `publishTrack(name, serve)` is the low-level escape hatch:
+`serve` runs whenever a subscriber requests the named track. The component
+exposes both via its `broadcast` property (`el.broadcast.publishJson(...)`).
+
 ## Related Packages
 
 - **[@moq/watch](/lib/js/@moq/watch)** — Subscribe to and render MoQ broadcasts

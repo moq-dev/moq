@@ -12,6 +12,13 @@ test("base catalog preserves unknown sections", () => {
 	expect(parsed.scte35).toEqual({ spliceId: 42 });
 });
 
+test("parses the data section of custom tracks", () => {
+	const parsed = RootSchema.parse({
+		data: { "meta.json": { mime: "application/json", description: "broadcast metadata" } },
+	});
+	expect(parsed.data?.["meta.json"]).toEqual({ mime: "application/json", description: "broadcast metadata" });
+});
+
 test("extended schema validates app sections", () => {
 	const Scte35Schema = z.object({ spliceId: z.number() });
 	const ExtendedSchema = z.extend(RootSchema, { scte35: z.optional(Scte35Schema) });
