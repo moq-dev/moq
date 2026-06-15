@@ -74,7 +74,6 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 			cluster,
 			tls_info: server.tls_info(),
 			conn_id: AtomicU64::new(0),
-			health: web_config.health.build(),
 		},
 		web_config,
 	);
@@ -255,8 +254,7 @@ async fn two_publish_only_clients_coexist() {
 	web_handle.abort();
 }
 
-/// With no thresholds configured, `/health` is a pure liveness probe that
-/// returns `200 ok`.
+/// `/health` is a liveness probe that always returns `200 ok`.
 #[tokio::test]
 async fn health_endpoint_reports_ok() {
 	let (port, web_handle) = spawn_relay().await;

@@ -49,11 +49,6 @@ pub struct WebConfig {
 	#[arg(long = "web-ws", env = "MOQ_WEB_WS", default_value = "true")]
 	#[serde(default = "default_true")]
 	pub ws: bool,
-
-	/// Health endpoint (`/health`) thresholds for load shedding.
-	#[command(flatten)]
-	#[serde(default)]
-	pub health: crate::HealthConfig,
 }
 
 /// Plain HTTP listener configuration.
@@ -114,8 +109,6 @@ pub struct WebState {
 	pub tls_info: Arc<std::sync::RwLock<moq_native::tls::Info>>,
 	/// Monotonically increasing connection counter for WebSocket sessions.
 	pub conn_id: AtomicU64,
-	/// Host overload monitor backing the `/health` endpoint.
-	pub health: crate::Health,
 }
 
 /// Run a HTTP server using Axum
@@ -385,33 +378,11 @@ async fn serve_landing() -> Response {
 	landing_response()
 }
 
-/// Liveness/load-shedding probe.
-///
-/// Returns `200 ok` when every configured threshold passes, or `503` with a
-/// plain-text `overloaded` header line followed by one line per breached
-/// threshold. Unauthenticated so load-balancer probes don't need a JWT.
-async fn serve_health(State(state): State<Arc<WebState>>) -> Response {
-	let mut breaches = state.health.check();
-	// Only pay the external probe (up to 5s) when we're otherwise healthy; on an
-	// already-breached host the api line is just diagnostic and would delay the
-	// inevitable 503. `&&` short-circuits, so check_api isn't awaited when
-	// breaches are already present.
-	if breaches.is_empty()
-		&& let Some(msg) = state.health.check_api().await
-	{
-		breaches.push(msg);
-	}
-
-	if breaches.is_empty() {
-		return (StatusCode::OK, "ok\n").into_response();
-	}
-
-	let mut body = String::from("overloaded\n");
-	for breach in &breaches {
-		body.push_str(breach);
-		body.push('\n');
-	}
-	(StatusCode::SERVICE_UNAVAILABLE, body).into_response()
+/// Liveness probe. Always returns `200 ok`. Unauthenticated so load-balancer
+/// probes don't need a JWT. Host overload monitoring belongs in a separate
+/// process, not the relay.
+async fn serve_health() -> Response {
+	(StatusCode::OK, "ok\n").into_response()
 }
 
 async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
