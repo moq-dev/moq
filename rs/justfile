@@ -40,6 +40,7 @@ ci FILES="":
     cargo check --workspace --all-features
     cargo deny check --show-stats
     just rs test --all-features
+    just rs test-moq-gst --all-features
     just build
 
 # Auto-fix clippy/format/shear/sort.
@@ -51,6 +52,10 @@ fix:
 
 test *args:
     cargo test --all-targets {{ args }}
+
+# moq-gst is outside default-members (needs GStreamer), so `test` above skips it.
+test-moq-gst *args:
+    cargo test -p moq-gst --all-targets {{ args }}
 
 build:
     cargo build
