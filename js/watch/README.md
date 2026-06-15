@@ -64,13 +64,25 @@ The simplest way to watch a stream:
 
 ### Attributes
 
-| Attribute | Type    | Default  | Description           |
-|-----------|---------|----------|-----------------------|
-| `url`     | string  | required | Relay server URL      |
-| `path`    | string  | required | Broadcast path        |
-| `paused`  | boolean | false    | Pause playback        |
-| `muted`   | boolean | false    | Mute audio            |
-| `volume`  | number  | 1        | Audio volume (0-1)    |
+| Attribute | Type                                | Default  | Description                              |
+|-----------|-------------------------------------|----------|------------------------------------------|
+| `url`     | string                              | required | Relay server URL                         |
+| `path`    | string                              | required | Broadcast path                           |
+| `paused`  | boolean                             | false    | Pause playback                           |
+| `muted`   | boolean                             | false    | Mute audio                               |
+| `visible` | `never` \| distance \| `always`     | `0px`    | When to download video (see below)       |
+| `volume`  | number                              | 1        | Audio volume (0-1)                       |
+
+The `visible` attribute controls when the video track is downloaded, based on the canvas
+position relative to the viewport:
+
+- `never`: never download video.
+- a distance (`0px`, `200px`, `100%`, ...): download while the canvas is within that distance
+  of the viewport. `0px` (the default) means strictly on screen; a larger distance pre-warms
+  the video before it scrolls into view.
+- `always`: always download video, even when the canvas is scrolled out of view.
+
+In all cases video is still suspended while the tab is hidden.
 
 ## JavaScript API
 

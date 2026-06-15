@@ -2,9 +2,24 @@ import { Time } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 
+/**
+ * Controls when video is downloaded relative to the canvas position.
+ *
+ * - `"never"`: never download video (forces the visibility check off).
+ * - `"always"`: always download video, even when the canvas is scrolled out of view (forces
+ *   the visibility check on).
+ * - a CSS length (`"0px"`, `"200px"`, `"100%"`, ...): download while the canvas is within
+ *   that distance of the viewport, used as the {@link IntersectionObserver} `rootMargin`.
+ *   `"0px"` means strictly on screen; larger values pre-warm the video before it scrolls in.
+ *
+ * In all cases video is still suspended while the tab is hidden.
+ */
+export type Visible = "never" | "always" | (string & {});
+
 export type RendererProps = {
 	canvas?: HTMLCanvasElement | Signal<HTMLCanvasElement | undefined>;
 	paused?: boolean | Signal<boolean>;
+	visible?: Visible | Signal<Visible>;
 };
 
 // An component to render a video to a canvas.
@@ -17,6 +32,9 @@ export class Renderer {
 	// Whether the video is paused.
 	paused: Signal<boolean>;
 
+	// When video is downloaded relative to the canvas position. See {@link Visible}.
+	visible: Signal<Visible>;
+
 	// The most recently rendered frame, updated after each rAF paint.
 	readonly frame = new Signal<VideoFrame | undefined>(undefined);
 
@@ -24,6 +42,7 @@ export class Renderer {
 	readonly timestamp = new Signal<Time.Milli | undefined>(undefined);
 
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
+	// Whether the canvas is within the configured visible margin and the tab is focused.
 	#visible = new Signal(false);
 	#signals = new Effect();
 
@@ -31,6 +50,7 @@ export class Renderer {
 		this.decoder = decoder;
 		this.canvas = Signal.from(props?.canvas);
 		this.paused = Signal.from(props?.paused ?? false);
+		this.visible = Signal.from(props?.visible ?? "0px");
 
 		this.#signals.run((effect) => {
 			const canvas = effect.get(this.canvas);
@@ -56,34 +76,46 @@ export class Renderer {
 		}
 	}
 
-	// Track whether the canvas is visible in the viewport and the tab is focused.
+	// Track whether the canvas is within the configured visible margin and the tab is focused.
 	#runVisible(effect: Effect): void {
-		const canvas = effect.get(this.canvas);
-		if (!canvas) {
+		const visible = effect.get(this.visible);
+
+		// "never" forces the visibility check off regardless of position or tab state.
+		if (visible === "never") {
 			this.#visible.set(false);
 			return;
 		}
 
-		let intersecting = false;
+		// "always" overrides the IntersectionObserver result to true; a distance is its rootMargin.
+		let intersecting = visible === "always";
 
 		const update = () => {
 			this.#visible.set(intersecting && !document.hidden);
 		};
 
-		const observer = new IntersectionObserver(
-			(entries) => {
-				for (const entry of entries) {
-					intersecting = entry.isIntersecting;
-					update();
-				}
-			},
-			{ threshold: 0.01 },
-		);
+		if (visible !== "always") {
+			const canvas = effect.get(this.canvas);
+			if (!canvas) {
+				this.#visible.set(false);
+				return;
+			}
 
+			const observer = new IntersectionObserver(
+				(entries) => {
+					for (const entry of entries) {
+						intersecting = entry.isIntersecting;
+						update();
+					}
+				},
+				{ threshold: 0.01, rootMargin: visible },
+			);
+
+			observer.observe(canvas);
+			effect.cleanup(() => observer.disconnect());
+		}
+
+		update();
 		effect.event(document, "visibilitychange", update);
-
-		observer.observe(canvas);
-		effect.cleanup(() => observer.disconnect());
 		effect.cleanup(() => this.#visible.set(false));
 	}
 
