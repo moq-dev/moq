@@ -80,7 +80,8 @@ curl http://localhost:4443/certificate.sha256
 ### GET /health
 
 A liveness probe for upstream load balancers. Always returns `200` with the
-body `ok`. It's unauthenticated so probes don't need a token.
+body `ok\n` (a trailing newline). It's unauthenticated so probes don't need a
+token.
 
 ```bash
 curl -i http://localhost:4443/health
