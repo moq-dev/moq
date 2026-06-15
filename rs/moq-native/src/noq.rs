@@ -80,6 +80,9 @@ pub enum Error {
 	#[error("connection ID length ({0}) exceeds maximum of 20")]
 	QuicLbCidTooLong(usize),
 
+	#[error("failed to build client certificate verifier")]
+	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
+
 	#[error(transparent)]
 	NoInitialCipherSuite(#[from] noq::crypto::rustls::NoInitialCipherSuite),
 
@@ -315,11 +318,22 @@ impl NoqServer {
 		certs.load_certs(&config.tls)?;
 		let certs = Arc::new(certs);
 
-		let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+		let tls_builder = rustls::ServerConfig::builder_with_provider(provider.clone())
 			.with_protocol_versions(&[&rustls::version::TLS13])
-			.map_err(crate::tls::Error::from)?
-			.with_no_client_auth()
-			.with_cert_resolver(certs.clone());
+			.map_err(crate::tls::Error::from)?;
+
+		let mut tls = if config.tls.root.is_empty() {
+			tls_builder.with_no_client_auth().with_cert_resolver(certs.clone())
+		} else {
+			let roots = config.tls.load_roots()?;
+			let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+				.allow_unauthenticated()
+				.build()
+				.map_err(Error::ClientVerifier)?;
+			tls_builder
+				.with_client_cert_verifier(verifier)
+				.with_cert_resolver(certs.clone())
+		};
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
 		let mut alpns: Vec<Vec<u8>> = config
@@ -336,6 +350,15 @@ impl NoqServer {
 		let tls: noq::crypto::rustls::QuicServerConfig = tls.try_into()?;
 		let mut tls = noq::ServerConfig::with_crypto(Arc::new(tls));
 		tls.transport_config(transport);
+
+		// Advertise the preferred_address transport parameter (RFC 9000 §9.6).
+		// noq allocates a fresh CID + reset token for the address during the handshake.
+		if let Some(addr) = config.preferred_v4 {
+			tls.preferred_address_v4(Some(addr));
+		}
+		if let Some(addr) = config.preferred_v6 {
+			tls.preferred_address_v6(Some(addr));
+		}
 
 		// There's a bit more boilerplate to make a generic endpoint.
 		let runtime = noq::default_runtime().ok_or(Error::NoRuntime)?;
@@ -490,6 +513,16 @@ impl NoqRequest {
 			NoqRequest::Raw { .. } => None,
 			NoqRequest::WebTransport { request, .. } => Some(&request.url),
 		}
+	}
+
+	/// Whether the peer presented a client certificate that rustls validated
+	/// against the configured `tls.root` during the handshake.
+	pub fn has_peer_certificate(&self) -> bool {
+		let conn = match self {
+			NoqRequest::Raw { connection, .. } => connection,
+			NoqRequest::WebTransport { request, .. } => request.conn(),
+		};
+		conn.peer_identity().is_some()
 	}
 
 	/// Reject the session with a status code.

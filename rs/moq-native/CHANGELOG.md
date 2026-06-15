@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(moq-native)* support mTLS client certificates and `preferred_address` on the noq backend, bringing it to parity with quinn.
+
+### Changed
+
+- *(moq-native)* rename `Error::MtlsQuinnOnly` to `Error::MtlsUnsupported`; mTLS now works on both the quinn and noq backends.
+
 ## [0.17.0](https://github.com/moq-dev/moq/compare/moq-native-v0.16.3...moq-native-v0.17.0) - 2026-06-10
 
 ### Added

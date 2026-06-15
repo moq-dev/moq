@@ -40,8 +40,8 @@ pub enum Error {
 	#[error("Iroh support is not enabled")]
 	IrohDisabled,
 
-	#[error("tls.root (mTLS) is only supported by the quinn backend")]
-	MtlsQuinnOnly,
+	#[error("tls.root (mTLS) is not supported by the selected QUIC backend")]
+	MtlsUnsupported,
 
 	#[error("invalid status code")]
 	InvalidStatusCode,
