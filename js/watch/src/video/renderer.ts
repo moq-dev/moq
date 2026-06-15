@@ -2,6 +2,9 @@ import { Time } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 
+// Fraction of the canvas that must intersect the viewport before it counts as visible.
+const INTERSECTION_THRESHOLD = 0.01;
+
 /**
  * Controls when video is downloaded relative to the canvas position.
  *
@@ -14,13 +17,17 @@ import type { Decoder } from "./decoder";
  */
 export type Visible = "never" | "always" | (string & {});
 
+/** Options for {@link Renderer}. */
 export type RendererProps = {
+	/** The canvas to render decoded frames to. */
 	canvas?: HTMLCanvasElement | Signal<HTMLCanvasElement | undefined>;
+	/** Whether playback is paused; when paused only a single preview frame is fetched. */
 	paused?: boolean | Signal<boolean>;
+	/** When video is downloaded relative to the canvas position. See {@link Visible}. Defaults to `"0px"`. */
 	visible?: Visible | Signal<Visible>;
 };
 
-// An component to render a video to a canvas.
+/** Decodes a video track and paints it to a canvas, gating downloads on canvas visibility. */
 export class Renderer {
 	decoder: Decoder;
 
@@ -113,10 +120,10 @@ export class Renderer {
 		// invalid rootMargin throws a SyntaxError, so fall back to the default margin.
 		let observer: IntersectionObserver;
 		try {
-			observer = new IntersectionObserver(callback, { threshold: 0.01, rootMargin: visible });
+			observer = new IntersectionObserver(callback, { threshold: INTERSECTION_THRESHOLD, rootMargin: visible });
 		} catch {
 			console.warn(`moq-watch: invalid visible margin "${visible}", using "0px"`);
-			observer = new IntersectionObserver(callback, { threshold: 0.01 });
+			observer = new IntersectionObserver(callback, { threshold: INTERSECTION_THRESHOLD });
 		}
 
 		update();
