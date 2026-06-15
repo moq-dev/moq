@@ -10,7 +10,7 @@ use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
 
-use super::session::{DataMsg, ResolvedSettings, SessionHandle, Status, CAT};
+use super::session::{caps_supported, DataMsg, ResolvedSettings, SessionHandle, Status, CAT};
 
 #[derive(Debug, Clone, Default)]
 struct Settings {
@@ -261,6 +261,12 @@ impl MoqSinkSpike {
 		generation: u64,
 		buffer: gst::Buffer,
 	) -> Result<gst::FlowSuccess, gst::FlowError> {
+		// The worker marks a pad failed after rejecting its data; surface that to GStreamer instead of
+		// silently dropping. Because the worker is async, this lands on the buffer after the bad one.
+		if self.status.is_failed(pad.name().as_str()) {
+			return Err(gst::FlowError::NotNegotiated);
+		}
+
 		let sender = self
 			.session
 			.lock()
@@ -289,11 +295,17 @@ impl MoqSinkSpike {
 
 		match event.view() {
 			gst::EventView::Caps(caps) => {
+				let caps = caps.caps();
+				// Reject unsupported caps synchronously (NotNegotiated) before handing off to the worker.
+				if !caps_supported(caps) {
+					gst::warning!(CAT, "rejecting unsupported caps on pad {}", pad.name());
+					return false;
+				}
 				let Some(sender) = sender else { return false };
 				let msg = DataMsg::Caps {
 					pad: pad.name().to_string(),
 					generation,
-					caps: caps.caps().to_owned(),
+					caps: caps.to_owned(),
 				};
 				if sender.blocking_send(msg).is_err() {
 					return false;

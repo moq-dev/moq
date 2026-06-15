@@ -34,11 +34,30 @@ pub struct Status {
 	connected: AtomicBool,
 	version: Mutex<Option<String>>,
 	send_bitrate: AtomicU64,
+	/// Pads whose data the worker rejected; the chain reads this to return a FlowError instead of
+	/// silently dropping. Cleared per pad on recreate, and wholesale on session exit.
+	failed: Mutex<HashSet<String>>,
 }
 
 impl Status {
 	fn set_connected(&self, value: bool) {
 		self.connected.store(value, Ordering::Relaxed);
+	}
+
+	fn mark_failed(&self, pad: &str) {
+		self.failed.lock().unwrap().insert(pad.to_string());
+	}
+
+	fn clear_failed(&self, pad: &str) {
+		self.failed.lock().unwrap().remove(pad);
+	}
+
+	pub fn is_failed(&self, pad: &str) -> bool {
+		self.failed.lock().unwrap().contains(pad)
+	}
+
+	fn reset_failed(&self) {
+		self.failed.lock().unwrap().clear();
 	}
 
 	pub fn connected(&self) -> bool {
@@ -183,7 +202,7 @@ async fn run_session(
 	notify_connected(&element);
 	gst::info!(CAT, "session connected to {}", settings.url);
 
-	let mut pad_set = PadSet::new(broadcast, catalog);
+	let mut pad_set = PadSet::new(broadcast, catalog, status.clone());
 	// Pads requested before the session task existed are seeded into the authoritative set.
 	for (name, generation) in seed {
 		pad_set.add_pad(&name, generation);
@@ -197,6 +216,7 @@ async fn run_session(
 	status.set_connected(false);
 	status.set_version(None);
 	status.set_send_bitrate(0);
+	status.reset_failed();
 	notify_connected(&element);
 	result
 }
@@ -251,7 +271,11 @@ async fn run_loop(
 				None => send_bandwidth = None,
 			},
 			msg = data.recv() => match msg {
-				Some(DataMsg::AddPad { pad, generation }) => pad_set.add_pad(&pad, generation),
+				Some(DataMsg::AddPad { pad, generation }) => {
+					pad_set.add_pad(&pad, generation);
+					// A fresh incarnation is not failed even if a previous one was.
+					status.clear_failed(&pad);
+				}
 				Some(DataMsg::Caps { pad, generation, caps }) => pad_set.caps(&pad, generation, &caps)?,
 				Some(DataMsg::Segment { pad, generation, segment }) => pad_set.segment(&pad, generation, segment),
 				Some(DataMsg::Buffer { pad, generation, data, pts }) => pad_set.buffer(&pad, generation, data, pts)?,
@@ -279,6 +303,8 @@ async fn run_loop(
 struct PadSet {
 	broadcast: moq_net::BroadcastProducer,
 	catalog: Option<moq_mux::catalog::Producer>,
+	/// Shared with the element so the chain can read which pads the worker has failed.
+	status: Arc<Status>,
 	/// Authoritative membership: name -> current generation. EOS aggregation counts against this, not
 	/// the lazily-created `pads`, so a pad that ends before CAPS still counts.
 	active: HashMap<String, u64>,
@@ -288,10 +314,11 @@ struct PadSet {
 }
 
 impl PadSet {
-	fn new(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Self {
+	fn new(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer, status: Arc<Status>) -> Self {
 		Self {
 			broadcast,
 			catalog: Some(catalog),
+			status,
 			active: HashMap::new(),
 			pads: HashMap::new(),
 			eos: HashSet::new(),
@@ -319,6 +346,7 @@ impl PadSet {
 		!self.active.is_empty() && self.active.keys().all(|name| self.eos.contains(name))
 	}
 
+	/// `Err` is session-fatal (the catalog is gone); a bad-caps failure invalidates only this pad.
 	fn caps(&mut self, pad: &str, generation: u64, caps: &gst::Caps) -> Result<()> {
 		if !self.is_current(pad, generation) {
 			gst::warning!(CAT, "caps for stale or unknown pad {pad}, dropping");
@@ -326,10 +354,27 @@ impl PadSet {
 		}
 		let broadcast = self.broadcast.clone();
 		let catalog = self.catalog.clone().context("catalog already finalized")?;
-		self.pads
+		let result = self
+			.pads
 			.entry(pad.to_string())
 			.or_insert_with(Pad::new)
-			.set_caps(broadcast, catalog, caps)
+			.set_caps(broadcast, catalog, caps);
+		if let Err(err) = result {
+			gst::warning!(CAT, "invalidating pad {pad}: {err:?}");
+			self.fail_pad(pad);
+		}
+		Ok(())
+	}
+
+	/// Drops a pad's producer (closing its track) and marks it failed so the chain returns a FlowError
+	/// on its next buffer. The pad stays a member, so the session and the other pads keep going.
+	fn fail_pad(&mut self, pad: &str) {
+		if let Some(mut p) = self.pads.remove(pad) {
+			if let Err(err) = p.finalize() {
+				gst::warning!(CAT, "finalize on failed pad {pad}: {err:?}");
+			}
+		}
+		self.status.mark_failed(pad);
 	}
 
 	fn segment(&mut self, pad: &str, generation: u64, segment: gst::Segment) {
@@ -353,13 +398,19 @@ impl PadSet {
 			gst::warning!(CAT, "buffer after EOS on pad {pad}, dropping");
 			return Ok(());
 		}
-		match self.pads.get_mut(pad) {
+		let result = match self.pads.get_mut(pad) {
 			Some(p) => p.push_buffer(data, pts),
 			None => {
 				gst::warning!(CAT, "buffer before caps on pad {pad}, dropping");
-				Ok(())
+				return Ok(());
 			}
+		};
+		// A bad bitstream invalidates only this pad; the session and other pads continue.
+		if let Err(err) = result {
+			gst::warning!(CAT, "invalidating pad {pad}: {err:?}");
+			self.fail_pad(pad);
 		}
+		Ok(())
 	}
 
 	/// Returns whether every active pad has now ended, so the caller posts the element EOS once.
@@ -456,7 +507,7 @@ impl Pad {
 	) -> Result<()> {
 		let structure = caps.structure(0).context("empty caps")?;
 		ensure!(
-			structure.name() == "video/x-h264",
+			caps_supported(caps),
 			"spike only carries H.264 byte-stream, got {}",
 			structure.name()
 		);
@@ -552,6 +603,12 @@ impl Pad {
 	}
 }
 
+/// The spike only carries H.264 byte-stream. Checked synchronously at the event boundary (so an
+/// unsupported caps is rejected with NotNegotiated) and again in `set_caps` as the worker's defence.
+pub(super) fn caps_supported(caps: &gst::CapsRef) -> bool {
+	caps.structure(0).map(|s| s.name() == "video/x-h264").unwrap_or(false)
+}
+
 fn segment_info(segment: &gst::Segment) -> SegmentInfo {
 	match segment.downcast_ref::<gst::ClockTime>() {
 		Some(time) => SegmentInfo {
@@ -584,7 +641,7 @@ mod tests {
 	fn pad_set() -> PadSet {
 		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
-		PadSet::new(broadcast, catalog)
+		PadSet::new(broadcast, catalog, Arc::new(Status::default()))
 	}
 
 	fn h264_caps() -> gst::Caps {
@@ -592,6 +649,10 @@ mod tests {
 			.field("stream-format", "byte-stream")
 			.field("alignment", "au")
 			.build()
+	}
+
+	fn audio_caps() -> gst::Caps {
+		gst::Caps::builder("audio/x-raw").build()
 	}
 
 	// EOS/new-caps/drop/shutdown converge on exactly one finalize per producer; catalog last.
@@ -723,6 +784,46 @@ mod tests {
 		);
 		// The current generation still completes it.
 		assert!(set.eos("video", 1).unwrap());
+	}
+
+	#[test]
+	fn caps_supported_accepts_only_h264() {
+		gst::init().unwrap();
+		assert!(caps_supported(&h264_caps()));
+		assert!(!caps_supported(&audio_caps()));
+	}
+
+	// A pad with unsupported caps is invalidated alone: marked failed and its producer dropped, while
+	// the session and the other pad keep going (a pad error is not a session error).
+	#[test]
+	fn invalid_caps_fails_only_that_pad() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		set.add_pad("data", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
+
+		assert!(
+			set.caps("data", 0, &audio_caps()).is_ok(),
+			"a pad error must not kill the session"
+		);
+		assert!(set.status.is_failed("data"), "the bad pad is marked failed");
+		assert!(!set.status.is_failed("video"), "the good pad is untouched");
+		assert!(set.pads.contains_key("video"), "the good pad keeps its producer");
+		assert!(!set.pads.contains_key("data"), "the failed pad's producer is dropped");
+	}
+
+	// A finalized catalog is a session failure: caps returns Err so the worker tears the session down.
+	#[test]
+	fn caps_after_catalog_finalized_is_a_session_error() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		set.finalize_all();
+		assert!(
+			set.caps("video", 0, &h264_caps()).is_err(),
+			"a gone catalog is session-fatal"
+		);
 	}
 
 	// SEGMENT before CAPS: the pad is created and the segment retained when CAPS arrives.
