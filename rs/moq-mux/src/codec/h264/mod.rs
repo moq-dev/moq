@@ -57,6 +57,9 @@ pub enum Error {
 	#[error("not initialized; call initialize() or with_mode() first")]
 	NotInitialized,
 
+	#[error("fixed track cannot be reconfigured")]
+	FixedTrackReconfigured,
+
 	#[error("avc3 track not created")]
 	Avc3TrackNotCreated,
 

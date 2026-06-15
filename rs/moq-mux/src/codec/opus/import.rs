@@ -16,14 +16,31 @@ pub struct Import {
 
 impl Import {
 	pub fn new(
-		mut broadcast: moq_net::BroadcastProducer,
+		broadcast: moq_net::BroadcastProducer,
+		catalog: crate::catalog::Producer,
+		config: Config,
+	) -> crate::Result<Self> {
+		Self::new_with_source(
+			crate::track_provider::TrackProvider::unique(broadcast, ".opus"),
+			catalog,
+			config,
+		)
+	}
+
+	pub fn new_with_track(
+		track: moq_net::TrackProducer,
+		catalog: crate::catalog::Producer,
+		config: Config,
+	) -> crate::Result<Self> {
+		Self::new_with_source(crate::track_provider::TrackProvider::fixed(track), catalog, config)
+	}
+
+	fn new_with_source(
+		mut tracks: crate::track_provider::TrackProvider,
 		mut catalog: crate::catalog::Producer,
 		config: Config,
 	) -> crate::Result<Self> {
-		let track = broadcast.create_track(
-			broadcast.unique_name(".opus"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)?;
+		let track = tracks.create()?;
 
 		let mut audio_config = hang::catalog::AudioConfig::new(
 			hang::catalog::AudioCodec::Opus,

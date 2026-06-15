@@ -187,7 +187,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	web_handle.abort();
 }
 
-/// Two publish-only clients (each `with_publish`, no `with_consume`) coexist on one relay;
+/// Two publish-only clients (each `with_publisher`, no `with_subscriber`) coexist on one relay;
 /// a single subscriber sees broadcasts forwarded from both. Verifies that multiple
 /// publish-only connections don't interfere with each other or get torn down.
 #[tokio::test]
@@ -198,7 +198,7 @@ async fn two_publish_only_clients_coexist() {
 	// ── two publish-only publishers, each serving a distinct broadcast ──
 	let pub_a = Origin::random().produce();
 	let mut broadcast_a = pub_a.create_broadcast("alpha").expect("create broadcast a");
-	let mut track_a = broadcast_a.create_track(Track::new("video")).expect("create track a");
+	let mut track_a = broadcast_a.create_track("video", None).expect("create track a");
 	track_a
 		.append_group()
 		.expect("append group a")
@@ -207,37 +207,37 @@ async fn two_publish_only_clients_coexist() {
 
 	let pub_b = Origin::random().produce();
 	let mut broadcast_b = pub_b.create_broadcast("beta").expect("create broadcast b");
-	let mut track_b = broadcast_b.create_track(Track::new("video")).expect("create track b");
+	let mut track_b = broadcast_b.create_track("video", None).expect("create track b");
 	track_b
 		.append_group()
 		.expect("append group b")
 		.write_frame(b"b".as_ref())
 		.expect("write frame b");
 
-	let sess_a = tokio::time::timeout(TIMEOUT, client().with_publish(pub_a.consume()).connect(url.clone()))
+	let sess_a = tokio::time::timeout(TIMEOUT, client().with_publisher(pub_a.consume()).connect(url.clone()))
 		.await
 		.expect("publisher a connect timeout")
 		.expect("publisher a connect failed");
-	let sess_b = tokio::time::timeout(TIMEOUT, client().with_publish(pub_b.consume()).connect(url.clone()))
+	let sess_b = tokio::time::timeout(TIMEOUT, client().with_publisher(pub_b.consume()).connect(url.clone()))
 		.await
 		.expect("publisher b connect timeout")
 		.expect("publisher b connect failed");
 
 	// ── one subscriber should see broadcasts from both publish-only clients ──
 	let sub_origin = Origin::random().produce();
-	let mut announcements = sub_origin.consume();
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_consume(sub_origin).connect(url))
+	let mut announcements = sub_origin.consume().announced();
+	let sub_session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
 
 	let mut seen = std::collections::HashSet::new();
 	while seen.len() < 2 {
-		let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+		let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
 			.await
 			.expect("announcement timeout")
 			.expect("origin closed");
-		if bc.is_some() {
+		if bc.broadcast().is_some() {
 			seen.insert(path.as_str().to_owned());
 		}
 	}

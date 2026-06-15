@@ -70,6 +70,9 @@ type MultiBackendInput = {
 
 	paused: Getter<boolean>;
 
+	// When video is downloaded relative to the canvas position. See {@link Video.Visible}.
+	visible: Getter<Video.Visible>;
+
 	// Latency: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter in ms.
 	latency: Getter<Latency>;
 
@@ -127,6 +130,7 @@ export class MultiBackend {
 			broadcast: getter(props?.broadcast),
 			connection: getter(props?.connection),
 			paused: getter(props?.paused ?? false),
+			visible: getter(props?.visible ?? "0px"),
 			latency: getter(props?.latency ?? ("real-time" as Latency)),
 			volume: getter(props?.volume ?? 0.5),
 			muted: getter(props?.muted ?? false),
@@ -187,6 +191,7 @@ export class MultiBackend {
 
 		const videoRenderer = new Video.Renderer(videoDecoder, {
 			canvas: element,
+			visible: this.input.visible,
 		});
 
 		effect.cleanup(() => {

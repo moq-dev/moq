@@ -7,8 +7,32 @@ import { Broadcast, type CatalogFormat, parseCatalogFormat } from "./broadcast";
 import type { Latency } from "./sync";
 import type * as Video from "./video";
 
-const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog-format"] as const;
+const OBSERVED = [
+	"url",
+	"name",
+	"paused",
+	"volume",
+	"muted",
+	"visible",
+	"reload",
+	"latency",
+	"jitter",
+	"catalog-format",
+] as const;
 type Observed = (typeof OBSERVED)[number];
+
+// Parse the `visible` attribute into a Visible value, falling back to "0px" (on screen only).
+function parseVisible(value: string | null): Video.Visible {
+	const trimmed = value?.trim();
+	if (!trimmed) return "0px";
+	if (trimmed === "never" || trimmed === "always") return trimmed;
+	// A CSS length usable as an IntersectionObserver rootMargin (px or %).
+	if (/^-?\d+(\.\d+)?(px|%)$/.test(trimmed)) return trimmed;
+	// Allow a bare number as a px convenience (e.g. visible="200").
+	if (/^-?\d+(\.\d+)?$/.test(trimmed)) return `${trimmed}px`;
+	console.warn(`moq-watch: invalid visible="${value}", expected "never", "always", or a CSS length like "200px"`);
+	return "0px";
+}
 
 // Close everything when this element is garbage collected.
 // This is primarily to avoid a console.warn that we didn't close() before GC.
@@ -35,6 +59,8 @@ export default class MoqWatch extends HTMLElement {
 		paused: new Signal(false),
 		volume: new Signal(0.5),
 		muted: new Signal(false),
+		// When video is downloaded relative to the canvas position. See {@link Video.Visible}.
+		visible: new Signal<Video.Visible>("0px"),
 		latency: new Signal<Latency>("real-time"),
 		// The desired video rendition (resolution/bitrate cap).
 		target: new Signal<Video.Target | undefined>(undefined),
@@ -84,6 +110,7 @@ export default class MoqWatch extends HTMLElement {
 			broadcast: this.broadcast,
 			connection: this.connection.established,
 			paused: this.controls.paused,
+			visible: this.controls.visible,
 			latency: this.controls.latency,
 			volume: this.controls.volume,
 			muted: this.controls.muted,
@@ -174,6 +201,11 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
+			const visible = effect.get(this.controls.visible);
+			this.setAttribute("visible", visible);
+		});
+
+		this.signals.run((effect) => {
 			const latency = effect.get(this.controls.latency);
 			if (latency === "real-time") {
 				this.setAttribute("latency", "real-time");
@@ -243,6 +275,8 @@ export default class MoqWatch extends HTMLElement {
 			this.controls.volume.set(volume);
 		} else if (name === "muted") {
 			this.controls.muted.set(newValue !== null);
+		} else if (name === "visible") {
+			this.controls.visible.set(parseVisible(newValue));
 		} else if (name === "reload") {
 			this.#reload.set(newValue !== null);
 		} else if (name === "latency") {
@@ -300,6 +334,14 @@ export default class MoqWatch extends HTMLElement {
 
 	set muted(value: boolean) {
 		this.controls.muted.set(value);
+	}
+
+	get visible(): Video.Visible {
+		return this.controls.visible.peek();
+	}
+
+	set visible(value: Video.Visible) {
+		this.controls.visible.set(value);
 	}
 
 	get reload(): boolean {

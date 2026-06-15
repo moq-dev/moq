@@ -9,8 +9,8 @@ use crate::Result;
 
 /// A decoder for AV1 with inline sequence headers.
 pub struct Import {
-	// The broadcast being produced.
-	broadcast: moq_net::BroadcastProducer,
+	// Where new media tracks come from.
+	tracks: crate::track_provider::TrackProvider,
 
 	// The catalog being produced.
 	catalog: crate::catalog::Producer,
@@ -41,7 +41,19 @@ struct Frame {
 impl Import {
 	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
-			broadcast,
+			tracks: crate::track_provider::TrackProvider::unique(broadcast, ".av01"),
+			catalog,
+			track: None,
+			config: None,
+			current: Default::default(),
+			zero: None,
+			jitter: MinFrameDuration::new(),
+		}
+	}
+
+	pub fn new_with_track(track: moq_net::TrackProducer, catalog: crate::catalog::Producer) -> Self {
+		Self {
+			tracks: crate::track_provider::TrackProvider::fixed(track),
 			catalog,
 			track: None,
 			config: None,
@@ -89,15 +101,16 @@ impl Import {
 			return Ok(());
 		}
 
-		if let Some(track) = &self.track.take() {
+		if self.track.is_some() && self.tracks.is_fixed() {
+			return Err(Error::FixedTrackReconfigured.into());
+		}
+
+		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.name(), "reinitializing track");
 			self.catalog.lock().video.renditions.remove(track.name());
 		}
 
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(".av01"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)?;
+		let track = self.tracks.create()?;
 		tracing::debug!(name = ?track.name(), ?config, "starting track");
 		self.catalog
 			.lock()
@@ -132,10 +145,11 @@ impl Import {
 		});
 		config.container = hang::catalog::Container::Legacy;
 
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(".av01"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)?;
+		if self.track.is_some() && self.tracks.is_fixed() {
+			return Err(Error::FixedTrackReconfigured.into());
+		}
+
+		let track = self.tracks.create()?;
 		tracing::debug!(name = ?track.name(), "starting track with minimal config");
 		self.catalog
 			.lock()
@@ -208,14 +222,15 @@ impl Import {
 			return Ok(());
 		}
 
-		if let Some(track) = &self.track.take() {
+		if self.track.is_some() && self.tracks.is_fixed() {
+			return Err(Error::FixedTrackReconfigured.into());
+		}
+
+		if let Some(track) = self.track.take() {
 			self.catalog.lock().video.renditions.remove(track.name());
 		}
 
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(".av01"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)?;
+		let track = self.tracks.create()?;
 		self.catalog
 			.lock()
 			.video

@@ -231,8 +231,8 @@ advertises its own identity by setting `--cluster-mesh` to its
 externally-reachable URL, which it publishes on the cluster origin for other
 peers to discover and dial.
 
-Only the `quinn` QUIC backend supports mTLS; configuring `tls.root` with any
-other backend is a startup error.
+The `quinn` and `noq` QUIC backends support mTLS; configuring `tls.root` with a
+backend that does not (e.g. `quiche`) is a startup error.
 
 ## Example Configurations
 

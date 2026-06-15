@@ -11,8 +11,8 @@ use crate::Result;
 /// A decoder for H.265 with inline SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
 pub struct Import<E: CatalogExt = ()> {
-	// The broadcast being produced.
-	broadcast: moq_net::BroadcastProducer,
+	// Where new media tracks come from.
+	tracks: crate::track_provider::TrackProvider,
 
 	// The catalog being produced.
 	catalog: crate::catalog::Producer<E>,
@@ -42,7 +42,22 @@ pub struct Import<E: CatalogExt = ()> {
 impl<E: CatalogExt> Import<E> {
 	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
-			broadcast,
+			tracks: crate::track_provider::TrackProvider::unique(broadcast, ".hev1"),
+			catalog,
+			track: None,
+			config: None,
+			current: Default::default(),
+			zero: None,
+			vps: None,
+			sps: None,
+			pps: None,
+			jitter: MinFrameDuration::new(),
+		}
+	}
+
+	pub fn new_with_track(track: moq_net::TrackProducer, catalog: crate::catalog::Producer<E>) -> Self {
+		Self {
+			tracks: crate::track_provider::TrackProvider::fixed(track),
 			catalog,
 			track: None,
 			config: None,
@@ -83,15 +98,16 @@ impl<E: CatalogExt> Import<E> {
 
 		let mut catalog = self.catalog.lock();
 
-		if let Some(track) = &self.track.take() {
+		if self.track.is_some() && self.tracks.is_fixed() {
+			return Err(Error::FixedTrackReconfigured.into());
+		}
+
+		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.name(), "reinitializing track");
 			catalog.video.renditions.remove(track.name());
 		}
 
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(".hev1"),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)?;
+		let track = self.tracks.create()?;
 		tracing::debug!(name = ?track.name(), ?config, "starting track");
 		catalog
 			.video

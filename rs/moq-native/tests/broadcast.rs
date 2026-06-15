@@ -1472,16 +1472,14 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn announce_interest_unauthorized_keeps_session_alive() {
-	use moq_native::moq_net::{Origin, Track};
+	use moq_native::moq_net::Origin;
 
 	// ── publisher (server): only allowed to announce under "allowed" ──
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin
 		.create_broadcast("allowed/test")
 		.expect("failed to create broadcast");
-	let mut track = broadcast
-		.create_track(Track::new("video"))
-		.expect("failed to create track");
+	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
 	group.finish().expect("failed to finish group");
@@ -1499,33 +1497,33 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 	let consume = sub_origin
 		.scope(&["allowed".into(), "denied".into()])
 		.expect("failed to scope consume origin");
-	let mut announcements = consume.consume();
+	let mut announcements = consume.consume().announced();
 
 	let client = test_client();
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publish(publish).ok().await?;
+		let session = request.with_publisher(publish).ok().await?;
 		let _broadcast = broadcast;
 		let _track = track;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let client = client.with_consume(consume);
+	let client = client.with_subscriber(consume);
 	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
 	// The "allowed" announce stream still delivers even though "denied" was FINed.
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(path.as_str(), "allowed/test");
-	assert!(bc.is_some(), "expected announce, got unannounce");
+	assert!(bc.broadcast().is_some(), "expected announce, got unannounce");
 
 	// The unauthorized "denied" interest must not have torn down the session.
 	assert!(
@@ -1542,21 +1540,21 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 		.expect("server task failed");
 }
 
-/// Reverse of the usual direction: a publish-only client (`with_publish`, no `with_consume`)
-/// serving a subscribe-only server (`with_consume`, no `with_publish`). The server is also
+/// Reverse of the usual direction: a publish-only client (`with_publisher`, no `with_subscriber`)
+/// serving a subscribe-only server (`with_subscriber`, no `with_publisher`). The server is also
 /// interested in a disjoint "denied" prefix the client can't serve, so the server's
 /// subscriber must survive that FIN and still receive the served broadcast.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn publish_only_client_to_subscribe_only_server() {
-	use moq_native::moq_net::{Origin, Track};
+	use moq_native::moq_net::Origin;
 
 	// ── subscriber (server): interested in both "allowed" and "denied" ──
 	let sub_origin = Origin::random().produce();
 	let consume = sub_origin
 		.scope(&["allowed".into(), "denied".into()])
 		.expect("failed to scope consume origin");
-	let mut announcements = consume.consume();
+	let mut announcements = consume.consume().announced();
 
 	let (mut server, addr) = test_server();
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
@@ -1566,22 +1564,26 @@ async fn publish_only_client_to_subscribe_only_server() {
 			.accept()
 			.await
 			.expect("no incoming connection")
-			.with_consume(consume)
+			.with_subscriber(consume)
 			.ok()
 			.await?;
 
 		// The client serves "allowed/test"; the "denied" interest is FINed but must not
 		// tear down the session.
-		let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+		let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.next())
 			.await
 			.expect("announce timed out")
 			.expect("origin closed");
 		assert_eq!(path.as_str(), "allowed/test");
-		let bc = bc.expect("expected announce, got unannounce");
+		let bc = bc.broadcast().expect("expected announce, got unannounce");
 
 		let mut track_sub = bc
-			.subscribe_track(&Track::new("video"))
-			.expect("subscribe_track failed");
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.unwrap()
+			.await
+			.expect("consume_track failed");
 		let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 			.await
 			.expect("recv_group timed out")
@@ -1610,9 +1612,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 	let mut broadcast = pub_origin
 		.create_broadcast("allowed/test")
 		.expect("failed to create broadcast");
-	let mut track = broadcast
-		.create_track(Track::new("video"))
-		.expect("failed to create track");
+	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
 	group.finish().expect("failed to finish group");
@@ -1622,7 +1622,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 		.scope(&["allowed".into()])
 		.expect("failed to scope publish origin");
 
-	let session = tokio::time::timeout(TIMEOUT, test_client().with_publish(publish).connect(url))
+	let session = tokio::time::timeout(TIMEOUT, test_client().with_publisher(publish).connect(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");

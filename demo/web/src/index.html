@@ -24,6 +24,7 @@
 				- `name`: The broadcast name, otherwise we use the last part of the URL.
 				- `paused`: Video and audio are paused.
 				- `muted`: Audio is muted.
+				- `visible`: When to download video: `never`, a distance like `200px` from the viewport (suspended while the tab is hidden), or `always` (default `0px`, on screen only).
 				- `volume`: The audio volume (0-1).
 				- `latency`: The target jitter buffer size in milliseconds, or "real-time" to use the RTT.
 				- `reload`: Whether to automatically reconnect when the broadcast goes offline/online.
@@ -87,6 +88,9 @@
 		It won't be downloaded, decoded, or rendered.
 		This includes when the video is paused, minimized, not in the DOM, or scrolled out of view.
 		wowee the bandwidth savings!
+	</p>
+	<p>
+		Use <code>visible="200px"</code> to pre-warm video before it scrolls into view (still suspended while the tab is hidden), or <code>visible="always"</code> to download it regardless of scroll position or tab visibility.
 	</p>
 	<p>
 		Audio may start muted because the browser can require user interaction before autoplaying.

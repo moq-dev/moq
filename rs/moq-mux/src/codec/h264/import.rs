@@ -31,7 +31,7 @@ pub enum Mode {
 /// input streams; the shape is detected from the first bytes the caller
 /// supplies, or forced explicitly via [`with_mode`](Self::with_mode).
 pub struct Import<E: CatalogExt = ()> {
-	broadcast: moq_net::BroadcastProducer,
+	tracks: crate::track_provider::TrackProvider,
 	catalog: crate::catalog::Producer<E>,
 	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
 	config: Option<hang::catalog::VideoConfig>,
@@ -65,7 +65,19 @@ struct Avc3Frame {
 impl<E: CatalogExt> Import<E> {
 	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
-			broadcast,
+			tracks: crate::track_provider::TrackProvider::unique(broadcast, ".avc3"),
+			catalog,
+			track: None,
+			config: None,
+			state: State::Pending { mode_hint: None },
+			zero: None,
+			jitter: MinFrameDuration::new(),
+		}
+	}
+
+	pub fn new_with_track(track: moq_net::TrackProducer, catalog: crate::catalog::Producer<E>) -> Self {
+		Self {
+			tracks: crate::track_provider::TrackProvider::fixed(track),
 			catalog,
 			track: None,
 			config: None,
@@ -82,15 +94,14 @@ impl<E: CatalogExt> Import<E> {
 	pub fn with_mode(mut self, mode: Mode) -> Result<Self> {
 		match mode {
 			Mode::Avc1 => {
+				self.tracks.set_suffix(".avc1");
 				self.state = State::Pending {
 					mode_hint: Some(Mode::Avc1),
 				};
 			}
 			Mode::Avc3 => {
-				let track = self.broadcast.create_track(
-					self.broadcast.unique_name(".avc3"),
-					moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-				)?;
+				self.tracks.set_suffix(".avc3");
+				let track = self.tracks.create()?;
 				self.track = Some(
 					crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
 						.with_lenient_start(),
@@ -153,7 +164,8 @@ impl<E: CatalogExt> Import<E> {
 		config.description = Some(Bytes::copy_from_slice(avcc_bytes));
 		config.container = hang::catalog::Container::Legacy;
 
-		self.swap_config(config, ".avc1")?;
+		self.tracks.set_suffix(".avc1");
+		self.swap_config(config)?;
 		buf.advance(buf.remaining());
 
 		Ok(())
@@ -171,10 +183,8 @@ impl<E: CatalogExt> Import<E> {
 				pps: None,
 			};
 			if self.track.is_none() {
-				let track = self.broadcast.create_track(
-					self.broadcast.unique_name(".avc3"),
-					moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-				)?;
+				self.tracks.set_suffix(".avc3");
+				let track = self.tracks.create()?;
 				self.track = Some(
 					crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
 						.with_lenient_start(),
@@ -426,7 +436,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Replace the current track + catalog rendition with `config`. Used by
 	/// the avc1 path on every (re)initialization.
-	fn swap_config(&mut self, config: hang::catalog::VideoConfig, suffix: &str) -> Result<()> {
+	fn swap_config(&mut self, config: hang::catalog::VideoConfig) -> Result<()> {
 		if let Some(old) = &self.config
 			&& old == &config
 		{
@@ -435,13 +445,14 @@ impl<E: CatalogExt> Import<E> {
 
 		let mut catalog = self.catalog.lock();
 		if let Some(track) = self.track.take() {
+			if self.tracks.is_fixed() {
+				self.track = Some(track);
+				return Err(Error::FixedTrackReconfigured.into());
+			}
 			tracing::debug!(name = ?track.name(), "reinitializing H.264 track");
 			catalog.video.renditions.remove(track.name());
 		}
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(suffix),
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)?;
+		let track = self.tracks.create()?;
 		tracing::debug!(name = ?track.name(), ?config, "starting H.264 track");
 		catalog
 			.video

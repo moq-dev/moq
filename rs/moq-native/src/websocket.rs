@@ -196,6 +196,9 @@ impl Error {
 	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
 		match self {
 			Self::ConnectRejected(err) => Some(*err),
+			// qmux surfaces a non-101 WebSocket upgrade response as `Http(status)`;
+			// map an auth rejection (401/403) so the caller sees it as terminal.
+			Self::Connect(qmux::Error::Http(status)) => crate::ConnectError::from_status_u16(*status),
 			_ => None,
 		}
 	}

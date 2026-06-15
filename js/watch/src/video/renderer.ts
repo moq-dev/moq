@@ -2,8 +2,26 @@ import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 
+// Fraction of the canvas that must intersect the viewport before it counts as visible.
+const INTERSECTION_THRESHOLD = 0.01;
+
+/**
+ * Controls when video is downloaded relative to the canvas position.
+ *
+ * - `"never"`: never download video.
+ * - `"always"`: always download video, regardless of the canvas position or tab visibility.
+ * - a CSS length (`"0px"`, `"200px"`, `"100%"`, ...): download while the canvas is within
+ *   that distance of the viewport (used as the {@link IntersectionObserver} `rootMargin`) and
+ *   the tab is visible. `"0px"` means strictly on screen; larger values pre-warm the video
+ *   before it scrolls in.
+ */
+export type Visible = "never" | "always" | (string & {});
+
 type RendererInput = {
 	canvas: Getter<HTMLCanvasElement | undefined>;
+
+	// When video is downloaded relative to the canvas position. See {@link Visible}. Defaults to "0px".
+	visible: Getter<Visible>;
 };
 
 type RendererOutput = {
@@ -13,7 +31,7 @@ type RendererOutput = {
 	// The media timestamp of the most recently rendered frame.
 	timestamp: Signal<Time.Milli | undefined>;
 
-	// Whether the canvas is visible in the viewport and the tab is focused.
+	// Whether the canvas should currently download per the configured distance and tab focus.
 	// The owner combines this with `paused` to drive the decoder's `enabled` input.
 	visible: Signal<boolean>;
 };
@@ -38,6 +56,7 @@ export class Renderer {
 		this.decoder = decoder;
 		this.input = {
 			canvas: getter(props?.canvas),
+			visible: getter(props?.visible ?? "0px"),
 		};
 
 		this.#signals.run((effect) => {
@@ -63,8 +82,23 @@ export class Renderer {
 		}
 	}
 
-	// Track whether the canvas is visible in the viewport and the tab is focused.
+	// Track whether the canvas should currently download per the configured distance and tab focus.
 	#runVisible(effect: Effect): void {
+		const visible = effect.get(this.input.visible);
+
+		// "never" forces the check off; "always" forces it on regardless of viewport or tab state.
+		if (visible === "never") {
+			this.#output.visible.set(false);
+			return;
+		}
+
+		if (visible === "always") {
+			this.#output.visible.set(true);
+			effect.cleanup(() => this.#output.visible.set(false));
+			return;
+		}
+
+		// A distance gates on the viewport (used as the rootMargin) and the tab being visible.
 		const canvas = effect.get(this.input.canvas);
 		if (!canvas) {
 			this.#output.visible.set(false);
@@ -72,23 +106,29 @@ export class Renderer {
 		}
 
 		let intersecting = false;
-
 		const update = () => {
 			this.#output.visible.set(intersecting && !document.hidden);
 		};
 
-		const observer = new IntersectionObserver(
-			(entries) => {
-				for (const entry of entries) {
-					intersecting = entry.isIntersecting;
-					update();
-				}
-			},
-			{ threshold: 0.01 },
-		);
+		const callback = (entries: IntersectionObserverEntry[]) => {
+			for (const entry of entries) {
+				intersecting = entry.isIntersecting;
+				update();
+			}
+		};
 
+		// `visible` is a CSS length, but the programmatic API accepts arbitrary strings. An
+		// invalid rootMargin throws a SyntaxError, so fall back to the default margin.
+		let observer: IntersectionObserver;
+		try {
+			observer = new IntersectionObserver(callback, { threshold: INTERSECTION_THRESHOLD, rootMargin: visible });
+		} catch {
+			console.warn(`moq-watch: invalid visible margin "${visible}", using "0px"`);
+			observer = new IntersectionObserver(callback, { threshold: INTERSECTION_THRESHOLD });
+		}
+
+		update();
 		effect.event(document, "visibilitychange", update);
-
 		observer.observe(canvas);
 		effect.cleanup(() => observer.disconnect());
 		effect.cleanup(() => this.#output.visible.set(false));

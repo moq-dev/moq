@@ -63,7 +63,7 @@ generate = ["localhost", "127.0.0.1"]
 # Optional: root CAs to accept for mTLS peer authentication.
 # Clients that present a cert signed by one of these CAs are granted
 # full access (publish/subscribe/cluster). Intended for relay clustering.
-# Quinn backend only.
+# Supported by the quinn and noq backends.
 root = ["/path/to/peer-ca.pem"]
 ```
 
