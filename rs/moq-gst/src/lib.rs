@@ -34,7 +34,9 @@ gst::plugin_define!(
 	env!("CARGO_PKG_DESCRIPTION"),
 	plugin_init,
 	concat!(env!("CARGO_PKG_VERSION"), "-", env!("COMMIT_ID")),
-	"Apache 2.0",
+	// GStreamer only loads plugins whose license is in its recognised set; the crate is
+	// MIT OR Apache-2.0, so declare the MIT side ("Apache 2.0" is rejected and the plugin never loads).
+	"MIT/X11",
 	env!("CARGO_PKG_NAME"),
 	env!("CARGO_PKG_NAME"),
 	env!("CARGO_PKG_REPOSITORY"),
