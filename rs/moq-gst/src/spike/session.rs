@@ -34,9 +34,9 @@ pub struct Status {
 	connected: AtomicBool,
 	version: Mutex<Option<String>>,
 	send_bitrate: AtomicU64,
-	/// Pads whose data the worker rejected; the chain reads this to return a FlowError instead of
-	/// silently dropping. Cleared per pad on recreate, and wholesale on session exit.
-	failed: Mutex<HashSet<String>>,
+	/// Pads whose data the worker rejected, keyed by the failed generation so a pad recreated with the
+	/// same name does not inherit it. The chain reads this to return a FlowError instead of dropping.
+	failed: Mutex<HashMap<String, u64>>,
 }
 
 impl Status {
@@ -44,16 +44,16 @@ impl Status {
 		self.connected.store(value, Ordering::Relaxed);
 	}
 
-	fn mark_failed(&self, pad: &str) {
-		self.failed.lock().unwrap().insert(pad.to_string());
+	fn mark_failed(&self, pad: &str, generation: u64) {
+		self.failed.lock().unwrap().insert(pad.to_string(), generation);
 	}
 
 	fn clear_failed(&self, pad: &str) {
 		self.failed.lock().unwrap().remove(pad);
 	}
 
-	pub fn is_failed(&self, pad: &str) -> bool {
-		self.failed.lock().unwrap().contains(pad)
+	pub fn is_failed(&self, pad: &str, generation: u64) -> bool {
+		self.failed.lock().unwrap().get(pad) == Some(&generation)
 	}
 
 	fn reset_failed(&self) {
@@ -207,18 +207,33 @@ async fn run_session(
 	for (name, generation) in seed {
 		pad_set.add_pad(&name, generation);
 	}
-	let result = run_loop(session, &mut data, &mut shutdown, &mut pad_set, &element, &status).await;
+	let reason = run_loop(session, &mut data, &mut shutdown, &mut pad_set, &status).await;
 
 	// Finalize every live producer once on the way out, catalog last; runs on every exit path.
 	let finalized = pad_set.finalize_all();
-	gst::debug!(CAT, "finalized on exit: {finalized:?}");
 	// Reset the whole observable surface on exit, not just connected.
 	status.set_connected(false);
 	status.set_version(None);
 	status.set_send_bitrate(0);
 	status.reset_failed();
 	notify_connected(&element);
-	result
+
+	match (reason, finalized) {
+		// Clean end: post the element EOS only once the catalog has finalized cleanly.
+		(Ok(ExitReason::Ended), Ok(order)) => {
+			gst::debug!(CAT, "finalized on exit: {order:?}");
+			post_element_eos(&element);
+			Ok(())
+		}
+		(Ok(ExitReason::Stopped), Ok(order)) => {
+			gst::debug!(CAT, "finalized on exit: {order:?}");
+			Ok(())
+		}
+		// A finalize failure is surfaced (becomes element_error on the bus), never silently logged.
+		(Ok(_), Err(err)) => Err(err),
+		// The session already failed; finalize was best-effort.
+		(Err(session_err), _) => Err(session_err),
+	}
 }
 
 /// Only on the connect/disconnect edges, never per sample.
@@ -236,14 +251,20 @@ fn post_element_eos(element: &glib::WeakRef<Element>) {
 	}
 }
 
+/// Why run_loop returned: a clean end (all pads EOS) posts the element EOS after finalize; a stop
+/// (local shutdown, dropped sender, or clean remote close) finalizes quietly.
+enum ExitReason {
+	Ended,
+	Stopped,
+}
+
 async fn run_loop(
 	session: moq_net::Session,
 	data: &mut mpsc::Receiver<DataMsg>,
 	shutdown: &mut watch::Receiver<bool>,
 	pad_set: &mut PadSet,
-	element: &glib::WeakRef<Element>,
 	status: &Status,
-) -> Result<()> {
+) -> Result<ExitReason> {
 	// Congestion-controller send estimate; None when unavailable, then this arm parks forever.
 	let mut send_bandwidth = session.send_bandwidth();
 
@@ -253,12 +274,12 @@ async fn run_loop(
 
 	loop {
 		tokio::select! {
-			// Local close: quiet Ok, no ERROR.
-			_ = shutdown.changed() => return Ok(()),
+			// Local close: quiet stop, no ERROR.
+			_ = shutdown.changed() => return Ok(ExitReason::Stopped),
 			// Remote death: propagate the Err so the wrapper posts ERROR to the bus.
 			result = &mut closed => {
 				result?;
-				return Ok(());
+				return Ok(ExitReason::Stopped);
 			}
 			// A closed estimate stops the polling.
 			bitrate = async {
@@ -276,24 +297,30 @@ async fn run_loop(
 					// A fresh incarnation is not failed even if a previous one was.
 					status.clear_failed(&pad);
 				}
-				Some(DataMsg::Caps { pad, generation, caps }) => pad_set.caps(&pad, generation, &caps)?,
+				Some(DataMsg::Caps { pad, generation, caps }) => {
+					if pad_set.caps(&pad, generation, &caps)? {
+						return Ok(ExitReason::Ended);
+					}
+				}
 				Some(DataMsg::Segment { pad, generation, segment }) => pad_set.segment(&pad, generation, segment),
-				Some(DataMsg::Buffer { pad, generation, data, pts }) => pad_set.buffer(&pad, generation, data, pts)?,
+				Some(DataMsg::Buffer { pad, generation, data, pts }) => {
+					if pad_set.buffer(&pad, generation, data, pts)? {
+						return Ok(ExitReason::Ended);
+					}
+				}
 				Some(DataMsg::Eos { pad, generation }) => {
 					if pad_set.eos(&pad, generation)? {
-						post_element_eos(element);
-						return Ok(());
+						return Ok(ExitReason::Ended);
 					}
 				}
 				// A release can complete the element if the remaining pads have all ended.
 				Some(DataMsg::DropPad { pad, generation }) => {
 					if pad_set.drop_pad(&pad, generation) {
-						post_element_eos(element);
-						return Ok(());
+						return Ok(ExitReason::Ended);
 					}
 				}
 				// The element dropped the sender (state change to READY) without a shutdown signal.
-				None => return Ok(()),
+				None => return Ok(ExitReason::Stopped),
 			},
 		}
 	}
@@ -332,6 +359,7 @@ impl PadSet {
 			let _ = old.finalize();
 		}
 		self.eos.remove(pad);
+		self.status.clear_failed(pad);
 		self.active.insert(pad.to_string(), generation);
 	}
 
@@ -346,11 +374,12 @@ impl PadSet {
 		!self.active.is_empty() && self.active.keys().all(|name| self.eos.contains(name))
 	}
 
-	/// `Err` is session-fatal (the catalog is gone); a bad-caps failure invalidates only this pad.
-	fn caps(&mut self, pad: &str, generation: u64, caps: &gst::Caps) -> Result<()> {
+	/// `Ok(true)` means the element is now complete (a pad failure can finish it); `Err` is session-fatal
+	/// (the catalog is gone). A bad-caps failure invalidates only this pad.
+	fn caps(&mut self, pad: &str, generation: u64, caps: &gst::Caps) -> Result<bool> {
 		if !self.is_current(pad, generation) {
 			gst::warning!(CAT, "caps for stale or unknown pad {pad}, dropping");
-			return Ok(());
+			return Ok(false);
 		}
 		let broadcast = self.broadcast.clone();
 		let catalog = self.catalog.clone().context("catalog already finalized")?;
@@ -361,20 +390,23 @@ impl PadSet {
 			.set_caps(broadcast, catalog, caps);
 		if let Err(err) = result {
 			gst::warning!(CAT, "invalidating pad {pad}: {err:?}");
-			self.fail_pad(pad);
+			self.fail_pad(pad, generation);
+			return Ok(self.all_ended());
 		}
-		Ok(())
+		Ok(false)
 	}
 
 	/// Drops a pad's producer (closing its track) and marks it failed so the chain returns a FlowError
 	/// on its next buffer. The pad stays a member, so the session and the other pads keep going.
-	fn fail_pad(&mut self, pad: &str) {
+	fn fail_pad(&mut self, pad: &str, generation: u64) {
 		if let Some(mut p) = self.pads.remove(pad) {
 			if let Err(err) = p.finalize() {
 				gst::warning!(CAT, "finalize on failed pad {pad}: {err:?}");
 			}
 		}
-		self.status.mark_failed(pad);
+		self.status.mark_failed(pad, generation);
+		// The failed pad's track is finalized, so it is terminal for EOS aggregation (counts as ended).
+		self.eos.insert(pad.to_string());
 	}
 
 	fn segment(&mut self, pad: &str, generation: u64, segment: gst::Segment) {
@@ -389,28 +421,30 @@ impl PadSet {
 			.set_segment(segment);
 	}
 
-	fn buffer(&mut self, pad: &str, generation: u64, data: Bytes, pts: Option<gst::ClockTime>) -> Result<()> {
+	/// `Ok(true)` means the element is now complete (a pad failure can finish it).
+	fn buffer(&mut self, pad: &str, generation: u64, data: Bytes, pts: Option<gst::ClockTime>) -> Result<bool> {
 		if !self.is_current(pad, generation) {
 			gst::warning!(CAT, "buffer for stale or unknown pad {pad}, dropping");
-			return Ok(());
+			return Ok(false);
 		}
 		if self.eos.contains(pad) {
 			gst::warning!(CAT, "buffer after EOS on pad {pad}, dropping");
-			return Ok(());
+			return Ok(false);
 		}
 		let result = match self.pads.get_mut(pad) {
 			Some(p) => p.push_buffer(data, pts),
 			None => {
 				gst::warning!(CAT, "buffer before caps on pad {pad}, dropping");
-				return Ok(());
+				return Ok(false);
 			}
 		};
 		// A bad bitstream invalidates only this pad; the session and other pads continue.
 		if let Err(err) = result {
 			gst::warning!(CAT, "invalidating pad {pad}: {err:?}");
-			self.fail_pad(pad);
+			self.fail_pad(pad, generation);
+			return Ok(self.all_ended());
 		}
-		Ok(())
+		Ok(false)
 	}
 
 	/// Returns whether every active pad has now ended, so the caller posts the element EOS once.
@@ -446,8 +480,9 @@ impl PadSet {
 		self.all_ended()
 	}
 
-	/// Idempotent (skips already-finalized pads); the returned order proves "catalog last".
-	fn finalize_all(&mut self) -> Vec<String> {
+	/// Idempotent (skips already-finalized pads); the returned order proves "catalog last". `Err` means
+	/// the catalog could not be closed cleanly, which the caller surfaces instead of posting EOS.
+	fn finalize_all(&mut self) -> Result<Vec<String>> {
 		let mut order = Vec::new();
 		for (name, pad) in self.pads.iter_mut() {
 			match pad.finalize() {
@@ -458,12 +493,10 @@ impl PadSet {
 		}
 		// finish() closes both the hang and MSF tracks; a bare drop would not.
 		if let Some(mut catalog) = self.catalog.take() {
-			match catalog.finish() {
-				Ok(()) => order.push("catalog".to_string()),
-				Err(err) => gst::warning!(CAT, "finalize catalog: {err:?}"),
-			}
+			catalog.finish().context("finalize catalog")?;
+			order.push("catalog".to_string());
 		}
-		order
+		Ok(order)
 	}
 }
 
@@ -486,6 +519,8 @@ struct Pad {
 	segment_info: Option<SegmentInfo>,
 	// Kept only to map a buffer PTS to a running time.
 	segment: Option<gst::FormattedSegment<gst::ClockTime>>,
+	/// Last emitted MoQ timestamp (micros); a frame that would regress below it is dropped.
+	last_emitted_micros: Option<u64>,
 }
 
 impl Pad {
@@ -496,6 +531,7 @@ impl Pad {
 			state: PadState::NoSegment,
 			segment_info: None,
 			segment: None,
+			last_emitted_micros: None,
 		}
 	}
 
@@ -554,8 +590,8 @@ impl Pad {
 	}
 
 	/// Pure of the importer, so it can be tested with real segments and no codec.
-	fn frame_timestamp(&self, pts: Option<gst::ClockTime>) -> FrameDecision {
-		match self.state {
+	fn frame_timestamp(&mut self, pts: Option<gst::ClockTime>) -> FrameDecision {
+		let decision = match self.state {
 			PadState::Active => {
 				// to_running_time_full is signed: a buffer before the segment returns Negative, which
 				// frame_micros drops; to_running_time would instead clip it to None and lose the reason.
@@ -564,12 +600,21 @@ impl Pad {
 					.as_ref()
 					.zip(pts)
 					.and_then(|(segment, pts)| segment.to_running_time_full(pts))
-					.map(signed_nanos);
+					.and_then(signed_nanos);
 				frame_micros(running_time)
 			}
 			PadState::NoSegment => FrameDecision::Drop("buffer before a valid SEGMENT"),
 			PadState::Invalid => FrameDecision::Drop("buffer on an invalidated timeline"),
+		};
+		// Frame-level monotonicity: segment continuity (base) does not by itself stop a frame from
+		// regressing, so drop a timestamp that would go backwards rather than emit out of order.
+		if let FrameDecision::Emit(micros) = decision {
+			if self.last_emitted_micros.is_some_and(|last| micros < last) {
+				return FrameDecision::Drop("non-monotonic timestamp (regressed)");
+			}
+			self.last_emitted_micros = Some(micros);
 		}
+		decision
 	}
 
 	fn push_buffer(&mut self, mut data: Bytes, pts: Option<gst::ClockTime>) -> Result<()> {
@@ -606,7 +651,11 @@ impl Pad {
 /// The spike only carries H.264 byte-stream. Checked synchronously at the event boundary (so an
 /// unsupported caps is rejected with NotNegotiated) and again in `set_caps` as the worker's defence.
 pub(super) fn caps_supported(caps: &gst::CapsRef) -> bool {
-	caps.structure(0).map(|s| s.name() == "video/x-h264").unwrap_or(false)
+	let Some(s) = caps.structure(0) else { return false };
+	// FramedFormat::Avc3 consumes Annex-B access units, so require byte-stream/au, not just the type.
+	s.name() == "video/x-h264"
+		&& s.get::<String>("stream-format").is_ok_and(|f| f == "byte-stream")
+		&& s.get::<String>("alignment").is_ok_and(|a| a == "au")
 }
 
 fn segment_info(segment: &gst::Segment) -> SegmentInfo {
@@ -625,10 +674,11 @@ fn segment_info(segment: &gst::Segment) -> SegmentInfo {
 }
 
 /// Flattens a signed running time to nanos, keeping the sign so the timeline can drop negatives.
-fn signed_nanos(running_time: gst::Signed<gst::ClockTime>) -> i64 {
+/// None on overflow of u64 nanos into i64 (unreachable in practice).
+fn signed_nanos(running_time: gst::Signed<gst::ClockTime>) -> Option<i64> {
 	match running_time {
-		gst::Signed::Positive(time) => time.nseconds() as i64,
-		gst::Signed::Negative(time) => -(time.nseconds() as i64),
+		gst::Signed::Positive(time) => i64::try_from(time.nseconds()).ok(),
+		gst::Signed::Negative(time) => i64::try_from(time.nseconds()).ok().map(|nanos| -nanos),
 	}
 }
 
@@ -665,7 +715,7 @@ mod tests {
 		set.caps("video", 0, &h264_caps()).unwrap();
 		set.caps("audio", 0, &h264_caps()).unwrap();
 
-		let order = set.finalize_all();
+		let order = set.finalize_all().unwrap();
 		assert_eq!(
 			order.last().map(String::as_str),
 			Some("catalog"),
@@ -674,7 +724,7 @@ mod tests {
 		assert!(order.contains(&"video".to_string()) && order.contains(&"audio".to_string()));
 
 		// A second pass finalizes nothing again.
-		assert!(set.finalize_all().is_empty());
+		assert!(set.finalize_all().unwrap().is_empty());
 	}
 
 	#[test]
@@ -686,7 +736,7 @@ mod tests {
 
 		assert!(set.eos("video", 0).unwrap());
 		// Only the catalog is left; the pad is not finalized twice.
-		assert_eq!(set.finalize_all(), vec!["catalog".to_string()]);
+		assert_eq!(set.finalize_all().unwrap(), vec!["catalog".to_string()]);
 	}
 
 	#[test]
@@ -750,7 +800,7 @@ mod tests {
 		assert!(set.eos("video", 0).unwrap());
 		assert!(set.eos("video", 0).unwrap(), "duplicate EOS stays complete");
 		// Finalized exactly once: only the catalog remains for the exit sweep.
-		assert_eq!(set.finalize_all(), vec!["catalog".to_string()]);
+		assert_eq!(set.finalize_all().unwrap(), vec!["catalog".to_string()]);
 	}
 
 	// A buffer that arrives after the pad's EOS is dropped (the producer is already finalized).
@@ -787,10 +837,16 @@ mod tests {
 	}
 
 	#[test]
-	fn caps_supported_accepts_only_h264() {
+	fn caps_supported_requires_h264_byte_stream_au() {
 		gst::init().unwrap();
 		assert!(caps_supported(&h264_caps()));
 		assert!(!caps_supported(&audio_caps()));
+		// H.264 but not byte-stream/au is rejected: FramedFormat::Avc3 consumes Annex-B AUs.
+		let avc = gst::Caps::builder("video/x-h264")
+			.field("stream-format", "avc")
+			.field("alignment", "au")
+			.build();
+		assert!(!caps_supported(&avc), "length-prefixed avc must be rejected");
 	}
 
 	// A pad with unsupported caps is invalidated alone: marked failed and its producer dropped, while
@@ -807,10 +863,74 @@ mod tests {
 			set.caps("data", 0, &audio_caps()).is_ok(),
 			"a pad error must not kill the session"
 		);
-		assert!(set.status.is_failed("data"), "the bad pad is marked failed");
-		assert!(!set.status.is_failed("video"), "the good pad is untouched");
+		assert!(set.status.is_failed("data", 0), "the bad pad is marked failed");
+		assert!(!set.status.is_failed("video", 0), "the good pad is untouched");
 		assert!(set.pads.contains_key("video"), "the good pad keeps its producer");
 		assert!(!set.pads.contains_key("data"), "the failed pad's producer is dropped");
+	}
+
+	// The buffer/bitstream failure path (decode_frame error), distinct from the caps path: a malformed
+	// Annex-B NAL invalidates only that pad, which is then terminal for aggregation.
+	#[test]
+	fn malformed_bitstream_fails_only_that_pad() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		set.add_pad("audio", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
+		set.caps("audio", 0, &h264_caps()).unwrap();
+		set.segment("video", 0, time_segment());
+
+		// Annex-B start code + a NAL header with the forbidden_zero_bit set: a real importer error.
+		let bad = Bytes::from_static(&[0x00, 0x00, 0x00, 0x01, 0x80]);
+		assert!(
+			set.buffer("video", 0, bad, Some(gst::ClockTime::ZERO)).is_ok(),
+			"a bitstream error must not kill the session"
+		);
+		assert!(
+			set.status.is_failed("video", 0),
+			"the bad-bitstream pad is marked failed"
+		);
+		assert!(!set.status.is_failed("audio", 0), "the other pad is untouched");
+		assert!(!set.pads.contains_key("video"), "the failed pad's producer is dropped");
+		// The failed pad is terminal: the audio EOS completes the element.
+		assert!(
+			set.eos("audio", 0).unwrap(),
+			"the failed video pad no longer blocks completion"
+		);
+	}
+
+	// A failed pad is terminal (its track is finalized), so it stops blocking aggregation: the element
+	// completes once the remaining good pads end.
+	#[test]
+	fn a_failed_pad_is_terminal_for_aggregation() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		set.add_pad("data", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
+		// "data" fails on unsupported caps; the element is not complete yet (video still active).
+		assert!(!set.caps("data", 0, &audio_caps()).unwrap());
+		// video EOS now finishes the element: data (failed, terminal) + video (EOS) are both ended.
+		assert!(
+			set.eos("video", 0).unwrap(),
+			"the failed pad no longer blocks completion"
+		);
+	}
+
+	// Failing the last pending pad completes the element directly (caps reports completion).
+	#[test]
+	fn failing_the_last_pending_pad_completes_the_element() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		set.add_pad("data", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
+		assert!(!set.eos("video", 0).unwrap(), "video ended but data is still pending");
+		assert!(
+			set.caps("data", 0, &audio_caps()).unwrap(),
+			"failing the last pending pad completes the element"
+		);
 	}
 
 	// A finalized catalog is a session failure: caps returns Err so the worker tears the session down.
@@ -819,11 +939,48 @@ mod tests {
 		gst::init().unwrap();
 		let mut set = pad_set();
 		set.add_pad("video", 0);
-		set.finalize_all();
+		set.finalize_all().unwrap();
 		assert!(
 			set.caps("video", 0, &h264_caps()).is_err(),
 			"a gone catalog is session-fatal"
 		);
+	}
+
+	// Frame monotonicity: a segment accepted on base alone can still place a frame before one already
+	// emitted; that regression is dropped, not emitted out of order.
+	#[test]
+	fn regressing_timestamp_is_dropped() {
+		gst::init().unwrap();
+		let mut pad = Pad::new();
+		pad.set_segment(time_segment_at(0, 0));
+		assert_eq!(
+			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(10_000))),
+			FrameDecision::Emit(10_000_000)
+		);
+		// New segment: base advances past the previous base (so it is accepted) but below the running
+		// time already emitted.
+		pad.set_segment(time_segment_at(0, 5_000));
+		assert_eq!(pad.state, PadState::Active);
+		// Its first frame maps to 5s, which regresses below the 10s already emitted: dropped.
+		assert!(matches!(
+			pad.frame_timestamp(Some(gst::ClockTime::ZERO)),
+			FrameDecision::Drop(_)
+		));
+		// A later frame that catches up past 10s emits again.
+		assert_eq!(
+			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(6_000))),
+			FrameDecision::Emit(11_000_000)
+		);
+	}
+
+	// The failure set is scoped to the generation, so a pad recreated with the same name does not
+	// inherit a previous incarnation's failure even before the worker clears it.
+	#[test]
+	fn failure_is_scoped_to_the_generation() {
+		let status = Status::default();
+		status.mark_failed("video", 0);
+		assert!(status.is_failed("video", 0), "the failed incarnation is failed");
+		assert!(!status.is_failed("video", 1), "a newer incarnation is not failed");
 	}
 
 	// SEGMENT before CAPS: the pad is created and the segment retained when CAPS arrives.
@@ -840,9 +997,11 @@ mod tests {
 		assert!(pad.framed.is_some());
 	}
 
-	// Firing the watch drops the receiver, waking a sender parked on the full channel with Err.
+	// The tokio property SessionHandle::stop relies on: dropping the receiver (which the worker does
+	// when run_session returns) wakes a sender parked on the full channel with Err, so a stop never
+	// deadlocks a chain thread applying backpressure. The element-level path needs a connected session.
 	#[test]
-	fn shutdown_via_watch_releases_a_blocked_send() {
+	fn dropped_receiver_wakes_blocked_send() {
 		let runtime = tokio::runtime::Runtime::new().unwrap();
 		let (data_tx, data_rx) = mpsc::channel::<u8>(DATA_CHANNEL_BOUND);
 		let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -892,7 +1051,7 @@ mod tests {
 	// A pad with no SEGMENT yet drops buffers (NoSegment), distinct from an invalidated timeline.
 	#[test]
 	fn pad_without_segment_drops_buffers() {
-		let pad = Pad::new();
+		let mut pad = Pad::new();
 		assert_eq!(pad.state, PadState::NoSegment);
 		assert!(matches!(
 			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(5))),

@@ -1,7 +1,7 @@
 //! Hermetic element-boundary tests: behaviour reachable without a live MoQ session.
 //!
-//! Session-dependent flows (multipad EOS aggregation, per-pad errors, FLUSH, remote death) require a
-//! real relay, so they live in the relay-backed harness, not here.
+//! Flows that need a connected session (multipad EOS aggregation, per-pad error propagation, remote
+//! close) are validated against a real relay, separately from this hermetic suite.
 
 use std::sync::Once;
 
@@ -48,7 +48,8 @@ fn missing_url_fails_state_change() {
 	let _ = sink.set_state(gst::State::Null);
 }
 
-// A connect that cannot succeed surfaces as an ERROR on the bus, not a silent log.
+// A connect that cannot succeed surfaces as an ERROR on the bus (not a silent log) and leaves the
+// element disconnected. The `.invalid` host fails fast at DNS resolution in this test environment.
 #[test]
 fn connect_failure_posts_error_to_bus() {
 	init();
@@ -62,8 +63,10 @@ fn connect_failure_posts_error_to_bus() {
 
 	let _ = pipeline.set_state(gst::State::Playing);
 	let bus = pipeline.bus().expect("pipeline bus");
-	let msg = bus.timed_pop_filtered(gst::ClockTime::from_seconds(20), &[gst::MessageType::Error]);
+	let msg = bus.timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Error]);
+	let connected = sink.property::<bool>("connected");
 	let _ = pipeline.set_state(gst::State::Null);
 
 	assert!(msg.is_some(), "a failed connect must post an ERROR to the bus");
+	assert!(!connected, "a failed connect must leave connected = false");
 }

@@ -12,6 +12,10 @@ use gst::subclass::prelude::*;
 
 use super::session::{caps_supported, DataMsg, ResolvedSettings, SessionHandle, Status, CAT};
 
+/// Reject a frame past the MoQ frame limit (moq-net's MAX_FRAME_SIZE, 16 MiB): it could not be
+/// consumed anyway, and copying it would let hostile input drive an unbounded allocation.
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone, Default)]
 struct Settings {
 	url: Option<String>,
@@ -263,8 +267,20 @@ impl MoqSinkSpike {
 	) -> Result<gst::FlowSuccess, gst::FlowError> {
 		// The worker marks a pad failed after rejecting its data; surface that to GStreamer instead of
 		// silently dropping. Because the worker is async, this lands on the buffer after the bad one.
-		if self.status.is_failed(pad.name().as_str()) {
+		if self.status.is_failed(pad.name().as_str(), generation) {
 			return Err(gst::FlowError::NotNegotiated);
+		}
+
+		// Bound the per-frame allocation before copying: a buffer past the frame limit cannot be
+		// consumed and would let hostile input drive an unbounded copy.
+		if buffer.size() > MAX_FRAME_BYTES {
+			gst::warning!(
+				CAT,
+				"rejecting {}-byte buffer on pad {} (exceeds frame limit)",
+				buffer.size(),
+				pad.name()
+			);
+			return Err(gst::FlowError::Error);
 		}
 
 		let sender = self

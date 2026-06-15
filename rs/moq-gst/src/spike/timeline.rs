@@ -128,10 +128,10 @@ mod tests {
 		assert!(matches!(frame_micros(None), FrameDecision::Drop(_)));
 	}
 
-	// Stateless conversion: two pads sharing one running-time clock keep their relative offset,
-	// regardless of call order.
+	// frame_micros is a stateless conversion (no last-emitted state, no per-pad anchor). The real
+	// A/V-offset guarantee is exercised by two_pads_keep_av_aligned_through_real_segments.
 	#[test]
-	fn shared_timeline_keeps_av_aligned() {
+	fn frame_micros_is_stateless() {
 		assert_eq!(frame_micros(Some(7_000_000)), FrameDecision::Emit(7_000));
 		assert_eq!(frame_micros(Some(5_000_000)), FrameDecision::Emit(5_000));
 	}
