@@ -5,14 +5,12 @@ import type { Decoder } from "./decoder";
 /**
  * Controls when video is downloaded relative to the canvas position.
  *
- * - `"never"`: never download video (forces the visibility check off).
- * - `"always"`: always download video, even when the canvas is scrolled out of view (forces
- *   the visibility check on).
+ * - `"never"`: never download video.
+ * - `"always"`: always download video, regardless of the canvas position or tab visibility.
  * - a CSS length (`"0px"`, `"200px"`, `"100%"`, ...): download while the canvas is within
- *   that distance of the viewport, used as the {@link IntersectionObserver} `rootMargin`.
- *   `"0px"` means strictly on screen; larger values pre-warm the video before it scrolls in.
- *
- * In all cases video is still suspended while the tab is hidden.
+ *   that distance of the viewport (used as the {@link IntersectionObserver} `rootMargin`) and
+ *   the tab is visible. `"0px"` means strictly on screen; larger values pre-warm the video
+ *   before it scrolls in.
  */
 export type Visible = "never" | "always" | (string & {});
 
@@ -42,7 +40,7 @@ export class Renderer {
 	readonly timestamp = new Signal<Time.Milli | undefined>(undefined);
 
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
-	// Whether the canvas is within the configured visible margin and the tab is focused.
+	// Whether video should currently download (within the configured margin and tab visible, or forced via "always").
 	#visible = new Signal(false);
 	#signals = new Effect();
 
@@ -76,53 +74,55 @@ export class Renderer {
 		}
 	}
 
-	// Track whether the canvas is within the configured visible margin and the tab is focused.
+	// Track whether video should currently download.
 	#runVisible(effect: Effect): void {
 		const visible = effect.get(this.visible);
 
-		// "never" forces the visibility check off regardless of position or tab state.
+		// "never" forces the check off; "always" forces it on regardless of viewport or tab state.
 		if (visible === "never") {
 			this.#visible.set(false);
 			return;
 		}
 
-		// "always" overrides the IntersectionObserver result to true; a distance is its rootMargin.
-		let intersecting = visible === "always";
+		if (visible === "always") {
+			this.#visible.set(true);
+			effect.cleanup(() => this.#visible.set(false));
+			return;
+		}
 
+		// A distance gates on the viewport (used as the rootMargin) and the tab being visible.
+		const canvas = effect.get(this.canvas);
+		if (!canvas) {
+			this.#visible.set(false);
+			return;
+		}
+
+		let intersecting = false;
 		const update = () => {
 			this.#visible.set(intersecting && !document.hidden);
 		};
 
-		if (visible !== "always") {
-			const canvas = effect.get(this.canvas);
-			if (!canvas) {
-				this.#visible.set(false);
-				return;
+		const callback = (entries: IntersectionObserverEntry[]) => {
+			for (const entry of entries) {
+				intersecting = entry.isIntersecting;
+				update();
 			}
+		};
 
-			const callback = (entries: IntersectionObserverEntry[]) => {
-				for (const entry of entries) {
-					intersecting = entry.isIntersecting;
-					update();
-				}
-			};
-
-			// `visible` is a CSS length, but the programmatic API accepts arbitrary strings. An
-			// invalid rootMargin throws a SyntaxError, so fall back to the default margin.
-			let observer: IntersectionObserver;
-			try {
-				observer = new IntersectionObserver(callback, { threshold: 0.01, rootMargin: visible });
-			} catch {
-				console.warn(`moq-watch: invalid visible margin "${visible}", using "0px"`);
-				observer = new IntersectionObserver(callback, { threshold: 0.01 });
-			}
-
-			observer.observe(canvas);
-			effect.cleanup(() => observer.disconnect());
+		// `visible` is a CSS length, but the programmatic API accepts arbitrary strings. An
+		// invalid rootMargin throws a SyntaxError, so fall back to the default margin.
+		let observer: IntersectionObserver;
+		try {
+			observer = new IntersectionObserver(callback, { threshold: 0.01, rootMargin: visible });
+		} catch {
+			console.warn(`moq-watch: invalid visible margin "${visible}", using "0px"`);
+			observer = new IntersectionObserver(callback, { threshold: 0.01 });
 		}
 
 		update();
 		effect.event(document, "visibilitychange", update);
+		observer.observe(canvas);
+		effect.cleanup(() => observer.disconnect());
 		effect.cleanup(() => this.#visible.set(false));
 	}
 

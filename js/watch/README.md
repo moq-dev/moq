@@ -78,11 +78,11 @@ position relative to the viewport:
 
 - `never`: never download video.
 - a distance (`0px`, `200px`, `100%`, ...): download while the canvas is within that distance
-  of the viewport. `0px` (the default) means strictly on screen; a larger distance pre-warms
-  the video before it scrolls into view.
-- `always`: always download video, even when the canvas is scrolled out of view.
+  of the viewport **and** the tab is visible. `0px` (the default) means strictly on screen; a
+  larger distance pre-warms the video before it scrolls into view.
+- `always`: always download video, regardless of the canvas position or tab visibility.
 
-In all cases video is still suspended while the tab is hidden.
+Only the distance mode suspends video while the tab is hidden; `always` keeps downloading.
 
 ## JavaScript API
 
