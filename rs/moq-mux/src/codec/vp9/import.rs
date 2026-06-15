@@ -12,8 +12,8 @@ use super::FrameHeader;
 /// [`decode_frame`](Self::decode_frame). The first key frame's header supplies
 /// the catalog config; the track is created lazily.
 pub struct Import {
-	// The broadcast being produced.
-	broadcast: moq_net::BroadcastProducer,
+	// Where new media tracks come from.
+	tracks: crate::track_provider::TrackProvider,
 
 	// The catalog being produced.
 	catalog: crate::catalog::Producer,
@@ -34,7 +34,18 @@ pub struct Import {
 impl Import {
 	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
-			broadcast,
+			tracks: crate::track_provider::TrackProvider::unique(broadcast, ".vp09"),
+			catalog,
+			track: None,
+			config: None,
+			zero: None,
+			jitter: MinFrameDuration::new(),
+		}
+	}
+
+	pub fn new_with_track(track: moq_net::TrackProducer, catalog: crate::catalog::Producer) -> Self {
+		Self {
+			tracks: crate::track_provider::TrackProvider::fixed(track),
 			catalog,
 			track: None,
 			config: None,
@@ -66,12 +77,16 @@ impl Import {
 			return Ok(());
 		}
 
+		if self.track.is_some() && self.tracks.is_fixed() {
+			anyhow::bail!("fixed track cannot be reconfigured");
+		}
+
 		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.name, "reinitializing track");
 			self.catalog.lock().video.renditions.remove(&track.name);
 		}
 
-		let track = self.broadcast.unique_track(".vp09")?;
+		let track = self.tracks.create()?;
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 		self.catalog
 			.lock()

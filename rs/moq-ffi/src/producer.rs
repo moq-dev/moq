@@ -143,6 +143,48 @@ impl MoqBroadcastProducer {
 		}))
 	}
 
+	/// Publish media on an existing track, usually one returned by
+	/// [`MoqBroadcastDynamic::requested_track`].
+	///
+	/// `format` controls the encoding of `init` and frame payloads. Only
+	/// single-track formats are supported.
+	pub fn publish_media_on_track(
+		&self,
+		track: &MoqTrackProducer,
+		format: String,
+		init: Vec<u8>,
+	) -> Result<Arc<MoqMediaProducer>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let guard = self.state.lock().unwrap();
+		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let format = moq_mux::import::FramedFormat::from_str(&format)
+			.map_err(|_| MoqError::Codec(format!("unknown format: {format}")))?;
+
+		let track_clone = {
+			let guard = track.inner.lock().unwrap();
+			guard.as_ref().ok_or_else(|| MoqError::Closed)?.clone()
+		};
+
+		let mut buf = init.as_slice();
+		let decoder =
+			moq_mux::import::Framed::new_with_track(track_clone.clone(), state.catalog.clone(), format, &mut buf)
+				.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+
+		if buf.has_remaining() {
+			return Err(MoqError::Codec("init failed: trailing bytes".into()));
+		}
+
+		let mut guard = track.inner.lock().unwrap();
+		guard.take().ok_or_else(|| MoqError::Closed)?;
+
+		Ok(Arc::new(MoqMediaProducer {
+			inner: std::sync::Mutex::new(Some(MediaProducer {
+				decoder,
+				track: track_clone,
+			})),
+		}))
+	}
+
 	/// Create a media track fed by a raw byte stream with unknown frame
 	/// boundaries (e.g. piped Annex-B H.264 straight from an encoder).
 	///
