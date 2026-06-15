@@ -5,7 +5,7 @@ import type { Decoder } from "./decoder";
 export type RendererProps = {
 	canvas?: HTMLCanvasElement | Signal<HTMLCanvasElement | undefined>;
 	paused?: boolean | Signal<boolean>;
-	noSuspendWhenHidden?: boolean | Signal<boolean>;
+	backgroundPlayback?: boolean | Signal<boolean>;
 };
 
 // An component to render a video to a canvas.
@@ -19,7 +19,7 @@ export class Renderer {
 	paused: Signal<boolean>;
 
 	// Whether video keeps downloading while the tab is hidden.
-	noSuspendWhenHidden: Signal<boolean>;
+	backgroundPlayback: Signal<boolean>;
 
 	// The most recently rendered frame, updated after each rAF paint.
 	readonly frame = new Signal<VideoFrame | undefined>(undefined);
@@ -36,7 +36,7 @@ export class Renderer {
 		this.decoder = decoder;
 		this.canvas = Signal.from(props?.canvas);
 		this.paused = Signal.from(props?.paused ?? false);
-		this.noSuspendWhenHidden = Signal.from(props?.noSuspendWhenHidden ?? false);
+		this.backgroundPlayback = Signal.from(props?.backgroundPlayback ?? false);
 
 		this.#signals.run((effect) => {
 			const canvas = effect.get(this.canvas);
@@ -96,8 +96,8 @@ export class Renderer {
 		const paused = effect.get(this.paused);
 		const onscreen = effect.get(this.#onscreen);
 		const foreground = effect.get(this.#foreground);
-		const noSuspendWhenHidden = effect.get(this.noSuspendWhenHidden);
-		const visible = onscreen && (foreground || noSuspendWhenHidden);
+		const backgroundPlayback = effect.get(this.backgroundPlayback);
+		const visible = onscreen && (foreground || backgroundPlayback);
 
 		effect.cleanup(() => this.decoder.enabled.set(false));
 

@@ -24,7 +24,7 @@
 				- `name`: The broadcast name, otherwise we use the last part of the URL.
 				- `paused`: Video and audio are paused.
 				- `muted`: Audio is muted.
-				- `no-suspend-when-hidden`: Keep canvas video active when the tab is hidden.
+				- `background-playback`: Keep canvas video active when the tab is hidden.
 				- `volume`: The audio volume (0-1).
 				- `latency`: The target jitter buffer size in milliseconds, or "real-time" to use the RTT.
 				- `reload`: Whether to automatically reconnect when the broadcast goes offline/online.
@@ -82,7 +82,7 @@
 		Don't want video? Don't provide a canvas!
 		It won't be downloaded, decoded, or rendered.
 		This includes when the video is paused, minimized, not in the DOM, scrolled out of view, or in a hidden tab.
-		Add <code>no-suspend-when-hidden</code> if you need canvas video to keep downloading while the tab is hidden.
+		Add <code>background-playback</code> if you need canvas video to keep downloading while the tab is hidden.
 	</p>
 	<p>
 		Audio may start muted because the browser can require user interaction before autoplaying.

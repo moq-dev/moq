@@ -70,7 +70,7 @@ The simplest way to watch a stream:
 | `path`                    | string  | required | Broadcast path                           |
 | `paused`                  | boolean | false    | Pause playback                           |
 | `muted`                   | boolean | false    | Mute audio                               |
-| `no-suspend-when-hidden`  | boolean | false    | Keep canvas video active in hidden tabs  |
+| `background-playback`     | boolean | false    | Keep canvas video active in hidden tabs  |
 | `volume`                  | number  | 1        | Audio volume (0-1)                       |
 
 ## JavaScript API

@@ -12,7 +12,7 @@ const OBSERVED = [
 	"paused",
 	"volume",
 	"muted",
-	"no-suspend-when-hidden",
+	"background-playback",
 	"reload",
 	"latency",
 	"jitter",
@@ -119,11 +119,11 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
-			const noSuspendWhenHidden = effect.get(this.backend.noSuspendWhenHidden);
-			if (noSuspendWhenHidden) {
-				this.setAttribute("no-suspend-when-hidden", "true");
+			const backgroundPlayback = effect.get(this.backend.backgroundPlayback);
+			if (backgroundPlayback) {
+				this.setAttribute("background-playback", "true");
 			} else {
-				this.removeAttribute("no-suspend-when-hidden");
+				this.removeAttribute("background-playback");
 			}
 		});
 
@@ -202,8 +202,8 @@ export default class MoqWatch extends HTMLElement {
 			this.backend.audio.volume.set(volume);
 		} else if (name === "muted") {
 			this.backend.audio.muted.set(newValue !== null);
-		} else if (name === "no-suspend-when-hidden") {
-			this.backend.noSuspendWhenHidden.set(newValue !== null);
+		} else if (name === "background-playback") {
+			this.backend.backgroundPlayback.set(newValue !== null);
 		} else if (name === "reload") {
 			this.broadcast.reload.set(newValue !== null);
 		} else if (name === "latency") {
@@ -263,12 +263,12 @@ export default class MoqWatch extends HTMLElement {
 		this.backend.audio.muted.set(value);
 	}
 
-	get noSuspendWhenHidden(): boolean {
-		return this.backend.noSuspendWhenHidden.peek();
+	get backgroundPlayback(): boolean {
+		return this.backend.backgroundPlayback.peek();
 	}
 
-	set noSuspendWhenHidden(value: boolean) {
-		this.backend.noSuspendWhenHidden.set(value);
+	set backgroundPlayback(value: boolean) {
+		this.backend.backgroundPlayback.set(value);
 	}
 
 	get reload(): boolean {
