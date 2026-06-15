@@ -56,7 +56,7 @@ The simplest way to watch a stream:
 
 <moq-watch
     url="https://relay.example.com/anon"
-    path="room/alice.hang"
+    name="room/alice.hang"
     controls>
     <canvas></canvas>
 </moq-watch>
@@ -67,11 +67,11 @@ The simplest way to watch a stream:
 | Attribute | Type                                | Default  | Description                              |
 |-----------|-------------------------------------|----------|------------------------------------------|
 | `url`     | string                              | required | Relay server URL                         |
-| `path`    | string                              | required | Broadcast path                           |
+| `name`    | string                              | required | Broadcast name/path                      |
 | `paused`  | boolean                             | false    | Pause playback                           |
 | `muted`   | boolean                             | false    | Mute audio                               |
 | `visible` | `never` \| distance \| `always`     | `0px`    | When to download video (see below)       |
-| `volume`  | number                              | 1        | Audio volume (0-1)                       |
+| `volume`  | number                              | 0.5      | Audio volume (0-1)                       |
 
 The `visible` attribute controls when the video track is downloaded, based on the canvas
 position relative to the viewport:
@@ -117,7 +117,7 @@ watch.video.media.subscribe((stream) => {
 </script>
 
 <moq-watch-ui>
-    <moq-watch url="https://relay.example.com/anon" path="room/alice.hang">
+    <moq-watch url="https://relay.example.com/anon" name="room/alice.hang">
         <canvas></canvas>
     </moq-watch>
 </moq-watch-ui>

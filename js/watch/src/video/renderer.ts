@@ -100,15 +100,22 @@ export class Renderer {
 				return;
 			}
 
-			const observer = new IntersectionObserver(
-				(entries) => {
-					for (const entry of entries) {
-						intersecting = entry.isIntersecting;
-						update();
-					}
-				},
-				{ threshold: 0.01, rootMargin: visible },
-			);
+			const callback = (entries: IntersectionObserverEntry[]) => {
+				for (const entry of entries) {
+					intersecting = entry.isIntersecting;
+					update();
+				}
+			};
+
+			// `visible` is a CSS length, but the programmatic API accepts arbitrary strings. An
+			// invalid rootMargin throws a SyntaxError, so fall back to the default margin.
+			let observer: IntersectionObserver;
+			try {
+				observer = new IntersectionObserver(callback, { threshold: 0.01, rootMargin: visible });
+			} catch {
+				console.warn(`moq-watch: invalid visible margin "${visible}", using "0px"`);
+				observer = new IntersectionObserver(callback, { threshold: 0.01 });
+			}
 
 			observer.observe(canvas);
 			effect.cleanup(() => observer.disconnect());
