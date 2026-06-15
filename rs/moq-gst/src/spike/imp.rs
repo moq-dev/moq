@@ -23,7 +23,11 @@ impl TryFrom<Settings> for ResolvedSettings {
 	fn try_from(value: Settings) -> Result<Self> {
 		Ok(Self {
 			url: url::Url::parse(value.url.as_ref().context("url property is required")?)?,
-			broadcast: value.broadcast.as_ref().context("broadcast property is required")?.clone(),
+			broadcast: value
+				.broadcast
+				.as_ref()
+				.context("broadcast property is required")?
+				.clone(),
 			tls_disable_verify: value.tls_disable_verify,
 		})
 	}
@@ -267,7 +271,11 @@ impl MoqSinkSpike {
 			}
 			gst::EventView::Eos(_) => {
 				let Some(sender) = sender else { return false };
-				sender.blocking_send(DataMsg::Eos { pad: pad.name().to_string() }).is_ok()
+				sender
+					.blocking_send(DataMsg::Eos {
+						pad: pad.name().to_string(),
+					})
+					.is_ok()
 			}
 			_ => gst::Pad::event_default(pad, Some(&*self.obj()), event),
 		}

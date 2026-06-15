@@ -22,13 +22,8 @@ static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 		.expect("spawn tokio runtime")
 });
 
-pub static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
-	gst::DebugCategory::new(
-		"moq-sink-spike",
-		gst::DebugColorFlags::empty(),
-		Some("MoQ Sink spike"),
-	)
-});
+pub static CAT: LazyLock<gst::DebugCategory> =
+	LazyLock::new(|| gst::DebugCategory::new("moq-sink-spike", gst::DebugColorFlags::empty(), Some("MoQ Sink spike")));
 
 /// Handoff, not a buffer: a full channel must block the streaming thread, not grow.
 const DATA_CHANNEL_BOUND: usize = 8;
@@ -69,11 +64,25 @@ impl Status {
 
 /// Ordered; shutdown is deliberately elsewhere (cancellation channel) so it can cut a blocked send.
 pub enum DataMsg {
-	Caps { pad: String, caps: gst::Caps },
-	Segment { pad: String, segment: gst::Segment },
-	Buffer { pad: String, data: Bytes, pts: Option<gst::ClockTime> },
-	Eos { pad: String },
-	DropPad { pad: String },
+	Caps {
+		pad: String,
+		caps: gst::Caps,
+	},
+	Segment {
+		pad: String,
+		segment: gst::Segment,
+	},
+	Buffer {
+		pad: String,
+		data: Bytes,
+		pts: Option<gst::ClockTime>,
+	},
+	Eos {
+		pad: String,
+	},
+	DropPad {
+		pad: String,
+	},
 }
 
 pub struct ResolvedSettings {
@@ -262,7 +271,10 @@ impl PadSet {
 
 	fn segment(&mut self, pad: &str, segment: gst::Segment) {
 		// SEGMENT may arrive before CAPS (independent sticky events); this only records timing.
-		self.pads.entry(pad.to_string()).or_insert_with(Pad::new).set_segment(segment);
+		self.pads
+			.entry(pad.to_string())
+			.or_insert_with(Pad::new)
+			.set_segment(segment);
 	}
 
 	fn buffer(&mut self, pad: &str, data: Bytes, pts: Option<gst::ClockTime>) -> Result<()> {
@@ -314,9 +326,22 @@ impl PadSet {
 	}
 }
 
+/// Per-pad timeline state. Buffers only map and emit while `Active`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PadState {
+	/// No valid SEGMENT seen yet.
+	NoSegment,
+	/// A valid timeline is anchored.
+	Active,
+	/// A live timeline broke (discontinuity, non-TIME, or rate != 1.0); buffers drop until a valid
+	/// SEGMENT re-anchors the pad.
+	Invalid,
+}
+
 struct Pad {
 	framed: Option<moq_mux::import::Framed>,
 	caps: Option<gst::Caps>,
+	state: PadState,
 	segment_info: Option<SegmentInfo>,
 	// Kept only to map a buffer PTS to a running time.
 	segment: Option<gst::FormattedSegment<gst::ClockTime>>,
@@ -327,6 +352,7 @@ impl Pad {
 		Self {
 			framed: None,
 			caps: None,
+			state: PadState::NoSegment,
 			segment_info: None,
 			segment: None,
 		}
@@ -363,24 +389,46 @@ impl Pad {
 
 	fn set_segment(&mut self, segment: gst::Segment) {
 		let info = segment_info(&segment);
-		match classify_segment(self.segment_info.as_ref(), &info) {
+		// Only an Active pad enforces continuity against its previous segment; NoSegment and Invalid
+		// re-anchor from scratch on the next valid one.
+		let prev = match self.state {
+			PadState::Active => self.segment_info.as_ref(),
+			PadState::NoSegment | PadState::Invalid => None,
+		};
+		match classify_segment(prev, &info) {
 			SegmentDecision::Accept => {
 				self.segment_info = Some(info);
 				self.segment = segment.downcast::<gst::ClockTime>().ok();
+				self.state = PadState::Active;
 			}
-			SegmentDecision::Reject(reason) => gst::warning!(CAT, "ignoring segment: {reason}"),
+			SegmentDecision::Reject(reason) => {
+				gst::warning!(CAT, "rejecting segment: {reason}");
+				// A break only invalidates a live timeline; a bad segment before any valid one leaves
+				// the pad in NoSegment.
+				if self.state == PadState::Active {
+					self.state = PadState::Invalid;
+				}
+			}
 		}
 	}
 
 	/// Pure of the importer, so it can be tested with real segments and no codec.
 	fn frame_timestamp(&self, pts: Option<gst::ClockTime>) -> FrameDecision {
-		let running_time = self
-			.segment
-			.as_ref()
-			.zip(pts)
-			.and_then(|(segment, pts)| segment.to_running_time(pts))
-			.map(|time| time.nseconds());
-		frame_micros(self.segment_info.is_some(), running_time)
+		match self.state {
+			PadState::Active => {
+				// to_running_time_full is signed: a buffer before the segment returns Negative, which
+				// frame_micros drops; to_running_time would instead clip it to None and lose the reason.
+				let running_time = self
+					.segment
+					.as_ref()
+					.zip(pts)
+					.and_then(|(segment, pts)| segment.to_running_time_full(pts))
+					.map(signed_nanos);
+				frame_micros(running_time)
+			}
+			PadState::NoSegment => FrameDecision::Drop("buffer before a valid SEGMENT"),
+			PadState::Invalid => FrameDecision::Drop("buffer on an invalidated timeline"),
+		}
 	}
 
 	fn push_buffer(&mut self, mut data: Bytes, pts: Option<gst::ClockTime>) -> Result<()> {
@@ -419,15 +467,21 @@ fn segment_info(segment: &gst::Segment) -> SegmentInfo {
 		Some(time) => SegmentInfo {
 			time_format: true,
 			rate: time.rate(),
-			start_nanos: time.start().map(|c| c.nseconds()).unwrap_or(0),
 			base_nanos: time.base().map(|c| c.nseconds()).unwrap_or(0),
 		},
 		None => SegmentInfo {
 			time_format: false,
 			rate: segment.rate(),
-			start_nanos: 0,
 			base_nanos: 0,
 		},
+	}
+}
+
+/// Flattens a signed running time to nanos, keeping the sign so the timeline can drop negatives.
+fn signed_nanos(running_time: gst::Signed<gst::ClockTime>) -> i64 {
+	match running_time {
+		gst::Signed::Positive(time) => time.nseconds() as i64,
+		gst::Signed::Negative(time) => -(time.nseconds() as i64),
 	}
 }
 
@@ -459,7 +513,11 @@ mod tests {
 		set.caps("audio", &h264_caps()).unwrap();
 
 		let order = set.finalize_all();
-		assert_eq!(order.last().map(String::as_str), Some("catalog"), "catalog must finalize last");
+		assert_eq!(
+			order.last().map(String::as_str),
+			Some("catalog"),
+			"catalog must finalize last"
+		);
 		assert!(order.contains(&"video".to_string()) && order.contains(&"audio".to_string()));
 
 		// A second pass finalizes nothing again.
@@ -491,7 +549,9 @@ mod tests {
 	#[test]
 	fn buffer_for_unknown_pad_is_dropped_without_error() {
 		let mut set = pad_set();
-		assert!(set.buffer("ghost", Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO)).is_ok());
+		assert!(set
+			.buffer("ghost", Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO))
+			.is_ok());
 	}
 
 	// SEGMENT before CAPS: the pad is created and the segment retained when CAPS arrives.
@@ -537,7 +597,7 @@ mod tests {
 		);
 	}
 
-	// Two pads, real PTS via to_running_time: the A/V offset survives because running time is shared.
+	// Two pads, real PTS via to_running_time_full: the A/V offset survives because running time is shared.
 	#[test]
 	fn two_pads_keep_av_aligned_through_real_segments() {
 		gst::init().unwrap();
@@ -546,13 +606,91 @@ mod tests {
 		video.set_segment(time_segment());
 		audio.set_segment(time_segment());
 
-		assert_eq!(video.frame_timestamp(Some(gst::ClockTime::from_mseconds(7))), FrameDecision::Emit(7_000));
-		assert_eq!(audio.frame_timestamp(Some(gst::ClockTime::from_mseconds(5))), FrameDecision::Emit(5_000));
+		assert_eq!(
+			video.frame_timestamp(Some(gst::ClockTime::from_mseconds(7))),
+			FrameDecision::Emit(7_000)
+		);
+		assert_eq!(
+			audio.frame_timestamp(Some(gst::ClockTime::from_mseconds(5))),
+			FrameDecision::Emit(5_000)
+		);
+	}
+
+	// A pad with no SEGMENT yet drops buffers (NoSegment), distinct from an invalidated timeline.
+	#[test]
+	fn pad_without_segment_drops_buffers() {
+		let pad = Pad::new();
+		assert_eq!(pad.state, PadState::NoSegment);
+		assert!(matches!(
+			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(5))),
+			FrameDecision::Drop(_)
+		));
+	}
+
+	// The fix: a moved media start stays continuous as long as the running-time base advances. The
+	// old start-equality rule would have rejected this and stalled the pad.
+	#[test]
+	fn moved_start_with_advancing_base_stays_continuous() {
+		gst::init().unwrap();
+		let mut pad = Pad::new();
+		pad.set_segment(time_segment_at(0, 0));
+		assert_eq!(pad.state, PadState::Active);
+		pad.set_segment(time_segment_at(30_000, 5_000));
+		assert_eq!(pad.state, PadState::Active);
+	}
+
+	// A buffer before the segment start yields a negative running time: drop it, never clamp to zero.
+	#[test]
+	fn frame_before_segment_start_is_dropped_not_clamped() {
+		gst::init().unwrap();
+		let mut pad = Pad::new();
+		pad.set_segment(time_segment_at(10_000, 0));
+		assert!(matches!(
+			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(5_000))),
+			FrameDecision::Drop(_)
+		));
+		// A PTS at or after the start maps to a non-negative running time and emits.
+		assert_eq!(
+			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(12_000))),
+			FrameDecision::Emit(2_000_000)
+		);
+	}
+
+	// A discontinuity invalidates the pad (drops), and the next valid SEGMENT re-anchors it to Active.
+	#[test]
+	fn invalid_segment_drops_then_a_valid_one_recovers() {
+		gst::init().unwrap();
+		let mut pad = Pad::new();
+		pad.set_segment(time_segment_at(0, 5_000));
+		assert_eq!(pad.state, PadState::Active);
+
+		// base rewinds -> discontinuous -> Invalid; buffers drop.
+		pad.set_segment(time_segment_at(0, 0));
+		assert_eq!(pad.state, PadState::Invalid);
+		assert!(matches!(
+			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(6_000))),
+			FrameDecision::Drop(_)
+		));
+
+		// A valid SEGMENT re-anchors -> Active; buffers emit again.
+		pad.set_segment(time_segment_at(0, 10_000));
+		assert_eq!(pad.state, PadState::Active);
+		assert_eq!(
+			pad.frame_timestamp(Some(gst::ClockTime::ZERO)),
+			FrameDecision::Emit(10_000_000)
+		);
 	}
 
 	fn time_segment() -> gst::Segment {
 		let mut segment = gst::FormattedSegment::<gst::ClockTime>::new();
 		segment.set_start(gst::ClockTime::ZERO);
+		segment.upcast()
+	}
+
+	fn time_segment_at(start_ms: u64, base_ms: u64) -> gst::Segment {
+		let mut segment = gst::FormattedSegment::<gst::ClockTime>::new();
+		segment.set_start(gst::ClockTime::from_mseconds(start_ms));
+		segment.set_base(gst::ClockTime::from_mseconds(base_ms));
 		segment.upcast()
 	}
 }

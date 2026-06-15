@@ -10,5 +10,10 @@ glib::wrapper! {
 }
 
 pub fn register(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
-	gst::Element::register(Some(plugin), "moqsinkspike", gst::Rank::NONE, MoqSinkSpike::static_type())
+	gst::Element::register(
+		Some(plugin),
+		"moqsinkspike",
+		gst::Rank::NONE,
+		MoqSinkSpike::static_type(),
+	)
 }
