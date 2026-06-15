@@ -257,7 +257,7 @@ impl Framed {
 				let config = crate::codec::opus::Config::parse(buf)?;
 				FramedKind::Opus(crate::codec::opus::Import::new_with_track(track, catalog, config)?)
 			}
-			FramedFormat::Fmp4 | FramedFormat::Mkv | FramedFormat::Ts => {
+			FramedFormat::Fmp4 | FramedFormat::Mkv | FramedFormat::Ts | FramedFormat::Flv => {
 				anyhow::bail!("{format} can publish multiple tracks")
 			}
 		};

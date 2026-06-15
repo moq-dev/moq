@@ -19,6 +19,10 @@ use super::{
 };
 use crate::container::{Frame, Timestamp};
 
+/// Upper bound on the FLV header's `data_offset`. The header is 9 bytes in
+/// practice; this cap stops a crafted offset from forcing unbounded buffering.
+const MAX_DATA_OFFSET: usize = 64 * 1024;
+
 /// Demuxes an FLV byte stream into a MoQ broadcast.
 ///
 /// Supports H.264 (CodecID 7) video and AAC (SoundFormat 10) audio, the modern
@@ -104,6 +108,9 @@ impl Import {
 			let data_offset =
 				u32::from_be_bytes([self.buffer[5], self.buffer[6], self.buffer[7], self.buffer[8]]) as usize;
 			anyhow::ensure!(data_offset >= FILE_HEADER_LEN, "invalid FLV data offset");
+			// The header is tiny in practice (9 bytes). Cap it so a crafted offset
+			// can't force unbounded buffering before the first tag is reached.
+			anyhow::ensure!(data_offset <= MAX_DATA_OFFSET, "FLV data offset too large");
 			if self.buffer.len() < data_offset + PREV_TAG_SIZE_LEN {
 				return Ok(());
 			}

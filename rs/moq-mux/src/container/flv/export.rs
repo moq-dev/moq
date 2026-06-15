@@ -35,7 +35,7 @@ use crate::container::{CatalogSource, ExportSource, Frame};
 /// [`Avc1`](crate::codec::h264::Avc1) transform caches the inline SPS/PPS, builds
 /// the avcC for the sequence-header tag, and length-prefixes each sample. The
 /// header is deferred until that codec config is available (typically the first
-/// keyframe). Only [`Legacy`](crate::catalog::hang::Container) tracks are
+/// keyframe). Only Legacy and LOC container tracks (raw codec payloads) are
 /// supported; CMAF tracks are rejected.
 pub struct Export {
 	broadcast: moq_net::BroadcastConsumer,
@@ -271,7 +271,7 @@ impl Export {
 			body.put_u8(AVC_SEQUENCE_HEADER);
 			body.put_slice(&[0, 0, 0]); // composition time
 			body.put_slice(avcc);
-			write_tag(&mut out, TAG_VIDEO, 0, &body);
+			write_tag(&mut out, TAG_VIDEO, 0, &body)?;
 		}
 		if let Some(track) = &self.audio {
 			let asc = track
@@ -282,7 +282,7 @@ impl Export {
 			body.put_u8(AAC_AUDIO_TAG_HEADER);
 			body.put_u8(AAC_SEQUENCE_HEADER);
 			body.put_slice(asc);
-			write_tag(&mut out, TAG_AUDIO, 0, &body);
+			write_tag(&mut out, TAG_AUDIO, 0, &body)?;
 		}
 
 		Ok(out.freeze())
@@ -328,21 +328,29 @@ impl Export {
 			// We carry PTS in the tag timestamp, so the composition offset is zero.
 			body.put_slice(&[0, 0, 0]);
 			body.put_slice(&frame.payload);
-			write_tag(&mut out, TAG_VIDEO, timestamp_ms, &body);
+			write_tag(&mut out, TAG_VIDEO, timestamp_ms, &body)?;
 		} else {
 			let mut body = BytesMut::with_capacity(2 + frame.payload.len());
 			body.put_u8(AAC_AUDIO_TAG_HEADER);
 			body.put_u8(AAC_RAW);
 			body.put_slice(&frame.payload);
-			write_tag(&mut out, TAG_AUDIO, timestamp_ms, &body);
+			write_tag(&mut out, TAG_AUDIO, timestamp_ms, &body)?;
 		}
 		Ok(out.freeze())
 	}
 }
 
 /// Append one FLV tag (header + body + trailing `PreviousTagSize`) to `out`.
-fn write_tag(out: &mut BytesMut, tag_type: u8, timestamp_ms: u32, body: &[u8]) {
-	let size = body.len() as u32;
+///
+/// Errors if `body` exceeds FLV's 24-bit `DataSize` field (16 MiB), which would
+/// otherwise be silently truncated into a corrupt header.
+fn write_tag(out: &mut BytesMut, tag_type: u8, timestamp_ms: u32, body: &[u8]) -> anyhow::Result<()> {
+	let size: u32 = body
+		.len()
+		.try_into()
+		.ok()
+		.filter(|n| *n <= 0x00FF_FFFF)
+		.context("FLV tag body exceeds the 24-bit DataSize limit")?;
 	out.put_u8(tag_type);
 	out.put_slice(&size.to_be_bytes()[1..]); // 24-bit data size
 	out.put_slice(&timestamp_ms.to_be_bytes()[1..]); // 24-bit timestamp (low)
@@ -350,6 +358,7 @@ fn write_tag(out: &mut BytesMut, tag_type: u8, timestamp_ms: u32, body: &[u8]) {
 	out.put_slice(&[0, 0, 0]); // stream id
 	out.put_slice(body);
 	out.put_u32(TAG_HEADER_LEN as u32 + size);
+	Ok(())
 }
 
 fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Result<()> {
