@@ -63,25 +63,36 @@ impl Status {
 }
 
 /// Ordered; shutdown is deliberately elsewhere (cancellation channel) so it can cut a blocked send.
+/// Every message carries its pad's generation so a pad recreated with the same name discards the
+/// previous incarnation's in-flight messages.
 pub enum DataMsg {
+	AddPad {
+		pad: String,
+		generation: u64,
+	},
 	Caps {
 		pad: String,
+		generation: u64,
 		caps: gst::Caps,
 	},
 	Segment {
 		pad: String,
+		generation: u64,
 		segment: gst::Segment,
 	},
 	Buffer {
 		pad: String,
+		generation: u64,
 		data: Bytes,
 		pts: Option<gst::ClockTime>,
 	},
 	Eos {
 		pad: String,
+		generation: u64,
 	},
 	DropPad {
 		pad: String,
+		generation: u64,
 	},
 }
 
@@ -98,13 +109,18 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-	pub fn start(settings: ResolvedSettings, status: Arc<Status>, element: glib::WeakRef<Element>) -> Self {
+	pub fn start(
+		settings: ResolvedSettings,
+		status: Arc<Status>,
+		element: glib::WeakRef<Element>,
+		seed: Vec<(String, u64)>,
+	) -> Self {
 		let (data_tx, data_rx) = mpsc::channel(DATA_CHANNEL_BOUND);
 		let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
 		let join = RUNTIME.spawn(async move {
 			// Only a remote close reaches the bus as an error; a local shutdown returns Ok and stays quiet.
-			if let Err(err) = run_session(settings, status, data_rx, shutdown_rx, element.clone()).await {
+			if let Err(err) = run_session(settings, status, seed, data_rx, shutdown_rx, element.clone()).await {
 				if let Some(obj) = element.upgrade() {
 					gst::element_error!(obj, gst::CoreError::Failed, ("session error"), ["{err:?}"]);
 				}
@@ -137,6 +153,7 @@ impl SessionHandle {
 async fn run_session(
 	settings: ResolvedSettings,
 	status: Arc<Status>,
+	seed: Vec<(String, u64)>,
 	mut data: mpsc::Receiver<DataMsg>,
 	mut shutdown: watch::Receiver<bool>,
 	element: glib::WeakRef<Element>,
@@ -167,6 +184,10 @@ async fn run_session(
 	gst::info!(CAT, "session connected to {}", settings.url);
 
 	let mut pad_set = PadSet::new(broadcast, catalog);
+	// Pads requested before the session task existed are seeded into the authoritative set.
+	for (name, generation) in seed {
+		pad_set.add_pad(&name, generation);
+	}
 	let result = run_loop(session, &mut data, &mut shutdown, &mut pad_set, &element, &status).await;
 
 	// Finalize every live producer once on the way out, catalog last; runs on every exit path.
@@ -184,6 +205,14 @@ async fn run_session(
 fn notify_connected(element: &glib::WeakRef<Element>) {
 	if let Some(obj) = element.upgrade() {
 		obj.notify("connected");
+	}
+}
+
+/// Posted once when every active pad has ended.
+fn post_element_eos(element: &glib::WeakRef<Element>) {
+	gst::info!(CAT, "all pads ended, posting EOS");
+	if let Some(obj) = element.upgrade() {
+		let _ = obj.post_message(gst::message::Eos::builder().src(&obj).build());
 	}
 }
 
@@ -222,19 +251,23 @@ async fn run_loop(
 				None => send_bandwidth = None,
 			},
 			msg = data.recv() => match msg {
-				Some(DataMsg::Caps { pad, caps }) => pad_set.caps(&pad, &caps)?,
-				Some(DataMsg::Segment { pad, segment }) => pad_set.segment(&pad, segment),
-				Some(DataMsg::Buffer { pad, data, pts }) => pad_set.buffer(&pad, data, pts)?,
-				Some(DataMsg::Eos { pad }) => {
-					if pad_set.eos(&pad)? {
-						gst::info!(CAT, "all pads ended, posting EOS");
-						if let Some(obj) = element.upgrade() {
-							let _ = obj.post_message(gst::message::Eos::builder().src(&obj).build());
-						}
+				Some(DataMsg::AddPad { pad, generation }) => pad_set.add_pad(&pad, generation),
+				Some(DataMsg::Caps { pad, generation, caps }) => pad_set.caps(&pad, generation, &caps)?,
+				Some(DataMsg::Segment { pad, generation, segment }) => pad_set.segment(&pad, generation, segment),
+				Some(DataMsg::Buffer { pad, generation, data, pts }) => pad_set.buffer(&pad, generation, data, pts)?,
+				Some(DataMsg::Eos { pad, generation }) => {
+					if pad_set.eos(&pad, generation)? {
+						post_element_eos(element);
 						return Ok(());
 					}
 				}
-				Some(DataMsg::DropPad { pad }) => pad_set.drop_pad(&pad),
+				// A release can complete the element if the remaining pads have all ended.
+				Some(DataMsg::DropPad { pad, generation }) => {
+					if pad_set.drop_pad(&pad, generation) {
+						post_element_eos(element);
+						return Ok(());
+					}
+				}
 				// The element dropped the sender (state change to READY) without a shutdown signal.
 				None => return Ok(()),
 			},
@@ -246,6 +279,10 @@ async fn run_loop(
 struct PadSet {
 	broadcast: moq_net::BroadcastProducer,
 	catalog: Option<moq_mux::catalog::Producer>,
+	/// Authoritative membership: name -> current generation. EOS aggregation counts against this, not
+	/// the lazily-created `pads`, so a pad that ends before CAPS still counts.
+	active: HashMap<String, u64>,
+	/// Producer state, created lazily on the first CAPS (a member without CAPS has no entry here).
 	pads: HashMap<String, Pad>,
 	eos: HashSet<String>,
 }
@@ -255,12 +292,38 @@ impl PadSet {
 		Self {
 			broadcast,
 			catalog: Some(catalog),
+			active: HashMap::new(),
 			pads: HashMap::new(),
 			eos: HashSet::new(),
 		}
 	}
 
-	fn caps(&mut self, pad: &str, caps: &gst::Caps) -> Result<()> {
+	/// Declares (or re-declares) a pad's membership. A recreated pad (new generation) starts fresh:
+	/// any producer and EOS mark from a previous incarnation are dropped.
+	fn add_pad(&mut self, pad: &str, generation: u64) {
+		if let Some(mut old) = self.pads.remove(pad) {
+			let _ = old.finalize();
+		}
+		self.eos.remove(pad);
+		self.active.insert(pad.to_string(), generation);
+	}
+
+	/// A message is current only if its generation matches the pad's active generation; otherwise it
+	/// belongs to a previous incarnation (or an unknown pad) and is dropped.
+	fn is_current(&self, pad: &str, generation: u64) -> bool {
+		self.active.get(pad) == Some(&generation)
+	}
+
+	/// Every active pad has ended (and there is at least one).
+	fn all_ended(&self) -> bool {
+		!self.active.is_empty() && self.active.keys().all(|name| self.eos.contains(name))
+	}
+
+	fn caps(&mut self, pad: &str, generation: u64, caps: &gst::Caps) -> Result<()> {
+		if !self.is_current(pad, generation) {
+			gst::warning!(CAT, "caps for stale or unknown pad {pad}, dropping");
+			return Ok(());
+		}
 		let broadcast = self.broadcast.clone();
 		let catalog = self.catalog.clone().context("catalog already finalized")?;
 		self.pads
@@ -269,7 +332,11 @@ impl PadSet {
 			.set_caps(broadcast, catalog, caps)
 	}
 
-	fn segment(&mut self, pad: &str, segment: gst::Segment) {
+	fn segment(&mut self, pad: &str, generation: u64, segment: gst::Segment) {
+		if !self.is_current(pad, generation) {
+			gst::warning!(CAT, "segment for stale or unknown pad {pad}, dropping");
+			return;
+		}
 		// SEGMENT may arrive before CAPS (independent sticky events); this only records timing.
 		self.pads
 			.entry(pad.to_string())
@@ -277,32 +344,55 @@ impl PadSet {
 			.set_segment(segment);
 	}
 
-	fn buffer(&mut self, pad: &str, data: Bytes, pts: Option<gst::ClockTime>) -> Result<()> {
+	fn buffer(&mut self, pad: &str, generation: u64, data: Bytes, pts: Option<gst::ClockTime>) -> Result<()> {
+		if !self.is_current(pad, generation) {
+			gst::warning!(CAT, "buffer for stale or unknown pad {pad}, dropping");
+			return Ok(());
+		}
+		if self.eos.contains(pad) {
+			gst::warning!(CAT, "buffer after EOS on pad {pad}, dropping");
+			return Ok(());
+		}
 		match self.pads.get_mut(pad) {
-			Some(pad) => pad.push_buffer(data, pts),
+			Some(p) => p.push_buffer(data, pts),
 			None => {
-				gst::warning!(CAT, "buffer for unknown pad {pad}");
+				gst::warning!(CAT, "buffer before caps on pad {pad}, dropping");
 				Ok(())
 			}
 		}
 	}
 
-	/// Returns whether every pad has now ended, so the caller posts the element EOS once.
-	fn eos(&mut self, pad: &str) -> Result<bool> {
+	/// Returns whether every active pad has now ended, so the caller posts the element EOS once.
+	fn eos(&mut self, pad: &str, generation: u64) -> Result<bool> {
+		if !self.is_current(pad, generation) {
+			gst::warning!(CAT, "EOS for stale or unknown pad {pad}, ignoring");
+			return Ok(false);
+		}
+		// Duplicate EOS is idempotent: do not re-finalize, just re-report completion.
+		if self.eos.contains(pad) {
+			return Ok(self.all_ended());
+		}
 		if let Some(p) = self.pads.get_mut(pad) {
 			p.finalize()?;
 		}
 		self.eos.insert(pad.to_string());
-		Ok(!self.pads.is_empty() && self.eos.len() == self.pads.len())
+		Ok(self.all_ended())
 	}
 
-	fn drop_pad(&mut self, pad: &str) {
+	/// Returns whether the remaining active pads have all ended (a release can complete the element).
+	fn drop_pad(&mut self, pad: &str, generation: u64) -> bool {
+		if self.active.get(pad) != Some(&generation) {
+			gst::warning!(CAT, "DropPad for stale or unknown pad {pad}, ignoring");
+			return false;
+		}
 		if let Some(mut p) = self.pads.remove(pad) {
 			if let Err(err) = p.finalize() {
 				gst::warning!(CAT, "finalize on drop {pad}: {err:?}");
 			}
 		}
+		self.active.remove(pad);
 		self.eos.remove(pad);
+		self.all_ended()
 	}
 
 	/// Idempotent (skips already-finalized pads); the returned order proves "catalog last".
@@ -509,8 +599,10 @@ mod tests {
 	fn finalize_all_finishes_pads_then_catalog_once() {
 		gst::init().unwrap();
 		let mut set = pad_set();
-		set.caps("video", &h264_caps()).unwrap();
-		set.caps("audio", &h264_caps()).unwrap();
+		set.add_pad("video", 0);
+		set.add_pad("audio", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
+		set.caps("audio", 0, &h264_caps()).unwrap();
 
 		let order = set.finalize_all();
 		assert_eq!(
@@ -528,9 +620,10 @@ mod tests {
 	fn eos_then_shutdown_does_not_double_finalize() {
 		gst::init().unwrap();
 		let mut set = pad_set();
-		set.caps("video", &h264_caps()).unwrap();
+		set.add_pad("video", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
 
-		assert!(set.eos("video").unwrap());
+		assert!(set.eos("video", 0).unwrap());
 		// Only the catalog is left; the pad is not finalized twice.
 		assert_eq!(set.finalize_all(), vec!["catalog".to_string()]);
 	}
@@ -539,9 +632,10 @@ mod tests {
 	fn identical_caps_keep_one_live_producer() {
 		gst::init().unwrap();
 		let mut set = pad_set();
-		set.caps("video", &h264_caps()).unwrap();
+		set.add_pad("video", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
 		// Re-sent identical caps are a no-op; the pad still holds exactly one live producer.
-		set.caps("video", &h264_caps()).unwrap();
+		set.caps("video", 0, &h264_caps()).unwrap();
 		assert_eq!(set.pads.len(), 1);
 		assert!(set.pads["video"].framed.is_some());
 	}
@@ -550,8 +644,85 @@ mod tests {
 	fn buffer_for_unknown_pad_is_dropped_without_error() {
 		let mut set = pad_set();
 		assert!(set
-			.buffer("ghost", Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO))
+			.buffer("ghost", 0, Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO))
 			.is_ok());
+	}
+
+	// AddPad declares membership independent of CAPS, and generation discriminates incarnations.
+	#[test]
+	fn add_pad_makes_a_member_independent_of_caps() {
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		assert!(set.is_current("video", 0));
+		assert!(!set.is_current("video", 1), "a different generation is not current");
+		assert!(!set.is_current("audio", 0), "an unknown pad is not current");
+	}
+
+	// EOS before any CAPS still counts: a member with no producer has nothing to finalize but ends.
+	#[test]
+	fn eos_before_caps_counts_toward_completion() {
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		assert!(set.eos("video", 0).unwrap());
+	}
+
+	// The element completes only once every member has ended; a still-open member holds it open.
+	#[test]
+	fn element_completes_only_after_all_members_eos() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("a", 0);
+		set.add_pad("b", 0);
+		set.caps("a", 0, &h264_caps()).unwrap();
+		set.caps("b", 0, &h264_caps()).unwrap();
+		assert!(!set.eos("a", 0).unwrap(), "one of two members ended, not complete");
+		assert!(set.eos("b", 0).unwrap(), "both members ended, complete");
+	}
+
+	// Duplicate EOS is idempotent: it neither re-finalizes the producer nor changes completion.
+	#[test]
+	fn duplicate_eos_is_idempotent() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
+		assert!(set.eos("video", 0).unwrap());
+		assert!(set.eos("video", 0).unwrap(), "duplicate EOS stays complete");
+		// Finalized exactly once: only the catalog remains for the exit sweep.
+		assert_eq!(set.finalize_all(), vec!["catalog".to_string()]);
+	}
+
+	// A buffer that arrives after the pad's EOS is dropped (the producer is already finalized).
+	#[test]
+	fn buffer_after_eos_is_dropped() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
+		set.eos("video", 0).unwrap();
+		assert!(set
+			.buffer("video", 0, Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO))
+			.is_ok());
+	}
+
+	// A pad recreated with the same name (new generation) discards the previous incarnation's messages.
+	#[test]
+	fn stale_generation_messages_are_dropped() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
+		set.add_pad("video", 1);
+		// Old-generation messages no longer match the active generation.
+		assert!(set
+			.buffer("video", 0, Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO))
+			.is_ok());
+		assert!(
+			!set.eos("video", 0).unwrap(),
+			"a stale EOS must not complete the element"
+		);
+		// The current generation still completes it.
+		assert!(set.eos("video", 1).unwrap());
 	}
 
 	// SEGMENT before CAPS: the pad is created and the segment retained when CAPS arrives.
@@ -559,8 +730,9 @@ mod tests {
 	fn segment_before_caps_is_retained() {
 		gst::init().unwrap();
 		let mut set = pad_set();
-		set.segment("video", time_segment());
-		set.caps("video", &h264_caps()).unwrap();
+		set.add_pad("video", 0);
+		set.segment("video", 0, time_segment());
+		set.caps("video", 0, &h264_caps()).unwrap();
 
 		let pad = &set.pads["video"];
 		assert!(pad.segment_info.is_some(), "segment kept across a later caps");

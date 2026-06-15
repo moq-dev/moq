@@ -1,5 +1,7 @@
 //! GObject shell, deliberately a parallel element (`moqsinkspike`) so production `moqsink` is untouched.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::{Context, Result};
@@ -38,6 +40,10 @@ pub struct MoqSinkSpike {
 	settings: Mutex<Settings>,
 	session: Mutex<Option<SessionHandle>>,
 	status: Arc<Status>,
+	// Monotonic per-pad generation; a pad recreated with the same name gets a fresh value so the
+	// worker discards the previous incarnation's in-flight messages.
+	next_generation: AtomicU64,
+	pad_generations: Mutex<HashMap<String, u64>>,
 }
 
 #[glib::object_subclass]
@@ -153,16 +159,23 @@ impl ElementImpl for MoqSinkSpike {
 		name: Option<&str>,
 		_caps: Option<&gst::Caps>,
 	) -> Option<gst::Pad> {
+		// Fixed per pad incarnation and captured here, so a buffer in flight from a released pad never
+		// reads a successor's generation.
+		let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
 		let pad_builder = gst::Pad::builder_from_template(templ)
-			.chain_function(|pad, parent, buffer| {
+			.chain_function(move |pad, parent, buffer| {
 				MoqSinkSpike::catch_panic_pad_function(
 					parent,
 					|| Err(gst::FlowError::Error),
-					|sink| sink.forward_buffer(pad, buffer),
+					|sink| sink.forward_buffer(pad, generation, buffer),
 				)
 			})
-			.event_function(|pad, parent, event| {
-				MoqSinkSpike::catch_panic_pad_function(parent, || false, |sink| sink.handle_event(pad, event))
+			.event_function(move |pad, parent, event| {
+				MoqSinkSpike::catch_panic_pad_function(
+					parent,
+					|| false,
+					|sink| sink.handle_event(pad, generation, event),
+				)
 			});
 
 		let pad = match name {
@@ -170,20 +183,29 @@ impl ElementImpl for MoqSinkSpike {
 			None => pad_builder.generated_name().build(),
 		};
 
+		let name = pad.name().to_string();
+		self.pad_generations.lock().unwrap().insert(name.clone(), generation);
+
+		// Announce the pad before adding it: its own CAPS/buffers can only flow after add_pad, so they
+		// are never enqueued ahead of the AddPad that declares its membership.
+		let sender = self.session.lock().unwrap().as_ref().map(SessionHandle::sender);
+		if let Some(sender) = sender {
+			let _ = sender.blocking_send(DataMsg::AddPad { pad: name, generation });
+		}
 		self.obj().add_pad(&pad).ok()?;
 		Some(pad)
 	}
 
 	fn release_pad(&self, pad: &gst::Pad) {
+		let name = pad.name().to_string();
+		let generation = self.pad_generations.lock().unwrap().remove(&name);
 		// Drop the session guard before blocking_send: holding it across a full-channel block deadlocks stop_session.
 		let sender = {
 			let session = self.session.lock().unwrap();
 			session.as_ref().map(SessionHandle::sender)
 		};
-		if let Some(sender) = sender {
-			let _ = sender.blocking_send(DataMsg::DropPad {
-				pad: pad.name().to_string(),
-			});
+		if let (Some(sender), Some(generation)) = (sender, generation) {
+			let _ = sender.blocking_send(DataMsg::DropPad { pad: name, generation });
 		}
 		let _ = self.obj().remove_pad(pad);
 	}
@@ -208,7 +230,20 @@ impl MoqSinkSpike {
 	fn start_session(&self) -> Result<()> {
 		// Synchronous settings validation surfaces as a StateChangeError; async failures go to the bus.
 		let settings = ResolvedSettings::try_from(self.settings.lock().unwrap().clone())?;
-		let handle = SessionHandle::start(settings, self.status.clone(), self.obj().downgrade());
+		// Seed pads requested before the session existed; the data channel is created inside start().
+		let seed = {
+			let gens = self.pad_generations.lock().unwrap();
+			self.obj()
+				.pads()
+				.iter()
+				.map(|pad| {
+					let name = pad.name().to_string();
+					let generation = gens.get(&name).copied().unwrap_or(0);
+					(name, generation)
+				})
+				.collect()
+		};
+		let handle = SessionHandle::start(settings, self.status.clone(), self.obj().downgrade(), seed);
 		*self.session.lock().unwrap() = Some(handle);
 		Ok(())
 	}
@@ -220,7 +255,12 @@ impl MoqSinkSpike {
 	}
 
 	/// Clone the sender, release the lock, then blocking-send: never apply backpressure under the session lock.
-	fn forward_buffer(&self, pad: &gst::Pad, buffer: gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
+	fn forward_buffer(
+		&self,
+		pad: &gst::Pad,
+		generation: u64,
+		buffer: gst::Buffer,
+	) -> Result<gst::FlowSuccess, gst::FlowError> {
 		let sender = self
 			.session
 			.lock()
@@ -236,6 +276,7 @@ impl MoqSinkSpike {
 		sender
 			.blocking_send(DataMsg::Buffer {
 				pad: pad.name().to_string(),
+				generation,
 				data,
 				pts,
 			})
@@ -243,7 +284,7 @@ impl MoqSinkSpike {
 		Ok(gst::FlowSuccess::Ok)
 	}
 
-	fn handle_event(&self, pad: &gst::Pad, event: gst::Event) -> bool {
+	fn handle_event(&self, pad: &gst::Pad, generation: u64, event: gst::Event) -> bool {
 		let sender = self.session.lock().unwrap().as_ref().map(|handle| handle.sender());
 
 		match event.view() {
@@ -251,6 +292,7 @@ impl MoqSinkSpike {
 				let Some(sender) = sender else { return false };
 				let msg = DataMsg::Caps {
 					pad: pad.name().to_string(),
+					generation,
 					caps: caps.caps().to_owned(),
 				};
 				if sender.blocking_send(msg).is_err() {
@@ -262,6 +304,7 @@ impl MoqSinkSpike {
 				let Some(sender) = sender else { return false };
 				let msg = DataMsg::Segment {
 					pad: pad.name().to_string(),
+					generation,
 					segment: segment.segment().to_owned(),
 				};
 				if sender.blocking_send(msg).is_err() {
@@ -274,6 +317,7 @@ impl MoqSinkSpike {
 				sender
 					.blocking_send(DataMsg::Eos {
 						pad: pad.name().to_string(),
+						generation,
 					})
 					.is_ok()
 			}
