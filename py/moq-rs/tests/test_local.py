@@ -240,6 +240,20 @@ def test_publish_lifecycle():
     broadcast.finish()
 
 
+async def test_publish_track_info_and_subscription():
+    """Raw track published with explicit TrackInfo, consumed with a Subscription."""
+    broadcast = moq.BroadcastProducer()
+    info = moq.TrackInfo(priority=5, compress=True, cache_ms=2_000)
+    track = broadcast.publish_track("status", info)
+
+    consumer = track.consume(moq.Subscription(priority=3))
+    track.write_frame(b"ready")
+
+    frame = await asyncio.wait_for(consumer.read_frame(), timeout=5.0)
+    assert frame == b"ready"
+    track.finish()
+
+
 async def test_dynamic_track_request():
     broadcast = moq.BroadcastProducer()
     dynamic = broadcast.dynamic()

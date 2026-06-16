@@ -22,8 +22,9 @@ func (b *BroadcastConsumer) SubscribeCatalog() (*CatalogConsumer, error) {
 }
 
 // SubscribeTrack subscribes to a track, receiving arbitrary byte payloads.
-func (b *BroadcastConsumer) SubscribeTrack(name string) (*TrackConsumer, error) {
-	inner, err := b.inner.SubscribeTrack(name)
+// subscription tunes delivery (priority, ordering, group range); pass nil for defaults.
+func (b *BroadcastConsumer) SubscribeTrack(name string, subscription *Subscription) (*TrackConsumer, error) {
+	inner, err := b.inner.SubscribeTrack(name, subscription)
 	if err != nil {
 		return nil, err
 	}
@@ -31,9 +32,10 @@ func (b *BroadcastConsumer) SubscribeTrack(name string) (*TrackConsumer, error) 
 }
 
 // SubscribeMedia subscribes to a media track, decoded with the given container.
-// maxLatencyMs bounds buffering before a stalled group is skipped.
-func (b *BroadcastConsumer) SubscribeMedia(name string, container Container, maxLatencyMs uint64) (*MediaConsumer, error) {
-	inner, err := b.inner.SubscribeMedia(name, container, maxLatencyMs)
+// maxLatencyMs bounds buffering before a stalled group is skipped. subscription
+// tunes delivery (priority, ordering, group range); pass nil for defaults.
+func (b *BroadcastConsumer) SubscribeMedia(name string, container Container, maxLatencyMs uint64, subscription *Subscription) (*MediaConsumer, error) {
+	inner, err := b.inner.SubscribeMedia(name, container, maxLatencyMs, subscription)
 	if err != nil {
 		return nil, err
 	}

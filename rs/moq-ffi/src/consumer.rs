@@ -6,6 +6,41 @@ use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::*;
 
+/// Subscriber-side delivery preferences, mirroring [`moq_net::Subscription`].
+///
+/// Construct with the fields you care about; the rest default to moq-net's defaults
+/// (priority 0, ordered, no staleness tolerance, full group range).
+#[derive(Clone, uniffi::Record)]
+pub struct MoqSubscription {
+	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
+	#[uniffi(default = 0)]
+	pub priority: u8,
+	/// Deliver groups in sequence order.
+	#[uniffi(default = true)]
+	pub ordered: bool,
+	/// How long to wait for an older group once a newer one has arrived before
+	/// skipping it, in milliseconds. `0` skips immediately.
+	#[uniffi(default = 0)]
+	pub stale_ms: u64,
+	/// First group to deliver, or null to start at the latest group.
+	#[uniffi(default = None)]
+	pub group_start: Option<u64>,
+	/// Last group to deliver (inclusive), or null for no end.
+	#[uniffi(default = None)]
+	pub group_end: Option<u64>,
+}
+
+impl From<MoqSubscription> for moq_net::Subscription {
+	fn from(s: MoqSubscription) -> Self {
+		moq_net::Subscription::default()
+			.with_priority(s.priority)
+			.with_ordered(s.ordered)
+			.with_stale(std::time::Duration::from_millis(s.stale_ms))
+			.with_group_start(s.group_start)
+			.with_group_end(s.group_end)
+	}
+}
+
 #[derive(Clone, uniffi::Object)]
 pub struct MoqBroadcastConsumer {
 	inner: moq_net::BroadcastConsumer,
@@ -96,8 +131,14 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to a track by name — same pattern as moq-boy's command/status tracks.
 	///
 	/// Frames are returned as plain byte payloads with no codec or container parsing.
-	pub async fn subscribe_track(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
-		let track = self.inner.track(&name)?.subscribe(None)?.await?;
+	/// `subscription` tunes delivery (priority, ordering, group range); omit for defaults.
+	pub async fn subscribe_track(
+		&self,
+		name: String,
+		subscription: Option<MoqSubscription>,
+	) -> Result<Arc<MoqTrackConsumer>, MoqError> {
+		let subscription = subscription.map(moq_net::Subscription::from);
+		let track = self.inner.track(&name)?.subscribe(subscription)?.await?;
 		Ok(Arc::new(MoqTrackConsumer::new(track)))
 	}
 
@@ -105,11 +146,13 @@ impl MoqBroadcastConsumer {
 	///
 	/// `container` is the track container from the catalog.
 	/// `max_latency_ms` controls the maximum buffering before skipping a GoP.
+	/// `subscription` tunes delivery (priority, ordering, group range); omit for defaults.
 	pub async fn subscribe_media(
 		&self,
 		name: String,
 		container: Container,
 		max_latency_ms: u64,
+		subscription: Option<MoqSubscription>,
 	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
 		// Parse the container before subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
@@ -117,7 +160,8 @@ impl MoqBroadcastConsumer {
 		let media: moq_mux::catalog::hang::Container = (&container)
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
-		let track = self.inner.track(&name)?.subscribe(None)?.await?;
+		let subscription = subscription.map(moq_net::Subscription::from);
+		let track = self.inner.track(&name)?.subscribe(subscription)?.await?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {
