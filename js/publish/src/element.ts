@@ -273,10 +273,17 @@ export default class MoqPublish extends HTMLElement {
 		if (source === "file" || source instanceof File) {
 			const fileSource = new Source.File({
 				// If a File is provided, use it directly.
-				// TODO: Show a file picker otherwise.
 				file: source instanceof File ? source : undefined,
 				enabled: this.#eitherEnabled,
 			});
+
+			// Otherwise prompt the user to pick one. The selection click is still the
+			// active user gesture (effects run a microtask later, which preserves it).
+			if (!(source instanceof File)) {
+				fileSource.prompt();
+			}
+
+			effect.set(this.file, fileSource);
 
 			this.signals.run((effect) => {
 				const source = effect.get(fileSource.source);

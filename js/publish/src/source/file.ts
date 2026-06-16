@@ -7,6 +7,9 @@ export interface FileSourceConfig {
 	file?: globalThis.File | Signal<globalThis.File | undefined>;
 }
 
+// Image, video, and audio files we know how to decode (see #decode).
+const ACCEPT = "image/*,video/*,audio/*";
+
 export class File {
 	file = new Signal<globalThis.File | undefined>(undefined);
 	signals = new Effect();
@@ -27,6 +30,21 @@ export class File {
 				console.error("Failed to decode file:", err);
 			});
 		});
+	}
+
+	/**
+	 * Open a native file picker and use the chosen file as the source.
+	 * Must be called from within a user gesture (e.g. a click handler), otherwise the browser blocks the dialog.
+	 */
+	prompt() {
+		const input = document.createElement("input");
+		input.type = "file";
+		input.accept = ACCEPT;
+		input.addEventListener("change", () => {
+			const file = input.files?.[0];
+			if (file) this.file.set(file);
+		});
+		input.click();
 	}
 
 	async #decode(file: globalThis.File, effect: Effect) {
