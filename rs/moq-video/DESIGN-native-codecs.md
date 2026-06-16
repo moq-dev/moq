@@ -43,7 +43,7 @@ capture still pulls in `libav*`. This proposal replaces encode **and** capture.
 |---|---|---|---|
 | VideoToolbox (macOS) | [`objc2-video-toolbox`](https://docs.rs/objc2-video-toolbox/) + `objc2-core-media` / `objc2-core-video` | Raw FFI. We hand-write the `VTCompressionSession` glue. | System frameworks, always present. Zero external runtime deps. |
 | NVENC (NVIDIA) | [`nvidia-video-codec-sdk`](https://crates.io/crates/nvidia-video-codec-sdk) (0.4) | Safe `Encoder` wrapper. | NVENC API lives in the driver (`libnvidia-encode.so`), loaded at runtime. No build-time SDK linking. |
-| VAAPI (Intel/AMD) | [`cros-codecs`](https://github.com/chromeos/cros-codecs) (0.0.x) | VAAPI H.264 encoder (Google/ChromeOS, ships in crosvm). | Links thin, stable `libva`; libva `dlopen`s the GPU driver. |
+| VAAPI (Intel/AMD) | [`moq-vaapi`](../moq-vaapi) (in-tree; vendored+trimmed from cros-libva + discord/cros-codecs) | VAAPI H.264 encoder (Google/ChromeOS, ships in crosvm). | `dlopen`s `libva` at runtime; libva `dlopen`s the GPU driver. Build needs libva headers for bindgen. |
 | Software fallback | [`openh264`](https://crates.io/crates/openh264) | Pure fallback when no GPU. | Vendored build -> static, zero runtime deps. |
 
 Decisions and rationale:
@@ -215,7 +215,7 @@ Wrinkles to handle:
 [features]
 default = []                       # capture pulled in by moq-cli's `capture` feature
 nvenc  = ["dep:nvidia-video-codec-sdk"]   # linux only, opt-in
-vaapi  = ["dep:cros-codecs"]              # linux only, opt-in
+vaapi  = ["dep:moq-vaapi", "moq-vaapi/dlopen"] # linux only, opt-in
 # videotoolbox + openh264 need no feature: gated by cfg(target_os) / always-on
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -225,7 +225,7 @@ objc2-core-video = "..."
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nvidia-video-codec-sdk = { version = "0.4", optional = true }
-cros-codecs = { version = "=0.0.6", optional = true }   # pin: pre-1.0, churns
+moq-vaapi = { workspace = true, optional = true }       # in-tree; vendored cros-libva + cros-codecs
 
 [dependencies]
 openh264 = "..."   # software fallback, all targets
