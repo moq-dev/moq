@@ -36,7 +36,7 @@ impl VideoEncoder {
 	pub fn spawn(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
 		let producer = moq_video::encode::Producer::new(broadcast, catalog).expect("failed to create avc3 producer");
-		let track = producer.track().expect("avc3 track is eagerly created").clone();
+		let track = producer.track().clone();
 
 		let force_keyframe = Arc::new(AtomicBool::new(false));
 		let encode_duration = Arc::new(AtomicU64::new(0));
