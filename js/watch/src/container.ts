@@ -1,9 +1,18 @@
-import type { Time } from "@moq/net";
-import * as Moq from "@moq/net";
+import type { BufferedRanges, Format, Frame } from "@moq/hang/container";
 import { Effect, type Getter, type GetterInit, getter, Signal } from "@moq/signals";
+import { Time } from "@moq/wasm";
 
-import type { Format } from "./format";
-import type { BufferedRanges, Frame } from "./types";
+// Minimal structural track surface this consumer pumps, so it works with any
+// networking backend (@moq/net, @moq/wasm) or a test double.
+interface GroupConsumer {
+	readonly sequence: number;
+	readFrame(): Promise<Uint8Array | undefined>;
+	close(): void;
+}
+interface TrackSubscriber {
+	recvGroup(): Promise<GroupConsumer | undefined>;
+	close(): void;
+}
 
 /** Options for constructing a {@link Consumer}. */
 export interface ConsumerProps {
@@ -15,7 +24,7 @@ export interface ConsumerProps {
 }
 
 interface Group {
-	consumer: Moq.Group;
+	consumer: GroupConsumer;
 	frames: Frame[]; // decode order
 	latest?: Time.Micro; // The timestamp of the latest known frame
 	end?: Time.Micro; // The furthest presentation point so far, i.e. max(timestamp + duration)
@@ -24,7 +33,7 @@ interface Group {
 
 /** Reads frames from a MoQ track in order, buffering groups and skipping slow ones to meet the latency target. */
 export class Consumer {
-	#track: Moq.TrackSubscriber;
+	#track: TrackSubscriber;
 	#format: Format;
 	#latency: Getter<Time.Milli>;
 	#groups: Group[] = [];
@@ -40,10 +49,10 @@ export class Consumer {
 	#signals = new Effect();
 
 	/** Start consuming the given track, decoding frames with `props.format`. */
-	constructor(track: Moq.TrackSubscriber, props: ConsumerProps) {
+	constructor(track: TrackSubscriber, props: ConsumerProps) {
 		this.#track = track;
 		this.#format = props.format;
-		this.#latency = getter(props.latency ?? Moq.Time.Milli.zero);
+		this.#latency = getter(props.latency ?? Time.Milli.zero);
 
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
@@ -174,7 +183,7 @@ export class Consumer {
 		// This also handles gaps in group sequence numbers: if #active points to a missing
 		// group, the latency span proves the missing content is too old to wait for.
 		while (this.#groups.length >= 2) {
-			const threshold = Moq.Time.Micro.fromMilli(this.#latency.peek());
+			const threshold = Time.Micro.fromMilli(this.#latency.peek());
 
 			// Check the difference between the earliest and latest known frames.
 			let min: number | undefined;
@@ -307,13 +316,13 @@ export class Consumer {
 			const first = group.frames.at(0);
 			if (!first || group.latest === undefined) continue;
 
-			const start = Moq.Time.Milli.fromMicro(first.timestamp);
-			const end = Moq.Time.Milli.fromMicro(group.latest);
+			const start = Time.Milli.fromMicro(first.timestamp);
+			const end = Time.Milli.fromMicro(group.latest);
 
 			const last = ranges.at(-1);
 			const contiguous = prev?.done && prev.consumer.sequence + 1 === group.consumer.sequence;
 			if (last && (last.end >= start || contiguous)) {
-				last.end = Moq.Time.Milli.max(last.end, end);
+				last.end = Time.Milli.max(last.end, end);
 			} else {
 				ranges.push({ start, end });
 			}

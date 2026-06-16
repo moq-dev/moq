@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Time } from "@moq/wasm";
 
 // Control array slot indices
 const WRITE = 0;

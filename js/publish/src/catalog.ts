@@ -1,6 +1,5 @@
 import type * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import type * as Moq from "@moq/net";
 import type { Effect } from "@moq/signals";
 
 /**
@@ -25,7 +24,7 @@ export class CatalogProducer {
 	}
 
 	/** Serve a subscription request: seed it with the current catalog, then forward updates. */
-	serve(track: Moq.TrackProducer, effect: Effect): void {
+	serve(track: Json.TrackProducer, effect: Effect): void {
 		const output = new Json.Producer<Catalog.Root>(track);
 		output.update(this.#value);
 

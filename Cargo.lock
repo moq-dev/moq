@@ -4399,7 +4399,9 @@ dependencies = [
  "js-sys",
  "moq-net",
  "thiserror 2.0.18",
- "tracing-wasm",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-web",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -8188,14 +8190,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-wasm"
-version = "0.2.1"
+name = "tracing-web"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4575c663a174420fa2d78f4108ff68f65bf2fbb7dd89f33749b6e826b3626e07"
+checksum = "b9e6a141feebd51f8d91ebfd785af50fca223c570b86852166caa3b141defe7c"
 dependencies = [
- "tracing",
+ "js-sys",
+ "tracing-core",
  "tracing-subscriber",
  "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -8877,9 +8881,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-wasm"
-version = "0.5.7"
+version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ee22c228309b45651038d975a9f3c041525e9f2cc0f6c3bd8753a110804df11"
+checksum = "304af61705cf9212d1686fc6b2eb10110bea706a1ccaa475065947bc8562f553"
 dependencies = [
  "bytes",
  "js-sys",

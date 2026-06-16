@@ -1,5 +1,5 @@
-import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import { Time } from "@moq/wasm";
 import type * as Video from "./video";
 
 // What the canvas preview renders.

@@ -24,6 +24,7 @@
 	},
 	"dependencies": {
 		"@moq/net": "workspace:^",
+		"@moq/wasm": "workspace:^",
 		"@moq/watch": "workspace:^",
 		"@moq/signals": "workspace:^",
 		"zod": "^4.4.3"

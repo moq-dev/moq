@@ -1,4 +1,4 @@
-import type { Time } from "@moq/net";
+import type { Time } from "@moq/wasm";
 import type { SharedRingBufferInit } from "./shared-ring-buffer";
 
 export type Message = InitShared | InitPost | Data | Latency;

@@ -1,6 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
-import type * as Moq from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import type * as Moq from "@moq/wasm";
 import { Encoder, type EncoderProps } from "./encoder";
 import { TrackProcessor } from "./polyfill";
 import type { Source } from "./types";

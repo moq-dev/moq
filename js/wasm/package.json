@@ -7,20 +7,27 @@
 	"repository": "github:moq-dev/moq",
 	"private": true,
 	"files": [
+		"src",
 		"dist",
 		"README.md"
 	],
-	"main": "./dist/moq.js",
-	"module": "./dist/moq.js",
-	"types": "./dist/moq.d.ts",
+	"sideEffects": false,
 	"exports": {
-		".": {
-			"types": "./dist/moq.d.ts",
-			"default": "./dist/moq.js"
-		}
+		".": "./src/index.ts"
 	},
-	"sideEffects": [
-		"./dist/moq.js",
-		"./dist/moq_bg.js"
-	]
+	"imports": {
+		"#bindgen": "./dist/moq.js"
+	},
+	"scripts": {
+		"check": "if [ -f dist/moq.js ]; then tsc --noEmit; else echo 'skipping @moq/wasm tsc: dist/ not built (run `just wasm` first)'; fi"
+	},
+	"dependencies": {
+		"@moq/net": "workspace:^",
+		"@moq/signals": "workspace:^"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.3.14",
+		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
+		"typescript": "^6.0.3"
+	}
 }

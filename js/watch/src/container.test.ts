@@ -1,130 +1,16 @@
 import { expect, test } from "bun:test";
+import { Cmaf, type Format as ContainerFormat, type Frame, Legacy } from "@moq/hang/container";
 import { Group, type Time, TrackProducer, Varint } from "@moq/net";
-import type { InitSegment } from "./cmaf/decode.ts";
-import { encodeDataSegment } from "./cmaf/encode.ts";
-import { Format as CmafFormat } from "./cmaf/format.ts";
-import { Consumer } from "./consumer.ts";
-import type { Format as ContainerFormat } from "./format.ts";
-import { Format as LegacyFormat } from "./legacy.ts";
-import type { Frame } from "./types.ts";
+import { Consumer } from "./container.ts";
 
 const TIMESCALE = 90_000;
-const TEST_INIT: InitSegment = {
+const TEST_INIT: Cmaf.InitSegment = {
 	timescale: TIMESCALE,
 	trackId: 1,
 	defaultSampleDuration: 0,
 	defaultSampleSize: 0,
 	defaultSampleFlags: 0,
 };
-
-function encodeLegacyFrame(timestamp: Time.Micro, payload: Uint8Array): Uint8Array {
-	const tsBytes = Varint.encode(timestamp);
-	const data = new Uint8Array(tsBytes.byteLength + payload.byteLength);
-	data.set(tsBytes, 0);
-	data.set(payload, tsBytes.byteLength);
-	return data;
-}
-
-// --- LegacyFormat ---
-
-test("LegacyFormat decodes a valid frame", () => {
-	const format = new LegacyFormat();
-	const payload = new Uint8Array([0xde, 0xad]);
-	const timestamp = 1000 as Time.Micro;
-	const frame = encodeLegacyFrame(timestamp, payload);
-
-	const result = format.decode(frame);
-
-	expect(result).toHaveLength(1);
-	expect(result[0].timestamp).toBe(timestamp);
-	expect(result[0].data).toEqual(payload);
-	expect(result[0].keyframe).toBe(false);
-});
-
-test("LegacyFormat always returns keyframe: false", () => {
-	const format = new LegacyFormat();
-	const frame = encodeLegacyFrame(0 as Time.Micro, new Uint8Array([0x01]));
-
-	const [decoded] = format.decode(frame);
-	expect(decoded.keyframe).toBe(false);
-});
-
-test("LegacyFormat always returns exactly one frame", () => {
-	const format = new LegacyFormat();
-	const frame = encodeLegacyFrame(5000 as Time.Micro, new Uint8Array([0x01, 0x02, 0x03]));
-
-	const result = format.decode(frame);
-	expect(result).toHaveLength(1);
-});
-
-test("LegacyFormat throws on empty input", () => {
-	const format = new LegacyFormat();
-	expect(() => format.decode(new Uint8Array(0))).toThrow();
-});
-
-test("LegacyFormat throws on truncated input", () => {
-	const format = new LegacyFormat();
-	// A varint that indicates more bytes follow but is truncated
-	expect(() => format.decode(new Uint8Array([0x80]))).toThrow();
-});
-
-// --- CmafFormat ---
-
-test("CmafFormat decodes a valid keyframe segment", () => {
-	const format = new CmafFormat(TEST_INIT);
-	const segment = encodeDataSegment({
-		data: new Uint8Array([0xca, 0xfe]),
-		timestamp: 0,
-		duration: 3000,
-		keyframe: true,
-		sequence: 0,
-	});
-
-	const result = format.decode(segment);
-
-	expect(result).toHaveLength(1);
-	expect(result[0].data).toEqual(new Uint8Array([0xca, 0xfe]));
-	expect(result[0].timestamp).toBe(0 as Time.Micro);
-	expect(result[0].keyframe).toBe(true);
-});
-
-test("CmafFormat decodes a delta frame segment", () => {
-	const format = new CmafFormat(TEST_INIT);
-	const segment = encodeDataSegment({
-		data: new Uint8Array([0xbe, 0xef]),
-		timestamp: 3000,
-		duration: 3000,
-		keyframe: false,
-		sequence: 1,
-	});
-
-	const result = format.decode(segment);
-
-	expect(result).toHaveLength(1);
-	expect(result[0].keyframe).toBe(false);
-});
-
-test("CmafFormat converts timescale units to microseconds", () => {
-	const format = new CmafFormat(TEST_INIT);
-	// 90000 timescale units = 1 second = 1_000_000 microseconds
-	const segment = encodeDataSegment({
-		data: new Uint8Array([0x01]),
-		timestamp: TIMESCALE,
-		duration: 3000,
-		keyframe: true,
-		sequence: 0,
-	});
-
-	const result = format.decode(segment);
-	expect(result[0].timestamp).toBe(1_000_000 as Time.Micro);
-});
-
-test("CmafFormat throws on corrupt segment", () => {
-	const format = new CmafFormat(TEST_INIT);
-	expect(() => format.decode(new Uint8Array([0x00, 0x01, 0x02]))).toThrow();
-});
-
-// --- Consumer ---
 
 function encodeLegacy(timestamp: Time.Micro): Uint8Array {
 	const tsBytes = Varint.encode(timestamp);
@@ -164,7 +50,7 @@ async function drainFrames(
 
 test("Consumer delivers frames from a single group", async () => {
 	const track = new TrackProducer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new Legacy.Format(), latency: 500 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 33_000 as Time.Micro]);
 	track.close();
@@ -178,7 +64,7 @@ test("Consumer delivers frames from a single group", async () => {
 
 test("Consumer forces keyframe true at index 0", async () => {
 	const track = new TrackProducer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new Legacy.Format(), latency: 500 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 33_000 as Time.Micro]);
 	track.close();
@@ -257,7 +143,7 @@ test("Consumer keeps frames decoded before an error (truncated GoP)", async () =
 
 test("Consumer close returns undefined from next()", async () => {
 	const track = new TrackProducer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new Legacy.Format(), latency: 500 as Time.Milli });
 
 	const promise = consumer.next();
 	consumer.close();
@@ -268,7 +154,7 @@ test("Consumer close returns undefined from next()", async () => {
 
 test("Consumer throws on concurrent next() calls", async () => {
 	const track = new TrackProducer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new Legacy.Format(), latency: 500 as Time.Milli });
 
 	// First call blocks waiting for data
 	consumer.next();
@@ -281,7 +167,7 @@ test("Consumer throws on concurrent next() calls", async () => {
 test("Consumer skips groups via PTS-span when over latency", async () => {
 	const track = new TrackProducer("test");
 	// Zero latency = skip everything that's not the latest
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 0 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new Legacy.Format(), latency: 0 as Time.Milli });
 
 	// Write groups with increasing timestamps. With 0 latency, any PTS span > 0 triggers skip.
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
@@ -300,7 +186,7 @@ test("Consumer skips groups via PTS-span when over latency", async () => {
 
 test("Consumer delivers groups in sequence order regardless of arrival order", async () => {
 	const track = new TrackProducer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new Legacy.Format(), latency: 500 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 2, [60_000 as Time.Micro]);
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
@@ -319,7 +205,7 @@ test("Consumer delivers groups in sequence order regardless of arrival order", a
 
 test("Consumer rejects stale groups", async () => {
 	const track = new TrackProducer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new Legacy.Format(), latency: 500 as Time.Milli });
 
 	// Group 5 arrives first (sets active = 5)
 	writeGroupWithLegacyFrames(track, 5, [0 as Time.Micro]);
@@ -344,7 +230,7 @@ test("Consumer rejects stale groups", async () => {
 
 test("Consumer next() returns group-done signals", async () => {
 	const track = new TrackProducer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new Legacy.Format(), latency: 500 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 33_000 as Time.Micro]);
 	writeGroupWithLegacyFrames(track, 1, [66_000 as Time.Micro]);
@@ -375,7 +261,7 @@ test("Consumer next() returns group-done signals", async () => {
 
 test("Consumer buffered signal updates as frames arrive", async () => {
 	const track = new TrackProducer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new Legacy.Format(), latency: 500 as Time.Milli });
 
 	expect(consumer.buffered.peek()).toEqual([]);
 
@@ -397,7 +283,7 @@ test("Consumer buffered signal updates as frames arrive", async () => {
 
 test("Consumer recovers from gap in group sequence numbers", async () => {
 	const track = new TrackProducer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 100 as Time.Milli });
+	const consumer = new Consumer(track.subscribe(), { format: new Legacy.Format(), latency: 100 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 20_000 as Time.Micro]);
 	writeGroupWithLegacyFrames(track, 1, [40_000 as Time.Micro, 60_000 as Time.Micro]);
@@ -438,9 +324,7 @@ test("Consumer handles empty decode result without deadlock", async () => {
 
 	const frames = await drainFrames(consumer, 300);
 	// The empty decode produces no frames, but the second MoQ frame does.
-	// Since index 0 was never used (empty result), the first actual frame gets index=1 → keyframe false?
-	// Actually index increments per sample, and empty decode means 0 samples → index stays at 0.
-	// So the next frame's first sample gets index=0 → keyframe=true.
+	// Since index 0 was never used (empty result), the first actual frame gets index=0 → keyframe=true.
 	expect(frames).toHaveLength(1);
 	expect(frames[0].keyframe).toBe(true);
 	consumer.close();
@@ -451,13 +335,13 @@ test("Consumer handles empty decode result without deadlock", async () => {
 test("Consumer with CmafFormat delivers correct timestamps", async () => {
 	const track = new TrackProducer("test");
 	const consumer = new Consumer(track.subscribe(), {
-		format: new CmafFormat(TEST_INIT),
+		format: new Cmaf.Format(TEST_INIT),
 		latency: 500 as Time.Milli,
 	});
 
 	const group = new Group(0);
 	group.writeFrame(
-		encodeDataSegment({
+		Cmaf.encodeDataSegment({
 			data: new Uint8Array([0xca, 0xfe]),
 			timestamp: 0,
 			duration: 3000,
@@ -466,7 +350,7 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 		}),
 	);
 	group.writeFrame(
-		encodeDataSegment({
+		Cmaf.encodeDataSegment({
 			data: new Uint8Array([0xbe, 0xef]),
 			timestamp: 3000,
 			duration: 3000,
@@ -485,21 +369,6 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 	expect(frames[0].timestamp).toBe(0 as Time.Micro);
 	expect(frames[1].timestamp).toBe(33_333 as Time.Micro); // 3000/90000 * 1_000_000
 	consumer.close();
-});
-
-test("CmafFormat decodes the per-sample duration", () => {
-	const format = new CmafFormat(TEST_INIT);
-	const segment = encodeDataSegment({
-		data: new Uint8Array([0xca, 0xfe]),
-		timestamp: 0,
-		duration: 3000,
-		keyframe: true,
-		sequence: 0,
-	});
-
-	const [frame] = format.decode(segment);
-	// 3000 ticks / 90000 timescale * 1_000_000 = 33333µs
-	expect(frame.duration).toBe(33_333 as Time.Micro);
 });
 
 // --- Duration skipping ---

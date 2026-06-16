@@ -1,8 +1,8 @@
 export * as Hang from "@moq/hang";
-export * as Net from "@moq/net";
-/** @deprecated Use `Net` instead. */
-export * as Lite from "@moq/net";
 export * as Signals from "@moq/signals";
+export * as Net from "@moq/wasm";
+/** @deprecated Use `Net` instead. */
+export * as Lite from "@moq/wasm";
 export * as Audio from "./audio";
 export * from "./backend";
 export * from "./broadcast";

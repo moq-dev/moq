@@ -1,7 +1,17 @@
-import type * as Moq from "@moq/net";
 import type * as z from "zod/mini";
 
 import { deepEqual, diff } from "./diff.ts";
+
+// Minimal structural track surface @moq/json writes to, so the package stays
+// networking-model-agnostic (works with @moq/net, @moq/wasm, or a test double).
+export interface Group {
+	writeFrame(frame: Uint8Array): void;
+	close(): void;
+}
+export interface TrackProducer {
+	appendGroup(): Group;
+	close(): void;
+}
 
 // Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced. Kept
 // well below the per-group frame cap so a late joiner can always read the snapshot at frame 0.
@@ -27,15 +37,15 @@ export interface Config<T> {
 
 /** Publishes a JSON value over a track, choosing snapshots and deltas automatically. */
 export class Producer<T> {
-	#track: Moq.TrackProducer;
+	#track: TrackProducer;
 	#config: Config<T>;
 
-	#group?: Moq.Group;
+	#group?: Group;
 	#last?: unknown;
 	#groupBytes = 0;
 	#groupFrames = 0;
 
-	constructor(track: Moq.TrackProducer, config: Config<T> = {}) {
+	constructor(track: TrackProducer, config: Config<T> = {}) {
 		this.#track = track;
 		this.#config = config;
 	}

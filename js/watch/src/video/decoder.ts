@@ -1,11 +1,12 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
-import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import type * as Moq from "@moq/wasm";
+import { Time } from "@moq/wasm";
 import type { BufferedRanges } from "../backend";
 import { base64ToBytes } from "../base64";
+import { Consumer } from "../container.ts";
 import type { Sync } from "../sync";
 import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
@@ -316,7 +317,7 @@ class DecoderTrack {
 		const format =
 			this.config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer that reorders groups/frames up to the provided latency.
-		const consumer = new Container.Consumer(sub, {
+		const consumer = new Consumer(sub, {
 			format,
 			latency: this.sync.output.buffer,
 		});
@@ -396,7 +397,7 @@ class DecoderTrack {
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
 		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : init.description;
 
-		const consumer = new Container.Consumer(sub, {
+		const consumer = new Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
 			latency: this.sync.output.buffer,
 		});
