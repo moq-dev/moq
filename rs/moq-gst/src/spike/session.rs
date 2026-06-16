@@ -1,7 +1,6 @@
 //! Async core: the session/pads/timeline seams, isolated from the GObject shell.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::{ensure, Context, Result};
@@ -29,56 +28,107 @@ pub static CAT: LazyLock<gst::DebugCategory> =
 /// Handoff, not a buffer: a full channel must block the streaming thread, not grow.
 const DATA_CHANNEL_BOUND: usize = 8;
 
-/// Read by the element's getters without touching the task; reset on every exit.
+/// Shared observable state, read by the element's getters and the chain without touching the worker
+/// task. One `Mutex` covers the session generation plus every gated field, so "check the live
+/// generation, then write" is one indivisible step: a stale session (one whose task lingers after a
+/// newer one started) cannot clobber the live status even by racing the check against `begin_session`.
+#[derive(Default)]
+struct StatusInner {
+	/// Bumped by `begin_session` on every new session; the latest value is the live generation.
+	generation: u64,
+	connected: bool,
+	version: Option<String>,
+	send_bitrate: u64,
+	/// Pads the worker rejected, keyed by name -> (session generation, pad generation) of the failed
+	/// incarnation. `is_failed` matches only the live session, so neither a recreated pad nor a
+	/// recreated session (same pad name and pad generation across a restart) inherits a stale failure.
+	failed: HashMap<String, (u64, u64)>,
+}
+
 #[derive(Default)]
 pub struct Status {
-	connected: AtomicBool,
-	version: Mutex<Option<String>>,
-	send_bitrate: AtomicU64,
-	/// Pads whose data the worker rejected, keyed by the failed generation so a pad recreated with the
-	/// same name does not inherit it. The chain reads this to return a FlowError instead of dropping.
-	failed: Mutex<HashMap<String, u64>>,
+	inner: Mutex<StatusInner>,
 }
 
 impl Status {
-	fn set_connected(&self, value: bool) {
-		self.connected.store(value, Ordering::Relaxed);
+	/// Claim a fresh generation for a starting session; the returned value is now the live generation.
+	fn begin_session(&self) -> u64 {
+		let mut s = self.inner.lock().unwrap();
+		s.generation += 1;
+		s.generation
 	}
 
-	fn mark_failed(&self, pad: &str, generation: u64) {
-		self.failed.lock().unwrap().insert(pad.to_string(), generation);
+	/// True only while `generation` is the live session. A point-in-time check (only the setters gate
+	/// atomically); use it where a stale result is harmless, e.g. skipping a notify.
+	fn is_live(&self, generation: u64) -> bool {
+		self.inner.lock().unwrap().generation == generation
 	}
 
-	fn clear_failed(&self, pad: &str) {
-		self.failed.lock().unwrap().remove(pad);
+	fn set_connected(&self, generation: u64, value: bool) {
+		let mut s = self.inner.lock().unwrap();
+		if s.generation == generation {
+			s.connected = value;
+		}
 	}
 
-	pub fn is_failed(&self, pad: &str, generation: u64) -> bool {
-		self.failed.lock().unwrap().get(pad) == Some(&generation)
+	fn set_version(&self, generation: u64, value: Option<String>) {
+		let mut s = self.inner.lock().unwrap();
+		if s.generation == generation {
+			s.version = value;
+		}
 	}
 
-	fn reset_failed(&self) {
-		self.failed.lock().unwrap().clear();
+	fn set_send_bitrate(&self, generation: u64, bits_per_sec: u64) {
+		let mut s = self.inner.lock().unwrap();
+		if s.generation == generation {
+			s.send_bitrate = bits_per_sec;
+		}
+	}
+
+	/// Reset the observable surface on a session's exit, but only if it is still the live generation.
+	/// A newer session may have started before this one's task unwinds, so a stale exit must not clobber
+	/// the live status. Returns whether it actually reset (so the caller can skip a spurious notify).
+	fn reset_on_exit(&self, generation: u64) -> bool {
+		let mut s = self.inner.lock().unwrap();
+		if s.generation != generation {
+			return false;
+		}
+		s.connected = false;
+		s.version = None;
+		s.send_bitrate = 0;
+		s.failed.clear();
+		true
+	}
+
+	fn mark_failed(&self, session_generation: u64, pad: &str, pad_generation: u64) {
+		let mut s = self.inner.lock().unwrap();
+		if s.generation == session_generation {
+			s.failed.insert(pad.to_string(), (session_generation, pad_generation));
+		}
+	}
+
+	fn clear_failed(&self, session_generation: u64, pad: &str) {
+		let mut s = self.inner.lock().unwrap();
+		if s.generation == session_generation {
+			s.failed.remove(pad);
+		}
+	}
+
+	pub fn is_failed(&self, pad: &str, pad_generation: u64) -> bool {
+		let s = self.inner.lock().unwrap();
+		s.failed.get(pad) == Some(&(s.generation, pad_generation))
 	}
 
 	pub fn connected(&self) -> bool {
-		self.connected.load(Ordering::Relaxed)
-	}
-
-	fn set_version(&self, value: Option<String>) {
-		*self.version.lock().unwrap() = value;
+		self.inner.lock().unwrap().connected
 	}
 
 	pub fn version(&self) -> Option<String> {
-		self.version.lock().unwrap().clone()
-	}
-
-	fn set_send_bitrate(&self, bits_per_sec: u64) {
-		self.send_bitrate.store(bits_per_sec, Ordering::Relaxed);
+		self.inner.lock().unwrap().version.clone()
 	}
 
 	pub fn send_bitrate(&self) -> u64 {
-		self.send_bitrate.load(Ordering::Relaxed)
+		self.inner.lock().unwrap().send_bitrate
 	}
 }
 
@@ -116,14 +166,32 @@ pub enum DataMsg {
 	},
 }
 
+/// Out-of-band FLUSH notification to the worker. Carried on its own unbounded channel (not the bounded
+/// `DataMsg` FIFO) so FLUSH_START re-anchors promptly and never blocks behind queued buffers.
+pub struct FlushSignal {
+	pub pad: String,
+	pub generation: u64,
+}
+
 pub struct ResolvedSettings {
 	pub url: url::Url,
 	pub broadcast: String,
 	pub tls_disable_verify: bool,
 }
 
+/// The worker's inbound channels, bundled so `run_session` stays under the argument limit.
+struct Inbound {
+	data: mpsc::Receiver<DataMsg>,
+	flush: mpsc::UnboundedReceiver<FlushSignal>,
+	shutdown: watch::Receiver<bool>,
+}
+
 pub struct SessionHandle {
 	data: mpsc::Sender<DataMsg>,
+	/// Out-of-band control path for FLUSH: unbounded so FLUSH_START never blocks behind a full data
+	/// channel (the very condition a flush must break), and a discrete pad-targeted event a `watch`
+	/// would collapse.
+	flush: mpsc::UnboundedSender<FlushSignal>,
 	shutdown: watch::Sender<bool>,
 	join: tokio::task::JoinHandle<()>,
 }
@@ -135,12 +203,34 @@ impl SessionHandle {
 		element: glib::WeakRef<Element>,
 		seed: Vec<(String, u64)>,
 	) -> Self {
+		// Claim the generation synchronously so a previous session's late exit-reset (running on its own
+		// task) sees a newer generation and becomes a no-op instead of clobbering this session's status.
+		let generation = status.begin_session();
 		let (data_tx, data_rx) = mpsc::channel(DATA_CHANNEL_BOUND);
+		let (flush_tx, flush_rx) = mpsc::unbounded_channel();
 		let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
 		let join = RUNTIME.spawn(async move {
+			// Run the worker on its own task so a panic surfaces as an element_error here, instead of a
+			// silent operational death only observed when stop() reaps the outer JoinHandle.
+			let worker = RUNTIME.spawn(run_session(
+				settings,
+				status,
+				generation,
+				seed,
+				Inbound {
+					data: data_rx,
+					flush: flush_rx,
+					shutdown: shutdown_rx,
+				},
+				element.clone(),
+			));
 			// Only a remote close reaches the bus as an error; a local shutdown returns Ok and stays quiet.
-			if let Err(err) = run_session(settings, status, seed, data_rx, shutdown_rx, element.clone()).await {
+			// A panic (or cancellation) joins as Err and is surfaced too.
+			let outcome = worker
+				.await
+				.unwrap_or_else(|join_err| Err(anyhow::anyhow!("session worker panicked: {join_err}")));
+			if let Err(err) = outcome {
 				if let Some(obj) = element.upgrade() {
 					gst::element_error!(obj, gst::CoreError::Failed, ("session error"), ["{err:?}"]);
 				}
@@ -149,6 +239,7 @@ impl SessionHandle {
 
 		Self {
 			data: data_tx,
+			flush: flush_tx,
 			shutdown: shutdown_tx,
 			join,
 		}
@@ -157,6 +248,12 @@ impl SessionHandle {
 	/// Cloned out so the element blocking-sends without holding the session lock (else a full channel deadlocks stop).
 	pub fn sender(&self) -> mpsc::Sender<DataMsg> {
 		self.data.clone()
+	}
+
+	/// Out-of-band FLUSH signal to the worker; unbounded, so it is safe to call from the event thread
+	/// even while the data channel is full.
+	pub fn flush_sender(&self) -> mpsc::UnboundedSender<FlushSignal> {
+		self.flush.clone()
 	}
 
 	pub fn stop(self) {
@@ -170,14 +267,73 @@ impl SessionHandle {
 	}
 }
 
+/// Outcome of a flush-cancellable send. Both `Flushed` and `Closed` map to `FlowError::Flushing` for
+/// the caller; they are split only so the reason stays legible.
+pub(super) enum SendOutcome {
+	Sent,
+	/// FLUSH_START flipped this pad's flush watch (or the watch sender was dropped on release).
+	Flushed,
+	/// The worker's receiver is gone (the session ended).
+	Closed,
+}
+
+/// Send `msg` on the bounded data channel, aborting promptly if this pad starts flushing. This is the
+/// cancellable replacement for `blocking_send`: the chain runs off the runtime, so `block_on` is safe,
+/// and FLUSH_START (signalled on `flush`) can cut a send blocked on a full channel without tearing the
+/// session down. The loop re-arms on a FLUSH_STOP (`false`) that lands mid-block, so a quick flush+stop
+/// does not drop a still-valid buffer.
+pub(super) fn send_or_flush(
+	sender: &mpsc::Sender<DataMsg>,
+	msg: DataMsg,
+	flush: &mut watch::Receiver<bool>,
+) -> SendOutcome {
+	if *flush.borrow_and_update() {
+		return SendOutcome::Flushed;
+	}
+	RUNTIME.block_on(async move {
+		loop {
+			tokio::select! {
+				// Biased toward flush: FLUSH_START must win a tie with freed capacity, so a blocked chain is
+				// cut rather than enqueuing a pre-flush buffer.
+				biased;
+				changed = flush.changed() => {
+					// Sender dropped (release) or now flushing: abort. A `false` change (FLUSH_STOP) falls
+					// through and re-arms the wait.
+					if changed.is_err() || *flush.borrow() {
+						return SendOutcome::Flushed;
+					}
+				}
+				permit = sender.reserve() => match permit {
+					Ok(permit) => {
+						// Re-check after winning the permit: a flushing pad drops the buffer. This narrows (does
+						// not atomically close) the race: a FLUSH_START in the gap before the send below still
+						// enqueues one buffer, which the worker re-anchor and the next buffer's check absorb.
+						if *flush.borrow_and_update() {
+							return SendOutcome::Flushed;
+						}
+						permit.send(msg);
+						return SendOutcome::Sent;
+					}
+					Err(_) => return SendOutcome::Closed,
+				},
+			}
+		}
+	})
+}
+
 async fn run_session(
 	settings: ResolvedSettings,
 	status: Arc<Status>,
+	generation: u64,
 	seed: Vec<(String, u64)>,
-	mut data: mpsc::Receiver<DataMsg>,
-	mut shutdown: watch::Receiver<bool>,
+	inbound: Inbound,
 	element: glib::WeakRef<Element>,
 ) -> Result<()> {
+	let Inbound {
+		mut data,
+		mut flush,
+		mut shutdown,
+	} = inbound;
 	let mut config = moq_native::ClientConfig::default();
 	config.tls.disable_verify = Some(settings.tls_disable_verify);
 	let client = config.init()?;
@@ -198,26 +354,36 @@ async fn run_session(
 		result = client.connect(settings.url.clone()) => result?,
 		_ = shutdown.changed() => return Ok(()),
 	};
-	status.set_connected(true);
-	status.set_version(Some(session.version().to_string()));
-	notify_connected(&element);
+	status.set_connected(generation, true);
+	status.set_version(generation, Some(session.version().to_string()));
+	if status.is_live(generation) {
+		notify_connected(&element);
+	}
 	gst::info!(CAT, "session connected to {}", settings.url);
 
-	let mut pad_set = PadSet::new(broadcast, catalog, status.clone());
+	let mut pad_set = PadSet::new(broadcast, catalog, status.clone(), generation);
 	// Pads requested before the session task existed are seeded into the authoritative set.
 	for (name, generation) in seed {
 		pad_set.add_pad(&name, generation);
 	}
-	let reason = run_loop(session, &mut data, &mut shutdown, &mut pad_set, &status).await;
+	let reason = run_loop(
+		session,
+		generation,
+		&mut data,
+		&mut flush,
+		&mut shutdown,
+		&mut pad_set,
+		&status,
+	)
+	.await;
 
 	// Finalize every live producer once on the way out, catalog last; runs on every exit path.
 	let finalized = pad_set.finalize_all();
-	// Reset the whole observable surface on exit, not just connected.
-	status.set_connected(false);
-	status.set_version(None);
-	status.set_send_bitrate(0);
-	status.reset_failed();
-	notify_connected(&element);
+	// Reset the whole observable surface on exit, but only if no newer session has taken over (else a
+	// stale exit would clobber the live session's status). Skip the notify when the reset was a no-op.
+	if status.reset_on_exit(generation) {
+		notify_connected(&element);
+	}
 
 	match (reason, finalized) {
 		// Clean end: post the element EOS only once the catalog has finalized cleanly.
@@ -261,7 +427,9 @@ enum ExitReason {
 
 async fn run_loop(
 	session: moq_net::Session,
+	generation: u64,
 	data: &mut mpsc::Receiver<DataMsg>,
+	flush: &mut mpsc::UnboundedReceiver<FlushSignal>,
 	shutdown: &mut watch::Receiver<bool>,
 	pad_set: &mut PadSet,
 	status: &Status,
@@ -275,6 +443,10 @@ async fn run_loop(
 
 	loop {
 		tokio::select! {
+			// Biased so a pending FLUSH re-anchors before the post-flush SEGMENT it precedes: the flush
+			// signal is enqueued before that SEGMENT on the streaming thread, and biased preserves that
+			// order across the two channels. Shutdown/death still preempt everything.
+			biased;
 			// Local close: quiet stop, no ERROR.
 			_ = shutdown.changed() => return Ok(ExitReason::Stopped),
 			// Remote death: propagate the Err so the wrapper posts ERROR to the bus.
@@ -282,6 +454,8 @@ async fn run_loop(
 				result?;
 				return Ok(ExitReason::Stopped);
 			}
+			// FLUSH (out of band): re-anchor the pad's timeline before any post-flush data is processed.
+			Some(FlushSignal { pad, generation }) = flush.recv() => pad_set.flush(&pad, generation),
 			// A closed estimate stops the polling.
 			bitrate = async {
 				match send_bandwidth.as_mut() {
@@ -289,14 +463,13 @@ async fn run_loop(
 					None => std::future::pending::<Option<u64>>().await,
 				}
 			} => match bitrate {
-				Some(rate) => status.set_send_bitrate(rate),
+				Some(rate) => status.set_send_bitrate(generation, rate),
 				None => send_bandwidth = None,
 			},
 			msg = data.recv() => match msg {
 				Some(DataMsg::AddPad { pad, generation }) => {
+					// add_pad clears any stale failure for a fresh incarnation (keyed by this session).
 					pad_set.add_pad(&pad, generation);
-					// A fresh incarnation is not failed even if a previous one was.
-					status.clear_failed(&pad);
 				}
 				Some(DataMsg::Caps { pad, generation, caps }) => {
 					if pad_set.caps(&pad, generation, &caps)? {
@@ -333,6 +506,9 @@ struct PadSet {
 	catalog: Option<moq_mux::catalog::Producer>,
 	/// Shared with the element so the chain can read which pads the worker has failed.
 	status: Arc<Status>,
+	/// This session's generation; tags failure marks so a stale task's late mark/clear cannot affect the
+	/// live session's view of which pads have failed.
+	session_generation: u64,
 	/// Authoritative membership: name -> current generation. EOS aggregation counts against this, not
 	/// the lazily-created `pads`, so a pad that ends before CAPS still counts.
 	active: HashMap<String, u64>,
@@ -342,11 +518,17 @@ struct PadSet {
 }
 
 impl PadSet {
-	fn new(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer, status: Arc<Status>) -> Self {
+	fn new(
+		broadcast: moq_net::BroadcastProducer,
+		catalog: moq_mux::catalog::Producer,
+		status: Arc<Status>,
+		session_generation: u64,
+	) -> Self {
 		Self {
 			broadcast,
 			catalog: Some(catalog),
 			status,
+			session_generation,
 			active: HashMap::new(),
 			pads: HashMap::new(),
 			eos: HashSet::new(),
@@ -360,7 +542,7 @@ impl PadSet {
 			let _ = old.finalize();
 		}
 		self.eos.remove(pad);
-		self.status.clear_failed(pad);
+		self.status.clear_failed(self.session_generation, pad);
 		self.active.insert(pad.to_string(), generation);
 	}
 
@@ -405,7 +587,7 @@ impl PadSet {
 				gst::warning!(CAT, "finalize on failed pad {pad}: {err:?}");
 			}
 		}
-		self.status.mark_failed(pad, generation);
+		self.status.mark_failed(self.session_generation, pad, generation);
 		// The failed pad's track is finalized, so it is terminal for EOS aggregation (counts as ended).
 		self.eos.insert(pad.to_string());
 	}
@@ -420,6 +602,19 @@ impl PadSet {
 			.entry(pad.to_string())
 			.or_insert_with(Pad::new)
 			.set_segment(segment);
+	}
+
+	/// FLUSH_START re-anchor: drop this pad's timeline so the next SEGMENT is accepted fresh and
+	/// post-flush frames are not dropped as regressions. The producer and its track are kept (FLUSH is
+	/// not EOS). A flush before CAPS has no producer entry and is a no-op.
+	fn flush(&mut self, pad: &str, generation: u64) {
+		if !self.is_current(pad, generation) {
+			gst::warning!(CAT, "flush for stale or unknown pad {pad}, ignoring");
+			return;
+		}
+		if let Some(p) = self.pads.get_mut(pad) {
+			p.flush();
+		}
 	}
 
 	/// `Ok(true)` means the element is now complete (a pad failure can finish it).
@@ -520,8 +715,6 @@ struct Pad {
 	segment_info: Option<SegmentInfo>,
 	// Kept only to map a buffer PTS to a running time.
 	segment: Option<gst::FormattedSegment<gst::ClockTime>>,
-	/// Last emitted MoQ timestamp (micros); a frame that would regress below it is dropped.
-	last_emitted_micros: Option<u64>,
 }
 
 impl Pad {
@@ -532,7 +725,6 @@ impl Pad {
 			state: PadState::NoSegment,
 			segment_info: None,
 			segment: None,
-			last_emitted_micros: None,
 		}
 	}
 
@@ -626,9 +818,23 @@ impl Pad {
 		}
 	}
 
-	/// Pure of the importer, so it can be tested with real segments and no codec.
-	fn frame_timestamp(&mut self, pts: Option<gst::ClockTime>) -> FrameDecision {
-		let decision = match self.state {
+	/// Re-anchor on FLUSH. A flushing seek rewinds running time, so the timeline must restart: dropping
+	/// the segment moves the pad to NoSegment (the next SEGMENT is accepted fresh via `prev = None`). The
+	/// producer is kept (FLUSH is not EOS); the codec's partial-AU reset is a documented follow-up, not
+	/// handled here.
+	fn flush(&mut self) {
+		self.state = PadState::NoSegment;
+		self.segment = None;
+		self.segment_info = None;
+	}
+
+	/// Pure of the importer, so it can be tested with real segments and no codec. Emits the PTS-derived
+	/// running time without enforcing frame-level monotonicity: frames arrive in decode order and the
+	/// moq-mux container documents that B-frames carry non-monotonic presentation timestamps, so a PTS
+	/// regression is normal reordering, not an error. Timeline breaks are caught at the SEGMENT level
+	/// (the `Invalid` state), not per frame.
+	fn frame_timestamp(&self, pts: Option<gst::ClockTime>) -> FrameDecision {
+		match self.state {
 			PadState::Active => {
 				// to_running_time_full is signed: a buffer before the segment returns Negative, which
 				// frame_micros drops; to_running_time would instead clip it to None and lose the reason.
@@ -642,16 +848,7 @@ impl Pad {
 			}
 			PadState::NoSegment => FrameDecision::Drop("buffer before a valid SEGMENT"),
 			PadState::Invalid => FrameDecision::Drop("buffer on an invalidated timeline"),
-		};
-		// Frame-level monotonicity: segment continuity (base) does not by itself stop a frame from
-		// regressing, so drop a timestamp that would go backwards rather than emit out of order.
-		if let FrameDecision::Emit(micros) = decision {
-			if self.last_emitted_micros.is_some_and(|last| micros < last) {
-				return FrameDecision::Drop("non-monotonic timestamp (regressed)");
-			}
-			self.last_emitted_micros = Some(micros);
 		}
-		decision
 	}
 
 	fn push_buffer(&mut self, mut data: Bytes, pts: Option<gst::ClockTime>) -> Result<()> {
@@ -750,7 +947,7 @@ mod tests {
 	fn pad_set() -> PadSet {
 		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
-		PadSet::new(broadcast, catalog, Arc::new(Status::default()))
+		PadSet::new(broadcast, catalog, Arc::new(Status::default()), 0)
 	}
 
 	// A producer that actually emitted has at least one group. latest() is the cross-crate-visible
@@ -927,18 +1124,9 @@ mod tests {
 		assert!(!caps_supported(&audio_caps()), "an unsupported media type is rejected");
 	}
 
-	// Frame-through (real init + emit): a keyframe AU emits a frame to the rendition track, not just
-	// the SPS-published rendition.
-	#[test]
-	fn frame_through_h264_emits_a_frame() {
-		gst::init().unwrap();
-		let mut set = pad_set();
-		set.add_pad("video", 0);
-		set.caps("video", 0, &h264_caps()).unwrap();
-		set.segment("video", 0, time_segment());
-
-		// SPS (the importer's own proven bytes) + PPS + a type-5 IDR slice. The slice header is not
-		// fully parsed for IDR, but this drives the real decode_frame path and emits one frame.
+	// SPS (the importer's own proven bytes) + PPS + a type-5 IDR slice: drives the real decode_frame
+	// path and emits one keyframe. The slice header is not fully parsed for IDR.
+	fn h264_keyframe_au() -> Bytes {
 		let sps: &[u8] = &[
 			0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07, 0xd0, 0x00,
 			0x01, 0xd4, 0xc0, 0x80,
@@ -950,7 +1138,20 @@ mod tests {
 			au.extend_from_slice(&[0, 0, 0, 1]);
 			au.extend_from_slice(nal);
 		}
-		set.buffer("video", 0, Bytes::from(au), Some(gst::ClockTime::ZERO))
+		Bytes::from(au)
+	}
+
+	// Frame-through (real init + emit): a keyframe AU emits a frame to the rendition track, not just
+	// the SPS-published rendition.
+	#[test]
+	fn frame_through_h264_emits_a_frame() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
+		set.segment("video", 0, time_segment());
+
+		set.buffer("video", 0, h264_keyframe_au(), Some(gst::ClockTime::ZERO))
 			.unwrap();
 
 		let snapshot = set.catalog.as_ref().unwrap().snapshot();
@@ -1233,10 +1434,11 @@ mod tests {
 		);
 	}
 
-	// Frame monotonicity: a segment accepted on base alone can still place a frame before one already
-	// emitted; that regression is dropped, not emitted out of order.
+	// A PTS that regresses within an Active timeline still emits: frames arrive in decode order and
+	// B-frames carry non-monotonic presentation timestamps (moq-mux container contract). The timeline
+	// itself is guarded at the SEGMENT level (the Invalid state), not per frame.
 	#[test]
-	fn regressing_timestamp_is_dropped() {
+	fn regressing_pts_within_an_active_timeline_still_emits() {
 		gst::init().unwrap();
 		let mut pad = Pad::new();
 		pad.set_segment(time_segment_at(0, 0));
@@ -1244,30 +1446,33 @@ mod tests {
 			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(10_000))),
 			FrameDecision::Emit(10_000_000)
 		);
-		// New segment: base advances past the previous base (so it is accepted) but below the running
-		// time already emitted.
-		pad.set_segment(time_segment_at(0, 5_000));
-		assert_eq!(pad.state, PadState::Active);
-		// Its first frame maps to 5s, which regresses below the 10s already emitted: dropped.
-		assert!(matches!(
-			pad.frame_timestamp(Some(gst::ClockTime::ZERO)),
-			FrameDecision::Drop(_)
-		));
-		// A later frame that catches up past 10s emits again.
+		// A later buffer whose PTS sits below the previous one (a B-frame in decode order) still emits
+		// at its own running time, rather than being dropped as a regression.
 		assert_eq!(
 			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(6_000))),
-			FrameDecision::Emit(11_000_000)
+			FrameDecision::Emit(6_000_000)
 		);
 	}
 
-	// The failure set is scoped to the generation, so a pad recreated with the same name does not
-	// inherit a previous incarnation's failure even before the worker clears it.
+	// Failures are scoped to BOTH the pad generation and the session generation, so neither a recreated
+	// pad nor a recreated session (same pad name + generation across a restart) inherits a stale failure.
 	#[test]
 	fn failure_is_scoped_to_the_generation() {
 		let status = Status::default();
-		status.mark_failed("video", 0);
+		let session = status.begin_session();
+		status.mark_failed(session, "video", 0);
 		assert!(status.is_failed("video", 0), "the failed incarnation is failed");
-		assert!(!status.is_failed("video", 1), "a newer incarnation is not failed");
+		assert!(!status.is_failed("video", 1), "a newer pad incarnation is not failed");
+
+		// A new session does not inherit the old one's failures, even for the same pad name/generation.
+		let _next = status.begin_session();
+		assert!(
+			!status.is_failed("video", 0),
+			"the failure does not carry across a session restart"
+		);
+		// And a now-stale session's late mark is dropped, not surfaced for the live session.
+		status.mark_failed(session, "video", 0);
+		assert!(!status.is_failed("video", 0), "a stale session's mark is a no-op");
 	}
 
 	// SEGMENT before CAPS: the pad is created and the segment retained when CAPS arrives.
@@ -1316,6 +1521,158 @@ mod tests {
 		);
 	}
 
+	// FLUSH must wake a send blocked on a full channel AND leave the receiver alive. The second half is
+	// the discriminator: dropped_receiver_wakes_blocked_send proves the shutdown wake (receiver gone), so
+	// a flush wake that also tore the receiver down would be indistinguishable from it.
+	#[test]
+	fn flush_wakes_a_blocked_send_and_keeps_the_receiver() {
+		let (data_tx, mut data_rx) = mpsc::channel::<DataMsg>(DATA_CHANNEL_BOUND);
+		for _ in 0..DATA_CHANNEL_BOUND {
+			data_tx
+				.try_send(DataMsg::AddPad {
+					pad: "x".into(),
+					generation: 0,
+				})
+				.unwrap();
+		}
+		let (flush_tx, flush_rx) = watch::channel(false);
+
+		// Rendezvous so the flush is sent only after the worker is running and about to call
+		// send_or_flush (else the send could see flush=true at its initial check and never block). The
+		// sleep then covers parking inside reserve(), which has no test seam to observe directly.
+		let started = Arc::new(std::sync::Barrier::new(2));
+		let sender = data_tx.clone();
+		let mut rx = flush_rx;
+		let started_worker = started.clone();
+		let blocked = std::thread::spawn(move || {
+			started_worker.wait();
+			send_or_flush(
+				&sender,
+				DataMsg::AddPad {
+					pad: "x".into(),
+					generation: 1,
+				},
+				&mut rx,
+			)
+		});
+		started.wait();
+		std::thread::sleep(Duration::from_millis(50)); // let the send park inside block_on
+
+		flush_tx.send(true).unwrap();
+		assert!(
+			matches!(blocked.join().unwrap(), SendOutcome::Flushed),
+			"flush woke the blocked send"
+		);
+
+		// The receiver is still alive (not dropped): it delivers the queued data, and a fresh non-flushing
+		// send then goes through. A teardown would fail both.
+		assert!(data_rx.blocking_recv().is_some(), "receiver still delivers");
+		let (_gate_tx, mut rx) = watch::channel(false);
+		assert!(
+			matches!(
+				send_or_flush(
+					&data_tx,
+					DataMsg::AddPad {
+						pad: "x".into(),
+						generation: 2
+					},
+					&mut rx
+				),
+				SendOutcome::Sent
+			),
+			"the receiver survived the flush and accepts new sends"
+		);
+	}
+
+	// A per-pad watch means flushing pad A never cancels pad B's blocked send.
+	#[test]
+	fn flush_only_wakes_the_flushed_pad() {
+		let (data_tx, mut data_rx) = mpsc::channel::<DataMsg>(DATA_CHANNEL_BOUND);
+		for _ in 0..DATA_CHANNEL_BOUND {
+			data_tx
+				.try_send(DataMsg::AddPad {
+					pad: "fill".into(),
+					generation: 0,
+				})
+				.unwrap();
+		}
+		let (flush_a_tx, flush_a_rx) = watch::channel(false);
+		let (_flush_b_tx, flush_b_rx) = watch::channel(false);
+
+		// Both workers must be running before A is flushed, so B is genuinely inside send_or_flush (not
+		// merely unspawned). The sleep then covers parking inside reserve().
+		let started = Arc::new(std::sync::Barrier::new(3));
+		let sender_a = data_tx.clone();
+		let mut rx_a = flush_a_rx;
+		let started_a = started.clone();
+		let blocked_a = std::thread::spawn(move || {
+			started_a.wait();
+			send_or_flush(
+				&sender_a,
+				DataMsg::AddPad {
+					pad: "a".into(),
+					generation: 1,
+				},
+				&mut rx_a,
+			)
+		});
+		let sender_b = data_tx.clone();
+		let mut rx_b = flush_b_rx;
+		let started_b = started.clone();
+		let blocked_b = std::thread::spawn(move || {
+			started_b.wait();
+			send_or_flush(
+				&sender_b,
+				DataMsg::AddPad {
+					pad: "b".into(),
+					generation: 1,
+				},
+				&mut rx_b,
+			)
+		});
+		started.wait();
+		std::thread::sleep(Duration::from_millis(50));
+
+		flush_a_tx.send(true).unwrap();
+		assert!(
+			matches!(blocked_a.join().unwrap(), SendOutcome::Flushed),
+			"pad A's flush woke A"
+		);
+
+		// B was untouched: freeing a slot lets it send normally (Sent, not Flushed).
+		assert!(data_rx.blocking_recv().is_some());
+		assert!(
+			matches!(blocked_b.join().unwrap(), SendOutcome::Sent),
+			"pad B's send was not cancelled by A's flush"
+		);
+	}
+
+	// Already-flushing contract: a pad whose watch is set drops the buffer (returns Flushed, enqueues
+	// nothing) even with capacity. This exercises the initial check in send_or_flush, NOT the select's
+	// biased arm; the capacity+FLUSH sub-poll tie (pitfall 14) stays structural, not covered here.
+	#[test]
+	fn flush_drops_the_buffer_even_with_capacity() {
+		let (data_tx, mut data_rx) = mpsc::channel::<DataMsg>(DATA_CHANNEL_BOUND); // empty: capacity free
+		let (flush_tx, flush_rx) = watch::channel(false);
+		flush_tx.send(true).unwrap();
+		let mut rx = flush_rx;
+		assert!(
+			matches!(
+				send_or_flush(
+					&data_tx,
+					DataMsg::AddPad {
+						pad: "x".into(),
+						generation: 0
+					},
+					&mut rx
+				),
+				SendOutcome::Flushed
+			),
+			"a flushing send returns Flushed"
+		);
+		assert!(data_rx.try_recv().is_err(), "and enqueues nothing");
+	}
+
 	// Two pads, real PTS via to_running_time_full: the A/V offset survives because running time is shared.
 	#[test]
 	fn two_pads_keep_av_aligned_through_real_segments() {
@@ -1338,7 +1695,7 @@ mod tests {
 	// A pad with no SEGMENT yet drops buffers (NoSegment), distinct from an invalidated timeline.
 	#[test]
 	fn pad_without_segment_drops_buffers() {
-		let mut pad = Pad::new();
+		let pad = Pad::new();
 		assert_eq!(pad.state, PadState::NoSegment);
 		assert!(matches!(
 			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(5))),
@@ -1398,6 +1755,194 @@ mod tests {
 			pad.frame_timestamp(Some(gst::ClockTime::ZERO)),
 			FrameDecision::Emit(10_000_000)
 		);
+	}
+
+	// FLUSH re-anchor: flush drops the timeline to NoSegment, so a rewinding post-flush segment anchors
+	// fresh and is accepted (Active) rather than rejected as a discontinuity. Without the flush the
+	// rewind would go Invalid (see invalid_segment_drops_then_a_valid_one_recovers).
+	#[test]
+	fn flush_reanchors_so_a_rewinding_segment_recovers() {
+		gst::init().unwrap();
+		let mut pad = Pad::new();
+		pad.set_segment(time_segment_at(0, 5_000));
+		assert_eq!(pad.state, PadState::Active);
+		assert!(matches!(
+			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(10_000))),
+			FrameDecision::Emit(_)
+		));
+
+		pad.flush();
+		assert_eq!(pad.state, PadState::NoSegment, "flush re-anchors to NoSegment");
+
+		// A base that rewinds below the old one is now accepted fresh, not rejected.
+		pad.set_segment(time_segment_at(0, 0));
+		assert_eq!(pad.state, PadState::Active, "post-flush rewinding segment is accepted");
+		// And the post-flush timeline emits from the new anchor.
+		assert_eq!(pad.frame_timestamp(Some(gst::ClockTime::ZERO)), FrameDecision::Emit(0));
+	}
+
+	#[test]
+	fn flush_for_stale_generation_is_ignored() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 1);
+		set.caps("video", 1, &h264_caps()).unwrap();
+		set.segment("video", 1, time_segment());
+		assert_eq!(set.pads["video"].state, PadState::Active);
+		// A flush for a previous incarnation must not touch the live pad.
+		set.flush("video", 0);
+		assert_eq!(
+			set.pads["video"].state,
+			PadState::Active,
+			"stale-generation flush is ignored"
+		);
+	}
+
+	#[test]
+	fn flush_before_caps_is_a_noop() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		// No CAPS yet, so no producer entry; flush must not panic or fabricate one.
+		set.flush("video", 0);
+		assert!(!set.pads.contains_key("video"), "flush before caps creates no producer");
+	}
+
+	// FLUSH is not EOS: the producer and its track (same name) survive a flush; only the timeline
+	// re-anchors. A keyframe AU publishes the rendition first so the track name is observable.
+	#[test]
+	fn flush_keeps_the_producer() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
+		set.segment("video", 0, time_segment());
+		set.buffer("video", 0, h264_keyframe_au(), Some(gst::ClockTime::ZERO))
+			.unwrap();
+		let before = set
+			.catalog
+			.as_ref()
+			.unwrap()
+			.snapshot()
+			.video
+			.renditions
+			.keys()
+			.next()
+			.expect("a video rendition")
+			.clone();
+
+		set.flush("video", 0);
+
+		assert!(set.pads["video"].framed.is_some(), "flush keeps the producer");
+		let after = set
+			.catalog
+			.as_ref()
+			.unwrap()
+			.snapshot()
+			.video
+			.renditions
+			.keys()
+			.next()
+			.cloned();
+		assert_eq!(
+			after.as_deref(),
+			Some(before.as_str()),
+			"the track name is unchanged across the flush (no catalog churn)"
+		);
+		assert_eq!(set.pads["video"].state, PadState::NoSegment, "the timeline re-anchored");
+	}
+
+	// The worker's re-anchor path (PadSet::flush then PadSet::segment): a rewinding post-flush segment is
+	// accepted (Active), where without the flush the rewind would be rejected to Invalid.
+	#[test]
+	fn worker_flush_then_rewinding_segment_reanchors() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
+		set.segment("video", 0, time_segment_at(0, 5_000));
+		assert_eq!(set.pads["video"].state, PadState::Active);
+		set.flush("video", 0);
+		assert_eq!(set.pads["video"].state, PadState::NoSegment);
+		// Rewinding base: accepted fresh after the flush (would go Invalid without it).
+		set.segment("video", 0, time_segment_at(0, 0));
+		assert_eq!(
+			set.pads["video"].state,
+			PadState::Active,
+			"the worker accepts the post-flush rewinding segment fresh"
+		);
+	}
+
+	// Decode-order frames, including B-frames, must all emit. The moq-mux container contract
+	// (container/mod.rs:46-48) is "frames in DECODE order; B-frames may have non-monotonic presentation
+	// timestamps", so a PTS regression is normal reordering, not an error: frame_timestamp must not drop
+	// on PTS monotonicity (which would silently lose every B-frame).
+	#[test]
+	fn bframes_in_decode_order_all_emit() {
+		gst::init().unwrap();
+		let mut pad = Pad::new();
+		// start=0, base=0 so running time == pts. Display order I B B B P @25fps -> DECODE order
+		// I P B B B, so the PTS the sink sees is 0, 160, 40, 80, 120 ms.
+		pad.set_segment(time_segment());
+		let decode_order_pts_ms = [0u64, 160, 40, 80, 120];
+		let emitted = decode_order_pts_ms
+			.into_iter()
+			.filter(|&ms| {
+				matches!(
+					pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(ms))),
+					FrameDecision::Emit(_)
+				)
+			})
+			.count();
+		assert_eq!(
+			emitted, 5,
+			"all five decode-order frames must emit; B-frames are not regressions (got {emitted})"
+		);
+	}
+
+	// Status is a shared Arc written by every session, and stop() does not await the old task, so a stale
+	// session's exit-reset can run after a new session connected. The generation token makes a stale
+	// reset_on_exit a no-op, so it cannot clobber the live status (the restart-on-failure race).
+	#[test]
+	fn stale_session_reset_must_not_clobber_live_status() {
+		let status = Arc::new(Status::default());
+		let stale = status.begin_session(); // an old session's generation
+		let live = status.begin_session(); // the new session's generation, now the live one
+									 // The live session connects and writes the shared status.
+		status.set_connected(live, true);
+		status.set_version(live, Some("moq-lite-04".to_string()));
+		// The old session's exit-reset runs late, but it is stale: a no-op that leaves the live status.
+		assert!(
+			!status.reset_on_exit(stale),
+			"a stale generation must not reset the live status"
+		);
+		assert!(status.connected(), "the live session is still connected");
+		// The live session's own exit does reset.
+		assert!(status.reset_on_exit(live), "the current generation resets on exit");
+		assert!(
+			!status.connected(),
+			"after the live session exits, the status is disconnected"
+		);
+	}
+
+	// Not just the exit-reset: a stale session's connected/version/bitrate writes must also be no-ops, or
+	// an old task that lingers (or wins its connect late) would clobber the live session's status.
+	#[test]
+	fn stale_session_writes_are_dropped() {
+		let status = Arc::new(Status::default());
+		let stale = status.begin_session();
+		let live = status.begin_session(); // now the live generation
+		status.set_connected(live, true);
+		status.set_send_bitrate(live, 1000);
+		assert!(status.connected());
+
+		// Stale writes from the old generation are dropped, leaving the live status intact.
+		status.set_connected(stale, false);
+		status.set_version(stale, Some("ghost".to_string()));
+		status.set_send_bitrate(stale, 999);
+		assert!(status.connected(), "stale set_connected ignored");
+		assert_ne!(status.version().as_deref(), Some("ghost"), "stale set_version ignored");
+		assert_eq!(status.send_bitrate(), 1000, "stale set_send_bitrate ignored");
 	}
 
 	fn time_segment() -> gst::Segment {
