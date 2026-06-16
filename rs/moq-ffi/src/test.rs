@@ -120,22 +120,15 @@ async fn dynamic_track_request_can_abort() {
 	assert!(matches!(track.name(), Err(MoqError::Closed)));
 }
 
-// A dynamically-requested track is subscribed with no timescale, so the track the
-// producer hands back has timescale = None. publish_media_on_track then stamps
-// per-frame timestamps via the hang encoder, which append_frame rejects as a
-// TimestampMismatch. The fix (giving a requested media track its timescale) is
-// separate product work; the deadlock/await structure below is already correct so
-// this just needs the #[ignore] removed once that lands.
-#[ignore = "publish_media_on_track on a dynamically-requested (untimed) track fails TimestampMismatch"]
 #[tokio::test]
 async fn dynamic_track_request_can_publish_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
 
-	// subscribe_media for an unpublished track stays pending until the dynamic
-	// producer accepts the request via requested_track(), so drive both sides
-	// concurrently to avoid a deadlock.
+	// subscribe_media stays pending until the dynamic producer accepts the request
+	// via requested_track(), so drive both sides concurrently to avoid a deadlock.
 	let (media_consumer, track) = tokio::join!(
 		consumer.subscribe_media("requested-audio".into(), crate::media::Container::Legacy, 10_000),
 		tokio::time::timeout(TIMEOUT, dynamic.requested_track()),
@@ -150,8 +143,6 @@ async fn dynamic_track_request_can_publish_media() {
 	assert_eq!(media.name().unwrap(), "requested-audio");
 	assert!(matches!(track.name(), Err(MoqError::Closed)));
 
-	// The catalog track is published at construction; it now carries the new track.
-	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
