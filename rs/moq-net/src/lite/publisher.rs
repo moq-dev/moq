@@ -683,7 +683,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// its absolute timestamp (the subscriber decodes against the same baseline).
 		let mut index = fetch.frame_start as usize;
 		let mut prev_ts: u64 = 0;
-		let mut prev_dur: u64 = 0;
 		while let Some(mut frame) = group.get_frame(index).await? {
 			write_fetch_frame(
 				&mut stream.writer,
@@ -691,7 +690,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				compression,
 				timescale,
 				&mut prev_ts,
-				&mut prev_dur,
 				&track_stats,
 			)
 			.await?;
@@ -704,13 +702,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 }
 
 /// Encode the per-frame timing prefix when the track advertises a timescale:
-/// `[zigzag-delta timestamp][zigzag-delta duration]` (the lite-05 FRAME format).
-/// With `None` both fields are omitted entirely, saving the bytes on tracks where
-/// timing isn't meaningful (catalogs, control channels, IETF transport).
+/// `[zigzag-delta timestamp]` (the lite-05 FRAME format). With `None` the field is
+/// omitted entirely, saving the bytes on tracks where timing isn't meaningful
+/// (catalogs, control channels, IETF transport).
 ///
-/// `prev_ts`/`prev_dur` carry the running baselines, so the first frame deltas
-/// against 0. A `None` duration resolves to 0 on the wire ("unknown"). The model
-/// layer (`GroupProducer::append_frame`) already validated the timestamp/duration
+/// `prev_ts` carries the running baseline, so the first frame deltas against 0. The
+/// model layer (`GroupProducer::append_frame`) already validated the timestamp
 /// against the track timescale, so the `expect` below is infallible. Mirrors the
 /// decode in the subscriber's `run_group`.
 async fn encode_frame_timing<W: web_transport_trait::SendStream>(
@@ -718,7 +715,6 @@ async fn encode_frame_timing<W: web_transport_trait::SendStream>(
 	frame: &FrameConsumer,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
-	prev_dur: &mut u64,
 ) -> Result<(), Error> {
 	if timescale.is_none() {
 		return Ok(());
@@ -729,9 +725,6 @@ async fn encode_frame_timing<W: web_transport_trait::SendStream>(
 		.expect("model layer validated timestamp presence")
 		.value();
 	encode_zigzag_delta(writer, ts, prev_ts).await?;
-
-	let dur = frame.duration.map_or(0, |d| d.value());
-	encode_zigzag_delta(writer, dur, prev_dur).await?;
 
 	Ok(())
 }
@@ -763,10 +756,9 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	compression: Compression,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
-	prev_dur: &mut u64,
 	track_stats: &crate::PublisherTrack,
 ) -> Result<(), Error> {
-	encode_frame_timing(writer, frame, timescale, prev_ts, prev_dur).await?;
+	encode_frame_timing(writer, frame, timescale, prev_ts).await?;
 
 	match compression {
 		Compression::None => {
@@ -923,13 +915,12 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		stream.encode(&msg).await?;
 		self.track_stats.group();
 
-		// Lite05+ delta-encodes per-frame timestamps and durations within the group.
-		// The first frame's deltas are absolute (against implicit prev values of 0),
-		// every subsequent delta is signed against the previous frame.
+		// Lite05+ delta-encodes per-frame timestamps within the group. The first
+		// frame's delta is absolute (against an implicit prev value of 0), every
+		// subsequent delta is signed against the previous frame.
 		let mut prev_ts: u64 = 0;
-		let mut prev_dur: u64 = 0;
 		while let Some(frame) = self.next_frame(&mut stream, &mut priority, &mut group).await? {
-			self.serve_frame(&mut stream, &mut priority, frame, &mut prev_ts, &mut prev_dur)
+			self.serve_frame(&mut stream, &mut priority, frame, &mut prev_ts)
 				.await?;
 		}
 
@@ -951,9 +942,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		priority: &mut PriorityHandle,
 		mut frame: FrameConsumer,
 		prev_ts: &mut u64,
-		prev_dur: &mut u64,
 	) -> Result<(), Error> {
-		encode_frame_timing(stream, &frame, self.timescale, prev_ts, prev_dur).await?;
+		encode_frame_timing(stream, &frame, self.timescale, prev_ts).await?;
 
 		match self.compression {
 			Compression::None => {

@@ -206,9 +206,7 @@ impl GroupProducer {
 	///
 	/// Returns [`Error::TimestampMismatch`] if the frame's timing doesn't match the
 	/// parent track's timescale: a `timestamp` missing on a timed track, present on
-	/// an untimed track, or at a different scale; or a `duration` present on an
-	/// untimed track or at a different scale (a `None` duration on a timed track is
-	/// allowed and means "unknown").
+	/// an untimed track, or at a different scale.
 	pub fn append_frame(&mut self, frame: FrameProducer) -> Result<()> {
 		// Catch the contract violation here, at the model layer, so peers that
 		// downstream-encode (e.g. the lite publisher's `serve_frame`) can rely
@@ -217,13 +215,6 @@ impl GroupProducer {
 			(Some(track_scale), Some(ts)) if ts.scale() == track_scale => {}
 			(None, None) => {}
 			_ => return Err(Error::TimestampMismatch),
-		}
-		// A duration only rides timed tracks, at the track's scale; `None` (unknown)
-		// is always fine.
-		if let Some(d) = frame.duration
-			&& self.timescale != Some(d.scale())
-		{
-			return Err(Error::TimestampMismatch);
 		}
 
 		let mut state = modify(&self.state)?;
@@ -705,7 +696,6 @@ mod test {
 		let frame = Frame {
 			size: 3,
 			timestamp: Some(Timestamp::from_micros(42).unwrap()),
-			duration: None,
 		};
 		assert!(matches!(producer.create_frame(frame), Err(Error::TimestampMismatch)));
 	}
@@ -719,7 +709,6 @@ mod test {
 		let frame = Frame {
 			size: 3,
 			timestamp: None,
-			duration: None,
 		};
 		assert!(matches!(producer.create_frame(frame), Err(Error::TimestampMismatch)));
 	}
@@ -733,41 +722,11 @@ mod test {
 		let frame = Frame {
 			size: 3,
 			timestamp: Some(Timestamp::from_millis(1).unwrap()), // millis, not micros
-			duration: None,
 		};
 		assert!(matches!(producer.create_frame(frame), Err(Error::TimestampMismatch)));
 	}
 
-	/// A timed group rejects a frame whose duration is at the wrong scale.
-	#[test]
-	fn append_frame_rejects_duration_scale_mismatch() {
-		use crate::{Timescale, Timestamp};
-
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, Some(Timescale::MICRO));
-		let frame = Frame {
-			size: 3,
-			timestamp: Some(Timestamp::from_micros(7).unwrap()),
-			duration: Some(Timestamp::from_millis(1).unwrap()), // millis, not micros
-		};
-		assert!(matches!(producer.create_frame(frame), Err(Error::TimestampMismatch)));
-	}
-
-	/// An untimed group rejects a frame that carries a duration.
-	#[test]
-	fn append_frame_rejects_duration_on_untimed_group() {
-		use crate::Timestamp;
-
-		let mut producer = GroupProducer::new(Group { sequence: 0 }, None);
-		let frame = Frame {
-			size: 3,
-			timestamp: None,
-			duration: Some(Timestamp::from_micros(33).unwrap()),
-		};
-		assert!(matches!(producer.create_frame(frame), Err(Error::TimestampMismatch)));
-	}
-
-	/// A matching scale passes through; bytes can be written normally. A `None`
-	/// duration (unknown) is accepted on a timed group.
+	/// A matching scale passes through; bytes can be written normally.
 	#[test]
 	fn append_frame_accepts_matching_scale() {
 		use crate::{Timescale, Timestamp};
@@ -776,7 +735,6 @@ mod test {
 		let frame = Frame {
 			size: 1,
 			timestamp: Some(Timestamp::from_micros(7).unwrap()),
-			duration: Some(Timestamp::from_micros(33).unwrap()),
 		};
 		let mut writer = producer.create_frame(frame).unwrap();
 		writer.write(Bytes::from_static(b"x")).unwrap();

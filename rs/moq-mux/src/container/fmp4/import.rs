@@ -604,19 +604,12 @@ impl Import {
 			};
 
 			// Carry the fragment's earliest presentation time as the frame timestamp,
-			// and its total presentation span (sum of sample durations = final dts
-			// minus the fragment's base decode time) as the frame duration, both in
-			// the track's native timescale. The relay reads them off the wire; the
+			// in the track's native timescale. The relay reads it off the wire; the
 			// consumer still drives playback from the fragment's internal timing.
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
-			let duration_units = dts.saturating_sub(tfdt.base_media_decode_time);
-			let duration = (duration_units > 0)
-				.then(|| moq_net::Timestamp::new(duration_units, timescale))
-				.transpose()?;
 			let mut frame = g.create_frame(moq_net::Frame {
 				size: fragment_bytes.len() as u64,
 				timestamp: Some(timestamp),
-				duration,
 			})?;
 			frame.write(fragment_bytes)?;
 			frame.finish()?;

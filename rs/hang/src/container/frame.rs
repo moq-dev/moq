@@ -51,12 +51,10 @@ impl Frame {
 		let size = (header.len() + self.payload.len()) as u64;
 
 		// Stamp the moq-net frame timestamp too so Lite05+ can delta-encode it on the
-		// wire independently of the container-level prefix. This container doesn't
-		// report a per-frame duration, so it stays unknown (`None`).
+		// wire independently of the container-level prefix.
 		let net_frame = moq_net::Frame {
 			size,
 			timestamp: Some(timestamp),
-			duration: None,
 		};
 		let mut chunked = group.create_frame(net_frame)?;
 		chunked.write(header.freeze())?;
