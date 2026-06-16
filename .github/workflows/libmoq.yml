@@ -50,7 +50,6 @@ jobs:
           determinate: false
       - name: Configure Nix cache
         if: matrix.use_nix
-        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
 
       - name: Install Rust (Windows)
         if: '!matrix.use_nix'

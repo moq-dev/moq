@@ -7,7 +7,6 @@ runs:
     - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a # main
       with:
         determinate: false
-    - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
 
     - name: Build packaging tools from flake
       shell: bash
