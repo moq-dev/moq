@@ -26,7 +26,7 @@ Add `Moq` to your target's dependencies:
 ),
 ```
 
-Supported platforms: iOS 15+, iPadOS 15+, macOS 12+. The package ships an XCFramework with iOS device (arm64), iOS Simulator (arm64 + x86_64), and macOS universal slices.
+Supported platforms: iOS 15+, iPadOS 15+, macOS 12+. The package ships an XCFramework with iOS device (arm64), iOS Simulator (arm64 + x86\_64), and macOS universal slices.
 
 ## Connect
 

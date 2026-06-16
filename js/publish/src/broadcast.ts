@@ -2,7 +2,6 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
-import type { CatalogProducer } from "./catalog";
 import * as Video from "./video";
 
 export type BroadcastProps = {
@@ -30,7 +29,7 @@ export class Broadcast {
 	// `video`/`audio` sections are kept in sync from the encoders; an application adds its own root
 	// sections (e.g. `scte35`) by mutating it too. Catalog.Producer pins deltas off (one snapshot per
 	// group) to stay byte-compatible with consumers that only read snapshots.
-	readonly catalog: CatalogProducer = new Catalog.Producer();
+	readonly catalog: Catalog.Producer = new Catalog.Producer();
 
 	// Handlers for custom tracks registered via `publishTrack`, keyed by track name. Persists across
 	// reconnects so a new `Moq.Broadcast` still serves them.

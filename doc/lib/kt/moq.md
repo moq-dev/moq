@@ -21,8 +21,8 @@ dependencies {
 
 Native binaries are bundled for:
 
-- Android: arm64-v8a, armeabi-v7a, x86_64
-- JVM: Linux x86_64 + aarch64, macOS x86_64 + aarch64, Windows x86_64
+- Android: arm64-v8a, armeabi-v7a, x86\_64
+- JVM: Linux x86\_64 + aarch64, macOS x86\_64 + aarch64, Windows x86\_64
 
 Android uses JNI (`jniLibs/`), desktop JVM uses JNA (resource-classpath layout). Both are bundled in the same AAR/JAR.
 
