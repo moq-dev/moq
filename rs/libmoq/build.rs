@@ -20,7 +20,8 @@ fn main() {
 		.expect("Unable to generate bindings")
 		.write_to_file(&header);
 
-	// Generate pkg-config file into target/lib/pkgconfig/
+	// Generate pkg-config file into target/lib/pkgconfig/ so the raw cargo
+	// target tree matches the conventional lib/ layout consumers expect.
 	let pc_in = PathBuf::from(&crate_dir).join(format!("{}.pc.in", LIB_NAME));
 	let pkgconfig_dir = target_dir.join("lib").join("pkgconfig");
 	fs::create_dir_all(&pkgconfig_dir).expect("Failed to create pkgconfig directory");
@@ -28,7 +29,6 @@ fn main() {
 	if let Ok(template) = fs::read_to_string(&pc_in) {
 		let target = env::var("TARGET").unwrap();
 		let profile = env::var("PROFILE").unwrap();
-		let lib_dir = target_dir.join(&profile);
 		let libs_private = if target.contains("apple") {
 			"-framework CoreFoundation -framework Security -framework CoreServices"
 		} else if target.contains("windows") {
@@ -40,8 +40,7 @@ fn main() {
 		let content = template
 			.replace("@VERSION@", &version)
 			.replace("@LIBS_PRIVATE@", libs_private)
-			.replace("@LIB_DIR@", lib_dir.to_str().unwrap())
-			.replace("@INCLUDE_DIR@", include_dir.to_str().unwrap());
+			.replace("@PROFILE@", &profile);
 		fs::write(&pc_out, content).expect("Failed to write pkg-config file");
 	}
 }
