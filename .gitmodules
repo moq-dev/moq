@@ -1,3 +1,0 @@
-[submodule "rs/moq-vaapi/libva"]
-	path = rs/moq-vaapi/libva
-	url = https://github.com/intel/libva.git

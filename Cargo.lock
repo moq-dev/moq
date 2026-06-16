@@ -4346,6 +4346,7 @@ dependencies = [
 [[package]]
 name = "moq-vaapi"
 version = "0.0.1"
+source = "git+https://github.com/moq-dev/vaapi.git#27a218abf5548b9e692ea79465fee77babb45d54"
 dependencies = [
  "anyhow",
  "bindgen 0.70.1",

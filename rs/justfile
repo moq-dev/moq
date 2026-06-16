@@ -66,18 +66,6 @@ test *args:
 build:
     cargo build
 
-# Compile-check moq-vaapi on any OS (macOS included). It's workspace-excluded, so
-# `cargo check --workspace` skips it; the Linux CI compiles it via moq-video's
-# `vaapi` feature, and this is the way to exercise the crate itself on a
-# libva-less dev box. The build is hermetic (vendored libva headers from the
-# submodule + runtime dlopen), so it needs only libclang, which the nix devShell
-# provides. Requires the libva submodule (auto-initialized here if missing).
-vaapi-check:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    git submodule update --init rs/moq-vaapi/libva
-    cargo clippy --manifest-path rs/moq-vaapi/Cargo.toml --all-targets -- -D warnings
-
 # Remove the Rust target directory.
 clean:
     cargo clean

@@ -24,12 +24,6 @@ members = [
     "rs/moq-video",
     "rs/moq-wasm",
 ]
-# moq-vaapi is a path dependency of moq-video's (Linux-only) `vaapi` feature, not a
-# standalone member: its build script needs libva headers (bindgen) and panics
-# without them, so building it via `cargo check --workspace` on a libva-less host
-# (macOS CI) would fail. Excluding it keeps it out of every `--workspace` sweep; it
-# still compiles as moq-video's dependency in the Linux `just rs ci` step.
-exclude = ["rs/moq-vaapi"]
 default-members = [
     "rs/kio",
     "rs/hang",
@@ -73,7 +67,10 @@ moq-mux = { version = "0.5", path = "rs/moq-mux" }
 moq-native = { version = "0.17", path = "rs/moq-native", default-features = false }
 moq-net = { version = "0.1", path = "rs/moq-net" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
-moq-vaapi = { version = "0.0.1", path = "rs/moq-vaapi" }
+# Standalone repo (vendored from cros-libva + cros-codecs); a git dep until it's
+# published to crates.io, at which point moq-video can publish too. See allow-git
+# in deny.toml.
+moq-vaapi = { git = "https://github.com/moq-dev/vaapi.git" }
 moq-video = { version = "0.0.3", path = "rs/moq-video" }
 qmux = { version = "0.1.3", default-features = false }
 serde = { version = "1", features = ["derive"] }

@@ -29,9 +29,6 @@ jobs:
           persist-credentials: false
           # Full history so `just changed` can diff against origin/$GITHUB_BASE_REF.
           fetch-depth: 0
-          # moq-vaapi vendors libva's headers via the rs/moq-vaapi/libva submodule;
-          # the Linux `just rs ci` step builds it through moq-video's `vaapi` feature.
-          submodules: recursive
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
