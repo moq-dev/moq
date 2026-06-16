@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/moq-dev/moq/compare/kio-v0.3.0...kio-v0.4.0) - 2026-06-16
+
+### Fixed
+
+- *(kio)* split waiters by condition so writes don't churn closed/consumer waiters ([#1739](https://github.com/moq-dev/moq/pull/1739))
+- *(moq-net)* release cached state when a producer is aborted or dropped ([#1715](https://github.com/moq-dev/moq/pull/1715))
+
+### Other
+
+- rework Producer::poll/wait to a read-only predicate that returns a Mut ([#1735](https://github.com/moq-dev/moq/pull/1735))
+
 ### Fixed
 
 - Split the internal waiter list into separate value / closed / consumer lists,

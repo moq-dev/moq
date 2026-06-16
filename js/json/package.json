@@ -1,7 +1,7 @@
 {
 	"name": "@moq/json",
 	"type": "module",
-	"version": "0.0.2",
+	"version": "0.0.3",
 	"description": "Snapshot/delta JSON publishing over MoQ tracks using RFC 7396 JSON Merge Patch.",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",

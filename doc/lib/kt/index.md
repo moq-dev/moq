@@ -15,7 +15,7 @@ A single Kotlin Multiplatform module that publishes both JVM and Android variant
 
 **Features:**
 
-- Android (arm64-v8a, armeabi-v7a, x86_64) and desktop JVM (Linux, macOS, Windows)
+- Android (arm64-v8a, armeabi-v7a, x86\_64) and desktop JVM (Linux, macOS, Windows)
 - `Flow`-based async sequences with structured cancellation
 - Native binaries bundled via JNI (Android) / JNA (desktop JVM)
 

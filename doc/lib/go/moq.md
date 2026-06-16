@@ -21,6 +21,17 @@ import "github.com/moq-dev/moq-go/moq"
 
 The module bundles prebuilt `libmoq_ffi.a` for `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`. cgo selects the right archive at link time via build tags.
 
+## Error handling
+
+A server can reject the connection on auth grounds: `ErrMoqErrorUnauthorized` (HTTP 401) or `ErrMoqErrorForbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. The `moq.IsAuthError` helper catches both:
+
+```go
+session, err := client.Connect("https://relay.example.com")
+if moq.IsAuthError(err) {
+    // Prompt for credentials; don't reconnect.
+}
+```
+
 ## Local development
 
 The in-tree `go/` directory is the source skeleton; it's not a buildable Go module on its own (the generated `moq.go` and per-platform `.a` files are added at release time by CI, not committed). To exercise it locally:

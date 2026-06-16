@@ -1,6 +1,6 @@
 use clap::Subcommand;
 use hang::moq_net;
-use moq_mux::container::{fmp4, hls, ts};
+use moq_mux::container::{flv, fmp4, hls, ts};
 
 #[derive(Subcommand, Clone)]
 pub enum PublishFormat {
@@ -8,6 +8,8 @@ pub enum PublishFormat {
 	Fmp4,
 	/// MPEG-TS (transport stream) read from stdin.
 	Ts,
+	/// FLV (Flash Video / RTMP) read from stdin.
+	Flv,
 	// NOTE: No aac support because it needs framing.
 	Hls {
 		/// URL or file path of an HLS playlist to ingest.
@@ -20,16 +22,18 @@ enum PublishDecoder {
 	Avc3(Box<moq_mux::codec::h264::Import>),
 	Fmp4(Box<fmp4::Import>),
 	Ts(Box<ts::Import>),
+	Flv(Box<flv::Import>),
 	Hls(Box<hls::Import>),
 }
 
 impl PublishDecoder {
-	/// Decode a chunk of bytes from stdin (Avc3, Fmp4, or Ts).
+	/// Decode a chunk of bytes from stdin (Avc3, Fmp4, Ts, or Flv).
 	fn decode_buf(&mut self, buffer: &mut bytes::BytesMut) -> anyhow::Result<()> {
 		match self {
 			Self::Avc3(d) => d.decode_stream(buffer, None),
 			Self::Fmp4(d) => d.decode(buffer),
 			Self::Ts(d) => d.decode(buffer),
+			Self::Flv(d) => d.decode(buffer),
 			Self::Hls(_) => unreachable!(),
 		}
 	}
@@ -58,6 +62,10 @@ impl Publish {
 			PublishFormat::Ts => {
 				let ts = ts::Import::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Ts(Box::new(ts))
+			}
+			PublishFormat::Flv => {
+				let flv = flv::Import::new(broadcast.clone(), catalog.clone());
+				PublishDecoder::Flv(Box::new(flv))
 			}
 			PublishFormat::Hls { playlist } => {
 				let hls = hls::Import::new(broadcast.clone(), catalog.clone(), hls::Config::new(playlist.clone()))?;

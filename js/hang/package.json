@@ -1,7 +1,7 @@
 {
 	"name": "@moq/hang",
 	"type": "module",
-	"version": "0.2.9",
+	"version": "0.2.11",
 	"description": "WebCodecs-based media format for MoQ",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
@@ -20,6 +20,7 @@
 	"dependencies": {
 		"@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
 		"@libav.js/variant-opus-af": "^6.8.8",
+		"@moq/json": "workspace:^",
 		"@moq/loc": "workspace:^",
 		"@moq/net": "workspace:^",
 		"@moq/signals": "workspace:^",

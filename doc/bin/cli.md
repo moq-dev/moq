@@ -129,6 +129,7 @@ Publish (read from stdin unless noted):
 - `avc3` - raw H.264 Annex-B
 - `fmp4` - fragmented MP4 / CMAF
 - `ts` - MPEG-TS (H.264 / H.265 video; AAC, MP2, AC-3, or E-AC-3 audio)
+- `flv` - FLV / RTMP (H.264 video, AAC audio)
 - `hls --playlist <url>` - HLS playlist ingest
 - `capture` - capture local devices directly (camera H.264 + microphone Opus; requires the `capture` build feature; does not read stdin)
 
@@ -137,6 +138,7 @@ Subscribe (`--format`):
 - `fmp4` - fragmented MP4 / CMAF
 - `mkv` - Matroska / WebM
 - `ts` - MPEG-TS
+- `flv` - FLV / RTMP (H.264 video, AAC audio)
 
 ### MPEG-TS
 
@@ -161,6 +163,25 @@ frames pass through byte-exact, never transcoded; malformed input is rejected
 rather than mis-described. The catalog describes the codec honestly so a
 subscriber that can decode it (typically TS gear) picks it up; browsers cannot
 play these codecs and should skip the rendition.
+
+### FLV
+
+Ingest an FLV stream from FFmpeg and play one back out:
+
+```bash
+# Publish: remux a file to FLV and pipe it in
+ffmpeg -i input.mp4 -c copy -f flv - | \
+    moq-cli publish --url https://relay.example.com --broadcast my-stream flv
+
+# Subscribe: pull FLV back out and play it
+moq-cli subscribe --url https://relay.example.com --broadcast my-stream --format flv | ffplay -
+```
+
+FLV is the classic RTMP container: H.264 video carried as length-prefixed NALU
+with an out-of-band avcC, and AAC audio carried raw with an out-of-band
+AudioSpecificConfig. Both pass straight through to the catalog `description`. The
+enhanced E-RTMP FourCC payloads (HEVC, AV1, Opus) and the older codecs (VP6, MP3)
+are not supported.
 
 ## Authentication
 

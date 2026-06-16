@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1](https://github.com/moq-dev/moq/compare/moq-native-v0.17.0...moq-native-v0.17.1) - 2026-06-16
+
+### Added
+
+- *(moq-native)* mTLS + preferred_address on the noq backend ([#1741](https://github.com/moq-dev/moq/pull/1741))
+- *(moq-native)* add --tls-system-roots to trust custom and system roots together ([#1711](https://github.com/moq-dev/moq/pull/1711))
+- *(moq-native)* enable BBR3 congestion control on the noq backend ([#1706](https://github.com/moq-dev/moq/pull/1706))
+- certificate pinning for native and browser clients ([#1698](https://github.com/moq-dev/moq/pull/1698))
+
+### Fixed
+
+- *(moq-native)* watch current dir for bare-filename certs ([#1751](https://github.com/moq-dev/moq/pull/1751))
+- *(moq-net)* don't tear down session on unauthorized announce-interest ([#1717](https://github.com/moq-dev/moq/pull/1717))
+- *(native)* surface terminal auth connect errors ([#1649](https://github.com/moq-dev/moq/pull/1649))
+
+### Other
+
+- *(moq-native)* bump to 0.17.1 to unblock moq-relay release ([#1755](https://github.com/moq-dev/moq/pull/1755))
+- Windows support: dual-stack IPv4/IPv6 sockets, setup.bat, and `just dev` ([#1732](https://github.com/moq-dev/moq/pull/1732))
+- *(moq-native)* remove tokio-console instrumentation ([#1699](https://github.com/moq-dev/moq/pull/1699))
+- *(demo,doc)* drop redundant /anon prefix from localhost URLs ([#1688](https://github.com/moq-dev/moq/pull/1688))
+
 ### Added
 
 - *(moq-native)* support mTLS client certificates and `preferred_address` on the noq backend, bringing it to parity with quinn.
