@@ -145,11 +145,32 @@ impl ElementImpl for MoqSinkSpike {
 
 	fn pad_templates() -> &'static [gst::PadTemplate] {
 		static PAD_TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
-			// Spike scope: a single H.264 pad; the point is the lifecycle, not codec breadth.
-			let caps = gst::Caps::builder("video/x-h264")
-				.field("stream-format", "byte-stream")
-				.field("alignment", "au")
-				.build();
+			// Every codec that converges on moq_mux::import::Framed; per-codec specifics are validated
+			// when the producer is built from caps, not here.
+			let mut caps = gst::Caps::new_empty();
+			caps.merge(
+				gst::Caps::builder("video/x-h264")
+					.field("stream-format", "byte-stream")
+					.field("alignment", "au")
+					.build(),
+			);
+			caps.merge(
+				gst::Caps::builder("video/x-h265")
+					.field("stream-format", "byte-stream")
+					.field("alignment", "au")
+					.build(),
+			);
+			caps.merge(gst::Caps::builder("video/x-av1").build());
+			caps.merge(gst::Caps::builder("video/x-vp8").build());
+			caps.merge(gst::Caps::builder("video/x-vp9").build());
+			caps.merge(
+				gst::Caps::builder("audio/mpeg")
+					.field("mpegversion", 4i32)
+					.field("stream-format", "raw")
+					.build(),
+			);
+			caps.merge(gst::Caps::builder("audio/x-opus").build());
+
 			let templ =
 				gst::PadTemplate::new("sink_%u", gst::PadDirection::Sink, gst::PadPresence::Request, &caps).unwrap();
 			vec![templ]

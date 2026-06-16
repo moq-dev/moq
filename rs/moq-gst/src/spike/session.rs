@@ -11,6 +11,7 @@ use gst::prelude::*;
 use tokio::sync::{mpsc, watch};
 
 use hang::moq_net;
+use moq_mux::import::{Framed, FramedFormat};
 
 use super::timeline::{classify_segment, frame_micros, FrameDecision, SegmentDecision, SegmentInfo};
 use super::MoqSinkSpike as Element;
@@ -542,24 +543,60 @@ impl Pad {
 		caps: &gst::Caps,
 	) -> Result<()> {
 		let structure = caps.structure(0).context("empty caps")?;
-		ensure!(
-			caps_supported(caps),
-			"spike only carries H.264 byte-stream, got {}",
-			structure.name()
-		);
 		// Identical caps re-sent (sticky event): keep the live producer, don't finalize and recreate.
 		if self.framed.is_some() && self.caps.as_ref() == Some(caps) {
 			return Ok(());
 		}
 		// Renegotiation: finalize the previous producer before replacing it (closed once, not abandoned).
 		self.finalize()?;
-		let mut empty = Bytes::new();
-		self.framed = Some(moq_mux::import::Framed::new(
-			broadcast,
-			catalog,
-			moq_mux::import::FramedFormat::Avc3,
-			&mut empty,
-		)?);
+		// Every codec converges on one Framed; only the caps -> producer construction differs. A bad or
+		// unsupported caps is a per-pad error (the caller invalidates just this pad), not session-fatal.
+		let framed: Framed = match structure.name().as_str() {
+			"video/x-h264" => {
+				require_byte_stream_au(structure)?;
+				Framed::new(broadcast, catalog, FramedFormat::Avc3, &mut Bytes::new())?
+			}
+			"video/x-h265" => {
+				require_byte_stream_au(structure)?;
+				Framed::new(broadcast, catalog, FramedFormat::Hev1, &mut Bytes::new())?
+			}
+			"video/x-av1" => Framed::new(broadcast, catalog, FramedFormat::Av01, &mut Bytes::new())?,
+			"video/x-vp8" => Framed::new(broadcast, catalog, FramedFormat::Vp8, &mut Bytes::new())?,
+			"video/x-vp9" => Framed::new(broadcast, catalog, FramedFormat::Vp9, &mut Bytes::new())?,
+			"audio/mpeg" => {
+				// AAC: the AudioSpecificConfig rides in caps as codec_data, not in the bitstream.
+				ensure!(
+					structure.get::<i32>("mpegversion").is_ok_and(|v| v == 4),
+					"AAC requires mpegversion=4"
+				);
+				ensure!(
+					structure.get::<String>("stream-format").is_ok_and(|f| f == "raw"),
+					"AAC requires stream-format=raw"
+				);
+				let codec_data = structure
+					.get::<gst::Buffer>("codec_data")
+					.context("AAC caps missing codec_data")?;
+				let map = codec_data.map_readable().context("failed to map AAC codec_data")?;
+				let mut data = Bytes::copy_from_slice(map.as_slice());
+				Framed::new(broadcast, catalog, FramedFormat::Aac, &mut data)?
+			}
+			"audio/x-opus" => {
+				// Opus: GStreamer gives channels/rate in caps (not an OpusHead), so build the config here.
+				let channels: i32 = structure.get("channels").unwrap_or(2);
+				let rate: i32 = structure.get("rate").unwrap_or(48_000);
+				let channel_count = u32::try_from(channels)
+					.with_context(|| format!("Opus caps has negative channel count {channels}"))?;
+				let sample_rate =
+					u32::try_from(rate).with_context(|| format!("Opus caps has negative sample rate {rate}"))?;
+				let config = moq_mux::codec::opus::Config {
+					sample_rate,
+					channel_count,
+				};
+				moq_mux::codec::opus::Import::new(broadcast, catalog, config)?.into()
+			}
+			other => anyhow::bail!("unsupported caps: {other}"),
+		};
+		self.framed = Some(framed);
 		self.caps = Some(caps.clone());
 		Ok(())
 	}
@@ -640,7 +677,12 @@ impl Pad {
 	fn finalize(&mut self) -> Result<bool> {
 		match self.framed.take() {
 			Some(mut framed) => {
-				framed.finish()?;
+				// A lazy codec (H.265/AV1/VP8/VP9) given CAPS but no frame never created its track, so
+				// there is nothing to flush and finish() would error "not initialized". track() is Ok only
+				// once a track exists; a real finish error on an initialized one still surfaces.
+				if framed.track().is_ok() {
+					framed.finish()?;
+				}
 				Ok(true)
 			}
 			None => Ok(false),
@@ -648,14 +690,31 @@ impl Pad {
 	}
 }
 
-/// The spike only carries H.264 byte-stream. Checked synchronously at the event boundary (so an
-/// unsupported caps is rejected with NotNegotiated) and again in `set_caps` as the worker's defence.
+/// Media types the spike can build a producer for. Checked synchronously at the event boundary (an
+/// unsupported caps is rejected with NotNegotiated) and again in `set_caps`. Per-codec specifics
+/// (byte-stream/au, AAC codec_data) are enforced when the producer is built, so a bad detail fails
+/// that pad, not the session.
 pub(super) fn caps_supported(caps: &gst::CapsRef) -> bool {
 	let Some(s) = caps.structure(0) else { return false };
-	// FramedFormat::Avc3 consumes Annex-B access units, so require byte-stream/au, not just the type.
-	s.name() == "video/x-h264"
-		&& s.get::<String>("stream-format").is_ok_and(|f| f == "byte-stream")
-		&& s.get::<String>("alignment").is_ok_and(|a| a == "au")
+	matches!(
+		s.name().as_str(),
+		"video/x-h264" | "video/x-h265" | "video/x-av1" | "video/x-vp8" | "video/x-vp9" | "audio/mpeg" | "audio/x-opus"
+	)
+}
+
+/// FramedFormat::Avc3/Hev1 consume Annex-B access units, so H.264/H.265 caps must be byte-stream/au.
+fn require_byte_stream_au(s: &gst::StructureRef) -> Result<()> {
+	ensure!(
+		s.get::<String>("stream-format").is_ok_and(|f| f == "byte-stream"),
+		"{} requires stream-format=byte-stream",
+		s.name()
+	);
+	ensure!(
+		s.get::<String>("alignment").is_ok_and(|a| a == "au"),
+		"{} requires alignment=au",
+		s.name()
+	);
+	Ok(())
 }
 
 fn segment_info(segment: &gst::Segment) -> SegmentInfo {
@@ -692,6 +751,17 @@ mod tests {
 		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		PadSet::new(broadcast, catalog, Arc::new(Status::default()))
+	}
+
+	// A producer that actually emitted has at least one group. latest() is the cross-crate-visible
+	// sync read; moq-net's assert_group helper is gated to that crate's own tests.
+	fn emitted_a_frame(set: &PadSet, track: &str) -> bool {
+		set.broadcast
+			.consume()
+			.subscribe_track(&moq_net::Track::new(track))
+			.expect("the rendition track is published")
+			.latest()
+			.is_some()
 	}
 
 	fn h264_caps() -> gst::Caps {
@@ -836,17 +906,234 @@ mod tests {
 		assert!(set.eos("video", 1).unwrap());
 	}
 
+	// caps_supported is media-type only; per-codec specifics are the factory's/template's job.
 	#[test]
-	fn caps_supported_requires_h264_byte_stream_au() {
+	fn caps_supported_accepts_known_media_types() {
 		gst::init().unwrap();
-		assert!(caps_supported(&h264_caps()));
-		assert!(!caps_supported(&audio_caps()));
-		// H.264 but not byte-stream/au is rejected: FramedFormat::Avc3 consumes Annex-B AUs.
-		let avc = gst::Caps::builder("video/x-h264")
+		for media in [
+			"video/x-h264",
+			"video/x-h265",
+			"video/x-av1",
+			"video/x-vp8",
+			"video/x-vp9",
+			"audio/mpeg",
+			"audio/x-opus",
+		] {
+			assert!(
+				caps_supported(&gst::Caps::builder(media).build()),
+				"{media} must be accepted"
+			);
+		}
+		assert!(!caps_supported(&audio_caps()), "an unsupported media type is rejected");
+	}
+
+	// Frame-through (real init + emit): a keyframe AU emits a frame to the rendition track, not just
+	// the SPS-published rendition.
+	#[test]
+	fn frame_through_h264_emits_a_frame() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		set.caps("video", 0, &h264_caps()).unwrap();
+		set.segment("video", 0, time_segment());
+
+		// SPS (the importer's own proven bytes) + PPS + a type-5 IDR slice. The slice header is not
+		// fully parsed for IDR, but this drives the real decode_frame path and emits one frame.
+		let sps: &[u8] = &[
+			0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07, 0xd0, 0x00,
+			0x01, 0xd4, 0xc0, 0x80,
+		];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x00, 0x21];
+		let mut au = Vec::new();
+		for nal in [sps, pps, idr] {
+			au.extend_from_slice(&[0, 0, 0, 1]);
+			au.extend_from_slice(nal);
+		}
+		set.buffer("video", 0, Bytes::from(au), Some(gst::ClockTime::ZERO))
+			.unwrap();
+
+		let snapshot = set.catalog.as_ref().unwrap().snapshot();
+		let track = snapshot.video.renditions.keys().next().expect("a video rendition");
+		// The discriminant: a real frame reached the track. The rendition alone would pass on the SPS.
+		assert!(emitted_a_frame(&set, track), "the IDR AU emitted a frame to the track");
+		assert_eq!(
+			snapshot.video.renditions.len(),
+			1,
+			"the SPS published exactly one rendition"
+		);
+	}
+
+	// Frame-through for Opus: the rendition publishes from caps, then a packet emits a real frame.
+	#[test]
+	fn frame_through_opus_emits_a_frame() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("audio", 0);
+		let caps = gst::Caps::builder("audio/x-opus")
+			.field("channels", 2i32)
+			.field("rate", 48_000i32)
+			.build();
+		set.caps("audio", 0, &caps).unwrap();
+		assert_eq!(
+			set.catalog.as_ref().unwrap().snapshot().audio.renditions.len(),
+			1,
+			"Opus publishes its rendition from channels/rate at construction"
+		);
+
+		set.segment("audio", 0, time_segment());
+		// The Opus importer carries the packet verbatim; any non-empty payload is one frame.
+		set.buffer(
+			"audio",
+			0,
+			Bytes::from_static(&[0xfc, 0xff, 0xfe]),
+			Some(gst::ClockTime::ZERO),
+		)
+		.unwrap();
+
+		let track = set
+			.catalog
+			.as_ref()
+			.unwrap()
+			.snapshot()
+			.audio
+			.renditions
+			.keys()
+			.next()
+			.expect("an audio rendition")
+			.clone();
+		assert!(
+			emitted_a_frame(&set, &track),
+			"the Opus packet emitted a frame to the track"
+		);
+	}
+
+	// Creation only (decision c): these importers build from an empty init and create the track lazily,
+	// so assert the producer exists, not a rendition.
+	#[test]
+	fn creation_succeeds_for_video_codecs() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		for (i, media) in ["video/x-h265", "video/x-av1", "video/x-vp8", "video/x-vp9"]
+			.into_iter()
+			.enumerate()
+		{
+			let name = format!("v{i}");
+			set.add_pad(&name, 0);
+			// H.265 shares H.264's Annex-B requirement; AV1/VP8/VP9 carry no such specifics.
+			let mut builder = gst::Caps::builder(media);
+			if media == "video/x-h265" {
+				builder = builder.field("stream-format", "byte-stream").field("alignment", "au");
+			}
+			set.caps(&name, 0, &builder.build()).unwrap();
+			assert!(set.pads[&name].framed.is_some(), "{media} producer built");
+		}
+	}
+
+	#[test]
+	fn creation_succeeds_for_aac_with_codec_data() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("audio", 0);
+		// AudioSpecificConfig: AAC-LC, 44100 Hz, stereo.
+		let codec_data = gst::Buffer::from_slice([0x12u8, 0x10]);
+		let caps = gst::Caps::builder("audio/mpeg")
+			.field("mpegversion", 4i32)
+			.field("stream-format", "raw")
+			.field("codec_data", &codec_data)
+			.build();
+		set.caps("audio", 0, &caps).unwrap();
+		assert!(set.pads["audio"].framed.is_some());
+	}
+
+	// Missing codec_data is a per-pad error (the factory cannot build AAC), not a session failure.
+	#[test]
+	fn aac_without_codec_data_fails_the_pad() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("audio", 0);
+		let caps = gst::Caps::builder("audio/mpeg")
+			.field("mpegversion", 4i32)
+			.field("stream-format", "raw")
+			.build();
+		assert!(
+			set.caps("audio", 0, &caps).is_ok(),
+			"a missing codec_data fails the pad, not the session"
+		);
+		assert!(set.status.is_failed("audio", 0), "the pad is marked failed");
+		assert!(!set.pads.contains_key("audio"), "the failed pad's producer is dropped");
+	}
+
+	// Per-codec specifics that caps_supported delegates: the factory fails the pad on a bad detail.
+	#[test]
+	fn h264_length_prefixed_avc_fails_the_pad() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		// FramedFormat::Avc3 needs Annex-B, so length-prefixed avc is rejected by the factory.
+		let caps = gst::Caps::builder("video/x-h264")
 			.field("stream-format", "avc")
 			.field("alignment", "au")
 			.build();
-		assert!(!caps_supported(&avc), "length-prefixed avc must be rejected");
+		set.caps("video", 0, &caps).unwrap();
+		assert!(set.status.is_failed("video", 0), "length-prefixed avc fails the pad");
+		assert!(!set.pads.contains_key("video"));
+	}
+
+	#[test]
+	fn h265_without_byte_stream_au_fails_the_pad() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("video", 0);
+		set.caps("video", 0, &gst::Caps::builder("video/x-h265").build())
+			.unwrap();
+		assert!(
+			set.status.is_failed("video", 0),
+			"H.265 without byte-stream/au fails the pad"
+		);
+		assert!(!set.pads.contains_key("video"));
+	}
+
+	#[test]
+	fn aac_wrong_mpegversion_fails_the_pad() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("audio", 0);
+		let codec_data = gst::Buffer::from_slice([0x12u8, 0x10]);
+		let caps = gst::Caps::builder("audio/mpeg")
+			.field("mpegversion", 1i32)
+			.field("stream-format", "raw")
+			.field("codec_data", &codec_data)
+			.build();
+		set.caps("audio", 0, &caps).unwrap();
+		assert!(set.status.is_failed("audio", 0), "mpegversion!=4 fails the pad");
+		assert!(!set.pads.contains_key("audio"));
+	}
+
+	// CAPS then EOS with no frame: lazy importers (H.265/AV1/VP8/VP9) never created a track, so
+	// finalize must be a clean no-op rather than a "not initialized" session error.
+	#[test]
+	fn caps_then_eos_before_first_frame_is_clean_for_lazy_codecs() {
+		gst::init().unwrap();
+		for media in ["video/x-h265", "video/x-av1", "video/x-vp8", "video/x-vp9"] {
+			let mut set = pad_set();
+			set.add_pad("video", 0);
+			let mut builder = gst::Caps::builder(media);
+			if media == "video/x-h265" {
+				builder = builder.field("stream-format", "byte-stream").field("alignment", "au");
+			}
+			set.caps("video", 0, &builder.build()).unwrap();
+			// EOS before any frame must be clean, not a session error.
+			assert!(
+				set.eos("video", 0).is_ok(),
+				"{media}: CAPS->EOS with no frame must be clean"
+			);
+			// The pad must still count as ended (it is terminal for aggregation).
+			assert!(
+				set.eos("video", 0).unwrap(),
+				"{media}: the EOS'd pad completes the element"
+			);
+		}
 	}
 
 	// A pad with unsupported caps is invalidated alone: marked failed and its producer dropped, while
