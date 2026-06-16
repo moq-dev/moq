@@ -100,12 +100,12 @@ let
       cp "$tdir/include/moq.h" $out/include/
       cp "$tdir/lib/pkgconfig/moq.pc" $out/lib/pkgconfig/
 
-      # build.rs writes libdir relative to the raw cargo target tree
-      # (../../release). Here the staticlib sits in $out/lib alongside
-      # pkgconfig/, so point libdir one level up. Stays relocatable; no
-      # build-time path leaks into the store.
-      substituteInPlace $out/lib/pkgconfig/moq.pc \
-        --replace-fail 'libdir=''${pcfiledir}/../../release' 'libdir=''${pcfiledir}/..'
+      # build.rs points libdir at the raw cargo target tree's profile dir
+      # (../../<profile>). The installPhase puts the staticlib in $out/lib
+      # alongside pkgconfig/, so rewrite libdir one level up. Match the whole
+      # line so this is independent of the profile name and the exact .pc
+      # template. Stays relocatable; no build-time path leaks into the store.
+      sed -i 's#^libdir=.*#libdir=''${pcfiledir}/..#' $out/lib/pkgconfig/moq.pc
 
       major_version="$(echo "${libmoqInfo.version}" | cut -d. -f1)"
       substitute ${../rs/libmoq/cmake/moq-config.cmake.in} \
