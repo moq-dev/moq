@@ -8,9 +8,11 @@
 
 mod export;
 mod import;
+mod split;
 
 pub use export::*;
 pub use import::*;
+pub use split::*;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use scuffle_h265::{NALUnitType, SpsNALUnit};

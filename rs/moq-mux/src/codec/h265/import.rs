@@ -1,41 +1,40 @@
-use crate::codec::annexb::{NalIterator, START_CODE};
-use crate::container::jitter::MinFrameDuration;
-use crate::publish::Renditions;
+//! H.265 importer.
+//!
+//! Publishes H.265 frames (Annex-B, inline VPS/SPS/PPS, the "hev1" shape) on a
+//! single moq track and resolves the catalog rendition. Only single-layer
+//! streams are supported (VPS is cached but not parsed).
+//!
+//! The codec config is scanned out of the SPS the splitter packages into the
+//! first keyframe (or seeded via [`initialize`](Import::initialize)). A keyframe
+//! that can't be configured is an error; non-keyframes before the first config
+//! are written through to the producer, which reports
+//! [`MissingKeyframe`](crate::container::MissingKeyframe) for a mid-stream join.
+//! Annex-B byte parsing lives in [`Split`]; this type drives it and adds the
+//! catalog.
 
 use bytes::{Buf, Bytes, BytesMut};
-use scuffle_h265::{NALUnitType, SpsNALUnit};
+use scuffle_h265::SpsNALUnit;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
-use super::Error;
+use super::{Error, Split, split::nal_unit_type};
 use crate::Result;
+use crate::codec::annexb::NalIterator;
+use crate::container::Frame;
+use crate::container::jitter::MinFrameDuration;
+use crate::publish::{FrameDecode, Renditions};
 
-/// A decoder for H.265 with inline SPS/PPS.
+/// A decoder for H.265 with inline VPS/SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
 ///
 /// Build it from a [`moq_net::TrackRequest`] ([`new`](Self::new)) or an existing
 /// track ([`from_track`](Self::from_track)). The catalog rendition fills in lazily
 /// once the first SPS is parsed; read it via [`catalog`](Self::catalog).
 pub struct Import {
-	// The track being produced.
+	split: Split,
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-
-	// The standalone catalog, populated once the codec config is known.
 	catalog: hang::Catalog,
-
-	// The resolved config; a change to it on a fixed track is an error.
 	config: Option<hang::catalog::VideoConfig>,
-
-	// The current frame being built.
-	current: Frame,
-
-	// Used to compute wall clock timestamps if needed.
-	zero: Option<tokio::time::Instant>,
-
-	// Cached parameter set NALs for re-insertion before keyframes.
-	vps: Option<Bytes>,
-	sps: Option<Bytes>,
-	pps: Option<Bytes>,
-
-	// Tracks the minimum frame duration and updates the catalog `jitter` field.
+	last_sps: Option<Bytes>,
 	jitter: MinFrameDuration,
 }
 
@@ -49,67 +48,35 @@ impl Import {
 	/// Publish on an existing track producer.
 	pub fn from_track(track: moq_net::TrackProducer) -> Self {
 		Self {
+			split: Split::new(),
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			catalog: hang::Catalog::default(),
 			config: None,
-			current: Default::default(),
-			zero: None,
-			vps: None,
-			sps: None,
-			pps: None,
+			last_sps: None,
 			jitter: MinFrameDuration::new(),
 		}
 	}
 
-	fn init(&mut self, sps: &SpsNALUnit) -> Result<()> {
-		let profile = &sps.rbsp.profile_tier_level.general_profile;
-		let vui_data = sps.rbsp.vui_parameters.as_ref().map(VuiData::new).unwrap_or_default();
-
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
-			in_band: true, // We only support `hev1` with inline SPS/PPS for now
-			profile_space: profile.profile_space,
-			profile_idc: profile.profile_idc,
-			profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
-			tier_flag: profile.tier_flag,
-			level_idc: profile.level_idc.ok_or(Error::MissingLevelIdc)?,
-			constraint_flags: crate::codec::h265::pack_constraint_flags(profile),
-		});
-		config.coded_width = Some(sps.rbsp.cropped_width() as u32);
-		config.coded_height = Some(sps.rbsp.cropped_height() as u32);
-		config.framerate = vui_data.framerate;
-		config.display_ratio_width = vui_data.display_ratio_width;
-		config.display_ratio_height = vui_data.display_ratio_height;
-		config.container = hang::catalog::Container::Legacy;
-
-		if let Some(old) = &self.config {
-			if old == &config {
-				return Ok(());
-			}
-			// A different SPS would need a new init segment, which the single fixed
-			// track can't represent.
-			return Err(Error::FixedTrackReconfigured.into());
-		}
-
-		let track_name = self.track.name().to_string();
-		tracing::debug!(name = ?track_name, ?config, "starting track");
-		self.catalog.video.renditions.insert(track_name, config.clone());
-		self.config = Some(config);
-
-		Ok(())
-	}
-
-	/// Initialize the decoder with SPS/PPS and other non-slice NALs.
+	/// Initialize the decoder with VPS/SPS/PPS and other non-slice NALs.
+	///
+	/// Resolves the config from any SPS in the buffer and primes the splitter's
+	/// parameter-set cache. Optional, since the importer also self-initializes
+	/// from the first keyframe. The buffer is fully consumed.
 	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
-		let mut nals = NalIterator::new(buf);
-
+		let mut scan = Bytes::copy_from_slice(buf.as_ref());
+		let mut nals = NalIterator::new(&mut scan);
 		while let Some(nal) = nals.next().transpose()? {
-			self.decode_nal(nal, None)?;
+			if is_sps(&nal) {
+				self.configure_from_sps(&nal)?;
+			}
+		}
+		if let Some(nal) = nals.flush()?
+			&& is_sps(&nal)
+		{
+			self.configure_from_sps(&nal)?;
 		}
 
-		if let Some(nal) = nals.flush()? {
-			self.decode_nal(nal, None)?;
-		}
-
+		self.split.seed(buf)?;
 		Ok(())
 	}
 
@@ -123,212 +90,36 @@ impl Import {
 		self.config.is_some().then_some(&self.catalog)
 	}
 
+	/// True once the first SPS has populated the catalog.
+	pub fn is_initialized(&self) -> bool {
+		self.config.is_some()
+	}
+
+	/// Decode from an asynchronous reader (streaming input).
+	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> Result<()> {
+		let mut buffer = BytesMut::new();
+		while reader.read_buf(&mut buffer).await? > 0 {
+			self.decode_stream(&mut buffer, None)?;
+		}
+		Ok(())
+	}
+
 	/// Decode as much data as possible from the given buffer.
 	///
-	/// Unlike [Self::decode_frame], this method needs the start code for the next frame.
-	/// This means it works for streaming media (ex. stdin) but adds a frame of latency.
-	///
-	/// TODO: This currently associates PTS with the *previous* frame, as part of `maybe_start_frame`.
+	/// Unlike [Self::decode_frame], this needs the start code of the next frame,
+	/// so it works for streaming media (e.g. stdin) but adds a frame of latency.
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
-		let pts = self.pts(pts)?;
-
-		// Iterate over the NAL units in the buffer based on start codes.
-		let nals = NalIterator::new(buf);
-
-		for nal in nals {
-			self.decode_nal(nal?, Some(pts))?;
-		}
-
-		Ok(())
+		let frames = self.split.decode_stream(buf, pts)?;
+		self.write_frames(frames)
 	}
 
-	/// Decode all data in the buffer, assuming the buffer contains (the rest of) a frame.
+	/// Decode all data in the buffer, assuming it holds (the rest of) one frame.
 	///
-	/// Unlike [Self::decode_stream], this is called when we know NAL boundaries.
-	/// This can avoid a frame of latency just waiting for the next frame's start code.
-	/// This can also be used when EOF is detected to flush the final frame.
-	///
-	/// NOTE: The next decode will fail if it doesn't begin with a start code.
+	/// Unlike [Self::decode_stream], this is called when NAL boundaries are
+	/// known, avoiding a frame of latency. Also used at EOF to flush the final frame.
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
-		let pts = self.pts(pts)?;
-		// Iterate over the NAL units in the buffer based on start codes.
-		let mut nals = NalIterator::new(buf);
-
-		// Iterate over each NAL that is followed by a start code.
-		while let Some(nal) = nals.next().transpose()? {
-			self.decode_nal(nal, Some(pts))?;
-		}
-
-		// Assume the rest of the buffer is a single NAL.
-		if let Some(nal) = nals.flush()? {
-			self.decode_nal(nal, Some(pts))?;
-		}
-
-		// Flush the frame if we read a slice.
-		self.maybe_start_frame(Some(pts))?;
-
-		Ok(())
-	}
-
-	/// Decode a single NAL unit. Only reads the first header byte to extract nal_unit_type,
-	/// Ignores nuh_layer_id and nuh_temporal_id_plus1.
-	fn decode_nal(&mut self, nal: Bytes, pts: Option<moq_net::Timestamp>) -> Result<()> {
-		if nal.len() < 2 {
-			return Err(Error::NalTooShort.into());
-		}
-		// u16 header: [forbidden_zero_bit(1) | nal_unit_type(6) | nuh_layer_id(6) | nuh_temporal_id_plus1(3)]
-		let header = nal.first().ok_or(Error::NalTooShort)?;
-
-		let forbidden_zero_bit = (header >> 7) & 1;
-		if forbidden_zero_bit != 0 {
-			return Err(Error::ForbiddenZeroBit.into());
-		}
-
-		// Bits 1-6: nal_unit_type
-		let nal_unit_type = (header >> 1) & 0b111111;
-		let nal_type = NALUnitType::from(nal_unit_type);
-
-		match nal_type {
-			NALUnitType::VpsNut => {
-				self.maybe_start_frame(pts)?;
-
-				self.vps = Some(nal.clone());
-				self.current.contains_vps = true;
-			}
-			NALUnitType::SpsNut => {
-				self.maybe_start_frame(pts)?;
-
-				// Try to reinitialize the track if the SPS has changed.
-				let sps = SpsNALUnit::parse(&mut &nal[..]).map_err(|_| Error::SpsParse)?;
-				self.init(&sps)?;
-
-				// SPS changed mid-AU. Cached VPS/PPS are tied to the old SPS
-				// and may already have been appended to current.chunks earlier
-				// in this AU; reset the AU so the new VPS+SPS+PPS triple is
-				// the only parameter set we emit.
-				if self.sps.as_ref().is_some_and(|cached| cached != &nal) {
-					self.pps = None;
-					self.current.chunks.clear();
-					self.current.contains_vps = false;
-					self.current.contains_sps = false;
-					self.current.contains_pps = false;
-				}
-
-				self.sps = Some(nal.clone());
-				self.current.contains_sps = true;
-			}
-			NALUnitType::PpsNut => {
-				self.maybe_start_frame(pts)?;
-
-				self.pps = Some(nal.clone());
-				self.current.contains_pps = true;
-			}
-			NALUnitType::AudNut | NALUnitType::PrefixSeiNut | NALUnitType::SuffixSeiNut => {
-				self.maybe_start_frame(pts)?;
-			}
-			// Keyframe containing slices
-			NALUnitType::IdrWRadl
-			| NALUnitType::IdrNLp
-			| NALUnitType::BlaNLp
-			| NALUnitType::BlaWRadl
-			| NALUnitType::BlaWLp
-			| NALUnitType::CraNut => {
-				// Insert cached VPS/SPS/PPS before keyframes if not already present in this frame.
-				if !self.current.contains_vps
-					&& let Some(vps) = &self.vps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(vps);
-					self.current.contains_vps = true;
-				}
-				if !self.current.contains_sps
-					&& let Some(sps) = &self.sps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(sps);
-					self.current.contains_sps = true;
-				}
-				if !self.current.contains_pps
-					&& let Some(pps) = &self.pps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(pps);
-					self.current.contains_pps = true;
-				}
-
-				self.current.contains_idr = true;
-				self.current.contains_slice = true;
-			}
-			// All other slice types (both N and R variants)
-			NALUnitType::TrailN
-			| NALUnitType::TrailR
-			| NALUnitType::TsaN
-			| NALUnitType::TsaR
-			| NALUnitType::StsaN
-			| NALUnitType::StsaR
-			| NALUnitType::RadlN
-			| NALUnitType::RadlR
-			| NALUnitType::RaslN
-			| NALUnitType::RaslR => {
-				// Check first_slice_segment_in_pic_flag (bit 7 of third byte, after 2-byte header)
-				if nal.get(2).ok_or(Error::NalTooShort)? & 0x80 != 0 {
-					self.maybe_start_frame(pts)?;
-				}
-				self.current.contains_slice = true;
-			}
-			_ => {}
-		}
-
-		// Replace the original start code with a canonical 4-byte start code (marginally easier
-		// for downstream players, e.g. MSE).
-		self.current.chunks.extend_from_slice(&START_CODE);
-		self.current.chunks.extend_from_slice(&nal);
-
-		Ok(())
-	}
-
-	fn maybe_start_frame(&mut self, pts: Option<moq_net::Timestamp>) -> Result<()> {
-		// If we haven't seen any slices, we shouldn't flush yet.
-		if !self.current.contains_slice {
-			return Ok(());
-		}
-
-		let pts = pts.ok_or(Error::MissingTimestamp)?;
-		let keyframe = self.current.contains_idr;
-
-		// A keyframe we couldn't configure (no SPS) is undecodable.
-		if keyframe && self.config.is_none() {
-			return Err(Error::MissingSps.into());
-		}
-
-		// Take the payload and clear the per-AU state up front, so a
-		// MissingKeyframe from a pre-keyframe delta (a mid-stream join) leaves a
-		// clean slate for the next access unit.
-		let payload = std::mem::take(&mut self.current.chunks).freeze();
-		self.current.contains_idr = false;
-		self.current.contains_slice = false;
-		self.current.contains_vps = false;
-		self.current.contains_sps = false;
-		self.current.contains_pps = false;
-
-		let frame = crate::container::Frame {
-			timestamp: pts,
-			payload,
-			keyframe,
-			duration: None,
-		};
-
-		// A pre-keyframe delta has no group to anchor it: the producer returns
-		// MissingKeyframe, which the caller (e.g. a TS mid-stream join) skips.
-		self.track.write(frame)?;
-
-		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.video.renditions.get_mut(self.track.name())
-		{
-			c.jitter = Some(jitter);
-		}
-
-		Ok(())
+		let frames = self.split.decode_frame(buf, pts)?;
+		self.write_frames(frames)
 	}
 
 	/// Finish the track, flushing the current group.
@@ -342,23 +133,89 @@ impl Import {
 	/// Any in-flight access unit is dropped. Pre-seek NALs would otherwise leak
 	/// into the post-seek group with the wrong timestamp.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.current = Frame::default();
+		self.split.reset();
 		self.track.seek(sequence)?;
 		Ok(())
 	}
 
-	/// True once the first SPS has populated the catalog.
-	pub fn is_initialized(&self) -> bool {
-		self.config.is_some()
-	}
-
-	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {
-		if let Some(pts) = hint {
-			return Ok(pts);
+	/// Resolve the config from an inline SPS.
+	///
+	/// A different SPS would need a new init segment, which the single fixed
+	/// track can't represent, so a reconfiguration is an error.
+	fn configure_from_sps(&mut self, sps_nal: &Bytes) -> Result<()> {
+		if self.last_sps.as_ref() == Some(sps_nal) {
+			return Ok(());
 		}
 
-		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
+		let sps = SpsNALUnit::parse(&mut &sps_nal[..]).map_err(|_| Error::SpsParse)?;
+		let profile = &sps.rbsp.profile_tier_level.general_profile;
+		let vui_data = sps.rbsp.vui_parameters.as_ref().map(VuiData::new).unwrap_or_default();
+
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
+			in_band: true, // We only support `hev1` with inline VPS/SPS/PPS for now.
+			profile_space: profile.profile_space,
+			profile_idc: profile.profile_idc,
+			profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
+			tier_flag: profile.tier_flag,
+			level_idc: profile.level_idc.ok_or(Error::MissingLevelIdc)?,
+			constraint_flags: super::pack_constraint_flags(profile),
+		});
+		config.coded_width = Some(sps.rbsp.cropped_width() as u32);
+		config.coded_height = Some(sps.rbsp.cropped_height() as u32);
+		config.framerate = vui_data.framerate;
+		config.display_ratio_width = vui_data.display_ratio_width;
+		config.display_ratio_height = vui_data.display_ratio_height;
+		config.container = hang::catalog::Container::Legacy;
+
+		self.last_sps = Some(sps_nal.clone());
+
+		if let Some(old) = &self.config {
+			if old == &config {
+				return Ok(());
+			}
+			return Err(Error::FixedTrackReconfigured.into());
+		}
+
+		let track_name = self.track.name().to_string();
+		tracing::debug!(name = ?track_name, ?config, "starting track");
+		self.catalog.video.renditions.insert(track_name, config.clone());
+		self.config = Some(config);
+		Ok(())
+	}
+
+	/// Write split frames to the track, resolving the config from the first
+	/// keyframe's inline SPS and refining the catalog jitter as it goes.
+	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
+		for frame in frames {
+			if frame.keyframe
+				&& let Some(sps) = find_sps(&frame.payload)
+			{
+				self.configure_from_sps(&sps)?;
+			}
+
+			// A keyframe we still can't configure (no SPS) is undecodable.
+			if frame.keyframe && self.config.is_none() {
+				return Err(Error::MissingSps.into());
+			}
+
+			let pts = frame.timestamp;
+			// A pre-keyframe delta has no group to anchor it: the producer returns
+			// MissingKeyframe, which the caller (e.g. a TS mid-stream join) skips.
+			self.track.write(frame)?;
+
+			if let Some(jitter) = self.jitter.observe(pts)
+				&& let Some(c) = self.catalog.video.renditions.get_mut(self.track.name())
+			{
+				c.jitter = Some(jitter);
+			}
+		}
+		Ok(())
+	}
+}
+
+impl FrameDecode for Import {
+	fn decode<I: IntoIterator<Item = Frame>>(&mut self, frames: I) -> Result<()> {
+		self.write_frames(frames)
 	}
 }
 
@@ -368,14 +225,21 @@ impl Renditions for Import {
 	}
 }
 
-#[derive(Default)]
-struct Frame {
-	chunks: BytesMut,
-	contains_idr: bool,
-	contains_slice: bool,
-	contains_vps: bool,
-	contains_sps: bool,
-	contains_pps: bool,
+fn is_sps(nal: &[u8]) -> bool {
+	nal.first()
+		.is_some_and(|h| nal_unit_type(*h) == scuffle_h265::NALUnitType::SpsNut)
+}
+
+/// Find the first SPS NAL in an Annex-B payload, if any.
+fn find_sps(payload: &[u8]) -> Option<Bytes> {
+	let mut buf = Bytes::copy_from_slice(payload);
+	let mut nals = NalIterator::new(&mut buf);
+	while let Some(Ok(nal)) = nals.next() {
+		if is_sps(&nal) {
+			return Some(nal);
+		}
+	}
+	nals.flush().ok().flatten().filter(|nal| is_sps(nal))
 }
 
 #[derive(Default)]
