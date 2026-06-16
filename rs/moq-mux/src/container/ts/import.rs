@@ -723,7 +723,7 @@ enum Stream<E: CatalogExt = ()> {
 
 impl<E: CatalogExt> Stream<E> {
 	fn write(&mut self, pending: Pending, burst: Option<u64>) -> anyhow::Result<()> {
-		match self {
+		let result = match self {
 			Stream::H264 { import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
 				import.decode_frame(&mut pending.data.as_slice(), pts)
@@ -735,6 +735,13 @@ impl<E: CatalogExt> Stream<E> {
 			Stream::Aac(stream) => stream.write(pending, burst),
 			Stream::Legacy(stream) => stream.write(pending),
 			Stream::Clock | Stream::Ignored => Ok(()),
+		};
+
+		// A TS stream can join mid-GOP: the codec importer rejects deltas until a
+		// keyframe anchors the first group. Drop those, but surface any other error.
+		match result {
+			Err(err) if crate::Error::is_missing_keyframe(&err) => Ok(()),
+			result => result,
 		}
 	}
 

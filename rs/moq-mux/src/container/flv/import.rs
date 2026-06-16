@@ -176,10 +176,18 @@ impl Import {
 				// FLV stores DTS in the tag; PTS is DTS plus the composition offset.
 				let pts_ms = (timestamp as i64) + (composition_time as i64);
 				anyhow::ensure!(pts_ms >= 0, "negative AVC presentation timestamp");
+
+				// A group must start with a keyframe. A valid FLV opens on one, so a
+				// leading delta means a malformed/mid-GOP stream: reject it outright.
+				let keyframe = frame_type == FRAME_TYPE_KEY;
+				if !keyframe && !stream.track.has_group() {
+					return Err(crate::Error::MissingKeyframe.into());
+				}
+
 				stream.track.write(Frame {
 					timestamp: Timestamp::from_millis(pts_ms as u64)?,
 					payload: Bytes::copy_from_slice(data),
-					keyframe: frame_type == FRAME_TYPE_KEY,
+					keyframe,
 				})?;
 				Ok(())
 			}
@@ -248,9 +256,7 @@ impl Import {
 			.renditions
 			.insert(net_track.name.clone(), config);
 		self.video = Some(Stream {
-			// Live FLV can join mid-GOP; tolerate leading deltas before the first keyframe.
-			track: crate::container::Producer::new(net_track, crate::catalog::hang::Container::Legacy)
-				.with_lenient_start(),
+			track: crate::container::Producer::new(net_track, crate::catalog::hang::Container::Legacy),
 			description: Bytes::copy_from_slice(avcc_bytes),
 		});
 		Ok(())

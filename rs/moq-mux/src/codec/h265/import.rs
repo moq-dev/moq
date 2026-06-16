@@ -110,8 +110,10 @@ impl<E: CatalogExt> Import<E> {
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track =
-			Some(crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start());
+		self.track = Some(crate::container::Producer::new(
+			track,
+			crate::catalog::hang::Container::Legacy,
+		));
 
 		Ok(())
 	}
@@ -314,11 +316,23 @@ impl<E: CatalogExt> Import<E> {
 		let pts = pts.context("missing timestamp")?;
 
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
+		let keyframe = self.current.contains_idr;
+
+		// A delta with no open group can't anchor a group (which must start with a
+		// keyframe). Reject it; importers that join mid-stream ignore MissingKeyframe.
+		if !keyframe && !track.has_group() {
+			self.current.contains_idr = false;
+			self.current.contains_slice = false;
+			self.current.contains_vps = false;
+			self.current.contains_sps = false;
+			self.current.contains_pps = false;
+			return Err(crate::Error::MissingKeyframe.into());
+		}
 
 		let frame = crate::container::Frame {
 			timestamp: pts,
 			payload,
-			keyframe: self.current.contains_idr,
+			keyframe,
 		};
 
 		track.write(frame)?;

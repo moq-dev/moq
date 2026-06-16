@@ -102,10 +102,10 @@ impl<E: CatalogExt> Import<E> {
 			Mode::Avc3 => {
 				self.tracks.set_suffix(".avc3");
 				let track = self.tracks.create()?;
-				self.track = Some(
-					crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
-						.with_lenient_start(),
-				);
+				self.track = Some(crate::container::Producer::new(
+					track,
+					crate::catalog::hang::Container::Legacy,
+				));
 				self.state = State::Avc3 {
 					current: Avc3Frame::default(),
 					sps: None,
@@ -185,10 +185,10 @@ impl<E: CatalogExt> Import<E> {
 			if self.track.is_none() {
 				self.tracks.set_suffix(".avc3");
 				let track = self.tracks.create()?;
-				self.track = Some(
-					crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
-						.with_lenient_start(),
-				);
+				self.track = Some(crate::container::Producer::new(
+					track,
+					crate::catalog::hang::Container::Legacy,
+				));
 			}
 		}
 
@@ -266,6 +266,12 @@ impl<E: CatalogExt> Import<E> {
 			.track
 			.as_mut()
 			.context("not initialized; call initialize() first")?;
+
+		// A delta with no open group can't anchor a group (which must start with a
+		// keyframe). Reject it; importers that join mid-stream ignore MissingKeyframe.
+		if !keyframe && !track.has_group() {
+			return Err(crate::Error::MissingKeyframe.into());
+		}
 
 		track.write(crate::container::Frame {
 			timestamp: pts,
@@ -427,7 +433,20 @@ impl<E: CatalogExt> Import<E> {
 		current.contains_sps = false;
 		current.contains_pps = false;
 
+		// A keyframe with no SPS (none inline, none cached) is genuinely undecodable:
+		// the group it would anchor could never be played. Reject it loudly.
+		if keyframe && self.config.is_none() {
+			anyhow::bail!("H.264 keyframe arrived before any SPS; cannot configure the decoder");
+		}
+
 		let track = self.track.as_mut().context("avc3 track not created")?;
+
+		// A delta with no open group can't anchor a group (which must start with a
+		// keyframe). Reject it; importers that join mid-stream ignore MissingKeyframe.
+		if !keyframe && !track.has_group() {
+			return Err(crate::Error::MissingKeyframe.into());
+		}
+
 		track.write(crate::container::Frame {
 			timestamp: pts,
 			payload,
@@ -465,8 +484,10 @@ impl<E: CatalogExt> Import<E> {
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track =
-			Some(crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start());
+		self.track = Some(crate::container::Producer::new(
+			track,
+			crate::catalog::hang::Container::Legacy,
+		));
 		Ok(())
 	}
 
@@ -631,6 +652,42 @@ mod tests {
 		assert!(cfg.description.is_none(), "avc3 has no out-of-band description");
 		assert_eq!(h264.profile, sps[1]);
 		assert_eq!(h264.level, sps[3]);
+	}
+
+	/// An avc3 IDR that arrives before any SPS can't configure the decoder, so the
+	/// importer rejects it rather than anchoring an undecodable group.
+	#[tokio::test(start_paused = true)]
+	async fn keyframe_without_sps_errors() {
+		let mut producer = moq_net::Broadcast::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+		let mut importer = Import::new(producer, catalog).with_mode(Mode::Avc3).unwrap();
+
+		// Annex-B IDR slice (NAL type 5) with no preceding SPS.
+		let mut annexb = bytes::BytesMut::new();
+		annexb.extend_from_slice(&[0, 0, 0, 1]);
+		annexb.extend_from_slice(&[0x65, 0x88, 0x80, 0x00]);
+
+		let err = importer.decode_frame(&mut annexb, None).unwrap_err();
+		assert!(err.to_string().contains("SPS"), "unexpected error: {err}");
+	}
+
+	/// An avc3 delta that arrives before the first keyframe (a mid-stream join) is
+	/// rejected with `MissingKeyframe`: a MoQ group must start with a keyframe.
+	/// Container importers that can join mid-stream ignore this error.
+	#[tokio::test(start_paused = true)]
+	async fn delta_before_init_returns_missing_keyframe() {
+		let mut producer = moq_net::Broadcast::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+		let mut importer = Import::new(producer, catalog).with_mode(Mode::Avc3).unwrap();
+
+		// Annex-B non-IDR slice (NAL type 1) with the slice-header high bit set so it
+		// is treated as a frame boundary.
+		let mut annexb = bytes::BytesMut::new();
+		annexb.extend_from_slice(&[0, 0, 0, 1]);
+		annexb.extend_from_slice(&[0x41, 0x9a, 0x00, 0x00]);
+
+		let err = importer.decode_frame(&mut annexb, None).unwrap_err();
+		assert!(crate::Error::is_missing_keyframe(&err), "unexpected error: {err}");
 	}
 }
 

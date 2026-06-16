@@ -25,6 +25,25 @@ pub enum Error {
 	/// Error parsing or building LOC frames.
 	#[error("loc: {0}")]
 	Loc(#[from] moq_loc::Error),
+
+	/// A frame arrived with no open group to anchor it, i.e. before the first
+	/// keyframe. A MoQ group must start with a keyframe, so importers reject such
+	/// frames. A stream that can legitimately join mid-GOP (TS) ignores this via
+	/// [`is_missing_keyframe`](Self::is_missing_keyframe); formats that must open on
+	/// a keyframe (FLV) let it propagate as a malformed-stream error.
+	#[error("frame received before the first keyframe")]
+	MissingKeyframe,
+}
+
+impl Error {
+	/// Whether `err` (possibly wrapped by anyhow) is [`Error::MissingKeyframe`].
+	///
+	/// Container importers that join mid-stream use this to drop the leading deltas
+	/// a codec importer rejects before a keyframe anchors the first group.
+	pub fn is_missing_keyframe(err: &anyhow::Error) -> bool {
+		err.downcast_ref::<Error>()
+			.is_some_and(|e| matches!(e, Error::MissingKeyframe))
+	}
 }
 
 /// A Result type alias for moq-mux operations.
