@@ -1,7 +1,7 @@
-use anyhow::Context;
 use bytes::Buf;
 
 use crate::container::jitter::MinFrameDuration;
+use crate::publish::Renditions;
 
 use super::FrameHeader;
 
@@ -9,17 +9,15 @@ use super::FrameHeader;
 ///
 /// A VP8 elementary stream isn't self-delimiting, so the caller must pass whole
 /// frames, one per [`decode_frame`](Self::decode_frame). The first key frame's
-/// header supplies the catalog dimensions; the track is created lazily so the
-/// importer can be constructed before any media arrives.
+/// header supplies the catalog dimensions, so [`catalog`](Self::catalog) is
+/// `None` until then. Build it from a [`moq_net::TrackRequest`] ([`new`](Self::new))
+/// or an existing track ([`from_track`](Self::from_track)).
 pub struct Import {
-	// Where new media tracks come from.
-	tracks: crate::track_provider::TrackProvider,
+	// The track being produced.
+	track: crate::container::Producer<crate::catalog::hang::Container>,
 
-	// The catalog being produced.
-	catalog: crate::catalog::Producer,
-
-	// The track being produced, created on the first key frame.
-	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
+	// The standalone catalog, populated on the first key frame.
+	catalog: hang::Catalog,
 
 	// The resolved config, used to detect resolution changes.
 	config: Option<hang::catalog::VideoConfig>,
@@ -32,22 +30,17 @@ pub struct Import {
 }
 
 impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
-		Self {
-			tracks: crate::track_provider::TrackProvider::unique(broadcast, ".vp8"),
-			catalog,
-			track: None,
-			config: None,
-			zero: None,
-			jitter: MinFrameDuration::new(),
-		}
+	/// Serve a track request, accepting it at the microsecond timescale.
+	pub fn new(request: moq_net::TrackRequest) -> Self {
+		let info = moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE);
+		Self::from_track(request.accept(info))
 	}
 
-	pub fn new_with_track(track: moq_net::TrackProducer, catalog: crate::catalog::Producer) -> Self {
+	/// Publish on an existing track producer.
+	pub fn from_track(track: moq_net::TrackProducer) -> Self {
 		Self {
-			tracks: crate::track_provider::TrackProvider::fixed(track),
-			catalog,
-			track: None,
+			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
+			catalog: hang::Catalog::default(),
 			config: None,
 			zero: None,
 			jitter: MinFrameDuration::new(),
@@ -57,9 +50,9 @@ impl Import {
 	/// Initialize the importer.
 	///
 	/// VP8 has no out-of-band configuration record, so this is normally called
-	/// with an empty buffer (gstreamer / ffi pass `Bytes::new()`) and the track
-	/// is created lazily from the first key frame. If the caller does pass the
-	/// first frame here, it's decoded so nothing is dropped.
+	/// with an empty buffer (gstreamer / ffi pass `Bytes::new()`) and the catalog
+	/// is filled from the first key frame. If the caller does pass the first frame
+	/// here, it's decoded so nothing is dropped.
 	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
 		if buf.has_remaining() {
 			self.decode_frame(buf, None)?;
@@ -77,28 +70,16 @@ impl Import {
 			return Ok(());
 		}
 
-		if self.track.is_some() && self.tracks.is_fixed() {
+		if self.config.is_some() {
 			anyhow::bail!("fixed track cannot be reconfigured");
 		}
 
-		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name(), "reinitializing track");
-			self.catalog.lock().video.renditions.remove(track.name());
-		}
-
-		let track = self.tracks.create()?;
-		tracing::debug!(name = ?track.name(), ?config, "starting track");
+		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
 		self.catalog
-			.lock()
 			.video
 			.renditions
-			.insert(track.name().to_string(), config.clone());
-
+			.insert(self.track.name().to_string(), config.clone());
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::catalog::hang::Container::Legacy,
-		));
 
 		Ok(())
 	}
@@ -117,15 +98,8 @@ impl Import {
 			self.init(width, height)?;
 		}
 
-		// Resolve the timestamp before borrowing `track` so `pts` doesn't hold a
-		// `&mut self` across the track write.
 		let pts = self.pts(pts)?;
-		let track = self
-			.track
-			.as_mut()
-			.context("expected a VP8 key frame before any interframe")?;
-
-		track.write(crate::container::Frame {
+		self.track.write(crate::container::Frame {
 			timestamp: pts,
 			payload,
 			keyframe: header.keyframe,
@@ -133,7 +107,7 @@ impl Import {
 		})?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(track.name())
+			&& let Some(c) = self.catalog.video.renditions.get_mut(self.track.name())
 		{
 			c.jitter = Some(jitter);
 		}
@@ -141,27 +115,31 @@ impl Import {
 		Ok(())
 	}
 
-	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
-		Ok(self.track.as_ref().context("not initialized")?.track())
+	/// The standalone catalog once the first key frame is seen, else `None`.
+	pub fn catalog(&self) -> Option<&hang::Catalog> {
+		self.config.is_some().then_some(&self.catalog)
+	}
+
+	/// The underlying track producer.
+	pub fn track(&self) -> &moq_net::TrackProducer {
+		self.track.track()
 	}
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
-		track.finish()?;
+		self.track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
-		track.seek(sequence)?;
+		self.track.seek(sequence)?;
 		Ok(())
 	}
 
+	/// True once the first key frame has populated the catalog.
 	pub fn is_initialized(&self) -> bool {
-		self.track.is_some()
+		self.config.is_some()
 	}
 
 	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> anyhow::Result<moq_net::Timestamp> {
@@ -174,12 +152,9 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
-	fn drop(&mut self) {
-		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name(), "ending track");
-			self.catalog.lock().video.renditions.remove(track.name());
-		}
+impl Renditions for Import {
+	fn renditions(&self) -> &hang::Catalog {
+		&self.catalog
 	}
 }
 
@@ -193,13 +168,12 @@ mod tests {
 	/// rendition with the right dimensions and emit both frames.
 	#[tokio::test(start_paused = true)]
 	async fn imports_keyframe_then_interframe() {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
-		let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-		let mut import = super::Import::new(broadcast.clone(), catalog.clone());
+		let mut import = super::Import::new(moq_net::TrackRequest::new("0.vp8"));
 
-		// Empty init buffer: the track is created lazily on the first key frame.
+		// Empty init buffer: the catalog is filled on the first key frame.
 		import.initialize(&mut Bytes::new()).unwrap();
 		assert!(!import.is_initialized());
+		assert!(import.catalog().is_none());
 
 		let keyframe = Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00]);
 		import
@@ -207,8 +181,8 @@ mod tests {
 			.unwrap();
 
 		assert!(import.is_initialized());
-		let name = import.track().unwrap().name().to_string();
-		let config = catalog.lock().video.renditions.get(&name).cloned().unwrap();
+		let catalog = import.catalog().unwrap();
+		let config = catalog.video.renditions.get(import.track().name()).unwrap();
 		assert_eq!(config.codec, hang::catalog::VideoCodec::VP8);
 		assert_eq!(config.coded_width, Some(320));
 		assert_eq!(config.coded_height, Some(240));
@@ -222,13 +196,11 @@ mod tests {
 		import.finish().unwrap();
 	}
 
-	/// An interframe before any key frame has no dimensions, so the track can't
-	/// be created and the Producer rejects a non-keyframe first frame.
+	/// An interframe before any key frame has no dimensions, so the Producer
+	/// rejects a non-keyframe as the first frame in a group.
 	#[tokio::test(start_paused = true)]
 	async fn rejects_interframe_first() {
-		let mut broadcast = moq_net::BroadcastInfo::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-		let mut import = super::Import::new(broadcast.clone(), catalog);
+		let mut import = super::Import::new(moq_net::TrackRequest::new("0.vp8"));
 
 		let mut interframe = Bytes::from_static(&[0x31, 0x00, 0x00, 0xaa, 0xbb]);
 		assert!(

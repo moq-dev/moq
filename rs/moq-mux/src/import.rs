@@ -102,11 +102,11 @@ enum FramedKind {
 	H264(crate::publish::Published<crate::codec::h264::Import>),
 	// Boxed because it's a large struct and clippy complains about the size.
 	Fmp4(Box<crate::container::fmp4::Import>),
-	Hev1(crate::codec::h265::Import),
-	Av01(crate::codec::av1::Import),
-	Vp8(crate::codec::vp8::Import),
-	Vp9(crate::codec::vp9::Import),
-	Aac(crate::codec::aac::Import),
+	Hev1(crate::publish::Published<crate::codec::h265::Import>),
+	Av01(crate::publish::Published<crate::codec::av1::Import>),
+	Vp8(crate::publish::Published<crate::codec::vp8::Import>),
+	Vp9(crate::publish::Published<crate::codec::vp9::Import>),
+	Aac(crate::publish::Published<crate::codec::aac::Import>),
 	Opus(crate::publish::Published<crate::codec::opus::Import>),
 	// Boxed for the same reason as Fmp4.
 	Mkv(Box<crate::container::mkv::Import>),
@@ -151,28 +151,34 @@ impl Framed {
 				FramedKind::Fmp4(decoder)
 			}
 			FramedFormat::Hev1 => {
-				let mut decoder = crate::codec::h265::Import::new(broadcast, catalog);
+				let track = crate::publish::unique_track(&mut broadcast, ".hev1")?;
+				let mut decoder = crate::codec::h265::Import::from_track(track);
 				decoder.initialize(buf)?;
-				FramedKind::Hev1(decoder)
+				FramedKind::Hev1(crate::publish::Published::new(catalog, decoder))
 			}
 			FramedFormat::Av01 => {
-				let mut decoder = crate::codec::av1::Import::new(broadcast, catalog);
+				let track = crate::publish::unique_track(&mut broadcast, ".av01")?;
+				let mut decoder = crate::codec::av1::Import::from_track(track);
 				decoder.initialize(buf)?;
-				FramedKind::Av01(decoder)
+				FramedKind::Av01(crate::publish::Published::new(catalog, decoder))
 			}
 			FramedFormat::Vp8 => {
-				let mut decoder = crate::codec::vp8::Import::new(broadcast, catalog);
+				let track = crate::publish::unique_track(&mut broadcast, ".vp8")?;
+				let mut decoder = crate::codec::vp8::Import::from_track(track);
 				decoder.initialize(buf)?;
-				FramedKind::Vp8(decoder)
+				FramedKind::Vp8(crate::publish::Published::new(catalog, decoder))
 			}
 			FramedFormat::Vp9 => {
-				let mut decoder = crate::codec::vp9::Import::new(broadcast, catalog);
+				let track = crate::publish::unique_track(&mut broadcast, ".vp09")?;
+				let mut decoder = crate::codec::vp9::Import::from_track(track);
 				decoder.initialize(buf)?;
-				FramedKind::Vp9(decoder)
+				FramedKind::Vp9(crate::publish::Published::new(catalog, decoder))
 			}
 			FramedFormat::Aac => {
 				let config = crate::codec::aac::Config::parse(buf)?;
-				FramedKind::Aac(crate::codec::aac::Import::new(broadcast, catalog, config)?)
+				let track = crate::publish::unique_track(&mut broadcast, ".aac")?;
+				let import = crate::codec::aac::Import::from_track(track, config)?;
+				FramedKind::Aac(crate::publish::Published::new(catalog, import))
 			}
 			FramedFormat::Opus => {
 				let config = crate::codec::opus::Config::parse(buf)?;
@@ -222,28 +228,29 @@ impl Framed {
 				FramedKind::H264(crate::publish::Published::new(catalog, decoder))
 			}
 			FramedFormat::Hev1 => {
-				let mut decoder = crate::codec::h265::Import::new_with_track(track, catalog);
+				let mut decoder = crate::codec::h265::Import::from_track(track);
 				decoder.initialize(buf)?;
-				FramedKind::Hev1(decoder)
+				FramedKind::Hev1(crate::publish::Published::new(catalog, decoder))
 			}
 			FramedFormat::Av01 => {
-				let mut decoder = crate::codec::av1::Import::new_with_track(track, catalog);
+				let mut decoder = crate::codec::av1::Import::from_track(track);
 				decoder.initialize(buf)?;
-				FramedKind::Av01(decoder)
+				FramedKind::Av01(crate::publish::Published::new(catalog, decoder))
 			}
 			FramedFormat::Vp8 => {
-				let mut decoder = crate::codec::vp8::Import::new_with_track(track, catalog);
+				let mut decoder = crate::codec::vp8::Import::from_track(track);
 				decoder.initialize(buf)?;
-				FramedKind::Vp8(decoder)
+				FramedKind::Vp8(crate::publish::Published::new(catalog, decoder))
 			}
 			FramedFormat::Vp9 => {
-				let mut decoder = crate::codec::vp9::Import::new_with_track(track, catalog);
+				let mut decoder = crate::codec::vp9::Import::from_track(track);
 				decoder.initialize(buf)?;
-				FramedKind::Vp9(decoder)
+				FramedKind::Vp9(crate::publish::Published::new(catalog, decoder))
 			}
 			FramedFormat::Aac => {
 				let config = crate::codec::aac::Config::parse(buf)?;
-				FramedKind::Aac(crate::codec::aac::Import::new_with_track(track, catalog, config)?)
+				let import = crate::codec::aac::Import::from_track(track, config)?;
+				FramedKind::Aac(crate::publish::Published::new(catalog, import))
 			}
 			FramedFormat::Opus => {
 				let config = crate::codec::opus::Config::parse(buf)?;
@@ -297,10 +304,10 @@ impl Framed {
 		match self.decoder {
 			FramedKind::H264(ref decoder) => Ok(decoder.track()),
 			FramedKind::Fmp4(_) => Err(crate::Error::MultipleTracks("fmp4")),
-			FramedKind::Hev1(ref decoder) => decoder.track(),
-			FramedKind::Av01(ref decoder) => decoder.track(),
-			FramedKind::Vp8(ref decoder) => decoder.track().map_err(Into::into),
-			FramedKind::Vp9(ref decoder) => decoder.track().map_err(Into::into),
+			FramedKind::Hev1(ref decoder) => Ok(decoder.track()),
+			FramedKind::Av01(ref decoder) => Ok(decoder.track()),
+			FramedKind::Vp8(ref decoder) => Ok(decoder.track()),
+			FramedKind::Vp9(ref decoder) => Ok(decoder.track()),
 			FramedKind::Aac(ref decoder) => Ok(decoder.track()),
 			FramedKind::Opus(ref decoder) => Ok(decoder.track()),
 			FramedKind::Mkv(_) => Err(crate::Error::MultipleTracks("mkv")),
@@ -316,10 +323,22 @@ impl Framed {
 				decoder.sync();
 			}
 			FramedKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
-			FramedKind::Hev1(ref mut decoder) => decoder.decode_frame(buf, pts)?,
-			FramedKind::Av01(ref mut decoder) => decoder.decode_frame(buf, pts)?,
-			FramedKind::Vp8(ref mut decoder) => decoder.decode_frame(buf, pts)?,
-			FramedKind::Vp9(ref mut decoder) => decoder.decode_frame(buf, pts)?,
+			FramedKind::Hev1(ref mut decoder) => {
+				decoder.decode_frame(buf, pts)?;
+				decoder.sync();
+			}
+			FramedKind::Av01(ref mut decoder) => {
+				decoder.decode_frame(buf, pts)?;
+				decoder.sync();
+			}
+			FramedKind::Vp8(ref mut decoder) => {
+				decoder.decode_frame(buf, pts)?;
+				decoder.sync();
+			}
+			FramedKind::Vp9(ref mut decoder) => {
+				decoder.decode_frame(buf, pts)?;
+				decoder.sync();
+			}
 			FramedKind::Aac(ref mut decoder) => decoder.decode(buf, pts)?,
 			FramedKind::Opus(ref mut decoder) => decoder.decode_buf(buf, pts)?,
 			FramedKind::Mkv(ref mut decoder) => {
@@ -351,8 +370,8 @@ impl From<crate::publish::Published<crate::codec::opus::Import>> for Framed {
 	}
 }
 
-impl From<crate::codec::aac::Import> for Framed {
-	fn from(aac: crate::codec::aac::Import) -> Self {
+impl From<crate::publish::Published<crate::codec::aac::Import>> for Framed {
+	fn from(aac: crate::publish::Published<crate::codec::aac::Import>) -> Self {
 		Self {
 			decoder: FramedKind::Aac(aac),
 		}
@@ -619,8 +638,8 @@ enum StreamKind {
 	Avc3(crate::publish::Published<crate::codec::h264::Import>),
 	// Boxed because it's a large struct and clippy complains about the size.
 	Fmp4(Box<crate::container::fmp4::Import>),
-	Hev1(crate::codec::h265::Import),
-	Av01(crate::codec::av1::Import),
+	Hev1(crate::publish::Published<crate::codec::h265::Import>),
+	Av01(crate::publish::Published<crate::codec::av1::Import>),
 	// Boxed for the same reason as Fmp4.
 	Mkv(Box<crate::container::mkv::Import>),
 	// Boxed for the same reason as Fmp4.
@@ -650,8 +669,16 @@ impl Stream {
 				StreamKind::Avc3(crate::publish::Published::new(catalog, decoder))
 			}
 			StreamFormat::Fmp4 => StreamKind::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, catalog))),
-			StreamFormat::Hev1 => StreamKind::Hev1(crate::codec::h265::Import::new(broadcast, catalog)),
-			StreamFormat::Av01 => StreamKind::Av01(crate::codec::av1::Import::new(broadcast, catalog)),
+			StreamFormat::Hev1 => {
+				let track = crate::publish::unique_track(&mut broadcast, ".hev1")?;
+				let decoder = crate::codec::h265::Import::from_track(track);
+				StreamKind::Hev1(crate::publish::Published::new(catalog, decoder))
+			}
+			StreamFormat::Av01 => {
+				let track = crate::publish::unique_track(&mut broadcast, ".av01")?;
+				let decoder = crate::codec::av1::Import::from_track(track);
+				StreamKind::Av01(crate::publish::Published::new(catalog, decoder))
+			}
 			StreamFormat::Mkv => StreamKind::Mkv(Box::new(crate::container::mkv::Import::new(broadcast, catalog))),
 			StreamFormat::Ts => StreamKind::Ts(Box::new(crate::container::ts::Import::new(broadcast, catalog))),
 		};
@@ -671,8 +698,14 @@ impl Stream {
 				decoder.sync();
 			}
 			StreamKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
-			StreamKind::Hev1(ref mut decoder) => decoder.initialize(buf)?,
-			StreamKind::Av01(ref mut decoder) => decoder.initialize(buf)?,
+			StreamKind::Hev1(ref mut decoder) => {
+				decoder.initialize(buf)?;
+				decoder.sync();
+			}
+			StreamKind::Av01(ref mut decoder) => {
+				decoder.initialize(buf)?;
+				decoder.sync();
+			}
 			StreamKind::Mkv(ref mut decoder) => decoder.decode(buf)?,
 			StreamKind::Ts(ref mut decoder) => decoder.decode(buf)?,
 		}
@@ -693,8 +726,16 @@ impl Stream {
 				Ok(())
 			}
 			StreamKind::Fmp4(ref mut decoder) => decoder.decode(buf),
-			StreamKind::Hev1(ref mut decoder) => decoder.decode_stream(buf, None),
-			StreamKind::Av01(ref mut decoder) => decoder.decode_stream(buf, None),
+			StreamKind::Hev1(ref mut decoder) => {
+				decoder.decode_stream(buf, None)?;
+				decoder.sync();
+				Ok(())
+			}
+			StreamKind::Av01(ref mut decoder) => {
+				decoder.decode_stream(buf, None)?;
+				decoder.sync();
+				Ok(())
+			}
 			StreamKind::Mkv(ref mut decoder) => decoder.decode(buf),
 			StreamKind::Ts(ref mut decoder) => decoder.decode(buf).map_err(Into::into),
 		}

@@ -1,48 +1,31 @@
 use bytes::{Buf, BytesMut};
 
 use super::Config;
-use crate::catalog::hang::CatalogExt;
+use crate::publish::Renditions;
 
 /// AAC importer.
 ///
 /// Initialized from an AudioSpecificConfig blob (variable-length, typically extracted from
-/// an MP4 ESDS atom). Each input buffer passed to [`decode`](Self::decode) is published as
-/// one hang frame in its own group, so the relay can forward each frame without waiting for
-/// a group boundary. The codec's packet loss concealment handles drops.
-pub struct Import<E: CatalogExt = ()> {
-	catalog: crate::catalog::Producer<E>,
+/// an MP4 ESDS atom), so its catalog is known up front. Each input buffer passed to
+/// [`decode`](Self::decode) is published as one hang frame in its own group, so the relay can
+/// forward each frame without waiting for a group boundary. The codec's packet loss
+/// concealment handles drops. Build it from a [`moq_net::TrackRequest`] ([`new`](Self::new))
+/// or an existing track ([`from_track`](Self::from_track)).
+pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
+	catalog: hang::Catalog,
 	zero: Option<tokio::time::Instant>,
 }
 
-impl<E: CatalogExt> Import<E> {
-	pub fn new(
-		broadcast: moq_net::BroadcastProducer,
-		catalog: crate::catalog::Producer<E>,
-		config: Config,
-	) -> crate::Result<Self> {
-		Self::new_with_source(
-			crate::track_provider::TrackProvider::unique(broadcast, ".aac"),
-			catalog,
-			config,
-		)
+impl Import {
+	/// Serve a track request, accepting it at the microsecond timescale.
+	pub fn new(request: moq_net::TrackRequest, config: Config) -> crate::Result<Self> {
+		let info = moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE);
+		Self::from_track(request.accept(info), config)
 	}
 
-	pub fn new_with_track(
-		track: moq_net::TrackProducer,
-		catalog: crate::catalog::Producer<E>,
-		config: Config,
-	) -> crate::Result<Self> {
-		Self::new_with_source(crate::track_provider::TrackProvider::fixed(track), catalog, config)
-	}
-
-	fn new_with_source(
-		mut tracks: crate::track_provider::TrackProvider,
-		mut catalog: crate::catalog::Producer<E>,
-		config: Config,
-	) -> crate::Result<Self> {
-		let track = tracks.create()?;
-
+	/// Publish on an existing track producer.
+	pub fn from_track(track: moq_net::TrackProducer, config: Config) -> crate::Result<Self> {
 		let mut audio_config = hang::catalog::AudioConfig::new(
 			hang::catalog::AAC {
 				profile: config.profile,
@@ -53,22 +36,33 @@ impl<E: CatalogExt> Import<E> {
 		audio_config.container = hang::catalog::Container::Legacy;
 
 		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
-		catalog
-			.lock()
-			.audio
-			.renditions
-			.insert(track.name().to_string(), audio_config);
+
+		let mut catalog = hang::Catalog::default();
+		catalog.audio.renditions.insert(track.name().to_string(), audio_config);
 
 		Ok(Self {
-			catalog,
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
+			catalog,
 			zero: None,
 		})
+	}
+
+	/// The standalone catalog this importer publishes (one AAC audio rendition).
+	pub fn catalog(&self) -> &hang::Catalog {
+		&self.catalog
 	}
 
 	/// Returns a reference to the underlying track producer.
 	pub fn track(&self) -> &moq_net::TrackProducer {
 		self.track.track()
+	}
+
+	/// Mutable access to the single audio rendition, for callers that refine it
+	/// after construction (the TS importer sets the synthesized `description` and
+	/// an audio-burst `jitter`). Follow with [`crate::publish::Published::sync`].
+	pub(crate) fn rendition_mut(&mut self) -> Option<&mut hang::catalog::AudioConfig> {
+		let name = self.track.name();
+		self.catalog.audio.renditions.get_mut(name)
 	}
 
 	/// Finish the track, flushing the current group.
@@ -120,9 +114,8 @@ impl<E: CatalogExt> Import<E> {
 	}
 }
 
-impl<E: CatalogExt> Drop for Import<E> {
-	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.name(), "ending track");
-		self.catalog.lock().audio.renditions.remove(self.track.name());
+impl Renditions for Import {
+	fn renditions(&self) -> &hang::Catalog {
+		&self.catalog
 	}
 }

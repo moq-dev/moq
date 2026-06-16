@@ -1,4 +1,5 @@
 use crate::container::jitter::MinFrameDuration;
+use crate::publish::Renditions;
 
 use bytes::BytesMut;
 use bytes::{Buf, Bytes};
@@ -9,14 +10,11 @@ use crate::Result;
 
 /// A decoder for AV1 with inline sequence headers.
 pub struct Import {
-	// Where new media tracks come from.
-	tracks: crate::track_provider::TrackProvider,
-
-	// The catalog being produced.
-	catalog: crate::catalog::Producer,
-
 	// The track being produced.
-	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
+	track: crate::container::Producer<crate::catalog::hang::Container>,
+
+	// The standalone catalog, populated once the config is known.
+	catalog: hang::Catalog,
 
 	// Whether the track has been initialized.
 	config: Option<hang::catalog::VideoConfig>,
@@ -39,23 +37,17 @@ struct Frame {
 }
 
 impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
-		Self {
-			tracks: crate::track_provider::TrackProvider::unique(broadcast, ".av01"),
-			catalog,
-			track: None,
-			config: None,
-			current: Default::default(),
-			zero: None,
-			jitter: MinFrameDuration::new(),
-		}
+	/// Serve a track request, accepting it at the microsecond timescale.
+	pub fn new(request: moq_net::TrackRequest) -> Self {
+		let info = moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE);
+		Self::from_track(request.accept(info))
 	}
 
-	pub fn new_with_track(track: moq_net::TrackProducer, catalog: crate::catalog::Producer) -> Self {
+	/// Publish on an existing track producer.
+	pub fn from_track(track: moq_net::TrackProducer) -> Self {
 		Self {
-			tracks: crate::track_provider::TrackProvider::fixed(track),
-			catalog,
-			track: None,
+			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
+			catalog: hang::Catalog::default(),
 			config: None,
 			current: Default::default(),
 			zero: None,
@@ -101,28 +93,17 @@ impl Import {
 			return Ok(());
 		}
 
-		if self.track.is_some() && self.tracks.is_fixed() {
+		if self.config.is_some() {
 			return Err(Error::FixedTrackReconfigured.into());
 		}
 
-		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name(), "reinitializing track");
-			self.catalog.lock().video.renditions.remove(track.name());
-		}
-
-		let track = self.tracks.create()?;
-		tracing::debug!(name = ?track.name(), ?config, "starting track");
+		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
 		self.catalog
-			.lock()
 			.video
 			.renditions
-			.insert(track.name().to_string(), config.clone());
+			.insert(self.track.name().to_string(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::catalog::hang::Container::Legacy,
-		));
 
 		Ok(())
 	}
@@ -145,23 +126,17 @@ impl Import {
 		});
 		config.container = hang::catalog::Container::Legacy;
 
-		if self.track.is_some() && self.tracks.is_fixed() {
+		if self.config.is_some() {
 			return Err(Error::FixedTrackReconfigured.into());
 		}
 
-		let track = self.tracks.create()?;
-		tracing::debug!(name = ?track.name(), "starting track with minimal config");
+		tracing::debug!(name = ?self.track.name(), "starting track with minimal config");
 		self.catalog
-			.lock()
 			.video
 			.renditions
-			.insert(track.name().to_string(), config.clone());
+			.insert(self.track.name().to_string(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::catalog::hang::Container::Legacy,
-		));
 
 		Ok(())
 	}
@@ -222,33 +197,28 @@ impl Import {
 			return Ok(());
 		}
 
-		if self.track.is_some() && self.tracks.is_fixed() {
+		if self.config.is_some() {
 			return Err(Error::FixedTrackReconfigured.into());
 		}
 
-		if let Some(track) = self.track.take() {
-			self.catalog.lock().video.renditions.remove(track.name());
-		}
-
-		let track = self.tracks.create()?;
 		self.catalog
-			.lock()
 			.video
 			.renditions
-			.insert(track.name().to_string(), config.clone());
+			.insert(self.track.name().to_string(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::catalog::hang::Container::Legacy,
-		));
 
 		Ok(())
 	}
 
-	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> Result<&moq_net::TrackProducer> {
-		Ok(self.track.as_ref().ok_or(Error::NotInitialized)?.track())
+	/// The standalone catalog once the config is known, else `None`.
+	pub fn catalog(&self) -> Option<&hang::Catalog> {
+		self.config.is_some().then_some(&self.catalog)
+	}
+
+	/// The underlying track producer.
+	pub fn track(&self) -> &moq_net::TrackProducer {
+		self.track.track()
 	}
 
 	/// Decode as much data as possible from the given buffer.
@@ -304,7 +274,7 @@ impl Import {
 					}
 					Err(_) => {
 						// Use minimal config so stream can work (catalog won't have full info)
-						if self.track.is_none() {
+						if self.config.is_none() {
 							tracing::debug!("Sequence header parsing failed, initializing with minimal config");
 							self.init_minimal()?;
 						}
@@ -372,7 +342,9 @@ impl Import {
 			return Ok(());
 		}
 
-		let track = self.track.as_mut().ok_or(Error::MissingSequenceHeader)?;
+		if self.config.is_none() {
+			return Err(Error::MissingSequenceHeader.into());
+		}
 		let pts = pts.ok_or(Error::MissingTimestamp)?;
 
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
@@ -384,10 +356,10 @@ impl Import {
 			duration: None,
 		};
 
-		track.write(frame)?;
+		self.track.write(frame)?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(track.name())
+			&& let Some(c) = self.catalog.video.renditions.get_mut(self.track.name())
 		{
 			c.jitter = Some(jitter);
 		}
@@ -400,8 +372,7 @@ impl Import {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> Result<()> {
-		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
-		track.finish()?;
+		self.track.finish()?;
 		Ok(())
 	}
 
@@ -411,13 +382,13 @@ impl Import {
 	/// into the post-seek group with the wrong timestamp.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.current = Frame::default();
-		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
-		track.seek(sequence)?;
+		self.track.seek(sequence)?;
 		Ok(())
 	}
 
+	/// True once the config is known and the catalog has been populated.
 	pub fn is_initialized(&self) -> bool {
-		self.track.is_some()
+		self.config.is_some()
 	}
 
 	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {
@@ -430,12 +401,9 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
-	fn drop(&mut self) {
-		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name(), "ending track");
-			self.catalog.lock().video.renditions.remove(track.name());
-		}
+impl Renditions for Import {
+	fn renditions(&self) -> &hang::Catalog {
+		&self.catalog
 	}
 }
 

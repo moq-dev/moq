@@ -1,6 +1,6 @@
-use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::{NalIterator, START_CODE};
 use crate::container::jitter::MinFrameDuration;
+use crate::publish::Renditions;
 
 use bytes::{Buf, Bytes, BytesMut};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
@@ -10,18 +10,18 @@ use crate::Result;
 
 /// A decoder for H.265 with inline SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
-pub struct Import<E: CatalogExt = ()> {
-	// Where new media tracks come from.
-	tracks: crate::track_provider::TrackProvider,
-
-	// The catalog being produced.
-	catalog: crate::catalog::Producer<E>,
-
+///
+/// Build it from a [`moq_net::TrackRequest`] ([`new`](Self::new)) or an existing
+/// track ([`from_track`](Self::from_track)). The catalog rendition fills in lazily
+/// once the first SPS is parsed; read it via [`catalog`](Self::catalog).
+pub struct Import {
 	// The track being produced.
-	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
+	track: crate::container::Producer<crate::catalog::hang::Container>,
 
-	// Whether the track has been initialized.
-	// If it changes, then we'll reinitialize with a new track.
+	// The standalone catalog, populated once the codec config is known.
+	catalog: hang::Catalog,
+
+	// The resolved config; a change to it on a fixed track is an error.
 	config: Option<hang::catalog::VideoConfig>,
 
 	// The current frame being built.
@@ -39,27 +39,18 @@ pub struct Import<E: CatalogExt = ()> {
 	jitter: MinFrameDuration,
 }
 
-impl<E: CatalogExt> Import<E> {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
-		Self {
-			tracks: crate::track_provider::TrackProvider::unique(broadcast, ".hev1"),
-			catalog,
-			track: None,
-			config: None,
-			current: Default::default(),
-			zero: None,
-			vps: None,
-			sps: None,
-			pps: None,
-			jitter: MinFrameDuration::new(),
-		}
+impl Import {
+	/// Serve a track request, accepting it at the microsecond timescale.
+	pub fn new(request: moq_net::TrackRequest) -> Self {
+		let info = moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE);
+		Self::from_track(request.accept(info))
 	}
 
-	pub fn new_with_track(track: moq_net::TrackProducer, catalog: crate::catalog::Producer<E>) -> Self {
+	/// Publish on an existing track producer.
+	pub fn from_track(track: moq_net::TrackProducer) -> Self {
 		Self {
-			tracks: crate::track_provider::TrackProvider::fixed(track),
-			catalog,
-			track: None,
+			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start(),
+			catalog: hang::Catalog::default(),
 			config: None,
 			current: Default::default(),
 			zero: None,
@@ -90,33 +81,19 @@ impl<E: CatalogExt> Import<E> {
 		config.display_ratio_height = vui_data.display_ratio_height;
 		config.container = hang::catalog::Container::Legacy;
 
-		if let Some(old) = &self.config
-			&& old == &config
-		{
-			return Ok(());
-		}
-
-		let mut catalog = self.catalog.lock();
-
-		if self.track.is_some() && self.tracks.is_fixed() {
+		if let Some(old) = &self.config {
+			if old == &config {
+				return Ok(());
+			}
+			// A different SPS would need a new init segment, which the single fixed
+			// track can't represent.
 			return Err(Error::FixedTrackReconfigured.into());
 		}
 
-		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name(), "reinitializing track");
-			catalog.video.renditions.remove(track.name());
-		}
-
-		let track = self.tracks.create()?;
-		tracing::debug!(name = ?track.name(), ?config, "starting track");
-		catalog
-			.video
-			.renditions
-			.insert(track.name().to_string(), config.clone());
-
+		let track_name = self.track.name().to_string();
+		tracing::debug!(name = ?track_name, ?config, "starting track");
+		self.catalog.video.renditions.insert(track_name, config.clone());
 		self.config = Some(config);
-		self.track =
-			Some(crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start());
 
 		Ok(())
 	}
@@ -136,9 +113,14 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> Result<&moq_net::TrackProducer> {
-		Ok(self.track.as_ref().ok_or(Error::NotInitialized)?.track())
+	/// The underlying track producer.
+	pub fn track(&self) -> &moq_net::TrackProducer {
+		self.track.track()
+	}
+
+	/// The standalone catalog once the first SPS is parsed, else `None`.
+	pub fn catalog(&self) -> Option<&hang::Catalog> {
+		self.config.is_some().then_some(&self.catalog)
 	}
 
 	/// Decode as much data as possible from the given buffer.
@@ -311,7 +293,10 @@ impl<E: CatalogExt> Import<E> {
 			return Ok(());
 		}
 
-		let track = self.track.as_mut().ok_or(Error::MissingSps)?;
+		// A slice before the first SPS has no catalog config to anchor it.
+		if self.config.is_none() {
+			return Err(Error::MissingSps.into());
+		}
 		let pts = pts.ok_or(Error::MissingTimestamp)?;
 
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
@@ -323,10 +308,10 @@ impl<E: CatalogExt> Import<E> {
 			duration: None,
 		};
 
-		track.write(frame)?;
+		self.track.write(frame)?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(track.name())
+			&& let Some(c) = self.catalog.video.renditions.get_mut(self.track.name())
 		{
 			c.jitter = Some(jitter);
 		}
@@ -342,8 +327,7 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> Result<()> {
-		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
-		track.finish()?;
+		self.track.finish()?;
 		Ok(())
 	}
 
@@ -353,13 +337,13 @@ impl<E: CatalogExt> Import<E> {
 	/// into the post-seek group with the wrong timestamp.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.current = Frame::default();
-		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
-		track.seek(sequence)?;
+		self.track.seek(sequence)?;
 		Ok(())
 	}
 
+	/// True once the first SPS has populated the catalog.
 	pub fn is_initialized(&self) -> bool {
-		self.track.is_some()
+		self.config.is_some()
 	}
 
 	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {
@@ -372,12 +356,9 @@ impl<E: CatalogExt> Import<E> {
 	}
 }
 
-impl<E: CatalogExt> Drop for Import<E> {
-	fn drop(&mut self) {
-		if let Some(track) = &self.track {
-			tracing::debug!(name = ?track.name(), "ending track");
-			self.catalog.lock().video.renditions.remove(track.name());
-		}
+impl Renditions for Import {
+	fn renditions(&self) -> &hang::Catalog {
+		&self.catalog
 	}
 }
 

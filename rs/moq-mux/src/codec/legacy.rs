@@ -10,7 +10,7 @@
 use bytes::{Buf, BytesMut};
 use moq_net::Timestamp;
 
-use crate::catalog::hang::CatalogExt;
+use crate::publish::Renditions;
 
 /// A parsed legacy-audio frame header.
 #[derive(Debug)]
@@ -48,26 +48,16 @@ pub(crate) struct Config {
 /// Publishes each whole frame as one hang frame in its own group, so the relay
 /// forwards it immediately. The audio is never decoded; the catalog carries the
 /// codec, sample rate and channel count read from the frame header.
-pub(crate) struct Import<E: CatalogExt = ()> {
-	catalog: crate::catalog::Producer<E>,
+pub(crate) struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
+	catalog: hang::Catalog,
 	zero: Option<tokio::time::Instant>,
 }
 
-impl<E: CatalogExt> Import<E> {
-	pub fn new(
-		descriptor: &'static Descriptor,
-		mut broadcast: moq_net::BroadcastProducer,
-		mut catalog: crate::catalog::Producer<E>,
-		config: Config,
-	) -> anyhow::Result<Self> {
-		// The legacy container normalizes the per-frame timestamp to microseconds on
-		// the wire, so the track declares that timescale to match.
-		let track = broadcast.unique_track(
-			descriptor.track_suffix,
-			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-		)?;
-
+impl Import {
+	/// Publish on an existing track. Mint it at the descriptor's suffix and the
+	/// microsecond [`hang::container::TIMESCALE`] (e.g. via [`crate::publish::unique_track`]).
+	pub fn from_track(descriptor: &'static Descriptor, track: moq_net::TrackProducer, config: Config) -> Self {
 		let mut audio_config =
 			hang::catalog::AudioConfig::new(descriptor.codec.clone(), config.sample_rate, config.channel_count);
 		audio_config.container = hang::catalog::Container::Legacy;
@@ -76,17 +66,15 @@ impl<E: CatalogExt> Import<E> {
 		// cannot decode these codecs). Fill it only if a real consumer ever needs it.
 
 		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
-		catalog
-			.lock()
-			.audio
-			.renditions
-			.insert(track.name().to_string(), audio_config);
 
-		Ok(Self {
-			catalog,
+		let mut catalog = hang::Catalog::default();
+		catalog.audio.renditions.insert(track.name().to_string(), audio_config);
+
+		Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
+			catalog,
 			zero: None,
-		})
+		}
 	}
 
 	/// Finish the track, flushing the current group.
@@ -136,9 +124,8 @@ impl<E: CatalogExt> Import<E> {
 	}
 }
 
-impl<E: CatalogExt> Drop for Import<E> {
-	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.name(), "ending track");
-		self.catalog.lock().audio.renditions.remove(self.track.name());
+impl Renditions for Import {
+	fn renditions(&self) -> &hang::Catalog {
+		&self.catalog
 	}
 }

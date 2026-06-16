@@ -269,10 +269,16 @@ impl<E: scte35::Catalog> Import<E> {
 					unwrap: PtsUnwrap::default(),
 				}
 			}
-			StreamType::H265 => Stream::H265 {
-				import: Box::new(h265::Import::new(self.broadcast.clone(), self.catalog.clone())),
-				unwrap: PtsUnwrap::default(),
-			},
+			StreamType::H265 => {
+				let track = crate::publish::unique_track(&mut self.broadcast, ".hev1")?;
+				Stream::H265 {
+					import: Box::new(crate::publish::Published::new(
+						self.catalog.clone(),
+						h265::Import::from_track(track),
+					)),
+					unwrap: PtsUnwrap::default(),
+				}
+			}
 			// Only ADTS-framed AAC (0x0F). 0x11 is LATM/LOAS, which uses a different
 			// framing and syncword, so it falls through to the ignored arm below.
 			StreamType::AdtsAac => Stream::Aac(Box::new(AacStream {
@@ -717,7 +723,7 @@ enum Stream<E: CatalogExt = ()> {
 		unwrap: PtsUnwrap,
 	},
 	H265 {
-		import: Box<h265::Import<E>>,
+		import: Box<crate::publish::Published<h265::Import, E>>,
 		unwrap: PtsUnwrap,
 	},
 	Aac(Box<AacStream<E>>),
@@ -739,7 +745,9 @@ impl<E: CatalogExt> Stream<E> {
 			}
 			Stream::H265 { import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				Ok(import.decode_frame(&mut pending.data.as_slice(), pts)?)
+				import.decode_frame(&mut pending.data.as_slice(), pts)?;
+				import.sync();
+				Ok(())
 			}
 			Stream::Aac(stream) => stream.write(pending, burst),
 			Stream::Legacy(stream) => stream.write(pending),
@@ -772,7 +780,7 @@ impl<E: CatalogExt> Stream<E> {
 /// (the sample rate and channel layout aren't in the PMT), so creation is
 /// deferred until the first frame arrives.
 struct AacStream<E: CatalogExt = ()> {
-	import: Option<aac::Import<E>>,
+	import: Option<crate::publish::Published<aac::Import, E>>,
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::Producer<E>,
 	unwrap: PtsUnwrap,
@@ -807,11 +815,13 @@ impl<E: CatalogExt> AacStream<E> {
 					// downstream consumers that need out-of-band config (fMP4/MKV export,
 					// WebCodecs) can configure the decoder. TS itself carries it inline.
 					let description = config.encode();
-					let import = aac::Import::new(self.broadcast.clone(), self.catalog.clone(), config)?;
-					let name = import.track().name().to_string();
-					if let Some(rendition) = self.catalog.lock().audio.renditions.get_mut(&name) {
+					let track = crate::publish::unique_track(&mut self.broadcast, ".aac")?;
+					let aac = aac::Import::from_track(track, config)?;
+					let mut import = crate::publish::Published::new(self.catalog.clone(), aac);
+					if let Some(rendition) = import.rendition_mut() {
 						rendition.description = Some(description);
 					}
+					import.sync();
 					self.import.insert(import)
 				}
 			};
@@ -870,11 +880,11 @@ impl<E: CatalogExt> AacStream<E> {
 		}
 		self.jitter = Some(jitter);
 
-		if let Some(import) = &self.import {
-			let name = import.track().name().to_string();
-			if let Some(rendition) = self.catalog.lock().audio.renditions.get_mut(&name) {
+		if let Some(import) = &mut self.import {
+			if let Some(rendition) = import.rendition_mut() {
 				rendition.jitter = Some(jitter.into());
 			}
+			import.sync();
 		}
 		Ok(())
 	}
@@ -901,7 +911,7 @@ impl<E: CatalogExt> AacStream<E> {
 /// players, which cannot decode these codecs.
 struct LegacyStream<E: CatalogExt = ()> {
 	descriptor: &'static legacy::Descriptor,
-	import: Option<legacy::Import<E>>,
+	import: Option<crate::publish::Published<legacy::Import, E>>,
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::Producer<E>,
 	unwrap: PtsUnwrap,
@@ -960,9 +970,10 @@ impl<E: CatalogExt> LegacyStream<E> {
 						sample_rate: header.sample_rate,
 						channel_count: header.channel_count,
 					};
-					let import =
-						legacy::Import::new(self.descriptor, self.broadcast.clone(), self.catalog.clone(), config)?;
-					self.import.insert(import)
+					let track = crate::publish::unique_track(&mut self.broadcast, self.descriptor.track_suffix)?;
+					let legacy = legacy::Import::from_track(self.descriptor, track, config);
+					self.import
+						.insert(crate::publish::Published::new(self.catalog.clone(), legacy))
 				}
 			};
 
