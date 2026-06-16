@@ -318,36 +318,26 @@ impl<E: CatalogExt> Import<E> {
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
 		let keyframe = self.current.contains_idr;
 
-		// A delta with no open group can't anchor a group (which must start with a
-		// keyframe). Reject it; importers that join mid-stream ignore MissingKeyframe.
-		if !keyframe && !track.has_group() {
-			self.current.contains_idr = false;
-			self.current.contains_slice = false;
-			self.current.contains_vps = false;
-			self.current.contains_sps = false;
-			self.current.contains_pps = false;
-			return Err(crate::Error::MissingKeyframe.into());
-		}
+		// Reset per-frame state up front so a delta before the first keyframe (which
+		// the producer rejects with MissingKeyframe) leaves the importer ready for the
+		// next access unit. Importers that join mid-stream ignore that error.
+		self.current.contains_idr = false;
+		self.current.contains_slice = false;
+		self.current.contains_vps = false;
+		self.current.contains_sps = false;
+		self.current.contains_pps = false;
 
-		let frame = crate::container::Frame {
+		track.write(crate::container::Frame {
 			timestamp: pts,
 			payload,
 			keyframe,
-		};
-
-		track.write(frame)?;
+		})?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
 			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
 		{
 			c.jitter = Some(jitter);
 		}
-
-		self.current.contains_idr = false;
-		self.current.contains_slice = false;
-		self.current.contains_vps = false;
-		self.current.contains_sps = false;
-		self.current.contains_pps = false;
 
 		Ok(())
 	}

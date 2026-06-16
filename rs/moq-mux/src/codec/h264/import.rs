@@ -267,12 +267,8 @@ impl<E: CatalogExt> Import<E> {
 			.as_mut()
 			.context("not initialized; call initialize() first")?;
 
-		// A delta with no open group can't anchor a group (which must start with a
-		// keyframe). Reject it; importers that join mid-stream ignore MissingKeyframe.
-		if !keyframe && !track.has_group() {
-			return Err(crate::Error::MissingKeyframe.into());
-		}
-
+		// A delta before the first keyframe is rejected by the producer with
+		// MissingKeyframe; importers that join mid-stream ignore that error.
 		track.write(crate::container::Frame {
 			timestamp: pts,
 			payload: data.to_vec().into(),
@@ -441,12 +437,9 @@ impl<E: CatalogExt> Import<E> {
 
 		let track = self.track.as_mut().context("avc3 track not created")?;
 
-		// A delta with no open group can't anchor a group (which must start with a
-		// keyframe). Reject it; importers that join mid-stream ignore MissingKeyframe.
-		if !keyframe && !track.has_group() {
-			return Err(crate::Error::MissingKeyframe.into());
-		}
-
+		// Per-frame state is reset above, so a delta before the first keyframe (which
+		// the producer rejects with MissingKeyframe) leaves the importer ready for the
+		// next access unit. Importers that join mid-stream ignore that error.
 		track.write(crate::container::Frame {
 			timestamp: pts,
 			payload,

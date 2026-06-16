@@ -39,7 +39,10 @@ pub struct Producer<C: Container> {
 	pending_sequence: Option<u64>,
 }
 
-impl<C: Container> Producer<C> {
+impl<C: Container> Producer<C>
+where
+	crate::Error: From<C::Error>,
+{
 	/// Create a new Producer wrapping the given moq-lite producer.
 	pub fn new(track: moq_net::TrackProducer, container: C) -> Self {
 		Self {
@@ -50,14 +53,6 @@ impl<C: Container> Producer<C> {
 			latency: std::time::Duration::ZERO,
 			pending_sequence: None,
 		}
-	}
-
-	/// Whether a group is currently open (the last frame written was a keyframe or
-	/// extended an open group). Importers check this before writing a non-keyframe:
-	/// a group must always start with a keyframe, so a delta with no open group has
-	/// nowhere to go and is rejected rather than written.
-	pub fn has_group(&self) -> bool {
-		self.group.is_some()
 	}
 
 	/// The underlying moq-lite track producer. Read-only; mutating it directly
@@ -81,10 +76,10 @@ impl<C: Container> Producer<C> {
 	/// Write a frame to the track.
 	///
 	/// A keyframe closes any open group and starts a new one. A non-keyframe extends
-	/// the current group; if no group is open it's a protocol violation. A group must
-	/// always start with a keyframe, so callers joining mid-stream must drop leading
-	/// deltas themselves (see [`has_group`](Self::has_group)) rather than write them.
-	pub fn write(&mut self, frame: Frame) -> Result<(), C::Error> {
+	/// the current group; if no group is open it's rejected with
+	/// [`MissingKeyframe`](crate::Error::MissingKeyframe), since a group must always
+	/// start with a keyframe. Importers that can join mid-stream ignore that error.
+	pub fn write(&mut self, frame: Frame) -> Result<(), crate::Error> {
 		// Close the current group on an explicit keyframe.
 		if frame.keyframe {
 			self.finish_group()?;
@@ -93,9 +88,9 @@ impl<C: Container> Producer<C> {
 		// Start a new group if needed; the first frame of a group must be a keyframe.
 		if self.group.is_none() {
 			if !frame.keyframe {
-				// No group yet and this delta can't anchor one. A caller joining
-				// mid-stream must drop leading deltas before they reach here.
-				return Err(moq_net::Error::ProtocolViolation.into());
+				// No group yet and this delta can't anchor one (a group must start
+				// with a keyframe). Importers joining mid-stream ignore this.
+				return Err(crate::Error::MissingKeyframe);
 			}
 			self.group = Some(match self.pending_sequence.take() {
 				Some(sequence) => self.inner.create_group(moq_net::Group { sequence })?,
@@ -127,7 +122,7 @@ impl<C: Container> Producer<C> {
 	/// Close the current group early, flushing any buffered frames.
 	///
 	/// The next [`write`](Self::write) must be a keyframe.
-	pub fn finish_group(&mut self) -> Result<(), C::Error> {
+	pub fn finish_group(&mut self) -> Result<(), crate::Error> {
 		self.flush()?;
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
@@ -139,14 +134,14 @@ impl<C: Container> Producer<C> {
 	///
 	/// The next [`write`](Self::write) must be a keyframe and will land in a group with
 	/// `sequence`. Useful for joining mid-stream or signalling a discontinuity.
-	pub fn seek(&mut self, sequence: u64) -> Result<(), C::Error> {
+	pub fn seek(&mut self, sequence: u64) -> Result<(), crate::Error> {
 		self.finish_group()?;
 		self.pending_sequence = Some(sequence);
 		Ok(())
 	}
 
 	/// Flush any buffered frames into the current group without closing it.
-	fn flush(&mut self) -> Result<(), C::Error> {
+	fn flush(&mut self) -> Result<(), crate::Error> {
 		if self.buffer.is_empty() {
 			return Ok(());
 		}
@@ -163,7 +158,7 @@ impl<C: Container> Producer<C> {
 	}
 
 	/// Finish the track, flushing any buffered frames and closing any open group.
-	pub fn finish(&mut self) -> Result<(), C::Error> {
+	pub fn finish(&mut self) -> Result<(), crate::Error> {
 		self.finish_group()?;
 		self.inner.finish()?;
 		Ok(())
@@ -251,7 +246,7 @@ mod tests {
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		let err = producer.write(frame(0, false)).unwrap_err();
-		assert!(matches!(err, crate::Error::Moq(moq_net::Error::ProtocolViolation)));
+		assert!(matches!(err, crate::Error::MissingKeyframe));
 	}
 
 	/// Drain all groups from a finished track, returning their sequence numbers.

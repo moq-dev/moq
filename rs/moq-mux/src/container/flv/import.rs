@@ -178,16 +178,13 @@ impl Import {
 				anyhow::ensure!(pts_ms >= 0, "negative AVC presentation timestamp");
 
 				// A group must start with a keyframe. A valid FLV opens on one, so a
-				// leading delta means a malformed/mid-GOP stream: reject it outright.
-				let keyframe = frame_type == FRAME_TYPE_KEY;
-				if !keyframe && !stream.track.has_group() {
-					return Err(crate::Error::MissingKeyframe.into());
-				}
-
+				// leading delta is rejected by the producer with MissingKeyframe and
+				// propagates as a malformed-stream error (unlike TS, FLV doesn't join
+				// mid-GOP).
 				stream.track.write(Frame {
 					timestamp: Timestamp::from_millis(pts_ms as u64)?,
 					payload: Bytes::copy_from_slice(data),
-					keyframe,
+					keyframe: frame_type == FRAME_TYPE_KEY,
 				})?;
 				Ok(())
 			}
