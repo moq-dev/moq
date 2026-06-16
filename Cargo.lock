@@ -4351,7 +4351,6 @@ dependencies = [
  "bindgen 0.70.1",
  "bitflags 2.13.0",
  "log",
- "pkg-config",
  "regex",
  "thiserror 1.0.69",
 ]

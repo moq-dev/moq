@@ -8,19 +8,20 @@ license = "BSD-3-Clause"
 edition = "2021"
 rust-version = "1.85"
 
-# moq-vaapi is excluded from the root workspace (it can't build without libva
-# headers, so it must stay out of cross-platform `--workspace` sweeps; see the
-# root Cargo.toml). This empty table makes it a standalone workspace root so that
-# cargo, following moq-video's path dependency into it, doesn't walk up and bind
-# it to the wrong parent workspace.
+# Excluded from the root workspace to keep the ~14k lines of vendored libva /
+# cros-codecs code out of `cargo fmt --all` and every cross-platform
+# `cargo check --workspace` sweep; it's built only as moq-video's (Linux-only)
+# `vaapi`-feature dependency, and standalone via `just rs vaapi-check`. This empty
+# table makes it a standalone workspace root so that cargo, following moq-video's
+# path dependency into it, doesn't walk up and bind it to the parent workspace.
 [workspace]
 
-[features]
-# libva is loaded at runtime (dlopen) rather than linked, so a built binary
-# still links on a libva-less host and starts on machines without libva.
-dlopen = []
-# Vendor libva headers instead of finding them via pkg-config (probed by build.rs).
-vendored = []
+# Build is always hermetic: bindgen reads the vendored libva headers (the
+# rs/moq-vaapi/libva submodule, pinned at a known VA-API version so a system libva
+# bump can't drift the bindings), and libva is dlopen'd at runtime rather than
+# linked (so a built binary links on a libva-less host and starts on machines
+# without libva). There's no system-libva build path, so there are no features to
+# toggle: the build needs only libclang (for bindgen) on any OS.
 
 [dependencies]
 anyhow = "1"
@@ -30,5 +31,4 @@ log = { version = "0", features = ["release_max_level_debug"] }
 
 [build-dependencies]
 bindgen = "0.70.1"
-pkg-config = "0.3.31"
 regex = "1.11.1"

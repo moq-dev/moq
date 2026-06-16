@@ -28,12 +28,12 @@ doctest = false
 # API version so the build needs no CUDA toolkit.
 nvenc = ["dep:nvidia-video-codec-sdk", "nvidia-video-codec-sdk/dynamic-loading", "cudarc/fallback-dynamic-loading", "cudarc/cuda-12020"]
 # Intel/AMD VAAPI hardware encoder (Linux). Off by default; enable for a build
-# that should use VAAPI where present. The `moq-vaapi` crate dlopen's libva at
-# runtime, so a vaapi-enabled binary still links on a libva-less builder and
-# still loads on machines without libva, falling back to software (see
-# backend::open). The build still needs libva *headers* for bindgen (provided by
-# the nix devShell).
-vaapi = ["dep:moq-vaapi", "moq-vaapi/dlopen"]
+# that should use VAAPI where present. The `moq-vaapi` crate builds against
+# vendored libva headers (its bundled submodule) and dlopen's libva at runtime,
+# so a vaapi-enabled binary builds without system libva-dev, links on a libva-less
+# builder, and still loads on machines without libva, falling back to software
+# (see backend::open). The build needs the moq-vaapi/libva submodule checked out.
+vaapi = ["dep:moq-vaapi"]
 
 [dependencies]
 anyhow = "1"
