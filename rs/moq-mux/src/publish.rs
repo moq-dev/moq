@@ -30,6 +30,17 @@ pub trait Renditions {
 	fn renditions(&self) -> &hang::Catalog;
 }
 
+/// A single-track importer that publishes already-split frames.
+///
+/// The uniform decode entry point: callers split bytes into [`Frame`](crate::container::Frame)s
+/// (a per-format splitter, e.g. [`crate::codec::h264::Split`]) and hand them over.
+/// [`Published`] wraps this so the catalog re-mirror can't be forgotten (see
+/// [`Published::decode`]).
+pub trait FrameDecode {
+	/// Publish frames on this importer's track.
+	fn decode<I: IntoIterator<Item = crate::container::Frame>>(&mut self, frames: I) -> crate::Result<()>;
+}
+
 /// Mint a fresh unique track for a legacy single-codec importer.
 ///
 /// Picks a unique name from `suffix` and sets the microsecond
@@ -107,6 +118,18 @@ impl<I: Renditions, E: CatalogExt> Published<I, E> {
 	}
 }
 
+impl<I: Renditions + FrameDecode, E: CatalogExt> Published<I, E> {
+	/// Publish frames and re-mirror any catalog change in one call.
+	///
+	/// This is the footgun-free path: it [`sync`](Self::sync)s after decoding, so
+	/// a lazily-resolved config or refined jitter always reaches the catalog.
+	pub fn decode<It: IntoIterator<Item = crate::container::Frame>>(&mut self, frames: It) -> crate::Result<()> {
+		self.inner.decode(frames)?;
+		self.sync();
+		Ok(())
+	}
+}
+
 impl<I: Renditions, E: CatalogExt> Deref for Published<I, E> {
 	type Target = I;
 
@@ -150,6 +173,14 @@ mod tests {
 		}
 	}
 
+	impl FrameDecode for Fake {
+		fn decode<I: IntoIterator<Item = crate::container::Frame>>(&mut self, _frames: I) -> crate::Result<()> {
+			// Simulate an importer resolving its config lazily while decoding.
+			self.0.video.renditions.insert("v".to_string(), video());
+			Ok(())
+		}
+	}
+
 	fn video() -> hang::catalog::VideoConfig {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.container = hang::catalog::Container::Legacy;
@@ -178,5 +209,18 @@ mod tests {
 		// Dropping the wrapper retires the rendition.
 		drop(published);
 		assert!(catalog.snapshot().video.renditions.is_empty());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn decode_auto_syncs_catalog() {
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let mut published = Published::new(catalog.clone(), Fake(hang::Catalog::default()));
+		assert!(catalog.snapshot().video.renditions.is_empty());
+
+		// `decode` resolves the rendition and mirrors it — no manual `sync()`.
+		published.decode(std::iter::empty::<crate::container::Frame>()).unwrap();
+		assert!(catalog.snapshot().video.renditions.contains_key("v"));
 	}
 }
