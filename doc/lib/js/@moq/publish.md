@@ -69,7 +69,7 @@ a real bundler (the examples below).
 - `source` - "camera", "screen", or "file"
 - `muted` - Disable audio capture (boolean)
 - `invisible` - Disable video capture (boolean)
-- `simulcast` - Also publish a 480p `video/sd` rendition alongside `video/hd` (boolean)
+- `simulcast` - Also publish a lower-resolution `video/sd` rendition (a quarter of the source pixels) alongside `video/hd` (boolean)
 
 ## UI Overlay
 
@@ -104,7 +104,7 @@ const broadcast = new Publish.Broadcast({
     connection,
     enabled: true,
     name: "alice.hang",
-    // Publish two video renditions: video/hd plus a 480p video/sd.
+    // Publish two video renditions: video/hd plus a lower-resolution video/sd.
     video: { hd: { enabled: true }, sd: { enabled: true } },
     audio: { enabled: true },
 });

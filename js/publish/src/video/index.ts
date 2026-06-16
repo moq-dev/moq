@@ -21,11 +21,12 @@ export class Root {
 	static readonly TRACK_SD = "video/sd";
 	static readonly PRIORITY = Catalog.PRIORITY.video;
 
-	// The default cap for the sd rendition: 480p, the baseline of the encoder's bitrate table.
-	// Without a cap the sd encoder would run at the full source resolution, duplicating hd.
-	// Only applied when no sd config is provided; passing any config (even an empty object
-	// or a Signal) takes full ownership, so `config: {}` removes the cap entirely.
-	static readonly SD_DEFAULT_CONFIG: EncoderConfig = { maxPixels: 854 * 480 };
+	// Default the sd rendition to a quarter of the source pixel count (half the width and height).
+	// Scaling relative to the source keeps simulcast generic: we don't assume the hd resolution or
+	// bake in a fixed baseline. Without a cap the sd encoder would run at the full source resolution,
+	// duplicating hd. Only applied when no sd config is provided; passing any config (even an empty
+	// object or a Signal) takes full ownership, so `config: {}` removes the cap entirely.
+	static readonly SD_DEFAULT_CONFIG: EncoderConfig = { maxScale: 0.25 };
 
 	source: Signal<Source | undefined>;
 	hd: Encoder;
