@@ -4,7 +4,7 @@ import { Root } from "./index.ts";
 test("sd encoder defaults to a quarter-resolution scale", () => {
 	const root = new Root({ sd: { enabled: true } });
 	// Scales relative to the source rather than a fixed resolution.
-	expect(root.sd.config.peek()?.maxScale).toBe(0.25);
+	expect(root.sd.config.peek()?.maxScale).toBe(0.1875);
 	expect(root.sd.config.peek()?.maxPixels).toBeUndefined();
 	// hd stays uncapped; it tracks the source resolution.
 	expect(root.hd.config.peek()).toBeUndefined();

@@ -69,7 +69,7 @@ a real bundler (the examples below).
 - `source` - "camera", "screen", or "file"
 - `muted` - Disable audio capture (boolean)
 - `invisible` - Disable video capture (boolean)
-- `simulcast` - Also publish a lower-resolution `video/sd` rendition (a quarter of the source pixels) alongside `video/hd` (boolean)
+- `simulcast` - Also publish a lower-resolution `video/sd` rendition (a fraction of the source resolution) alongside `video/hd` (boolean)
 
 ## UI Overlay
 

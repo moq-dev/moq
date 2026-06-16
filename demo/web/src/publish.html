@@ -81,7 +81,7 @@ publish.broadcast.audio.enabled.set(true);</code></pre>
 	<hr />
 	<p>
 		The <code class="language-html">simulcast</code> attribute makes this page publish two renditions of the same
-		video: `video/hd` at the captured resolution and `video/sd` at a quarter of the source pixels (half width and height).
+		video: `video/hd` at the captured resolution and `video/sd` at a fraction of the source resolution (around 480p from a 1080p source).
 		Each rendition is a separate track, so it only costs bandwidth when a viewer requests it.
 		Tiny thumbnails download the small one; big players download the big one.
 	</p>
