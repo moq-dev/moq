@@ -96,22 +96,6 @@ cert = "cert.pem"
 key = "key.pem"
 ```
 
-### \[web.health]
-
-Thresholds for the `/health` load-shedding probe (CPU, RAM, network, load
-average), or an external `api` to defer the decision to. All keys are optional;
-an unset threshold is not enforced, and with none set `/health` is a pure
-liveness probe. See [HTTP Endpoints](/bin/relay/http) for the full reference and
-value syntax.
-
-```toml
-[web.health]
-cpu = 75       # percent; `75` or `75%`
-ram = "80%"    # percent of total, or absolute (`32GB`)
-tx = "500MB"   # bytes/s; `b` = bits, `B` = bytes (`4Gb`)
-load5 = "80%"  # load average; raw (`6.0`) or percent of cores; Unix only
-```
-
 ### \[auth]
 
 Authentication configuration.

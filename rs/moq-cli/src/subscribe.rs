@@ -16,6 +16,7 @@ pub enum SubscribeFormat {
 	H265,
 	/// MPEG-TS (transport stream) container.
 	Ts,
+	Flv,
 }
 
 /// `clap` adapter for [`CatalogFormat`] (which is `#[non_exhaustive]` and so
@@ -151,7 +152,7 @@ impl SubscribeArgs {
 		match self.format {
 			SubscribeFormat::H264 => Some(VideoCodecKind::H264),
 			SubscribeFormat::H265 => Some(VideoCodecKind::H265),
-			SubscribeFormat::Fmp4 | SubscribeFormat::Mkv | SubscribeFormat::Ts => None,
+			SubscribeFormat::Fmp4 | SubscribeFormat::Mkv | SubscribeFormat::Ts | SubscribeFormat::Flv => None,
 		}
 	}
 
@@ -249,6 +250,7 @@ impl Subscribe {
 			SubscribeFormat::H264 => self.run_h264().await,
 			SubscribeFormat::H265 => self.run_h265().await,
 			SubscribeFormat::Ts => self.run_ts().await,
+			SubscribeFormat::Flv => self.run_flv().await,
 		}
 	}
 
@@ -325,6 +327,25 @@ impl Subscribe {
 			.with_latency(self.args.max_latency);
 
 		while let Some(chunk) = ts.next().await? {
+			stdout.write_all(&chunk).await?;
+			stdout.flush().await?;
+		}
+
+		Ok(())
+	}
+
+	async fn run_flv(self) -> anyhow::Result<()> {
+		let mut stdout = tokio::io::stdout();
+
+		// FLV emits the file header plus AVC/AAC sequence headers, then one tag per
+		// frame interleaved by timestamp. Avc3 sources are transcoded to avc1 shape
+		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
+		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
+		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.broadcast, self.catalog)
+			.await?
+			.with_latency(self.args.max_latency);
+
+		while let Some(chunk) = flv.next().await? {
 			stdout.write_all(&chunk).await?;
 			stdout.flush().await?;
 		}
