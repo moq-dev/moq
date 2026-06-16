@@ -1,5 +1,5 @@
 import * as Catalog from "@moq/hang/catalog";
-import { Source } from "@moq/json";
+import { Producer } from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
@@ -30,7 +30,7 @@ export class Broadcast {
 	// The catalog, editable at any time regardless of whether anyone is subscribed. The base
 	// `video`/`audio` sections are kept in sync from the encoders; an application adds its own root
 	// sections (e.g. `scte35`) by mutating it too.
-	readonly catalog: CatalogProducer = new Source<Catalog.Root>({ initial: {} });
+	readonly catalog: CatalogProducer = new Producer<Catalog.Root>({ initial: {} });
 
 	// Handlers for custom tracks registered via `publishTrack`, keyed by track name. Persists across
 	// reconnects so a new `Moq.Broadcast` still serves them.
@@ -143,14 +143,14 @@ export class Broadcast {
 	 * subscriptions, nor touch the catalog. Throws if `name` collides with a built-in track
 	 * (catalog/audio/video), since those are served first and the handler would never run.
 	 *
-	 * For a JSON track, serve each track from a `@moq/json` `Source` (the same fan-out producer the
-	 * catalog uses, seeding late joiners with the latest value). Advertise the track by writing your
-	 * own section to {@link catalog}, e.g. to support a custom `scte35` section with no hang-specific
-	 * support:
+	 * For a JSON track, serve each track from a track-less `@moq/json` `Producer` (the same fan-out
+	 * producer the catalog uses, seeding late joiners with the latest value). Advertise the track by
+	 * writing your own section to {@link catalog}, e.g. to support a custom `scte35` section with no
+	 * hang-specific support:
 	 *
 	 * ```ts
-	 * import { Source } from "@moq/json";
-	 * const scte35 = new Source({ initial: { splices: [] } });
+	 * import { Producer } from "@moq/json";
+	 * const scte35 = new Producer({ initial: { splices: [] } });
 	 * broadcast.publishTrack("scte35.json", (track, effect) => scte35.serve(track, effect));
 	 * broadcast.catalog.mutate((c) => { c.scte35 = { track: "scte35.json" }; });
 	 * scte35.update({ splices: [42] });

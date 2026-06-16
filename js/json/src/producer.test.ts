@@ -2,10 +2,10 @@ import { expect, test } from "bun:test";
 import { Track } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { Consumer } from "./consumer.ts";
-import { Source } from "./source.ts";
+import { Producer } from "./producer.ts";
 
-test("seeds subscribers and fans out edits", async () => {
-	const source = new Source<Record<string, unknown>>({ initial: {} });
+test("a track-less producer seeds subscribers and fans out edits", async () => {
+	const source = new Producer<Record<string, unknown>>({ initial: {} });
 
 	// Edit before anyone subscribes: the value is retained, not lost.
 	source.mutate((v) => {
@@ -32,7 +32,7 @@ test("seeds subscribers and fans out edits", async () => {
 });
 
 test("a reconnecting subscriber is seeded with the full current value", async () => {
-	const source = new Source<Record<string, unknown>>({ initial: {} });
+	const source = new Producer<Record<string, unknown>>({ initial: {} });
 	source.mutate((v) => {
 		v.video = { renditions: {} };
 		v.scte35 = { splices: [] };
@@ -55,6 +55,13 @@ test("a reconnecting subscriber is seeded with the full current value", async ()
 });
 
 test("mutate without a value or initial throws", () => {
-	const source = new Source<Record<string, unknown>>();
+	const source = new Producer<Record<string, unknown>>();
 	expect(() => source.mutate(() => {})).toThrow();
+});
+
+test("serve() throws on a track-bound producer", () => {
+	const producer = new Producer<Record<string, unknown>>(new Track("meta.json"));
+	const effect = new Effect();
+	expect(() => producer.serve(new Track("other"), effect)).toThrow();
+	effect.close();
 });
