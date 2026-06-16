@@ -127,21 +127,28 @@ broadcast.video.device.set("screen");
 broadcast.name.set("bob.hang");
 ```
 
-### Custom data tracks
+### Custom tracks and catalog sections
 
 Beyond audio and video, you can publish arbitrary application tracks within the
-same broadcast (no separate broadcast needed). `publishJson` serves a JSON track
-(seeding late joiners with the latest value) and advertises it in the catalog
-[`data` section](/concept/layer/hang#data-tracks):
+same broadcast (no separate broadcast needed). `publishJson` serves a JSON track,
+seeding late joiners with the latest value. It does not touch the catalog; you
+advertise the track by writing your own section to `broadcast.catalog` (the
+[catalog root](/concept/layer/hang#extensions) is a loose object, so any key
+passes through). This lets an app support something like an `scte35` section with
+no hang-specific support:
 
 ```typescript
-const meta = broadcast.publishJson<{ title: string }>("meta.json");
-meta.update({ title: "Live from the moon" });
+const scte35 = broadcast.publishJson<{ splices: number[] }>("scte35.json");
+broadcast.catalog.mutate((c) => {
+    c.scte35 = { track: "scte35.json" };
+});
+scte35.update({ splices: [] });
 ```
 
 For non-JSON payloads, `publishTrack(name, serve)` is the low-level escape hatch:
-`serve` runs whenever a subscriber requests the named track. The component
-exposes both via its `broadcast` property (`el.broadcast.publishJson(...)`).
+`serve` runs whenever a subscriber requests the named track. Both reject the
+built-in track names (catalog/audio/video). The component exposes everything via
+its `broadcast` property (`el.broadcast.publishJson(...)`).
 
 ## Related Packages
 

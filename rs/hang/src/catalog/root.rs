@@ -1,13 +1,12 @@
 //! This module contains the structs and functions for the MoQ catalog format
 use crate::Result;
-use crate::catalog::{Audio, Data, Video};
+use crate::catalog::{Audio, Video};
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 ///
-/// The base catalog carries the media sections (`video`, `audio`) plus an optional `data` section
-/// listing arbitrary application-defined tracks (e.g. a `meta.json` track). Applications extend it
-/// with their own root sections (e.g. `scte35`) by flattening this struct into their own with
+/// The base catalog carries only the media sections (`video`, `audio`). Applications extend it with
+/// their own root sections (e.g. `scte35`) by flattening this struct into their own with
 /// `#[serde(flatten)]`. The catalog does not deny unknown fields, so a base consumer ignores the
 /// extra sections and an extended catalog stays wire-compatible. See the `extension_roundtrip` test.
 #[serde_with::serde_as]
@@ -28,11 +27,6 @@ pub struct Catalog {
 	/// based on their preferences (codec, bitrate, language, etc).
 	#[serde(default)]
 	pub audio: Audio,
-
-	/// Custom application-defined data tracks (e.g. a `meta.json` track) carried within the
-	/// broadcast. Omitted from the wire when empty, so existing catalogs are unaffected.
-	#[serde(default, skip_serializing_if = "Data::is_empty")]
-	pub data: Data,
 }
 
 impl Catalog {
@@ -87,7 +81,7 @@ impl Catalog {
 mod test {
 	use std::collections::BTreeMap;
 
-	use crate::catalog::{AudioCodec::Opus, AudioConfig, Container, Data, DataTrack, H264, VideoConfig};
+	use crate::catalog::{AudioCodec::Opus, AudioConfig, Container, H264, VideoConfig};
 
 	use super::*;
 
@@ -154,7 +148,6 @@ mod test {
 			audio: Audio {
 				renditions: audio_renditions,
 			},
-			data: Data::default(),
 		};
 
 		let output = Catalog::from_str(&encoded).expect("failed to decode");
@@ -162,46 +155,6 @@ mod test {
 
 		let output = decoded.to_string().expect("failed to encode");
 		assert_eq!(encoded, output, "wrong encoded output");
-	}
-
-	#[test]
-	fn data_roundtrip() {
-		let mut encoded = r#"{
-			"video": {"renditions": {}},
-			"audio": {"renditions": {}},
-			"data": {
-				"meta.json": {"mime": "application/json", "description": "metadata"}
-			}
-		}"#
-		.to_string();
-		encoded.retain(|c| !c.is_whitespace());
-
-		let mut data = Data::default();
-		data.insert(
-			"meta.json".to_string(),
-			DataTrack {
-				mime: Some("application/json".to_string()),
-				description: Some("metadata".to_string()),
-			},
-		);
-
-		let decoded = Catalog {
-			data,
-			..Default::default()
-		};
-
-		assert_eq!(decoded, Catalog::from_str(&encoded).expect("failed to decode"));
-		assert_eq!(encoded, decoded.to_string().expect("failed to encode"));
-	}
-
-	#[test]
-	fn data_omitted_when_empty() {
-		// An empty data section must not appear on the wire, so existing catalogs are unaffected.
-		let encoded = Catalog::default().to_string().expect("failed to encode");
-		assert!(
-			!encoded.contains("data"),
-			"empty data section should be omitted: {encoded}"
-		);
 	}
 
 	#[test]

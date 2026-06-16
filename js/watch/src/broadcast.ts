@@ -8,6 +8,9 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import { JsonConsumer, type SubscribeJsonOptions } from "./json";
 import { toHang } from "./msf";
 
+/** Consumes a custom track once subscribed, scoped to the subscription's lifetime. */
+export type ConsumeTrack = (track: Moq.Track, effect: Effect) => void;
+
 // Watch supports the two on-the-wire catalog formats from @moq/hang plus a
 // "manual" mode where the user supplies the catalog directly without fetching.
 export const CATALOG_FORMATS = [...Catalog.FORMATS, "manual"] as const;
@@ -192,8 +195,31 @@ export class Broadcast {
 	}
 
 	/**
-	 * Subscribe to a custom JSON track within this broadcast (e.g. a `meta.json` track listed in the
-	 * catalog `data` section).
+	 * Subscribe to a custom track within this broadcast, following the active broadcast across
+	 * reconnects. `consume` runs with a freshly-subscribed track and a subscription-scoped effect
+	 * each time a broadcast becomes active (re-running on reconnect). This is the low-level escape
+	 * hatch for arbitrary payloads; see {@link subscribeJson} for a JSON convenience.
+	 *
+	 * Returns a function to stop subscribing; also stopped when this broadcast closes.
+	 */
+	subscribeTrack(name: string, priority: number, consume: ConsumeTrack): () => void {
+		const signals = new Effect();
+		signals.run((effect) => {
+			const active = effect.get(this.active);
+			if (!active) return;
+
+			const track = active.subscribe(name, priority);
+			effect.cleanup(() => track.close());
+
+			consume(track, effect);
+		});
+		this.signals.cleanup(() => signals.close());
+		return () => signals.close();
+	}
+
+	/**
+	 * Subscribe to a custom JSON track within this broadcast (e.g. a `meta.json` track that an
+	 * application advertises in its own catalog section).
 	 *
 	 * Follows the active broadcast across reconnects and exposes the latest reconstructed value as a
 	 * Signal on the returned consumer. The consumer is closed when this broadcast closes; close it

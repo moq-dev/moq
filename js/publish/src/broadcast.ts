@@ -18,14 +18,6 @@ export type BroadcastProps = {
 /** Serves a custom track when a subscriber requests it, scoped to the subscription's lifetime. */
 export type ServeTrack = (track: Moq.Track, effect: Effect) => void;
 
-/** Options for {@link Broadcast.publishJson}, extending the {@link Json.Config} for the value. */
-export type PublishJsonOptions<T> = Json.Config<T> & {
-	/** MIME type recorded in the catalog `data` entry. Defaults to `"application/json"`. */
-	mime?: string;
-	/** Human-readable description recorded in the catalog `data` entry. */
-	description?: string;
-};
-
 export class Broadcast {
 	static readonly CATALOG_TRACK = "catalog.json";
 
@@ -164,27 +156,25 @@ export class Broadcast {
 	}
 
 	/**
-	 * Publish a custom JSON track within this broadcast and advertise it in the catalog `data`
-	 * section.
+	 * Publish a custom JSON track within this broadcast.
 	 *
 	 * Returns a {@link JsonProducer}: call `update`/`mutate` to set the value, which is served to
 	 * every subscriber (seeding late joiners with the latest value). The track lives for the
 	 * lifetime of the broadcast.
 	 *
+	 * This does not touch the catalog. To advertise the track, write your own section to
+	 * {@link catalog} (the root is a loose object, so any key passes through). For example, to support
+	 * a custom `scte35` section with no hang-specific support:
+	 *
 	 * ```ts
-	 * const meta = broadcast.publishJson("meta.json");
-	 * meta.update({ title: "Live from the moon" });
+	 * const scte35 = broadcast.publishJson("scte35.json");
+	 * broadcast.catalog.mutate((c) => { c.scte35 = { track: "scte35.json" }; });
+	 * scte35.update({ splices: [] });
 	 * ```
 	 */
-	publishJson<T>(name: string, options?: PublishJsonOptions<T>): JsonProducer<T> {
+	publishJson<T>(name: string, options?: Json.Config<T>): JsonProducer<T> {
 		const producer = new JsonProducer<T>(options);
 		this.publishTrack(name, (track, effect) => producer.serve(track, effect));
-
-		this.catalog.mutate((catalog) => {
-			catalog.data ??= {};
-			catalog.data[name] = { mime: options?.mime ?? "application/json", description: options?.description };
-		});
-
 		return producer;
 	}
 

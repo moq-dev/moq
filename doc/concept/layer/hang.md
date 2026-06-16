@@ -83,19 +83,16 @@ The catalog is a JSON document published through the merge-patch helper (`@moq/j
 
 This keeps application-specific sections in the application layer while the base catalog stays generic.
 
-### Data tracks
+### Custom tracks
 
-Beyond `audio`/`video`, the catalog has an optional `data` section: a flat map of track name to a small descriptor (`mime`, `description`). It advertises arbitrary application-defined tracks (for example a `meta.json` metadata track) carried within the same broadcast, so a consumer can discover and subscribe to them without a separate broadcast. The catalog says nothing about how to decode a data track; the descriptor fields are hints for the consumer.
+A custom catalog section can carry its payload inline (for low-rate metadata), or it can reference a separate track in the same broadcast (for a stream of data, e.g. a `meta.json` track or an SCTE-35 event track). The relay treats such a track like any other; only the publisher and consumer give it meaning.
 
-```json
-{
-  "data": {
-    "meta.json": { "mime": "application/json", "description": "broadcast metadata" }
-  }
-}
-```
+The `@moq/publish` and `@moq/watch` components publish and subscribe to these tracks generically, with no per-application support:
 
-The web components expose this directly: on the publish side, `broadcast.publishJson("meta.json")` serves a JSON track (seeding late joiners with the latest value) and adds the `data` entry; on the watch side, `broadcast.subscribeJson("meta.json")` follows the active broadcast and exposes the latest value as a signal. The section is omitted from the wire when empty, so existing catalogs are unaffected.
+- **Publish**: `broadcast.publishJson(name)` serves a JSON track (seeding late joiners with the latest value), and `broadcast.publishTrack(name, serve)` serves arbitrary bytes. Advertise the track by writing your own catalog section with `broadcast.catalog.mutate(...)`.
+- **Watch**: `broadcast.subscribeJson(name)` follows the active broadcast and exposes the latest value as a signal, and `broadcast.subscribeTrack(name, priority, consume)` is the raw-bytes equivalent. Read your section back from `broadcast.catalog` (unknown sections pass through the loose schema).
+
+So an application supports something like SCTE-35 entirely in its own code: publish an `scte35` section (and optionally a track) on one side, read it on the other, without hang, `@moq/publish`, or `@moq/watch` knowing anything about SCTE-35.
 
 ## Container
 

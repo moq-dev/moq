@@ -7,7 +7,6 @@
 
 export * from "./audio";
 export * from "./container";
-export * from "./data";
 export * from "./format";
 export * from "./integers";
 export * from "./priority";

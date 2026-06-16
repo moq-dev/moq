@@ -139,26 +139,28 @@ el.catalog = myCatalog;
 > `"msf"`) tears down the previous fetch loop, which clears `catalog`. Set the
 > catalog *after* switching to `"manual"`, not before.
 
-### Custom data tracks
+### Custom tracks and catalog sections
 
 A broadcast can carry arbitrary application tracks (for example a `meta.json`
-metadata track) alongside the media, listed in the catalog
-[`data` section](/concept/layer/hang#data-tracks). Use `subscribeJson` to read
-one: it follows the active broadcast across reconnects and exposes the latest
-value as a signal. Call `close()` when done (it's also closed when the broadcast
-closes).
+metadata track) alongside the media. An application advertises them in its own
+catalog section (the [catalog root](/concept/layer/hang#extensions) is a loose
+object, so unknown sections pass through to `broadcast.catalog`). Use
+`subscribeJson` to read a JSON track: it follows the active broadcast across
+reconnects and exposes the latest value as a signal. Call `close()` when done
+(it's also closed when the broadcast closes).
 
 ```typescript
+// The app's own catalog section, read back from the loose catalog.
+const scte35 = broadcast.catalog.peek()?.scte35;
+
 const meta = broadcast.subscribeJson<{ title: string }>("meta.json");
 meta.value.subscribe((value) => console.log("meta", value));
 ```
 
-The component exposes the same method via its `broadcast` property:
-
-```typescript
-const el = document.querySelector("moq-watch")!;
-const meta = el.broadcast.subscribeJson("meta.json");
-```
+For non-JSON payloads, `subscribeTrack(name, priority, consume)` is the
+low-level equivalent: `consume` runs with the subscribed track each time a
+broadcast becomes active. The component exposes everything via its `broadcast`
+property (`el.broadcast.subscribeJson(...)`).
 
 ## UI Overlay
 
