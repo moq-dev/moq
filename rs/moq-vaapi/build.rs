@@ -87,6 +87,11 @@ fn generate_vendored_version_header(out_dir: &Path) -> (u32, u32) {
 	std::fs::create_dir_all(&va_dir).expect("failed to create va dir in OUT_DIR");
 	std::fs::write(va_dir.join("va_version.h"), generated).expect("failed to write va_version.h");
 
+	// libva keeps va_drm.h under va/drm/ in its source tree, but installs it (and
+	// the wrapper includes it) as <va/va_drm.h>. Stage it next to the generated
+	// va_version.h so the OUT_DIR include path resolves <va/va_drm.h>.
+	std::fs::copy("libva/va/drm/va_drm.h", va_dir.join("va_drm.h")).expect("failed to stage va/drm/va_drm.h");
+
 	(
 		major.parse().expect("invalid major version"),
 		minor.parse().expect("invalid minor version"),

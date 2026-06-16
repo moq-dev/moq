@@ -66,6 +66,23 @@ test *args:
 build:
     cargo build
 
+# Compile-check moq-vaapi without system libva, by vendoring libva's headers.
+# Works on any OS (macOS included): `dlopen` skips linking and `vendored` feeds
+# bindgen the header tree, so only libclang is needed (the nix devShell provides
+# it). moq-vaapi is workspace-excluded (its build script needs libva headers), so
+# the Linux CI compiles it via moq-video's `vaapi` feature against system libva;
+# this recipe is the way to exercise the same crate on a libva-less dev box.
+# Clones the pinned libva headers (matching CI's VA-API 1.23) into the gitignored
+# rs/moq-vaapi/libva on first run.
+vaapi-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    libva=rs/moq-vaapi/libva
+    if [[ ! -e "$libva/meson.build" ]]; then
+    	git clone --depth 1 --branch 2.23.0 https://github.com/intel/libva.git "$libva"
+    fi
+    cargo clippy --manifest-path rs/moq-vaapi/Cargo.toml --all-targets --features vendored,dlopen -- -D warnings
+
 # Remove the Rust target directory.
 clean:
     cargo clean
