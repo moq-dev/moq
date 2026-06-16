@@ -27,8 +27,7 @@ impl codec::Bridge for Bridge {
 		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
 		let mut buf = BytesMut::from(frame.payload.as_ref());
-		self.import.decode_frame(&mut buf, Some(pts))?;
-		self.import.sync();
+		self.import.decoding(|i| i.decode_frame(&mut buf, Some(pts)))?;
 		Ok(())
 	}
 }

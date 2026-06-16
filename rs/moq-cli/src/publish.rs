@@ -89,8 +89,7 @@ impl PublishDecoder {
 	fn decode_buf(&mut self, buffer: &mut bytes::BytesMut) -> anyhow::Result<()> {
 		match self {
 			Self::Avc3(d) => {
-				d.decode_stream(buffer, None)?;
-				d.sync();
+				d.decoding(|d| d.decode_stream(buffer, None))?;
 				Ok(())
 			}
 			Self::Fmp4(d) => Ok(d.decode(buffer)?),

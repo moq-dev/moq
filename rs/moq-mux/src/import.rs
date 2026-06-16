@@ -318,27 +318,12 @@ impl Framed {
 	/// Decode a frame from the given buffer.
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		match self.decoder {
-			FramedKind::H264(ref mut decoder) => {
-				decoder.decode_frame(buf, pts)?;
-				decoder.sync();
-			}
+			FramedKind::H264(ref mut decoder) => decoder.decoding(|d| d.decode_frame(buf, pts))?,
 			FramedKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
-			FramedKind::Hev1(ref mut decoder) => {
-				decoder.decode_frame(buf, pts)?;
-				decoder.sync();
-			}
-			FramedKind::Av01(ref mut decoder) => {
-				decoder.decode_frame(buf, pts)?;
-				decoder.sync();
-			}
-			FramedKind::Vp8(ref mut decoder) => {
-				decoder.decode_frame(buf, pts)?;
-				decoder.sync();
-			}
-			FramedKind::Vp9(ref mut decoder) => {
-				decoder.decode_frame(buf, pts)?;
-				decoder.sync();
-			}
+			FramedKind::Hev1(ref mut decoder) => decoder.decoding(|d| d.decode_frame(buf, pts))?,
+			FramedKind::Av01(ref mut decoder) => decoder.decoding(|d| d.decode_frame(buf, pts))?,
+			FramedKind::Vp8(ref mut decoder) => decoder.decoding(|d| d.decode_frame(buf, pts))?,
+			FramedKind::Vp9(ref mut decoder) => decoder.decoding(|d| d.decode_frame(buf, pts))?,
 			FramedKind::Aac(ref mut decoder) => decoder.decode(buf, pts)?,
 			FramedKind::Opus(ref mut decoder) => decoder.decode_buf(buf, pts)?,
 			FramedKind::Mkv(ref mut decoder) => {
@@ -693,19 +678,10 @@ impl Stream {
 	/// The buffer will be fully consumed, or an error will be returned.
 	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		match self.decoder {
-			StreamKind::Avc3(ref mut decoder) => {
-				decoder.initialize(buf)?;
-				decoder.sync();
-			}
+			StreamKind::Avc3(ref mut decoder) => decoder.decoding(|d| d.initialize(buf))?,
 			StreamKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
-			StreamKind::Hev1(ref mut decoder) => {
-				decoder.initialize(buf)?;
-				decoder.sync();
-			}
-			StreamKind::Av01(ref mut decoder) => {
-				decoder.initialize(buf)?;
-				decoder.sync();
-			}
+			StreamKind::Hev1(ref mut decoder) => decoder.decoding(|d| d.initialize(buf))?,
+			StreamKind::Av01(ref mut decoder) => decoder.decoding(|d| d.initialize(buf))?,
 			StreamKind::Mkv(ref mut decoder) => decoder.decode(buf)?,
 			StreamKind::Ts(ref mut decoder) => decoder.decode(buf)?,
 		}
@@ -720,22 +696,10 @@ impl Stream {
 	/// Decode a stream of data from the given buffer.
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		match self.decoder {
-			StreamKind::Avc3(ref mut decoder) => {
-				decoder.decode_stream(buf, None)?;
-				decoder.sync();
-				Ok(())
-			}
+			StreamKind::Avc3(ref mut decoder) => decoder.decoding(|d| d.decode_stream(buf, None)),
 			StreamKind::Fmp4(ref mut decoder) => decoder.decode(buf),
-			StreamKind::Hev1(ref mut decoder) => {
-				decoder.decode_stream(buf, None)?;
-				decoder.sync();
-				Ok(())
-			}
-			StreamKind::Av01(ref mut decoder) => {
-				decoder.decode_stream(buf, None)?;
-				decoder.sync();
-				Ok(())
-			}
+			StreamKind::Hev1(ref mut decoder) => decoder.decoding(|d| d.decode_stream(buf, None)),
+			StreamKind::Av01(ref mut decoder) => decoder.decoding(|d| d.decode_stream(buf, None)),
 			StreamKind::Mkv(ref mut decoder) => decoder.decode(buf),
 			StreamKind::Ts(ref mut decoder) => decoder.decode(buf).map_err(Into::into),
 		}

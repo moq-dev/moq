@@ -45,10 +45,12 @@ impl Producer {
 
 	/// Publish already-encoded Annex-B packets at the given timestamp.
 	pub fn publish(&mut self, packets: Vec<bytes::Bytes>, timestamp: Timestamp) -> Result<(), Error> {
-		for mut packet in packets {
-			self.import.decode_frame(&mut packet, Some(timestamp))?;
-		}
-		self.import.sync();
+		self.import.decoding(|i| {
+			for mut packet in packets {
+				i.decode_frame(&mut packet, Some(timestamp))?;
+			}
+			Ok::<(), moq_mux::Error>(())
+		})?;
 		Ok(())
 	}
 

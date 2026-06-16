@@ -739,14 +739,12 @@ impl<E: CatalogExt> Stream<E> {
 		match self {
 			Stream::H264 { import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				import.decode_frame(&mut pending.data.as_slice(), pts)?;
-				import.sync();
+				import.decoding(|i| i.decode_frame(&mut pending.data.as_slice(), pts))?;
 				Ok(())
 			}
 			Stream::H265 { import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				import.decode_frame(&mut pending.data.as_slice(), pts)?;
-				import.sync();
+				import.decoding(|i| i.decode_frame(&mut pending.data.as_slice(), pts))?;
 				Ok(())
 			}
 			Stream::Aac(stream) => stream.write(pending, burst),
@@ -816,12 +814,12 @@ impl<E: CatalogExt> AacStream<E> {
 					// WebCodecs) can configure the decoder. TS itself carries it inline.
 					let description = config.encode();
 					let track = crate::publish::unique_track(&mut self.broadcast, ".aac")?;
-					let aac = aac::Import::from_track(track, config)?;
-					let mut import = crate::publish::Published::new(self.catalog.clone(), aac);
-					if let Some(rendition) = import.rendition_mut() {
+					let mut aac = aac::Import::from_track(track, config)?;
+					if let Some(rendition) = aac.rendition_mut() {
 						rendition.description = Some(description);
 					}
-					import.sync();
+					// Published::new mirrors the rendition (description included) on attach.
+					let import = crate::publish::Published::new(self.catalog.clone(), aac);
 					self.import.insert(import)
 				}
 			};
@@ -881,10 +879,12 @@ impl<E: CatalogExt> AacStream<E> {
 		self.jitter = Some(jitter);
 
 		if let Some(import) = &mut self.import {
-			if let Some(rendition) = import.rendition_mut() {
-				rendition.jitter = Some(jitter.into());
-			}
-			import.sync();
+			import.decoding(|i| {
+				if let Some(rendition) = i.rendition_mut() {
+					rendition.jitter = Some(jitter.into());
+				}
+				crate::Result::Ok(())
+			})?;
 		}
 		Ok(())
 	}

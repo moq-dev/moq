@@ -12,9 +12,9 @@
 //! is instead the on-demand path, fed directly to the importer's `new`.
 //!
 //! Some importers fill their catalog lazily (H.264 only knows its config once SPS
-//! arrives) or refine it over time (jitter). Call [`Published::sync`] after
-//! feeding such an importer so the new/changed renditions reach the catalog; it's
-//! a cheap comparison when nothing changed.
+//! arrives) or refine it over time (jitter). Feed them through
+//! [`Published::decode`] or [`Published::decoding`], which re-mirror the catalog
+//! automatically so new/changed renditions always reach it.
 
 use std::ops::{Deref, DerefMut};
 
@@ -81,10 +81,10 @@ impl<I: Renditions, E: CatalogExt> Published<I, E> {
 
 	/// Re-mirror the importer's current renditions into the catalog.
 	///
-	/// Call this after feeding an importer whose catalog appears or changes
-	/// lazily (H.264 once SPS is parsed, jitter refinement, ...). It's a cheap
-	/// comparison and touches the catalog only when something actually changed.
-	pub fn sync(&mut self) {
+	/// Runs after each decode via [`decode`](Self::decode) / [`decoding`](Self::decoding),
+	/// so callers never invoke it directly. A cheap comparison that touches the
+	/// catalog only when a rendition actually appeared, changed, or was dropped.
+	fn sync(&mut self) {
 		let current = self.inner.renditions();
 		if self.published == *current {
 			return;
@@ -116,13 +116,29 @@ impl<I: Renditions, E: CatalogExt> Published<I, E> {
 
 		self.published = current.clone();
 	}
+
+	/// Run a decode on the inner importer, then re-mirror the catalog.
+	///
+	/// The footgun-free wrapper for the byte-decode entry points (the importer's
+	/// `decode_frame` / `decode_stream` / `initialize`): it re-mirrors the catalog
+	/// after the closure returns, so a lazily-resolved config or refined jitter
+	/// always reaches it. Prefer [`decode`](Self::decode) where the caller already
+	/// has split frames.
+	pub fn decoding<R, Er>(&mut self, decode: impl FnOnce(&mut I) -> Result<R, Er>) -> crate::Result<R>
+	where
+		crate::Error: From<Er>,
+	{
+		let out = decode(&mut self.inner)?;
+		self.sync();
+		Ok(out)
+	}
 }
 
 impl<I: Renditions + FrameDecode, E: CatalogExt> Published<I, E> {
 	/// Publish frames and re-mirror any catalog change in one call.
 	///
-	/// This is the footgun-free path: it [`sync`](Self::sync)s after decoding, so
-	/// a lazily-resolved config or refined jitter always reaches the catalog.
+	/// This is the footgun-free path: it re-mirrors the catalog after decoding, so
+	/// a lazily-resolved config or refined jitter always reaches it.
 	pub fn decode<It: IntoIterator<Item = crate::container::Frame>>(&mut self, frames: It) -> crate::Result<()> {
 		self.inner.decode(frames)?;
 		self.sync();
@@ -196,14 +212,22 @@ mod tests {
 		let mut published = Published::new(catalog.clone(), Fake(hang::Catalog::default()));
 		assert!(catalog.snapshot().video.renditions.is_empty());
 
-		// A rendition appears later; sync mirrors it into the broadcast catalog.
-		published.0.video.renditions.insert("v".to_string(), video());
-		published.sync();
+		// A rendition appears later; decoding mirrors it into the broadcast catalog.
+		published
+			.decoding(|i| {
+				i.0.video.renditions.insert("v".to_string(), video());
+				crate::Result::Ok(())
+			})
+			.unwrap();
 		assert!(catalog.snapshot().video.renditions.contains_key("v"));
 
 		// An update to the same rendition propagates too.
-		published.0.video.renditions.get_mut("v").unwrap().bitrate = Some(1_000);
-		published.sync();
+		published
+			.decoding(|i| {
+				i.0.video.renditions.get_mut("v").unwrap().bitrate = Some(1_000);
+				crate::Result::Ok(())
+			})
+			.unwrap();
 		assert_eq!(catalog.snapshot().video.renditions["v"].bitrate, Some(1_000));
 
 		// Dropping the wrapper retires the rendition.
