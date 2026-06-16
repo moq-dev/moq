@@ -7,7 +7,7 @@ const TrackSchema = z.object({
 	name: z.string(),
 });
 
-// Based on VideoDecoderConfig
+/** Schema for a single video rendition's decoder config. Mirrors WebCodecs VideoDecoderConfig. */
 export const VideoConfigSchema = z.object({
 	// See: https://w3c.github.io/webcodecs/codec_registry.html
 	codec: z.string(),
@@ -53,8 +53,10 @@ export const VideoConfigSchema = z.object({
 	jitter: z.optional(u53Schema),
 });
 
-// Mirrors VideoDecoderConfig
-// https://w3c.github.io/webcodecs/#video-decoder-config
+/**
+ * Schema for the catalog video section: renditions plus display size, rotation, and flip.
+ * Renditions mirror WebCodecs VideoDecoderConfig (https://w3c.github.io/webcodecs/#video-decoder-config).
+ */
 export const VideoSchema = z.union([
 	z.object({
 		// A map of track name to rendition configuration.
@@ -101,5 +103,7 @@ export const VideoSchema = z.union([
 	),
 ]);
 
+/** The catalog video section: renditions keyed by track name plus display options. */
 export type Video = z.infer<typeof VideoSchema>;
+/** Decoder config for a single video rendition. */
 export type VideoConfig = z.infer<typeof VideoConfigSchema>;

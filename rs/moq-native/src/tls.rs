@@ -315,7 +315,7 @@ pub struct Server {
 	/// and can be used by the application to grant elevated access. Clients that
 	/// do not present a certificate are unaffected.
 	///
-	/// Only supported by the Quinn backend.
+	/// Only supported by the Quinn and noq backends.
 	#[arg(
 		long = "server-tls-root",
 		id = "server-tls-root",

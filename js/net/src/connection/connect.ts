@@ -9,6 +9,7 @@ import { exchangeSetup } from "./handshake.ts";
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = 500;
 
+/** Tuning for the WebSocket fallback used when WebTransport is unavailable or loses the connect race. */
 export interface WebSocketOptions {
 	// If true (default), enable the WebSocket fallback.
 	enabled?: boolean;
@@ -25,12 +26,14 @@ export interface WebSocketOptions {
 // One entry of `serverCertificateHashes`, used to pin a self-signed server.
 // Unlike the DOM type, `value` also accepts a hex string (the format moq
 // servers report via their certificate fingerprints), decoded automatically.
+/** A server certificate hash used to pin a self-signed server. `value` accepts raw bytes or a hex string. */
 export interface CertificateHash {
 	algorithm?: "sha-256";
 	value: BufferSource | string;
 }
 
 // WebTransport options, extended with friendlier certificate pinning.
+/** WebTransport options extended with friendlier certificate pinning (hex hashes or a raw certificate). */
 export interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes"> {
 	// Pin the server to one or more certificate hashes. Each `value` may be raw
 	// bytes or a hex string; the algorithm defaults to `sha-256`.
@@ -42,6 +45,7 @@ export interface WebTransportProps extends Omit<WebTransportOptions, "serverCert
 	serverCertificate?: string | BufferSource;
 }
 
+/** Options for {@link connect}. */
 export interface ConnectProps {
 	// WebTransport options.
 	webtransport?: WebTransportProps;
@@ -363,7 +367,13 @@ async function connectWebTransport(
 		const fingerprintUrl = new URL(url);
 		fingerprintUrl.pathname = "/certificate.sha256";
 		fingerprintUrl.search = "";
-		console.warn(fingerprintUrl.toString(), "performing an insecure fingerprint fetch; use https:// in production");
+		// Dev-only path: http:// can't be a real WebTransport origin, so we fetch the
+		// self-signed cert's hash over plain HTTP and pin it. Production uses https://
+		// and never reaches here. Keep this at debug so it doesn't read as a problem.
+		console.debug(
+			fingerprintUrl.toString(),
+			"performing an insecure fingerprint fetch; use https:// in production",
+		);
 
 		// Fetch the fingerprint from the server.
 		// TODO cancel the request if the effect is cancelled.

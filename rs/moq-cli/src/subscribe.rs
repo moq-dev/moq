@@ -10,6 +10,7 @@ pub enum SubscribeFormat {
 	Fmp4,
 	Mkv,
 	Ts,
+	Flv,
 }
 
 /// `clap` adapter for [`CatalogFormat`] (which is `#[non_exhaustive]` and so
@@ -86,6 +87,7 @@ impl Subscribe {
 			SubscribeFormat::Fmp4 => self.run_fmp4().await,
 			SubscribeFormat::Mkv => self.run_mkv().await,
 			SubscribeFormat::Ts => self.run_ts().await,
+			SubscribeFormat::Flv => self.run_flv().await,
 		}
 	}
 
@@ -135,6 +137,24 @@ impl Subscribe {
 			.with_latency(self.args.max_latency);
 
 		while let Some(chunk) = ts.next().await? {
+			stdout.write_all(&chunk).await?;
+			stdout.flush().await?;
+		}
+
+		Ok(())
+	}
+
+	async fn run_flv(self) -> anyhow::Result<()> {
+		let mut stdout = tokio::io::stdout();
+
+		// FLV emits the file header plus AVC/AAC sequence headers, then one tag per
+		// frame interleaved by timestamp. Avc3 sources are transcoded to avc1 shape
+		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
+		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
+		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.broadcast, self.catalog)?
+			.with_latency(self.args.max_latency);
+
+		while let Some(chunk) = flv.next().await? {
 			stdout.write_all(&chunk).await?;
 			stdout.flush().await?;
 		}

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.21](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.20...moq-ffi-v0.2.21) - 2026-06-16
+
+### Added
+
+- certificate pinning for native and browser clients ([#1698](https://github.com/moq-dev/moq/pull/1698))
+- *(moq-ffi)* expose dynamic track requests ([#1674](https://github.com/moq-dev/moq/pull/1674))
+
+### Fixed
+
+- *(native)* surface terminal auth connect errors ([#1649](https://github.com/moq-dev/moq/pull/1649))
+
+### Other
+
+- Mux import with existing track ([#1684](https://github.com/moq-dev/moq/pull/1684))
+
 ## [0.2.20](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.19...moq-ffi-v0.2.20) - 2026-06-10
 
 ### Added

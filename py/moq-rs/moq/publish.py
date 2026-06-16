@@ -190,6 +190,9 @@ class BroadcastProducer:
     def publish_media(self, format: str, init: bytes) -> MediaProducer:
         return MediaProducer(self._inner.publish_media(format, init))
 
+    def publish_media_on_track(self, track: TrackProducer, format: str, init: bytes) -> MediaProducer:
+        return MediaProducer(self._inner.publish_media_on_track(track._inner, format, init))
+
     def publish_media_stream(self, format: str) -> MediaStreamProducer:
         """Publish a media track fed by a raw byte stream (unknown frame
         boundaries). `format` is a stream format (avc3, hev1, av01, fmp4, mkv)."""

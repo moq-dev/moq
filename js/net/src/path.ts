@@ -30,6 +30,7 @@
  */
 export type Valid = string & { __brand: "Name" };
 
+/** Build a path from one or more components, joining with "/" and trimming redundant slashes. */
 export function from(...paths: string[]): Valid {
 	// Join paths with "/" and then remove leading and trailing slashes, and collapse multiple slashes into one.
 	const joined = paths.join("/");
@@ -132,6 +133,7 @@ export function join(path: Valid, other: Valid): Valid {
 	}
 }
 
+/** The empty path, which is a prefix of every path. */
 export function empty(): Valid {
 	return "" as Valid;
 }

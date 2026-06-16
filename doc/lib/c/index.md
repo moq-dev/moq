@@ -35,7 +35,7 @@ library, and the generated header. Supported targets:
 - `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
 - `x86_64-apple-darwin`, `aarch64-apple-darwin`
 
-Download and extract a bundle (here `0.2.0` on Linux x86_64):
+Download and extract a bundle (here `0.2.0` on Linux x86\_64):
 
 ```bash
 ver=0.2.0
@@ -110,6 +110,8 @@ if (rc < 0) {
 ```
 
 `moq_error()` returns the reason for the most recent failed call **on the calling thread**, including detail the numeric code can't carry (which URL failed to parse, why a decode failed, etc.). The returned pointer is valid until the next libmoq call on that thread, so copy it if you need to keep it. It is only meaningful after a call returned a negative code; check the code first. Errors delivered through status callbacks carry their code directly, so read `moq_error()` from inside the callback if you want the matching reason.
+
+A server can reject the connection on auth grounds: unauthorized (HTTP 401) or forbidden (HTTP 403). Each returns its own distinct negative code (with `moq_error()` reporting `"unauthorized"` / `"forbidden"`). These are terminal, so distinguish them from a transient transport failure and stop rather than reconnecting.
 
 Failed calls are reported only through the return code and `moq_error()`, not logged. To surface libmoq's internal logs (moq-net / QUIC activity), call `moq_log_level("debug")` (or `"trace"`, `"info"`, etc.) to install a tracing subscriber.
 

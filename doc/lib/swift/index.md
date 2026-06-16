@@ -17,7 +17,7 @@ A single Swift Package Manager target that wraps the UniFFI bindings with `Async
 
 - iOS 15+, iPadOS 15+, macOS 12+
 - Universal binary for Apple Silicon and Intel Macs
-- iOS device + iOS Simulator slices (arm64 and x86_64)
+- iOS device + iOS Simulator slices (arm64 and x86\_64)
 - Cancellation through Swift `Task` propagates to native consumers
 
 [Learn more](/lib/swift/moq)

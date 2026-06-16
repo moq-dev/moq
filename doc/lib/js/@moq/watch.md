@@ -139,6 +139,39 @@ el.catalog = myCatalog;
 > `"msf"`) tears down the previous fetch loop, which clears `catalog`. Set the
 > catalog *after* switching to `"manual"`, not before.
 
+### Custom tracks and catalog sections
+
+A broadcast can carry arbitrary application tracks (for example a `meta.json`
+metadata track) alongside the media. An application advertises them in its own
+catalog section (the [catalog root](/concept/layer/hang#extensions) is a loose
+object, so unknown sections pass through to `broadcast.catalog`).
+`subscribeTrack(name, priority, consume)` follows the active broadcast across
+reconnects and runs `consume(track, effect)` each time it becomes active. Decode
+the payload yourself with the re-exported `@moq/json`:
+
+```typescript
+import { Json } from "@moq/watch";
+import { Signals } from "@moq/watch";
+
+// The app's own catalog section, read back from the loose catalog.
+const section = broadcast.catalog.peek()?.scte35;
+
+const scte35 = new Signals.Signal<{ splices: number[] } | undefined>(undefined);
+broadcast.subscribeTrack("scte35.json", 100, (track, effect) => {
+    const consumer = new Json.Consumer<{ splices: number[] }>(track);
+    effect.spawn(async () => {
+        for (;;) {
+            const next = await Promise.race([effect.cancel, consumer.next()]);
+            if (next === undefined) break;
+            scte35.set(next);
+        }
+    });
+});
+```
+
+The component exposes everything via its `broadcast` property
+(`el.broadcast.subscribeTrack(...)`).
+
 ## UI Overlay
 
 Import `@moq/watch/ui` for a Web Component overlay with buffering indicator, stats panel, and playback controls:

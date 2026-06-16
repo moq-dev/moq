@@ -31,4 +31,5 @@ export const ContainerSchema = z._default(
 	{ kind: "legacy" },
 );
 
+/** The per-frame container format declared in the catalog. */
 export type Container = z.infer<typeof ContainerSchema>;

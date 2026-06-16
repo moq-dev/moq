@@ -5,6 +5,7 @@ import * as z from "zod/mini";
  */
 export const u8Schema = z.number().check(z.int(), z.nonnegative(), z.lte(255)).brand("u8");
 
+/** Branded 8-bit unsigned integer (0-255). */
 export type U8 = z.infer<typeof u8Schema>;
 
 /**
@@ -13,6 +14,7 @@ export type U8 = z.infer<typeof u8Schema>;
  */
 export const u53Schema = z.number().check(z.int(), z.nonnegative(), z.lte(Number.MAX_SAFE_INTEGER)).brand("u53");
 
+/** Branded unsigned integer up to JavaScript's MAX_SAFE_INTEGER (2^53 - 1). */
 export type U53 = z.infer<typeof u53Schema>;
 
 /**

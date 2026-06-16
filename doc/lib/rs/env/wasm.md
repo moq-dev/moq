@@ -21,8 +21,8 @@ browser implementation.
 The [`web-transport`](https://crates.io/crates/web-transport) meta-crate picks
 the backend by target automatically:
 
-- **native** &rarr; [`web-transport-quinn`](https://crates.io/crates/web-transport-quinn) (a real QUIC stack)
-- **wasm** &rarr; [`web-transport-wasm`](https://crates.io/crates/web-transport-wasm) (a thin wrapper over the browser's `WebTransport`)
+- **native** → [`web-transport-quinn`](https://crates.io/crates/web-transport-quinn) (a real QUIC stack)
+- **wasm** → [`web-transport-wasm`](https://crates.io/crates/web-transport-wasm) (a thin wrapper over the browser's `WebTransport`)
 
 So the same `moq-net` code works in both places. On wasm you skip
 [`moq-native`](/lib/rs/crate/moq-native) entirely (it's quinn-only) and get the

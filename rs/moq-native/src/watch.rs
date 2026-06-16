@@ -36,8 +36,15 @@ impl FileWatcher {
 			let _ = tx.try_send(());
 		})?;
 
-		// Watch each distinct parent directory once.
-		let mut dirs: Vec<&Path> = paths.iter().filter_map(|p| p.parent()).collect();
+		// Watch each distinct parent directory once. A bare filename like
+		// `cert.pem` has an empty-string parent (`Some("")`, not `None`), which the
+		// OS watcher rejects with "No path was found", so map that to the current
+		// directory.
+		let mut dirs: Vec<&Path> = paths
+			.iter()
+			.filter_map(|p| p.parent())
+			.map(|p| if p.as_os_str().is_empty() { Path::new(".") } else { p })
+			.collect();
 		dirs.sort_unstable();
 		dirs.dedup();
 		for dir in dirs {
@@ -60,5 +67,18 @@ impl FileWatcher {
 			.recv()
 			.await
 			.expect("file watcher channel closed unexpectedly");
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// A bare filename has a `Some("")` parent; watching "" is rejected by the OS
+	// watcher, so `new` must fall back to the current directory rather than error.
+	#[test]
+	fn bare_filename_watches_current_dir() {
+		FileWatcher::new(&[PathBuf::from("cert.pem"), PathBuf::from("key.pem")])
+			.expect("bare filenames should watch the current directory");
 	}
 }

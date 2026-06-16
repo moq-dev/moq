@@ -14,6 +14,8 @@
 	<!-- Always show this banner to flex browser support. -->
 	<moq-watch-support show="always"></moq-watch-support>
 
+	<!-- Drag the handle on the right edge to resize the player. -->
+	<div style="resize: horizontal; overflow: hidden; min-width: 240px;">
 	<!-- Live discovers new broadcasts available at the given URL. -->
 	<moq-discover>
 		<!-- This optional component shows some simple controls for the inner <moq-watch> component. -->
@@ -24,6 +26,7 @@
 				- `name`: The broadcast name, otherwise we use the last part of the URL.
 				- `paused`: Video and audio are paused.
 				- `muted`: Audio is muted.
+				- `visible`: When to download video: `never`, a distance like `200px` from the viewport (suspended while the tab is hidden), or `always` (default `0px`, on screen only).
 				- `volume`: The audio volume (0-1).
 				- `latency`: The target jitter buffer size in milliseconds, or "real-time" to use the RTT.
 				- `reload`: Whether to automatically reconnect when the broadcast goes offline/online.
@@ -38,6 +41,12 @@
 			</moq-watch>
 		</moq-watch-ui>
 	</moq-discover>
+	</div>
+
+	<!-- Dev-only: renders console output inline here. Set `level` to lower the
+	     threshold (debug | log | info | warn | error; defaults to warn). Defined
+	     by the console-overlay Vite plugin; absent from production builds. -->
+	<moq-console></moq-console>
 
 	<h3>Other demos:</h3>
 	<ul>
@@ -78,10 +87,25 @@
 &lt;/moq-watch&gt;</code></pre>
 	</p>
 	<p>
+		The player sits in a resizable container; grab the right edge and drag.
+		<code class="language-html">&lt;moq-watch&gt;</code> monitors its own rendered size (scaled by
+		devicePixelRatio) and requests the smallest rendition that still fills the canvas.
+		The default bunny broadcast only has one rendition, so nothing will change.
+		Instead, open the <a href="publish.html">publish demo</a>, which uses the <code
+			class="language-html">simulcast</code> attribute to publish both `video/hd` and `video/sd`, and then <a
+			href="index.html?broadcast=me.hang">watch your own broadcast</a>.
+		Keep the Quality dropdown on Auto and resize away; the exact switch point depends on your display's
+		devicePixelRatio.
+		Switching is seamless: the player keeps decoding the old rendition until the new one catches up.
+	</p>
+	<p>
 		Don't want video? Don't provide a canvas!
 		It won't be downloaded, decoded, or rendered.
 		This includes when the video is paused, minimized, not in the DOM, or scrolled out of view.
 		wowee the bandwidth savings!
+	</p>
+	<p>
+		Use <code>visible="200px"</code> to pre-warm video before it scrolls into view (still suspended while the tab is hidden), or <code>visible="always"</code> to download it regardless of scroll position or tab visibility.
 	</p>
 	<p>
 		Audio may start muted because the browser can require user interaction before autoplaying.
