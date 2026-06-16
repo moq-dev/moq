@@ -77,19 +77,27 @@ async fn dynamic_track_request() {
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
 
-	// subscribe_track stays pending until the dynamic producer accepts the request
-	// via requested_track(), so drive both sides concurrently to avoid a deadlock.
-	let (track_consumer, track) = tokio::join!(
-		consumer.subscribe_track("events".into()),
-		tokio::time::timeout(TIMEOUT, dynamic.requested_track()),
-	);
-	let track_consumer = track_consumer.unwrap();
-	let track = track.expect("timed out waiting for requested track").unwrap();
+	// The request is accepted by the first producer op (write_frame below), so the
+	// subscribe stays pending until then; run it on a concurrent task.
+	let subscribe = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.subscribe_track("events".into()).await })
+	};
 
+	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for requested track")
+		.unwrap();
 	assert_eq!(track.name().unwrap(), "events");
 
 	let payload = b"hello dynamic track".to_vec();
 	track.write_frame(payload.clone()).unwrap();
+
+	let track_consumer = tokio::time::timeout(TIMEOUT, subscribe)
+		.await
+		.expect("timed out waiting for subscribe")
+		.expect("subscribe task panicked")
+		.unwrap();
 
 	let frame = tokio::time::timeout(TIMEOUT, track_consumer.read_frame())
 		.await
@@ -107,17 +115,26 @@ async fn dynamic_track_request_can_abort() {
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
 
-	// subscribe_track stays pending until the dynamic producer accepts the request
-	// via requested_track(), so drive both sides concurrently to avoid a deadlock.
-	let (track_consumer, track) = tokio::join!(
-		consumer.subscribe_track("unknown".into()),
-		tokio::time::timeout(TIMEOUT, dynamic.requested_track()),
-	);
-	let _track_consumer = track_consumer.unwrap();
-	let track = track.expect("timed out waiting for requested track").unwrap();
+	// The subscribe stays pending until the request is resolved; aborting an
+	// unaccepted request rejects it, so the subscribe fails instead of succeeding.
+	let subscribe = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.subscribe_track("unknown".into()).await })
+	};
+
+	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for requested track")
+		.unwrap();
 
 	track.abort(404).unwrap();
 	assert!(matches!(track.name(), Err(MoqError::Closed)));
+
+	let result = tokio::time::timeout(TIMEOUT, subscribe)
+		.await
+		.expect("timed out waiting for subscribe")
+		.expect("subscribe task panicked");
+	assert!(result.is_err(), "subscribe to a rejected track should fail");
 }
 
 #[tokio::test]
@@ -127,14 +144,21 @@ async fn dynamic_track_request_can_publish_media() {
 	let consumer = broadcast.consume().unwrap();
 	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
 
-	// subscribe_media stays pending until the dynamic producer accepts the request
-	// via requested_track(), so drive both sides concurrently to avoid a deadlock.
-	let (media_consumer, track) = tokio::join!(
-		consumer.subscribe_media("requested-audio".into(), crate::media::Container::Legacy, 10_000),
-		tokio::time::timeout(TIMEOUT, dynamic.requested_track()),
-	);
-	let media_consumer = media_consumer.unwrap();
-	let track = track.expect("timed out waiting for requested track").unwrap();
+	// publish_media_on_track accepts the request (at the media timescale), which is what
+	// unblocks subscribe_media, so the subscribe runs on a concurrent task until then.
+	let subscribe = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move {
+			consumer
+				.subscribe_media("requested-audio".into(), crate::media::Container::Legacy, 10_000)
+				.await
+		})
+	};
+
+	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for requested track")
+		.unwrap();
 	assert_eq!(track.name().unwrap(), "requested-audio");
 
 	let media = broadcast
@@ -142,6 +166,12 @@ async fn dynamic_track_request_can_publish_media() {
 		.unwrap();
 	assert_eq!(media.name().unwrap(), "requested-audio");
 	assert!(matches!(track.name(), Err(MoqError::Closed)));
+
+	let media_consumer = tokio::time::timeout(TIMEOUT, subscribe)
+		.await
+		.expect("timed out waiting for subscribe")
+		.expect("subscribe task panicked")
+		.unwrap();
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await

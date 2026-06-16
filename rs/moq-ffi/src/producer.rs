@@ -42,12 +42,11 @@ struct DynamicProducer {
 
 impl DynamicProducer {
 	async fn requested_track(&mut self) -> Result<Arc<MoqTrackProducer>, MoqError> {
-		// dev's reshape yields a TrackRequest the producer must accept; accept with default
-		// info (the caller then produces frames onto the returned track).
-		let track = self.inner.requested_track().await?.accept(None);
-		Ok(Arc::new(MoqTrackProducer {
-			inner: std::sync::Mutex::new(Some(track)),
-		}))
+		// Hand back the request un-accepted so the publishing operation picks the timescale
+		// at accept: raw writes accept untimed, publish_media_on_track at the media timescale.
+		// The subscriber's subscribe stays pending until that first use.
+		let request = self.inner.requested_track().await?;
+		Ok(Arc::new(MoqTrackProducer::pending(request)))
 	}
 }
 
@@ -162,27 +161,31 @@ impl MoqBroadcastProducer {
 		let format = moq_mux::import::FramedFormat::from_str(&format)
 			.map_err(|_| MoqError::Codec(format!("unknown format: {format}")))?;
 
-		let track_clone = {
-			let guard = track.inner.lock().unwrap();
-			guard.as_ref().ok_or_else(|| MoqError::Closed)?.clone()
+		// Accept the request (if still pending) at the media timescale so per-frame
+		// timestamps ride the moq-net wire for the relay. An already-active track keeps
+		// whatever timescale it was created with.
+		let track_producer = {
+			let mut guard = track.inner.lock().unwrap();
+			let info = moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE);
+			MoqTrackProducer::producer(&mut guard, info)?.clone()
 		};
 
 		let mut buf = init.as_slice();
 		let decoder =
-			moq_mux::import::Framed::new_with_track(track_clone.clone(), state.catalog.clone(), format, &mut buf)
+			moq_mux::import::Framed::new_with_track(track_producer.clone(), state.catalog.clone(), format, &mut buf)
 				.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
 
 		if buf.has_remaining() {
 			return Err(MoqError::Codec("init failed: trailing bytes".into()));
 		}
 
-		let mut guard = track.inner.lock().unwrap();
-		guard.take().ok_or_else(|| MoqError::Closed)?;
+		// Consume the handle so raw writes can't follow on the same track.
+		*track.inner.lock().unwrap() = None;
 
 		Ok(Arc::new(MoqMediaProducer {
 			inner: std::sync::Mutex::new(Some(MediaProducer {
 				decoder,
-				track: track_clone,
+				track: track_producer,
 			})),
 		}))
 	}
@@ -222,9 +225,7 @@ impl MoqBroadcastProducer {
 		// Clone the broadcast handle (shared Arc internally) to get &mut access.
 		let mut broadcast = state.broadcast.clone();
 		let producer = broadcast.create_track(name, None)?;
-		Ok(Arc::new(MoqTrackProducer {
-			inner: std::sync::Mutex::new(Some(producer)),
-		}))
+		Ok(Arc::new(MoqTrackProducer::active(producer)))
 	}
 
 	/// Finish this publisher, finalizing the catalog stream.
@@ -243,6 +244,12 @@ impl MoqBroadcastProducer {
 impl MoqBroadcastDynamic {
 	/// Wait for the next subscriber-requested track.
 	///
+	/// The returned track is not yet accepted: the requesting subscriber stays pending until
+	/// the first producer operation on it. Publish media with
+	/// [`MoqBroadcastProducer::publish_media_on_track`] (accepts at the media timescale) or
+	/// write raw frames with [`MoqTrackProducer::write_frame`] (accepts untimed); call
+	/// [`MoqTrackProducer::abort`] to reject the request.
+	///
 	/// Returns an error once the broadcast is closed or aborted.
 	pub async fn requested_track(&self) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		self.task
@@ -258,9 +265,55 @@ impl MoqBroadcastDynamic {
 
 // ---- Track Producer ----
 
+/// Either a not-yet-accepted dynamic request or an accepted track.
+///
+/// A track from [`MoqBroadcastDynamic::requested_track`] starts `Pending` so the publishing
+/// operation can pick the timescale at accept: raw operations accept untimed,
+/// [`MoqBroadcastProducer::publish_media_on_track`] accepts at the media timescale. A track
+/// from [`MoqBroadcastProducer::publish_track`] is `Active` from the start.
+enum TrackState {
+	Pending(moq_net::TrackRequest),
+	Active(moq_net::TrackProducer),
+}
+
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
-	inner: std::sync::Mutex<Option<moq_net::TrackProducer>>,
+	inner: std::sync::Mutex<Option<TrackState>>,
+}
+
+impl MoqTrackProducer {
+	/// Wrap a not-yet-accepted dynamic request (see [`MoqBroadcastDynamic::requested_track`]).
+	pub(crate) fn pending(request: moq_net::TrackRequest) -> Self {
+		Self {
+			inner: std::sync::Mutex::new(Some(TrackState::Pending(request))),
+		}
+	}
+
+	/// Wrap an already-accepted track producer (see [`MoqBroadcastProducer::publish_track`]).
+	pub(crate) fn active(producer: moq_net::TrackProducer) -> Self {
+		Self {
+			inner: std::sync::Mutex::new(Some(TrackState::Active(producer))),
+		}
+	}
+
+	/// Ensure the track is accepted and return mutable access to the producer.
+	///
+	/// A still-pending request is accepted with `info`, fixing the timescale on its first
+	/// use as a producer: raw operations pass `None` (untimed), media passes the container
+	/// timescale. An already-active track ignores `info`.
+	fn producer(
+		slot: &mut Option<TrackState>,
+		info: impl Into<Option<moq_net::TrackInfo>>,
+	) -> Result<&mut moq_net::TrackProducer, MoqError> {
+		match slot.take().ok_or(MoqError::Closed)? {
+			TrackState::Pending(request) => *slot = Some(TrackState::Active(request.accept(info))),
+			active => *slot = Some(active),
+		}
+		match slot.as_mut() {
+			Some(TrackState::Active(producer)) => Ok(producer),
+			_ => unreachable!("set to Active above"),
+		}
+	}
 }
 
 #[uniffi::export]
@@ -269,13 +322,21 @@ impl MoqTrackProducer {
 	pub fn name(&self) -> Result<String, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
-		let track = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(track.name().to_string())
+		let name = match guard.as_ref().ok_or(MoqError::Closed)? {
+			TrackState::Pending(request) => request.name().to_string(),
+			TrackState::Active(producer) => producer.name().to_string(),
+		};
+		Ok(name)
 	}
 
 	/// Wait until this track has at least one active consumer.
+	///
+	/// A still-pending request is accepted untimed (its first producer use).
 	pub async fn used(&self) -> Result<(), MoqError> {
-		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
+		let track = {
+			let mut guard = self.inner.lock().unwrap();
+			Self::producer(&mut guard, None)?.clone()
+		};
 		match crate::ffi::RUNTIME.spawn(async move { track.used().await }).await {
 			Ok(result) => result.map_err(Into::into),
 			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
@@ -284,8 +345,13 @@ impl MoqTrackProducer {
 	}
 
 	/// Wait until this track has no active consumers.
+	///
+	/// A still-pending request is accepted untimed (its first producer use).
 	pub async fn unused(&self) -> Result<(), MoqError> {
-		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
+		let track = {
+			let mut guard = self.inner.lock().unwrap();
+			Self::producer(&mut guard, None)?.clone()
+		};
 		match crate::ffi::RUNTIME.spawn(async move { track.unused().await }).await {
 			Ok(result) => result.map_err(Into::into),
 			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
@@ -295,20 +361,22 @@ impl MoqTrackProducer {
 
 	/// Create a consumer that reads from this producer's track.
 	///
-	/// Useful for local pub/sub without going through an origin/broadcast.
+	/// Useful for local pub/sub without going through an origin/broadcast. A still-pending
+	/// request is accepted untimed (its first producer use).
 	pub fn consume(&self) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let guard = self.inner.lock().unwrap();
-		let track = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(Arc::new(MoqTrackConsumer::new(track.subscribe(None))))
+		let mut guard = self.inner.lock().unwrap();
+		let subscriber = Self::producer(&mut guard, None)?.subscribe(None);
+		Ok(Arc::new(MoqTrackConsumer::new(subscriber)))
 	}
 
 	/// Append a new group to the track, returning a producer for writing frames into it.
+	///
+	/// A still-pending request is accepted untimed (its first producer use).
 	pub fn append_group(&self) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
-		let track = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
-		let group = track.append_group()?;
+		let group = Self::producer(&mut guard, None)?.append_group()?;
 		Ok(Arc::new(MoqGroupProducer {
 			sequence: group.sequence,
 			inner: std::sync::Mutex::new(Some(group)),
@@ -317,29 +385,38 @@ impl MoqTrackProducer {
 
 	/// Convenience: write a single-frame group in one call, the same pattern
 	/// used by moq-boy's status/command tracks.
+	///
+	/// A still-pending request is accepted untimed (its first producer use), so a track
+	/// destined for media must go through [`MoqBroadcastProducer::publish_media_on_track`]
+	/// before any raw write.
 	pub fn write_frame(&self, payload: Vec<u8>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
-		let track = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
-		track.write_frame(payload)?;
+		Self::producer(&mut guard, None)?.write_frame(payload)?;
 		Ok(())
 	}
 
 	/// Abort this track with an application error code.
+	///
+	/// A still-pending request is rejected (the subscriber's subscribe fails); an accepted
+	/// track is aborted with the code.
 	pub fn abort(&self, error_code: i32) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let error_code = u16::try_from(error_code).map_err(|_| MoqError::InvalidErrorCode(error_code))?;
 		let mut guard = self.inner.lock().unwrap();
-		let mut track = guard.take().ok_or_else(|| MoqError::Closed)?;
-		track.abort(moq_net::Error::App(error_code))?;
+		match guard.take().ok_or(MoqError::Closed)? {
+			TrackState::Pending(request) => request.reject(moq_net::Error::App(error_code)),
+			TrackState::Active(mut producer) => producer.abort(moq_net::Error::App(error_code))?,
+		}
 		Ok(())
 	}
 
+	/// Finish this track. A still-pending request is accepted untimed and finished empty.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut track = guard.take().ok_or_else(|| MoqError::Closed)?;
-		track.finish()?;
+		Self::producer(&mut guard, None)?.finish()?;
+		*guard = None;
 		Ok(())
 	}
 }
