@@ -3,9 +3,53 @@ use std::sync::Arc;
 
 use bytes::Buf;
 
-use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqTrackConsumer};
+use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
 use crate::error::MoqError;
 use crate::ffi::Task;
+
+/// Publisher-side track properties, mirroring [`moq_net::TrackInfo`].
+///
+/// Construct with the fields you care about; the rest default to moq-net's defaults
+/// (priority 0, ordered, uncompressed, default cache, untimed).
+#[derive(Clone, uniffi::Record)]
+pub struct MoqTrackInfo {
+	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
+	#[uniffi(default = 0)]
+	pub priority: u8,
+	/// Whether groups are delivered in sequence order.
+	#[uniffi(default = true)]
+	pub ordered: bool,
+	/// Hint that this track's frames are worth compressing (e.g. a JSON catalog).
+	#[uniffi(default = false)]
+	pub compress: bool,
+	/// How long the relay should cache past groups, in milliseconds. Null uses the default.
+	#[uniffi(default = None)]
+	pub cache_ms: Option<u64>,
+	/// Per-frame timescale in ticks per second. Null leaves the track untimed; set it only
+	/// when writing timestamped frames, since raw `write_frame` is untimed and would mismatch.
+	#[uniffi(default = None)]
+	pub timescale: Option<u64>,
+}
+
+impl TryFrom<MoqTrackInfo> for moq_net::TrackInfo {
+	type Error = MoqError;
+
+	fn try_from(info: MoqTrackInfo) -> Result<Self, MoqError> {
+		let mut out = moq_net::TrackInfo::default()
+			.with_priority(info.priority)
+			.with_ordered(info.ordered)
+			.with_compress(info.compress);
+		if let Some(ms) = info.cache_ms {
+			out = out.with_cache(std::time::Duration::from_millis(ms));
+		}
+		if let Some(ticks) = info.timescale {
+			let scale =
+				moq_net::Timescale::new(ticks).map_err(|_| MoqError::Codec(format!("invalid timescale: {ticks}")))?;
+			out = out.with_timescale(scale);
+		}
+		Ok(out)
+	}
+}
 
 // ---- UniFFI Objects ----
 
@@ -217,14 +261,16 @@ impl MoqBroadcastProducer {
 	/// Create a track for arbitrary byte payloads, no codec or container.
 	///
 	/// Same pattern as moq-boy's `status` and `command` tracks: raw UTF-8/JSON
-	/// bytes written directly to moq-lite groups with no media framing.
-	pub fn publish_track(&self, name: String) -> Result<Arc<MoqTrackProducer>, MoqError> {
+	/// bytes written directly to moq-lite groups with no media framing. `info` sets
+	/// track properties (priority, cache, compression); omit for defaults.
+	pub fn publish_track(&self, name: String, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let info = info.map(moq_net::TrackInfo::try_from).transpose()?;
 		// Clone the broadcast handle (shared Arc internally) to get &mut access.
 		let mut broadcast = state.broadcast.clone();
-		let producer = broadcast.create_track(name, None)?;
+		let producer = broadcast.create_track(name, info)?;
 		Ok(Arc::new(MoqTrackProducer::active(producer)))
 	}
 
@@ -361,12 +407,14 @@ impl MoqTrackProducer {
 
 	/// Create a consumer that reads from this producer's track.
 	///
-	/// Useful for local pub/sub without going through an origin/broadcast. A still-pending
+	/// Useful for local pub/sub without going through an origin/broadcast. `subscription`
+	/// tunes delivery (priority, ordering, group range); omit for defaults. A still-pending
 	/// request is accepted untimed (its first producer use).
-	pub fn consume(&self) -> Result<Arc<MoqTrackConsumer>, MoqError> {
+	pub fn consume(&self, subscription: Option<MoqSubscription>) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
-		let subscriber = Self::producer(&mut guard, None)?.subscribe(None);
+		let subscription = subscription.map(moq_net::Subscription::from);
+		let subscriber = Self::producer(&mut guard, None)?.subscribe(subscription);
 		Ok(Arc::new(MoqTrackConsumer::new(subscriber)))
 	}
 

@@ -16,6 +16,8 @@ type (
 	Catalog            = ffi.MoqCatalog
 	Dimensions         = ffi.MoqDimensions
 	Frame              = ffi.MoqFrame
+	Subscription       = ffi.MoqSubscription
+	TrackInfo          = ffi.MoqTrackInfo
 	Video              = ffi.MoqVideo
 
 	// Container selects how subscribed media frames are demuxed. Construct one

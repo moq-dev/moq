@@ -15,15 +15,24 @@ public final class BroadcastConsumer: Sendable {
     }
 
     /// Subscribe to a track by name, delivering raw frame payloads with no codec
-    /// or container parsing.
-    public func subscribeTrack(name: String) async throws -> TrackConsumer {
-        TrackConsumer(try await ffi.subscribeTrack(name: name))
+    /// or container parsing. `subscription` tunes delivery (priority, ordering,
+    /// group range); omit for defaults.
+    public func subscribeTrack(name: String, subscription: Subscription? = nil) async throws -> TrackConsumer {
+        TrackConsumer(try await ffi.subscribeTrack(name: name, subscription: subscription))
     }
 
     /// Subscribe to a media track, delivering frames in decode order. `container`
     /// comes from the catalog; `maxLatencyMs` bounds buffering before skipping a GoP.
-    public func subscribeMedia(name: String, container: Container, maxLatencyMs: UInt64) async throws -> MediaConsumer {
-        MediaConsumer(try await ffi.subscribeMedia(name: name, container: container, maxLatencyMs: maxLatencyMs))
+    /// `subscription` tunes delivery (priority, ordering, group range); omit for defaults.
+    public func subscribeMedia(
+        name: String,
+        container: Container,
+        maxLatencyMs: UInt64,
+        subscription: Subscription? = nil
+    ) async throws -> MediaConsumer {
+        MediaConsumer(
+            try await ffi.subscribeMedia(
+                name: name, container: container, maxLatencyMs: maxLatencyMs, subscription: subscription))
     }
 
     /// Subscribe to a raw-audio track, decoding to PCM in the layout `output`
@@ -60,8 +69,9 @@ public final class BroadcastProducer: Sendable {
     }
 
     /// Open a track for arbitrary byte payloads, with no codec or container.
-    public func publishTrack(name: String) throws -> TrackProducer {
-        TrackProducer(try ffi.publishTrack(name: name))
+    /// `info` sets track properties (priority, cache, compression); omit for defaults.
+    public func publishTrack(name: String, info: TrackInfo? = nil) throws -> TrackProducer {
+        TrackProducer(try ffi.publishTrack(name: name, info: info))
     }
 
     /// Open a raw-audio track. PCM written via `AudioProducer.write` is encoded

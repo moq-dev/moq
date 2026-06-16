@@ -2,6 +2,7 @@
 
 import asyncio
 import struct
+from typing import cast
 
 import moq
 import pytest
@@ -239,6 +240,20 @@ def test_publish_lifecycle():
     broadcast.finish()
 
 
+async def test_publish_track_info_and_subscription():
+    """Raw track published with explicit TrackInfo, consumed with a Subscription."""
+    broadcast = moq.BroadcastProducer()
+    info = moq.TrackInfo(priority=5, compress=True, cache_ms=2_000)
+    track = broadcast.publish_track("status", info)
+
+    consumer = track.consume(moq.Subscription(priority=3))
+    track.write_frame(b"ready")
+
+    frame = await asyncio.wait_for(consumer.read_frame(), timeout=5.0)
+    assert frame == b"ready"
+    track.finish()
+
+
 async def test_dynamic_track_request():
     broadcast = moq.BroadcastProducer()
     dynamic = broadcast.dynamic()
@@ -269,7 +284,9 @@ async def test_dynamic_track_request_can_publish_media():
 
     # publish_media_on_track accepts the request (at the media timescale), which is what
     # unblocks subscribe_media, so run the subscribe concurrently until then.
-    subscribe = asyncio.create_task(consumer.subscribe_media("requested-audio", moq.Container.LEGACY(), 10_000))
+    subscribe = asyncio.create_task(
+        consumer.subscribe_media("requested-audio", cast(moq.Container, moq.Container.LEGACY()), 10_000)
+    )
 
     track = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
     assert track.name == "requested-audio"

@@ -96,8 +96,9 @@ public final class TrackProducer: Sendable {
     }
 
     /// A read handle for this track (local pub/sub, no origin needed).
-    public func consume() throws -> TrackConsumer {
-        TrackConsumer(try ffi.consume())
+    /// `subscription` tunes delivery (priority, ordering, group range); omit for defaults.
+    public func consume(subscription: Subscription? = nil) throws -> TrackConsumer {
+        TrackConsumer(try ffi.consume(subscription: subscription))
     }
 
     /// Suspend until the track has at least one active consumer.

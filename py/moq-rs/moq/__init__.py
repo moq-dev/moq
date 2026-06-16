@@ -39,6 +39,8 @@ from .types import (
     Container,
     Dimensions,
     Frame,
+    Subscription,
+    TrackInfo,
     Video,
 )
 
@@ -75,7 +77,9 @@ __all__ = [
     "Request",
     "Server",
     "Session",
+    "Subscription",
     "TrackConsumer",
+    "TrackInfo",
     "TrackProducer",
     "Transport",
     "Video",
