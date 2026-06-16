@@ -14,6 +14,26 @@ pub use import::*;
 
 use hang::catalog::VP9;
 
+/// VP9 parsing errors.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("invalid VP9 frame marker")]
+	InvalidFrameMarker,
+
+	#[error("invalid VP9 sync code")]
+	InvalidSyncCode,
+
+	#[error("VP9 header truncated")]
+	Truncated,
+
+	#[error("empty VP9 frame")]
+	EmptyFrame,
+}
+
+/// A Result type alias for VP9 parsing.
+pub type Result<T> = std::result::Result<T, Error>;
+
 /// VP9 key-frame sync code (VP9 spec §6.2, `frame_sync_code`).
 const SYNC_CODE: u32 = 0x49_8342;
 
@@ -46,10 +66,12 @@ impl FrameHeader {
 	///
 	/// Reads only as far as the frame size (the last field we care about);
 	/// everything after it is left untouched.
-	pub fn parse(data: &[u8]) -> anyhow::Result<Self> {
+	pub fn parse(data: &[u8]) -> Result<Self> {
 		let mut r = BitReader::new(data);
 
-		anyhow::ensure!(r.read(2)? == 0b10, "invalid VP9 frame marker");
+		if r.read(2)? != 0b10 {
+			return Err(Error::InvalidFrameMarker);
+		}
 
 		let profile_low = r.read(1)?;
 		let profile_high = r.read(1)?;
@@ -77,7 +99,9 @@ impl FrameHeader {
 			});
 		}
 
-		anyhow::ensure!(r.read(24)? == SYNC_CODE, "invalid VP9 sync code");
+		if r.read(24)? != SYNC_CODE {
+			return Err(Error::InvalidSyncCode);
+		}
 
 		// color_config (VP9 spec §6.2.2).
 		let bit_depth = if profile >= 2 {
@@ -227,11 +251,13 @@ impl<'a> BitReader<'a> {
 		Self { data, bit: 0 }
 	}
 
-	fn read(&mut self, n: u32) -> anyhow::Result<u32> {
+	fn read(&mut self, n: u32) -> Result<u32> {
 		let mut value = 0;
 		for _ in 0..n {
 			let byte = self.bit / 8;
-			anyhow::ensure!(byte < self.data.len(), "VP9 header truncated");
+			if byte >= self.data.len() {
+				return Err(Error::Truncated);
+			}
 			let shift = 7 - (self.bit % 8);
 			value = (value << 1) | u32::from((self.data[byte] >> shift) & 1);
 			self.bit += 1;
@@ -239,7 +265,7 @@ impl<'a> BitReader<'a> {
 		Ok(value)
 	}
 
-	fn skip(&mut self, n: u32) -> anyhow::Result<()> {
+	fn skip(&mut self, n: u32) -> Result<()> {
 		self.read(n).map(|_| ())
 	}
 }

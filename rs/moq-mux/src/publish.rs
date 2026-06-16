@@ -124,10 +124,7 @@ impl<I: Renditions, E: CatalogExt> Published<I, E> {
 	/// after the closure returns, so a lazily-resolved config or refined jitter
 	/// always reaches it. Prefer [`decode`](Self::decode) where the caller already
 	/// has split frames.
-	pub fn decoding<R, Er>(&mut self, decode: impl FnOnce(&mut I) -> Result<R, Er>) -> crate::Result<R>
-	where
-		crate::Error: From<Er>,
-	{
+	pub fn decoding<R>(&mut self, decode: impl FnOnce(&mut I) -> crate::Result<R>) -> crate::Result<R> {
 		let out = decode(&mut self.inner)?;
 		self.sync();
 		Ok(out)

@@ -53,14 +53,14 @@ impl Import {
 	/// with an empty buffer (gstreamer / ffi pass `Bytes::new()`) and the catalog
 	/// is filled from the first key frame. If the caller does pass the first frame
 	/// here, it's decoded so nothing is dropped.
-	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> crate::Result<()> {
 		if buf.has_remaining() {
 			self.decode_frame(buf, None)?;
 		}
 		Ok(())
 	}
 
-	fn init(&mut self, width: u16, height: u16) -> anyhow::Result<()> {
+	fn init(&mut self, width: u16, height: u16) -> crate::Result<()> {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.coded_width = Some(width as u32);
 		config.coded_height = Some(height as u32);
@@ -68,10 +68,6 @@ impl Import {
 
 		if self.config.as_ref() == Some(&config) {
 			return Ok(());
-		}
-
-		if self.config.is_some() {
-			anyhow::bail!("fixed track cannot be reconfigured");
 		}
 
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
@@ -89,9 +85,11 @@ impl Import {
 		&mut self,
 		buf: &mut T,
 		pts: Option<moq_net::Timestamp>,
-	) -> anyhow::Result<()> {
+	) -> crate::Result<()> {
 		let payload = buf.copy_to_bytes(buf.remaining());
-		anyhow::ensure!(!payload.is_empty(), "empty VP8 frame");
+		if payload.is_empty() {
+			return Err(super::Error::EmptyFrame.into());
+		}
 
 		let header = FrameHeader::parse(&payload)?;
 		if let Some((width, height)) = header.dimensions {
@@ -126,13 +124,13 @@ impl Import {
 	}
 
 	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		self.track.seek(sequence)?;
 		Ok(())
 	}
@@ -142,7 +140,7 @@ impl Import {
 		self.config.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> anyhow::Result<moq_net::Timestamp> {
+	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}

@@ -42,7 +42,6 @@ pub enum Error {
 	#[error("not initialized")]
 	NotInitialized,
 
-
 	#[error("expected SPS before any frames")]
 	MissingSps,
 

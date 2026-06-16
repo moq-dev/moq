@@ -12,6 +12,71 @@ use moq_net::Timestamp;
 
 use crate::publish::Renditions;
 
+/// Legacy audio (MP2 / AC-3 / E-AC-3) header parsing errors.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("AC-3 header needs 7 bytes")]
+	Ac3HeaderTooShort,
+
+	#[error("missing AC-3 sync word")]
+	Ac3MissingSyncWord,
+
+	#[error("invalid AC-3 frame size code")]
+	Ac3InvalidFrameSizeCode,
+
+	#[error("unsupported AC-3 bsid {0}")]
+	Ac3UnsupportedBsid(u8),
+
+	#[error("reserved AC-3 sample-rate code")]
+	Ac3ReservedSampleRate,
+
+	#[error("E-AC-3 header needs 6 bytes")]
+	Eac3HeaderTooShort,
+
+	#[error("missing E-AC-3 sync word")]
+	Eac3MissingSyncWord,
+
+	#[error("not an E-AC-3 bitstream (bsid {0})")]
+	Eac3NotEac3Bsid(u8),
+
+	#[error("reserved E-AC-3 stream type")]
+	Eac3ReservedStreamType,
+
+	#[error("E-AC-3 dependent substream (7.1+ layout) is not supported; only a single independent substream")]
+	Eac3DependentSubstream,
+
+	#[error("E-AC-3 additional substream {0} is not supported; only a single independent substream")]
+	Eac3AdditionalSubstream(u8),
+
+	#[error("E-AC-3 frame length {0} shorter than its header")]
+	Eac3FrameShorterThanHeader(usize),
+
+	#[error("reserved E-AC-3 sample-rate code")]
+	Eac3ReservedSampleRate,
+
+	#[error("MP2 header needs 4 bytes")]
+	Mp2HeaderTooShort,
+
+	#[error("missing MP2 frame sync")]
+	Mp2MissingSync,
+
+	#[error("reserved or MPEG-2.5 audio version")]
+	Mp2ReservedVersion,
+
+	#[error("not MPEG Layer II")]
+	Mp2NotLayerII,
+
+	#[error("reserved MP2 sample-rate index")]
+	Mp2ReservedSampleRate,
+
+	#[error("free-format or invalid MP2 bitrate")]
+	Mp2InvalidBitrate,
+}
+
+/// A Result type alias for legacy audio header parsing.
+pub type Result<T> = std::result::Result<T, Error>;
+
 /// A parsed legacy-audio frame header.
 #[derive(Debug)]
 pub(crate) struct Header {
@@ -33,7 +98,7 @@ pub(crate) struct Descriptor {
 	/// Bytes needed to attempt a header parse.
 	pub min_header_len: usize,
 	/// Parse one frame header at the start of the slice.
-	pub parse: fn(&[u8]) -> anyhow::Result<Header>,
+	pub parse: fn(&[u8]) -> Result<Header>,
 }
 
 /// Catalog config for a legacy audio track. Both fields come from the frame
@@ -78,19 +143,19 @@ impl Import {
 	}
 
 	/// Finish the track, flushing the current group.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		self.track.seek(sequence)?;
 		Ok(())
 	}
 
 	/// Publish one whole frame as a hang frame in its own group.
-	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<Timestamp>) -> anyhow::Result<()> {
+	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<Timestamp>) -> crate::Result<()> {
 		let pts = self.pts(pts)?;
 
 		let mut payload = BytesMut::with_capacity(buf.remaining());
@@ -114,7 +179,7 @@ impl Import {
 		Ok(())
 	}
 
-	fn pts(&mut self, hint: Option<Timestamp>) -> anyhow::Result<Timestamp> {
+	fn pts(&mut self, hint: Option<Timestamp>) -> crate::Result<Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}

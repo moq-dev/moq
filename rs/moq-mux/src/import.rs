@@ -286,8 +286,8 @@ impl Framed {
 			FramedKind::Fmp4(ref mut decoder) => decoder.finish(),
 			FramedKind::Hev1(ref mut decoder) => decoder.finish(),
 			FramedKind::Av01(ref mut decoder) => decoder.finish(),
-			FramedKind::Vp8(ref mut decoder) => decoder.finish().map_err(Into::into),
-			FramedKind::Vp9(ref mut decoder) => decoder.finish().map_err(Into::into),
+			FramedKind::Vp8(ref mut decoder) => decoder.finish(),
+			FramedKind::Vp9(ref mut decoder) => decoder.finish(),
 			FramedKind::Aac(ref mut decoder) => decoder.finish(),
 			FramedKind::Opus(ref mut decoder) => decoder.finish(),
 			FramedKind::Mkv(ref mut decoder) => decoder.finish(),
@@ -303,8 +303,8 @@ impl Framed {
 			FramedKind::Fmp4(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Hev1(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Av01(ref mut decoder) => decoder.seek(sequence),
-			FramedKind::Vp8(ref mut decoder) => decoder.seek(sequence).map_err(Into::into),
-			FramedKind::Vp9(ref mut decoder) => decoder.seek(sequence).map_err(Into::into),
+			FramedKind::Vp8(ref mut decoder) => decoder.seek(sequence),
+			FramedKind::Vp9(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Aac(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Opus(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Mkv(ref mut decoder) => decoder.seek(sequence),
@@ -563,8 +563,10 @@ mod tests {
 		}
 	}
 
+	/// A changed key frame just updates the rendition in place; there are no fixed
+	/// tracks to reject a reconfiguration, so the second key frame succeeds.
 	#[tokio::test(start_paused = true)]
-	async fn fixed_track_reconfiguration_errors() {
+	async fn reconfiguration_updates_in_place() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let track = broadcast
 			.create_track(
@@ -581,10 +583,9 @@ mod tests {
 			.unwrap();
 
 		let mut second = Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01]);
-		let err = framed
+		framed
 			.decode_frame(&mut second, Some(Timestamp::from_micros(33_000).unwrap()))
-			.unwrap_err();
-		assert!(err.to_string().contains("fixed track cannot be reconfigured"));
+			.unwrap();
 	}
 }
 

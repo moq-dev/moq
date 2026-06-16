@@ -25,7 +25,6 @@ pub enum Error {
 	#[error("not initialized")]
 	NotInitialized,
 
-
 	#[error("expected sequence header before any frames")]
 	MissingSequenceHeader,
 
