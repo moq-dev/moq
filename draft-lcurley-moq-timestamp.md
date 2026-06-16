@@ -23,8 +23,8 @@ informative:
 
 --- abstract
 
-This document defines an extension for MoQ Transport {{moqt}} that attaches a media presentation timestamp and duration to each object.
-A track-level Timescale property establishes the units, an object-level Timestamp property carries the presentation time of each object, and an optional Duration property carries its presentation duration.
+This document defines an extension for MoQ Transport {{moqt}} that attaches a media presentation timestamp to each object.
+A track-level Timescale property establishes the units, and an object-level Timestamp property carries the presentation time of each object.
 Exposing media time to the transport lets relays make consistent age-based decisions (e.g. dropping stale objects) without parsing the media container, and it remains consistent across hops regardless of buffering or jitter.
 
 --- middle
@@ -46,7 +46,7 @@ A relay frequently needs a notion of *when* an object is meant to be presented:
 MoQ also demultiplexes media into many independent tracks — audio, video, captions, metadata, and more — so a timestamp is needed on nearly every track.
 Re-implementing per-object timestamping inside each application's container format, for every track, is repetitive and error-prone; standardizing it at the transport lets one implementation serve every track and lets relays use it directly.
 
-This extension exposes media time to the transport with three Key-Value-Pairs ({{moqt}} Section 2.5): a track-level **Timescale**, an object-level **Timestamp**, and an optional object-level **Duration**.
+This extension exposes media time to the transport with two Key-Value-Pairs ({{moqt}} Section 2.5): a track-level **Timescale** and an object-level **Timestamp**.
 The transport does not interpret the *meaning* of the timeline (it is still the application's clock); it only uses the timestamp for relative age comparisons.
 
 
@@ -67,7 +67,7 @@ A relay MAY perform timestamp-based dropping for a track only if the upstream pu
 
 
 # TIMESCALE Track Property
-The TIMESCALE property establishes the units for every Timestamp and Duration on a track.
+The TIMESCALE property establishes the units for every Timestamp on a track.
 It is a track-level Key-Value-Pair, carried with the track's properties (see {{moqt}} Section 2.5 and Section 12).
 Because the value is a single integer, TIMESCALE uses an even Type so the value is a bare varint with no length prefix:
 
@@ -81,11 +81,11 @@ TIMESCALE Track Property {
 **Value**:
 The number of timestamp units per second.
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (a typical audio sample rate), and `90000` (the RTP video clock).
-A value of `0`, or the absence of the property, means the track has no media timeline: Timestamp and Duration properties, if present, MUST be ignored, and a relay MUST fall back to wall-clock arrival time for any age-based decision.
+A value of `0`, or the absence of the property, means the track has no media timeline: Timestamp properties, if present, MUST be ignored, and a relay MUST fall back to wall-clock arrival time for any age-based decision.
 
 The Timescale is fixed for the lifetime of the track and MUST NOT change.
 
-The Timescale is required to interpret the units of every Timestamp and Duration, so a receiver cannot resolve an object's timing until it has the track's properties.
+The Timescale is required to interpret the units of every Timestamp, so a receiver cannot resolve an object's timing until it has the track's properties.
 Those properties are delivered in SUBSCRIBE_OK or TRACK_STATUS ({{moqt}} Section 12), so a receiver that begins receiving objects before it has them MUST buffer the timing (or treat it as unknown) until the Timescale arrives.
 A relay that has not yet learned the Timescale MUST fall back to wall-clock arrival time for any age-based decision.
 
@@ -117,24 +117,6 @@ This decision is identical at every hop because it depends only on values embedd
 A relay MUST NOT use timestamps to reorder delivery beyond what {{moqt}} already permits; this property informs *dropping*, not transmission order.
 
 
-# DURATION Object Property
-The DURATION property carries the presentation duration of an object, in the track's Timescale.
-It is optional and is an object-level Key-Value-Pair with an even Type:
-
-~~~
-DURATION Object Property {
-  Type (vi64) = 0x915C4
-  Value (vi64)  ; presentation duration, in Timescale units
-}
-~~~
-
-**Value**:
-The presentation duration of the object, expressed in the track's Timescale.
-A value of `0`, or the absence of the property, means the duration is unknown; the object is presented until the next object begins.
-
-Duration is primarily an application-level presentation hint, but a relay MAY also use it to refine age-based dropping: an object's Timestamp plus its Duration marks the end of its presentation interval, which is a more precise "this object is now in the past" signal than the Timestamp alone (for example, the last object of a group has no following object to bound it). A relay MUST NOT rely on Duration being present; when it is absent, the relay falls back to comparing Timestamps as in [Age-Based Dropping](#age-based-dropping).
-
-
 # Security Considerations
 Timestamps expose the media timeline to relays, which is the point of the extension, but a relay still treats payloads as opaque and gains no access to media content.
 
@@ -147,7 +129,7 @@ Because age-based dropping only affects which objects a live subscription receiv
 
 This document requests the following registrations.
 High, distinctive values are requested to avoid the low ranges reserved by {{moqt}} and to minimize collisions with provisional registrations by other extensions; they also avoid the greasing pattern (`0x7f * N + 0x9D`).
-The three property Types are even so that each value is a bare varint with no length prefix (see {{moqt}} Section 2.5).
+The property Types are even so that each value is a bare varint with no length prefix (see {{moqt}} Section 2.5).
 
 ## MOQT Setup Options
 
@@ -165,7 +147,6 @@ This document requests registrations in the "MOQT Properties" registry ({{moqt}}
 |:--------|:----------|:-------|:--------------|
 | 0x915C0 | TIMESCALE | Track  | This Document |
 | 0x915C2 | TIMESTAMP | Object | This Document |
-| 0x915C4 | DURATION  | Object | This Document |
 
 
 --- back

@@ -155,10 +155,9 @@ A Frame is a payload of bytes within a Group.
 A frame is used to represent a chunk of data with an upfront size.
 The contents are opaque to the moq-lite layer.
 
-Each frame carries a presentation timestamp expressed in the parent Track's `Timescale` (units per second, part of the [TRACK_INFO](#track-info)), and a duration in the same scale.
+Each frame carries a presentation timestamp expressed in the parent Track's `Timescale` (units per second, part of the [TRACK_INFO](#track-info)).
 The timestamp is the source-of-truth for media time and is used by the moq-lite layer for [expiration](#expiration) decisions instead of wall-clock arrival time.
-The duration is a hint for the application layer (e.g. presentation scheduling) and is not used by moq-lite itself; a duration of `0` means unknown and the frame is presented until the next frame begins.
-A Track with a `Timescale` of 0 (unspecified) carries no meaningful timestamps or durations and falls back to wall-clock arrival time for expiration.
+A Track with a `Timescale` of 0 (unspecified) carries no meaningful timestamps and falls back to wall-clock arrival time for expiration.
 
 # Flow
 This section outlines the flow of messages within a moq-lite session.
@@ -495,13 +494,12 @@ DATAGRAM Body {
   Subscribe ID (i)
   Group Sequence (i)
   [Timestamp (i)]
-  [Duration (i)]
   Payload (b)
 }
 ~~~
 
-`Timestamp` and `Duration` are present only when the Track's `Publisher Timescale` (see [TRACK_INFO](#track-info)) is non-zero.
-When `Publisher Timescale` is 0, both fields are omitted from the wire and the datagram body consists of just `Subscribe ID`, `Group Sequence`, and `Payload`.
+`Timestamp` is present only when the Track's `Publisher Timescale` (see [TRACK_INFO](#track-info)) is non-zero.
+When `Publisher Timescale` is 0, the field is omitted from the wire and the datagram body consists of just `Subscribe ID`, `Group Sequence`, and `Payload`.
 
 **Subscribe ID**:
 The Subscribe ID of an active subscription on the same session.
@@ -514,10 +512,6 @@ Each datagram represents a complete group containing exactly one frame.
 **Timestamp**:
 The absolute timestamp of the single frame in the group, expressed in the Track's negotiated `Timescale`.
 Any varint value (including 0) is a valid absolute timestamp.
-
-**Duration**:
-The absolute duration of the frame, expressed in the Track's negotiated `Timescale`.
-A value of `0` means the duration is unknown; the frame is presented until the next frame begins (or indefinitely, since a datagram-delivered group contains exactly one frame, until the application supersedes it).
 
 **Payload**:
 The frame payload, extending to the end of the datagram.
@@ -847,7 +841,7 @@ The unit is milliseconds (independent of `Publisher Timescale`) so cache retenti
 **Publisher Timescale**:
 The number of timestamp units per second for frame timestamps on this Track.
 A value of 0 means unspecified; the subscriber MUST treat per-frame timestamps as opaque and fall back to wall-clock arrival time for [expiration](#expiration).
-When `Publisher Timescale` is 0, the per-frame `Timestamp Delta` and `Duration Delta` fields are omitted from FRAME messages and the `Timestamp` and `Duration` fields are omitted from datagram bodies (see [FRAME](#frame) and [Datagrams](#datagrams)).
+When `Publisher Timescale` is 0, the per-frame `Timestamp Delta` field is omitted from FRAME messages and the `Timestamp` field is omitted from datagram bodies (see [FRAME](#frame) and [Datagrams](#datagrams)).
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (audio sample rate), and `90000` (RTP video clock).
 
 **Publisher Compression**:
@@ -1044,14 +1038,13 @@ The FRAME message is a payload within a group.
 ~~~
 FRAME Message {
   [Timestamp Delta (i)]
-  [Duration Delta (i)]
   Message Length (i)
   Payload (b)
 }
 ~~~
 
-`Timestamp Delta` and `Duration Delta` are present only when the Track's `Publisher Timescale` (see [TRACK_INFO](#track-info)) is non-zero.
-When `Publisher Timescale` is 0, both fields are omitted from the wire and the FRAME consists of just `Message Length` and `Payload`.
+`Timestamp Delta` is present only when the Track's `Publisher Timescale` (see [TRACK_INFO](#track-info)) is non-zero.
+When `Publisher Timescale` is 0, the field is omitted from the wire and the FRAME consists of just `Message Length` and `Payload`.
 
 **Timestamp Delta**:
 A signed delta from the previous frame's timestamp, in the Track's negotiated `Timescale`.
@@ -1062,18 +1055,6 @@ Encoded as a zigzag-mapped variable-length integer:
 
 Zigzag interleaves non-negative and negative values (`0 → 0, -1 → 1, 1 → 2, -2 → 3, 2 → 4, ...`) so small magnitudes of either sign fit in a 1-byte varint and there is exactly one wire encoding for zero.
 The first frame of a group is delta-encoded from `0`, so its `Timestamp Delta` is the zigzag encoding of the absolute timestamp.
-
-**Duration Delta**:
-A signed delta from the previous frame's duration, in the Track's negotiated `Timescale`, encoded using the same zigzag mapping as `Timestamp Delta`.
-A wire value of `0` means the duration is unchanged from the previous frame; this is the common case for constant-rate media and fits in one byte.
-The first frame of a group is delta-encoded from a prior duration of `0`.
-
-The resolved duration value carries the following semantics for the application:
-
-- A resolved duration of `0` means the duration is unknown; the frame is presented until the next frame in the group begins (or until the group ends, if it is the last frame).
-- A non-zero resolved duration is the explicit presentation duration in the Track's `Timescale`.
-
-The duration is an application-level hint and is not used by the moq-lite layer for delivery decisions.
 
 **Payload**:
 An application-specific payload.
@@ -1093,9 +1074,9 @@ A generic library or relay MUST NOT inspect or modify the decompressed contents 
 - Renamed `Start Group`/`End Group` to `Group Start`/`Group End` in SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP for consistency with the entity-first naming used elsewhere (e.g. `Group Sequence`). Wire format unchanged.
 - Allowed a duplicate `active` ANNOUNCE to atomically replace the prior advertisement (equivalent to UNANNOUNCE+ANNOUNCE). Used when only the origin or hop path changes (e.g. relay failover) without interrupting the broadcast. No new wire enum value — the existing `active` status carries the new metadata.
 - Added ANNOUNCE_OK message, sent once at the head of the Announce Stream response. Carries the publisher's `Hop ID` (hoisted out of every ANNOUNCE's Hop ID list) and an `Active Count` so subscribers can batch the initial set instead of reporting each ANNOUNCE as it trickles in.
-- Added `Publisher Timescale` to TRACK_INFO for per-track timestamp negotiation. When `Publisher Timescale` is 0, the per-frame timestamp/duration fields are omitted entirely from FRAME and datagram bodies.
-- Added `Timestamp Delta` and `Duration Delta` to FRAME, both zigzag-encoded signed varints (present only when timescale is non-zero). `Duration Delta = 0` is the common "unchanged" case and fits in one byte; a resolved duration of `0` means "until the next frame".
-- Added `Timestamp` and `Duration` to the QUIC datagram body (absolute, present only when timescale is non-zero).
+- Added `Publisher Timescale` to TRACK_INFO for per-track timestamp negotiation. When `Publisher Timescale` is 0, the per-frame timestamp field is omitted entirely from FRAME and datagram bodies.
+- Added `Timestamp Delta` to FRAME, a zigzag-encoded signed varint (present only when timescale is non-zero).
+- Added `Timestamp` to the QUIC datagram body (absolute, present only when timescale is non-zero).
 - Renamed `Publisher Max Latency` to `Publisher Cache` (now in TRACK_INFO), defined as a minimum retention guarantee (similar to HTTP `Cache-Control: max-age`). Groups may live longer than `Publisher Cache` and remain FETCH-able.
 - Renamed `Subscriber Max Latency` to `Subscriber Stale` in SUBSCRIBE/SUBSCRIBE_UPDATE. It is the subscriber's delivery-time preference for dropping non-latest stale groups, separate from the publisher's retention guarantee.
 - Timestamp-based expiration replaces wall-clock arrival time when a Track timescale is negotiated.
