@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct DataTrack {
 	/// The MIME type of each frame's payload, e.g. `"application/json"`. Informational.
 	pub mime: Option<String>,

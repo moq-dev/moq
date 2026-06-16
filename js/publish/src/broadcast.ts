@@ -45,6 +45,15 @@ export class Broadcast {
 	// reconnects so a new `Moq.Broadcast` still serves them.
 	#tracks = new Map<string, ServeTrack>();
 
+	// Built-in track names handled before `#tracks`, so a custom handler registered under one of
+	// these would never run. `publishTrack` rejects them to fail fast.
+	static readonly #RESERVED_TRACKS: ReadonlySet<string> = new Set([
+		Broadcast.CATALOG_TRACK,
+		Audio.Encoder.TRACK,
+		Video.Root.TRACK_HD,
+		Video.Root.TRACK_SD,
+	]);
+
 	signals = new Effect();
 
 	constructor(props?: BroadcastProps) {
@@ -141,9 +150,13 @@ export class Broadcast {
 	 * {@link publishJson} for a JSON track that also advertises itself in the catalog.
 	 *
 	 * Returns a function that unregisters the handler. Note this does not close already-served
-	 * subscriptions, nor touch the catalog.
+	 * subscriptions, nor touch the catalog. Throws if `name` collides with a built-in track
+	 * (catalog/audio/video), since those are served first and the handler would never run.
 	 */
 	publishTrack(name: string, serve: ServeTrack): () => void {
+		if (Broadcast.#RESERVED_TRACKS.has(name)) {
+			throw new Error(`Track name is reserved: ${name}`);
+		}
 		this.#tracks.set(name, serve);
 		return () => {
 			if (this.#tracks.get(name) === serve) this.#tracks.delete(name);

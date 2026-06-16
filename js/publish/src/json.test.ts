@@ -23,7 +23,11 @@ test("seeds late subscribers with the current value and fans out updates", async
 	producer.update({ title: "world" });
 	expect(await consumer.next()).toEqual({ title: "world" });
 
+	// Closing the effect finishes the subscription: it's dropped from the fan-out and the track
+	// ends, so further updates never reach it.
 	effect.close();
+	producer.update({ title: "after close" });
+	expect(await consumer.next()).toBeUndefined();
 });
 
 test("mutate composes from the last value", async () => {

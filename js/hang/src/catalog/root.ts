@@ -21,5 +21,8 @@ export const RootSchema = z.looseObject({
 	data: z.optional(DataSchema),
 });
 
-/** The root catalog object, with optional video and audio sections plus any app extensions. */
+/**
+ * The root catalog object, with optional `video`, `audio`, and `data` (custom application tracks)
+ * sections plus any app extensions.
+ */
 export type Root = z.infer<typeof RootSchema>;
