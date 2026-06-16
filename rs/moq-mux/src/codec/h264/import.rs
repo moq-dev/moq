@@ -137,7 +137,7 @@ impl Import {
 		config.description = Some(Bytes::copy_from_slice(avcc_bytes));
 		config.container = hang::catalog::Container::Legacy;
 
-		self.set_config(config)?;
+		self.apply_config(config);
 		buf.advance(buf.remaining());
 		Ok(())
 	}
@@ -269,23 +269,14 @@ impl Import {
 		Ok(())
 	}
 
-	/// Resolve the avc1 config from an avcC.
+	/// Apply a resolved config, updating the catalog rendition in place.
 	///
-	/// The first config is stored. A different avcC would mean a new init
-	/// segment, which a single fixed track can't represent, so a reconfiguration
-	/// is an error (mint a new track via a fresh importer).
-	fn set_config(&mut self, config: hang::catalog::VideoConfig) -> Result<()> {
-		if let Some(old) = &self.config {
-			if old == &config {
-				return Ok(());
-			}
-			return Err(Error::FixedTrackReconfigured.into());
-		}
-		self.apply_config(config);
-		Ok(())
-	}
-
+	/// A changed config (new avcC, or a new inline SPS) just re-mirrors the
+	/// rendition; there are no fixed tracks to reject a reconfiguration.
 	fn apply_config(&mut self, config: hang::catalog::VideoConfig) {
+		if self.config.as_ref() == Some(&config) {
+			return;
+		}
 		tracing::debug!(?config, "starting H.264 track");
 		self.catalog
 			.video

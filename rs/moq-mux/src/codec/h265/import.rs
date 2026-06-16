@@ -138,10 +138,8 @@ impl Import {
 		Ok(())
 	}
 
-	/// Resolve the config from an inline SPS.
-	///
-	/// A different SPS would need a new init segment, which the single fixed
-	/// track can't represent, so a reconfiguration is an error.
+	/// Resolve the config from an inline SPS, updating the rendition in place on a
+	/// change.
 	fn configure_from_sps(&mut self, sps_nal: &Bytes) -> Result<()> {
 		if self.last_sps.as_ref() == Some(sps_nal) {
 			return Ok(());
@@ -169,11 +167,10 @@ impl Import {
 
 		self.last_sps = Some(sps_nal.clone());
 
-		if let Some(old) = &self.config {
-			if old == &config {
-				return Ok(());
-			}
-			return Err(Error::FixedTrackReconfigured.into());
+		// A changed SPS just re-mirrors the rendition in place; there are no fixed
+		// tracks to reject a reconfiguration.
+		if self.config.as_ref() == Some(&config) {
+			return Ok(());
 		}
 
 		let track_name = self.track.name().to_string();

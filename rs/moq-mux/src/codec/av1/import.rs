@@ -106,7 +106,8 @@ impl Import {
 			full_range: false,
 		});
 		config.container = hang::catalog::Container::Legacy;
-		self.apply_config(config)
+		self.apply_config(config);
+		Ok(())
 	}
 
 	fn init(&mut self, seq_header: &SequenceHeaderObu) -> Result<()> {
@@ -140,7 +141,8 @@ impl Import {
 		config.coded_width = Some(seq_header.max_frame_width as u32);
 		config.coded_height = Some(seq_header.max_frame_height as u32);
 		config.container = hang::catalog::Container::Legacy;
-		self.apply_config(config)
+		self.apply_config(config);
+		Ok(())
 	}
 
 	/// Minimal config when sequence-header parsing fails, so the stream can still
@@ -161,26 +163,24 @@ impl Import {
 			full_range: false,
 		});
 		config.container = hang::catalog::Container::Legacy;
-		self.apply_config(config)
+		self.apply_config(config);
+		Ok(())
 	}
 
-	/// Store a resolved config. The first one is kept; a different one would need
-	/// a new init segment, which the single fixed track can't represent.
-	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> Result<()> {
-		if let Some(old) = &self.config {
-			if old == &config {
-				return Ok(());
-			}
-			return Err(Error::FixedTrackReconfigured.into());
+	/// Apply a resolved config, updating the catalog rendition in place.
+	///
+	/// A changed config just re-mirrors the rendition; there are no fixed tracks
+	/// to reject a reconfiguration.
+	fn apply_config(&mut self, config: hang::catalog::VideoConfig) {
+		if self.config.as_ref() == Some(&config) {
+			return;
 		}
-
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
 		self.catalog
 			.video
 			.renditions
 			.insert(self.track.name().to_string(), config.clone());
 		self.config = Some(config);
-		Ok(())
 	}
 
 	/// Resolve the config from a sequence-header OBU, falling back to a minimal

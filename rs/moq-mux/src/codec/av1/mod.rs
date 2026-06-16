@@ -25,8 +25,6 @@ pub enum Error {
 	#[error("not initialized")]
 	NotInitialized,
 
-	#[error("fixed track cannot be reconfigured")]
-	FixedTrackReconfigured,
 
 	#[error("expected sequence header before any frames")]
 	MissingSequenceHeader,

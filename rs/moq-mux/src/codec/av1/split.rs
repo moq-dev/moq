@@ -81,12 +81,13 @@ impl Split {
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<moq_net::Timestamp>,
+		pts: impl Into<Option<moq_net::Timestamp>>,
 	) -> Result<Vec<crate::container::Frame>> {
+		let hint = pts.into();
 		let obus = ObuIterator::new(buf);
 		for obu in obus {
 			// Resolve a timestamp per OBU so a wall-clock stream doesn't reuse one.
-			let pts = self.pts(pts)?;
+			let pts = self.pts(hint)?;
 			self.decode_obu(obu?, Some(pts))?;
 		}
 		Ok(std::mem::take(&mut self.pending))
@@ -97,9 +98,9 @@ impl Split {
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<moq_net::Timestamp>,
+		pts: impl Into<Option<moq_net::Timestamp>>,
 	) -> Result<Vec<crate::container::Frame>> {
-		let pts = self.pts(pts)?;
+		let pts = self.pts(pts.into())?;
 		let mut obus = ObuIterator::new(buf);
 		while let Some(obu) = obus.next().transpose()? {
 			self.decode_obu(obu, Some(pts))?;
