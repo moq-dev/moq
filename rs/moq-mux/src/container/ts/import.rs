@@ -262,10 +262,10 @@ impl<E: scte35::Catalog> Import<E> {
 
 		let stream = match stream_type {
 			StreamType::H264 => {
-				let import =
-					h264::Import::new(self.broadcast.clone(), self.catalog.clone()).with_mode(h264::Mode::Avc3)?;
+				let track = crate::publish::unique_track(&mut self.broadcast, ".avc3")?;
+				let import = h264::Import::from_track(track).with_mode(h264::Mode::Avc3)?;
 				Stream::H264 {
-					import: Box::new(import),
+					import: Box::new(crate::publish::Published::new(self.catalog.clone(), import)),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
@@ -713,7 +713,7 @@ impl ScteReassembler {
 /// One elementary stream's codec importer plus PTS-unwrap state.
 enum Stream<E: CatalogExt = ()> {
 	H264 {
-		import: Box<h264::Import<E>>,
+		import: Box<crate::publish::Published<h264::Import, E>>,
 		unwrap: PtsUnwrap,
 	},
 	H265 {
@@ -733,7 +733,9 @@ impl<E: CatalogExt> Stream<E> {
 		match self {
 			Stream::H264 { import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				Ok(import.decode_frame(&mut pending.data.as_slice(), pts)?)
+				import.decode_frame(&mut pending.data.as_slice(), pts)?;
+				import.sync();
+				Ok(())
 			}
 			Stream::H265 { import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;

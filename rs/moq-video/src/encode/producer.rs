@@ -25,20 +25,21 @@ const DEFAULT_FRAMERATE: u32 = 30;
 /// trigger capture on demand. `moq_mux::codec::h264::Import` handles
 /// catalog registration and framing.
 pub struct Producer {
-	import: moq_mux::codec::h264::Import,
+	import: moq_mux::publish::Published<moq_mux::codec::h264::Import>,
 }
 
 impl Producer {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self, Error> {
-		let import =
-			moq_mux::codec::h264::Import::new(broadcast, catalog).with_mode(moq_mux::codec::h264::Mode::Avc3)?;
+	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self, Error> {
+		let track = moq_mux::publish::unique_track(&mut broadcast, ".avc3")?;
+		let import = moq_mux::codec::h264::Import::from_track(track).with_mode(moq_mux::codec::h264::Mode::Avc3)?;
+		let import = moq_mux::publish::Published::new(catalog, import);
 		Ok(Self { import })
 	}
 
-	/// The underlying track producer, eagerly created by avc3 mode. Clone it
-	/// to watch subscription state via [`used`](moq_net::TrackProducer::used) /
-	/// [`unused`](moq_net::TrackProducer::unused).
-	pub fn track(&self) -> Option<&moq_net::TrackProducer> {
+	/// The underlying track producer, created eagerly so subscription state is
+	/// observable before any frames arrive. Clone it to watch via
+	/// [`used`](moq_net::TrackProducer::used) / [`unused`](moq_net::TrackProducer::unused).
+	pub fn track(&self) -> &moq_net::TrackProducer {
 		self.import.track()
 	}
 
@@ -47,6 +48,7 @@ impl Producer {
 		for mut packet in packets {
 			self.import.decode_frame(&mut packet, Some(timestamp))?;
 		}
+		self.import.sync();
 		Ok(())
 	}
 
@@ -94,10 +96,7 @@ pub async fn publish_capture(
 	}
 
 	let producer = Producer::new(broadcast, catalog)?;
-	let track = producer
-		.track()
-		.cloned()
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("avc3 track was not created")))?;
+	let track = producer.track().clone();
 
 	let gate = Gate::new();
 

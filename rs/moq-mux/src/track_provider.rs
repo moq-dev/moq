@@ -19,12 +19,6 @@ impl TrackProvider {
 		matches!(self, Self::Fixed(_))
 	}
 
-	pub(crate) fn set_suffix(&mut self, next: &'static str) {
-		if let Self::Unique { suffix, .. } = self {
-			*suffix = next;
-		}
-	}
-
 	pub(crate) fn create(&mut self) -> crate::Result<moq_net::TrackProducer> {
 		match self {
 			Self::Unique { broadcast, suffix } => {

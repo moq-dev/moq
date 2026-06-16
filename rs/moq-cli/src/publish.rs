@@ -78,7 +78,7 @@ pub struct CaptureArgs {
 }
 
 enum PublishDecoder {
-	Avc3(Box<moq_mux::codec::h264::Import>),
+	Avc3(Box<moq_mux::publish::Published<moq_mux::codec::h264::Import>>),
 	Fmp4(Box<fmp4::Import>),
 	Ts(Box<ts::Import>),
 	Hls(Box<hls::Import>),
@@ -88,7 +88,11 @@ impl PublishDecoder {
 	/// Decode a chunk of bytes from stdin (Avc3, Fmp4, or Ts).
 	fn decode_buf(&mut self, buffer: &mut bytes::BytesMut) -> anyhow::Result<()> {
 		match self {
-			Self::Avc3(d) => Ok(d.decode_stream(buffer, None)?),
+			Self::Avc3(d) => {
+				d.decode_stream(buffer, None)?;
+				d.sync();
+				Ok(())
+			}
 			Self::Fmp4(d) => Ok(d.decode(buffer)?),
 			Self::Ts(d) => Ok(d.decode(buffer)?),
 			Self::Hls(_) => unreachable!(),
@@ -126,8 +130,10 @@ impl Publish {
 
 		let source = match format {
 			PublishFormat::Avc3 => {
-				let avc3 = moq_mux::codec::h264::Import::new(broadcast.clone(), catalog.clone())
-					.with_mode(moq_mux::codec::h264::Mode::Avc3)?;
+				let track = moq_mux::publish::unique_track(&mut broadcast, ".avc3")?;
+				let avc3 =
+					moq_mux::codec::h264::Import::from_track(track).with_mode(moq_mux::codec::h264::Mode::Avc3)?;
+				let avc3 = moq_mux::publish::Published::new(catalog.clone(), avc3);
 				Source::Stream(PublishDecoder::Avc3(Box::new(avc3)))
 			}
 			PublishFormat::Fmp4 => {

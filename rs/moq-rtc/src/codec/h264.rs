@@ -10,13 +10,14 @@ use bytes::BytesMut;
 use crate::{Result, codec};
 
 pub struct Bridge {
-	import: moq_mux::codec::h264::Import,
+	import: moq_mux::publish::Published<moq_mux::codec::h264::Import>,
 }
 
 impl Bridge {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
-		let import =
-			moq_mux::codec::h264::Import::new(broadcast, catalog).with_mode(moq_mux::codec::h264::Mode::Avc3)?;
+	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
+		let track = moq_mux::publish::unique_track(&mut broadcast, ".avc3")?;
+		let import = moq_mux::codec::h264::Import::from_track(track).with_mode(moq_mux::codec::h264::Mode::Avc3)?;
+		let import = moq_mux::publish::Published::new(catalog, import);
 		Ok(Self { import })
 	}
 }
@@ -27,6 +28,7 @@ impl codec::Bridge for Bridge {
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
 		let mut buf = BytesMut::from(frame.payload.as_ref());
 		self.import.decode_frame(&mut buf, Some(pts))?;
+		self.import.sync();
 		Ok(())
 	}
 }

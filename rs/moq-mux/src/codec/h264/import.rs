@@ -12,9 +12,9 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::{Error, Sps};
 use crate::Result;
-use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::{NalIterator, START_CODE};
 use crate::container::jitter::MinFrameDuration;
+use crate::publish::Renditions;
 
 /// The wire shape an [`Import`] is processing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,10 +30,16 @@ pub enum Mode {
 /// H.264 importer. Handles both avc1 (length-prefixed) and avc3 (Annex-B)
 /// input streams; the shape is detected from the first bytes the caller
 /// supplies, or forced explicitly via [`with_mode`](Self::with_mode).
-pub struct Import<E: CatalogExt = ()> {
-	tracks: crate::track_provider::TrackProvider,
-	catalog: crate::catalog::Producer<E>,
-	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
+///
+/// Build it from a [`moq_net::TrackRequest`] ([`new`](Self::new), the on-demand
+/// path) or an existing [`moq_net::TrackProducer`] ([`from_track`](Self::from_track),
+/// the broadcast-push / fixed-track path). The catalog rendition fills in lazily
+/// once the codec config is known (avcC for avc1, the first SPS for avc3); read it
+/// via [`catalog`](Self::catalog) or attach the importer to a broadcast catalog
+/// with [`crate::publish::Published`].
+pub struct Import {
+	track: crate::container::Producer<crate::catalog::hang::Container>,
+	catalog: hang::Catalog,
 	config: Option<hang::catalog::VideoConfig>,
 	state: State,
 	zero: Option<tokio::time::Instant>,
@@ -62,24 +68,18 @@ struct Avc3Frame {
 	contains_pps: bool,
 }
 
-impl<E: CatalogExt> Import<E> {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
-		Self {
-			tracks: crate::track_provider::TrackProvider::unique(broadcast, ".avc3"),
-			catalog,
-			track: None,
-			config: None,
-			state: State::Pending { mode_hint: None },
-			zero: None,
-			jitter: MinFrameDuration::new(),
-		}
+impl Import {
+	/// Serve a track request, accepting it at the microsecond timescale.
+	pub fn new(request: moq_net::TrackRequest) -> Self {
+		let info = moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE);
+		Self::from_track(request.accept(info))
 	}
 
-	pub fn new_with_track(track: moq_net::TrackProducer, catalog: crate::catalog::Producer<E>) -> Self {
+	/// Publish on an existing track producer.
+	pub fn from_track(track: moq_net::TrackProducer) -> Self {
 		Self {
-			tracks: crate::track_provider::TrackProvider::fixed(track),
-			catalog,
-			track: None,
+			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start(),
+			catalog: hang::Catalog::default(),
 			config: None,
 			state: State::Pending { mode_hint: None },
 			zero: None,
@@ -88,24 +88,15 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Pin the wire shape ahead of time; skips the leading-bytes auto-detect
-	/// inside [`initialize`](Self::initialize). Eagerly creates the broadcast
-	/// track for avc3 sources so the caller can observe subscriber state
-	/// (`used()` / `unused()`) before any frames arrive.
+	/// inside [`initialize`](Self::initialize).
 	pub fn with_mode(mut self, mode: Mode) -> Result<Self> {
 		match mode {
 			Mode::Avc1 => {
-				self.tracks.set_suffix(".avc1");
 				self.state = State::Pending {
 					mode_hint: Some(Mode::Avc1),
 				};
 			}
 			Mode::Avc3 => {
-				self.tracks.set_suffix(".avc3");
-				let track = self.tracks.create()?;
-				self.track = Some(
-					crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
-						.with_lenient_start(),
-				);
 				self.state = State::Avc3 {
 					current: Avc3Frame::default(),
 					sps: None,
@@ -116,12 +107,15 @@ impl<E: CatalogExt> Import<E> {
 		Ok(self)
 	}
 
-	/// Returns a reference to the underlying track producer, e.g. for
-	/// monitoring subscriber state via `used()` / `unused()`. Available only
-	/// after the track has been created. i.e. after [`with_mode`](Self::with_mode)
-	/// for avc3 or after [`initialize`](Self::initialize) for avc1.
-	pub fn track(&self) -> Option<&moq_net::TrackProducer> {
-		self.track.as_ref().map(|t| t.track())
+	/// The underlying track producer, e.g. for monitoring subscriber state via
+	/// `used()` / `unused()`.
+	pub fn track(&self) -> &moq_net::TrackProducer {
+		self.track.track()
+	}
+
+	/// The standalone catalog once the codec config is known, else `None`.
+	pub fn catalog(&self) -> Option<&hang::Catalog> {
+		self.config.is_some().then_some(&self.catalog)
 	}
 
 	/// Initialize from the codec's leading bytes.
@@ -164,7 +158,6 @@ impl<E: CatalogExt> Import<E> {
 		config.description = Some(Bytes::copy_from_slice(avcc_bytes));
 		config.container = hang::catalog::Container::Legacy;
 
-		self.tracks.set_suffix(".avc1");
 		self.swap_config(config)?;
 		buf.advance(buf.remaining());
 
@@ -172,24 +165,14 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Initialize the avc3 path by parsing Annex-B NALs (SPS/PPS seed the
-	/// catalog rendition; the track is created eagerly on first SPS).
+	/// catalog rendition once the first SPS is parsed).
 	fn initialize_avc3<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
-		// Eager-create the track + state on first switch into Avc3 mode so
-		// callers can observe `used()` / `unused()` before any frames arrive.
 		if !matches!(self.state, State::Avc3 { .. }) {
 			self.state = State::Avc3 {
 				current: Avc3Frame::default(),
 				sps: None,
 				pps: None,
 			};
-			if self.track.is_none() {
-				self.tracks.set_suffix(".avc3");
-				let track = self.tracks.create()?;
-				self.track = Some(
-					crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy)
-						.with_lenient_start(),
-				);
-			}
 		}
 
 		let mut nals = NalIterator::new(buf);
@@ -203,8 +186,9 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
+	/// True once the codec config is known and the catalog rendition is published.
 	pub fn is_initialized(&self) -> bool {
-		self.track.is_some()
+		self.config.is_some()
 	}
 
 	/// Decode from an asynchronous reader. avc3 only — for avc1, the caller
@@ -252,9 +236,8 @@ impl<E: CatalogExt> Import<E> {
 		let data = buf.as_ref();
 		let pts = self.pts(pts)?;
 		let keyframe = avc1_is_keyframe(data, length_size);
-		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
 
-		track.write(crate::container::Frame {
+		self.track.write(crate::container::Frame {
 			timestamp: pts,
 			payload: data.to_vec().into(),
 			keyframe,
@@ -262,7 +245,7 @@ impl<E: CatalogExt> Import<E> {
 		})?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(track.name())
+			&& let Some(c) = self.catalog.video.renditions.get_mut(self.track.name())
 		{
 			c.jitter = Some(jitter);
 		}
@@ -389,16 +372,10 @@ impl<E: CatalogExt> Import<E> {
 			return Ok(());
 		}
 
-		// The avc3 track was created eagerly in initialize_avc3; just publish
-		// (or republish) the catalog rendition with the latest config.
-		let track_name = self
-			.track
-			.as_ref()
-			.ok_or(Error::Avc3TrackNotCreated)?
-			.name()
-			.to_string();
-		let mut catalog = self.catalog.lock();
-		catalog.video.renditions.insert(track_name, config.clone());
+		// avc3 carries SPS inline, so a resolution change updates the rendition in
+		// place on the same track (no new init segment, unlike avc1).
+		let track_name = self.track.name().to_string();
+		self.catalog.video.renditions.insert(track_name, config.clone());
 		self.config = Some(config);
 		Ok(())
 	}
@@ -418,8 +395,7 @@ impl<E: CatalogExt> Import<E> {
 		current.contains_sps = false;
 		current.contains_pps = false;
 
-		let track = self.track.as_mut().ok_or(Error::Avc3TrackNotCreated)?;
-		track.write(crate::container::Frame {
+		self.track.write(crate::container::Frame {
 			timestamp: pts,
 			payload,
 			keyframe,
@@ -427,48 +403,36 @@ impl<E: CatalogExt> Import<E> {
 		})?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(track.name())
+			&& let Some(c) = self.catalog.video.renditions.get_mut(self.track.name())
 		{
 			c.jitter = Some(jitter);
 		}
 		Ok(())
 	}
 
-	/// Replace the current track + catalog rendition with `config`. Used by
-	/// the avc1 path on every (re)initialization.
+	/// Register the avc1 codec config on the (fixed) track.
+	///
+	/// The first config seeds the catalog rendition. A different avcC would mean
+	/// a new init segment, which the single fixed track can't represent, so a
+	/// reconfiguration is an error (mint a new track via a fresh importer).
 	fn swap_config(&mut self, config: hang::catalog::VideoConfig) -> Result<()> {
-		if let Some(old) = &self.config
-			&& old == &config
-		{
-			return Ok(());
-		}
-
-		let mut catalog = self.catalog.lock();
-		if let Some(track) = self.track.take() {
-			if self.tracks.is_fixed() {
-				self.track = Some(track);
-				return Err(Error::FixedTrackReconfigured.into());
+		if let Some(old) = &self.config {
+			if old == &config {
+				return Ok(());
 			}
-			tracing::debug!(name = ?track.name(), "reinitializing H.264 track");
-			catalog.video.renditions.remove(track.name());
+			return Err(Error::FixedTrackReconfigured.into());
 		}
-		let track = self.tracks.create()?;
-		tracing::debug!(name = ?track.name(), ?config, "starting H.264 track");
-		catalog
-			.video
-			.renditions
-			.insert(track.name().to_string(), config.clone());
 
+		let track_name = self.track.name().to_string();
+		tracing::debug!(name = ?track_name, ?config, "starting H.264 track");
+		self.catalog.video.renditions.insert(track_name, config.clone());
 		self.config = Some(config);
-		self.track =
-			Some(crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start());
 		Ok(())
 	}
 
 	/// Finish the track, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
-		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
-		track.finish()?;
+		self.track.finish()?;
 		Ok(())
 	}
 
@@ -480,8 +444,7 @@ impl<E: CatalogExt> Import<E> {
 		if let State::Avc3 { current, .. } = &mut self.state {
 			*current = Avc3Frame::default();
 		}
-		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
-		track.seek(sequence)?;
+		self.track.seek(sequence)?;
 		Ok(())
 	}
 
@@ -494,12 +457,9 @@ impl<E: CatalogExt> Import<E> {
 	}
 }
 
-impl<E: CatalogExt> Drop for Import<E> {
-	fn drop(&mut self) {
-		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name(), "ending H.264 track");
-			self.catalog.lock().video.renditions.remove(track.name());
-		}
+impl Renditions for Import {
+	fn renditions(&self) -> &hang::Catalog {
+		&self.catalog
 	}
 }
 
@@ -577,17 +537,13 @@ mod tests {
 		avcc.extend_from_slice(&sps_nal);
 		avcc.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]); // num_pps + pps
 
-		let broadcast = moq_net::BroadcastInfo::new();
-		let mut producer = broadcast.produce();
-		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-
-		let mut importer = Import::new(producer, catalog.clone());
+		let mut importer = Import::new(moq_net::TrackRequest::new("0.avc1"));
 		let mut buf = bytes::BytesMut::from(avcc.as_slice());
 		importer.initialize(&mut buf).expect("initialize avc1");
 
-		let snapshot = catalog.snapshot();
-		assert_eq!(snapshot.video.renditions.len(), 1);
-		let cfg = snapshot.video.renditions.values().next().unwrap();
+		let catalog = importer.catalog().expect("config known after init");
+		assert_eq!(catalog.video.renditions.len(), 1);
+		let cfg = catalog.video.renditions.values().next().unwrap();
 		let hang::catalog::VideoCodec::H264(h264) = &cfg.codec else {
 			panic!("expected H.264 codec")
 		};
@@ -613,16 +569,12 @@ mod tests {
 		annexb.extend_from_slice(&[0, 0, 0, 1]);
 		annexb.extend_from_slice(pps);
 
-		let broadcast = moq_net::BroadcastInfo::new();
-		let mut producer = broadcast.produce();
-		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-
-		let mut importer = Import::new(producer, catalog.clone());
+		let mut importer = Import::new(moq_net::TrackRequest::new("0.avc3"));
 		importer.initialize(&mut annexb).expect("initialize avc3");
 
-		let snapshot = catalog.snapshot();
-		assert_eq!(snapshot.video.renditions.len(), 1);
-		let cfg = snapshot.video.renditions.values().next().unwrap();
+		let catalog = importer.catalog().expect("config known after first SPS");
+		assert_eq!(catalog.video.renditions.len(), 1);
+		let cfg = catalog.video.renditions.values().next().unwrap();
 		let hang::catalog::VideoCodec::H264(h264) = &cfg.codec else {
 			panic!("expected H.264 codec")
 		};

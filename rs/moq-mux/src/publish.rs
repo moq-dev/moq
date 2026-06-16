@@ -6,18 +6,25 @@
 //! [`catalog::Producer`](crate::catalog::Producer). [`Published`] is the adapter:
 //! it merges an importer's renditions into that catalog and removes them on drop.
 //!
-//! For the broadcast-push case, mint a track with
-//! [`BroadcastProducer::unique_track`](moq_net::BroadcastProducer::unique_track) and
-//! build the importer `from_track`. A [`moq_net::TrackRequest`] (from
+//! For the broadcast-push case, mint a track with [`unique_track`] and build the
+//! importer `from_track`. A [`moq_net::TrackRequest`] (from
 //! [`BroadcastDynamic::requested_track`](moq_net::BroadcastDynamic::requested_track))
 //! is instead the on-demand path, fed directly to the importer's `new`.
+//!
+//! Some importers fill their catalog lazily (H.264 only knows its config once SPS
+//! arrives) or refine it over time (jitter). Call [`Published::sync`] after
+//! feeding such an importer so the new/changed renditions reach the catalog; it's
+//! a cheap comparison when nothing changed.
 
 use std::ops::{Deref, DerefMut};
+
+use crate::catalog::hang::CatalogExt;
 
 /// A single-track importer that exposes the catalog renditions it publishes.
 ///
 /// Implemented by the per-codec importers so [`Published`] can merge their
-/// renditions into a broadcast catalog generically.
+/// renditions into a broadcast catalog generically. The returned catalog may be
+/// empty (and grow later) for importers that initialize lazily.
 pub trait Renditions {
 	/// The standalone media catalog (video/audio renditions) this importer publishes.
 	fn renditions(&self) -> &hang::Catalog;
@@ -36,43 +43,71 @@ pub fn unique_track(broadcast: &mut moq_net::BroadcastProducer, suffix: &str) ->
 
 /// A single-track importer attached to a broadcast catalog.
 ///
-/// Merges the importer's [`Renditions`] into a [`catalog::Producer`](crate::catalog::Producer)
-/// on creation and removes them on drop. Derefs to the inner importer, so all of
-/// its methods (`decode`, `finish`, `seek`, ...) are available directly.
-pub struct Published<I: Renditions> {
+/// Mirrors the importer's [`Renditions`] into a [`catalog::Producer`](crate::catalog::Producer)
+/// and removes them on drop. Derefs to the inner importer, so all of its methods
+/// (`decode`, `finish`, `seek`, ...) are available directly. Generic over the
+/// catalog extension `E` so it can attach to an extended broadcast catalog (e.g.
+/// the one a container holds).
+pub struct Published<I: Renditions, E: CatalogExt = ()> {
 	inner: I,
-	catalog: crate::catalog::Producer,
-	video: Vec<String>,
-	audio: Vec<String>,
+	catalog: crate::catalog::Producer<E>,
+	/// The renditions we last mirrored into the catalog, so [`sync`](Self::sync)
+	/// can diff against the importer's current state and retire them on drop.
+	published: hang::Catalog,
 }
 
-impl<I: Renditions> Published<I> {
-	/// Merge `inner`'s renditions into `catalog`, publishing the update.
-	pub fn new(mut catalog: crate::catalog::Producer, inner: I) -> Self {
-		let media = inner.renditions();
-		let video: Vec<String> = media.video.renditions.keys().cloned().collect();
-		let audio: Vec<String> = media.audio.renditions.keys().cloned().collect();
+impl<I: Renditions, E: CatalogExt> Published<I, E> {
+	/// Attach `inner` to `catalog`, mirroring whatever renditions it already has.
+	pub fn new(catalog: crate::catalog::Producer<E>, inner: I) -> Self {
+		let mut this = Self {
+			inner,
+			catalog,
+			published: hang::Catalog::default(),
+		};
+		this.sync();
+		this
+	}
+
+	/// Re-mirror the importer's current renditions into the catalog.
+	///
+	/// Call this after feeding an importer whose catalog appears or changes
+	/// lazily (H.264 once SPS is parsed, jitter refinement, ...). It's a cheap
+	/// comparison and touches the catalog only when something actually changed.
+	pub fn sync(&mut self) {
+		let current = self.inner.renditions();
+		if self.published == *current {
+			return;
+		}
 
 		{
-			let mut guard = catalog.lock();
-			for (name, config) in &media.video.renditions {
+			let mut guard = self.catalog.lock();
+
+			// Retire renditions we published before that the importer dropped.
+			for name in self.published.video.renditions.keys() {
+				if !current.video.renditions.contains_key(name) {
+					guard.video.renditions.remove(name);
+				}
+			}
+			for name in self.published.audio.renditions.keys() {
+				if !current.audio.renditions.contains_key(name) {
+					guard.audio.renditions.remove(name);
+				}
+			}
+
+			// Insert or update the current ones.
+			for (name, config) in &current.video.renditions {
 				guard.video.renditions.insert(name.clone(), config.clone());
 			}
-			for (name, config) in &media.audio.renditions {
+			for (name, config) in &current.audio.renditions {
 				guard.audio.renditions.insert(name.clone(), config.clone());
 			}
 		}
 
-		Self {
-			inner,
-			catalog,
-			video,
-			audio,
-		}
+		self.published = current.clone();
 	}
 }
 
-impl<I: Renditions> Deref for Published<I> {
+impl<I: Renditions, E: CatalogExt> Deref for Published<I, E> {
 	type Target = I;
 
 	fn deref(&self) -> &I {
@@ -80,20 +115,68 @@ impl<I: Renditions> Deref for Published<I> {
 	}
 }
 
-impl<I: Renditions> DerefMut for Published<I> {
+impl<I: Renditions, E: CatalogExt> DerefMut for Published<I, E> {
 	fn deref_mut(&mut self) -> &mut I {
 		&mut self.inner
 	}
 }
 
-impl<I: Renditions> Drop for Published<I> {
+impl<I: Renditions, E: CatalogExt> Drop for Published<I, E> {
 	fn drop(&mut self) {
+		if self.published == hang::Catalog::default() {
+			return;
+		}
+
 		let mut guard = self.catalog.lock();
-		for name in &self.video {
+		for name in self.published.video.renditions.keys() {
 			guard.video.renditions.remove(name);
 		}
-		for name in &self.audio {
+		for name in self.published.audio.renditions.keys() {
 			guard.audio.renditions.remove(name);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// An importer whose catalog we can mutate, to drive [`Published::sync`].
+	struct Fake(hang::Catalog);
+
+	impl Renditions for Fake {
+		fn renditions(&self) -> &hang::Catalog {
+			&self.0
+		}
+	}
+
+	fn video() -> hang::catalog::VideoConfig {
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.container = hang::catalog::Container::Legacy;
+		config
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn sync_propagates_lazily_and_drop_retires() {
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+		// Importer starts with an empty catalog (lazy init): nothing merged yet.
+		let mut published = Published::new(catalog.clone(), Fake(hang::Catalog::default()));
+		assert!(catalog.snapshot().video.renditions.is_empty());
+
+		// A rendition appears later; sync mirrors it into the broadcast catalog.
+		published.0.video.renditions.insert("v".to_string(), video());
+		published.sync();
+		assert!(catalog.snapshot().video.renditions.contains_key("v"));
+
+		// An update to the same rendition propagates too.
+		published.0.video.renditions.get_mut("v").unwrap().bitrate = Some(1_000);
+		published.sync();
+		assert_eq!(catalog.snapshot().video.renditions["v"].bitrate, Some(1_000));
+
+		// Dropping the wrapper retires the rendition.
+		drop(published);
+		assert!(catalog.snapshot().video.renditions.is_empty());
 	}
 }
