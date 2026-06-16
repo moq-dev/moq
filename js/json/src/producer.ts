@@ -8,14 +8,20 @@ import { deepEqual, diff } from "./diff.ts";
 // well below the per-group frame cap so a late joiner can always read the snapshot at frame 0.
 const MAX_DELTA_FRAMES = 256;
 
+// Delta ratio used when {@link Config.deltaRatio} is left unset.
+const DEFAULT_DELTA_RATIO = 8;
+
 export interface Config<T> {
-	// Controls whether the producer emits deltas (merge patches) instead of full snapshots.
+	// Controls how aggressively the producer emits deltas (merge patches) instead of full snapshots.
 	//
-	// `undefined` disables deltas: every change is published as a new snapshot group.
+	// `0` disables deltas: every change is published as a new snapshot group.
 	//
-	// A number enables deltas: a delta is appended to the current group as long as the group's
-	// total size stays within `deltaRatio` times the size of a fresh snapshot; otherwise a new
-	// snapshot group is started.
+	// A positive number enables deltas: a delta is appended to the current group as long as the
+	// accumulated deltas (excluding the snapshot frame) stay within `deltaRatio` times the size of a
+	// fresh snapshot; otherwise a new snapshot group is started. So `1` allows deltas totalling up to
+	// one snapshot before rolling.
+	//
+	// Defaults to `8` when unset.
 	deltaRatio?: number;
 
 	// Optional zod schema used to validate each value before publishing.
@@ -43,7 +49,8 @@ export class Producer<T> {
 	#track?: Moq.Track;
 	#group?: Moq.Group;
 	#last?: unknown;
-	#groupBytes = 0;
+	// Bytes of deltas accumulated in the current group, excluding the snapshot frame.
+	#deltaBytes = 0;
 	#groupFrames = 0;
 
 	// Fan-out mode: retains the value and serves a child (leaf) Producer per subscriber.
@@ -104,7 +111,7 @@ export class Producer<T> {
 		const delta = this.#delta(json, snapshot.length);
 		if (delta && this.#group) {
 			this.#group.writeFrame(delta);
-			this.#groupBytes += delta.length;
+			this.#deltaBytes += delta.length;
 			this.#groupFrames += 1;
 		} else {
 			this.#snapshot(this.#track, snapshot);
@@ -177,9 +184,14 @@ export class Producer<T> {
 		this.#track.close();
 	}
 
+	// Resolved delta ratio: the configured value, or the default when unset. `0` disables deltas.
+	get #deltaRatio(): number {
+		return this.#config.deltaRatio ?? DEFAULT_DELTA_RATIO;
+	}
+
 	#delta(json: unknown, snapshotLen: number): Uint8Array | undefined {
-		const ratio = this.#config.deltaRatio;
-		if (ratio === undefined) return undefined;
+		const ratio = this.#deltaRatio;
+		if (ratio === 0) return undefined;
 		if (this.#last === undefined) return undefined;
 		if (!this.#group || this.#groupFrames >= MAX_DELTA_FRAMES) return undefined;
 
@@ -188,8 +200,8 @@ export class Producer<T> {
 
 		const delta = new TextEncoder().encode(JSON.stringify(result.patch));
 
-		// Roll a snapshot if appending the delta would bloat the group past the budget.
-		if (this.#groupBytes + delta.length > ratio * snapshotLen) return undefined;
+		// Roll a snapshot once the deltas would outgrow the budget (snapshot frame excluded).
+		if (this.#deltaBytes + delta.length > ratio * snapshotLen) return undefined;
 
 		return delta;
 	}
@@ -200,10 +212,10 @@ export class Producer<T> {
 
 		const group = track.appendGroup();
 		group.writeFrame(snapshot);
-		this.#groupBytes = snapshot.length;
+		this.#deltaBytes = 0;
 		this.#groupFrames = 1;
 
-		if (this.#config.deltaRatio !== undefined) {
+		if (this.#deltaRatio !== 0) {
 			// Keep the group open so future deltas can be appended.
 			this.#group = group;
 		} else {

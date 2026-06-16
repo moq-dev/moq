@@ -29,7 +29,7 @@ async function structure(track: Track): Promise<number[]> {
 
 test("deltas off: a snapshot group per change", async () => {
 	const track = new Track("test");
-	const producer = new Producer<Value>(track);
+	const producer = new Producer<Value>(track, { deltaRatio: 0 });
 	producer.update({ a: 1 });
 	producer.update({ a: 2 });
 	producer.finish();
@@ -139,14 +139,28 @@ test("mutate removes a section", async () => {
 
 test("tight ratio rolls snapshots", async () => {
 	const track = new Track("test");
-	// A ratio of 1.0 leaves no room for any delta past the snapshot, so every change rolls.
-	const producer = new Producer<Value>(track, { deltaRatio: 1.0 });
-	producer.update({ a: 1 });
-	producer.update({ a: 2 });
-	producer.update({ a: 3 });
+	// A ratio of 1 admits deltas only up to the snapshot size: with equal 7-byte frames that is a
+	// single delta per group, so it rolls every other update.
+	const producer = new Producer<Value>(track, { deltaRatio: 1 });
+	producer.update({ a: 1 }); // snapshot, group 0
+	producer.update({ a: 2 }); // delta, group 0
+	producer.update({ a: 3 }); // exceeds budget, rolls group 1
+	producer.update({ a: 4 }); // delta, group 1
 	producer.finish();
 
-	expect(await structure(track)).toEqual([1, 1, 1]);
+	expect(await structure(track)).toEqual([2, 2]);
+});
+
+test("deltas stay within ratio times snapshot", async () => {
+	const track = new Track("test");
+	// The budget covers only the deltas, not the snapshot frame, measured against the current
+	// snapshot size. Single-digit values keep every frame at a constant 7 bytes (`{"n":N}`), so a
+	// ratio of 8 admits 8 deltas (8x the snapshot) on top of the snapshot before the 9th rolls.
+	const producer = new Producer<Value>(track, { deltaRatio: 8 });
+	for (let n = 0; n <= 9; n++) producer.update({ n });
+	producer.finish();
+
+	expect(await structure(track)).toEqual([9, 1]);
 });
 
 test("array change is a wholesale delta", async () => {

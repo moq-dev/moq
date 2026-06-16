@@ -30,7 +30,8 @@ export class Broadcast {
 	// The catalog, editable at any time regardless of whether anyone is subscribed. The base
 	// `video`/`audio` sections are kept in sync from the encoders; an application adds its own root
 	// sections (e.g. `scte35`) by mutating it too.
-	readonly catalog: CatalogProducer = new Producer<Catalog.Root>({ initial: {} });
+	// Deltas are disabled for now (`deltaRatio: 0`) to stay byte-compatible with consumers that only read snapshots.
+	readonly catalog: CatalogProducer = new Producer<Catalog.Root>({ initial: {}, deltaRatio: 0 });
 
 	// Handlers for custom tracks registered via `publishTrack`, keyed by track name. Persists across
 	// reconnects so a new `Moq.Broadcast` still serves them.
