@@ -9,8 +9,12 @@ export interface Config<T = Root> {
 	schema?: z.ZodMiniType<T>;
 
 	/**
-	 * Delta encoding ratio forwarded to the underlying JSON producer. `undefined` (the default)
-	 * publishes a full snapshot per change; a number enables JSON Merge Patch deltas.
+	 * Delta encoding ratio forwarded to the underlying JSON producer.
+	 *
+	 * Leave it unset (the default) to disable deltas: every change publishes a full snapshot in its
+	 * own group, matching the Rust catalog producer (`delta_ratio: None`) and the current wire. A
+	 * positive number enables JSON Merge Patch deltas. Note that `0` does *not* disable deltas, it is
+	 * a degenerate "enabled" value that keeps the group open, so use `undefined` to turn them off.
 	 */
 	deltaRatio?: number;
 }
