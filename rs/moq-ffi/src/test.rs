@@ -125,9 +125,10 @@ async fn dynamic_track_request_can_publish_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = consumer.subscribe_catalog().unwrap();
+	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
 	let media_consumer = consumer
 		.subscribe_media("requested-audio".into(), crate::media::Container::Legacy, 10_000)
+		.await
 		.unwrap();
 
 	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
