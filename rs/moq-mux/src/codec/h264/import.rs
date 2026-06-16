@@ -53,6 +53,11 @@ enum State {
 	},
 }
 
+/// Cap on a single in-progress access unit. Without a slice the importer never
+/// flushes `chunks`, so a stream of non-VCL NALs (AUD/SEI/SPS/PPS) would grow it
+/// unboundedly; bail instead.
+const MAX_PENDING_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Default)]
 struct Avc3Frame {
 	chunks: BytesMut,
@@ -60,6 +65,27 @@ struct Avc3Frame {
 	contains_slice: bool,
 	contains_sps: bool,
 	contains_pps: bool,
+}
+
+impl Avc3Frame {
+	fn append_nal(&mut self, nal: &[u8]) -> anyhow::Result<()> {
+		let next = self.chunks.len() + START_CODE.len() + nal.len();
+		anyhow::ensure!(
+			next <= MAX_PENDING_FRAME_BYTES,
+			"pending H.264 frame exceeds {MAX_PENDING_FRAME_BYTES} bytes without a slice"
+		);
+		self.chunks.extend_from_slice(&START_CODE);
+		self.chunks.extend_from_slice(nal);
+		Ok(())
+	}
+
+	fn clear_partial(&mut self) {
+		self.chunks.clear();
+		self.contains_idr = false;
+		self.contains_slice = false;
+		self.contains_sps = false;
+		self.contains_pps = false;
+	}
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -347,15 +373,13 @@ impl<E: CatalogExt> Import<E> {
 				if !current.contains_sps
 					&& let Some(sps) = sps.as_ref()
 				{
-					current.chunks.extend_from_slice(&START_CODE);
-					current.chunks.extend_from_slice(sps);
+					current.append_nal(sps)?;
 					current.contains_sps = true;
 				}
 				if !current.contains_pps
 					&& let Some(pps) = pps.as_ref()
 				{
-					current.chunks.extend_from_slice(&START_CODE);
-					current.chunks.extend_from_slice(pps);
+					current.append_nal(pps)?;
 					current.contains_pps = true;
 				}
 				current.contains_idr = true;
@@ -381,8 +405,7 @@ impl<E: CatalogExt> Import<E> {
 		let State::Avc3 { current, .. } = &mut self.state else {
 			unreachable!()
 		};
-		current.chunks.extend_from_slice(&START_CODE);
-		current.chunks.extend_from_slice(&nal);
+		current.append_nal(&nal)?;
 		Ok(())
 	}
 
@@ -481,6 +504,19 @@ impl<E: CatalogExt> Import<E> {
 	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
 		let track = self.track.as_mut().context("not initialized")?;
 		track.seek(sequence)?;
+		Ok(())
+	}
+
+	/// Signal a timeline discontinuity: drop the in-progress access unit and
+	/// close the current group so the next frame starts a fresh group with a
+	/// keyframe. Tolerant before the track exists.
+	pub fn discontinuity(&mut self) -> anyhow::Result<()> {
+		if let State::Avc3 { current, .. } = &mut self.state {
+			current.clear_partial();
+		}
+		if let Some(track) = self.track.as_mut() {
+			track.finish_group()?;
+		}
 		Ok(())
 	}
 
@@ -631,6 +667,163 @@ mod tests {
 		assert!(cfg.description.is_none(), "avc3 has no out-of-band description");
 		assert_eq!(h264.profile, sps[1]);
 		assert_eq!(h264.level, sps[3]);
+	}
+
+	fn avc3_importer() -> (Import, crate::catalog::Producer) {
+		let broadcast = moq_net::Broadcast::new();
+		let mut producer = broadcast.produce();
+		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+		let import = Import::new(producer, catalog.clone()).with_mode(Mode::Avc3).unwrap();
+		(import, catalog)
+	}
+
+	/// A SEI NAL (no slice) so the importer accumulates without ever flushing.
+	fn sei_nal(payload: usize) -> bytes::BytesMut {
+		let mut buf = bytes::BytesMut::from(&[0x00, 0x00, 0x00, 0x01, 0x06][..]);
+		buf.extend(std::iter::repeat_n(0xFFu8, payload));
+		buf
+	}
+
+	/// Repeated non-VCL NALs (never a slice) must bail instead of growing forever.
+	#[tokio::test(start_paused = true)]
+	async fn caps_pending_non_vcl_accumulation() {
+		let (mut import, _catalog) = avc3_importer();
+		let chunk = 9 * 1024 * 1024;
+
+		import
+			.decode_frame(
+				&mut sei_nal(chunk),
+				Some(crate::container::Timestamp::from_micros(0).unwrap()),
+			)
+			.expect("first non-VCL buffer fits");
+
+		let err = import
+			.decode_frame(
+				&mut sei_nal(chunk),
+				Some(crate::container::Timestamp::from_micros(1).unwrap()),
+			)
+			.expect_err("second buffer must exceed the cap");
+		assert!(err.to_string().contains("without a slice"), "got: {err}");
+	}
+
+	/// discontinuity() drops the partial AU so accumulation restarts from zero.
+	#[tokio::test(start_paused = true)]
+	async fn discontinuity_resets_accumulation() {
+		let (mut import, _catalog) = avc3_importer();
+		let chunk = 9 * 1024 * 1024;
+
+		import
+			.decode_frame(
+				&mut sei_nal(chunk),
+				Some(crate::container::Timestamp::from_micros(0).unwrap()),
+			)
+			.expect("first buffer fits");
+		import.discontinuity().expect("discontinuity clears the partial AU");
+		import
+			.decode_frame(
+				&mut sei_nal(chunk),
+				Some(crate::container::Timestamp::from_micros(1).unwrap()),
+			)
+			.expect("post-discontinuity buffer fits because the cap reset");
+	}
+
+	/// After a discontinuity the next access unit must not carry leftover bytes
+	/// from the dropped partial AU.
+	#[tokio::test(start_paused = true)]
+	async fn discontinuity_drops_partial_au_without_leaking() {
+		let sps: &[u8] = &[
+			0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07, 0xd0, 0x00,
+			0x01, 0xd4, 0xc0, 0x80,
+		];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x00];
+
+		let access_unit = || {
+			let mut buf = bytes::BytesMut::new();
+			for nal in [sps, pps, idr] {
+				buf.extend_from_slice(&[0, 0, 0, 1]);
+				buf.extend_from_slice(nal);
+			}
+			buf
+		};
+		let partial = || {
+			let mut buf = bytes::BytesMut::new();
+			for nal in [sps, pps] {
+				buf.extend_from_slice(&[0, 0, 0, 1]);
+				buf.extend_from_slice(nal);
+			}
+			buf
+		};
+
+		let (mut import, _catalog) = avc3_importer();
+		let consumer = import.track().unwrap().consume();
+		let mut media = crate::container::Consumer::new(consumer, crate::catalog::hang::Container::Legacy);
+
+		import
+			.decode_frame(
+				&mut access_unit(),
+				Some(crate::container::Timestamp::from_micros(0).unwrap()),
+			)
+			.unwrap();
+		import
+			.decode_frame(
+				&mut partial(),
+				Some(crate::container::Timestamp::from_micros(33_000).unwrap()),
+			)
+			.unwrap();
+		import.discontinuity().unwrap();
+		import
+			.decode_frame(
+				&mut access_unit(),
+				Some(crate::container::Timestamp::from_micros(66_000).unwrap()),
+			)
+			.unwrap();
+
+		let first = media.read().await.unwrap().unwrap();
+		let second = media.read().await.unwrap().unwrap();
+		assert_eq!(
+			first.payload, second.payload,
+			"the post-discontinuity AU must match a clean AU, not carry the dropped partial"
+		);
+	}
+
+	/// Cached SPS/PPS re-inserted before a keyframe also go through the capped
+	/// append, so a large parameter set can't grow the partial AU past the limit
+	/// before the final append checks it.
+	#[tokio::test(start_paused = true)]
+	async fn caps_reinserted_parameter_sets() {
+		let sps: &[u8] = &[
+			0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07, 0xd0, 0x00,
+			0x01, 0xd4, 0xc0, 0x80,
+		];
+		let mut pps = vec![0x68u8]; // PPS NAL header; payload is opaque (not parsed, just cached).
+		pps.extend(std::iter::repeat_n(0xFFu8, 9 * 1024 * 1024));
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x00];
+
+		let (mut import, _catalog) = avc3_importer();
+
+		// AU1 fits on its own and caches the SPS + large PPS.
+		let mut au1 = bytes::BytesMut::new();
+		for nal in [sps, pps.as_slice(), idr] {
+			au1.extend_from_slice(&[0, 0, 0, 1]);
+			au1.extend_from_slice(nal);
+		}
+		import
+			.decode_frame(&mut au1, Some(crate::container::Timestamp::from_micros(0).unwrap()))
+			.expect("AU1 fits under the cap");
+
+		// AU2: 8 MiB of SEI, then a keyframe with no inline PPS. Re-inserting the
+		// cached 9 MiB PPS must trip the cap instead of allocating past it.
+		let mut au2 = sei_nal(8 * 1024 * 1024);
+		au2.extend_from_slice(&[0, 0, 0, 1]);
+		au2.extend_from_slice(idr);
+		let err = import
+			.decode_frame(
+				&mut au2,
+				Some(crate::container::Timestamp::from_micros(33_000).unwrap()),
+			)
+			.expect_err("re-inserted PPS must exceed the cap");
+		assert!(err.to_string().contains("without a slice"), "got: {err}");
 	}
 }
 

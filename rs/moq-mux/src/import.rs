@@ -301,6 +301,23 @@ impl Framed {
 		}
 	}
 
+	/// Signal a timeline discontinuity (e.g. a GStreamer FLUSH): drop any
+	/// codec partial state and close the current group so the next frame starts
+	/// a fresh group with a keyframe. No-op for container formats that manage
+	/// their own framing.
+	pub fn discontinuity(&mut self) -> anyhow::Result<()> {
+		match self.decoder {
+			FramedKind::H264(ref mut decoder) => decoder.discontinuity(),
+			FramedKind::Hev1(ref mut decoder) => decoder.discontinuity(),
+			FramedKind::Av01(ref mut decoder) => decoder.discontinuity(),
+			FramedKind::Vp8(ref mut decoder) => decoder.discontinuity(),
+			FramedKind::Vp9(ref mut decoder) => decoder.discontinuity(),
+			FramedKind::Aac(ref mut decoder) => decoder.discontinuity(),
+			FramedKind::Opus(ref mut decoder) => decoder.discontinuity(),
+			FramedKind::Fmp4(_) | FramedKind::Mkv(_) | FramedKind::Ts(_) | FramedKind::Flv(_) => Ok(()),
+		}
+	}
+
 	/// Return the single track produced by this importer.
 	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
 		match self.decoder {
@@ -493,6 +510,46 @@ mod tests {
 			.decode_frame(&mut second, Some(Timestamp::from_micros(33_000).unwrap()))
 			.unwrap_err();
 		assert!(err.to_string().contains("fixed track cannot be reconfigured"));
+	}
+
+	/// discontinuity() must close the open group, not just clear the partial AU:
+	/// a non-keyframe arriving after it cannot anchor the closed group and is
+	/// dropped by lenient start. Without `finish_group()` the delta would extend
+	/// the keyframe's group as a second frame, so this fails if it regresses.
+	#[tokio::test(start_paused = true)]
+	async fn discontinuity_closes_group_so_following_delta_is_dropped() {
+		let (broadcast, catalog) = new_broadcast();
+		let init = h264_init();
+		let mut init = init.as_slice();
+		let mut framed = Framed::new(broadcast, catalog, FramedFormat::Avc3, &mut init).unwrap();
+
+		let consumer = framed.track().unwrap().consume();
+		let mut media = crate::container::Consumer::new(consumer, crate::catalog::hang::Container::Legacy);
+
+		// Keyframe AU: just an IDR slice; the importer re-inserts the cached SPS/PPS.
+		let mut keyframe = Bytes::from_static(&[0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00]);
+		framed
+			.decode_frame(&mut keyframe, Some(Timestamp::from_micros(0).unwrap()))
+			.unwrap();
+
+		framed.discontinuity().unwrap();
+
+		// Non-IDR slice (first_mb flag set) after the discontinuity.
+		let mut delta = Bytes::from_static(&[0x00, 0x00, 0x00, 0x01, 0x41, 0x80, 0x00, 0x00]);
+		framed
+			.decode_frame(&mut delta, Some(Timestamp::from_micros(33_000).unwrap()))
+			.unwrap();
+
+		framed.finish().unwrap();
+
+		let mut frames = 0;
+		while media.read().await.unwrap().is_some() {
+			frames += 1;
+		}
+		assert_eq!(
+			frames, 1,
+			"the delta after discontinuity() must not extend the closed group"
+		);
 	}
 }
 

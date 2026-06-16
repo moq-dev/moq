@@ -159,6 +159,16 @@ impl Import {
 		Ok(())
 	}
 
+	/// Signal a timeline discontinuity: close the current group so the next
+	/// frame starts a fresh group with a keyframe. Tolerant before the track
+	/// exists.
+	pub fn discontinuity(&mut self) -> anyhow::Result<()> {
+		if let Some(track) = self.track.as_mut() {
+			track.finish_group()?;
+		}
+		Ok(())
+	}
+
 	pub fn is_initialized(&self) -> bool {
 		self.track.is_some()
 	}

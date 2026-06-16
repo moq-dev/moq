@@ -254,22 +254,19 @@ impl<E: CatalogExt> Import<E> {
 				if !self.current.contains_vps
 					&& let Some(vps) = &self.vps
 				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(vps);
+					self.current.append_nal(vps)?;
 					self.current.contains_vps = true;
 				}
 				if !self.current.contains_sps
 					&& let Some(sps) = &self.sps
 				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(sps);
+					self.current.append_nal(sps)?;
 					self.current.contains_sps = true;
 				}
 				if !self.current.contains_pps
 					&& let Some(pps) = &self.pps
 				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(pps);
+					self.current.append_nal(pps)?;
 					self.current.contains_pps = true;
 				}
 
@@ -298,8 +295,7 @@ impl<E: CatalogExt> Import<E> {
 
 		// Replace the original start code with a canonical 4-byte start code (marginally easier
 		// for downstream players, e.g. MSE).
-		self.current.chunks.extend_from_slice(&START_CODE);
-		self.current.chunks.extend_from_slice(&nal);
+		self.current.append_nal(&nal)?;
 
 		Ok(())
 	}
@@ -352,6 +348,17 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
+	/// Signal a timeline discontinuity: drop the in-progress access unit and
+	/// close the current group so the next frame starts a fresh group with a
+	/// keyframe. Tolerant before the track exists.
+	pub fn discontinuity(&mut self) -> anyhow::Result<()> {
+		self.current.clear_partial();
+		if let Some(track) = self.track.as_mut() {
+			track.finish_group()?;
+		}
+		Ok(())
+	}
+
 	pub fn is_initialized(&self) -> bool {
 		self.track.is_some()
 	}
@@ -377,6 +384,11 @@ impl<E: CatalogExt> Drop for Import<E> {
 	}
 }
 
+/// Cap on a single in-progress access unit. Without a slice the importer never
+/// flushes `chunks`, so a stream of non-VCL NALs (AUD/SEI/VPS/SPS/PPS) would grow
+/// it unboundedly; bail instead.
+const MAX_PENDING_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Default)]
 struct Frame {
 	chunks: BytesMut,
@@ -385,6 +397,28 @@ struct Frame {
 	contains_vps: bool,
 	contains_sps: bool,
 	contains_pps: bool,
+}
+
+impl Frame {
+	fn append_nal(&mut self, nal: &[u8]) -> anyhow::Result<()> {
+		let next = self.chunks.len() + START_CODE.len() + nal.len();
+		anyhow::ensure!(
+			next <= MAX_PENDING_FRAME_BYTES,
+			"pending H.265 frame exceeds {MAX_PENDING_FRAME_BYTES} bytes without a slice"
+		);
+		self.chunks.extend_from_slice(&START_CODE);
+		self.chunks.extend_from_slice(nal);
+		Ok(())
+	}
+
+	fn clear_partial(&mut self) {
+		self.chunks.clear();
+		self.contains_idr = false;
+		self.contains_slice = false;
+		self.contains_vps = false;
+		self.contains_sps = false;
+		self.contains_pps = false;
+	}
 }
 
 #[derive(Default)]
@@ -442,5 +476,69 @@ fn aspect_ratio_from_idc(idc: scuffle_h265::AspectRatioIdc) -> Option<(u32, u32)
 		scuffle_h265::AspectRatioIdc::Aspect2_1 => Some((2, 1)),
 		scuffle_h265::AspectRatioIdc::ExtendedSar => None,
 		_ => None, // Reserved
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn importer() -> Import {
+		let broadcast = moq_net::Broadcast::new();
+		let mut producer = broadcast.produce();
+		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+		Import::new(producer, catalog)
+	}
+
+	/// An AUD NAL (no slice) so the importer accumulates without ever flushing.
+	fn aud_nal(payload: usize) -> bytes::BytesMut {
+		// 2-byte header: nal_unit_type 35 (AUD_NUT) => first byte (35 << 1) = 0x46.
+		let mut buf = bytes::BytesMut::from(&[0x00, 0x00, 0x00, 0x01, 0x46, 0x01][..]);
+		buf.extend(std::iter::repeat_n(0xFFu8, payload));
+		buf
+	}
+
+	/// Repeated non-VCL NALs (never a slice) must bail instead of growing forever.
+	#[tokio::test(start_paused = true)]
+	async fn caps_pending_non_vcl_accumulation() {
+		let mut import = importer();
+		let chunk = 9 * 1024 * 1024;
+
+		import
+			.decode_frame(
+				&mut aud_nal(chunk),
+				Some(crate::container::Timestamp::from_micros(0).unwrap()),
+			)
+			.expect("first non-VCL buffer fits");
+
+		let err = import
+			.decode_frame(
+				&mut aud_nal(chunk),
+				Some(crate::container::Timestamp::from_micros(1).unwrap()),
+			)
+			.expect_err("second buffer must exceed the cap");
+		assert!(err.to_string().contains("without a slice"), "got: {err}");
+	}
+
+	/// discontinuity() drops the partial AU so accumulation restarts from zero,
+	/// and is tolerant before any track exists.
+	#[tokio::test(start_paused = true)]
+	async fn discontinuity_resets_accumulation() {
+		let mut import = importer();
+		let chunk = 9 * 1024 * 1024;
+
+		import
+			.decode_frame(
+				&mut aud_nal(chunk),
+				Some(crate::container::Timestamp::from_micros(0).unwrap()),
+			)
+			.expect("first buffer fits");
+		import.discontinuity().expect("discontinuity clears the partial AU");
+		import
+			.decode_frame(
+				&mut aud_nal(chunk),
+				Some(crate::container::Timestamp::from_micros(1).unwrap()),
+			)
+			.expect("post-discontinuity buffer fits because the cap reset");
 	}
 }

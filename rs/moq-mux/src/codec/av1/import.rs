@@ -29,11 +29,34 @@ pub struct Import {
 	jitter: MinFrameDuration,
 }
 
+/// Cap on a single in-progress temporal unit. Without a frame OBU the importer
+/// never flushes `chunks`, so a stream of non-frame OBUs (sequence headers,
+/// metadata) would grow it unboundedly; bail instead.
+const MAX_PENDING_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Default)]
 struct Frame {
 	chunks: BytesMut,
 	contains_keyframe: bool,
 	contains_frame: bool,
+}
+
+impl Frame {
+	fn append_obu(&mut self, obu: &[u8]) -> anyhow::Result<()> {
+		let next = self.chunks.len() + obu.len();
+		anyhow::ensure!(
+			next <= MAX_PENDING_FRAME_BYTES,
+			"pending AV1 frame exceeds {MAX_PENDING_FRAME_BYTES} bytes without a frame OBU"
+		);
+		self.chunks.extend_from_slice(obu);
+		Ok(())
+	}
+
+	fn clear_partial(&mut self) {
+		self.chunks.clear();
+		self.contains_keyframe = false;
+		self.contains_frame = false;
+	}
 }
 
 impl Import {
@@ -366,7 +389,7 @@ impl Import {
 
 		tracing::trace!(?header.obu_type, "parsed OBU");
 
-		self.current.chunks.extend_from_slice(&obu_data);
+		self.current.append_obu(&obu_data)?;
 
 		Ok(())
 	}
@@ -415,6 +438,17 @@ impl Import {
 	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
 		let track = self.track.as_mut().context("not initialized")?;
 		track.seek(sequence)?;
+		Ok(())
+	}
+
+	/// Signal a timeline discontinuity: drop the in-progress temporal unit and
+	/// close the current group so the next frame starts a fresh group with a
+	/// keyframe. Tolerant before the track exists.
+	pub fn discontinuity(&mut self) -> anyhow::Result<()> {
+		self.current.clear_partial();
+		if let Some(track) = self.track.as_mut() {
+			track.finish_group()?;
+		}
 		Ok(())
 	}
 
@@ -528,5 +562,88 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for ObuIterator<'a, T> {
 
 		let obu = self.buf.copy_to_bytes(total_size);
 		Some(Ok(obu))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn importer() -> Import {
+		let broadcast = moq_net::Broadcast::new();
+		let mut producer = broadcast.produce();
+		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+		Import::new(producer, catalog)
+	}
+
+	fn leb128(mut value: usize) -> Vec<u8> {
+		let mut out = Vec::new();
+		loop {
+			let mut byte = (value & 0x7f) as u8;
+			value >>= 7;
+			if value != 0 {
+				byte |= 0x80;
+			}
+			out.push(byte);
+			if value == 0 {
+				break;
+			}
+		}
+		out
+	}
+
+	/// A Metadata OBU (not a frame) so the importer accumulates without flushing.
+	fn metadata_obu(payload: usize) -> bytes::BytesMut {
+		// header 0x2A: obu_type 5 (Metadata), obu_has_size_field = 1.
+		let mut buf = bytes::BytesMut::from(&[0x2Au8][..]);
+		buf.extend_from_slice(&leb128(payload));
+		buf.extend(std::iter::repeat_n(0xFFu8, payload));
+		buf
+	}
+
+	/// Repeated non-frame OBUs (never a frame) must bail instead of growing forever.
+	#[tokio::test(start_paused = true)]
+	async fn caps_pending_non_frame_accumulation() {
+		let mut import = importer();
+		let chunk = 9 * 1024 * 1024;
+
+		import
+			.decode_frame(
+				&mut metadata_obu(chunk),
+				Some(crate::container::Timestamp::from_micros(0).unwrap()),
+			)
+			.expect("first non-frame buffer fits");
+
+		let err = import
+			.decode_frame(
+				&mut metadata_obu(chunk),
+				Some(crate::container::Timestamp::from_micros(1).unwrap()),
+			)
+			.expect_err("second buffer must exceed the cap");
+		assert!(err.to_string().contains("without a frame OBU"), "got: {err}");
+	}
+
+	/// discontinuity() drops the partial temporal unit so accumulation restarts
+	/// from zero, and is tolerant before any track exists.
+	#[tokio::test(start_paused = true)]
+	async fn discontinuity_resets_accumulation() {
+		let mut import = importer();
+		let chunk = 9 * 1024 * 1024;
+
+		import
+			.decode_frame(
+				&mut metadata_obu(chunk),
+				Some(crate::container::Timestamp::from_micros(0).unwrap()),
+			)
+			.expect("first buffer fits");
+		import
+			.discontinuity()
+			.expect("discontinuity clears the partial temporal unit");
+		import
+			.decode_frame(
+				&mut metadata_obu(chunk),
+				Some(crate::container::Timestamp::from_micros(1).unwrap()),
+			)
+			.expect("post-discontinuity buffer fits because the cap reset");
 	}
 }

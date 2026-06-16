@@ -77,6 +77,13 @@ impl Import {
 		Ok(())
 	}
 
+	/// Signal a timeline discontinuity: close the current group so the next
+	/// frame starts a fresh group.
+	pub fn discontinuity(&mut self) -> anyhow::Result<()> {
+		self.track.finish_group()?;
+		Ok(())
+	}
+
 	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<crate::container::Timestamp>) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 
