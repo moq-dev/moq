@@ -310,8 +310,8 @@ impl Import {
 			if self.config.is_none() {
 				// A keyframe we still can't configure is undecodable, so bail
 				// loudly. A non-keyframe before config is a mid-stream-join
-				// leftover: write it and let the producer's lenient start drop it
-				// ahead of the first keyframe.
+				// leftover: write it through, and the producer reports
+				// MissingKeyframe (which a mid-stream join skips).
 				if frame.keyframe {
 					return Err(Error::NotInitialized.into());
 				}
@@ -541,10 +541,9 @@ mod tests {
 		assert!(matches!(err, crate::Error::H264(Error::NotInitialized)), "got {err:?}");
 	}
 
-	/// A non-keyframe before any config is a mid-stream-join leftover: it must
-	/// not abort the import (the producer's lenient start drops it downstream).
 	/// A non-keyframe before the first keyframe has no group to anchor it, so the
-	/// producer surfaces MissingKeyframe (which a mid-stream join skips).
+	/// producer surfaces MissingKeyframe (which a mid-stream join skips). It must
+	/// not silently abort the import.
 	#[tokio::test(start_paused = true)]
 	async fn delta_before_init_reports_missing_keyframe() {
 		let pslice: &[u8] = &[0x61, 0xe0, 0x12, 0x34]; // non-IDR slice
