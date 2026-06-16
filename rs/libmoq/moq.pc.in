@@ -1,11 +1,9 @@
-prefix=${pcfiledir}/../..
-exec_prefix=${prefix}
-libdir=${exec_prefix}/lib
-includedir=${prefix}/include
+libdir=@LIB_DIR@
+includedir=@INCLUDE_DIR@
 
 Name: moq
 Description: Media over QUIC C Interface
 Version: @VERSION@
 Libs: -L${libdir} -lmoq
-Libs.private: -framework CoreFoundation -framework Security
+Libs.private: @LIBS_PRIVATE@
 Cflags: -I${includedir}
