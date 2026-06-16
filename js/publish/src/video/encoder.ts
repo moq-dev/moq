@@ -282,6 +282,9 @@ export class Encoder {
 		// maxPixels caps absolutely; maxScale caps relative to the source. The smaller cap wins.
 		let maxPixels = user?.maxPixels ?? sourcePixels;
 		if (user?.maxScale !== undefined) {
+			if (!Number.isFinite(user.maxScale) || user.maxScale <= 0) {
+				throw new Error(`maxScale must be a finite number greater than 0: ${user.maxScale}`);
+			}
 			maxPixels = Math.min(maxPixels, sourcePixels * user.maxScale);
 		}
 
