@@ -1,5 +1,4 @@
 import * as Catalog from "@moq/hang/catalog";
-import { Producer } from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
@@ -30,7 +29,7 @@ export class Broadcast {
 	// The catalog, editable at any time regardless of whether anyone is subscribed. The base
 	// `video`/`audio` sections are kept in sync from the encoders; an application adds its own root
 	// sections (e.g. `scte35`) by mutating it too.
-	readonly catalog: CatalogProducer = new Producer<Catalog.Root>({ initial: {} });
+	readonly catalog: CatalogProducer = new Catalog.Producer();
 
 	// Handlers for custom tracks registered via `publishTrack`, keyed by track name. Persists across
 	// reconnects so a new `Moq.Broadcast` still serves them.

@@ -1,5 +1,4 @@
 import * as Catalog from "@moq/hang/catalog";
-import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
@@ -164,7 +163,7 @@ export class Broadcast {
 		// MSF stays on its own one-blob-per-group fetch.
 		let fetchNext: () => Promise<Catalog.Root | undefined>;
 		if (format === "hang") {
-			const consumer = new Json.Consumer<Catalog.Root>(track, { schema: Catalog.RootSchema });
+			const consumer = new Catalog.Consumer(track);
 			fetchNext = () => consumer.next();
 		} else {
 			fetchNext = async () => {
