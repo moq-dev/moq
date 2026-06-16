@@ -11,11 +11,12 @@ const MAX_DELTA_FRAMES = 256;
 export interface Config<T> {
 	// Controls whether the producer emits deltas (merge patches) instead of full snapshots.
 	//
-	// `undefined` disables deltas: every change is published as a new snapshot group.
+	// `undefined` or a non-positive value (e.g. `0`) disables deltas: every change is published as a
+	// new snapshot group.
 	//
-	// A number enables deltas: a delta is appended to the current group as long as the group's
-	// total size stays within `deltaRatio` times the size of a fresh snapshot; otherwise a new
-	// snapshot group is started.
+	// A positive number enables deltas: a delta is appended to the current group as long as the
+	// group's total size stays within `deltaRatio` times the size of a fresh snapshot; otherwise a
+	// new snapshot group is started.
 	deltaRatio?: number;
 
 	// Optional zod schema used to validate each value before publishing.
@@ -38,6 +39,10 @@ export interface Config<T> {
  */
 export class Producer<T> {
 	#config: Config<T>;
+
+	// Normalized delta ratio: `undefined` whenever deltas are disabled, i.e. the configured ratio is
+	// unset or non-positive (so `0` reads as "off", not a degenerate always-snapshot "on").
+	#deltaRatio?: number;
 
 	// Leaf mode: writes snapshots/deltas straight to a single track.
 	#track?: Moq.Track;
@@ -63,6 +68,9 @@ export class Producer<T> {
 			this.#outputs = new Set();
 			this.#value = this.#config.initial;
 		}
+
+		const ratio = this.#config.deltaRatio;
+		this.#deltaRatio = ratio !== undefined && ratio > 0 ? ratio : undefined;
 	}
 
 	/** The current value, or `undefined` if nothing has been published yet. */
@@ -178,7 +186,7 @@ export class Producer<T> {
 	}
 
 	#delta(json: unknown, snapshotLen: number): Uint8Array | undefined {
-		const ratio = this.#config.deltaRatio;
+		const ratio = this.#deltaRatio;
 		if (ratio === undefined) return undefined;
 		if (this.#last === undefined) return undefined;
 		if (!this.#group || this.#groupFrames >= MAX_DELTA_FRAMES) return undefined;
@@ -203,7 +211,7 @@ export class Producer<T> {
 		this.#groupBytes = snapshot.length;
 		this.#groupFrames = 1;
 
-		if (this.#config.deltaRatio !== undefined) {
+		if (this.#deltaRatio !== undefined) {
 			// Keep the group open so future deltas can be appended.
 			this.#group = group;
 		} else {

@@ -12,7 +12,7 @@ import { type Root, RootSchema } from "./root.ts";
  * `z.extend(RootSchema, ...)`) to validate and type application sections; otherwise unknown
  * sections pass through untouched.
  */
-export class Consumer<T = Root> extends Json.Consumer<T> {
+export class Consumer<T extends Root = Root> extends Json.Consumer<T> {
 	/** Wrap `track`, validating each catalog against `schema` (defaults to {@link RootSchema}). */
 	constructor(track: Moq.Track, schema?: z.ZodMiniType<T>) {
 		super(track, { schema: (schema ?? RootSchema) as z.ZodMiniType<T> });

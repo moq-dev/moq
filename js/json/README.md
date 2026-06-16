@@ -33,4 +33,4 @@ for await (const value of consumer) {
 }
 ```
 
-Pass `{ deltaRatio: x }` to `Producer` to emit merge-patch deltas while a group stays within `x` times the size of a fresh snapshot. Arrays are replaced wholesale within a delta; a value set to `null` falls back to a snapshot, since merge patch reads `null` as a key deletion.
+Pass `{ deltaRatio: x }` with a positive `x` to `Producer` to emit merge-patch deltas while a group stays within `x` times the size of a fresh snapshot. Leaving `deltaRatio` unset, or setting it to `0` (or any non-positive value), disables deltas: every change is a fresh single-frame snapshot group. Arrays are replaced wholesale within a delta; a value set to `null` falls back to a snapshot, since merge patch reads `null` as a key deletion.

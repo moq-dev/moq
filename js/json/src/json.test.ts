@@ -38,6 +38,18 @@ test("deltas off: a snapshot group per change", async () => {
 	expect(await drain(track)).toEqual([{ a: 1 }, { a: 2 }]);
 });
 
+test("deltaRatio 0 disables deltas, like off", async () => {
+	const track = new Track("test");
+	const producer = new Producer<Value>(track, { deltaRatio: 0 });
+	producer.update({ a: 1 });
+	producer.update({ a: 2 });
+	producer.finish();
+
+	// `0` is treated as off, not a degenerate "enabled" value: each change is its own single-frame
+	// snapshot group, the same layout as the no-config case.
+	expect(await structure(track)).toEqual([1, 1]);
+});
+
 test("live consumer sees each update", async () => {
 	const track = new Track("test");
 	const producer = new Producer<Value>(track);

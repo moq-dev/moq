@@ -4,17 +4,16 @@ import type * as z from "zod/mini";
 import { type Root, RootSchema } from "./root.ts";
 
 /** Options for a catalog {@link Producer}. */
-export interface Config<T = Root> {
+export interface Config<T extends Root = Root> {
 	/** zod schema validating each catalog before publish. Defaults to {@link RootSchema}. */
 	schema?: z.ZodMiniType<T>;
 
 	/**
 	 * Delta encoding ratio forwarded to the underlying JSON producer.
 	 *
-	 * Leave it unset (the default) to disable deltas: every change publishes a full snapshot in its
-	 * own group, matching the Rust catalog producer (`delta_ratio: None`) and the current wire. A
-	 * positive number enables JSON Merge Patch deltas. Note that `0` does *not* disable deltas, it is
-	 * a degenerate "enabled" value that keeps the group open, so use `undefined` to turn them off.
+	 * Defaults to `0`, which (like `undefined`) disables deltas: every change publishes a full
+	 * snapshot in its own group, matching the Rust catalog producer (`delta_ratio: None`) and the
+	 * current wire. Set a positive number to enable JSON Merge Patch deltas.
 	 */
 	deltaRatio?: number;
 }
@@ -28,13 +27,14 @@ export interface Config<T = Root> {
  * with `serve`. Extend the catalog by passing a schema built via `z.extend(RootSchema, ...)` and
  * writing the extra sections in `mutate`.
  */
-export class Producer<T = Root> extends Json.Producer<T> {
+export class Producer<T extends Root = Root> extends Json.Producer<T> {
 	/** Create a track-less catalog producer seeded with an empty catalog. */
 	constructor(config: Config<T> = {}) {
 		super({
 			initial: {} as T,
 			schema: (config.schema ?? RootSchema) as z.ZodMiniType<T>,
-			deltaRatio: config.deltaRatio,
+			// Deltas off by default (one snapshot per group); pass a positive ratio to enable.
+			deltaRatio: config.deltaRatio ?? 0,
 		});
 	}
 }
