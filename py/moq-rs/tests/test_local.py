@@ -2,6 +2,7 @@
 
 import asyncio
 import struct
+from typing import cast
 
 import moq
 import pytest
@@ -269,7 +270,9 @@ async def test_dynamic_track_request_can_publish_media():
 
     # publish_media_on_track accepts the request (at the media timescale), which is what
     # unblocks subscribe_media, so run the subscribe concurrently until then.
-    subscribe = asyncio.create_task(consumer.subscribe_media("requested-audio", moq.Container.LEGACY(), 10_000))
+    subscribe = asyncio.create_task(
+        consumer.subscribe_media("requested-audio", cast(moq.Container, moq.Container.LEGACY()), 10_000)
+    )
 
     track = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
     assert track.name == "requested-audio"
