@@ -11,9 +11,10 @@ export interface Config<T extends Root = Root> {
 	/**
 	 * Delta encoding ratio forwarded to the underlying JSON producer.
 	 *
-	 * Defaults to `0`, which (like `undefined`) disables deltas: every change publishes a full
-	 * snapshot in its own group, matching the Rust catalog producer (`delta_ratio: None`) and the
-	 * current wire. Set a positive number to enable JSON Merge Patch deltas.
+	 * Defaults to `0`, which disables deltas: every change publishes a full snapshot in its own
+	 * group, keeping the catalog byte-compatible with snapshot-only consumers. Note this overrides
+	 * the `@moq/json` producer's own default ratio. Set a positive number to enable JSON Merge Patch
+	 * deltas.
 	 */
 	deltaRatio?: number;
 }
@@ -33,7 +34,8 @@ export class Producer<T extends Root = Root> extends Json.Producer<T> {
 		super({
 			initial: {} as T,
 			schema: (config.schema ?? RootSchema) as z.ZodMiniType<T>,
-			// Deltas off by default (one snapshot per group); pass a positive ratio to enable.
+			// Pin deltas off by default (the @moq/json default would enable them); pass a positive
+			// ratio to opt in.
 			deltaRatio: config.deltaRatio ?? 0,
 		});
 	}
