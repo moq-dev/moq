@@ -92,13 +92,20 @@ let
       mkdir -p $out/lib/pkgconfig $out/include $out/lib/cmake/moq
 
       # build.rs derives its output dir from OUT_DIR, so a cross --target
-      # build puts the staticlib, header and pkgconfig under target/<triple>/.
-      # Keep the prefix target-aware so the native and cross outputs share
-      # one installPhase.
+      # build puts the staticlib, header and pkgconfig (under lib/) below
+      # target/<triple>/. Keep the prefix target-aware so the native and
+      # cross outputs share one installPhase.
       tdir="target''${CARGO_BUILD_TARGET:+/$CARGO_BUILD_TARGET}"
       cp "$tdir/release/libmoq.a" $out/lib/
       cp "$tdir/include/moq.h" $out/include/
-      cp "$tdir/pkgconfig/moq.pc" $out/lib/pkgconfig/
+      cp "$tdir/lib/pkgconfig/moq.pc" $out/lib/pkgconfig/
+
+      # build.rs writes libdir relative to the raw cargo target tree
+      # (../../release). Here the staticlib sits in $out/lib alongside
+      # pkgconfig/, so point libdir one level up. Stays relocatable; no
+      # build-time path leaks into the store.
+      substituteInPlace $out/lib/pkgconfig/moq.pc \
+        --replace-fail 'libdir=''${pcfiledir}/../../release' 'libdir=''${pcfiledir}/..'
 
       major_version="$(echo "${libmoqInfo.version}" | cut -d. -f1)"
       substitute ${../rs/libmoq/cmake/moq-config.cmake.in} \

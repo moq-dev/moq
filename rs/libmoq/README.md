@@ -12,7 +12,7 @@ This will:
 
 - Build the static library (`libmoq.a` on Unix-like systems, `moq.lib` on Windows)
 - Generate the C header file at `target/include/moq.h`
-- Generate the pkg-config file at `target/moq.pc`
+- Generate the pkg-config file at `target/lib/pkgconfig/moq.pc`
 
 There's also a [CMakeLists.txt](CMakeLists.txt) file that can be used to import/build the library.
 
