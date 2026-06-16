@@ -5,8 +5,10 @@
 //! raw AV1 bitstreams (OBU-framed) to a moq broadcast.
 
 mod import;
+mod split;
 
 pub use import::*;
+pub use split::*;
 
 use hang::catalog::AV1;
 
