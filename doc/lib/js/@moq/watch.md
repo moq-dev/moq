@@ -147,7 +147,7 @@ catalog section (the [catalog root](/concept/layer/hang#extensions) is a loose
 object, so unknown sections pass through to `broadcast.catalog`).
 `subscribeTrack(name, priority, consume)` follows the active broadcast across
 reconnects and runs `consume(track, effect)` each time it becomes active. Decode
-the payload yourself with the re-exported [`@moq/json`](/lib/js/@moq/hang):
+the payload yourself with the re-exported `@moq/json`:
 
 ```typescript
 import { Json } from "@moq/watch";

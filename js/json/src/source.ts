@@ -34,7 +34,21 @@ export class Source<T> {
 	/** Replace the value; the result is published to all current subscribers. */
 	update(value: T): void {
 		this.#value = value;
-		for (const output of this.#outputs) output.update(value);
+		for (const output of this.#outputs) {
+			// Isolate per-subscriber failures: a bad track (e.g. closed mid-update) must not stop the
+			// fan-out to the others. Drop it and keep going.
+			try {
+				output.update(value);
+			} catch (err) {
+				this.#outputs.delete(output);
+				try {
+					output.finish();
+				} catch {
+					// Already broken; nothing more to do.
+				}
+				console.warn("dropping failed json subscriber during fan-out", err);
+			}
+		}
 	}
 
 	/**

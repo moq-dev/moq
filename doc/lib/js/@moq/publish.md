@@ -133,8 +133,8 @@ Beyond audio and video, you can publish arbitrary application tracks within the
 same broadcast (no separate broadcast needed). `publishTrack(name, serve)` runs
 `serve(track, effect)` for each subscriber; it rejects the built-in track names
 (catalog/audio/video). Encode the payload yourself with the re-exported
-[`@moq/json`](/lib/js/@moq/hang): a `Json.Source` is the same fan-out producer the
-catalog uses, seeding late joiners with the latest value.
+`@moq/json`: a `Json.Source` is the same fan-out producer the catalog uses,
+seeding late joiners with the latest value.
 
 `publishTrack` does not touch the catalog; advertise the track by writing your own
 section to `broadcast.catalog` (the [catalog root](/concept/layer/hang#extensions)
