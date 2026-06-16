@@ -19,6 +19,7 @@ pub(crate) mod jitter;
 mod producer;
 mod source;
 
+pub mod flv;
 pub mod fmp4;
 pub mod legacy;
 pub mod loc;

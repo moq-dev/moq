@@ -480,9 +480,9 @@ export class Subscriber {
 
 			// timescale resolves together with compression (from TRACK_INFO). A
 			// non-zero scale means every frame is prefixed with a zigzag-delta
-			// timestamp and a zigzag-delta duration (see the lite-05 FRAME format).
-			// We don't surface either to the application yet, but we must still read
-			// both varints to keep the frame framing in sync with the publisher.
+			// timestamp (see the lite-05 FRAME format). We don't surface it to the
+			// application yet, but we must still read the varint to keep the frame
+			// framing in sync with the publisher.
 			const scale = timescale.peek() ?? 0;
 
 			for (;;) {
@@ -490,8 +490,7 @@ export class Subscriber {
 				if (done !== false) break;
 
 				if (scale !== 0) {
-					// Consume (and discard) the per-frame timestamp and duration deltas.
-					await stream.u62();
+					// Consume (and discard) the per-frame timestamp delta.
 					await stream.u62();
 				}
 

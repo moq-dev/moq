@@ -42,6 +42,8 @@ pub enum FramedFormat {
 	Vp8,
 	/// VP9 (one frame per buffer; not self-delimiting).
 	Vp9,
+	/// FLV (Flash Video / RTMP) container.
+	Flv,
 }
 
 impl FromStr for FramedFormat {
@@ -60,6 +62,7 @@ impl FromStr for FramedFormat {
 			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => Ok(FramedFormat::Ts),
 			"vp8" | "vp08" => Ok(FramedFormat::Vp8),
 			"vp9" | "vp09" => Ok(FramedFormat::Vp9),
+			"flv" => Ok(FramedFormat::Flv),
 			_ => Err(crate::Error::UnknownFormat(s.to_string())),
 		}
 	}
@@ -79,6 +82,7 @@ impl fmt::Display for FramedFormat {
 			FramedFormat::Ts => write!(f, "ts"),
 			FramedFormat::Vp8 => write!(f, "vp8"),
 			FramedFormat::Vp9 => write!(f, "vp9"),
+			FramedFormat::Flv => write!(f, "flv"),
 		}
 	}
 }
@@ -92,6 +96,7 @@ impl From<StreamFormat> for FramedFormat {
 			StreamFormat::Av01 => FramedFormat::Av01,
 			StreamFormat::Mkv => FramedFormat::Mkv,
 			StreamFormat::Ts => FramedFormat::Ts,
+			StreamFormat::Flv => FramedFormat::Flv,
 		}
 	}
 }
@@ -112,6 +117,8 @@ enum FramedKind {
 	Mkv(Box<crate::container::mkv::Import>),
 	// Boxed for the same reason as Fmp4.
 	Ts(Box<crate::container::ts::Import>),
+	// Boxed for the same reason as Fmp4.
+	Flv(Box<crate::container::flv::Import>),
 }
 
 /// An importer for formats with known frame boundaries.
@@ -196,6 +203,11 @@ impl Framed {
 				decoder.decode(buf)?;
 				FramedKind::Ts(decoder)
 			}
+			FramedFormat::Flv => {
+				let mut decoder = Box::new(crate::container::flv::Import::new(broadcast, catalog));
+				decoder.decode(buf)?;
+				FramedKind::Flv(decoder)
+			}
 		};
 
 		if buf.has_remaining() {
@@ -257,7 +269,7 @@ impl Framed {
 				let import = crate::codec::opus::Import::from_track(track, config)?;
 				FramedKind::Opus(crate::publish::Published::new(catalog, import))
 			}
-			FramedFormat::Fmp4 | FramedFormat::Mkv | FramedFormat::Ts => {
+			FramedFormat::Fmp4 | FramedFormat::Mkv | FramedFormat::Ts | FramedFormat::Flv => {
 				anyhow::bail!("{format} can publish multiple tracks")
 			}
 		};
@@ -280,6 +292,7 @@ impl Framed {
 			FramedKind::Opus(ref mut decoder) => decoder.finish(),
 			FramedKind::Mkv(ref mut decoder) => decoder.finish(),
 			FramedKind::Ts(ref mut decoder) => decoder.finish().map_err(Into::into),
+			FramedKind::Flv(ref mut decoder) => decoder.finish().map_err(Into::into),
 		}
 	}
 
@@ -296,6 +309,7 @@ impl Framed {
 			FramedKind::Opus(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Mkv(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Ts(ref mut decoder) => decoder.seek(sequence).map_err(Into::into),
+			FramedKind::Flv(ref mut decoder) => decoder.seek(sequence).map_err(Into::into),
 		}
 	}
 
@@ -312,6 +326,7 @@ impl Framed {
 			FramedKind::Opus(ref decoder) => Ok(decoder.track()),
 			FramedKind::Mkv(_) => Err(crate::Error::MultipleTracks("mkv")),
 			FramedKind::Ts(_) => Err(crate::Error::MultipleTracks("ts")),
+			FramedKind::Flv(_) => Err(crate::Error::MultipleTracks("flv")),
 		}
 	}
 
@@ -331,6 +346,10 @@ impl Framed {
 				decoder.decode(buf)?;
 			}
 			FramedKind::Ts(ref mut decoder) => {
+				let _ = pts;
+				decoder.decode(buf)?;
+			}
+			FramedKind::Flv(ref mut decoder) => {
 				let _ = pts;
 				decoder.decode(buf)?;
 			}
@@ -587,6 +606,8 @@ pub enum StreamFormat {
 	Mkv,
 	/// MPEG-TS (transport stream) container.
 	Ts,
+	/// FLV (Flash Video / RTMP) container.
+	Flv,
 }
 
 impl FromStr for StreamFormat {
@@ -600,6 +621,7 @@ impl FromStr for StreamFormat {
 			"av01" | "av1" | "av1c" | "av1C" => Ok(StreamFormat::Av01),
 			"mkv" | "webm" | "matroska" => Ok(StreamFormat::Mkv),
 			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => Ok(StreamFormat::Ts),
+			"flv" => Ok(StreamFormat::Flv),
 			_ => Err(crate::Error::UnknownFormat(s.to_string())),
 		}
 	}
@@ -614,6 +636,7 @@ impl fmt::Display for StreamFormat {
 			StreamFormat::Av01 => write!(f, "av01"),
 			StreamFormat::Mkv => write!(f, "mkv"),
 			StreamFormat::Ts => write!(f, "ts"),
+			StreamFormat::Flv => write!(f, "flv"),
 		}
 	}
 }
@@ -629,6 +652,8 @@ enum StreamKind {
 	Mkv(Box<crate::container::mkv::Import>),
 	// Boxed for the same reason as Fmp4.
 	Ts(Box<crate::container::ts::Import>),
+	// Boxed for the same reason as Fmp4.
+	Flv(Box<crate::container::flv::Import>),
 }
 
 /// An importer for formats that support stream decoding (unknown frame boundaries).
@@ -666,6 +691,7 @@ impl Stream {
 			}
 			StreamFormat::Mkv => StreamKind::Mkv(Box::new(crate::container::mkv::Import::new(broadcast, catalog))),
 			StreamFormat::Ts => StreamKind::Ts(Box::new(crate::container::ts::Import::new(broadcast, catalog))),
+			StreamFormat::Flv => StreamKind::Flv(Box::new(crate::container::flv::Import::new(broadcast, catalog))),
 		};
 
 		Ok(Self { decoder })
@@ -684,6 +710,7 @@ impl Stream {
 			StreamKind::Av01(ref mut decoder) => decoder.decoding(|d| d.initialize(buf))?,
 			StreamKind::Mkv(ref mut decoder) => decoder.decode(buf)?,
 			StreamKind::Ts(ref mut decoder) => decoder.decode(buf)?,
+			StreamKind::Flv(ref mut decoder) => decoder.decode(buf)?,
 		}
 
 		if buf.has_remaining() {
@@ -702,6 +729,7 @@ impl Stream {
 			StreamKind::Av01(ref mut decoder) => decoder.decoding(|d| d.decode_stream(buf, None)),
 			StreamKind::Mkv(ref mut decoder) => decoder.decode(buf),
 			StreamKind::Ts(ref mut decoder) => decoder.decode(buf).map_err(Into::into),
+			StreamKind::Flv(ref mut decoder) => decoder.decode(buf).map_err(Into::into),
 		}
 	}
 
@@ -714,6 +742,7 @@ impl Stream {
 			StreamKind::Av01(ref mut decoder) => decoder.finish(),
 			StreamKind::Mkv(ref mut decoder) => decoder.finish(),
 			StreamKind::Ts(ref mut decoder) => decoder.finish().map_err(Into::into),
+			StreamKind::Flv(ref mut decoder) => decoder.finish().map_err(Into::into),
 		}
 	}
 
@@ -726,6 +755,7 @@ impl Stream {
 			StreamKind::Av01(ref mut decoder) => decoder.seek(sequence),
 			StreamKind::Mkv(ref mut decoder) => decoder.seek(sequence),
 			StreamKind::Ts(ref mut decoder) => decoder.seek(sequence).map_err(Into::into),
+			StreamKind::Flv(ref mut decoder) => decoder.seek(sequence).map_err(Into::into),
 		}
 	}
 
@@ -738,6 +768,7 @@ impl Stream {
 			StreamKind::Av01(ref decoder) => decoder.is_initialized(),
 			StreamKind::Mkv(ref decoder) => decoder.is_initialized(),
 			StreamKind::Ts(ref decoder) => decoder.is_initialized(),
+			StreamKind::Flv(ref decoder) => decoder.is_initialized(),
 		}
 	}
 }

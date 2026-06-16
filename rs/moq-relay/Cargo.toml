@@ -5,11 +5,9 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.12.9"
+version = "0.12.10"
 edition = "2024"
-# Higher than the workspace MSRV: sysinfo 0.39 uses std's `cfg_select!`, stabilized in Rust 1.95.
-# Fine here because moq-relay is a binary, not a published library.
-rust-version = "1.95"
+rust-version.workspace = true
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
@@ -52,7 +50,6 @@ rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_with = { version = "3", features = ["json", "base64"] }
-sysinfo = { version = "0.39", default-features = false, features = ["system", "network"] }
 thiserror = "2"
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { version = "0.26", default-features = false }

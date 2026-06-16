@@ -132,17 +132,14 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		.expect("failed to create track");
 
 	// Three frames where the middle PTS goes backwards (B-frame decode order) so the
-	// zigzag timestamp delta carries a negative value. Durations exercise the
-	// duration delta too: a known span, then unknown (None -> resolved 0, a negative
-	// delta), then known again (a positive delta back up from 0).
-	let frames = [(10_000u64, Some(33_000u64)), (30_000, None), (20_000, Some(20_000))];
+	// zigzag timestamp delta carries a negative value.
+	let frames = [10_000u64, 30_000, 20_000];
 	let mut group = track.append_group().expect("failed to append group");
-	for &(us, dur_us) in &frames {
+	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
 		let frame = moq_native::moq_net::Frame {
 			size: payload.len() as u64,
 			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
-			duration: dur_us.map(|d| Timestamp::new(d, Timescale::MICRO).unwrap()),
 		};
 		let mut writer = group.create_frame(frame).expect("failed to create frame");
 		writer
@@ -204,7 +201,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
 
-	for &(expected_us, expected_dur_us) in &frames {
+	for &expected_us in &frames {
 		let mut frame_sub = tokio::time::timeout(TIMEOUT, group_sub.next_frame())
 			.await
 			.expect("next_frame timed out")
@@ -214,15 +211,6 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		let ts = frame_sub.timestamp.expect("Lite05 must carry per-frame timestamps");
 		assert_eq!(ts.scale(), Timescale::MICRO);
 		assert_eq!(ts.value(), expected_us);
-
-		match expected_dur_us {
-			Some(d) => {
-				let dur = frame_sub.duration.expect("expected a per-frame duration");
-				assert_eq!(dur.scale(), Timescale::MICRO);
-				assert_eq!(dur.value(), d);
-			}
-			None => assert!(frame_sub.duration.is_none(), "unknown duration must decode to None"),
-		}
 
 		// Drain the payload so the stream advances to the next frame.
 		let _ = frame_sub.read_all().await;
@@ -261,16 +249,14 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		.expect("failed to create track");
 
 	// A group with a few timestamped frames (middle PTS goes backwards, so the fetch
-	// stream carries a negative zigzag delta too). Durations also exercise the
-	// duration delta on the fetch path, including an unknown (None) span.
-	let frames = [(10_000u64, Some(33_000u64)), (30_000, None), (20_000, Some(20_000))];
+	// stream carries a negative zigzag delta too).
+	let frames = [10_000u64, 30_000, 20_000];
 	let mut group = track.append_group().expect("failed to append group"); // seq 0
-	for &(us, dur_us) in &frames {
+	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
 		let frame = moq_native::moq_net::Frame {
 			size: payload.len() as u64,
 			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
-			duration: dur_us.map(|d| Timestamp::new(d, Timescale::MICRO).unwrap()),
 		};
 		let mut writer = group.create_frame(frame).expect("failed to create frame");
 		writer
@@ -328,7 +314,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	.expect("fetch failed");
 	assert_eq!(group_sub.sequence, 0);
 
-	for &(expected_us, expected_dur_us) in &frames {
+	for &expected_us in &frames {
 		let mut frame_sub = tokio::time::timeout(TIMEOUT, group_sub.next_frame())
 			.await
 			.expect("next_frame timed out")
@@ -340,15 +326,6 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 			.expect("Lite05 fetch must carry per-frame timestamps");
 		assert_eq!(ts.scale(), Timescale::MICRO);
 		assert_eq!(ts.value(), expected_us);
-
-		match expected_dur_us {
-			Some(d) => {
-				let dur = frame_sub.duration.expect("expected a per-frame duration");
-				assert_eq!(dur.scale(), Timescale::MICRO);
-				assert_eq!(dur.value(), d);
-			}
-			None => assert!(frame_sub.duration.is_none(), "unknown duration must decode to None"),
-		}
 
 		let payload = frame_sub.read_all().await.expect("failed to read frame");
 		assert_eq!(payload, bytes::Bytes::from(format!("frame@{expected_us}")));
@@ -388,7 +365,6 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 		moq_net::Frame {
 			size: payload.len() as u64,
 			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
-			duration: None,
 		}
 	}
 
