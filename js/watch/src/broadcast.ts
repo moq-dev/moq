@@ -5,7 +5,6 @@ import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 
-import { JsonConsumer, type SubscribeJsonOptions } from "./json";
 import { toHang } from "./msf";
 
 /** Consumes a custom track once subscribed, scoped to the subscription's lifetime. */
@@ -197,8 +196,26 @@ export class Broadcast {
 	/**
 	 * Subscribe to a custom track within this broadcast, following the active broadcast across
 	 * reconnects. `consume` runs with a freshly-subscribed track and a subscription-scoped effect
-	 * each time a broadcast becomes active (re-running on reconnect). This is the low-level escape
-	 * hatch for arbitrary payloads; see {@link subscribeJson} for a JSON convenience.
+	 * each time a broadcast becomes active (re-running on reconnect).
+	 *
+	 * For a JSON track, wrap the track with a `@moq/json` `Consumer` and read it in a spawned loop
+	 * (e.g. into a Signal). An application advertises the track in its own catalog section, which it
+	 * reads back from {@link catalog} (unknown sections pass through the loose schema):
+	 *
+	 * ```ts
+	 * import * as Json from "@moq/json";
+	 * const scte35 = new Signal<{ splices: number[] } | undefined>(undefined);
+	 * broadcast.subscribeTrack("scte35.json", Catalog.PRIORITY.catalog, (track, effect) => {
+	 * 	const consumer = new Json.Consumer<{ splices: number[] }>(track);
+	 * 	effect.spawn(async () => {
+	 * 		for (;;) {
+	 * 			const next = await Promise.race([effect.cancel, consumer.next()]);
+	 * 			if (next === undefined) break;
+	 * 			scte35.set(next);
+	 * 		}
+	 * 	});
+	 * });
+	 * ```
 	 *
 	 * Returns a function to stop subscribing; also stopped when this broadcast closes.
 	 */
@@ -215,25 +232,6 @@ export class Broadcast {
 		});
 		this.signals.cleanup(() => signals.close());
 		return () => signals.close();
-	}
-
-	/**
-	 * Subscribe to a custom JSON track within this broadcast (e.g. a `meta.json` track that an
-	 * application advertises in its own catalog section).
-	 *
-	 * Follows the active broadcast across reconnects and exposes the latest reconstructed value as a
-	 * Signal on the returned consumer. The consumer is closed when this broadcast closes; close it
-	 * sooner via its `close()` to stop subscribing.
-	 *
-	 * ```ts
-	 * const meta = broadcast.subscribeJson<{ title: string }>("meta.json");
-	 * meta.value.subscribe((v) => console.log("meta", v));
-	 * ```
-	 */
-	subscribeJson<T>(name: string, options?: SubscribeJsonOptions<T>): JsonConsumer<T> {
-		const consumer = new JsonConsumer<T>(this.active, name, options);
-		this.signals.cleanup(() => consumer.close());
-		return consumer;
 	}
 
 	close() {

@@ -1,10 +1,9 @@
 import * as Catalog from "@moq/hang/catalog";
-import type * as Json from "@moq/json";
+import { Source } from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
-import { CatalogProducer } from "./catalog";
-import { JsonProducer } from "./json";
+import type { CatalogProducer } from "./catalog";
 import * as Video from "./video";
 
 export type BroadcastProps = {
@@ -30,8 +29,8 @@ export class Broadcast {
 
 	// The catalog, editable at any time regardless of whether anyone is subscribed. The base
 	// `video`/`audio` sections are kept in sync from the encoders; an application adds its own root
-	// sections (e.g. `scte35`) by locking it too.
-	readonly catalog = new CatalogProducer();
+	// sections (e.g. `scte35`) by mutating it too.
+	readonly catalog: CatalogProducer = new Source<Catalog.Root>({ initial: {} });
 
 	// Handlers for custom tracks registered via `publishTrack`, keyed by track name. Persists across
 	// reconnects so a new `Moq.Broadcast` still serves them.
@@ -138,12 +137,24 @@ export class Broadcast {
 	 *
 	 * When a subscriber requests a track with this name, `serve` runs with the track and an effect
 	 * scoped to that subscription (cleaned up when the subscriber goes away). The handler persists
-	 * across reconnects. This is the low-level escape hatch for arbitrary payloads; see
-	 * {@link publishJson} for a fan-out JSON-track helper.
+	 * across reconnects. This is the generic hook for arbitrary payloads; encode them yourself.
 	 *
 	 * Returns a function that unregisters the handler. Note this does not close already-served
 	 * subscriptions, nor touch the catalog. Throws if `name` collides with a built-in track
 	 * (catalog/audio/video), since those are served first and the handler would never run.
+	 *
+	 * For a JSON track, serve each track from a `@moq/json` `Source` (the same fan-out producer the
+	 * catalog uses, seeding late joiners with the latest value). Advertise the track by writing your
+	 * own section to {@link catalog}, e.g. to support a custom `scte35` section with no hang-specific
+	 * support:
+	 *
+	 * ```ts
+	 * import { Source } from "@moq/json";
+	 * const scte35 = new Source({ initial: { splices: [] } });
+	 * broadcast.publishTrack("scte35.json", (track, effect) => scte35.serve(track, effect));
+	 * broadcast.catalog.mutate((c) => { c.scte35 = { track: "scte35.json" }; });
+	 * scte35.update({ splices: [42] });
+	 * ```
 	 */
 	publishTrack(name: string, serve: ServeTrack): () => void {
 		if (Broadcast.#RESERVED_TRACKS.has(name)) {
@@ -153,29 +164,6 @@ export class Broadcast {
 		return () => {
 			if (this.#tracks.get(name) === serve) this.#tracks.delete(name);
 		};
-	}
-
-	/**
-	 * Publish a custom JSON track within this broadcast.
-	 *
-	 * Returns a {@link JsonProducer}: call `update`/`mutate` to set the value, which is served to
-	 * every subscriber (seeding late joiners with the latest value). The track lives for the
-	 * lifetime of the broadcast.
-	 *
-	 * This does not touch the catalog. To advertise the track, write your own section to
-	 * {@link catalog} (the root is a loose object, so any key passes through). For example, to support
-	 * a custom `scte35` section with no hang-specific support:
-	 *
-	 * ```ts
-	 * const scte35 = broadcast.publishJson("scte35.json");
-	 * broadcast.catalog.mutate((c) => { c.scte35 = { track: "scte35.json" }; });
-	 * scte35.update({ splices: [] });
-	 * ```
-	 */
-	publishJson<T>(name: string, options?: Json.Config<T>): JsonProducer<T> {
-		const producer = new JsonProducer<T>(options);
-		this.publishTrack(name, (track, effect) => producer.serve(track, effect));
-		return producer;
 	}
 
 	close() {

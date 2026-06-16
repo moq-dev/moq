@@ -144,23 +144,33 @@ el.catalog = myCatalog;
 A broadcast can carry arbitrary application tracks (for example a `meta.json`
 metadata track) alongside the media. An application advertises them in its own
 catalog section (the [catalog root](/concept/layer/hang#extensions) is a loose
-object, so unknown sections pass through to `broadcast.catalog`). Use
-`subscribeJson` to read a JSON track: it follows the active broadcast across
-reconnects and exposes the latest value as a signal. Call `close()` when done
-(it's also closed when the broadcast closes).
+object, so unknown sections pass through to `broadcast.catalog`).
+`subscribeTrack(name, priority, consume)` follows the active broadcast across
+reconnects and runs `consume(track, effect)` each time it becomes active. Decode
+the payload yourself with the re-exported [`@moq/json`](/lib/js/@moq/hang):
 
 ```typescript
-// The app's own catalog section, read back from the loose catalog.
-const scte35 = broadcast.catalog.peek()?.scte35;
+import { Json } from "@moq/watch";
+import { Signals } from "@moq/watch";
 
-const meta = broadcast.subscribeJson<{ title: string }>("meta.json");
-meta.value.subscribe((value) => console.log("meta", value));
+// The app's own catalog section, read back from the loose catalog.
+const section = broadcast.catalog.peek()?.scte35;
+
+const scte35 = new Signals.Signal<{ splices: number[] } | undefined>(undefined);
+broadcast.subscribeTrack("scte35.json", 100, (track, effect) => {
+    const consumer = new Json.Consumer<{ splices: number[] }>(track);
+    effect.spawn(async () => {
+        for (;;) {
+            const next = await Promise.race([effect.cancel, consumer.next()]);
+            if (next === undefined) break;
+            scte35.set(next);
+        }
+    });
+});
 ```
 
-For non-JSON payloads, `subscribeTrack(name, priority, consume)` is the
-low-level equivalent: `consume` runs with the subscribed track each time a
-broadcast becomes active. The component exposes everything via its `broadcast`
-property (`el.broadcast.subscribeJson(...)`).
+The component exposes everything via its `broadcast` property
+(`el.broadcast.subscribeTrack(...)`).
 
 ## UI Overlay
 

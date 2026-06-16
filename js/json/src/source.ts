@@ -1,26 +1,27 @@
-import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
 import type { Effect } from "@moq/signals";
+
+import { type Config, Producer } from "./producer.ts";
 
 /**
  * A stable JSON value that fans out to on-demand subscription tracks.
  *
- * Unlike a raw {@link Json.Producer}, this exists independently of any subscription: set the value
+ * Unlike a per-track {@link Producer}, this exists independently of any subscription: set the value
  * at any time with {@link update} or {@link mutate}, and each subscriber (including a relay that
  * reconnects) is seeded with the current value before receiving updates. Multiple independent owners
  * can share one instance and each edit only their own keys via {@link mutate}, so their sections
  * compose instead of clobbering one another.
  *
- * This backs both the broadcast catalog and arbitrary custom JSON tracks (see
- * `Broadcast.publishJson`).
+ * This backs the hang catalog, and an application can use it for its own custom tracks (serve it
+ * from a publish `Broadcast.publishTrack` handler).
  */
-export class JsonProducer<T> {
+export class Source<T> {
 	#value: T | undefined;
-	#outputs = new Set<Json.Producer<T>>();
-	#config: Json.Config<T>;
+	#outputs = new Set<Producer<T>>();
+	#config: Config<T>;
 
-	/** Create a producer, optionally seeding an initial value and per-track config. */
-	constructor(config: Json.Config<T> = {}) {
+	/** Create a source, optionally seeding an initial value and per-track {@link Config}. */
+	constructor(config: Config<T> = {}) {
 		this.#config = config;
 		this.#value = config.initial;
 	}
@@ -30,7 +31,7 @@ export class JsonProducer<T> {
 		return this.#value;
 	}
 
-	/** Replace the value; the result is published to all current subscribers. No-op if unchanged. */
+	/** Replace the value; the result is published to all current subscribers. */
 	update(value: T): void {
 		this.#value = value;
 		for (const output of this.#outputs) output.update(value);
@@ -56,7 +57,7 @@ export class JsonProducer<T> {
 
 	/** Serve a subscription request: seed it with the current value, then forward updates. */
 	serve(track: Moq.Track, effect: Effect): void {
-		const output = new Json.Producer<T>(track, this.#config);
+		const output = new Producer<T>(track, this.#config);
 		if (this.#value !== undefined) output.update(this.#value);
 
 		this.#outputs.add(output);

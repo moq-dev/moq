@@ -130,25 +130,30 @@ broadcast.name.set("bob.hang");
 ### Custom tracks and catalog sections
 
 Beyond audio and video, you can publish arbitrary application tracks within the
-same broadcast (no separate broadcast needed). `publishJson` serves a JSON track,
-seeding late joiners with the latest value. It does not touch the catalog; you
-advertise the track by writing your own section to `broadcast.catalog` (the
-[catalog root](/concept/layer/hang#extensions) is a loose object, so any key
-passes through). This lets an app support something like an `scte35` section with
-no hang-specific support:
+same broadcast (no separate broadcast needed). `publishTrack(name, serve)` runs
+`serve(track, effect)` for each subscriber; it rejects the built-in track names
+(catalog/audio/video). Encode the payload yourself with the re-exported
+[`@moq/json`](/lib/js/@moq/hang): a `Json.Source` is the same fan-out producer the
+catalog uses, seeding late joiners with the latest value.
+
+`publishTrack` does not touch the catalog; advertise the track by writing your own
+section to `broadcast.catalog` (the [catalog root](/concept/layer/hang#extensions)
+is a loose object, so any key passes through). This lets an app support something
+like an `scte35` section with no hang-specific support:
 
 ```typescript
-const scte35 = broadcast.publishJson<{ splices: number[] }>("scte35.json");
+import { Json } from "@moq/publish";
+
+const scte35 = new Json.Source<{ splices: number[] }>({ initial: { splices: [] } });
+broadcast.publishTrack("scte35.json", (track, effect) => scte35.serve(track, effect));
 broadcast.catalog.mutate((c) => {
     c.scte35 = { track: "scte35.json" };
 });
-scte35.update({ splices: [] });
+scte35.update({ splices: [42] });
 ```
 
-For non-JSON payloads, `publishTrack(name, serve)` is the low-level escape hatch:
-`serve` runs whenever a subscriber requests the named track. Both reject the
-built-in track names (catalog/audio/video). The component exposes everything via
-its `broadcast` property (`el.broadcast.publishJson(...)`).
+The component exposes everything via its `broadcast` property
+(`el.broadcast.publishTrack(...)`).
 
 ## Related Packages
 
