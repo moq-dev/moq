@@ -107,7 +107,7 @@ enum FramedKind {
 	Vp8(crate::codec::vp8::Import),
 	Vp9(crate::codec::vp9::Import),
 	Aac(crate::codec::aac::Import),
-	Opus(crate::codec::opus::Import),
+	Opus(crate::publish::Published<crate::codec::opus::Import>),
 	// Boxed for the same reason as Fmp4.
 	Mkv(Box<crate::container::mkv::Import>),
 	// Boxed for the same reason as Fmp4.
@@ -126,7 +126,7 @@ impl Framed {
 	///
 	/// The buffer will be fully consumed, or an error will be returned.
 	pub fn new<T: Buf + AsRef<[u8]>>(
-		broadcast: moq_net::BroadcastProducer,
+		mut broadcast: moq_net::BroadcastProducer,
 		catalog: crate::catalog::Producer,
 		format: FramedFormat,
 		buf: &mut T,
@@ -174,7 +174,9 @@ impl Framed {
 			}
 			FramedFormat::Opus => {
 				let config = crate::codec::opus::Config::parse(buf)?;
-				FramedKind::Opus(crate::codec::opus::Import::new(broadcast, catalog, config)?)
+				let track = crate::publish::unique_track(&mut broadcast, ".opus")?;
+				let import = crate::codec::opus::Import::from_track(track, config)?;
+				FramedKind::Opus(crate::publish::Published::new(catalog, import))
 			}
 			FramedFormat::Mkv => {
 				let mut decoder = Box::new(crate::container::mkv::Import::new(broadcast, catalog));
@@ -245,7 +247,8 @@ impl Framed {
 			}
 			FramedFormat::Opus => {
 				let config = crate::codec::opus::Config::parse(buf)?;
-				FramedKind::Opus(crate::codec::opus::Import::new_with_track(track, catalog, config)?)
+				let import = crate::codec::opus::Import::from_track(track, config)?;
+				FramedKind::Opus(crate::publish::Published::new(catalog, import))
 			}
 			FramedFormat::Fmp4 | FramedFormat::Mkv | FramedFormat::Ts => {
 				anyhow::bail!("{format} can publish multiple tracks")
@@ -317,7 +320,7 @@ impl Framed {
 			FramedKind::Vp8(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			FramedKind::Vp9(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			FramedKind::Aac(ref mut decoder) => decoder.decode(buf, pts)?,
-			FramedKind::Opus(ref mut decoder) => decoder.decode(buf, pts)?,
+			FramedKind::Opus(ref mut decoder) => decoder.decode_buf(buf, pts)?,
 			FramedKind::Mkv(ref mut decoder) => {
 				let _ = pts;
 				decoder.decode(buf)?;
@@ -336,11 +339,11 @@ impl Framed {
 	}
 }
 
-// Lift an already-built codec importer into a `Framed` so callers that build
-// their config out-of-band (e.g. moq-gst, which constructs `opus::Config` from
-// gstreamer caps instead of an OpusHead buffer) can keep using `.into()`.
-impl From<crate::codec::opus::Import> for Framed {
-	fn from(opus: crate::codec::opus::Import) -> Self {
+// Lift an already-built, catalog-attached opus importer into a `Framed` so callers
+// that build their config out-of-band (e.g. moq-gst, which constructs `opus::Config`
+// from gstreamer caps instead of an OpusHead buffer) can keep using `.into()`.
+impl From<crate::publish::Published<crate::codec::opus::Import>> for Framed {
+	fn from(opus: crate::publish::Published<crate::codec::opus::Import>) -> Self {
 		Self {
 			decoder: FramedKind::Opus(opus),
 		}
@@ -432,6 +435,76 @@ mod tests {
 		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
 
 		framed.finish().unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn unique_track_opus_delivers_frames_via_broadcast() {
+		let (broadcast, catalog) = new_broadcast();
+		let init = opus_head();
+		let mut init = init.as_slice();
+
+		// The broadcast path mints a unique track and attaches its catalog rendition.
+		let mut framed = Framed::new(broadcast, catalog.clone(), FramedFormat::Opus, &mut init).unwrap();
+
+		assert_eq!(framed.track().unwrap().name(), "0.opus");
+		assert!(catalog.snapshot().audio.renditions.contains_key("0.opus"));
+
+		// Frames published through the minted producer are delivered.
+		let subscriber = framed.track().unwrap().subscribe(None);
+		let mut media = crate::container::Consumer::new(subscriber, crate::catalog::hang::Container::Legacy);
+
+		let payload = b"opus payload".to_vec();
+		let mut frame = payload.as_slice();
+		framed
+			.decode_frame(&mut frame, Some(Timestamp::from_micros(2_000).unwrap()))
+			.unwrap();
+
+		let frame = tokio::time::timeout(Duration::from_secs(1), media.read())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.payload, payload);
+		assert_eq!(frame.timestamp, Timestamp::from_micros(2_000).unwrap());
+
+		framed.finish().unwrap();
+
+		// Dropping the importer retires its rendition from the shared catalog.
+		drop(framed);
+		assert!(!catalog.snapshot().audio.renditions.contains_key("0.opus"));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn opus_import_serves_track_request() {
+		// The on-demand path: build straight from a TrackRequest, no broadcast/catalog.
+		let request = moq_net::TrackRequest::new("audio");
+		let config = crate::codec::opus::Config {
+			sample_rate: 48_000,
+			channel_count: 2,
+		};
+		let mut import = crate::codec::opus::Import::new(request, config).unwrap();
+
+		assert_eq!(import.track().name(), "audio");
+		assert!(import.catalog().audio.renditions.contains_key("audio"));
+
+		// Accepting the request yields a working producer that delivers frames.
+		let subscriber = import.track().subscribe(None);
+		let mut media = crate::container::Consumer::new(subscriber, crate::catalog::hang::Container::Legacy);
+
+		let payload = b"opus payload".to_vec();
+		let mut buf = payload.as_slice();
+		import
+			.decode_buf(&mut buf, Some(Timestamp::from_micros(1_000).unwrap()))
+			.unwrap();
+
+		let frame = tokio::time::timeout(Duration::from_secs(1), media.read())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.payload, payload);
+
+		import.finish().unwrap();
 	}
 
 	#[tokio::test(start_paused = true)]

@@ -6,12 +6,12 @@
 use crate::{Result, codec};
 
 pub struct Bridge {
-	import: moq_mux::codec::opus::Import,
+	import: moq_mux::publish::Published<moq_mux::codec::opus::Import>,
 }
 
 impl Bridge {
 	pub fn new(
-		broadcast: moq_net::BroadcastProducer,
+		mut broadcast: moq_net::BroadcastProducer,
 		catalog: moq_mux::catalog::Producer,
 		sample_rate: u32,
 		channel_count: u32,
@@ -20,7 +20,9 @@ impl Bridge {
 			sample_rate,
 			channel_count,
 		};
-		let import = moq_mux::codec::opus::Import::new(broadcast, catalog, config)?;
+		let track = moq_mux::publish::unique_track(&mut broadcast, ".opus")?;
+		let import = moq_mux::codec::opus::Import::from_track(track, config)?;
+		let import = moq_mux::publish::Published::new(catalog, import);
 		Ok(Self { import })
 	}
 }
@@ -30,7 +32,7 @@ impl codec::Bridge for Bridge {
 		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
 		let mut payload = frame.payload;
-		self.import.decode(&mut payload, Some(pts))?;
+		self.import.decode_buf(&mut payload, Some(pts))?;
 		Ok(())
 	}
 }

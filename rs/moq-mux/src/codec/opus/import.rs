@@ -1,70 +1,61 @@
 use bytes::{Buf, BytesMut};
 
 use super::Config;
+use crate::container::Frame;
+use crate::publish::Renditions;
 
 /// Opus importer.
 ///
-/// Initialized from an OpusHead packet. Each input buffer passed to [`decode`](Self::decode)
-/// is published as one hang frame in its own group, so the relay can forward each frame
-/// without waiting for a group boundary. Opus' packet loss concealment handles drops.
-/// Ogg framing is not supported, feed raw Opus packets.
+/// Publishes raw Opus frames (no Ogg framing) to a single moq track. Build it
+/// from a [`moq_net::TrackRequest`] (the on-demand path, [`new`](Self::new)) or
+/// an existing [`moq_net::TrackProducer`] ([`from_track`](Self::from_track)).
+///
+/// Each input frame is published in its own group so the relay can forward it
+/// immediately without waiting for a group boundary; Opus' packet loss
+/// concealment handles drops. The catalog rendition this importer publishes is
+/// available via [`catalog`](Self::catalog); attach it to a broadcast catalog
+/// with [`crate::publish::Published`].
 pub struct Import {
-	catalog: crate::catalog::Producer,
 	track: crate::container::Producer<crate::catalog::hang::Container>,
+	catalog: hang::Catalog,
 	zero: Option<tokio::time::Instant>,
 }
 
 impl Import {
-	pub fn new(
-		broadcast: moq_net::BroadcastProducer,
-		catalog: crate::catalog::Producer,
-		config: Config,
-	) -> crate::Result<Self> {
-		Self::new_with_source(
-			crate::track_provider::TrackProvider::unique(broadcast, ".opus"),
-			catalog,
-			config,
-		)
+	/// Serve a track request, accepting it at the microsecond timescale.
+	pub fn new(request: moq_net::TrackRequest, config: Config) -> crate::Result<Self> {
+		let info = moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE);
+		Self::from_track(request.accept(info), config)
 	}
 
-	pub fn new_with_track(
-		track: moq_net::TrackProducer,
-		catalog: crate::catalog::Producer,
-		config: Config,
-	) -> crate::Result<Self> {
-		Self::new_with_source(crate::track_provider::TrackProvider::fixed(track), catalog, config)
-	}
-
-	fn new_with_source(
-		mut tracks: crate::track_provider::TrackProvider,
-		mut catalog: crate::catalog::Producer,
-		config: Config,
-	) -> crate::Result<Self> {
-		let track = tracks.create()?;
-
-		let mut audio_config = hang::catalog::AudioConfig::new(
+	/// Publish on an existing track producer.
+	pub fn from_track(track: moq_net::TrackProducer, config: Config) -> crate::Result<Self> {
+		let mut audio = hang::catalog::AudioConfig::new(
 			hang::catalog::AudioCodec::Opus,
 			config.sample_rate,
 			config.channel_count,
 		);
-		audio_config.container = hang::catalog::Container::Legacy;
+		audio.container = hang::catalog::Container::Legacy;
 
-		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
-		catalog
-			.lock()
-			.audio
-			.renditions
-			.insert(track.name().to_string(), audio_config);
+		tracing::debug!(name = ?track.name(), config = ?audio, "starting track");
+
+		let mut catalog = hang::Catalog::default();
+		catalog.audio.renditions.insert(track.name().to_string(), audio);
 
 		Ok(Self {
-			catalog,
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
+			catalog,
 			zero: None,
 		})
 	}
 
-	/// Returns a reference to the underlying track producer, e.g. for
-	/// monitoring subscriber state via `used()`/`unused()`.
+	/// The standalone catalog this importer publishes (one Opus audio rendition).
+	pub fn catalog(&self) -> &hang::Catalog {
+		&self.catalog
+	}
+
+	/// The underlying track producer, e.g. for monitoring subscriber state via
+	/// `used()` / `unused()`.
 	pub fn track(&self) -> &moq_net::TrackProducer {
 		self.track.track()
 	}
@@ -81,10 +72,22 @@ impl Import {
 		Ok(())
 	}
 
-	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		let pts = self.pts(pts)?;
+	/// Publish frames, each in its own group.
+	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> crate::Result<()> {
+		for frame in frames {
+			self.track.write(frame)?;
+			self.track.finish_group()?;
+		}
+		Ok(())
+	}
 
-		// Collect the input into a contiguous Bytes payload.
+	/// Publish one Opus packet from `buf`, stamping `pts` or a wall clock when absent.
+	///
+	/// Convenience for callers that hand over raw packet bytes plus an optional
+	/// timestamp; it wraps the packet in a [`Frame`] and forwards to [`decode`](Self::decode).
+	pub fn decode_buf<T: Buf>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
+		let timestamp = self.pts(pts)?;
+
 		let mut payload = BytesMut::with_capacity(buf.remaining());
 		while buf.has_remaining() {
 			let chunk = buf.chunk();
@@ -93,19 +96,12 @@ impl Import {
 			buf.advance(len);
 		}
 
-		// Each frame is its own group so the relay can forward it immediately.
-		// Opus' packet loss concealment handles drops.
-		let frame = crate::container::Frame {
-			timestamp: pts,
+		self.decode(std::iter::once(Frame {
+			timestamp,
 			payload: payload.freeze(),
 			keyframe: true,
 			duration: None,
-		};
-
-		self.track.write(frame)?;
-		self.track.finish_group()?;
-
-		Ok(())
+		}))
 	}
 
 	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
@@ -118,9 +114,8 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
-	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.name(), "ending track");
-		self.catalog.lock().audio.renditions.remove(self.track.name());
+impl Renditions for Import {
+	fn renditions(&self) -> &hang::Catalog {
+		&self.catalog
 	}
 }
