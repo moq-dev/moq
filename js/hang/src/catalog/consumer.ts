@@ -18,3 +18,13 @@ export class Consumer<T = Root> extends Json.Consumer<T> {
 		super(track, { schema: (schema ?? RootSchema) as z.ZodMiniType<T> });
 	}
 }
+
+/**
+ * Read the current catalog from `track` once.
+ *
+ * @deprecated Use {@link Consumer} instead: `new Catalog.Consumer(track).next()`. A one-shot read
+ * returns only the current catalog and misses later updates (and deltas, once enabled).
+ */
+export function fetch(track: Moq.Track): Promise<Root | undefined> {
+	return new Consumer(track).next();
+}
