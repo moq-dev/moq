@@ -342,20 +342,29 @@ impl Import {
 			return Ok(());
 		}
 
-		if self.config.is_none() {
+		let pts = pts.ok_or(Error::MissingTimestamp)?;
+		let keyframe = self.current.contains_keyframe;
+
+		// A keyframe we couldn't configure (no sequence header) is undecodable.
+		if keyframe && self.config.is_none() {
 			return Err(Error::MissingSequenceHeader.into());
 		}
-		let pts = pts.ok_or(Error::MissingTimestamp)?;
 
+		// Take the payload and clear the per-frame state up front, so a
+		// MissingKeyframe from a pre-keyframe delta leaves a clean slate.
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
+		self.current.contains_keyframe = false;
+		self.current.contains_frame = false;
 
 		let frame = crate::container::Frame {
 			timestamp: pts,
 			payload,
-			keyframe: self.current.contains_keyframe,
+			keyframe,
 			duration: None,
 		};
 
+		// A pre-keyframe delta has no group to anchor it: the producer returns
+		// MissingKeyframe, which a caller joining mid-stream skips.
 		self.track.write(frame)?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
@@ -363,9 +372,6 @@ impl Import {
 		{
 			c.jitter = Some(jitter);
 		}
-
-		self.current.contains_keyframe = false;
-		self.current.contains_frame = false;
 
 		Ok(())
 	}

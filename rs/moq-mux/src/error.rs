@@ -87,6 +87,11 @@ pub enum Error {
 	#[error("{0} can contain multiple tracks")]
 	MultipleTracks(&'static str),
 
+	/// A non-keyframe frame was received before any keyframe opened a group.
+	/// A track joining mid-stream should skip frames until the first keyframe.
+	#[error("{0}")]
+	MissingKeyframe(#[from] crate::container::MissingKeyframe),
+
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]

@@ -37,12 +37,6 @@ pub struct Producer<C: Container> {
 	/// Sequence to use for the next group opened by [`Self::write`].
 	/// Set by [`Self::seek`] and consumed on the next group creation.
 	pending_sequence: Option<u64>,
-
-	/// When set, a non-keyframe arriving with no open group is dropped instead of
-	/// erroring. Lets a track join mid-stream (the leading deltas before the first
-	/// keyframe have no group to anchor) without a protocol violation. Off by
-	/// default so a producer that simply never marks keyframes still fails loudly.
-	lenient_start: bool,
 }
 
 impl<C: Container> Producer<C> {
@@ -55,16 +49,7 @@ impl<C: Container> Producer<C> {
 			buffer: Vec::new(),
 			latency: std::time::Duration::ZERO,
 			pending_sequence: None,
-			lenient_start: false,
 		}
-	}
-
-	/// Tolerate joining a stream mid-flight: drop non-keyframes that arrive before
-	/// the first keyframe (which has no group to anchor) instead of erroring. Use
-	/// for live ingest, where the input may start mid-GOP.
-	pub fn with_lenient_start(mut self) -> Self {
-		self.lenient_start = true;
-		self
 	}
 
 	/// The underlying moq-lite track producer. Read-only; mutating it directly
@@ -88,8 +73,8 @@ impl<C: Container> Producer<C> {
 	/// Write a frame to the track.
 	///
 	/// A keyframe closes any open group and starts a new one. A non-keyframe extends
-	/// the current group; if no group is open it's a protocol violation, unless
-	/// [`with_lenient_start`](Self::with_lenient_start) was set (then it's dropped).
+	/// the current group; if no group is open it returns [`MissingKeyframe`](super::MissingKeyframe),
+	/// so a caller joining mid-stream can skip frames until the first keyframe.
 	pub fn write(&mut self, frame: Frame) -> Result<(), C::Error> {
 		// Close the current group on an explicit keyframe, passing its timestamp so
 		// the previous group's last frame can borrow it as a duration boundary.
@@ -100,12 +85,9 @@ impl<C: Container> Producer<C> {
 		// Start a new group if needed; the first frame of a group must be a keyframe.
 		if self.group.is_none() {
 			if !frame.keyframe {
-				// Mid-stream join: no group yet and this delta can't anchor one. Drop it
-				// (wait for the first keyframe) when lenient; otherwise it's a violation.
-				if self.lenient_start {
-					return Ok(());
-				}
-				return Err(moq_net::Error::ProtocolViolation.into());
+				// No group yet and this delta can't anchor one. The caller (e.g. a
+				// mid-stream join) decides whether to skip until the first keyframe.
+				return Err(super::MissingKeyframe.into());
 			}
 			self.group = Some(match self.pending_sequence.take() {
 				Some(sequence) => self.inner.create_group(moq_net::Group { sequence })?,
@@ -286,7 +268,7 @@ mod tests {
 		assert_eq!(collect_groups(consumer).await, vec![2, 1]);
 	}
 
-	/// Writing a non-keyframe with no open group is a protocol violation.
+	/// Writing a non-keyframe with no open group returns MissingKeyframe.
 	#[test]
 	fn first_frame_must_be_keyframe() {
 		let track = moq_net::TrackProducer::new(
@@ -296,7 +278,7 @@ mod tests {
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		let err = producer.write(frame(0, false)).unwrap_err();
-		assert!(matches!(err, crate::Error::Moq(moq_net::Error::ProtocolViolation)));
+		assert!(matches!(err, crate::Error::MissingKeyframe(_)));
 	}
 
 	/// Drain all groups from a finished track, returning their sequence numbers.

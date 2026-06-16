@@ -76,7 +76,7 @@ impl Import {
 		Self {
 			shape: Shape::Pending { hint: None },
 			split: Split::new(),
-			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start(),
+			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			catalog: hang::Catalog::default(),
 			config: None,
 			last_sps: None,
@@ -543,8 +543,10 @@ mod tests {
 
 	/// A non-keyframe before any config is a mid-stream-join leftover: it must
 	/// not abort the import (the producer's lenient start drops it downstream).
+	/// A non-keyframe before the first keyframe has no group to anchor it, so the
+	/// producer surfaces MissingKeyframe (which a mid-stream join skips).
 	#[tokio::test(start_paused = true)]
-	async fn delta_before_init_is_tolerated() {
+	async fn delta_before_init_reports_missing_keyframe() {
 		let pslice: &[u8] = &[0x61, 0xe0, 0x12, 0x34]; // non-IDR slice
 		let mut annexb = bytes::BytesMut::new();
 		annexb.extend_from_slice(&[0, 0, 0, 1]);
@@ -559,9 +561,10 @@ mod tests {
 			.unwrap();
 		let mut import = Import::from_track(track);
 
-		import
+		let err = import
 			.decode_frame(&mut annexb, Some(moq_net::Timestamp::from_micros(0).unwrap()))
-			.expect("a delta before init must be tolerated, not abort");
+			.expect_err("a delta before any keyframe must report MissingKeyframe");
+		assert!(matches!(err, crate::Error::MissingKeyframe(_)), "got {err:?}");
 		assert!(import.catalog().is_none(), "no config yet, so no catalog");
 	}
 }

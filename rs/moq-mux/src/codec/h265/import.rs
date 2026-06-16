@@ -49,7 +49,7 @@ impl Import {
 	/// Publish on an existing track producer.
 	pub fn from_track(track: moq_net::TrackProducer) -> Self {
 		Self {
-			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start(),
+			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			catalog: hang::Catalog::default(),
 			config: None,
 			current: Default::default(),
@@ -293,21 +293,33 @@ impl Import {
 			return Ok(());
 		}
 
-		// A slice before the first SPS has no catalog config to anchor it.
-		if self.config.is_none() {
+		let pts = pts.ok_or(Error::MissingTimestamp)?;
+		let keyframe = self.current.contains_idr;
+
+		// A keyframe we couldn't configure (no SPS) is undecodable.
+		if keyframe && self.config.is_none() {
 			return Err(Error::MissingSps.into());
 		}
-		let pts = pts.ok_or(Error::MissingTimestamp)?;
 
+		// Take the payload and clear the per-AU state up front, so a
+		// MissingKeyframe from a pre-keyframe delta (a mid-stream join) leaves a
+		// clean slate for the next access unit.
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
+		self.current.contains_idr = false;
+		self.current.contains_slice = false;
+		self.current.contains_vps = false;
+		self.current.contains_sps = false;
+		self.current.contains_pps = false;
 
 		let frame = crate::container::Frame {
 			timestamp: pts,
 			payload,
-			keyframe: self.current.contains_idr,
+			keyframe,
 			duration: None,
 		};
 
+		// A pre-keyframe delta has no group to anchor it: the producer returns
+		// MissingKeyframe, which the caller (e.g. a TS mid-stream join) skips.
 		self.track.write(frame)?;
 
 		if let Some(jitter) = self.jitter.observe(pts)
@@ -315,12 +327,6 @@ impl Import {
 		{
 			c.jitter = Some(jitter);
 		}
-
-		self.current.contains_idr = false;
-		self.current.contains_slice = false;
-		self.current.contains_vps = false;
-		self.current.contains_sps = false;
-		self.current.contains_pps = false;
 
 		Ok(())
 	}

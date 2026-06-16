@@ -36,6 +36,9 @@ pub enum Error {
 	#[error("moq: {0}")]
 	Moq(#[from] moq_net::Error),
 
+	#[error("missing keyframe: a group must open on a keyframe")]
+	MissingKeyframe(#[from] crate::container::MissingKeyframe),
+
 	#[error("timestamp overflow")]
 	TimestampOverflow(#[from] moq_net::TimeOverflow),
 

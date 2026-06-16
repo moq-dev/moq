@@ -739,13 +739,11 @@ impl<E: CatalogExt> Stream<E> {
 		match self {
 			Stream::H264 { import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				import.decoding(|i| i.decode_frame(&mut pending.data.as_slice(), pts))?;
-				Ok(())
+				skip_missing_keyframe(import.decoding(|i| i.decode_frame(&mut pending.data.as_slice(), pts)))
 			}
 			Stream::H265 { import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				import.decoding(|i| i.decode_frame(&mut pending.data.as_slice(), pts))?;
-				Ok(())
+				skip_missing_keyframe(import.decoding(|i| i.decode_frame(&mut pending.data.as_slice(), pts)))
 			}
 			Stream::Aac(stream) => stream.write(pending, burst),
 			Stream::Legacy(stream) => stream.write(pending),
@@ -1046,6 +1044,16 @@ fn pes_data_len(header: &PesHeader, pes_packet_len: u16) -> Option<usize> {
 /// Convert a raw 90 kHz PTS to a microsecond [`Timestamp`], unwrapping the
 /// 33-bit field. Returns `None` when the PES carried no PTS (the codec layer
 /// then falls back to a wall-clock timestamp).
+/// Swallow a [`MissingKeyframe`](crate::container::MissingKeyframe) from a video
+/// decode: a TS capture can join mid-GOP, so the deltas before the first keyframe
+/// have no group to anchor and are simply dropped rather than aborting the demux.
+fn skip_missing_keyframe(result: crate::Result<()>) -> anyhow::Result<()> {
+	match result {
+		Ok(()) | Err(crate::Error::MissingKeyframe(_)) => Ok(()),
+		Err(e) => Err(e.into()),
+	}
+}
+
 fn unwrap_pts(unwrap: &mut PtsUnwrap, pts: Option<u64>) -> anyhow::Result<Option<Timestamp>> {
 	let Some(raw) = pts else {
 		return Ok(None);
