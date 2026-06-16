@@ -9,8 +9,9 @@ type Observed = (typeof OBSERVED)[number];
 
 type SourceType = "camera" | "screen" | "file";
 
-// `true` announces immediately, `false` never announces, "source" waits until a source is selected.
-type AnnounceMode = boolean | "source";
+// "always" announces immediately, "never" never announces, "source" waits until a source is selected.
+// Defaults to "source" so we don't announce an empty broadcast with no audio/video.
+type AnnounceMode = "always" | "source" | "never";
 
 // Close everything when this element is garbage collected.
 // This is primarily to avoid a console.warn that we didn't close() before GC.
@@ -30,7 +31,7 @@ export default class MoqPublish extends HTMLElement {
 		// What a <canvas> preview renders: the raw capture, or a decoded copy of the encoded video.
 		preview: new Signal<Preview.Mode>("source"),
 		// When to announce/publish the broadcast: always, never, or only once a source is selected.
-		announce: new Signal<AnnounceMode>(true),
+		announce: new Signal<AnnounceMode>("source"),
 	};
 
 	connection: Moq.Connection.Reload;
@@ -90,7 +91,7 @@ export default class MoqPublish extends HTMLElement {
 			const enabled = effect.get(this.#enabled);
 			const announce = effect.get(this.state.announce);
 			const hasSource = effect.get(this.state.source) !== undefined;
-			const announcing = announce === true || (announce === "source" && hasSource);
+			const announcing = announce === "always" || (announce === "source" && hasSource);
 			this.#publishEnabled.set(enabled && announcing);
 		});
 
@@ -190,12 +191,12 @@ export default class MoqPublish extends HTMLElement {
 				throw new Error(`Invalid source: ${newValue}`);
 			}
 		} else if (name === "announce") {
-			if (newValue === "true" || newValue === null) {
-				this.state.announce.set(true);
-			} else if (newValue === "false") {
-				this.state.announce.set(false);
-			} else if (newValue === "source") {
+			if (newValue === "source" || newValue === null) {
 				this.state.announce.set("source");
+			} else if (newValue === "always") {
+				this.state.announce.set("always");
+			} else if (newValue === "never") {
+				this.state.announce.set("never");
 			} else {
 				throw new Error(`Invalid announce: ${newValue}`);
 			}

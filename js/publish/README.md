@@ -72,7 +72,7 @@ The simplest way to publish a stream:
 | `muted`     | boolean | false    | Mute audio capture              |
 | `invisible` | boolean | false    | Disable video capture           |
 | `preview`   | string  | `"source"` | What the preview renders: `"source"`, `"encoded"`, `"none"` |
-| `announce`  | string  | `"true"` | When to publish: `"true"` (always), `"false"` (never), `"source"` (once a source is selected) |
+| `announce`  | string  | `"source"` | When to publish: `"always"`, `"never"`, `"source"` (once a source is selected) |
 
 ## JavaScript API
 
