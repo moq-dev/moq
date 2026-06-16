@@ -1,37 +1,23 @@
-//! Async-friendly MoqSink that keeps the original dynamic-pad Element
-//! behavior while pushing all network setup and CMAF publishing work into
-//! a Tokio task. The GLib state change thread never blocks, pads still get
-//! requested dynamically, and each pad simply forwards buffers to the
-//! background worker via an unbounded channel. Events are handled on the
-//! sink pad, with EOS aggregated locally before posting element EOS.
+//! GObject shell for the moqsink element.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, Mutex};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
-use tokio::sync::mpsc;
-use url::Url;
+use tokio::sync::watch;
 
-use hang::moq_net;
+use super::session::{
+	caps_supported, send_or_flush, DataMsg, FlushSignal, ResolvedSettings, SendOutcome, SessionHandle, Status, CAT,
+};
 
-static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-	tokio::runtime::Builder::new_multi_thread()
-		.enable_all()
-		.build()
-		.expect("spawn tokio runtime")
-});
-
-static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
-	gst::DebugCategory::new(
-		"moq-sink",
-		gst::DebugColorFlags::empty(),
-		Some("MoQ Sink (async element)"),
-	)
-});
+/// Reject a frame past the MoQ frame limit (moq-net's MAX_FRAME_SIZE, 16 MiB): it could not be
+/// consumed anyway, and copying it would let hostile input drive an unbounded allocation.
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default)]
 struct Settings {
@@ -40,19 +26,12 @@ struct Settings {
 	tls_disable_verify: bool,
 }
 
-#[derive(Debug, Clone)]
-struct ResolvedSettings {
-	url: Url,
-	broadcast: String,
-	tls_disable_verify: bool,
-}
-
 impl TryFrom<Settings> for ResolvedSettings {
 	type Error = anyhow::Error;
 
 	fn try_from(value: Settings) -> Result<Self> {
 		Ok(Self {
-			url: Url::parse(value.url.as_ref().context("url property is required")?)?,
+			url: url::Url::parse(value.url.as_ref().context("url property is required")?)?,
 			broadcast: value
 				.broadcast
 				.as_ref()
@@ -63,60 +42,19 @@ impl TryFrom<Settings> for ResolvedSettings {
 	}
 }
 
-#[derive(Debug)]
-struct SessionHandle {
-	sender: mpsc::UnboundedSender<ControlMessage>,
-	join: tokio::task::JoinHandle<()>,
-}
-
-impl SessionHandle {
-	fn stop(self) {
-		let _ = self.sender.send(ControlMessage::Shutdown);
-		RUNTIME.spawn(async move {
-			if let Err(err) = self.join.await {
-				gst::warning!(CAT, "session task ended with error: {err:?}");
-			}
-		});
-	}
-}
-
-struct PadState {
-	decoder: moq_mux::import::Framed,
-	reference_pts: Option<gst::ClockTime>,
-}
-
-struct RuntimeState {
-	#[allow(dead_code)]
-	session: moq_net::Session,
-	broadcast: moq_net::BroadcastProducer,
-	catalog: moq_mux::catalog::Producer,
-	pads: HashMap<String, PadState>,
-}
-
-#[derive(Debug)]
-enum ControlMessage {
-	SetCaps {
-		pad_name: String,
-		caps: gst::Caps,
-	},
-	Buffer {
-		pad_name: String,
-		data: Bytes,
-		pts: Option<gst::ClockTime>,
-	},
-	Eos {
-		pad_name: String,
-	},
-	DropPad {
-		pad_name: String,
-	},
-	Shutdown,
-}
-
 #[derive(Default)]
 pub struct MoqSink {
 	settings: Mutex<Settings>,
 	session: Mutex<Option<SessionHandle>>,
+	status: Arc<Status>,
+	// Monotonic per-pad generation; a pad recreated with the same name gets a fresh value so the
+	// worker discards the previous incarnation's in-flight messages.
+	next_generation: AtomicU64,
+	pad_generations: Mutex<HashMap<String, u64>>,
+	// Per-pad FLUSH gate: FLUSH_START flips it true to cut a blocked send (the chain holds a cloned
+	// receiver); FLUSH_STOP flips it false. Per-pad so flushing one input never cancels another's send.
+	// Keyed with the generation so a stale FLUSH from a previous incarnation cannot flip the live pad.
+	pad_flush: Mutex<HashMap<String, (u64, watch::Sender<bool>)>>,
 }
 
 #[glib::object_subclass]
@@ -143,6 +81,22 @@ impl ObjectImpl for MoqSink {
 					.blurb("Disable TLS verification")
 					.default_value(false)
 					.build(),
+				// Read-only, served from the shared Status the task writes.
+				glib::ParamSpecBoolean::builder("connected")
+					.nick("Connected")
+					.blurb("Whether the session is currently connected")
+					.read_only()
+					.build(),
+				glib::ParamSpecString::builder("moq-version")
+					.nick("Negotiated version")
+					.blurb("The negotiated MoQ protocol version, null when disconnected")
+					.read_only()
+					.build(),
+				glib::ParamSpecUInt64::builder("estimated-send-bitrate")
+					.nick("Estimated send bitrate")
+					.blurb("Estimated send bitrate in bits per second (congestion controller), 0 when unavailable")
+					.read_only()
+					.build(),
 			]
 		});
 		PROPS.as_ref()
@@ -159,12 +113,19 @@ impl ObjectImpl for MoqSink {
 	}
 
 	fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
-		let settings = self.settings.lock().unwrap();
 		match pspec.name() {
-			"url" => settings.url.to_value(),
-			"broadcast" => settings.broadcast.to_value(),
-			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
-			_ => unreachable!(),
+			"connected" => self.status.connected().to_value(),
+			"moq-version" => self.status.version().to_value(),
+			"estimated-send-bitrate" => self.status.send_bitrate().to_value(),
+			name => {
+				let settings = self.settings.lock().unwrap();
+				match name {
+					"url" => settings.url.to_value(),
+					"broadcast" => settings.broadcast.to_value(),
+					"tls-disable-verify" => settings.tls_disable_verify.to_value(),
+					_ => unreachable!(),
+				}
+			}
 		}
 	}
 
@@ -178,19 +139,21 @@ impl GstObjectImpl for MoqSink {}
 
 impl ElementImpl for MoqSink {
 	fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
-		static ELEMENT_METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
+		static METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
 			gst::subclass::ElementMetadata::new(
-				"MoQ Sink (async)",
+				"MoQ Sink",
 				"Sink/Network/MoQ",
 				"Transmits media over MoQ",
-				"Luke Curley <kixelated@gmail.com>, Steve McFarlin <steve@stevemcfarlin.com>",
+				"Ariel Molina <ariel@edis.mx>",
 			)
 		});
-		Some(&*ELEMENT_METADATA)
+		Some(&*METADATA)
 	}
 
 	fn pad_templates() -> &'static [gst::PadTemplate] {
 		static PAD_TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
+			// Every codec that converges on moq_mux::import::Framed; per-codec specifics are validated
+			// when the producer is built from caps, not here.
 			let mut caps = gst::Caps::new_empty();
 			caps.merge(
 				gst::Caps::builder("video/x-h264")
@@ -228,35 +191,105 @@ impl ElementImpl for MoqSink {
 		name: Option<&str>,
 		_caps: Option<&gst::Caps>,
 	) -> Option<gst::Pad> {
+		// Fixed per pad incarnation and captured here, so a buffer in flight from a released pad never
+		// reads a successor's generation.
+		let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+		// One flush watch per pad: the sender lives in `pad_flush` (toggled by FLUSH_START/STOP), each
+		// pad function carries its own cloned receiver to cancel a blocked send.
+		let (flush_tx, flush_rx) = watch::channel(false);
+		let chain_flush = flush_rx.clone();
+		let event_flush = flush_rx;
 		let pad_builder = gst::Pad::builder_from_template(templ)
-			.chain_function(|pad, parent, buffer| {
-				let element = parent
-					.and_then(|p| p.downcast_ref::<super::MoqSink>())
-					.ok_or(gst::FlowError::Error)?;
-				element.imp().forward_buffer(pad, buffer)
+			.chain_function(move |pad, parent, buffer| {
+				let mut flush = chain_flush.clone();
+				MoqSink::catch_panic_pad_function(
+					parent,
+					|| Err(gst::FlowError::Error),
+					|sink| sink.forward_buffer(pad, generation, &mut flush, buffer),
+				)
 			})
-			.event_function(|pad, parent, event| {
-				let Some(element) = parent.and_then(|p| p.downcast_ref::<super::MoqSink>()) else {
-					return false;
-				};
-				element.imp().handle_event(pad, event)
+			.event_function(move |pad, parent, event| {
+				let mut flush = event_flush.clone();
+				MoqSink::catch_panic_pad_function(
+					parent,
+					|| false,
+					|sink| sink.handle_event(pad, generation, &mut flush, event),
+				)
 			});
 
-		let pad = if let Some(name) = name {
-			pad_builder.name(name).build()
-		} else {
-			pad_builder.generated_name().build()
+		let pad = match name {
+			Some(name) => pad_builder.name(name).build(),
+			None => pad_builder.generated_name().build(),
 		};
 
-		self.obj().add_pad(&pad).ok()?;
+		// Populate the maps BEFORE the pad is visible to GStreamer, so a concurrent start_session seed
+		// never sees a pad without its generation. Capture the previous holders so a failed add_pad (a
+		// duplicate name, or a concurrent request that lost the race) rolls back without orphaning the
+		// live pad, and announce AddPad only after add_pad succeeds so the worker never gets a phantom.
+		//
+		// Known limitation (documented, not closed): two concurrent requests for the SAME name racing a
+		// start_session seed can leave the seed reading the loser's generation for the winner's pad, so
+		// the winner's events are then dropped as stale. Closing it would mean holding a lock across
+		// add_pad, which emits pad-added synchronously and would deadlock a reentrant handler; that risk
+		// is worse than the bug, whose trigger (same-name concurrent request_new_pad) apps do not produce.
+		let name = pad.name().to_string();
+		let prev_gen = self.pad_generations.lock().unwrap().insert(name.clone(), generation);
+		let prev_flush = self
+			.pad_flush
+			.lock()
+			.unwrap()
+			.insert(name.clone(), (generation, flush_tx));
+
+		if self.obj().add_pad(&pad).is_err() {
+			// Roll back, but only if this attempt still owns the entry. A concurrent same-name request
+			// that won add_pad may have overwritten it; restoring our captured `prev` (or removing) would
+			// then clobber the live pad it just registered. Touch the maps only while they still hold our
+			// own generation.
+			{
+				let mut gens = self.pad_generations.lock().unwrap();
+				if gens.get(name.as_str()) == Some(&generation) {
+					match prev_gen {
+						Some(g) => gens.insert(name.clone(), g),
+						None => gens.remove(&name),
+					};
+				}
+			}
+			{
+				let mut flushes = self.pad_flush.lock().unwrap();
+				if flushes.get(name.as_str()).map(|(g, _)| *g) == Some(generation) {
+					match prev_flush {
+						Some(f) => flushes.insert(name.clone(), f),
+						None => flushes.remove(&name),
+					};
+				}
+			}
+			return None;
+		}
+
+		// A request pad is linked by the caller only after this returns, so its CAPS/buffers cannot reach
+		// the worker ahead of this AddPad.
+		let sender = self.session.lock().unwrap().as_ref().map(SessionHandle::sender);
+		if let Some(sender) = sender {
+			let _ = sender.blocking_send(DataMsg::AddPad { pad: name, generation });
+		}
 		Some(pad)
 	}
 
 	fn release_pad(&self, pad: &gst::Pad) {
-		if let Some(session) = self.session.lock().unwrap().as_ref() {
-			let _ = session.sender.send(ControlMessage::DropPad {
-				pad_name: pad.name().to_string(),
-			});
+		let name = pad.name().to_string();
+		let generation = self.pad_generations.lock().unwrap().remove(&name);
+		// Dropping the watch sender wakes any send still blocked on this pad (changed() errors -> Flushing).
+		self.pad_flush.lock().unwrap().remove(&name);
+		// Drop the session guard before blocking_send: holding it across a full-channel block deadlocks stop_session.
+		let sender = {
+			let session = self.session.lock().unwrap();
+			session.as_ref().map(SessionHandle::sender)
+		};
+		if let (Some(sender), Some(generation)) = (sender, generation) {
+			// Uncancellable: a full data channel or an in-progress connect stalls release here, and the
+			// per-pad flush watch (removed just above) cannot cut it. Known control-path-blocking limit,
+			// shared with the AddPad send; out of scope for FLUSH.
+			let _ = sender.blocking_send(DataMsg::DropPad { pad: name, generation });
 		}
 		let _ = self.obj().remove_pad(pad);
 	}
@@ -279,21 +312,23 @@ impl ElementImpl for MoqSink {
 
 impl MoqSink {
 	fn start_session(&self) -> Result<()> {
-		let settings = {
-			let settings = self.settings.lock().unwrap().clone();
-			ResolvedSettings::try_from(settings)?
+		// Synchronous settings validation surfaces as a StateChangeError; async failures go to the bus.
+		let settings = ResolvedSettings::try_from(self.settings.lock().unwrap().clone())?;
+		// Seed pads requested before the session existed; the data channel is created inside start().
+		let seed = {
+			let gens = self.pad_generations.lock().unwrap();
+			self.obj()
+				.pads()
+				.iter()
+				.map(|pad| {
+					let name = pad.name().to_string();
+					let generation = gens.get(&name).copied().unwrap_or(0);
+					(name, generation)
+				})
+				.collect()
 		};
-
-		let (tx, rx) = mpsc::unbounded_channel::<ControlMessage>();
-		let element_weak = self.obj().downgrade();
-
-		let join = RUNTIME.spawn(async move {
-			if let Err(err) = run_session(settings, rx, element_weak).await {
-				gst::error!(CAT, "session error: {err:#}");
-			}
-		});
-
-		*self.session.lock().unwrap() = Some(SessionHandle { sender: tx, join });
+		let handle = SessionHandle::start(settings, self.status.clone(), self.obj().downgrade(), seed);
+		*self.session.lock().unwrap() = Some(handle);
 		Ok(())
 	}
 
@@ -303,227 +338,198 @@ impl MoqSink {
 		}
 	}
 
-	fn forward_buffer(&self, pad: &gst::Pad, buffer: gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
+	/// Clone the sender, release the lock, then blocking-send: never apply backpressure under the session lock.
+	fn forward_buffer(
+		&self,
+		pad: &gst::Pad,
+		generation: u64,
+		flush: &mut watch::Receiver<bool>,
+		buffer: gst::Buffer,
+	) -> Result<gst::FlowSuccess, gst::FlowError> {
+		// The worker marks a pad failed after rejecting its data; surface that to GStreamer instead of
+		// silently dropping. Because the worker is async, this lands on the buffer after the bad one.
+		if self.status.is_failed(pad.name().as_str(), generation) {
+			return Err(gst::FlowError::NotNegotiated);
+		}
+
+		// Bound the per-frame allocation before copying: a buffer past the frame limit cannot be
+		// consumed and would let hostile input drive an unbounded copy.
+		if buffer.size() > MAX_FRAME_BYTES {
+			gst::warning!(
+				CAT,
+				"rejecting {}-byte buffer on pad {} (exceeds frame limit)",
+				buffer.size(),
+				pad.name()
+			);
+			return Err(gst::FlowError::Error);
+		}
+
+		// Skip the map + copy if the pad is already flushing; send_or_flush re-checks for a flush that
+		// starts mid-send, but during a flush repeated buffers would otherwise burn a copy each before
+		// being dropped.
+		if *flush.borrow() {
+			return Err(gst::FlowError::Flushing);
+		}
+
 		let sender = self
 			.session
 			.lock()
 			.unwrap()
 			.as_ref()
-			.map(|handle| handle.sender.clone())
+			.map(|handle| handle.sender())
 			.ok_or(gst::FlowError::Flushing)?;
 
 		let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-		let pts = buffer.pts();
 		let data = Bytes::copy_from_slice(map.as_slice());
+		let pts = buffer.pts();
 
-		sender
-			.send(ControlMessage::Buffer {
-				pad_name: pad.name().to_string(),
-				data,
-				pts,
-			})
-			.map_err(|_| gst::FlowError::Flushing)?;
-
-		Ok(gst::FlowSuccess::Ok)
+		let msg = DataMsg::Buffer {
+			pad: pad.name().to_string(),
+			generation,
+			data,
+			pts,
+		};
+		// FLUSH_START on this pad cuts a send blocked on a full channel (returns Flushing), instead of
+		// stalling the streaming thread until the relay drains.
+		match send_or_flush(&sender, msg, flush) {
+			SendOutcome::Sent => Ok(gst::FlowSuccess::Ok),
+			SendOutcome::Flushed | SendOutcome::Closed => Err(gst::FlowError::Flushing),
+		}
 	}
 
-	fn handle_event(&self, pad: &gst::Pad, event: gst::Event) -> bool {
+	fn handle_event(
+		&self,
+		pad: &gst::Pad,
+		generation: u64,
+		flush: &mut watch::Receiver<bool>,
+		event: gst::Event,
+	) -> bool {
+		let sender = self.session.lock().unwrap().as_ref().map(|handle| handle.sender());
+
 		match event.view() {
 			gst::EventView::Caps(caps) => {
-				let Some(sender) = self
-					.session
-					.lock()
-					.unwrap()
-					.as_ref()
-					.map(|handle| handle.sender.clone())
-				else {
-					return false;
-				};
-
-				if sender
-					.send(ControlMessage::SetCaps {
-						pad_name: pad.name().to_string(),
-						caps: caps.caps().to_owned(),
-					})
-					.is_err()
-				{
+				let caps = caps.caps();
+				// Reject unsupported caps synchronously (NotNegotiated) before handing off to the worker.
+				if !caps_supported(caps) {
+					gst::warning!(CAT, "rejecting unsupported caps on pad {}", pad.name());
 					return false;
 				}
-
-				gst::Pad::event_default(pad, Some(&*self.obj()), event)
+				let Some(sender) = sender else { return false };
+				let msg = DataMsg::Caps {
+					pad: pad.name().to_string(),
+					generation,
+					caps: caps.to_owned(),
+				};
+				match send_or_flush(&sender, msg, flush) {
+					SendOutcome::Sent => gst::Pad::event_default(pad, Some(&*self.obj()), event),
+					SendOutcome::Flushed | SendOutcome::Closed => false,
+				}
+			}
+			gst::EventView::Segment(segment) => {
+				let Some(sender) = sender else { return false };
+				let msg = DataMsg::Segment {
+					pad: pad.name().to_string(),
+					generation,
+					segment: segment.segment().to_owned(),
+				};
+				match send_or_flush(&sender, msg, flush) {
+					SendOutcome::Sent => gst::Pad::event_default(pad, Some(&*self.obj()), event),
+					SendOutcome::Flushed | SendOutcome::Closed => false,
+				}
 			}
 			gst::EventView::Eos(_) => {
-				let Some(sender) = self
-					.session
-					.lock()
-					.unwrap()
-					.as_ref()
-					.map(|handle| handle.sender.clone())
-				else {
-					return false;
+				let Some(sender) = sender else { return false };
+				let msg = DataMsg::Eos {
+					pad: pad.name().to_string(),
+					generation,
 				};
-
-				if sender
-					.send(ControlMessage::Eos {
-						pad_name: pad.name().to_string(),
-					})
-					.is_err()
-				{
-					return false;
+				matches!(send_or_flush(&sender, msg, flush), SendOutcome::Sent)
+			}
+			// FLUSH_START arrives out of band on the flushing thread: flip this pad's watch to cut a send
+			// blocked in the chain, and tell the worker to re-anchor the timeline. Never blocks.
+			gst::EventView::FlushStart(_) => {
+				toggle_pad_flush(&self.pad_flush.lock().unwrap(), pad.name().as_str(), generation, true);
+				if let Some(handle) = self.session.lock().unwrap().as_ref() {
+					let _ = handle.flush_sender().send(FlushSignal {
+						pad: pad.name().to_string(),
+						generation,
+					});
 				}
-
-				true
+				gst::Pad::event_default(pad, Some(&*self.obj()), event)
+			}
+			// FLUSH_STOP clears the gate so the chain resumes; the trailing SEGMENT re-anchors the worker.
+			gst::EventView::FlushStop(_) => {
+				toggle_pad_flush(&self.pad_flush.lock().unwrap(), pad.name().as_str(), generation, false);
+				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
 			_ => gst::Pad::event_default(pad, Some(&*self.obj()), event),
 		}
 	}
 }
 
-async fn run_session(
-	settings: ResolvedSettings,
-	mut rx: mpsc::UnboundedReceiver<ControlMessage>,
-	element_weak: gst::glib::WeakRef<super::MoqSink>,
-) -> Result<()> {
-	let mut client_config = moq_native::ClientConfig::default();
-	client_config.tls.disable_verify = Some(settings.tls_disable_verify);
-
-	let client = client_config.init()?;
-
-	let origin = moq_net::Origin::random().produce();
-	let mut broadcast = moq_net::Broadcast::new().produce();
-	let broadcast_consumer = broadcast.consume();
-
-	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
-
-	anyhow::ensure!(
-		origin.publish_broadcast(&settings.broadcast, broadcast_consumer),
-		"failed to publish broadcast {}",
-		settings.broadcast
-	);
-
-	let client = client.with_publish(origin.consume());
-	let session = client.connect(settings.url.clone()).await?;
-
-	let mut runtime = RuntimeState {
-		session,
-		broadcast,
-		catalog,
-		pads: HashMap::new(),
-	};
-	let mut eos_pads = HashSet::new();
-
-	while let Some(msg) = rx.recv().await {
-		match msg {
-			ControlMessage::SetCaps { pad_name, caps } => {
-				if let Err(err) = handle_caps(&mut runtime, pad_name, caps) {
-					gst::error!(CAT, "failed to configure pad: {err:#}");
-				}
-			}
-			ControlMessage::Buffer { pad_name, data, pts } => {
-				if let Err(err) = handle_buffer(&mut runtime, pad_name, data, pts) {
-					gst::error!(CAT, "failed to publish buffer: {err:#}");
-				}
-			}
-			ControlMessage::DropPad { pad_name } => {
-				runtime.pads.remove(&pad_name);
-				eos_pads.remove(&pad_name);
-			}
-			ControlMessage::Eos { pad_name } => {
-				eos_pads.insert(pad_name);
-
-				if !runtime.pads.is_empty() && eos_pads.len() == runtime.pads.len() {
-					if let Some(element) = element_weak.upgrade() {
-						let eos_message = gst::message::Eos::builder().src(&element).build();
-						let _ = element.post_message(eos_message);
-					}
-				}
-			}
-			ControlMessage::Shutdown => break,
+// Flip a pad's FLUSH watch only when the generation matches, so a stale FLUSH from a previous
+// incarnation cannot cancel the live pad's sends. Mirrors the worker's generation discipline.
+fn toggle_pad_flush(flush: &HashMap<String, (u64, watch::Sender<bool>)>, name: &str, generation: u64, value: bool) {
+	if let Some((gen, tx)) = flush.get(name) {
+		if *gen == generation {
+			let _ = tx.send(value);
 		}
 	}
-
-	Ok(())
 }
 
-fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) -> Result<()> {
-	let structure = caps.structure(0).context("empty caps")?;
-	let decoder: moq_mux::import::Framed = match structure.name().as_str() {
-		"video/x-h264" => {
-			let mut bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::FramedFormat::Avc3, &mut bytes)?
-		}
-		"video/x-h265" => {
-			let mut bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::FramedFormat::Hev1, &mut bytes)?
-		}
-		"video/x-av1" => {
-			let mut bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::FramedFormat::Av01, &mut bytes)?
-		}
-		"video/x-vp8" => {
-			let mut bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::FramedFormat::Vp8, &mut bytes)?
-		}
-		"video/x-vp9" => {
-			let mut bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::FramedFormat::Vp9, &mut bytes)?
-		}
-		"audio/mpeg" => {
-			let codec_data = structure
-				.get::<gst::Buffer>("codec_data")
-				.context("AAC caps missing codec_data")?;
-			let map = codec_data.map_readable().context("failed to map codec_data")?;
-			let mut data = Bytes::copy_from_slice(map.as_slice());
-			new_decoder(runtime, moq_mux::import::FramedFormat::Aac, &mut data)?
-		}
-		"audio/x-opus" => {
-			let channels: i32 = structure.get("channels").unwrap_or(2);
-			let rate: i32 = structure.get("rate").unwrap_or(48_000);
-			let channel_count =
-				u32::try_from(channels).with_context(|| format!("Opus caps has negative channel count {channels}"))?;
-			let sample_rate =
-				u32::try_from(rate).with_context(|| format!("Opus caps has negative sample rate {rate}"))?;
-			let config = moq_mux::codec::opus::Config {
-				sample_rate,
-				channel_count,
-			};
-			moq_mux::codec::opus::Import::new(runtime.broadcast.clone(), runtime.catalog.clone(), config)?.into()
-		}
-		other => anyhow::bail!("unsupported caps: {}", other),
-	};
+#[cfg(test)]
+mod tests {
+	use std::collections::HashMap;
 
-	runtime.pads.insert(
-		pad_name,
-		PadState {
-			decoder,
-			reference_pts: None,
-		},
-	);
-	Ok(())
-}
+	use tokio::sync::watch;
 
-fn new_decoder(
-	runtime: &mut RuntimeState,
-	format: moq_mux::import::FramedFormat,
-	buf: &mut Bytes,
-) -> Result<moq_mux::import::Framed> {
-	let decoder = moq_mux::import::Framed::new(runtime.broadcast.clone(), runtime.catalog.clone(), format, buf)?;
-	Ok(decoder)
-}
+	use super::toggle_pad_flush;
 
-fn handle_buffer(
-	runtime: &mut RuntimeState,
-	pad_name: String,
-	mut data: Bytes,
-	pts: Option<gst::ClockTime>,
-) -> Result<()> {
-	let pad = runtime.pads.get_mut(&pad_name).context("pad not configured")?;
+	#[test]
+	fn pad_flush_toggle_ignores_stale_generation() {
+		let mut map = HashMap::new();
+		let (tx, rx) = watch::channel(false);
+		map.insert("video".to_string(), (1u64, tx));
+		// A stale generation must not flip the live pad's watch.
+		toggle_pad_flush(&map, "video", 0, true);
+		assert!(!*rx.borrow(), "stale-generation flush is ignored");
+		// The current generation flips it.
+		toggle_pad_flush(&map, "video", 1, true);
+		assert!(*rx.borrow(), "current-generation flush flips the watch");
+	}
 
-	let ts = pts.and_then(|pts| {
-		let reference = *pad.reference_pts.get_or_insert(pts);
-		let relative = pts.checked_sub(reference)?;
-		hang::container::Timestamp::from_micros(relative.nseconds() / 1000).ok()
-	});
+	// A failed pad add must leave membership untouched. request_new_pad adds the pad before announcing
+	// AddPad or mutating the maps, so a duplicate name (or a concurrent request that lost the race) that
+	// fails add_pad does not corrupt the live pad: its generation and flush sender survive. Announcing
+	// for a name already held would otherwise make the worker finalize the live pad's producer and
+	// overwrite its generation. Exercised via two direct request_new_pad calls (the concurrent path).
+	#[test]
+	fn failed_duplicate_pad_keeps_membership_consistent() {
+		use gst::prelude::*;
+		use gst::subclass::prelude::*;
+		gst::init().unwrap();
 
-	pad.decoder.decode_frame(&mut data, ts).map_err(|e| anyhow::anyhow!(e))
+		let obj = gst::glib::Object::new::<super::super::MoqSink>();
+		let imp = obj.imp();
+		let templ = obj.pad_template("sink_%u").expect("sink template");
+
+		let p0 = imp.request_new_pad(&templ, Some("sink_0"), None);
+		let p1 = imp.request_new_pad(&templ, Some("sink_0"), None);
+		assert!(p0.is_some(), "first request succeeds");
+		assert!(p1.is_none(), "duplicate name fails to add");
+
+		let gen = imp.pad_generations.lock().unwrap().get("sink_0").copied();
+		let flush_gen = imp.pad_flush.lock().unwrap().get("sink_0").map(|(g, _)| *g);
+		// After the failed duplicate the maps must still describe the LIVE pad (generation 0).
+		assert_eq!(
+			gen,
+			Some(0),
+			"live pad's generation must survive a failed duplicate (got {gen:?})"
+		);
+		assert_eq!(
+			flush_gen,
+			Some(0),
+			"live pad's flush sender must survive a failed duplicate (got {flush_gen:?})"
+		);
+	}
 }

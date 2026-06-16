@@ -19,9 +19,7 @@ fn init() {
 #[test]
 fn request_and_release_sink_pads() {
 	init();
-	let sink = gst::ElementFactory::make("moqsinkspike")
-		.build()
-		.expect("create moqsinkspike");
+	let sink = gst::ElementFactory::make("moqsink").build().expect("create moqsink");
 
 	let pad0 = sink.request_pad_simple("sink_0").expect("request sink_0");
 	assert_eq!(pad0.name().as_str(), "sink_0");
@@ -38,9 +36,7 @@ fn request_and_release_sink_pads() {
 #[test]
 fn missing_url_fails_state_change() {
 	init();
-	let sink = gst::ElementFactory::make("moqsinkspike")
-		.build()
-		.expect("create moqsinkspike");
+	let sink = gst::ElementFactory::make("moqsink").build().expect("create moqsink");
 	assert!(
 		sink.set_state(gst::State::Paused).is_err(),
 		"a missing url must fail the Ready->Paused state change"
@@ -54,11 +50,11 @@ fn missing_url_fails_state_change() {
 fn connect_failure_posts_error_to_bus() {
 	init();
 	let pipeline = gst::Pipeline::new();
-	let sink = gst::ElementFactory::make("moqsinkspike")
+	let sink = gst::ElementFactory::make("moqsink")
 		.property("url", "https://nonexistent.invalid:443")
 		.property("broadcast", "test")
 		.build()
-		.expect("create moqsinkspike");
+		.expect("create moqsink");
 	pipeline.add(&sink).expect("add sink to pipeline");
 
 	let _ = pipeline.set_state(gst::State::Playing);

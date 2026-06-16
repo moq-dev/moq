@@ -2,7 +2,6 @@ use gst::glib;
 
 mod sink;
 mod source;
-mod spike;
 
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
@@ -10,7 +9,6 @@ use tracing_subscriber::EnvFilter;
 pub fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
 	sink::register(plugin)?;
 	source::register(plugin)?;
-	spike::register(plugin)?;
 
 	let filter = EnvFilter::builder()
 		.with_default_directive(LevelFilter::INFO.into())

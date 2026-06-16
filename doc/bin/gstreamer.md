@@ -30,6 +30,14 @@ Both elements support the following properties:
 For `http://` URLs, `moq-native` automatically fetches the server's certificate fingerprint from `/certificate.sha256` and verifies TLS against it. You don't need `tls-disable-verify` for local development.
 :::
 
+`moqsink` additionally exposes these read-only properties for monitoring:
+
+| Property                 | Type   | Description                                                  |
+| ------------------------ | ------ | ----------------------------------------------------------- |
+| `connected`              | bool   | Whether the publish session is currently connected          |
+| `moq-version`            | string | The negotiated MoQ protocol version; null when disconnected |
+| `estimated-send-bitrate` | uint64 | Estimated send bitrate in bits per second; 0 when unavailable |
+
 ## Prerequisites
 
 The plugin requires GStreamer development libraries. It is **not** built by default since most users don't have them installed.

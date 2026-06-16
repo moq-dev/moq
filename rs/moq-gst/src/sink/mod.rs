@@ -2,6 +2,8 @@ use gst::glib;
 use gst::prelude::*;
 
 mod imp;
+mod session;
+mod timeline;
 
 glib::wrapper! {
 	pub struct MoqSink(ObjectSubclass<imp::MoqSink>) @extends gst::Element, gst::Object;

@@ -13,7 +13,7 @@ use hang::moq_net;
 use moq_mux::import::{Framed, FramedFormat};
 
 use super::timeline::{classify_segment, frame_micros, FrameDecision, SegmentDecision, SegmentInfo};
-use super::MoqSinkSpike as Element;
+use super::MoqSink as Element;
 
 static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 	tokio::runtime::Builder::new_multi_thread()
@@ -23,7 +23,7 @@ static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 });
 
 pub static CAT: LazyLock<gst::DebugCategory> =
-	LazyLock::new(|| gst::DebugCategory::new("moq-sink-spike", gst::DebugColorFlags::empty(), Some("MoQ Sink spike")));
+	LazyLock::new(|| gst::DebugCategory::new("moq-sink", gst::DebugColorFlags::empty(), Some("MoQ Sink Element")));
 
 /// Handoff, not a buffer: a full channel must block the streaming thread, not grow.
 const DATA_CHANNEL_BOUND: usize = 8;
@@ -887,7 +887,7 @@ impl Pad {
 	}
 }
 
-/// Media types the spike can build a producer for. Checked synchronously at the event boundary (an
+/// Media types moqsink can build a producer for. Checked synchronously at the event boundary (an
 /// unsupported caps is rejected with NotNegotiated) and again in `set_caps`. Per-codec specifics
 /// (byte-stream/au, AAC codec_data) are enforced when the producer is built, so a bad detail fails
 /// that pad, not the session.
