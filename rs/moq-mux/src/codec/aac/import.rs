@@ -1,6 +1,7 @@
 use bytes::{Buf, BytesMut};
 
 use super::Config;
+use crate::catalog::hang::CatalogExt;
 
 /// AAC importer.
 ///
@@ -8,19 +9,39 @@ use super::Config;
 /// an MP4 ESDS atom). Each input buffer passed to [`decode`](Self::decode) is published as
 /// one hang frame in its own group, so the relay can forward each frame without waiting for
 /// a group boundary. The codec's packet loss concealment handles drops.
-pub struct Import {
-	catalog: crate::catalog::Producer,
+pub struct Import<E: CatalogExt = ()> {
+	catalog: crate::catalog::Producer<E>,
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	zero: Option<tokio::time::Instant>,
 }
 
-impl Import {
+impl<E: CatalogExt> Import<E> {
 	pub fn new(
-		mut broadcast: moq_net::BroadcastProducer,
-		mut catalog: crate::catalog::Producer,
+		broadcast: moq_net::BroadcastProducer,
+		catalog: crate::catalog::Producer<E>,
 		config: Config,
 	) -> anyhow::Result<Self> {
-		let track = broadcast.unique_track(".aac")?;
+		Self::new_with_source(
+			crate::track_provider::TrackProvider::unique(broadcast, ".aac"),
+			catalog,
+			config,
+		)
+	}
+
+	pub fn new_with_track(
+		track: moq_net::TrackProducer,
+		catalog: crate::catalog::Producer<E>,
+		config: Config,
+	) -> anyhow::Result<Self> {
+		Self::new_with_source(crate::track_provider::TrackProvider::fixed(track), catalog, config)
+	}
+
+	fn new_with_source(
+		mut tracks: crate::track_provider::TrackProvider,
+		mut catalog: crate::catalog::Producer<E>,
+		config: Config,
+	) -> anyhow::Result<Self> {
+		let track = tracks.create()?;
 
 		let mut audio_config = hang::catalog::AudioConfig::new(
 			hang::catalog::AAC {
@@ -96,7 +117,7 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
+impl<E: CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
 		tracing::debug!(name = ?self.track.name, "ending track");
 		self.catalog.lock().audio.renditions.remove(&self.track.name);

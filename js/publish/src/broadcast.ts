@@ -1,8 +1,9 @@
 import * as Catalog from "@moq/hang/catalog";
+import { Producer } from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
-import { CatalogProducer } from "./catalog";
+import type { CatalogProducer } from "./catalog";
 import * as Video from "./video";
 
 export type BroadcastProps = {
@@ -12,6 +13,9 @@ export type BroadcastProps = {
 	audio?: Audio.EncoderProps;
 	video?: Video.Props;
 };
+
+/** Serves a custom track when a subscriber requests it, scoped to the subscription's lifetime. */
+export type ServeTrack = (track: Moq.Track, effect: Effect) => void;
 
 export class Broadcast {
 	static readonly CATALOG_TRACK = "catalog.json";
@@ -25,8 +29,21 @@ export class Broadcast {
 
 	// The catalog, editable at any time regardless of whether anyone is subscribed. The base
 	// `video`/`audio` sections are kept in sync from the encoders; an application adds its own root
-	// sections (e.g. `scte35`) by locking it too.
-	readonly catalog = new CatalogProducer();
+	// sections (e.g. `scte35`) by mutating it too.
+	readonly catalog: CatalogProducer = new Producer<Catalog.Root>({ initial: {} });
+
+	// Handlers for custom tracks registered via `publishTrack`, keyed by track name. Persists across
+	// reconnects so a new `Moq.Broadcast` still serves them.
+	#tracks = new Map<string, ServeTrack>();
+
+	// Built-in track names handled before `#tracks`, so a custom handler registered under one of
+	// these would never run. `publishTrack` rejects them to fail fast.
+	static readonly #RESERVED_TRACKS: ReadonlySet<string> = new Set([
+		Broadcast.CATALOG_TRACK,
+		Audio.Encoder.TRACK,
+		Video.Root.TRACK_HD,
+		Video.Root.TRACK_SD,
+	]);
 
 	signals = new Effect();
 
@@ -100,13 +117,53 @@ export class Broadcast {
 					case Video.Root.TRACK_SD:
 						this.video.sd.serve(request.track, effect);
 						break;
-					default:
+					default: {
+						const serve = this.#tracks.get(request.track.name);
+						if (serve) {
+							serve(request.track, effect);
+							break;
+						}
 						console.error("received subscription for unknown track", request.track.name);
 						request.track.close(new Error(`Unknown track: ${request.track.name}`));
 						break;
+					}
 				}
 			});
 		}
+	}
+
+	/**
+	 * Serve a custom track within this broadcast, identified by name.
+	 *
+	 * When a subscriber requests a track with this name, `serve` runs with the track and an effect
+	 * scoped to that subscription (cleaned up when the subscriber goes away). The handler persists
+	 * across reconnects. This is the generic hook for arbitrary payloads; encode them yourself.
+	 *
+	 * Returns a function that unregisters the handler. Note this does not close already-served
+	 * subscriptions, nor touch the catalog. Throws if `name` collides with a built-in track
+	 * (catalog/audio/video), since those are served first and the handler would never run.
+	 *
+	 * For a JSON track, serve each track from a track-less `@moq/json` `Producer` (the same fan-out
+	 * producer the catalog uses, seeding late joiners with the latest value). Advertise the track by
+	 * writing your own section to {@link catalog}, e.g. to support a custom `scte35` section with no
+	 * hang-specific support:
+	 *
+	 * ```ts
+	 * import { Producer } from "@moq/json";
+	 * const scte35 = new Producer({ initial: { splices: [] } });
+	 * broadcast.publishTrack("scte35.json", (track, effect) => scte35.serve(track, effect));
+	 * broadcast.catalog.mutate((c) => { c.scte35 = { track: "scte35.json" }; });
+	 * scte35.update({ splices: [42] });
+	 * ```
+	 */
+	publishTrack(name: string, serve: ServeTrack): () => void {
+		if (Broadcast.#RESERVED_TRACKS.has(name)) {
+			throw new Error(`Track name is reserved: ${name}`);
+		}
+		this.#tracks.set(name, serve);
+		return () => {
+			if (this.#tracks.get(name) === serve) this.#tracks.delete(name);
+		};
 	}
 
 	close() {

@@ -1,0 +1,22 @@
+# Standard-definition video: lower bitrate, more viewers per publisher.
+#
+# Models a typical live-streaming fan-out: many subscribers per broadcast at a
+# modest ~1-3 Mbps per track.
+
+# url = "https://relay.example.com"
+
+startup = "30s"
+report = "5s"
+
+# A: number of connections
+connections = "100:500"
+# B: broadcasts (tracks) per connection
+broadcasts = 1
+# C: peer broadcasts each connection watches
+subscribe = "5:20"
+# D: frames per second
+fps = 30
+# E: bytes per frame (~1-3 Mbps)
+frame_size = "4000:12000"
+# F: zeroed frames per group (2s GOP at 30fps)
+group_size = 59

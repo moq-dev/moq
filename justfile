@@ -40,7 +40,7 @@ dev:
 # of `just <lang> check`.
 install:
     bun install
-    cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-sweep cargo-semver-checks release-plz
+    cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-semver-checks release-plz
 
 # Fast inner-loop checks. Runs JS, Rust, and Markdown lints.
 # Shell + workflow + TOML + Nix + justfile lints skip silently if their

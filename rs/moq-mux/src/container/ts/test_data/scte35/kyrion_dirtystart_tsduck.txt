@@ -1,0 +1,85 @@
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x014D (333)
+  Short section, total size: 35 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x05 (SpliceInsert), size: 15 bytes
+    Splice event id: 0x00000020 (32), cancel: 0
+    Out of network: yes, program splice: yes, duration set: no, immediate: no
+    Time PTS: 0x0117F2A3C (293,546,556, 3,261,628 ms)
+    Unique program id: 0xD8CD (55501), avail: 0x00 (0), avails expected: 0
+    CRC32: 0xBA4ECC90 (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x014D (333)
+  Short section, total size: 35 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x05 (SpliceInsert), size: 15 bytes
+    Splice event id: 0x00000020 (32), cancel: 0
+    Out of network: yes, program splice: yes, duration set: no, immediate: no
+    Time PTS: 0x0117F64E3 (293,561,571, 3,261,795 ms)
+    Unique program id: 0xD8CE (55502), avail: 0x00 (0), avails expected: 0
+    CRC32: 0x12465416 (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x014D (333)
+  Short section, total size: 35 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x05 (SpliceInsert), size: 15 bytes
+    Splice event id: 0x00000020 (32), cancel: 0
+    Out of network: yes, program splice: yes, duration set: no, immediate: no
+    Time PTS: 0x0118043C4 (293,618,628, 3,262,429 ms)
+    Unique program id: 0xD8CF (55503), avail: 0x00 (0), avails expected: 0
+    CRC32: 0x70EE6F06 (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x014D (333)
+  Short section, total size: 35 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x05 (SpliceInsert), size: 15 bytes
+    Splice event id: 0x00000020 (32), cancel: 0
+    Out of network: yes, program splice: yes, duration set: no, immediate: no
+    Time PTS: 0x011804F7F (293,621,631, 3,262,462 ms)
+    Unique program id: 0xD8D0 (55504), avail: 0x00 (0), avails expected: 0
+    CRC32: 0x56BAD6EA (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x014D (333)
+  Short section, total size: 35 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x05 (SpliceInsert), size: 15 bytes
+    Splice event id: 0x00000020 (32), cancel: 0
+    Out of network: yes, program splice: yes, duration set: no, immediate: no
+    Time PTS: 0x0118174C2 (293,696,706, 3,263,296 ms)
+    Unique program id: 0xD8D1 (55505), avail: 0x00 (0), avails expected: 0
+    CRC32: 0x21051309 (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x014D (333)
+  Short section, total size: 35 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x05 (SpliceInsert), size: 15 bytes
+    Splice event id: 0x00000009 (9), cancel: 0
+    Out of network: yes, program splice: yes, duration set: no, immediate: no
+    Time PTS: 0x01181A3AE (293,708,718, 3,263,430 ms)
+    Unique program id: 0x0007 (7), avail: 0x00 (0), avails expected: 0
+    CRC32: 0x5287FA7F (OK)
+

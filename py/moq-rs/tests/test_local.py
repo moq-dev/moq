@@ -1,6 +1,8 @@
-"""Local pub/sub tests — no network required."""
+"""Local pub/sub tests: no network required."""
 
+import asyncio
 import struct
+from typing import cast
 
 import moq
 import pytest
@@ -199,7 +201,7 @@ async def test_catalog_update_on_new_track():
         catalog1 = await anext(cat_consumer)
         assert len(catalog1.audio) == 1
 
-        # Add a second audio track — triggers catalog update.
+        # Add a second audio track, which triggers a catalog update.
         _media2 = broadcast.publish_media("opus", opus_head())
 
         catalog2 = await anext(cat_consumer)
@@ -236,6 +238,60 @@ def test_publish_lifecycle():
     track.write_frame(b'{"cmd": "ready"}')
     track.finish()
     broadcast.finish()
+
+
+async def test_dynamic_track_request():
+    broadcast = moq.BroadcastProducer()
+    dynamic = broadcast.dynamic()
+    consumer = broadcast.consume()
+    track_consumer = consumer.subscribe_track("events")
+
+    track = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert track.name == "events"
+
+    payload = b"hello dynamic track"
+    track.write_frame(payload)
+
+    frame = await asyncio.wait_for(track_consumer.read_frame(), timeout=5.0)
+    assert frame == payload
+
+    track.finish()
+
+
+async def test_dynamic_track_request_can_publish_media():
+    broadcast = moq.BroadcastProducer()
+    dynamic = broadcast.dynamic()
+    consumer = broadcast.consume()
+    catalog_consumer = consumer.subscribe_catalog()
+    media_consumer = consumer.subscribe_media(
+        "requested-audio",
+        cast(moq.Container, moq.Container.LEGACY()),
+        10_000,
+    )
+
+    track = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert track.name == "requested-audio"
+
+    media = broadcast.publish_media_on_track(track, "opus", opus_head())
+    assert media.name == "requested-audio"
+    with pytest.raises(Exception):
+        _ = track.name
+
+    catalog = await asyncio.wait_for(anext(catalog_consumer), timeout=5.0)
+    audio = catalog.audio["requested-audio"]
+    assert audio.codec == "opus"
+    assert audio.sample_rate == 48000
+    assert audio.channel_count == 2
+
+    payload = b"dynamic opus frame"
+    media.write_frame(payload, 20_000)
+
+    async for frame in media_consumer:
+        assert frame.payload == payload
+        assert frame.timestamp_us == 20_000
+        break
+
+    media.finish()
 
 
 def test_raw_append_group_sequence_increments():
@@ -414,7 +470,7 @@ async def test_raw_group_producer_consume_direct():
 
 
 async def test_broadcast_producer_consume_direct():
-    """Consume a broadcast directly from the producer — catalog + raw track."""
+    """Consume a broadcast directly from the producer with catalog and raw track."""
     broadcast = moq.BroadcastProducer()
     raw = broadcast.publish_track("events")
     consumer = broadcast.consume()
@@ -461,7 +517,7 @@ async def test_raw_group_sequence():
 
 
 async def test_raw_multi_frame_group():
-    """A single group can carry multiple frames — not just one-per-group."""
+    """A single group can carry multiple frames, not just one per group."""
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     raw = broadcast.publish_track("chunks")

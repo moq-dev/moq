@@ -17,15 +17,28 @@ mod consumer;
 mod producer;
 mod weak;
 
+#[cfg(test)]
+mod tests;
+
 pub use consumer::Consumer;
 pub use producer::{Mut, Producer, Ref};
 pub use waiter::{Waiter, WaiterList, wait};
 pub use weak::Weak;
 
+/// Waiters split by what they're waiting on, so an event only wakes the
+/// waiters that care about it. The big win is per-modification writes (the hot
+/// path) waking only `value`, leaving the long-lived `closed` and `consumer`
+/// waiters untouched.
 #[derive(Debug)]
 pub(crate) struct State<T> {
 	pub value: T,
-	pub waiters: waiter::WaiterList,
+	/// Value changes (`poll`/`wait`). Woken on every modification.
+	pub waiters_value: waiter::WaiterList,
+	/// Closure (`closed`). Woken only when the channel closes.
+	pub waiters_closed: waiter::WaiterList,
+	/// Consumer-count changes (`used`/`unused`). `used`/`unused` are used
+	/// sequentially in practice, so they share one list.
+	pub waiters_consumer: waiter::WaiterList,
 	pub closed: bool,
 }
 
@@ -40,8 +53,20 @@ impl<T> State<T> {
 		Self {
 			value,
 			closed: false,
-			waiters: waiter::WaiterList::new(),
+			waiters_value: waiter::WaiterList::new(),
+			waiters_closed: waiter::WaiterList::new(),
+			waiters_consumer: waiter::WaiterList::new(),
 		}
+	}
+
+	/// Drain every waiter list. Used on close, which all waiters react to.
+	/// Caller wakes the returned lists after releasing the lock.
+	pub fn take_close_waiters(&mut self) -> [waiter::WaiterList; 3] {
+		[
+			self.waiters_value.take(),
+			self.waiters_closed.take(),
+			self.waiters_consumer.take(),
+		]
 	}
 }
 

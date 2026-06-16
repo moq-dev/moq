@@ -11,16 +11,29 @@ const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
 const OPUS_BITRATE_PER_CHANNEL = 32_000;
 const OPUS_FRAME_DURATION_MS = 20;
+const AAC_BITRATE_PER_CHANNEL = 64_000;
+const AAC_FRAME_SAMPLES = 1024; // AAC-LC encodes a fixed 1024 samples per frame.
+
+// The WebCodecs/MP4 codec string for AAC-LC. "aac" is our user-facing shorthand.
+const AAC_CODEC = "mp4a.40.2";
 
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
 
 // Selects the audio codec and its encoder settings. Either the bare codec name (all defaults) or an
-// object with the mime plus tuning knobs. Only Opus is implemented today; AAC would slot in as
-// `| Aac` here and as another branch in normalizeCodec/#createConfig.
-export type Codec = Opus;
+// object with the mime plus tuning knobs.
+export type Codec = Opus | Aac;
 
 export type Opus = "opus" | OpusConfig;
+export type Aac = "aac" | AacConfig;
+
+// AAC encoder settings. AAC-LC has a fixed 1024-sample frame and no real-time tuning knobs, so
+// bitrate is the only thing to configure.
+export type AacConfig = {
+	mime: "aac";
+
+	bitrate?: number; // bits/sec, defaults to channelCount * 64kbps
+};
 
 // Opus encoder settings. bitrate and frameDuration also shape the catalog (decoders need them); the
 // rest are encode-only knobs that map directly to the matching OpusEncoderConfig fields:
@@ -185,15 +198,34 @@ export class Encoder {
 		});
 	}
 
-	#createConfig(captured: Captured, opus: OpusConfig): Catalog.AudioConfig {
+	#createConfig(captured: Captured, codec: OpusConfig | AacConfig): Catalog.AudioConfig {
+		const sampleRate = Catalog.u53(captured.sampleRate);
+		const numberOfChannels = Catalog.u53(captured.channelCount);
+
+		if (codec.mime === "aac") {
+			return {
+				codec: AAC_CODEC,
+				sampleRate,
+				numberOfChannels,
+				bitrate: Catalog.u53(codec.bitrate ?? captured.channelCount * AAC_BITRATE_PER_CHANNEL),
+				container: { kind: "legacy" } as const,
+				// Frames are raw (no ADTS header), so the decoder needs the AudioSpecificConfig to init.
+				description: Util.Hex.fromBytes(
+					Util.Aac.audioSpecificConfig(captured.sampleRate, captured.channelCount),
+				),
+				// Each AAC-LC frame is 1024 samples; report that duration as the jitter hint.
+				jitter: Catalog.u53(Math.ceil((AAC_FRAME_SAMPLES / captured.sampleRate) * 1000)),
+			};
+		}
+
 		return {
 			codec: "opus",
-			sampleRate: Catalog.u53(captured.sampleRate),
-			numberOfChannels: Catalog.u53(captured.channelCount),
-			bitrate: Catalog.u53(opus.bitrate ?? captured.channelCount * OPUS_BITRATE_PER_CHANNEL),
+			sampleRate,
+			numberOfChannels,
+			bitrate: Catalog.u53(codec.bitrate ?? captured.channelCount * OPUS_BITRATE_PER_CHANNEL),
 			container: { kind: "legacy" } as const,
 			// jitter doubles as the Opus frame duration; toEncoderConfig converts it to µs for WebCodecs.
-			jitter: Catalog.u53(opus.frameDuration ?? OPUS_FRAME_DURATION_MS),
+			jitter: Catalog.u53(codec.frameDuration ?? OPUS_FRAME_DURATION_MS),
 		};
 	}
 
@@ -206,8 +238,8 @@ export class Encoder {
 			return;
 		}
 
-		const opus = normalizeCodec(effect.get(this.codec));
-		effect.set(this.#config, this.#createConfig(captured, opus));
+		const codec = normalizeCodec(effect.get(this.codec));
+		effect.set(this.#config, this.#createConfig(captured, codec));
 	}
 
 	// Collect the encode-only Opus knobs that are set, reading the codec through the effect so the
@@ -215,6 +247,7 @@ export class Encoder {
 	#opusOptions(effect: Effect): OpusEncoderConfigExt {
 		const codec = normalizeCodec(effect.get(this.codec));
 		const opus: OpusEncoderConfigExt = {};
+		if (codec.mime !== "opus") return opus;
 
 		if (codec.complexity !== undefined) opus.complexity = codec.complexity;
 		if (codec.packetlossperc !== undefined) opus.packetlossperc = codec.packetlossperc;
@@ -346,9 +379,10 @@ function requestedChannelCount(track: MediaStreamTrack): number | undefined {
 	return constraint.exact ?? constraint.ideal ?? constraint.max ?? constraint.min;
 }
 
-// Resolve the bare "opus" shorthand to the full config object so callers can read fields uniformly.
-function normalizeCodec(codec: Codec): OpusConfig {
+// Resolve the bare codec shorthands to their full config object so callers can read fields uniformly.
+function normalizeCodec(codec: Codec): OpusConfig | AacConfig {
 	if (codec === "opus") return { mime: "opus" };
+	if (codec === "aac") return { mime: "aac" };
 	return codec;
 }
 
@@ -360,7 +394,8 @@ interface OpusEncoderConfigExt extends OpusEncoderConfig {
 }
 
 // Build the WebCodecs encoder config from the catalog (decoder) config, a Kind hint, and any
-// Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding.
+// Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding. AAC has
+// no such knobs, so it just uses the shared base fields (codec/sampleRate/channels/bitrate).
 function toEncoderConfig(
 	config: Catalog.AudioConfig,
 	kind: Kind,
@@ -372,6 +407,12 @@ function toEncoderConfig(
 		numberOfChannels: config.numberOfChannels,
 		bitrate: config.bitrate,
 	};
+
+	if (config.codec.startsWith("mp4a")) {
+		// Pin raw AAC: the catalog carries a synthesized AudioSpecificConfig, which is only valid for
+		// raw frames. An ADTS default would make the frames self-describing and that description wrong.
+		encoderConfig.aac = { format: "aac" };
+	}
 
 	if (config.codec === "opus") {
 		const opus: OpusEncoderConfigExt = { ...opusOptions };

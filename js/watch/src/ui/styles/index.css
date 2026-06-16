@@ -1,9 +1,7 @@
 @import "./base.css";
-@import "./stats.css";
+@import "./player.css";
 @import "./controls.css";
-@import "./volume-slider.css";
-@import "./quality-selector.css";
+@import "./panel.css";
 @import "./buffer-control.css";
 @import "./buffering-indicator.css";
 @import "./offline-indicator.css";
-@import "./status-indicator.css";

@@ -24,7 +24,7 @@ async fn run_session(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 
-	// For local development, use: http://localhost:4443/anon/video-example
+	// For local development, use: http://localhost:4443/video-example
 	// The "anon" path is usually configured to bypass authentication; be careful!
 	let url = url::Url::parse("https://cdn.moq.dev/anon/video-example").unwrap();
 

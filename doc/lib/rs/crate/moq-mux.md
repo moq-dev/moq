@@ -13,9 +13,12 @@ Media muxers and demuxers for converting existing media formats into MoQ broadca
 
 ## Overview
 
-`moq-mux` provides tools for importing media from various container formats:
+`moq-mux` provides tools for importing media from (and exporting it back to) various container formats:
 
 - **fMP4/CMAF** - Fragmented MP4 and Common Media Application Format
+- **MPEG-TS** - Transport stream (import and export)
+- **Matroska / WebM** - EBML container (import and export)
+- **FLV** - Flash Video / RTMP container (H.264 + AAC; import and export)
 - **HLS** - HTTP Live Streaming playlists
 - **Annex B** - H.264/H.265 raw NAL unit streams
 
@@ -56,6 +59,9 @@ See the [moq-cli source](https://github.com/moq-dev/moq/tree/main/rs/moq-cli) fo
 
 - AAC
 - Opus
+- MP2 (MPEG-TS only, carried verbatim)
+- AC-3 (MPEG-TS only, carried verbatim)
+- E-AC-3 (MPEG-TS only, carried verbatim)
 
 ## Use Cases
 

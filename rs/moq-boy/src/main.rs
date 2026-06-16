@@ -241,7 +241,6 @@ async fn run(config: &Config) -> Result<()> {
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone());
 
-	ffmpeg_next::init().context("failed to init ffmpeg")?;
 	let audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
 
 	let video_track = video_encoder.track.clone();

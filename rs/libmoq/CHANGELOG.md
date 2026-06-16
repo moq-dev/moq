@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/moq-dev/moq/compare/libmoq-v0.3.3...libmoq-v0.3.4) - 2026-06-10
+
+### Added
+
+- *(hang,json,moq-mux)* generic catalog with application extensions ([#1658](https://github.com/moq-dev/moq/pull/1658))
+
+### Fixed
+
+- *(moq-relay)* classify malformed auth-API JSON as an upstream 502
+
+### Other
+
+- Revert accidental commit 24d25604 (moq-native connect/reconnect refactor)
+- *(moq-native)* migrate from anyhow to thiserror ([#1651](https://github.com/moq-dev/moq/pull/1651))
+- cross-compile all x86_64-darwin release artifacts on Apple Silicon ([#1623](https://github.com/moq-dev/moq/pull/1623))
+
 ## [0.3.3](https://github.com/moq-dev/moq/compare/libmoq-v0.3.2...libmoq-v0.3.3) - 2026-06-03
 
 ### Other

@@ -1,3 +1,4 @@
+use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::{NalIterator, START_CODE};
 use crate::container::jitter::MinFrameDuration;
 
@@ -7,12 +8,12 @@ use scuffle_h265::{NALUnitType, SpsNALUnit};
 
 /// A decoder for H.265 with inline SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
-pub struct Import {
-	// The broadcast being produced.
-	broadcast: moq_net::BroadcastProducer,
+pub struct Import<E: CatalogExt = ()> {
+	// Where new media tracks come from.
+	tracks: crate::track_provider::TrackProvider,
 
 	// The catalog being produced.
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<E>,
 
 	// The track being produced.
 	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
@@ -36,10 +37,25 @@ pub struct Import {
 	jitter: MinFrameDuration,
 }
 
-impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+impl<E: CatalogExt> Import<E> {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
-			broadcast,
+			tracks: crate::track_provider::TrackProvider::unique(broadcast, ".hev1"),
+			catalog,
+			track: None,
+			config: None,
+			current: Default::default(),
+			zero: None,
+			vps: None,
+			sps: None,
+			pps: None,
+			jitter: MinFrameDuration::new(),
+		}
+	}
+
+	pub fn new_with_track(track: moq_net::TrackProducer, catalog: crate::catalog::Producer<E>) -> Self {
+		Self {
+			tracks: crate::track_provider::TrackProvider::fixed(track),
 			catalog,
 			track: None,
 			config: None,
@@ -80,20 +96,22 @@ impl Import {
 
 		let mut catalog = self.catalog.lock();
 
-		if let Some(track) = &self.track.take() {
+		if self.track.is_some() && self.tracks.is_fixed() {
+			anyhow::bail!("fixed track cannot be reconfigured");
+		}
+
+		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.name, "reinitializing track");
 			catalog.video.renditions.remove(&track.name);
 		}
 
-		let track = self.broadcast.unique_track(".hev1")?;
+		let track = self.tracks.create()?;
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::catalog::hang::Container::Legacy,
-		));
+		self.track =
+			Some(crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start());
 
 		Ok(())
 	}
@@ -350,7 +368,7 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
+impl<E: CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
 		if let Some(track) = &self.track {
 			tracing::debug!(name = ?track.name, "ending track");

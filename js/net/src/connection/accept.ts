@@ -4,6 +4,7 @@ import { Stream } from "../stream.ts";
 import type { Established } from "./established.ts";
 import { exchangeSetup } from "./handshake.ts";
 
+/** Options for {@link accept}. */
 export interface AcceptProps {
 	// Version to select during SETUP negotiation (for non-ALPN paths).
 	version?: number;

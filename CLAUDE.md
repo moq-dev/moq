@@ -47,6 +47,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq-token/         # JWT authentication library
   moq-token-cli/     # JWT token CLI tool (binary: moq-token-cli)
   moq-cli/           # CLI tool for media operations (binary: moq)
+  moq-bench/         # Load generator for benchmarking relays (binary: moq-bench)
   moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)
   moq-audio/         # Native PCM ↔ Opus encode/decode on top of moq-mux
   hang/              # Media encoding/streaming (catalog/container format)
@@ -135,7 +136,8 @@ match version {
 
 ## Comment Conventions
 
-- Keep things brief and avoid comments if the code is self-explanatory. Reserve comments for the non-obvious WHY: a hidden constraint, a subtle invariant, a workaround for a specific bug, behavior that would surprise a reader.
+- Keep things brief and avoid comments if the code is self-explanatory. Reserve comments for the non-obvious WHY: a hidden constraint, a subtle invariant, a workaround for a specific bug, behavior that would surprise a reader. This is about *implementation* comments inside function bodies and on private items.
+- **Public API symbols are the exception: document every exported symbol.** Each `pub` Rust item and each exported JS/TS symbol (function, class, interface, type, const, enum, plus their notable public members) gets a doc comment (`///` / `/** */`), even when it looks self-explanatory. These render on the published docs (JSR builds API docs from the `.d.ts`; docs.rs from `///`), so a missing doc is a hole a consumer hits, not a self-evident line of code. Add a module-level doc to every entrypoint too (a `/** ... @module */` block at the top of each JS entrypoint file; a `//!` block on each Rust module root). Keep these one line where possible and say what a *consumer* needs (units, ownership, lifecycle, what it wraps), not throat-clearing.
 - Write the way you'd say it out loud, not the way a doc generator would. One short line is almost always enough. Skip throat-clearing like "This function is responsible for...".
 - Comments must reflect the **current** state of the code, not its history. Don't write "X no longer does Y" or "this used to cascade". Describe what the code does today, or delete the comment. Migration context belongs in commit messages and PR descriptions, where it ages with the change rather than rotting in the source.
 
@@ -146,6 +148,18 @@ LLM-authored prose visible to humans (PR descriptions, PR comments, review repli
 ## Refactor As You Go
 
 A function with 4+ args, or a call site passing the same 3+ values into multiple functions, is a struct waiting to happen. Make the change in the same PR rather than leaving a TODO. Same for repeated tuples returned across modules.
+
+## Public API Scrutiny
+
+Before exposing a new public type, function, or field, stop and ask: how will consumers actually call this, and what are we likely to add later? Default to the smallest surface that does the job. Prefer one insulated high-level entry point (plain config in, plain result out) over exposing every building block. Then future-proof what you do expose so additions don't force a breaking change:
+
+- **Config structs consumers construct**: add `#[non_exhaustive]` and a `Default` or constructor. New optional fields then stay additive (callers build via `default()`/`new()` + field set, not struct literals). Prefer adding a field to an existing `#[non_exhaustive]` config over adding a function parameter.
+- **Public enums that may gain variants**: add `#[non_exhaustive]` so external `match`es keep compiling.
+- **Name by role, not by today's only implementation** (`capture::Config`, `publish_capture`, not `CameraConfig`/`publish_camera`) so a second implementation slots in without a rename. Don't bundle generic options under a specific-case name.
+- **Namespace with modules; keep type names short.** Split a growing crate into role modules (`capture`, `encode`, `decode`) and let each own short, unprefixed names. The module already supplies the prefix, so `encode::Config` beats `EncoderConfig` and `encode::Producer` beats `VideoProducer`. But don't nest a module whose name echoes its main type: `encode::encoder::Encoder` stutters; re-export the type flat so it reads `encode::Encoder`. Re-export the public types at the role-module level (`pub use encoder::{Encoder, Config}`) and keep the file-level module (`mod encoder`) private.
+- **Don't leak a third-party type** (`ffmpeg_next`, etc.) in a signature unless the crate is explicitly a thin wrapper. If you must, re-export the dependency and document that a major bump is a breaking change; keep the recommended high-level path free of it.
+
+This applies whenever you add or widen a `pub` item, especially in library crates (`rs/moq-*`, `js/*`) with the [Branch Targeting](#branch-targeting) breaking-change rules.
 
 ## Tooling
 
@@ -209,6 +223,8 @@ When making changes to the codebase:
 ## PR Reviews
 
 CodeRabbit reviews PRs automatically, but it has an hourly quota and runs out of org credits. If a PR shows a "Review limit reached" / "out of usage credits" message instead of an actual review, run the `/review` skill locally against the PR to get review feedback without waiting for the quota to refill.
+
+When reviewing a PR, always include a list of the public API changes (new/renamed/removed/signature-changed `pub` items in `rs/moq-*` and `js/*`), and call out anything that is breaking per [Branch Targeting](#branch-targeting). Distinguish genuinely public surface from `pub(crate)` / private items so the breaking-change and branch-targeting rules are applied to the right things.
 
 ## PR Title and Description Maintenance
 

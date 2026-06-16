@@ -7,6 +7,9 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
 
+/** Consumes a custom track once subscribed, scoped to the subscription's lifetime. */
+export type ConsumeTrack = (track: Moq.Track, effect: Effect) => void;
+
 // Watch supports the two on-the-wire catalog formats from @moq/hang plus a
 // "manual" mode where the user supplies the catalog directly without fetching.
 export const CATALOG_FORMATS = [...Catalog.FORMATS, "manual"] as const;
@@ -188,6 +191,47 @@ export class Broadcast {
 				this.status.set("offline");
 			}
 		});
+	}
+
+	/**
+	 * Subscribe to a custom track within this broadcast, following the active broadcast across
+	 * reconnects. `consume` runs with a freshly-subscribed track and a subscription-scoped effect
+	 * each time a broadcast becomes active (re-running on reconnect).
+	 *
+	 * For a JSON track, wrap the track with a `@moq/json` `Consumer` and read it in a spawned loop
+	 * (e.g. into a Signal). An application advertises the track in its own catalog section, which it
+	 * reads back from {@link catalog} (unknown sections pass through the loose schema):
+	 *
+	 * ```ts
+	 * import * as Json from "@moq/json";
+	 * const scte35 = new Signal<{ splices: number[] } | undefined>(undefined);
+	 * broadcast.subscribeTrack("scte35.json", Catalog.PRIORITY.catalog, (track, effect) => {
+	 * 	const consumer = new Json.Consumer<{ splices: number[] }>(track);
+	 * 	effect.spawn(async () => {
+	 * 		for (;;) {
+	 * 			const next = await Promise.race([effect.cancel, consumer.next()]);
+	 * 			if (next === undefined) break;
+	 * 			scte35.set(next);
+	 * 		}
+	 * 	});
+	 * });
+	 * ```
+	 *
+	 * Returns a function to stop subscribing; also stopped when this broadcast closes.
+	 */
+	subscribeTrack(name: string, priority: number, consume: ConsumeTrack): () => void {
+		const signals = new Effect();
+		signals.run((effect) => {
+			const active = effect.get(this.active);
+			if (!active) return;
+
+			const track = active.subscribe(name, priority);
+			effect.cleanup(() => track.close());
+
+			consume(track, effect);
+		});
+		this.signals.cleanup(() => signals.close());
+		return () => signals.close();
 	}
 
 	close() {

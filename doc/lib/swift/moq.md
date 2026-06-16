@@ -61,6 +61,16 @@ When you're done, signal graceful shutdown to the peer:
 session.shutdown()  // alias for cancel(code: 0)
 ```
 
+A server can reject the connection on auth grounds: `MoqError.Unauthorized` (HTTP 401) or `MoqError.Forbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. Use the `isAuth` helper to catch both:
+
+```swift
+do {
+    let session = try await client.connect(url: "https://relay.example.com")
+} catch let error as MoqError where error.isAuth {
+    // Prompt for credentials; don't reconnect.
+}
+```
+
 ## Subscribe
 
 ```swift
@@ -87,6 +97,26 @@ try audio.writeFrame(payload: payload, timestampUs: 0)
 try audio.writeFrame(payload: payload, timestampUs: 20_000)
 try audio.finish()
 try broadcast.finish()
+```
+
+### On-demand raw tracks
+
+Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:
+
+```swift
+let broadcast = try MoqBroadcastProducer()
+let dynamic = try broadcast.dynamic()
+
+try origin.publish(path: "events", broadcast: broadcast)
+
+for try await track in dynamic.requestedTracks {
+    if try track.name() == "alerts" {
+        try track.writeFrame(payload: Data("ready".utf8))
+        try track.finish()
+    } else {
+        try track.abort(errorCode: 404)
+    }
+}
 ```
 
 ## Cancellation

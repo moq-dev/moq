@@ -86,7 +86,6 @@
             cargo-sort
             cargo-shear
             cargo-edit
-            cargo-sweep
             cargo-semver-checks
             cargo-deny
           ]
@@ -94,6 +93,9 @@
           ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
             # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
             pkgs.release-plz
+            # cpal's `alsa-sys` (moq-audio `capture` feature) links libasound on
+            # Linux via pkg-config; macOS uses CoreAudio, so no dep there.
+            pkgs.alsa-lib
           ];
 
         # JavaScript dependencies
@@ -101,6 +103,9 @@
           bun
           # Only for NPM publishing
           nodejs_24
+          # JSR publishing. We call `deno publish` directly instead of `bunx jsr`
+          # so the release doesn't race on a runtime binary download.
+          deno
         ];
 
         # Python dependencies

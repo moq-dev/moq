@@ -63,7 +63,7 @@ generate = ["localhost", "127.0.0.1"]
 # Optional: root CAs to accept for mTLS peer authentication.
 # Clients that present a cert signed by one of these CAs are granted
 # full access (publish/subscribe/cluster). Intended for relay clustering.
-# Quinn backend only.
+# Supported by the quinn and noq backends.
 root = ["/path/to/peer-ca.pem"]
 ```
 
@@ -96,22 +96,6 @@ cert = "cert.pem"
 key = "key.pem"
 ```
 
-### \[web.health]
-
-Thresholds for the `/health` load-shedding probe (CPU, RAM, network, load
-average), or an external `api` to defer the decision to. All keys are optional;
-an unset threshold is not enforced, and with none set `/health` is a pure
-liveness probe. See [HTTP Endpoints](/bin/relay/http) for the full reference and
-value syntax.
-
-```toml
-[web.health]
-cpu = 75       # percent; `75` or `75%`
-ram = "80%"    # percent of total, or absolute (`32GB`)
-tx = "500MB"   # bytes/s; `b` = bits, `B` = bytes (`4Gb`)
-load5 = "80%"  # load average; raw (`6.0`) or percent of cores; Unix only
-```
-
 ### \[auth]
 
 Authentication configuration.
@@ -136,8 +120,10 @@ Clustering configuration for multi-relay deployments.
 
 ```toml
 [cluster]
-# Peers this relay dials. The topology is whatever you draw with these links.
-connect = ["us-east.example.com:4443"]
+# Peers this relay dials, as full URLs. The topology is whatever you draw with
+# these links. A JWT may be supplied inline as a ?jwt= query parameter. A bare
+# host or "host:port" is deprecated but still accepted (wrapped in https://.../).
+connect = ["https://us-east.example.com/?jwt=..."]
 
 # Optional. This relay's own externally-reachable URL (identity). Advertised to
 # peers when gossip is on, and sent to connect_api as ?node=.
@@ -151,7 +137,9 @@ mesh = true
 # array of hostnames) and reconcile it at runtime, no restart needed.
 connect_api = "https://api.example.com/cluster/connect"
 
-# JWT used for outbound cluster dials (alternative to mTLS).
+# JWT for outbound cluster dials (alternative to mTLS), applied to any peer
+# whose URL has no inline ?jwt=. Required to authenticate gossip / connect_api
+# discovered peers; for static `connect` peers, prefer an inline ?jwt=.
 token = "cluster.jwt"
 ```
 
@@ -166,8 +154,14 @@ Client settings used when connecting to other relays (clustering).
 # Disable TLS verification (development only!)
 tls.disable_verify = true
 
-# Or provide trusted root certificates
+# Or provide trusted root certificates. By default these replace the system
+# roots, so the relay trusts only these CAs.
 # tls.root = ["/path/to/root.pem"]
+
+# Set this to also trust the platform's system roots alongside any custom root,
+# e.g. to dial a local relay with a private CA and a remote one with a public CA.
+# Defaults to true only when no custom root is set.
+# tls.system_roots = true
 ```
 
 ### \[stats]

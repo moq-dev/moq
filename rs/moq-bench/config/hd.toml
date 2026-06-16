@@ -1,0 +1,25 @@
+# High-bitrate video: emulates HD broadcasts at 24-60fps.
+#
+# A swarm of publishers each pushing a single high-bitrate track, with a handful
+# of viewers per connection. Roughly 4-29 Mbps per track depending on the roll.
+#
+# Override the target on the CLI:
+#   moq-bench --file rs/moq-bench/config/hd.toml --url https://relay.example.com
+
+# url = "https://relay.example.com"
+
+startup = "30s"
+report = "5s"
+
+# A: number of connections
+connections = "50:200"
+# B: broadcasts (tracks) per connection
+broadcasts = 1
+# C: peer broadcasts each connection watches
+subscribe = "1:5"
+# D: frames per second
+fps = "24:60"
+# E: bytes per frame
+frame_size = "20000:60000"
+# F: zeroed frames per group (one GOP between keyframes)
+group_size = "23:59"

@@ -137,7 +137,7 @@ impl Export {
 		// 1. Drain catalog updates and (un)subscribe tracks accordingly.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
-				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot)?,
+				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot.media())?,
 				Poll::Ready(None) => {
 					self.catalog = None;
 					break;

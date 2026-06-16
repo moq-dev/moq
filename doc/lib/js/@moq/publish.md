@@ -66,10 +66,27 @@ a real bundler (the examples below).
 
 - `url` (required) - Relay server URL
 - `name` (required) - Broadcast name
-- `source` - "camera", "screen", or "file"
-- `muted` - Disable audio capture (boolean)
+- `source` - Input to capture: `"camera"`, `"screen"`, or `"file"`
+- `muted` - Mute audio capture (boolean)
 - `invisible` - Disable video capture (boolean)
 - `simulcast` - Also publish a lower-resolution `video/sd` rendition (a fraction of the source resolution) alongside `video/hd` (boolean)
+- `preview` - What the preview renders: `"source"` (default), `"encoded"`, or `"none"` to disable it (see [Preview element](#preview-element))
+- `announce` - When to publish the broadcast: `"true"` (default, announce as soon as the element connects), `"false"` (never announce), or `"source"` (hold off until a `source` is selected). The JS property takes a real boolean or `"source"` (`el.announce = false`)
+
+## Preview element
+
+`<moq-publish>` discovers a nested `<video>` or `<canvas>` and uses it for a local preview.
+
+- `<video>` attaches the raw capture stream via `srcObject`. This is the cheapest preview and the default.
+- `<canvas>` draws the frames itself. With `preview="source"` (default) it draws the raw capture; with `preview="encoded"` it draws a decoded copy of the encoded video, so the preview shows exactly what a viewer receives over the network, codec artifacts and all.
+
+The `encoded` mode costs a full extra encode + decode pass (it re-encodes with the same settings as the published rendition), so reach for it when you want to monitor the transmitted quality, not as the default preview. Set `preview="none"` to disable the preview without removing the element.
+
+```html
+<moq-publish url="https://relay.example.com/anon" name="room/alice.hang" source="camera" preview="encoded">
+    <canvas></canvas>
+</moq-publish>
+```
 
 ## UI Overlay
 
@@ -112,6 +129,34 @@ const broadcast = new Publish.Broadcast({
 // Reactive controls
 broadcast.name.set("bob.hang");
 ```
+
+### Custom tracks and catalog sections
+
+Beyond audio and video, you can publish arbitrary application tracks within the
+same broadcast (no separate broadcast needed). `publishTrack(name, serve)` runs
+`serve(track, effect)` for each subscriber; it rejects the built-in track names
+(catalog/audio/video). Encode the payload yourself with the re-exported
+`@moq/json`: a track-less `Json.Producer` is the same fan-out producer the catalog
+uses, seeding late joiners with the latest value.
+
+`publishTrack` does not touch the catalog; advertise the track by writing your own
+section to `broadcast.catalog` (the [catalog root](/concept/layer/hang#extensions)
+is a loose object, so any key passes through). This lets an app support something
+like an `scte35` section with no hang-specific support:
+
+```typescript
+import { Json } from "@moq/publish";
+
+const scte35 = new Json.Producer<{ splices: number[] }>({ initial: { splices: [] } });
+broadcast.publishTrack("scte35.json", (track, effect) => scte35.serve(track, effect));
+broadcast.catalog.mutate((c) => {
+    c.scte35 = { track: "scte35.json" };
+});
+scte35.update({ splices: [42] });
+```
+
+The component exposes everything via its `broadcast` property
+(`el.broadcast.publishTrack(...)`).
 
 ## Related Packages
 

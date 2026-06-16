@@ -54,6 +54,9 @@ export interface MultiBackendProps {
 	connection?: Signal<Moq.Connection.Established | undefined>;
 
 	paused?: boolean | Signal<boolean>;
+
+	// When video is downloaded relative to the canvas position. See {@link Video.Visible}.
+	visible?: Video.Visible | Signal<Video.Visible>;
 }
 
 // We have to proxy some of these signals because we support both the MSE and WebCodecs.
@@ -112,6 +115,9 @@ export class MultiBackend implements Backend {
 	jitter: Signal<Moq.Time.Milli>;
 	paused: Signal<boolean>;
 
+	// When video is downloaded relative to the canvas position. See {@link Video.Visible}.
+	visible: Signal<Video.Visible>;
+
 	video: VideoBackend;
 	#videoSource: Video.Source;
 
@@ -141,6 +147,7 @@ export class MultiBackend implements Backend {
 		this.audio = new AudioBackend(this.#audioSource);
 
 		this.paused = Signal.from(props?.paused ?? false);
+		this.visible = Signal.from(props?.visible ?? "0px");
 
 		this.signals.run(this.#runElement.bind(this));
 	}
@@ -169,6 +176,7 @@ export class MultiBackend implements Backend {
 		const videoRenderer = new Video.Renderer(videoSource, {
 			canvas: element,
 			paused: this.paused,
+			visible: this.visible,
 		});
 
 		effect.cleanup(() => {

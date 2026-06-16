@@ -46,9 +46,9 @@ impl<T> Weak<T> {
 	pub fn consume(&self) -> Consumer<T> {
 		let prev = self.counts.consumers.fetch_add(1, Ordering::AcqRel);
 
-		// Wake waiters (e.g. `used()`) when the first consumer appears.
+		// Wake `used()` waiters when the first consumer appears.
 		if prev == 0 {
-			let mut waiters = self.state.lock().waiters.take();
+			let mut waiters = self.state.lock().waiters_consumer.take();
 			waiters.wake();
 		}
 
@@ -78,46 +78,6 @@ impl<T> Weak<T> {
 		}
 	}
 
-	/// Poll-based mutable access with waker registration.
-	///
-	/// Calls `f` with a [`Mut`] guard. If `f` returns [`Poll::Pending`],
-	/// registers the waiter for notification when the state next changes.
-	/// Returns `None` if the channel is closed.
-	pub fn poll_write<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Option<R>>
-	where
-		F: FnMut(&mut Mut<'_, T>) -> Poll<R>,
-	{
-		let Ok(mut state) = self.write() else {
-			return Poll::Ready(None);
-		};
-
-		if let Poll::Ready(res) = f(&mut state) {
-			return Poll::Ready(Some(res));
-		}
-
-		// Reset modified so the drop doesn't immediately wake the waiter we're about to register.
-		state.modified = false;
-
-		let state = state.state.as_mut().unwrap();
-		waiter.register(&mut state.waiters);
-		Poll::Pending
-	}
-
-	/// Wait for the closure to return [`Poll::Ready`], re-polling on each state change.
-	///
-	/// Returns `Ok(R)` when the closure returns [`Poll::Ready`], or `Err(Ref)` with
-	/// read-only access to the final state if the channel closes first.
-	pub async fn wait<F, R>(&self, mut f: F) -> Result<R, Ref<'_, T>>
-	where
-		F: FnMut(&mut Mut<'_, T>) -> Poll<R> + Unpin,
-		R: Unpin,
-	{
-		match crate::wait(move |waiter| self.poll_write(waiter, &mut f)).await {
-			Some(r) => Ok(r),
-			None => Err(self.read()),
-		}
-	}
-
 	/// Returns `true` if the channel has been closed.
 	pub fn is_closed(&self) -> bool {
 		self.state.lock().closed
@@ -143,7 +103,7 @@ impl<T> Weak<T> {
 			return Poll::Ready(None);
 		}
 
-		waiter.register(&mut state.waiters);
+		waiter.register(&mut state.waiters_consumer);
 
 		// Re-check after registration to avoid TOCTOU race where the last
 		// consumer drops between the initial check and waiter registration.
@@ -174,7 +134,7 @@ impl<T> Weak<T> {
 			return Poll::Ready(None);
 		}
 
-		waiter.register(&mut state.waiters);
+		waiter.register(&mut state.waiters_consumer);
 
 		// Re-check after registration to avoid TOCTOU race.
 		if self.counts.consumers.load(Ordering::Relaxed) > 0 {

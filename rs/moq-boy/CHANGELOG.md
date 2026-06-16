@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.18](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.17...moq-boy-v0.2.18) - 2026-06-10
+
+### Added
+
+- *(moq-video,moq-cli)* webcam capture and publish ([#1669](https://github.com/moq-dev/moq/pull/1669))
+- *(hang,json,moq-mux)* generic catalog with application extensions ([#1658](https://github.com/moq-dev/moq/pull/1658))
+
+### Fixed
+
+- *(moq-relay)* classify malformed auth-API JSON as an upstream 502
+
+### Other
+
+- Revert accidental commit 24d25604 (moq-native connect/reconnect refactor)
+- *(moq-native)* migrate from anyhow to thiserror ([#1651](https://github.com/moq-dev/moq/pull/1651))
+
 ## [0.2.17](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.16...moq-boy-v0.2.17) - 2026-06-03
 
 ### Other

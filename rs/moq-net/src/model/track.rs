@@ -315,12 +315,16 @@ impl TrackProducer {
 
 	/// Abort the track with the given error.
 	///
-	/// Child groups are independent and must be aborted separately if desired;
-	/// existing group consumers can still finish reading any groups that were
-	/// already created.
+	/// Drops the cached groups so a stale [`TrackConsumer`] can't pin them (and
+	/// their frame buffers) in memory forever. Consumers that haven't drained yet
+	/// surface the abort error instead of the leftover cache. Child groups are
+	/// independent: a consumer that already pulled a [`GroupConsumer`] keeps its
+	/// own handle and can finish reading it.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut guard = self.modify()?;
 		guard.abort = Some(err);
+		guard.groups.clear();
+		guard.duplicates.clear();
 		guard.close();
 		Ok(())
 	}
@@ -388,6 +392,24 @@ impl Clone for TrackProducer {
 		Self {
 			info: self.info.clone(),
 			state: self.state.clone(),
+		}
+	}
+}
+
+impl Drop for TrackProducer {
+	fn drop(&mut self) {
+		// The last producer going away without finishing is an abrupt teardown:
+		// release the cached groups so a stale consumer can't pin them (and their
+		// frame buffers) forever, the same as an explicit abort. A cleanly
+		// finished track keeps its cache so consumers can still drain it.
+		if !self.state.is_last() {
+			return;
+		}
+		if let Ok(mut state) = self.state.write()
+			&& state.final_sequence.is_none()
+		{
+			state.groups.clear();
+			state.duplicates.clear();
 		}
 	}
 }
@@ -842,6 +864,62 @@ mod test {
 		let group = consumer.assert_group();
 		// consume() starts at index 0, first non-tombstoned group is seq 5.
 		assert_eq!(group.sequence, 5);
+	}
+
+	#[tokio::test]
+	async fn abort_clears_cached_groups() {
+		let mut producer = Track::new("test").produce();
+		producer.append_group().unwrap();
+		producer.append_group().unwrap();
+
+		// A stale consumer that never drains must not pin the cached groups.
+		let mut consumer = producer.consume();
+		assert_eq!(live_groups(&producer.state.read()), 2);
+
+		producer.abort(Error::Cancel).unwrap();
+
+		{
+			let state = producer.state.read();
+			assert!(state.groups.is_empty(), "cached groups should be dropped on abort");
+			assert!(state.duplicates.is_empty());
+		}
+
+		// The consumer now surfaces the abort error rather than the leftover cache.
+		let result = consumer.recv_group().now_or_never().expect("should not block");
+		assert!(matches!(result, Err(Error::Cancel)));
+	}
+
+	#[tokio::test]
+	async fn drop_unfinished_clears_cached_groups() {
+		let producer = Track::new("test").produce();
+		let mut writer = producer.clone();
+		writer.append_group().unwrap();
+
+		// A stale consumer keeps the channel (and thus the cache) alive.
+		let mut consumer = producer.consume();
+		assert_eq!(live_groups(&producer.state.read()), 1);
+
+		// Drop every producer without finishing: the cache is released.
+		drop(writer);
+		drop(producer);
+
+		let result = consumer.recv_group().now_or_never().expect("should not block");
+		assert!(matches!(result, Err(Error::Dropped)));
+	}
+
+	#[tokio::test]
+	async fn drop_finished_keeps_cached_groups() {
+		let mut producer = Track::new("test").produce();
+		producer.append_group().unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		drop(producer);
+
+		// A cleanly finished track keeps its cache so the consumer can still drain.
+		assert_eq!(consumer.assert_group().sequence, 0);
+		let done = consumer.recv_group().now_or_never().expect("should not block").unwrap();
+		assert!(done.is_none(), "consumer should drain then see clean finish");
 	}
 
 	#[test]

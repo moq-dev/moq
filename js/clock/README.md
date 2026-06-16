@@ -18,7 +18,7 @@ bun ./src/main.ts --url https://cdn.moq.dev/anon --broadcast myclock publish
 bun ./src/main.ts --url https://cdn.moq.dev/anon --broadcast myclock subscribe
 ```
 
-If you're running a relay server locally, use `http://localhost:4443/anon` instead.
+If you're running a relay server locally, use `http://localhost:4443` instead.
 
 ## Wire Format
 

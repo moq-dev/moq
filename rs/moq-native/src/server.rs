@@ -58,7 +58,7 @@ pub struct ServerConfig {
 	/// shortly after the handshake completes. Typical use: handshake on an
 	/// anycast IP, steady-state on this host's unicast IP.
 	///
-	/// Only honored by the Quinn backend.
+	/// Honored by the Quinn and noq backends.
 	#[arg(
 		id = "server-preferred-v4",
 		long = "server-preferred-v4",
@@ -162,12 +162,16 @@ impl Server {
 		let versions = config.versions();
 
 		if !config.tls.root.is_empty() {
-			#[cfg(feature = "quinn")]
-			let quinn_backend = matches!(backend, QuicBackend::Quinn);
-			#[cfg(not(feature = "quinn"))]
-			let quinn_backend = false;
-			if !quinn_backend {
-				return Err(Error::MtlsQuinnOnly);
+			let mtls_supported = match backend {
+				#[cfg(feature = "quinn")]
+				QuicBackend::Quinn => true,
+				#[cfg(feature = "noq")]
+				QuicBackend::Noq => true,
+				#[allow(unreachable_patterns)]
+				_ => false,
+			};
+			if !mtls_supported {
+				return Err(Error::MtlsUnsupported);
 			}
 		}
 
@@ -611,13 +615,13 @@ impl Request {
 	/// Whether the peer presented a client certificate during the handshake
 	/// that chained to a configured [`crate::tls::Server::root`].
 	///
-	/// Only the Quinn backend supports mTLS; other backends always return `false`.
+	/// Only the Quinn and noq backends support mTLS; other backends always return `false`.
 	pub fn has_peer_certificate(&self) -> bool {
 		match self.kind {
 			#[cfg(feature = "quinn")]
 			RequestKind::Quinn(ref request) => request.has_peer_certificate(),
 			#[cfg(feature = "noq")]
-			RequestKind::Noq(_) => false,
+			RequestKind::Noq(ref request) => request.has_peer_certificate(),
 			#[cfg(feature = "quiche")]
 			RequestKind::Quiche(_) => false,
 			#[cfg(feature = "iroh")]
