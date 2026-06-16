@@ -139,7 +139,7 @@ export class Broadcast {
 	 * When a subscriber requests a track with this name, `serve` runs with the track and an effect
 	 * scoped to that subscription (cleaned up when the subscriber goes away). The handler persists
 	 * across reconnects. This is the low-level escape hatch for arbitrary payloads; see
-	 * {@link publishJson} for a JSON track that also advertises itself in the catalog.
+	 * {@link publishJson} for a fan-out JSON-track helper.
 	 *
 	 * Returns a function that unregisters the handler. Note this does not close already-served
 	 * subscriptions, nor touch the catalog. Throws if `name` collides with a built-in track
