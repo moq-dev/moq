@@ -1,3 +1,5 @@
+//! Watch on-disk files (TLS certs/keys) and get notified when they're rotated.
+
 use std::path::{Path, PathBuf};
 
 use notify::Watcher;
@@ -15,7 +17,7 @@ use tokio::sync::mpsc;
 /// swap, which changes the inode (and, for the K8s `..data` symlink, fires on the
 /// directory without ever naming the file), so a watch set directly on the path
 /// would be missed.
-pub(crate) struct FileWatcher {
+pub struct FileWatcher {
 	// Holds the OS watcher alive; dropping it stops events.
 	_watcher: notify::RecommendedWatcher,
 	events: mpsc::Receiver<()>,
@@ -27,7 +29,7 @@ impl FileWatcher {
 	/// instance/watch limit is hit). `notify` already falls back to a built-in
 	/// poll watcher on platforms without a native backend, so there's no manual
 	/// polling here.
-	pub(crate) fn new(paths: &[PathBuf]) -> notify::Result<Self> {
+	pub fn new(paths: &[PathBuf]) -> notify::Result<Self> {
 		// A capacity-1 channel of unit wakeups coalesces the burst of raw events
 		// notify emits per change (and any unrelated churn in the directory): a
 		// full buffer already has a pending wakeup, so extra sends are dropped.
@@ -68,7 +70,7 @@ impl FileWatcher {
 	/// Resolve once the OS reports activity in a watched directory. The caller
 	/// reloads on return; reloads are idempotent, so the coarse "something
 	/// changed" granularity at worst costs an occasional redundant reload.
-	pub(crate) async fn changed(&mut self) {
+	pub async fn changed(&mut self) {
 		// The sender lives inside `_watcher`, which we hold for `&mut self`, so the
 		// channel can't be closed here.
 		self.events

@@ -4013,7 +4013,6 @@ dependencies = [
  "moq-native",
  "moq-net",
  "moq-token",
- "notify",
  "qmux",
  "rcgen",
  "reqwest 0.12.28",
