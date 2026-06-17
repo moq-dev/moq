@@ -43,8 +43,8 @@ pub use server::*;
 pub use moq_net;
 pub use rustls;
 
-// Re-exported because [`watch::FileWatcher`] surfaces `notify::Result`/`notify::Error`
-// in its API; a major `notify` bump is therefore a breaking change for this crate.
+/// Re-exported because [`watch::FileWatcher`] surfaces `notify::Result`/`notify::Error`
+/// in its API; a major `notify` bump is therefore a breaking change for this crate.
 #[cfg(feature = "watch")]
 pub use notify;
 
