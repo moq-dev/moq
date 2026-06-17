@@ -12,6 +12,26 @@ fn id(raw: i32) -> u32 {
 	raw as u32
 }
 
+/// Request an already-announced broadcast via `moq_origin_request` and return its handle.
+///
+/// The broadcast resolves immediately (it was published locally), so this drains both the
+/// broadcast handle and the terminal callback before returning.
+fn request_broadcast(origin: u32, path: &[u8]) -> u32 {
+	let cb = Callback::new();
+	let _task = id(unsafe {
+		moq_origin_request(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+	let broadcast = id(cb.recv());
+	cb.recv_terminal();
+	broadcast
+}
+
 /// RAII guard that calls a closure on drop.
 struct Guard<F: FnOnce()>(Option<F>);
 impl<F: FnOnce()> Drop for Guard<F> {
@@ -242,7 +262,7 @@ fn publish_catalog_roundtrip() {
 	let path = b"catalog-producer";
 	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
-	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
+	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
 	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
@@ -329,7 +349,7 @@ fn raw_track_publish_consume() {
 	let path = b"raw-track";
 	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
-	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
+	let consume = request_broadcast(origin, path);
 
 	let frame_cb = Callback::new();
 	let consumer = id(unsafe {
@@ -490,7 +510,7 @@ fn double_close_all_resource_types() {
 	let path = b"double-close-test";
 	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
-	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
+	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
 	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
 
@@ -630,7 +650,7 @@ fn local_publish_consume() {
 	let path = b"live";
 	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
-	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
+	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
 	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
 
@@ -746,7 +766,7 @@ fn consume_announced_local() {
 	let consume = id(cb.recv());
 	assert_eq!(cb.recv_terminal(), 0, "wait delivers terminal 0 after the handle");
 
-	// The delivered handle behaves like one from moq_origin_consume.
+	// The delivered handle behaves like one from moq_origin_request.
 	let catalog_cb = Callback::new();
 	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
@@ -818,7 +838,7 @@ fn video_publish_consume() {
 	let path = b"video-test";
 	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
-	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
+	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
 	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
 
@@ -926,7 +946,7 @@ fn multiple_frames_ordering() {
 	let path = b"ordering-test";
 	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
-	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
+	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
 	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
@@ -992,7 +1012,7 @@ fn catalog_update_on_new_track() {
 	let path = b"catalog-update";
 	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
-	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
+	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
 	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
 

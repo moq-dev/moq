@@ -201,7 +201,7 @@ pub extern "C" fn moq_session_close(session: u32) -> i32 {
 /// The same broadcast can be published to multiple origins under different paths.
 ///
 /// [moq_origin_announced] can be used to discover broadcasts published to this origin.
-/// This is extremely useful for discovering what is available on the server to [moq_origin_consume].
+/// This is extremely useful for discovering what is available on the server to [moq_origin_request].
 ///
 /// Returns a non-zero handle to the origin on success.
 #[unsafe(no_mangle)]
@@ -323,30 +323,12 @@ pub extern "C" fn moq_origin_announced_close(announced: u32) -> i32 {
 	})
 }
 
-/// Consume a broadcast from an origin by path.
-///
-/// Returns a non-zero handle to the broadcast on success, or a negative code on failure.
-///
-/// # Safety
-/// - The caller must ensure that path is a valid pointer to path_len bytes of data.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_consume(origin: u32, path: *const c_char, path_len: usize) -> i32 {
-	ffi::enter(move || {
-		let origin = ffi::parse_id(origin)?;
-		let path = unsafe { ffi::parse_str(path, path_len)? };
-
-		let mut state = State::lock();
-		let broadcast = state.origin.consume(origin, path)?;
-		state.consume.start(broadcast)
-	})
-}
-
 /// Consume a broadcast from an origin by path, waiting until it is announced.
 ///
-/// Unlike [moq_origin_consume], which fails immediately with a not-found code when the broadcast
-/// has not been announced yet, this waits for the announcement to arrive (e.g. over the network)
-/// and then delivers the broadcast handle via `on_broadcast`. Use it right after [moq_session_connect]
-/// to avoid racing announcement gossip, instead of polling [moq_origin_consume] in a retry loop.
+/// Resolves against future announcements: it waits for the announcement to arrive (e.g. over the
+/// network) and then delivers the broadcast handle via `on_broadcast`. Use it right after
+/// [moq_session_connect] to avoid racing announcement gossip. To resolve against only what is
+/// announced now (plus any dynamic fallback), use [moq_origin_request] instead.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once announced, then exactly once
 /// more with a terminal code: `0` (the wait finished, including after
@@ -393,8 +375,8 @@ pub extern "C" fn moq_origin_consume_announced_close(task: u32) -> i32 {
 
 /// Request a broadcast from an origin by path, resolving as soon as it can be served.
 ///
-/// Sits between [moq_origin_consume] (announced-only, fails immediately) and
-/// [moq_origin_consume_announced] (waits indefinitely for a future announcement): it returns an
+/// Resolves against what is announced *now* plus any dynamic fallback, where
+/// [moq_origin_consume_announced] waits indefinitely for a future announcement: it returns an
 /// already-announced broadcast at once, otherwise falls back to a dynamic handler on the origin
 /// (if any), and fails when neither can serve the path. It does NOT wait for a later
 /// announcement.

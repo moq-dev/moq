@@ -92,7 +92,7 @@ Any function that registers a callback (`moq_session_connect`, `moq_origin_annou
 - **`0`** — closed cleanly. **Terminal.**
 - **`< 0`** — closed with an error. **Terminal.**
 
-A positive result that is itself a handle must be freed once you're done with it (e.g. broadcasts from `moq_origin_consume` / `moq_origin_request` via `moq_consume_close`). `moq_origin_announced` is the notable repeat case: it delivers a fresh announce ID for *every* announce / unannounce event, so free each one with `moq_origin_announced_free` after reading it with `moq_origin_announced_info`, or they accumulate for the life of the listener.
+A positive result that is itself a handle must be freed once you're done with it (e.g. a broadcast from `moq_origin_request` via `moq_consume_close`). `moq_origin_announced` is the notable repeat case: it delivers a fresh announce ID for *every* announce / unannounce event, so free each one with `moq_origin_announced_free` after reading it with `moq_origin_announced_info`, or they accumulate for the life of the listener.
 
 Once a callback fires with any non-positive (`<= 0`) code, libmoq will never invoke it again and never touch `user_data` again. Release `user_data` in response to that final callback.
 

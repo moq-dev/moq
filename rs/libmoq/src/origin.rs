@@ -133,13 +133,6 @@ impl Origin {
 		Ok(())
 	}
 
-	pub fn consume<P: moq_net::AsPath>(&mut self, origin: Id, path: P) -> Result<moq_net::BroadcastConsumer, Error> {
-		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		// Synchronous lookup races announcement gossip; consume() is a cheap handle over this
-		// origin's tree. Use `consume_announced` to wait for the announcement instead.
-		origin.consume().get_broadcast(path).ok_or(Error::BroadcastNotFound)
-	}
-
 	/// Wait until the broadcast at `path` is announced, then deliver its handle via the callback.
 	///
 	/// The callback fires the broadcast handle (> 0) once announced, then a terminal `0`. On error
