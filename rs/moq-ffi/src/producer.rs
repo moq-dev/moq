@@ -1,8 +1,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use bytes::Buf;
-
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqTrackConsumer};
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -127,13 +125,8 @@ impl MoqBroadcastProducer {
 		let format = moq_mux::import::FramedFormat::from_str(&format)
 			.map_err(|_| MoqError::Codec(format!("unknown format: {format}")))?;
 
-		let mut buf = init.as_slice();
-		let decoder = moq_mux::import::Framed::new(state.broadcast.clone(), state.catalog.clone(), format, &mut buf)
+		let decoder = moq_mux::import::Framed::new(state.broadcast.clone(), state.catalog.clone(), format, &init)
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
-
-		if buf.has_remaining() {
-			return Err(MoqError::Codec("init failed: trailing bytes".into()));
-		}
 
 		let demand = decoder
 			.demand()
@@ -166,14 +159,9 @@ impl MoqBroadcastProducer {
 			guard.as_ref().ok_or_else(|| MoqError::Closed)?.clone()
 		};
 
-		let mut buf = init.as_slice();
 		let decoder =
-			moq_mux::import::Framed::new_with_track(track_clone.clone(), state.catalog.clone(), format, &mut buf)
+			moq_mux::import::Framed::new_with_track(track_clone.clone(), state.catalog.clone(), format, &init)
 				.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
-
-		if buf.has_remaining() {
-			return Err(MoqError::Codec("init failed: trailing bytes".into()));
-		}
 
 		let mut guard = track.inner.lock().unwrap();
 		guard.take().ok_or_else(|| MoqError::Closed)?;
@@ -438,15 +426,10 @@ impl MoqMediaProducer {
 		let media = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
 
 		let timestamp = hang::container::Timestamp::from_micros(timestamp_us)?;
-		let mut data = payload.as_slice();
 		media
 			.decoder
-			.decode_frame(&mut data, Some(timestamp))
+			.decode(&payload, Some(timestamp))
 			.map_err(|err| MoqError::Codec(format!("decode failed: {err}")))?;
-
-		if data.has_remaining() {
-			return Err(MoqError::Codec("buffer was not fully consumed".into()));
-		}
 
 		Ok(())
 	}

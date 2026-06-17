@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use bytes::Buf;
 use moq_mux::import;
 
 use crate::{Error, Id, NonZeroSlab};
@@ -52,29 +51,20 @@ impl Publish {
 		Ok(())
 	}
 
-	pub fn media_ordered(&mut self, broadcast: Id, format: &str, mut init: &[u8]) -> Result<Id, Error> {
+	pub fn media_ordered(&mut self, broadcast: Id, format: &str, init: &[u8]) -> Result<Id, Error> {
 		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 
 		let format = import::FramedFormat::from_str(format).map_err(|_| Error::UnknownFormat(format.to_string()))?;
-		let decoder = import::Framed::new(broadcast.clone(), catalog.clone(), format, &mut init)?;
+		let decoder = import::Framed::new(broadcast.clone(), catalog.clone(), format, init)?;
 
 		let id = self.media.insert(decoder)?;
 		Ok(id)
 	}
 
-	pub fn media_frame(
-		&mut self,
-		media: Id,
-		mut data: &[u8],
-		timestamp: hang::container::Timestamp,
-	) -> Result<(), Error> {
+	pub fn media_frame(&mut self, media: Id, data: &[u8], timestamp: hang::container::Timestamp) -> Result<(), Error> {
 		let media = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
 
-		media.decode_frame(&mut data, Some(timestamp))?;
-
-		if data.has_remaining() {
-			return Err(Error::BufferNotConsumed);
-		}
+		media.decode(data, Some(timestamp))?;
 
 		Ok(())
 	}

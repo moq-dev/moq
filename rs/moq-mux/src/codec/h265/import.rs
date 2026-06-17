@@ -10,45 +10,40 @@
 //! are written through to the producer, which reports
 //! [`MissingKeyframe`](crate::container::MissingKeyframe) for a mid-stream join.
 //! Annex-B byte parsing lives in [`Split`](super::Split); this type is a pure frame publisher
-//! that whoever owns the split drives via the [`FrameDecode`] trait.
+//! that whoever owns the split drives via [`decode`](Import::decode).
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use scuffle_h265::SpsNALUnit;
 
 use super::{Error, split::nal_unit_type};
 use crate::Result;
+use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::NalIterator;
 use crate::container::Frame;
 use crate::container::jitter::MinFrameDuration;
-use crate::import::{FrameDecode, Renditions};
 
 /// A pure-publisher importer for H.265 with inline VPS/SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
 ///
-/// Build it from a [`moq_net::TrackRequest`] ([`new`](Self::new)) or an existing
-/// track ([`from_track`](Self::from_track)), and feed it frames a [`Split`](super::Split)
-/// produced via the [`FrameDecode`] impl. The catalog rendition fills in lazily
-/// once the first SPS is parsed; read it via [`catalog`](Self::catalog).
-pub struct Import {
+/// Build it with [`new`](Self::new), passing the track producer and the
+/// [`catalog::Producer`](crate::catalog::Producer) it publishes into, and feed it
+/// frames a [`Split`](super::Split) produced via [`decode`](Self::decode). The
+/// catalog rendition fills in lazily once the first SPS is parsed.
+pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	catalog: hang::Catalog,
+	rendition: crate::catalog::VideoTrack<E>,
 	config: Option<hang::catalog::VideoConfig>,
 	last_sps: Option<Bytes>,
 	jitter: MinFrameDuration,
 }
 
-impl Import {
-	/// Serve a track request, accepting it at the microsecond timescale.
-	pub fn new(request: moq_net::TrackRequest) -> Self {
-		let info = moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE);
-		Self::from_track(request.accept(info))
-	}
-
-	/// Publish on an existing track producer.
-	pub fn from_track(track: moq_net::TrackProducer) -> Self {
+impl<E: CatalogExt> Import<E> {
+	/// Publish on an existing track producer, registering the rendition in `catalog`.
+	pub fn new(track: moq_net::TrackProducer, catalog: crate::catalog::Producer<E>) -> Self {
+		let rendition = catalog.video_track(track.name());
 		Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
-			catalog: hang::Catalog::default(),
+			rendition,
 			config: None,
 			last_sps: None,
 			jitter: MinFrameDuration::new(),
@@ -57,12 +52,12 @@ impl Import {
 
 	/// Resolve the codec config from VPS/SPS/PPS and other non-slice NALs.
 	///
-	/// Resolves the config from any SPS in the buffer. Optional, since the
-	/// importer also self-initializes from the first keyframe. The buffer is
-	/// *not* consumed: the dispatcher-owned [`Split`](super::Split) consumes it (and seeds its
-	/// parameter-set cache).
-	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
-		let mut scan = Bytes::copy_from_slice(buf.as_ref());
+	/// Resolves the config from any SPS in the buffer. Optional, since the importer
+	/// also self-initializes from the first keyframe. Takes a read-only slice: the
+	/// dispatcher-owned [`Split`](super::Split) is what consumes the stream (and seeds
+	/// its parameter-set cache).
+	pub fn initialize(&mut self, buf: &[u8]) -> Result<()> {
+		let mut scan = Bytes::copy_from_slice(buf);
 		let mut nals = NalIterator::new(&mut scan);
 		while let Some(nal) = nals.next().transpose()? {
 			if is_sps(&nal) {
@@ -77,14 +72,9 @@ impl Import {
 		Ok(())
 	}
 
-	/// The underlying track producer.
-	pub fn track(&self) -> &moq_net::TrackProducer {
-		self.track.track()
-	}
-
-	/// The standalone catalog once the first SPS is parsed, else `None`.
-	pub fn catalog(&self) -> Option<&hang::Catalog> {
-		self.config.is_some().then_some(&self.catalog)
+	/// A watch-only handle to this track's subscriber demand.
+	pub fn demand(&self) -> moq_net::TrackDemand {
+		self.track.track().demand()
 	}
 
 	/// True once the first SPS has populated the catalog.
@@ -139,9 +129,8 @@ impl Import {
 			return Ok(());
 		}
 
-		let track_name = self.track.name().to_string();
-		tracing::debug!(name = ?track_name, ?config, "starting track");
-		self.catalog.video.renditions.insert(track_name, config.clone());
+		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
+		self.rendition.set(config.clone());
 		self.config = Some(config);
 		Ok(())
 	}
@@ -166,25 +155,17 @@ impl Import {
 			// MissingKeyframe, which the caller (e.g. a TS mid-stream join) skips.
 			self.track.write(frame)?;
 
-			if let Some(jitter) = self.jitter.observe(pts)
-				&& let Some(c) = self.catalog.video.renditions.get_mut(self.track.name())
-			{
-				c.jitter = Some(jitter);
+			if let Some(jitter) = self.jitter.observe(pts) {
+				self.rendition.update(|c| c.jitter = Some(jitter));
 			}
 		}
 		Ok(())
 	}
-}
 
-impl FrameDecode for Import {
-	fn decode<I: IntoIterator<Item = Frame>>(&mut self, frames: I) -> Result<()> {
+	/// Publish split frames, resolving the config from the first keyframe's inline
+	/// SPS and refining the catalog jitter as it goes.
+	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		self.write_frames(frames)
-	}
-}
-
-impl Renditions for Import {
-	fn renditions(&self) -> &hang::Catalog {
-		&self.catalog
 	}
 }
 

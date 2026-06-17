@@ -90,8 +90,8 @@ pub struct Config {
 /// track monitors, and async tasks.
 struct Session {
 	video_encoder: video::VideoEncoder,
-	video_track: moq_net::TrackProducer,
-	audio_track: moq_net::TrackProducer,
+	video_track: moq_net::TrackDemand,
+	audio_track: moq_net::TrackDemand,
 
 	/// Whether anyone is subscribed to the video/audio tracks.
 	video_active: AtomicBool,
@@ -109,7 +109,7 @@ struct Session {
 impl Session {
 	/// Monitor a single track's subscription state.
 	/// Sets the flag when a viewer subscribes, clears it when all unsubscribe.
-	async fn run_track_monitor(&self, name: &str, track: &moq_net::TrackProducer, flag: &AtomicBool) {
+	async fn run_track_monitor(&self, name: &str, track: &moq_net::TrackDemand, flag: &AtomicBool) {
 		loop {
 			if track.used().await.is_err() {
 				break;
@@ -246,8 +246,8 @@ async fn run(config: &Config) -> Result<()> {
 
 	let audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
 
-	let video_track = video_encoder.track.clone();
-	let audio_track = audio_encoder.track().clone();
+	let video_track = video_encoder.demand.clone();
+	let audio_track = audio_encoder.track().demand();
 
 	let status_publisher = status::StatusPublisher::new(&mut broadcast)?;
 

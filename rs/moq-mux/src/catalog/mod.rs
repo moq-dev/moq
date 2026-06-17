@@ -29,6 +29,7 @@ mod format;
 mod producer;
 mod stream;
 mod target;
+mod tracks;
 
 pub use consumer::Consumer;
 pub use filter::{Filter, FilterAudio, FilterVideo};
@@ -36,3 +37,4 @@ pub use format::*;
 pub use producer::{Guard, Producer};
 pub use stream::Stream;
 pub use target::{Target, TargetAudio, TargetVideo};
+pub use tracks::{AudioTrack, VideoTrack};

@@ -26,23 +26,22 @@ const DEFAULT_FRAMERATE: u32 = 30;
 /// catalog registration and framing.
 pub struct Producer {
 	split: moq_mux::codec::h264::Split,
-	import: moq_mux::import::Track<moq_mux::codec::h264::Import>,
+	import: moq_mux::codec::h264::Import,
 }
 
 impl Producer {
 	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self, Error> {
 		let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
-		let import = moq_mux::codec::h264::Import::from_track(track);
-		let import = moq_mux::import::Track::new(catalog, import);
+		let import = moq_mux::codec::h264::Import::new(track, catalog);
 		let split = moq_mux::codec::h264::Split::new();
 		Ok(Self { split, import })
 	}
 
-	/// The underlying track producer, created eagerly so subscription state is
-	/// observable before any frames arrive. Clone it to watch via
-	/// [`used`](moq_net::TrackProducer::used) / [`unused`](moq_net::TrackProducer::unused).
-	pub fn track(&self) -> &moq_net::TrackProducer {
-		self.import.track()
+	/// A watch-only handle to the track's subscriber demand, created eagerly so
+	/// subscription state is observable before any frames arrive. Watch it via
+	/// [`used`](moq_net::TrackDemand::used) / [`unused`](moq_net::TrackDemand::unused).
+	pub fn demand(&self) -> moq_net::TrackDemand {
+		self.import.demand()
 	}
 
 	/// Publish already-encoded Annex-B packets at the given timestamp.
@@ -100,7 +99,7 @@ pub async fn publish_capture(
 	}
 
 	let producer = Producer::new(broadcast, catalog)?;
-	let track = producer.track().clone();
+	let demand = producer.demand();
 
 	let gate = Gate::new();
 
@@ -112,7 +111,7 @@ pub async fn publish_capture(
 		// Surface a capture/encode failure (e.g. camera open) promptly.
 		res = &mut worker => res.map_err(|e| Error::Codec(anyhow::anyhow!("capture task: {e}")))?,
 		// The broadcast was dropped: stop the worker and wait for it to flush.
-		() = monitor_demand(&track, &gate) => {
+		() = monitor_demand(&demand, &gate) => {
 			gate.close();
 			worker
 				.await
@@ -123,13 +122,13 @@ pub async fn publish_capture(
 
 /// Toggle the gate as viewers subscribe and unsubscribe. Returns once the
 /// track stops being announced (broadcast dropped / aborted).
-async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
+async fn monitor_demand(demand: &moq_net::TrackDemand, gate: &Gate) {
 	loop {
-		match track.used().await {
+		match demand.used().await {
 			Ok(()) => gate.set_active(true),
 			Err(err) => return log_track_ended(err),
 		}
-		match track.unused().await {
+		match demand.unused().await {
 			Ok(()) => gate.set_active(false),
 			Err(err) => return log_track_ended(err),
 		}

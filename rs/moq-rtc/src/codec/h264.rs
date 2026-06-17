@@ -11,14 +11,13 @@ use crate::{Result, codec};
 
 pub struct Bridge {
 	split: moq_mux::codec::h264::Split,
-	import: moq_mux::import::Track<moq_mux::codec::h264::Import>,
+	import: moq_mux::codec::h264::Import,
 }
 
 impl Bridge {
 	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
 		let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
-		let import = moq_mux::codec::h264::Import::from_track(track);
-		let import = moq_mux::import::Track::new(catalog, import);
+		let import = moq_mux::codec::h264::Import::new(track, catalog);
 		let split = moq_mux::codec::h264::Split::new();
 		Ok(Self { split, import })
 	}

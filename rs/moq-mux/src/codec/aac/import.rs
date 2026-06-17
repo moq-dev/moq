@@ -1,31 +1,27 @@
-use bytes::{Buf, BytesMut};
-
 use super::Config;
-use crate::import::Renditions;
+use crate::catalog::hang::CatalogExt;
+use crate::container::Frame;
 
 /// AAC importer.
 ///
 /// Initialized from an AudioSpecificConfig blob (variable-length, typically extracted from
-/// an MP4 ESDS atom), so its catalog is known up front. Each input buffer passed to
+/// an MP4 ESDS atom), so its catalog is known up front. Each packet passed to
 /// [`decode`](Self::decode) is published as one hang frame in its own group, so the relay can
 /// forward each frame without waiting for a group boundary. The codec's packet loss
-/// concealment handles drops. Build it from a [`moq_net::TrackRequest`] ([`new`](Self::new))
-/// or an existing track ([`from_track`](Self::from_track)).
-pub struct Import {
+/// concealment handles drops. Build it with [`new`](Self::new), passing the track producer
+/// and the [`catalog::Producer`](crate::catalog::Producer) it publishes its rendition into.
+pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	catalog: hang::Catalog,
-	zero: Option<tokio::time::Instant>,
+	rendition: crate::catalog::AudioTrack<E>,
 }
 
-impl Import {
-	/// Serve a track request, accepting it at the microsecond timescale.
-	pub fn new(request: moq_net::TrackRequest, config: Config) -> crate::Result<Self> {
-		let info = moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE);
-		Self::from_track(request.accept(info), config)
-	}
-
-	/// Publish on an existing track producer.
-	pub fn from_track(track: moq_net::TrackProducer, config: Config) -> crate::Result<Self> {
+impl<E: CatalogExt> Import<E> {
+	/// Publish on an existing track producer, registering the rendition in `catalog`.
+	pub fn new(
+		track: moq_net::TrackProducer,
+		catalog: crate::catalog::Producer<E>,
+		config: Config,
+	) -> crate::Result<Self> {
 		let mut audio_config = hang::catalog::AudioConfig::new(
 			hang::catalog::AAC {
 				profile: config.profile,
@@ -37,32 +33,26 @@ impl Import {
 
 		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
 
-		let mut catalog = hang::Catalog::default();
-		catalog.audio.renditions.insert(track.name().to_string(), audio_config);
+		let mut rendition = catalog.audio_track(track.name());
+		rendition.set(audio_config);
 
 		Ok(Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
-			catalog,
-			zero: None,
+			rendition,
 		})
 	}
 
-	/// The standalone catalog this importer publishes (one AAC audio rendition).
-	pub fn catalog(&self) -> &hang::Catalog {
-		&self.catalog
+	/// A watch-only handle to this track's subscriber demand.
+	pub fn demand(&self) -> moq_net::TrackDemand {
+		self.track.track().demand()
 	}
 
-	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> &moq_net::TrackProducer {
-		self.track.track()
-	}
-
-	/// Mutable access to the single audio rendition, for callers that refine it
-	/// after construction (the TS importer sets the synthesized `description` and
-	/// an audio-burst `jitter`). Follow with [`crate::import::Track::sync`].
-	pub(crate) fn rendition_mut(&mut self) -> Option<&mut hang::catalog::AudioConfig> {
-		let name = self.track.name();
-		self.catalog.audio.renditions.get_mut(name)
+	/// Refine the single audio rendition in place, republishing the catalog.
+	///
+	/// The TS importer uses this to set the synthesized `description` and an
+	/// audio-burst `jitter` once it knows them.
+	pub(crate) fn update_rendition(&mut self, f: impl FnOnce(&mut hang::catalog::AudioConfig)) {
+		self.rendition.update(f);
 	}
 
 	/// Finish the track, flushing the current group.
@@ -77,45 +67,16 @@ impl Import {
 		Ok(())
 	}
 
-	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		let pts = self.pts(pts)?;
-
-		// Collect the input into a contiguous Bytes payload.
-		let mut payload = BytesMut::with_capacity(buf.remaining());
-		while buf.has_remaining() {
-			let chunk = buf.chunk();
-			payload.extend_from_slice(chunk);
-			let len = chunk.len();
-			buf.advance(len);
-		}
-
-		// Each frame is its own group so the relay can forward it immediately.
-		// The codec's packet loss concealment handles drops.
-		let frame = crate::container::Frame {
-			timestamp: pts,
-			payload: payload.freeze(),
+	/// Publish one AAC packet as its own group, stamping `pts` or a wall clock when absent.
+	pub fn decode(&mut self, frame: &[u8], pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
+		let timestamp = self.rendition.timestamp(pts)?;
+		self.track.write(Frame {
+			timestamp,
+			payload: bytes::Bytes::copy_from_slice(frame),
 			keyframe: true,
 			duration: None,
-		};
-
-		self.track.write(frame)?;
+		})?;
 		self.track.finish_group()?;
-
 		Ok(())
-	}
-
-	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
-		if let Some(pts) = hint {
-			return Ok(pts);
-		}
-
-		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
-	}
-}
-
-impl Renditions for Import {
-	fn renditions(&self) -> &hang::Catalog {
-		&self.catalog
 	}
 }

@@ -263,10 +263,9 @@ impl<E: scte35::Catalog> Import<E> {
 		let stream = match stream_type {
 			StreamType::H264 => {
 				let track = crate::import::unique_track(&mut self.broadcast, ".avc3")?;
-				let import = h264::Import::from_track(track);
 				Stream::H264 {
 					split: h264::Split::new(),
-					import: Box::new(crate::import::Track::new(self.catalog.clone(), import)),
+					import: Box::new(h264::Import::new(track, self.catalog.clone())),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
@@ -274,10 +273,7 @@ impl<E: scte35::Catalog> Import<E> {
 				let track = crate::import::unique_track(&mut self.broadcast, ".hev1")?;
 				Stream::H265 {
 					split: h265::Split::new(),
-					import: Box::new(crate::import::Track::new(
-						self.catalog.clone(),
-						h265::Import::from_track(track),
-					)),
+					import: Box::new(h265::Import::new(track, self.catalog.clone())),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
@@ -722,12 +718,12 @@ impl ScteReassembler {
 enum Stream<E: CatalogExt = ()> {
 	H264 {
 		split: h264::Split,
-		import: Box<crate::import::Track<h264::Import, E>>,
+		import: Box<h264::Import<E>>,
 		unwrap: PtsUnwrap,
 	},
 	H265 {
 		split: h265::Split,
-		import: Box<crate::import::Track<h265::Import, E>>,
+		import: Box<h265::Import<E>>,
 		unwrap: PtsUnwrap,
 	},
 	Aac(Box<AacStream<E>>),
@@ -796,7 +792,7 @@ impl<E: CatalogExt> Stream<E> {
 /// (the sample rate and channel layout aren't in the PMT), so creation is
 /// deferred until the first frame arrives.
 struct AacStream<E: CatalogExt = ()> {
-	import: Option<crate::import::Track<aac::Import, E>>,
+	import: Option<aac::Import<E>>,
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::Producer<E>,
 	unwrap: PtsUnwrap,
@@ -832,13 +828,9 @@ impl<E: CatalogExt> AacStream<E> {
 					// WebCodecs) can configure the decoder. TS itself carries it inline.
 					let description = config.encode();
 					let track = crate::import::unique_track(&mut self.broadcast, ".aac")?;
-					let mut aac = aac::Import::from_track(track, config)?;
-					if let Some(rendition) = aac.rendition_mut() {
-						rendition.description = Some(description);
-					}
-					// Published::new mirrors the rendition (description included) on attach.
-					let import = crate::import::Track::new(self.catalog.clone(), aac);
-					self.import.insert(import)
+					let mut aac = aac::Import::new(track, self.catalog.clone(), config)?;
+					aac.update_rendition(|rendition| rendition.description = Some(description));
+					self.import.insert(aac)
 				}
 			};
 
@@ -853,8 +845,7 @@ impl<E: CatalogExt> AacStream<E> {
 				other => other,
 			};
 
-			let mut raw = &data[offset + header.header_len..end];
-			import.decode(&mut raw, pts)?;
+			import.decode(&data[offset + header.header_len..end], pts)?;
 
 			offset = end;
 			index += 1;
@@ -897,12 +888,7 @@ impl<E: CatalogExt> AacStream<E> {
 		self.jitter = Some(jitter);
 
 		if let Some(import) = &mut self.import {
-			import.decoding(|i| {
-				if let Some(rendition) = i.rendition_mut() {
-					rendition.jitter = Some(jitter.into());
-				}
-				crate::Result::Ok(())
-			})?;
+			import.update_rendition(|rendition| rendition.jitter = Some(jitter.into()));
 		}
 		Ok(())
 	}
@@ -929,7 +915,7 @@ impl<E: CatalogExt> AacStream<E> {
 /// players, which cannot decode these codecs.
 struct LegacyStream<E: CatalogExt = ()> {
 	descriptor: &'static legacy::Descriptor,
-	import: Option<crate::import::Track<legacy::Import, E>>,
+	import: Option<legacy::Import<E>>,
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::Producer<E>,
 	unwrap: PtsUnwrap,
@@ -989,14 +975,12 @@ impl<E: CatalogExt> LegacyStream<E> {
 						channel_count: header.channel_count,
 					};
 					let track = crate::import::unique_track(&mut self.broadcast, self.descriptor.track_suffix)?;
-					let legacy = legacy::Import::from_track(self.descriptor, track, config);
-					self.import
-						.insert(crate::import::Track::new(self.catalog.clone(), legacy))
+					let legacy = legacy::Import::new(self.descriptor, track, self.catalog.clone(), config);
+					self.import.insert(legacy)
 				}
 			};
 
-			let mut frame = &data[offset..end];
-			import.decode(&mut frame, pts)?;
+			import.decode(&data[offset..end], pts)?;
 
 			pts = match pts {
 				// `pts` is a 90 kHz PES PTS; rescale the sample-rate advance to match

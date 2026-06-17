@@ -8,46 +8,40 @@
 //! error; non-keyframes before the first config are written through to the
 //! producer, which reports [`MissingKeyframe`](crate::container::MissingKeyframe)
 //! for a mid-stream join. OBU byte parsing lives in [`Split`](super::Split); this type is a
-//! pure frame publisher that whoever owns the split drives via the
-//! [`FrameDecode`] trait.
+//! pure frame publisher that whoever owns the split drives via [`decode`](Import::decode).
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use scuffle_av1::seq::SequenceHeaderObu;
 use scuffle_av1::{ObuHeader, ObuType};
 
 use super::Error;
 use super::split::ObuIterator;
 use crate::Result;
+use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
 use crate::container::jitter::MinFrameDuration;
-use crate::import::{FrameDecode, Renditions};
 
 /// A pure-publisher importer for AV1 with inline sequence headers.
 ///
-/// Build it from a [`moq_net::TrackRequest`] ([`new`](Self::new)) or an existing
-/// track ([`from_track`](Self::from_track)), and feed it frames a [`Split`](super::Split)
-/// produced via the [`FrameDecode`] impl. The catalog rendition fills in lazily
-/// once the config is known; read it via [`catalog`](Self::catalog).
-pub struct Import {
+/// Build it with [`new`](Self::new), passing the track producer and the
+/// [`catalog::Producer`](crate::catalog::Producer) it publishes into, and feed it
+/// frames a [`Split`](super::Split) produced via [`decode`](Self::decode). The
+/// catalog rendition fills in lazily once the config is known.
+pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	catalog: hang::Catalog,
+	rendition: crate::catalog::VideoTrack<E>,
 	config: Option<hang::catalog::VideoConfig>,
 	last_seq: Option<Bytes>,
 	jitter: MinFrameDuration,
 }
 
-impl Import {
-	/// Serve a track request, accepting it at the microsecond timescale.
-	pub fn new(request: moq_net::TrackRequest) -> Self {
-		let info = moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE);
-		Self::from_track(request.accept(info))
-	}
-
-	/// Publish on an existing track producer.
-	pub fn from_track(track: moq_net::TrackProducer) -> Self {
+impl<E: CatalogExt> Import<E> {
+	/// Publish on an existing track producer, registering the rendition in `catalog`.
+	pub fn new(track: moq_net::TrackProducer, catalog: crate::catalog::Producer<E>) -> Self {
+		let rendition = catalog.video_track(track.name());
 		Self {
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
-			catalog: hang::Catalog::default(),
+			rendition,
 			config: None,
 			last_seq: None,
 			jitter: MinFrameDuration::new(),
@@ -63,8 +57,8 @@ impl Import {
 	/// Optional, since the importer also self-initializes from the first keyframe.
 	/// The buffer is *not* consumed: the dispatcher-owned [`Split`](super::Split)
 	/// consumes it (seeding the sequence header so it prefixes the first keyframe).
-	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
-		let data = buf.as_ref();
+	pub fn initialize(&mut self, buf: &[u8]) -> Result<()> {
+		let data = buf;
 
 		// av1C box starts with 0x81 (marker=1, version=1) per ISO/IEC 14496-15.
 		if data.len() >= 16 && data[0] == 0x81 {
@@ -172,10 +166,7 @@ impl Import {
 			return;
 		}
 		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
-		self.catalog
-			.video
-			.renditions
-			.insert(self.track.name().to_string(), config.clone());
+		self.rendition.set(config.clone());
 		self.config = Some(config);
 	}
 
@@ -201,14 +192,9 @@ impl Import {
 		}
 	}
 
-	/// The standalone catalog once the config is known, else `None`.
-	pub fn catalog(&self) -> Option<&hang::Catalog> {
-		self.config.is_some().then_some(&self.catalog)
-	}
-
-	/// The underlying track producer.
-	pub fn track(&self) -> &moq_net::TrackProducer {
-		self.track.track()
+	/// A watch-only handle to this track's subscriber demand.
+	pub fn demand(&self) -> moq_net::TrackDemand {
+		self.track.track().demand()
 	}
 
 	/// True once the config is known and the catalog has been populated.
@@ -248,25 +234,17 @@ impl Import {
 			// MissingKeyframe, which a caller joining mid-stream skips.
 			self.track.write(frame)?;
 
-			if let Some(jitter) = self.jitter.observe(pts)
-				&& let Some(c) = self.catalog.video.renditions.get_mut(self.track.name())
-			{
-				c.jitter = Some(jitter);
+			if let Some(jitter) = self.jitter.observe(pts) {
+				self.rendition.update(|c| c.jitter = Some(jitter));
 			}
 		}
 		Ok(())
 	}
-}
 
-impl FrameDecode for Import {
-	fn decode<I: IntoIterator<Item = Frame>>(&mut self, frames: I) -> Result<()> {
+	/// Publish split frames, resolving the config from the first keyframe's inline
+	/// sequence header and refining the catalog jitter.
+	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		self.write_frames(frames)
-	}
-}
-
-impl Renditions for Import {
-	fn renditions(&self) -> &hang::Catalog {
-		&self.catalog
 	}
 }
 
