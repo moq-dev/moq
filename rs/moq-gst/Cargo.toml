@@ -29,8 +29,8 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 url = "2"
 
-[dev-dependencies]
-gst = { package = "gstreamer", version = "0.23" }
-
 [build-dependencies]
 gst-plugin-version-helper = "0.8"
+
+[dev-dependencies]
+gst = { package = "gstreamer", version = "0.23" }
