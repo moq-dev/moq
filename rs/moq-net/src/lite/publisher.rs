@@ -4,8 +4,8 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::Stats;
 
 use crate::{
-	AnnounceConsumer, AsPath, BroadcastConsumer, Compression, Error, Origin, OriginConsumer, OriginList,
-	StatsHandle as MoqStats, TrackSubscriber,
+	AnnounceConsumer, AsPath, Compression, Error, Origin, OriginConsumer, OriginList, StatsHandle as MoqStats,
+	TrackSubscriber,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -422,9 +422,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	async fn run_track_info(&self, stream: &mut Stream<S, Version>, request: &lite::Track<'_>) -> Result<(), Error> {
-		// The peer requested this exact path, so it has already seen an announcement
-		// for it; a synchronous lookup is appropriate (as in recv_subscribe).
-		let broadcast = self.origin.get_broadcast(&request.broadcast).ok_or(Error::NotFound)?;
+		// The peer requested this exact path, so it has already seen an announcement for it.
+		// `request_broadcast` resolves it immediately, or falls back to an `OriginDynamic`
+		// handler (as in recv_subscribe).
+		let broadcast = self.origin.request_broadcast(&request.broadcast)?.await?;
 		let info = broadcast.track(&request.track)?.info().await?;
 
 		// Same negotiation as a subscription, just answered once: codec only when
@@ -466,8 +467,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		tracing::info!(%id, broadcast = %absolute, %track, "subscribed started");
 
 		// We just received a subscribe for this exact path, so by definition the peer has
-		// already seen an announcement for it — synchronous lookup is appropriate here.
-		let broadcast = self.origin.get_broadcast(&subscribe.broadcast);
+		// already seen an announcement for it. `request_broadcast` resolves an announced
+		// broadcast immediately; if it isn't announced it falls back to an `OriginDynamic`
+		// handler (or fails fast when there is none). Registration is synchronous.
+		let broadcast = self.origin.request_broadcast(&subscribe.broadcast);
 
 		// Per-track subscription guard (bumps `subscriptions`). The per-(session,
 		// broadcast) `broadcasts` sentinel that counts viewers is taken inside
@@ -507,7 +510,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		stream: &mut Stream<S, Version>,
 		subscribe: &lite::Subscribe<'_>,
-		consumer: Option<BroadcastConsumer>,
+		broadcast: Result<kio::Pending<crate::BroadcastRequested>, Error>,
 		priority: PriorityQueue,
 		// The track guard (bumps `subscriptions`), the per-session broadcast
 		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
@@ -524,7 +527,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			group_end: subscribe.end_group,
 		};
 
-		let broadcast = consumer.ok_or(Error::NotFound)?;
+		// Awaits the dynamic fallback if the broadcast wasn't announced; resolves
+		// immediately otherwise.
+		let broadcast = broadcast?.await?;
 		let track = broadcast.track(&subscribe.track)?.subscribe(subscription)?.await?;
 
 		// Compress only when the producer marked the track worth it and the
@@ -618,9 +623,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::info!(broadcast = %absolute, %track, %group, "fetch started");
 
-		// The peer fetched this exact path, so it has already seen an announcement
-		// for it; a synchronous lookup is appropriate (as in recv_subscribe).
-		let broadcast = self.origin.get_broadcast(&fetch.broadcast);
+		// The peer fetched this exact path, so it has already seen an announcement for it.
+		// `request_broadcast` resolves it immediately, or falls back to an `OriginDynamic`
+		// handler (as in recv_subscribe).
+		let broadcast = self.origin.request_broadcast(&fetch.broadcast);
 		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
 
 		if let Err(err) = Self::run_fetch(&mut stream, &fetch, broadcast, track_stats, self.version).await {
@@ -641,11 +647,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn run_fetch(
 		stream: &mut Stream<S, Version>,
 		fetch: &lite::Fetch<'_>,
-		consumer: Option<BroadcastConsumer>,
+		broadcast: Result<kio::Pending<crate::BroadcastRequested>, Error>,
 		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
-		let broadcast = consumer.ok_or(Error::NotFound)?;
+		let broadcast = broadcast?.await?;
 		let track = broadcast.track(&fetch.track)?;
 
 		let group = track
