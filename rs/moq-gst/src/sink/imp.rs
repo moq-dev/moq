@@ -328,6 +328,8 @@ impl MoqSink {
 				.collect()
 		};
 		let handle = SessionHandle::start(settings, self.status.clone(), self.obj().downgrade(), seed);
+		// Clear any watch left armed by a previous incarnation before the new session is visible.
+		reset_pad_flushes(&self.pad_flush.lock().unwrap());
 		*self.session.lock().unwrap() = Some(handle);
 		Ok(())
 	}
@@ -477,13 +479,51 @@ fn toggle_pad_flush(flush: &HashMap<String, (u64, watch::Sender<bool>)>, name: &
 	}
 }
 
+// Clear every pad's FLUSH watch at session start. The watch is keyed to the pad's lifetime, not the
+// session's, so a FLUSH_START whose FLUSH_STOP never arrived before a restart would otherwise keep that
+// pad muted across the new session. `false` is always safe here; a later live FLUSH_START re-arms it.
+fn reset_pad_flushes(flush: &HashMap<String, (u64, watch::Sender<bool>)>) {
+	for (_, tx) in flush.values() {
+		let _ = tx.send(false);
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::collections::HashMap;
 
 	use tokio::sync::watch;
 
-	use super::toggle_pad_flush;
+	use super::{reset_pad_flushes, toggle_pad_flush};
+
+	// A FLUSH_START left unpaired by a previous incarnation (stopped before its FLUSH_STOP) leaves the
+	// pad's watch armed; the watch outlives the session, so a new session must clear it or the pad stays
+	// muted across the restart. Exercised over a real pad registered by request_new_pad.
+	#[test]
+	fn session_start_clears_a_pads_stuck_flush_watch() {
+		use gst::prelude::*;
+		use gst::subclass::prelude::*;
+		gst::init().unwrap();
+
+		let obj = gst::glib::Object::new::<super::super::MoqSink>();
+		let imp = obj.imp();
+		let templ = obj.pad_template("sink_%u").expect("sink template");
+		imp.request_new_pad(&templ, Some("sink_0"), None)
+			.expect("request sink_0");
+
+		// Arm the watch as an unpaired FLUSH_START would, then take an independent receiver to observe it.
+		let rx = {
+			let map = imp.pad_flush.lock().unwrap();
+			let (_, tx) = map.get("sink_0").expect("pad is registered");
+			tx.send(true).unwrap();
+			tx.subscribe()
+		};
+		assert!(*rx.borrow(), "watch is armed before session start");
+
+		// The reset start_session runs must clear it.
+		reset_pad_flushes(&imp.pad_flush.lock().unwrap());
+		assert!(!*rx.borrow(), "session start cleared the stuck watch");
+	}
 
 	#[test]
 	fn pad_flush_toggle_ignores_stale_generation() {

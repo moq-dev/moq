@@ -443,9 +443,10 @@ async fn run_loop(
 
 	loop {
 		tokio::select! {
-			// Biased so a pending FLUSH re-anchors before the post-flush SEGMENT it precedes: the flush
-			// signal is enqueued before that SEGMENT on the streaming thread, and biased preserves that
-			// order across the two channels. Shutdown/death still preempt everything.
+			// Biased so a ready FLUSH wins a readiness tie and re-anchors the pad before its queued data is
+			// processed. FLUSH_START is out of band (a different thread), so this is not a happens-before
+			// against the bounded data channel; the pad goes NoSegment and drops until its next valid
+			// SEGMENT, which absorbs any residual reorder. Shutdown/death still preempt everything.
 			biased;
 			// Local close: quiet stop, no ERROR.
 			_ = shutdown.changed() => return Ok(ExitReason::Stopped),
@@ -467,29 +468,8 @@ async fn run_loop(
 				None => send_bandwidth = None,
 			},
 			msg = data.recv() => match msg {
-				Some(DataMsg::AddPad { pad, generation }) => {
-					// add_pad clears any stale failure for a fresh incarnation (keyed by this session).
-					pad_set.add_pad(&pad, generation);
-				}
-				Some(DataMsg::Caps { pad, generation, caps }) => {
-					if pad_set.caps(&pad, generation, &caps)? {
-						return Ok(ExitReason::Ended);
-					}
-				}
-				Some(DataMsg::Segment { pad, generation, segment }) => pad_set.segment(&pad, generation, segment),
-				Some(DataMsg::Buffer { pad, generation, data, pts }) => {
-					if pad_set.buffer(&pad, generation, data, pts)? {
-						return Ok(ExitReason::Ended);
-					}
-				}
-				Some(DataMsg::Eos { pad, generation }) => {
-					if pad_set.eos(&pad, generation)? {
-						return Ok(ExitReason::Ended);
-					}
-				}
-				// A release can complete the element if the remaining pads have all ended.
-				Some(DataMsg::DropPad { pad, generation }) => {
-					if pad_set.drop_pad(&pad, generation) {
+				Some(msg) => {
+					if handle_data_msg(pad_set, msg)? {
 						return Ok(ExitReason::Ended);
 					}
 				}
@@ -498,6 +478,41 @@ async fn run_loop(
 			},
 		}
 	}
+}
+
+/// Apply one data-channel message to the pad set, returning `true` when the element is now complete.
+/// Completion is driven only by EOS aggregation (and a pad failure that ends the last open pad); a pad
+/// release is reconfiguration and never completes the element.
+fn handle_data_msg(pad_set: &mut PadSet, msg: DataMsg) -> Result<bool> {
+	let complete = match msg {
+		// add_pad clears any stale failure for a fresh incarnation (keyed by this session).
+		DataMsg::AddPad { pad, generation } => {
+			pad_set.add_pad(&pad, generation);
+			false
+		}
+		DataMsg::Caps { pad, generation, caps } => pad_set.caps(&pad, generation, &caps)?,
+		DataMsg::Segment {
+			pad,
+			generation,
+			segment,
+		} => {
+			pad_set.segment(&pad, generation, segment);
+			false
+		}
+		DataMsg::Buffer {
+			pad,
+			generation,
+			data,
+			pts,
+		} => pad_set.buffer(&pad, generation, data, pts)?,
+		DataMsg::Eos { pad, generation } => pad_set.eos(&pad, generation)?,
+		// A release is reconfiguration, not EOS: drop the pad without completing the element.
+		DataMsg::DropPad { pad, generation } => {
+			pad_set.drop_pad(&pad, generation);
+			false
+		}
+	};
+	Ok(complete)
 }
 
 /// Running time is shared, not per-pad, so there is no anchor to drift.
@@ -587,6 +602,12 @@ impl PadSet {
 				gst::warning!(CAT, "finalize on failed pad {pad}: {err:?}");
 			}
 		}
+		self.mark_pad_failed_terminal(pad, generation);
+	}
+
+	/// Marks a pad failed in the shared Status and terminal for EOS aggregation, without touching its
+	/// producer; the caller has already finalized or dropped it.
+	fn mark_pad_failed_terminal(&mut self, pad: &str, generation: u64) {
 		self.status.mark_failed(self.session_generation, pad, generation);
 		// The failed pad's track is finalized, so it is terminal for EOS aggregation (counts as ended).
 		self.eos.insert(pad.to_string());
@@ -653,18 +674,27 @@ impl PadSet {
 		if self.eos.contains(pad) {
 			return Ok(self.all_ended());
 		}
-		if let Some(p) = self.pads.get_mut(pad) {
-			p.finalize()?;
+		// A failed finish() at EOS is isolated to this pad, like a per-pad data error: mark it
+		// failed-terminal instead of escalating to a session error, so the other pads still complete.
+		match self.pads.get_mut(pad).map(Pad::finalize) {
+			Some(Ok(_)) | None => {
+				self.eos.insert(pad.to_string());
+			}
+			Some(Err(err)) => {
+				gst::warning!(CAT, "finalize on EOS {pad}: {err:?}");
+				self.pads.remove(pad);
+				self.mark_pad_failed_terminal(pad, generation);
+			}
 		}
-		self.eos.insert(pad.to_string());
 		Ok(self.all_ended())
 	}
 
-	/// Returns whether the remaining active pads have all ended (a release can complete the element).
-	fn drop_pad(&mut self, pad: &str, generation: u64) -> bool {
+	/// Removes a released pad from membership. A release is reconfiguration, not end-of-stream, so it
+	/// never completes the element; element EOS comes only from every active pad reaching EOS.
+	fn drop_pad(&mut self, pad: &str, generation: u64) {
 		if self.active.get(pad) != Some(&generation) {
 			gst::warning!(CAT, "DropPad for stale or unknown pad {pad}, ignoring");
-			return false;
+			return;
 		}
 		if let Some(mut p) = self.pads.remove(pad) {
 			if let Err(err) = p.finalize() {
@@ -673,7 +703,6 @@ impl PadSet {
 		}
 		self.active.remove(pad);
 		self.eos.remove(pad);
-		self.all_ended()
 	}
 
 	/// Idempotent (skips already-finalized pads); the returned order proves "catalog last". `Err` means
@@ -872,18 +901,18 @@ impl Pad {
 
 	/// Consumes the producer so a second call is a no-op (`Framed::finish()` is not idempotent).
 	fn finalize(&mut self) -> Result<bool> {
-		match self.framed.take() {
-			Some(mut framed) => {
-				// A lazy codec (H.265/AV1/VP8/VP9) given CAPS but no frame never created its track, so
-				// there is nothing to flush and finish() would error "not initialized". track() is Ok only
-				// once a track exists; a real finish error on an initialized one still surfaces.
-				if framed.track().is_ok() {
-					framed.finish()?;
-				}
-				Ok(true)
-			}
-			None => Ok(false),
+		// take() up front makes this attempt-once: after a failed finish() the producer is already gone,
+		// so a later finalize (fail_pad, finalize_all) is a no-op and never double-finishes.
+		let Some(mut framed) = self.framed.take() else {
+			return Ok(false);
+		};
+		// A lazy codec (H.265/AV1/VP8/VP9) given CAPS but no frame never created its track, so there is
+		// nothing to flush and finish() would error "not initialized". track() is Ok only once a track
+		// exists; a real finish error on an initialized one still surfaces.
+		if framed.track().is_ok() {
+			framed.finish()?;
 		}
+		Ok(true)
 	}
 }
 
@@ -1042,6 +1071,52 @@ mod tests {
 		let mut set = pad_set();
 		set.add_pad("video", 0);
 		assert!(set.eos("video", 0).unwrap());
+	}
+
+	// A pad release is reconfiguration, not EOS: releasing the still-active pad must not complete the
+	// element, even though the remaining pad has already ended (its remainder reads all-ended). Guards
+	// against a release posting a spurious element EOS.
+	#[test]
+	fn releasing_active_pad_does_not_complete_the_element() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("a", 0);
+		set.add_pad("b", 0);
+		let done = handle_data_msg(
+			&mut set,
+			DataMsg::Eos {
+				pad: "a".into(),
+				generation: 0,
+			},
+		)
+		.unwrap();
+		assert!(!done, "one of two members ended, not complete");
+		let done = handle_data_msg(
+			&mut set,
+			DataMsg::DropPad {
+				pad: "b".into(),
+				generation: 0,
+			},
+		)
+		.unwrap();
+		assert!(!done, "releasing the active pad must not complete the element");
+	}
+
+	// The normal completion path still fires through the dispatch: the last member's EOS completes it.
+	#[test]
+	fn last_eos_completes_the_element_through_dispatch() {
+		gst::init().unwrap();
+		let mut set = pad_set();
+		set.add_pad("a", 0);
+		let done = handle_data_msg(
+			&mut set,
+			DataMsg::Eos {
+				pad: "a".into(),
+				generation: 0,
+			},
+		)
+		.unwrap();
+		assert!(done, "the last member's EOS completes the element");
 	}
 
 	// The element completes only once every member has ended; a still-open member holds it open.
