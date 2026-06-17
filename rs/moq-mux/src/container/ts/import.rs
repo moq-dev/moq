@@ -263,8 +263,9 @@ impl<E: scte35::Catalog> Import<E> {
 		let stream = match stream_type {
 			StreamType::H264 => {
 				let track = crate::publish::unique_track(&mut self.broadcast, ".avc3")?;
-				let import = h264::Import::from_track(track).with_mode(h264::Mode::Avc3)?;
+				let import = h264::Import::from_track(track);
 				Stream::H264 {
+					split: h264::Split::new().with_mode(h264::Mode::Avc3),
 					import: Box::new(crate::publish::Published::new(self.catalog.clone(), import)),
 					unwrap: PtsUnwrap::default(),
 				}
@@ -272,6 +273,7 @@ impl<E: scte35::Catalog> Import<E> {
 			StreamType::H265 => {
 				let track = crate::publish::unique_track(&mut self.broadcast, ".hev1")?;
 				Stream::H265 {
+					split: h265::Split::new(),
 					import: Box::new(crate::publish::Published::new(
 						self.catalog.clone(),
 						h265::Import::from_track(track),
@@ -719,10 +721,12 @@ impl ScteReassembler {
 /// One elementary stream's codec importer plus PTS-unwrap state.
 enum Stream<E: CatalogExt = ()> {
 	H264 {
+		split: h264::Split,
 		import: Box<crate::publish::Published<h264::Import, E>>,
 		unwrap: PtsUnwrap,
 	},
 	H265 {
+		split: h265::Split,
 		import: Box<crate::publish::Published<h265::Import, E>>,
 		unwrap: PtsUnwrap,
 	},
@@ -737,13 +741,19 @@ enum Stream<E: CatalogExt = ()> {
 impl<E: CatalogExt> Stream<E> {
 	fn write(&mut self, pending: Pending, burst: Option<u64>) -> anyhow::Result<()> {
 		match self {
-			Stream::H264 { import, unwrap } => {
+			Stream::H264 { split, import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				skip_missing_keyframe(import.decoding(|i| i.decode_frame(&mut pending.data.as_slice(), pts)))
+				skip_missing_keyframe((|| {
+					let frames = split.decode_frame(&mut pending.data.as_slice(), pts)?;
+					import.decode(frames)
+				})())
 			}
-			Stream::H265 { import, unwrap } => {
+			Stream::H265 { split, import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
-				skip_missing_keyframe(import.decoding(|i| i.decode_frame(&mut pending.data.as_slice(), pts)))
+				skip_missing_keyframe((|| {
+					let frames = split.decode_frame(&mut pending.data.as_slice(), pts)?;
+					import.decode(frames)
+				})())
 			}
 			Stream::Aac(stream) => stream.write(pending, burst),
 			Stream::Legacy(stream) => stream.write(pending),
@@ -753,8 +763,14 @@ impl<E: CatalogExt> Stream<E> {
 
 	fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
 		match self {
-			Stream::H264 { import, .. } => Ok(import.seek(sequence)?),
-			Stream::H265 { import, .. } => Ok(import.seek(sequence)?),
+			Stream::H264 { split, import, .. } => {
+				split.reset();
+				Ok(import.seek(sequence)?)
+			}
+			Stream::H265 { split, import, .. } => {
+				split.reset();
+				Ok(import.seek(sequence)?)
+			}
 			Stream::Aac(stream) => stream.seek(sequence),
 			Stream::Legacy(stream) => stream.seek(sequence),
 			Stream::Clock | Stream::Ignored => Ok(()),

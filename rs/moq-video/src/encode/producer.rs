@@ -25,15 +25,17 @@ const DEFAULT_FRAMERATE: u32 = 30;
 /// trigger capture on demand. `moq_mux::codec::h264::Import` handles
 /// catalog registration and framing.
 pub struct Producer {
+	split: moq_mux::codec::h264::Split,
 	import: moq_mux::publish::Published<moq_mux::codec::h264::Import>,
 }
 
 impl Producer {
 	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self, Error> {
 		let track = moq_mux::publish::unique_track(&mut broadcast, ".avc3")?;
-		let import = moq_mux::codec::h264::Import::from_track(track).with_mode(moq_mux::codec::h264::Mode::Avc3)?;
+		let import = moq_mux::codec::h264::Import::from_track(track);
 		let import = moq_mux::publish::Published::new(catalog, import);
-		Ok(Self { import })
+		let split = moq_mux::codec::h264::Split::new().with_mode(moq_mux::codec::h264::Mode::Avc3);
+		Ok(Self { split, import })
 	}
 
 	/// The underlying track producer, created eagerly so subscription state is
@@ -45,12 +47,10 @@ impl Producer {
 
 	/// Publish already-encoded Annex-B packets at the given timestamp.
 	pub fn publish(&mut self, packets: Vec<bytes::Bytes>, timestamp: Timestamp) -> Result<(), Error> {
-		self.import.decoding(|i| {
-			for mut packet in packets {
-				i.decode_frame(&mut packet, Some(timestamp))?;
-			}
-			Ok::<(), moq_mux::Error>(())
-		})?;
+		for mut packet in packets {
+			let frames = self.split.decode_frame(&mut packet, Some(timestamp))?;
+			self.import.decode(frames)?;
+		}
 		Ok(())
 	}
 

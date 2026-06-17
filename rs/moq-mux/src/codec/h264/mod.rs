@@ -5,8 +5,9 @@
 //! (inline SPS/PPS) as length-prefixed NALU + out-of-band avcC, which is
 //! what every CMAF and MKV consumer expects. [`Export`] subscribes to a
 //! catalog-narrowed H.264 rendition and emits an Annex-B elementary
-//! stream; [`Import`] is the importer (auto-detects either wire shape
-//! from the leading bytes).
+//! stream; [`Split`] does the byte-level framing (either wire shape,
+//! auto-detected from the leading bytes) and [`Import`] is the pure frame
+//! publisher that resolves the catalog.
 
 mod export;
 mod import;

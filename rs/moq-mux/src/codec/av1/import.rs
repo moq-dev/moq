@@ -7,28 +7,28 @@
 //! [`initialize`](Import::initialize). A keyframe that can't be configured is an
 //! error; non-keyframes before the first config are written through to the
 //! producer, which reports [`MissingKeyframe`](crate::container::MissingKeyframe)
-//! for a mid-stream join. OBU byte parsing lives in [`Split`]; this type drives
-//! it and adds the catalog.
+//! for a mid-stream join. OBU byte parsing lives in [`Split`](super::Split); this type is a
+//! pure frame publisher that whoever owns the split drives via the
+//! [`FrameDecode`] trait.
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 use scuffle_av1::seq::SequenceHeaderObu;
 use scuffle_av1::{ObuHeader, ObuType};
-use tokio::io::{AsyncRead, AsyncReadExt};
 
+use super::Error;
 use super::split::ObuIterator;
-use super::{Error, Split};
 use crate::Result;
 use crate::container::Frame;
 use crate::container::jitter::MinFrameDuration;
 use crate::publish::{FrameDecode, Renditions};
 
-/// A decoder for AV1 with inline sequence headers.
+/// A pure-publisher importer for AV1 with inline sequence headers.
 ///
 /// Build it from a [`moq_net::TrackRequest`] ([`new`](Self::new)) or an existing
-/// track ([`from_track`](Self::from_track)). The catalog rendition fills in lazily
+/// track ([`from_track`](Self::from_track)), and feed it frames a [`Split`](super::Split)
+/// produced via the [`FrameDecode`] impl. The catalog rendition fills in lazily
 /// once the config is known; read it via [`catalog`](Self::catalog).
 pub struct Import {
-	split: Split,
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	catalog: hang::Catalog,
 	config: Option<hang::catalog::VideoConfig>,
@@ -46,7 +46,6 @@ impl Import {
 	/// Publish on an existing track producer.
 	pub fn from_track(track: moq_net::TrackProducer) -> Self {
 		Self {
-			split: Split::new(),
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			catalog: hang::Catalog::default(),
 			config: None,
@@ -55,31 +54,28 @@ impl Import {
 		}
 	}
 
-	/// Initialize the decoder with a sequence header / av1C and other metadata.
+	/// Resolve the codec config from a sequence header / av1C and other metadata.
 	///
 	/// - **av1C** (leading `0x81` marker): the buffer is parsed as an
 	///   AV1CodecConfigurationRecord, which resolves the config.
-	/// - **raw OBUs**: any sequence header resolves the config and is fed into
-	///   the splitter so it prefixes the first keyframe.
+	/// - **raw OBUs**: any sequence header resolves the config.
 	///
 	/// Optional, since the importer also self-initializes from the first keyframe.
-	/// The buffer is fully consumed.
+	/// The buffer is *not* consumed: the dispatcher-owned [`Split`](super::Split)
+	/// consumes it (seeding the sequence header so it prefixes the first keyframe).
 	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		let data = buf.as_ref();
 
 		// av1C box starts with 0x81 (marker=1, version=1) per ISO/IEC 14496-15.
 		if data.len() >= 16 && data[0] == 0x81 {
 			self.init_from_av1c(data)?;
-			buf.advance(buf.remaining());
 			return Ok(());
 		}
 
-		// Raw OBUs: resolve the config from any sequence header, then feed the
-		// metadata OBUs into the splitter so they prefix the first keyframe.
+		// Raw OBUs: resolve the config from any sequence header.
 		if let Some(seq) = find_sequence_header(data) {
 			self.configure_from_seq(&seq)?;
 		}
-		self.split.seed(buf)?;
 		Ok(())
 	}
 
@@ -220,27 +216,6 @@ impl Import {
 		self.config.is_some()
 	}
 
-	/// Decode from an asynchronous reader (streaming input).
-	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> Result<()> {
-		let mut buffer = BytesMut::new();
-		while reader.read_buf(&mut buffer).await? > 0 {
-			self.decode_stream(&mut buffer, None)?;
-		}
-		Ok(())
-	}
-
-	/// Decode as much data as possible from the given buffer.
-	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
-		let frames = self.split.decode_stream(buf, pts)?;
-		self.write_frames(frames)
-	}
-
-	/// Decode all data in the buffer, assuming it holds (the rest of) one frame.
-	pub fn decode_frame<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
-		let frames = self.split.decode_frame(buf, pts)?;
-		self.write_frames(frames)
-	}
-
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> Result<()> {
 		self.track.finish()?;
@@ -248,11 +223,7 @@ impl Import {
 	}
 
 	/// Close the current group and open the next one at `sequence`.
-	///
-	/// Any in-flight temporal unit is dropped. Pre-seek OBUs would otherwise leak
-	/// into the post-seek group with the wrong timestamp.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.split.reset();
 		self.track.seek(sequence)?;
 		Ok(())
 	}

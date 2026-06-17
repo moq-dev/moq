@@ -10,15 +10,17 @@ use bytes::BytesMut;
 use crate::{Result, codec};
 
 pub struct Bridge {
+	split: moq_mux::codec::h264::Split,
 	import: moq_mux::publish::Published<moq_mux::codec::h264::Import>,
 }
 
 impl Bridge {
 	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
 		let track = moq_mux::publish::unique_track(&mut broadcast, ".avc3")?;
-		let import = moq_mux::codec::h264::Import::from_track(track).with_mode(moq_mux::codec::h264::Mode::Avc3)?;
+		let import = moq_mux::codec::h264::Import::from_track(track);
 		let import = moq_mux::publish::Published::new(catalog, import);
-		Ok(Self { import })
+		let split = moq_mux::codec::h264::Split::new().with_mode(moq_mux::codec::h264::Mode::Avc3);
+		Ok(Self { split, import })
 	}
 }
 
@@ -27,7 +29,8 @@ impl codec::Bridge for Bridge {
 		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
 		let mut buf = BytesMut::from(frame.payload.as_ref());
-		self.import.decoding(|i| i.decode_frame(&mut buf, Some(pts)))?;
+		let frames = self.split.decode_frame(&mut buf, Some(pts))?;
+		self.import.decode(frames)?;
 		Ok(())
 	}
 }

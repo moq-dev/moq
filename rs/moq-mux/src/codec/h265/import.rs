@@ -9,28 +9,27 @@
 //! that can't be configured is an error; non-keyframes before the first config
 //! are written through to the producer, which reports
 //! [`MissingKeyframe`](crate::container::MissingKeyframe) for a mid-stream join.
-//! Annex-B byte parsing lives in [`Split`]; this type drives it and adds the
-//! catalog.
+//! Annex-B byte parsing lives in [`Split`](super::Split); this type is a pure frame publisher
+//! that whoever owns the split drives via the [`FrameDecode`] trait.
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 use scuffle_h265::SpsNALUnit;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
-use super::{Error, Split, split::nal_unit_type};
+use super::{Error, split::nal_unit_type};
 use crate::Result;
 use crate::codec::annexb::NalIterator;
 use crate::container::Frame;
 use crate::container::jitter::MinFrameDuration;
 use crate::publish::{FrameDecode, Renditions};
 
-/// A decoder for H.265 with inline VPS/SPS/PPS.
+/// A pure-publisher importer for H.265 with inline VPS/SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
 ///
 /// Build it from a [`moq_net::TrackRequest`] ([`new`](Self::new)) or an existing
-/// track ([`from_track`](Self::from_track)). The catalog rendition fills in lazily
+/// track ([`from_track`](Self::from_track)), and feed it frames a [`Split`](super::Split)
+/// produced via the [`FrameDecode`] impl. The catalog rendition fills in lazily
 /// once the first SPS is parsed; read it via [`catalog`](Self::catalog).
 pub struct Import {
-	split: Split,
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	catalog: hang::Catalog,
 	config: Option<hang::catalog::VideoConfig>,
@@ -48,7 +47,6 @@ impl Import {
 	/// Publish on an existing track producer.
 	pub fn from_track(track: moq_net::TrackProducer) -> Self {
 		Self {
-			split: Split::new(),
 			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
 			catalog: hang::Catalog::default(),
 			config: None,
@@ -57,11 +55,12 @@ impl Import {
 		}
 	}
 
-	/// Initialize the decoder with VPS/SPS/PPS and other non-slice NALs.
+	/// Resolve the codec config from VPS/SPS/PPS and other non-slice NALs.
 	///
-	/// Resolves the config from any SPS in the buffer and primes the splitter's
-	/// parameter-set cache. Optional, since the importer also self-initializes
-	/// from the first keyframe. The buffer is fully consumed.
+	/// Resolves the config from any SPS in the buffer. Optional, since the
+	/// importer also self-initializes from the first keyframe. The buffer is
+	/// *not* consumed: the dispatcher-owned [`Split`](super::Split) consumes it (and seeds its
+	/// parameter-set cache).
 	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
 		let mut scan = Bytes::copy_from_slice(buf.as_ref());
 		let mut nals = NalIterator::new(&mut scan);
@@ -75,8 +74,6 @@ impl Import {
 		{
 			self.configure_from_sps(&nal)?;
 		}
-
-		self.split.seed(buf)?;
 		Ok(())
 	}
 
@@ -95,33 +92,6 @@ impl Import {
 		self.config.is_some()
 	}
 
-	/// Decode from an asynchronous reader (streaming input).
-	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> Result<()> {
-		let mut buffer = BytesMut::new();
-		while reader.read_buf(&mut buffer).await? > 0 {
-			self.decode_stream(&mut buffer, None)?;
-		}
-		Ok(())
-	}
-
-	/// Decode as much data as possible from the given buffer.
-	///
-	/// Unlike [Self::decode_frame], this needs the start code of the next frame,
-	/// so it works for streaming media (e.g. stdin) but adds a frame of latency.
-	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
-		let frames = self.split.decode_stream(buf, pts)?;
-		self.write_frames(frames)
-	}
-
-	/// Decode all data in the buffer, assuming it holds (the rest of) one frame.
-	///
-	/// Unlike [Self::decode_stream], this is called when NAL boundaries are
-	/// known, avoiding a frame of latency. Also used at EOF to flush the final frame.
-	pub fn decode_frame<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
-		let frames = self.split.decode_frame(buf, pts)?;
-		self.write_frames(frames)
-	}
-
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> Result<()> {
 		self.track.finish()?;
@@ -129,11 +99,7 @@ impl Import {
 	}
 
 	/// Close the current group and open the next one at `sequence`.
-	///
-	/// Any in-flight access unit is dropped. Pre-seek NALs would otherwise leak
-	/// into the post-seek group with the wrong timestamp.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.split.reset();
 		self.track.seek(sequence)?;
 		Ok(())
 	}
