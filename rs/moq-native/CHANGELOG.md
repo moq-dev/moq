@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.2](https://github.com/moq-dev/moq/compare/moq-native-v0.17.1...moq-native-v0.17.2) - 2026-06-17
+
+### Fixed
+
+- *(moq-relay,moq-native)* stop the cert-reload busy loop, then dedupe FileWatcher ([#1773](https://github.com/moq-dev/moq/pull/1773))
+
+### Other
+
+- release ([#1676](https://github.com/moq-dev/moq/pull/1676))
+
 ## [0.17.1](https://github.com/moq-dev/moq/compare/moq-native-v0.17.0...moq-native-v0.17.1) - 2026-06-16
 
 ### Added
