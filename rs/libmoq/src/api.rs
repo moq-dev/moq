@@ -253,6 +253,7 @@ pub extern "C" fn moq_origin_unpublish(publish: u32) -> i32 {
 /// there. The terminal callback fires even after [moq_origin_announced_close].
 ///
 /// - [moq_origin_announced_info] is used to query information about the broadcast.
+/// - [moq_origin_announced_free] releases each delivered announced ID once read.
 /// - [moq_origin_announced_close] is used to stop receiving announcements.
 ///
 /// Returns a non-zero handle on success, or a negative code on failure.
@@ -274,7 +275,9 @@ pub unsafe extern "C" fn moq_origin_announced(
 
 /// Query information about a broadcast discovered by [moq_origin_announced].
 ///
-/// The destination is filled with the broadcast information.
+/// The destination is filled with the broadcast information. The `path` pointer borrows
+/// the announcement's storage: copy it out before calling [moq_origin_announced_free], which
+/// invalidates it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -286,6 +289,23 @@ pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq
 		let announced = ffi::parse_id(announced)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().origin.announced_info(announced, dst)
+	})
+}
+
+/// Free a single announcement delivered to a [moq_origin_announced] `on_announce` callback.
+///
+/// Each announce / unannounce event hands the callback a distinct announcement handle (read
+/// with [moq_origin_announced_info]); release it here once done to avoid leaking one per event
+/// over the life of the listener. This is per-announcement and distinct from
+/// [moq_origin_announced_close], which stops the listener itself. After freeing, any `path`
+/// pointer obtained from [moq_origin_announced_info] for this handle is dangling.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_origin_announced_free(announced: u32) -> i32 {
+	ffi::enter(move || {
+		let announced = ffi::parse_id(announced)?;
+		State::lock().origin.announced_free(announced)
 	})
 }
 

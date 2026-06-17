@@ -109,6 +109,18 @@ impl Origin {
 		Ok(())
 	}
 
+	/// Free a single announcement record delivered to an `on_announce` callback.
+	///
+	/// Each announce/unannounce event allocates a record (read via [`Self::announced_info`]);
+	/// the caller releases it here once done. This is per-record, distinct from
+	/// [`Self::announced_close`], which stops the whole listener. Records are freed explicitly
+	/// rather than on unannounce: an unannounce is its own delivered record, and auto-freeing
+	/// the prior one would race a caller still reading it.
+	pub fn announced_free(&mut self, announced: Id) -> Result<(), Error> {
+		self.announced.remove(announced).ok_or(Error::AnnouncementNotFound)?;
+		Ok(())
+	}
+
 	pub fn announced_close(&mut self, announced: Id) -> Result<(), Error> {
 		// Signal shutdown; the task delivers a final callback and removes itself.
 		self.announced_task
