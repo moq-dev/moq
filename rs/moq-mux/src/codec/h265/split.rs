@@ -18,13 +18,17 @@ use crate::codec::annexb::{NalIterator, START_CODE};
 
 /// H.265 Annex-B stream splitter: bytes in, [`Frame`](crate::container::Frame)s out.
 ///
-/// Feed bytes via [`decode_stream`](Self::decode_stream) (unknown frame
-/// boundaries, e.g. stdin), [`decode_frame`](Self::decode_frame) (one complete
-/// access unit per call), or [`decode_from`](Self::decode_from) (an async
-/// reader). Each returns the frames it produced. VPS/SPS/PPS seen inline are
-/// cached and re-inserted ahead of each keyframe; [`seed`](Self::seed) primes
-/// that cache from an out-of-band parameter-set buffer.
+/// Feed bytes via [`decode`](Self::decode) (unknown frame boundaries, e.g.
+/// stdin) or [`decode_from`](Self::decode_from) (an async reader); call
+/// [`flush`](Self::flush) to emit the final in-flight access unit. Each returns
+/// the frames it produced. VPS/SPS/PPS seen inline are cached and re-inserted
+/// ahead of each keyframe; [`seed`](Self::seed) primes that cache from an
+/// out-of-band parameter-set buffer.
 pub struct Split {
+	/// Bytes carried over between calls: complete NALs are parsed out on each
+	/// [`decode`](Self::decode), leaving the in-flight (final, not-yet-terminated)
+	/// NAL here until the next start code arrives or [`flush`](Self::flush) drains it.
+	tail: BytesMut,
 	current: Au,
 	vps: Option<Bytes>,
 	sps: Option<Bytes>,
@@ -53,6 +57,7 @@ impl Split {
 	/// A fresh splitter with an empty parameter-set cache.
 	pub fn new() -> Self {
 		Self {
+			tail: BytesMut::new(),
 			current: Au::default(),
 			vps: None,
 			sps: None,
@@ -90,44 +95,51 @@ impl Split {
 		let mut frames = Vec::new();
 		let mut buffer = BytesMut::new();
 		while reader.read_buf(&mut buffer).await? > 0 {
-			frames.extend(self.decode_stream(&mut buffer, None)?);
+			frames.extend(self.decode(&mut buffer, None)?);
 		}
+		frames.extend(self.flush(None)?);
 		Ok(frames)
 	}
 
-	/// Decode a buffer where frame boundaries are unknown, returning the frames
-	/// it produced. The leading start code of the *next* access unit is what
-	/// signals the previous one is complete, so the final access unit stays
-	/// buffered until the next call (or [`decode_frame`](Self::decode_frame)).
-	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
+	/// Decode a buffer where frame boundaries are unknown, returning the access
+	/// units it can complete. The leading start code of the *next* access unit is
+	/// what signals the previous one is complete, so the final NAL of the in-flight
+	/// access unit stays buffered until the next call (or [`flush`](Self::flush)).
+	/// The buffer is fully consumed.
+	pub fn decode<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
 		pts: impl Into<Option<moq_net::Timestamp>>,
 	) -> Result<Vec<crate::container::Frame>> {
 		let pts = self.pts(pts.into())?;
-		let nals = NalIterator::new(buf);
+		while buf.has_remaining() {
+			let chunk = buf.chunk();
+			self.tail.extend_from_slice(chunk);
+			let len = chunk.len();
+			buf.advance(len);
+		}
+		// Iterate complete NALs out of `tail`, leaving the trailing (in-flight) NAL
+		// (with its start code) buffered for the next call or `flush`.
+		let nals = NalIterator::new(&mut self.tail);
+		let mut parsed = Vec::new();
 		for nal in nals {
-			self.decode_nal(nal?, pts)?;
+			parsed.push(nal?);
+		}
+		for nal in parsed {
+			self.decode_nal(nal, pts)?;
 		}
 		Ok(std::mem::take(&mut self.pending))
 	}
 
-	/// Decode a buffer holding one complete access unit, returning the frames it
-	/// produced (typically one). Any trailing NAL without a start code is the
-	/// last NAL of this access unit, and the unit is flushed before returning.
-	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: impl Into<Option<moq_net::Timestamp>>,
-	) -> Result<Vec<crate::container::Frame>> {
+	/// Emit the in-flight access unit, if any. Call after the last
+	/// [`decode`](Self::decode) when a caller handed over a complete access unit
+	/// (or at end of stream) so the final NAL isn't left buffered.
+	pub fn flush(&mut self, pts: impl Into<Option<moq_net::Timestamp>>) -> Result<Vec<crate::container::Frame>> {
 		let pts = self.pts(pts.into())?;
-		let mut nals = NalIterator::new(buf);
-		while let Some(nal) = nals.next().transpose()? {
+		if let Some(nal) = NalIterator::new(&mut self.tail).flush()? {
 			self.decode_nal(nal, pts)?;
 		}
-		if let Some(nal) = nals.flush()? {
-			self.decode_nal(nal, pts)?;
-		}
+		self.tail.clear();
 		self.maybe_start_frame(pts)?;
 		Ok(std::mem::take(&mut self.pending))
 	}
@@ -268,6 +280,7 @@ impl Split {
 	/// self-contained.
 	pub fn reset(&mut self) {
 		self.current = Au::default();
+		self.tail.clear();
 	}
 
 	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {
@@ -313,12 +326,20 @@ mod tests {
 		haystack.windows(needle.len()).any(|w| w == needle)
 	}
 
+	/// Decode one complete access unit handed over as a single buffer: `decode`
+	/// buffers it, `flush` emits it.
+	fn decode_one(split: &mut Split, buf: &mut BytesMut, pts: moq_net::Timestamp) -> Vec<crate::container::Frame> {
+		let mut frames = split.decode(buf, pts).unwrap();
+		frames.extend(split.flush(pts).unwrap());
+		frames
+	}
+
 	/// A keyframe access unit fed as one buffer emits one self-contained frame:
 	/// VPS+SPS+PPS are packaged ahead of the IDR slice and `keyframe` is set.
 	#[tokio::test(start_paused = true)]
-	async fn decode_frame_packages_keyframe() {
+	async fn decode_packages_keyframe() {
 		let mut split = Split::new();
-		let frames = split.decode_frame(&mut annexb(&[VPS, SPS, PPS, IDR]), ts()).unwrap();
+		let frames = decode_one(&mut split, &mut annexb(&[VPS, SPS, PPS, IDR]), ts());
 
 		assert_eq!(frames.len(), 1);
 		assert!(frames[0].keyframe);
@@ -335,7 +356,7 @@ mod tests {
 		let mut split = Split::new();
 		split.seed(&mut annexb(&[VPS, SPS, PPS])).unwrap();
 
-		let frames = split.decode_frame(&mut annexb(&[IDR]), ts()).unwrap();
+		let frames = decode_one(&mut split, &mut annexb(&[IDR]), ts());
 		assert_eq!(frames.len(), 1);
 		assert!(frames[0].keyframe);
 		assert!(contains(&frames[0].payload, VPS));

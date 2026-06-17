@@ -265,7 +265,7 @@ impl<E: scte35::Catalog> Import<E> {
 				let track = crate::publish::unique_track(&mut self.broadcast, ".avc3")?;
 				let import = h264::Import::from_track(track);
 				Stream::H264 {
-					split: h264::Split::new().with_mode(h264::Mode::Avc3),
+					split: h264::Split::new(),
 					import: Box::new(crate::publish::Published::new(self.catalog.clone(), import)),
 					unwrap: PtsUnwrap::default(),
 				}
@@ -744,14 +744,18 @@ impl<E: CatalogExt> Stream<E> {
 			Stream::H264 { split, import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
 				skip_missing_keyframe((|| {
-					let frames = split.decode_frame(&mut pending.data.as_slice(), pts)?;
+					// Each PES is one access unit, so flush to emit it immediately.
+					let mut frames = split.decode(&mut pending.data.as_slice(), pts)?;
+					frames.extend(split.flush(pts)?);
 					import.decode(frames)
 				})())
 			}
 			Stream::H265 { split, import, unwrap } => {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
 				skip_missing_keyframe((|| {
-					let frames = split.decode_frame(&mut pending.data.as_slice(), pts)?;
+					// Each PES is one access unit, so flush to emit it immediately.
+					let mut frames = split.decode(&mut pending.data.as_slice(), pts)?;
+					frames.extend(split.flush(pts)?);
 					import.decode(frames)
 				})())
 			}

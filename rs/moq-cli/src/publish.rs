@@ -95,7 +95,7 @@ impl PublishDecoder {
 	fn decode_buf(&mut self, buffer: &mut bytes::BytesMut) -> anyhow::Result<()> {
 		match self {
 			Self::Avc3 { split, import } => {
-				let frames = split.decode_stream(buffer, None)?;
+				let frames = split.decode(buffer, None)?;
 				import.decode(frames)?;
 				Ok(())
 			}
@@ -104,6 +104,16 @@ impl PublishDecoder {
 			Self::Flv(d) => Ok(d.decode(buffer)?),
 			Self::Hls(_) => unreachable!(),
 		}
+	}
+
+	/// Flush any in-flight access unit at end of stream. The avc3 split holds the
+	/// final AU until the next start code, so stdin EOF must flush it.
+	fn finish(&mut self) -> anyhow::Result<()> {
+		if let Self::Avc3 { split, import } = self {
+			let tail = split.flush(None)?;
+			import.decode(tail)?;
+		}
+		Ok(())
 	}
 }
 
@@ -140,7 +150,7 @@ impl Publish {
 				let track = moq_mux::publish::unique_track(&mut broadcast, ".avc3")?;
 				let import = moq_mux::codec::h264::Import::from_track(track);
 				let import = moq_mux::publish::Published::new(catalog.clone(), import);
-				let split = moq_mux::codec::h264::Split::new().with_mode(moq_mux::codec::h264::Mode::Avc3);
+				let split = moq_mux::codec::h264::Split::new();
 				Source::Stream(PublishDecoder::Avc3 {
 					split,
 					import: Box::new(import),
@@ -191,6 +201,7 @@ impl Publish {
 				loop {
 					let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
 					if n == 0 {
+						decoder.finish()?;
 						return Ok(());
 					}
 					decoder.decode_buf(&mut buffer)?;

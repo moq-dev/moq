@@ -34,7 +34,7 @@ impl Producer {
 		let track = moq_mux::publish::unique_track(&mut broadcast, ".avc3")?;
 		let import = moq_mux::codec::h264::Import::from_track(track);
 		let import = moq_mux::publish::Published::new(catalog, import);
-		let split = moq_mux::codec::h264::Split::new().with_mode(moq_mux::codec::h264::Mode::Avc3);
+		let split = moq_mux::codec::h264::Split::new();
 		Ok(Self { split, import })
 	}
 
@@ -48,7 +48,9 @@ impl Producer {
 	/// Publish already-encoded Annex-B packets at the given timestamp.
 	pub fn publish(&mut self, packets: Vec<bytes::Bytes>, timestamp: Timestamp) -> Result<(), Error> {
 		for mut packet in packets {
-			let frames = self.split.decode_frame(&mut packet, Some(timestamp))?;
+			// The encoder emits one whole access unit per packet, so flush to emit it.
+			let mut frames = self.split.decode(&mut packet, Some(timestamp))?;
+			frames.extend(self.split.flush(Some(timestamp))?);
 			self.import.decode(frames)?;
 		}
 		Ok(())

@@ -17,11 +17,11 @@ use crate::Result;
 
 /// AV1 OBU stream splitter: bytes in, [`Frame`](crate::container::Frame)s out.
 ///
-/// Feed bytes via [`decode_stream`](Self::decode_stream) (unknown frame
-/// boundaries, e.g. stdin), [`decode_frame`](Self::decode_frame) (one complete
-/// temporal unit per call), or [`decode_from`](Self::decode_from) (an async
-/// reader). Each returns the frames it produced. [`seed`](Self::seed) feeds
-/// leading metadata OBUs (e.g. a sequence header) into the next frame.
+/// Feed bytes via [`decode`](Self::decode) (unknown frame boundaries, e.g.
+/// stdin) or [`decode_from`](Self::decode_from) (an async reader); call
+/// [`flush`](Self::flush) to emit the final in-flight temporal unit. Each
+/// returns the frames it produced. [`seed`](Self::seed) feeds leading metadata
+/// OBUs (e.g. a sequence header) into the next frame.
 pub struct Split {
 	current: Au,
 	zero: Option<tokio::time::Instant>,
@@ -70,15 +70,16 @@ impl Split {
 		let mut frames = Vec::new();
 		let mut buffer = BytesMut::new();
 		while reader.read_buf(&mut buffer).await? > 0 {
-			frames.extend(self.decode_stream(&mut buffer, None)?);
+			frames.extend(self.decode(&mut buffer, None)?);
 		}
+		frames.extend(self.flush(None)?);
 		Ok(frames)
 	}
 
-	/// Decode a buffer where frame boundaries are unknown, returning the frames
-	/// it produced. The final temporal unit stays buffered until the next call
-	/// (or [`decode_frame`](Self::decode_frame)).
-	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
+	/// Decode a buffer where frame boundaries are unknown, returning the temporal
+	/// units it can complete. The final temporal unit stays buffered until the
+	/// next call (or [`flush`](Self::flush)).
+	pub fn decode<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
 		pts: impl Into<Option<moq_net::Timestamp>>,
@@ -93,21 +94,11 @@ impl Split {
 		Ok(std::mem::take(&mut self.pending))
 	}
 
-	/// Decode a buffer holding one complete temporal unit, returning the frames
-	/// it produced. The unit is flushed before returning.
-	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: impl Into<Option<moq_net::Timestamp>>,
-	) -> Result<Vec<crate::container::Frame>> {
+	/// Emit the in-flight temporal unit, if any. Call after the last
+	/// [`decode`](Self::decode) when a caller handed over a complete temporal unit
+	/// (or at end of stream) so the final unit isn't left buffered.
+	pub fn flush(&mut self, pts: impl Into<Option<moq_net::Timestamp>>) -> Result<Vec<crate::container::Frame>> {
 		let pts = self.pts(pts.into())?;
-		let mut obus = ObuIterator::new(buf);
-		while let Some(obu) = obus.next().transpose()? {
-			self.decode_obu(obu, Some(pts))?;
-		}
-		if let Some(obu) = obus.flush()? {
-			self.decode_obu(obu, Some(pts))?;
-		}
 		self.maybe_start_frame(Some(pts))?;
 		Ok(std::mem::take(&mut self.pending))
 	}
@@ -310,35 +301,39 @@ mod tests {
 		moq_net::Timestamp::from_micros(0).unwrap()
 	}
 
+	/// Decode one complete temporal unit handed over as a single buffer: `decode`
+	/// buffers it, `flush` emits it.
+	fn decode_one(split: &mut Split, buf: &mut BytesMut, pts: moq_net::Timestamp) -> Vec<crate::container::Frame> {
+		let mut frames = split.decode(buf, Some(pts)).unwrap();
+		frames.extend(split.flush(Some(pts)).unwrap());
+		frames
+	}
+
 	/// A temporal unit with a sequence header + KEY_FRAME emits one keyframe.
 	#[tokio::test(start_paused = true)]
-	async fn decode_frame_keyframe() {
+	async fn decode_keyframe() {
 		let mut split = Split::new();
-		let frames = split
-			.decode_frame(&mut cat(&[td(), seq_header(), key_frame()]), Some(ts()))
-			.unwrap();
+		let frames = decode_one(&mut split, &mut cat(&[td(), seq_header(), key_frame()]), ts());
 		assert_eq!(frames.len(), 1);
 		assert!(frames[0].keyframe);
 	}
 
 	/// A frame with no sequence header and INTER frame_type is not a keyframe.
 	#[tokio::test(start_paused = true)]
-	async fn decode_frame_delta_is_not_keyframe() {
+	async fn decode_delta_is_not_keyframe() {
 		let mut split = Split::new();
-		let frames = split
-			.decode_frame(&mut cat(&[td(), inter_frame()]), Some(ts()))
-			.unwrap();
+		let frames = decode_one(&mut split, &mut cat(&[td(), inter_frame()]), ts());
 		assert_eq!(frames.len(), 1);
 		assert!(!frames[0].keyframe);
 	}
 
 	/// In streaming mode the next temporal delimiter closes the previous unit, so
-	/// the trailing one stays buffered.
+	/// the trailing one stays buffered until `flush`.
 	#[tokio::test(start_paused = true)]
-	async fn decode_stream_emits_on_next_boundary() {
+	async fn decode_emits_on_next_boundary() {
 		let mut split = Split::new();
 		let frames = split
-			.decode_stream(
+			.decode(
 				&mut cat(&[td(), seq_header(), key_frame(), td(), inter_frame()]),
 				Some(ts()),
 			)
@@ -346,5 +341,10 @@ mod tests {
 		// Only the keyframe is complete; the inter frame waits for the next TD.
 		assert_eq!(frames.len(), 1);
 		assert!(frames[0].keyframe);
+
+		// Flushing closes the buffered inter frame.
+		let tail = split.flush(Some(ts())).unwrap();
+		assert_eq!(tail.len(), 1);
+		assert!(!tail[0].keyframe);
 	}
 }

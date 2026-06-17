@@ -102,10 +102,17 @@ impl From<StreamFormat> for FramedFormat {
 }
 
 enum FramedKind {
-	/// H.264 (both avc1 and avc3 wire shapes; the split is pinned by the caller's
-	/// FramedFormat choice). The split owns byte parsing; the import publishes.
-	H264 {
+	/// H.264 avc3 (Annex-B, inline SPS/PPS). The split owns byte parsing; the
+	/// import publishes.
+	Avc3 {
 		split: crate::codec::h264::Split,
+		import: crate::publish::Published<crate::codec::h264::Import>,
+	},
+	/// H.264 avc1 (length-prefixed NALU, out-of-band avcC). No splitter: each
+	/// access unit is wrapped directly. `length_size` is the NALU length prefix
+	/// width read from the avcC.
+	Avc1 {
+		length_size: usize,
 		import: crate::publish::Published<crate::codec::h264::Import>,
 	},
 	// Boxed because it's a large struct and clippy complains about the size.
@@ -137,15 +144,13 @@ pub struct Framed {
 	decoder: FramedKind,
 }
 
-/// Build an H.264 split + import pair, resolving the config and consuming `buf`.
+/// Build an H.264 avc3 split + import pair, resolving the config and consuming `buf`.
 ///
 /// The import reads `buf` for the codec config without consuming it; the split
-/// then consumes it (seeding its parameter-set cache for avc3, or reading the
-/// NALU length size for avc1).
-fn build_h264<T: Buf + AsRef<[u8]>>(
+/// then consumes it, seeding its parameter-set cache.
+fn build_h264_avc3<T: Buf + AsRef<[u8]>>(
 	track: moq_net::TrackProducer,
 	catalog: crate::catalog::Producer,
-	mode: crate::codec::h264::Mode,
 	buf: &mut T,
 ) -> Result<(
 	crate::codec::h264::Split,
@@ -153,9 +158,24 @@ fn build_h264<T: Buf + AsRef<[u8]>>(
 )> {
 	let mut import = crate::codec::h264::Import::from_track(track);
 	import.initialize(buf)?;
-	let mut split = crate::codec::h264::Split::new().with_mode(mode);
-	split.initialize(buf)?;
+	let mut split = crate::codec::h264::Split::new();
+	split.seed(buf)?;
 	Ok((split, crate::publish::Published::new(catalog, import)))
+}
+
+/// Build an H.264 avc1 import, resolving the config and the NALU length size from
+/// the avcC, and consuming `buf`. avc1 has no splitter: each access unit is
+/// wrapped directly via [`crate::codec::h264::avc1_frame`].
+fn build_h264_avc1<T: Buf + AsRef<[u8]>>(
+	track: moq_net::TrackProducer,
+	catalog: crate::catalog::Producer,
+	buf: &mut T,
+) -> Result<(usize, crate::publish::Published<crate::codec::h264::Import>)> {
+	let mut import = crate::codec::h264::Import::from_track(track);
+	import.initialize(buf)?;
+	let length_size = crate::codec::h264::Avcc::parse(buf.as_ref())?.length_size;
+	buf.advance(buf.remaining());
+	Ok((length_size, crate::publish::Published::new(catalog, import)))
 }
 
 /// Build an H.265 split + import pair, resolving the config and consuming `buf`.
@@ -208,17 +228,16 @@ impl Framed {
 		format: FramedFormat,
 		buf: &mut T,
 	) -> Result<Self> {
-		use crate::codec::h264::Mode as H264Mode;
 		let decoder = match format {
 			FramedFormat::Avc1 => {
 				let track = crate::publish::unique_track(&mut broadcast, ".avc1")?;
-				let (split, import) = build_h264(track, catalog, H264Mode::Avc1, buf)?;
-				FramedKind::H264 { split, import }
+				let (length_size, import) = build_h264_avc1(track, catalog, buf)?;
+				FramedKind::Avc1 { length_size, import }
 			}
 			FramedFormat::Avc3 => {
 				let track = crate::publish::unique_track(&mut broadcast, ".avc3")?;
-				let (split, import) = build_h264(track, catalog, H264Mode::Avc3, buf)?;
-				FramedKind::H264 { split, import }
+				let (split, import) = build_h264_avc3(track, catalog, buf)?;
+				FramedKind::Avc3 { split, import }
 			}
 			FramedFormat::Fmp4 => {
 				let mut decoder = Box::new(crate::container::fmp4::Import::new(broadcast, catalog));
@@ -293,15 +312,14 @@ impl Framed {
 		format: FramedFormat,
 		buf: &mut T,
 	) -> anyhow::Result<Self> {
-		use crate::codec::h264::Mode as H264Mode;
 		let decoder = match format {
 			FramedFormat::Avc1 => {
-				let (split, import) = build_h264(track, catalog, H264Mode::Avc1, buf)?;
-				FramedKind::H264 { split, import }
+				let (length_size, import) = build_h264_avc1(track, catalog, buf)?;
+				FramedKind::Avc1 { length_size, import }
 			}
 			FramedFormat::Avc3 => {
-				let (split, import) = build_h264(track, catalog, H264Mode::Avc3, buf)?;
-				FramedKind::H264 { split, import }
+				let (split, import) = build_h264_avc3(track, catalog, buf)?;
+				FramedKind::Avc3 { split, import }
 			}
 			FramedFormat::Hev1 => {
 				let (split, import) = build_h265(track, catalog, buf)?;
@@ -344,7 +362,8 @@ impl Framed {
 	/// Finish the decoder, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
 		match self.decoder {
-			FramedKind::H264 { ref mut import, .. } => import.finish(),
+			FramedKind::Avc3 { ref mut import, .. } => import.finish(),
+			FramedKind::Avc1 { ref mut import, .. } => import.finish(),
 			FramedKind::Fmp4(ref mut decoder) => decoder.finish(),
 			FramedKind::Hev1 { ref mut import, .. } => import.finish(),
 			FramedKind::Av01 { ref mut import, .. } => import.finish(),
@@ -361,13 +380,14 @@ impl Framed {
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		match self.decoder {
-			FramedKind::H264 {
+			FramedKind::Avc3 {
 				ref mut split,
 				ref mut import,
 			} => {
 				split.reset();
 				import.seek(sequence)
 			}
+			FramedKind::Avc1 { ref mut import, .. } => import.seek(sequence),
 			FramedKind::Fmp4(ref mut decoder) => decoder.seek(sequence),
 			FramedKind::Hev1 {
 				ref mut split,
@@ -396,7 +416,8 @@ impl Framed {
 	/// Return the single track produced by this importer.
 	pub fn track(&self) -> Result<&moq_net::TrackProducer> {
 		match self.decoder {
-			FramedKind::H264 { ref import, .. } => Ok(import.track()),
+			FramedKind::Avc3 { ref import, .. } => Ok(import.track()),
+			FramedKind::Avc1 { ref import, .. } => Ok(import.track()),
 			FramedKind::Fmp4(_) => Err(crate::Error::MultipleTracks("fmp4")),
 			FramedKind::Hev1 { ref import, .. } => Ok(import.track()),
 			FramedKind::Av01 { ref import, .. } => Ok(import.track()),
@@ -413,26 +434,40 @@ impl Framed {
 	/// Decode a frame from the given buffer.
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		match self.decoder {
-			FramedKind::H264 {
+			FramedKind::Avc3 {
 				ref mut split,
 				ref mut import,
 			} => {
-				let frames = split.decode_frame(buf, pts)?;
+				// Framed hands over one whole access unit per call, so flush to
+				// emit it rather than waiting for the next start code.
+				let mut frames = split.decode(buf, pts)?;
+				frames.extend(split.flush(pts)?);
 				import.decode(frames)?;
+			}
+			FramedKind::Avc1 {
+				length_size,
+				ref mut import,
+			} => {
+				let pts = pts.ok_or(crate::codec::h264::Error::MissingTimestamp)?;
+				let frame = crate::codec::h264::avc1_frame(buf.as_ref(), length_size, pts)?;
+				import.decode([frame])?;
+				buf.advance(buf.remaining());
 			}
 			FramedKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
 			FramedKind::Hev1 {
 				ref mut split,
 				ref mut import,
 			} => {
-				let frames = split.decode_frame(buf, pts)?;
+				let mut frames = split.decode(buf, pts)?;
+				frames.extend(split.flush(pts)?);
 				import.decode(frames)?;
 			}
 			FramedKind::Av01 {
 				ref mut split,
 				ref mut import,
 			} => {
-				let frames = split.decode_frame(buf, pts)?;
+				let mut frames = split.decode(buf, pts)?;
+				frames.extend(split.flush(pts)?);
 				import.decode(frames)?;
 			}
 			FramedKind::Vp8(ref mut decoder) => decoder.decoding(|d| d.decode_frame(buf, pts))?,
@@ -780,12 +815,11 @@ impl Stream {
 		catalog: crate::catalog::Producer,
 		format: StreamFormat,
 	) -> Result<Self> {
-		use crate::codec::h264::Mode as H264Mode;
 		let decoder = match format {
 			StreamFormat::Avc3 => {
 				let track = crate::publish::unique_track(&mut broadcast, ".avc3")?;
 				let import = crate::codec::h264::Import::from_track(track);
-				let split = crate::codec::h264::Split::new().with_mode(H264Mode::Avc3);
+				let split = crate::codec::h264::Split::new();
 				StreamKind::Avc3 {
 					split,
 					import: crate::publish::Published::new(catalog, import),
@@ -828,7 +862,7 @@ impl Stream {
 				ref mut import,
 			} => {
 				import.decoding(|d| d.initialize(buf))?;
-				split.initialize(buf)?;
+				split.seed(buf)?;
 			}
 			StreamKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
 			StreamKind::Hev1 {
@@ -869,7 +903,7 @@ impl Stream {
 				ref mut split,
 				ref mut import,
 			} => {
-				let frames = split.decode_stream(buf, None)?;
+				let frames = split.decode(buf, None)?;
 				import.decode(frames)
 			}
 			StreamKind::Fmp4(ref mut decoder) => decoder.decode(buf),
@@ -877,14 +911,14 @@ impl Stream {
 				ref mut split,
 				ref mut import,
 			} => {
-				let frames = split.decode_stream(buf, None)?;
+				let frames = split.decode(buf, None)?;
 				import.decode(frames)
 			}
 			StreamKind::Av01 {
 				ref mut split,
 				ref mut import,
 			} => {
-				let frames = split.decode_stream(buf, None)?;
+				let frames = split.decode(buf, None)?;
 				import.decode(frames)
 			}
 			StreamKind::Mkv(ref mut decoder) => decoder.decode(buf),
@@ -896,10 +930,31 @@ impl Stream {
 	/// Finish the decoder, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
 		match self.decoder {
-			StreamKind::Avc3 { ref mut import, .. } => import.finish(),
+			StreamKind::Avc3 {
+				ref mut split,
+				ref mut import,
+			} => {
+				let tail = split.flush(None)?;
+				import.decode(tail)?;
+				import.finish()
+			}
 			StreamKind::Fmp4(ref mut decoder) => decoder.finish(),
-			StreamKind::Hev1 { ref mut import, .. } => import.finish(),
-			StreamKind::Av01 { ref mut import, .. } => import.finish(),
+			StreamKind::Hev1 {
+				ref mut split,
+				ref mut import,
+			} => {
+				let tail = split.flush(None)?;
+				import.decode(tail)?;
+				import.finish()
+			}
+			StreamKind::Av01 {
+				ref mut split,
+				ref mut import,
+			} => {
+				let tail = split.flush(None)?;
+				import.decode(tail)?;
+				import.finish()
+			}
 			StreamKind::Mkv(ref mut decoder) => decoder.finish(),
 			StreamKind::Ts(ref mut decoder) => decoder.finish().map_err(Into::into),
 			StreamKind::Flv(ref mut decoder) => decoder.finish().map_err(Into::into),

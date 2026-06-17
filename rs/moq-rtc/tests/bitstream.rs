@@ -2,7 +2,7 @@
 //!
 //! The H.264 Annex-B -> AVCC conversion is provided by `moq_mux::codec::h264`,
 //! but the WHIP path depends on the importer parsing the SPS for the catalog
-//! and accepting Annex-B input via `decode_frame`. These tests guard against
+//! and accepting Annex-B input via the bridge. These tests guard against
 //! regressions in the contract the moq-rtc bridge depends on.
 
 use bytes::{Bytes, BytesMut};

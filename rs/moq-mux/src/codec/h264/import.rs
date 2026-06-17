@@ -258,7 +258,7 @@ mod tests {
 	use bytes::BytesMut;
 
 	use super::*;
-	use crate::codec::h264::{Mode, Split};
+	use crate::codec::h264::Split;
 
 	fn track(name: &str) -> moq_net::TrackProducer {
 		let mut broadcast = moq_net::BroadcastInfo::new().produce();
@@ -317,13 +317,13 @@ mod tests {
 			annexb.extend_from_slice(nal);
 		}
 
-		let mut split = Split::new().with_mode(Mode::Avc3);
+		let mut split = Split::new();
 		let mut import = Import::from_track(track("video"));
 		assert!(import.catalog().is_none(), "no config before any frame");
 
-		let frames = split
-			.decode_frame(&mut annexb, moq_net::Timestamp::from_micros(0).unwrap())
-			.expect("split keyframe");
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let mut frames = split.decode(&mut annexb, pts).expect("split keyframe");
+		frames.extend(split.flush(pts).expect("flush keyframe"));
 		import.decode(frames).expect("decode keyframe");
 
 		let cfg = import.catalog().expect("config after keyframe");
@@ -346,12 +346,12 @@ mod tests {
 		annexb.extend_from_slice(&[0, 0, 0, 1]);
 		annexb.extend_from_slice(idr);
 
-		let mut split = Split::new().with_mode(Mode::Avc3);
+		let mut split = Split::new();
 		let mut import = Import::from_track(track("video"));
 
-		let frames = split
-			.decode_frame(&mut annexb, moq_net::Timestamp::from_micros(0).unwrap())
-			.expect("split keyframe");
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let mut frames = split.decode(&mut annexb, pts).expect("split keyframe");
+		frames.extend(split.flush(pts).expect("flush keyframe"));
 		let err = import
 			.decode(frames)
 			.expect_err("an unconfigurable keyframe must error");
@@ -368,12 +368,12 @@ mod tests {
 		annexb.extend_from_slice(&[0, 0, 0, 1]);
 		annexb.extend_from_slice(pslice);
 
-		let mut split = Split::new().with_mode(Mode::Avc3);
+		let mut split = Split::new();
 		let mut import = Import::from_track(track("video"));
 
-		let frames = split
-			.decode_frame(&mut annexb, moq_net::Timestamp::from_micros(0).unwrap())
-			.expect("split delta");
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let mut frames = split.decode(&mut annexb, pts).expect("split delta");
+		frames.extend(split.flush(pts).expect("flush delta"));
 		let err = import
 			.decode(frames)
 			.expect_err("a delta before any keyframe must report MissingKeyframe");

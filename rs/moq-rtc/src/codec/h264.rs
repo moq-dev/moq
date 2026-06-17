@@ -19,7 +19,7 @@ impl Bridge {
 		let track = moq_mux::publish::unique_track(&mut broadcast, ".avc3")?;
 		let import = moq_mux::codec::h264::Import::from_track(track);
 		let import = moq_mux::publish::Published::new(catalog, import);
-		let split = moq_mux::codec::h264::Split::new().with_mode(moq_mux::codec::h264::Mode::Avc3);
+		let split = moq_mux::codec::h264::Split::new();
 		Ok(Self { split, import })
 	}
 }
@@ -29,7 +29,9 @@ impl codec::Bridge for Bridge {
 		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
 		let mut buf = BytesMut::from(frame.payload.as_ref());
-		let frames = self.split.decode_frame(&mut buf, Some(pts))?;
+		// str0m hands over one whole access unit per frame, so flush to emit it.
+		let mut frames = self.split.decode(&mut buf, Some(pts))?;
+		frames.extend(self.split.flush(Some(pts))?);
 		self.import.decode(frames)?;
 		Ok(())
 	}
