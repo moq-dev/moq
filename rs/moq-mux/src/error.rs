@@ -95,10 +95,6 @@ pub enum Error {
 	#[error("buffer was not fully consumed")]
 	BufferNotConsumed,
 
-	/// Importer dispatcher cannot return a single track for multi-track containers.
-	#[error("{0} can contain multiple tracks")]
-	MultipleTracks(&'static str),
-
 	/// A non-keyframe frame was received before any keyframe opened a group.
 	/// A track joining mid-stream should skip frames until the first keyframe.
 	#[error("{0}")]

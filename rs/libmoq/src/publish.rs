@@ -4,13 +4,22 @@ use moq_mux::import;
 
 use crate::{Error, Id, NonZeroSlab};
 
+/// A media importer fed whole chunks: either a single codec track or a container
+/// that may publish several tracks. The format string picks which at creation.
+enum Media {
+	// Boxed because the codec splitters/imports make this variant much larger
+	// than the (already boxed) container one.
+	Track(Box<import::Track>),
+	Container(import::Container),
+}
+
 #[derive(Default)]
 pub struct Publish {
 	/// Active broadcast producers for publishing.
 	broadcasts: NonZeroSlab<(moq_net::BroadcastProducer, moq_mux::catalog::Producer)>,
 
 	/// Active media encoders/decoders for publishing.
-	media: NonZeroSlab<import::Framed>,
+	media: NonZeroSlab<Media>,
 
 	/// Raw track producers (no media/container/catalog framing).
 	tracks: NonZeroSlab<moq_net::TrackProducer>,
@@ -54,24 +63,45 @@ impl Publish {
 	pub fn media_ordered(&mut self, broadcast: Id, format: &str, init: &[u8]) -> Result<Id, Error> {
 		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 
-		let format = import::FramedFormat::from_str(format).map_err(|_| Error::UnknownFormat(format.to_string()))?;
-		let decoder = import::Framed::new(broadcast.clone(), catalog.clone(), format, init)?;
+		let media = if let Ok(format) = import::TrackFormat::from_str(format) {
+			Media::Track(Box::new(import::Track::new(
+				broadcast.clone(),
+				catalog.clone(),
+				format,
+				init,
+			)?))
+		} else if let Ok(format) = import::ContainerFormat::from_str(format) {
+			Media::Container(import::Container::new(
+				broadcast.clone(),
+				catalog.clone(),
+				format,
+				init,
+			)?)
+		} else {
+			return Err(Error::UnknownFormat(format.to_string()));
+		};
 
-		let id = self.media.insert(decoder)?;
+		let id = self.media.insert(media)?;
 		Ok(id)
 	}
 
 	pub fn media_frame(&mut self, media: Id, data: &[u8], timestamp: hang::container::Timestamp) -> Result<(), Error> {
 		let media = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
 
-		media.decode(data, Some(timestamp))?;
+		match media {
+			Media::Track(track) => track.decode(data, Some(timestamp))?,
+			Media::Container(container) => container.decode(data)?,
+		}
 
 		Ok(())
 	}
 
 	pub fn media_close(&mut self, media: Id) -> Result<(), Error> {
-		let mut decoder = self.media.remove(media).ok_or(Error::MediaNotFound)?;
-		decoder.finish()?;
+		let mut media = self.media.remove(media).ok_or(Error::MediaNotFound)?;
+		match &mut media {
+			Media::Track(track) => track.finish()?,
+			Media::Container(container) => container.finish()?,
+		}
 		Ok(())
 	}
 
