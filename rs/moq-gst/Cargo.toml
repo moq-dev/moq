@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/kixelated/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.2.3"
+version = "0.2.6"
 edition = "2021"
 rust-version.workspace = true
 publish = true
@@ -13,7 +13,6 @@ publish = true
 [lib]
 name = "gstmoq"
 crate-type = ["cdylib", "rlib"]
-test = false
 doctest = false
 
 [dependencies]

@@ -41,7 +41,7 @@ pub(crate) async fn serve_ws(
 	let params = AuthParams { path, jwt: query.jwt };
 	let token = if mtls.is_some() {
 		// mTLS peers: the API returns the canonical root and the billing tier.
-		let (root, internal) = state.auth.resolve_mtls(&params.path).await;
+		let (root, internal) = state.auth.resolve_mtls(&params.path).await?;
 		let mut token = AuthToken::unrestricted(moq_net::Path::new(&root).to_owned());
 		token.internal = internal;
 		token

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/moq-dev/moq/compare/moq-net-v0.1.10...moq-net-v0.1.11) - 2026-06-16
+
+### Fixed
+
+- *(moq-net)* don't tear down session on unauthorized announce-interest ([#1717](https://github.com/moq-dev/moq/pull/1717))
+- *(moq-net)* release cached state when a producer is aborted or dropped ([#1715](https://github.com/moq-dev/moq/pull/1715))
+
+### Other
+
+- rework Producer::poll/wait to a read-only predicate that returns a Mut ([#1735](https://github.com/moq-dev/moq/pull/1735))
+
+## [0.1.10](https://github.com/moq-dev/moq/compare/moq-net-v0.1.9...moq-net-v0.1.10) - 2026-06-10
+
+### Added
+
+- *(moq-net)* tag broadcasts with a per-connection origin hop when the wire carries none ([#1635](https://github.com/moq-dev/moq/pull/1635))
+
+### Fixed
+
+- *(moq-net,js/net)* draft-18 SUBSCRIBE_NAMESPACE, subgroup headers, and announce race ([#1668](https://github.com/moq-dev/moq/pull/1668))
+
 ## [0.1.9](https://github.com/moq-dev/moq/compare/moq-net-v0.1.8...moq-net-v0.1.9) - 2026-06-03
 
 ### Other

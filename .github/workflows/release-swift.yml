@@ -4,15 +4,6 @@ on:
   push:
     tags:
       - "moq-ffi-v*"
-  pull_request:
-    paths:
-      - ".github/workflows/release-swift.yml"
-      - ".github/scripts/release.sh"
-      - "swift/Package.swift.template"
-      - "swift/scripts/package.sh"
-      - "swift/scripts/publish.sh"
-      - "swift/scripts/verify.sh"
-      - "rs/moq-ffi/build.sh"
 
 permissions:
   contents: read
@@ -29,22 +20,13 @@ jobs:
       version: ${{ steps.parse.outputs.version }}
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
       - name: Parse version
         id: parse
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            CARGO_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
-          else
-            .github/scripts/release.sh parse-version moq-ffi
-          fi
+        run: .github/scripts/release.sh parse-version moq-ffi
 
   build:
     name: Build moq-ffi (${{ matrix.target }})
@@ -64,7 +46,7 @@ jobs:
           - universal-apple-darwin
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
@@ -101,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
@@ -132,7 +114,7 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
@@ -181,12 +163,11 @@ jobs:
     name: Attach assets to GitHub release
     needs: [package, parse-version]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
     permissions:
       contents: write
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           # No git operations here use the stored credential. gh CLI
@@ -220,10 +201,9 @@ jobs:
     name: Verify staged package resolves
     needs: [release, parse-version]
     runs-on: macos-latest
-    if: github.event_name == 'push'
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
@@ -243,10 +223,9 @@ jobs:
     name: Publish to Swift Package mirror
     needs: [verify, parse-version]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
@@ -278,25 +257,3 @@ jobs:
           GIT_AUTHOR_NAME: moq-bot
           GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
         run: ./swift/scripts/publish.sh
-
-  publish-dry-run:
-    name: Publish dry-run
-    needs: [package, parse-version]
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-
-      - name: Download package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: swift-package
-          path: swift-out
-
-      - name: Dry-run publish to mirror
-        env:
-          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-        run: ./swift/scripts/publish.sh --dry-run

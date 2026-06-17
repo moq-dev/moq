@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.4...moq-mux-v0.5.5) - 2026-06-16
+
+### Fixed
+
+- *(moq-mux)* confirm TS sync lock before trusting a candidate sync byte ([#1697](https://github.com/moq-dev/moq/pull/1697))
+
+### Other
+
+- Add FLV (Flash Video / RTMP) container support to moq-mux ([#1745](https://github.com/moq-dev/moq/pull/1745))
+- Mux import with existing track ([#1684](https://github.com/moq-dev/moq/pull/1684))
+- ingest and export legacy non-browser broadcast audio over MPEG-TS mp2, ac-3 & e-ac-3 ([#1701](https://github.com/moq-dev/moq/pull/1701))
+- harden the scte35_inject fixture generator ([#1696](https://github.com/moq-dev/moq/pull/1696))
+- *(moq-mux)* SIMD-accelerate MPEG-TS sync byte resync ([#1695](https://github.com/moq-dev/moq/pull/1695))
+- SIMD start-code scanning via memchr ([#1694](https://github.com/moq-dev/moq/pull/1694))
+- export SCTE-35 sections back to MPEG-TS ([#1685](https://github.com/moq-dev/moq/pull/1685))
+- ingest SCTE-35 from MPEG-TS, and tolerate mid-stream joins ([#1617](https://github.com/moq-dev/moq/pull/1617))
+
+## [0.5.4](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.3...moq-mux-v0.5.4) - 2026-06-10
+
+### Added
+
+- *(moq-video,moq-cli)* webcam capture and publish ([#1669](https://github.com/moq-dev/moq/pull/1669))
+- *(hang,json,moq-mux)* generic catalog with application extensions ([#1658](https://github.com/moq-dev/moq/pull/1658))
+- *(moq-json)* JSON Merge Patch snapshot/delta helper, route hang catalog through it ([#1655](https://github.com/moq-dev/moq/pull/1655))
+- *(moq-mux)* add VP8 and VP9 codec modules (import + fMP4 export) ([#1625](https://github.com/moq-dev/moq/pull/1625))
+
+### Fixed
+
+- *(moq-mux)* keep catalog Consumer Clone + stable FramedFormat discriminants ([#1661](https://github.com/moq-dev/moq/pull/1661))
+
 ## [0.5.3](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.2...moq-mux-v0.5.3) - 2026-06-03
 
 ### Other

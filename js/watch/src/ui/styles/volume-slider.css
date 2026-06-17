@@ -1,8 +1,0 @@
-.volume-slider {
-	gap: var(--spacing-4);
-}
-
-.volume-label {
-	width: var(--spacing-16);
-	text-align: right;
-}

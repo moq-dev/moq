@@ -224,7 +224,7 @@ export class Publisher {
 				},
 			});
 
-			await header.encode(stream);
+			await header.encode(stream, this.#session.version);
 
 			try {
 				for (;;) {

@@ -1,5 +1,13 @@
+/**
+ * DOM helpers built on Effects: create elements, render reactive content, and
+ * toggle classes with automatic cleanup when the owning effect tears down.
+ *
+ * @module
+ */
+
 import type { Effect } from ".";
 
+/** Options for {@link create}: styles, classes, dataset, attributes, plus any element properties. */
 export type CreateOptions<T extends HTMLElement> = {
 	style?: Partial<CSSStyleDeclaration>;
 	className?: string;
@@ -9,6 +17,7 @@ export type CreateOptions<T extends HTMLElement> = {
 	attributes?: Record<string, string>;
 } & Partial<Omit<T, "style" | "dataset">>;
 
+/** Creates an HTML element, applying the given options and appending the given children. */
 export function create<K extends keyof HTMLElementTagNameMap>(
 	tagName: K,
 	options?: CreateOptions<HTMLElementTagNameMap[K] & HTMLElement>,
@@ -61,10 +70,11 @@ export function create<K extends keyof HTMLElementTagNameMap>(
 	return element;
 }
 
-// Matches solid.js's JSX.Element type.
+/** Renderable content: a node, array of nodes, primitive, or nullish. Matches solid.js's JSX.Element. */
 export type Element = Node | ArrayElement | (string & {}) | number | boolean | null | undefined;
 interface ArrayElement extends Array<Element> {}
 
+/** Renders `element` into `parent`, removing it again when the effect reruns or closes. */
 export function render(effect: Effect, parent: Node, element: Element | ((effect: Effect) => Element)) {
 	const e = typeof element === "function" ? element(effect) : element;
 	if (e === undefined || e === null) return;
@@ -88,6 +98,7 @@ export function render(effect: Effect, parent: Node, element: Element | ((effect
 	effect.cleanup(() => parent.removeChild(node));
 }
 
+/** Adds the given classes to `element`, removing them again when the effect reruns or closes. */
 export function setClass(effect: Effect, element: HTMLElement, ...classNames: string[]) {
 	for (const className of classNames) {
 		element.classList.add(className);

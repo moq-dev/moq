@@ -89,7 +89,7 @@ struct RuntimeState {
 	#[allow(dead_code)]
 	session: moq_net::Session,
 	broadcast: moq_net::BroadcastProducer,
-	catalog: moq_mux::catalog::hang::Producer,
+	catalog: moq_mux::catalog::Producer,
 	pads: HashMap<String, PadState>,
 }
 
@@ -205,6 +205,8 @@ impl ElementImpl for MoqSink {
 					.build(),
 			);
 			caps.merge(gst::Caps::builder("video/x-av1").build());
+			caps.merge(gst::Caps::builder("video/x-vp8").build());
+			caps.merge(gst::Caps::builder("video/x-vp9").build());
 			caps.merge(
 				gst::Caps::builder("audio/mpeg")
 					.field("mpegversion", 4i32)
@@ -391,7 +393,7 @@ async fn run_session(
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let broadcast_consumer = broadcast.consume();
 
-	let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 	anyhow::ensure!(
 		origin.publish_broadcast(&settings.broadcast, broadcast_consumer),
@@ -457,6 +459,14 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 		"video/x-av1" => {
 			let mut bytes = Bytes::new();
 			new_decoder(runtime, moq_mux::import::FramedFormat::Av01, &mut bytes)?
+		}
+		"video/x-vp8" => {
+			let mut bytes = Bytes::new();
+			new_decoder(runtime, moq_mux::import::FramedFormat::Vp8, &mut bytes)?
+		}
+		"video/x-vp9" => {
+			let mut bytes = Bytes::new();
+			new_decoder(runtime, moq_mux::import::FramedFormat::Vp9, &mut bytes)?
 		}
 		"audio/mpeg" => {
 			let codec_data = structure

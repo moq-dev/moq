@@ -21,8 +21,8 @@ dependencies {
 
 Native binaries are bundled for:
 
-- Android: arm64-v8a, armeabi-v7a, x86_64
-- JVM: Linux x86_64 + aarch64, macOS x86_64 + aarch64, Windows x86_64
+- Android: arm64-v8a, armeabi-v7a, x86\_64
+- JVM: Linux x86\_64 + aarch64, macOS x86\_64 + aarch64, Windows x86\_64
 
 Android uses JNI (`jniLibs/`), desktop JVM uses JNA (resource-classpath layout). Both are bundled in the same AAR/JAR.
 
@@ -60,6 +60,20 @@ When you're done, signal graceful shutdown to the peer:
 session.shutdown()  // alias for cancel(0u)
 ```
 
+A server can reject the connection on auth grounds: `MoqException.Unauthorized` (HTTP 401) or `MoqException.Forbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. Use the `isAuth` helper to catch both:
+
+```kotlin
+import dev.moq.isAuth
+
+try {
+    val session = client.connect("https://relay.example.com")
+} catch (e: MoqException) {
+    if (e.isAuth) {
+        // Prompt for credentials; don't reconnect.
+    }
+}
+```
+
 ## Subscribe
 
 ```kotlin
@@ -92,6 +106,29 @@ audio.writeFrame(payload, timestampUs = 0u)
 audio.writeFrame(payload, timestampUs = 20_000u)
 audio.finish()
 broadcast.finish()
+```
+
+### On-demand raw tracks
+
+Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:
+
+```kotlin
+import dev.moq.*
+import uniffi.moq.MoqBroadcastProducer
+
+val broadcast = MoqBroadcastProducer()
+val dynamic = broadcast.dynamic()
+
+origin.publish("events", broadcast)
+
+dynamic.requestedTracks().collect { track ->
+    if (track.name() == "alerts") {
+        track.writeFrame("ready".encodeToByteArray())
+        track.finish()
+    } else {
+        track.abort(404)
+    }
+}
 ```
 
 ## Cancellation

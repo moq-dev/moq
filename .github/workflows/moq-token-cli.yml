@@ -4,18 +4,10 @@ on:
   push:
     tags:
       - "moq-token-cli-v*"
-  pull_request:
-    paths:
-      - ".github/workflows/moq-token-cli.yml"
-      - ".github/scripts/release.sh"
-      - "rs/scripts/package-binary.sh"
-      - "rs/scripts/scrub-macho.sh"
-      - "packaging/moq-token-cli/**"
-      - ".github/actions/setup-packaging/**"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -39,7 +31,7 @@ jobs:
             rpm-arch: aarch64
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
@@ -51,16 +43,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            CARGO_VERSION=$(grep '^version' rs/moq-token-cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
-          else
-            .github/scripts/release.sh parse-version moq-token-cli
-          fi
+        run: .github/scripts/release.sh parse-version moq-token-cli
 
       - name: Set up packaging tools
         uses: ./.github/actions/setup-packaging
@@ -133,13 +116,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both Apple targets build on the Apple Silicon runner. The
+          # Determinate Nix installer dropped Intel macOS, so x86_64 is
+          # cross-compiled (Apple clang is multi-arch) and its smoke test
+          # runs under Rosetta. See rs/scripts/package-binary.sh.
           - target: x86_64-apple-darwin
-            os: macos-15-intel
+            os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -147,21 +134,18 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
+
+      # The cross build links system libs only, but its dyld smoke test must
+      # actually run the x86_64 binary on this arm host. Idempotent no-op when
+      # Rosetta is already present.
+      - name: Install Rosetta (x86_64 smoke test)
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: softwareupdate --install-rosetta --agree-to-license
 
       - name: Parse version
         id: parse
         shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            CARGO_VERSION=$(grep '^version' rs/moq-token-cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
-          else
-            .github/scripts/release.sh parse-version moq-token-cli
-          fi
+        run: .github/scripts/release.sh parse-version moq-token-cli
 
       - name: Build and package tarball
         shell: bash
@@ -178,17 +162,63 @@ jobs:
           name: moq-token-cli-${{ matrix.target }}
           path: dist/*
 
+  build-windows:
+    name: Build Windows zip (${{ matrix.target }})
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # aws-lc-rs assembles its x86_64 crypto with NASM on Windows.
+      - name: Install NASM
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Parse version
+        id: parse
+        shell: bash
+        run: .github/scripts/release.sh parse-version moq-token-cli
+
+      - name: Build and package zip
+        shell: bash
+        run: |
+          ./rs/scripts/package-windows.sh \
+            --crate moq-token-cli \
+            --target ${{ matrix.target }} \
+            --version ${{ steps.parse.outputs.version }} \
+            --output dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: moq-token-cli-${{ matrix.target }}
+          path: dist/*
+
   release:
     name: Release
-    needs: [build, build-tarball-macos]
+    needs: [build, build-tarball-macos, build-windows]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
     permissions:
       contents: write
       actions: write
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false

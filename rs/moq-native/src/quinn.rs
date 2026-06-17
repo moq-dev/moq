@@ -1,11 +1,115 @@
 use crate::client::ClientConfig;
-use crate::server::{ServerConfig, ServerId, ServerTlsInfo};
+use crate::server::{ServerConfig, ServerId};
 use crate::tls::{FingerprintVerifier, ServeCerts};
-use anyhow::Context;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::{net, time};
 use url::Url;
+
+pub use web_transport_quinn;
+
+/// Errors specific to the quinn QUIC backend.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("failed to bind UDP socket")]
+	BindSocket(#[source] std::io::Error),
+
+	#[error("failed to create QUIC endpoint")]
+	CreateEndpoint(#[source] std::io::Error),
+
+	#[error("no async runtime")]
+	NoRuntime,
+
+	#[error("failed to get local address")]
+	LocalAddr(#[source] std::io::Error),
+
+	#[error("failed to resolve bind address")]
+	ResolveBind(#[source] std::io::Error),
+
+	#[error("invalid DNS name")]
+	InvalidDnsName,
+
+	#[error("failed DNS lookup")]
+	DnsLookup(#[source] std::io::Error),
+
+	#[error("no DNS entries")]
+	NoDnsEntries,
+
+	#[error("failed to fetch fingerprint")]
+	FetchFingerprint(#[source] reqwest::Error),
+
+	#[error("fingerprint request failed")]
+	FingerprintStatus(#[source] reqwest::Error),
+
+	#[error("failed to read fingerprint")]
+	ReadFingerprint(#[source] reqwest::Error),
+
+	#[error("invalid fingerprint")]
+	InvalidFingerprint(#[from] hex::FromHexError),
+
+	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
+	InvalidScheme,
+
+	#[error("unsupported URL scheme: {0}")]
+	UnsupportedScheme(String),
+
+	#[error("missing handshake data")]
+	MissingHandshake,
+
+	#[error("missing ALPN")]
+	MissingAlpn,
+
+	#[error("failed to decode ALPN")]
+	DecodeAlpn(#[from] std::string::FromUtf8Error),
+
+	#[error("unsupported ALPN: {0}")]
+	UnsupportedAlpn(String),
+
+	#[error("missing server name for raw QUIC connection")]
+	MissingServerName,
+
+	#[error("failed to construct URL from server name")]
+	BuildUrl(#[source] url::ParseError),
+
+	#[error("quic_lb_nonce must be at least 4")]
+	QuicLbNonceTooSmall,
+
+	#[error("connection ID length ({0}) exceeds maximum of 20")]
+	QuicLbCidTooLong(usize),
+
+	#[error("failed to build client certificate verifier")]
+	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
+
+	#[error(transparent)]
+	NoInitialCipherSuite(#[from] quinn::crypto::rustls::NoInitialCipherSuite),
+
+	#[error(transparent)]
+	Connect(#[from] quinn::ConnectError),
+
+	#[error(transparent)]
+	Connection(#[from] quinn::ConnectionError),
+
+	#[error(transparent)]
+	Client(#[from] web_transport_quinn::ClientError),
+
+	#[error(transparent)]
+	ConnectRejected(#[from] crate::ConnectError),
+
+	#[error(transparent)]
+	Server(#[from] web_transport_quinn::ServerError),
+
+	#[error("failed to establish QUIC connection")]
+	Establish(#[source] quinn::ConnectionError),
+
+	#[error("failed to receive WebTransport request")]
+	RecvRequest(#[source] web_transport_quinn::ServerError),
+
+	#[error(transparent)]
+	Tls(#[from] crate::tls::Error),
+}
+
+type Result<T> = std::result::Result<T, Error>;
 
 // ── Client ──────────────────────────────────────────────────────────
 
@@ -17,8 +121,8 @@ pub(crate) struct QuinnClient {
 }
 
 impl QuinnClient {
-	pub fn new(config: &ClientConfig) -> anyhow::Result<Self> {
-		let socket = std::net::UdpSocket::bind(config.bind).context("failed to bind UDP socket")?;
+	pub fn new(config: &ClientConfig) -> Result<Self> {
+		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
 
 		// TODO Validate the BBR implementation before enabling it
 		let mut transport = quinn::TransportConfig::default();
@@ -34,12 +138,11 @@ impl QuinnClient {
 		let transport = Arc::new(transport);
 
 		// There's a bit more boilerplate to make a generic endpoint.
-		let runtime = quinn::default_runtime().context("no async runtime")?;
+		let runtime = quinn::default_runtime().ok_or(Error::NoRuntime)?;
 		let endpoint_config = quinn::EndpointConfig::default();
 
 		// Create the generic QUIC endpoint.
-		let quic =
-			quinn::Endpoint::new(endpoint_config, None, socket, runtime).context("failed to create QUIC endpoint")?;
+		let quic = quinn::Endpoint::new(endpoint_config, None, socket, runtime).map_err(Error::CreateEndpoint)?;
 
 		Ok(Self {
 			quic,
@@ -48,11 +151,11 @@ impl QuinnClient {
 		})
 	}
 
-	pub async fn connect(&self, tls: &rustls::ClientConfig, url: Url) -> anyhow::Result<web_transport_quinn::Session> {
+	pub async fn connect(&self, tls: &rustls::ClientConfig, url: Url) -> Result<web_transport_quinn::Session> {
 		let mut url = url;
 		let mut config = tls.clone();
 
-		let host = url.host().context("invalid DNS name")?.to_string();
+		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
 		let port = url.port().unwrap_or(443);
 
 		// Look up the DNS entry.
@@ -60,11 +163,11 @@ impl QuinnClient {
 		// preferring one whose family matches the local socket so the OS
 		// doesn't reject it (notably on Windows, where IPv6 sockets aren't
 		// dual-stack by default).
-		let local = self.quic.local_addr().context("failed to get local address")?;
+		let local = self.quic.local_addr().map_err(Error::LocalAddr)?;
 		let addrs = tokio::net::lookup_host((host.clone(), port))
 			.await
-			.context("failed DNS lookup")?;
-		let ip = crate::util::pick_addr(addrs, local).context("no DNS entries")?;
+			.map_err(Error::DnsLookup)?;
+		let ip = crate::util::pick_addr(addrs, local).ok_or(Error::NoDnsEntries)?;
 
 		if url.scheme() == "http" {
 			// Perform a HTTP request to fetch the certificate fingerprint.
@@ -77,14 +180,14 @@ impl QuinnClient {
 
 			let resp = reqwest::get(fingerprint.as_str())
 				.await
-				.context("failed to fetch fingerprint")?
+				.map_err(Error::FetchFingerprint)?
 				.error_for_status()
-				.context("fingerprint request failed")?;
+				.map_err(Error::FingerprintStatus)?;
 
-			let fingerprint = resp.text().await.context("failed to read fingerprint")?;
-			let fingerprint = hex::decode(fingerprint.trim()).context("invalid fingerprint")?;
+			let fingerprint = resp.text().await.map_err(Error::ReadFingerprint)?;
+			let fingerprint = hex::decode(fingerprint.trim())?;
 
-			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), fingerprint);
+			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), vec![fingerprint]);
 			config.dangerous().set_certificate_verifier(Arc::new(verifier));
 
 			url.set_scheme("https").expect("failed to set scheme");
@@ -98,7 +201,7 @@ impl QuinnClient {
 				.iter()
 				.map(|alpn| alpn.as_bytes().to_vec())
 				.collect(),
-			_ => anyhow::bail!("url scheme must be 'https', 'moqt', or 'moql'"),
+			_ => return Err(Error::InvalidScheme),
 		};
 
 		config.alpn_protocols = alpns;
@@ -119,24 +222,69 @@ impl QuinnClient {
 		}
 
 		let session = match url.scheme() {
-			"https" => web_transport_quinn::Session::connect(connection, request).await?,
+			"https" => web_transport_quinn::Session::connect(connection, request)
+				.await
+				.map_err(map_client_error)?,
 			"moqt" | "moql" => {
 				let handshake = connection
 					.handshake_data()
-					.context("missing handshake data")?
+					.ok_or(Error::MissingHandshake)?
 					.downcast::<quinn::crypto::rustls::HandshakeData>()
 					.unwrap();
 
-				let alpn = handshake.protocol.context("missing ALPN")?;
-				let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
+				let alpn = handshake.protocol.ok_or(Error::MissingAlpn)?;
+				let alpn = String::from_utf8(alpn)?;
 
 				let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
 				web_transport_quinn::Session::raw(connection, request, response)
 			}
-			_ => anyhow::bail!("unsupported URL scheme: {}", url.scheme()),
+			_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
 		};
 
 		Ok(session)
+	}
+}
+
+impl Error {
+	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
+		match self {
+			Self::ConnectRejected(err) => Some(*err),
+			Self::Client(err) => classify_client_error(err),
+			_ => None,
+		}
+	}
+}
+
+fn map_client_error(err: web_transport_quinn::ClientError) -> Error {
+	if let Some(err) = classify_client_error(&err) {
+		return err.into();
+	}
+
+	err.into()
+}
+
+fn classify_client_error(err: &web_transport_quinn::ClientError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_quinn::ClientError::HttpError(err) => classify_connect_error(err),
+		_ => None,
+	}
+}
+
+fn classify_connect_error(err: &web_transport_quinn::ConnectError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_quinn::ConnectError::ErrorStatus(status) => crate::ConnectError::from_status_u16(status.as_u16()),
+		web_transport_quinn::ConnectError::ProtoError(err) => classify_proto_error(err),
+		_ => None,
+	}
+}
+
+fn classify_proto_error(err: &web_transport_quinn::proto::ConnectError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_quinn::proto::ConnectError::ErrorStatus(status)
+		| web_transport_quinn::proto::ConnectError::WrongStatus(Some(status)) => {
+			crate::ConnectError::from_status_u16(status.as_u16())
+		}
+		_ => None,
 	}
 }
 
@@ -148,7 +296,7 @@ pub(crate) struct QuinnServer {
 }
 
 impl QuinnServer {
-	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
+	pub fn new(config: ServerConfig) -> Result<Self> {
 		// Enable BBR congestion control
 		// TODO Validate the BBR implementation before enabling it
 		let mut transport = quinn::TransportConfig::default();
@@ -170,7 +318,8 @@ impl QuinnServer {
 		let certs = Arc::new(certs);
 
 		let tls_builder = rustls::ServerConfig::builder_with_provider(provider.clone())
-			.with_protocol_versions(&[&rustls::version::TLS13])?;
+			.with_protocol_versions(&[&rustls::version::TLS13])
+			.map_err(crate::tls::Error::from)?;
 
 		let mut tls = if config.tls.root.is_empty() {
 			tls_builder.with_no_client_auth().with_cert_resolver(certs.clone())
@@ -179,7 +328,7 @@ impl QuinnServer {
 			let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
 				.allow_unauthenticated()
 				.build()
-				.context("failed to build client certificate verifier")?;
+				.map_err(Error::ClientVerifier)?;
 			tls_builder
 				.with_client_cert_verifier(verifier)
 				.with_cert_resolver(certs.clone())
@@ -211,19 +360,23 @@ impl QuinnServer {
 		}
 
 		// There's a bit more boilerplate to make a generic endpoint.
-		let runtime = quinn::default_runtime().context("no async runtime")?;
+		let runtime = quinn::default_runtime().ok_or(Error::NoRuntime)?;
 
-		let listen = crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND)
-			.context("failed to resolve bind address")?;
+		let listen =
+			crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND).map_err(Error::ResolveBind)?;
 
 		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = quinn::EndpointConfig::default();
 		if let Some(server_id) = config.quic_lb_id {
 			let nonce_len = config.quic_lb_nonce.unwrap_or(8);
-			anyhow::ensure!(nonce_len >= 4, "quic_lb_nonce must be at least 4");
+			if nonce_len < 4 {
+				return Err(Error::QuicLbNonceTooSmall);
+			}
 
 			let cid_len = 1 + server_id.len() + nonce_len;
-			anyhow::ensure!(cid_len <= 20, "connection ID length ({cid_len}) exceeds maximum of 20");
+			if cid_len > 20 {
+				return Err(Error::QuicLbCidTooLong(cid_len));
+			}
 
 			tracing::info!(
 				?server_id,
@@ -233,15 +386,13 @@ impl QuinnServer {
 			endpoint_config.cid_generator(move || Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len)));
 		}
 
-		let socket = std::net::UdpSocket::bind(listen).context("failed to bind UDP socket")?;
+		let socket = crate::bind::udp(listen).map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
-		let quic = quinn::Endpoint::new(endpoint_config, Some(tls), socket, runtime)
-			.context("failed to create QUIC endpoint")?;
+		let quic = quinn::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;
 
-		// Spawn cert reload listener only after endpoint creation succeeds,
-		// so we don't leave a dangling signal listener on failure.
-		#[cfg(unix)]
+		// Spawn the cert reload watcher only after endpoint creation succeeds,
+		// so we don't leave a dangling watcher on failure.
 		tokio::spawn(crate::tls::reload_certs(certs.clone(), config.tls.clone()));
 
 		Ok(Self { quic, certs })
@@ -251,12 +402,12 @@ impl QuinnServer {
 		self.quic.accept()
 	}
 
-	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
+	pub fn tls_info(&self) -> Arc<RwLock<crate::tls::Info>> {
 		self.certs.info.clone()
 	}
 
-	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {
-		self.quic.local_addr().context("failed to get local address")
+	pub fn local_addr(&self) -> Result<net::SocketAddr> {
+		self.quic.local_addr().map_err(Error::LocalAddr)
 	}
 
 	pub fn close(&self) {
@@ -280,7 +431,7 @@ pub(crate) enum QuinnRequest {
 }
 
 impl QuinnRequest {
-	pub async fn accept(conn: quinn::Incoming, alpns: Vec<&'static str>) -> anyhow::Result<Self> {
+	pub async fn accept(conn: quinn::Incoming, alpns: Vec<&'static str>) -> Result<Self> {
 		let mut conn = conn.accept()?;
 
 		let handshake = conn
@@ -289,14 +440,14 @@ impl QuinnRequest {
 			.downcast::<quinn::crypto::rustls::HandshakeData>()
 			.unwrap();
 
-		let alpn = handshake.protocol.context("missing ALPN")?;
-		let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
+		let alpn = handshake.protocol.ok_or(Error::MissingAlpn)?;
+		let alpn = String::from_utf8(alpn)?;
 		let host = handshake.server_name.unwrap_or_default();
 
 		tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepting");
 
 		// Wait for the QUIC connection to be established.
-		let conn = conn.await.context("failed to establish QUIC connection")?;
+		let conn = conn.await.map_err(Error::Establish)?;
 
 		let span = tracing::Span::current();
 		span.record("id", conn.stable_id()); // TODO can we get this earlier?
@@ -307,19 +458,19 @@ impl QuinnRequest {
 				// Wait for the CONNECT request.
 				let request = web_transport_quinn::Request::accept(conn)
 					.await
-					.context("failed to receive WebTransport request")?;
+					.map_err(Error::RecvRequest)?;
 				Ok(Self::WebTransport { request, alpns })
 			}
 			alpn if moq_net::ALPNS.contains(&alpn) => {
-				anyhow::ensure!(!host.is_empty(), "missing server name for raw QUIC connection");
+				if host.is_empty() {
+					return Err(Error::MissingServerName);
+				}
 				let host_str = if host.contains(':') {
 					format!("[{}]", host)
 				} else {
 					host.clone()
 				};
-				let url = format!("moqt://{}", host_str)
-					.parse::<Url>()
-					.context("failed to construct URL from server name")?;
+				let url = format!("moqt://{}", host_str).parse::<Url>().map_err(Error::BuildUrl)?;
 				let request = web_transport_quinn::proto::ConnectRequest::new(url);
 				let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
 				Ok(Self::Raw {
@@ -328,12 +479,12 @@ impl QuinnRequest {
 					response,
 				})
 			}
-			_ => anyhow::bail!("unsupported ALPN: {alpn}"),
+			_ => Err(Error::UnsupportedAlpn(alpn)),
 		}
 	}
 
 	/// Accept the session, returning a 200 OK if using WebTransport.
-	pub async fn ok(self) -> Result<web_transport_quinn::Session, web_transport_quinn::ServerError> {
+	pub async fn ok(self) -> std::result::Result<web_transport_quinn::Session, web_transport_quinn::ServerError> {
 		match self {
 			QuinnRequest::Raw {
 				connection,
@@ -377,7 +528,7 @@ impl QuinnRequest {
 	pub async fn close(
 		self,
 		status: web_transport_quinn::http::StatusCode,
-	) -> Result<(), web_transport_quinn::ServerError> {
+	) -> std::result::Result<(), web_transport_quinn::ServerError> {
 		match self {
 			QuinnRequest::Raw { connection, .. } => {
 				connection.close(status.as_u16().into(), status.as_str().as_bytes());

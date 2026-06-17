@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.0.2"
+version = "0.0.4"
 edition = "2024"
 rust-version.workspace = true
 
@@ -15,8 +15,20 @@ categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 [lib]
 doctest = false
 
+[features]
+# Microphone capture via cpal (pure-Rust: CoreAudio / WASAPI / ALSA). Off by
+# default so audio-only consumers (e.g. moq-ffi) don't pull cpal and, on Linux,
+# the ALSA build dependency. On macOS it also pulls AVFoundation for the TCC
+# permission pre-check (the objc deps below are target-gated, so this is a no-op
+# elsewhere).
+capture = ["dep:cpal", "dep:tokio", "dep:tracing", "dep:block2", "dep:objc2", "dep:objc2-av-foundation"]
+
 [dependencies]
 bytes = "1"
+# Pure-Rust cross-platform audio I/O. Optional: only the `capture` feature
+# (microphone input) needs it. Encode stays on unsafe-libopus, so a build
+# without `capture` pulls no new dependency.
+cpal = { version = "0.18", optional = true }
 hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
@@ -24,6 +36,11 @@ moq-net = { workspace = true }
 # fft_resampler feature and its RustFFT/realfft dependencies.
 rubato = { version = "3.0", default-features = false }
 thiserror = "2"
+# Only the `capture` feature needs an async runtime (spawn_blocking + select for
+# the on-demand gate).
+tokio = { workspace = true, optional = true, features = ["rt", "macros"] }
+# Only used by the `capture` feature for stream-error logging.
+tracing = { version = "0.1", optional = true }
 # Pure-Rust transpilation of libopus 1.3.1. No CMake toolchain, no C
 # linker hackery, and crucially still maintained, unlike the
 # `opus`/`audiopus_sys` combo which is stuck on a 5-year-old vendored
@@ -32,6 +49,14 @@ thiserror = "2"
 # 20 ms Opus frames moq-audio publishes that's still well under any
 # real-time budget.
 unsafe-libopus = "0.2"
+
+# macOS-only: query/request the microphone TCC permission so a denied mic fails
+# fast with a clear error instead of feeding silence into the capture loop. Only
+# pulled in by the `capture` feature (see above); a no-op on other platforms.
+[target.'cfg(target_os="macos")'.dependencies]
+block2 = { version = "0.6.2", optional = true }
+objc2 = { version = "0.6.4", optional = true }
+objc2-av-foundation = { version = "0.3.2", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

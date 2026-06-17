@@ -5,6 +5,7 @@ import { Effect, Signal } from "@moq/signals";
 import { MultiBackend } from "./backend";
 import { Broadcast, type CatalogFormat, parseCatalogFormat } from "./broadcast";
 import type { Latency } from "./sync";
+import type { Visible } from "./video";
 
 const OBSERVED = [
 	"url",
@@ -12,6 +13,7 @@ const OBSERVED = [
 	"paused",
 	"volume",
 	"muted",
+	"visible",
 	"reload",
 	"latency",
 	"latency-min",
@@ -20,6 +22,19 @@ const OBSERVED = [
 	"catalog-format",
 ] as const;
 type Observed = (typeof OBSERVED)[number];
+
+// Parse the `visible` attribute into a Visible value, falling back to "0px" (on screen only).
+function parseVisible(value: string | null): Visible {
+	const trimmed = value?.trim();
+	if (!trimmed) return "0px";
+	if (trimmed === "never" || trimmed === "always") return trimmed;
+	// A CSS length usable as an IntersectionObserver rootMargin (px or %).
+	if (/^-?\d+(\.\d+)?(px|%)$/.test(trimmed)) return trimmed;
+	// Allow a bare number as a px convenience (e.g. visible="200").
+	if (/^-?\d+(\.\d+)?$/.test(trimmed)) return `${trimmed}px`;
+	console.warn(`moq-watch: invalid visible="${value}", expected "never", "always", or a CSS length like "200px"`);
+	return "0px";
+}
 
 // Close everything when this element is garbage collected.
 // This is primarily to avoid a console.warn that we didn't close() before GC.
@@ -120,6 +135,11 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
+			const visible = effect.get(this.backend.visible);
+			this.setAttribute("visible", visible);
+		});
+
+		this.signals.run((effect) => {
 			const volume = effect.get(this.backend.audio.volume);
 			this.setAttribute("volume", volume.toString());
 		});
@@ -203,6 +223,8 @@ export default class MoqWatch extends HTMLElement {
 			this.backend.audio.volume.set(volume);
 		} else if (name === "muted") {
 			this.backend.audio.muted.set(newValue !== null);
+		} else if (name === "visible") {
+			this.backend.visible.set(parseVisible(newValue));
 		} else if (name === "reload") {
 			this.broadcast.reload.set(newValue !== null);
 		} else if (name === "latency") {
@@ -261,6 +283,15 @@ export default class MoqWatch extends HTMLElement {
 
 	set muted(value: boolean) {
 		this.backend.audio.muted.set(value);
+	}
+
+	/** When video is downloaded relative to the canvas position. See {@link Visible}. */
+	get visible(): Visible {
+		return this.backend.visible.peek();
+	}
+
+	set visible(value: Visible) {
+		this.backend.visible.set(value);
 	}
 
 	get reload(): boolean {

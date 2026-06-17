@@ -1,7 +1,13 @@
+/**
+ * React hooks for reading and writing signals from components.
+ *
+ * @module
+ */
+
 import { useCallback, useSyncExternalStore } from "react";
 import type { Getter, Signal } from "./index";
 
-// A helper to read a signal's value in React.
+/** Subscribes a component to a signal and returns its current value. */
 export function useValue<T>(signal: Getter<T>): T {
 	return useSyncExternalStore(
 		(callback) => signal.subscribe(callback),
@@ -10,7 +16,7 @@ export function useValue<T>(signal: Getter<T>): T {
 	);
 }
 
-// A helper to read and write a signal in React, like useState.
+/** Reads and writes a signal as a `[value, setValue]` pair, like `useState`. */
 export function useSignal<T>(signal: Signal<T>): [T, (value: T | ((prev: T) => T)) => void] {
 	const value = useValue(signal);
 	const setter = useCallback(

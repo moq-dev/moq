@@ -23,7 +23,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer.unique_track(".avc3").unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x42,
@@ -118,7 +118,7 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer.unique_track(".aac").unwrap();
 
 	// AAC-LC (profile 2), 44100 Hz, stereo. The TS importer sets `description`
@@ -191,6 +191,154 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	moov.encode(&mut buf).expect("encode synthesized moov");
 }
 
+/// VP8 source (catalog `Container::Legacy`, codec `vp8`, no `description`) →
+/// fMP4 export must synthesize a `vp08` sample entry. VP8 carries no out-of-band
+/// config, so this exercises the description-less synthesis path.
+#[tokio::test(start_paused = true)]
+async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
+	use crate::container::Timestamp;
+	use bytes::Bytes;
+	use hang::catalog::{Container, VideoCodec, VideoConfig};
+
+	let broadcast = moq_net::Broadcast::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let track = producer.unique_track(".vp8").unwrap();
+	let mut config = VideoConfig::new(VideoCodec::VP8);
+	config.coded_width = Some(320);
+	config.coded_height = Some(240);
+	config.container = Container::Legacy;
+	catalog.lock().video.renditions.insert(track.name.clone(), config);
+
+	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
+	track_producer
+		.write(crate::container::Frame {
+			timestamp: Timestamp::from_micros(0).unwrap(),
+			payload: Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a]),
+			keyframe: true,
+		})
+		.unwrap();
+	track_producer.finish().unwrap();
+
+	let mut exporter = crate::container::fmp4::Export::new(consumer).expect("new Fmp4");
+
+	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+		.await
+		.expect("exporter timed out")
+		.expect("exporter result")
+		.expect("expected init bytes");
+
+	drop(track_producer);
+	drop(catalog);
+	drop(producer);
+
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut moov: Option<mp4_atom::Moov> = None;
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		if let mp4_atom::Any::Moov(m) = atom {
+			moov = Some(m);
+		}
+	}
+	let moov = moov.expect("init segment missing moov");
+	assert_eq!(moov.trak.len(), 1, "expected single track in moov");
+
+	let trak = &moov.trak[0];
+	let stsd = &trak.mdia.minf.stbl.stsd;
+	assert_eq!(stsd.codecs.len(), 1, "expected single sample entry");
+	let vp08 = match &stsd.codecs[0] {
+		mp4_atom::Codec::Vp08(vp08) => vp08,
+		other => panic!("expected Vp08 sample entry, got {:?}", other),
+	};
+	assert_eq!(vp08.visual.width, 320);
+	assert_eq!(vp08.visual.height, 240);
+	assert_eq!(vp08.vpcc.bit_depth, 8);
+
+	// The synthesized init (vpcC included) must round-trip through encode.
+	let mut buf = Vec::new();
+	moov.encode(&mut buf).expect("encode synthesized moov");
+}
+
+/// VP9 source (catalog `Container::Legacy`, codec `vp09`, no `description`) →
+/// fMP4 export must synthesize a `vp09` sample entry whose `vpcC` round-trips
+/// the catalog's VP9 parameters.
+#[tokio::test(start_paused = true)]
+async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
+	use crate::container::Timestamp;
+	use bytes::Bytes;
+	use hang::catalog::{Container, VP9, VideoConfig};
+
+	let broadcast = moq_net::Broadcast::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let track = producer.unique_track(".vp9").unwrap();
+	let mut config = VideoConfig::new(VP9 {
+		profile: 0,
+		level: 20,
+		bit_depth: 8,
+		chroma_subsampling: 1,
+		color_primaries: 2,
+		transfer_characteristics: 2,
+		matrix_coefficients: 5,
+		full_range: false,
+	});
+	config.coded_width = Some(320);
+	config.coded_height = Some(240);
+	config.container = Container::Legacy;
+	catalog.lock().video.renditions.insert(track.name.clone(), config);
+
+	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
+	track_producer
+		.write(crate::container::Frame {
+			timestamp: Timestamp::from_micros(0).unwrap(),
+			payload: Bytes::from_static(&[0x82, 0x49, 0x83, 0x42]),
+			keyframe: true,
+		})
+		.unwrap();
+	track_producer.finish().unwrap();
+
+	let mut exporter = crate::container::fmp4::Export::new(consumer).expect("new Fmp4");
+
+	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+		.await
+		.expect("exporter timed out")
+		.expect("exporter result")
+		.expect("expected init bytes");
+
+	drop(track_producer);
+	drop(catalog);
+	drop(producer);
+
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut moov: Option<mp4_atom::Moov> = None;
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		if let mp4_atom::Any::Moov(m) = atom {
+			moov = Some(m);
+		}
+	}
+	let moov = moov.expect("init segment missing moov");
+	assert_eq!(moov.trak.len(), 1, "expected single track in moov");
+
+	let trak = &moov.trak[0];
+	let stsd = &trak.mdia.minf.stbl.stsd;
+	let vp09 = match &stsd.codecs[0] {
+		mp4_atom::Codec::Vp09(vp09) => vp09,
+		other => panic!("expected Vp09 sample entry, got {:?}", other),
+	};
+	assert_eq!(vp09.visual.width, 320);
+	assert_eq!(vp09.visual.height, 240);
+	assert_eq!(vp09.vpcc.profile, 0);
+	assert_eq!(vp09.vpcc.bit_depth, 8);
+	assert_eq!(vp09.vpcc.matrix_coefficients, 5);
+
+	// The synthesized init (vpcC included) must round-trip through encode.
+	let mut buf = Vec::new();
+	moov.encode(&mut buf).expect("encode synthesized moov");
+}
+
 /// CMAF source (catalog `Container::Cmaf`) → fMP4 export should keep using
 /// the passthrough init path: existing init bytes are merged into the moov.
 ///
@@ -203,7 +351,7 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let catalog = crate::catalog::hang::Producer::new(&mut producer).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = crate::container::fmp4::Import::new(producer, catalog);
 	let mut buf = BytesMut::from(data.as_slice());
 	let _ = importer.decode(&mut buf);

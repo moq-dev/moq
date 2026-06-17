@@ -15,6 +15,12 @@ description: Command-line tools for MoQ media
 cargo install moq-cli
 ```
 
+### Using winget (Windows)
+
+```powershell
+winget install moq-dev.moq-cli
+```
+
 ### Using Nix
 
 ```bash
@@ -60,7 +66,9 @@ Pipe FFmpeg output directly to moq-cli:
 ffmpeg -i input.mp4 -f mpegts - | moq-cli publish - https://relay.example.com/anon/my-stream
 ```
 
-### Publish a Webcam
+### Capture a Webcam
+
+Pipe an external FFmpeg process as MPEG-TS:
 
 ```bash
 # macOS
@@ -120,14 +128,17 @@ Publish (read from stdin unless noted):
 
 - `avc3` - raw H.264 Annex-B
 - `fmp4` - fragmented MP4 / CMAF
-- `ts` - MPEG-TS (H.264 / H.265 video, AAC audio)
+- `ts` - MPEG-TS (H.264 / H.265 video; AAC, MP2, AC-3, or E-AC-3 audio)
+- `flv` - FLV / RTMP (H.264 video, AAC audio)
 - `hls --playlist <url>` - HLS playlist ingest
+- `capture` - capture local devices directly (camera H.264 + microphone Opus; requires the `capture` build feature; does not read stdin)
 
 Subscribe (`--format`):
 
 - `fmp4` - fragmented MP4 / CMAF
 - `mkv` - Matroska / WebM
 - `ts` - MPEG-TS
+- `flv` - FLV / RTMP (H.264 video, AAC audio)
 
 ### MPEG-TS
 
@@ -146,6 +157,31 @@ TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
 (avc3 / hev1) and out-of-band (avc1 / hvc1, e.g. from an fMP4 import) video
 sources work: the parameter sets are read from the bitstream or the catalog
 `description` and re-injected as Annex-B on each keyframe.
+
+Broadcast audio (MP2, AC-3, E-AC-3) is carried verbatim: complete, well-formed
+frames pass through byte-exact, never transcoded; malformed input is rejected
+rather than mis-described. The catalog describes the codec honestly so a
+subscriber that can decode it (typically TS gear) picks it up; browsers cannot
+play these codecs and should skip the rendition.
+
+### FLV
+
+Ingest an FLV stream from FFmpeg and play one back out:
+
+```bash
+# Publish: remux a file to FLV and pipe it in
+ffmpeg -i input.mp4 -c copy -f flv - | \
+    moq-cli publish --url https://relay.example.com --broadcast my-stream flv
+
+# Subscribe: pull FLV back out and play it
+moq-cli subscribe --url https://relay.example.com --broadcast my-stream --format flv | ffplay -
+```
+
+FLV is the classic RTMP container: H.264 video carried as length-prefixed NALU
+with an out-of-band avcC, and AAC audio carried raw with an out-of-band
+AudioSpecificConfig. Both pass straight through to the catalog `description`. The
+enhanced E-RTMP FourCC payloads (HEVC, AV1, Opus) and the older codecs (VP6, MP3)
+are not supported.
 
 ## Authentication
 

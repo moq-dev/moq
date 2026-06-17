@@ -29,6 +29,11 @@ ignore = [
     # http-cache (via http-cache-reqwest in moq-relay) still depends on
     # bincode 1.x. Awaits upstream bump to bincode 2.x.
     "RUSTSEC-2025-0141",
+
+    # proc-macro-error2 unmaintained. Pulled in transitively as a build-time
+    # proc-macro via local-ip-address -> neli -> getset; no runtime exposure.
+    # Drop the ignore when getset migrates off proc-macro-error2.
+    "RUSTSEC-2026-0173",
 ]
 
 [licenses]

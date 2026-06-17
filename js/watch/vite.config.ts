@@ -16,7 +16,9 @@ export default defineConfig({
 			formats: ["es"],
 		},
 		rollupOptions: {
-			external: ["@moq/hang", "@moq/net", "@moq/signals"],
+			// Keep every @moq workspace dep (and its subpaths, e.g. @moq/signals/dom)
+			// external so consumers dedupe against their own copy instead of bundling ours.
+			external: (id) => id.startsWith("@moq/"),
 		},
 		sourcemap: true,
 		target: "esnext",

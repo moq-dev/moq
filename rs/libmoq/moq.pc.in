@@ -1,11 +1,14 @@
-prefix=${pcfiledir}/../..
-exec_prefix=${prefix}
-libdir=${exec_prefix}/lib
-includedir=${prefix}/include
+# Paths are relative to this .pc file so the raw `cargo build` target tree is
+# usable directly (e.g. PKG_CONFIG_PATH=target/lib/pkgconfig). The staticlib
+# lives in the profile dir (target/<profile>/), the header in target/include/.
+# Packagers that relocate into a conventional lib/+include/ layout rewrite
+# libdir; see nix/overlay.nix.
+libdir=${pcfiledir}/../../@PROFILE@
+includedir=${pcfiledir}/../../include
 
 Name: moq
 Description: Media over QUIC C Interface
 Version: @VERSION@
 Libs: -L${libdir} -lmoq
-Libs.private: -framework CoreFoundation -framework Security
+Libs.private: @LIBS_PRIVATE@
 Cflags: -I${includedir}

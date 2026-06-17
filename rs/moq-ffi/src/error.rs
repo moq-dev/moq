@@ -48,8 +48,14 @@ pub enum MoqError {
 	#[error("codec: {0}")]
 	Codec(String),
 
+	#[error("invalid error code: {0}")]
+	InvalidErrorCode(i32),
+
 	#[error("unauthorized")]
 	Unauthorized,
+
+	#[error("forbidden")]
+	Forbidden,
 
 	#[error("log: {0}")]
 	Log(String),

@@ -23,10 +23,23 @@
 		NOTE: `http` performs an insecure certificate check. You must use `https` in production.
 	-->
 	<moq-publish-ui>
-		<moq-publish url="%VITE_RELAY_URL%" name="me.hang">
+		<moq-publish id="publish" url="%VITE_RELAY_URL%" name="me.hang" simulcast>
 			<video style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;" muted autoplay></video>
+
+			<!--
+				Alternatively, preview a decoded copy of the encoded video, i.e. what a viewer actually
+				receives over the network (codec artifacts and all), at the cost of an extra encode +
+				decode. Add preview="encoded" to <moq-publish> above and use this <canvas> instead of the
+				<video>:
+			-->
+			<!-- <canvas style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;"></canvas> -->
 		</moq-publish>
 	</moq-publish-ui>
+
+	<!-- Dev-only: renders console output inline here. Set `level` to lower the
+	     threshold (debug | log | info | warn | error; defaults to warn). Defined
+	     by the console-overlay Vite plugin; absent from production builds. -->
+	<moq-console></moq-console>
 
 	<h3>Other demos:</h3>
 	<ul>
@@ -77,6 +90,19 @@ publish.broadcast.audio.enabled.set(true);</code></pre>
 		If you want to do things more efficiently, you can use the
 		<a href="https://doc.moq.dev/app/gstreamer">GStreamer plugin</a>.
 		It's pretty crude and doesn't handle all pipeline events; contributions welcome!
+	</p>
+	<hr />
+	<p>
+		The <code class="language-html">simulcast</code> attribute makes this page publish two renditions of the same
+		video: `video/hd` at the captured resolution and `video/sd` at a fraction of the source resolution (around 480p from a 1080p source).
+		Each rendition is a separate track, so it only costs bandwidth when a viewer requests it.
+		Tiny thumbnails download the small one; big players download the big one.
+	</p>
+	<p>
+		To see it in action, <a href="index.html?broadcast=me.hang" target="_blank" rel="noreferrer">watch your
+			broadcast</a> in another tab and drag the player's resize handle.
+		The "Quality" dropdown shows which rendition is active; leave it on Auto and watch it hop.
+		You can also toggle it from Javascript with <code class="language-typescript">publish.simulcast = false</code>.
 	</p>
 	<hr />
 	<p>

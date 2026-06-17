@@ -14,6 +14,10 @@ pub enum Error {
 	#[error("hang: {0}")]
 	Hang(#[from] hang::Error),
 
+	/// Error publishing or consuming JSON over a track.
+	#[error("json: {0}")]
+	Json(#[from] moq_json::Error),
+
 	/// Error parsing or building CMAF moof+mdat fragments.
 	#[error("cmaf: {0}")]
 	Cmaf(#[from] crate::container::fmp4::Error),

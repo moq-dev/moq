@@ -4,11 +4,6 @@ on:
   push:
     tags:
       - "libmoq-v*"
-  pull_request:
-    paths:
-      - ".github/workflows/libmoq.yml"
-      - ".github/scripts/release.sh"
-      - "rs/libmoq/build.sh"
 
 permissions:
   contents: read
@@ -28,8 +23,12 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             use_nix: true
+          # Both Apple targets build on the Apple Silicon runner: the
+          # Determinate Nix installer dropped Intel macOS, so x86_64 is
+          # cross-compiled (Apple clang is multi-arch). libmoq.a needs no
+          # execution, so no Rosetta. See rs/libmoq/build.sh.
           - target: x86_64-apple-darwin
-            os: macos-15-intel
+            os: macos-latest
             use_nix: true
           - target: aarch64-apple-darwin
             os: macos-latest
@@ -39,7 +38,7 @@ jobs:
             use_nix: false
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -49,9 +48,6 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
-      - name: Configure Nix cache
-        if: matrix.use_nix
-        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
 
       - name: Install Rust (Windows)
         if: '!matrix.use_nix'
@@ -62,16 +58,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            CARGO_VERSION=$(grep '^version' rs/libmoq/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
-          else
-            .github/scripts/release.sh parse-version libmoq
-          fi
+        run: .github/scripts/release.sh parse-version libmoq
 
       - name: Build and package
         shell: bash
@@ -91,12 +78,11 @@ jobs:
     name: Release
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
     permissions:
       contents: write
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false

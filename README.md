@@ -23,64 +23,22 @@ The core networking is delegated to a QUIC library but the rest is in applicatio
 
 > **Note:** This project implements [moq-lite](https://doc.moq.dev/concept/layer/moq-lite), a forwards-compatible subset of the IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft. moq-lite works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn/)). The focus is narrower, prioritizing simplicity and deployability.
 
-## Installing on Linux
+## Getting Started
 
-Debian/Ubuntu users can install pre-built packages from `apt.moq.dev`,
-Fedora/RHEL/Rocky/AlmaLinux/openSUSE users from `rpm.moq.dev`. The
-relay ships with a hardened systemd unit and a default config; the
-GStreamer plugin lands in the right multiarch plugin directory and is
-visible to `gst-inspect-1.0` after one install. See
-[Linux Installation](https://doc.moq.dev/setup/linux) for the apt/dnf
-one-liners and the list of available packages.
+Full documentation lives at **[doc.moq.dev](https://doc.moq.dev)**.
 
-## Demo
+- **[Run the demo](https://doc.moq.dev/setup/demo/web)** - try MoQ locally with a relay, demo media, and the web UI.
+- **[Linux packages](https://doc.moq.dev/setup/linux)** - install the relay and GStreamer plugin from `apt.moq.dev` / `rpm.moq.dev`.
+- **[Production setup](https://doc.moq.dev/setup/prod)** - deploy a relay with a real domain and TLS.
 
-This repository is split into multiple binaries and libraries across different languages.
-It can get overwhelming, so there's an included [demo](demo/web) with some examples.
-
-**Note:** this demo uses an insecure HTTP fetch intended for *local development only*.
-In production, you'll need a proper domain and a matching TLS certificate via [LetsEncrypt](https://letsencrypt.org/docs/) or similar.
-
-### Quick Setup
-
-**Requirements:**
-
-- [Nix](https://nixos.org/download.html)
-- [Nix Flakes enabled](https://nixos.wiki/wiki/Flakes)
+The quickest way to see it in action (requires [Nix](https://nixos.org/download.html) with [flakes](https://nixos.wiki/wiki/Flakes)):
 
 ```sh
 # Runs a relay, demo media, and the web server
 nix develop -c just
 ```
 
-Then visit <https://localhost:8080> to see the demo.
-Note that this uses an insecure HTTP fetch for local development only; in production you'll need a proper domain + TLS certificate.
-
-*TIP:* If you've installed [nix-direnv](https://github.com/nix-community/nix-direnv), then only `just` is required.
-
-### Full Setup
-
-If you don't like Nix, then you can install dependencies manually:
-
-**Requirements:**
-
-- [Just](https://github.com/casey/just)
-- [Rust](https://www.rust-lang.org/tools/install)
-- [Bun](https://bun.sh/)
-- [FFmpeg](https://ffmpeg.org/download.html)
-- ...probably some other stuff
-
-**Run it:**
-
-```sh
-# Install some more dependencies
-just install
-
-# Runs a relay, demo media, and the web server
-just
-```
-
-Then visit <http://localhost:5173> to see the demo.
+Then visit <https://localhost:8080>. Don't have Nix? See the [demo guide](https://doc.moq.dev/setup/demo/web) for manual setup.
 
 ## Architecture
 
@@ -138,18 +96,12 @@ This repository provides both [Rust](rs) and [TypeScript](js) libraries with sim
 | Package                                  | Description                                                                                                        | NPM                                                                                                   |
 |------------------------------------------|--------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------|
 | **[@moq/net](js/net)**             | The networking layer: real-time pub/sub with built-in caching, fan-out, and prioritization. Negotiates either the `moq-lite` or `moq-transport` wire protocol. Intended for browsers, runs server-side with a WebTransport polyfill. | [![npm](https://img.shields.io/npm/v/@moq/net)](https://www.npmjs.com/package/@moq/net)     |
-| **[@moq/token](js/token)**             |  Authentication library & CLI for JS/TS environments (see [Authentication](doc/app/relay/auth.md))                               | [![npm](https://img.shields.io/npm/v/@moq/token)](https://www.npmjs.com/package/@moq/token)   |
+| **[@moq/token](js/token)**             |  Authentication library & CLI for JS/TS environments (see [Authentication](https://doc.moq.dev/bin/relay/auth))                               | [![npm](https://img.shields.io/npm/v/@moq/token)](https://www.npmjs.com/package/@moq/token)   |
 | **[@moq/hang](js/hang)**           | Core media library: catalog, container, and support. Shared by `@moq/watch` and `@moq/publish`. | [![npm](https://img.shields.io/npm/v/@moq/hang)](https://www.npmjs.com/package/@moq/hang) |
 | **[@moq/demo](demo/web)** | Examples using `@moq/hang`.                                                                                  |                                                                                                       |
 | **[@moq/watch](js/watch)**         | Subscribe to and render MoQ broadcasts (Web Component + JS API).                                                        | [![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)     |
 | **[@moq/publish](js/publish)**     | Publish media to MoQ broadcasts (Web Component + JS API).                                                               | [![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish) |
 | **[@moq/ui-core](js/ui-core)**     | Shared UI components (Button, Icon, Stats, CSS theme) used by `@moq/watch/ui` and `@moq/publish/ui`.                    | [![npm](https://img.shields.io/npm/v/@moq/ui-core)](https://www.npmjs.com/package/@moq/ui-core) |
-
-## Documentation
-
-Additional documentation and implementation details:
-
-- **[Authentication](doc/app/relay/auth.md)** - JWT tokens, authorization, and security
 
 ## Protocol
 
@@ -173,54 +125,9 @@ just check
 
 # Automatically fix some linting errors
 just fix
-
-# Run the demo manually
-just relay    # Terminal 1: Start relay server
-just pub tos  # Terminal 2: Publish a demo video using ffmpeg
-just web      # Terminal 3: Start web server
 ```
 
-There are more commands: check out the [justfile](justfile).
-
-## Iroh support
-
-The `moq-native` and `moq-relay` crates optionally support connecting via [iroh](https://github.com/n0-computer/iroh). The iroh integration is disabled by default, to use it enable the `iroh` feature.
-
-When the iroh feature is enabled, you can connect to iroh endpoints with these URLs:
-
-- `iroh://<ENDPOINT_ID>`: Connect via moq-lite over raw QUIC.
-- `moql+iroh://<ENDPOINT_ID>`: Connect via moq-lite over raw QUIC (same as above)
-- `moqt+iroh://<ENDPOINT_ID>`: Connect via IETF MoQ over raw QUIC
-- `h3+iroh://<ENDPOINT_ID>/optional/path?with=query`: Connect via WebTransport over HTTP/3.
-
-`ENDPOINT_ID` must be the hex-encoded iroh endpoint id. It is currently not possible to set direct addresses or iroh relay URLs. The iroh integration in moq-native uses iroh's default discovery mechanisms to discover other endpoints by their endpoint id.
-
-You can run a demo like this:
-
-```sh
-# Terminal 1: Start a relay server
-just relay --iroh-enabled
-# Copy the endpoint id printed at "iroh listening"
-
-# Terminal 2: Publish via moq-lite over raw iroh QUIC
-#
-# Replace ENDPOINT_ID with the relay's endpoint id.
-#
-# We set an `anon/` prefix to match the broadcast name the web ui expects
-# Because moq-lite does not have headers if using raw QUIC, only the hostname
-# in the URL can be used.
-just pub-iroh bbb iroh://ENDPOINT_ID  anon/
-# Alternatively you can use WebTransport over HTTP/3 over iroh,
-# which allows to set a path prefix in the URL:
-just pub-iroh bbb h3+iroh://ENDPOINT_ID/anon
-
-# Terminal 3: Start web server
-just web
-```
-
-Then open [localhost:5173](http://localhost:5173) and watch BBB, pushed from terminal 1 via iroh to the relay running in terminal 2, from where the browser fetches it over regular WebTransport.
-
-`just serve` serves a video via iroh alongside regular QUIC (it enables the `iroh` feature). This repo currently does not provide a native viewer, so you can't subscribe to it directly. However, you can use the [watch example from iroh-live](https://github.com/n0-computer/iroh-live/blob/main/iroh-live/examples/watch.rs) to view a video published via `moq-native`.
+See the [development guide](https://doc.moq.dev/setup/dev) and the [justfile](justfile) for more.
 
 ## License
 

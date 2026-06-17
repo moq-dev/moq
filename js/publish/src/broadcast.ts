@@ -2,10 +2,6 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
-import * as Chat from "./chat";
-import * as Location from "./location";
-import { Preview, type PreviewProps } from "./preview";
-import * as User from "./user";
 import * as Video from "./video";
 
 export type BroadcastProps = {
@@ -14,11 +10,10 @@ export type BroadcastProps = {
 	name?: Moq.Path.Valid | Signal<Moq.Path.Valid>;
 	audio?: Audio.EncoderProps;
 	video?: Video.Props;
-	location?: Location.Props;
-	user?: User.Props;
-	chat?: Chat.Props;
-	preview?: PreviewProps;
 };
+
+/** Serves a custom track when a subscriber requests it, scoped to the subscription's lifetime. */
+export type ServeTrack = (track: Moq.Track, effect: Effect) => void;
 
 export class Broadcast {
 	static readonly CATALOG_TRACK = "catalog.json";
@@ -30,10 +25,24 @@ export class Broadcast {
 	audio: Audio.Encoder;
 	video: Video.Root;
 
-	location: Location.Root;
-	chat: Chat.Root;
-	preview: Preview;
-	user: User.Info;
+	// The catalog, editable at any time regardless of whether anyone is subscribed. The base
+	// `video`/`audio` sections are kept in sync from the encoders; an application adds its own root
+	// sections (e.g. `scte35`) by mutating it too. Catalog.Producer pins deltas off (one snapshot per
+	// group) to stay byte-compatible with consumers that only read snapshots.
+	readonly catalog: Catalog.Producer = new Catalog.Producer();
+
+	// Handlers for custom tracks registered via `publishTrack`, keyed by track name. Persists across
+	// reconnects so a new `Moq.Broadcast` still serves them.
+	#tracks = new Map<string, ServeTrack>();
+
+	// Built-in track names handled before `#tracks`, so a custom handler registered under one of
+	// these would never run. `publishTrack` rejects them to fail fast.
+	static readonly #RESERVED_TRACKS: ReadonlySet<string> = new Set([
+		Broadcast.CATALOG_TRACK,
+		Audio.Encoder.TRACK,
+		Video.Root.TRACK_HD,
+		Video.Root.TRACK_SD,
+	]);
 
 	signals = new Effect();
 
@@ -44,12 +53,24 @@ export class Broadcast {
 
 		this.audio = new Audio.Encoder(props?.audio);
 		this.video = new Video.Root({ ...props?.video, connection: this.connection });
-		this.location = new Location.Root(props?.location);
-		this.chat = new Chat.Root(props?.chat);
-		this.preview = new Preview(props?.preview);
-		this.user = new User.Info(props?.user);
 
+		this.signals.run(this.#runCatalog.bind(this));
 		this.signals.run(this.#run.bind(this));
+	}
+
+	// Keep the base catalog sections in sync with the encoders, leaving extension sections alone.
+	#runCatalog(effect: Effect) {
+		const enabled = effect.get(this.enabled);
+		const video = enabled ? effect.get(this.video.catalog) : undefined;
+		const audio = enabled ? effect.get(this.audio.catalog) : undefined;
+
+		this.catalog.mutate((catalog) => {
+			if (video !== undefined) catalog.video = video;
+			else delete catalog.video;
+
+			if (audio !== undefined) catalog.audio = audio;
+			else delete catalog.audio;
+		});
 	}
 
 	#run(effect: Effect) {
@@ -84,22 +105,7 @@ export class Broadcast {
 
 				switch (request.track.name) {
 					case Broadcast.CATALOG_TRACK:
-						this.#serveCatalog(request.track, effect);
-						break;
-					case Location.Window.TRACK:
-						this.location.window.serve(request.track, effect);
-						break;
-					case Location.Peers.TRACK:
-						this.location.peers.serve(request.track, effect);
-						break;
-					case Preview.TRACK:
-						this.preview.serve(request.track, effect);
-						break;
-					case Chat.Typing.TRACK:
-						this.chat.typing.serve(request.track, effect);
-						break;
-					case Chat.Message.TRACK:
-						this.chat.message.serve(request.track, effect);
+						this.catalog.serve(request.track, effect);
 						break;
 					case Audio.Encoder.TRACK:
 						this.audio.serve(request.track, effect);
@@ -110,43 +116,58 @@ export class Broadcast {
 					case Video.Root.TRACK_SD:
 						this.video.sd.serve(request.track, effect);
 						break;
-					default:
+					default: {
+						const serve = this.#tracks.get(request.track.name);
+						if (serve) {
+							serve(request.track, effect);
+							break;
+						}
 						console.error("received subscription for unknown track", request.track.name);
 						request.track.close(new Error(`Unknown track: ${request.track.name}`));
 						break;
+					}
 				}
 			});
 		}
 	}
 
-	#serveCatalog(track: Moq.Track, effect: Effect): void {
-		if (!effect.get(this.enabled)) {
-			// Clear the catalog.
-			track.writeFrame(Catalog.encode({}));
-			return;
+	/**
+	 * Serve a custom track within this broadcast, identified by name.
+	 *
+	 * When a subscriber requests a track with this name, `serve` runs with the track and an effect
+	 * scoped to that subscription (cleaned up when the subscriber goes away). The handler persists
+	 * across reconnects. This is the generic hook for arbitrary payloads; encode them yourself.
+	 *
+	 * Returns a function that unregisters the handler. Note this does not close already-served
+	 * subscriptions, nor touch the catalog. Throws if `name` collides with a built-in track
+	 * (catalog/audio/video), since those are served first and the handler would never run.
+	 *
+	 * For a JSON track, serve each track from a track-less `@moq/json` `Producer` (the same fan-out
+	 * producer the catalog uses, seeding late joiners with the latest value). Advertise the track by
+	 * writing your own section to {@link catalog}, e.g. to support a custom `scte35` section with no
+	 * hang-specific support:
+	 *
+	 * ```ts
+	 * import { Producer } from "@moq/json";
+	 * const scte35 = new Producer({ initial: { splices: [] } });
+	 * broadcast.publishTrack("scte35.json", (track, effect) => scte35.serve(track, effect));
+	 * broadcast.catalog.mutate((c) => { c.scte35 = { track: "scte35.json" }; });
+	 * scte35.update({ splices: [42] });
+	 * ```
+	 */
+	publishTrack(name: string, serve: ServeTrack): () => void {
+		if (Broadcast.#RESERVED_TRACKS.has(name)) {
+			throw new Error(`Track name is reserved: ${name}`);
 		}
-
-		// Create the new catalog.
-		const catalog: Catalog.Root = {
-			video: effect.get(this.video.catalog),
-			audio: effect.get(this.audio.catalog),
-			location: effect.get(this.location.catalog),
-			user: effect.get(this.user.catalog),
-			chat: effect.get(this.chat.catalog),
-			preview: effect.get(this.preview.catalog),
+		this.#tracks.set(name, serve);
+		return () => {
+			if (this.#tracks.get(name) === serve) this.#tracks.delete(name);
 		};
-
-		const encoded = Catalog.encode(catalog);
-		track.writeFrame(encoded);
 	}
 
 	close() {
 		this.signals.close();
 		this.audio.close();
 		this.video.close();
-		this.location.close();
-		this.chat.close();
-		this.preview.close();
-		this.user.close();
 	}
 }

@@ -1,0 +1,22 @@
+# Audio-only: small, frequent frames with short groups.
+#
+# Emulates Opus-style audio: 50 frames/sec (20ms each), a few hundred bytes per
+# frame, and short groups so keyframes (and thus new QUIC streams) are frequent.
+
+# url = "https://relay.example.com"
+
+startup = "20s"
+report = "5s"
+
+# A: number of connections
+connections = "200:1000"
+# B: broadcasts (tracks) per connection
+broadcasts = 1
+# C: peer broadcasts each connection watches
+subscribe = "2:10"
+# D: frames per second (20ms frames)
+fps = 50
+# E: bytes per frame
+frame_size = "200:600"
+# F: zeroed frames per group (short groups, frequent stream churn)
+group_size = "4:9"

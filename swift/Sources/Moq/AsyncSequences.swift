@@ -115,6 +115,29 @@ extension MoqTrackConsumer {
     }
 }
 
+extension MoqBroadcastDynamic {
+    /// Stream of tracks requested by subscribers.
+    public var requestedTracks: AsyncThrowingStream<MoqTrackProducer, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    while true {
+                        let track = try await self.requestedTrack()
+                        try Task.checkCancellation()
+                        continuation.yield(track)
+                    }
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { [weak self] _ in
+                task.cancel()
+                self?.cancel()
+            }
+        }
+    }
+}
+
 extension MoqGroupConsumer {
     /// Stream of raw frame payloads in this group.
     public var frames: AsyncThrowingStream<Data, Error> {

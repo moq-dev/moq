@@ -11,7 +11,7 @@ use tower_http::services::ServeDir;
 // Initialize the HTTP server (but don't serve yet).
 pub async fn run_web(
 	bind: &str,
-	tls_info: Arc<RwLock<moq_native::ServerTlsInfo>>,
+	tls_info: Arc<RwLock<moq_native::tls::Info>>,
 	public: Option<PathBuf>,
 ) -> anyhow::Result<()> {
 	let listen = tokio::net::lookup_host(bind)
@@ -51,7 +51,10 @@ pub async fn run_web(
 		app = app.fallback_service(handle_404.into_service());
 	}
 
-	let server = axum_server::bind(listen);
+	// Dual-stack so the cert endpoint answers over IPv4 too, even on Windows
+	// where `[::]` is IPv6-only by default.
+	let listener = moq_native::bind::tcp(listen).context("failed to bind web listener")?;
+	let server = axum_server::from_tcp(listener)?;
 	server.serve(app.into_make_service()).await?;
 
 	Ok(())

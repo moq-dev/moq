@@ -1,0 +1,80 @@
+$ tsp -I file kyrion_mpeg2av_ac3.ts -P tables --pid 0x14d -O drop
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x014D (333)
+  Short section, total size: 35 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x05 (SpliceInsert), size: 15 bytes
+    Splice event id: 0x00000001 (1), cancel: 0
+    Out of network: yes, program splice: yes, duration set: no, immediate: no
+    Time PTS: 0x00673FC0B (108,264,459, 1,202,938 ms)
+    Unique program id: 0x0001 (1), avail: 0x00 (0), avails expected: 0
+    CRC32: 0xCEFB9FFA (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x014D (333)
+  Short section, total size: 35 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x05 (SpliceInsert), size: 15 bytes
+    Splice event id: 0x00000020 (32), cancel: 0
+    Out of network: yes, program splice: yes, duration set: no, immediate: no
+    Time PTS: 0x00674AC00 (108,309,504, 1,203,438 ms)
+    Unique program id: 0xD8CF (55503), avail: 0x00 (0), avails expected: 0
+    CRC32: 0xD5920E48 (OK)
+
+* SCTE 35 Splice Information, TID 0xFC (252), PID 0x014D (333)
+  Short section, total size: 35 bytes
+  - Section 0:
+    Protocol version: 0
+    Encryption: none
+    PTS adjustment: 0x000000000
+    CW index: 0x00 (0), tier: 0xFFF (4095)
+    Command type: 0x05 (SpliceInsert), size: 15 bytes
+    Splice event id: 0x00000020 (32), cancel: 0
+    Out of network: yes, program splice: yes, duration set: no, immediate: no
+    Time PTS: 0x00675214E (108,339,534, 1,203,772 ms)
+    Unique program id: 0xD8CE (55502), avail: 0x00 (0), avails expected: 0
+    CRC32: 0xB2771625 (OK)
+
+
+$ tsp -I file kyrion_mpeg2av_ac3.ts -P tables --tid 2 --max-tables 1 -O drop
+
+* PMT, TID 0x02 (2), PID 0x0020 (32)
+  Version: 0, sections: 1, total size: 65 bytes
+  - Section 0:
+    Program: 0x0001 (1), PCR PID: 0x0021 (33)
+    Program information:
+    - Descriptor 0: Registration (0x05, 5), 4 bytes
+      Format identifier: 0x43554549 ("CUEI")
+    Elementary stream: type 0x02 (MPEG-2 Video), PID: 0x0100 (256)
+    - Descriptor 0: Data Stream Alignment (0x06, 6), 1 bytes
+      Alignment type: 0x02 (2, Video access unit)
+    - Descriptor 1: Video Stream (0x02, 2), 3 bytes
+      Multiple frame rate: false, frame rate: 0x04 (29.97 fps (30000/1001))
+      MPEG-1 only: false, constained parameter: true, still picture: false
+      Profile and level: 0x44 (68)
+      Chroma format: 0x01 (4:2:0)
+      Frame rate extension: false
+    Elementary stream: type 0x81 (ATSC AC-3 Audio), PID: 0x0101 (257)
+    - Descriptor 0: Registration (0x05, 5), 4 bytes
+      Format identifier: 0x41432D33 ("AC-3")
+    - Descriptor 1: ATSC AC-3 Audio (0x81, 129), 7 bytes
+      Sample rate: 48 or 44.1 or 32 kHz (0x7)
+      AC-3 coding version: 0x08 (8)
+      Bit rate: 96 kb/s (0x06) max
+      Surround mode: Not indicated (0x0)
+      Bitstream mode: main audio service: complete main (CM) (0x0)
+      Num. channels: 6 max (0xD)
+      Full service: true
+      Main audio service id: 0
+      Priority: 1
+      Text: ""
+    Elementary stream: type 0x03 (MPEG-1 Audio), PID: 0x0102 (258)
+    Elementary stream: type 0x86 (SCTE 35 Splice Info), PID: 0x014D (333)
+

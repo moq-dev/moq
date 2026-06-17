@@ -223,8 +223,13 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 		let data = stream.reader.read_exact(size as usize).await?;
 
 		match id {
-			// Publisher handles: Subscribe, Fetch, SubscribeNamespace, TrackStatus
-			ietf::Subscribe::ID | ietf::Fetch::ID | ietf::SubscribeNamespace::ID | ietf::TrackStatus::ID => {
+			// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
+			// 0x11 legacy), TrackStatus
+			ietf::Subscribe::ID
+			| ietf::Fetch::ID
+			| ietf::SubscribeNamespace::ID
+			| ietf::SubscribeNamespaceLegacy::ID
+			| ietf::TrackStatus::ID => {
 				publisher.handle_stream(id, data, stream)?;
 			}
 			// Subscriber handles: Publish, PublishNamespace

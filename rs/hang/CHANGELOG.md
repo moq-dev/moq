@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1](https://github.com/moq-dev/moq/compare/hang-v0.19.0...hang-v0.19.1) - 2026-06-16
+
+### Other
+
+- ingest and export legacy non-browser broadcast audio over MPEG-TS mp2, ac-3 & e-ac-3 ([#1701](https://github.com/moq-dev/moq/pull/1701))
+- *(demo,doc)* drop redundant /anon prefix from localhost URLs ([#1688](https://github.com/moq-dev/moq/pull/1688))
+
+## [0.19.0](https://github.com/moq-dev/moq/compare/hang-v0.18.1...hang-v0.19.0) - 2026-06-10
+
+### Added
+
+- *(hang,json,moq-mux)* generic catalog with application extensions ([#1658](https://github.com/moq-dev/moq/pull/1658))
+
+### Fixed
+
+- *(moq-relay)* classify malformed auth-API JSON as an upstream 502
+
+### Other
+
+- Revert accidental commit 24d25604 (moq-native connect/reconnect refactor)
+- *(moq-native)* migrate from anyhow to thiserror ([#1651](https://github.com/moq-dev/moq/pull/1651))
+
 ## [0.18.1](https://github.com/moq-dev/moq/compare/hang-v0.18.0...hang-v0.18.1) - 2026-05-30
 
 ### Other

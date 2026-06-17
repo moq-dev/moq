@@ -78,8 +78,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					}
 				});
 			}
-			ietf::SubscribeNamespace::ID => {
-				let msg = ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?;
+			// Draft-18 SUBSCRIBE_NAMESPACE (0x50) and the legacy 0x11 message decode
+			// to the same request_id + namespace; the legacy Subscribe Options field
+			// is ignored (moq-lite never subscribes to tracks).
+			ietf::SubscribeNamespace::ID | ietf::SubscribeNamespaceLegacy::ID => {
+				let msg = if id == ietf::SubscribeNamespace::ID {
+					ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?
+				} else {
+					let legacy = ietf::SubscribeNamespaceLegacy::decode_msg(&mut data, this.version)?;
+					ietf::SubscribeNamespace {
+						request_id: legacy.request_id,
+						namespace: legacy.namespace,
+					}
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -600,7 +611,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::debug!(prefix = %self.origin.absolute(&prefix), "subscribe_namespace stream");
 
-		let mut origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
+		// A peer may subscribe to a namespace this session can't serve (e.g. a publish-only
+		// token). Acknowledge with OK and then FIN the stream (no namespaces follow), rather
+		// than erroring, which would tear down the whole session. `None` here is handled the
+		// same as an origin with no matching broadcasts.
+		let origin = self.origin.scope(&[prefix.as_path()]);
 
 		// Send OK response
 		match self.version {
@@ -637,6 +652,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 			// v16+: Send Namespace/NamespaceDone entries on this bidi stream.
 			_ => {
+				let Some(mut origin) = origin else {
+					// Nothing to serve (e.g. a publish-only token): FIN so the peer's
+					// namespace subscription completes cleanly instead of waiting forever.
+					stream.writer.finish()?;
+					return stream.writer.closed().await;
+				};
+
 				// Send initial NAMESPACE messages for currently active namespaces
 				while let Some((path, active)) = origin.try_announced() {
 					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");

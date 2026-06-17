@@ -21,6 +21,12 @@ export interface EncoderConfig {
 	// TODO figure out how this interacts with the width/height props.
 	maxPixels?: number;
 
+	// Cap the encoded resolution to this fraction of the source pixel count.
+	// For example 0.25 yields a quarter of the pixels (half the width and height),
+	// scaling with the source instead of assuming a fixed resolution.
+	// When combined with maxPixels, the smaller resulting cap wins.
+	maxScale?: number;
+
 	// The interval at which to insert keyframes. (default: 2000 milliseconds)
 	keyframeInterval?: Time.Milli;
 
@@ -31,7 +37,8 @@ export interface EncoderConfig {
 	// NOTE: This is multiplied by the codecScale (1.0 for h264) to get the final scale.
 	bitrateScale?: number;
 
-	// TODO actually enforce this
+	// Cap the encoded frame rate. If set below the captured rate, frames are dropped to hit this target.
+	// Also feeds the bitrate calculation and the encoder config. If unset, the captured track's rate is used.
 	frameRate?: number;
 }
 
@@ -53,6 +60,10 @@ export class Encoder {
 
 	// The video encoder config.
 	#config = new Signal<VideoEncoderConfig | undefined>(undefined);
+
+	// The resolved encoder config (codec, bitrate, dimensions), available even with no subscriber.
+	// Exposed so a local preview can re-encode with identical settings to mirror the wire output.
+	readonly resolved: Getter<VideoEncoderConfig | undefined> = this.#config;
 
 	// True when the encoder is actively serving a track.
 	active = new Signal<boolean>(false);
@@ -84,6 +95,7 @@ export class Encoder {
 		effect.cleanup(() => producer.close());
 
 		let lastKeyframe: Time.Micro | undefined;
+		let lastEncoded: Time.Micro | undefined;
 
 		effect.set(this.active, true, false);
 
@@ -117,7 +129,19 @@ export class Encoder {
 				if (encoder.state !== "configured") return;
 
 				// This doesn't need to be reactive.
-				const interval = this.config.peek()?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
+				const config = this.config.peek();
+
+				// Pace to the target frame rate by dropping frames that arrive too soon.
+				// Allow half an interval of slack so jittery capture timestamps don't drop a frame we meant to keep.
+				// The shared frame Signal owner closes frames, so we just skip encoding here.
+				const targetFrameRate = config?.frameRate;
+				if (targetFrameRate && lastEncoded !== undefined) {
+					const minGap = Time.Micro.fromSecond((1 / targetFrameRate) as Time.Second);
+					if (frame.timestamp - lastEncoded < minGap - minGap / 2) return;
+				}
+				lastEncoded = frame.timestamp as Time.Micro;
+
+				const interval = config?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
 
 				// Force a keyframe if this is the first frame (no group yet), or GOP elapsed.
 				const keyFrame = !lastKeyframe || lastKeyframe + Time.Micro.fromMilli(interval) <= frame.timestamp;
@@ -159,10 +183,12 @@ export class Encoder {
 		const [_, source, dimensions] = values;
 
 		const settings = source.getSettings();
-		const framerate = settings.frameRate ?? 30;
 
 		// Get the user provided config.
 		const user = effect.get(this.config) ?? {};
+
+		// Prefer the explicitly requested rate; the encode loop drops frames to enforce it.
+		const framerate = user.frameRate ?? settings.frameRate ?? 30;
 
 		const maxPixels = user.maxPixels ?? dimensions.width * dimensions.height;
 		const bitrateScale = user.bitrateScale ?? 0.07;
@@ -251,8 +277,18 @@ export class Encoder {
 		const frame = effect.get(this.frame);
 		if (!frame) return;
 
-		const maxPixels = user?.maxPixels ?? frame.codedWidth * frame.codedHeight;
-		const ratio = Math.min(Math.sqrt(maxPixels / (frame.codedWidth * frame.codedHeight)), 1);
+		const sourcePixels = frame.codedWidth * frame.codedHeight;
+
+		// maxPixels caps absolutely; maxScale caps relative to the source. The smaller cap wins.
+		let maxPixels = user?.maxPixels ?? sourcePixels;
+		if (user?.maxScale !== undefined) {
+			if (!Number.isFinite(user.maxScale) || user.maxScale <= 0) {
+				throw new Error(`maxScale must be a finite number greater than 0: ${user.maxScale}`);
+			}
+			maxPixels = Math.min(maxPixels, sourcePixels * user.maxScale);
+		}
+
+		const ratio = Math.min(Math.sqrt(maxPixels / sourcePixels), 1);
 
 		// Make sure width/height is a power of 16
 		// TODO should this be on a per-codec basis?

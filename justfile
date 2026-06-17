@@ -40,7 +40,7 @@ dev:
 # of `just <lang> check`.
 install:
     bun install
-    cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-sweep cargo-semver-checks release-plz
+    cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-semver-checks release-plz
 
 # Fast inner-loop checks. Runs JS, Rust, and Markdown lints.
 # Shell + workflow + TOML + Nix + justfile lints skip silently if their
@@ -120,6 +120,37 @@ build:
     just js build
     just rs build
     if command -v uv &> /dev/null; then just py build; fi
+
+# Delete build artifacts and caches to reclaim disk space. Each language
+# owns its own `clean` (see js/rs/py/kt/swift/go justfiles); this
+# orchestrates them, sweeps the caches no language owns, then recurses into
+# any agent worktrees under .claude/worktrees/.
+clean:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    just rs clean
+    just js clean
+    just py clean
+    just kt clean
+    just swift clean
+    just go clean
+
+    # Caches not owned by any one language: nix build result, direnv, wrangler.
+    rm -rf result .direnv
+    find . -name .claude -prune -o -type d -name .wrangler -prune -exec rm -rf {} +
+
+    # Reclaim Nix store space too, if Nix is installed.
+    if command -v nix-collect-garbage &> /dev/null; then nix-collect-garbage -d; fi
+
+    # Agent worktrees each carry their own artifacts now that the shared
+    # target dir is gone. Worktrees don't nest, so this recurses exactly one
+    # level. Tolerate stale worktrees on branches that predate this recipe.
+    for wt in .claude/worktrees/*/; do
+    	[ -f "${wt}justfile" ] || continue
+    	echo "==> cleaning ${wt}"
+    	(cd "$wt" && just clean) || echo "    (skipped: just clean failed in ${wt})"
+    done
 
 # Upgrade any tooling
 update:

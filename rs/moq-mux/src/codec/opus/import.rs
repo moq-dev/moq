@@ -9,18 +9,38 @@ use super::Config;
 /// without waiting for a group boundary. Opus' packet loss concealment handles drops.
 /// Ogg framing is not supported, feed raw Opus packets.
 pub struct Import {
-	catalog: crate::catalog::hang::Producer,
+	catalog: crate::catalog::Producer,
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	zero: Option<tokio::time::Instant>,
 }
 
 impl Import {
 	pub fn new(
-		mut broadcast: moq_net::BroadcastProducer,
-		mut catalog: crate::catalog::hang::Producer,
+		broadcast: moq_net::BroadcastProducer,
+		catalog: crate::catalog::Producer,
 		config: Config,
 	) -> anyhow::Result<Self> {
-		let track = broadcast.unique_track(".opus")?;
+		Self::new_with_source(
+			crate::track_provider::TrackProvider::unique(broadcast, ".opus"),
+			catalog,
+			config,
+		)
+	}
+
+	pub fn new_with_track(
+		track: moq_net::TrackProducer,
+		catalog: crate::catalog::Producer,
+		config: Config,
+	) -> anyhow::Result<Self> {
+		Self::new_with_source(crate::track_provider::TrackProvider::fixed(track), catalog, config)
+	}
+
+	fn new_with_source(
+		mut tracks: crate::track_provider::TrackProvider,
+		mut catalog: crate::catalog::Producer,
+		config: Config,
+	) -> anyhow::Result<Self> {
+		let track = tracks.create()?;
 
 		let mut audio_config = hang::catalog::AudioConfig::new(
 			hang::catalog::AudioCodec::Opus,

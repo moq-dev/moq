@@ -1,0 +1,147 @@
+name: release-winget
+
+# Submits/updates the winget manifest for a CLI after its release workflow
+# publishes the GitHub Release (with the Windows .zip assets). The release is
+# created by the default GITHUB_TOKEN, which can't trigger a `release` event,
+# so this triggers on workflow_run like release-brew.yml.
+#
+# workflow_dispatch runs the same logic as a dry run: it resolves the winget
+# identifier and verifies the Windows .zip asset exists on the release, then
+# stops without opening a winget-pkgs PR. Use it to sanity-check a tag before
+# (or instead of) a real submission. winget-releaser itself has no dry-run
+# flag, hence the separate path.
+#
+# One-time bootstrap (winget-pkgs only lets you UPDATE an existing package):
+#   1. A maintainer lands the first manifest once via `wingetcreate new` (or a
+#      manual PR) for each PackageIdentifier below.
+#   2. Set the WINGET_TOKEN repo secret: a classic PAT with `public_repo`
+#      scope, owned by an account that has forked microsoft/winget-pkgs. By
+#      default the fork is looked up under the token owner.
+# After that every release is hands-off. Until the secret exists the real
+# submit is a clean no-op (the dry run still works without it).
+
+on:
+  workflow_run:
+    workflows:
+      - moq-cli
+      - moq-relay
+      - moq-token-cli
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to dry-run (e.g. moq-cli-v0.7.31)"
+        required: true
+        type: string
+
+concurrency:
+  # Key on the release tag, not github.ref (which is the default branch on
+  # workflow_run), so different packages submit in parallel and only repeat
+  # runs of the same tag serialize.
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # Single source of truth: the dry-run asset check and the winget-releaser
+  # submission must agree on which assets are the Windows installers.
+  INSTALLERS_REGEX: '-x86_64-pc-windows-msvc\.zip$'
+
+jobs:
+  publish:
+    name: Submit winget manifest
+    # workflow_run: only after a successful release of a moq-* tag.
+    # workflow_dispatch: always (it's an explicit dry run).
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'moq-')) }}
+    runs-on: windows-latest
+
+    steps:
+      - name: Resolve mode and tag
+        id: mode
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+            echo "tag=$RUN_TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Parse crate and version
+        id: parse
+        shell: bash
+        env:
+          TAG: ${{ steps.mode.outputs.tag }}
+        run: |
+          if [[ ! "$TAG" =~ ^(.+)-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "Tag format not recognized: $TAG" >&2
+            exit 1
+          fi
+          crate="${BASH_REMATCH[1]}"
+          version="${BASH_REMATCH[2]}"
+          case "$crate" in
+            moq-cli)       identifier="moq-dev.moq-cli" ;;
+            moq-relay)     identifier="moq-dev.moq-relay" ;;
+            moq-token-cli) identifier="moq-dev.moq-token-cli" ;;
+            *)
+              echo "No winget identifier mapped for crate: $crate" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "version=$version"
+            echo "tag=$TAG"
+            echo "identifier=$identifier"
+          } >> "$GITHUB_OUTPUT"
+          echo "$identifier $version (tag $TAG)"
+
+      # Dry run: prove the release carries a Windows installer that the
+      # submission would match, then stop without opening a PR.
+      - name: Dry run (validate, do not submit)
+        if: steps.mode.outputs.dry_run == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.parse.outputs.tag }}
+        run: |
+          names=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          matched=$(echo "$names" | grep -E -e "$INSTALLERS_REGEX" || true)
+          if [[ -z "$matched" ]]; then
+            echo "No asset on $TAG matches $INSTALLERS_REGEX" >&2
+            echo "Available assets:" >&2
+            echo "$names" >&2
+            exit 1
+          fi
+          echo "Dry run OK. Would submit ${{ steps.parse.outputs.identifier }} ${{ steps.parse.outputs.version }} with installer(s):"
+          echo "$matched"
+
+      - name: Check for WINGET_TOKEN
+        if: steps.mode.outputs.dry_run == 'false'
+        id: gate
+        shell: bash
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [[ -z "${WINGET_TOKEN}" ]]; then
+            echo "WINGET_TOKEN not configured; skipping winget submission." >&2
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Submit to winget-pkgs
+        if: steps.mode.outputs.dry_run == 'false' && steps.gate.outputs.enabled == 'true'
+        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          identifier: ${{ steps.parse.outputs.identifier }}
+          version: ${{ steps.parse.outputs.version }}
+          release-tag: ${{ steps.parse.outputs.tag }}
+          installers-regex: ${{ env.INSTALLERS_REGEX }}
+          token: ${{ secrets.WINGET_TOKEN }}

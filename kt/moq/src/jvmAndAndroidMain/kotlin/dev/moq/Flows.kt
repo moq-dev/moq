@@ -10,12 +10,14 @@ import uniffi.moq.MoqAnnounced
 import uniffi.moq.MoqAnnouncement
 import uniffi.moq.MoqAudioConsumer
 import uniffi.moq.MoqAudioFrame
+import uniffi.moq.MoqBroadcastDynamic
 import uniffi.moq.MoqCatalog
 import uniffi.moq.MoqCatalogConsumer
 import uniffi.moq.MoqFrame
 import uniffi.moq.MoqGroupConsumer
 import uniffi.moq.MoqMediaConsumer
 import uniffi.moq.MoqTrackConsumer
+import uniffi.moq.MoqTrackProducer
 
 /**
  * Stream of catalog updates. Terminates when the underlying track ends.
@@ -71,6 +73,16 @@ fun MoqTrackConsumer.groupsAsArrived(): Flow<MoqGroupConsumer> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(recvGroup() ?: break)
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
+/** Stream of tracks requested by subscribers. */
+fun MoqBroadcastDynamic.requestedTracks(): Flow<MoqTrackProducer> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(requestedTrack())
     }
 }.onCompletion { cause ->
     if (cause is CancellationException) cancel()

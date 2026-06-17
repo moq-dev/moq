@@ -1,168 +1,153 @@
-import type { Effect, Signal } from "@moq/signals";
+import type { Effect, Getter } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../element";
-import { audio, buffer, icon, network, video } from "./icons";
+import { formatBitrate, formatFps, formatHz, formatMillis } from "./format";
+import { graph } from "./graph";
+import { audio as audioIcon, icon, network as networkIcon, video as videoIcon } from "./icons";
 
 const POLL_MS = 250;
 
-type Kind = "network" | "video" | "audio" | "buffer";
+type Kind = "network" | "video" | "audio";
 
-function row(kind: Kind, label: string, svg: string): { el: HTMLElement; data: HTMLSpanElement } {
-	const el = DOM.create("div", { className: `stats-item stats-item--${kind}` });
+function card(kind: Kind, label: string, svg: string): { el: HTMLElement; grid: HTMLElement; status: HTMLElement } {
+	const el = DOM.create("div", { className: `stat-card stat-card--${kind}` });
 
-	const iconWrap = DOM.create("div", { className: "stats-icon-wrapper" });
+	const head = DOM.create("div", { className: "stat-head" });
+	const iconWrap = DOM.create("div", { className: "stat-icon" });
 	iconWrap.appendChild(icon(svg));
+	const status = DOM.create("span", { className: "stat-status", style: { display: "none" } });
+	head.append(iconWrap, DOM.create("span", { className: "stat-title" }, label), status);
 
-	const title = DOM.create("span", { className: "stats-item-title" }, label);
-	const data = DOM.create("span", { className: "stats-item-data" }, "N/A");
-
-	const detail = DOM.create("div", { className: "stats-item-detail" });
-	detail.append(title, data);
-
-	el.append(iconWrap, detail);
-	return { el, data };
+	const grid = DOM.create("div", { className: "stat-grid" });
+	el.append(head, grid);
+	return { el, grid, status };
 }
 
-function formatBitrate(bps: number): string {
-	if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)}Mbps`;
-	if (bps >= 1_000) return `${(bps / 1_000).toFixed(0)}kbps`;
-	return `${bps.toFixed(0)}bps`;
+function line(grid: HTMLElement, label: string): HTMLSpanElement {
+	const row = DOM.create("div", { className: "stat-line" });
+	const value = DOM.create("span", { className: "stat-value" }, "—");
+	row.append(DOM.create("span", { className: "stat-key" }, label), value);
+	grid.appendChild(row);
+	return value;
 }
 
-function formatBandwidth(bps: number | undefined, dir: "up" | "down"): string | null {
-	if (bps === undefined || bps <= 0) return null;
-	const arrow = dir === "down" ? "↓" : "↑";
-	if (bps >= 1_000_000_000) return `${arrow} ${(bps / 1_000_000_000).toFixed(1)}Gbps`;
-	return `${arrow} ${formatBitrate(bps)}`;
+/** Bitrate from a byte counter, sampled across an interval. */
+function rate(prev: { bytes: number; when: number }, bytes: number, now: number): number | undefined {
+	if (prev.bytes <= 0) return undefined;
+	const elapsed = now - prev.when;
+	const delta = bytes - prev.bytes;
+	if (delta <= 0 || elapsed <= 0) return undefined;
+	// bytes → bits (*8); elapsed is ms, so *1000/elapsed gives a per-second rate.
+	return delta * 8 * (1000 / elapsed);
 }
 
-function networkRow(parent: Effect, watch: MoqWatch): HTMLElement {
-	const { el, data } = row("network", "network", network);
+function hasRenditions(catalog: { renditions?: Record<string, unknown> } | undefined): boolean {
+	return Object.keys(catalog?.renditions ?? {}).length > 0;
+}
+
+interface TrackOptions {
+	// Hide the card entirely when this catalog has no renditions.
+	catalog: Getter<{ renditions?: Record<string, unknown> } | undefined>;
+	// Show the status pill when this is true (e.g. muted / paused).
+	flag: Getter<boolean>;
+	label: string;
+}
+
+/** Hide a card when its media isn't in the catalog; show a status pill otherwise. */
+function track(parent: Effect, card: { el: HTMLElement; status: HTMLElement }, opts: TrackOptions) {
+	card.status.textContent = opts.label;
+	parent.run((effect) => {
+		const present = hasRenditions(effect.get(opts.catalog));
+		card.el.style.display = present ? "" : "none";
+		card.status.style.display = present && effect.get(opts.flag) ? "" : "none";
+	});
+}
+
+/** The Stats tab: live codec/network detail plus rolling graphs. */
+export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
+	const container = DOM.create("div", { className: "tab-body stats" });
+
+	// Video card: static detail as rows, live bitrate/fps as graphs (no duplicate rows).
+	const videoCard = card("video", "Video", videoIcon);
+	const vRes = line(videoCard.grid, "Resolution");
+	const vCodec = line(videoCard.grid, "Codec");
+	const vBitrateGraph = graph(parent, "Bitrate", { color: "#a855f7", format: formatBitrate });
+	const vFpsGraph = graph(parent, "Frame rate", { color: "#facc15", format: formatFps });
+	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
+	track(parent, videoCard, {
+		catalog: watch.backend.video.source.catalog,
+		flag: watch.backend.paused,
+		label: "paused",
+	});
+
+	// Audio card.
+	const audioCard = card("audio", "Audio", audioIcon);
+	const aCodec = line(audioCard.grid, "Codec");
+	const aRate2 = line(audioCard.grid, "Sample rate");
+	const aChannels = line(audioCard.grid, "Channels");
+	const aBitrate = line(audioCard.grid, "Bitrate");
+	track(parent, audioCard, {
+		catalog: watch.backend.audio.source.catalog,
+		flag: watch.backend.audio.muted,
+		label: "muted",
+	});
+
+	// Network card: congestion-control estimate vs. the bitrate we actually pull.
+	const netCard = card("network", "Network", networkIcon);
+	const nMax = line(netCard.grid, "Estimated max");
+	const nActual = line(netCard.grid, "Actual");
+	const nRttGraph = graph(parent, "Round trip", { color: "#00dfff", format: (v) => formatMillis(v) });
+	netCard.el.append(nRttGraph.el);
+
+	container.append(videoCard.el, audioCard.el, netCard.el);
+
+	let vPrev = { frames: 0, bytes: 0, when: performance.now() };
+	let aPrev = { bytes: 0, when: performance.now() };
 
 	parent.interval(() => {
-		const conn = watch.connection.established.peek();
-		if (!conn) {
-			data.textContent = "N/A";
-			return;
-		}
-		const rtt = conn.rtt?.peek();
-		const parts = [
-			formatBandwidth(conn.recvBandwidth?.peek(), "down"),
-			formatBandwidth(conn.sendBandwidth?.peek(), "up"),
-			rtt !== undefined && rtt > 0 ? `${rtt.toFixed(0)}ms` : null,
-		].filter((p): p is string => p !== null);
-		data.textContent = parts.length > 0 ? parts.join("\n") : "N/A";
-	}, POLL_MS);
-
-	return el;
-}
-
-function videoRow(parent: Effect, watch: MoqWatch): HTMLElement {
-	const { el, data } = row("video", "video", video);
-	let prevFrames = 0;
-	let prevBytes = 0;
-	let prevWhen = performance.now();
-
-	parent.interval(() => {
-		const catalog = watch.backend.video.source.catalog.peek();
-		const stats = watch.backend.video.stats.peek();
 		const now = performance.now();
-		const elapsedMs = now - prevWhen;
+
+		// Video. Resolution comes from the active rendition (catalog.display is optional).
+		const vConf = watch.backend.video.source.config.peek();
+		const vCat = watch.backend.video.source.catalog.peek();
+		const vStats = watch.backend.video.stats.peek();
+		const w = vConf?.codedWidth ?? vCat?.display?.width;
+		const h = vConf?.codedHeight ?? vCat?.display?.height;
+		vRes.textContent = w && h ? `${w}×${h}` : "—";
+		vCodec.textContent = vConf?.codec ?? "—";
 
 		let fps: number | undefined;
-		if (stats && prevFrames > 0 && elapsedMs > 0) {
-			const delta = stats.frameCount - prevFrames;
-			if (delta > 0) fps = delta / (elapsedMs / 1000);
+		if (vStats && vPrev.frames > 0) {
+			const elapsed = now - vPrev.when;
+			const delta = vStats.frameCount - vPrev.frames;
+			if (delta > 0 && elapsed > 0) fps = delta / (elapsed / 1000);
 		}
+		const vBitrate = vStats ? rate(vPrev, vStats.bytesReceived, now) : undefined;
+		vBitrateGraph.push(vBitrate);
+		vFpsGraph.push(fps);
+		if (vStats) vPrev = { frames: vStats.frameCount, bytes: vStats.bytesReceived, when: now };
 
-		let bitrate: string | undefined;
-		if (stats && prevBytes > 0 && elapsedMs > 0) {
-			const delta = stats.bytesReceived - prevBytes;
-			if (delta > 0) bitrate = formatBitrate(delta * 8 * (1000 / elapsedMs));
-		}
+		// Audio.
+		const aConf = watch.backend.audio.source.config.peek();
+		const aStats = watch.backend.audio.stats.peek();
+		aCodec.textContent = aConf?.codec ?? "—";
+		aRate2.textContent = aConf?.sampleRate ? formatHz(aConf.sampleRate) : "—";
+		aChannels.textContent = aConf?.numberOfChannels ? `${aConf.numberOfChannels}` : "—";
+		const aBitrate2 = aStats ? rate(aPrev, aStats.bytesReceived, now) : undefined;
+		aBitrate.textContent = aBitrate2 !== undefined ? formatBitrate(aBitrate2) : "—";
+		if (aStats) aPrev = { bytes: aStats.bytesReceived, when: now };
 
-		if (stats) {
-			prevFrames = stats.frameCount;
-			prevBytes = stats.bytesReceived;
-			prevWhen = now;
-		}
-
-		const { width, height } = catalog?.display ?? {};
-		data.textContent = [
-			width && height ? `${width}x${height}` : "N/A",
-			fps !== undefined ? `@${fps.toFixed(1)} fps` : "N/A",
-			bitrate ?? "N/A",
-		].join("\n");
+		// Network. "Estimated max" is the congestion controller / PROBE estimate;
+		// "Actual" is the goodput we measure from the video + audio byte counters.
+		const conn = watch.connection.established.peek();
+		const estimate = conn?.recvBandwidth?.peek();
+		nMax.textContent = estimate ? formatBitrate(estimate) : "—";
+		const actual =
+			vBitrate !== undefined || aBitrate2 !== undefined ? (vBitrate ?? 0) + (aBitrate2 ?? 0) : undefined;
+		nActual.textContent = actual !== undefined ? formatBitrate(actual) : "—";
+		const rtt = conn?.rtt?.peek();
+		nRttGraph.push(rtt !== undefined && rtt > 0 ? rtt : undefined);
 	}, POLL_MS);
 
-	return el;
-}
-
-function audioRow(parent: Effect, watch: MoqWatch): HTMLElement {
-	const { el, data } = row("audio", "audio", audio);
-	let prevBytes = 0;
-	let prevWhen = performance.now();
-
-	parent.interval(() => {
-		const track = watch.backend.audio.source.track.peek();
-		const config = watch.backend.audio.source.config.peek();
-		const stats = watch.backend.audio.stats.peek();
-
-		if (!track || !config) {
-			data.textContent = "N/A";
-			return;
-		}
-
-		const now = performance.now();
-		let bitrate: string | undefined;
-		if (stats && prevBytes > 0) {
-			const delta = stats.bytesReceived - prevBytes;
-			const elapsedMs = now - prevWhen;
-			if (delta > 0 && elapsedMs > 0) bitrate = formatBitrate(delta * 8 * (1000 / elapsedMs));
-		}
-
-		if (stats) {
-			prevBytes = stats.bytesReceived;
-			prevWhen = now;
-		}
-
-		const parts: string[] = [];
-		if (config.sampleRate) parts.push(`${(config.sampleRate / 1000).toFixed(1)}kHz`);
-		if (config.numberOfChannels) parts.push(`${config.numberOfChannels}ch`);
-		parts.push(bitrate ?? "N/A");
-		if (config.codec) parts.push(config.codec);
-		data.textContent = parts.length > 0 ? parts.join("\n") : "N/A";
-	}, POLL_MS);
-
-	return el;
-}
-
-function bufferRow(parent: Effect, watch: MoqWatch): HTMLElement {
-	const { el, data } = row("buffer", "buffer", buffer);
-
-	parent.run((effect) => {
-		const jitter = effect.get(watch.backend.jitter);
-		data.textContent = `${Math.round(jitter)}ms`;
-	});
-
-	return el;
-}
-
-export function statsPanel(parent: Effect, watch: MoqWatch, visible: Signal<boolean>): HTMLElement {
-	const wrap = DOM.create("div", { className: "stats" });
-	const panel = DOM.create("div", { className: "stats-panel" });
-	wrap.appendChild(panel);
-
-	parent.run((effect) => {
-		const showing = effect.get(visible);
-		wrap.style.display = showing ? "" : "none";
-		if (!showing) return;
-
-		DOM.render(effect, panel, networkRow(effect, watch));
-		DOM.render(effect, panel, videoRow(effect, watch));
-		DOM.render(effect, panel, audioRow(effect, watch));
-		DOM.render(effect, panel, bufferRow(effect, watch));
-	});
-
-	return wrap;
+	return container;
 }

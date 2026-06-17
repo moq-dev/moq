@@ -147,10 +147,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let interest = stream.reader.decode::<lite::AnnounceInterest>().await?;
 		let prefix = interest.prefix.to_owned();
 		let exclude_hop = interest.exclude_hop;
-
-		let mut origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
-
 		let version = self.version;
+
+		let Some(mut origin) = self.origin.scope(&[prefix.as_path()]) else {
+			// A peer may announce-interest in a prefix this session can't serve (e.g. a
+			// publish-only token). FIN the stream so the peer's announce subscription
+			// completes cleanly, rather than erroring and tearing down the whole session.
+			web_async::spawn(async move {
+				if let Err(err) = Self::finish_empty_announce(&mut stream, version).await {
+					stream.writer.abort(&err);
+				}
+			});
+			return Ok(());
+		};
+
 		let self_origin = self.self_origin;
 		let stats = self.stats.clone();
 		web_async::spawn(async move {
@@ -179,6 +189,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		});
 
 		Ok(())
+	}
+
+	// FIN an announce stream that will never carry any announcements (the peer asked for a
+	// prefix this session can't serve). Lite01/02 peers block reading ANNOUNCE_INIT, so send
+	// an empty one before finishing; Lite03+ has no init.
+	async fn finish_empty_announce(stream: &mut Stream<S, Version>, version: Version) -> Result<(), Error> {
+		if let Version::Lite01 | Version::Lite02 = version {
+			stream
+				.writer
+				.encode(&lite::AnnounceInit { suffixes: Vec::new() })
+				.await?;
+		}
+		stream.writer.finish()?;
+		stream.writer.closed().await
 	}
 
 	async fn run_announce(

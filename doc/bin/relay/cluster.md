@@ -11,7 +11,7 @@ A broadcast carries a small hop list as it travels. Each relay it passes through
 
 ## Topology
 
-Each relay lists the peers it wants to dial in `cluster.connect`. That's it; the topology is whatever you draw with those links.
+Each relay lists the peers it wants to dial in `cluster.connect`. That's it; the topology is whatever you draw with those links. Each peer is a full URL (e.g. `https://us-east.example.com/`); a bare host or `host:port` is deprecated but still accepted, and is wrapped in `https://.../` with a warning.
 
 A simple chain works well when one region is the source and others are caches:
 
@@ -22,11 +22,11 @@ eu-west  <---  us-east  <---  us-west
 ```toml
 # us-east.toml
 [cluster]
-connect = ["eu-west.example.com:4443"]
+connect = ["https://eu-west.example.com/"]
 
 # us-west.toml
 [cluster]
-connect = ["us-east.example.com:4443"]
+connect = ["https://us-east.example.com/"]
 ```
 
 A publisher on `eu-west` reaches a viewer on `us-west` through `us-east`. If a second `us-west` viewer subscribes to the same broadcast, `us-east` already has it cached, so only one fetch crosses the Atlantic. A full mesh (every relay dialing every other) would skip the cache entirely and waste an outbound link per pair.
@@ -39,7 +39,7 @@ Listing every peer by hand can get tedious in larger clusters. Tell the relay it
 
 ```toml
 [cluster]
-connect = ["us-east.example.com:4443"]
+connect = ["https://us-east.example.com/"]
 node    = "us-west.example.com:4443"
 mesh    = true
 ```
@@ -78,7 +78,7 @@ If a fetch fails or returns garbage, the relay logs and keeps the last good list
 Cluster peers must authenticate to each other:
 
 - **mTLS** (recommended). Set `tls.root` to the CA that signed the cluster certificates. Inbound connections presenting a valid client cert are granted full access; outbound dials use `client.tls.cert` / `client.tls.key`.
-- **JWT**. Each relay reads a token from `cluster.token` and presents it on outbound dials. The token needs broad enough scope to cover whatever paths the cluster carries.
+- **JWT**. For static `connect` peers, supply the token inline as a `?jwt=` query parameter on the URL. For gossip- and `connect_api`-discovered peers (whose addresses can't carry an inline token), set `cluster.token` to a file holding the JWT; it's presented on any dial whose URL has no inline `?jwt=` (so an inline token wins per-peer). Either way the token needs broad enough scope to cover whatever paths the cluster carries.
 
 See [Authentication](/bin/relay/auth) for the full setup.
 
@@ -86,11 +86,14 @@ See [Authentication](/bin/relay/auth) for the full setup.
 
 `cluster.root` was removed; setting it errors at startup with a message pointing at the replacement. `cluster.mesh` is now a boolean gossip toggle (it used to take this relay's URL); the URL moved to `cluster.node`. The old `mesh = "<url>"` form still works for backwards compatibility: it enables gossip and is treated as `cluster.node`, with a deprecation warning (or an error if it conflicts with an explicit `cluster.node`).
 
+`cluster.connect` entries are now full URLs; a bare host or `host:port` still works but logs a deprecation warning. A JWT for a static peer belongs inline as a `?jwt=` query parameter (the `cluster.token` file remains for gossip / `connect_api` peers, which can't carry an inline token).
+
 | Old | New |
 |---|---|
 | `root = "rendezvous:4443"` + `node = "us-east:4443"` | `connect = ["rendezvous:4443"]` + `node = "us-east:4443"` + `mesh = true` |
 | `root = "rendezvous:4443"` only | `node = "rendezvous:4443"` + `mesh = true` (passive rendezvous) |
 | `mesh = "us-east:4443"` | `node = "us-east:4443"` + `mesh = true` |
+| `connect = ["host:4443"]` + `token = "c.jwt"` | `connect = ["https://host/?jwt=<token>"]` |
 
 ## Next steps
 

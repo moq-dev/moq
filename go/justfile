@@ -19,6 +19,12 @@ check:
 package *args:
     bash scripts/package.sh {{ args }}
 
+# Remove the generated bindings, native libs, and vendoring that
+# scripts/check.sh produces in go/ (see go/.gitignore). The tmp staging
+# under the workspace dist/ is swept by `just js clean`.
+clean:
+    rm -rf moq/moq.go moq/lib go.sum vendor
+
 # Full Go CI: `check` builds moq-ffi, regenerates bindings, runs go
 # vet/build/test. Takes a newline-separated list of changed files;
 # skips if FILES is non-empty and none match the Go scope. Run

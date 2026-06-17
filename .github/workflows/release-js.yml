@@ -10,10 +10,6 @@ on:
     paths:
       - 'js/**'
       - '.github/workflows/release-js.yml'
-  pull_request:
-    paths:
-      - '.github/workflows/release-js.yml'
-      - 'js/common/release.ts'
 
 concurrency:
   group: release-js
@@ -26,14 +22,13 @@ jobs:
     if: github.repository_owner == 'moq-dev'
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # main
 
       - name: Setup npm registry
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -44,6 +39,9 @@ jobs:
         run: nix develop --command bun install --frozen-lockfile
 
       - name: Release packages
+        # Web-component packages register custom elements via global type
+        # augmentations, which JSR's fast-type check rejects. Allow slow types so
+        # the JSR publish succeeds; npm still ships full .d.ts files.
         env:
-          DRY_RUN: ${{ github.event_name == 'pull_request' && 'true' || 'false' }}
+          JSR_ALLOW_SLOW_TYPES: "true"
         run: nix develop --command bun --filter '*' release

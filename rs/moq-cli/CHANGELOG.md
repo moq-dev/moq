@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.32](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.31...moq-cli-v0.7.32) - 2026-06-16
+
+### Other
+
+- Add FLV (Flash Video / RTMP) container support to moq-mux ([#1745](https://github.com/moq-dev/moq/pull/1745))
+- Windows support: dual-stack IPv4/IPv6 sockets, setup.bat, and `just dev` ([#1732](https://github.com/moq-dev/moq/pull/1732))
+- *(moq-cli)* remove the capture feature ([#1728](https://github.com/moq-dev/moq/pull/1728))
+
+## [0.7.31](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.30...moq-cli-v0.7.31) - 2026-06-10
+
+### Added
+
+- *(moq-video,moq-cli)* webcam capture and publish ([#1669](https://github.com/moq-dev/moq/pull/1669))
+- *(hang,json,moq-mux)* generic catalog with application extensions ([#1658](https://github.com/moq-dev/moq/pull/1658))
+
+### Fixed
+
+- *(moq-relay)* classify malformed auth-API JSON as an upstream 502
+
+### Other
+
+- Revert accidental commit 24d25604 (moq-native connect/reconnect refactor)
+- *(moq-native)* migrate from anyhow to thiserror ([#1651](https://github.com/moq-dev/moq/pull/1651))
+
 ## [0.7.30](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.29...moq-cli-v0.7.30) - 2026-06-03
 
 ### Other

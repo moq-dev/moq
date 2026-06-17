@@ -1,66 +1,55 @@
-use std::task::Poll;
+use std::task::{Poll, ready};
 
-use hang::Catalog;
-
+use super::{Catalog, CatalogExt};
 use crate::Result;
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
 ///
-/// This wraps a `moq_net::TrackConsumer` and automatically deserializes JSON
-/// catalog data to discover available audio and video tracks in a broadcast.
-#[derive(Clone)]
-pub struct Consumer {
-	/// Access to the underlying track consumer.
-	pub track: moq_net::TrackConsumer,
-	group: Option<moq_net::GroupConsumer>,
+/// This wraps a [`moq_json::Consumer`], reconstructing the JSON catalog from the latest
+/// group's snapshot (plus any future deltas) to discover available audio and video tracks.
+///
+/// Generic over the application extension `E` (defaulting to `()`); yields a
+/// [`Catalog<E>`](super::Catalog).
+pub struct Consumer<E: CatalogExt = ()> {
+	inner: moq_json::Consumer<Catalog<E>>,
 }
 
-impl Consumer {
+// Manual Clone so a consumer is cheaply clonable regardless of whether `E` is.
+impl<E: CatalogExt> Clone for Consumer<E> {
+	fn clone(&self) -> Self {
+		Self {
+			inner: self.inner.clone(),
+		}
+	}
+}
+
+impl<E: CatalogExt> Consumer<E> {
 	/// Create a new catalog consumer from a MoQ track consumer.
 	pub fn new(track: moq_net::TrackConsumer) -> Self {
-		Self { track, group: None }
+		Self {
+			inner: moq_json::Consumer::new(track),
+		}
 	}
 
 	/// Poll for the next catalog update.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog>>> {
-		// Drain pending groups, keeping only the newest. Remember whether the track is done
-		// so we can distinguish "more groups may arrive" from "no more groups, ever".
-		let track_finished = loop {
-			match self.track.poll_next_group(waiter)? {
-				Poll::Ready(Some(group)) => self.group = Some(group),
-				Poll::Ready(None) => break true,
-				Poll::Pending => break false,
-			}
-		};
-
-		if let Some(group) = &mut self.group {
-			match group.poll_read_frame(waiter)? {
-				Poll::Ready(Some(frame)) => {
-					self.group = None;
-					return Poll::Ready(Ok(Some(Catalog::from_slice(&frame)?)));
-				}
-				Poll::Ready(None) => self.group = None,
-				Poll::Pending => return Poll::Pending,
-			}
-		}
-
-		if track_finished {
-			Poll::Ready(Ok(None))
-		} else {
-			Poll::Pending
-		}
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
+		let result = ready!(self.inner.poll_next(waiter));
+		Poll::Ready(result.map_err(Into::into))
 	}
 
 	/// Get the next catalog update.
 	///
 	/// This method waits for the next catalog publication and returns the
 	/// catalog data. If there are no more updates, `None` is returned.
-	pub async fn next(&mut self) -> Result<Option<Catalog>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
+	pub async fn next(&mut self) -> Result<Option<Catalog<E>>>
+	where
+		Catalog<E>: Unpin,
+	{
+		Ok(self.inner.next().await?)
 	}
 }
 
-impl From<moq_net::TrackConsumer> for Consumer {
+impl<E: CatalogExt> From<moq_net::TrackConsumer> for Consumer<E> {
 	fn from(inner: moq_net::TrackConsumer) -> Self {
 		Self::new(inner)
 	}
@@ -72,15 +61,14 @@ mod test {
 
 	use super::*;
 
+	// Build a base catalog distinguished by an audio rendition named `name`, plus its JSON payload.
 	fn catalog_payload(name: &str) -> (Catalog, String) {
-		let catalog = Catalog {
-			user: Some(hang::catalog::User {
-				name: Some(name.to_string()),
-				..Default::default()
-			}),
-			..Default::default()
-		};
-		let payload = catalog.to_string().expect("catalog should serialize");
+		let mut catalog = Catalog::default();
+		catalog.audio.renditions.insert(
+			name.to_string(),
+			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+		);
+		let payload = serde_json::to_string(&catalog).expect("catalog should serialize");
 		(catalog, payload)
 	}
 
@@ -93,7 +81,7 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload() {
-		let mut track = Catalog::default_track().produce();
+		let mut track = hang::Catalog::default_track().produce();
 		let mut consumer = Consumer::new(track.consume());
 		let mut group = track.append_group().expect("catalog group should append");
 
@@ -109,7 +97,7 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload_after_track_finish() {
-		let mut track = Catalog::default_track().produce();
+		let mut track = hang::Catalog::default_track().produce();
 		let mut consumer = Consumer::new(track.consume());
 		let mut group = track.append_group().expect("catalog group should append");
 
@@ -127,7 +115,7 @@ mod test {
 
 	#[test]
 	fn returns_latest_complete_catalog_group() {
-		let mut track = Catalog::default_track().produce();
+		let mut track = hang::Catalog::default_track().produce();
 		let mut consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
@@ -153,7 +141,7 @@ mod test {
 
 	#[test]
 	fn waits_for_newer_pending_group_instead_of_returning_older_ready_group() {
-		let mut track = Catalog::default_track().produce();
+		let mut track = hang::Catalog::default_track().produce();
 		let mut consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
@@ -180,7 +168,7 @@ mod test {
 
 	#[test]
 	fn retained_pending_group_is_superseded_by_newer_group() {
-		let mut track = Catalog::default_track().produce();
+		let mut track = hang::Catalog::default_track().produce();
 		let mut consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
@@ -210,8 +198,8 @@ mod test {
 
 	#[test]
 	fn returns_none_when_empty_track_finishes() {
-		let mut track = Catalog::default_track().produce();
-		let mut consumer = Consumer::new(track.consume());
+		let mut track = hang::Catalog::default_track().produce();
+		let mut consumer: Consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
 		track.finish().expect("catalog track should finish");

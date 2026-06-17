@@ -1,0 +1,150 @@
+:host {
+	display: block;
+	position: relative;
+}
+
+.player {
+	position: relative;
+	width: 100%;
+	overflow: hidden;
+	border-radius: var(--spacing-8);
+	background: #000;
+	line-height: 0;
+}
+
+/* The slotted <moq-watch> (canvas/video) defines the player's height. */
+.player ::slotted(moq-watch) {
+	display: block;
+	width: 100%;
+}
+
+/* Hide the cursor along with the chrome while playing. */
+.player:not(.player--chrome) {
+	cursor: none;
+}
+
+/*
+ * Fullscreen: fill the screen and center the video. We fullscreen this shadow
+ * container (not the bare <moq-watch>) so the overlay chrome stays visible.
+ * `.player--pseudo-fullscreen` is the iPhone fallback where the fullscreen API
+ * is unavailable; it pins the player to the viewport via fixed positioning.
+ */
+.player:fullscreen,
+/* stylelint-disable-next-line selector-no-vendor-prefix -- Safari/iPadOS fallback */
+.player:-webkit-full-screen,
+.player--pseudo-fullscreen {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 0;
+}
+
+.player--pseudo-fullscreen {
+	position: fixed;
+	inset: 0;
+	width: 100vw;
+	height: 100vh;
+	z-index: 2147483647;
+}
+
+.player:fullscreen ::slotted(moq-watch),
+/* stylelint-disable-next-line selector-no-vendor-prefix -- Safari/iPadOS fallback */
+.player:-webkit-full-screen ::slotted(moq-watch),
+.player--pseudo-fullscreen ::slotted(moq-watch) {
+	max-height: 100%;
+}
+
+/* Gradient scrims keep the chrome legible over bright video. */
+.scrim {
+	position: absolute;
+	left: 0;
+	right: 0;
+	pointer-events: none;
+	opacity: 0;
+	transition: opacity 200ms var(--ease);
+}
+
+.scrim--top {
+	top: 0;
+	height: 25%;
+	background: linear-gradient(to bottom, var(--color-black-alpha-40), transparent);
+}
+
+.scrim--bottom {
+	bottom: 0;
+	height: 100%;
+	background: linear-gradient(to top, var(--color-black-alpha-60), transparent 60%);
+}
+
+.player--chrome .scrim {
+	opacity: 1;
+}
+
+/* Center affordances. */
+.center {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	pointer-events: none;
+	line-height: 1;
+}
+
+.center-play {
+	pointer-events: auto;
+	width: 4.5rem;
+	height: 4.5rem;
+	color: var(--color-white);
+	background: linear-gradient(
+		to bottom right,
+		var(--color-orange-400),
+		var(--color-orange-500),
+		var(--color-amber-600)
+	);
+	border: none;
+	border-radius: 50%;
+	cursor: pointer;
+	box-shadow: 0 var(--spacing-8) var(--spacing-24) var(--color-black-alpha-40);
+	transition:
+		transform 150ms var(--ease),
+		box-shadow 150ms var(--ease);
+}
+
+.center-play svg {
+	width: 2rem;
+	height: 2rem;
+}
+
+.center-play:hover {
+	transform: scale(1.06);
+	box-shadow: 0 var(--spacing-8) var(--spacing-32) var(--color-orange-500-alpha-60);
+}
+
+.center-play:active {
+	transform: scale(0.97);
+}
+
+/* Bottom chrome. */
+.chrome {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	display: flex;
+	flex-direction: column;
+	justify-content: flex-end;
+	opacity: 0;
+	transform: translateY(0.5rem);
+	pointer-events: none;
+	transition:
+		opacity 200ms var(--ease),
+		transform 200ms var(--ease);
+	line-height: 1.4;
+}
+
+.player--chrome .chrome {
+	opacity: 1;
+	transform: translateY(0);
+	pointer-events: auto;
+}
