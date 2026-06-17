@@ -10,7 +10,6 @@
 
 use bytes::{Buf, Bytes, BytesMut};
 use scuffle_av1::{ObuHeader, ObuType};
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::Error;
 use crate::Result;
@@ -18,10 +17,9 @@ use crate::Result;
 /// AV1 OBU stream splitter: bytes in, [`Frame`](crate::container::Frame)s out.
 ///
 /// Feed bytes via [`decode`](Self::decode) (unknown frame boundaries, e.g.
-/// stdin) or [`decode_from`](Self::decode_from) (an async reader); call
-/// [`flush`](Self::flush) to emit the final in-flight temporal unit. Each
-/// returns the frames it produced. [`seed`](Self::seed) feeds leading metadata
-/// OBUs (e.g. a sequence header) into the next frame.
+/// stdin); call [`flush`](Self::flush) to emit the final in-flight temporal
+/// unit. [`seed`](Self::seed) feeds leading metadata OBUs (e.g. a sequence
+/// header) into the next frame.
 pub struct Split {
 	current: Au,
 	zero: Option<tokio::time::Instant>,
@@ -63,17 +61,6 @@ impl Split {
 			self.decode_obu(obu, None)?;
 		}
 		Ok(())
-	}
-
-	/// Decode from an asynchronous reader, returning all frames produced.
-	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> Result<Vec<crate::container::Frame>> {
-		let mut frames = Vec::new();
-		let mut buffer = BytesMut::new();
-		while reader.read_buf(&mut buffer).await? > 0 {
-			frames.extend(self.decode(&mut buffer, None)?);
-		}
-		frames.extend(self.flush(None)?);
-		Ok(frames)
 	}
 
 	/// Decode a buffer where frame boundaries are unknown, returning the temporal

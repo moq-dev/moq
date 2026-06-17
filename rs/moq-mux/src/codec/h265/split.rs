@@ -10,7 +10,6 @@
 
 use bytes::{Buf, Bytes, BytesMut};
 use scuffle_h265::NALUnitType;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::Error;
 use crate::Result;
@@ -19,11 +18,9 @@ use crate::codec::annexb::{NalIterator, START_CODE};
 /// H.265 Annex-B stream splitter: bytes in, [`Frame`](crate::container::Frame)s out.
 ///
 /// Feed bytes via [`decode`](Self::decode) (unknown frame boundaries, e.g.
-/// stdin) or [`decode_from`](Self::decode_from) (an async reader); call
-/// [`flush`](Self::flush) to emit the final in-flight access unit. Each returns
-/// the frames it produced. VPS/SPS/PPS seen inline are cached and re-inserted
-/// ahead of each keyframe; [`seed`](Self::seed) primes that cache from an
-/// out-of-band parameter-set buffer.
+/// stdin); call [`flush`](Self::flush) to emit the final in-flight access unit.
+/// VPS/SPS/PPS seen inline are cached and re-inserted ahead of each keyframe;
+/// [`seed`](Self::seed) primes that cache from an out-of-band parameter-set buffer.
 pub struct Split {
 	/// Bytes carried over between calls: complete NALs are parsed out on each
 	/// [`decode`](Self::decode), leaving the in-flight (final, not-yet-terminated)
@@ -88,17 +85,6 @@ impl Split {
 			Some(NALUnitType::PpsNut) => self.pps = Some(nal.clone()),
 			_ => {}
 		}
-	}
-
-	/// Decode from an asynchronous reader, returning all frames produced.
-	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> Result<Vec<crate::container::Frame>> {
-		let mut frames = Vec::new();
-		let mut buffer = BytesMut::new();
-		while reader.read_buf(&mut buffer).await? > 0 {
-			frames.extend(self.decode(&mut buffer, None)?);
-		}
-		frames.extend(self.flush(None)?);
-		Ok(frames)
 	}
 
 	/// Decode a buffer where frame boundaries are unknown, returning the access
