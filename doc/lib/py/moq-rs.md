@@ -103,8 +103,12 @@ async for announcement in client.announced("live/"):
     print(announcement.path)
     ...
 
-# Or wait for a specific path:
+# Or wait for a specific path to be announced:
 broadcast = await client.announced_broadcast("live/cam1")
+
+# Or request a path: resolves to the announced broadcast, falls back to a dynamic
+# handler if the origin has one, else raises. Does not wait for a future announce.
+broadcast = await client.request_broadcast("live/cam1")
 ```
 
 ## Examples

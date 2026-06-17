@@ -56,6 +56,18 @@ func (o *OriginConsumer) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, e
 	return &AnnouncedBroadcast{inner: inner}, nil
 }
 
+// RequestBroadcast resolves a broadcast at path as soon as it can be served: the
+// announced broadcast if present, otherwise a dynamic fallback on the origin, or an
+// error if neither can serve it. Unlike AnnouncedBroadcast, it does not wait for a
+// future announcement. Blocks until resolved.
+func (o *OriginConsumer) RequestBroadcast(path string) (*BroadcastConsumer, error) {
+	inner, err := o.inner.RequestBroadcast(path)
+	if err != nil {
+		return nil, err
+	}
+	return &BroadcastConsumer{inner: inner}, nil
+}
+
 // Announcement is a discovered broadcast.
 type Announcement struct {
 	inner *ffi.MoqAnnouncement

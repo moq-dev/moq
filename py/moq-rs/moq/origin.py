@@ -82,6 +82,16 @@ class OriginConsumer:
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
         return AnnouncedBroadcast(self._inner.announced_broadcast(path))
 
+    async def request_broadcast(self, path: str) -> BroadcastConsumer:
+        """Request a broadcast by path, resolving as soon as it can be served.
+
+        Returns the announced broadcast immediately if one exists, otherwise falls
+        back to a dynamic handler on the origin (if any), or raises if neither can
+        serve it. Unlike `announced_broadcast`, this does not wait indefinitely for a
+        future announcement.
+        """
+        return BroadcastConsumer(await self._inner.request_broadcast(path))
+
 
 class OriginProducer:
     """Wraps MoqOriginProducer for publishing broadcasts."""
