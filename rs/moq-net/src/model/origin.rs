@@ -1333,14 +1333,13 @@ impl OriginConsumer {
 		self.clone()
 	}
 
-	/// Get a broadcast by path if it has *already* been announced.
+	/// Internal synchronous peek: the broadcast at `path` if it is *already* announced.
 	///
-	/// Returns `None` when the path is unknown to this consumer right now. Synchronous
-	/// lookup races announcement gossip. A freshly-connected consumer will see `None`
-	/// even when the broadcast is about to arrive. Prefer [`Self::announced_broadcast`]
-	/// (blocks until announced) unless you can guarantee the announcement has already
-	/// landed (e.g. you're responding to an `announced()` callback).
-	pub fn get_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
+	/// Races announcement gossip (a freshly-connected consumer sees `None` even when the
+	/// broadcast is about to arrive), so it is not public. [`Self::request_broadcast`] is the
+	/// public lookup: it builds on this for the announced case, then falls back to a dynamic
+	/// handler. [`Self::announced_broadcast`] waits for a future announcement.
+	fn get_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
 		let (root, rest) = self.nodes.get(&path)?;
 		let state = root.lock();

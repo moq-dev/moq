@@ -207,9 +207,9 @@ async fn run_client(
 			// Once the per-codec re-packetizer lands, this should poll
 			// `subscriber.announced()` to await the broadcast rather than
 			// erroring on first-miss.
-			let broadcast = subscriber
-				.get_broadcast(broadcast_name)
-				.ok_or_else(|| anyhow::anyhow!("broadcast {} not announced", broadcast_name))?;
+			let broadcast = async { subscriber.request_broadcast(broadcast_name)?.await }
+				.await
+				.map_err(|_| anyhow::anyhow!("broadcast {} not announced", broadcast_name))?;
 			client.publish(url, broadcast).await?;
 		}
 	}

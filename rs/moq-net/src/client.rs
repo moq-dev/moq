@@ -154,7 +154,8 @@ impl Client {
 				)?;
 
 				// Block until the initial announce set has landed (Lite05 reports it
-				// via AnnounceOk + N), so a synchronous get_broadcast() won't race it.
+				// via AnnounceOk + N), so a `request_broadcast()` for a live path resolves
+				// immediately instead of racing announcement gossip.
 				connecting.ready().await;
 
 				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw));
