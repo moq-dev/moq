@@ -60,11 +60,30 @@ export class Decoder {
 
 	#signals = new Effect();
 
+	// How much buffered audio the container consumer retains before skipping
+	// ahead. This must be the latency CEILING (maxBuffer), not the floor
+	// (buffer): in buffered playback the producer writes faster than real-time
+	// with future PTS, so the group span legitimately exceeds the floor and
+	// would otherwise be skipped. Uncapped (maxBuffer undefined) has no finite
+	// ceiling to hand the consumer, so it falls back to the floor.
+	//
+	// Held in a plain Signal driven by a running effect (below) rather than a
+	// lazy `computed`: the container consumer only `.peek()`s this (it never
+	// subscribes), and an unsubscribed computed peeks as `undefined`, which
+	// would make the consumer's threshold NaN and skip every group.
+	#consumerLatency = new Signal<Time.Milli>(Time.Milli.zero);
+
 	constructor(source: Source, props?: DecoderProps) {
 		this.source = source;
 		this.source.supported.set(supported); // super hacky
 
 		this.enabled = Signal.from(props?.enabled ?? false);
+
+		this.#signals.run((effect) => {
+			const max = effect.get(this.source.sync.maxBuffer);
+			const floor = effect.get(this.source.sync.buffer);
+			this.#consumerLatency.set(max ?? floor);
+		});
 
 		this.#signals.run(this.#runWorklet.bind(this));
 		this.#signals.run(this.#runEnabled.bind(this));
@@ -196,7 +215,7 @@ export class Decoder {
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Consumer(sub, {
 			format,
-			latency: this.source.sync.buffer,
+			latency: this.#consumerLatency,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -287,7 +306,7 @@ export class Decoder {
 
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
-			latency: this.source.sync.buffer,
+			latency: this.#consumerLatency,
 		});
 		effect.cleanup(() => consumer.close());
 
