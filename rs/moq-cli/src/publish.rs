@@ -146,10 +146,6 @@ impl Publish {
 				let flv = flv::Import::new(broadcast.clone(), catalog.clone());
 				Source::Stream(PublishDecoder::Flv(Box::new(flv)))
 			}
-			PublishFormat::Flv => {
-				let flv = flv::Import::new(broadcast.clone(), catalog.clone());
-				PublishDecoder::Flv(Box::new(flv))
-			}
 			PublishFormat::Hls { playlist } => {
 				let hls = hls::Import::new(broadcast.clone(), catalog.clone(), hls::Config::new(playlist.clone()))?;
 				Source::Stream(PublishDecoder::Hls(Box::new(hls)))
