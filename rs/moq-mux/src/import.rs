@@ -146,8 +146,9 @@ pub struct Framed {
 
 /// Build an H.264 avc3 split + import pair, resolving the config and consuming `buf`.
 ///
-/// The import reads `buf` for the codec config without consuming it; the split
-/// then consumes it, seeding its parameter-set cache.
+/// The import reads `buf` for the codec config (without consuming it); the split
+/// then consumes it as the leading bytes of the stream (caching any inline
+/// SPS/PPS). Any frames in the init buffer are published.
 fn build_h264_avc3<T: Buf + AsRef<[u8]>>(
 	track: moq_net::TrackProducer,
 	catalog: crate::catalog::Producer,
@@ -159,8 +160,10 @@ fn build_h264_avc3<T: Buf + AsRef<[u8]>>(
 	let mut import = crate::codec::h264::Import::from_track(track);
 	import.initialize(buf)?;
 	let mut split = crate::codec::h264::Split::new();
-	split.seed(buf)?;
-	Ok((split, crate::publish::Published::new(catalog, import)))
+	let frames = split.decode(buf, None)?;
+	let mut published = crate::publish::Published::new(catalog, import);
+	published.decode(frames)?;
+	Ok((split, published))
 }
 
 /// Build an H.264 avc1 import, resolving the config and the NALU length size from
@@ -190,8 +193,10 @@ fn build_h265<T: Buf + AsRef<[u8]>>(
 	let mut import = crate::codec::h265::Import::from_track(track);
 	import.initialize(buf)?;
 	let mut split = crate::codec::h265::Split::new();
-	split.seed(buf)?;
-	Ok((split, crate::publish::Published::new(catalog, import)))
+	let frames = split.decode(buf, None)?;
+	let mut published = crate::publish::Published::new(catalog, import);
+	published.decode(frames)?;
+	Ok((split, published))
 }
 
 /// Build an AV1 split + import pair, resolving the config and consuming `buf`.
@@ -206,16 +211,19 @@ fn build_av1<T: Buf + AsRef<[u8]>>(
 	let mut import = crate::codec::av1::Import::from_track(track);
 	import.initialize(buf)?;
 	let mut split = crate::codec::av1::Split::new();
-	// av1C (leading 0x81, ISO/IEC 14496-15) is config-only and not fed to the
-	// splitter; raw OBUs seed it so the sequence header prefixes the first
-	// keyframe. Mirror the importer's av1C detection exactly.
+	// av1C (leading 0x81, ISO/IEC 14496-15) is an out-of-band config record, not
+	// an OBU stream, so it's read for config (above) and dropped here. Raw OBUs
+	// are the leading bytes of the stream and feed the splitter.
 	let data = buf.as_ref();
-	if data.len() >= 16 && data[0] == 0x81 {
+	let frames = if data.len() >= 16 && data[0] == 0x81 {
 		buf.advance(buf.remaining());
+		Vec::new()
 	} else {
-		split.seed(buf)?;
-	}
-	Ok((split, crate::publish::Published::new(catalog, import)))
+		split.decode(buf, None)?
+	};
+	let mut published = crate::publish::Published::new(catalog, import);
+	published.decode(frames)?;
+	Ok((split, published))
 }
 
 impl Framed {
@@ -862,7 +870,8 @@ impl Stream {
 				ref mut import,
 			} => {
 				import.decoding(|d| d.initialize(buf))?;
-				split.seed(buf)?;
+				let frames = split.decode(buf, None)?;
+				import.decode(frames)?;
 			}
 			StreamKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
 			StreamKind::Hev1 {
@@ -870,19 +879,24 @@ impl Stream {
 				ref mut import,
 			} => {
 				import.decoding(|d| d.initialize(buf))?;
-				split.seed(buf)?;
+				let frames = split.decode(buf, None)?;
+				import.decode(frames)?;
 			}
 			StreamKind::Av01 {
 				ref mut split,
 				ref mut import,
 			} => {
 				import.decoding(|d| d.initialize(buf))?;
+				// av1C (leading 0x81) is an out-of-band config record, not an OBU
+				// stream; read for config above and dropped here.
 				let data = buf.as_ref();
-				if data.len() >= 16 && data[0] == 0x81 {
+				let frames = if data.len() >= 16 && data[0] == 0x81 {
 					buf.advance(buf.remaining());
+					Vec::new()
 				} else {
-					split.seed(buf)?;
-				}
+					split.decode(buf, None)?
+				};
+				import.decode(frames)?;
 			}
 			StreamKind::Mkv(ref mut decoder) => decoder.decode(buf)?,
 			StreamKind::Ts(ref mut decoder) => decoder.decode(buf)?,

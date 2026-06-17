@@ -17,9 +17,7 @@ use crate::Result;
 /// AV1 OBU stream splitter: bytes in, [`Frame`](crate::container::Frame)s out.
 ///
 /// Feed bytes via [`decode`](Self::decode) (unknown frame boundaries, e.g.
-/// stdin); call [`flush`](Self::flush) to emit the final in-flight temporal
-/// unit. [`seed`](Self::seed) feeds leading metadata OBUs (e.g. a sequence
-/// header) into the next frame.
+/// stdin); call [`flush`](Self::flush) to emit the final in-flight temporal unit.
 pub struct Split {
 	current: Au,
 	zero: Option<tokio::time::Instant>,
@@ -47,20 +45,6 @@ impl Split {
 			zero: None,
 			pending: Vec::new(),
 		}
-	}
-
-	/// Feed leading metadata OBUs (e.g. a sequence header) into the in-flight
-	/// access unit without completing a frame, so they prefix the next keyframe.
-	/// The buffer must not contain a completed frame (no timestamp is available).
-	pub fn seed<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
-		let mut obus = ObuIterator::new(buf);
-		while let Some(obu) = obus.next().transpose()? {
-			self.decode_obu(obu, None)?;
-		}
-		if let Some(obu) = obus.flush()? {
-			self.decode_obu(obu, None)?;
-		}
-		Ok(())
 	}
 
 	/// Decode a buffer where frame boundaries are unknown, returning the temporal

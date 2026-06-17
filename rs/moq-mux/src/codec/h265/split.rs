@@ -19,8 +19,8 @@ use crate::codec::annexb::{NalIterator, START_CODE};
 ///
 /// Feed bytes via [`decode`](Self::decode) (unknown frame boundaries, e.g.
 /// stdin); call [`flush`](Self::flush) to emit the final in-flight access unit.
-/// VPS/SPS/PPS seen inline are cached and re-inserted ahead of each keyframe;
-/// [`seed`](Self::seed) primes that cache from an out-of-band parameter-set buffer.
+/// VPS/SPS/PPS seen inline are cached and re-inserted ahead of each keyframe so
+/// each keyframe is self-contained.
 pub struct Split {
 	/// Bytes carried over between calls: complete NALs are parsed out on each
 	/// [`decode`](Self::decode), leaving the in-flight (final, not-yet-terminated)
@@ -61,29 +61,6 @@ impl Split {
 			pps: None,
 			zero: None,
 			pending: Vec::new(),
-		}
-	}
-
-	/// Prime the VPS/SPS/PPS cache from an Annex-B parameter-set buffer, so the
-	/// first keyframe is self-contained even if the stream itself omits inline
-	/// parameter sets. Other NAL types in the buffer are ignored.
-	pub fn seed<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
-		let mut nals = NalIterator::new(buf);
-		while let Some(nal) = nals.next().transpose()? {
-			self.cache_param(&nal);
-		}
-		if let Some(nal) = nals.flush()? {
-			self.cache_param(&nal);
-		}
-		Ok(())
-	}
-
-	fn cache_param(&mut self, nal: &Bytes) {
-		match nal.first().map(|h| nal_unit_type(*h)) {
-			Some(NALUnitType::VpsNut) => self.vps = Some(nal.clone()),
-			Some(NALUnitType::SpsNut) => self.sps = Some(nal.clone()),
-			Some(NALUnitType::PpsNut) => self.pps = Some(nal.clone()),
-			_ => {}
 		}
 	}
 
@@ -335,12 +312,14 @@ mod tests {
 		assert!(contains(&frames[0].payload, IDR));
 	}
 
-	/// A seeded splitter re-inserts the cached VPS/SPS/PPS ahead of a bare IDR,
-	/// even though the stream itself never carried inline parameter sets.
+	/// Parameter sets fed up front (as the leading stream bytes) are cached and
+	/// re-inserted ahead of a later bare IDR, so the keyframe is self-contained
+	/// even when the stream never repeats its parameter sets inline.
 	#[tokio::test(start_paused = true)]
-	async fn seed_makes_bare_keyframe_self_contained() {
+	async fn params_then_bare_keyframe_self_contained() {
 		let mut split = Split::new();
-		split.seed(&mut annexb(&[VPS, SPS, PPS])).unwrap();
+		// The leading VPS/SPS/PPS carry no slice, so they complete no frame yet.
+		assert!(split.decode(&mut annexb(&[VPS, SPS, PPS]), ts()).unwrap().is_empty());
 
 		let frames = decode_one(&mut split, &mut annexb(&[IDR]), ts());
 		assert_eq!(frames.len(), 1);

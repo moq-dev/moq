@@ -15,7 +15,7 @@
 
 use bytes::{Buf, Bytes, BytesMut};
 
-use super::{Error, NAL_TYPE_PPS, NAL_TYPE_SPS};
+use super::Error;
 use crate::Result;
 use crate::codec::annexb::{NalIterator, START_CODE};
 
@@ -23,8 +23,8 @@ use crate::codec::annexb::{NalIterator, START_CODE};
 ///
 /// Feed bytes via [`decode`](Self::decode) (unknown frame boundaries, e.g.
 /// stdin); call [`flush`](Self::flush) to emit the final in-flight access unit.
-/// SPS/PPS seen inline are cached and re-inserted ahead of each keyframe;
-/// [`seed`](Self::seed) primes that cache from an out-of-band parameter-set buffer.
+/// SPS/PPS seen inline are cached and re-inserted ahead of each keyframe so each
+/// keyframe is self-contained.
 pub struct Split {
 	/// Bytes carried over between calls: complete NALs are parsed out on each
 	/// [`decode`](Self::decode), leaving the in-flight (final, not-yet-terminated)
@@ -62,28 +62,6 @@ impl Split {
 			pps: None,
 			zero: None,
 			pending: Vec::new(),
-		}
-	}
-
-	/// Prime the SPS/PPS cache from an Annex-B parameter-set buffer, so the first
-	/// keyframe is self-contained even if the stream itself omits inline
-	/// parameter sets. Other NAL types in the buffer are ignored.
-	pub fn seed<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
-		let mut nals = NalIterator::new(buf);
-		while let Some(nal) = nals.next().transpose()? {
-			self.cache_param(&nal);
-		}
-		if let Some(nal) = nals.flush()? {
-			self.cache_param(&nal);
-		}
-		Ok(())
-	}
-
-	fn cache_param(&mut self, nal: &Bytes) {
-		match nal.first().map(|h| h & 0x1f) {
-			Some(NAL_TYPE_SPS) => self.sps = Some(nal.clone()),
-			Some(NAL_TYPE_PPS) => self.pps = Some(nal.clone()),
-			_ => {}
 		}
 	}
 
@@ -308,16 +286,18 @@ mod tests {
 		assert!(frames[0].payload.windows(idr.len()).any(|w| w == idr));
 	}
 
-	/// A seeded splitter re-inserts the cached SPS/PPS ahead of a bare IDR slice,
-	/// even though the stream itself never carried inline parameter sets.
+	/// Parameter sets fed up front (as the leading stream bytes) are cached and
+	/// re-inserted ahead of a later bare IDR, so the keyframe is self-contained
+	/// even when the stream never repeats its parameter sets inline.
 	#[tokio::test(start_paused = true)]
-	async fn seed_makes_bare_keyframe_self_contained() {
+	async fn params_then_bare_keyframe_self_contained() {
 		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f];
 		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
 
 		let mut split = Split::new();
-		split.seed(&mut annexb(&[sps, pps])).unwrap();
+		// The leading SPS/PPS carry no slice, so they complete no frame yet.
+		assert!(split.decode(&mut annexb(&[sps, pps]), ts()).unwrap().is_empty());
 
 		let frames = decode_one(&mut split, &mut annexb(&[idr]), ts());
 		assert_eq!(frames.len(), 1);
