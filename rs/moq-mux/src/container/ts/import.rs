@@ -262,19 +262,19 @@ impl<E: scte35::Catalog> Import<E> {
 
 		let stream = match stream_type {
 			StreamType::H264 => {
-				let track = crate::publish::unique_track(&mut self.broadcast, ".avc3")?;
+				let track = crate::import::unique_track(&mut self.broadcast, ".avc3")?;
 				let import = h264::Import::from_track(track);
 				Stream::H264 {
 					split: h264::Split::new(),
-					import: Box::new(crate::publish::Published::new(self.catalog.clone(), import)),
+					import: Box::new(crate::import::Track::new(self.catalog.clone(), import)),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
 			StreamType::H265 => {
-				let track = crate::publish::unique_track(&mut self.broadcast, ".hev1")?;
+				let track = crate::import::unique_track(&mut self.broadcast, ".hev1")?;
 				Stream::H265 {
 					split: h265::Split::new(),
-					import: Box::new(crate::publish::Published::new(
+					import: Box::new(crate::import::Track::new(
 						self.catalog.clone(),
 						h265::Import::from_track(track),
 					)),
@@ -722,12 +722,12 @@ impl ScteReassembler {
 enum Stream<E: CatalogExt = ()> {
 	H264 {
 		split: h264::Split,
-		import: Box<crate::publish::Published<h264::Import, E>>,
+		import: Box<crate::import::Track<h264::Import, E>>,
 		unwrap: PtsUnwrap,
 	},
 	H265 {
 		split: h265::Split,
-		import: Box<crate::publish::Published<h265::Import, E>>,
+		import: Box<crate::import::Track<h265::Import, E>>,
 		unwrap: PtsUnwrap,
 	},
 	Aac(Box<AacStream<E>>),
@@ -796,7 +796,7 @@ impl<E: CatalogExt> Stream<E> {
 /// (the sample rate and channel layout aren't in the PMT), so creation is
 /// deferred until the first frame arrives.
 struct AacStream<E: CatalogExt = ()> {
-	import: Option<crate::publish::Published<aac::Import, E>>,
+	import: Option<crate::import::Track<aac::Import, E>>,
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::Producer<E>,
 	unwrap: PtsUnwrap,
@@ -831,13 +831,13 @@ impl<E: CatalogExt> AacStream<E> {
 					// downstream consumers that need out-of-band config (fMP4/MKV export,
 					// WebCodecs) can configure the decoder. TS itself carries it inline.
 					let description = config.encode();
-					let track = crate::publish::unique_track(&mut self.broadcast, ".aac")?;
+					let track = crate::import::unique_track(&mut self.broadcast, ".aac")?;
 					let mut aac = aac::Import::from_track(track, config)?;
 					if let Some(rendition) = aac.rendition_mut() {
 						rendition.description = Some(description);
 					}
 					// Published::new mirrors the rendition (description included) on attach.
-					let import = crate::publish::Published::new(self.catalog.clone(), aac);
+					let import = crate::import::Track::new(self.catalog.clone(), aac);
 					self.import.insert(import)
 				}
 			};
@@ -929,7 +929,7 @@ impl<E: CatalogExt> AacStream<E> {
 /// players, which cannot decode these codecs.
 struct LegacyStream<E: CatalogExt = ()> {
 	descriptor: &'static legacy::Descriptor,
-	import: Option<crate::publish::Published<legacy::Import, E>>,
+	import: Option<crate::import::Track<legacy::Import, E>>,
 	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::Producer<E>,
 	unwrap: PtsUnwrap,
@@ -988,10 +988,10 @@ impl<E: CatalogExt> LegacyStream<E> {
 						sample_rate: header.sample_rate,
 						channel_count: header.channel_count,
 					};
-					let track = crate::publish::unique_track(&mut self.broadcast, self.descriptor.track_suffix)?;
+					let track = crate::import::unique_track(&mut self.broadcast, self.descriptor.track_suffix)?;
 					let legacy = legacy::Import::from_track(self.descriptor, track, config);
 					self.import
-						.insert(crate::publish::Published::new(self.catalog.clone(), legacy))
+						.insert(crate::import::Track::new(self.catalog.clone(), legacy))
 				}
 			};
 

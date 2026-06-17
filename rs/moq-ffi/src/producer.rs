@@ -16,7 +16,7 @@ pub(crate) struct BroadcastProducer {
 
 struct MediaProducer {
 	decoder: moq_mux::import::Framed,
-	track: moq_net::TrackProducer,
+	demand: moq_net::TrackDemand,
 }
 
 struct MediaStreamProducer {
@@ -135,13 +135,12 @@ impl MoqBroadcastProducer {
 			return Err(MoqError::Codec("init failed: trailing bytes".into()));
 		}
 
-		let track = decoder
-			.track()
-			.map_err(|err| MoqError::Codec(format!("track unavailable: {err}")))?
-			.clone();
+		let demand = decoder
+			.demand()
+			.map_err(|err| MoqError::Codec(format!("track unavailable: {err}")))?;
 
 		Ok(Arc::new(MoqMediaProducer {
-			inner: std::sync::Mutex::new(Some(MediaProducer { decoder, track })),
+			inner: std::sync::Mutex::new(Some(MediaProducer { decoder, demand })),
 		}))
 	}
 
@@ -182,7 +181,7 @@ impl MoqBroadcastProducer {
 		Ok(Arc::new(MoqMediaProducer {
 			inner: std::sync::Mutex::new(Some(MediaProducer {
 				decoder,
-				track: track_clone,
+				demand: track_clone.demand(),
 			})),
 		}))
 	}
@@ -393,20 +392,20 @@ impl MoqMediaProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
 		let media = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(media.track.name().to_string())
+		Ok(media.demand.name().to_string())
 	}
 
 	/// Wait until this media track has at least one active consumer.
 	pub async fn used(&self) -> Result<(), MoqError> {
-		let track = self
+		let demand = self
 			.inner
 			.lock()
 			.unwrap()
 			.as_ref()
 			.ok_or(MoqError::Closed)?
-			.track
+			.demand
 			.clone();
-		match crate::ffi::RUNTIME.spawn(async move { track.used().await }).await {
+		match crate::ffi::RUNTIME.spawn(async move { demand.used().await }).await {
 			Ok(result) => result.map_err(Into::into),
 			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
 			Err(e) => Err(MoqError::Task(e)),
@@ -415,15 +414,15 @@ impl MoqMediaProducer {
 
 	/// Wait until this media track has no active consumers.
 	pub async fn unused(&self) -> Result<(), MoqError> {
-		let track = self
+		let demand = self
 			.inner
 			.lock()
 			.unwrap()
 			.as_ref()
 			.ok_or(MoqError::Closed)?
-			.track
+			.demand
 			.clone();
-		match crate::ffi::RUNTIME.spawn(async move { track.unused().await }).await {
+		match crate::ffi::RUNTIME.spawn(async move { demand.unused().await }).await {
 			Ok(result) => result.map_err(Into::into),
 			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
 			Err(e) => Err(MoqError::Task(e)),

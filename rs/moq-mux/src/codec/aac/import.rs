@@ -1,7 +1,7 @@
 use bytes::{Buf, BytesMut};
 
 use super::Config;
-use crate::publish::Renditions;
+use crate::import::Renditions;
 
 /// AAC importer.
 ///
@@ -59,7 +59,7 @@ impl Import {
 
 	/// Mutable access to the single audio rendition, for callers that refine it
 	/// after construction (the TS importer sets the synthesized `description` and
-	/// an audio-burst `jitter`). Follow with [`crate::publish::Published::sync`].
+	/// an audio-burst `jitter`). Follow with [`crate::import::Track::sync`].
 	pub(crate) fn rendition_mut(&mut self) -> Option<&mut hang::catalog::AudioConfig> {
 		let name = self.track.name();
 		self.catalog.audio.renditions.get_mut(name)

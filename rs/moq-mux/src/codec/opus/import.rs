@@ -2,7 +2,7 @@ use bytes::{Buf, BytesMut};
 
 use super::Config;
 use crate::container::Frame;
-use crate::publish::Renditions;
+use crate::import::Renditions;
 
 /// Opus importer.
 ///
@@ -14,7 +14,7 @@ use crate::publish::Renditions;
 /// immediately without waiting for a group boundary; Opus' packet loss
 /// concealment handles drops. The catalog rendition this importer publishes is
 /// available via [`catalog`](Self::catalog); attach it to a broadcast catalog
-/// with [`crate::publish::Published`].
+/// with [`crate::import::Track`].
 pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	catalog: hang::Catalog,

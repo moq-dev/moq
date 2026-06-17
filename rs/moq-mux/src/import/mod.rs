@@ -1,12 +1,19 @@
-//! Format dispatchers for callers who only have a format string.
+//! Import media into a moq broadcast.
 //!
-//! [`Framed`] is the entry point when the caller already has whole
-//! frames (the typical case for files and reassembled network input).
-//! [`Stream`] is for raw byte streams where frame boundaries have to
-//! be inferred (piped Annex-B H.264, an fMP4 reader, …). Both pick a
-//! concrete importer from a [`FramedFormat`] / [`StreamFormat`] string.
-//! The concrete importers themselves live with their format under
-//! [`crate::container`] or [`crate::codec`].
+//! The format dispatchers are the front door for callers who only have a format
+//! string. [`Framed`] is the entry point when the caller already has whole frames
+//! (the typical case for files and reassembled network input). [`Stream`] is for
+//! raw byte streams where frame boundaries have to be inferred (piped Annex-B
+//! H.264, an fMP4 reader, …). Both pick a concrete importer from a
+//! [`FramedFormat`] / [`StreamFormat`] string. The concrete importers themselves
+//! live with their format under [`crate::container`] or [`crate::codec`].
+//!
+//! Underneath, [`Track`] binds a bare single-track codec importer to a broadcast
+//! catalog, mirroring its [`Renditions`] in and retiring them on drop;
+//! [`FrameDecode`] is the contract for handing it already-split frames.
+
+mod track;
+pub use track::*;
 
 use std::{fmt, str::FromStr};
 
@@ -106,29 +113,29 @@ enum FramedKind {
 	/// import publishes.
 	Avc3 {
 		split: crate::codec::h264::Split,
-		import: crate::publish::Published<crate::codec::h264::Import>,
+		import: crate::import::Track<crate::codec::h264::Import>,
 	},
 	/// H.264 avc1 (length-prefixed NALU, out-of-band avcC). No splitter: each
 	/// access unit is wrapped directly. `length_size` is the NALU length prefix
 	/// width read from the avcC.
 	Avc1 {
 		length_size: usize,
-		import: crate::publish::Published<crate::codec::h264::Import>,
+		import: crate::import::Track<crate::codec::h264::Import>,
 	},
 	// Boxed because it's a large struct and clippy complains about the size.
 	Fmp4(Box<crate::container::fmp4::Import>),
 	Hev1 {
 		split: crate::codec::h265::Split,
-		import: crate::publish::Published<crate::codec::h265::Import>,
+		import: crate::import::Track<crate::codec::h265::Import>,
 	},
 	Av01 {
 		split: crate::codec::av1::Split,
-		import: crate::publish::Published<crate::codec::av1::Import>,
+		import: crate::import::Track<crate::codec::av1::Import>,
 	},
-	Vp8(crate::publish::Published<crate::codec::vp8::Import>),
-	Vp9(crate::publish::Published<crate::codec::vp9::Import>),
-	Aac(crate::publish::Published<crate::codec::aac::Import>),
-	Opus(crate::publish::Published<crate::codec::opus::Import>),
+	Vp8(crate::import::Track<crate::codec::vp8::Import>),
+	Vp9(crate::import::Track<crate::codec::vp9::Import>),
+	Aac(crate::import::Track<crate::codec::aac::Import>),
+	Opus(crate::import::Track<crate::codec::opus::Import>),
 	// Boxed for the same reason as Fmp4.
 	Mkv(Box<crate::container::mkv::Import>),
 	// Boxed for the same reason as Fmp4.
@@ -155,13 +162,13 @@ fn build_h264_avc3<T: Buf + AsRef<[u8]>>(
 	buf: &mut T,
 ) -> Result<(
 	crate::codec::h264::Split,
-	crate::publish::Published<crate::codec::h264::Import>,
+	crate::import::Track<crate::codec::h264::Import>,
 )> {
 	let mut import = crate::codec::h264::Import::from_track(track);
 	import.initialize(buf)?;
 	let mut split = crate::codec::h264::Split::new();
 	let frames = split.decode(buf, None)?;
-	let mut published = crate::publish::Published::new(catalog, import);
+	let mut published = crate::import::Track::new(catalog, import);
 	published.decode(frames)?;
 	Ok((split, published))
 }
@@ -173,12 +180,12 @@ fn build_h264_avc1<T: Buf + AsRef<[u8]>>(
 	track: moq_net::TrackProducer,
 	catalog: crate::catalog::Producer,
 	buf: &mut T,
-) -> Result<(usize, crate::publish::Published<crate::codec::h264::Import>)> {
+) -> Result<(usize, crate::import::Track<crate::codec::h264::Import>)> {
 	let mut import = crate::codec::h264::Import::from_track(track);
 	import.initialize(buf)?;
 	let length_size = crate::codec::h264::Avcc::parse(buf.as_ref())?.length_size;
 	buf.advance(buf.remaining());
-	Ok((length_size, crate::publish::Published::new(catalog, import)))
+	Ok((length_size, crate::import::Track::new(catalog, import)))
 }
 
 /// Build an H.265 split + import pair, resolving the config and consuming `buf`.
@@ -188,13 +195,13 @@ fn build_h265<T: Buf + AsRef<[u8]>>(
 	buf: &mut T,
 ) -> Result<(
 	crate::codec::h265::Split,
-	crate::publish::Published<crate::codec::h265::Import>,
+	crate::import::Track<crate::codec::h265::Import>,
 )> {
 	let mut import = crate::codec::h265::Import::from_track(track);
 	import.initialize(buf)?;
 	let mut split = crate::codec::h265::Split::new();
 	let frames = split.decode(buf, None)?;
-	let mut published = crate::publish::Published::new(catalog, import);
+	let mut published = crate::import::Track::new(catalog, import);
 	published.decode(frames)?;
 	Ok((split, published))
 }
@@ -206,7 +213,7 @@ fn build_av1<T: Buf + AsRef<[u8]>>(
 	buf: &mut T,
 ) -> Result<(
 	crate::codec::av1::Split,
-	crate::publish::Published<crate::codec::av1::Import>,
+	crate::import::Track<crate::codec::av1::Import>,
 )> {
 	let mut import = crate::codec::av1::Import::from_track(track);
 	import.initialize(buf)?;
@@ -221,7 +228,7 @@ fn build_av1<T: Buf + AsRef<[u8]>>(
 	} else {
 		split.decode(buf, None)?
 	};
-	let mut published = crate::publish::Published::new(catalog, import);
+	let mut published = crate::import::Track::new(catalog, import);
 	published.decode(frames)?;
 	Ok((split, published))
 }
@@ -238,12 +245,12 @@ impl Framed {
 	) -> Result<Self> {
 		let decoder = match format {
 			FramedFormat::Avc1 => {
-				let track = crate::publish::unique_track(&mut broadcast, ".avc1")?;
+				let track = crate::import::unique_track(&mut broadcast, ".avc1")?;
 				let (length_size, import) = build_h264_avc1(track, catalog, buf)?;
 				FramedKind::Avc1 { length_size, import }
 			}
 			FramedFormat::Avc3 => {
-				let track = crate::publish::unique_track(&mut broadcast, ".avc3")?;
+				let track = crate::import::unique_track(&mut broadcast, ".avc3")?;
 				let (split, import) = build_h264_avc3(track, catalog, buf)?;
 				FramedKind::Avc3 { split, import }
 			}
@@ -253,38 +260,38 @@ impl Framed {
 				FramedKind::Fmp4(decoder)
 			}
 			FramedFormat::Hev1 => {
-				let track = crate::publish::unique_track(&mut broadcast, ".hev1")?;
+				let track = crate::import::unique_track(&mut broadcast, ".hev1")?;
 				let (split, import) = build_h265(track, catalog, buf)?;
 				FramedKind::Hev1 { split, import }
 			}
 			FramedFormat::Av01 => {
-				let track = crate::publish::unique_track(&mut broadcast, ".av01")?;
+				let track = crate::import::unique_track(&mut broadcast, ".av01")?;
 				let (split, import) = build_av1(track, catalog, buf)?;
 				FramedKind::Av01 { split, import }
 			}
 			FramedFormat::Vp8 => {
-				let track = crate::publish::unique_track(&mut broadcast, ".vp8")?;
+				let track = crate::import::unique_track(&mut broadcast, ".vp8")?;
 				let mut decoder = crate::codec::vp8::Import::from_track(track);
 				decoder.initialize(buf)?;
-				FramedKind::Vp8(crate::publish::Published::new(catalog, decoder))
+				FramedKind::Vp8(crate::import::Track::new(catalog, decoder))
 			}
 			FramedFormat::Vp9 => {
-				let track = crate::publish::unique_track(&mut broadcast, ".vp09")?;
+				let track = crate::import::unique_track(&mut broadcast, ".vp09")?;
 				let mut decoder = crate::codec::vp9::Import::from_track(track);
 				decoder.initialize(buf)?;
-				FramedKind::Vp9(crate::publish::Published::new(catalog, decoder))
+				FramedKind::Vp9(crate::import::Track::new(catalog, decoder))
 			}
 			FramedFormat::Aac => {
 				let config = crate::codec::aac::Config::parse(buf)?;
-				let track = crate::publish::unique_track(&mut broadcast, ".aac")?;
+				let track = crate::import::unique_track(&mut broadcast, ".aac")?;
 				let import = crate::codec::aac::Import::from_track(track, config)?;
-				FramedKind::Aac(crate::publish::Published::new(catalog, import))
+				FramedKind::Aac(crate::import::Track::new(catalog, import))
 			}
 			FramedFormat::Opus => {
 				let config = crate::codec::opus::Config::parse(buf)?;
-				let track = crate::publish::unique_track(&mut broadcast, ".opus")?;
+				let track = crate::import::unique_track(&mut broadcast, ".opus")?;
 				let import = crate::codec::opus::Import::from_track(track, config)?;
-				FramedKind::Opus(crate::publish::Published::new(catalog, import))
+				FramedKind::Opus(crate::import::Track::new(catalog, import))
 			}
 			FramedFormat::Mkv => {
 				let mut decoder = Box::new(crate::container::mkv::Import::new(broadcast, catalog));
@@ -340,22 +347,22 @@ impl Framed {
 			FramedFormat::Vp8 => {
 				let mut decoder = crate::codec::vp8::Import::from_track(track);
 				decoder.initialize(buf)?;
-				FramedKind::Vp8(crate::publish::Published::new(catalog, decoder))
+				FramedKind::Vp8(crate::import::Track::new(catalog, decoder))
 			}
 			FramedFormat::Vp9 => {
 				let mut decoder = crate::codec::vp9::Import::from_track(track);
 				decoder.initialize(buf)?;
-				FramedKind::Vp9(crate::publish::Published::new(catalog, decoder))
+				FramedKind::Vp9(crate::import::Track::new(catalog, decoder))
 			}
 			FramedFormat::Aac => {
 				let config = crate::codec::aac::Config::parse(buf)?;
 				let import = crate::codec::aac::Import::from_track(track, config)?;
-				FramedKind::Aac(crate::publish::Published::new(catalog, import))
+				FramedKind::Aac(crate::import::Track::new(catalog, import))
 			}
 			FramedFormat::Opus => {
 				let config = crate::codec::opus::Config::parse(buf)?;
 				let import = crate::codec::opus::Import::from_track(track, config)?;
-				FramedKind::Opus(crate::publish::Published::new(catalog, import))
+				FramedKind::Opus(crate::import::Track::new(catalog, import))
 			}
 			FramedFormat::Fmp4 | FramedFormat::Mkv | FramedFormat::Ts | FramedFormat::Flv => {
 				anyhow::bail!("{format} can publish multiple tracks")
@@ -421,8 +428,11 @@ impl Framed {
 		}
 	}
 
-	/// Return the single track produced by this importer.
-	pub fn track(&self) -> Result<&moq_net::TrackProducer> {
+	/// The single track's producer. Private: callers get the curated, read-only
+	/// accessors below ([`name`](Self::name) / [`subscribe`](Self::subscribe) /
+	/// [`demand`](Self::demand)) so the importer keeps sole ownership of the
+	/// publishing handle.
+	fn producer(&self) -> Result<&moq_net::TrackProducer> {
 		match self.decoder {
 			FramedKind::Avc3 { ref import, .. } => Ok(import.track()),
 			FramedKind::Avc1 { ref import, .. } => Ok(import.track()),
@@ -437,6 +447,34 @@ impl Framed {
 			FramedKind::Ts(_) => Err(crate::Error::MultipleTracks("ts")),
 			FramedKind::Flv(_) => Err(crate::Error::MultipleTracks("flv")),
 		}
+	}
+
+	/// The name of the single track this importer publishes.
+	///
+	/// Returns [`Error::MultipleTracks`](crate::Error::MultipleTracks) for container
+	/// formats that may publish more than one track.
+	pub fn name(&self) -> Result<&str> {
+		Ok(self.producer()?.name())
+	}
+
+	/// Subscribe to the single track this importer publishes.
+	///
+	/// A read-only handle; it can't publish frames or close the track. Pass `None`
+	/// for [`Subscription::default`](moq_net::Subscription).
+	pub fn subscribe(
+		&self,
+		subscription: impl Into<Option<moq_net::Subscription>>,
+	) -> Result<moq_net::TrackSubscriber> {
+		Ok(self.producer()?.subscribe(subscription))
+	}
+
+	/// A cloneable, watch-only handle to the single track's subscriber demand.
+	///
+	/// Lets the caller gate work on whether anyone is subscribed (via
+	/// [`used`](moq_net::TrackDemand::used) / [`unused`](moq_net::TrackDemand::unused))
+	/// without the ability to publish or close the track.
+	pub fn demand(&self) -> Result<moq_net::TrackDemand> {
+		Ok(self.producer()?.demand())
 	}
 
 	/// Decode a frame from the given buffer.
@@ -507,16 +545,16 @@ impl Framed {
 // Lift an already-built, catalog-attached opus importer into a `Framed` so callers
 // that build their config out-of-band (e.g. moq-gst, which constructs `opus::Config`
 // from gstreamer caps instead of an OpusHead buffer) can keep using `.into()`.
-impl From<crate::publish::Published<crate::codec::opus::Import>> for Framed {
-	fn from(opus: crate::publish::Published<crate::codec::opus::Import>) -> Self {
+impl From<crate::import::Track<crate::codec::opus::Import>> for Framed {
+	fn from(opus: crate::import::Track<crate::codec::opus::Import>) -> Self {
 		Self {
 			decoder: FramedKind::Opus(opus),
 		}
 	}
 }
 
-impl From<crate::publish::Published<crate::codec::aac::Import>> for Framed {
-	fn from(aac: crate::publish::Published<crate::codec::aac::Import>) -> Self {
+impl From<crate::import::Track<crate::codec::aac::Import>> for Framed {
+	fn from(aac: crate::import::Track<crate::codec::aac::Import>) -> Self {
 		Self {
 			decoder: FramedKind::Aac(aac),
 		}
@@ -579,7 +617,7 @@ mod tests {
 
 		let mut framed = Framed::new_with_track(track, catalog.clone(), FramedFormat::Opus, &mut init).unwrap();
 
-		assert_eq!(framed.track().unwrap().name(), "requested-audio");
+		assert_eq!(framed.name().unwrap(), "requested-audio");
 		let snapshot = catalog.snapshot();
 		assert!(snapshot.audio.renditions.contains_key("requested-audio"));
 		assert!(!snapshot.audio.renditions.contains_key("0.opus"));
@@ -611,11 +649,11 @@ mod tests {
 		// The broadcast path mints a unique track and attaches its catalog rendition.
 		let mut framed = Framed::new(broadcast, catalog.clone(), FramedFormat::Opus, &mut init).unwrap();
 
-		assert_eq!(framed.track().unwrap().name(), "0.opus");
+		assert_eq!(framed.name().unwrap(), "0.opus");
 		assert!(catalog.snapshot().audio.renditions.contains_key("0.opus"));
 
 		// Frames published through the minted producer are delivered.
-		let subscriber = framed.track().unwrap().subscribe(None);
+		let subscriber = framed.subscribe(None).unwrap();
 		let mut media = crate::container::Consumer::new(subscriber, crate::catalog::hang::Container::Legacy);
 
 		let payload = b"opus payload".to_vec();
@@ -681,7 +719,7 @@ mod tests {
 
 		let framed = Framed::new_with_track(track, catalog.clone(), FramedFormat::Avc3, &mut init).unwrap();
 
-		assert_eq!(framed.track().unwrap().name(), "camera");
+		assert_eq!(framed.name().unwrap(), "camera");
 		let snapshot = catalog.snapshot();
 		let video = snapshot.video.renditions.get("camera").unwrap();
 		assert_eq!(video.coded_width, Some(1280));
@@ -788,17 +826,17 @@ enum StreamKind {
 	/// byte parsing; the import publishes.
 	Avc3 {
 		split: crate::codec::h264::Split,
-		import: crate::publish::Published<crate::codec::h264::Import>,
+		import: crate::import::Track<crate::codec::h264::Import>,
 	},
 	// Boxed because it's a large struct and clippy complains about the size.
 	Fmp4(Box<crate::container::fmp4::Import>),
 	Hev1 {
 		split: crate::codec::h265::Split,
-		import: crate::publish::Published<crate::codec::h265::Import>,
+		import: crate::import::Track<crate::codec::h265::Import>,
 	},
 	Av01 {
 		split: crate::codec::av1::Split,
-		import: crate::publish::Published<crate::codec::av1::Import>,
+		import: crate::import::Track<crate::codec::av1::Import>,
 	},
 	// Boxed for the same reason as Fmp4.
 	Mkv(Box<crate::container::mkv::Import>),
@@ -825,29 +863,29 @@ impl Stream {
 	) -> Result<Self> {
 		let decoder = match format {
 			StreamFormat::Avc3 => {
-				let track = crate::publish::unique_track(&mut broadcast, ".avc3")?;
+				let track = crate::import::unique_track(&mut broadcast, ".avc3")?;
 				let import = crate::codec::h264::Import::from_track(track);
 				let split = crate::codec::h264::Split::new();
 				StreamKind::Avc3 {
 					split,
-					import: crate::publish::Published::new(catalog, import),
+					import: crate::import::Track::new(catalog, import),
 				}
 			}
 			StreamFormat::Fmp4 => StreamKind::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, catalog))),
 			StreamFormat::Hev1 => {
-				let track = crate::publish::unique_track(&mut broadcast, ".hev1")?;
+				let track = crate::import::unique_track(&mut broadcast, ".hev1")?;
 				let import = crate::codec::h265::Import::from_track(track);
 				StreamKind::Hev1 {
 					split: crate::codec::h265::Split::new(),
-					import: crate::publish::Published::new(catalog, import),
+					import: crate::import::Track::new(catalog, import),
 				}
 			}
 			StreamFormat::Av01 => {
-				let track = crate::publish::unique_track(&mut broadcast, ".av01")?;
+				let track = crate::import::unique_track(&mut broadcast, ".av01")?;
 				let import = crate::codec::av1::Import::from_track(track);
 				StreamKind::Av01 {
 					split: crate::codec::av1::Split::new(),
-					import: crate::publish::Published::new(catalog, import),
+					import: crate::import::Track::new(catalog, import),
 				}
 			}
 			StreamFormat::Mkv => StreamKind::Mkv(Box::new(crate::container::mkv::Import::new(broadcast, catalog))),

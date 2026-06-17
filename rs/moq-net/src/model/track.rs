@@ -639,6 +639,20 @@ impl TrackProducer {
 		}
 	}
 
+	/// Create a [`TrackDemand`]: a cloneable, watch-only handle to this track's
+	/// subscriber demand.
+	///
+	/// Lets a publisher gate work (e.g. on-demand capture) on whether anyone is
+	/// subscribed, without the ability to publish frames or close the track. The
+	/// handle is weak, so holding one neither keeps the track alive nor pins its
+	/// cached groups.
+	pub fn demand(&self) -> TrackDemand {
+		TrackDemand {
+			name: self.name.clone(),
+			state: self.state.weak(),
+		}
+	}
+
 	/// Get a consumer handle for this in-process track.
 	///
 	/// Unlike a wire subscription, the info is already known, so a subscription
@@ -894,6 +908,49 @@ impl TrackWeak {
 	/// refcount bump, and the same `Arc` is shared with the track's handles).
 	pub(crate) fn name(&self) -> &Arc<str> {
 		&self.name
+	}
+}
+
+/// A cloneable, watch-only handle to a track's subscriber demand.
+///
+/// Obtained from [`TrackProducer::demand`]. A publisher uses it to react to
+/// whether anyone is subscribed (on-demand capture / encoding) without being able
+/// to publish frames or close the track. It's a weak handle, so it neither keeps
+/// the track alive nor pins its cached groups; once the owning [`TrackProducer`]
+/// goes away, [`used`](Self::used) / [`unused`](Self::unused) report the track's
+/// closure.
+#[derive(Clone)]
+pub struct TrackDemand {
+	name: Arc<str>,
+	state: kio::Weak<TrackState>,
+}
+
+impl TrackDemand {
+	/// The track name this handle is bound to.
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	/// Block until there is at least one active consumer.
+	pub async fn used(&self) -> Result<()> {
+		self.state
+			.used()
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	}
+
+	/// Block until there are no active consumers.
+	pub async fn unused(&self) -> Result<()> {
+		self.state
+			.unused()
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	}
+
+	/// Block until the track is closed or aborted, returning the cause.
+	pub async fn closed(&self) -> Error {
+		self.state.closed().await;
+		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 }
 

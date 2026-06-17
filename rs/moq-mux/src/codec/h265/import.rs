@@ -20,7 +20,7 @@ use crate::Result;
 use crate::codec::annexb::NalIterator;
 use crate::container::Frame;
 use crate::container::jitter::MinFrameDuration;
-use crate::publish::{FrameDecode, Renditions};
+use crate::import::{FrameDecode, Renditions};
 
 /// A pure-publisher importer for H.265 with inline VPS/SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).

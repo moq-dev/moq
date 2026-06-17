@@ -20,7 +20,7 @@ use super::split::ObuIterator;
 use crate::Result;
 use crate::container::Frame;
 use crate::container::jitter::MinFrameDuration;
-use crate::publish::{FrameDecode, Renditions};
+use crate::import::{FrameDecode, Renditions};
 
 /// A pure-publisher importer for AV1 with inline sequence headers.
 ///

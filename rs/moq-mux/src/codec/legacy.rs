@@ -10,7 +10,7 @@
 use bytes::{Buf, BytesMut};
 use moq_net::Timestamp;
 
-use crate::publish::Renditions;
+use crate::import::Renditions;
 
 /// Legacy audio (MP2 / AC-3 / E-AC-3) header parsing errors.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -121,7 +121,7 @@ pub(crate) struct Import {
 
 impl Import {
 	/// Publish on an existing track. Mint it at the descriptor's suffix and the
-	/// microsecond [`hang::container::TIMESCALE`] (e.g. via [`crate::publish::unique_track`]).
+	/// microsecond [`hang::container::TIMESCALE`] (e.g. via [`crate::import::unique_track`]).
 	pub fn from_track(descriptor: &'static Descriptor, track: moq_net::TrackProducer, config: Config) -> Self {
 		let mut audio_config =
 			hang::catalog::AudioConfig::new(descriptor.codec.clone(), config.sample_rate, config.channel_count);

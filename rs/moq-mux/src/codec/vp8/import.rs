@@ -1,7 +1,7 @@
 use bytes::Buf;
 
 use crate::container::jitter::MinFrameDuration;
-use crate::publish::Renditions;
+use crate::import::Renditions;
 
 use super::FrameHeader;
 

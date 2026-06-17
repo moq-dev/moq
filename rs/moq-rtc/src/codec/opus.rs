@@ -6,7 +6,7 @@
 use crate::{Result, codec};
 
 pub struct Bridge {
-	import: moq_mux::publish::Published<moq_mux::codec::opus::Import>,
+	import: moq_mux::import::Track<moq_mux::codec::opus::Import>,
 }
 
 impl Bridge {
@@ -20,9 +20,9 @@ impl Bridge {
 			sample_rate,
 			channel_count,
 		};
-		let track = moq_mux::publish::unique_track(&mut broadcast, ".opus")?;
+		let track = moq_mux::import::unique_track(&mut broadcast, ".opus")?;
 		let import = moq_mux::codec::opus::Import::from_track(track, config)?;
-		let import = moq_mux::publish::Published::new(catalog, import);
+		let import = moq_mux::import::Track::new(catalog, import);
 		Ok(Self { import })
 	}
 }

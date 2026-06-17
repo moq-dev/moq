@@ -3,7 +3,7 @@
 //! A single-track importer (in [`crate::codec`]) produces frames on one track and
 //! exposes the catalog renditions it publishes via [`Renditions`]. Most callers,
 //! though, work with a whole [`moq_net::BroadcastProducer`] plus a shared
-//! [`catalog::Producer`](crate::catalog::Producer). [`Published`] is the adapter:
+//! [`catalog::Producer`](crate::catalog::Producer). [`Track`] is the adapter:
 //! it merges an importer's renditions into that catalog and removes them on drop.
 //!
 //! For the broadcast-push case, mint a track with [`unique_track`] and build the
@@ -13,7 +13,7 @@
 //!
 //! Some importers fill their catalog lazily (H.264 only knows its config once SPS
 //! arrives) or refine it over time (jitter). Feed them through
-//! [`Published::decode`] or [`Published::decoding`], which re-mirror the catalog
+//! [`Track::decode`] or [`Track::decoding`], which re-mirror the catalog
 //! automatically so new/changed renditions always reach it.
 
 use std::ops::{Deref, DerefMut};
@@ -22,7 +22,7 @@ use crate::catalog::hang::CatalogExt;
 
 /// A single-track importer that exposes the catalog renditions it publishes.
 ///
-/// Implemented by the per-codec importers so [`Published`] can merge their
+/// Implemented by the per-codec importers so [`Track`] can merge their
 /// renditions into a broadcast catalog generically. The returned catalog may be
 /// empty (and grow later) for importers that initialize lazily.
 pub trait Renditions {
@@ -34,8 +34,8 @@ pub trait Renditions {
 ///
 /// The uniform decode entry point: callers split bytes into [`Frame`](crate::container::Frame)s
 /// (a per-format splitter, e.g. [`crate::codec::h264::Split`]) and hand them over.
-/// [`Published`] wraps this so the catalog re-mirror can't be forgotten (see
-/// [`Published::decode`]).
+/// [`Track`] wraps this so the catalog re-mirror can't be forgotten (see
+/// [`Track::decode`]).
 pub trait FrameDecode {
 	/// Publish frames on this importer's track.
 	fn decode<I: IntoIterator<Item = crate::container::Frame>>(&mut self, frames: I) -> crate::Result<()>;
@@ -59,7 +59,7 @@ pub fn unique_track(broadcast: &mut moq_net::BroadcastProducer, suffix: &str) ->
 /// (`decode`, `finish`, `seek`, ...) are available directly. Generic over the
 /// catalog extension `E` so it can attach to an extended broadcast catalog (e.g.
 /// the one a container holds).
-pub struct Published<I: Renditions, E: CatalogExt = ()> {
+pub struct Track<I: Renditions, E: CatalogExt = ()> {
 	inner: I,
 	catalog: crate::catalog::Producer<E>,
 	/// The renditions we last mirrored into the catalog, so [`sync`](Self::sync)
@@ -67,7 +67,7 @@ pub struct Published<I: Renditions, E: CatalogExt = ()> {
 	published: hang::Catalog,
 }
 
-impl<I: Renditions, E: CatalogExt> Published<I, E> {
+impl<I: Renditions, E: CatalogExt> Track<I, E> {
 	/// Attach `inner` to `catalog`, mirroring whatever renditions it already has.
 	pub fn new(catalog: crate::catalog::Producer<E>, inner: I) -> Self {
 		let mut this = Self {
@@ -131,7 +131,7 @@ impl<I: Renditions, E: CatalogExt> Published<I, E> {
 	}
 }
 
-impl<I: Renditions + FrameDecode, E: CatalogExt> Published<I, E> {
+impl<I: Renditions + FrameDecode, E: CatalogExt> Track<I, E> {
 	/// Publish frames and re-mirror any catalog change in one call.
 	///
 	/// This is the footgun-free path: it re-mirrors the catalog after decoding, so
@@ -143,7 +143,7 @@ impl<I: Renditions + FrameDecode, E: CatalogExt> Published<I, E> {
 	}
 }
 
-impl<I: Renditions, E: CatalogExt> Deref for Published<I, E> {
+impl<I: Renditions, E: CatalogExt> Deref for Track<I, E> {
 	type Target = I;
 
 	fn deref(&self) -> &I {
@@ -151,13 +151,13 @@ impl<I: Renditions, E: CatalogExt> Deref for Published<I, E> {
 	}
 }
 
-impl<I: Renditions, E: CatalogExt> DerefMut for Published<I, E> {
+impl<I: Renditions, E: CatalogExt> DerefMut for Track<I, E> {
 	fn deref_mut(&mut self) -> &mut I {
 		&mut self.inner
 	}
 }
 
-impl<I: Renditions, E: CatalogExt> Drop for Published<I, E> {
+impl<I: Renditions, E: CatalogExt> Drop for Track<I, E> {
 	fn drop(&mut self) {
 		if self.published == hang::Catalog::default() {
 			return;
@@ -177,7 +177,7 @@ impl<I: Renditions, E: CatalogExt> Drop for Published<I, E> {
 mod tests {
 	use super::*;
 
-	/// An importer whose catalog we can mutate, to drive [`Published::sync`].
+	/// An importer whose catalog we can mutate, to drive [`Track::sync`].
 	struct Fake(hang::Catalog);
 
 	impl Renditions for Fake {
@@ -206,7 +206,7 @@ mod tests {
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 		// Importer starts with an empty catalog (lazy init): nothing merged yet.
-		let mut published = Published::new(catalog.clone(), Fake(hang::Catalog::default()));
+		let mut published = Track::new(catalog.clone(), Fake(hang::Catalog::default()));
 		assert!(catalog.snapshot().video.renditions.is_empty());
 
 		// A rendition appears later; decoding mirrors it into the broadcast catalog.
@@ -237,7 +237,7 @@ mod tests {
 		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
-		let mut published = Published::new(catalog.clone(), Fake(hang::Catalog::default()));
+		let mut published = Track::new(catalog.clone(), Fake(hang::Catalog::default()));
 		assert!(catalog.snapshot().video.renditions.is_empty());
 
 		// `decode` resolves the rendition and mirrors it — no manual `sync()`.

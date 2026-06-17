@@ -18,7 +18,7 @@ use crate::Result;
 use crate::codec::annexb::NalIterator;
 use crate::container::Frame;
 use crate::container::jitter::MinFrameDuration;
-use crate::publish::{FrameDecode, Renditions};
+use crate::import::{FrameDecode, Renditions};
 
 /// H.264 importer: a pure frame publisher that resolves the catalog rendition.
 ///
@@ -28,7 +28,7 @@ use crate::publish::{FrameDecode, Renditions};
 /// the [`FrameDecode`] impl. The catalog rendition fills in lazily once the codec
 /// config is known (avcC via [`initialize`](Self::initialize) for avc1, the first
 /// SPS for avc3); read it via [`catalog`](Self::catalog) or attach the importer to
-/// a broadcast catalog with [`crate::publish::Published`].
+/// a broadcast catalog with [`crate::import::Track`].
 pub struct Import {
 	/// True for the avc1 shape: the codec config is out-of-band (avcC), so
 	/// keyframes are not scanned for an inline SPS.

@@ -82,7 +82,7 @@ pub struct CaptureArgs {
 enum PublishDecoder {
 	Avc3 {
 		split: moq_mux::codec::h264::Split,
-		import: Box<moq_mux::publish::Published<moq_mux::codec::h264::Import>>,
+		import: Box<moq_mux::import::Track<moq_mux::codec::h264::Import>>,
 	},
 	Fmp4(Box<fmp4::Import>),
 	Ts(Box<ts::Import>),
@@ -147,9 +147,9 @@ impl Publish {
 
 		let source = match format {
 			PublishFormat::Avc3 => {
-				let track = moq_mux::publish::unique_track(&mut broadcast, ".avc3")?;
+				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
 				let import = moq_mux::codec::h264::Import::from_track(track);
-				let import = moq_mux::publish::Published::new(catalog.clone(), import);
+				let import = moq_mux::import::Track::new(catalog.clone(), import);
 				let split = moq_mux::codec::h264::Split::new();
 				Source::Stream(PublishDecoder::Avc3 {
 					split,

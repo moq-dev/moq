@@ -486,9 +486,9 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 				sample_rate,
 				channel_count,
 			};
-			let track = moq_mux::publish::unique_track(&mut runtime.broadcast, ".opus")?;
+			let track = moq_mux::import::unique_track(&mut runtime.broadcast, ".opus")?;
 			let import = moq_mux::codec::opus::Import::from_track(track, config)?;
-			moq_mux::publish::Published::new(runtime.catalog.clone(), import).into()
+			moq_mux::import::Track::new(runtime.catalog.clone(), import).into()
 		}
 		other => anyhow::bail!("unsupported caps: {}", other),
 	};
