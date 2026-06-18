@@ -242,9 +242,9 @@ pub struct ClusterConfig {
 	///
 	/// Unset (the default) picks a fresh random id on every start. Set it to give
 	/// a node a stable identity across restarts. Must be non-zero and below 2^62
-	/// (the wire varint limit); an out-of-range value is ignored in favor of a
-	/// random id. Keep it below 2^53 for compatibility with older `@moq/lite` JS
-	/// clients, which decode hop ids as a `u53` and reject anything larger.
+	/// (the wire varint limit); an out-of-range value errors at startup. Keep it
+	/// below 2^53 for compatibility with older `@moq/lite` JS clients, which
+	/// decode hop ids as a `u53` and reject anything larger.
 	#[arg(id = "cluster-id", long = "cluster-id", env = "MOQ_CLUSTER_ID")]
 	pub id: Option<u64>,
 
@@ -356,39 +356,27 @@ impl Cluster {
 	/// Use [`with_client`](Self::with_client) to enable dialing remote peers
 	/// (required when `config.connect` is non-empty), and
 	/// [`with_stats`](Self::with_stats) to enable metrics publishing.
-	pub fn new(config: ClusterConfig) -> Self {
+	///
+	/// Errors if `config.id` is set but invalid: it must be non-zero and below
+	/// 2^62 (the wire varint limit). An unset id picks a fresh random origin.
+	pub fn new(config: ClusterConfig) -> anyhow::Result<Self> {
 		let origin = match config.id {
-			Some(0) => {
-				tracing::warn!("--cluster-id 0 is reserved; using a random origin instead");
-				Origin::random()
-			}
+			Some(0) => anyhow::bail!("--cluster-id must be non-zero"),
 			Some(id) if id >= 1 << 62 => {
-				tracing::warn!(
-					id,
-					"--cluster-id must be below 2^62 (wire varint limit); using a random origin instead"
-				);
-				Origin::random()
+				anyhow::bail!("--cluster-id must be below 2^62 (wire varint limit), got {id}")
 			}
-			Some(id) => {
-				if id >= 1 << 53 {
-					tracing::warn!(
-						id,
-						"--cluster-id exceeds 2^53-1; older @moq/lite JS clients may reject it"
-					);
-				}
-				Origin::from(id)
-			}
+			Some(id) => Origin::from(id),
 			None => Origin::random(),
 		}
 		.produce();
 		tracing::info!(origin_id = %origin.id, configured = config.id.is_some(), "cluster initialized");
-		Cluster {
+		Ok(Cluster {
 			config,
 			client: None,
 			client_tls: None,
 			origin,
 			stats: Stats::default(),
-		}
+		})
 	}
 
 	/// Attach a QUIC client used to dial cluster peers.
@@ -1141,7 +1129,7 @@ mod tests {
 			root: Some("legacy-root.example.com:4443".to_string()),
 			..Default::default()
 		};
-		let err = Cluster::new(config).run().await.expect_err("should error");
+		let err = Cluster::new(config).unwrap().run().await.expect_err("should error");
 		let msg = format!("{err}");
 		assert!(msg.contains("cluster.root"), "missing cluster.root in: {msg}");
 		assert!(msg.contains("--cluster-connect"), "missing --cluster-connect in: {msg}");
@@ -1156,7 +1144,7 @@ mod tests {
 			mesh: Some("true".to_string()),
 			..Default::default()
 		};
-		let err = Cluster::new(config).run().await.expect_err("should error");
+		let err = Cluster::new(config).unwrap().run().await.expect_err("should error");
 		let msg = format!("{err}");
 		assert!(msg.contains("--cluster-node"), "missing --cluster-node in: {msg}");
 		assert!(msg.contains("--cluster-mesh"), "missing --cluster-mesh in: {msg}");
@@ -1169,21 +1157,23 @@ mod tests {
 		let cluster = Cluster::new(ClusterConfig {
 			id: Some(42),
 			..Default::default()
-		});
+		})
+		.expect("valid id");
 		assert_eq!(cluster.origin.id, 42);
 	}
 
-	/// A reserved (0) or out-of-range (>= 2^62) `cluster.id` is ignored in favor
-	/// of a random origin rather than producing an unencodable hop id.
+	/// A reserved (0) or out-of-range (>= 2^62) `cluster.id` is rejected rather
+	/// than producing an unencodable hop id.
 	#[test]
-	fn cluster_id_out_of_range_falls_back_to_random() {
+	fn cluster_id_out_of_range_errors() {
 		for bad in [0, 1u64 << 62] {
-			let cluster = Cluster::new(ClusterConfig {
+			let err = Cluster::new(ClusterConfig {
 				id: Some(bad),
 				..Default::default()
-			});
-			assert_ne!(cluster.origin.id, bad);
-			assert!(cluster.origin.id > 0 && cluster.origin.id < 1 << 62);
+			})
+			.err()
+			.expect("should error");
+			assert!(format!("{err}").contains("--cluster-id"), "got: {err}");
 		}
 	}
 
@@ -1202,7 +1192,7 @@ mod tests {
 
 		let rt = tokio::runtime::Runtime::new().unwrap();
 		let err = rt
-			.block_on(Cluster::new(config.cluster).run())
+			.block_on(Cluster::new(config.cluster).unwrap().run())
 			.expect_err("should error");
 		assert!(format!("{err}").contains("cluster.root"));
 	}
@@ -1217,7 +1207,8 @@ mod tests {
 			node: Some("rendezvous.example.com:4443".to_string()),
 			mesh: Some("true".to_string()),
 			..Default::default()
-		});
+		})
+		.unwrap();
 
 		// Snapshot a consumer on the cluster origin before run() takes ownership of
 		// `cluster` so we can later check that the registration was published.
@@ -1272,7 +1263,8 @@ mod tests {
 		let cluster = Cluster::new(ClusterConfig {
 			mesh: Some("rendezvous.example.com:4443".to_string()),
 			..Default::default()
-		});
+		})
+		.unwrap();
 		let (gossip, node) = cluster.resolve_mesh().expect("legacy mesh url resolves");
 		assert!(gossip);
 		assert_eq!(node.as_deref(), Some("rendezvous.example.com:4443"));
@@ -1330,7 +1322,8 @@ mod tests {
 			mesh: Some("a.example.com:4443".to_string()),
 			node: Some("b.example.com:4443".to_string()),
 			..Default::default()
-		});
+		})
+		.unwrap();
 		let err = cluster.resolve_mesh().expect_err("conflict should error");
 		assert!(format!("{err}").contains("conflicts with"), "got: {err}");
 	}

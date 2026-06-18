@@ -61,7 +61,7 @@ Set `cluster.id` to pin a stable id across restarts:
 id = 12345
 ```
 
-The id must be non-zero and below 2^62 (the wire varint limit); an out-of-range value is ignored and a random id is used instead. Keep it below 2^53 if older `@moq/lite` browser clients connect to the cluster, since they decode hop ids as a `u53` and reject anything larger. Give each relay a distinct id, otherwise two nodes sharing one id can break loop detection.
+The id must be non-zero and below 2^62 (the wire varint limit); an out-of-range value is an error at startup. Keep it below 2^53 if older `@moq/lite` browser clients connect to the cluster, since they decode hop ids as a `u53` and reject anything larger. Give each relay a distinct id, otherwise two nodes sharing one id can break loop detection.
 
 ## Dynamic peer lists
 
