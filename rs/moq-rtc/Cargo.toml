@@ -19,36 +19,48 @@ doctest = false
 name = "moq-rtc"
 path = "bin/moq-rtc.rs"
 doc = false
+# The binary (TLS listener, CLI, relay client) needs the `server` feature; the
+# library can be depended on with `default-features = false` to embed the
+# WHIP/WHEP gateway (the axum routers and WHEP/WHIP client) into another process.
+required-features = ["server"]
 
 [features]
-default = ["iroh", "quinn", "websocket"]
-iroh = ["moq-native/iroh"]
-quinn = ["moq-native/quinn"]
-quiche = ["moq-native/quiche"]
-websocket = ["moq-native/websocket"]
+default = ["server", "iroh", "quinn", "websocket"]
+# Standalone binary: TLS-terminating listener, CORS, CLI parsing, and the
+# moq-native relay client. Pulls in axum-server / clap / moq-native / rustls /
+# sd-notify / tower-http.
+server = ["dep:axum-server", "dep:clap", "dep:moq-native", "dep:rustls", "dep:sd-notify", "dep:tower-http"]
+iroh = ["server", "moq-native/iroh"]
+quinn = ["server", "moq-native/quinn"]
+quiche = ["server", "moq-native/quiche"]
+websocket = ["server", "moq-native/websocket"]
 
+# The embeddable gateway library needs only anyhow/axum/bytes/hang/moq-mux/
+# moq-net/reqwest/str0m/thiserror/tokio/tracing/url/uuid. The rest
+# (axum-server/clap/moq-native/rustls/sd-notify/tower-http) are `optional` and
+# pulled in by the `server` feature for the binary.
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio"] }
-axum-server = { version = "0.8", features = ["tls-rustls"] }
+axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
 bytes = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 hang = { workspace = true }
 moq-mux = { workspace = true }
-moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"], optional = true }
 moq-net = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
+rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false, optional = true }
 str0m = "0.19"
 thiserror = "2"
 tokio = { workspace = true, features = ["full"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
-sd-notify = "0.5"
+sd-notify = { version = "0.5", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
