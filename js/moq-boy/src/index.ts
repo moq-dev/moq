@@ -229,11 +229,13 @@ export class Game {
 		// Reconstruct each status from snapshots and deltas, validated against the schema.
 		const consumer = new Json.Consumer(statusTrack, { schema: GameStatusSchema });
 
+		// Closing the track on cleanup unblocks a pending next() (it returns undefined), so the loop
+		// ends without racing effect.cancel.
 		effect.spawn(async () => {
 			for (;;) {
 				let status: GameStatus | undefined;
 				try {
-					status = (await Promise.race([effect.cancel, consumer.next()])) || undefined;
+					status = await consumer.next();
 				} catch (err) {
 					console.warn("Invalid status JSON:", err);
 					continue;
