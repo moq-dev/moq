@@ -61,13 +61,16 @@ impl Publish {
 	pub fn media_ordered(&mut self, broadcast: Id, format: &str, init: &[u8]) -> Result<Id, Error> {
 		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 
-		// A single codec fills one track; anything else is treated as a container.
-		// `UnknownFormat` from the track importer is the signal to try a container.
-		let media = match import::Track::new(broadcast.clone(), catalog.clone(), format, init) {
-			Ok(track) => Media::Track(Box::new(track)),
+		// A container may publish several tracks; a single codec fills one minted
+		// track. Try the container first so a codec format doesn't mint a stray
+		// track on the way to being recognized.
+		let media = match import::Container::new(broadcast.clone(), catalog.clone(), format, init) {
+			Ok(container) => Media::Container(container),
 			Err(moq_mux::Error::UnknownFormat(_)) => {
-				match import::Container::new(broadcast.clone(), catalog.clone(), format, init) {
-					Ok(container) => Media::Container(container),
+				let mut broadcast = broadcast.clone();
+				let track = import::unique_track(&mut broadcast, &format!(".{format}"))?;
+				match import::Track::new(track, catalog.clone(), format, init) {
+					Ok(track) => Media::Track(Box::new(track)),
 					Err(moq_mux::Error::UnknownFormat(_)) => return Err(Error::UnknownFormat(format.to_string())),
 					Err(err) => return Err(err.into()),
 				}

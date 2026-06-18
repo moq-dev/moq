@@ -113,68 +113,12 @@ pub struct Track {
 }
 
 impl Track {
-	/// Create an importer that mints a fresh unique track on `broadcast`.
+	/// Create an importer that publishes a single codec onto `track`.
+	///
+	/// The caller owns track creation; mint one with [`unique_track`] for the
+	/// on-demand case. The catalog rendition is registered once the codec config
+	/// is resolved.
 	pub fn new(
-		mut broadcast: moq_net::BroadcastProducer,
-		catalog: crate::catalog::Producer,
-		format: &str,
-		init: &[u8],
-	) -> Result<Self> {
-		let kind = match format {
-			"avc1" | "avcc" => {
-				let track = unique_track(&mut broadcast, ".avc1")?;
-				let (length_size, import) = build_h264_avc1(track, catalog, init)?;
-				TrackKind::Avc1 { length_size, import }
-			}
-			"avc3" | "h264" => {
-				let track = unique_track(&mut broadcast, ".avc3")?;
-				let (split, import) = build_h264_avc3(track, catalog, init)?;
-				TrackKind::Avc3 { split, import }
-			}
-			"hev1" => {
-				let track = unique_track(&mut broadcast, ".hev1")?;
-				let (split, import) = build_h265(track, catalog, init)?;
-				TrackKind::Hev1 { split, import }
-			}
-			"av01" | "av1" | "av1c" | "av1C" => {
-				let track = unique_track(&mut broadcast, ".av01")?;
-				let (split, import) = build_av1(track, catalog, init)?;
-				TrackKind::Av01 { split, import }
-			}
-			"vp8" | "vp08" => {
-				let track = unique_track(&mut broadcast, ".vp8")?;
-				let mut import = crate::codec::vp8::Import::new(track, catalog);
-				import.initialize(init)?;
-				TrackKind::Vp8(import)
-			}
-			"vp9" | "vp09" => {
-				let track = unique_track(&mut broadcast, ".vp09")?;
-				let mut import = crate::codec::vp9::Import::new(track, catalog);
-				import.initialize(init)?;
-				TrackKind::Vp9(import)
-			}
-			"aac" => {
-				let mut data = init;
-				let config = crate::codec::aac::Config::parse(&mut data)?;
-				let track = unique_track(&mut broadcast, ".aac")?;
-				let import = crate::codec::aac::Import::new(track, catalog, config)?;
-				TrackKind::Aac(import)
-			}
-			"opus" => {
-				let mut data = init;
-				let config = crate::codec::opus::Config::parse(&mut data)?;
-				let track = unique_track(&mut broadcast, ".opus")?;
-				let import = crate::codec::opus::Import::new(track, catalog, config)?;
-				TrackKind::Opus(import)
-			}
-			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
-		};
-
-		Ok(Self { kind })
-	}
-
-	/// Create an importer that publishes on an existing track.
-	pub fn from_track(
 		track: moq_net::TrackProducer,
 		catalog: crate::catalog::Producer,
 		format: &str,
@@ -606,7 +550,7 @@ mod tests {
 			.unwrap();
 		let consumer = track.subscribe(None);
 
-		let mut import = Track::from_track(track, catalog.clone(), "opus", &opus_head()).unwrap();
+		let mut import = Track::new(track, catalog.clone(), "opus", &opus_head()).unwrap();
 
 		assert_eq!(import.name(), "requested-audio");
 		let snapshot = catalog.snapshot();
@@ -632,10 +576,11 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn unique_track_opus_attaches_catalog_and_retires_on_drop() {
-		let (broadcast, catalog) = new_broadcast();
+		let (mut broadcast, catalog) = new_broadcast();
 
-		// The broadcast path mints a unique track and attaches its catalog rendition.
-		let mut import = Track::new(broadcast, catalog.clone(), "opus", &opus_head()).unwrap();
+		// A freshly minted track attaches its catalog rendition on init.
+		let track = unique_track(&mut broadcast, ".opus").unwrap();
+		let mut import = Track::new(track, catalog.clone(), "opus", &opus_head()).unwrap();
 
 		assert_eq!(import.name(), "0.opus");
 		assert!(catalog.snapshot().audio.renditions.contains_key("0.opus"));
@@ -690,7 +635,7 @@ mod tests {
 		let (mut broadcast, catalog) = new_broadcast();
 		let track = broadcast.create_track("camera", None).unwrap();
 
-		let import = Track::from_track(track, catalog.clone(), "avc3", &h264_init()).unwrap();
+		let import = Track::new(track, catalog.clone(), "avc3", &h264_init()).unwrap();
 
 		assert_eq!(import.name(), "camera");
 		let snapshot = catalog.snapshot();
@@ -711,7 +656,7 @@ mod tests {
 				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 			)
 			.unwrap();
-		let mut import = Track::from_track(track, catalog, "vp8", &[]).unwrap();
+		let mut import = Track::new(track, catalog, "vp8", &[]).unwrap();
 
 		import
 			.decode(

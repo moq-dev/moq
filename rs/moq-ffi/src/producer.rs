@@ -130,7 +130,10 @@ impl MoqBroadcastProducer {
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
 
-		let decoder = moq_mux::import::Track::new(state.broadcast.clone(), state.catalog.clone(), &format, &init)
+		let mut broadcast = state.broadcast.clone();
+		let track = moq_mux::import::unique_track(&mut broadcast, &format!(".{format}"))
+			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+		let decoder = moq_mux::import::Track::new(track, state.catalog.clone(), &format, &init)
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
 
 		let demand = decoder.demand();
@@ -160,7 +163,7 @@ impl MoqBroadcastProducer {
 			guard.as_ref().ok_or_else(|| MoqError::Closed)?.clone()
 		};
 
-		let decoder = moq_mux::import::Track::from_track(track_clone.clone(), state.catalog.clone(), &format, &init)
+		let decoder = moq_mux::import::Track::new(track_clone.clone(), state.catalog.clone(), &format, &init)
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
 
 		let mut guard = track.inner.lock().unwrap();
