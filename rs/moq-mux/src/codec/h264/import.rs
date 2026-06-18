@@ -113,11 +113,6 @@ impl<E: CatalogExt> Import<E> {
 		self.track.track().demand()
 	}
 
-	/// True once the codec config is known and the catalog rendition is published.
-	pub fn is_initialized(&self) -> bool {
-		self.config.is_some()
-	}
-
 	/// Finish the track, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
 		self.track.finish()?;

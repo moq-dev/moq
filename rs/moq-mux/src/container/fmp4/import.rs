@@ -146,10 +146,6 @@ impl Import {
 		Ok(())
 	}
 
-	pub fn is_initialized(&self) -> bool {
-		self.moov.is_some()
-	}
-
 	fn init(&mut self, moov: Moov) -> Result<()> {
 		// Clone the catalog to avoid the borrow checker.
 		let mut catalog = self.catalog.clone();

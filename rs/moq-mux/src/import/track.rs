@@ -550,15 +550,6 @@ impl TrackStream {
 	pub fn name(&self) -> String {
 		self.demand().name().to_string()
 	}
-
-	/// Check if the importer has read enough data to be initialized.
-	pub fn is_initialized(&self) -> bool {
-		match self.kind {
-			TrackStreamKind::Avc3 { ref import, .. } => import.is_initialized(),
-			TrackStreamKind::Hev1 { ref import, .. } => import.is_initialized(),
-			TrackStreamKind::Av01 { ref import, .. } => import.is_initialized(),
-		}
-	}
 }
 
 #[cfg(test)]

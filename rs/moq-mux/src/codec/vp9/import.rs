@@ -112,11 +112,6 @@ impl<E: CatalogExt> Import<E> {
 		self.track.seek(sequence)?;
 		Ok(())
 	}
-
-	/// True once the first key frame has populated the catalog.
-	pub fn is_initialized(&self) -> bool {
-		self.config.is_some()
-	}
 }
 
 #[cfg(test)]
@@ -146,14 +141,12 @@ mod tests {
 		let mut import = super::Import::new(track, catalog.clone());
 
 		import.initialize(&[]).unwrap();
-		assert!(!import.is_initialized());
 		assert!(catalog.snapshot().video.renditions.is_empty());
 
 		import
 			.decode(KEYFRAME, Some(Timestamp::from_micros(0).unwrap()))
 			.unwrap();
 
-		assert!(import.is_initialized());
 		let snapshot = catalog.snapshot();
 		let config = snapshot.video.renditions.get("0.vp9").unwrap();
 		assert!(matches!(config.codec, hang::catalog::VideoCodec::VP9(_)));

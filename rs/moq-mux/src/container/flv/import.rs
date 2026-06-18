@@ -65,11 +65,6 @@ impl Import {
 		}
 	}
 
-	/// True once at least one stream's sequence header has been parsed.
-	pub fn is_initialized(&self) -> bool {
-		self.video.is_some() || self.audio.is_some()
-	}
-
 	/// Append `buf` to the internal scratch and demux every whole tag it now
 	/// completes. The buffer is fully consumed; a trailing partial tag is retained
 	/// for the next call.

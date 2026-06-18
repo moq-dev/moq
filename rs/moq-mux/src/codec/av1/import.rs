@@ -197,11 +197,6 @@ impl<E: CatalogExt> Import<E> {
 		self.track.track().demand()
 	}
 
-	/// True once the config is known and the catalog has been populated.
-	pub fn is_initialized(&self) -> bool {
-		self.config.is_some()
-	}
-
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> Result<()> {
 		self.track.finish()?;

@@ -178,7 +178,6 @@ async fn test_seek_sets_initial_sequence() {
 
 	// Decode init so the tracks exist, then seek, then decode the fragments.
 	fmp4.decode(&init_buf).unwrap();
-	assert!(fmp4.is_initialized());
 
 	let snap = catalog.snapshot();
 	let video_name = snap.video.renditions.keys().next().expect("video track").clone();

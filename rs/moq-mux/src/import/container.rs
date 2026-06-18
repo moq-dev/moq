@@ -61,15 +61,6 @@ impl ContainerImpl {
 			ContainerImpl::Flv(decoder) => decoder.seek(sequence).map_err(Into::into),
 		}
 	}
-
-	fn is_initialized(&self) -> bool {
-		match self {
-			ContainerImpl::Fmp4(decoder) => decoder.is_initialized(),
-			ContainerImpl::Mkv(decoder) => decoder.is_initialized(),
-			ContainerImpl::Ts(decoder) => decoder.is_initialized(),
-			ContainerImpl::Flv(decoder) => decoder.is_initialized(),
-		}
-	}
 }
 
 /// A container importer for whole chunks.
@@ -142,10 +133,5 @@ impl ContainerStream {
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.inner.seek(sequence)
-	}
-
-	/// Check if the importer has read enough data to be initialized.
-	pub fn is_initialized(&self) -> bool {
-		self.inner.is_initialized()
 	}
 }

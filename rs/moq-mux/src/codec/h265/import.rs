@@ -77,11 +77,6 @@ impl<E: CatalogExt> Import<E> {
 		self.track.track().demand()
 	}
 
-	/// True once the first SPS has populated the catalog.
-	pub fn is_initialized(&self) -> bool {
-		self.config.is_some()
-	}
-
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> Result<()> {
 		self.track.finish()?;

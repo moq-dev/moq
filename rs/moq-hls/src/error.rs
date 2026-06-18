@@ -30,14 +30,8 @@ pub enum Error {
 	#[error("playlist missing EXT-X-MAP")]
 	MissingMap,
 
-	#[error("init segment did not initialize the importer")]
-	InitNotInitialized,
-
 	#[error("encountered segment with empty URI")]
 	EmptySegmentUri,
-
-	#[error("importer not initialized for {0:?} after ensure_init_segment - init segment processing failed")]
-	ImporterNotInitialized(String),
 
 	#[error("url parse: {0}")]
 	UrlParse(#[from] url::ParseError),

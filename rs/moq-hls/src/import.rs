@@ -398,12 +398,9 @@ impl Import {
 		};
 
 		// The importer buffers internally, so a fully-parsed init segment leaves it
-		// initialized; any trailing partial atom just waits for the next segment.
+		// initialized; any trailing partial atom just waits for the next segment. A
+		// segment that never yields a moov surfaces later as a decode error.
 		importer.decode(&bytes)?;
-
-		if !importer.is_initialized() {
-			return Err(Error::InitNotInitialized);
-		}
 
 		track.init_ready = true;
 		info!(?kind, "loaded HLS init segment");
@@ -437,11 +434,6 @@ impl Import {
 			TrackKind::Video(index) => self.ensure_video_importer_for(index),
 			TrackKind::Audio => self.ensure_audio_importer(),
 		};
-
-		// Final check after ensuring init segment
-		if !importer.is_initialized() {
-			return Err(Error::ImporterNotInitialized(format!("{:?}", kind)));
-		}
 
 		importer.decode(&bytes)?;
 		track.next_sequence = Some(sequence + 1);

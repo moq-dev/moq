@@ -82,10 +82,6 @@ impl Import {
 		}
 	}
 
-	pub fn is_initialized(&self) -> bool {
-		self.tracks_seen
-	}
-
 	/// Append the buffer to the internal scratch and parse as many tags as possible.
 	///
 	/// The buffer is fully consumed on every call (data is moved into the internal

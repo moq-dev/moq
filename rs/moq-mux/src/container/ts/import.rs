@@ -109,11 +109,6 @@ impl<E: scte35::Catalog> Import<E> {
 		}
 	}
 
-	/// True once the stream layout (PMT) has been discovered.
-	pub fn is_initialized(&self) -> bool {
-		self.initialized
-	}
-
 	/// Append `buf` to the internal scratch and demux every whole TS packet it
 	/// now completes. The buffer is fully consumed; a trailing partial packet
 	/// (< 188 bytes) is retained for the next call.
