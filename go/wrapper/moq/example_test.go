@@ -10,7 +10,7 @@ import (
 
 // Subscribe to a broadcast and print its catalog. These examples have no Output
 // line, so they are compiled (API-checked) but not executed.
-func ExampleClient_announced() {
+func ExampleClient_Announced() {
 	ctx := context.Background()
 
 	client, err := moq.Dial(ctx, "https://relay.example.com")

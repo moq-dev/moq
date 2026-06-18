@@ -286,6 +286,10 @@ func (s *Server) Serve(ctx context.Context, onRequest func(*Request) (bool, erro
 // handles are dropped or cancelled. Safe to call more than once and from
 // multiple goroutines (Serve calls it on ctx-driven shutdown).
 func (s *Server) Close() error {
-	s.closeOnce.Do(s.inner.Cancel)
+	s.closeOnce.Do(func() {
+		if s.inner != nil {
+			s.inner.Cancel()
+		}
+	})
 	return nil
 }

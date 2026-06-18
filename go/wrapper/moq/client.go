@@ -151,6 +151,10 @@ func (c *Client) Session() *Session {
 // Close stops the client. In-flight sessions stay alive until their handles are
 // dropped or cancelled. Safe to call more than once.
 func (c *Client) Close() error {
-	c.closeOnce.Do(c.inner.Cancel)
+	c.closeOnce.Do(func() {
+		if c.inner != nil {
+			c.inner.Cancel()
+		}
+	})
 	return nil
 }
