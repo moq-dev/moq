@@ -19,6 +19,9 @@ jobs:
     # persistent CARGO_TARGET_DIR). Fork PRs fall back to GitHub-hosted ARM so
     # untrusted code never runs on the box.
     runs-on: ${{ github.event.pull_request.head.repo.fork && fromJSON('["ubuntu-24.04-arm"]') || fromJSON('["self-hosted", "nix"]') }}
+    # Backstop a hang (e.g. a wedged test) instead of holding the runner for the
+    # 6-hour default. Generous enough for a cold first build.
+    timeout-minutes: 60
 
     steps:
       # GitHub-hosted fallback only: the self-hosted box already has disk space,
