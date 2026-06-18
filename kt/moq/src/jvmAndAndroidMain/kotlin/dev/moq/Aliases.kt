@@ -24,6 +24,7 @@ typealias Announcement = uniffi.moq.MoqAnnouncement
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
 typealias BroadcastConsumer = uniffi.moq.MoqBroadcastConsumer
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
+typealias TrackRequest = uniffi.moq.MoqTrackRequest
 typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
 typealias GroupProducer = uniffi.moq.MoqGroupProducer
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer

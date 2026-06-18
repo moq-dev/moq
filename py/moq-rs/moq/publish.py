@@ -12,6 +12,7 @@ from moq_ffi import (
     MoqMediaProducer,
     MoqMediaStreamProducer,
     MoqTrackProducer,
+    MoqTrackRequest,
 )
 
 from .types import AudioEncoderInput, AudioEncoderOutput, AudioFrame, Subscription, TrackInfo
@@ -137,6 +138,30 @@ class TrackProducer:
         self._inner.finish()
 
 
+class TrackRequest:
+    """A subscriber-requested track that hasn't been accepted yet.
+
+    Accept it for raw writes, hand it to :meth:`BroadcastProducer.publish_media_on_track`
+    to publish media (the importer accepts it), or abort it to reject the subscriber.
+    """
+
+    def __init__(self, inner: MoqTrackRequest) -> None:
+        self._inner = inner
+
+    @property
+    def name(self) -> str:
+        """The requested track name."""
+        return self._inner.name()
+
+    def accept(self) -> TrackProducer:
+        """Accept the request as a raw track."""
+        return TrackProducer(self._inner.accept(None))
+
+    def abort(self, error_code: int) -> None:
+        """Reject the request with an application error code."""
+        self._inner.abort(error_code)
+
+
 class AudioProducer:
     """Publish raw PCM and let libopus encode it on the way out.
 
@@ -170,11 +195,11 @@ class BroadcastDynamic:
     def __aiter__(self):
         return self
 
-    async def __anext__(self) -> TrackProducer:
+    async def __anext__(self) -> TrackRequest:
         return await self.requested_track()
 
-    async def requested_track(self) -> TrackProducer:
-        return TrackProducer(await self._inner.requested_track())
+    async def requested_track(self) -> TrackRequest:
+        return TrackRequest(await self._inner.requested_track())
 
     def cancel(self) -> None:
         self._inner.cancel()
@@ -193,8 +218,8 @@ class BroadcastProducer:
     def publish_media(self, format: str, init: bytes) -> MediaProducer:
         return MediaProducer(self._inner.publish_media(format, init))
 
-    def publish_media_on_track(self, track: TrackProducer, format: str, init: bytes) -> MediaProducer:
-        return MediaProducer(self._inner.publish_media_on_track(track._inner, format, init))
+    def publish_media_on_track(self, request: TrackRequest, format: str, init: bytes) -> MediaProducer:
+        return MediaProducer(self._inner.publish_media_on_track(request._inner, format, init))
 
     def publish_media_stream(self, format: str) -> MediaStreamProducer:
         """Publish a media track fed by a raw byte stream (unknown frame

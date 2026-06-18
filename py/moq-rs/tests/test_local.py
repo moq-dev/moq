@@ -259,13 +259,14 @@ async def test_dynamic_track_request():
     dynamic = broadcast.dynamic()
     consumer = broadcast.consume()
 
-    # The request is accepted by the first producer op (write_frame below), so the
-    # subscribe stays pending until then; run it concurrently.
+    # The subscribe stays pending until the request is accepted below; run it concurrently.
     subscribe = asyncio.create_task(consumer.subscribe_track("events"))
 
-    track = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
-    assert track.name == "events"
+    request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert request.name == "events"
 
+    # Accept the request as a raw track (which unblocks the subscribe), then write.
+    track = request.accept()
     payload = b"hello dynamic track"
     track.write_frame(payload)
 

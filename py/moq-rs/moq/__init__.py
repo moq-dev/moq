@@ -16,6 +16,7 @@ from .publish import (
     MediaProducer,
     MediaStreamProducer,
     TrackProducer,
+    TrackRequest,
 )
 from .server import Request, Server, Transport
 from .session import Session
@@ -81,6 +82,7 @@ __all__ = [
     "TrackConsumer",
     "TrackInfo",
     "TrackProducer",
+    "TrackRequest",
     "Transport",
     "Video",
     "connect",
