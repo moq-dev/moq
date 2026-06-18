@@ -92,38 +92,47 @@ pub struct moq_announced {
 pub struct moq_connection_stats {
 	/// Smoothed round-trip time, in microseconds.
 	pub rtt_us: u64,
+	/// Whether `rtt_us` is reported by the transport backend.
 	pub rtt_valid: bool,
 
 	/// Estimated send bandwidth from the congestion controller, in bits per second.
 	pub send_rate_bps: u64,
+	/// Whether `send_rate_bps` is reported by the transport backend.
 	pub send_rate_valid: bool,
 
 	/// Estimated receive bandwidth from MoQ PROBE, in bits per second.
 	pub recv_rate_bps: u64,
+	/// Whether `recv_rate_bps` is reported by the transport backend.
 	pub recv_rate_valid: bool,
 
 	/// Total bytes sent, including retransmissions and overhead.
 	pub bytes_sent: u64,
+	/// Whether `bytes_sent` is reported by the transport backend.
 	pub bytes_sent_valid: bool,
 
 	/// Total bytes received, including duplicates and overhead.
 	pub bytes_received: u64,
+	/// Whether `bytes_received` is reported by the transport backend.
 	pub bytes_received_valid: bool,
 
 	/// Total bytes lost (detected via retransmission or acknowledgement).
 	pub bytes_lost: u64,
+	/// Whether `bytes_lost` is reported by the transport backend.
 	pub bytes_lost_valid: bool,
 
 	/// Total datagrams sent.
 	pub packets_sent: u64,
+	/// Whether `packets_sent` is reported by the transport backend.
 	pub packets_sent_valid: bool,
 
 	/// Total datagrams received.
 	pub packets_received: u64,
+	/// Whether `packets_received` is reported by the transport backend.
 	pub packets_received_valid: bool,
 
 	/// Total datagrams detected as lost.
 	pub packets_lost: u64,
+	/// Whether `packets_lost` is reported by the transport backend.
 	pub packets_lost_valid: bool,
 }
 
@@ -134,7 +143,7 @@ impl From<&moq_net::ConnectionStats> for moq_connection_stats {
 			(value.unwrap_or(0), value.is_some())
 		}
 
-		let (rtt_us, rtt_valid) = split(stats.rtt.map(|d| d.as_micros() as u64));
+		let (rtt_us, rtt_valid) = split(stats.rtt.and_then(|d| u64::try_from(d.as_micros()).ok()));
 		let (send_rate_bps, send_rate_valid) = split(stats.estimated_send_rate);
 		let (recv_rate_bps, recv_rate_valid) = split(stats.estimated_recv_rate);
 		let (bytes_sent, bytes_sent_valid) = split(stats.bytes_sent);

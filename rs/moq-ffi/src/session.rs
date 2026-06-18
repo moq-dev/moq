@@ -178,7 +178,7 @@ pub struct MoqConnectionStats {
 impl From<moq_net::ConnectionStats> for MoqConnectionStats {
 	fn from(stats: moq_net::ConnectionStats) -> Self {
 		Self {
-			rtt_us: stats.rtt.map(|d| d.as_micros() as u64),
+			rtt_us: stats.rtt.and_then(|d| u64::try_from(d.as_micros()).ok()),
 			send_rate_bps: stats.estimated_send_rate,
 			recv_rate_bps: stats.estimated_recv_rate,
 			bytes_sent: stats.bytes_sent,
