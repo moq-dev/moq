@@ -14,6 +14,8 @@
 	<!-- Always show this banner to flex browser support. -->
 	<moq-watch-support show="always"></moq-watch-support>
 
+	<!-- Drag the handle on the right edge to resize the player. -->
+	<div style="resize: horizontal; overflow: hidden; min-width: 240px;">
 	<!-- Live discovers new broadcasts available at the given URL. -->
 	<moq-discover>
 		<!-- This optional component shows some simple controls for the inner <moq-watch> component. -->
@@ -39,6 +41,7 @@
 			</moq-watch>
 		</moq-watch-ui>
 	</moq-discover>
+	</div>
 
 	<!-- Dev-only: renders console output inline here. Set `level` to lower the
 	     threshold (debug | log | info | warn | error; defaults to warn). Defined
@@ -82,6 +85,18 @@
 	&lt;!-- Optionally provide a custom canvas element that we can style as needed --&gt;
 	&lt;canvas style=&quot;max-width: 100%; height: auto; border-radius: 4px;&quot;&gt;&lt;/canvas&gt;
 &lt;/moq-watch&gt;</code></pre>
+	</p>
+	<p>
+		The player sits in a resizable container; grab the right edge and drag.
+		<code class="language-html">&lt;moq-watch&gt;</code> monitors its own rendered size (scaled by
+		devicePixelRatio) and requests the smallest rendition that still fills the canvas.
+		The default bunny broadcast only has one rendition, so nothing will change.
+		Instead, open the <a href="publish.html">publish demo</a>, which uses the <code
+			class="language-html">simulcast</code> attribute to publish both `video/hd` and `video/sd`, and then <a
+			href="index.html?broadcast=me.hang">watch your own broadcast</a>.
+		Keep the Quality dropdown on Auto and resize away; the exact switch point depends on your display's
+		devicePixelRatio.
+		Switching is seamless: the player keeps decoding the old rendition until the new one catches up.
 	</p>
 	<p>
 		Don't want video? Don't provide a canvas!

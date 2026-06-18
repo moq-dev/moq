@@ -57,10 +57,10 @@ rust-version = "1.85"
 [workspace.dependencies]
 flate2 = "1.1"
 hang = { version = "0.19", path = "rs/hang" }
-kio = { version = "0.3", path = "rs/kio" }
-moq-audio = { version = "0.0.3", path = "rs/moq-audio" }
+kio = { version = "0.4", path = "rs/kio" }
+moq-audio = { version = "0.0.4", path = "rs/moq-audio" }
 moq-hls = { version = "0.0.1", path = "rs/moq-hls", default-features = false }
-moq-json = { version = "0.0.2", path = "rs/moq-json" }
+moq-json = { version = "0.0.3", path = "rs/moq-json" }
 moq-loc = { version = "0.1", path = "rs/moq-loc" }
 moq-msf = { version = "0.2", path = "rs/moq-msf" }
 moq-mux = { version = "0.5", path = "rs/moq-mux" }
@@ -69,7 +69,7 @@ moq-net = { version = "0.1", path = "rs/moq-net" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 moq-vaapi = "0.0.2"
-moq-video = { version = "0.0.3", path = "rs/moq-video" }
+moq-video = { version = "0.0.4", path = "rs/moq-video" }
 qmux = { version = "0.1.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"

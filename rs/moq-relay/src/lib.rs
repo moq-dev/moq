@@ -13,7 +13,6 @@ mod config;
 mod connection;
 mod http_client;
 mod stats;
-mod watch;
 mod web;
 #[cfg(feature = "websocket")]
 mod websocket;

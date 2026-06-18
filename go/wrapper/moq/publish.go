@@ -52,9 +52,10 @@ func (b *BroadcastProducer) PublishAudio(name string, input AudioEncoderInput, o
 }
 
 // PublishTrack creates a track that carries arbitrary byte payloads with no
-// codec validation.
-func (b *BroadcastProducer) PublishTrack(name string) (*TrackProducer, error) {
-	inner, err := b.inner.PublishTrack(name)
+// codec validation. info sets track properties (priority, cache, compression);
+// pass nil for defaults.
+func (b *BroadcastProducer) PublishTrack(name string, info *TrackInfo) (*TrackProducer, error) {
+	inner, err := b.inner.PublishTrack(name, info)
 	if err != nil {
 		return nil, err
 	}
@@ -160,9 +161,10 @@ func (t *TrackProducer) WriteFrame(payload []byte) error {
 	return t.inner.WriteFrame(payload)
 }
 
-// Consume reads directly from this producer's track.
-func (t *TrackProducer) Consume() (*TrackConsumer, error) {
-	inner, err := t.inner.Consume()
+// Consume reads directly from this producer's track. subscription tunes delivery
+// (priority, ordering, group range); pass nil for defaults.
+func (t *TrackProducer) Consume(subscription *Subscription) (*TrackConsumer, error) {
+	inner, err := t.inner.Consume(subscription)
 	if err != nil {
 		return nil, err
 	}

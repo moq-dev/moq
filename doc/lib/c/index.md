@@ -86,11 +86,13 @@ generated header at `../../target/release/moq.h`.
 
 ## Callback lifetime
 
-Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_consume_catalog`, `moq_consume_video_ordered`, `moq_consume_audio_ordered`, `moq_consume_track`, `moq_consume_audio_raw`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:
+Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_origin_consume_announced`, `moq_origin_request`, `moq_consume_catalog`, `moq_consume_video_ordered`, `moq_consume_audio_ordered`, `moq_consume_track`, `moq_consume_audio_raw`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:
 
 - **`> 0`** — a live result you can use: a frame, catalog, or announce ID (or `1` to mean "session connected"). May fire any number of times.
 - **`0`** — closed cleanly. **Terminal.**
 - **`< 0`** — closed with an error. **Terminal.**
+
+A positive result that is itself a handle must be freed once you're done with it (e.g. a broadcast from `moq_origin_request` via `moq_consume_close`). `moq_origin_announced` is the notable repeat case: it delivers a fresh announce ID for *every* announce / unannounce event, so free each one with `moq_origin_announced_free` after reading it with `moq_origin_announced_info`, or they accumulate for the life of the listener.
 
 Once a callback fires with any non-positive (`<= 0`) code, libmoq will never invoke it again and never touch `user_data` again. Release `user_data` in response to that final callback.
 
@@ -110,6 +112,8 @@ if (rc < 0) {
 ```
 
 `moq_error()` returns the reason for the most recent failed call **on the calling thread**, including detail the numeric code can't carry (which URL failed to parse, why a decode failed, etc.). The returned pointer is valid until the next libmoq call on that thread, so copy it if you need to keep it. It is only meaningful after a call returned a negative code; check the code first. Errors delivered through status callbacks carry their code directly, so read `moq_error()` from inside the callback if you want the matching reason.
+
+A server can reject the connection on auth grounds: unauthorized (HTTP 401) or forbidden (HTTP 403). Each returns its own distinct negative code (with `moq_error()` reporting `"unauthorized"` / `"forbidden"`). These are terminal, so distinguish them from a transient transport failure and stop rather than reconnecting.
 
 Failed calls are reported only through the return code and `moq_error()`, not logged. To surface libmoq's internal logs (moq-net / QUIC activity), call `moq_log_level("debug")` (or `"trace"`, `"info"`, etc.) to install a tracing subscriber.
 

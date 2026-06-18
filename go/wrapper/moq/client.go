@@ -130,6 +130,16 @@ func (c *Client) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
 	return c.consumer.AnnouncedBroadcast(path)
 }
 
+// RequestBroadcast resolves a broadcast at path as soon as it can be served: the
+// announced broadcast if present, otherwise a dynamic fallback on the origin, or an
+// error. Unlike AnnouncedBroadcast, it does not wait for a future announcement.
+func (c *Client) RequestBroadcast(path string) (*BroadcastConsumer, error) {
+	if c.consumer == nil {
+		return nil, ErrNoConsumeOrigin
+	}
+	return c.consumer.RequestBroadcast(path)
+}
+
 // Session returns the underlying session. Hold the client (or session) to keep
 // the connection alive.
 func (c *Client) Session() *Session {

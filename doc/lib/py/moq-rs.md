@@ -36,6 +36,16 @@ async with moq.Client("https://relay.example.com") as client:
 
 `Client(url, *, tls_verify=True, publish=None, subscribe=None)`. Without `publish` / `subscribe` an internal origin is created automatically. Pass an `OriginProducer` to share state across multiple clients.
 
+A server can reject the connection on auth grounds: `moq.MoqError.Unauthorized` (HTTP 401) or `moq.MoqError.Forbidden` (HTTP 403). These are terminal, so handle them separately from a transient transport failure rather than reconnecting:
+
+```python
+try:
+    async with moq.Client("https://relay.example.com") as client:
+        ...
+except (moq.MoqError.Unauthorized, moq.MoqError.Forbidden):
+    ...  # Prompt for credentials; don't reconnect.
+```
+
 ### Publishing media
 
 ```python
@@ -103,8 +113,12 @@ async for announcement in client.announced("live/"):
     print(announcement.path)
     ...
 
-# Or wait for a specific path:
+# Or wait for a specific path to be announced:
 broadcast = await client.announced_broadcast("live/cam1")
+
+# Or request a path: resolves to the announced broadcast, falls back to a dynamic
+# handler if the origin has one, else raises. Does not wait for a future announce.
+broadcast = await client.request_broadcast("live/cam1")
 ```
 
 ## Examples

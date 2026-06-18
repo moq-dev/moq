@@ -39,10 +39,9 @@ futures = "0.3"
 http-body = "1"
 http-cache-reqwest = { version = "0.16", features = ["manager-moka"], default-features = false }
 jsonwebtoken = "10"
-moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch"] }
 moq-net = { workspace = true, features = ["serde"] }
 moq-token = { workspace = true, features = ["tokio"] }
-notify = "8"
 qmux = { workspace = true, features = ["ws"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 reqwest-middleware = "0.4"

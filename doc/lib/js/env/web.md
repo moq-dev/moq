@@ -53,10 +53,10 @@ Publish camera/microphone or screen as a MoQ broadcast.
 
 - `url` (required) - Relay server URL
 - `name` (required) - Broadcast name
-- `device` - "camera" or "screen" (default: "camera")
-- `audio` - Enable audio capture (boolean)
-- `video` - Enable video capture (boolean)
-- `controls` - Show publishing controls (boolean)
+- `source` - "camera", "screen", or "file"
+- `muted` - Disable audio capture (boolean)
+- `invisible` - Disable video capture (boolean)
+- `simulcast` - Also publish a lower-resolution `video/sd` rendition (a fraction of the source resolution) alongside `video/hd` (boolean)
 
 **Example:**
 
@@ -68,8 +68,7 @@ Publish camera/microphone or screen as a MoQ broadcast.
 <moq-publish
     url="https://relay.example.com/anon"
     name="room/alice.hang"
-    device="camera"
-    audio video controls>
+    source="camera" simulcast>
     <!-- Optional preview element -->
     <video muted autoplay style="width: 100%"></video>
 </moq-publish>

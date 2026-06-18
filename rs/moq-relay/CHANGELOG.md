@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.10](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.9...moq-relay-v0.12.10) - 2026-06-16
+
+### Added
+
+- *(moq-relay)* make /health a plain liveness probe, drop sysinfo ([#1746](https://github.com/moq-dev/moq/pull/1746))
+- *(moq-native)* add --tls-system-roots to trust custom and system roots together ([#1711](https://github.com/moq-dev/moq/pull/1711))
+- *(moq-relay)* accept a full URL for cluster.connect ([#1705](https://github.com/moq-dev/moq/pull/1705))
+
+### Fixed
+
+- *(moq-net)* don't tear down session on unauthorized announce-interest ([#1717](https://github.com/moq-dev/moq/pull/1717))
+
+### Other
+
+- Windows support: dual-stack IPv4/IPv6 sockets, setup.bat, and `just dev` ([#1732](https://github.com/moq-dev/moq/pull/1732))
+
 ### Removed
 
 - *(moq-relay)* reduce `/health` to a plain liveness probe; drop the `--web-health-*` host overload thresholds and the `sysinfo` dependency ([#1746](https://github.com/moq-dev/moq/pull/1746))

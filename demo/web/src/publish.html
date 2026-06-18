@@ -23,7 +23,7 @@
 		NOTE: `http` performs an insecure certificate check. You must use `https` in production.
 	-->
 	<moq-publish-ui>
-		<moq-publish url="%VITE_RELAY_URL%" name="me.hang">
+		<moq-publish id="publish" url="%VITE_RELAY_URL%" name="me.hang" simulcast>
 			<video style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;" muted autoplay></video>
 
 			<!--
@@ -90,6 +90,19 @@ publish.broadcast.audio.enabled.set(true);</code></pre>
 		If you want to do things more efficiently, you can use the
 		<a href="https://doc.moq.dev/app/gstreamer">GStreamer plugin</a>.
 		It's pretty crude and doesn't handle all pipeline events; contributions welcome!
+	</p>
+	<hr />
+	<p>
+		The <code class="language-html">simulcast</code> attribute makes this page publish two renditions of the same
+		video: `video/hd` at the captured resolution and `video/sd` at a fraction of the source resolution (around 480p from a 1080p source).
+		Each rendition is a separate track, so it only costs bandwidth when a viewer requests it.
+		Tiny thumbnails download the small one; big players download the big one.
+	</p>
+	<p>
+		To see it in action, <a href="index.html?broadcast=me.hang" target="_blank" rel="noreferrer">watch your
+			broadcast</a> in another tab and drag the player's resize handle.
+		The "Quality" dropdown shows which rendition is active; leave it on Auto and watch it hop.
+		You can also toggle it from Javascript with <code class="language-typescript">publish.simulcast = false</code>.
 	</p>
 	<hr />
 	<p>

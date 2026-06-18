@@ -18,6 +18,8 @@ public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 public typealias AudioFormat = MoqFFI.MoqAudioFormat
 public typealias AudioCodec = MoqFFI.MoqAudioCodec
 public typealias Container = MoqFFI.Container
+public typealias Subscription = MoqFFI.MoqSubscription
+public typealias TrackInfo = MoqFFI.MoqTrackInfo
 
 /// The error thrown by every throwing call in this package. Already conforms to
 /// `Swift.Error` and `LocalizedError`; see `Errors.swift` for conveniences.

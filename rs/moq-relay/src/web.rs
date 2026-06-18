@@ -263,7 +263,7 @@ async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, 
 		.chain(root.iter().cloned())
 		.collect();
 
-	let mut watcher = match crate::watch::FileWatcher::new(&paths) {
+	let mut watcher = match moq_native::watch::FileWatcher::new(&paths) {
 		Ok(watcher) => watcher,
 		Err(err) => {
 			tracing::error!(%err, "failed to watch web certificate files; hot reload disabled");

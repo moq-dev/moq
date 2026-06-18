@@ -4,13 +4,14 @@ import { Broadcast } from "./broadcast";
 import * as Preview from "./preview";
 import * as Source from "./source";
 
-const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "announce"] as const;
+const OBSERVED = ["url", "name", "muted", "invisible", "source", "simulcast", "preview", "announce"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 type SourceType = "camera" | "screen" | "file";
 
-// `true` announces immediately, `false` never announces, "source" waits until a source is selected.
-type AnnounceMode = boolean | "source";
+// "always" announces immediately, "never" never announces, "source" waits until a source is selected.
+// Defaults to "source" so we don't announce an empty broadcast with no audio/video.
+type AnnounceMode = "always" | "source" | "never";
 
 // Close everything when this element is garbage collected.
 // This is primarily to avoid a console.warn that we didn't close() before GC.
@@ -26,10 +27,11 @@ export default class MoqPublish extends HTMLElement {
 		source: new Signal<SourceType | File | undefined>(undefined),
 		muted: new Signal(false),
 		invisible: new Signal(false),
+		simulcast: new Signal(false),
 		// What a <canvas> preview renders: the raw capture, or a decoded copy of the encoded video.
 		preview: new Signal<Preview.Mode>("source"),
 		// When to announce/publish the broadcast: always, never, or only once a source is selected.
-		announce: new Signal<AnnounceMode>(true),
+		announce: new Signal<AnnounceMode>("source"),
 	};
 
 	connection: Moq.Connection.Reload;
@@ -46,6 +48,9 @@ export default class MoqPublish extends HTMLElement {
 	#videoEnabled: Signal<boolean>;
 	#audioEnabled: Signal<boolean>;
 	#eitherEnabled: Signal<boolean>;
+
+	// Set when `simulcast` is enabled and video is not `invisible`.
+	#sdEnabled: Signal<boolean>;
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
@@ -70,20 +75,23 @@ export default class MoqPublish extends HTMLElement {
 		this.#videoEnabled = new Signal(false);
 		this.#audioEnabled = new Signal(false);
 		this.#eitherEnabled = new Signal(false);
+		this.#sdEnabled = new Signal(false);
 
 		this.signals.run((effect) => {
 			const muted = effect.get(this.state.muted);
 			const invisible = effect.get(this.state.invisible);
+			const simulcast = effect.get(this.state.simulcast);
 			this.#videoEnabled.set(!invisible);
 			this.#audioEnabled.set(!muted);
 			this.#eitherEnabled.set(!muted || !invisible);
+			this.#sdEnabled.set(simulcast && !invisible);
 		});
 
 		this.signals.run((effect) => {
 			const enabled = effect.get(this.#enabled);
 			const announce = effect.get(this.state.announce);
 			const hasSource = effect.get(this.state.source) !== undefined;
-			const announcing = announce === true || (announce === "source" && hasSource);
+			const announcing = announce === "always" || (announce === "source" && hasSource);
 			this.#publishEnabled.set(enabled && announcing);
 		});
 
@@ -97,6 +105,9 @@ export default class MoqPublish extends HTMLElement {
 			video: {
 				hd: {
 					enabled: this.#videoEnabled,
+				},
+				sd: {
+					enabled: this.#sdEnabled,
 				},
 			},
 		});
@@ -180,12 +191,12 @@ export default class MoqPublish extends HTMLElement {
 				throw new Error(`Invalid source: ${newValue}`);
 			}
 		} else if (name === "announce") {
-			if (newValue === "true" || newValue === null) {
-				this.state.announce.set(true);
-			} else if (newValue === "false") {
-				this.state.announce.set(false);
-			} else if (newValue === "source") {
+			if (newValue === "source" || newValue === null) {
 				this.state.announce.set("source");
+			} else if (newValue === "always") {
+				this.state.announce.set("always");
+			} else if (newValue === "never") {
+				this.state.announce.set("never");
 			} else {
 				throw new Error(`Invalid announce: ${newValue}`);
 			}
@@ -193,6 +204,8 @@ export default class MoqPublish extends HTMLElement {
 			this.state.muted.set(newValue !== null);
 		} else if (name === "invisible") {
 			this.state.invisible.set(newValue !== null);
+		} else if (name === "simulcast") {
+			this.state.simulcast.set(newValue !== null);
 		} else if (name === "preview") {
 			if (newValue === "encoded" || newValue === "source" || newValue === "none") {
 				this.state.preview.set(newValue);
@@ -261,10 +274,17 @@ export default class MoqPublish extends HTMLElement {
 		if (source === "file" || source instanceof File) {
 			const fileSource = new Source.File({
 				// If a File is provided, use it directly.
-				// TODO: Show a file picker otherwise.
 				file: source instanceof File ? source : undefined,
 				enabled: this.#eitherEnabled,
 			});
+
+			// Otherwise prompt the user to pick one. The selection click is still the
+			// active user gesture (effects run a microtask later, which preserves it).
+			if (!(source instanceof File)) {
+				fileSource.prompt();
+			}
+
+			effect.set(this.file, fileSource);
 
 			this.signals.run((effect) => {
 				const source = effect.get(fileSource.source);
@@ -321,6 +341,18 @@ export default class MoqPublish extends HTMLElement {
 
 	set invisible(value: boolean) {
 		this.state.invisible.set(value);
+	}
+
+	/**
+	 * When enabled, publish an additional lower-resolution `video/sd` rendition alongside `video/hd`.
+	 * Mirrors the `simulcast` attribute and has no effect while `invisible` is set.
+	 */
+	get simulcast(): boolean {
+		return this.state.simulcast.peek();
+	}
+
+	set simulcast(value: boolean) {
+		this.state.simulcast.set(value);
 	}
 
 	get preview(): Preview.Mode {

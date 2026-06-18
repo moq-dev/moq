@@ -34,6 +34,12 @@ from moq_ffi import (
     MoqFrame as Frame,
 )
 from moq_ffi import (
+    MoqSubscription as Subscription,
+)
+from moq_ffi import (
+    MoqTrackInfo as TrackInfo,
+)
+from moq_ffi import (
     MoqVideo as Video,
 )
 
@@ -49,5 +55,7 @@ __all__ = [
     "Container",
     "Dimensions",
     "Frame",
+    "Subscription",
+    "TrackInfo",
     "Video",
 ]

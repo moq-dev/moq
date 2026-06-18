@@ -41,6 +41,14 @@ public final class OriginConsumer: Sendable {
     public func announcedBroadcast(path: String) throws -> AnnouncedBroadcast {
         AnnouncedBroadcast(try ffi.announcedBroadcast(path: path))
     }
+
+    /// Request a broadcast by path, resolving as soon as it can be served: the announced
+    /// broadcast if present, otherwise a dynamic fallback on the origin, or an error if
+    /// neither can serve it. Unlike `announcedBroadcast`, this does not wait for a future
+    /// announcement.
+    public func requestBroadcast(path: String) async throws -> BroadcastConsumer {
+        BroadcastConsumer(try await ffi.requestBroadcast(path: path))
+    }
 }
 
 /// A stream of broadcast announcements. Iterate directly:

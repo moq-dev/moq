@@ -6,8 +6,8 @@
 //! order. A consumer jumps to the newest group, reads the snapshot, and applies the deltas, so
 //! a late joiner never needs older groups.
 //!
-//! Deltas are opt-in via [`Config::delta_ratio`]. With deltas disabled (the default)
-//! every change is a fresh snapshot group, matching a plain "one JSON blob per group" track.
+//! Deltas are controlled by [`Config::delta_ratio`]. A ratio of `0` disables them, so every
+//! change is a fresh snapshot group, matching a plain "one JSON blob per group" track.
 
 mod diff;
 
@@ -53,16 +53,25 @@ impl From<serde_json::Error> for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Configuration for a [`Producer`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Config {
-	/// Controls whether the producer emits deltas (merge patches) instead of full snapshots.
+	/// Controls how aggressively the producer emits deltas (merge patches) instead of full snapshots.
 	///
-	/// `None` disables deltas: every change is published as a new snapshot group.
+	/// A ratio of `0` disables deltas: every change is published as a new snapshot group.
 	///
-	/// `Some(ratio)` enables deltas. A delta is appended to the current group as long as the
-	/// group's total size stays within `ratio` times the size of a fresh snapshot; otherwise a
-	/// new snapshot group is started. A larger ratio tolerates bigger groups before snapshotting.
-	pub delta_ratio: Option<f64>,
+	/// A positive ratio enables deltas. A delta is appended to the current group as long as the
+	/// accumulated deltas (excluding the snapshot frame) stay within `ratio` times the size of a
+	/// fresh snapshot; otherwise a new snapshot group is started. So `1` allows deltas totalling up
+	/// to one snapshot before rolling, and a larger ratio tolerates more deltas per snapshot.
+	///
+	/// Defaults to `8`.
+	pub delta_ratio: u32,
+}
+
+impl Default for Config {
+	fn default() -> Self {
+		Self { delta_ratio: 8 }
+	}
 }
 
 /// Publishes a JSON value over a track, choosing snapshots and deltas automatically.
@@ -98,7 +107,7 @@ impl<T: Serialize> Producer<T> {
 				track,
 				group: None,
 				last: None,
-				group_bytes: 0,
+				delta_bytes: 0,
 				group_frames: 0,
 				config,
 			})),
@@ -199,7 +208,8 @@ struct Inner {
 	track: moq_net::TrackProducer,
 	group: Option<moq_net::GroupProducer>,
 	last: Option<Value>,
-	group_bytes: u64,
+	// Bytes of deltas accumulated in the current group, excluding the snapshot frame.
+	delta_bytes: u64,
 	group_frames: usize,
 	config: Config,
 }
@@ -215,7 +225,7 @@ impl Inner {
 				let group = self.group.as_mut().expect("delta requires an open group");
 				let len = delta.len() as u64;
 				group.write_frame(delta)?;
-				self.group_bytes += len;
+				self.delta_bytes += len;
 				self.group_frames += 1;
 			}
 			None => self.snapshot(snapshot)?,
@@ -228,9 +238,10 @@ impl Inner {
 	/// Serialize a delta if deltas are enabled and appending one keeps the group within budget;
 	/// otherwise `None`, signalling that a fresh snapshot should be published instead.
 	fn delta(&self, value: &Value, snapshot_len: usize) -> Result<Option<Vec<u8>>> {
-		let Some(ratio) = self.config.delta_ratio else {
+		let ratio = self.config.delta_ratio;
+		if ratio == 0 {
 			return Ok(None);
-		};
+		}
 		let Some(last) = &self.last else {
 			return Ok(None);
 		};
@@ -245,9 +256,9 @@ impl Inner {
 
 		let delta = serde_json::to_vec(&diff.patch)?;
 
-		// Roll a snapshot if appending the delta would bloat the group past the budget.
-		let projected = (self.group_bytes + delta.len() as u64) as f64;
-		if projected > ratio * snapshot_len as f64 {
+		// Roll a snapshot once the deltas would outgrow the budget (snapshot frame excluded).
+		let projected = self.delta_bytes + delta.len() as u64;
+		if projected > ratio as u64 * snapshot_len as u64 {
 			return Ok(None);
 		}
 
@@ -261,13 +272,12 @@ impl Inner {
 			group.finish()?;
 		}
 
-		let len = snapshot.len() as u64;
 		let mut group = self.track.append_group()?;
 		group.write_frame(snapshot)?;
-		self.group_bytes = len;
+		self.delta_bytes = 0;
 		self.group_frames = 1;
 
-		if self.config.delta_ratio.is_some() {
+		if self.config.delta_ratio != 0 {
 			// Keep the group open so future deltas can be appended.
 			self.group = Some(group);
 		} else {
@@ -393,7 +403,7 @@ mod test {
 
 	#[test]
 	fn deltas_off_snapshot_per_group() {
-		let (mut producer, track) = producer(Config::default());
+		let (mut producer, track) = producer(Config { delta_ratio: 0 });
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.update(&json!({ "a": 2 })).unwrap();
 		producer.finish().unwrap();
@@ -432,9 +442,7 @@ mod test {
 
 	#[test]
 	fn deltas_share_one_group() {
-		let config = Config {
-			delta_ratio: Some(100.0),
-		};
+		let config = Config { delta_ratio: 100 };
 		let (mut producer, track) = producer(config);
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
@@ -449,22 +457,41 @@ mod test {
 
 	#[test]
 	fn tight_ratio_rolls_snapshots() {
-		// A ratio of 1.0 leaves no room for any delta past the snapshot, so every change rolls.
-		let config = Config { delta_ratio: Some(1.0) };
+		// A ratio of 1 admits deltas only up to the snapshot size: with equal 7-byte frames that is a
+		// single delta per group, so it rolls every other update. (Still distinct from 0, which would
+		// disable deltas entirely and never produce the group-0 delta below.)
+		let config = Config { delta_ratio: 1 };
 		let (mut producer, track) = producer(config);
-		producer.update(&json!({ "a": 1 })).unwrap();
-		producer.update(&json!({ "a": 2 })).unwrap();
-		producer.update(&json!({ "a": 3 })).unwrap();
+		producer.update(&json!({ "a": 1 })).unwrap(); // snapshot, group 0
+		producer.update(&json!({ "a": 2 })).unwrap(); // delta, group 0
+		producer.update(&json!({ "a": 3 })).unwrap(); // exceeds budget, rolls group 1
+		producer.update(&json!({ "a": 4 })).unwrap(); // delta, group 1
 		producer.finish().unwrap();
 
-		assert_eq!(track.latest(), Some(2));
+		assert_eq!(track.latest(), Some(1));
+	}
+
+	#[test]
+	fn deltas_stay_within_ratio_times_snapshot() {
+		// The budget covers only the deltas, not the snapshot frame, measured against the current
+		// snapshot size. Single-digit values keep every frame at a constant 7 bytes (`{"n":N}`), so a
+		// `ratio = 8` admits 8 deltas (8x the snapshot, the inclusive limit) on top of the snapshot
+		// before the 9th delta rolls.
+		let config = Config { delta_ratio: 8 };
+		let (mut producer, track) = producer(config);
+		for n in 0..=9 {
+			producer.update(&json!({ "n": n })).unwrap();
+		}
+		producer.finish().unwrap();
+
+		// Group 0 carries the snapshot plus 8 deltas (9 frames); the 9th delta opens group 1.
+		assert_eq!(track.latest(), Some(1));
+		assert_eq!(drain(track).last().unwrap(), &json!({ "n": 9 }));
 	}
 
 	#[test]
 	fn array_change_is_delta() {
-		let config = Config {
-			delta_ratio: Some(100.0),
-		};
+		let config = Config { delta_ratio: 100 };
 		let (mut producer, track) = producer(config);
 		producer.update(&json!({ "list": [1, 2] })).unwrap();
 		producer.update(&json!({ "list": [1, 2, 3] })).unwrap();
@@ -477,9 +504,7 @@ mod test {
 
 	#[test]
 	fn frame_cap_rolls_snapshot() {
-		let config = Config {
-			delta_ratio: Some(1_000_000.0),
-		};
+		let config = Config { delta_ratio: 1_000_000 };
 		let (mut producer, track) = producer(config);
 		// First update is the snapshot (frame 0); then MAX_DELTA_FRAMES - 1 deltas fill the group.
 		for i in 0..=MAX_DELTA_FRAMES {
@@ -494,9 +519,7 @@ mod test {
 
 	#[test]
 	fn late_joiner_reconstructs_from_deltas() {
-		let config = Config {
-			delta_ratio: Some(100.0),
-		};
+		let config = Config { delta_ratio: 100 };
 		let (mut producer, track) = producer(config);
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
@@ -551,7 +574,7 @@ mod test {
 	#[test]
 	fn newer_group_supersedes_in_progress_reconstruction() {
 		// A tight ratio lets one delta fit, then forces the next update into a new snapshot group.
-		let config = Config { delta_ratio: Some(2.0) };
+		let config = Config { delta_ratio: 1 };
 		let (mut producer, track) = producer(config);
 		let observer = producer.consume();
 		let mut consumer = Consumer::<Value>::new(track);

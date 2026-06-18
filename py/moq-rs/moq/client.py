@@ -7,6 +7,7 @@ from moq_ffi import MoqClient
 from .origin import Announced, AnnouncedBroadcast, OriginConsumer, OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
+from .subscribe import BroadcastConsumer
 
 
 class Client:
@@ -103,6 +104,11 @@ class Client:
         if self._consumer is None:
             raise RuntimeError("no consume origin configured")
         return self._consumer.announced_broadcast(path)
+
+    async def request_broadcast(self, path: str) -> BroadcastConsumer:
+        if self._consumer is None:
+            raise RuntimeError("no consume origin configured")
+        return await self._consumer.request_broadcast(path)
 
     @property
     def session(self) -> Session | None:

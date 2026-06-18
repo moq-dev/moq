@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.17.0"
+version = "0.17.1"
 edition = "2024"
 rust-version.workspace = true
 
@@ -17,9 +17,11 @@ doctest = false
 
 [features]
 default = ["quinn", "aws-lc-rs", "websocket"]
-quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:notify"]
-noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:notify"]
+quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch"]
+noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch"]
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
+# Filesystem watcher for hot-reloading on-disk TLS certs/keys; the QUIC backends imply it.
+watch = ["dep:notify"]
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]

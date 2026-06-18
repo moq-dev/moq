@@ -131,11 +131,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track_stats = std::sync::Arc::new(self.stats.broadcast(&absolute).publisher_track(&track_name));
 
 		// We just received a subscribe for this exact namespace, so the peer must have already
-		// seen the announcement — synchronous lookup is appropriate here.
-		let Some(broadcast) = self.origin.get_broadcast(&msg.track_namespace) else {
-			self.write_subscribe_error(&mut stream.writer, request_id, 404, "Broadcast not found")
-				.await?;
-			return Ok(());
+		// seen the announcement. `request_broadcast` resolves it immediately, or falls back to
+		// an `OriginDynamic` handler if one is registered.
+		let broadcast = match async { self.origin.request_broadcast(&msg.track_namespace)?.await }.await {
+			Ok(broadcast) => broadcast,
+			Err(_) => {
+				self.write_subscribe_error(&mut stream.writer, request_id, 404, "Broadcast not found")
+					.await?;
+				return Ok(());
+			}
 		};
 
 		let subscription = Subscription {

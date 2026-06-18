@@ -14,7 +14,7 @@ from moq_ffi import (
     MoqTrackProducer,
 )
 
-from .types import AudioEncoderInput, AudioEncoderOutput, AudioFrame
+from .types import AudioEncoderInput, AudioEncoderOutput, AudioFrame, Subscription, TrackInfo
 
 if TYPE_CHECKING:
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
@@ -120,11 +120,14 @@ class TrackProducer:
         """Convenience: write a single-frame group in one call."""
         self._inner.write_frame(payload)
 
-    def consume(self) -> TrackConsumer:
-        """Create a consumer that reads directly from this producer's track."""
+    def consume(self, subscription: Subscription | None = None) -> TrackConsumer:
+        """Create a consumer that reads directly from this producer's track.
+
+        ``subscription`` tunes delivery (priority, ordering, group range); omit for defaults.
+        """
         from .subscribe import TrackConsumer
 
-        return TrackConsumer(self._inner.consume())
+        return TrackConsumer(self._inner.consume(subscription))
 
     def abort(self, error_code: int) -> None:
         """Abort this track with an application error code."""
@@ -207,9 +210,10 @@ class BroadcastProducer:
         """Publish a raw-audio track with an in-process Opus encoder."""
         return AudioProducer(self._inner.publish_audio(name, input, output))
 
-    def publish_track(self, name: str) -> TrackProducer:
-        """Create a track. Send any bytes, no codec validation."""
-        return TrackProducer(self._inner.publish_track(name))
+    def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
+        """Create a track. Send any bytes, no codec validation. ``info`` sets track
+        properties (priority, cache, compression); omit for defaults."""
+        return TrackProducer(self._inner.publish_track(name, info))
 
     def consume(self) -> BroadcastConsumer:
         """Create a consumer that reads from this broadcast's tracks."""

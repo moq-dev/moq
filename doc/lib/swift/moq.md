@@ -56,6 +56,16 @@ When you're done, signal graceful shutdown to the peer:
 session.shutdown()  // alias for cancel(code: 0)
 ```
 
+A server can reject the connection on auth grounds: `MoqError.Unauthorized` (HTTP 401) or `MoqError.Forbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. Use the `isAuth` helper to catch both:
+
+```swift
+do {
+    let session = try await client.connect(url: "https://relay.example.com")
+} catch let error as MoqError where error.isAuth {
+    // Prompt for credentials; don't reconnect.
+}
+```
+
 ## Subscribe
 
 Every consumer is an `AsyncSequence`, so iterate directly:

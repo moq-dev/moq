@@ -55,6 +55,17 @@ for ann, err := range announced.All(ctx) {
 }
 ```
 
+## Error handling
+
+A server can reject the connection on auth grounds: `ErrMoqErrorUnauthorized` (HTTP 401) or `ErrMoqErrorForbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. The `moq.IsAuthError` helper catches both:
+
+```go
+session, err := client.Connect("https://relay.example.com")
+if moq.IsAuthError(err) {
+    // Prompt for credentials; don't reconnect.
+}
+```
+
 ## Local development
 
 The in-tree `go/wrapper/` directory is the source skeleton; CI publishes it to the [moq-dev/moq-go](https://github.com/moq-dev/moq-go) mirror. To exercise it locally:

@@ -81,6 +81,92 @@ pub struct moq_announced {
 	pub active: bool,
 }
 
+/// A snapshot of connection statistics, filled in by [moq_session_stats].
+///
+/// Each metric has a `*_valid` flag: when `false`, the matching value is meaningless because
+/// the transport backend doesn't report it (a `false` flag is NOT the same as a zero value).
+/// Native QUIC reports every metric; the browser WebTransport reports few or none. Initialize
+/// the struct to zero before the call; [moq_session_stats] overwrites every field.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_connection_stats {
+	/// Smoothed round-trip time, in microseconds.
+	pub rtt_us: u64,
+	pub rtt_valid: bool,
+
+	/// Estimated send bandwidth from the congestion controller, in bits per second.
+	pub send_rate_bps: u64,
+	pub send_rate_valid: bool,
+
+	/// Estimated receive bandwidth from MoQ PROBE, in bits per second.
+	pub recv_rate_bps: u64,
+	pub recv_rate_valid: bool,
+
+	/// Total bytes sent, including retransmissions and overhead.
+	pub bytes_sent: u64,
+	pub bytes_sent_valid: bool,
+
+	/// Total bytes received, including duplicates and overhead.
+	pub bytes_received: u64,
+	pub bytes_received_valid: bool,
+
+	/// Total bytes lost (detected via retransmission or acknowledgement).
+	pub bytes_lost: u64,
+	pub bytes_lost_valid: bool,
+
+	/// Total datagrams sent.
+	pub packets_sent: u64,
+	pub packets_sent_valid: bool,
+
+	/// Total datagrams received.
+	pub packets_received: u64,
+	pub packets_received_valid: bool,
+
+	/// Total datagrams detected as lost.
+	pub packets_lost: u64,
+	pub packets_lost_valid: bool,
+}
+
+impl From<&moq_net::ConnectionStats> for moq_connection_stats {
+	fn from(stats: &moq_net::ConnectionStats) -> Self {
+		// An Option<u64> becomes a (value, valid) pair; absent metrics report 0/false.
+		fn split(value: Option<u64>) -> (u64, bool) {
+			(value.unwrap_or(0), value.is_some())
+		}
+
+		let (rtt_us, rtt_valid) = split(stats.rtt.map(|d| d.as_micros() as u64));
+		let (send_rate_bps, send_rate_valid) = split(stats.estimated_send_rate);
+		let (recv_rate_bps, recv_rate_valid) = split(stats.estimated_recv_rate);
+		let (bytes_sent, bytes_sent_valid) = split(stats.bytes_sent);
+		let (bytes_received, bytes_received_valid) = split(stats.bytes_received);
+		let (bytes_lost, bytes_lost_valid) = split(stats.bytes_lost);
+		let (packets_sent, packets_sent_valid) = split(stats.packets_sent);
+		let (packets_received, packets_received_valid) = split(stats.packets_received);
+		let (packets_lost, packets_lost_valid) = split(stats.packets_lost);
+
+		Self {
+			rtt_us,
+			rtt_valid,
+			send_rate_bps,
+			send_rate_valid,
+			recv_rate_bps,
+			recv_rate_valid,
+			bytes_sent,
+			bytes_sent_valid,
+			bytes_received,
+			bytes_received_valid,
+			bytes_lost,
+			bytes_lost_valid,
+			packets_sent,
+			packets_sent_valid,
+			packets_received,
+			packets_received_valid,
+			packets_lost,
+			packets_lost_valid,
+		}
+	}
+}
+
 /// Initialize the library with a log level.
 ///
 /// This should be called before any other functions.
@@ -195,13 +281,36 @@ pub extern "C" fn moq_session_close(session: u32) -> i32 {
 	})
 }
 
+/// Snapshot the current connection statistics for a session.
+///
+/// Fills `dst` with a point-in-time view of the underlying QUIC/WebTransport connection
+/// (RTT, bandwidth estimates, byte/packet counters). Each metric carries a `*_valid` flag
+/// since availability depends on the transport backend; see [moq_connection_stats].
+///
+/// Returns zero on success, or a negative code on failure: the session handle is unknown, or
+/// the session is currently reconnecting and has no live connection (in which case `dst` is
+/// left untouched). Safe to call repeatedly to poll stats over the life of the session.
+///
+/// # Safety
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_connection_stats] struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_session_stats(session: u32, dst: *mut moq_connection_stats) -> i32 {
+	ffi::enter(move || {
+		let session = ffi::parse_id(session)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let stats = State::lock().session.stats(session)?;
+		*dst = moq_connection_stats::from(&stats);
+		Ok(())
+	})
+}
+
 /// Create an origin for publishing broadcasts.
 ///
 /// Origins contain any number of broadcasts addressed by path.
 /// The same broadcast can be published to multiple origins under different paths.
 ///
 /// [moq_origin_announced] can be used to discover broadcasts published to this origin.
-/// This is extremely useful for discovering what is available on the server to [moq_origin_consume].
+/// This is extremely useful for discovering what is available on the server to [moq_origin_request].
 ///
 /// Returns a non-zero handle to the origin on success.
 #[unsafe(no_mangle)]
@@ -253,6 +362,7 @@ pub extern "C" fn moq_origin_unpublish(publish: u32) -> i32 {
 /// there. The terminal callback fires even after [moq_origin_announced_close].
 ///
 /// - [moq_origin_announced_info] is used to query information about the broadcast.
+/// - [moq_origin_announced_free] releases each delivered announced ID once read.
 /// - [moq_origin_announced_close] is used to stop receiving announcements.
 ///
 /// Returns a non-zero handle on success, or a negative code on failure.
@@ -274,7 +384,9 @@ pub unsafe extern "C" fn moq_origin_announced(
 
 /// Query information about a broadcast discovered by [moq_origin_announced].
 ///
-/// The destination is filled with the broadcast information.
+/// The destination is filled with the broadcast information. The `path` pointer borrows
+/// the announcement's storage: copy it out before calling [moq_origin_announced_free], which
+/// invalidates it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -286,6 +398,23 @@ pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq
 		let announced = ffi::parse_id(announced)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().origin.announced_info(announced, dst)
+	})
+}
+
+/// Free a single announcement delivered to a [moq_origin_announced] `on_announce` callback.
+///
+/// Each announce / unannounce event hands the callback a distinct announcement handle (read
+/// with [moq_origin_announced_info]); release it here once done to avoid leaking one per event
+/// over the life of the listener. This is per-announcement and distinct from
+/// [moq_origin_announced_close], which stops the listener itself. After freeing, any `path`
+/// pointer obtained from [moq_origin_announced_info] for this handle is dangling.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_origin_announced_free(announced: u32) -> i32 {
+	ffi::enter(move || {
+		let announced = ffi::parse_id(announced)?;
+		State::lock().origin.announced_free(announced)
 	})
 }
 
@@ -303,30 +432,12 @@ pub extern "C" fn moq_origin_announced_close(announced: u32) -> i32 {
 	})
 }
 
-/// Consume a broadcast from an origin by path.
-///
-/// Returns a non-zero handle to the broadcast on success, or a negative code on failure.
-///
-/// # Safety
-/// - The caller must ensure that path is a valid pointer to path_len bytes of data.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_consume(origin: u32, path: *const c_char, path_len: usize) -> i32 {
-	ffi::enter(move || {
-		let origin = ffi::parse_id(origin)?;
-		let path = unsafe { ffi::parse_str(path, path_len)? };
-
-		let mut state = State::lock();
-		let broadcast = state.origin.consume(origin, path)?;
-		state.consume.start(broadcast)
-	})
-}
-
 /// Consume a broadcast from an origin by path, waiting until it is announced.
 ///
-/// Unlike [moq_origin_consume], which fails immediately with a not-found code when the broadcast
-/// has not been announced yet, this waits for the announcement to arrive (e.g. over the network)
-/// and then delivers the broadcast handle via `on_broadcast`. Use it right after [moq_session_connect]
-/// to avoid racing announcement gossip, instead of polling [moq_origin_consume] in a retry loop.
+/// Resolves against future announcements: it waits for the announcement to arrive (e.g. over the
+/// network) and then delivers the broadcast handle via `on_broadcast`. Use it right after
+/// [moq_session_connect] to avoid racing announcement gossip. To resolve against only what is
+/// announced now (plus any dynamic fallback), use [moq_origin_request] instead.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once announced, then exactly once
 /// more with a terminal code: `0` (the wait finished, including after
@@ -365,6 +476,55 @@ pub unsafe extern "C" fn moq_origin_consume_announced(
 /// [moq_consume_close].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_origin_consume_announced_close(task: u32) -> i32 {
+	ffi::enter(move || {
+		let task = ffi::parse_id(task)?;
+		State::lock().origin.consume_announced_close(task)
+	})
+}
+
+/// Request a broadcast from an origin by path, resolving as soon as it can be served.
+///
+/// Resolves against what is announced *now* plus any dynamic fallback, where
+/// [moq_origin_consume_announced] waits indefinitely for a future announcement: it returns an
+/// already-announced broadcast at once, otherwise falls back to a dynamic handler on the origin
+/// (if any), and fails when neither can serve the path. It does NOT wait for a later
+/// announcement.
+///
+/// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
+/// with a terminal code: `0` (finished, including after [moq_origin_request_close]) or a negative
+/// error. After the terminal (`<= 0`) callback, `user_data` is never touched again, so release it
+/// there. The broadcast handle is usable with [moq_consume_catalog] / [moq_consume_track] and must
+/// be freed separately with [moq_consume_close].
+///
+/// Returns a non-zero handle to the request on success, or a negative code on (immediate) failure.
+///
+/// # Safety
+/// - The caller must ensure that path is a valid pointer to path_len bytes of data.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_broadcast` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_origin_request(
+	origin: u32,
+	path: *const c_char,
+	path_len: usize,
+	on_broadcast: Option<extern "C" fn(user_data: *mut c_void, broadcast: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let origin = ffi::parse_id(origin)?;
+		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
+		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast) };
+		State::lock().origin.request(origin, path, on_broadcast)
+	})
+}
+
+/// Abort a request started by [moq_origin_request].
+///
+/// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
+/// `user_data`; the [moq_origin_request] `on_broadcast` callback fires once more with a terminal
+/// code, which is where `user_data` should be released. Any broadcast handle already delivered is
+/// unaffected and must still be freed with [moq_consume_close].
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_origin_request_close(task: u32) -> i32 {
 	ffi::enter(move || {
 		let task = ffi::parse_id(task)?;
 		State::lock().origin.consume_announced_close(task)

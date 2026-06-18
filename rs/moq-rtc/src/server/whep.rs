@@ -44,13 +44,12 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 	let sdp = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
 	let offer = sdp::parse_offer(sdp)?;
 
-	// Look up the MoQ broadcast on the subscriber origin. v1 uses
-	// `get_broadcast`: if the broadcast hasn't been announced yet, the
-	// WHEP client retries (typical) or fails fast.
-	let consumer = server
-		.subscriber()
-		.get_broadcast(path)
-		.ok_or_else(|| Error::Other(anyhow::anyhow!("broadcast {path} not announced")))?;
+	// Look up the MoQ broadcast on the subscriber origin. `request_broadcast` resolves an
+	// already-announced broadcast immediately and falls back to a dynamic handler if the
+	// origin has one; with neither, it fails fast and the WHEP client retries (typical).
+	let consumer = async { server.subscriber().request_broadcast(path)?.await }
+		.await
+		.map_err(|_| Error::Other(anyhow::anyhow!("broadcast {path} not announced")))?;
 
 	let source = EgressSource::new(consumer).await?;
 	let codecs = source.catalog_codecs();

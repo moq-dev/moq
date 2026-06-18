@@ -79,10 +79,11 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.2.9",
+      "version": "0.2.11",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.8.8",
+        "@moq/json": "workspace:^",
         "@moq/loc": "workspace:^",
         "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
@@ -100,7 +101,7 @@
     },
     "js/json": {
       "name": "@moq/json",
-      "version": "0.0.2",
+      "version": "0.0.3",
       "dependencies": {
         "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
@@ -116,7 +117,7 @@
     },
     "js/loc": {
       "name": "@moq/loc",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "@moq/net": "workspace:^",
       },
@@ -147,7 +148,7 @@
     },
     "js/msf": {
       "name": "@moq/msf",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "dependencies": {
         "@moq/net": "workspace:^",
         "zod": "^4.4.3",
@@ -159,7 +160,7 @@
     },
     "js/net": {
       "name": "@moq/net",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "dependencies": {
         "@moq/qmux": "^0.1.1",
         "@moq/signals": "workspace:*",
@@ -179,7 +180,7 @@
     },
     "js/publish": {
       "name": "@moq/publish",
-      "version": "0.2.14",
+      "version": "0.2.15",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",
@@ -198,7 +199,7 @@
     },
     "js/signals": {
       "name": "@moq/signals",
-      "version": "0.1.8",
+      "version": "0.1.9",
       "devDependencies": {
         "@types/bun": "^1.3.11",
         "@types/react": "^19.2.15",
@@ -243,7 +244,7 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.2.16",
+      "version": "0.2.17",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/json": "workspace:^",

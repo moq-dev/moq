@@ -21,6 +21,12 @@ export interface EncoderConfig {
 	// TODO figure out how this interacts with the width/height props.
 	maxPixels?: number;
 
+	// Cap the encoded resolution to this fraction of the source pixel count.
+	// For example 0.25 yields a quarter of the pixels (half the width and height),
+	// scaling with the source instead of assuming a fixed resolution.
+	// When combined with maxPixels, the smaller resulting cap wins.
+	maxScale?: number;
+
 	// The interval at which to insert keyframes. (default: 2000 milliseconds)
 	keyframeInterval?: Time.Milli;
 
@@ -271,8 +277,18 @@ export class Encoder {
 		const frame = effect.get(this.frame);
 		if (!frame) return;
 
-		const maxPixels = user?.maxPixels ?? frame.codedWidth * frame.codedHeight;
-		const ratio = Math.min(Math.sqrt(maxPixels / (frame.codedWidth * frame.codedHeight)), 1);
+		const sourcePixels = frame.codedWidth * frame.codedHeight;
+
+		// maxPixels caps absolutely; maxScale caps relative to the source. The smaller cap wins.
+		let maxPixels = user?.maxPixels ?? sourcePixels;
+		if (user?.maxScale !== undefined) {
+			if (!Number.isFinite(user.maxScale) || user.maxScale <= 0) {
+				throw new Error(`maxScale must be a finite number greater than 0: ${user.maxScale}`);
+			}
+			maxPixels = Math.min(maxPixels, sourcePixels * user.maxScale);
+		}
+
+		const ratio = Math.min(Math.sqrt(maxPixels / sourcePixels), 1);
 
 		// Make sure width/height is a power of 16
 		// TODO should this be on a per-codec basis?

@@ -151,7 +151,8 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
   - `.publish(path, broadcast)`
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix) → Announced` (async iterator)
-  - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable)
+  - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits for a future announcement)
+  - `.request_broadcast(path) → BroadcastConsumer` (awaitable; announced now or a dynamic fallback, else raises)
 
 ### Types
 

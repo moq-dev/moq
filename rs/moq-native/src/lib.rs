@@ -27,9 +27,8 @@ mod reconnect;
 mod server;
 pub mod tls;
 mod util;
-// Only used by the cert-reload path, which is itself gated on a QUIC backend.
-#[cfg(any(feature = "noq", feature = "quinn"))]
-mod watch;
+#[cfg(feature = "watch")]
+pub mod watch;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
@@ -43,6 +42,11 @@ pub use server::*;
 // Re-export these crates.
 pub use moq_net;
 pub use rustls;
+
+/// Re-exported because [`watch::FileWatcher`] surfaces `notify::Result`/`notify::Error`
+/// in its API; a major `notify` bump is therefore a breaking change for this crate.
+#[cfg(feature = "watch")]
+pub use notify;
 
 #[cfg(feature = "quiche")]
 pub mod quiche;

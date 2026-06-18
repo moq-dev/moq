@@ -1,7 +1,7 @@
 {
 	"name": "@moq/publish",
 	"type": "module",
-	"version": "0.2.14",
+	"version": "0.2.15",
 	"jsr": false,
 	"description": "Publish Media over QUIC broadcasts",
 	"license": "(MIT OR Apache-2.0)",
@@ -21,7 +21,7 @@
 	"scripts": {
 		"build": "rimraf dist && vite build && tsc && bun ../common/package.ts",
 		"check": "tsc --noEmit",
-		"test": "bun test",
+		"test": "bun test --pass-with-no-tests",
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {

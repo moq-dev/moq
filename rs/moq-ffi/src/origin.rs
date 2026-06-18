@@ -151,6 +151,18 @@ impl MoqOriginConsumer {
 			}),
 		}))
 	}
+
+	/// Request a broadcast by path, resolving as soon as it can be served.
+	///
+	/// Returns the announced broadcast immediately if one exists; otherwise falls back to a
+	/// dynamic handler on the origin (if any) and resolves once it serves the broadcast, or
+	/// errors if nothing can serve it. Unlike `announced_broadcast`, this does *not* wait
+	/// indefinitely for a future announcement: it resolves or fails based on what is
+	/// announced now plus any dynamic fallback. Drop the returned future to cancel.
+	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		let broadcast = self.inner.request_broadcast(path.as_str())?.await?;
+		Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)))
+	}
 }
 
 // ---- MoqAnnounced ----

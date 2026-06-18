@@ -11,7 +11,7 @@ from moq_ffi import (
     MoqTrackConsumer,
 )
 
-from .types import Audio, AudioDecoderOutput, AudioFrame, Catalog, Frame, Video
+from .types import Audio, AudioDecoderOutput, AudioFrame, Catalog, Container, Frame, Subscription, Video
 
 
 class MediaConsumer:
@@ -193,19 +193,31 @@ class BroadcastConsumer:
     async def subscribe_catalog(self) -> CatalogConsumer:
         return CatalogConsumer(await self._inner.subscribe_catalog())
 
-    async def subscribe_track(self, name: str) -> TrackConsumer:
-        """Subscribe to a track — receive arbitrary byte payloads."""
-        return TrackConsumer(await self._inner.subscribe_track(name))
+    async def subscribe_track(self, name: str, subscription: Subscription | None = None) -> TrackConsumer:
+        """Subscribe to a track — receive arbitrary byte payloads.
 
-    async def subscribe_media(self, name: str, track: Video | Audio, max_latency_ms: int = 10000) -> MediaConsumer:
+        ``subscription`` tunes delivery (priority, ordering, group range); omit for defaults.
+        """
+        return TrackConsumer(await self._inner.subscribe_track(name, subscription))
+
+    async def subscribe_media(
+        self,
+        name: str,
+        track: Video | Audio | Container,
+        max_latency_ms: int = 10000,
+        subscription: Subscription | None = None,
+    ) -> MediaConsumer:
         """Subscribe to a media track, delivering frames in decode order.
 
-        ``track`` is the catalog entry for this track (e.g.
-        ``catalog.video[name]``); its ``container`` describes how to parse the
-        bitstream, so the caller doesn't construct a :class:`Container` by hand.
+        ``track`` is either the catalog entry for this track (e.g.
+        ``catalog.video[name]``), whose ``container`` describes how to parse the
+        bitstream, or a :class:`Container` directly. Pass a bare container for the
+        dynamic flow, where you subscribe before the catalog exists.
         ``max_latency_ms`` bounds buffering before a stalled GoP is skipped.
+        ``subscription`` tunes delivery (priority, ordering, group range); omit for defaults.
         """
-        return MediaConsumer(await self._inner.subscribe_media(name, track.container, max_latency_ms))
+        container = track if isinstance(track, Container) else track.container
+        return MediaConsumer(await self._inner.subscribe_media(name, container, max_latency_ms, subscription))
 
     async def subscribe_audio(
         self,

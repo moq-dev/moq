@@ -42,6 +42,20 @@ Moq.connect("https://localhost:4443", tlsVerify = false, bind = "127.0.0.1:0").u
 
 Advanced callers can pass their own `publish` / `subscribe` origins, or skip the facade entirely and drive `uniffi.moq.MoqClient` directly.
 
+A server can reject the connection on auth grounds: `MoqException.Unauthorized` (HTTP 401) or `MoqException.Forbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. Use the `isAuth` helper to catch both:
+
+```kotlin
+import dev.moq.isAuth
+
+try {
+    val session = client.connect("https://relay.example.com")
+} catch (e: MoqException) {
+    if (e.isAuth) {
+        // Prompt for credentials; don't reconnect.
+    }
+}
+```
+
 ## Subscribe
 
 ```kotlin

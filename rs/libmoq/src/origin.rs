@@ -109,6 +109,18 @@ impl Origin {
 		Ok(())
 	}
 
+	/// Free a single announcement record delivered to an `on_announce` callback.
+	///
+	/// Each announce/unannounce event allocates a record (read via [`Self::announced_info`]);
+	/// the caller releases it here once done. This is per-record, distinct from
+	/// [`Self::announced_close`], which stops the whole listener. Records are freed explicitly
+	/// rather than on unannounce: an unannounce is its own delivered record, and auto-freeing
+	/// the prior one would race a caller still reading it.
+	pub fn announced_free(&mut self, announced: Id) -> Result<(), Error> {
+		self.announced.remove(announced).ok_or(Error::AnnouncementNotFound)?;
+		Ok(())
+	}
+
 	pub fn announced_close(&mut self, announced: Id) -> Result<(), Error> {
 		// Signal shutdown; the task delivers a final callback and removes itself.
 		self.announced_task
@@ -119,13 +131,6 @@ impl Origin {
 			.take()
 			.ok_or(Error::AnnouncementNotFound)?;
 		Ok(())
-	}
-
-	pub fn consume<P: moq_net::AsPath>(&mut self, origin: Id, path: P) -> Result<moq_net::BroadcastConsumer, Error> {
-		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		// Synchronous lookup races announcement gossip; consume() is a cheap handle over this
-		// origin's tree. Use `consume_announced` to wait for the announcement instead.
-		origin.consume().get_broadcast(path).ok_or(Error::BroadcastNotFound)
 	}
 
 	/// Wait until the broadcast at `path` is announced, then deliver its handle via the callback.
@@ -169,6 +174,61 @@ impl Origin {
 			biased;
 			_ = &mut close => return Ok(()),
 			found = consumer.announced_broadcast(path.as_str()) => found.ok_or(Error::BroadcastNotFound)?,
+		};
+
+		// Hold the lock only to buffer the broadcast; release it before the callback.
+		let broadcast_id = State::lock().consume.start(broadcast)?;
+		callback.call(broadcast_id);
+		Ok(())
+	}
+
+	/// Request the broadcast at `path`, delivering its handle once it can be served.
+	///
+	/// Unlike [`Self::consume`] (announced-only, fails fast) and [`Self::consume_announced`]
+	/// (waits indefinitely for a future announcement), this resolves against what is announced
+	/// now plus any dynamic fallback handler on the origin: the callback fires the broadcast
+	/// handle (> 0) once served, then a terminal `0`; or a single terminal code (`0` on close,
+	/// negative on error) if it can't be served. Returns a task handle for cancellation.
+	pub fn request(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
+		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
+		let consumer = origin.consume();
+		let channel = oneshot::channel();
+
+		let entry = TaskEntry {
+			close: Some(channel.0),
+			callback: on_broadcast,
+		};
+		let id = self.consume_task.insert(Some(entry))?;
+
+		tokio::spawn(async move {
+			let res = Self::run_request(on_broadcast, consumer, path, channel.1).await;
+
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().origin.consume_task.remove(id).flatten();
+			if let Some(entry) = entry {
+				entry.callback.call(res);
+			}
+		});
+
+		Ok(id)
+	}
+
+	async fn run_request(
+		callback: OnStatus,
+		consumer: moq_net::OriginConsumer,
+		path: String,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		// Registration is synchronous; this errors immediately if the path can never be served
+		// (not announced and no dynamic handler).
+		let pending = consumer.request_broadcast(path.as_str())?;
+
+		// `biased` so a pending close always wins over a ready broadcast.
+		let broadcast = tokio::select! {
+			biased;
+			_ = &mut close => return Ok(()),
+			res = pending => res?,
 		};
 
 		// Hold the lock only to buffer the broadcast; release it before the callback.
