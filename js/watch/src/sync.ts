@@ -2,21 +2,38 @@ import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 
-/** Latency floor: `"real-time"` auto-computes jitter from RTT; a `Time.Milli` sets a fixed jitter. */
-export type Latency = "real-time" | Time.Milli;
+/** A single latency bound: `"real-time"` adapts to the RTT; a `Time.Milli` fixes the jitter buffer. */
+export type Bound = "real-time" | Time.Milli;
+
+/**
+ * Latency target. A scalar (or `"real-time"`) collapses the range and minimizes latency, the live
+ * default. An object opens a range `[min, max]`: playback buffers freely between the floor and the
+ * ceiling and only skips ahead once latency would exceed the ceiling, so faster-than-real-time
+ * frames (e.g. a TTS response with future timestamps) build up instead of being skipped. Both
+ * bounds default to `"real-time"` when omitted. The ceiling is always finite (no uncapped buffering),
+ * so worst case the audio ring drops its oldest samples rather than exhausting memory.
+ */
+export type Latency = Bound | { min?: Bound; max?: Bound };
+
+/** Resolve a {@link Latency} into explicit floor/ceiling bounds (a scalar collapses to `min == max`). */
+export function latencyBounds(latency: Latency): { min: Bound; max: Bound } {
+	if (latency === "real-time" || typeof latency === "number") {
+		return { min: latency, max: latency };
+	}
+	return { min: latency.min ?? "real-time", max: latency.max ?? "real-time" };
+}
+
+/** Build a {@link Latency} from explicit bounds, collapsing to a scalar when they're equal. */
+export function latencyFromBounds(min: Bound, max: Bound): Latency {
+	return min === max ? min : { min, max };
+}
 
 const MIN_JITTER = 20 as Time.Milli;
 const FALLBACK_JITTER = 100 as Time.Milli;
 
 export interface SyncProps {
-	// Latency floor: the jitter/startup buffer. Playback un-stalls once this much is buffered
-	// and never deliberately drops below it. `"real-time"` derives it from RTT.
-	latencyMin?: Latency | Signal<Latency>;
-
-	// Latency ceiling: "real-time" (default) caps at the RTT jitter (= minimize), a number caps
-	// at that many ms, and `undefined` is uncapped (buffer indefinitely). While the buffer stays
-	// under the ceiling we never skip ahead, so faster-than-real-time frames (e.g. TTS) build up.
-	latencyMax?: Latency | Signal<Latency | undefined>;
+	// Latency target: a scalar minimizes (collapsed range), an object opens a range. See {@link Latency}.
+	latency?: Latency | Signal<Latency>;
 
 	connection?: Signal<Moq.Connection.Established | undefined>;
 	audio?: Time.Milli | Signal<Time.Milli | undefined>;
@@ -29,32 +46,27 @@ export class Sync {
 	#reference = new Signal<Time.Milli | undefined>(undefined);
 	readonly reference: Signal<Time.Milli | undefined> = this.#reference;
 
-	// The latency floor: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter.
-	latencyMin: Signal<Latency>;
-
-	// The latency ceiling: "real-time" (default) caps at the RTT-derived jitter (= minimize),
-	// a number caps at that many ms, and `undefined` means no cap (buffer indefinitely).
-	latencyMax: Signal<Latency | undefined>;
+	// The latency target: a scalar minimizes (collapsed range), an object opens a range. See {@link Latency}.
+	latency: Signal<Latency>;
 
 	// The jitter buffer in milliseconds (always numeric).
 	// In "real-time" mode this is updated automatically from RTT.
-	// When latencyMin is a number, jitter equals that number.
+	// When the floor is a number, jitter equals that number.
 	jitter: Signal<Time.Milli>;
 
 	// Any additional delay required for audio or video.
 	audio: Signal<Time.Milli | undefined>;
 	video: Signal<Time.Milli | undefined>;
 
-	// Derived: true when the ceiling sits above the floor (or is uncapped). Buffered playback
-	// lets the reference stay anchored so future-dated frames build up a buffer, re-anchoring
-	// (skipping ahead) only when latency would exceed the ceiling. See `reset()`.
+	// Derived: true when the ceiling sits above the floor. Buffered playback lets the reference
+	// stay anchored so future-dated frames build up a buffer, re-anchoring (skipping ahead) only
+	// when latency would exceed the ceiling. See `reset()`.
 	#buffered = new Signal<boolean>(false);
 	readonly buffered: Signal<boolean> = this.#buffered;
 
-	// Derived cap on buffered audio, consumed by the audio ring. A number is the ceiling in ms;
-	// `undefined` means uncapped (the ring bounds memory itself and applies backpressure).
-	#maxBuffer = new Signal<Time.Milli | undefined>(undefined);
-	readonly maxBuffer: Signal<Time.Milli | undefined> = this.#maxBuffer;
+	// Derived cap on buffered audio (ms), consumed by the audio ring to size itself. Always finite.
+	#maxBuffer = new Signal<Time.Milli>(Time.Milli.zero);
+	readonly maxBuffer: Signal<Time.Milli> = this.#maxBuffer;
 
 	// The total buffer required: jitter + max(audio, video).
 	#buffer = new Signal<Time.Milli>(Time.Milli.zero);
@@ -80,9 +92,7 @@ export class Sync {
 	signals = new Effect();
 
 	constructor(props?: SyncProps) {
-		this.latencyMin = Signal.from(props?.latencyMin ?? ("real-time" as Latency));
-		// Default ceiling tracks the floor ("real-time"), i.e. minimize latency.
-		this.latencyMax = Signal.from(props?.latencyMax ?? ("real-time" as Latency));
+		this.latency = Signal.from(props?.latency ?? ("real-time" as Latency));
 		this.jitter = new Signal<Time.Milli>(FALLBACK_JITTER);
 		this.#connection = props?.connection;
 		this.audio = Signal.from(props?.audio);
@@ -95,16 +105,12 @@ export class Sync {
 		this.signals.run(this.#runRange.bind(this));
 	}
 
-	// Derive `buffered` / `maxBuffer` from the floor (`buffer`) and the ceiling (`latencyMax`).
+	// Derive `buffered` / `maxBuffer` from the floor (`buffer`) and the ceiling (the `max` bound).
 	#runRange(effect: Effect): void {
-		const max = effect.get(this.latencyMax);
+		const { max } = latencyBounds(effect.get(this.latency));
 		const floor = effect.get(this.buffer);
 
-		if (max === undefined) {
-			// Uncapped: buffer indefinitely (the ring bounds memory and applies backpressure).
-			this.#buffered.set(true);
-			this.#maxBuffer.set(undefined);
-		} else if (max === "real-time") {
+		if (max === "real-time") {
 			// Ceiling tracks the floor: minimize latency, the live default.
 			this.#buffered.set(false);
 			this.#maxBuffer.set(floor);
@@ -116,22 +122,21 @@ export class Sync {
 	}
 
 	// The maximum total latency (lookahead + floor) we tolerate before re-anchoring, in ms.
-	// `Infinity` when uncapped. Used by `received()` to decide when to skip ahead.
-	#latencyCap(): number {
-		const max = this.latencyMax.peek();
+	// Used by `received()` to decide when to skip ahead.
+	#latencyCap(): Time.Milli {
+		const { max } = latencyBounds(this.latency.peek());
 		const floor = this.#buffer.peek();
-		if (max === undefined) return Number.POSITIVE_INFINITY;
 		if (max === "real-time") return floor;
-		return Math.max(max, floor);
+		return Time.Milli.max(max, floor);
 	}
 
 	#runJitter(effect: Effect): void {
-		const latency = effect.get(this.latencyMin);
+		const { min } = latencyBounds(effect.get(this.latency));
 
-		if (typeof latency === "number") {
+		if (typeof min === "number") {
 			// Fixed mode: the floor value is the jitter.
 			this.#minRtt = undefined;
-			this.jitter.set(latency);
+			this.jitter.set(min);
 			return;
 		}
 

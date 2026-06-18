@@ -64,8 +64,7 @@ export class Decoder {
 	// ahead. This must be the latency CEILING (maxBuffer), not the floor
 	// (buffer): in buffered playback the producer writes faster than real-time
 	// with future PTS, so the group span legitimately exceeds the floor and
-	// would otherwise be skipped. Uncapped (maxBuffer undefined) has no finite
-	// ceiling to hand the consumer, so it falls back to the floor.
+	// would otherwise be skipped. When collapsed, maxBuffer equals the floor.
 	//
 	// Held in a plain Signal driven by a running effect (below) rather than a
 	// lazy `computed`: the container consumer only `.peek()`s this (it never
@@ -80,9 +79,7 @@ export class Decoder {
 		this.enabled = Signal.from(props?.enabled ?? false);
 
 		this.#signals.run((effect) => {
-			const max = effect.get(this.source.sync.maxBuffer);
-			const floor = effect.get(this.source.sync.buffer);
-			this.#consumerLatency.set(max ?? floor);
+			this.#consumerLatency.set(effect.get(this.source.sync.maxBuffer));
 		});
 
 		this.#signals.run(this.#runWorklet.bind(this));
@@ -275,10 +272,6 @@ export class Decoder {
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
 				}));
 
-				// Backpressure: in uncapped buffered mode this holds the encoded frame until the
-				// playhead nears it, so we keep the lookahead as Opus instead of decoded PCM.
-				await this.#ring?.wait(frame.timestamp as Time.Micro);
-
 				const chunk = new EncodedAudioChunk({
 					type: frame.keyframe ? "key" : "delta",
 					data: frame.data,
@@ -350,10 +343,6 @@ export class Decoder {
 				this.#stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
 				}));
-
-				// Backpressure: in uncapped buffered mode this holds the encoded frame until the
-				// playhead nears it, so we keep the lookahead as Opus instead of decoded PCM.
-				await this.#ring?.wait(frame.timestamp);
 
 				if (decoder.state === "closed") break;
 				decoder.decode(

@@ -1,8 +1,7 @@
 import { Time } from "@moq/net";
 
-// Capacity for an uncapped buffered ring (postMessage path). The main thread can't see the
-// worklet's fill level here, so there's no backpressure; the worklet drops the oldest if full,
-// which bounds an uncapped buffer to this on the fallback path.
+// Fallback ring capacity (ms) when buffered but no cap was supplied. The ceiling is always finite,
+// so this is just defensive; the worklet drops the oldest samples once the ring fills.
 const DEFAULT_MAX_BUFFER = 1_500 as Time.Milli;
 
 export class AudioRingBuffer {

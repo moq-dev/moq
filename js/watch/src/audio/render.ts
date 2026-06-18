@@ -16,7 +16,7 @@ export interface InitPost {
 	rate: number;
 	latency: Time.Milli;
 	buffered: boolean;
-	// undefined = uncapped; the worklet falls back to a fixed large capacity.
+	// The buffered-mode cap in ms; the worklet sizes the ring to it (falls back to a default if absent).
 	maxBuffer?: Time.Milli;
 }
 

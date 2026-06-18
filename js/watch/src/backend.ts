@@ -36,13 +36,8 @@ export interface Backend {
 	// Audio specific signals.
 	audio?: Audio.Backend;
 
-	// The latency floor: "real-time" auto-computes jitter, a number sets a fixed jitter.
-	latencyMin: Signal<Latency>;
-
-	// The latency ceiling: "real-time" (default) caps at the RTT jitter (minimize), a number
-	// caps at that many ms, `undefined` is uncapped. A ceiling above the floor enables buffered
-	// playback: build up a buffer from future-dated frames instead of skipping ahead.
-	latencyMax: Signal<Latency | undefined>;
+	// The latency target: a scalar minimizes (collapsed range), an object opens a range. See {@link Latency}.
+	latency: Signal<Latency>;
 
 	// The jitter buffer in milliseconds.
 	jitter: Signal<Moq.Time.Milli>;
@@ -58,16 +53,10 @@ export interface MultiBackendProps {
 	element?: HTMLCanvasElement | HTMLVideoElement | Signal<HTMLCanvasElement | HTMLVideoElement | undefined>;
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 
-	// Latency floor (the jitter buffer). "real-time" derives it from RTT, a number fixes it.
-	// `latency` is sugar that collapses the floor and ceiling to the same value.
+	// Latency target. A scalar (or "real-time") minimizes; an object `{ min, max }` opens a range and
+	// enables buffered playback: build up a buffer from future-dated frames (e.g. TTS) instead of
+	// minimizing latency. Call `reset()` at each utterance boundary to re-anchor. See {@link Latency}.
 	latency?: Latency | Signal<Latency>;
-	latencyMin?: Latency | Signal<Latency>;
-
-	// Latency ceiling: "real-time" (default) minimizes, a number caps at that many ms, `undefined`
-	// is uncapped. A ceiling above the floor enables buffered playback: build up a buffer from
-	// future-dated frames (e.g. TTS) instead of minimizing latency. Call `reset()` at each
-	// utterance boundary to re-anchor.
-	latencyMax?: Latency | Signal<Latency | undefined>;
 
 	// Established connection, used by Sync to read RTT (PROBE) for dynamic jitter in "real-time" mode.
 	connection?: Signal<Moq.Connection.Established | undefined>;
@@ -130,8 +119,7 @@ class AudioBackend implements Audio.Backend {
 export class MultiBackend implements Backend {
 	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
 	broadcast: Signal<Broadcast | undefined>;
-	latencyMin: Signal<Latency>;
-	latencyMax: Signal<Latency | undefined>;
+	latency: Signal<Latency>;
 	jitter: Signal<Moq.Time.Milli>;
 	buffered: Signal<boolean>;
 	paused: Signal<boolean>;
@@ -157,12 +145,10 @@ export class MultiBackend implements Backend {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
 		this.sync = new Sync({
-			latencyMin: props?.latencyMin ?? props?.latency,
-			latencyMax: props?.latencyMax,
+			latency: props?.latency,
 			connection: props?.connection,
 		});
-		this.latencyMin = this.sync.latencyMin;
-		this.latencyMax = this.sync.latencyMax;
+		this.latency = this.sync.latency;
 		this.jitter = this.sync.jitter;
 		this.buffered = this.sync.buffered;
 

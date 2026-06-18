@@ -6,15 +6,23 @@ import { Sync } from "./sync";
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("latency range", () => {
-	it("is collapsed by default (no ceiling)", async () => {
+	it("is collapsed by default", async () => {
 		const sync = new Sync();
 		await flush();
 		expect(sync.buffered.peek()).toBe(false);
 		sync.close();
 	});
 
+	it("stays collapsed for a scalar latency", async () => {
+		const sync = new Sync({ latency: 100 as Time.Milli });
+		await flush();
+		expect(sync.buffered.peek()).toBe(false);
+		expect(sync.maxBuffer.peek()).toBe(100 as Time.Milli);
+		sync.close();
+	});
+
 	it("enters buffered mode when the ceiling is above the floor", async () => {
-		const sync = new Sync({ latencyMax: 30_000 as Time.Milli });
+		const sync = new Sync({ latency: { max: 30_000 as Time.Milli } });
 		await flush();
 		expect(sync.buffered.peek()).toBe(true);
 		expect(sync.maxBuffer.peek()).toBe(30_000 as Time.Milli);
@@ -23,7 +31,7 @@ describe("latency range", () => {
 
 	it("stays collapsed when the ceiling is at or below the floor", async () => {
 		// Fixed 200ms floor sits above the 100ms ceiling, so there's no room to buffer.
-		const sync = new Sync({ latencyMin: 200 as Time.Milli, latencyMax: 100 as Time.Milli });
+		const sync = new Sync({ latency: { min: 200 as Time.Milli, max: 100 as Time.Milli } });
 		await flush();
 		expect(sync.buffered.peek()).toBe(false);
 		sync.close();
@@ -34,27 +42,14 @@ describe("latency range", () => {
 		await flush();
 		expect(sync.buffered.peek()).toBe(false);
 
-		sync.latencyMax.set(30_000 as Time.Milli);
+		sync.latency.set({ max: 30_000 as Time.Milli });
 		await flush();
 		expect(sync.buffered.peek()).toBe(true);
-		sync.close();
-	});
-
-	it("treats an undefined ceiling as uncapped", async () => {
-		const sync = new Sync({ latencyMax: undefined });
-		await flush();
-		// Undefined ceiling means buffer indefinitely (no cap), not collapse.
-		expect(sync.buffered.peek()).toBe(false); // props undefined falls back to the "real-time" default
-
-		sync.latencyMax.set(undefined);
-		await flush();
-		expect(sync.buffered.peek()).toBe(true);
-		expect(sync.maxBuffer.peek()).toBeUndefined();
 		sync.close();
 	});
 
 	it("stays collapsed for an explicit real-time ceiling", async () => {
-		const sync = new Sync({ latencyMax: "real-time" });
+		const sync = new Sync({ latency: { max: "real-time" } });
 		await flush();
 		expect(sync.buffered.peek()).toBe(false);
 		sync.close();

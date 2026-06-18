@@ -70,9 +70,9 @@ a real bundler (the examples below).
 - `paused`: Pause playback (boolean)
 - `muted`: Mute audio (boolean)
 - `volume`: Audio volume (0 to 1, default: 1)
-- `latency`: Latency target. `"real-time"` (default) derives it from RTT, or a number sets a fixed jitter buffer in ms. Sugar for collapsing `latency-min` and `latency-max` to one value (minimize latency).
+- `latency`: Latency target. `"real-time"` (default) derives it from RTT, or a number sets a fixed jitter buffer in ms. Collapses `latency-min` and `latency-max` to one value (minimize latency).
 - `latency-min`: Latency floor (the jitter/startup buffer). Same units as `latency`; leaves the ceiling untouched.
-- `latency-max`: Latency ceiling. `"real-time"` (default) minimizes latency, a number caps at that many ms, and `"none"` is uncapped. A ceiling above the floor enables [buffered playback](#buffered-playback): build up a buffer from future-dated frames instead of skipping ahead.
+- `latency-max`: Latency ceiling. `"real-time"` (default) minimizes latency; a number caps at that many ms. A ceiling above the floor enables [buffered playback](#buffered-playback): build up a buffer from future-dated frames instead of skipping ahead.
 - `catalog-format`: Catalog format. One of `"hang"`, `"msf"` (see [MSF](/concept/standard/msf)), or `"manual"` (supply the catalog yourself). When omitted, the format is auto-detected from the broadcast `name` extension (`.hang` or `.msf`), falling back to `"hang"`.
 
 ## Catalog Formats
@@ -162,24 +162,28 @@ allowed to float anywhere between the floor and the ceiling without skipping:
 </moq-watch>
 ```
 
+In JavaScript, `latency` takes either a scalar (collapsed, minimize) or a range
+object. The `latencyMin` / `latencyMax` properties are read-modify-write sugar
+over the same `latency` value:
+
 ```typescript
 const el = document.querySelector("moq-watch")!;
+el.latency = { min: 100, max: 30_000 }; // floor 100ms, ceiling 30s
+// equivalently, set the bounds independently:
 el.latencyMin = 100;     // floor: start after 100ms buffered
 el.latencyMax = 30_000;  // ceiling: never skip until 30s buffered
 ```
 
 `latency-min` is the jitter/startup buffer (it can also be `"real-time"` for an
-adaptive floor). `latency-max` is the ceiling, and it has three forms:
+adaptive floor). `latency-max` is the ceiling, and it has two forms:
 
 - a **number** (ms): buffer freely up to the cap, then skip ahead, so latency
   stays at most that far behind the newest frame.
-- **`"none"`** (`el.latencyMax = undefined` in JS): uncapped. Playback never skips
-  ahead. The decoded audio ring stays small (~1.5s); the lookahead is held upstream
-  as encoded frames, and the decoder applies backpressure (stops decoding ahead)
-  rather than dropping audio or buffering seconds of PCM.
 - **`"real-time"`** (the default) or any value `<= latency-min`: collapsed, i.e.
   today's minimize-latency behavior.
 
+The ceiling is always finite: the buffer is bounded by `latency-max`, and once it
+fills the audio ring drops its oldest samples rather than growing without limit.
 The mechanism is the same in every case: the playhead is anchored on the first
 frame and only re-anchored (skipped forward) when keeping it would push latency
 past `latency-max`. Minimize is just the degenerate case where the ceiling equals
