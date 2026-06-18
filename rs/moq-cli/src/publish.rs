@@ -92,16 +92,16 @@ enum PublishDecoder {
 
 impl PublishDecoder {
 	/// Decode a chunk of bytes from stdin (Avc3, Fmp4, Ts, or Flv).
-	fn decode_buf(&mut self, buffer: &mut bytes::BytesMut) -> anyhow::Result<()> {
+	fn decode_buf(&mut self, data: &[u8]) -> anyhow::Result<()> {
 		match self {
 			Self::Avc3 { split, import } => {
-				let frames = split.decode(buffer, None)?;
+				let frames = split.decode(data, None)?;
 				import.decode(frames)?;
 				Ok(())
 			}
-			Self::Fmp4(d) => Ok(d.decode(buffer)?),
-			Self::Ts(d) => Ok(d.decode(buffer)?),
-			Self::Flv(d) => Ok(d.decode(buffer)?),
+			Self::Fmp4(d) => Ok(d.decode(data)?),
+			Self::Ts(d) => Ok(d.decode(data)?),
+			Self::Flv(d) => Ok(d.decode(data)?),
 			Self::Hls(_) => unreachable!(),
 		}
 	}
@@ -198,12 +198,13 @@ impl Publish {
 				let mut buffer = bytes::BytesMut::new();
 
 				loop {
+					buffer.clear();
 					let n = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer).await?;
 					if n == 0 {
 						decoder.finish()?;
 						return Ok(());
 					}
-					decoder.decode_buf(&mut buffer)?;
+					decoder.decode_buf(&buffer)?;
 				}
 			}
 			#[cfg(feature = "capture")]

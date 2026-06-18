@@ -259,8 +259,8 @@ mod tests {
 		let (track, catalog) = setup("video");
 		let mut import = Import::new(track, catalog.clone());
 		// initialize() must not consume the buffer (the split owns the consume).
-		let mut buf = bytes::BytesMut::from(avcc.as_slice());
-		import.initialize(&mut buf).expect("initialize avc1");
+		let buf = bytes::BytesMut::from(avcc.as_slice());
+		import.initialize(&buf).expect("initialize avc1");
 		assert_eq!(buf.len(), avcc.len(), "initialize must not consume the buffer");
 
 		let snapshot = catalog.snapshot();
@@ -300,7 +300,7 @@ mod tests {
 		);
 
 		let pts = moq_net::Timestamp::from_micros(0).unwrap();
-		let mut frames = split.decode(&mut annexb, pts).expect("split keyframe");
+		let mut frames = split.decode(&annexb, pts).expect("split keyframe");
 		frames.extend(split.flush(pts).expect("flush keyframe"));
 		import.decode(frames).expect("decode keyframe");
 
@@ -329,7 +329,7 @@ mod tests {
 		let mut import = Import::new(track, catalog);
 
 		let pts = moq_net::Timestamp::from_micros(0).unwrap();
-		let mut frames = split.decode(&mut annexb, pts).expect("split keyframe");
+		let mut frames = split.decode(&annexb, pts).expect("split keyframe");
 		frames.extend(split.flush(pts).expect("flush keyframe"));
 		let err = import
 			.decode(frames)
@@ -352,7 +352,7 @@ mod tests {
 		let mut import = Import::new(track, catalog.clone());
 
 		let pts = moq_net::Timestamp::from_micros(0).unwrap();
-		let mut frames = split.decode(&mut annexb, pts).expect("split delta");
+		let mut frames = split.decode(&annexb, pts).expect("split delta");
 		frames.extend(split.flush(pts).expect("flush delta"));
 		let err = import
 			.decode(frames)

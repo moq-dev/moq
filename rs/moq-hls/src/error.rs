@@ -30,9 +30,6 @@ pub enum Error {
 	#[error("playlist missing EXT-X-MAP")]
 	MissingMap,
 
-	#[error("init segment was not fully consumed")]
-	InitNotConsumed,
-
 	#[error("init segment did not initialize the importer")]
 	InitNotInitialized,
 

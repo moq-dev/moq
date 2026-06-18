@@ -46,8 +46,8 @@ impl Publisher {
 	///
 	/// `decode` drains `data` fully, buffering any partial trailing packet in
 	/// its own internal scratch, so there's nothing to retain here.
-	pub fn feed(&mut self, mut data: Bytes) -> Result<()> {
-		Ok(self.importer.decode(&mut data)?)
+	pub fn feed(&mut self, data: Bytes) -> Result<()> {
+		Ok(self.importer.decode(&data)?)
 	}
 
 	/// Flush any buffered media and close out the broadcast's open groups.

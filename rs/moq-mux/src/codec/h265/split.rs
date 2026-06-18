@@ -8,7 +8,7 @@
 //! codec config. The importer parses the codec config out of the frames it
 //! emits.
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use scuffle_h265::NALUnitType;
 
 use super::Error;
@@ -69,18 +69,13 @@ impl Split {
 	/// what signals the previous one is complete, so the final NAL of the in-flight
 	/// access unit stays buffered until the next call (or [`flush`](Self::flush)).
 	/// The buffer is fully consumed.
-	pub fn decode<T: Buf + AsRef<[u8]>>(
+	pub fn decode(
 		&mut self,
-		buf: &mut T,
+		data: &[u8],
 		pts: impl Into<Option<moq_net::Timestamp>>,
 	) -> Result<Vec<crate::container::Frame>> {
 		let pts = self.pts(pts.into())?;
-		while buf.has_remaining() {
-			let chunk = buf.chunk();
-			self.tail.extend_from_slice(chunk);
-			let len = chunk.len();
-			buf.advance(len);
-		}
+		self.tail.extend_from_slice(data);
 		// Iterate complete NALs out of `tail`, leaving the trailing (in-flight) NAL
 		// (with its start code) buffered for the next call or `flush`.
 		let nals = NalIterator::new(&mut self.tail);
@@ -319,7 +314,7 @@ mod tests {
 	async fn params_then_bare_keyframe_self_contained() {
 		let mut split = Split::new();
 		// The leading VPS/SPS/PPS carry no slice, so they complete no frame yet.
-		assert!(split.decode(&mut annexb(&[VPS, SPS, PPS]), ts()).unwrap().is_empty());
+		assert!(split.decode(&annexb(&[VPS, SPS, PPS]), ts()).unwrap().is_empty());
 
 		let frames = decode_one(&mut split, &mut annexb(&[IDR]), ts());
 		assert_eq!(frames.len(), 1);

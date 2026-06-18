@@ -96,7 +96,7 @@ impl Import {
 			if n == 0 {
 				break;
 			}
-			self.decode(&mut chunk)?;
+			self.decode(&chunk)?;
 		}
 		Ok(())
 	}
@@ -106,14 +106,9 @@ impl Import {
 	/// The buffer is fully consumed on every call (data is moved into the internal
 	/// scratch). Bytes that cannot yet form a complete top-level tag are retained
 	/// for the next call.
-	pub fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
+	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
 		// Move the input into our scratch buffer.
-		while buf.has_remaining() {
-			let chunk = buf.chunk();
-			self.buffer.extend_from_slice(chunk);
-			let len = chunk.len();
-			buf.advance(len);
-		}
+		self.buffer.extend_from_slice(data);
 
 		self.drain()
 	}

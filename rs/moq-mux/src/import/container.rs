@@ -5,8 +5,6 @@
 //! track, so neither exposes a single-track demand/name handle. Today every
 //! container supports both; both wrap the same [`ContainerImpl`] dispatch.
 
-use bytes::Buf;
-
 use super::ContainerFormat;
 use crate::Result;
 
@@ -37,12 +35,12 @@ impl ContainerImpl {
 		}
 	}
 
-	fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
+	fn decode(&mut self, data: &[u8]) -> Result<()> {
 		match self {
-			ContainerImpl::Fmp4(decoder) => decoder.decode(buf),
-			ContainerImpl::Mkv(decoder) => decoder.decode(buf),
-			ContainerImpl::Ts(decoder) => decoder.decode(buf).map_err(Into::into),
-			ContainerImpl::Flv(decoder) => decoder.decode(buf).map_err(Into::into),
+			ContainerImpl::Fmp4(decoder) => decoder.decode(data),
+			ContainerImpl::Mkv(decoder) => decoder.decode(data),
+			ContainerImpl::Ts(decoder) => decoder.decode(data).map_err(Into::into),
+			ContainerImpl::Flv(decoder) => decoder.decode(data).map_err(Into::into),
 		}
 	}
 
@@ -91,13 +89,13 @@ impl Container {
 		init: &[u8],
 	) -> Result<Self> {
 		let mut inner = ContainerImpl::new(broadcast, catalog, format);
-		inner.decode(&mut { init })?;
+		inner.decode(init)?;
 		Ok(Self { inner })
 	}
 
 	/// Decode a chunk of container bytes.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
-		self.inner.decode(&mut { data })
+		self.inner.decode(data)
 	}
 
 	/// Finish the importer, flushing any buffered data.
@@ -131,21 +129,9 @@ impl ContainerStream {
 		})
 	}
 
-	/// Initialize the importer with the given buffer and populate the broadcast.
-	///
-	/// Containers are self-describing, so this is equivalent to [`Self::decode`]
-	/// except that it requires the buffer to be fully consumed.
-	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
-		self.inner.decode(buf)?;
-		if buf.has_remaining() {
-			return Err(crate::Error::BufferNotConsumed);
-		}
-		Ok(())
-	}
-
 	/// Decode a chunk of the byte stream.
-	pub fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
-		self.inner.decode(buf)
+	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
+		self.inner.decode(data)
 	}
 
 	/// Finish the importer, flushing any buffered data.

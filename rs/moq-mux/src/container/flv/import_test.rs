@@ -79,8 +79,8 @@ async fn import_populates_catalog() {
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut importer = Import::new(producer, catalog.clone());
-	let mut buf = bytes::BytesMut::from(synth_flv().as_slice());
-	importer.decode(&mut buf).unwrap();
+	let buf = bytes::BytesMut::from(synth_flv().as_slice());
+	importer.decode(&buf).unwrap();
 	importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
@@ -105,8 +105,8 @@ async fn import_emits_frames() {
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut importer = Import::new(producer, catalog.clone());
-	let mut buf = bytes::BytesMut::from(synth_flv().as_slice());
-	importer.decode(&mut buf).unwrap();
+	let buf = bytes::BytesMut::from(synth_flv().as_slice());
+	importer.decode(&buf).unwrap();
 	importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
@@ -140,8 +140,8 @@ async fn import_handles_split_input() {
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut importer = Import::new(producer, catalog.clone());
-	importer.decode(&mut bytes::BytesMut::from(head)).unwrap();
-	importer.decode(&mut bytes::BytesMut::from(tail)).unwrap();
+	importer.decode(&bytes::BytesMut::from(head)).unwrap();
+	importer.decode(&bytes::BytesMut::from(tail)).unwrap();
 	importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
@@ -155,6 +155,6 @@ async fn import_rejects_non_flv() {
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut importer = Import::new(producer, catalog);
-	let mut buf = bytes::BytesMut::from(&b"NOTFLV\x00\x00\x00"[..]);
-	assert!(importer.decode(&mut buf).is_err());
+	let buf = bytes::BytesMut::from(&b"NOTFLV\x00\x00\x00"[..]);
+	assert!(importer.decode(&buf).is_err());
 }

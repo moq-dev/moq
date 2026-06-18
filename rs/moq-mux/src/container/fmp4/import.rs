@@ -1,4 +1,4 @@
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
 use moq_net::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
@@ -41,6 +41,10 @@ pub struct Import {
 	// The latest moof header
 	moof: Option<Moof>,
 	moof_size: usize,
+
+	// Bytes carried across calls: a partial atom at the tail of one `decode` waits
+	// here for the rest to arrive on the next call.
+	buffer: BytesMut,
 }
 
 #[derive(PartialEq, Debug)]
@@ -80,31 +84,57 @@ impl Import {
 			moof: None,
 			moof_size: 0,
 			broadcast,
+			buffer: BytesMut::new(),
 		}
 	}
 
 	/// Decode from an asynchronous reader.
 	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> Result<()> {
-		let mut buffer = BytesMut::new();
-		while reader.read_buf(&mut buffer).await? > 0 {
-			self.decode(&mut buffer)?;
+		let mut chunk = BytesMut::with_capacity(64 * 1024);
+		loop {
+			chunk.clear();
+			if reader.read_buf(&mut chunk).await? == 0 {
+				break;
+			}
+			self.decode(&chunk)?;
 		}
 
 		Ok(())
 	}
 
 	/// Decode a buffer of bytes.
-	pub fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
-		let mut cursor = std::io::Cursor::new(buf);
+	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
+		self.buffer.extend_from_slice(data);
+		self.drain()
+	}
+
+	/// Parse every whole top-level atom buffered so far, leaving any trailing
+	/// partial atom for the next call.
+	fn drain(&mut self) -> Result<()> {
+		// Parse complete atoms first, recording each one's byte range, then process
+		// them. Collecting up front keeps `self.buffer` un-borrowed while the handlers
+		// (`init`/`extract`) take `&mut self`.
+		let mut parsed = Vec::new();
 		let mut position = 0;
+		loop {
+			let mut cursor = std::io::Cursor::new(&self.buffer[position..]);
+			let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? else {
+				break;
+			};
+			let size = cursor.position() as usize;
+			parsed.push((atom, position, size));
+			position += size;
+		}
 
-		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
-			// Process the parsed atom.
-			let size = cursor.position() as usize - position;
+		if position == 0 {
+			return Ok(());
+		}
 
-			// The raw bytes of the atom we just parsed (not copied).
-			let raw = &cursor.get_ref().as_ref()[position..position + size];
+		// Detach the fully-parsed prefix as a cheap ref-counted buffer so each mdat's
+		// raw bytes can be sliced out without copying or borrowing `self`.
+		let consumed = self.buffer.split_to(position).freeze();
 
+		for (atom, start, size) in parsed {
 			match atom {
 				Any::Ftyp(_) | Any::Styp(_) => {}
 				Any::Moov(moov) => {
@@ -118,19 +148,15 @@ impl Import {
 					self.moof_size = size;
 				}
 				Any::Mdat(mdat) => {
-					self.extract(mdat, raw)?;
+					let raw = consumed.slice(start..start + size);
+					self.extract(mdat, &raw)?;
 				}
 				_ => {
 					// Skip unknown atoms (e.g., sidx, which is optional and used for segment indexing)
 					// These are safe to ignore and don't affect playback
 				}
 			}
-
-			position = cursor.position() as usize;
 		}
-
-		// Advance the buffer by the amount of data that was processed.
-		cursor.into_inner().advance(position);
 
 		Ok(())
 	}

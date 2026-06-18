@@ -22,6 +22,9 @@ pub struct Split {
 	current: Au,
 	zero: Option<tokio::time::Instant>,
 	pending: Vec<crate::container::Frame>,
+	// Bytes carried across calls: a partial OBU at the tail of one `decode` waits
+	// here for the rest to arrive on the next call.
+	tail: BytesMut,
 }
 
 #[derive(Default)]
@@ -44,23 +47,31 @@ impl Split {
 			current: Au::default(),
 			zero: None,
 			pending: Vec::new(),
+			tail: BytesMut::new(),
 		}
 	}
 
 	/// Decode a buffer where frame boundaries are unknown, returning the temporal
 	/// units it can complete. The final temporal unit stays buffered until the
 	/// next call (or [`flush`](Self::flush)).
-	pub fn decode<T: Buf + AsRef<[u8]>>(
+	pub fn decode(
 		&mut self,
-		buf: &mut T,
+		data: &[u8],
 		pts: impl Into<Option<moq_net::Timestamp>>,
 	) -> Result<Vec<crate::container::Frame>> {
 		let hint = pts.into();
-		let obus = ObuIterator::new(buf);
+		self.tail.extend_from_slice(data);
+		// Pull complete OBUs out of `tail`, leaving any trailing partial OBU
+		// buffered for the next call. Collect first so `tail` isn't borrowed while
+		// `decode_obu` mutates `self`.
+		let obus = {
+			let it = ObuIterator::new(&mut self.tail);
+			it.collect::<Result<Vec<_>>>()?
+		};
 		for obu in obus {
 			// Resolve a timestamp per OBU so a wall-clock stream doesn't reuse one.
 			let pts = self.pts(hint)?;
-			self.decode_obu(obu?, Some(pts))?;
+			self.decode_obu(obu, Some(pts))?;
 		}
 		Ok(std::mem::take(&mut self.pending))
 	}
@@ -305,7 +316,7 @@ mod tests {
 		let mut split = Split::new();
 		let frames = split
 			.decode(
-				&mut cat(&[td(), seq_header(), key_frame(), td(), inter_frame()]),
+				&cat(&[td(), seq_header(), key_frame(), td(), inter_frame()]),
 				Some(ts()),
 			)
 			.unwrap();

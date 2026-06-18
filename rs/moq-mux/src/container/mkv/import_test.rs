@@ -138,8 +138,8 @@ fn run(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut broadcast = moq_net::BroadcastInfo::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.clone());
-	let mut buf = bytes::BytesMut::from(data);
-	mkv.decode(&mut buf).expect("decode");
+	let buf = bytes::BytesMut::from(data);
+	mkv.decode(&buf).expect("decode");
 	mkv.finish().expect("finish");
 	catalog.snapshot()
 }
@@ -228,8 +228,8 @@ fn test_chunked_decode_dedup() {
 
 	// Feed in 16-byte chunks to stress the chunked-restart code path.
 	for chunk in data.chunks(16) {
-		let mut b = bytes::BytesMut::from(chunk);
-		mkv.decode(&mut b).expect("decode chunk");
+		let b = bytes::BytesMut::from(chunk);
+		mkv.decode(&b).expect("decode chunk");
 	}
 	mkv.finish().expect("finish");
 

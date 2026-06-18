@@ -23,8 +23,8 @@ async fn export_header_roundtrip_vp9_opus() {
 
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = crate::container::mkv::Import::new(producer, catalog.clone());
-	let mut buf = bytes::BytesMut::from(import_bytes.as_slice());
-	importer.decode(&mut buf).unwrap();
+	let buf = bytes::BytesMut::from(import_bytes.as_slice());
+	importer.decode(&buf).unwrap();
 	importer.finish().unwrap();
 
 	// Now subscribe via the exporter and pull bytes.
@@ -126,8 +126,8 @@ async fn export_header_roundtrip_vp9_opus() {
 	let mut broadcast2 = moq_net::BroadcastInfo::new().produce();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
 	let mut importer2 = crate::container::mkv::Import::new(broadcast2, catalog2.clone());
-	let mut hbuf = bytes::BytesMut::from(header.as_ref());
-	importer2.decode(&mut hbuf).unwrap();
+	let hbuf = bytes::BytesMut::from(header.as_ref());
+	importer2.decode(&hbuf).unwrap();
 	let snap = catalog2.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1);
 	assert_eq!(snap.audio.renditions.len(), 1);
@@ -182,8 +182,8 @@ async fn export_emits_blocks_for_each_frame() {
 
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = crate::container::mkv::Import::new(producer, catalog.clone());
-	let mut buf = bytes::BytesMut::from(import_bytes.as_slice());
-	importer.decode(&mut buf).unwrap();
+	let buf = bytes::BytesMut::from(import_bytes.as_slice());
+	importer.decode(&buf).unwrap();
 	importer.finish().unwrap();
 
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
@@ -231,8 +231,8 @@ async fn export_emits_blocks_for_each_frame() {
 	let mut bcast2 = moq_net::BroadcastInfo::new().produce();
 	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
 	let mut imp2 = crate::container::mkv::Import::new(bcast2, cat2.clone());
-	let mut rt = bytes::BytesMut::from(exported.as_slice());
-	imp2.decode(&mut rt).unwrap();
+	let rt = bytes::BytesMut::from(exported.as_slice());
+	imp2.decode(&rt).unwrap();
 	imp2.finish().unwrap();
 	let snap = cat2.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1);
@@ -470,8 +470,8 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	let mut bcast2 = moq_net::BroadcastInfo::new().produce();
 	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
 	let mut imp2 = crate::container::mkv::Import::new(bcast2, cat2.clone());
-	let mut rt = bytes::BytesMut::from(exported.as_slice());
-	imp2.decode(&mut rt).unwrap();
+	let rt = bytes::BytesMut::from(exported.as_slice());
+	imp2.decode(&rt).unwrap();
 	imp2.finish().unwrap();
 	let snap = cat2.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1);
@@ -496,8 +496,8 @@ async fn export_fragment_duration_batches_blocks() {
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = crate::container::mkv::Import::new(producer, catalog.clone());
-	let mut buf = bytes::BytesMut::from(import_bytes.as_slice());
-	importer.decode(&mut buf).unwrap();
+	let buf = bytes::BytesMut::from(import_bytes.as_slice());
+	importer.decode(&buf).unwrap();
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 

@@ -46,9 +46,9 @@ impl Producer {
 
 	/// Publish already-encoded Annex-B packets at the given timestamp.
 	pub fn publish(&mut self, packets: Vec<bytes::Bytes>, timestamp: Timestamp) -> Result<(), Error> {
-		for mut packet in packets {
+		for packet in packets {
 			// The encoder emits one whole access unit per packet, so flush to emit it.
-			let mut frames = self.split.decode(&mut packet, Some(timestamp))?;
+			let mut frames = self.split.decode(&packet, Some(timestamp))?;
 			frames.extend(self.split.flush(Some(timestamp))?);
 			self.import.decode(frames)?;
 		}

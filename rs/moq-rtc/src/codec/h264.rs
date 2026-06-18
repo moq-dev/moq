@@ -5,8 +5,6 @@
 //! [`moq_mux::codec::h264::Import`] in Avc3 mode wants. We just convert the
 //! timestamp and stream NALs in.
 
-use bytes::BytesMut;
-
 use crate::{Result, codec};
 
 pub struct Bridge {
@@ -27,9 +25,8 @@ impl codec::Bridge for Bridge {
 	fn push(&mut self, frame: codec::Frame) -> Result<()> {
 		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
-		let mut buf = BytesMut::from(frame.payload.as_ref());
 		// str0m hands over one whole access unit per frame, so flush to emit it.
-		let mut frames = self.split.decode(&mut buf, Some(pts))?;
+		let mut frames = self.split.decode(&frame.payload, Some(pts))?;
 		frames.extend(self.split.flush(Some(pts))?);
 		self.import.decode(frames)?;
 		Ok(())

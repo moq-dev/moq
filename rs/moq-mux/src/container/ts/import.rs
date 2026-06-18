@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
-use bytes::{Buf, BytesMut};
+use bytes::BytesMut;
 use mpeg2ts::es::StreamType;
 use mpeg2ts::pes::PesHeader;
 use mpeg2ts::ts::payload::Pes;
@@ -124,7 +124,7 @@ impl<E: scte35::Catalog> Import<E> {
 			if n == 0 {
 				break;
 			}
-			self.decode(&mut chunk)?;
+			self.decode(&chunk)?;
 		}
 		Ok(())
 	}
@@ -132,13 +132,8 @@ impl<E: scte35::Catalog> Import<E> {
 	/// Append `buf` to the internal scratch and demux every whole TS packet it
 	/// now completes. The buffer is fully consumed; a trailing partial packet
 	/// (< 188 bytes) is retained for the next call.
-	pub fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
-		while buf.has_remaining() {
-			let chunk = buf.chunk();
-			self.scratch.extend_from_slice(chunk);
-			let len = chunk.len();
-			buf.advance(len);
-		}
+	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
+		self.scratch.extend_from_slice(data);
 
 		// Route one whole packet at a time. SCTE-35 PIDs are intercepted here (the
 		// reader would PES-parse their sections and abort); every other packet is
@@ -741,7 +736,7 @@ impl<E: CatalogExt> Stream<E> {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
 				skip_missing_keyframe((|| {
 					// Each PES is one access unit, so flush to emit it immediately.
-					let mut frames = split.decode(&mut pending.data.as_slice(), pts)?;
+					let mut frames = split.decode(&pending.data, pts)?;
 					frames.extend(split.flush(pts)?);
 					import.decode(frames)
 				})())
@@ -750,7 +745,7 @@ impl<E: CatalogExt> Stream<E> {
 				let pts = unwrap_pts(unwrap, pending.pts)?;
 				skip_missing_keyframe((|| {
 					// Each PES is one access unit, so flush to emit it immediately.
-					let mut frames = split.decode(&mut pending.data.as_slice(), pts)?;
+					let mut frames = split.decode(&pending.data, pts)?;
 					frames.extend(split.flush(pts)?);
 					import.decode(frames)
 				})())
@@ -1361,7 +1356,7 @@ mod test {
 		let mut bytes = bytes::BytesMut::new();
 		bytes.extend_from_slice(&synth_pmt(&[(StreamType::Dts8ChannelLosslessAudio, 0x21)], true));
 		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
-		import.decode(&mut bytes).unwrap();
+		import.decode(&bytes).unwrap();
 		import.finish().unwrap();
 
 		assert_eq!(
@@ -1384,7 +1379,7 @@ mod test {
 		let mut bytes = bytes::BytesMut::new();
 		bytes.extend_from_slice(&synth_pmt(&[(StreamType::Dts8ChannelLosslessAudio, 0x21)], true));
 		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
-		import.decode(&mut bytes).unwrap(); // must not abort on the private section
+		import.decode(&bytes).unwrap(); // must not abort on the private section
 		import.finish().unwrap();
 
 		assert!(import.scte.is_empty(), "no cue stream is created for a base catalog");
@@ -1429,7 +1424,7 @@ mod test {
 			&[(StreamType::Dts8ChannelLosslessAudio, SECTION_PID)],
 			false,
 		));
-		import.decode(&mut bytes).unwrap();
+		import.decode(&bytes).unwrap();
 		assert!(
 			matches!(import.streams.get(&pid), Some(super::Stream::Ignored)),
 			"pre-CUEI PMT routes the PID to Ignored"
@@ -1439,7 +1434,7 @@ mod test {
 		let mut bytes = bytes::BytesMut::new();
 		bytes.extend_from_slice(&synth_pmt(&[(StreamType::Dts8ChannelLosslessAudio, SECTION_PID)], true));
 		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
-		import.decode(&mut bytes).unwrap();
+		import.decode(&bytes).unwrap();
 		import.finish().unwrap();
 
 		assert!(
@@ -1513,19 +1508,19 @@ mod test {
 			],
 			true,
 		));
-		import.decode(&mut bytes).unwrap();
+		import.decode(&bytes).unwrap();
 
 		// Private before video: no clock yet.
-		import.decode(&mut pes_packet(PRIVATE_PID, 1_000).as_slice()).unwrap();
+		import.decode(pes_packet(PRIVATE_PID, 1_000).as_slice()).unwrap();
 		assert!(import.last_pts.is_none(), "a private PES must not start the clock");
 
 		// Video sets the clock.
-		import.decode(&mut pes_packet(VIDEO_PID, 90_000).as_slice()).unwrap();
+		import.decode(pes_packet(VIDEO_PID, 90_000).as_slice()).unwrap();
 		let after_video = import.last_pts;
 		assert!(after_video.is_some(), "MPEG-2 video PTS must set the clock");
 
 		// Private after video: must NOT overwrite it.
-		import.decode(&mut pes_packet(PRIVATE_PID, 270_000).as_slice()).unwrap();
+		import.decode(pes_packet(PRIVATE_PID, 270_000).as_slice()).unwrap();
 		assert_eq!(
 			import.last_pts, after_video,
 			"a later private PES must not overwrite the clock"
@@ -1595,7 +1590,7 @@ mod test {
 		aac.extend_from_slice(&[0u8; 8]);
 		bytes.extend_from_slice(&audio_pes_packet(AAC_PID, 0, 270_000, &aac));
 
-		import.decode(&mut bytes).unwrap();
+		import.decode(&bytes).unwrap();
 		import.finish().unwrap();
 
 		let snap = catalog.snapshot();
@@ -1651,7 +1646,7 @@ mod test {
 		let mut import = super::Import::new(broadcast, catalog.clone());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
-		import.decode(&mut bytes::BytesMut::from(&pmt[..])).unwrap();
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
 
 		// Two 96-byte MP2 frames with distinct payloads; frame A is cut at byte 50.
 		let mut frame_a = vec![0xFF, 0xFD, 0x14, 0x00];
@@ -1662,10 +1657,10 @@ mod test {
 		let mut second = frame_a[50..].to_vec();
 		second.extend_from_slice(&frame_b);
 		import
-			.decode(&mut audio_pes_packet(MP2_PID, 0, 90_000, &frame_a[..50]).as_slice())
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &frame_a[..50]).as_slice())
 			.unwrap();
 		import
-			.decode(&mut audio_pes_packet(MP2_PID, 1, 270_000, &second).as_slice())
+			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &second).as_slice())
 			.unwrap();
 		import.finish().unwrap();
 
@@ -1697,7 +1692,7 @@ mod test {
 		let mut import = super::Import::new(broadcast, catalog.clone());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
-		import.decode(&mut bytes::BytesMut::from(&pmt[..])).unwrap();
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
 
 		let mut frame_a = vec![0xFF, 0xFD, 0x14, 0x00];
 		frame_a.resize(96, 0x55);
@@ -1708,11 +1703,11 @@ mod test {
 		let mut first = frame_a.clone();
 		first.extend_from_slice(&frame_b[..2]);
 		import
-			.decode(&mut audio_pes_packet(MP2_PID, 0, 90_000, &first).as_slice())
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &first).as_slice())
 			.unwrap();
 		// PES 2: the rest of frame B, under a far-off PTS that must NOT apply to it.
 		import
-			.decode(&mut audio_pes_packet(MP2_PID, 1, 900_000, &frame_b[2..]).as_slice())
+			.decode(audio_pes_packet(MP2_PID, 1, 900_000, &frame_b[2..]).as_slice())
 			.unwrap();
 		import.finish().unwrap();
 
@@ -1755,7 +1750,7 @@ mod test {
 		));
 		bytes.extend_from_slice(&pes_packet(VIDEO_PID, 90_000)); // video sets the clock
 		bytes.extend_from_slice(&packet(true, 0, 0, &CUE)); // then the SCTE-35 section
-		import.decode(&mut bytes).unwrap();
+		import.decode(&bytes).unwrap();
 		let clock = import.last_pts.expect("video set the media clock");
 		import.finish().unwrap();
 
@@ -1808,7 +1803,7 @@ mod test {
 		));
 		bytes.extend_from_slice(&packet(true, 0, 0, &CUE)); // a private section on 0x21
 		bytes.extend_from_slice(&pes_packet(VIDEO_PID, 90_000)); // valid video after it
-		import.decode(&mut bytes).unwrap(); // must NOT abort
+		import.decode(&bytes).unwrap(); // must NOT abort
 
 		assert!(
 			import.last_pts.is_some(),

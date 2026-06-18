@@ -5,8 +5,6 @@
 //! own exactly one track, so they expose [`Track::demand`] / [`Track::name`]
 //! directly rather than fallibly.
 
-use bytes::Buf;
-
 use super::{TrackFormat, TrackStreamFormat, unique_track};
 use crate::Result;
 
@@ -23,8 +21,7 @@ fn build_h264_avc3(
 	let mut import = crate::codec::h264::Import::new(track, catalog);
 	import.initialize(init)?;
 	let mut split = crate::codec::h264::Split::new();
-	let mut data = init;
-	let frames = split.decode(&mut data, None)?;
+	let frames = split.decode(init, None)?;
 	import.decode(frames)?;
 	Ok((split, import))
 }
@@ -52,8 +49,7 @@ fn build_h265(
 	let mut import = crate::codec::h265::Import::new(track, catalog);
 	import.initialize(init)?;
 	let mut split = crate::codec::h265::Split::new();
-	let mut data = init;
-	let frames = split.decode(&mut data, None)?;
+	let frames = split.decode(init, None)?;
 	import.decode(frames)?;
 	Ok((split, import))
 }
@@ -73,8 +69,7 @@ fn build_av1(
 	let frames = if init.len() >= 16 && init[0] == 0x81 {
 		Vec::new()
 	} else {
-		let mut data = init;
-		split.decode(&mut data, None)?
+		split.decode(init, None)?
 	};
 	import.decode(frames)?;
 	Ok((split, import))
@@ -237,8 +232,7 @@ impl Track {
 			} => {
 				// One whole access unit per call, so flush to emit it rather than
 				// waiting for the next start code.
-				let mut data = frame;
-				let mut frames = split.decode(&mut data, pts)?;
+				let mut frames = split.decode(frame, pts)?;
 				frames.extend(split.flush(pts)?);
 				import.decode(frames)?;
 			}
@@ -254,8 +248,7 @@ impl Track {
 				ref mut split,
 				ref mut import,
 			} => {
-				let mut data = frame;
-				let mut frames = split.decode(&mut data, pts)?;
+				let mut frames = split.decode(frame, pts)?;
 				frames.extend(split.flush(pts)?);
 				import.decode(frames)?;
 			}
@@ -263,8 +256,7 @@ impl Track {
 				ref mut split,
 				ref mut import,
 			} => {
-				let mut data = frame;
-				let mut frames = split.decode(&mut data, pts)?;
+				let mut frames = split.decode(frame, pts)?;
 				frames.extend(split.flush(pts)?);
 				import.decode(frames)?;
 			}
@@ -424,73 +416,65 @@ impl TrackStream {
 	/// Initialize the importer with the given buffer and populate the broadcast.
 	///
 	/// This is not required for self-describing formats like AVC3.
-	///
-	/// The buffer will be fully consumed, or an error will be returned.
-	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
+	pub fn initialize(&mut self, data: &[u8]) -> Result<()> {
 		match self.kind {
 			TrackStreamKind::Avc3 {
 				ref mut split,
 				ref mut import,
 			} => {
-				import.initialize(buf.as_ref())?;
-				let frames = split.decode(buf, None)?;
+				import.initialize(data)?;
+				let frames = split.decode(data, None)?;
 				import.decode(frames)?;
 			}
 			TrackStreamKind::Hev1 {
 				ref mut split,
 				ref mut import,
 			} => {
-				import.initialize(buf.as_ref())?;
-				let frames = split.decode(buf, None)?;
+				import.initialize(data)?;
+				let frames = split.decode(data, None)?;
 				import.decode(frames)?;
 			}
 			TrackStreamKind::Av01 {
 				ref mut split,
 				ref mut import,
 			} => {
-				import.initialize(buf.as_ref())?;
+				import.initialize(data)?;
 				// av1C (leading 0x81) is an out-of-band config record, not an OBU
 				// stream; read for config above and dropped here.
-				let data = buf.as_ref();
 				let frames = if data.len() >= 16 && data[0] == 0x81 {
-					buf.advance(buf.remaining());
 					Vec::new()
 				} else {
-					split.decode(buf, None)?
+					split.decode(data, None)?
 				};
 				import.decode(frames)?;
 			}
-		}
-
-		if buf.has_remaining() {
-			return Err(crate::Error::BufferNotConsumed);
 		}
 
 		Ok(())
 	}
 
 	/// Decode a chunk of the byte stream.
-	pub fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
+	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
 		match self.kind {
 			TrackStreamKind::Avc3 {
 				ref mut split,
 				ref mut import,
 			} => {
-				let frames = split.decode(buf, None)?;
+				let frames = split.decode(data, None)?;
 				import.decode(frames)
 			}
 			TrackStreamKind::Hev1 {
 				ref mut split,
 				ref mut import,
 			} => {
-				let frames = split.decode(buf, None)?;
+				let frames = split.decode(data, None)?;
 				import.decode(frames)
 			}
 			TrackStreamKind::Av01 {
 				ref mut split,
 				ref mut import,
 			} => {
-				let frames = split.decode(buf, None)?;
+				let frames = split.decode(data, None)?;
 				import.decode(frames)
 			}
 		}

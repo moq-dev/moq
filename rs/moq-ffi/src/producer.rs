@@ -27,10 +27,9 @@ enum StreamDecoder {
 }
 
 struct MediaStreamProducer {
+	// The importer buffers any partial trailing frame internally, so callers can
+	// write arbitrary chunks without retaining a remainder here.
 	decoder: StreamDecoder,
-	// Carries the partial trailing frame between `write` calls; `decode`
-	// consumes whole frames and leaves the remainder here.
-	buffer: bytes::BytesMut,
 }
 
 #[derive(uniffi::Object)]
@@ -205,10 +204,7 @@ impl MoqBroadcastProducer {
 		};
 
 		Ok(Arc::new(MoqMediaStreamProducer {
-			inner: std::sync::Mutex::new(Some(MediaStreamProducer {
-				decoder,
-				buffer: bytes::BytesMut::new(),
-			})),
+			inner: std::sync::Mutex::new(Some(MediaStreamProducer { decoder })),
 		}))
 	}
 
@@ -471,10 +467,9 @@ impl MoqMediaStreamProducer {
 		let mut guard = self.inner.lock().unwrap();
 		let media = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
 
-		media.buffer.extend_from_slice(&payload);
 		match &mut media.decoder {
-			StreamDecoder::Track(decoder) => decoder.decode(&mut media.buffer),
-			StreamDecoder::Container(decoder) => decoder.decode(&mut media.buffer),
+			StreamDecoder::Track(decoder) => decoder.decode(&payload),
+			StreamDecoder::Container(decoder) => decoder.decode(&payload),
 		}
 		.map_err(|err| MoqError::Codec(format!("decode failed: {err}")))?;
 		Ok(())

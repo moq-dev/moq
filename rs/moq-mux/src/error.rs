@@ -91,10 +91,6 @@ pub enum Error {
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
 
-	/// Buffer was not fully consumed.
-	#[error("buffer was not fully consumed")]
-	BufferNotConsumed,
-
 	/// A non-keyframe frame was received before any keyframe opened a group.
 	/// A track joining mid-stream should skip frames until the first keyframe.
 	#[error("{0}")]

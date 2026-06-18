@@ -13,7 +13,7 @@
 //! avc1 (length-prefixed NALU + out-of-band avcC) is not a stream and has no
 //! splitter; wrap one access unit with `super::avc1_frame`.
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 
 use super::Error;
 use crate::Result;
@@ -70,18 +70,13 @@ impl Split {
 	/// what signals the previous one is complete, so the final NAL of the in-flight
 	/// access unit stays buffered until the next call (or [`flush`](Self::flush)).
 	/// The buffer is fully consumed.
-	pub fn decode<T: Buf + AsRef<[u8]>>(
+	pub fn decode(
 		&mut self,
-		buf: &mut T,
+		data: &[u8],
 		pts: impl Into<Option<moq_net::Timestamp>>,
 	) -> Result<Vec<crate::container::Frame>> {
 		let pts = self.pts(pts.into())?;
-		while buf.has_remaining() {
-			let chunk = buf.chunk();
-			self.tail.extend_from_slice(chunk);
-			let len = chunk.len();
-			buf.advance(len);
-		}
+		self.tail.extend_from_slice(data);
 		// Iterate complete NALs out of `tail`, leaving the trailing (in-flight) NAL
 		// (with its start code) buffered for the next call or `flush`.
 		let nals = NalIterator::new(&mut self.tail);
@@ -297,7 +292,7 @@ mod tests {
 
 		let mut split = Split::new();
 		// The leading SPS/PPS carry no slice, so they complete no frame yet.
-		assert!(split.decode(&mut annexb(&[sps, pps]), ts()).unwrap().is_empty());
+		assert!(split.decode(&annexb(&[sps, pps]), ts()).unwrap().is_empty());
 
 		let frames = decode_one(&mut split, &mut annexb(&[idr]), ts());
 		assert_eq!(frames.len(), 1);
@@ -322,7 +317,7 @@ mod tests {
 		let aud: &[u8] = &[0x09, 0x10];
 
 		let mut split = Split::new();
-		let frames = split.decode(&mut annexb(&[sps, pps, idr, pslice, aud]), ts()).unwrap();
+		let frames = split.decode(&annexb(&[sps, pps, idr, pslice, aud]), ts()).unwrap();
 		assert_eq!(frames.len(), 1);
 		assert!(frames[0].keyframe);
 

@@ -19,9 +19,9 @@ fn run_fmp4(data: &[u8]) -> crate::catalog::hang::Catalog {
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
 
-	let mut buf = bytes::BytesMut::from(data);
+	let buf = bytes::BytesMut::from(data);
 	// Ignore errors from incomplete/malformed trailing fragments in test files.
-	let _ = fmp4.decode(&mut buf);
+	let _ = fmp4.decode(&buf);
 
 	catalog.snapshot()
 }
@@ -177,7 +177,7 @@ async fn test_seek_sets_initial_sequence() {
 	}
 
 	// Decode init so the tracks exist, then seek, then decode the fragments.
-	fmp4.decode(&mut init_buf).unwrap();
+	fmp4.decode(&init_buf).unwrap();
 	assert!(fmp4.is_initialized());
 
 	let snap = catalog.snapshot();
@@ -192,7 +192,7 @@ async fn test_seek_sets_initial_sequence() {
 
 	fmp4.seek(100).unwrap();
 	// Trailing partial fragments may error; ignore.
-	let _ = fmp4.decode(&mut frag_buf);
+	let _ = fmp4.decode(&frag_buf);
 	fmp4.finish().unwrap();
 
 	let sequences = drain_group_sequences(&mut video_track);
@@ -220,9 +220,9 @@ async fn test_msf_catalog_roundtrip() {
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog);
 
 	let data = include_bytes!("test_data/bbb.mp4");
-	let mut buf = bytes::BytesMut::from(&data[..]);
+	let buf = bytes::BytesMut::from(&data[..]);
 	// Trailing fragments may error out (e.g. partial mdat); ignore.
-	let _ = fmp4.decode(&mut buf);
+	let _ = fmp4.decode(&buf);
 
 	let track = consumer
 		.track(moq_msf::DEFAULT_NAME)

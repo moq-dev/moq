@@ -389,8 +389,8 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = crate::container::fmp4::Import::new(producer, catalog);
-	let mut buf = BytesMut::from(data.as_slice());
-	let _ = importer.decode(&mut buf);
+	let buf = BytesMut::from(data.as_slice());
+	let _ = importer.decode(&buf);
 
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
