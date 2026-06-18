@@ -131,6 +131,7 @@
       "name": "@moq/boy",
       "version": "0.2.10",
       "dependencies": {
+        "@moq/json": "workspace:^",
         "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
         "@moq/watch": "workspace:^",

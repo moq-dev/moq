@@ -24,12 +24,12 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }
 moq-audio = { workspace = true }
+moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 moq-net = { workspace = true }
 moq-video = { workspace = true }
 serde = { workspace = true }
-serde_json = "1"
 tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"
 url = "2"
