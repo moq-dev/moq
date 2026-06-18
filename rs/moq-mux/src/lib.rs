@@ -21,7 +21,6 @@ pub mod codec;
 pub mod container;
 mod error;
 pub mod import;
-mod track_provider;
 
 pub use clock::Clock;
 pub use error::*;

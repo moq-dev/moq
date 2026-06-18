@@ -116,9 +116,7 @@ async fn export_roundtrips_through_import() {
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut importer = Import::new(producer, catalog.clone());
-	importer
-		.decode(&mut bytes::BytesMut::from(synth_flv().as_slice()))
-		.unwrap();
+	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
 	catalog.finish().unwrap();
 
 	let exporter = Export::new(consumer).unwrap();
@@ -131,7 +129,7 @@ async fn export_roundtrips_through_import() {
 	let mut bcast2 = moq_net::Broadcast::new().produce();
 	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
 	let mut imp2 = Import::new(bcast2, cat2.clone());
-	imp2.decode(&mut bytes::BytesMut::from(exported.as_slice())).unwrap();
+	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
 	imp2.finish().unwrap();
 
 	let snap = cat2.snapshot();
@@ -156,9 +154,7 @@ async fn export_emits_sequence_headers_and_frames() {
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut importer = Import::new(producer, catalog.clone());
-	importer
-		.decode(&mut bytes::BytesMut::from(synth_flv().as_slice()))
-		.unwrap();
+	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
 	catalog.finish().unwrap();
 
 	let exporter = Export::new(consumer).unwrap();
@@ -229,9 +225,7 @@ async fn export_preserves_timestamps() {
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 
 	let mut importer = Import::new(producer, catalog.clone());
-	importer
-		.decode(&mut bytes::BytesMut::from(synth_flv().as_slice()))
-		.unwrap();
+	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
 	catalog.finish().unwrap();
 
 	let exporter = Export::new(consumer).unwrap();

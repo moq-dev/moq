@@ -7,28 +7,28 @@
 
 use crate::{Result, codec};
 
-/// Feeds str0m's Annex-B H.264 access units into a moq-mux avc3 importer.
 pub struct Bridge {
-	import: moq_mux::codec::h264::Import<moq_mux::catalog::hang::Extra>,
+	split: moq_mux::codec::h264::Split,
+	import: moq_mux::codec::h264::Import,
 }
 
 impl Bridge {
-	/// Publish an `.avc3` track on `broadcast`, registering it in `catalog`.
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
-		// Pin avc3 (Annex-B, inline SPS/PPS) up front: str0m always hands us that wire shape.
-		let import =
-			moq_mux::codec::h264::Import::new(broadcast, catalog).with_mode(moq_mux::codec::h264::Mode::Avc3)?;
-		Ok(Self { import })
+	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
+		let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
+		let import = moq_mux::codec::h264::Import::new(track, catalog);
+		let split = moq_mux::codec::h264::Split::new();
+		Ok(Self { split, import })
 	}
 }
 
 impl codec::Bridge for Bridge {
 	fn push(&mut self, frame: codec::Frame) -> Result<()> {
-		let pts = moq_mux::container::Timestamp::from_micros(frame.timestamp_us)
+		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
-		// str0m hands over one whole access unit per frame.
-		let mut payload = frame.payload;
-		self.import.decode_frame(&mut payload, Some(pts))?;
+		// str0m hands over one whole access unit per frame, so flush to emit it.
+		let mut frames = self.split.decode(&frame.payload, Some(pts))?;
+		frames.extend(self.split.flush(Some(pts))?);
+		self.import.decode(frames)?;
 		Ok(())
 	}
 }

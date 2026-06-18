@@ -3,13 +3,23 @@
 Real-time pub/sub with built-in caching, fan-out, and prioritization.
 """
 
-from moq_ffi import Container, MoqError
-from moq_ffi import MoqSession as Session
+from moq_ffi import MoqError as Error
 
-from .client import Client
+from .client import Client, connect
+from .log import log_level
 from .origin import Announced, AnnouncedBroadcast, Announcement, OriginConsumer, OriginProducer
-from .publish import AudioProducer, BroadcastDynamic, BroadcastProducer, GroupProducer, MediaProducer, TrackProducer
+from .publish import (
+    AudioProducer,
+    BroadcastDynamic,
+    BroadcastProducer,
+    GroupProducer,
+    MediaProducer,
+    MediaStreamProducer,
+    TrackProducer,
+    TrackRequest,
+)
 from .server import Request, Server, Transport
+from .session import Session
 from .subscribe import (
     AudioConsumer,
     BroadcastConsumer,
@@ -27,8 +37,11 @@ from .types import (
     AudioFormat,
     AudioFrame,
     Catalog,
+    Container,
     Dimensions,
     Frame,
+    Subscription,
+    TrackInfo,
     Video,
 )
 
@@ -53,19 +66,25 @@ __all__ = [
     "Client",
     "Container",
     "Dimensions",
+    "Error",
     "Frame",
     "GroupConsumer",
     "GroupProducer",
     "MediaConsumer",
     "MediaProducer",
-    "MoqError",
+    "MediaStreamProducer",
     "OriginConsumer",
     "OriginProducer",
     "Request",
     "Server",
     "Session",
+    "Subscription",
     "TrackConsumer",
+    "TrackInfo",
     "TrackProducer",
+    "TrackRequest",
     "Transport",
     "Video",
+    "connect",
+    "log_level",
 ]

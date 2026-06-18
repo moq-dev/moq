@@ -11,6 +11,26 @@ mod import;
 
 pub use import::*;
 
+/// VP8 parsing errors.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("VP8 frame too short for tag")]
+	FrameTooShort,
+
+	#[error("VP8 key frame too short for header")]
+	KeyframeHeaderTooShort,
+
+	#[error("VP8 key frame start code mismatch")]
+	StartCodeMismatch,
+
+	#[error("empty VP8 frame")]
+	EmptyFrame,
+}
+
+/// A Result type alias for VP8 parsing.
+pub type Result<T> = std::result::Result<T, Error>;
+
 /// Fields parsed from a VP8 frame tag (RFC 6386 §9.1) plus, for key frames, the
 /// key-frame header (§19.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,8 +47,10 @@ impl FrameHeader {
 	/// Reads the 3-byte frame tag, and on a key frame the 7-byte header that
 	/// follows (start code + dimensions). Interframes carry neither a start code
 	/// nor dimensions.
-	pub fn parse(data: &[u8]) -> anyhow::Result<Self> {
-		anyhow::ensure!(data.len() >= 3, "VP8 frame too short for tag");
+	pub fn parse(data: &[u8]) -> Result<Self> {
+		if data.len() < 3 {
+			return Err(Error::FrameTooShort);
+		}
 
 		// 24-bit little-endian frame tag. Bit 0 is frame_type: 0 = key frame.
 		let tag = u32::from(data[0]) | (u32::from(data[1]) << 8) | (u32::from(data[2]) << 16);
@@ -41,11 +63,12 @@ impl FrameHeader {
 			});
 		}
 
-		anyhow::ensure!(data.len() >= 10, "VP8 key frame too short for header");
-		anyhow::ensure!(
-			data[3] == 0x9d && data[4] == 0x01 && data[5] == 0x2a,
-			"VP8 key frame start code mismatch"
-		);
+		if data.len() < 10 {
+			return Err(Error::KeyframeHeaderTooShort);
+		}
+		if !(data[3] == 0x9d && data[4] == 0x01 && data[5] == 0x2a) {
+			return Err(Error::StartCodeMismatch);
+		}
 
 		// 14-bit dimensions; the top 2 bits of each field are the scaling factor.
 		let width = (u16::from(data[6]) | (u16::from(data[7]) << 8)) & 0x3fff;

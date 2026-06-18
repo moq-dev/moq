@@ -112,7 +112,7 @@ async def test_local_publish_consume_audio():
         assert audio.sample_rate == 48000
         assert audio.channel_count == 2
 
-        media_consumer = announcement.broadcast.subscribe_media(track_name, audio.container, 10_000)
+        media_consumer = await announcement.broadcast.subscribe_media(track_name, audio, 10_000)
 
         payload = b"opus audio payload data"
         media.write_frame(payload, 1_000_000)
@@ -146,7 +146,7 @@ async def test_video_publish_consume():
         assert video.coded.width == 1280
         assert video.coded.height == 720
 
-        media_consumer = announcement.broadcast.subscribe_media(track_name, video.container, 10_000)
+        media_consumer = await announcement.broadcast.subscribe_media(track_name, video, 10_000)
 
         keyframe = bytes([0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC])
         media.write_frame(keyframe, 0)
@@ -171,7 +171,7 @@ async def test_multiple_frames_ordering():
         catalog = await announcement.broadcast.catalog()
         track_name = list(catalog.audio.keys())[0]
         audio = catalog.audio[track_name]
-        media_consumer = announcement.broadcast.subscribe_media(track_name, audio.container, 10_000)
+        media_consumer = await announcement.broadcast.subscribe_media(track_name, audio, 10_000)
 
         timestamps = [0, 20_000, 40_000, 60_000, 80_000]
         for i, ts in enumerate(timestamps):
@@ -195,7 +195,7 @@ async def test_catalog_update_on_new_track():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        cat_consumer = announcement.broadcast.subscribe_catalog()
+        cat_consumer = await announcement.broadcast.subscribe_catalog()
 
         # First catalog: 1 audio track.
         catalog1 = await anext(cat_consumer)
@@ -228,7 +228,7 @@ async def test_announced_broadcast():
 
     async for announcement in consumer.announced():
         assert announcement.path == "test/broadcast"
-        _catalog = announcement.broadcast.subscribe_catalog()
+        _catalog = await announcement.broadcast.subscribe_catalog()
         break
 
 
@@ -240,18 +240,37 @@ def test_publish_lifecycle():
     broadcast.finish()
 
 
+async def test_publish_track_info_and_subscription():
+    """Raw track published with explicit TrackInfo, consumed with a Subscription."""
+    broadcast = moq.BroadcastProducer()
+    info = moq.TrackInfo(priority=5, compress=True, cache_ms=2_000)
+    track = broadcast.publish_track("status", info)
+
+    consumer = track.consume(moq.Subscription(priority=3))
+    track.write_frame(b"ready")
+
+    frame = await asyncio.wait_for(consumer.read_frame(), timeout=5.0)
+    assert frame == b"ready"
+    track.finish()
+
+
 async def test_dynamic_track_request():
     broadcast = moq.BroadcastProducer()
     dynamic = broadcast.dynamic()
     consumer = broadcast.consume()
-    track_consumer = consumer.subscribe_track("events")
 
-    track = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
-    assert track.name == "events"
+    # The subscribe stays pending until the request is accepted below; run it concurrently.
+    subscribe = asyncio.create_task(consumer.subscribe_track("events"))
 
+    request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert request.name == "events"
+
+    # Accept the request as a raw track (which unblocks the subscribe), then write.
+    track = request.accept()
     payload = b"hello dynamic track"
     track.write_frame(payload)
 
+    track_consumer = await asyncio.wait_for(subscribe, timeout=5.0)
     frame = await asyncio.wait_for(track_consumer.read_frame(), timeout=5.0)
     assert frame == payload
 
@@ -262,11 +281,12 @@ async def test_dynamic_track_request_can_publish_media():
     broadcast = moq.BroadcastProducer()
     dynamic = broadcast.dynamic()
     consumer = broadcast.consume()
-    catalog_consumer = consumer.subscribe_catalog()
-    media_consumer = consumer.subscribe_media(
-        "requested-audio",
-        cast(moq.Container, moq.Container.LEGACY()),
-        10_000,
+    catalog_consumer = await consumer.subscribe_catalog()
+
+    # publish_media_on_track accepts the request (at the media timescale), which is what
+    # unblocks subscribe_media, so run the subscribe concurrently until then.
+    subscribe = asyncio.create_task(
+        consumer.subscribe_media("requested-audio", cast(moq.Container, moq.Container.LEGACY()), 10_000)
     )
 
     track = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
@@ -276,6 +296,8 @@ async def test_dynamic_track_request_can_publish_media():
     assert media.name == "requested-audio"
     with pytest.raises(Exception):
         _ = track.name
+
+    media_consumer = await asyncio.wait_for(subscribe, timeout=5.0)
 
     catalog = await asyncio.wait_for(anext(catalog_consumer), timeout=5.0)
     audio = catalog.audio["requested-audio"]
@@ -379,6 +401,43 @@ def test_raw_parallel_groups():
     g1.finish()
 
 
+def test_public_api_exports():
+    """The ergonomic surface is reachable from the top-level package, so users
+    never have to import the private `moq._uniffi` module."""
+    assert issubclass(moq.Error, Exception)
+    # Flat-error variants are accessible as attributes for selective catching.
+    assert hasattr(moq.Error, "AlreadyResponded")
+    assert hasattr(moq.Error, "Cancelled")
+    assert callable(moq.log_level)
+    assert isinstance(moq.connect("https://example.com"), moq.Client)
+
+
+async def test_subscribe_media_default_latency_and_context_manager():
+    """subscribe_media takes the catalog record directly and defaults the
+    latency; the returned consumer is also an async context manager."""
+    origin = moq.OriginProducer()
+    broadcast = moq.BroadcastProducer()
+    media = broadcast.publish_media("opus", opus_head())
+    origin.publish("live", broadcast)
+
+    consumer = origin.consume()
+
+    async for announcement in consumer.announced():
+        catalog = await announcement.broadcast.catalog()
+        track_name, audio = next(iter(catalog.audio.items()))
+
+        # No container argument, no explicit latency.
+        payload = b"opus audio payload data"
+        media.write_frame(payload, 1_000_000)
+
+        async with await announcement.broadcast.subscribe_media(track_name, audio) as media_consumer:
+            async for frame in media_consumer:
+                assert frame.payload == payload
+                break
+
+        break
+
+
 async def test_raw_publish_consume():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
@@ -390,7 +449,7 @@ async def test_raw_publish_consume():
     async for announcement in consumer.announced():
         assert announcement.path == "robot/arm"
 
-        raw_consumer = announcement.broadcast.subscribe_track("events")
+        raw_consumer = await announcement.broadcast.subscribe_track("events")
 
         payload = b'{"cmd": "button_changed", "arm": "left", "button": "THUMB", "state": "PRESSED"}'
         raw.write_frame(payload)
@@ -413,7 +472,7 @@ async def test_raw_multiple_frames():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        raw_consumer = announcement.broadcast.subscribe_track("commands")
+        raw_consumer = await announcement.broadcast.subscribe_track("commands")
 
         messages = [
             b'{"cmd": "led", "arm": "left", "led": "THUMB", "state": 1}',
@@ -475,7 +534,7 @@ async def test_broadcast_producer_consume_direct():
     raw = broadcast.publish_track("events")
     consumer = broadcast.consume()
 
-    raw_consumer = consumer.subscribe_track("events")
+    raw_consumer = await consumer.subscribe_track("events")
     raw.write_frame(b"event-0")
 
     async for group in raw_consumer:
@@ -495,7 +554,7 @@ async def test_raw_group_sequence():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        raw_consumer = announcement.broadcast.subscribe_track("seq")
+        raw_consumer = await announcement.broadcast.subscribe_track("seq")
 
         sent_sequences = []
         for i in range(3):
@@ -526,7 +585,7 @@ async def test_raw_multi_frame_group():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        raw_consumer = announcement.broadcast.subscribe_track("chunks")
+        raw_consumer = await announcement.broadcast.subscribe_track("chunks")
 
         group_producer = raw.append_group()
         chunks = [b"chunk-0", b"chunk-1", b"chunk-2"]

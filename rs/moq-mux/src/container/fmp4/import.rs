@@ -1,9 +1,8 @@
-use crate::container::Timestamp;
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
+use moq_net::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::Error;
 use crate::Result;
@@ -41,6 +40,10 @@ pub struct Import {
 	// The latest moof header
 	moof: Option<Moof>,
 	moof_size: usize,
+
+	// Bytes carried across calls: a partial atom at the tail of one `decode` waits
+	// here for the rest to arrive on the next call.
+	buffer: BytesMut,
 }
 
 #[derive(PartialEq, Debug)]
@@ -80,31 +83,43 @@ impl Import {
 			moof: None,
 			moof_size: 0,
 			broadcast,
+			buffer: BytesMut::new(),
 		}
-	}
-
-	/// Decode from an asynchronous reader.
-	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> Result<()> {
-		let mut buffer = BytesMut::new();
-		while reader.read_buf(&mut buffer).await? > 0 {
-			self.decode(&mut buffer)?;
-		}
-
-		Ok(())
 	}
 
 	/// Decode a buffer of bytes.
-	pub fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
-		let mut cursor = std::io::Cursor::new(buf);
+	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
+		self.buffer.extend_from_slice(data);
+		self.drain()
+	}
+
+	/// Parse every whole top-level atom buffered so far, leaving any trailing
+	/// partial atom for the next call.
+	fn drain(&mut self) -> Result<()> {
+		// Parse complete atoms first, recording each one's byte range, then process
+		// them. Collecting up front keeps `self.buffer` un-borrowed while the handlers
+		// (`init`/`extract`) take `&mut self`.
+		let mut parsed = Vec::new();
 		let mut position = 0;
+		loop {
+			let mut cursor = std::io::Cursor::new(&self.buffer[position..]);
+			let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? else {
+				break;
+			};
+			let size = cursor.position() as usize;
+			parsed.push((atom, position, size));
+			position += size;
+		}
 
-		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
-			// Process the parsed atom.
-			let size = cursor.position() as usize - position;
+		if position == 0 {
+			return Ok(());
+		}
 
-			// The raw bytes of the atom we just parsed (not copied).
-			let raw = &cursor.get_ref().as_ref()[position..position + size];
+		// Detach the fully-parsed prefix as a cheap ref-counted buffer so each mdat's
+		// raw bytes can be sliced out without copying or borrowing `self`.
+		let consumed = self.buffer.split_to(position).freeze();
 
+		for (atom, start, size) in parsed {
 			match atom {
 				Any::Ftyp(_) | Any::Styp(_) => {}
 				Any::Moov(moov) => {
@@ -118,25 +133,17 @@ impl Import {
 					self.moof_size = size;
 				}
 				Any::Mdat(mdat) => {
-					self.extract(mdat, raw)?;
+					let raw = consumed.slice(start..start + size);
+					self.extract(mdat, &raw)?;
 				}
 				_ => {
 					// Skip unknown atoms (e.g., sidx, which is optional and used for segment indexing)
 					// These are safe to ignore and don't affect playback
 				}
 			}
-
-			position = cursor.position() as usize;
 		}
 
-		// Advance the buffer by the amount of data that was processed.
-		cursor.into_inner().advance(position);
-
 		Ok(())
-	}
-
-	pub fn is_initialized(&self) -> bool {
-		self.moov.is_some()
 	}
 
 	fn init(&mut self, moov: Moov) -> Result<()> {
@@ -149,17 +156,25 @@ impl Import {
 			let handler = &trak.mdia.hdlr.handler;
 			let suffix = ".m4s";
 
-			let track = self.broadcast.unique_track(suffix)?;
+			// Declare the track at the fMP4's native timescale. Frame timestamps are
+			// emitted at this same scale (see below), so they satisfy the track's
+			// timescale invariant and ride the wire for the relay, redundant with the
+			// timing already inside each CMAF fragment.
+			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
+			let track = self.broadcast.create_track(
+				self.broadcast.unique_name(suffix),
+				moq_net::TrackInfo::default().with_timescale(timescale),
+			)?;
 
 			let kind = match handler.as_ref() {
 				b"vide" => {
 					let config = self.init_video(trak, &moov)?;
-					catalog.video.renditions.insert(track.name.clone(), config);
+					catalog.video.renditions.insert(track.name().to_string(), config);
 					TrackKind::Video
 				}
 				b"soun" => {
 					let config = self.init_audio(trak, &moov)?;
-					catalog.audio.renditions.insert(track.name.clone(), config);
+					catalog.audio.renditions.insert(track.name().to_string(), config);
 					TrackKind::Audio
 				}
 				b"sbtl" => return Err(Error::UnsupportedSubtitle.into()),
@@ -391,8 +406,8 @@ impl Import {
 
 	// Extract all frames out of an mdat atom using CMAF passthrough.
 	fn extract(&mut self, mdat: Mdat, mdat_raw: &[u8]) -> Result<()> {
-		let moov = self.moov.as_ref().ok_or(Error::MissingMoov)?;
-		let moof = self.moof.take().ok_or(Error::MissingMoof)?;
+		let moov = self.moov.as_ref().ok_or(Error::NoMoov)?;
+		let moof = self.moof.take().ok_or(Error::NoMoof)?;
 		let moof_size = self.moof_size;
 		let header_size = mdat_raw.len() - mdat.data.len();
 
@@ -419,7 +434,7 @@ impl Import {
 
 			let tfdt = traf.tfdt.as_ref().ok_or(Error::MissingTfdt)?;
 			let mut dts = tfdt.base_media_decode_time;
-			let timescale = trak.mdia.mdhd.timescale as u64;
+			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 
 			let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
 			let mut track_data_start: Option<usize> = None;
@@ -467,7 +482,9 @@ impl Import {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let timestamp = crate::container::Timestamp::from_scale(pts, timescale)?;
+					// Preserve the fmp4 track's native timescale so a passthrough re-emit
+					// doesn't go through a lossy microsecond detour.
+					let timestamp = moq_net::Timestamp::new(pts, timescale)?;
 
 					if offset + size > mdat.data.len() {
 						return Err(Error::InvalidDataOffset.into());
@@ -484,16 +501,16 @@ impl Import {
 
 					contains_keyframe |= keyframe;
 
-					if timestamp >= max_timestamp.unwrap_or(Timestamp::ZERO) {
+					if max_timestamp.is_none_or(|max| timestamp >= max) {
 						max_timestamp = Some(timestamp);
 					}
-					if timestamp <= min_timestamp.unwrap_or(Timestamp::MAX) {
+					if min_timestamp.is_none_or(|min| timestamp <= min) {
 						min_timestamp = Some(timestamp);
 					}
 
 					if let Some(last_timestamp) = track.last_timestamp
 						&& let Ok(duration) = timestamp.checked_sub(last_timestamp)
-						&& duration < track.min_duration.unwrap_or(Timestamp::MAX)
+						&& track.min_duration.is_none_or(|min| duration < min)
 					{
 						track.min_duration = Some(duration);
 					}
@@ -593,14 +610,23 @@ impl Import {
 				track.group.take().ok_or(Error::NoKeyframe)?
 			};
 
-			g.write_frame(fragment_bytes)?;
+			// Carry the fragment's earliest presentation time as the frame timestamp,
+			// in the track's native timescale. The relay reads it off the wire; the
+			// consumer still drives playback from the fragment's internal timing.
+			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
+			let mut frame = g.create_frame(moq_net::Frame {
+				size: fragment_bytes.len() as u64,
+				timestamp: Some(timestamp),
+			})?;
+			frame.write(fragment_bytes)?;
+			frame.finish()?;
 
 			track.group = Some(g);
 
 			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
 				let jitter = max - min + min_duration;
 
-				if jitter < track.jitter.unwrap_or(Timestamp::MAX) {
+				if track.jitter.is_none_or(|j| jitter < j) {
 					track.jitter = Some(jitter);
 
 					let mut catalog = self.catalog.lock();
@@ -610,17 +636,17 @@ impl Import {
 							let config = catalog
 								.video
 								.renditions
-								.get_mut(&track.track.name)
-								.ok_or_else(|| Error::MissingVideoTrack(track.track.name.clone()))?;
-							config.jitter = Some(jitter.convert()?);
+								.get_mut(track.track.name())
+								.ok_or_else(|| Error::MissingVideoTrack(track.track.name().to_string()))?;
+							config.jitter = Some(jitter.into());
 						}
 						TrackKind::Audio => {
 							let config = catalog
 								.audio
 								.renditions
-								.get_mut(&track.track.name)
-								.ok_or_else(|| Error::MissingAudioTrack(track.track.name.clone()))?;
-							config.jitter = Some(jitter.convert()?);
+								.get_mut(track.track.name())
+								.ok_or_else(|| Error::MissingAudioTrack(track.track.name().to_string()))?;
+							config.jitter = Some(jitter.into());
 						}
 					}
 				}
@@ -647,7 +673,7 @@ impl Import {
 	///
 	/// Broadcast-wide: every track inside this fMP4 import advances together; per-track
 	/// control is intentionally not exposed.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.tracks.values_mut() {
 			if let Some(mut g) = track.group.take() {
 				g.finish()?;
@@ -665,10 +691,10 @@ impl Drop for Import {
 		for track in self.tracks.values() {
 			match track.kind {
 				TrackKind::Video => {
-					catalog.video.renditions.remove(&track.track.name);
+					catalog.video.renditions.remove(track.track.name());
 				}
 				TrackKind::Audio => {
-					catalog.audio.renditions.remove(&track.track.name);
+					catalog.audio.renditions.remove(track.track.name());
 				}
 			}
 		}

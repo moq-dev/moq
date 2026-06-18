@@ -1,10 +1,9 @@
-//! GObject shell for the moqsink element, on a bare GstElement.
-//!
-//! Each request pad has its own chain function that writes buffers straight into the moq producers
-//! from the streaming thread. There is no intermediate channel and no worker task: `moq_net`'s producer
-//! writes are synchronous (an in-memory append, bounded by group eviction), so the streaming thread
-//! never blocks on the network. A thin async task only owns connect and the session lifetime. Pads are
-//! fully independent: one pad's chain never waits on another's data.
+//! Async-friendly MoqSink that keeps the original dynamic-pad Element
+//! behavior while pushing all network setup and CMAF publishing work into
+//! a Tokio task. The GLib state change thread never blocks, pads still get
+//! requested dynamically, and each pad simply forwards buffers to the
+//! background worker via an unbounded channel. Events are handled on the
+//! sink pad, with EOS aggregated locally before posting element EOS.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
@@ -14,10 +13,25 @@ use bytes::Bytes;
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
+use tokio::sync::mpsc;
+use url::Url;
+
 use hang::moq_net;
 
-use super::pad::{Pad, caps_supported};
-use super::session::{CAT, RUNTIME, ResolvedSettings, Session};
+static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+	tokio::runtime::Builder::new_multi_thread()
+		.enable_all()
+		.build()
+		.expect("spawn tokio runtime")
+});
+
+static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
+	gst::DebugCategory::new(
+		"moq-sink",
+		gst::DebugColorFlags::empty(),
+		Some("MoQ Sink (async element)"),
+	)
+});
 
 #[derive(Debug, Clone, Default)]
 struct Settings {
@@ -26,12 +40,19 @@ struct Settings {
 	tls_disable_verify: bool,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedSettings {
+	url: Url,
+	broadcast: String,
+	tls_disable_verify: bool,
+}
+
 impl TryFrom<Settings> for ResolvedSettings {
 	type Error = anyhow::Error;
 
 	fn try_from(value: Settings) -> Result<Self> {
 		Ok(Self {
-			url: url::Url::parse(value.url.as_ref().context("url property is required")?)?,
+			url: Url::parse(value.url.as_ref().context("url property is required")?)?,
 			broadcast: value
 				.broadcast
 				.as_ref()
@@ -42,67 +63,60 @@ impl TryFrom<Settings> for ResolvedSettings {
 	}
 }
 
-/// Live state, present only while started. The producers are created up front (so frames buffered
-/// before connect are sent once it completes); the catalog is `Option` because it is taken on the first
-/// finalize. Per-pad media lives in `pads`; `ended` tracks EOS for element-level EOS aggregation.
-struct State {
-	session: Session,
-	broadcast: moq_net::BroadcastProducer,
-	catalog: Option<moq_mux::catalog::Producer>,
-	pads: HashMap<String, Pad>,
-	ended: HashSet<String>,
-	eos_posted: bool,
+#[derive(Debug)]
+struct SessionHandle {
+	sender: mpsc::UnboundedSender<ControlMessage>,
+	join: tokio::task::JoinHandle<()>,
 }
 
-impl State {
-	/// Finalize every live producer once, catalog last; runs on EOS and on stop. Idempotent. The names of
-	/// the producers finalized are accumulated into the `Ok` order until the first error, which is logged
-	/// and then surfaced as the returned `Err`.
-	fn finalize_all(&mut self) -> Result<Vec<String>> {
-		let mut result: Result<Vec<String>> = Ok(Vec::new());
-		for (name, pad) in self.pads.iter_mut() {
-			match pad.finalize() {
-				Ok(true) => {
-					if let Ok(order) = result.as_mut() {
-						order.push(name.clone());
-					}
-				}
-				Ok(false) => {}
-				Err(err) => {
-					gst::warning!(CAT, "finalize {name}: {err:?}");
-					if result.is_ok() {
-						result = Err(err);
-					}
-				}
+impl SessionHandle {
+	fn stop(self) {
+		let _ = self.sender.send(ControlMessage::Shutdown);
+		RUNTIME.spawn(async move {
+			if let Err(err) = self.join.await {
+				gst::warning!(CAT, "session task ended with error: {err:?}");
 			}
-		}
-		if let Some(mut catalog) = self.catalog.take() {
-			match catalog.finish().context("finalize catalog") {
-				Ok(()) => {
-					if let Ok(order) = result.as_mut() {
-						order.push("catalog".to_string());
-					}
-				}
-				Err(err) => {
-					if result.is_ok() {
-						result = Err(err);
-					}
-				}
-			}
-		}
-		result
+		});
 	}
 }
 
-/// The `moqsink` element implementation: its GObject properties plus the live session state.
+struct PadState {
+	decoder: moq_mux::import::Track,
+	reference_pts: Option<gst::ClockTime>,
+}
+
+struct RuntimeState {
+	#[allow(dead_code)]
+	session: moq_net::Session,
+	broadcast: moq_net::BroadcastProducer,
+	catalog: moq_mux::catalog::Producer,
+	pads: HashMap<String, PadState>,
+}
+
+#[derive(Debug)]
+enum ControlMessage {
+	SetCaps {
+		pad_name: String,
+		caps: gst::Caps,
+	},
+	Buffer {
+		pad_name: String,
+		data: Bytes,
+		pts: Option<gst::ClockTime>,
+	},
+	Eos {
+		pad_name: String,
+	},
+	DropPad {
+		pad_name: String,
+	},
+	Shutdown,
+}
+
 #[derive(Default)]
 pub struct MoqSink {
 	settings: Mutex<Settings>,
-	/// Live state between Ready->Paused and Paused->Ready. One Mutex, not Arc<Mutex>: glib already owns
-	/// and shares the subclass instance across GStreamer's threads, so we need interior mutability but
-	/// not a second ownership layer. Held only briefly per buffer, so independent pad threads barely
-	/// contend.
-	state: Mutex<Option<State>>,
+	session: Mutex<Option<SessionHandle>>,
 }
 
 #[glib::object_subclass]
@@ -129,22 +143,6 @@ impl ObjectImpl for MoqSink {
 					.blurb("Disable TLS verification")
 					.default_value(false)
 					.build(),
-				// Read-only, served from the live session's status.
-				glib::ParamSpecBoolean::builder("connected")
-					.nick("Connected")
-					.blurb("Whether the session is currently connected")
-					.read_only()
-					.build(),
-				glib::ParamSpecString::builder("moq-version")
-					.nick("Negotiated version")
-					.blurb("The negotiated MoQ protocol version, null when disconnected")
-					.read_only()
-					.build(),
-				glib::ParamSpecUInt64::builder("estimated-send-bitrate")
-					.nick("Estimated send bitrate")
-					.blurb("Estimated send bitrate in bits per second (congestion controller), 0 when unavailable")
-					.read_only()
-					.build(),
 			]
 		});
 		PROPS.as_ref()
@@ -161,26 +159,12 @@ impl ObjectImpl for MoqSink {
 	}
 
 	fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+		let settings = self.settings.lock().unwrap();
 		match pspec.name() {
-			"connected" | "moq-version" | "estimated-send-bitrate" => {
-				let state = self.state.lock().unwrap();
-				let status = state.as_ref().map(|s| s.session.status());
-				match pspec.name() {
-					"connected" => status.is_some_and(|s| s.connected()).to_value(),
-					"moq-version" => status.and_then(|s| s.version()).to_value(),
-					"estimated-send-bitrate" => status.map(|s| s.send_bitrate()).unwrap_or(0).to_value(),
-					_ => unreachable!(),
-				}
-			}
-			name => {
-				let settings = self.settings.lock().unwrap();
-				match name {
-					"url" => settings.url.to_value(),
-					"broadcast" => settings.broadcast.to_value(),
-					"tls-disable-verify" => settings.tls_disable_verify.to_value(),
-					_ => unreachable!(),
-				}
-			}
+			"url" => settings.url.to_value(),
+			"broadcast" => settings.broadcast.to_value(),
+			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
+			_ => unreachable!(),
 		}
 	}
 
@@ -194,22 +178,19 @@ impl GstObjectImpl for MoqSink {}
 
 impl ElementImpl for MoqSink {
 	fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
-		static METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
+		static ELEMENT_METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
 			gst::subclass::ElementMetadata::new(
-				"MoQ Sink",
+				"MoQ Sink (async)",
 				"Sink/Network/MoQ",
 				"Transmits media over MoQ",
-				"Luke Curley <kixelated@gmail.com>, Steve McFarlin <steve@stevemcfarlin.com>, Ariel Molina <ariel@edis.mx>",
+				"Luke Curley <kixelated@gmail.com>, Steve McFarlin <steve@stevemcfarlin.com>",
 			)
 		});
-		Some(&*METADATA)
+		Some(&*ELEMENT_METADATA)
 	}
 
 	fn pad_templates() -> &'static [gst::PadTemplate] {
 		static PAD_TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
-			// Every codec that converges on moq_mux::import::Framed. The structural fields here
-			// (byte-stream/au, AAC mpegversion/stream-format) are what negotiation enforces, so the
-			// producer build does not re-check them.
 			let mut caps = gst::Caps::new_empty();
 			caps.merge(
 				gst::Caps::builder("video/x-h264")
@@ -234,9 +215,9 @@ impl ElementImpl for MoqSink {
 			);
 			caps.merge(gst::Caps::builder("audio/x-opus").build());
 
-			let sink =
+			let templ =
 				gst::PadTemplate::new("sink_%u", gst::PadDirection::Sink, gst::PadPresence::Request, &caps).unwrap();
-			vec![sink]
+			vec![templ]
 		});
 		PAD_TEMPLATES.as_ref()
 	}
@@ -247,236 +228,295 @@ impl ElementImpl for MoqSink {
 		name: Option<&str>,
 		_caps: Option<&gst::Caps>,
 	) -> Option<gst::Pad> {
-		// Wrap both pad functions in catch_panic_pad_function: these run on the streaming thread across the
-		// C FFI boundary, and they hit `state.lock().unwrap()` (poisonable) and `expect()`. An escaping
-		// panic would abort the process; here it becomes a clean FlowError / `false` instead.
 		let pad_builder = gst::Pad::builder_from_template(templ)
 			.chain_function(|pad, parent, buffer| {
-				MoqSink::catch_panic_pad_function(
-					parent,
-					|| Err(gst::FlowError::Error),
-					|this| this.forward_buffer(pad, buffer),
-				)
+				let element = parent
+					.and_then(|p| p.downcast_ref::<super::MoqSink>())
+					.ok_or(gst::FlowError::Error)?;
+				element.imp().forward_buffer(pad, buffer)
 			})
 			.event_function(|pad, parent, event| {
-				MoqSink::catch_panic_pad_function(parent, || false, |this| this.handle_event(pad, event))
+				let Some(element) = parent.and_then(|p| p.downcast_ref::<super::MoqSink>()) else {
+					return false;
+				};
+				element.imp().handle_event(pad, event)
 			});
 
-		let pad = match name {
-			Some(name) => pad_builder.name(name).build(),
-			None => pad_builder.generated_name().build(),
+		let pad = if let Some(name) = name {
+			pad_builder.name(name).build()
+		} else {
+			pad_builder.generated_name().build()
 		};
+
 		self.obj().add_pad(&pad).ok()?;
 		Some(pad)
 	}
 
 	fn release_pad(&self, pad: &gst::Pad) {
-		{
-			let _rt = RUNTIME.enter();
-			if let Some(state) = self.state.lock().unwrap().as_mut() {
-				let name = pad.name();
-				if let Some(mut media) = state.pads.remove(name.as_str())
-					&& let Err(err) = media.finalize()
-				{
-					gst::warning!(CAT, "finalize on release {name}: {err:?}");
-				}
-				state.ended.remove(name.as_str());
-			}
+		if let Some(session) = self.session.lock().unwrap().as_ref() {
+			let _ = session.sender.send(ControlMessage::DropPad {
+				pad_name: pad.name().to_string(),
+			});
 		}
 		let _ = self.obj().remove_pad(pad);
-		// Removing a still-active pad can leave only already-ended pads, which now satisfies EOS.
-		self.maybe_post_eos();
 	}
 
 	fn change_state(&self, transition: gst::StateChange) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
 		match transition {
-			gst::StateChange::ReadyToPaused => self.start_session()?,
+			gst::StateChange::ReadyToPaused => {
+				self.start_session().map_err(|err| {
+					gst::error!(CAT, obj = self.obj(), "failed to start session: {err:#}");
+					gst::StateChangeError
+				})?;
+			}
 			gst::StateChange::PausedToReady => self.stop_session(),
-			_ => {}
+			_ => (),
 		}
+
 		self.parent_change_state(transition)
 	}
 }
 
 impl MoqSink {
-	/// Create the session and producers before any buffer flows.
-	fn start_session(&self) -> Result<(), gst::StateChangeError> {
-		let settings = ResolvedSettings::try_from(self.settings.lock().unwrap().clone()).map_err(|err| {
-			gst::error!(CAT, obj = self.obj(), "invalid settings: {err:#}");
-			gst::StateChangeError
-		})?;
-		let (session, broadcast, catalog) = Session::start(settings, self.obj().downgrade()).map_err(|err| {
-			gst::error!(CAT, obj = self.obj(), "failed to start session: {err:?}");
-			gst::StateChangeError
-		})?;
-		*self.state.lock().unwrap() = Some(State {
-			session,
-			broadcast,
-			catalog: Some(catalog),
-			pads: HashMap::new(),
-			ended: HashSet::new(),
-			eos_posted: false,
+	fn start_session(&self) -> Result<()> {
+		let settings = {
+			let settings = self.settings.lock().unwrap().clone();
+			ResolvedSettings::try_from(settings)?
+		};
+
+		let (tx, rx) = mpsc::unbounded_channel::<ControlMessage>();
+		let element_weak = self.obj().downgrade();
+
+		let join = RUNTIME.spawn(async move {
+			if let Err(err) = run_session(settings, rx, element_weak).await {
+				gst::error!(CAT, "session error: {err:#}");
+			}
 		});
+
+		*self.session.lock().unwrap() = Some(SessionHandle { sender: tx, join });
 		Ok(())
 	}
 
-	/// Finalize the producers (catalog last) and tear down the session. Finalize is best-effort: we are
-	/// tearing down regardless.
 	fn stop_session(&self) {
-		let Some(mut state) = self.state.lock().unwrap().take() else {
-			return;
-		};
-		let _rt = RUNTIME.enter();
-		if let Err(err) = state.finalize_all() {
-			gst::warning!(CAT, "finalize on stop: {err:?}");
+		if let Some(handle) = self.session.lock().unwrap().take() {
+			handle.stop();
 		}
-		// Drop the broadcast (closing it) before reaping the session task.
-		drop(state.broadcast);
-		state.session.stop();
 	}
 
-	/// Write one buffer straight into its pad's producer. Per-pad failures (bad caps/bitstream) drop
-	/// quietly so the session and other pads keep going; an unmappable buffer or a dead session is a hard
-	/// error on this pad's streaming thread.
 	fn forward_buffer(&self, pad: &gst::Pad, buffer: gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
-		// Map and copy outside the lock: neither needs shared state, so the per-pad lock is held only for
-		// the producer write. An oversized buffer is still copied here (it already exists upstream), but
-		// moq-net rejects it (FrameTooLarge) before reserving its own group slot, and that error invalidates
-		// just this pad.
+		let sender = self
+			.session
+			.lock()
+			.unwrap()
+			.as_ref()
+			.map(|handle| handle.sender.clone())
+			.ok_or(gst::FlowError::Flushing)?;
+
+		let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
 		let pts = buffer.pts();
-		let map = buffer.map_readable().map_err(|_| {
-			gst::error!(CAT, "failed to map buffer on pad {}", pad.name());
-			gst::FlowError::Error
-		})?;
 		let data = Bytes::copy_from_slice(map.as_slice());
-		drop(map);
 
-		// Producer writes can touch tokio time (group eviction), so hold the runtime context here.
-		let _rt = RUNTIME.enter();
-		let mut guard = self.state.lock().unwrap();
-		let Some(state) = guard.as_mut() else {
-			return Err(gst::FlowError::Flushing); // not started
-		};
-		if state.session.errored() {
-			return Err(gst::FlowError::Error);
-		}
+		sender
+			.send(ControlMessage::Buffer {
+				pad_name: pad.name().to_string(),
+				data,
+				pts,
+			})
+			.map_err(|_| gst::FlowError::Flushing)?;
 
-		// The pad almost always exists already (caps arrive before buffers), so look it up without
-		// allocating an owned name; only the rare first-buffer insert pays for the key.
-		let name = pad.name();
-		let media = match state.pads.get_mut(name.as_str()) {
-			Some(media) => media,
-			None => state.pads.entry(name.to_string()).or_insert_with(Pad::new),
-		};
-		if media.is_failed() {
-			return Ok(gst::FlowSuccess::Ok); // drop quietly; the pad already reported its failure
-		}
-
-		let no_segment = media.push_buffer(data, pts);
-		drop(guard);
-
-		if no_segment {
-			gst::element_warning!(
-				self.obj(),
-				gst::StreamError::Format,
-				(
-					"pad {} received buffers with no TIME segment; nothing is published for it",
-					pad.name()
-				)
-			);
-		}
 		Ok(gst::FlowSuccess::Ok)
 	}
 
 	fn handle_event(&self, pad: &gst::Pad, event: gst::Event) -> bool {
 		match event.view() {
 			gst::EventView::Caps(caps) => {
-				let caps = caps.caps().to_owned();
-				// Reject unsupported caps synchronously (NotNegotiated) before building a producer.
-				if !caps_supported(&caps) {
-					gst::warning!(CAT, "rejecting unsupported caps on pad {}", pad.name());
+				let Some(sender) = self
+					.session
+					.lock()
+					.unwrap()
+					.as_ref()
+					.map(|handle| handle.sender.clone())
+				else {
+					return false;
+				};
+
+				if sender
+					.send(ControlMessage::SetCaps {
+						pad_name: pad.name().to_string(),
+						caps: caps.caps().to_owned(),
+					})
+					.is_err()
+				{
 					return false;
 				}
-				let _rt = RUNTIME.enter();
-				if let Some(state) = self.state.lock().unwrap().as_mut() {
-					let State {
-						broadcast,
-						catalog,
-						pads,
-						..
-					} = state;
-					if let Some(catalog) = catalog.as_ref() {
-						pads.entry(pad.name().to_string())
-							.or_insert_with(Pad::new)
-							.observe_caps(broadcast, catalog, &caps);
-					}
-				}
-				gst::Pad::event_default(pad, Some(&*self.obj()), event)
-			}
-			gst::EventView::Segment(segment) => {
-				if let Some(state) = self.state.lock().unwrap().as_mut() {
-					state
-						.pads
-						.entry(pad.name().to_string())
-						.or_insert_with(Pad::new)
-						.observe_segment(segment.segment().to_owned());
-				}
+
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
 			gst::EventView::Eos(_) => {
-				self.handle_eos(pad);
-				gst::Pad::event_default(pad, Some(&*self.obj()), event)
-			}
-			// FLUSH_STOP re-anchors the timeline; the trailing SEGMENT is accepted fresh. The producer is
-			// kept (FLUSH is not EOS).
-			gst::EventView::FlushStop(_) => {
-				if let Some(state) = self.state.lock().unwrap().as_mut()
-					&& let Some(media) = state.pads.get_mut(pad.name().as_str())
+				let Some(sender) = self
+					.session
+					.lock()
+					.unwrap()
+					.as_ref()
+					.map(|handle| handle.sender.clone())
+				else {
+					return false;
+				};
+
+				if sender
+					.send(ControlMessage::Eos {
+						pad_name: pad.name().to_string(),
+					})
+					.is_err()
 				{
-					media.flush();
+					return false;
 				}
-				gst::Pad::event_default(pad, Some(&*self.obj()), event)
+
+				true
 			}
 			_ => gst::Pad::event_default(pad, Some(&*self.obj()), event),
 		}
 	}
+}
 
-	/// Mark a pad ended, then post the element EOS if that was the last active pad.
-	fn handle_eos(&self, pad: &gst::Pad) {
-		if let Some(state) = self.state.lock().unwrap().as_mut() {
-			state.ended.insert(pad.name().to_string());
+async fn run_session(
+	settings: ResolvedSettings,
+	mut rx: mpsc::UnboundedReceiver<ControlMessage>,
+	element_weak: gst::glib::WeakRef<super::MoqSink>,
+) -> Result<()> {
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(settings.tls_disable_verify);
+
+	let client = client_config.init()?;
+
+	let origin = moq_net::Origin::random().produce();
+	let mut broadcast = moq_net::BroadcastInfo::new().produce();
+	let broadcast_consumer = broadcast.consume();
+
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+
+	// Held for the lifetime of this task; dropping it (on return) unannounces the broadcast.
+	let _publish = origin
+		.publish_broadcast(&settings.broadcast, &broadcast_consumer)
+		.context("failed to publish broadcast")?;
+
+	let client = client.with_publisher(&origin);
+	let session = client.connect(settings.url.clone()).await?;
+
+	let mut runtime = RuntimeState {
+		session,
+		broadcast,
+		catalog,
+		pads: HashMap::new(),
+	};
+	let mut eos_pads = HashSet::new();
+
+	while let Some(msg) = rx.recv().await {
+		match msg {
+			ControlMessage::SetCaps { pad_name, caps } => {
+				if let Err(err) = handle_caps(&mut runtime, pad_name, caps) {
+					gst::error!(CAT, "failed to configure pad: {err:#}");
+				}
+			}
+			ControlMessage::Buffer { pad_name, data, pts } => {
+				if let Err(err) = handle_buffer(&mut runtime, pad_name, data, pts) {
+					gst::error!(CAT, "failed to publish buffer: {err:#}");
+				}
+			}
+			ControlMessage::DropPad { pad_name } => {
+				runtime.pads.remove(&pad_name);
+				eos_pads.remove(&pad_name);
+			}
+			ControlMessage::Eos { pad_name } => {
+				eos_pads.insert(pad_name);
+
+				if !runtime.pads.is_empty() && eos_pads.len() == runtime.pads.len() {
+					if let Some(element) = element_weak.upgrade() {
+						let eos_message = gst::message::Eos::builder().src(&element).build();
+						let _ = element.post_message(eos_message);
+					}
+				}
+			}
+			ControlMessage::Shutdown => break,
 		}
-		self.maybe_post_eos();
 	}
 
-	/// Finalize and post the element EOS once every active sink pad has ended. Locks internally and is
-	/// idempotent via `eos_posted`, so both the EOS handler and `release_pad` (releasing the last active
-	/// pad can satisfy aggregation for pads that already ended) can call it.
-	fn maybe_post_eos(&self) {
-		let _rt = RUNTIME.enter();
-		let mut guard = self.state.lock().unwrap();
-		let Some(state) = guard.as_mut() else {
-			return;
-		};
-		let sink_pads = self.obj().sink_pads();
-		let all_ended = !sink_pads.is_empty() && sink_pads.iter().all(|p| state.ended.contains(p.name().as_str()));
-		if !all_ended || state.eos_posted {
-			return;
-		}
-		state.eos_posted = true;
-		let result = state.finalize_all();
-		drop(guard);
+	Ok(())
+}
 
-		match result {
-			Ok(order) => {
-				gst::debug!(CAT, "finalized on EOS: {order:?}");
-				gst::info!(CAT, "all pads ended, posting EOS");
-				let obj = self.obj();
-				let _ = obj.post_message(gst::message::Eos::builder().src(&*obj).build());
-			}
-			Err(err) => {
-				gst::element_error!(self.obj(), gst::CoreError::Failed, ("finalize failed"), ["{err:?}"]);
-			}
+fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) -> Result<()> {
+	let structure = caps.structure(0).context("empty caps")?;
+	let decoder: moq_mux::import::Track = match structure.name().as_str() {
+		"video/x-h264" => {
+			let bytes = Bytes::new();
+			new_decoder(runtime, "avc3", &bytes)?
 		}
-	}
+		"video/x-h265" => {
+			let bytes = Bytes::new();
+			new_decoder(runtime, "hev1", &bytes)?
+		}
+		"video/x-av1" => {
+			let bytes = Bytes::new();
+			new_decoder(runtime, "av01", &bytes)?
+		}
+		"video/x-vp8" => {
+			let bytes = Bytes::new();
+			new_decoder(runtime, "vp8", &bytes)?
+		}
+		"video/x-vp9" => {
+			let bytes = Bytes::new();
+			new_decoder(runtime, "vp9", &bytes)?
+		}
+		"audio/mpeg" => {
+			let codec_data = structure
+				.get::<gst::Buffer>("codec_data")
+				.context("AAC caps missing codec_data")?;
+			let map = codec_data.map_readable().context("failed to map codec_data")?;
+			let data = Bytes::copy_from_slice(map.as_slice());
+			new_decoder(runtime, "aac", &data)?
+		}
+		"audio/x-opus" => {
+			let channels: i32 = structure.get("channels").unwrap_or(2);
+			let rate: i32 = structure.get("rate").unwrap_or(48_000);
+			let channel_count =
+				u32::try_from(channels).with_context(|| format!("Opus caps has negative channel count {channels}"))?;
+			let sample_rate =
+				u32::try_from(rate).with_context(|| format!("Opus caps has negative sample rate {rate}"))?;
+			let config = moq_mux::codec::opus::Config {
+				sample_rate,
+				channel_count,
+			};
+			let track = moq_mux::import::unique_track(&mut runtime.broadcast, ".opus")?;
+			moq_mux::codec::opus::Import::new(track, runtime.catalog.clone(), config)?.into()
+		}
+		other => anyhow::bail!("unsupported caps: {}", other),
+	};
+
+	runtime.pads.insert(
+		pad_name,
+		PadState {
+			decoder,
+			reference_pts: None,
+		},
+	);
+	Ok(())
+}
+
+fn new_decoder(runtime: &mut RuntimeState, format: &str, buf: &[u8]) -> Result<moq_mux::import::Track> {
+	let name = runtime.broadcast.unique_name(&format!(".{format}"));
+	let request = runtime.broadcast.reserve_track(name)?;
+	let decoder = moq_mux::import::Track::new(request, runtime.catalog.clone(), format, buf)?;
+	Ok(decoder)
+}
+
+fn handle_buffer(runtime: &mut RuntimeState, pad_name: String, data: Bytes, pts: Option<gst::ClockTime>) -> Result<()> {
+	let pad = runtime.pads.get_mut(&pad_name).context("pad not configured")?;
+
+	let ts = pts.and_then(|pts| {
+		let reference = *pad.reference_pts.get_or_insert(pts);
+		let relative = pts.checked_sub(reference)?;
+		hang::container::Timestamp::from_micros(relative.nseconds() / 1000).ok()
+	});
+
+	pad.decoder.decode(&data, ts).map_err(|e| anyhow::anyhow!(e))
 }

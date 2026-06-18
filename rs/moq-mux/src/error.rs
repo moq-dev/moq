@@ -59,6 +59,18 @@ pub enum Error {
 	#[error("av1: {0}")]
 	Av1(#[from] crate::codec::av1::Error),
 
+	/// Error parsing VP8.
+	#[error("vp8: {0}")]
+	Vp8(#[from] crate::codec::vp8::Error),
+
+	/// Error parsing VP9.
+	#[error("vp9: {0}")]
+	Vp9(#[from] crate::codec::vp9::Error),
+
+	/// Error parsing legacy audio (MP2 / AC-3 / E-AC-3).
+	#[error("legacy: {0}")]
+	Legacy(#[from] crate::codec::legacy::Error),
+
 	/// Timestamp overflow when converting between timescales.
 	#[error("timestamp overflow")]
 	TimestampOverflow(#[from] moq_net::TimeOverflow),
@@ -79,13 +91,10 @@ pub enum Error {
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
 
-	/// Buffer was not fully consumed.
-	#[error("buffer was not fully consumed")]
-	BufferNotConsumed,
-
-	/// Importer dispatcher cannot return a single track for multi-track containers.
-	#[error("{0} can contain multiple tracks")]
-	MultipleTracks(&'static str),
+	/// A non-keyframe frame was received before any keyframe opened a group.
+	/// A track joining mid-stream should skip frames until the first keyframe.
+	#[error("{0}")]
+	MissingKeyframe(#[from] crate::container::MissingKeyframe),
 
 	/// Multi-track container reported no tracks.
 	#[error("init segment did not initialize the importer")]

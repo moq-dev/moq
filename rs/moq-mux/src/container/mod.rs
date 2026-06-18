@@ -62,6 +62,16 @@ pub struct Frame {
 	pub keyframe: bool,
 }
 
+/// A non-keyframe frame arrived with no open group.
+///
+/// A track must open with a keyframe (and so must the frame after
+/// [`finish_group`](Producer::finish_group) / [`seek`](Producer::seek)).
+/// [`Producer::write`] returns this so a caller joining mid-stream can skip
+/// frames until the first keyframe instead of treating it as fatal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("missing keyframe: a group must open on a keyframe")]
+pub struct MissingKeyframe;
+
 /// Encode and decode media frames over a moq-lite group.
 ///
 /// Implementors decide how many [`Frame`]s map onto one moq-lite frame:
@@ -69,8 +79,9 @@ pub struct Frame {
 /// pack many samples into a single moof+mdat fragment.
 pub trait Container {
 	/// Container-specific error. Must be convertible from [`moq_net::Error`]
-	/// so the IO layer's errors propagate cleanly.
-	type Error: std::error::Error + Send + Sync + Unpin + From<moq_net::Error>;
+	/// (so IO errors propagate) and [`MissingKeyframe`] (so the producer can
+	/// reject a group that doesn't open on a keyframe).
+	type Error: std::error::Error + Send + Sync + Unpin + From<moq_net::Error> + From<MissingKeyframe>;
 
 	/// Encode one or more frames into a single moq-lite frame appended to `group`.
 	fn write(&self, group: &mut moq_net::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error>;

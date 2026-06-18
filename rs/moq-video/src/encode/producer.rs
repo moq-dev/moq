@@ -8,10 +8,10 @@
 
 use std::sync::{Arc, Condvar, Mutex};
 
-use moq_mux::container::Timestamp;
+use moq_net::Timestamp;
 
 use crate::Error;
-use crate::capture::{self, Camera};
+use crate::capture::{self, FrameSource};
 
 use super::encoder::{self, Encoder};
 
@@ -25,27 +25,32 @@ const DEFAULT_FRAMERATE: u32 = 30;
 /// trigger capture on demand. `moq_mux::codec::h264::Import` handles
 /// catalog registration and framing.
 pub struct Producer {
-	import: moq_mux::codec::h264::Import<moq_mux::catalog::hang::Extra>,
+	split: moq_mux::codec::h264::Split,
+	import: moq_mux::codec::h264::Import,
 }
 
 impl Producer {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self, Error> {
-		let import =
-			moq_mux::codec::h264::Import::new(broadcast, catalog).with_mode(moq_mux::codec::h264::Mode::Avc3)?;
-		Ok(Self { import })
+	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self, Error> {
+		let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
+		let import = moq_mux::codec::h264::Import::new(track, catalog);
+		let split = moq_mux::codec::h264::Split::new();
+		Ok(Self { split, import })
 	}
 
-	/// The underlying track producer, eagerly created by avc3 mode. Clone it
-	/// to watch subscription state via [`used`](moq_net::TrackProducer::used) /
-	/// [`unused`](moq_net::TrackProducer::unused).
-	pub fn track(&self) -> Option<&moq_net::TrackProducer> {
-		self.import.track()
+	/// A watch-only handle to the track's subscriber demand, created eagerly so
+	/// subscription state is observable before any frames arrive. Watch it via
+	/// [`used`](moq_net::TrackDemand::used) / [`unused`](moq_net::TrackDemand::unused).
+	pub fn demand(&self) -> moq_net::TrackDemand {
+		self.import.demand()
 	}
 
 	/// Publish already-encoded Annex-B packets at the given timestamp.
 	pub fn publish(&mut self, packets: Vec<bytes::Bytes>, timestamp: Timestamp) -> Result<(), Error> {
-		for mut packet in packets {
-			self.import.decode_frame(&mut packet, Some(timestamp))?;
+		for packet in packets {
+			// The encoder emits one whole access unit per packet, so flush to emit it.
+			let mut frames = self.split.decode(&packet, Some(timestamp))?;
+			frames.extend(self.split.flush(Some(timestamp))?);
+			self.import.decode(frames)?;
 		}
 		Ok(())
 	}
@@ -94,14 +99,11 @@ pub async fn publish_capture(
 	}
 
 	let producer = Producer::new(broadcast, catalog)?;
-	let track = producer
-		.track()
-		.cloned()
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("avc3 track was not created")))?;
+	let demand = producer.demand();
 
 	let gate = Gate::new();
 
-	// ffmpeg capture + encode is blocking; keep it off the async runtime.
+	// Camera capture + encode is blocking; keep it off the async runtime.
 	let worker_gate = gate.clone();
 	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, capture, encode, worker_gate, clock));
 
@@ -109,7 +111,7 @@ pub async fn publish_capture(
 		// Surface a capture/encode failure (e.g. camera open) promptly.
 		res = &mut worker => res.map_err(|e| Error::Codec(anyhow::anyhow!("capture task: {e}")))?,
 		// The broadcast was dropped: stop the worker and wait for it to flush.
-		() = monitor_demand(&track, &gate) => {
+		() = monitor_demand(&demand, &gate) => {
 			gate.close();
 			worker
 				.await
@@ -120,13 +122,13 @@ pub async fn publish_capture(
 
 /// Toggle the gate as viewers subscribe and unsubscribe. Returns once the
 /// track stops being announced (broadcast dropped / aborted).
-async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
+async fn monitor_demand(demand: &moq_net::TrackDemand, gate: &Gate) {
 	loop {
-		match track.used().await {
+		match demand.used().await {
 			Ok(()) => gate.set_active(true),
 			Err(err) => return log_track_ended(err),
 		}
-		match track.unused().await {
+		match demand.unused().await {
 			Ok(()) => gate.set_active(false),
 			Err(err) => return log_track_ended(err),
 		}
@@ -154,8 +156,12 @@ fn capture_loop(
 	gate: Arc<Gate>,
 	clock: moq_mux::Clock,
 ) -> Result<(), Error> {
-	let mut camera: Option<Camera> = None;
+	let mut camera: Option<Box<dyn FrameSource>> = None;
 	let mut encoder: Option<Encoder> = None;
+	// Force an IDR on the first frame of each (re)open so a viewer subscribing
+	// after an idle gap can start decoding immediately, rather than waiting for
+	// the next GOP boundary.
+	let mut force_keyframe = false;
 	let mut last_ts = Timestamp::from_micros(0)?;
 	// The catalog video rendition only appears once a frame has been encoded
 	// (the importer reads the SPS). Until then we keep capturing regardless of
@@ -180,7 +186,7 @@ fn capture_loop(
 		// Open the camera (and an encoder sized to its negotiated mode) the
 		// first time we're watched after being idle.
 		if camera.is_none() {
-			let cam = Camera::open(&capture)?;
+			let cam = capture::open(&capture)?;
 			// Prefer an explicit --fps, otherwise use the camera's reported
 			// rate, falling back only if the backend doesn't expose one.
 			let framerate = capture
@@ -198,6 +204,7 @@ fn capture_loop(
 			);
 			camera = Some(cam);
 			encoder = Some(enc);
+			force_keyframe = true;
 		}
 
 		let frame = match camera.as_mut().expect("camera open above").read()? {
@@ -208,7 +215,11 @@ fn capture_loop(
 		let ts = Timestamp::from_micros(clock.micros())?;
 		last_ts = ts;
 
-		let packets = encoder.as_mut().expect("encoder built above").encode(&frame)?;
+		let packets = encoder
+			.as_mut()
+			.expect("encoder built above")
+			.encode(&frame, force_keyframe)?;
+		force_keyframe = false;
 		// Once the encoder has emitted a frame, the importer has parsed the SPS
 		// and the catalog rendition exists, so the gate can take over.
 		catalog_ready |= !packets.is_empty();

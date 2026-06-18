@@ -5,20 +5,67 @@
 //! (inline SPS/PPS) as length-prefixed NALU + out-of-band avcC, which is
 //! what every CMAF and MKV consumer expects. [`Export`] subscribes to a
 //! catalog-narrowed H.264 rendition and emits an Annex-B elementary
-//! stream; [`Import`] is the importer (auto-detects either wire shape
-//! from the leading bytes).
+//! stream; [`Split`] does the byte-level framing for the Annex-B (avc3)
+//! wire shape and [`Import`] is the pure frame publisher that resolves the
+//! catalog. avc1 (length-prefixed NALU) has no stream framing; wrap one
+//! access unit with `avc1_frame`.
 
 mod export;
 mod import;
+mod split;
 
 pub use export::*;
 pub use import::*;
+pub use split::*;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 // H.264 NAL unit types (ISO/IEC 14496-10 §7.4.1).
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
+
+/// Wrap one avc1 (length-prefixed NALU) access unit as a single
+/// [`Frame`](crate::container::Frame), with the keyframe flag set when it
+/// carries an IDR slice (NAL type 5).
+///
+/// avc1 is not a stream: each access unit arrives whole with its NALU
+/// `length_size` known out-of-band from the avcC (`super::Avcc::parse(avcc).length_size`).
+/// The payload is passed through verbatim.
+pub(crate) fn avc1_frame(
+	data: &[u8],
+	length_size: usize,
+	pts: moq_net::Timestamp,
+) -> crate::Result<crate::container::Frame> {
+	Ok(crate::container::Frame {
+		timestamp: pts,
+		payload: data.to_vec().into(),
+		keyframe: avc1_is_keyframe(data, length_size),
+		duration: None,
+	})
+}
+
+/// Detect whether an avc1-shaped (length-prefixed) buffer contains an IDR slice.
+fn avc1_is_keyframe(data: &[u8], length_size: usize) -> bool {
+	let mut offset = 0;
+	while offset + length_size <= data.len() {
+		let nal_len = match length_size {
+			1 => data[offset] as usize,
+			2 => u16::from_be_bytes([data[offset], data[offset + 1]]) as usize,
+			3 => u32::from_be_bytes([0, data[offset], data[offset + 1], data[offset + 2]]) as usize,
+			4 => u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]) as usize,
+			_ => return false,
+		};
+		offset += length_size;
+		if offset + nal_len > data.len() {
+			break;
+		}
+		if nal_len > 0 && data[offset] & 0x1f == 5 {
+			return true; // IDR slice
+		}
+		offset += nal_len;
+	}
+	false
+}
 
 /// H.264 parsing and transform errors.
 #[derive(Debug, thiserror::Error)]
@@ -48,7 +95,7 @@ pub enum Error {
 	#[error("forbidden zero bit is not zero")]
 	ForbiddenZeroBit,
 
-	#[error("not initialized; call initialize() or with_mode() first")]
+	#[error("not initialized")]
 	NotInitialized,
 
 	#[error("avc3 track not created")]
@@ -56,9 +103,6 @@ pub enum Error {
 
 	#[error("missing timestamp")]
 	MissingTimestamp,
-
-	#[error("decode_stream is avc3 only")]
-	StreamNotAvc3,
 
 	#[error("annexb: {0}")]
 	Annexb(#[from] crate::codec::annexb::Error),
@@ -373,6 +417,32 @@ mod tests {
 			buf.extend_from_slice(nal);
 		}
 		buf.freeze()
+	}
+
+	/// avc1: a length-prefixed access unit with an IDR slice wraps as one keyframe;
+	/// the payload is passed through verbatim.
+	#[test]
+	fn avc1_frame_keyframe() {
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let mut au = BytesMut::new();
+		au.extend_from_slice(&(idr.len() as u32).to_be_bytes());
+		au.extend_from_slice(idr);
+
+		let frame = avc1_frame(&au, 4, moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
+		assert!(frame.keyframe);
+		assert_eq!(frame.payload[4..], *idr);
+	}
+
+	/// avc1: a length-prefixed access unit with a non-IDR slice is a delta frame.
+	#[test]
+	fn avc1_frame_delta() {
+		let pslice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+		let mut au = BytesMut::new();
+		au.extend_from_slice(&(pslice.len() as u32).to_be_bytes());
+		au.extend_from_slice(pslice);
+
+		let frame = avc1_frame(&au, 4, moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
+		assert!(!frame.keyframe);
 	}
 
 	#[test]

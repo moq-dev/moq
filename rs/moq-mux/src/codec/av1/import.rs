@@ -1,66 +1,103 @@
-use crate::container::jitter::Jitter;
+//! AV1 importer.
+//!
+//! Publishes raw AV1 (OBU-framed, inline sequence headers) on a single moq
+//! track and resolves the catalog rendition. The codec config comes from the
+//! sequence header the splitter packages into the first keyframe (scanned out of
+//! the frame here), or from an av1C record handed to
+//! [`initialize`](Import::initialize). A keyframe that can't be configured is an
+//! error; non-keyframes before the first config are written through to the
+//! producer, which reports [`MissingKeyframe`](crate::container::MissingKeyframe)
+//! for a mid-stream join. OBU byte parsing lives in [`Split`](super::Split); this type is a
+//! pure frame publisher that whoever owns the split drives via [`decode`](Import::decode).
 
-use bytes::BytesMut;
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use scuffle_av1::seq::SequenceHeaderObu;
+use scuffle_av1::{ObuHeader, ObuType};
 
 use super::Error;
+use super::split::ObuIterator;
 use crate::Result;
+use crate::catalog::hang::CatalogExt;
+use crate::container::Frame;
+use crate::container::jitter::MinFrameDuration;
 
-/// A decoder for AV1 with inline sequence headers.
-pub struct Import {
-	// Where new media tracks come from.
-	tracks: crate::track_provider::TrackProvider,
-
-	// The catalog being produced.
-	catalog: crate::catalog::Producer,
-
-	// The track being produced.
-	track: Option<crate::container::Producer<crate::catalog::hang::Container>>,
-
-	// Whether the track has been initialized.
+/// A pure-publisher importer for AV1 with inline sequence headers.
+///
+/// Build it with [`new`](Self::new), passing the track producer and the
+/// [`catalog::Producer`](crate::catalog::Producer) it publishes into, and feed it
+/// frames a [`Split`](super::Split) produced via [`decode`](Self::decode). The
+/// catalog rendition fills in lazily once the config is known.
+pub struct Import<E: CatalogExt = ()> {
+	track: crate::container::Producer<crate::catalog::hang::Container>,
+	rendition: crate::catalog::VideoTrack<E>,
 	config: Option<hang::catalog::VideoConfig>,
-
-	// The current frame being built.
-	current: Frame,
-
-	// Used to compute wall clock timestamps if needed.
-	zero: Option<tokio::time::Instant>,
-
-	// Tracks the minimum frame duration and updates the catalog `jitter` field.
-	jitter: Jitter,
+	last_seq: Option<Bytes>,
+	jitter: MinFrameDuration,
 }
 
-#[derive(Default)]
-struct Frame {
-	chunks: BytesMut,
-	contains_keyframe: bool,
-	contains_frame: bool,
-}
-
-impl Import {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+impl<E: CatalogExt> Import<E> {
+	/// Publish on an existing track producer, registering the rendition in `catalog`.
+	pub fn new(track: moq_net::TrackProducer, catalog: crate::catalog::Producer<E>) -> Self {
+		let rendition = catalog.video_track(track.name());
 		Self {
-			tracks: crate::track_provider::TrackProvider::unique(broadcast, ".av01"),
-			catalog,
-			track: None,
+			track: crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy),
+			rendition,
 			config: None,
-			current: Default::default(),
-			zero: None,
-			jitter: Jitter::new(),
+			last_seq: None,
+			jitter: MinFrameDuration::new(),
 		}
 	}
 
-	pub fn new_with_track(track: moq_net::TrackProducer, catalog: crate::catalog::Producer) -> Self {
-		Self {
-			tracks: crate::track_provider::TrackProvider::fixed(track),
-			catalog,
-			track: None,
-			config: None,
-			current: Default::default(),
-			zero: None,
-			jitter: Jitter::new(),
+	/// Resolve the codec config from a sequence header / av1C and other metadata.
+	///
+	/// - **av1C** (leading `0x81` marker): the buffer is parsed as an
+	///   AV1CodecConfigurationRecord, which resolves the config.
+	/// - **raw OBUs**: any sequence header resolves the config.
+	///
+	/// Optional, since the importer also self-initializes from the first keyframe.
+	/// The buffer is *not* consumed: the dispatcher-owned [`Split`](super::Split)
+	/// consumes it (seeding the sequence header so it prefixes the first keyframe).
+	pub fn initialize(&mut self, buf: &[u8]) -> Result<()> {
+		let data = buf;
+
+		// av1C box starts with 0x81 (marker=1, version=1) per ISO/IEC 14496-15.
+		if data.len() >= 16 && data[0] == 0x81 {
+			self.init_from_av1c(data)?;
+			return Ok(());
 		}
+
+		// Raw OBUs: resolve the config from any sequence header.
+		if let Some(seq) = find_sequence_header(data) {
+			self.configure_from_seq(&seq)?;
+		}
+		Ok(())
+	}
+
+	fn init_from_av1c(&mut self, data: &[u8]) -> Result<()> {
+		let seq_profile = (data[1] >> 5) & 0x07;
+		let seq_level_idx = data[1] & 0x1F;
+		let tier = ((data[2] >> 7) & 0x01) == 1;
+		let high_bitdepth = ((data[2] >> 6) & 0x01) == 1;
+		let twelve_bit = ((data[2] >> 5) & 0x01) == 1;
+
+		// Resolution is unknown from av1C; it's filled when the first sequence header arrives.
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
+			profile: seq_profile,
+			level: seq_level_idx,
+			tier: if tier { 'H' } else { 'M' },
+			bitdepth: super::bitdepth(twelve_bit, high_bitdepth),
+			mono_chrome: ((data[2] >> 4) & 0x01) == 1,
+			chroma_subsampling_x: ((data[2] >> 3) & 0x01) == 1,
+			chroma_subsampling_y: ((data[2] >> 2) & 0x01) == 1,
+			chroma_sample_position: data[2] & 0x03,
+			color_primaries: 1,
+			transfer_characteristics: 1,
+			matrix_coefficients: 1,
+			full_range: false,
+		});
+		config.container = hang::catalog::Container::Legacy;
+		self.apply_config(config);
+		Ok(())
 	}
 
 	fn init(&mut self, seq_header: &SequenceHeaderObu) -> Result<()> {
@@ -94,46 +131,18 @@ impl Import {
 		config.coded_width = Some(seq_header.max_frame_width as u32);
 		config.coded_height = Some(seq_header.max_frame_height as u32);
 		config.container = hang::catalog::Container::Legacy;
-
-		if let Some(old) = &self.config
-			&& old == &config
-		{
-			return Ok(());
-		}
-
-		if self.track.is_some() && self.tracks.is_fixed() {
-			anyhow::bail!("fixed track cannot be reconfigured");
-		}
-
-		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name, "reinitializing track");
-			self.catalog.lock().video.renditions.remove(&track.name);
-		}
-
-		let track = self.tracks.create()?;
-		tracing::debug!(name = ?track.name, ?config, "starting track");
-		self.catalog
-			.lock()
-			.video
-			.renditions
-			.insert(track.name.clone(), config.clone());
-
-		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::catalog::hang::Container::Legacy,
-		));
-
+		self.apply_config(config);
 		Ok(())
 	}
 
-	/// Initialize with minimal config if sequence header parsing fails
+	/// Minimal config when sequence-header parsing fails, so the stream can still
+	/// flow (the catalog just won't carry full codec info).
 	fn init_minimal(&mut self) -> Result<()> {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
-			profile: 0,  // Main profile
-			level: 0,    // Unknown
-			tier: 'M',   // Main tier
-			bitdepth: 8, // Assume 8-bit
+			profile: 0,
+			level: 0,
+			tier: 'M',
+			bitdepth: 8,
 			mono_chrome: false,
 			chroma_subsampling_x: true, // 4:2:0
 			chroma_subsampling_y: true,
@@ -144,390 +153,111 @@ impl Import {
 			full_range: false,
 		});
 		config.container = hang::catalog::Container::Legacy;
+		self.apply_config(config);
+		Ok(())
+	}
 
-		if self.track.is_some() && self.tracks.is_fixed() {
-			anyhow::bail!("fixed track cannot be reconfigured");
+	/// Apply a resolved config, updating the catalog rendition in place.
+	///
+	/// A changed config just re-mirrors the rendition; there are no fixed tracks
+	/// to reject a reconfiguration.
+	fn apply_config(&mut self, config: hang::catalog::VideoConfig) {
+		if self.config.as_ref() == Some(&config) {
+			return;
 		}
-
-		let track = self.tracks.create()?;
-		tracing::debug!(name = ?track.name, "starting track with minimal config");
-		self.catalog
-			.lock()
-			.video
-			.renditions
-			.insert(track.name.clone(), config.clone());
-
+		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
+		self.rendition.set(config.clone());
 		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::catalog::hang::Container::Legacy,
-		));
-
-		Ok(())
 	}
 
-	/// Initialize the decoder with sequence header and other metadata OBUs.
-	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> Result<()> {
-		let data = buf.as_ref();
-
-		// Handle av1C format (MP4/container initialization)
-		// av1C box starts with 0x81 (marker=1, version=1) per ISO/IEC 14496-15
-		if data.len() >= 4 && data[0] == 0x81 && data.len() >= 16 {
-			self.init_from_av1c(data)?;
-			buf.advance(data.len());
+	/// Resolve the config from a sequence-header OBU, falling back to a minimal
+	/// config if it fails to parse.
+	fn configure_from_seq(&mut self, seq_obu: &Bytes) -> Result<()> {
+		if self.last_seq.as_ref() == Some(seq_obu) {
 			return Ok(());
 		}
+		self.last_seq = Some(seq_obu.clone());
 
-		// Handle raw OBU format
-		let mut obus = ObuIterator::new(buf);
-		while let Some(obu) = obus.next().transpose()? {
-			self.decode_obu(obu, None)?;
+		let mut reader = &seq_obu[..];
+		let header = ObuHeader::parse(&mut reader)?;
+		let payload_offset = seq_obu.len() - reader.len();
+
+		match SequenceHeaderObu::parse(header, &mut &seq_obu[payload_offset..]) {
+			Ok(seq_header) => self.init(&seq_header),
+			Err(_) if self.config.is_none() => {
+				tracing::debug!("sequence header parse failed, using minimal config");
+				self.init_minimal()
+			}
+			Err(_) => Ok(()),
 		}
-
-		if let Some(obu) = obus.flush()? {
-			self.decode_obu(obu, None)?;
-		}
-
-		Ok(())
 	}
 
-	fn init_from_av1c(&mut self, data: &[u8]) -> Result<()> {
-		// Parse av1C box structure
-		let seq_profile = (data[1] >> 5) & 0x07;
-		let seq_level_idx = data[1] & 0x1F;
-		let tier = ((data[2] >> 7) & 0x01) == 1;
-		let high_bitdepth = ((data[2] >> 6) & 0x01) == 1;
-		let twelve_bit = ((data[2] >> 5) & 0x01) == 1;
-
-		// Resolution unknown from av1C - will be updated when first sequence header arrives
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
-			profile: seq_profile,
-			level: seq_level_idx,
-			tier: if tier { 'H' } else { 'M' },
-			bitdepth: super::bitdepth(twelve_bit, high_bitdepth),
-			mono_chrome: ((data[2] >> 4) & 0x01) == 1,
-			chroma_subsampling_x: ((data[2] >> 3) & 0x01) == 1,
-			chroma_subsampling_y: ((data[2] >> 2) & 0x01) == 1,
-			chroma_sample_position: data[2] & 0x03,
-			color_primaries: 1,
-			transfer_characteristics: 1,
-			matrix_coefficients: 1,
-			full_range: false,
-		});
-		config.container = hang::catalog::Container::Legacy;
-
-		if let Some(old) = &self.config
-			&& old == &config
-		{
-			return Ok(());
-		}
-
-		if self.track.is_some() && self.tracks.is_fixed() {
-			anyhow::bail!("fixed track cannot be reconfigured");
-		}
-
-		if let Some(track) = self.track.take() {
-			self.catalog.lock().video.renditions.remove(&track.name);
-		}
-
-		let track = self.tracks.create()?;
-		self.catalog
-			.lock()
-			.video
-			.renditions
-			.insert(track.name.clone(), config.clone());
-
-		self.config = Some(config);
-		self.track = Some(crate::container::Producer::new(
-			track,
-			crate::catalog::hang::Container::Legacy,
-		));
-
-		Ok(())
-	}
-
-	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> Result<&moq_net::TrackProducer> {
-		Ok(self.track.as_ref().ok_or(Error::NotInitialized)?.track())
-	}
-
-	/// Decode as much data as possible from the given buffer.
-	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> Result<()> {
-		let obus = ObuIterator::new(buf);
-
-		for obu in obus {
-			// Generate PTS for each OBU to avoid reusing same timestamp
-			let pts = self.pts(pts)?;
-			self.decode_obu(obu?, Some(pts))?;
-		}
-
-		Ok(())
-	}
-
-	/// Decode all data in the buffer, assuming the buffer contains (the rest of) a frame.
-	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
-		&mut self,
-		buf: &mut T,
-		pts: Option<crate::container::Timestamp>,
-	) -> Result<()> {
-		let pts = self.pts(pts)?;
-		let mut obus = ObuIterator::new(buf);
-
-		while let Some(obu) = obus.next().transpose()? {
-			self.decode_obu(obu, Some(pts))?;
-		}
-
-		if let Some(obu) = obus.flush()? {
-			self.decode_obu(obu, Some(pts))?;
-		}
-
-		self.maybe_start_frame(Some(pts))?;
-
-		Ok(())
-	}
-
-	fn decode_obu(&mut self, obu_data: Bytes, pts: Option<crate::container::Timestamp>) -> Result<()> {
-		if obu_data.is_empty() {
-			return Err(Error::ObuTooShort.into());
-		}
-
-		// Parse OBU header - this consumes header + extension + LEB128 size
-		let mut reader = &obu_data[..];
-		let header = scuffle_av1::ObuHeader::parse(&mut reader)?;
-
-		// Calculate payload offset by seeing how much the parser consumed
-		let payload_offset = obu_data.len() - reader.len();
-
-		// Match on the ObuType enum directly
-		use scuffle_av1::ObuType;
-		match header.obu_type {
-			ObuType::SequenceHeader => {
-				match SequenceHeaderObu::parse(header, &mut &obu_data[payload_offset..]) {
-					Ok(seq_header) => {
-						self.init(&seq_header)?;
-					}
-					Err(_) => {
-						// Use minimal config so stream can work (catalog won't have full info)
-						if self.track.is_none() {
-							tracing::debug!("Sequence header parsing failed, initializing with minimal config");
-							self.init_minimal()?;
-						}
-					}
-				}
-
-				self.current.contains_keyframe = true;
-			}
-			ObuType::TemporalDelimiter => {
-				self.maybe_start_frame(pts)?;
-			}
-			ObuType::FrameHeader | ObuType::Frame => {
-				let is_keyframe = if obu_data.len() > payload_offset {
-					let data = &obu_data[payload_offset..];
-					if data.is_empty() {
-						false
-					} else {
-						let first_byte = data[0];
-
-						let show_existing_frame = (first_byte >> 7) & 1;
-
-						if show_existing_frame == 1 {
-							self.current.contains_keyframe
-						} else {
-							let frame_type = (first_byte >> 5) & 0b11;
-
-							frame_type == 0
-						}
-					}
-				} else {
-					tracing::warn!(
-						"Frame OBU too short: {} bytes (payload_offset={})",
-						obu_data.len(),
-						payload_offset
-					);
-					false
-				};
-
-				if is_keyframe || self.current.contains_keyframe {
-					self.current.contains_keyframe = true;
-				}
-
-				self.current.contains_frame = true;
-			}
-			ObuType::Metadata => {
-				self.maybe_start_frame(pts)?;
-			}
-			ObuType::TileGroup | ObuType::TileList => {
-				self.current.contains_frame = true;
-			}
-			_ => {
-				// Other OBU types - just include them
-			}
-		}
-
-		tracing::trace!(?header.obu_type, "parsed OBU");
-
-		self.current.chunks.extend_from_slice(&obu_data);
-
-		Ok(())
-	}
-
-	fn maybe_start_frame(&mut self, pts: Option<crate::container::Timestamp>) -> Result<()> {
-		if !self.current.contains_frame {
-			return Ok(());
-		}
-
-		let track = self.track.as_mut().ok_or(Error::MissingSequenceHeader)?;
-		let pts = pts.ok_or(Error::MissingTimestamp)?;
-
-		let payload = std::mem::take(&mut self.current.chunks).freeze();
-
-		let frame = crate::container::Frame {
-			timestamp: pts,
-			payload,
-			keyframe: self.current.contains_keyframe,
-		};
-
-		track.write(frame)?;
-
-		if let Some(jitter) = self.jitter.observe(pts)
-			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
-		{
-			c.jitter = Some(jitter);
-		}
-
-		self.current.contains_keyframe = false;
-		self.current.contains_frame = false;
-
-		Ok(())
+	/// A watch-only handle to this track's subscriber demand.
+	pub fn demand(&self) -> moq_net::TrackDemand {
+		self.track.track().demand()
 	}
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> Result<()> {
-		let track = self.track.as_mut().ok_or(Error::NotInitialized)?;
-		track.finish()?;
+		self.track.finish()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
-		track.seek(sequence)?;
+	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		self.track.seek(sequence)?;
 		Ok(())
 	}
 
-	pub fn is_initialized(&self) -> bool {
-		self.track.is_some()
-	}
-
-	fn pts(&mut self, hint: Option<crate::container::Timestamp>) -> Result<crate::container::Timestamp> {
-		if let Some(pts) = hint {
-			return Ok(pts);
-		}
-
-		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(crate::container::Timestamp::from_micros(
-			zero.elapsed().as_micros() as u64
-		)?)
-	}
-}
-
-impl Drop for Import {
-	fn drop(&mut self) {
-		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name, "ending track");
-			self.catalog.lock().video.renditions.remove(&track.name);
-		}
-	}
-}
-
-/// Iterator over AV1 Open Bitstream Units (OBUs)
-struct ObuIterator<'a, T: Buf + AsRef<[u8]> + 'a> {
-	buf: &'a mut T,
-}
-
-impl<'a, T: Buf + AsRef<[u8]> + 'a> ObuIterator<'a, T> {
-	pub fn new(buf: &'a mut T) -> Self {
-		Self { buf }
-	}
-
-	pub fn flush(self) -> Result<Option<Bytes>> {
-		let remaining = self.buf.remaining();
-		if remaining == 0 {
-			return Ok(None);
-		}
-
-		let obu = self.buf.copy_to_bytes(remaining);
-		Ok(Some(obu))
-	}
-}
-
-impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for ObuIterator<'a, T> {
-	type Item = Result<Bytes>;
-
-	fn next(&mut self) -> Option<Self::Item> {
-		if self.buf.remaining() == 0 {
-			return None;
-		}
-
-		// Parse OBU header to get size
-		let data = self.buf.as_ref();
-		if data.is_empty() {
-			return None;
-		}
-
-		// OBU header format:
-		// - obu_forbidden_bit (1)
-		// - obu_type (4)
-		// - obu_extension_flag (1)
-		// - obu_has_size_field (1)
-		// - obu_reserved_1bit (1)
-
-		let header = data[0];
-		let has_extension = (header >> 2) & 1 == 1;
-		let has_size = (header >> 1) & 1 == 1;
-
-		if !has_size {
-			let remaining = self.buf.remaining();
-			let obu = self.buf.copy_to_bytes(remaining);
-			return Some(Ok(obu));
-		}
-
-		// LEB128 size field starts after header byte and optional extension byte
-		let mut size: usize = 0;
-		let mut offset = if has_extension { 2 } else { 1 };
-		let mut shift = 0;
-
-		loop {
-			if offset >= data.len() {
-				return None;
+	/// Write split frames to the track, resolving the config from the first
+	/// keyframe's inline sequence header and refining the catalog jitter.
+	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
+		for frame in frames {
+			if frame.keyframe
+				&& let Some(seq) = find_sequence_header(&frame.payload)
+			{
+				self.configure_from_seq(&seq)?;
 			}
 
-			let byte = data[offset];
-			offset += 1;
-
-			size |= ((byte & 0x7F) as usize) << shift;
-			shift += 7;
-
-			if byte & 0x80 == 0 {
-				break;
+			// A keyframe we couldn't configure (no sequence header) is undecodable.
+			if frame.keyframe && self.config.is_none() {
+				return Err(Error::MissingSequenceHeader.into());
 			}
 
-			if shift >= 56 {
-				return Some(Err(Error::ObuSizeTooLarge.into()));
+			let pts = frame.timestamp;
+			// A pre-keyframe delta has no group to anchor it: the producer returns
+			// MissingKeyframe, which a caller joining mid-stream skips.
+			self.track.write(frame)?;
+
+			if let Some(jitter) = self.jitter.observe(pts) {
+				self.rendition.update(|c| c.jitter = Some(jitter));
 			}
 		}
-
-		let total_size = offset + size;
-
-		if total_size > self.buf.remaining() {
-			return None;
-		}
-
-		let obu = self.buf.copy_to_bytes(total_size);
-		Some(Ok(obu))
+		Ok(())
 	}
+
+	/// Publish split frames, resolving the config from the first keyframe's inline
+	/// sequence header and refining the catalog jitter.
+	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
+		self.write_frames(frames)
+	}
+}
+
+fn is_sequence_header(obu: &[u8]) -> bool {
+	let mut reader = obu;
+	ObuHeader::parse(&mut reader)
+		.map(|h| h.obu_type == ObuType::SequenceHeader)
+		.unwrap_or(false)
+}
+
+/// Find the first sequence-header OBU in a payload, if any.
+fn find_sequence_header(payload: &[u8]) -> Option<Bytes> {
+	let mut buf = Bytes::copy_from_slice(payload);
+	let mut obus = ObuIterator::new(&mut buf);
+	while let Some(Ok(obu)) = obus.next() {
+		if is_sequence_header(&obu) {
+			return Some(obu);
+		}
+	}
+	obus.flush().ok().flatten().filter(|obu| is_sequence_header(obu))
 }

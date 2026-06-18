@@ -25,18 +25,26 @@ const CHANNELS: [u32; 8] = [2, 1, 2, 3, 3, 4, 4, 5];
 const SAMPLES_PER_FRAME: u64 = 1536;
 
 /// Parse an AC-3 sync frame header from the start of `data` (needs >= 7 bytes).
-pub(crate) fn parse_header(data: &[u8]) -> anyhow::Result<legacy::Header> {
-	anyhow::ensure!(data.len() >= 7, "AC-3 header needs 7 bytes");
-	anyhow::ensure!(data[0] == 0x0B && data[1] == 0x77, "missing AC-3 sync word");
+pub(crate) fn parse_header(data: &[u8]) -> legacy::Result<legacy::Header> {
+	if data.len() < 7 {
+		return Err(legacy::Error::Ac3HeaderTooShort);
+	}
+	if !(data[0] == 0x0B && data[1] == 0x77) {
+		return Err(legacy::Error::Ac3MissingSyncWord);
+	}
 
 	let fscod = data[4] >> 6;
 	let frmsizecod = (data[4] & 0x3F) as usize;
-	anyhow::ensure!(frmsizecod <= 37, "invalid AC-3 frame size code");
+	if frmsizecod > 37 {
+		return Err(legacy::Error::Ac3InvalidFrameSizeCode);
+	}
 	let bitrate_kbps = BITRATE[frmsizecod >> 1] as usize;
 
 	// bsid > 8 is E-AC-3 or a low-sample-rate variant, neither parsed here.
 	let bsid = data[5] >> 3;
-	anyhow::ensure!(bsid <= 8, "unsupported AC-3 bsid {bsid}");
+	if bsid > 8 {
+		return Err(legacy::Error::Ac3UnsupportedBsid(bsid));
+	}
 
 	// At 44.1 kHz the frame doesn't divide evenly, so the low frmsizecod bit
 	// selects the padded size (A/52 Table 5.18).
@@ -44,7 +52,7 @@ pub(crate) fn parse_header(data: &[u8]) -> anyhow::Result<legacy::Header> {
 		0b00 => (48000, 4 * bitrate_kbps),
 		0b01 => (44100, 2 * (320 * bitrate_kbps / 147 + (frmsizecod & 1))),
 		0b10 => (32000, 6 * bitrate_kbps),
-		_ => anyhow::bail!("reserved AC-3 sample-rate code"),
+		_ => return Err(legacy::Error::Ac3ReservedSampleRate),
 	};
 
 	// acmod decides which mix-level fields precede lfeon; skip them bit by bit.

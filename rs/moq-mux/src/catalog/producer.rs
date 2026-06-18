@@ -29,6 +29,11 @@ pub struct Producer<E: CatalogExt = Extra> {
 	msf_track: moq_net::TrackProducer,
 
 	current: Arc<Mutex<Catalog<E>>>,
+
+	/// Shared wall clock for the broadcast's tracks. Every importer on this catalog
+	/// gets a clone (a `Copy` of the same epoch), so timestamps they synthesize when
+	/// a caller has none land on one timeline and audio/video stay in sync.
+	clock: crate::Clock,
 }
 
 // Manual Clone so a producer is cheaply clonable regardless of whether `E` is.
@@ -39,6 +44,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			hangz: self.hangz.clone(),
 			msf_track: self.msf_track.clone(),
 			current: self.current.clone(),
+			clock: self.clock,
 		}
 	}
 }
@@ -95,7 +101,20 @@ impl<E: CatalogExt> Producer<E> {
 			hangz,
 			msf_track,
 			current: Arc::new(Mutex::new(catalog)),
+			clock: crate::Clock::new(),
 		})
+	}
+
+	/// Resolve a timestamp, synthesizing one from the broadcast's shared
+	/// [`Clock`](crate::Clock) when the caller has none.
+	///
+	/// Sharing the clock across the catalog's tracks keeps concurrently-produced
+	/// audio and video on a single timeline.
+	pub fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
+		match hint {
+			Some(pts) => Ok(pts),
+			None => Ok(moq_net::Timestamp::from_micros(self.clock.micros())?),
+		}
 	}
 
 	/// Get mutable access to the catalog, publishing it after any changes.
@@ -112,6 +131,20 @@ impl<E: CatalogExt> Producer<E> {
 	/// Get a snapshot of the current catalog.
 	pub fn snapshot(&self) -> Catalog<E> {
 		self.current.lock().unwrap().clone()
+	}
+
+	/// A handle for one importer to publish a video rendition, retired on drop.
+	///
+	/// See [`VideoTrack`](super::VideoTrack).
+	pub fn video_track(&self, name: impl Into<String>) -> super::VideoTrack<E> {
+		super::VideoTrack::new(self.clone(), name)
+	}
+
+	/// A handle for one importer to publish an audio rendition, retired on drop.
+	///
+	/// See [`AudioTrack`](super::AudioTrack).
+	pub fn audio_track(&self, name: impl Into<String>) -> super::AudioTrack<E> {
+		super::AudioTrack::new(self.clone(), name)
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.

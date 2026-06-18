@@ -120,6 +120,21 @@ impl BroadcastProducer {
 		Ok(track)
 	}
 
+	/// Reserve a track by name without finalizing its [`TrackInfo`].
+	///
+	/// Returns a [`TrackRequest`] already discoverable by consumers; call
+	/// [`TrackRequest::accept`] to set its info and start producing. Use this when
+	/// the producer can't pick the track's properties (e.g. timescale) until it has
+	/// inspected the media, the same shape as a consumer-driven
+	/// [`BroadcastDynamic::requested_track`].
+	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<TrackRequest, Error> {
+		let request = TrackRequest::new(name);
+		let mut state = BroadcastState::modify(&self.state)?;
+		state.insert_track(request.weak())?;
+		drop(state);
+		Ok(request)
+	}
+
 	/// Create a track with a unique name using the given suffix.
 	///
 	/// Generates names like `0{suffix}`, `1{suffix}`, etc. and picks the first

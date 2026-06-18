@@ -19,8 +19,8 @@ use crate::emulator::{HEIGHT, WIDTH};
 /// Frames are submitted via `try_frame()` (non-blocking, drops if full).
 pub struct VideoEncoder {
 	tx: tokio::sync::mpsc::Sender<EncoderMsg>,
-	/// Clone of the video track producer, for monitoring used/unused.
-	pub track: moq_net::TrackProducer,
+	/// Watch-only handle to the video track, for monitoring used/unused.
+	pub demand: moq_net::TrackDemand,
 	force_keyframe: Arc<AtomicBool>,
 	/// Latest encode duration in microseconds.
 	encode_duration: Arc<AtomicU64>,
@@ -36,7 +36,7 @@ impl VideoEncoder {
 	pub fn spawn(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
 		let producer = moq_video::encode::Producer::new(broadcast, catalog).expect("failed to create avc3 producer");
-		let track = producer.track().expect("avc3 track is eagerly created").clone();
+		let demand = producer.demand();
 
 		let force_keyframe = Arc::new(AtomicBool::new(false));
 		let encode_duration = Arc::new(AtomicU64::new(0));
@@ -49,7 +49,7 @@ impl VideoEncoder {
 
 		Self {
 			tx,
-			track,
+			demand,
 			force_keyframe,
 			encode_duration,
 			_thread: thread,

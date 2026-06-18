@@ -1,7 +1,9 @@
-//! HLS (HTTP Live Streaming) ingest built on top of fMP4.
+//! HLS import: pull an HLS master/media playlist and publish it into MoQ.
 //!
-//! This module provides reusable logic to ingest HLS master/media playlists and
-//! feed their fMP4 segments into a `hang` broadcast.
+//! Watches an HLS master or media playlist, downloads each fMP4 segment as it
+//! appears, and feeds it through moq-mux's fMP4 importer (which publishes a
+//! `hang` broadcast + catalog). Classic HLS only for now (no LL-HLS partial
+//! segments on the import side).
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -12,18 +14,18 @@ use bytes::Bytes;
 use m3u8_rs::{
 	AlternativeMedia, AlternativeMediaType, Map, MasterPlaylist, MediaPlaylist, MediaSegment, Resolution, VariantStream,
 };
+use moq_mux::catalog::Producer as CatalogProducer;
+use moq_mux::container::fmp4::Import as Fmp4;
 use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
 
-use crate::Result;
-use crate::container::fmp4::Import as Fmp4;
-use crate::container::hls::Error;
+use crate::{Error, Result};
 
-/// Configuration for the single-rendition HLS ingest loop.
+/// Configuration for the single-rendition HLS import loop.
 #[derive(Clone)]
 pub struct Config {
-	/// The master or media playlist URL or file path to ingest.
+	/// The master or media playlist URL or file path to import.
 	pub playlist: String,
 
 	/// An optional HTTP client to use for fetching the playlist and segments.
@@ -41,7 +43,7 @@ impl Config {
 	/// Otherwise, treat as a file path and convert to file:// URL.
 	fn parse_playlist(&self) -> Result<Url> {
 		if self.playlist.starts_with("http://") || self.playlist.starts_with("https://") {
-			Url::parse(&self.playlist).map_err(|_| Error::InvalidPlaylistUrl.into())
+			Url::parse(&self.playlist).map_err(|_| Error::InvalidPlaylistUrl)
 		} else {
 			let path = PathBuf::from(&self.playlist);
 			let absolute = if path.is_absolute() {
@@ -49,12 +51,12 @@ impl Config {
 			} else {
 				std::env::current_dir()?.join(path)
 			};
-			Url::from_file_path(&absolute).map_err(|_| Error::InvalidFilePath.into())
+			Url::from_file_path(&absolute).map_err(|_| Error::InvalidFilePath)
 		}
 	}
 }
 
-/// Result of a single ingest step.
+/// Result of a single import step.
 struct StepOutcome {
 	/// Number of media segments written during this step.
 	pub wrote_segments: usize,
@@ -62,16 +64,16 @@ struct StepOutcome {
 	pub target_duration: Option<u64>,
 }
 
-/// HLS ingest that pulls an HLS media playlist and feeds the bytes into the fMP4 ingest.
+/// HLS import that pulls an HLS media playlist and feeds the bytes into the fMP4 importer.
 ///
-/// Provides `init()` to prime the ingest with initial segments, and `service()`
-/// to run the continuous ingest loop.
+/// Provides `init()` to prime the importer with initial segments, and `run()`
+/// to run the continuous import loop.
 pub struct Import {
 	/// Broadcast that all CMAF importers write into.
 	broadcast: moq_net::BroadcastProducer,
 
 	/// The catalog being produced.
-	catalog: crate::catalog::Producer,
+	catalog: CatalogProducer,
 
 	/// fMP4 importers for each discovered video rendition.
 	/// Each importer feeds a separate MoQ track but shares the same catalog.
@@ -112,12 +114,8 @@ impl TrackState {
 }
 
 impl Import {
-	/// Create a new HLS ingest that will write into the given broadcast.
-	pub fn new(
-		broadcast: moq_net::BroadcastProducer,
-		catalog: crate::catalog::Producer,
-		cfg: Config,
-	) -> Result<Self> {
+	/// Create a new HLS import that will write into the given broadcast.
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let base_url = cfg.parse_playlist()?;
 		let client = cfg.client.unwrap_or_else(|| {
 			Client::builder()
@@ -150,7 +148,7 @@ impl Import {
 		Ok(())
 	}
 
-	/// Run the ingest loop until cancelled.
+	/// Run the import loop until cancelled.
 	pub async fn run(&mut self) -> Result<()> {
 		loop {
 			let outcome = self.step().await?;
@@ -160,7 +158,7 @@ impl Import {
 				wrote_segments = outcome.wrote_segments,
 				target_duration = ?outcome.target_duration,
 				delay_secs = delay.as_secs_f32(),
-				"HLS ingest step complete"
+				"HLS import step complete"
 			);
 
 			tokio::time::sleep(delay).await;
@@ -177,7 +175,7 @@ impl Import {
 		// Prime all discovered video variants.
 		//
 		// Move the video track states out of `self` so we can safely mutate both
-		// the ingest and the tracks without running into borrow checker issues.
+		// the importer and the tracks without running into borrow checker issues.
 		let video_tracks = std::mem::take(&mut self.video);
 		for (index, mut track) in video_tracks.into_iter().enumerate() {
 			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
@@ -201,7 +199,7 @@ impl Import {
 		Ok(buffered)
 	}
 
-	/// Perform a single ingest step for all active tracks.
+	/// Perform a single import step for all active tracks.
 	///
 	/// This fetches the current media playlists, consumes any fresh segments,
 	/// and returns how many segments were written along with the target
@@ -246,7 +244,7 @@ impl Import {
 		})
 	}
 
-	/// Compute the delay before the next ingest step should run.
+	/// Compute the delay before the next import step should run.
 	fn refresh_delay(&self, target_duration: Option<u64>, wrote_segments: usize) -> Duration {
 		let base = target_duration
 			.map(|dur| Duration::from_secs(dur.max(1)))
@@ -277,7 +275,7 @@ impl Import {
 		if let Ok((_, master)) = m3u8_rs::parse_master_playlist(&body) {
 			let variants = select_variants(&master);
 			if variants.is_empty() {
-				return Err(Error::NoVariants.into());
+				return Err(Error::NoVariants);
 			}
 
 			// Create a video track state for every usable variant.
@@ -393,20 +391,16 @@ impl Import {
 		let map = self.find_map(playlist).ok_or(Error::MissingMap)?;
 
 		let url = resolve_uri(&track.playlist, &map.uri)?;
-		let mut bytes = self.fetch_bytes(url).await?;
+		let bytes = self.fetch_bytes(url).await?;
 		let importer = match kind {
 			TrackKind::Video(index) => self.ensure_video_importer_for(index),
 			TrackKind::Audio => self.ensure_audio_importer(),
 		};
 
-		importer.decode(&mut bytes)?;
-
-		if !bytes.is_empty() {
-			return Err(Error::InitNotConsumed.into());
-		}
-		if !importer.is_initialized() {
-			return Err(Error::InitNotInitialized.into());
-		}
+		// The importer buffers internally, so a fully-parsed init segment leaves it
+		// initialized; any trailing partial atom just waits for the next segment. A
+		// segment that never yields a moov surfaces later as a decode error.
+		importer.decode(&bytes)?;
 
 		track.init_ready = true;
 		info!(?kind, "loaded HLS init segment");
@@ -421,11 +415,11 @@ impl Import {
 		sequence: u64,
 	) -> Result<()> {
 		if segment.uri.is_empty() {
-			return Err(Error::EmptySegmentUri.into());
+			return Err(Error::EmptySegmentUri);
 		}
 
 		let url = resolve_uri(&track.playlist, &segment.uri)?;
-		let mut bytes = self.fetch_bytes(url).await?;
+		let bytes = self.fetch_bytes(url).await?;
 
 		// Ensure the importer is initialized before processing fragments
 		// Use track.init_ready to avoid borrowing issues
@@ -441,12 +435,7 @@ impl Import {
 			TrackKind::Audio => self.ensure_audio_importer(),
 		};
 
-		// Final check after ensuring init segment
-		if !importer.is_initialized() {
-			return Err(Error::ImporterNotInitialized(format!("{:?}", kind)).into());
-		}
-
-		importer.decode(&mut bytes)?;
+		importer.decode(&bytes)?;
 		track.next_sequence = Some(sequence + 1);
 
 		Ok(())
@@ -459,12 +448,12 @@ impl Import {
 	async fn fetch_bytes(&self, url: Url) -> Result<Bytes> {
 		if url.scheme() == "file" {
 			let path = url.to_file_path().map_err(|_| Error::InvalidFileUrl)?;
-			let bytes = tokio::fs::read(&path).await.map_err(Error::Io)?;
+			let bytes = tokio::fs::read(&path).await.map_err(Error::from)?;
 			Ok(Bytes::from(bytes))
 		} else {
-			let response = self.client.get(url).send().await.map_err(Error::Reqwest)?;
-			let response = response.error_for_status().map_err(Error::Reqwest)?;
-			let bytes = response.bytes().await.map_err(Error::Reqwest)?;
+			let response = self.client.get(url).send().await.map_err(Error::from)?;
+			let response = response.error_for_status().map_err(Error::from)?;
+			let bytes = response.bytes().await.map_err(Error::from)?;
 			Ok(bytes)
 		}
 	}
@@ -614,9 +603,9 @@ mod tests {
 	}
 
 	#[test]
-	fn hls_ingest_starts_without_importers() {
-		let mut broadcast = moq_net::Broadcast::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	fn hls_import_starts_without_importers() {
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = Config::new(url);
 		let hls = Import::new(broadcast, catalog, cfg).unwrap();

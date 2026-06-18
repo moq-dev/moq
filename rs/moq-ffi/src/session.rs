@@ -5,7 +5,7 @@ use url::Url;
 
 use crate::error::MoqError;
 use crate::ffi::Task;
-use crate::origin::MoqOriginProducer;
+use crate::origin::{MoqOriginConsumer, MoqOriginProducer};
 
 struct Client {
 	config: moq_native::ClientConfig,
@@ -17,17 +17,28 @@ impl Client {
 	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
 		let client = self.config.clone().init().map_err(map_connect_error)?;
 
-		let publish = self.publish.as_ref().map(|o| o.inner().consume());
-		let consume = self.consume.as_ref().map(|o| o.inner().clone());
+		// Materialize both origin sides (reusing the caller's if wired, else a
+		// fresh one) so the session can publish/subscribe and the FFI can always
+		// hand back a publisher/consumer.
+		let publish = self
+			.publish
+			.as_ref()
+			.map(|p| p.inner().clone())
+			.unwrap_or_else(|| moq_net::Origin::random().produce());
+		let subscribe = self
+			.consume
+			.as_ref()
+			.map(|p| p.inner().clone())
+			.unwrap_or_else(|| moq_net::Origin::random().produce());
 
 		let session = client
-			.with_publish(publish)
-			.with_consume(consume)
+			.with_publisher(&publish)
+			.with_subscriber(subscribe.clone())
 			.connect(url)
 			.await
 			.map_err(map_connect_error)?;
 
-		Ok(Arc::new(MoqSession::new(session)))
+		Ok(Arc::new(MoqSession::new(session, publish, subscribe)))
 	}
 }
 
@@ -134,6 +145,12 @@ impl MoqClient {
 
 	/// Connect to a MoQ server and wait for the session to be established.
 	///
+	/// Any side not wired via [`set_publish`](Self::set_publish) /
+	/// [`set_consume`](Self::set_consume) gets a fresh origin, so the producer
+	/// and consumer sides are always accessible via [`MoqSession::publisher`]
+	/// and [`MoqSession::consumer`] without the caller constructing a
+	/// [`MoqOriginProducer`] themselves.
+	///
 	/// Can be cancelled by calling `cancel()`.
 	pub async fn connect(&self, url: String) -> Result<Arc<MoqSession>, MoqError> {
 		let url = Url::parse(&url)?;
@@ -147,17 +164,74 @@ impl MoqClient {
 	}
 }
 
+/// A snapshot of connection statistics for a [`MoqSession`].
+///
+/// Each field is `None` when the transport backend doesn't report that metric (native QUIC
+/// reports all of them; the browser WebTransport reports few or none), or when it isn't yet
+/// available (e.g. `send_rate_bps` before the congestion controller has a window). A `None` is
+/// not the same as a zero value.
+#[derive(uniffi::Record)]
+pub struct MoqConnectionStats {
+	/// Smoothed round-trip time, in microseconds.
+	pub rtt_us: Option<u64>,
+	/// Estimated send bandwidth from the congestion controller, in bits per second.
+	pub send_rate_bps: Option<u64>,
+	/// Estimated receive bandwidth from MoQ PROBE, in bits per second.
+	pub recv_rate_bps: Option<u64>,
+	/// Total bytes sent, including retransmissions and overhead.
+	pub bytes_sent: Option<u64>,
+	/// Total bytes received, including duplicates and overhead.
+	pub bytes_received: Option<u64>,
+	/// Total bytes lost (detected via retransmission or acknowledgement).
+	pub bytes_lost: Option<u64>,
+	/// Total datagrams sent.
+	pub packets_sent: Option<u64>,
+	/// Total datagrams received.
+	pub packets_received: Option<u64>,
+	/// Total datagrams detected as lost.
+	pub packets_lost: Option<u64>,
+}
+
+impl From<moq_net::ConnectionStats> for MoqConnectionStats {
+	fn from(stats: moq_net::ConnectionStats) -> Self {
+		Self {
+			rtt_us: stats.rtt.map(|d| d.as_micros() as u64),
+			send_rate_bps: stats.estimated_send_rate,
+			recv_rate_bps: stats.estimated_recv_rate,
+			bytes_sent: stats.bytes_sent,
+			bytes_received: stats.bytes_received,
+			bytes_lost: stats.bytes_lost,
+			packets_sent: stats.packets_sent,
+			packets_received: stats.packets_received,
+			packets_lost: stats.packets_lost,
+		}
+	}
+}
+
 #[derive(uniffi::Object)]
 pub struct MoqSession {
 	inner: Option<moq_net::Session>,
 	closed: Task<Session>,
+	publisher: Arc<MoqOriginProducer>,
+	consumer: Arc<MoqOriginConsumer>,
 }
 
 impl MoqSession {
-	pub(crate) fn new(session: moq_net::Session) -> Self {
+	pub(crate) fn new(
+		session: moq_net::Session,
+		publish: moq_net::OriginProducer,
+		subscribe: moq_net::OriginProducer,
+	) -> Self {
+		// Eagerly wrap the wired origin sides so each publisher()/consumer()
+		// call hands back the same Arc. `publish` is published into; `subscribe`
+		// is where the remote's broadcasts land (read via its consumer view).
+		let publisher = Arc::new(MoqOriginProducer::from_inner(publish));
+		let consumer = Arc::new(MoqOriginConsumer::from_inner(subscribe.consume()));
 		Self {
 			inner: Some(session.clone()),
 			closed: Task::new(session),
+			publisher,
+			consumer,
 		}
 	}
 }
@@ -197,5 +271,35 @@ impl MoqSession {
 	/// thing per binding.
 	pub fn shutdown(&self) {
 		self.cancel(0);
+	}
+
+	/// The publish-side origin: where local broadcasts get advertised
+	/// to the remote. Either the producer the caller wired via
+	/// `set_publish` / `set_consume` before connect/accept, or one
+	/// auto-created if neither was set.
+	pub fn publisher(&self) -> Arc<MoqOriginProducer> {
+		self.publisher.clone()
+	}
+
+	/// The subscribe-side origin: a read handle for receiving
+	/// announcements pushed by the remote. Either derived from the
+	/// origin the caller wired via `set_consume`, or auto-created if
+	/// neither was set.
+	pub fn consumer(&self) -> Arc<MoqOriginConsumer> {
+		self.consumer.clone()
+	}
+
+	/// Snapshot the current connection statistics (RTT, bandwidth estimates,
+	/// byte/packet counters). Cheap to call; intended for periodic polling.
+	///
+	/// Individual fields are `None` when the transport backend doesn't report
+	/// them; see [`MoqConnectionStats`].
+	pub fn stats(&self) -> MoqConnectionStats {
+		let _guard = crate::ffi::RUNTIME.enter();
+		self.inner
+			.as_ref()
+			.map(moq_net::Session::stats)
+			.unwrap_or_default()
+			.into()
 	}
 }

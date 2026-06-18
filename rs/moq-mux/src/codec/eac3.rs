@@ -26,41 +26,51 @@ const BLOCKS: [u64; 4] = [1, 2, 3, 6];
 const CHANNELS: [u32; 8] = [2, 1, 2, 3, 3, 4, 4, 5];
 
 /// Parse an E-AC-3 sync frame header from the start of `data` (needs >= 6 bytes).
-pub(crate) fn parse_header(data: &[u8]) -> anyhow::Result<legacy::Header> {
-	anyhow::ensure!(data.len() >= 6, "E-AC-3 header needs 6 bytes");
-	anyhow::ensure!(data[0] == 0x0B && data[1] == 0x77, "missing E-AC-3 sync word");
+pub(crate) fn parse_header(data: &[u8]) -> legacy::Result<legacy::Header> {
+	if data.len() < 6 {
+		return Err(legacy::Error::Eac3HeaderTooShort);
+	}
+	if !(data[0] == 0x0B && data[1] == 0x77) {
+		return Err(legacy::Error::Eac3MissingSyncWord);
+	}
 
 	// bsid 11..=16 is E-AC-3; plain AC-3 (bsid <= 8) is routed by stream_type and
 	// never reaches this parser.
 	let bsid = data[5] >> 3;
-	anyhow::ensure!((11..=16).contains(&bsid), "not an E-AC-3 bitstream (bsid {bsid})");
+	if !(11..=16).contains(&bsid) {
+		return Err(legacy::Error::Eac3NotEac3Bsid(bsid));
+	}
 
 	// A dependent substream (strmtyp 1) extends a prior program to 7.1+, and a
 	// nonzero substreamid carries additional programs in the same PID. Either
 	// would make this track's channel count a lie, so they are rejected rather
 	// than mis-described.
 	let strmtyp = data[2] >> 6;
-	anyhow::ensure!(strmtyp != 3, "reserved E-AC-3 stream type");
-	anyhow::ensure!(
-		strmtyp != 1,
-		"E-AC-3 dependent substream (7.1+ layout) is not supported; only a single independent substream"
-	);
+	if strmtyp == 3 {
+		return Err(legacy::Error::Eac3ReservedStreamType);
+	}
+	if strmtyp == 1 {
+		return Err(legacy::Error::Eac3DependentSubstream);
+	}
 	let substreamid = (data[2] >> 3) & 0x07;
-	anyhow::ensure!(
-		substreamid == 0,
-		"E-AC-3 additional substream {substreamid} is not supported; only a single independent substream"
-	);
+	if substreamid != 0 {
+		return Err(legacy::Error::Eac3AdditionalSubstream(substreamid));
+	}
 
 	let frmsiz = (((data[2] & 0x07) as usize) << 8) | data[3] as usize;
 	let len = (frmsiz + 1) * 2;
 	// frmsiz is a raw field; corrupt input can declare a "frame" shorter than the
 	// header just parsed, which would surface later as a confusing sync error.
-	anyhow::ensure!(len >= 6, "E-AC-3 frame length {len} shorter than its header");
+	if len < 6 {
+		return Err(legacy::Error::Eac3FrameShorterThanHeader(len));
+	}
 
 	let fscod = data[4] >> 6;
 	let (sample_rate, blocks) = if fscod == 0b11 {
 		let fscod2 = (data[4] >> 4) & 0x03;
-		anyhow::ensure!(fscod2 != 3, "reserved E-AC-3 sample-rate code");
+		if fscod2 == 3 {
+			return Err(legacy::Error::Eac3ReservedSampleRate);
+		}
 		// Reduced rates always run 6 blocks.
 		(SAMPLE_RATE_REDUCED[fscod2 as usize], 6)
 	} else {

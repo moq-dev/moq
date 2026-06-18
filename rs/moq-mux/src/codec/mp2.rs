@@ -32,10 +32,14 @@ const SAMPLE_RATE: [[u32; 3]; 2] = [[44100, 48000, 32000], [22050, 24000, 16000]
 const SAMPLES_PER_FRAME: u64 = 1152;
 
 /// Parse a Layer II frame header from the start of `data` (needs >= 4 bytes).
-pub(crate) fn parse_header(data: &[u8]) -> anyhow::Result<legacy::Header> {
-	anyhow::ensure!(data.len() >= 4, "MP2 header needs 4 bytes");
+pub(crate) fn parse_header(data: &[u8]) -> legacy::Result<legacy::Header> {
+	if data.len() < 4 {
+		return Err(legacy::Error::Mp2HeaderTooShort);
+	}
 	// Frame sync: 11 bits set (0xFFE).
-	anyhow::ensure!(data[0] == 0xFF && (data[1] & 0xE0) == 0xE0, "missing MP2 frame sync");
+	if !(data[0] == 0xFF && (data[1] & 0xE0) == 0xE0) {
+		return Err(legacy::Error::Mp2MissingSync);
+	}
 
 	// 0b00 is the unofficial MPEG-2.5 extension: 13818-1 has no stream type for
 	// it, so accepting it here would re-announce it as 0x04 on export and invent
@@ -44,23 +48,29 @@ pub(crate) fn parse_header(data: &[u8]) -> anyhow::Result<legacy::Header> {
 	let (version, sr_row) = match (data[1] >> 3) & 0x03 {
 		0b11 => (Version::Mpeg1, 0),
 		0b10 => (Version::Mpeg2, 1),
-		_ => anyhow::bail!("reserved or MPEG-2.5 audio version"),
+		_ => return Err(legacy::Error::Mp2ReservedVersion),
 	};
 	// Layer field 0b10 is Layer II.
-	anyhow::ensure!((data[1] >> 1) & 0x03 == 0b10, "not MPEG Layer II");
+	if (data[1] >> 1) & 0x03 != 0b10 {
+		return Err(legacy::Error::Mp2NotLayerII);
+	}
 
 	let bitrate_index = (data[2] >> 4) & 0x0F;
 	let sr_index = (data[2] >> 2) & 0x03;
 	let padding = ((data[2] >> 1) & 0x01) as usize;
 
-	anyhow::ensure!(sr_index != 3, "reserved MP2 sample-rate index");
+	if sr_index == 3 {
+		return Err(legacy::Error::Mp2ReservedSampleRate);
+	}
 	let sample_rate = SAMPLE_RATE[sr_row][sr_index as usize];
 
 	let bitrate_kbps = match version {
 		Version::Mpeg1 => BITRATE_MPEG1_L2[bitrate_index as usize],
 		Version::Mpeg2 => BITRATE_MPEG2_L2[bitrate_index as usize],
 	};
-	anyhow::ensure!(bitrate_kbps != 0, "free-format or invalid MP2 bitrate");
+	if bitrate_kbps == 0 {
+		return Err(legacy::Error::Mp2InvalidBitrate);
+	}
 
 	// Layer II is always 1152 samples, so the frame is 144 * bitrate / sample_rate bytes.
 	let len = (144 * bitrate_kbps * 1000 / sample_rate) as usize + padding;

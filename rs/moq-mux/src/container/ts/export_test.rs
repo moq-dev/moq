@@ -569,7 +569,7 @@ async fn export_scte35_roundtrip() {
 
 	// Now add the real video/audio by importing bbb.ts (this moves `broadcast`).
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
-	import.decode(&mut BytesMut::from(&data[..])).unwrap();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
 	// `import`, `catalog`, and `scte_producer` stay alive: retained tracks. The
@@ -606,7 +606,7 @@ async fn export_scte35_roundtrip() {
 		crate::catalog::Producer::with_catalog(&mut broadcast2, crate::catalog::hang::Catalog::<tscat::Ext>::default())
 			.unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
-	import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
 	let snapshot = catalog2.snapshot();
@@ -789,7 +789,7 @@ async fn mp2_kyrion_roundtrip_byte_exact() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
-	import.decode(&mut BytesMut::from(&data[..])).unwrap();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
 	let names: Vec<String> = catalog.snapshot().audio.renditions.keys().cloned().collect();
@@ -825,7 +825,7 @@ async fn mp2_kyrion_roundtrip_byte_exact() {
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
-	import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
 	let names2: Vec<String> = catalog2.snapshot().audio.renditions.keys().cloned().collect();
@@ -858,7 +858,7 @@ async fn ac3_roundtrip_byte_exact() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
-	import.decode(&mut BytesMut::from(&data[..])).unwrap();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
 	let name = catalog
@@ -902,7 +902,7 @@ async fn ac3_roundtrip_byte_exact() {
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
-	import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
 	let name2 = catalog2
@@ -928,7 +928,7 @@ async fn eac3_roundtrip_byte_exact() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
-	import.decode(&mut BytesMut::from(&data[..])).unwrap();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
 	let name = catalog
@@ -975,7 +975,7 @@ async fn eac3_roundtrip_byte_exact() {
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
-	import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
 	let name2 = catalog2
@@ -1015,7 +1015,7 @@ async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
-	import.decode(&mut BytesMut::from(&data[..])).unwrap();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
 	let ingested = read_audio_by_codec(&consumer, &catalog).await;
@@ -1063,7 +1063,7 @@ async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
-	import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
 	let roundtripped = read_audio_by_codec(&consumer2, &catalog2).await;
@@ -1158,7 +1158,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 		)
 		.unwrap();
 		let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
-		import.decode(&mut BytesMut::from(&data[..])).unwrap();
+		import.decode(&BytesMut::from(&data[..])).unwrap();
 		import.finish().unwrap();
 
 		let snap = catalog.snapshot();
@@ -1209,7 +1209,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 		)
 		.unwrap();
 		let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
-		import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
+		import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 		import2.finish().unwrap();
 		let name2 = scte_track(&catalog2.snapshot()).expect("a scte35 track");
 		let roundtripped = read_cues(&consumer2, &name2).await;
