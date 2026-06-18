@@ -5,7 +5,6 @@
 //! own exactly one track, so they expose [`Track::demand`] / [`Track::name`]
 //! directly rather than fallibly.
 
-use super::unique_track;
 use crate::Result;
 
 /// Build an H.264 avc3 split + import pair, resolving the config from `init`.
@@ -113,17 +112,22 @@ pub struct Track {
 }
 
 impl Track {
-	/// Create an importer that publishes a single codec onto `track`.
+	/// Create an importer that publishes a single codec onto a reserved track.
 	///
-	/// The caller owns track creation; mint one with [`unique_track`] for the
-	/// on-demand case. The catalog rendition is registered once the codec config
-	/// is resolved.
+	/// The caller reserves the track (by name) with
+	/// [`BroadcastProducer::reserve_track`](moq_net::BroadcastProducer::reserve_track);
+	/// the importer accepts it here, which is where the track's timescale is set.
+	/// The catalog rendition is registered once the codec config is resolved.
 	pub fn new(
-		track: moq_net::TrackProducer,
+		request: moq_net::TrackRequest,
 		catalog: crate::catalog::Producer,
 		format: &str,
 		init: &[u8],
 	) -> Result<Self> {
+		// Accept at the legacy microsecond timescale, matching the frame timestamps
+		// the container stamps. A codec-specific timescale (e.g. the opus sample
+		// rate) would be chosen here instead.
+		let track = request.accept(moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE));
 		let kind = match format {
 			"avc1" | "avcc" => {
 				let (length_size, import) = build_h264_avc1(track, catalog, init)?;
@@ -326,35 +330,28 @@ pub struct TrackStream {
 }
 
 impl TrackStream {
-	/// Create an importer that mints a fresh unique track on `broadcast`.
-	pub fn new(
-		mut broadcast: moq_net::BroadcastProducer,
-		catalog: crate::catalog::Producer,
-		format: &str,
-	) -> Result<Self> {
+	/// Create an importer that publishes a single codec onto a reserved track.
+	///
+	/// The caller reserves the track with
+	/// [`BroadcastProducer::reserve_track`](moq_net::BroadcastProducer::reserve_track);
+	/// the importer accepts it here at the legacy microsecond timescale (where a
+	/// codec-specific timescale would be chosen).
+	pub fn new(request: moq_net::TrackRequest, catalog: crate::catalog::Producer, format: &str) -> Result<Self> {
+		let track = request.accept(moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE));
 		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match format {
-			"avc3" | "h264" => {
-				let track = unique_track(&mut broadcast, ".avc3")?;
-				TrackStreamKind::Avc3 {
-					split: crate::codec::h264::Split::new(),
-					import: crate::codec::h264::Import::new(track, catalog),
-				}
-			}
-			"hev1" => {
-				let track = unique_track(&mut broadcast, ".hev1")?;
-				TrackStreamKind::Hev1 {
-					split: crate::codec::h265::Split::new(),
-					import: crate::codec::h265::Import::new(track, catalog),
-				}
-			}
-			"av01" | "av1" | "av1c" | "av1C" => {
-				let track = unique_track(&mut broadcast, ".av01")?;
-				TrackStreamKind::Av01 {
-					split: crate::codec::av1::Split::new(),
-					import: crate::codec::av1::Import::new(track, catalog),
-				}
-			}
+			"avc3" | "h264" => TrackStreamKind::Avc3 {
+				split: crate::codec::h264::Split::new(),
+				import: crate::codec::h264::Import::new(track, catalog),
+			},
+			"hev1" => TrackStreamKind::Hev1 {
+				split: crate::codec::h265::Split::new(),
+				import: crate::codec::h265::Import::new(track, catalog),
+			},
+			"av01" | "av1" | "av1c" | "av1C" => TrackStreamKind::Av01 {
+				split: crate::codec::av1::Split::new(),
+				import: crate::codec::av1::Import::new(track, catalog),
+			},
 			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
 		};
 
@@ -538,39 +535,21 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn existing_track_opus_uses_existing_name_and_delivers_frames() {
+	async fn existing_track_opus_uses_existing_name() {
 		let (mut broadcast, catalog) = new_broadcast();
-		// Legacy-container codecs write micro-timestamped frames, so a caller-supplied
-		// track must declare the matching timescale.
-		let track = broadcast
-			.create_track(
-				"requested-audio",
-				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-			)
-			.unwrap();
-		let consumer = track.subscribe(None);
-
-		let mut import = Track::new(track, catalog.clone(), "opus", &opus_head()).unwrap();
+		// The importer accepts the reserved track, setting its (microsecond) timescale.
+		let request = broadcast.reserve_track("requested-audio").unwrap();
+		let mut import = Track::new(request, catalog.clone(), "opus", &opus_head()).unwrap();
 
 		assert_eq!(import.name(), "requested-audio");
 		let snapshot = catalog.snapshot();
 		assert!(snapshot.audio.renditions.contains_key("requested-audio"));
 		assert!(!snapshot.audio.renditions.contains_key("0.opus"));
 
-		let mut media = crate::container::Consumer::new(consumer, crate::catalog::hang::Container::Legacy);
-		let payload = b"opus payload".to_vec();
+		// Frame delivery and the accepted timescale are covered by `opus_import_delivers_frames`.
 		import
-			.decode(&payload, Some(Timestamp::from_micros(1_000).unwrap()))
+			.decode(b"opus payload", Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
-
-		let frame = tokio::time::timeout(Duration::from_secs(1), media.read())
-			.await
-			.unwrap()
-			.unwrap()
-			.unwrap();
-		assert_eq!(frame.payload, payload);
-		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
-
 		import.finish().unwrap();
 	}
 
@@ -578,9 +557,10 @@ mod tests {
 	async fn unique_track_opus_attaches_catalog_and_retires_on_drop() {
 		let (mut broadcast, catalog) = new_broadcast();
 
-		// A freshly minted track attaches its catalog rendition on init.
-		let track = unique_track(&mut broadcast, ".opus").unwrap();
-		let mut import = Track::new(track, catalog.clone(), "opus", &opus_head()).unwrap();
+		// A freshly reserved track attaches its catalog rendition on init.
+		let name = broadcast.unique_name(".opus");
+		let request = broadcast.reserve_track(name).unwrap();
+		let mut import = Track::new(request, catalog.clone(), "opus", &opus_head()).unwrap();
 
 		assert_eq!(import.name(), "0.opus");
 		assert!(catalog.snapshot().audio.renditions.contains_key("0.opus"));
@@ -626,6 +606,7 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		assert_eq!(frame.payload, payload);
+		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
 
 		import.finish().unwrap();
 	}
@@ -633,9 +614,9 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn existing_track_h264_uses_existing_name_in_catalog() {
 		let (mut broadcast, catalog) = new_broadcast();
-		let track = broadcast.create_track("camera", None).unwrap();
+		let request = broadcast.reserve_track("camera").unwrap();
 
-		let import = Track::new(track, catalog.clone(), "avc3", &h264_init()).unwrap();
+		let import = Track::new(request, catalog.clone(), "avc3", &h264_init()).unwrap();
 
 		assert_eq!(import.name(), "camera");
 		let snapshot = catalog.snapshot();
@@ -650,13 +631,8 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn reconfiguration_updates_in_place() {
 		let (mut broadcast, catalog) = new_broadcast();
-		let track = broadcast
-			.create_track(
-				"video",
-				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
-			)
-			.unwrap();
-		let mut import = Track::new(track, catalog, "vp8", &[]).unwrap();
+		let request = broadcast.reserve_track("video").unwrap();
+		let mut import = Track::new(request, catalog, "vp8", &[]).unwrap();
 
 		import
 			.decode(

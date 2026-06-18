@@ -503,8 +503,9 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 }
 
 fn new_decoder(runtime: &mut RuntimeState, format: &str, buf: &[u8]) -> Result<moq_mux::import::Track> {
-	let track = moq_mux::import::unique_track(&mut runtime.broadcast, &format!(".{format}"))?;
-	let decoder = moq_mux::import::Track::new(track, runtime.catalog.clone(), format, buf)?;
+	let name = runtime.broadcast.unique_name(&format!(".{format}"));
+	let request = runtime.broadcast.reserve_track(name)?;
+	let decoder = moq_mux::import::Track::new(request, runtime.catalog.clone(), format, buf)?;
 	Ok(decoder)
 }
 

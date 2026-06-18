@@ -2,7 +2,6 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
-use crate::error::MoqError;
 
 use std::time::Duration;
 
@@ -77,19 +76,20 @@ async fn dynamic_track_request() {
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
 
-	// subscribe_track stays pending until the dynamic producer accepts the request
-	// via requested_track(), so drive both sides concurrently to avoid a deadlock.
-	let (track_consumer, track) = tokio::join!(
-		consumer.subscribe_track("events".into()),
-		tokio::time::timeout(TIMEOUT, dynamic.requested_track()),
-	);
-	let track_consumer = track_consumer.unwrap();
-	let track = track.expect("timed out waiting for requested track").unwrap();
-
-	assert_eq!(track.name().unwrap(), "events");
-
+	// subscribe_track stays pending until the request is accepted, so accept it
+	// (and write a frame) from the requested-track side concurrently.
 	let payload = b"hello dynamic track".to_vec();
-	track.write_frame(payload.clone()).unwrap();
+	let (track_consumer, track) = tokio::join!(consumer.subscribe_track("events".into()), async {
+		let request = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+			.await
+			.expect("timed out waiting for requested track")
+			.unwrap();
+		assert_eq!(request.name().unwrap(), "events");
+		let track = request.accept().unwrap();
+		track.write_frame(payload.clone()).unwrap();
+		track
+	});
+	let track_consumer = track_consumer.unwrap();
 
 	let frame = tokio::time::timeout(TIMEOUT, track_consumer.read_frame())
 		.await
@@ -107,17 +107,16 @@ async fn dynamic_track_request_can_abort() {
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
 
-	// subscribe_track stays pending until the dynamic producer accepts the request
-	// via requested_track(), so drive both sides concurrently to avoid a deadlock.
-	let (track_consumer, track) = tokio::join!(
-		consumer.subscribe_track("unknown".into()),
-		tokio::time::timeout(TIMEOUT, dynamic.requested_track()),
-	);
-	let _track_consumer = track_consumer.unwrap();
-	let track = track.expect("timed out waiting for requested track").unwrap();
-
-	track.abort(404).unwrap();
-	assert!(matches!(track.name(), Err(MoqError::Closed)));
+	// Rejecting the request fails the pending subscription, so drive both sides
+	// concurrently and reject from the requested-track side.
+	let (sub, ()) = tokio::join!(consumer.subscribe_track("unknown".into()), async {
+		let request = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+			.await
+			.expect("timed out waiting for requested track")
+			.unwrap();
+		request.abort(404).unwrap();
+	});
+	assert!(sub.is_err());
 }
 
 #[tokio::test]
@@ -127,21 +126,23 @@ async fn dynamic_track_request_can_publish_media() {
 	let consumer = broadcast.consume().unwrap();
 	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
 
-	// subscribe_media stays pending until the dynamic producer accepts the request
-	// via requested_track(), so drive both sides concurrently to avoid a deadlock.
-	let (media_consumer, track) = tokio::join!(
+	// subscribe_media stays pending until the importer accepts the request, so
+	// publish onto it from the requested-track side concurrently.
+	let (media_consumer, media) = tokio::join!(
 		consumer.subscribe_media("requested-audio".into(), crate::media::Container::Legacy, 10_000),
-		tokio::time::timeout(TIMEOUT, dynamic.requested_track()),
+		async {
+			let request = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+				.await
+				.expect("timed out waiting for requested track")
+				.unwrap();
+			assert_eq!(request.name().unwrap(), "requested-audio");
+			broadcast
+				.publish_media_on_track(&request, "opus".into(), opus_head())
+				.unwrap()
+		}
 	);
 	let media_consumer = media_consumer.unwrap();
-	let track = track.expect("timed out waiting for requested track").unwrap();
-	assert_eq!(track.name().unwrap(), "requested-audio");
-
-	let media = broadcast
-		.publish_media_on_track(&track, "opus".into(), opus_head())
-		.unwrap();
 	assert_eq!(media.name().unwrap(), "requested-audio");
-	assert!(matches!(track.name(), Err(MoqError::Closed)));
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
