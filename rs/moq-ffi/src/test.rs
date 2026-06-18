@@ -77,19 +77,21 @@ async fn dynamic_track_request() {
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
 
-	// The request is accepted by the first producer op (write_frame below), so the
-	// subscribe stays pending until then; run it on a concurrent task.
+	// The subscribe stays pending until the request is accepted below, so run it on a
+	// concurrent task.
 	let subscribe = {
 		let consumer = consumer.clone();
 		tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await })
 	};
 
-	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
 		.await
 		.expect("timed out waiting for requested track")
 		.unwrap();
-	assert_eq!(track.name().unwrap(), "events");
+	assert_eq!(request.name().unwrap(), "events");
 
+	// Accept the request as a raw track (which unblocks the subscribe), then write.
+	let track = request.accept(None).unwrap();
 	let payload = b"hello dynamic track".to_vec();
 	track.write_frame(payload.clone()).unwrap();
 
