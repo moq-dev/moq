@@ -18,7 +18,7 @@ jobs:
     # Trusted events run on the moq-dev self-hosted A1 runner (warm /nix/store +
     # persistent CARGO_TARGET_DIR). Fork PRs fall back to GitHub-hosted ARM so
     # untrusted code never runs on the box.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04-arm' || 'self-hosted' }}
+    runs-on: ${{ github.event.pull_request.head.repo.fork && fromJSON('["ubuntu-24.04-arm"]') || fromJSON('["self-hosted", "nix"]') }}
 
     steps:
       # GitHub-hosted fallback only: the self-hosted box already has disk space,
@@ -47,14 +47,16 @@ jobs:
 
       # GitHub-hosted fallback caches Rust via the Actions cache. The self-hosted
       # box instead persists CARGO_TARGET_DIR outside the workspace (checkout
-      # clean + the runner's job cleanup wipe the workspace, not $HOME).
+      # clean + the runner's job cleanup wipe the workspace, not $HOME). Scope it
+      # per runner ($RUNNER_NAME) so a second runner service on the same box gets
+      # its own target dir instead of racing on a shared one.
       - name: Rust Cache
         if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
       - if: runner.environment == 'self-hosted'
-        run: echo "CARGO_TARGET_DIR=$HOME/cargo-target/moq" >> "$GITHUB_ENV"
+        run: echo "CARGO_TARGET_DIR=$HOME/cargo-target/moq-$RUNNER_NAME" >> "$GITHUB_ENV"
 
       # `just ci` calls `just changed` internally to skip unchanged scopes.
       # Login shell so /etc/profile.d puts Nix on PATH; Actions shells don't by
