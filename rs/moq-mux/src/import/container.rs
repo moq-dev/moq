@@ -5,7 +5,6 @@
 //! track, so neither exposes a single-track demand/name handle. Today every
 //! container supports both; both wrap the same [`ContainerImpl`] dispatch.
 
-use super::ContainerFormat;
 use crate::Result;
 
 /// The concrete container importers, shared by [`Container`] and
@@ -20,19 +19,20 @@ enum ContainerImpl {
 }
 
 impl ContainerImpl {
-	fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer, format: ContainerFormat) -> Self {
-		match format {
-			ContainerFormat::Fmp4 => {
-				ContainerImpl::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, catalog)))
-			}
-			ContainerFormat::Mkv => {
-				ContainerImpl::Mkv(Box::new(crate::container::mkv::Import::new(broadcast, catalog)))
-			}
-			ContainerFormat::Ts => ContainerImpl::Ts(Box::new(crate::container::ts::Import::new(broadcast, catalog))),
-			ContainerFormat::Flv => {
-				ContainerImpl::Flv(Box::new(crate::container::flv::Import::new(broadcast, catalog)))
-			}
-		}
+	fn fmp4(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+		ContainerImpl::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, catalog)))
+	}
+
+	fn mkv(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+		ContainerImpl::Mkv(Box::new(crate::container::mkv::Import::new(broadcast, catalog)))
+	}
+
+	fn ts(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+		ContainerImpl::Ts(Box::new(crate::container::ts::Import::new(broadcast, catalog)))
+	}
+
+	fn flv(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+		ContainerImpl::Flv(Box::new(crate::container::flv::Import::new(broadcast, catalog)))
 	}
 
 	fn decode(&mut self, data: &[u8]) -> Result<()> {
@@ -76,10 +76,16 @@ impl Container {
 	pub fn new(
 		broadcast: moq_net::BroadcastProducer,
 		catalog: crate::catalog::Producer,
-		format: ContainerFormat,
+		format: &str,
 		init: &[u8],
 	) -> Result<Self> {
-		let mut inner = ContainerImpl::new(broadcast, catalog, format);
+		let mut inner = match format {
+			"fmp4" | "cmaf" => ContainerImpl::fmp4(broadcast, catalog),
+			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, catalog),
+			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, catalog),
+			"flv" => ContainerImpl::flv(broadcast, catalog),
+			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
+		};
 		inner.decode(init)?;
 		Ok(Self { inner })
 	}
@@ -110,14 +116,19 @@ pub struct ContainerStream {
 
 impl ContainerStream {
 	/// Create a new container stream importer.
-	pub fn new(
-		broadcast: moq_net::BroadcastProducer,
-		catalog: crate::catalog::Producer,
-		format: ContainerFormat,
-	) -> Result<Self> {
-		Ok(Self {
-			inner: ContainerImpl::new(broadcast, catalog, format),
-		})
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer, format: &str) -> Result<Self> {
+		// A separate list from [`Container::new`]: only containers that can be
+		// recovered from a raw byte stream belong here. Today that's all of them,
+		// but a non-streamable container (e.g. RTP) would be added to `Container`
+		// alone.
+		let inner = match format {
+			"fmp4" | "cmaf" => ContainerImpl::fmp4(broadcast, catalog),
+			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, catalog),
+			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, catalog),
+			"flv" => ContainerImpl::flv(broadcast, catalog),
+			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
+		};
+		Ok(Self { inner })
 	}
 
 	/// Decode a chunk of the byte stream.

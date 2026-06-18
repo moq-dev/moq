@@ -5,7 +5,7 @@
 //! own exactly one track, so they expose [`Track::demand`] / [`Track::name`]
 //! directly rather than fallibly.
 
-use super::{TrackFormat, TrackStreamFormat, unique_track};
+use super::unique_track;
 use crate::Result;
 
 /// Build an H.264 avc3 split + import pair, resolving the config from `init`.
@@ -117,56 +117,57 @@ impl Track {
 	pub fn new(
 		mut broadcast: moq_net::BroadcastProducer,
 		catalog: crate::catalog::Producer,
-		format: TrackFormat,
+		format: &str,
 		init: &[u8],
 	) -> Result<Self> {
 		let kind = match format {
-			TrackFormat::Avc1 => {
+			"avc1" | "avcc" => {
 				let track = unique_track(&mut broadcast, ".avc1")?;
 				let (length_size, import) = build_h264_avc1(track, catalog, init)?;
 				TrackKind::Avc1 { length_size, import }
 			}
-			TrackFormat::Avc3 => {
+			"avc3" | "h264" => {
 				let track = unique_track(&mut broadcast, ".avc3")?;
 				let (split, import) = build_h264_avc3(track, catalog, init)?;
 				TrackKind::Avc3 { split, import }
 			}
-			TrackFormat::Hev1 => {
+			"hev1" => {
 				let track = unique_track(&mut broadcast, ".hev1")?;
 				let (split, import) = build_h265(track, catalog, init)?;
 				TrackKind::Hev1 { split, import }
 			}
-			TrackFormat::Av01 => {
+			"av01" | "av1" | "av1c" | "av1C" => {
 				let track = unique_track(&mut broadcast, ".av01")?;
 				let (split, import) = build_av1(track, catalog, init)?;
 				TrackKind::Av01 { split, import }
 			}
-			TrackFormat::Vp8 => {
+			"vp8" | "vp08" => {
 				let track = unique_track(&mut broadcast, ".vp8")?;
 				let mut import = crate::codec::vp8::Import::new(track, catalog);
 				import.initialize(init)?;
 				TrackKind::Vp8(import)
 			}
-			TrackFormat::Vp9 => {
+			"vp9" | "vp09" => {
 				let track = unique_track(&mut broadcast, ".vp09")?;
 				let mut import = crate::codec::vp9::Import::new(track, catalog);
 				import.initialize(init)?;
 				TrackKind::Vp9(import)
 			}
-			TrackFormat::Aac => {
+			"aac" => {
 				let mut data = init;
 				let config = crate::codec::aac::Config::parse(&mut data)?;
 				let track = unique_track(&mut broadcast, ".aac")?;
 				let import = crate::codec::aac::Import::new(track, catalog, config)?;
 				TrackKind::Aac(import)
 			}
-			TrackFormat::Opus => {
+			"opus" => {
 				let mut data = init;
 				let config = crate::codec::opus::Config::parse(&mut data)?;
 				let track = unique_track(&mut broadcast, ".opus")?;
 				let import = crate::codec::opus::Import::new(track, catalog, config)?;
 				TrackKind::Opus(import)
 			}
+			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
 		};
 
 		Ok(Self { kind })
@@ -176,48 +177,49 @@ impl Track {
 	pub fn from_track(
 		track: moq_net::TrackProducer,
 		catalog: crate::catalog::Producer,
-		format: TrackFormat,
+		format: &str,
 		init: &[u8],
 	) -> Result<Self> {
 		let kind = match format {
-			TrackFormat::Avc1 => {
+			"avc1" | "avcc" => {
 				let (length_size, import) = build_h264_avc1(track, catalog, init)?;
 				TrackKind::Avc1 { length_size, import }
 			}
-			TrackFormat::Avc3 => {
+			"avc3" | "h264" => {
 				let (split, import) = build_h264_avc3(track, catalog, init)?;
 				TrackKind::Avc3 { split, import }
 			}
-			TrackFormat::Hev1 => {
+			"hev1" => {
 				let (split, import) = build_h265(track, catalog, init)?;
 				TrackKind::Hev1 { split, import }
 			}
-			TrackFormat::Av01 => {
+			"av01" | "av1" | "av1c" | "av1C" => {
 				let (split, import) = build_av1(track, catalog, init)?;
 				TrackKind::Av01 { split, import }
 			}
-			TrackFormat::Vp8 => {
+			"vp8" | "vp08" => {
 				let mut import = crate::codec::vp8::Import::new(track, catalog);
 				import.initialize(init)?;
 				TrackKind::Vp8(import)
 			}
-			TrackFormat::Vp9 => {
+			"vp9" | "vp09" => {
 				let mut import = crate::codec::vp9::Import::new(track, catalog);
 				import.initialize(init)?;
 				TrackKind::Vp9(import)
 			}
-			TrackFormat::Aac => {
+			"aac" => {
 				let mut data = init;
 				let config = crate::codec::aac::Config::parse(&mut data)?;
 				let import = crate::codec::aac::Import::new(track, catalog, config)?;
 				TrackKind::Aac(import)
 			}
-			TrackFormat::Opus => {
+			"opus" => {
 				let mut data = init;
 				let config = crate::codec::opus::Config::parse(&mut data)?;
 				let import = crate::codec::opus::Import::new(track, catalog, config)?;
 				TrackKind::Opus(import)
 			}
+			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
 		};
 
 		Ok(Self { kind })
@@ -384,30 +386,32 @@ impl TrackStream {
 	pub fn new(
 		mut broadcast: moq_net::BroadcastProducer,
 		catalog: crate::catalog::Producer,
-		format: TrackStreamFormat,
+		format: &str,
 	) -> Result<Self> {
+		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match format {
-			TrackStreamFormat::Avc3 => {
+			"avc3" | "h264" => {
 				let track = unique_track(&mut broadcast, ".avc3")?;
 				TrackStreamKind::Avc3 {
 					split: crate::codec::h264::Split::new(),
 					import: crate::codec::h264::Import::new(track, catalog),
 				}
 			}
-			TrackStreamFormat::Hev1 => {
+			"hev1" => {
 				let track = unique_track(&mut broadcast, ".hev1")?;
 				TrackStreamKind::Hev1 {
 					split: crate::codec::h265::Split::new(),
 					import: crate::codec::h265::Import::new(track, catalog),
 				}
 			}
-			TrackStreamFormat::Av01 => {
+			"av01" | "av1" | "av1c" | "av1C" => {
 				let track = unique_track(&mut broadcast, ".av01")?;
 				TrackStreamKind::Av01 {
 					split: crate::codec::av1::Split::new(),
 					import: crate::codec::av1::Import::new(track, catalog),
 				}
 			}
+			_ => return Err(crate::Error::UnknownFormat(format.to_string())),
 		};
 
 		Ok(Self { kind })
@@ -602,7 +606,7 @@ mod tests {
 			.unwrap();
 		let consumer = track.subscribe(None);
 
-		let mut import = Track::from_track(track, catalog.clone(), TrackFormat::Opus, &opus_head()).unwrap();
+		let mut import = Track::from_track(track, catalog.clone(), "opus", &opus_head()).unwrap();
 
 		assert_eq!(import.name(), "requested-audio");
 		let snapshot = catalog.snapshot();
@@ -631,7 +635,7 @@ mod tests {
 		let (broadcast, catalog) = new_broadcast();
 
 		// The broadcast path mints a unique track and attaches its catalog rendition.
-		let mut import = Track::new(broadcast, catalog.clone(), TrackFormat::Opus, &opus_head()).unwrap();
+		let mut import = Track::new(broadcast, catalog.clone(), "opus", &opus_head()).unwrap();
 
 		assert_eq!(import.name(), "0.opus");
 		assert!(catalog.snapshot().audio.renditions.contains_key("0.opus"));
@@ -686,7 +690,7 @@ mod tests {
 		let (mut broadcast, catalog) = new_broadcast();
 		let track = broadcast.create_track("camera", None).unwrap();
 
-		let import = Track::from_track(track, catalog.clone(), TrackFormat::Avc3, &h264_init()).unwrap();
+		let import = Track::from_track(track, catalog.clone(), "avc3", &h264_init()).unwrap();
 
 		assert_eq!(import.name(), "camera");
 		let snapshot = catalog.snapshot();
@@ -707,7 +711,7 @@ mod tests {
 				moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
 			)
 			.unwrap();
-		let mut import = Track::from_track(track, catalog, TrackFormat::Vp8, &[]).unwrap();
+		let mut import = Track::from_track(track, catalog, "vp8", &[]).unwrap();
 
 		import
 			.decode(

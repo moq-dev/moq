@@ -449,23 +449,23 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 	let decoder: moq_mux::import::Track = match structure.name().as_str() {
 		"video/x-h264" => {
 			let bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::TrackFormat::Avc3, &bytes)?
+			new_decoder(runtime, "avc3", &bytes)?
 		}
 		"video/x-h265" => {
 			let bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::TrackFormat::Hev1, &bytes)?
+			new_decoder(runtime, "hev1", &bytes)?
 		}
 		"video/x-av1" => {
 			let bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::TrackFormat::Av01, &bytes)?
+			new_decoder(runtime, "av01", &bytes)?
 		}
 		"video/x-vp8" => {
 			let bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::TrackFormat::Vp8, &bytes)?
+			new_decoder(runtime, "vp8", &bytes)?
 		}
 		"video/x-vp9" => {
 			let bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::TrackFormat::Vp9, &bytes)?
+			new_decoder(runtime, "vp9", &bytes)?
 		}
 		"audio/mpeg" => {
 			let codec_data = structure
@@ -473,7 +473,7 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 				.context("AAC caps missing codec_data")?;
 			let map = codec_data.map_readable().context("failed to map codec_data")?;
 			let data = Bytes::copy_from_slice(map.as_slice());
-			new_decoder(runtime, moq_mux::import::TrackFormat::Aac, &data)?
+			new_decoder(runtime, "aac", &data)?
 		}
 		"audio/x-opus" => {
 			let channels: i32 = structure.get("channels").unwrap_or(2);
@@ -502,11 +502,7 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 	Ok(())
 }
 
-fn new_decoder(
-	runtime: &mut RuntimeState,
-	format: moq_mux::import::TrackFormat,
-	buf: &[u8],
-) -> Result<moq_mux::import::Track> {
+fn new_decoder(runtime: &mut RuntimeState, format: &str, buf: &[u8]) -> Result<moq_mux::import::Track> {
 	let decoder = moq_mux::import::Track::new(runtime.broadcast.clone(), runtime.catalog.clone(), format, buf)?;
 	Ok(decoder)
 }

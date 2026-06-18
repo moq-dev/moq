@@ -8,8 +8,9 @@
 //! [`ContainerStream`] infer boundaries from a raw byte stream (piped Annex-B
 //! H.264, an fMP4 reader, …).
 //!
-//! Each importer is parameterized by a format from [`format`]: [`TrackFormat`],
-//! [`TrackStreamFormat`], or [`ContainerFormat`]. The concrete importers live with
+//! Each importer's `new` takes a format string (e.g. `"avc3"`, `"fmp4"`) and
+//! errors on a format it doesn't handle — `TrackStream` / `ContainerStream`
+//! accept only the self-delimiting formats. The concrete importers live with
 //! their format under [`crate::container`] or [`crate::codec`] and publish their
 //! own catalog rendition (see [`crate::catalog::VideoTrack`] /
 //! [`crate::catalog::AudioTrack`]).
@@ -17,11 +18,9 @@
 //! [`unique_track`] mints a track for the single-codec importers.
 
 mod container;
-mod format;
 mod track;
 
 pub use container::*;
-pub use format::*;
 pub use track::*;
 
 /// Mint a fresh unique track for a legacy single-codec importer.

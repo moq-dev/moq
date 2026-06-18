@@ -1,4 +1,3 @@
-use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqTrackConsumer};
@@ -130,10 +129,8 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		let format = moq_mux::import::TrackFormat::from_str(&format)
-			.map_err(|_| MoqError::Codec(format!("unknown format: {format}")))?;
 
-		let decoder = moq_mux::import::Track::new(state.broadcast.clone(), state.catalog.clone(), format, &init)
+		let decoder = moq_mux::import::Track::new(state.broadcast.clone(), state.catalog.clone(), &format, &init)
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
 
 		let demand = decoder.demand();
@@ -157,15 +154,13 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		let format = moq_mux::import::TrackFormat::from_str(&format)
-			.map_err(|_| MoqError::Codec(format!("unknown format: {format}")))?;
 
 		let track_clone = {
 			let guard = track.inner.lock().unwrap();
 			guard.as_ref().ok_or_else(|| MoqError::Closed)?.clone()
 		};
 
-		let decoder = moq_mux::import::Track::from_track(track_clone.clone(), state.catalog.clone(), format, &init)
+		let decoder = moq_mux::import::Track::from_track(track_clone.clone(), state.catalog.clone(), &format, &init)
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
 
 		let mut guard = track.inner.lock().unwrap();
@@ -189,18 +184,16 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		let decoder = if let Ok(format) = moq_mux::import::TrackStreamFormat::from_str(&format) {
-			StreamDecoder::Track(Box::new(
-				moq_mux::import::TrackStream::new(state.broadcast.clone(), state.catalog.clone(), format)
+		// A single codec streams onto one track; anything else is treated as a
+		// container. `UnknownFormat` from the track importer is the signal to fall
+		// through rather than a hard error.
+		let decoder = match moq_mux::import::TrackStream::new(state.broadcast.clone(), state.catalog.clone(), &format) {
+			Ok(track) => StreamDecoder::Track(Box::new(track)),
+			Err(moq_mux::Error::UnknownFormat(_)) => StreamDecoder::Container(
+				moq_mux::import::ContainerStream::new(state.broadcast.clone(), state.catalog.clone(), &format)
 					.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?,
-			))
-		} else if let Ok(format) = moq_mux::import::ContainerFormat::from_str(&format) {
-			StreamDecoder::Container(
-				moq_mux::import::ContainerStream::new(state.broadcast.clone(), state.catalog.clone(), format)
-					.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?,
-			)
-		} else {
-			return Err(MoqError::Codec(format!("unknown stream format: {format}")));
+			),
+			Err(err) => return Err(MoqError::Codec(format!("init failed: {err}"))),
 		};
 
 		Ok(Arc::new(MoqMediaStreamProducer {

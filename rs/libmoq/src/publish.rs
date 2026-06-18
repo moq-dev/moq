@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use moq_mux::import;
 
 use crate::{Error, Id, NonZeroSlab};
@@ -63,22 +61,18 @@ impl Publish {
 	pub fn media_ordered(&mut self, broadcast: Id, format: &str, init: &[u8]) -> Result<Id, Error> {
 		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 
-		let media = if let Ok(format) = import::TrackFormat::from_str(format) {
-			Media::Track(Box::new(import::Track::new(
-				broadcast.clone(),
-				catalog.clone(),
-				format,
-				init,
-			)?))
-		} else if let Ok(format) = import::ContainerFormat::from_str(format) {
-			Media::Container(import::Container::new(
-				broadcast.clone(),
-				catalog.clone(),
-				format,
-				init,
-			)?)
-		} else {
-			return Err(Error::UnknownFormat(format.to_string()));
+		// A single codec fills one track; anything else is treated as a container.
+		// `UnknownFormat` from the track importer is the signal to try a container.
+		let media = match import::Track::new(broadcast.clone(), catalog.clone(), format, init) {
+			Ok(track) => Media::Track(Box::new(track)),
+			Err(moq_mux::Error::UnknownFormat(_)) => {
+				match import::Container::new(broadcast.clone(), catalog.clone(), format, init) {
+					Ok(container) => Media::Container(container),
+					Err(moq_mux::Error::UnknownFormat(_)) => return Err(Error::UnknownFormat(format.to_string())),
+					Err(err) => return Err(err.into()),
+				}
+			}
+			Err(err) => return Err(err.into()),
 		};
 
 		let id = self.media.insert(media)?;
