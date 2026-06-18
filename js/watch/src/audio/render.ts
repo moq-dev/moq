@@ -15,9 +15,9 @@ export interface InitPost {
 	channels: number;
 	rate: number;
 	latency: Time.Milli;
+	// Buffered mode: anchor to the first frame and play through; the ring is sized to the floor and
+	// the lookahead above it is held back upstream (the main thread applies the backpressure).
 	buffered: boolean;
-	// The buffered-mode cap in ms; the worklet sizes the ring to it (falls back to a default if absent).
-	maxBuffer?: Time.Milli;
 }
 
 /** Flush the buffer and re-stall (fallback path only; shared path resets via Atomics). */

@@ -182,12 +182,17 @@ adaptive floor). `latency-max` is the ceiling, and it has two forms:
 - **`"real-time"`** (the default) or any value `<= latency-min`: collapsed, i.e.
   today's minimize-latency behavior.
 
-The ceiling is always finite: the buffer is bounded by `latency-max`, and once it
-fills the audio ring drops its oldest samples rather than growing without limit.
-The mechanism is the same in every case: the playhead is anchored on the first
-frame and only re-anchored (skipped forward) when keeping it would push latency
-past `latency-max`. Minimize is just the degenerate case where the ceiling equals
-the floor.
+The ceiling is always finite: the buffer is bounded by `latency-max` rather than
+growing without limit. The mechanism is the same in every case: the playhead is
+anchored on the first frame and only re-anchored (skipped forward) when keeping it
+would push latency past `latency-max`. Minimize is just the degenerate case where
+the ceiling equals the floor.
+
+The buffered lookahead is held cheaply. The decoded audio ring only holds the
+**floor** (`latency-min`) worth of PCM; everything above it stays upstream as
+encoded frames, and the decoder applies backpressure (stops decoding ahead) until
+the playhead nears each frame. So a large `latency-max` costs encoded bytes, not
+seconds of decoded PCM.
 
 At each new utterance, call `reset()` to flush the audio buffer and re-anchor
 playback to the next frame. The producer can interrupt by writing a new utterance

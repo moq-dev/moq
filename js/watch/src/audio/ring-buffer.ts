@@ -1,9 +1,5 @@
 import { Time } from "@moq/net";
 
-// Fallback ring capacity (ms) when buffered but no cap was supplied. The ceiling is always finite,
-// so this is just defensive; the worklet drops the oldest samples once the ring fills.
-const DEFAULT_MAX_BUFFER = 1_500 as Time.Milli;
-
 export class AudioRingBuffer {
 	#buffer: Float32Array[];
 	#writeIndex = 0;
@@ -25,7 +21,6 @@ export class AudioRingBuffer {
 		channels: number;
 		latency: Time.Milli;
 		buffered?: boolean;
-		maxBuffer?: Time.Milli;
 	}) {
 		if (props.channels <= 0) throw new Error("invalid channels");
 		if (props.rate <= 0) throw new Error("invalid sample rate");
@@ -38,16 +33,19 @@ export class AudioRingBuffer {
 		this.channels = props.channels;
 		this.#buffered = props.buffered ?? false;
 
-		// In buffered mode the capacity is the maxBuffer cap, not just the latency target.
-		const maxBuffer = props.maxBuffer ?? DEFAULT_MAX_BUFFER;
-		const capacity = this.#buffered
-			? Math.ceil(props.rate * Time.Second.fromMilli(maxBuffer))
-			: this.#latencySamples;
+		// The ring holds the latency floor as PCM. Buffered mode gives it headroom above the floor
+		// so the backpressure-paced decode loop (on the main thread) doesn't overflow-drop; the rest
+		// of the lookahead stays encoded upstream.
+		const capacity = this.#capacityFor(this.#latencySamples);
 
 		this.#buffer = [];
 		for (let i = 0; i < this.channels; i++) {
 			this.#buffer[i] = new Float32Array(capacity);
 		}
+	}
+
+	#capacityFor(latencySamples: number): number {
+		return this.#buffered ? latencySamples * 2 : latencySamples;
 	}
 
 	get stalled(): boolean {
@@ -67,13 +65,9 @@ export class AudioRingBuffer {
 	}
 
 	resize(latency: Time.Milli): void {
-		// In buffered mode the capacity is fixed; latency only moves the un-stall threshold.
-		if (this.#buffered) {
-			this.#latencySamples = Math.ceil(this.rate * Time.Second.fromMilli(latency));
-			return;
-		}
+		this.#latencySamples = Math.ceil(this.rate * Time.Second.fromMilli(latency));
 
-		const newCapacity = Math.ceil(this.rate * Time.Second.fromMilli(latency));
+		const newCapacity = this.#capacityFor(this.#latencySamples);
 		if (newCapacity === this.capacity) return;
 		if (newCapacity === 0) throw new Error("empty buffer");
 
