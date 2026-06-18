@@ -140,7 +140,7 @@ impl BroadcastProducer {
 	/// [`TrackRequest::accept`] to set its info and start producing. Use this when
 	/// the producer can't pick the track's properties (e.g. timescale) until it has
 	/// inspected the media, the same shape as a consumer-driven
-	/// [`Self::requested_track`].
+	/// [`BroadcastDynamic::requested_track`].
 	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<TrackRequest, Error> {
 		let request = TrackRequest::new(name);
 		let mut state = BroadcastState::modify(&self.state)?;
