@@ -18,7 +18,6 @@ use mpeg2ts::es::StreamType;
 use mpeg2ts::pes::PesHeader;
 use mpeg2ts::ts::payload::Pes;
 use mpeg2ts::ts::{Pid, ReadTsPacket, TsPacket, TsPacketReader, TsPayload};
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::adts;
 use super::scte35;
@@ -113,20 +112,6 @@ impl<E: scte35::Catalog> Import<E> {
 	/// True once the stream layout (PMT) has been discovered.
 	pub fn is_initialized(&self) -> bool {
 		self.initialized
-	}
-
-	/// Decode from an asynchronous reader, driving [`Self::decode`] in a loop.
-	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> anyhow::Result<()> {
-		let mut chunk = BytesMut::with_capacity(64 * 1024);
-		loop {
-			chunk.clear();
-			let n = reader.read_buf(&mut chunk).await?;
-			if n == 0 {
-				break;
-			}
-			self.decode(&chunk)?;
-		}
-		Ok(())
 	}
 
 	/// Append `buf` to the internal scratch and demux every whole TS packet it

@@ -11,7 +11,6 @@
 
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::{
 	AAC_RAW, AAC_SEQUENCE_HEADER, AUDIO_FORMAT_AAC, AVC_NALU, AVC_SEQUENCE_HEADER, FILE_HEADER_LEN, FRAME_TYPE_KEY,
@@ -69,20 +68,6 @@ impl Import {
 	/// True once at least one stream's sequence header has been parsed.
 	pub fn is_initialized(&self) -> bool {
 		self.video.is_some() || self.audio.is_some()
-	}
-
-	/// Decode from an asynchronous reader, driving [`Self::decode`] in a loop.
-	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> anyhow::Result<()> {
-		let mut chunk = BytesMut::with_capacity(64 * 1024);
-		loop {
-			chunk.clear();
-			let n = reader.read_buf(&mut chunk).await?;
-			if n == 0 {
-				break;
-			}
-			self.decode(&chunk)?;
-		}
-		Ok(())
 	}
 
 	/// Append `buf` to the internal scratch and demux every whole tag it now

@@ -3,7 +3,6 @@ use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, Vi
 use moq_net::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::Error;
 use crate::Result;
@@ -86,20 +85,6 @@ impl Import {
 			broadcast,
 			buffer: BytesMut::new(),
 		}
-	}
-
-	/// Decode from an asynchronous reader.
-	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> Result<()> {
-		let mut chunk = BytesMut::with_capacity(64 * 1024);
-		loop {
-			chunk.clear();
-			if reader.read_buf(&mut chunk).await? == 0 {
-				break;
-			}
-			self.decode(&chunk)?;
-		}
-
-		Ok(())
 	}
 
 	/// Decode a buffer of bytes.

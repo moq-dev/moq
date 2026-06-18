@@ -7,7 +7,6 @@ use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
 use moq_net::Timestamp;
 use mp4_atom::Atom;
-use tokio::io::{AsyncRead, AsyncReadExt};
 use webm_iterable::WebmIterator;
 use webm_iterable::errors::TagIteratorError;
 use webm_iterable::iterator::AllowableErrors;
@@ -85,20 +84,6 @@ impl Import {
 
 	pub fn is_initialized(&self) -> bool {
 		self.tracks_seen
-	}
-
-	/// Decode from an asynchronous reader. Drives [`Self::decode`] in a loop.
-	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> Result<()> {
-		let mut chunk = BytesMut::with_capacity(64 * 1024);
-		loop {
-			chunk.clear();
-			let n = reader.read_buf(&mut chunk).await?;
-			if n == 0 {
-				break;
-			}
-			self.decode(&chunk)?;
-		}
-		Ok(())
 	}
 
 	/// Append the buffer to the internal scratch and parse as many tags as possible.
