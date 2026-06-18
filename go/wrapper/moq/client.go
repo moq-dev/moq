@@ -2,6 +2,7 @@ package moq
 
 import (
 	"context"
+	"sync"
 
 	ffi "github.com/moq-dev/moq-go-ffi/moq"
 )
@@ -49,6 +50,7 @@ type Client struct {
 	consumeOrigin *OriginProducer
 	consumer      *OriginConsumer
 	session       *Session
+	closeOnce     sync.Once
 }
 
 // Dial connects to a MoQ server and returns the established client. Cancel ctx
@@ -87,14 +89,14 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	}
 	c.inner = inner
 
-	session, err := runCancellable(ctx, inner.Cancel, func() (*Session, error) {
+	session, err := runCancellable(ctx, inner.Cancel, func() (*ffi.MoqSession, error) {
 		return inner.Connect(url)
 	})
 	if err != nil {
 		inner.Cancel()
 		return nil, err
 	}
-	c.session = session
+	c.session = &Session{inner: session}
 
 	// Only a configured consume origin yields a consumer. A publish-only client
 	// has none, so Announced/AnnouncedBroadcast surface ErrNoConsumeOrigin
@@ -147,13 +149,8 @@ func (c *Client) Session() *Session {
 }
 
 // Close stops the client. In-flight sessions stay alive until their handles are
-// dropped or cancelled.
+// dropped or cancelled. Safe to call more than once.
 func (c *Client) Close() error {
-	if c.inner != nil {
-		c.inner.Cancel()
-		c.inner = nil
-	}
-	c.consumer = nil
-	c.session = nil
+	c.closeOnce.Do(c.inner.Cancel)
 	return nil
 }

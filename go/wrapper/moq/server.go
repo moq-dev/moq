@@ -9,7 +9,15 @@ import (
 )
 
 // Transport is the wire transport an incoming session arrived over.
-type Transport = string
+type Transport string
+
+// Known transports reported by Request.Transport. Future native versions may
+// report values not listed here, so treat Transport as an open set.
+const (
+	TransportQUIC      Transport = "quic"
+	TransportIroh      Transport = "iroh"
+	TransportWebSocket Transport = "websocket"
+)
 
 // Request is an incoming session that can be accepted (OK) or rejected (Close).
 // Dropping a Request without responding closes the connection silently.
@@ -22,9 +30,9 @@ func (r *Request) URL() *string {
 	return r.inner.Url()
 }
 
-// Transport is the wire transport: "quic", "iroh", or "websocket".
+// Transport is the wire transport the request arrived over, e.g. TransportQUIC.
 func (r *Request) Transport() Transport {
-	return r.inner.Transport()
+	return Transport(r.inner.Transport())
 }
 
 // SetPublish overrides the publish origin for this session. Pass nil to fall
@@ -50,7 +58,11 @@ func (r *Request) SetConsume(o *OriginProducer) {
 // OK completes the handshake and returns the established session. Hold the
 // session to keep the connection alive.
 func (r *Request) OK(ctx context.Context) (*Session, error) {
-	return runCancellable(ctx, r.inner.Cancel, r.inner.Ok)
+	inner, err := runCancellable(ctx, r.inner.Cancel, r.inner.Ok)
+	if err != nil {
+		return nil, err
+	}
+	return &Session{inner: inner}, nil
 }
 
 // Close rejects the session with an HTTP status code (default convention: 404).
@@ -110,6 +122,7 @@ type Server struct {
 	publishOrigin *OriginProducer
 	consumeOrigin *OriginProducer
 	localAddr     string
+	closeOnce     sync.Once
 }
 
 // Listen binds the server and starts accepting. Cancel ctx to abort the bind.
@@ -262,19 +275,17 @@ func (s *Server) Serve(ctx context.Context, onRequest func(*Request) (bool, erro
 			if err != nil {
 				return
 			}
-			// Hold the session until it closes; shut it down if ctx is cancelled
-			// so this goroutine (and the deferred Wait) can't hang.
-			_ = runErr(ctx, func() { session.Shutdown() }, session.Closed)
+			// Hold the session until it closes; Closed shuts it down if ctx is
+			// cancelled so this goroutine (and the deferred Wait) can't hang.
+			_ = session.Closed(ctx)
 		}(req)
 	}
 }
 
 // Close stops accepting new sessions. In-flight sessions stay alive until their
-// handles are dropped or cancelled.
+// handles are dropped or cancelled. Safe to call more than once and from
+// multiple goroutines (Serve calls it on ctx-driven shutdown).
 func (s *Server) Close() error {
-	if s.inner != nil {
-		s.inner.Cancel()
-		s.inner = nil
-	}
+	s.closeOnce.Do(s.inner.Cancel)
 	return nil
 }

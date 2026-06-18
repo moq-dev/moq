@@ -3,6 +3,8 @@ package moq_test
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -111,7 +113,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("audio = %+v, want opus/48000/2", audio)
 	}
 
-	mediaConsumer, err := ann.Broadcast().SubscribeMedia(trackName, audio.Container, 10_000)
+	mediaConsumer, err := ann.Broadcast().SubscribeMedia(trackName, audio.Container, 10_000, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,11 +144,11 @@ func TestTrackPublishConsume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := broadcast.PublishTrack("data")
+	track, err := broadcast.PublishTrack("data", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	consumer, err := track.Consume()
+	consumer, err := track.Consume(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,4 +165,69 @@ func TestTrackPublishConsume(t *testing.T) {
 	if string(frame) != "hello" {
 		t.Fatalf("frame = %q, want %q", frame, "hello")
 	}
+}
+
+// TestRecvGroupCancelRace exercises the core runCancellable path under -race:
+// the native RecvGroup runs on an internal goroutine while ctx expiry triggers a
+// concurrent Cancel on the same consumer. No group is ever written, so each read
+// blocks until its short ctx fires. The race detector flags any unsynchronized
+// access between the in-flight call and the cancel.
+func TestRecvGroupCancelRace(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Finish()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		track, err := broadcast.PublishTrack(fmt.Sprintf("t%d", i), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		consumer, err := track.Consume(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		wg.Add(1)
+		go func(c *moq.TrackConsumer) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+			defer cancel()
+			// Returns ctx.Err() once the deadline fires; we only care that it
+			// returns without a data race or panic.
+			_, _ = c.RecvGroup(ctx)
+		}(consumer)
+	}
+	wg.Wait()
+}
+
+// TestConsumerCancelConcurrent confirms Cancel is safe to call repeatedly from
+// multiple goroutines (it underlies every stream's cleanup and Close path).
+func TestConsumerCancelConcurrent(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Finish()
+
+	track, err := broadcast.PublishTrack("x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := track.Consume(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			consumer.Cancel()
+		}()
+	}
+	wg.Wait()
 }

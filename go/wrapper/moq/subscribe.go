@@ -52,14 +52,22 @@ func (b *BroadcastConsumer) SubscribeAudio(name string, catalogAudio Audio, outp
 	return &AudioConsumer{inner: inner}, nil
 }
 
-// Catalog subscribes and returns the first catalog.
+// Catalog subscribes and returns the first catalog. It reports ErrClosed if the
+// catalog track ends before any catalog arrives.
 func (b *BroadcastConsumer) Catalog(ctx context.Context) (*Catalog, error) {
 	consumer, err := b.SubscribeCatalog()
 	if err != nil {
 		return nil, err
 	}
 	defer consumer.Cancel()
-	return consumer.Next(ctx)
+	catalog, err := consumer.Next(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if catalog == nil {
+		return nil, ErrClosed
+	}
+	return catalog, nil
 }
 
 // MediaConsumer is a stream of decoded media frames.

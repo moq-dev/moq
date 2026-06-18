@@ -44,6 +44,20 @@ for ann, err := range announced.All(ctx) {
 }
 ```
 
+## Errors
+
+All FFI errors come back as the `moq.Error` type. The error variants are
+re-exported as sentinels (`moq.ErrClosed`, `moq.ErrUnauthorized`, ...) so you can
+`errors.Is` against them without importing `moq-go-ffi`. Two helpers cover the
+common cases: `moq.IsShutdown(err)` (a stream ended because it was cancelled or
+the session closed, i.e. not a real failure) and `moq.IsAuthError(err)` (HTTP
+401/403).
+
+Blocking calls take a `context.Context`. Most abort cleanly when the context is
+cancelled; the few that have no native cancel (`Used`/`Unused` and
+`Server.Accept`) return `ctx.Err()` promptly but keep running in the background
+until the owning producer/server is closed. See the package doc for details.
+
 ## Versioning
 
 `VERSION` holds the human-owned `MAJOR.MINOR` line (the wrapper API version). Bump it in a PR when the wrapper's own API changes. The patch number is derived by CI from the existing mirror tags, so every release (whether triggered by a wrapper change or by a new `moq-go-ffi`) just takes the next patch on that line.

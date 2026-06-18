@@ -20,18 +20,29 @@ type (
 	TrackInfo          = ffi.MoqTrackInfo
 	Video              = ffi.MoqVideo
 
-	// Container selects how subscribed media frames are demuxed. Construct one
-	// of the variant types below.
+	// Container selects how subscribed media frames are demuxed. Build one with
+	// LegacyContainer, CmafContainer, or LocContainer.
 	Container       = ffi.Container
 	ContainerLegacy = ffi.ContainerLegacy
 	ContainerCmaf   = ffi.ContainerCmaf
 	ContainerLoc    = ffi.ContainerLoc
-
-	// Session is the established connection. Hold it to keep the connection
-	// alive; its methods (Closed, Cancel, Shutdown) block, so drive them from
-	// a goroutine if you need cancellation.
-	Session = ffi.MoqSession
 )
+
+// LegacyContainer selects the legacy hang container for a media subscription.
+func LegacyContainer() Container {
+	return ContainerLegacy{}
+}
+
+// CmafContainer selects the CMAF (fMP4) container for a media subscription,
+// initialized from the given init segment.
+func CmafContainer(init []byte) Container {
+	return ContainerCmaf{Init: init}
+}
+
+// LocContainer selects the low-overhead container for a media subscription.
+func LocContainer() Container {
+	return ContainerLoc{}
+}
 
 // AudioFormat values: the raw PCM sample layout fed to or returned from the
 // in-process Opus codec.
