@@ -115,6 +115,28 @@ A server can reject the connection on auth grounds: unauthorized (HTTP 401) or f
 
 Failed calls are reported only through the return code and `moq_error()`, not logged. To surface libmoq's internal logs (moq-net / QUIC activity), call `moq_log_level("debug")` (or `"trace"`, `"info"`, etc.) to install a tracing subscriber.
 
+## Connection statistics
+
+`moq_session_stats(session, &dst)` fills a `moq_connection_stats` struct with a point-in-time view of the underlying QUIC/WebTransport connection: RTT, send/receive bandwidth estimates, and byte/packet counters. Unlike the callback-based APIs, this is a plain synchronous query you can poll on a timer.
+
+Each metric carries a `*_valid` flag because availability depends on the transport backend (native QUIC reports every metric; the browser WebTransport reports few or none). A `false` flag is not the same as a zero value, so always check it before reading the field:
+
+```c
+moq_connection_stats stats = {0};
+int rc = moq_session_stats(session, &stats);
+if (rc < 0) {
+    // < 0 also covers "currently reconnecting, no live connection".
+    fprintf(stderr, "stats failed: %s\n", moq_error());
+} else {
+    if (stats.rtt_valid) {
+        printf("rtt: %llu us\n", (unsigned long long)stats.rtt_us);
+    }
+    if (stats.send_rate_valid) {
+        printf("send: %llu bps\n", (unsigned long long)stats.send_rate_bps);
+    }
+}
+```
+
 ## Use cases
 
 - **C/C++ applications** integrating MoQ without a Rust toolchain
