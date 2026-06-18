@@ -49,6 +49,11 @@ pub enum Error {
 	#[error("not found")]
 	NotFound,
 
+	/// A broadcast was requested that is neither announced nor served by a dynamic
+	/// router, so there is no route to it.
+	#[error("unroutable")]
+	Unroutable,
+
 	#[error("wrong frame size")]
 	WrongSize,
 
@@ -135,6 +140,7 @@ impl Error {
 			Self::FrameTooLarge => 27,
 			Self::Decompress => 28,
 			Self::TimestampMismatch => 29,
+			Self::Unroutable => 30,
 			Self::App(app) => *app as u32 + 64,
 			Self::Remote(code) => *code,
 		}

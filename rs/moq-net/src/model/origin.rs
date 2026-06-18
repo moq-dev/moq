@@ -993,7 +993,7 @@ struct OriginDynamicState {
 	request_order: VecDeque<PathOwned>,
 
 	// The number of live `OriginDynamic` handlers. While zero, `request_broadcast`
-	// fails fast with `NotFound` rather than queueing a request nobody will serve.
+	// fails fast with `Unroutable` rather than queueing a request nobody will serve.
 	dynamic: usize,
 }
 
@@ -1037,7 +1037,7 @@ impl Clone for OriginDynamic {
 	fn clone(&self) -> Self {
 		// Mirror `new`: bump `dynamic` so each live handle is counted. Without this,
 		// dropping a clone would decrement past `new`'s increment and prematurely flip
-		// `dynamic` to zero, making future `request_broadcast` calls return `NotFound`.
+		// `dynamic` to zero, making future `request_broadcast` calls return `Unroutable`.
 		if let Ok(mut state) = self.state.write() {
 			state.dynamic += 1;
 		}
@@ -1196,8 +1196,8 @@ impl BroadcastRequested {
 					None => Poll::Pending,
 				})) {
 					Ok(result) => result,
-					// The handler dropped without resolving: nobody could serve it.
-					Err(_closed) => Err(Error::NotFound),
+					// Every handler dropped without resolving: nobody could route it.
+					Err(_closed) => Err(Error::Unroutable),
 				},
 			),
 		}
@@ -1408,9 +1408,11 @@ impl OriginConsumer {
 	/// [`reject`](BroadcastRequest::reject)s or every handler drops). Concurrent requests for
 	/// the same unannounced path coalesce onto one handler request.
 	///
-	/// Fails synchronously with [`Error::NotFound`] when the path is not announced and no
-	/// handler exists, or [`Error::Dropped`] once the origin is gone. Unlike an announced
-	/// broadcast, a dynamically served one is never visible to [`Self::announced`].
+	/// Fails synchronously with [`Error::Unroutable`] when the path is not announced and no
+	/// dynamic handler exists, or [`Error::Dropped`] once the origin is gone. A request that is
+	/// registered while a handler is live but then loses every handler before being served also
+	/// resolves to [`Error::Unroutable`]. Unlike an announced broadcast, a dynamically served one
+	/// is never visible to [`Self::announced`].
 	pub fn request_broadcast(&self, path: impl AsPath) -> Result<kio::Pending<BroadcastRequested>, Error> {
 		let path = path.as_path();
 
@@ -1430,7 +1432,7 @@ impl OriginConsumer {
 			producer.consume()
 		} else {
 			if state.dynamic == 0 {
-				return Err(Error::NotFound);
+				return Err(Error::Unroutable);
 			}
 
 			let producer = kio::Producer::<PendingBroadcast>::default();
@@ -2941,10 +2943,10 @@ mod tests {
 
 	// With no OriginDynamic handler, an unannounced path fails fast (synchronously).
 	#[tokio::test]
-	async fn dynamic_request_not_found_without_handler() {
+	async fn dynamic_request_unroutable_without_handler() {
 		let origin = Origin::random().produce();
 		let consumer = origin.consume();
-		assert!(matches!(consumer.request_broadcast("missing"), Err(Error::NotFound)));
+		assert!(matches!(consumer.request_broadcast("missing"), Err(Error::Unroutable)));
 	}
 
 	// A dynamically served broadcast resolves the requester and serves tracks, but is
@@ -3036,10 +3038,31 @@ mod tests {
 
 		let request_fut = consumer.request_broadcast("fallback").unwrap();
 		drop(dynamic);
-		assert!(request_fut.await.is_err());
+		assert!(matches!(request_fut.await, Err(Error::Unroutable)));
 
 		// With no handler left, a fresh request fails fast.
-		assert!(matches!(consumer.request_broadcast("again"), Err(Error::NotFound)));
+		assert!(matches!(consumer.request_broadcast("again"), Err(Error::Unroutable)));
+	}
+
+	// `accept` is decoupled from the dynamic count: once a handler has picked a request up,
+	// it can still serve it even if every handler (including itself) drops first, flipping the
+	// count to zero. The in-flight request must not be rejected as `Unroutable`.
+	#[tokio::test(start_paused = true)]
+	async fn dynamic_request_accept_after_handler_dropped() {
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let consumer = origin.consume();
+
+		let request_fut = consumer.request_broadcast("fallback").unwrap();
+
+		// The handler picks the request up, then every handler drops (count -> 0).
+		let request = dynamic.requested_broadcast().await.unwrap();
+		drop(dynamic);
+
+		// Accept still resolves the awaiting requester with the served broadcast.
+		let served = BroadcastInfo::new().produce();
+		request.accept(&served);
+		assert!(request_fut.await.unwrap().is_clone(&served.consume()));
 	}
 
 	// A live announcement wins over the dynamic fallback; no request is queued.
