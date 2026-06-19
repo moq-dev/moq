@@ -120,6 +120,8 @@ The JWT payload contains these claims:
 | `exp` | Expiration time (Unix timestamp) |
 | `iat` | Issued-at time (Unix timestamp) |
 
+The `exp` claim is enforced for the whole session, not just at connect time. The relay closes the connection once `exp` passes, so a client must reconnect with a fresh token to continue. The same applies to mTLS: the connection is closed when the client certificate's `notAfter` is reached.
+
 ### Path Matching
 
 The `root` claim sets a base path. The `pub` and `sub` claims are suffixes:

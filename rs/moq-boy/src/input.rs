@@ -1,11 +1,11 @@
 //! Viewer discovery and command handling.
 //!
 //! Viewers are MoQ publishers: each creates a broadcast under the viewer prefix
-//! with a "command" track containing JSON button states and reset requests.
-//! This module discovers viewer broadcasts and relays their commands to the
-//! emulator thread via an mpsc channel.
-
-use anyhow::Context;
+//! with a "command" track containing JSON button states and reset requests. The
+//! command track is read through [`moq_json`], so snapshots and merge-patch
+//! deltas are reconstructed into a full command before dispatch. This module
+//! discovers viewer broadcasts and relays their commands to the emulator thread
+//! via an mpsc channel.
 
 use std::time::Duration;
 
@@ -99,35 +99,41 @@ async fn handle_viewer_commands(
 	broadcast: moq_net::BroadcastConsumer,
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
-	let mut track = broadcast.track("command")?.subscribe(None)?.await?;
+	let track = broadcast.track("command")?.subscribe(None)?.await?;
+	let mut commands = moq_json::Consumer::<RawCommand>::new(track);
 
-	while let Some(mut group) = track.recv_group().await? {
-		while let Some(frame) = group.read_frame().await? {
-			let text = std::str::from_utf8(&frame).context("invalid UTF-8 in command")?;
-			match serde_json::from_str::<RawCommand>(text) {
-				Ok(RawCommand::Buttons { buttons, timestamps }) => {
-					let timestamps: Vec<_> = timestamps
-						.into_iter()
-						.filter_map(|t| {
-							let ts = Duration::try_from_secs_f64(t.ts / 1000.0).ok()?;
-							Some(TimestampEntry { label: t.label, ts })
-						})
-						.collect();
-					let _ = cmd_tx
-						.send(Command::Buttons {
-							buttons,
-							viewer_id: viewer_id.to_string(),
-							timestamps,
-						})
-						.await;
-				}
-				Ok(RawCommand::Reset { .. }) => {
-					tracing::info!(%viewer_id, "reset");
-					let _ = cmd_tx.send(Command::Reset).await;
-				}
-				Err(e) => {
-					tracing::warn!(%viewer_id, error = %e, "invalid command");
-				}
+	loop {
+		let command = match commands.next().await {
+			Ok(Some(command)) => command,
+			Ok(None) => break,
+			// A malformed command is skipped; a track error ends the stream.
+			Err(moq_json::Error::Json(err)) => {
+				tracing::warn!(%viewer_id, %err, "invalid command");
+				continue;
+			}
+			Err(err) => return Err(err.into()),
+		};
+
+		match command {
+			RawCommand::Buttons { buttons, timestamps } => {
+				let timestamps: Vec<_> = timestamps
+					.into_iter()
+					.filter_map(|t| {
+						let ts = Duration::try_from_secs_f64(t.ts / 1000.0).ok()?;
+						Some(TimestampEntry { label: t.label, ts })
+					})
+					.collect();
+				let _ = cmd_tx
+					.send(Command::Buttons {
+						buttons,
+						viewer_id: viewer_id.to_string(),
+						timestamps,
+					})
+					.await;
+			}
+			RawCommand::Reset {} => {
+				tracing::info!(%viewer_id, "reset");
+				let _ = cmd_tx.send(Command::Reset).await;
 			}
 		}
 	}

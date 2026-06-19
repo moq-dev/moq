@@ -281,7 +281,7 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(unsafe { moq_consume_video_config(catalog_id, 0, &mut video_cfg) }, 0);
 	let codec = unsafe {
 		std::str::from_utf8(std::slice::from_raw_parts(
-			video_cfg.codec as *const u8,
+			video_cfg.codec.cast::<u8>(),
 			video_cfg.codec_len,
 		))
 	}
@@ -453,7 +453,7 @@ fn announced_free_lifecycle() {
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
 	assert!(info.active, "broadcast should be active");
-	let got = unsafe { std::slice::from_raw_parts(info.path as *const u8, info.path_len) };
+	let got = unsafe { std::slice::from_raw_parts(info.path.cast::<u8>(), info.path_len) };
 	assert_eq!(got, path, "announced path should match");
 
 	// Freeing the record succeeds once; the handle is then unknown.
@@ -588,7 +588,7 @@ fn local_announce() {
 	assert!(info.active, "broadcast should be active");
 
 	let announced_path =
-		unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.path as *const u8, info.path_len)).unwrap() };
+		unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.path.cast::<u8>(), info.path_len)).unwrap() };
 	assert_eq!(announced_path, "test/broadcast");
 
 	assert_eq!(moq_origin_announced_close(announced_task), 0);
@@ -672,7 +672,7 @@ fn local_publish_consume() {
 
 	let codec = unsafe {
 		std::str::from_utf8(std::slice::from_raw_parts(
-			audio_cfg.codec as *const u8,
+			audio_cfg.codec.cast::<u8>(),
 			audio_cfg.codec_len,
 		))
 	}
@@ -862,7 +862,7 @@ fn video_publish_consume() {
 
 	let codec = unsafe {
 		std::str::from_utf8(std::slice::from_raw_parts(
-			video_cfg.codec as *const u8,
+			video_cfg.codec.cast::<u8>(),
 			video_cfg.codec_len,
 		))
 	}

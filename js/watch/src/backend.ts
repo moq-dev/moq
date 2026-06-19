@@ -73,7 +73,8 @@ type MultiBackendInput = {
 	// When video is downloaded relative to the canvas position. See {@link Video.Visible}.
 	visible: Getter<Video.Visible>;
 
-	// Latency: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter in ms.
+	// Latency target. A scalar (or "real-time") minimizes; an object `{ min, max }` opens a range and
+	// enables buffered playback. Call `reset()` at each utterance boundary to re-anchor. See {@link Latency}.
 	latency: Getter<Latency>;
 
 	// Audio controls. The owner holds the writable Signals.
@@ -90,8 +91,8 @@ type MultiBackendInput = {
 export class MultiBackend {
 	readonly input: Readonlys<MultiBackendInput>;
 
-	// The jitter buffer in milliseconds, computed by Sync.
-	readonly output: { readonly jitter: Getter<Moq.Time.Milli> };
+	// Read-only signals computed by Sync: the jitter buffer (ms) and whether buffered playback is active.
+	readonly output: { readonly jitter: Getter<Moq.Time.Milli>; readonly buffered: Getter<boolean> };
 
 	#videoSource: Video.Source;
 	#audioSource: Audio.Source;
@@ -118,6 +119,9 @@ export class MultiBackend {
 
 	video: VideoBackend;
 	audio: AudioBackend;
+
+	// The active WebCodecs audio decoder, used to flush the buffer on `reset()`.
+	#audioDecoder?: Audio.Decoder;
 
 	// Used to sync audio and video playback at a target delay.
 	sync: Sync;
@@ -159,7 +163,7 @@ export class MultiBackend {
 		this.video = new VideoBackend(this.#videoSource, this.#videoOutput);
 		this.audio = new AudioBackend(this.#audioSource, this.#audioOutput);
 
-		this.output = { jitter: this.sync.output.jitter };
+		this.output = { jitter: this.sync.output.jitter, buffered: this.sync.output.buffered };
 
 		this.signals.run(this.#runElement.bind(this));
 	}
@@ -182,6 +186,7 @@ export class MultiBackend {
 
 		const videoDecoder = new Video.Decoder(this.#videoSource, this.sync, { enabled: this.#videoEnabled });
 		const audioDecoder = new Audio.Decoder(this.#audioSource, this.sync, { enabled: this.#audioEnabled });
+		this.#audioDecoder = audioDecoder;
 
 		const audioEmitter = new Audio.Emitter(audioDecoder, {
 			volume: this.input.volume,
@@ -199,6 +204,7 @@ export class MultiBackend {
 			audioDecoder.close();
 			audioEmitter.close();
 			videoRenderer.close();
+			this.#audioDecoder = undefined;
 		});
 
 		// Audio download follows the emitter's enable policy (paused/muted).
@@ -264,6 +270,13 @@ export class MultiBackend {
 		effect.proxy(this.#audioOutput.stats, audio.output.stats);
 		effect.proxy(this.#audioOutput.buffered, audio.output.buffered);
 		effect.proxy(this.#audioOutput.context, audio.output.context);
+	}
+
+	// Re-anchor playback at an utterance boundary in buffered mode: reset the sync reference
+	// and flush the audio buffer so the next utterance plays from its own first frame.
+	reset(): void {
+		this.sync.reset();
+		this.#audioDecoder?.reset();
 	}
 
 	close(): void {
