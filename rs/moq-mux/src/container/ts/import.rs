@@ -303,6 +303,15 @@ impl<E: catalog::Catalog> Import<E> {
 		stream_type: StreamType,
 		descriptors: &[mpeg2ts::ts::Descriptor],
 	) -> anyhow::Result<()> {
+		// A later PMT can remap a PID that was section-framed (intercepted in
+		// `decode`) to a PES codec/verbatim stream. Drop the stale section route first,
+		// or it would keep intercepting the PID and the new stream would never get data.
+		// This only fires on a genuine remap: section PIDs otherwise route to
+		// `ensure_section`, never here.
+		if let Some(mut section) = self.sections.remove(&pid.as_u16()) {
+			section.finish()?;
+			self.pending.remove(&pid);
+		}
 		if self.streams.contains_key(&pid) {
 			return Ok(());
 		}
