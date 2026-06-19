@@ -6,7 +6,7 @@
 //!
 //! TCP has no TLS handshake, so the application protocol (the moq ALPN) is
 //! negotiated in-band: pass the offered/supported protocols and the resulting
-//! [`qmux::Session::protocol`] is populated before connect/accept returns.
+//! `qmux::Session::protocol()` is populated before connect/accept returns.
 
 use std::net;
 use url::Url;
