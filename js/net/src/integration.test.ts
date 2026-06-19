@@ -64,6 +64,21 @@ test("integration: lite draft-03", async () => {
 	await runPublishSubscribeFlow(Lite.ALPN_03);
 });
 
+test("integration: lite draft-04", async () => {
+	await runPublishSubscribeFlow(Lite.ALPN_04);
+});
+
+// No-ALPN fallback (e.g. Firefox WebTransport, which can't select an ALPN).
+// The SETUP exchange advertises every shipped moq-lite version, so the server
+// can pick Lite03+ even without ALPN selection.
+test("integration: lite draft-03 via SETUP fallback (no ALPN)", async () => {
+	await runPublishSubscribeFlow("", Lite.Version.DRAFT_03);
+});
+
+test("integration: lite draft-04 via SETUP fallback (no ALPN)", async () => {
+	await runPublishSubscribeFlow("", Lite.Version.DRAFT_04);
+});
+
 test("integration: ietf draft-14", async () => {
 	await runPublishSubscribeFlow("", Ietf.Version.DRAFT_14);
 });

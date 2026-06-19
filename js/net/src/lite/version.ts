@@ -11,7 +11,10 @@ export const Version = {
 export type Version = (typeof Version)[keyof typeof Version];
 
 /// The WebTransport subprotocol identifier for moq-lite.
-/// Version negotiation still happens via SETUP when this is used.
+/// Version negotiation still happens via SETUP when this is used, or when no
+/// ALPN selection is available at all (e.g. Firefox WebTransport). In both
+/// cases we advertise every shipped moq-lite version in the legacy SETUP
+/// versions list, so Lite03+ can still be negotiated without a dedicated ALPN.
 export const ALPN = "moql";
 
 /// The ALPN string for Draft03, which uses ALPN-based version negotiation.

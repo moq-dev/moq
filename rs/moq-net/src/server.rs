@@ -207,10 +207,21 @@ impl Server {
 
 		let recv_bw = match version {
 			Version::Lite(v) => {
-				let stream = stream.with_version(v);
+				// Lite03+ has no SessionInfo protocol on the control stream. When it's
+				// negotiated via this legacy SETUP fallback (because ALPN selection
+				// wasn't available, e.g. Firefox WebTransport), close the bootstrap
+				// stream after the exchange and run the session as if it had been
+				// ALPN-negotiated directly.
+				let setup_stream = match v {
+					lite::Version::Lite01 | lite::Version::Lite02 => Some(stream.with_version(v)),
+					_ => {
+						let _ = stream.writer.finish();
+						None
+					}
+				};
 				lite::start(
 					session.clone(),
-					Some(stream),
+					setup_stream,
 					self.publish.clone(),
 					self.consume.clone(),
 					self.stats.clone(),
