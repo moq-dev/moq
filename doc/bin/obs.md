@@ -35,12 +35,11 @@ just obs build
 
 ### macOS
 
-The macOS build is fully native, **not** Nix. The build spec (`cpp/obs/buildspec.json`) downloads prebuilt `libobs` and `Qt6` on first configure, but `ffmpeg` and `pkg-config` come from Homebrew.
+The macOS build is fully native, **not** Nix. The build spec (`cpp/obs/buildspec.json`) downloads the prebuilt obs-deps bundle (`libobs`, `Qt6`, and `ffmpeg`) on first configure, so no Homebrew packages are needed.
 
 Requirements:
 
 - Full **Xcode** (not just the Command Line Tools): `sudo xcode-select -s /Applications/Xcode.app`
-- `brew install ffmpeg pkg-config`
 - Run **outside** the Nix dev shell. The Nix toolchain sets `DEVELOPER_DIR`/`NIX_LDFLAGS`, which break the Xcode build. If you use direnv, run from a plain terminal or `exit` the shell first.
 
 ```bash

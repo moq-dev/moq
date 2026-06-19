@@ -3,9 +3,9 @@
 # OBS Studio plugin for MoQ. See doc/bin/obs.md for the full build guide.
 #
 # Linux:   `nix develop` provides obs-studio/qt6/ffmpeg/cmake, then `just obs build`.
-# macOS:   native, NOT nix. Needs full Xcode + `brew install ffmpeg pkg-config`;
-#          run outside `nix develop` (its toolchain breaks the Xcode build).
-#          `just obs setup` downloads libobs/Qt6 via buildspec.json.
+# macOS:   native, NOT nix. Needs full Xcode; run outside `nix develop` (its
+#          toolchain breaks the Xcode build). `just obs setup` downloads
+#          libobs/Qt6/ffmpeg via buildspec.json (obs-deps).
 # Windows: needs Visual Studio 2022; same buildspec download (run from Git Bash).
 #
 # libmoq is built from the in-tree crate (rs/libmoq) via cargo. MOQ_LOCAL points

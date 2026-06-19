@@ -7,8 +7,8 @@ set -euo pipefail
 # The required toolchain must already be on PATH; this script only drives
 # CMake. Per platform:
 #   Linux   - run inside `nix develop` (provides cmake/ninja/obs-studio/qt6/ffmpeg)
-#   macOS   - full Xcode + `brew install ffmpeg pkg-config`, run OUTSIDE nix
-#             (libobs/Qt6 are downloaded by buildspec.json at configure time)
+#   macOS   - full Xcode, run OUTSIDE nix (libobs/Qt6/ffmpeg all come from the
+#             obs-deps bundle downloaded by buildspec.json at configure time)
 #   Windows - Visual Studio 2022; run from Git Bash with cmake on PATH
 #             (libobs/Qt6 downloaded by buildspec.json)
 #
@@ -94,12 +94,6 @@ case "$TARGET" in
         exit 1
         ;;
 esac
-
-# Homebrew ffmpeg/pkg-config on macOS (obs-deps ships libobs/Qt6, not ffmpeg).
-if [[ "$KIND" == "macos" ]] && command -v brew >/dev/null; then
-    brew_prefix="$(brew --prefix)"
-    export PKG_CONFIG_PATH="$brew_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-fi
 
 # Resolve the output dir to an absolute path before we cd into the plugin
 # directory (cmake --preset reads CMakePresets.json from the current dir).

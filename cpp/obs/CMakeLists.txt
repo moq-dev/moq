@@ -15,10 +15,12 @@ add_library(obs-moq MODULE)
 
 if(${BUILD_PLUGIN})
   find_package(libobs REQUIRED)
-  # FFmpeg dependency. The Windows obs-deps ship FFmpeg without pkg-config .pc
-  # files, so fall back to the vendored FindFFmpeg finder (it searches the
-  # obs-deps prefix directly). pkg-config is the simplest path on macOS/Linux.
-  if(WIN32)
+  # FFmpeg dependency (used by the MoQ source to decode subscribed video). On
+  # macOS and Windows, link the ffmpeg the obs-deps bundle ships -- the same one
+  # OBS itself uses at runtime -- via the vendored FindFFmpeg finder (obs-deps
+  # ship ffmpeg with no pkg-config .pc files, so it searches the prefix). On
+  # Linux there's no obs-deps; pkg-config finds the nix/system ffmpeg.
+  if(WIN32 OR APPLE)
     find_package(FFmpeg REQUIRED avcodec avutil swscale swresample)
     target_link_libraries(
       obs-moq

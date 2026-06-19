@@ -148,11 +148,6 @@ jobs:
         with:
           determinate: false
 
-      # obs-deps ship libobs + Qt6 but not ffmpeg/pkg-config; Homebrew does.
-      - name: Install macOS deps
-        if: runner.os == 'macOS'
-        run: brew install ffmpeg pkg-config
-
       - name: Parse version
         id: parse
         shell: bash
