@@ -1,7 +1,7 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthConfig, ClusterConfig, StatsConfig, WebConfig};
+use crate::{AuthConfig, ClusterConfig, InternalConfig, StatsConfig, WebConfig};
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
 /// variables, or a TOML file.
@@ -39,6 +39,11 @@ pub struct Config {
 	#[command(flatten)]
 	#[serde(default)]
 	pub web: WebConfig,
+
+	/// Optionally run an unauthenticated plain-TCP listener for trusted clients.
+	#[command(flatten)]
+	#[serde(default)]
+	pub internal: InternalConfig,
 
 	/// Stats publishing configuration. Disabled unless `stats.enabled = true`.
 	#[command(flatten)]
@@ -320,6 +325,58 @@ id = 12345
 			config.cluster.id,
 			Some(12345),
 			"TOML's cluster.id must not be clobbered by the CLI re-parse"
+		);
+	}
+
+	/// Same clap+TOML clobber guard for `internal.listen`. It's typed as
+	/// `Option<SocketAddr>` so an absent `--internal-listen` CLI flag must not
+	/// wipe a TOML-configured value during the `update_from` re-parse. A bare
+	/// field would reset it to its default and silently disable the internal
+	/// listener for a deployment that enabled it via TOML.
+	static INTERNAL_LISTEN_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	#[test]
+	fn cli_does_not_clobber_toml_internal_listen() {
+		let _guard = INTERNAL_LISTEN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: INTERNAL_LISTEN_ENV_LOCK serializes this with any sibling test
+		// touching the same env var.
+		unsafe { std::env::remove_var("MOQ_INTERNAL_LISTEN") };
+
+		let toml = r#"
+[internal]
+listen = "127.0.0.1:4444"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("internal-listen-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.internal.listen,
+			Some(crate::InternalListen::Tcp("127.0.0.1:4444".parse().unwrap())),
+			"TOML's internal.listen must not be clobbered by the CLI re-parse"
+		);
+	}
+
+	#[test]
+	fn internal_listen_parses_tcp_and_unix() {
+		use crate::InternalListen;
+		assert_eq!(
+			"127.0.0.1:4444".parse::<InternalListen>().unwrap(),
+			InternalListen::Tcp("127.0.0.1:4444".parse().unwrap())
+		);
+		// A bare path with no port is a Unix socket.
+		assert_eq!(
+			"/run/moq/internal.sock".parse::<InternalListen>().unwrap(),
+			InternalListen::Unix("/run/moq/internal.sock".into())
+		);
+		// The `unix:` prefix forces a path even if it would otherwise parse as an address.
+		assert_eq!(
+			"unix:127.0.0.1:4444".parse::<InternalListen>().unwrap(),
+			InternalListen::Unix("127.0.0.1:4444".into())
 		);
 	}
 
