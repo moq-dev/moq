@@ -104,7 +104,12 @@ impl Config {
 ///     #[command(flatten)]
 ///     #[serde(flatten)]
 ///     relay: moq_relay::Config,
+///     // CLI/env only: `#[serde(skip)]` keeps this out of the TOML so the
+///     // clobber pitfall below can't apply to it (an absent flag overwriting a
+///     // TOML value on the re-parse). Drop the skip + use `Option<T>` if you
+///     // want it TOML-settable.
 ///     #[arg(long)]
+///     #[serde(skip)]
 ///     my_flag: bool,
 /// }
 ///
@@ -400,8 +405,9 @@ id = 12345
 	/// the relay's CLI -> TOML -> CLI merge via the generic [`merge_from_args`]
 	/// (the core of the public [`load_config`]). Exercises all four corners at
 	/// once: clap flatten + the positional `file`, serde flatten of `Config`
-	/// (whose `deny_unknown_fields` must not break embedding), and the CLI
-	/// re-apply landing the extra flag.
+	/// (its `deny_unknown_fields` must not be enforced *through* the flatten, or
+	/// an embedder's own top-level TOML key would be rejected), and the CLI
+	/// re-apply landing the embedder's extra flag.
 	#[test]
 	fn embedder_can_flatten_config() {
 		#[derive(clap::Parser, serde::Deserialize, Debug)]
@@ -416,7 +422,11 @@ id = 12345
 			worker_enabled: bool,
 		}
 
-		let toml = "[stats]\nenabled = true\nnode = \"embed\"\n";
+		// `embedder_only` is a top-level key the relay's `Config` has no field
+		// for. It must NOT trip `Config`'s `deny_unknown_fields` (serde can't
+		// enforce that through a flatten), or embedders couldn't carry their own
+		// TOML config alongside the relay's.
+		let toml = "embedder_only = \"ignored\"\n\n[stats]\nenabled = true\nnode = \"embed\"\n";
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("embed-flatten.toml");
