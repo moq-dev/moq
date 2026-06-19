@@ -375,6 +375,109 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 	moov.encode(&mut buf).expect("encode synthesized moov");
 }
 
+/// AV1 source (catalog `Container::Legacy`, codec `av01`, no `description`) →
+/// fMP4 export must synthesize an `av01` sample entry whose `av1C` round-trips
+/// the catalog's AV1 parameters. AV1 publishes its sequence header in-band
+/// (like `hev1`/`avc3`), so there is no out-of-band config and `config_obus`
+/// stays empty.
+#[tokio::test(start_paused = true)]
+async fn av1_source_to_cmaf_export_synthesizes_av01() {
+	use bytes::Bytes;
+	use hang::catalog::{AV1, Container, VideoConfig};
+	use moq_net::Timestamp;
+
+	let broadcast = moq_net::BroadcastInfo::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let track = producer
+		.create_track(
+			producer.unique_name(".av01"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)
+		.unwrap();
+	let mut config = VideoConfig::new(AV1 {
+		profile: 0,
+		level: 8,
+		tier: 'M',
+		bitdepth: 10,
+		mono_chrome: false,
+		chroma_subsampling_x: true,
+		chroma_subsampling_y: true,
+		chroma_sample_position: 2,
+		color_primaries: 9,
+		transfer_characteristics: 16,
+		matrix_coefficients: 9,
+		full_range: false,
+	});
+	config.coded_width = Some(320);
+	config.coded_height = Some(240);
+	config.container = Container::Legacy;
+	catalog.lock().video.renditions.insert(track.name().to_string(), config);
+
+	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
+	track_producer
+		.write(crate::container::Frame {
+			timestamp: Timestamp::from_micros(0).unwrap(),
+			payload: Bytes::from_static(&[0x12, 0x00, 0x0a, 0x0b]),
+			keyframe: true,
+			duration: None,
+		})
+		.unwrap();
+	track_producer.finish().unwrap();
+
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.expect("catalog consumer");
+	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
+
+	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+		.await
+		.expect("exporter timed out")
+		.expect("exporter result")
+		.expect("expected init bytes");
+
+	drop(track_producer);
+	drop(catalog);
+	drop(producer);
+
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut moov: Option<mp4_atom::Moov> = None;
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		if let mp4_atom::Any::Moov(m) = atom {
+			moov = Some(m);
+		}
+	}
+	let moov = moov.expect("init segment missing moov");
+	assert_eq!(moov.trak.len(), 1, "expected single track in moov");
+
+	let trak = &moov.trak[0];
+	let stsd = &trak.mdia.minf.stbl.stsd;
+	assert_eq!(stsd.codecs.len(), 1, "expected single sample entry");
+	let av01 = match &stsd.codecs[0] {
+		mp4_atom::Codec::Av01(av01) => av01,
+		other => panic!("expected Av01 sample entry, got {:?}", other),
+	};
+	assert_eq!(av01.visual.width, 320);
+	assert_eq!(av01.visual.height, 240);
+
+	let av1c = &av01.av1c;
+	assert_eq!(av1c.seq_profile, 0);
+	assert_eq!(av1c.seq_level_idx_0, 8);
+	assert!(!av1c.seq_tier_0, "Main tier");
+	assert!(av1c.high_bitdepth, "10-bit");
+	assert!(!av1c.twelve_bit);
+	assert!(av1c.chroma_subsampling_x);
+	assert!(av1c.chroma_subsampling_y);
+	assert_eq!(av1c.chroma_sample_position, 2);
+	assert!(av1c.config_obus.is_empty(), "sequence header stays in-band");
+
+	// The synthesized init (av1C included) must round-trip through encode.
+	let mut buf = Vec::new();
+	moov.encode(&mut buf).expect("encode synthesized moov");
+}
+
 /// CMAF source (catalog `Container::Cmaf`) → fMP4 export should keep using
 /// the passthrough init path: existing init bytes are merged into the moov.
 ///
