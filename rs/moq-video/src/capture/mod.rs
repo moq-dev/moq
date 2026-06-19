@@ -60,6 +60,12 @@ pub struct Config {
 }
 
 /// The outcome of a bounded [`FrameSource::read`].
+///
+/// `Idle` / `End` are only produced on some platforms (the macOS queue can time
+/// out or be closed; the Windows reader signals end-of-stream), so `allow` the
+/// dead-code lint where a backend never constructs them (e.g. V4L2, which always
+/// returns a frame or an error).
+#[allow(dead_code)]
 pub(crate) enum Read {
 	/// A captured frame.
 	Frame(Frame),
