@@ -21,9 +21,16 @@ static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 		.expect("spawn tokio runtime")
 });
 
-/// Process-wide pad id counter. Kept global (not per-session) so a pad created by a
-/// restarted session can't collide with one still being torn down by the previous one.
-static NEXT_PAD_ID: AtomicU64 = AtomicU64::new(0);
+/// Process-wide pad id counters, one per pad kind. Kept global (not per-session) so a pad
+/// created by a restarted session can't collide with one still being torn down by the
+/// previous one, and split per kind so the *first* video pad is reliably `video_0` and the
+/// first audio pad `audio_0`. That predictability matters because `gst-launch` links a
+/// source's sometimes-pads by name (`moqsrc name=s s.video_0 ! ...`); a single shared counter
+/// made the first pad's number depend on catalog arrival order (audio could claim `0`),
+/// silently breaking those pipelines. Counters only ever increment, so a mid-stream reshape
+/// still gets a fresh, collision-free id.
+static NEXT_VIDEO_PAD_ID: AtomicU64 = AtomicU64::new(0);
+static NEXT_AUDIO_PAD_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Default)]
 struct Settings {
@@ -411,7 +418,11 @@ fn reconcile(
 			}
 		};
 
-		let id = NEXT_PAD_ID.fetch_add(1, Ordering::Relaxed);
+		let id = match d.kind {
+			TrackKind::Video => &NEXT_VIDEO_PAD_ID,
+			TrackKind::Audio => &NEXT_AUDIO_PAD_ID,
+		}
+		.fetch_add(1, Ordering::Relaxed);
 
 		let track_consumer = broadcast.subscribe_track(&moq_net::Track::new(&name))?;
 		let track = moq_mux::container::Consumer::new(track_consumer, container).with_latency(Duration::from_secs(1));
@@ -463,9 +474,11 @@ fn plan_reconcile<S: PartialEq>(desired: &HashMap<String, S>, active: &HashMap<S
 }
 
 /// Identifies a pump's pad. Pads are named `video_<id>` / `audio_<id>` from a
-/// process-unique counter (matching the `%u` templates) rather than after the
-/// track name, so a rendition can be torn down and recreated (when its
-/// codec/resolution changes mid-stream) without two pads ever sharing a name.
+/// per-kind, process-unique counter (matching the `%u` templates) rather than after
+/// the track name, so a rendition can be torn down and recreated (when its
+/// codec/resolution changes mid-stream) without two pads ever sharing a name. The
+/// first pad of each kind is `video_0` / `audio_0`, so `gst-launch` can link them by
+/// name regardless of which rendition the catalog announces first.
 struct TrackDescriptor {
 	kind: TrackKind,
 	name: String,

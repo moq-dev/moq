@@ -35,12 +35,21 @@ ci FILES="":
     	echo "rs: no Rust changes; skipping."
     	exit 0
     fi
-    just check --workspace
+    # Heavy compiles -- clippy, doc, and the --all-features test run -- are crane
+    # derivations built by `nix flake check` (see flake.nix `checks` and
+    # nix/overlay.nix): deps cache in /nix/store, only first-party code rebuilds
+    # in the sandbox, and there's no persistent cargo target dir to bound. What
+    # stays here is non-compiling hygiene, cargo-deny (hits the network, so it
+    # can't run in the Nix sandbox), and the default / no-default-feature
+    # `cargo check`s the all-features crane run doesn't cover -- those compile
+    # into the in-workspace ./target, which the runner wipes per job.
+    # (Local devs still get the full cargo loop via `just rs check`.)
+    cargo fmt --all --check
+    cargo sort --workspace --check --no-format
+    cargo shear
+    cargo check --workspace --all-targets
     cargo check --workspace --no-default-features
-    cargo check --workspace --all-features
     cargo deny check --show-stats
-    just rs test --all-features
-    just build
 
 # Auto-fix clippy/format/shear/sort.
 fix:

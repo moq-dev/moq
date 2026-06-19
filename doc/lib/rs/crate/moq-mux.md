@@ -93,11 +93,13 @@ For command-line importing, use [moq-cli](/bin/cli):
 # Install
 cargo install moq-cli
 
-# Publish a video file
-moq-cli publish video.mp4
+# Publish a video file (remux to MPEG-TS and pipe it in)
+ffmpeg -i input.mp4 -c copy -f mpegts - | \
+    moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
 
 # Publish from FFmpeg
-ffmpeg -i input.mp4 -f mpegts - | moq-cli publish -
+ffmpeg -i input.mp4 -f mpegts - | \
+    moq-cli publish --url https://relay.example.com/anon --broadcast my-stream ts
 ```
 
 ## Next Steps

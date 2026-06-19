@@ -139,7 +139,7 @@ task.cancel()   // releases native resources
 To run the test suite, build a host-only XCFramework first:
 
 ```bash
-just check-ffi
+just swift check
 ```
 
 This runs `swift/scripts/check.sh`, which builds `moq-ffi` for the host arch, regenerates the UniFFI Swift bindings, drops a single-slice `MoqFFI.xcframework` into `swift/`, and then runs `swift test`. Requires macOS with `xcodebuild`.
