@@ -15,13 +15,17 @@ use scuffle_h265::{NALUnitType, SpsNALUnit};
 
 /// Annex-B → length-prefixed transmuxer; the H.265 analogue of
 /// [`crate::codec::h264::Avc1`].
+///
+/// The active VPS/SPS/PPS set is scoped to the latest keyframe: a frame that
+/// carries parameter sets redefines them, so a mid-stream reconfiguration drops
+/// the superseded ones instead of accumulating them forever.
 pub struct Hvc1 {
 	hvcc: Option<Bytes>,
-	/// Distinct VPS NALs observed, in arrival order.
+	/// The active VPS NALs (from the most recent keyframe that carried them).
 	vps: Vec<Bytes>,
-	/// Distinct SPS NALs observed, in arrival order.
+	/// The active SPS NALs.
 	sps: Vec<Bytes>,
-	/// Distinct PPS NALs observed, in arrival order.
+	/// The active PPS NALs.
 	pps: Vec<Bytes>,
 }
 
@@ -59,7 +63,9 @@ impl Hvc1 {
 		let mut nal_iter = crate::codec::annexb::NalIterator::new(&mut buf);
 
 		let mut out = BytesMut::with_capacity(payload.remaining());
-		let mut params_changed = false;
+		let mut frame_vps: Vec<Bytes> = Vec::new();
+		let mut frame_sps: Vec<Bytes> = Vec::new();
+		let mut frame_pps: Vec<Bytes> = Vec::new();
 		let mut emitted_any_slice = false;
 
 		loop {
@@ -68,19 +74,35 @@ impl Hvc1 {
 				Some(Err(e)) => return Err(e),
 				None => break,
 			};
-			if self.process_nal(&nal, &mut out, &mut params_changed)? {
+			if process_nal(&nal, &mut out, &mut frame_vps, &mut frame_sps, &mut frame_pps)? {
 				emitted_any_slice = true;
 			}
 		}
 
 		if let Some(nal) = nal_iter.flush()? {
-			let was_slice = self.process_nal(&nal, &mut out, &mut params_changed)?;
-			if was_slice {
+			if process_nal(&nal, &mut out, &mut frame_vps, &mut frame_sps, &mut frame_pps)? {
 				emitted_any_slice = true;
 			}
 		}
 
-		if params_changed {
+		// A frame that carries parameter sets (a keyframe) redefines the active
+		// set; adopt it so a superseded configuration's VPS/SPS/PPS are dropped
+		// rather than lingering in the hvcC. Per type, so a frame that updates only
+		// one kind keeps the others.
+		let mut changed = false;
+		if !frame_vps.is_empty() && frame_vps != self.vps {
+			self.vps = frame_vps;
+			changed = true;
+		}
+		if !frame_sps.is_empty() && frame_sps != self.sps {
+			self.sps = frame_sps;
+			changed = true;
+		}
+		if !frame_pps.is_empty() && frame_pps != self.pps {
+			self.pps = frame_pps;
+			changed = true;
+		}
+		if changed {
 			self.rebuild_hvcc()?;
 		}
 
@@ -91,48 +113,48 @@ impl Hvc1 {
 		Ok(Some(out.freeze()))
 	}
 
-	fn process_nal(&mut self, nal: &Bytes, out: &mut BytesMut, params_changed: &mut bool) -> anyhow::Result<bool> {
-		if nal.is_empty() {
-			return Ok(false);
-		}
-		// HEVC NAL header is 2 bytes; type is bits 1..=6 of byte 0.
-		let nal_unit_type = (nal[0] >> 1) & 0x3f;
-		let nal_type = NALUnitType::from(nal_unit_type);
-
-		match nal_type {
-			NALUnitType::VpsNut => {
-				if crate::codec::annexb::push_distinct(&mut self.vps, nal) {
-					*params_changed = true;
-				}
-				Ok(false)
-			}
-			NALUnitType::SpsNut => {
-				if crate::codec::annexb::push_distinct(&mut self.sps, nal) {
-					*params_changed = true;
-				}
-				Ok(false)
-			}
-			NALUnitType::PpsNut => {
-				if crate::codec::annexb::push_distinct(&mut self.pps, nal) {
-					*params_changed = true;
-				}
-				Ok(false)
-			}
-			_ => {
-				let len = u32::try_from(nal.len()).context("NAL too large for 4-byte length prefix")?;
-				out.extend_from_slice(&len.to_be_bytes());
-				out.extend_from_slice(nal);
-				Ok(true)
-			}
-		}
-	}
-
 	fn rebuild_hvcc(&mut self) -> anyhow::Result<()> {
 		if self.vps.is_empty() || self.sps.is_empty() || self.pps.is_empty() {
 			return Ok(());
 		}
 		self.hvcc = Some(build_hvcc(&self.vps, &self.sps, &self.pps)?);
 		Ok(())
+	}
+}
+
+/// Process one NAL: VPS/SPS/PPS are collected (distinctly) into this frame's
+/// sets, everything else is length-prefixed and appended to `out`. Returns true
+/// if the NAL was a slice (i.e. produced sample bytes).
+fn process_nal(
+	nal: &Bytes,
+	out: &mut BytesMut,
+	frame_vps: &mut Vec<Bytes>,
+	frame_sps: &mut Vec<Bytes>,
+	frame_pps: &mut Vec<Bytes>,
+) -> anyhow::Result<bool> {
+	if nal.is_empty() {
+		return Ok(false);
+	}
+	// HEVC NAL header is 2 bytes; type is bits 1..=6 of byte 0.
+	match NALUnitType::from((nal[0] >> 1) & 0x3f) {
+		NALUnitType::VpsNut => {
+			crate::codec::annexb::push_distinct(frame_vps, nal);
+			Ok(false)
+		}
+		NALUnitType::SpsNut => {
+			crate::codec::annexb::push_distinct(frame_sps, nal);
+			Ok(false)
+		}
+		NALUnitType::PpsNut => {
+			crate::codec::annexb::push_distinct(frame_pps, nal);
+			Ok(false)
+		}
+		_ => {
+			let len = u32::try_from(nal.len()).context("NAL too large for 4-byte length prefix")?;
+			out.extend_from_slice(&len.to_be_bytes());
+			out.extend_from_slice(nal);
+			Ok(true)
+		}
 	}
 }
 

@@ -17,17 +17,25 @@ pub(crate) fn push_distinct(set: &mut Vec<Bytes>, nal: &Bytes) -> bool {
 	true
 }
 
-/// Append each `cached` parameter-set NAL not yet in `seen` to `chunks` as
-/// Annex-B, marking it seen. Called before a keyframe slice so every parameter
-/// set the GOP references is carried for mid-stream tune-in, not just the latest.
-pub(crate) fn reinject_params(chunks: &mut BytesMut, cached: &[Bytes], seen: &mut Vec<Bytes>) {
-	for nal in cached {
-		if seen.iter().any(|s| s == nal) {
-			continue;
+/// Reconcile the retained parameter sets with what a keyframe access unit carried
+/// inline, called when the keyframe slice is reached:
+///
+/// - If the AU presented its own set (`seen` non-empty), adopt it as the retained
+///   set, dropping any the new GOP no longer uses (a mid-stream reinit).
+/// - If the AU carried none, re-inject the retained set into `chunks` as Annex-B
+///   so a receiver tuning in at this keyframe still gets them.
+///
+/// `seen` is this AU's inline NALs (already appended to `chunks`); `retained` is
+/// the cross-GOP set re-injected on bare keyframes.
+pub(crate) fn reconcile_keyframe_params(chunks: &mut BytesMut, retained: &mut Vec<Bytes>, seen: &mut Vec<Bytes>) {
+	if seen.is_empty() {
+		for nal in retained.iter() {
+			chunks.extend_from_slice(&START_CODE);
+			chunks.extend_from_slice(nal);
 		}
-		chunks.extend_from_slice(&START_CODE);
-		chunks.extend_from_slice(nal);
-		seen.push(nal.clone());
+		seen.clone_from(retained);
+	} else if seen != retained {
+		retained.clone_from(seen);
 	}
 }
 

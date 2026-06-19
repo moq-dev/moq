@@ -48,10 +48,12 @@ enum State {
 	/// avc3 wire shape: Annex-B NALU, inline SPS/PPS.
 	Avc3 {
 		current: Avc3Frame,
-		/// Distinct SPS NALs seen so far, re-injected on keyframes that lack them.
+		/// Retained SPS NALs from the latest keyframe that carried them, re-injected
+		/// on bare keyframes. Replaced (not accumulated) when a keyframe presents a
+		/// different set, so a mid-stream reinit drops the superseded ones.
 		sps: Vec<Bytes>,
-		/// Distinct PPS NALs seen so far. A stream may define several (slices
-		/// reference them by id), so all are kept and re-injected, not just the last.
+		/// Retained PPS NALs. A keyframe may carry several (slices reference them by
+		/// id); all are kept and re-injected, but a new GOP's set supersedes them.
 		pps: Vec<Bytes>,
 	},
 }
@@ -317,31 +319,31 @@ impl<E: CatalogExt> Import<E> {
 			Some(Avc3NalType::Sps) => {
 				self.maybe_start_frame(pts)?;
 				let parsed = Sps::parse(&nal)?;
-				// A changed config (resolution/profile) means the old parameter sets
-				// no longer apply; reconfigured tells us to drop them.
+				// A changed config (resolution/profile) means the retained parameter
+				// sets no longer apply; reconfigured tells us to drop them.
 				let reconfigured = self.init_from_sps(&parsed)?;
 				let State::Avc3 { current, sps, pps } = &mut self.state else {
 					unreachable!("decode_nal is avc3 only")
 				};
 				if reconfigured {
-					// The cached SPS/PPS are tied to the old config and may already
+					// The retained SPS/PPS are tied to the old config and may already
 					// have been appended to current.chunks earlier in this AU; reset
-					// the caches and AU so only the new parameter sets emit.
+					// the sets and AU so only the new parameter sets emit.
 					sps.clear();
 					pps.clear();
 					current.chunks.clear();
 					current.sps_seen.clear();
 					current.pps_seen.clear();
 				}
-				crate::codec::annexb::push_distinct(sps, &nal);
+				// Track only what this AU carries; the retained set is reconciled at
+				// the keyframe so a new GOP's set replaces (not accumulates onto) it.
 				crate::codec::annexb::push_distinct(&mut current.sps_seen, &nal);
 			}
 			Some(Avc3NalType::Pps) => {
 				self.maybe_start_frame(pts)?;
-				let State::Avc3 { current, pps, .. } = &mut self.state else {
+				let State::Avc3 { current, .. } = &mut self.state else {
 					unreachable!()
 				};
-				crate::codec::annexb::push_distinct(pps, &nal);
 				crate::codec::annexb::push_distinct(&mut current.pps_seen, &nal);
 			}
 			Some(Avc3NalType::Aud) | Some(Avc3NalType::Sei) => {
@@ -351,11 +353,10 @@ impl<E: CatalogExt> Import<E> {
 				let State::Avc3 { current, sps, pps } = &mut self.state else {
 					unreachable!()
 				};
-				// Re-inject every cached parameter set not already inline in this AU,
-				// so a receiver tuning in at this keyframe has each SPS/PPS its slices
-				// may reference (not just the most recent one).
-				crate::codec::annexb::reinject_params(&mut current.chunks, sps, &mut current.sps_seen);
-				crate::codec::annexb::reinject_params(&mut current.chunks, pps, &mut current.pps_seen);
+				// Adopt this keyframe's inline set (dropping any the new GOP no longer
+				// uses), or re-inject the retained set if the keyframe carried none.
+				crate::codec::annexb::reconcile_keyframe_params(&mut current.chunks, sps, &mut current.sps_seen);
+				crate::codec::annexb::reconcile_keyframe_params(&mut current.chunks, pps, &mut current.pps_seen);
 				current.contains_idr = true;
 				current.contains_slice = true;
 			}
@@ -692,6 +693,64 @@ mod tests {
 		assert_eq!(frames.len(), 2, "expected two keyframes");
 		// The bare IDR keyframe must carry SPS + both PPS, re-injected in order.
 		assert_eq!(frames[1].payload.as_ref(), annexb(&[sps, pps0, pps1, idr]).as_ref());
+	}
+
+	/// A keyframe that presents a smaller parameter set than a prior one reinits
+	/// the retained set: the dropped PPS must not be re-injected on later bare
+	/// keyframes.
+	#[tokio::test(start_paused = true)]
+	async fn avc3_reinit_drops_superseded_pps_on_keyframe() {
+		const SC: &[u8] = &[0, 0, 0, 1];
+		let sps: &[u8] = &[
+			0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07, 0xd0, 0x00,
+			0x01, 0xd4, 0xc0, 0x80,
+		];
+		let pps0: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let pps1: &[u8] = &[0x68, 0xce, 0x3c, 0x81];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+
+		let annexb = |nals: &[&[u8]]| {
+			let mut buf = bytes::BytesMut::new();
+			for nal in nals {
+				buf.extend_from_slice(SC);
+				buf.extend_from_slice(nal);
+			}
+			buf
+		};
+
+		let mut producer = moq_net::Broadcast::new().produce();
+		let consumer = producer.consume();
+		let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+		let mut importer = Import::new(producer, catalog.clone())
+			.with_mode(Mode::Avc3)
+			.expect("avc3 mode");
+		let name = importer.track().unwrap().name.clone();
+
+		// GOP 1 defines both PPS; GOP 2 redefines the set with only PPS 0; GOP 3 is
+		// a bare IDR that must re-inject the reduced set, not the dropped PPS 1.
+		let times = [0u64, 40, 80];
+		let gops: [&[&[u8]]; 3] = [&[sps, pps0, pps1, idr], &[sps, pps0, idr], &[idr]];
+		for (gop, t) in gops.iter().zip(times) {
+			importer
+				.decode_frame(
+					&mut annexb(gop),
+					Some(crate::container::Timestamp::from_millis(t).unwrap()),
+				)
+				.unwrap();
+		}
+		importer.finish().unwrap();
+
+		let track = consumer.subscribe_track(&moq_net::Track::new(name)).unwrap();
+		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+		let mut frames = Vec::new();
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
+		{
+			frames.push(frame);
+		}
+
+		assert_eq!(frames.len(), 3, "expected three keyframes");
+		// The bare third keyframe re-injects only the surviving SPS + PPS 0.
+		assert_eq!(frames[2].payload.as_ref(), annexb(&[sps, pps0, idr]).as_ref());
 	}
 }
 

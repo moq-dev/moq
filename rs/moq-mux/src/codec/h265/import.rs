@@ -28,9 +28,10 @@ pub struct Import<E: CatalogExt = ()> {
 	// Used to compute wall clock timestamps if needed.
 	zero: Option<tokio::time::Instant>,
 
-	// Distinct cached parameter set NALs for re-insertion before keyframes. A
-	// stream may define several of each (slices reference them by id), so all are
-	// kept and re-injected, not just the last seen.
+	// Retained parameter set NALs from the latest keyframe that carried them,
+	// re-injected before bare keyframes. A keyframe may define several of each
+	// (slices reference them by id); all are kept, but a new GOP's set supersedes
+	// them (replace, not accumulate) so a mid-stream reinit drops stale entries.
 	vps: Vec<Bytes>,
 	sps: Vec<Bytes>,
 	pps: Vec<Bytes>,
@@ -215,7 +216,8 @@ impl<E: CatalogExt> Import<E> {
 			NALUnitType::VpsNut => {
 				self.maybe_start_frame(pts)?;
 
-				crate::codec::annexb::push_distinct(&mut self.vps, &nal);
+				// Track only what this AU carries; the retained set is reconciled at
+				// the keyframe so a new GOP's set replaces (not accumulates onto) it.
 				crate::codec::annexb::push_distinct(&mut self.current.vps_seen, &nal);
 			}
 			NALUnitType::SpsNut => {
@@ -225,9 +227,9 @@ impl<E: CatalogExt> Import<E> {
 				let sps = SpsNALUnit::parse(&mut &nal[..]).context("failed to parse SPS NAL unit")?;
 				let reconfigured = self.init(&sps)?;
 
-				// A changed config means the cached VPS/SPS/PPS no longer apply; they
+				// A changed config means the retained VPS/SPS/PPS no longer apply; they
 				// may already have been appended to current.chunks earlier in this AU,
-				// so reset the caches and AU so only the new parameter sets emit.
+				// so reset the sets and AU so only the new parameter sets emit.
 				if reconfigured {
 					self.vps.clear();
 					self.sps.clear();
@@ -238,13 +240,11 @@ impl<E: CatalogExt> Import<E> {
 					self.current.pps_seen.clear();
 				}
 
-				crate::codec::annexb::push_distinct(&mut self.sps, &nal);
 				crate::codec::annexb::push_distinct(&mut self.current.sps_seen, &nal);
 			}
 			NALUnitType::PpsNut => {
 				self.maybe_start_frame(pts)?;
 
-				crate::codec::annexb::push_distinct(&mut self.pps, &nal);
 				crate::codec::annexb::push_distinct(&mut self.current.pps_seen, &nal);
 			}
 			NALUnitType::AudNut | NALUnitType::PrefixSeiNut | NALUnitType::SuffixSeiNut => {
@@ -257,12 +257,23 @@ impl<E: CatalogExt> Import<E> {
 			| NALUnitType::BlaWRadl
 			| NALUnitType::BlaWLp
 			| NALUnitType::CraNut => {
-				// Re-inject every cached parameter set not already inline in this AU,
-				// so a receiver tuning in at this keyframe has each VPS/SPS/PPS its
-				// slices may reference (not just the most recent one).
-				crate::codec::annexb::reinject_params(&mut self.current.chunks, &self.vps, &mut self.current.vps_seen);
-				crate::codec::annexb::reinject_params(&mut self.current.chunks, &self.sps, &mut self.current.sps_seen);
-				crate::codec::annexb::reinject_params(&mut self.current.chunks, &self.pps, &mut self.current.pps_seen);
+				// Adopt this keyframe's inline set (dropping any the new GOP no longer
+				// uses), or re-inject the retained set if the keyframe carried none.
+				crate::codec::annexb::reconcile_keyframe_params(
+					&mut self.current.chunks,
+					&mut self.vps,
+					&mut self.current.vps_seen,
+				);
+				crate::codec::annexb::reconcile_keyframe_params(
+					&mut self.current.chunks,
+					&mut self.sps,
+					&mut self.current.sps_seen,
+				);
+				crate::codec::annexb::reconcile_keyframe_params(
+					&mut self.current.chunks,
+					&mut self.pps,
+					&mut self.current.pps_seen,
+				);
 
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;

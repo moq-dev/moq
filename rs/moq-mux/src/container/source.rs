@@ -212,11 +212,13 @@ impl ExportSource {
 	}
 
 	fn refresh_description(&mut self) {
-		if self.description.is_some() {
-			return;
-		}
+		// Track the transform's record even after it is first set: a mid-stream
+		// reconfiguration rebuilds the avcC/hvcC with a new parameter set, and the
+		// muxer re-injects from this on every keyframe, so a stale record would
+		// carry superseded SPS/PPS.
 		if let Some(transform) = self.transform.as_ref()
 			&& let Some(d) = transform.codec_private()
+			&& self.description.as_ref() != Some(d)
 		{
 			self.description = Some(d.clone());
 		}

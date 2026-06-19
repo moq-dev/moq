@@ -201,16 +201,19 @@ fn read_param_set_array(buf: &[u8], mut pos: usize, count: usize, params: &mut V
 /// Transform H.264 frames from Annex-B (inline SPS/PPS, "avc3") to
 /// length-prefixed NALU (out-of-band AVCDecoderConfigurationRecord, "avc1").
 ///
-/// The avcC is synthesized from cached SPS+PPS the first time both are
-/// observed and is exposed via [`Self::avcc`]. Once [`Self::avcc`] returns
-/// `Some`, all subsequent calls to [`Self::transform`] return length-prefixed
-/// sample data suitable for an avc1 container (e.g. MKV `V_MPEG4/ISO/AVC` with
-/// the avcC in CodecPrivate).
+/// The avcC is synthesized from the active SPS+PPS and exposed via
+/// [`Self::avcc`]. Once it returns `Some`, all subsequent calls to
+/// [`Self::transform`] return length-prefixed sample data suitable for an avc1
+/// container (e.g. MKV `V_MPEG4/ISO/AVC` with the avcC in CodecPrivate).
+///
+/// The active set is scoped to the latest keyframe: a frame that carries
+/// parameter sets redefines them, so a mid-stream reconfiguration drops the
+/// superseded SPS/PPS instead of accumulating them forever.
 pub struct Avc1 {
 	avcc: Option<Bytes>,
-	/// Distinct SPS NALs observed, in arrival order.
+	/// The active SPS NALs (from the most recent keyframe that carried them).
 	sps: Vec<Bytes>,
-	/// Distinct PPS NALs observed, in arrival order.
+	/// The active PPS NALs.
 	pps: Vec<Bytes>,
 }
 
@@ -243,14 +246,15 @@ impl Avc1 {
 	///   transform is still waiting for slice NALs (avcC may have been built
 	///   as a side effect).
 	pub fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
-		// Parse Annex-B NALs, strip SPS/PPS into the cache, length-prefix
-		// the rest. NalIterator advances the Bytes cursor; the trailing NAL
-		// has to be pulled separately via flush().
+		// Parse Annex-B NALs, collect this frame's SPS/PPS, length-prefix the
+		// rest. NalIterator advances the Bytes cursor; the trailing NAL has to be
+		// pulled separately via flush().
 		let mut buf = payload.clone();
 		let mut nal_iter = crate::codec::annexb::NalIterator::new(&mut buf);
 
 		let mut out = BytesMut::with_capacity(payload.remaining());
-		let mut sps_pps_changed = false;
+		let mut frame_sps: Vec<Bytes> = Vec::new();
+		let mut frame_pps: Vec<Bytes> = Vec::new();
 		let mut emitted_any_slice = false;
 
 		loop {
@@ -259,19 +263,31 @@ impl Avc1 {
 				Some(Err(e)) => return Err(e),
 				None => break,
 			};
-			if self.process_nal(&nal, &mut out, &mut sps_pps_changed)? {
+			if process_nal(&nal, &mut out, &mut frame_sps, &mut frame_pps)? {
 				emitted_any_slice = true;
 			}
 		}
 
 		if let Some(nal) = nal_iter.flush()? {
-			let was_slice = self.process_nal(&nal, &mut out, &mut sps_pps_changed)?;
-			if was_slice {
+			if process_nal(&nal, &mut out, &mut frame_sps, &mut frame_pps)? {
 				emitted_any_slice = true;
 			}
 		}
 
-		if sps_pps_changed {
+		// A frame that carries parameter sets (a keyframe) redefines the active
+		// set; adopt it so SPS/PPS from a superseded configuration are dropped
+		// rather than lingering in the avcC. Per type, so a frame that updates only
+		// one of SPS/PPS keeps the other.
+		let mut changed = false;
+		if !frame_sps.is_empty() && frame_sps != self.sps {
+			self.sps = frame_sps;
+			changed = true;
+		}
+		if !frame_pps.is_empty() && frame_pps != self.pps {
+			self.pps = frame_pps;
+			changed = true;
+		}
+		if changed {
 			self.rebuild_avcc()?;
 		}
 
@@ -282,42 +298,42 @@ impl Avc1 {
 		Ok(Some(out.freeze()))
 	}
 
-	/// Process one NAL: SPS/PPS go into the cache, everything else gets
-	/// length-prefixed and appended to `out`. Returns true if the NAL was a
-	/// slice (i.e. produced sample bytes).
-	fn process_nal(&mut self, nal: &Bytes, out: &mut BytesMut, sps_pps_changed: &mut bool) -> anyhow::Result<bool> {
-		if nal.is_empty() {
-			return Ok(false);
-		}
-		let nal_type = nal[0] & 0x1f;
-		match nal_type {
-			NAL_TYPE_SPS => {
-				if crate::codec::annexb::push_distinct(&mut self.sps, nal) {
-					*sps_pps_changed = true;
-				}
-				Ok(false)
-			}
-			NAL_TYPE_PPS => {
-				if crate::codec::annexb::push_distinct(&mut self.pps, nal) {
-					*sps_pps_changed = true;
-				}
-				Ok(false)
-			}
-			_ => {
-				let len = u32::try_from(nal.len()).context("NAL too large for 4-byte length prefix")?;
-				out.extend_from_slice(&len.to_be_bytes());
-				out.extend_from_slice(nal);
-				Ok(true)
-			}
-		}
-	}
-
 	fn rebuild_avcc(&mut self) -> anyhow::Result<()> {
 		if self.sps.is_empty() || self.pps.is_empty() {
 			return Ok(());
 		}
 		self.avcc = Some(build_avcc(&self.sps, &self.pps)?);
 		Ok(())
+	}
+}
+
+/// Process one NAL: SPS/PPS are collected (distinctly) into this frame's sets,
+/// everything else is length-prefixed and appended to `out`. Returns true if the
+/// NAL was a slice (i.e. produced sample bytes).
+fn process_nal(
+	nal: &Bytes,
+	out: &mut BytesMut,
+	frame_sps: &mut Vec<Bytes>,
+	frame_pps: &mut Vec<Bytes>,
+) -> anyhow::Result<bool> {
+	if nal.is_empty() {
+		return Ok(false);
+	}
+	match nal[0] & 0x1f {
+		NAL_TYPE_SPS => {
+			crate::codec::annexb::push_distinct(frame_sps, nal);
+			Ok(false)
+		}
+		NAL_TYPE_PPS => {
+			crate::codec::annexb::push_distinct(frame_pps, nal);
+			Ok(false)
+		}
+		_ => {
+			let len = u32::try_from(nal.len()).context("NAL too large for 4-byte length prefix")?;
+			out.extend_from_slice(&len.to_be_bytes());
+			out.extend_from_slice(nal);
+			Ok(true)
+		}
 	}
 }
 
@@ -390,8 +406,28 @@ mod tests {
 	}
 
 	#[test]
-	fn avc3_accumulates_distinct_pps() {
-		// Two distinct PPS arrive across keyframes; the synthesized avcC carries both.
+	fn avc3_keyframe_with_two_pps_keeps_both() {
+		// One keyframe carrying both PPS: the synthesized avcC keeps both, in order.
+		let sps = &[0x67, 0x42, 0xc0, 0x1f, 0xde][..];
+		let pps0 = &[0x68, 0xce, 0x3c, 0x80][..];
+		let pps1 = &[0x68, 0xce, 0x3c, 0x81][..];
+		let idr = &[0x65, 0x88][..];
+
+		let mut tx = Avc1::new();
+		tx.transform(annexb_frame(&[sps, pps0, pps1, idr])).unwrap();
+
+		let avcc = tx.avcc().expect("avcC available");
+		let (_, params) = avcc_params(avcc).unwrap();
+		assert_eq!(
+			params.iter().map(|p| p.as_ref()).collect::<Vec<_>>(),
+			vec![sps, pps0, pps1]
+		);
+	}
+
+	#[test]
+	fn avc3_reinit_drops_superseded_pps() {
+		// A later keyframe presents a different PPS set: the avcC adopts the new set
+		// and drops the old one rather than accumulating both forever.
 		let sps = &[0x67, 0x42, 0xc0, 0x1f, 0xde][..];
 		let pps0 = &[0x68, 0xce, 0x3c, 0x80][..];
 		let pps1 = &[0x68, 0xce, 0x3c, 0x81][..];
@@ -403,10 +439,11 @@ mod tests {
 
 		let avcc = tx.avcc().expect("avcC available");
 		let (_, params) = avcc_params(avcc).unwrap();
-		assert_eq!(params.len(), 3, "expected 1 SPS + 2 PPS, got {params:?}");
-		assert_eq!(params[0].as_ref(), sps);
-		assert_eq!(params[1].as_ref(), pps0);
-		assert_eq!(params[2].as_ref(), pps1);
+		assert_eq!(
+			params.iter().map(|p| p.as_ref()).collect::<Vec<_>>(),
+			vec![sps, pps1],
+			"reinit must drop the superseded PPS"
+		);
 	}
 
 	#[test]
