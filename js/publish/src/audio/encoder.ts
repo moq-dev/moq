@@ -5,7 +5,6 @@ import type * as Moq from "@moq/net";
 import type { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Capture from "./capture";
-import { toEncoderConfig } from "./encoder-config";
 import { type Kind, normalizeSource, type Source } from "./types";
 
 const GAIN_MIN = 0.001;
@@ -17,6 +16,38 @@ const AAC_FRAME_SAMPLES = 1024; // AAC-LC encodes a fixed 1024 samples per frame
 
 // The WebCodecs/MP4 codec string for AAC-LC. "aac" is our user-facing shorthand.
 const AAC_CODEC = "mp4a.40.2";
+
+// Compiled and inlined as a blob URL via vite-plugin-worklet.
+import CaptureWorklet from "./capture-worklet.ts?worklet";
+
+// Selects the audio codec and its encoder settings. Either the bare codec name (all defaults) or an
+// object with the mime plus tuning knobs.
+export type Codec = Opus | Aac;
+
+export type Opus = "opus" | OpusConfig;
+export type Aac = "aac" | AacConfig;
+
+// AAC encoder settings. AAC-LC has a fixed 1024-sample frame and no real-time tuning knobs, so
+// bitrate is the only thing to configure.
+export type AacConfig = {
+	mime: "aac";
+
+	bitrate?: number; // bits/sec, defaults to channelCount * 64kbps
+};
+
+// Opus encoder settings. bitrate and frameDuration also shape the catalog (decoders need them); the
+// rest are encode-only knobs that map directly to the matching OpusEncoderConfig fields:
+// https://developer.mozilla.org/en-US/docs/Web/API/AudioEncoder/configure#opus
+export type OpusConfig = {
+	mime: "opus";
+
+	bitrate?: number; // bits/sec, defaults to channelCount * 32kbps
+	frameDuration?: number; // ms, Opus supports 2.5-60ms, defaults to 20ms (the real-time default)
+	complexity?: number; // 0-10, higher is better quality but more CPU
+	packetlossperc?: number; // 0-100, expected loss the encoder optimizes for
+	useinbandfec?: boolean; // in-band forward error correction
+	usedtx?: boolean; // discontinuous transmission (silence suppression)
+};
 
 // The initial values for our signals.
 export type EncoderProps = {
@@ -121,8 +152,6 @@ export class Encoder {
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
-			// Compiled and inlined as a blob URL via vite-plugin-worklet.
-			const { default: CaptureWorklet } = await import("./capture-worklet.ts?worklet");
 			await context.audioWorklet.addModule(CaptureWorklet);
 			if (context.state === "closed") return;
 
@@ -341,4 +370,80 @@ export class Encoder {
 	}
 }
 
-export { toEncoderConfig } from "./encoder-config";
+// getConstraints() echoes the constraints applied via getUserMedia, which (unlike getSettings)
+// survives the macOS mono->stereo misreport. Returns the requested channel count, if any.
+function requestedChannelCount(track: MediaStreamTrack): number | undefined {
+	const constraint = track.getConstraints().channelCount;
+	if (constraint === undefined) return undefined;
+	if (typeof constraint === "number") return constraint;
+	return constraint.exact ?? constraint.ideal ?? constraint.max ?? constraint.min;
+}
+
+// Resolve the bare codec shorthands to their full config object so callers can read fields uniformly.
+function normalizeCodec(codec: Codec): OpusConfig | AacConfig {
+	if (codec === "opus") return { mime: "opus" };
+	if (codec === "aac") return { mime: "aac" };
+	return codec;
+}
+
+// `application` and `signal` are in the WebCodecs spec but missing from lib.dom.d.ts.
+// https://www.w3.org/TR/webcodecs-opus-codec-registration/#dom-opusencoderconfig
+interface OpusEncoderConfigExt extends OpusEncoderConfig {
+	application?: "voip" | "audio" | "lowdelay";
+	signal?: "auto" | "voice" | "music";
+}
+
+// Opus settings implied by the audio kind. These are only defaults: any field set explicitly via
+// OpusConfig (carried in opusOptions) overrides them, so a caller can always opt out. DTX (silence
+// suppression) is enabled for voice, where speech has natural gaps that collapse to tiny
+// comfort-noise packets. Music has no useful silence to suppress, and "auto" leaves every knob to
+// the browser.
+function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
+	switch (kind) {
+		case "voice":
+			return { application: "voip", signal: "voice", usedtx: true };
+		case "music":
+			return { application: "audio", signal: "music" };
+		default:
+			return {};
+	}
+}
+
+// Build the WebCodecs encoder config from the catalog (decoder) config, a Kind hint, and any
+// Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding. AAC has
+// no such knobs, so it just uses the shared base fields (codec/sampleRate/channels/bitrate).
+export function toEncoderConfig(
+	config: Catalog.AudioConfig,
+	kind: Kind,
+	opusOptions: OpusEncoderConfigExt,
+): AudioEncoderConfig {
+	const encoderConfig: AudioEncoderConfig = {
+		codec: config.codec,
+		sampleRate: config.sampleRate,
+		numberOfChannels: config.numberOfChannels,
+		bitrate: config.bitrate,
+	};
+
+	if (config.codec.startsWith("mp4a")) {
+		// Pin raw AAC: the catalog carries a synthesized AudioSpecificConfig, which is only valid for
+		// raw frames. An ADTS default would make the frames self-describing and that description wrong.
+		encoderConfig.aac = { format: "aac" };
+	}
+
+	if (config.codec === "opus") {
+		// Start from the kind's defaults, then let explicit opusOptions win (undefined knobs were
+		// already dropped upstream, so the spread only overrides what the caller actually set).
+		const opus: OpusEncoderConfigExt = { ...opusKindDefaults(kind), ...opusOptions };
+
+		// jitter carries the frame duration in ms; WebCodecs wants µs.
+		if (config.jitter !== undefined) {
+			opus.frameDuration = config.jitter * 1000;
+		}
+
+		if (Object.keys(opus).length > 0) {
+			encoderConfig.opus = opus;
+		}
+	}
+
+	return encoderConfig;
+}
