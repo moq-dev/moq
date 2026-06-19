@@ -8,13 +8,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{Bool, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_av_foundation::{
-	AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceInput, AVCaptureOutput, AVCaptureSession,
-	AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeVideo,
+	AVAuthorizationStatus, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceInput, AVCaptureOutput,
+	AVCaptureSession, AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaType,
+	AVMediaTypeVideo,
 };
 use objc2_core_media::CMSampleBuffer;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
@@ -27,6 +29,52 @@ use crate::frame::Frame;
 /// How long `open` waits for the first frame before assuming the camera never
 /// started (e.g. permission denied).
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long to wait for the user to answer the camera-permission prompt the
+/// first time capture runs.
+const ACCESS_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Ensure the process is authorized to use the camera, prompting once if the
+/// decision hasn't been made yet.
+///
+/// macOS otherwise vends black/no frames for an unauthorized client, which
+/// surfaces as the confusing [`FIRST_FRAME_TIMEOUT`] hang. Requesting up front
+/// turns "denied" into an immediate, actionable error and blocks on the system
+/// prompt while the user decides. Note the prompt is attributed to the
+/// responsible app (the one that launched the process), so a bare CLI inherits
+/// its host app's grant.
+fn ensure_camera_access(media: &AVMediaType) -> Result<(), Error> {
+	let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(media) };
+
+	if status == AVAuthorizationStatus::Authorized {
+		return Ok(());
+	}
+	if status == AVAuthorizationStatus::NotDetermined {
+		// requestAccess returns asynchronously on an arbitrary queue; block the
+		// (already off-runtime) capture-open thread on its result so we don't fall
+		// through to a black-frame first-frame timeout while the prompt is up.
+		let (tx, rx) = std::sync::mpsc::channel();
+		let handler = RcBlock::new(move |granted: Bool| {
+			let _ = tx.send(granted.as_bool());
+		});
+		unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &handler) };
+
+		return match rx.recv_timeout(ACCESS_TIMEOUT) {
+			Ok(true) => Ok(()),
+			Ok(false) => Err(Error::Codec(anyhow::anyhow!(
+				"camera access denied; enable it in System Settings > Privacy & Security > Camera"
+			))),
+			Err(_) => Err(Error::Codec(anyhow::anyhow!(
+				"timed out after {ACCESS_TIMEOUT:?} waiting for the camera-permission prompt"
+			))),
+		};
+	}
+
+	// Denied or restricted: no prompt will appear, so fail fast with a fix.
+	Err(Error::Codec(anyhow::anyhow!(
+		"camera access not authorized (denied or restricted); enable it in System Settings > Privacy & Security > Camera"
+	)))
+}
 
 pub(super) struct Camera {
 	// Kept alive (and running) for the life of the capture; dropped stops it.
@@ -43,18 +91,21 @@ pub(super) struct Camera {
 
 impl Camera {
 	pub(super) fn open(config: &Config) -> Result<Self, Error> {
+		let media = unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::Codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
+
+		// Gate on camera authorization before opening the device, so an
+		// unauthorized client gets a clear error (and a prompt on first run)
+		// instead of a silent first-frame timeout.
+		ensure_camera_access(media)?;
+
 		let device = match &config.device {
 			Some(id) => {
 				let id = NSString::from_str(id);
 				unsafe { AVCaptureDevice::deviceWithUniqueID(&id) }
 					.ok_or_else(|| Error::Codec(anyhow::anyhow!("no camera with id {id}")))?
 			}
-			None => {
-				let media =
-					unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::Codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
-				unsafe { AVCaptureDevice::defaultDeviceWithMediaType(media) }
-					.ok_or_else(|| Error::Codec(anyhow::anyhow!("no default camera")))?
-			}
+			None => unsafe { AVCaptureDevice::defaultDeviceWithMediaType(media) }
+				.ok_or_else(|| Error::Codec(anyhow::anyhow!("no default camera")))?,
 		};
 		let device_id = unsafe { device.uniqueID() }.to_string();
 

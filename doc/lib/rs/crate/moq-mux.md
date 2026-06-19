@@ -54,6 +54,9 @@ See the [moq-cli source](https://github.com/moq-dev/moq/tree/main/rs/moq-cli) fo
 
 - H.264 (AVC) - requires `h264` feature
 - H.265 (HEVC) - requires `h265` feature
+- AV1
+- VP8
+- VP9
 
 **Audio:**
 
