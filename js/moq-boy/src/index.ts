@@ -305,7 +305,11 @@ export class Game {
 		});
 	}
 
-	#runCommandTrack(track: Moq.TrackProducer, producer: Json.Producer<Record<string, unknown>>, effect: Moq.Signals.Effect) {
+	#runCommandTrack(
+		track: Moq.TrackProducer,
+		producer: Json.Producer<Record<string, unknown>>,
+		effect: Moq.Signals.Effect,
+	) {
 		if (effect.get(track.state.closed)) return;
 
 		const command = effect.get(this.#command);
