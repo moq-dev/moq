@@ -235,7 +235,13 @@ impl<E: CatalogExt> Import<E> {
 					self.sps.clear();
 					self.pps.clear();
 					self.current.chunks.clear();
-					self.current.vps_seen.clear();
+					// Keep vps_seen: in H.265 the VPS precedes the reconfiguring SPS, so
+					// any VPS already seen this AU belongs to the new config. Re-append
+					// it to the cleared chunks so the keyframe still carries it.
+					for nal in &self.current.vps_seen {
+						self.current.chunks.extend_from_slice(&START_CODE);
+						self.current.chunks.extend_from_slice(nal);
+					}
 					self.current.sps_seen.clear();
 					self.current.pps_seen.clear();
 				}
