@@ -89,7 +89,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
                       # on each moq-ffi-v* tag.
 
 /cpp/                 # C/C++ consumers of libmoq
-  obs/               # OBS Studio plugin (CMake; links libmoq via MOQ_LOCAL). GPL-2.0.
+  obs/               # OBS Studio plugin (CMake; links libmoq via MOQ_LOCAL). GPL-2.0-or-later.
 
 /demo/                # Demos and test media
   boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)

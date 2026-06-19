@@ -165,7 +165,7 @@
         # Dependencies for building the OBS plugin (`just obs build`).
         # Linux-only: nixpkgs marks obs-studio broken on Darwin, so macOS
         # and Windows fetch libobs/Qt6 via the OBS buildspec instead (see
-        # obs/buildspec.json and doc/bin/obs.md). ffmpeg + cmake come from
+        # cpp/obs/buildspec.json and doc/bin/obs.md). ffmpeg + cmake come from
         # rustDeps. clang-tools/gersemi back `just obs check`.
         obsDeps =
           with pkgs;

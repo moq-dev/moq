@@ -18,5 +18,5 @@ just obs setup
 just obs build
 ```
 
-Licensed under GPL-2.0 (see [LICENSE](LICENSE)), separate from the rest of the
+Licensed under GPL-2.0-or-later (see [LICENSE](LICENSE)), separate from the rest of the
 repository, because it links OBS.

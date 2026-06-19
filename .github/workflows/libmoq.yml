@@ -209,11 +209,25 @@ jobs:
           pattern: obs-moq-*
           merge-multiple: true
 
+      # release.sh prev-tag keys off the current tag, but the trigger here is a
+      # libmoq-v* tag, so it can't find the previous obs-moq tag. Take the
+      # newest existing obs-moq tag (excluding this version, for safe re-runs)
+      # so the release notes span only since the last obs-moq release.
+      - name: Find previous obs-moq tag
+        id: prev_tag
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          cur="obs-moq-v${VERSION}"
+          prev=$(git tag --list 'obs-moq-v*' --sort=-v:refname | grep -vx "$cur" | head -n1)
+          echo "tag=${prev}" >>"$GITHUB_OUTPUT"
+
       # Cut a parallel obs-moq-v<version> release at this commit (gh creates
-      # the tag). Notes auto-generate against the previous obs-moq release.
+      # the tag).
       - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: "obs-moq-v${{ steps.parse.outputs.version }}"
           RELEASE_TITLE: "obs-moq v${{ steps.parse.outputs.version }}"
+          RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: .github/scripts/release.sh create artifacts
