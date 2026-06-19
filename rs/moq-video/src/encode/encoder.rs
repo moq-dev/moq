@@ -15,7 +15,7 @@ use crate::frame::{Frame, I420};
 /// breaking external `match`es.
 ///
 /// Not every codec has a backend on every platform: H.265 is hardware-only
-/// (VideoToolbox on macOS today). [`open`](backend::open) returns
+/// (VideoToolbox on macOS today). Building an [`Encoder`] returns
 /// [`Error::NoEncoder`](crate::Error::NoEncoder) when nothing can encode the
 /// requested codec on this machine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
