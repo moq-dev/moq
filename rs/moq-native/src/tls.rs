@@ -365,6 +365,10 @@ impl PeerIdentity {
 	}
 
 	/// The validated certificate chain, leaf first.
+	///
+	/// Exposes [`rustls::pki_types::CertificateDer`] directly (already part of
+	/// this crate's public API via the `rustls` re-export), so a major `rustls`
+	/// bump is a breaking change for consumers of this method.
 	pub fn chain(&self) -> &[CertificateDer<'static>] {
 		&self.chain
 	}
