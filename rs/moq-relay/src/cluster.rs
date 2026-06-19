@@ -302,10 +302,6 @@ pub struct ClusterConfig {
 	/// token). For static `--cluster-connect` peers, prefer an inline `?jwt=`.
 	#[arg(id = "cluster-token", long = "cluster-token", env = "MOQ_CLUSTER_TOKEN")]
 	pub token: Option<PathBuf>,
-
-	/// Removed; present only to emit a migration error. Use [`Self::connect`] instead.
-	#[arg(id = "cluster-root", long = "cluster-root", env = "MOQ_CLUSTER_ROOT", hide = true)]
-	pub root: Option<String>,
 }
 
 /// A relay cluster built around a single [`OriginProducer`].
@@ -436,20 +432,9 @@ impl Cluster {
 	/// (`connect` / `connect_api` set) dials peers and, when `mesh` gossip is on,
 	/// also advertises `node` and runs discovery.
 	///
-	/// Bails when the removed flag `cluster.root` is set, when `mesh` gossip is on
-	/// without `node`, or when peers are configured to dial but no client was
-	/// attached via [`with_client`](Self::with_client).
+	/// Bails when `mesh` gossip is on without `node`, or when peers are configured
+	/// to dial but no client was attached via [`with_client`](Self::with_client).
 	pub async fn run(self) -> anyhow::Result<()> {
-		if let Some(root) = &self.config.root {
-			anyhow::bail!(
-				"`cluster.root` / `--cluster-root` was removed (value: {root:?}). \
-				 Use `--cluster-connect <peer-url>` to dial cluster peers. To gossip \
-				 this relay's address, set `--cluster-node <self-url>` and enable \
-				 `--cluster-mesh`. \
-				 See https://doc.moq.dev/bin/relay/cluster."
-			);
-		}
-
 		let (gossip, node) = self.resolve_mesh()?;
 		anyhow::ensure!(
 			!gossip || node.is_some(),
@@ -1103,21 +1088,6 @@ mod tests {
 		assert!(!should_dial("self.example.com:4443", "self.example.com:4443"));
 	}
 
-	/// Setting `cluster.root` (the removed flag) at startup must surface a migration
-	/// message that names the replacement flags.
-	#[tokio::test]
-	async fn cluster_root_errors_with_migration_message() {
-		let config = ClusterConfig {
-			root: Some("legacy-root.example.com:4443".to_string()),
-			..Default::default()
-		};
-		let err = Cluster::new(config).run().await.expect_err("should error");
-		let msg = format!("{err}");
-		assert!(msg.contains("cluster.root"), "missing cluster.root in: {msg}");
-		assert!(msg.contains("--cluster-connect"), "missing --cluster-connect in: {msg}");
-		assert!(msg.contains("--cluster-node"), "missing --cluster-node in: {msg}");
-	}
-
 	/// Enabling gossip (`--cluster-mesh`) without `--cluster-node` has no address to
 	/// advertise, so it must fail fast with a message naming the missing flag.
 	#[tokio::test]
@@ -1130,26 +1100,6 @@ mod tests {
 		let msg = format!("{err}");
 		assert!(msg.contains("--cluster-node"), "missing --cluster-node in: {msg}");
 		assert!(msg.contains("--cluster-mesh"), "missing --cluster-mesh in: {msg}");
-	}
-
-	/// `cluster.root` parsed from TOML triggers the same migration error.
-	#[test]
-	fn cluster_root_toml_parses_then_errors() {
-		let toml = "[cluster]\nroot = \"legacy-root.example.com:4443\"\n";
-		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-root-toml.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-		assert_eq!(config.cluster.root.as_deref(), Some("legacy-root.example.com:4443"));
-
-		let rt = tokio::runtime::Runtime::new().unwrap();
-		let err = rt
-			.block_on(Cluster::new(config.cluster).run())
-			.expect_err("should error");
-		assert!(format!("{err}").contains("cluster.root"));
 	}
 
 	/// A relay configured with `cluster.node` + `cluster.mesh` gossip and no peers
