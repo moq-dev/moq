@@ -119,22 +119,18 @@ jobs:
     needs: release
     runs-on: ${{ matrix.os }}
 
+    # macOS + Windows only. These link the ffmpeg the obs-deps bundle ships
+    # (the same one OBS uses), so the binaries are portable. A Linux build
+    # would link nix/distro ffmpeg and not be portable, so Linux is
+    # build-from-source (see doc/bin/obs.md) and ships no prebuilt binary.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            use_nix: true
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
-            use_nix: true
           - target: aarch64-apple-darwin
             os: macos-latest
-            use_nix: false
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            use_nix: false
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -142,29 +138,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install Nix
-        if: matrix.use_nix
-        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-
       - name: Parse version
         id: parse
         shell: bash
         run: .github/scripts/release.sh parse-version libmoq
 
-      - name: Build and package (Linux, nix)
-        if: matrix.use_nix
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ steps.parse.outputs.version }}
-        run: |
-          nix develop --accept-flake-config --command \
-            ./cpp/obs/build.sh --target "$TARGET" --libmoq-release "$VERSION" --output dist
-
-      - name: Build and package (macOS / Windows, native)
-        if: '!matrix.use_nix'
+      # Native Xcode / Visual Studio; libobs/Qt6/ffmpeg come from the obs-deps
+      # bundle and libmoq from the release we just published (--libmoq-release).
+      - name: Build and package
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
