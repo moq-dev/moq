@@ -14,16 +14,17 @@ use crate::{
 	coding::{Decode, DecodeError, Encode, EncodeError},
 };
 
-/// A relay origin, identified by a 62-bit varint on the wire.
+/// A relay origin (Hop ID), a randomly-assigned identifier carried in the hop chain.
 ///
 /// `id` must be non-zero for a real origin; `id == 0` is reserved as a
 /// placeholder for Lite03-style hops where the actual value isn't carried.
-/// Encoding a value outside the 62-bit range (>= 2^62) will fail at the
-/// varint layer; [`Origin::random`] picks a valid random nonzero id.
+/// On the wire lite-05+ encodes the id as a fixed-width 64-bit integer (the full
+/// 64-bit space), while older versions used a 62-bit varint. [`Origin::random`]
+/// picks a random nonzero id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Origin {
-	/// Non-zero 62-bit identifier. Encoded as a QUIC varint on the wire.
+	/// Non-zero identifier. Encoded as a fixed-width 64-bit integer on the wire (lite-05+).
 	pub id: u64,
 }
 
@@ -64,25 +65,37 @@ impl fmt::Display for Origin {
 	}
 }
 
-impl<V: Copy> Encode<V> for Origin
-where
-	u64: Encode<V>,
-{
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		self.id.encode(w, version)
+impl Encode<crate::lite::Version> for Origin {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: crate::lite::Version) -> Result<(), EncodeError> {
+		if version.hops_fixed_width() {
+			// lite-05+: fixed-width 64-bit. Hop IDs are random, so a varint would almost
+			// never be shorter, and the fixed width buys the full 64-bit space.
+			if w.remaining_mut() < 8 {
+				return Err(EncodeError::Short);
+			}
+			w.put_u64(self.id);
+			Ok(())
+		} else {
+			self.id.encode(w, version)
+		}
 	}
 }
 
-impl<V: Copy> Decode<V> for Origin
-where
-	u64: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let id = u64::decode(r, version)?;
-		if id >= 1u64 << 62 {
-			return Err(DecodeError::InvalidValue);
+impl Decode<crate::lite::Version> for Origin {
+	fn decode<R: bytes::Buf>(r: &mut R, version: crate::lite::Version) -> Result<Self, DecodeError> {
+		if version.hops_fixed_width() {
+			if r.remaining() < 8 {
+				return Err(DecodeError::Short);
+			}
+			// The full 64-bit space is valid here (no 62-bit cap).
+			Ok(Self { id: r.get_u64() })
+		} else {
+			let id = u64::decode(r, version)?;
+			if id >= 1u64 << 62 {
+				return Err(DecodeError::InvalidValue);
+			}
+			Ok(Self { id })
 		}
-		Ok(Self { id })
 	}
 }
 
