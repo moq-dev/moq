@@ -4,12 +4,15 @@
 //! [`Frame`]s, ready to feed an [`AudioProducer`] with
 //! an [`EncoderInput`] of `format = AudioFormat::F32`.
 //! Encoding stays on `unsafe-libopus`, so audio never touches ffmpeg.
+//!
+//! The cpal callback (a realtime thread) forwards buffers through an async
+//! channel that the on-demand capture loop awaits, so dropping the publish
+//! future (e.g. on Ctrl+C) cancels the read and releases the device.
 
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use tokio::sync::mpsc;
 
 use crate::{AudioError, AudioFormat, AudioProducer, EncoderInput, EncoderOutput, Frame};
 
@@ -20,22 +23,6 @@ mod permission;
 /// timeout. Without this the capture loop hangs silently forever when macOS TCC
 /// denies microphone access.
 const FIRST_BUFFER_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How long a bounded mic read blocks before returning to recheck the gate.
-/// Bounds shutdown latency: once the gate closes, the worker observes it within
-/// this interval even if the device stalls without delivering buffers.
-const SHUTDOWN_POLL: Duration = Duration::from_millis(100);
-
-/// The outcome of a bounded [`Microphone`] read.
-enum Read {
-	/// A captured PCM frame.
-	Frame(Frame),
-	/// The timeout elapsed before a buffer arrived; the stream is still live, so
-	/// the caller should poll its shutdown signal and read again.
-	Idle,
-	/// The stream ended (device gone, callback dropped the sender).
-	End,
-}
 
 /// Microphone capture configuration. All fields are hints; the backend picks
 /// the closest supported mode and the [`AudioProducer`]
@@ -52,11 +39,11 @@ pub struct Config {
 /// An open microphone, read frame-by-frame via [`read`](Self::read).
 ///
 /// Holds the live `cpal` stream, which is `!Send`, so build and use it on a
-/// single thread (e.g. inside a `spawn_blocking` closure).
+/// single task. Buffers arrive from the realtime callback over an async channel.
 pub struct Microphone {
 	// Kept alive to keep capturing; dropping it stops the stream.
 	_stream: cpal::Stream,
-	rx: Receiver<Vec<f32>>,
+	rx: mpsc::UnboundedReceiver<Vec<f32>>,
 	sample_rate: u32,
 	channels: u32,
 	frames_read: u64,
@@ -74,7 +61,7 @@ impl Microphone {
 	}
 
 	/// Open (and start) the microphone described by `config`.
-	pub fn open(config: &Config) -> Result<Self, AudioError> {
+	pub async fn open(config: &Config) -> Result<Self, AudioError> {
 		// Fail fast on a denied/restricted mic (macOS TCC) instead of opening a
 		// stream that silently delivers nothing. A no-op on other platforms.
 		permission::ensure_microphone_access()?;
@@ -83,7 +70,7 @@ impl Microphone {
 		let sample_rate = stream_config.sample_rate;
 		let channels = stream_config.channels as u32;
 
-		let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
+		let (tx, mut rx) = mpsc::unbounded_channel::<Vec<f32>>();
 
 		// The callback runs on cpal's realtime audio thread; convert to f32 and
 		// forward. Keep it allocation-light and never block.
@@ -116,18 +103,18 @@ impl Microphone {
 
 		stream.play().map_err(cpal_err)?;
 
-		// Block for the first buffer to surface a permission failure (or dead
-		// device) as an error rather than a silent hang in the capture loop.
-		let pending = match rx.recv_timeout(FIRST_BUFFER_TIMEOUT) {
-			Ok(samples) => samples,
-			Err(RecvTimeoutError::Timeout) => {
-				return Err(AudioError::Unsupported(format!(
-					"no samples from microphone {device} within {FIRST_BUFFER_TIMEOUT:?} (permission denied?)"
-				)));
-			}
-			Err(RecvTimeoutError::Disconnected) => {
+		// Await the first buffer to surface a permission failure (or dead device)
+		// as an error rather than a silent hang in the capture loop.
+		let pending = match tokio::time::timeout(FIRST_BUFFER_TIMEOUT, rx.recv()).await {
+			Ok(Some(samples)) => samples,
+			Ok(None) => {
 				return Err(AudioError::Unsupported(format!(
 					"microphone {device} stopped before any samples"
+				)));
+			}
+			Err(_) => {
+				return Err(AudioError::Unsupported(format!(
+					"no samples from microphone {device} within {FIRST_BUFFER_TIMEOUT:?} (permission denied?)"
 				)));
 			}
 		};
@@ -152,38 +139,15 @@ impl Microphone {
 		self.channels
 	}
 
-	/// Block until the next buffer of PCM is captured, or `None` once the
-	/// stream stops. The returned [`Frame`] holds interleaved little-endian
-	/// `f32` samples (i.e. `AudioFormat::F32`).
-	pub fn read(&mut self) -> Result<Option<Frame>, AudioError> {
+	/// Await the next buffer of PCM, or `None` once the stream stops. The
+	/// returned [`Frame`] holds interleaved little-endian `f32` samples (i.e.
+	/// `AudioFormat::F32`). Cancel-safe: drop the future to stop reading.
+	pub async fn read(&mut self) -> Option<Frame> {
 		let samples = match self.pending.take() {
 			Some(samples) => samples,
-			None => {
-				let Ok(samples) = self.rx.recv() else {
-					return Ok(None); // stream dropped / device gone
-				};
-				samples
-			}
+			None => self.rx.recv().await?, // stream dropped / device gone
 		};
-
-		Ok(Some(self.frame_from(samples)))
-	}
-
-	/// Like [`read`](Self::read) but only blocks up to `timeout`, returning
-	/// [`Read::Idle`] on timeout so the capture loop can poll for shutdown rather
-	/// than block indefinitely on a stalled device. Internal to the on-demand
-	/// capture loop; external callers use [`read`](Self::read).
-	fn read_timeout(&mut self, timeout: Duration) -> Result<Read, AudioError> {
-		let samples = match self.pending.take() {
-			Some(samples) => samples,
-			None => match self.rx.recv_timeout(timeout) {
-				Ok(samples) => samples,
-				Err(RecvTimeoutError::Timeout) => return Ok(Read::Idle),
-				Err(RecvTimeoutError::Disconnected) => return Ok(Read::End),
-			},
-		};
-
-		Ok(Read::Frame(self.frame_from(samples)))
+		Some(self.frame_from(samples))
 	}
 
 	/// Build a timestamped [`Frame`] from a buffer of interleaved `f32` samples,
@@ -231,52 +195,62 @@ pub async fn publish_microphone(
 		channels,
 	};
 
-	let producer = AudioProducer::new(&mut broadcast, catalog, track_name, input, output)?;
+	let mut producer = AudioProducer::new(&mut broadcast, catalog, track_name, input, output)?;
 	let track = producer.track().clone();
 
-	let gate = Gate::new();
-	let worker_gate = gate.clone();
-	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, config, worker_gate, clock));
-
-	// Cancellation safety: a spawn_blocking task can't be cancelled, so if this
-	// future is dropped (e.g. on Ctrl+C) we must still tell the worker to stop.
-	// Closing the gate on drop unblocks both its idle wait and its bounded read,
-	// so the worker returns and releases the mic and runtime shutdown doesn't
-	// hang waiting for a task that never finishes.
-	let _cancel = CancelGuard(gate.clone());
-
-	tokio::select! {
-		res = &mut worker => res.map_err(task_err)?,
-		() = monitor_demand(&track, &gate) => {
-			gate.close();
-			worker.await.map_err(task_err)?
-		}
-	}
+	capture_loop(&mut producer, &track, &config, &clock).await
 }
 
-/// Closes the gate when dropped, so cancelling [`publish_microphone`] (which
-/// drops this guard) signals the blocking worker to stop. Async `Drop` doesn't
-/// exist, so this RAII guard is how the worker learns the future is gone.
-struct CancelGuard(Arc<Gate>);
-
-impl Drop for CancelGuard {
-	fn drop(&mut self) {
-		self.0.close();
-	}
-}
-
-/// Toggle the gate as listeners subscribe and unsubscribe. Returns once the
-/// track stops being announced (broadcast dropped / aborted).
-async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
+/// Async capture/encode loop: open the mic while a listener is subscribed,
+/// release it when the last one leaves, and re-anchor the timeline on resume so
+/// the idle gap lands in the PTS.
+///
+/// Cancel safety: every wait is a real `.await` (a buffer read or a demand
+/// transition), so dropping this future (e.g. on Ctrl+C) drops the [`Microphone`]
+/// and stops the cpal stream. No blocking thread is left behind.
+async fn capture_loop(
+	producer: &mut AudioProducer,
+	track: &moq_net::TrackProducer,
+	config: &Config,
+	clock: &moq_mux::Clock,
+) -> Result<(), AudioError> {
 	loop {
-		match track.used().await {
-			Ok(()) => gate.set_active(true),
-			Err(err) => return log_track_ended(err),
+		// Idle until a listener subscribes; the track ending is a clean exit.
+		if let Err(err) = track.used().await {
+			log_track_ended(err);
+			return Ok(());
 		}
-		match track.unused().await {
-			Ok(()) => gate.set_active(false),
-			Err(err) => return log_track_ended(err),
+
+		let mut mic = Microphone::open(config).await?;
+
+		loop {
+			// Race the next buffer against the last listener leaving so we release
+			// the mic promptly. `biased` checks demand first so an unwatched track
+			// stops before reading another buffer.
+			let frame = tokio::select! {
+				biased;
+				res = track.unused() => {
+					if let Err(err) = res {
+						log_track_ended(err);
+						return Ok(());
+					}
+					break; // no listeners: release the mic, then wait for one
+				}
+				frame = mic.read() => frame,
+			};
+
+			let Some(mut frame) = frame else { break }; // device stopped producing samples
+
+			// Stamp from the shared clock (including any idle gap) so the producer's
+			// epoch re-anchors and audio stays aligned with the video track.
+			frame.timestamp_us = clock.micros();
+			producer.write(&frame)?;
 		}
+
+		// Release the mic and re-anchor so the next frame after resume reflects the gap.
+		drop(mic);
+		producer.reset_epoch();
+		tracing::info!("no listeners: released microphone");
 	}
 }
 
@@ -291,119 +265,9 @@ fn log_track_ended(err: moq_net::Error) {
 	}
 }
 
-/// Blocking capture/encode loop. Opens the mic only while watched, releases it
-/// when idle, and stamps frames with wall-clock time so a release/reopen gap
-/// shows up in the PTS.
-fn capture_loop(
-	mut producer: AudioProducer,
-	config: Config,
-	gate: Arc<Gate>,
-	clock: moq_mux::Clock,
-) -> Result<(), AudioError> {
-	let mut mic: Option<Microphone> = None;
-
-	loop {
-		// Stop promptly when cancelled (gate closed via CancelGuard / shutdown).
-		if gate.is_closed() {
-			break;
-		}
-
-		if !gate.is_active() {
-			if mic.take().is_some() {
-				// Re-anchor so the next frame after resume reflects the gap.
-				producer.reset_epoch();
-				tracing::info!("no listeners: released microphone");
-			}
-			if !gate.wait_active() {
-				break; // closed
-			}
-			continue;
-		}
-
-		if mic.is_none() {
-			mic = Some(Microphone::open(&config)?);
-		}
-
-		let mut frame = match mic.as_mut().expect("mic open above").read_timeout(SHUTDOWN_POLL)? {
-			Read::Frame(frame) => frame,
-			// Timed out without a buffer: loop back to recheck the gate (shutdown
-			// or the last listener leaving) instead of blocking indefinitely.
-			Read::Idle => continue,
-			Read::End => break, // device stopped producing samples
-		};
-
-		// Stamp from the shared clock (including any idle gap) so the producer's
-		// epoch re-anchors and audio stays aligned with the video track.
-		frame.timestamp_us = clock.micros();
-		producer.write(&frame)?;
-	}
-
-	producer.finish()?;
-	Ok(())
-}
-
-fn task_err(err: tokio::task::JoinError) -> AudioError {
-	AudioError::Unsupported(format!("capture task: {err}"))
-}
-
-/// Bridges the async demand monitor to the blocking capture thread: the monitor
-/// flips `active`, the capture loop waits on it.
-struct Gate {
-	state: Mutex<GateState>,
-	cond: Condvar,
-}
-
-#[derive(Default)]
-struct GateState {
-	active: bool,
-	closed: bool,
-}
-
-impl Gate {
-	fn new() -> Arc<Self> {
-		Arc::new(Self {
-			state: Mutex::new(GateState::default()),
-			cond: Condvar::new(),
-		})
-	}
-
-	fn set_active(&self, active: bool) {
-		let mut state = self.state.lock().unwrap();
-		state.active = active;
-		self.cond.notify_all();
-	}
-
-	fn close(&self) {
-		let mut state = self.state.lock().unwrap();
-		// Clear active so a shutdown that races a still-subscribed track also
-		// releases the idle wait. The capture loop additionally checks `closed`
-		// at the top of each iteration and between bounded reads.
-		state.active = false;
-		state.closed = true;
-		self.cond.notify_all();
-	}
-
-	fn is_active(&self) -> bool {
-		self.state.lock().unwrap().active
-	}
-
-	fn is_closed(&self) -> bool {
-		self.state.lock().unwrap().closed
-	}
-
-	/// Block until active or closed. Returns `false` if closed.
-	fn wait_active(&self) -> bool {
-		let mut state = self.state.lock().unwrap();
-		while !state.active && !state.closed {
-			state = self.cond.wait(state).unwrap();
-		}
-		!state.closed
-	}
-}
-
 /// Forward a buffer to the reader, ignoring send errors (receiver dropped means
 /// capture is shutting down).
-fn forward(tx: &Sender<Vec<f32>>, samples: Vec<f32>) {
+fn forward(tx: &mpsc::UnboundedSender<Vec<f32>>, samples: Vec<f32>) {
 	let _ = tx.send(samples);
 }
 
@@ -439,65 +303,4 @@ fn stream_err(err: cpal::Error) {
 
 fn cpal_err(err: cpal::Error) -> AudioError {
 	AudioError::Unsupported(format!("audio capture: {err}"))
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use std::sync::mpsc;
-
-	/// Dropping the guard (as cancelling the `publish_microphone` future does)
-	/// must close the gate so the worker stops.
-	#[test]
-	fn cancel_guard_closes_gate() {
-		let gate = Gate::new();
-		{
-			let _cancel = CancelGuard(gate.clone());
-			assert!(!gate.is_closed());
-		}
-		assert!(gate.is_closed());
-		// A closed gate releases the idle wait instead of blocking forever.
-		assert!(!gate.wait_active());
-	}
-
-	/// A worker parked in the idle `wait_active` must wake when the gate closes.
-	/// `join` bounds the wake: if `close` failed to notify, the test hangs.
-	#[test]
-	fn close_wakes_idle_waiter() {
-		let gate = Gate::new();
-		let waiter = std::thread::spawn({
-			let gate = gate.clone();
-			move || gate.wait_active()
-		});
-		gate.close();
-		assert!(!waiter.join().unwrap());
-	}
-
-	/// Mirror the capture loop's active path: a bounded `recv_timeout` that keeps
-	/// timing out (the mic delivers nothing) must still end the worker once the
-	/// gate closes. The sender is held open so only the gate can break the loop;
-	/// `join` bounds it, so an unbounded read would hang the test.
-	#[test]
-	fn close_ends_active_recv_loop() {
-		let gate = Gate::new();
-		gate.set_active(true);
-		let (_tx, rx) = mpsc::channel::<Vec<f32>>();
-		let worker = std::thread::spawn({
-			let gate = gate.clone();
-			move || {
-				loop {
-					if gate.is_closed() {
-						break;
-					}
-					match rx.recv_timeout(Duration::from_millis(5)) {
-						Ok(_) => {}
-						Err(RecvTimeoutError::Timeout) => continue,
-						Err(RecvTimeoutError::Disconnected) => break,
-					}
-				}
-			}
-		});
-		gate.close();
-		worker.join().unwrap();
-	}
 }

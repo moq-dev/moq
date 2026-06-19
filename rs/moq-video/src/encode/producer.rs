@@ -6,23 +6,15 @@
 //! released again. This mirrors `moq-boy`, which pauses its emulator on
 //! `TrackProducer::used()` / `unused()`.
 
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
-
 use moq_net::Timestamp;
 
 use crate::Error;
-use crate::capture::{self, FrameSource, Read};
+use crate::capture;
 
 use super::encoder::{self, Encoder};
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 const DEFAULT_FRAMERATE: u32 = 30;
-
-/// How long a capture read blocks before returning to recheck the gate. Bounds
-/// shutdown latency: once the gate closes, the worker observes it within this
-/// interval even if the device stalls without producing frames.
-const SHUTDOWN_POLL: Duration = Duration::from_millis(100);
 
 /// Publishes encoded H.264 frames as an avc3 moq track.
 ///
@@ -104,59 +96,10 @@ pub async fn publish_capture(
 		return Err(Error::InvalidFramerate(0));
 	}
 
-	let producer = Producer::new(broadcast, catalog)?;
+	let mut producer = Producer::new(broadcast, catalog)?;
 	let demand = producer.demand();
 
-	let gate = Gate::new();
-
-	// Camera capture + encode is blocking; keep it off the async runtime.
-	let worker_gate = gate.clone();
-	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, capture, encode, worker_gate, clock));
-
-	// Cancellation safety: a spawn_blocking task can't be cancelled, so if this
-	// future is dropped (e.g. on Ctrl+C) we must still tell the worker to stop.
-	// Closing the gate on drop unblocks both its idle wait and its bounded read,
-	// so the worker returns and releases the camera (LED off) and runtime
-	// shutdown doesn't hang waiting for a task that never finishes.
-	let _cancel = CancelGuard(gate.clone());
-
-	tokio::select! {
-		// Surface a capture/encode failure (e.g. camera open) promptly.
-		res = &mut worker => res.map_err(|e| Error::Codec(anyhow::anyhow!("capture task: {e}")))?,
-		// The broadcast was dropped: stop the worker and wait for it to flush.
-		() = monitor_demand(&demand, &gate) => {
-			gate.close();
-			worker
-				.await
-				.map_err(|e| Error::Codec(anyhow::anyhow!("capture task: {e}")))?
-		}
-	}
-}
-
-/// Closes the gate when dropped, so cancelling [`publish_capture`] (which drops
-/// this guard) signals the blocking worker to stop. Async `Drop` doesn't exist,
-/// so this RAII guard is how the worker learns the future is gone.
-struct CancelGuard(Arc<Gate>);
-
-impl Drop for CancelGuard {
-	fn drop(&mut self) {
-		self.0.close();
-	}
-}
-
-/// Toggle the gate as viewers subscribe and unsubscribe. Returns once the
-/// track stops being announced (broadcast dropped / aborted).
-async fn monitor_demand(demand: &moq_net::TrackDemand, gate: &Gate) {
-	loop {
-		match demand.used().await {
-			Ok(()) => gate.set_active(true),
-			Err(err) => return log_track_ended(err),
-		}
-		match demand.unused().await {
-			Ok(()) => gate.set_active(false),
-			Err(err) => return log_track_ended(err),
-		}
-	}
+	capture_loop(&mut producer, &demand, &capture, &encode, &clock).await
 }
 
 /// A dropped or closed track is the normal end of a publish; any other cause is
@@ -170,215 +113,88 @@ fn log_track_ended(err: moq_net::Error) {
 	}
 }
 
-/// Blocking capture/encode loop. Captures one frame up front to populate the
+/// Async capture/encode loop. Captures one frame up front to populate the
 /// catalog (the codec/resolution only exist once the encoder has produced an
-/// SPS), then releases the camera whenever the gate goes idle.
-fn capture_loop(
-	mut producer: Producer,
-	capture: capture::Config,
-	encode: Options,
-	gate: Arc<Gate>,
-	clock: moq_mux::Clock,
+/// SPS), then releases the camera whenever the last viewer leaves and reopens it
+/// when one returns.
+///
+/// Cancel safety: every wait here is a real `.await` (a frame read or a demand
+/// transition), so dropping this future (e.g. on Ctrl+C) drops `camera`, which
+/// releases the device and turns the LED off. No blocking thread is left behind.
+async fn capture_loop(
+	producer: &mut Producer,
+	demand: &moq_net::TrackDemand,
+	capture: &capture::Config,
+	encode: &Options,
+	clock: &moq_mux::Clock,
 ) -> Result<(), Error> {
-	let mut camera: Option<Box<dyn FrameSource>> = None;
-	let mut encoder: Option<Encoder> = None;
-	// Force an IDR on the first frame of each (re)open so a viewer subscribing
-	// after an idle gap can start decoding immediately, rather than waiting for
-	// the next GOP boundary.
-	let mut force_keyframe = false;
-	let mut last_ts = Timestamp::from_micros(0)?;
-	// The catalog video rendition only appears once a frame has been encoded
-	// (the importer reads the SPS). Until then we keep capturing regardless of
-	// the gate, so a catalog-driven subscriber can discover the track and
-	// trigger `used()`. After that we release the camera while unwatched.
+	// The catalog video rendition only appears once a frame has been encoded (the
+	// importer reads the SPS). Until then we capture regardless of demand so a
+	// catalog-driven subscriber can discover the track and trigger `used()`.
+	// After that we release the camera while unwatched.
 	let mut catalog_ready = false;
 
 	loop {
-		// Stop promptly when cancelled (gate closed via CancelGuard / shutdown).
-		if gate.is_closed() {
-			break;
-		}
-
-		if catalog_ready && !gate.is_active() {
-			// No viewers: drop the camera so its LED turns off and it stops
-			// consuming CPU, then block until someone subscribes.
-			if camera.take().is_some() {
-				encoder = None;
-				tracing::info!("no viewers: released camera");
+		if catalog_ready {
+			// Idle until a viewer subscribes; the track ending is a clean exit.
+			if let Err(err) = demand.used().await {
+				log_track_ended(err);
+				return Ok(());
 			}
-			if !gate.wait_active() {
-				break; // closed
-			}
-			continue;
 		}
 
-		// Open the camera (and an encoder sized to its negotiated mode) the
-		// first time we're watched after being idle.
-		if camera.is_none() {
-			let cam = capture::open(&capture)?;
-			// Prefer an explicit --fps, otherwise use the camera's reported
-			// rate, falling back only if the backend doesn't expose one.
-			let framerate = capture
-				.framerate
-				.or_else(|| cam.framerate())
-				.unwrap_or(DEFAULT_FRAMERATE);
-			let mut encoder_config = encoder::Config::new(cam.width(), cam.height(), framerate);
-			encoder_config.bitrate = encode.bitrate;
-			encoder_config.kind = encode.kind.clone();
-			let enc = Encoder::new(&encoder_config)?;
-			tracing::info!(
-				encoder = enc.name(),
-				device = cam.device(),
-				"viewer subscribed: capturing"
-			);
-			camera = Some(cam);
-			encoder = Some(enc);
-			force_keyframe = true;
-		}
+		// Open the camera and an encoder sized to its negotiated mode.
+		let mut camera = capture::open(capture).await?;
+		// Prefer an explicit --fps, otherwise the camera's reported rate, falling
+		// back only if the backend doesn't expose one.
+		let framerate = capture
+			.framerate
+			.or_else(|| camera.framerate())
+			.unwrap_or(DEFAULT_FRAMERATE);
+		let mut encoder_config = encoder::Config::new(camera.width(), camera.height(), framerate);
+		encoder_config.bitrate = encode.bitrate;
+		encoder_config.kind = encode.kind.clone();
+		let mut encoder = Encoder::new(&encoder_config)?;
+		// Force an IDR on the first frame of each (re)open so a viewer subscribing
+		// after an idle gap can start decoding immediately.
+		let mut force_keyframe = true;
+		tracing::info!(encoder = encoder.name(), device = camera.device(), "capturing");
 
-		let frame = match camera.as_mut().expect("camera open above").read(SHUTDOWN_POLL)? {
-			Read::Frame(frame) => frame,
-			// Timed out without a frame: loop back to recheck the gate (shutdown
-			// or the last viewer leaving) instead of blocking indefinitely.
-			Read::Idle => continue,
-			Read::End => break, // device stopped producing frames
-		};
-
-		let ts = Timestamp::from_micros(clock.micros())?;
-		last_ts = ts;
-
-		let packets = encoder
-			.as_mut()
-			.expect("encoder built above")
-			.encode(&frame, force_keyframe)?;
-		force_keyframe = false;
-		// Once the encoder has emitted a frame, the importer has parsed the SPS
-		// and the catalog rendition exists, so the gate can take over.
-		catalog_ready |= !packets.is_empty();
-		producer.publish(packets, ts)?;
-	}
-
-	// Flush whatever the encoder still holds, then close the track. Log
-	// (don't discard) flush/publish errors at shutdown; they're not worth
-	// aborting the close over, but silently dropping them hides real failures.
-	if let Some(enc) = encoder.as_mut() {
-		match enc.finish() {
-			Ok(packets) => {
-				if let Err(err) = producer.publish(packets, last_ts) {
-					tracing::warn!(error = %err, "failed to publish final video packets");
+		loop {
+			// While watched, race the next frame against the last viewer leaving so
+			// we release the camera promptly when demand drops. `biased` checks
+			// demand first so an unwatched track stops before reading another frame.
+			let frame = if catalog_ready {
+				tokio::select! {
+					biased;
+					res = demand.unused() => {
+						if let Err(err) = res {
+							log_track_ended(err);
+							return Ok(());
+						}
+						break; // no viewers: release the camera, then wait for one
+					}
+					frame = camera.read() => frame,
 				}
-			}
-			Err(err) => tracing::warn!(error = %err, "failed to flush video encoder"),
+			} else {
+				camera.read().await
+			};
+
+			let Some(frame) = frame else { break }; // device stopped producing frames
+
+			let ts = Timestamp::from_micros(clock.micros())?;
+			let packets = encoder.encode(&frame, force_keyframe)?;
+			force_keyframe = false;
+			// Once the encoder emits a frame the importer has parsed the SPS and
+			// the catalog rendition exists, so demand gating can take over.
+			catalog_ready |= !packets.is_empty();
+			producer.publish(packets, ts)?;
 		}
-	}
-	producer.finish()?;
-	Ok(())
-}
 
-/// Bridges the async demand monitor to the blocking capture thread: the
-/// monitor flips `active`, the capture loop waits on it.
-struct Gate {
-	state: Mutex<GateState>,
-	cond: Condvar,
-}
-
-#[derive(Default)]
-struct GateState {
-	active: bool,
-	closed: bool,
-}
-
-impl Gate {
-	fn new() -> Arc<Self> {
-		Arc::new(Self {
-			state: Mutex::new(GateState::default()),
-			cond: Condvar::new(),
-		})
-	}
-
-	fn set_active(&self, active: bool) {
-		let mut state = self.state.lock().unwrap();
-		state.active = active;
-		self.cond.notify_all();
-	}
-
-	fn close(&self) {
-		let mut state = self.state.lock().unwrap();
-		// Clear active so a shutdown that races a still-subscribed track also
-		// releases the idle wait. The capture loop additionally checks `closed`
-		// at the top of each iteration and between bounded reads.
-		state.active = false;
-		state.closed = true;
-		self.cond.notify_all();
-	}
-
-	fn is_active(&self) -> bool {
-		self.state.lock().unwrap().active
-	}
-
-	fn is_closed(&self) -> bool {
-		self.state.lock().unwrap().closed
-	}
-
-	/// Block until active or closed. Returns `false` if closed.
-	fn wait_active(&self) -> bool {
-		let mut state = self.state.lock().unwrap();
-		while !state.active && !state.closed {
-			state = self.cond.wait(state).unwrap();
+		// Drop the camera (LED off) and encoder before waiting for the next viewer.
+		drop(camera);
+		if catalog_ready {
+			tracing::info!("no viewers: released camera");
 		}
-		!state.closed
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	/// Dropping the guard (as cancelling the `publish_capture` future does) must
-	/// close the gate so the worker stops.
-	#[test]
-	fn cancel_guard_closes_gate() {
-		let gate = Gate::new();
-		{
-			let _cancel = CancelGuard(gate.clone());
-			assert!(!gate.is_closed());
-		}
-		assert!(gate.is_closed());
-		// A closed gate releases the idle wait instead of blocking forever.
-		assert!(!gate.wait_active());
-	}
-
-	/// A worker parked in the idle `wait_active` must wake when the gate closes.
-	/// `join` bounds the wake: if `close` failed to notify, the test hangs.
-	#[test]
-	fn close_wakes_idle_waiter() {
-		let gate = Gate::new();
-		let waiter = std::thread::spawn({
-			let gate = gate.clone();
-			move || gate.wait_active()
-		});
-		gate.close();
-		assert!(!waiter.join().unwrap());
-	}
-
-	/// Mirror the capture loop's active path with a bounded poll: with no frames
-	/// ever arriving, closing the gate must still end the worker within the poll
-	/// interval. `join` bounds it; a regression (unbounded read) would hang.
-	#[test]
-	fn close_ends_active_poll_loop() {
-		let gate = Gate::new();
-		gate.set_active(true);
-		let worker = std::thread::spawn({
-			let gate = gate.clone();
-			move || {
-				while !gate.is_closed() {
-					// Stand in for a bounded `camera.read(SHUTDOWN_POLL)` that keeps
-					// timing out (Read::Idle) because the device produces nothing.
-					std::thread::sleep(Duration::from_millis(5));
-				}
-			}
-		});
-		gate.close();
-		worker.join().unwrap();
 	}
 }

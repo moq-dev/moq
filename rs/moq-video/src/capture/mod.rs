@@ -7,17 +7,20 @@
 //!
 //! [`encode::publish_capture`](crate::encode::publish_capture) consumes [`Config`].
 
-use std::time::Duration;
+use std::sync::Arc;
 
 use crate::Error;
 use crate::frame::Frame;
 
+mod channel;
+use channel::FrameChannel;
+
 #[cfg(target_os = "macos")]
 mod avfoundation;
 #[cfg(target_os = "macos")]
-mod queue;
-#[cfg(target_os = "macos")]
 mod screencapture;
+#[cfg(target_os = "macos")]
+mod surface;
 
 // Native V4L2 camera capture on Linux.
 #[cfg(target_os = "linux")]
@@ -26,6 +29,10 @@ mod v4l2;
 // Native Media Foundation camera capture on Windows.
 #[cfg(target_os = "windows")]
 mod mediafoundation;
+
+// Blocking-device -> async-channel bridge used by V4L2 / Media Foundation.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod pump;
 
 /// What to capture.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -59,51 +66,92 @@ pub struct Config {
 	pub framerate: Option<u32>,
 }
 
-/// The outcome of a bounded [`FrameSource::read`].
+/// A live, async frame source opened via [`open`].
 ///
-/// `Idle` / `End` are only produced on some platforms (the macOS queue can time
-/// out or be closed; the Windows reader signals end-of-stream), so `allow` the
-/// dead-code lint where a backend never constructs them (e.g. V4L2, which always
-/// returns a frame or an error).
-#[allow(dead_code)]
-pub(crate) enum Read {
-	/// A captured frame.
-	Frame(Frame),
-	/// The timeout elapsed before a frame arrived; the source is still live, so
-	/// the caller should poll its shutdown signal and read again.
-	Idle,
-	/// The source ended (device stopped, queue closed).
-	End,
+/// Every backend delivers frames through a shared [`FrameChannel`], so the
+/// encode loop just `read().await`s regardless of platform. Dropping the stream
+/// releases the device (stops the macOS `AVCaptureSession`, joins the V4L2 /
+/// Media Foundation pump thread). That is the whole point: because `read` is a
+/// real await, cancelling the capture future drops this and the camera turns off
+/// promptly, with no blocking task left pinned to the runtime.
+pub(crate) struct FrameStream {
+	chan: Arc<FrameChannel>,
+	width: u32,
+	height: u32,
+	framerate: Option<u32>,
+	device: String,
+	/// First frame captured during [`open`] (some backends learn their geometry
+	/// only from a frame); returned by the first [`read`](Self::read).
+	pending: Option<Frame>,
+	/// Keeps the backend alive and releases it on drop. Type-erased because it
+	/// differs per platform (objc session + delegate, or pump-thread guard).
+	_backend: Box<dyn std::any::Any>,
 }
 
-/// A live frame source, read frame-by-frame. Opened via [`open`].
-pub(crate) trait FrameSource {
-	/// Block up to `timeout` for the next frame. Returns [`Read::Idle`] if the
-	/// timeout elapses while the source is still live, so the caller can check a
-	/// shutdown signal between reads instead of blocking forever.
-	fn read(&mut self, timeout: Duration) -> Result<Read, Error>;
-	fn width(&self) -> u32;
-	fn height(&self) -> u32;
+impl FrameStream {
+	/// Build a stream from a backend's channel, geometry, and keep-alive guard.
+	fn new(
+		chan: Arc<FrameChannel>,
+		width: u32,
+		height: u32,
+		framerate: Option<u32>,
+		device: String,
+		pending: Option<Frame>,
+		backend: Box<dyn std::any::Any>,
+	) -> Self {
+		Self {
+			chan,
+			width,
+			height,
+			framerate,
+			device,
+			pending,
+			_backend: backend,
+		}
+	}
+
+	/// Await the next frame, or `None` once the source ends. Cancel-safe: drop
+	/// the future to stop reading and release the device.
+	pub(crate) async fn read(&mut self) -> Option<Frame> {
+		if let Some(frame) = self.pending.take() {
+			return Some(frame);
+		}
+		self.chan.recv().await
+	}
+
+	pub(crate) fn width(&self) -> u32 {
+		self.width
+	}
+
+	pub(crate) fn height(&self) -> u32 {
+		self.height
+	}
+
 	/// The negotiated frame rate, or `None` if the source doesn't report one.
-	fn framerate(&self) -> Option<u32>;
-	fn device(&self) -> &str;
+	pub(crate) fn framerate(&self) -> Option<u32> {
+		self.framerate
+	}
+
+	pub(crate) fn device(&self) -> &str {
+		&self.device
+	}
 }
 
 /// Open the capture source described by `config`.
-pub(crate) fn open(config: &Config) -> Result<Box<dyn FrameSource>, Error> {
+pub(crate) async fn open(config: &Config) -> Result<FrameStream, Error> {
 	match config.source {
 		Source::Camera => {
 			#[cfg(target_os = "macos")]
 			{
-				Ok(Box::new(avfoundation::Camera::open(config)?))
+				avfoundation::open(config).await
 			}
 			#[cfg(target_os = "linux")]
 			{
-				Ok(Box::new(v4l2::Camera::open(config)?))
+				v4l2::open(config).await
 			}
 			#[cfg(target_os = "windows")]
 			{
-				Ok(Box::new(mediafoundation::Camera::open(config)?))
+				mediafoundation::open(config).await
 			}
 			#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 			{
@@ -115,7 +163,7 @@ pub(crate) fn open(config: &Config) -> Result<Box<dyn FrameSource>, Error> {
 		Source::Display => {
 			#[cfg(target_os = "macos")]
 			{
-				Ok(Box::new(screencapture::Screen::open(config)?))
+				screencapture::open(config).await
 			}
 			#[cfg(not(target_os = "macos"))]
 			{
