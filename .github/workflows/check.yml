@@ -73,15 +73,19 @@ jobs:
         shell: bash -leo pipefail {0}
 
       # Invariant: nothing should write to the old persistent target dir anymore.
-      # Fails loudly if a CARGO_TARGET_DIR override sneaks back in.
+      # Fails loudly if a CARGO_TARGET_DIR override sneaks back in. Scope it to
+      # *this* repo's old per-runner dir (moq-$RUNNER_NAME) -- the box's
+      # $HOME/cargo-target is shared with other repos (e.g. moq-pro) and runners,
+      # whose jobs may run concurrently and legitimately still write there.
       - name: Assert the persistent target dir stayed unused
         if: runner.environment == 'self-hosted'
         run: |
-          mkdir -p "$HOME/cargo-target"
-          leaked=$(find "$HOME/cargo-target" -type f -newer "$RUNNER_TEMP/target-baseline" 2>/dev/null | head)
+          target="$HOME/cargo-target/moq-$RUNNER_NAME"
+          mkdir -p "$target"
+          leaked=$(find "$target" -type f -newer "$RUNNER_TEMP/target-baseline" 2>/dev/null | head)
           if [ -n "$leaked" ]; then
-            echo "::error::cargo wrote to the persistent target dir; a CARGO_TARGET_DIR override leaked back in"
+            echo "::error::cargo wrote to $target; a CARGO_TARGET_DIR override leaked back in"
             echo "$leaked"
             exit 1
           fi
-          echo "OK: \$HOME/cargo-target untouched this run"
+          echo "OK: $target untouched this run"
