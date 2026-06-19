@@ -82,7 +82,8 @@ impl SessionHandle {
 
 struct PadState {
 	decoder: moq_mux::import::Framed,
-	reference_pts: Option<gst::ClockTime>,
+	// The pad's most recent TIME segment, used to map a buffer PTS to GStreamer running time.
+	segment: Option<gst::FormattedSegment<gst::ClockTime>>,
 }
 
 struct RuntimeState {
@@ -98,6 +99,10 @@ enum ControlMessage {
 	SetCaps {
 		pad_name: String,
 		caps: gst::Caps,
+	},
+	Segment {
+		pad_name: String,
+		segment: gst::Segment,
 	},
 	Buffer {
 		pad_name: String,
@@ -352,6 +357,29 @@ impl MoqSink {
 
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
+			gst::EventView::Segment(segment) => {
+				let Some(sender) = self
+					.session
+					.lock()
+					.unwrap()
+					.as_ref()
+					.map(|handle| handle.sender.clone())
+				else {
+					return false;
+				};
+
+				if sender
+					.send(ControlMessage::Segment {
+						pad_name: pad.name().to_string(),
+						segment: segment.segment().to_owned(),
+					})
+					.is_err()
+				{
+					return false;
+				}
+
+				gst::Pad::event_default(pad, Some(&*self.obj()), event)
+			}
 			gst::EventView::Eos(_) => {
 				let Some(sender) = self
 					.session
@@ -417,6 +445,11 @@ async fn run_session(
 			ControlMessage::SetCaps { pad_name, caps } => {
 				if let Err(err) = handle_caps(&mut runtime, pad_name, caps) {
 					gst::error!(CAT, "failed to configure pad: {err:#}");
+				}
+			}
+			ControlMessage::Segment { pad_name, segment } => {
+				if let Err(err) = handle_segment(&mut runtime, pad_name, segment) {
+					gst::error!(CAT, "failed to set segment: {err:#}");
 				}
 			}
 			ControlMessage::Buffer { pad_name, data, pts } => {
@@ -492,13 +525,15 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 		other => anyhow::bail!("unsupported caps: {}", other),
 	};
 
-	runtime.pads.insert(
-		pad_name,
-		PadState {
-			decoder,
-			reference_pts: None,
-		},
-	);
+	runtime.pads.insert(pad_name, PadState { decoder, segment: None });
+	Ok(())
+}
+
+fn handle_segment(runtime: &mut RuntimeState, pad_name: String, segment: gst::Segment) -> Result<()> {
+	let pad = runtime.pads.get_mut(&pad_name).context("pad not configured")?;
+	// Only TIME segments map to a media timeline; a non-TIME (e.g. BYTES) segment leaves it unset so
+	// the buffer path falls back to the raw PTS.
+	pad.segment = segment.downcast::<gst::ClockTime>().ok();
 	Ok(())
 }
 
@@ -519,10 +554,16 @@ fn handle_buffer(
 ) -> Result<()> {
 	let pad = runtime.pads.get_mut(&pad_name).context("pad not configured")?;
 
+	// Emit the GStreamer running time, which is the broadcast-aligned timeline shared by every pad in
+	// the pipeline. Rebasing each pad to its own first PTS (the previous behavior) would zero them
+	// independently and break A/V alignment. Fall back to the raw PTS only if no TIME segment is known.
 	let ts = pts.and_then(|pts| {
-		let reference = *pad.reference_pts.get_or_insert(pts);
-		let relative = pts.checked_sub(reference)?;
-		hang::container::Timestamp::from_micros(relative.nseconds() / 1000).ok()
+		let timeline = pad
+			.segment
+			.as_ref()
+			.and_then(|segment| segment.to_running_time(pts))
+			.unwrap_or(pts);
+		hang::container::Timestamp::from_micros(timeline.nseconds() / 1000).ok()
 	});
 
 	pad.decoder.decode_frame(&mut data, ts).map_err(|e| anyhow::anyhow!(e))
