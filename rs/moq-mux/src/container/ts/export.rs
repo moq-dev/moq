@@ -34,7 +34,7 @@ use crate::codec::annexb;
 use crate::container::{CatalogSource, ExportSource, Frame};
 
 use super::adts;
-use super::scte35;
+use super::catalog;
 
 /// PID of the single program's PMT.
 const PMT_PID: u16 = 0x1000;
@@ -48,7 +48,7 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// Use [`next`](Self::next) to pull byte chunks: the first chunk is PAT+PMT, then
 /// each subsequent chunk is the TS packets for one media frame (preceded by a
 /// fresh PAT+PMT at video keyframes). Returns `None` when the broadcast ends.
-pub struct Export<E: scte35::Catalog = ()> {
+pub struct Export<E: catalog::Catalog = ()> {
 	broadcast: moq_net::BroadcastConsumer,
 	catalog: Option<CatalogSource<E>>,
 	latency: Duration,
@@ -87,8 +87,14 @@ enum Kind {
 	Ac3,
 	/// E-AC-3 (ATSC stream_type 0x87), carried verbatim.
 	Eac3,
-	/// SCTE-35: private sections (stream_type 0x86), carried verbatim.
-	Scte35,
+	/// An undecoded elementary stream carried verbatim (SCTE-35, private PES,
+	/// teletext, ...). Re-announced in the PMT with its recorded `stream_type` and
+	/// descriptors, and repacketized per its `framing`.
+	Verbatim {
+		stream_type: u8,
+		framing: catalog::Framing,
+		descriptors: Vec<catalog::Descriptor>,
+	},
 }
 
 /// The program tables plus the resolved PID layout.
@@ -114,7 +120,7 @@ impl Export {
 	}
 
 	/// Subscribe to `broadcast`, selecting an explicit catalog format. Media only;
-	/// any catalog extension (e.g. `.scte35` cues) is ignored.
+	/// any catalog extension (e.g. the `ts` verbatim streams) is ignored.
 	pub fn with_catalog_format(
 		broadcast: moq_net::BroadcastConsumer,
 		catalog_format: CatalogFormat,
@@ -123,19 +129,17 @@ impl Export {
 	}
 }
 
-impl Export<scte35::Ext> {
-	/// Subscribe to `broadcast`, exporting its `.scte35` cue tracks back to MPEG-TS
-	/// alongside the media. The `Self` type pins the extension, so callers write
-	/// `Export::with_scte35(..)` with no turbofish (the plain constructors are media-only).
-	pub fn with_scte35(
-		broadcast: moq_net::BroadcastConsumer,
-		catalog_format: CatalogFormat,
-	) -> Result<Self, crate::Error> {
+impl Export<catalog::Ext> {
+	/// Subscribe to `broadcast`, exporting its `ts` verbatim streams (SCTE-35,
+	/// private data, ...) back to MPEG-TS alongside the media. The `Self` type pins
+	/// the extension, so callers write `Export::with_ts(..)` with no turbofish (the
+	/// plain constructors are media-only).
+	pub fn with_ts(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
 		Self::build(broadcast, catalog_format)
 	}
 }
 
-impl<E: scte35::Catalog> Export<E> {
+impl<E: catalog::Catalog> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
 	fn build(broadcast: moq_net::BroadcastConsumer, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
@@ -247,10 +251,10 @@ impl<E: scte35::Catalog> Export<E> {
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog<E>) -> anyhow::Result<()> {
-		// The cue tracks live in the extension. The trait only exposes `scte35_mut`,
-		// and this snapshot is owned, so clone the section out (`()` yields the
-		// empty default: zero cue tracks).
-		let scte35 = catalog.scte35_mut().cloned().unwrap_or_default();
+		// The verbatim streams and PID map live in the extension. The trait only
+		// exposes `ts_mut`, and this snapshot is owned, so clone the section out
+		// (`()` yields the empty default: no verbatim streams, no preserved PIDs).
+		let ts = catalog.ts_mut().cloned().unwrap_or_default();
 
 		let mut active: HashMap<String, ()> = HashMap::new();
 		for name in catalog.video.renditions.keys() {
@@ -259,7 +263,7 @@ impl<E: scte35::Catalog> Export<E> {
 		for name in catalog.audio.renditions.keys() {
 			active.insert(name.clone(), ());
 		}
-		for name in scte35.renditions.keys() {
+		for name in ts.streams.keys() {
 			active.insert(name.clone(), ());
 		}
 
@@ -280,31 +284,23 @@ impl<E: scte35::Catalog> Export<E> {
 			return Ok(());
 		}
 
-		let mut next_pid = self
-			.tracks
-			.values()
-			.map(|t| t.pid)
-			.max()
-			.map(|p| p + 1)
-			.unwrap_or(FIRST_ES_PID);
-
 		for (name, config) in catalog.video.renditions.iter() {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
 			let kind = video_kind(config, name)?;
 			let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
+			let pid = self.alloc_pid(name, &ts.pids);
 			self.tracks.insert(
 				name.clone(),
 				Track {
 					source,
 					pending: None,
 					finished: false,
-					pid: next_pid,
+					pid,
 					kind,
 				},
 			);
-			next_pid += 1;
 		}
 
 		for (name, config) in catalog.audio.renditions.iter() {
@@ -313,40 +309,63 @@ impl<E: scte35::Catalog> Export<E> {
 			}
 			let kind = audio_kind(config, name)?;
 			let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
+			let pid = self.alloc_pid(name, &ts.pids);
 			self.tracks.insert(
 				name.clone(),
 				Track {
 					source,
 					pending: None,
 					finished: false,
-					pid: next_pid,
+					pid,
 					kind,
 				},
 			);
-			next_pid += 1;
 		}
 
-		for (name, config) in scte35.renditions.iter() {
+		for (name, config) in ts.streams.iter() {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let kind = scte35_kind(config, name)?;
-			let source = ExportSource::for_scte35(&self.broadcast, name, config, self.latency)?;
+			let kind = verbatim_kind(config);
+			let source = ExportSource::for_stream(&self.broadcast, name, config, self.latency)?;
+			let pid = self.alloc_pid(name, &ts.pids);
 			self.tracks.insert(
 				name.clone(),
 				Track {
 					source,
 					pending: None,
 					finished: false,
-					pid: next_pid,
+					pid,
 					kind,
 				},
 			);
-			next_pid += 1;
 		}
 
 		self.tracks.retain(|name, _| active.contains_key(name));
 		Ok(())
+	}
+
+	/// Pick a PID for a new track: the original PID recorded in the `ts` section
+	/// when it's free, else the next free PID from [`FIRST_ES_PID`]. PID `0x0000`
+	/// (PAT), [`PMT_PID`], `0x1FFF` (null), and any already-assigned PID are
+	/// avoided so cross-references in verbatim streams survive when possible.
+	fn alloc_pid(&self, name: &str, preserved: &std::collections::BTreeMap<String, u16>) -> u16 {
+		let mut used: std::collections::HashSet<u16> = self.tracks.values().map(|t| t.pid).collect();
+		used.insert(0x0000);
+		used.insert(PMT_PID);
+		used.insert(0x1FFF);
+
+		if let Some(&pid) = preserved.get(name)
+			&& !used.contains(&pid)
+		{
+			return pid;
+		}
+
+		let mut pid = FIRST_ES_PID;
+		while used.contains(&pid) {
+			pid += 1;
+		}
+		pid
 	}
 
 	/// Header is ready when every track's [`ExportSource`] has resolved its
@@ -361,13 +380,22 @@ impl<E: scte35::Catalog> Export<E> {
 		let mut tracks: Vec<&Track> = self.tracks.values().collect();
 		tracks.sort_by_key(|t| t.pid);
 
-		// SCTE-35 cues are stamped on the video clock (and SCTE carries no PTS for the PCR),
-		// so a cue program needs a video track; audio alone would leave the cues pinned to zero.
-		let has_scte = tracks.iter().any(|t| matches!(t.kind, Kind::Scte35));
+		// Section-framed verbatim streams (SCTE-35, ...) are stamped on the video clock
+		// and carry no PTS for the PCR, so they need a video track; audio alone would
+		// leave them pinned to zero.
+		let needs_clock = tracks.iter().any(|t| {
+			matches!(
+				&t.kind,
+				Kind::Verbatim {
+					framing: catalog::Framing::Section,
+					..
+				}
+			)
+		});
 		let video = tracks.iter().find(|t| matches!(t.kind, Kind::Video(_)));
 		anyhow::ensure!(
-			!has_scte || video.is_some(),
-			"TS export of SCTE-35 requires a video track for the program clock"
+			!needs_clock || video.is_some(),
+			"TS export of section-framed verbatim streams (e.g. SCTE-35) requires a video track for the program clock"
 		);
 		let pcr_pid = video
 			.or_else(|| {
@@ -381,39 +409,61 @@ impl<E: scte35::Catalog> Export<E> {
 		let es_info = tracks
 			.iter()
 			.map(|t| {
-				Ok(EsInfo {
-					stream_type: match t.kind {
-						Kind::Video(stream_type) => stream_type,
-						Kind::Aac { .. } => StreamType::AdtsAac,
-						// Half-rate MPEG-2 BC audio (< 32 kHz) re-announces as 0x04;
-						// the full rates are MPEG-1 (0x03). The catalog sample rate
-						// came from the frame header, so the mapping is faithful.
-						Kind::Mp2 { sample_rate } if sample_rate < 32000 => StreamType::Mpeg2HalvedSampleRateAudio,
-						Kind::Mp2 { .. } => StreamType::Mpeg1Audio,
-						Kind::Ac3 => StreamType::DolbyDigitalUpToSixChannelAudio,
-						Kind::Eac3 => StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc,
-						Kind::Scte35 => StreamType::Dts8ChannelLosslessAudio,
-					},
-					elementary_pid: Pid::new(t.pid)?,
+				let (stream_type, descriptors) = match &t.kind {
+					Kind::Video(stream_type) => (*stream_type, Vec::new()),
+					Kind::Aac { .. } => (StreamType::AdtsAac, Vec::new()),
+					// Half-rate MPEG-2 BC audio (< 32 kHz) re-announces as 0x04; the full
+					// rates are MPEG-1 (0x03). The catalog sample rate came from the frame
+					// header, so the mapping is faithful.
+					Kind::Mp2 { sample_rate } if *sample_rate < 32000 => {
+						(StreamType::Mpeg2HalvedSampleRateAudio, Vec::new())
+					}
+					Kind::Mp2 { .. } => (StreamType::Mpeg1Audio, Vec::new()),
 					// ATSC pairs the Dolby stream types with a registration descriptor.
-					descriptors: match t.kind {
-						Kind::Ac3 => vec![Descriptor {
+					Kind::Ac3 => (
+						StreamType::DolbyDigitalUpToSixChannelAudio,
+						vec![Descriptor {
 							tag: 0x05,
 							data: b"AC-3".to_vec(),
 						}],
-						Kind::Eac3 => vec![Descriptor {
+					),
+					Kind::Eac3 => (
+						StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc,
+						vec![Descriptor {
 							tag: 0x05,
 							data: b"EAC3".to_vec(),
 						}],
-						_ => Vec::new(),
-					},
+					),
+					// Re-announce the recorded stream_type and descriptors verbatim.
+					Kind::Verbatim {
+						stream_type,
+						descriptors,
+						..
+					} => (
+						StreamType::from_u8(*stream_type).map_err(anyhow::Error::msg)?,
+						descriptors
+							.iter()
+							.map(|d| Descriptor {
+								tag: d.tag,
+								data: d.data.to_vec(),
+							})
+							.collect(),
+					),
+				};
+				Ok(EsInfo {
+					stream_type,
+					elementary_pid: Pid::new(t.pid)?,
+					descriptors,
 				})
 			})
 			.collect::<anyhow::Result<Vec<_>>>()?;
 
 		// SCTE-35 is announced by a program-level 'CUEI' registration descriptor;
 		// the import keys detection off it (stream_type 0x86 alone is ambiguous).
-		let program_info = if tracks.iter().any(|t| matches!(t.kind, Kind::Scte35)) {
+		let program_info = if tracks
+			.iter()
+			.any(|t| matches!(&t.kind, Kind::Verbatim { stream_type: 0x86, .. }))
+		{
 			vec![Descriptor {
 				tag: 0x05,
 				data: b"CUEI".to_vec(),
@@ -472,8 +522,8 @@ impl<E: scte35::Catalog> Export<E> {
 		let is_video = matches!(kind, Kind::Video(_));
 
 		// Build the elementary-stream payload for this frame. Video needs the
-		// resolved avcC/hvcC to rewrite length-prefixed NALs as Annex-B. SCTE-35
-		// carries no PES payload; the section is written separately below.
+		// resolved avcC/hvcC to rewrite length-prefixed NALs as Annex-B. Section-framed
+		// verbatim streams carry no PES payload; the section is written separately below.
 		let es_payload = match &kind {
 			Kind::Video(stream_type) => Some(video_es_payload(*stream_type, track.source.description(), &frame)?),
 			Kind::Aac {
@@ -488,9 +538,16 @@ impl<E: scte35::Catalog> Export<E> {
 				Some(framed)
 			}
 			// Legacy audio frames were ingested whole (framing header included), so
-			// they pass through untouched.
+			// they pass through untouched. PES-framed verbatim payloads likewise.
 			Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => Some(frame.payload.to_vec()),
-			Kind::Scte35 => None,
+			Kind::Verbatim {
+				framing: catalog::Framing::Pes,
+				..
+			} => Some(frame.payload.to_vec()),
+			Kind::Verbatim {
+				framing: catalog::Framing::Section,
+				..
+			} => None,
 		};
 
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
@@ -510,7 +567,8 @@ impl<E: scte35::Catalog> Export<E> {
 		}
 
 		match es_payload {
-			// SCTE-35 rides in private sections, not PES; carry the bytes verbatim.
+			// Section-framed verbatim (SCTE-35, ...) rides in private sections, not PES;
+			// carry the bytes verbatim.
 			None => self.write_section(&mut out, pid, &frame.payload)?,
 			Some(es_payload) => {
 				let unit = PesUnit {
@@ -599,17 +657,17 @@ impl<E: scte35::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// Packetize a private section (SCTE-35) verbatim. The first packet carries the
-	/// pointer_field plus the section start as a `Section` payload (sets the unit-
-	/// start bit so the receiver finds the pointer_field); continuations are `Raw`.
-	/// The section bytes are opaque, so this round-trips byte-for-byte.
+	/// Packetize a private section (SCTE-35 or other) verbatim. The first packet
+	/// carries the pointer_field plus the section start as a `Section` payload (sets
+	/// the unit-start bit so the receiver finds the pointer_field); continuations are
+	/// `Raw`. The section bytes are opaque, so this round-trips byte-for-byte.
 	fn write_section(&mut self, out: &mut Vec<u8>, pid: u16, section: &[u8]) -> anyhow::Result<()> {
-		// The .scte35 track is public; a non-importer producer could publish a frame
-		// that isn't a complete splice_info_section. Drop it (with a warning) rather
-		// than emit a malformed section a downstream demuxer would choke on. One bad
-		// cue must not abort a live export, so this skips instead of erroring.
-		if !is_complete_scte35_section(section) {
-			tracing::warn!(pid, len = section.len(), "dropping malformed SCTE-35 section on export");
+		// The verbatim track is public; a non-importer producer could publish a frame
+		// that isn't a complete section. Drop it (with a warning) rather than emit a
+		// malformed section a downstream demuxer would choke on. One bad section must
+		// not abort a live export, so this skips instead of erroring.
+		if !is_complete_section(section) {
+			tracing::warn!(pid, len = section.len(), "dropping malformed private section on export");
 			return Ok(());
 		}
 
@@ -745,18 +803,19 @@ fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 	}
 }
 
-fn scte35_kind(config: &scte35::Config, name: &str) -> anyhow::Result<Kind> {
-	ensure_raw(&config.container, "scte35", name)?;
-	Ok(Kind::Scte35)
+fn verbatim_kind(config: &catalog::Stream) -> Kind {
+	Kind::Verbatim {
+		stream_type: config.stream_type,
+		framing: config.framing,
+		descriptors: config.descriptors.clone(),
+	}
 }
 
-/// One SCTE-35 frame must be exactly one splice_info_section: table_id 0xFC and a
-/// total length matching the declared section_length. Structural only (no splice
-/// semantics); the bytes are still carried verbatim.
-fn is_complete_scte35_section(section: &[u8]) -> bool {
-	section.len() >= 3
-		&& section[0] == 0xfc
-		&& section.len() == 3 + ((((section[1] & 0x0f) as usize) << 8) | section[2] as usize)
+/// One section-framed verbatim frame must be exactly one section: at least the
+/// 3-byte header and a total length matching the declared section_length.
+/// Structural only (no table semantics); the bytes are still carried verbatim.
+fn is_complete_section(section: &[u8]) -> bool {
+	section.len() >= 3 && section.len() == 3 + ((((section[1] & 0x0f) as usize) << 8) | section[2] as usize)
 }
 
 fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<()> {
@@ -769,22 +828,22 @@ fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<(
 
 #[cfg(test)]
 mod tests {
-	use super::is_complete_scte35_section;
+	use super::is_complete_section;
 
 	#[test]
-	fn scte35_section_validation() {
-		// table_id 0xFC, section_length 27 (0x1b) -> 30 bytes total.
+	fn section_validation() {
+		// section_length 27 (0x1b) -> 30 bytes total.
 		let mut ok = vec![0xfc, 0x30, 0x1b];
 		ok.resize(30, 0x00);
-		assert!(is_complete_scte35_section(&ok));
+		assert!(is_complete_section(&ok));
 		// minimal: section_length 0 -> exactly the 3-byte header.
-		assert!(is_complete_scte35_section(&[0xfc, 0x00, 0x00]));
+		assert!(is_complete_section(&[0xfc, 0x00, 0x00]));
+		// any table_id is accepted (verbatim carriage isn't SCTE-specific).
+		assert!(is_complete_section(&[0x00, 0x00, 0x00]));
 
 		// shorter than the 3-byte header.
-		assert!(!is_complete_scte35_section(&[0xfc, 0x00]));
-		// wrong table_id (not a splice_info_section).
-		assert!(!is_complete_scte35_section(&[0x00, 0x00, 0x00]));
+		assert!(!is_complete_section(&[0xfc, 0x00]));
 		// declared section_length (27) does not match the actual length (3).
-		assert!(!is_complete_scte35_section(&[0xfc, 0x30, 0x1b]));
+		assert!(!is_complete_section(&[0xfc, 0x30, 0x1b]));
 	}
 }

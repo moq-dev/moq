@@ -284,7 +284,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::with_catalog(
 		&mut broadcast,
-		crate::catalog::hang::Catalog::<crate::container::ts::scte35::Ext>::default(),
+		crate::catalog::hang::Catalog::<crate::container::ts::catalog::Ext>::default(),
 	)
 	.unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -295,7 +295,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1, "video track lost across the dirty join");
-	let name = snap.scte35.renditions.keys().next().expect("scte35 track").clone();
+	let name = snap.ts.streams.keys().next().expect("scte35 track").clone();
 	let track = consumer.subscribe_track(&moq_net::Track::new(name)).unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 	let mut cues = Vec::new();
