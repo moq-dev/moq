@@ -464,13 +464,18 @@ afterward on top of the same `Backend` seam:
   `moq_mux::codec` importer (`.avc3` / `.hev1`). The mux + `hang` catalog already
   supported both, so only `moq-video` needed work.
 - Backends advertise the codecs they emit and `backend::open` filters by the
-  requested codec before applying `Kind`. **H.265**: VideoToolbox only (one extra
-  codec type + profile, an HVCC->Annex-B path reusing the H.264 conversion, and
-  HEVC NAL/IRAP parsing); no software encoder, so it's hardware-only.
+  requested codec before applying `Kind`. **H.265**: hardware-only (no software
+  encoder). On macOS, VideoToolbox (one extra codec type + profile, an
+  HVCC->Annex-B path reusing the H.264 conversion, and HEVC NAL/IRAP parsing). On
+  Windows, the Media Foundation MFT, which natively emits Annex-B with inline
+  VPS/SPS/PPS like its H.264 output, so it only needs the HEVC output subtype +
+  Main profile, no rewrite. The MFT is vendor-agnostic (NVIDIA/Intel/AMD).
 - Verified on macOS (`just check`): VideoToolbox HEVC emits a self-contained
   VPS+SPS+PPS+IDR Annex-B keyframe, and the full encode -> split -> import ->
   catalog round-trip registers the right rendition for each codec.
-- Follow-ups: NVENC/VAAPI HEVC, and a live camera run per codec.
+- Verified on Windows (RTX 3070 Ti, live camera): Media Foundation HEVC publishes
+  a `.hev1` rendition; the round-trip into Matroska decodes as Main-profile HEVC.
+- Follow-ups: Linux NVENC/VAAPI HEVC, and a live camera run per platform.
 
 AV1 is intentionally left out: there is no hardware AV1 encoder available to us
 (none on macOS; NVENC/VAAPI AV1 are Linux-only and not yet wired), and software
