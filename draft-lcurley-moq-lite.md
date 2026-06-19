@@ -631,7 +631,7 @@ A subscriber sends an ANNOUNCE_INTEREST message to indicate it wants to receive 
 ANNOUNCE_INTEREST Message {
   Message Length (i)
   Broadcast Path Prefix (s),
-  Exclude Hop (i),
+  Exclude Hop (64),
 }
 ~~~
 
@@ -653,13 +653,14 @@ It carries metadata that is constant for the lifetime of the stream and applies 
 ~~~
 ANNOUNCE_OK Message {
   Message Length (i)
-  Hop ID (i)
+  Hop ID (64)
   Active Count (i)
 }
 ~~~
 
 **Hop ID**:
-The publisher's own Hop ID.
+The publisher's own Hop ID, encoded as a 64-bit integer.
+Hop IDs are randomly assigned, so they are carried as fixed-width 64 bits rather than a variable-length integer: a varint would almost never be shorter, and the fixed width buys the full 64-bit space (a varint caps at 62 bits).
 This is treated as the implicit trailing entry of every ANNOUNCE's Hop ID list on this stream; ANNOUNCE messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
 A value of 0 indicates the publisher does not assign Hop IDs (e.g. when bridging from an older protocol version).
 Receivers reconstruct the full path as `ANNOUNCE.Hop IDs ++ [ANNOUNCE_OK.Hop ID]`.
@@ -686,7 +687,7 @@ ANNOUNCE Message {
   Announce Status (i),
   Broadcast Path Suffix (s),
   Hop Count (i),
-  Hop ID (i) ...,
+  Hop ID (64) ...,
 }
 ~~~
 
@@ -705,7 +706,7 @@ A value of 0 means no Hop ID entries are present, indicating either that the ann
 A receiver MUST close the stream with a PROTOCOL_VIOLATION if the Hop Count does not match the number of subsequent Hop ID entries.
 
 **Hop ID**:
-A unique identifier for each relay in the path from the origin publisher, ordered from origin to the upstream of the responding publisher.
+A unique identifier for each relay in the path from the origin publisher, ordered from origin to the upstream of the responding publisher, each encoded as a 64-bit integer (see ANNOUNCE_OK's `Hop ID` for the rationale).
 The responding publisher's own Hop ID is NOT included in this list; it is carried once in ANNOUNCE_OK as `Hop ID`.
 When forwarding an announcement received from an upstream peer, a relay MUST append the upstream peer's ANNOUNCE_OK `Hop ID` to this list (since that ID is no longer implicit downstream) and then send its own `Hop ID` in the ANNOUNCE_OK it sends to the downstream subscriber.
 The total path length is `Hop Count + 1` (including the implicit ANNOUNCE_OK `Hop ID`); this total is used as a tiebreaker when there are multiple paths to the same broadcast.
@@ -1074,6 +1075,7 @@ A generic library or relay MUST NOT inspect or modify the decompressed contents 
 - Renamed `Start Group`/`End Group` to `Group Start`/`Group End` in SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP for consistency with the entity-first naming used elsewhere (e.g. `Group Sequence`). Wire format unchanged.
 - Allowed a duplicate `active` ANNOUNCE to atomically replace the prior advertisement (equivalent to UNANNOUNCE+ANNOUNCE). Used when only the origin or hop path changes (e.g. relay failover) without interrupting the broadcast. No new wire enum value — the existing `active` status carries the new metadata.
 - Added ANNOUNCE_OK message, sent once at the head of the Announce Stream response. Carries the publisher's `Hop ID` (hoisted out of every ANNOUNCE's Hop ID list) and an `Active Count` so subscribers can batch the initial set instead of reporting each ANNOUNCE as it trickles in.
+- Encoded `Hop ID` (in ANNOUNCE and ANNOUNCE_OK) and `Exclude Hop` (in ANNOUNCE_INTEREST) as fixed-width 64-bit integers instead of varints. Hop IDs are random, so a varint would almost never be shorter, and the fixed width restores the 2 bits a 62-bit varint would have cost.
 - Added `Publisher Timescale` to TRACK_INFO for per-track timestamp negotiation. When `Publisher Timescale` is 0, the per-frame timestamp field is omitted entirely from FRAME and datagram bodies.
 - Added `Timestamp Delta` to FRAME, a zigzag-encoded signed varint (present only when timescale is non-zero).
 - Added `Timestamp` to the QUIC datagram body (absolute, present only when timescale is non-zero).

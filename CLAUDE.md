@@ -74,3 +74,4 @@ This is a standards documentation project, not a software implementation. Key co
 - Draft format uses kramdown-rfc with YAML frontmatter
 - References are managed via bibxml includes
 - Do not edit generated files (*.html, *.txt)
+- When making a wire-format or semantic change to a draft, add a bullet to its changelog appendix (e.g. `# Appendix A: Changelog`) under the in-progress version's section. Drafts without a changelog section (typically unreleased ones) don't need one.

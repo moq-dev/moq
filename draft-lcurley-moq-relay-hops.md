@@ -75,7 +75,7 @@ An endpoint that did not negotiate the extension simply omits these parameters; 
 A **Hop ID** is a variable-length integer that identifies a single relay (or the origin publisher) within the path of an advertisement.
 
 Each relay and each origin publisher chooses its Hop ID **randomly**.
-An endpoint SHOULD draw a full-width random value (up to the 62-bit varint maximum) so that the probability of two endpoints choosing the same Hop ID is negligible.
+An endpoint SHOULD draw a full-width random value (up to the 64-bit varint maximum) so that the probability of two endpoints choosing the same Hop ID is negligible.
 Random assignment means there is no registry, no coordination, and no reserved values: a Hop ID is simply an opaque identifier that is, with overwhelming probability, unique.
 
 An endpoint SHOULD keep its Hop ID stable for the lifetime of a session (and MAY reuse it across sessions) so that loop detection and path comparison are consistent.
