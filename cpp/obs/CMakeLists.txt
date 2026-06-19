@@ -28,10 +28,13 @@ endif()
 
 target_link_libraries(obs-moq PRIVATE OBS::libobs)
 
-option(MOQ_LOCAL "Path to moq repo for local development" "")
+# Default to the in-tree moq checkout (this file lives at cpp/obs, so the repo
+# root is two levels up). A consumer building cpp/obs in isolation can point
+# MOQ_LOCAL elsewhere, or unset it to fall back to the published release.
+set(MOQ_LOCAL "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Path to the moq repo (builds rs/libmoq in-tree)")
 
-if(MOQ_LOCAL)
-  add_subdirectory(${MOQ_LOCAL}/rs/libmoq moq)
+if(MOQ_LOCAL AND EXISTS "${MOQ_LOCAL}/rs/libmoq/CMakeLists.txt")
+  add_subdirectory("${MOQ_LOCAL}/rs/libmoq" moq)
   target_link_libraries(obs-moq PRIVATE moq)
 else()
   include(FetchContent)

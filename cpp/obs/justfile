@@ -28,7 +28,8 @@ setup preset="" path=moq_local:
     echo "Configuring with preset: $PRESET and MOQ_LOCAL={{ path }}"
     cmake --preset "$PRESET" -DMOQ_LOCAL="{{ path }}"
 
-# Build via CMake presets (runs `just setup` first if you haven't).
+# Build via CMake presets. Run `just obs setup` first (it configures + downloads
+# deps); not chained here because on macOS setup reconfigures OBS, which is slow.
 build preset="":
     #!/usr/bin/env bash
     set -euo pipefail

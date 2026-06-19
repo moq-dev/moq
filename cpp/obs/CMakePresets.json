@@ -20,8 +20,8 @@
     },
     {
       "name": "macos",
-      "displayName": "macOS Universal",
-      "description": "Build for macOS 12.0+ (Universal binary)",
+      "displayName": "macOS arm64",
+      "description": "Build for macOS 12.0+ (arm64)",
       "inherits": [
         "template"
       ],
@@ -49,8 +49,8 @@
       "inherits": [
         "macos"
       ],
-      "displayName": "macOS Universal CI build",
-      "description": "Build for macOS 12.0+ (Universal binary) for CI",
+      "displayName": "macOS arm64 CI build",
+      "description": "Build for macOS 12.0+ (arm64) for CI",
       "generator": "Xcode",
       "cacheVariables": {
         "CMAKE_COMPILE_WARNING_AS_ERROR": true,
@@ -134,15 +134,15 @@
     {
       "name": "macos",
       "configurePreset": "macos",
-      "displayName": "macOS Universal",
-      "description": "macOS build for Universal architectures",
+      "displayName": "macOS arm64",
+      "description": "macOS build for arm64",
       "configuration": "RelWithDebInfo"
     },
     {
       "name": "macos-ci",
       "configurePreset": "macos-ci",
-      "displayName": "macOS Universal CI",
-      "description": "macOS CI build for Universal architectures",
+      "displayName": "macOS arm64 CI",
+      "description": "macOS CI build for arm64",
       "configuration": "RelWithDebInfo"
     },
     {

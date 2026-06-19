@@ -1,6 +1,6 @@
 #!/bin/sh
 
-if [[ "$1" == "${CMAKE_C_COMPILER}" ]] ; then
+if [ "$1" = "${CMAKE_C_COMPILER}" ]; then
     shift
 fi
 
@@ -15,12 +15,12 @@ export CCACHE_COMPILERCHECK='content'
 
 CCACHE_SLOPPINESS='file_stat_matches,include_file_mtime,include_file_ctime,system_headers'
 
-if [[ "${CMAKE_C_COMPILER_ID}" == "AppleClang" ]]; then
+if [ "${CMAKE_C_COMPILER_ID}" = "AppleClang" ]; then
     CCACHE_SLOPPINESS="${CCACHE_SLOPPINESS},modules,clang_index_store"
 fi
 export CCACHE_SLOPPINESS
 
-if [[ "${CI}" ]]; then
+if [ -n "${CI}" ]; then
     export CCACHE_NOHASHDIR=true
 fi
 exec "${CMAKE_C_COMPILER_LAUNCHER}" "${CMAKE_C_COMPILER}" "$@"

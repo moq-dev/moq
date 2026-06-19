@@ -3,13 +3,15 @@
 include_guard(GLOBAL)
 
 # Set empty codesigning team if not specified as cache variable
-if(NOT CODESIGN_TEAM)
+if(NOT DEFINED CODESIGN_TEAM)
   set(CODESIGN_TEAM "" CACHE STRING "OBS code signing team for macOS" FORCE)
+endif()
 
-  # Set ad-hoc codesigning identity if not specified as cache variable
-  if(NOT CODESIGN_IDENTITY)
-    set(CODESIGN_IDENTITY "-" CACHE STRING "OBS code signing identity for macOS" FORCE)
-  endif()
+# Set ad-hoc codesigning identity if not specified as cache variable. Kept
+# independent of CODESIGN_TEAM so a team without an explicit identity still
+# falls back to ad-hoc signing.
+if(NOT DEFINED CODESIGN_IDENTITY)
+  set(CODESIGN_IDENTITY "-" CACHE STRING "OBS code signing identity for macOS" FORCE)
 endif()
 
 include(xcode)
