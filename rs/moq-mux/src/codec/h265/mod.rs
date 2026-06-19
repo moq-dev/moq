@@ -17,9 +17,12 @@ use scuffle_h265::{NALUnitType, SpsNALUnit};
 /// [`crate::codec::h264::Avc1`].
 pub struct Hvc1 {
 	hvcc: Option<Bytes>,
-	vps: Option<Bytes>,
-	sps: Option<Bytes>,
-	pps: Option<Bytes>,
+	/// Distinct VPS NALs observed, in arrival order.
+	vps: Vec<Bytes>,
+	/// Distinct SPS NALs observed, in arrival order.
+	sps: Vec<Bytes>,
+	/// Distinct PPS NALs observed, in arrival order.
+	pps: Vec<Bytes>,
 }
 
 impl Default for Hvc1 {
@@ -33,9 +36,9 @@ impl Hvc1 {
 	pub fn new() -> Self {
 		Self {
 			hvcc: None,
-			vps: None,
-			sps: None,
-			pps: None,
+			vps: Vec::new(),
+			sps: Vec::new(),
+			pps: Vec::new(),
 		}
 	}
 
@@ -98,22 +101,19 @@ impl Hvc1 {
 
 		match nal_type {
 			NALUnitType::VpsNut => {
-				if self.vps.as_deref() != Some(nal.as_ref()) {
-					self.vps = Some(nal.clone());
+				if crate::codec::annexb::push_distinct(&mut self.vps, nal) {
 					*params_changed = true;
 				}
 				Ok(false)
 			}
 			NALUnitType::SpsNut => {
-				if self.sps.as_deref() != Some(nal.as_ref()) {
-					self.sps = Some(nal.clone());
+				if crate::codec::annexb::push_distinct(&mut self.sps, nal) {
 					*params_changed = true;
 				}
 				Ok(false)
 			}
 			NALUnitType::PpsNut => {
-				if self.pps.as_deref() != Some(nal.as_ref()) {
-					self.pps = Some(nal.clone());
+				if crate::codec::annexb::push_distinct(&mut self.pps, nal) {
 					*params_changed = true;
 				}
 				Ok(false)
@@ -128,35 +128,52 @@ impl Hvc1 {
 	}
 
 	fn rebuild_hvcc(&mut self) -> anyhow::Result<()> {
-		let (Some(vps), Some(sps), Some(pps)) = (&self.vps, &self.sps, &self.pps) else {
+		if self.vps.is_empty() || self.sps.is_empty() || self.pps.is_empty() {
 			return Ok(());
-		};
-		self.hvcc = Some(build_hvcc(vps, sps, pps)?);
+		}
+		self.hvcc = Some(build_hvcc(&self.vps, &self.sps, &self.pps)?);
 		Ok(())
 	}
 }
 
 /// Build an HEVCDecoderConfigurationRecord (ISO/IEC 14496-15 §8.3.3).
-/// Single-layer streams only.
-pub(crate) fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
-	for (label, nal) in [("VPS", vps_nal), ("SPS", sps_nal), ("PPS", pps_nal)] {
+/// Single-layer streams only. Each NAL array (VPS, SPS, PPS) carries every
+/// distinct parameter set the stream defined, in arrival order; the profile/tier
+/// fields are read from the first SPS.
+pub(crate) fn build_hvcc(vps_nals: &[Bytes], sps_nals: &[Bytes], pps_nals: &[Bytes]) -> anyhow::Result<Bytes> {
+	let first_sps = sps_nals.first().context("hvcC requires at least one SPS")?;
+	for (label, nals) in [("VPS", vps_nals), ("SPS", sps_nals), ("PPS", pps_nals)] {
 		anyhow::ensure!(
-			nal.len() <= u16::MAX as usize,
-			"{} too large for hvcC length field ({} > {})",
+			nals.len() <= u16::MAX as usize,
+			"too many {} for hvcC ({} > 65535)",
 			label,
-			nal.len(),
-			u16::MAX
+			nals.len()
 		);
+		for nal in nals {
+			anyhow::ensure!(
+				nal.len() <= u16::MAX as usize,
+				"{} too large for hvcC length field ({} > {})",
+				label,
+				nal.len(),
+				u16::MAX
+			);
+		}
 	}
 
-	let sps = SpsNALUnit::parse(&mut &sps_nal[..]).context("failed to parse SPS NAL unit for hvcC")?;
+	let sps = SpsNALUnit::parse(&mut &first_sps[..]).context("failed to parse SPS NAL unit for hvcC")?;
 	let profile = &sps.rbsp.profile_tier_level.general_profile;
 	let level_idc = profile.level_idc.context("missing level_idc in SPS")?;
 	let constraint_flags = pack_constraint_flags(profile);
 	let compat = profile.profile_compatibility_flag.bits().to_be_bytes();
 	let num_temporal_layers = sps.rbsp.sps_max_sub_layers_minus1 + 1;
 
-	let mut out = BytesMut::with_capacity(23 + vps_nal.len() + sps_nal.len() + pps_nal.len() + 9 * 3);
+	let params_len: usize = vps_nals
+		.iter()
+		.chain(sps_nals)
+		.chain(pps_nals)
+		.map(|n| 2 + n.len())
+		.sum();
+	let mut out = BytesMut::with_capacity(23 + 3 * 3 + params_len);
 	out.put_u8(1); // configurationVersion
 	out.put_u8(((profile.profile_space & 0x3) << 6) | ((profile.tier_flag as u8) << 5) | (profile.profile_idc & 0x1f));
 	out.put_slice(&compat);
@@ -169,17 +186,19 @@ pub(crate) fn build_hvcc(vps_nal: &[u8], sps_nal: &[u8], pps_nal: &[u8]) -> anyh
 	out.put_u8(0xf8 | (sps.rbsp.bit_depth_chroma_minus8 & 0x7));
 	out.put_u16(0); // avgFrameRate unspecified
 	out.put_u8(((num_temporal_layers & 0x7) << 3) | ((sps.rbsp.sps_temporal_id_nesting_flag as u8) << 2) | 0x3);
-	out.put_u8(3); // numOfArrays
+	out.put_u8(3); // numOfArrays (VPS, SPS, PPS)
 
-	for (nal_type, nal) in [
-		(u8::from(NALUnitType::VpsNut), vps_nal),
-		(u8::from(NALUnitType::SpsNut), sps_nal),
-		(u8::from(NALUnitType::PpsNut), pps_nal),
+	for (nal_type, nals) in [
+		(u8::from(NALUnitType::VpsNut), vps_nals),
+		(u8::from(NALUnitType::SpsNut), sps_nals),
+		(u8::from(NALUnitType::PpsNut), pps_nals),
 	] {
 		out.put_u8(0x80 | (nal_type & 0x3f)); // array_completeness = 1
-		out.put_u16(1); // numNalus
-		out.put_u16(nal.len() as u16);
-		out.put_slice(nal);
+		out.put_u16(nals.len() as u16); // numNalus
+		for nal in nals {
+			out.put_u16(nal.len() as u16);
+			out.put_slice(nal);
+		}
 	}
 
 	Ok(out.freeze())

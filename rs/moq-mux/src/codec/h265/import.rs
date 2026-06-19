@@ -28,10 +28,12 @@ pub struct Import<E: CatalogExt = ()> {
 	// Used to compute wall clock timestamps if needed.
 	zero: Option<tokio::time::Instant>,
 
-	// Cached parameter set NALs for re-insertion before keyframes.
-	vps: Option<Bytes>,
-	sps: Option<Bytes>,
-	pps: Option<Bytes>,
+	// Distinct cached parameter set NALs for re-insertion before keyframes. A
+	// stream may define several of each (slices reference them by id), so all are
+	// kept and re-injected, not just the last seen.
+	vps: Vec<Bytes>,
+	sps: Vec<Bytes>,
+	pps: Vec<Bytes>,
 
 	// Tracks the minimum frame duration and updates the catalog `jitter` field.
 	jitter: MinFrameDuration,
@@ -46,9 +48,9 @@ impl<E: CatalogExt> Import<E> {
 			config: None,
 			current: Default::default(),
 			zero: None,
-			vps: None,
-			sps: None,
-			pps: None,
+			vps: Vec::new(),
+			sps: Vec::new(),
+			pps: Vec::new(),
 			jitter: MinFrameDuration::new(),
 		}
 	}
@@ -61,14 +63,17 @@ impl<E: CatalogExt> Import<E> {
 			config: None,
 			current: Default::default(),
 			zero: None,
-			vps: None,
-			sps: None,
-			pps: None,
+			vps: Vec::new(),
+			sps: Vec::new(),
+			pps: Vec::new(),
 			jitter: MinFrameDuration::new(),
 		}
 	}
 
-	fn init(&mut self, sps: &SpsNALUnit) -> anyhow::Result<()> {
+	/// Publish (or republish) the catalog rendition for this SPS. Returns true if
+	/// it changed an existing config (a reconfiguration), so the caller drops the
+	/// parameter sets tied to the old config. The first SPS is not a reconfiguration.
+	fn init(&mut self, sps: &SpsNALUnit) -> anyhow::Result<bool> {
 		let profile = &sps.rbsp.profile_tier_level.general_profile;
 		let vui_data = sps.rbsp.vui_parameters.as_ref().map(VuiData::new).unwrap_or_default();
 
@@ -91,9 +96,10 @@ impl<E: CatalogExt> Import<E> {
 		if let Some(old) = &self.config
 			&& old == &config
 		{
-			return Ok(());
+			return Ok(false);
 		}
 
+		let reconfigured = self.config.is_some();
 		let mut catalog = self.catalog.lock();
 
 		if self.track.is_some() && self.tracks.is_fixed() {
@@ -113,7 +119,7 @@ impl<E: CatalogExt> Import<E> {
 		self.track =
 			Some(crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy).with_lenient_start());
 
-		Ok(())
+		Ok(reconfigured)
 	}
 
 	/// Initialize the decoder with SPS/PPS and other non-slice NALs.
@@ -209,36 +215,37 @@ impl<E: CatalogExt> Import<E> {
 			NALUnitType::VpsNut => {
 				self.maybe_start_frame(pts)?;
 
-				self.vps = Some(nal.clone());
-				self.current.contains_vps = true;
+				crate::codec::annexb::push_distinct(&mut self.vps, &nal);
+				crate::codec::annexb::push_distinct(&mut self.current.vps_seen, &nal);
 			}
 			NALUnitType::SpsNut => {
 				self.maybe_start_frame(pts)?;
 
 				// Try to reinitialize the track if the SPS has changed.
 				let sps = SpsNALUnit::parse(&mut &nal[..]).context("failed to parse SPS NAL unit")?;
-				self.init(&sps)?;
+				let reconfigured = self.init(&sps)?;
 
-				// SPS changed mid-AU. Cached VPS/PPS are tied to the old SPS
-				// and may already have been appended to current.chunks earlier
-				// in this AU; reset the AU so the new VPS+SPS+PPS triple is
-				// the only parameter set we emit.
-				if self.sps.as_ref().is_some_and(|cached| cached != &nal) {
-					self.pps = None;
+				// A changed config means the cached VPS/SPS/PPS no longer apply; they
+				// may already have been appended to current.chunks earlier in this AU,
+				// so reset the caches and AU so only the new parameter sets emit.
+				if reconfigured {
+					self.vps.clear();
+					self.sps.clear();
+					self.pps.clear();
 					self.current.chunks.clear();
-					self.current.contains_vps = false;
-					self.current.contains_sps = false;
-					self.current.contains_pps = false;
+					self.current.vps_seen.clear();
+					self.current.sps_seen.clear();
+					self.current.pps_seen.clear();
 				}
 
-				self.sps = Some(nal.clone());
-				self.current.contains_sps = true;
+				crate::codec::annexb::push_distinct(&mut self.sps, &nal);
+				crate::codec::annexb::push_distinct(&mut self.current.sps_seen, &nal);
 			}
 			NALUnitType::PpsNut => {
 				self.maybe_start_frame(pts)?;
 
-				self.pps = Some(nal.clone());
-				self.current.contains_pps = true;
+				crate::codec::annexb::push_distinct(&mut self.pps, &nal);
+				crate::codec::annexb::push_distinct(&mut self.current.pps_seen, &nal);
 			}
 			NALUnitType::AudNut | NALUnitType::PrefixSeiNut | NALUnitType::SuffixSeiNut => {
 				self.maybe_start_frame(pts)?;
@@ -250,28 +257,12 @@ impl<E: CatalogExt> Import<E> {
 			| NALUnitType::BlaWRadl
 			| NALUnitType::BlaWLp
 			| NALUnitType::CraNut => {
-				// Insert cached VPS/SPS/PPS before keyframes if not already present in this frame.
-				if !self.current.contains_vps
-					&& let Some(vps) = &self.vps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(vps);
-					self.current.contains_vps = true;
-				}
-				if !self.current.contains_sps
-					&& let Some(sps) = &self.sps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(sps);
-					self.current.contains_sps = true;
-				}
-				if !self.current.contains_pps
-					&& let Some(pps) = &self.pps
-				{
-					self.current.chunks.extend_from_slice(&START_CODE);
-					self.current.chunks.extend_from_slice(pps);
-					self.current.contains_pps = true;
-				}
+				// Re-inject every cached parameter set not already inline in this AU,
+				// so a receiver tuning in at this keyframe has each VPS/SPS/PPS its
+				// slices may reference (not just the most recent one).
+				crate::codec::annexb::reinject_params(&mut self.current.chunks, &self.vps, &mut self.current.vps_seen);
+				crate::codec::annexb::reinject_params(&mut self.current.chunks, &self.sps, &mut self.current.sps_seen);
+				crate::codec::annexb::reinject_params(&mut self.current.chunks, &self.pps, &mut self.current.pps_seen);
 
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
@@ -331,9 +322,9 @@ impl<E: CatalogExt> Import<E> {
 
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
-		self.current.contains_vps = false;
-		self.current.contains_sps = false;
-		self.current.contains_pps = false;
+		self.current.vps_seen.clear();
+		self.current.sps_seen.clear();
+		self.current.pps_seen.clear();
 
 		Ok(())
 	}
@@ -382,9 +373,10 @@ struct Frame {
 	chunks: BytesMut,
 	contains_idr: bool,
 	contains_slice: bool,
-	contains_vps: bool,
-	contains_sps: bool,
-	contains_pps: bool,
+	/// VPS/SPS/PPS NALs already inline in this access unit, so re-injection skips them.
+	vps_seen: Vec<Bytes>,
+	sps_seen: Vec<Bytes>,
+	pps_seen: Vec<Bytes>,
 }
 
 #[derive(Default)]

@@ -109,39 +109,59 @@ fn pack_constraint_flags(sps: &h264_parser::Sps) -> u8 {
 		| ((sps.constraint_set5_flag as u8) << 2)
 }
 
-/// Build an AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2) from a
-/// single SPS and PPS NAL.
-pub(crate) fn build_avcc(sps_nal: &[u8], pps_nal: &[u8]) -> anyhow::Result<Bytes> {
+/// Build an AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2) from the
+/// given SPS and PPS NALs. At least one SPS is required; the profile/level fields
+/// are read from the first SPS. A stream may legitimately carry several distinct
+/// SPS/PPS (slices reference them by id), so the record holds an ordered list of
+/// each rather than a single one.
+pub(crate) fn build_avcc(sps_nals: &[Bytes], pps_nals: &[Bytes]) -> anyhow::Result<Bytes> {
+	let first_sps = sps_nals.first().context("avcC requires at least one SPS")?;
+	anyhow::ensure!(first_sps.len() >= 4, "SPS NAL too short");
+	// numOfSequenceParameterSets is a 5-bit field, numOfPictureParameterSets a byte.
 	anyhow::ensure!(
-		sps_nal.len() <= u16::MAX as usize,
-		"SPS too large for avcC length field ({} > {})",
-		sps_nal.len(),
-		u16::MAX
+		sps_nals.len() <= 0x1f,
+		"too many SPS for avcC ({} > 31)",
+		sps_nals.len()
 	);
 	anyhow::ensure!(
-		pps_nal.len() <= u16::MAX as usize,
-		"PPS too large for avcC length field ({} > {})",
-		pps_nal.len(),
-		u16::MAX
+		pps_nals.len() <= u8::MAX as usize,
+		"too many PPS for avcC ({} > 255)",
+		pps_nals.len()
 	);
-	anyhow::ensure!(sps_nal.len() >= 4, "SPS NAL too short");
+	for (label, nal) in sps_nals
+		.iter()
+		.map(|n| ("SPS", n))
+		.chain(pps_nals.iter().map(|n| ("PPS", n)))
+	{
+		anyhow::ensure!(
+			nal.len() <= u16::MAX as usize,
+			"{label} too large for avcC length field ({} > {})",
+			nal.len(),
+			u16::MAX
+		);
+	}
 
-	let profile_idc = sps_nal[1];
-	let constraints = sps_nal[2];
-	let level_idc = sps_nal[3];
+	let profile_idc = first_sps[1];
+	let constraints = first_sps[2];
+	let level_idc = first_sps[3];
 
-	let mut out = BytesMut::with_capacity(11 + sps_nal.len() + pps_nal.len());
+	let payload: usize = sps_nals.iter().chain(pps_nals).map(|n| 2 + n.len()).sum();
+	let mut out = BytesMut::with_capacity(7 + payload);
 	out.put_u8(1); // configurationVersion
 	out.put_u8(profile_idc);
 	out.put_u8(constraints);
 	out.put_u8(level_idc);
 	out.put_u8(0xff); // reserved (6 bits) | lengthSizeMinusOne (2 bits = 3)
-	out.put_u8(0xe1); // reserved (3 bits) | numOfSequenceParameterSets (5 bits = 1)
-	out.put_u16(sps_nal.len() as u16);
-	out.put_slice(sps_nal);
-	out.put_u8(1); // numOfPictureParameterSets
-	out.put_u16(pps_nal.len() as u16);
-	out.put_slice(pps_nal);
+	out.put_u8(0xe0 | sps_nals.len() as u8); // reserved (3 bits) | numOfSequenceParameterSets
+	for sps in sps_nals {
+		out.put_u16(sps.len() as u16);
+		out.put_slice(sps);
+	}
+	out.put_u8(pps_nals.len() as u8); // numOfPictureParameterSets
+	for pps in pps_nals {
+		out.put_u16(pps.len() as u16);
+		out.put_slice(pps);
+	}
 	Ok(out.freeze())
 }
 
@@ -188,8 +208,10 @@ fn read_param_set_array(buf: &[u8], mut pos: usize, count: usize, params: &mut V
 /// the avcC in CodecPrivate).
 pub struct Avc1 {
 	avcc: Option<Bytes>,
-	sps: Option<Bytes>,
-	pps: Option<Bytes>,
+	/// Distinct SPS NALs observed, in arrival order.
+	sps: Vec<Bytes>,
+	/// Distinct PPS NALs observed, in arrival order.
+	pps: Vec<Bytes>,
 }
 
 impl Default for Avc1 {
@@ -203,8 +225,8 @@ impl Avc1 {
 	pub fn new() -> Self {
 		Self {
 			avcc: None,
-			sps: None,
-			pps: None,
+			sps: Vec::new(),
+			pps: Vec::new(),
 		}
 	}
 
@@ -270,15 +292,13 @@ impl Avc1 {
 		let nal_type = nal[0] & 0x1f;
 		match nal_type {
 			NAL_TYPE_SPS => {
-				if self.sps.as_deref() != Some(nal.as_ref()) {
-					self.sps = Some(nal.clone());
+				if crate::codec::annexb::push_distinct(&mut self.sps, nal) {
 					*sps_pps_changed = true;
 				}
 				Ok(false)
 			}
 			NAL_TYPE_PPS => {
-				if self.pps.as_deref() != Some(nal.as_ref()) {
-					self.pps = Some(nal.clone());
+				if crate::codec::annexb::push_distinct(&mut self.pps, nal) {
 					*sps_pps_changed = true;
 				}
 				Ok(false)
@@ -293,10 +313,10 @@ impl Avc1 {
 	}
 
 	fn rebuild_avcc(&mut self) -> anyhow::Result<()> {
-		let (Some(sps), Some(pps)) = (&self.sps, &self.pps) else {
+		if self.sps.is_empty() || self.pps.is_empty() {
 			return Ok(());
-		};
-		self.avcc = Some(build_avcc(sps, pps)?);
+		}
+		self.avcc = Some(build_avcc(&self.sps, &self.pps)?);
 		Ok(())
 	}
 }
@@ -341,16 +361,52 @@ mod tests {
 
 	#[test]
 	fn avcc_params_roundtrips_build_avcc() {
-		let sps = &[0x67, 0x42, 0xc0, 0x1f, 0xde][..];
-		let pps = &[0x68, 0xce, 0x3c, 0x80][..];
+		let sps = Bytes::from_static(&[0x67, 0x42, 0xc0, 0x1f, 0xde]);
+		let pps = Bytes::from_static(&[0x68, 0xce, 0x3c, 0x80]);
 
-		let avcc = build_avcc(sps, pps).unwrap();
+		let avcc = build_avcc(std::slice::from_ref(&sps), std::slice::from_ref(&pps)).unwrap();
 		let (length_size, params) = avcc_params(&avcc).unwrap();
 
 		assert_eq!(length_size, 4);
 		assert_eq!(params.len(), 2);
+		assert_eq!(params[0], sps);
+		assert_eq!(params[1], pps);
+	}
+
+	#[test]
+	fn build_avcc_carries_multiple_pps() {
+		// A source with one SPS and two PPS (ids 0 and 1): the avcC must keep both,
+		// in order, so slices referencing either id stay decodable.
+		let sps = Bytes::from_static(&[0x67, 0x42, 0xc0, 0x1f, 0xde]);
+		let pps0 = Bytes::from_static(&[0x68, 0xce, 0x3c, 0x80]);
+		let pps1 = Bytes::from_static(&[0x68, 0xce, 0x3c, 0x81]);
+
+		let avcc = build_avcc(std::slice::from_ref(&sps), &[pps0.clone(), pps1.clone()]).unwrap();
+		// numOfSequenceParameterSets is the low 5 bits of byte 5.
+		assert_eq!(avcc[5] & 0x1f, 1);
+
+		let (_, params) = avcc_params(&avcc).unwrap();
+		assert_eq!(params, vec![sps, pps0, pps1]);
+	}
+
+	#[test]
+	fn avc3_accumulates_distinct_pps() {
+		// Two distinct PPS arrive across keyframes; the synthesized avcC carries both.
+		let sps = &[0x67, 0x42, 0xc0, 0x1f, 0xde][..];
+		let pps0 = &[0x68, 0xce, 0x3c, 0x80][..];
+		let pps1 = &[0x68, 0xce, 0x3c, 0x81][..];
+		let idr = &[0x65, 0x88][..];
+
+		let mut tx = Avc1::new();
+		tx.transform(annexb_frame(&[sps, pps0, idr])).unwrap();
+		tx.transform(annexb_frame(&[sps, pps1, idr])).unwrap();
+
+		let avcc = tx.avcc().expect("avcC available");
+		let (_, params) = avcc_params(avcc).unwrap();
+		assert_eq!(params.len(), 3, "expected 1 SPS + 2 PPS, got {params:?}");
 		assert_eq!(params[0].as_ref(), sps);
-		assert_eq!(params[1].as_ref(), pps);
+		assert_eq!(params[1].as_ref(), pps0);
+		assert_eq!(params[2].as_ref(), pps1);
 	}
 
 	#[test]

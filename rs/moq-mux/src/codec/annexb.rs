@@ -1,7 +1,35 @@
 use anyhow::{self};
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
+
+/// Append `nal` to `set` unless a byte-identical entry is already present,
+/// preserving insertion order. Returns true if it was added.
+///
+/// Used to accumulate the distinct parameter-set NALs (SPS/PPS, plus VPS for
+/// H.265) a stream carries: avcC/hvcC hold an ordered list, and a source may
+/// define several (e.g. two PPS) that slices reference by id.
+pub(crate) fn push_distinct(set: &mut Vec<Bytes>, nal: &Bytes) -> bool {
+	if set.iter().any(|existing| existing == nal) {
+		return false;
+	}
+	set.push(nal.clone());
+	true
+}
+
+/// Append each `cached` parameter-set NAL not yet in `seen` to `chunks` as
+/// Annex-B, marking it seen. Called before a keyframe slice so every parameter
+/// set the GOP references is carried for mid-stream tune-in, not just the latest.
+pub(crate) fn reinject_params(chunks: &mut BytesMut, cached: &[Bytes], seen: &mut Vec<Bytes>) {
+	for nal in cached {
+		if seen.iter().any(|s| s == nal) {
+			continue;
+		}
+		chunks.extend_from_slice(&START_CODE);
+		chunks.extend_from_slice(nal);
+		seen.push(nal.clone());
+	}
+}
 
 pub struct NalIterator<'a, T: Buf + AsRef<[u8]> + 'a> {
 	buf: &'a mut T,
