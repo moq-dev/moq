@@ -2,9 +2,8 @@
 //!
 //! Accepts raw RGBA frames, converts them to I420, and delegates the actual
 //! encode to a [`Backend`](super::backend::Backend). The resulting packets are
-//! in the framing the catalog importer for [`Config::codec`] expects: Annex-B
-//! for H.264 (`moq_mux::codec::h264`) and H.265 (`moq_mux::codec::h265`), raw
-//! OBUs for AV1 (`moq_mux::codec::av1`).
+//! Annex-B in the framing the catalog importer for [`Config::codec`] expects:
+//! H.264 (`moq_mux::codec::h264`) or H.265 (`moq_mux::codec::h265`).
 
 use bytes::Bytes;
 
@@ -16,9 +15,9 @@ use crate::frame::{Frame, I420};
 /// breaking external `match`es.
 ///
 /// Not every codec has a backend on every platform: H.265 is hardware-only
-/// (VideoToolbox on macOS today), AV1 is software (rav1e). [`open`](backend::open)
-/// returns [`Error::NoEncoder`](crate::Error::NoEncoder) when nothing can encode
-/// the requested codec on this machine.
+/// (VideoToolbox on macOS today). [`open`](backend::open) returns
+/// [`Error::NoEncoder`](crate::Error::NoEncoder) when nothing can encode the
+/// requested codec on this machine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Codec {
@@ -28,8 +27,6 @@ pub enum Codec {
 	H264,
 	/// H.265 / HEVC, Annex-B with in-band VPS/SPS/PPS (the "hev1" shape).
 	H265,
-	/// AV1, OBU-framed with inline sequence headers (the "av01" shape).
-	AV1,
 }
 
 /// Which encoder implementation to use. `#[non_exhaustive]` so new selection
@@ -42,10 +39,10 @@ pub enum Kind {
 	Auto,
 	/// Hardware only; error if none is available.
 	Hardware,
-	/// Software only (openh264 for H.264, rav1e for AV1).
+	/// Software only (openh264 for H.264).
 	Software,
 	/// A specific backend by name, e.g. `"videotoolbox"`, `"nvenc"`, `"vaapi"`,
-	/// `"openh264"`, `"rav1e"`.
+	/// `"openh264"`.
 	Named(String),
 }
 
@@ -390,73 +387,6 @@ mod tests {
 			}
 		}
 		types
-	}
-
-	/// AV1 via rav1e: synthetic frames produce a non-empty OBU bitstream whose
-	/// first temporal unit carries a sequence header (OBU type 1), so the av1
-	/// importer can self-initialize.
-	#[test]
-	fn rav1e_emits_av1_with_sequence_header() {
-		let config = Config {
-			codec: Codec::AV1,
-			kind: Kind::Software,
-			..Config::new(320, 240, 30)
-		};
-		let mut encoder = Encoder::new(&config).expect("rav1e is always available");
-		assert_eq!(encoder.name(), "rav1e");
-		assert_eq!(encoder.codec(), Codec::AV1);
-
-		let frame = gray_rgba(320, 240);
-		let mut packets = Vec::new();
-		for i in 0..10 {
-			packets.extend(encoder.encode_rgba(&frame, 320, 240, i == 0).unwrap());
-		}
-		packets.extend(encoder.finish().unwrap());
-
-		assert!(!packets.is_empty(), "encoder produced no packets");
-		assert!(
-			packets.iter().any(|p| has_obu_type(p, 1)),
-			"no AV1 sequence header OBU found across {} packets",
-			packets.len()
-		);
-	}
-
-	/// Scan a low-overhead AV1 OBU bitstream for an OBU of `wanted` type. Each OBU
-	/// is `[header byte][optional ext byte][leb128 size][payload]`; the type is
-	/// bits 3..6 of the header byte and `has_size_field` (bit 1) is always set by
-	/// rav1e, so we can walk the units.
-	fn has_obu_type(mut data: &[u8], wanted: u8) -> bool {
-		while !data.is_empty() {
-			let header = data[0];
-			let obu_type = (header >> 3) & 0x0f;
-			let has_ext = (header >> 2) & 0x01 == 1;
-			let has_size = (header >> 1) & 0x01 == 1;
-			if !has_size {
-				return obu_type == wanted; // can't walk further without sizes
-			}
-			let mut pos = 1 + has_ext as usize;
-			// leb128 size field.
-			let mut size = 0usize;
-			let mut shift = 0;
-			loop {
-				let Some(&b) = data.get(pos) else { return false };
-				size |= ((b & 0x7f) as usize) << shift;
-				pos += 1;
-				if b & 0x80 == 0 {
-					break;
-				}
-				shift += 7;
-			}
-			if obu_type == wanted {
-				return true;
-			}
-			let end = pos + size;
-			if end > data.len() {
-				return false;
-			}
-			data = &data[end..];
-		}
-		false
 	}
 
 	/// Feed a GPU surface (NV12 `CVPixelBuffer`) straight into VideoToolbox:

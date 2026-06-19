@@ -1,7 +1,7 @@
 //! Encode captured video and publish it as a moq video track.
 //!
-//! The output codec is selected via [`Codec`] (H.264, H.265, or AV1); see its
-//! docs for which backends cover each on this platform.
+//! The output codec is selected via [`Codec`] (H.264 or H.265); see its docs
+//! for which backends cover each on this platform.
 //!
 //! Entry points, high to low level:
 //! - [`publish_capture`] captures and publishes a webcam (turnkey).

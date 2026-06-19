@@ -2,10 +2,10 @@
 //!
 //! [`Backend`] is the seam between frame input prep (capture + color conversion,
 //! owned by [`Encoder`](super::Encoder)) and the codec itself. Every backend
-//! takes a planar I420 [`Frame`] and emits the framing the matching catalog
-//! importer expects: Annex-B with in-band parameter sets for H.264/H.265, raw
-//! OBUs with inline sequence headers for AV1. Each backend produces exactly one
-//! codec, so the producer can route its packets to the right importer.
+//! takes a planar I420 [`Frame`] and emits Annex-B with in-band parameter sets
+//! (SPS/PPS, plus VPS for H.265), the framing the matching catalog importer
+//! expects. Each backend produces exactly one codec, so the producer can route
+//! its packets to the right importer.
 //!
 //! [`open`] picks the best backend for a [`Codec`](super::Codec) +
 //! [`Kind`](super::Kind): only candidates that support the requested codec are
@@ -18,7 +18,6 @@ use crate::Error;
 use crate::frame::Frame;
 
 mod openh264;
-mod rav1e;
 
 #[cfg(target_os = "macos")]
 mod videotoolbox;
@@ -82,20 +81,13 @@ const HARDWARE: &[Candidate] = &[
 	},
 ];
 
-/// Software fallbacks, all platforms. One per codec: openh264 for H.264, rav1e
-/// for AV1. H.265 has no software encoder, so it is hardware-only.
-const SOFTWARE: &[Candidate] = &[
-	Candidate {
-		name: openh264::NAME,
-		codecs: &[Codec::H264],
-		open: openh264::Openh264::open,
-	},
-	Candidate {
-		name: rav1e::NAME,
-		codecs: &[Codec::AV1],
-		open: rav1e::Rav1e::open,
-	},
-];
+/// Software fallbacks, all platforms. Only H.264 (openh264) has one; H.265 is
+/// hardware-only. A slice so future software codecs slot in.
+const SOFTWARE: &[Candidate] = &[Candidate {
+	name: openh264::NAME,
+	codecs: &[Codec::H264],
+	open: openh264::Openh264::open,
+}];
 
 /// Open the best encoder for `config.codec` + `config.kind`, trying candidates
 /// in priority order and falling back until one succeeds.

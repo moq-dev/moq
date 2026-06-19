@@ -52,10 +52,6 @@ moq-vaapi = { workspace = true, optional = true }
 nvidia-video-codec-sdk = { version = "0.4", optional = true }
 # Vendored, statically-linked software H.264 fallback (no system dependency).
 openh264 = "0.9.3"
-# Pure-Rust software AV1 encoder, the AV1 analogue of openh264 (no system
-# dependency). `default-features = false` drops the `asm` feature so the build
-# needs no nasm; the software path prioritizes portability over speed.
-rav1e = { version = "0.7", default-features = false, features = ["threading"] }
 thiserror = "2"
 tokio = { workspace = true, features = ["rt", "macros"] }
 tracing = "0.1"

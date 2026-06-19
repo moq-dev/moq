@@ -29,14 +29,10 @@ enum Codecs {
 		split: moq_mux::codec::h265::Split,
 		import: moq_mux::codec::h265::Import,
 	},
-	Av1 {
-		split: moq_mux::codec::av1::Split,
-		import: moq_mux::codec::av1::Import,
-	},
 }
 
-/// Publishes encoded video frames as a moq track (avc3 / hev1 / av01 depending
-/// on the codec).
+/// Publishes encoded video frames as a moq track (avc3 / hev1 depending on the
+/// codec).
 ///
 /// Built on the async side so the track is advertised (and the catalog
 /// registered) before the camera opens; this is what lets a subscriber
@@ -70,13 +66,6 @@ impl Producer {
 					import: moq_mux::codec::h265::Import::new(track, catalog),
 				}
 			}
-			Codec::AV1 => {
-				let track = moq_mux::import::unique_track(&mut broadcast, ".av01")?;
-				Codecs::Av1 {
-					split: moq_mux::codec::av1::Split::new(),
-					import: moq_mux::codec::av1::Import::new(track, catalog),
-				}
-			}
 		};
 		Ok(Self { codecs })
 	}
@@ -88,7 +77,6 @@ impl Producer {
 		match &self.codecs {
 			Codecs::H264 { import, .. } => import.demand(),
 			Codecs::H265 { import, .. } => import.demand(),
-			Codecs::Av1 { import, .. } => import.demand(),
 		}
 	}
 
@@ -108,11 +96,6 @@ impl Producer {
 					frames.extend(split.flush(Some(timestamp))?);
 					import.decode(frames)?;
 				}
-				Codecs::Av1 { split, import } => {
-					let mut frames = split.decode(&packet, Some(timestamp))?;
-					frames.extend(split.flush(Some(timestamp))?);
-					import.decode(frames)?;
-				}
 			}
 		}
 		Ok(())
@@ -123,7 +106,6 @@ impl Producer {
 		match &mut self.codecs {
 			Codecs::H264 { import, .. } => import.finish()?,
 			Codecs::H265 { import, .. } => import.finish()?,
-			Codecs::Av1 { import, .. } => import.finish()?,
 		}
 		Ok(())
 	}
@@ -408,11 +390,6 @@ mod tests {
 	#[tokio::test]
 	async fn h264_roundtrip_publishes_avc3() {
 		assert!(roundtrip_rendition(Codec::H264).await.ends_with(".avc3"));
-	}
-
-	#[tokio::test]
-	async fn av1_roundtrip_publishes_av01() {
-		assert!(roundtrip_rendition(Codec::AV1).await.ends_with(".av01"));
 	}
 
 	/// H.265 has no software encoder, so this only runs where a hardware one

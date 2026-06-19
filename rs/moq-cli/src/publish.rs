@@ -31,8 +31,6 @@ pub enum VideoCodec {
 	H264,
 	/// H.265 / HEVC (hardware-only).
 	H265,
-	/// AV1 (software).
-	Av1,
 }
 
 #[cfg(feature = "capture")]
@@ -41,12 +39,11 @@ impl From<VideoCodec> for moq_video::encode::Codec {
 		match codec {
 			VideoCodec::H264 => moq_video::encode::Codec::H264,
 			VideoCodec::H265 => moq_video::encode::Codec::H265,
-			VideoCodec::Av1 => moq_video::encode::Codec::AV1,
 		}
 	}
 }
 
-/// Device capture options. Video (camera -> H.264/H.265/AV1) maps to `moq-video`;
+/// Device capture options. Video (camera -> H.264/H.265) maps to `moq-video`;
 /// audio (microphone -> Opus) to `moq-audio`. Both are captured by default; use
 /// `--no-video` / `--no-audio` to publish only one.
 #[cfg(feature = "capture")]
@@ -78,8 +75,7 @@ pub struct CaptureArgs {
 	#[arg(long)]
 	pub bitrate: Option<u64>,
 
-	/// Video codec to encode. H.265 is hardware-only (VideoToolbox on macOS);
-	/// AV1 is software (rav1e).
+	/// Video codec to encode. H.265 is hardware-only (VideoToolbox on macOS).
 	#[arg(long, value_enum, default_value_t)]
 	pub codec: VideoCodec,
 

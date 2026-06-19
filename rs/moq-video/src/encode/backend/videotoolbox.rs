@@ -67,12 +67,11 @@ unsafe impl Send for VideoToolbox {}
 
 impl VideoToolbox {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
+		// backend::open only routes codecs this backend advertises, so the match is
+		// exhaustive; a new Codec variant won't compile here until it's handled.
 		let codec_type = match config.codec {
 			Codec::H264 => kCMVideoCodecType_H264,
 			Codec::H265 => kCMVideoCodecType_HEVC,
-			other => {
-				return Err(Error::Codec(anyhow::anyhow!("videotoolbox does not support {other:?}")));
-			}
 		};
 
 		let mut sink = Box::new(Sink {

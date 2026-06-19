@@ -56,11 +56,6 @@ allow = [
     "WTFPL", # ffmpeg-next, ffmpeg-sys-next
     "Zlib",
 ]
-# rav1e's optional `fuzzing` feature pulls libfuzzer-sys (NCSA), which we never
-# enable; allow NCSA only for that crate rather than repo-wide.
-exceptions = [
-    { allow = ["NCSA"], crate = "libfuzzer-sys" },
-]
 
 [bans]
 multiple-versions = "warn"
