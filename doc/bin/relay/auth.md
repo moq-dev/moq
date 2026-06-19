@@ -244,14 +244,13 @@ stream. It performs **no token/certificate authentication**: every accepted
 connection is granted full, unrestricted publish and subscribe access on the
 internal tier, exactly like a cluster peer dialing `/`.
 
-The single `listen` value picks the transport: a `host:port` binds a plain-TCP
-listener (the `tcp://` scheme), and a filesystem path binds a Unix socket (the
-`unix://` scheme).
+A TCP and a Unix-socket listener can each be enabled independently, under
+`[internal.tcp]` and `[internal.uds]`.
 
 ### TCP
 
 ```toml
-[internal]
+[internal.tcp]
 # Plain-TCP qmux listener. No TLS, no UDP, no auth: anyone who can reach this
 # socket gets full access. Bind it only to a trusted interface.
 listen = "127.0.0.1:4444"
@@ -274,14 +273,13 @@ specific worker user rather than any local process. Requires the relay to be
 built with the `uds` feature.
 
 ```toml
-[internal]
-# A path (optionally `unix:`-prefixed) binds a Unix socket instead of TCP.
+[internal.uds]
 listen = "/run/moq/internal.sock"
 
 # Only accept connections from these credentials. Each list is matched
 # independently (AND across fields, OR within a field); an empty/omitted list
 # imposes no constraint on that field.
-[internal.allow]
+[internal.uds.allow]
 uid = [1001]   # only the worker's user
 # gid = [2000]
 # pid = [12345]

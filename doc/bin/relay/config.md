@@ -98,19 +98,21 @@ key = "key.pem"
 
 ### \[internal]
 
-Unauthenticated qmux listener (no TLS) for trusted local workers. Every
-connection is granted full, unrestricted access. The `listen` value picks the
-transport: a `host:port` binds plain TCP, a path binds a Unix socket.
+Unauthenticated qmux listeners (no TLS) for trusted local workers. Every
+connection is granted full, unrestricted access. A TCP and a Unix-socket
+listener can each be enabled independently; both default to disabled.
 
 ```toml
-[internal]
-# host:port  -> plain-TCP listener (tcp:// scheme)
-# a path     -> Unix-socket listener (unix:// scheme), requires the `uds` build feature
-# Defaults to disabled if not specified.
+# Plain-TCP listener (tcp:// scheme).
+[internal.tcp]
 listen = "127.0.0.1:4444"
 
-# Unix-socket only: restrict callers by peer credentials. Empty/omitted = no check.
-[internal.allow]
+# Unix-socket listener (unix:// scheme), requires the `uds` build feature.
+[internal.uds]
+listen = "/run/moq/internal.sock"
+
+# Restrict the Unix-socket callers by peer credentials. Empty/omitted = no check.
+[internal.uds.allow]
 uid = [1001]
 # gid = [2000]
 # pid = [12345]

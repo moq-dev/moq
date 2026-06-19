@@ -11,8 +11,7 @@ use std::{net::TcpListener, sync::atomic::AtomicU64, time::Duration};
 
 use moq_native::moq_net::{self, Origin, Track};
 use moq_relay::{
-	AuthConfig, Cluster, ClusterConfig, InternalConfig, InternalListen, PublicConfig, Web, WebConfig, WebState,
-	run_internal,
+	AuthConfig, Cluster, ClusterConfig, InternalConfig, PublicConfig, Web, WebConfig, WebState, run_internal,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -270,7 +269,7 @@ async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	drop(probe);
 
 	let mut internal = InternalConfig::default();
-	internal.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
+	internal.tcp.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 
 	let handle = tokio::spawn(async move {
 		// `run_internal` only returns on error; aborted at teardown.
@@ -373,7 +372,7 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 	let path = std::path::PathBuf::from(format!("/tmp/moq-internal-{}.sock", std::process::id()));
 
 	let mut internal = InternalConfig::default();
-	internal.listen = Some(InternalListen::Unix(path.clone()));
+	internal.uds.listen = Some(path.clone());
 
 	let handle = tokio::spawn(async move {
 		let _ = run_internal(internal, cluster).await;

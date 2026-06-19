@@ -1,7 +1,5 @@
-use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -9,49 +7,59 @@ use tracing::Instrument;
 
 use crate::{AuthToken, Cluster};
 
-/// Where the internal listener binds.
+/// Configuration for the unauthenticated internal listener(s).
 ///
-/// Parsed from a single string: a `host:port` socket address binds a plain-TCP
-/// listener, anything else (or a `unix:` prefix) is treated as a Unix-socket
-/// path. So `127.0.0.1:4444` is TCP and `/run/moq/internal.sock` (or
-/// `unix:/run/moq/internal.sock`) is a Unix socket.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum InternalListen {
-	/// A plain-TCP qmux listener. No peer identity is available.
-	Tcp(SocketAddr),
-	/// A Unix-domain-socket qmux listener. Supports the [`InternalAllow`] uid/gid/pid check.
-	Unix(PathBuf),
+/// A TCP and a Unix-socket listener can each be enabled independently. Both
+/// grant every accepted connection full internal access (publish and subscribe
+/// to everything, no JWT or client certificate), so only expose them to trusted
+/// clients. This is the local-worker analogue of a cluster peer dialing `/`.
+#[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct InternalConfig {
+	/// Plain-TCP listener (`tcp://`).
+	#[command(flatten)]
+	#[serde(default)]
+	pub tcp: InternalTcp,
+
+	/// Unix-socket listener (`unix://`), with an optional peer-credential allowlist.
+	#[command(flatten)]
+	#[serde(default)]
+	pub uds: InternalUds,
 }
 
-impl FromStr for InternalListen {
-	type Err = std::convert::Infallible;
-
-	fn from_str(s: &str) -> Result<Self, Self::Err> {
-		// An explicit `unix:` prefix forces a path, even one that might parse as
-		// an address. Otherwise a valid socket address is TCP and everything
-		// else is a path.
-		if let Some(rest) = s.strip_prefix("unix:") {
-			return Ok(Self::Unix(PathBuf::from(rest)));
-		}
-		Ok(match s.parse::<SocketAddr>() {
-			Ok(addr) => Self::Tcp(addr),
-			Err(_) => Self::Unix(PathBuf::from(s)),
-		})
-	}
+/// Plain-TCP internal listener.
+///
+/// TCP carries no peer identity, so it must only be reachable from trusted
+/// clients. Bind it to loopback or a private interface; a non-loopback bind
+/// logs a warning but is allowed.
+#[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct InternalTcp {
+	/// Bind an unauthenticated plain-TCP (qmux, no TLS) listener on this address.
+	#[arg(long = "internal-listen", id = "internal-listen", env = "MOQ_INTERNAL_LISTEN")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub listen: Option<SocketAddr>,
 }
 
-impl fmt::Display for InternalListen {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::Tcp(addr) => write!(f, "{addr}"),
-			// Prefix so it round-trips back through FromStr as a path.
-			Self::Unix(path) => write!(f, "unix:{}", path.display()),
-		}
-	}
-}
+/// Unix-socket internal listener.
+///
+/// The kernel reports the connecting process's credentials, so [`allow`](Self::allow)
+/// can restrict callers to a specific worker user. Requires the `uds` build feature.
+#[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct InternalUds {
+	/// Bind an unauthenticated Unix-socket (qmux, no TLS) listener at this path.
+	#[arg(long = "internal-uds-listen", id = "internal-uds-listen", env = "MOQ_INTERNAL_UDS_LISTEN")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub listen: Option<PathBuf>,
 
-fn parse_listen(s: &str) -> Result<InternalListen, std::convert::Infallible> {
-	s.parse()
+	/// Peer-credential allowlist applied to accepted connections.
+	#[command(flatten)]
+	#[serde(default)]
+	pub allow: InternalAllow,
 }
 
 /// Peer-credential allowlist for the Unix-socket internal listener.
@@ -60,8 +68,6 @@ fn parse_listen(s: &str) -> Result<InternalListen, std::convert::Infallible> {
 /// imposes no constraint. A connection is allowed when it satisfies every
 /// populated field (AND across fields, OR within a field). All empty means no
 /// check, so the socket's filesystem permissions are the only gate.
-///
-/// Only applies to a Unix-socket [`InternalListen`]; TCP carries no peer identity.
 #[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -85,58 +91,41 @@ pub struct InternalAllow {
 
 impl InternalAllow {
 	/// Whether this allowlist imposes any constraint.
+	#[cfg_attr(not(all(feature = "uds", unix)), allow(dead_code))]
 	fn is_empty(&self) -> bool {
 		self.uid.is_empty() && self.gid.is_empty() && self.pid.is_empty()
 	}
 }
 
-/// Configuration for the unauthenticated internal listener.
+/// Run the configured internal listener(s) until one fails; wait forever if none.
 ///
-/// When [`listen`](Self::listen) is set, the relay binds a listener (plain TCP
-/// or a Unix socket) that grants every accepted connection full internal
-/// access: publish and subscribe to everything, with no JWT or client
-/// certificate.
-///
-/// There is no transport encryption. A TCP listener has no peer identity, so it
-/// must only be reachable from trusted clients (loopback or a private
-/// interface). A Unix-socket listener can additionally restrict callers by
-/// uid/gid/pid via [`allow`](Self::allow).
-#[serde_with::serde_as]
-#[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
-#[serde(deny_unknown_fields, default)]
-#[non_exhaustive]
-pub struct InternalConfig {
-	/// Bind the internal listener here: a `host:port` for TCP, or a path
-	/// (optionally `unix:`-prefixed) for a Unix socket.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
-	#[arg(long = "internal-listen", env = "MOQ_INTERNAL_LISTEN", value_parser = parse_listen)]
-	pub listen: Option<InternalListen>,
-
-	/// Peer-credential allowlist (Unix-socket listeners only).
-	#[command(flatten)]
-	#[serde(default)]
-	pub allow: InternalAllow,
-}
-
-/// Run the internal listener if one is configured, otherwise wait forever.
-///
-/// Used directly in the relay's top-level `select!` so it composes whether or
-/// not `internal.listen` is set.
+/// Used directly in the relay's top-level `select!`. The TCP and Unix listeners
+/// run concurrently when both are configured.
 pub async fn run_internal(config: InternalConfig, cluster: Cluster) -> anyhow::Result<()> {
-	match config.listen {
-		None => std::future::pending().await,
-		Some(InternalListen::Tcp(addr)) => run_tcp(addr, config.allow, cluster).await,
-		Some(InternalListen::Unix(path)) => run_unix(path, config.allow, cluster).await,
+	let tcp = {
+		let cluster = cluster.clone();
+		async move {
+			match config.tcp.listen {
+				Some(addr) => run_tcp(addr, cluster).await,
+				None => std::future::pending().await,
+			}
+		}
+	};
+
+	let uds = async move {
+		match config.uds.listen {
+			Some(path) => run_uds(path, config.uds.allow, cluster).await,
+			None => std::future::pending().await,
+		}
+	};
+
+	tokio::select! {
+		res = tcp => res,
+		res = uds => res,
 	}
 }
 
-async fn run_tcp(addr: SocketAddr, allow: InternalAllow, cluster: Cluster) -> anyhow::Result<()> {
-	// TCP carries no peer identity, so an allowlist can't be honored here.
-	if !allow.is_empty() {
-		tracing::warn!("internal.allow is ignored for a TCP listener; it only applies to Unix sockets");
-	}
-
+async fn run_tcp(addr: SocketAddr, cluster: Cluster) -> anyhow::Result<()> {
 	// No transport security, so a non-loopback bind is worth flagging. We still
 	// allow it (private VPC interfaces are a valid use), just loudly.
 	if addr.ip().is_loopback() {
@@ -155,11 +144,11 @@ async fn run_tcp(addr: SocketAddr, allow: InternalAllow, cluster: Cluster) -> an
 		}
 	}
 
-	anyhow::bail!("internal listener stopped accepting connections")
+	anyhow::bail!("internal TCP listener stopped accepting connections")
 }
 
 #[cfg(all(feature = "uds", unix))]
-async fn run_unix(path: PathBuf, allow: InternalAllow, cluster: Cluster) -> anyhow::Result<()> {
+async fn run_uds(path: PathBuf, allow: InternalAllow, cluster: Cluster) -> anyhow::Result<()> {
 	if allow.is_empty() {
 		tracing::warn!(path = %path.display(), "internal Unix listener has no allow list; any local user able to reach the socket gets full access");
 	} else {
@@ -191,13 +180,13 @@ async fn run_unix(path: PathBuf, allow: InternalAllow, cluster: Cluster) -> anyh
 		spawn_session(session, cluster.clone());
 	}
 
-	anyhow::bail!("internal listener stopped accepting connections")
+	anyhow::bail!("internal Unix listener stopped accepting connections")
 }
 
 #[cfg(not(all(feature = "uds", unix)))]
-async fn run_unix(path: PathBuf, _allow: InternalAllow, _cluster: Cluster) -> anyhow::Result<()> {
+async fn run_uds(path: PathBuf, _allow: InternalAllow, _cluster: Cluster) -> anyhow::Result<()> {
 	anyhow::bail!(
-		"internal.listen requests a Unix socket ({}) but this relay was built without the `uds` feature",
+		"internal.uds.listen requests a Unix socket ({}) but this relay was built without the `uds` feature",
 		path.display()
 	)
 }

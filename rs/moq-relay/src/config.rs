@@ -328,23 +328,32 @@ id = 12345
 		);
 	}
 
-	/// Same clap+TOML clobber guard for `internal.listen`. It's typed as
-	/// `Option<SocketAddr>` so an absent `--internal-listen` CLI flag must not
-	/// wipe a TOML-configured value during the `update_from` re-parse. A bare
-	/// field would reset it to its default and silently disable the internal
-	/// listener for a deployment that enabled it via TOML.
+	/// Same clap+TOML clobber guard for the internal listeners. Both
+	/// `internal.tcp.listen` (`Option<SocketAddr>`) and `internal.uds.listen`
+	/// (`Option<PathBuf>`) must survive the `update_from` re-parse when their
+	/// CLI flags are absent, or a TOML-configured listener gets silently
+	/// disabled.
 	static INTERNAL_LISTEN_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 	#[test]
 	fn cli_does_not_clobber_toml_internal_listen() {
 		let _guard = INTERNAL_LISTEN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		// SAFETY: INTERNAL_LISTEN_ENV_LOCK serializes this with any sibling test
-		// touching the same env var.
-		unsafe { std::env::remove_var("MOQ_INTERNAL_LISTEN") };
+		// touching the same env vars.
+		unsafe {
+			std::env::remove_var("MOQ_INTERNAL_LISTEN");
+			std::env::remove_var("MOQ_INTERNAL_UDS_LISTEN");
+		}
 
 		let toml = r#"
-[internal]
+[internal.tcp]
 listen = "127.0.0.1:4444"
+
+[internal.uds]
+listen = "/run/moq/internal.sock"
+
+[internal.uds.allow]
+uid = [1001]
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -355,29 +364,16 @@ listen = "127.0.0.1:4444"
 		let config = Config::parse_and_merge(args).expect("config load");
 
 		assert_eq!(
-			config.internal.listen,
-			Some(crate::InternalListen::Tcp("127.0.0.1:4444".parse().unwrap())),
-			"TOML's internal.listen must not be clobbered by the CLI re-parse"
+			config.internal.tcp.listen,
+			Some("127.0.0.1:4444".parse().unwrap()),
+			"TOML's internal.tcp.listen must not be clobbered by the CLI re-parse"
 		);
-	}
-
-	#[test]
-	fn internal_listen_parses_tcp_and_unix() {
-		use crate::InternalListen;
 		assert_eq!(
-			"127.0.0.1:4444".parse::<InternalListen>().unwrap(),
-			InternalListen::Tcp("127.0.0.1:4444".parse().unwrap())
+			config.internal.uds.listen.as_deref(),
+			Some(std::path::Path::new("/run/moq/internal.sock")),
+			"TOML's internal.uds.listen must not be clobbered by the CLI re-parse"
 		);
-		// A bare path with no port is a Unix socket.
-		assert_eq!(
-			"/run/moq/internal.sock".parse::<InternalListen>().unwrap(),
-			InternalListen::Unix("/run/moq/internal.sock".into())
-		);
-		// The `unix:` prefix forces a path even if it would otherwise parse as an address.
-		assert_eq!(
-			"unix:127.0.0.1:4444".parse::<InternalListen>().unwrap(),
-			InternalListen::Unix("127.0.0.1:4444".into())
-		);
+		assert_eq!(config.internal.uds.allow.uid, vec![1001]);
 	}
 
 	#[test]
