@@ -3,8 +3,6 @@
 #include <QWidget>
 #include <obs.hpp>
 
-#include <chrono>
-
 class QLineEdit;
 class QPushButton;
 class QLabel;
@@ -23,7 +21,7 @@ public:
 
 private slots:
 	void ToggleStream();
-	void UpdateStats();
+	void UpdateStatus();
 
 private:
 	void StartStream();
@@ -43,14 +41,7 @@ private:
 	QPushButton *button;
 	QLabel *status;
 
-	QLabel *statState;
-	QLabel *statDuration;
-	QLabel *statBitrate;
-	QLabel *statSent;
-	QLabel *statDropped;
-	QLabel *statConnect;
-
-	QTimer *statsTimer;
+	QTimer *pollTimer;
 
 	OBSServiceAutoRelease service;
 	OBSOutputAutoRelease output;
@@ -58,9 +49,6 @@ private:
 	OBSEncoderAutoRelease audioEncoder;
 
 	bool running = false;
-	uint64_t lastBytes = 0;
-	std::chrono::steady_clock::time_point lastSample;
-	std::chrono::steady_clock::time_point streamStart;
 };
 
 void register_moq_dock();

@@ -6,12 +6,11 @@
 #include <util/config-file.h>
 
 #include <QFormLayout>
-#include <QGridLayout>
 #include <QVBoxLayout>
-#include <QGroupBox>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QLabel>
+#include <QFont>
 #include <QTimer>
 #include <QDir>
 #include <QFileInfo>
@@ -72,27 +71,6 @@ std::string SettingsPath()
 	return s;
 }
 
-QString FormatDuration(int seconds)
-{
-	int h = seconds / 3600;
-	int m = (seconds % 3600) / 60;
-	int s = seconds % 60;
-	return QString::asprintf("%02d:%02d:%02d", h, m, s);
-}
-
-// Add a "name: value" row to the stats grid and return the (right-aligned) value label.
-QLabel *AddStatRow(QGridLayout *grid, int row, const QString &name)
-{
-	auto *nameLabel = new QLabel(name);
-	nameLabel->setStyleSheet("color: palette(mid);");
-	auto *valueLabel = new QLabel("—");
-	valueLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-	valueLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-	grid->addWidget(nameLabel, row, 0);
-	grid->addWidget(valueLabel, row, 1);
-	return valueLabel;
-}
-
 } // namespace
 
 MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
@@ -105,48 +83,40 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	pathEdit->setText("obs");
 	pathEdit->setPlaceholderText("(optional) broadcast name");
 
-	// Labels above the fields (WrapAllRows) so the inputs get the full width.
+	// Labels above the fields (WrapAllRows), and let the fields grow to the full
+	// dock width (the macOS default keeps them at their size hint otherwise).
 	auto *form = new QFormLayout();
 	form->setRowWrapPolicy(QFormLayout::WrapAllRows);
+	form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 	form->setContentsMargins(0, 0, 0, 0);
 	form->addRow("Relay URL", urlEdit);
-	form->addRow("Broadcast path", pathEdit);
+	form->addRow("Broadcast name", pathEdit);
 
 	button = new QPushButton("Go Live", this);
 	button->setCursor(Qt::PointingHandCursor);
 	connect(button, &QPushButton::clicked, this, &MoQDock::ToggleStream);
 
-	status = new QLabel("Idle", this);
+	status = new QLabel(this);
 	status->setWordWrap(true);
-	status->setStyleSheet("color: palette(mid);");
-
-	auto *statsBox = new QGroupBox("Statistics", this);
-	auto *grid = new QGridLayout(statsBox);
-	grid->setColumnStretch(1, 1);
-	grid->setVerticalSpacing(4);
-	statState = AddStatRow(grid, 0, "Status");
-	statDuration = AddStatRow(grid, 1, "Duration");
-	statBitrate = AddStatRow(grid, 2, "Bitrate");
-	statSent = AddStatRow(grid, 3, "Data sent");
-	statDropped = AddStatRow(grid, 4, "Dropped frames");
-	statConnect = AddStatRow(grid, 5, "Connect time");
+	QFont statusFont = status->font();
+	statusFont.setBold(true);
+	status->setFont(statusFont);
 
 	auto *versionLabel = new QLabel(QString("libmoq %1").arg(MOQ_VERSION_STRING), this);
 	versionLabel->setAlignment(Qt::AlignRight | Qt::AlignBottom);
-	versionLabel->setStyleSheet("color: palette(mid); font-size: 10px;");
+	versionLabel->setStyleSheet("color: #888888; font-size: 10px;");
 
 	auto *layout = new QVBoxLayout(this);
 	layout->setSpacing(10);
 	layout->addLayout(form);
 	layout->addWidget(button);
 	layout->addWidget(status);
-	layout->addWidget(statsBox);
 	layout->addStretch();
 	layout->addWidget(versionLabel);
 
-	statsTimer = new QTimer(this);
-	statsTimer->setInterval(1000);
-	connect(statsTimer, &QTimer::timeout, this, &MoQDock::UpdateStats);
+	pollTimer = new QTimer(this);
+	pollTimer->setInterval(1000);
+	connect(pollTimer, &QTimer::timeout, this, &MoQDock::UpdateStatus);
 
 	connect(urlEdit, &QLineEdit::editingFinished, this, &MoQDock::SaveSettings);
 	connect(pathEdit, &QLineEdit::editingFinished, this, &MoQDock::SaveSettings);
@@ -301,18 +271,16 @@ void MoQDock::StartStream()
 		return;
 	}
 
-	lastBytes = 0;
-	lastSample = std::chrono::steady_clock::now();
-	streamStart = lastSample;
-	statsTimer->start();
+	pollTimer->start();
 
 	SetRunning(true);
-	status->setText("Connecting…");
+	status->setText("● Connecting…");
+	status->setStyleSheet("color: #d08b1d;");
 }
 
 void MoQDock::StopStream()
 {
-	statsTimer->stop();
+	pollTimer->stop();
 
 	if (output) {
 		signal_handler_disconnect(obs_output_get_signal_handler(output), "stop", OnOutputStopped, this);
@@ -342,48 +310,22 @@ void MoQDock::SetRunning(bool isRunning)
 	pathEdit->setEnabled(!isRunning);
 
 	if (!isRunning) {
-		status->setText("Idle");
-		statState->setText("Offline");
-		statState->setStyleSheet("color: palette(mid);");
-		statDuration->setText("—");
-		statBitrate->setText("—");
-		statSent->setText("—");
-		statDropped->setText("—");
-		statConnect->setText("—");
+		status->setText("● Disconnected");
+		status->setStyleSheet("color: #888888;");
 	}
 }
 
-void MoQDock::UpdateStats()
+void MoQDock::UpdateStatus()
 {
 	if (!output || !running)
 		return;
 
-	const auto now = std::chrono::steady_clock::now();
-	const uint64_t bytes = obs_output_get_total_bytes(output);
-	const double secs = std::chrono::duration<double>(now - lastSample).count();
-	const double kbps = secs > 0.0 ? (double)(bytes - lastBytes) * 8.0 / 1000.0 / secs : 0.0;
-	lastBytes = bytes;
-	lastSample = now;
-
-	const bool connected = obs_output_active(output) && bytes > 0;
-	statState->setText(connected ? "● Live" : "Connecting…");
-	statState->setStyleSheet(connected ? "color: #36a45e; font-weight: bold;" : "color: palette(mid);");
-
-	const int liveSecs = (int)std::chrono::duration_cast<std::chrono::seconds>(now - streamStart).count();
-	statDuration->setText(FormatDuration(liveSecs));
-	statBitrate->setText(QString("%1 kb/s").arg((int)(kbps + 0.5)));
-	statSent->setText(QString("%1 MB").arg((double)bytes / (1024.0 * 1024.0), 0, 'f', 1));
-
-	const int total = obs_output_get_total_frames(output);
-	const int dropped = obs_output_get_frames_dropped(output);
-	const double dropPct = total > 0 ? (double)dropped * 100.0 / (double)total : 0.0;
-	statDropped->setText(QString("%1 (%2%)").arg(dropped).arg(dropPct, 0, 'f', 1));
-
-	const int connectMs = obs_output_get_connect_time_ms(output);
-	statConnect->setText(connectMs > 0 ? QString("%1 ms").arg(connectMs) : "—");
-
-	if (connected)
-		status->setText("Streaming");
+	// libmoq surfaces connection state via the session-connect callback, which
+	// MoQOutput records as the output's connect time; until that fires we're
+	// still connecting. There's no per-frame stats API to show beyond this.
+	const bool connected = obs_output_get_connect_time_ms(output) > 0;
+	status->setText(connected ? "● Connected" : "● Connecting…");
+	status->setStyleSheet(connected ? "color: #36a45e;" : "color: #d08b1d;");
 }
 
 void MoQDock::LoadSettings()
