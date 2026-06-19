@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.12](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.11...moq-relay-v0.12.12) - 2026-06-19
+
+### Added
+
+- *(relay)* close sessions when the token/cert expires ([#1789](https://github.com/moq-dev/moq/pull/1789))
+- *(relay)* add --cluster-id to set a fixed origin id ([#1786](https://github.com/moq-dev/moq/pull/1786))
+
 ## [0.12.11](https://github.com/moq-dev/moq/compare/moq-relay-v0.12.10...moq-relay-v0.12.11) - 2026-06-17
 
 ### Fixed

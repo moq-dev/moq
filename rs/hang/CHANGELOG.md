@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.2](https://github.com/moq-dev/moq/compare/hang-v0.19.1...hang-v0.19.2) - 2026-06-19
+
+### Fixed
+
+- *(hang)* omit empty HEVC constraint component in codec string ([#1781](https://github.com/moq-dev/moq/pull/1781))
+
 ## [0.19.1](https://github.com/moq-dev/moq/compare/hang-v0.19.0...hang-v0.19.1) - 2026-06-16
 
 ### Other

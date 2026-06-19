@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.3](https://github.com/moq-dev/moq/compare/moq-native-v0.17.2...moq-native-v0.17.3) - 2026-06-19
+
+### Added
+
+- *(relay)* close sessions when the token/cert expires ([#1789](https://github.com/moq-dev/moq/pull/1789))
+
+### Fixed
+
+- *(moq-native)* keep has_peer_certificate as deprecated, release 0.17.3 ([#1790](https://github.com/moq-dev/moq/pull/1790))
+
 ## [0.17.2](https://github.com/moq-dev/moq/compare/moq-native-v0.17.1...moq-native-v0.17.2) - 2026-06-17
 
 ### Fixed
