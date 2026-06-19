@@ -56,6 +56,8 @@ pub struct Export<E: catalog::Catalog = ()> {
 	tracks: HashMap<String, Track>,
 	/// Continuity counter per PID (PAT, PMT, and each elementary stream).
 	counters: HashMap<u16, ContinuityCounter>,
+	/// PMT program-level descriptors captured on import, re-emitted in the PMT.
+	program_descriptors: Vec<catalog::Descriptor>,
 
 	/// Program tables, built once the track layout is known.
 	psi: Option<Psi>,
@@ -69,6 +71,9 @@ struct Track {
 	finished: bool,
 	pid: u16,
 	kind: Kind,
+	/// PMT ES-level descriptors to re-announce, captured verbatim on import (language,
+	/// registration, ...). Empty for non-TS sources; AC-3/E-AC-3 then synthesize one.
+	descriptors: Vec<catalog::Descriptor>,
 }
 
 #[derive(Clone)]
@@ -89,12 +94,8 @@ enum Kind {
 	Eac3,
 	/// An undecoded elementary stream carried verbatim (SCTE-35, private PES,
 	/// teletext, ...). Re-announced in the PMT with its recorded `stream_type` and
-	/// descriptors, and repacketized per its `framing`.
-	Verbatim {
-		stream_type: u8,
-		framing: catalog::Framing,
-		descriptors: Vec<catalog::Descriptor>,
-	},
+	/// repacketized per its `framing`.
+	Verbatim { stream_type: u8, framing: catalog::Framing },
 }
 
 /// The program tables plus the resolved PID layout.
@@ -120,7 +121,7 @@ impl Export {
 	}
 
 	/// Subscribe to `broadcast`, selecting an explicit catalog format. Media only;
-	/// any catalog extension (e.g. the `ts` verbatim streams) is ignored.
+	/// any catalog extension (e.g. the `mpegts` verbatim streams) is ignored.
 	pub fn with_catalog_format(
 		broadcast: moq_net::BroadcastConsumer,
 		catalog_format: CatalogFormat,
@@ -130,7 +131,7 @@ impl Export {
 }
 
 impl Export<catalog::Ext> {
-	/// Subscribe to `broadcast`, exporting its `ts` verbatim streams (SCTE-35,
+	/// Subscribe to `broadcast`, exporting its `mpegts` verbatim streams (SCTE-35,
 	/// private data, ...) back to MPEG-TS alongside the media. The `Self` type pins
 	/// the extension, so callers write `Export::with_ts(..)` with no turbofish (the
 	/// plain constructors are media-only).
@@ -150,6 +151,7 @@ impl<E: catalog::Catalog> Export<E> {
 			latency: Duration::ZERO,
 			tracks: HashMap::new(),
 			counters: HashMap::new(),
+			program_descriptors: Vec::new(),
 			psi: None,
 			last_psi: None,
 		})
@@ -251,10 +253,11 @@ impl<E: catalog::Catalog> Export<E> {
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog<E>) -> anyhow::Result<()> {
-		// The verbatim streams and PID map live in the extension. The trait only
-		// exposes `ts_mut`, and this snapshot is owned, so clone the section out
-		// (`()` yields the empty default: no verbatim streams, no preserved PIDs).
-		let ts = catalog.ts_mut().cloned().unwrap_or_default();
+		// The MPEG-TS section lives in the extension. The trait only exposes
+		// `mpegts_mut`, and this snapshot is owned, so clone it out (`()` yields the
+		// empty default: no verbatim streams, no preserved PIDs/descriptors).
+		let mpegts = catalog.mpegts_mut().cloned().unwrap_or_default();
+		self.program_descriptors = mpegts.program_descriptors.clone();
 
 		let mut active: HashMap<String, ()> = HashMap::new();
 		for name in catalog.video.renditions.keys() {
@@ -263,8 +266,12 @@ impl<E: catalog::Catalog> Export<E> {
 		for name in catalog.audio.renditions.keys() {
 			active.insert(name.clone(), ());
 		}
-		for name in ts.streams.keys() {
-			active.insert(name.clone(), ());
+		// Verbatim entries become their own export tracks; media entries in
+		// `mpegts.tracks` only augment a video/audio rendition (PID + descriptors).
+		for (name, track) in mpegts.tracks.iter() {
+			if track.verbatim.is_some() {
+				active.insert(name.clone(), ());
+			}
 		}
 
 		// The program tables are written once; reject layout changes afterwards.
@@ -290,7 +297,8 @@ impl<E: catalog::Catalog> Export<E> {
 			}
 			let kind = video_kind(config, name)?;
 			let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
-			let pid = self.alloc_pid(name, &ts.pids);
+			let pid = self.alloc_pid(name, &mpegts.tracks);
+			let descriptors = track_descriptors(&mpegts, name);
 			self.tracks.insert(
 				name.clone(),
 				Track {
@@ -299,6 +307,7 @@ impl<E: catalog::Catalog> Export<E> {
 					finished: false,
 					pid,
 					kind,
+					descriptors,
 				},
 			);
 		}
@@ -309,7 +318,8 @@ impl<E: catalog::Catalog> Export<E> {
 			}
 			let kind = audio_kind(config, name)?;
 			let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
-			let pid = self.alloc_pid(name, &ts.pids);
+			let pid = self.alloc_pid(name, &mpegts.tracks);
+			let descriptors = track_descriptors(&mpegts, name);
 			self.tracks.insert(
 				name.clone(),
 				Track {
@@ -318,17 +328,24 @@ impl<E: catalog::Catalog> Export<E> {
 					finished: false,
 					pid,
 					kind,
+					descriptors,
 				},
 			);
 		}
 
-		for (name, config) in ts.streams.iter() {
+		for (name, track) in mpegts.tracks.iter() {
+			let Some(verbatim) = &track.verbatim else {
+				continue;
+			};
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let kind = verbatim_kind(config);
-			let source = ExportSource::for_stream(&self.broadcast, name, config, self.latency)?;
-			let pid = self.alloc_pid(name, &ts.pids);
+			let kind = Kind::Verbatim {
+				stream_type: verbatim.stream_type,
+				framing: verbatim.framing,
+			};
+			let source = ExportSource::for_stream(&self.broadcast, name, verbatim, self.latency)?;
+			let pid = self.alloc_pid(name, &mpegts.tracks);
 			self.tracks.insert(
 				name.clone(),
 				Track {
@@ -337,6 +354,7 @@ impl<E: catalog::Catalog> Export<E> {
 					finished: false,
 					pid,
 					kind,
+					descriptors: track.descriptors.clone(),
 				},
 			);
 		}
@@ -345,20 +363,20 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// Pick a PID for a new track: the original PID recorded in the `ts` section
+	/// Pick a PID for a new track: the original PID recorded in the `mpegts` section
 	/// when it's free, else the next free PID from [`FIRST_ES_PID`]. PID `0x0000`
-	/// (PAT), [`PMT_PID`], `0x1FFF` (null), and any already-assigned PID are
-	/// avoided so cross-references in verbatim streams survive when possible.
-	fn alloc_pid(&self, name: &str, preserved: &std::collections::BTreeMap<String, u16>) -> u16 {
+	/// (PAT), [`PMT_PID`], `0x1FFF` (null), and any already-assigned PID are avoided
+	/// so cross-references survive when possible.
+	fn alloc_pid(&self, name: &str, tracks: &std::collections::BTreeMap<String, catalog::Track>) -> u16 {
 		let mut used: std::collections::HashSet<u16> = self.tracks.values().map(|t| t.pid).collect();
 		used.insert(0x0000);
 		used.insert(PMT_PID);
 		used.insert(0x1FFF);
 
-		if let Some(&pid) = preserved.get(name)
-			&& !used.contains(&pid)
+		if let Some(track) = tracks.get(name)
+			&& !used.contains(&track.pid)
 		{
-			return pid;
+			return track.pid;
 		}
 
 		let mut pid = FIRST_ES_PID;
@@ -409,46 +427,37 @@ impl<E: catalog::Catalog> Export<E> {
 		let es_info = tracks
 			.iter()
 			.map(|t| {
-				let (stream_type, descriptors) = match &t.kind {
-					Kind::Video(stream_type) => (*stream_type, Vec::new()),
-					Kind::Aac { .. } => (StreamType::AdtsAac, Vec::new()),
+				let stream_type = match &t.kind {
+					Kind::Video(stream_type) => *stream_type,
+					Kind::Aac { .. } => StreamType::AdtsAac,
 					// Half-rate MPEG-2 BC audio (< 32 kHz) re-announces as 0x04; the full
 					// rates are MPEG-1 (0x03). The catalog sample rate came from the frame
 					// header, so the mapping is faithful.
-					Kind::Mp2 { sample_rate } if *sample_rate < 32000 => {
-						(StreamType::Mpeg2HalvedSampleRateAudio, Vec::new())
+					Kind::Mp2 { sample_rate } if *sample_rate < 32000 => StreamType::Mpeg2HalvedSampleRateAudio,
+					Kind::Mp2 { .. } => StreamType::Mpeg1Audio,
+					Kind::Ac3 => StreamType::DolbyDigitalUpToSixChannelAudio,
+					Kind::Eac3 => StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc,
+					Kind::Verbatim { stream_type, .. } => {
+						StreamType::from_u8(*stream_type).map_err(anyhow::Error::msg)?
 					}
-					Kind::Mp2 { .. } => (StreamType::Mpeg1Audio, Vec::new()),
-					// ATSC pairs the Dolby stream types with a registration descriptor.
-					Kind::Ac3 => (
-						StreamType::DolbyDigitalUpToSixChannelAudio,
-						vec![Descriptor {
+				};
+				// Prefer the descriptors captured verbatim on import; otherwise synthesize
+				// the ATSC Dolby registration so a fresh (non-TS) AC-3/E-AC-3 track is
+				// still announced the way the import path expects.
+				let descriptors = if !t.descriptors.is_empty() {
+					to_pmt_descriptors(&t.descriptors)
+				} else {
+					match &t.kind {
+						Kind::Ac3 => vec![Descriptor {
 							tag: 0x05,
 							data: b"AC-3".to_vec(),
 						}],
-					),
-					Kind::Eac3 => (
-						StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc,
-						vec![Descriptor {
+						Kind::Eac3 => vec![Descriptor {
 							tag: 0x05,
 							data: b"EAC3".to_vec(),
 						}],
-					),
-					// Re-announce the recorded stream_type and descriptors verbatim.
-					Kind::Verbatim {
-						stream_type,
-						descriptors,
-						..
-					} => (
-						StreamType::from_u8(*stream_type).map_err(anyhow::Error::msg)?,
-						descriptors
-							.iter()
-							.map(|d| Descriptor {
-								tag: d.tag,
-								data: d.data.to_vec(),
-							})
-							.collect(),
-					),
+						_ => Vec::new(),
+					}
 				};
 				Ok(EsInfo {
 					stream_type,
@@ -458,9 +467,11 @@ impl<E: catalog::Catalog> Export<E> {
 			})
 			.collect::<anyhow::Result<Vec<_>>>()?;
 
-		// SCTE-35 is announced by a program-level 'CUEI' registration descriptor;
-		// the import keys detection off it (stream_type 0x86 alone is ambiguous).
-		let program_info = if tracks
+		// Re-emit the captured program-level descriptors. With none (a non-TS source),
+		// derive the SCTE-35 'CUEI' registration when a 0x86 verbatim stream is present.
+		let program_info = if !self.program_descriptors.is_empty() {
+			to_pmt_descriptors(&self.program_descriptors)
+		} else if tracks
 			.iter()
 			.any(|t| matches!(&t.kind, Kind::Verbatim { stream_type: 0x86, .. }))
 		{
@@ -803,12 +814,24 @@ fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 	}
 }
 
-fn verbatim_kind(config: &catalog::Stream) -> Kind {
-	Kind::Verbatim {
-		stream_type: config.stream_type,
-		framing: config.framing,
-		descriptors: config.descriptors.clone(),
-	}
+/// The PMT descriptors recorded for `name` in the `mpegts` section, if any.
+fn track_descriptors(mpegts: &catalog::Mpegts, name: &str) -> Vec<catalog::Descriptor> {
+	mpegts
+		.tracks
+		.get(name)
+		.map(|t| t.descriptors.clone())
+		.unwrap_or_default()
+}
+
+/// Convert catalog descriptors (base64 bytes) to mpeg2ts PMT descriptors.
+fn to_pmt_descriptors(descriptors: &[catalog::Descriptor]) -> Vec<Descriptor> {
+	descriptors
+		.iter()
+		.map(|d| Descriptor {
+			tag: d.tag,
+			data: d.data.to_vec(),
+		})
+		.collect()
 }
 
 /// One section-framed verbatim frame must be exactly one section: at least the

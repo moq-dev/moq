@@ -79,6 +79,11 @@ impl<E: CatalogExt> Import<E> {
 		})
 	}
 
+	/// The underlying MoQ track producer (for its name, etc.).
+	pub fn track(&self) -> &moq_net::TrackProducer {
+		self.track.track()
+	}
+
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		self.track.finish()?;

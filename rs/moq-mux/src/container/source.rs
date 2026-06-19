@@ -146,13 +146,13 @@ impl ExportSource {
 		})
 	}
 
-	/// Subscribe to a verbatim `ts` stream rendition (SCTE-35, private PES, ...). No
-	/// codec-shape transform and no description: the frames carry verbatim bytes that
+	/// Subscribe to a verbatim `mpegts` stream rendition (SCTE-35, private PES, ...).
+	/// No codec-shape transform and no description: the frames carry verbatim bytes
 	/// the muxer writes back out as PES or private sections per the stream's framing.
 	pub fn for_stream(
 		broadcast: &moq_net::BroadcastConsumer,
 		name: &str,
-		config: &ts::Stream,
+		config: &ts::Verbatim,
 		latency: Duration,
 	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;

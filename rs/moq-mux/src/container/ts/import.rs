@@ -4,7 +4,7 @@
 //! routes their payloads to the codec importers (H.264/H.265/AAC, plus the
 //! legacy MP2/AC-3/E-AC-3 verbatim path), which own their broadcast tracks and
 //! catalog entries. Elementary streams we don't decode are carried verbatim, one
-//! MoQ track per PID, described in the `ts` catalog section: PES-framed streams
+//! MoQ track per PID, described in the `mpegts` catalog section: PES-framed streams
 //! ride the normal PES reassembly, while section-framed streams (SCTE-35 and
 //! other private sections, which are not PES) are intercepted before the mpeg2ts
 //! reader and reassembled. TS adds PAT/PMT discovery, PES reassembly, the
@@ -35,7 +35,7 @@ use crate::container::Timestamp;
 /// manages the track, catalog config, and keyframe-based group boundaries.
 ///
 /// Elementary streams we don't decode are carried verbatim, one MoQ track per
-/// PID, when the catalog `E` carries the [`ts`](catalog) section: PES-framed
+/// PID, when the catalog `E` carries the [`mpegts`](catalog) section: PES-framed
 /// streams ride the normal PES reassembly, section-framed streams (SCTE-35, marked
 /// by a program-level 'CUEI' registration descriptor, and other private sections)
 /// are intercepted before the reader and reassembled. With a base `Catalog<()>`
@@ -79,9 +79,18 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// `Pes::read_from` and abort. Keyed by PID. SCTE-35 is detected via the PMT
 	/// 'CUEI' registration descriptor.
 	sections: HashMap<u16, SectionStream<E>>,
-	/// Whether the catalog can carry the `ts` section, sampled once at construction.
+	/// Whether the catalog can carry the `mpegts` section, sampled once at construction.
 	/// A base `Catalog<()>` can't, so its undecoded PIDs route to `Stream::Ignored`.
-	supports_ts: bool,
+	supports_mpegts: bool,
+	/// PMT ES-level descriptors per PID, stashed when a PMT is parsed so a decoded
+	/// media track can record them (language, registration, ...) once its track exists.
+	es_descriptors: HashMap<u16, Vec<catalog::Descriptor>>,
+	/// Decoded media PIDs already recorded into `mpegts.tracks`, so the reconcile in
+	/// [`Self::flush`] runs once per track rather than on every frame.
+	recorded_media: HashSet<Pid>,
+	/// Whether the PMT program-level descriptors have been recorded yet (set once;
+	/// PMT `program_info` is stable for the program's life).
+	program_recorded: bool,
 	/// Latest video PTS: the media clock used to timestamp private sections, which
 	/// carry no PES PTS of their own. Unwrapped independently of the video stream.
 	/// SPTS scope: one clock for the whole input. Under MPTS every program's video
@@ -96,7 +105,7 @@ impl<E: catalog::Catalog> Import<E> {
 		// Sample the real catalog once at construction, not E::default(): an extension
 		// may carry the section by value, and a snapshot clones under the mutex (no publish).
 		let mut snapshot = catalog.snapshot();
-		let supports_ts = snapshot.ts_mut().is_some();
+		let supports_mpegts = snapshot.mpegts_mut().is_some();
 		Self {
 			broadcast,
 			catalog,
@@ -110,7 +119,10 @@ impl<E: catalog::Catalog> Import<E> {
 			scratch: Vec::new(),
 			synced: false,
 			sections: HashMap::new(),
-			supports_ts,
+			supports_mpegts,
+			es_descriptors: HashMap::new(),
+			recorded_media: HashSet::new(),
+			program_recorded: false,
 			last_pts: None,
 			media_unwrap: PtsUnwrap::default(),
 		}
@@ -243,8 +255,25 @@ impl<E: catalog::Catalog> Import<E> {
 					.program_info
 					.iter()
 					.any(|d| d.tag == 0x05 && d.data.len() >= 4 && &d.data[0..4] == b"CUEI");
+
+				// Record the program-level descriptors once (PMT program_info is stable);
+				// export re-emits them verbatim, including the original CUEI.
+				if self.supports_mpegts && !self.program_recorded && !pmt.program_info.is_empty() {
+					let program = to_descriptors(&pmt.program_info);
+					if let Some(mpegts) = self.catalog.lock().mpegts_mut() {
+						mpegts.program_descriptors = program;
+					}
+					self.program_recorded = true;
+				}
+
 				for es in &pmt.es_info {
 					let stream_type = es.stream_type as u8;
+					// Stash ES descriptors so a decoded media track can record them once its
+					// (lazily created) track exists; verbatim streams record their own.
+					if self.supports_mpegts {
+						self.es_descriptors
+							.insert(es.elementary_pid.as_u16(), to_descriptors(&es.descriptors));
+					}
 					// Section-framed private data is intercepted before the reader (which
 					// aborts on private sections): private sections (0x05) and CUEI-marked
 					// SCTE-35 (0x86). Everything else routes through ensure_stream (a decoded
@@ -308,11 +337,11 @@ impl<E: catalog::Catalog> Import<E> {
 			StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc => self.legacy_stream(&eac3::DESCRIPTOR),
 			StreamType::Mpeg1Video | StreamType::Mpeg2Video => Stream::Clock,
 			// A codec we don't decode. Carry it verbatim as PES when the catalog supports
-			// the `ts` section. 0x86 is excluded: it's ambiguous (DTS audio, or a
+			// the `mpegts` section. 0x86 is excluded: it's ambiguous (DTS audio, or a
 			// non-conformant SCTE-35 mux without CUEI, which is sections the PES reader
 			// would abort on), so drop it rather than risk feeding sections to the reader.
 			other => {
-				if self.supports_ts && !matches!(other, StreamType::Dts8ChannelLosslessAudio) {
+				if self.supports_mpegts && !matches!(other, StreamType::Dts8ChannelLosslessAudio) {
 					let descriptors = to_descriptors(descriptors);
 					match VerbatimStream::new(
 						self.broadcast.clone(),
@@ -356,7 +385,7 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Register a section-framed verbatim PID (SCTE-35 or other private sections):
 	/// intercepted (see [`Self::decode`]) with a verbatim track when the catalog
-	/// carries the `ts` section, dropped as `Ignored` when it can't.
+	/// carries the `mpegts` section, dropped as `Ignored` when it can't.
 	fn ensure_section(
 		&mut self,
 		pid: Pid,
@@ -368,13 +397,13 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// This PID is becoming section-framed; drop any partial PES a prior codec left pending.
 		self.pending.remove(&pid);
-		if !self.supports_ts {
+		if !self.supports_mpegts {
 			// Always route to Ignored, replacing any prior codec on this PID (a later PMT
 			// can reassign it), so a private section never reaches the PES reader. Warn once.
 			if !matches!(self.streams.insert(pid, Stream::Ignored), Some(Stream::Ignored)) {
 				tracing::warn!(
 					pid = pid.as_u16(),
-					"private section stream detected without `ts` catalog support; dropping"
+					"private section stream detected without `mpegts` catalog support; dropping"
 				);
 			}
 			return Ok(());
@@ -481,7 +510,39 @@ impl<E: catalog::Catalog> Import<E> {
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
-		stream.write(pending, run_start)
+		stream.write(pending, run_start)?;
+
+		// Record the decoded media track's PID + PMT descriptors (language, ...) once
+		// its lazily created track exists, so export can preserve them.
+		self.record_media_track(pid);
+		Ok(())
+	}
+
+	/// Record a decoded media stream's PID and ES descriptors into `mpegts.tracks`,
+	/// once per track. No-op without the `mpegts` section, before the track exists,
+	/// or for verbatim streams (which self-register).
+	fn record_media_track(&mut self, pid: Pid) {
+		if !self.supports_mpegts || self.recorded_media.contains(&pid) {
+			return;
+		}
+		let (name, descriptors) = {
+			let Some(name) = self.streams.get(&pid).and_then(|s| s.media_track_name()) else {
+				return;
+			};
+			(
+				name,
+				self.es_descriptors.get(&pid.as_u16()).cloned().unwrap_or_default(),
+			)
+		};
+		if let Some(mpegts) = self.catalog.lock().mpegts_mut() {
+			let entry = mpegts
+				.tracks
+				.entry(name)
+				.or_insert_with(|| catalog::Track::new(pid.as_u16()));
+			entry.pid = pid.as_u16();
+			entry.descriptors = descriptors;
+		}
+		self.recorded_media.insert(pid);
 	}
 
 	/// Close the current group on every track and reopen at `sequence`.
@@ -531,8 +592,9 @@ fn to_descriptors(descriptors: &[mpeg2ts::ts::Descriptor]) -> Vec<catalog::Descr
 		.collect()
 }
 
-/// Create a verbatim track and record it in the `ts` catalog section (config in
-/// `streams`, original PID in `pids`). Shared by the section- and PES-framed paths.
+/// Create a verbatim track and record it in the `mpegts` catalog section as a
+/// [`Track`](catalog::Track) with a `verbatim` carriage record. Shared by the
+/// section- and PES-framed paths.
 fn register_verbatim<E: catalog::Catalog>(
 	broadcast: &mut moq_net::BroadcastProducer,
 	catalog: &mut crate::catalog::Producer<E>,
@@ -544,15 +606,19 @@ fn register_verbatim<E: catalog::Catalog>(
 	let track = broadcast.unique_track(".ts")?;
 
 	let mut guard = catalog.lock();
-	let Some(ts) = guard.ts_mut() else {
-		// supports_ts was true when sampled at construction; None here means the
+	let Some(mpegts) = guard.mpegts_mut() else {
+		// supports_mpegts was true when sampled at construction; None here means the
 		// catalog dropped the section since.
-		anyhow::bail!("catalog extension no longer carries a ts section");
+		anyhow::bail!("catalog extension no longer carries an mpegts section");
 	};
-	let mut stream = catalog::Stream::new(stream_type, framing);
-	stream.descriptors = descriptors;
-	ts.streams.insert(track.name.clone(), stream);
-	ts.pids.insert(track.name.clone(), pid);
+	mpegts.tracks.insert(
+		track.name.clone(),
+		catalog::Track {
+			pid,
+			descriptors,
+			verbatim: Some(catalog::Verbatim::new(stream_type, framing)),
+		},
+	);
 	drop(guard);
 
 	Ok(crate::container::Producer::new(
@@ -561,16 +627,15 @@ fn register_verbatim<E: catalog::Catalog>(
 	))
 }
 
-/// Remove a verbatim track's entries from the `ts` catalog section on drop.
+/// Remove a verbatim track's entry from the `mpegts` catalog section on drop.
 fn unregister_verbatim<E: catalog::Catalog>(catalog: &mut crate::catalog::Producer<E>, name: &str) {
-	if let Some(ts) = catalog.lock().ts_mut() {
-		ts.streams.remove(name);
-		ts.pids.remove(name);
+	if let Some(mpegts) = catalog.lock().mpegts_mut() {
+		mpegts.tracks.remove(name);
 	}
 }
 
 /// Publishes reassembled private sections (SCTE-35 and others) as verbatim frames
-/// on a track described in the `ts` catalog section.
+/// on a track described in the `mpegts` catalog section.
 ///
 /// Private sections (e.g. SCTE-35 table_id 0xFC) are not PES, so this PID is
 /// intercepted before the mpeg2ts reader (which would PES-parse it and abort).
@@ -648,7 +713,7 @@ impl<E: catalog::Catalog> Drop for SectionStream<E> {
 }
 
 /// Publishes whole reassembled PES payloads verbatim as frames on a track
-/// described in the `ts` catalog section, for elementary streams we don't decode
+/// described in the `mpegts` catalog section, for elementary streams we don't decode
 /// (DTS audio, private PES, teletext, ...).
 ///
 /// Unlike [`SectionStream`], these ride the normal PES reassembly path, so this
@@ -922,6 +987,18 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Legacy(stream) => stream.finish(),
 			Stream::Verbatim(stream) => stream.finish(),
 			Stream::Clock | Stream::Ignored => Ok(()),
+		}
+	}
+
+	/// The MoQ track name of a decoded media stream, once its (lazily created) track
+	/// exists. `None` for verbatim/clock/ignored streams (verbatim self-registers).
+	fn media_track_name(&self) -> Option<String> {
+		match self {
+			Stream::H264 { import, .. } => import.track().map(|t| t.name.clone()),
+			Stream::H265 { import, .. } => import.track().ok().map(|t| t.name.clone()),
+			Stream::Aac(stream) => stream.import.as_ref().map(|i| i.track().name.clone()),
+			Stream::Legacy(stream) => stream.import.as_ref().map(|i| i.track().name.clone()),
+			Stream::Verbatim(_) | Stream::Clock | Stream::Ignored => None,
 		}
 	}
 }
@@ -1492,7 +1569,11 @@ mod test {
 		import.decode(&mut bytes).unwrap();
 		import.finish().unwrap();
 
-		assert_eq!(catalog.snapshot().ts.streams.len(), 1, "expected one scte35 rendition");
+		assert_eq!(
+			catalog.snapshot().mpegts.tracks.len(),
+			1,
+			"expected one scte35 rendition"
+		);
 	}
 
 	// The base catalog (`Catalog<()>`) can't carry cues, so a detected CUEI PID routes to
@@ -1573,12 +1654,12 @@ mod test {
 			"upgrade drops the stale Ignored route"
 		);
 		assert_eq!(
-			catalog.snapshot().ts.streams.len(),
+			catalog.snapshot().mpegts.tracks.len(),
 			1,
 			"upgrade advertises the cue track"
 		);
 
-		let name = catalog.snapshot().ts.streams.keys().next().unwrap().clone();
+		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
 		let track = consumer.subscribe_track(&moq_net::Track::new(name)).unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
@@ -1883,7 +1964,7 @@ mod test {
 		let clock = import.last_pts.expect("video set the media clock");
 		import.finish().unwrap();
 
-		let name = catalog.snapshot().ts.streams.keys().next().unwrap().clone();
+		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
 		let track = consumer.subscribe_track(&moq_net::Track::new(name)).unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
@@ -1932,7 +2013,7 @@ mod test {
 			"video kept importing past the dropped section PID"
 		);
 		assert!(
-			catalog.snapshot().ts.streams.is_empty(),
+			catalog.snapshot().mpegts.tracks.is_empty(),
 			"a 0x86 PID without CUEI must not be cataloged"
 		);
 	}
@@ -1969,7 +2050,7 @@ mod test {
 	}
 
 	// A PES-framed elementary stream we don't decode (private data, stream_type 0x06)
-	// is carried verbatim: cataloged in the `ts` section with its PID and framing, and
+	// is carried verbatim: cataloged in the `mpegts` section with its PID and framing, and
 	// its PES payload published byte-for-byte.
 	#[tokio::test(start_paused = true)]
 	async fn private_pes_carried_verbatim() {
@@ -2000,11 +2081,12 @@ mod test {
 		import.finish().unwrap();
 
 		let snap = catalog.snapshot();
-		assert_eq!(snap.ts.streams.len(), 1, "the private PES PID is carried verbatim");
-		let (name, stream) = snap.ts.streams.iter().next().unwrap();
-		assert_eq!(stream.stream_type, 0x06, "recorded the PMT stream_type");
-		assert_eq!(stream.framing, Framing::Pes, "private PES is PES-framed");
-		assert_eq!(snap.ts.pids.get(name), Some(&DATA_PID), "recorded the original PID");
+		assert_eq!(snap.mpegts.tracks.len(), 1, "the private PES PID is carried verbatim");
+		let (name, track) = snap.mpegts.tracks.iter().next().unwrap();
+		let verbatim = track.verbatim.as_ref().expect("a verbatim carriage record");
+		assert_eq!(verbatim.stream_type, 0x06, "recorded the PMT stream_type");
+		assert_eq!(verbatim.framing, Framing::Pes, "private PES is PES-framed");
+		assert_eq!(track.pid, DATA_PID, "recorded the original PID");
 
 		let track = consumer.subscribe_track(&moq_net::Track::new(name.clone())).unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);

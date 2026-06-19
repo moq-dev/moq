@@ -1,11 +1,12 @@
-//! TS-specific catalog extension.
+//! MPEG-TS catalog extension (the `mpegts` section).
 //!
-//! The `ts` section carries everything needed to faithfully re-mux a broadcast
-//! back to MPEG-TS that doesn't belong in the codec-neutral media configs: the
-//! original PID of each track, and a verbatim description of every elementary
-//! stream we don't decode (SCTE-35, teletext, DVB subtitles, private data, ...).
-//! Demuxed media tracks stay in the base `video`/`audio` sections; only their
-//! PID (when preservation matters) lands here.
+//! The `mpegts` section carries everything needed to faithfully re-mux a broadcast
+//! back to MPEG-TS that doesn't belong in the codec-neutral media configs: one
+//! entry per track (its original PID and PMT descriptors), a `verbatim` carriage
+//! record for every elementary stream we don't decode (SCTE-35, teletext, DVB
+//! subtitles, private data, ...), and the program-level PMT descriptors. Demuxed
+//! media tracks keep their codec config in the base `video`/`audio` sections; only
+//! their MPEG-TS identity lands here.
 
 use std::collections::BTreeMap;
 
@@ -33,30 +34,89 @@ mod base64_bytes {
 	}
 }
 
-/// The `ts` catalog section.
+/// The `mpegts` catalog section.
 ///
-/// Both maps are keyed by MoQ track name and omitted from the catalog when empty,
-/// so a broadcast that needs neither stays byte-identical.
+/// Omitted from the catalog when empty, so a broadcast that needs none of it stays
+/// byte-identical to one without the extension.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
-pub struct Section {
-	/// Original MPEG-TS PID per track name, for media and verbatim streams alike.
-	/// Export prefers these so PID cross-references survive; tracks not listed are
-	/// renumbered.
+pub struct Mpegts {
+	/// Per-track MPEG-TS info, keyed by MoQ track name. Media tracks record their
+	/// PID and PMT descriptors; undecoded tracks add a [`Verbatim`] carriage record.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-	pub pids: BTreeMap<String, u16>,
+	pub tracks: BTreeMap<String, Track>,
 
-	/// Elementary streams we don't decode, carried verbatim, one MoQ track per PID.
-	/// SCTE-35 is just an entry here with `stream_type` 0x86.
-	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-	pub streams: BTreeMap<String, Stream>,
+	/// PMT program-level descriptors (`program_info`), carried verbatim. Export
+	/// re-emits these; the SCTE-35 'CUEI' registration is derived when absent.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub program_descriptors: Vec<Descriptor>,
 }
 
-impl Section {
+impl Mpegts {
 	/// True when the section carries nothing, so it's omitted from the catalog.
 	pub fn is_empty(&self) -> bool {
-		self.pids.is_empty() && self.streams.is_empty()
+		self.tracks.is_empty() && self.program_descriptors.is_empty()
+	}
+}
+
+/// One track's MPEG-TS identity and signaling.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Track {
+	/// Original MPEG-TS PID. Export prefers it so PID cross-references survive;
+	/// tracks without an entry are renumbered.
+	pub pid: u16,
+
+	/// PMT ES-level descriptors (ISO-639 language, registration, ...), carried
+	/// verbatim so they survive the round-trip.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub descriptors: Vec<Descriptor>,
+
+	/// Present when the stream is carried verbatim (not decoded into `video`/`audio`).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub verbatim: Option<Verbatim>,
+}
+
+impl Track {
+	/// A new media track entry (decoded; no verbatim carriage), recording its PID.
+	pub fn new(pid: u16) -> Self {
+		Self {
+			pid,
+			descriptors: Vec::new(),
+			verbatim: None,
+		}
+	}
+}
+
+/// Carriage record for an undecoded elementary stream carried byte-for-byte.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Verbatim {
+	/// PMT `stream_type` to re-announce (0x86 SCTE-35, 0x06 private PES, 0x05
+	/// private sections, ...).
+	pub stream_type: u8,
+
+	/// How the verbatim payload is framed, so export knows how to repacketize it.
+	#[serde(default)]
+	pub framing: Framing,
+
+	/// How the verbatim bytes are timestamp-framed as MoQ frames.
+	#[serde(default)]
+	pub container: hang::catalog::Container,
+}
+
+impl Verbatim {
+	/// A new verbatim carriage record of the given `stream_type` and `framing`,
+	/// framed as [`Container::Legacy`](hang::catalog::Container::Legacy) MoQ frames.
+	pub fn new(stream_type: u8, framing: Framing) -> Self {
+		Self {
+			stream_type,
+			framing,
+			container: hang::catalog::Container::Legacy,
+		}
 	}
 }
 
@@ -86,74 +146,39 @@ pub struct Descriptor {
 	pub data: Bytes,
 }
 
-/// One undecoded elementary stream, its payload carried verbatim as MoQ frames.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
-#[non_exhaustive]
-pub struct Stream {
-	/// PMT `stream_type` to re-announce (0x86 SCTE-35, 0x06 private PES, 0x05
-	/// private sections, ...).
-	pub stream_type: u8,
-
-	/// How the verbatim payload is framed, so export knows how to repacketize it.
-	#[serde(default)]
-	pub framing: Framing,
-
-	/// PMT ES-level descriptors, carried verbatim.
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub descriptors: Vec<Descriptor>,
-
-	/// How the verbatim bytes are timestamp-framed as MoQ frames.
-	#[serde(default)]
-	pub container: hang::catalog::Container,
-}
-
-impl Stream {
-	/// A new verbatim stream of the given `stream_type` and `framing`, framed as
-	/// [`Container::Legacy`](hang::catalog::Container::Legacy) MoQ frames.
-	pub fn new(stream_type: u8, framing: Framing) -> Self {
-		Self {
-			stream_type,
-			framing,
-			descriptors: Vec::new(),
-			container: hang::catalog::Container::Legacy,
-		}
-	}
-}
-
-/// The application catalog extension carrying the `ts` section. Empty by default,
-/// so the section is omitted until a TS-specific detail is recorded.
+/// The application catalog extension carrying the `mpegts` section. Empty by
+/// default, so the section is omitted until an MPEG-TS detail is recorded.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Ext {
-	#[serde(default, skip_serializing_if = "Section::is_empty")]
-	pub ts: Section,
+	#[serde(default, skip_serializing_if = "Mpegts::is_empty")]
+	pub mpegts: Mpegts,
 }
 
 impl CatalogExt for Ext {}
 
-/// An extension that can carry a `ts` catalog section.
+/// An extension that can carry an `mpegts` catalog section.
 ///
-/// Implement this for an application extension to compose TS carriage with
+/// Implement this for an application extension to compose MPEG-TS carriage with
 /// additional sections.
 pub trait Catalog: CatalogExt {
-	/// The section to record TS details into, or `None` for an extension that
+	/// The section to record MPEG-TS details into, or `None` for an extension that
 	/// doesn't carry them.
 	///
 	/// Keep this stable per catalog: an importer samples support once at
 	/// construction, so a result that flips between `Some` and `None` mid-stream
 	/// would disable verbatim carriage or fail.
-	fn ts_mut(&mut self) -> Option<&mut Section>;
+	fn mpegts_mut(&mut self) -> Option<&mut Mpegts>;
 }
 
 impl Catalog for () {
-	fn ts_mut(&mut self) -> Option<&mut Section> {
+	fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
 		None
 	}
 }
 
 impl Catalog for Ext {
-	fn ts_mut(&mut self) -> Option<&mut Section> {
-		Some(&mut self.ts)
+	fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
+		Some(&mut self.mpegts)
 	}
 }
 
@@ -163,7 +188,7 @@ mod test {
 
 	#[test]
 	fn empty_section_omitted() {
-		// An empty `ts` section serializes to `{}` so a media-only broadcast stays
+		// An empty `mpegts` section serializes to `{}` so a media-only broadcast stays
 		// byte-identical to one without the extension.
 		let ext = Ext::default();
 		assert_eq!(serde_json::to_string(&ext).unwrap(), "{}");
@@ -171,21 +196,38 @@ mod test {
 
 	#[test]
 	fn section_roundtrip() {
-		let mut section = Section::default();
-		section.pids.insert("video".to_string(), 0x100);
-		section.pids.insert(".ts".to_string(), 0x102);
-		let mut stream = Stream::new(0x86, Framing::Section);
-		stream.descriptors.push(Descriptor {
+		let mut mpegts = Mpegts::default();
+		// A media track: PID + a language descriptor, no verbatim carriage.
+		mpegts.tracks.insert(
+			"audio".to_string(),
+			Track {
+				pid: 0x101,
+				descriptors: vec![Descriptor {
+					tag: 0x0a,
+					data: Bytes::from_static(b"eng\x00"),
+				}],
+				verbatim: None,
+			},
+		);
+		// A verbatim SCTE-35 track.
+		mpegts.tracks.insert(
+			".scte35".to_string(),
+			Track {
+				pid: 0x102,
+				descriptors: Vec::new(),
+				verbatim: Some(Verbatim::new(0x86, Framing::Section)),
+			},
+		);
+		mpegts.program_descriptors.push(Descriptor {
 			tag: 0x05,
 			data: Bytes::from_static(b"CUEI"),
 		});
-		section.streams.insert(".ts".to_string(), stream);
 
-		let json = serde_json::to_string(&Ext { ts: section.clone() }).unwrap();
+		let json = serde_json::to_string(&Ext { mpegts: mpegts.clone() }).unwrap();
 		// Descriptor bytes are base64 ("CUEI" -> "Q1VFSQ==").
 		assert!(json.contains("\"Q1VFSQ==\""), "descriptor data is base64: {json}");
 
 		let parsed: Ext = serde_json::from_str(&json).unwrap();
-		assert_eq!(parsed.ts, section, "ts section round-trips");
+		assert_eq!(parsed.mpegts, mpegts, "mpegts section round-trips");
 	}
 }

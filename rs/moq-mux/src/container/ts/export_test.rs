@@ -308,8 +308,12 @@ async fn export_scte35_roundtrip() {
 	let scte = broadcast.unique_track(".scte35").unwrap();
 	let scte_name = scte.name.clone();
 	{
-		let stream = tscat::Stream::new(0x86, tscat::Framing::Section);
-		catalog.lock().ts.streams.insert(scte_name.clone(), stream);
+		let track = tscat::Track {
+			pid: 0x102,
+			descriptors: Vec::new(),
+			verbatim: Some(tscat::Verbatim::new(0x86, tscat::Framing::Section)),
+		};
+		catalog.lock().mpegts.tracks.insert(scte_name.clone(), track);
 	}
 	let mut scte_producer = Producer::new(scte, HangContainer::Legacy);
 	scte_producer
@@ -365,8 +369,9 @@ async fn export_scte35_roundtrip() {
 	import2.finish().unwrap();
 
 	let snapshot = catalog2.snapshot();
-	assert_eq!(snapshot.ts.streams.len(), 1, "round-trip lost the SCTE-35 track");
-	let name = snapshot.ts.streams.keys().next().unwrap();
+	let verbatim = snapshot.mpegts.tracks.values().filter(|t| t.verbatim.is_some()).count();
+	assert_eq!(verbatim, 1, "round-trip lost the SCTE-35 track");
+	let name = scte_track(&snapshot).expect("a scte35 track");
 
 	let track = consumer2.subscribe_track(&moq_net::Track::new(name.clone())).unwrap();
 	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy);
@@ -396,8 +401,12 @@ async fn scte35_without_video_export_is_rejected() {
 	let scte = broadcast.unique_track(".scte35").unwrap();
 	let scte_name = scte.name.clone();
 	{
-		let stream = tscat::Stream::new(0x86, tscat::Framing::Section);
-		catalog.lock().ts.streams.insert(scte_name, stream);
+		let track = tscat::Track {
+			pid: 0x102,
+			descriptors: Vec::new(),
+			verbatim: Some(tscat::Verbatim::new(0x86, tscat::Framing::Section)),
+		};
+		catalog.lock().mpegts.tracks.insert(scte_name, track);
 	}
 	let mut producer = Producer::new(scte, HangContainer::Legacy);
 	producer
@@ -728,10 +737,10 @@ async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
 /// Find the SCTE-35 verbatim stream (stream_type 0x86) in a catalog snapshot. A
 /// clip may carry other undecoded streams verbatim, so select by type, not order.
 fn scte_track(snap: &crate::catalog::hang::Catalog<tscat::Ext>) -> Option<String> {
-	snap.ts
-		.streams
+	snap.mpegts
+		.tracks
 		.iter()
-		.find(|(_, s)| s.stream_type == 0x86)
+		.find(|(_, t)| t.verbatim.as_ref().is_some_and(|v| v.stream_type == 0x86))
 		.map(|(name, _)| name.clone())
 }
 
