@@ -23,14 +23,26 @@ OUTPUT_DIR="dist"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --target) TARGET="$2"; shift 2 ;;
-        --version) VERSION="$2"; shift 2 ;;
-        --output) OUTPUT_DIR="$2"; shift 2 ;;
+        --target)
+            TARGET="$2"
+            shift 2
+            ;;
+        --version)
+            VERSION="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
         -h | --help)
             echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR]"
             exit 0
             ;;
-        *) echo "Unknown option: $1" >&2; exit 1 ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
     esac
 done
 
@@ -47,10 +59,25 @@ fi
 
 # Map the target triple to a CMake preset and build tree.
 case "$TARGET" in
-    *-linux-*) PRESET="ubuntu-x86_64"; BUILD_DIR="$SCRIPT_DIR/build_x86_64"; KIND="unix" ;;
-    *-apple-darwin) PRESET="macos"; BUILD_DIR="$SCRIPT_DIR/build_macos"; KIND="macos" ;;
-    *-windows-*) PRESET="windows-x64"; BUILD_DIR="$SCRIPT_DIR/build_x64"; KIND="windows" ;;
-    *) echo "Unsupported target: $TARGET" >&2; exit 1 ;;
+    *-linux-*)
+        PRESET="ubuntu-x86_64"
+        BUILD_DIR="$SCRIPT_DIR/build_x86_64"
+        KIND="unix"
+        ;;
+    *-apple-darwin)
+        PRESET="macos"
+        BUILD_DIR="$SCRIPT_DIR/build_macos"
+        KIND="macos"
+        ;;
+    *-windows-*)
+        PRESET="windows-x64"
+        BUILD_DIR="$SCRIPT_DIR/build_x64"
+        KIND="windows"
+        ;;
+    *)
+        echo "Unsupported target: $TARGET" >&2
+        exit 1
+        ;;
 esac
 
 # Homebrew ffmpeg/pkg-config on macOS (obs-deps ships libobs/Qt6, not ffmpeg).
@@ -77,13 +104,19 @@ mkdir -p "$OUTPUT_DIR"
 if [[ "$KIND" == "macos" ]]; then
     # Self-contained loadable bundle; drop into the OBS plugins directory.
     PLUGIN=$(find "$BUILD_DIR" -name 'obs-moq.plugin' -maxdepth 4 -print -quit)
-    [[ -n "$PLUGIN" ]] || { echo "obs-moq.plugin not found under $BUILD_DIR" >&2; exit 1; }
+    [[ -n "$PLUGIN" ]] || {
+        echo "obs-moq.plugin not found under $BUILD_DIR" >&2
+        exit 1
+    }
     mkdir -p "$STAGE"
     cp -R "$PLUGIN" "$STAGE/"
 else
     # OBS portable-plugin layout: extract into your OBS plugins directory.
     LIB=$(find "$BUILD_DIR" \( -name 'obs-moq.so' -o -name 'obs-moq.dll' \) -print -quit)
-    [[ -n "$LIB" ]] || { echo "obs-moq.{so,dll} not found under $BUILD_DIR" >&2; exit 1; }
+    [[ -n "$LIB" ]] || {
+        echo "obs-moq.{so,dll} not found under $BUILD_DIR" >&2
+        exit 1
+    }
     mkdir -p "$STAGE/obs-moq/bin/64bit"
     cp "$LIB" "$STAGE/obs-moq/bin/64bit/"
     cp -R "$SCRIPT_DIR/data" "$STAGE/obs-moq/"
@@ -94,13 +127,15 @@ cp "$SCRIPT_DIR/README.md" "$STAGE/"
 
 # Archive with CMake's tar so we don't depend on zip/gtar being present
 # (notably on the Windows runner). tar.gz on unix, zip on macOS/Windows.
-( cd "$OUTPUT_DIR"
-  if [[ "$KIND" == "unix" ]]; then
-      ARCHIVE="$NAME.tar.gz"
-      cmake -E tar czf "$ARCHIVE" "$NAME"
-  else
-      ARCHIVE="$NAME.zip"
-      cmake -E tar cf "$ARCHIVE" --format=zip "$NAME"
-  fi
-  rm -rf "$NAME"
-  echo "Created: $OUTPUT_DIR/$ARCHIVE" )
+(
+    cd "$OUTPUT_DIR"
+    if [[ "$KIND" == "unix" ]]; then
+        ARCHIVE="$NAME.tar.gz"
+        cmake -E tar czf "$ARCHIVE" "$NAME"
+    else
+        ARCHIVE="$NAME.zip"
+        cmake -E tar cf "$ARCHIVE" --format=zip "$NAME"
+    fi
+    rm -rf "$NAME"
+    echo "Created: $OUTPUT_DIR/$ARCHIVE"
+)
