@@ -18,9 +18,45 @@ The OBS plugin allows you to:
 - **Publish** directly from OBS to a MoQ relay
 - **Subscribe** to MoQ broadcasts as an OBS source
 
-## Repository
+It loads into a stock OBS Studio install. You no longer need to build OBS from source to use it.
 
-The plugin is maintained in a separate repository: [moq-dev/obs](https://github.com/moq-dev/obs)
+## Building
+
+The plugin lives in-tree under `cpp/obs/`. It links `libmoq`, which is built from the in-tree `rs/libmoq` crate via cargo (CMake's `MOQ_LOCAL` points at the repo root by default), so there is no prebuilt release to download.
+
+### Linux (Nix)
+
+`libobs`, `Qt6`, and `ffmpeg` come from the dev shell; no system packages required.
+
+```bash
+nix develop
+just obs build
+```
+
+### macOS
+
+The macOS build is fully native, **not** Nix. The build spec (`cpp/obs/buildspec.json`) downloads prebuilt `libobs` and `Qt6` on first configure, but `ffmpeg` and `pkg-config` come from Homebrew.
+
+Requirements:
+
+- Full **Xcode** (not just the Command Line Tools): `sudo xcode-select -s /Applications/Xcode.app`
+- `brew install ffmpeg pkg-config`
+- Run **outside** the Nix dev shell. The Nix toolchain sets `DEVELOPER_DIR`/`NIX_LDFLAGS`, which break the Xcode build. If you use direnv, run from a plain terminal or `exit` the shell first.
+
+```bash
+just obs setup   # downloads obs-deps, configures via the macOS preset
+just obs build
+just obs run     # copies the plugin into ~/Library/Application Support/obs-studio/plugins and launches OBS
+```
+
+### Windows
+
+Needs Visual Studio 2022. Run from Git Bash (for `just`); the build spec downloads obs-deps the same way as macOS.
+
+```bash
+just obs setup
+just obs build
+```
 
 ## Usage
 

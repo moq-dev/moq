@@ -1,0 +1,89 @@
+#!/usr/bin/env just --justfile
+
+# OBS Studio plugin for MoQ. See doc/bin/obs.md for the full build guide.
+#
+# Linux:   `nix develop` provides obs-studio/qt6/ffmpeg/cmake, then `just obs build`.
+# macOS:   native, NOT nix. Needs full Xcode + `brew install ffmpeg pkg-config`;
+#          run outside `nix develop` (its toolchain breaks the Xcode build).
+#          `just obs setup` downloads libobs/Qt6 via buildspec.json.
+# Windows: needs Visual Studio 2022; same buildspec download (run from Git Bash).
+#
+# libmoq is built from the in-tree crate (rs/libmoq) via cargo. MOQ_LOCAL points
+# CMake at the repo root by default, so there's no prebuilt release to download.
+
+set quiet
+
+# Repo root, passed to CMake as MOQ_LOCAL so it builds rs/libmoq from source.
+moq_local := justfile_directory() / ".." / ".."
+
+# List all of the available commands.
+default:
+    just --list
+
+# Configure via CMake presets. Override the preset or MOQ_LOCAL path if needed.
+setup preset="" path=moq_local:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PRESET=$(just preset "{{ preset }}")
+    echo "Configuring with preset: $PRESET and MOQ_LOCAL={{ path }}"
+    cmake --preset "$PRESET" -DMOQ_LOCAL="{{ path }}"
+
+# Build via CMake presets (runs `just setup` first if you haven't).
+build preset="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PRESET=$(just preset "{{ preset }}")
+    cmake --build --preset "$PRESET"
+
+# Copy the freshly built plugin into the OBS user plugin dir and launch OBS.
+# Uses the installed OBS (no local OBS build required). macOS only for now.
+run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$OSTYPE" != "darwin"* ]]; then
+        echo "just run is macOS-only for now; copy build_*/obs-moq.* into your OBS plugin dir manually" >&2
+        exit 1
+    fi
+    dest="$HOME/Library/Application Support/obs-studio/plugins"
+    mkdir -p "$dest"
+    cp -a build_macos/RelWithDebInfo/obs-moq.plugin "$dest/"
+    RUST_LOG=debug RUST_BACKTRACE=1 OBS_LOG_LEVEL=debug /Applications/OBS.app/Contents/MacOS/OBS
+
+# Lint formatting. Skips a tool silently if it isn't on $PATH (matches repo convention).
+check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v clang-format >/dev/null; then
+        git ls-files 'src/*.cpp' 'src/*.h' | xargs clang-format --dry-run --Werror
+    fi
+    if command -v gersemi >/dev/null; then
+        gersemi --check CMakeLists.txt cmake
+    fi
+
+# Auto-fix formatting.
+fix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v clang-format >/dev/null; then
+        git ls-files 'src/*.cpp' 'src/*.h' | xargs clang-format -i
+    fi
+    if command -v gersemi >/dev/null; then
+        gersemi --in-place CMakeLists.txt cmake
+    fi
+
+# Detect the CMake preset for the current platform (or use the override).
+preset override="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "{{ override }}" ]]; then
+        echo "{{ override }}"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "macos"
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        echo "ubuntu-x86_64"
+    elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
+        echo "windows-x64"
+    else
+        echo "Unknown platform: $OSTYPE" >&2
+        exit 1
+    fi

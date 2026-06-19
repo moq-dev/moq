@@ -88,6 +88,9 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
                       # CI mirrors them to moq-dev/moq-{swift,kotlin,go}
                       # on each moq-ffi-v* tag.
 
+/cpp/                 # C/C++ consumers of libmoq
+  obs/               # OBS Studio plugin (CMake; links libmoq via MOQ_LOCAL). GPL-2.0.
+
 /demo/                # Demos and test media
   boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)
   relay/             # Relay server configs (relay.toml, root.toml, leaf*.toml)
@@ -193,6 +196,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 | `rs/moq-relay` config/behavior | `doc/bin/relay/` |
 | `rs/moq-cli` | `doc/bin/cli.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
+| `rs/libmoq` C ABI (`moq.h`) | `cpp/obs/src`, `doc/bin/obs.md` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
 
 ## Branch Targeting
