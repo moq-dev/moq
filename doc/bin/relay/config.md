@@ -5,12 +5,10 @@ description: TOML configuration reference for moq-relay
 
 # Configuration
 
-moq-relay is configured via a TOML file. Pass the path as the only argument:
+moq-relay is configured via a TOML file. Pass the path as the only positional argument:
 
 ```bash
 moq-relay relay.toml
-# or
-moq-relay --config relay.toml
 ```
 
 ## Minimal Example
