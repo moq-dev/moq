@@ -272,7 +272,9 @@ let
       checkCommonArgs
       // {
         cargoArtifacts = checkDeps;
-        cargoClippyExtraArgs = "--workspace --all-targets --all-features -- -D warnings";
+        # --workspace/--all-features come from checkCommonArgs.cargoExtraArgs,
+        # which crane prepends; only add the clippy-specific flags here.
+        cargoClippyExtraArgs = "--all-targets -- -D warnings";
       }
     );
 
@@ -280,7 +282,9 @@ let
       checkCommonArgs
       // {
         cargoArtifacts = checkDeps;
-        cargoDocExtraArgs = "--workspace --no-deps --all-features";
+        # --all-targets is invalid for `cargo doc`, so it stays out of the
+        # shared cargoExtraArgs; --workspace/--all-features are inherited.
+        cargoDocExtraArgs = "--no-deps";
         RUSTDOCFLAGS = "-D warnings";
       }
     );
@@ -289,7 +293,7 @@ let
       checkCommonArgs
       // {
         cargoArtifacts = checkDeps;
-        cargoTestExtraArgs = "--workspace --all-targets --all-features";
+        cargoTestExtraArgs = "--all-targets";
       }
     );
   };
