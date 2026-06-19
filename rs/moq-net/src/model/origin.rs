@@ -87,14 +87,13 @@ impl Decode<crate::lite::Version> for Origin {
 			if r.remaining() < 8 {
 				return Err(DecodeError::Short);
 			}
-			// The full 64-bit space is valid here (no 62-bit cap).
+			// Fixed-width carries the full 64-bit space.
 			Ok(Self { id: r.get_u64() })
 		} else {
-			let id = u64::decode(r, version)?;
-			if id >= 1u64 << 62 {
-				return Err(DecodeError::InvalidValue);
-			}
-			Ok(Self { id })
+			// A lite varint is QUIC-encoded, so it already caps at 62 bits.
+			Ok(Self {
+				id: u64::decode(r, version)?,
+			})
 		}
 	}
 }
