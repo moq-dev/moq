@@ -103,6 +103,14 @@ pub struct Verbatim {
 	#[serde(default)]
 	pub framing: Framing,
 
+	/// Original PES `stream_id` (e.g. 0xBD private_stream_1 for teletext/DVB
+	/// subtitles/DVB AC-3, 0xC0-0xDF audio). Preserved so export re-emits the PES
+	/// under its real id rather than relabeling it, which strict broadcast demuxers
+	/// and TR 101 290 analyzers reject. `None` for section framing or a non-TS
+	/// source; export then falls back to `private_stream_1`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub stream_id: Option<u8>,
+
 	/// How the verbatim bytes are timestamp-framed as MoQ frames.
 	#[serde(default)]
 	pub container: hang::catalog::Container,
@@ -115,6 +123,7 @@ impl Verbatim {
 		Self {
 			stream_type,
 			framing,
+			stream_id: None,
 			container: hang::catalog::Container::Legacy,
 		}
 	}

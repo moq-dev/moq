@@ -463,6 +463,7 @@ impl<E: catalog::Catalog> Import<E> {
 		let data_len = pes_data_len(&pes.header, pes.pes_packet_len);
 		let mut pending = Pending {
 			pts: pes.header.pts.map(|t| t.as_u64()),
+			stream_id: pes.header.stream_id.as_u8(),
 			data: Vec::with_capacity(pes.data.len()),
 			data_len,
 		};
@@ -576,6 +577,8 @@ impl<E: catalog::Catalog> Import<E> {
 struct Pending {
 	/// Raw 90 kHz PTS, before wrap-unwrapping.
 	pts: Option<u64>,
+	/// PES stream_id, preserved for verbatim PES carriage.
+	stream_id: u8,
 	data: Vec<u8>,
 	/// Expected payload length for bounded PES, else `None` (unbounded video).
 	data_len: Option<usize>,
@@ -722,6 +725,8 @@ struct VerbatimStream<E: catalog::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	catalog: crate::catalog::Producer<E>,
 	unwrap: PtsUnwrap,
+	/// Whether the PES stream_id has been recorded into the catalog yet (once).
+	stream_id_recorded: bool,
 }
 
 impl<E: catalog::Catalog> VerbatimStream<E> {
@@ -744,12 +749,25 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 			track,
 			catalog,
 			unwrap: PtsUnwrap::default(),
+			stream_id_recorded: false,
 		})
 	}
 
 	/// Publish one reassembled PES payload verbatim, in its own group, stamped with
 	/// its PTS (or zero when the PES carried none).
 	fn write(&mut self, pending: Pending) -> anyhow::Result<()> {
+		// Record the original PES stream_id once, from the first PES, so export
+		// re-emits the stream under its real id (e.g. 0xBD for teletext/DVB AC-3).
+		if !self.stream_id_recorded {
+			let name = self.track.name.clone();
+			if let Some(mpegts) = self.catalog.lock().mpegts_mut()
+				&& let Some(verbatim) = mpegts.tracks.get_mut(&name).and_then(|t| t.verbatim.as_mut())
+			{
+				verbatim.stream_id = Some(pending.stream_id);
+			}
+			self.stream_id_recorded = true;
+		}
+
 		let pts = unwrap_pts(&mut self.unwrap, pending.pts)?.unwrap_or(Timestamp::ZERO);
 		let frame = crate::container::Frame {
 			timestamp: pts,
@@ -2086,6 +2104,8 @@ mod test {
 		let verbatim = track.verbatim.as_ref().expect("a verbatim carriage record");
 		assert_eq!(verbatim.stream_type, 0x06, "recorded the PMT stream_type");
 		assert_eq!(verbatim.framing, Framing::Pes, "private PES is PES-framed");
+		// `audio_pes_packet` uses stream_id 0xC0; it must be captured for faithful re-emit.
+		assert_eq!(verbatim.stream_id, Some(0xC0), "recorded the PES stream_id");
 		assert_eq!(track.pid, DATA_PID, "recorded the original PID");
 
 		let track = consumer.subscribe_track(&moq_net::Track::new(name.clone())).unwrap();

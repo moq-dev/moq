@@ -94,8 +94,13 @@ enum Kind {
 	Eac3,
 	/// An undecoded elementary stream carried verbatim (SCTE-35, private PES,
 	/// teletext, ...). Re-announced in the PMT with its recorded `stream_type` and
-	/// repacketized per its `framing`.
-	Verbatim { stream_type: u8, framing: catalog::Framing },
+	/// repacketized per its `framing`. `stream_id` is the original PES stream_id to
+	/// re-emit (PES framing only; `None` falls back to `private_stream_1`).
+	Verbatim {
+		stream_type: u8,
+		framing: catalog::Framing,
+		stream_id: Option<u8>,
+	},
 }
 
 /// The program tables plus the resolved PID layout.
@@ -112,6 +117,8 @@ struct PesUnit {
 	is_video: bool,
 	keyframe: bool,
 	timestamp: crate::container::Timestamp,
+	/// Explicit PES stream_id (verbatim PES); `None` derives it from `is_video`.
+	stream_id: Option<u8>,
 }
 
 impl Export {
@@ -361,6 +368,7 @@ impl<E: catalog::Catalog> Export<E> {
 			let kind = Kind::Verbatim {
 				stream_type: verbatim.stream_type,
 				framing: verbatim.framing,
+				stream_id: verbatim.stream_id,
 			};
 			let source = ExportSource::for_stream(&self.broadcast, name, verbatim, self.latency)?;
 			let pid = self.alloc_pid(name, &mpegts.tracks);
@@ -497,6 +505,7 @@ impl<E: catalog::Catalog> Export<E> {
 				Kind::Verbatim {
 					stream_type: 0x86,
 					framing: catalog::Framing::Section,
+					..
 				}
 			)
 		}) {
@@ -607,12 +616,20 @@ impl<E: catalog::Catalog> Export<E> {
 			// carry the bytes verbatim.
 			None => self.write_section(&mut out, pid, &frame.payload)?,
 			Some(es_payload) => {
+				// Verbatim PES re-emits its original stream_id (falling back to
+				// private_stream_1 for an undecoded stream with none recorded); media
+				// derives it from is_video.
+				let stream_id = match &kind {
+					Kind::Verbatim { stream_id, .. } => Some(stream_id.unwrap_or(StreamId::PRIVATE_STREAM_1)),
+					_ => None,
+				};
 				let unit = PesUnit {
 					pid,
 					is_pcr,
 					is_video,
 					keyframe: frame.keyframe,
 					timestamp: frame.timestamp,
+					stream_id,
 				};
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
@@ -623,10 +640,10 @@ impl<E: catalog::Catalog> Export<E> {
 	/// Packetize a PES payload into 188-byte TS packets.
 	fn write_pes(&mut self, out: &mut Vec<u8>, unit: &PesUnit, payload: &[u8]) -> anyhow::Result<()> {
 		let pts = to_ts_timestamp(unit.timestamp)?;
-		let stream_id = if unit.is_video {
-			StreamId::new(StreamId::VIDEO_MIN)
-		} else {
-			StreamId::new(StreamId::AUDIO_MIN)
+		let stream_id = match unit.stream_id {
+			Some(id) => StreamId::new(id),
+			None if unit.is_video => StreamId::new(StreamId::VIDEO_MIN),
+			None => StreamId::new(StreamId::AUDIO_MIN),
 		};
 		let header = mpeg2ts::pes::PesHeader {
 			stream_id,
