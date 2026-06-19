@@ -102,12 +102,12 @@ where
 	// Wrap the WebSocket in a WebTransport compatibility layer. We have to
 	// forward the negotiated subprotocol explicitly; axum performed the
 	// upgrade, so qmux can't sniff it from the handshake.
-	let bare = qmux::ws::Bare::new(socket);
-	let bare = match alpn.as_deref() {
-		Some(alpn) => bare.with_alpn(alpn),
-		None => bare,
+	let upgraded = qmux::ws::Upgraded::new(socket);
+	let upgraded = match alpn.as_deref() {
+		Some(alpn) => upgraded.with_alpn(alpn),
+		None => upgraded,
 	};
-	let ws = bare.accept();
+	let ws = upgraded.accept();
 	let session = moq_net::Server::new()
 		.with_publish(subscribe)
 		.with_consume(publish)
@@ -117,19 +117,23 @@ where
 	session.closed().await.map_err(Into::into)
 }
 
+/// QMux wire-format drafts that carry a prefixed `{prefix}{alpn}` subprotocol,
+/// newest first. The legacy `webtransport` format only appears as a bare ALPN.
+const QMUX_PREFIX_VERSIONS: &[qmux::Version] = &[qmux::Version::QMux01, qmux::Version::QMux00];
+
 /// Subprotocols to advertise on the WebSocket upgrade.
 ///
-/// Generates the cross product of `qmux::PREFIXES` × `moq_net::ALPNS`, with
-/// the bare qmux fallbacks (`qmux-00`, `webtransport`) appended last so
-/// versioned subprotocols always win the exact-string match axum performs.
-/// Without the versioned entries, axum picks bare `webtransport`, qmux can't
-/// resolve a moq version from it, and the relay silently downgrades clients
-/// to Lite02 via SETUP-based negotiation.
+/// Generates the cross product of `QMUX_PREFIX_VERSIONS` × `moq_net::ALPNS`,
+/// with the bare qmux fallbacks (`qmux-01`, `qmux-00`, `webtransport`) appended
+/// last so versioned subprotocols always win the exact-string match axum
+/// performs. Without the versioned entries, axum picks bare `webtransport`,
+/// qmux can't resolve a moq version from it, and the relay silently downgrades
+/// clients to Lite02 via SETUP-based negotiation.
 fn supported_subprotocols() -> Vec<String> {
-	let mut out = Vec::with_capacity(qmux::PREFIXES.len() * moq_net::ALPNS.len() + qmux::ALPNS.len());
-	for &prefix in qmux::PREFIXES {
+	let mut out = Vec::with_capacity(QMUX_PREFIX_VERSIONS.len() * moq_net::ALPNS.len() + qmux::ALPNS.len());
+	for &version in QMUX_PREFIX_VERSIONS {
 		for &alpn in moq_net::ALPNS {
-			out.push(format!("{prefix}{alpn}"));
+			out.push(format!("{}{alpn}", version.prefix()));
 		}
 	}
 	for &alpn in qmux::ALPNS {
@@ -200,7 +204,10 @@ mod tests {
 	}
 
 	fn preferred_qmux_prefix() -> &'static str {
-		qmux::PREFIXES.first().copied().expect("qmux::PREFIXES is empty")
+		QMUX_PREFIX_VERSIONS
+			.first()
+			.expect("QMUX_PREFIX_VERSIONS is empty")
+			.prefix()
 	}
 
 	#[test]
@@ -213,9 +220,9 @@ mod tests {
 		assert_eq!(list.first().map(String::as_str), Some(expected_first.as_str()));
 
 		// Every moq ALPN must appear under every qmux prefix.
-		for &prefix in qmux::PREFIXES {
+		for &version in QMUX_PREFIX_VERSIONS {
 			for &alpn in moq_net::ALPNS {
-				let entry = format!("{prefix}{alpn}");
+				let entry = format!("{}{alpn}", version.prefix());
 				assert!(list.contains(&entry), "missing {entry}");
 			}
 		}
@@ -265,12 +272,12 @@ mod tests {
 							.sink_map_err(|_| tungstenite::Error::ConnectionClosed)
 							.with(tungstenite_to_axum);
 
-						let bare = qmux::ws::Bare::new(socket);
-						let bare = match alpn.as_deref() {
-							Some(alpn) => bare.with_alpn(alpn),
-							None => bare,
+						let upgraded = qmux::ws::Upgraded::new(socket);
+						let upgraded = match alpn.as_deref() {
+							Some(alpn) => upgraded.with_alpn(alpn),
+							None => upgraded,
 						};
-						let session = bare.accept();
+						let session = upgraded.accept();
 						if let Some(tx) = server_alpn_tx.lock().unwrap().take() {
 							let _ = tx.send(session.protocol().map(str::to_owned));
 						}
@@ -292,8 +299,9 @@ mod tests {
 			axum::serve(listener, app).await.expect("axum serve");
 		});
 
+		let entries: Vec<(&str, &[qmux::Version])> = moq_net::ALPNS.iter().map(|&alpn| (alpn, &[][..])).collect();
 		let session = qmux::Client::new()
-			.with_protocols(moq_net::ALPNS)
+			.with_protocols(entries)
 			.connect(&format!("ws://{addr}/"))
 			.await
 			.expect("qmux client connect");

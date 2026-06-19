@@ -183,12 +183,12 @@ pub(crate) async fn connect(
 		.get(http::header::SEC_WEBSOCKET_PROTOCOL)
 		.and_then(|header| header.to_str().ok())
 		.map(str::to_owned);
-	let bare = qmux::ws::Bare::new(socket).with_keep_alive(qmux::KeepAlive::default());
-	let bare = match alpn.as_deref() {
-		Some(alpn) => bare.with_alpn(alpn),
-		None => bare,
+	let upgraded = qmux::ws::Upgraded::new(socket).with_keep_alive(qmux::KeepAlive::default());
+	let upgraded = match alpn.as_deref() {
+		Some(alpn) => upgraded.with_alpn(alpn),
+		None => upgraded,
 	};
-	let session = bare.connect();
+	let session = upgraded.connect();
 
 	tracing::warn!(%url, "using WebSocket fallback");
 	WEBSOCKET_WON.lock().unwrap().insert(key);
@@ -197,13 +197,23 @@ pub(crate) async fn connect(
 }
 
 fn websocket_subprotocols(alpns: &[&str]) -> Vec<String> {
-	let mut protocols = Vec::with_capacity(qmux::ALPNS.len() + qmux::PREFIXES.len() * alpns.len());
-	for (&bare, &prefix) in qmux::ALPNS.iter().zip(qmux::PREFIXES) {
-		protocols.push(bare.to_string());
-		protocols.extend(alpns.iter().map(|alpn| format!("{prefix}{alpn}")));
+	// Every moq ALPN rides on every qmux wire-format draft, so build the full
+	// `{version.prefix()}{alpn}` cross product, then append the bare qmux ALPNs
+	// (`qmux-01`, `qmux-00`, `webtransport`) as a fallback for peers that don't
+	// pin an app protocol. Mirrors qmux's own `alpn::build` ordering.
+	let mut protocols = Vec::with_capacity(QMUX_PREFIX_VERSIONS.len() * alpns.len() + qmux::ALPNS.len());
+	for &alpn in alpns {
+		for &version in QMUX_PREFIX_VERSIONS {
+			protocols.push(format!("{}{alpn}", version.prefix()));
+		}
 	}
+	protocols.extend(qmux::ALPNS.iter().map(|bare| bare.to_string()));
 	protocols
 }
+
+/// QMux wire-format drafts that carry a prefixed `{prefix}{alpn}` subprotocol,
+/// newest first. The legacy `webtransport` format only appears as a bare ALPN.
+const QMUX_PREFIX_VERSIONS: &[qmux::Version] = &[qmux::Version::QMux01, qmux::Version::QMux00];
 
 impl Error {
 	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
@@ -240,7 +250,10 @@ impl Listener {
 
 	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> Result<Self> {
 		let listener = tokio::net::TcpListener::bind(addr).await?;
-		let server = qmux::Server::new().with_protocols(alpns);
+		// Each moq ALPN rides on every qmux wire-format draft (`&[]` expands to
+		// all of them); bare qmux ALPNs are accepted as a fallback by default.
+		let entries: Vec<(&str, &[qmux::Version])> = alpns.iter().map(|&alpn| (alpn, &[][..])).collect();
+		let server = qmux::Server::new().with_protocols(entries);
 		Ok(Self { listener, server })
 	}
 
