@@ -640,6 +640,12 @@ impl Request {
 			_ => None,
 		}
 	}
+
+	/// Whether the peer presented a valid client certificate during the handshake.
+	#[deprecated(note = "use `peer_identity` instead")]
+	pub fn has_peer_certificate(&self) -> bool {
+		self.peer_identity().is_some()
+	}
 }
 
 /// Server ID for QUIC-LB support.
