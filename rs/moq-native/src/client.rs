@@ -116,11 +116,12 @@ impl Client {
 		feature = "quinn",
 		feature = "quiche",
 		feature = "websocket",
-		feature = "tcp"
+		feature = "tcp",
+		feature = "uds"
 	)))]
 	pub fn new(_config: ClientConfig) -> crate::Result<Self> {
 		Err(Error::NoBackend(
-			"no QUIC or WebSocket backend compiled; enable noq, quinn, quiche, websocket, or tcp feature",
+			"no QUIC or WebSocket backend compiled; enable noq, quinn, quiche, websocket, tcp, or uds feature",
 		))
 	}
 
@@ -130,7 +131,8 @@ impl Client {
 		feature = "quinn",
 		feature = "quiche",
 		feature = "websocket",
-		feature = "tcp"
+		feature = "tcp",
+		feature = "uds"
 	))]
 	pub fn new(config: ClientConfig) -> crate::Result<Self> {
 		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
@@ -240,11 +242,12 @@ impl Client {
 		feature = "quiche",
 		feature = "iroh",
 		feature = "websocket",
-		feature = "tcp"
+		feature = "tcp",
+		feature = "uds"
 	)))]
 	pub async fn connect(&self, _url: Url) -> crate::Result<moq_net::Session> {
 		Err(Error::NoBackend(
-			"no backend compiled; enable noq, quinn, quiche, iroh, websocket, or tcp feature",
+			"no backend compiled; enable noq, quinn, quiche, iroh, websocket, tcp, or uds feature",
 		))
 	}
 
@@ -254,7 +257,8 @@ impl Client {
 		feature = "quiche",
 		feature = "iroh",
 		feature = "websocket",
-		feature = "tcp"
+		feature = "tcp",
+		feature = "uds"
 	))]
 	pub async fn connect(&self, url: Url) -> crate::Result<moq_net::Session> {
 		let session = self.connect_inner(url).await?;
@@ -268,7 +272,8 @@ impl Client {
 		feature = "quiche",
 		feature = "iroh",
 		feature = "websocket",
-		feature = "tcp"
+		feature = "tcp",
+		feature = "uds"
 	))]
 	async fn connect_inner(&self, url: Url) -> crate::Result<moq_net::Session> {
 		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
