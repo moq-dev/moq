@@ -453,7 +453,7 @@ fn announced_free_lifecycle() {
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
 	assert!(info.active, "broadcast should be active");
-	let got = unsafe { std::slice::from_raw_parts(info.path as *const u8, info.path_len) };
+	let got = unsafe { std::slice::from_raw_parts(info.path.cast::<u8>(), info.path_len) };
 	assert_eq!(got, path, "announced path should match");
 
 	// Freeing the record succeeds once; the handle is then unknown.
