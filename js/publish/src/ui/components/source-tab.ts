@@ -13,6 +13,12 @@ interface DeviceLike {
 	preferred: Signal<string | undefined>;
 }
 
+// Structural view of source/file.ts File, avoiding a cross-module import.
+interface FileLike {
+	file: Getter<File | undefined>;
+	prompt(): void;
+}
+
 const OPTIONS: { id: SourceValue; label: string; svg: string }[] = [
 	{ id: "camera", label: "Camera", svg: camera },
 	{ id: "screen", label: "Screen", svg: screen },
@@ -106,6 +112,42 @@ export function sourceTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		DOM.render(effect, devices, section);
 	});
 
-	container.appendChild(devices);
+	// File selection only applies to the file source.
+	const filePicker = DOM.create("div");
+	parent.run((effect) => {
+		const source = effect.get(publish.state.source);
+		if (source !== "file" && !(source instanceof File)) return;
+
+		const fileSource = effect.get(publish.file);
+		if (!fileSource) return;
+
+		DOM.render(effect, filePicker, fileField(effect, fileSource));
+	});
+
+	container.appendChild(filePicker);
 	return container;
+}
+
+function fileField(parent: Effect, source: FileLike): HTMLElement {
+	const section = DOM.create("div");
+	section.appendChild(DOM.create("div", { className: "tab-section-label" }, "File"));
+
+	const field = DOM.create("div", { className: "device-field" });
+	const labelEl = DOM.create("div", { className: "device-field-label" });
+	const name = DOM.create("span", {}, "No file");
+	labelEl.append(icon(file), name);
+
+	const button = DOM.create("button", { className: "source-opt", type: "button" }, "Choose");
+	field.append(labelEl, button);
+	section.appendChild(field);
+
+	parent.run((effect) => {
+		const picked = effect.get(source.file);
+		name.textContent = picked?.name ?? "No file";
+	});
+
+	// A click is a user gesture, so the picker can open synchronously.
+	parent.event(button, "click", () => source.prompt());
+
+	return section;
 }

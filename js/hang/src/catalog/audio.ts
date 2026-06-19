@@ -7,8 +7,10 @@ const TrackSchema = z.object({
 	name: z.string(),
 });
 
-// Mirrors AudioDecoderConfig
-// https://w3c.github.io/webcodecs/#audio-decoder-config
+/**
+ * Schema for a single audio rendition's decoder config.
+ * Mirrors WebCodecs AudioDecoderConfig (https://w3c.github.io/webcodecs/#audio-decoder-config).
+ */
 export const AudioConfigSchema = z.object({
 	// See: https://w3c.github.io/webcodecs/codec_registry.html
 	codec: z.string(),
@@ -40,6 +42,7 @@ export const AudioConfigSchema = z.object({
 	jitter: z.optional(u53Schema),
 });
 
+/** Schema for the catalog audio section: a map of track name to rendition config. */
 export const AudioSchema = z.union([
 	z.object({
 		// A map of track name to rendition configuration.
@@ -58,5 +61,7 @@ export const AudioSchema = z.union([
 	),
 ]);
 
+/** The catalog audio section: renditions keyed by track name. */
 export type Audio = z.infer<typeof AudioSchema>;
+/** Decoder config for a single audio rendition. */
 export type AudioConfig = z.infer<typeof AudioConfigSchema>;

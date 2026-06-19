@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/moq-dev/moq/compare/libmoq-v0.3.4...libmoq-v0.3.5) - 2026-06-16
+
+### Fixed
+
+- *(native)* surface terminal auth connect errors ([#1649](https://github.com/moq-dev/moq/pull/1649))
+
 ## [0.3.4](https://github.com/moq-dev/moq/compare/libmoq-v0.3.3...libmoq-v0.3.4) - 2026-06-10
 
 ### Added

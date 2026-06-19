@@ -47,19 +47,29 @@ impl fmt::Display for H265 {
 			.collect::<Vec<_>>()
 			.join("");
 
-		// Skip the trailing "0" elements
-		let skip = self.constraint_flags.iter().rev().skip_while(|b| **b == 0).count();
-		let constraints = self
-			.constraint_flags
-			.iter()
-			.take(skip)
-			.map(|b| format!("{b:X}"))
-			.collect::<Vec<_>>()
-			.join(".");
+		// Constraint flags: hex encoded, trailing-zero bytes omitted. When every
+		// byte is zero the component is omitted ENTIRELY (carry its own leading
+		// '.' only when non-empty); otherwise the string ends in a dangling '.'
+		// and an empty final field that `FromStr` rejects ("expected int"). This
+		// happens for streams whose general_constraint_indicator_flags are all
+		// zero (e.g. some IP-camera HEVC encoders).
+		let significant = self.constraint_flags.iter().rev().skip_while(|b| **b == 0).count();
+		let constraints = if significant == 0 {
+			String::new()
+		} else {
+			let body = self
+				.constraint_flags
+				.iter()
+				.take(significant)
+				.map(|b| format!("{b:X}"))
+				.collect::<Vec<_>>()
+				.join(".");
+			format!(".{body}")
+		};
 
 		write!(
 			f,
-			"{}.{}{}.{}.{}{}.{}",
+			"{}.{}{}.{}.{}{}{}",
 			match self.in_band {
 				true => "hev1",
 				false => "hvc1",
@@ -116,6 +126,11 @@ impl FromStr for H265 {
 
 		let parts = parts.enumerate();
 		for (i, constraint) in parts {
+			// Tolerate an empty trailing field (a dangling '.') emitted by older
+			// encoders/muxers so we still parse their streams once this is fixed.
+			if constraint.is_empty() {
+				continue;
+			}
 			if i >= 6 {
 				return Err(Error::InvalidCodec);
 			}
@@ -190,5 +205,25 @@ mod tests {
 
 		let output = output.to_string();
 		assert_eq!(output, encoded);
+	}
+
+	#[test]
+	fn test_h265_zero_constraints() {
+		// All-zero general_constraint_indicator_flags (common in live HEVC from
+		// hardware encoders): the constraint component must be omitted entirely —
+		// no trailing '.', and it must round-trip.
+		let decoded = H265 {
+			in_band: false,
+			profile_space: 0,
+			profile_idc: 1,
+			profile_compatibility_flags: [0x60, 0, 0, 0],
+			tier_flag: false,
+			level_idc: 150,
+			constraint_flags: [0, 0, 0, 0, 0, 0],
+		};
+		assert_eq!(decoded.to_string(), "hvc1.1.60.L150");
+		assert_eq!(H265::from_str("hvc1.1.60.L150").unwrap(), decoded);
+		// And tolerate the dangling-'.' form older muxers emitted for the same stream.
+		assert_eq!(H265::from_str("hvc1.1.60.L150.").unwrap(), decoded);
 	}
 }

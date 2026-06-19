@@ -79,6 +79,10 @@
             git
             cmake
             pkg-config
+            # Sets LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS so ffmpeg-sys-next's
+            # bindgen finds libc headers (<errno.h>) on hosts without system
+            # headers in /usr/include, e.g. the self-hosted runner.
+            rustPlatform.bindgenHook
             glib
             libressl
             ffmpeg
@@ -86,7 +90,6 @@
             cargo-sort
             cargo-shear
             cargo-edit
-            cargo-sweep
             cargo-semver-checks
             cargo-deny
           ]
@@ -104,6 +107,9 @@
           bun
           # Only for NPM publishing
           nodejs_24
+          # JSR publishing. We call `deno publish` directly instead of `bunx jsr`
+          # so the release doesn't race on a runtime binary download.
+          deno
         ];
 
         # Python dependencies
@@ -221,9 +227,6 @@
           # Nix's _FORTIFY_SOURCE hardening (requires -O).
           hardeningDisable = [ "fortify" ];
 
-          shellHook = ''
-            export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
-          '';
         };
 
         formatter = pkgs.nixfmt-tree;

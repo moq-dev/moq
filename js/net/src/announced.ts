@@ -11,6 +11,7 @@ export interface AnnouncedEntry {
 	active: boolean;
 }
 
+/** Reactive backing state for an {@link Announced}: the pending queue plus a closed flag. */
 export class AnnouncedState {
 	queue = new Signal<AnnouncedEntry[]>([]);
 	closed = new Signal<boolean | Error>(false);
@@ -22,9 +23,13 @@ export class AnnouncedState {
  * @public
  */
 export class Announced {
+	/** Reactive backing state. */
 	state = new AnnouncedState();
+
+	/** Path prefix this stream is scoped to. */
 	prefix: Path.Valid;
 
+	/** Resolves with the abort error (or undefined) once closed. */
 	readonly closed: Promise<Error | undefined>;
 
 	constructor(prefix = Path.empty()) {

@@ -1,5 +1,7 @@
+/** A duration in nanoseconds, branded so it can't be mixed with other units. */
 export type Nano = number & { readonly _brand: "nano" };
 
+/** Constructors, conversions, and arithmetic for {@link Nano} values. */
 export const Nano = {
 	zero: 0 as Nano,
 	fromMicro: (us: Micro): Nano => (us * 1_000) as Nano,
@@ -17,8 +19,10 @@ export const Nano = {
 	min: (a: Nano, b: Nano): Nano => Math.min(a, b) as Nano,
 } as const;
 
+/** A duration in microseconds, branded so it can't be mixed with other units. */
 export type Micro = number & { readonly _brand: "micro" };
 
+/** Constructors, conversions, and arithmetic for {@link Micro} values. */
 export const Micro = {
 	zero: 0 as Micro,
 	fromNano: (ns: Nano): Micro => (ns / 1_000) as Micro,
@@ -36,8 +40,10 @@ export const Micro = {
 	min: (a: Micro, b: Micro): Micro => Math.min(a, b) as Micro,
 } as const;
 
+/** A duration in milliseconds, branded so it can't be mixed with other units. */
 export type Milli = number & { readonly _brand: "milli" };
 
+/** Constructors, conversions, and arithmetic for {@link Milli} values. */
 export const Milli = {
 	zero: 0 as Milli,
 	fromNano: (ns: Nano): Milli => (ns / 1_000_000) as Milli,
@@ -55,8 +61,10 @@ export const Milli = {
 	min: (a: Milli, b: Milli): Milli => Math.min(a, b) as Milli,
 } as const;
 
+/** A duration in seconds, branded so it can't be mixed with other units. */
 export type Second = number & { readonly _brand: "second" };
 
+/** Constructors, conversions, and arithmetic for {@link Second} values. */
 export const Second = {
 	zero: 0 as Second,
 	fromNano: (ns: Nano): Second => (ns / 1_000_000_000) as Second,

@@ -1,3 +1,11 @@
+/**
+ * Reactive, safe signals: observable values, derived computeds, and effects
+ * that track their dependencies and clean up automatically.
+ *
+ * @module
+ */
+
+/** Cancels a subscription, effect, or other registration when called. */
 export type Dispose = () => void;
 
 type Subscriber<T> = (value: T) => void;
@@ -8,22 +16,27 @@ const DEV = typeof import.meta.env !== "undefined" && import.meta.env?.MODE !== 
 // Symbol to identify Signal instances across different package versions
 const SIGNAL_BRAND = Symbol.for("@moq/signals");
 
+/** Read side of a signal: peek the current value and subscribe to changes. */
 export interface Getter<T> {
-	// Get the current value.
+	/** Returns the current value without subscribing. */
 	peek(): T;
 
-	// Receive a notification once when the value changes.
+	/** Calls `fn` once the next time the value changes. */
 	changed(fn: Subscriber<T>): Dispose;
 
-	// Receive a notification each time the value changes.
+	/** Calls `fn` every time the value changes. */
 	subscribe(fn: Subscriber<T>): Dispose;
 }
 
+/** Write side of a signal: replace or transform the current value. */
 export interface Setter<T> {
+	/** Replaces the value, or transforms it via a function of the previous value. */
 	set(value: T | ((prev: T) => T)): void;
+	/** Transforms the value via a function of the previous value. */
 	update(fn: (prev: T) => T): void;
 }
 
+/** A mutable observable value. Writes are coalesced per microtask and only notify subscribers when the value actually changes. */
 export class Signal<T> implements Getter<T>, Setter<T> {
 	#value: T;
 
@@ -43,6 +56,7 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		this.#value = value;
 	}
 
+	/** Returns the value if it's already a Signal, otherwise wraps it in a new Signal. */
 	static from<T>(value: T | Signal<T>): Signal<T> {
 		// Use brand check instead of instanceof to work across package instances
 		if (typeof value === "object" && value !== null && SIGNAL_BRAND in value) {
@@ -51,17 +65,21 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		return new Signal(value);
 	}
 
+	/** Returns the current value without subscribing. */
 	get(): T {
 		return this.#value;
 	}
 
+	/** Returns the current value without subscribing. */
 	// TODO rename to `get` once we've ported everything
 	peek(): T {
 		return this.#value;
 	}
 
-	// Set the current value, by default notifying subscribers if the value is different.
-	// If notify is undefined, we'll check if the value has changed after the microtask.
+	/**
+	 * Sets the current value, notifying subscribers if it changed.
+	 * Pass `notify` true to always notify or false to never notify.
+	 */
 	set(value: T, notify?: boolean): void {
 		// Capture old value before the first set in this microtask.
 		if (!this.#hasCapturedOldValue) {
@@ -126,21 +144,23 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		}
 	}
 
-	// Mutate the current value and notify subscribers unless notify is false.
-	// Unlike set, we can't use a dequal check because the function may mutate the value.
+	/** Sets the value to the result of `fn(prev)`, notifying subscribers unless `notify` is false. */
 	update(fn: (prev: T) => T, notify = true): void {
 		const value = fn(this.#value);
 		this.set(value, notify);
 	}
 
-	// Mutate the current value and notify subscribers unless notify is false.
+	/**
+	 * Mutates the current value in place via `fn`, returning `fn`'s result and
+	 * notifying subscribers unless `notify` is false.
+	 */
 	mutate<R>(fn: (value: T) => R, notify = true): R {
 		const r = fn(this.#value);
 		this.set(this.#value, notify);
 		return r;
 	}
 
-	// Receive a notification each time the value changes.
+	/** Calls `fn` every time the value changes. Returns a function to unsubscribe. */
 	subscribe(fn: Subscriber<T>): Dispose {
 		this.#subscribers.add(fn);
 		if (DEV && this.#subscribers.size >= 100 && Number.isInteger(Math.log10(this.#subscribers.size))) {
@@ -149,26 +169,27 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		return () => this.#subscribers.delete(fn);
 	}
 
-	// Receive a notification when the value changes.
+	/** Calls `fn` once the next time the value changes. Returns a function to cancel. */
 	changed(fn: (value: T) => void): Dispose {
 		this.#changed.add(fn);
 		return () => this.#changed.delete(fn);
 	}
 
-	// Resolve with the next value, once the signal changes.
+	/** Resolves with the next value, once the signal changes. */
 	next(): Promise<T> {
 		return new Promise<T>((resolve) => {
 			this.changed(resolve);
 		});
 	}
 
-	// Receive a notification when the value changes AND with the initial value.
+	/** Calls `fn` with the current value now, and again every time it changes. */
 	watch(fn: Subscriber<T>): Dispose {
 		const dispose = this.subscribe(fn);
 		queueMicrotask(() => fn(this.#value));
 		return dispose;
 	}
 
+	/** Resolves with the next value from whichever of the given signals changes first. */
 	static async race<T extends readonly unknown[]>(
 		...sigs: { [K in keyof T]: Signal<T[K]> }
 	): Promise<Awaited<T[number]>> {
@@ -192,6 +213,11 @@ type GetterType<G> = G extends Getter<infer T> ? T : never;
 type Falsy = false | 0 | "" | null | undefined;
 type Truthy<T> = Exclude<T, Falsy>;
 
+/**
+ * Runs a function that reads signals via `effect.get(...)` and reruns whenever
+ * any of them change. Registers cleanup, timers, and event listeners that are
+ * torn down automatically on each rerun and when the effect is closed.
+ */
 // TODO Make this a single instance of an Effect, so close() can work correctly from async code.
 export class Effect {
 	// Sanity check to make sure roots are being disposed on dev.
@@ -212,7 +238,7 @@ export class Effect {
 
 	#abort: AbortController = new AbortController();
 
-	// If a function is provided, it will be run with the effect as an argument.
+	/** If a function is provided, it runs immediately and reruns whenever a tracked signal changes. */
 	constructor(fn?: (effect: Effect) => void) {
 		if (DEV) {
 			const debug = new Error("created here:").stack ?? "No stack";
@@ -308,7 +334,7 @@ export class Effect {
 		}
 	}
 
-	// Get the current value of a signal, monitoring it for changes (via ===) and rerunning on change.
+	/** Reads a signal and tracks it, rerunning the effect whenever it changes. */
 	get<T>(signal: Getter<T>): T {
 		if (this.#dispose === undefined) {
 			if (DEV) {
@@ -327,9 +353,10 @@ export class Effect {
 		return value;
 	}
 
-	// Temporarily set the value of a signal, unsetting it on cleanup.
-	// The last argument is the cleanup value, set before the effect is rerun.
-	// It's optional only if T can be undefined.
+	/**
+	 * Sets a signal for the duration of this run, restoring `cleanup` on rerun or close.
+	 * The cleanup value is optional only when the signal type includes `undefined`.
+	 */
 	set<S extends Setter<unknown>>(
 		signal: S,
 		value: SetterType<S>,
@@ -348,8 +375,9 @@ export class Effect {
 		this.cleanup(() => signal.set(cleanupValue));
 	}
 
-	// Spawn an async effect that blocks the effect being reloaded until it completes.
-	// Use this.cancel if you need to detect when the effect is reloading to terminate.
+	/**
+	 * Runs an async task. The effect will not rerun until the task's promise settles.
+	 */
 	// TODO: Add effect for another layer of nesting
 	spawn(fn: () => Promise<void>) {
 		const promise = fn().catch((error) => {
@@ -367,7 +395,7 @@ export class Effect {
 		this.#async.push(promise);
 	}
 
-	// Run the function after the given delay in milliseconds UNLESS the effect is cleaned up first.
+	/** Runs `fn` after `ms` milliseconds, unless the effect reruns or closes first. */
 	timer(fn: () => void, ms: DOMHighResTimeStamp) {
 		if (this.#dispose === undefined) {
 			if (DEV) {
@@ -384,7 +412,7 @@ export class Effect {
 		this.cleanup(() => timeout && clearTimeout(timeout));
 	}
 
-	// Run the function, and clean up the nested effect after the given delay.
+	/** Runs `fn` as a nested effect, then closes that effect after `ms` milliseconds. */
 	timeout(fn: (effect: Effect) => void, ms: DOMHighResTimeStamp) {
 		if (this.#dispose === undefined) {
 			if (DEV) {
@@ -408,7 +436,7 @@ export class Effect {
 		});
 	}
 
-	// Run the callback on the next animation frame, unless the effect is cleaned up first.
+	/** Runs `fn` on the next animation frame, unless the effect reruns or closes first. */
 	animate(fn: (now: DOMHighResTimeStamp) => void) {
 		if (this.#dispose === undefined) {
 			if (DEV) {
@@ -426,6 +454,7 @@ export class Effect {
 		});
 	}
 
+	/** Runs `fn` every `ms` milliseconds until the effect reruns or closes. */
 	interval(fn: () => void, ms: DOMHighResTimeStamp) {
 		if (this.#dispose === undefined) {
 			if (DEV) {
@@ -440,7 +469,7 @@ export class Effect {
 		this.cleanup(() => clearInterval(interval));
 	}
 
-	// Create a nested effect that can be rerun independently.
+	/** Creates a nested effect that reruns independently and is closed with its parent. */
 	run(fn: (effect: Effect) => void) {
 		if (this.#dispose === undefined) {
 			if (DEV) {
@@ -453,20 +482,19 @@ export class Effect {
 		this.#dispose.push(() => effect.close());
 	}
 
-	// Backwards compatibility with the old name.
+	/** Alias for {@link run}, kept for backwards compatibility. */
 	effect(fn: (effect: Effect) => void) {
 		return this.run(fn);
 	}
 
-	// Create a derived signal whose lifetime is tied to this effect.
-	// It's closed (unsubscribing from its dependencies) when the effect reruns or closes.
+	/** Creates a derived signal scoped to this effect, closed when the effect reruns or closes. */
 	computed<T>(fn: (effect: Effect) => T): Computed<T> {
 		const computed = new Computed(fn);
 		this.cleanup(() => computed.close());
 		return computed;
 	}
 
-	// Get the values of multiple signals, returning undefined if any are falsy.
+	/** Reads and tracks several signals, returning their values or `undefined` if any is falsy. */
 	getAll<S extends readonly Getter<unknown>[]>(
 		signals: [...S],
 	): { [K in keyof S]: Truthy<GetterType<S[K]>> } | undefined {
@@ -479,7 +507,7 @@ export class Effect {
 		return values as { [K in keyof S]: Truthy<GetterType<S[K]>> };
 	}
 
-	// A helper to call a function when a signal changes.
+	/** Runs `fn` with the signal's value now and again whenever it changes, scoped to this effect. */
 	subscribe<T>(signal: Getter<T>, fn: (value: T) => void) {
 		if (this.#dispose === undefined) {
 			if (DEV) {
@@ -495,7 +523,7 @@ export class Effect {
 		});
 	}
 
-	// Add an event listener that automatically removes on cleanup.
+	/** Adds an event listener that is removed automatically when the effect reruns or closes. */
 	event<K extends keyof HTMLElementEventMap>(
 		target: HTMLElement,
 		type: K,
@@ -580,7 +608,7 @@ export class Effect {
 		target.addEventListener(type, listener, merged);
 	}
 
-	// Register a cleanup function.
+	/** Registers a function to run when the effect reruns or closes. */
 	cleanup(fn: Dispose): void {
 		if (this.#dispose === undefined) {
 			if (DEV) {
@@ -594,6 +622,7 @@ export class Effect {
 		this.#dispose.push(fn);
 	}
 
+	/** Stops the effect permanently, running all cleanup and unsubscribing from every signal. */
 	close(): void {
 		if (this.#dispose === undefined) {
 			return;
@@ -616,57 +645,69 @@ export class Effect {
 		}
 	}
 
+	/** Resolves when the effect is closed. */
 	get closed(): Promise<void> {
 		return this.#closed.promise;
 	}
 
+	/** Resolves when the current run is about to be torn down, by a rerun or close. */
 	get cancel(): Promise<void> {
 		return this.#stopped.promise;
 	}
 
+	/** An AbortSignal that fires when the current run is torn down. */
 	get abort(): AbortSignal {
 		return this.#abort.signal;
 	}
 
+	/** Copies `src` into `dst` and keeps `dst` in sync as `src` changes. */
 	proxy<T>(dst: Setter<T>, src: Getter<T>): void {
 		this.subscribe(src, (value) => dst.update(() => value));
 	}
 }
 
-// A read-only signal derived from other signals.
-//
-// The compute function reads its dependencies with `effect.get(...)`, exactly
-// like an effect, and returns the derived value. It reruns whenever a
-// dependency changes. Keep it pure: derive a value, don't perform side effects.
-//
-// Like every signal, updates are asynchronous: the value is `undefined` until
-// the first run completes (and after close()), and recomputes propagate on a
-// microtask. Read it inside an effect and handle the `undefined` case, the same
-// way you would any other signal that starts empty.
+/**
+ * A read-only signal derived from other signals.
+ *
+ * The compute function reads its dependencies with `effect.get(...)`, exactly
+ * like an effect, and returns the derived value. It reruns whenever a
+ * dependency changes. Keep it pure: derive a value, don't perform side effects.
+ *
+ * Like every signal, updates are asynchronous: the value is `undefined` until
+ * the first run completes (and after close()), and recomputes propagate on a
+ * microtask. Read it inside an effect and handle the `undefined` case, the same
+ * way you would any other signal that starts empty.
+ */
 export class Computed<T> implements Getter<T | undefined> {
 	#signal = new Signal<T | undefined>(undefined);
 	#effect: Effect;
 
+	/** Creates a computed that derives its value from `fn`, rerunning when dependencies change. */
 	constructor(fn: (effect: Effect) => T) {
 		this.#effect = new Effect((effect) => {
 			this.#signal.set(fn(effect));
 		});
 	}
 
+	/** Returns the current derived value without subscribing (`undefined` until the first run). */
 	peek(): T | undefined {
 		return this.#signal.peek();
 	}
 
+	/** Calls `fn` once the next time the derived value changes. */
 	changed(fn: Subscriber<T | undefined>): Dispose {
 		return this.#signal.changed(fn);
 	}
 
+	/** Calls `fn` every time the derived value changes. */
 	subscribe(fn: Subscriber<T | undefined>): Dispose {
 		return this.#signal.subscribe(fn);
 	}
 
-	// Stop recomputing and tracking dependencies. Required for standalone computeds;
-	// an effect.computed() is closed automatically with its parent effect.
+	/**
+	 * Stops recomputing and tracking dependencies. Required for standalone computeds;
+	 * an `effect.computed()` is closed automatically with its parent effect.
+	 */
 	close(): void {
 		this.#effect.close();
 	}

@@ -55,12 +55,12 @@ cgo bindings with prebuilt static libraries per platform. Resolved via `go get g
 
 ## Picking a language
 
-- **Server, CLI, or anything native** &rarr; [Rust](/lib/rs/)
-- **Web browser or Node/Bun/Deno** &rarr; [TypeScript](/lib/js/)
-- **iOS / macOS app** &rarr; [Swift](/lib/swift/)
-- **Android app or JVM service** &rarr; [Kotlin](/lib/kt/)
-- **Scripts, ML pipelines, prototypes** &rarr; [Python](/lib/py/)
-- **Go service or tooling** &rarr; [Go](/lib/go/)
-- **Anything else with a C ABI** &rarr; [C](/lib/c/)
+- **Server, CLI, or anything native** → [Rust](/lib/rs/)
+- **Web browser or Node/Bun/Deno** → [TypeScript](/lib/js/)
+- **iOS / macOS app** → [Swift](/lib/swift/)
+- **Android app or JVM service** → [Kotlin](/lib/kt/)
+- **Scripts, ML pipelines, prototypes** → [Python](/lib/py/)
+- **Go service or tooling** → [Go](/lib/go/)
+- **Anything else with a C ABI** → [C](/lib/c/)
 
 All FFI bindings expose the same protocol surface as the Rust core, so a publisher in Python can be consumed by a Swift subscriber, etc.

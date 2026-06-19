@@ -37,6 +37,12 @@ The binary will be in `target/release/moq-relay`.
 cargo install moq-relay
 ```
 
+### Using winget (Windows)
+
+```powershell
+winget install moq-dev.moq-relay
+```
+
 ### Using Nix
 
 ```bash

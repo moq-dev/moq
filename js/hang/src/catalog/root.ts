@@ -16,4 +16,5 @@ export const RootSchema = z.looseObject({
 	audio: z.optional(AudioSchema),
 });
 
+/** The root catalog object, with optional video and audio sections plus any app extensions. */
 export type Root = z.infer<typeof RootSchema>;

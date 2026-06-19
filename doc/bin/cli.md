@@ -15,6 +15,12 @@ description: Command-line tools for MoQ media
 cargo install moq-cli
 ```
 
+### Using winget (Windows)
+
+```powershell
+winget install moq-dev.moq-cli
+```
+
 ### Using Nix
 
 ```bash
@@ -62,39 +68,7 @@ ffmpeg -i input.mp4 -f mpegts - | moq-cli publish - https://relay.example.com/an
 
 ### Capture a Webcam
 
-The `capture` subcommand captures and encodes from local devices directly, no
-external FFmpeg process required. It publishes the camera as an H.264 video
-track and the microphone as an Opus audio track on the same broadcast. It is
-gated behind the `capture` feature, whose video path pulls in a system FFmpeg
-(libav\*) build dependency (audio is pure-Rust via cpal):
-
-Build (or run) with the feature enabled:
-
-```bash
-cargo build --release -p moq-cli --features capture
-# or run straight from a checkout:
-cargo run -p moq-cli --features capture -- publish --url https://relay.example.com --broadcast cam.hang capture
-
-# Default camera + microphone, hardware-encoded H.264 when available:
-moq-cli publish --url https://relay.example.com --broadcast cam.hang capture
-
-# Pick devices, resolution, and bitrates:
-moq-cli publish --url https://relay.example.com --broadcast cam.hang \
-    capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 \
-            --microphone "MacBook Pro Microphone" --audio-bitrate 64000
-
-# One medium only:
-moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --no-audio
-moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --no-video
-```
-
-Video capture uses the platform backend (avfoundation on macOS, v4l2 on Linux,
-dshow on Windows) and picks a hardware encoder (`h264_videotoolbox` /
-`h264_nvenc` / `h264_vaapi`) when one is present, falling back to software
-(`libx264`); force either with `--hardware` / `--software`. Audio capture uses
-cpal (CoreAudio / WASAPI / ALSA) and encodes Opus.
-
-Alternatively, pipe an external FFmpeg process as MPEG-TS:
+Pipe an external FFmpeg process as MPEG-TS:
 
 ```bash
 # macOS
@@ -154,7 +128,8 @@ Publish (read from stdin unless noted):
 
 - `avc3` - raw H.264 Annex-B
 - `fmp4` - fragmented MP4 / CMAF
-- `ts` - MPEG-TS (H.264 / H.265 video, AAC audio)
+- `ts` - MPEG-TS (H.264 / H.265 video; AAC, MP2, AC-3, or E-AC-3 audio)
+- `flv` - FLV / RTMP (H.264 video, AAC audio)
 - `hls --playlist <url>` - HLS playlist ingest
 - `capture` - capture local devices directly (camera H.264 + microphone Opus; requires the `capture` build feature; does not read stdin)
 
@@ -163,6 +138,7 @@ Subscribe (`--format`):
 - `fmp4` - fragmented MP4 / CMAF
 - `mkv` - Matroska / WebM
 - `ts` - MPEG-TS
+- `flv` - FLV / RTMP (H.264 video, AAC audio)
 
 ### MPEG-TS
 
@@ -181,6 +157,31 @@ TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
 (avc3 / hev1) and out-of-band (avc1 / hvc1, e.g. from an fMP4 import) video
 sources work: the parameter sets are read from the bitstream or the catalog
 `description` and re-injected as Annex-B on each keyframe.
+
+Broadcast audio (MP2, AC-3, E-AC-3) is carried verbatim: complete, well-formed
+frames pass through byte-exact, never transcoded; malformed input is rejected
+rather than mis-described. The catalog describes the codec honestly so a
+subscriber that can decode it (typically TS gear) picks it up; browsers cannot
+play these codecs and should skip the rendition.
+
+### FLV
+
+Ingest an FLV stream from FFmpeg and play one back out:
+
+```bash
+# Publish: remux a file to FLV and pipe it in
+ffmpeg -i input.mp4 -c copy -f flv - | \
+    moq-cli publish --url https://relay.example.com --broadcast my-stream flv
+
+# Subscribe: pull FLV back out and play it
+moq-cli subscribe --url https://relay.example.com --broadcast my-stream --format flv | ffplay -
+```
+
+FLV is the classic RTMP container: H.264 video carried as length-prefixed NALU
+with an out-of-band avcC, and AAC audio carried raw with an out-of-band
+AudioSpecificConfig. Both pass straight through to the catalog `description`. The
+enhanced E-RTMP FourCC payloads (HEVC, AV1, Opus) and the older codecs (VP6, MP3)
+are not supported.
 
 ## Authentication
 

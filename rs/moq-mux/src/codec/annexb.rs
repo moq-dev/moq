@@ -99,66 +99,17 @@ pub fn after_start_code(b: &[u8]) -> anyhow::Result<Option<usize>> {
 }
 
 // Return the number of bytes until the next start code, and the size of that start code.
-pub fn find_start_code(mut b: &[u8]) -> Option<(usize, usize)> {
-	// Okay this is over-engineered because this was my interview question.
-	// We need to find either a 3 byte or 4 byte start code.
-	// 3-byte: 0 0 1
-	// 4-byte: 0 0 0 1
-	//
-	// You fail the interview if you call string.split twice or something.
-	// You get a pass if you do index += 1 and check the next 3-4 bytes.
-	// You get my eternal respect if you check the 3rd byte first.
-	// What?
-	//
-	// If we check the 3rd byte and it's not a 0 or 1, then we immediately index += 3
-	// Sometimes we might only skip 1 or 2 bytes, but it's still better than checking every byte.
-	//
-	// TODO Is this the type of thing that SIMD could further improve?
-	// If somebody can figure that out, I'll buy you a beer.
-	let size = b.len();
-
-	while b.len() >= 3 {
-		// ? ? ?
-		match b[2] {
-			// ? ? 0
-			0 if b.len() >= 4 => match b[3] {
-				// ? ? 0 1
-				1 => match b[1] {
-					// ? 0 0 1
-					0 => match b[0] {
-						// 0 0 0 1
-						0 => return Some((size - b.len(), 4)),
-						// ? 0 0 1
-						_ => return Some((size - b.len() + 1, 3)),
-					},
-					// ? x 0 1
-					_ => b = &b[4..],
-				},
-				// ? ? 0 0 - skip only 1 byte to check for potential 0 0 0 1
-				0 => b = &b[1..],
-				// ? ? 0 x
-				_ => b = &b[4..],
-			},
-			// ? ? 0 FIN
-			0 => return None,
-			// ? ? 1
-			1 => match b[1] {
-				// ? 0 1
-				0 => match b[0] {
-					// 0 0 1
-					0 => return Some((size - b.len(), 3)),
-					// ? 0 1
-					_ => b = &b[3..],
-				},
-				// ? x 1
-				_ => b = &b[3..],
-			},
-			// ? ? x
-			_ => b = &b[3..],
-		}
+//
+// Both forms share the `0 0 1` suffix (3-byte is `0 0 1`, 4-byte is `0 0 0 1`), so a single
+// SIMD-accelerated substring search for `0 0 1` finds the core. We then peek one byte back to
+// decide whether a leading zero promotes it to a 4-byte code.
+pub fn find_start_code(b: &[u8]) -> Option<(usize, usize)> {
+	let core = memchr::memmem::find(b, &[0, 0, 1])?;
+	if core > 0 && b[core - 1] == 0 {
+		Some((core - 1, 4))
+	} else {
+		Some((core, 3))
 	}
-
-	None
 }
 
 #[cfg(test)]

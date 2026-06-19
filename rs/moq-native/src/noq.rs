@@ -80,6 +80,9 @@ pub enum Error {
 	#[error("connection ID length ({0}) exceeds maximum of 20")]
 	QuicLbCidTooLong(usize),
 
+	#[error("failed to build client certificate verifier")]
+	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
+
 	#[error(transparent)]
 	NoInitialCipherSuite(#[from] noq::crypto::rustls::NoInitialCipherSuite),
 
@@ -91,6 +94,9 @@ pub enum Error {
 
 	#[error(transparent)]
 	Client(#[from] web_transport_noq::ClientError),
+
+	#[error(transparent)]
+	ConnectRejected(#[from] crate::ConnectError),
 
 	#[error(transparent)]
 	Server(#[from] web_transport_noq::ServerError),
@@ -118,12 +124,13 @@ pub(crate) struct NoqClient {
 
 impl NoqClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
-		let socket = std::net::UdpSocket::bind(config.bind).map_err(Error::BindSocket)?;
+		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
 
 		let mut transport = noq::TransportConfig::default();
 		transport.max_idle_timeout(Some(time::Duration::from_secs(30).try_into().unwrap()));
 		transport.keep_alive_interval(Some(time::Duration::from_secs(5)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
+		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
 
 		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
 		let max_streams = noq::VarInt::from_u64(max_streams).unwrap_or(noq::VarInt::MAX);
@@ -182,7 +189,7 @@ impl NoqClient {
 			let fingerprint = resp.text().await.map_err(Error::ReadFingerprint)?;
 			let fingerprint = hex::decode(fingerprint.trim())?;
 
-			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), fingerprint);
+			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), vec![fingerprint]);
 			config.dangerous().set_certificate_verifier(Arc::new(verifier));
 
 			url.set_scheme("https").expect("failed to set scheme");
@@ -217,7 +224,9 @@ impl NoqClient {
 		}
 
 		let session = match url.scheme() {
-			"https" => web_transport_noq::Session::connect(connection, request).await?,
+			"https" => web_transport_noq::Session::connect(connection, request)
+				.await
+				.map_err(map_client_error)?,
 			"moqt" | "moql" => {
 				let handshake = connection
 					.handshake_data()
@@ -238,6 +247,49 @@ impl NoqClient {
 	}
 }
 
+impl Error {
+	pub(crate) fn connect_error(&self) -> Option<crate::ConnectError> {
+		match self {
+			Self::ConnectRejected(err) => Some(*err),
+			Self::Client(err) => classify_client_error(err),
+			_ => None,
+		}
+	}
+}
+
+fn map_client_error(err: web_transport_noq::ClientError) -> Error {
+	if let Some(err) = classify_client_error(&err) {
+		return err.into();
+	}
+
+	err.into()
+}
+
+fn classify_client_error(err: &web_transport_noq::ClientError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_noq::ClientError::HttpError(err) => classify_connect_error(err),
+		_ => None,
+	}
+}
+
+fn classify_connect_error(err: &web_transport_noq::ConnectError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_noq::ConnectError::ErrorStatus(status) => crate::ConnectError::from_status_u16(status.as_u16()),
+		web_transport_noq::ConnectError::ProtoError(err) => classify_proto_error(err),
+		_ => None,
+	}
+}
+
+fn classify_proto_error(err: &web_transport_noq::proto::ConnectError) -> Option<crate::ConnectError> {
+	match err {
+		web_transport_noq::proto::ConnectError::ErrorStatus(status)
+		| web_transport_noq::proto::ConnectError::WrongStatus(Some(status)) => {
+			crate::ConnectError::from_status_u16(status.as_u16())
+		}
+		_ => None,
+	}
+}
+
 // ── Server ──────────────────────────────────────────────────────────
 
 pub(crate) struct NoqServer {
@@ -251,6 +303,7 @@ impl NoqServer {
 		transport.max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()));
 		transport.keep_alive_interval(Some(Duration::from_secs(5)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
+		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
 
 		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
 		let max_streams = noq::VarInt::from_u64(max_streams).unwrap_or(noq::VarInt::MAX);
@@ -265,11 +318,22 @@ impl NoqServer {
 		certs.load_certs(&config.tls)?;
 		let certs = Arc::new(certs);
 
-		let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+		let tls_builder = rustls::ServerConfig::builder_with_provider(provider.clone())
 			.with_protocol_versions(&[&rustls::version::TLS13])
-			.map_err(crate::tls::Error::from)?
-			.with_no_client_auth()
-			.with_cert_resolver(certs.clone());
+			.map_err(crate::tls::Error::from)?;
+
+		let mut tls = if config.tls.root.is_empty() {
+			tls_builder.with_no_client_auth().with_cert_resolver(certs.clone())
+		} else {
+			let roots = config.tls.load_roots()?;
+			let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+				.allow_unauthenticated()
+				.build()
+				.map_err(Error::ClientVerifier)?;
+			tls_builder
+				.with_client_cert_verifier(verifier)
+				.with_cert_resolver(certs.clone())
+		};
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
 		let mut alpns: Vec<Vec<u8>> = config
@@ -286,6 +350,15 @@ impl NoqServer {
 		let tls: noq::crypto::rustls::QuicServerConfig = tls.try_into()?;
 		let mut tls = noq::ServerConfig::with_crypto(Arc::new(tls));
 		tls.transport_config(transport);
+
+		// Advertise the preferred_address transport parameter (RFC 9000 §9.6).
+		// noq allocates a fresh CID + reset token for the address during the handshake.
+		if let Some(addr) = config.preferred_v4 {
+			tls.preferred_address_v4(Some(addr));
+		}
+		if let Some(addr) = config.preferred_v6 {
+			tls.preferred_address_v6(Some(addr));
+		}
 
 		// There's a bit more boilerplate to make a generic endpoint.
 		let runtime = noq::default_runtime().ok_or(Error::NoRuntime)?;
@@ -316,7 +389,7 @@ impl NoqServer {
 			}));
 		}
 
-		let socket = std::net::UdpSocket::bind(listen).map_err(Error::BindSocket)?;
+		let socket = crate::bind::udp(listen).map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
 		let quic = noq::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;
@@ -440,6 +513,16 @@ impl NoqRequest {
 			NoqRequest::Raw { .. } => None,
 			NoqRequest::WebTransport { request, .. } => Some(&request.url),
 		}
+	}
+
+	/// Whether the peer presented a client certificate that rustls validated
+	/// against the configured `tls.root` during the handshake.
+	pub fn has_peer_certificate(&self) -> bool {
+		let conn = match self {
+			NoqRequest::Raw { connection, .. } => connection,
+			NoqRequest::WebTransport { request, .. } => request.conn(),
+		};
+		conn.peer_identity().is_some()
 	}
 
 	/// Reject the session with a status code.

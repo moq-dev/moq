@@ -1,19 +1,24 @@
 import { Signal } from "@moq/signals";
 import { Group } from "./group.ts";
 
+/** Reactive backing state for a {@link Track}: buffered groups, a closed flag, and the subscription priority. */
 export class TrackState {
 	groups = new Signal<Group[]>([]);
 	closed = new Signal<boolean | Error>(false);
 	priority = new Signal<number | undefined>(undefined);
 }
 
+/** A live stream of groups within a broadcast, identified by name. */
 export class Track {
+	/** Name of this track within its broadcast. */
 	readonly name: string;
 
+	/** Reactive backing state. */
 	state = new TrackState();
 	#next?: number;
 	#nextSequence = 0;
 
+	/** Resolves with the abort error (or undefined) once closed. */
 	readonly closed: Promise<Error | undefined>;
 
 	constructor(name: string) {
@@ -75,18 +80,21 @@ export class Track {
 		group.close();
 	}
 
+	/** Appends a string to the track as its own single-frame group. */
 	writeString(str: string) {
 		const group = this.appendGroup();
 		group.writeString(str);
 		group.close();
 	}
 
+	/** Appends a JSON value to the track as its own single-frame group. */
 	writeJson(json: unknown) {
 		const group = this.appendGroup();
 		group.writeJson(json);
 		group.close();
 	}
 
+	/** Appends a boolean to the track as its own single-frame group. */
 	writeBool(bool: boolean) {
 		const group = this.appendGroup();
 		group.writeBool(bool);
@@ -142,11 +150,12 @@ export class Track {
 		}
 	}
 
+	/** Reads the next frame across all groups, discarding older groups. */
 	async readFrame(): Promise<Uint8Array | undefined> {
 		return (await this.readFrameSequence())?.data;
 	}
 
-	// Returns the sequence number of the group and frame, not just the data.
+	/** Reads the next frame along with its group and frame sequence numbers. */
 	async readFrameSequence(): Promise<{ group: number; frame: number; data: Uint8Array } | undefined> {
 		for (;;) {
 			const groups = this.state.groups.peek();
@@ -193,18 +202,21 @@ export class Track {
 		}
 	}
 
+	/** Reads the next frame and decodes it as a UTF-8 string. */
 	async readString(): Promise<string | undefined> {
 		const next = await this.readFrame();
 		if (!next) return undefined;
 		return new TextDecoder().decode(next);
 	}
 
+	/** Reads the next frame and parses it as JSON. */
 	async readJson(): Promise<unknown | undefined> {
 		const next = await this.readString();
 		if (!next) return undefined;
 		return JSON.parse(next);
 	}
 
+	/** Reads the next frame and decodes it as a one-byte boolean, throwing on a malformed frame. */
 	async readBool(): Promise<boolean | undefined> {
 		const next = await this.readFrame();
 		if (!next) return undefined;

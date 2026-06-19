@@ -17,7 +17,7 @@ Two public entry points:
 - `encode::Producer` publishes H.264 you encoded yourself, handling the catalog
   and framing via `moq_mux::codec::h264::Import`.
 
-Used by `moq-cli`'s `capture` subcommand. Requires a system FFmpeg (libav\*).
+Requires a system FFmpeg (libav\*).
 
 The `decode` (consume) side, mirror of `moq-audio`'s `AudioConsumer`, is not
 implemented yet.

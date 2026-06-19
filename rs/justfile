@@ -42,13 +42,12 @@ ci FILES="":
     just rs test --all-features
     just build
 
-# Auto-fix clippy/format/shear/sort, then sweep stale target/.
+# Auto-fix clippy/format/shear/sort.
 fix:
     cargo clippy --fix --allow-staged --allow-dirty --all-targets
     cargo fmt --all
     cargo shear --fix
     cargo sort --workspace --no-format
-    if command -v cargo-sweep >/dev/null 2>&1; then cargo sweep --time 3; fi
 
 test *args:
     cargo test --all-targets {{ args }}

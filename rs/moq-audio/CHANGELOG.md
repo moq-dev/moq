@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.3...moq-audio-v0.0.4) - 2026-06-16
+
+### Fixed
+
+- *(moq-audio)* surface denied/unavailable mic instead of hanging ([#1708](https://github.com/moq-dev/moq/pull/1708))
+
 ## [0.0.3](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.2...moq-audio-v0.0.3) - 2026-06-10
 
 ### Added

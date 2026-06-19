@@ -1,11 +1,13 @@
 import { Signal } from "@moq/signals";
 import { Track } from "./track.ts";
 
+/** A track a subscriber asked for, along with its requested delivery priority. */
 export interface TrackRequest {
 	track: Track;
 	priority: number;
 }
 
+/** Reactive backing state for a {@link Broadcast}: requested tracks plus a closed flag. */
 export class BroadcastState {
 	requested = new Signal<TrackRequest[]>([]);
 	closed = new Signal<boolean | Error>(false);
@@ -17,8 +19,10 @@ export class BroadcastState {
  * @public
  */
 export class Broadcast {
+	/** Reactive backing state. */
 	state = new BroadcastState();
 
+	/** Resolves with the abort error (or undefined) once closed. */
 	readonly closed: Promise<Error | undefined>;
 
 	constructor() {

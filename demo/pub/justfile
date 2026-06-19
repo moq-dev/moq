@@ -221,10 +221,6 @@ clock action url="http://localhost:4443" *args:
 
     cargo run -p moq-native --example clock -- --url "{{ url }}" --broadcast "clock" {{ args }} {{ action }}
 
-# Connect tokio-console to the publisher (port 6681).
-console:
-    tokio-console http://127.0.0.1:6681
-
 # --- GStreamer ---
 
 # Publish a video using GStreamer to a relay server.

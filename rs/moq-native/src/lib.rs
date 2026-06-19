@@ -11,7 +11,9 @@
 /// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
 pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
 
+pub mod bind;
 mod client;
+mod connect;
 mod crypto;
 mod error;
 #[cfg(feature = "jemalloc")]
@@ -25,13 +27,13 @@ mod reconnect;
 mod server;
 pub mod tls;
 mod util;
-// Only used by the cert-reload path, which is itself gated on a QUIC backend.
-#[cfg(any(feature = "noq", feature = "quinn"))]
-mod watch;
+#[cfg(feature = "watch")]
+pub mod watch;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
 pub use client::*;
+pub use connect::ConnectError;
 pub use error::{Error, Result};
 pub use log::*;
 pub use reconnect::*;
@@ -40,6 +42,11 @@ pub use server::*;
 // Re-export these crates.
 pub use moq_net;
 pub use rustls;
+
+/// Re-exported because [`watch::FileWatcher`] surfaces `notify::Result`/`notify::Error`
+/// in its API; a major `notify` bump is therefore a breaking change for this crate.
+#[cfg(feature = "watch")]
+pub use notify;
 
 #[cfg(feature = "quiche")]
 pub mod quiche;

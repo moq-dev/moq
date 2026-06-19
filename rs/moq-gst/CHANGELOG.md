@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7](https://github.com/moq-dev/moq/compare/moq-gst-v0.2.6...moq-gst-v0.2.7) - 2026-06-17
+
+### Added
+
+- *(hang)* add Catalog.Producer/Consumer wrapping @moq/json ([#1767](https://github.com/moq-dev/moq/pull/1767))
+
+## [0.2.6](https://github.com/moq-dev/moq/compare/moq-gst-v0.2.5...moq-gst-v0.2.6) - 2026-06-16
+
+### Other
+
+- *(moq-gst)* moqsrc reconcile follow-ups ([#1647](https://github.com/moq-dev/moq/pull/1647)) ([#1683](https://github.com/moq-dev/moq/pull/1683))
+
 ## [0.2.5](https://github.com/moq-dev/moq/compare/moq-gst-v0.2.4...moq-gst-v0.2.5) - 2026-06-10
 
 ### Added

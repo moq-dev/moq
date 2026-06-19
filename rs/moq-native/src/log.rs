@@ -67,9 +67,6 @@ impl Log {
 			registry.with(fmt_layer)
 		};
 
-		#[cfg(feature = "tokio-console")]
-		let registry = registry.with(console_subscriber::spawn());
-
 		registry
 			.try_init()
 			.map_err(|e| crate::Error::SetSubscriber(std::sync::Arc::new(e)))?;

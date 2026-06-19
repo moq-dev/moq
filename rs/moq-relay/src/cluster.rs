@@ -237,8 +237,21 @@ impl DialMap {
 #[non_exhaustive]
 #[group(id = "cluster-config")]
 pub struct ClusterConfig {
-	/// Connect to one or more other cluster nodes. Accepts a comma-separated list on the CLI
-	/// or repeat the flag; in config files use a TOML array.
+	/// Fixed origin (hop) id for this relay, identifying it in the hop chains
+	/// carried on each broadcast for loop detection and shortest-path routing.
+	///
+	/// Unset (the default) picks a fresh random id on every start. Set it to give
+	/// a node a stable identity across restarts. Must be non-zero and below 2^62
+	/// (the wire varint limit); an out-of-range value errors at startup. Keep it
+	/// below 2^53 for compatibility with older `@moq/lite` JS clients, which
+	/// decode hop ids as a `u53` and reject anything larger.
+	#[arg(id = "cluster-id", long = "cluster-id", env = "MOQ_CLUSTER_ID")]
+	pub id: Option<u64>,
+
+	/// Connect to one or more other cluster nodes. Each peer is a full URL, e.g.
+	/// `https://host/?jwt=TOKEN`; a bare host or `host:port` is deprecated but
+	/// still accepted (wrapped in `https://.../`). Accepts a comma-separated list
+	/// on the CLI or repeat the flag; in config files use a TOML array.
 	#[serde(alias = "connect")]
 	#[arg(
 		id = "cluster-connect",
@@ -294,7 +307,10 @@ pub struct ClusterConfig {
 	#[serde(default, deserialize_with = "deserialize_bool_or_string")]
 	pub mesh: Option<String>,
 
-	/// Use the token in this file when connecting to other nodes.
+	/// JWT presented on outbound cluster dials, read from this file. Applied to
+	/// any peer whose URL doesn't already carry a `?jwt=` (so it authenticates
+	/// gossip- and `connect_api`-discovered peers, whose addresses can't embed a
+	/// token). For static `--cluster-connect` peers, prefer an inline `?jwt=`.
 	#[arg(id = "cluster-token", long = "cluster-token", env = "MOQ_CLUSTER_TOKEN")]
 	pub token: Option<PathBuf>,
 
@@ -340,16 +356,27 @@ impl Cluster {
 	/// Use [`with_client`](Self::with_client) to enable dialing remote peers
 	/// (required when `config.connect` is non-empty), and
 	/// [`with_stats`](Self::with_stats) to enable metrics publishing.
-	pub fn new(config: ClusterConfig) -> Self {
-		let origin = Origin::random().produce();
-		tracing::info!(origin_id = %origin.id, "cluster initialized");
-		Cluster {
+	///
+	/// Errors if `config.id` is set but invalid: it must be non-zero and below
+	/// 2^62 (the wire varint limit). An unset id picks a fresh random origin.
+	pub fn new(config: ClusterConfig) -> anyhow::Result<Self> {
+		let origin = match config.id {
+			Some(0) => anyhow::bail!("--cluster-id must be non-zero"),
+			Some(id) if id >= 1 << 62 => {
+				anyhow::bail!("--cluster-id must be below 2^62 (wire varint limit), got {id}")
+			}
+			Some(id) => Origin::from(id),
+			None => Origin::random(),
+		}
+		.produce();
+		tracing::info!(origin_id = %origin.id, configured = config.id.is_some(), "cluster initialized");
+		Ok(Cluster {
 			config,
 			client: None,
 			client_tls: None,
 			origin,
 			stats: Stats::default(),
-		}
+		})
 	}
 
 	/// Attach a QUIC client used to dial cluster peers.
@@ -463,6 +490,10 @@ impl Cluster {
 			);
 		}
 
+		// Token presented on outbound dials whose URL doesn't already carry a
+		// `?jwt=`. This is how gossip- and connect_api-discovered peers (whose
+		// addresses can't carry an inline token) authenticate, so it isn't
+		// deprecated; for static `connect` peers, an inline `?jwt=` is preferred.
 		let token = match &self.config.token {
 			Some(path) => std::fs::read_to_string(path)
 				.context("failed to read cluster token")?
@@ -482,19 +513,26 @@ impl Cluster {
 		let mut tasks = tokio::task::JoinSet::new();
 
 		for peer in &self.config.connect {
-			if dialed.contains(peer) {
+			let key = canonicalize_peer_key(peer);
+			if dialed.contains(&key) {
 				continue;
+			}
+			if is_legacy_peer(peer) {
+				tracing::warn!(
+					%peer,
+					"DEPRECATED: pass --cluster-connect as a full URL like \"https://<host>/?jwt=TOKEN\"; \
+					 a bare host or \"host:port\" is deprecated and will be removed in a future release"
+				);
 			}
 			let this = self.clone();
 			let token = token.clone();
-			let peer = peer.clone();
 			let peer_for_task = peer.clone();
 			let handle = tasks.spawn(async move {
 				if let Err(err) = this.run_remote(&peer_for_task, token).await {
 					tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
 				}
 			});
-			dialed.insert(peer, handle, DialSource::Static);
+			dialed.insert(key, handle, DialSource::Static);
 		}
 
 		if let Some(source) = self.config.connect_api.clone() {
@@ -581,12 +619,13 @@ impl Cluster {
 						continue;
 					}
 					let peer = peer.to_owned();
+					let key = canonicalize_peer_key(&peer);
 					match announced {
 						Some(_) => {
-							if dialed.contains(&peer) {
+							if dialed.contains(&key) {
 								// Already dialed (possibly via another source). Mark gossip as
 								// a wanter and cancel any pending stale-sweep.
-								if dialed.add_source(&peer, DialSource::Gossip) {
+								if dialed.add_source(&key, DialSource::Gossip) {
 									tracing::debug!(%peer, "reannounce within sweep window; keeping dial");
 								}
 								continue;
@@ -600,10 +639,10 @@ impl Cluster {
 									tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
 								}
 							});
-							dialed.insert(peer, handle.abort_handle(), DialSource::Gossip);
+							dialed.insert(key, handle.abort_handle(), DialSource::Gossip);
 						}
 						None => {
-							dialed.mark_unannounced(&peer, Instant::now());
+							dialed.mark_unannounced(&key, Instant::now());
 						}
 					}
 				}
@@ -681,13 +720,13 @@ impl Cluster {
 	}
 
 	/// Watch a local peer-list file, reconciling whenever it changes. Backed by
-	/// [`crate::watch::FileWatcher`] (OS notifications with a polling fallback).
+	/// [`moq_native::watch::FileWatcher`] (OS notifications with a polling fallback).
 	/// Fails static: a missing or malformed file keeps the current dials, and the
 	/// next change triggers a fresh attempt.
 	async fn run_connect_api_file(&self, path: PathBuf, node: Option<String>, token: String, dialed: DialMap) {
 		self.reload_connect_api_file(&path, &node, &token, &dialed);
 
-		let mut watcher = match crate::watch::FileWatcher::new(std::slice::from_ref(&path)) {
+		let mut watcher = match moq_native::watch::FileWatcher::new(std::slice::from_ref(&path)) {
 			Ok(watcher) => watcher,
 			Err(err) => {
 				tracing::error!(%err, ?path, "failed to watch cluster.connect_api file; updates disabled");
@@ -702,7 +741,7 @@ impl Cluster {
 	}
 
 	/// Re-read the peer-list file and reconcile. Any read/parse error keeps the
-	/// current dials; the [`FileWatcher`](crate::watch::FileWatcher) only
+	/// current dials; the [`FileWatcher`](moq_native::watch::FileWatcher) only
 	/// re-invokes this on a real change, so a malformed file isn't re-warned on a
 	/// loop.
 	fn reload_connect_api_file(&self, path: &std::path::Path, node: &Option<String>, token: &str, dialed: &DialMap) {
@@ -739,9 +778,14 @@ impl Cluster {
 	/// are new and drop API peers that disappeared. The relay's own [`node`] URL
 	/// is filtered out so it never dials itself.
 	fn apply_peer_list(&self, list: Vec<String>, node: &Option<String>, token: &str, dialed: &DialMap) {
+		// Dedupe against the shared dial map (and filter out self) on the canonical
+		// key, so an API entry matches the same peer reached via `connect`/gossip
+		// regardless of how each spells it. reconcile_api then yields canonical keys.
+		let self_key = node.as_deref().map(canonicalize_peer_key);
 		let desired: HashSet<String> = list
 			.into_iter()
-			.filter(|peer| Some(peer.as_str()) != node.as_deref())
+			.map(|peer| canonicalize_peer_key(&peer))
+			.filter(|key| Some(key) != self_key.as_ref())
 			.collect();
 
 		for peer in dialed.reconcile_api(&desired) {
@@ -760,8 +804,12 @@ impl Cluster {
 
 	#[tracing::instrument("remote", skip_all, err, fields(%remote))]
 	async fn run_remote(self, remote: &str, token: String) -> anyhow::Result<()> {
-		let mut url = Url::parse(&format!("https://{remote}/"))?;
-		if !token.is_empty() {
+		let mut url = peer_url(remote)?;
+		// Apply the shared cluster token unless the URL already carries its own
+		// non-empty `?jwt=` (an inline token on a static `connect` peer wins; the
+		// shared token still covers discovered peers that have none). An empty
+		// `?jwt=` counts as absent, matching `AuthParams::from_url`.
+		if !token.is_empty() && !url.query_pairs().any(|(key, value)| key == "jwt" && !value.is_empty()) {
 			url.query_pairs_mut().append_pair("jwt", &token);
 		}
 
@@ -823,6 +871,44 @@ impl Cluster {
 /// treated as a local file path, which needs no TLS client).
 fn connect_api_is_http(source: &str) -> bool {
 	Url::parse(source).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+/// Resolve a cluster peer to the URL we dial.
+///
+/// The modern form is a full URL, e.g. `https://host/?jwt=TOKEN`, which is used
+/// verbatim. A bare host or `host:port` is still accepted for backwards
+/// compatibility and wrapped in `https://.../` (callers warn about this legacy
+/// form for user-supplied `--cluster-connect` entries).
+fn peer_url(peer: &str) -> anyhow::Result<Url> {
+	// A full URL has a scheme separator; a bare host or `host:port` does not
+	// (and `Url::parse` would otherwise mis-read `host:port` as scheme `host`).
+	if peer.contains("://") {
+		return Url::parse(peer).with_context(|| format!("invalid cluster peer URL: {peer}"));
+	}
+
+	Url::parse(&format!("https://{peer}/")).with_context(|| format!("invalid cluster peer host: {peer}"))
+}
+
+/// Whether a peer string uses the deprecated bare-host / `host:port` form rather
+/// than a full URL. Used to warn on legacy `--cluster-connect` entries.
+fn is_legacy_peer(peer: &str) -> bool {
+	!peer.contains("://")
+}
+
+/// Canonical dedupe key for a cluster peer, so the same relay reached via
+/// different spellings (a full URL vs a bare `host:port`, with or without an
+/// inline `?jwt=`) shares one [`DialMap`] entry instead of opening a duplicate
+/// session. Drops the query (the jwt isn't part of a peer's identity) and lets
+/// `Url` normalize the scheme, host case, and default port. Falls back to the
+/// raw string if the peer can't be parsed.
+fn canonicalize_peer_key(peer: &str) -> String {
+	match peer_url(peer) {
+		Ok(mut url) => {
+			url.set_query(None);
+			url.into()
+		}
+		Err(_) => peer.to_string(),
+	}
 }
 
 /// Deserialize a field that accepts either a TOML boolean or string into an
@@ -1043,7 +1129,7 @@ mod tests {
 			root: Some("legacy-root.example.com:4443".to_string()),
 			..Default::default()
 		};
-		let err = Cluster::new(config).run().await.expect_err("should error");
+		let err = Cluster::new(config).unwrap().run().await.expect_err("should error");
 		let msg = format!("{err}");
 		assert!(msg.contains("cluster.root"), "missing cluster.root in: {msg}");
 		assert!(msg.contains("--cluster-connect"), "missing --cluster-connect in: {msg}");
@@ -1058,10 +1144,37 @@ mod tests {
 			mesh: Some("true".to_string()),
 			..Default::default()
 		};
-		let err = Cluster::new(config).run().await.expect_err("should error");
+		let err = Cluster::new(config).unwrap().run().await.expect_err("should error");
 		let msg = format!("{err}");
 		assert!(msg.contains("--cluster-node"), "missing --cluster-node in: {msg}");
 		assert!(msg.contains("--cluster-mesh"), "missing --cluster-mesh in: {msg}");
+	}
+
+	/// A valid `cluster.id` is used verbatim as the relay's origin id, giving the
+	/// node a stable identity across restarts.
+	#[test]
+	fn cluster_id_sets_origin() {
+		let cluster = Cluster::new(ClusterConfig {
+			id: Some(42),
+			..Default::default()
+		})
+		.expect("valid id");
+		assert_eq!(cluster.origin.id, 42);
+	}
+
+	/// A reserved (0) or out-of-range (>= 2^62) `cluster.id` is rejected rather
+	/// than producing an unencodable hop id.
+	#[test]
+	fn cluster_id_out_of_range_errors() {
+		for bad in [0, 1u64 << 62] {
+			let err = Cluster::new(ClusterConfig {
+				id: Some(bad),
+				..Default::default()
+			})
+			.err()
+			.expect("should error");
+			assert!(format!("{err}").contains("--cluster-id"), "got: {err}");
+		}
 	}
 
 	/// `cluster.root` parsed from TOML triggers the same migration error.
@@ -1079,7 +1192,7 @@ mod tests {
 
 		let rt = tokio::runtime::Runtime::new().unwrap();
 		let err = rt
-			.block_on(Cluster::new(config.cluster).run())
+			.block_on(Cluster::new(config.cluster).unwrap().run())
 			.expect_err("should error");
 		assert!(format!("{err}").contains("cluster.root"));
 	}
@@ -1094,7 +1207,8 @@ mod tests {
 			node: Some("rendezvous.example.com:4443".to_string()),
 			mesh: Some("true".to_string()),
 			..Default::default()
-		});
+		})
+		.unwrap();
 
 		// Snapshot a consumer on the cluster origin before run() takes ownership of
 		// `cluster` so we can later check that the registration was published.
@@ -1149,10 +1263,55 @@ mod tests {
 		let cluster = Cluster::new(ClusterConfig {
 			mesh: Some("rendezvous.example.com:4443".to_string()),
 			..Default::default()
-		});
+		})
+		.unwrap();
 		let (gossip, node) = cluster.resolve_mesh().expect("legacy mesh url resolves");
 		assert!(gossip);
 		assert_eq!(node.as_deref(), Some("rendezvous.example.com:4443"));
+	}
+
+	/// `--cluster-connect` accepts a full URL verbatim (preserving its `?jwt=`)
+	/// and falls back to wrapping a bare host / `host:port` in `https://.../`.
+	#[test]
+	fn peer_url_full_url_and_legacy_host() {
+		// Full URL used verbatim, including its jwt query.
+		assert_eq!(
+			peer_url("https://cdn.example.com/?jwt=abc").unwrap().as_str(),
+			"https://cdn.example.com/?jwt=abc"
+		);
+		// Bare host (legacy) wrapped in https://.../.
+		assert_eq!(
+			peer_url("cdn.example.com").unwrap().as_str(),
+			"https://cdn.example.com/"
+		);
+		// `host:port` (legacy) is NOT mis-parsed as scheme `host`.
+		assert_eq!(peer_url("localhost:4443").unwrap().as_str(), "https://localhost:4443/");
+
+		assert!(is_legacy_peer("cdn.example.com"));
+		assert!(is_legacy_peer("localhost:4443"));
+		assert!(!is_legacy_peer("https://cdn.example.com/?jwt=abc"));
+	}
+
+	/// The same relay spelled as a bare `host:port`, a full URL, or a URL with an
+	/// inline jwt all canonicalize to one key, so they share a single dial entry.
+	#[tokio::test]
+	async fn canonicalize_peer_key_dedupes_spellings() {
+		let key = canonicalize_peer_key("host:4443");
+		assert_eq!(key, "https://host:4443/");
+		assert_eq!(canonicalize_peer_key("https://host:4443/"), key);
+		assert_eq!(canonicalize_peer_key("https://host:4443/?jwt=abc"), key);
+
+		// A URL form and the legacy host:port form dedupe against each other.
+		let dialed = DialMap::default();
+		dialed.insert(
+			canonicalize_peer_key("https://host:4443/?jwt=abc"),
+			placeholder_handle(),
+			DialSource::Static,
+		);
+		assert!(dialed.contains(&canonicalize_peer_key("host:4443")));
+
+		// Different ports stay distinct.
+		assert_ne!(canonicalize_peer_key("host:4443"), canonicalize_peer_key("host:5555"));
 	}
 
 	/// A legacy mesh URL that disagrees with an explicit `--cluster-node` is a
@@ -1163,7 +1322,8 @@ mod tests {
 			mesh: Some("a.example.com:4443".to_string()),
 			node: Some("b.example.com:4443".to_string()),
 			..Default::default()
-		});
+		})
+		.unwrap();
 		let err = cluster.resolve_mesh().expect_err("conflict should error");
 		assert!(format!("{err}").contains("conflicts with"), "got: {err}");
 	}

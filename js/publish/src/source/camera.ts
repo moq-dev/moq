@@ -9,6 +9,13 @@ export interface CameraProps {
 }
 
 export class Camera {
+	// The browser picks a low default resolution (often 640x480), so request 720p.
+	// Caller-supplied constraints take precedence per field.
+	static readonly DEFAULT_CONSTRAINTS: Video.Constraints = {
+		width: { ideal: 1280 },
+		height: { ideal: 720 },
+	};
+
 	enabled: Signal<boolean>;
 	device: Device<"video">;
 
@@ -32,11 +39,9 @@ export class Camera {
 		const device = effect.get(this.device.requested);
 		const constraints = effect.get(this.constraints) ?? {};
 
-		// Build final constraints with device selection. Default to 720p (browsers
-		// otherwise tend to pick 480p); explicit constraints override these.
+		// Build final constraints with device selection, defaulting resolution unless overridden.
 		const finalConstraints: MediaTrackConstraints = {
-			width: { ideal: 1280 },
-			height: { ideal: 720 },
+			...Camera.DEFAULT_CONSTRAINTS,
 			...constraints,
 			deviceId: device ? { exact: device } : undefined,
 		};

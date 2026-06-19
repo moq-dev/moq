@@ -40,9 +40,9 @@ impl<T> Producer<T> {
 	pub fn consume(&self) -> Consumer<T> {
 		let prev = self.counts.consumers.fetch_add(1, Ordering::AcqRel);
 
-		// Wake waiters (e.g. `used()`) when the first consumer appears.
+		// Wake `used()` waiters when the first consumer appears.
 		if prev == 0 {
-			let mut waiters = self.state.lock().waiters.take();
+			let mut waiters = self.state.lock().waiters_consumer.take();
 			waiters.wake();
 		}
 
@@ -71,54 +71,46 @@ impl<T> Producer<T> {
 		}
 	}
 
-	/// Poll-based mutable access with waker registration.
+	/// Poll a read-only predicate; on [`Poll::Ready`] hand back a [`Mut`] with the
+	/// lock still held, so the caller can inspect and mutate atomically.
 	///
-	/// Calls `f` with a [`Mut`] guard. If `f` returns [`Poll::Pending`],
-	/// registers the [`Waiter`] for notification when the state next changes.
+	/// Unlike [`Consumer::poll`], the predicate returns `Poll<()>` (it just gates
+	/// readiness) and a satisfied poll yields write access via [`Mut`]. The
+	/// predicate only sees a [`Ref`], so it can't accidentally flag the state
+	/// modified (e.g. via a `&mut`-taking method like `Vec::pop`). That sidesteps
+	/// the footgun where a no-op mutation during a *pending* poll would wake this
+	/// producer's own waiter and spin into an infinite loop. Decide readiness in
+	/// the predicate, then mutate through the returned `Mut`. Registers `waiter`
+	/// while pending.
+	///
 	/// Returns `Poll::Ready(Err(`[`Ref`]`))` if the channel is closed.
-	pub fn poll<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Ref<'_, T>>>
+	pub fn poll<F>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
 	where
-		F: FnMut(&mut Mut<'_, T>) -> Poll<R>,
+		F: FnMut(&Ref<'_, T>) -> Poll<()>,
 	{
-		let mut state = self.write()?;
-
-		if let Poll::Ready(res) = f(&mut state) {
-			return Poll::Ready(Ok(res));
+		let state = self.state.lock();
+		if state.closed {
+			return Poll::Ready(Err(Ref { state }));
 		}
 
-		let inner = state.state.as_mut().unwrap();
-
-		// Take existing waiters if f modified the state, so we can notify consumers.
-		let waiters = if state.modified {
-			Some(inner.waiters.take())
-		} else {
-			None
-		};
-
-		// Register ourselves for future notifications.
-		waiter.register(&mut inner.waiters);
-
-		// Prevent Drop from re-waking the waiter we just registered.
-		state.modified = false;
-
-		// Release the lock before waking consumers.
-		drop(state);
-
-		if let Some(mut waiters) = waiters {
-			waiters.wake();
+		let mut guard = Ref { state };
+		match f(&guard) {
+			// Upgrade the Ref to a Mut, keeping the same lock guard.
+			Poll::Ready(()) => Poll::Ready(Ok(Mut::new(guard.state))),
+			Poll::Pending => {
+				waiter.register(&mut guard.state.waiters_value);
+				Poll::Pending
+			}
 		}
-
-		Poll::Pending
 	}
 
-	/// Wait for the closure to return [`Poll::Ready`], re-polling on each state change.
+	/// Wait until the read-only predicate holds, then acquire write access.
 	///
-	/// Returns `Ok(R)` when the closure returns [`Poll::Ready`], or `Err(Ref)` with
-	/// read-only access to the final state if the channel closes first.
-	pub async fn wait<F, R>(&self, mut f: F) -> Result<R, Ref<'_, T>>
+	/// The async sibling of [`poll`](Self::poll): returns `Ok(Mut)` once `f`
+	/// returns [`Poll::Ready`], or `Err(Ref)` if the channel closes first.
+	pub async fn wait<F>(&self, mut f: F) -> Result<Mut<'_, T>, Ref<'_, T>>
 	where
-		F: FnMut(&mut Mut<'_, T>) -> Poll<R> + Unpin,
-		R: Unpin,
+		F: FnMut(&Ref<'_, T>) -> Poll<()> + Unpin,
 	{
 		crate::wait(move |waiter| self.poll(waiter, &mut f)).await
 	}
@@ -134,7 +126,7 @@ impl<T> Producer<T> {
 			return Poll::Ready(());
 		}
 
-		waiter.register(&mut state.waiters);
+		waiter.register(&mut state.waiters_closed);
 		Poll::Pending
 	}
 
@@ -158,7 +150,7 @@ impl<T> Producer<T> {
 			return Poll::Ready(Some(()));
 		}
 
-		waiter.register(&mut state.waiters);
+		waiter.register(&mut state.waiters_consumer);
 
 		// Re-check after registration to avoid TOCTOU race where the last
 		// consumer drops between the initial check and waiter registration.
@@ -189,7 +181,7 @@ impl<T> Producer<T> {
 			return Poll::Ready(Some(()));
 		}
 
-		waiter.register(&mut state.waiters);
+		waiter.register(&mut state.waiters_consumer);
 
 		// Re-check after registration to avoid TOCTOU race where a consumer
 		// is created between the initial check and waiter registration.
@@ -210,6 +202,16 @@ impl<T> Producer<T> {
 	/// Returns `true` if both producers share the same underlying state.
 	pub fn same_channel(&self, other: &Self) -> bool {
 		self.state.is_clone(&other.state)
+	}
+
+	/// Returns `true` if this is the only remaining producer.
+	///
+	/// Inherently racy if other handles may clone this producer or upgrade a
+	/// [`Weak`] / [`Consumer`] concurrently. Intended for a producer's own
+	/// `Drop`, where this handle has not yet been counted out, to gate
+	/// last-producer cleanup.
+	pub fn is_last(&self) -> bool {
+		self.counts.producers.load(Ordering::Acquire) == 1
 	}
 
 	/// Create a [`Weak`] reference that doesn't affect the producer/consumer ref counts.
@@ -240,7 +242,9 @@ impl<T> Drop for Producer<T> {
 			return;
 		}
 
-		// We were the last producer, need to close
+		// We were the last producer, need to close. Every waiter reacts to
+		// closure (value/closed resolve, `used`/`unused` resolve to `None`),
+		// so wake all the lists.
 		let mut waiters = {
 			let mut state = self.state.lock();
 			if state.closed {
@@ -248,10 +252,12 @@ impl<T> Drop for Producer<T> {
 			}
 
 			state.closed = true;
-			state.waiters.take()
+			state.take_close_waiters()
 		};
 
-		waiters.wake();
+		for list in &mut waiters {
+			list.wake();
+		}
 	}
 }
 
@@ -307,11 +313,22 @@ impl<T> Drop for Mut<'_, T> {
 			return;
 		}
 
-		// Drain wakers while holding lock, then wake after releasing
-		let mut waiters = state.waiters.take();
+		// Drain wakers while holding lock, then wake after releasing.
+		// A modification that also closed the channel (e.g. `close()`) must
+		// wake the closed and consumer-count waiters too, since they resolve
+		// on closure. A plain modification touches only the value waiters.
+		let mut waiters_value = state.waiters_value.take();
+		let extra = state
+			.closed
+			.then(|| [state.waiters_closed.take(), state.waiters_consumer.take()]);
 		drop(state); // Release Mutex BEFORE waking
 
-		waiters.wake();
+		waiters_value.wake();
+		if let Some(mut extra) = extra {
+			for list in &mut extra {
+				list.wake();
+			}
+		}
 	}
 }
 
@@ -334,5 +351,63 @@ impl<T> Deref for Ref<'_, T> {
 
 	fn deref(&self) -> &Self::Target {
 		&self.state.value
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	#[test]
+	fn is_last_tracks_producer_count() {
+		let producer = Producer::new(0u8);
+		assert!(producer.is_last());
+
+		let clone = producer.clone();
+		assert!(!producer.is_last());
+		assert!(!clone.is_last());
+
+		drop(clone);
+		assert!(producer.is_last());
+
+		// Consumers and weak handles don't count as producers.
+		let _consumer = producer.consume();
+		let _weak = producer.weak();
+		assert!(producer.is_last());
+	}
+
+	#[test]
+	fn poll_gates_on_predicate_then_writes() {
+		let producer = Producer::<Vec<u32>>::default();
+		let waiter = Waiter::noop();
+
+		let predicate = |state: &Ref<'_, Vec<u32>>| {
+			if state.is_empty() {
+				Poll::Pending
+			} else {
+				Poll::Ready(())
+			}
+		};
+
+		// Empty queue: the read-only predicate is pending, so no Mut is handed out
+		// (and crucially nothing flags the state modified to wake our own waiter).
+		assert!(matches!(producer.poll(&waiter, predicate), Poll::Pending));
+
+		let Ok(mut write) = producer.write() else {
+			panic!("channel should be open");
+		};
+		write.push(1);
+		drop(write);
+
+		// Now satisfied: poll upgrades to a Mut with the lock still held.
+		let Poll::Ready(Ok(mut state)) = producer.poll(&waiter, predicate) else {
+			panic!("expected a writable guard");
+		};
+		assert_eq!(state.pop(), Some(1));
+		drop(state);
+
+		// Closed channel reports back through Err.
+		assert!(producer.close().is_ok());
+		assert!(matches!(producer.poll(&waiter, predicate), Poll::Ready(Err(_))));
 	}
 }

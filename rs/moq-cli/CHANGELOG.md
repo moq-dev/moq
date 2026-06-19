@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.32](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.31...moq-cli-v0.7.32) - 2026-06-16
+
+### Other
+
+- Add FLV (Flash Video / RTMP) container support to moq-mux ([#1745](https://github.com/moq-dev/moq/pull/1745))
+- Windows support: dual-stack IPv4/IPv6 sockets, setup.bat, and `just dev` ([#1732](https://github.com/moq-dev/moq/pull/1732))
+- *(moq-cli)* remove the capture feature ([#1728](https://github.com/moq-dev/moq/pull/1728))
+
 ## [0.7.31](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.30...moq-cli-v0.7.31) - 2026-06-10
 
 ### Added

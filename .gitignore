@@ -49,3 +49,6 @@ __pycache__/
 # maturin develop drops uniffi bindings + cdylib here during editable
 # installs of the py/moq-ffi package.
 /py/moq-ffi/moq_ffi/_uniffi/
+
+# Generated JSR manifest (derived from package.json by js/common/package.ts)
+jsr.json
