@@ -66,6 +66,8 @@ web-transport-trait = { workspace = true }
 sd-notify = "0.5"
 
 [dev-dependencies]
+# Old qmux for the cross-version WebSocket interop test (old client -> current relay).
+qmux_old = { package = "qmux", version = "0.0.8" }
 rcgen = "0.14"
 tempfile = "3"
 wiremock = "0.6"

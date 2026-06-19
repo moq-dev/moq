@@ -3919,7 +3919,7 @@ dependencies = [
  "moq-net",
  "notify",
  "parking_lot",
- "qmux",
+ "qmux 0.2.0",
  "quinn",
  "rand 0.10.1",
  "rcgen",
@@ -3985,7 +3985,8 @@ dependencies = [
  "moq-native",
  "moq-net",
  "moq-token",
- "qmux",
+ "qmux 0.0.8",
+ "qmux 0.2.0",
  "rcgen",
  "reqwest 0.12.28",
  "reqwest-middleware",
@@ -5460,6 +5461,24 @@ dependencies = [
  "serde_json",
  "serde_with",
  "zstd",
+]
+
+[[package]]
+name = "qmux"
+version = "0.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3a761722f4499404d45c4971e332b8d0d1fe4a1882d404c2c5f96f3e49933e9"
+dependencies = [
+ "bytes",
+ "futures",
+ "rustls",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "tracing",
+ "web-transport-proto",
+ "web-transport-trait",
 ]
 
 [[package]]
