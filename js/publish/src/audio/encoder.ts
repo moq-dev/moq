@@ -412,8 +412,7 @@ function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
 // Build the WebCodecs encoder config from the catalog (decoder) config, a Kind hint, and any
 // Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding. AAC has
 // no such knobs, so it just uses the shared base fields (codec/sampleRate/channels/bitrate).
-// Exported only for the in-package test; not re-exported from ./index, so not public API.
-export function toEncoderConfig(
+function toEncoderConfig(
 	config: Catalog.AudioConfig,
 	kind: Kind,
 	opusOptions: OpusEncoderConfigExt,
