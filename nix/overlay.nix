@@ -212,12 +212,30 @@ let
   # store's free-space GC. Only first-party code recompiles, inside Nix's
   # sandbox (which is wiped per build), so there is no target dir to bound.
 
-  # Keep .pc.in alongside the cargo sources: libmoq's build.rs reads moq.pc.in,
-  # and the default cleanCargoSource filter would drop it (see libmoqArgs).
+  # crane's cleanCargoSource keeps only Rust-relevant files, but the test
+  # targets compiled under `--all-targets` `include_str!`/`include_bytes!` data
+  # fixtures (rs/moq-mux test_data/*.ts, rs/moq-json tests/vectors.json, etc.)
+  # and libmoq's build.rs reads moq.pc.in. Rather than enumerate every asset
+  # (fragile -- a new fixture would break CI), take the whole tree minus the
+  # heavy non-source dirs. Dep caching is unaffected (buildDepsOnly keys on
+  # Cargo.lock); only the first-party check rebuilds on a non-Rust change.
   checkSrc = final.lib.cleanSourceWith {
     src = ../.;
     name = "source";
-    filter = path: type: (final.lib.hasSuffix ".pc.in" path) || (craneLib.filterCargoSources path type);
+    filter =
+      path: _type:
+      let
+        # Prune a dir both as an entry ("…/target") and its contents
+        # ("…/target/…") so we don't walk node_modules etc. at all.
+        excluded = name: final.lib.hasSuffix "/${name}" path || final.lib.hasInfix "/${name}/" path;
+      in
+      !(
+        excluded "node_modules"
+        || excluded "target"
+        || excluded ".direnv"
+        || excluded ".venv"
+        || excluded ".git"
+      );
   };
 
   # Every system lib the workspace needs to compile with all features on:
