@@ -266,15 +266,7 @@ impl<E: catalog::Catalog> Export<E> {
 		let mpegts = catalog.mpegts_mut().cloned().unwrap_or_default();
 		self.program_descriptors = mpegts.program_descriptors.clone();
 
-		// The desired track set: media renditions plus carriable verbatim streams. A
-		// verbatim stream_type that isn't a known TS stream type can't be announced in
-		// the PMT, so it's skipped (not aborted); round-tripped streams always parse,
-		// this only guards a hand-built catalog.
-		let verbatim_ok = |t: &catalog::Track| {
-			t.verbatim
-				.as_ref()
-				.is_some_and(|v| StreamType::from_u8(v.stream_type).is_ok())
-		};
+		// The desired track set: media renditions plus the verbatim streams.
 		let mut active: HashMap<String, ()> = HashMap::new();
 		for name in catalog.video.renditions.keys() {
 			active.insert(name.clone(), ());
@@ -283,7 +275,7 @@ impl<E: catalog::Catalog> Export<E> {
 			active.insert(name.clone(), ());
 		}
 		for (name, track) in mpegts.tracks.iter() {
-			if verbatim_ok(track) {
+			if track.verbatim.is_some() {
 				active.insert(name.clone(), ());
 			}
 		}
@@ -372,9 +364,6 @@ impl<E: catalog::Catalog> Export<E> {
 			let Some(verbatim) = &track.verbatim else {
 				continue;
 			};
-			if !verbatim_ok(track) {
-				continue;
-			}
 			let kind = Kind::Verbatim {
 				stream_type: verbatim.stream_type,
 				framing: verbatim.framing,
