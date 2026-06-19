@@ -15,12 +15,22 @@ add_library(obs-moq MODULE)
 
 if(${BUILD_PLUGIN})
   find_package(libobs REQUIRED)
-  # FFmpeg dependency
-  include(FindPkgConfig)
-  pkg_check_modules(FFMPEG REQUIRED libavcodec libavutil libswscale libswresample)
-  target_include_directories(obs-moq PRIVATE ${FFMPEG_INCLUDE_DIRS})
-  target_link_directories(obs-moq PRIVATE ${FFMPEG_LIBRARY_DIRS})
-  target_link_libraries(obs-moq PRIVATE ${FFMPEG_LIBRARIES})
+  # FFmpeg dependency. The Windows obs-deps ship FFmpeg without pkg-config .pc
+  # files, so fall back to the vendored FindFFmpeg finder (it searches the
+  # obs-deps prefix directly). pkg-config is the simplest path on macOS/Linux.
+  if(WIN32)
+    find_package(FFmpeg REQUIRED avcodec avutil swscale swresample)
+    target_link_libraries(
+      obs-moq
+      PRIVATE FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale FFmpeg::swresample
+    )
+  else()
+    include(FindPkgConfig)
+    pkg_check_modules(FFMPEG REQUIRED libavcodec libavutil libswscale libswresample)
+    target_include_directories(obs-moq PRIVATE ${FFMPEG_INCLUDE_DIRS})
+    target_link_directories(obs-moq PRIVATE ${FFMPEG_LIBRARY_DIRS})
+    target_link_libraries(obs-moq PRIVATE ${FFMPEG_LIBRARIES})
+  endif()
 else()
   find_package(FFmpeg REQUIRED avcodec avutil swscale swresample)
   target_link_libraries(obs-moq PRIVATE FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale FFmpeg::swresample)
