@@ -424,6 +424,11 @@ pub(crate) fn synthesize_video_trak(
 				})
 			}
 		}
+		VideoCodec::AV1(av1) => mp4_atom::Codec::from(mp4_atom::Av01 {
+			visual,
+			av1c: crate::codec::av1::av1c_from_av1(av1),
+			..Default::default()
+		}),
 		VideoCodec::VP8 => mp4_atom::Codec::from(mp4_atom::Vp08 {
 			visual,
 			vpcc: crate::codec::vp8::vpcc(),

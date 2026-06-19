@@ -29,10 +29,13 @@ if(NOT TARGET moq::moq)
         )
     endif()
 
-    # On Windows, add required system libraries
+    # On Windows, add the system libraries Rust std/deps pull in (from
+    # `cargo rustc -- --print native-static-libs`). An external linker
+    # consuming the staticlib needs these spelled out; cargo can't inject them.
     if(WIN32)
         set_property(TARGET moq::moq APPEND PROPERTY
-            INTERFACE_LINK_LIBRARIES "ws2_32" "userenv" "bcrypt" "ntdll"
+            INTERFACE_LINK_LIBRARIES
+                "ws2_32" "userenv" "bcrypt" "ntdll" "dbghelp" "advapi32" "legacy_stdio_definitions"
         )
     endif()
 

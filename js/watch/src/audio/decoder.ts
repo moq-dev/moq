@@ -65,6 +65,18 @@ export class Decoder {
 	// Audio ring bridging main thread and worklet (shared memory or postMessage transport).
 	#ring: AudioBuffer | undefined;
 
+	// How much buffered audio the container consumer retains before skipping
+	// ahead. This must be the latency CEILING (maxBuffer), not the floor
+	// (buffer): in buffered playback the producer writes faster than real-time
+	// with future PTS, so the group span legitimately exceeds the floor and
+	// would otherwise be skipped. When collapsed, maxBuffer equals the floor.
+	//
+	// Held in a plain Signal driven by a running effect (below) rather than a
+	// lazy `computed`: the container consumer only `.peek()`s this (it never
+	// subscribes), and an unsubscribed computed peeks as `undefined`, which
+	// would make the consumer's threshold NaN and skip every group.
+	#consumerLatency = new Signal<Time.Milli>(Time.Milli.zero);
+
 	#signals = new Effect();
 
 	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
@@ -74,6 +86,10 @@ export class Decoder {
 
 		this.source = source;
 		this.sync = sync;
+
+		this.#signals.run((effect) => {
+			this.#consumerLatency.set(effect.get(this.sync.output.maxBuffer));
+		});
 
 		this.#signals.run(this.#runWorklet.bind(this));
 		this.#signals.run(this.#runEnabled.bind(this));
@@ -122,9 +138,10 @@ export class Decoder {
 			// Initial target latency in samples.
 			const latency = this.sync.output.buffer.peek();
 			const latencySamples = Math.ceil(sampleRate * Time.Second.fromMilli(latency));
+			const buffered = this.sync.output.buffered.peek();
 
 			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
-			const ring = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples);
+			const ring = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples, buffered);
 			this.#ring = ring;
 			effect.cleanup(() => {
 				ring.close();
@@ -200,7 +217,7 @@ export class Decoder {
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Consumer(sub, {
 			format,
-			latency: this.sync.output.buffer,
+			latency: this.#consumerLatency,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -260,6 +277,10 @@ export class Decoder {
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
 				}));
 
+				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
+				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
+				await this.#ring?.wait(frame.timestamp as Time.Micro);
+
 				const chunk = new EncodedAudioChunk({
 					type: frame.keyframe ? "key" : "delta",
 					data: frame.data,
@@ -287,7 +308,7 @@ export class Decoder {
 
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
-			latency: this.sync.output.buffer,
+			latency: this.#consumerLatency,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -331,6 +352,10 @@ export class Decoder {
 				this.#output.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
 				}));
+
+				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
+				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
+				await this.#ring?.wait(frame.timestamp);
 
 				if (decoder.state === "closed") break;
 				decoder.decode(
@@ -408,6 +433,12 @@ export class Decoder {
 				current.shift();
 			}
 		});
+	}
+
+	// Flush the audio buffer and re-stall, re-anchoring playback to the next frame.
+	// Use in buffered mode at an utterance boundary (see Sync.reset).
+	reset(): void {
+		this.#ring?.reset();
 	}
 
 	close() {

@@ -633,3 +633,58 @@ describe("resize", () => {
 		}
 	});
 });
+
+describe("buffered mode", () => {
+	function createBuffered(latency: number) {
+		return new AudioRingBuffer({ rate: 1000, channels: 1, latency: latency as Time.Milli, buffered: true });
+	}
+
+	it("anchors to the first frame and un-stalls at the latency target", () => {
+		const buffer = createBuffered(50);
+		expect(buffer.stalled).toBe(true);
+		write(buffer, 2000 as Time.Milli, 100, { channels: 1, value: 0.1 });
+		expect(buffer.stalled).toBe(false);
+		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(2000 as Time.Milli);
+	});
+
+	it("plays frames in order within the floor-sized ring without skipping ahead", () => {
+		// 600ms floor at 1000Hz -> 1200-sample ring, comfortably holding the 1000-sample utterance
+		// the backpressure loop would feed it. A non-buffered ring would have skipped to write-latency.
+		const buffer = createBuffered(600);
+		for (let i = 0; i < 10; i++) {
+			write(buffer, (2000 + i * 100) as Time.Milli, 100, { channels: 1, value: (i + 1) / 10 });
+		}
+		expect(buffer.length).toBe(1000);
+
+		const first = read(buffer, 100, 1);
+		expect(first[0][0]).toBeCloseTo(0.1, 5);
+		const second = read(buffer, 100, 1);
+		expect(second[0][0]).toBeCloseTo(0.2, 5);
+	});
+
+	it("reset re-stalls and re-anchors to the next utterance", () => {
+		const buffer = createBuffered(50);
+		write(buffer, 2000 as Time.Milli, 100, { channels: 1, value: 0.1 });
+		read(buffer, 50, 1);
+
+		buffer.reset();
+		expect(buffer.stalled).toBe(true);
+
+		write(buffer, 500 as Time.Milli, 100, { channels: 1, value: 0.9 });
+		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(500 as Time.Milli);
+		const out = read(buffer, 100, 1);
+		expect(out[0][0]).toBeCloseTo(0.9, 5);
+	});
+
+	it("drops the oldest samples once the ring fills beyond the floor", () => {
+		// 50ms floor at 1000Hz -> 50-sample floor, 100-sample ring. Backpressure normally keeps the
+		// decode loop from running this far ahead; if it slips, the ring drops its oldest as a backstop.
+		const buffer = createBuffered(50);
+
+		write(buffer, 0 as Time.Milli, 100, { channels: 1, value: 0.1 }); // [0, 100)
+		write(buffer, 100 as Time.Milli, 100, { channels: 1, value: 0.2 }); // exceeds 100-sample ring; drops [0, 100)
+
+		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(100 as Time.Milli);
+		expect(read(buffer, 100, 1)[0][0]).toBeCloseTo(0.2, 5);
+	});
+});

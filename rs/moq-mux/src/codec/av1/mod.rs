@@ -61,6 +61,32 @@ pub(crate) fn av1_from_av1c(av1c: &mp4_atom::Av1c) -> AV1 {
 	}
 }
 
+/// Build an `mp4_atom::Av1c` (AV1CodecConfigurationRecord) from the hang
+/// catalog's AV1 codec struct, the inverse of [`av1_from_av1c`].
+///
+/// `config_obus` is left empty: moq-video publishes AV1 with the sequence
+/// header inline in the bitstream (the `.av01` in-band case, analogous to
+/// `hev1`/`avc3`), so the decoder reads it from the keyframe rather than the
+/// out-of-band config record. The catalog's color fields (color primaries,
+/// transfer characteristics, matrix coefficients, full range) have no slot in
+/// av1C; they live in the sequence header OBU instead.
+pub(crate) fn av1c_from_av1(av1: &AV1) -> mp4_atom::Av1c {
+	let (twelve_bit, high_bitdepth) = bitdepth_flags(av1.bitdepth);
+	mp4_atom::Av1c {
+		seq_profile: av1.profile,
+		seq_level_idx_0: av1.level,
+		seq_tier_0: av1.tier == 'H',
+		high_bitdepth,
+		twelve_bit,
+		monochrome: av1.mono_chrome,
+		chroma_subsampling_x: av1.chroma_subsampling_x,
+		chroma_subsampling_y: av1.chroma_subsampling_y,
+		chroma_sample_position: av1.chroma_sample_position,
+		initial_presentation_delay: None,
+		config_obus: Vec::new(),
+	}
+}
+
 /// Bit depth from the (twelve_bit, high_bitdepth) av1C flag pair
 /// (ISO/IEC 14496-15 + av1-isobmff §2.3.3).
 ///
@@ -69,9 +95,17 @@ pub(crate) fn bitdepth(twelve_bit: bool, high_bitdepth: bool) -> u8 {
 	8 + 2 * u8::from(high_bitdepth) + 2 * u8::from(twelve_bit)
 }
 
+/// The (twelve_bit, high_bitdepth) av1C flag pair for a given bit depth, the
+/// inverse of [`bitdepth`]. 8-bit -> (false, false), 10-bit -> (false, true),
+/// 12-bit -> (true, true).
+pub(crate) fn bitdepth_flags(bitdepth: u8) -> (bool, bool) {
+	(bitdepth >= 12, bitdepth >= 10)
+}
+
 #[cfg(test)]
 mod tests {
-	use super::bitdepth;
+	use super::{av1_from_av1c, av1c_from_av1, bitdepth, bitdepth_flags};
+	use hang::catalog::AV1;
 
 	#[test]
 	fn maps_bitdepth_flags() {
@@ -81,5 +115,51 @@ mod tests {
 		// twelve_bit=true with high_bitdepth=false is not a valid combination
 		// per the spec, but the additive formula still gives a defined answer.
 		assert_eq!(bitdepth(true, false), 10);
+	}
+
+	#[test]
+	fn bitdepth_flags_round_trip() {
+		for (depth, flags) in [(8, (false, false)), (10, (false, true)), (12, (true, true))] {
+			assert_eq!(bitdepth_flags(depth), flags);
+			let (twelve_bit, high_bitdepth) = flags;
+			assert_eq!(bitdepth(twelve_bit, high_bitdepth), depth);
+		}
+	}
+
+	#[test]
+	fn av1c_round_trips_catalog_fields() {
+		let av1 = AV1 {
+			profile: 0,
+			level: 8,
+			tier: 'H',
+			bitdepth: 10,
+			mono_chrome: false,
+			chroma_subsampling_x: true,
+			chroma_subsampling_y: true,
+			chroma_sample_position: 2,
+			// Color fields have no av1C slot; they live in the sequence header.
+			..Default::default()
+		};
+
+		let av1c = av1c_from_av1(&av1);
+		assert_eq!(av1c.seq_profile, 0);
+		assert_eq!(av1c.seq_level_idx_0, 8);
+		assert!(av1c.seq_tier_0);
+		assert!(av1c.high_bitdepth);
+		assert!(!av1c.twelve_bit);
+		assert!(av1c.chroma_subsampling_x);
+		assert!(av1c.chroma_subsampling_y);
+		assert_eq!(av1c.chroma_sample_position, 2);
+		assert!(av1c.config_obus.is_empty());
+
+		// The av1C-backed fields survive a round trip back to the catalog.
+		let back = av1_from_av1c(&av1c);
+		assert_eq!(back.profile, av1.profile);
+		assert_eq!(back.level, av1.level);
+		assert_eq!(back.bitdepth, av1.bitdepth);
+		assert_eq!(back.mono_chrome, av1.mono_chrome);
+		assert_eq!(back.chroma_subsampling_x, av1.chroma_subsampling_x);
+		assert_eq!(back.chroma_subsampling_y, av1.chroma_subsampling_y);
+		assert_eq!(back.chroma_sample_position, av1.chroma_sample_position);
 	}
 }
