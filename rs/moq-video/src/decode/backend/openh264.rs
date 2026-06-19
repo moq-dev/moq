@@ -4,6 +4,7 @@
 //! backend on Linux/Windows for now. Accepts Annex-B access units (SPS/PPS
 //! inline ahead of each keyframe) and returns packed I420.
 
+use bytes::Bytes;
 use openh264::OpenH264API;
 use openh264::decoder::{Decoder, DecoderConfig};
 use openh264::formats::YUVSource;
@@ -29,10 +30,10 @@ impl Openh264 {
 }
 
 impl Backend for Openh264 {
-	fn decode(&mut self, access_unit: &[u8], _keyframe: bool) -> Result<Vec<I420>, Error> {
+	fn decode(&mut self, access_unit: Bytes, _keyframe: bool) -> Result<Vec<I420>, Error> {
 		let decoded = self
 			.decoder
-			.decode(access_unit)
+			.decode(&access_unit)
 			.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 decode: {e}")))?;
 
 		// `None` means the decoder buffered the access unit but has no picture

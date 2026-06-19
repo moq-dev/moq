@@ -120,7 +120,7 @@ impl Decoder {
 		}
 
 		let annexb = match &self.conversion {
-			// Cheap refcount bump; the backend only borrows.
+			// Cheap refcount bump; the backend splits NAL slices off this buffer.
 			Conversion::Annexb => payload.clone(),
 			Conversion::Avc1 {
 				length_size,
@@ -131,7 +131,7 @@ impl Decoder {
 			}
 		};
 
-		self.backend.decode(&annexb, keyframe)
+		self.backend.decode(annexb, keyframe)
 	}
 }
 
@@ -164,7 +164,7 @@ mod tests {
 		for i in 0..10 {
 			let keyframe = i == 0;
 			for packet in encoder.encode_rgba(&frame, 320, 240, keyframe).unwrap() {
-				decoded.extend(decoder.decode(&packet, keyframe).unwrap());
+				decoded.extend(decoder.decode(packet, keyframe).unwrap());
 			}
 		}
 

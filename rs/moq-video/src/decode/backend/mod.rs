@@ -10,6 +10,8 @@
 //! candidates (platform-gated) before the openh264 software fallback, exactly
 //! like the encode side.
 
+use bytes::Bytes;
+
 use super::decoder::Kind;
 use crate::Error;
 use crate::frame::I420;
@@ -24,8 +26,9 @@ mod videotoolbox;
 /// e.g. before the first keyframe's parameter sets).
 pub(crate) trait Backend: Send {
 	/// Decode one Annex-B access unit. `keyframe` marks an IDR (parameter sets
-	/// are inline ahead of it).
-	fn decode(&mut self, access_unit: &[u8], keyframe: bool) -> Result<Vec<I420>, Error>;
+	/// are inline ahead of it). Takes an owned [`Bytes`] so a backend can split
+	/// out NAL slices without copying.
+	fn decode(&mut self, access_unit: Bytes, keyframe: bool) -> Result<Vec<I420>, Error>;
 
 	/// The decoder name in use, e.g. `"videotoolbox"` (for logging).
 	fn name(&self) -> &str;

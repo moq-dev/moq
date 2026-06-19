@@ -18,6 +18,7 @@ use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 
 use bytes::Bytes;
+use moq_mux::codec::annexb::NalIterator;
 use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CFRetained, CFString};
 use objc2_core_media::{
 	CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime, CMVideoFormatDescriptionCreateFromH264ParameterSets,
@@ -131,21 +132,32 @@ impl VideoToolbox {
 }
 
 impl Backend for VideoToolbox {
-	fn decode(&mut self, access_unit: &[u8], _keyframe: bool) -> Result<Vec<I420>, Error> {
+	fn decode(&mut self, access_unit: Bytes, _keyframe: bool) -> Result<Vec<I420>, Error> {
 		// Split the Annex-B access unit, pull out any parameter sets, and gather
-		// the VCL slices into AVCC (4-byte length-prefixed) form.
+		// the VCL slices into AVCC (4-byte length-prefixed) form. `NalIterator`
+		// yields the parameter-set NALs as zero-copy `Bytes` (sub-slices of
+		// `access_unit`), so SPS/PPS need no copy.
 		let mut sps = None;
 		let mut pps = None;
 		let mut avcc: Vec<u8> = Vec::with_capacity(access_unit.len());
-		for nal in nal_units(access_unit) {
-			match nal_unit_type(nal) {
-				NAL_TYPE_SPS => sps = Some(Bytes::copy_from_slice(nal)),
-				NAL_TYPE_PPS => pps = Some(Bytes::copy_from_slice(nal)),
-				_ => {
-					avcc.extend_from_slice(&(nal.len() as u32).to_be_bytes());
-					avcc.extend_from_slice(nal);
-				}
+		let mut handle = |nal: Bytes| match nal_unit_type(&nal) {
+			NAL_TYPE_SPS => sps = Some(nal),
+			NAL_TYPE_PPS => pps = Some(nal),
+			_ => {
+				avcc.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+				avcc.extend_from_slice(&nal);
 			}
+		};
+
+		// `NalIterator` yields every NAL except the last (it has no trailing start
+		// code); `flush` returns that final one.
+		let mut buf = access_unit;
+		let mut nals = NalIterator::new(&mut buf);
+		for nal in nals.by_ref() {
+			handle(nal.map_err(moq_mux::Error::from)?);
+		}
+		if let Some(nal) = nals.flush().map_err(moq_mux::Error::from)? {
+			handle(nal);
 		}
 
 		if !self.ensure_session(sps, pps)? {
@@ -329,34 +341,4 @@ fn nv12_output_attributes() -> Result<CFRetained<CFDictionary>, Error> {
 
 fn nal_unit_type(nal: &[u8]) -> u8 {
 	nal.first().map_or(0, |b| b & 0x1f)
-}
-
-/// Split an Annex-B buffer into its NAL unit slices (start codes removed). Finds
-/// 3- or 4-byte start codes; a 4-byte `00 00 00 01` contains `00 00 01` too, so
-/// scanning for the 3-byte code catches both.
-fn nal_units(annexb: &[u8]) -> Vec<&[u8]> {
-	let mut starts = Vec::new();
-	let mut i = 0;
-	while i + 3 <= annexb.len() {
-		if annexb[i..i + 3] == [0, 0, 1] {
-			starts.push(i + 3);
-			i += 3;
-		} else {
-			i += 1;
-		}
-	}
-
-	let mut nals = Vec::with_capacity(starts.len());
-	for (idx, &start) in starts.iter().enumerate() {
-		// The next NAL begins at its start code; trim the (3- or 4-byte) code and
-		// any trailing zero that belonged to it.
-		let mut end = starts.get(idx + 1).map(|&next| next - 3).unwrap_or(annexb.len());
-		if end > start && annexb.get(end.wrapping_sub(1)) == Some(&0) {
-			end -= 1;
-		}
-		if end > start {
-			nals.push(&annexb[start..end]);
-		}
-	}
-	nals
 }
