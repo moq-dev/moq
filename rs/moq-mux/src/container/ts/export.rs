@@ -471,10 +471,17 @@ impl<E: catalog::Catalog> Export<E> {
 		// derive the SCTE-35 'CUEI' registration when a 0x86 verbatim stream is present.
 		let program_info = if !self.program_descriptors.is_empty() {
 			to_pmt_descriptors(&self.program_descriptors)
-		} else if tracks
-			.iter()
-			.any(|t| matches!(&t.kind, Kind::Verbatim { stream_type: 0x86, .. }))
-		{
+		} else if tracks.iter().any(|t| {
+			// Only derive CUEI for section-framed 0x86 (SCTE-35); a PES-framed 0x86
+			// (e.g. DTS audio) must not advertise SCTE-35 section signaling.
+			matches!(
+				&t.kind,
+				Kind::Verbatim {
+					stream_type: 0x86,
+					framing: catalog::Framing::Section,
+				}
+			)
+		}) {
 			vec![Descriptor {
 				tag: 0x05,
 				data: b"CUEI".to_vec(),
