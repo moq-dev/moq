@@ -453,3 +453,25 @@ can carry NVENC and use it only where the driver is present. Upstream the
   first real exercise (see the unverified note above).
 - Consider reusing NVENC input/output buffers across frames (currently allocated
   per frame to sidestep the self-referential Session borrow).
+
+## Beyond H.264: HEVC and AV1 (added later)
+
+The "H.264 only" scope above was the ffmpeg-removal project. H.265 and AV1 encode
+landed afterward on top of the same `Backend` seam:
+
+- `Encoder`/`Config`/`Options` gained a `Codec` field (`H264` / `H265` / `AV1`);
+  `Producer::new` takes the codec and routes packets to the matching
+  `moq_mux::codec` importer (`.avc3` / `.hev1` / `.av01`). The mux + `hang`
+  catalog already supported all three, so only `moq-video` needed work.
+- Backends advertise the codecs they emit and `backend::open` filters by the
+  requested codec before applying `Kind`. **H.265**: VideoToolbox only (one extra
+  codec type + profile, an HVCC->Annex-B path reusing the H.264 conversion, and
+  HEVC NAL/IRAP parsing); no software encoder, so it's hardware-only. **AV1**:
+  rav1e, the pure-Rust software analogue of openh264 (`default-features = false`
+  so the build needs no nasm); no hardware AV1 backend yet.
+- Verified on macOS (`just check`): VideoToolbox HEVC emits a self-contained
+  VPS+SPS+PPS+IDR Annex-B keyframe, rav1e emits an OBU stream with an inline
+  sequence header, and the full encode -> split -> import -> catalog round-trip
+  registers the right rendition for each codec.
+- Follow-ups: hardware AV1 (VideoToolbox on M3+, NVENC on 40-series, VAAPI),
+  NVENC/VAAPI HEVC, and a live camera run for each codec.
