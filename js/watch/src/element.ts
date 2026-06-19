@@ -365,11 +365,6 @@ export default class MoqWatch extends HTMLElement {
 		return this.backend.output.jitter.peek();
 	}
 
-	/** @deprecated Use `latency = <number>` instead. */
-	set jitter(value: number) {
-		this.controls.latency.set(Moq.Time.Milli(value));
-	}
-
 	get catalogFormat(): CatalogFormat | undefined {
 		return this.#catalogFormat.peek();
 	}

@@ -1,4 +1,4 @@
-import { Moq } from "@moq/hang";
+import * as Moq from "@moq/net";
 import type { Effect } from "@moq/signals";
 import type { BufferedRanges } from "../..";
 import type MoqWatch from "../../element";
