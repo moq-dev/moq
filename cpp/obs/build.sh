@@ -65,9 +65,10 @@ if [[ -z "$TARGET" ]]; then
     echo "Detected target: $TARGET"
 fi
 
-# Default the version from buildspec.json (the plugin's source of truth).
+# Default the version from buildspec.json's top-level "version" (the nested
+# dependency entries also have "version" keys, hence the leading-indent anchor).
 if [[ -z "$VERSION" ]]; then
-    VERSION=$(grep -E '"version"' "$SCRIPT_DIR/buildspec.json" | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+    VERSION=$(grep -E '^[[:space:]]{4}"version"' "$SCRIPT_DIR/buildspec.json" | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
     echo "Detected version: $VERSION"
 fi
 
@@ -108,6 +109,11 @@ cd "$SCRIPT_DIR"
 
 echo "Building obs-moq $VERSION for $TARGET (preset: $PRESET)..."
 CONFIGURE_ARGS=()
+# Stamp the plugin's compiled-in version (project version, macOS Info.plist,
+# Windows resource) to match what we're building, not buildspec.json's 0.0.1.
+if [[ -n "$VERSION" ]]; then
+    CONFIGURE_ARGS+=("-DPLUGIN_VERSION_OVERRIDE=$VERSION")
+fi
 if [[ -n "$MOQ_RELEASE" ]]; then
     # Empty MOQ_LOCAL forces CMake's release-download branch; MOQ_VERSION and
     # MOQ_TARGET steer it at this target's archive (the presets hard-code an
