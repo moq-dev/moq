@@ -101,8 +101,8 @@ Linux, Media Foundation on Windows). The codec is chosen with `--codec`
 (`h264` default, or `h265`). For H.264 it picks a hardware encoder
 (VideoToolbox on macOS, NVENC on Linux NVIDIA, VAAPI on Linux Intel/AMD) when one
 is present, falling back to the built-in software encoder (openh264); force either
-with `--hardware` / `--software`. H.265 is hardware-only (VideoToolbox on macOS).
-`--camera` takes a bare integer as a device index, otherwise a
+with `--hardware` / `--software`. H.265 is hardware-only (VideoToolbox on macOS,
+Media Foundation on Windows). `--camera` takes a bare integer as a device index, otherwise a
 device path (Linux) or name (a friendly-name substring on Windows, the
 AVFoundation `uniqueID` on macOS). Audio capture uses cpal (CoreAudio / WASAPI /
 ALSA) and encodes Opus.

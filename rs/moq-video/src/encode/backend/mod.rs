@@ -64,7 +64,7 @@ const HARDWARE: &[Candidate] = &[
 	#[cfg(target_os = "windows")]
 	Candidate {
 		name: mediafoundation::NAME,
-		codecs: &[Codec::H264],
+		codecs: &[Codec::H264, Codec::H265],
 		open: mediafoundation::MediaFoundation::open,
 	},
 	#[cfg(all(target_os = "linux", feature = "nvenc"))]
