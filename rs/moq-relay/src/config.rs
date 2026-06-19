@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -87,14 +88,63 @@ impl Config {
 		I: IntoIterator<Item = T>,
 		T: Into<std::ffi::OsString> + Clone,
 	{
-		let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
-		let mut config = Config::parse_from(&args);
-		if let Some(file) = config.file.clone() {
-			config = toml::from_str(&std::fs::read_to_string(file)?)?;
-			config.update_from(&args);
-		}
-		Ok(config)
+		merge_from_args(args, |config: &Config| config.file.clone())
 	}
+}
+
+/// Parse a clap config from CLI args, merging a TOML file if one is named.
+///
+/// This is the generic core of [`Config::load`], exposed so embedders that
+/// **flatten** [`Config`] into their own clap parser (to add extra flags
+/// alongside every relay flag) can reuse the exact same merge semantics:
+///
+/// ```no_run
+/// #[derive(clap::Parser, serde::Deserialize)]
+/// struct MyConfig {
+///     #[command(flatten)]
+///     #[serde(flatten)]
+///     relay: moq_relay::Config,
+///     #[arg(long)]
+///     my_flag: bool,
+/// }
+///
+/// let config: MyConfig = moq_relay::load_config(|c| c.relay.file.clone())?;
+/// config.relay.log.init()?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+///
+/// `file` extracts the optional TOML path from the parsed value (e.g.
+/// `|c| c.relay.file.clone()`). Unlike [`Config::load`] this does NOT initialize
+/// the logger; call `config.relay.log.init()` yourself once you have the value.
+///
+/// The clap+TOML clobber pitfall documented on [`Config::load`] applies to the
+/// flattening config too: type any extra TOML-overridable flag as `Option<T>`.
+pub fn load_config<T, F>(file: F) -> anyhow::Result<T>
+where
+	T: Parser + serde::de::DeserializeOwned,
+	F: FnOnce(&T) -> Option<String>,
+{
+	merge_from_args(std::env::args_os(), file)
+}
+
+/// Shared implementation behind [`Config::parse_and_merge`] and [`load_config`].
+/// Merge order: CLI args -> TOML file (if named) -> CLI args re-applied so
+/// explicit flags / env vars win over the file.
+fn merge_from_args<I, A, T, F>(args: I, file: F) -> anyhow::Result<T>
+where
+	I: IntoIterator<Item = A>,
+	A: Into<std::ffi::OsString> + Clone,
+	T: Parser + serde::de::DeserializeOwned,
+	F: FnOnce(&T) -> Option<String>,
+{
+	let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+	let mut config = T::parse_from(&args);
+	if let Some(path) = file(&config) {
+		let text = std::fs::read_to_string(&path).with_context(|| format!("reading config file {path}"))?;
+		config = toml::from_str(&text).with_context(|| format!("parsing config file {path}"))?;
+		config.update_from(&args);
+	}
+	Ok(config)
 }
 
 #[cfg(test)]
@@ -343,5 +393,46 @@ id = 12345
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.cluster.id, Some(67890));
+	}
+
+	/// The embed contract: a downstream binary can flatten [`Config`] into its
+	/// own clap parser (adding extra flags alongside every relay flag) and reuse
+	/// the relay's CLI -> TOML -> CLI merge via the generic [`merge_from_args`]
+	/// (the core of the public [`load_config`]). Exercises all four corners at
+	/// once: clap flatten + the positional `file`, serde flatten of `Config`
+	/// (whose `deny_unknown_fields` must not break embedding), and the CLI
+	/// re-apply landing the extra flag.
+	#[test]
+	fn embedder_can_flatten_config() {
+		#[derive(clap::Parser, serde::Deserialize, Debug)]
+		struct Embed {
+			#[command(flatten)]
+			#[serde(flatten)]
+			relay: Config,
+
+			/// An embedder-specific flag the relay knows nothing about.
+			#[arg(long = "worker-enabled")]
+			#[serde(skip)]
+			worker_enabled: bool,
+		}
+
+		let toml = "[stats]\nenabled = true\nnode = \"embed\"\n";
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("embed-flatten.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![
+			std::ffi::OsString::from("my-edge"),
+			std::ffi::OsString::from(&path),
+			std::ffi::OsString::from("--worker-enabled"),
+		];
+		let config: Embed = merge_from_args(args, |c: &Embed| c.relay.file.clone()).expect("embed config load");
+
+		// The relay's TOML section was applied through the flattened field...
+		assert_eq!(config.relay.stats.enabled, Some(true));
+		assert_eq!(config.relay.stats.node.as_deref(), Some("embed"));
+		// ...and the embedder's own flag came through the CLI re-apply.
+		assert!(config.worker_enabled);
 	}
 }
