@@ -26,11 +26,13 @@ mod origin;
 mod publish;
 mod session;
 mod state;
+mod video;
 
 pub use api::*;
 pub use audio::*;
 pub use error::*;
 pub use id::*;
+pub use video::*;
 
 pub(crate) use consume::*;
 pub(crate) use origin::*;

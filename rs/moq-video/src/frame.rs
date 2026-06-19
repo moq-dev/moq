@@ -97,6 +97,38 @@ impl I420 {
 		Ok(Self::pack(&planar, width, height))
 	}
 
+	/// Pack strided Y/U/V planes (4:2:0, full-size luma, half-size chroma) into a
+	/// tightly-packed I420 buffer. `y_stride` / `uv_stride` are the source row
+	/// strides, which a decoder may pad wider than the visible width. Used by the
+	/// software H.264 decode backend, whose `DecodedYUV` exposes strided planes.
+	/// Width and height must be even (4:2:0 chroma).
+	pub(crate) fn from_planes(
+		y: &[u8],
+		u: &[u8],
+		v: &[u8],
+		y_stride: usize,
+		uv_stride: usize,
+		width: u32,
+		height: u32,
+	) -> Self {
+		let (w, h) = (width as usize, height as usize);
+		let (cw, ch) = (w / 2, h / 2);
+
+		let mut data = vec![0u8; Self::len(width, height)];
+		let (luma, chroma) = data.split_at_mut(w * h);
+		let (u_dst, v_dst) = chroma.split_at_mut(cw * ch);
+
+		for row in 0..h {
+			luma[row * w..row * w + w].copy_from_slice(&y[row * y_stride..row * y_stride + w]);
+		}
+		for row in 0..ch {
+			u_dst[row * cw..row * cw + cw].copy_from_slice(&u[row * uv_stride..row * uv_stride + cw]);
+			v_dst[row * cw..row * cw + cw].copy_from_slice(&v[row * uv_stride..row * uv_stride + cw]);
+		}
+
+		Self { width, height, data }
+	}
+
 	/// Convert tightly-packed RGB (`width * height * 3` bytes) to I420, BT.601
 	/// limited range. Used for MJPEG capture (Linux V4L2), which decodes to RGB.
 	#[cfg(target_os = "linux")]

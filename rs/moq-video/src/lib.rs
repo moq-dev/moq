@@ -17,20 +17,22 @@
 //!     front, but the camera opens only while a subscriber is watching and is
 //!     released when the last one leaves.
 //!   - [`encode::Producer`] publishes H.264 you encoded yourself.
-//!
-//! The decode/consume side (the mirror of `moq-audio`'s `AudioConsumer`) is
-//! not implemented yet; native subscribers can keep using `moq_mux` directly.
+//! - [`decode`] subscribes to an H.264 track and decodes it to raw I420 frames
+//!   with a native backend (VideoToolbox / openh264). [`decode::Consumer`] is the
+//!   mirror of `moq-audio`'s `AudioConsumer`.
 //!
 //! ## API stability
 //!
 //! The public API is codec-agnostic: no public type, signature, or error
 //! variant names a backend (openh264 / VideoToolbox / NVENC) or a capture
-//! implementation. [`encode::Encoder`] takes raw RGBA bytes, and the camera
-//! capture path stays internal. So swapping or bumping any backend crate is not
-//! a breaking change for consumers. Config structs are `#[non_exhaustive]`:
-//! build them via `default()`/`new()` and set fields, so new options stay additive.
+//! implementation. [`encode::Encoder`] takes raw RGBA bytes, [`decode::Consumer`]
+//! returns raw I420, and the camera capture path stays internal. So swapping or
+//! bumping any backend crate is not a breaking change for consumers. Config
+//! structs are `#[non_exhaustive]`: build them via `default()`/`new()` and set
+//! fields, so new options stay additive.
 
 pub mod capture;
+pub mod decode;
 pub mod encode;
 
 mod error;

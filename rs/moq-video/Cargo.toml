@@ -39,6 +39,8 @@ vaapi = ["dep:moq-vaapi"]
 anyhow = "1"
 bytes = "1"
 cudarc = { version = "0.19", optional = true, default-features = false, features = ["driver"] }
+# Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
+hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # VAAPI H.264 encoder, gated behind the `vaapi` feature + a linux cfg. Listed here
