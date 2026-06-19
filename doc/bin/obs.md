@@ -60,7 +60,7 @@ just obs build
 
 ## Releases
 
-Pushing an `obs-moq-v*` tag runs [`.github/workflows/obs.yml`](https://github.com/moq-dev/moq/blob/main/.github/workflows/obs.yml): it builds on Linux (x86_64 + arm64, via Nix), macOS (arm64), and Windows (x64), then attaches per-platform archives to a GitHub release. `cpp/obs/build.sh` drives the per-platform build and packaging.
+The plugin statically links `libmoq`, so it ships with every libmoq release rather than on its own schedule. The [`libmoq` workflow](https://github.com/moq-dev/moq/blob/main/.github/workflows/libmoq.yml) (triggered by a `libmoq-v*` tag) rebuilds the plugin against the libmoq release it just published, then cuts a matching `obs-moq-v<version>` release for Linux (x86_64 + arm64, via Nix), macOS (arm64), and Windows (x64). `cpp/obs/build.sh --libmoq-release <version>` drives each per-platform build (it fetches the prebuilt libmoq archive, so no second cargo build).
 
 The archives are **unsigned**, so macOS Gatekeeper and Windows SmartScreen will warn on first load (right-click → Open on macOS). Extract the archive into your OBS plugins directory: the `.plugin` bundle on macOS, or the `obs-moq/` folder (containing `bin/64bit/` + `data/`) on Linux/Windows.
 
