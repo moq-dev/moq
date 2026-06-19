@@ -350,16 +350,15 @@ impl Server {
 /// certificate that chained to a configured [`Server::root`]. Owns the chain
 /// (leaf first) so callers can inspect it, e.g. [`expiry`](Self::expiry),
 /// without re-parsing the type-erased QUIC identity.
-#[cfg(any(feature = "quinn", feature = "noq"))]
 pub struct PeerIdentity {
 	chain: Vec<CertificateDer<'static>>,
 }
 
-#[cfg(any(feature = "quinn", feature = "noq"))]
 impl PeerIdentity {
 	/// Wrap the type-erased identity from `quinn::Connection::peer_identity`.
 	/// Returns `None` if the peer presented no certificate or the identity is
 	/// not a certificate chain.
+	#[cfg(any(feature = "quinn", feature = "noq"))]
 	pub(crate) fn from_any(identity: Option<Box<dyn std::any::Any>>) -> Option<Self> {
 		let chain = identity?.downcast::<Vec<CertificateDer<'static>>>().ok()?;
 		Some(Self { chain: *chain })

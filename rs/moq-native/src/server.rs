@@ -618,7 +618,6 @@ impl Request {
 	/// Only the Quinn and noq backends support mTLS; other backends always
 	/// return `None`. Use it to grant elevated access or to close the session
 	/// once the certificate expires (see [`crate::tls::PeerIdentity::expiry`]).
-	#[cfg(any(feature = "quinn", feature = "noq"))]
 	pub fn peer_identity(&self) -> Option<crate::tls::PeerIdentity> {
 		match self.kind {
 			#[cfg(feature = "quinn")]
@@ -631,6 +630,14 @@ impl Request {
 			RequestKind::Iroh(_) => None,
 			#[cfg(feature = "websocket")]
 			RequestKind::WebSocket(_) => None,
+			#[cfg(not(any(
+				feature = "noq",
+				feature = "quinn",
+				feature = "quiche",
+				feature = "iroh",
+				feature = "websocket"
+			)))]
+			_ => None,
 		}
 	}
 }
