@@ -612,58 +612,25 @@ impl Request {
 		}
 	}
 
-	/// Whether the peer presented a client certificate during the handshake
-	/// that chained to a configured [`crate::tls::Server::root`].
-	///
-	/// Only the Quinn and noq backends support mTLS; other backends always return `false`.
-	pub fn has_peer_certificate(&self) -> bool {
-		match self.kind {
-			#[cfg(feature = "quinn")]
-			RequestKind::Quinn(ref request) => request.has_peer_certificate(),
-			#[cfg(feature = "noq")]
-			RequestKind::Noq(ref request) => request.has_peer_certificate(),
-			#[cfg(feature = "quiche")]
-			RequestKind::Quiche(_) => false,
-			#[cfg(feature = "iroh")]
-			RequestKind::Iroh(_) => false,
-			#[cfg(feature = "websocket")]
-			RequestKind::WebSocket(_) => false,
-			#[cfg(not(any(
-				feature = "noq",
-				feature = "quinn",
-				feature = "quiche",
-				feature = "iroh",
-				feature = "websocket"
-			)))]
-			_ => false,
-		}
-	}
-
-	/// The expiry (`notAfter`) of the peer's end-entity certificate, if it
-	/// presented one that chained to a configured [`crate::tls::Server::root`].
+	/// The client certificate chain the peer presented, if any, validated
+	/// against a configured [`crate::tls::Server::root`] during the handshake.
 	///
 	/// Only the Quinn and noq backends support mTLS; other backends always
-	/// return `None`. Lets the caller close the session once the cert expires.
-	pub fn peer_certificate_expiry(&self) -> Option<std::time::SystemTime> {
+	/// return `None`. Use it to grant elevated access or to close the session
+	/// once the certificate expires (see [`crate::tls::PeerIdentity::expiry`]).
+	#[cfg(any(feature = "quinn", feature = "noq"))]
+	pub fn peer_identity(&self) -> Option<crate::tls::PeerIdentity> {
 		match self.kind {
 			#[cfg(feature = "quinn")]
-			RequestKind::Quinn(ref request) => request.peer_certificate_expiry(),
+			RequestKind::Quinn(ref request) => request.peer_identity(),
 			#[cfg(feature = "noq")]
-			RequestKind::Noq(ref request) => request.peer_certificate_expiry(),
+			RequestKind::Noq(ref request) => request.peer_identity(),
 			#[cfg(feature = "quiche")]
 			RequestKind::Quiche(_) => None,
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh(_) => None,
 			#[cfg(feature = "websocket")]
 			RequestKind::WebSocket(_) => None,
-			#[cfg(not(any(
-				feature = "noq",
-				feature = "quinn",
-				feature = "quiche",
-				feature = "iroh",
-				feature = "websocket"
-			)))]
-			_ => None,
 		}
 	}
 }

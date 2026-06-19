@@ -101,25 +101,20 @@ impl Connection {
 
 		// The credential (JWT `exp` or client cert `notAfter`) is only checked at
 		// connect time, so hold the session open no longer than the credential is
-		// valid. Without an expiry, sleep forever and just wait for close.
-		let expiry = async {
-			match token.expires {
-				Some(expires) => {
-					let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
-					tokio::time::sleep(remaining).await;
-				}
-				None => std::future::pending().await,
-			}
+		// valid. Without an expiry, just wait for the session to close.
+		let Some(expires) = token.expires else {
+			return Ok(session.closed().await?);
 		};
 
-		tokio::select! {
-			res = session.closed() => return Ok(res?),
-			_ = expiry => {}
+		let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
+		match tokio::time::timeout(remaining, session.closed()).await {
+			Ok(res) => Ok(res?),
+			Err(_) => {
+				tracing::info!("credential expired, closing session");
+				session.close(moq_net::Error::Unauthorized);
+				Ok(())
+			}
 		}
-
-		tracing::info!("credential expired, closing session");
-		session.close(moq_net::Error::Unauthorized);
-		Ok(())
 	}
 
 	/// Resolve an [`AuthToken`] from the request's URL and (optional) mTLS peer
@@ -135,7 +130,7 @@ impl Connection {
 			None => AuthParams::default(),
 		};
 
-		if self.request.has_peer_certificate() {
+		if let Some(identity) = self.request.peer_identity() {
 			tracing::debug!("mTLS peer authenticated");
 			// Scope the grant to the canonical root. An mTLS publisher dialing a
 			// vanity alias lands on the same tree a JWT would; cluster peers dial
@@ -146,7 +141,7 @@ impl Connection {
 			token.internal = internal;
 			// Close the session when the client certificate expires, mirroring
 			// the JWT `exp` handling. Validated once at the TLS handshake otherwise.
-			token.expires = self.request.peer_certificate_expiry();
+			token.expires = identity.expiry();
 			return Ok(token);
 		}
 
