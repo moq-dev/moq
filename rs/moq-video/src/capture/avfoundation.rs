@@ -20,7 +20,7 @@ use objc2_core_media::CMSampleBuffer;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 
 use super::queue::{FrameQueue, surface_frame};
-use super::{Config, FrameSource};
+use super::{Config, FrameSource, Read};
 use crate::Error;
 use crate::frame::Frame;
 
@@ -113,11 +113,15 @@ impl Camera {
 }
 
 impl FrameSource for Camera {
-	fn read(&mut self) -> Result<Option<Frame>, Error> {
+	fn read(&mut self, timeout: Duration) -> Result<Read, Error> {
 		if let Some(frame) = self.pending.take() {
-			return Ok(Some(frame));
+			return Ok(Read::Frame(frame));
 		}
-		Ok(self.queue.pop())
+		match self.queue.pop_timeout(timeout) {
+			Some(frame) => Ok(Read::Frame(frame)),
+			None if self.queue.is_closed() => Ok(Read::End),
+			None => Ok(Read::Idle),
+		}
 	}
 
 	fn width(&self) -> u32 {

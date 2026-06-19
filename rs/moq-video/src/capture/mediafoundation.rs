@@ -11,6 +11,7 @@
 use std::ffi::c_void;
 use std::ptr;
 use std::slice;
+use std::time::Duration;
 
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
@@ -31,7 +32,7 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::core::{Interface, PWSTR};
 
-use super::{Config, FrameSource};
+use super::{Config, FrameSource, Read};
 use crate::Error;
 use crate::frame::d3d11::Texture;
 use crate::frame::{Frame, I420};
@@ -242,7 +243,9 @@ impl Camera {
 }
 
 impl FrameSource for Camera {
-	fn read(&mut self) -> Result<Option<Frame>, Error> {
+	// The source reader blocks per frame, so the bounded read budget is unused;
+	// it returns promptly enough for the loop to poll shutdown between frames.
+	fn read(&mut self, _timeout: Duration) -> Result<Read, Error> {
 		loop {
 			let mut flags: u32 = 0;
 			let mut sample: Option<IMFSample> = None;
@@ -260,7 +263,7 @@ impl FrameSource for Camera {
 			}
 
 			if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-				return Ok(None);
+				return Ok(Read::End);
 			}
 			// A null sample with no end-of-stream is a gap / stream tick (e.g. a
 			// mid-stream format change); keep reading until a real frame arrives.
@@ -271,7 +274,7 @@ impl FrameSource for Camera {
 				Some(device) => self.sample_to_texture(device, &sample)?,
 				None => self.sample_to_i420(&sample)?,
 			};
-			return Ok(Some(frame));
+			return Ok(Read::Frame(frame));
 		}
 	}
 

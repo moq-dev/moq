@@ -21,6 +21,22 @@ mod permission;
 /// denies microphone access.
 const FIRST_BUFFER_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a bounded mic read blocks before returning to recheck the gate.
+/// Bounds shutdown latency: once the gate closes, the worker observes it within
+/// this interval even if the device stalls without delivering buffers.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(100);
+
+/// The outcome of a bounded [`Microphone`] read.
+enum Read {
+	/// A captured PCM frame.
+	Frame(Frame),
+	/// The timeout elapsed before a buffer arrived; the stream is still live, so
+	/// the caller should poll its shutdown signal and read again.
+	Idle,
+	/// The stream ended (device gone, callback dropped the sender).
+	End,
+}
+
 /// Microphone capture configuration. All fields are hints; the backend picks
 /// the closest supported mode and the [`AudioProducer`]
 /// resamples to the codec rate anyway.
@@ -150,6 +166,29 @@ impl Microphone {
 			}
 		};
 
+		Ok(Some(self.frame_from(samples)))
+	}
+
+	/// Like [`read`](Self::read) but only blocks up to `timeout`, returning
+	/// [`Read::Idle`] on timeout so the capture loop can poll for shutdown rather
+	/// than block indefinitely on a stalled device. Internal to the on-demand
+	/// capture loop; external callers use [`read`](Self::read).
+	fn read_timeout(&mut self, timeout: Duration) -> Result<Read, AudioError> {
+		let samples = match self.pending.take() {
+			Some(samples) => samples,
+			None => match self.rx.recv_timeout(timeout) {
+				Ok(samples) => samples,
+				Err(RecvTimeoutError::Timeout) => return Ok(Read::Idle),
+				Err(RecvTimeoutError::Disconnected) => return Ok(Read::End),
+			},
+		};
+
+		Ok(Read::Frame(self.frame_from(samples)))
+	}
+
+	/// Build a timestamped [`Frame`] from a buffer of interleaved `f32` samples,
+	/// advancing the read cursor so consecutive frames carry monotonic PTS.
+	fn frame_from(&mut self, samples: Vec<f32>) -> Frame {
 		let timestamp_us = self.frames_read * 1_000_000 / self.sample_rate as u64;
 		self.frames_read += (samples.len() / self.channels.max(1) as usize) as u64;
 
@@ -158,10 +197,10 @@ impl Microphone {
 			bytes.extend_from_slice(&sample.to_le_bytes());
 		}
 
-		Ok(Some(Frame {
+		Frame {
 			timestamp_us,
 			data: bytes.into(),
-		}))
+		}
 	}
 }
 
@@ -199,12 +238,30 @@ pub async fn publish_microphone(
 	let worker_gate = gate.clone();
 	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, config, worker_gate, clock));
 
+	// Cancellation safety: a spawn_blocking task can't be cancelled, so if this
+	// future is dropped (e.g. on Ctrl+C) we must still tell the worker to stop.
+	// Closing the gate on drop unblocks both its idle wait and its bounded read,
+	// so the worker returns and releases the mic and runtime shutdown doesn't
+	// hang waiting for a task that never finishes.
+	let _cancel = CancelGuard(gate.clone());
+
 	tokio::select! {
 		res = &mut worker => res.map_err(task_err)?,
 		() = monitor_demand(&track, &gate) => {
 			gate.close();
 			worker.await.map_err(task_err)?
 		}
+	}
+}
+
+/// Closes the gate when dropped, so cancelling [`publish_microphone`] (which
+/// drops this guard) signals the blocking worker to stop. Async `Drop` doesn't
+/// exist, so this RAII guard is how the worker learns the future is gone.
+struct CancelGuard(Arc<Gate>);
+
+impl Drop for CancelGuard {
+	fn drop(&mut self) {
+		self.0.close();
 	}
 }
 
@@ -246,6 +303,11 @@ fn capture_loop(
 	let mut mic: Option<Microphone> = None;
 
 	loop {
+		// Stop promptly when cancelled (gate closed via CancelGuard / shutdown).
+		if gate.is_closed() {
+			break;
+		}
+
 		if !gate.is_active() {
 			if mic.take().is_some() {
 				// Re-anchor so the next frame after resume reflects the gap.
@@ -262,8 +324,12 @@ fn capture_loop(
 			mic = Some(Microphone::open(&config)?);
 		}
 
-		let Some(mut frame) = mic.as_mut().expect("mic open above").read()? else {
-			break; // device stopped producing samples
+		let mut frame = match mic.as_mut().expect("mic open above").read_timeout(SHUTDOWN_POLL)? {
+			Read::Frame(frame) => frame,
+			// Timed out without a buffer: loop back to recheck the gate (shutdown
+			// or the last listener leaving) instead of blocking indefinitely.
+			Read::Idle => continue,
+			Read::End => break, // device stopped producing samples
 		};
 
 		// Stamp from the shared clock (including any idle gap) so the producer's
@@ -309,6 +375,9 @@ impl Gate {
 
 	fn close(&self) {
 		let mut state = self.state.lock().unwrap();
+		// Clear active so a shutdown that races a still-subscribed track also
+		// releases the idle wait. The capture loop additionally checks `closed`
+		// at the top of each iteration and between bounded reads.
 		state.active = false;
 		state.closed = true;
 		self.cond.notify_all();
@@ -316,6 +385,10 @@ impl Gate {
 
 	fn is_active(&self) -> bool {
 		self.state.lock().unwrap().active
+	}
+
+	fn is_closed(&self) -> bool {
+		self.state.lock().unwrap().closed
 	}
 
 	/// Block until active or closed. Returns `false` if closed.
@@ -366,4 +439,65 @@ fn stream_err(err: cpal::Error) {
 
 fn cpal_err(err: cpal::Error) -> AudioError {
 	AudioError::Unsupported(format!("audio capture: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::sync::mpsc;
+
+	/// Dropping the guard (as cancelling the `publish_microphone` future does)
+	/// must close the gate so the worker stops.
+	#[test]
+	fn cancel_guard_closes_gate() {
+		let gate = Gate::new();
+		{
+			let _cancel = CancelGuard(gate.clone());
+			assert!(!gate.is_closed());
+		}
+		assert!(gate.is_closed());
+		// A closed gate releases the idle wait instead of blocking forever.
+		assert!(!gate.wait_active());
+	}
+
+	/// A worker parked in the idle `wait_active` must wake when the gate closes.
+	/// `join` bounds the wake: if `close` failed to notify, the test hangs.
+	#[test]
+	fn close_wakes_idle_waiter() {
+		let gate = Gate::new();
+		let waiter = std::thread::spawn({
+			let gate = gate.clone();
+			move || gate.wait_active()
+		});
+		gate.close();
+		assert!(!waiter.join().unwrap());
+	}
+
+	/// Mirror the capture loop's active path: a bounded `recv_timeout` that keeps
+	/// timing out (the mic delivers nothing) must still end the worker once the
+	/// gate closes. The sender is held open so only the gate can break the loop;
+	/// `join` bounds it, so an unbounded read would hang the test.
+	#[test]
+	fn close_ends_active_recv_loop() {
+		let gate = Gate::new();
+		gate.set_active(true);
+		let (_tx, rx) = mpsc::channel::<Vec<f32>>();
+		let worker = std::thread::spawn({
+			let gate = gate.clone();
+			move || {
+				loop {
+					if gate.is_closed() {
+						break;
+					}
+					match rx.recv_timeout(Duration::from_millis(5)) {
+						Ok(_) => {}
+						Err(RecvTimeoutError::Timeout) => continue,
+						Err(RecvTimeoutError::Disconnected) => break,
+					}
+				}
+			}
+		});
+		gate.close();
+		worker.join().unwrap();
+	}
 }

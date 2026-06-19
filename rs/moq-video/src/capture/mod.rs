@@ -7,6 +7,8 @@
 //!
 //! [`encode::publish_capture`](crate::encode::publish_capture) consumes [`Config`].
 
+use std::time::Duration;
+
 use crate::Error;
 use crate::frame::Frame;
 
@@ -57,10 +59,23 @@ pub struct Config {
 	pub framerate: Option<u32>,
 }
 
+/// The outcome of a bounded [`FrameSource::read`].
+pub(crate) enum Read {
+	/// A captured frame.
+	Frame(Frame),
+	/// The timeout elapsed before a frame arrived; the source is still live, so
+	/// the caller should poll its shutdown signal and read again.
+	Idle,
+	/// The source ended (device stopped, queue closed).
+	End,
+}
+
 /// A live frame source, read frame-by-frame. Opened via [`open`].
 pub(crate) trait FrameSource {
-	/// Block until the next frame, or `None` once the source ends.
-	fn read(&mut self) -> Result<Option<Frame>, Error>;
+	/// Block up to `timeout` for the next frame. Returns [`Read::Idle`] if the
+	/// timeout elapses while the source is still live, so the caller can check a
+	/// shutdown signal between reads instead of blocking forever.
+	fn read(&mut self, timeout: Duration) -> Result<Read, Error>;
 	fn width(&self) -> u32;
 	fn height(&self) -> u32;
 	/// The negotiated frame rate, or `None` if the source doesn't report one.

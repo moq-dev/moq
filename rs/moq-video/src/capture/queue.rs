@@ -53,20 +53,6 @@ impl FrameQueue {
 		self.cond.notify_one();
 	}
 
-	/// Block until a frame is available or the queue closes.
-	pub(super) fn pop(&self) -> Option<Frame> {
-		let mut state = self.state.lock().unwrap();
-		loop {
-			if let Some(frame) = state.frames.pop_front() {
-				return Some(frame.0);
-			}
-			if state.closed {
-				return None;
-			}
-			state = self.cond.wait(state).unwrap();
-		}
-	}
-
 	/// Block up to `timeout` for the next available frame.
 	pub(super) fn pop_timeout(&self, timeout: Duration) -> Option<Frame> {
 		let deadline = Instant::now() + timeout;
@@ -93,6 +79,13 @@ impl FrameQueue {
 		state.closed = true;
 		self.cond.notify_all();
 	}
+
+	/// Whether the queue has been closed (the source is shutting down). A
+	/// `None` from [`pop_timeout`](Self::pop_timeout) means closed when this is
+	/// true, otherwise it was just a timeout.
+	pub(super) fn is_closed(&self) -> bool {
+		self.state.lock().unwrap().closed
+	}
 }
 
 /// Extract the `CVPixelBuffer` from a sample buffer as a zero-copy surface.
@@ -104,4 +97,25 @@ pub(super) fn surface_frame(sample_buffer: &CMSampleBuffer) -> Option<Frame> {
 	let width = CVPixelBufferGetWidth(&pixel) as u32;
 	let height = CVPixelBufferGetHeight(&pixel) as u32;
 	Some(Frame::Surface(Surface::new(pixel, width, height)))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A timed-out `pop_timeout` on a live queue is `None` but not closed (the
+	/// read maps it to `Read::Idle`); after `close` it's `None` and closed (the
+	/// read maps it to `Read::End`). This is the distinction the capture loop
+	/// relies on to stop without a frame ever arriving.
+	#[test]
+	fn pop_timeout_distinguishes_idle_from_closed() {
+		let queue = FrameQueue::new();
+
+		assert!(queue.pop_timeout(Duration::from_millis(5)).is_none());
+		assert!(!queue.is_closed());
+
+		queue.close();
+		assert!(queue.pop_timeout(Duration::from_millis(5)).is_none());
+		assert!(queue.is_closed());
+	}
 }

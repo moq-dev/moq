@@ -450,7 +450,10 @@ mod tests {
 		let mut packets = Vec::new();
 		let mut textures = 0;
 		for i in 0..30 {
-			let frame = camera.read().expect("read frame").expect("frame, not end of stream");
+			let frame = match camera.read(std::time::Duration::from_secs(5)).expect("read frame") {
+				crate::capture::Read::Frame(frame) => frame,
+				_ => panic!("expected a frame, not idle/end of stream"),
+			};
 			if matches!(frame, Frame::Texture(_)) {
 				textures += 1;
 			}

@@ -6,6 +6,8 @@
 //! the pure-Rust [`zune_jpeg`], then converted). This is the CPU path feeding
 //! openh264 / NVENC; there's no GPU surface here.
 
+use std::time::Duration;
+
 use v4l::buffer::Type as BufType;
 use v4l::io::mmap::Stream as MmapStream;
 use v4l::io::traits::CaptureStream;
@@ -14,7 +16,7 @@ use v4l::video::capture::Parameters;
 use v4l::{Device, Format, FourCC};
 use zune_jpeg::zune_core::bytestream::ZCursor;
 
-use super::{Config, FrameSource};
+use super::{Config, FrameSource, Read};
 use crate::Error;
 use crate::frame::{Frame, I420};
 
@@ -103,7 +105,9 @@ impl Camera {
 }
 
 impl FrameSource for Camera {
-	fn read(&mut self) -> Result<Option<Frame>, Error> {
+	// V4L2 blocks per frame (one frame interval), so the bounded read budget is
+	// unused; the driver returns promptly enough for the loop to poll shutdown.
+	fn read(&mut self, _timeout: Duration) -> Result<Read, Error> {
 		let (buf, meta) =
 			CaptureStream::next(&mut self.stream).map_err(|e| Error::Codec(anyhow::anyhow!("V4L2 capture: {e}")))?;
 
@@ -123,7 +127,7 @@ impl FrameSource for Camera {
 				I420::from_rgb(&rgb, w as u32, h as u32)?
 			}
 		};
-		Ok(Some(Frame::I420(i420)))
+		Ok(Read::Frame(Frame::I420(i420)))
 	}
 
 	fn width(&self) -> u32 {
