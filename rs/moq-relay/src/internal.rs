@@ -52,7 +52,11 @@ pub struct InternalTcp {
 #[non_exhaustive]
 pub struct InternalUds {
 	/// Bind an unauthenticated Unix-socket (qmux, no TLS) listener at this path.
-	#[arg(long = "internal-uds-listen", id = "internal-uds-listen", env = "MOQ_INTERNAL_UDS_LISTEN")]
+	#[arg(
+		long = "internal-uds-listen",
+		id = "internal-uds-listen",
+		env = "MOQ_INTERNAL_UDS_LISTEN"
+	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub listen: Option<PathBuf>,
 
