@@ -2638,7 +2638,7 @@ checksum = "253b313319f7109de64e480ffb606f89475cd758bae82e096e00c5d95341d30e"
 
 [[package]]
 name = "hang"
-version = "0.19.1"
+version = "0.19.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3744,7 +3744,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.2.19"
+version = "0.2.20"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4003,12 +4003,12 @@ dependencies = [
  "clap",
  "hang",
  "moq-audio",
+ "moq-json",
  "moq-mux",
  "moq-native",
  "moq-net",
  "moq-video",
  "serde",
- "serde_json",
  "tokio",
  "tracing",
  "url",
@@ -4016,7 +4016,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.7.32"
+version = "0.7.33"
 dependencies = [
  "anyhow",
  "axum",
@@ -4040,7 +4040,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.2.21"
+version = "0.2.22"
 dependencies = [
  "bytes",
  "hang",
@@ -4058,7 +4058,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4102,7 +4102,7 @@ dependencies = [
 
 [[package]]
 name = "moq-json"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bytes",
  "json-patch",
@@ -4133,7 +4133,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "base64",
@@ -4163,7 +4163,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.17.1"
+version = "0.17.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4205,6 +4205,7 @@ dependencies = [
  "web-transport-quiche",
  "web-transport-quinn",
  "web-transport-trait",
+ "x509-parser",
 ]
 
 [[package]]
@@ -4228,7 +4229,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.12.10"
+version = "0.12.12"
 dependencies = [
  "anyhow",
  "axum",
@@ -4335,7 +4336,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.30"
+version = "0.5.31"
 dependencies = [
  "anyhow",
  "clap",

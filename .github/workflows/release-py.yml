@@ -31,7 +31,10 @@ concurrency:
 jobs:
   build:
     name: Build wheel + sdist
-    runs-on: ubuntu-latest
+    # Trusted push to main and the wrapper wheel is pure-python (arch
+    # independent), so run on the moq-dev self-hosted A1 runner (warm
+    # /nix/store).
+    runs-on: [self-hosted, nix]
     if: ${{ github.repository_owner == 'moq-dev' }}
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -56,12 +59,11 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: .github/scripts/release.sh pypi-exists moq-rs "$VERSION"
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-
+      # Login shell so /etc/profile.d puts Nix on PATH; Actions shells don't by
+      # default.
       - name: Build
         run: nix develop --command just py package
+        shell: bash -leo pipefail {0}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

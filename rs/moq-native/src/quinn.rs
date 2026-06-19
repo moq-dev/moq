@@ -514,14 +514,14 @@ impl QuinnRequest {
 		}
 	}
 
-	/// Whether the peer presented a client certificate that rustls validated
-	/// against the configured `tls.root` during the handshake.
-	pub fn has_peer_certificate(&self) -> bool {
+	/// The client certificate chain the peer presented, if any, validated by
+	/// rustls against the configured `tls.root` during the handshake.
+	pub fn peer_identity(&self) -> Option<crate::tls::PeerIdentity> {
 		let conn = match self {
 			QuinnRequest::Raw { connection, .. } => connection,
 			QuinnRequest::WebTransport { request, .. } => request.conn(),
 		};
-		conn.peer_identity().is_some()
+		crate::tls::PeerIdentity::from_any(conn.peer_identity())
 	}
 
 	/// Reject the session with a status code.

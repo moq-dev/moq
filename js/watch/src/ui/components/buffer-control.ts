@@ -141,7 +141,7 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Mil
 		const ms = (x / trackWidth) * max;
 		const snapped = Moq.Time.Milli(Math.round(ms / RANGE_STEP) * RANGE_STEP);
 		const clamped = Moq.Time.Milli(Math.max(MIN_RANGE, Math.min(max, snapped)));
-		watch.controls.latency.set(clamped);
+		watch.latencyMin = clamped;
 	};
 
 	const interact = () => {
@@ -181,7 +181,7 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Mil
 		interact();
 		const current = watch.backend.output.jitter.peek();
 		const value = Moq.Time.Milli(Math.max(MIN_RANGE, Math.min(max, current + delta)));
-		watch.controls.latency.set(value);
+		watch.latencyMin = value;
 	});
 
 	const draw = () => {

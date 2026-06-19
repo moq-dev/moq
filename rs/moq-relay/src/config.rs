@@ -289,4 +289,59 @@ system_roots = true
 			"TOML's client.tls.system_roots must not be clobbered by the CLI re-parse"
 		);
 	}
+
+	/// Same clap+TOML clobber guard for `cluster.id`. It's typed as `Option<u64>`
+	/// so an absent `--cluster-id` CLI flag must not wipe a TOML-configured value
+	/// during the `update_from` re-parse. A bare `u64` would reset it to `0`,
+	/// which the cluster treats as reserved and silently swaps for a random id,
+	/// defeating the point of pinning a stable origin via TOML.
+	static CLUSTER_ID_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	#[test]
+	fn cli_does_not_clobber_toml_cluster_id() {
+		let _guard = CLUSTER_ID_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: CLUSTER_ID_ENV_LOCK serializes this with any sibling test
+		// touching the same env var.
+		unsafe { std::env::remove_var("MOQ_CLUSTER_ID") };
+
+		let toml = r#"
+[cluster]
+id = 12345
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("cluster-id-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.cluster.id,
+			Some(12345),
+			"TOML's cluster.id must not be clobbered by the CLI re-parse"
+		);
+	}
+
+	#[test]
+	fn cli_flag_overrides_toml_cluster_id() {
+		let _guard = CLUSTER_ID_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: CLUSTER_ID_ENV_LOCK serializes this with any sibling test
+		// touching the same env var.
+		unsafe { std::env::remove_var("MOQ_CLUSTER_ID") };
+
+		let toml = "[cluster]\nid = 12345\n";
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("cluster-id-cli-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![
+			std::ffi::OsString::from("moq-relay"),
+			std::ffi::OsString::from(&path),
+			std::ffi::OsString::from("--cluster-id=67890"),
+		];
+		let config = Config::parse_and_merge(args).expect("config load");
+		assert_eq!(config.cluster.id, Some(67890));
+	}
 }
