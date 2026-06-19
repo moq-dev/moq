@@ -89,7 +89,7 @@ impl Connection {
 		// NOTE: subscribe and publish seem backwards because of how relays work.
 		// We publish the tracks the client is allowed to subscribe to.
 		// We subscribe to the tracks the client is allowed to publish.
-		let session = self
+		let mut session = self
 			.request
 			.with_publish(subscribe)
 			.with_consume(publish)
@@ -99,8 +99,26 @@ impl Connection {
 
 		tracing::info!(version = %session.version(), transport, "negotiated");
 
-		// Wait until the session is closed.
-		session.closed().await?;
+		// The credential (JWT `exp` or client cert `notAfter`) is only checked at
+		// connect time, so hold the session open no longer than the credential is
+		// valid. Without an expiry, sleep forever and just wait for close.
+		let expiry = async {
+			match token.expires {
+				Some(expires) => {
+					let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
+					tokio::time::sleep(remaining).await;
+				}
+				None => std::future::pending().await,
+			}
+		};
+
+		tokio::select! {
+			res = session.closed() => return Ok(res?),
+			_ = expiry => {}
+		}
+
+		tracing::info!("credential expired, closing session");
+		session.close(moq_net::Error::Unauthorized);
 		Ok(())
 	}
 
@@ -126,6 +144,9 @@ impl Connection {
 			let (root, internal) = self.auth.resolve_mtls(&params.path).await?;
 			let mut token = AuthToken::unrestricted(Path::new(&root).to_owned());
 			token.internal = internal;
+			// Close the session when the client certificate expires, mirroring
+			// the JWT `exp` handling. Validated once at the TLS handshake otherwise.
+			token.expires = self.request.peer_certificate_expiry();
 			return Ok(token);
 		}
 

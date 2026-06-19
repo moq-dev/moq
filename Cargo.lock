@@ -3948,6 +3948,7 @@ dependencies = [
  "web-transport-quiche",
  "web-transport-quinn",
  "web-transport-trait",
+ "x509-parser",
 ]
 
 [[package]]

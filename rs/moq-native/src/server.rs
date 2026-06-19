@@ -638,6 +638,34 @@ impl Request {
 			_ => false,
 		}
 	}
+
+	/// The expiry (`notAfter`) of the peer's end-entity certificate, if it
+	/// presented one that chained to a configured [`crate::tls::Server::root`].
+	///
+	/// Only the Quinn and noq backends support mTLS; other backends always
+	/// return `None`. Lets the caller close the session once the cert expires.
+	pub fn peer_certificate_expiry(&self) -> Option<std::time::SystemTime> {
+		match self.kind {
+			#[cfg(feature = "quinn")]
+			RequestKind::Quinn(ref request) => request.peer_certificate_expiry(),
+			#[cfg(feature = "noq")]
+			RequestKind::Noq(ref request) => request.peer_certificate_expiry(),
+			#[cfg(feature = "quiche")]
+			RequestKind::Quiche(_) => None,
+			#[cfg(feature = "iroh")]
+			RequestKind::Iroh(_) => None,
+			#[cfg(feature = "websocket")]
+			RequestKind::WebSocket(_) => None,
+			#[cfg(not(any(
+				feature = "noq",
+				feature = "quinn",
+				feature = "quiche",
+				feature = "iroh",
+				feature = "websocket"
+			)))]
+			_ => None,
+		}
+	}
 }
 
 /// Server ID for QUIC-LB support.
