@@ -58,6 +58,12 @@ just obs setup
 just obs build
 ```
 
+## Releases
+
+Pushing an `obs-moq-v*` tag runs [`.github/workflows/obs.yml`](https://github.com/moq-dev/moq/blob/main/.github/workflows/obs.yml): it builds on Linux (x86_64 + arm64, via Nix), macOS (arm64), and Windows (x64), then attaches per-platform archives to a GitHub release. `cpp/obs/build.sh` drives the per-platform build and packaging.
+
+The archives are **unsigned**, so macOS Gatekeeper and Windows SmartScreen will warn on first load (right-click → Open on macOS). Extract the archive into your OBS plugins directory: the `.plugin` bundle on macOS, or the `obs-moq/` folder (containing `bin/64bit/` + `data/`) on Linux/Windows.
+
 ## Usage
 
 ### Publishing

@@ -1,0 +1,116 @@
+name: obs
+
+on:
+  push:
+    tags:
+      - "obs-moq-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds inside the nix dev shell (obs-studio/Qt6/ffmpeg come
+          # from nixpkgs). macOS and Windows are native: full Xcode / Visual
+          # Studio, with libobs/Qt6 downloaded by buildspec.json at configure.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_nix: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            use_nix: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            use_nix: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_nix: false
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Nix
+        if: matrix.use_nix
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+
+      # obs-deps ship libobs + Qt6 but not ffmpeg/pkg-config; Homebrew does.
+      - name: Install macOS deps
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg pkg-config
+
+      - name: Parse version
+        id: parse
+        shell: bash
+        run: .github/scripts/release.sh parse-version obs-moq
+
+      - name: Build and package (Linux, nix)
+        if: matrix.use_nix
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          nix develop --accept-flake-config --command \
+            ./cpp/obs/build.sh --target "$TARGET" --version "$VERSION" --output dist
+
+      - name: Build and package (macOS / Windows, native)
+        if: '!matrix.use_nix'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          ./cpp/obs/build.sh --target "$TARGET" --version "$VERSION" --output dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: obs-moq-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Parse version
+        id: parse
+        run: .github/scripts/release.sh parse-version obs-moq
+
+      - name: Find previous tag
+        id: prev_tag
+        run: .github/scripts/release.sh prev-tag obs-moq
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TITLE: "obs-moq v${{ steps.parse.outputs.version }}"
+          RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+        run: .github/scripts/release.sh create artifacts

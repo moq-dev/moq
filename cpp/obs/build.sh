@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build and package the obs-moq plugin for release.
+# Usage: ./build.sh [--target TARGET] [--version VERSION] [--output DIR]
+#
+# The required toolchain must already be on PATH; this script only drives
+# CMake. Per platform:
+#   Linux   - run inside `nix develop` (provides cmake/ninja/obs-studio/qt6/ffmpeg)
+#   macOS   - full Xcode + `brew install ffmpeg pkg-config`, run OUTSIDE nix
+#             (libobs/Qt6 are downloaded by buildspec.json at configure time)
+#   Windows - Visual Studio 2022; run from Git Bash with cmake on PATH
+#             (libobs/Qt6 downloaded by buildspec.json)
+#
+# Produces $OUTPUT_DIR/obs-moq-$VERSION-$TARGET.{tar.gz,zip}. The archive is
+# unsigned; macOS Gatekeeper / Windows SmartScreen will warn on first load.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+TARGET=""
+VERSION=""
+OUTPUT_DIR="dist"
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --target) TARGET="$2"; shift 2 ;;
+        --version) VERSION="$2"; shift 2 ;;
+        --output) OUTPUT_DIR="$2"; shift 2 ;;
+        -h | --help)
+            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR]"
+            exit 0
+            ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+if [[ -z "$TARGET" ]]; then
+    TARGET=$(cc -dumpmachine 2>/dev/null || echo unknown)
+    echo "Detected target: $TARGET"
+fi
+
+# Default the version from buildspec.json (the plugin's source of truth).
+if [[ -z "$VERSION" ]]; then
+    VERSION=$(grep -E '"version"' "$SCRIPT_DIR/buildspec.json" | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+    echo "Detected version: $VERSION"
+fi
+
+# Map the target triple to a CMake preset and build tree.
+case "$TARGET" in
+    *-linux-*) PRESET="ubuntu-x86_64"; BUILD_DIR="$SCRIPT_DIR/build_x86_64"; KIND="unix" ;;
+    *-apple-darwin) PRESET="macos"; BUILD_DIR="$SCRIPT_DIR/build_macos"; KIND="macos" ;;
+    *-windows-*) PRESET="windows-x64"; BUILD_DIR="$SCRIPT_DIR/build_x64"; KIND="windows" ;;
+    *) echo "Unsupported target: $TARGET" >&2; exit 1 ;;
+esac
+
+# Homebrew ffmpeg/pkg-config on macOS (obs-deps ships libobs/Qt6, not ffmpeg).
+if [[ "$KIND" == "macos" ]] && command -v brew >/dev/null; then
+    brew_prefix="$(brew --prefix)"
+    export PKG_CONFIG_PATH="$brew_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+fi
+
+# Resolve the output dir to an absolute path before we cd into the plugin
+# directory (cmake --preset reads CMakePresets.json from the current dir).
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+cd "$SCRIPT_DIR"
+
+echo "Building obs-moq $VERSION for $TARGET (preset: $PRESET)..."
+cmake --preset "$PRESET"
+cmake --build --preset "$PRESET"
+
+NAME="obs-moq-${VERSION}-${TARGET}"
+STAGE="$OUTPUT_DIR/$NAME"
+rm -rf "$STAGE"
+mkdir -p "$OUTPUT_DIR"
+
+if [[ "$KIND" == "macos" ]]; then
+    # Self-contained loadable bundle; drop into the OBS plugins directory.
+    PLUGIN=$(find "$BUILD_DIR" -name 'obs-moq.plugin' -maxdepth 4 -print -quit)
+    [[ -n "$PLUGIN" ]] || { echo "obs-moq.plugin not found under $BUILD_DIR" >&2; exit 1; }
+    mkdir -p "$STAGE"
+    cp -R "$PLUGIN" "$STAGE/"
+else
+    # OBS portable-plugin layout: extract into your OBS plugins directory.
+    LIB=$(find "$BUILD_DIR" \( -name 'obs-moq.so' -o -name 'obs-moq.dll' \) -print -quit)
+    [[ -n "$LIB" ]] || { echo "obs-moq.{so,dll} not found under $BUILD_DIR" >&2; exit 1; }
+    mkdir -p "$STAGE/obs-moq/bin/64bit"
+    cp "$LIB" "$STAGE/obs-moq/bin/64bit/"
+    cp -R "$SCRIPT_DIR/data" "$STAGE/obs-moq/"
+fi
+
+cp "$SCRIPT_DIR/LICENSE" "$STAGE/"
+cp "$SCRIPT_DIR/README.md" "$STAGE/"
+
+# Archive with CMake's tar so we don't depend on zip/gtar being present
+# (notably on the Windows runner). tar.gz on unix, zip on macOS/Windows.
+( cd "$OUTPUT_DIR"
+  if [[ "$KIND" == "unix" ]]; then
+      ARCHIVE="$NAME.tar.gz"
+      cmake -E tar czf "$ARCHIVE" "$NAME"
+  else
+      ARCHIVE="$NAME.zip"
+      cmake -E tar cf "$ARCHIVE" --format=zip "$NAME"
+  fi
+  rm -rf "$NAME"
+  echo "Created: $OUTPUT_DIR/$ARCHIVE" )
