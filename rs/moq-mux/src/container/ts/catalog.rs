@@ -149,6 +149,7 @@ pub struct Descriptor {
 /// The application catalog extension carrying the `mpegts` section. Empty by
 /// default, so the section is omitted until an MPEG-TS detail is recorded.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct Ext {
 	#[serde(default, skip_serializing_if = "Mpegts::is_empty")]
 	pub mpegts: Mpegts,

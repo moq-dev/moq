@@ -268,8 +268,14 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 		// Verbatim entries become their own export tracks; media entries in
 		// `mpegts.tracks` only augment a video/audio rendition (PID + descriptors).
+		// A verbatim stream_type that isn't a known TS stream type can't be announced
+		// in the PMT, so skip it rather than abort the whole export.
 		for (name, track) in mpegts.tracks.iter() {
-			if track.verbatim.is_some() {
+			if track
+				.verbatim
+				.as_ref()
+				.is_some_and(|v| StreamType::from_u8(v.stream_type).is_ok())
+			{
 				active.insert(name.clone(), ());
 			}
 		}
@@ -338,6 +344,18 @@ impl<E: catalog::Catalog> Export<E> {
 				continue;
 			};
 			if self.tracks.contains_key(name) {
+				continue;
+			}
+			// Skip (don't abort) a verbatim stream whose recorded stream_type isn't a
+			// known TS stream type, so it can't be announced in the PMT. Round-tripped
+			// streams always parse (the type came from the import's PMT); this guards a
+			// hand-built catalog. Mirrors the `active` filter above.
+			if StreamType::from_u8(verbatim.stream_type).is_err() {
+				tracing::warn!(
+					name,
+					stream_type = verbatim.stream_type,
+					"skipping verbatim stream with unknown stream_type"
+				);
 				continue;
 			}
 			let kind = Kind::Verbatim {
