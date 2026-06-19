@@ -12,27 +12,10 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use serde_with::base64::Base64;
+use serde_with::serde_as;
 
 use crate::catalog::hang::CatalogExt;
-
-/// Serialize [`Bytes`] as a base64 string in the catalog JSON.
-mod base64_bytes {
-	use base64::Engine;
-	use bytes::Bytes;
-	use serde::{Deserialize, Deserializer, Serializer};
-
-	pub fn serialize<S: Serializer>(bytes: &Bytes, serializer: S) -> Result<S::Ok, S::Error> {
-		serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
-	}
-
-	pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Bytes, D::Error> {
-		let encoded = String::deserialize(deserializer)?;
-		let decoded = base64::engine::general_purpose::STANDARD
-			.decode(encoded.as_bytes())
-			.map_err(serde::de::Error::custom)?;
-		Ok(Bytes::from(decoded))
-	}
-}
 
 /// The `mpegts` catalog section.
 ///
@@ -110,21 +93,15 @@ pub struct Verbatim {
 	/// source; export then falls back to `private_stream_1`.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub stream_id: Option<u8>,
-
-	/// How the verbatim bytes are timestamp-framed as MoQ frames.
-	#[serde(default)]
-	pub container: hang::catalog::Container,
 }
 
 impl Verbatim {
-	/// A new verbatim carriage record of the given `stream_type` and `framing`,
-	/// framed as [`Container::Legacy`](hang::catalog::Container::Legacy) MoQ frames.
+	/// A new verbatim carriage record of the given `stream_type` and `framing`.
 	pub fn new(stream_type: u8, framing: Framing) -> Self {
 		Self {
 			stream_type,
 			framing,
 			stream_id: None,
-			container: hang::catalog::Container::Legacy,
 		}
 	}
 }
@@ -145,13 +122,14 @@ pub enum Framing {
 
 /// One PMT descriptor, carried verbatim so language/registration/etc. survive the
 /// round-trip without a per-descriptor parser.
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Descriptor {
 	/// The descriptor tag (e.g. 0x05 registration, 0x0A ISO-639 language).
 	pub tag: u8,
 	/// The descriptor body, base64-encoded in the catalog.
-	#[serde(with = "base64_bytes")]
+	#[serde_as(as = "Base64")]
 	pub data: Bytes,
 }
 

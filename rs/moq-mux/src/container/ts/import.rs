@@ -1024,7 +1024,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::H264 { import, .. } => import.track().map(|t| t.name.clone()),
 			Stream::H265 { import, .. } => import.track().ok().map(|t| t.name.clone()),
 			Stream::Aac(stream) => stream.import.as_ref().map(|i| i.track().name.clone()),
-			Stream::Legacy(stream) => stream.import.as_ref().map(|i| i.track().name.clone()),
+			Stream::Legacy(stream) => stream.import.as_ref().map(|i| i.name().to_string()),
 			Stream::Verbatim(_) | Stream::Clock | Stream::Ignored => None,
 		}
 	}

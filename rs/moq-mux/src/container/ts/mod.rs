@@ -7,15 +7,15 @@
 //! PTS, and ADTS framing for AAC.
 //!
 //! Elementary streams we don't decode (SCTE-35, teletext, DVB subtitles, private
-//! data, ...) are carried verbatim, one MoQ track per PID, described in the [`ts`]
-//! catalog section. SCTE-35 is just one such stream (`stream_type` 0x86).
+//! data, ...) are carried verbatim, one MoQ track per PID, described in the
+//! [`catalog`] (`mpegts`) section. SCTE-35 is just one such stream (`stream_type` 0x86).
 
 mod adts;
 mod export;
 mod import;
 
-/// The `ts` catalog section: PID mapping plus verbatim carriage of undecoded
-/// elementary streams.
+/// The `mpegts` catalog section: per-track PID + descriptors plus verbatim
+/// carriage of undecoded elementary streams.
 pub mod catalog;
 
 pub use export::*;

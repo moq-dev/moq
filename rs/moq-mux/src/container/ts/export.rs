@@ -266,6 +266,15 @@ impl<E: catalog::Catalog> Export<E> {
 		let mpegts = catalog.mpegts_mut().cloned().unwrap_or_default();
 		self.program_descriptors = mpegts.program_descriptors.clone();
 
+		// The desired track set: media renditions plus carriable verbatim streams. A
+		// verbatim stream_type that isn't a known TS stream type can't be announced in
+		// the PMT, so it's skipped (not aborted); round-tripped streams always parse,
+		// this only guards a hand-built catalog.
+		let verbatim_ok = |t: &catalog::Track| {
+			t.verbatim
+				.as_ref()
+				.is_some_and(|v| StreamType::from_u8(v.stream_type).is_ok())
+		};
 		let mut active: HashMap<String, ()> = HashMap::new();
 		for name in catalog.video.renditions.keys() {
 			active.insert(name.clone(), ());
@@ -273,16 +282,8 @@ impl<E: catalog::Catalog> Export<E> {
 		for name in catalog.audio.renditions.keys() {
 			active.insert(name.clone(), ());
 		}
-		// Verbatim entries become their own export tracks; media entries in
-		// `mpegts.tracks` only augment a video/audio rendition (PID + descriptors).
-		// A verbatim stream_type that isn't a known TS stream type can't be announced
-		// in the PMT, so skip it rather than abort the whole export.
 		for (name, track) in mpegts.tracks.iter() {
-			if track
-				.verbatim
-				.as_ref()
-				.is_some_and(|v| StreamType::from_u8(v.stream_type).is_ok())
-			{
+			if verbatim_ok(track) {
 				active.insert(name.clone(), ());
 			}
 		}
@@ -304,65 +305,74 @@ impl<E: catalog::Catalog> Export<E> {
 			return Ok(());
 		}
 
+		// Assign a PID to every desired track: prefer the original recorded in the
+		// `mpegts` section, then fill the rest from FIRST_ES_PID. The importer fills
+		// PIDs, descriptors, and stream_ids across several catalog publishes, so this
+		// runs every snapshot until the PMT is built and the tracks below are
+		// *refreshed*, not latched from the first (partial) snapshot.
+		let mut used: Vec<u16> = vec![0x0000, PMT_PID, 0x1FFF];
+		let mut pids: HashMap<String, u16> = HashMap::new();
+		for name in active.keys() {
+			if let Some(pid) = mpegts.tracks.get(name).map(|t| t.pid)
+				&& !used.contains(&pid)
+			{
+				used.push(pid);
+				pids.insert(name.clone(), pid);
+			}
+		}
+		for name in active.keys() {
+			if !pids.contains_key(name) {
+				let mut pid = FIRST_ES_PID;
+				while used.contains(&pid) {
+					pid += 1;
+				}
+				used.push(pid);
+				pids.insert(name.clone(), pid);
+			}
+		}
+
+		// Reuse each track's existing source (and any pending frame) by name; refresh
+		// its PID, kind, and descriptors from this snapshot. Drop tracks no longer present.
+		let mut old = std::mem::take(&mut self.tracks);
 		for (name, config) in catalog.video.renditions.iter() {
-			if self.tracks.contains_key(name) {
-				continue;
-			}
 			let kind = video_kind(config, name)?;
-			let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
-			let pid = self.alloc_pid(name, &mpegts.tracks);
 			let descriptors = track_descriptors(&mpegts, name);
-			self.tracks.insert(
-				name.clone(),
-				Track {
-					source,
-					pending: None,
-					finished: false,
-					pid,
-					kind,
-					descriptors,
-				},
-			);
-		}
-
-		for (name, config) in catalog.audio.renditions.iter() {
-			if self.tracks.contains_key(name) {
-				continue;
+			let pid = pids[name];
+			match old.remove(name) {
+				Some(mut track) => {
+					track.pid = pid;
+					track.kind = kind;
+					track.descriptors = descriptors;
+					self.tracks.insert(name.clone(), track);
+				}
+				None => {
+					let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
+					self.insert_track(name, source, pid, kind, descriptors);
+				}
 			}
-			let kind = audio_kind(config, name)?;
-			let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
-			let pid = self.alloc_pid(name, &mpegts.tracks);
-			let descriptors = track_descriptors(&mpegts, name);
-			self.tracks.insert(
-				name.clone(),
-				Track {
-					source,
-					pending: None,
-					finished: false,
-					pid,
-					kind,
-					descriptors,
-				},
-			);
 		}
-
+		for (name, config) in catalog.audio.renditions.iter() {
+			let kind = audio_kind(config, name)?;
+			let descriptors = track_descriptors(&mpegts, name);
+			let pid = pids[name];
+			match old.remove(name) {
+				Some(mut track) => {
+					track.pid = pid;
+					track.kind = kind;
+					track.descriptors = descriptors;
+					self.tracks.insert(name.clone(), track);
+				}
+				None => {
+					let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
+					self.insert_track(name, source, pid, kind, descriptors);
+				}
+			}
+		}
 		for (name, track) in mpegts.tracks.iter() {
 			let Some(verbatim) = &track.verbatim else {
 				continue;
 			};
-			if self.tracks.contains_key(name) {
-				continue;
-			}
-			// Skip (don't abort) a verbatim stream whose recorded stream_type isn't a
-			// known TS stream type, so it can't be announced in the PMT. Round-tripped
-			// streams always parse (the type came from the import's PMT); this guards a
-			// hand-built catalog. Mirrors the `active` filter above.
-			if StreamType::from_u8(verbatim.stream_type).is_err() {
-				tracing::warn!(
-					name,
-					stream_type = verbatim.stream_type,
-					"skipping verbatim stream with unknown stream_type"
-				);
+			if !verbatim_ok(track) {
 				continue;
 			}
 			let kind = Kind::Verbatim {
@@ -370,46 +380,44 @@ impl<E: catalog::Catalog> Export<E> {
 				framing: verbatim.framing,
 				stream_id: verbatim.stream_id,
 			};
-			let source = ExportSource::for_stream(&self.broadcast, name, verbatim, self.latency)?;
-			let pid = self.alloc_pid(name, &mpegts.tracks);
-			self.tracks.insert(
-				name.clone(),
-				Track {
-					source,
-					pending: None,
-					finished: false,
-					pid,
-					kind,
-					descriptors: track.descriptors.clone(),
-				},
-			);
+			let descriptors = track.descriptors.clone();
+			let pid = pids[name];
+			match old.remove(name) {
+				Some(mut existing) => {
+					existing.pid = pid;
+					existing.kind = kind;
+					existing.descriptors = descriptors;
+					self.tracks.insert(name.clone(), existing);
+				}
+				None => {
+					let source = ExportSource::for_stream(&self.broadcast, name, self.latency)?;
+					self.insert_track(name, source, pid, kind, descriptors);
+				}
+			}
 		}
-
-		self.tracks.retain(|name, _| active.contains_key(name));
 		Ok(())
 	}
 
-	/// Pick a PID for a new track: the original PID recorded in the `mpegts` section
-	/// when it's free, else the next free PID from [`FIRST_ES_PID`]. PID `0x0000`
-	/// (PAT), [`PMT_PID`], `0x1FFF` (null), and any already-assigned PID are avoided
-	/// so cross-references survive when possible.
-	fn alloc_pid(&self, name: &str, tracks: &std::collections::BTreeMap<String, catalog::Track>) -> u16 {
-		let mut used: std::collections::HashSet<u16> = self.tracks.values().map(|t| t.pid).collect();
-		used.insert(0x0000);
-		used.insert(PMT_PID);
-		used.insert(0x1FFF);
-
-		if let Some(track) = tracks.get(name)
-			&& !used.contains(&track.pid)
-		{
-			return track.pid;
-		}
-
-		let mut pid = FIRST_ES_PID;
-		while used.contains(&pid) {
-			pid += 1;
-		}
-		pid
+	/// Insert a freshly created export track.
+	fn insert_track(
+		&mut self,
+		name: &str,
+		source: ExportSource,
+		pid: u16,
+		kind: Kind,
+		descriptors: Vec<catalog::Descriptor>,
+	) {
+		self.tracks.insert(
+			name.to_string(),
+			Track {
+				source,
+				pending: None,
+				finished: false,
+				pid,
+				kind,
+				descriptors,
+			},
+		);
 	}
 
 	/// Header is ready when every track's [`ExportSource`] has resolved its
