@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 #include <iostream>
 
 // Logging macros - use MOQ_ prefix to avoid conflicts with OBS log level constants

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 #include <obs-module.h>
 #include <util/threading.h>
 #include <util/platform.h>
