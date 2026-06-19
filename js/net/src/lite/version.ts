@@ -11,6 +11,23 @@ export const Version = {
 
 export type Version = (typeof Version)[keyof typeof Version];
 
+/// Whether Hop IDs (ANNOUNCE / ANNOUNCE_OK) and `Exclude Hop` (ANNOUNCE_INTEREST) are
+/// carried as fixed-width 64-bit integers rather than varints. Added in lite-05: Hop IDs
+/// are randomly assigned, so a varint would almost never be shorter, and the fixed width
+/// buys the full 64-bit space (a varint caps at 62 bits).
+export function hopsFixedWidth(version: Version): boolean {
+	// Explicitly list older versions so future versions default to fixed-width.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// The WebTransport subprotocol identifier for moq-lite.
 /// Version negotiation still happens via SETUP when this is used.
 export const ALPN = "moql";

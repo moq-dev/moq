@@ -170,6 +170,16 @@ export class Reader {
 		return result;
 	}
 
+	// Fixed-width big-endian 64-bit integer (8 bytes), as opposed to the variable-length
+	// u62 varint. Used for randomly-assigned Hop IDs on lite-05+, where a varint would
+	// almost never be shorter and the fixed width buys the full 64-bit space.
+	async u64(): Promise<bigint> {
+		await this.#fillTo(8);
+		const slice = this.#slice(8);
+		const view = new DataView(slice.buffer, slice.byteOffset, slice.byteLength);
+		return view.getBigUint64(0);
+	}
+
 	// Returns a Number using 53-bits, the max Javascript can use for integer math.
 	// Values > 2^53-1 are coerced to a Number (precision is lost) and logged. We
 	// downgrade overflow from throw to warn so a stray u64 field on the wire (e.g.
@@ -294,6 +304,11 @@ export class Writer {
 		await this.write(setUint16(this.#scratch, v));
 	}
 
+	// Fixed-width big-endian 64-bit integer (8 bytes); counterpart to {@link Reader.u64}.
+	async u64(v: bigint) {
+		await this.write(setBigUint64(this.#scratch, v));
+	}
+
 	async i32(v: number) {
 		if (Math.abs(v) > MAX_U31) {
 			throw new Error(`overflow, value larger than 32-bits: ${v.toString()}`);
@@ -370,6 +385,12 @@ function setUint16(dst: ArrayBuffer, v: number): Uint8Array {
 function setInt32(dst: ArrayBuffer, v: number): Uint8Array {
 	const view = new DataView(dst, 0, 4);
 	view.setInt32(0, v);
+	return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+}
+
+function setBigUint64(dst: ArrayBuffer, v: bigint): Uint8Array {
+	const view = new DataView(dst, 0, 8);
+	view.setBigUint64(0, BigInt.asUintN(64, v));
 	return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
 }
 

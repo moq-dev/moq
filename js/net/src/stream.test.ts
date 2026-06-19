@@ -206,6 +206,34 @@ test("Reader u62 varint decoding", async () => {
 	expect(await reader.done()).toBe(true);
 });
 
+test("Reader u64 fixed-width decoding", async () => {
+	// Fixed-width always uses 8 bytes, including the full 64-bit space a varint can't reach.
+	const testValues = [0n, 1n, 63n, 1n << 53n, (1n << 62n) - 1n, 1n << 62n, (1n << 64n) - 1n];
+
+	const { stream, written } = createTestWritableStream();
+	const testWriter = new Writer(stream);
+
+	for (const value of testValues) {
+		await testWriter.u64(value);
+	}
+
+	testWriter.close();
+	await testWriter.closed;
+
+	const data = concatChunks(written);
+	// Every value occupies exactly 8 bytes.
+	expect(data.byteLength).toBe(testValues.length * 8);
+
+	const reader = new Reader(undefined, data);
+
+	for (const expectedValue of testValues) {
+		const actualValue = await reader.u64();
+		expect(actualValue).toBe(expectedValue);
+	}
+
+	expect(await reader.done()).toBe(true);
+});
+
 test("Reader string decoding", async () => {
 	const testStrings = ["hello", "🎉", "", "world with spaces", "multi\nline\nstring"];
 
