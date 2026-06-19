@@ -230,6 +230,14 @@
         };
 
         formatter = pkgs.nixfmt-tree;
+
+        # Heavy Rust CI (clippy / doc / test, all features) as crane
+        # derivations: deps compile once and cache, only first-party code
+        # recompiles per run, and there's no persistent CARGO_TARGET_DIR to
+        # bound. Run with `nix flake check` or a single one via
+        # `nix build .#checks.<system>.clippy`. The cheap, non-compiling lints
+        # (rustfmt, cargo-deny/shear/sort) stay in `just rs ci`.
+        checks = overlayPkgs.moqChecks;
       }
     );
 }

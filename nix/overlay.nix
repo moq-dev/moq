@@ -200,8 +200,125 @@ let
       fi
     '';
   };
+
+  # --- CI checks (run via `nix flake check`) -------------------------------
+  #
+  # The heavy Rust CI (clippy / doc / test) used to run as plain `cargo` on the
+  # self-hosted runner, compiling into a persistent CARGO_TARGET_DIR that grew
+  # unbounded (every branch's artifacts, never pruned) and was unsafe to share
+  # across parallel jobs. Expressing those checks as crane derivations instead
+  # makes Nix the cache: dependencies compile exactly once (`checkDeps`), land
+  # in the binary cache, are shared across machines, and are LRU-evicted by the
+  # store's free-space GC. Only first-party code recompiles, inside Nix's
+  # sandbox (which is wiped per build), so there is no target dir to bound.
+
+  # crane's cleanCargoSource keeps only Rust-relevant files, but the test
+  # targets compiled under `--all-targets` `include_str!`/`include_bytes!` data
+  # fixtures (rs/moq-mux test_data/*.ts, rs/moq-json tests/vectors.json, etc.)
+  # and libmoq's build.rs reads moq.pc.in. Rather than enumerate every asset
+  # (fragile -- a new fixture would break CI), take the whole tree minus the
+  # heavy non-source dirs. Dep caching is unaffected (buildDepsOnly keys on
+  # Cargo.lock); only the first-party check rebuilds on a non-Rust change.
+  checkSrc = final.lib.cleanSourceWith {
+    src = ../.;
+    name = "source";
+    filter =
+      path: _type:
+      let
+        # Prune a dir both as an entry ("…/target") and its contents
+        # ("…/target/…") so we don't walk node_modules etc. at all.
+        excluded = name: final.lib.hasSuffix "/${name}" path || final.lib.hasInfix "/${name}/" path;
+      in
+      !(
+        excluded "node_modules"
+        || excluded "target"
+        || excluded ".direnv"
+        || excluded ".venv"
+        || excluded ".git"
+      );
+  };
+
+  # Every system lib the workspace needs to compile with all features on:
+  # bindgen (clang) for ffmpeg/vaapi, GStreamer for moq-gst, ALSA for
+  # moq-audio's capture feature, libva for moq-video's vaapi feature. The
+  # Linux-only libs match the devShell's `lib.optionals (!isDarwin)` set.
+  checkCommonArgs = {
+    src = checkSrc;
+    # The workspace root Cargo.toml has no [package], so name it explicitly
+    # (otherwise crane warns and uses a placeholder).
+    pname = "moq-workspace";
+    version = "0.0.0";
+    strictDeps = true;
+    nativeBuildInputs = with final; [
+      pkg-config
+      clang
+      cmake
+      # boring-sys (quiche, under --all-features) shells out to `git` to apply
+      # its BoringSSL patches; the devShell has it on $PATH, the sandbox doesn't.
+      git
+    ];
+    buildInputs =
+      (with final; [
+        ffmpeg
+        glib
+        curl
+        gst_all_1.gstreamer
+        gst_all_1.gst-plugins-base
+      ])
+      ++ final.lib.optionals final.stdenv.isLinux (
+        with final;
+        [
+          alsa-lib
+          libva
+        ]
+      );
+    LIBCLANG_PATH = "${final.libclang.lib}/lib";
+    # jemalloc (pulled in by --all-features) builds -O0 configure tests that
+    # clash with Nix's _FORTIFY_SOURCE hardening (needs -O). Same as the
+    # package builds and the devShell.
+    hardeningDisable = [ "fortify" ];
+    # Scope the dep build to the whole workspace with every feature so a single
+    # checkDeps covers clippy/doc/test below.
+    cargoExtraArgs = "--workspace --all-features";
+  };
+
+  # Compile all third-party deps once; the checks reuse this artifact.
+  checkDeps = craneLib.buildDepsOnly (checkCommonArgs // { pname = "moq-workspace-deps"; });
+
+  moqChecks = {
+    clippy = craneLib.cargoClippy (
+      checkCommonArgs
+      // {
+        cargoArtifacts = checkDeps;
+        # --workspace/--all-features come from checkCommonArgs.cargoExtraArgs,
+        # which crane prepends; only add the clippy-specific flags here.
+        cargoClippyExtraArgs = "--all-targets -- -D warnings";
+      }
+    );
+
+    doc = craneLib.cargoDoc (
+      checkCommonArgs
+      // {
+        cargoArtifacts = checkDeps;
+        # --all-targets is invalid for `cargo doc`, so it stays out of the
+        # shared cargoExtraArgs; --workspace/--all-features are inherited.
+        cargoDocExtraArgs = "--no-deps";
+        RUSTDOCFLAGS = "-D warnings";
+      }
+    );
+
+    test = craneLib.cargoTest (
+      checkCommonArgs
+      // {
+        cargoArtifacts = checkDeps;
+        cargoTestExtraArgs = "--all-targets";
+      }
+    );
+  };
 in
 {
+  inherit moqChecks;
+
   moq-relay = craneLib.buildPackage moqRelayArgs;
   moq-relay-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqRelayArgs);
 
