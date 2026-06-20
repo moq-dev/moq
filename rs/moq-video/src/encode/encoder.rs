@@ -15,18 +15,16 @@ use crate::frame::{Frame, I420};
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Kind {
-	/// Prefer a platform hardware encoder; fall back to software only when the
-	/// `software` feature is enabled. Without it, `Auto` errors on a box with no
-	/// hardware encoder.
+	/// Prefer a platform hardware encoder, falling back to the openh264 software
+	/// encoder when none is available.
 	#[default]
 	Auto,
 	/// Hardware only; error if none is available.
 	Hardware,
-	/// Software (openh264) only. Requires the `software` feature; otherwise no
-	/// encoder opens and [`Encoder::new`] returns [`Error::NoEncoder`].
+	/// Software (openh264) only.
 	Software,
 	/// A specific backend by name, e.g. `"videotoolbox"`, `"nvenc"`, `"vaapi"`,
-	/// or `"openh264"` (the last only with the `software` feature).
+	/// or `"openh264"`.
 	Named(String),
 }
 
@@ -180,7 +178,6 @@ mod tests {
 		vec![0x80u8; width as usize * height as usize * 4]
 	}
 
-	#[cfg(feature = "software")]
 	#[test]
 	fn software_encoder_emits_annexb() {
 		let config = Config {
@@ -212,11 +209,11 @@ mod tests {
 
 	#[test]
 	fn encode_rgba_emits_annexb() {
-		// Any available encoder suffices; skip where none opens (e.g. a GPU-less
-		// box built without the `software` feature).
-		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, 30)) else {
-			return;
+		let config = Config {
+			kind: Kind::Software,
+			..Config::new(320, 240, 30)
 		};
+		let mut encoder = Encoder::new(&config).unwrap();
 
 		let rgba = gray_rgba(320, 240);
 		let mut packets = encoder.encode_rgba(&rgba, 320, 240, true).unwrap();
@@ -329,7 +326,7 @@ mod tests {
 
 	/// A software encoder must download a GPU surface to I420 first. Exercises
 	/// the NV12 -> I420 fallback path.
-	#[cfg(all(target_os = "macos", feature = "software"))]
+	#[cfg(target_os = "macos")]
 	#[test]
 	fn openh264_downloads_surface() {
 		let config = Config {

@@ -104,7 +104,7 @@ encode/
     videotoolbox.rs # cfg(target_os = "macos")
     nvenc.rs        # cfg(target_os = "linux")
     vaapi.rs        # cfg(target_os = "linux")
-    openh264.rs     # cfg(feature = "software"), all platforms
+    openh264.rs     # software fallback, all platforms
 ```
 
 The public surface (`Encoder`, `Config`, `Kind`, `Producer`, `Options`,
@@ -228,25 +228,24 @@ nvidia-video-codec-sdk = { version = "0.4", features = ["dynamic-loading"] }
 moq-vaapi = "0.0.2"                 # standalone; vendored cros-libva + cros-codecs
 
 [dependencies]
-openh264 = { version = "...", optional = true }   # only with the `software` feature
+openh264 = "..."   # always-on software fallback
 ```
 
 Hardware encoders are always-on (VideoToolbox on macOS, Media Foundation on
 Windows, NVENC + VAAPI on Linux); the runtime fallback chain skips whichever
 driver is absent. None is a build-time hard dep on the driver, so the binary
-still builds and runs on a box with no GPU. openh264 is the only software
-encoder and is opt-in behind the `software` feature: a GPU-less box without it
-gets `NoEncoder`. moq-boy enables `software` for its tiny 160x144 frames.
+still builds and runs on a box with no GPU. openh264 is always compiled in as
+the software fallback, so a GPU-less box still encodes (it's also what moq-boy
+uses for its tiny 160x144 frames, which hardware encoders may reject).
 
 ### Selection / fallback (`Kind` mapping)
 
 `open_backend(kind, config)` builds an ordered candidate list and returns the
 first that opens, mirroring today's `open_encoder` loop:
 
-- `Auto`   -> \[videotoolbox | nvenc | vaapi] (cfg-filtered), then openh264 if the
-  `software` feature is on.
+- `Auto`   -> \[videotoolbox | nvenc | vaapi] (cfg-filtered), then openh264.
 - `Hardware` -> hardware-only; `NoEncoder` if none opens.
-- `Software` -> openh264 only (requires the `software` feature; else `NoEncoder`).
+- `Software` -> openh264 only.
 - `Named(id)` -> that backend only.
 
 A backend "fails to open" (driver missing, no device) the same way an ffmpeg
@@ -261,7 +260,7 @@ A backend "fails to open" (driver missing, no device) the same way an ffmpeg
 
   - `dlopen`s `libnvidia-encode` if an NVIDIA driver is present (no build dep),
   - `dlopen`s `libva` for Intel/AMD (no build dep on libva-dev),
-  - falls back to openh264 only if built with the `software` feature.
+  - falls back to the always-compiled-in openh264 when no GPU encoder is usable.
 
   That single artifact runs across Ubuntu 20.04 -> 24.04, Debian, Fedora, etc.,
   which is the whole reason for the change.

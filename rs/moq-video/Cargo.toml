@@ -15,22 +15,16 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 [lib]
 doctest = false
 
-[features]
-# Software H.264 fallback via the vendored, statically-linked openh264. Off by
-# default: hardware encoders are the supported path (VideoToolbox on macOS, Media
-# Foundation on Windows, NVENC/VAAPI on Linux, all always-on). Enable for a
-# guaranteed encoder on a GPU-less box, or for tiny resolutions a hardware encoder
-# rejects (see moq-boy).
-software = ["dep:openh264"]
-
 [dependencies]
 anyhow = "1"
 bytes = "1"
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-# Vendored, statically-linked software H.264 fallback (no system dependency),
-# behind the `software` feature.
-openh264 = { version = "0.9.3", optional = true }
+# Vendored, statically-linked software H.264 fallback (no system dependency).
+# Always compiled in: hardware encoders (VideoToolbox / Media Foundation /
+# NVENC / VAAPI) are preferred, but openh264 is the fallback when none is usable
+# (GPU-less box, or a resolution a hardware encoder rejects).
+openh264 = "0.9.3"
 thiserror = "2"
 tokio = { workspace = true, features = ["rt", "macros"] }
 tracing = "0.1"

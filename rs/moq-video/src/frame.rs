@@ -53,9 +53,6 @@ impl Frame {
 	}
 
 	/// A CPU I420 view, downloading a GPU frame only if necessary.
-	// On macOS the only encoder that needs a CPU download is openh264; without the
-	// `software` feature VideoToolbox consumes surfaces directly, so this is dead.
-	#[cfg_attr(all(target_os = "macos", not(feature = "software")), allow(dead_code))]
 	pub(crate) fn to_i420(&self) -> Result<Cow<'_, I420>, Error> {
 		match self {
 			#[cfg(target_os = "macos")]
@@ -232,8 +229,6 @@ pub(crate) mod macos {
 	use crate::Error;
 
 	/// Read-only lock flag (`kCVPixelBufferLock_ReadOnly`).
-	// Only the CPU download path locks the buffer; dead without `software`.
-	#[cfg_attr(not(feature = "software"), allow(dead_code))]
 	const LOCK_READ_ONLY: CVPixelBufferLockFlags = CVPixelBufferLockFlags(1);
 
 	/// A captured GPU surface. Cloning is a cheap retain (no pixel copy), which
@@ -250,7 +245,6 @@ pub(crate) mod macos {
 		}
 
 		/// Download an NV12 surface to packed I420 (the CPU encode path).
-		#[cfg_attr(not(feature = "software"), allow(dead_code))]
 		pub(crate) fn download_i420(&self) -> Result<I420, Error> {
 			let format = CVPixelBufferGetPixelFormatType(&self.buffer);
 			if format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -306,7 +300,6 @@ pub(crate) mod macos {
 		}
 	}
 
-	#[cfg_attr(not(feature = "software"), allow(dead_code))]
 	struct UnlockGuard<'a>(&'a CVPixelBuffer);
 
 	impl Drop for UnlockGuard<'_> {
