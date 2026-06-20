@@ -40,6 +40,12 @@ WHEP egress is in progress.
 An HLS / LL-HLS <-> MoQ gateway. Serves a MoQ broadcast as HLS and
 Low-Latency HLS over HTTP, or imports a remote HLS playlist into MoQ.
 
+## [moq-rtmp](/bin/rtmp)
+
+An RTMP / enhanced-RTMP -> MoQ ingest gateway. Accepts RTMP from any encoder
+(OBS, ffmpeg) and publishes it into MoQ, supporting H.264/HEVC/AV1/VP9 and
+AAC/Opus/AC-3.
+
 ## [OBS Plugin](/bin/obs)
 
 Real-time latency with the familiar OBS interface.

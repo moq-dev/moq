@@ -61,6 +61,11 @@ impl Server {
 
 	/// Router for `server publish` (WHIP). Mount under whichever HTTP path
 	/// the deployment prefers (`/whip`, `/`, ...).
+	///
+	/// The router derives the broadcast name from the request path and performs
+	/// no authentication. To own the route and authorize requests yourself
+	/// (resolving the broadcast name from a verified token), skip the router and
+	/// call [`whip::accept`] directly from your own handler.
 	pub fn publish_router(&self) -> Router {
 		whip::router(self.clone())
 	}

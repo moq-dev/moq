@@ -275,8 +275,6 @@ async fn export_rejects_cmaf_track() {
 	config.description = Some(Bytes::from(vec![0u8; 8]));
 	config.container = Container::Cmaf {
 		init: Bytes::from(vec![0u8; 32]),
-		timescale: None,
-		track_id: None,
 	};
 	catalog.lock().video.renditions.insert(track.name().to_string(), config);
 

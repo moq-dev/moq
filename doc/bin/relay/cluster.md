@@ -97,7 +97,7 @@ See [Authentication](/bin/relay/auth) for the full setup.
 
 ## Migration from older configs
 
-`cluster.root` was removed; setting it errors at startup with a message pointing at the replacement. `cluster.mesh` is now a boolean gossip toggle (it used to take this relay's URL); the URL moved to `cluster.node`. The old `mesh = "<url>"` form still works for backwards compatibility: it enables gossip and is treated as `cluster.node`, with a deprecation warning (or an error if it conflicts with an explicit `cluster.node`).
+`cluster.root` was removed. To dial cluster peers use `cluster.connect`; to advertise this relay's own address set `cluster.node` and enable `cluster.mesh`. `cluster.mesh` is now a boolean gossip toggle (it used to take this relay's URL); the URL moved to `cluster.node`. The old `mesh = "<url>"` form still works for backwards compatibility: it enables gossip and is treated as `cluster.node`, with a deprecation warning (or an error if it conflicts with an explicit `cluster.node`).
 
 `cluster.connect` entries are now full URLs; a bare host or `host:port` still works but logs a deprecation warning. A JWT for a static peer belongs inline as a `?jwt=` query parameter (the `cluster.token` file remains for gossip / `connect_api` peers, which can't carry an inline token).
 
