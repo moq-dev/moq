@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Native H.264 decode: a `decode` module mirroring `encode`, with a
+  `decode::Consumer` (the counterpart to `moq-audio`'s `AudioConsumer`) that
+  subscribes to an H.264 track and returns raw I420 frames. Backends are
+  VideoToolbox (macOS) and openh264 (portable software fallback); no ffmpeg.
+
 ## [0.0.4](https://github.com/moq-dev/moq/compare/moq-video-v0.0.3...moq-video-v0.0.4) - 2026-06-16
 
 ### Other

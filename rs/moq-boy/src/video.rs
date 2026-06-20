@@ -35,7 +35,8 @@ struct EncoderMsg {
 impl VideoEncoder {
 	pub fn spawn(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
-		let producer = moq_video::encode::Producer::new(broadcast, catalog).expect("failed to create avc3 producer");
+		let producer = moq_video::encode::Producer::new(broadcast, catalog, moq_video::encode::Codec::H264)
+			.expect("failed to create avc3 producer");
 		let demand = producer.demand();
 
 		let force_keyframe = Arc::new(AtomicBool::new(false));

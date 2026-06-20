@@ -10,6 +10,10 @@ pub enum Error {
 	#[error("moq: {0}")]
 	Moq(#[from] moq_net::Error),
 
+	/// Error from the moq-mux muxer/demuxer (TS demux on ingest, TS mux on egress).
+	#[error("mux: {0}")]
+	Mux(#[from] moq_mux::Error),
+
 	/// I/O error from the SRT listener or socket.
 	#[error("io: {0}")]
 	Io(Arc<std::io::Error>),

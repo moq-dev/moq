@@ -31,18 +31,51 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::core::{Interface, PWSTR};
 
-use super::{Config, FrameSource};
+use super::channel::FrameChannel;
+use super::pump::{self, Geometry};
+use super::{Config, FrameStream};
 use crate::Error;
 use crate::frame::d3d11::Texture;
 use crate::frame::{Frame, I420};
+
+/// Open a Media Foundation camera and stream its frames over a pump thread.
+pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
+	let config = config.clone();
+	let chan = FrameChannel::new();
+	let (geo, guard) = pump::spawn(
+		chan.clone(),
+		move || {
+			let camera = Camera::open(&config)?;
+			let geometry = Geometry {
+				width: camera.width,
+				height: camera.height,
+				framerate: camera.framerate,
+				device: camera.device_name.clone(),
+			};
+			Ok((camera, geometry))
+		},
+		Camera::read,
+	)
+	.await?;
+
+	Ok(FrameStream::new(
+		chan,
+		geo.width,
+		geo.height,
+		geo.framerate,
+		geo.device,
+		None,
+		Box::new(guard),
+	))
+}
 use crate::mf::{ComGuard, mf_err, pack_2x32};
 
 fn unpack_2x32(v: u64) -> (u32, u32) {
 	((v >> 32) as u32, v as u32)
 }
 
-/// An open camera, read frame-by-frame via [`read`](FrameSource::read).
-pub(crate) struct Camera {
+/// An open camera, read frame-by-frame via [`read`](Self::read) on the pump thread.
+struct Camera {
 	source: IMFMediaSource,
 	reader: IMFSourceReader,
 	/// The shared Direct3D11 device when capturing on the GPU; `None` on the CPU
@@ -60,7 +93,7 @@ pub(crate) struct Camera {
 }
 
 impl Camera {
-	pub(crate) fn open(config: &Config) -> Result<Self, Error> {
+	fn open(config: &Config) -> Result<Self, Error> {
 		let com = ComGuard::new()?;
 		let (source, device_name) = open_source(config)?;
 
@@ -239,9 +272,9 @@ impl Camera {
 
 		Ok(Frame::I420(I420::from_nv12(&nv12, self.width, self.height)?))
 	}
-}
 
-impl FrameSource for Camera {
+	/// Pull the next frame. Blocks per frame; the pump thread calls this in a loop
+	/// and checks its stop flag between calls.
 	fn read(&mut self) -> Result<Option<Frame>, Error> {
 		loop {
 			let mut flags: u32 = 0;
@@ -273,22 +306,6 @@ impl FrameSource for Camera {
 			};
 			return Ok(Some(frame));
 		}
-	}
-
-	fn width(&self) -> u32 {
-		self.width
-	}
-
-	fn height(&self) -> u32 {
-		self.height
-	}
-
-	fn framerate(&self) -> Option<u32> {
-		self.framerate
-	}
-
-	fn device(&self) -> &str {
-		&self.device_name
 	}
 }
 

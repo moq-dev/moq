@@ -14,9 +14,42 @@ use v4l::video::capture::Parameters;
 use v4l::{Device, Format, FourCC};
 use zune_jpeg::zune_core::bytestream::ZCursor;
 
-use super::{Config, FrameSource};
+use super::channel::FrameChannel;
+use super::pump::{self, Geometry};
+use super::{Config, FrameStream};
 use crate::Error;
 use crate::frame::{Frame, I420};
+
+/// Open a V4L2 camera and stream its frames over a pump thread.
+pub(super) async fn open(config: &Config) -> Result<FrameStream, Error> {
+	let config = config.clone();
+	let chan = FrameChannel::new();
+	let (geo, guard) = pump::spawn(
+		chan.clone(),
+		move || {
+			let camera = Camera::open(&config)?;
+			let geometry = Geometry {
+				width: camera.width,
+				height: camera.height,
+				framerate: camera.framerate,
+				device: camera.name.clone(),
+			};
+			Ok((camera, geometry))
+		},
+		Camera::read,
+	)
+	.await?;
+
+	Ok(FrameStream::new(
+		chan,
+		geo.width,
+		geo.height,
+		geo.framerate,
+		geo.device,
+		None,
+		Box::new(guard),
+	))
+}
 
 /// Fallback geometry when the caller doesn't pin a resolution; the driver picks
 /// the nearest mode it supports.
@@ -50,7 +83,7 @@ pub(crate) struct Camera {
 }
 
 impl Camera {
-	pub(crate) fn open(config: &Config) -> Result<Self, Error> {
+	fn open(config: &Config) -> Result<Self, Error> {
 		let (device, name) = open_device(config)?;
 		let width = config.width.unwrap_or(DEFAULT_WIDTH);
 		let height = config.height.unwrap_or(DEFAULT_HEIGHT);
@@ -100,9 +133,9 @@ impl Camera {
 			name,
 		})
 	}
-}
 
-impl FrameSource for Camera {
+	/// Pull the next frame. Blocks one frame interval; the pump thread calls this
+	/// in a loop and checks its stop flag between calls.
 	fn read(&mut self) -> Result<Option<Frame>, Error> {
 		let (buf, meta) =
 			CaptureStream::next(&mut self.stream).map_err(|e| Error::Codec(anyhow::anyhow!("V4L2 capture: {e}")))?;
@@ -124,22 +157,6 @@ impl FrameSource for Camera {
 			}
 		};
 		Ok(Some(Frame::I420(i420)))
-	}
-
-	fn width(&self) -> u32 {
-		self.width
-	}
-
-	fn height(&self) -> u32 {
-		self.height
-	}
-
-	fn framerate(&self) -> Option<u32> {
-		self.framerate
-	}
-
-	fn device(&self) -> &str {
-		&self.name
 	}
 }
 

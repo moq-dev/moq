@@ -18,6 +18,8 @@ doctest = false
 [dependencies]
 anyhow = "1"
 bytes = "1"
+# Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
+hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Vendored, statically-linked software H.264 fallback (no system dependency).
@@ -26,7 +28,7 @@ moq-net = { workspace = true }
 # (GPU-less box, or a resolution a hardware encoder rejects).
 openh264 = "0.9.3"
 thiserror = "2"
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = "0.1"
 # RGBA -> I420 color conversion (replaces ffmpeg swscale).
 yuv = "0.8.14"

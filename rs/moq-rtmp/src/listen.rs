@@ -1,19 +1,22 @@
 //! RTMP listener, configuration, and stream-key routing.
 //!
 //! We run a TCP listener on RTMP's port, hand each connection to
-//! [`crate::server`] for the handshake + session handling, and route each
-//! publish to a broadcast path derived from its RTMP app and stream key.
+//! [`crate::server`] for the handshake + session handling, and route each publish
+//! or play to a broadcast path derived from its RTMP app and stream key.
 //!
-//! Routing: the usual OBS/ffmpeg URL is `rtmp://host[:1935]/<app>/<key>`, which
-//! arrives as app `<app>` and stream key `<key>`. The path is `<app>/<key>`
+//! Routing: the usual OBS/ffmpeg/player URL is `rtmp://host[:1935]/<app>/<key>`,
+//! which arrives as app `<app>` and stream key `<key>`. The path is `<app>/<key>`
 //! (just `<app>` when the key is empty). The optional [`prefix`](Config::prefix)
-//! is prepended so a single listener can namespace all of its ingests (e.g.
-//! prefix `live/` + app `cam0` -> broadcast `live/cam0`).
+//! is prepended so a single listener can namespace everything (e.g. prefix
+//! `live/` + app `cam0` -> broadcast `live/cam0`). The same routing applies to
+//! both directions: a publish ingests *into* that path, a play serves *from* it,
+//! so the same URL round-trips (push to `rtmp://host/live/cam0`, pull it back from
+//! the same URL).
 //!
 //! Auth: this listener is currently unauthenticated. Anyone who can reach the
-//! TCP port can publish, so gate it with the host firewall / a private network.
-//! Treating the stream key as a token (a moq-token JWT, as moq-edge does) is the
-//! obvious next step.
+//! TCP port can publish or play, so gate it with the host firewall / a private
+//! network. Treating the stream key as a token (a moq-token JWT, as moq-edge
+//! does) is the obvious next step.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -22,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use moq_net::OriginProducer;
 
 use crate::Result;
-use crate::server::Server;
+use crate::server::{Request, Server};
 
 /// RTMP ingest configuration.
 ///
@@ -53,15 +56,16 @@ pub struct Config {
 	pub tls: Option<std::sync::Arc<rustls::ServerConfig>>,
 }
 
-/// Run the RTMP ingest listener until it fails, publishing each connection into
-/// `origin` as a broadcast.
+/// Run the RTMP listener until it fails, bridging each connection to `origin`:
+/// publishers ingest into it as broadcasts, players are served broadcasts from it.
 ///
 /// This is the unauthenticated convenience entry point: it accepts every
-/// publisher and routes by [`prefix`](Config::prefix) + app/key. To gate ingest
-/// (e.g. verify the stream key as a JWT) or to scope the origin per publisher,
-/// drive [`Server`] directly: loop on [`Server::accept`] and call
-/// [`Request::accept`](crate::Request::accept) / [`Request::reject`](crate::Request::reject)
-/// after making your own decision.
+/// publisher and player and routes by [`prefix`](Config::prefix) + app/key. Play
+/// requests are served from `origin.consume()`, so anything in the origin (RTMP
+/// ingests and otherwise) can be pulled back out over RTMP. To gate access (e.g.
+/// verify the stream key as a JWT) or to scope the origin per client, drive
+/// [`Server`] directly: loop on [`Server::accept`], match the [`Request`], and
+/// call accept/reject after making your own decision.
 ///
 /// Stays pending forever (rather than resolving) when RTMP is disabled, so it
 /// composes cleanly inside a `tokio::select!` alongside a relay's other
@@ -93,31 +97,54 @@ pub async fn run(origin: OriginProducer, config: Config) -> Result<()> {
 	// of clobbering the live one.
 	let active = ActivePaths::default();
 	let prefix = Arc::new(config.prefix);
+	// Players are served out of the same origin the publishers write into.
+	let consumer = origin.consume();
 
 	while let Some(request) = server.accept().await {
-		let origin = origin.clone();
-		let active = active.clone();
 		let prefix = prefix.clone();
-		// Each connection runs on its own task: `accept` pumps media for the whole
-		// connection lifetime, so handling it inline would serialize publishers.
-		tokio::spawn(async move {
-			let peer = request.peer();
-			let Some(path) = resolve_path(&prefix, request.app(), request.stream_key()) else {
-				tracing::warn!(%peer, "rejecting RTMP: no usable broadcast path");
-				let _ = request.reject("missing broadcast path (RTMP app/key)").await;
-				return;
-			};
-			// Claim the path before accepting; the guard releases it when the
-			// connection task ends (success, error, or panic).
-			let Some(_guard) = active.claim(&path) else {
-				tracing::warn!(%peer, %path, "rejecting RTMP: path already being published");
-				let _ = request.reject("path already being published").await;
-				return;
-			};
-			if let Err(err) = request.accept(&origin, &path).await {
-				tracing::warn!(%peer, %path, %err, "RTMP ingest ended with error");
+		match request {
+			Request::Publish(publish) => {
+				let origin = origin.clone();
+				let active = active.clone();
+				// Each connection runs on its own task: `accept` pumps media for the
+				// whole connection lifetime, so handling it inline would serialize
+				// publishers.
+				tokio::spawn(async move {
+					let peer = publish.peer();
+					let Some(path) = resolve_path(&prefix, publish.app(), publish.stream_key()) else {
+						tracing::warn!(%peer, "rejecting RTMP publish: no usable broadcast path");
+						let _ = publish.reject("missing broadcast path (RTMP app/key)").await;
+						return;
+					};
+					// Claim the path before accepting; the guard releases it when the
+					// connection task ends (success, error, or panic).
+					let Some(_guard) = active.claim(&path) else {
+						tracing::warn!(%peer, %path, "rejecting RTMP publish: path already being published");
+						let _ = publish.reject("path already being published").await;
+						return;
+					};
+					if let Err(err) = publish.accept(&origin, &path).await {
+						tracing::warn!(%peer, %path, %err, "RTMP ingest ended with error");
+					}
+				});
 			}
-		});
+			Request::Play(play) => {
+				let consumer = consumer.clone();
+				// Many viewers can play the same path concurrently, so plays don't
+				// claim an `ActivePaths` slot.
+				tokio::spawn(async move {
+					let peer = play.peer();
+					let Some(path) = resolve_path(&prefix, play.app(), play.stream_key()) else {
+						tracing::warn!(%peer, "rejecting RTMP play: no usable broadcast path");
+						let _ = play.reject("missing broadcast path (RTMP app/key)").await;
+						return;
+					};
+					if let Err(err) = play.accept(&consumer, &path).await {
+						tracing::warn!(%peer, %path, %err, "RTMP play ended with error");
+					}
+				});
+			}
+		}
 	}
 
 	Err(anyhow::anyhow!("RTMP listener stopped accepting connections").into())

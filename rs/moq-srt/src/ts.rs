@@ -3,11 +3,13 @@
 //! SRT carries MPEG-TS, so ingest is the same three steps every time: create a
 //! broadcast, publish it into the origin so downstream subscribers can find it,
 //! and feed the incoming bytes through a [`moq_mux`] TS importer that demuxes
-//! them into MoQ tracks. [`Publisher`] packages that up.
+//! them into MoQ tracks. [`Publisher`] packages that up. [`Subscriber`] is the
+//! mirror image for egress: it consumes a broadcast from the origin and re-muxes
+//! it back to MPEG-TS for an SRT caller (VLC, ffmpeg) to play.
 
 use bytes::Bytes;
 use moq_mux::container::ts;
-use moq_net::{BroadcastInfo, OriginProducer, OriginPublish};
+use moq_net::{BroadcastInfo, OriginConsumer, OriginProducer, OriginPublish};
 
 use crate::Result;
 
@@ -53,5 +55,35 @@ impl Publisher {
 	/// Flush any buffered media and close out the broadcast's open groups.
 	pub fn finish(&mut self) -> Result<()> {
 		Ok(self.importer.finish()?)
+	}
+}
+
+/// Muxes a single MoQ broadcast back into an MPEG-TS byte stream for egress.
+///
+/// The mirror of [`Publisher`]: where that demuxes SRT-carried TS into the
+/// origin, this consumes a broadcast from the origin and re-muxes it to TS so an
+/// SRT caller can play it. Pull byte chunks with [`next`](Self::next).
+pub struct Subscriber {
+	export: ts::Export,
+}
+
+impl Subscriber {
+	/// Resolve the broadcast at `path` in the origin and prepare to mux it to TS.
+	///
+	/// Returns `Ok(None)` if the broadcast can never be served (path outside the
+	/// consumer's scope, or the origin closed). Otherwise waits for the broadcast
+	/// to be announced, so a caller may connect before the publisher does.
+	pub async fn new(origin: &OriginConsumer, path: &str) -> Result<Option<Self>> {
+		let Some(broadcast) = origin.announced_broadcast(path).await else {
+			return Ok(None);
+		};
+
+		let export = ts::Export::new(broadcast).await?;
+		Ok(Some(Self { export }))
+	}
+
+	/// Pull the next MPEG-TS byte chunk, or `None` once the broadcast ends.
+	pub async fn next(&mut self) -> Result<Option<Bytes>> {
+		Ok(self.export.next().await?)
 	}
 }

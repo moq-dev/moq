@@ -24,6 +24,7 @@ moq-audio = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
 moq-net = { workspace = true, features = ["serde"] }
+moq-video = { workspace = true }
 thiserror = "2"
 tokio = { workspace = true, features = ["macros"] }
 tracing = "0.1"

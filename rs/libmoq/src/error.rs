@@ -142,11 +142,21 @@ pub enum Error {
 	/// Error from the moq-audio codec layer.
 	#[error("audio error: {0}")]
 	Audio(Arc<moq_audio::AudioError>),
+
+	/// Error from the moq-video codec layer.
+	#[error("video error: {0}")]
+	Video(Arc<moq_video::Error>),
 }
 
 impl From<moq_audio::AudioError> for Error {
 	fn from(err: moq_audio::AudioError) -> Self {
 		Error::Audio(Arc::new(err))
+	}
+}
+
+impl From<moq_video::Error> for Error {
+	fn from(err: moq_video::Error) -> Self {
+		Error::Video(Arc::new(err))
 	}
 }
 
@@ -195,6 +205,7 @@ impl ffi::ReturnCode for Error {
 			Error::Native(_) => -33,
 			Error::Unauthorized => -34,
 			Error::Forbidden => -35,
+			Error::Video(_) => -36,
 		}
 	}
 }

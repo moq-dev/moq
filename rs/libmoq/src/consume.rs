@@ -492,6 +492,25 @@ impl Consume {
 		Ok(())
 	}
 
+	/// Look up a video rendition by catalog index, returning the
+	/// (broadcast, config, name) tuple needed to subscribe — mirrors
+	/// the index-based selection in `video_ordered`.
+	pub fn video_rendition(
+		&self,
+		catalog: Id,
+		index: usize,
+	) -> Result<(moq_net::BroadcastConsumer, hang::catalog::VideoConfig, String), Error> {
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
+		let (name, config) = consume
+			.catalog
+			.video
+			.renditions
+			.iter()
+			.nth(index)
+			.ok_or(Error::NoIndex)?;
+		Ok((consume.broadcast.clone(), config.clone(), name.clone()))
+	}
+
 	/// Look up an audio rendition by catalog index, returning the
 	/// (broadcast, config, name) tuple needed to subscribe — mirrors
 	/// the index-based selection in `audio_ordered`.
