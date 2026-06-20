@@ -262,11 +262,11 @@ pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
 		config = match c {
 			Codec::Opus => config.enable_opus(true),
 			Codec::H264 => config.enable_h264(true),
+			Codec::H265 => config.enable_h265(true),
 			Codec::Vp8 => config.enable_vp8(true),
 			Codec::Vp9 => config.enable_vp9(true),
-			// AV1 / H.265 are in str0m's enum but we don't yet support them
-			// on the egress side. Skip rather than enable a codec we can't
-			// pump frames for.
+			Codec::Av1 => config.enable_av1(true),
+			// Any other codec str0m grows is one we have no egress source for.
 			_ => config,
 		};
 	}

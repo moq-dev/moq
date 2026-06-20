@@ -21,7 +21,7 @@ pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::Broadcas
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {
 		return Err(Error::Other(anyhow::anyhow!(
-			"catalog has no codecs we can egress (Opus / H.264 / VP8 / VP9)"
+			"catalog has no codecs we can egress (Opus / H.264 / H.265 / VP8 / VP9 / AV1)"
 		)));
 	}
 

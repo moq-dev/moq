@@ -70,8 +70,8 @@ impl Server {
 		whip::router(self.clone())
 	}
 
-	/// Router for `server subscribe` (WHEP). Currently returns 501 until
-	/// the egress re-packetizer lands.
+	/// Router for `server subscribe` (WHEP). Mount under whichever HTTP path
+	/// the deployment prefers (`/whep`, `/`, ...).
 	pub fn subscribe_router(&self) -> Router {
 		whep::router(self.clone())
 	}
