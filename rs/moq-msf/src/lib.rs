@@ -143,6 +143,11 @@ pub struct Track {
 	pub packaging: Packaging,
 
 	/// Whether new objects will be appended.
+	///
+	/// draft-00 marks this required, but its own examples omit it on
+	/// `mediatimeline`/`eventtimeline` tracks, so we default to `false` when
+	/// absent rather than reject the whole catalog.
+	#[serde(default)]
 	pub is_live: bool,
 
 	/// Content role.
@@ -651,5 +656,100 @@ mod test {
 	fn unsupported_numeric_version_errors() {
 		// Numbers other than 1 never had a defined meaning, so reject them.
 		assert!(Catalog::from_str(r#"{"version":2,"tracks":[]}"#).is_err());
+	}
+
+	#[test]
+	fn draft00_example_av_decodes() {
+		// Example 1 from draft-ietf-moq-msf-00: time-aligned audio/video. Exercises the
+		// numeric version, integer framerate into an f64 field, and unmodeled fields
+		// (namespace, targetLatency, generatedAt) which must be ignored, not rejected.
+		let json = r#"{
+			"version": 1,
+			"generatedAt": 1746104606044,
+			"tracks": [
+				{
+					"name": "1080p-video",
+					"namespace": "conference.example.com/conference123/alice",
+					"packaging": "loc",
+					"isLive": true,
+					"targetLatency": 2000,
+					"role": "video",
+					"renderGroup": 1,
+					"codec": "av01.0.08M.10.0.110.09",
+					"width": 1920,
+					"height": 1080,
+					"framerate": 30,
+					"bitrate": 1500000
+				},
+				{
+					"name": "audio",
+					"namespace": "conference.example.com/conference123/alice",
+					"packaging": "loc",
+					"isLive": true,
+					"targetLatency": 2000,
+					"role": "audio",
+					"codec": "opus",
+					"samplerate": 48000,
+					"channelConfig": "2",
+					"bitrate": 32000
+				}
+			]
+		}"#;
+
+		let catalog = Catalog::from_str(json).expect("draft-00 AV catalog must decode");
+		assert_eq!(catalog.version, Version::Draft00);
+		assert_eq!(catalog.tracks.len(), 2);
+		assert_eq!(catalog.tracks[0].framerate, Some(30.0));
+		assert_eq!(catalog.tracks[1].channel_config.as_deref(), Some("2"));
+	}
+
+	#[test]
+	fn draft00_example_timeline_tracks_decode() {
+		// Example 8 from draft-ietf-moq-msf-00: mediatimeline/eventtimeline tracks omit
+		// isLive/role/codec entirely. The whole catalog must still decode.
+		let json = r#"{
+			"version": 1,
+			"generatedAt": 1746104606044,
+			"tracks": [
+				{
+					"name": "history",
+					"namespace": "conference.example.com/conference123/alice",
+					"packaging": "mediatimeline",
+					"mimetype": "application/json",
+					"depends": ["1080p-video", "audio"]
+				},
+				{
+					"name": "1080p-video",
+					"namespace": "conference.example.com/conference123/alice",
+					"packaging": "loc",
+					"isLive": true,
+					"role": "video",
+					"codec": "av01.0.08M.10.0.110.09",
+					"width": 1920,
+					"height": 1080,
+					"framerate": 30,
+					"bitrate": 1500000
+				}
+			]
+		}"#;
+
+		let catalog = Catalog::from_str(json).expect("draft-00 timeline catalog must decode");
+		assert_eq!(catalog.tracks.len(), 2);
+		// The timeline track had no isLive; it must default rather than fail the parse.
+		assert!(!catalog.tracks[0].is_live);
+		assert_eq!(catalog.tracks[0].packaging, Packaging::MediaTimeline);
+	}
+
+	#[test]
+	fn draft00_example_complete_decodes() {
+		// Example 9: terminating a live broadcast (isComplete, empty tracks).
+		let json = r#"{
+			"version": 1,
+			"generatedAt": 1746104606044,
+			"isComplete": true,
+			"tracks": []
+		}"#;
+		let catalog = Catalog::from_str(json).expect("draft-00 completion catalog must decode");
+		assert!(catalog.tracks.is_empty());
 	}
 }

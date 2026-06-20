@@ -23,7 +23,9 @@ export type Role = z.infer<typeof RoleSchema>;
 export const TrackSchema = z.object({
 	name: z.string(),
 	packaging: PackagingSchema,
-	isLive: z.boolean(),
+	// draft-00 marks isLive required but omits it on mediatimeline/eventtimeline
+	// tracks, so accept its absence rather than reject the whole catalog.
+	isLive: z.optional(z.boolean()),
 	role: z.optional(RoleSchema),
 	codec: z.optional(z.string()),
 	width: z.optional(z.number()),
