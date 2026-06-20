@@ -58,8 +58,8 @@
 					Video encode <span class="text-[10px] px-1.5 py-0.5 rounded bg-sky-900 text-sky-200 font-medium">WebCodecs</span>
 				</h3>
 				<label class="flex items-center gap-2 text-xs text-neutral-400">
-					<input id="encoded-preview" type="checkbox">
-					Encoded preview <span class="text-neutral-500">(decode a copy of the stream)</span>
+					<input id="encoded-preview" type="checkbox" class="accent-blue-600">
+					Accurate preview <span class="text-neutral-500">(decode a copy of the stream)</span>
 				</label>
 				<label class="block text-xs text-neutral-400">
 					Codec
@@ -101,8 +101,11 @@
 				</label>
 				<label class="block text-xs text-neutral-400">
 					Keyframe interval (ms)
-					<input id="keyframe" type="number" min="100" max="10000" step="100" placeholder="auto"
-						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+					<div class="mt-1 flex items-center gap-2">
+						<input id="keyframe" type="number" min="100" max="10000" step="100" placeholder="auto"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+						<span id="keyframe-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
 				</label>
 			</section>
 
@@ -129,7 +132,8 @@
 					<div class="mt-1 flex items-center gap-2">
 						<select id="samplerate"
 							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
-							<option value="48000" selected>48000</option>
+							<option value="" selected>Auto</option>
+							<option value="48000">48000</option>
 							<option value="24000">24000</option>
 							<option value="16000">16000</option>
 						</select>
@@ -141,8 +145,9 @@
 					<div class="mt-1 flex items-center gap-2">
 						<select id="channels"
 							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+							<option value="" selected>Auto</option>
 							<option value="1">1 (mono)</option>
-							<option value="2" selected>2 (stereo)</option>
+							<option value="2">2 (stereo)</option>
 						</select>
 						<span id="channels-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
 					</div>
@@ -153,7 +158,7 @@
 						<label class="block">
 							Bitrate (kbps)
 							<div class="mt-1 flex items-center gap-2">
-								<input id="opus-bitrate" type="number" min="6" max="510" step="2" value="64"
+								<input id="opus-bitrate" type="number" min="6" max="510" step="2" placeholder="auto"
 									class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
 								<span id="opusbitrate-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
 							</div>
@@ -162,29 +167,30 @@
 							Frame duration
 							<select id="opus-frame-duration"
 								class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+								<option value="" selected>Auto</option>
 								<option value="2.5">2.5 ms</option>
 								<option value="5">5 ms</option>
 								<option value="10">10 ms</option>
-								<option value="20" selected>20 ms</option>
+								<option value="20">20 ms</option>
 								<option value="40">40 ms</option>
 								<option value="60">60 ms</option>
 							</select>
 						</label>
 						<label class="block">
 							Complexity (0-10)
-							<input id="opus-complexity" type="number" min="0" max="10" step="1" value="10"
+							<input id="opus-complexity" type="number" min="0" max="10" step="1" placeholder="auto"
 								class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
 						</label>
 						<label class="flex items-center gap-2">
-							<input id="opus-fec" type="checkbox"> In-band FEC
+							<input id="opus-fec" type="checkbox" class="accent-blue-600"> In-band FEC
 						</label>
 						<label class="block">
 							Expected packet loss (%)
-							<input id="opus-plc" type="number" min="0" max="100" step="1" value="0"
+							<input id="opus-plc" type="number" min="0" max="100" step="1" placeholder="auto"
 								class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
 						</label>
 						<label class="flex items-center gap-2">
-							<input id="opus-dtx" type="checkbox"> DTX (discontinuous transmission)
+							<input id="opus-dtx" type="checkbox" class="accent-blue-600"> DTX (discontinuous transmission)
 						</label>
 					</div>
 				</details>

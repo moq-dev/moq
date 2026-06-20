@@ -84,18 +84,19 @@ const framerate = new Signals.Signal<number | undefined>(undefined);
 const bitrateKbps = new Signals.Signal<number | undefined>(undefined);
 const keyframeMs = new Signals.Signal<number | undefined>(undefined);
 
-// Audio encode. Only Opus exists today, but everything downstream keys off this.
+// Audio encode. Like the video knobs, undefined / "" means "auto" (omit the
+// field so the encoder picks). Only Opus exists today.
 const audioCodecKind = new Signals.Signal("opus");
 const volume = new Signals.Signal(1);
-const sampleRate = new Signals.Signal<number | undefined>(48000);
-const channelCount = new Signals.Signal<number | undefined>(2);
+const sampleRate = new Signals.Signal<number | undefined>(undefined);
+const channelCount = new Signals.Signal<number | undefined>(undefined);
 
 // Opus-specific knobs (the "Opus options" panel), mapping 1:1 onto OpusConfig.
-const opusBitrateKbps = new Signals.Signal(64);
-const opusFrameDuration = new Signals.Signal(20); // ms (Opus supports 2.5 to 60 ms)
-const opusComplexity = new Signals.Signal(10); // 0 (fast) … 10 (best quality)
+const opusBitrateKbps = new Signals.Signal<number | undefined>(undefined);
+const opusFrameDuration = new Signals.Signal<number | undefined>(undefined); // ms (2.5 to 60)
+const opusComplexity = new Signals.Signal<number | undefined>(undefined); // 0 (fast) … 10 (best)
 const opusFec = new Signals.Signal(false); // in-band forward error correction
-const opusPacketLoss = new Signals.Signal(0); // expected loss %, tunes FEC strength
+const opusPacketLoss = new Signals.Signal<number | undefined>(undefined); // expected loss %
 const opusDtx = new Signals.Signal(false); // discontinuous transmission (silence)
 
 const ui = new Signals.Effect();
@@ -123,20 +124,24 @@ ui.run((effect) => {
 	publish.broadcast.audio.channelCount.set(effect.get(channelCount));
 });
 
-// Compose the structured audio codec config; today only Opus.
+// Compose the structured audio codec config; today only Opus. Undefined knobs
+// are omitted so the encoder auto-sizes them.
 ui.run((effect) => {
-	if (effect.get(audioCodecKind) === "opus") {
-		const config: Audio.OpusConfig = {
-			mime: "opus",
-			bitrate: effect.get(opusBitrateKbps) * 1000,
-			frameDuration: effect.get(opusFrameDuration),
-			complexity: effect.get(opusComplexity),
-			useinbandfec: effect.get(opusFec),
-			packetlossperc: effect.get(opusPacketLoss),
-			usedtx: effect.get(opusDtx),
-		};
-		publish.broadcast.audio.codec.set(config);
-	}
+	if (effect.get(audioCodecKind) !== "opus") return;
+	const bitrate = effect.get(opusBitrateKbps);
+	const frameDuration = effect.get(opusFrameDuration);
+	const complexity = effect.get(opusComplexity);
+	const packetLoss = effect.get(opusPacketLoss);
+	const config: Audio.OpusConfig = {
+		mime: "opus",
+		...(bitrate != null ? { bitrate: bitrate * 1000 } : {}),
+		...(frameDuration != null ? { frameDuration } : {}),
+		...(complexity != null ? { complexity } : {}),
+		...(packetLoss != null ? { packetlossperc: packetLoss } : {}),
+		useinbandfec: effect.get(opusFec),
+		usedtx: effect.get(opusDtx),
+	};
+	publish.broadcast.audio.codec.set(config);
 });
 
 // ---------------------------------------------------------------------------
@@ -167,6 +172,14 @@ const bindOptionalNumber = (id: string, signal: Signals.Signal<number | undefine
 	el.addEventListener("input", sync);
 };
 
+// An optional select where the empty value ("Auto") means undefined.
+const bindOptionalSelect = (id: string, signal: Signals.Signal<number | undefined>) => {
+	const el = $<HTMLSelectElement>(id);
+	const sync = () => signal.set(el.value ? Number(el.value) : undefined);
+	sync();
+	el.addEventListener("change", sync);
+};
+
 const bindCheckbox = (id: string, signal: Signals.Signal<boolean>) => {
 	const el = $<HTMLInputElement>(id);
 	signal.set(el.checked);
@@ -181,18 +194,14 @@ bindOptionalNumber("framerate", framerate);
 bindOptionalNumber("bitrate", bitrateKbps);
 bindOptionalNumber("keyframe", keyframeMs);
 bindNumber("volume", volume);
-bindNumber("opus-bitrate", opusBitrateKbps);
-bindNumber("opus-frame-duration", opusFrameDuration);
-bindNumber("opus-complexity", opusComplexity);
+bindOptionalSelect("samplerate", sampleRate);
+bindOptionalSelect("channels", channelCount);
+bindOptionalNumber("opus-bitrate", opusBitrateKbps);
+bindOptionalSelect("opus-frame-duration", opusFrameDuration);
+bindOptionalNumber("opus-complexity", opusComplexity);
+bindOptionalNumber("opus-plc", opusPacketLoss);
 bindCheckbox("opus-fec", opusFec);
-bindNumber("opus-plc", opusPacketLoss);
 bindCheckbox("opus-dtx", opusDtx);
-
-// sample rate / channels are numbers; bind via change to keep the defaults.
-const sampleRateEl = $<HTMLSelectElement>("samplerate");
-sampleRateEl.addEventListener("change", () => sampleRate.set(Number(sampleRateEl.value)));
-const channelsEl = $<HTMLSelectElement>("channels");
-channelsEl.addEventListener("change", () => channelCount.set(Number(channelsEl.value)));
 
 // Audio codec selector: drive the codec kind and show the matching options panel.
 const audioCodecEl = $<HTMLSelectElement>("audio-codec");
@@ -267,6 +276,10 @@ ui.run((effect) => {
 	setActual("resolution-actual", v?.width && v?.height ? `${v.width}×${v.height}` : undefined);
 	setActual("framerate-actual", v?.framerate ? formatFps(v.framerate) : undefined);
 	setActual("bitrate-actual", v?.bitrate ? formatBitrate(v.bitrate) : undefined);
+	// The encoder doesn't report the negotiated keyframe interval, so show the
+	// configured value (defaulting to the 2s encoder default) once live.
+	const kf = effect.get(keyframeMs);
+	setActual("keyframe-actual", v ? `${(kf ?? 2000) / 1000}s` : undefined);
 });
 
 // Audio: the resolved audio config (codec / sample rate / channels / bitrate).
