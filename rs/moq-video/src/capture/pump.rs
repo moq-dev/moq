@@ -6,8 +6,12 @@
 //! them like any other backend. The device is built on the thread (so a `!Send`
 //! handle such as `IMFSourceReader` is fine) and dropped when the thread exits.
 //! [`PumpGuard`] stops and joins the thread when the [`FrameStream`](super::FrameStream)
-//! drops, releasing the device. Reads are bounded (one frame interval), so the
-//! stop flag is observed promptly.
+//! drops, releasing the device. The stop flag is checked between reads, so on a
+//! live device (which delivers a frame per interval) shutdown is prompt; the join
+//! is what guarantees the device fd is closed before a subsequent reopen, so we
+//! don't race EBUSY. A wedged device that blocks a read forever would stall that
+//! join, the same as the original `spawn_blocking` path did, but that needs a
+//! driver that delivers neither a frame nor an error.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

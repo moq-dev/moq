@@ -99,7 +99,15 @@ pub async fn publish_capture(
 	let mut producer = Producer::new(broadcast, catalog)?;
 	let demand = producer.demand();
 
-	capture_loop(&mut producer, &demand, &capture, &encode, &clock).await
+	let result = capture_loop(&mut producer, &demand, &capture, &encode, &clock).await;
+
+	// Best-effort clean close. This runs only when the loop ends on its own (the
+	// track is usually already going away by then); a Ctrl+C cancels the future
+	// before this point, since async `Drop` can't finalize the track.
+	if let Err(err) = producer.finish() {
+		tracing::debug!(error = %err, "video track finish after capture ended");
+	}
+	result
 }
 
 /// A dropped or closed track is the normal end of a publish; any other cause is

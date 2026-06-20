@@ -198,7 +198,15 @@ pub async fn publish_microphone(
 	let mut producer = AudioProducer::new(&mut broadcast, catalog, track_name, input, output)?;
 	let track = producer.track().clone();
 
-	capture_loop(&mut producer, &track, &config, &clock).await
+	let result = capture_loop(&mut producer, &track, &config, &clock).await;
+
+	// Best-effort clean close: flush the trailing sub-frame and finalize the
+	// track. Runs only when the loop ends on its own; a Ctrl+C cancels the future
+	// before this point, since async `Drop` can't finalize the track.
+	if let Err(err) = producer.finish() {
+		tracing::debug!(error = %err, "audio track finish after capture ended");
+	}
+	result
 }
 
 /// Async capture/encode loop: open the mic while a listener is subscribed,
