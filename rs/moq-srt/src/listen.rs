@@ -219,7 +219,20 @@ async fn serve_publish(origin: OriginProducer, path: &str, mut socket: srt_tokio
 /// publisher), then packs the muxer's output into [`SRT_PAYLOAD`]-sized SRT
 /// messages. Returns once the broadcast ends or the caller disconnects.
 async fn serve_request(origin: OriginConsumer, path: &str, mut socket: srt_tokio::SrtSocket) -> Result<()> {
-	let Some(mut subscriber) = crate::ts::Subscriber::new(&origin, path).await? else {
+	// Resolve the broadcast, but watch the socket while we wait: `announced_broadcast`
+	// parks forever for a stream that is never published, and nothing else polls the
+	// socket during that wait, so without this a caller who requests a non-existent
+	// stream (or hangs up before it starts) would leak this task and its socket.
+	let subscriber = tokio::select! {
+		biased;
+		_ = wait_closed(&mut socket) => {
+			tracing::debug!(%path, "SRT request closed before its broadcast was available");
+			return Ok(());
+		}
+		subscriber = crate::ts::Subscriber::new(&origin, path) => subscriber?,
+	};
+
+	let Some(mut subscriber) = subscriber else {
 		tracing::warn!(%path, "SRT request for an unroutable broadcast");
 		return Ok(());
 	};
@@ -241,6 +254,14 @@ async fn serve_request(origin: OriginConsumer, path: &str, mut socket: srt_tokio
 	socket.close().await?;
 
 	Ok(())
+}
+
+/// Resolve once the SRT caller hangs up (a clean close or an error), draining and
+/// ignoring any unexpected inbound packets. A request caller normally sends
+/// nothing, so this is purely a disconnect signal to race against the announce wait.
+async fn wait_closed(socket: &mut srt_tokio::SrtSocket) {
+	use futures::TryStreamExt;
+	while let Ok(Some(_)) = socket.try_next().await {}
 }
 
 /// A routing decision derived from an SRT connection's stream id.
