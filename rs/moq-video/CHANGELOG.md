@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `decode::Consumer` (the counterpart to `moq-audio`'s `AudioConsumer`) that
   subscribes to an H.264 track and returns raw I420 frames. Backends are
   VideoToolbox (macOS) and openh264 (portable software fallback); no ffmpeg.
+- H.265 encode via the NVENC backend (Linux, `nvenc` feature). The codec is
+  selected by `encode::Codec`; the NVENC HEVC path shares the H.264 preset / GOP
+  / rate-control setup and emits Annex-B with inline VPS/SPS/PPS. Not yet
+  validated on hardware.
 
 ## [0.0.4](https://github.com/moq-dev/moq/compare/moq-video-v0.0.3...moq-video-v0.0.4) - 2026-06-16
 
