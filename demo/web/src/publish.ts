@@ -4,13 +4,15 @@
  * The component owns capture (camera / screen / file / mic), preview, go-live,
  * and mute. This demo adds on top of it:
  *
- *   1. A side panel of *encoder* settings. The component publishes with sensible
- *      defaults; here we drive the broadcast's encoder signals directly so codec,
- *      bitrate, resolution, frame rate, and the full Opus config are editable.
- *   2. A custom `meta.json` track carried *within* the broadcast.
- *   3. A "Negotiated" panel: the resolved encode config plus live graphs (capture
- *      rate, upload-bandwidth estimate, round trip). The publish API exposes no
- *      encoded-byte counter, so these are the honestly-observable signals.
+ *   1. A side panel of *encoder* settings. Each defaults to "auto" (the field is
+ *      omitted so the encoder picks); we drive the broadcast's encoder signals
+ *      directly and show the negotiated value beside each control once live.
+ *   2. A toggle between a raw-capture preview and an "encoded" preview that
+ *      decodes a copy of the stream (what viewers actually receive).
+ *   3. A custom `meta.json` track carried *within* the broadcast.
+ *   4. Live graphs (capture rate, upload-bandwidth estimate, round trip). The
+ *      publish API exposes no encoded-byte counter, so these are the honestly-
+ *      observable signals.
  */
 
 import "./highlight";
@@ -19,8 +21,9 @@ import "@moq/publish/ui"; // defines <moq-publish-ui>
 import { type Audio, Json, type Net, Signals } from "@moq/publish";
 import type MoqPublish from "@moq/publish/element";
 import MoqPublishSupport from "@moq/publish/support/element";
-import { formatBitrate, formatFps, graph, renderRows } from "./viz";
+import { formatBitrate, formatFps, graph } from "./viz";
 
+/** Re-exported so bundlers keep the `<moq-publish-support>` element registration. */
 export { MoqPublishSupport };
 
 // Injected by Vite (see justfile). Defaults to the local relay.
@@ -60,16 +63,26 @@ nameEl.addEventListener("change", () => {
 	if (v) publish.name = v;
 });
 
+// Toggle the preview between the raw capture ("source") and a decoded copy of the
+// encoded stream ("encoded"). Defaults to off (raw) to avoid the extra encode +
+// decode unless the user wants to inspect codec artifacts.
+const encodedEl = $<HTMLInputElement>("encoded-preview");
+const syncPreview = () => publish.setAttribute("preview", encodedEl.checked ? "encoded" : "source");
+encodedEl.addEventListener("change", syncPreview);
+syncPreview();
+
 // ---------------------------------------------------------------------------
 // Encoder settings - reactive Signals the broadcast's encoders subscribe to.
 // ---------------------------------------------------------------------------
+//
+// Video knobs default to undefined / "" meaning "auto": we omit the field so the
+// encoder picks. The negotiated result shows up in the *-actual spans below.
 
-// Video encode (WebCodecs / MoQ)
-const codec = new Signals.Signal<string | undefined>(undefined); // undefined => encoder picks
-const resolution = new Signals.Signal("1280x720");
-const framerate = new Signals.Signal(30);
-const bitrateKbps = new Signals.Signal(2000);
-const keyframeMs = new Signals.Signal(2000);
+const codec = new Signals.Signal<string | undefined>(undefined);
+const resolution = new Signals.Signal(""); // "" => auto
+const framerate = new Signals.Signal<number | undefined>(undefined);
+const bitrateKbps = new Signals.Signal<number | undefined>(undefined);
+const keyframeMs = new Signals.Signal<number | undefined>(undefined);
 
 // Audio encode. Only Opus exists today, but everything downstream keys off this.
 const audioCodecKind = new Signals.Signal("opus");
@@ -88,14 +101,17 @@ const opusDtx = new Signals.Signal(false); // discontinuous transmission (silenc
 const ui = new Signals.Effect();
 
 // Compose the WebCodecs/MoQ video encoder config and push it onto the HD
-// rendition. Resolution caps the encoded pixels; the rest map straight through.
+// rendition. Undefined fields are omitted, so the encoder auto-sizes them.
 ui.run((effect) => {
-	const [w, h] = effect.get(resolution).split("x").map(Number);
+	const res = effect.get(resolution);
+	const [w, h] = res ? res.split("x").map(Number) : [undefined, undefined];
+	const br = effect.get(bitrateKbps);
+	const kf = effect.get(keyframeMs);
 	publish.broadcast.video.hd.config.set({
 		codec: effect.get(codec),
-		maxPixels: (w ?? 1280) * (h ?? 720),
-		maxBitrate: effect.get(bitrateKbps) * 1000,
-		keyframeInterval: effect.get(keyframeMs) as Net.Time.Milli,
+		maxPixels: w && h ? w * h : undefined,
+		maxBitrate: br != null ? br * 1000 : undefined,
+		keyframeInterval: kf != null ? (kf as Net.Time.Milli) : undefined,
 		frameRate: effect.get(framerate),
 	});
 });
@@ -127,11 +143,30 @@ ui.run((effect) => {
 // Input bindings (DOM -> Signal)
 // ---------------------------------------------------------------------------
 
+// A required number input: ignore empty / non-numeric so typing never pushes a
+// transient 0 or NaN onto the encoder.
 const bindNumber = (id: string, signal: Signals.Signal<number>) => {
 	const el = $<HTMLInputElement | HTMLSelectElement>(id);
-	signal.set(Number(el.value));
-	el.addEventListener("input", () => signal.set(Number(el.value)));
+	const sync = () => {
+		const n = Number(el.value);
+		if (el.value.trim() !== "" && Number.isFinite(n)) signal.set(n);
+	};
+	sync();
+	el.addEventListener("input", sync);
 };
+
+// An optional number input where empty means "auto" (undefined).
+const bindOptionalNumber = (id: string, signal: Signals.Signal<number | undefined>) => {
+	const el = $<HTMLInputElement>(id);
+	const sync = () => {
+		const v = el.value.trim();
+		const n = Number(v);
+		signal.set(v !== "" && Number.isFinite(n) ? n : undefined);
+	};
+	sync();
+	el.addEventListener("input", sync);
+};
+
 const bindCheckbox = (id: string, signal: Signals.Signal<boolean>) => {
 	const el = $<HTMLInputElement>(id);
 	signal.set(el.checked);
@@ -142,9 +177,9 @@ const resolutionEl = $<HTMLSelectElement>("resolution");
 resolution.set(resolutionEl.value);
 resolutionEl.addEventListener("input", () => resolution.set(resolutionEl.value));
 
-bindNumber("framerate", framerate);
-bindNumber("bitrate", bitrateKbps);
-bindNumber("keyframe", keyframeMs);
+bindOptionalNumber("framerate", framerate);
+bindOptionalNumber("bitrate", bitrateKbps);
+bindOptionalNumber("keyframe", keyframeMs);
 bindNumber("volume", volume);
 bindNumber("opus-bitrate", opusBitrateKbps);
 bindNumber("opus-frame-duration", opusFrameDuration);
@@ -174,7 +209,7 @@ syncAudioCodec();
 // ---------------------------------------------------------------------------
 
 const CODECS: { label: string; value: string | undefined; probe?: string }[] = [
-	{ label: "Auto (encoder picks best)", value: undefined },
+	{ label: "Auto", value: undefined },
 	{ label: "H.264 (AVC, baseline)", value: "avc1.42E01F", probe: "avc1.42E01F" },
 	{ label: "H.264 (AVC, high)", value: "avc1.640028", probe: "avc1.640028" },
 	{ label: "VP8", value: "vp8", probe: "vp8" },
@@ -216,6 +251,32 @@ async function buildCodecMenu() {
 	});
 }
 buildCodecMenu();
+
+// ---------------------------------------------------------------------------
+// Negotiated values, shown inline beside each control once live
+// ---------------------------------------------------------------------------
+
+const setActual = (id: string, value: string | undefined) => {
+	$(id).textContent = value ?? "";
+};
+
+// Video: the resolved encoder config (codec / resolution / fps / bitrate).
+ui.run((effect) => {
+	const v = effect.get(publish.broadcast.video.hd.resolved);
+	setActual("codec-actual", v?.codec);
+	setActual("resolution-actual", v?.width && v?.height ? `${v.width}×${v.height}` : undefined);
+	setActual("framerate-actual", v?.framerate ? formatFps(v.framerate) : undefined);
+	setActual("bitrate-actual", v?.bitrate ? formatBitrate(v.bitrate) : undefined);
+});
+
+// Audio: the resolved audio config (codec / sample rate / channels / bitrate).
+ui.run((effect) => {
+	const a = effect.get(publish.broadcast.audio.config);
+	setActual("audiocodec-actual", a?.codec);
+	setActual("samplerate-actual", a?.sampleRate ? `${a.sampleRate} Hz` : undefined);
+	setActual("channels-actual", a?.numberOfChannels ? String(a.numberOfChannels) : undefined);
+	setActual("opusbitrate-actual", a?.bitrate ? formatBitrate(a.bitrate) : undefined);
+});
 
 // ---------------------------------------------------------------------------
 // Custom meta.json track
@@ -261,31 +322,8 @@ metaBtn.addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Negotiated config + live graphs
+// Live graphs
 // ---------------------------------------------------------------------------
-
-// The resolved encoder config (codec/resolution/bitrate/fps that were actually
-// negotiated) only exists once a source is live, so the panel hides until then.
-ui.run((effect) => {
-	const v = effect.get(publish.broadcast.video.hd.resolved);
-	const a = effect.get(publish.broadcast.audio.config);
-	const section = $("negotiated-section");
-	if (!v && !a) {
-		section.hidden = true;
-		return;
-	}
-	section.hidden = false;
-	renderRows($("negotiated-info"), [
-		["video codec", v?.codec],
-		["resolution", v?.width && v?.height ? `${v.width}×${v.height}` : undefined],
-		["frame rate", v?.framerate ? `${v.framerate} fps` : undefined],
-		["video bitrate", v?.bitrate ? formatBitrate(v.bitrate) : undefined],
-		["audio codec", a?.codec],
-		["sample rate", a?.sampleRate ? `${a.sampleRate} Hz` : undefined],
-		["channels", a?.numberOfChannels ? String(a.numberOfChannels) : undefined],
-		["audio bitrate", a?.bitrate ? formatBitrate(a.bitrate) : undefined],
-	]);
-});
 
 const viz = new Signals.Effect();
 

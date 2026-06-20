@@ -24,6 +24,7 @@ import type MoqWatch from "@moq/watch/element";
 import MoqWatchSupport from "@moq/watch/support/element";
 import { bufferBars, formatBitrate, formatFps, graph, renderRows } from "./viz";
 
+/** Re-exported so bundlers keep the `<moq-watch-support>` element registration. */
 export { MoqWatchSupport };
 
 // Injected by Vite (see justfile). Defaults to the local relay.
@@ -108,11 +109,11 @@ function createTile(name: string): WatchTile {
 	player.appendChild(watch);
 	el.append(label, player);
 
+	const effects = new Signals.Effect();
+
 	// Clicking anywhere in the tile makes it the active audio source. The click
 	// doubles as the user gesture browsers require before audio can start.
-	el.addEventListener("pointerdown", () => active.set(name));
-
-	const effects = new Signals.Effect();
+	effects.event(el, "pointerdown", () => active.set(name));
 
 	// Follow the editable relay URL in its own effect. Keeping this separate from
 	// the active-state effect below is important: `watch.url =` reassigns a fresh

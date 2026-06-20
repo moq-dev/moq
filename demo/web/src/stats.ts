@@ -203,13 +203,15 @@ const ui = new Signals.Effect();
 // Relay URL is editable: committing a new value reconnects the dashboard.
 const relayEl = $<HTMLInputElement>("relay-url");
 relayEl.value = RELAY_URL;
-relayEl.addEventListener("change", () => {
-	try {
-		relayUrl.set(new URL(relayEl.value.trim()));
-	} catch {
-		// Revert invalid input to the last good URL.
-		relayEl.value = relayUrl.peek()?.toString() ?? RELAY_URL;
-	}
+ui.run((effect) => {
+	effect.event(relayEl, "change", () => {
+		try {
+			relayUrl.set(new URL(relayEl.value.trim()));
+		} catch {
+			// Revert invalid input to the last good URL.
+			relayEl.value = relayUrl.peek()?.toString() ?? RELAY_URL;
+		}
+	});
 });
 
 ui.run((effect) => {
@@ -262,7 +264,7 @@ ui.run((effect) => {
 			],
 		};
 	});
-	renderTable(el, headers, rows, { selected: sel, onClick: (k) => selectedNode.set(k) });
+	renderTable(effect, el, headers, rows, { selected: sel, onClick: (k) => selectedNode.set(k) });
 });
 
 // Drill-down: the selected node's broadcasts (egress-focused) + sessions.
@@ -315,14 +317,16 @@ ui.run((effect) => {
 	const inHeaders = ["broadcast", "ingress", "frames", "groups"];
 	const outHeaders = ["broadcast", "viewers", "track subs", "egress", "frames", "groups"];
 
-	renderTable($("node-publishers"), inHeaders, ingressRows(stats.ingress));
-	renderTable($("node-subscribers"), outHeaders, egressRows(stats.egress));
+	renderTable(effect, $("node-publishers"), inHeaders, ingressRows(stats.ingress));
+	renderTable(effect, $("node-subscribers"), outHeaders, egressRows(stats.egress));
 	renderTable(
+		effect,
 		$("node-internal-publishers"),
 		["broadcast", "ingress", "frames", "groups"],
 		ingressRows(stats.internalIngress),
 	);
 	renderTable(
+		effect,
 		$("node-internal-subscribers"),
 		["broadcast", "peers", "track subs", "egress", "frames", "groups"],
 		egressRows(stats.internalEgress),
@@ -349,6 +353,7 @@ interface Row {
 }
 
 function renderTable(
+	effect: Signals.Effect,
 	container: HTMLElement,
 	headers: string[],
 	rows: Row[],
@@ -378,8 +383,17 @@ function renderTable(
 		tr.className = "border-b border-neutral-800";
 		if (opts?.onClick) {
 			tr.classList.add("cursor-pointer", "hover:bg-neutral-800");
+			tr.tabIndex = 0;
+			tr.setAttribute("role", "button");
 			if (row.key === opts.selected) tr.classList.add("bg-neutral-800", "text-emerald-300");
-			tr.addEventListener("click", () => opts.onClick?.(row.key));
+			const activate = () => opts.onClick?.(row.key);
+			effect.event(tr, "click", activate);
+			effect.event(tr, "keydown", (e) => {
+				if (e.key === "Enter" || e.key === " ") {
+					e.preventDefault();
+					activate();
+				}
+			});
 		}
 		for (const cell of row.cells) {
 			const td = document.createElement("td");

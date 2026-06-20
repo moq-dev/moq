@@ -17,8 +17,8 @@
 	<h1 class="text-2xl font-bold mb-1">MoQ Publish</h1>
 	<p class="text-neutral-400 text-sm mb-4 max-w-3xl">
 		The <code>&lt;moq-publish-ui&gt;</code> player owns capture, preview, go-live, and mute &ndash; pick a
-		source in its controls to start. The side panel drives the encoder settings the component otherwise
-		leaves at their defaults, plus a custom <code>meta.json</code> metadata track.
+		source in its controls to start. The side panel drives the encoder settings (left at "auto" by
+		default), with the negotiated value shown to the right of each control once live.
 	</p>
 
 	<div class="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-4 items-start">
@@ -28,19 +28,23 @@
 				announce="source": only advertise the broadcast once a source is picked,
 				so the watch inspector shows no phantom tile while idle.
 
-				preview="encoded": preview a decoded copy of the *encoded* video, i.e. what
-				a viewer actually receives over the network (codec artifacts and all), at
-				the cost of an extra encode + decode. Rendered into the <canvas> below; swap
-				back to a plain <video> for a zero-cost preview of the raw capture.
+				The preview renders into the <canvas>. With "Encoded preview" off it shows
+				the raw capture (preview="source"); on, it decodes a copy of the *encoded*
+				video (preview="encoded") so you see exactly what viewers receive, at the
+				cost of an extra encode + decode.
 			-->
 			<moq-publish-ui>
-				<moq-publish id="publish" name="me.hang" announce="source" simulcast preview="encoded">
+				<moq-publish id="publish" name="me.hang" announce="source" simulcast>
 					<canvas style="width: 100%; height: auto; border-radius: 4px;"></canvas>
 				</moq-publish>
 			</moq-publish-ui>
+			<label class="mt-2 flex items-center gap-2 text-xs text-neutral-400">
+				<input id="encoded-preview" type="checkbox">
+				Encoded preview <span class="text-neutral-500">(decode a copy of the stream &ndash; see codec artifacts)</span>
+			</label>
 		</section>
 
-		<!-- Right: encoder settings + metadata + live stats. -->
+		<!-- Right: encoder settings + metadata + live graphs. -->
 		<aside>
 			<section class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3">
 				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
@@ -64,32 +68,45 @@
 				</h3>
 				<label class="block text-xs text-neutral-400">
 					Codec
-					<select id="codec"
-						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm"></select>
+					<div class="mt-1 flex items-center gap-2">
+						<select id="codec"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm"></select>
+						<span id="codec-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
 				</label>
 				<label class="block text-xs text-neutral-400">
 					Max resolution
-					<select id="resolution"
-						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
-						<option value="640x360">360p (640×360)</option>
-						<option value="854x480">480p (854×480)</option>
-						<option value="1280x720" selected>720p (1280×720)</option>
-						<option value="1920x1080">1080p (1920×1080)</option>
-					</select>
+					<div class="mt-1 flex items-center gap-2">
+						<select id="resolution"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+							<option value="" selected>Auto</option>
+							<option value="640x360">360p (640×360)</option>
+							<option value="854x480">480p (854×480)</option>
+							<option value="1280x720">720p (1280×720)</option>
+							<option value="1920x1080">1080p (1920×1080)</option>
+						</select>
+						<span id="resolution-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
 				</label>
 				<label class="block text-xs text-neutral-400">
 					Frame rate (fps)
-					<input id="framerate" type="number" min="1" max="120" value="30"
-						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+					<div class="mt-1 flex items-center gap-2">
+						<input id="framerate" type="number" min="1" max="120" placeholder="auto"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+						<span id="framerate-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
 				</label>
 				<label class="block text-xs text-neutral-400">
 					Target bitrate (kbps)
-					<input id="bitrate" type="number" min="50" max="20000" step="50" value="2000"
-						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+					<div class="mt-1 flex items-center gap-2">
+						<input id="bitrate" type="number" min="50" max="20000" step="50" placeholder="auto"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+						<span id="bitrate-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
 				</label>
 				<label class="block text-xs text-neutral-400">
 					Keyframe interval (ms)
-					<input id="keyframe" type="number" min="100" max="10000" step="100" value="2000"
+					<input id="keyframe" type="number" min="100" max="10000" step="100" placeholder="auto"
 						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
 				</label>
 			</section>
@@ -100,10 +117,13 @@
 				</h3>
 				<label class="block text-xs text-neutral-400">
 					Codec
-					<select id="audio-codec"
-						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
-						<option value="opus" selected>Opus</option>
-					</select>
+					<div class="mt-1 flex items-center gap-2">
+						<select id="audio-codec"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+							<option value="opus" selected>Opus</option>
+						</select>
+						<span id="audiocodec-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
 				</label>
 				<label class="block text-xs text-neutral-400">
 					Volume / gain
@@ -111,28 +131,37 @@
 				</label>
 				<label class="block text-xs text-neutral-400">
 					Sample rate (Hz)
-					<select id="samplerate"
-						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
-						<option value="48000" selected>48000</option>
-						<option value="24000">24000</option>
-						<option value="16000">16000</option>
-					</select>
+					<div class="mt-1 flex items-center gap-2">
+						<select id="samplerate"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+							<option value="48000" selected>48000</option>
+							<option value="24000">24000</option>
+							<option value="16000">16000</option>
+						</select>
+						<span id="samplerate-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
 				</label>
 				<label class="block text-xs text-neutral-400">
 					Channels
-					<select id="channels"
-						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
-						<option value="1">1 (mono)</option>
-						<option value="2" selected>2 (stereo)</option>
-					</select>
+					<div class="mt-1 flex items-center gap-2">
+						<select id="channels"
+							class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+							<option value="1">1 (mono)</option>
+							<option value="2" selected>2 (stereo)</option>
+						</select>
+						<span id="channels-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+					</div>
 				</label>
 				<details id="opus-advanced" class="text-xs text-neutral-400">
 					<summary class="cursor-pointer text-neutral-300">Opus options</summary>
 					<div class="mt-2 space-y-2">
 						<label class="block">
 							Bitrate (kbps)
-							<input id="opus-bitrate" type="number" min="6" max="510" step="2" value="64"
-								class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+							<div class="mt-1 flex items-center gap-2">
+								<input id="opus-bitrate" type="number" min="6" max="510" step="2" value="64"
+									class="flex-1 min-w-0 bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm">
+								<span id="opusbitrate-actual" class="shrink-0 w-24 text-right font-mono text-xs text-emerald-400"></span>
+							</div>
 						</label>
 						<label class="block">
 							Frame duration
@@ -179,12 +208,11 @@
 				</button>
 			</section>
 
-			<section id="negotiated-section" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3" hidden>
+			<section class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3">
 				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
-					Negotiated <span class="text-[10px] px-1.5 py-0.5 rounded bg-sky-900 text-sky-200 font-medium">WebCodecs</span>
+					Network <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900 text-emerald-200 font-medium">WebTransport</span>
 				</h3>
-				<div id="negotiated-info" class="space-y-0.5"></div>
-				<div id="publish-graphs" class="mt-3 space-y-2"></div>
+				<div id="publish-graphs" class="space-y-2"></div>
 			</section>
 		</aside>
 	</div>
@@ -200,15 +228,17 @@
 			<code class="language-html">&lt;moq-publish-ui&gt;</code> web component. The side panel writes the
 			encoder signals directly &ndash; codec, bitrate, resolution, frame rate, and the full Opus config
 			are all editable live:
+		</p>
 		<pre><code class="language-typescript">const publish = document.getElementById("publish");
 publish.broadcast.video.hd.config.set({ maxBitrate: 2_000_000, frameRate: 30 });
 publish.broadcast.audio.codec.set({ mime: "opus", bitrate: 64_000 });</code></pre>
-		</p>
 		<p>
-			Codec support is probed live with <code class="language-typescript">VideoEncoder.isConfigSupported</code>;
-			unsupported options are disabled. The <code>simulcast</code> attribute also publishes a smaller
-			<code>video/sd</code> rendition (the panel tunes <code>video/hd</code>); the
-			<a href="index.html">watch inspector</a> picks whichever fits the player size.
+			Each setting defaults to "auto" (the field is omitted, so the encoder picks); the negotiated value
+			appears to the right once you go live. Codec support is probed with
+			<code class="language-typescript">VideoEncoder.isConfigSupported</code>; unsupported options are
+			disabled. The <code>simulcast</code> attribute also publishes a smaller <code>video/sd</code>
+			rendition (the panel tunes <code>video/hd</code>); the <a href="index.html">watch inspector</a>
+			picks whichever fits the player size.
 		</p>
 		<p>
 			The <code>meta.json</code> editor publishes a custom JSON track <em>within</em> the broadcast via
