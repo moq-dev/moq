@@ -45,6 +45,10 @@ yuv = "0.8.14"
 # driver, falling back to the next encoder (see backend::open). `cuda-12020` pins
 # the CUDA API version so the build needs no CUDA toolkit.
 cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
+# Probe for the NVIDIA driver libraries before calling cudarc / the NVENC SDK,
+# which panic (process-abort under release `panic = "abort"`) if their library is
+# absent. Lets a GPU-less host fall back to the next encoder instead of crashing.
+libloading = "0.8"
 # Intel/AMD VAAPI hardware encoder, always-on for Linux. Builds against its own
 # vendored libva headers and dlopen's libva at runtime, so it builds without
 # system libva-dev and still loads on machines without libva, falling back to the
