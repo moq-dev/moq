@@ -27,11 +27,7 @@ impl From<Container> for hang::catalog::Container {
 	fn from(container: Container) -> Self {
 		match container {
 			Container::Legacy => Self::Legacy,
-			Container::Cmaf { init } => Self::Cmaf {
-				init: init.into(),
-				timescale: None,
-				track_id: None,
-			},
+			Container::Cmaf { init } => Self::Cmaf { init: init.into() },
 			Container::Loc => Self::Loc,
 		}
 	}

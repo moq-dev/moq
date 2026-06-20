@@ -397,8 +397,6 @@ mod test {
 				.decode("AAAYZ2Z0eXA=")
 				.unwrap()
 				.into(),
-			timescale: None,
-			track_id: None,
 		};
 
 		let mut video_renditions = BTreeMap::new();

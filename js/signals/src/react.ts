@@ -31,7 +31,3 @@ export function useSignal<T>(signal: Signal<T>): [T, (value: T | ((prev: T) => T
 	);
 	return [value, setter];
 }
-
-/** @deprecated Use `useValue` instead. */
-const react = useValue;
-export default react;
