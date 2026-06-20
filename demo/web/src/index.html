@@ -4,186 +4,148 @@
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>MoQ Demo</title>
+	<title>MoQ Demo (Watch)</title>
 
 	<link rel="stylesheet" href="index.css">
 	<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 </head>
 
-<body class="dark:bg-black p-4">
-	<!-- Always show this banner to flex browser support. -->
-	<moq-watch-support show="always"></moq-watch-support>
+<body class="p-4 max-w-6xl mx-auto">
+	<!-- Only show the support banner when a required feature is missing. -->
+	<moq-watch-support show="warning"></moq-watch-support>
 
-	<!-- Drag the handle on the right edge to resize the player. -->
-	<div style="resize: horizontal; overflow: hidden; min-width: 240px;">
-	<!-- Live discovers new broadcasts available at the given URL. -->
-	<moq-discover>
-		<!-- This optional component shows some simple controls for the inner <moq-watch> component. -->
-		<moq-watch-ui>
-			<!--
-				Some supported attributes are:
-				- `url`: The URL of the (relay) server; feel free to use `https://cdn.moq.dev/anon` for public access.
-				- `name`: The broadcast name, otherwise we use the last part of the URL.
-				- `paused`: Video and audio are paused.
-				- `muted`: Audio is muted.
-				- `visible`: When to download video: `never`, a distance like `200px` from the viewport (suspended while the tab is hidden), or `always` (default `0px`, on screen only).
-				- `volume`: The audio volume (0-1).
-				- `latency`: The target jitter buffer size in milliseconds, or "real-time" to use the RTT.
-				- `reload`: Whether to automatically reconnect when the broadcast goes offline/online.
+	<h1 class="text-2xl font-bold mb-1">MoQ Watch</h1>
+	<p class="text-neutral-400 text-sm mb-4 max-w-3xl">
+		One tile per live broadcast announced under the prefix. Click a tile to make it active; only the
+		active tile plays sound, and the panel on the right shows its live stats. Everything is discovered
+		over a single connection.
+	</p>
 
-				NOTE: Cloudflare doesn't support reload yet or latency=real-time.
-			-->
-			<moq-watch id="watch" url="%VITE_RELAY_URL%" name="bbb.hang" muted latency="real-time" reload>
-				<!-- Provide a canvas element to render the video via WebCodecs. -->
-				<canvas style="width: 100%; height: auto;"></canvas>
-				<!-- Or provide a video element to use the (higher latency) MSE backend. -->
-				<!-- <video style="width: 100%; height: auto;" autoplay muted></video> -->
-			</moq-watch>
-		</moq-watch-ui>
-	</moq-discover>
+	<div class="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-4 items-start">
+		<!-- Left: every live broadcast under the prefix. Tiles are built in index.ts. -->
+		<section>
+			<div id="players" class="grid grid-cols-1 gap-4"></div>
+			<div id="players-empty" class="text-neutral-500 text-sm border border-dashed border-neutral-800 rounded-lg p-8 text-center">
+				Searching for live broadcasts…
+			</div>
+		</section>
+
+		<!-- Right: stats + controls for the active tile only. -->
+		<aside>
+			<div class="flex gap-2 mb-3">
+				<span id="conn-status" class="inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs bg-neutral-900 border border-neutral-700">
+					<span class="dot w-2 h-2 rounded-full bg-neutral-500"></span>
+					<b id="conn-text">Connecting</b>
+				</span>
+				<span id="bcast-status" class="inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs bg-neutral-900 border border-neutral-700">
+					<span class="dot w-2 h-2 rounded-full bg-neutral-500"></span>
+					<b id="bcast-text">Offline</b>
+				</span>
+			</div>
+
+			<section class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3">
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2">Source</h3>
+				<label class="block text-xs text-neutral-400 mb-2">
+					Relay URL
+					<input id="relay-url" type="text"
+						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm font-mono">
+				</label>
+				<label class="block text-xs text-neutral-400">
+					Prefix
+					<input id="prefix" type="text"
+						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm font-mono"
+						placeholder="(everything)">
+				</label>
+			</section>
+
+			<section id="video-section" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3" hidden>
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+					Video <span class="text-[10px] px-1.5 py-0.5 rounded bg-sky-900 text-sky-200 font-medium">WebCodecs</span>
+				</h3>
+				<div id="video-info" class="space-y-0.5"></div>
+				<div id="video-graphs" class="mt-3 space-y-2"></div>
+			</section>
+
+			<section id="audio-section" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3" hidden>
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+					Audio <span class="text-[10px] px-1.5 py-0.5 rounded bg-sky-900 text-sky-200 font-medium">WebCodecs</span>
+				</h3>
+				<div id="audio-info" class="space-y-0.5"></div>
+			</section>
+
+			<section id="network-section" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3" hidden>
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+					Network <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900 text-emerald-200 font-medium">WebTransport</span>
+				</h3>
+				<div id="network-info" class="space-y-0.5"></div>
+				<div id="network-graphs" class="mt-3 space-y-2"></div>
+			</section>
+
+			<section id="buffer-section" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3" hidden>
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+					Latency <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900 text-emerald-200 font-medium">MoQ</span>
+				</h3>
+				<div id="buffer-viz"></div>
+			</section>
+
+			<section id="metadata-section" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3" hidden>
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+					Metadata <code class="text-xs text-neutral-400">meta.json</code>
+					<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900 text-emerald-200 font-medium">MoQ</span>
+				</h3>
+				<pre id="metadata" class="text-xs font-mono text-neutral-200 max-h-64 overflow-auto whitespace-pre-wrap break-all"></pre>
+			</section>
+
+			<details id="catalog-raw-section" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3" hidden>
+				<summary class="text-sm font-semibold text-neutral-300 cursor-pointer">Raw catalog JSON</summary>
+				<pre id="catalog-raw" class="text-xs font-mono text-neutral-200 mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all"></pre>
+			</details>
+		</aside>
 	</div>
 
 	<!-- Dev-only: renders console output inline here. Set `level` to lower the
 	     threshold (debug | log | info | warn | error; defaults to warn). Defined
 	     by the console-overlay Vite plugin; absent from production builds. -->
-	<moq-console></moq-console>
+	<moq-console class="block mt-8"></moq-console>
 
-	<h3>Other demos:</h3>
-	<ul>
-		<li><a href="mse.html">Watch a broadcast (MSE).</a></li>
-		<li><a href="publish.html">Publish a broadcast.</a></li>
-		<li><a href="manual.html">Watch with a manual catalog.</a></li>
-	</ul>
+	<footer class="prose-doc mt-8">
+		<h3>How it works:</h3>
+		<p>
+			Each tile is a <code class="language-html">&lt;moq-watch-ui&gt;</code> wrapping a
+			<code class="language-html">&lt;moq-watch&gt;</code> <a
+				href="https://developer.mozilla.org/en-US/docs/Web/API/Web_components">Web Component</a>.
+			A single connection discovers broadcasts via MoQ announcements
+			(<code class="language-typescript">connection.announced(prefix)</code>) and we reconcile one
+			tile per live <code>.hang</code> broadcast, adding and removing them as publishers come and go.
+			No F5 needed; restart a publisher and its tile reconnects on its own.
+		</p>
+		<p>
+			The right panel reads everything reactively off the active tile's element:
+		<pre><code class="language-typescript">const watch = document.querySelector("moq-watch");
+watch.broadcast.catalog.subscribe((catalog) =&gt; { /* video/audio config */ });
+watch.backend.video.stats.subscribe((stats) =&gt; { /* decoded frames, bytes */ });</code></pre>
+		</p>
+		<p>
+			The <code>meta.json</code> panel subscribes to a custom JSON track carried <em>within</em> the
+			broadcast (see the <a href="publish.html">publish demo</a>), reconstructed from a snapshot plus
+			merge-patch deltas via <code class="language-typescript">@moq/json</code>.
+		</p>
+		<p>
+			Don't want sound from a tile? It only downloads audio while active. Don't want video at all?
+			Remove the canvas and nothing is downloaded, decoded, or rendered.
+		</p>
+		<p>
+			This demo uses <code>http</code> so it's extra not secure: it insecurely fetches the certificate
+			hash and tells WebTransport to trust it. In production you'll need a real certificate (ex.
+			LetsEncrypt) and <code>https</code>.
+		</p>
 
-	<h3>Tips:</h3>
-	<p>
-		You can find the source code for this demo in <code>dev/web/src/index.html</code>.
-		Yes I know it's confusing when a command automatically opens a browser window.
-	</p>
-	<p>
-		This demo uses
-		<code>http</code> so it's extra not secure.
-		It works by insecurely fetching the certificate hash and telling WebTransport to trust it.
-		If you're going to run this code in production, you'll need a valid certificate (ex. LetsEncrypt) and use
-		<code>https</code>.
-	</p>
-	<hr />
-	<p>
-		You can instanciate the player via the provided <code class="language-html">&lt;moq-watch&gt;</code> <a
-			href="https://developer.mozilla.org/en-US/docs/Web/API/Web_components">Web Component</a>.
-		Either modify HTML attributes like <code class="language-html">&lt;moq-watch paused&gt;</code> or use the
-		Javascript API.
-		The Javascript API is still evolving, so I recommend the Web Component for now.
-	</p>
-	<p>
-		You can provide your own canvas element and use CSS to modify it.
-		Unfortunately, you can't use the HTML width/height attributes because of how <a
-			href="https://developer.mozilla.org/en-US/docs/Web/API/OffscreenCanvas">OffscreenCanvas</a>
-		works.
-		For example:
-	<pre><code class="language-html">&lt;moq-watch url=&quot;http://localhost:4443/&quot; name=&quot;bbb.hang&quot;&gt;
-	&lt;!-- Optionally provide a custom canvas element that we can style as needed --&gt;
-	&lt;canvas style=&quot;max-width: 100%; height: auto; border-radius: 4px;&quot;&gt;&lt;/canvas&gt;
-&lt;/moq-watch&gt;</code></pre>
-	</p>
-	<p>
-		The player sits in a resizable container; grab the right edge and drag.
-		<code class="language-html">&lt;moq-watch&gt;</code> monitors its own rendered size (scaled by
-		devicePixelRatio) and requests the smallest rendition that still fills the canvas.
-		The default bunny broadcast only has one rendition, so nothing will change.
-		Instead, open the <a href="publish.html">publish demo</a>, which uses the <code
-			class="language-html">simulcast</code> attribute to publish both `video/hd` and `video/sd`, and then <a
-			href="index.html?broadcast=me.hang">watch your own broadcast</a>.
-		Keep the Quality dropdown on Auto and resize away; the exact switch point depends on your display's
-		devicePixelRatio.
-		Switching is seamless: the player keeps decoding the old rendition until the new one catches up.
-	</p>
-	<p>
-		Don't want video? Don't provide a canvas!
-		It won't be downloaded, decoded, or rendered.
-		This includes when the video is paused, minimized, not in the DOM, or scrolled out of view.
-		wowee the bandwidth savings!
-	</p>
-	<p>
-		Use <code>visible="200px"</code> to pre-warm video before it scrolls into view (still suspended while the tab is hidden), or <code>visible="always"</code> to download it regardless of scroll position or tab visibility.
-	</p>
-	<p>
-		Audio may start muted because the browser can require user interaction before autoplaying.
-		You can unmute it by removing the <code>muted</code> property or calling <code
-			class="language-typescript">watch.audio.muted.set(false)</code> via the Javascript API.
-		And of course, nothing is downloaded while it's muted.
-	</p>
-	<hr />
-	<p>
-		The Javascript API is far more powerful and you can access properties directly:
-
-	<pre><code class="language-typescript">const watch = document.getElementById("watch");
-watch.audio.muted.set(true);
-</code></pre>
-	</p>
-
-	<p>
-		All of the properties are reactive using a hand-rolled signals library: `@moq/signals`.
-		You could use it... or you can use the provided `react` and `solid` helpers:
-
-	<pre><code class="language-typescript">
-import { Watch } from "@moq/hang";
-import solid from "@moq/signals/solid";
-
-function Volume(hang: Watch) {
-	// Switch to `react` if you're using React, duh.
-	const volume = solid(hang.volume);
-
-	// Return a div that displays the volume.
-	return &lt;div&gt;
-		Volume: {volume()}
-	&lt;/div&gt;
-}
-		</code></pre>
-	</p>
-	<p>
-		Using something more niche? There's also a <code class="language-typescript">subscribe()</code> method to
-		trigger a callback on change.
-
-	<pre><code class="language-typescript">
-const cleanup = hang.volume.subscribe((volume) => {
-	document.getElementById("volume-value").textContent = `${volume * 100}%`;
-});
-
-// Cleanup the subscription when no longer needed.
-cleanup();
-		</code></pre>
-	</p>
-	<hr>
-	<p>
-		The connection and broadcast are automatically reloaded.
-		Try running multiple terminals and kill the broadcast to see what happens.
-
-	<pre><code class="language-bash"># Run the relay and web server in another terminal or the background.
-just relay &
-just web &
-
-just pub bbb
-# Kill it with ctrl+C
-
-# Republish the same broadcast, the player will reconnect.
-just pub bbb
-		</code></pre>
-	</p>
-	<p>
-		If the Big Bunny is making you sick, you can use other inferior test videos or the <a
-			href="publish.html">publish demo</a>.
-		For example,
-		Try running <code class="language-bash">just pub tos</code> in a new terminal and then <a
-			href="index.html?broadcast=tos.hang" target="_blank">watch robots bang</a>.
-		This command uses ffmpeg to produce a fragmented MP4 file piped over stdout and then sent over the network.
-		Yeah it's pretty gross.
-	</p>
-	<p>
-		If you want to do things more efficiently, you can use the
-		<a href="https://doc.moq.dev/app/gstreamer">GStreamer plugin</a>.
-		It's pretty crude and doesn't handle all pipeline events; contributions welcome!
-	</p>
+		<h3>Other demos:</h3>
+		<ul>
+			<li><a href="publish.html">Publish a broadcast.</a></li>
+			<li><a href="stats.html">Relay stats dashboard.</a></li>
+		</ul>
+	</footer>
 </body>
 
 <script type="module" src="index.ts"></script>

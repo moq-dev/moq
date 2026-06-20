@@ -7,7 +7,7 @@
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
 	"scripts": {
-		"dev": "vite --open",
+		"dev": "vite",
 		"build": "vite build",
 		"check": "tsc --noEmit"
 	},
@@ -22,6 +22,7 @@
 		"@tailwindcss/vite": "^4.3.0",
 		"esbuild": "^0.28.0",
 		"highlight.js": "^11.11.1",
+		"open": "^10.2.0",
 		"solid-element": "^1.9.1",
 		"solid-js": "^1.9.13",
 		"tailwindcss": "^4.1.13",

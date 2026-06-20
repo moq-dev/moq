@@ -14,7 +14,7 @@ cluster: token
     	"just wait http://localhost:4443/certificate.sha256 && just leaf1" \
     	"just wait http://localhost:4444/certificate.sha256 && just pub bbb http://localhost:4444/demo?jwt=$(cat demo-cli.jwt)" \
     	"just wait http://localhost:4443/certificate.sha256 && just pub tos http://localhost:4443/demo?jwt=$(cat demo-cli.jwt)" \
-    	"just wait http://localhost:4445/certificate.sha256 && VITE_RELAY_URL=http://localhost:4445/demo?jwt=$(cat demo-web.jwt) bun --cwd ../web --bun vite --open"
+    	"just wait http://localhost:4445/certificate.sha256 && VITE_RELAY_URL=http://localhost:4445/demo?jwt=$(cat demo-web.jwt) bun --cwd ../web --bun vite"
 
 # Run a localhost root server, accepting connections from leaf nodes.
 root: (cert "root")

@@ -1,18 +1,535 @@
+/**
+ * MoQ watch inspector.
+ *
+ * We discover every broadcast announced under a prefix and render one tile per
+ * live broadcast on the left: a `<moq-watch-ui>` (player chrome) wrapping a
+ * `<moq-watch>` element. The right column shows live stats (catalog, decode,
+ * network, metadata) for the *active* tile only, read straight off that tile's
+ * `<moq-watch>` `broadcast`/`backend` signals.
+ *
+ * Audio policy: only the active tile plays sound. Clicking a tile makes it
+ * active (and is the user gesture that lets its audio start); every other tile
+ * is muted.
+ *
+ * The per-stream `meta.json` metadata track is read with
+ * `broadcast.subscribeTrack`, which runs for the active broadcast and follows it
+ * across reconnects, reusing the tile's own connection.
+ */
+
 import "./highlight";
-import "@moq/watch/ui";
-import MoqWatch from "@moq/watch/element";
+import "@moq/watch/element"; // defines <moq-watch>
+import "@moq/watch/ui"; // defines <moq-watch-ui>
+import { Hang, Json, Net, Signals } from "@moq/watch";
+import type MoqWatch from "@moq/watch/element";
 import MoqWatchSupport from "@moq/watch/support/element";
-import MoqDiscover from "./discover";
+import { bufferBars, formatBitrate, formatFps, graph } from "./viz";
 
-export { MoqDiscover, MoqWatch, MoqWatchSupport };
+export { MoqWatchSupport };
 
-const watch = document.querySelector("moq-watch") as MoqWatch | undefined;
-if (!watch) throw new Error("unable to find <moq-watch> element");
+// Injected by Vite (see justfile). Defaults to the local relay.
+const RELAY_URL = import.meta.env.VITE_RELAY_URL ?? "http://localhost:4443";
 
-// If query params are provided, use them.
-const urlParams = new URLSearchParams(window.location.search);
-const name = urlParams.get("broadcast") ?? urlParams.get("name");
-const url = urlParams.get("url");
+const $ = <T extends HTMLElement>(id: string): T => {
+	const el = document.getElementById(id);
+	if (!el) throw new Error(`missing #${id}`);
+	return el as T;
+};
 
-if (url) watch.url = url;
-if (name) watch.name = name;
+// Build a branded path from a user-typed prefix, tolerating a trailing slash
+// (we show "demo/" in the UI but the path is "demo").
+const prefixPath = (raw: string): Net.Path.Valid => Net.Path.from(raw.trim().replace(/\/+$/, ""));
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+// Empty prefix discovers every broadcast on the relay.
+const prefixInput = new Signals.Signal("");
+
+// Active broadcasts announced under the prefix (full paths), sorted.
+const broadcasts = new Signals.Signal<string[]>([]);
+
+// The active tile: the only one that plays audio. undefined => all muted.
+const active = new Signals.Signal<string | undefined>(undefined);
+
+// The active tile's <moq-watch> element, or undefined when nothing is active.
+// The right-hand stats panel reads everything off this.
+const activeWatch = new Signals.Signal<MoqWatch | undefined>(undefined);
+
+// The first metadata track the active catalog advertises (stable key so the
+// metadata subscription doesn't churn on every catalog frame), and its value.
+const metaTrack = new Signals.Signal<string | undefined>(undefined);
+const metaSignal = new Signals.Signal<unknown>(undefined);
+
+// The relay URL, editable at runtime. Both the discovery connection and every
+// tile's <moq-watch> follow it reactively.
+const relayUrl = new Signals.Signal<URL | undefined>(new URL(RELAY_URL));
+
+// Discovery connection (the tiles each open their own connection internally).
+const connection = new Net.Connection.Reload({ url: relayUrl, enabled: true });
+
+// ---------------------------------------------------------------------------
+// Per-broadcast tile (a <moq-watch-ui> in the left column)
+// ---------------------------------------------------------------------------
+
+interface WatchTile {
+	readonly name: string;
+	readonly el: HTMLElement;
+	readonly watch: MoqWatch;
+	close(): void;
+}
+
+function createTile(name: string): WatchTile {
+	const el = document.createElement("div");
+	el.className =
+		"rounded-lg overflow-hidden border border-neutral-800 bg-neutral-900 cursor-pointer transition-colors";
+
+	const label = document.createElement("div");
+	label.className =
+		"flex items-center gap-2 px-3 py-1.5 text-xs font-mono text-neutral-300 border-b border-neutral-800 truncate";
+	label.textContent = (Net.Path.stripPrefix(prefixPath(prefixInput.peek()), Net.Path.from(name)) ?? name) as string;
+
+	// Each tile is a <moq-watch-ui> (player chrome: play/pause, volume,
+	// fullscreen) wrapping a bare <moq-watch> that renders into its <canvas>
+	// child. We still drive audio on the inner <moq-watch> and read its stats off
+	// `broadcast`/`backend`, so the shared inspector panel reflects the active tile.
+	const watch = document.createElement("moq-watch") as MoqWatch;
+	watch.name = name;
+	watch.reload = true; // wait for (re)announcement; survives publisher restarts
+	watch.muted = true; // unmuted only while active (see below)
+	// Default to a fixed 100ms jitter buffer (instead of adaptive "real-time") so
+	// the latency visualization has something to show. Drag it in the panel.
+	watch.setAttribute("latency", "100");
+	const canvas = document.createElement("canvas");
+	canvas.style.cssText = "width: 100%; height: auto;";
+	watch.appendChild(canvas);
+
+	const player = document.createElement("moq-watch-ui");
+	player.appendChild(watch);
+	el.append(label, player);
+
+	// Clicking anywhere in the tile makes it the active audio source. The click
+	// doubles as the user gesture browsers require before audio can start.
+	el.addEventListener("pointerdown", () => active.set(name));
+
+	const effects = new Signals.Effect();
+
+	// Follow the editable relay URL in its own effect. Keeping this separate from
+	// the active-state effect below is important: `watch.url =` reassigns a fresh
+	// URL into the connection, which reconnects and flashes the canvas black. We
+	// only want that when the URL actually changes, not on every active switch.
+	effects.run((effect) => {
+		watch.url = effect.get(relayUrl);
+	});
+
+	// Active state: only toggle audio + the active styling, so switching tiles
+	// keeps the video playing.
+	effects.run((effect) => {
+		const isActive = effect.get(active) === name;
+		el.classList.toggle("border-emerald-500", isActive);
+		el.classList.toggle("border-neutral-800", !isActive);
+		watch.muted = !isActive;
+	});
+
+	return {
+		name,
+		el,
+		watch,
+		close() {
+			effects.close();
+			el.remove(); // disconnects <moq-watch> -> stops its connection
+		},
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Broadcast discovery
+// ---------------------------------------------------------------------------
+//
+// Subscribe to announcements under the prefix and keep a live set of active
+// broadcasts. `announced.next()` drains a queue, so we track membership
+// ourselves: active=true adds the path, active=false removes it.
+const discovery = new Signals.Effect();
+discovery.run((effect) => {
+	const conn = effect.get(connection.established);
+	broadcasts.set([]);
+	if (!conn) return;
+
+	const announced = conn.announced(prefixPath(effect.get(prefixInput)));
+	effect.cleanup(() => announced.close());
+
+	const live = new Set<string>();
+	effect.spawn(async () => {
+		for (;;) {
+			const entry = await Promise.race([effect.cancel, announced.next()]);
+			if (!entry) break;
+			// Only `.hang` broadcasts are watchable streams; this skips the relay's
+			// `.stats` broadcast (see the stats dashboard demo for that one).
+			if (!entry.path.endsWith(".hang")) continue;
+			if (entry.active) live.add(entry.path);
+			else live.delete(entry.path);
+			broadcasts.set([...live].sort());
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Tile lifecycle: reconcile against discovery
+// ---------------------------------------------------------------------------
+//
+// A persistent map outside the effect so re-runs reconcile (add new, close gone)
+// rather than tearing every tile down.
+const tiles = new Map<string, WatchTile>();
+const playersContainer = $("players");
+
+// Recompute the active tile's element from the current selection + tile map.
+// Called from both the reconcile effect (tiles changed) and the selection effect
+// (active changed) so `activeWatch` is never left pointing at a stale or
+// not-yet-created tile.
+function syncActiveWatch(): void {
+	const name = active.peek();
+	activeWatch.set(name ? tiles.get(name)?.watch : undefined);
+}
+
+const tilesEffect = new Signals.Effect();
+tilesEffect.run((effect) => {
+	const list = effect.get(broadcasts);
+	const live = new Set(list);
+
+	for (const [name, t] of tiles) {
+		if (!live.has(name)) {
+			t.close();
+			tiles.delete(name);
+		}
+	}
+	for (const name of list) {
+		if (!tiles.has(name)) tiles.set(name, createTile(name));
+	}
+	// Keep DOM order matching the sorted list (append moves existing nodes).
+	for (const name of list) {
+		const t = tiles.get(name);
+		if (t) playersContainer.append(t.el);
+	}
+
+	$("players-empty").hidden = list.length > 0;
+	syncActiveWatch();
+});
+
+// ---------------------------------------------------------------------------
+// Reactive UI
+// ---------------------------------------------------------------------------
+
+const ui = new Signals.Effect();
+
+// Relay URL is editable: on commit, reconnect discovery + every tile to it.
+const relayEl = $<HTMLInputElement>("relay-url");
+relayEl.value = RELAY_URL;
+relayEl.addEventListener("change", () => {
+	try {
+		relayUrl.set(new URL(relayEl.value.trim()));
+	} catch {
+		// Revert invalid input to the last good URL.
+		relayEl.value = relayUrl.peek()?.toString() ?? RELAY_URL;
+	}
+});
+
+const prefixEl = $<HTMLInputElement>("prefix");
+prefixEl.value = prefixInput.peek();
+prefixEl.addEventListener("input", () => prefixInput.set(prefixEl.value));
+
+// Keep the active tile valid: auto-pick the first broadcast and switch away from
+// one that disappears, but never steal focus once the user has chosen.
+ui.run((effect) => {
+	const list = effect.get(broadcasts);
+	const cur = active.peek();
+	if (cur && list.includes(cur)) return;
+	active.set(list[0]);
+});
+
+// Point `activeWatch` at the selected tile's element whenever the selection
+// changes (tile creation is handled by `tilesEffect`, also via syncActiveWatch).
+ui.run((effect) => {
+	effect.get(active);
+	syncActiveWatch();
+});
+
+// Connection pill: Connected / Connecting / Disconnected.
+ui.run((effect) => {
+	const status = effect.get(connection.status); // connecting | connected | disconnected
+	const label = status.charAt(0).toUpperCase() + status.slice(1);
+	setPill(
+		"conn-status",
+		"conn-text",
+		label,
+		status === "connected" ? "ok" : status === "connecting" ? "wait" : "bad",
+	);
+});
+
+// Broadcast pill: Online when the active broadcast is live, else Loading/Offline.
+ui.run((effect) => {
+	const watch = effect.get(activeWatch);
+	const stream = watch ? effect.get(watch.broadcast.status) : "offline"; // offline | loading | live
+	if (stream === "live") setPill("bcast-status", "bcast-text", "Online", "ok");
+	else if (watch && stream === "loading") setPill("bcast-status", "bcast-text", "Loading", "wait");
+	else setPill("bcast-status", "bcast-text", "Offline", "bad");
+});
+
+// Video section: only shown when the active catalog has a video section. Inlines
+// the video track config from the catalog plus live decode stats.
+ui.run((effect) => {
+	const watch = effect.get(activeWatch);
+	const catalog = watch ? effect.get(watch.broadcast.catalog) : undefined;
+	const video = catalog?.video;
+	const section = $("video-section");
+	if (!watch || !video) {
+		section.hidden = true;
+		return;
+	}
+	section.hidden = false;
+
+	const stalled = effect.get(watch.backend.video.stalled);
+	const live = effect.get(watch.broadcast.status) === "live";
+	const r = Object.values(video.renditions)[0];
+
+	const resolution =
+		r?.codedWidth && r?.codedHeight
+			? `${r.codedWidth}×${r.codedHeight}`
+			: video.display
+				? `${video.display.width}×${video.display.height}`
+				: undefined;
+
+	renderRows($("video-info"), [
+		["codec", r?.codec],
+		["resolution", resolution],
+		["framerate", r?.framerate ? `${r.framerate} fps` : undefined],
+		["bitrate", r?.bitrate ? `${Math.round(r.bitrate / 1000)} kbps` : undefined],
+		// A stall is mid-stream starvation, not "offline" - only surface it when live.
+		["stalled", live && stalled ? "⚠️ recovering" : undefined],
+	]);
+});
+
+// Audio section: only shown when the active catalog has an audio section.
+ui.run((effect) => {
+	const watch = effect.get(activeWatch);
+	const catalog = watch ? effect.get(watch.broadcast.catalog) : undefined;
+	const audio = catalog?.audio;
+	const section = $("audio-section");
+	if (!watch || !audio) {
+		section.hidden = true;
+		return;
+	}
+	section.hidden = false;
+
+	const stats = effect.get(watch.backend.audio.stats);
+	const a = Object.values(audio.renditions)[0];
+	renderRows($("audio-info"), [
+		["codec", a?.codec],
+		["sample rate", a?.sampleRate ? `${a.sampleRate} Hz` : undefined],
+		["channels", a?.numberOfChannels ? String(a.numberOfChannels) : undefined],
+		["bitrate", a?.bitrate ? `${Math.round(a.bitrate / 1000)} kbps` : undefined],
+		["samples decoded", stats?.sampleCount != null ? String(stats.sampleCount) : undefined],
+	]);
+});
+
+// Network section: only shown while connected to the relay with an active tile.
+ui.run((effect) => {
+	const connected = effect.get(connection.status) === "connected";
+	const watch = effect.get(activeWatch);
+	const section = $("network-section");
+	if (!connected || !watch) {
+		section.hidden = true;
+		return;
+	}
+	section.hidden = false;
+
+	const video = effect.get(watch.backend.video.stats);
+	const audio = effect.get(watch.backend.audio.stats);
+	const bytes = (video?.bytesReceived ?? 0) + (audio?.bytesReceived ?? 0);
+	renderRows($("network-info"), [["bytes received", bytes > 0 ? formatBytes(bytes) : undefined]]);
+});
+
+// Raw catalog (collapsible) - only rendered once the active catalog arrives.
+ui.run((effect) => {
+	const watch = effect.get(activeWatch);
+	const catalog = watch ? effect.get(watch.broadcast.catalog) : undefined;
+	const section = $("catalog-raw-section");
+	if (!catalog) {
+		section.hidden = true;
+		return;
+	}
+	section.hidden = false;
+	$("catalog-raw").textContent = JSON.stringify(catalog, null, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Metadata track
+// ---------------------------------------------------------------------------
+//
+// The publish demo serves a `meta.json` track *within* the broadcast and
+// *advertises* the available `.json` tracks in the catalog's `metadata` section.
+// We track the first advertised track name as a stable key (so the subscription
+// doesn't churn on every catalog frame) and subscribe to it for the active
+// broadcast only.
+ui.run((effect) => {
+	const watch = effect.get(activeWatch);
+	const catalog = watch ? (effect.get(watch.broadcast.catalog) as { metadata?: unknown } | undefined) : undefined;
+	const list = Array.isArray(catalog?.metadata)
+		? catalog.metadata.filter((t): t is string => typeof t === "string")
+		: [];
+	const next = list[0];
+	if (next !== metaTrack.peek()) metaTrack.set(next);
+});
+
+const metaEffect = new Signals.Effect();
+metaEffect.run((effect) => {
+	const watch = effect.get(activeWatch);
+	const trackName = effect.get(metaTrack);
+	metaSignal.set(undefined); // never show stale metadata across streams/catalogs
+	if (!watch || !trackName) return;
+
+	// subscribeTrack runs `consume` for the active tile's broadcast and follows it
+	// across reconnects, reusing the <moq-watch>'s own connection. The
+	// Json.Consumer reconstructs the value from the snapshot (frame 0) +
+	// merge-patch deltas, the same encoding @moq/hang uses for the catalog itself.
+	const unsubscribe = watch.broadcast.subscribeTrack(trackName, Hang.Catalog.PRIORITY.catalog, (track, e) => {
+		const consumer = new Json.Consumer<unknown>(track);
+		e.spawn(async () => {
+			for (;;) {
+				const nextVal = await Promise.race([e.cancel, consumer.next()]);
+				if (nextVal === undefined) break;
+				metaSignal.set(nextVal);
+			}
+		});
+	});
+	effect.cleanup(() => unsubscribe());
+});
+
+// Metadata view - only shown when the active broadcast is live AND has actually
+// received a frame (no placeholder text while offline).
+ui.run((effect) => {
+	const meta = effect.get(metaSignal);
+	const watch = effect.get(activeWatch);
+	const live = watch ? effect.get(watch.broadcast.status) === "live" : false;
+	const section = $("metadata-section");
+	const pre = $("metadata");
+	if (live && meta !== undefined) {
+		section.hidden = false;
+		pre.textContent = JSON.stringify(meta, null, 2);
+	} else {
+		section.hidden = true;
+		pre.textContent = "";
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Live graphs (bitrate / frame rate / RTT) + buffer visualization
+// ---------------------------------------------------------------------------
+//
+// These are stateful DOM elements, so we build them once and feed them from a
+// single timer that samples the *active* tile, rather than rebuilding per render.
+
+const viz = new Signals.Effect();
+
+const bitrateGraph = graph(viz, "Bitrate", { color: "#a855f7", format: formatBitrate });
+const fpsGraph = graph(viz, "Frame rate", { color: "#facc15", format: formatFps });
+$("video-graphs").append(bitrateGraph.el, fpsGraph.el);
+
+const rttGraph = graph(viz, "Round trip", { color: "#38bdf8", format: (v) => `${Math.round(v)} ms` });
+$("network-graphs").append(rttGraph.el);
+
+// Sample the active tile's byte/frame counters and push per-second rates.
+let prevWatch: MoqWatch | undefined;
+let prev = { frames: 0, bytes: 0, when: performance.now() };
+viz.interval(() => {
+	const watch = activeWatch.peek();
+	const now = performance.now();
+
+	// Reset baselines when switching tiles (or when idle) so the first sample
+	// isn't a huge spike from the counter difference.
+	if (watch !== prevWatch || !watch) {
+		prevWatch = watch;
+		prev = { frames: 0, bytes: 0, when: now };
+		bitrateGraph.push(undefined);
+		fpsGraph.push(undefined);
+		rttGraph.push(undefined);
+		return;
+	}
+
+	const v = watch.backend.video.stats.peek();
+	const a = watch.backend.audio.stats.peek();
+	const bytes = (v?.bytesReceived ?? 0) + (a?.bytesReceived ?? 0);
+	const frames = v?.frameCount ?? 0;
+	const elapsed = now - prev.when;
+
+	let bitrate: number | undefined;
+	let fps: number | undefined;
+	if (elapsed > 0 && prev.bytes > 0) {
+		const db = bytes - prev.bytes;
+		if (db >= 0) bitrate = (db * 8 * 1000) / elapsed;
+		const df = frames - prev.frames;
+		if (df >= 0) fps = (df * 1000) / elapsed;
+	}
+	bitrateGraph.push(bitrate);
+	fpsGraph.push(fps);
+
+	const conn = watch.connection.established.peek();
+	const rtt = conn?.rtt?.peek() as unknown as number | undefined;
+	rttGraph.push(rtt && rtt > 0 ? rtt : undefined);
+
+	prev = { frames, bytes, when: now };
+}, 250);
+
+// Rebuild the buffer visualization whenever the active tile changes; it binds to
+// one element and runs its own animation loop until its child effect closes.
+ui.run((effect) => {
+	const watch = effect.get(activeWatch);
+	const live = watch ? effect.get(watch.broadcast.status) === "live" : false;
+	const section = $("buffer-section");
+	const host = $("buffer-viz");
+	host.replaceChildren();
+	if (!watch || !live) {
+		section.hidden = true;
+		return;
+	}
+	section.hidden = false;
+	const child = new Signals.Effect();
+	effect.cleanup(() => child.close());
+	host.append(bufferBars(child, watch));
+});
+
+// ---------------------------------------------------------------------------
+// Small render helpers
+// ---------------------------------------------------------------------------
+
+function setPill(statusId: string, textId: string, label: string, state: "ok" | "wait" | "bad"): void {
+	$(textId).textContent = label;
+	const dot = $(statusId).querySelector(".dot") as HTMLElement;
+	const color = state === "ok" ? "bg-emerald-500" : state === "wait" ? "bg-amber-400" : "bg-red-500";
+	dot.className = `dot w-2 h-2 rounded-full ${color}`;
+}
+
+function kv(key: string, value: string): HTMLElement {
+	const row = document.createElement("div");
+	row.className = "flex justify-between gap-4 text-sm";
+	const k = document.createElement("span");
+	k.className = "text-neutral-400";
+	k.textContent = key;
+	const v = document.createElement("span");
+	v.className = "font-mono text-neutral-100 text-right break-all";
+	v.textContent = value;
+	row.append(k, v);
+	return row;
+}
+
+// Render key/value rows, skipping any whose value is undefined (we don't show a
+// stat we don't know).
+function renderRows(container: HTMLElement, rows: [string, string | undefined][]): void {
+	const known = rows.filter((r): r is [string, string] => r[1] !== undefined);
+	container.replaceChildren(...known.map(([k, v]) => kv(k, v)));
+}
+
+function formatBytes(n: number): string {
+	if (n < 1024) return `${n} B`;
+	if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+	return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
