@@ -1,12 +1,19 @@
 # moq-srt
 
-SRT contribution ingest gateway for Media over QUIC.
+SRT gateway for Media over QUIC, both directions.
 
-SRT carries MPEG-TS. This crate runs an SRT listener, demuxes each connection's
-transport stream with [`moq-mux`](../moq-mux), and publishes the result into a
-MoQ origin as ordinary broadcasts. It's the contribution-ingest analogue of
-`moq-hls`'s import and `moq-rtc`'s WHIP. Pure Rust: SRT is provided by
-`srt-tokio`, with no libsrt or ffmpeg dependency.
+SRT carries MPEG-TS. This crate runs an SRT listener and routes each connection
+by its stream id `m=` mode:
+
+- `m=publish` (the default): ingest. Demux the connection's transport stream
+  with [`moq-mux`](../moq-mux) and publish it into a MoQ origin as an ordinary
+  broadcast. The contribution-ingest analogue of `moq-hls`'s import and
+  `moq-rtc`'s WHIP.
+- `m=request`: egress. Re-mux a broadcast from the origin back to MPEG-TS and
+  stream it to the caller, so `vlc srt://...` and `ffmpeg -i srt://...` can play
+  any broadcast the origin carries (H.264/H.265 video, AAC/AC-3/MP2 audio).
+
+Pure Rust: SRT is provided by `srt-tokio`, with no libsrt or ffmpeg dependency.
 
 ## Library
 
@@ -56,23 +63,32 @@ moq-srt publish --relay https://relay.example.com \
 Feed either mode with any SRT source:
 
 ```bash
-# Lands at broadcast `live/cam0`.
+# Publish: lands at broadcast `live/cam0`.
 ffmpeg -re -i input.mp4 -c copy -f mpegts \
   'srt://127.0.0.1:9000?streamid=#!::r=cam0,m=publish'
+
+# Request: play `live/cam0` back out as MPEG-TS.
+ffplay 'srt://127.0.0.1:9000?streamid=#!::r=cam0,m=request'
+vlc    'srt://127.0.0.1:9000?streamid=#!::r=cam0,m=request'
 ```
+
+A request waits for the broadcast to be announced, so a player may connect before
+the publisher does.
 
 ## Routing
 
-Each connection's broadcast path comes from its SRT stream id:
+Each connection's broadcast path and direction come from its SRT stream id:
 
-- Standard form `#!::r=<resource>,m=publish` -> `<resource>`.
-- Otherwise the raw stream id (e.g. OBS-style `app/key`).
+- Standard form `#!::r=<resource>,m=<mode>` -> `<resource>`, with `m=request`
+  selecting egress and anything else (including absent) selecting ingest.
+- Otherwise the raw stream id (e.g. OBS-style `app/key`), always ingest.
 
 `--srt-prefix` is prepended to namespace a listener's streams. First publisher on
-a path wins; a second connection to the same path is rejected.
+a path wins; a second publish of the same path is rejected. Requests don't claim
+a path, so any number of players can pull the same broadcast.
 
 ## Auth
 
 The listener is currently unauthenticated: anyone who can reach the UDP port can
-publish. Gate it with a host firewall or a private network. SRT passphrase
-encryption and token checks are the planned next step.
+publish or request any broadcast. Gate it with a host firewall or a private
+network. SRT passphrase encryption and token checks are the planned next step.

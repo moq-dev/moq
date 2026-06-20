@@ -1,14 +1,17 @@
 //! `moq-srt` binary.
 //!
-//! Ingests SRT (MPEG-TS) and exposes it over MoQ two ways:
+//! Runs an SRT gateway (MPEG-TS in via `m=publish`, out via `m=request`) and
+//! connects it to MoQ two ways:
 //!
 //! - `serve` runs a local QUIC/WebTransport server so subscribers connect
-//!   straight to this binary (no separate relay needed).
+//!   straight to this binary (no separate relay needed). Ingested broadcasts are
+//!   also requestable back out over SRT.
 //! - `publish` forwards every ingested broadcast out to a remote relay over
-//!   WebTransport, like `moq-hls import` / `moq-rtc` WHIP.
+//!   WebTransport, like `moq-hls import` / `moq-rtc` WHIP. SRT requests are
+//!   served from the local origin (broadcasts ingested by this same process).
 //!
-//! A relay that wants in-process ingest should instead depend on the `moq-srt`
-//! library and call `moq_srt::run` against its own origin.
+//! A relay that wants an in-process gateway should instead depend on the
+//! `moq-srt` library and call `moq_srt::run` against its own origin.
 
 mod serve;
 mod web;
