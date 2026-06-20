@@ -362,7 +362,80 @@ publishes the broadcast into a session, so the archive is a composable link in t
 (relay -> archive -> origin) rather than the owner of the track. `upstream` is the miss-
 fallback handle and, when recording the same track, the source the writer drains. Per the repo
 convention it is `impl Into<Option<TrackConsumer>>`, so callers pass the consumer or `None`.
-Folding this into `moq_net` directly is the open architectural question noted above.
+
+## Usage mockups
+
+These compile-in-spirit sketches answer "how is this actually called?" and surface a real gap:
+the per-track API above serves a **standalone / VOD** node cleanly, but `moq-relay` has no
+seam to use it, which is the argument for the moq-net integration below.
+
+### A. Standalone VOD node (works with the per-track API)
+
+A node that recorded a broadcast earlier and now serves it back. Here the archive *is* the
+publisher: the live broadcast is gone, so there is no path collision and the per-track API
+fits. Recording is symmetric (`origin.consume()` -> `BroadcastConsumer::track` ->
+`Archive::record`).
+
+```rust
+let archive = Archive::new(config)?;
+
+// Publish a broadcast; its tracks answer FETCH from storage.
+let broadcast = BroadcastInfo::new().produce();
+origin.publish_broadcast("vod/room-alice", broadcast.consume())?;
+
+// For each track a downstream subscriber asks for, serve it from storage.
+let mut tracks = broadcast.dynamic();
+while let Ok(request) = tracks.requested_track().await {
+    let producer = request.accept(TrackInfo::default())?;   // caller owns the producer
+    let requests = producer.dynamic();                      // archive gets the request side
+    tokio::spawn(archive.serve(requests, None));            // no upstream: pure VOD
+}
+```
+
+### B. Why `moq-relay` cannot use the per-track API as-is
+
+The relay is built entirely around a single `OriginProducer` (`Cluster::origin`). Remote
+publishers `publish_broadcast` into it; downstream sessions read `origin.consume()`. The relay
+code never constructs a `TrackProducer` and never calls `.dynamic()` on a track. That happens
+*inside* moq-net's session fan-out (`lite::subscriber` / `ietf::subscriber`), which creates the
+per-track producer and its `TrackDynamic` to forward a downstream cache-miss FETCH upstream.
+
+So there is no point in `moq-relay` where you could write `archive.serve(track_dynamic, ...)`:
+the relay operates one layer up, at the broadcast/origin granularity, and the track objects the
+archive needs only exist transiently deep inside moq-net. Wiring the per-track API into the
+relay would mean interposing on every track of every forwarded broadcast (republishing each
+broadcast through an archive-owned `BroadcastProducer`, re-`accept`ing every `requested_track`,
+re-`subscribe`ing upstream), i.e. reimplementing the relay's fan-out around the archive. That
+is the "wire a fallback chain" cost, and it is large.
+
+### C. The moq-net seam (what actually makes the relay one line)
+
+Give moq-net a pluggable cache backend that it consults on a miss and notifies on eviction,
+attached where it already owns the per-track RAM cache (the origin, flowing down to each
+`TrackProducer`). The archive implements the trait; the relay attaches it once.
+
+```rust
+// moq-net (new): the one hook the relay can't get from outside is *when* a group is evicted.
+pub trait Cache: Send + Sync + 'static {
+    /// A group aged out of the RAM cache. Persist it (called with the finished group).
+    fn store(&self, track: &TrackInfo, group: GroupConsumer);
+
+    /// A consumer fetched a group not in RAM. Produce it from storage into `request`,
+    /// or return it unserved so moq-net falls through to the upstream wire FETCH.
+    async fn fetch(&self, track: &TrackInfo, request: GroupRequest);
+}
+
+impl moq_net::Cache for Archive { /* store -> writer, fetch -> reader */ }
+
+// moq-relay: the entire integration.
+let origin = Origin::random().produce().with_cache(archive);
+```
+
+Now the relay keeps working at the origin level, the per-track plumbing stays inside moq-net,
+and the archive transparently catches evictions (the natural flush trigger) and serves misses
+before they cost an upstream round-trip. This is the recommended shape; it makes the public
+`Archive` a `Cache` impl plus the standalone `record`/`serve` helpers from scenario A, rather
+than the chain wiring. Decision needed before the API is locked (see open question 1).
 
 ## Binary
 
