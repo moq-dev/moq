@@ -14,12 +14,7 @@
 	<!-- Only show the support banner when a required feature is missing. -->
 	<moq-publish-support show="warning"></moq-publish-support>
 
-	<h1 class="text-2xl font-bold mb-1">MoQ Publish</h1>
-	<p class="text-neutral-400 text-sm mb-4 max-w-3xl">
-		The <code>&lt;moq-publish-ui&gt;</code> player owns capture, preview, go-live, and mute &ndash; pick a
-		source in its controls to start. The side panel drives the encoder settings (left at "auto" by
-		default), with the negotiated value shown to the right of each control once live.
-	</p>
+	<h1 class="text-2xl font-bold mb-4">MoQ Publish</h1>
 
 	<div class="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-4 items-start">
 		<!-- Left: preview + player chrome. -->
@@ -38,10 +33,6 @@
 					<canvas style="width: 100%; height: auto; border-radius: 4px;"></canvas>
 				</moq-publish>
 			</moq-publish-ui>
-			<label class="mt-2 flex items-center gap-2 text-xs text-neutral-400">
-				<input id="encoded-preview" type="checkbox">
-				Encoded preview <span class="text-neutral-500">(decode a copy of the stream &ndash; see codec artifacts)</span>
-			</label>
 		</section>
 
 		<!-- Right: encoder settings + metadata + live graphs. -->
@@ -66,6 +57,10 @@
 				<h3 class="text-sm font-semibold text-neutral-300 flex items-center gap-2">
 					Video encode <span class="text-[10px] px-1.5 py-0.5 rounded bg-sky-900 text-sky-200 font-medium">WebCodecs</span>
 				</h3>
+				<label class="flex items-center gap-2 text-xs text-neutral-400">
+					<input id="encoded-preview" type="checkbox">
+					Encoded preview <span class="text-neutral-500">(decode a copy of the stream)</span>
+				</label>
 				<label class="block text-xs text-neutral-400">
 					Codec
 					<div class="mt-1 flex items-center gap-2">
