@@ -59,6 +59,24 @@ ffmpeg -re -i input.mp4 -c copy -f flv rtmp://127.0.0.1:1935/live/cam0
 - `--rtmp-prefix`: prepended to every broadcast path, to namespace a listener's
   streams (e.g. `live/`).
 
+### RTMPS flags
+
+RTMPS (RTMP over TLS, `rtmps://`) is served on a second listener alongside
+plaintext RTMP, sharing the same `--rtmp-prefix`:
+
+- `--rtmps-listen`: TCP bind address for the RTMPS server (off unless set). RTMPS
+  has no well-known port; 443 or a custom one are common.
+- `--rtmps-tls-cert` / `--rtmps-tls-key`: PEM certificate chain and key.
+- `--rtmps-tls-generate <hostname>`: or generate a throwaway self-signed cert
+  (testing only; clients must disable verification).
+
+```bash
+moq-rtmp serve --server-bind [::]:443 --tls-generate localhost \
+  --rtmp-listen 0.0.0.0:1935 \
+  --rtmps-listen 0.0.0.0:1936 --rtmps-tls-cert cert.pem --rtmps-tls-key key.pem \
+  --rtmp-prefix live/
+```
+
 ## Routing
 
 Each connection's broadcast path is `<app>/<key>` from the RTMP app and stream
@@ -80,6 +98,10 @@ connection to the same path is rejected.
   origin for the unauthenticated case, or use `Server` / `Request` to plug in the
   relay's existing JWT/path auth and scope the origin per token. Either way the
   media is published locally with no extra hop.
+- **RTMPS.** Embedders can terminate TLS themselves: set `Config::tls` (or
+  `Server::with_tls`) with a `rustls::ServerConfig`, or accept the connection and
+  finish the TLS handshake by hand and hand the stream to `moq_rtmp::accept_stream`
+  (which works over any `AsyncRead + AsyncWrite` transport).
 - **Codecs.** FLAC and MP3 enhanced-audio payloads are dropped (no MoQ catalog
   codec); everything else (H.264/HEVC/AV1/VP9 video, AAC/Opus/AC-3/E-AC-3 audio)
   is supported.
