@@ -430,16 +430,20 @@ ui.run((effect) => {
 
 const viz = new Signals.Effect();
 
+// Video bitrate is video-only; the Network "Throughput" graph is video + audio.
 const bitrateGraph = graph(viz, "Bitrate", { color: "#a855f7", format: formatBitrate });
 const fpsGraph = graph(viz, "Frame rate", { color: "#facc15", format: formatFps });
 $("video-graphs").append(bitrateGraph.el, fpsGraph.el);
 
+const throughputGraph = graph(viz, "Throughput", { color: "#34d399", format: formatBitrate });
 const rttGraph = graph(viz, "Round trip", { color: "#38bdf8", format: (v) => `${Math.round(v)} ms` });
-$("network-graphs").append(rttGraph.el);
+$("network-graphs").append(throughputGraph.el, rttGraph.el);
+
+const allGraphs = [bitrateGraph, fpsGraph, throughputGraph, rttGraph];
 
 // Sample the active tile's byte/frame counters and push per-second rates.
 let prevWatch: MoqWatch | undefined;
-let prev = { frames: 0, bytes: 0, when: performance.now() };
+let prev = { frames: 0, videoBytes: 0, totalBytes: 0, when: performance.now() };
 viz.interval(() => {
 	const watch = activeWatch.peek();
 	const now = performance.now();
@@ -448,35 +452,36 @@ viz.interval(() => {
 	// isn't a huge spike from the counter difference.
 	if (watch !== prevWatch || !watch) {
 		prevWatch = watch;
-		prev = { frames: 0, bytes: 0, when: now };
-		bitrateGraph.push(undefined);
-		fpsGraph.push(undefined);
-		rttGraph.push(undefined);
+		prev = { frames: 0, videoBytes: 0, totalBytes: 0, when: now };
+		for (const g of allGraphs) g.push(undefined);
 		return;
 	}
 
 	const v = watch.backend.video.stats.peek();
 	const a = watch.backend.audio.stats.peek();
-	const bytes = (v?.bytesReceived ?? 0) + (a?.bytesReceived ?? 0);
+	const videoBytes = v?.bytesReceived ?? 0;
+	const totalBytes = videoBytes + (a?.bytesReceived ?? 0);
 	const frames = v?.frameCount ?? 0;
 	const elapsed = now - prev.when;
 
+	const perSec = (delta: number) => (delta >= 0 ? (delta * 1000) / elapsed : undefined);
 	let bitrate: number | undefined;
+	let throughput: number | undefined;
 	let fps: number | undefined;
-	if (elapsed > 0 && prev.bytes > 0) {
-		const db = bytes - prev.bytes;
-		if (db >= 0) bitrate = (db * 8 * 1000) / elapsed;
-		const df = frames - prev.frames;
-		if (df >= 0) fps = (df * 1000) / elapsed;
+	if (elapsed > 0 && prev.totalBytes > 0) {
+		bitrate = perSec((videoBytes - prev.videoBytes) * 8);
+		throughput = perSec((totalBytes - prev.totalBytes) * 8);
+		fps = perSec(frames - prev.frames);
 	}
 	bitrateGraph.push(bitrate);
 	fpsGraph.push(fps);
+	throughputGraph.push(throughput);
 
 	const conn = watch.connection.established.peek();
 	const rtt = conn?.rtt?.peek() as unknown as number | undefined;
 	rttGraph.push(rtt && rtt > 0 ? rtt : undefined);
 
-	prev = { frames, bytes, when: now };
+	prev = { frames, videoBytes, totalBytes, when: now };
 }, 250);
 
 // Rebuild the buffer visualization whenever the active tile changes; it binds to
