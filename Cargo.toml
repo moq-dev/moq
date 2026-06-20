@@ -18,6 +18,7 @@ members = [
     "rs/moq-net",
     "rs/moq-relay",
     "rs/moq-rtc",
+    "rs/moq-rtmp",
     "rs/moq-srt",
     "rs/moq-token",
     "rs/moq-token-cli",
@@ -43,6 +44,7 @@ default-members = [
     "rs/moq-native",
     "rs/moq-relay",
     "rs/moq-rtc",
+    "rs/moq-rtmp",
     "rs/moq-srt",
     "rs/moq-token",
     "rs/moq-token-cli",
@@ -66,6 +68,7 @@ moq-msf = { version = "0.2", path = "rs/moq-msf" }
 moq-mux = { version = "0.5", path = "rs/moq-mux" }
 moq-native = { version = "0.17", path = "rs/moq-native", default-features = false }
 moq-net = { version = "0.1", path = "rs/moq-net" }
+moq-rtmp = { version = "0.0.1", path = "rs/moq-rtmp", default-features = false }
 moq-token = { version = "0.6", path = "rs/moq-token" }
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 moq-vaapi = "0.0.2"

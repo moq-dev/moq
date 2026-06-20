@@ -1,27 +1,61 @@
 //! FLV muxer.
 //!
 //! [`Export`] subscribes to a MoQ broadcast and produces a single FLV byte
-//! stream: the file header, an AVC and/or AAC sequence header, then one tag per
-//! media frame interleaved by timestamp. Frames flow through [`ExportSource`],
-//! which normalizes H.264 to length-prefixed NALU plus a resolved avcC (parsing
-//! inline avc3 parameter sets when needed) and hands audio through with its
-//! `AudioSpecificConfig`. FLV carries a single video and a single audio stream,
-//! so only the first rendition of each kind is muxed; extra renditions and any
-//! non-AVC/AAC codec are rejected.
+//! stream: the file header, the video/audio sequence headers, then one tag per
+//! media frame interleaved by timestamp. Legacy H.264 + AAC are muxed as the
+//! classic CodecID tags; HEVC, AV1, VP9, Opus, AC-3, and E-AC-3 are muxed as the
+//! enhanced-RTMP (E-RTMP) FourCC payloads. Frames flow through [`ExportSource`],
+//! which normalizes H.264/H.265 to length-prefixed NALU plus a resolved
+//! avcC/hvcC (parsing inline avc3/hev1 parameter sets when needed) and hands the
+//! other codecs through unchanged. FLV carries a single video and a single audio
+//! stream, so only the first rendition of each kind is muxed; extra renditions
+//! and any unsupported codec are rejected.
 
 use std::task::Poll;
 use std::time::Duration;
 
 use anyhow::Context;
 use bytes::{BufMut, Bytes, BytesMut};
-use hang::catalog::{AudioCodec, Catalog, Container, VideoCodec};
+use hang::catalog::{AV1, AudioCodec, Catalog, Container, VideoCodec};
 
 use super::{
-	AAC_AUDIO_TAG_HEADER, AAC_RAW, AAC_SEQUENCE_HEADER, AVC_NALU, AVC_SEQUENCE_HEADER, FRAME_TYPE_INTER,
-	FRAME_TYPE_KEY, TAG_AUDIO, TAG_HEADER_LEN, TAG_VIDEO, VIDEO_CODEC_AVC,
+	AAC_AUDIO_TAG_HEADER, AAC_RAW, AAC_SEQUENCE_HEADER, AUDIO_FORMAT_EX, AUDIO_PACKET_CODED_FRAMES,
+	AUDIO_PACKET_SEQUENCE_START, AVC_NALU, AVC_SEQUENCE_HEADER, FRAME_TYPE_INTER, FRAME_TYPE_KEY, TAG_AUDIO,
+	TAG_HEADER_LEN, TAG_VIDEO, VIDEO_CODEC_AVC, VIDEO_EX_HEADER, VIDEO_PACKET_CODED_FRAMES,
+	VIDEO_PACKET_SEQUENCE_START,
 };
 use crate::catalog::{CatalogFormat, Stream};
 use crate::container::{ExportSource, Frame};
+
+/// Which FLV payload shape a bound track is muxed as: a legacy CodecID
+/// (`Avc`/`Aac`) or an enhanced-RTMP FourCC codec.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flavor {
+	Avc,
+	Hevc,
+	Av1,
+	Vp9,
+	Aac,
+	Opus,
+	Ac3,
+	Eac3,
+}
+
+impl Flavor {
+	/// The enhanced-RTMP FourCC for this codec, or `None` for the legacy
+	/// (CodecID-signaled) AVC and AAC shapes.
+	fn fourcc(self) -> Option<[u8; 4]> {
+		match self {
+			Flavor::Hevc => Some(*b"hvc1"),
+			Flavor::Av1 => Some(*b"av01"),
+			Flavor::Vp9 => Some(*b"vp09"),
+			Flavor::Opus => Some(*b"Opus"),
+			Flavor::Ac3 => Some(*b"ac-3"),
+			Flavor::Eac3 => Some(*b"ec-3"),
+			Flavor::Avc | Flavor::Aac => None,
+		}
+	}
+}
 
 /// Subscribe to a broadcast and produce an FLV byte stream.
 ///
@@ -55,6 +89,13 @@ struct FlvTrack {
 	source: ExportSource,
 	pending: Option<Frame>,
 	finished: bool,
+	/// The FLV payload shape (legacy CodecID vs enhanced FourCC) to mux this
+	/// track as, fixed from its catalog codec when it's bound.
+	flavor: Flavor,
+	/// A codec config record synthesized at bind time for the sequence-header
+	/// tag, used when the catalog (and thus [`ExportSource::description`]) carries
+	/// none. Only AV1 needs this today (its av1C is optional in the catalog).
+	fallback_description: Option<Bytes>,
 }
 
 impl Export {
@@ -188,14 +229,22 @@ impl Export {
 		if self.video.is_none()
 			&& let Some((name, config)) = catalog.video.renditions.iter().next()
 		{
-			ensure_supported_video(config)?;
+			let flavor = video_flavor(config)?;
 			ensure_legacy(&config.container, "video", name)?;
+			// AV1's av1C is optional in the catalog; synthesize one from the codec
+			// struct so the enhanced SequenceStart tag always has a config record.
+			let fallback_description = match (&config.codec, config.description.as_ref()) {
+				(VideoCodec::AV1(av1), None) => Some(Bytes::copy_from_slice(&av1c_bytes(av1))),
+				_ => None,
+			};
 			let source = ExportSource::for_video(&self.broadcast, name, config, self.latency)?;
 			self.video = Some(FlvTrack {
 				name: name.clone(),
 				source,
 				pending: None,
 				finished: false,
+				flavor,
+				fallback_description,
 			});
 		}
 		if catalog.video.renditions.len() > 1 {
@@ -205,7 +254,7 @@ impl Export {
 		if self.audio.is_none()
 			&& let Some((name, config)) = catalog.audio.renditions.iter().next()
 		{
-			ensure_supported_audio(config)?;
+			let flavor = audio_flavor(config)?;
 			ensure_legacy(&config.container, "audio", name)?;
 			let source = ExportSource::for_audio(&self.broadcast, name, config, self.latency)?;
 			self.audio = Some(FlvTrack {
@@ -213,6 +262,8 @@ impl Export {
 				source,
 				pending: None,
 				finished: false,
+				flavor,
+				fallback_description: None,
 			});
 		}
 		if catalog.audio.renditions.len() > 1 {
@@ -264,24 +315,14 @@ impl Export {
 		// PreviousTagSize0 is always zero.
 		out.put_u32(0);
 
-		if let Some(track) = &self.video {
-			let avcc = track.source.description().context("H.264 track missing avcC")?;
-			let mut body = BytesMut::with_capacity(5 + avcc.len());
-			body.put_u8((FRAME_TYPE_KEY << 4) | VIDEO_CODEC_AVC);
-			body.put_u8(AVC_SEQUENCE_HEADER);
-			body.put_slice(&[0, 0, 0]); // composition time
-			body.put_slice(avcc);
+		if let Some(track) = &self.video
+			&& let Some(body) = video_sequence_header(track)?
+		{
 			write_tag(&mut out, TAG_VIDEO, 0, &body)?;
 		}
-		if let Some(track) = &self.audio {
-			let asc = track
-				.source
-				.description()
-				.context("AAC track missing AudioSpecificConfig")?;
-			let mut body = BytesMut::with_capacity(2 + asc.len());
-			body.put_u8(AAC_AUDIO_TAG_HEADER);
-			body.put_u8(AAC_SEQUENCE_HEADER);
-			body.put_slice(asc);
+		if let Some(track) = &self.audio
+			&& let Some(body) = audio_sequence_header(track)?
+		{
 			write_tag(&mut out, TAG_AUDIO, 0, &body)?;
 		}
 
@@ -317,22 +358,45 @@ impl Export {
 
 		let mut out = BytesMut::with_capacity(TAG_HEADER_LEN + frame.payload.len() + 8);
 		if is_video {
-			let mut body = BytesMut::with_capacity(5 + frame.payload.len());
+			let flavor = self.video.as_ref().expect("video frame without a video track").flavor;
 			let frame_type = if frame.keyframe {
 				FRAME_TYPE_KEY
 			} else {
 				FRAME_TYPE_INTER
 			};
-			body.put_u8((frame_type << 4) | VIDEO_CODEC_AVC);
-			body.put_u8(AVC_NALU);
-			// We carry PTS in the tag timestamp, so the composition offset is zero.
-			body.put_slice(&[0, 0, 0]);
+			let mut body = BytesMut::with_capacity(8 + frame.payload.len());
+			match flavor.fourcc() {
+				// Legacy AVC: CodecID + AVCPacketType + composition time (PTS in the tag).
+				None => {
+					body.put_u8((frame_type << 4) | VIDEO_CODEC_AVC);
+					body.put_u8(AVC_NALU);
+					body.put_slice(&[0, 0, 0]);
+				}
+				// Enhanced FourCC CodedFrames. hvc1 keeps the 3-byte composition
+				// time (zero, since we carry PTS in the tag); av01/vp09 omit it.
+				Some(fourcc) => {
+					body.put_u8(VIDEO_EX_HEADER | (frame_type << 4) | VIDEO_PACKET_CODED_FRAMES);
+					body.put_slice(&fourcc);
+					if flavor == Flavor::Hevc {
+						body.put_slice(&[0, 0, 0]);
+					}
+				}
+			}
 			body.put_slice(&frame.payload);
 			write_tag(&mut out, TAG_VIDEO, timestamp_ms, &body)?;
 		} else {
-			let mut body = BytesMut::with_capacity(2 + frame.payload.len());
-			body.put_u8(AAC_AUDIO_TAG_HEADER);
-			body.put_u8(AAC_RAW);
+			let flavor = self.audio.as_ref().expect("audio frame without an audio track").flavor;
+			let mut body = BytesMut::with_capacity(5 + frame.payload.len());
+			match flavor.fourcc() {
+				None => {
+					body.put_u8(AAC_AUDIO_TAG_HEADER);
+					body.put_u8(AAC_RAW);
+				}
+				Some(fourcc) => {
+					body.put_u8((AUDIO_FORMAT_EX << 4) | AUDIO_PACKET_CODED_FRAMES);
+					body.put_slice(&fourcc);
+				}
+			}
 			body.put_slice(&frame.payload);
 			write_tag(&mut out, TAG_AUDIO, timestamp_ms, &body)?;
 		}
@@ -368,16 +432,110 @@ fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Resul
 	}
 }
 
-fn ensure_supported_video(config: &hang::catalog::VideoConfig) -> anyhow::Result<()> {
+fn video_flavor(config: &hang::catalog::VideoConfig) -> anyhow::Result<Flavor> {
 	match &config.codec {
-		VideoCodec::H264(_) => Ok(()),
-		other => anyhow::bail!("FLV export only supports H.264 video, got {other:?}"),
+		VideoCodec::H264(_) => Ok(Flavor::Avc),
+		VideoCodec::H265(_) => Ok(Flavor::Hevc),
+		VideoCodec::AV1(_) => Ok(Flavor::Av1),
+		VideoCodec::VP9(_) => Ok(Flavor::Vp9),
+		other => anyhow::bail!("FLV export does not support video codec {other:?}"),
 	}
 }
 
-fn ensure_supported_audio(config: &hang::catalog::AudioConfig) -> anyhow::Result<()> {
+fn audio_flavor(config: &hang::catalog::AudioConfig) -> anyhow::Result<Flavor> {
 	match &config.codec {
-		AudioCodec::AAC(_) => Ok(()),
-		other => anyhow::bail!("FLV export only supports AAC audio, got {other:?}"),
+		AudioCodec::AAC(_) => Ok(Flavor::Aac),
+		AudioCodec::Opus => Ok(Flavor::Opus),
+		AudioCodec::Ac3 => Ok(Flavor::Ac3),
+		AudioCodec::Ec3 => Ok(Flavor::Eac3),
+		other => anyhow::bail!("FLV export does not support audio codec {other:?}"),
 	}
+}
+
+/// Build the FLV video sequence-header tag body, or `None` for codecs that carry
+/// their config in band (VP9), so no out-of-band record is emitted.
+fn video_sequence_header(track: &FlvTrack) -> anyhow::Result<Option<BytesMut>> {
+	let mut body = BytesMut::new();
+	match track.flavor {
+		Flavor::Avc => {
+			let avcc = track.source.description().context("H.264 track missing avcC")?;
+			body.put_u8((FRAME_TYPE_KEY << 4) | VIDEO_CODEC_AVC);
+			body.put_u8(AVC_SEQUENCE_HEADER);
+			body.put_slice(&[0, 0, 0]); // composition time
+			body.put_slice(avcc);
+		}
+		Flavor::Hevc => {
+			let hvcc = track.source.description().context("H.265 track missing hvcC")?;
+			ex_video_sequence_start(&mut body, b"hvc1", hvcc);
+		}
+		Flavor::Av1 => {
+			// av1C from the catalog `description`, or the record synthesized at bind
+			// time (the sequence header is carried in band, so an empty configOBUs
+			// record is enough for the decoder).
+			let av1c = track
+				.source
+				.description()
+				.or(track.fallback_description.as_ref())
+				.context("AV1 track missing av1C")?;
+			ex_video_sequence_start(&mut body, b"av01", av1c);
+		}
+		// VP9 configures the decoder from the key frame; no sequence header tag.
+		Flavor::Vp9 => return Ok(None),
+		Flavor::Aac | Flavor::Opus | Flavor::Ac3 | Flavor::Eac3 => unreachable!("audio flavor on a video track"),
+	}
+	Ok(Some(body))
+}
+
+/// Build the FLV audio sequence-header tag body, or `None` for codecs that carry
+/// their config in band (AC-3 / E-AC-3).
+fn audio_sequence_header(track: &FlvTrack) -> anyhow::Result<Option<BytesMut>> {
+	let mut body = BytesMut::new();
+	match track.flavor {
+		Flavor::Aac => {
+			let asc = track
+				.source
+				.description()
+				.context("AAC track missing AudioSpecificConfig")?;
+			body.put_u8(AAC_AUDIO_TAG_HEADER);
+			body.put_u8(AAC_SEQUENCE_HEADER);
+			body.put_slice(asc);
+		}
+		Flavor::Opus => {
+			let head = track.source.description().context("Opus track missing OpusHead")?;
+			body.put_u8((AUDIO_FORMAT_EX << 4) | AUDIO_PACKET_SEQUENCE_START);
+			body.put_slice(b"Opus");
+			body.put_slice(head);
+		}
+		// AC-3 / E-AC-3 carry their config in each sync frame; no sequence header tag.
+		Flavor::Ac3 | Flavor::Eac3 => return Ok(None),
+		Flavor::Avc | Flavor::Hevc | Flavor::Av1 | Flavor::Vp9 => unreachable!("video flavor on an audio track"),
+	}
+	Ok(Some(body))
+}
+
+/// Append an enhanced-RTMP video `SequenceStart` tag body: ex-header + FourCC +
+/// the codec config record.
+fn ex_video_sequence_start(body: &mut BytesMut, fourcc: &[u8; 4], config: &[u8]) {
+	body.put_u8(VIDEO_EX_HEADER | (FRAME_TYPE_KEY << 4) | VIDEO_PACKET_SEQUENCE_START);
+	body.put_slice(fourcc);
+	body.put_slice(config);
+}
+
+/// Build a minimal `AV1CodecConfigurationRecord` (av1C) from the catalog AV1
+/// struct, with an empty `configOBUs` (the sequence header is carried in band).
+fn av1c_bytes(av1: &AV1) -> [u8; 4] {
+	let high_bitdepth = av1.bitdepth >= 10;
+	let twelve_bit = av1.bitdepth >= 12;
+	[
+		0x81, // marker (1) + version (1)
+		((av1.profile & 0x07) << 5) | (av1.level & 0x1f),
+		((av1.tier == 'H') as u8) << 7
+			| (high_bitdepth as u8) << 6
+			| (twelve_bit as u8) << 5
+			| (av1.mono_chrome as u8) << 4
+			| (av1.chroma_subsampling_x as u8) << 3
+			| (av1.chroma_subsampling_y as u8) << 2
+			| (av1.chroma_sample_position & 0x03),
+		0x00, // no initial presentation delay
+	]
 }
