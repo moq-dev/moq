@@ -124,10 +124,6 @@
 					</div>
 				</label>
 				<label class="block text-xs text-neutral-400">
-					Volume / gain
-					<input id="volume" type="range" min="0" max="2" step="0.05" value="1" class="mt-1 w-full">
-				</label>
-				<label class="block text-xs text-neutral-400">
 					Sample rate (Hz)
 					<div class="mt-1 flex items-center gap-2">
 						<select id="samplerate"
@@ -194,6 +190,13 @@
 						</label>
 					</div>
 				</details>
+				<label class="block text-xs text-neutral-400">
+					Gain
+					<div class="mt-1 flex items-center gap-2">
+						<input id="volume" type="range" min="0" max="2" step="0.05" value="1" class="flex-1 min-w-0 accent-blue-600">
+						<span id="volume-actual" class="shrink-0 w-24 text-right font-mono text-xs text-neutral-400"></span>
+					</div>
+				</label>
 			</section>
 
 			<section class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3">

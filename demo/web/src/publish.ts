@@ -282,6 +282,11 @@ ui.run((effect) => {
 	setActual("keyframe-actual", v ? `${(kf ?? 2000) / 1000}s` : undefined);
 });
 
+// Gain is a local control (not negotiated), so just echo the current value.
+ui.run((effect) => {
+	setActual("volume-actual", `${effect.get(volume).toFixed(2)}×`);
+});
+
 // Audio: the resolved audio config (codec / sample rate / channels / bitrate).
 ui.run((effect) => {
 	const a = effect.get(publish.broadcast.audio.config);

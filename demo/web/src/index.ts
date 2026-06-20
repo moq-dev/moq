@@ -87,8 +87,18 @@ function createTile(name: string): WatchTile {
 
 	const label = document.createElement("div");
 	label.className =
-		"flex items-center gap-2 px-3 py-1.5 text-xs font-mono text-neutral-300 border-b border-neutral-800 truncate";
-	label.textContent = (Net.Path.stripPrefix(prefixPath(prefixInput.peek()), Net.Path.from(name)) ?? name) as string;
+		"flex items-center gap-2 px-3 py-1.5 text-xs font-mono text-neutral-300 border-b border-neutral-800";
+	const labelText = document.createElement("span");
+	labelText.className = "truncate";
+	labelText.textContent = (Net.Path.stripPrefix(prefixPath(prefixInput.peek()), Net.Path.from(name)) ??
+		name) as string;
+	// Speaker badge marking the tile whose audio is playing (active + has audio).
+	const audioBadge = document.createElement("span");
+	audioBadge.className = "ml-auto shrink-0";
+	audioBadge.textContent = "🔊";
+	audioBadge.title = "audio active";
+	audioBadge.hidden = true;
+	label.append(labelText, audioBadge);
 
 	// Each tile is a <moq-watch-ui> (player chrome: play/pause, volume,
 	// fullscreen) wrapping a bare <moq-watch> that renders into its <canvas>
@@ -130,6 +140,10 @@ function createTile(name: string): WatchTile {
 		el.classList.toggle("border-emerald-500", isActive);
 		el.classList.toggle("border-neutral-800", !isActive);
 		watch.muted = !isActive;
+		// Show the speaker badge on the active tile, but only when it actually has
+		// an audio track to play.
+		const hasAudio = !!effect.get(watch.broadcast.catalog)?.audio;
+		audioBadge.hidden = !(isActive && hasAudio);
 	});
 
 	return {
