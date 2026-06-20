@@ -149,6 +149,85 @@ async fn import_handles_split_input() {
 	assert_eq!(snap.audio.renditions.len(), 1);
 }
 
+/// A real VP9 key frame (profile 0, 320x240), borrowed from the VP9 parser's
+/// own test vector. Bytes after the frame size are irrelevant to the header.
+const VP9_KEYFRAME_320X240: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
+
+/// Enhanced-RTMP (FourCC) VP9 video configures from the key frame and emits it.
+#[tokio::test(start_paused = true)]
+async fn import_enhanced_vp9() {
+	let mut out = Vec::new();
+	out.extend_from_slice(b"FLV");
+	out.push(1);
+	out.push(0x01); // video only
+	out.extend_from_slice(&9u32.to_be_bytes());
+	out.extend_from_slice(&0u32.to_be_bytes());
+
+	// Ex-video CodedFrames keyframe: high bit set, frame type 1, packet type 1.
+	let first = super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_CODED_FRAMES;
+	let mut body = vec![first];
+	body.extend_from_slice(b"vp09");
+	body.extend_from_slice(VP9_KEYFRAME_320X240);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &body);
+
+	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = Import::new(producer, catalog.clone());
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	importer.finish().unwrap();
+
+	let snap = catalog.snapshot();
+	assert_eq!(snap.video.renditions.len(), 1);
+	let v = snap.video.renditions.values().next().unwrap();
+	assert!(matches!(v.codec, VideoCodec::VP9(_)));
+	assert_eq!(v.coded_width, Some(320));
+	assert_eq!(v.coded_height, Some(240));
+}
+
+/// Enhanced-RTMP (FourCC) Opus audio configures from the `OpusHead` sequence
+/// header and carries the frames through.
+#[tokio::test(start_paused = true)]
+async fn import_enhanced_opus() {
+	let head = crate::codec::opus::Config {
+		sample_rate: 48000,
+		channel_count: 2,
+	}
+	.encode();
+
+	let mut out = Vec::new();
+	out.extend_from_slice(b"FLV");
+	out.push(1);
+	out.push(0x04); // audio only
+	out.extend_from_slice(&9u32.to_be_bytes());
+	out.extend_from_slice(&0u32.to_be_bytes());
+
+	// Ex-audio SequenceStart: SoundFormat 9, packet type 0.
+	let mut seq = vec![(super::AUDIO_FORMAT_EX << 4) | super::AUDIO_PACKET_SEQUENCE_START];
+	seq.extend_from_slice(b"Opus");
+	seq.extend_from_slice(&head);
+	write_tag(&mut out, super::TAG_AUDIO, 0, &seq);
+
+	// Ex-audio CodedFrames: SoundFormat 9, packet type 1.
+	let mut frame = vec![(super::AUDIO_FORMAT_EX << 4) | super::AUDIO_PACKET_CODED_FRAMES];
+	frame.extend_from_slice(b"Opus");
+	frame.extend_from_slice(&[0xfc, 0xff, 0xfe]);
+	write_tag(&mut out, super::TAG_AUDIO, 20, &frame);
+
+	let mut producer = moq_net::BroadcastInfo::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut importer = Import::new(producer, catalog.clone());
+	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
+	importer.finish().unwrap();
+
+	let snap = catalog.snapshot();
+	assert_eq!(snap.audio.renditions.len(), 1);
+	let a = snap.audio.renditions.values().next().unwrap();
+	assert!(matches!(a.codec, AudioCodec::Opus));
+	assert_eq!(a.sample_rate, 48000);
+	assert_eq!(a.channel_count, 2);
+	assert_eq!(a.description.as_ref().map(|b| b.as_ref()), Some(head.as_ref()));
+}
+
 #[tokio::test(start_paused = true)]
 async fn import_rejects_non_flv() {
 	let mut producer = moq_net::BroadcastInfo::new().produce();

@@ -130,6 +130,36 @@ pub fn parse_hvcc_param_sets(hvcc: &[u8]) -> Result<HvccParamSets> {
 	})
 }
 
+/// Build a catalog [`VideoConfig`](hang::catalog::VideoConfig) for the `hvc1`
+/// shape from an HEVCDecoderConfigurationRecord (hvcC).
+///
+/// The H.265 analogue of [`crate::codec::h264::Avcc::parse`] feeding a
+/// `VideoConfig`. Used by the enhanced-RTMP / FLV importer, where the hvcC
+/// arrives out of band in the sequence-header tag and the coded samples are
+/// already length-prefixed NALU, so the record passes straight through as the
+/// catalog `description` (`in_band: false`).
+pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig> {
+	let params = parse_hvcc_param_sets(hvcc)?;
+	let sps_nal = params.sps.first().ok_or(Error::MissingSps)?;
+	let sps = SpsNALUnit::parse(&mut &sps_nal[..]).map_err(|_| Error::SpsParse)?;
+	let profile = &sps.rbsp.profile_tier_level.general_profile;
+
+	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
+		in_band: false,
+		profile_space: profile.profile_space,
+		profile_idc: profile.profile_idc,
+		profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
+		tier_flag: profile.tier_flag,
+		level_idc: profile.level_idc.ok_or(Error::MissingLevelIdc)?,
+		constraint_flags: pack_constraint_flags(profile),
+	});
+	config.coded_width = Some(sps.rbsp.cropped_width() as u32);
+	config.coded_height = Some(sps.rbsp.cropped_height() as u32);
+	config.description = Some(Bytes::copy_from_slice(hvcc));
+	config.container = hang::catalog::Container::Legacy;
+	Ok(config)
+}
+
 /// Annex-B → length-prefixed transmuxer; the H.265 analogue of
 /// [`crate::codec::h264::Avc1`].
 pub struct Hvc1 {
