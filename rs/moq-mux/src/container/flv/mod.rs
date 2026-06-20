@@ -87,7 +87,7 @@ const AUDIO_FORMAT_EX: u8 = 9;
 const AUDIO_PACKET_SEQUENCE_START: u8 = 0;
 const AUDIO_PACKET_CODED_FRAMES: u8 = 1;
 const AUDIO_PACKET_SEQUENCE_END: u8 = 2;
-const AUDIO_PACKET_MULTICHANNEL_CONFIG: u8 = 3;
+const AUDIO_PACKET_MULTICHANNEL_CONFIG: u8 = 4;
 
 /// Read a 24-bit big-endian unsigned integer.
 fn read_u24(b: &[u8]) -> u32 {

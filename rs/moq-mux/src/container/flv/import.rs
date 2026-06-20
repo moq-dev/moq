@@ -205,11 +205,15 @@ impl Import {
 					(payload, 0)
 				};
 
-				// VP9 has no out-of-band config record, so configure from the first
-				// key frame's uncompressed header.
-				if &fourcc == b"vp09" && self.video.is_none() && keyframe {
-					if let Some(config) = crate::codec::vp9::config_from_keyframe(data)? {
-						self.init_video(config)?;
+				// VP9 has no out-of-band config record, so (re)configure from each key
+				// frame's uncompressed header. `init_video` dedups when unchanged, so
+				// this is a no-op except on the first key frame or a resolution change.
+				// A malformed header drops just this frame rather than aborting the stream.
+				if &fourcc == b"vp09" && keyframe {
+					match crate::codec::vp9::config_from_keyframe(data) {
+						Ok(Some(config)) => self.init_video(config)?,
+						Ok(None) => {}
+						Err(err) => tracing::warn!(%err, "dropping malformed VP9 key frame"),
 					}
 				}
 

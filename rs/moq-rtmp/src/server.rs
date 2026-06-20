@@ -30,6 +30,12 @@ use crate::flv;
 /// Read buffer size for pulling RTMP chunk-stream bytes off the socket.
 const READ_BUFFER: usize = 16 * 1024;
 
+/// How long a connection has to finish the handshake and issue its `publish`
+/// before it is dropped. Bounds the lifetime (and socket / `pending` slot) of a
+/// client that connects but never publishes, so idle or half-open connections
+/// can't accumulate without limit.
+const PUBLISH_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// An RTMP server that yields each connection's pending publish as a [`Request`].
 ///
 /// Build it with [`bind`](Self::bind), then loop on [`accept`](Self::accept).
@@ -80,10 +86,14 @@ impl Server {
 							tracing::debug!(%peer, %err, "failed to set TCP_NODELAY");
 						}
 						self.pending.push(Box::pin(async move {
-							match accept_until_publish(stream, peer).await {
-								Ok(request) => request,
-								Err(err) => {
+							match tokio::time::timeout(PUBLISH_TIMEOUT, accept_until_publish(stream, peer)).await {
+								Ok(Ok(request)) => request,
+								Ok(Err(err)) => {
 									tracing::warn!(%peer, %err, "RTMP connection closed before publish");
+									None
+								}
+								Err(_) => {
+									tracing::warn!(%peer, "RTMP connection did not publish before timeout");
 									None
 								}
 							}
@@ -390,6 +400,13 @@ impl Publisher {
 
 	/// Re-wrap one RTMP audio/video message body as an FLV tag and demux it.
 	fn push(&mut self, tag_type: u8, timestamp: u32, body: &[u8]) -> anyhow::Result<()> {
+		// FLV's tag DataSize is 24-bit. A larger body would truncate, declaring a
+		// wrong size that desyncs the demuxer on the next tag. Drop it instead.
+		anyhow::ensure!(
+			body.len() <= 0xFF_FFFF,
+			"RTMP message body {} exceeds FLV's 24-bit tag size limit",
+			body.len()
+		);
 		self.importer.decode(&flv::tag(tag_type, timestamp, body))
 	}
 
