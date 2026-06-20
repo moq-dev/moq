@@ -4337,6 +4337,7 @@ dependencies = [
  "bytes",
  "cudarc",
  "dispatch2",
+ "libloading 0.8.9",
  "moq-mux",
  "moq-net",
  "moq-vaapi",
