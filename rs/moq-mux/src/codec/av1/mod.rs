@@ -43,6 +43,39 @@ impl From<std::io::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Build a catalog [`VideoConfig`](hang::catalog::VideoConfig) for the `av01`
+/// shape from an AV1CodecConfigurationRecord (av1C).
+///
+/// Used by the enhanced-RTMP / FLV importer, where the av1C arrives out of band
+/// in the sequence-header tag (leading `0x81` marker) and the coded samples are
+/// raw OBU temporal units, so the record passes straight through as the catalog
+/// `description`. Resolution and color live in the inline sequence header, not
+/// the av1C, so `coded_width`/`coded_height` are left unset here.
+pub(crate) fn config_from_av1c(av1c: &[u8]) -> Result<hang::catalog::VideoConfig> {
+	// av1C: byte 0 = marker(1)|version(7) = 0x81, byte 1 = seq_profile(3)|seq_level_idx_0(5),
+	// byte 2 = seq_tier_0|high_bitdepth|twelve_bit|monochrome|subsampling_x|subsampling_y|sample_position(2).
+	if av1c.len() < 4 || av1c[0] != 0x81 {
+		return Err(Error::ObuTooShort);
+	}
+	let high_bitdepth = ((av1c[2] >> 6) & 0x01) == 1;
+	let twelve_bit = ((av1c[2] >> 5) & 0x01) == 1;
+
+	let mut config = hang::catalog::VideoConfig::new(AV1 {
+		profile: (av1c[1] >> 5) & 0x07,
+		level: av1c[1] & 0x1f,
+		tier: if ((av1c[2] >> 7) & 0x01) == 1 { 'H' } else { 'M' },
+		bitdepth: bitdepth(twelve_bit, high_bitdepth),
+		mono_chrome: ((av1c[2] >> 4) & 0x01) == 1,
+		chroma_subsampling_x: ((av1c[2] >> 3) & 0x01) == 1,
+		chroma_subsampling_y: ((av1c[2] >> 2) & 0x01) == 1,
+		chroma_sample_position: av1c[2] & 0x03,
+		..Default::default()
+	});
+	config.description = Some(bytes::Bytes::copy_from_slice(av1c));
+	config.container = hang::catalog::Container::Legacy;
+	Ok(config)
+}
+
 /// Map a parsed `mp4_atom::Av1c` (AV1CodecConfigurationRecord) to the
 /// hang catalog's AV1 codec struct.
 ///
