@@ -1,14 +1,21 @@
-//! RTMP server: accept connections, and hand each pending publish to the caller
+//! RTMP server: accept connections, and hand each pending request to the caller
 //! as a [`Request`] to authorize.
 //!
-//! [`Server::accept`] runs the RTMP handshake and the connect/publish command
-//! exchange for each TCP connection (many concurrently, so a slow client doesn't
-//! block others), then yields a [`Request`] once the client issues its `publish`
-//! command. The caller inspects the app and stream key, makes an authorization
-//! decision, and calls [`Request::accept`] (publish into an origin at a path) or
-//! [`Request::reject`]. This mirrors `moq-native`'s `Server` / `Request`, so the
-//! gateway stays unopinionated about auth: the embedder (e.g. a relay verifying
-//! the stream key as a JWT) owns that policy.
+//! [`Server::accept`] runs the RTMP handshake and the connect command exchange
+//! for each TCP connection (many concurrently, so a slow client doesn't block
+//! others), then yields a [`Request`] once the client issues its `publish` or
+//! `play` command. The caller inspects the app and stream key, makes an
+//! authorization decision, and either:
+//!
+//! - **[`Request::Publish`]**: [`Publish::accept`] (ingest into an origin at a
+//!   path) or [`Publish::reject`]. This is the contribution path (OBS, ffmpeg).
+//! - **[`Request::Play`]**: [`Play::accept`] (serve a broadcast from an origin
+//!   down to the player) or [`Play::reject`]. This is the egress path: a player
+//!   (VLC, ffplay, mpv) pulls `rtmp://host/<app>/<key>` and we stream it back.
+//!
+//! This mirrors `moq-native`'s `Server` / `Request`, so the gateway stays
+//! unopinionated about auth: the embedder (e.g. a relay verifying the stream key
+//! as a JWT) owns that policy.
 //!
 //! RTMPS (RTMP over TLS): [`Server::with_tls`] makes the listener terminate TLS
 //! before the RTMP handshake, so `rtmps://` clients work with no other change.
@@ -27,10 +34,11 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
-use moq_mux::container::flv::Import as FlvImport;
-use moq_net::{BroadcastInfo, OriginProducer, OriginPublish};
+use moq_mux::container::flv::{Export as FlvExport, Import as FlvImport};
+use moq_net::{BroadcastInfo, OriginConsumer, OriginProducer, OriginPublish};
 use rml_rtmp::handshake::{Handshake, HandshakeProcessResult, PeerType};
 use rml_rtmp::sessions::{ServerSession, ServerSessionConfig, ServerSessionEvent, ServerSessionResult};
+use rml_rtmp::time::RtmpTimestamp;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -40,11 +48,12 @@ use crate::flv;
 /// Read buffer size for pulling RTMP chunk-stream bytes off the socket.
 const READ_BUFFER: usize = 16 * 1024;
 
-/// How long a connection has to finish the handshake and issue its `publish`
-/// before it is dropped. Bounds the lifetime (and socket / `pending` slot) of a
-/// client that connects but never publishes, so idle or half-open connections
-/// can't accumulate without limit. With TLS this also covers the TLS handshake.
-const PUBLISH_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a connection has to finish the handshake and issue its `publish` or
+/// `play` before it is dropped. Bounds the lifetime (and socket / `pending` slot)
+/// of a client that connects but never does either, so idle or half-open
+/// connections can't accumulate without limit. With TLS this also covers the TLS
+/// handshake.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A bidirectional byte stream carrying an RTMP session.
 ///
@@ -106,12 +115,12 @@ impl AsyncWrite for Conn {
 	}
 }
 
-/// An RTMP server that yields each connection's pending publish as a [`Request`].
+/// An RTMP server that yields each connection's pending request as a [`Request`].
 ///
 /// Build it with [`bind`](Self::bind), optionally enable RTMPS with
 /// [`with_tls`](Self::with_tls), then loop on [`accept`](Self::accept). The
-/// handshake and the connect/publish exchange happen inside `accept`, so a
-/// [`Request`] is only produced once a client actually wants to publish.
+/// handshake and the connect exchange happen inside `accept`, so a [`Request`] is
+/// only produced once a client actually wants to publish or play.
 pub struct Server {
 	listener: TcpListener,
 
@@ -121,7 +130,7 @@ pub struct Server {
 	tls: Option<tokio_rustls::TlsAcceptor>,
 
 	/// In-flight handshakes; each resolves to a ready [`Request`], or `None` if
-	/// the connection closed or errored before issuing a publish.
+	/// the connection closed or errored before issuing a publish or play.
 	pending: FuturesUnordered<BoxFuture<'static, Option<Request<Conn>>>>,
 }
 
@@ -152,11 +161,11 @@ impl Server {
 		Ok(self.listener.local_addr()?)
 	}
 
-	/// Wait for the next connection that wants to publish.
+	/// Wait for the next connection that wants to publish or play.
 	///
 	/// New connections are accepted and handshaked concurrently; this returns the
-	/// next one to reach its `publish` command. Connections that close or error
-	/// before publishing are dropped without surfacing here. Returns `None` only
+	/// next one to reach its `publish` or `play` command. Connections that close or
+	/// error before either are dropped without surfacing here. Returns `None` only
 	/// if the listener itself stops (it currently never does).
 	pub async fn accept(&mut self) -> Option<Request<Conn>> {
 		loop {
@@ -179,7 +188,7 @@ impl Server {
 						self.pending.push(Box::pin(async move {
 							// The TLS handshake (if any) and the RTMP handshake share one
 							// budget, so a client that stalls either is dropped.
-							let outcome = tokio::time::timeout(PUBLISH_TIMEOUT, async move {
+							let outcome = tokio::time::timeout(REQUEST_TIMEOUT, async move {
 								#[cfg(feature = "server")]
 								let conn = match tls {
 									Some(acceptor) => Conn::Tls(Box::new(
@@ -192,17 +201,17 @@ impl Server {
 								};
 								#[cfg(not(feature = "server"))]
 								let conn = Conn::Plain(stream);
-								accept_until_publish(conn, peer).await
+								accept_until_request(conn, peer).await
 							})
 							.await;
 							match outcome {
 								Ok(Ok(request)) => request,
 								Ok(Err(err)) => {
-									tracing::warn!(%peer, %err, "RTMP connection closed before publish");
+									tracing::warn!(%peer, %err, "RTMP connection closed before publish/play");
 									None
 								}
 								Err(_) => {
-									tracing::warn!(%peer, "RTMP connection did not publish before timeout");
+									tracing::warn!(%peer, "RTMP connection did not publish or play before timeout");
 									None
 								}
 							}
@@ -220,32 +229,76 @@ impl Server {
 	}
 }
 
-/// Run the RTMP handshake and connect/publish exchange on an already-established
-/// byte stream, yielding the pending publish as a [`Request`].
+/// Run the RTMP handshake and connect exchange on an already-established byte
+/// stream, yielding the pending publish or play as a [`Request`].
 ///
 /// The bring-your-own-transport entry point: accept the connection (and, for
 /// `rtmps://`, complete the TLS handshake) yourself, then hand the stream here.
 /// `peer` is the remote address, used for logging and [`Request::peer`].
 ///
-/// Returns `Ok(None)` if the client disconnects before issuing `publish`. Unlike
-/// [`Server`], this applies no publish timeout: wrap the call in
+/// Returns `Ok(None)` if the client disconnects before issuing `publish` or
+/// `play`. Unlike [`Server`], this applies no timeout: wrap the call in
 /// [`tokio::time::timeout`] to bound how long a connected-but-idle client can
 /// hold the task.
 pub async fn accept_stream<S: Stream>(stream: S, peer: SocketAddr) -> Result<Option<Request<S>>> {
-	Ok(accept_until_publish(stream, peer).await?)
+	Ok(accept_until_request(stream, peer).await?)
 }
 
-/// A pending RTMP publish, waiting on the caller to authorize it.
+/// What an accepted RTMP connection wants: to contribute media ([`Publish`]) or
+/// to view it ([`Play`]).
+///
+/// Yielded by [`Server::accept`] / [`accept_stream`] once the client issues its
+/// `publish` or `play` command. Inspect [`app`](Self::app) /
+/// [`stream_key`](Self::stream_key), then match to authorize the right
+/// direction. Dropping it without accepting or rejecting closes the connection.
+///
+/// `S` is the underlying stream: [`Conn`] for a [`Server`]-produced request, or
+/// your own transport when built via [`accept_stream`].
+#[non_exhaustive]
+pub enum Request<S = Conn> {
+	/// A client pushing media in (OBS, ffmpeg). Ingest it with [`Publish::accept`].
+	Publish(Publish<S>),
+	/// A client pulling media out (VLC, ffplay, mpv). Serve it with [`Play::accept`].
+	Play(Play<S>),
+}
+
+impl<S: Stream> Request<S> {
+	/// The RTMP app name (the path component of `rtmp://host/<app>/<key>`).
+	pub fn app(&self) -> &str {
+		match self {
+			Request::Publish(r) => r.app(),
+			Request::Play(r) => r.app(),
+		}
+	}
+
+	/// The RTMP stream key (the final component of `rtmp://host/<app>/<key>`).
+	pub fn stream_key(&self) -> &str {
+		match self {
+			Request::Publish(r) => r.stream_key(),
+			Request::Play(r) => r.stream_key(),
+		}
+	}
+
+	/// The remote peer address.
+	pub fn peer(&self) -> SocketAddr {
+		match self {
+			Request::Publish(r) => r.peer(),
+			Request::Play(r) => r.peer(),
+		}
+	}
+}
+
+/// A pending RTMP publish (contribution), waiting on the caller to authorize it.
 ///
 /// Inspect [`app`](Self::app) and [`stream_key`](Self::stream_key) (an
 /// `rtmp://host/<app>/<key>` URL splits into these), then either
 /// [`accept`](Self::accept) the publish into an origin at a chosen broadcast
-/// path or [`reject`](Self::reject) it. Dropping a `Request` without either
-/// closes the connection.
+/// path or [`reject`](Self::reject) it. Dropping it without either closes the
+/// connection.
 ///
 /// `S` is the underlying stream: [`Conn`] for a [`Server`]-produced request, or
 /// your own transport when built via [`accept_stream`].
-pub struct Request<S = Conn> {
+pub struct Publish<S = Conn> {
 	stream: S,
 	session: ServerSession,
 	/// The `rml_rtmp` request id for the pending publish, replied to on accept/reject.
@@ -258,7 +311,7 @@ pub struct Request<S = Conn> {
 	peer: SocketAddr,
 }
 
-impl<S: Stream> Request<S> {
+impl<S: Stream> Publish<S> {
 	/// The RTMP app name (the path component of `rtmp://host/<app>/<key>`).
 	pub fn app(&self) -> &str {
 		&self.app
@@ -330,9 +383,119 @@ impl<S: Stream> Request<S> {
 	}
 }
 
-/// Run one connection's handshake and connect/publish exchange, returning a
-/// [`Request`] once the client issues `publish` (or `None` if it disconnects first).
-async fn accept_until_publish<S: Stream>(mut stream: S, peer: SocketAddr) -> anyhow::Result<Option<Request<S>>> {
+/// A pending RTMP play (egress), waiting on the caller to authorize it.
+///
+/// The viewing counterpart of [`Publish`]: inspect [`app`](Self::app) /
+/// [`stream_key`](Self::stream_key), then [`accept`](Self::accept) to serve a
+/// broadcast from an origin down to the player, or [`reject`](Self::reject) it.
+/// Dropping it without either closes the connection.
+///
+/// `S` is the underlying stream: [`Conn`] for a [`Server`]-produced request, or
+/// your own transport when built via [`accept_stream`].
+pub struct Play<S = Conn> {
+	stream: S,
+	session: ServerSession,
+	/// The `rml_rtmp` request id for the pending play, replied to on accept/reject.
+	request_id: u32,
+	/// The RTMP message stream id to address outbound media at (from the `play`).
+	stream_id: u32,
+	/// Session results produced alongside the play command, processed on accept.
+	work: VecDeque<ServerSessionResult>,
+	app: String,
+	stream_key: String,
+	peer: SocketAddr,
+}
+
+impl<S: Stream> Play<S> {
+	/// The RTMP app name (the path component of `rtmp://host/<app>/<key>`).
+	pub fn app(&self) -> &str {
+		&self.app
+	}
+
+	/// The RTMP stream key (the final component of `rtmp://host/<app>/<key>`).
+	///
+	/// As with a publish, an embedder can treat this as a token to authorize the
+	/// viewer.
+	pub fn stream_key(&self) -> &str {
+		&self.stream_key
+	}
+
+	/// The remote peer address.
+	pub fn peer(&self) -> SocketAddr {
+		self.peer
+	}
+
+	/// Accept the play: subscribe to the broadcast at `path` in `origin`, mux it
+	/// to FLV, and stream the tags down to the player until either side ends.
+	///
+	/// Waits for the broadcast to be announced (so a player can connect slightly
+	/// before the publisher), cancelling cleanly if the viewer disconnects first.
+	/// This future resolves when playback ends, so callers usually run it on its
+	/// own task.
+	pub async fn accept(mut self, origin: &OriginConsumer, path: &str) -> Result<()> {
+		// Tell the client playback is starting (Play.Reset / Play.Start + StreamBegin).
+		let results = self
+			.session
+			.accept_request(self.request_id)
+			.map_err(|e| anyhow::anyhow!("rtmp accept play: {e:?}"))?;
+		self.work.extend(results);
+		flush_outbound(&mut self.stream, &mut self.work).await?;
+
+		tracing::info!(peer = %self.peer, %path, "rtmp play accepted");
+
+		// Wait for the broadcast, but abandon the wait if the viewer hangs up.
+		let broadcast = tokio::select! {
+			biased;
+			res = drain_input(&mut self.stream) => {
+				res?;
+				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
+				return Ok(());
+			}
+			broadcast = origin.announced_broadcast(path) => broadcast,
+		};
+		let Some(broadcast) = broadcast else {
+			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
+			return Ok(());
+		};
+
+		let mut export = FlvExport::new(broadcast)
+			.await
+			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
+		let result = play_pump(
+			&mut self.stream,
+			&mut self.session,
+			&mut self.work,
+			&mut export,
+			self.stream_id,
+			self.peer,
+		)
+		.await;
+
+		tracing::debug!(peer = %self.peer, %path, "rtmp play ended");
+		result
+	}
+
+	/// Reject the play, sending `reason` back to the client as the
+	/// `NetStream.Play.Failed` description, then close the connection.
+	pub async fn reject(mut self, reason: &str) -> Result<()> {
+		let results = self
+			.session
+			.reject_request(self.request_id, "NetStream.Play.Failed", reason)
+			.map_err(|e| anyhow::anyhow!("rtmp reject play: {e:?}"))?;
+
+		for result in self.work.drain(..).chain(results) {
+			if let ServerSessionResult::OutboundResponse(packet) = result {
+				self.stream.write_all(&packet.bytes).await?;
+			}
+		}
+		tracing::debug!(peer = %self.peer, %reason, "rtmp play rejected");
+		Ok(())
+	}
+}
+
+/// Run one connection's handshake and connect exchange, returning a [`Request`]
+/// once the client issues `publish` or `play` (or `None` if it disconnects first).
+async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> anyhow::Result<Option<Request<S>>> {
 	let remaining = run_handshake(&mut stream, peer).await?;
 
 	let (mut session, initial) =
@@ -355,7 +518,7 @@ async fn accept_until_publish<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 					stream.write_all(&packet.bytes).await?;
 				}
 				ServerSessionResult::RaisedEvent(event) => match event {
-					// Accept every connect; authorization happens at publish time.
+					// Accept every connect; authorization happens at publish/play time.
 					ServerSessionEvent::ConnectionRequested { request_id, app_name } => {
 						tracing::debug!(%peer, %app_name, "rtmp connect");
 						let results = session
@@ -370,7 +533,7 @@ async fn accept_until_publish<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 						stream_key,
 						..
 					} => {
-						return Ok(Some(Request {
+						return Ok(Some(Request::Publish(Publish {
 							stream,
 							session,
 							request_id,
@@ -378,9 +541,28 @@ async fn accept_until_publish<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							app: app_name,
 							stream_key,
 							peer,
-						}));
+						})));
 					}
-					other => tracing::trace!(%peer, ?other, "ignoring RTMP event before publish"),
+					// The client wants to play: hand control back to the caller.
+					ServerSessionEvent::PlayStreamRequested {
+						request_id,
+						app_name,
+						stream_key,
+						stream_id,
+						..
+					} => {
+						return Ok(Some(Request::Play(Play {
+							stream,
+							session,
+							request_id,
+							stream_id,
+							work,
+							app: app_name,
+							stream_key,
+							peer,
+						})));
+					}
+					other => tracing::trace!(%peer, ?other, "ignoring RTMP event before publish/play"),
 				},
 				ServerSessionResult::UnhandleableMessageReceived(_) => {
 					tracing::trace!(%peer, "ignoring unhandleable RTMP message");
@@ -456,6 +638,108 @@ async fn pump<S: Stream>(
 
 	tracing::debug!(%peer, "rtmp connection closed");
 	Ok(())
+}
+
+/// Stream a broadcast to an RTMP player until the broadcast ends or the viewer
+/// stops.
+///
+/// Pulls FLV from `export`, splits it back into tags, and sends each as an RTMP
+/// audio/video message; concurrently it services client input (acknowledgements,
+/// pings, `deleteStream`) so a long playback stays healthy. The read and write
+/// halves run independently, so media keeps flowing regardless of when the viewer
+/// next sends anything.
+async fn play_pump<S: Stream>(
+	stream: &mut S,
+	session: &mut ServerSession,
+	work: &mut VecDeque<ServerSessionResult>,
+	export: &mut FlvExport,
+	stream_id: u32,
+	peer: SocketAddr,
+) -> Result<()> {
+	let (mut reader, mut writer) = tokio::io::split(stream);
+	let mut tags = flv::TagReader::new();
+	let mut buffer = [0u8; READ_BUFFER];
+
+	loop {
+		// Flush responses queued by the last batch of client input.
+		while let Some(result) = work.pop_front() {
+			match result {
+				ServerSessionResult::OutboundResponse(packet) => writer.write_all(&packet.bytes).await?,
+				ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished { .. }) => {
+					tracing::debug!(%peer, "viewer stopped playback");
+					return Ok(());
+				}
+				ServerSessionResult::RaisedEvent(other) => {
+					tracing::trace!(%peer, ?other, "ignoring RTMP event during play")
+				}
+				ServerSessionResult::UnhandleableMessageReceived(_) => {}
+			}
+		}
+
+		tokio::select! {
+			// Media from the broadcast: split into tags and send each one down.
+			chunk = export.next() => match chunk? {
+				Some(bytes) => {
+					tags.push(&bytes);
+					while let Some(tag) = tags.next()? {
+						let ts = RtmpTimestamp::new(tag.timestamp);
+						let packet = match tag.tag_type {
+							flv::TAG_VIDEO => session.send_video_data(stream_id, tag.body, ts, false),
+							flv::TAG_AUDIO => session.send_audio_data(stream_id, tag.body, ts, false),
+							_ => continue,
+						}
+						.map_err(|e| anyhow::anyhow!("rtmp send media: {e:?}"))?;
+						writer.write_all(&packet.bytes).await?;
+					}
+				}
+				// Broadcast ended: tell the player and finish.
+				None => {
+					let packet = session
+						.finish_playing(stream_id)
+						.map_err(|e| anyhow::anyhow!("rtmp finish play: {e:?}"))?;
+					writer.write_all(&packet.bytes).await?;
+					return Ok(());
+				}
+			},
+			// Client input: feed the session so it can ack / tear down.
+			res = reader.read(&mut buffer) => {
+				let n = res?;
+				if n == 0 {
+					return Ok(());
+				}
+				let results = session
+					.handle_input(&buffer[..n])
+					.map_err(|e| anyhow::anyhow!("rtmp handle_input: {e:?}"))?;
+				work.extend(results);
+			}
+		}
+	}
+}
+
+/// Write every queued [`OutboundResponse`](ServerSessionResult::OutboundResponse)
+/// to the client, dropping the other result kinds.
+async fn flush_outbound<S: Stream>(stream: &mut S, work: &mut VecDeque<ServerSessionResult>) -> anyhow::Result<()> {
+	for result in work.drain(..) {
+		if let ServerSessionResult::OutboundResponse(packet) = result {
+			stream.write_all(&packet.bytes).await?;
+		}
+	}
+	Ok(())
+}
+
+/// Read and discard client bytes until the connection closes.
+///
+/// Used to detect a viewer hanging up while we wait for their broadcast to come
+/// online. Pre-playback the client only sends control messages (window ack,
+/// buffer length) that need no response, so discarding them is safe. Returns
+/// `Ok(())` on a clean close (EOF), or an error on an I/O failure.
+async fn drain_input<S: Stream>(stream: &mut S) -> anyhow::Result<()> {
+	let mut buffer = [0u8; READ_BUFFER];
+	loop {
+		if stream.read(&mut buffer).await? == 0 {
+			return Ok(());
+		}
+	}
 }
 
 /// Perform the RTMP server handshake, returning any leftover bytes that followed
@@ -550,11 +834,18 @@ mod tests {
 		ClientSession, ClientSessionConfig, ClientSessionEvent, ClientSessionResult, PublishRequestType,
 	};
 
+	/// What the test client asks for once connected.
+	#[derive(Clone, Copy)]
+	enum ClientMode {
+		Publish,
+		Play,
+	}
+
 	/// Drive a real RTMP client over an already-connected `stream` through
-	/// handshake -> connect(`live`) -> publish(`cam0`), pumping until aborted by
-	/// the test. Generic over the transport so the same client exercises both
+	/// handshake -> connect(`live`) -> publish/play(`cam0`), pumping until aborted
+	/// by the test. Generic over the transport so the same client exercises both
 	/// plaintext RTMP and RTMPS.
-	async fn run_client<S: Stream>(mut stream: S) {
+	async fn run_client<S: Stream>(mut stream: S, mode: ClientMode) {
 		// Handshake.
 		let mut handshake = Handshake::new(PeerType::Client);
 		stream
@@ -595,12 +886,15 @@ mod tests {
 					ClientSessionResult::OutboundResponse(packet) => {
 						stream.write_all(&packet.bytes).await.unwrap();
 					}
-					// Once connected, ask to publish; the publish command is sent
+					// Once connected, ask to publish or play; the command is sent
 					// automatically as the createStream round trip completes.
 					ClientSessionResult::RaisedEvent(ClientSessionEvent::ConnectionRequestAccepted) => {
-						let result = session
-							.request_publishing("cam0".to_string(), PublishRequestType::Live)
-							.unwrap();
+						let result = match mode {
+							ClientMode::Publish => session
+								.request_publishing("cam0".to_string(), PublishRequestType::Live)
+								.unwrap(),
+							ClientMode::Play => session.request_playback("cam0".to_string()).unwrap(),
+						};
 						work.push_back(result);
 					}
 					_ => {}
@@ -620,6 +914,141 @@ mod tests {
 		}
 	}
 
+	/// A received RTMP media message: `is_video` and the message body.
+	type Media = (bool, bytes::Bytes);
+
+	/// Drive an RTMP play client over `stream` through handshake -> connect(`live`)
+	/// -> play(`cam0`), collecting media messages until `want` have arrived.
+	async fn play_client_collect<S: Stream>(mut stream: S, want: usize) -> Vec<Media> {
+		// Handshake.
+		let mut handshake = Handshake::new(PeerType::Client);
+		stream
+			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
+			.await
+			.unwrap();
+		let mut buffer = [0u8; 4096];
+		let remaining = loop {
+			let n = stream.read(&mut buffer).await.unwrap();
+			match handshake.process_bytes(&buffer[..n]).unwrap() {
+				HandshakeProcessResult::InProgress { response_bytes } => {
+					if !response_bytes.is_empty() {
+						stream.write_all(&response_bytes).await.unwrap();
+					}
+				}
+				HandshakeProcessResult::Completed {
+					response_bytes,
+					remaining_bytes,
+				} => {
+					if !response_bytes.is_empty() {
+						stream.write_all(&response_bytes).await.unwrap();
+					}
+					break remaining_bytes;
+				}
+			}
+		};
+
+		let (mut session, initial) = ClientSession::new(ClientSessionConfig::new()).unwrap();
+		let mut work: VecDeque<ClientSessionResult> = VecDeque::from(initial);
+		if !remaining.is_empty() {
+			work.extend(session.handle_input(&remaining).unwrap());
+		}
+		work.push_back(session.request_connection("live".to_string()).unwrap());
+
+		let mut media = Vec::new();
+		loop {
+			while let Some(result) = work.pop_front() {
+				match result {
+					ClientSessionResult::OutboundResponse(packet) => {
+						stream.write_all(&packet.bytes).await.unwrap();
+					}
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::ConnectionRequestAccepted) => {
+						work.push_back(session.request_playback("cam0".to_string()).unwrap());
+					}
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::VideoDataReceived { data, .. }) => {
+						media.push((true, data));
+					}
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::AudioDataReceived { data, .. }) => {
+						media.push((false, data));
+					}
+					_ => {}
+				}
+			}
+			if media.len() >= want {
+				return media;
+			}
+			let n = stream.read(&mut buffer).await.unwrap();
+			if n == 0 {
+				return media;
+			}
+			work.extend(session.handle_input(&buffer[..n]).unwrap());
+		}
+	}
+
+	/// End-to-end play: publish a real broadcast into an origin (via the FLV
+	/// importer, so it carries a catalog + frames), then drive an RTMP play client
+	/// and assert it receives the muxed AVC sequence header and keyframe back.
+	#[tokio::test]
+	async fn play_streams_broadcast_to_client() {
+		// An AVC sequence-header tag body: keyframe + AVC CodecID, AVCPacketType 0,
+		// composition time 0, then a minimal avcC (one SPS, one PPS).
+		let avcc = {
+			let sps = [0x67u8, 0x42, 0xc0, 0x1f];
+			let mut out = vec![0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, sps.len() as u8];
+			out.extend_from_slice(&sps);
+			out.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
+			out
+		};
+		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
+		vseq.extend_from_slice(&avcc);
+		// A keyframe NALU tag body: AVCPacketType 1, then a length-prefixed IDR.
+		let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00];
+		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
+
+		// Publish the broadcast at `live/cam0` by feeding synthetic FLV to the importer.
+		let origin = moq_net::Origin::random().produce();
+		let mut broadcast = BroadcastInfo::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut importer = FlvImport::new(broadcast.clone(), catalog);
+		let _publish = origin.publish_broadcast("live/cam0", broadcast.consume()).unwrap();
+		importer.decode(&flv::file_header()).unwrap();
+		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
+		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
+		importer.finish().unwrap();
+
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = server.local_addr().unwrap();
+		let consumer = origin.consume();
+
+		// Serve the first (play) request against the populated origin.
+		let server_task = tokio::spawn(async move {
+			let request = server.accept().await.expect("a request");
+			let Request::Play(play) = request else {
+				panic!("expected a play request");
+			};
+			play.accept(&consumer, "live/cam0").await.unwrap();
+		});
+
+		let stream = TcpStream::connect(addr).await.unwrap();
+		let media = tokio::time::timeout(Duration::from_secs(5), play_client_collect(stream, 2))
+			.await
+			.expect("play client timed out");
+
+		assert!(
+			media.len() >= 2,
+			"expected the seq header and a keyframe, got {}",
+			media.len()
+		);
+		// First video message is the AVC sequence header (AVCPacketType 0).
+		assert!(media[0].0, "first message should be video");
+		assert_eq!(media[0].1[0], 0x17);
+		assert_eq!(media[0].1[1], 0x00);
+		// Second is the keyframe NALU (AVCPacketType 1).
+		assert!(media[1].0, "second message should be video");
+		assert_eq!(media[1].1[1], 0x01);
+
+		server_task.abort();
+	}
+
 	#[tokio::test]
 	async fn accept_yields_publish_request() {
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -627,7 +1056,7 @@ mod tests {
 
 		let client = tokio::spawn(async move {
 			let stream = TcpStream::connect(addr).await.unwrap();
-			run_client(stream).await;
+			run_client(stream, ClientMode::Publish).await;
 		});
 
 		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
@@ -638,7 +1067,35 @@ mod tests {
 		assert_eq!(request.app(), "live");
 		assert_eq!(request.stream_key(), "cam0");
 
-		request.reject("test rejection").await.unwrap();
+		let Request::Publish(publish) = request else {
+			panic!("expected a publish request");
+		};
+		publish.reject("test rejection").await.unwrap();
+		client.abort();
+	}
+
+	#[tokio::test]
+	async fn accept_yields_play_request() {
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = server.local_addr().unwrap();
+
+		let client = tokio::spawn(async move {
+			let stream = TcpStream::connect(addr).await.unwrap();
+			run_client(stream, ClientMode::Play).await;
+		});
+
+		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+			.await
+			.expect("server.accept timed out")
+			.expect("server yielded a request");
+
+		assert_eq!(request.app(), "live");
+		assert_eq!(request.stream_key(), "cam0");
+
+		let Request::Play(play) = request else {
+			panic!("expected a play request");
+		};
+		play.reject("test rejection").await.unwrap();
 		client.abort();
 	}
 
@@ -719,7 +1176,7 @@ mod tests {
 			let tcp = TcpStream::connect(addr).await.unwrap();
 			let server_name = ServerName::try_from("localhost").unwrap();
 			let stream = connector.connect(server_name, tcp).await.unwrap();
-			run_client(stream).await;
+			run_client(stream, ClientMode::Publish).await;
 		});
 
 		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
@@ -730,7 +1187,10 @@ mod tests {
 		assert_eq!(request.app(), "live");
 		assert_eq!(request.stream_key(), "cam0");
 
-		request.reject("test rejection").await.unwrap();
+		let Request::Publish(publish) = request else {
+			panic!("expected a publish request");
+		};
+		publish.reject("test rejection").await.unwrap();
 		client.abort();
 	}
 }

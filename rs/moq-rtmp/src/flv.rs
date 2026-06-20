@@ -12,8 +12,13 @@
 //! See `moq-mux/src/container/flv` for the matching reader; the field layout
 //! here mirrors what it parses (11-byte tag header, 24-bit + 8-bit extended
 //! millisecond timestamp, trailing `PreviousTagSize`).
+//!
+//! The reverse direction (play / egress) uses [`TagReader`]: it splits the FLV
+//! byte stream that [`moq_mux::container::flv::Export`] produces back into
+//! individual tags, so each tag body can be sent to a player as an RTMP
+//! audio/video message.
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 /// FLV tag type for audio data (matches moq-mux's `TAG_AUDIO`).
 pub const TAG_AUDIO: u8 = 8;
@@ -69,9 +74,149 @@ pub fn tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Bytes {
 	buf.freeze()
 }
 
+/// One FLV media tag pulled out of an [`Export`](moq_mux::container::flv::Export)
+/// byte stream by [`TagReader`], ready to send as an RTMP message body.
+pub struct Tag {
+	/// FLV tag type: [`TAG_AUDIO`] or [`TAG_VIDEO`].
+	pub tag_type: u8,
+	/// Tag timestamp in milliseconds (the reassembled 24-bit + extended byte).
+	pub timestamp: u32,
+	/// The tag body, i.e. the bytes of the RTMP audio/video message to send.
+	pub body: Bytes,
+}
+
+/// Splits an FLV byte stream back into its individual tags.
+///
+/// The inverse of [`file_header`] + [`tag`]: feed the chunks
+/// [`Export`](moq_mux::container::flv::Export) yields via [`push`](Self::push),
+/// then drain whole tags with [`next`](Self::next). The leading FLV file header
+/// is consumed and discarded; only the audio/video tags surface, each carrying
+/// the body to forward as an RTMP message.
+#[derive(Default)]
+pub struct TagReader {
+	/// Bytes received but not yet parsed into a complete tag.
+	buf: BytesMut,
+	/// Set once the FLV file header has been consumed.
+	header_done: bool,
+}
+
+impl TagReader {
+	/// Create an empty reader.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Append a chunk of the FLV byte stream.
+	pub fn push(&mut self, bytes: &[u8]) {
+		self.buf.extend_from_slice(bytes);
+	}
+
+	/// Pop the next complete tag, or `None` if more bytes are needed first.
+	///
+	/// Errors only if the stream doesn't start with the FLV signature.
+	pub fn next(&mut self) -> anyhow::Result<Option<Tag>> {
+		if !self.header_done {
+			// File header: a 9-byte header whose last 4 bytes are the DataOffset,
+			// followed by the 4-byte PreviousTagSize0.
+			if self.buf.len() < FILE_HEADER_LEN {
+				return Ok(None);
+			}
+			anyhow::ensure!(&self.buf[0..3] == b"FLV", "not an FLV stream");
+			let data_offset = u32::from_be_bytes([self.buf[5], self.buf[6], self.buf[7], self.buf[8]]) as usize;
+			let skip = data_offset + 4;
+			if self.buf.len() < skip {
+				return Ok(None);
+			}
+			self.buf.advance(skip);
+			self.header_done = true;
+		}
+
+		// Tag header (11 bytes), body (DataSize bytes), then the 4-byte PreviousTagSize.
+		if self.buf.len() < TAG_HEADER_LEN {
+			return Ok(None);
+		}
+		let tag_type = self.buf[0];
+		let data_size = ((self.buf[1] as usize) << 16) | ((self.buf[2] as usize) << 8) | (self.buf[3] as usize);
+		let timestamp = ((self.buf[4] as u32) << 16)
+			| ((self.buf[5] as u32) << 8)
+			| (self.buf[6] as u32)
+			| ((self.buf[7] as u32) << 24);
+
+		if self.buf.len() < TAG_HEADER_LEN + data_size + 4 {
+			return Ok(None);
+		}
+
+		self.buf.advance(TAG_HEADER_LEN);
+		let body = self.buf.split_to(data_size).freeze();
+		self.buf.advance(4); // PreviousTagSize
+
+		Ok(Some(Tag {
+			tag_type,
+			timestamp,
+			body,
+		}))
+	}
+}
+
+/// Bytes in the FLV file header (signature, version, flags, DataOffset).
+const FILE_HEADER_LEN: usize = 9;
+/// Bytes in an FLV tag header (type, 24-bit size, timestamp, stream id).
+const TAG_HEADER_LEN: usize = 11;
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn tag_reader_splits_header_and_tags() {
+		let mut reader = TagReader::new();
+		reader.push(&file_header());
+		// A header chunk often carries the sequence-header tag(s) too; feed two tags.
+		reader.push(&tag(TAG_VIDEO, 0, &[0x17, 0x00]));
+		reader.push(&tag(TAG_AUDIO, 0x01_02_03_04, &[0xaf, 0x00, 0x12]));
+
+		let v = reader.next().unwrap().expect("video tag");
+		assert_eq!(v.tag_type, TAG_VIDEO);
+		assert_eq!(v.timestamp, 0);
+		assert_eq!(&v.body[..], &[0x17, 0x00]);
+
+		let a = reader.next().unwrap().expect("audio tag");
+		assert_eq!(a.tag_type, TAG_AUDIO);
+		assert_eq!(a.timestamp, 0x01_02_03_04);
+		assert_eq!(&a.body[..], &[0xaf, 0x00, 0x12]);
+
+		assert!(reader.next().unwrap().is_none());
+	}
+
+	#[test]
+	fn tag_reader_waits_for_a_whole_tag() {
+		let mut reader = TagReader::new();
+		reader.push(&file_header());
+		let full = tag(TAG_VIDEO, 7, &[1, 2, 3, 4, 5]);
+		// Feed everything but the last byte: no complete tag yet.
+		reader.push(&full[..full.len() - 1]);
+		assert!(reader.next().unwrap().is_none());
+		// The final byte completes it.
+		reader.push(&full[full.len() - 1..]);
+		let t = reader.next().unwrap().expect("tag once complete");
+		assert_eq!(t.timestamp, 7);
+		assert_eq!(&t.body[..], &[1, 2, 3, 4, 5]);
+	}
+
+	#[test]
+	fn tag_reader_round_trips_export_style_framing() {
+		// Mirrors how Export emits: header chunk, then one tag per chunk.
+		let mut reader = TagReader::new();
+		let mut header = BytesMut::new();
+		header.extend_from_slice(&file_header());
+		header.extend_from_slice(&tag(TAG_VIDEO, 0, b"seqhdr"));
+		reader.push(&header);
+		reader.push(&tag(TAG_VIDEO, 33, b"frame"));
+
+		assert_eq!(&reader.next().unwrap().unwrap().body[..], b"seqhdr");
+		assert_eq!(&reader.next().unwrap().unwrap().body[..], b"frame");
+		assert!(reader.next().unwrap().is_none());
+	}
 
 	#[test]
 	fn tag_layout_roundtrips_timestamp_and_size() {
