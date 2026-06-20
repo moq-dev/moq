@@ -325,3 +325,23 @@ export function formatBitrate(bps: number): string {
 export function formatFps(v: number): string {
 	return `${v.toFixed(0)} fps`;
 }
+
+/** A key/value row for the stat panels. */
+export function kv(key: string, value: string): HTMLElement {
+	const row = document.createElement("div");
+	row.className = "flex justify-between gap-4 text-sm";
+	const k = document.createElement("span");
+	k.className = "text-neutral-400";
+	k.textContent = key;
+	const v = document.createElement("span");
+	v.className = "font-mono text-neutral-100 text-right break-all";
+	v.textContent = value;
+	row.append(k, v);
+	return row;
+}
+
+/** Render key/value rows, skipping any whose value is undefined (we don't show a stat we don't know). */
+export function renderRows(container: HTMLElement, rows: [string, string | undefined][]): void {
+	const known = rows.filter((r): r is [string, string] => r[1] !== undefined);
+	container.replaceChildren(...known.map(([k, v]) => kv(k, v)));
+}

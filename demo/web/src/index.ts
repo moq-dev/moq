@@ -22,7 +22,7 @@ import "@moq/watch/ui"; // defines <moq-watch-ui>
 import { Hang, Json, Net, Signals } from "@moq/watch";
 import type MoqWatch from "@moq/watch/element";
 import MoqWatchSupport from "@moq/watch/support/element";
-import { bufferBars, formatBitrate, formatFps, graph } from "./viz";
+import { bufferBars, formatBitrate, formatFps, graph, renderRows } from "./viz";
 
 export { MoqWatchSupport };
 
@@ -511,26 +511,6 @@ function setPill(statusId: string, textId: string, label: string, state: "ok" | 
 	const dot = $(statusId).querySelector(".dot") as HTMLElement;
 	const color = state === "ok" ? "bg-emerald-500" : state === "wait" ? "bg-amber-400" : "bg-red-500";
 	dot.className = `dot w-2 h-2 rounded-full ${color}`;
-}
-
-function kv(key: string, value: string): HTMLElement {
-	const row = document.createElement("div");
-	row.className = "flex justify-between gap-4 text-sm";
-	const k = document.createElement("span");
-	k.className = "text-neutral-400";
-	k.textContent = key;
-	const v = document.createElement("span");
-	v.className = "font-mono text-neutral-100 text-right break-all";
-	v.textContent = value;
-	row.append(k, v);
-	return row;
-}
-
-// Render key/value rows, skipping any whose value is undefined (we don't show a
-// stat we don't know).
-function renderRows(container: HTMLElement, rows: [string, string | undefined][]): void {
-	const known = rows.filter((r): r is [string, string] => r[1] !== undefined);
-	container.replaceChildren(...known.map(([k, v]) => kv(k, v)));
 }
 
 function formatBytes(n: number): string {
