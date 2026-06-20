@@ -122,8 +122,10 @@ impl EgressSource {
 		for rendition in self.catalog.video.renditions.values() {
 			let codec = match rendition.codec.kind() {
 				VideoCodecKind::H264 => Some(Codec::H264),
+				VideoCodecKind::H265 => Some(Codec::H265),
 				VideoCodecKind::VP8 => Some(Codec::Vp8),
 				VideoCodecKind::VP9 => Some(Codec::Vp9),
+				VideoCodecKind::AV1 => Some(Codec::Av1),
 				_ => None,
 			};
 			if let Some(c) = codec
@@ -155,11 +157,13 @@ async fn pick_track(
 			};
 			Ok(Some(codec::Track::opus(broadcast, name).await?))
 		}
-		Codec::H264 | Codec::Vp8 | Codec::Vp9 => {
+		Codec::H264 | Codec::H265 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 => {
 			let target = match codec {
 				Codec::H264 => VideoCodecKind::H264,
+				Codec::H265 => VideoCodecKind::H265,
 				Codec::Vp8 => VideoCodecKind::VP8,
 				Codec::Vp9 => VideoCodecKind::VP9,
+				Codec::Av1 => VideoCodecKind::AV1,
 				_ => unreachable!(),
 			};
 			let Some((name, config)) = catalog.video.renditions.iter().find(|(_, c)| c.codec.kind() == target) else {

@@ -22,8 +22,29 @@ pub enum PublishFormat {
 	Capture(CaptureArgs),
 }
 
-/// Device capture options. Video (camera -> H.264) maps to `moq-video`; audio
-/// (microphone -> Opus) to `moq-audio`. Both are captured by default; use
+/// `clap` adapter for [`moq_video::encode::Codec`].
+#[cfg(feature = "capture")]
+#[derive(clap::ValueEnum, Clone, Copy, Default)]
+pub enum VideoCodec {
+	/// H.264 / AVC (the default; widest support).
+	#[default]
+	H264,
+	/// H.265 / HEVC (hardware-only).
+	H265,
+}
+
+#[cfg(feature = "capture")]
+impl From<VideoCodec> for moq_video::encode::Codec {
+	fn from(codec: VideoCodec) -> Self {
+		match codec {
+			VideoCodec::H264 => moq_video::encode::Codec::H264,
+			VideoCodec::H265 => moq_video::encode::Codec::H265,
+		}
+	}
+}
+
+/// Device capture options. Video (camera -> H.264/H.265) maps to `moq-video`;
+/// audio (microphone -> Opus) to `moq-audio`. Both are captured by default; use
 /// `--no-video` / `--no-audio` to publish only one.
 #[cfg(feature = "capture")]
 #[derive(clap::Args, Clone)]
@@ -53,6 +74,10 @@ pub struct CaptureArgs {
 	/// Target video bitrate in bits per second. Omit to derive one from the resolution.
 	#[arg(long)]
 	pub bitrate: Option<u64>,
+
+	/// Video codec to encode. H.265 is hardware-only (VideoToolbox on macOS).
+	#[arg(long, value_enum, default_value_t)]
+	pub codec: VideoCodec,
 
 	/// Force a hardware encoder (error if none is available).
 	#[arg(long, conflicts_with = "software")]
@@ -269,6 +294,7 @@ impl CaptureArgs {
 	fn video_encode(&self) -> moq_video::encode::Options {
 		let mut options = moq_video::encode::Options::default();
 		options.bitrate = self.bitrate;
+		options.codec = self.codec.into();
 		options.kind = if self.software {
 			moq_video::encode::Kind::Software
 		} else if self.hardware {

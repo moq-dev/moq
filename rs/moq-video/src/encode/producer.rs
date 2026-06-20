@@ -1,10 +1,10 @@
-//! Encode decoded video frames and publish them as an H.264 moq track.
+//! Encode decoded video frames and publish them as a moq video track.
 //!
-//! Encoding is strictly on demand: the avc3 track and catalog entry are
-//! advertised immediately, but the camera stays closed (LED off, no CPU)
-//! until a subscriber appears. When the last viewer leaves, the camera is
-//! released again. This mirrors `moq-boy`, which pauses its emulator on
-//! `TrackProducer::used()` / `unused()`.
+//! Encoding is strictly on demand: the track and catalog entry are advertised
+//! immediately, but the camera stays closed (LED off, no CPU) until a subscriber
+//! appears. When the last viewer leaves, the camera is released again. This
+//! mirrors `moq-boy`, which pauses its emulator on `TrackProducer::used()` /
+//! `unused()`.
 
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -13,51 +13,100 @@ use moq_net::Timestamp;
 use crate::Error;
 use crate::capture::{self, FrameSource};
 
-use super::encoder::{self, Encoder};
+use super::encoder::{self, Codec, Encoder};
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 const DEFAULT_FRAMERATE: u32 = 30;
 
-/// Publishes encoded H.264 frames as an avc3 moq track.
+/// Per-codec splitter + importer pair. Each codec frames its packets and resolves
+/// its catalog rendition differently, so the producer holds one of these.
+enum Codecs {
+	H264 {
+		split: moq_mux::codec::h264::Split,
+		import: moq_mux::codec::h264::Import,
+	},
+	H265 {
+		split: moq_mux::codec::h265::Split,
+		import: moq_mux::codec::h265::Import,
+	},
+}
+
+/// Publishes encoded video frames as a moq track (avc3 / hev1 depending on the
+/// codec).
 ///
 /// Built on the async side so the track is advertised (and the catalog
 /// registered) before the camera opens; this is what lets a subscriber
-/// trigger capture on demand. `moq_mux::codec::h264::Import` handles
-/// catalog registration and framing.
+/// trigger capture on demand. The `moq_mux::codec` importer for the codec
+/// handles catalog registration and framing.
 pub struct Producer {
-	split: moq_mux::codec::h264::Split,
-	import: moq_mux::codec::h264::Import,
+	codecs: Codecs,
 }
 
 impl Producer {
-	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self, Error> {
-		let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
-		let import = moq_mux::codec::h264::Import::new(track, catalog);
-		let split = moq_mux::codec::h264::Split::new();
-		Ok(Self { split, import })
+	/// Publish a track for `codec` into `broadcast`, registering its rendition
+	/// in `catalog`. The packets fed to [`publish`](Self::publish) must be in
+	/// that codec's framing (the matching [`Encoder`](super::Encoder) emits it).
+	pub fn new(
+		mut broadcast: moq_net::BroadcastProducer,
+		catalog: moq_mux::catalog::Producer,
+		codec: Codec,
+	) -> Result<Self, Error> {
+		let codecs = match codec {
+			Codec::H264 => {
+				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
+				Codecs::H264 {
+					split: moq_mux::codec::h264::Split::new(),
+					import: moq_mux::codec::h264::Import::new(track, catalog),
+				}
+			}
+			Codec::H265 => {
+				let track = moq_mux::import::unique_track(&mut broadcast, ".hev1")?;
+				Codecs::H265 {
+					split: moq_mux::codec::h265::Split::new(),
+					import: moq_mux::codec::h265::Import::new(track, catalog),
+				}
+			}
+		};
+		Ok(Self { codecs })
 	}
 
 	/// A watch-only handle to the track's subscriber demand, created eagerly so
 	/// subscription state is observable before any frames arrive. Watch it via
 	/// [`used`](moq_net::TrackDemand::used) / [`unused`](moq_net::TrackDemand::unused).
 	pub fn demand(&self) -> moq_net::TrackDemand {
-		self.import.demand()
+		match &self.codecs {
+			Codecs::H264 { import, .. } => import.demand(),
+			Codecs::H265 { import, .. } => import.demand(),
+		}
 	}
 
-	/// Publish already-encoded Annex-B packets at the given timestamp.
+	/// Publish already-encoded packets at the given timestamp. Each packet is one
+	/// whole access unit in the producer's codec framing.
 	pub fn publish(&mut self, packets: Vec<bytes::Bytes>, timestamp: Timestamp) -> Result<(), Error> {
 		for packet in packets {
 			// The encoder emits one whole access unit per packet, so flush to emit it.
-			let mut frames = self.split.decode(&packet, Some(timestamp))?;
-			frames.extend(self.split.flush(Some(timestamp))?);
-			self.import.decode(frames)?;
+			match &mut self.codecs {
+				Codecs::H264 { split, import } => {
+					let mut frames = split.decode(&packet, Some(timestamp))?;
+					frames.extend(split.flush(Some(timestamp))?);
+					import.decode(frames)?;
+				}
+				Codecs::H265 { split, import } => {
+					let mut frames = split.decode(&packet, Some(timestamp))?;
+					frames.extend(split.flush(Some(timestamp))?);
+					import.decode(frames)?;
+				}
+			}
 		}
 		Ok(())
 	}
 
 	/// Finalize the track.
 	pub fn finish(&mut self) -> Result<(), Error> {
-		self.import.finish()?;
+		match &mut self.codecs {
+			Codecs::H264 { import, .. } => import.finish()?,
+			Codecs::H265 { import, .. } => import.finish()?,
+		}
 		Ok(())
 	}
 }
@@ -74,11 +123,13 @@ impl Producer {
 pub struct Options {
 	/// Target bitrate in bits per second; `None` derives from resolution.
 	pub bitrate: Option<u64>,
+	/// Output codec. Defaults to [`Codec::H264`].
+	pub codec: Codec,
 	/// Encoder implementation preference.
 	pub kind: encoder::Kind,
 }
 
-/// Capture a webcam and publish it as on-demand H.264.
+/// Capture a webcam and publish it as an on-demand video track.
 ///
 /// Returns when the broadcast is dropped (the track stops being announced)
 /// or the capture loop fails. The camera is opened only while at least one
@@ -98,7 +149,7 @@ pub async fn publish_capture(
 		return Err(Error::InvalidFramerate(0));
 	}
 
-	let producer = Producer::new(broadcast, catalog)?;
+	let producer = Producer::new(broadcast, catalog, encode.codec)?;
 	let demand = producer.demand();
 
 	let gate = Gate::new();
@@ -195,6 +246,7 @@ fn capture_loop(
 				.unwrap_or(DEFAULT_FRAMERATE);
 			let mut encoder_config = encoder::Config::new(cam.width(), cam.height(), framerate);
 			encoder_config.bitrate = encode.bitrate;
+			encoder_config.codec = encode.codec;
 			encoder_config.kind = encode.kind.clone();
 			let enc = Encoder::new(&encoder_config)?;
 			tracing::info!(
@@ -291,5 +343,75 @@ impl Gate {
 			state = self.cond.wait(state).unwrap();
 		}
 		!state.closed
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::encode::{Config, Encoder};
+
+	/// Encode a handful of synthetic frames for `codec` and publish them through a
+	/// real [`Producer`], returning the catalog rendition's track name. The
+	/// rendition only appears once the matching importer parses the codec config
+	/// out of the encoded keyframe, so a returned name proves the whole
+	/// encode -> split -> import -> catalog path works for that codec.
+	///
+	/// `kind` is explicit so the test picks a deterministic encoder rather than
+	/// `Auto`, which on Linux CI would try the NVENC backend and panic in cudarc
+	/// on a GPU-less runner.
+	async fn roundtrip_rendition(codec: Codec, kind: encoder::Kind) -> String {
+		let mut broadcast = moq_net::BroadcastInfo::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut producer = Producer::new(broadcast, catalog.clone(), codec).unwrap();
+
+		let mut config = Config::new(320, 240, 30);
+		config.codec = codec;
+		config.kind = kind;
+		let mut encoder = Encoder::new(&config).unwrap();
+		assert_eq!(encoder.codec(), codec);
+
+		let rgba = vec![0x80u8; 320 * 240 * 4];
+		for i in 0..10u64 {
+			let packets = encoder.encode_rgba(&rgba, 320, 240, i == 0).unwrap();
+			let ts = Timestamp::from_micros(i * 33_333).unwrap();
+			producer.publish(packets, ts).unwrap();
+		}
+		let tail = encoder.finish().unwrap();
+		producer
+			.publish(tail, Timestamp::from_micros(10 * 33_333).unwrap())
+			.unwrap();
+
+		let snapshot = catalog.snapshot();
+		snapshot
+			.video
+			.renditions
+			.keys()
+			.next()
+			.cloned()
+			.expect("the importer should have registered a video rendition")
+	}
+
+	#[tokio::test]
+	async fn h264_roundtrip_publishes_avc3() {
+		// Software (openh264) so the test is deterministic and never touches a
+		// hardware backend.
+		assert!(
+			roundtrip_rendition(Codec::H264, encoder::Kind::Software)
+				.await
+				.ends_with(".avc3")
+		);
+	}
+
+	/// H.265 has no software encoder, so this only runs where a hardware one
+	/// exists (VideoToolbox on macOS, the only hardware backend on this target).
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn h265_roundtrip_publishes_hev1() {
+		assert!(
+			roundtrip_rendition(Codec::H265, encoder::Kind::Hardware)
+				.await
+				.ends_with(".hev1")
+		);
 	}
 }

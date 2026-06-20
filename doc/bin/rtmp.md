@@ -1,24 +1,31 @@
 ---
 title: moq-rtmp
-description: RTMP / enhanced-RTMP -> MoQ contribution ingest gateway
+description: RTMP / enhanced-RTMP <-> MoQ gateway (ingest and egress)
 ---
 
 # moq-rtmp
 
-`moq-rtmp` ingests [RTMP](https://en.wikipedia.org/wiki/Real-Time_Messaging_Protocol)
-(the protocol OBS, ffmpeg, and most hardware encoders speak) and publishes each
-stream into Media over QUIC as an ordinary broadcast.
+`moq-rtmp` bridges [RTMP](https://en.wikipedia.org/wiki/Real-Time_Messaging_Protocol)
+(the protocol OBS, ffmpeg, and most hardware encoders and players speak) and
+Media over QUIC, in **both directions**:
+
+- **Publish (ingest):** an encoder pushes a stream in, and `moq-rtmp` publishes it
+  into MoQ as an ordinary broadcast.
+- **Play (egress):** a player pulls `rtmp://host/<app>/<key>`, and `moq-rtmp`
+  subscribes to that broadcast from MoQ and streams it back down. VLC, ffplay, and
+  mpv can play it (browsers can't -- Flash is dead).
 
 RTMP carries media as FLV-format audio/video messages. `moq-rtmp` runs the RTMP
 handshake and chunk/AMF session (via the pure-Rust
-[`rml_rtmp`](https://crates.io/crates/rml_rtmp), no librtmp), re-wraps each
-message as an FLV tag, and feeds it to `moq-mux`'s FLV demuxer, which routes the
-media onto MoQ tracks. It's the contribution-ingest sibling of `moq-srt`
-(SRT/MPEG-TS) and `moq-rtc` (WHIP).
+[`rml_rtmp`](https://crates.io/crates/rml_rtmp), no librtmp). On ingest it re-wraps
+each message as an FLV tag and feeds it to `moq-mux`'s FLV demuxer; on egress it
+muxes the broadcast back to FLV with `moq-mux` and sends the tags out as RTMP
+messages. It's the sibling of `moq-srt` (SRT/MPEG-TS) and `moq-rtc` (WHIP/WHEP).
 
 Both **legacy RTMP** (H.264 + AAC) and **enhanced RTMP** (E-RTMP: the HEVC, AV1,
-VP9, Opus, and AC-3 FourCC payloads) are supported, because all codec handling
-lives in the `moq-mux` FLV demuxer.
+VP9, Opus, and AC-3 FourCC payloads) are supported in each direction, because all
+codec handling lives in the `moq-mux` FLV demuxer/muxer. Legacy players that speak
+only H.264 + AAC will reject the E-RTMP codecs on the play path.
 
 ## CLI shape
 
@@ -40,6 +47,15 @@ and the stream key to `cam0`; with ffmpeg:
 ```bash
 # Lands at broadcast `live/cam0`.
 ffmpeg -re -i input.mp4 -c copy -f flv rtmp://127.0.0.1:1935/live/cam0
+```
+
+Then play the same broadcast back out over RTMP from any player:
+
+```bash
+# Pulls broadcast `live/cam0` (the same URL it was pushed to).
+ffplay rtmp://127.0.0.1:1935/live/cam0
+mpv rtmp://127.0.0.1:1935/live/cam0
+vlc rtmp://127.0.0.1:1935/live/cam0
 ```
 
 ### `serve` flags
@@ -81,23 +97,32 @@ moq-rtmp serve --server-bind [::]:443 --tls-generate localhost \
 
 Each connection's broadcast path is `<app>/<key>` from the RTMP app and stream
 key (`rtmp://host/<app>/<key>`), falling back to just the app when the key is
-empty, with `--rtmp-prefix` prepended. First publisher on a path wins; a second
-connection to the same path is rejected.
+empty, with `--rtmp-prefix` prepended. The same routing applies to both
+directions, so the URL round-trips: push to `rtmp://host/live/cam0`, then pull it
+back from `rtmp://host/live/cam0`.
+
+A play waits for the broadcast to be announced, so a player can connect slightly
+before the publisher. First **publisher** on a path wins (a second publish to a
+live path is rejected); **plays** don't claim a path, so any number of players can
+pull the same broadcast at once. In `serve` mode plays are served from the same
+origin the server exposes, so anything in it -- RTMP ingests and otherwise -- can
+be pulled back out over RTMP.
 
 ## Notes and limitations
 
 - **Auth.** The binary (and the `moq_rtmp::run` convenience) is unauthenticated:
-  anyone who can reach the TCP port can publish. Gate it with a host firewall or
-  a private network. To authenticate, embed the library and drive its
-  `Server` / `Request` API: `Server::accept` yields a pending publish, and you
-  verify the app / stream key (e.g. the stream key as a moq-token JWT) before
-  calling `request.accept(origin, path)` or `request.reject(reason)` -- no
-  callback, the policy lives in your loop.
-- **Embedding.** A relay can run ingest in-process by depending on the `moq-rtmp`
-  library (`default-features = false`). Call `moq_rtmp::run` against its own
-  origin for the unauthenticated case, or use `Server` / `Request` to plug in the
-  relay's existing JWT/path auth and scope the origin per token. Either way the
-  media is published locally with no extra hop.
+  anyone who can reach the TCP port can publish or play. Gate it with a host
+  firewall or a private network. To authenticate, embed the library and drive its
+  `Server` / `Request` API: `Server::accept` yields a `Request` that is either a
+  `Publish` or a `Play`, and you verify the app / stream key (e.g. the stream key
+  as a moq-token JWT) before accepting it into / out of an origin at a path of your
+  choosing, or rejecting it -- no callback, the policy lives in your loop.
+- **Embedding.** A relay can run the gateway in-process by depending on the
+  `moq-rtmp` library (`default-features = false`). Call `moq_rtmp::run` against its
+  own origin for the unauthenticated case (publishers ingest into it, players are
+  served out of it), or use `Server` / `Request` to plug in the relay's existing
+  JWT/path auth and scope the origin per token. Either way the media stays local
+  with no extra hop.
 - **RTMPS.** Embedders can terminate TLS themselves: set `Config::tls` (or
   `Server::with_tls`) with a `rustls::ServerConfig`, or accept the connection and
   finish the TLS handshake by hand and hand the stream to `moq_rtmp::accept_stream`

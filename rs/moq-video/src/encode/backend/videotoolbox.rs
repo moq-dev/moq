@@ -1,10 +1,11 @@
-//! Hardware H.264 backend via Apple VideoToolbox (`VTCompressionSession`).
+//! Hardware H.264 / H.265 backend via Apple VideoToolbox (`VTCompressionSession`).
 //!
-//! VideoToolbox emits AVCC (length-prefixed NALs) with SPS/PPS carried
-//! out-of-band in the sample's format description. We convert to Annex-B
-//! in-band so the output matches every other backend (`moq_mux` avc3 mode):
-//! the encoded slice lengths become start codes, and on each IDR we prepend the
-//! SPS/PPS pulled from the format description.
+//! VideoToolbox emits AVCC/HVCC (length-prefixed NALs) with parameter sets
+//! (SPS/PPS, plus VPS for H.265) carried out-of-band in the sample's format
+//! description. We convert to Annex-B in-band so the output matches every other
+//! backend (`moq_mux` avc3 / hev1 mode): the encoded slice lengths become start
+//! codes, and on each keyframe we prepend the parameter sets pulled from the
+//! format description.
 //!
 //! Hand-written on the raw `objc2-video-toolbox` bindings; there's no
 //! higher-level crate we trust. Used only from the single capture/encode thread,
@@ -19,7 +20,8 @@ use objc2_core_foundation::{
 	CFDictionary, CFNumber, CFNumberType, CFRetained, CFString, CFType, kCFBooleanFalse, kCFBooleanTrue,
 };
 use objc2_core_media::{
-	CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetH264ParameterSetAtIndex, kCMTimeInvalid, kCMVideoCodecType_H264,
+	CMFormatDescription, CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+	CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMTimeInvalid, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
 };
 use objc2_core_video::{
 	CVImageBuffer, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
@@ -31,9 +33,10 @@ use objc2_video_toolbox::{
 	kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_ExpectedFrameRate,
 	kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_ProfileLevel,
 	kVTCompressionPropertyKey_RealTime, kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel,
+	kVTProfileLevel_HEVC_Main_AutoLevel,
 };
 
-use super::super::encoder::Config;
+use super::super::encoder::{Codec, Config};
 use super::Backend;
 use crate::Error;
 use crate::frame::{Frame, I420};
@@ -43,8 +46,8 @@ pub(crate) const NAME: &str = "videotoolbox";
 /// Where the C output callback drops finished frames, read back after each
 /// `encode_frame` + `complete_frames`. Lives behind a `Box` so its address is
 /// stable for the lifetime of the session that holds it as a refcon.
-#[derive(Default)]
 struct Sink {
+	codec: Codec,
 	packets: Vec<Bytes>,
 	error: Option<i32>,
 }
@@ -64,7 +67,18 @@ unsafe impl Send for VideoToolbox {}
 
 impl VideoToolbox {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
-		let mut sink = Box::new(Sink::default());
+		// backend::open only routes codecs this backend advertises, so the match is
+		// exhaustive; a new Codec variant won't compile here until it's handled.
+		let codec_type = match config.codec {
+			Codec::H264 => kCMVideoCodecType_H264,
+			Codec::H265 => kCMVideoCodecType_HEVC,
+		};
+
+		let mut sink = Box::new(Sink {
+			codec: config.codec,
+			packets: Vec::new(),
+			error: None,
+		});
 		let refcon = (&mut *sink as *mut Sink).cast::<c_void>();
 
 		let mut session_ptr: *mut VTCompressionSession = ptr::null_mut();
@@ -73,7 +87,7 @@ impl VideoToolbox {
 				None,
 				config.width as i32,
 				config.height as i32,
-				kCMVideoCodecType_H264,
+				codec_type,
 				None,
 				None,
 				None,
@@ -94,9 +108,13 @@ impl VideoToolbox {
 			unsafe { kVTCompressionPropertyKey_AllowFrameReordering },
 			false,
 		)?;
-		set_property(&session, unsafe { kVTCompressionPropertyKey_ProfileLevel }, unsafe {
-			kVTProfileLevel_H264_High_AutoLevel
-		})?;
+		let profile = unsafe {
+			match config.codec {
+				Codec::H265 => kVTProfileLevel_HEVC_Main_AutoLevel,
+				_ => kVTProfileLevel_H264_High_AutoLevel,
+			}
+		};
+		set_property(&session, unsafe { kVTCompressionPropertyKey_ProfileLevel }, profile)?;
 		set_number(
 			&session,
 			unsafe { kVTCompressionPropertyKey_AverageBitRate },
@@ -117,9 +135,10 @@ impl VideoToolbox {
 
 		tracing::info!(
 			encoder = NAME,
+			codec = ?config.codec,
 			width = config.width,
 			height = config.height,
-			"opened H.264 encoder"
+			"opened video encoder"
 		);
 		Ok(Box::new(Self {
 			session,
@@ -210,30 +229,31 @@ unsafe extern "C-unwind" fn output_callback(
 	let Some(sample) = (unsafe { sample_buffer.as_ref() }) else {
 		return; // dropped frame
 	};
-	match annexb_from_sample(sample) {
+	match annexb_from_sample(sample, sink.codec) {
 		Ok(Some(packet)) => sink.packets.push(packet),
 		Ok(None) => {}
 		Err(status) => sink.error = Some(status),
 	}
 }
 
-/// Convert one AVCC `CMSampleBuffer` into a single Annex-B access unit. On an
-/// IDR, prepend the SPS/PPS from the format description so the stream is
-/// self-contained (avc3).
-fn annexb_from_sample(sample: &CMSampleBuffer) -> Result<Option<Bytes>, i32> {
+/// Convert one AVCC/HVCC `CMSampleBuffer` into a single Annex-B access unit. On a
+/// keyframe, prepend the parameter sets (SPS/PPS for H.264; VPS/SPS/PPS for
+/// H.265) from the format description so the stream is self-contained (avc3 / hev1).
+fn annexb_from_sample(sample: &CMSampleBuffer, codec: Codec) -> Result<Option<Bytes>, i32> {
 	let format = unsafe { sample.format_description() }.ok_or(-1)?;
 
 	// One call with null pointers just reports the count and NAL length size.
 	let mut count: usize = 0;
 	let mut nal_length_size: c_int = 4;
 	let status = unsafe {
-		CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+		get_param_set(
 			&format,
 			0,
 			ptr::null_mut(),
 			ptr::null_mut(),
 			&mut count,
 			&mut nal_length_size,
+			codec,
 		)
 	};
 	if status != 0 {
@@ -254,23 +274,15 @@ fn annexb_from_sample(sample: &CMSampleBuffer) -> Result<Option<Bytes>, i32> {
 	let avcc = unsafe { slice::from_raw_parts(data_ptr as *const u8, total) };
 
 	let slices = split_avcc(avcc, nal_length_size as usize);
-	let is_idr = slices.iter().any(|nal| nal_unit_type(nal) == NAL_TYPE_IDR);
+	let is_keyframe = slices.iter().any(|nal| is_keyframe_nal(nal, codec));
 
 	let mut out = BytesMut::with_capacity(total + 64);
-	if is_idr {
+	if is_keyframe {
 		for i in 0..count {
 			let mut ptr: *const u8 = ptr::null();
 			let mut size: usize = 0;
-			let status = unsafe {
-				CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-					&format,
-					i,
-					&mut ptr,
-					&mut size,
-					ptr::null_mut(),
-					ptr::null_mut(),
-				)
-			};
+			let status =
+				unsafe { get_param_set(&format, i, &mut ptr, &mut size, ptr::null_mut(), ptr::null_mut(), codec) };
 			if status != 0 {
 				return Err(status);
 			}
@@ -286,10 +298,41 @@ fn annexb_from_sample(sample: &CMSampleBuffer) -> Result<Option<Bytes>, i32> {
 	Ok(Some(out.freeze()))
 }
 
-const NAL_TYPE_IDR: u8 = 5;
+/// Dispatch to the codec-specific VideoToolbox parameter-set getter. Both have
+/// identical signatures; only the codec differs.
+#[allow(clippy::too_many_arguments)]
+unsafe fn get_param_set(
+	format: &CMFormatDescription,
+	index: usize,
+	ptr_out: *mut *const u8,
+	size_out: *mut usize,
+	count_out: *mut usize,
+	nal_len_out: *mut c_int,
+	codec: Codec,
+) -> i32 {
+	match codec {
+		Codec::H265 => unsafe {
+			CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format, index, ptr_out, size_out, count_out, nal_len_out)
+		},
+		_ => unsafe {
+			CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, index, ptr_out, size_out, count_out, nal_len_out)
+		},
+	}
+}
 
-fn nal_unit_type(nal: &[u8]) -> u8 {
-	nal.first().map_or(0, |b| b & 0x1f)
+/// Whether a NAL is a keyframe slice: an H.264 IDR (type 5), or an H.265 IRAP
+/// picture (BLA/IDR/CRA, types 16..=23).
+fn is_keyframe_nal(nal: &[u8], codec: Codec) -> bool {
+	let Some(&b) = nal.first() else {
+		return false;
+	};
+	match codec {
+		Codec::H265 => {
+			let nal_type = (b >> 1) & 0x3f;
+			(16..=23).contains(&nal_type)
+		}
+		_ => b & 0x1f == 5,
+	}
 }
 
 fn append_annexb(out: &mut BytesMut, nal: &[u8]) {
