@@ -356,13 +356,18 @@ mod tests {
 	/// rendition only appears once the matching importer parses the codec config
 	/// out of the encoded keyframe, so a returned name proves the whole
 	/// encode -> split -> import -> catalog path works for that codec.
-	async fn roundtrip_rendition(codec: Codec) -> String {
+	///
+	/// `kind` is explicit so the test picks a deterministic encoder rather than
+	/// `Auto`, which on Linux CI would try the NVENC backend and panic in cudarc
+	/// on a GPU-less runner.
+	async fn roundtrip_rendition(codec: Codec, kind: encoder::Kind) -> String {
 		let mut broadcast = moq_net::BroadcastInfo::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut producer = Producer::new(broadcast, catalog.clone(), codec).unwrap();
 
 		let mut config = Config::new(320, 240, 30);
 		config.codec = codec;
+		config.kind = kind;
 		let mut encoder = Encoder::new(&config).unwrap();
 		assert_eq!(encoder.codec(), codec);
 
@@ -389,14 +394,24 @@ mod tests {
 
 	#[tokio::test]
 	async fn h264_roundtrip_publishes_avc3() {
-		assert!(roundtrip_rendition(Codec::H264).await.ends_with(".avc3"));
+		// Software (openh264) so the test is deterministic and never touches a
+		// hardware backend.
+		assert!(
+			roundtrip_rendition(Codec::H264, encoder::Kind::Software)
+				.await
+				.ends_with(".avc3")
+		);
 	}
 
 	/// H.265 has no software encoder, so this only runs where a hardware one
-	/// exists (VideoToolbox on macOS).
+	/// exists (VideoToolbox on macOS, the only hardware backend on this target).
 	#[cfg(target_os = "macos")]
 	#[tokio::test]
 	async fn h265_roundtrip_publishes_hev1() {
-		assert!(roundtrip_rendition(Codec::H265).await.ends_with(".hev1"));
+		assert!(
+			roundtrip_rendition(Codec::H265, encoder::Kind::Hardware)
+				.await
+				.ends_with(".hev1")
+		);
 	}
 }
