@@ -443,10 +443,12 @@ impl<S: Stream> Play<S> {
 
 		tracing::info!(peer = %self.peer, %path, "rtmp play accepted");
 
-		// Wait for the broadcast, but abandon the wait if the viewer hangs up.
+		// Wait for the broadcast, but abandon the wait if the viewer hangs up. Feed
+		// the client's bytes through the session (not discard them) so its
+		// deserializer stays in sync for everything `play_pump` parses next.
 		let broadcast = tokio::select! {
 			biased;
-			res = drain_input(&mut self.stream) => {
+			res = feed_input(&mut self.stream, &mut self.session, &mut self.work) => {
 				res?;
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
@@ -727,16 +729,41 @@ async fn flush_outbound<S: Stream>(stream: &mut S, work: &mut VecDeque<ServerSes
 	Ok(())
 }
 
-/// Read and discard client bytes until the connection closes.
+/// Feed client bytes through the session while we wait for the broadcast, until
+/// the viewer hangs up or stops.
 ///
-/// Used to detect a viewer hanging up while we wait for their broadcast to come
-/// online. Pre-playback the client only sends control messages (window ack,
-/// buffer length) that need no response, so discarding them is safe. Returns
-/// `Ok(())` on a clean close (EOF), or an error on an I/O failure.
-async fn drain_input<S: Stream>(stream: &mut S) -> anyhow::Result<()> {
+/// Returns `Ok(())` when the client closes the connection (EOF) or issues a
+/// `play` teardown, so the caller can abandon the play. Crucially it does *not*
+/// discard the bytes: RTMP is a single continuous chunk stream, so skipping any
+/// bytes would desynchronize the session's deserializer for everything
+/// [`play_pump`] parses afterwards. Pre-playback the client's control messages
+/// (window ack, set buffer length) need no reply, so any responses are left
+/// queued in `work` for `play_pump` to flush rather than written here. The only
+/// await is the read, so dropping this future when the broadcast arrives is
+/// cancellation-safe (no half-consumed read).
+async fn feed_input<S: Stream>(
+	stream: &mut S,
+	session: &mut ServerSession,
+	work: &mut VecDeque<ServerSessionResult>,
+) -> anyhow::Result<()> {
 	let mut buffer = [0u8; READ_BUFFER];
 	loop {
-		if stream.read(&mut buffer).await? == 0 {
+		let n = stream.read(&mut buffer).await?;
+		if n == 0 {
+			return Ok(());
+		}
+		let results = session
+			.handle_input(&buffer[..n])
+			.map_err(|e| anyhow::anyhow!("rtmp handle_input: {e:?}"))?;
+		// The viewer tore down the play before media started: stop waiting.
+		let stopped = results.iter().any(|r| {
+			matches!(
+				r,
+				ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished { .. })
+			)
+		});
+		work.extend(results);
+		if stopped {
 			return Ok(());
 		}
 	}
