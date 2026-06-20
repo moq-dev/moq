@@ -38,10 +38,6 @@ tracing = "0.1"
 yuv = "0.8.14"
 
 [target.'cfg(target_os="linux")'.dependencies]
-# Native V4L2 webcam capture (replaces nokhwa). `v4l` streams MMAP buffers;
-# MJPEG cameras are decoded with the pure-Rust `zune-jpeg` (no libjpeg/IJG).
-v4l = "0.14"
-zune-jpeg = "0.5"
 # NVENC hardware encoder, always-on for Linux. Everything is dlopen'd at runtime:
 # cudarc loads CUDA, and nvidia-video-codec-sdk's `dynamic-loading` (a fork
 # feature, see the root [patch.crates-io]) loads libnvidia-encode. So the binary
@@ -49,15 +45,19 @@ zune-jpeg = "0.5"
 # driver, falling back to the next encoder (see backend::open). `cuda-12020` pins
 # the CUDA API version so the build needs no CUDA toolkit.
 cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
-# default-features off so the crate's `cuda-version-from-build-system` default
-# stays off: we pin the CUDA version via our own cudarc dep (cuda-12020) instead,
-# so the build needs no CUDA toolkit.
-nvidia-video-codec-sdk = { version = "0.4", default-features = false, features = ["dynamic-loading"] }
 # Intel/AMD VAAPI hardware encoder, always-on for Linux. Builds against its own
 # vendored libva headers and dlopen's libva at runtime, so it builds without
 # system libva-dev and still loads on machines without libva, falling back to the
 # next encoder (see backend::open).
 moq-vaapi = { workspace = true }
+# default-features off so the crate's `cuda-version-from-build-system` default
+# stays off: we pin the CUDA version via our own cudarc dep (cuda-12020) instead,
+# so the build needs no CUDA toolkit.
+nvidia-video-codec-sdk = { version = "0.4", default-features = false, features = ["dynamic-loading"] }
+# Native V4L2 webcam capture (replaces nokhwa). `v4l` streams MMAP buffers;
+# MJPEG cameras are decoded with the pure-Rust `zune-jpeg` (no libjpeg/IJG).
+v4l = "0.14"
+zune-jpeg = "0.5"
 
 [target.'cfg(target_os="macos")'.dependencies]
 block2 = "0.6.2"
