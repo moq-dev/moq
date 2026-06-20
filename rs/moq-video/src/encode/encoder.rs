@@ -15,15 +15,18 @@ use crate::frame::{Frame, I420};
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Kind {
-	/// Prefer a platform hardware encoder, fall back to software.
+	/// Prefer a platform hardware encoder; fall back to software only when the
+	/// `software` feature is enabled. Without it, `Auto` errors on a box with no
+	/// hardware encoder.
 	#[default]
 	Auto,
 	/// Hardware only; error if none is available.
 	Hardware,
-	/// Software (openh264) only.
+	/// Software (openh264) only. Requires the `software` feature; otherwise no
+	/// encoder opens and [`Encoder::new`] returns [`Error::NoEncoder`].
 	Software,
 	/// A specific backend by name, e.g. `"videotoolbox"`, `"nvenc"`, `"vaapi"`,
-	/// `"openh264"`.
+	/// or `"openh264"` (the last only with the `software` feature).
 	Named(String),
 }
 
@@ -177,6 +180,7 @@ mod tests {
 		vec![0x80u8; width as usize * height as usize * 4]
 	}
 
+	#[cfg(feature = "software")]
 	#[test]
 	fn software_encoder_emits_annexb() {
 		let config = Config {
@@ -208,11 +212,11 @@ mod tests {
 
 	#[test]
 	fn encode_rgba_emits_annexb() {
-		let config = Config {
-			kind: Kind::Software,
-			..Config::new(320, 240, 30)
+		// Any available encoder suffices; skip where none opens (e.g. a GPU-less
+		// box built without the `software` feature).
+		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, 30)) else {
+			return;
 		};
-		let mut encoder = Encoder::new(&config).unwrap();
 
 		let rgba = gray_rgba(320, 240);
 		let mut packets = encoder.encode_rgba(&rgba, 320, 240, true).unwrap();
@@ -223,11 +227,9 @@ mod tests {
 
 	#[test]
 	fn encode_rgba_rejects_short_buffer() {
-		let config = Config {
-			kind: Kind::Software,
-			..Config::new(320, 240, 30)
+		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, 30)) else {
+			return;
 		};
-		let mut encoder = Encoder::new(&config).unwrap();
 		// Far smaller than 320*240*4: must error, not panic on conversion.
 		assert!(matches!(
 			encoder.encode_rgba(&[0u8; 16], 320, 240, false),
@@ -237,11 +239,9 @@ mod tests {
 
 	#[test]
 	fn encode_rgba_rejects_dimension_mismatch() {
-		let config = Config {
-			kind: Kind::Software,
-			..Config::new(320, 240, 30)
+		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, 30)) else {
+			return;
 		};
-		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = gray_rgba(640, 480);
 		assert!(matches!(
 			encoder.encode_rgba(&rgba, 640, 480, false),
@@ -251,10 +251,9 @@ mod tests {
 
 	#[test]
 	fn new_rejects_zero_framerate() {
-		let config = Config {
-			kind: Kind::Software,
-			..Config::new(320, 240, 0)
-		};
+		// Framerate is validated before any backend opens, so this holds on every
+		// platform regardless of which encoders are compiled in.
+		let config = Config::new(320, 240, 0);
 		assert!(matches!(Encoder::new(&config), Err(Error::InvalidFramerate(0))));
 	}
 
@@ -330,7 +329,7 @@ mod tests {
 
 	/// A software encoder must download a GPU surface to I420 first. Exercises
 	/// the NV12 -> I420 fallback path.
-	#[cfg(target_os = "macos")]
+	#[cfg(all(target_os = "macos", feature = "software"))]
 	#[test]
 	fn openh264_downloads_surface() {
 		let config = Config {

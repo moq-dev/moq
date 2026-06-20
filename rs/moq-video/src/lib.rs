@@ -8,8 +8,9 @@
 //!   frames per platform: AVFoundation/ScreenCaptureKit on macOS, native V4L2
 //!   on Linux, native Media Foundation on Windows. Today that's a webcam or
 //!   the screen.
-//! - [`encode`] H.264-encodes frames with a native backend (openh264 /
-//!   VideoToolbox / NVENC) and publishes them through
+//! - [`encode`] H.264-encodes frames with a native hardware backend
+//!   (VideoToolbox / Media Foundation / NVENC / VAAPI; openh264 software is an
+//!   opt-in `software` feature) and publishes them through
 //!   [`moq_mux::codec::h264::Import`], which handles catalog registration
 //!   and framing. Two entry points:
 //!   - [`encode::publish_capture`] captures a webcam and publishes it (turnkey).
@@ -24,7 +25,7 @@
 //! ## API stability
 //!
 //! The public API is codec-agnostic: no public type, signature, or error
-//! variant names a backend (openh264 / VideoToolbox / NVENC) or a capture
+//! variant names a backend (VideoToolbox / NVENC / VAAPI / openh264) or a capture
 //! implementation. [`encode::Encoder`] takes raw RGBA bytes, and the camera
 //! capture path stays internal. So swapping or bumping any backend crate is not
 //! a breaking change for consumers. Config structs are `#[non_exhaustive]`:

@@ -240,7 +240,7 @@ let
 
   # Every system lib the workspace needs to compile with all features on:
   # bindgen (clang) for ffmpeg/vaapi, GStreamer for moq-gst, ALSA for
-  # moq-audio's capture feature, libva for moq-video's vaapi feature. The
+  # moq-audio's capture feature, libva for moq-video's VAAPI backend. The
   # Linux-only libs match the devShell's `lib.optionals (!isDarwin)` set.
   checkCommonArgs = {
     src = checkSrc;

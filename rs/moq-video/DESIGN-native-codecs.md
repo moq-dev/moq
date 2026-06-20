@@ -102,9 +102,9 @@ encode/
   backend/
     mod.rs          # Backend trait + open_backend(kind, config) fallback chain
     videotoolbox.rs # cfg(target_os = "macos")
-    nvenc.rs        # cfg(all(target_os = "linux", feature = "nvenc"))
-    vaapi.rs        # cfg(all(target_os = "linux", feature = "vaapi"))
-    openh264.rs     # software fallback, all platforms
+    nvenc.rs        # cfg(target_os = "linux")
+    vaapi.rs        # cfg(target_os = "linux")
+    openh264.rs     # cfg(feature = "software"), all platforms
 ```
 
 The public surface (`Encoder`, `Config`, `Kind`, `Producer`, `Options`,
@@ -214,9 +214,7 @@ Wrinkles to handle:
 ```toml
 [features]
 default = []                       # capture pulled in by moq-cli's `capture` feature
-nvenc  = ["dep:nvidia-video-codec-sdk"]   # linux only, opt-in
-vaapi  = ["dep:moq-vaapi", "moq-vaapi/dlopen"] # linux only, opt-in
-# videotoolbox + openh264 need no feature: gated by cfg(target_os) / always-on
+software = ["dep:openh264"]        # opt-in software fallback, all targets
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-video-toolbox = "..."
@@ -224,28 +222,31 @@ objc2-core-media = "..."
 objc2-core-video = "..."
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nvidia-video-codec-sdk = { version = "0.4", optional = true }
-moq-vaapi = { workspace = true, optional = true }       # in-tree; vendored cros-libva + cros-codecs
+# Hardware encoders are always-on for Linux (cfg-gated, no feature). Both
+# dlopen their drivers at runtime, so they link on a GPU-less builder.
+nvidia-video-codec-sdk = { version = "0.4", features = ["dynamic-loading"] }
+moq-vaapi = "0.0.2"                 # standalone; vendored cros-libva + cros-codecs
 
 [dependencies]
-openh264 = "..."   # software fallback, all targets
-nokhwa = { version = "...", features = ["input-avfoundation", "input-v4l", "input-msmf", "decoding-mjpeg"] }
-dcv-color-primitives = "..."
+openh264 = { version = "...", optional = true }   # only with the `software` feature
 ```
 
-Release builds for Linux enable both `nvenc` and `vaapi`; the runtime fallback
-chain skips whichever driver is absent. Neither is a build-time hard dep on the
-driver, so the binary still builds and runs on a box with neither GPU (it falls
-to openh264).
+Hardware encoders are always-on (VideoToolbox on macOS, Media Foundation on
+Windows, NVENC + VAAPI on Linux); the runtime fallback chain skips whichever
+driver is absent. None is a build-time hard dep on the driver, so the binary
+still builds and runs on a box with no GPU. openh264 is the only software
+encoder and is opt-in behind the `software` feature: a GPU-less box without it
+gets `NoEncoder`. moq-boy enables `software` for its tiny 160x144 frames.
 
 ### Selection / fallback (`Kind` mapping)
 
 `open_backend(kind, config)` builds an ordered candidate list and returns the
 first that opens, mirroring today's `open_encoder` loop:
 
-- `Auto`   -> \[videotoolbox | nvenc | vaapi] (cfg-filtered) then openh264.
+- `Auto`   -> \[videotoolbox | nvenc | vaapi] (cfg-filtered), then openh264 if the
+  `software` feature is on.
 - `Hardware` -> hardware-only; `NoEncoder` if none opens.
-- `Software` -> openh264 only.
+- `Software` -> openh264 only (requires the `software` feature; else `NoEncoder`).
 - `Named(id)` -> that backend only.
 
 A backend "fails to open" (driver missing, no device) the same way an ffmpeg
@@ -254,14 +255,13 @@ A backend "fails to open" (driver missing, no device) the same way an ffmpeg
 
 ## Packaging payoff
 
-- **macOS**: VideoToolbox + openh264 link only system frameworks + a vendored
-  static lib. One brew bottle per arch, no `Depends`.
+- **macOS**: VideoToolbox links only system frameworks. One brew bottle per
+  arch, no `Depends`.
 - **Linux**: one binary that
 
-  - `dlopen`s `libnvidia-encode.so` if an NVIDIA driver is present (no build dep),
-  - links `libva` (tiny, stable soname across releases) for Intel/AMD; package
-    `Depends: libva2`, `Recommends: intel-media-va-driver | mesa-va-drivers`,
-  - statically carries openh264 as the always-works fallback.
+  - `dlopen`s `libnvidia-encode` if an NVIDIA driver is present (no build dep),
+  - `dlopen`s `libva` for Intel/AMD (no build dep on libva-dev),
+  - falls back to openh264 only if built with the `software` feature.
 
   That single artifact runs across Ubuntu 20.04 -> 24.04, Debian, Fedora, etc.,
   which is the whole reason for the change.

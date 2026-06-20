@@ -28,7 +28,9 @@ moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 moq-net = { workspace = true }
-moq-video = { workspace = true }
+# `software`: the Game Boy is 160x144, small enough that hardware encoders may
+# reject it, so moq-boy needs the openh264 software fallback.
+moq-video = { workspace = true, features = ["software"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"

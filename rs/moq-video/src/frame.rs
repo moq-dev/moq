@@ -7,11 +7,12 @@
 //! - [`Frame::Texture`] is a Windows Direct3D11 NV12 texture. Media Foundation
 //!   capture produces it on a shared D3D11 device and the hardware encoder MFT
 //!   consumes it on that same device, also zero-copy.
-//! - [`Frame::I420`] is CPU-resident planar I420, for the software path
-//!   (openh264) and platforms without a zero-copy capture.
+//! - [`Frame::I420`] is CPU-resident planar I420, for the CPU encode path and
+//!   platforms without a zero-copy capture.
 //!
-//! A hardware backend takes the GPU frame as-is; a software backend asks for
-//! I420 via [`Frame::to_i420`], which downloads the GPU frame only when needed.
+//! A backend that consumes a GPU surface takes the frame as-is; a CPU encoder
+//! asks for I420 via [`Frame::to_i420`], which downloads the GPU frame only when
+//! needed.
 
 use std::borrow::Cow;
 
@@ -52,6 +53,9 @@ impl Frame {
 	}
 
 	/// A CPU I420 view, downloading a GPU frame only if necessary.
+	// On macOS the only encoder that needs a CPU download is openh264; without the
+	// `software` feature VideoToolbox consumes surfaces directly, so this is dead.
+	#[cfg_attr(all(target_os = "macos", not(feature = "software")), allow(dead_code))]
 	pub(crate) fn to_i420(&self) -> Result<Cow<'_, I420>, Error> {
 		match self {
 			#[cfg(target_os = "macos")]
@@ -228,6 +232,8 @@ pub(crate) mod macos {
 	use crate::Error;
 
 	/// Read-only lock flag (`kCVPixelBufferLock_ReadOnly`).
+	// Only the CPU download path locks the buffer; dead without `software`.
+	#[cfg_attr(not(feature = "software"), allow(dead_code))]
 	const LOCK_READ_ONLY: CVPixelBufferLockFlags = CVPixelBufferLockFlags(1);
 
 	/// A captured GPU surface. Cloning is a cheap retain (no pixel copy), which
@@ -243,7 +249,8 @@ pub(crate) mod macos {
 			Self { buffer, width, height }
 		}
 
-		/// Download an NV12 surface to packed I420 (the software-encode fallback).
+		/// Download an NV12 surface to packed I420 (the CPU encode path).
+		#[cfg_attr(not(feature = "software"), allow(dead_code))]
 		pub(crate) fn download_i420(&self) -> Result<I420, Error> {
 			let format = CVPixelBufferGetPixelFormatType(&self.buffer);
 			if format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -299,6 +306,7 @@ pub(crate) mod macos {
 		}
 	}
 
+	#[cfg_attr(not(feature = "software"), allow(dead_code))]
 	struct UnlockGuard<'a>(&'a CVPixelBuffer);
 
 	impl Drop for UnlockGuard<'_> {
@@ -357,8 +365,8 @@ pub(crate) mod d3d11 {
 		}
 
 		/// Copy the NV12 texture to a CPU-readable staging texture and
-		/// deinterleave it into packed I420 (the software-encode fallback, e.g.
-		/// openh264 when no hardware encoder is selected).
+		/// deinterleave it into packed I420 (the CPU encode path, when the encoder
+		/// can't consume the GPU texture directly).
 		pub(crate) fn download_i420(&self) -> Result<I420, Error> {
 			let context = unsafe { self.device.GetImmediateContext() }.map_err(|e| err("GetImmediateContext", e))?;
 

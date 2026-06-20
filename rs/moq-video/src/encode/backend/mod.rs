@@ -8,7 +8,8 @@
 //! care which encoder is running.
 //!
 //! [`open`] picks the best backend for a [`Kind`](super::Kind), trying hardware
-//! candidates (platform-gated) before the openh264 software fallback.
+//! candidates (platform-gated) before the openh264 software fallback, which is
+//! only compiled in when the `software` feature is enabled.
 
 use bytes::Bytes;
 
@@ -16,6 +17,7 @@ use super::encoder::{Config, Kind};
 use crate::Error;
 use crate::frame::Frame;
 
+#[cfg(feature = "software")]
 mod openh264;
 
 #[cfg(target_os = "macos")]
@@ -24,10 +26,10 @@ mod videotoolbox;
 #[cfg(target_os = "windows")]
 mod mediafoundation;
 
-#[cfg(all(target_os = "linux", feature = "nvenc"))]
+#[cfg(target_os = "linux")]
 mod nvenc;
 
-#[cfg(all(target_os = "linux", feature = "vaapi"))]
+#[cfg(target_os = "linux")]
 mod vaapi;
 
 /// An opened H.264 encoder. Feed it frames at the configured resolution;
@@ -63,33 +65,54 @@ const HARDWARE: &[Candidate] = &[
 		name: mediafoundation::NAME,
 		open: mediafoundation::MediaFoundation::open,
 	},
-	#[cfg(all(target_os = "linux", feature = "nvenc"))]
+	#[cfg(target_os = "linux")]
 	Candidate {
 		name: nvenc::NAME,
 		open: nvenc::Nvenc::open,
 	},
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[cfg(target_os = "linux")]
 	Candidate {
 		name: vaapi::NAME,
 		open: vaapi::Vaapi::open,
 	},
 ];
 
+/// The software fallback, only compiled in with the `software` feature.
+#[cfg(feature = "software")]
 const SOFTWARE: Candidate = Candidate {
 	name: openh264::NAME,
 	open: openh264::Openh264::open,
 };
 
 /// Open the best encoder for `config.kind`, trying candidates in priority order
-/// and falling back until one succeeds.
+/// and falling back until one succeeds. The software fallback only participates
+/// when the `software` feature is enabled; without it, software-only requests
+/// (and `Auto` on a box with no hardware encoder) yield [`Error::NoEncoder`].
 pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 	let candidates: Vec<&Candidate> = match &config.kind {
-		Kind::Auto => HARDWARE.iter().chain(std::iter::once(&SOFTWARE)).collect(),
+		Kind::Auto => {
+			#[cfg_attr(not(feature = "software"), allow(unused_mut))]
+			let mut c: Vec<&Candidate> = HARDWARE.iter().collect();
+			#[cfg(feature = "software")]
+			c.push(&SOFTWARE);
+			c
+		}
 		Kind::Hardware => HARDWARE.iter().collect(),
-		Kind::Software => vec![&SOFTWARE],
+		Kind::Software => {
+			#[cfg(feature = "software")]
+			let c = vec![&SOFTWARE];
+			#[cfg(not(feature = "software"))]
+			let c: Vec<&Candidate> = Vec::new();
+			c
+		}
 		Kind::Named(name) => {
-			let all = HARDWARE.iter().chain(std::iter::once(&SOFTWARE));
-			all.filter(|c| c.name == name).collect()
+			#[cfg_attr(not(feature = "software"), allow(unused_mut))]
+			let mut c: Vec<&Candidate> = HARDWARE.iter().filter(|c| c.name == name).collect();
+			#[cfg(feature = "software")]
+			if SOFTWARE.name == name {
+				c.push(&SOFTWARE);
+			}
+			c
 		}
 	};
 

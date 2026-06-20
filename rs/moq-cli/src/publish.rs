@@ -54,13 +54,11 @@ pub struct CaptureArgs {
 	#[arg(long)]
 	pub bitrate: Option<u64>,
 
-	/// Force a hardware encoder (error if none is available).
-	#[arg(long, conflicts_with = "software")]
-	pub hardware: bool,
-
-	/// Force the software encoder (openh264).
+	/// Force a hardware encoder (error if none is available). Hardware is already
+	/// the default; this just turns a missing encoder into an error instead of a
+	/// fallback.
 	#[arg(long)]
-	pub software: bool,
+	pub hardware: bool,
 
 	/// Microphone device name. Omit to use the default input.
 	#[arg(long)]
@@ -269,9 +267,7 @@ impl CaptureArgs {
 	fn video_encode(&self) -> moq_video::encode::Options {
 		let mut options = moq_video::encode::Options::default();
 		options.bitrate = self.bitrate;
-		options.kind = if self.software {
-			moq_video::encode::Kind::Software
-		} else if self.hardware {
+		options.kind = if self.hardware {
 			moq_video::encode::Kind::Hardware
 		} else {
 			moq_video::encode::Kind::Auto

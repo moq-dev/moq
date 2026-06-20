@@ -1,6 +1,6 @@
 //! Hardware H.264 backend via NVIDIA NVENC (`nvidia-video-codec-sdk` + cudarc).
 //!
-//! Linux only, behind the `nvenc` feature. The NVENC API lives in the driver
+//! Linux only, always-on (cfg-gated). The NVENC API lives in the driver
 //! (`libnvidia-encode.so`) and cudarc loads CUDA dynamically, so this is not a
 //! build-time dependency on the CUDA toolkit. NVENC emits Annex-B with in-band
 //! SPS/PPS, matching avc3 mode directly.
