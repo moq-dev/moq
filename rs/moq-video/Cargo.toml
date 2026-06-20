@@ -55,7 +55,7 @@ nvidia-video-codec-sdk = { version = "0.4", optional = true }
 # Vendored, statically-linked software H.264 fallback (no system dependency).
 openh264 = "0.9.3"
 thiserror = "2"
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = "0.1"
 # RGBA -> I420 color conversion (replaces ffmpeg swscale).
 yuv = "0.8.14"

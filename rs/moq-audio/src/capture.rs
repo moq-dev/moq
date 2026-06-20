@@ -4,12 +4,15 @@
 //! [`Frame`]s, ready to feed an [`AudioProducer`] with
 //! an [`EncoderInput`] of `format = AudioFormat::F32`.
 //! Encoding stays on `unsafe-libopus`, so audio never touches ffmpeg.
+//!
+//! The cpal callback (a realtime thread) forwards buffers through an async
+//! channel that the on-demand capture loop awaits, so dropping the publish
+//! future (e.g. on Ctrl+C) cancels the read and releases the device.
 
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use tokio::sync::mpsc;
 
 use crate::{AudioError, AudioFormat, AudioProducer, EncoderInput, EncoderOutput, Frame};
 
@@ -36,11 +39,11 @@ pub struct Config {
 /// An open microphone, read frame-by-frame via [`read`](Self::read).
 ///
 /// Holds the live `cpal` stream, which is `!Send`, so build and use it on a
-/// single thread (e.g. inside a `spawn_blocking` closure).
+/// single task. Buffers arrive from the realtime callback over an async channel.
 pub struct Microphone {
 	// Kept alive to keep capturing; dropping it stops the stream.
 	_stream: cpal::Stream,
-	rx: Receiver<Vec<f32>>,
+	rx: mpsc::UnboundedReceiver<Vec<f32>>,
 	sample_rate: u32,
 	channels: u32,
 	frames_read: u64,
@@ -58,7 +61,7 @@ impl Microphone {
 	}
 
 	/// Open (and start) the microphone described by `config`.
-	pub fn open(config: &Config) -> Result<Self, AudioError> {
+	pub async fn open(config: &Config) -> Result<Self, AudioError> {
 		// Fail fast on a denied/restricted mic (macOS TCC) instead of opening a
 		// stream that silently delivers nothing. A no-op on other platforms.
 		permission::ensure_microphone_access()?;
@@ -67,7 +70,7 @@ impl Microphone {
 		let sample_rate = stream_config.sample_rate;
 		let channels = stream_config.channels as u32;
 
-		let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
+		let (tx, mut rx) = mpsc::unbounded_channel::<Vec<f32>>();
 
 		// The callback runs on cpal's realtime audio thread; convert to f32 and
 		// forward. Keep it allocation-light and never block.
@@ -100,18 +103,18 @@ impl Microphone {
 
 		stream.play().map_err(cpal_err)?;
 
-		// Block for the first buffer to surface a permission failure (or dead
-		// device) as an error rather than a silent hang in the capture loop.
-		let pending = match rx.recv_timeout(FIRST_BUFFER_TIMEOUT) {
-			Ok(samples) => samples,
-			Err(RecvTimeoutError::Timeout) => {
-				return Err(AudioError::Unsupported(format!(
-					"no samples from microphone {device} within {FIRST_BUFFER_TIMEOUT:?} (permission denied?)"
-				)));
-			}
-			Err(RecvTimeoutError::Disconnected) => {
+		// Await the first buffer to surface a permission failure (or dead device)
+		// as an error rather than a silent hang in the capture loop.
+		let pending = match tokio::time::timeout(FIRST_BUFFER_TIMEOUT, rx.recv()).await {
+			Ok(Some(samples)) => samples,
+			Ok(None) => {
 				return Err(AudioError::Unsupported(format!(
 					"microphone {device} stopped before any samples"
+				)));
+			}
+			Err(_) => {
+				return Err(AudioError::Unsupported(format!(
+					"no samples from microphone {device} within {FIRST_BUFFER_TIMEOUT:?} (permission denied?)"
 				)));
 			}
 		};
@@ -136,20 +139,20 @@ impl Microphone {
 		self.channels
 	}
 
-	/// Block until the next buffer of PCM is captured, or `None` once the
-	/// stream stops. The returned [`Frame`] holds interleaved little-endian
-	/// `f32` samples (i.e. `AudioFormat::F32`).
-	pub fn read(&mut self) -> Result<Option<Frame>, AudioError> {
+	/// Await the next buffer of PCM, or `None` once the stream stops. The
+	/// returned [`Frame`] holds interleaved little-endian `f32` samples (i.e.
+	/// `AudioFormat::F32`). Cancel-safe: drop the future to stop reading.
+	pub async fn read(&mut self) -> Option<Frame> {
 		let samples = match self.pending.take() {
 			Some(samples) => samples,
-			None => {
-				let Ok(samples) = self.rx.recv() else {
-					return Ok(None); // stream dropped / device gone
-				};
-				samples
-			}
+			None => self.rx.recv().await?, // stream dropped / device gone
 		};
+		Some(self.frame_from(samples))
+	}
 
+	/// Build a timestamped [`Frame`] from a buffer of interleaved `f32` samples,
+	/// advancing the read cursor so consecutive frames carry monotonic PTS.
+	fn frame_from(&mut self, samples: Vec<f32>) -> Frame {
 		let timestamp_us = self.frames_read * 1_000_000 / self.sample_rate as u64;
 		self.frames_read += (samples.len() / self.channels.max(1) as usize) as u64;
 
@@ -158,10 +161,10 @@ impl Microphone {
 			bytes.extend_from_slice(&sample.to_le_bytes());
 		}
 
-		Ok(Some(Frame {
+		Frame {
 			timestamp_us,
 			data: bytes.into(),
-		}))
+		}
 	}
 }
 
@@ -192,34 +195,70 @@ pub async fn publish_microphone(
 		channels,
 	};
 
-	let producer = AudioProducer::new(&mut broadcast, catalog, track_name, input, output)?;
+	let mut producer = AudioProducer::new(&mut broadcast, catalog, track_name, input, output)?;
 	let track = producer.track().clone();
 
-	let gate = Gate::new();
-	let worker_gate = gate.clone();
-	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, config, worker_gate, clock));
+	let result = capture_loop(&mut producer, &track, &config, &clock).await;
 
-	tokio::select! {
-		res = &mut worker => res.map_err(task_err)?,
-		() = monitor_demand(&track, &gate) => {
-			gate.close();
-			worker.await.map_err(task_err)?
-		}
+	// Best-effort clean close: flush the trailing sub-frame and finalize the
+	// track. Runs only when the loop ends on its own; a Ctrl+C cancels the future
+	// before this point, since async `Drop` can't finalize the track.
+	if let Err(err) = producer.finish() {
+		tracing::debug!(error = %err, "audio track finish after capture ended");
 	}
+	result
 }
 
-/// Toggle the gate as listeners subscribe and unsubscribe. Returns once the
-/// track stops being announced (broadcast dropped / aborted).
-async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
+/// Async capture/encode loop: open the mic while a listener is subscribed,
+/// release it when the last one leaves, and re-anchor the timeline on resume so
+/// the idle gap lands in the PTS.
+///
+/// Cancel safety: every wait is a real `.await` (a buffer read or a demand
+/// transition), so dropping this future (e.g. on Ctrl+C) drops the [`Microphone`]
+/// and stops the cpal stream. No blocking thread is left behind.
+async fn capture_loop(
+	producer: &mut AudioProducer,
+	track: &moq_net::TrackProducer,
+	config: &Config,
+	clock: &moq_mux::Clock,
+) -> Result<(), AudioError> {
 	loop {
-		match track.used().await {
-			Ok(()) => gate.set_active(true),
-			Err(err) => return log_track_ended(err),
+		// Idle until a listener subscribes; the track ending is a clean exit.
+		if let Err(err) = track.used().await {
+			log_track_ended(err);
+			return Ok(());
 		}
-		match track.unused().await {
-			Ok(()) => gate.set_active(false),
-			Err(err) => return log_track_ended(err),
+
+		let mut mic = Microphone::open(config).await?;
+
+		loop {
+			// Race the next buffer against the last listener leaving so we release
+			// the mic promptly. `biased` checks demand first so an unwatched track
+			// stops before reading another buffer.
+			let frame = tokio::select! {
+				biased;
+				res = track.unused() => {
+					if let Err(err) = res {
+						log_track_ended(err);
+						return Ok(());
+					}
+					break; // no listeners: release the mic, then wait for one
+				}
+				frame = mic.read() => frame,
+			};
+
+			let Some(mut frame) = frame else { break }; // device stopped producing samples
+
+			// Stamp from the shared clock (including any idle gap) so the producer's
+			// epoch re-anchors and audio stays aligned with the video track.
+			frame.timestamp_us = clock.micros();
+			producer.write(&frame)?;
 		}
+
+		// Release the mic and re-anchor so the next frame after resume reflects the gap.
+		drop(mic);
+		producer.reset_epoch();
+		tracing::info!("no listeners: released microphone");
 	}
 }
 
@@ -234,103 +273,9 @@ fn log_track_ended(err: moq_net::Error) {
 	}
 }
 
-/// Blocking capture/encode loop. Opens the mic only while watched, releases it
-/// when idle, and stamps frames with wall-clock time so a release/reopen gap
-/// shows up in the PTS.
-fn capture_loop(
-	mut producer: AudioProducer,
-	config: Config,
-	gate: Arc<Gate>,
-	clock: moq_mux::Clock,
-) -> Result<(), AudioError> {
-	let mut mic: Option<Microphone> = None;
-
-	loop {
-		if !gate.is_active() {
-			if mic.take().is_some() {
-				// Re-anchor so the next frame after resume reflects the gap.
-				producer.reset_epoch();
-				tracing::info!("no listeners: released microphone");
-			}
-			if !gate.wait_active() {
-				break; // closed
-			}
-			continue;
-		}
-
-		if mic.is_none() {
-			mic = Some(Microphone::open(&config)?);
-		}
-
-		let Some(mut frame) = mic.as_mut().expect("mic open above").read()? else {
-			break; // device stopped producing samples
-		};
-
-		// Stamp from the shared clock (including any idle gap) so the producer's
-		// epoch re-anchors and audio stays aligned with the video track.
-		frame.timestamp_us = clock.micros();
-		producer.write(&frame)?;
-	}
-
-	producer.finish()?;
-	Ok(())
-}
-
-fn task_err(err: tokio::task::JoinError) -> AudioError {
-	AudioError::Unsupported(format!("capture task: {err}"))
-}
-
-/// Bridges the async demand monitor to the blocking capture thread: the monitor
-/// flips `active`, the capture loop waits on it.
-struct Gate {
-	state: Mutex<GateState>,
-	cond: Condvar,
-}
-
-#[derive(Default)]
-struct GateState {
-	active: bool,
-	closed: bool,
-}
-
-impl Gate {
-	fn new() -> Arc<Self> {
-		Arc::new(Self {
-			state: Mutex::new(GateState::default()),
-			cond: Condvar::new(),
-		})
-	}
-
-	fn set_active(&self, active: bool) {
-		let mut state = self.state.lock().unwrap();
-		state.active = active;
-		self.cond.notify_all();
-	}
-
-	fn close(&self) {
-		let mut state = self.state.lock().unwrap();
-		state.active = false;
-		state.closed = true;
-		self.cond.notify_all();
-	}
-
-	fn is_active(&self) -> bool {
-		self.state.lock().unwrap().active
-	}
-
-	/// Block until active or closed. Returns `false` if closed.
-	fn wait_active(&self) -> bool {
-		let mut state = self.state.lock().unwrap();
-		while !state.active && !state.closed {
-			state = self.cond.wait(state).unwrap();
-		}
-		!state.closed
-	}
-}
-
 /// Forward a buffer to the reader, ignoring send errors (receiver dropped means
 /// capture is shutting down).
-fn forward(tx: &Sender<Vec<f32>>, samples: Vec<f32>) {
+fn forward(tx: &mpsc::UnboundedSender<Vec<f32>>, samples: Vec<f32>) {
 	let _ = tx.send(samples);
 }
 

@@ -522,10 +522,12 @@ mod tests {
 	/// via the DXGI device manager, no CPU round-trip. Ignored: needs a camera and
 	/// a GPU. Run with `--ignored`.
 	#[cfg(target_os = "windows")]
-	#[test]
+	#[tokio::test]
 	#[ignore]
-	fn mediafoundation_camera_texture() {
-		let mut camera = crate::capture::open(&crate::capture::Config::default()).expect("open default camera");
+	async fn mediafoundation_camera_texture() {
+		let mut camera = crate::capture::open(&crate::capture::Config::default())
+			.await
+			.expect("open default camera");
 		let (w, h) = (camera.width(), camera.height());
 
 		let config = Config {
@@ -537,7 +539,7 @@ mod tests {
 		let mut packets = Vec::new();
 		let mut textures = 0;
 		for i in 0..30 {
-			let frame = camera.read().expect("read frame").expect("frame, not end of stream");
+			let frame = camera.read().await.expect("frame, not end of stream");
 			if matches!(frame, Frame::Texture(_)) {
 				textures += 1;
 			}
