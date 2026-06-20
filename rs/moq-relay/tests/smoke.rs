@@ -46,7 +46,7 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	auth_config.public = Some(public);
 	let auth = auth_config.init().await.expect("auth init");
 
-	let cluster = Cluster::new(ClusterConfig::default());
+	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
 
 	// moq_native::Server is needed for `tls_info`, even though we never
 	// expose HTTPS or QUIC in this test. Binding QUIC to `[::]:0` picks an

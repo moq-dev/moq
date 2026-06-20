@@ -27,7 +27,6 @@ check *args:
 # force-run everything. `cargo publish --dry-run` lives in release-rs.yml.
 #
 # `cargo deny` runs here (not in `check`) so the inner-loop stays fast
-
 # and devs aren't blocked by a fresh upstream advisory mid-edit.
 ci FILES="":
     #!/usr/bin/env bash
@@ -36,22 +35,21 @@ ci FILES="":
     	echo "rs: no Rust changes; skipping."
     	exit 0
     fi
-    just check --workspace
+    # Heavy compiles -- clippy, doc, and the --all-features test run -- are crane
+    # derivations built by `nix flake check` (see flake.nix `checks` and
+    # nix/overlay.nix): deps cache in /nix/store, only first-party code rebuilds
+    # in the sandbox, and there's no persistent cargo target dir to bound. What
+    # stays here is non-compiling hygiene, cargo-deny (hits the network, so it
+    # can't run in the Nix sandbox), and the default / no-default-feature
+    # `cargo check`s the all-features crane run doesn't cover -- those compile
+    # into the in-workspace ./target, which the runner wipes per job.
+    # (Local devs still get the full cargo loop via `just rs check`.)
+    cargo fmt --all --check
+    cargo sort --workspace --check --no-format
+    cargo shear
+    cargo check --workspace --all-targets
     cargo check --workspace --no-default-features
-    # NVENC's SDK crate has no macOS bindings, so moq-video can't be part of the
-    # blanket --all-features runs on a Mac. Exclude it and cover it on Linux only,
-    # where the `nvenc` feature dlopens libnvidia-encode (so it builds, links, and
-    # falls back to software without a GPU/driver).
-    cargo check --workspace --all-features --exclude moq-video
     cargo deny check --show-stats
-    cargo test --workspace --all-targets --all-features --exclude moq-video
-    if [[ "$(uname)" == "Linux" ]]; then
-    	cargo check -p moq-video --all-targets --all-features
-    	cargo test -p moq-video --all-targets --all-features
-    else
-    	cargo test -p moq-video --all-targets
-    fi
-    just build
 
 # Auto-fix clippy/format/shear/sort.
 fix:
@@ -94,7 +92,6 @@ update:
 #
 # Examples:
 #   just rs package moq-relay deb
-
 # just rs package moq-cli rpm
 package crate packager:
     #!/usr/bin/env bash

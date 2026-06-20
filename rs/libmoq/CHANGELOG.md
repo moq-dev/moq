@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7](https://github.com/moq-dev/moq/compare/libmoq-v0.3.6...libmoq-v0.3.7) - 2026-06-19
+
+### Fixed
+
+- *(libmoq)* use .cast() for c_char pointer to fix arm64 clippy ([#1782](https://github.com/moq-dev/moq/pull/1782))
+
 ## [0.3.5](https://github.com/moq-dev/moq/compare/libmoq-v0.3.4...libmoq-v0.3.5) - 2026-06-16
 
 ### Fixed

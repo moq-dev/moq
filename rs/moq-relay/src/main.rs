@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
 		config.auth.init().await?
 	};
 
-	let cluster = Cluster::new(config.cluster)
+	let cluster = Cluster::new(config.cluster)?
 		.with_client(client)
 		.with_client_tls(config.client.tls.build()?);
 	let stats = config.stats.build(cluster.origin.clone());

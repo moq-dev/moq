@@ -129,10 +129,12 @@ build:
 # profile, and cfg flags (getrandom, web-sys unstable) live in Cargo.toml and
 # .cargo/config.toml. The profile already optimizes for size; wasm-opt is
 # skipped since it didn't improve the gzipped (over-the-wire) size here.
+# Resolve the artifact via CARGO_TARGET_DIR so it also works on runners that
+# redirect the target directory (it defaults to `target`).
 wasm:
     cargo build -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
     wasm-bindgen --target web --out-name moq \
-    	--out-dir js/wasm/dist target/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm
+    	--out-dir js/wasm/dist "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm"
 
 # Delete build artifacts and caches to reclaim disk space. Each language
 # owns its own `clean` (see js/rs/py/kt/swift/go justfiles); this

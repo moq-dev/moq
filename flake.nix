@@ -82,6 +82,10 @@
             git
             cmake
             pkg-config
+            # Sets LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS so ffmpeg-sys-next's
+            # bindgen finds libc headers (<errno.h>) on hosts without system
+            # headers in /usr/include, e.g. the self-hosted runner.
+            rustPlatform.bindgenHook
             glib
             libressl
             ffmpeg
@@ -235,12 +239,17 @@
           # Nix's _FORTIFY_SOURCE hardening (requires -O).
           hardeningDisable = [ "fortify" ];
 
-          shellHook = ''
-            export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
-          '';
         };
 
         formatter = pkgs.nixfmt-tree;
+
+        # Heavy Rust CI (clippy / doc / test, all features) as crane
+        # derivations: deps compile once and cache, only first-party code
+        # recompiles per run, and there's no persistent CARGO_TARGET_DIR to
+        # bound. Run with `nix flake check` or a single one via
+        # `nix build .#checks.<system>.clippy`. The cheap, non-compiling lints
+        # (rustfmt, cargo-deny/shear/sort) stay in `just rs ci`.
+        checks = overlayPkgs.moqChecks;
       }
     );
 }

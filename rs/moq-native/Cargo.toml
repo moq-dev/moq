@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.17.1"
+version = "0.17.3"
 edition = "2024"
 rust-version.workspace = true
 
@@ -64,6 +64,7 @@ web-transport-proto = { workspace = true, optional = true }
 web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }
 web-transport-trait = { workspace = true }
+x509-parser = "0.18"
 
 [target.'cfg(target_os = "android")'.dependencies]
 tracing-android = { version = "0.2", optional = true }

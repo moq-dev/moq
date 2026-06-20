@@ -23,6 +23,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
+		"@moq/json": "workspace:^",
 		"@moq/net": "workspace:^",
 		"@moq/watch": "workspace:^",
 		"@moq/signals": "workspace:^",
