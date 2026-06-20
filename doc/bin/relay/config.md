@@ -94,6 +94,31 @@ cert = "cert.pem"
 key = "key.pem"
 ```
 
+### \[internal]
+
+Unauthenticated qmux listeners (no TLS) for trusted local workers. Every
+connection is granted full, unrestricted access. A TCP and a Unix-socket
+listener can each be enabled independently; both default to disabled.
+
+```toml
+# Plain-TCP listener (tcp:// scheme).
+[internal.tcp]
+listen = "127.0.0.1:4444"
+
+# Unix-socket listener (unix:// scheme), requires the `uds` build feature.
+[internal.uds]
+listen = "/run/moq/internal.sock"
+
+# Restrict the Unix-socket callers by peer credentials. Empty/omitted = no check.
+[internal.uds.allow]
+uid = [1001]
+# gid = [2000]
+# pid = [12345]
+```
+
+A non-loopback TCP bind logs a warning but is allowed. See
+[Internal Listener](/bin/relay/auth#internal-listener) for details.
+
 ### \[auth]
 
 Authentication configuration.

@@ -10,7 +10,9 @@
 use std::{net::TcpListener, sync::atomic::AtomicU64, time::Duration};
 
 use moq_native::moq_net::{self, Origin, Track};
-use moq_relay::{AuthConfig, Cluster, ClusterConfig, PublicConfig, Web, WebConfig, WebState};
+use moq_relay::{
+	AuthConfig, Cluster, ClusterConfig, InternalConfig, PublicConfig, Web, WebConfig, WebState, run_internal,
+};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -252,6 +254,211 @@ async fn two_publish_only_clients_coexist() {
 	drop(sess_b);
 	drop(sub_session);
 	web_handle.abort();
+}
+
+/// Stand up just the unauthenticated internal listener (plain-TCP qmux, no
+/// auth stack) on a free loopback port. Returns the port and an abort handle.
+async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
+
+	// Pick a free TCP port, then drop the probe so the listener can bind it.
+	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
+	let port = probe.local_addr().expect("local addr").port();
+	drop(probe);
+
+	let mut internal = InternalConfig::default();
+	internal.tcp.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
+
+	let handle = tokio::spawn(async move {
+		// `run_internal` only returns on error; aborted at teardown.
+		let _ = run_internal(internal, cluster).await;
+	});
+
+	let deadline = std::time::Instant::now() + Duration::from_secs(5);
+	loop {
+		if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+			break;
+		}
+		if std::time::Instant::now() >= deadline {
+			panic!("internal listener never became ready on port {port}");
+		}
+		tokio::time::sleep(Duration::from_millis(25)).await;
+	}
+
+	(port, handle)
+}
+
+/// Connect a publisher and subscriber to the unauthenticated internal listener
+/// over `tcp://` (plain TCP, no TLS, no JWT) and confirm a frame round-trips.
+/// Exercises the qmux-over-TCP transport and the unrestricted internal grant.
+#[tokio::test]
+async fn internal_tcp_round_trip() {
+	let (port, handle) = spawn_internal_relay().await;
+	// The raw-TCP transport dials host:port only; any URL path is ignored.
+	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
+	let expected_version = newest_lite_version();
+
+	// ── publisher ───────────────────────────────────────────────────
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let mut track = broadcast.create_track(Track::new("video")).expect("create track");
+	let mut group = track.append_group().expect("append group");
+	group.write_frame(b"hello".as_ref()).expect("write frame");
+	group.finish().expect("finish group");
+
+	let pub_session = tokio::time::timeout(
+		TIMEOUT,
+		client().with_publish(pub_origin.consume()).connect(url.clone()),
+	)
+	.await
+	.expect("publisher connect timeout")
+	.expect("publisher connect failed");
+	assert_eq!(
+		pub_session.version(),
+		expected_version,
+		"publisher should negotiate the newest moq-lite version in-band over TCP"
+	);
+
+	// ── subscriber ──────────────────────────────────────────────────
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume();
+	let sub_session = tokio::time::timeout(TIMEOUT, client().with_consume(sub_origin).connect(url))
+		.await
+		.expect("subscriber connect timeout")
+		.expect("subscriber connect failed");
+
+	// ── data path ───────────────────────────────────────────────────
+	// The internal listener grants the empty root, so the broadcast announces
+	// at its own name with no path prefix.
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+		.await
+		.expect("announcement timeout")
+		.expect("origin closed");
+	assert_eq!(path.as_str(), "test");
+	let bc = bc.expect("expected announce, got unannounce");
+
+	let mut track_sub = bc.subscribe_track(&Track::new("video")).expect("subscribe_track");
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+		.await
+		.expect("recv_group timeout")
+		.expect("recv_group failed")
+		.expect("track closed prematurely");
+	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+		.await
+		.expect("read_frame timeout")
+		.expect("read_frame failed")
+		.expect("group closed prematurely");
+	assert_eq!(&*frame, b"hello");
+
+	drop(track);
+	drop(broadcast);
+	drop(pub_session);
+	drop(sub_session);
+	handle.abort();
+}
+
+/// Stand up the internal listener on a Unix socket and return the socket path
+/// plus an abort handle.
+#[cfg(unix)]
+async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHandle<()>) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
+
+	// Keep the path short: macOS caps AF_UNIX paths around 104 bytes, and the
+	// system temp dir is long. /tmp is fine on macOS and Linux.
+	let path = std::path::PathBuf::from(format!("/tmp/moq-internal-{}.sock", std::process::id()));
+
+	let mut internal = InternalConfig::default();
+	internal.uds.listen = Some(path.clone());
+
+	let handle = tokio::spawn(async move {
+		let _ = run_internal(internal, cluster).await;
+	});
+
+	// Wait for the socket file to appear.
+	let deadline = std::time::Instant::now() + Duration::from_secs(5);
+	loop {
+		if tokio::net::UnixStream::connect(&path).await.is_ok() {
+			break;
+		}
+		if std::time::Instant::now() >= deadline {
+			panic!("internal Unix listener never became ready at {}", path.display());
+		}
+		tokio::time::sleep(Duration::from_millis(25)).await;
+	}
+
+	(path, handle)
+}
+
+/// Connect over `unix://` (qmux on a Unix socket) and confirm a frame
+/// round-trips. Also asserts both sides land on the newest moq-lite version,
+/// which proves the in-band ALPN negotiation populated the protocol.
+#[cfg(unix)]
+#[tokio::test]
+async fn internal_unix_round_trip() {
+	let (path, handle) = spawn_internal_unix_relay().await;
+	// `unix://` + an absolute path yields the triple-slash form the client expects.
+	let url: url::Url = format!("unix://{}", path.display()).parse().expect("parse url");
+	let expected_version = newest_lite_version();
+
+	// ── publisher ───────────────────────────────────────────────────
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let mut track = broadcast.create_track(Track::new("video")).expect("create track");
+	let mut group = track.append_group().expect("append group");
+	group.write_frame(b"hello".as_ref()).expect("write frame");
+	group.finish().expect("finish group");
+
+	let pub_session = tokio::time::timeout(
+		TIMEOUT,
+		client().with_publish(pub_origin.consume()).connect(url.clone()),
+	)
+	.await
+	.expect("publisher connect timeout")
+	.expect("publisher connect failed");
+	assert_eq!(
+		pub_session.version(),
+		expected_version,
+		"publisher should negotiate the newest moq-lite version in-band over the Unix socket"
+	);
+
+	// ── subscriber ──────────────────────────────────────────────────
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume();
+	let sub_session = tokio::time::timeout(TIMEOUT, client().with_consume(sub_origin).connect(url))
+		.await
+		.expect("subscriber connect timeout")
+		.expect("subscriber connect failed");
+
+	// ── data path ───────────────────────────────────────────────────
+	let (announced_path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+		.await
+		.expect("announcement timeout")
+		.expect("origin closed");
+	assert_eq!(announced_path.as_str(), "test");
+	let bc = bc.expect("expected announce, got unannounce");
+
+	let mut track_sub = bc.subscribe_track(&Track::new("video")).expect("subscribe_track");
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+		.await
+		.expect("recv_group timeout")
+		.expect("recv_group failed")
+		.expect("track closed prematurely");
+	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+		.await
+		.expect("read_frame timeout")
+		.expect("read_frame failed")
+		.expect("group closed prematurely");
+	assert_eq!(&*frame, b"hello");
+
+	drop(track);
+	drop(broadcast);
+	drop(pub_session);
+	drop(sub_session);
+	handle.abort();
 }
 
 /// `/health` is a liveness probe that always returns `200 ok`.

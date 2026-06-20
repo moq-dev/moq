@@ -35,21 +35,26 @@ ci FILES="":
     	echo "rs: no Rust changes; skipping."
     	exit 0
     fi
-    # Heavy compiles -- clippy, doc, and the --all-features test run -- are crane
-    # derivations built by `nix flake check` (see flake.nix `checks` and
-    # nix/overlay.nix): deps cache in /nix/store, only first-party code rebuilds
-    # in the sandbox, and there's no persistent cargo target dir to bound. What
-    # stays here is non-compiling hygiene, cargo-deny (hits the network, so it
-    # can't run in the Nix sandbox), and the default / no-default-feature
-    # `cargo check`s the all-features crane run doesn't cover -- those compile
-    # into the in-workspace ./target, which the runner wipes per job.
-    # (Local devs still get the full cargo loop via `just rs check`.)
+    # Hygiene (non-compiling) + cargo-deny (hits the network, so it couldn't run
+    # in the old Nix sandbox; runs fine here).
     cargo fmt --all --check
     cargo sort --workspace --check --no-format
     cargo shear
+    cargo deny check --show-stats
+
+    # Compiles. The all-features clippy / doc / test were crane derivations built
+    # by `nix flake check`; they now run here as plain cargo (flake.nix `checks`
+    # is unwired). The default / no-default-feature `cargo check`s cover feature
+    # edges the all-features run doesn't. Everything builds into the in-workspace
+    # ./target, which the runner wipes per job; on the self-hosted runner the
+    # heavy compilation is transparently cached per-crate by sccache (wired into
+    # the runner environment, not here), so there's no persistent target dir to
+    # bound. (Local devs still get the full cargo loop via `just rs check`.)
     cargo check --workspace --all-targets
     cargo check --workspace --no-default-features
-    cargo deny check --show-stats
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+    cargo test --workspace --all-targets --all-features
 
 # Auto-fix clippy/format/shear/sort.
 fix:
