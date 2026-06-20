@@ -1,16 +1,16 @@
-//! Hardware H.264 backend via a Media Foundation encoder MFT.
+//! Hardware H.264 / H.265 backend via a Media Foundation encoder MFT.
 //!
-//! Enumerates a hardware (`MFT_ENUM_FLAG_HARDWARE`) H.264 encoder and drives it
-//! through the async-MFT event model. When capture hands us a [`Frame::Texture`]
-//! the encoder runs on that texture's Direct3D11 device (via a DXGI device
-//! manager) and consumes the surface zero-copy; a CPU [`Frame::I420`] is uploaded
-//! into a system-memory NV12 sample instead.
+//! Enumerates a hardware (`MFT_ENUM_FLAG_HARDWARE`) encoder for the requested
+//! codec and drives it through the async-MFT event model. When capture hands us
+//! a [`Frame::Texture`] the encoder runs on that texture's Direct3D11 device (via
+//! a DXGI device manager) and consumes the surface zero-copy; a CPU
+//! [`Frame::I420`] is uploaded into a system-memory NV12 sample instead.
 //!
-//! The MFT emits an Annex-B byte stream for `MFVideoFormat_H264`, with SPS/PPS
-//! inline ahead of each IDR, which is exactly what `moq_mux` avc3 mode wants, so
-//! unlike VideoToolbox there's no AVCC -> Annex-B rewrite. Used only from the one
-//! capture/encode thread, so the COM handles are wrapped in a thread-confined
-//! `Send` type.
+//! The MFT emits an Annex-B byte stream with parameter sets inline ahead of each
+//! IDR/IRAP (SPS/PPS for H.264, VPS/SPS/PPS for H.265), which is exactly what
+//! `moq_mux` avc3 / hev1 mode wants, so unlike VideoToolbox there's no
+//! AVCC/HVCC -> Annex-B rewrite. Used only from the one capture/encode thread, so
+//! the COM handles are wrapped in a thread-confined `Send` type.
 
 use std::mem::ManuallyDrop;
 use std::ptr;
@@ -29,13 +29,13 @@ use windows::Win32::Media::MediaFoundation::{
 	MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_DRAIN,
 	MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
 	MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
-	MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive, eAVEncCommonRateControlMode_CBR,
-	eAVEncH264VProfile_High,
+	MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+	eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_High, eAVEncH265VProfile_Main_420_8,
 };
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
-use windows::core::Interface;
+use windows::core::{GUID, Interface};
 
-use super::super::encoder::Config;
+use super::super::encoder::{Codec, Config};
 use super::Backend;
 use crate::Error;
 use crate::frame::{Frame, interleave_uv};
@@ -52,6 +52,7 @@ pub(crate) struct MediaFoundation {
 	transform: IMFTransform,
 	events: IMFMediaEventGenerator,
 	codec_api: ICodecAPI,
+	codec: Codec,
 	width: u32,
 	height: u32,
 	framerate: u32,
@@ -79,8 +80,9 @@ unsafe impl Send for MediaFoundation {}
 
 impl MediaFoundation {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
+		let format = OutputFormat::for_codec(config.codec);
 		let com = ComGuard::new()?;
-		let transform = enumerate_encoder()?;
+		let transform = enumerate_encoder(format.subtype)?;
 
 		// Unlock the async interface before any other use (hardware MFTs are async).
 		let attrs = unsafe { transform.GetAttributes().map_err(|e| mf_err("MFT GetAttributes", e))? };
@@ -99,14 +101,16 @@ impl MediaFoundation {
 
 		tracing::info!(
 			encoder = NAME,
+			codec = format.label,
 			width = config.width,
 			height = config.height,
-			"opened H.264 encoder"
+			"opened encoder"
 		);
 		Ok(Box::new(Self {
 			transform,
 			events,
 			codec_api,
+			codec: config.codec,
 			width: config.width,
 			height: config.height,
 			framerate: config.framerate,
@@ -190,13 +194,14 @@ impl MediaFoundation {
 	}
 
 	fn set_output_type(&self) -> Result<(), Error> {
+		let format = OutputFormat::for_codec(self.codec);
 		let media = unsafe { MFCreateMediaType().map_err(|e| mf_err("create output type", e))? };
 		unsafe {
 			media
 				.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
 				.map_err(|e| mf_err("output major type", e))?;
 			media
-				.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)
+				.SetGUID(&MF_MT_SUBTYPE, &format.subtype)
 				.map_err(|e| mf_err("output subtype", e))?;
 			media
 				.SetUINT32(&MF_MT_AVG_BITRATE, self.bitrate)
@@ -205,7 +210,7 @@ impl MediaFoundation {
 				.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
 				.map_err(|e| mf_err("output interlace", e))?;
 			media
-				.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)
+				.SetUINT32(&MF_MT_MPEG2_PROFILE, format.profile)
 				.map_err(|e| mf_err("output profile", e))?;
 			media
 				.SetUINT64(&MF_MT_FRAME_SIZE, pack_2x32(self.width, self.height))
@@ -455,15 +460,15 @@ impl Backend for MediaFoundation {
 	}
 }
 
-/// Pick the first hardware H.264 encoder MFT (NV12 in, H.264 out).
-fn enumerate_encoder() -> Result<IMFTransform, Error> {
+/// Pick the first hardware encoder MFT (NV12 in, `subtype` out).
+fn enumerate_encoder(subtype: GUID) -> Result<IMFTransform, Error> {
 	let input = MFT_REGISTER_TYPE_INFO {
 		guidMajorType: MFMediaType_Video,
 		guidSubtype: MFVideoFormat_NV12,
 	};
 	let output = MFT_REGISTER_TYPE_INFO {
 		guidMajorType: MFMediaType_Video,
-		guidSubtype: MFVideoFormat_H264,
+		guidSubtype: subtype,
 	};
 
 	let mut activates: *mut Option<windows::Win32::Media::MediaFoundation::IMFActivate> = ptr::null_mut();
@@ -480,7 +485,7 @@ fn enumerate_encoder() -> Result<IMFTransform, Error> {
 		.map_err(|e| mf_err("MFTEnumEx", e))?;
 	}
 	if count == 0 {
-		return Err(Error::Codec(anyhow::anyhow!("no hardware H.264 encoder found")));
+		return Err(Error::Codec(anyhow::anyhow!("no hardware encoder found")));
 	}
 
 	let entries = unsafe { std::slice::from_raw_parts_mut(activates, count as usize) };
@@ -497,7 +502,33 @@ fn enumerate_encoder() -> Result<IMFTransform, Error> {
 		windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const std::ffi::c_void));
 	}
 
-	transform.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to activate H.264 encoder MFT")))
+	transform.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to activate encoder MFT")))
+}
+
+/// The Media Foundation output type for a codec: the format subtype enumerated
+/// and set on the MFT, plus the `MF_MT_MPEG2_PROFILE` value (the attribute MF
+/// reuses to carry the H.264/H.265 profile).
+struct OutputFormat {
+	subtype: GUID,
+	profile: u32,
+	label: &'static str,
+}
+
+impl OutputFormat {
+	fn for_codec(codec: Codec) -> Self {
+		match codec {
+			Codec::H264 => Self {
+				subtype: MFVideoFormat_H264,
+				profile: eAVEncH264VProfile_High.0 as u32,
+				label: "H.264",
+			},
+			Codec::H265 => Self {
+				subtype: MFVideoFormat_HEVC,
+				profile: eAVEncH265VProfile_Main_420_8.0 as u32,
+				label: "H.265",
+			},
+		}
+	}
 }
 
 /// A DXGI device manager wrapping `device`, so the MFT shares the capture

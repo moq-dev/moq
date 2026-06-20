@@ -244,11 +244,7 @@ impl Import {
 			ftyp.encode(&mut buf)?;
 			single_moov.encode(&mut buf)?;
 
-			Ok(Container::Cmaf {
-				init: buf.into(),
-				timescale: Some(trak.mdia.mdhd.timescale),
-				track_id: Some(trak.tkhd.track_id),
-			})
+			Ok(Container::Cmaf { init: buf.into() })
 		}
 	}
 

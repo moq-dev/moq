@@ -4,7 +4,7 @@
 pub enum Error {
 	/// No encoder matching the requested codec / hardware preference could be
 	/// opened (none compiled in, or none available on this machine).
-	#[error("no usable H.264 encoder found (tried: {0})")]
+	#[error("no usable video encoder found (tried: {0})")]
 	NoEncoder(String),
 
 	/// The configured framerate was zero (would divide by zero / produce a

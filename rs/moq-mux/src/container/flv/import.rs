@@ -1,20 +1,32 @@
 //! FLV demuxer.
 //!
 //! [`Import`] reads an FLV byte stream, splits it into tags, and routes the
-//! H.264 (AVC) video and AAC audio onto MoQ tracks. FLV carries codec config
-//! out of band: the AVC sequence header is an `AVCDecoderConfigurationRecord`
-//! (avcC) and the AAC sequence header is an `AudioSpecificConfig`, both reused
-//! verbatim as the catalog `description`. Video access units are already
-//! length-prefixed NALU (the avc1 shape) and audio frames are raw AAC, so the
-//! sample bytes pass through to the [`Legacy`](crate::catalog::hang::Container)
-//! container unchanged.
+//! video and audio onto MoQ tracks. Two payload generations are handled:
+//!
+//! - **Legacy FLV/RTMP**: H.264 (AVC) video carried as length-prefixed NALU with
+//!   an out-of-band `AVCDecoderConfigurationRecord` (avcC), and AAC audio with an
+//!   out-of-band `AudioSpecificConfig`.
+//! - **Enhanced RTMP (E-RTMP)**: the FourCC-signaled payloads OBS and ffmpeg emit
+//!   for HEVC (`hvc1`), AV1 (`av01`), VP9 (`vp09`), and the legacy AVC FourCC
+//!   (`avc1`); plus enhanced audio for Opus (`Opus`), AC-3 (`ac-3`), E-AC-3
+//!   (`ec-3`), and AAC (`mp4a`).
+//!
+//! Each codec's out-of-band config record (avcC / hvcC / av1C / `AudioSpecificConfig`
+//! / `OpusHead`) becomes the catalog `description`; VP9 and the verbatim audio
+//! codecs (AC-3 / E-AC-3) carry their config in band, so they configure from the
+//! first frame instead. Sample bytes already match the [`Legacy`](crate::catalog::hang::Container)
+//! container, so no codec transform is needed. FLAC (`fLaC`) and MP3 (`.mp3`)
+//! enhanced audio, and any other codec, are logged and dropped.
 
 use bytes::{Buf, Bytes, BytesMut};
-use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
+use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, VideoConfig};
 
 use super::{
-	AAC_RAW, AAC_SEQUENCE_HEADER, AUDIO_FORMAT_AAC, AVC_NALU, AVC_SEQUENCE_HEADER, FILE_HEADER_LEN, FRAME_TYPE_KEY,
-	PREV_TAG_SIZE_LEN, TAG_AUDIO, TAG_HEADER_LEN, TAG_SCRIPT, TAG_VIDEO, VIDEO_CODEC_AVC, read_i24, read_u24,
+	AAC_RAW, AAC_SEQUENCE_HEADER, AUDIO_FORMAT_AAC, AUDIO_FORMAT_EX, AUDIO_PACKET_CODED_FRAMES,
+	AUDIO_PACKET_MULTICHANNEL_CONFIG, AUDIO_PACKET_SEQUENCE_END, AUDIO_PACKET_SEQUENCE_START, AVC_NALU,
+	AVC_SEQUENCE_HEADER, FILE_HEADER_LEN, FRAME_TYPE_KEY, PREV_TAG_SIZE_LEN, TAG_AUDIO, TAG_HEADER_LEN, TAG_SCRIPT,
+	TAG_VIDEO, VIDEO_CODEC_AVC, VIDEO_EX_HEADER, VIDEO_PACKET_CODED_FRAMES, VIDEO_PACKET_CODED_FRAMES_X,
+	VIDEO_PACKET_METADATA, VIDEO_PACKET_SEQUENCE_END, VIDEO_PACKET_SEQUENCE_START, read_i24, read_u24,
 };
 use moq_net::Timestamp;
 
@@ -26,9 +38,9 @@ const MAX_DATA_OFFSET: usize = 64 * 1024;
 
 /// Demuxes an FLV byte stream into a MoQ broadcast.
 ///
-/// Supports H.264 (CodecID 7) video and AAC (SoundFormat 10) audio, the modern
-/// FLV payload produced by RTMP encoders and `ffmpeg -f flv`. Every other codec,
-/// plus the enhanced E-RTMP FourCC tags and `onMetaData` script tags, is logged
+/// Supports legacy H.264 + AAC and the enhanced-RTMP FourCC codecs (HEVC, AV1,
+/// VP9, Opus, AC-3, E-AC-3), the payloads produced by RTMP encoders and
+/// `ffmpeg -f flv`. Unsupported codecs, plus `onMetaData` script tags, are logged
 /// and dropped. A single FLV stream carries at most one video and one audio
 /// track; a new sequence header replaces the previous configuration.
 pub struct Import {
@@ -41,15 +53,21 @@ pub struct Import {
 	/// True once the 9-byte FLV file header and its `PreviousTagSize0` have been consumed.
 	header_seen: bool,
 
-	video: Option<Stream>,
-	audio: Option<Stream>,
+	video: Option<VideoStream>,
+	audio: Option<AudioStream>,
 }
 
-/// One demuxed track: its producer plus the sequence-header bytes last seen, so a
-/// repeated (identical) sequence header is a no-op rather than a track rebuild.
-struct Stream {
+/// The demuxed video track plus its current catalog config, so a repeated
+/// (identical) sequence header is a no-op rather than a track rebuild.
+struct VideoStream {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	description: Bytes,
+	config: VideoConfig,
+}
+
+/// The demuxed audio track plus its current catalog config.
+struct AudioStream {
+	track: crate::container::Producer<crate::catalog::hang::Container>,
+	config: AudioConfig,
 }
 
 impl Import {
@@ -126,11 +144,11 @@ impl Import {
 			return Ok(());
 		};
 		// The enhanced E-RTMP signaling sets the high bit and switches to FourCC
-		// codec identification; we only speak classic AVC.
-		if first & 0x80 != 0 {
-			tracing::warn!("enhanced FLV (FourCC) video not supported, dropping");
-			return Ok(());
+		// codec identification.
+		if first & VIDEO_EX_HEADER != 0 {
+			return self.handle_video_enhanced(first, body, timestamp);
 		}
+
 		let frame_type = first >> 4;
 		let codec_id = first & 0x0f;
 		if codec_id != VIDEO_CODEC_AVC {
@@ -144,30 +162,68 @@ impl Import {
 		let data = &body[5..];
 
 		match avc_packet_type {
-			AVC_SEQUENCE_HEADER => self.init_video(data),
-			AVC_NALU => {
-				let Some(stream) = self.video.as_mut() else {
-					tracing::debug!("AVC NALU before sequence header, dropping");
-					return Ok(());
-				};
-				// FLV stores DTS in the tag; PTS is DTS plus the composition offset.
-				let pts_ms = (timestamp as i64) + (composition_time as i64);
-				anyhow::ensure!(pts_ms >= 0, "negative AVC presentation timestamp");
-				// Live FLV can join mid-GOP: a leading delta before the first
-				// keyframe has no group to anchor, so the producer reports
-				// MissingKeyframe and we drop it rather than abort.
-				match stream.track.write(Frame {
-					timestamp: Timestamp::from_millis(pts_ms as u64)?,
-					duration: None,
-					payload: Bytes::copy_from_slice(data),
-					keyframe: frame_type == FRAME_TYPE_KEY,
-				}) {
-					Ok(()) | Err(crate::Error::MissingKeyframe(_)) => Ok(()),
-					Err(e) => Err(e.into()),
-				}
-			}
+			AVC_SEQUENCE_HEADER => self.init_video(config_from_avcc(data)?),
+			AVC_NALU => self.write_video(data, timestamp, composition_time, frame_type == FRAME_TYPE_KEY),
 			// AVCPacketType 2 is "end of sequence"; nothing to emit.
 			_ => Ok(()),
+		}
+	}
+
+	/// Handle an enhanced-RTMP (FourCC) video tag.
+	fn handle_video_enhanced(&mut self, first: u8, body: &[u8], timestamp: u64) -> anyhow::Result<()> {
+		let frame_type = (first >> 4) & 0x07;
+		let packet_type = first & 0x0f;
+		anyhow::ensure!(body.len() >= 5, "enhanced video tag too short for FourCC");
+		let fourcc: [u8; 4] = body[1..5].try_into().expect("slice is 4 bytes");
+		let payload = &body[5..];
+		let keyframe = frame_type == FRAME_TYPE_KEY;
+
+		match packet_type {
+			VIDEO_PACKET_SEQUENCE_START => {
+				let config = match &fourcc {
+					b"avc1" => config_from_avcc(payload)?,
+					b"hvc1" => crate::codec::h265::config_from_hvcc(payload)?,
+					b"av01" => crate::codec::av1::config_from_av1c(payload)?,
+					// VP9 carries its config in band; the SequenceStart vpcC is
+					// redundant with the key-frame header we configure from.
+					b"vp09" => return Ok(()),
+					other => {
+						tracing::warn!(fourcc = ?other, "unsupported enhanced FLV video codec, dropping");
+						return Ok(());
+					}
+				};
+				self.init_video(config)
+			}
+			VIDEO_PACKET_CODED_FRAMES | VIDEO_PACKET_CODED_FRAMES_X => {
+				// hvc1/avc1 CodedFrames prefix a 3-byte composition time; CodedFramesX
+				// and the always-zero-offset av01/vp09 do not.
+				let has_cts = packet_type == VIDEO_PACKET_CODED_FRAMES && matches!(&fourcc, b"hvc1" | b"avc1");
+				let (data, cts) = if has_cts {
+					anyhow::ensure!(payload.len() >= 3, "enhanced CodedFrames missing composition time");
+					(&payload[3..], read_i24(&payload[0..3]))
+				} else {
+					(payload, 0)
+				};
+
+				// VP9 has no out-of-band config record, so (re)configure from each key
+				// frame's uncompressed header. `init_video` dedups when unchanged, so
+				// this is a no-op except on the first key frame or a resolution change.
+				// A malformed header drops just this frame rather than aborting the stream.
+				if &fourcc == b"vp09" && keyframe {
+					match crate::codec::vp9::config_from_keyframe(data) {
+						Ok(Some(config)) => self.init_video(config)?,
+						Ok(None) => {}
+						Err(err) => tracing::warn!(%err, "dropping malformed VP9 key frame"),
+					}
+				}
+
+				self.write_video(data, timestamp, cts, keyframe)
+			}
+			VIDEO_PACKET_SEQUENCE_END | VIDEO_PACKET_METADATA => Ok(()),
+			other => {
+				tracing::debug!(packet_type = other, "ignoring enhanced FLV video packet type");
+				Ok(())
+			}
 		}
 	}
 
@@ -176,6 +232,9 @@ impl Import {
 			return Ok(());
 		};
 		let sound_format = first >> 4;
+		if sound_format == AUDIO_FORMAT_EX {
+			return self.handle_audio_enhanced(first, body, timestamp);
+		}
 		if sound_format != AUDIO_FORMAT_AAC {
 			tracing::warn!(sound_format, "unsupported FLV audio format, dropping");
 			return Ok(());
@@ -186,81 +245,129 @@ impl Import {
 		let data = &body[2..];
 
 		match aac_packet_type {
-			AAC_SEQUENCE_HEADER => self.init_audio(data),
-			AAC_RAW => {
-				let Some(stream) = self.audio.as_mut() else {
-					tracing::debug!("AAC frame before sequence header, dropping");
-					return Ok(());
-				};
-				// Each frame is its own group so the relay can forward it immediately.
-				stream.track.write(Frame {
-					timestamp: Timestamp::from_millis(timestamp)?,
-					duration: None,
-					payload: Bytes::copy_from_slice(data),
-					keyframe: true,
-				})?;
-				stream.track.finish_group()?;
-				Ok(())
-			}
+			AAC_SEQUENCE_HEADER => self.init_audio(config_from_asc(data)?),
+			AAC_RAW => self.write_audio(data, timestamp),
 			_ => Ok(()),
 		}
 	}
 
-	/// Handle an AVC sequence header (an `AVCDecoderConfigurationRecord`). On the
-	/// first one, or whenever the bytes change, (re)build the video track.
-	fn init_video(&mut self, avcc_bytes: &[u8]) -> anyhow::Result<()> {
-		if self.video.as_ref().is_some_and(|s| s.description == avcc_bytes) {
+	/// Handle an enhanced-RTMP (FourCC) audio tag.
+	fn handle_audio_enhanced(&mut self, first: u8, body: &[u8], timestamp: u64) -> anyhow::Result<()> {
+		let packet_type = first & 0x0f;
+		anyhow::ensure!(body.len() >= 5, "enhanced audio tag too short for FourCC");
+		let fourcc: [u8; 4] = body[1..5].try_into().expect("slice is 4 bytes");
+		let payload = &body[5..];
+
+		match packet_type {
+			AUDIO_PACKET_SEQUENCE_START => {
+				let config = match &fourcc {
+					b"Opus" => config_from_opus_head(payload)?,
+					b"mp4a" => config_from_asc(payload)?,
+					// AC-3 / E-AC-3 are verbatim with no sequence header; they
+					// configure from the first frame. Anything else is unsupported.
+					other => {
+						tracing::warn!(fourcc = ?other, "unsupported enhanced FLV audio codec, dropping");
+						return Ok(());
+					}
+				};
+				self.init_audio(config)
+			}
+			AUDIO_PACKET_CODED_FRAMES => {
+				// AC-3 / E-AC-3 carry their config in the frame header, so configure
+				// from the first frame when no sequence header preceded it.
+				if self.audio.is_none() {
+					let config = match &fourcc {
+						b"ac-3" => Some(config_from_ac3(payload)?),
+						b"ec-3" => Some(config_from_eac3(payload)?),
+						_ => None,
+					};
+					if let Some(config) = config {
+						self.init_audio(config)?;
+					}
+				}
+				self.write_audio(payload, timestamp)
+			}
+			AUDIO_PACKET_SEQUENCE_END | AUDIO_PACKET_MULTICHANNEL_CONFIG => Ok(()),
+			other => {
+				tracing::debug!(packet_type = other, "ignoring enhanced FLV audio packet type");
+				Ok(())
+			}
+		}
+	}
+
+	/// Write one decoded video sample, dropping a leading delta before the first
+	/// keyframe (a mid-GOP join) rather than aborting.
+	fn write_video(&mut self, data: &[u8], dts: u64, composition_time: i32, keyframe: bool) -> anyhow::Result<()> {
+		let Some(stream) = self.video.as_mut() else {
+			tracing::debug!("video frame before sequence header, dropping");
+			return Ok(());
+		};
+		// FLV stores DTS in the tag; PTS is DTS plus the composition offset.
+		let pts_ms = (dts as i64) + (composition_time as i64);
+		anyhow::ensure!(pts_ms >= 0, "negative video presentation timestamp");
+		match stream.track.write(Frame {
+			timestamp: Timestamp::from_millis(pts_ms as u64)?,
+			duration: None,
+			payload: Bytes::copy_from_slice(data),
+			keyframe,
+		}) {
+			Ok(()) | Err(crate::Error::MissingKeyframe(_)) => Ok(()),
+			Err(e) => Err(e.into()),
+		}
+	}
+
+	/// Write one audio frame as its own group, so the relay can forward it immediately.
+	fn write_audio(&mut self, data: &[u8], timestamp: u64) -> anyhow::Result<()> {
+		let Some(stream) = self.audio.as_mut() else {
+			tracing::debug!("audio frame before config, dropping");
+			return Ok(());
+		};
+		stream.track.write(Frame {
+			timestamp: Timestamp::from_millis(timestamp)?,
+			duration: None,
+			payload: Bytes::copy_from_slice(data),
+			keyframe: true,
+		})?;
+		stream.track.finish_group()?;
+		Ok(())
+	}
+
+	/// (Re)build the video track for `config`, unless it matches the current one.
+	fn init_video(&mut self, config: VideoConfig) -> anyhow::Result<()> {
+		if self.video.as_ref().is_some_and(|s| s.config == config) {
 			return Ok(());
 		}
-
-		let avcc = crate::codec::h264::Avcc::parse(avcc_bytes)?;
-		let mut config = VideoConfig::new(H264 {
-			profile: avcc.profile,
-			constraints: avcc.constraints,
-			level: avcc.level,
-			inline: false,
-		});
-		config.description = Some(Bytes::copy_from_slice(avcc_bytes));
-		config.coded_width = avcc.coded_width;
-		config.coded_height = avcc.coded_height;
-		config.container = Container::Legacy;
 
 		let net_track = self.replace_video()?;
 		self.catalog
 			.lock()
 			.video
 			.renditions
-			.insert(net_track.name().to_string(), config);
-		self.video = Some(Stream {
+			.insert(net_track.name().to_string(), config.clone());
+		self.video = Some(VideoStream {
 			// Leading deltas before the first keyframe are skipped at the write
 			// site (the producer reports MissingKeyframe), so a mid-GOP join works.
 			track: crate::container::Producer::new(net_track, crate::catalog::hang::Container::Legacy),
-			description: Bytes::copy_from_slice(avcc_bytes),
+			config,
 		});
 		Ok(())
 	}
 
-	/// Handle an AAC sequence header (an `AudioSpecificConfig`).
-	fn init_audio(&mut self, asc_bytes: &[u8]) -> anyhow::Result<()> {
-		if self.audio.as_ref().is_some_and(|s| s.description == asc_bytes) {
+	/// (Re)build the audio track for `config`, unless it matches the current one.
+	fn init_audio(&mut self, config: AudioConfig) -> anyhow::Result<()> {
+		if self.audio.as_ref().is_some_and(|s| s.config == config) {
 			return Ok(());
 		}
-
-		let mut cursor = asc_bytes;
-		let cfg = crate::codec::aac::Config::parse(&mut cursor)?;
-		let mut config = AudioConfig::new(AAC { profile: cfg.profile }, cfg.sample_rate, cfg.channel_count);
-		config.description = Some(Bytes::copy_from_slice(asc_bytes));
-		config.container = Container::Legacy;
 
 		let net_track = self.replace_audio()?;
 		self.catalog
 			.lock()
 			.audio
 			.renditions
-			.insert(net_track.name().to_string(), config);
-		self.audio = Some(Stream {
+			.insert(net_track.name().to_string(), config.clone());
+		self.audio = Some(AudioStream {
 			track: crate::container::Producer::new(net_track, crate::catalog::hang::Container::Legacy),
-			description: Bytes::copy_from_slice(asc_bytes),
+			config,
 		});
 		Ok(())
 	}
@@ -324,4 +431,56 @@ impl Drop for Import {
 			catalog.audio.renditions.remove(stream.track.name());
 		}
 	}
+}
+
+/// Build a video config for the `avc1` shape from an `AVCDecoderConfigurationRecord`.
+fn config_from_avcc(avcc_bytes: &[u8]) -> anyhow::Result<VideoConfig> {
+	let avcc = crate::codec::h264::Avcc::parse(avcc_bytes)?;
+	let mut config = VideoConfig::new(H264 {
+		profile: avcc.profile,
+		constraints: avcc.constraints,
+		level: avcc.level,
+		inline: false,
+	});
+	config.description = Some(Bytes::copy_from_slice(avcc_bytes));
+	config.coded_width = avcc.coded_width;
+	config.coded_height = avcc.coded_height;
+	config.container = Container::Legacy;
+	Ok(config)
+}
+
+/// Build an audio config for AAC from an `AudioSpecificConfig`.
+fn config_from_asc(asc_bytes: &[u8]) -> anyhow::Result<AudioConfig> {
+	let mut cursor = asc_bytes;
+	let cfg = crate::codec::aac::Config::parse(&mut cursor)?;
+	let mut config = AudioConfig::new(AAC { profile: cfg.profile }, cfg.sample_rate, cfg.channel_count);
+	config.description = Some(Bytes::copy_from_slice(asc_bytes));
+	config.container = Container::Legacy;
+	Ok(config)
+}
+
+/// Build an audio config for Opus from an `OpusHead` (RFC 7845) record.
+fn config_from_opus_head(head: &[u8]) -> anyhow::Result<AudioConfig> {
+	let mut cursor = head;
+	let cfg = crate::codec::opus::Config::parse(&mut cursor)?;
+	let mut config = AudioConfig::new(AudioCodec::Opus, cfg.sample_rate, cfg.channel_count);
+	config.description = Some(Bytes::copy_from_slice(head));
+	config.container = Container::Legacy;
+	Ok(config)
+}
+
+/// Build an audio config for AC-3 from a sync frame header.
+fn config_from_ac3(frame: &[u8]) -> anyhow::Result<AudioConfig> {
+	let header = crate::codec::ac3::parse_header(frame)?;
+	let mut config = AudioConfig::new(AudioCodec::Ac3, header.sample_rate, header.channel_count);
+	config.container = Container::Legacy;
+	Ok(config)
+}
+
+/// Build an audio config for E-AC-3 from a sync frame header.
+fn config_from_eac3(frame: &[u8]) -> anyhow::Result<AudioConfig> {
+	let header = crate::codec::eac3::parse_header(frame)?;
+	let mut config = AudioConfig::new(AudioCodec::Ec3, header.sample_rate, header.channel_count);
+	config.container = Container::Legacy;
+	Ok(config)
 }

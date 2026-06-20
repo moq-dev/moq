@@ -8,15 +8,15 @@
 //!   frames per platform: AVFoundation/ScreenCaptureKit on macOS, native V4L2
 //!   on Linux, native Media Foundation on Windows. Today that's a webcam or
 //!   the screen.
-//! - [`encode`] H.264-encodes frames with a native backend (openh264 /
-//!   VideoToolbox / NVENC) and publishes them through
-//!   [`moq_mux::codec::h264::Import`], which handles catalog registration
-//!   and framing. Two entry points:
+//! - [`encode`] encodes frames with a native backend and publishes them through
+//!   the matching `moq_mux::codec` importer, which handles catalog registration
+//!   and framing. The codec is chosen via [`encode::Codec`]: H.264 (openh264 /
+//!   VideoToolbox / NVENC / VAAPI) or H.265 (VideoToolbox). Two entry points:
 //!   - [`encode::publish_capture`] captures a webcam and publishes it (turnkey).
 //!     It encodes strictly on demand: the track and catalog are advertised up
 //!     front, but the camera opens only while a subscriber is watching and is
 //!     released when the last one leaves.
-//!   - [`encode::Producer`] publishes H.264 you encoded yourself.
+//!   - [`encode::Producer`] publishes packets you encoded yourself.
 //!
 //! The decode/consume side (the mirror of `moq-audio`'s `AudioConsumer`) is
 //! not implemented yet; native subscribers can keep using `moq_mux` directly.

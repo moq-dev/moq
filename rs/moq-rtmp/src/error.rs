@@ -1,8 +1,8 @@
-//! Errors for the SRT ingest gateway.
+//! Errors for the RTMP ingest gateway.
 
 use std::sync::Arc;
 
-/// Errors produced while ingesting SRT into MoQ.
+/// Errors produced while ingesting RTMP into MoQ.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -10,16 +10,12 @@ pub enum Error {
 	#[error("moq: {0}")]
 	Moq(#[from] moq_net::Error),
 
-	/// Error from the moq-mux muxer/demuxer (TS demux on ingest, TS mux on egress).
-	#[error("mux: {0}")]
-	Mux(#[from] moq_mux::Error),
-
-	/// I/O error from the SRT listener or socket.
+	/// I/O error from the RTMP listener or a connection.
 	#[error("io: {0}")]
 	Io(Arc<std::io::Error>),
 
-	/// Catch-all for ingest logic that reports via `anyhow` (the moq-mux
-	/// demuxer surfaces its errors this way).
+	/// Catch-all for ingest logic that reports via `anyhow` (the RTMP session and
+	/// the moq-mux demuxer surface their errors this way).
 	#[error("{0}")]
 	Other(Arc<anyhow::Error>),
 }
@@ -36,5 +32,5 @@ impl From<anyhow::Error> for Error {
 	}
 }
 
-/// Result alias for the SRT ingest gateway.
+/// Result alias for the RTMP ingest gateway.
 pub type Result<T> = std::result::Result<T, Error>;

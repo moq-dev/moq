@@ -91,13 +91,18 @@ moq-cli publish --url https://relay.example.com --broadcast cam.hang \
 # One medium only:
 moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --no-audio
 moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --no-video
+
+# Pick a codec (default h264). h265 is hardware-only:
+moq-cli publish --url https://relay.example.com --broadcast cam.hang capture --codec h265
 ```
 
 Video capture uses a native per-platform backend (AVFoundation on macOS, V4L2 on
-Linux, Media Foundation on Windows) and picks a hardware H.264 encoder
+Linux, Media Foundation on Windows). The codec is chosen with `--codec`
+(`h264` default, or `h265`). For H.264 it picks a hardware encoder
 (VideoToolbox on macOS, NVENC on Linux NVIDIA, VAAPI on Linux Intel/AMD) when one
 is present, falling back to the built-in software encoder (openh264); force either
-with `--hardware` / `--software`. `--camera` takes a bare integer as a device index, otherwise a
+with `--hardware` / `--software`. H.265 is hardware-only (VideoToolbox on macOS,
+Media Foundation on Windows). `--camera` takes a bare integer as a device index, otherwise a
 device path (Linux) or name (a friendly-name substring on Windows, the
 AVFoundation `uniqueID` on macOS). Audio capture uses cpal (CoreAudio / WASAPI /
 ALSA) and encodes Opus.

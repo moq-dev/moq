@@ -403,11 +403,6 @@ export default class MoqWatch extends HTMLElement {
 		return this.backend.output.jitter.peek();
 	}
 
-	/** @deprecated Use `latency = <number>` instead. */
-	set jitter(value: number) {
-		this.controls.latency.set(Moq.Time.Milli(value));
-	}
-
 	/** Re-anchor playback and flush the audio buffer at an utterance boundary (buffered mode). */
 	reset(): void {
 		this.backend.reset();

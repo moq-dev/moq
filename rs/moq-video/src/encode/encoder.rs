@@ -1,14 +1,33 @@
-//! H.264 encoder front end.
+//! Video encoder front end.
 //!
 //! Accepts raw RGBA frames, converts them to I420, and delegates the actual
-//! encode to a [`Backend`](super::backend::Backend). The resulting Annex-B
-//! H.264 packets are ready for `moq_mux::codec::h264::Import`.
+//! encode to a [`Backend`](super::backend::Backend). The resulting packets are
+//! Annex-B in the framing the catalog importer for [`Config::codec`] expects:
+//! H.264 (`moq_mux::codec::h264`) or H.265 (`moq_mux::codec::h265`).
 
 use bytes::Bytes;
 
 use super::backend::{self, Backend};
 use crate::Error;
 use crate::frame::{Frame, I420};
+
+/// Output video codec. `#[non_exhaustive]` so new codecs can be added without
+/// breaking external `match`es.
+///
+/// Not every codec has a backend on every platform: H.265 is hardware-only
+/// (VideoToolbox on macOS today). Building an [`Encoder`] returns
+/// [`Error::NoEncoder`](crate::Error::NoEncoder) when nothing can encode the
+/// requested codec on this machine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Codec {
+	/// H.264 / AVC, Annex-B with in-band SPS/PPS (the "avc3" shape). The widest
+	/// support and the default.
+	#[default]
+	H264,
+	/// H.265 / HEVC, Annex-B with in-band VPS/SPS/PPS (the "hev1" shape).
+	H265,
+}
 
 /// Which encoder implementation to use. `#[non_exhaustive]` so new selection
 /// strategies can be added without breaking external `match`es.
@@ -20,7 +39,7 @@ pub enum Kind {
 	Auto,
 	/// Hardware only; error if none is available.
 	Hardware,
-	/// Software (openh264) only.
+	/// Software only (openh264 for H.264).
 	Software,
 	/// A specific backend by name, e.g. `"videotoolbox"`, `"nvenc"`, `"vaapi"`,
 	/// `"openh264"`.
@@ -44,6 +63,8 @@ pub struct Config {
 	/// Keyframe interval in frames. Subscribers joining mid-stream wait at
 	/// most this many frames before they can start decoding.
 	pub gop: u32,
+	/// Output codec. Defaults to [`Codec::H264`].
+	pub codec: Codec,
 	pub kind: Kind,
 }
 
@@ -56,6 +77,7 @@ impl Config {
 			bitrate: None,
 			// ~2 seconds at the configured framerate.
 			gop: framerate.saturating_mul(2).max(1),
+			codec: Codec::default(),
 			kind: Kind::Auto,
 		}
 	}
@@ -71,11 +93,12 @@ impl Config {
 	}
 }
 
-/// H.264 encoder. Build one with [`Encoder::new`], feed it raw RGBA frames
-/// via [`encode_rgba`](Self::encode_rgba), and publish the resulting Annex-B
-/// packets through [`Producer`](super::Producer).
+/// Video encoder. Build one with [`Encoder::new`], feed it raw RGBA frames via
+/// [`encode_rgba`](Self::encode_rgba), and publish the resulting packets through
+/// a [`Producer`](super::Producer) built for the same [`Codec`].
 pub struct Encoder {
 	backend: Box<dyn Backend>,
+	codec: Codec,
 	width: u32,
 	height: u32,
 }
@@ -107,6 +130,7 @@ impl Encoder {
 		let backend = backend::open(config)?;
 		Ok(Self {
 			backend,
+			codec: config.codec,
 			width: config.width,
 			height: config.height,
 		})
@@ -117,10 +141,16 @@ impl Encoder {
 		self.backend.name()
 	}
 
+	/// The codec this encoder emits. A [`Producer`](super::Producer) must be
+	/// built for the same codec to publish its packets.
+	pub fn codec(&self) -> Codec {
+		self.codec
+	}
+
 	/// Encode one tightly-packed RGBA frame (`width * height * 4` bytes),
-	/// returning zero or more Annex-B H.264 packets. Set `keyframe` to force an
-	/// IDR (e.g. on resume so a re-subscribing viewer can start decoding at
-	/// once). The frame must already be at the encoder's resolution.
+	/// returning zero or more encoded packets in the codec's framing. Set
+	/// `keyframe` to force an IDR (e.g. on resume so a re-subscribing viewer can
+	/// start decoding at once). The frame must already be at the encoder's resolution.
 	pub fn encode_rgba(&mut self, rgba: &[u8], width: u32, height: u32, keyframe: bool) -> Result<Vec<Bytes>, Error> {
 		// Validate geometry up front: the encoder resolution is even (checked in
 		// `new`), so a matching frame is even too, and the conversion can't fail
@@ -300,6 +330,63 @@ mod tests {
 		assert!(types.contains(&7), "no SPS in first packet: {types:?}");
 		assert!(types.contains(&8), "no PPS in first packet: {types:?}");
 		assert!(types.contains(&5), "first packet is not an IDR: {types:?}");
+	}
+
+	/// HEVC via VideoToolbox: synthetic frames through the real
+	/// `VTCompressionSession` with `kCMVideoCodecType_HEVC`, asserting the
+	/// HVCC -> Annex-B conversion produces a self-contained IRAP (VPS+SPS+PPS+IDR).
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn videotoolbox_emits_annexb_keyframe_h265() {
+		let config = Config {
+			codec: Codec::H265,
+			kind: Kind::Named("videotoolbox".into()),
+			..Config::new(320, 240, 30)
+		};
+		let mut encoder = Encoder::new(&config).expect("videotoolbox HEVC is available on macOS");
+		assert_eq!(encoder.name(), "videotoolbox");
+		assert_eq!(encoder.codec(), Codec::H265);
+
+		let frame = gray_rgba(320, 240);
+		let mut packets = Vec::new();
+		for i in 0..10 {
+			packets.extend(encoder.encode_rgba(&frame, 320, 240, i == 0).unwrap());
+		}
+		packets.extend(encoder.finish().unwrap());
+
+		assert!(!packets.is_empty(), "encoder produced no packets");
+		let first = &packets[0];
+		assert!(
+			first.starts_with(&[0, 0, 0, 1]) || first.starts_with(&[0, 0, 1]),
+			"first packet is not Annex-B"
+		);
+
+		// The first access unit must be a self-contained IRAP: VPS (32), SPS (33),
+		// PPS (34), and an IDR slice (16..=23), spliced in-band by the conversion.
+		let types = hevc_nal_types(first);
+		assert!(types.contains(&32), "no VPS in first packet: {types:?}");
+		assert!(types.contains(&33), "no SPS in first packet: {types:?}");
+		assert!(types.contains(&34), "no PPS in first packet: {types:?}");
+		assert!(
+			types.iter().any(|t| (16..=23).contains(t)),
+			"first packet is not an IRAP: {types:?}"
+		);
+	}
+
+	/// HEVC NAL unit types in an Annex-B buffer (type = `(byte >> 1) & 0x3f`).
+	#[cfg(target_os = "macos")]
+	fn hevc_nal_types(annexb: &[u8]) -> Vec<u8> {
+		let mut types = Vec::new();
+		let mut i = 0;
+		while i + 3 < annexb.len() {
+			if annexb[i..i + 3] == [0, 0, 1] {
+				types.push((annexb[i + 3] >> 1) & 0x3f);
+				i += 3;
+			} else {
+				i += 1;
+			}
+		}
+		types
 	}
 
 	/// Feed a GPU surface (NV12 `CVPixelBuffer`) straight into VideoToolbox:

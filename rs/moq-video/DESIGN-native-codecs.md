@@ -453,3 +453,32 @@ can carry NVENC and use it only where the driver is present. Upstream the
   first real exercise (see the unverified note above).
 - Consider reusing NVENC input/output buffers across frames (currently allocated
   per frame to sidestep the self-referential Session borrow).
+
+## Beyond H.264: HEVC (added later)
+
+The "H.264 only" scope above was the ffmpeg-removal project. H.265 encode landed
+afterward on top of the same `Backend` seam:
+
+- `Encoder`/`Config`/`Options` gained a `Codec` field (`H264` / `H265`);
+  `Producer::new` takes the codec and routes packets to the matching
+  `moq_mux::codec` importer (`.avc3` / `.hev1`). The mux + `hang` catalog already
+  supported both, so only `moq-video` needed work.
+- Backends advertise the codecs they emit and `backend::open` filters by the
+  requested codec before applying `Kind`. **H.265**: hardware-only (no software
+  encoder). On macOS, VideoToolbox (one extra codec type + profile, an
+  HVCC->Annex-B path reusing the H.264 conversion, and HEVC NAL/IRAP parsing). On
+  Windows, the Media Foundation MFT, which natively emits Annex-B with inline
+  VPS/SPS/PPS like its H.264 output, so it only needs the HEVC output subtype +
+  Main profile, no rewrite. The MFT is vendor-agnostic (NVIDIA/Intel/AMD).
+- Verified on macOS (`just check`): VideoToolbox HEVC emits a self-contained
+  VPS+SPS+PPS+IDR Annex-B keyframe, and the full encode -> split -> import ->
+  catalog round-trip registers the right rendition for each codec.
+- Verified on Windows (RTX 3070 Ti, live camera): Media Foundation HEVC publishes
+  a `.hev1` rendition; the round-trip into Matroska decodes as Main-profile HEVC.
+- Follow-ups: Linux NVENC/VAAPI HEVC, and a live camera run per platform.
+
+AV1 is intentionally left out: there is no hardware AV1 encoder available to us
+(none on macOS; NVENC/VAAPI AV1 are Linux-only and not yet wired), and software
+AV1 (rav1e) is too slow for real-time capture. AV1 returns whenever a hardware
+backend lands. The `Codec` enum is `#[non_exhaustive]`, so adding it back is not
+a breaking change.
