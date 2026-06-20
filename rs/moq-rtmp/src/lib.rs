@@ -1,31 +1,38 @@
-//! RTMP / enhanced-RTMP contribution ingest gateway for MoQ.
+//! RTMP / enhanced-RTMP gateway for MoQ: contribution ingest *and* egress.
 //!
 //! Runs an [RTMP](https://en.wikipedia.org/wiki/Real-Time_Messaging_Protocol)
-//! server (the protocol OBS, ffmpeg, and most hardware encoders speak), re-wraps
-//! each connection's audio/video messages as FLV tags, demuxes them with
-//! [`moq_mux`], and publishes the result into a [`moq_net::OriginProducer`] as
-//! ordinary MoQ broadcasts. Whatever serves that origin (a relay, the bundled
-//! binary's serve mode) then exposes the ingested stream like any other
-//! broadcast. This is the contribution-ingest analogue of `moq-srt`, `moq-hls`'s
-//! import, and `moq-rtc`'s WHIP.
+//! server (the protocol OBS, ffmpeg, and most hardware encoders speak) and
+//! bridges it to MoQ in both directions:
+//!
+//! - **Publish (ingest)**: a client (OBS, ffmpeg) pushes a stream in; we re-wrap
+//!   its audio/video messages as FLV tags, demux them with [`moq_mux`], and
+//!   publish the result into a [`moq_net::OriginProducer`] as ordinary MoQ
+//!   broadcasts. This is the contribution-ingest analogue of `moq-srt`,
+//!   `moq-hls`'s import, and `moq-rtc`'s WHIP.
+//! - **Play (egress)**: a client (VLC, ffplay, mpv) pulls
+//!   `rtmp://host/<app>/<key>`; we subscribe to that broadcast from a
+//!   [`moq_net::OriginConsumer`], mux it back to FLV with [`moq_mux`], and stream
+//!   the tags down as RTMP. The counterpart to `moq-hls`'s export.
 //!
 //! Both legacy RTMP (H.264 + AAC) and enhanced RTMP (E-RTMP: the HEVC, AV1, VP9,
-//! Opus, and AC-3 FourCC payloads) are supported, because the codec handling
-//! lives entirely in the [`moq_mux`] FLV demuxer; this crate only translates the
-//! RTMP transport.
+//! Opus, and AC-3 FourCC payloads) are supported in each direction, because the
+//! codec handling lives entirely in the [`moq_mux`] FLV demuxer/muxer; this crate
+//! only translates the RTMP transport. Legacy players that speak only H.264 + AAC
+//! will of course reject the E-RTMP codecs on the play path.
 //!
-//! Two entry points, depending on how much control you need over each publish:
+//! Two entry points, depending on how much control you need over each request:
 //!
 //! - **[`run`]**: the unauthenticated convenience. Build a [`Config`] and hand it
-//!   plus an origin to [`run`]; it accepts every publisher and routes by prefix +
-//!   app/key. A relay embeds this with `run(cluster.origin.clone(), config)`.
+//!   plus an origin to [`run`]; it accepts every publisher and player and routes
+//!   by prefix + app/key (publishes into the origin, plays out of it). A relay
+//!   embeds this with `run(cluster.origin.clone(), config)`.
 //! - **[`Server`] / [`Request`]**: bring your own auth. Loop on
 //!   [`Server::accept`], inspect [`Request::app`] / [`Request::stream_key`] (treat
-//!   the stream key as a token if you like), then [`Request::accept`] the publish
-//!   into an origin at a path of your choosing, or [`Request::reject`] it. This is
-//!   how an embedder (e.g. a relay verifying a JWT and scoping the origin per
-//!   token) plugs its policy in, with no callback. It mirrors `moq-native`'s
-//!   `Server` / `Request`.
+//!   the stream key as a token if you like), then match on the [`Request`]: accept
+//!   a [`Publish`] into an origin, or accept a [`Play`] out of one, at a path of
+//!   your choosing (or reject it). This is how an embedder (e.g. a relay verifying
+//!   a JWT and scoping the origin per token) plugs its policy in, with no
+//!   callback. It mirrors `moq-native`'s `Server` / `Request`.
 //!
 //! The bundled `moq-rtmp` binary serves the origin locally or forwards it to a
 //! remote relay (those paths need the `server` feature).
@@ -51,7 +58,7 @@ mod server;
 
 pub use error::{Error, Result};
 pub use listen::{Config, run};
-pub use server::{Conn, Request, Server, Stream, accept_stream};
+pub use server::{Conn, Play, Publish, Request, Server, Stream, accept_stream};
 
 /// Re-export of the `rustls` version this crate builds [`Config::tls`] against,
 /// so consumers construct a matching [`rustls::ServerConfig`] (a major `rustls`

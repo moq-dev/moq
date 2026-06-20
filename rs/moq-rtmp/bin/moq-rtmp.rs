@@ -1,15 +1,18 @@
 //! `moq-rtmp` binary.
 //!
-//! Ingests RTMP / enhanced-RTMP (OBS, ffmpeg, hardware encoders) and exposes it
-//! over MoQ two ways:
+//! Bridges RTMP / enhanced-RTMP (OBS, ffmpeg, hardware encoders, and players like
+//! VLC / ffplay / mpv) to MoQ. Each listener does both directions: a `publish`
+//! ingests a stream in, a `play` pulls one back out (`rtmp://host/<app>/<key>`
+//! round-trips to the same path). Two binary modes wire up the MoQ side:
 //!
-//! - `serve` runs a local QUIC/WebTransport server so subscribers connect
-//!   straight to this binary (no separate relay needed).
+//! - `serve` runs a local QUIC/WebTransport server so MoQ subscribers connect
+//!   straight to this binary (no separate relay needed). RTMP players can also
+//!   pull the same broadcasts back out.
 //! - `publish` forwards every ingested broadcast out to a remote relay over
 //!   WebTransport, like `moq-srt publish` / `moq-hls import` / `moq-rtc` WHIP.
 //!
-//! A relay that wants in-process ingest should instead depend on the `moq-rtmp`
-//! library and call `moq_rtmp::run` against its own origin.
+//! A relay that wants in-process ingest/egress should instead depend on the
+//! `moq-rtmp` library and call `moq_rtmp::run` against its own origin.
 
 mod serve;
 mod web;

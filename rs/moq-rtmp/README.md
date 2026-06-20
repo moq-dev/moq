@@ -1,15 +1,17 @@
 # moq-rtmp
 
-RTMP / enhanced-RTMP contribution ingest gateway for Media over QUIC.
+RTMP / enhanced-RTMP gateway for Media over QUIC: contribution ingest and egress.
 
-RTMP carries FLV-format audio/video. This crate runs an RTMP server, re-wraps
-each connection's messages as FLV tags, demuxes them with
-[`moq-mux`](../moq-mux), and publishes the result into a MoQ origin as ordinary
-broadcasts. It's the contribution-ingest analogue of `moq-srt`, `moq-hls`'s
-import, and `moq-rtc`'s WHIP. Both legacy RTMP (H.264 + AAC) and enhanced RTMP
-(E-RTMP: HEVC, AV1, VP9, Opus, AC-3) work, since the codec handling lives in the
-`moq-mux` FLV demuxer. Pure Rust: the protocol is provided by `rml_rtmp`, with no
-librtmp or ffmpeg dependency.
+RTMP carries FLV-format audio/video. This crate runs an RTMP server that bridges
+both directions with [`moq-mux`](../moq-mux): on **publish** it re-wraps a
+client's messages as FLV tags, demuxes them, and publishes the result into a MoQ
+origin as ordinary broadcasts; on **play** it subscribes to a broadcast from the
+origin, muxes it back to FLV, and streams the tags down to the player. It's the
+sibling of `moq-srt`, `moq-hls`'s import/export, and `moq-rtc`'s WHIP/WHEP. Both
+legacy RTMP (H.264 + AAC) and enhanced RTMP (E-RTMP: HEVC, AV1, VP9, Opus, AC-3)
+work in each direction, since the codec handling lives in the `moq-mux` FLV
+demuxer/muxer. Pure Rust: the protocol is provided by `rml_rtmp`, with no librtmp
+or ffmpeg dependency.
 
 ## Library
 
@@ -24,9 +26,10 @@ There are two entry points.
 
 ### `run` (unauthenticated)
 
-`Config` + `run` accepts every publisher and routes by prefix + app/key. A relay
-embeds ingest by calling `run` against its own origin, so the ingested media is
-published locally with no extra hop:
+`Config` + `run` accepts every publisher and player and routes by prefix +
+app/key (publishers ingest into the origin, players are served out of it). A relay
+embeds the gateway by calling `run` against its own origin, so the media stays
+local with no extra hop:
 
 ```rust
 let mut rtmp = moq_rtmp::Config::default();
@@ -42,25 +45,34 @@ tokio::select! {
 
 ### `Server` / `Request` (bring your own auth)
 
-To gate ingest, drive the `Server` directly. `accept` runs the handshake and the
-connect/publish exchange, then yields a `Request` once the client wants to
-publish. You inspect the app and stream key, make a decision, and `accept` or
-`reject` it. This mirrors `moq-native`'s `Server` / `Request`, so there's no
-callback: the auth policy lives in your loop.
+To gate access, drive the `Server` directly. `accept` runs the handshake and the
+connect exchange, then yields a `Request` once the client wants to publish or
+play. The `Request` is either a `Publish` or a `Play`; you inspect the app and
+stream key, make a decision, and `accept` or `reject` it. This mirrors
+`moq-native`'s `Server` / `Request`, so there's no callback: the auth policy lives
+in your loop.
 
 ```rust
 let mut server = moq_rtmp::Server::bind("0.0.0.0:1935".parse()?).await?;
+let consumer = origin.consume(); // players are served out of this
 while let Some(request) = server.accept().await {
     let origin = origin.clone();
+    let consumer = consumer.clone();
     // Spawn per connection: `accept` pumps media for the whole connection, so
-    // handling it inline would serialize publishers.
+    // handling it inline would serialize clients.
     tokio::spawn(async move {
         // Treat the stream key as a token (e.g. a moq-token JWT) and the app as
-        // the broadcast path. Verify however you like; on success choose where to
-        // publish (`origin` can be scoped per token with `with_root` / `scope`).
-        match authorize(request.app(), request.stream_key()).await {
-            Ok(path) => { let _ = request.accept(&origin, &path).await; }
-            Err(err) => { let _ = request.reject(&err.to_string()).await; }
+        // the broadcast path. Verify however you like; the origin can be scoped
+        // per token with `with_root` / `scope`.
+        match request {
+            moq_rtmp::Request::Publish(publish) => match authorize(publish.app(), publish.stream_key()).await {
+                Ok(path) => { let _ = publish.accept(&origin, &path).await; }
+                Err(err) => { let _ = publish.reject(&err.to_string()).await; }
+            },
+            moq_rtmp::Request::Play(play) => match authorize(play.app(), play.stream_key()).await {
+                Ok(path) => { let _ = play.accept(&consumer, &path).await; }
+                Err(err) => { let _ = play.reject(&err.to_string()).await; }
+            },
         }
     });
 }
@@ -91,7 +103,7 @@ Two ways to serve `rtmps://`:
   ```rust
   let tls = acceptor.accept(tcp).await?; // your tokio_rustls TlsAcceptor
   if let Some(request) = moq_rtmp::accept_stream(tls, peer).await? {
-      // authorize, then request.accept(&origin, &path).await?
+      // authorize, then match on Request::Publish / Request::Play and accept it
   }
   ```
 
@@ -99,10 +111,11 @@ Two ways to serve `rtmps://`:
 
 The `moq-rtmp` binary (needs the default `server` feature) has two modes.
 
-`serve` ingests RTMP and serves it directly as a local relay, so MoQ subscribers
-(native or browser) connect straight to this binary. It also exposes the
-`/certificate.sha256` endpoint browsers need for self-signed `http://` origins,
-and can serve a static player directory with `--dir`:
+`serve` runs RTMP directly as a local relay, so MoQ subscribers (native or
+browser) connect straight to this binary; RTMP players can also pull the same
+broadcasts back out. It also exposes the `/certificate.sha256` endpoint browsers
+need for self-signed `http://` origins, and can serve a static player directory
+with `--dir`:
 
 ```bash
 moq-rtmp serve --server-bind [::]:443 --tls-generate localhost \
@@ -139,18 +152,28 @@ ffmpeg -re -i input.mp4 -c copy -f flv rtmp://127.0.0.1:1935/live/cam0
 ffmpeg -re -i input.mp4 -c:v hevc -c:a aac -f flv rtmp://127.0.0.1:1935/live/cam0
 ```
 
+Play any broadcast back out over RTMP from a player (VLC, ffplay, mpv):
+
+```bash
+# Pulls broadcast `live/cam0` (the same URL it was pushed to).
+ffplay rtmp://127.0.0.1:1935/live/cam0
+```
+
 ## Routing
 
 Each connection's broadcast path is `<app>/<key>`, from the RTMP app and stream
 key (`rtmp://host/<app>/<key>`), falling back to just the app when the key is
-empty. `--rtmp-prefix` is prepended to namespace a listener's streams. First
-publisher on a path wins; a second connection to the same path is rejected.
+empty. `--rtmp-prefix` is prepended to namespace a listener's streams. The same
+routing applies to both directions, so the URL round-trips. First publisher on a
+path wins (a second publish to a live path is rejected); plays don't claim a path,
+so any number of players can pull the same broadcast at once, and a play waits for
+the broadcast to be announced.
 
 ## Auth
 
 The `run` entry point and the `moq-rtmp` binary are unauthenticated: anyone who
-can reach the TCP port can publish, so gate them with a host firewall or a
+can reach the TCP port can publish or play, so gate them with a host firewall or a
 private network. To authenticate, use the `Server` / `Request` API above and
-verify each publish in your accept loop (e.g. the stream key as a moq-token JWT,
-the app as the broadcast path) before calling `request.accept`. That is the
-intended integration point for a relay that already has JWT/path auth.
+verify each request in your accept loop (e.g. the stream key as a moq-token JWT,
+the app as the broadcast path) before accepting it. That is the intended
+integration point for a relay that already has JWT/path auth.
