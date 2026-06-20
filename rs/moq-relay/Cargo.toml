@@ -47,7 +47,7 @@ moq-net = { workspace = true, features = ["serde"] }
 moq-token = { workspace = true, features = ["tokio"] }
 qmux = { workspace = true, features = ["ws"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-reqwest-middleware = "0.5"
+reqwest-middleware = "0.4"
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
