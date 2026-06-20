@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Emit MSF catalogs at draft-ietf-moq-msf-01: the `version` field is now the string `"draft-01"` instead of the number `1`. The MSF consumer still accepts both forms.
+
 ## [0.5.6](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.5...moq-mux-v0.5.6) - 2026-06-17
 
 ### Added

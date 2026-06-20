@@ -1,11 +1,14 @@
 //! MSF (MOQT Streaming Format) catalog types.
 //!
 //! This crate provides types for the MSF catalog format as defined in
-//! draft-ietf-moq-msf-00, with additional support for CMAF packaging
+//! draft-ietf-moq-msf-01, with additional support for CMAF packaging
 //! from draft-ietf-moq-cmsf-00.
 //!
+//! draft-01 changed the catalog `version` from a JSON number to a `"draft-XX"`
+//! string. [`Version`] parses both forms, so draft-00 catalogs still decode.
+//!
 //! References:
-//! - <https://www.ietf.org/archive/id/draft-ietf-moq-msf-00.txt>
+//! - <https://www.ietf.org/archive/id/draft-ietf-moq-msf-01.txt>
 //! - <https://www.ietf.org/archive/id/draft-ietf-moq-cmsf-00.txt>
 
 use std::fmt;
@@ -23,11 +26,101 @@ pub const DEFAULT_NAME: &str = "catalog";
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Catalog {
-	/// MSF version. Always 1 for this draft.
-	pub version: u32,
+	/// MSF catalog version. Defaults to [`Version::CURRENT`].
+	pub version: Version,
 
 	/// Array of track descriptions.
 	pub tracks: Vec<Track>,
+}
+
+impl Default for Catalog {
+	fn default() -> Self {
+		Self {
+			version: Version::CURRENT,
+			tracks: Vec::new(),
+		}
+	}
+}
+
+/// MSF catalog version.
+///
+/// draft-00 put the JSON number `1` in the `version` field. draft-01 switched to
+/// a JSON string of the form `"draft-XX"`. Both forms are accepted when parsing
+/// for backwards compatibility; new catalogs serialize as the newest draft this
+/// crate emits ([`Version::CURRENT`]).
+///
+/// The variant preserves the wire encoding it was parsed from, so a draft-00
+/// catalog re-serializes as the number `1` and a draft-01 catalog as
+/// `"draft-01"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Version {
+	/// draft-ietf-moq-msf-00, encoded on the wire as the JSON number `1`.
+	Draft00,
+	/// draft-ietf-moq-msf-01, encoded on the wire as the JSON string `"draft-01"`.
+	Draft01,
+	/// A version string this crate doesn't recognize, e.g. a future `"draft-02"`.
+	/// Preserved verbatim so it round-trips.
+	Unknown(String),
+}
+
+impl Version {
+	/// The newest MSF version this crate emits by default.
+	pub const CURRENT: Version = Version::Draft01;
+}
+
+impl Default for Version {
+	fn default() -> Self {
+		Version::CURRENT
+	}
+}
+
+impl Serialize for Version {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		match self {
+			// draft-00 encoded the version as a bare JSON number.
+			Version::Draft00 => serializer.serialize_u32(1),
+			Version::Draft01 => serializer.serialize_str("draft-01"),
+			Version::Unknown(s) => serializer.serialize_str(s),
+		}
+	}
+}
+
+impl<'de> Deserialize<'de> for Version {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		struct VersionVisitor;
+
+		impl serde::de::Visitor<'_> for VersionVisitor {
+			type Value = Version;
+
+			fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+				f.write_str("the JSON number 1 (draft-00) or a \"draft-XX\" version string")
+			}
+
+			fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Version, E> {
+				match v {
+					1 => Ok(Version::Draft00),
+					other => Err(E::custom(format!("unsupported MSF catalog version: {other}"))),
+				}
+			}
+
+			fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Version, E> {
+				match u64::try_from(v) {
+					Ok(v) => self.visit_u64(v),
+					Err(_) => Err(E::custom(format!("unsupported MSF catalog version: {v}"))),
+				}
+			}
+
+			fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Version, E> {
+				Ok(match v {
+					"draft-01" => Version::Draft01,
+					other => Version::Unknown(other.to_string()),
+				})
+			}
+		}
+
+		deserializer.deserialize_any(VersionVisitor)
+	}
 }
 
 /// A single track in the MSF catalog.
@@ -277,7 +370,7 @@ mod test {
 	#[test]
 	fn serialize_video_track() {
 		let catalog = Catalog {
-			version: 1,
+			version: Version::default(),
 			tracks: vec![Track {
 				name: "video0".to_string(),
 				packaging: Packaging::Legacy,
@@ -318,7 +411,7 @@ mod test {
 	#[test]
 	fn serialize_audio_track() {
 		let catalog = Catalog {
-			version: 1,
+			version: Version::default(),
 			tracks: vec![Track {
 				name: "audio0".to_string(),
 				packaging: Packaging::Legacy,
@@ -388,7 +481,7 @@ mod test {
 	#[test]
 	fn roundtrip_empty() {
 		let catalog = Catalog {
-			version: 1,
+			version: Version::default(),
 			tracks: vec![],
 		};
 		let json = catalog.to_string().unwrap();
@@ -399,7 +492,7 @@ mod test {
 	#[test]
 	fn cmaf_packaging() {
 		let catalog = Catalog {
-			version: 1,
+			version: Version::default(),
 			tracks: vec![Track {
 				name: "hd".to_string(),
 				packaging: Packaging::Cmaf,
@@ -452,7 +545,7 @@ mod test {
 	#[test]
 	fn serialize_sap_fields() {
 		let catalog = Catalog {
-			version: 1,
+			version: Version::default(),
 			tracks: vec![track_with_sap_and_jitter()],
 		};
 
@@ -501,7 +594,7 @@ mod test {
 	#[test]
 	fn sap_and_jitter_roundtrip() {
 		let original = Catalog {
-			version: 1,
+			version: Version::default(),
 			tracks: vec![track_with_sap_and_jitter()],
 		};
 
@@ -511,5 +604,52 @@ mod test {
 		assert_eq!(parsed.tracks[0].max_grp_sap_starting_type, Some(1));
 		assert_eq!(parsed.tracks[0].max_obj_sap_starting_type, Some(2));
 		assert_eq!(parsed.tracks[0].jitter, Some(Duration::from_millis(15)));
+	}
+
+	#[test]
+	fn default_catalog_emits_draft01_string() {
+		// New catalogs carry the draft-01 string version on the wire.
+		let json = Catalog::default().to_string().unwrap();
+		let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+		assert_eq!(value["version"], serde_json::json!("draft-01"));
+	}
+
+	#[test]
+	fn legacy_numeric_version_parses() {
+		// draft-00 catalogs put the JSON number 1 in `version`. They must still
+		// decode, and re-serialize back to the same numeric form.
+		let json = r#"{"version":1,"tracks":[]}"#;
+		let catalog = Catalog::from_str(json).unwrap();
+		assert_eq!(catalog.version, Version::Draft00);
+
+		let value: serde_json::Value = serde_json::from_str(&catalog.to_string().unwrap()).unwrap();
+		assert_eq!(value["version"], serde_json::json!(1));
+	}
+
+	#[test]
+	fn draft01_string_version_parses() {
+		let json = r#"{"version":"draft-01","tracks":[]}"#;
+		let catalog = Catalog::from_str(json).unwrap();
+		assert_eq!(catalog.version, Version::Draft01);
+
+		let value: serde_json::Value = serde_json::from_str(&catalog.to_string().unwrap()).unwrap();
+		assert_eq!(value["version"], serde_json::json!("draft-01"));
+	}
+
+	#[test]
+	fn unknown_version_string_roundtrips() {
+		// A future draft we don't recognize is preserved verbatim rather than rejected.
+		let json = r#"{"version":"draft-99","tracks":[]}"#;
+		let catalog = Catalog::from_str(json).unwrap();
+		assert_eq!(catalog.version, Version::Unknown("draft-99".to_string()));
+
+		let value: serde_json::Value = serde_json::from_str(&catalog.to_string().unwrap()).unwrap();
+		assert_eq!(value["version"], serde_json::json!("draft-99"));
+	}
+
+	#[test]
+	fn unsupported_numeric_version_errors() {
+		// Numbers other than 1 never had a defined meaning, so reject them.
+		assert!(Catalog::from_str(r#"{"version":2,"tracks":[]}"#).is_err());
 	}
 }

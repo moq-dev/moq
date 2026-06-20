@@ -10,8 +10,9 @@
 
 Catalog types for the MOQT Streaming Format (MSF).
 
-This crate implements the catalog format defined in [draft-ietf-moq-msf-00](https://www.ietf.org/archive/id/draft-ietf-moq-msf-00.txt),
+This crate implements the catalog format defined in [draft-ietf-moq-msf-01](https://www.ietf.org/archive/id/draft-ietf-moq-msf-01.txt),
 with additional support for CMAF packaging from [draft-ietf-moq-cmsf-00](https://www.ietf.org/archive/id/draft-ietf-moq-cmsf-00.txt).
+draft-00 catalogs (which used a numeric `version`) still decode, so older publishers remain compatible.
 
 Used by [moq-mux](https://github.com/moq-dev/moq/tree/main/rs/moq-mux) for muxing/demuxing media. For the higher-level [hang](https://github.com/moq-dev/moq/tree/main/rs/hang) catalog format used elsewhere in this repo, see that crate.
 

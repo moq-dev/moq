@@ -393,7 +393,7 @@ mod test {
 		let expected_init = base64::engine::general_purpose::STANDARD.decode(init_b64).unwrap();
 
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![video_track("video0", moq_msf::Packaging::Cmaf, Some(init_b64))],
 		};
 
@@ -413,7 +413,7 @@ mod test {
 	#[test]
 	fn loc_audio_yields_legacy_container() {
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![audio_track("audio0", moq_msf::Packaging::Loc)],
 		};
 
@@ -442,7 +442,7 @@ mod test {
 		audio.init_data = Some(init_b64);
 
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![video, audio],
 		};
 
@@ -460,7 +460,7 @@ mod test {
 		// must stay None so downstream code reads the bytes from one place only.
 		let init_b64 = "AAAYZ2Z0eXA=";
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![video_track("video0", moq_msf::Packaging::Cmaf, Some(init_b64))],
 		};
 		let catalog = from_msf(&msf).unwrap();
@@ -472,7 +472,7 @@ mod test {
 		let mut track = video_track("video0", moq_msf::Packaging::Legacy, Some("!!!not-base64!!!"));
 		track.codec = Some("avc1.42c01e".to_string());
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![track],
 		};
 		let err = from_msf(&msf).expect_err("malformed base64 should error");
@@ -488,7 +488,7 @@ mod test {
 		let mut track = video_track("video0", moq_msf::Packaging::Legacy, None);
 		track.codec = Some("weirdcodec".to_string());
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![track],
 		};
 
@@ -500,7 +500,7 @@ mod test {
 	#[test]
 	fn cmaf_without_init_data_is_error() {
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![video_track("video0", moq_msf::Packaging::Cmaf, None)],
 		};
 
@@ -512,7 +512,7 @@ mod test {
 	#[test]
 	fn empty_catalog_is_empty_hang_catalog() {
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![],
 		};
 
@@ -526,7 +526,7 @@ mod test {
 		let mut track = video_track("video0", moq_msf::Packaging::Legacy, None);
 		track.role = None;
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![track],
 		};
 
@@ -540,7 +540,7 @@ mod test {
 		let mut track = audio_track("caption0", moq_msf::Packaging::Legacy);
 		track.role = Some(moq_msf::Role::Caption);
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![track],
 		};
 
@@ -558,7 +558,7 @@ mod test {
 		track.channel_config = None;
 		track.init_data = None;
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![track],
 		};
 
@@ -585,7 +585,7 @@ mod test {
 		track.channel_config = None;
 		track.init_data = Some(init_b64);
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![track],
 		};
 
@@ -612,7 +612,7 @@ mod test {
 		track.channel_config = None;
 		track.init_data = Some(init_b64);
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![track],
 		};
 
@@ -640,7 +640,7 @@ mod test {
 		track.channel_config = None; // missing, derive from init_data
 		track.init_data = Some(init_b64);
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![track],
 		};
 
@@ -656,7 +656,7 @@ mod test {
 		let bad = video_track("timeline0", moq_msf::Packaging::MediaTimeline, None);
 		let good = video_track("video0", moq_msf::Packaging::Legacy, None);
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![bad, good],
 		};
 
@@ -678,7 +678,7 @@ mod test {
 		bad.codec = None;
 		let good = audio_track("audio0", moq_msf::Packaging::Loc);
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![bad, good],
 		};
 
@@ -691,7 +691,7 @@ mod test {
 	fn unknown_packaging_variant_is_skipped() {
 		let track = video_track("video0", moq_msf::Packaging::Unknown("custom".to_string()), None);
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![track],
 		};
 
@@ -704,7 +704,7 @@ mod test {
 		let mut track = video_track("video0", moq_msf::Packaging::Legacy, None);
 		track.codec = None;
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![track],
 		};
 
@@ -721,7 +721,7 @@ mod test {
 		let mut track = audio_track("audio0", moq_msf::Packaging::Legacy);
 		track.codec = None;
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![track],
 		};
 
@@ -739,7 +739,7 @@ mod test {
 		let mut track = video_track("video0", moq_msf::Packaging::Legacy, None);
 		track.codec = Some("avc1.0".to_string());
 		let msf = moq_msf::Catalog {
-			version: 1,
+			version: moq_msf::Version::default(),
 			tracks: vec![track],
 		};
 

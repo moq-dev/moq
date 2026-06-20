@@ -45,9 +45,23 @@ export const TrackSchema = z.object({
 /** A single track in an MSF catalog, including its codec and media properties. */
 export type Track = z.infer<typeof TrackSchema>;
 
-/** Zod schema for the top-level MSF catalog (version 1). */
+/**
+ * Zod schema for the catalog version.
+ *
+ * draft-00 put the JSON number `1` here; draft-01 switched to a `"draft-XX"`
+ * string. Both are accepted when decoding for backwards compatibility.
+ */
+export const VersionSchema = z.union([z.literal(1), z.string()]);
+
+/** The catalog version: the legacy number `1` (draft-00) or a `"draft-XX"` string. */
+export type Version = z.infer<typeof VersionSchema>;
+
+/** The newest MSF draft version string this package emits. */
+export const VERSION = "draft-01";
+
+/** Zod schema for the top-level MSF catalog. */
 export const CatalogSchema = z.object({
-	version: z.literal(1),
+	version: VersionSchema,
 	tracks: z.array(TrackSchema),
 });
 
