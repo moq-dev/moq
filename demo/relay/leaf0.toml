@@ -40,14 +40,15 @@ listen = "[::]:4444"
 connect = ["https://localhost:4443/"]
 
 [auth]
-# Allow JWT tokens that are signed by this root key.
-# `just key` will populate this file.
-key = "root.jwk"
+# Local development: anonymous access to everything, so no JWT is needed.
+public = ""
 
-[auth.public]
-# Allow anonymous clients to subscribe and publish to the prefixes below.
-subscribe = ["anon", "demo"]
-publish = ["anon", "demo/viewer"]
+# To exercise JWT + public-prefix auth instead, drop `public` above and restore:
+# key = "root.jwk"
+#
+# [auth.public]
+# subscribe = ["anon", "demo"]
+# publish = ["anon", "demo/viewer"]
 
 [stats]
 enabled = true
