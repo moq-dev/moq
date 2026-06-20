@@ -5,9 +5,9 @@
 //! direction (`publish` / `subscribe`). The 2x2 is:
 //!
 //! - `server publish` -- WHIP server, ingest from a remote publisher into MoQ.
-//! - `server subscribe` -- WHEP server, egress a MoQ broadcast to remote subscribers (501).
+//! - `server subscribe` -- WHEP server, egress a MoQ broadcast to remote subscribers.
 //! - `client subscribe` -- WHEP client, pull a remote WHEP feed into MoQ.
-//! - `client publish` -- WHIP client, push a MoQ broadcast to a remote WHIP endpoint (501).
+//! - `client publish` -- WHIP client, push a MoQ broadcast to a remote WHIP endpoint.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
