@@ -9,21 +9,37 @@ use axum::{
 	body::Bytes,
 	extract::{Path, State},
 	http::{HeaderMap, HeaderValue, StatusCode, header},
-	response::{IntoResponse, Response},
+	response::{IntoResponse, Response as HttpResponse},
 	routing::post,
 };
 use str0m::{Candidate, Rtc};
 
 use crate::{Error, Result, ingest::IngestSink, sdp, server::Server, session};
 
+/// The result of [`accept`]: the SDP answer to return to the client, plus an
+/// opaque resource id for the WHIP `Location` header (the RFC 9725 session
+/// resource URL).
+#[derive(Clone, Debug)]
+pub struct Response {
+	/// Opaque id identifying the negotiated session, for the `Location` header.
+	pub resource_id: String,
+	/// The SDP answer body (`Content-Type: application/sdp`).
+	pub answer: String,
+}
+
 /// Build the WHIP axum router.
 pub fn router(server: Server) -> Router {
 	Router::new().route("/{*path}", post(handle)).with_state(server)
 }
 
-async fn handle(State(server): State<Server>, Path(path): Path<String>, headers: HeaderMap, body: Bytes) -> Response {
+async fn handle(
+	State(server): State<Server>,
+	Path(path): Path<String>,
+	headers: HeaderMap,
+	body: Bytes,
+) -> HttpResponse {
 	match accept_offer(&server, &path, &headers, body).await {
-		Ok((resource_id, answer)) => {
+		Ok(Response { resource_id, answer }) => {
 			let mut response_headers = HeaderMap::new();
 			response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/sdp"));
 			if let Ok(loc) = HeaderValue::from_str(&format!("/{path}/{resource_id}")) {
@@ -38,24 +54,47 @@ async fn handle(State(server): State<Server>, Path(path): Path<String>, headers:
 	}
 }
 
-async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: Bytes) -> Result<(String, String)> {
+/// Router glue: enforce the WHIP `Content-Type` then hand the raw offer to
+/// [`accept`], using the request path as the (unauthenticated) broadcast name.
+async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: Bytes) -> Result<Response> {
 	if !is_sdp(headers) {
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
-	let sdp = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	let offer = sdp::parse_offer(sdp)?;
+	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
+	accept(server, path, offer).await
+}
+
+/// Accept a WHIP SDP offer and publish the negotiated WebRTC media into the
+/// server's configured publish origin under `broadcast` (a path relative to the
+/// origin's root).
+///
+/// This is the negotiation core behind [`router`], exposed so an embedder can
+/// own the HTTP route and authentication: verify the request, resolve the
+/// authorized broadcast name, then hand the raw SDP offer here. It parses the
+/// offer, registers the broadcast (so a fast subscriber doesn't 404 in the gap
+/// before the first RTP packet), binds the ICE socket, spawns the RTP->MoQ
+/// session, and returns the SDP answer plus an opaque `resource_id` for the WHIP
+/// `Location` header.
+///
+/// `offer` is the raw SDP body; the caller is responsible for checking the
+/// `Content-Type: application/sdp` request header. Fails with
+/// [`Error::InvalidSdp`] on a malformed offer and surfaces
+/// [`moq_net::Error::Unauthorized`] (as [`Error::Other`]) if `broadcast` is
+/// outside the publish origin's scope.
+pub async fn accept(server: &Server, broadcast: impl moq_net::AsPath, offer: &str) -> Result<Response> {
+	let offer = sdp::parse_offer(offer)?;
 
 	// Register the broadcast on the publish origin before negotiating, so a
 	// fast subscriber doesn't see a 404 in the gap between the SDP answer
 	// and the first RTP packet.
-	let broadcast = moq_net::BroadcastInfo::new().produce();
-	let consumer = broadcast.consume();
+	let producer = moq_net::BroadcastInfo::new().produce();
+	let consumer = producer.consume();
 	let publish = server
 		.publisher()
-		.publish_broadcast(path, &consumer)
+		.publish_broadcast(broadcast, &consumer)
 		.map_err(|err| Error::Other(anyhow::anyhow!("failed to publish broadcast: {err}")))?;
 
-	let sink = Box::new(IngestSink::new(broadcast)?);
+	let sink = Box::new(IngestSink::new(producer)?);
 
 	let (socket, candidates) = session::bind_udp(&server.config().ice_candidates).await?;
 	let mut rtc = Rtc::new(std::time::Instant::now());
@@ -76,7 +115,10 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 		}
 	});
 
-	Ok((resource_id, sdp::render_answer(&answer)))
+	Ok(Response {
+		resource_id,
+		answer: sdp::render_answer(&answer),
+	})
 }
 
 fn is_sdp(headers: &HeaderMap) -> bool {

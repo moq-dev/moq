@@ -322,9 +322,3 @@ export class PublishBlocked {
 		return new PublishBlocked({ suffix, trackName });
 	}
 }
-
-// Backward compatibility aliases
-export const SubscribeAnnounces = SubscribeNamespace;
-export const SubscribeAnnouncesOk = SubscribeNamespaceOk;
-export const SubscribeAnnouncesError = SubscribeNamespaceError;
-export const UnsubscribeAnnounces = UnsubscribeNamespace;

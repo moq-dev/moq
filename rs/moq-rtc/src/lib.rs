@@ -43,4 +43,4 @@ pub mod session;
 
 pub use client::Client;
 pub use error::*;
-pub use server::Server;
+pub use server::{Server, whip};
