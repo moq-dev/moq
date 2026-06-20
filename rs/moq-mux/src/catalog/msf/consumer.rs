@@ -147,12 +147,7 @@ fn container_from_msf(track: &moq_msf::Track) -> Result<Option<Container>> {
 		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy => Ok(Some(Container::Legacy)),
 		moq_msf::Packaging::Cmaf => {
 			let init = decode_init_data(track)?.ok_or_else(|| Error::MissingCmafInit(track.name.clone()))?;
-			#[allow(deprecated)]
-			Ok(Some(Container::Cmaf {
-				init,
-				timescale: None,
-				track_id: None,
-			}))
+			Ok(Some(Container::Cmaf { init }))
 		}
 		_ => Ok(None),
 	}

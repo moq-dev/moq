@@ -1,4 +1,4 @@
-import { Moq } from "@moq/hang";
+import * as Moq from "@moq/net";
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../../element";

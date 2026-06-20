@@ -1,5 +1,4 @@
 import * as z from "zod/mini";
-import { u53Schema } from "./integers";
 
 /**
  * Container format for frame timestamp encoding and frame payload structure.
@@ -16,14 +15,9 @@ export const ContainerSchema = z._default(
 		// The default hang container
 		z.object({ kind: z.literal("legacy") }),
 		// CMAF container with base64-encoded init segment (ftyp+moov).
-		// `timescale` and `trackId` are deprecated: they duplicate info in `init`
-		// and are accepted only so catalogs from newer publishers (which still
-		// emit them for older players) round-trip cleanly.
 		z.object({
 			kind: z.literal("cmaf"),
 			init: z.base64(),
-			timescale: z.optional(u53Schema),
-			trackId: z.optional(u53Schema),
 		}),
 		// Low Overhead Container.
 		z.object({ kind: z.literal("loc") }),

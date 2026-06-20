@@ -523,11 +523,6 @@ export class Effect {
 		this.#dispose.push(() => effect.close());
 	}
 
-	/** Alias for {@link run}, kept for backwards compatibility. */
-	effect(fn: (effect: Effect) => void) {
-		return this.run(fn);
-	}
-
 	/** Creates a derived signal scoped to this effect, closed when the effect reruns or closes. */
 	computed<T>(fn: (effect: Effect) => T): Computed<T> {
 		const computed = new Computed(fn);
