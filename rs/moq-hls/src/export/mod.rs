@@ -35,6 +35,14 @@ pub struct Config {
 	pub latency: Duration,
 	/// Target segment duration for audio renditions (video rolls on GOPs).
 	pub audio_segment_target: Duration,
+	/// VOD segment mode. When set, each rendition emits exactly ONE moof+mdat per
+	/// segment, rolled on a keyframe once the segment reaches this duration (audio:
+	/// purely on duration). Combines GOPs / sub-GOP input fragments into one fragment
+	/// per segment -- the right shape for recording (no LL-HLS parts), and robust to
+	/// publishers that over-fragment (e.g. ffmpeg `frag_every_frame`, whose per-frame
+	/// moofs otherwise explode into per-frame segments). `None` (default) keeps the
+	/// per-GOP + LL-HLS-part behavior used by the live gateway.
+	pub segment_target: Option<Duration>,
 }
 
 impl Default for Config {
@@ -44,6 +52,7 @@ impl Default for Config {
 			window: Duration::from_secs(16),
 			latency: Duration::from_secs(10),
 			audio_segment_target: Duration::from_secs(2),
+			segment_target: None,
 		}
 	}
 }

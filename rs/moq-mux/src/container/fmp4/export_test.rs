@@ -637,3 +637,123 @@ async fn next_fragment_reports_segment_metadata() {
 	drop(catalog);
 	drop(producer);
 }
+
+/// `with_segment_target` COMBINES whole GOPs into one moof+mdat per segment, rolled
+/// on a keyframe once the segment reaches the target -- instead of one fragment per
+/// GOP. This is the VOD shape (one moof per segment) and the fix for publishers that
+/// over-fragment (e.g. ffmpeg `frag_every_frame`): the per-keyframe / part triggers
+/// are bypassed, so a noisy keyframe-per-frame stream still yields target-sized
+/// segments rather than per-frame ones.
+#[tokio::test(start_paused = true)]
+async fn segment_target_combines_gops_into_one_fragment() {
+	use std::time::Duration;
+
+	use bytes::BytesMut;
+	use hang::catalog::{Container, H264, VideoConfig};
+	use moq_net::Timestamp;
+
+	let broadcast = moq_net::BroadcastInfo::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let track = producer
+		.create_track(
+			producer.unique_name(".avc3"),
+			moq_net::TrackInfo::default().with_timescale(hang::container::TIMESCALE),
+		)
+		.unwrap();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: true,
+	});
+	config.coded_width = Some(320);
+	config.coded_height = Some(240);
+	config.framerate = Some(30.0);
+	config.container = Container::Legacy;
+	catalog.lock().video.renditions.insert(track.name().to_string(), config);
+
+	const SC: &[u8] = &[0, 0, 0, 1];
+	let sps = &[0x67u8, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef][..];
+	let pps = &[0x68u8, 0xce, 0x3c, 0x80][..];
+	let idr = &[0x65u8, 0x88, 0x84, 0x21, 0x00, 0x11, 0x22, 0x33][..];
+	let slice = &[0x41u8, 0x9a, 0x00, 0x01][..];
+
+	let annexb = |nals: &[&[u8]]| {
+		let mut buf = BytesMut::new();
+		for nal in nals {
+			buf.extend_from_slice(SC);
+			buf.extend_from_slice(nal);
+		}
+		buf.freeze()
+	};
+	let frame = |timestamp_us: u64, payload, keyframe| crate::container::Frame {
+		timestamp: Timestamp::from_micros(timestamp_us).unwrap(),
+		payload,
+		keyframe,
+		duration: None,
+	};
+
+	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
+	// Three short GOPs (keyframe every ~66ms). With a 100ms segment target the first
+	// segment must span TWO GOPs (it can't roll on the 66ms keyframe — under target),
+	// rolling only on the keyframe at 200ms; the tail (200ms, 233ms) is the second.
+	track_producer.write(frame(0, annexb(&[sps, pps, idr]), true)).unwrap();
+	track_producer.write(frame(33_000, annexb(&[slice]), false)).unwrap();
+	track_producer
+		.write(frame(66_000, annexb(&[sps, pps, idr]), true))
+		.unwrap();
+	track_producer.write(frame(100_000, annexb(&[slice]), false)).unwrap();
+	track_producer
+		.write(frame(200_000, annexb(&[sps, pps, idr]), true))
+		.unwrap();
+	track_producer.write(frame(233_000, annexb(&[slice]), false)).unwrap();
+	track_producer.finish().unwrap();
+
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.expect("catalog consumer");
+	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream)
+		.with_fragment_duration(Duration::from_millis(20)) // ignored in segment mode
+		.with_segment_target(Duration::from_millis(100));
+
+	let init = tokio::time::timeout(Duration::from_secs(1), exporter.next_fragment())
+		.await
+		.expect("exporter timed out")
+		.expect("exporter result")
+		.expect("expected init fragment");
+	assert!(init.init);
+
+	// Read all media fragments (the track finished, so they're all available).
+	let mut frags = Vec::new();
+	for _ in 0..2 {
+		let frag = tokio::time::timeout(Duration::from_secs(1), exporter.next_fragment())
+			.await
+			.expect("exporter timed out")
+			.expect("exporter result")
+			.expect("expected a media fragment");
+		assert!(!frag.init);
+		frags.push(frag);
+	}
+
+	// Exactly TWO segments despite THREE GOPs / six frames: the part cap and the
+	// per-keyframe rollover are bypassed, GOPs combine up to the target.
+	assert_eq!(frags.len(), 2, "GOPs should combine into target-sized segments");
+	// Every segment starts on a keyframe (one moof per segment, seekable).
+	assert!(
+		frags.iter().all(|f| f.independent),
+		"each segment must start on a keyframe"
+	);
+	// The first segment spans two GOPs (>= the 100ms target), proving the combine.
+	assert!(
+		frags[0].duration >= 0.1,
+		"first segment should span >= the target, got {}",
+		frags[0].duration
+	);
+
+	drop(track_producer);
+	drop(catalog);
+	drop(producer);
+}

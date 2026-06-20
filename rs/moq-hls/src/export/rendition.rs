@@ -40,6 +40,7 @@ impl Rendition {
 			cfg.part_target.as_secs_f64(),
 			cfg.audio_segment_target.as_secs_f64(),
 			cfg.window.as_secs_f64(),
+			cfg.segment_target.is_some(),
 		));
 		spawn_pump(broadcast, name.clone(), Kind::Video, store.clone(), cfg.clone());
 		Self {
@@ -59,6 +60,7 @@ impl Rendition {
 			cfg.part_target.as_secs_f64(),
 			cfg.audio_segment_target.as_secs_f64(),
 			cfg.window.as_secs_f64(),
+			cfg.segment_target.is_some(),
 		));
 		spawn_pump(broadcast, name.clone(), Kind::Audio, store.clone(), cfg.clone());
 		Self {
@@ -105,8 +107,11 @@ async fn run_pump(
 	});
 	let _ = kind; // kind only drives the store policy; the exporter is codec-agnostic.
 
+	// In VOD mode (segment_target set) the exporter emits one moof per segment and
+	// the part cap is ignored; the live gateway leaves it None for LL-HLS parts.
 	let mut export = Export::new(broadcast, filter)
 		.with_fragment_duration(cfg.part_target)
+		.with_segment_target(cfg.segment_target)
 		.with_latency(cfg.latency);
 
 	while let Some(fragment) = export.next_fragment().await? {

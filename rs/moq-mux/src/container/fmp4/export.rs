@@ -38,6 +38,7 @@ pub struct Export<S: Stream> {
 	catalog: Option<S>,
 	latency: Duration,
 	fragment_duration: Option<Duration>,
+	segment_target: Option<Duration>,
 
 	tracks: HashMap<String, Fmp4Track>,
 
@@ -112,6 +113,7 @@ impl<S: Stream> Export<S> {
 			catalog: Some(catalog),
 			latency: Duration::ZERO,
 			fragment_duration: None,
+			segment_target: None,
 			tracks: HashMap::new(),
 			catalog_snapshot: None,
 			init_emitted: false,
@@ -140,6 +142,22 @@ impl<S: Stream> Export<S> {
 	/// the per-GOP default).
 	pub fn with_fragment_duration(mut self, duration: impl Into<Option<Duration>>) -> Self {
 		self.fragment_duration = duration.into();
+		self
+	}
+
+	/// Emit exactly ONE fragment (one moof+mdat) per segment, rolled on a keyframe
+	/// once the segment reaches `target`, instead of the default one-fragment-per-GOP
+	/// (plus optional `fragment_duration` parts). This COMBINES GOPs and any sub-GOP
+	/// input fragmentation into a single moof per segment -- what a VOD packager wants
+	/// (no LL-HLS parts) and the robust answer to publishers that over-fragment (e.g.
+	/// ffmpeg `frag_every_frame`, which emits a moof per frame). Keyframe-aligned:
+	/// segments always start on a sync sample and run >= `target` to the next keyframe.
+	/// When set, the `fragment_duration` part cap is ignored. `None` (default) keeps
+	/// the per-GOP / LL-HLS behavior. Audio (no keyframes) rolls purely on `target`.
+	///
+	/// Accepts either `Duration` or `Option<Duration>`.
+	pub fn with_segment_target(mut self, target: impl Into<Option<Duration>>) -> Self {
+		self.segment_target = target.into();
 		self
 	}
 
@@ -243,10 +261,11 @@ impl<S: Stream> Export<S> {
 
 		if let Some(name) = chosen {
 			let frag = self.fragment_duration;
+			let segment_target = self.segment_target;
 			let has_video_track = self.tracks.values().any(|t| t.is_video);
 			let track = self.tracks.get_mut(&name).unwrap();
 			let frame = track.pending.take().unwrap();
-			let flush_before = should_flush(track, &frame, frag, has_video_track);
+			let flush_before = should_flush(track, &frame, frag, segment_target, has_video_track);
 			if flush_before {
 				let frames = std::mem::take(&mut track.buffer);
 				let fragment = emit_fragment(track, frames)?;
@@ -493,40 +512,65 @@ fn extract_init(
 	Ok(())
 }
 
+/// Presentation span of `buffer` including the incoming `frame`, in seconds.
+///
+/// Frames within a track are in *decode* order; B-frames have non-monotonic PTS,
+/// so the span is max-min of all PTS, not just first..incoming.
+fn buffer_span(buffer: &[Frame], incoming: &Frame) -> Duration {
+	let mut min = Duration::from(incoming.timestamp);
+	let mut max = min;
+	for f in buffer {
+		let pts = Duration::from(f.timestamp);
+		if pts < min {
+			min = pts;
+		}
+		if pts > max {
+			max = pts;
+		}
+	}
+	max.saturating_sub(min)
+}
+
 /// Should we flush `track.buffer` *before* appending the incoming `frame`?
 ///
-/// Triggers:
+/// In `segment_target` mode (a VOD packager wanting one moof per segment) we
+/// COMBINE frames into a single fragment per segment, rolling on a keyframe once
+/// the segment reaches the target -- ignoring the per-GOP and `fragment_duration`
+/// part triggers so over-fragmented input (e.g. ffmpeg `frag_every_frame`) doesn't
+/// explode into per-frame segments.
+///
+/// Default (`segment_target == None`) triggers:
 /// - Video keyframe and buffer non-empty (one fragment per GOP)
 /// - Optional duration cap exceeded
 /// - Per-frame mode (`Some(ZERO)`)
 /// - Audio in an audio-only broadcast under default `None` mode (otherwise
 ///   the buffer would never flush — no keyframe boundary and no time cap)
-fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Duration>, has_video_track: bool) -> bool {
+fn should_flush(
+	track: &Fmp4Track,
+	frame: &Frame,
+	fragment_duration: Option<Duration>,
+	segment_target: Option<Duration>,
+	has_video_track: bool,
+) -> bool {
 	if track.buffer.is_empty() {
 		return false;
+	}
+	// VOD: one fragment per segment. Video rolls on a keyframe at/after the target
+	// (combining whole GOPs); audio has no keyframes so it rolls purely on the target.
+	if let Some(target) = segment_target {
+		let span = buffer_span(&track.buffer, frame);
+		return if track.is_video {
+			frame.keyframe && span >= target
+		} else {
+			span >= target
+		};
 	}
 	if track.is_video && frame.keyframe {
 		return true;
 	}
 	match fragment_duration {
 		Some(d) if d.is_zero() => true,
-		Some(d) => {
-			// Frames within a track are in *decode* order; B-frames have
-			// non-monotonic PTS, so the span of the buffer is min..max of all
-			// PTS, not just first..incoming.
-			let mut min = Duration::from(frame.timestamp);
-			let mut max = min;
-			for f in &track.buffer {
-				let pts = Duration::from(f.timestamp);
-				if pts < min {
-					min = pts;
-				}
-				if pts > max {
-					max = pts;
-				}
-			}
-			max.saturating_sub(min) >= d
-		}
+		Some(d) => buffer_span(&track.buffer, frame) >= d,
 		// No video keyframe will ever arrive to roll the fragment, so for
 		// audio-only broadcasts in `None` mode we fall back to per-frame
 		// fragments (matches the pre-batching default).

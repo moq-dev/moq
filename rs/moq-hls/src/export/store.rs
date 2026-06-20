@@ -86,10 +86,21 @@ pub struct SegmentStore {
 	/// Minimum duration (seconds) of media kept in the sliding window. The oldest
 	/// segment is evicted only while the remaining ones still cover this span.
 	window: f64,
+	/// VOD mode: the exporter already emits exactly one moof+mdat per segment (via
+	/// `Export::with_segment_target`), so every media fragment maps to its own
+	/// segment (one moof per segment, no LL-HLS parts). Bypasses the GOP/duration
+	/// segment-rolling policy in `push`.
+	fragment_per_segment: bool,
 }
 
 impl SegmentStore {
-	pub fn new(is_video: bool, part_target: f64, audio_segment_target: f64, window: f64) -> Self {
+	pub fn new(
+		is_video: bool,
+		part_target: f64,
+		audio_segment_target: f64,
+		window: f64,
+		fragment_per_segment: bool,
+	) -> Self {
 		let (notify, _) = watch::channel(Version::default());
 		Self {
 			inner: Mutex::new(Inner {
@@ -103,6 +114,7 @@ impl SegmentStore {
 			part_target,
 			audio_segment_target,
 			window,
+			fragment_per_segment,
 		}
 	}
 
@@ -121,7 +133,11 @@ impl SegmentStore {
 			let need_new = match inner.segments.back() {
 				None => true,
 				Some(cur) => {
-					if self.is_video {
+					if self.fragment_per_segment {
+						// VOD: the exporter already sized each fragment to a segment,
+						// so every fragment becomes its own segment (one moof each).
+						true
+					} else if self.is_video {
 						// A new GOP (independent fragment) starts a new segment.
 						fragment.independent
 					} else {
