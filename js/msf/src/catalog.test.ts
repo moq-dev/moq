@@ -1,8 +1,12 @@
 import { expect, test } from "bun:test";
-import { decode } from "./catalog.ts";
+import { decode, encode } from "./catalog.ts";
 
 function encodeJson(value: unknown): Uint8Array {
 	return new TextEncoder().encode(JSON.stringify(value));
+}
+
+function decodeJson(raw: Uint8Array): Record<string, unknown> {
+	return JSON.parse(new TextDecoder().decode(raw));
 }
 
 test("decodes a draft-00 catalog with a numeric version", () => {
@@ -30,7 +34,6 @@ test("decodes a draft-00 catalog with a numeric version", () => {
 		}),
 	);
 
-	expect(catalog.version).toBe(1);
 	expect(catalog.tracks).toHaveLength(1);
 	expect(catalog.tracks[0].codec).toBe("av01.0.08M.10.0.110.09");
 });
@@ -71,6 +74,44 @@ test("decodes a draft-01 catalog with a string version", () => {
 		}),
 	);
 
-	expect(catalog.version).toBe("draft-01");
 	expect(catalog.tracks[0].role).toBe("audio");
+});
+
+test("resolves draft-01 initRef into inline initData", () => {
+	const catalog = decode(
+		encodeJson({
+			version: "draft-01",
+			initDataList: [{ id: "v0", type: "inline", data: "AQID" }],
+			tracks: [
+				{ name: "video0", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", initRef: "v0" },
+			],
+		}),
+	);
+
+	expect(catalog.tracks[0].initData).toBe("AQID");
+});
+
+test("encode hoists and dedups init data, then round-trips", () => {
+	const catalog = {
+		tracks: [
+			{ name: "a", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", initData: "AQID" },
+			{ name: "b", packaging: "cmaf", isLive: true, role: "video", codec: "avc1.640028", initData: "AQID" },
+		],
+	};
+
+	const wire = decodeJson(encode(catalog));
+	const list = wire.initDataList as { id: string; type: string; data: string }[];
+	expect(list).toHaveLength(1);
+	expect(list[0].data).toBe("AQID");
+	expect(wire.version).toBe("draft-01");
+
+	const wireTracks = wire.tracks as { initRef?: string; initData?: string }[];
+	for (const t of wireTracks) {
+		expect(t.initRef).toBe(list[0].id);
+		expect(t.initData).toBeUndefined();
+	}
+
+	const parsed = decode(encode(catalog));
+	expect(parsed.tracks[0].initData).toBe("AQID");
+	expect(parsed.tracks[1].initData).toBe("AQID");
 });

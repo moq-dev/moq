@@ -262,10 +262,7 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 		tracks.push(track);
 	}
 
-	moq_msf::Catalog {
-		version: moq_msf::Version::CURRENT,
-		tracks,
-	}
+	moq_msf::Catalog { tracks }
 }
 
 #[cfg(test)]
@@ -315,7 +312,6 @@ mod test {
 
 		let msf = to_msf(&catalog);
 
-		assert_eq!(msf.version, moq_msf::Version::CURRENT);
 		assert_eq!(msf.tracks.len(), 2);
 
 		let video = &msf.tracks[0];
@@ -381,7 +377,6 @@ mod test {
 	fn convert_empty() {
 		let catalog = hang::Catalog::default();
 		let msf = to_msf(&catalog);
-		assert_eq!(msf.version, moq_msf::Version::CURRENT);
 		assert!(msf.tracks.is_empty());
 	}
 

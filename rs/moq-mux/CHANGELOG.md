@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Emit MSF catalogs at draft-ietf-moq-msf-01: the `version` field is now the string `"draft-01"` instead of the number `1`. The MSF consumer still accepts both forms.
+- Emit MSF catalogs at draft-ietf-moq-msf-01: `version` is the string `"draft-01"` and init data is carried via the root `initDataList` + per-track `initRef`. The MSF consumer still accepts draft-00 (numeric `version`, inline `initData`).
 
 ## [0.5.6](https://github.com/moq-dev/moq/compare/moq-mux-v0.5.5...moq-mux-v0.5.6) - 2026-06-17
 

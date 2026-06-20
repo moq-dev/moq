@@ -4,8 +4,13 @@
 //! draft-ietf-moq-msf-01, with additional support for CMAF packaging
 //! from draft-ietf-moq-cmsf-00.
 //!
-//! draft-01 changed the catalog `version` from a JSON number to a `"draft-XX"`
-//! string. [`Version`] parses both forms, so draft-00 catalogs still decode.
+//! [`Catalog`] is a version-agnostic snapshot of tracks. The wire details are
+//! hidden behind (de)serialization: parsing accepts both draft-00 (numeric
+//! `version`, inline `initData`) and draft-01 (string `version`, with init data
+//! held in a root `initDataList` and referenced per-track by `initRef`).
+//! Serializing always emits the newest draft, and init data is resolved to
+//! inline [`Track::init_data`] either way, so callers never touch the version
+//! or the init-data indirection.
 //!
 //! References:
 //! - <https://www.ietf.org/archive/id/draft-ietf-moq-msf-01.txt>
@@ -21,106 +26,17 @@ use serde_with::DurationMilliSeconds;
 /// The default track name for the MSF catalog.
 pub const DEFAULT_NAME: &str = "catalog";
 
-/// Root MSF catalog object.
-#[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+/// A snapshot of an MSF catalog: the tracks currently in a broadcast.
+///
+/// This is a version-agnostic view. The on-wire details (the catalog `version`
+/// field, and draft-01's `initDataList`/`initRef` indirection for initialization
+/// data) are handled during (de)serialization, so callers only ever see
+/// resolved tracks with inline [`Track::init_data`]. Parsing accepts both
+/// draft-00 and draft-01 catalogs; serializing always emits the newest draft.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Catalog {
-	/// MSF catalog version. Defaults to [`Version::CURRENT`].
-	pub version: Version,
-
-	/// Array of track descriptions.
+	/// The tracks in this catalog snapshot.
 	pub tracks: Vec<Track>,
-}
-
-impl Default for Catalog {
-	fn default() -> Self {
-		Self {
-			version: Version::CURRENT,
-			tracks: Vec::new(),
-		}
-	}
-}
-
-/// MSF catalog version.
-///
-/// draft-00 put the JSON number `1` in the `version` field. draft-01 switched to
-/// a JSON string of the form `"draft-XX"`. Both forms are accepted when parsing
-/// for backwards compatibility; new catalogs serialize as the newest draft this
-/// crate emits ([`Version::CURRENT`]).
-///
-/// The variant preserves the wire encoding it was parsed from, so a draft-00
-/// catalog re-serializes as the number `1` and a draft-01 catalog as
-/// `"draft-01"`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Version {
-	/// draft-ietf-moq-msf-00, encoded on the wire as the JSON number `1`.
-	Draft00,
-	/// draft-ietf-moq-msf-01, encoded on the wire as the JSON string `"draft-01"`.
-	Draft01,
-	/// A version string this crate doesn't recognize, e.g. a future `"draft-02"`.
-	/// Preserved verbatim so it round-trips.
-	Unknown(String),
-}
-
-impl Version {
-	/// The newest MSF version this crate emits by default.
-	pub const CURRENT: Version = Version::Draft01;
-}
-
-impl Default for Version {
-	fn default() -> Self {
-		Version::CURRENT
-	}
-}
-
-impl Serialize for Version {
-	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-		match self {
-			// draft-00 encoded the version as a bare JSON number.
-			Version::Draft00 => serializer.serialize_u32(1),
-			Version::Draft01 => serializer.serialize_str("draft-01"),
-			Version::Unknown(s) => serializer.serialize_str(s),
-		}
-	}
-}
-
-impl<'de> Deserialize<'de> for Version {
-	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-		struct VersionVisitor;
-
-		impl serde::de::Visitor<'_> for VersionVisitor {
-			type Value = Version;
-
-			fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-				f.write_str("the JSON number 1 (draft-00) or a \"draft-XX\" version string")
-			}
-
-			fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Version, E> {
-				match v {
-					1 => Ok(Version::Draft00),
-					other => Err(E::custom(format!("unsupported MSF catalog version: {other}"))),
-				}
-			}
-
-			fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Version, E> {
-				match u64::try_from(v) {
-					Ok(v) => self.visit_u64(v),
-					Err(_) => Err(E::custom(format!("unsupported MSF catalog version: {v}"))),
-				}
-			}
-
-			fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Version, E> {
-				Ok(match v {
-					"draft-01" => Version::Draft01,
-					other => Version::Unknown(other.to_string()),
-				})
-			}
-		}
-
-		deserializer.deserialize_any(VersionVisitor)
-	}
 }
 
 /// A single track in the MSF catalog.
@@ -174,8 +90,17 @@ pub struct Track {
 	/// Bitrate in bits per second.
 	pub bitrate: Option<u64>,
 
-	/// Base64-encoded initialization data.
+	/// Resolved base64 initialization data.
+	///
+	/// On the wire this is carried indirectly through draft-01's `initDataList` +
+	/// `initRef`; [`Catalog`] (de)serialization resolves it so callers always see
+	/// the inline payload here. draft-00's inline `initData` is also accepted.
 	pub init_data: Option<String>,
+
+	/// Wire-only pointer into the catalog's `initDataList` (draft-01). Populated
+	/// only while (de)serializing; resolved into `init_data` on parse and never
+	/// surfaced to callers.
+	init_ref: Option<String>,
 
 	/// Render group for synchronized playback.
 	pub render_group: Option<u32>,
@@ -216,6 +141,146 @@ impl Catalog {
 	}
 }
 
+/// The newest MSF draft string this crate emits.
+const CURRENT_VERSION: &str = "draft-01";
+
+impl Serialize for Catalog {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		use std::collections::HashMap;
+
+		// Hoist inline init payloads into a shared, deduplicated initDataList and
+		// point each track at its entry via initRef. That's the draft-01 wire
+		// shape; identical payloads across tracks collapse to one entry.
+		let mut init_data_list: Vec<InitData> = Vec::new();
+		let mut ids: HashMap<String, String> = HashMap::new();
+		let mut tracks = Vec::with_capacity(self.tracks.len());
+
+		for track in &self.tracks {
+			let mut track = track.clone();
+			if let Some(payload) = track.init_data.take() {
+				let id = if let Some(id) = ids.get(&payload) {
+					id.clone()
+				} else {
+					let id = format!("init{}", init_data_list.len());
+					init_data_list.push(InitData {
+						id: id.clone(),
+						kind: "inline".to_string(),
+						data: payload.clone(),
+					});
+					ids.insert(payload, id.clone());
+					id
+				};
+				track.init_ref = Some(id);
+			}
+			tracks.push(track);
+		}
+
+		Wire {
+			version: WireVersion,
+			tracks,
+			init_data_list: (!init_data_list.is_empty()).then_some(init_data_list),
+		}
+		.serialize(serializer)
+	}
+}
+
+impl<'de> Deserialize<'de> for Catalog {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let wire = Wire::deserialize(deserializer)?;
+		let init_data_list = wire.init_data_list.unwrap_or_default();
+
+		let tracks = wire
+			.tracks
+			.into_iter()
+			.map(|mut track| {
+				// Resolve draft-01 initRef into inline init_data so callers never
+				// see the indirection. Inline init_data (draft-00) is kept as-is.
+				if track.init_data.is_none() {
+					if let Some(id) = track.init_ref.take() {
+						if let Some(entry) = init_data_list.iter().find(|e| e.id == id && e.kind == "inline") {
+							track.init_data = Some(entry.data.clone());
+						}
+					}
+				}
+				track.init_ref = None;
+				track
+			})
+			.collect();
+
+		Ok(Catalog { tracks })
+	}
+}
+
+/// The on-wire catalog shape, carrying the bits [`Catalog`] hides from callers.
+#[serde_with::skip_serializing_none]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Wire {
+	version: WireVersion,
+	#[serde(default)]
+	tracks: Vec<Track>,
+	init_data_list: Option<Vec<InitData>>,
+}
+
+/// Wire encoding of the catalog version. Deserialization accepts draft-00's
+/// number `1` or any draft-01 `"draft-XX"` string; serialization always emits
+/// [`CURRENT_VERSION`], so callers never deal with the version on the wire.
+struct WireVersion;
+
+impl Serialize for WireVersion {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_str(CURRENT_VERSION)
+	}
+}
+
+impl<'de> Deserialize<'de> for WireVersion {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		struct VersionVisitor;
+
+		impl serde::de::Visitor<'_> for VersionVisitor {
+			type Value = WireVersion;
+
+			fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+				f.write_str("the JSON number 1 (draft-00) or a \"draft-XX\" version string")
+			}
+
+			fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<WireVersion, E> {
+				match v {
+					1 => Ok(WireVersion),
+					other => Err(E::custom(format!("unsupported MSF catalog version: {other}"))),
+				}
+			}
+
+			fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<WireVersion, E> {
+				match u64::try_from(v) {
+					Ok(v) => self.visit_u64(v),
+					Err(_) => Err(E::custom(format!("unsupported MSF catalog version: {v}"))),
+				}
+			}
+
+			fn visit_str<E: serde::de::Error>(self, _v: &str) -> Result<WireVersion, E> {
+				// Any draft string is accepted; we always re-emit the current draft.
+				Ok(WireVersion)
+			}
+		}
+
+		deserializer.deserialize_any(VersionVisitor)
+	}
+}
+
+/// An entry in the wire `initDataList`, referenced by a track's `initRef`.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InitData {
+	/// Identifier, unique within the catalog, that a track's `initRef` points at.
+	id: String,
+	/// Reference type. draft-01 defines only `"inline"` (base64 payload in `data`).
+	#[serde(rename = "type")]
+	kind: String,
+	/// The init payload, interpreted per `kind`. For `"inline"`, base64.
+	data: String,
+}
+
 impl Track {
 	/// Construct a track with the required identity fields set and every
 	/// optional field cleared. Fields are `pub`, so callers set whatever they
@@ -237,6 +302,7 @@ impl Track {
 			channel_config: None,
 			bitrate: None,
 			init_data: None,
+			init_ref: None,
 			render_group: None,
 			alt_group: None,
 			max_grp_sap_starting_type: None,
@@ -372,29 +438,79 @@ impl<'de> Deserialize<'de> for Role {
 mod test {
 	use super::*;
 
+	fn video_track() -> Track {
+		Track {
+			name: "video0".to_string(),
+			packaging: Packaging::Legacy,
+			is_live: true,
+			role: Some(Role::Video),
+			codec: Some("avc3.64001f".to_string()),
+			width: Some(1280),
+			height: Some(720),
+			framerate: Some(30.0),
+			samplerate: None,
+			channel_config: None,
+			bitrate: Some(6_000_000),
+			init_data: None,
+			init_ref: None,
+			render_group: Some(1),
+			alt_group: None,
+			max_grp_sap_starting_type: None,
+			max_obj_sap_starting_type: None,
+			jitter: None,
+		}
+	}
+
+	fn audio_track() -> Track {
+		Track {
+			name: "audio0".to_string(),
+			packaging: Packaging::Legacy,
+			is_live: true,
+			role: Some(Role::Audio),
+			codec: Some("opus".to_string()),
+			width: None,
+			height: None,
+			framerate: None,
+			samplerate: Some(48_000),
+			channel_config: Some("2".to_string()),
+			bitrate: Some(128_000),
+			init_data: None,
+			init_ref: None,
+			render_group: Some(1),
+			alt_group: None,
+			max_grp_sap_starting_type: None,
+			max_obj_sap_starting_type: None,
+			jitter: None,
+		}
+	}
+
+	fn track_with_sap_and_jitter() -> Track {
+		Track {
+			name: "video0".to_string(),
+			packaging: Packaging::Cmaf,
+			is_live: true,
+			role: Some(Role::Video),
+			codec: Some("avc1.640028".to_string()),
+			width: Some(1920),
+			height: Some(1080),
+			framerate: Some(30.0),
+			samplerate: None,
+			channel_config: None,
+			bitrate: Some(5_000_000),
+			init_data: None,
+			init_ref: None,
+			render_group: Some(1),
+			alt_group: None,
+			max_grp_sap_starting_type: Some(1),
+			max_obj_sap_starting_type: Some(2),
+			jitter: Some(Duration::from_millis(15)),
+		}
+	}
+
 	#[test]
 	fn serialize_video_track() {
 		let catalog = Catalog {
-			version: Version::default(),
-			tracks: vec![Track {
-				name: "video0".to_string(),
-				packaging: Packaging::Legacy,
-				is_live: true,
-				role: Some(Role::Video),
-				codec: Some("avc3.64001f".to_string()),
-				width: Some(1280),
-				height: Some(720),
-				framerate: Some(30.0),
-				samplerate: None,
-				channel_config: None,
-				bitrate: Some(6_000_000),
-				init_data: None,
-				render_group: Some(1),
-				alt_group: None,
-				max_grp_sap_starting_type: None,
-				max_obj_sap_starting_type: None,
-				jitter: None,
-			}],
+			tracks: vec![video_track()],
 		};
 
 		let json = catalog.to_string().unwrap();
@@ -416,26 +532,7 @@ mod test {
 	#[test]
 	fn serialize_audio_track() {
 		let catalog = Catalog {
-			version: Version::default(),
-			tracks: vec![Track {
-				name: "audio0".to_string(),
-				packaging: Packaging::Legacy,
-				is_live: true,
-				role: Some(Role::Audio),
-				codec: Some("opus".to_string()),
-				width: None,
-				height: None,
-				framerate: None,
-				samplerate: Some(48_000),
-				channel_config: Some("2".to_string()),
-				bitrate: Some(128_000),
-				init_data: None,
-				render_group: Some(1),
-				alt_group: None,
-				max_grp_sap_starting_type: None,
-				max_obj_sap_starting_type: None,
-				jitter: None,
-			}],
+			tracks: vec![audio_track()],
 		};
 
 		let json = catalog.to_string().unwrap();
@@ -485,10 +582,7 @@ mod test {
 
 	#[test]
 	fn roundtrip_empty() {
-		let catalog = Catalog {
-			version: Version::default(),
-			tracks: vec![],
-		};
+		let catalog = Catalog { tracks: vec![] };
 		let json = catalog.to_string().unwrap();
 		let parsed = Catalog::from_str(&json).unwrap();
 		assert_eq!(catalog, parsed);
@@ -496,61 +590,26 @@ mod test {
 
 	#[test]
 	fn cmaf_packaging() {
-		let catalog = Catalog {
-			version: Version::default(),
-			tracks: vec![Track {
-				name: "hd".to_string(),
-				packaging: Packaging::Cmaf,
-				is_live: true,
-				role: Some(Role::Video),
-				codec: Some("avc1.640028".to_string()),
-				width: Some(1920),
-				height: Some(1080),
-				framerate: Some(30.0),
-				samplerate: None,
-				channel_config: None,
-				bitrate: Some(5_000_000),
-				init_data: Some("AQID".to_string()),
-				render_group: Some(1),
-				alt_group: Some(1),
-				max_grp_sap_starting_type: None,
-				max_obj_sap_starting_type: None,
-				jitter: None,
-			}],
-		};
+		let mut track = track_with_sap_and_jitter();
+		track.name = "hd".to_string();
+		track.alt_group = Some(1);
+		track.max_grp_sap_starting_type = None;
+		track.max_obj_sap_starting_type = None;
+		track.jitter = None;
+		track.init_data = Some("AQID".to_string());
+
+		let catalog = Catalog { tracks: vec![track] };
 
 		let json = catalog.to_string().unwrap();
 		assert!(json.contains("\"packaging\":\"cmaf\""));
 		let parsed = Catalog::from_str(&json).unwrap();
 		assert_eq!(catalog, parsed);
-	}
-
-	fn track_with_sap_and_jitter() -> Track {
-		Track {
-			name: "video0".to_string(),
-			packaging: Packaging::Cmaf,
-			is_live: true,
-			role: Some(Role::Video),
-			codec: Some("avc1.640028".to_string()),
-			width: Some(1920),
-			height: Some(1080),
-			framerate: Some(30.0),
-			samplerate: None,
-			channel_config: None,
-			bitrate: Some(5_000_000),
-			init_data: None,
-			render_group: Some(1),
-			alt_group: None,
-			max_grp_sap_starting_type: Some(1),
-			max_obj_sap_starting_type: Some(2),
-			jitter: Some(Duration::from_millis(15)),
-		}
+		assert_eq!(parsed.tracks[0].init_data.as_deref(), Some("AQID"));
 	}
 
 	#[test]
 	fn serialize_sap_fields() {
 		let catalog = Catalog {
-			version: Version::default(),
 			tracks: vec![track_with_sap_and_jitter()],
 		};
 
@@ -599,7 +658,6 @@ mod test {
 	#[test]
 	fn sap_and_jitter_roundtrip() {
 		let original = Catalog {
-			version: Version::default(),
 			tracks: vec![track_with_sap_and_jitter()],
 		};
 
@@ -612,50 +670,92 @@ mod test {
 	}
 
 	#[test]
-	fn default_catalog_emits_draft01_string() {
-		// New catalogs carry the draft-01 string version on the wire.
+	fn serialize_emits_draft01_version() {
+		// Callers never set a version; we always emit the newest draft string.
 		let json = Catalog::default().to_string().unwrap();
 		let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 		assert_eq!(value["version"], serde_json::json!("draft-01"));
 	}
 
 	#[test]
-	fn legacy_numeric_version_parses() {
-		// draft-00 catalogs put the JSON number 1 in `version`. They must still
-		// decode, and re-serialize back to the same numeric form.
-		let json = r#"{"version":1,"tracks":[]}"#;
-		let catalog = Catalog::from_str(json).unwrap();
-		assert_eq!(catalog.version, Version::Draft00);
-
-		let value: serde_json::Value = serde_json::from_str(&catalog.to_string().unwrap()).unwrap();
-		assert_eq!(value["version"], serde_json::json!(1));
-	}
-
-	#[test]
-	fn draft01_string_version_parses() {
-		let json = r#"{"version":"draft-01","tracks":[]}"#;
-		let catalog = Catalog::from_str(json).unwrap();
-		assert_eq!(catalog.version, Version::Draft01);
+	fn draft00_numeric_version_decodes_and_normalizes() {
+		// draft-00 put the JSON number 1 in `version`. It must decode, and on
+		// re-serialize we normalize to the current draft string.
+		let catalog = Catalog::from_str(r#"{"version":1,"tracks":[]}"#).unwrap();
+		assert!(catalog.tracks.is_empty());
 
 		let value: serde_json::Value = serde_json::from_str(&catalog.to_string().unwrap()).unwrap();
 		assert_eq!(value["version"], serde_json::json!("draft-01"));
 	}
 
 	#[test]
-	fn unknown_version_string_roundtrips() {
-		// A future draft we don't recognize is preserved verbatim rather than rejected.
-		let json = r#"{"version":"draft-99","tracks":[]}"#;
-		let catalog = Catalog::from_str(json).unwrap();
-		assert_eq!(catalog.version, Version::Unknown("draft-99".to_string()));
+	fn draft01_string_version_decodes() {
+		let catalog = Catalog::from_str(r#"{"version":"draft-01","tracks":[]}"#).unwrap();
+		assert!(catalog.tracks.is_empty());
+	}
 
-		let value: serde_json::Value = serde_json::from_str(&catalog.to_string().unwrap()).unwrap();
-		assert_eq!(value["version"], serde_json::json!("draft-99"));
+	#[test]
+	fn unknown_version_string_is_accepted() {
+		// A future draft we don't specifically recognize still decodes; we don't
+		// expose the version, so callers are unaffected.
+		assert!(Catalog::from_str(r#"{"version":"draft-99","tracks":[]}"#).is_ok());
 	}
 
 	#[test]
 	fn unsupported_numeric_version_errors() {
 		// Numbers other than 1 never had a defined meaning, so reject them.
 		assert!(Catalog::from_str(r#"{"version":2,"tracks":[]}"#).is_err());
+	}
+
+	#[test]
+	fn draft01_init_ref_resolves_to_inline() {
+		// draft-01 carries init data in a root initDataList; tracks reference it by
+		// id via initRef. Parsing must resolve that into inline init_data.
+		let json = r#"{
+			"version": "draft-01",
+			"initDataList": [
+				{ "id": "v0", "type": "inline", "data": "AQID" }
+			],
+			"tracks": [
+				{ "name": "video0", "packaging": "cmaf", "isLive": true, "role": "video",
+				  "codec": "avc1.640028", "initRef": "v0" }
+			]
+		}"#;
+
+		let catalog = Catalog::from_str(json).unwrap();
+		assert_eq!(catalog.tracks[0].init_data.as_deref(), Some("AQID"));
+	}
+
+	#[test]
+	fn serialize_hoists_and_dedups_init_data() {
+		// Two tracks sharing the same init payload must collapse to a single
+		// initDataList entry, with both tracks referencing it via initRef and no
+		// inline initData left on the tracks.
+		let mut a = video_track();
+		a.name = "a".to_string();
+		a.init_data = Some("AQID".to_string());
+		let mut b = video_track();
+		b.name = "b".to_string();
+		b.init_data = Some("AQID".to_string());
+
+		let catalog = Catalog { tracks: vec![a, b] };
+		let value: serde_json::Value = serde_json::from_str(&catalog.to_string().unwrap()).unwrap();
+
+		let list = value["initDataList"].as_array().expect("initDataList present");
+		assert_eq!(list.len(), 1, "identical payloads should dedup to one entry");
+		assert_eq!(list[0]["data"], serde_json::json!("AQID"));
+		assert_eq!(list[0]["type"], serde_json::json!("inline"));
+
+		let id = list[0]["id"].as_str().unwrap();
+		for t in value["tracks"].as_array().unwrap() {
+			assert_eq!(t["initRef"], serde_json::json!(id));
+			assert!(t.get("initData").is_none(), "no inline initData on the wire");
+		}
+
+		// And it round-trips back to inline init_data for both tracks.
+		let parsed = Catalog::from_str(&catalog.to_string().unwrap()).unwrap();
+		assert_eq!(parsed.tracks[0].init_data.as_deref(), Some("AQID"));
+		assert_eq!(parsed.tracks[1].init_data.as_deref(), Some("AQID"));
 	}
 
 	#[test]
@@ -697,7 +797,6 @@ mod test {
 		}"#;
 
 		let catalog = Catalog::from_str(json).expect("draft-00 AV catalog must decode");
-		assert_eq!(catalog.version, Version::Draft00);
 		assert_eq!(catalog.tracks.len(), 2);
 		assert_eq!(catalog.tracks[0].framerate, Some(30.0));
 		assert_eq!(catalog.tracks[1].channel_config.as_deref(), Some("2"));
