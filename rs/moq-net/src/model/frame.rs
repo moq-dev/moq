@@ -13,10 +13,14 @@ use crate::{Error, Result};
 /// untrusted peer could otherwise request a multi-gigabyte allocation with a
 /// single varint. Subscribers reject frames whose declared size exceeds this.
 ///
+/// Matches the per-group cache cap (`MAX_GROUP_CACHE`), so a single frame may fill
+/// a group. 16 MiB was too tight for a high-bitrate CMAF fragment carried as one
+/// frame; 32 MiB covers that while keeping the per-frame preallocation bounded.
+///
 // TODO enforce this in [Frame::produce] / [FrameProducer::new] so the limit is
 // guaranteed for every caller, not just the wire decode paths. Blocked on
 // making the constructor fallible (returning [Result]), which is an API break.
-pub(crate) const MAX_FRAME_SIZE: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_FRAME_SIZE: u64 = 32 * 1024 * 1024;
 
 /// A chunk of data with an upfront size.
 ///
