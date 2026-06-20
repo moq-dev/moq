@@ -66,6 +66,35 @@ while let Some(request) = server.accept().await {
 }
 ```
 
+### RTMPS (RTMP over TLS)
+
+Two ways to serve `rtmps://`:
+
+- **Let the gateway terminate TLS.** Set `Config::tls` (or call
+  `Server::with_tls`) with a `rustls::ServerConfig`, and the listener speaks
+  RTMPS with no other change. Build the config from a cert/key with
+  `moq_native::tls::Server::server_config(vec![])` (RTMPS has no ALPN), or any
+  `rustls::ServerConfig`. To serve both RTMP and RTMPS, run two listeners
+  (`run` once per config) against a cloned origin.
+
+  ```rust
+  let mut rtmps = moq_rtmp::Config::default();
+  rtmps.listen = Some("0.0.0.0:443".parse()?);
+  rtmps.tls = Some(server_config); // Arc<rustls::ServerConfig>
+  ```
+
+- **Bring your own transport.** Accept the connection and complete the TLS
+  handshake yourself (or use any other `AsyncRead + AsyncWrite` stream: a proxy
+  socket, a test pipe), then hand the established stream to `accept_stream`,
+  which runs the RTMP handshake and yields the same `Request`:
+
+  ```rust
+  let tls = acceptor.accept(tcp).await?; // your tokio_rustls TlsAcceptor
+  if let Some(request) = moq_rtmp::accept_stream(tls, peer).await? {
+      // authorize, then request.accept(&origin, &path).await?
+  }
+  ```
+
 ## Binary
 
 The `moq-rtmp` binary (needs the default `server` feature) has two modes.
@@ -86,6 +115,17 @@ WebTransport (like `moq-srt publish` / `moq-hls import`):
 ```bash
 moq-rtmp publish --relay https://relay.example.com \
   --rtmp-listen 0.0.0.0:1935 --rtmp-prefix live/
+```
+
+Either mode also accepts RTMPS alongside plaintext RTMP. Add `--rtmps-listen`
+with a cert (`--rtmps-tls-cert` / `--rtmps-tls-key`, or `--rtmps-tls-generate`
+for a throwaway self-signed cert), and OBS/ffmpeg can publish to `rtmps://`:
+
+```bash
+moq-rtmp serve --server-bind [::]:443 --tls-generate localhost \
+  --rtmp-listen 0.0.0.0:1935 \
+  --rtmps-listen 0.0.0.0:1936 --rtmps-tls-cert cert.pem --rtmps-tls-key key.pem \
+  --rtmp-prefix live/
 ```
 
 Feed either mode with any RTMP source. OBS: set the server to

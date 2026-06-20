@@ -40,6 +40,17 @@ pub struct Config {
 	/// Prefix prepended to every ingested broadcast path. Lets one listener
 	/// namespace all of its streams (e.g. `live/`).
 	pub prefix: String,
+
+	/// TLS configuration for RTMPS (RTMP over TLS). When set, the
+	/// [`listen`](Self::listen) address speaks RTMPS instead of plaintext RTMP,
+	/// so clients connect with `rtmps://`. Build it with
+	/// [`moq_native::tls::Server::server_config`] (pass an empty ALPN list) or
+	/// any [`rustls::ServerConfig`]. Leave `None` for plaintext.
+	///
+	/// To serve both RTMP and RTMPS, run two listeners: call [`run`] once per
+	/// config (one with `tls`, one without) against a cloned origin.
+	#[cfg(feature = "server")]
+	pub tls: Option<std::sync::Arc<rustls::ServerConfig>>,
 }
 
 /// Run the RTMP ingest listener until it fails, publishing each connection into
@@ -62,8 +73,20 @@ pub async fn run(origin: OriginProducer, config: Config) -> Result<()> {
 		unreachable!("pending future never resolves");
 	};
 
+	#[cfg_attr(not(feature = "server"), allow(unused_mut))]
 	let mut server = Server::bind(listen).await?;
-	tracing::info!(%listen, prefix = %config.prefix, "RTMP ingest listening");
+
+	#[cfg(feature = "server")]
+	let tls = config.tls.is_some();
+	#[cfg(not(feature = "server"))]
+	let tls = false;
+
+	#[cfg(feature = "server")]
+	if let Some(tls) = config.tls.clone() {
+		server = server.with_tls(tls);
+	}
+
+	tracing::info!(%listen, prefix = %config.prefix, tls, "RTMP ingest listening");
 
 	// Tracks which broadcast paths are currently being ingested so a second
 	// publisher on the same stream key is rejected (first-publisher-wins) instead

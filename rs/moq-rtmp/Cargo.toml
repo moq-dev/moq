@@ -28,15 +28,17 @@ required-features = ["server"]
 default = ["server", "quinn", "websocket"]
 # Relay client/server transports + the moq-rtmp binary. Pulls in moq-native /
 # axum / clap / rustls.
-server = ["dep:axum", "dep:axum-server", "dep:clap", "dep:moq-native", "dep:rustls", "dep:sd-notify", "dep:tower-http", "dep:url"]
+server = ["dep:axum", "dep:axum-server", "dep:clap", "dep:moq-native", "dep:rustls", "dep:sd-notify", "dep:tokio-rustls", "dep:tower-http", "dep:url"]
 quinn = ["server", "moq-native/quinn"]
 quiche = ["server", "moq-native/quiche"]
 websocket = ["server", "moq-native/websocket"]
 iroh = ["server", "moq-native/iroh"]
 
 # The ingest library needs only anyhow/bytes/moq-mux/moq-net/rml_rtmp/thiserror/
-# tokio/tracing; the rest (axum/clap/moq-native/rustls/tower-http/url/sd-notify)
-# are `optional` and pulled in by the `server` feature for the binary.
+# tokio/tracing; the rest (axum/clap/moq-native/rustls/tokio-rustls/tower-http/
+# url/sd-notify) are `optional` and pulled in by the `server` feature. RTMPS
+# (Config::tls / Server::with_tls) needs rustls + tokio-rustls, so it's
+# server-gated too.
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio"], optional = true }
@@ -53,6 +55,10 @@ rml_rtmp = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"], optional = true }
 thiserror = "2"
 tokio = { workspace = true, features = ["full"] }
+# RTMPS: TLS-terminate accepted connections. Mirrors moq-relay's pinning so the
+# workspace shares one tokio-rustls; the crypto provider comes from the supplied
+# `rustls::ServerConfig`, so no default crypto feature is needed here.
+tokio-rustls = { version = "0.26", default-features = false, optional = true }
 tower-http = { version = "0.6", features = ["cors", "fs"], optional = true }
 tracing = "0.1"
 url = { version = "2", optional = true }

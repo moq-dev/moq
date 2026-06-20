@@ -30,6 +30,17 @@
 //! The bundled `moq-rtmp` binary serves the origin locally or forwards it to a
 //! remote relay (those paths need the `server` feature).
 //!
+//! RTMPS (RTMP over TLS) is supported two ways:
+//!
+//! - **Let the gateway terminate TLS**: set [`Config::tls`] (or call
+//!   [`Server::with_tls`]) with a [`rustls::ServerConfig`], and the listener
+//!   speaks `rtmps://` with no other change.
+//! - **Bring your own transport**: accept the connection and complete the TLS
+//!   handshake yourself (any [`Stream`]: a `tokio_rustls` stream, a custom
+//!   socket, a test pipe), then hand the established stream to [`accept_stream`].
+//!   Useful when an existing TLS terminator, proxy, or non-TCP transport already
+//!   owns the socket.
+//!
 //! Pure Rust: the RTMP handshake, chunk codec, and session state machine come
 //! from [`rml_rtmp`], with no librtmp or ffmpeg dependency.
 
@@ -40,4 +51,10 @@ mod server;
 
 pub use error::{Error, Result};
 pub use listen::{Config, run};
-pub use server::{Request, Server};
+pub use server::{Conn, Request, Server, Stream, accept_stream};
+
+/// Re-export of the `rustls` version this crate builds [`Config::tls`] against,
+/// so consumers construct a matching [`rustls::ServerConfig`] (a major `rustls`
+/// bump is a breaking change). Only available with the `server` feature.
+#[cfg(feature = "server")]
+pub use rustls;

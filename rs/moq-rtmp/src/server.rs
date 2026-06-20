@@ -9,9 +9,19 @@
 //! [`Request::reject`]. This mirrors `moq-native`'s `Server` / `Request`, so the
 //! gateway stays unopinionated about auth: the embedder (e.g. a relay verifying
 //! the stream key as a JWT) owns that policy.
+//!
+//! RTMPS (RTMP over TLS): [`Server::with_tls`] makes the listener terminate TLS
+//! before the RTMP handshake, so `rtmps://` clients work with no other change.
+//! If you'd rather own the transport (custom TLS, a non-TCP socket, a test
+//! pipe), accept the connection and complete any handshake yourself, then hand
+//! the established stream to [`accept_stream`]; everything here is generic over
+//! the [`Stream`] trait.
 
 use std::collections::VecDeque;
+use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -21,7 +31,7 @@ use moq_mux::container::flv::Import as FlvImport;
 use moq_net::{BroadcastInfo, OriginProducer, OriginPublish};
 use rml_rtmp::handshake::{Handshake, HandshakeProcessResult, PeerType};
 use rml_rtmp::sessions::{ServerSession, ServerSessionConfig, ServerSessionEvent, ServerSessionResult};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::Result;
@@ -33,19 +43,86 @@ const READ_BUFFER: usize = 16 * 1024;
 /// How long a connection has to finish the handshake and issue its `publish`
 /// before it is dropped. Bounds the lifetime (and socket / `pending` slot) of a
 /// client that connects but never publishes, so idle or half-open connections
-/// can't accumulate without limit.
+/// can't accumulate without limit. With TLS this also covers the TLS handshake.
 const PUBLISH_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A bidirectional byte stream carrying an RTMP session.
+///
+/// A plaintext [`tokio::net::TcpStream`] for `rtmp://`, or a TLS stream you've
+/// accepted for `rtmps://`. Implemented for every
+/// `AsyncRead + AsyncWrite + Unpin + Send`, so [`accept_stream`] and
+/// [`Request`] work over whatever transport you bring.
+pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
+
+/// A connection accepted by [`Server`]: plaintext RTMP, or RTMPS over TLS.
+///
+/// This is the stream type behind a [`Server`]-produced [`Request`] (hence
+/// `Request<Conn>`). Bring-your-own-transport callers using [`accept_stream`]
+/// keep their own stream type instead.
+pub enum Conn {
+	/// A plaintext TCP connection (`rtmp://`).
+	Plain(TcpStream),
+
+	/// A TLS connection (`rtmps://`), established by [`Server::with_tls`]. Boxed
+	/// because a `TlsStream` is large relative to a bare `TcpStream`.
+	#[cfg(feature = "server")]
+	Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
+}
+
+impl AsyncRead for Conn {
+	fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+		match self.get_mut() {
+			Conn::Plain(s) => Pin::new(s).poll_read(cx, buf),
+			#[cfg(feature = "server")]
+			Conn::Tls(s) => Pin::new(s).poll_read(cx, buf),
+		}
+	}
+}
+
+impl AsyncWrite for Conn {
+	fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+		match self.get_mut() {
+			Conn::Plain(s) => Pin::new(s).poll_write(cx, buf),
+			#[cfg(feature = "server")]
+			Conn::Tls(s) => Pin::new(s).poll_write(cx, buf),
+		}
+	}
+
+	fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		match self.get_mut() {
+			Conn::Plain(s) => Pin::new(s).poll_flush(cx),
+			#[cfg(feature = "server")]
+			Conn::Tls(s) => Pin::new(s).poll_flush(cx),
+		}
+	}
+
+	fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		match self.get_mut() {
+			Conn::Plain(s) => Pin::new(s).poll_shutdown(cx),
+			#[cfg(feature = "server")]
+			Conn::Tls(s) => Pin::new(s).poll_shutdown(cx),
+		}
+	}
+}
 
 /// An RTMP server that yields each connection's pending publish as a [`Request`].
 ///
-/// Build it with [`bind`](Self::bind), then loop on [`accept`](Self::accept).
-/// The handshake and the connect/publish exchange happen inside `accept`, so a
+/// Build it with [`bind`](Self::bind), optionally enable RTMPS with
+/// [`with_tls`](Self::with_tls), then loop on [`accept`](Self::accept). The
+/// handshake and the connect/publish exchange happen inside `accept`, so a
 /// [`Request`] is only produced once a client actually wants to publish.
 pub struct Server {
 	listener: TcpListener,
+
+	/// When set, each accepted connection is TLS-terminated (RTMPS) before the
+	/// RTMP handshake.
+	#[cfg(feature = "server")]
+	tls: Option<tokio_rustls::TlsAcceptor>,
+
 	/// In-flight handshakes; each resolves to a ready [`Request`], or `None` if
 	/// the connection closed or errored before issuing a publish.
-	pending: FuturesUnordered<BoxFuture<'static, Option<Request>>>,
+	pending: FuturesUnordered<BoxFuture<'static, Option<Request<Conn>>>>,
 }
 
 impl Server {
@@ -54,8 +131,20 @@ impl Server {
 		let listener = TcpListener::bind(addr).await?;
 		Ok(Self {
 			listener,
+			#[cfg(feature = "server")]
+			tls: None,
 			pending: FuturesUnordered::new(),
 		})
+	}
+
+	/// Terminate TLS on every accepted connection, turning this into an RTMPS
+	/// listener (`rtmps://`). Pass a `rustls::ServerConfig` (e.g. from
+	/// [`moq_native::tls::Server::server_config`] with an empty ALPN list), or
+	/// `None` to leave it plaintext.
+	#[cfg(feature = "server")]
+	pub fn with_tls(mut self, tls: impl Into<Option<std::sync::Arc<rustls::ServerConfig>>>) -> Self {
+		self.tls = tls.into().map(tokio_rustls::TlsAcceptor::from);
+		self
 	}
 
 	/// The local address the listener is bound to.
@@ -69,7 +158,7 @@ impl Server {
 	/// next one to reach its `publish` command. Connections that close or error
 	/// before publishing are dropped without surfacing here. Returns `None` only
 	/// if the listener itself stops (it currently never does).
-	pub async fn accept(&mut self) -> Option<Request> {
+	pub async fn accept(&mut self) -> Option<Request<Conn>> {
 		loop {
 			tokio::select! {
 				// A handshake finished: yield its request, or skip a dead connection.
@@ -78,15 +167,35 @@ impl Server {
 						return Some(request);
 					}
 				}
-				// A new TCP connection: start its handshake concurrently.
+				// A new TCP connection: start its (TLS +) handshake concurrently.
 				res = self.listener.accept() => match res {
 					Ok((stream, peer)) => {
 						// Nagle off: RTMP is latency-sensitive and we write whole packets.
 						if let Err(err) = stream.set_nodelay(true) {
 							tracing::debug!(%peer, %err, "failed to set TCP_NODELAY");
 						}
+						#[cfg(feature = "server")]
+						let tls = self.tls.clone();
 						self.pending.push(Box::pin(async move {
-							match tokio::time::timeout(PUBLISH_TIMEOUT, accept_until_publish(stream, peer)).await {
+							// The TLS handshake (if any) and the RTMP handshake share one
+							// budget, so a client that stalls either is dropped.
+							let outcome = tokio::time::timeout(PUBLISH_TIMEOUT, async move {
+								#[cfg(feature = "server")]
+								let conn = match tls {
+									Some(acceptor) => Conn::Tls(Box::new(
+										acceptor
+											.accept(stream)
+											.await
+											.map_err(|e| anyhow::anyhow!("rtmps tls handshake: {e}"))?,
+									)),
+									None => Conn::Plain(stream),
+								};
+								#[cfg(not(feature = "server"))]
+								let conn = Conn::Plain(stream);
+								accept_until_publish(conn, peer).await
+							})
+							.await;
+							match outcome {
 								Ok(Ok(request)) => request,
 								Ok(Err(err)) => {
 									tracing::warn!(%peer, %err, "RTMP connection closed before publish");
@@ -111,6 +220,21 @@ impl Server {
 	}
 }
 
+/// Run the RTMP handshake and connect/publish exchange on an already-established
+/// byte stream, yielding the pending publish as a [`Request`].
+///
+/// The bring-your-own-transport entry point: accept the connection (and, for
+/// `rtmps://`, complete the TLS handshake) yourself, then hand the stream here.
+/// `peer` is the remote address, used for logging and [`Request::peer`].
+///
+/// Returns `Ok(None)` if the client disconnects before issuing `publish`. Unlike
+/// [`Server`], this applies no publish timeout: wrap the call in
+/// [`tokio::time::timeout`] to bound how long a connected-but-idle client can
+/// hold the task.
+pub async fn accept_stream<S: Stream>(stream: S, peer: SocketAddr) -> Result<Option<Request<S>>> {
+	Ok(accept_until_publish(stream, peer).await?)
+}
+
 /// A pending RTMP publish, waiting on the caller to authorize it.
 ///
 /// Inspect [`app`](Self::app) and [`stream_key`](Self::stream_key) (an
@@ -118,8 +242,11 @@ impl Server {
 /// [`accept`](Self::accept) the publish into an origin at a chosen broadcast
 /// path or [`reject`](Self::reject) it. Dropping a `Request` without either
 /// closes the connection.
-pub struct Request {
-	stream: TcpStream,
+///
+/// `S` is the underlying stream: [`Conn`] for a [`Server`]-produced request, or
+/// your own transport when built via [`accept_stream`].
+pub struct Request<S = Conn> {
+	stream: S,
 	session: ServerSession,
 	/// The `rml_rtmp` request id for the pending publish, replied to on accept/reject.
 	request_id: u32,
@@ -131,7 +258,7 @@ pub struct Request {
 	peer: SocketAddr,
 }
 
-impl Request {
+impl<S: Stream> Request<S> {
 	/// The RTMP app name (the path component of `rtmp://host/<app>/<key>`).
 	pub fn app(&self) -> &str {
 		&self.app
@@ -205,7 +332,7 @@ impl Request {
 
 /// Run one connection's handshake and connect/publish exchange, returning a
 /// [`Request`] once the client issues `publish` (or `None` if it disconnects first).
-async fn accept_until_publish(mut stream: TcpStream, peer: SocketAddr) -> anyhow::Result<Option<Request>> {
+async fn accept_until_publish<S: Stream>(mut stream: S, peer: SocketAddr) -> anyhow::Result<Option<Request<S>>> {
 	let remaining = run_handshake(&mut stream, peer).await?;
 
 	let (mut session, initial) =
@@ -273,8 +400,8 @@ async fn accept_until_publish(mut stream: TcpStream, peer: SocketAddr) -> anyhow
 }
 
 /// Pump RTMP media into the publisher until the client disconnects or finishes.
-async fn pump(
-	stream: &mut TcpStream,
+async fn pump<S: Stream>(
+	stream: &mut S,
 	session: &mut ServerSession,
 	work: &mut VecDeque<ServerSessionResult>,
 	publisher: &mut Publisher,
@@ -333,7 +460,7 @@ async fn pump(
 
 /// Perform the RTMP server handshake, returning any leftover bytes that followed
 /// the client's final handshake packet (the start of the chunk stream).
-async fn run_handshake(stream: &mut TcpStream, peer: SocketAddr) -> anyhow::Result<Vec<u8>> {
+async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::Result<Vec<u8>> {
 	let mut handshake = Handshake::new(PeerType::Server);
 	let p0_p1 = handshake
 		.generate_outbound_p0_and_p1()
@@ -423,11 +550,11 @@ mod tests {
 		ClientSession, ClientSessionConfig, ClientSessionEvent, ClientSessionResult, PublishRequestType,
 	};
 
-	/// Drive a real RTMP client through handshake -> connect(`live`) ->
-	/// publish(`cam0`), pumping until aborted by the test.
-	async fn run_client(addr: SocketAddr) {
-		let mut stream = TcpStream::connect(addr).await.unwrap();
-
+	/// Drive a real RTMP client over an already-connected `stream` through
+	/// handshake -> connect(`live`) -> publish(`cam0`), pumping until aborted by
+	/// the test. Generic over the transport so the same client exercises both
+	/// plaintext RTMP and RTMPS.
+	async fn run_client<S: Stream>(mut stream: S) {
 		// Handshake.
 		let mut handshake = Handshake::new(PeerType::Client);
 		stream
@@ -498,7 +625,102 @@ mod tests {
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
 
-		let client = tokio::spawn(run_client(addr));
+		let client = tokio::spawn(async move {
+			let stream = TcpStream::connect(addr).await.unwrap();
+			run_client(stream).await;
+		});
+
+		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+			.await
+			.expect("server.accept timed out")
+			.expect("server yielded a request");
+
+		assert_eq!(request.app(), "live");
+		assert_eq!(request.stream_key(), "cam0");
+
+		request.reject("test rejection").await.unwrap();
+		client.abort();
+	}
+
+	/// The same publish flow, but over TLS: prove [`Server::with_tls`] terminates
+	/// RTMPS and yields an identical [`Request`]. Gated on `quinn` because it
+	/// borrows moq-native's cert generation (`server_config`), which needs a
+	/// moq-native backend feature.
+	#[cfg(feature = "quinn")]
+	#[tokio::test]
+	async fn rtmps_accept_yields_publish_request() {
+		use std::sync::Arc;
+
+		use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+		use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+		use rustls::{DigitallySignedStruct, SignatureScheme};
+
+		// Accept any server cert: the test uses a throwaway self-signed cert.
+		#[derive(Debug)]
+		struct NoVerify(Arc<rustls::crypto::CryptoProvider>);
+
+		impl ServerCertVerifier for NoVerify {
+			fn verify_server_cert(
+				&self,
+				_end_entity: &CertificateDer<'_>,
+				_intermediates: &[CertificateDer<'_>],
+				_server_name: &ServerName<'_>,
+				_ocsp: &[u8],
+				_now: UnixTime,
+			) -> std::result::Result<ServerCertVerified, rustls::Error> {
+				Ok(ServerCertVerified::assertion())
+			}
+
+			fn verify_tls12_signature(
+				&self,
+				message: &[u8],
+				cert: &CertificateDer<'_>,
+				dss: &DigitallySignedStruct,
+			) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+				rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+			}
+
+			fn verify_tls13_signature(
+				&self,
+				message: &[u8],
+				cert: &CertificateDer<'_>,
+				dss: &DigitallySignedStruct,
+			) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+				rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+			}
+
+			fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+				self.0.signature_verification_algorithms.supported_schemes()
+			}
+		}
+
+		let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+
+		// Server: a self-signed cert for `localhost`, fronting the RTMP listener.
+		let mut tls = moq_native::tls::Server::default();
+		tls.generate = vec!["localhost".to_string()];
+		let server_config = tls.server_config(vec![]).expect("build RTMPS server config");
+
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap())
+			.await
+			.unwrap()
+			.with_tls(server_config);
+		let addr = server.local_addr().unwrap();
+
+		// Client: TLS-connect (no verify), then run the ordinary RTMP client.
+		let client = tokio::spawn(async move {
+			let client_config = rustls::ClientConfig::builder_with_provider(provider.clone())
+				.with_safe_default_protocol_versions()
+				.unwrap()
+				.dangerous()
+				.with_custom_certificate_verifier(Arc::new(NoVerify(provider)))
+				.with_no_client_auth();
+			let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+			let tcp = TcpStream::connect(addr).await.unwrap();
+			let server_name = ServerName::try_from("localhost").unwrap();
+			let stream = connector.connect(server_name, tcp).await.unwrap();
+			run_client(stream).await;
+		});
 
 		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
 			.await
