@@ -24,7 +24,6 @@ use crate::catalog::hang::Container as HangContainer;
 use crate::catalog::hang::{Catalog, CatalogExt};
 use crate::codec::h264::Avc1;
 use crate::codec::h265::Hvc1;
-use crate::container::ts::scte35;
 use crate::container::{Consumer, Frame};
 
 /// Source for the catalog stream backing an exporter.
@@ -146,18 +145,16 @@ impl ExportSource {
 		})
 	}
 
-	/// Subscribe to a SCTE-35 cue rendition. No codec-shape transform and no
-	/// description: the frames carry the verbatim `splice_info_section` bytes that
-	/// the muxer writes back out as private sections.
-	pub fn for_scte35(
+	/// Subscribe to a verbatim `mpegts` stream rendition (SCTE-35, private PES, ...).
+	/// No codec-shape transform and no description: the frames are Legacy-framed
+	/// verbatim bytes the muxer writes back out as PES or private sections.
+	pub fn for_stream(
 		broadcast: &moq_net::BroadcastConsumer,
 		name: &str,
-		config: &scte35::Config,
 		latency: Duration,
 	) -> Result<Self, crate::Error> {
-		let media: HangContainer = (&config.container).try_into()?;
 		let track = broadcast.subscribe_track(&moq_net::Track::new(name.to_string()))?;
-		let consumer = Consumer::new(track, media).with_latency(latency);
+		let consumer = Consumer::new(track, HangContainer::Legacy).with_latency(latency);
 
 		Ok(Self {
 			consumer,

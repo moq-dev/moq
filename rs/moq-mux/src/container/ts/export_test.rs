@@ -15,7 +15,7 @@ use mpeg2ts::pes::{PesPacketReader, ReadPesPacket};
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 
 use crate::catalog::hang::Container as HangContainer;
-use crate::container::ts::{Export, scte35};
+use crate::container::ts::{Export, catalog as tscat};
 use crate::container::{Frame, Producer, Timestamp};
 
 const SC: &[u8] = &[0, 0, 0, 1];
@@ -63,7 +63,7 @@ async fn drain(consumer: moq_net::BroadcastConsumer) -> BytesMut {
 }
 
 /// `drain` for an exporter built with an explicit catalog extension.
-async fn drain_with<E: scte35::Catalog>(mut exporter: Export<E>) -> BytesMut {
+async fn drain_with<E: tscat::Catalog>(mut exporter: Export<E>) -> BytesMut {
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
@@ -345,18 +345,21 @@ async fn export_scte35_roundtrip() {
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<scte35::Ext>::default())
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
 			.unwrap();
 
-	// Create and write the .scte35 cue track BEFORE moving `broadcast` into
+	// Create and write the SCTE-35 cue track BEFORE moving `broadcast` into
 	// `Import` (which consumes it); the producer stays alive so the exporter can
 	// subscribe to the retained track.
 	let scte = broadcast.unique_track(".scte35").unwrap();
 	let scte_name = scte.name.clone();
 	{
-		let mut cfg = scte35::Config::new();
-		cfg.container = Container::Legacy;
-		catalog.lock().scte35.renditions.insert(scte_name.clone(), cfg);
+		let track = tscat::Track {
+			pid: 0x102,
+			descriptors: Vec::new(),
+			verbatim: Some(tscat::Verbatim::new(0x86, tscat::Framing::Section)),
+		};
+		catalog.lock().mpegts.tracks.insert(scte_name.clone(), track);
 	}
 	let mut scte_producer = Producer::new(scte, HangContainer::Legacy);
 	scte_producer
@@ -375,8 +378,8 @@ async fn export_scte35_roundtrip() {
 	import.finish().unwrap();
 
 	// `import`, `catalog`, and `scte_producer` stay alive: retained tracks. The
-	// exporter must carry the extension to see the scte35 section.
-	let ts = drain_with(Export::with_scte35(consumer, crate::catalog::CatalogFormat::Hang).unwrap()).await;
+	// exporter must carry the extension to see the ts section.
+	let ts = drain_with(Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap()).await;
 	assert_packet_aligned(&ts);
 
 	// The first PMT advertises the SCTE-35 ES (0x86) and the CUEI descriptor.
@@ -404,18 +407,17 @@ async fn export_scte35_roundtrip() {
 	// Re-import the exported TS and read the .scte35 frame back.
 	let mut broadcast2 = moq_net::Broadcast::new().produce();
 	let consumer2 = broadcast2.consume();
-	let catalog2 = crate::catalog::Producer::with_catalog(
-		&mut broadcast2,
-		crate::catalog::hang::Catalog::<scte35::Ext>::default(),
-	)
-	.unwrap();
+	let catalog2 =
+		crate::catalog::Producer::with_catalog(&mut broadcast2, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
 	import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
 	let snapshot = catalog2.snapshot();
-	assert_eq!(snapshot.scte35.renditions.len(), 1, "round-trip lost the SCTE-35 track");
-	let name = snapshot.scte35.renditions.keys().next().unwrap();
+	let verbatim = snapshot.mpegts.tracks.values().filter(|t| t.verbatim.is_some()).count();
+	assert_eq!(verbatim, 1, "round-trip lost the SCTE-35 track");
+	let name = scte_track(&snapshot).expect("a scte35 track");
 
 	let track = consumer2.subscribe_track(&moq_net::Track::new(name.clone())).unwrap();
 	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy);
@@ -438,16 +440,19 @@ async fn scte35_without_video_export_is_rejected() {
 	let mut broadcast = moq_net::Broadcast::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<scte35::Ext>::default())
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
 			.unwrap();
 
-	// A scte35 cue track and nothing else.
+	// A SCTE-35 cue track and nothing else.
 	let scte = broadcast.unique_track(".scte35").unwrap();
 	let scte_name = scte.name.clone();
 	{
-		let mut cfg = scte35::Config::new();
-		cfg.container = Container::Legacy;
-		catalog.lock().scte35.renditions.insert(scte_name, cfg);
+		let track = tscat::Track {
+			pid: 0x102,
+			descriptors: Vec::new(),
+			verbatim: Some(tscat::Verbatim::new(0x86, tscat::Framing::Section)),
+		};
+		catalog.lock().mpegts.tracks.insert(scte_name, track);
 	}
 	let mut producer = Producer::new(scte, HangContainer::Legacy);
 	producer
@@ -460,7 +465,7 @@ async fn scte35_without_video_export_is_rejected() {
 	producer.finish_group().unwrap();
 	producer.finish().unwrap();
 
-	let mut exporter = Export::with_scte35(consumer, crate::catalog::CatalogFormat::Hang).unwrap();
+	let mut exporter = Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap();
 	let err = loop {
 		match tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
 			Ok(Ok(Some(_))) => continue,
@@ -775,6 +780,16 @@ async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
 	assert_eq!(roundtripped, ingested, "both audio streams survive byte-for-byte");
 }
 
+/// Find the SCTE-35 verbatim stream (stream_type 0x86) in a catalog snapshot. A
+/// clip may carry other undecoded streams verbatim, so select by type, not order.
+fn scte_track(snap: &crate::catalog::hang::Catalog<tscat::Ext>) -> Option<String> {
+	snap.mpegts
+		.tracks
+		.iter()
+		.find(|(_, t)| t.verbatim.as_ref().is_some_and(|v| v.stream_type == 0x86))
+		.map(|(name, _)| name.clone())
+}
+
 /// Subscribe to a cue track and read every retained `splice_info_section` it holds.
 async fn read_cues(consumer: &moq_net::BroadcastConsumer, name: &str) -> Vec<(Vec<u8>, Timestamp)> {
 	let track = consumer
@@ -849,7 +864,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::with_catalog(
 			&mut broadcast,
-			crate::catalog::hang::Catalog::<scte35::Ext>::default(),
+			crate::catalog::hang::Catalog::<tscat::Ext>::default(),
 		)
 		.unwrap();
 		let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
@@ -858,7 +873,9 @@ async fn scte35_fixtures_survive_roundtrip() {
 
 		let snap = catalog.snapshot();
 		assert!(!snap.video.renditions.is_empty(), "{source}: video track from the clip");
-		let name = snap.scte35.renditions.keys().next().expect("a scte35 track").clone();
+		// Select the SCTE-35 stream by stream_type (0x86); a clip may also carry other
+		// undecoded streams verbatim (e.g. Opus as private PES in bbb5s).
+		let name = scte_track(&snap).expect("a scte35 track");
 		let ingested = read_cues(&consumer, &name).await;
 		assert_eq!(ingested.len(), *total, "{source}: {total} cues on ingest");
 		assert!(
@@ -891,27 +908,20 @@ async fn scte35_fixtures_survive_roundtrip() {
 		);
 
 		// Export and re-ingest.
-		let ts = drain_with(Export::with_scte35(consumer, crate::catalog::CatalogFormat::Hang).unwrap()).await;
+		let ts = drain_with(Export::with_ts(consumer, crate::catalog::CatalogFormat::Hang).unwrap()).await;
 		assert_packet_aligned(&ts);
 
 		let mut broadcast2 = moq_net::Broadcast::new().produce();
 		let consumer2 = broadcast2.consume();
 		let catalog2 = crate::catalog::Producer::with_catalog(
 			&mut broadcast2,
-			crate::catalog::hang::Catalog::<scte35::Ext>::default(),
+			crate::catalog::hang::Catalog::<tscat::Ext>::default(),
 		)
 		.unwrap();
 		let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.clone());
 		import2.decode(&mut BytesMut::from(ts.as_ref())).unwrap();
 		import2.finish().unwrap();
-		let name2 = catalog2
-			.snapshot()
-			.scte35
-			.renditions
-			.keys()
-			.next()
-			.expect("a scte35 track")
-			.clone();
+		let name2 = scte_track(&catalog2.snapshot()).expect("a scte35 track");
 		let roundtripped = read_cues(&consumer2, &name2).await;
 
 		let before: Vec<&Vec<u8>> = ingested.iter().map(|(b, _)| b).collect();
