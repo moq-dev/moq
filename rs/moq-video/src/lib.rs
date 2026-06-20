@@ -11,7 +11,8 @@
 //! - [`encode`] encodes frames with a native backend and publishes them through
 //!   the matching `moq_mux::codec` importer, which handles catalog registration
 //!   and framing. The codec is chosen via [`encode::Codec`]: H.264 (openh264 /
-//!   VideoToolbox / NVENC / VAAPI) or H.265 (VideoToolbox). Two entry points:
+//!   VideoToolbox / Media Foundation / NVENC / VAAPI) or H.265 (VideoToolbox /
+//!   Media Foundation / NVENC). Two entry points:
 //!   - [`encode::publish_capture`] captures a webcam and publishes it (turnkey).
 //!     It encodes strictly on demand: the track and catalog are advertised up
 //!     front, but the camera opens only while a subscriber is watching and is

@@ -475,7 +475,10 @@ afterward on top of the same `Backend` seam:
   catalog round-trip registers the right rendition for each codec.
 - Verified on Windows (RTX 3070 Ti, live camera): Media Foundation HEVC publishes
   a `.hev1` rendition; the round-trip into Matroska decodes as Main-profile HEVC.
-- Follow-ups: Linux NVENC/VAAPI HEVC, and a live camera run per platform.
+- Linux NVENC HEVC followed: the NVENC backend selects its codec GUID from
+  `Codec`, so H.265 reuses the H.264 preset / GOP / rate-control path and emits
+  Annex-B with inline VPS/SPS/PPS. Unvalidated on hardware like NVENC H.264.
+- Follow-ups: Linux VAAPI HEVC, and a live camera run per platform.
 
 AV1 is intentionally left out: there is no hardware AV1 encoder available to us
 (none on macOS; NVENC/VAAPI AV1 are Linux-only and not yet wired), and software
