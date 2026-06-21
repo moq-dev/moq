@@ -27,6 +27,7 @@ use bytes::Bytes;
 
 use super::Timestamp;
 
+pub mod index;
 pub mod segment;
 
 /// A cache bound, as a duration, a byte count, or both (the first to trip wins).

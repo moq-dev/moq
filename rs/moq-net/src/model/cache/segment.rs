@@ -152,16 +152,21 @@ impl Segment {
 		self.entries.is_empty()
 	}
 
+	/// Total size of the segment object in bytes (blobs, footer, and trailer).
+	pub fn byte_len(&self) -> usize {
+		self.data.len()
+	}
+
 	/// Decode the group with this sequence, or `None` if the segment does not contain it.
 	pub fn group(&self, sequence: u64) -> Option<Result<Group, Error>> {
 		let entry = self.entries.iter().find(|e| e.sequence == sequence)?;
-		Some(decode_group(entry.sequence, self.blob(entry)))
+		Some(self.blob(entry).and_then(|b| group_from_blob(entry.sequence, b)))
 	}
 
 	/// Decode the group at the given footer index.
 	pub fn group_at(&self, index: usize) -> Option<Result<Group, Error>> {
 		let entry = self.entries.get(index)?;
-		Some(decode_group(entry.sequence, self.blob(entry)))
+		Some(self.blob(entry).and_then(|b| group_from_blob(entry.sequence, b)))
 	}
 
 	/// The raw blob bytes for an entry, bounds-checked against the data.
@@ -175,9 +180,11 @@ impl Segment {
 	}
 }
 
-/// Decode a group blob (frame count, then frames) at a known sequence.
-fn decode_group(sequence: u64, blob: Result<Bytes, Error>) -> Result<Group, Error> {
-	let mut blob = blob?;
+/// Decode one group from just its blob bytes and known sequence.
+///
+/// This is the ranged-read decode path: the disk/remote tier reads `[offset, offset+length)` for
+/// a group (from the index) and decodes those bytes without the surrounding segment or footer.
+pub fn group_from_blob(sequence: u64, mut blob: Bytes) -> Result<Group, Error> {
 	let count = get_varint(&mut blob)? as usize;
 	let mut frames = Vec::with_capacity(count.min(8192));
 	for _ in 0..count {

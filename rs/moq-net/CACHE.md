@@ -4,12 +4,17 @@
 > - the RAM tier and watermark eviction policy (`mod.rs`);
 > - the on-disk **segment byte format** and **rollup** compaction (`segment.rs`): lossless
 >   per-frame encode/decode (raw timestamp value+scale, so any timescale round-trips), a
->   self-describing footer offset table read from a fixed trailer, and `rollup` to concatenate
->   small segments into one larger object.
+>   self-describing footer offset table read from a fixed trailer, `rollup` to concatenate small
+>   segments into one larger object, and `group_from_blob` (the ranged-read decode path);
+> - the storage-agnostic **multi-tier index + promotion** (`index.rs`): `sequence -> Location`
+>   (tier + segment + byte range), per-tier byte/duration accounting, `promotion` to pick the
+>   oldest disk segments over the high watermark, and `apply_promotion` to repoint them at the
+>   remote tier after a rollup.
 >
-> Still design: the tier I/O (object_store `put`/`get_range` + the disk-tier watermark and the
-> seq->location index) and the `TrackProducer` / `TrackConsumer` wiring. Targets `dev`: it
-> removes a public/wire field (`TrackInfo.cache`) and adds local API to the track endpoints.
+> Still design: the tier **I/O** (object_store `put`/`get_range`/`delete` wiring the index and
+> rollup to real storage, feature-gated) and the `TrackProducer` / `TrackConsumer` wiring.
+> Targets `dev`: it removes a public/wire field (`TrackInfo.cache`) and adds local API to the
+> track endpoints.
 
 A per-track group cache. It lets a relay or edge retain recent groups past the live window and
 serve them back on a FETCH, optionally spilling to local disk or remote object storage. This is
