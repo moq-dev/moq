@@ -42,6 +42,9 @@ pub fn render_media(snapshot: &Snapshot) -> String {
 	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.mp4\"");
 
 	for segment in &snapshot.segments {
+		if segment.discontinuity {
+			let _ = writeln!(out, "#EXT-X-DISCONTINUITY");
+		}
 		for (index, part) in segment.parts.iter().enumerate() {
 			let independent = if part.independent { ",INDEPENDENT=YES" } else { "" };
 			let _ = writeln!(
@@ -92,12 +95,14 @@ mod tests {
 					parts: vec![part(0.5, true), part(0.5, false)],
 					duration: 1.0,
 					complete: true,
+					discontinuity: false,
 				},
 				SegmentMeta {
 					sequence: 11,
 					parts: vec![part(0.5, true)],
 					duration: 0.5,
 					complete: false,
+					discontinuity: false,
 				},
 			],
 			finished: false,
@@ -106,6 +111,7 @@ mod tests {
 		let out = render_media(&snapshot);
 
 		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:9\n"));
+		assert!(!out.contains("#EXT-X-DISCONTINUITY"));
 		assert!(out.contains("#EXT-X-TARGETDURATION:1\n"));
 		// PART-HOLD-BACK must be >= 3x PART-TARGET.
 		assert!(out.contains("PART-HOLD-BACK=1.500"));
@@ -136,6 +142,7 @@ mod tests {
 				parts: vec![part(1.0, true)],
 				duration: 1.0,
 				complete: true,
+				discontinuity: false,
 			}],
 			finished: true,
 		};
@@ -143,5 +150,43 @@ mod tests {
 		let out = render_media(&snapshot);
 		assert!(out.contains("#EXT-X-ENDLIST\n"));
 		assert!(!out.contains("#EXT-X-PRELOAD-HINT"));
+	}
+
+	#[test]
+	fn discontinuity_precedes_resumed_segment() {
+		let snapshot = Snapshot {
+			init_ready: true,
+			part_target: 1.0,
+			media_sequence: 0,
+			next_sequence: 2,
+			segments: vec![
+				SegmentMeta {
+					sequence: 0,
+					parts: vec![part(1.0, true)],
+					duration: 1.0,
+					complete: true,
+					discontinuity: false,
+				},
+				// First segment after a resume: tagged discontinuous.
+				SegmentMeta {
+					sequence: 1,
+					parts: vec![part(1.0, true)],
+					duration: 1.0,
+					complete: true,
+					discontinuity: true,
+				},
+			],
+			finished: false,
+		};
+
+		let out = render_media(&snapshot);
+		// The tag precedes seg 1's parts, not seg 0's.
+		let disc = out.find("#EXT-X-DISCONTINUITY").expect("discontinuity tag");
+		let seg0 = out.find("part/0/0.m4s").expect("seg 0 part");
+		let seg1 = out.find("part/1/0.m4s").expect("seg 1 part");
+		assert!(
+			seg0 < disc && disc < seg1,
+			"discontinuity must sit between seg 0 and seg 1"
+		);
 	}
 }

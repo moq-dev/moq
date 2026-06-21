@@ -54,18 +54,41 @@ pub struct Broadcaster {
 	/// Current rendition count, bumped on every catalog sync so handlers can wait
 	/// for the catalog to populate before rendering a playlist.
 	ready: watch::Sender<usize>,
+	/// Pause flag shared with every rendition pump. While true, the pumps stop
+	/// draining the broadcast; renditions discovered later inherit the current
+	/// value (they `subscribe()` to this sender).
+	paused: watch::Sender<bool>,
 }
 
 impl Broadcaster {
 	/// Subscribe to `broadcast` and start tracking its renditions.
 	pub fn new(broadcast: moq_net::BroadcastConsumer, config: Config) -> Arc<Self> {
 		let (ready, _) = watch::channel(0);
+		let (paused, _) = watch::channel(false);
 		let broadcaster = Arc::new(Self {
 			renditions: Mutex::new(BTreeMap::new()),
 			ready,
+			paused,
 		});
 		tokio::spawn(watch_catalog(broadcast, config, broadcaster.clone()));
 		broadcaster
+	}
+
+	/// Pause or resume pulling media from the broadcast.
+	///
+	/// While paused, every rendition's pump stops draining the source, so live
+	/// media produced during the pause is dropped (not buffered); resuming
+	/// continues the SAME playlists, with the first post-resume segment of each
+	/// rendition marked `#EXT-X-DISCONTINUITY`. Segment numbering and the init
+	/// segment persist across the pause, so a paused-then-resumed export is one
+	/// continuous recording with a gap, not a restart. Idempotent.
+	pub fn set_paused(&self, paused: bool) {
+		let _ = self.paused.send(paused);
+	}
+
+	/// Whether the export is currently paused.
+	pub fn is_paused(&self) -> bool {
+		*self.paused.borrow()
 	}
 
 	/// Look up a rendition by name.
@@ -118,14 +141,26 @@ impl Broadcaster {
 	fn sync(&self, broadcast: &moq_net::BroadcastConsumer, config: &Config, catalog: &Catalog) {
 		let mut renditions = self.renditions.lock().unwrap();
 		for (name, video) in &catalog.video.renditions {
-			renditions
-				.entry(name.clone())
-				.or_insert_with(|| Arc::new(Rendition::video(name.clone(), video, broadcast.clone(), config)));
+			renditions.entry(name.clone()).or_insert_with(|| {
+				Arc::new(Rendition::video(
+					name.clone(),
+					video,
+					broadcast.clone(),
+					config,
+					self.paused.subscribe(),
+				))
+			});
 		}
 		for (name, audio) in &catalog.audio.renditions {
-			renditions
-				.entry(name.clone())
-				.or_insert_with(|| Arc::new(Rendition::audio(name.clone(), audio, broadcast.clone(), config)));
+			renditions.entry(name.clone()).or_insert_with(|| {
+				Arc::new(Rendition::audio(
+					name.clone(),
+					audio,
+					broadcast.clone(),
+					config,
+					self.paused.subscribe(),
+				))
+			});
 		}
 		let _ = self.ready.send(renditions.len());
 	}
