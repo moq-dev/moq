@@ -1,7 +1,6 @@
 import { Compression, compressionFromCode } from "../compression.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { DEFAULT_CACHE_MS } from "../track.ts";
 import * as Message from "./message.ts";
 import { Version } from "./version.ts";
 
@@ -61,8 +60,6 @@ export class Track {
 export class TrackInfo {
 	priority: number;
 	ordered: boolean;
-	/** How long (milliseconds) the publisher keeps old groups available. */
-	cache: number;
 	/**
 	 * Per-frame timestamp scale (units per second). `0` means frames carry no
 	 * per-frame timestamps on the wire.
@@ -74,19 +71,16 @@ export class TrackInfo {
 	constructor({
 		priority = 0,
 		ordered = true,
-		cache = DEFAULT_CACHE_MS,
 		timescale = 0,
 		compression = Compression.None,
 	}: {
 		priority?: number;
 		ordered?: boolean;
-		cache?: number;
 		timescale?: number;
 		compression?: Compression;
 	}) {
 		this.priority = priority;
 		this.ordered = ordered;
-		this.cache = cache;
 		this.timescale = timescale;
 		this.compression = compression;
 	}
@@ -94,7 +88,6 @@ export class TrackInfo {
 	async #encode(w: Writer) {
 		await w.u8(this.priority);
 		await w.bool(this.ordered);
-		await w.u53(this.cache);
 		await w.u53(this.timescale);
 		await w.u53(this.compression);
 	}
@@ -102,10 +95,9 @@ export class TrackInfo {
 	static async #decode(r: Reader): Promise<TrackInfo> {
 		const priority = await r.u8();
 		const ordered = await r.bool();
-		const cache = await r.u53();
 		const timescale = await r.u53();
 		const compression = compressionFromCode(await r.u53());
-		return new TrackInfo({ priority, ordered, cache, timescale, compression });
+		return new TrackInfo({ priority, ordered, timescale, compression });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

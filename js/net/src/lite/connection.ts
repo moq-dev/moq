@@ -6,7 +6,7 @@ import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream } from "../stream.ts";
 import type * as Time from "../time.ts";
-import { AnnounceInterest } from "./announce.ts";
+import { AnnounceRequest } from "./announce.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { type Origin, randomOrigin } from "./origin.ts";
@@ -180,7 +180,7 @@ export class Connection implements Established {
 		if (typ === StreamId.Session) {
 			throw new Error("duplicate session stream");
 		} else if (typ === StreamId.Announce) {
-			const msg = await AnnounceInterest.decode(stream.reader, this.#version);
+			const msg = await AnnounceRequest.decode(stream.reader, this.#version);
 			await this.#publisher.runAnnounce(msg, stream);
 		} else if (typ === StreamId.Subscribe) {
 			const msg = await Subscribe.decode(stream.reader, this.#version);

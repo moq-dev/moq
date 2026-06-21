@@ -1,9 +1,10 @@
 use crate::{
-	BandwidthConsumer, BandwidthProducer, Error, Origin, OriginConsumer, OriginProducer, StatsHandle, coding::Stream,
+	BandwidthConsumer, BandwidthProducer, Error, Origin, OriginConsumer, OriginProducer, StatsHandle,
+	coding::{Stream, Writer},
 	lite::SessionInfo,
 };
 
-use super::{Connecting, Publisher, PublisherConfig, Subscriber, SubscriberConfig, Version};
+use super::{Connecting, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, Version};
 
 /// Start a lite session.
 ///
@@ -24,6 +25,9 @@ pub fn start<S: web_transport_trait::Session>(
 	stats: StatsHandle,
 	// The version of the protocol to use.
 	version: Version,
+	// The capabilities (and optional request path) we advertise in our SETUP message.
+	// Only sent on versions with a Setup Stream (lite-05+); ignored otherwise.
+	our_setup: Setup,
 ) -> Result<(Option<BandwidthConsumer>, Connecting), Error> {
 	let recv_bw = BandwidthProducer::new();
 
@@ -63,6 +67,21 @@ pub fn start<S: web_transport_trait::Session>(
 	// stamped onto outbound hops and checked against incoming hops, so it
 	// must be stable across every session that shares the local origin.
 	// Required for cross-session cluster loop detection.
+	// Shared slot for the peer's SETUP (lite-05+). The subscriber writes it when it
+	// reads the peer's Setup stream; capability-gated streams (PROBE) wait on it.
+	let peer_setup = PeerSetup::default();
+
+	// Advertise our own capabilities on a uni Setup Stream, then FIN. Best-effort:
+	// a failure here just means the peer falls back to "no capabilities" for us.
+	if version.has_setup_stream() {
+		let session = session.clone();
+		web_async::spawn(async move {
+			if let Err(err) = send_setup(&session, our_setup, version).await {
+				tracing::debug!(%err, "failed to send setup");
+			}
+		});
+	}
+
 	let publisher = Publisher::new(PublisherConfig {
 		session: session.clone(),
 		origin: publish,
@@ -75,6 +94,7 @@ pub fn start<S: web_transport_trait::Session>(
 		recv_bandwidth: recv_bw_for_sub,
 		stats,
 		version,
+		peer_setup,
 	});
 
 	web_async::spawn(async move {
@@ -101,6 +121,20 @@ pub fn start<S: web_transport_trait::Session>(
 	});
 
 	Ok((recv_bw_consumer, connecting))
+}
+
+/// Open a unidirectional Setup Stream, send our single SETUP message, and FIN.
+async fn send_setup<S: web_transport_trait::Session>(
+	session: &S,
+	setup: Setup,
+	version: Version,
+) -> Result<(), Error> {
+	let stream = session.open_uni().await.map_err(Error::from_transport)?;
+	let mut writer = Writer::new(stream, version);
+	writer.encode(&super::DataType::Setup).await?;
+	writer.encode(&setup).await?;
+	writer.finish()?;
+	writer.closed().await
 }
 
 // TODO do something useful with this

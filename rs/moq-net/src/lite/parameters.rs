@@ -6,8 +6,43 @@ use super::Version;
 
 const MAX_PARAMS: u64 = 64;
 
+/// A bag of `id -> raw bytes` parameters, the body shared by SETUP (and any other
+/// parameterized message). Encoded as a varint count followed by `id, length, value`
+/// triples; duplicate ids are rejected on decode.
 #[derive(Default, Debug, Clone)]
 pub struct Parameters(HashMap<u64, Vec<u8>>);
+
+impl Parameters {
+	/// Set a parameter to a raw byte value, replacing any existing entry.
+	pub fn set_bytes(&mut self, id: u64, value: Vec<u8>) {
+		self.0.insert(id, value);
+	}
+
+	/// Borrow a parameter's raw byte value, if present.
+	pub fn get_bytes(&self, id: u64) -> Option<&[u8]> {
+		self.0.get(&id).map(Vec::as_slice)
+	}
+
+	/// Set a parameter to a varint value, replacing any existing entry.
+	pub fn set_varint(&mut self, id: u64, value: u64) {
+		let mut buf = Vec::new();
+		// Infallible: writing into a Vec never runs short.
+		value.encode(&mut buf, Version::Lite05Wip).expect("varint encode into Vec");
+		self.0.insert(id, buf);
+	}
+
+	/// Decode a parameter as a single varint, if present. Errors if trailing bytes remain.
+	pub fn get_varint(&self, id: u64) -> Result<Option<u64>, DecodeError> {
+		let Some(mut bytes) = self.0.get(&id).map(Vec::as_slice) else {
+			return Ok(None);
+		};
+		let value = u64::decode(&mut bytes, Version::Lite05Wip)?;
+		if !bytes.is_empty() {
+			return Err(DecodeError::Long);
+		}
+		Ok(Some(value))
+	}
+}
 
 impl Decode<Version> for Parameters {
 	fn decode<R: bytes::Buf>(mut r: &mut R, version: Version) -> Result<Self, DecodeError> {

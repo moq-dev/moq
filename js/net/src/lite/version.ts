@@ -28,6 +28,22 @@ export function hopsFixedWidth(version: Version): boolean {
 	}
 }
 
+/// Whether ANNOUNCE_BROADCAST carries a per-broadcast Epoch varint (after the suffix,
+/// before the hop chain). Added in lite-05 so a consumer can tell a newer instance of a
+/// broadcast from an older one. Older versions omit the field.
+export function hasBroadcastEpoch(version: Version): boolean {
+	// Explicitly list older versions so future versions default to carrying the epoch.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// The WebTransport subprotocol identifier for moq-lite.
 /// Version negotiation still happens via SETUP when this is used.
 export const ALPN = "moql";

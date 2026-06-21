@@ -7,10 +7,10 @@ import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
-import type { TrackProducer } from "../track.ts";
+import { DEFAULT_CACHE_MS, type TrackProducer } from "../track.ts";
 import { error } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
-import { Announce, AnnounceInit, AnnounceInterest, AnnounceOk } from "./announce.ts";
+import { AnnounceBroadcast, AnnounceInit, AnnounceOk, AnnounceRequest } from "./announce.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -133,7 +133,7 @@ export class Subscriber {
 		// Send our own session-level origin id so the peer can skip announces
 		// whose hop chain already passed through us. Matches the Rust subscriber's
 		// `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
-		const msg = new AnnounceInterest(prefix, this.origin);
+		const msg = new AnnounceRequest(prefix, this.origin);
 
 		try {
 			// Open a stream and send the announce interest.
@@ -172,7 +172,7 @@ export class Subscriber {
 			// Receive announce updates (for Draft03, this includes initial state)
 			for (;;) {
 				const announce = await Promise.race([
-					Announce.decodeMaybe(stream.reader, this.version),
+					AnnounceBroadcast.decodeMaybe(stream.reader, this.version),
 					announced.closed,
 				]);
 				if (!announce) break;
@@ -189,7 +189,11 @@ export class Subscriber {
 
 				const path = Path.join(prefix, announce.suffix);
 
-				console.debug(`announced: broadcast=${path} active=${announce.active}`);
+				// `announce.epoch` (lite-05+) identifies the broadcast instance. The Rust
+				// origin uses it to prefer the newest of several routes to the same path; the
+				// JS side has no multi-route origin tree (the announced queue is flat), so
+				// there is nothing to tie-break here and the epoch is currently unused.
+				console.debug(`announced: broadcast=${path} active=${announce.active} epoch=${announce.epoch}`);
 				announced.append({ path, active: announce.active });
 			}
 
@@ -217,7 +221,9 @@ export class Subscriber {
 			const info = await this.#trackInfo(path, name);
 			return {
 				compress: info.compression !== Compression.None,
-				cache: info.cache,
+				// The wire no longer carries a cache hint (retention is best-effort),
+				// so the local retention window falls back to the model default.
+				cache: DEFAULT_CACHE_MS,
 				priority: info.priority,
 				ordered: info.ordered,
 			};
@@ -334,7 +340,9 @@ export class Subscriber {
 			const info = await this.#trackInfo(msg.broadcast, msg.track);
 			producer = request.accept({
 				compress: info.compression !== Compression.None,
-				cache: info.cache,
+				// The wire no longer carries a cache hint (retention is best-effort),
+				// so the local retention window falls back to the model default.
+				cache: DEFAULT_CACHE_MS,
 				priority: info.priority,
 				ordered: info.ordered,
 			});

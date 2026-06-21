@@ -39,6 +39,9 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// to opt out.
 	pub stats: StatsHandle,
 	pub version: Version,
+	/// Shared slot for the peer's SETUP (lite-05+). Written when the peer's Setup
+	/// stream is read; the probe stream waits on it before opening.
+	pub peer_setup: super::PeerSetup,
 }
 
 #[derive(Clone)]
@@ -66,6 +69,8 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
+	/// The peer's advertised SETUP (lite-05+), set when its Setup stream is read.
+	peer_setup: super::PeerSetup,
 }
 
 #[derive(Clone)]
@@ -97,6 +102,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version: config.version,
+			peer_setup: config.peer_setup,
 		}
 	}
 
@@ -134,12 +140,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let res = match kind {
 			lite::DataType::Group => self.recv_group(&mut stream).await,
+			lite::DataType::Setup => self.recv_setup(&mut stream).await,
 		};
 
 		if let Err(err) = res {
 			stream.abort(&err);
 		}
 
+		Ok(())
+	}
+
+	/// Read the peer's single SETUP message off its Setup Stream and record it, so
+	/// capability-gated streams (PROBE) can consult it. lite-05+ only.
+	async fn recv_setup(&self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
+		if !self.version.has_setup_stream() {
+			return Err(Error::UnexpectedStream);
+		}
+		let setup = stream.decode::<lite::Setup>().await?;
+		tracing::debug!(?setup, "received peer setup");
+		self.peer_setup.set(setup);
 		Ok(())
 	}
 
@@ -309,6 +328,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let Some(bandwidth) = &self.recv_bandwidth else {
 			return Ok(());
 		};
+
+		// lite-05+ negotiates probing: only open a PROBE stream if the peer advertised it
+		// (Report or higher) in its SETUP. Older versions have no SETUP, so probe is always
+		// available there.
+		if self.version.has_setup_stream() && self.peer_setup.probe_level().await < lite::ProbeLevel::Report {
+			tracing::debug!("peer does not support probing; skipping probe stream");
+			return Ok(());
+		}
 
 		loop {
 			// Wait until at least one consumer is interested in the estimate.
